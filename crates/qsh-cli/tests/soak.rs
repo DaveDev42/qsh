@@ -327,7 +327,7 @@ fn listener_connection_caps(sessions: usize) -> (usize, usize) {
 /// (no packet sent). The client then sees `ConnectionFailed` "no response
 /// within 10s" and, after [`DIAL_RETRY_ATTEMPTS`] exhausted retries, the
 /// scenario dies (the 2026-09-11 24h-abort triage). The product default is
-/// deliberately NOT changed (`docs/history/m7-plan.md` Step 5 Q1 arbitration: a single
+/// deliberately NOT changed (M7 plan Step 5 (69dd788) Q1 arbitration: a single
 /// high-rate source is *meant* to be limited in production) — this raises
 /// the cap only in the harness's own listener config, where the single
 /// dialing source is a trusted test driver, not a flood. `(2*N).max(64)`

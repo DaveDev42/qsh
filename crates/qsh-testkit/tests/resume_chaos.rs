@@ -1,4 +1,4 @@
-//! L4: the **recovery gate** (`docs/design/testing.md` L4, docs/history/m2-plan.md Step 7,
+//! L4: the **recovery gate** (`docs/design/testing.md` L4, M2 plan Step 7 (2473c88),
 //! DoD 4). `chaos_proxy.rs` proved the harness can express path death;
 //! this file asserts the criterion itself.
 //!

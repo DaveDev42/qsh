@@ -99,7 +99,7 @@ pub struct RecoveryReport {
     /// re-registration before the resume itself could even start —
     /// `0` on the forward route (`DialReconnect`), which never waits on
     /// anything but its own dial; the measured wait on the reverse route
-    /// (`LocalReconnect`, `docs/history/m3-plan.md` Step 8, `docs/design/protocol.md`
+    /// (`LocalReconnect`, M3 plan Step 8 (2473c88), `docs/design/protocol.md`
     /// §11-4's Reattach mapping). Additive field (`docs/CLI.md` §6.4):
     /// added after the three fields M2 shipped, so an M2-era consumer
     /// that only reads those three keeps working unchanged. This is a

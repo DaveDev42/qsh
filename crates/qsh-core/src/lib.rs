@@ -14,7 +14,7 @@
 //! - [`trust`]: `trust.toml` — pinned peers, private CA roots, and the
 //!   [`qsh_transport::TrustEvaluator`] the verifier is driven by.
 //! - [`hosts`]: `hosts.toml` — the host profile address book layered over
-//!   `trust`'s pinned peers (`docs/history/m7-plan.md` Step 3). Never a trust source.
+//!   `trust`'s pinned peers (M7 plan Step 3 (69dd788)). Never a trust source.
 //! - [`ops`]: the typed operation façade.
 
 pub mod acl;
@@ -35,7 +35,7 @@ pub mod lifecycle;
 // meaning on Windows — no daemon, no socket, no peer credential concept —
 // so the whole module tree compiles out there rather than growing internal
 // platform splits (`crates/qsh-core/src/localctl/mod.rs` module docs,
-// `docs/CLI.md` §6.13, `docs/history/m3-plan.md` Step 5).
+// `docs/CLI.md` §6.13, M3 plan Step 5 (2473c88)).
 #[cfg(unix)]
 pub mod localctl;
 pub mod ops;

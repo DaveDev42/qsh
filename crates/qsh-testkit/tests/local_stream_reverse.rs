@@ -1,4 +1,4 @@
-//! L3 — the `LOCAL_STREAM` splice end to end (`docs/history/m3-plan.md` Step 7,
+//! L3 — the `LOCAL_STREAM` splice end to end (M3 plan Step 7 (2473c88),
 //! `docs/design/protocol.md` §11-3): a real
 //! [`qsh_testkit::reverse::ReverseHarness`] target, a real
 //! `crate::localctl::daemon::LocalctlDaemon` bound via

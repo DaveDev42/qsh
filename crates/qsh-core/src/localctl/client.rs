@@ -3,7 +3,7 @@
 //! step's host-specific routing) discover *which* daemon on this machine
 //! knows a given host by trying each of this machine's sockets in turn
 //! (`docs/design/protocol.md` §11-3, `docs/design/architecture.md` §7
-//! "런타임 소켓 discovery", `docs/history/m3-plan.md` Step 5).
+//! "런타임 소켓 discovery", M3 plan Step 5 (2473c88)).
 //!
 //! Deliberately transport-free (`crate::localctl` module docs): this file
 //! must never name `qsh_transport`, `quinn` or `rustls` —
@@ -116,7 +116,7 @@ async fn open_admin_conduit(stream: UnixStream) -> Result<LocalConduit<UnixStrea
 }
 
 /// Open a `LOCAL_ADMIN` conduit to the daemon listening on `socket_path`
-/// and return its current tunnel registrations (`docs/history/m4-plan.md` Step 5 PR
+/// and return its current tunnel registrations (M4 plan Step 5 (2473c88) PR
 /// 5b's `LocalTunnelList`/`LocalTunnelListResult` round trip — the direct
 /// structural twin of [`admin_host_list`]).
 ///
@@ -172,7 +172,7 @@ async fn admin_tunnel_list_over_inner(stream: UnixStream) -> Result<Vec<LocalTun
 }
 
 /// Open a `LOCAL_ADMIN` conduit to `socket_path` and ask it to close
-/// `tunnel_id` (`docs/history/m4-plan.md` Step 5 PR 5b's `LocalTunnelClose`/
+/// `tunnel_id` (M4 plan Step 5 (2473c88) PR 5b's `LocalTunnelClose`/
 /// `LocalTunnelCloseResult` round trip). `Ok(true)` if this daemon held
 /// and closed it, `Ok(false)` if `tunnel_id` named nothing here — same
 /// idempotent-not-error shape [`crate::reverse::listen::ControlHub::
@@ -242,7 +242,7 @@ async fn admin_tunnel_close_over_inner(
 /// [`ControlConduit`] it hands back carries the exact same
 /// `qsh.wire.v1::ControlMessage`/`Response` pair a QUIC control stream to
 /// `host` would (`crate::client::link::ControlLink::Local` is the seam
-/// that plugs this into a `client::Session`, `docs/history/m3-plan.md` Step 6).
+/// that plugs this into a `client::Session`, M3 plan Step 6 (2473c88)).
 ///
 /// `wait_ms` is passed straight through to `LocalHello` (clamped by the
 /// daemon to `LOCAL_WAIT_MAX`, `qsh/local/v1.proto`); Step 6's own callers
@@ -382,7 +382,7 @@ impl ControlConduit {
 /// for `host`, send `header` as the conduit's one framed message, then hand
 /// back a raw byte-level split — the CLI-process-side half of
 /// `crate::localctl::daemon::LocalctlDaemon::serve_stream`'s splice
-/// (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 7).
+/// (`docs/design/protocol.md` §11-3, M3 plan Step 7 (2473c88)).
 ///
 /// `header` is sent **by this function**, not the caller: exactly like
 /// [`open_control`] consuming its own `LocalHelloAck`, the shape of the
@@ -410,7 +410,7 @@ pub(crate) async fn open_stream(
 /// [`open_stream`], but with `LocalHello.wait_ms` threaded through rather
 /// than fixed at `0` — the one caller that needs it is `TCP_ACCEPTED`'s
 /// requester-side claim over a reverse route
-/// (`crate::tunnel::remote`'s reverse claim loop, `docs/history/m4-plan.md` Step 5 (a)):
+/// (`crate::tunnel::remote`'s reverse claim loop, M4 plan Step 5 (a) (2473c88)):
 /// the daemon's `serve_tcp_accepted` reuses this exact `wait_ms` as its
 /// [`ControlHub::claim_tcp_accepted`](crate::reverse::listen::ControlHub::claim_tcp_accepted)
 /// budget (`crate::localctl::daemon`'s `serve_stream`, `clamp_wait`), so
@@ -761,7 +761,7 @@ impl DataSendHalf {
     /// Surrender this send half as a raw byte writer, for the one caller
     /// that needs an unframed pipe past its handshake: a tunnel stream
     /// relayed over the reverse `LOCAL_STREAM` conduit
-    /// (`crate::tunnel::splice::splice_tcp_uds`, `docs/history/m4-plan.md` Step 5 (a)) —
+    /// (`crate::tunnel::splice::splice_tcp_uds`, M4 plan Step 5 (a) (2473c88)) —
     /// the `Local` carrier's counterpart to
     /// [`qsh_transport::control::FramedSend::into_raw`], which the forward
     /// `Direct` carrier surrenders instead.
@@ -1089,7 +1089,7 @@ pub async fn discover<T>(
 /// Unlike [`discover`] (stop at the first match — a routing probe only
 /// ever needs one answer), `Ops::host_list`'s reverse source needs the
 /// union across every live daemon, so this tries all of them and reports
-/// what each one said (`docs/history/m3-plan.md` Step 5 (a): "reverse — 이 머신의
+/// what each one said (M3 plan Step 5 (a) (2473c88): "reverse — 이 머신의
 /// localctl 데몬들에 등록된 엔트리의 합집합").
 #[derive(Debug, PartialEq, Eq)]
 pub struct DaemonHostList {

@@ -97,7 +97,7 @@ fn a_noisy_exec_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
-/// `docs/history/m9-plan.md` Step 2: refusing `trust accept` for lack of a code must
+/// M9 plan Step 2 (b9a621b): refusing `trust accept` for lack of a code must
 /// not leak the terminal-prompt wording onto stdout at any verbosity —
 /// the resolver never opens the prompt in machine mode, so there is
 /// nothing to leak, but this pins that as a regression test rather than
@@ -250,7 +250,7 @@ fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
     );
 }
 
-/// The reverse-route counterpart of the test above (`docs/history/m3-plan.md` Step 7
+/// The reverse-route counterpart of the test above (M3 plan Step 7 (2473c88)
 /// DoD 1): `session open`/`session read --follow` are both value ops, so
 /// this drives them over the `LOCAL_CONTROL` relay (`localctl/daemon.rs`'s
 /// `serve_control`) instead of a direct QUIC connection — a completely
@@ -402,7 +402,7 @@ fn serve_json_setup_failure_writes_nothing_to_stdout() {
 
 /// A tunnel in progress produces `qsh::tunnel` diagnostics on stderr while
 /// it splices real traffic (`crates/qsh-core/src/tunnel/local.rs`'s
-/// accept/close `tracing::debug!`s, `docs/history/m4-plan.md` Step 6) — a completely
+/// accept/close `tracing::debug!`s, M4 plan Step 6 (2473c88)) — a completely
 /// different code path from every value op above — and stdout must still
 /// carry nothing but the one `tunnel.open` envelope for as long as the
 /// process holds (`docs/CLI.md` §6.14: it blocks in `TunnelHold::hold`
@@ -412,7 +412,7 @@ fn serve_json_setup_failure_writes_nothing_to_stdout() {
 /// Forward-route only (client-side `-L` bind), like `tunnel_e2e.rs` — the
 /// client-side local listener is the one part of M4's tunnel stack this
 /// file's other tests do not need, so this test alone carries the `unix`
-/// gate (`docs/history/m4-plan.md` Windows-leg note: the tunnel relay/host path is
+/// gate (the M4 plan (2473c88) Windows-leg note: the tunnel relay/host path is
 /// `cfg(unix)`).
 #[cfg(unix)]
 #[test]

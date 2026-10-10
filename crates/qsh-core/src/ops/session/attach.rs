@@ -60,7 +60,7 @@ pub struct SessionAttachStream {
     /// deliberately: each handle's drop aborts its accept loop on `conn`'s
     /// runtime, so they must go while that runtime is still there. That
     /// ordering is also the whole `-L` teardown story — the listeners die
-    /// with the attach, no daemon and no close RPC (`docs/history/m4-plan.md` §4.1 #1).
+    /// with the attach, no daemon and no close RPC (M4 plan §4.1 #1 (2473c88)).
     pub(super) forwards: Vec<crate::tunnel::LocalForwardHandle>,
     /// The `-D` dynamic (SOCKS5) forwards opened on this attach, if any
     /// ([`Self::open_dynamic_forwards`], ADR-0019 decision 11). Declared
@@ -69,7 +69,7 @@ pub struct SessionAttachStream {
     pub(super) dynamic_forwards: Vec<crate::tunnel::DynamicForwardHandle>,
     /// The `-R` remote forwards opened on this attach, if any — one shared
     /// [`crate::tunnel::remote::RemoteForwardAcceptor`] for every `-R` spec
-    /// on this attach (`docs/history/m4-plan.md` Step 4): a single `TCP_ACCEPTED`
+    /// on this attach (M4 plan Step 4 (2473c88)): a single `TCP_ACCEPTED`
     /// dispatcher per connection is not an optimization, it is the only
     /// correct shape once more than one `-R` shares a connection (that
     /// type's own doc explains why two independent accept loops would
@@ -211,7 +211,7 @@ impl RenewalSchedule {
 }
 
 impl SessionAttachStream {
-    /// Bind and start this attach's `-L` local forwards (`docs/history/m4-plan.md`
+    /// Bind and start this attach's `-L` local forwards (the M4 plan (2473c88)
     /// Step 3; `docs/CLI.md` §7 "`-L`/`-R`은 이 대화형 form의 companion
     /// flag이지 별도 명령이 아니다").
     ///

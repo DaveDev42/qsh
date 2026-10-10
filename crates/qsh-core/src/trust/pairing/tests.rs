@@ -421,7 +421,7 @@ fn on_disk_record_never_contains_the_raw_secret() {
     assert!(!text.contains(&BASE64.encode(s.as_ref())));
 }
 
-/// Regression for `docs/history/m7-plan.md` Step 7-1's close of report F-9's
+/// Regression for M7 plan Step 7-1 (69dd788)'s close of report F-9's
 /// residual lost-update window: 8 threads, each doing a full
 /// `InviteStore::lock` → `load` → `add` → `save` cycle for a
 /// distinct invite, must not lose each other's addition — mirrors

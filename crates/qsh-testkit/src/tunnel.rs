@@ -1,5 +1,5 @@
 //! In-process loopback **tunnel** harness (L3, `docs/design/testing.md`;
-//! `docs/history/m4-plan.md` Step 3 (b)).
+//! M4 plan Step 3 (b) (2473c88)).
 //!
 //! One process, three real parties and no subprocess, no sleeps, no fixed
 //! ports:
@@ -112,7 +112,7 @@ impl Drop for EchoServer {
 
 /// A TCP sink on `127.0.0.1:0` for exactly one connection: reads and
 /// discards every byte, counting them as it goes. Used by the perf
-/// benchmarks (`docs/history/m4-plan.md` Step 7, DoD 3/4) that want to saturate the
+/// benchmarks (M4 plan Step 7 (2473c88), DoD 3/4) that want to saturate the
 /// *forward* direction only — an [`EchoServer`]'s own reply writes would
 /// contend for the same tunnel/QUIC bandwidth the benchmark is trying to
 /// measure, muddying a one-directional throughput number.
@@ -288,7 +288,7 @@ impl TunnelHarness {
     /// Start with a custom policy, a caller-provided client identity and a
     /// caller-provided host trust store — the tunnel-flavored twin of
     /// [`LoopbackHarness::start_custom`]. For a test that needs a *second*,
-    /// distinct principal pinned on the same host (`docs/history/m5-plan.md` Step 5's
+    /// distinct principal pinned on the same host (M5 plan Step 5 (2473c88)'s
     /// `forward.remote.close` ownership tests: one identity opens the `-R`
     /// forward via [`Self::remote_forward`], another — pinned here too —
     /// dials separately to prove it cannot close a forward it does not
@@ -304,7 +304,7 @@ impl TunnelHarness {
 
     /// Start with the interim allow-all-pinned policy, reachable only
     /// through a seeded chaos proxy (`docs/design/testing.md` L4,
-    /// `docs/history/m4-plan.md` Step 8 (a)/(b)) — the tunnel-flavored twin of
+    /// M4 plan Step 8 (a) (2473c88)/(b)) — the tunnel-flavored twin of
     /// [`LoopbackHarness::start_chaotic`], for `repath()`/`sever()`
     /// scenarios that need a live tunnel splice riding the same connection
     /// the fault is injected on. [`Self::connection`] (and so
@@ -383,7 +383,7 @@ impl TunnelHarness {
     /// Bind a `-L` listener on an **ephemeral** loopback port forwarding to
     /// `host:port` as the host sees it, and start serving it over this
     /// harness's connection. The returned handle owns the listener: drop it
-    /// to tear the forward down (`docs/history/m4-plan.md` §4.1 #1).
+    /// to tear the forward down (M4 plan §4.1 #1 (2473c88)).
     ///
     /// This is the production entry point the CLI's `-L` uses, reached the
     /// same way — nothing about the requester leg is re-implemented here.
@@ -409,7 +409,7 @@ impl TunnelHarness {
             .expect("bind dynamic forward")
     }
 
-    /// Open a `-R` remote forward the production way (`docs/history/m4-plan.md` Step 4):
+    /// Open a `-R` remote forward the production way (M4 plan Step 4 (2473c88)):
     /// a **fresh** [`Session`] to the host (not
     /// [`Self::connection`]/[`Self::tcp_connect`]'s — a `-R` forward gets
     /// its own connection here for the same reason `qsh tunnel_open`'s
@@ -638,7 +638,7 @@ impl RemoteForwardBinding {
 pub fn ephemeral_local_spec(host: &str, port: u16) -> ForwardSpec {
     ForwardSpec {
         direction: ForwardDirection::Local,
-        // No `bind:` — the default is loopback (`docs/history/m4-plan.md` §4.1 #3).
+        // No `bind:` — the default is loopback (M4 plan §4.1 #3 (2473c88)).
         bind: None,
         listen_port: 0,
         host: host.to_string(),

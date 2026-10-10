@@ -77,7 +77,7 @@ pub enum Attach {
         forwards: Vec<String>,
         /// `-R` remote forward specs, unparsed
         /// (`qsh_core::parse_remote_forwards` turns them into specs;
-        /// `docs/history/m4-plan.md` Step 4). Same scope as `forwards` — only this
+        /// M4 plan Step 4 (2473c88)). Same scope as `forwards` — only this
         /// form carries them, and only the `#[cfg(unix)]` driver reads
         /// them.
         #[cfg_attr(not(unix), allow(dead_code))]

@@ -1,4 +1,4 @@
-//! `acl.toml` loader (`docs/design/architecture.md` §6, §7; `docs/history/m5-plan.md`
+//! `acl.toml` loader (`docs/design/architecture.md` §6, §7; the M5 plan (2473c88)
 //! Step 2). Turns the file at `<config_dir>/acl.toml` into a [`Policy`] —
 //! or explains, structurally, why it couldn't.
 //!
@@ -6,7 +6,7 @@
 //! [`crate::trust::TrustStore::load`]'s "missing file → default" idiom.**
 //! Those types' defaults are safe because "no config" and "no pins" both
 //! mean "behave as before". An absent `acl.toml` has no such reading —
-//! `docs/design/architecture.md` §6 and `docs/history/m5-plan.md` §4.1 #1 are explicit
+//! `docs/design/architecture.md` §6 and M5 plan §4.1 #1 (2473c88) are explicit
 //! that it means "nobody has been granted anything yet", so [`PolicyLoad`]
 //! gives every non-[`PolicyLoad::Loaded`] outcome an effective policy of
 //! deny-all rather than quietly reusing `Config`'s pattern.
@@ -15,7 +15,7 @@
 //! ([`PolicyLoad::Invalid`]) — a half-applied policy would enforce
 //! something the operator never wrote down and never reviewed.
 //!
-//! [`load_or_deny`] is `docs/history/m5-plan.md` Step 6's production wiring: the one
+//! [`load_or_deny`] is M5 plan Step 6 (2473c88)'s production wiring: the one
 //! function `crate::serve::host_runtime` and
 //! `crate::reverse::listen::run_listen_unix` both call to turn this
 //! module's [`PolicyLoad`] into a real [`super::Authorizer`], falling back
@@ -41,7 +41,7 @@ use super::policy::FamilyPrefix;
 use super::{Action, ActionPattern, Authorizer, DenyAll, Policy, Rule, Scope};
 
 /// Hard caps on `acl.toml` shape, enforced before any rule is evaluated.
-/// `acl.toml` is operator-authored, not adversarial input (`docs/history/m5-plan.md`
+/// `acl.toml` is operator-authored, not adversarial input (the M5 plan (2473c88)
 /// §4 risk list), but "no unbounded parsing" is a hard invariant
 /// regardless (`CLAUDE.md` "unbounded input rejected"). `Policy::decide`
 /// is `O(rules)` per request, so bounding rule count bounds every future
@@ -84,7 +84,7 @@ pub enum PolicyLoad {
     /// an action pattern matching nothing in [`Action::ALL`], a value
     /// outside this module's caps, or another shape violation. Effective
     /// policy: deny-all. The [`OpError`] is `CONFIG_ERROR` and is for the
-    /// operator only — `docs/history/m5-plan.md` §4.1 #4: it must never reach a remote
+    /// operator only — M5 plan §4.1 #4 (2473c88): it must never reach a remote
     /// peer, who always sees a uniform `PERMISSION_DENIED` instead.
     Invalid(OpError),
 }
@@ -99,7 +99,7 @@ impl PolicyLoad {
     }
 }
 
-/// Loads `acl.toml`. Process-start-once by design (`docs/history/m5-plan.md` §4.1 #6:
+/// Loads `acl.toml`. Process-start-once by design (M5 plan §4.1 #6 (2473c88):
 /// no hot reload, no lazy load — a lazily-loaded policy has a
 /// "can't-decide-yet" window, and fail-open in that window would break
 /// the "no resource before authorization" invariant that has held since
@@ -118,7 +118,7 @@ impl PolicySource {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return PolicyLoad::Missing,
             Err(err) => return PolicyLoad::Invalid(read_error(path, &err)),
         };
-        // Arbitrated (`docs/history/m5-plan.md` Step 6): warn, never deny, on a
+        // Arbitrated (M5 plan Step 6 (2473c88)): warn, never deny, on a
         // group-/world-writable `acl.toml`. Denying would turn a permissions
         // slip into a second way to lock an operator out mid-incident —
         // exactly the moment they most need `acl.toml` to still load.
@@ -235,14 +235,14 @@ fn warn_if_group_or_world_writable(path: &Path, file: &File) {
 /// facing side ([`PolicyLoad::Invalid`]'s own doc) — this is a second,
 /// finer axis for the human-facing startup banner only, never sent to a
 /// peer (a remote peer only ever sees the uniform `PERMISSION_DENIED`,
-/// `docs/history/m5-plan.md` §4.1 #4).
+/// M5 plan §4.1 #4 (2473c88)).
 pub const ACL_POLICY_MISSING_CODE: &str = "acl_policy_missing";
 
 /// Machine-stable code word for [`PolicyLoad::Invalid`]'s startup
 /// diagnostic. See [`ACL_POLICY_MISSING_CODE`].
 pub const ACL_POLICY_INVALID_CODE: &str = "acl_policy_invalid";
 
-/// [`StartupDiagnostic::render`]'s headline fragment (F4, `docs/history/m5-plan.md`
+/// [`StartupDiagnostic::render`]'s headline fragment (F4, the M5 plan (2473c88)
 /// Step 6 PR 6a adversarial ②) — pulled out to a named const, rather than
 /// inlined in the `format!` below, so `crates/qsh-core/tests/acl_docs.rs`
 /// can pin it against `README.md`/`docs/CLI.md` byte-for-byte
@@ -260,12 +260,12 @@ pub const ACL_STARTUP_DENIED_CLAUSE: &str = "every request is denied until this 
 pub const ACL_STARTUP_NO_AUTOGEN: &str = "acl.toml is never auto-generated — create it by hand";
 
 /// [`StartupDiagnostic::render`]'s closing hint: how to verify a fix
-/// *before* restarting (`docs/history/m5-plan.md` §4.1 #1(c)'s migration-story
+/// *before* restarting (M5 plan §4.1 #1 (2473c88)(c)'s migration-story
 /// obligation, closed by M5 Step 7's `qsh acl check` — same evaluator as
 /// enforcement, `docs/CLI.md` §6.15). See [`ACL_STARTUP_HEADLINE`].
 pub const ACL_STARTUP_CHECK_HINT: &str = "verify a fix before restarting: qsh acl check";
 
-/// The exactly-once, operator-facing startup banner `docs/history/m5-plan.md` Step 6
+/// The exactly-once, operator-facing startup banner M5 plan Step 6 (2473c88)
 /// requires whenever `acl.toml` did not produce a usable [`Policy`] —
 /// [`PolicyLoad::Missing`] or [`PolicyLoad::Invalid`]. [`load_or_deny`]
 /// composes this; `qsh-cli` prints [`StartupDiagnostic::render`]'s output
@@ -294,7 +294,7 @@ pub struct StartupDiagnostic {
     pub detail: Option<String>,
     /// A copy-pasteable minimal `acl.toml` body, pre-filled with this
     /// machine's actual pinned peer names from the trust store when it has
-    /// any (`docs/history/m5-plan.md` §4.2: local information, stderr only, never sent
+    /// any (M5 plan §4.2 (2473c88): local information, stderr only, never sent
     /// to a peer).
     pub example: String,
 }
@@ -327,7 +327,7 @@ impl StartupDiagnostic {
 }
 
 /// Load `acl.toml` and turn the result straight into an [`Authorizer`] for
-/// a production call site (`docs/history/m5-plan.md` Step 6 — the only two callers are
+/// a production call site (M5 plan Step 6 (2473c88) — the only two callers are
 /// `crate::serve::host_runtime` and `crate::reverse::listen::run_listen_unix`'s
 /// controller side). [`PolicyLoad::Loaded`] becomes the real [`Policy`];
 /// every other outcome becomes [`DenyAll`] plus a [`StartupDiagnostic`] the
@@ -557,7 +557,7 @@ fn example_allow_list(role: Role) -> &'static str {
 /// [`example_allow_list`]), or the single generic `device:<name>`
 /// placeholder row when `names` is empty. Single-sourced by
 /// [`minimal_policy_example`] (the trust store's actual pinned peer
-/// names, `docs/history/m5-plan.md` §4.2) and by `crate::ops::doctor`'s
+/// names, M5 plan §4.2 (2473c88)) and by `crate::ops::doctor`'s
 /// `acl_principal_unmatched` finding (`docs/CLI.md` §6.17), which passes
 /// the one unmatched peer's name alone rather than every pinned peer —
 /// so `detail` shows a row for the peer the finding is actually about,
@@ -621,7 +621,7 @@ pub(crate) fn ca_policy_example_row(role: Role) -> String {
 
 /// Build the copy-pasteable minimal-policy example embedded in
 /// [`StartupDiagnostic::render`]: one `[[acl]]` block per pinned peer in
-/// `paths.trust_file()` (`docs/history/m5-plan.md` §4.2: fill the machine's actual
+/// `paths.trust_file()` (M5 plan §4.2 (2473c88): fill the machine's actual
 /// pinned peer names in), or a single generic placeholder row when the
 /// trust store has no pins yet (a fresh install before the first `qsh
 /// trust add`). `role` (ADR-0017 결정 2) picks the `allow` list — see
@@ -778,7 +778,7 @@ fn parse_rule(index: usize, raw: RawRule) -> Result<Rule, String> {
     let mut allow = Vec::with_capacity(raw.allow.len());
     for pattern in &raw.allow {
         if pattern.len() > caps::MAX_PATTERN_LEN {
-            // F1 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ①): unlike the
+            // F1 (M5 plan Step 6 (2473c88) PR 6a adversarial ①): unlike the
             // three deliberate Step 2 grammar-token echoes below (unknown
             // action pattern/auth_path/scope — bounded to <=128 bytes by
             // construction, since that is exactly the cap those shapes
@@ -798,7 +798,7 @@ fn parse_rule(index: usize, raw: RawRule) -> Result<Rule, String> {
         // granted (`Action::is_always_denied`, checked ahead of every
         // rule by `Policy::decide`) — that mismatch between what the file
         // says and what it can ever do is worth one operator-facing
-        // warning line, not silence (`docs/history/m5-plan.md` Step 2 (a)). Wildcard
+        // warning line, not silence (M5 plan Step 2 (a) (2473c88)). Wildcard
         // patterns that merely *also* cover an always-denied action
         // (`forward.*`) do not warn — only a pattern that names the
         // always-denied action exactly.

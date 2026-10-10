@@ -7,11 +7,11 @@ use super::*;
 /// [`close`](Connected::close)) and the streaming ops (many calls).
 ///
 /// `pub(crate)` only so the sibling `crate::ops::tunnel` module can hold
-/// one for a foreground tunnel (`docs/history/m4-plan.md` Step 3); nothing outside
+/// one for a foreground tunnel (M4 plan Step 3 (2473c88)); nothing outside
 /// `crate::ops` can name it.
 pub(crate) struct Connected {
     /// `None` only between [`Connected::close`] and the drop. Shared with
-    /// every other in-flight `Connected` on this `Ops` (`docs/history/m7-plan.md` Step
+    /// every other in-flight `Connected` on this `Ops` (the M7 plan (69dd788) Step
     /// 7-2 ①, [`crate::ops::SharedRuntime`]'s own doc) — never the sole
     /// owner, so nothing on this type may shut it down; the wrapper (not a
     /// bare `Runtime`) is also what makes it safe for this field to be
@@ -21,7 +21,7 @@ pub(crate) struct Connected {
     /// The endpoint and connection currently carrying this attach — the
     /// forward route's swappable pair — or, on the reverse route, the
     /// facts a `LOCAL_CONTROL` handshake produced instead of one
-    /// (`docs/history/m3-plan.md` Step 6).
+    /// (M3 plan Step 6 (2473c88)).
     pub(super) link: ConnectedLink,
     /// `None` only after the session was consumed by the teardown.
     pub(super) session: Option<Session>,
@@ -59,7 +59,7 @@ pub(super) enum ConnectedLink {
         /// the one this specific `Connected`'s `LOCAL_CONTROL` conduit is
         /// actually talking to. [`Connected::reverse_route`] is the only
         /// reader — `crate::ops::tunnel`'s route-aware `tunnel_open`
-        /// (`docs/history/m4-plan.md` Step 5 PR 5b), which needs both to open the
+        /// (M4 plan Step 5 (2473c88) PR 5b), which needs both to open the
         /// per-connection `LOCAL_STREAM` conduits
         /// `crate::tunnel::LocalForwardHandle::start_reverse` and
         /// `crate::tunnel::remote::RemoteForwardAcceptor::spawn_reverse`
@@ -177,7 +177,7 @@ impl Connected {
     /// Run one request closure on the live session.
     ///
     /// `pub(crate)`, not private: `crate::ops::tunnel`'s `-R` requester leg
-    /// (`docs/history/m4-plan.md` Step 4) needs the same one-request-closure shape
+    /// (M4 plan Step 4 (2473c88)) needs the same one-request-closure shape
     /// `session_open`/`attach_request`/etc. already use here, for
     /// `Session::rfwd_open`/`rfwd_close` — a sibling `ops` module, not a
     /// descendant of this one, so plain module-private is not enough.
@@ -233,7 +233,7 @@ impl Connected {
     /// handshake reported — the daemon's TLS-verified peer for *this*
     /// registration, which is the ADR-0007 presentation-condition input on
     /// that leg since the CLI process is not itself a TLS endpoint on the
-    /// underlying connection (`docs/history/m3-plan.md` Step 6).
+    /// underlying connection (M3 plan Step 6 (2473c88)).
     pub(crate) fn peer_fingerprint(&self) -> Option<String> {
         match &self.link {
             ConnectedLink::Forward(link) => link
@@ -253,7 +253,7 @@ impl Connected {
     /// listen` daemon over a `LOCAL_STREAM` conduit
     /// ([`ConnectedLink::Reverse`]). A caller that needs a raw byte pipe
     /// of its own (a tunnel splice) has to refuse there rather than
-    /// improvise, which is what `docs/history/m4-plan.md` Step 5 exists to fix.
+    /// improvise, which is what M4 plan Step 5 (2473c88) exists to fix.
     pub(crate) fn connection(&self) -> Option<qsh_transport::Connection> {
         match &self.link {
             ConnectedLink::Forward(link) => Some(link.connection()),
@@ -278,7 +278,7 @@ impl Connected {
 
     /// The reverse-route carrier [`crate::ops::tunnel`]'s route-aware
     /// `tunnel_open` needs to open its own `LOCAL_STREAM` conduits
-    /// (`docs/history/m4-plan.md` Step 5 PR 5b) — this machine's resident `qsh listen`
+    /// (M4 plan Step 5 (2473c88) PR 5b) — this machine's resident `qsh listen`
     /// daemon socket and the registered host alias, i.e. exactly
     /// [`ConnectedLink::Reverse`]'s two extra fields. `None` on the
     /// forward route (the mirror image of [`Self::connection`] being
@@ -374,7 +374,7 @@ impl Connected {
     /// route: there is no separate connection here to close, and no QUIC
     /// close frame of this process's own to drain).
     ///
-    /// The runtime is shared (`docs/history/m7-plan.md` Step 7-2 ①), so this only drops
+    /// The runtime is shared (M7 plan Step 7-2 (69dd788) ①), so this only drops
     /// this `Connected`'s own `Arc` handle to it — and only after
     /// `block_on` above has already run `connection.close()` and
     /// `endpoint.wait_idle()` to completion. If this handle happens to be

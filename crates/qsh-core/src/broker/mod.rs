@@ -139,7 +139,7 @@ pub enum BrokerError {
     #[error("qsh serve is shutting down: refusing new sessions")]
     Draining,
     /// A session quota was already saturated when this open was attempted
-    /// (→ `RESOURCE_EXHAUSTED`, `docs/history/m8-plan.md` Step 3, `docs/adr/0010-
+    /// (→ `RESOURCE_EXHAUSTED`, M8 plan Step 3 (52639fc), `docs/adr/0010-
     /// resource-quotas.md`). Reserved and checked *before* `factory.create`
     /// runs, so nothing was spawned — same "never create a resource before
     /// authorization/quota succeeds" discipline `Draining` already
@@ -259,7 +259,7 @@ pub struct BrokerConfig {
     /// (`[serve].close_grace_ms`).
     pub close_grace: Duration,
     /// Session-count quota limits (`[serve].max_sessions`/
-    /// `max_sessions_per_principal`, `docs/history/m8-plan.md` Step 3, `docs/adr/
+    /// `max_sessions_per_principal`, M8 plan Step 3 (52639fc), `docs/adr/
     /// 0010-resource-quotas.md`). Enforced from the registry itself plus
     /// the in-flight reservations not yet inserted into it (`Broker::
     /// reserve_slot`) — no separate steady-state counter.
@@ -379,7 +379,7 @@ impl SourceFactory for PipeFactory {
     }
 }
 
-/// The headless stand-in `qsh serve` uses until the PTY source lands (docs/history/m2-plan.md
+/// The headless stand-in `qsh serve` uses until the PTY source lands (the M2 plan (2473c88)
 /// M2 Step 4): every session is a [`PipeSource`] whose "child" prints
 /// [`ECHO_BANNER`] once, then echoes each input byte back as output, and
 /// exits on the first fatal signal. Zero PTY code, but the whole
@@ -625,7 +625,7 @@ impl Broker {
     /// authorization succeeds, `CLAUDE.md` security defaults).
     ///
     /// Quota-*reserved* (not merely checked) *before* `self.factory.create`
-    /// runs (`Broker::reserve_slot` — `docs/history/m8-plan.md` Step 3, `docs/adr/0010-
+    /// runs (`Broker::reserve_slot` — M8 plan Step 3 (52639fc), `docs/adr/0010-
     /// resource-quotas.md`, main-session arbitration item 1): a refused
     /// open must not fork/open a PTY only to throw it away, and the
     /// reservation itself (not a second check at insert time) is what
@@ -639,7 +639,7 @@ impl Broker {
     }
 
     /// [`Broker::open`], recording `opener` as the session's owner
-    /// (`docs/history/m3-plan.md` Step 3.5 PR②'s `session.control` ownership check —
+    /// (M3 plan Step 3 (2473c88).5 PR②'s `session.control` ownership check —
     /// [`SessionInfo::opener`]'s doc has the empty-string convention
     /// [`Broker::open`]/[`Broker::open_with`] fall back to when this is not
     /// used). `SessionBackend::open` — `server::handle_session_open`'s only
@@ -954,7 +954,7 @@ pub trait SessionBackend: Send + Sync {
     /// compares (production passes `server::opener_key`'s
     /// `(auth_path, principal)` output, never a bare principal string) —
     /// and `session.write`/`session.resize` are refused to every other
-    /// key (`docs/history/m3-plan.md` Step 3.5 PR②, PRD §6).
+    /// key (M3 plan Step 3 (2473c88).5 PR②, PRD §6).
     fn open(&self, spec: &SessionSpec, opener: &str) -> Result<SessionId, BrokerError>;
 
     /// Snapshot one live session.

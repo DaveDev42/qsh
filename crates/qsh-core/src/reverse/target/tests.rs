@@ -131,7 +131,7 @@ async fn dial_and_register_maps_an_unresolvable_controller_to_resolve_cause() {
 /// refuses on every non-unix target before it ever touches its
 /// arguments (module docs on [`super::listen::windows_unsupported`]),
 /// so the identity/paths/config below are throwaway. This is the
-/// positive Windows-leg assertion `docs/history/m9-plan.md` Step 3 (d) owes ("Windows
+/// positive Windows-leg assertion M9 plan Step 3 (d) (b9a621b) owes ("Windows
 /// leg의 nextest green … 나머지가 컴파일·통과") — a real `#[tokio::test]`
 /// that runs and passes on the Windows CI leg, not just an absence of
 /// a compile error there.
@@ -313,7 +313,7 @@ fn a_jitter_of_exactly_zero_percent_is_deterministic() {
 // no `sleep()`-based test synchronization)
 // ------------------------------------------------------------------
 
-/// `docs/design/protocol.md` §11-4 / `docs/history/m9-plan.md` Step 4 (d): "controller
+/// `docs/design/protocol.md` §11-4 / M9 plan Step 4 (d) (b9a621b): "controller
 /// 부재 상태에서 재접속 루프가 CPU를 태우지 않음(상한 도달 후 30 s
 /// 간격)". Reaching the cap and then waiting is driven by a real
 /// `tokio::time::sleep`, not a busy poll — proven by advancing a

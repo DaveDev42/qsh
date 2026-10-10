@@ -1,5 +1,5 @@
 //! What the chaos proxy actually does to the wire (`docs/design/testing.md`
-//! L4, docs/history/m2-plan.md Step 8).
+//! L4, M2 plan Step 8 (2473c88)).
 //!
 //! `chaos_proxy.rs` asserts that qsh survives the faults; this file asserts
 //! that the faults happen at all. There is no QUIC here — a plain

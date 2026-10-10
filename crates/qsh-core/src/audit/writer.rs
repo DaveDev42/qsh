@@ -1,4 +1,4 @@
-//! The async, bounded-queue, rotating audit writer (`docs/history/m5-plan.md` Step 3,
+//! The async, bounded-queue, rotating audit writer (M5 plan Step 3 (2473c88),
 //! `docs/design/architecture.md` §6/§7). [`RotatingAuditSink::record`] is a
 //! non-blocking bounded-queue enqueue; a single dedicated `std::thread`
 //! owns the active file handle across every append (no per-record open,
@@ -25,7 +25,7 @@
 //! in-memory `pending` queue and retries flushing it, in order, on a fixed
 //! cadence (`RETRY_TICK`) until the write actually lands, at which point
 //! the latch clears automatically and a caller needs to take no action
-//! (`docs/history/m5-plan.md` Step 3, F1). `record()` itself is unchanged by any of
+//! (M5 plan Step 3 (2473c88), F1). `record()` itself is unchanged by any of
 //! this: the latch check still runs *before* the enqueue, so an op that is
 //! actually denied while degraded produces zero audit lines, never a
 //! pending one. Only records still `pending` when the process exits
@@ -45,7 +45,7 @@ use std::time::Duration;
 use super::{AuditError, AuditRecord, AuditSink, create_private_dir};
 
 /// Production retry cadence for [`run_writer`]'s degraded-mode flush loop
-/// (`docs/history/m5-plan.md` Step 3, F1): once a write has failed, the writer wakes up
+/// (M5 plan Step 3 (2473c88), F1): once a write has failed, the writer wakes up
 /// this often to retry flushing whatever is `pending`, without waiting for
 /// another record to arrive. A `#[cfg(test)]` caller injects a much
 /// shorter tick (`RotatingAuditSink::spawn_joinable_with_retry_tick`) so a
@@ -57,7 +57,7 @@ const RETRY_TICK: Duration = Duration::from_secs(1);
 /// (`crate::config::AuditConfig`) straight into the writer thread.
 /// `crate::serve::host_runtime` is the one production call site.
 pub struct RotatingAuditSink {
-    /// `None` only after `Drop` has taken it (`docs/history/m5-plan.md` Step 3 F2) — a
+    /// `None` only after `Drop` has taken it (M5 plan Step 3 (2473c88) F2) — a
     /// live `RotatingAuditSink` always has one, so `record()` unwraps it.
     sender: Option<SyncSender<AuditRecord>>,
     degraded: Arc<AtomicBool>,
@@ -95,7 +95,7 @@ impl RotatingAuditSink {
 
     /// Whether the writer is currently latched degraded — its last write
     /// failed and automatic retry (`RETRY_TICK`) has not yet succeeded
-    /// (`docs/history/m5-plan.md` Step 3, F9). Operator visibility only: `record()`
+    /// (M5 plan Step 3 (2473c88), F9). Operator visibility only: `record()`
     /// already consults the same flag on its own fail-closed path, this
     /// just lets a caller (a doctor probe, a status line) observe it
     /// without provoking a call.
@@ -232,7 +232,7 @@ impl AuditSink for RotatingAuditSink {
 }
 
 impl Drop for RotatingAuditSink {
-    /// `docs/history/m5-plan.md` Step 3, F2: drop the sender first so the writer
+    /// M5 plan Step 3 (2473c88), F2: drop the sender first so the writer
     /// thread's blocking `recv`/`recv_timeout` observes a disconnect,
     /// performs its own one-shot bounded final flush of whatever is still
     /// `pending`, and exits — then join it, so a caller that drops the
@@ -608,7 +608,7 @@ impl RotatingFile {
     /// Rotate at a line boundary: close the handle **before** any rename
     /// touches its path — on Windows a rename while the file is open
     /// fails, and dropping the handle first works on every platform, so
-    /// this is the one code path this needs (`docs/history/m5-plan.md` Step 3).
+    /// this is the one code path this needs (M5 plan Step 3 (2473c88)).
     ///
     /// F6: a rename blocked by a co-writer (Windows file-sharing
     /// semantics, or losing the unix flock race to another rotator) is

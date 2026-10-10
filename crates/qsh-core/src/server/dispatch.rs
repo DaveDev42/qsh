@@ -104,7 +104,7 @@ impl Server {
                 ),
             )),
             // `RemoteForwardClose` needs no connection — it is an ACL
-            // choke point (`Server::authorize_owned`, `docs/history/m5-plan.md` Step 5)
+            // choke point (`Server::authorize_owned`, M5 plan Step 5 (2473c88))
             // over a `Server::remote_forwards` lookup plus an abort — so it
             // is handled inline here like every other control op.
             Some(control_message::Body::RfwdClose(req)) => {
@@ -193,21 +193,21 @@ impl Server {
 
     /// `Action::SessionControl` on `id`, with ownership folded into the
     /// same decision as an ordinary `scope = "owned"` policy judgment
-    /// (`docs/history/m5-plan.md` Step 5 (a), `docs/design/architecture.md` §6's ④):
+    /// (M5 plan Step 5 (a) (2473c88), `docs/design/architecture.md` §6's ④):
     /// [`Self::require_opener`] is now a thin broker lookup that fills
     /// [`ResourceRef::owner`] for [`Self::authorize_owned`], not a second
     /// gate run after the fact — so there is exactly one
     /// [`Authorizer::check`] call and exactly one terminal audit record per
     /// request, the same "single decision, single record" property the old
     /// two-step version (`Self::authorize` + a separate `require_opener`
-    /// deny) had to work to preserve (`docs/history/m3-plan.md` Step 3.5 PR② review: a
+    /// deny) had to work to preserve (M3 plan Step 3 (2473c88).5 PR② review: a
     /// foreign principal's refused write must not also read as an `allow`
     /// in the audit log — see
     /// `crates/qsh-testkit/tests/session_loopback.rs`'s
     /// `session_control_binds_write_and_resize_to_the_opener`), now true by
     /// construction instead of by careful sequencing.
     /// `action` is the caller's own `crate::acl::Op::X.action()` lookup
-    /// (`Op::SessionWrite`/`Op::SessionResize`, `docs/history/m5-plan.md` Step 8) — both
+    /// (`Op::SessionWrite`/`Op::SessionResize`, M5 plan Step 8 (2473c88)) — both
     /// resolve to `Action::SessionControl` today, but sourcing it from the
     /// registry at each call site (rather than hardcoding the enum
     /// variant here) is what keeps this shared helper and `OP_REGISTRY`
@@ -237,7 +237,7 @@ impl Server {
         )
     }
 
-    /// [`Self::authorize`]'s owner-aware sibling (`docs/history/m5-plan.md` Step 5): one
+    /// [`Self::authorize`]'s owner-aware sibling (M5 plan Step 5 (2473c88)): one
     /// [`Authorizer::check`] call over a [`ResourceRef`] that already
     /// carries `owner`, and exactly one terminal audit record either way.
     /// Its two callers are [`Self::authorize_session_control`] (owner from
@@ -281,7 +281,7 @@ impl Server {
     /// record-failure fail-closed deny are byte-identical — a peer must
     /// not be able to tell "the policy forbids this" from "this session
     /// exists but is someone else's" from "the audit log failed to write"
-    /// (`docs/history/m3-plan.md` Step 3.5 PR②, M5 Step 4 §4.2). The reply body is always
+    /// (M3 plan Step 3 (2473c88).5 PR②, M5 Step 4 §4.2). The reply body is always
     /// [`crate::acl::PERMISSION_DENIED_MESSAGE`] verbatim — `action` never
     /// reaches the wire (that would turn the message into a capability-
     /// enumeration oracle, see that constant's doc) and is used only for
@@ -298,13 +298,13 @@ impl Server {
         )
     }
 
-    /// `session.control`'s ownership *lookup* (audit A2 P0, `docs/history/m3-plan.md` Step
+    /// `session.control`'s ownership *lookup* (audit A2 P0, the M3 plan (2473c88) Step
     /// 3.5 PR②, PRD §6, M5 Step 5 (a)): finds the session's recorded
     /// opener, for [`Self::authorize_session_control`] to fold into the
     /// `ResourceRef` it hands the ordinary `Authorizer::check` call — the
     /// actual `scope = "owned"` comparison against it now lives in the
     /// authorizer (`AllowAllPinned::check`/`Policy::decide`), not here.
-    /// Named `require_opener` still: `docs/history/m5-plan.md` Step 5 (a) keeps the name
+    /// Named `require_opener` still: M5 plan Step 5 (a) (2473c88) keeps the name
     /// across this shrink from "the ownership gate itself" to "the thin
     /// broker lookup that feeds it".
     ///

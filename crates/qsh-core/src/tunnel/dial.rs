@@ -15,7 +15,7 @@
 //! — "give me a TCP connection to this destination" — with the resolve
 //! failure separated from the connect failure so the caller can pick the
 //! right `ErrorCode` (`docs/CLI.md` §3.3: `HOST_NOT_FOUND` vs
-//! `CONNECTION_FAILED`, and `docs/history/m4-plan.md` "전 step 공통 계약 규율" spells
+//! `CONNECTION_FAILED`, and the M4 plan (2473c88) "전 step 공통 계약 규율" spells
 //! out exactly that split).
 //!
 //! ADR-0019 decision 3 adds a second, orthogonal seam inside
@@ -280,7 +280,7 @@ impl TunnelDialer for SystemDialer {
                 Ok(result) => result,
                 // Expiry is a destination that could not be reached, which
                 // is what `CONNECTION_FAILED` already means — M4 invents no
-                // new `ErrorCode` (`docs/history/m4-plan.md` §4.1 #9).
+                // new `ErrorCode` (M4 plan §4.1 #9 (2473c88)).
                 Err(_elapsed) => Err(DialError::Connect(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "destination did not answer in time",

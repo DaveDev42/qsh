@@ -1,5 +1,5 @@
 //! L4 network fault injection: an in-process UDP chaos proxy
-//! (`docs/design/testing.md` L4, docs/history/m2-plan.md Step 8).
+//! (`docs/design/testing.md` L4, M2 plan Step 8 (2473c88)).
 //!
 //! ```text
 //! client (quinn Endpoint) ──▶ front socket ──▶ upstream socket ──▶ host
@@ -513,7 +513,7 @@ impl ChaosProxy {
     /// stays bound, so a **re-dial** (a fresh client endpoint, hence a fresh
     /// source port) is relayed normally onto a brand-new host connection.
     /// This is the harness half of the "재dial + resume" recovery path; the
-    /// client re-dial loop itself is docs/history/m2-plan.md Step 7.
+    /// client re-dial loop itself is M2 plan Step 7 (2473c88).
     ///
     /// There is deliberately no `unsever`. The blacklist is keyed by socket
     /// address and never expires, so in the (rare) event that the OS hands a

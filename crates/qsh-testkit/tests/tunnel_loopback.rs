@@ -1,5 +1,5 @@
 //! L3: local forward (`-L`) over a forward QUIC connection, end to end in
-//! one process (`docs/history/m4-plan.md` Step 3 (c), `docs/design/testing.md` L3).
+//! one process (M4 plan Step 3 (c) (2473c88), `docs/design/testing.md` L3).
 //!
 //! What these tests are for: the requester leg and the host leg each have
 //! in-crate unit tests, but until here they had never been run *against
@@ -53,7 +53,7 @@ async fn a_local_forward_round_trips_through_the_remote_echo() {
     assert_eq!(got, sent);
 
     // The listener is on loopback and on a kernel-assigned port — the two
-    // properties `docs/history/m4-plan.md` §4.1 #3 and the CI port rule ask for.
+    // properties M4 plan §4.1 #3 (2473c88) and the CI port rule ask for.
     assert!(forward.local_addr().ip().is_loopback());
     assert_ne!(forward.local_addr().port(), 0);
 
@@ -225,7 +225,7 @@ async fn a_denied_forward_is_refused_on_the_stream_and_audited() {
     h.shutdown().await;
 }
 
-/// Dropping the handle is the whole teardown (`docs/history/m4-plan.md` §4.1 #1): the
+/// Dropping the handle is the whole teardown (M4 plan §4.1 #1 (2473c88)): the
 /// listener goes away, so the port stops accepting.
 #[tokio::test(flavor = "multi_thread")]
 async fn dropping_the_forward_closes_the_local_listener() {

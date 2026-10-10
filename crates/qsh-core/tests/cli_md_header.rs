@@ -1,5 +1,5 @@
 //! Pins two invariants of the one-line status header in `docs/CLI.md`
-//! (`docs/history/m13-plan.md` (j)). The header is a hand-written change log, so a typo
+//! (The M13 plan (b70be6b) (j)). The header is a hand-written change log, so a typo
 //! in a cited section number or a newer version written behind an older one
 //! would otherwise ship unnoticed. Both tests read the document only; no
 //! code constant is involved, and there is no `#[cfg(unix)]`, so the tests

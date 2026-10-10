@@ -2,7 +2,7 @@
 //! `qsh listen` (controller) accepts dial-in registrations from `qsh
 //! reverse` (target) and serves them as hosts.
 //!
-//! `docs/history/m3-plan.md` Step 3 lands in two PRs. **PR 3a**: [`registry`] (the
+//! M3 plan Step 3 (2473c88) lands in two PRs. **PR 3a**: [`registry`] (the
 //! transport-free metadata table and name-resolution logic) and [`admit`]
 //! (the `host.reverse` authorization choke point that bridges it to
 //! `qsh_transport`'s typed `Principal`/`AuthPath`/`Authorizer`), factored so
@@ -14,7 +14,7 @@
 //! (`Command::Listen`/`Command::Reverse`) lives in `qsh-cli`, not here.
 //!
 //! The `registry`/`admit` split exists so that `registry.rs` alone can
-//! satisfy the transport-free arch-lint `docs/history/m3-plan.md` Step 5 commits to adding
+//! satisfy the transport-free arch-lint M3 plan Step 5 (2473c88) commits to adding
 //! for this exact file (the same six-token `BROKER_DIR`-style ban
 //! `xtask/src/arch.rs` already enforces under `broker/`) — see
 //! `registry`'s module docs.

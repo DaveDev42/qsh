@@ -41,7 +41,7 @@ mod registry;
 // then reports every item in this whole family as `dead_code` — rustc
 // exempts genuinely `pub` items from that lint on the theory that a
 // downstream crate might use them, but a `pub(crate)` item needs an
-// actual in-crate caller, and `docs/history/m5-plan.md` Step 6 — not this step — is
+// actual in-crate caller, and M5 plan Step 6 (2473c88) — not this step — is
 // what wires `PolicySource::load`/`Policy` into a production
 // `Authorizer` slot. That would fail this step's `-D warnings` gate for
 // a purely cosmetic visibility narrowing, so these stay `pub` (REBUTTED
@@ -137,7 +137,7 @@ pub enum Action {
     /// requested bind address, `"bind_host:bind_port"`. Passing this check
     /// is necessary but not sufficient to bind: the loopback-only
     /// constraint enforced right after is a separate, non-ACL host
-    /// constraint (`docs/history/m4-plan.md` Step 4) — see `crate::tunnel::remote`.
+    /// constraint (M4 plan Step 4 (2473c88)) — see `crate::tunnel::remote`.
     ForwardRemote,
     /// Dial a destination through a SOCKS5 proxy on this host's behalf
     /// (`forward.socks`, `-D`). `-D` is implemented (ADR-0019, ADR-0020,
@@ -207,7 +207,7 @@ impl Action {
     /// P1-deferred instead — defined in PRD §9 but not implemented in P0
     /// (`docs/ROADMAP.md` §3 deferred-feature guardrail table).
     ///
-    /// The M5 policy evaluator (`docs/history/m5-plan.md` Step 2) must apply this gate
+    /// The M5 policy evaluator (M5 plan Step 2 (2473c88)) must apply this gate
     /// **before** wildcard rule matching, not fold it into matching itself:
     /// an operator's `allow = ["forward.*"]` would otherwise silently
     /// swallow `forward.socks` too, since trailing-`.*` wildcard matching
@@ -273,21 +273,21 @@ impl Decision {
 }
 
 /// The exact, invariant text of every remote-facing `PERMISSION_DENIED`
-/// refusal (`docs/history/m5-plan.md` Step 4 §4.2). Every seam that can answer a peer
+/// refusal (M5 plan Step 4 §4.2 (2473c88)). Every seam that can answer a peer
 /// with [`qsh_proto::ErrorCode::PermissionDenied`] — the authorization
 /// choke points (`Server::authorize`, `Server::authorize_stream`, and
 /// `Server::authorize`'s owner-aware sibling `Server::authorize_owned`
 /// behind both `Server::authorize_session_control` and
-/// `Server::handle_rfwd_close`'s `RemoteForwardClose` gate, `docs/history/m5-plan.md`
+/// `Server::handle_rfwd_close`'s `RemoteForwardClose` gate, the M5 plan (2473c88)
 /// Step 5; `reverse::admit::admit`), their audit-record-failure
-/// fail-closed branches (`docs/history/m5-plan.md` Step 3), and the `forward.local`
+/// fail-closed branches (M5 plan Step 3 (2473c88)), and the `forward.local`
 /// inline `TCP_CONNECT` gate — uses this constant verbatim and nothing
 /// else. [`registry::DENY_SEAMS`] is the enumeration of every such seam; a
 /// remote-facing deny seam added without a row there is a defect.
 ///
 /// Why one opaque sentence instead of a message naming the action,
 /// capability, or resource that was refused: once the M5 policy engine
-/// (`docs/history/m5-plan.md` Step 6) evaluates real `acl.toml` rules, a message that
+/// (M5 plan Step 6 (2473c88)) evaluates real `acl.toml` rules, a message that
 /// names *what* was denied turns every refusal into a one-bit oracle. A
 /// peer that cannot yet see a session, a forward, or a capability could
 /// otherwise walk the action vocabulary one probe at a time and read
@@ -300,7 +300,7 @@ impl Decision {
 /// beyond the code — it never names the action, the capability, the
 /// resource, or the principal — and it is byte-identical whether the
 /// request was refused by an ordinary policy rule, by a `scope = "owned"`
-/// ownership mismatch (`docs/history/m5-plan.md` Step 5 — evaluated inside the same
+/// ownership mismatch (M5 plan Step 5 (2473c88) — evaluated inside the same
 /// [`Authorizer::check`] call as everything else since that step, fed by
 /// `Server::require_opener`'s thin broker lookup), or by an audit-record
 /// failure forcing fail-closed: the non-distinguishing error policy
@@ -317,7 +317,7 @@ impl Decision {
 pub const PERMISSION_DENIED_MESSAGE: &str =
     "peer is not allowed to perform this operation on this host";
 
-/// A resource identifier passed to `Policy::decide`, plus (`docs/history/m5-plan.md`
+/// A resource identifier passed to `Policy::decide`, plus (the M5 plan (2473c88)
 /// Step 5) that resource's owner, when it has one. `owner` is the
 /// [`opener_key`] of whichever principal/auth_path pair created the
 /// resource — a session's broker-recorded opener, or a remote forward's
@@ -360,7 +360,7 @@ pub trait Authorizer: Send + Sync + 'static {
     /// Returns a [`Verdict`], not a bare [`Decision`]: the matching rule's
     /// index (when one matched) travels with the decision so callers can
     /// pass it straight to [`crate::audit::AuditRecord`] without a second
-    /// lookup (`docs/history/m5-plan.md` §4.1 #8).
+    /// lookup (M5 plan §4.1 #8 (2473c88)).
     fn check(
         &self,
         principal: &Principal,
@@ -372,7 +372,7 @@ pub trait Authorizer: Send + Sync + 'static {
 
 /// The opener/ownership key folding `(principal, auth_path)` into the one
 /// string every owned [`ResourceRef::owner`] carries and every `scope =
-/// "owned"` comparison is made against (`docs/history/m5-plan.md` Step 5, `Scope`'s own
+/// "owned"` comparison is made against (M5 plan Step 5 (2473c88), `Scope`'s own
 /// doc). Not `principal.to_string()` alone: a CA-issued leaf may legally
 /// assert the same principal a trust-store pin does
 /// (`qsh_transport::AuthPath`'s own doc), so folding `auth_path` in is
@@ -401,7 +401,7 @@ pub fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
 /// `load_or_deny`).
 ///
 /// Reproduces M3's opener-principal ownership P0 for `resource.owner:
-/// Some(_)` (`docs/history/m5-plan.md` Step 5's interim-invariant requirement: this
+/// Some(_)` (M5 plan Step 5 (2473c88)'s interim-invariant requirement: this
 /// stand-in has to behave as `scope = "owned"` for every owned resource,
 /// since it is what production still runs until Step 6 wires a real
 /// `Policy` in) — a pinned principal is allowed every *unowned* action
@@ -426,7 +426,7 @@ impl Authorizer for AllowAllPinned {
         };
         // No policy engine behind this constant-time interim rule, so no
         // rule index — `rule: None` is the mechanical, behavior-preserving
-        // update `docs/history/m5-plan.md` Step 2's `Authorizer::check` signature
+        // update M5 plan Step 2 (2473c88)'s `Authorizer::check` signature
         // change forces here.
         Verdict {
             decision: if pinned && owned {
@@ -535,7 +535,7 @@ mod tests {
         }
     }
 
-    /// `docs/history/m5-plan.md` Step 5's interim invariant: `AllowAllPinned` must keep
+    /// M5 plan Step 5 (2473c88)'s interim invariant: `AllowAllPinned` must keep
     /// denying a non-owner on an owned resource exactly as M3's hardcoded
     /// `require_opener` gate did — production still runs this authorizer,
     /// not a real `Policy`, until Step 6.

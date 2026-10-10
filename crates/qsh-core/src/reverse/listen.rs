@@ -1,5 +1,5 @@
 //! `qsh listen` — the reverse-mode controller (`docs/CLI.md` §6.13,
-//! `docs/design/protocol.md` §11-2, `docs/history/m3-plan.md` Step 3, PR 3b). Symmetric in
+//! `docs/design/protocol.md` §11-2, M3 plan Step 3 (2473c88), PR 3b). Symmetric in
 //! shape with `serve.rs`'s `run_serve`: bind resolution
 //! (`--bind` > `[listen].bind` > [`crate::serve::DEFAULT_BIND`]), an
 //! `on_bound` callback, and a `shutdown` future the accept loop selects on.
@@ -25,7 +25,7 @@
 //! the connection — nothing here re-implements that ordering.
 //!
 //! `run_listen_unix` also binds this process's `localctl` UDS admin
-//! socket (`crate::localctl::daemon`, `docs/history/m3-plan.md` Step 5 (a)) alongside
+//! socket (`crate::localctl::daemon`, M3 plan Step 5 (a) (2473c88)) alongside
 //! the QUIC listener and runs its accept loop for as long as
 //! [`Listen::run`]'s does, unlinking the socket immediately after — on a
 //! clean shutdown and on the QUIC listener dying on its own alike, so the
@@ -109,7 +109,7 @@ pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 
 /// Poll interval for [`Listen::control_hub_wait`]/[`Listen::connection_for_wait`]
 /// — Step 8's reverse recovery waiting for a new-generation registration.
-/// `docs/history/m3-plan.md` Step 8 (b) sanctions a bounded poll as an acceptable
+/// M3 plan Step 8 (b) (2473c88) sanctions a bounded poll as an acceptable
 /// substitute for a per-name wakeup, and this is the interval the daemon-
 /// side `wait_ms`/`LOCAL_WAIT_MAX` (60 s) window is checked against —
 /// small enough that a re-registration a few hundred milliseconds into a
@@ -180,7 +180,7 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 /// `on_bound` and therefore before the accept loop starts admitting
 /// registrations. It fires at most once when `acl.toml` did not produce a
 /// usable policy — with the already-rendered
-/// [`crate::acl::StartupDiagnostic::render`] text (`docs/history/m5-plan.md` Step 6) —
+/// [`crate::acl::StartupDiagnostic::render`] text (M5 plan Step 6 (2473c88)) —
 /// and at most once when the stateless reset key file could not be used
 /// (`crate::reset_key`, ADR-0036). `qsh-cli` prints either verbatim and
 /// holds no ACL or key logic of its own.
@@ -255,7 +255,7 @@ async fn run_listen_unix(
     let stale_retention = config.stale_retention()?;
     let liveness = config.liveness()?;
 
-    // localctl (`docs/history/m3-plan.md` Step 5 (a)): bind this process's UDS admin
+    // localctl (M3 plan Step 5 (a) (2473c88)): bind this process's UDS admin
     // socket before the QUIC listener, so a runtime directory whose
     // permissions this process cannot pin to 0700 fails the whole startup
     // closed rather than leaving a QUIC listener half-serving with no
@@ -270,7 +270,7 @@ async fn run_listen_unix(
     // has taken ownership of cleaning it up the way the accept-loop tail
     // below does. Without this, a `qsh listen` that fails to come up at all
     // (bad trust store, port already in use, …) would leave a `<pid>.sock`
-    // behind that nothing will ever unlink — `docs/history/m3-plan.md` Step 5 (a)'s "the
+    // behind that nothing will ever unlink — M3 plan Step 5 (a) (2473c88)'s "the
     // socket must not outlive the process" on every exit path, not only the
     // clean-shutdown one the accept loop's own tail covers.
     let trust = SharedTrustStore::open(paths.trust_file()).inspect_err(|_| {
@@ -295,7 +295,7 @@ async fn run_listen_unix(
             format!("cannot read bound address: {err}"),
         )
     })?;
-    // F7 (`docs/history/m5-plan.md` Step 3 arbitration): the controller shares the same
+    // F7 (M5 plan Step 3 (2473c88) arbitration): the controller shares the same
     // config-driven `RotatingAuditSink` construction `serve.rs`'s
     // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/
     // `queue_depth` all apply here too, rather than `FileAuditSink`'s
@@ -315,7 +315,7 @@ async fn run_listen_unix(
     let audit_for_shutdown = audit.clone();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
-    // `docs/history/m5-plan.md` Step 6: the controller's `host.reverse` choke point
+    // M5 plan Step 6 (2473c88): the controller's `host.reverse` choke point
     // (`super::admit::admit`) is gated by the same `acl.toml`-backed
     // policy `crate::serve::host_runtime` builds for `qsh serve`/`qsh
     // reverse` — `load_or_deny` falls back to `DenyAll` (never
@@ -330,7 +330,7 @@ async fn run_listen_unix(
     }
     // `[listen]` has no admission keys of its own — it inherits
     // `[serve].max_concurrent_handshakes`/`handshake_rate_per_source`
-    // (`docs/history/m8-plan.md` Step 2 design arbitration, `docs/CLI.md` §6.12).
+    // (M8 plan Step 2 (52639fc) design arbitration, `docs/CLI.md` §6.12).
     let admission = crate::admission::Gate::new(
         clock.clone(),
         config.serve.max_concurrent_handshakes(),
@@ -402,7 +402,7 @@ async fn run_listen_unix(
     }
     let _ = std::fs::remove_file(&localctl_socket_path);
 
-    // F2 (`docs/history/m5-plan.md` Step 3): `Listen::run` detaches each accepted
+    // F2 (M5 plan Step 3 (2473c88)): `Listen::run` detaches each accepted
     // connection's task the same way `server::Server::run` does — a
     // straggler can still hold its own `Arc<Listen>` clone (and thus,
     // through it, `Listen::audit`) for a moment after `run` returns. By
@@ -424,7 +424,7 @@ mod control_hub_tests;
 mod conn_table_tests;
 
 /// The controller: registry + policy + audit + the live-connection table
-/// `Registry` deliberately does not hold (module docs, `docs/history/m3-plan.md` Step 3
+/// `Registry` deliberately does not hold (module docs, M3 plan Step 3 (2473c88)
 /// (b): "살아 있는 `client::Session`은 registry가 아니라
 /// `reverse/listen.rs`의 연결 표가 소유한다").
 ///
@@ -472,7 +472,7 @@ pub struct Listen {
     /// fire does not have to pay `STALE_SWEEP_TICK`'s real wall-clock cost
     /// to do it (`Listen::new`'s doc comment).
     sweep_tick: Duration,
-    /// L2-L3 of the L0-L5 admission ordering (`docs/history/m8-plan.md` Step 2,
+    /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — same type, same ordering,
     /// as `crate::server::Server`'s own field; consulted by [`Self::run`]
     /// before an `Incoming` reaches [`Self::accept_and_register`].
@@ -519,7 +519,7 @@ impl Listen {
     /// test that actually wants to observe a sweep fire without paying that
     /// real wall-clock cost uses [`Self::new_with_sweep_tick`] instead
     /// (`sweep_tick`'s own doc comment). Its admission
-    /// gate (`docs/history/m8-plan.md` Step 2) defaults to
+    /// gate (M8 plan Step 2 (52639fc)) defaults to
     /// `crate::config::ServeConfig`'s own defaults on `clock` — production
     /// (`run_listen_unix`) instead builds one from the operator's actual
     /// `[serve]` values (`[listen]` has no admission keys of its own — the
@@ -775,7 +775,7 @@ impl Listen {
 
     /// Every currently-registered host's `(name, hub)`, live or not —
     /// `crate::localctl::daemon`'s `LOCAL_ADMIN` handling for
-    /// `LocalTunnelList`/admin `tunnel.close` (`docs/history/m4-plan.md` Step 5 PR
+    /// `LocalTunnelList`/admin `tunnel.close` (M4 plan Step 5 (2473c88) PR
     /// 5b), which — unlike [`Self::control_hub`] — has no single host
     /// name to look up: `qsh tunnels`/`qsh tunnel close <id>` name no
     /// host at all (`docs/CLI.md` §6.9's own usage examples), so this
@@ -790,7 +790,7 @@ impl Listen {
     /// *current* live registration, generation-matched to each other —
     /// `crate::localctl::daemon`'s `LOCAL_STREAM` serve path needs both:
     /// the hub for `LocalHelloAck`'s fields, the connection to open the
-    /// spliced data stream on (`docs/history/m3-plan.md` Step 7).
+    /// spliced data stream on (M3 plan Step 7 (2473c88)).
     ///
     /// Looking each up independently (a `control_hub` call plus a
     /// separate `conns` lookup) could momentarily pair a hub from one
@@ -830,7 +830,7 @@ impl Listen {
     /// deterministically in tests, `docs/design/testing.md` L2) at
     /// `HUB_WAIT_POLL` — a plain `ConnTable` has no per-name wakeup to
     /// block on instead (this method's own module has no `Notify` keyed by
-    /// registration name), and `docs/history/m3-plan.md` Step 8 (b) sanctions a bounded
+    /// registration name), and M3 plan Step 8 (b) (2473c88) sanctions a bounded
     /// poll as an acceptable substitute for exactly this reason. Gives up
     /// and returns `None` the moment either `deadline` elapses *or* the
     /// name is no longer known to [`Self::registry`] at all (evicted by
@@ -962,7 +962,7 @@ impl Listen {
     ) {
         tokio::pin!(shutdown);
         // See `crate::server::Server::run`'s identical branch for the full
-        // rationale (`docs/history/m8-plan.md` Step 2 verification round, P1-3/F1):
+        // rationale (M8 plan Step 2 (52639fc) verification round, P1-3/F1):
         // bounded-latency admission-audit flush, same window, same
         // `MissedTickBehavior`.
         let mut audit_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);

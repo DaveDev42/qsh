@@ -1,5 +1,5 @@
 //! L5 local-forward acceptance: the **shipped binary** carries bytes from a
-//! local port to a remote destination (`docs/history/m4-plan.md` Step 3 (c), DoD 1).
+//! local port to a remote destination (M4 plan Step 3 (c) (2473c88), DoD 1).
 //!
 //! Everything here runs real processes. A real `qsh serve` is the host, a
 //! real `qsh` is the client — the interactive `qsh [user@]host -L …` form
@@ -24,7 +24,7 @@
 //!
 //! No port is hardcoded: the echo server binds `:0` and the forward's
 //! listen port comes from [`free_port`]. DoD 1's `8080` is illustrative
-//! (`docs/history/m4-plan.md` Step 3 (c): "port 0 bind으로 실제 포트를 얻어"), and the
+//! (M4 plan Step 3 (c) (2473c88): "port 0 bind으로 실제 포트를 얻어"), and the
 //! grammar settled in Step 1 rejects a `0` *listen* port
 //! (`parse_forward_spec`, `1..=65535`), so the spec cannot ask the kernel
 //! for one on a command line — the test picks a free one and passes it
@@ -186,7 +186,7 @@ impl PtyClient {
 // ---------------------------------------------------------------------------
 
 /// A running `qsh tunnel open … --json` child, killed on drop. The
-/// process *is* the tunnel's holder (`docs/history/m4-plan.md` §4.1 #1), so there is no
+/// process *is* the tunnel's holder (M4 plan §4.1 #1 (2473c88)), so there is no
 /// close RPC: killing it is the whole teardown.
 struct TunnelGuard {
     child: Child,
@@ -305,7 +305,7 @@ fn forward_audit(host: &Sandbox, action: &str, resource: &str, want: usize) -> V
 /// **DoD 1 (local leg).** `qsh [user@]host -L <lport>:127.0.0.1:<echo>`
 /// under a real terminal: a TCP write to the local port reaches the
 /// destination on the host and comes back, while the shell on the same
-/// connection keeps working (`docs/history/m4-plan.md` Step 3 (c) L5, `docs/PRD.md`
+/// connection keeps working (M4 plan Step 3 (c) (2473c88) L5, `docs/PRD.md`
 /// §131-135).
 #[test]
 fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
@@ -368,7 +368,7 @@ fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
 /// under a real terminal: `-R`'s mirror image of the test above — a TCP
 /// write to the **host's** bound port reaches the destination back on
 /// *this* machine and comes back, while the shell on the same connection
-/// keeps working (`docs/history/m4-plan.md` Step 4 (c) L5, `docs/design/protocol.md`
+/// keeps working (M4 plan Step 4 (c) (2473c88) L5, `docs/design/protocol.md`
 /// §7).
 #[test]
 fn the_interactive_form_forwards_a_remote_port_back_to_the_requesters_destination() {
@@ -444,7 +444,7 @@ fn the_interactive_form_forwards_a_remote_port_back_to_the_requesters_destinatio
 
 /// `qsh tunnel open host --local … --json`: one envelope naming the bound
 /// address, then the process holds the tunnel open (`docs/CLI.md` §6.9,
-/// `docs/history/m4-plan.md` §4.1 #1).
+/// M4 plan §4.1 #1 (2473c88)).
 #[test]
 fn tunnel_open_reports_the_bound_forward_and_holds_it() {
     let fleet = Fleet::start();
@@ -487,7 +487,7 @@ fn tunnel_open_reports_the_bound_forward_and_holds_it() {
 }
 
 /// `qsh tunnel open host --remote … --json`: `-R`'s mirror image of the
-/// test above (`docs/history/m4-plan.md` Step 4). The host binds `rport` on its own
+/// test above (M4 plan Step 4 (2473c88)). The host binds `rport` on its own
 /// loopback and forwards each connection it accepts back to the
 /// *requester* — this test process — as a `TCP_ACCEPTED` stream; the
 /// requester leg then dials `127.0.0.1:<echo>` itself and splices
@@ -595,7 +595,7 @@ fn a_forward_to_a_dead_destination_delivers_nothing_and_survives() {
 // ---------------------------------------------------------------------------
 
 /// A non-loopback bind is refused before anything exists: no session on
-/// the host, no listener locally (`docs/history/m4-plan.md` §4.1 #3, `docs/PRD.md` §9
+/// the host, no listener locally (M4 plan §4.1 #3 (2473c88), `docs/PRD.md` §9
 /// "no resource before authorization").
 #[test]
 fn a_non_loopback_bind_is_refused_before_a_session_exists() {

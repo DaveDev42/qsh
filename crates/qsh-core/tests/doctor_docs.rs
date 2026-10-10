@@ -1,5 +1,5 @@
 //! Doc-prose == code-constant anti-drift gate for
-//! [`qsh_core::doctor::CONTROLLER_UNREACHABLE`] (`docs/history/m3-plan.md` Step 9 (c)).
+//! [`qsh_core::doctor::CONTROLLER_UNREACHABLE`] (M3 plan Step 9 (c) (2473c88)).
 //!
 //! `README.md`, `docs/CLI.md`, and `docs/PRD.md` each quote this
 //! diagnostic's `message`/`remedy` verbatim rather than paraphrasing it —
@@ -13,7 +13,7 @@
 //! Deliberately has no `#[cfg(unix)]` anywhere — the diagnostic is pure
 //! data (`doctor.rs`'s own module docs) and every doc file it must appear
 //! in is plain text, so this runs on the Windows CI leg too
-//! (`docs/history/m3-plan.md` Step 9 (d)).
+//! (M3 plan Step 9 (d) (2473c88)).
 
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{ACL_CA_AUTH_PATH_MISSING, CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
@@ -62,7 +62,7 @@ fn prd_md_quotes_the_controller_unreachable_diagnostic_verbatim() {
 }
 
 // -----------------------------------------------------------------------
-// M7 Step 6 doctor diagnostics (verify round P2-5, `docs/history/m7-plan.md` §4.1
+// M7 Step 6 doctor diagnostics (verify round P2-5, M7 plan §4.1 (69dd788)
 // L98's completeness gate). Only the two new-in-M7 diagnostics
 // `docs/CLI.md` §6.17's own JSON example already quotes verbatim
 // (`TRUST_REMOVE_SCOPE` and `CERT_EXPIRING_SOON`) get a drift gate here —
@@ -70,7 +70,7 @@ fn prd_md_quotes_the_controller_unreachable_diagnostic_verbatim() {
 // paraphrase, not quoted verbatim anywhere in the docs today, so asserting
 // verbatim substring containment for them would fail against current
 // (accurate, just not verbatim) prose rather than catch real drift.
-// README.md is deliberately excluded (main-session decision, `docs/history/m7-plan.md`
+// README.md is deliberately excluded (main-session decision, the M7 plan (69dd788)
 // M7 Step 6 verify-round note): its "Known limitations" section
 // paraphrases these two rather than quoting them.
 // -----------------------------------------------------------------------

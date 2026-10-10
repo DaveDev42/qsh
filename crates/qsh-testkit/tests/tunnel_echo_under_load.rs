@@ -1,4 +1,4 @@
-//! DoD 4 (M4 perf gate, `docs/history/m4-plan.md` Step 7 (b), `docs/design/testing.md`
+//! DoD 4 (M4 perf gate, M4 plan Step 7 (b) (2473c88), `docs/design/testing.md`
 //! L9/L10, `docs/design/protocol.md` §12, `docs/ROADMAP.md` M4 DoD 4,
 //! `docs/PRD.md` §13/§15): a saturating `-L` tunnel transfer runs
 //! *concurrently*, on the **same QUIC connection**, with repeated PTY-echo
@@ -83,13 +83,13 @@
 //! exception to `docs/design/testing.md`'s no-`sleep()` rule (the same one
 //! `reverse_blackout.rs`'s 60s blackout uses) — an active measurement
 //! loop, not a passive wait. `MEASUREMENT_DURATION` (15s) is this step's
-//! "1GB을 시간-유계 등가로 대체" answer (`docs/history/m4-plan.md` §4.2): at this
+//! "1GB을 시간-유계 등가로 대체" answer (M4 plan §4.2 (2473c88)): at this
 //! same-process harness's own measured tunnel throughput
 //! (`tunnel_throughput.rs`), 15s moves several hundred MB — the same
 //! order of magnitude as the literal 1 GiB DoD wording — while stopping
 //! well short of M3's 60s blackout precedent's own budget.
 //!
-//! **Measured evidence (`docs/history/m4-plan.md` Step 7(a)'s "measure-then-fix"
+//! **Measured evidence (M4 plan Step 7(a) (2473c88)'s "measure-then-fix"
 //! obligation on [`qsh_transport::endpoint::TUNNEL_STREAM_RECEIVE_WINDOW`]).**
 //! The round-count-bounded prototype above, pushed to 5,000 rounds, grew
 //! the saturating transfer to 3.3 GiB over 62s and produced p95=18.1ms,
@@ -136,7 +136,7 @@
 //!
 //! Gated identically to `tunnel_throughput.rs`
 //! (`QSH_ACCEPTANCE_SLOW`/`QSH_ACCEPTANCE_STRICT`), but with a single
-//! threshold rather than a strict/smoke split: `docs/history/m4-plan.md` §4.2's draft
+//! threshold rather than a strict/smoke split: M4 plan §4.2 (2473c88)'s draft
 //! margin only carves out a lenient smoke tier for DoD 3's *ratio*. DoD 4's
 //! own threshold (measured RTT + 10ms) is already the "관대한 임계치"
 //! `testing.md` L10 describes for the acceptance job's DoD 4 gate, so a
@@ -418,7 +418,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
          duration={MEASUREMENT_DURATION:?}, flood_bytes={flood_bytes} drained_bytes={drained_bytes}"
     );
     // DoD 4's acceptance-job log is the record of the criterion
-    // (`docs/history/m4-plan.md` Step 7 (d)) — print on success too, not just failure.
+    // (M4 plan Step 7 (d) (2473c88)) — print on success too, not just failure.
     eprintln!("tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms: {report}");
     // `QSH_PERF_OUT`: one line for the nightly trend, written before any
     // assertion so a red run is still recorded. No-op when unset. `rtt_ms`

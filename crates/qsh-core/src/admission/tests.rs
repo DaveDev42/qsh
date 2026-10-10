@@ -23,7 +23,7 @@ fn decision_kind(d: &Decision) -> &'static str {
     }
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — the concurrency cap: the first
+/// M8 plan Step 2 (52639fc) design §8 — the concurrency cap: the first
 /// `max_concurrent_handshakes` validated attempts are all `Admit`ted,
 /// and the next one is `Refuse`d with an `AtCapacity` audit record
 /// while every earlier permit is still held.
@@ -127,7 +127,7 @@ async fn gate_counters_tally_every_decision_branch() {
     assert_eq!(counters.refuse, 1);
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — dropping the permit returned by
+/// M8 plan Step 2 (52639fc) design §8 — dropping the permit returned by
 /// `Admit` (standing in for the handshake resolving, `Decision::Admit`'s
 /// own doc) frees the slot for a later attempt.
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn gate_releases_permit_on_handshake_completion() {
     }
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — an unvalidated source under the
+/// M8 plan Step 2 (52639fc) design §8 — an unvalidated source under the
 /// rate limit is always `Retry`d (never audited); once it exceeds
 /// `rate_per_source * 2` (burst) within one epoch it is `Ignore`d
 /// with a `RateLimited` record, and advancing the clock past the next
@@ -194,7 +194,7 @@ async fn gate_throttles_per_source_and_recovers_next_window() {
     }
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — two IPv6 addresses sharing a /64
+/// M8 plan Step 2 (52639fc) design §8 — two IPv6 addresses sharing a /64
 /// share a rate-limit bucket; a different /64 does not.
 #[tokio::test]
 async fn gate_keys_ipv6_by_64_prefix() {
@@ -228,7 +228,7 @@ async fn gate_keys_ipv6_by_64_prefix() {
     ));
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — the sketch's backing storage
+/// M8 plan Step 2 (52639fc) design §8 — the sketch's backing storage
 /// cannot grow no matter how many distinct (forged) source addresses
 /// pass through `decide`. Proxy: pointer identity of the sketch's
 /// backing `Vec`s (see `Gate::sketch_storage_pointers`'s doc for why
@@ -258,7 +258,7 @@ async fn gate_table_is_constant_size_under_forged_cardinality() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — false-positive rate under a flood
+/// M8 plan Step 2 (52639fc) design §8 — false-positive rate under a flood
 /// of forged sources. **Forged cardinality tested at: 5,000** distinct
 /// spoofed sources, each firing once within the same epoch (expected
 /// load ≈ 5000/1024 ≈ 4.9 events per column per row) — chosen as a
@@ -422,7 +422,7 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 verification round, P1-2: pins the L2-before-L3
+/// M8 plan Step 2 (52639fc) verification round, P1-2: pins the L2-before-L3
 /// ordering `Gate::decide`'s own doc claims — an *unvalidated* peer is
 /// never charged against the handshake-concurrency semaphore, even
 /// with the cap already exhausted (`max_concurrent_handshakes = 0`
@@ -466,7 +466,7 @@ async fn unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero() {
     assert_eq!(gate.available_permits(), 0);
 }
 
-/// `docs/history/m8-plan.md` Step 2 verification round, P1-3/F1: pins
+/// M8 plan Step 2 (52639fc) verification round, P1-3/F1: pins
 /// [`Gate::flush_expired`] without any real wall-clock wait —
 /// `Gate` is clock-injected precisely so this doesn't need one.
 /// Reject `n` times (all suppressed after the first), advance the
@@ -526,7 +526,7 @@ async fn gate_flush_expired_emits_exactly_one_summary_after_the_window_closes() 
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 verification round, F2/item 4: pins the
+/// M8 plan Step 2 (52639fc) verification round, F2/item 4: pins the
 /// corrected rate semantics with a `TestClock` and wide margins —
 /// `rate_per_source = 10` ⇒ `burst_limit = 10 * EPOCH.as_secs() = 20`.
 ///
@@ -724,7 +724,7 @@ async fn gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_
     }
 }
 
-/// `docs/history/m8-plan.md` Step 3 P2-3 (design §4.3, U15) — the validated-axis
+/// M8 plan Step 3 (52639fc) P2-3 (design §4.3, U15) — the validated-axis
 /// rate limiter sits *ahead* of the handshake semaphore, exactly the
 /// `AtCapacity` axis's own ordering: an attempt that loses only to
 /// its own rate budget must never dent `available_permits()`.
@@ -819,7 +819,7 @@ fn validated_rate_rejection_never_dips_the_permit_pool_even_transiently() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 3 P2-3 (design §4.3, U16), both directions: the
+/// M8 plan Step 3 (52639fc) P2-3 (design §4.3, U16), both directions: the
 /// two axes are tracked in genuinely independent `Sketch`es, so a
 /// flood on one axis from a given address never spends the other
 /// axis's budget for that same address.
@@ -860,7 +860,7 @@ async fn unvalidated_flood_does_not_consume_a_validated_sources_budget() {
     }
 }
 
-/// `docs/history/m8-plan.md` Step 3 P2-3 (design §4.3, U17) — the validated-axis
+/// M8 plan Step 3 (52639fc) P2-3 (design §4.3, U17) — the validated-axis
 /// sketch's twin of `gate_table_is_constant_size_under_forged_cardinality`:
 /// its backing storage must never reallocate regardless of how many
 /// distinct validated addresses an attacker forges.
@@ -885,7 +885,7 @@ async fn validated_rate_state_is_constant_size_under_forged_cardinality() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 3 P2-3 (design §4.3, U18) — pins the documented
+/// M8 plan Step 3 (52639fc) P2-3 (design §4.3, U18) — pins the documented
 /// default (`[serve].validated_rate_per_source = 10`, `docs/CLI.md`
 /// §6.12): a sustained validated source at exactly the burst ceiling
 /// (20 within one epoch, same `rate × EPOCH.as_secs()` formula as the
@@ -924,7 +924,7 @@ async fn validated_rate_threshold_matches_the_documented_sustained_rate() {
     drop(held_permits);
 }
 
-/// `docs/history/m8-plan.md` Step 3, verdict ruling 10's U18 twin (F3 of the M8
+/// M8 plan Step 3 (52639fc), verdict ruling 10's U18 twin (F3 of the M8
 /// Step 3a conformance sweep — `validated_rate_threshold_matches_
 /// the_documented_sustained_rate` above proves only the validated
 /// axis, at a single instant; the ADR-0010 draft cited it as the
@@ -984,7 +984,7 @@ async fn one_source_dialing_at_a_sustained_rate_passes_both_axes_across_epochs()
     }
 }
 
-/// `docs/history/m8-plan.md` Step 3 P2-3 — the `ValidatedRateLimited` category's
+/// M8 plan Step 3 (52639fc) P2-3 — the `ValidatedRateLimited` category's
 /// audit shares the exact first-row-then-summary aggregation contract
 /// every other `RejectReason` already has
 /// (`gate_flush_expired_emits_exactly_one_summary_after_the_window_closes`'s

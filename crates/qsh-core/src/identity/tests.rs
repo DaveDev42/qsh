@@ -137,7 +137,7 @@ fn auto_falls_back_to_file_when_headless() {
 /// ever touching `device.pem`.
 ///
 /// The temp path now carries a writer-scoped ticket
-/// (`crate::config::write_private_file_io`, `docs/history/m7-plan.md` Step 7-1).
+/// (`crate::config::write_private_file_io`, M7 plan Step 7-1 (69dd788)).
 /// `promote_to_ca_issued` makes exactly two `write_private_file` calls
 /// in a fixed order (cert, then record), so
 /// `next_write_ticket_for_test() + 1` is exactly the record write's
@@ -151,7 +151,7 @@ fn auto_falls_back_to_file_when_headless() {
 /// scheduled sibling test that also calls `write_private_file`/
 /// `write_private_file_io` can steal the predicted ticket out from
 /// under this read, and the assertions below can fail spuriously
-/// (`docs/history/m7-plan.md` Step 7-1 검증 라운드 A1 — this test's sibling in
+/// (M7 plan Step 7-1 (69dd788) 검증 라운드 A1 — this test's sibling in
 /// `crate::ca` was reproduced 3/3 failing this way under `cargo test`;
 /// this one wasn't in that sample, but shares the identical
 /// mechanism). This is a known test-isolation limitation of this

@@ -6,7 +6,7 @@
 //! secret, not the TLS identity).
 //!
 //! Promoted from `crates/qsh-testkit/tests/pairing_loopback.rs`'s private
-//! `PairingHost` (`docs/history/m8-plan.md` Step 4) so a second
+//! `PairingHost` (M8 plan Step 4 (52639fc)) so a second
 //! test file can share it without duplicating the wiring.
 
 use std::net::SocketAddr;

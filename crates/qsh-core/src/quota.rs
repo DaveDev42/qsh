@@ -1,4 +1,4 @@
-//! Resource quotas (`docs/history/m8-plan.md` Step 3, `docs/adr/0010-resource-quotas.md`).
+//! Resource quotas (M8 plan Step 3 (52639fc), `docs/adr/0010-resource-quotas.md`).
 //!
 //! Everything here enforces a *post-authorization* limit — the ACL choke
 //! point has already run by the time any caller reaches this module

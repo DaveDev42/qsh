@@ -1302,7 +1302,7 @@ fn overall_status_is_worst_of_error_warn_ok() {
 }
 
 // -----------------------------------------------------------------
-// config_unknown_key (`docs/history/m8-plan.md` Step 4b, J10).
+// config_unknown_key (M8 plan Step 4b (52639fc), J10).
 // -----------------------------------------------------------------
 
 fn config_unknown_key_findings(ops: &Ops) -> Vec<DoctorFinding> {

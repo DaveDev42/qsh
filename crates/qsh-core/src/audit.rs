@@ -6,7 +6,7 @@
 //! not a discipline. Adding such a field is a design change (opt-in
 //! `audit.log_argv` is the only sanctioned exception, and it is not in M1).
 //!
-//! **Fail-closed (`docs/history/m5-plan.md` Step 3).** [`AuditSink::record`] returns a
+//! **Fail-closed (M5 plan Step 3 (2473c88)).** [`AuditSink::record`] returns a
 //! [`Result`]: a caller that cannot durably record a decision must not
 //! treat it as allowed. The production sink is [`writer::RotatingAuditSink`]
 //! — a bounded-queue, rotating, degraded-latching writer thread — and the
@@ -35,14 +35,14 @@ pub mod writer;
 
 pub use writer::RotatingAuditSink;
 
-/// `docs/history/m5-plan.md` Step 3, F2: how long [`wait_for_sole_owner`] gives a
+/// M5 plan Step 3 (2473c88), F2: how long [`wait_for_sole_owner`] gives a
 /// straggling `Arc` clone to drop before giving up. Generous enough for a
 /// detached per-connection task to finish unwinding, finite enough to
 /// never meaningfully delay process shutdown.
 pub const AUDIT_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// Bounded, best-effort wait for `arc` to become the sole owner of its
-/// value before the caller drops its own clone (`docs/history/m5-plan.md` Step 3, F2).
+/// value before the caller drops its own clone (M5 plan Step 3 (2473c88), F2).
 ///
 /// `RotatingAuditSink::drop`'s final bounded flush of whatever is still
 /// `pending` only runs once every clone is gone — but neither
@@ -68,7 +68,7 @@ pub async fn wait_for_sole_owner<T: ?Sized>(arc: &Arc<T>, grace: Duration) {
 }
 
 /// Why [`AuditSink::record`] could not accept a record. Exactly two shapes
-/// (`docs/history/m5-plan.md` Step 3): the writer's bounded queue is at capacity, or the
+/// (M5 plan Step 3 (2473c88)): the writer's bounded queue is at capacity, or the
 /// writer is latched degraded after a fatal write failure (disk full,
 /// read-only filesystem, …). Either way the record is not durable, so a
 /// caller gating a privileged operation on it must deny.
@@ -129,7 +129,7 @@ pub struct AuditRecord {
     /// Peer socket address at decision time.
     pub peer_addr: String,
     /// How many *additional* rejections a windowed summary record
-    /// collapses (`docs/history/m8-plan.md` Step 2, ADR-0009) — `None` (and omitted
+    /// collapses (M8 plan Step 2 (52639fc), ADR-0009) — `None` (and omitted
     /// from the JSONL line entirely, `skip_serializing_if`) on every
     /// ordinary record, including the first rejection of a new admission
     /// aggregation window. `Some(n)` only on
@@ -235,7 +235,7 @@ impl AuditRecord {
     }
 
     /// The windowed-summary half of [`AuditRecord::handshake_rejected`]'s
-    /// aggregation (`docs/history/m8-plan.md` Step 2, ADR-0009, `crate::admission::Gate`):
+    /// aggregation (M8 plan Step 2 (52639fc), ADR-0009, `crate::admission::Gate`):
     /// one record per `(category, 10s window)`, standing in for `count`
     /// further rejections in that same category and window that were
     /// suppressed rather than each getting their own line. `peer_addr` is
@@ -259,7 +259,7 @@ impl AuditRecord {
         }
     }
 
-    /// A resource-quota rejection (`crate::quota`, `docs/history/m8-plan.md` Step 3,
+    /// A resource-quota rejection (`crate::quota`, M8 plan Step 3 (52639fc),
     /// `docs/adr/0010-resource-quotas.md`) — the peer was already
     /// authorized (this fires strictly after the ACL choke point, never
     /// before: an unauthorized principal must see `PERMISSION_DENIED`,
@@ -403,7 +403,7 @@ impl AuditRecord {
 /// through `audit`, warning (not failing the caller) if the write itself
 /// fails.
 ///
-/// **The single definition** of this contract (`docs/history/m8-plan.md` Step 2
+/// **The single definition** of this contract (M8 plan Step 2 (52639fc)
 /// verification round, P1-1): `crate::server::Server::admit` and
 /// `crate::reverse::listen::Listen::admit` — the two internet-exposed
 /// accept loops — both call this instead of each keeping its own copy.
@@ -439,7 +439,7 @@ pub(crate) fn write_admission_audit(audit: &dyn AuditSink, records: &[AuditRecor
 
 /// [`write_admission_audit`]'s sibling for resource-quota rejections
 /// ([`AuditRecord::quota_rejected`]/[`AuditRecord::quota_rejected_summary`],
-/// `docs/history/m8-plan.md` Step 3): same sink, same fail-open-on-audit-failure
+/// M8 plan Step 3 (52639fc)): same sink, same fail-open-on-audit-failure
 /// exception (the request is already being refused, so a failed enqueue
 /// changes only the diagnostic), same suppression-driven `tracing::warn!`
 /// volume — but its own wording, because a quota rejection is neither a
@@ -474,7 +474,7 @@ pub(crate) fn write_quota_audit(audit: &dyn AuditSink, records: &[AuditRecord]) 
 /// Where audit lines go. Implementations must never block the caller for
 /// long and must never panic on I/O errors. A failure is not logged and
 /// swallowed: it is returned, and every privileged-operation choke point
-/// treats it as a denial (`docs/history/m5-plan.md` Step 3 — this is the audit
+/// treats it as a denial (M5 plan Step 3 (2473c88) — this is the audit
 /// fail-closed policy `docs/design/architecture.md` §6 documents).
 pub trait AuditSink: Send + Sync + 'static {
     /// Append one record. `Err` means the record is not durable — the
@@ -490,7 +490,7 @@ pub trait AuditSink: Send + Sync + 'static {
 /// reported as [`AuditError::Degraded`], never silently dropped. Every
 /// production choke point uses [`RotatingAuditSink`] instead (`qsh serve`/
 /// `qsh reverse` via `serve::host_runtime`, and `qsh listen`'s controller
-/// as of `docs/history/m5-plan.md` Step 3 F7) — this stays as the simplest-possible
+/// as of M5 plan Step 3 (2473c88) F7) — this stays as the simplest-possible
 /// sink for callers that just want one, mainly this crate's own tests.
 /// Creates the parent directory (0700) and the file (0600) on first use.
 #[derive(Debug)]
@@ -610,7 +610,7 @@ impl AuditSink for NullAuditSink {
 }
 
 /// Deterministic test double that fails every `record()` call on demand
-/// (`docs/history/m5-plan.md` Step 3's disk-full fail-closed tests) — an ENOSPC-class
+/// (M5 plan Step 3 (2473c88)'s disk-full fail-closed tests) — an ENOSPC-class
 /// failure without touching a real filesystem or the bounded-queue/writer
 /// machinery [`RotatingAuditSink`] actually uses. `#[cfg(test)]` and
 /// `pub(crate)`: it is a correctness fixture, never a production sink, but
@@ -638,7 +638,7 @@ impl FailingAuditSink {
     }
 
     /// Stop failing — later `record()` calls succeed again. The latch is
-    /// not permanent (`docs/history/m5-plan.md` §4.2's "다음 성공적 쓰기" recovery rule);
+    /// not permanent (M5 plan §4.2 (2473c88)'s "다음 성공적 쓰기" recovery rule);
     /// this is the test-side equivalent of that recovery.
     pub(crate) fn clear(&self) {
         self.failing

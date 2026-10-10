@@ -140,7 +140,7 @@ impl Paths {
     }
 
     /// `<config_dir>/hosts.toml` — the host profile address book
-    /// (`docs/design/architecture.md` §7, `docs/history/m7-plan.md` Step 3,
+    /// (`docs/design/architecture.md` §7, M7 plan Step 3 (69dd788),
     /// `crate::hosts::HostsFile`). Read-only in M7: no CLI command writes
     /// this path.
     pub fn hosts_file(&self) -> PathBuf {
@@ -166,7 +166,7 @@ impl Paths {
     }
 
     /// `<config_dir>/ca` — the private CA's root cert + key
-    /// (`docs/adr/0008-private-ca-cert-issuance.md` §4, `docs/history/m7-plan.md` Step
+    /// (`docs/adr/0008-private-ca-cert-issuance.md` §4, the M7 plan (69dd788) Step
     /// 5). Deliberately separate from [`Paths::identity_dir`]: this
     /// device's own identity and its issuance authority (if any) are
     /// different threats and belong in different directories.
@@ -296,7 +296,7 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), OpError> {
 /// racing the write itself or resetting shared state — `ca::init`'s and
 /// `identity::promote_to_ca_issued`'s `*_recovers_from_an_interrupted_*_write`
 /// tests block a specific temp path with a directory to force that write to
-/// fail. Forwards to [`crate::fsutil`]'s shared ticket counter (`docs/history/m7-plan.md`
+/// fail. Forwards to [`crate::fsutil`]'s shared ticket counter (the M7 plan (69dd788)
 /// M7 Step 7-2 carryover (iv)) — this crate's other durable writer
 /// (`resume::write_durably`) draws from the exact same counter now, not a
 /// second one of its own, so this prediction is unaffected by which of
@@ -308,7 +308,7 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), OpError> {
 /// thread-parallel execution, any other test scheduled at the same time
 /// that also writes a private file can consume a ticket between this read
 /// and the write it's predicting for, making the caller's prediction
-/// wrong (`docs/history/m7-plan.md` Step 7-1 검증 라운드 A1, reproduced). Callers of
+/// wrong (M7 plan Step 7-1 (69dd788) 검증 라운드 A1, reproduced). Callers of
 /// this function carry the same caveat in their own doc comments.
 #[cfg(test)]
 pub(crate) fn next_write_ticket_for_test() -> u64 {
@@ -343,7 +343,7 @@ pub(crate) fn lock_path_for(path: &Path) -> PathBuf {
 
 /// An exclusive advisory lock held for the duration of one
 /// read-modify-write, on **every** platform — promoted from
-/// `crate::resume` (`docs/history/m7-plan.md` Step 7-1 brief §4) so `trust.toml`,
+/// `crate::resume` (M7 plan Step 7-1 (69dd788) brief §4) so `trust.toml`,
 /// `invites.toml` and the CA root's key+cert pair share the same
 /// mechanism `resume.json` already relies on, instead of each config file
 /// re-deriving its own.
@@ -442,7 +442,7 @@ pub struct Config {
     /// `[reverse]` — reverse-mode target settings (`qsh reverse`).
     pub reverse: ReverseConfig,
     /// `[audit]` — audit log lifecycle settings (rotation, retention, async
-    /// writer queue depth; `docs/design/architecture.md` §7, `docs/history/m5-plan.md`
+    /// writer queue depth; `docs/design/architecture.md` §7, the M5 plan (2473c88)
     /// Step 1). No `[acl]` section exists — policy lives in the separate
     /// `acl.toml` file, not `config.toml` (same file/`Config` split
     /// `trust.toml` already has).
@@ -492,13 +492,13 @@ pub struct ServeConfig {
     pub close_grace_ms: Option<u64>,
     /// Upper bound on connections concurrently *in handshake* — from
     /// admission through `Incoming::accept()` resolving, released before
-    /// `serve_connection` (`crate::admission::Gate`, `docs/history/m8-plan.md` Step 2,
+    /// `serve_connection` (`crate::admission::Gate`, M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`). Unset or `0` ⇒
     /// [`ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES`] (64) — same "0
     /// degrades to default, never unlimited" discipline as
     /// [`ServeConfig::replay_bytes`]: this defense has no off switch.
     /// `[listen]` has no key of its own — `Listen::run` reads this same
-    /// value (design arbitration, `docs/history/m8-plan.md` Step 2).
+    /// value (design arbitration, M8 plan Step 2 (52639fc)).
     pub max_concurrent_handshakes: Option<usize>,
     /// Per-source rate limit on address-*unvalidated* Initials, in new
     /// attempts per second (key: IPv4 /32, IPv6 /64; burst 2x, not
@@ -507,7 +507,7 @@ pub struct ServeConfig {
     /// no-off-switch discipline as `max_concurrent_handshakes`.
     pub handshake_rate_per_source: Option<u32>,
     /// Global cap on live (not closed) sessions across all principals
-    /// (`crate::quota`, `docs/history/m8-plan.md` Step 3, `docs/adr/0010-resource-
+    /// (`crate::quota`, M8 plan Step 3 (52639fc), `docs/adr/0010-resource-
     /// quotas.md`). Derived from the broker registry, not a separate
     /// counter (`docs/design/architecture.md` §1). Unset or `0` ⇒
     /// [`ServeConfig::DEFAULT_MAX_SESSIONS`] (256) — same no-off-switch
@@ -576,14 +576,14 @@ impl ServeConfig {
     pub const DEFAULT_RESUME_TTL_SECS: u64 = 24 * 60 * 60;
     /// Default close escalation grace: 5 seconds (`docs/CLI.md` §6.7).
     pub const DEFAULT_CLOSE_GRACE_MS: u64 = 5000;
-    /// Default handshake concurrency cap: 64 (`docs/history/m8-plan.md` Step 2 — the
+    /// Default handshake concurrency cap: 64 (M8 plan Step 2 (52639fc) — the
     /// same magnitude as `localctl::daemon::MAX_CONCURRENT_LOCALCTL_HANDSHAKES`,
     /// so the codebase tells one story about this class of bound).
     pub const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 64;
-    /// Default per-source unvalidated-Initial rate: 10/s (`docs/history/m8-plan.md`
+    /// Default per-source unvalidated-Initial rate: 10/s (the M8 plan (52639fc)
     /// Step 2).
     pub const DEFAULT_HANDSHAKE_RATE_PER_SOURCE: u32 = 10;
-    /// Default global live-session cap: 256 (`docs/history/m8-plan.md` Step 3,
+    /// Default global live-session cap: 256 (M8 plan Step 3 (52639fc),
     /// `docs/adr/0010-resource-quotas.md`).
     pub const DEFAULT_MAX_SESSIONS: usize = 256;
     /// Default per-principal live-session cap: 32.
@@ -609,7 +609,7 @@ impl ServeConfig {
     /// would then arrive already validated, skipping Retry, and this axis
     /// becomes the only gate on that path.
     pub const DEFAULT_VALIDATED_RATE_PER_SOURCE: u32 = 10;
-    /// Default host-wide concurrent-`exec.run` cap: 256 (`docs/history/m8-plan.md` Step
+    /// Default host-wide concurrent-`exec.run` cap: 256 (the M8 plan (52639fc) Step
     /// 3b, `docs/adr/0010-resource-quotas.md`).
     pub const DEFAULT_MAX_EXEC: usize = 256;
     /// Default per-principal concurrent tunnel-stream cap: 256.
@@ -762,7 +762,7 @@ pub struct IdentityConfig {
 }
 
 /// `[audit]` section — audit log lifecycle (`docs/design/architecture.md`
-/// §6/§7, `docs/history/m5-plan.md` Step 1/3). `crate::serve::host_runtime` reads these
+/// §6/§7, M5 plan Step 1 (2473c88)/3). `crate::serve::host_runtime` reads these
 /// values to build the rotating, bounded-queue writer
 /// (`crate::audit::RotatingAuditSink::spawn`): `max_bytes`/`retain` govern
 /// its rotation and retention, `queue_depth` its backpressure bound.
@@ -786,7 +786,7 @@ pub struct AuditConfig {
 
 impl AuditConfig {
     /// Default rotation trigger: 64 MiB (`docs/design/architecture.md` §7,
-    /// `docs/history/m5-plan.md` §4.2).
+    /// M5 plan §4.2 (2473c88)).
     pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
     /// Default retained rotated files: 5.
     pub const DEFAULT_RETAIN: u32 = 5;
@@ -828,7 +828,7 @@ impl AuditConfig {
 /// `[listen]` section — `qsh listen`, the reverse-mode controller
 /// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2/§11-4).
 ///
-/// `docs/history/m3-plan.md` Step 3 PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
+/// M3 plan Step 3 (2473c88) PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
 /// `stale_retention`, read by [`crate::reverse::listen::Listen`]'s stale-eviction
 /// sweeper (`crates/qsh-core/src/reverse/listen.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -917,8 +917,8 @@ impl ListenConfig {
 /// `[reverse]` section — `qsh reverse <controller>`, the reverse-mode
 /// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2, §11-4).
 ///
-/// `docs/history/m3-plan.md` Step 3 PR 3a wired `offered_name` only — `controller` parses
-/// but is not read by any code path (see its own field doc). `docs/history/m3-plan.md`
+/// M3 plan Step 3 (2473c88) PR 3a wired `offered_name` only — `controller` parses
+/// but is not read by any code path (see its own field doc). The M3 plan (2473c88)
 /// Step 4 adds the backoff knobs below, read by the reconnect loop in
 /// `reverse::target::run_reverse`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

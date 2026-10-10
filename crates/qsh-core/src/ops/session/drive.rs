@@ -31,7 +31,7 @@ fn spawn_watchdog(
 }
 
 /// Drive one attach for its whole life, across as many connections as it
-/// takes (`docs/design/protocol.md` §2, §10; `docs/history/m2-plan.md` Step 7 (a)).
+/// takes (`docs/design/protocol.md` §2, §10; M2 plan Step 7 (a) (2473c88)).
 ///
 /// Each *leg* is one connection's worth of attach: a data stream, a control
 /// stream, and a watchdog asking whether the path still carries packets. A
@@ -205,7 +205,7 @@ pub(super) async fn drive_attach(
                     // here — a typed error rather than `unreachable!()` so
                     // a future `Reconnect` implementation that breaks that
                     // invariant fails closed instead of panicking
-                    // (`docs/design/testing.md`; `docs/history/m3-plan.md` Step 8's
+                    // (`docs/design/testing.md`; M3 plan Step 8 (2473c88)'s
                     // "recovery == migrated must be impossible on the
                     // reverse leg").
                     let _ = events

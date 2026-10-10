@@ -1,9 +1,9 @@
-//! `docs/history/m5-plan.md` Step 6 (PR 6a): the enforcement flip, exercised against the
+//! M5 plan Step 6 (2473c88) (PR 6a): the enforcement flip, exercised against the
 //! real `qsh` binary. `crates/qsh-core/src/serve.rs`'s `host_runtime` and
 //! `crates/qsh-core/src/reverse/listen.rs`'s controller both now build their
 //! `Authorizer` from `acl.toml` (`qsh_core::acl::load_or_deny`) instead of
 //! the M1–M4 interim `AllowAllPinned` — these are the owed L2/L3/L5 tests
-//! `docs/history/m5-plan.md` (c) lists for that flip, minus (4) the CA-path round trip
+//! The M5 plan (2473c88) (c) lists for that flip, minus (4) the CA-path round trip
 //! (`crates/qsh-core/src/acl/load.rs`'s own `load_or_deny_*` tests: no CA
 //! issuance harness exists at the real-binary level yet — private CA is M6
 //! scope, `crates/qsh-core/src/trust/mod.rs`'s own doc) and (6) the file-
@@ -287,7 +287,7 @@ fn listen_without_acl_toml_denies_every_reverse_registration() {
         "a denied registration must never appear in host.list: {hosts:?}"
     );
 
-    // F6 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ④): the controller's own
+    // F6 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): the controller's own
     // startup diagnostic — deleting the `on_policy_diagnostic` call
     // entirely in `crates/qsh-core/src/reverse/listen.rs`'s `run_listen`
     // still left every test in this file green before this assertion

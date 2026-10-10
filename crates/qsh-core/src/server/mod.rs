@@ -261,7 +261,7 @@ impl ConnCtx {
 
 /// An authorized exec waiting for its data stream.
 ///
-/// Not [`Clone`] (as of `docs/history/m8-plan.md` Step 3): [`Self::permit`] is an RAII
+/// Not [`Clone`] (as of M8 plan Step 3 (52639fc)): [`Self::permit`] is an RAII
 /// reservation ([`crate::quota::ExecPermit`]), and nothing in this crate
 /// ever actually clones a [`Ticket`]/[`TicketPurpose`]/`PendingExec`
 /// (confirmed by grep before dropping the derive) — cloning one would
@@ -368,7 +368,7 @@ pub enum ServerError {
 }
 
 /// One live remote-forward listener, everything [`Server::handle_rfwd_close`]
-/// and [`Server::purge_connection`] need about it (`docs/history/m5-plan.md` Step 5 (a)
+/// and [`Server::purge_connection`] need about it (M5 plan Step 5 (a) (2473c88)
 /// restructured this from a `conn_id`-first nested map — see
 /// [`Server::remote_forwards`]'s own doc for why).
 struct RemoteForwardEntry {
@@ -379,7 +379,7 @@ struct RemoteForwardEntry {
     conn_id: usize,
     /// The opening principal's [`opener_key`] — the ACL ownership axis
     /// [`Server::handle_rfwd_close`] checks. Principal-based, not
-    /// `conn_id`-based (`docs/history/m5-plan.md` Step 5 §4.2, `docs/CLI.md` §2.5's
+    /// `conn_id`-based (M5 plan Step 5 §4.2 (2473c88), `docs/CLI.md` §2.5's
     /// "소유 peer" wording taken literally) — but *not* because a forward
     /// outlives its opening connection: it does not. [`Server::
     /// purge_connection`] tears down every forward its `conn_id` (above)
@@ -459,7 +459,7 @@ pub struct Server {
     device_name: String,
     tickets: Mutex<HashMap<[u8; TICKET_LEN], Ticket>>,
     /// Live remote-forward listeners, keyed by `forward_id` — flat, not
-    /// nested under the owning connection's `conn_id`, since `docs/history/m5-plan.md`
+    /// nested under the owning connection's `conn_id`, since the M5 plan (2473c88)
     /// Step 5 made forward ownership principal-based rather than
     /// connection-based (`RemoteForwardEntry::owner`'s own doc): a
     /// `conn_id`-first map could only ever express "this connection's own
@@ -471,7 +471,7 @@ pub struct Server {
     /// choke point (`Server::authorize_owned`), and only then removes it;
     /// [`Server::purge_connection`] instead filters by
     /// `RemoteForwardEntry::conn_id`, its own, connection-bound axis
-    /// (`docs/history/m4-plan.md` Step 4's "`RemoteForwardClose{forward_id}` 또는 연결
+    /// (M4 plan Step 4 (2473c88)'s "`RemoteForwardClose{forward_id}` 또는 연결
     /// 종료 시 리스너를 닫는다").
     remote_forwards: Mutex<HashMap<String, RemoteForwardEntry>>,
     /// Set once by [`Server::drain`] (SIGTERM, `docs/CLI.md` §6.12,
@@ -511,7 +511,7 @@ pub struct Server {
     /// dropped — best-effort, like every other operator diagnostic this
     /// crate emits.
     notice_sink: OnceLock<NoticeSink>,
-    /// L2-L3 of the L0-L5 admission ordering (`docs/history/m8-plan.md` Step 2,
+    /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
     /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
     /// Defaulted to `crate::config::ServeConfig`'s own defaults by
@@ -519,7 +519,7 @@ pub struct Server {
     /// builds one from the operator's actual config via
     /// [`Server::with_admission`].
     admission: crate::admission::Gate,
-    /// Post-authorization resource quotas (`docs/history/m8-plan.md` Step 3, `docs/adr/
+    /// Post-authorization resource quotas (M8 plan Step 3 (52639fc), `docs/adr/
     /// 0010-resource-quotas.md`) — the `exec.run` concurrency reservation
     /// ([`Self::handle_exec_start`]) plus the shared audit-aggregation
     /// windows for every [`crate::quota::QuotaKind`], including the
@@ -629,7 +629,7 @@ impl Server {
     /// [`Server::new`] plus an explicit [`crate::admission::Gate`] —
     /// `crate::serve::run_serve` uses this to build the gate from the
     /// operator's actual `[serve].max_concurrent_handshakes`/
-    /// `handshake_rate_per_source` (`docs/history/m8-plan.md` Step 2) instead of the
+    /// `handshake_rate_per_source` (M8 plan Step 2 (52639fc)) instead of the
     /// hardcoded defaults `Server::new` uses. A separate constructor
     /// rather than a config-file parameter on `Server::new` itself: every
     /// other call site (a dozen across `qsh-core`/`qsh-testkit`) has no
@@ -655,7 +655,7 @@ impl Server {
     /// [`Server::with_admission`] plus explicit [`crate::quota::Quotas`] —
     /// `crate::serve::host_runtime` uses this to build the quota tracker
     /// from the operator's actual `[serve].max_sessions`/
-    /// `max_sessions_per_principal`/`max_exec_per_principal` (`docs/history/m8-plan.md`
+    /// `max_sessions_per_principal`/`max_exec_per_principal` (the M8 plan (52639fc)
     /// Step 3) instead of [`crate::quota::QuotaLimits::default`]. A
     /// separate constructor for the same reason [`Server::with_admission`]
     /// itself is one and not a parameter on [`Server::new`]: every other
@@ -908,7 +908,7 @@ impl Server {
     }
 
     /// The connection is gone: drop every ticket issued to it, abort every
-    /// remote-forward listener it opened (`docs/history/m4-plan.md` Step 4's
+    /// remote-forward listener it opened (M4 plan Step 4 (2473c88)'s
     /// connection-bound lifetime — see `Server::remote_forwards`'s own
     /// doc), and release every writer lease it held. Sessions (and their
     /// children) survive — that is the point of the broker
@@ -1051,7 +1051,7 @@ impl Server {
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
-        // Bounded-latency admission-audit flush (`docs/history/m8-plan.md` Step 2
+        // Bounded-latency admission-audit flush (M8 plan Step 2 (52639fc)
         // verification round, P1-3/F1): a flood that stops still gets its
         // last (possibly partial) aggregation window's summary within one
         // more tick, instead of only ever flushing lazily on the *next*
@@ -1087,7 +1087,7 @@ impl Server {
                     let records = self.admission.flush_expired(self.admission.now());
                     crate::audit::write_admission_audit(self.audit.as_ref(), &records);
                     // Same bounded-latency rationale, for the quota
-                    // rejection windows (`docs/history/m8-plan.md` Step 3, `docs/adr/
+                    // rejection windows (M8 plan Step 3 (52639fc), `docs/adr/
                     // 0010-resource-quotas.md` §2.4): a flood that has
                     // already stopped still gets its last window's summary
                     // within one more tick instead of only on the next
@@ -1115,7 +1115,7 @@ impl Server {
         listener.endpoint().wait_idle().await;
     }
 
-    /// L2-L4 of the L0-L5 admission ordering (`docs/history/m8-plan.md` Step 2,
+    /// L2-L4 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`): consult [`Self::admission`]
     /// synchronously (`crate::admission::Gate::decide` never awaits) and
     /// dispatch the `Incoming` accordingly, *before* spawning anything.
@@ -1358,7 +1358,7 @@ impl Server {
             // A forward host does not accept registrations — the
             // symmetric-protocol counterpart of `qsh listen` refusing a
             // peer with no `Hello.reverse` at all (`docs/design/
-            // protocol.md` §11-2, `docs/history/m3-plan.md` Step 3). Zero resources:
+            // protocol.md` §11-2, M3 plan Step 3 (2473c88)). Zero resources:
             // this runs inside `respond`'s callback, strictly before any
             // session/ticket/registry state could exist, and the rejection
             // error frame this writes gets the same bounded drain as every
@@ -1397,7 +1397,7 @@ impl Server {
         self.serve_control(conn, ctl, ctx, None).await
     }
 
-    /// Answer a `Principal::Pairing` connection (ADR-0002, `docs/history/m7-plan.md`
+    /// Answer a `Principal::Pairing` connection (ADR-0002, the M7 plan (69dd788)
     /// Step 4): verify the initiator's proof against this host's own
     /// invite store, and — only once that verification succeeds — pin the
     /// initiator into `trust.toml` via the same
@@ -1413,7 +1413,7 @@ impl Server {
     /// could accidentally bypass.
     ///
     /// Unlike `trust add`'s own deliberate silent no-op on a name collision
-    /// (`TrustStore::add_peer`'s own doc, `docs/history/m7-plan.md` Step 2 decision B),
+    /// (`TrustStore::add_peer`'s own doc, M7 plan Step 2 (69dd788) decision B),
     /// pairing fails loudly on one (invariant #5): the `try_pin` hook below
     /// returns `false` on a collision, which `crate::pairing::respond` turns
     /// into `PairingError::PinCollision` (`SESSION_CONFLICT`) — and because
@@ -1464,14 +1464,14 @@ impl Server {
             let path = trust.path();
             // Whole load→mutate→save under lock, not just the write —
             // same discipline as `Ops::trust_add`/`trust_remove`
-            // (`TrustStore::lock`'s own doc, `docs/history/m7-plan.md` Step 7-1
+            // (`TrustStore::lock`'s own doc, M7 plan Step 7-1 (69dd788)
             // S1). This closure runs synchronously inside
             // `SharedInviteStore::redeem`, which already holds its
             // cache `RwLock` — that lock is acquired first, this one
             // second, matching `TrustStore::lock`'s required order.
             // Blocking here (a `flock` wait, then a small TOML
             // rewrite) briefly parks the current tokio worker thread;
-            // see `docs/history/m7-plan.md` Step 7-1's report for why that is
+            // see M7 plan Step 7-1 (69dd788)'s report for why that is
             // accepted rather than moved to `spawn_blocking`.
             let _lock = match crate::trust::TrustStore::lock(path) {
                 Ok(lock) => lock,
@@ -1565,13 +1565,13 @@ impl Server {
     /// [`crate::handshake::initiate`] with the *host* role instead of
     /// [`crate::handshake::respond`]), and `qsh-testkit`'s role-swapped
     /// connected-pair harness (`crates/qsh-testkit/src/reverse.rs`'s
-    /// `ReversePairHarness`, `docs/history/m3-plan.md` Step 3 PR 3b's role-axis-
+    /// `ReversePairHarness`, M3 plan Step 3 (2473c88) PR 3b's role-axis-
     /// independence proof), which needs this reachable from outside the
     /// crate — hence `pub`, not `pub(crate)`.
     ///
     /// `probe`, when `Some`, wires this connection's own outbound liveness
     /// `Ping`/`Pong` correlation (`docs/design/protocol.md` §10/§11-4,
-    /// `docs/history/m3-plan.md` Step 4 "target 재접속"): a [`ControlPinger`] is built
+    /// M3 plan Step 4 (2473c88) "target 재접속"): a [`ControlPinger`] is built
     /// from the given [`crate::client::pathwatch::PathWatch`] over this
     /// call's own `reply_tx` (so a probe queues behind whatever this
     /// connection is already sending, exactly like every other reply —
@@ -1943,7 +1943,7 @@ async fn run_remote_forward_accept_loop<F: std::future::Future<Output = ()>>(
     }
 }
 
-/// The `BrokerError` → `ErrorCode` table (docs/history/m2-plan.md Step 2 handoff): the
+/// The `BrokerError` → `ErrorCode` table (M2 plan Step 2 (2473c88) handoff): the
 /// broker never names the CLI vocabulary; the dispatch edge does.
 fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
     let (code, retryable) = match &err {
@@ -1964,7 +1964,7 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
         BrokerError::Spawn(_) | BrokerError::Io(_) | BrokerError::Gone => {
             (ErrorCode::Internal, false)
         }
-        // A session quota was saturated (`docs/history/m8-plan.md` Step 3, `docs/adr/
+        // A session quota was saturated (M8 plan Step 3 (52639fc), `docs/adr/
         // 0010-resource-quotas.md`): retryable, unlike `Draining` —
         // retrying against this same process can succeed once some other
         // session closes. Structural message only, no payload.
@@ -2205,7 +2205,7 @@ impl ConnError {
 
 /// Map [`crate::handshake::HelloError`] onto the responder's pre-existing
 /// [`ConnError`] surface, preserving every message exactly as it read
-/// before the handshake exchange moved into `handshake.rs` (docs/history/m3-plan.md Step 2
+/// before the handshake exchange moved into `handshake.rs` (M3 plan Step 2 (2473c88)
 /// (d) — zero observable behavior change).
 fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
     use crate::handshake::HelloError;
@@ -2234,7 +2234,7 @@ fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
 }
 
 // ---------------------------------------------------------------------
-// Outbound liveness probing (`docs/history/m3-plan.md` Step 4, "target 재접속" Stage A)
+// Outbound liveness probing (M3 plan Step 4 (2473c88), "target 재접속" Stage A)
 // ---------------------------------------------------------------------
 
 /// The host role's counterpart to the client attach's control pump
@@ -2422,7 +2422,7 @@ impl ControlPinger {
     /// the path regardless of whether it was ours) and the message was
     /// reported onward: a `Ping` or an *uncorrelated* `Pong` as bare
     /// liveness — under symmetric probing (both ends of a registered
-    /// connection running their own `PathWatch`, `docs/history/m3-plan.md` Step 4) an
+    /// connection running their own `PathWatch`, M3 plan Step 4 (2473c88)) an
     /// inbound `Ping` this pinger did not send is the *peer's* probe loop
     /// asking the same question back, never real session traffic, so
     /// treating it as activity would re-arm `active_window` on every reply
