@@ -109,7 +109,7 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
    - `FILE_DATA` 스트림은 §5 frame layer(`u32` BE length + prost, `DATA_FRAME_MAX` 64 KiB)를 그대로 쓰고, `data` 한 조각의 상한은 새 상수 `FILE_CHUNK_MAX = 32 KiB`(`crates/qsh-proto/src/wire.rs`)다. 터널처럼 raw bytes로 바꾸지 않는다. 끝 표지(`FileEnd`)와 쓰기 결과를 스트림 안에서 실어야 하고, 32 KiB당 frame 비용은 수 바이트라 처리량에 의미가 없다. 상한을 넘는 `data`, `end` 뒤의 frame, 요청자가 보낸 `result`는 프로토콜 위반이다. 스트림을 `BAD_HEADER`(0x2001)로 reset하고 결정 7의 정리를 한다.
    - `file.read` 스트림: 요청자가 header를 보내면 host는 EOF까지 `data`를 보낸 뒤 `end`를 보내고 `finish()`한다.
    - `file.write` 스트림: 요청자가 header, `data`들, `end`를 보내고 송신 half를 `finish()`한다. host는 결정 10의 검증과 결정 7의 교체를 끝낸 뒤 `result` 하나를 보내고 `finish()`한다. 거부 teardown은 `TCP_CONNECT`와 같이 결과를 먼저 쓰고 송신 half를 reset하지 않는다(§7).
-   - 이 추가로 `.proto`의 top-level `message`가 49개에서 56개로, `ControlMessage` oneof가 18 branch에서 20 branch로, `Response` oneof가 10 branch에서 12 branch로 는다. §16 발효 전에 착륙하면 같은 커밋에서 §16.1 표의 해당 행을 고친다.
+   - 이 추가로 `.proto`의 top-level `message`가 49개에서 56개로, `ControlMessage` oneof가 18 branch에서 20 branch로, `Response` oneof가 (`error`를 포함해) 10 branch에서 12 branch로 는다. §16 발효 전에 착륙하면 같은 커밋에서 §16.1 표의 해당 행을 고친다.
 
 10. **무결성.** 보내는 쪽은 보낸 바이트 전체의 BLAKE3-256과 총 길이를 `FileEnd`에 싣는다. 받는 쪽은 받은 바이트로 같은 값을 계산하고, 둘 중 하나라도 다르면 실패로 끝낸다(`file.write`는 host가 교체하지 않고 `INVALID_ARGUMENT`, `file.read`는 client가 교체하지 않고 `REMOTE_ERROR`). `file.write`는 `FileWriteOpen.size`와 받은 총 길이도 같아야 하고, `size`를 넘는 바이트가 오면 그 자리에서 끊는다. `FileReadOpened.size`는 열 때의 `fstat` 값으로 안내용이다. 읽는 도중 원본이 바뀌면 `FileEnd`가 실제로 보낸 바이트를 말하고, 그 값이 기준이다. 원본의 일관된 스냅숏은 보장하지 않는다(scp와 같다). TLS가 이미 전송 구간을 인증하므로 이 해시는 구현 결함, 잘린 스트림, 디스크 쓰기 오류를 잡는 끝단 검사다. 성공 envelope에 hex로 실어 사용자가 원본과 대조할 수 있게 한다. BLAKE3를 고르는 이유는 이미 workspace 의존성이라서다(`Cargo.toml`).
 
@@ -196,7 +196,7 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
 ## 결과
 
 - **계약 문서.** `docs/CLI.md` §2.4·§2.5에 행이 늘고, §2.5 끝의 "향후 예약: streaming file copy" 문장이 빠지며, 새 절(`qsh file`)이 결정 2·4·5·17·18을 담는다. §6.12에 quota 키 둘이 는다. `docs/design/protocol.md`는 §4(`file.v1`), §7(`FILE_DATA` 행과 ticket 규칙), §9(`.proto` 발췌), §12(정체 장부 범위), freeze 발효 전이면 §16.1 표가 같은 커밋에서 바뀐다. `docs/design/architecture.md` §7 아래에 "이 트리는 원격 파일 op에서 항상 거부된다"는 한 문장과 결정 5의 집합이 오른다.
-- **ACL 테스트 갱신.** `Action::is_always_denied`가 `forward.socks`만 남긴다. `DENY_SEAMS`에 `file.read`, `file.write` 두 행이 오르고(행 수 고정값 14 → 16), `acl_uniformity.rs`가 두 seam의 문면 균일성을, `acl_registry.rs`가 항상-deny 예외 목록이 `forward.socks` 하나임을, `acl_check_equivalence.rs`가 두 action 행을 단언한다. `acl_docs.rs`의 PRD §9 대조는 바뀌지 않는다.
+- **ACL 테스트 갱신.** `Action::is_always_denied`가 `forward.socks`만 남긴다(`acl/mod.rs`의 `is_always_denied_is_exactly_the_undrivable_trio`가 이 집합을 고정하므로 같이 바꾼다). `DENY_SEAMS`에 `file.read`, `file.write` 두 행이 오르고(`registry.rs`의 `deny_seams_row_names_and_count_are_pinned`가 고정한 행 수 14 → 16), `ALWAYS_DENIED_NO_OP`에서 두 action이 빠져 `forward.socks`만 남으며(`deny_seams_cover_every_action_except_the_always_denied_trio`), `qsh-testkit/tests/acl_uniformity.rs`가 두 seam의 문면 균일성을, `qsh-cli/tests/acl_check_equivalence.rs`가 두 action 행을 단언한다. `acl_docs.rs`의 PRD §9 대조는 바뀌지 않는다.
 - **핀 테스트(이름은 구현 때 확정하되 성질은 이대로).**
   - `file_ops_are_denied_without_a_matching_rule`
   - `file_write_to_state_paths_is_denied_even_with_file_wildcard`: `acl.toml`, `trust.toml`, `identity/device.key`(또는 `device.pem`), `audit.log` 넷과 그 경로를 가리키는 symlink, `..` 이탈 경로에 대해 `PERMISSION_DENIED`이고 파일 바이트가 그대로임을 단언한다
@@ -213,7 +213,7 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
   - `quota_registry.rs`의 두 행, `quota_docs.rs`의 키·기본값 대조
   - `file_copy_echo_under_load`: `tunnel_echo_under_load`와 같은 예산으로 파일 전송 중 PTY echo p95를 잰다(M13 (b) 하네스)
 - **등록 완전성과 fixture.** 두 op의 성공 fixture와 대표 오류 fixture를 `crates/qsh-cli/tests/fixtures/`에 새로 추가하고 `REQUIRED_FIXTURES`에 등재한다(기존 fixture는 건드리지 않는다). `layer_2_every_schema_command_has_all_six_faces`가 두 op을 덮는다. `capabilities.json` golden을 `QSH_UPDATE_FIXTURES=1`로 다시 만들어 `file.v1`이 들어간다. `cargo xtask man`으로 `qsh-file`, `qsh-file-get`, `qsh-file-put` man 페이지가 는다.
-- **fuzz.** 새 control message 둘은 `decode_control`이, `FILE_DATA`는 `decode_stream_header`가 이미 덮는다. data 스트림 message `FileFrame`은 새 타깃 `decode_file_frame`을 받는다(19종 → 20종, `fuzz/README.md`와 `docs/design/protocol.md` §13의 개수 문장 갱신).
+- **fuzz.** 새 control message 둘은 `decode_control`이, `FILE_DATA`는 `decode_stream_header`가 이미 덮는다. data 스트림 message `FileFrame`은 새 타깃 `decode_file_frame`을 받는다(타깃이 하나 늘어난다. 개수 문장은 `fuzz/README.md`와 `docs/design/protocol.md` §13에서 착륙 시점의 실제 타깃 수로 맞춘다. 이 ADR 단독이면 19종 → 20종이지만 ADR-0031도 타깃을 하나 더하므로 순서에 따라 값이 달라진다).
 - **위협 모델.** `docs/design/threat-model.md` §3에 진입점 행 "`Server::dispatch`의 `file.read`/`file.write`와 `FILE_DATA` 스트림"을 더한다. §4에 다음 행을 더한다.
   - B16: `file.write`로 qsh 상태 파일(ACL·trust·audit)을 고쳐 인가를 우회한다 → 결정 5·6, 위 `file_write_to_state_paths_…` 핀
   - B17: symlink, `..`, 성분 교체 경쟁, hard link로 상태 경로 판정을 우회한다 → 결정 6, `state_path_guard_…` 핀

@@ -74,9 +74,9 @@ audit 조회를 로컬로 못 박는 이유는 `acl.check`·`acl.show`와 같다
 
 ## 결과
 
-- 계약 문서: `docs/CLI.md` §2.4·§2.5에 `audit.query`가 오르고, §6.2에 필터 세 개의 서술이 들어가며, `qsh audit`의 새 절(§6.21 이후, 번호는 구현 때)이 서고, 버전 헤더가 갱신된다. `docs/design/threat-model.md`에 새 진입점 행(`qsh audit`, 로컬 읽기, 열거 oracle 방지)과 F2의 필드 전수 테스트 확장이 오른다. `cargo xtask man`으로 `qsh-audit.1`이 생기고 `qsh-sessions.1`이 바뀌며, `checked_in_man_pages_match_the_generator`가 확인한다.
+- 계약 문서: `docs/CLI.md` §2.4·§2.5에 `audit.query`가 오르고, §6.2에 필터 세 개의 서술이 들어가며, `qsh audit`의 새 절(§6.20 뒤에 붙는다. ADR-0029의 `qsh file` 절도 같은 자리를 쓰므로 번호는 착륙 순서대로 구현 때 매긴다)이 서고, 버전 헤더가 갱신된다. `docs/design/threat-model.md`에 새 진입점 행(`qsh audit`, 로컬 읽기, 열거 oracle 방지)과 F2의 필드 전수 테스트 확장이 오른다. `cargo xtask man`으로 `qsh-audit.1`이 생기고 `qsh-sessions.1`이 바뀌며, `checked_in_man_pages_match_the_generator`가 확인한다.
 - 고정할 테스트(이름은 구현 때 확정):
-  - 분류: `crates/qsh-core/tests/op_registration_completeness.rs`와 `acl_registry.rs`가 `audit.query`를 local-only로 분류하고, 프레임 enum에 대응 variant가 없음을 단언한다(M17 DoD (d)).
+  - 분류: `crates/qsh-core/tests/op_registration_completeness.rs`와 `crates/qsh-core/tests/acl_registry.rs`가 `audit.query`를 local-only로 분류하고, 프레임 enum에 대응 variant가 없음을 단언한다(M17 DoD (d)).
   - `audit_query_has_no_wire_message_and_no_localctl_request`, `audit_record_view_fields_equal_audit_record_fields`.
   - `audit_query_reads_active_and_rotated_files_newest_first`, `audit_query_filters_are_and_combined`, `audit_query_limit_above_the_cap_is_invalid_argument`.
   - `audit_query_skips_a_torn_line_and_counts_it_without_echoing_it`, `audit_query_does_not_modify_the_log`(바이트 단위 불변), `audit_query_works_while_the_audit_sink_is_degraded`, `audit_query_writes_no_audit_record`, `audit_query_on_a_missing_log_is_empty_not_an_error`.

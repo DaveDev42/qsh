@@ -67,7 +67,7 @@ argv를 문서와 대조하는 테스트는 이미 있는 장치(`service_docs.r
 - `launchctl bootstrap` 실패 시 `user/<uid>` 도메인으로 대체한다. 기각한다. 도메인이 다르면 LaunchAgent의 수명 모델(로그인 세션 종속)이 달라지고, 그 선택은 로그인 세션 밖 상시 기동으로 이어져 M17 명시적 out과 겹친다.
 - 매니저 호출 전에 `launchctl`/`systemctl` 존재를 `PATH`에서 탐색한다. 기각한다. 현행 코드가 의도적으로 탐색하지 않는 성질("probing for `systemctl`/`launchctl`, ever")을 깨고, 탐색과 호출 사이의 어긋남이 생긴다. spawn의 `NotFound`가 같은 정보를 준다.
 - `systemctl --user enable`만 하고 `--now`는 빼서 재부팅 때 뜨게 한다. 기각한다. `service.md`의 레시피가 `enable --now`이고 `doctor`의 `service_not_registered` 안내가 "등록하라"에서 끝나므로, 사람이 기대하는 상태는 "지금 떠 있다"이다. 둘을 어긋나게 두면 문서-코드 대조 테스트(결정 11)의 기준도 흐려진다.
-- 활성화 전용 audit 레코드를 더한다. 기각한다. 결정 9대로 필드가 없고, 새 action 문자열은 `op_registration_completeness.rs`의 분류를 건드린다. 활성화 사실이 audit에 남아야 한다는 요구가 생기면 `AuditRecord`의 확장을 별도 ADR로 연다.
+- 활성화 전용 audit 레코드를 더한다. 기각한다. 결정 9대로 필드가 없고, audit의 action 문자열은 op의 `COMMAND`(`ServiceInstallOp::COMMAND`)라서 새 action은 새 dotted op를 뜻하고, `docs/CLI.md` §2.4 목록과 `op_registration_completeness.rs`의 분류를 건드린다. 활성화 사실이 audit에 남아야 한다는 요구가 생기면 `AuditRecord`의 확장을 별도 ADR로 연다.
 
 ## 결과
 
@@ -82,6 +82,6 @@ argv를 문서와 대조하는 테스트는 이미 있는 장치(`service_docs.r
   - `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code`, `a_manager_call_past_the_deadline_is_timeout`.
   - `service_md_activation_recipes_match_the_argv_builders`(`crates/qsh-core/tests/service_docs.rs`).
 - fixture: `crates/qsh-cli/tests/fixtures/cli-v1/`에 플래그를 준 호출의 성공 envelope 세 개(`activation`, `deactivation`, `active`)를 append하고 `REQUIRED_FIXTURES`에 등록한다. 기존 service fixture는 바뀌지 않는다. `qsh.cli/v1`은 additive만 쓰고, wire 프로토콜과 `ErrorCode`는 변하지 않는다.
-- `docs/deploy/service.md`가 비활성화 레시피와 `--activate` 안내를 얻는다. `docs/adr/README.md` 목록에 이 ADR이 오르고 ADR-0024 결정 11의 "별도 결정" 문장이 이 ADR을 가리키게 하는 것은 승인 뒤 같은 커밋에서 한다.
+- `docs/deploy/service.md`가 비활성화 레시피와 `--activate` 안내를 얻는다. `docs/adr/README.md` 목록의 이 ADR 상태 열을 `승인됨`으로 고치고 ADR-0024 결정 11의 "별도 결정" 문장이 이 ADR을 가리키게 하는 것은 승인 뒤 같은 커밋에서 한다.
 - 크기는 ADR 0.2ew에 구현 0.3~0.5ew다(`docs/ROADMAP.md` M17 (a)). `ManagerRunner` seam과 플래그 세 개, 필드 세 개, 테스트와 문서 동기화로 구성된다.
 - 이 ADR이 `승인됨`이 되면 M17 (a)의 착수 조건이 풀린다.

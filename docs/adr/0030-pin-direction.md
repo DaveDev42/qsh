@@ -121,7 +121,7 @@ TLS 오류를 미지 peer와 같게 둔 것(결정 5)은 원격 오류와 로컬
   - `TRUST_REQUIRED`의 `details.pinned_as`·`details.pinned_direction`.
   - 기존 fixture는 하나도 고치지 않는다. 결정 2 때문에 방향 없는 호출의 출력이 바이트 단위로 같다. 새 fixture는 `trust.add.direction.json`, `trust.list.direction.json`, `error.TRUST_REQUIRED.direction.json`이고 `REQUIRED_FIXTURES`에 등재한다.
   - `ErrorCode`와 wire(`qsh.wire.v1`)는 바뀌지 않는다.
-  - `docs/CLI.md` §6.11에 `direction` 설명(결정 1의 마지막 문단 포함)과 세 플래그, §6.17 표에 `trust_pin_direction_invalid`를 더한다. §6.11·§6.17 산문의 doctor code 수는 `EXPECTED_DOCTOR_CODES.len()`과 같게 24에서 25로 바꾼다(`doctor_code_counts_named_in_prose`, `cli_md_prose_doctor_code_count_matches_expected_len`).
+  - `docs/CLI.md` §6.11에 `direction` 설명(결정 1의 마지막 문단 포함)과 세 플래그, §6.17 표에 `trust_pin_direction_invalid`를 더한다. §6.11·§6.17 산문의 doctor code 수는 `EXPECTED_DOCTOR_CODES.len()`과 같게 맞춘다(현재 24종에서 하나 늘지만, 다른 ADR이 doctor code를 더하면 최종 수가 달라지므로 착륙 시점의 실제 값을 쓴다)(`doctor_code_counts_named_in_prose`, `cli_md_prose_doctor_code_count_matches_expected_len`).
   - `cargo xtask man`으로 `qsh-trust-add.1`, `qsh-pair-invite.1`, `qsh-pair-accept.1`을 다시 만든다.
 - **문서.** README "One machine, two aliases"(결정 10)와 Known limitations의 다운그레이드 한 줄, `docs/design/protocol.md` §3·§16.2 해석 줄(결정 8), `docs/design/architecture.md`의 trust store 서술(§5·§7)에 `direction` 필드가 더해진다.
 - **크기.** ADR 0.2~0.3ew, 구현 0.8~1.2ew. 구현의 내역은 verifier와 evaluator 0.2, 파일·JSON 필드와 writer 세 갈래 0.3, doctor 둘 0.15, pairing 규칙 0.1, 테스트와 문서 0.2~0.45다. `docs/ROADMAP.md` M16 크기 절의 (a) 구현 칸에 이 값을 적는다.

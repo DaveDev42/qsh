@@ -152,7 +152,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | TCP/TLS fallback (철회, ADR-0043) | doctor가 "UDP 차단"을 보고하는 순간 | 만들지 않는다. transport facade는 남지만 TCP 코드는 0줄이고, doctor 메시지와 README는 "예정"이 아니라 범위 밖이라고 적는다. 다시 열려면 ADR-0043을 개정하는 새 ADR |
 | SOCKS `-D` (M9로 승격, 2026-09-19, [ADR-0019](adr/0019-socks-dynamic-forward.md)) | 스펙 예시에 존재 | M9가 구현했다. `-D`는 CONNECT마다 `forward.local`로 인가된다. `forward.socks` action은 어휘에 남고 여전히 항상 deny다. 이 토큰을 적은 기존 `acl.toml`이 파싱 오류로 전부 거부 상태가 되지 않게 하려는 것이다 |
 | File copy (P1) | `file.read/write` action이 §9에 존재 | action만 정의, op 미등록, capabilities에 미광고. → M15 |
-| Windows (P1 client / P2 host) | 외부 기여 PR | PTY 코드에 `#![cfg(unix)]`. CI는 `windows-latest`에서 build/clippy/portable 테스트만 돌려 컴파일 회귀를 막는다. 지원 약속 아님. README Known limitations에 명시. → M19 / P2 |
+| Windows (P1 client / P2 host) | 외부 기여 PR | PTY 백엔드(`pty/posix.rs`)는 `#[cfg(unix)]`이고 비unix에서 `pty::factory()`가 `UnsupportedFactory`를 돌려준다. CI는 `windows-latest`에서 build/clippy/portable 테스트만 돌려 컴파일 회귀를 막는다. 지원 약속 아님. README Known limitations에 명시. → M19 / P2 |
 | Multi-attach read-only (P2) | broker에서 거의 공짜로 나옴, 그래서 위험 | 관찰자(observer) 개념 자체를 만들지 않는다. writer lease는 P0 필수이고 두 번째 attach 정책은 lease 규칙만 따른다 |
 | Local echo prediction (P2) | mosh 대비 지연 불평 | P0는 실제 PTY 지연을 측정·공개해 데이터로 대화한다(§13의 10ms 예산) |
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). `--relay` flag는 stub조차 없다 |
