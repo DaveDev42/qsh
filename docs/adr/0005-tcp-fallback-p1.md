@@ -1,7 +1,7 @@
 # ADR-0005: TCP/TLS fallback은 P1 유지, transport 추상화는 P0 산출물
 
 날짜: 2026-08-17
-상태: 승인됨
+상태: 승인됨. TCP fallback을 P1에 한다는 부분은 ADR-0043(2026-10-11)이 철회했다
 
 ## 맥락
 

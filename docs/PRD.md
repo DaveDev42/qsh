@@ -159,7 +159,6 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 
 마일스톤 배치는 `docs/ROADMAP.md` §5에 있다.
 
-- UDP가 차단된 환경을 위한 TCP/TLS fallback (M14, ADR-0028)
 - streaming file copy (M15)
 - 인증서 rotation과 revocation UX (M16 (d))
 - Windows client (M19)
@@ -169,6 +168,8 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 
 - SOCKS5 dynamic forwarding — 2026-09-19 사용자 결정(ADR-0019)
 - background service 설치 — ROADMAP M9 (g). `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18). 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 v1 범위 밖이다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알린다
+
+처음 P1에 있었으나 철회한 항목: UDP가 차단된 환경을 위한 TCP/TLS fallback. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다(ADR-0043, 2026-10-11).
 
 ### P2 — 선택 기능
 
@@ -323,7 +324,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 
 | 위험 | 대응 |
 |---|---|
-| 기업망의 UDP 차단 | P1 TCP/TLS fallback과 `qsh doctor` |
+| 기업망의 UDP 차단 | 범위 밖으로 둔다(ADR-0043). `qsh doctor`가 차단을 진단하고 README가 SSH·overlay 우회를 안내한다 |
 | Replay buffer 초과 | 누락 구간 표시, configurable buffer |
 | Shell 권한의 과도한 범위 | 제한 자동화는 별도 `exec.run` 사용 |
 | 역방향 연결을 relay로 오인 | Controller reachability 요구 명시 |
@@ -341,11 +342,11 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - JSON CLI를 canonical programmatic interface로 삼는다.
 - 내장 MCP adapter(`qsh mcp`)는 철회했다(ADR-0011) — 에이전트 연동은 JSON CLI 하나로 통일한다.
 - Relay는 향후 별도 self-hosted/managed 제품으로 개발한다.
-- Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없고, custom frame layer는 P1 TCP fallback과도 동일하게 동작한다.
+- Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없다.
 - Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다. `qsh pair accept`의 `code`는 M9에서 선택 인자가 됐다(ROADMAP M9 (j), ADR-0013 결정 8): TTY면 에코 없는 프롬프트로 받고, 파이프 입력은 `--code-stdin`으로 주며, `--json`/`--jsonl`에서는 프롬프트 없이 `INVALID_ARGUMENT`다. 계약은 `docs/CLI.md` §6.11.
 - Detached PTY 세션은 MVP에서 `qsh serve` 프로세스 내부(in-listener)에 둔다. 단 `SessionBackend` trait와 per-process UDS 제어 소켓 seam을 미리 마련해 P1에서 별도 supervisor로 drop-in 교체 가능하게 한다.
 - Replay buffer는 memory-only ring(세션당 기본 8MB)으로 하며 `ReplayStore` trait 뒤에 격리한다. Encrypted disk spool은 P1 이후 opt-in으로 검토한다.
-- TCP fallback은 P1으로 유지한다. 단 모든 프로토콜 코드를 transport-agnostic framing(`Transport`/`StreamMux` trait) 위에 작성하고, `qsh doctor`의 UDP reachability probe는 P0에 포함한다.
+- TCP fallback은 만들지 않는다(ADR-0043이 ADR-0005의 P1 약속을 철회). 프로토콜 코드는 transport 중립 파사드(`qsh-transport`의 `Connection`/`SendStream`/`RecvStream`) 위에 작성하고, `qsh doctor`의 UDP reachability probe가 차단 망을 진단한다.
 - 제품명과 바이너리는 `qsh`를 유지한다. crates.io 배포 패키지명만 `qsh-cli`로 분리하고 `[[bin]] name = "qsh"`로 바이너리 이름은 그대로 둔다(§16 이름 충돌 위험 참고).
 - MVP에는 user switching이 없다. 원격 셸은 항상 `qsh serve` 계정으로 실행되며 `user@`는 일치 단언(hint)일 뿐이다(§6).
 - `session_ref`는 클라이언트 `Ops`가 조립하고, resume token은 클라이언트 상태 파일에만 두며 JSON에 노출하지 않는다(ADR-0007).
@@ -358,6 +359,6 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - `docs/adr/0002-pairing-invite-code.md` — pairing 기본 UX(일회용 invite code)
 - `docs/adr/0003-sessions-in-listener.md` — detached PTY 세션 위치(in-listener + SessionBackend seam)
 - `docs/adr/0004-replay-buffer-memory-only.md` — replay buffer(memory-only ring)
-- `docs/adr/0005-tcp-fallback-p1.md` — TCP fallback 시점(P1)과 transport 추상화
+- `docs/adr/0005-tcp-fallback-p1.md` — transport 추상화(TCP fallback 시점은 `docs/adr/0043-no-tcp-fallback.md`가 철회)
 - `docs/adr/0006-product-name-and-crate-name.md` — 제품/바이너리 이름과 crates.io 패키지 이름
 - `docs/adr/0007-session-ref-and-resume-token-custody.md` — `session_ref` 조립 주체(클라이언트 `Ops`)와 resume token 보관처(클라이언트 상태 파일, JSON 비노출)

@@ -713,7 +713,7 @@ impl Connection {
     /// stall ledger, traffic hooks).
     ///
     /// Process-global and monotonic, minted when the connection is wrapped
-    /// (`docs/adr/0028-tcp-tls-fallback.md` decision 0), so two connections
+    /// (`docs/adr/0043-no-tcp-fallback.md` decision 3), so two connections
     /// of one process never share an id even when they come from different
     /// listeners or transports and an id is never reused after its
     /// connection closes. (quinn's own `stable_id` is a per-endpoint slab
@@ -827,8 +827,8 @@ enum EndpointBackend {
 ///
 /// A cheap `Clone` handle. It exposes only what callers do with an endpoint
 /// (read its address, wait for its connections to drain, move it to a fresh
-/// local path); the transport behind it is a closed enum, so a TCP backend
-/// is one more variant (`docs/adr/0028-tcp-tls-fallback.md` decision 0).
+/// local path); the transport behind it is a closed enum, so another backend
+/// is one more variant (`docs/adr/0043-no-tcp-fallback.md` decision 3).
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     inner: EndpointBackend,
@@ -875,7 +875,7 @@ impl Endpoint {
     /// dual-stack-v6 handling (`true`, mirroring [`Dialer::dial`]) the
     /// original dial got; a bare bind would silently reset the connection to
     /// whatever the OS grants by default. A backend with no migration
-    /// (TCP) returns [`io::ErrorKind::Unsupported`].
+    /// would return [`io::ErrorKind::Unsupported`].
     pub fn rebind_ephemeral(&self) -> io::Result<SocketAddr> {
         match &self.inner {
             EndpointBackend::Quic(e) => {
