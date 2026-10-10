@@ -19,7 +19,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0013](0013-cert-file-exchange.md) | 인증서 파일 교환을 프로비저닝 1급 경로로 승격한다(ADR-0002 개정) | 승인됨 |
 | [0014](0014-address-default-port.md) | peer 주소는 포트 생략 시 4433을 채우고 읽기·쓰기 양쪽에서 정규화하되 파일은 쓰지 않는다 | 승인됨 |
 | [0015](0015-listener-pairing.md) | listener를 상대로 한 초대 코드 pairing | 예약됨 |
-| [0016](0016-csr-issuance.md) | CA 서명 요청(CSR) 흐름 | 예약됨 |
+| [0016](0016-csr-issuance.md) | CSR 흐름을 파일 교환으로만 연다. `qsh identity request`·`qsh cert sign`·`qsh identity install`을 신설하고, 서명 장비는 CSR에서 공개키와 `device_id`만 꺼내 leaf를 새로 만든다. user cert 발급은 별도 ADR로 남긴다 | 제안됨 |
 | [0017](0017-acl-toml-not-written.md) | `acl.toml`은 어떤 명령도 쓰지 않고 부담은 doctor 진단과 페어링 직후 고지로 옮긴다 | 승인됨 |
 | [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |
 | [0019](0019-socks-dynamic-forward.md) | SOCKS `-D`를 구현한다. client가 SOCKS5를 번역해 CONNECT마다 기존 `TCP_CONNECT`로 싣고 host는 그 dial에서 host-local 주소를 거른다 | 승인됨 |
@@ -32,6 +32,12 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않는다. P1으로 미루고 착수할 때의 모양만 지금 고정한다 | 승인됨 |
 | [0027](0027-doctor-fail-on-exit.md) | `qsh doctor --fail-on <warn\|error>`는 임계 이상 finding이 있으면 envelope을 그대로 둔 채 exit만 `1`로 바꾼다 | 승인됨 |
 | [0028](0028-tcp-tls-fallback.md) | TCP/TLS fallback은 `[transport].mode` = `quic`(기본) \| `tcp` \| `auto`로 고르고, TCP listener는 `tcp_bind`가 있을 때만 bind한다. mux는 `qsh-proto`의 자체 sans-IO codec이고 `docs/design/protocol.md` §16.2의 새 행이다. TCP 연결은 항상 resume으로 복구한다. M14 (a)의 추상은 공개 enum facade와 비공개 계약 trait이다 | 기각됨 (0043) |
+| [0029](0029-file-copy.md) | `qsh file get`/`qsh file put`(op `file.read`/`file.write`)로 파일 하나를 QUIC 위에서 원자적으로 옮기고, qsh 자신의 config·state·runtime 경로는 symlink를 해석한 정규 경로 기준으로 ACL 행과 무관하게 항상 거부한다. 재개 없음, BLAKE3 검증, 역방향 route 지원 | 제안됨 |
+| [0030](0030-pin-direction.md) | pin에 방향 축(`direction = "both" \| "outbound" \| "inbound"`)을 더하고 handshake 역할로 pin 조회를 거른다. 필드가 없는 pin은 오늘처럼 양방향이고, §16.2 검증 경로의 의미 변경이 아니라 로컬 trust 입력의 변경이다. TOFU는 열지 않는다 | 제안됨 |
+| [0031](0031-cert-rotation-revocation.md) | revocation은 이 장비의 `trust.toml` `[[revoked]]` 목록으로만 강제하고 전파하지 않는다. trust 변경 뒤 장기 실행 프로세스는 2초 안에 기존 연결을 재검증해 닫는다. 키 rotation은 옛 키가 서명한 rotation 문서를 파일로 건네고 `trust rotate`로 pin 교체와 옛 키 revoke를 한 번에 한다 | 제안됨 |
+| [0032](0032-service-manager-activation.md) | `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다 | 제안됨 |
+| [0033](0033-session-audit-management.md) | 세션 및 audit 관리 개선은 세션 목록 필터와 읽기 전용 로컬 `qsh audit`까지로 하고, audit 삭제 경로와 텔레메트리 계약 승격은 만들지 않는다 | 제안됨 |
+| [0035](0035-windows-client.md) | Windows client는 직접 연결 client 명령과 콘솔 raw 모드 대화형 attach까지 연다. host 역할과 localctl 대체는 열지 않는다 | 제안됨 |
 | [0036](0036-stateless-reset-key.md) | stateless reset key는 config 디렉터리의 0600 파일 `stateless_reset.key`에 두고, 읽을 수 없거나 형식이 틀리면 파일을 건드리지 않은 채 이번 기동만 임시 키로 뜬다 | 승인됨 |
 | [0037](0037-stalled-tunnel-stream-eviction.md) | 연결 하나에서 정체한 터널 스트림이 연결 수신 창을 다 쓰기 전에 가장 오래 정체한 스트림부터 끊는다 | 승인됨 |
 | [0038](0038-setup-client-complete-without-acl.md) | `qsh setup client`의 `complete`는 doctor의 `acl_policy_missing` 하나를 세지 않는다(ADR-0024 결정 9 개정). doctor의 진단 등급과 host 쪽 역할의 판정은 그대로 둔다 | 승인됨 |
@@ -43,10 +49,6 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 
 P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회)이 받았으므로 다음 새 번호는 0044이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
-- 0029 파일 복사(M15)
-- 0030 pin 방향(M16)
-- 0031 cert rotation·revocation(M16)
-- 0032 서비스 매니저 실호출(M17)
-- 0033 세션·audit 관리 범위(M17)
-- 0034 세션 거처(M18)
-- 0035 Windows client(M19)
+- 0034 세션 거처(M18). 착수 조건(M8 DoD 3 기록)이 닫히면 쓴다
+
+0029~0033과 0035는 2026-10-11 초안이 올라 위 표에 있다.
