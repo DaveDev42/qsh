@@ -503,7 +503,7 @@ peer from its own trust store. The older `qsh reverse controller
      lookup_pin_follows_a_reordered_trust_toml_without_a_restart (qsh-core trust tests),
      an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered (qsh-cli/tests/trust_alias_order.rs),
      acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row (qsh-core doctor tests).
-     A proper fix (per-direction pins) is docs/ROADMAP.md M16 (a). -->
+     Per-direction pins were considered and dropped (ADR-0030, rejected 2026-10-12). -->
 #### One machine, two aliases
 
 One machine can be reachable two ways: directly at an address for `qsh serve`,
@@ -522,8 +522,8 @@ default. `qsh doctor` counts each name separately, so in that layout it
 flags the first name (`acl_principal_unmatched`) and stays quiet about the
 second. `trust.toml` is re-read on every handshake, so reordering the two
 entries changes the principal immediately, without a restart; `acl.toml`
-still needs the restart. Splitting the aliases by direction is planned work
-(`docs/ROADMAP.md` M16), not something to rely on today.
+still needs the restart. Splitting the aliases by direction is not planned (ADR-0030 was rejected),
+so this layout rule stays.
 
 #### Riding out a long outage
 

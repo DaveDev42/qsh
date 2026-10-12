@@ -260,14 +260,14 @@ g1~g5는 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지 않�
 
 | # | 한계 | 근거 |
 |---|---|---|
-| h1 | TOFU 미지원. `trust.toml`이 pin의 방향을 구분하지 않아, client 쪽 자동 pin이 같은 상대의 inbound 인증까지 통과시킨다 | ADR-0017 결정 5(방향 축 `direction = "outbound"`는 별도 ADR로 미뤘고 번호도 아직 없다); `docs/ROADMAP.md`가 명시적 out으로 적는다 |
-| h2 | listener를 상대로 한 pairing이 미정 | ADR-0015 결정 "미정" |
-| h3 | CSR 기반 발급이 없어, 여러 장비를 한 CA로 서명하려면 CA 개인키를 그 장비 모두에 복제해야 한다 | ADR-0016 맥락 2번째 문단·결정; ADR-0013 결정 8 뒤 단락 |
+| h1 | TOFU 미지원. `trust.toml`이 pin의 방향을 구분하지 않아, client 쪽 자동 pin이 같은 상대의 inbound 인증까지 통과시킨다 | ADR-0017 결정 5(방향 축은 ADR-0030이 제안했으나 2026-10-12에 기각됐다); `docs/ROADMAP.md`가 명시적 out으로 적는다 |
+| h2 | listener를 상대로 한 코드 pairing이 없다. 인증서 파일 교환으로 pin한다 | ADR-0015(기각됨, 2026-10-12), ADR-0013 |
+| h3 | CSR 기반 발급이 없어, 여러 장비를 한 CA로 서명하려면 CA 개인키를 그 장비 모두에 복제해야 한다. CSR은 만들지 않기로 했다(2026-10-12), 장비 다수는 pin으로 신뢰한다 | ADR-0016(기각됨) 맥락 2번째 문단; ADR-0013 결정 8 뒤 단락 |
 | h4 | CA rotation·revocation 설계가 없다. 단일 root, intermediate 없음 | ADR-0008 근거 1번째 불릿·대안 1번째 불릿 |
 | h5 | `qsh trust remove`가 기존 연결에 소급되지 않는다. 제거된 peer는 그 연결이 끊길 때까지 협상된 권한 전체를 유지한다 | README "Known limitations". 강제 종료는 P1 |
 | h6 | `qsh pair accept`(구 표기 `qsh trust accept`)의 양쪽 pin이 원자적이지 않다. 호스트 쪽 pin과 invite 소비가 먼저 일어나고 클라이언트 로컬 pin이 나중이라, 그 사이 로컬 이름 충돌이 나면 invite는 이미 소비된 채 남는다 | README "Known limitations"; `protocol.md` §15.6 |
 | h7 | 이미 pin된 상대의 재페어링이 불가능하다. 새 invite로도 풀리지 않고 복구 경로는 호스트의 `trust remove` 뿐이다 | README "Known limitations"; `protocol.md` §15.6 |
-| h8 | 역방향 conduit에 pairing evaluator가 붙어 있지 않다. 사전 pin/CA로만 신뢰를 세우고, 그것이 손상됐을 때의 복구 절차 문서가 없다 | `protocol.md` §15.8; ADR-0015 미정 |
+| h8 | 역방향 conduit에 pairing evaluator가 붙어 있지 않다. 사전 pin/CA로만 신뢰를 세우고, 그것이 손상됐을 때의 복구 절차 문서가 없다 | `protocol.md` §15.8; ADR-0015(기각됨) |
 | h9 | homoglyph 미탐지. 서로 다른 코드 포인트가 같은 글리프로 렌더되는 이름을 `validate_device_name`이 잡지 않는다 | `protocol.md` §15.5; `crates/qsh-proto/src/wire.rs`. 실제 방어선은 fingerprint 병기 대조 |
 | h10 | `acl.toml` hot reload 없음. 편집은 다음 `serve`/`listen`/`reverse` 시작부터 적용된다 | `README.md` "Known limitations"; ADR-0017 |
 | h11 | 터널에는 replay ring이 없다. connection 손실 시 in-flight TCP 연결은 재생되지 않고 깨끗이 끊긴다 | ADR-0018 결정 1; `README.md` "Known limitations" |
@@ -305,7 +305,7 @@ qsh가 지키지 않고 운영자에게 맡긴 것들이다.
 - **시계 동기.** cert 유효기간(`protocol.md` §3), invite TTL 10분과 retention 20분(`protocol.md` §15.5), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
 - **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md` §15.7).
 - **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. relay·NAT traversal·discovery를 qsh는 제공하지 않는다(`README.md` "Known limitations"; PRD §12).
-- **CA 키 복제 관행.** h3이 닫힐 때까지 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016 맥락 2번째 문단).
+- **CA 키 복제 관행.** CSR을 만들지 않으므로(ADR-0016 기각) 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016 맥락 2번째 문단).
 - **`acl.toml` 재시작 규율.** h10에 따라 정책 편집은 재시작해야 반영된다. 편집했는데 반영이 안 된 상태를 "정책이 느슨한 채로 돌고 있는 창"으로 인식해야 한다.
 - **replay 여유 조정.** `[serve].replay_bytes` 기본 8 MiB가 자기 워크로드에 충분한지는 운영자가 판단한다. ADR-0004 근거 3번째 불릿이 "전형적 텍스트 터미널 output 기준 수십 초~수 분 분량"이라고 추정한 값이다.
 

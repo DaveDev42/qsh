@@ -18,8 +18,8 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0012](0012-human-surface-naming.md) | 사람용 표면의 이름 규약을 역할 어휘·`serve --to`·`pair --as`로 재정렬한다 | 승인됨 |
 | [0013](0013-cert-file-exchange.md) | 인증서 파일 교환을 프로비저닝 1급 경로로 승격한다(ADR-0002 개정) | 승인됨 |
 | [0014](0014-address-default-port.md) | peer 주소는 포트 생략 시 4433을 채우고 읽기·쓰기 양쪽에서 정규화하되 파일은 쓰지 않는다 | 승인됨 |
-| [0015](0015-listener-pairing.md) | listener를 상대로 한 초대 코드 pairing | 예약됨 |
-| [0016](0016-csr-issuance.md) | CSR 흐름을 파일 교환으로만 연다. `qsh identity request`·`qsh cert sign`·`qsh identity install`을 신설하고, 서명 장비는 CSR에서 공개키와 `device_id`만 꺼내 leaf를 새로 만든다. user cert 발급은 별도 ADR로 남긴다 | 제안됨 |
+| [0015](0015-listener-pairing.md) | listener를 상대로 한 초대 코드 pairing | 기각됨 (2026-10-12, 0044가 동기를 대체) |
+| [0016](0016-csr-issuance.md) | CSR 흐름을 파일 교환으로만 연다. `qsh identity request`·`qsh cert sign`·`qsh identity install`을 신설하고, 서명 장비는 CSR에서 공개키와 `device_id`만 꺼내 leaf를 새로 만든다. user cert 발급은 별도 ADR로 남긴다 | 기각됨 (2026-10-12, 0044가 동기를 대체) |
 | [0017](0017-acl-toml-not-written.md) | `acl.toml`은 어떤 명령도 쓰지 않고 부담은 doctor 진단과 페어링 직후 고지로 옮긴다 | 승인됨 |
 | [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |
 | [0019](0019-socks-dynamic-forward.md) | SOCKS `-D`를 구현한다. client가 SOCKS5를 번역해 CONNECT마다 기존 `TCP_CONNECT`로 싣고 host는 그 dial에서 host-local 주소를 거른다 | 승인됨 |
@@ -32,9 +32,9 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않는다. P1으로 미루고 착수할 때의 모양만 지금 고정한다 | 승인됨 |
 | [0027](0027-doctor-fail-on-exit.md) | `qsh doctor --fail-on <warn\|error>`는 임계 이상 finding이 있으면 envelope을 그대로 둔 채 exit만 `1`로 바꾼다 | 승인됨 |
 | [0028](0028-tcp-tls-fallback.md) | TCP/TLS fallback은 `[transport].mode` = `quic`(기본) \| `tcp` \| `auto`로 고르고, TCP listener는 `tcp_bind`가 있을 때만 bind한다. mux는 `qsh-proto`의 자체 sans-IO codec이고 `docs/design/protocol.md` §16.2의 새 행이다. TCP 연결은 항상 resume으로 복구한다. M14 (a)의 추상은 공개 enum facade와 비공개 계약 trait이다 | 기각됨 (0043) |
-| [0029](0029-file-copy.md) | `qsh file get`/`qsh file put`(op `file.read`/`file.write`)로 파일 하나를 QUIC 위에서 원자적으로 옮긴다. 원격 경로는 그 action을 준 `[[acl]]` 행의 `paths`(정규 경로 기준 성분 단위 prefix, 없으면 파일 권한 없음) 아래로만 허용하고, qsh 자신의 config·state·runtime 경로는 `paths`와 무관하게 항상 거부한다. 재개 없음, BLAKE3 검증, 역방향 route 지원 | 제안됨 |
-| [0030](0030-pin-direction.md) | pin에 방향 축(`direction = "both" \| "outbound" \| "inbound"`)을 더하고 handshake 역할로 pin 조회를 거른다. 필드가 없는 pin은 오늘처럼 양방향이고, §16.2 검증 경로의 의미 변경이 아니라 로컬 trust 입력의 변경이다. TOFU는 열지 않는다 | 제안됨 |
-| [0031](0031-cert-rotation-revocation.md) | revocation은 이 장비의 `trust.toml` `[[revoked]]` 목록으로만 강제하고 전파하지 않는다. trust 변경 뒤 장기 실행 프로세스는 2초 안에 기존 연결을 재검증해 닫는다. 키 rotation은 옛 키가 서명한 rotation 문서를 파일로 건네고 `trust rotate`로 pin 교체와 옛 키 revoke를 한 번에 한다 | 제안됨 |
+| [0029](0029-file-copy.md) | 파일 복사는 scp 인자 문법의 `qsh cp [-r] [-p] [-q] SRC... DST` 하나로 연다. 디렉터리 순회는 client가 하고 wire에는 `file.list`·`file.mkdir`만 더한다. `full` role은 serve 계정이 닿는 경로 전부를 주되 qsh 상태 경로는 항상 거부하고, `[[acl]]` `paths`는 행으로 파일 권한을 줄 때만 쓴다(2026-10-12 개정) | 제안됨 |
+| [0030](0030-pin-direction.md) | pin에 방향 축(`direction = "both" \| "outbound" \| "inbound"`)을 더하고 handshake 역할로 pin 조회를 거른다 | 기각됨 (2026-10-12, 1인 사용에 가치 낮음) |
+| [0031](0031-cert-rotation-revocation.md) | trust에서 peer를 빼거나 role을 줄이면 `qsh serve`·`qsh listen`·`qsh serve --to`가 2초 안에 살아 있는 연결을 재검증해 신뢰를 잃었거나 권한이 줄어든 연결을 닫는다. revocation 목록·rotation 문서·`trust rotate`·CA 발급 인증서 개별 revoke는 두지 않는다(2026-10-12 축소) | 제안됨 |
 | [0032](0032-service-manager-activation.md) | `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다 | 제안됨 |
 | [0033](0033-session-audit-management.md) | 세션 및 audit 관리 개선은 세션 목록 필터와 읽기 전용 로컬 `qsh audit`까지로 하고, audit 삭제 경로와 텔레메트리 계약 승격은 만들지 않는다 | 제안됨 |
 | [0035](0035-windows-client.md) | Windows client는 직접 연결 client 명령과 콘솔 raw 모드 대화형 attach까지 연다. host 역할과 localctl 대체는 열지 않는다 | 제안됨 |
@@ -46,9 +46,11 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0041](0041-reverse-registration-detection-budget.md) | 역방향 등록 연결의 PathWatch 감지 예산을 대화형 attach의 2초 상한에서 분리하고 기본 창을 약 5초로 둔다. attach 기본값은 그대로이고 역방향 등록은 `min_dead_after` 4250ms·`strikes` 3, 재정의 키 `reverse_min_dead_after_ms`·`reverse_strikes`, 상한 5초다(ADR-0021 결정 4의 기본값과 결과 절 상한을 역방향에 한해 개정) | 승인됨 |
 | [0042](0042-watch-self-delay-and-quick-loss-backoff.md) | PathWatch는 자기 tick의 지연을 침묵에서 덜어내고(`late >= probe_interval`이면 `last_inbound`를 앞으로 밀고 그 tick은 사망을 선언하지 못한다) 판정 줄에 `tick_gap_ms`를 싣는다. 역방향 target은 60초 안에 끝난 등록이 연속되면 재dial 지연을 두 번째부터 2배씩 8초까지 늘린다. `cause` 분류를 보정한다(`Reset`은 `peer_closed`, `Hello` 시간 초과는 `dial_timeout`). 설정 키·wire 변경 없음 | 승인됨 |
 | [0043](0043-no-tcp-fallback.md) | TCP/TLS fallback을 만들지 않는다. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다. M14를 철회로 닫고 (a)의 transport facade는 유지한다 | 승인됨 |
+| [0044](0044-ssh-bootstrap.md) | SSH 부트스트랩. pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 ssh를 한 번 거쳐(`ssh -G`로 HostName 해석, ssh 설정·agent·known_hosts는 ssh가 처리) 원격 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. 원격 pin은 0045 role `full`(`--role`), 이 장비 쪽 pin은 role `none`이고, 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다 | 제안됨 |
+| [0045](0045-trust-roles.md) | trust pin에 role 하나(`full`·`exec`·`tunnel`·`read-only`·`reverse`·`none`)를 두어 장비를 신뢰 등록하면 그대로 권한이 주어지게 한다. `acl.toml`은 세밀한 제어용 선택 사항이 되고, role 키가 없는 기존 pin은 `acl.toml`만 따르며, 파싱할 수 없는 `acl.toml`은 role grant까지 모두 거부한다(ADR-0017·0024·0025·0029·0038 관련 결정 개정) | 제안됨 |
 
-P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회)이 받았으므로 다음 새 번호는 0044이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회), 0044(SSH 부트스트랩), 0045(역할 기반 권한)가 받았으므로 다음 새 번호는 0046이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0034 세션 거처(M18). 착수 조건(M8 DoD 3 기록)이 닫히면 쓴다
 
-0029~0033과 0035는 2026-10-11 초안이 올라 위 표에 있다.
+0029~0033과 0035는 2026-10-11 초안이 올라 위 표에 있다. 2026-10-12 재기획으로 0015·0016·0030은 기각했고 0029는 scp 호환으로, 0031은 연결 닫기 하나로 개정했다.
