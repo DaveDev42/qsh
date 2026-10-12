@@ -1,7 +1,11 @@
 # ADR-0030: pin에 방향 축(`direction = "both" | "outbound" | "inbound"`)을 더하고 handshake 역할로 pin 조회를 거른다. 필드가 없는 pin은 오늘처럼 양방향이고, 이 변경은 §16.2 검증 경로의 의미 변경이 아니라 로컬 trust 입력의 변경이다. TOFU는 열지 않는다
 
 날짜: 2026-10-11
-상태: 제안됨
+상태: 기각됨 (2026-10-12 사용자 결정)
+
+## 기각 사유
+
+2026-10-12에 pin 방향 축을 만들지 않기로 했다. 1인·소수 장비 사용에서 가치가 낮다. 두 별칭 배치의 파일 순서 제약은 README "One machine, two aliases"의 처방(앞 이름에 ACL을 쓴다)으로 남고, TOFU는 ADR-0017 결정 5대로 닫혀 있다. 아래 본문은 기록으로 남긴다.
 
 개정 관계: ADR-0017 결정 5가 번호 없이 미룬 후속 ADR이 이 문서다. 결정 5의 결론(TOFU를 넣지 않는다)은 유지하고, 그 근거 중 "`trust.toml`이 방향을 구분하지 않는다"는 이 ADR 뒤로는 방향 필드가 없는 pin에만 맞는 문장이 된다. TOFU를 계속 닫아 두는 근거는 결정 9가 새로 적는다. ADR-0015 결정 7(listener 상대 pairing과 방향 축의 관계)이 입력으로 쓸 축을 이 ADR이 정한다. `docs/design/protocol.md` §3과 §16.2의 `QshPeerVerifier` 행에 해석 한 줄이 붙고(결정 8), `docs/CLI.md` §6.11·§6.17과 README "One machine, two aliases" 절이 바뀐다. 승인된 다른 ADR의 결정은 개정하지 않는다. ADR-0024 결정의 "같은 fingerprint의 두 번째 이름은 거절한다"(`setup_refuses_second_name_for_pinned_fingerprint`)도 그대로 둔다.
 
