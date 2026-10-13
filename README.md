@@ -183,31 +183,14 @@ page directly: `man ./man/qsh-trust-add.1` from an unpacked archive, or
 
 ## First run
 
-Six commands and one small policy file, two machines. This is the literal
-script that `docs/campaigns/m9-stopwatch.md` and `docs/campaigns/m7-stopwatch.md`
+Six commands, two machines. This is the literal script that
+`docs/campaigns/m9-stopwatch.md` and `docs/campaigns/m7-stopwatch.md`
 time: two machines that have never run `qsh` before, nothing but this section
 open, stopwatch running from the first command.
 
 ```bash
 # Host, the machine that will run the shell:
 qsh init --json                              # note "fingerprint" in the output
-```
-
-`acl.toml` loads once, at `qsh serve` startup, with no hot reload: it has to
-exist *before* `serve` runs, or the host denies everything until it's
-restarted. `laptop` below is just the name the client gets pinned under a
-few steps down; the rule can reference it now and take effect once that
-pin exists.
-
-```toml
-# <config_dir>/acl.toml, next to trust.toml: written by hand, qsh never
-# generates this file:
-[[acl]]
-principal = "device:laptop"
-allow = ["session.*"]
-```
-
-```bash
 qsh serve --bind 0.0.0.0:4433               # leave this running
 
 # Client, in a separate terminal on the other machine:
@@ -215,13 +198,22 @@ qsh init --json                              # note this device's fingerprint to
 qsh trust add box --address host.example.com:4433 --fingerprint sha256:<HOST_FP>
 
 # Host, in a second terminal, let the client in. This can happen after
-# "serve" has already started; unlike acl.toml, trust.toml is re-read on
-# every handshake, so no restart is needed:
+# "serve" has already started: trust.toml is re-read on every handshake,
+# so no restart is needed:
 qsh trust add laptop --fingerprint sha256:<CLIENT_FP>
 
 # Client, first shell:
 qsh dave@box
 ```
+
+Pinning a machine is also what lets it in. The host's `trust add laptop`
+has no `--address`, so it is a pin for a machine that connects *to* this
+one, and it gets the trust role `full`: shell, `exec`, port forwards and
+reverse registration, the same power as the account running `qsh serve`.
+No policy file is needed. The client's `trust add box --address …` is a pin
+for a machine it dials, so it gets role `none` and `box` can do nothing on
+the client. [Choosing what a peer may do](#choosing-what-a-peer-may-do) below
+covers narrower roles.
 
 Swap `host.example.com:4433` for wherever the host actually listens, and
 the two `sha256:…` fingerprints for what `qsh init --json` printed on each
@@ -259,6 +251,10 @@ the code", compare `trust list`'s fingerprint out of band after pairing, as
 after any first connection. A code works once and expires in ten minutes,
 and a running `qsh serve` recognizes a freshly minted invite without a
 restart, the same way it picks up `trust remove` (`docs/CLI.md` §6.11).
+The invite fixes the role the redeeming machine will get on the host: `full`
+by default, or whatever `--role` gave. The redeeming side cannot ask for
+more. On the redeeming machine, `pair accept` pins the host with role `none`
+unless you pass `--role`.
 
 A third way is to exchange certificate files directly (ADR-0013). Only an
 inbound `qsh serve` opens the invite-redemption window, so nothing can pair
@@ -299,6 +295,49 @@ already-pinned peer (mTLS still blocks an unpinned address). `qsh hosts
 --json` reveals such a redirect through `"source": "hosts"` (`docs/CLI.md`
 §5).
 
+### Choosing what a peer may do
+
+Every pin carries one trust role (ADR-0045). The six roles are fixed, there
+are no custom ones, and each grants a fixed set of actions:
+
+| role | grants |
+|---|---|
+| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `host.reverse` (and `file.read`/`file.write`, which stay denied for now) |
+| `exec` | `exec.run`, `session.*` |
+| `tunnel` | `forward.local`, `forward.remote` (it can only close remote forwards it opened itself) |
+| `read-only` | `session.list`, `session.attach`: watch sessions, no input |
+| `reverse` | `host.reverse`: register as a reverse target, nothing else |
+| `none` | nothing |
+
+```bash
+qsh trust add phone --fingerprint sha256:<PHONE_FP> --role tunnel
+qsh pair invite --role read-only --json
+qsh trust set-role laptop exec            # change a pin later
+qsh trust list                            # ROLE column
+```
+
+A role change applies from the next request, with no restart. A pin without
+a `role` key (made before roles existed) is judged as `none`, so upgrading
+never widens anything. `exec` is a statement of intent, not a boundary
+against `full`: a peer that can run commands as the `qsh serve` account can
+run `qsh trust set-role` too. The roles that hold up as boundaries are
+`tunnel`, `read-only`, `reverse` and `none`.
+
+For finer control than six roles, add `[[acl]]` rows. A request is allowed
+when the peer's role grants it or a row does. Rows are written by hand, qsh
+never generates the file, and they load once at startup:
+
+```toml
+# <config_dir>/acl.toml, next to trust.toml
+[[acl]]
+principal = "device:laptop"
+allow = ["session.list", "session.attach", "exec.run"]
+```
+
+Rows can only add to a role, never take away. To give a peer less than a
+role, pick a smaller role and add rows for the rest. `qsh acl check` and
+`qsh acl show` report the role, the rows, and which one allowed a request.
+
 ## Guided setup (`qsh setup`)
 
 `qsh setup` walks one machine through the commands that "First run" types
@@ -324,17 +363,21 @@ terminal, or with `--json`, setup asks nothing and fails with
 `INVALID_ARGUMENT` if an input is missing. The exact flags are in
 [docs/CLI.md](docs/CLI.md) §6.20.
 
-Setup never writes `acl.toml`. It prints the `[[acl]]` rows this role needs,
-checks with `qsh acl check` whether the file already allows them, and stops
-with the step marked `pending` until you have saved the rows yourself and
-run `qsh setup` again. The same holds for `config.toml` and `hosts.toml`.
+Setup never writes `acl.toml`, `config.toml` or `hosts.toml`. It pins the
+peer with a role instead: `--peer-role` picks it, and the defaults are `full`
+for `setup host`, `reverse` for `setup listener` and `none` for `setup
+client`. With any role but `none` the ACL step is `done` and no rows are
+needed. With `--peer-role none` setup prints the `[[acl]]` rows the role
+needs, checks with `qsh acl check` whether the file already allows them, and
+stops with the step marked `pending` until you have saved the rows yourself
+and run `qsh setup` again.
 Setup also does not start `qsh serve` or `qsh listen` and does not enable
 the service unit.
 
 There is no automatic trust. A peer is pinned only from an invite code or a
 certificate file you hand over, never from a fingerprint setup observed on
-the wire. Because `acl.toml` is read once at process start, setup ends the
-ACL step with this notice:
+the wire. When setup has you write `acl.toml` rows, it ends the ACL step with
+this notice, because the file is read once at process start:
 
 ```
 restart serve/listen — acl.toml is only read once at process start.
@@ -344,8 +387,9 @@ restart serve/listen — acl.toml is only read once at process start.
 
 Everything below assumes the two machines from [First run](#first-run):
 `box` is the host running `qsh serve`, `laptop` is the client, and each has
-pinned the other. One addition to the host's `acl.toml`: the commands here
-need `exec.run` alongside `session.*`.
+pinned the other. The host pinned `laptop` with role `full`, which covers
+every command here. A narrower role needs the matching actions
+(`exec.run`, `forward.*`) from a row or a bigger role.
 
 ### Running one command
 
@@ -448,9 +492,9 @@ It is not a new grant:
 
 Two things have to be true before the first `CONNECT` succeeds:
 
-- The host's `acl.toml` grants the client `forward.local` (or the
-  `forward.*` family). The First run example only grants `session.*`, so add
-  the action there. `-R` needs `forward.remote` the same way.
+- The client's role or an `acl.toml` row on the host grants `forward.local`
+  (or the `forward.*` family). Role `full` and `tunnel` do; `exec` and
+  `read-only` do not. `-R` needs `forward.remote` the same way.
 - Both ends run a build that negotiates `dial-filter.v1`, which lets the host
   refuse loopback, link-local and metadata destinations. An older peer is
   refused before anything binds. Over a reverse route
@@ -490,6 +534,12 @@ qsh sessions workshop
 qsh workshop -L 8080:localhost:3000
 ```
 
+Each side pins the other with the role it needs. The controller pins the
+target with `--role reverse` (it only has to register), and the target pins
+the controller with `--address … --role full`, because the controller's
+requests are authorized by the target's trust store. Without that `--role`
+an address pin is `none` and the target refuses them.
+
 A peer address with no port defaults to 4433: `controller` and `controller:4433` resolve the same way, and an IPv6 literal needs brackets once a port follows it, as in `[::1]:4433`.
 
 `qsh serve --to` keeps reconnecting with backoff, so the target comes back
@@ -512,18 +562,21 @@ name for each, both pinning the same fingerprint (for example `workshop-lan`
 with an address, and `workshop` for the reverse registration). qsh accepts
 that, but the two names are not equal. When a peer authenticates, qsh looks
 its fingerprint up in `trust.toml` and takes the first entry in file order.
-That name is the principal every inbound `[[acl]]` row is matched against;
-the second name never becomes one.
+That name is the principal every inbound `[[acl]]` row is matched against,
+and the only pin whose role counts; the second name never becomes one.
 
-So write `[[acl]]` rows for the name that comes first in `trust.toml`, and
-treat the second name as an outbound dial alias only. A row written for the
-second name is not matched on inbound requests, which are then denied by
-default. `qsh doctor` counts each name separately, so in that layout it
-flags the first name (`acl_principal_unmatched`) and stays quiet about the
-second. `trust.toml` is re-read on every handshake, so reordering the two
-entries changes the principal immediately, without a restart; `acl.toml`
-still needs the restart. Splitting the aliases by direction is not planned (ADR-0030 was rejected),
-so this layout rule stays.
+So give the role and write `[[acl]]` rows for the name that comes first in
+`trust.toml`, and treat the second name as an outbound dial alias only. A
+role or row on the second name is not matched on inbound requests, which are
+then denied by default. When the pins hold no role and the rows are
+what grants access, `qsh doctor` counts each name separately: it flags the
+first name (`acl_principal_unmatched`) and stays quiet about the second.
+A pin with a role other than `none` is never flagged that way, so doctor
+cannot warn you about a role that sits on the wrong name. `trust.toml` is
+re-read on every handshake, so reordering the two entries changes the
+principal immediately, without a restart; `acl.toml` still needs the
+restart. Splitting the aliases by direction is not planned (ADR-0030 was
+rejected), so this layout rule stays.
 
 #### Riding out a long outage
 
@@ -587,30 +640,54 @@ into a dedicated pairing exchange that can do nothing but verify possession
 of the invite's secret and, on success, pin. It never reaches a session,
 tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side names the peer explicitly with `--as <name>` on `pair invite`/`pair accept`; without it, the peer's own self-reported name is used.
 
-Authorization is `acl.toml`: a small, principal-scoped rule file at
-`<config_dir>/acl.toml`. It is default-deny. A host with no `acl.toml`, or
-one that fails to parse, denies every operation from every peer, and qsh
-never creates or edits the file for you; an operator writes it by hand. Each
-rule names a principal (`user:<name>`, `device:<name>`, or
-`fp:sha256:<fingerprint>`), the auth path it applies to (`pin`, the default
-when omitted, or `ca`), and the actions it grants: an exact name like
-`exec.run`, or a trailing-wildcard family like `session.*`. A peer that
-authenticates through a trusted CA (`[[ca]]` in `trust.toml`) gets exactly
-what a rule with an explicit `auth_path = "ca"` grants it; a rule that omits
-`auth_path` never matches a CA-authenticated peer, even when the principal
-string is identical.
+Authorization has two sources, and a request is allowed when either one
+grants it. The first is the trust role on the peer's pin in `trust.toml`
+(see [Choosing what a peer may do](#choosing-what-a-peer-may-do)): registering
+a peer is what grants it something. The second is `acl.toml`, a small,
+principal-scoped rule file at `<config_dir>/acl.toml`, for anything finer.
+Everything is default-deny: a pin with no role, or role `none`, can do
+nothing without a matching row, and qsh never creates or edits the file for
+you; an operator writes it by hand. Each rule names a principal
+(`user:<name>`, `device:<name>`, or `fp:sha256:<fingerprint>`), the auth path
+it applies to (`pin`, the default when omitted, or `ca`), and the actions it
+grants: an exact name like `exec.run`, or a trailing-wildcard family like
+`session.*`. A role only reaches a peer that authenticated through its pin,
+and only while the connection's certificate still matches that pin's
+fingerprint, so a CA-issued certificate naming a pinned device gets no role,
+and a name re-pinned to another key takes the role away from the old
+connection. A peer that authenticates through a trusted CA (`[[ca]]` in
+`trust.toml`) gets exactly what a rule with an explicit `auth_path = "ca"`
+grants it; a rule that omits `auth_path` never matches a CA-authenticated
+peer, even when the principal string is identical.
+
+`acl.toml` has three states. A missing file is a policy with no rows, and
+roles alone decide. A readable file adds its rows to the roles. A file that
+fails to parse denies every operation from every peer, roles included, since
+a policy that was meant to apply but cannot be read is an ambiguous state and
+ambiguity closes. If `trust.toml` itself fails to reload while the process
+runs, pin authentication keeps using the last good snapshot but role grants
+stop until the file parses again, so a half-edited file cannot keep an old,
+wider role alive. Rows still work in that window.
 
 `file.read` and `file.write` are in the action vocabulary but always denied,
 because those operations are not implemented. `forward.socks` is also always
 denied, for a different reason: no operation is ever authorized through it
 ([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)); `-D` reuses
 `forward.local`. Every refusal a remote peer sees is the same opaque
-`PERMISSION_DENIED` message, whether it came from a missing rule, a policy
-file that failed to load, or an audit-write failure.
+`PERMISSION_DENIED` message, whether it came from a missing role or rule, a
+policy file that failed to load, or an audit-write failure.
 
-The policy loads once, when `qsh serve`/`qsh listen`/`qsh serve --to`
-starts, so an edit to `acl.toml` only takes effect on the next restart. If
-the file is missing or invalid at startup, the process still comes up (it
+The `acl.toml` rows load once, when `qsh serve`/`qsh listen`/`qsh serve --to`
+starts, so an edit to the file only takes effect on the next restart. Roles
+are the opposite: they are read from `trust.toml` on every request, so
+`qsh trust set-role` and `qsh trust remove` apply from the next request with
+no restart. A role that shrinks does not close what the peer already opened
+(an attached session, an open tunnel, a transfer in flight); that waits for
+connection-closing on removal (ADR-0031). If the file is missing, the process
+comes up and prints one line to stderr (`no acl.toml`, code
+`acl_policy_missing`, and that requests are authorized by trust roles only);
+`qsh doctor` reports `acl_policy_missing` only when no role grants anything
+either. If the file is invalid at startup, the process still comes up (it
 answers, and denies everything) and prints a diagnostic to stderr exactly
 once, made of:
 
@@ -622,16 +699,25 @@ once, made of:
 - `verify a fix before restarting: qsh acl check`
 
 The diagnostic's `code` field tells the two causes apart: `acl_policy_missing`
-(no file) versus `acl_policy_invalid` (parse or validation failure). It
-never dumps raw source lines; the only echo is a bounded (at most 128 bytes,
-single-line-escaped) grammar token from the offending rule (unknown action
-pattern, `auth_path` or scope).
+(no file) versus `acl_policy_invalid` (parse or validation failure); the full
+block above is the invalid case. It never dumps raw source lines; the only
+echo is a bounded (at most 128 bytes, single-line-escaped) grammar token from
+the offending rule (unknown action pattern, `auth_path` or scope).
 
 On unix, a group- or world-writable `acl.toml` gets a one-time stderr
 warning instead of a refusal to load: an operator locked out of their own
 host by a permissions slip has no way back in. Windows ACL checking is out
-of scope. Pin only devices you would hand a shell to, and write down what
-you want each of them to be able to do.
+of scope. Pin only devices you would hand a shell to, and choose each
+one's role on purpose. The default for a machine that connects in is `full`,
+which is the power of the account running `qsh serve`: `exec` and `full`
+can run any command as that account, a `tunnel` peer's `forward.local`
+reaches any TCP destination the host can reach, and a `read-only` peer sees
+the screen output of sessions other devices opened, secrets included.
+An older `qsh` binary that rewrites `trust.toml` drops the `role` key it does
+not know, which turns that pin into `none` (narrower, never wider);
+`qsh trust set-role` restores it and `qsh doctor` lists pins without a role.
+Every write that gives a pin a role other than `none` leaves an audit record
+first, and without a durable record it does not happen.
 
 ## Known limitations
 
@@ -707,7 +793,8 @@ Some of these are MVP scope decisions, some are unfinished work.
 
   > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - `acl.toml` has no hot reload: an edit takes effect the next time
-  `qsh serve`/`qsh listen`/`qsh serve --to` starts. See [Security
+  `qsh serve`/`qsh listen`/`qsh serve --to` starts. Trust roles do not have
+  this limit; they apply from the next request. See [Security
   posture](#security-posture).
 - The audit log is fail-closed. `qsh serve`/`qsh serve --to` deny an
   otherwise-allowed `session.open`, `session.attach`, session write,
@@ -738,8 +825,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   within its budget and gives up. Force-closing an established connection on
   removal is P1.
 - `qsh trust rename` also takes effect on the next handshake without a
-  restart, but `acl.toml` rows do not: they match the pre-rename name until
-  `qsh serve` is restarted (ADR-0012 decision 7). A renamed peer's next
+  restart, and the pin's role moves with it, but `acl.toml` rows do not:
+  they match the pre-rename name until `qsh serve` is restarted (ADR-0012
+  decision 7). A renamed peer's next
   connection authenticates but can be denied every operation until the ACL
   rows catch up.
 - `qsh service status` and `qsh service uninstall` only look at the run mode

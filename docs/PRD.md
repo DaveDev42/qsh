@@ -154,7 +154,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 | Exec | argv 기반 비대화형 명령 실행과 exit status |
 | Tunnel | local 및 remote TCP forwarding |
 | Identity | pinned certificate와 private CA |
-| ACL | principal·resource·action 기반 local policy |
+| ACL | trust role(pin에 묶인 고정 여섯 값)과 principal·resource·action 기반 local policy의 합집합 |
 | Automation | 안정된 JSON/JSONL CLI (`qsh.cli/v1`; 내장 MCP adapter는 철회, ADR-0011) |
 | Operations | host profile, local audit, `qsh doctor` |
 | Platform | macOS와 Linux, arm64와 x86_64 |
@@ -291,7 +291,7 @@ qsh sessions [host]             세션 조회
 qsh attach <session-ref>        세션 attach
 qsh tunnel ...                  터널 관리
 qsh identity export             이 장치 인증서를 PEM으로 출력
-qsh trust ...                   신뢰 관리(add --cert-file·add-ca·rename 포함)
+qsh trust ...                   신뢰 관리(add --cert-file·add-ca·rename·set-role 포함, add는 --role로 role을 정함)
 qsh pair invite|accept          pairing으로 새 신뢰 항목 생성(구 qsh trust invite/accept, 숨김 alias로 남음)
 qsh cert ...                    인증서 관리
 qsh acl ...                     ACL 관리와 검사
@@ -299,7 +299,7 @@ qsh <command> --json            machine-readable result
 qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 qsh service install|uninstall|status  플랫폼 서비스 유닛 관리(launchd·systemd user)
-qsh setup host|client|listener  이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않고 넣을 행을 인쇄, 자동 신뢰 없음, `docs/CLI.md` §6.20)
+qsh setup host|client|listener  이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않는다. 기본 role은 `--peer-role`로 정하고 `none`일 때만 넣을 행을 인쇄한다. 자동 신뢰 없음, `docs/CLI.md` §6.20)
 ```
 
 SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).
