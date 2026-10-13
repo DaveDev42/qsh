@@ -59,6 +59,7 @@ use crate::tunnel::splice::splice_tcp_quic;
 
 mod dispatch;
 mod exec;
+mod file;
 mod reverse;
 mod sessions;
 mod tunnels;
@@ -519,6 +520,11 @@ pub struct Server {
     /// dropped — best-effort, like every other operator diagnostic this
     /// crate emits.
     notice_sink: OnceLock<NoticeSink>,
+    /// The path normalizer the remote file ops call, set at most once by
+    /// [`Server::set_path_normalizer`]. Unset (production) reads as the real
+    /// filesystem normalizer; a test injects a counting one
+    /// (ADR-0029 decision 6-2).
+    path_normalizer: OnceLock<Arc<dyn crate::file::guard::Normalizer>>,
     /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
     /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
@@ -687,6 +693,7 @@ impl Server {
             pairing: OnceLock::new(),
             pinned_principals: OnceLock::new(),
             notice_sink: OnceLock::new(),
+            path_normalizer: OnceLock::new(),
             admission,
             quotas,
         })

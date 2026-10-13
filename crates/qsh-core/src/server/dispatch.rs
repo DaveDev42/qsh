@@ -110,6 +110,42 @@ impl Server {
             Some(control_message::Body::RfwdClose(req)) => {
                 Some(self.handle_rfwd_close(ctx, request_id, req).await)
             }
+            // The four remote file ops (ADR-0029, M15): shape check, then
+            // the ACL choke point. `file.list` authorizes as `file.read` and
+            // `file.mkdir` as `file.write` (decision 3). Only `file.write`
+            // and `file.mkdir` carry a `name_if_dir`.
+            Some(control_message::Body::FileReadOpen(req)) => Some(self.handle_file_op(
+                ctx,
+                request_id,
+                crate::acl::Op::FileRead,
+                crate::file::guard::FileOp::Read,
+                &req.path,
+                "",
+            )),
+            Some(control_message::Body::FileWriteOpen(req)) => Some(self.handle_file_op(
+                ctx,
+                request_id,
+                crate::acl::Op::FileWrite,
+                crate::file::guard::FileOp::Write,
+                &req.path,
+                &req.name_if_dir,
+            )),
+            Some(control_message::Body::FileListOpen(req)) => Some(self.handle_file_op(
+                ctx,
+                request_id,
+                crate::acl::Op::FileList,
+                crate::file::guard::FileOp::List,
+                &req.path,
+                "",
+            )),
+            Some(control_message::Body::FileMkdirOpen(req)) => Some(self.handle_file_op(
+                ctx,
+                request_id,
+                crate::acl::Op::FileMkdir,
+                crate::file::guard::FileOp::Mkdir,
+                &req.path,
+                &req.name_if_dir,
+            )),
             // No body this build understands. prost drops unknown fields,
             // so a reserved (25 `SessionSignal`) or future control number
             // decodes to `body: None` exactly like an empty message;

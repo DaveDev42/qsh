@@ -429,3 +429,72 @@ async fn severing_the_quic_connection_ends_every_conduit_of_that_host() {
     localctl.shutdown().await;
     harness.shutdown().await;
 }
+
+/// ADR-0029 decisions 8 and 16: the four remote file ops are request-shaped,
+/// so a `LOCAL_CONTROL` conduit relays them to the reverse target like any
+/// other op (`mux::classify` -> `Request`), and the target's own
+/// `Server::dispatch` decides. It denies all four: the always-deny gate still
+/// covers `file.*`. The reply keeps the conduit's own `peer_request_id` and
+/// carries the uniform message, so a relayed denial reads like a direct one.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_ops_over_a_conduit_reach_the_target_and_are_permission_denied() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (_dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+        let mut conduit = connect_control(&localctl.socket_path, "widget").await;
+
+        let requests = [
+            control_message::Body::FileReadOpen(wire::FileReadOpen {
+                path: "/srv/share/a.txt".into(),
+                user: String::new(),
+            }),
+            control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+                path: "/srv/share/b.txt".into(),
+                size: 1,
+                mode: 0o600,
+                ..Default::default()
+            }),
+            control_message::Body::FileListOpen(wire::FileListOpen {
+                path: "/srv/share/".into(),
+                ..Default::default()
+            }),
+            control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
+                path: "/srv/share/new".into(),
+                mode: 0o700,
+                ..Default::default()
+            }),
+        ];
+        for (i, body) in requests.into_iter().enumerate() {
+            let peer_request_id = 70 + i as u64;
+            send(&mut conduit, peer_request_id, body).await;
+            let reply = recv(&mut conduit).await;
+            assert_eq!(reply.request_id, peer_request_id);
+            match reply.body {
+                Some(control_message::Body::Response(wire::Response {
+                    body: Some(response::Body::Error(e)),
+                })) => {
+                    assert_eq!(e.error_code(), qsh_proto::ErrorCode::PermissionDenied);
+                    assert_eq!(e.message, qsh_core::acl::PERMISSION_DENIED_MESSAGE);
+                }
+                other => panic!("request {i}: expected PERMISSION_DENIED, got {other:?}"),
+            }
+        }
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}

@@ -159,7 +159,14 @@ pub fn classify(body: &control_message::Body) -> MessageKind {
         // Step 4/5). A conduit legitimately sends these, so they are
         // Requests like the session ops above, not Invalid.
         | control_message::Body::RfwdOpen(_)
-        | control_message::Body::RfwdClose(_) => MessageKind::Request,
+        | control_message::Body::RfwdClose(_)
+        // Remote file ops (ADR-0029, M15): relayed like any request, so the
+        // conduit gets the target's own answer. Nothing here authorizes
+        // them; the answering side does.
+        | control_message::Body::FileReadOpen(_)
+        | control_message::Body::FileWriteOpen(_)
+        | control_message::Body::FileListOpen(_)
+        | control_message::Body::FileMkdirOpen(_) => MessageKind::Request,
     }
 }
 
@@ -482,6 +489,20 @@ mod tests {
             classify(&control_message::Body::SessionList(wire::SessionList {})),
             MessageKind::Request
         );
+    }
+
+    /// The four remote file ops (ADR-0029) are requests a conduit may
+    /// relay, never `Invalid`; the answering side decides.
+    #[test]
+    fn file_ops_classify_as_requests() {
+        for body in [
+            control_message::Body::FileReadOpen(wire::FileReadOpen::default()),
+            control_message::Body::FileWriteOpen(wire::FileWriteOpen::default()),
+            control_message::Body::FileListOpen(wire::FileListOpen::default()),
+            control_message::Body::FileMkdirOpen(wire::FileMkdirOpen::default()),
+        ] {
+            assert_eq!(classify(&body), MessageKind::Request, "{body:?}");
+        }
     }
 
     #[test]

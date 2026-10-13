@@ -789,6 +789,84 @@ async fn controller_refuses_session_open_but_answers_ping() {
     harness.shutdown().await;
 }
 
+/// ADR-0029 decision 16: the four remote file ops are request-shaped, and the
+/// controller serves none of them. Each is refused `UNSUPPORTED` on the
+/// registered connection, with nothing created, and the registration itself
+/// is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn controller_refuses_the_four_file_ops() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+
+    let (dialed, ctl, peer_hello) = harness.register(&target, "").await.expect("registers");
+    let mut session = Session::from_control(dialed.connection.clone(), ctl, peer_hello);
+
+    let requests = [
+        control_message::Body::FileReadOpen(wire::FileReadOpen {
+            path: "/srv/a".into(),
+            user: String::new(),
+        }),
+        control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+            path: "/srv/b".into(),
+            size: 1,
+            ..Default::default()
+        }),
+        control_message::Body::FileListOpen(wire::FileListOpen {
+            path: "/srv/".into(),
+            ..Default::default()
+        }),
+        control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
+            path: "/srv/new".into(),
+            ..Default::default()
+        }),
+    ];
+    for (i, body) in requests.into_iter().enumerate() {
+        let request_id = 500 + i as u64;
+        session
+            .send_control_message(&ControlMessage::new(request_id, body))
+            .await
+            .expect("send file op");
+        // The controller's own liveness probe can interleave a `Ping`
+        // ahead of the reply (see the test above); answer it and keep
+        // reading.
+        let reply = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                let msg = session
+                    .next_control_message()
+                    .await
+                    .expect("no stream error")
+                    .expect("stream open");
+                match msg.body {
+                    Some(control_message::Body::Ping(_)) => {
+                        session
+                            .send_pong(msg.request_id)
+                            .await
+                            .expect("answer ping");
+                    }
+                    _ => return msg,
+                }
+            }
+        })
+        .await
+        .expect("reply within the timeout");
+        assert_eq!(reply.request_id, request_id);
+        match reply.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(e)),
+            })) => assert_eq!(e.error_code(), ErrorCode::Unsupported, "request {i}"),
+            other => panic!("request {i}: expected a remote UNSUPPORTED, got {other:?}"),
+        }
+    }
+    assert!(
+        harness.listen.registry().get("widget").is_some(),
+        "the refused file ops must not have touched the registration itself"
+    );
+
+    drop(session);
+    harness.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // `run_target` — the actual `qsh reverse` entry point end to end
 // (`qsh_core::reverse::target::run_reverse`, via `ReverseHarness::run_target`

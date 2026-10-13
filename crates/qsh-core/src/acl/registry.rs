@@ -28,17 +28,21 @@
 //! reset code (`RESET_CODE_FORBIDDEN`) plus a real audit deny record,
 //! never message equality. See [`SeamKind::StreamReset`]'s own doc.
 //!
-//! `forward.socks` / `file.read` / `file.write` are excluded too: they are
-//! always-denied (`Action::is_always_denied`), but for two different
-//! reasons. `file.read`/`file.write` are P1-unimplemented — no wire op
-//! exists yet for a peer to hit the gate through. `forward.socks` is
-//! undrivable by design, permanently — `-D` authorizes every `CONNECT` as
-//! `forward.local` instead (ADR-0019 결정 6), and a client-attached label
-//! can't carry authorization, so no wire op will ever construct this
-//! action. This exclusion is anchored by this module's own `#[cfg(test)]`
+//! `forward.socks` is excluded too: it is always-denied
+//! (`Action::is_always_denied`) and undrivable by design, permanently --
+//! `-D` authorizes every `CONNECT` as `forward.local` instead (ADR-0019
+//! 결정 6), and a client-attached label can't carry authorization, so no
+//! wire op will ever construct this action. `file.read` / `file.write` used
+//! to be excluded as well, while no wire op existed; the four remote file
+//! ops (`file.read`, `file.write`, `file.list`, `file.mkdir`, ADR-0029
+//! decision 3) gave them rows, so [`ALWAYS_DENIED_NO_OP`] shrank to
+//! `forward.socks`. The gate still denies them for now
+//! (`Action::is_always_denied` is unchanged until the host control plane
+//! lands), so those rows are driven as denials only. This exclusion is
+//! anchored by this module's own `#[cfg(test)]`
 //! `deny_seams_cover_every_action_except_the_always_denied_trio`: it fails
-//! the moment a new `Action` — always-denied or not — has no row and no
-//! documented exclusion here.
+//! the moment a new `Action` has neither a row nor a documented exclusion
+//! here.
 
 use super::Action;
 
@@ -178,6 +182,30 @@ pub const DENY_SEAMS: &[DenySeam] = &[
         action: Action::HostReverse,
         kind: SeamKind::ReverseRegistration,
     },
+    // The four remote file ops (ADR-0029 decision 3): two actions, four
+    // wire ops. `file.list` authorizes as `file.read` and `file.mkdir` as
+    // `file.write`, the same way `session.get` shares `session.list`'s
+    // action, so each op needs its own row name.
+    DenySeam {
+        name: "file.read",
+        action: Action::FileRead,
+        kind: SeamKind::ControlStreamOp,
+    },
+    DenySeam {
+        name: "file.write",
+        action: Action::FileWrite,
+        kind: SeamKind::ControlStreamOp,
+    },
+    DenySeam {
+        name: "file.list",
+        action: Action::FileRead,
+        kind: SeamKind::ControlStreamOp,
+    },
+    DenySeam {
+        name: "file.mkdir",
+        action: Action::FileWrite,
+        kind: SeamKind::ControlStreamOp,
+    },
     // F3 (M5 Step 4 adversarial review): the SessionData reattach inline
     // gate (`server/mod.rs`'s `handle_data_stream`, the `SessionData`
     // ticket branch) is a fifth remote-facing seam that answers
@@ -222,6 +250,10 @@ pub enum ResourceKind {
     ForwardBinding,
     /// The resolved reverse-host name being registered (`host.reverse`).
     ReverseHost,
+    /// The path string exactly as the requester sent it (`file.read`,
+    /// `file.write`, `file.list`, `file.mkdir`; ADR-0029 decision 4-7). The
+    /// canonical path travels separately, in `ResourceRef`.
+    FilePath,
 }
 
 /// Derives [`Op`], [`Op::ALL`], [`Op::as_str`], [`Op::spec`], and
@@ -329,6 +361,12 @@ declare_ops! {
     ForwardRemote => ("forward.remote", Action::ForwardRemote, ResourceKind::ForwardBinding, false),
     ForwardRemoteClose => ("forward.remote.close", Action::ForwardRemote, ResourceKind::ForwardBinding, true),
     HostReverse => ("host.reverse", Action::HostReverse, ResourceKind::ReverseHost, false),
+    // Files have no qsh owner, so `scope = "owned"` never narrows them
+    // (ADR-0029 decision 4-7).
+    FileRead => ("file.read", Action::FileRead, ResourceKind::FilePath, false),
+    FileWrite => ("file.write", Action::FileWrite, ResourceKind::FilePath, false),
+    FileList => ("file.list", Action::FileRead, ResourceKind::FilePath, false),
+    FileMkdir => ("file.mkdir", Action::FileWrite, ResourceKind::FilePath, false),
 }
 
 impl Op {
@@ -349,9 +387,11 @@ impl Op {
 /// opener/registering principal.
 ///
 /// [`OpSpec::op`] names a `docs/CLI.md` §2.4 dotted operation for the nine
-/// rows that are one, or the seam's own §2.5-prose name for the four that
+/// rows that are one, or the seam's own §2.5-prose name for the eight that
 /// are not (`forward.local`, `forward.remote`, `forward.remote.close`,
-/// `host.reverse`) — the exact naming [`DENY_SEAMS`] already uses.
+/// `host.reverse`, and the four file ops, which are wire ops of the `qsh
+/// cp` feature rather than `Ops` operations) — the exact naming
+/// [`DENY_SEAMS`] already uses.
 /// Deliberately not incidental: [`OP_REGISTRY`]'s (op, action) pairs are
 /// exactly [`DENY_SEAMS`]'s minus the one row with no CLI.md-documented
 /// op/seam name of its own (`"session.attach@data-stream"`, the internal
@@ -384,32 +424,20 @@ pub struct OpSpec {
     pub owned: bool,
 }
 
-/// PRD §9 actions with no [`OP_REGISTRY`] row, and why — the always-denied
-/// trio ([`Action::is_always_denied`]) [`DENY_SEAMS`] already excludes for
-/// the identical reason (its own
-/// `deny_seams_cover_every_action_except_the_always_denied_trio` anchor).
-/// Named here too, not merely inherited, so a reader of this table alone
-/// sees the gap and its reason without cross-referencing that test — the
-/// same `DEFERRED`-style discipline the milestone plans use elsewhere: an exclusion
-/// is only legitimate on record, with a reason, never a silent hole.
-pub const ALWAYS_DENIED_NO_OP: &[(Action, &str)] = &[
-    (
-        Action::ForwardSocks,
-        "-D runs SOCKS5 on the client and authorizes every CONNECT on the peer as \
-         forward.local (ADR-0019 decision 6); a client-attached label can't carry \
-         authorization, so no wire op will ever be built to construct this action",
-    ),
-    (
-        Action::FileRead,
-        "file.read (streaming file copy) is P1-deferred; no wire op exists yet for a peer to \
-         construct this action (docs/ROADMAP.md §3)",
-    ),
-    (
-        Action::FileWrite,
-        "file.write (streaming file copy) is P1-deferred; no wire op exists yet for a peer to \
-         construct this action (docs/ROADMAP.md §3)",
-    ),
-];
+/// PRD §9 actions with no [`OP_REGISTRY`] row, and why. Only
+/// `forward.socks` is left: `file.read` and `file.write` have rows now that
+/// the four file ops exist (ADR-0029 decision 3). Named here too, not merely
+/// inherited from [`Action::is_always_denied`], so a reader of this table
+/// alone sees the gap and its reason without cross-referencing a test -- the
+/// same `DEFERRED`-style discipline the milestone plans use elsewhere: an
+/// exclusion is only legitimate on record, with a reason, never a silent
+/// hole.
+pub const ALWAYS_DENIED_NO_OP: &[(Action, &str)] = &[(
+    Action::ForwardSocks,
+    "-D runs SOCKS5 on the client and authorizes every CONNECT on the peer as \
+     forward.local (ADR-0019 decision 6); a client-attached label can't carry \
+     authorization, so no wire op will ever be built to construct this action",
+)];
 
 #[cfg(test)]
 mod tests {
@@ -454,50 +482,49 @@ mod tests {
                 "forward.remote.close",
                 "forward.local",
                 "host.reverse",
+                "file.read",
+                "file.write",
+                "file.list",
+                "file.mkdir",
                 "session.attach@data-stream",
             ],
             "DENY_SEAMS row list drifted from this pin — if the drift is a \
              deliberate seam addition/removal, update this list as part of \
              that change; otherwise a row silently changed shape"
         );
-        assert_eq!(DENY_SEAMS.len(), 14, "DENY_SEAMS row count drifted");
+        assert_eq!(DENY_SEAMS.len(), 18, "DENY_SEAMS row count drifted");
     }
 
-    /// F1(a) (M5 Step 4 adversarial review) — the registry's coverage
-    /// anchor: the set of [`Action`]s covered by [`DENY_SEAMS`] rows must
-    /// equal `Action::ALL` minus the always-denied trio
-    /// (`ForwardSocks`/`FileRead`/`FileWrite`, `Action::is_always_denied`).
-    /// That trio has no row here, for two different reasons. `FileRead`/
-    /// `FileWrite` are P1-deferred — no wire op exists today that can
-    /// construct either for a real peer to hit a gate through
-    /// (`docs/ROADMAP.md` §3's guardrail table); the deferred-feature
-    /// guardrail table there is re-checked once real wire paths might
-    /// exist. `ForwardSocks`
-    /// is undrivable by design, permanently — `-D` authorizes every
-    /// `CONNECT` as `forward.local` instead (ADR-0019 결정 6), and no wire
-    /// op will ever construct `forward.socks` for a peer to hit. A newly
-    /// added `Action` — always-denied or not — fails this test until it
-    /// either gets a seam row or is added to the exclusion filter below
-    /// with a reason.
+    /// F1(a) (M5 Step 4 adversarial review) -- the registry's coverage
+    /// anchor: the [`Action`]s covered by [`DENY_SEAMS`] rows and the
+    /// [`ALWAYS_DENIED_NO_OP`] exclusions must partition `Action::ALL`. The
+    /// only exclusion is `ForwardSocks`, undrivable by design, permanently
+    /// (`-D` authorizes every `CONNECT` as `forward.local`, ADR-0019 결정 6).
+    /// `FileRead`/`FileWrite` are covered since the four file ops landed
+    /// (ADR-0029 decision 3), even though `Action::is_always_denied` still
+    /// denies them. A newly added `Action` fails this test until it either
+    /// gets a seam row or is added to [`ALWAYS_DENIED_NO_OP`] with a reason.
     #[test]
     fn deny_seams_cover_every_action_except_the_always_denied_trio() {
         let covered: std::collections::HashSet<Action> =
             DENY_SEAMS.iter().map(|s| s.action).collect();
-        let expected: std::collections::HashSet<Action> = Action::ALL
-            .iter()
-            .copied()
-            .filter(|a| !a.is_always_denied())
-            .collect();
+        let excluded: std::collections::HashSet<Action> =
+            ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
+        assert!(
+            covered.is_disjoint(&excluded),
+            "an action cannot be both covered by a DENY_SEAMS row and excluded"
+        );
+        let all: std::collections::HashSet<Action> = Action::ALL.iter().copied().collect();
+        let union: std::collections::HashSet<Action> = covered.union(&excluded).copied().collect();
         assert_eq!(
-            covered, expected,
-            "DENY_SEAMS must cover every Action::ALL member except the \
-             always-denied trio (ForwardSocks/FileRead/FileWrite via \
-             Action::is_always_denied) — FileRead/FileWrite have no \
-             constructing wire op yet (docs/ROADMAP.md §3's guardrail \
-             table is re-checked once one might exist) and ForwardSocks \
-             is undrivable by design (ADR-0019 결정 6: -D authorizes via \
-             forward.local, not this action); every other action needs a \
-             row here or this test fails"
+            union, all,
+            "DENY_SEAMS plus ALWAYS_DENIED_NO_OP must cover every Action::ALL member: \
+             every action needs a row or a documented exclusion"
+        );
+        assert_eq!(
+            excluded,
+            std::collections::HashSet::from([Action::ForwardSocks]),
+            "ForwardSocks is the one action no wire op will ever construct"
         );
     }
 
@@ -591,6 +618,10 @@ mod tests {
             Body::ExecStart(_) => BodyClassification::Seam("exec.run"),
             Body::RfwdOpen(_) => BodyClassification::Seam("forward.remote"),
             Body::RfwdClose(_) => BodyClassification::Seam("forward.remote.close"),
+            Body::FileReadOpen(_) => BodyClassification::Seam("file.read"),
+            Body::FileWriteOpen(_) => BodyClassification::Seam("file.write"),
+            Body::FileListOpen(_) => BodyClassification::Seam("file.list"),
+            Body::FileMkdirOpen(_) => BodyClassification::Seam("file.mkdir"),
             Body::Ping(_) => BodyClassification::NoAuthorizationSurface(
                 "keepalive, answered unconditionally with no ACL check",
             ),
@@ -624,9 +655,10 @@ mod tests {
     fn all_control_message_body_samples() -> Vec<qsh_proto::wire::control_message::Body> {
         use qsh_proto::wire::control_message::Body;
         use qsh_proto::wire::{
-            ExecStart, Hello, PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose,
-            RemoteForwardOpen, Response, SessionAttach, SessionClose, SessionEvent, SessionGet,
-            SessionList, SessionOpen, SessionRead, SessionResize, SessionWrite,
+            ExecStart, FileListOpen, FileMkdirOpen, FileReadOpen, FileWriteOpen, Hello,
+            PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose, RemoteForwardOpen,
+            Response, SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList,
+            SessionOpen, SessionRead, SessionResize, SessionWrite,
         };
         vec![
             Body::Hello(Hello::default()),
@@ -642,6 +674,10 @@ mod tests {
             Body::ExecStart(ExecStart::default()),
             Body::RfwdOpen(RemoteForwardOpen::default()),
             Body::RfwdClose(RemoteForwardClose::default()),
+            Body::FileReadOpen(FileReadOpen::default()),
+            Body::FileWriteOpen(FileWriteOpen::default()),
+            Body::FileListOpen(FileListOpen::default()),
+            Body::FileMkdirOpen(FileMkdirOpen::default()),
             Body::Ping(Ping::default()),
             Body::Pong(Pong::default()),
             Body::SessionEvent(SessionEvent::default()),
@@ -676,20 +712,24 @@ mod tests {
         }
     }
 
-    /// `ALWAYS_DENIED_NO_OP` must name exactly `Action::is_always_denied`'s
-    /// three actions — same anchor `deny_seams_cover_every_action_except_the_always_denied_trio`
-    /// pins for `DENY_SEAMS`, restated here since this exclusion list is
-    /// its own named thing (`OpSpec`'s own doc), not merely inherited.
+    /// `ALWAYS_DENIED_NO_OP` must name exactly the always-denied actions
+    /// that no [`OP_REGISTRY`] row constructs. Today `Action::is_always_denied`
+    /// still names the trio, and the file ops gave two of them rows, so the
+    /// exclusion list is the third alone. When the gate stops denying
+    /// `file.*` the left-hand side shrinks to `forward.socks` and this test
+    /// needs no edit.
     #[test]
-    fn always_denied_no_op_names_exactly_the_always_denied_trio() {
+    fn always_denied_no_op_names_the_always_denied_actions_that_have_no_op() {
         let excluded: std::collections::HashSet<Action> =
             ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
-        let always_denied: std::collections::HashSet<Action> = Action::ALL
+        let driven: std::collections::HashSet<Action> =
+            OP_REGISTRY.iter().map(|s| s.action).collect();
+        let always_denied_without_op: std::collections::HashSet<Action> = Action::ALL
             .iter()
             .copied()
-            .filter(|a| a.is_always_denied())
+            .filter(|a| a.is_always_denied() && !driven.contains(a))
             .collect();
-        assert_eq!(excluded, always_denied);
+        assert_eq!(excluded, always_denied_without_op);
     }
 
     /// The "표 두 벌 금지" cross-check (M5 plan Step 8 (c) (2473c88)): `OP_REGISTRY`

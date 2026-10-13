@@ -43,6 +43,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
+- `file.v1`(ADR-0029)은 상수 `CAP_FILE_V1`로 정의만 되어 있고 **아직 광고하지 않는다**(`LOCAL_CAPABILITIES`에 없다). 파일 op의 wire와 인가 seam은 이 문자열 없이도 dispatch되며, 항상-deny 게이트가 걷히는 단계에서 광고와 negotiation 규칙이 함께 선다.
 
 ## 5. Frame layer
 
@@ -71,10 +72,15 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 | Control | dialer가 handshake 후 첫 bidi | bidi, 연결당 1개 | `Hello` 교환 후 양방향 `ControlMessage` RPC(role 대칭), heartbeat, 비동기 event |
 | Session data | attach하는 쪽, attach당 1개 | bidi | `StreamHeader{SESSION_DATA, ticket}` 후 framed `Output/Input/InputAck/Gap/Resize/Exit` |
 | Exec data | exec 요청자, exec당 1개 | bidi | `StreamHeader{EXEC_DATA, ticket}` 후 framed `Stdin/StdinEof/Stdout/Stderr/ExecExit` |
+| File data | 요청자, `file.read`/`file.write` 전송당 1개 | bidi | `StreamHeader{FILE_DATA, ticket}` 후 framed `FileFrame{data/end/result}`(ADR-0029 결정 9, 아래 문단) |
 | Tunnel (local fwd) | local listener 쪽, TCP 연결당 1개 | bidi | `StreamHeader{TCP_CONNECT, host, port}` → `ConnectResult{ok, code, message}` → (ok면) raw bytes |
 | Tunnel (remote fwd) | remote port를 bind한 쪽, accept당 1개 | bidi | `StreamHeader{TCP_ACCEPTED, forward_id}` → raw bytes |
 
 **Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
+
+**`FILE_DATA`(ADR-0029 결정 9).** `FileReadOpen`/`FileWriteOpen`이 ACL을 통과한 뒤 발급되는 ticket으로만 열린다. 프레임은 §5 그대로(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이고 `data` 청크는 `FILE_CHUNK_MAX`(32 KiB) 이하다. `FileEnd{size, blake3}`가 바이트열을 닫고, `FileWriteResult`는 `file.write` 스트림에서 host가 요청자에게만 보낸다. 청크 상한 초과·`end` 뒤의 frame·요청자가 보낸 `result`는 프로토콜 위반이다. 이 단계(M15 (b))에는 `FILE_DATA` 스트림을 받는 pump가 없어서 host는 이 header를 `BAD_HEADER`로 거절한다 — 파일 복사 본체가 오는 단계에서 pump가 선다. `FileListOpen`/`FileMkdirOpen`은 control 스트림 안에서만 답하며 `FileListed` 한 페이지는 `FILE_LIST_PAGE_MAX`(512)개 항목으로 `CONTROL_FRAME_MAX` 안에 들어간다(`FILE_LIST_DIR_MAX` 65536은 디렉터리당 상한).
+
+**파일 op의 host 쪽 순서(ADR-0029 결정 8, 이 단계의 몫).** 1) 경로 모양 검사와 home 해석(`file::guard::shape_path`) — 실패는 `INVALID_ARGUMENT`(비 unix host는 `UNSUPPORTED`), 판정할 것이 없으므로 ACL도 audit도 없다. 2) ACL choke point — 경로 문자열 그대로가 audit `resource`이고 거절은 균일한 `PERMISSION_DENIED`다. 항상-deny 게이트가 아직 `file.read`/`file.write`를 막으므로 실 정책에서는 여기서 끝나고 정규화기는 불리지 않는다. 3) 이후 단계(사용자 힌트·상태 경로·쿼터·열기·응답)는 아직 없고, 인가를 통과한 요청은 `UNSUPPORTED`로 답한다.
 
 **`ConnectResult`(§9의 data-stream message, `qsh.wire.v1`):** `{ bool ok = 1; string code = 2; string message = 3; }`. frame layer는 위와 같은 §5 재사용(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이며, `ok = true` 이후로는 frame 없이 raw bytes로 전환된다(§5의 터널 스트림 예외). `ok = false`일 때 `code`는 CLI.md §3.3 어휘에서 온다 — dial 실패는 `CONNECTION_FAILED`, 위 inline ACL 거부는 `PERMISSION_DENIED`.
 
@@ -207,6 +213,15 @@ message ControlMessage {
                                             //   등장 — 그 연결은 Hello/session/tunnel/exec dispatch에
                                             //   전혀 닿지 않는 전용 responder로만 라우팅된다
     PairingAccepted     pairing_accepted = 71; // §15. 성공 시에만; 실패는 기존 Error frame 재사용
+
+    FileReadOpen        file_read_open = 80;   // ADR-0029. path, user -> FileReadOpened{ticket, size, mode, mtime}
+                                               //   ; ACL file.read
+    FileWriteOpen       file_write_open = 81;  // path, size, mode, overwrite, name_if_dir, preserve, mtime, user
+                                               //   -> FileWriteOpened{ticket, into_dir}; ACL file.write
+    FileListOpen        file_list_open = 82;   // path, after, user -> FileListed{kind, size, mode, mtime,
+                                               //   entries[](≤ FILE_LIST_PAGE_MAX), more, unlistable}; ACL file.read
+    FileMkdirOpen       file_mkdir_open = 83;  // path, mode, name_if_dir, preserve, user
+                                               //   -> FileMkdirDone{created, into_dir}; ACL file.write
   }
 }
 
@@ -224,6 +239,10 @@ message Response {
     SessionWritten      session_written = 8; // session_write 성공 {bytes_written — 호스트가 실제 수용한 바이트}
     SessionResized      session_resized = 9; // session_resize 성공 {cols, rows — 실제 적용된 크기}
     SessionClosed       session_closed = 10; // session_close 성공 (final_seq)
+    FileReadOpened      file_read_opened = 11;   // file_read_open 성공
+    FileWriteOpened     file_write_opened = 12;  // file_write_open 성공
+    FileListed          file_listed = 13;        // file_list_open 성공
+    FileMkdirDone       file_mkdir_done = 14;    // file_mkdir_open 성공
     Error               error = 15;          // { code, message, retryable } — code는 CLI.md §3.3 어휘
   }
 }
@@ -251,8 +270,8 @@ message ReverseRegistration {
 
 // 모든 비-control 스트림의 첫 frame.
 message StreamHeader {
-  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED
-  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / TCP_ACCEPTED(forward_id)
+  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED | FILE_DATA
+  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / FILE_DATA / TCP_ACCEPTED(forward_id)
   string host = 3; uint32 port = 4;    // TCP_CONNECT 전용
   bool deny_host_local = 5;            // TCP_CONNECT 전용, dial-filter.v1을 광고하는 peer만 준수
                                         //   (ADR-0019 결정 3). 기본값 false = 오늘 동작(무필터).
@@ -282,6 +301,16 @@ message ExecFrame {
     Stdout   stdout = 3;    // { bytes data; }         chunk ≤ 16 KiB
     Stderr   stderr = 4;    // { bytes data; }          chunk ≤ 16 KiB
     ExecExit exec_exit = 5; // { int32 exit_code; optional string signal; bool timed_out; }
+  }
+}
+
+// File data 스트림 frame(ADR-0029 결정 9). data 청크 ≤ FILE_CHUNK_MAX(32 KiB).
+// FileWriteResult는 file.write 스트림에서 host -> 요청자 방향으로만 흐른다.
+message FileFrame {
+  oneof body {
+    bytes           data = 1;
+    FileEnd         end = 2;     // { uint64 size; bytes blake3; }  blake3는 보낸 모든 바이트의 BLAKE3-256(32바이트)
+    FileWriteResult result = 3;  // { bool ok; string code; string message; bool overwritten; }
   }
 }
 ```
@@ -472,7 +501,7 @@ message ExecFrame {
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **19종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8)가 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **20종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9)가 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
 
 1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
 2. **wire·local 메시지 decode 8종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로), `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`, localctl UDS 첫 두 메시지). 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
@@ -489,7 +518,9 @@ message ExecFrame {
 
 **8. `parse_openssh_key`(ADR-0026).** `crates/qsh-proto/src/openssh/`의 손으로 쓴 OpenSSH 키 파서를 흔든다. `qsh init --import-ssh-key`가 읽는 개인키 파일과 `authorized_keys` 미리보기가 읽는 공개키 목록이 대상이다. 항목 7과 같은 이유(신뢰 불가 **로컬** 입력)로 이 표면에 있고, 항목 7과 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. 첫 입력 바이트가 봉투 해제, 이진 `openssh-key-v1` 본문, `authorized_keys` 줄 분류 중 하나를 고른다. 불변식: panic 없음, 받아들인 키의 공개키 wire blob이 온전함, 줄 번호가 입력 줄 수 안에서 단조 증가함. 길이 접두가 남은 입력보다 크면 할당 전에 거절하므로 입력 크기로 할당이 정해진다.
 
-corpus는 `fuzz/corpus/`에 체크인한다. **19종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 18종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+**9. `decode_file_frame`(ADR-0029 결정 9).** `FILE_DATA` 스트림의 프레임(`FileFrame`: `data`/`end`/`result` oneof)을 흔든다. `ExecFrame`·`SessionFrame`과 같은 종류의 신뢰 불가 peer 입력이지만 자기 프레임 상한(`DATA_FRAME_MAX`)과 청크 상한(`FILE_CHUNK_MAX` 32 KiB), 자기 인코더(`encode_file_frame`)를 가지므로 `decode_control`과 별도 타깃이다. `FileReadOpen` 등 control 쪽 새 메시지는 `ControlMessage` 안에 있어 `decode_control`이 이미 덮는다. 항목 7·8과 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. decode 뒤 `validate()`를 체인한다. 불변식: panic 없음, 수신 쪽이 받아들인 프레임은 송신 쪽 청크 상한에 걸리지 않고(전체 프레임 크기 초과만 예외), 거절된 프레임은 `ChunkTooLarge`로 거절된다.
+
+corpus는 `fuzz/corpus/`에 체크인한다. **20종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 19종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
 
@@ -599,9 +630,9 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 | 항목 | 정의 위치 | 값 |
 |---|---|---|
-| `ControlMessage` oneof 태그(18 branch) | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `message ControlMessage` | `hello=10`, `response=11`, `session_open=20`…`session_write=28`(`25`는 결번), `exec_start=30`, `rfwd_open=40`, `rfwd_close=41`, `ping=50`, `pong=51`, `session_event=60`, `pairing_proof=70`, `pairing_accepted=71` |
-| `Response` oneof 태그(10 branch + `error`) | 같은 파일의 `message Response` | `session_opened=1`…`session_closed=10`, `error=15` |
-| top-level `message` 선언 49종의 필드 번호 전체 | 같은 파일 | `grep -c '^message '` = 49 |
+| `ControlMessage` oneof 태그(22 branch) | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `message ControlMessage` | `hello=10`, `response=11`, `session_open=20`…`session_write=28`(`25`는 결번), `exec_start=30`, `rfwd_open=40`, `rfwd_close=41`, `ping=50`, `pong=51`, `session_event=60`, `pairing_proof=70`, `pairing_accepted=71`, `file_read_open=80`…`file_mkdir_open=83` |
+| `Response` oneof 태그(14 branch + `error`) | 같은 파일의 `message Response` | `session_opened=1`…`session_closed=10`, `file_read_opened=11`…`file_mkdir_done=14`, `error=15` |
+| top-level `message` 선언 61종의 필드 번호 전체 | 같은 파일 | `grep -c '^message '` = 61 (ADR-0029의 파일 op message 12종 포함) |
 | `reserved 25` | 같은 파일의 `ControlMessage` 안 | 구 `SessionSignal`, 번호만 예약(P1). prost는 unknown field를 버리므로 25는 body 없는 `ControlMessage`로 디코드되고, 호스트는 `UNSUPPORTED`로 답한다(§9) |
 | `AttachMode.ATTACH_MODE_RO = 2` | 같은 파일의 `enum AttachMode` | `UNSPECIFIED=0`/`RW=1`/`RO=2`. 오늘 hosts는 RO 요청에 `INVALID_ARGUMENT`로 답한다 — `reserved 25`와 같은 성격의 예약 번호다 |
 | `ErrorCode` 어휘 16종 + `Unknown(raw)` passthrough | `crates/qsh-proto/src/error.rs`의 `ErrorCode::KNOWN`과 모듈 머리의 passthrough 정책 | `InvalidArgument`…`Internal` 16종. 미지 문자열은 `Unknown(raw)`로 무손실 왕복 |
@@ -609,7 +640,9 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 | Frame 헤더 레이아웃 | `crates/qsh-proto/src/frame.rs` 머리 주석; 1차 결정 `docs/adr/0001-custom-quic-protocol.md` | `u32` BE length prefix + prost body. ADR-0001이 이 모양을 고른 결정적 이유는 P1 TCP fallback(ADR-0005)을 wire 변경 없이 얹기 위해서다 — 이 layer를 얼리는 것은 그 경로도 함께 지키는 일이다 |
 | `CONTROL_FRAME_MAX` / `DATA_FRAME_MAX` | `crates/qsh-proto/src/frame.rs` | 256 KiB / 64 KiB |
 | `EXEC_CHUNK_MAX` / `SESSION_CHUNK_MAX` / `SESSION_READ_MAX_BYTES` | `crates/qsh-proto/src/wire.rs` | 16 KiB / 16 KiB / 192 KiB |
-| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`. 0값의 취급은 §16.8 |
+| `FILE_CHUNK_MAX` / `FILE_LIST_PAGE_MAX` / `FILE_LIST_DIR_MAX` | `crates/qsh-proto/src/wire.rs` | 32 KiB / 512 / 65536 |
+| `enum FileKind` | 같은 파일의 `enum FileKind` | `UNSPECIFIED=0`/`FILE=1`/`DIR=2`/`SYMLINK=3`/`OTHER=4` |
+| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`. 0값의 취급은 §16.8 |
 | sequence 시맨틱 | §8; `crates/qsh-core/src/broker/ring.rs` 머리 주석 | 세션 수명 누적 output byte offset(`u64`). 오프셋 배정은 `ReplayStore::push` 한 곳뿐 |
 
 ### 16.2 동결 대상 — `.proto` 밖의 상호운용 계약

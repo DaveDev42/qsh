@@ -312,6 +312,26 @@ async fn bogus_ticket_stream_is_reset_without_spawn_or_audit() {
     assert_eq!(h.server.pending_tickets(), 0);
 }
 
+/// ADR-0029 decision 9 adds `FILE_DATA`, but no ticket for it exists in this
+/// build (the four file ops are all refused before one is minted), so a peer
+/// that opens one anyway is reset with the same non-distinguishing code as any
+/// other unredeemable header: no resource, no audit line.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_data_stream_is_reset_without_resource_or_audit() {
+    let h = LoopbackHarness::start().await;
+    let s = h.session().await;
+    let (send, recv) = s.connection().open_bi().await.unwrap();
+    let mut data = FramedStream::data(send, recv);
+    data.send
+        .send(&StreamHeader::file_data(vec![0u8; 16]))
+        .await
+        .unwrap();
+    let res = data.recv.recv::<qsh_proto::wire::FileFrame>().await;
+    assert!(res.is_err(), "stream must be reset, got {res:?}");
+    assert!(h.audit.records().is_empty());
+    assert_eq!(h.server.pending_tickets(), 0);
+}
+
 /// A peer that redeems its ticket and then never reads the data stream
 /// must not be able to wedge the host: once the deadline kills the child,
 /// the host waits at most `DRAIN_GRACE` for the tail to drain, then resets

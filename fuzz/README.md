@@ -3,11 +3,11 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds nineteen `cargo-fuzz` targets.
-Eighteen are parser harnesses over that surface; one of them,
+anything else touches it. This crate holds twenty `cargo-fuzz` targets.
+Nineteen are parser harnesses over that surface; one of them,
 `fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
-paths (trust store files, ACL principal text). The nineteenth, stateful
+paths (trust store files, ACL principal text). The twentieth, stateful
 target, `broker_ops`, drives `qsh-core`'s session broker state machine
 (append/read/lease/resume/attach/tick/reap) against a model oracle instead
 of decoding a single message; see "The `broker_ops` state machine target"
@@ -74,9 +74,10 @@ Run from `fuzz/`. `cargo fuzz list` prints the same set.
 | target | file | covers |
 |---|---|---|
 | `frame_decoder` | `crates/qsh-proto/src/frame.rs` | `FrameDecoder::push`/`next_frame`/`take_remaining`, driven as an arbitrary interleaved sequence (models a peer trickling bytes and a caller draining/splicing mid-stream). Asserts no panic, no allocation-before-cap-check on an oversize header, and full byte conservation. |
-| `decode_control` | `crates/qsh-proto/src/wire.rs` | `decode_msg::<ControlMessage>` — the whole control-stream oneof (Hello, Session*, ExecStart, Rfwd*, Ping/Pong, SessionEvent, PairingProof/Accepted, Response{...,Error}). Chains `SessionWrite::validate`/`SessionAttach::attach_mode`+`wants_write`/`SessionReadResult::validate`/`Error::error_code` on the relevant decoded variant. |
+| `decode_control` | `crates/qsh-proto/src/wire.rs` | `decode_msg::<ControlMessage>` — the whole control-stream oneof (Hello, Session*, ExecStart, Rfwd*, File{Read,Write,List,Mkdir}Open, Ping/Pong, SessionEvent, PairingProof/Accepted, Response{..., the four File* bodies, Error}). Chains `SessionWrite::validate`/`SessionAttach::attach_mode`+`wants_write`/`SessionReadResult::validate`/`Error::error_code` on the relevant decoded variant. |
 | `decode_hello` | `wire.rs` | `decode_msg::<Hello>` alone — the very first control-stream message, narrower target than `decode_control` for coverage-guided mutation to focus on. |
 | `decode_exec_frame` | `wire.rs` | `decode_msg::<ExecFrame>` — the EXEC_DATA stream oneof (Stdout/Stderr/Stdin/StdinEof/ExecExit), independent grammar/cap from the control stream. |
+| `decode_file_frame` | `wire.rs` | `decode_msg::<FileFrame>` + `.validate()` + `encode_file_frame` chained — the FILE_DATA stream oneof (data/end/result, ADR-0029 decision 9), own frame cap and 32 KiB chunk cap. Asserts a frame the receiver accepts is never refused by the sender-side chunk cap, and a rejected one is refused with `ChunkTooLarge`. |
 | `decode_session_frame` | `wire.rs` | `decode_msg::<SessionFrame>` + `.validate()` chained — the SESSION_DATA stream oneof the PTY/replay-ring pump calls on every decoded frame. |
 | `decode_stream_header` | `wire.rs` | `decode_msg::<StreamHeader>` + `.stream_kind()` chained — the first message on every newly-opened QUIC stream, before kind-based dispatch. |
 | `decode_connect_result` | `wire.rs` | `decode_msg::<ConnectResult>` + `sanitize_peer_text` on `code`/`message` chained — the reply a `-L` local-forward dial reads off the `TCP_CONNECT` stream (`crates/qsh-core/src/tunnel/local.rs`), the sole top-level `decode_msg` message reached with no ticket in front of it. |
@@ -208,6 +209,11 @@ tests and fixtures — not random bytes — per target:
   `SESSION_CHUNK_MAX`), encoded via `prost::Message::encode_to_vec` (the
   same bytes `decode_msg` is handed in production, i.e. *not*
   frame-wrapped).
+- `decode_file_frame`: the ADR-0029 decision 9 frame grammar — a short and
+  an empty `data` chunk, one chunk over `FILE_CHUNK_MAX`, an `end` with a
+  32-byte hash, an `end` with a wrong-length hash, a succeeded `result`
+  (`overwritten`) and a failed one, the empty input, an unknown field and a
+  truncated length prefix.
 - `decode_local_hello` / `decode_local_admin_request`: the same treatment
   for `qsh.local.v1`, covering each `LocalStreamKind` variant and each
   `LocalAdminRequest` oneof arm plus the `body: None` discriminator case
