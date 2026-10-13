@@ -110,6 +110,7 @@ fn trust_types_match_documented_shape() {
         fingerprint: "sha256:BASE64FINGERPRINT".into(),
         address: "personal-mac.example.com:4433".into(),
         added_at: "2026-08-17T00:00:00Z".into(),
+        role: None,
     };
     let add = TrustAddData {
         peer: peer.clone(),
@@ -128,6 +129,26 @@ fn trust_types_match_documented_shape() {
         json.as_object().unwrap().get("updated").is_none(),
         "updated: None must be omitted, not null: {json}"
     );
+
+    // ADR-0045 결정 9: `role` is omitted for a pin with no `role` key (a
+    // pre-ADR-0045 pin) and an open string otherwise.
+    assert!(
+        serde_json::to_value(&peer)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get("role")
+            .is_none(),
+        "role: None must be omitted, not null"
+    );
+    let with_role = TrustPeer {
+        role: Some("full".into()),
+        ..peer.clone()
+    };
+    assert_eq!(serde_json::to_value(&with_role).unwrap()["role"], "full");
+    let back: TrustPeer =
+        serde_json::from_value(serde_json::to_value(&with_role).unwrap()).unwrap();
+    assert_eq!(back, with_role);
 
     let moved = TrustAddData {
         peer: peer.clone(),

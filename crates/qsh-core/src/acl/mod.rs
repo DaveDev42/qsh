@@ -29,6 +29,7 @@ use qsh_transport::{AuthPath, Principal};
 mod load;
 mod policy;
 mod registry;
+mod roles;
 
 // F8 (M5 Step 2 adversarial review) asked whether `ActionPattern` (and,
 // to stay lint-consistent, its `Policy`/`Rule`/`Scope`/`PolicySource`/
@@ -64,6 +65,7 @@ pub(crate) use load::{
     ca_policy_example_row, example_allow_actions, policy_example_rows, policy_example_rows_with,
 };
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
+pub use roles::{ROLE_GRANTS, RoleGrant, RoleScope, role_grant};
 
 // Expands to the literal restart-notice string below. A `macro_rules!`
 // rather than a plain `&str` fn/const alias so `crate::doctor`'s two

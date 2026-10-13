@@ -115,7 +115,7 @@ Broker
 - **Default deny, fail closed:** 매칭 allow 없음 → `PERMISSION_DENIED`; acl.toml이 없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR` 노출(원격 peer에게는 절대 노출되지 않는다 — 노출하면 그 자체가 host 설정 상태 oracle이다). "오류 시 개방"은 존재하지 않는다. 정책은 **프로세스 시작 시 1회** 로드한다 — lazy load는 하지 않는다: 첫 요청 시점의 로드는 "판정 불가" 창을 만들고, 그 창에서 fail-open하면 인증 전 리소스 금지 불변식이 깨진다.
 - **단일 choke point:** 호스트 측 `server::dispatch`가 디코딩된 모든 요청에 대해 `Authorizer::check(principal, auth_path, action, resource)`를 **리소스 생성(PTY spawn/exec fork/socket bind/ticket 발급) 이전에** 호출한다. `auth_path`(`Pin`|`Ca`)는 transport가 principal과 함께 connection에 부착하는 "어떤 신뢰 경로로 인증됐는가"이며, principal 모양으로는 복원할 수 없다(CA 발급 leaf도 `qsh://device/…` SAN으로 `device:` principal을 낼 수 있다) — 정책 파일 도입 전 임시 정책이던 `AllowAllPinned`(allow-all-**pinned**)는 이 값으로만 판정한다. 클라이언트 측 코드와 렌더러에는 ACL 로직이 0이다. op → 필요 ACL action 매핑은 CLI.md의 매핑 표가 정본이다.
 - **거부 문면 균일성:** 네 인가 지점(`Server::authorize`·`authorize_stream`·`authorize_owned`·`reverse::admit::admit`)과 그 감사-쓰기-실패 fail-closed 분기가 원격 peer에게 내려보내는 `PERMISSION_DENIED`는 정책 거부·소유권 거부·fail-closed 거부를 가리지 않고 단일 상수 `qsh_core::acl::PERMISSION_DENIED_MESSAGE`("peer is not allowed to perform this operation on this host")를 그대로 쓴다 — action/capability/resource/principal을 노출하면 그 자체가 정책 열거 oracle이 되기 때문이다. `authorize_owned`는 `authorize`의 owner-aware 자매 함수다 — `ResourceRef.owner`를 채운 채로 `Authorizer::check` + 단일 terminal audit record를 수행하는 같은 헬퍼가, 세션 소유권 게이트(`authorize_session_control` — 얇아진 `require_opener`로 owner를 조회한 뒤 위임)와 remote forward 소유권 게이트(`handle_rfwd_close`)에서 각각 쓰인다. `authorize_stream`은 프로덕션 호출자가 둘이다: `forward.local` 인라인 `TCP_CONNECT` 게이트(거부를 `ConnectResult`에 이 상수 그대로 실어 보낸 뒤 매칭되는 코드로 스트림을 정리한다)와 `SessionData` 재접속 인라인 게이트(`Server::handle_data_stream`, 실을 응답 자체가 없어 `RESET_CODE_FORBIDDEN` 스트림 reset이 거부 그 자체다 — 이 seam의 균일성 의무는 문면 동일성이 아니라 reset 코드와 실제 audit deny 레코드다). 이 seam들의 정본 목록은 `qsh_core::acl::DENY_SEAMS`다. `localctl`의 `NotOwner` 거부("this forward is owned by another client on this host")는 **이 상수를 쓰지 않는다** — 한 호스트 위 두 로컬 클라이언트 사이의 same-uid 신뢰 경계이지 원격 peer 인가 계층이 아니기 때문이다(`docs/design/protocol.md` §11-3, "localctl은 인가 계층이 아니다").
-- **Audit:** 결정당 한 줄 JSONL(`$XDG_STATE_HOME/qsh/audit.log`)이다. 필드는 ts, request_id, principal, action, resource, decision, rule index, `auth_path`, peer_addr, `count`(선택 — admission·quota 거부 집계 요약 레코드에만 실리는 억제 건수, 그 외 모든 레코드는 생략)다.
+- **Audit:** 결정당 한 줄 JSONL(`$XDG_STATE_HOME/qsh/audit.log`)이다. 필드는 ts, request_id, principal, action, resource, decision, rule index, `auth_path`, peer_addr, `count`(선택 — admission·quota 거부 집계 요약 레코드에만 실리는 억제 건수, 그 외 모든 레코드는 생략), `role`(선택 — 판정 근거가 trust role이었던 원격 판정과 role을 쓰는 로컬 trust 쓰기에만 실리는 role 이름, 그 외 모든 레코드는 생략, ADR-0045 결정 16)다.
   - 레코드 타입에 argv·PTY 내용·키를 담을 **필드 자체가 없어** "내용 무기록"이 규율이 아니라 타입 수준 속성이다(opt-in `audit.log_argv`만 예외이고 구현하지 않는다).
   - **Audit은 fail-closed다.** 쓰기가 실패하면(디스크 만실 등) 그 뒤의 인가 판정은 감사 없이 조용히 허용되지 않는다. 감사 없는 서비스보다 서비스 없는 감사가 낫다는 트레이드오프이며, `[audit]`의 회전·retention(§7)이 상시 디스크 예산을 유계로 만들어 이 fail-closed가 자기 유발 서비스 거부가 되는 폭을 줄인다. 다만 레코드 하나가 `max_bytes`보다 크면 분할·재시도 없이 그 레코드 하나만 담은 파일이 되므로, 파일당 실제 상한은 `max(max_bytes, 레코드 1개 크기)`다.
   - **Admission 거부**(`resource` 값, `docs/CLI.md` §6.12): `rate_limited`(주소 미검증 Initial, source당), `at_capacity`(handshake 동시성 상한), `validated_rate_limited`(검증된 Initial, source당).
@@ -133,7 +133,7 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
 ├── config.toml           # [serve] [identity] [audit] [listen] [reverse] [transport] [recovery] — 키와 기본값은 아래 목록
 ├── hosts.toml            # [[host]] name·address·user — 클라이언트 쪽 순수 주소록 (아래 설명)
-├── trust.toml            # pinned peers + CAs
+├── trust.toml            # pinned peers (+ optional role 키, ADR-0045) + CAs
 ├── acl.toml              # serve/listen 역할만 읽음
 └── identity/             # device.pem (+ file-mode일 때 device.key 0600)
 ~/.local/state/qsh/       # $XDG_STATE_HOME: audit.log, resume.json(0600; session_ref → {token, peer_spki_sha256, expires_at, …}; flock + tmp+rename 원자 교체, ADR-0007)
@@ -161,6 +161,12 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 - qsh는 이 파일을 읽기만 하고 쓰지 않는다(수동 편집 전용).
 - `user`는 계정 선택이 아니라 CLI.md §7의 assertion hint다. 명시적 힌트가 항상 우선하고 hosts.toml은 기본값만 채우며, 서버 측 계정과 불일치하면 `UNSUPPORTED`다.
 - `serve` 쪽은 hosts.toml을 읽지 않는다. 위 choke point는 전부 dial하는 프로세스 쪽 경로다.
+
+`trust.toml`의 `[[peer]]`는 optional 키 `role`을 가질 수 있다(ADR-0045 결정 3).
+
+- 값은 `full`, `exec`, `tunnel`, `read-only`, `reverse`, `none` 여섯 문자열 중 하나다. 다른 값이면 파일 전체가 `CONFIG_ERROR`다. 실행 중인 `qsh serve`가 파일을 다시 읽다 이 오류를 만나면 마지막 정상 snapshot을 유지한다.
+- 키가 없는 pin은 ADR-0045 이전에 만든 pin이다. 다시 쓸 때도 키를 만들지 않는다. `trust rename`은 role을 옮기고 `trust remove`는 지운다.
+- role이 주는 action 집합은 `qsh_core::acl::ROLE_GRANTS` 상수 하나가 정본이고 `docs/CLI.md` §6.11의 표와 같다. 이 단계에서는 저장과 표시만 하고 인가 판정은 아직 이 키를 읽지 않는다.
 
 qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh service install`의 유닛 파일과, macOS에서는 그 유닛이 가리키는 `~/Library/Logs/qsh/`(없을 때만 `install`이 만들고, LaunchAgent의 `StandardOutPath`/`StandardErrorPath`가 그리로 쓴다)뿐이다(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `~/.config/systemd/user/qsh-<mode>.service`; `docs/CLI.md` §6.18, `docs/deploy/service.md`). `qsh identity export --out <path>`는 별도다 — 그 경로는 운영자가 직접 고른다.
 

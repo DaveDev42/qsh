@@ -225,6 +225,30 @@ principal = "device:hermes"
 allow = ["session.list", "session.attach", "exec.run"]
 ```
 
+ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 권한 부여가 되게 한다. role은 고정된 여섯 값이고, 각 role이 주는 action과 소유 축은 다음과 같다(`docs/CLI.md` §6.11의 표와 같다).
+
+| role | 주는 action | 소유 축 |
+|---|---|---|
+| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse` | any |
+| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control` | any |
+| `tunnel` | `forward.local`, `forward.remote` | owned |
+| `read-only` | `session.list`, `session.attach` | any |
+| `reverse` | `host.reverse` | 해당 없음 |
+| `none` | 없음 | 해당 없음 |
+
+role 하나로 장비를 들이는 예는 다음과 같다. 세밀한 제어가 필요할 때만 ACL 정책 파일을 쓴다.
+
+```toml
+[[peer]]
+name = "phone"
+fingerprint = "sha256:BASE64FINGERPRINT"
+address = ""
+added_at = "2026-10-12T00:00:00Z"
+role = "full"
+```
+
+`role` 키가 없는 기존 pin은 `none`과 같이 판정되어 ACL 정책 파일의 행 없이는 아무것도 할 수 없다. role을 인가에 반영하는 판정 변경은 같은 마일스톤의 뒤 단계에서 이 절의 서술과 함께 바뀐다.
+
 대화형 shell 권한은 사실상 임의 명령 실행 권한이다. 제한된 자동화에는 shell 대신 별도의 `exec.run` 정책을 사용한다.
 
 추가 요구사항:

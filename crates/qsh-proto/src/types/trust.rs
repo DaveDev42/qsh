@@ -19,6 +19,14 @@ pub struct TrustPeer {
     pub address: String,
     /// RFC 3339 UTC timestamp of when the pin was added.
     pub added_at: String,
+    /// The pin's trust role (ADR-0045 결정 9): one of `full`, `exec`,
+    /// `tunnel`, `read-only`, `reverse`, `none`. An open string on the wire
+    /// (the closed vocabulary lives in `qsh-core`, like
+    /// `AclCheckData.decision`). Omitted when `trust.toml` has no `role` key
+    /// for the pin, which is how a pin written before ADR-0045 is told apart
+    /// from an explicit `none`. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Request for `trust.add`.

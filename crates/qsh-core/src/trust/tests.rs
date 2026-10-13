@@ -958,3 +958,139 @@ fn suggested_peer_label_takes_the_first_dns_label_and_skips_ip_literals() {
         "an IPv6 literal has no useful suggested label"
     );
 }
+
+// ---- ADR-0045 trust roles (결정 2·3·9) -----------------------------------
+
+const TWO_PINS_ONE_WITH_ROLE: &str = r#"
+[[peer]]
+name = "legacy"
+fingerprint = "sha256:AAAA"
+address = ""
+added_at = "2026-08-17T00:00:00Z"
+
+[[peer]]
+name = "phone"
+fingerprint = "sha256:BBBB"
+address = ""
+added_at = "2026-08-17T00:00:00Z"
+role = "read-only"
+"#;
+
+fn load_text(text: &str) -> Result<TrustStore, OpError> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, text).unwrap();
+    TrustStore::load(&path)
+}
+
+#[test]
+fn trust_role_names_round_trip_and_are_exactly_the_six() {
+    let names: Vec<&str> = TrustRole::ALL.iter().map(|r| r.as_str()).collect();
+    assert_eq!(
+        names,
+        ["full", "exec", "tunnel", "read-only", "reverse", "none"]
+    );
+    for role in TrustRole::ALL {
+        assert_eq!(role.as_str().parse::<TrustRole>(), Ok(role));
+        assert_eq!(role.to_string(), role.as_str());
+    }
+    for bad in [
+        "",
+        "Full",
+        "FULL",
+        "read_only",
+        "readonly",
+        "admin",
+        " full",
+    ] {
+        assert_eq!(
+            bad.parse::<TrustRole>(),
+            Err(TrustRoleParseError(bad.to_string())),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn unknown_role_string_makes_trust_toml_a_config_error() {
+    let text = TWO_PINS_ONE_WITH_ROLE.replace("read-only", "superuser");
+    let err = load_text(&text).unwrap_err();
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(!err.retryable);
+    assert!(err.message.contains("phone"), "{}", err.message);
+    assert!(err.message.contains("superuser"), "{}", err.message);
+
+    // Whole-file failure: a valid pin next to the bad one does not survive.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, &text).unwrap();
+    assert!(TrustStore::load(&path).is_err());
+    // The running-server path reuses the same parser, so a bad edit keeps the
+    // last good snapshot instead of loading a pin with an unreadable role.
+    let good = dir.path().join("good.toml");
+    std::fs::write(&good, TWO_PINS_ONE_WITH_ROLE).unwrap();
+    let shared = SharedTrustStore::open(&good).unwrap();
+    std::fs::write(&good, &text).unwrap();
+    let snap = shared.snapshot();
+    assert_eq!(snap.peers().len(), 2);
+    assert_eq!(
+        snap.find("phone").unwrap().role.as_deref(),
+        Some("read-only"),
+        "a role the parser rejects must leave the last good snapshot in place"
+    );
+}
+
+#[test]
+fn role_key_is_read_and_a_missing_key_stays_none() {
+    let store = load_text(TWO_PINS_ONE_WITH_ROLE).unwrap();
+    assert_eq!(store.find("legacy").unwrap().role, None);
+    assert_eq!(
+        store.find("phone").unwrap().role.as_deref(),
+        Some("read-only")
+    );
+}
+
+#[test]
+fn rewriting_a_pin_without_a_role_key_does_not_add_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, TWO_PINS_ONE_WITH_ROLE).unwrap();
+    let store = TrustStore::load(&path).unwrap();
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text.matches("role").count(),
+        1,
+        "only the pin that had a role keeps one: {text}"
+    );
+    assert_eq!(TrustStore::load(&path).unwrap(), store);
+
+    // A brand-new pin written by `add_peer` has no role key either (Step 5
+    // gives the writing commands a role to write).
+    let mut store = TrustStore::load(&path).unwrap();
+    store.add_peer("fresh", None, fp(b"fresh"), "t".into());
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches("role").count(), 1, "{text}");
+}
+
+#[test]
+fn rename_carries_the_role_and_remove_drops_it() {
+    let mut store = load_text(TWO_PINS_ONE_WITH_ROLE).unwrap();
+
+    let renamed = store.rename("phone", "tablet").unwrap();
+    assert_eq!(renamed.role.as_deref(), Some("read-only"));
+    assert_eq!(
+        store.find("tablet").unwrap().role.as_deref(),
+        Some("read-only")
+    );
+    let legacy = store.rename("legacy", "old").unwrap();
+    assert_eq!(legacy.role, None, "rename must not invent a role key");
+
+    assert!(store.remove("tablet"));
+    assert!(store.find("tablet").is_none());
+    // Re-pinning the same name starts from a clean slate: the removed pin's
+    // role is not remembered anywhere.
+    store.add_peer("tablet", None, fp(b"tablet"), "t".into());
+    assert_eq!(store.find("tablet").unwrap().role, None);
+}

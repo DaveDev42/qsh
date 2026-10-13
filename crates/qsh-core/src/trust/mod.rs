@@ -7,6 +7,7 @@
 //! fingerprint = "sha256:BASE64FINGERPRINT"
 //! address = "personal-mac.example.com:4433"
 //! added_at = "2026-08-17T00:00:00Z"
+//! role = "full"            # optional (ADR-0045); absent = a pre-ADR-0045 pin
 //!
 //! [[ca]]
 //! name = "corp-root"
@@ -40,7 +41,9 @@ use crate::ops::OpError;
 
 pub mod invite_address;
 pub mod pairing;
+mod role;
 pub use pairing::{LiveInviteCounts, SharedInviteStore, live_invite_counts};
+pub use role::{TrustRole, TrustRoleParseError};
 
 /// The one line an operator gets when a peer address named no port and
 /// 4433 was assumed (ADR-0014 결정 5). stderr only, on the write paths
@@ -310,6 +313,25 @@ impl TrustStore {
             )
             .with_retryable(false)
         })?;
+        // ADR-0045 결정 3: a `role` outside the six names makes the whole
+        // file a `CONFIG_ERROR`, the same treatment as any other malformed
+        // field. Checked here, not at deserialization, because the wire type
+        // (`TrustPeer.role`) is an open string.
+        for peer in &file.peers {
+            if let Some(role) = &peer.role
+                && let Err(err) = role.parse::<TrustRole>()
+            {
+                return Err(OpError::new(
+                    ErrorCode::ConfigError,
+                    format!(
+                        "invalid trust store {}: peer {:?}: {err}",
+                        path.display(),
+                        peer.name
+                    ),
+                )
+                .with_retryable(false));
+            }
+        }
         Ok(Self {
             peers: file.peers,
             cas: file.cas,
@@ -492,6 +514,9 @@ impl TrustStore {
             fingerprint,
             address: address.unwrap_or_default(),
             added_at: now,
+            // No `role` key until Step 5 gives the writing commands a role
+            // to write (ADR-0045 결정 8).
+            role: None,
         };
         self.peers.push(peer.clone());
         (peer, true, false)

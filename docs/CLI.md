@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.25 (역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, `trust list`의 role 열, audit의 optional `role` 키, ADR-0045, §6.11; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -724,6 +724,8 @@ qsh trust remove <name> --json
 }
 ```
 
+`role`은 ADR-0045가 더한 optional 필드다. `trust.toml`의 해당 `[[peer]]`에 `role` 키가 있을 때만 나오고, 값은 아래 여섯 문자열 중 하나다. 키가 없는 pin(ADR-0045 이전에 만든 pin)에서는 필드가 생략되므로 JSON만으로 "키 없음"과 명시적 `"none"`을 가를 수 있다. 값은 열린 문자열이라 호출자는 모르는 값을 만나도 오류로 취급하지 않는다.
+
 `trust.add` 결과 (신규 pin):
 
 ```json
@@ -792,6 +794,57 @@ qsh trust remove <name> --json
   }
 }
 ```
+
+`trust.list` 결과 (role이 있는 pin과 키가 없는 pin):
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.list",
+  "ok": true,
+  "data": {
+    "peers": [
+      {
+        "name": "phone",
+        "fingerprint": "sha256:BASE64FINGERPRINT",
+        "address": "",
+        "added_at": "2026-10-12T00:00:00Z",
+        "role": "full"
+      },
+      {
+        "name": "personal-mac",
+        "fingerprint": "sha256:BASE64FINGERPRINT",
+        "address": "personal-mac.example.com:4433",
+        "added_at": "2026-08-17T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+human 출력의 `trust list`는 `ROLE` 열을 낸다. `role` 키가 없는 pin은 `(none, legacy)`로 적는다. 판정은 `none`과 같지만 ADR-0045 이전에 만든 pin이라는 사실을 보여 준다.
+
+**Trust role (ADR-0045).** pin 하나에 role 하나를 둔다. role은 고정된 여섯 값이고 사용자 정의 role은 없다. 값을 더하거나 표를 바꾸려면 새 ADR이 필요하다. 코드의 정본은 `qsh_core::acl::ROLE_GRANTS`이고 이 표와 `docs/PRD.md` §9의 표가 그것과 같음을 `role_action_table_matches_docs` 테스트가 고정한다.
+
+| role | 주는 action | 소유 축 |
+|---|---|---|
+| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse` | any |
+| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control` | any |
+| `tunnel` | `forward.local`, `forward.remote` | owned |
+| `read-only` | `session.list`, `session.attach` | any |
+| `reverse` | `host.reverse` | 해당 없음 |
+| `none` | 없음 | 해당 없음 |
+
+- `forward.socks`는 어느 role에도 없다. 항상-deny 게이트가 role보다 먼저 돈다.
+- `full`의 `file.read`/`file.write`는 파일 복사(ADR-0029)가 항상-deny를 걷을 때 비로소 효과가 난다.
+- 소유 축은 role로 받은 grant가 `scope = "owned"` 행처럼 자기가 만든 자원으로 걸러지는지를 뜻한다.
+- `exec`는 의도를 나타내는 구분이지 `full`에 대한 보안 경계가 아니다. 셸이나 `exec.run`을 가진 peer는 serve 계정으로 `qsh trust set-role`을 실행해 자기 role을 올릴 수 있다. 보안 경계 구실을 하는 role은 명령 실행을 주지 않는 `tunnel`, `read-only`, `reverse`, `none`뿐이다.
+- 이 표는 role이 무엇을 주는지만 정한다. 이 단계에서는 role을 저장하고 보여 줄 뿐이고, 인가 판정은 아직 이 키를 읽지 않는다. 모든 pin이 지금처럼 `acl.toml` 행으로만 인가된다.
+
+role을 쓰는 명령(`--role`, `trust set-role`)과 role 기본값 표는 이 절에 같은 마일스톤(M15)의 뒤 단계에서 채운다. 그때까지 `trust add`와 `pair`가 새로 만드는 pin은 `role` 키를 쓰지 않는다.
+
+`trust.toml`의 `role`이 여섯 값 밖이면 파일 전체가 `CONFIG_ERROR`다. `trust rename`은 role을 새 이름으로 옮기고 `trust remove`는 지운다. 키가 없는 pin은 다시 쓸 때도 키가 생기지 않는다.
 
 `trust.remove` 결과:
 
