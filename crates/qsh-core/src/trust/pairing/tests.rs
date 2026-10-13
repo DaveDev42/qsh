@@ -154,8 +154,8 @@ fn a_corrupt_assigned_name_refuses_redemption_instead_of_falling_back() {
     fixed.records[0].assigned_name = Some("good-name".to_string());
     fixed.save(&path).unwrap();
     let shared = SharedInviteStore::open(&path).unwrap();
-    match shared.redeem(&e, &proof, now, |name| {
-        assert_eq!(name, Some("good-name"));
+    match shared.redeem(&e, &proof, now, |matched| {
+        assert_eq!(matched.assigned_name, Some("good-name"));
         true
     }) {
         Ok(RedeemOutcome::Accepted { .. }) => {}
@@ -512,4 +512,72 @@ fn live_invite_count_excludes_expired_and_redeemed_invites() {
         live_invite_counts(&dir.path().join("none.toml"), now).unwrap(),
         LiveInviteCounts::default()
     );
+}
+
+/// Redeems `secret` against the store at `path` and returns the role the
+/// `on_matched` hook was told to pin.
+fn redeemed_role(path: &Path, secret_bytes: &[u8], ekm_bytes: &[u8]) -> TrustRole {
+    let shared = SharedInviteStore::open(path).unwrap();
+    let proof = client_proof_for(secret_bytes, ekm_bytes);
+    let mut seen = None;
+    let outcome = shared
+        .redeem(ekm_bytes, &proof, SystemTime::now(), |matched| {
+            seen = Some(matched.role);
+            true
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, RedeemOutcome::Accepted { .. }),
+        "{outcome:?}"
+    );
+    seen.expect("on_matched ran")
+}
+
+/// ADR-0045 결정 8: the role a redeemer is pinned with is whatever the
+/// issuer wrote into the invite record. `redeem` has no input the redeeming
+/// peer controls beyond the proof, so the peer cannot choose it; an invite
+/// with no `role` key (minted before ADR-0045) pins `none`, so an old
+/// invite never widens.
+#[test]
+fn invite_role_is_fixed_by_the_issuer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invites.toml");
+    let now = SystemTime::now();
+
+    let mut store = InviteStore::default();
+    store.add_with_role(&secret(1), now, None, TrustRole::Tunnel);
+    store.add_with_role(&secret(2), now, Some("named".to_string()), TrustRole::Full);
+    store.add(&secret(3), now, None);
+    store.save(&path).unwrap();
+
+    assert_eq!(redeemed_role(&path, &secret(1), &ekm(1)), TrustRole::Tunnel);
+    assert_eq!(redeemed_role(&path, &secret(2), &ekm(2)), TrustRole::Full);
+    assert_eq!(
+        redeemed_role(&path, &secret(3), &ekm(3)),
+        TrustRole::None,
+        "an invite with no role key pins none"
+    );
+
+    // The role survives the save/load round trip as a plain string key.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("role = \"tunnel\""), "{text}");
+}
+
+/// A `role` outside the six names makes the whole file `CONFIG_ERROR`,
+/// the way an unknown `role` in `trust.toml` does.
+#[test]
+fn an_unknown_invite_role_is_a_config_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invites.toml");
+    let now = SystemTime::now();
+    let mut store = InviteStore::default();
+    store.add(&secret(1), now, None);
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}role = \"root\"\n")).unwrap();
+
+    let Err(err) = InviteStore::load(&path) else {
+        panic!("an unknown invite role must not load");
+    };
+    assert_eq!(err.code, qsh_proto::ErrorCode::ConfigError);
 }

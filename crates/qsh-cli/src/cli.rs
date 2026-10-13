@@ -687,6 +687,12 @@ pub enum TrustCmd {
         /// §6.11, ADR-0012 decision 6).
         #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
+        /// Trust role the redeeming peer is pinned with: one of `full`,
+        /// `exec`, `tunnel`, `read-only`, `reverse`, `none` (default `full`,
+        /// `docs/CLI.md` §6.11, ADR-0045). The redeeming side cannot choose
+        /// it.
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
     },
     /// Dial `address`, redeem `code` against its invite, and — on a
     /// successful mutual proof — pin the peer exactly as `trust add` would
@@ -726,6 +732,11 @@ pub enum TrustCmd {
         /// asserted one (`docs/CLI.md` §6.11, ADR-0012 decision 6).
         #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
+        /// Trust role for the pin written here: one of `full`, `exec`,
+        /// `tunnel`, `read-only`, `reverse`, `none` (default `none`: the
+        /// pin is a peer to dial, `docs/CLI.md` §6.11, ADR-0045).
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
     },
     /// Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next
     /// handshake with no restart required. `acl.toml` is not reloaded: until
@@ -737,6 +748,18 @@ pub enum TrustCmd {
         old: String,
         /// The name to rename it to.
         new: String,
+    },
+    /// Change the trust role of a pinned peer (`docs/CLI.md` §6.11,
+    /// ADR-0045). The only command that changes the role of a pin that
+    /// already exists. Takes effect from the peer's next request with no
+    /// restart: roles are read on every decision, unlike `acl.toml` rows.
+    /// The role is one of `full`, `exec`, `tunnel`, `read-only`, `reverse`,
+    /// `none`.
+    SetRole {
+        /// The pinned peer's name.
+        name: String,
+        /// The new role.
+        role: String,
     },
     /// Preview the pins and `[[acl]]` rows an OpenSSH `authorized_keys`
     /// file would need (`docs/CLI.md` §6.11, ADR-0026). Read-only: nothing
@@ -773,6 +796,12 @@ pub enum PairCmd {
         /// §6.11, ADR-0012 decision 6).
         #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
+        /// Trust role the redeeming peer is pinned with: one of `full`,
+        /// `exec`, `tunnel`, `read-only`, `reverse`, `none` (default `full`,
+        /// `docs/CLI.md` §6.11, ADR-0045). The redeeming side cannot choose
+        /// it.
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
     },
     /// Dial `address`, redeem `code` against its invite, and — on a
     /// successful mutual proof — pin the peer exactly as `trust add` would
@@ -809,6 +838,11 @@ pub enum PairCmd {
         /// from `address` when it has a hostname (never for an IP literal).
         #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
+        /// Trust role for the pin written here: one of `full`, `exec`,
+        /// `tunnel`, `read-only`, `reverse`, `none` (default `none`: the
+        /// pin is a peer to dial, `docs/CLI.md` §6.11, ADR-0045).
+        #[arg(long, value_name = "ROLE")]
+        role: Option<String>,
     },
 }
 
@@ -989,6 +1023,14 @@ pub struct TrustAddArgs {
     /// (`docs/CLI.md` §6.11, ADR-0013).
     #[arg(long, value_name = "PEM|-")]
     pub cert_file: Option<String>,
+
+    /// Trust role for the new pin: one of `full`, `exec`, `tunnel`,
+    /// `read-only`, `reverse`, `none` (`docs/CLI.md` §6.11, ADR-0045).
+    /// Without it, a pin with no `--address` is `full` and a pin with one
+    /// is `none`. An already-pinned name keeps its role; change it with
+    /// `qsh trust set-role`.
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
 }
 
 /// Arguments of `qsh trust add-ca`.

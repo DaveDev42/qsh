@@ -1,0 +1,17 @@
+{
+  "command": "trust.set_role",
+  "data": {
+    "changed": true,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "phone",
+      "role": "exec"
+    },
+    "previous_role": "read-only"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

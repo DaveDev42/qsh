@@ -564,6 +564,7 @@ async fn supervised_reverse_route_local_never_dials_a_forward_pin_while_the_regi
                 qsh_transport::Fingerprint::of_spki_der(b"a forward pin").to_string(),
             ),
             cert_pem: None,
+            role: None,
         })
         .expect("pin the name to a blackhole address");
     })

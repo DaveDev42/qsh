@@ -366,6 +366,7 @@ async fn session_lifecycle_succeeds_over_both_forward_and_reverse_routes() {
                 address: Some(addr),
                 fingerprint: Some(fp),
                 cert_pem: None,
+                role: None,
             })
         }
     })
@@ -571,6 +572,7 @@ async fn killing_the_daemon_mid_session_gives_the_cli_a_clear_error_while_the_ta
                 address: Some(addr),
                 fingerprint: Some(fp),
                 cert_pem: None,
+                role: None,
             })
         }
     })

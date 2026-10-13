@@ -5468,3 +5468,220 @@ async fn purge_connection_removes_and_aborts_this_connections_remote_forwards() 
     drop(host_conn);
     drop(client_conn);
 }
+
+// ---------------------------------------------------------------------
+// pairing redemption: the role a pin holds, and fail-closed audit
+// (ADR-0045 결정 8, 결정 13)
+// ---------------------------------------------------------------------
+
+/// A pairing-capable server over temp trust/invite files, with an audit
+/// sink that can be made to fail and a capture of the operator notices.
+struct PairingRig {
+    server: Arc<Server>,
+    audit: Arc<FailingAuditSink>,
+    notices: Arc<std::sync::Mutex<Vec<String>>>,
+    _dir: tempfile::TempDir,
+    trust_path: std::path::PathBuf,
+    invites_path: std::path::PathBuf,
+}
+
+/// `seed`, when given, is a pin written before the server starts: its name,
+/// fingerprint and (optional) `role` key.
+fn pairing_rig(
+    seed: Option<(
+        &str,
+        qsh_transport::Fingerprint,
+        Option<crate::trust::TrustRole>,
+    )>,
+) -> PairingRig {
+    let dir = tempfile::tempdir().unwrap();
+    let trust_path = dir.path().join("trust.toml");
+    let invites_path = dir.path().join("invites.toml");
+    if let Some((name, fingerprint, role)) = seed {
+        let mut store = crate::trust::TrustStore::load(&trust_path).unwrap();
+        match role {
+            Some(role) => {
+                store.add_peer_with_role(
+                    name,
+                    None,
+                    fingerprint,
+                    "2026-01-01T00:00:00Z".into(),
+                    role,
+                );
+            }
+            None => {
+                store.add_peer(name, None, fingerprint, "2026-01-01T00:00:00Z".into());
+            }
+        }
+        store.save(&trust_path).unwrap();
+    }
+    let pipes = Arc::new(PipeFactory::new(64 * 1024));
+    let broker = Broker::new(
+        Arc::new(TestClock::new()),
+        BrokerConfig {
+            replay_bytes: 64 * 1024,
+            resume_ttl: Duration::from_secs(3600),
+            close_grace: Duration::from_millis(100),
+            quota_limits: crate::quota::QuotaLimits::default(),
+        },
+        pipes,
+    );
+    let audit = Arc::new(FailingAuditSink::new());
+    let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), broker, "host");
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&notices);
+    server.set_notice_sink(move |line| captured.lock().unwrap().push(line.to_string()));
+    let invites = crate::trust::pairing::SharedInviteStore::open(&invites_path).unwrap();
+    let trust = crate::trust::SharedTrustStore::open(&trust_path).unwrap();
+    server.set_pairing(trust, invites);
+    PairingRig {
+        server,
+        audit,
+        notices,
+        _dir: dir,
+        trust_path,
+        invites_path,
+    }
+}
+
+/// Mint an invite carrying `role` straight into the rig's `invites.toml`.
+fn mint_invite(
+    rig: &PairingRig,
+    role: crate::trust::TrustRole,
+) -> [u8; qsh_proto::pairing::INVITE_SECRET_LEN] {
+    let secret = crate::trust::pairing::generate_secret();
+    let _lock = crate::trust::pairing::InviteStore::lock(&rig.invites_path).unwrap();
+    let mut store = crate::trust::pairing::InviteStore::load(&rig.invites_path).unwrap();
+    store.add_with_role(secret.as_slice(), std::time::SystemTime::now(), None, role);
+    store.save(&rig.invites_path).unwrap();
+    *secret
+}
+
+/// Redeem `secret` once over a fresh pairing connection as `device_name`
+/// and wait until the server side has finished (notice posted).
+async fn redeem(
+    rig: &PairingRig,
+    client: Connection,
+    host_conn: Connection,
+    device_name: &str,
+    secret: &[u8],
+) -> Result<crate::pairing::PairingSuccess, crate::pairing::PairingError> {
+    let server = rig.server.clone();
+    let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
+    let result = crate::pairing::accept(&client, device_name, secret).await;
+    drop(client);
+    host_side.await.unwrap();
+    result
+}
+
+/// Re-pairing a name that is already pinned with the same fingerprint
+/// changes neither the pin nor its role, so the pin notice must name the
+/// role the pin holds, not the one the invite offered. A `none` invite
+/// redeemed onto a `full` pin must not read as "grants no action".
+#[tokio::test]
+async fn redeeming_onto_an_existing_pin_reports_the_role_the_pin_holds() {
+    use crate::trust::TrustRole;
+    let cases = [
+        // (role key on the existing pin, role the invite offers, expected on file)
+        (Some(TrustRole::Full), TrustRole::None, "full"),
+        (Some(TrustRole::Exec), TrustRole::Full, "exec"),
+        (Some(TrustRole::None), TrustRole::Full, "none"),
+        // A pin written before ADR-0045 has no `role` key and holds `none`.
+        (None, TrustRole::Full, "none"),
+    ];
+    for (held, offered, on_file) in cases {
+        let (client, host_conn) = crate::tunnel::testutil::pairing_loopback_pair().await;
+        let fingerprint = host_conn.peer_fingerprint().unwrap();
+        let rig = pairing_rig(Some(("client-x", fingerprint, held)));
+        let secret = mint_invite(&rig, offered);
+
+        redeem(&rig, client, host_conn, "client-x", &secret)
+            .await
+            .unwrap_or_else(|err| panic!("{held:?} / {offered:?}: {err}"));
+
+        let stored = crate::trust::TrustStore::load(&rig.trust_path).unwrap();
+        let peer = stored.find("client-x").unwrap();
+        assert_eq!(
+            peer.role,
+            held.map(|r| r.as_str().to_string()),
+            "{held:?} / {offered:?}: a redemption never rewrites an existing pin"
+        );
+
+        let notices = rig.notices.lock().unwrap().clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let notice = &notices[0];
+        if on_file == "none" {
+            assert!(
+                notice.contains(crate::pairing::PAIRING_ROLE_NONE),
+                "{held:?} / {offered:?}: {notice}"
+            );
+        } else {
+            assert!(
+                notice.contains(&format!(
+                    "{} `{on_file}`, which grants:",
+                    crate::pairing::PAIRING_ROLE_LEAD
+                )),
+                "{held:?} / {offered:?}: {notice}"
+            );
+            assert!(
+                !notice.contains(crate::pairing::PAIRING_ROLE_NONE),
+                "{notice}"
+            );
+        }
+        assert!(
+            rig.audit
+                .records()
+                .iter()
+                .all(|r| r.action != "trust.invite"),
+            "no role is written, so no role-bearing record either"
+        );
+    }
+}
+
+/// "No record, no write" for the invite-redemption path: a role other than
+/// `none` is a grant this call writes, so when the audit sink cannot append,
+/// the redemption is declined, `trust.toml` gains no pin and the invite is
+/// not consumed. Once the sink recovers the same invite still redeems.
+#[tokio::test]
+async fn redemption_without_a_durable_audit_record_writes_no_pin_and_keeps_the_invite() {
+    use crate::trust::TrustRole;
+    let rig = pairing_rig(None);
+    let secret = mint_invite(&rig, TrustRole::Exec);
+    let invites_before = std::fs::read_to_string(&rig.invites_path).unwrap();
+
+    rig.audit.fail();
+    let (client, host_conn) = crate::tunnel::testutil::pairing_loopback_pair().await;
+    let refused = redeem(&rig, client, host_conn, "client-x", &secret).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        crate::trust::TrustStore::load(&rig.trust_path)
+            .unwrap()
+            .find("client-x")
+            .is_none(),
+        "no pin without a durable audit record"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rig.invites_path).unwrap(),
+        invites_before,
+        "the invite is left unconsumed"
+    );
+    assert!(rig.notices.lock().unwrap().is_empty());
+
+    rig.audit.clear();
+    let (client, host_conn) = crate::tunnel::testutil::pairing_loopback_pair().await;
+    redeem(&rig, client, host_conn, "client-x", &secret)
+        .await
+        .expect("the same invite redeems once the sink recovers");
+    let stored = crate::trust::TrustStore::load(&rig.trust_path).unwrap();
+    assert_eq!(
+        stored.find("client-x").unwrap().role.as_deref(),
+        Some("exec")
+    );
+    let records = rig.audit.records();
+    let written: Vec<_> = records
+        .iter()
+        .filter(|r| r.action == "trust.invite")
+        .collect();
+    assert_eq!(written.len(), 1, "{records:?}");
+    assert_eq!(written[0].role.as_deref(), Some("exec"));
+}

@@ -14,7 +14,7 @@ use qsh_proto::{
     ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
     SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, SetupRole,
     SetupRunData, SetupStatus, SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData,
-    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData,
+    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
     TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
@@ -327,12 +327,50 @@ pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
     )
 }
 
+/// Print the outcome of `qsh trust set-role <name> <role>` (`docs/CLI.md`
+/// §6.11, ADR-0045 결정 8). A role applies from the peer's next request, so
+/// there is no restart reminder for it; the one reminder is the opposite
+/// one, that `acl.toml` rows the peer also matches still need a restart.
+pub fn print_trust_set_role(data: &TrustSetRoleData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let name = sanitize(&data.peer.name);
+    let role = data.peer.role.as_deref().map(sanitize).unwrap_or_default();
+    if !data.changed {
+        return writeln!(stdout, "{name} already has role {role} (nothing to do)");
+    }
+    let previous = data
+        .previous_role
+        .as_deref()
+        .map(sanitize)
+        .unwrap_or_else(|| LEGACY_ROLE_CELL.to_string());
+    writeln!(stdout, "{name}: role {previous} -> {role}")?;
+    writeln!(
+        stdout,
+        "takes effect from its next request; open sessions and tunnels keep running"
+    )
+}
+
+/// The one line `qsh trust add` adds when it is run again for a name that
+/// is already pinned (ADR-0045 결정 8): a repeated `trust add` never changes
+/// a role, whatever `--role` said. On stdout beside `print_trust_add`'s verb, human mode only.
+pub fn print_trust_add_role_unchanged() -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "role is unchanged; use `qsh trust set-role <name> <role>`"
+    )
+}
+
 /// Print `qsh trust ssh-preview` (`docs/CLI.md` §6.11, ADR-0026). One
 /// block per key line, then the two cautions the data cannot carry: the
-/// `<name>` placeholder appears in two places and both must change to the
-/// same name, and the predicted qsh fingerprint only holds if the other
-/// device imports this very key with `qsh init --import-ssh-key`. Nothing is
-/// written anywhere.
+/// `<name>` placeholder in the pin command must change to the name the
+/// device is pinned under, and the predicted qsh fingerprint only holds if
+/// the other device imports this very key with `qsh init --import-ssh-key`.
+/// The pin command is printed with the role an address-less `trust add`
+/// gets (`TrustRole::default_for_trust_add`, ADR-0045), where the data
+/// carries the bare command and an `[[acl]]` row draft; the draft is kept in
+/// the JSON, which is additive-only, and left out of the human text because
+/// the role already grants what the row would. Nothing is written anywhere.
 pub fn print_trust_ssh_preview(data: &TrustSshPreviewData) -> io::Result<()> {
     use qsh_proto::SshPreviewStatus;
 
@@ -340,6 +378,9 @@ pub fn print_trust_ssh_preview(data: &TrustSshPreviewData) -> io::Result<()> {
     if data.entries.is_empty() {
         return writeln!(stdout, "no key lines found");
     }
+    // The preview's pin command has no address, so core's default for that
+    // case is the role to show; the renderer only prints it.
+    let pin_role = qsh_core::trust::TrustRole::default_for_trust_add(false);
     let mut any_ok = false;
     for entry in &data.entries {
         let status = match entry.status {
@@ -365,19 +406,19 @@ pub fn print_trust_ssh_preview(data: &TrustSshPreviewData) -> io::Result<()> {
         }
         if let Some(command) = &entry.trust_command {
             any_ok = true;
-            writeln!(stdout, "  pin:  {}", sanitize(command))?;
-        }
-        if let Some(row) = &entry.acl_row {
-            writeln!(stdout, "  acl.toml:")?;
-            for line in row.lines() {
-                writeln!(stdout, "    {}", sanitize(line))?;
-            }
+            writeln!(stdout, "  pin:  {} --role {pin_role}", sanitize(command))?;
         }
     }
     if any_ok {
+        writeln!(stdout, "replace <name> with the name to pin the key under")?;
+        let names: Vec<&str> = qsh_core::trust::TrustRole::ALL
+            .iter()
+            .map(|role| role.as_str())
+            .collect();
         writeln!(
             stdout,
-            "replace <name> with the same name in the pin command and in the acl.toml row"
+            "--role picks what the key may do: {}; `qsh trust set-role` changes it later",
+            names.join(", ")
         )?;
         writeln!(
             stdout,
@@ -426,6 +467,9 @@ pub fn print_trust_invite(data: &TrustInviteData, advice: &InviteAddressAdvice) 
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "invite code: {}", data.code)?;
     writeln!(stdout, "expires:     {}", data.expires_at)?;
+    if let Some(role) = &data.assigned_role {
+        writeln!(stdout, "role:        {}", sanitize(role))?;
+    }
     writeln!(stdout)?;
     writeln!(stdout, "Give this command to the other device's operator:")?;
     writeln!(stdout, "  {}", data.accept_command)?;
@@ -465,14 +509,21 @@ pub fn print_trust_accept(data: &TrustAcceptData) -> io::Result<()> {
 fn format_trust_pin_line(verb: &str, peer: &TrustPeer) -> String {
     let name = sanitize(&peer.name);
     let fingerprint = sanitize(&peer.fingerprint);
-    if peer.address.is_empty() {
+    let mut line = if peer.address.is_empty() {
         format!("{verb} {name} ({fingerprint})")
     } else {
         format!(
             "{verb} {name} ({fingerprint}) [{}]",
             sanitize(&peer.address)
         )
+    };
+    // ADR-0045: a pin written now names its role. A pin with no `role` key
+    // (written before ADR-0045) adds nothing here; `trust list` is where
+    // `(none, legacy)` shows.
+    if let Some(role) = &peer.role {
+        line.push_str(&format!(" role {}", sanitize(role)));
     }
+    line
 }
 
 /// `source`/`user` are `None` unless `hosts.toml` supplied them

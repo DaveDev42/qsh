@@ -275,9 +275,32 @@ impl Sandbox {
             .to_string()
     }
 
-    /// Pin `name` without connecting (`docs/CLI.md` §6.11).
+    /// Pin `name` without connecting (`docs/CLI.md` §6.11), with role
+    /// `none` so the pin grants nothing by itself: every caller predates
+    /// roles and expects `acl.toml` rows to be the only grant (ADR-0045
+    /// 결정 8 makes an addressless `trust add` default to `full`).
     pub fn trust_add(&self, name: &str, address: Option<&str>, fingerprint: &str) {
-        let mut args = vec!["trust", "add", name, "--fingerprint", fingerprint, "--json"];
+        self.trust_add_with_role(name, address, fingerprint, "none");
+    }
+
+    /// [`trust_add`](Self::trust_add) with an explicit `--role`.
+    pub fn trust_add_with_role(
+        &self,
+        name: &str,
+        address: Option<&str>,
+        fingerprint: &str,
+        role: &str,
+    ) {
+        let mut args = vec![
+            "trust",
+            "add",
+            name,
+            "--fingerprint",
+            fingerprint,
+            "--role",
+            role,
+            "--json",
+        ];
         if let Some(address) = address {
             args.extend_from_slice(&["--address", address]);
         }

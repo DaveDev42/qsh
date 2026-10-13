@@ -47,6 +47,15 @@ pub struct TrustAddReq {
     /// observed. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_pem: Option<String>,
+    /// The trust role to write on a *new* pin (`qsh trust add --role`,
+    /// ADR-0045 결정 8): one of `full`, `exec`, `tunnel`, `read-only`,
+    /// `reverse`, `none`. An open string on the wire. Absent means the
+    /// default: `full` when no `address` is given (an inbound-only pin),
+    /// `none` when one is (a pin to dial). Ignored for a name that is
+    /// already pinned: `trust.add` never changes an existing pin's role,
+    /// only `trust.set_role` does. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Data payload of `trust.add`.
@@ -133,11 +142,23 @@ pub struct TrustInviteReq {
     /// it always was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_name: Option<String>,
+    /// The trust role the redeeming peer is pinned with (`qsh pair invite
+    /// --role`, ADR-0045 결정 8), stored in the invite record. The
+    /// redeeming side cannot choose it. An open string on the wire; absent
+    /// means `full`. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Data payload of `trust.invite`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrustInviteData {
+    /// The trust role the invite will pin its redeemer with: the request's
+    /// `role`, or `full` when none was given (ADR-0045 결정 8). Additive
+    /// (`docs/CLI.md` §10): absent on any envelope produced before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_role: Option<String>,
     /// Echoes `TrustInviteReq.as_name` when the invite was minted with
     /// `--as` (`docs/CLI.md` §6.11). Additive: absent, never present as
     /// `null`, when no name was assigned.
@@ -159,6 +180,32 @@ pub struct TrustInviteData {
     /// address). Human-mode output prints this verbatim; the operator
     /// substitutes a real `host:port` before sending it to the other party.
     pub accept_command: String,
+}
+
+/// Request for `trust.set_role` (`qsh trust set-role <name> <role>`,
+/// ADR-0045 결정 8): the only command that changes an existing pin's role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetRoleReq {
+    /// The pinned peer's name. A `[[ca]]` name is not a pin and is
+    /// `HOST_NOT_FOUND`.
+    pub name: String,
+    /// The new role: one of `full`, `exec`, `tunnel`, `read-only`,
+    /// `reverse`, `none`. Anything else is `INVALID_ARGUMENT`.
+    pub role: String,
+}
+
+/// Data payload of `trust.set_role`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetRoleData {
+    /// The pin after the call (its `role` is the requested one).
+    pub peer: TrustPeer,
+    /// The role before the call. Omitted when the pin had no `role` key
+    /// (a pin written before ADR-0045).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_role: Option<String>,
+    /// `false` when the pin already had exactly this role: nothing was
+    /// written and no audit record was made.
+    pub changed: bool,
 }
 
 /// Request for `trust.rename`.
@@ -202,6 +249,7 @@ mod tests {
     #[test]
     fn trust_invite_data_omits_assigned_name_when_absent() {
         let value = serde_json::to_value(TrustInviteData {
+            assigned_role: None,
             assigned_name: None,
             code: "c".into(),
             expires_at: "e".into(),
@@ -223,6 +271,7 @@ mod tests {
     #[test]
     fn trust_invite_data_includes_assigned_name_when_present() {
         let value = serde_json::to_value(TrustInviteData {
+            assigned_role: None,
             assigned_name: Some("x".into()),
             code: "c".into(),
             expires_at: "e".into(),

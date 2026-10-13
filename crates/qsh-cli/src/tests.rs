@@ -229,6 +229,9 @@ fn pair_and_trust_invite_accept_spellings_converge_on_the_same_op_name() {
 
     let cli = Cli::try_parse_from(["qsh", "trust", "rename", "old", "new"]).unwrap();
     assert_eq!(command_name(&cli), TrustRenameOp::COMMAND);
+
+    let cli = Cli::try_parse_from(["qsh", "trust", "set-role", "phone", "exec"]).unwrap();
+    assert_eq!(command_name(&cli), qsh_core::TrustSetRoleOp::COMMAND);
 }
 
 /// ROADMAP M9 (g) (`docs/CLI.md` §6.18): all three `qsh service` subcommands
@@ -277,6 +280,7 @@ fn finish_never_calls_the_human_closure_in_machine_mode() {
         accept_command: "qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
             .to_string(),
         assigned_name: None,
+        assigned_role: None,
     };
     let exit = finish(&cli, TrustInviteOp::COMMAND, Ok(data), |_data| {
         called.set(true);

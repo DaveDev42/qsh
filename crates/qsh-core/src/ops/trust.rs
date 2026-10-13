@@ -36,6 +36,13 @@ impl Ops {
     /// mobility campaign's backlog item. A *different* fingerprint is still
     /// a hard no-op on the whole entry; re-binding an identity is `trust
     /// remove` then `trust add`, never a side effect of a repeated call.
+    ///
+    /// **Role (ADR-0045 결정 8).** A *new* pin is written with an explicit
+    /// `role`: `req.role`, or `full` without an address and `none` with one.
+    /// An existing pin keeps the role it has, whatever `req.role` says —
+    /// only `trust.set_role` changes it. A new pin with a role other than
+    /// `none` writes one `trust.add` audit record before the save; an
+    /// audit failure is `INTERNAL` and leaves `trust.toml` untouched.
     pub fn trust_add(&self, req: TrustAddReq) -> Result<TrustAddData, OpError> {
         let name = req.name.trim().to_string();
         if name.is_empty() {
@@ -44,6 +51,7 @@ impl Ops {
                 "peer name must not be empty",
             ));
         }
+        let requested_role = req.role.as_deref().map(parse_role_arg).transpose()?;
 
         if req.cert_pem.is_some() && req.fingerprint.is_some() {
             return Err(cert_file_fingerprint_conflict());
@@ -100,7 +108,13 @@ impl Ops {
         // Step 7-1).
         let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
-        let (peer, created, updated) = store.add_peer(name, address, fingerprint, now_rfc3339());
+        let role =
+            requested_role.unwrap_or_else(|| TrustRole::default_for_trust_add(address.is_some()));
+        let (peer, created, updated) =
+            store.add_peer_with_role(name, address, fingerprint, now_rfc3339(), role);
+        if created {
+            self.record_role_write("trust.add", &peer.name, role)?;
+        }
         if created || updated {
             store.save(&path)?;
         }
@@ -276,6 +290,82 @@ impl Ops {
         })
     }
 
+    /// `trust.set_role` — change the role of a pinned peer (`qsh trust
+    /// set-role <name> <role>`, `docs/CLI.md` §6.11, ADR-0045 결정 8). The
+    /// only command that changes the role of a pin that already exists.
+    ///
+    /// Same discipline as [`Self::trust_rename`]: `TrustStore::lock` →
+    /// `load` → mutate → **audit record** → `save`, all under the one lock.
+    /// A running `qsh serve`/`qsh listen` reads roles on every decision, so
+    /// the change applies from its next request without a restart.
+    ///
+    /// Errors: a role outside the six names is `INVALID_ARGUMENT`; a name
+    /// that is no pin (a `[[ca]]` name included) is `HOST_NOT_FOUND`; an
+    /// unreadable `trust.toml` is `CONFIG_ERROR`; a failed audit write is
+    /// `INTERNAL` (`retryable: true`) and leaves `trust.toml` untouched.
+    /// Setting the role the pin already has is `changed: false` and writes
+    /// neither the file nor an audit record.
+    pub fn trust_set_role(&self, req: TrustSetRoleReq) -> Result<TrustSetRoleData, OpError> {
+        let role = parse_role_arg(&req.role)?;
+
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let (peer, previous_role, changed) =
+            store.set_role(&req.name, role).map_err(|err| match err {
+                crate::trust::SetRoleError::NotFound => OpError::new(
+                    ErrorCode::HostNotFound,
+                    format!("{:?} is not a pinned peer", req.name),
+                )
+                .with_retryable(false),
+            })?;
+        if changed {
+            self.record_role_write("trust.set_role", &peer.name, role)?;
+            store.save(&path)?;
+        }
+        Ok(TrustSetRoleData {
+            peer,
+            previous_role,
+            changed,
+        })
+    }
+
+    /// The audit record every write of a role other than `none` leaves
+    /// (ADR-0045 결정 8): `action` the op name, `principal` the pin acted on,
+    /// `resource` the pin name, `role` the role written. Fail-closed like
+    /// [`Self::trust_rename`]'s: no durable record, no write — a failed
+    /// append is `INTERNAL` (`retryable: true`) and the caller must not
+    /// save. A `none` role writes no record, since it grants nothing.
+    fn record_role_write(
+        &self,
+        action: &'static str,
+        pin: &str,
+        role: TrustRole,
+    ) -> Result<(), OpError> {
+        if role == TrustRole::None {
+            return Ok(());
+        }
+        let mut record = AuditRecord::local_op(
+            action,
+            Principal::Device(pin.to_string()).to_string(),
+            pin.to_string(),
+        );
+        record.role = Some(role.as_str().to_string());
+        let sink: Arc<dyn AuditSink> = match &self.audit {
+            Some(sink) => Arc::clone(sink),
+            None => Arc::new(FileAuditSink::new(
+                Config::load(&self.paths)?.audit.path(&self.paths),
+            )),
+        };
+        sink.record(&record).map_err(|err| {
+            OpError::new(
+                ErrorCode::Internal,
+                format!("audit record could not be written; trust.toml left unchanged: {err}"),
+            )
+            .with_retryable(true)
+        })
+    }
+
     /// `trust.invite` — mint a one-time pairing invite (ADR-0002, the M7 plan (69dd788)
     /// M7 Step 4).
     ///
@@ -293,6 +383,15 @@ impl Ops {
             .as_name
             .map(|name| validate_peer_label_arg(&name))
             .transpose()?;
+        // ADR-0045 결정 8: the issuer fixes the role the redeemer is pinned
+        // with, `full` unless told otherwise. It rides in the invite record;
+        // the redeeming side cannot choose it.
+        let assigned_role = req
+            .role
+            .as_deref()
+            .map(parse_role_arg)
+            .transpose()?
+            .unwrap_or(TrustRole::DEFAULT_FOR_INVITE);
 
         let secret = crate::trust::pairing::generate_secret();
         let now = std::time::SystemTime::now();
@@ -304,11 +403,13 @@ impl Ops {
         let _lock = crate::trust::pairing::InviteStore::lock(&path)?;
         let mut store = crate::trust::pairing::InviteStore::load(&path)?;
         store.prune(now);
-        let (_created_at, expires_at) = store.add(secret.as_slice(), now, assigned_name.clone());
+        let (_created_at, expires_at) =
+            store.add_with_role(secret.as_slice(), now, assigned_name.clone(), assigned_role);
         store.save(&path)?;
 
         let code = qsh_proto::pairing::encode_invite_code(&secret);
         Ok(TrustInviteData {
+            assigned_role: Some(assigned_role.as_str().to_string()),
             assigned_name,
             accept_command: format!("qsh pair accept <address> {code}"),
             code,
@@ -390,6 +491,15 @@ impl Ops {
             .as_name
             .map(|name| validate_peer_label_arg(&name))
             .transpose()?;
+
+        // Validated before any dial too: a bad `--role` must not spend a
+        // network round trip either (ADR-0045 결정 8).
+        let role = req
+            .role
+            .as_deref()
+            .map(parse_role_arg)
+            .transpose()?
+            .unwrap_or(TrustRole::DEFAULT_FOR_ACCEPT);
 
         let secret = qsh_proto::pairing::parse_invite_code(&req.code).map_err(|err| {
             OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
@@ -477,11 +587,12 @@ impl Ops {
         // `HOST_NOT_FOUND` (§6.1/§6.8: an address-less pin is never a
         // dial-address candidate), directly undercutting ADR-0002's SC1
         // (5-minute pairing to first connection).
-        let (peer, created, updated) = store.add_peer(
+        let (peer, created, updated) = store.add_peer_with_role(
             effective_name.clone(),
             Some(address.clone()),
             observed_fp,
             now_rfc3339(),
+            role,
         );
         if !created && !updated && peer.fingerprint != observed_fp.to_string() {
             return Err(OpError::new(
@@ -493,6 +604,25 @@ impl Ops {
             )
             .with_retryable(false));
         }
+        if created {
+            // The responder consumed the one-time invite before this audit
+            // append, so a failure here cannot be fixed by retrying the same
+            // code: `retryable` is false and the message says a new invite
+            // is needed. `trust.toml` is still untouched.
+            self.record_role_write("trust.accept", &peer.name, role)
+                .map_err(|err| {
+                    OpError::new(
+                        err.code,
+                        format!(
+                            "{}; the one-time invite is already used, so ask the other device \
+                             for a new invite (qsh pair invite) and run accept again",
+                            err.message
+                        ),
+                    )
+                    .with_retryable(false)
+                    .with_details(serde_json::json!({ "new_invite_required": true }))
+                })?;
+        }
         if created || updated {
             store.save(&path)?;
         }
@@ -502,6 +632,16 @@ impl Ops {
             updated: (!created).then_some(updated),
         })
     }
+}
+
+/// Parse a role argument (`--role`, `trust set-role <role>`, a request's
+/// `role`) against the six fixed names (ADR-0045 결정 2), mapping a failure
+/// to `INVALID_ARGUMENT`. The text in the message is the operator's own
+/// argument, never peer-controlled.
+pub(crate) fn parse_role_arg(role: &str) -> Result<TrustRole, OpError> {
+    role.parse::<TrustRole>().map_err(|err| {
+        OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+    })
 }
 
 /// Validate an operator-supplied trust-store label (`--as` on `pair

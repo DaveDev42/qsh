@@ -316,3 +316,81 @@ fn listen_without_acl_toml_denies_every_reverse_registration() {
         controller_stderr
     );
 }
+
+/// ADR-0045 결정 8: `qsh trust set-role` on the host takes effect from the
+/// next request of the same running `qsh serve`, with no restart and with
+/// no `acl.toml` in play (a missing `acl.toml` is "no rows", the role still
+/// grants). `none` is denied, `exec` runs, and narrowing to `read-only`
+/// denies again.
+#[test]
+fn set_role_takes_effect_on_the_next_request_without_restart() {
+    let host = Sandbox::new();
+    let client = Sandbox::new();
+    let host_fp = host.fingerprint();
+    let client_fp = client.fingerprint();
+    host.trust_add_with_role(CLIENT_ALIAS, None, &client_fp, "none");
+    let serve = ServeGuard::start_without_policy(&host, &[]);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
+
+    let run = || client.json(&["exec", HOST_ALIAS, "--json", "--", "true"]);
+
+    let (code, denied) = run();
+    assert_eq!(code, 255, "{denied}");
+    assert_eq!(denied["error"]["code"], "PERMISSION_DENIED", "{denied}");
+
+    let (code, set) = host.json(&["trust", "set-role", CLIENT_ALIAS, "exec", "--json"]);
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(set["data"]["previous_role"], "none", "{set}");
+    let (code, allowed) = run();
+    assert_eq!(code, 0, "same serve process, next request: {allowed}");
+
+    let (code, set) = host.json(&["trust", "set-role", CLIENT_ALIAS, "read-only", "--json"]);
+    assert_eq!(code, 0, "{set}");
+    let (code, denied) = run();
+    assert_eq!(code, 255, "{denied}");
+    assert_eq!(denied["error"]["code"], "PERMISSION_DENIED", "{denied}");
+}
+
+/// The `serve --to` half: the controller's `qsh listen` keeps refusing the
+/// target's registration while the target's pin has role `none`, and the
+/// target's own retry loop registers as soon as `trust set-role <target>
+/// reverse` runs on the controller, with neither process restarted.
+#[test]
+#[cfg(unix)]
+fn set_role_takes_effect_for_a_reverse_registration_without_restart() {
+    const TARGET_ALIAS: &str = "late-target";
+    let controller = Sandbox::new();
+    let target = Sandbox::new();
+    let controller_fp = controller.fingerprint();
+    let target_fp = target.fingerprint();
+    controller.trust_add_with_role(TARGET_ALIAS, None, &target_fp, "none");
+    let listen = ListenGuard::start_without_policy(&controller, "127.0.0.1:0");
+    target.trust_add("hub", Some(listen.addr()), &controller_fp);
+    std::fs::write(
+        target.config_dir().join("config.toml"),
+        "[reverse]\nbackoff_initial_ms = 10\nbackoff_max_ms = 40\nbackoff_jitter_pct = 0\n",
+    )
+    .expect("write config.toml");
+    let reverse = ReverseGuard::start_serve_to(&target, "hub");
+
+    common::wait_for_audit(&controller, "a host.reverse deny", |record| {
+        record["action"] == "host.reverse" && record["decision"] == "deny"
+    });
+    assert!(hosts_array(&controller).is_empty());
+
+    let (code, set) = controller.json(&["trust", "set-role", TARGET_ALIAS, "reverse", "--json"]);
+    assert_eq!(code, 0, "{set}");
+
+    common::poll_until(
+        "the reverse registration to be admitted after set-role",
+        std::time::Duration::from_secs(15),
+        || {
+            hosts_array(&controller)
+                .iter()
+                .any(|h| h["name"] == TARGET_ALIAS && h["connection_mode"] == "reverse")
+                .then_some(())
+        },
+    );
+    reverse.shut_down();
+    drop(listen);
+}

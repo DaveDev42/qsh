@@ -19,6 +19,11 @@ use super::{complete_exempt_codes, is_read_only_step, step_order};
 use crate::acl::{ACL_RESTART_NOTICE, Role};
 use crate::ops::{OpError, Ops};
 
+/// The role every pin `qsh setup` writes carries until `--peer-role` exists
+/// (ADR-0045 결정 8, 결정 14): `none`, the same authority a pin written before
+/// ADR-0045 has, so `setup` neither widens nor narrows anything.
+const SETUP_PIN_ROLE: &str = "none";
+
 /// How long an invite stays redeemable (`crate::trust::pairing::INVITE_TTL`,
 /// `docs/CLI.md` §6.11), in the words a person is told.
 const INVITE_TTL_TEXT: &str = "10 minutes";
@@ -565,6 +570,11 @@ impl Ops {
             // Always the certificate: without one `trust_add` would dial the
             // peer and offer whatever it presents (ADR-0024 결정 3, 6).
             cert_pem: Some(pem.to_string()),
+            // `setup` keeps writing what it always wrote: a pin that grants
+            // nothing by role, authorized by the printed `[[acl]]` rows.
+            // `--peer-role` and the per-role defaults of ADR-0045 결정 8
+            // replace this constant when `setup` learns roles.
+            role: Some(SETUP_PIN_ROLE.to_string()),
         })?;
         Ok(step(
             SetupStepId::PinCert,
@@ -608,6 +618,7 @@ impl Ops {
             address: address.to_string(),
             code: code.to_string(),
             as_name: Some(name.to_string()),
+            role: Some(SETUP_PIN_ROLE.to_string()),
         })?;
         let peers = self.trust_list()?.peers;
         Ok(pair_outcome(
@@ -654,6 +665,7 @@ impl Ops {
         // were written for, whatever it calls itself (ADR-0024 결정 5).
         let data = self.trust_invite(TrustInviteReq {
             as_name: Some(name.to_string()),
+            role: Some(SETUP_PIN_ROLE.to_string()),
         })?;
         let detail = (earlier > 0).then(|| {
             format!(

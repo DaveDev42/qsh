@@ -30,6 +30,7 @@ fn exec_run_shares_the_connect_runtime_across_calls() {
         address: Some("127.0.0.1:1".into()),
         fingerprint: Some(fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -319,6 +320,7 @@ fn exec_host_not_found_names_a_pinned_host_without_address_truthfully() {
         address: None,
         fingerprint: Some(fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -358,6 +360,7 @@ fn exec_host_not_found_names_a_pinned_alias_behind_a_user_prefix() {
         address: None,
         fingerprint: Some(fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 

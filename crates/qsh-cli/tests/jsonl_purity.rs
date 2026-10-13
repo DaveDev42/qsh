@@ -150,7 +150,11 @@ fn trust_invite_keeps_stdout_pure_json_and_free_of_the_address_block_at_every_ve
             .map(String::as_str)
             .collect();
         // Alphabetical: see `qsh_proto::types::trust`'s own key-set test.
-        assert_eq!(keys, ["accept_command", "code", "expires_at"], "{label}");
+        assert_eq!(
+            keys,
+            ["accept_command", "assigned_role", "code", "expires_at"],
+            "{label}"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         for wording in [INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE] {
             assert!(!stdout.contains(wording), "{label}: {stdout:?}");

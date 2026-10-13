@@ -290,6 +290,14 @@ pub enum RenameError {
     NewTaken,
 }
 
+/// Why [`TrustStore::set_role`] refused (`docs/CLI.md` §6.11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetRoleError {
+    /// `name` is no `[[peer]]` entry. A `[[ca]]`-only name counts as missing:
+    /// a CA root has no role (ADR-0045 결정 8).
+    NotFound,
+}
+
 impl TrustStore {
     /// Load `path`. A missing file is an empty store (not an error); a
     /// malformed one is `CONFIG_ERROR` — QSH never guesses at trust.
@@ -483,12 +491,43 @@ impl TrustStore {
     ///   entry, untouched. Re-binding an identity is a deliberate operator
     ///   action (remove, then add), never a side effect of a repeated
     ///   `trust add` (`docs/CLI.md` §6.11).
+    ///
+    /// This is the legacy writer: a *new* pin gets no `role` key, which
+    /// reads as `none` (ADR-0045 결정 3). Production paths that create a pin
+    /// go through [`Self::add_peer_with_role`] so every pin written after
+    /// ADR-0045 names its role; this form stays for fixtures that need a
+    /// pre-ADR-0045 pin.
     pub fn add_peer(
         &mut self,
         name: impl Into<String>,
         address: Option<String>,
         fingerprint: Fingerprint,
         now: String,
+    ) -> (TrustPeer, bool, bool) {
+        self.add_peer_inner(name, address, fingerprint, now, None)
+    }
+
+    /// [`Self::add_peer`] that writes `role` on a *new* pin (ADR-0045
+    /// 결정 8). The same four outcomes apply, and an existing pin keeps the
+    /// role it has: `role` is used only when `created` comes back `true`.
+    pub fn add_peer_with_role(
+        &mut self,
+        name: impl Into<String>,
+        address: Option<String>,
+        fingerprint: Fingerprint,
+        now: String,
+        role: TrustRole,
+    ) -> (TrustPeer, bool, bool) {
+        self.add_peer_inner(name, address, fingerprint, now, Some(role))
+    }
+
+    fn add_peer_inner(
+        &mut self,
+        name: impl Into<String>,
+        address: Option<String>,
+        fingerprint: Fingerprint,
+        now: String,
+        role: Option<TrustRole>,
     ) -> (TrustPeer, bool, bool) {
         let name = name.into();
         let fingerprint = fingerprint.to_string();
@@ -515,9 +554,7 @@ impl TrustStore {
             fingerprint,
             address: address.unwrap_or_default(),
             added_at: now,
-            // No `role` key until Step 5 gives the writing commands a role
-            // to write (ADR-0045 결정 8).
-            role: None,
+            role: role.map(|role| role.as_str().to_string()),
         };
         self.peers.push(peer.clone());
         (peer, true, false)
@@ -640,6 +677,37 @@ impl TrustStore {
             .ok_or(RenameError::OldMissing)?;
         self.peers[index].name = new.to_string();
         Ok(self.peers[index].clone())
+    }
+
+    /// Set the role of the pin named `name` (`qsh trust set-role`, ADR-0045
+    /// 결정 8). Pure, shaped like [`Self::rename`]: `Ops::trust_set_role`
+    /// owns the lock, the audit record and the save.
+    ///
+    /// `[[peer]]` only: a `[[ca]]` name has no role and is
+    /// [`SetRoleError::NotFound`], the way [`Self::rename`] treats it.
+    /// Returns the pin as it now stands, the role string it had before
+    /// (`None` for a pin with no `role` key) and whether anything changed:
+    /// setting the role a pin already has (`none` for a pin with no `role`
+    /// key) is `changed = false` and leaves the entry as it was.
+    pub fn set_role(
+        &mut self,
+        name: &str,
+        role: TrustRole,
+    ) -> Result<(TrustPeer, Option<String>, bool), SetRoleError> {
+        let index = self
+            .peers
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or(SetRoleError::NotFound)?;
+        let previous = self.peers[index].role.clone();
+        // A pin with no `role` key holds `none` (ADR-0045 결정 3), so
+        // setting `none` on it changes nothing; `previous` still reports the
+        // absent key as it was.
+        let changed = previous.as_deref().unwrap_or(TrustRole::None.as_str()) != role.as_str();
+        if changed {
+            self.peers[index].role = Some(role.as_str().to_string());
+        }
+        Ok((self.peers[index].clone(), previous, changed))
     }
 
     /// Pins as `(fingerprint, principal)` pairs. Entries whose fingerprint

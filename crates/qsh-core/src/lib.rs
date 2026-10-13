@@ -70,8 +70,8 @@ pub use ops::{
     ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
     SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
     SessionResizeOp, SessionWriteOp, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp,
-    TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
+    TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
     cert_file_fingerprint_conflict, meets_threshold, normalize_invite_code, parse_dynamic_forwards,
     parse_local_forwards, parse_remote_forwards, read_cert_file_arg, resolve_invite_code_source,
 };
