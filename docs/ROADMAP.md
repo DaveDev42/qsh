@@ -2,7 +2,7 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR은 모두 `제안됨`으로 사용자 승인을 기다린다. M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). 승인 전까지 에이전트가 더 할 P1 일은 없고 `PLAN.md`는 사람 몫을 추적하는 자리표시자다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). 현재 마일스톤은 M15(역할 기반 권한과 scp 호환 파일 복사)이고 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M20)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -221,7 +221,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - (a) 역할 기반 권한(ADR-0045). trust pin에 role(`full`·`exec`·`tunnel`·`read-only`·`reverse`·`none`) 하나를 두어 신뢰 등록이 곧 권한 부여가 되게 한다. role grant와 `acl.toml` 행은 합집합이고 `acl.toml`은 세밀한 제어용 선택 사항이 된다. role 키가 없는 기존 pin은 `acl.toml`만 따르고(업그레이드로 권한이 넓어지지 않음), 파싱할 수 없는 `acl.toml`은 role grant까지 거부한다. `trust set-role`과 `--role` 플래그를 더하고 `acl show`/`acl check`/doctor가 role을 보여 준다. ADR-0017·0024·0025·0038의 관련 결정을 개정한다.
   - (b) scp 호환 파일 복사(ADR-0029 개정판). `qsh cp [-r] [-p] [-q] [--no-clobber] SRC... DST`, 인자 문법은 `[user@]host:path`, 로컬↔원격 한 방향. 디렉터리 순회는 client가 하고 wire에는 `file.read`/`file.write`에 더해 `file.list`·`file.mkdir`가 오른다. `full` role은 serve 계정이 닿는 경로 전부를 준다. `[[acl]]` `paths`는 행으로 파일 권한을 줄 때만 쓴다.
   - 이 ADR이 반드시 담아야 하는 결정이 하나 있다. `file.write`는 `qsh serve`의 uid로 파일을 쓰고, 그 uid는 `acl.toml`, `trust.toml`, `invites.toml`, identity와 keystore, `resume.json`, audit 로그를 쓸 수 있다. `file.write`가 `acl.toml`에 닿으면 원격 peer가 ACL writer가 되어 ADR-0017 결정 1과 ADR-0025 결정 1이 닫은 자리를 원격 op이 우회한다. `trust.toml`은 더 나쁘다. pin과 role이 판정마다 다시 읽히므로 원격 쓰기 하나가 재시작 없이 새 pin이나 `full` role을 심는다. audit 로그를 덮어쓰면 SC6 추적성이 지워진다. 그래서 qsh의 config·data·state·runtime 디렉터리(`docs/design/architecture.md` §7의 경로 전부, 곧 `config.toml`, `acl.toml`, `trust.toml`, `invites.toml`, `hosts.toml`, identity·keystore 파일, `resume.json`, audit 경로, localctl 소켓 디렉터리, M13 (f)의 reset key 파일)는 role·ACL 행과 무관하게 `file.*`의 대상에서 항상 거부한다. 판정은 symlink를 해석한 뒤의 정규 경로로 한다. 이 성질은 role로도 행으로도 열 수 없어야 한다.
-- **착수 조건:** ADR-0045 승인((a)), ADR-0029 승인((b)). (b)는 (a)의 role 판정 위에 선다. M13 (b)의 역압 하네스가 선 뒤(충족).
+- **착수 조건:** ADR-0045 승인((a), 충족 2026-10-14), ADR-0029 승인((b), 충족 2026-10-14). (b)는 (a)의 role 판정 위에 선다. M13 (b)의 역압 하네스가 선 뒤(충족).
 - **명시적 out:** 디렉터리 동기화(rsync류), 원격↔원격 복사, 재개, UDP forwarding, 원격 파일 브라우징, role 추가·매핑 변경(새 ADR).
 - **수용 기준 (DoD):**
   - (a) ADR-0045가 `승인됨`이다. role 키가 없는 기존 `trust.toml`이 오늘과 같은 판정을 내고, 새 pin은 role 키를 명시하며, 모르는 role 값은 `CONFIG_ERROR`로 fail closed함을 테스트가 고정한다. `acl.toml` 세 상태(있음·없음·파싱 불가)마다 role grant의 동작이 ADR대로임을 oracle 테스트가 고정하고, `acl_check_equivalence.rs`와 `acl_uniformity.rs`가 role 경로를 포함한다. role로 allow된 요청의 audit 레코드가 근거를 싣는다.
@@ -242,7 +242,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **범위:** 2026-10-12 사용자 결정("기존 SSH의 설정과 키를 활용해서 바로 qsh가 동작할 수 있게")으로 다시 짰다. 이전 범위의 pin 방향 축(ADR-0030), listener 초대 상환(ADR-0015), CSR 다대 CA 서명(ADR-0016)은 기각했고, rotation·revocation(ADR-0031)은 (b) 하나로 줄였다.
   - (a) SSH 부트스트랩(ADR-0044). pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 `ssh`를 한 번 거쳐 원격의 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. `~/.ssh/config`, ssh-agent, 암호 걸린 키, known_hosts는 ssh가 처리하고 qsh는 `ssh -G`로 HostName만 읽는다. 원격 pin은 ADR-0045 role `full`(`--role`로 바꿈), 이 장비 쪽 pin은 role `none`이다. 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다. 역방향 구도는 `qsh pair ssh <dest> --reverse --to <이 장비의 주소>`가 같은 절차로 연다(원격 pin `full`, 이 장비 쪽 pin `reverse`). 원격 설치와 serve 기동은 대신하지 않는다.
   - (b) trust 철회 시 열린 연결 닫기(ADR-0031 축소판). `trust remove`나 role 축소 뒤 `qsh serve`·`qsh listen`·`qsh serve --to`가 2초 안에 살아 있는 연결을 재검증해 신뢰를 잃었거나 권한이 줄어든 연결을 닫는다. `TrustRemoveScope` remedy의 "(P1)"이 여기서 풀린다.
-- **착수 조건:** ADR-0044·0031 승인, 그리고 M15 (a)(ADR-0045 role) 착지. (a)는 원격 pin에 role을 쓰고 (b)는 role grant 축소를 비교한다.
+- **착수 조건:** ADR-0044·0031 승인(충족 2026-10-14), 그리고 M15 (a)(ADR-0045 role) 착지. (a)는 원격 pin에 role을 쓰고 (b)는 role grant 축소를 비교한다.
 - **명시적 out:** 조직 계정·중앙 관리(PRD §12 경계 밖), SSH 공개키를 principal로 쓰는 것(ADR-0026이 거부), 원격 qsh 설치·serve 기동, `StrictHostKeyChecking` 덮어쓰기, revocation 목록·rotation 문서·`trust rotate`·CA 발급 인증서 개별 revoke(2026-10-12 폐기).
 - **수용 기준 (DoD):**
   - ADR-0044·0031이 `승인됨`이다.
@@ -255,11 +255,11 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 ### M17 — 운영 표면
 
 - **범위:** 사람 회차와 무관하게 열 수 있는 운영·문서 항목.
-  - (a) 서비스 매니저 실호출(ADR-0032). `launchctl bootstrap`/`systemctl --user enable`을 명시적 플래그로만 부른다. `docs/CLI.md` §6.18은 `service install`이 유닛 파일만 쓴다고 계약하고, ADR-0024 결정 11은 활성화를 §6.18을 개정하는 별도 결정으로 남겼다. 이 ADR이 그 결정이다. 2026-10-13 개정으로 플랫폼마다 사람이 치는 상시 기동 레시피(Linux linger, macOS LaunchDaemon, Windows 상시 기동 작업)와 doctor 인식, `keystore_session_bound`, 개인키를 store 사이에서 옮기는 `qsh identity move-key`가 (a)에 들어온다.
+  - (a) 서비스 매니저 실호출(ADR-0032). `launchctl bootstrap`/`systemctl --user enable`을 명시적 플래그로만 부른다. `docs/CLI.md` §6.18은 `service install`이 유닛 파일만 쓴다고 계약하고, ADR-0024 결정 11은 활성화를 §6.18을 개정하는 별도 결정으로 남겼다. 이 ADR이 그 결정이다. 2026-10-13 개정으로 플랫폼마다 사람이 치는 상시 기동 레시피(Linux linger, macOS LaunchDaemon, Windows 상시 기동 작업)와 doctor 인식, `keystore_session_bound`, 개인키를 store 사이에서 옮기는 `qsh identity move-key`가 (a)에 들어온다. ADR-0032 결정 3 표의 작업 스케줄러(Windows) 열은 M17 (a)가 `ManagerRunner`와 실행 상태 질의 seam만 세우고, Windows 분기의 구현은 M19(ADR-0035 크기에 포함)가 한다. 사람이 설치한 상시 기동 형태(macOS LaunchDaemon, Windows `Password` 주체 작업)를 `--activate`/`--deactivate`가 건드리지 않는 규칙(ADR-0032 결정 18)도 (a) 범위다.
   - (b) README 서사·구조 전면 재작성. M9는 측정 대상 문서(README "First run" 절)를 회차 전에 바꾸지 않으려고 이 일을 SC1 재측정 뒤로 미뤘다. M12 (b)가 M9 재측정의 대상 트리를 `docs/campaigns/m9-stopwatch.md` §8에 SHA로 고정하고 `qsh setup` 캠페인도 대상 트리를 고정하므로, 두 고정 뒤에는 재작성이 측정을 흔들지 않는다. M9 DoD 1 결과가 그때 기록돼 있으면 서사의 입력으로 쓴다. **착지 (2026-10-11):** `2fc879b`. First run 절차와 테스트가 고정한 문구는 그대로다.
   - (c) QR pairing. **폐기 (2026-10-12 사용자 결정):** P1 안에 QR을 읽을 소비자가 없음을 확인했고(2026-10-11, M19는 콘솔 client), 소비자로 상정했던 P2 mobile client SDK도 폐기했다. PRD §17의 확정 결정은 "QR pairing은 만들지 않는다"로 바뀌었고 ADR-0002의 해당 줄도 맞췄다.
   - (d) 세션 및 audit 관리 개선(PRD §7 P1, 범위 ADR-0033). PRD는 항목 이름만 두었다. 범위 ADR이 무엇을 개선하는지 정한다(세션 목록 필터, audit 조회, retention 정책 등 후보). 결정 항목에 다음을 미리 넣는다. audit 조회는 인가 불요 local op이고 wire 메시지를 만들지 않는다(원격에서 부를 수 있으면 ADR-0022 결정 4·ADR-0025 결정 4가 적은 열거 oracle이 된다). audit 레코드의 삭제·축약은 원격 op으로 만들지 않는다(SC6 추적성). 조회 출력은 기존 구조 필드만 싣는다. 텔레메트리 줄의 계약 승격 여부(`crates/qsh-core/src/telemetry.rs` 모듈 doc: "That promotion is a P1 decision")도 이 ADR이 정한다.
-- **착수 조건:** (a)는 ADR-0032 승인, (b)는 M12 (b)의 두 SHA 고정, (d)는 ADR-0033 승인. 사람 회차를 기다리는 항목은 없다.
+- **착수 조건:** (a)는 ADR-0032 승인(충족 2026-10-14), (b)는 M12 (b)의 두 SHA 고정, (d)는 ADR-0033 승인(충족 2026-10-14). 사람 회차를 기다리는 항목은 없다.
 - **명시적 out:** `acl.toml`을 쓰는 어떤 동작(ADR-0017 결정 1, ADR-0025 결정 1), 핫 리로드, 로그인 세션 밖 상시 기동의 자동 설정(어느 플랫폼에서도 qsh가 linger·LaunchDaemon·Windows 상시 기동 작업을 대신 설정하지 않는다. 레시피와 doctor finding은 (a) 범위다), qsh 자체 데몬화(§5.3).
 - **수용 기준 (DoD):**
   - (a) ADR-0032가 `승인됨`이다. 플래그 없이는 매니저를 부르지 않는다. 부를 때의 명령 인자가 `docs/deploy/service.md`의 안내와 같음을 문서-코드 대조 테스트가 고정한다. 테스트는 실제 매니저를 부르지 않는다. §6.18과 man이 같은 커밋에서 바뀐다. LaunchDaemon 펜스가 LaunchAgent 렌더러와 같은 인자를 쓴다는 것을 문서-코드 대조 테스트가 고정한다. `keystore_session_bound`와 `identity.move_key`는 테스트와 fixture 등록 완전성을 갖추고, `move-key`가 fingerprint를 바꾸지 않음을 테스트가 확인한다.
@@ -292,7 +292,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 ### M19 — Windows client
 
 - **범위:** PRD P1의 Windows client와 Windows 공통 기반. 연결 방향과 플랫폼에 관계없이 같은 기능을 연다(`docs/PRD.md` §4, §5.1 원칙 7, 2026-10-13 사용자 결정 "정방향, 역방향, 모든 플랫폼에서 평등한 기능 지원", 같은 날 "원칙에 예외는 없다"). client 쪽은 `init`, `trust`/`pair accept`(콘솔 프롬프트 포함)/`pair ssh [--reverse]`, `exec`, 대화형 attach, `-L`/`-R`/`-D`, `qsh cp`, `doctor`, `qsh listen`과 `setup listener`, `hosts`·`tunnels`의 데몬 항목이다. 공통 기반은 콘솔 raw 모드와 VT 입력, resize 폴링, named pipe localctl(소유자 전용 DACL, 이름 선점 거부, 양방향 SID 확인), 키·상태·audit 파일의 소유자 전용 DACL, Credential Manager keystore, `QueryUnbiasedInterruptTime` 기반 절전 감지다. `qsh service`와 `--service`의 작업 스케줄러 로그온 작업 백엔드(숨김 `qsh service run`, linger에 대응하는 상시 기동 레시피, `logon_task_session_scoped`)도 여기서 연다. 출고는 x86_64·aarch64 zip(man 페이지 포함), `install.ps1`, Authenticode 서명(SSL.com eSigner)과 CI 서명 검증, scoop bucket과 winget 매니페스트다. 역방향 CI를 위해 `qsh serve --to`의 Windows 게이트를 먼저 걷는다. PTY 세션은 M20까지 `UNSUPPORTED`이고 지원 약속이 아니다.
-- **착수 조건:** ADR-0035 승인. M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다. `qsh cp`와 `pair ssh` 항목은 ADR-0029·ADR-0044 착지 뒤에 열린다. 서명 스텝의 실서명은 사람 몫(인증서와 시크릿, §5.5)이 준비되어야 돈다. 그 전까지는 게이트가 경고와 함께 건너뛴다.
+- **착수 조건:** ADR-0035 승인(충족 2026-10-14). M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다. `qsh cp`와 `pair ssh` 항목은 ADR-0029·ADR-0044 착지 뒤에 열린다. 서명 스텝의 실서명은 사람 몫(인증서와 시크릿, §5.5)이 준비되어야 돈다. 그 전까지는 게이트가 경고와 함께 건너뛴다.
 - **명시적 out:** host 역할 전부(M20): ConPTY 백엔드, PTY 세션, `setup host`, `pair invite`, `pair ssh-respond`, host 쪽 `cp`. MSI 설치 관리자는 macOS·Linux도 OS 패키지를 만들지 않으므로 만들지 않는다.
 - **수용 기준 (DoD):**
   - `ci.yml`의 `windows-latest` leg이 Windows `qsh listen` ← Windows `qsh serve --to`의 실제 CLI로 역방향 종단(`exec`, 터널 echo, `hosts`의 reverse 항목, 데몬 재시작 뒤 재등록, ADR-0029 착지 뒤 `qsh cp`)을 돌고, ConPTY probe로 콘솔 계층(raw 입력, resize 폴링, 모드 복원, 초대 코드 에코 부재)을 단언한다.
@@ -330,11 +330,11 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M12 이슈 설계 ADR 구현 | 5.1~6.1 | 완료 |
 | M13 측정·배포 기반 | 3.1~6.1 | 완료 |
 | M14 TCP/TLS fallback | 1.0~1.8 | 철회(ADR-0043). (a)만 착지 |
-| M15 역할 기반 권한과 scp 호환 파일 복사 | 7.0~10.5 | ADR-0045·0029 승인 (제안됨 2026-10-12, M13 (b)는 충족) |
-| M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | ADR-0044·0031 승인(제안됨 2026-10-12), M15 (a) 착지. 0015·0016·0030은 기각 |
-| M17 운영 표면 | 2.1~3.1 + 미산정 하나 | (b) 착지, (c) 폐기. ADR-0032·0033 승인(제안됨 2026-10-11, 0032 개정 2026-10-13) |
+| M15 역할 기반 권한과 scp 호환 파일 복사 | 7.0~10.5 | ADR-0045·0029 승인됨 2026-10-14, M13 (b) 충족 |
+| M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | ADR-0044·0031 승인됨 2026-10-14, M15 (a) 착지. 0015·0016·0030은 기각 |
+| M17 운영 표면 | 2.1~3.1 + 미산정 하나 | (b) 착지, (c) 폐기. ADR-0032·0033 승인됨 2026-10-14 |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
-| M19 Windows client | 7.7~12.9 | ADR-0035 승인 (제안됨, 2026-10-13 세 번째 개정) |
+| M19 Windows client | 7.7~12.9 | ADR-0035 승인됨 2026-10-14 |
 | M20 Windows host | 3.6~6.3 | M19 닫힘 |
 | 합 | 약 40~65 + 미산정 둘 | |
 

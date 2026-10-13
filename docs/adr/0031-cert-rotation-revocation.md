@@ -1,7 +1,7 @@
 # ADR-0031: trust에서 peer를 빼거나 role을 줄이면, 장기 실행 프로세스(`qsh serve`, `qsh listen`, `qsh serve --to`)는 2초 안에 살아 있는 연결을 재검증해 더는 신뢰하지 않는 연결과 권한이 줄어든 연결을 닫는다. revocation 목록, rotation 문서, `trust rotate`, CA가 서명한 인증서의 개별 revoke는 두지 않는다
 
-날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13)
-상태: 제안됨
+날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13, 2026-10-14)
+상태: 승인됨
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5)에서 이 번호를 인증서 rotation·revocation(M16 (d)) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `trust.toml`의 `[[revoked]]` 목록, `qsh trust revoke`, `qsh identity rotate`(rotation 문서와 `--keep-key` 갱신), `qsh trust rotate`, 연결 재검증, 유효기간 기한을 한 묶음으로 제안했다. 2026-10-12 사용자 결정이 P1을 다시 짜면서 앞의 넷을 뺐다. 이 문서는 남은 하나, 곧 "trust를 거두면 이미 열린 연결도 닫는다"만 정한다. 빠진 것은 대안과 기각 사유 절에 사용자 결정으로 옮겼다.
 
@@ -9,7 +9,10 @@
 - ADR-0012 결정 7("rename 뒤 이미 붙어 있는 연결은 권한을 유지한다")은 role이 없는 pin에 대해서는 그대로 서고, role이 있는 pin의 rename은 결정 5의 마지막 항목으로 연결을 닫는다. `acl.toml`은 이전처럼 기동 때 한 번만 읽는다.
 - ADR-0045 결정 4의 "이미 만들어진 자원은 role이 줄어도 끝까지 간다. 그런 연결을 끊는 일은 ADR-0031(축소판)이 정한다"와 결정 12의 `trust_remove_scope` 문면은 이 ADR이 착지하면 이 ADR의 결정 5·9가 이긴다.
 - ADR-0044의 SSH 부트스트랩 잔여 위험 문단이 가리키는 "ADR-0031(축소판)"은 이 문서다. 부트스트랩이 심은 pin도 `trust remove`로 거두면 이 결정이 적용된다.
+- ADR-0045의 결정 4와 결과 절 위협 모델 문단은 2026-10-14 승인 때 이 ADR이 `remove`, role 축소, role이 있는 pin의 rename을 모두 다룬다고(결정 1·5) 맞춰 적었다. 두 ADR 사이에 남은 어긋남은 없다.
 - ADR-0030(pin 방향)은 기각됐다. 이 ADR은 방향 필드나 `PeerRole` 확장을 입력으로 쓰지 않는다. 쓰는 `PeerRole`은 TLS 역할(상대가 서버인가 클라이언트인가) 둘뿐이고 지금 `QshPeerVerifier::verify_peer`가 이미 받는다.
+
+승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. 결정 2의 `qsh listen`이 role grant 비교를 하는지 열려 있던 문장(listen은 신뢰 자격만 본다고 적었으나 ADR-0045 결정 6에서 listen이 `host.reverse`를 인가하므로 비교 대상이다), 정방향과 역방향 사이의 닫는 범위 동등, Windows host에서의 동작, ADR-0045 의존 분기, `serve --to` 재dial 분류를 닫았다.
 
 ## 맥락
 
@@ -21,7 +24,7 @@ ADR-0045가 role을 도입하면서 같은 공백이 한 겹 더 생긴다. role
 
 설계를 가르는 사실은 이렇다.
 
-- 인가 결정이 나는 연결을 쥔 프로세스는 셋이다. `qsh serve`는 inbound 연결을 `Server::serve_connection`으로 받는다. `qsh serve --to`(`reverse/target`)는 controller에 outbound로 붙은 연결에서 같은 `Server::serve_control`을 돌린다. `qsh listen`(`reverse/listen`)은 target이 등록하러 붙은 inbound 연결을 쥐고, controller로서 그 위로 요청을 보낸다. 셋 모두 자기 `SharedTrustStore` 핸들을 따로 연다.
+- 인가 결정이 나는 연결을 쥔 프로세스는 셋이다. `qsh serve`는 inbound 연결을 `Server::serve_connection`으로 받는다. `qsh serve --to`(`reverse/target`)는 controller에 outbound로 붙은 연결에서 같은 `Server::serve_control`을 돌린다. `qsh listen`(`reverse/listen`)은 target이 등록하러 붙은 inbound 연결을 쥐고, controller로서 그 위로 요청을 보낸다. listen은 등록 요청의 `host.reverse`를 `Authorizer`로 인가하므로(ADR-0045 결정 6, `reverse::admit`) 이 연결도 role grant를 갖는다. 셋 모두 자기 `SharedTrustStore` 핸들을 따로 연다.
 - `qsh listen` 데몬 안의 localctl 브리지(`localctl/daemon.rs`)는 UDS와 peer credential로 신뢰를 정하고 `trust.toml`을 읽지 않는다. 거기서 relay되는 `LOCAL_CONTROL`/`LOCAL_STREAM`은 위 listen의 등록 연결 위에 얹힌다. 그래서 브리지 자체는 이 ADR의 대상이 아니고, 등록 연결이 닫히면 relay도 함께 끝난다.
 - one-shot client(`exec`, 대화형 attach, client 쪽 터널)는 상대 host에게 요청을 보낼 뿐 상대의 요청을 인가하지 않는다. 신뢰를 거둔 host를 계속 쓰는 것은 그 client 사용자의 선택이고, `--supervise` 터널은 재수립 handshake에서 거부된다.
 - `qsh_transport::Connection`은 principal, `auth_path`, peer fingerprint만 들고 있고 peer 인증서 chain은 handshake 뒤에 버린다. CA 경로의 재검증에는 chain이 필요하다. chain은 수 KB다.
@@ -38,12 +41,15 @@ ADR-0045가 role을 도입하면서 같은 공백이 한 겹 더 생긴다. role
    - `qsh serve --to`가 controller로 연 outbound 연결.
    - `qsh listen`이 받은 inbound 등록 연결.
 
-   one-shot client 연결과 localctl UDS 연결은 재검증하지 않는다(맥락). 셋 가운데 role grant 비교(결정 5의 마지막 두 항목)는 요청을 `Authorizer`로 인가하는 쪽, 곧 `qsh serve`와 `qsh serve --to`에만 적용한다. `qsh listen`은 요청을 인가하지 않으므로 신뢰 자격 재검증만 한다.
+   one-shot client 연결과 localctl UDS 연결은 재검증하지 않는다(맥락). 세 프로세스 모두 신뢰 자격 재검증(결정 5의 앞 세 항목)과 role grant 비교(마지막 항목)를 받는다. `qsh listen`의 등록 연결이 갖는 role grant는 `reverse` role이 주는 `host.reverse` 하나이고, `trust set-role <target> none`이나 target pin 삭제는 그 grant를 줄이므로 등록이 닫힌다. 이 비교를 빼면 `serve`에서는 role 축소가 연결을 닫는데 `listen`에서는 닫지 않는 방향 간 비대칭이 생긴다.
+
+   정방향과 역방향의 동등은 이렇게 성립한다. 서비스 쪽 장기 프로세스가 쥔 연결은 방향과 상관없이 모두 닫는다. 정방향의 `serve`가 받은 client 연결, 역방향의 `serve --to`가 연 controller 연결, `listen`이 받은 target 등록 연결이 그것이다. 사용자가 터미널에서 직접 띄운 foreground client(`exec`, `attach`, `cp`, `-L`/`-R`/`-D`의 일회성 실행)의 dial 쪽 연결은 두 방향 모두 재검증하지 않는다. 역방향에서 controller 쪽 foreground client는 localctl로 `listen`에 붙으므로 그 연결도 해당하지 않고, 등록 연결이 닫히면 relay가 같이 끝난다. 어느 쪽이든 그 client 사용자가 신뢰를 거둔 상대를 계속 쓰는 것은 본인의 선택이고, `--supervise` 터널은 재수립 handshake에서 거부된다.
 
 3. 변경 감지. 변경 감지는 프로세스 하나가 한 곳에서 한다.
    - `SharedTrustStore`에 단조 증가하는 세대 번호를 더한다. `refresh`가 snapshot을 실제로 바꿀 때마다(새로 파싱한 내용이든, 파일이 없어져 빈 store가 된 경우든) 세대를 올리고 `tokio::sync::watch` 채널로 알린다. 파싱에 실패해 마지막 정상 snapshot을 유지한 경우에는 세대를 올리지 않는다.
    - 프로세스 하나에 1초 간격 poll 작업을 하나 둔다. 이 작업은 `refresh`만 부른다. handshake의 `lookup_pin`이 먼저 `refresh`해 세대를 올릴 수도 있고, 그 경우 같은 알림이 즉시 간다.
    - 연결마다 감시 작업이 채널의 변경을 기다린다. 변경이 오면 결정 4의 판정을 연결마다 한 번 돌린다. 감시 작업은 그 연결을 서빙하는 작업과 같은 수명에 묶는다(`select!`로 같이 끝난다). 감시 작업만 죽고 연결이 남는 상태를 만들지 않는다.
+   - 플랫폼 차이는 없다. poll과 `watch` 채널과 `Connection::close`는 모두 이식 가능한 코드이고, Windows host(ADR-0035 M20)의 `serve`·`listen`·`serve --to`도 같은 감시 작업을 쓴다. `trust.toml`을 바꾸는 쓰기가 원자적 rename이든 Windows의 교체 쓰기든 감시는 파일 내용 바이트만 본다.
    - 보장은 "`trust.toml`의 바이트가 바뀐 시점부터 2초 안에 닫힌다"이다. poll 1초와 연결당 판정 시간의 여유다. 파일 감시(inotify, FSEvents)와 프로세스 간 신호는 쓰지 않는다(근거 절).
    - 연결 수는 기존 연결 수 상한(ADR-0010)이 묶는다. 판정은 snapshot만 읽고 I/O가 없다. CA 경로의 chain 검증이 연결당 가장 비싼 일이고, 연결마다 독립 작업이라 한 작업이 모든 연결을 순서대로 돌지 않는다.
 
@@ -72,7 +78,7 @@ ADR-0045가 role을 도입하면서 같은 공백이 한 겹 더 생긴다. role
    - 닫는 동작은 audit 기록과 무관하게 먼저 한다. 연결 수준 deny는 이미 좁히는 쪽이고 `handshake_rejected`와 같은 예외다. audit 쓰기가 fail-closed로 실패해도 연결은 닫히고, 그 사실은 로그 줄로만 남는다.
 
 7. 닫는 방법. 새 CLOSE 코드 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)를 `crates/qsh-transport/src/endpoint.rs`의 다른 CLOSE 상수 옆에 정의하고, `Connection::close(0x1005, b"trust withdrawn")`로 닫는다. reason 문자열은 고정이고 어떤 principal이나 사유도 싣지 않는다. peer는 값에 따라 분기하지 않는다(§7). 닫힌 연결 위의 세션은 오늘의 연결 유실과 같은 규칙으로 detach된다. 신뢰를 거둔 peer는 다시 handshake할 수 없어 resume으로 돌아오지 못하고, role만 줄어든 peer는 다시 붙어 줄어든 grant로 resume할 수 있다. 열린 터널, 진행 중인 전송, 열려 있는 스트림은 연결과 함께 끝난다. 거둔 principal의 세션을 즉시 종료하는 것은 이 ADR의 결정이 아니다.
-   - `qsh serve --to` 쪽은 연결이 닫히면 지금의 재dial 루프로 돌아간다. 이 루프의 연결 유실 분류가 `0x1005`를 일시적 네트워크 유실이 아니라 신뢰 철회로 구별해야 한다(재dial은 handshake에서 거부되어 backoff로 간다).
+   - `qsh serve --to` 쪽은 연결이 닫히면 지금의 재dial 루프로 돌아간다. 이 루프는 로컬이 `0x1005`로 닫은 경우와 상대가 `0x1005`로 닫은 경우를 모두 일시적 네트워크 유실이 아니라 신뢰 철회로 분류하고, 로그 한 줄만 남기며, 일시 유실용 빠른 재dial 경로를 타지 않고 handshake 거부와 같은 일반 backoff로 간다. 재dial은 handshake에서 거부되거나(신뢰가 거둬진 경우) 줄어든 grant로 받아들여진다(role만 줄어든 경우).
    - `qsh listen` 쪽은 등록 연결이 닫히면 등록표에서 빠지고 그 위의 relay가 끝난다. target이 다시 등록하려 하면 listen의 verifier가 handshake에서 거부하고 `handshake_rejected`가 남는다.
 
 8. audit. 닫을 때 연결 수준 deny 한 줄을 남긴다. 키 집합은 바뀌지 않는다(아홉 키와 ADR-0045 결정 16의 optional `role`, 여기서는 `role` 키를 싣지 않는다).
@@ -134,6 +140,7 @@ rename을 role이 있는 pin에서만 닫는 이유는 두 요구가 부딪히�
   - 연결 닫힘. 실제 QUIC 연결로, `qsh serve` inbound 연결이 `trust remove` 뒤 2초 안에 `0x1005`로 닫히고 audit 한 줄(`resource` `trust_withdrawn`)이 남는다. `qsh serve --to` outbound 연결과 `qsh listen` 등록 연결도 같다. tokio 시간을 멈춘 상태에서 poll 1초 틱 하나 안에 닫힘을 단언해 2초 보장을 시계로 고정한다.
   - 기존 테스트 교체. `crates/qsh-cli/tests/trust_lifecycle_live.rs`의 `an_established_connection_survives_the_hosts_trust_remove`는 g2가 한계 자체를 고정하던 테스트다. 이 ADR이 착지하면 그 단언이 정반대가 되므로 같은 커밋에서 `an_established_connection_is_closed_within_two_seconds_of_trust_remove`로 바꾸고 threat-model g2의 설명도 고친다.
   - 경로별. pin 경로 연결과 CA 경로 연결 각각이 `trust remove`로 닫힌다. `[[ca]]`를 지우면 CA 경로 연결이 닫히고 pin 경로 연결은 살아 있다. pin을 지웠는데 CA로 받을 수 있게 남아 있으면 `auth_path` 변화로 닫힌다. `trust.toml` 삭제는 모든 연결을 닫는다.
+  - `qsh listen` 등록 연결의 role. target pin의 role을 `reverse`에서 `none`으로 낮추면 등록 연결이 `grants_reduced`로 닫히고, `reverse`로 올리거나 같은 값이면 닫히지 않는다.
   - role. `trust set-role`이 role을 낮추면(`full`에서 `exec`, `full`에서 `tunnel`로 소유 축이 `any`에서 `owned`로 좁아지는 경우 포함) 연결이 `grants_reduced`로 닫히고, 올리면 닫히지 않는다. 올렸다 낮추면 올린 동안의 기록값 기준으로 닫힌다. role이 있는 pin의 `trust rename`은 닫히고, role이 없는 pin의 `trust rename`과 별칭 순서 변경은 닫히지 않는다.
   - 다른 항목. 이 연결과 무관한 pin의 추가·삭제·role 변경은 연결을 닫지 않는다. `acl.toml` 행으로만 인가되던 연결은 pin이 남아 있는 동안 닫히지 않는다.
   - fail closed. `trust.toml`을 파싱할 수 없는 내용으로 바꾸면 연결은 닫히지 않지만 role 요청은 모두 거부되고(ADR-0045), 다시 고치면 세대가 오르고 비교가 돈다. `reverify`가 판정하지 못하는 연결(chain을 비운 합성 연결)은 닫힌다. audit 쓰기를 실패시켜도 연결은 닫힌다.
@@ -147,7 +154,7 @@ rename을 role이 있는 pin에서만 닫는 이유는 두 요구가 부딪히�
   - §7 h4: "CA가 서명한 인증서를 개별로 무효로 하는 수단이 없다. CA 전체를 `trust remove`로 거두는 것이 유일한 처방이고, 기존 연결은 2초 안에 닫힌다"로 고친다.
   - §7 h29: 키 rotation 경로가 없다는 설명은 그대로 둔다.
 - 잔여 위험. 변경 알림 뒤 연결이 닫히기까지 최대 2초 동안 그 연결의 요청은 행으로 받은 grant로 통과한다(role grant는 ADR-0045로 요청마다 즉시 멈춘다). 한 장비에서 거둔 신뢰는 그 장비에서만 효과가 난다. `trust.toml`을 읽을 수 없거나 파싱할 수 없는 동안은 거둔 신뢰가 반영되지 않는다.
-- ADR 의존. 이 ADR은 ADR-0045의 role 조회 함수를 공유하므로 ADR-0045가 먼저 또는 같이 착지해야 role grant 비교가 의미를 갖는다. ADR-0045가 서지 않으면 결정 5의 마지막 두 항목이 빠지고 신뢰 자격 재검증만 남는다. 나머지 결정은 바뀌지 않는다.
+- ADR 의존. 이 ADR은 ADR-0045의 role 조회 함수를 공유하므로 ADR-0045가 먼저 또는 같이 착지해야 role grant 비교가 의미를 갖는다. ADR-0045도 2026-10-14에 같이 승인됐으므로 role grant 비교(결정 5의 마지막 두 항목)는 이 ADR의 범위에 확정으로 들어 있다. M16 (b)의 착수 조건은 M15 (a)(ADR-0045 role) 착지이고, 그 순서가 지켜지지 않은 채 이 ADR이 먼저 착지하는 일은 없다.
 - 크기. 0.9~1.35ew. ADR 0.1, 구현 0.8~1.25. 구현 내역은 다음과 같다.
   - `qsh-transport`의 chain 보관, `reverify`, CLOSE 상수: 0.1~0.15
   - `SharedTrustStore`의 세대 번호, `watch` 채널, poll 작업: 0.1~0.2
@@ -156,4 +163,4 @@ rename을 role이 있는 pin에서만 닫는 이유는 두 요구가 부딪히�
   - audit 생성자, 문면 상수, doctor, 문서: 0.1~0.15
   - 테스트(실제 QUIC 연결 셋, 시간 고정, 기존 테스트 교체): 0.2~0.25
 
-  `docs/ROADMAP.md` M16 (d)의 크기 가정과 §5.2 크기 표의 M16 행은 메인 세션이 이 값으로 고친다. 2026-10-11 초안의 2.2~2.8ew에서 rotation·revocation 몫 1.3~1.5ew가 빠졌다.
+  `docs/ROADMAP.md` M16 (b)의 크기와 §5.2 크기 표의 M16 행은 이미 이 값을 쓴다. 2026-10-11 초안의 2.2~2.8ew에서 rotation·revocation 몫 1.3~1.5ew가 빠졌다.

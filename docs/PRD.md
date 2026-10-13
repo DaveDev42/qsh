@@ -58,7 +58,7 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 인증에 성공해도 자동으로 셸 권한을 얻지 않는다. 각 기능은 ACL로 별도 허용하며 기본값은 deny다.
 
-ADR-0045(제안됨)가 승인되면 이 원칙은 "권한은 신뢰를 등록할 때 role로 명시한다"로 바뀐다. 들이는 장비의 pin은 기본 `full`이고 좁힐 때 `--role`로 opt-out하며, role이 없는 pin과 role `none`은 지금처럼 `acl.toml` 행 없이는 아무것도 할 수 없다.
+ADR-0045(승인됨, 2026-10-14)에 따라 이 원칙은 "권한은 신뢰를 등록할 때 role로 명시한다"로 바뀌었다(착지는 M15). 들이는 장비의 pin은 기본 `full`이고 좁힐 때 `--role`로 opt-out하며, role이 없는 pin과 role `none`은 지금처럼 `acl.toml` 행 없이는 아무것도 할 수 없다.
 
 ### 단일 바이너리
 
@@ -370,5 +370,5 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - `docs/adr/0005-tcp-fallback-p1.md` — transport 추상화(TCP fallback 시점은 `docs/adr/0043-no-tcp-fallback.md`가 철회)
 - `docs/adr/0006-product-name-and-crate-name.md` — 제품/바이너리 이름과 crates.io 패키지 이름
 - `docs/adr/0015-listener-pairing.md`, `0016-csr-issuance.md`, `0030-pin-direction.md` — 기각됨(2026-10-12 사용자 결정)
-- `docs/adr/0044`(SSH 부트스트랩)와 `docs/adr/0045`(역할 기반 권한) — 제안됨
+- `docs/adr/0044`(SSH 부트스트랩)와 `docs/adr/0045`(역할 기반 권한) — 승인됨(2026-10-14)
 - `docs/adr/0007-session-ref-and-resume-token-custody.md` — `session_ref` 조립 주체(클라이언트 `Ops`)와 resume token 보관처(클라이언트 상태 파일, JSON 비노출)
