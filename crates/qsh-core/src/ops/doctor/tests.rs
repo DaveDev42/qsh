@@ -2456,6 +2456,9 @@ fn doctor_acl_policy_missing_is_silent_while_a_role_invite_is_live() {
         role: Some("full".into()),
     })
     .unwrap();
+    // Read after minting: the invite's `created_at` is the clock at mint
+    // time, and an earlier `now` would date it in the future.
+    let now = SystemTime::now();
     let findings = ops.doctor_acl_findings("serve", now).unwrap();
     assert!(
         !codes_of(&findings).contains(&"acl_policy_missing"),
