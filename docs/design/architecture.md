@@ -168,6 +168,15 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 - 키가 없는 pin은 ADR-0045 이전에 만든 pin이다. 다시 쓸 때도 키를 만들지 않는다. `trust rename`은 role을 옮기고 `trust remove`는 지운다.
 - role이 주는 action 집합은 `qsh_core::acl::ROLE_GRANTS` 상수 하나가 정본이고 `docs/CLI.md` §6.11의 표와 같다. 인가 판정은 평가 단계 ⓡ에서 이 키를 판정마다 읽는다. `trust remove`나 role 변경은 다음 요청부터 적용되고, 같은 이름이 다른 fingerprint로 다시 pin되면 옛 연결은 role을 잃는다.
 
+이 트리는 원격 파일 op에서 항상 거부된다. role이나 `acl.toml` 행이 무엇을 허용하든, `paths = ["/"]`든 `full` role이든 이 집합에 닿지 못하고 끄는 설정 키도 없다(ADR-0029 결정 5). 집합은 `qsh_core::file::guard::ProtectedSet`이 요청마다 새로 해석하며 기동 시점에 얼리지 않는다.
+
+- 보호 디렉터리(디렉터리 자신과 그 아래 전부, 아직 없는 경로 포함): config 디렉터리, state 디렉터리, runtime 디렉터리(localctl 소켓 디렉터리). 그래서 `config.toml`, `acl.toml`, `trust.toml`, `invites.toml`, `hosts.toml`, `identity/`, `ca/`, `stateless_reset.key`, `resume.json`, 기본 위치의 `audit.log`와 그 회전 파일이 모두 덮인다.
+- 보호 파일: `[audit].path`의 파일과 회전 파일(`<path>.<n>`, n은 양의 정수 아무 값. `[audit].retain`을 낮춘 뒤 남은 `.N` 파일도 writer가 기동 때 치울 때까지 덮는다), 회전 writer의 `<path>.lock`, file-mode keystore의 `identity/device.key`. 회전 writer는 rename만 쓰고 임시 파일 이름을 만들지 않으므로 `.lock` 밖에 따로 열거할 이름이 없다. 이 파일들이 위 디렉터리 안이면 디렉터리 규칙이 이미 덮는다.
+- 두 해석의 합집합: 위 디렉터리는 이 프로세스가 실제로 쓰는 경로(`$QSH_CONFIG_DIR`·`$XDG_*` 반영)와, 환경 변수 재정의 없이 serve 계정의 passwd home과 환경의 `$HOME` 기준 기본값(`~/.config/qsh`, `~/.local/state/qsh`)으로 해석한 경로를 모두 넣는다. Linux는 `/run/user/<uid>/qsh`도 넣는다. 같은 uid의 다른 qsh 인스턴스의 상태도 지키기 위해서다.
+- 대조는 정규 경로(존재하는 가장 긴 조상을 `realpath`로 풀고 나머지를 어휘적으로 접은 것)와 성분 단위로 한다. 목록의 각 항목은 적힌 모양과 정규화한 모양을 둘 다 넣어서, config 디렉터리 자체가 symlink여도 두 표기가 모두 덮인다. macOS(와 M20의 Windows)는 성분 단위 대소문자를 무시하고 비교한다.
+- 같은 집합이 열린 핸들 재검증(fd가 실제로 가리키는 경로, Linux `/proc/self/fd/<n>`, macOS `fcntl(F_GETPATH)`)과 `file.read`의 `(dev, ino)` 대조에도 쓰인다. inode 집합은 보호 디렉터리 아래의 모든 비디렉터리 항목과 보호 파일이라서 결정 5가 이름으로 열거한 파일보다 넓다.
+- 이 모듈은 `cfg(not(unix))`에서 모든 경로를 거부하는 stub이다. Windows 구현은 M20이다(ADR-0029 결정 23, ADR-0035 결정 26).
+
 qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh service install`의 유닛 파일과, macOS에서는 그 유닛이 가리키는 `~/Library/Logs/qsh/`(없을 때만 `install`이 만들고, LaunchAgent의 `StandardOutPath`/`StandardErrorPath`가 그리로 쓴다)뿐이다(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `~/.config/systemd/user/qsh-<mode>.service`; `docs/CLI.md` §6.18, `docs/deploy/service.md`). `qsh identity export --out <path>`는 별도다 — 그 경로는 운영자가 직접 고른다.
 
 **런타임 소켓 discovery.** 한 머신에 `qsh listen` 데몬이 여러 개 떠 있을 수 있으므로(프로세스마다 `<pid>.sock`), CLI는 `$XDG_RUNTIME_DIR/qsh/*.sock`을 pid 오름차순으로 시도한다. connect가 거부되는 stale 소켓은 unlink하고 다음으로 넘어가며, 요청한 host를 모르는 데몬은 `HOST_NOT_FOUND`로 답해 다음 소켓으로 넘어가게 한다. 전부 실패하면 `HOST_NOT_FOUND`다.

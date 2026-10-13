@@ -277,6 +277,27 @@ const SETUP_TOKEN_SET: [&str; 8] = [
     "probe_fingerprint",
 ];
 
+/// `file/guard.rs` is the shared path judgement of every remote file op
+/// (ADR-0029 decisions 5, 6, 23). It stays a pure, blocking module: it does
+/// not name the transport, the async runtime, or the session and
+/// authorization layers (the evaluator re-call of the open-handle recheck is
+/// an injected closure, and the dispatch that owns the choke point calls the
+/// guard, never the other way round). File-scoped, not directory-scoped: the
+/// op and copy modules that land beside it legitimately drive transport
+/// streams. `file/guard/tests.rs` is deliberately out of scope.
+const FILE_GUARD_FILE: &str = "crates/qsh-core/src/file/guard.rs";
+const FILE_GUARD_REASON: &str = "file/guard.rs is a pure path judgement: no transport, async runtime, or session/ACL layer; \
+     the evaluator re-call is an injected closure (ADR-0029 decision 6-4)";
+const FILE_GUARD_TOKEN_SET: [&str; 7] = [
+    "qsh_transport",
+    "tokio",
+    "crate::server",
+    "crate::client",
+    "crate::broker",
+    "crate::acl",
+    "crate::audit",
+];
+
 /// `qsh-core` and `qsh-cli` never name the QUIC stack: every stream,
 /// connection, endpoint and error they touch is a `qsh_transport` neutral
 /// type, so a second transport backend needs no edit above `qsh-transport`
@@ -355,6 +376,14 @@ fn module_bans() -> Vec<ModuleBan> {
             scope: Scope::Dir(INVITE_ADDRESS_DIR),
             forbidden,
             reason: INVITE_ADDRESS_REASON,
+        });
+    }
+
+    for forbidden in FILE_GUARD_TOKEN_SET {
+        bans.push(ModuleBan {
+            scope: Scope::File(FILE_GUARD_FILE),
+            forbidden,
+            reason: FILE_GUARD_REASON,
         });
     }
 

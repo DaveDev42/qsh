@@ -15,6 +15,8 @@
 //!   [`qsh_transport::TrustEvaluator`] the verifier is driven by.
 //! - [`hosts`]: `hosts.toml` — the host profile address book layered over
 //!   `trust`'s pinned peers (M7 plan Step 3 (69dd788)). Never a trust source.
+//! - [`mod@file`]: remote file operations; today only the shared path judgement
+//!   [`file::guard`] (`docs/adr/0029-file-copy.md`).
 //! - [`ops`]: the typed operation façade.
 
 pub mod acl;
@@ -26,6 +28,7 @@ pub mod client;
 pub mod config;
 pub mod doctor;
 pub mod exec;
+pub mod file;
 pub(crate) mod fsutil;
 pub mod handshake;
 pub mod hosts;
