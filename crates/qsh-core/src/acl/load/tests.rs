@@ -508,11 +508,18 @@ fn capture_qsh_acl_events(text: &str) -> (PolicyLoad, Vec<(String, String)>) {
     (load, events)
 }
 
+/// An absolute `paths` entry in this platform's spelling (ADR-0029
+/// decision 23: Windows entries are `C:/...`).
+#[cfg(not(windows))]
+const SRV: &str = "/srv";
+#[cfg(windows)]
+const SRV: &str = "C:/srv";
+
 #[test]
 fn always_denied_named_action_warns_with_structural_fields_only() {
-    let (load, events) = capture_qsh_acl_events(
-        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.socks\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\npaths = [\"/srv\"]\n",
-    );
+    let (load, events) = capture_qsh_acl_events(&format!(
+        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.socks\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\npaths = [\"{SRV}\"]\n",
+    ));
     assert!(matches!(load, PolicyLoad::Loaded(_)));
     assert_eq!(
         events.len(),
@@ -529,9 +536,9 @@ fn always_denied_named_action_warns_with_structural_fields_only() {
 
 #[test]
 fn wildcard_covering_an_always_denied_action_emits_no_warning() {
-    let (load, events) = capture_qsh_acl_events(
-        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.*\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.*\"]\npaths = [\"/srv\"]\n",
-    );
+    let (load, events) = capture_qsh_acl_events(&format!(
+        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.*\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.*\"]\npaths = [\"{SRV}\"]\n",
+    ));
     assert!(matches!(load, PolicyLoad::Loaded(_)));
     assert!(
         events.is_empty(),
