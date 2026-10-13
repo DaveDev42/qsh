@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.19; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, doctor `trust_pin_role_unset`과 role에 따라 바뀐 `acl_*` 조건, `setup --peer-role`과 role 기본값, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -1089,7 +1089,7 @@ human 출력은 `trust_command`에 `--role full`을 붙여 보여 주고 `acl_ro
 }
 ```
 
-`doctor.run`의 전체 계약(§6.17)은 진단 코드 24종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
+`doctor.run`의 전체 계약(§6.17)은 진단 코드 25종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -1443,7 +1443,7 @@ qsh doctor [host] --json
       {
         "code": "trust_remove_scope",
         "status": "info",
-        "detail": "trust.toml has at least one pinned peer. `qsh trust remove` only takes effect starting with that peer's next handshake — an already-established connection keeps its entire negotiated authority (including opening brand-new sessions, tunnels and forwards) until that connection drops and has to handshake again.",
+        "detail": "trust.toml has at least one pinned peer. `qsh trust remove` takes effect for authority granted by a trust role starting with the peer's next request, but authority granted by an acl.toml row stays until that connection drops and has to handshake again — an already-established connection keeps its entire negotiated row authority (including opening brand-new sessions, tunnels and forwards) until then.",
         "remedy": "Force-closing an already-established connection on removal is not implemented (P1). If that matters right now, restart the process holding the connection."
       }
     ]
@@ -1460,7 +1460,7 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**24종 진단 코드** (재사용 5종·신설 19종 — `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)가 확정한 잠금 어휘, `config_unknown_key`는 `6d8de8c`가, M9의 8종은 `963809e`+`699af37`이 더했다 — 범위 (h)의 7종 + `host_pinned_without_address` — `acl_forward_socks_ineffective`는 ADR-0019 결과 절 R6의 후속이고 `service_restart_drops_sessions`는 M13 graceful re-exec H1이 더했다):
+**25종 진단 코드** (재사용 5종·신설 20종 — `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)가 확정한 잠금 어휘, `config_unknown_key`는 `6d8de8c`가, M9의 8종은 `963809e`+`699af37`이 더했다 — 범위 (h)의 7종 + `host_pinned_without_address` — `acl_forward_socks_ineffective`는 ADR-0019 결과 절 R6의 후속이고 `service_restart_drops_sessions`는 M13 graceful re-exec H1이, `trust_pin_role_unset`은 ADR-0045 결정 12(M15)가 더했다):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
@@ -1473,21 +1473,36 @@ qsh doctor [host] --json
 | `keystore_unavailable` | warn | 플랫폼 키스토어(macOS Keychain / Linux Secret Service)에 도달 불가 — 이미 file store(0600)로 정상 동작 중이므로 기능에는 지장 없음(read-only probe, 실제 키 저장소를 바꾸지 않는다) |
 | `clock_skew` | warn 또는 error | 로컬 시계가 device cert의 backdated `not_before`보다 과거 — `qsh init` 시 준 5분 backdate 여유(`CERT_BACKDATE_MINUTES`)를 넘으면 error, 그 안이면 warn |
 | `audit_path_unwritable` | error | 설정된 `[audit].path`를 append로 열 수 없음 — fail-closed로 privileged operation(`session.open`/`exec.run`/`host.reverse`)이 전부 거부되는 상태. 문면은 `qsh_core::doctor::AUDIT_PATH_UNWRITABLE`을 재사용한다 |
-| `acl_policy_missing` | error | `acl.toml`이 없음 — `qsh serve`/`qsh listen`(§6.12·§6.13)의 시작 진단과 같은 검사·같은 code(`ACL_POLICY_MISSING_CODE`)를 재사용한다. 행이 없는 상태이고 요청은 trust role로만 인가된다(role이 없는 pin은 거부된다). doctor가 이 상태를 어떻게 세는지는 M15 Step 7이 role과 함께 다시 정한다. 등급은 모든 장비에서 `error`다. `qsh setup client`의 `complete` 판정만 이 code를 세지 않는다(§6.20, ADR-0038). |
-| `acl_policy_invalid` | error | `acl.toml`이 있지만 파싱/검증에 실패함 — 같은 시작 진단(`ACL_POLICY_INVALID_CODE`)을 재사용한다. `detail`이 시작 진단과 같은 banner(경로·오류 코드·오류 상세·예시)를 담는다 |
+| `acl_policy_missing` | error | `acl.toml`이 없고 요청을 인가할 다른 근거도 없음. `trust.toml`에 role이 `none`이 아닌 pin이 하나도 없고, 그런 role을 실은 살아 있는 초대(미상환이고 10분 안)도 없을 때만 낸다. `qsh serve`/`qsh listen`(§6.12·§6.13)의 시작 진단과 같은 검사·같은 code(`ACL_POLICY_MISSING_CODE`)를 쓰지만, 시작 진단은 이 상태를 한 줄로만 알리고 "모두 거부"를 알리는 일은 doctor가 맡는다. role pin이나 role 초대가 하나라도 있으면 침묵한다. `remedy`는 `qsh trust set-role <name> full`로 장비를 들이거나 `acl.toml`을 직접 쓰라고 안내한다(ADR-0045 결정 12). 등급은 모든 장비에서 `error`다. `qsh setup client`의 `complete` 판정만 이 code를 세지 않는다(§6.20, ADR-0038). |
+| `acl_policy_invalid` | error | `acl.toml`이 있지만 파싱/검증에 실패함. 같은 시작 진단(`ACL_POLICY_INVALID_CODE`)을 재사용한다. 조건은 그대로이고 role과 무관하게 낸다. 파싱되지 않는 `acl.toml`은 role로 받은 권한도 거부하기 때문이다. `detail`이 시작 진단과 같은 banner(경로·오류 코드·오류 상세·예시)를 담고 그 뒤에 "role grants are refused too while acl.toml cannot be parsed"를 덧붙인다(ADR-0045 결정 12) |
 | `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
 | `config_unknown_key` | warn | `config.toml`에 `Config`가 모르는 키 경로가 있어 조용히 무시되고 있음(§2.3의 "알 수 없는 키는 오류 없이 무시된다" 계약 그대로 — `deny_unknown_fields`는 쓰지 않는다). 상한 키 이름 오타면 그 상한은 기본값으로 남는다. `detail`이 문제의 키 경로를 밝힌다 |
-| `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
+| `trust_pin_role_unset` | info | `trust.toml`의 `[[peer]]` 중 `role` 키가 없는 것마다 finding 하나. ADR-0045 이전에 만든 pin이 모두 여기에 든다. 이 pin은 role `none`으로 판정되어 `acl.toml` 행으로만 인가된다. 동작을 바꾸지 않으므로 info다. `detail`은 pin 이름(`(peer: <name>)`)만 싣고 주소·fingerprint는 싣지 않는다. `remedy`는 `qsh trust set-role <name> <role>`로 role을 주거나 `none`으로 명시하라고 안내한다(ADR-0045 결정 12) |
+| `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지. `trust remove`의 유효 범위(§6.11)를 다시 알려준다: role로 받은 권한은 다음 요청부터 사라지고, `acl.toml` 행으로 받은 권한은 이미 확립된 연결이 끊기고 다시 handshake할 때까지 남는다(연결이 협상한 행 권한 전체, 새 session·tunnel·forward 열기 포함). ADR-0031(축소판)이 착지하면 그 ADR이 다시 고친다(ADR-0045 결정 12) |
 | `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`, 우선순위 `[listen]` > `[serve].to` > 구 `[reverse].controller` > `serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`(§6.18)로 유닛을 생성하고 등록하라고 안내한다 |
 | `systemd_linger_disabled` | warn | Linux에서만, 그리고 해당 mode의 유닛이 이미 등록된 경우에만 도달한다 — `/var/lib/systemd/linger/$USER` 파일 존재 여부만 읽는다(subprocess 없음). 못 읽으면 "unknown"으로 취급해 finding을 내지 않는다 |
 | `launchagent_session_scoped` | warn | macOS에서만, 해당 mode의 LaunchAgent가 등록돼 있으면 무조건 뜨는 구조적 고지 — 사용자 LaunchAgent는 로그인 세션 안에서만 돌고 로그아웃하면 멈춘다. headless 대안은 root LaunchDaemon(out of scope)뿐이다 |
 | `service_restart_drops_sessions` | info | 세션을 호스팅하는 mode(`serve`, `reverse`)에 대응하는 서비스 유닛이 이 머신에 등록돼 있으면 뜨는 구조적 고지다. `listen`은 세션을 갖지 않아 뜨지 않는다. 서비스 매니저의 재시작은 프로세스와 함께 detach된 세션을 전부 지운다(ADR-0003). 유닛 검출은 `service_not_registered`와 같은 두 경로(LaunchAgent, systemd user unit)를 읽고, 유닛이 없으면 이 행이 아니라 `service_not_registered`만 나온다. remedy는 `qsh sessions`로 지워질 세션을 확인하라고 안내하고 `docs/deploy/service.md`의 Notes for both와 README Known limitations를 가리킨다 |
 | `bindv6only_blocks_ipv4` | warn | 유효 bind 주소가 IPv6 wildcard이고 이 OS가 새 dual-stack 소켓을 기본으로 `IPV6_V6ONLY`로 여는 경우 — `Listener::bind`는 `dual_stack_v6=false`로 열어 서버 쪽이 명시적으로 풀지 않으므로, 그런 OS 기본값에서는 `[::]:4433` listener가 IPv4 peer를 조용히 거부한다 |
-| `acl_principal_unmatched` | error | `trust.toml`이 pin한 peer 중 `auth_path = "pin"`인 `acl.toml` 행 어디에도 매칭되지 않는 것이 있음 — `device:<name>`·`fp:sha256:<fingerprint>` 두 후보 다 확인한다. `PEER_UNTRUSTED`와 같은 이유로 error다: 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
-| `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음 — peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
+| `acl_principal_unmatched` | error | `trust.toml`이 pin한 peer 중 `auth_path = "pin"`인 `acl.toml` 행 어디에도 매칭되지 않는 것이 있음. `device:<name>`·`fp:sha256:<fingerprint>` 두 후보 다 확인한다. role이 `none`이 아닌 pin은 세지 않는다. 행이 없어도 role로 인가되기 때문이다. `acl.toml`이 없거나 파싱되지 않으면 이 검사는 돌지 않는다. `PEER_UNTRUSTED`와 같은 이유로 error다: 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2, ADR-0045 결정 12) |
+| `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음. `acl.toml`이 아예 없는 경우에도 낸다. CA 경로에는 role이 없어서(ADR-0045 결정 4), role pin이 `acl_policy_missing`을 침묵시켜도 CA 경로가 조용히 막힌 사실을 알릴 곳은 이 code뿐이다. peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
 | `host_pinned_without_address` | warn | `host_list`가 아는 이름(trust pin 또는 `hosts.toml` 항목)에 두 출처 어디서도 주소가 없고 현재 유지 중인 reverse 등록(live·stale 불문)도 없음 — `--address` 없이 `--fingerprint`만으로 pin해 아직 phone-home하지 않은 순정 reverse 대상은 정상적인 일시 상태이므로 error가 아니라 warn이다. 그 이름의 reverse 등록이 하나라도 있으면(live든 stale이든) 뜨지 않는다 |
 | `config_serve_to_conflict` | error | `[serve].to`와 구 `[reverse].controller`가 둘 다 설정돼 있고 값이 다름 — 그 상태에서 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail closed한다(ADR-0012 결정 5). doctor는 exit `0`을 유지한 채 finding으로만 알린다. 두 값이 같으면 통과이므로 뜨지 않는다 |
 | `acl_forward_socks_ineffective` | warn | `acl.toml` 행의 `allow`가 `forward.socks`를 exact로 적었는데 같은 principal 문자열과 같은 `auth_path`(생략이면 `pin`)를 가진 행 어디에도 `forward.local`(exact 또는 `forward.*`)이 없음 — `forward.socks`는 늘 거부되고 `-D`는 CONNECT마다 `forward.local`로 인가되므로(ADR-0019 결정 6·14) 그 행은 `-D`를 허락하지 못한다. 행의 다른 action은 여전히 동작하고 깨지는 것은 `-D` 의도 하나라 `acl_principal_unmatched`의 error보다 한 단계 낮은 warn이다. `detail`은 행의 배열 index와 `auth_path`만 싣고 principal 문자열은 싣지 않는다. 판정 단위가 principal 문자열 일치라서 같은 peer를 `device:<name>` 행과 `fp:sha256:<fingerprint>` 행으로 나눠 적은 정책은 다른 행이 `forward.local`을 줘도 짚힌다(한계이며 `message`에도 적힌다). 정책이 없거나 파싱에 실패하면 침묵한다(그 상태는 `acl_policy_missing`·`acl_policy_invalid`가 알린다) |
+
+**role 관련 문안.** 위 표의 role 문구는 `crates/qsh-core/src/doctor.rs`의 상수가 정본이고, 아래가 그 문면이다.
+
+  > `trust_pin_role_unset`의 `message`: This trust.toml pin has no role key, so it counts as role none and is authorized only by acl.toml rows.
+  >
+  > `trust_pin_role_unset`의 `remedy`: Give it a role with `qsh trust set-role {name} <role>`, or record that it stays row-only with `qsh trust set-role {name} none`.
+  >
+  > `acl_policy_missing`의 `remedy` 머리: admit a device by role with `qsh trust set-role <name> full`, or write acl.toml
+  >
+  > `acl_policy_invalid`의 `detail` 꼬리: role grants are refused too while acl.toml cannot be parsed
+
+`trust.toml`이 읽히지 않거나 파싱되지 않으면 doctor는 finding 없이 `CONFIG_ERROR`로 끝나고(위 `Err` 경우), 그 `message` 끝에 다음 문구가 붙는다. 같은 실패가 실행 중인 `qsh serve`/`qsh listen`에서는 role 판정을 멈추게 하기 때문이다(ADR-0045 결정 4·12). 이 때문에 새 code는 없다.
+
+  > a running qsh serve/listen refuses role grants until this file parses again (pin authentication keeps using the last good snapshot)
 
 **`acl_ca_auth_path_missing` 문안.** 이 진단의 정본 문안은 `qsh_core::doctor::ACL_CA_AUTH_PATH_MISSING`(`crates/qsh-core/src/doctor.rs`, ADR-0017 결정 2)이고, 그 `message`/`remedy` 두 필드는 각각 다음과 같다. 실제 렌더되는 `detail`은 이 `message` 뒤에 `minimal example:` 블록을 덧붙인 값이다(`crates/qsh-core/src/ops/doctor.rs`의 `doctor_acl_findings`):
 
@@ -1661,10 +1676,10 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
 ### 6.20 `qsh setup`
 
 ```bash
-qsh setup host --peer <name> [--peer-cert <path|->] [--forward] [--service] --json
-qsh setup host --to <alias> --address <addr> --peer-cert <path|-> [--forward] [--service] --json
-qsh setup client <name> --address <addr> [<code> | --code-stdin | --peer-cert <path|->] --json
-qsh setup listener --peer <name> --peer-cert <path|-> [--service] --json
+qsh setup host --peer <name> [--peer-cert <path|->] [--forward] [--service] [--peer-role <role>] --json
+qsh setup host --to <alias> --address <addr> --peer-cert <path|-> [--forward] [--service] [--peer-role <role>] --json
+qsh setup client <name> --address <addr> [<code> | --code-stdin | --peer-cert <path|->] [--peer-role <role>] --json
+qsh setup listener --peer <name> --peer-cert <path|-> [--service] [--peer-role <role>] --json
 ```
 
 이 머신을 한 역할로 세운다([ADR-0024](adr/0024-setup-orchestrator.md)). 기존 op을 정해진 순서로 부르는 오케스트레이터이고 새 능력은 없다. 상태를 바꾸는 호출은 `identity.init`, `trust.invite`, `trust.accept`, `trust.add`, `service.install`뿐이며 그 밖에 `doctor.run`을 부른다. `acl.toml`, `config.toml`, `hosts.toml`은 쓰지 않는다. 넣을 `[[acl]]` 행을 인쇄하고 `acl.check`로 확인할 뿐이다. 자동 신뢰는 없어서 pin의 근거는 초대 코드와 인증서 파일 둘뿐이다. `qsh serve`, `qsh listen`, 대화형 세션은 띄우지 않고 서비스 유닛도 활성화하지 않는다(§6.18). §2.5의 "인가 불요" local operation이며 원격 peer가 요청할 수 없고 wire 메시지도 없다.
@@ -1680,6 +1695,17 @@ qsh setup listener --peer <name> --peer-cert <path|-> [--service] --json
 | `setup client <name> --address <addr>` | `client` | `qsh <name>` | 초대 코드 또는 `--peer-cert` + 주소 | 없음 |
 | `setup listener --peer <name> --peer-cert` | `listener` | `qsh listen` | `--peer-cert` | `host.reverse` |
 
+**`--peer-role <role>`** ([ADR-0045](adr/0045-trust-roles.md) 결정 8·14). 이 실행이 쓰는 pin(또는 초대)의 trust role이다. 값은 §6.11의 여섯 role 중 하나이고 모르는 값은 `INVALID_ARGUMENT`(exit `255`)다. 위치 인자 `<role>`이 이미 장비의 역할을 뜻해서 `--role`이 아니라 `--peer-role`이다. 네 호출 모두에서 받고, 생략하면 역할마다 기본값이 정해진다.
+
+| 호출 | 기본 `--peer-role` | 누구에게 적용되나 |
+|---|---|---|
+| `setup host --peer` | `full` | 이 장비가 발급하는 초대(또는 `--peer-cert`로 쓰는 pin) |
+| `setup host --to` | `full` | listener pin. controller가 중계하는 요청을 target이 그 principal로 인가한다 |
+| `setup listener` | `reverse` | target pin |
+| `setup client` | `none` | server pin. 다이얼만 하는 장비다 |
+
+`--peer-role`이 `none`이 아니면 `acl` 단계는 `done`이다. `detail`이 어느 pin 또는 초대가 어느 role과 그 action을 받는지 적고, `acl_rows`는 나가지 않으며 `acl.toml`은 읽지도 쓰지도 않는다. 이미 같은 이름의 pin이 있고 그 role(`role` 키가 없으면 `none`)이 요청한 role과 다르면 `acl` 단계는 `pending`이고 `detail`과 `next`가 `qsh trust set-role <name> <role>`을 안내한다. `trust add`와 초대 상환은 기존 pin의 role을 바꾸지 않기 때문이다(§6.11). `--peer-role none`이면 지금까지처럼 동작한다. `acl` 단계는 `[[acl]]` 행을 인쇄하고 `acl.toml`을 검증하며 pin은 role `none`으로 쓴다. role이 있는 실행에서는 doctor의 `acl_policy_missing`이 §6.17의 조건대로 나오지 않으므로 `complete` 판정 문장은 그대로 `acl.toml` 없이도 `true`가 될 수 있다. 단독 명령 `steps[].command`는 `none`이 아닌 role이면 끝에 ` --role <role>`을 붙인다.
+
 `--forward`는 `host`와 `host_to`에서만 받고 allow 목록에 `forward.local`을 더한다. `--service`는 `host`, `host_to`, `listener`에서만 받는다. 코드와 `--peer-cert`를 함께 주거나, 위치 코드와 `--code-stdin`을 함께 주거나, `--peer`와 `--to`를 함께 주거나, 역할에 없는 플래그를 주면 clap 인자 사용 오류로 exit `2`다.
 
 **단계 id 어휘.** 닫힌 목록이고 추가만 허용한다.
@@ -1688,7 +1714,7 @@ qsh setup listener --peer <name> --peer-cert <path|-> [--service] --json
 |---|---|
 | `identity` | 이 장치의 신원을 만든다(`identity.init`, 멱등) |
 | `mode_config` | `config.toml`이 역할에 맞는 실행 모드를 고르는지 읽어서 확인한다 |
-| `acl` | `acl.toml`이 의도한 action을 허용하는지 `acl.check`로 확인한다. 읽기 전용 |
+| `acl` | `acl.toml`이 의도한 action을 허용하는지 `acl.check`로 확인한다. 읽기 전용. `--peer-role`이 `none`이 아니면 확인하지 않고 pin·초대가 받는 role을 적는다 |
 | `pin_cert` | 인증서 파일로 상대를 pin한다(`trust.add`, 항상 `cert_pem`을 채운다) |
 | `pair` | 초대 코드를 상환해 상대를 pin한다(`trust.accept`) |
 | `invite` | pin 이름을 고정한 초대를 발급한다(`trust.invite --as <name>`) |
@@ -1722,7 +1748,7 @@ qsh setup listener --peer <name> --peer-cert <path|-> [--service] --json
 }
 ```
 
-`steps[].command`는 그 단계와 같은 일을 하는 단독 명령이라 `qsh setup` 없이도 손으로 따라 할 수 있다. `steps[].result`는 그 단계가 부른 op의 `data`를 그대로 담는다. `invite`는 `trust.invite`의 `data`(초대 코드 포함)이고 `acl`은 action 순서를 따른 `acl.check` `data` 배열이다. 초대 코드는 `host`의 `invite` 단계 `result`에만 나가고 키 재료는 어느 출력에도 나가지 않는다. `acl` 단계가 충족일 때마다 `detail`에 재시작 고지(`ACL_RESTART_NOTICE`)가 붙는다. `qsh setup`은 떠 있는 `serve`를 알 수 없기 때문이다. `host`에서는 만료되지 않은 `assigned_name` 없는 초대가 살아 있으면 `acl` 단계를 충족으로 보지 않고 `detail`이 10분 TTL을 적는다. `complete`는 `pending`·`blocked`가 없고, doctor의 `findings`에 `status: "error"`인 원소가 없을 때만 `true`다. 단, 역할의 면제 목록에 든 `code`는 세지 않는다(ADR-0038). 면제 목록은 `client`가 `acl_policy_missing` 하나이고 `host`·`host_to`·`listener`는 비어 있다. `acl_policy_invalid`와 그 밖의 `acl_*` 진단은 면제하지 않는다. 면제는 판정만 바꾼다. doctor 단계의 `result`는 `doctor.run`의 `data` 그대로라서 `overall: "error"`와 `acl_policy_missing` finding을 담은 채 나가고, 면제가 일어난 실행에서는 그 단계 `detail`이 이 사실을 한 문장으로 덧붙인다. `acl.toml`은 여전히 쓰지 않고 ACL은 default-deny 그대로이므로, `client`의 `complete: true`는 "이 장비가 `<name>`으로 다이얼할 준비를 마쳤다"를 뜻하고 인바운드를 받을 준비를 뜻하지 않는다. `host`에서 `complete`는 상대가 연결했다는 뜻이 아니다.
+`steps[].command`는 그 단계와 같은 일을 하는 단독 명령이라 `qsh setup` 없이도 손으로 따라 할 수 있다. `steps[].result`는 그 단계가 부른 op의 `data`를 그대로 담는다. `invite`는 `trust.invite`의 `data`(초대 코드 포함)이고 `acl`은 action 순서를 따른 `acl.check` `data` 배열이다. 초대 코드는 `host`의 `invite` 단계 `result`에만 나가고 키 재료는 어느 출력에도 나가지 않는다. `--peer-role none`에서 `acl` 단계가 충족일 때마다 `detail`에 재시작 고지(`ACL_RESTART_NOTICE`)가 붙는다. role 실행에서는 role이 재시작 없이 반영되므로 붙지 않는다. `qsh setup`은 떠 있는 `serve`를 알 수 없기 때문이다. `--peer-role none`의 `host`에서는 만료되지 않은 `assigned_name` 없는 초대가 살아 있으면 `acl` 단계를 충족으로 보지 않고 `detail`이 10분 TTL을 적는다. `complete`는 `pending`·`blocked`가 없고, doctor의 `findings`에 `status: "error"`인 원소가 없을 때만 `true`다. 단, 역할의 면제 목록에 든 `code`는 세지 않는다(ADR-0038). 면제 목록은 `client`가 `acl_policy_missing` 하나이고 `host`·`host_to`·`listener`는 비어 있다. `acl_policy_invalid`와 그 밖의 `acl_*` 진단은 면제하지 않는다. 면제는 판정만 바꾼다. doctor 단계의 `result`는 `doctor.run`의 `data` 그대로라서 `overall: "error"`와 `acl_policy_missing` finding을 담은 채 나가고, 면제가 일어난 실행에서는 그 단계 `detail`이 이 사실을 한 문장으로 덧붙인다. `acl.toml`은 여전히 쓰지 않고 ACL은 default-deny 그대로이므로, `client`의 `complete: true`는 "이 장비가 `<name>`으로 다이얼할 준비를 마쳤다"를 뜻하고 인바운드를 받을 준비를 뜻하지 않는다. `host`에서 `complete`는 상대가 연결했다는 뜻이 아니다.
 
 **입력과 프롬프트.** `--json`/`--jsonl`은 프롬프트를 열지 않는다. 첫 단계 전에 필수 입력의 존재, 이름 규칙, 주소 형식, `--peer-cert`의 PEM 구조와 코드 형식을 모두 검사하고, 하나라도 빠졌거나 틀리면 아무것도 쓰지 않고 `INVALID_ARGUMENT`(exit `255`)다. 이 규칙은 human mode에서 표준입력이 터미널이 아니거나 `--peer-cert -`가 표준입력을 쓸 때도 같다. human mode는 터미널이면 빠진 입력을 stderr 프롬프트로 묻는다. 묻는 것은 역할, pin 이름, 초대 코드(에코 없음), `acl.toml` 저장 확인(저장 뒤 Enter로 다시 확인), `--service`가 없을 때의 서비스 유닛 설치 여부(기본 아니오) 다섯뿐이다. 주소와 인증서 경로는 플래그로만 받는다.
 

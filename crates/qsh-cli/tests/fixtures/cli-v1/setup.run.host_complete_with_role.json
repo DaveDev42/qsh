@@ -1,0 +1,66 @@
+{
+  "command": "setup.run",
+  "data": {
+    "complete": true,
+    "next": [
+      "qsh serve",
+      "on the peer, before the invite expires: qsh setup client <host-name> --address <this-host:port> <code>"
+    ],
+    "role": "host",
+    "steps": [
+      {
+        "command": "qsh init",
+        "id": "identity",
+        "result": {
+          "config_dir": "<config_dir>",
+          "created": true,
+          "device_id": "<device_id>",
+          "fingerprint": "<fingerprint>",
+          "key_store": "file"
+        },
+        "status": "done"
+      },
+      {
+        "command": "edit config.toml",
+        "id": "mode_config",
+        "status": "already"
+      },
+      {
+        "command": "qsh acl check --principal device:laptop --action exec.run",
+        "detail": "the invite this run mints pins its redeemer as \"laptop\" with role full, so no [[acl]] rows are needed; `full` grants: exec.run, session.open, session.list, session.attach, session.control, forward.local, forward.remote, file.read, file.write, host.reverse. A role change applies from the next request, with no restart.",
+        "id": "acl",
+        "status": "done"
+      },
+      {
+        "command": "qsh service install",
+        "detail": "not requested; pass --service to write the unit file",
+        "id": "service",
+        "status": "skipped"
+      },
+      {
+        "command": "qsh pair invite --as laptop --role full",
+        "id": "invite",
+        "result": {
+          "accept_command": "<accept_command>",
+          "assigned_name": "laptop",
+          "assigned_role": "full",
+          "code": "<code>",
+          "expires_at": "<timestamp>"
+        },
+        "status": "done"
+      },
+      {
+        "command": "qsh doctor",
+        "detail": "overall: <overall>",
+        "id": "doctor",
+        "result": {
+          "overall": "<overall>"
+        },
+        "status": "done"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

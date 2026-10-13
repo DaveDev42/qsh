@@ -34,16 +34,18 @@ use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_exampl
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
-    ACL_CA_AUTH_PATH_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED,
-    CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED,
-    QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    ACL_CA_AUTH_PATH_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE, ACL_POLICY_INVALID_ROLE_CLAUSE,
+    ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED, CERT_EXPIRING_SOON,
+    CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED,
+    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
+    probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
     CERT_BACKDATE_MINUTES, FileKeyStore, Identity, KEY_FILE, KeyStore, PlatformKeyStore,
 };
 use crate::ops::{OpError, Operation, Ops, resolve_peer_address};
-use crate::trust::TrustStore;
+use crate::trust::{TrustRole, TrustStore};
 
 /// The `doctor.run` operation (`qsh doctor [host]`).
 pub struct DoctorOp;
@@ -225,7 +227,7 @@ impl Ops {
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
         findings.extend(self.doctor_config_serve_to_conflict_finding(config));
-        findings.extend(self.doctor_acl_findings(mode)?);
+        findings.extend(self.doctor_acl_findings(mode, unix_to_system_time(now_unix))?);
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
         findings.extend(keystore_finding_of(env.keystore));
@@ -291,29 +293,62 @@ impl Ops {
     /// every pinned peer; [`crate::acl::ca_policy_example_row`] for
     /// `acl_ca_auth_path_missing`, which is file-wide and has no peer to
     /// name).
-    fn doctor_acl_findings(&self, mode: &str) -> Result<Vec<DoctorFinding>, OpError> {
+    ///
+    /// Trust roles change what these codes mean (ADR-0045 결정 12). A missing
+    /// `acl.toml` is `acl_policy_missing` only when nothing else authorizes a
+    /// request either: no pin with a role other than `none`, and no live
+    /// invite that will pin one (`now` is the clock for "live"). An
+    /// unparseable `acl.toml` is `acl_policy_invalid` whatever the roles are,
+    /// because it refuses role grants too. `acl_principal_unmatched` does
+    /// not count a pin with a role, and `acl_ca_auth_path_missing` also
+    /// fires when `acl.toml` is absent, since a role pin can silence
+    /// `acl_policy_missing` while the CA path (which has no role) stays shut.
+    fn doctor_acl_findings(
+        &self,
+        mode: &str,
+        now: SystemTime,
+    ) -> Result<Vec<DoctorFinding>, OpError> {
         let role = if mode == "listen" {
             Role::Listen
         } else {
             Role::Serve
         };
         let (_policy, diagnostic, index) = load_policy_or_deny(&self.paths, role);
+        let trust = self.doctor_load_trust()?;
         let mut out = Vec::new();
+        let mut policy_loaded = true;
         if let Some(diagnostic) = diagnostic {
-            out.push(DoctorFinding {
-                code: diagnostic.code.to_string(),
-                status: "error".to_string(),
-                detail: diagnostic.render_block(),
-                remedy: Some(format!(
-                    "{}. {}",
-                    crate::acl::ACL_STARTUP_NO_AUTOGEN,
-                    crate::acl::ACL_STARTUP_CHECK_HINT
-                )),
-            });
-            return Ok(out);
+            policy_loaded = false;
+            if diagnostic.code == crate::acl::ACL_POLICY_INVALID_CODE {
+                out.push(DoctorFinding {
+                    code: diagnostic.code.to_string(),
+                    status: "error".to_string(),
+                    detail: format!(
+                        "{}\n{ACL_POLICY_INVALID_ROLE_CLAUSE}",
+                        diagnostic.render_block()
+                    ),
+                    remedy: Some(format!(
+                        "{}. {}",
+                        crate::acl::ACL_STARTUP_NO_AUTOGEN,
+                        crate::acl::ACL_STARTUP_CHECK_HINT
+                    )),
+                });
+                return Ok(out);
+            }
+            if !self.doctor_roles_authorize_something(&trust, now) {
+                out.push(DoctorFinding {
+                    code: diagnostic.code.to_string(),
+                    status: "error".to_string(),
+                    detail: diagnostic.render_block(),
+                    remedy: Some(format!(
+                        "{ACL_POLICY_MISSING_SET_ROLE_HINT}. {}. {}",
+                        crate::acl::ACL_STARTUP_NO_AUTOGEN,
+                        crate::acl::ACL_STARTUP_CHECK_HINT
+                    )),
+                });
+            }
         }
 
-        let trust = TrustStore::load(&self.paths.trust_file())?;
         // `docs/CLI.md` §6.17: `remedy` is one actionable line; the
         // copy-pasteable `[[acl]]` example row goes in `detail` instead
         // (the same split `acl_policy_missing`/`acl_policy_invalid`'s
@@ -324,9 +359,15 @@ impl Ops {
         // ([`ca_policy_example_row`]) is file-wide, so it has no peer to
         // name at all.
         let diag = &ACL_PRINCIPAL_UNMATCHED;
-        for peer in trust.peers() {
-            let matched =
-                index.names_device(&peer.name) || index.names_fingerprint(&peer.fingerprint);
+        // A missing `acl.toml` has no rows to match against, so the check
+        // is only meaningful against a policy that loaded.
+        let candidates = if policy_loaded { trust.peers() } else { &[] };
+        for peer in candidates {
+            // A pin with a role other than `none` is authorized without a
+            // row, so "no row names it" is not a problem (ADR-0045 결정 12).
+            let matched = peer_has_role(peer)
+                || index.names_device(&peer.name)
+                || index.names_fingerprint(&peer.fingerprint);
             if !matched {
                 let example = policy_example_rows(&[peer.name.as_str()], role);
                 out.push(DoctorFinding {
@@ -371,6 +412,31 @@ impl Ops {
         }
 
         Ok(out)
+    }
+
+    /// Load `trust.toml` for a finding. A failure here is the same failure
+    /// that suspends role grants in a running `qsh serve`/`qsh listen`
+    /// (ADR-0045 결정 4), so the `CONFIG_ERROR` doctor ends with says so
+    /// (결정 12). `code` and `retryable` are the loader's own.
+    fn doctor_load_trust(&self) -> Result<TrustStore, OpError> {
+        TrustStore::load(&self.paths.trust_file()).map_err(|mut err| {
+            err.message = format!(
+                "{}. {TRUST_FILE_ROLES_SUSPENDED_CLAUSE}",
+                err.message.trim_end_matches('.')
+            );
+            err
+        })
+    }
+
+    /// Whether anything but `acl.toml` rows authorizes a request: a pin with
+    /// a role other than `none`, or an invite that is still redeemable at
+    /// `now` and will pin one (ADR-0045 결정 12). An unreadable
+    /// `invites.toml` counts as "no invite": the invite cannot be redeemed
+    /// either, and the finding errs toward reporting.
+    fn doctor_roles_authorize_something(&self, trust: &TrustStore, now: SystemTime) -> bool {
+        trust.peers().iter().any(peer_has_role)
+            || crate::trust::live_role_invite_count(&self.paths.invites_file(), now)
+                .is_ok_and(|live| live > 0)
     }
 
     /// `cert_expired`/`cert_expiring_soon` (design brief rows #4/#5) —
@@ -505,7 +571,7 @@ impl Ops {
     /// unconditional notice (`trust_remove_scope`) whenever at least one
     /// peer is pinned at all.
     fn doctor_trust_findings(&self) -> Result<Vec<DoctorFinding>, OpError> {
-        let trust = TrustStore::load(&self.paths.trust_file())?;
+        let trust = self.doctor_load_trust()?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let mut out = Vec::new();
 
@@ -519,6 +585,19 @@ impl Ops {
                     remedy: Some(peer_diag.remedy.to_string()),
                 });
             }
+        }
+
+        // `trust_pin_role_unset` (ADR-0045 결정 12): one info finding per pin
+        // with no `role` key. `detail` carries the pin name and nothing of
+        // the pin beyond it.
+        let unset_diag = &TRUST_PIN_ROLE_UNSET;
+        for peer in trust.peers().iter().filter(|peer| peer.role.is_none()) {
+            out.push(DoctorFinding {
+                code: unset_diag.code.to_string(),
+                status: "info".to_string(),
+                detail: format!("{} (peer: {})", unset_diag.message, peer.name),
+                remedy: Some(unset_diag.remedy.replace("{name}", &peer.name)),
+            });
         }
 
         if !trust.peers().is_empty() {
@@ -721,6 +800,23 @@ pub(crate) fn infer_run_mode(config: &Config) -> &'static str {
     } else {
         "serve"
     }
+}
+
+/// Whether `peer` carries a role other than `none`. A value that is not one
+/// of the six names cannot get here (the loader refuses the whole file) and
+/// reads as no role.
+fn peer_has_role(peer: &qsh_proto::TrustPeer) -> bool {
+    peer.role
+        .as_deref()
+        .and_then(|role| role.parse::<TrustRole>().ok())
+        .is_some_and(|role| role != TrustRole::None)
+}
+
+/// `now_unix` back to a `SystemTime`, for the one finding that needs a clock
+/// type (live invites). Second precision is enough: an invite lives ten
+/// minutes. A negative value clamps to the epoch.
+fn unix_to_system_time(now_unix: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(now_unix).unwrap_or(0))
 }
 
 /// [`AuthPath`] → `"pin"`/`"ca"`, the same rendering `crate::audit`'s and

@@ -107,16 +107,24 @@ fn service_restart_drops_sessions_has_the_stable_snake_case_code() {
     );
 }
 
+/// ADR-0045 결정 12 — same mutation-catching rationale as
+/// `service_restart_drops_sessions_has_the_stable_snake_case_code`.
+#[test]
+fn trust_pin_role_unset_has_the_stable_snake_case_code() {
+    assert_eq!(TRUST_PIN_ROLE_UNSET.id, DiagnosticId::TrustPinRoleUnset);
+    assert_eq!(TRUST_PIN_ROLE_UNSET.code, "trust_pin_role_unset");
+}
+
 /// M7 plan §4.1 #5 (69dd788)'s "code 안정성 fixture": every [`DiagnosticId`]
 /// variant, exhaustively hand-listed (a variant added here without a
 /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
 /// exactly the drift this test exists to catch), must map to a unique
-/// code and the frozen set must be exactly those 24 codes — no more, no
+/// code and the frozen set must be exactly those 25 codes — no more, no
 /// fewer. Mirrors `qsh_proto::schema`'s
 /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
 #[test]
 fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-    const ALL: [DiagnosticId; 24] = [
+    const ALL: [DiagnosticId; 25] = [
         DiagnosticId::ControllerUnreachable,
         DiagnosticId::AuditPathUnwritable,
         DiagnosticId::AclPolicyMissing,
@@ -141,6 +149,7 @@ fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
         DiagnosticId::ConfigServeToConflict,
         DiagnosticId::AclForwardSocksIneffective,
         DiagnosticId::ServiceRestartDropsSessions,
+        DiagnosticId::TrustPinRoleUnset,
     ];
     let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
     codes.sort_unstable();

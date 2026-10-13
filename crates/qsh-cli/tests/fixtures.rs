@@ -170,6 +170,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.client_complete.json",
     "setup.run.client_complete_without_acl.json",
     "setup.run.listener_pending_acl.json",
+    "setup.run.host_complete_with_role.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
 ];
 
@@ -724,10 +725,38 @@ fn golden_setup_run_fixtures() {
     };
 
     let host = with_config("");
-    let (code, host_run) = host.json(&["setup", "host", "--peer", "laptop", "--json"]);
+    // `--peer-role none` is the pre-role behavior (ADR-0045 결정 14): the
+    // `acl` step prints rows. The role defaults have their own fixture below.
+    let (code, host_run) = host.json(&[
+        "setup",
+        "host",
+        "--peer",
+        "laptop",
+        "--peer-role",
+        "none",
+        "--json",
+    ]);
     assert_eq!(code, 0, "{host_run}");
     assert_eq!(host_run["data"]["complete"], false, "{host_run}");
     check_without_roles("setup.run.host_pending_acl.json", host_run);
+
+    // The same host with the role default (`full` on the invite): no rows,
+    // no `acl.toml`, and `complete` is true (ADR-0045 결정 14).
+    let role_host = with_config("");
+    let (code, mut role_run) = role_host.json(&["setup", "host", "--peer", "laptop", "--json"]);
+    assert_eq!(code, 0, "{role_run}");
+    assert_eq!(role_run["data"]["complete"], true, "{role_run}");
+    assert!(role_run["data"].get("acl_rows").is_none(), "{role_run}");
+    assert!(!role_host.config_dir().join("acl.toml").exists());
+    // The doctor step's `result` is the whole `doctor.run` data, which
+    // carries PATH and temp-dir text that differ per machine.
+    for step in role_run["data"]["steps"].as_array_mut().unwrap() {
+        if step["id"] == "doctor" {
+            step["detail"] = serde_json::json!("overall: <overall>");
+            step["result"] = serde_json::json!({ "overall": "<overall>" });
+        }
+    }
+    check("setup.run.host_complete_with_role.json", role_run);
 
     let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
     let cert_path = listener.home_dir().join("peer.pem");
@@ -738,6 +767,8 @@ fn golden_setup_run_fixtures() {
         "macmini",
         "--peer-cert",
         cert_path.to_str().unwrap(),
+        "--peer-role",
+        "none",
         "--json",
     ]);
     assert_eq!(code, 0, "{listener_run}");

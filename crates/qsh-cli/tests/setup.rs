@@ -91,6 +91,16 @@ fn setup_machine_mode_rejects_missing_input_before_any_write() {
         &["setup", "client", "--address", "h.example:4433", "--json"],
         &["setup", "listener", "--peer", "macmini", "--json"],
         &["setup", "host", "--to", "macmini", "--json"],
+        // `--peer-role` outside the six names (ADR-0045 결정 8).
+        &[
+            "setup",
+            "host",
+            "--peer",
+            "laptop",
+            "--peer-role",
+            "admin",
+            "--json",
+        ],
     ];
     for args in cases {
         let sandbox = Sandbox::new();

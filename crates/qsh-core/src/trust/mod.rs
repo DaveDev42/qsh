@@ -43,7 +43,9 @@ use crate::ops::OpError;
 pub mod invite_address;
 pub mod pairing;
 mod role;
-pub use pairing::{LiveInviteCounts, SharedInviteStore, live_invite_counts};
+pub use pairing::{
+    LiveInviteCounts, SharedInviteStore, live_invite_counts, live_role_invite_count,
+};
 pub use role::{TrustRole, TrustRoleParseError};
 
 /// The one line an operator gets when a peer address named no port and

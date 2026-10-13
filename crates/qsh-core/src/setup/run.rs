@@ -16,13 +16,9 @@ use qsh_proto::{
 use serde_json::{Value, json};
 
 use super::{complete_exempt_codes, is_read_only_step, step_order};
-use crate::acl::{ACL_RESTART_NOTICE, Role};
+use crate::acl::{ACL_RESTART_NOTICE, Role, role_grant};
 use crate::ops::{OpError, Ops};
-
-/// The role every pin `qsh setup` writes carries until `--peer-role` exists
-/// (ADR-0045 결정 8, 결정 14): `none`, the same authority a pin written before
-/// ADR-0045 has, so `setup` neither widens nor narrows anything.
-const SETUP_PIN_ROLE: &str = "none";
+use crate::trust::TrustRole;
 
 /// How long an invite stays redeemable (`crate::trust::pairing::INVITE_TTL`,
 /// `docs/CLI.md` §6.11), in the words a person is told.
@@ -97,6 +93,30 @@ fn acl_role(role: SetupRole) -> Role {
     match role {
         SetupRole::Listener => Role::Listen,
         _ => Role::Serve,
+    }
+}
+
+/// The role `qsh setup <role>` gives the pin or invite it writes when
+/// `--peer-role` is absent (ADR-0045 결정 8): the host lets a device in
+/// (`full`), the `serve --to` side lets the controller's listener in
+/// (`full`, the controller relays requests that the target authorizes as
+/// that principal), the listener lets its target register (`reverse`), and
+/// a client only dials (`none`).
+fn default_peer_role(role: SetupRole) -> TrustRole {
+    match role {
+        SetupRole::Host | SetupRole::HostTo => TrustRole::Full,
+        SetupRole::Listener => TrustRole::Reverse,
+        SetupRole::Client => TrustRole::None,
+    }
+}
+
+/// The role this run writes: `--peer-role`, or the setup role's default.
+/// [`validate`] has already rejected an unknown name, so a value that does
+/// not parse cannot get here and falls to the narrowest role.
+fn peer_role(req: &SetupRunReq) -> TrustRole {
+    match req.peer_role.as_deref() {
+        Some(name) => name.parse().unwrap_or(TrustRole::None),
+        None => default_peer_role(req.role),
     }
 }
 
@@ -208,6 +228,11 @@ fn validate(req: &SetupRunReq) -> Result<(), OpError> {
     if req.forward && !matches!(role, SetupRole::Host | SetupRole::HostTo) {
         return Err(invalid("--forward does not apply to this role"));
     }
+    if let Some(peer_role) = req.peer_role.as_deref() {
+        peer_role
+            .parse::<TrustRole>()
+            .map_err(|err| invalid(format!("--peer-role: {err}")))?;
+    }
 
     if let Some(pem) = req.peer_cert_pem.as_deref() {
         crate::ops::check_cert_pem_size(pem)?;
@@ -222,6 +247,16 @@ fn validate(req: &SetupRunReq) -> Result<(), OpError> {
 /// The pin name (`validate` guarantees it exists).
 fn pin_name(req: &SetupRunReq) -> &str {
     req.name.as_deref().unwrap_or("")
+}
+
+/// ` --role <role>` for a standalone command that writes the pin or invite,
+/// or nothing for `none`. The pre-role commands (before ADR-0045) carry no
+/// flag, and their JSON golden fixtures pin that wording.
+fn role_flag(req: &SetupRunReq) -> String {
+    match peer_role(req) {
+        TrustRole::None => String::new(),
+        role => format!(" --role {role}"),
+    }
 }
 
 fn peer_named<'a>(peers: &'a [TrustPeer], name: &str) -> Option<&'a TrustPeer> {
@@ -325,16 +360,21 @@ impl Ops {
                 format!("qsh acl check --principal device:{name} --action {first}")
             }
             SetupStepId::PinCert => match req.address.as_deref() {
-                Some(address) => {
-                    format!("qsh trust add {name} --cert-file <peer.pem> --address {address}")
-                }
-                None => format!("qsh trust add {name} --cert-file <peer.pem>"),
+                Some(address) => format!(
+                    "qsh trust add {name} --cert-file <peer.pem> --address {address}{}",
+                    role_flag(req)
+                ),
+                None => format!(
+                    "qsh trust add {name} --cert-file <peer.pem>{}",
+                    role_flag(req)
+                ),
             },
             SetupStepId::Pair => format!(
-                "qsh pair accept {} <code> --as {name}",
-                req.address.as_deref().unwrap_or("<address>")
+                "qsh pair accept {} <code> --as {name}{}",
+                req.address.as_deref().unwrap_or("<address>"),
+                role_flag(req)
             ),
-            SetupStepId::Invite => format!("qsh pair invite --as {name}"),
+            SetupStepId::Invite => format!("qsh pair invite --as {name}{}", role_flag(req)),
             SetupStepId::Service => "qsh service install".to_string(),
             SetupStepId::Doctor => "qsh doctor".to_string(),
         }
@@ -430,7 +470,73 @@ impl Ops {
         })
     }
 
+    /// The `acl` step when the run writes a pin or invite with a role other
+    /// than `none` (ADR-0045 결정 14): the role authorizes the peer, so there
+    /// are no rows to print and `acl.toml` is not looked at. The step is
+    /// `done` and says which pin or invite gets which role. The one thing
+    /// it checks is a pin that already exists under a different role, which
+    /// neither `trust add` nor an invite redemption changes (결정 8): then the
+    /// authority the run announces would not be the authority the pin has.
+    fn setup_acl_by_role(&self, req: &SetupRunReq, role: TrustRole) -> Result<SetupStep, OpError> {
+        let command = self.setup_command(req, SetupStepId::Acl);
+        let name = pin_name(req);
+        let actions: Vec<&str> = role_grant(role)
+            .actions
+            .iter()
+            .map(|action| action.as_str())
+            .collect();
+        let grants = format!("`{role}` grants: {}", actions.join(", "));
+        let peers = self.trust_list()?.peers;
+        if let Some(existing) = peer_named(&peers, name) {
+            // A pin without a `role` key counts as `none` (ADR-0045 결정 3).
+            let held = existing.role.as_deref().unwrap_or(TrustRole::None.as_str());
+            if held != role.as_str() {
+                return Ok(step(
+                    SetupStepId::Acl,
+                    SetupStatus::Pending,
+                    command,
+                    Some(format!(
+                        "{name:?} is already pinned with role {held}, and setup never changes \
+                         the role of an existing pin. Run `qsh trust set-role {name} {role}` to \
+                         give it the role this run was asked for."
+                    )),
+                    None,
+                ));
+            }
+            return Ok(step(
+                SetupStepId::Acl,
+                SetupStatus::Done,
+                command,
+                Some(format!(
+                    "the pin {name:?} has role {role}, so no [[acl]] rows are needed; {grants}. \
+                     A role change applies from the next request, with no restart."
+                )),
+                None,
+            ));
+        }
+        let writer = match req.role {
+            SetupRole::Host if req.peer_cert_pem.is_none() => {
+                format!("the invite this run mints pins its redeemer as {name:?}")
+            }
+            _ => format!("this run pins {name:?}"),
+        };
+        Ok(step(
+            SetupStepId::Acl,
+            SetupStatus::Done,
+            command,
+            Some(format!(
+                "{writer} with role {role}, so no [[acl]] rows are needed; {grants}. A role \
+                 change applies from the next request, with no restart."
+            )),
+            None,
+        ))
+    }
+
     fn setup_acl(&self, req: &SetupRunReq, env: &SetupEnv) -> Result<SetupStep, OpError> {
+        let role = peer_role(req);
+        if role != TrustRole::None {
+            return self.setup_acl_by_role(req, role);
+        }
         let command = self.setup_command(req, SetupStepId::Acl);
         let name = pin_name(req);
         let principal = format!("device:{name}");
@@ -570,11 +676,10 @@ impl Ops {
             // Always the certificate: without one `trust_add` would dial the
             // peer and offer whatever it presents (ADR-0024 결정 3, 6).
             cert_pem: Some(pem.to_string()),
-            // `setup` keeps writing what it always wrote: a pin that grants
-            // nothing by role, authorized by the printed `[[acl]]` rows.
-            // `--peer-role` and the per-role defaults of ADR-0045 결정 8
-            // replace this constant when `setup` learns roles.
-            role: Some(SETUP_PIN_ROLE.to_string()),
+            // Always explicit, `none` included: a pin written after
+            // ADR-0045 names its role (결정 3), and `trust add`'s own
+            // address-based default must not decide for `setup`.
+            role: Some(peer_role(req).as_str().to_string()),
         })?;
         Ok(step(
             SetupStepId::PinCert,
@@ -618,7 +723,7 @@ impl Ops {
             address: address.to_string(),
             code: code.to_string(),
             as_name: Some(name.to_string()),
-            role: Some(SETUP_PIN_ROLE.to_string()),
+            role: Some(peer_role(req).as_str().to_string()),
         })?;
         let peers = self.trust_list()?.peers;
         Ok(pair_outcome(
@@ -665,7 +770,7 @@ impl Ops {
         // were written for, whatever it calls itself (ADR-0024 결정 5).
         let data = self.trust_invite(TrustInviteReq {
             as_name: Some(name.to_string()),
-            role: Some(SETUP_PIN_ROLE.to_string()),
+            role: Some(peer_role(req).as_str().to_string()),
         })?;
         let detail = (earlier > 0).then(|| {
             format!(
@@ -896,7 +1001,10 @@ fn annotate(mut err: OpError, failed: SetupStepId, done: &[SetupStep]) -> OpErro
 pub(super) fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData {
     let name = pin_name(req);
     let has_acl = steps.iter().any(|s| s.id == SetupStepId::Acl);
-    let acl_rows = has_acl.then(|| acl_rows_text(req, name));
+    // With a role other than `none` the pin or invite carries the
+    // authority, so there is nothing to paste (ADR-0045 결정 14).
+    let by_rows = peer_role(req) == TrustRole::None;
+    let acl_rows = (has_acl && by_rows).then(|| acl_rows_text(req, name));
     let any_open = steps
         .iter()
         .any(|s| matches!(s.status, SetupStatus::Pending | SetupStatus::Blocked));
@@ -907,10 +1015,12 @@ pub(super) fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData
 
     let mut next: Vec<String> = Vec::new();
     for s in steps.iter().filter(|s| s.status == SetupStatus::Pending) {
-        if s.id == SetupStepId::Acl {
+        if s.id == SetupStepId::Acl && by_rows {
             next.push(
                 "save the rows in `acl_rows` to acl.toml, then run `qsh setup` again".to_string(),
             );
+        } else if s.id == SetupStepId::Acl {
+            next.push(format!("qsh trust set-role {name} {}", peer_role(req)));
         } else {
             next.push(s.command.clone());
         }

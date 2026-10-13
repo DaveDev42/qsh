@@ -130,6 +130,7 @@ fn setup_rejects_bad_input_before_any_write() {
         code: None,
         forward: false,
         service: false,
+        peer_role: None,
     };
     let bad = [
         // Neither pin method.
@@ -184,6 +185,7 @@ fn run_req(role: SetupRole) -> qsh_proto::SetupRunReq {
         code: None,
         forward: false,
         service: false,
+        peer_role: None,
     }
 }
 

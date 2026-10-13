@@ -512,6 +512,28 @@ impl InviteStore {
     }
 }
 
+impl InviteStore {
+    /// How many invites redeemable at `now` pin their redeemer with a role
+    /// other than `none` (ADR-0045 결정 12). `qsh doctor` reads this to tell
+    /// "nothing authorizes a new device" from "an invite will". A record
+    /// without a `role` key redeems to `none` and is not counted.
+    pub fn live_role_invites(&self, now: SystemTime) -> u32 {
+        let live = self
+            .parsed()
+            .into_iter()
+            .filter(|(_, record)| record.redeemable(now) && record.role != TrustRole::None)
+            .count();
+        u32::try_from(live).unwrap_or(u32::MAX)
+    }
+}
+
+/// Read `path` and count its live invites that carry a role other than
+/// `none` (see [`InviteStore::live_role_invites`]). Read-only, like
+/// [`live_invite_counts`].
+pub fn live_role_invite_count(path: &Path, now: SystemTime) -> Result<u32, OpError> {
+    Ok(InviteStore::load(path)?.live_role_invites(now))
+}
+
 /// Read `path` and count its live invites (see [`InviteStore::live_counts`]).
 /// Read-only: takes no lock and never writes, because every writer replaces
 /// the file atomically.
