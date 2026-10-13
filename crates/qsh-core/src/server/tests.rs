@@ -3776,14 +3776,13 @@ async fn tcp_connect_allowed_splices_raw_bytes_both_ways() {
 
     raw_send.write_all(b"tail").await.unwrap();
     raw_send.finish().unwrap();
-    let (mut raw_recv, residue) = recv.into_raw();
-    assert!(
-        residue.is_empty(),
-        "the host sends nothing behind ConnectResult"
-    );
+    // The splice starts right after ConnectResult, so the echoed bytes can
+    // arrive in the same read as the frame and come back as residue; they
+    // are part of the stream and go in front of what is read raw.
+    let (mut raw_recv, mut got) = recv.into_raw();
     // `qsh_transport::RecvStream` has its own inherent `read_to_end(limit)`,
     // which shadows `AsyncReadExt::read_to_end`.
-    let got = raw_recv.read_to_end(4096).await.unwrap();
+    got.extend(raw_recv.read_to_end(4096).await.unwrap());
     assert_eq!(
         got, b"pipelined-tailbye",
         "every byte, in order, exactly once: the payload pipelined \
