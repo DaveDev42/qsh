@@ -6,13 +6,17 @@
 //! opens short `-L` connections back to back through two hosts that differ
 //! in one thing only:
 //!
-//! - **arm A** runs the bare interim authorizer, as before Step 3.
-//! - **arm B** runs the same authorizer inside
-//!   [`RoleResolvingAuthorizer`], which on every check refreshes a
-//!   `trust.toml` holding 100 pins and looks the requester's pin up. This is
-//!   the production wiring (`acl::load_or_deny`).
+//! - **arm A** runs a bare [`Policy`] with one `[[acl]]` row that allows the
+//!   client `forward.local`: rows only, no `trust.toml` involved.
+//! - **arm B** runs [`RoleResolvingAuthorizer`] over a policy with no rows,
+//!   which on every check refreshes a `trust.toml` holding 100 pins, looks
+//!   the requester's pin up and allows `forward.local` through its `full`
+//!   role. This is the production wiring (`acl::load_or_deny`).
 //!
-//! The decision is identical in both arms; only the lookup differs. The two
+//! The decision is allow in both arms; only the lookup differs. (Step 3
+//! measured the lookup alone, with the role discarded; since Step 4 the
+//! role is the grant, so arm B pays for both the lookup and the role
+//! stage.) The two
 //! hosts stay up for the whole run and take turns in batches, so machine
 //! drift hits both alike. The test prints per-connection median and p95 for
 //! each arm and their ratio.
@@ -26,11 +30,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use qsh_core::acl::{AllowAllPinned, Authorizer, RoleResolvingAuthorizer};
+use qsh_core::acl::{
+    Action, ActionPattern, Authorizer, Policy, RoleResolvingAuthorizer, Rule, Scope,
+};
 use qsh_core::trust::SharedTrustStore;
 use qsh_testkit::loopback::make_identity;
 use qsh_testkit::tunnel::TunnelHarness;
-use qsh_transport::{Fingerprint, Principal, StaticTrust};
+use qsh_transport::{AuthPath, Fingerprint, Principal, StaticTrust};
 
 /// Pins in `trust.toml`, the client's own among them (PLAN §7.1 #2).
 const PINS: usize = 100;
@@ -76,6 +82,18 @@ fn trust_toml(client: &Fingerprint) -> String {
          added_at = \"2026-10-14T00:00:00Z\"\nrole = \"full\"\n"
     ));
     text
+}
+
+/// Arm A's rows: the harness client may open local forwards, nothing else.
+fn rows_only_policy() -> Policy {
+    Policy {
+        rules: vec![Rule {
+            principal: "device:laptop".to_string(),
+            auth_path: AuthPath::Pin,
+            allow: vec![ActionPattern::Exact(Action::ForwardLocal)],
+            scope: Scope::Any,
+        }],
+    }
 }
 
 struct Arm {
@@ -132,10 +150,10 @@ async fn role_resolution_per_decision_costs_within_ten_percent_on_short_local_fo
     std::fs::write(&trust_path, trust_toml(&client_b.fingerprint)).unwrap();
     let trust = SharedTrustStore::open(&trust_path).expect("open trust.toml");
 
-    let mut a = Arm::start(Arc::new(AllowAllPinned), client_a).await;
+    let mut a = Arm::start(Arc::new(rows_only_policy()), client_a).await;
     let mut b = Arm::start(
         Arc::new(RoleResolvingAuthorizer::new(
-            Arc::new(AllowAllPinned),
+            Policy::default(),
             Arc::clone(&trust),
         )),
         client_b,

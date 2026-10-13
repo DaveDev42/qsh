@@ -893,8 +893,11 @@ pub async fn wait_for_audit_records(
 /// code, driven from the CLIENT-role side of a connection the HOST-role
 /// side happened to dial, behaves identically to the forward direction.
 ///
-/// **Structurally single-peer, by construction — not a harness
-/// limitation.** A forward host ([`crate::loopback::LoopbackHarness`]) is a
+/// **Structurally single-peer by default.** (A second principal is possible
+/// only as a second controller the target dials:
+/// [`Self::session_from_second_controller`], used by
+/// `role_authorization.rs`; the paragraph below explains why the three
+/// `resume_loopback.rs` scenarios still do not use it.) A forward host ([`crate::loopback::LoopbackHarness`]) is a
 /// [`Listener`]: any number of distinct principals can dial in, which is
 /// exactly what `resume_loopback.rs`'s three credential-theft/no-steal
 /// scenarios need (an "owner" and a "thief"/"other" device reaching the
@@ -925,7 +928,12 @@ pub struct ReversePairHarness {
     pub pipes: Arc<PipeFactory>,
     /// Every audit record the target produced.
     pub audit: Arc<MemoryAuditSink>,
+    /// The target's own identity, kept so [`Self::session_from_second_controller`]
+    /// can stand up further controllers that pin it.
+    target: TestIdentity,
     controller_addr: SocketAddr,
+    /// Accept loops of the extra controllers, aborted on [`Drop`].
+    extra_controllers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// The target's dialer, trusting only the controller.
     dialer: Dialer,
     /// Controller-side `(Connection, ctl, peer_hello)` triples, one per
@@ -951,8 +959,33 @@ impl ReversePairHarness {
     /// ACL the controller (client role) is checked against, symmetric with
     /// [`crate::loopback::LoopbackHarness::start_with`].
     pub async fn start_with(authorizer: Arc<dyn Authorizer>) -> Self {
+        Self::start_custom(authorizer, make_identity()).await
+    }
+
+    /// [`Self::start_with`] with a caller-provided controller identity. The
+    /// target pins that identity's fingerprint as `device:laptop`, so a
+    /// caller that builds its [`Authorizer`] from the fingerprint (a
+    /// `trust.toml` pin carrying a `role`, ADR-0045 결정 4) knows the value
+    /// before the pair starts — the symmetric counterpart of
+    /// [`crate::loopback::LoopbackHarness::start_custom`]'s `client`.
+    pub async fn start_custom(authorizer: Arc<dyn Authorizer>, controller: TestIdentity) -> Self {
+        let trust = StaticTrust::empty()
+            .with_pin(controller.fingerprint, Principal::Device("laptop".into()));
+        Self::start_custom_trusting(authorizer, controller, trust).await
+    }
+
+    /// [`Self::start_custom`] with a caller-built trust store for the
+    /// *target's* view of the controller it dials. Lets a test make the
+    /// controller authenticate by a CA instead of a pin (a CA-issued leaf as
+    /// `controller`, `StaticTrust::with_ca` in `target_trust`), the
+    /// reverse-route counterpart of [`crate::loopback::LoopbackHarness::
+    /// start_custom`]'s `server_trust`.
+    pub async fn start_custom_trusting(
+        authorizer: Arc<dyn Authorizer>,
+        controller: TestIdentity,
+        target_trust: StaticTrust,
+    ) -> Self {
         let target = make_identity();
-        let controller = make_identity();
 
         // The controller's listener pins the target — only the target may
         // ever dial in.
@@ -975,8 +1008,6 @@ impl ReversePairHarness {
         // principal by this exact literal in both directions — the point
         // being that the *same* string appears regardless of which side
         // dialed, not that the name "controller" would somehow be wrong.
-        let target_trust = StaticTrust::empty()
-            .with_pin(controller.fingerprint, Principal::Device("laptop".into()));
         let dialer = Dialer::new(target.local.clone(), Arc::new(target_trust));
 
         let pipes = Arc::new(PipeFactory::new(64 * 1024));
@@ -1019,9 +1050,11 @@ impl ReversePairHarness {
             broker,
             pipes,
             audit,
+            target,
             controller_addr,
             dialer,
             accepted: AsyncMutex::new(rx),
+            extra_controllers: Mutex::new(Vec::new()),
             target_tasks: Mutex::new(Vec::new()),
             accept_task,
             accept_shutdown: Some(shutdown_tx),
@@ -1035,13 +1068,24 @@ impl ReversePairHarness {
     /// the client-role `(Connection, ctl, peer_hello)` a caller wraps into
     /// [`Session::from_control`] or drives raw.
     async fn connect(&self) -> (Connection, FramedStream, Hello) {
-        let dialed = self
-            .dialer
-            .dial(self.controller_addr, "127.0.0.1")
+        let mut accepted = self.accepted.lock().await;
+        self.dial_and_serve(&self.dialer, self.controller_addr, &mut accepted)
             .await
-            .unwrap_or_else(|err| {
-                panic!("target dials controller {}: {err:?}", self.controller_addr)
-            });
+    }
+
+    /// [`Self::connect`] against an arbitrary controller: dial `addr` with
+    /// `dialer`, serve the target side, take the controller side from
+    /// `accepted`.
+    async fn dial_and_serve(
+        &self,
+        dialer: &Dialer,
+        addr: SocketAddr,
+        accepted: &mut mpsc::UnboundedReceiver<(Connection, FramedStream, Hello)>,
+    ) -> (Connection, FramedStream, Hello) {
+        let dialed = dialer
+            .dial(addr, "127.0.0.1")
+            .await
+            .unwrap_or_else(|err| panic!("target dials controller {addr}: {err:?}"));
         let target_hello = Hello {
             versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
             device_name: "target".to_string(),
@@ -1104,7 +1148,6 @@ impl ReversePairHarness {
         // (`Dialed::endpoint`'s own docs: dropping it does not close the
         // connection).
 
-        let mut accepted = self.accepted.lock().await;
         tokio::time::timeout(CONNECT_TIMEOUT, accepted.recv())
             .await
             .unwrap_or_else(|_| {
@@ -1121,6 +1164,56 @@ impl ReversePairHarness {
     /// implementation.
     pub async fn session(&self) -> Session {
         let (conn, ctl, peer_hello) = self.connect().await;
+        Session::from_control(conn, ctl, peer_hello)
+    }
+
+    /// A client-role [`Session`] from a *second, distinct* controller
+    /// `identity` the target pins as `device:{name}`: a fresh controller
+    /// listener (the target has no listener of its own, so a second
+    /// principal can only arrive as a second controller it dials) served by
+    /// the same [`Server`]/broker as [`Self::session`]. This is how a
+    /// reverse-route scenario gets two principals onto one host, e.g. an
+    /// ownership check across `device:laptop` and `device:{name}`.
+    pub async fn session_from_second_controller(
+        &self,
+        identity: &TestIdentity,
+        name: &str,
+    ) -> Session {
+        let target_trust = StaticTrust::empty()
+            .with_pin(identity.fingerprint, Principal::Device(name.to_string()));
+        let dialer = Dialer::new(self.target.local.clone(), Arc::new(target_trust));
+        let controller_trust = StaticTrust::empty()
+            .with_pin(self.target.fingerprint, Principal::Device("target".into()));
+        crate::env_check::ensure_loopback_udp();
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            identity.local.clone(),
+            Arc::new(controller_trust),
+        )
+        .expect("bind second controller");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: name.to_string(),
+            capabilities: wire::LOCAL_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            reverse: None,
+        };
+        // Never signalled: the task is aborted in `Drop`.
+        let accept = tokio::spawn(controller_accept_loop(
+            listener,
+            tx,
+            hello,
+            std::future::pending::<()>(),
+        ));
+        self.extra_controllers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(accept);
+        let (conn, ctl, peer_hello) = self.dial_and_serve(&dialer, addr, &mut rx).await;
         Session::from_control(conn, ctl, peer_hello)
     }
 
@@ -1150,6 +1243,14 @@ impl Drop for ReversePairHarness {
             let _ = tx.send(());
         }
         self.accept_task.abort();
+        for handle in self
+            .extra_controllers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            handle.abort();
+        }
         for handle in self
             .target_tasks
             .lock()

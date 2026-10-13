@@ -56,8 +56,9 @@ mod roles;
 // `FamilyPrefix` to put one in, `pub` enum or not.
 pub use load::{
     ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
-    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PinnedPrincipalIndex,
-    PolicyLoad, PolicySource, Role, StartupDiagnostic, load_or_deny, load_or_deny_with_index,
+    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_MISSING_LINE,
+    ACL_STARTUP_NO_AUTOGEN, ACL_STARTUP_ROLES_ONLY_CLAUSE, PinnedPrincipalIndex, PolicyLoad,
+    PolicySource, Role, StartupDiagnostic, load_or_deny, load_or_deny_with_index,
 };
 // Crate-internal only (not part of `qsh-core`'s public surface):
 // `crate::ops::doctor`'s `acl_principal_unmatched`/`acl_ca_auth_path_missing`
@@ -68,7 +69,7 @@ pub(crate) use load::{
     ca_policy_example_row, example_allow_actions, load_policy_or_deny, policy_example_rows,
     policy_example_rows_with,
 };
-pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
+pub use policy::{ActionPattern, GrantBasis, Policy, Rule, Scope, Verdict};
 pub use resolving::RoleResolvingAuthorizer;
 pub use roles::{ROLE_GRANTS, RoleGrant, RoleScope, role_grant};
 
@@ -470,13 +471,10 @@ impl Authorizer for AllowAllPinned {
         // rule index — `rule: None` is the mechanical, behavior-preserving
         // update M5 plan Step 2 (2473c88)'s `Authorizer::check` signature
         // change forces here.
-        Verdict {
-            decision: if pinned && owned {
-                Decision::Allow
-            } else {
-                Decision::Deny
-            },
-            rule: None,
+        if pinned && owned {
+            Verdict::ALLOW_UNBASED
+        } else {
+            Verdict::DENY
         }
     }
 }
@@ -493,10 +491,7 @@ impl Authorizer for DenyAll {
         _action: Action,
         _resource: ResourceRef<'_>,
     ) -> Verdict {
-        Verdict {
-            decision: Decision::Deny,
-            rule: None,
-        }
+        Verdict::DENY
     }
 }
 

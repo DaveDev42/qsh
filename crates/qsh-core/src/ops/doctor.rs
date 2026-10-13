@@ -297,13 +297,13 @@ impl Ops {
         } else {
             Role::Serve
         };
-        let (_authorizer, diagnostic, index) = load_policy_or_deny(&self.paths, role);
+        let (_policy, diagnostic, index) = load_policy_or_deny(&self.paths, role);
         let mut out = Vec::new();
         if let Some(diagnostic) = diagnostic {
             out.push(DoctorFinding {
                 code: diagnostic.code.to_string(),
                 status: "error".to_string(),
-                detail: diagnostic.render(),
+                detail: diagnostic.render_block(),
                 remedy: Some(format!(
                     "{}. {}",
                     crate::acl::ACL_STARTUP_NO_AUTOGEN,

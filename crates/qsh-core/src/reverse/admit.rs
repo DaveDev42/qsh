@@ -143,15 +143,18 @@ pub fn admit(
     // request — `AuditRecord::connection_level` records `request_id: "-"`
     // (mirroring `AuditRecord::handshake_rejected`'s convention) so it can
     // never be confused with a peer-chosen wire request `0`.
-    let recorded = audit.record(&AuditRecord::connection_level(
-        req.principal,
-        req.auth_path,
-        crate::acl::Op::HostReverse.action(),
-        &name,
-        verdict.decision,
-        verdict.rule,
-        req.address,
-    ));
+    let recorded = audit.record(
+        &AuditRecord::connection_level(
+            req.principal,
+            req.auth_path,
+            crate::acl::Op::HostReverse.action(),
+            &name,
+            verdict.decision,
+            verdict.rule,
+            req.address,
+        )
+        .with_verdict_role(verdict.role),
+    );
     // Fail-closed: an allow verdict that failed to make it into the audit
     // log is denied — never register the reverse listener without a
     // durable record of having authorized it.
@@ -395,6 +398,7 @@ mod tests {
             crate::acl::Verdict {
                 decision: Decision::Allow,
                 rule: None,
+                role: None,
             }
         }
     }

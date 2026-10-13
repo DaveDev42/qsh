@@ -142,7 +142,10 @@ impl Ops {
         let path = self.paths.acl_file();
         let (decision, rule, policy) = match PolicySource::load(&self.paths) {
             PolicyLoad::Loaded(policy) => {
-                let verdict = policy.decide(&principal, auth_path, action, resource);
+                // Rows only: the role input (ADR-0045 결정 10) arrives with
+                // PLAN M15 Step 6; until then this answers "what do the rows
+                // say", which is the whole answer for a pin with no role.
+                let verdict = policy.decide(&principal, auth_path, None, action, resource);
                 let rules = u32::try_from(policy.rules.len()).expect(
                     "rule count fits u32: crate::acl::load bounds rule count far below u32::MAX",
                 );
