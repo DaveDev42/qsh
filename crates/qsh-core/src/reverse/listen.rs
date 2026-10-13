@@ -279,12 +279,17 @@ async fn run_listen_unix(
     // The stateless reset key (ADR-0036) is read or created before the
     // bind; an unusable key file never fails the start, it yields one
     // diagnostic, delivered through the same callback as the ACL one.
-    let (listener, reset_key_diagnostic) =
-        crate::reset_key::bind_listener(paths, bind, identity.local, trust, liveness.tuning())
-            .map_err(|err| {
-                let _ = std::fs::remove_file(&localctl_socket_path);
-                crate::serve::bind_setup_error(&bind, err)
-            })?;
+    let (listener, reset_key_diagnostic) = crate::reset_key::bind_listener(
+        paths,
+        bind,
+        identity.local,
+        trust.clone(),
+        liveness.tuning(),
+    )
+    .map_err(|err| {
+        let _ = std::fs::remove_file(&localctl_socket_path);
+        crate::serve::bind_setup_error(&bind, err)
+    })?;
     if let Some(diagnostic) = &reset_key_diagnostic {
         on_policy_diagnostic(diagnostic);
     }
@@ -320,11 +325,13 @@ async fn run_listen_unix(
     // policy `crate::serve::host_runtime` builds for `qsh serve`/`qsh
     // reverse` — `load_or_deny` falls back to `DenyAll` (never
     // `AllowAllPinned`) plus a diagnostic on anything short of a clean
-    // load. Read independently of `trust` above (already moved into
-    // `Listener::bind`): `load_or_deny` opens `paths.trust_file()` itself
-    // to fill the diagnostic's example policy with this machine's actual
-    // pins.
-    let (authorizer, policy_diagnostic) = crate::acl::load_or_deny(paths, crate::acl::Role::Listen);
+    // load. `trust` is the same handle the listener's TLS verifier reads
+    // (ADR-0045 결정 6: the authorizer resolves each requester's trust
+    // role through it); `load_or_deny` still opens `paths.trust_file()`
+    // itself to fill the diagnostic's example policy with this machine's
+    // actual pins.
+    let (authorizer, policy_diagnostic) =
+        crate::acl::load_or_deny(paths, crate::acl::Role::Listen, trust);
     if let Some(diag) = &policy_diagnostic {
         on_policy_diagnostic(&diag.render());
     }

@@ -1094,3 +1094,104 @@ fn rename_carries_the_role_and_remove_drops_it() {
     store.add_peer("tablet", None, fp(b"tablet"), "t".into());
     assert_eq!(store.find("tablet").unwrap().role, None);
 }
+
+fn peer_fp(seed: &[u8]) -> Option<PeerFingerprint> {
+    Some(PeerFingerprint::new(*fp(seed).as_bytes()))
+}
+
+fn peer_entry(name: &str, seed: &[u8], role: Option<&str>) -> String {
+    let role = role.map_or(String::new(), |r| format!("role = \"{r}\"\n"));
+    format!(
+        "[[peer]]\nname = \"{name}\"\nfingerprint = \"{}\"\naddress = \"\"\nadded_at = \"t\"\n{role}\n",
+        fp(seed)
+    )
+}
+
+/// ADR-0045 결정 4's inputs to ⓡ: the role comes from the pin of the
+/// requester's own name whose fingerprint equals the connection's, and from
+/// nothing else. PLAN M15 Step 3 only wires this lookup; the evaluator does
+/// not read it yet.
+#[test]
+fn resolve_role_requires_a_current_pin_with_the_connections_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "{}{}",
+            peer_entry("phone", b"phone", Some("full")),
+            peer_entry("legacy", b"legacy", None)
+        ),
+    )
+    .unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+
+    assert_eq!(
+        shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone")),
+        Some(TrustRole::Full)
+    );
+    // A pin with no `role` key has no role (it is judged as `none`).
+    assert_eq!(
+        shared.resolve_role(
+            &Principal::Device("legacy".into()),
+            AuthPath::Pin,
+            peer_fp(b"legacy")
+        ),
+        None
+    );
+    // The connection's fingerprint is another device's, or absent.
+    assert_eq!(
+        shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"other")),
+        None
+    );
+    assert_eq!(shared.resolve_role(&phone, AuthPath::Pin, None), None);
+    // A CA leaf naming the pinned device never reaches the pin's role, and
+    // neither do `user:` and `fp:` principals.
+    assert_eq!(
+        shared.resolve_role(&phone, AuthPath::Ca, peer_fp(b"phone")),
+        None
+    );
+    assert_eq!(
+        shared.resolve_role(
+            &Principal::User("phone".into()),
+            AuthPath::Pin,
+            peer_fp(b"phone")
+        ),
+        None
+    );
+    assert_eq!(
+        shared.resolve_role(
+            &Principal::Fingerprint(fp(b"phone")),
+            AuthPath::Pin,
+            peer_fp(b"phone")
+        ),
+        None
+    );
+}
+
+#[test]
+fn resolve_role_follows_the_file_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("full"))).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let resolve = |seed: &[u8]| shared.resolve_role(&phone, AuthPath::Pin, peer_fp(seed));
+    assert_eq!(resolve(b"phone"), Some(TrustRole::Full));
+
+    // The role is narrowed in place: the next call sees it.
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("read-only"))).unwrap();
+    assert_eq!(resolve(b"phone"), Some(TrustRole::ReadOnly));
+
+    // The same name re-pinned under a new fingerprint: the old connection
+    // (old fingerprint) gets nothing, the new one gets the new pin's role.
+    std::fs::write(&path, peer_entry("phone", b"phone-2", Some("full"))).unwrap();
+    assert_eq!(resolve(b"phone"), None);
+    assert_eq!(resolve(b"phone-2"), Some(TrustRole::Full));
+
+    // Removed: no role for anyone.
+    std::fs::write(&path, "").unwrap();
+    assert_eq!(resolve(b"phone"), None);
+    assert_eq!(resolve(b"phone-2"), None);
+}

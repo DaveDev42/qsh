@@ -35,10 +35,12 @@ use serde::Deserialize;
 
 use crate::config::Paths;
 use crate::ops::OpError;
-use crate::trust::TrustStore;
+use crate::trust::{SharedTrustStore, TrustStore};
 
 use super::policy::FamilyPrefix;
-use super::{Action, ActionPattern, Authorizer, DenyAll, Policy, Rule, Scope};
+use super::{
+    Action, ActionPattern, Authorizer, DenyAll, Policy, RoleResolvingAuthorizer, Rule, Scope,
+};
 
 /// Hard caps on `acl.toml` shape, enforced before any rule is evaluated.
 /// `acl.toml` is operator-authored, not adversarial input (the M5 plan (2473c88)
@@ -340,8 +342,19 @@ impl StartupDiagnostic {
 /// `unwrap_or_default()`, since a broken `trust.toml` is a different,
 /// already-reported failure elsewhere and must not blank out this
 /// diagnostic's own message.
-pub fn load_or_deny(paths: &Paths, role: Role) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
-    let (authorizer, diagnostic, _index) = load_or_deny_with_index(paths, role);
+///
+/// `trust` is the process's own trust-store handle (the one its TLS
+/// verifier reads): the returned authorizer is a
+/// [`RoleResolvingAuthorizer`] around the policy (or `DenyAll`), so each
+/// decision resolves the requester's trust role from the current
+/// `trust.toml` (ADR-0045 결정 6). `qsh serve`, `qsh listen` and `qsh serve
+/// --to` all construct it this way.
+pub fn load_or_deny(
+    paths: &Paths,
+    role: Role,
+    trust: Arc<SharedTrustStore>,
+) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
+    let (authorizer, diagnostic, _index) = load_or_deny_with_index(paths, role, trust);
     (authorizer, diagnostic)
 }
 
@@ -369,8 +382,8 @@ pub enum Role {
 /// matching rule, reused verbatim.
 ///
 /// This is the one thing [`crate::acl::Authorizer::check`] cannot answer:
-/// that trait has a single method, `check(principal, auth_path, action,
-/// resource) -> Verdict`, which asks "may this principal do this one
+/// that trait has a single method, `check(requester, action, resource) ->
+/// Verdict`, which asks "may this principal do this one
 /// thing", never "does any row name this principal at all". Probing with a
 /// representative action would misclassify a principal that a row names
 /// for a *different* action as "absent". Re-reading `acl.toml` at pairing
@@ -500,6 +513,24 @@ impl PinnedPrincipalIndex {
 /// so it has no pairing notice to compose and no doctor diagnostic of its
 /// own to feed.
 pub fn load_or_deny_with_index(
+    paths: &Paths,
+    role: Role,
+    trust: Arc<SharedTrustStore>,
+) -> (
+    Arc<dyn Authorizer>,
+    Option<StartupDiagnostic>,
+    PinnedPrincipalIndex,
+) {
+    let (policy, diagnostic, index) = load_policy_or_deny(paths, role);
+    let authorizer: Arc<dyn Authorizer> = Arc::new(RoleResolvingAuthorizer::new(policy, trust));
+    (authorizer, diagnostic, index)
+}
+
+/// [`load_or_deny_with_index`] without the trust-store half: the bare
+/// policy authorizer (a [`Policy`] or [`DenyAll`]) plus the diagnostic and
+/// index. For a caller that only reads the diagnostic and the index and
+/// never decides a request (`qsh doctor`).
+pub(crate) fn load_policy_or_deny(
     paths: &Paths,
     role: Role,
 ) -> (

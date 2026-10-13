@@ -32,9 +32,10 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
 use qsh_proto::{ErrorCode, TrustPeer};
-use qsh_transport::{CertificateDer, Fingerprint, Principal, TrustEvaluator};
+use qsh_transport::{AuthPath, CertificateDer, Fingerprint, Principal, TrustEvaluator};
 use serde::{Deserialize, Serialize};
 
+use crate::broker::PeerFingerprint;
 use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
 use crate::ops::OpError;
@@ -657,6 +658,24 @@ impl TrustStore {
             .collect()
     }
 
+    /// Pins with their parsed `role`, for [`SharedTrustStore::resolve_role`].
+    /// An unparsable fingerprint is skipped (the same entries
+    /// [`Self::parsed_pins`] skips, already warned about there). A `role`
+    /// that does not parse cannot occur — [`TrustStore::parse`] rejects the
+    /// whole file — but is read as "no role" rather than trusted.
+    fn parsed_pin_roles(&self) -> Vec<PinRole> {
+        self.peers
+            .iter()
+            .filter_map(|peer| {
+                Some(PinRole {
+                    name: peer.name.clone(),
+                    fingerprint: peer.fingerprint.parse::<Fingerprint>().ok()?,
+                    role: peer.role.as_deref().and_then(|r| r.parse().ok()),
+                })
+            })
+            .collect()
+    }
+
     /// CA roots as DER. Unparsable PEM is skipped with a `WARN`.
     fn parsed_cas(&self) -> Vec<CertificateDer<'static>> {
         self.cas
@@ -690,13 +709,26 @@ struct Cached {
     mtime: Option<SystemTime>,
     store: TrustStore,
     pins: Vec<(Fingerprint, Principal)>,
+    /// `(name, fingerprint, role)` per pin whose fingerprint parses: what
+    /// [`SharedTrustStore::resolve_role`] compares a connection against.
+    /// `role` is `None` for a pin with no `role` key.
+    pin_roles: Vec<PinRole>,
     cas: Vec<CertificateDer<'static>>,
+}
+
+/// One pin as [`SharedTrustStore::resolve_role`] sees it.
+#[derive(Debug)]
+struct PinRole {
+    name: String,
+    fingerprint: Fingerprint,
+    role: Option<TrustRole>,
 }
 
 impl Cached {
     fn new(raw: Option<String>, mtime: Option<SystemTime>, store: TrustStore) -> Self {
         Self {
             pins: store.parsed_pins(),
+            pin_roles: store.parsed_pin_roles(),
             cas: store.parsed_cas(),
             store,
             raw,
@@ -772,6 +804,42 @@ impl SharedTrustStore {
     /// only shape that matters in practice.
     pub fn attach_pairing(&self, store: Arc<SharedInviteStore>) {
         let _ = self.pairing.set(store);
+    }
+
+    /// The role of the pin a request's connection authenticated with, read
+    /// from the current `trust.toml` (ADR-0045 결정 4, "판정마다 읽기").
+    ///
+    /// `Some(role)` only when all of these hold: `auth_path` is
+    /// [`AuthPath::Pin`], `principal` is `device:<name>`, `fingerprint` is
+    /// present, and the store now holds a pin of that name whose
+    /// fingerprint equals `fingerprint` and which carries a `role` key.
+    /// Everything else, including a pin removed or re-pinned under a new
+    /// fingerprint since the connection was made and a pin with no `role`
+    /// key, is `None`: no role. A CA-authenticated principal, a
+    /// `user:<name>` principal and a `fp:` principal never reach a role.
+    ///
+    /// Refreshes the store first (the same content comparison every
+    /// handshake does), so a `trust set-role` or `trust remove` is visible
+    /// on the next call without a restart.
+    pub fn resolve_role(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        fingerprint: Option<PeerFingerprint>,
+    ) -> Option<TrustRole> {
+        if auth_path != AuthPath::Pin {
+            return None;
+        }
+        let Principal::Device(name) = principal else {
+            return None;
+        };
+        let fingerprint = fingerprint?;
+        self.refresh();
+        self.read()
+            .pin_roles
+            .iter()
+            .find(|pin| pin.name == *name && pin.fingerprint.as_bytes() == fingerprint.as_bytes())
+            .and_then(|pin| pin.role)
     }
 
     /// A copy of the current (possibly reloaded) store contents.

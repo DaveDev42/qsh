@@ -61,7 +61,12 @@ fn run_reverse_future_is_send() {
 async fn reverse_hello_carries_only_offered_name_capabilities_empty() {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::new(dir.path(), dir.path());
-    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let runtime = crate::serve::host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
     let hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: "phone".into(),
         capabilities: Vec::new(),
@@ -102,7 +107,12 @@ async fn dial_and_register_maps_an_unresolvable_controller_to_resolve_cause() {
     trust.save(&paths.trust_file()).expect("save trust.toml");
     let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
 
-    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let runtime = crate::serve::host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: "hermes".into(),
         capabilities: Vec::new(),
@@ -828,7 +838,12 @@ async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
     trust.save(&paths.trust_file()).expect("save trust.toml");
     let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
 
-    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let runtime = crate::serve::host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: "hermes".into(),
         capabilities: Vec::new(),
@@ -905,7 +920,12 @@ async fn dial_and_register_bounds_a_resolver_that_never_answers() {
     trust.save(&paths.trust_file()).expect("save trust.toml");
     let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
 
-    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let runtime = crate::serve::host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: "hermes".into(),
         capabilities: Vec::new(),

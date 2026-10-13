@@ -53,7 +53,7 @@ use std::str::FromStr;
 use common::{CLIENT_ALIAS, CLIENT_PRINCIPAL, HOST_ALIAS, Sandbox, ServeGuard, wait_for_audit};
 use qsh_core::acl::{
     ACL_RESTART_NOTICE, Action as CoreAction, Authorizer, PERMISSION_DENIED_MESSAGE, PolicyLoad,
-    PolicySource, ResourceRef,
+    PolicySource, Requester, ResourceRef,
 };
 use qsh_core::{Paths, Principal};
 // F5 (M5 plan Step 7 (2473c88) adversarial ⑥): `Principal` comes from `qsh-core`
@@ -354,8 +354,7 @@ fn row_always_denied_action_overrides_an_explicit_allow_rule() {
     };
     let principal = Principal::from_str(CLIENT_PRINCIPAL).expect("principal parses");
     let verdict = policy.check(
-        &principal,
-        AuthPath::Pin,
+        &Requester::new(&principal, AuthPath::Pin, None),
         CoreAction::ForwardSocks,
         ResourceRef::unowned("socks"),
     );

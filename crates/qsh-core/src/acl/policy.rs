@@ -31,7 +31,7 @@
 
 use qsh_transport::{AuthPath, Principal};
 
-use super::{Action, Authorizer, Decision, ResourceRef, opener_key};
+use super::{Action, Authorizer, Decision, Requester, ResourceRef, opener_key};
 
 /// A validated action-family prefix — dot included, non-empty stem —
 /// the only value [`ActionPattern::Prefix`] can hold. `FamilyPrefix` is
@@ -331,12 +331,13 @@ fn rule_covers(rule: &Rule, action: Action) -> bool {
 impl Authorizer for Policy {
     fn check(
         &self,
-        principal: &Principal,
-        auth_path: AuthPath,
+        requester: &Requester<'_>,
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
-        self.decide(principal, auth_path, action, resource)
+        // The connection fingerprint is not an input here yet: the role
+        // stage ⓡ that reads it lands in `decide` with PLAN M15 Step 4.
+        self.decide(requester.principal, requester.auth_path, action, resource)
     }
 }
 

@@ -15,8 +15,9 @@ use std::net::SocketAddr;
 use qsh_proto::ErrorCode;
 use qsh_transport::{AuthPath, Principal};
 
-use crate::acl::{Authorizer, Decision, ResourceRef};
+use crate::acl::{Authorizer, Decision, Requester, ResourceRef};
 use crate::audit::{AuditRecord, AuditSink};
+use crate::broker::PeerFingerprint;
 use crate::ops::OpError;
 
 use super::registry::{AdmittedEntry, RegisterOutcome, Registry, host_reverse_denied};
@@ -128,9 +129,13 @@ pub fn admit(
     };
 
     // ---- ACL choke point: decide + audit BEFORE any resource. ----
-    let verdict = authorizer.check(
+    let requester = Requester::new(
         req.principal,
         req.auth_path,
+        Some(PeerFingerprint::new(*req.fingerprint.as_bytes())),
+    );
+    let verdict = authorizer.check(
+        &requester,
         crate::acl::Op::HostReverse.action(),
         ResourceRef::unowned(&name),
     );
@@ -383,8 +388,7 @@ mod tests {
     impl Authorizer for AllowEverything {
         fn check(
             &self,
-            _: &Principal,
-            _: AuthPath,
+            _requester: &Requester<'_>,
             _: Action,
             _: ResourceRef<'_>,
         ) -> crate::acl::Verdict {

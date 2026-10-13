@@ -44,7 +44,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::acl::{Action, Authorizer, Decision, ResourceRef, opener_key};
+use crate::acl::{Action, Authorizer, Decision, Requester, ResourceRef, opener_key};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
     BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, FIRST_INPUT_STREAM,
@@ -248,6 +248,14 @@ pub struct ConnCtx {
 }
 
 impl ConnCtx {
+    /// This connection's identity as an [`Authorizer`] input: principal,
+    /// auth path and verified leaf fingerprint. Every `Authorizer::check`
+    /// call on a served connection passes this and nothing hand-assembled,
+    /// so the fingerprint cannot be left out at one seam.
+    pub(crate) fn requester(&self) -> Requester<'_> {
+        Requester::new(&self.principal, self.auth_path, self.peer_fingerprint)
+    }
+
     fn has_capability(&self, cap: &str) -> bool {
         self.capabilities.iter().any(|c| c == cap)
     }

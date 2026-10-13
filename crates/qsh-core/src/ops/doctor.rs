@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime};
 use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode, KeyStoreKind};
 use qsh_transport::AuthPath;
 
-use crate::acl::{Role, ca_policy_example_row, load_or_deny_with_index, policy_example_rows};
+use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_example_rows};
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
@@ -297,7 +297,7 @@ impl Ops {
         } else {
             Role::Serve
         };
-        let (_authorizer, diagnostic, index) = load_or_deny_with_index(&self.paths, role);
+        let (_authorizer, diagnostic, index) = load_policy_or_deny(&self.paths, role);
         let mut out = Vec::new();
         if let Some(diagnostic) = diagnostic {
             out.push(DoctorFinding {

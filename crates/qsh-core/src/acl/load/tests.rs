@@ -1,7 +1,11 @@
 use qsh_transport::{AuthPath, Principal};
 
 use super::*;
-use crate::acl::{Decision, ResourceRef};
+use crate::acl::{Decision, Requester, ResourceRef};
+
+fn open_trust(dir: &std::path::Path) -> Arc<SharedTrustStore> {
+    SharedTrustStore::open(paths_with(dir).trust_file()).expect("open trust store")
+}
 
 fn paths_with(dir: &std::path::Path) -> Paths {
     Paths::new(dir, dir)
@@ -662,10 +666,10 @@ fn owner_only_acl_toml_does_not_warn() {
 #[test]
 fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
     let dir = tempfile::tempdir().unwrap();
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
+    let (authorizer, diag) =
+        load_or_deny(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
     let verdict = authorizer.check(
-        &Principal::Device("laptop".into()),
-        AuthPath::Pin,
+        &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
@@ -788,10 +792,10 @@ fn load_or_deny_on_invalid_file_denies_and_carries_a_content_free_detail() {
     for case in cases {
         let dir = tempfile::tempdir().unwrap();
         write_acl(dir.path(), &case.text);
-        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
+        let (authorizer, diag) =
+            load_or_deny(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
         let verdict = authorizer.check(
-            &Principal::Device("laptop".into()),
-            AuthPath::Pin,
+            &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
             Action::ExecRun,
             ResourceRef::unowned("exec"),
         );
@@ -858,18 +862,17 @@ fn load_or_deny_on_loaded_policy_has_no_diagnostic_and_evaluates_rules() {
         dir.path(),
         "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\"]\n",
     );
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
+    let (authorizer, diag) =
+        load_or_deny(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
     assert!(diag.is_none());
     let verdict = authorizer.check(
-        &Principal::Device("laptop".into()),
-        AuthPath::Pin,
+        &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
     assert_eq!(verdict.decision, Decision::Allow);
     let verdict = authorizer.check(
-        &Principal::Device("laptop".into()),
-        AuthPath::Pin,
+        &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
         Action::SessionOpen,
         ResourceRef::unowned("s1"),
     );
@@ -898,15 +901,15 @@ fn load_or_deny_ca_path_round_trip_default_denies_explicit_ca_allows() {
         "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\n\
          [[acl]]\nprincipal = \"user:carol\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n",
     );
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
+    let (authorizer, diag) =
+        load_or_deny(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
     assert!(diag.is_none());
 
     // `dave`'s rule has no `auth_path` — defaults to `pin` (F6(b)'s own
     // discipline) — so a CA-authenticated `dave` is denied even though
     // the principal string matches a real rule.
     let verdict = authorizer.check(
-        &Principal::User("dave".into()),
-        AuthPath::Ca,
+        &Requester::new(&Principal::User("dave".into()), AuthPath::Ca, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
@@ -914,8 +917,7 @@ fn load_or_deny_ca_path_round_trip_default_denies_explicit_ca_allows() {
     // The same principal, pinned, is allowed — the rule it omitted
     // `auth_path` for.
     let verdict = authorizer.check(
-        &Principal::User("dave".into()),
-        AuthPath::Pin,
+        &Requester::new(&Principal::User("dave".into()), AuthPath::Pin, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
@@ -925,15 +927,13 @@ fn load_or_deny_ca_path_round_trip_default_denies_explicit_ca_allows() {
     // CA-authenticated `carol` is allowed, but a *pinned* `carol` is
     // not — the rule never claimed to cover that path.
     let verdict = authorizer.check(
-        &Principal::User("carol".into()),
-        AuthPath::Ca,
+        &Requester::new(&Principal::User("carol".into()), AuthPath::Ca, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
     assert_eq!(verdict.decision, Decision::Allow);
     let verdict = authorizer.check(
-        &Principal::User("carol".into()),
-        AuthPath::Pin,
+        &Requester::new(&Principal::User("carol".into()), AuthPath::Pin, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
@@ -1135,13 +1135,13 @@ fn load_or_deny_with_index_returns_the_empty_index_on_a_missing_or_invalid_polic
     // pin-path or otherwise — is enforcing anything.
     let dir = tempfile::tempdir().unwrap();
     let (_authorizer, diagnostic, index) =
-        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve);
+        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
     assert!(diagnostic.is_some(), "a missing acl.toml must diagnose");
     assert!(!index.names_device("anything"));
 
     write_acl(dir.path(), "this is not [ valid toml");
     let (_authorizer, diagnostic, index) =
-        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve);
+        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
     assert!(
         diagnostic.is_some(),
         "an unparseable acl.toml must diagnose"
