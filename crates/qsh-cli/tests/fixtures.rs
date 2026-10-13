@@ -108,6 +108,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.add.updated.json",
     "trust.add_ca.json",
     "trust.list.json",
+    "trust.list.with_role.json",
     "trust.remove.json",
     "trust.remove.absent.json",
     "trust.invite.json",
@@ -790,6 +791,55 @@ fn golden_trust_add_update_fixture() {
     assert_eq!(updated["data"]["created"], false, "{updated}");
     assert_eq!(updated["data"]["updated"], true, "{updated}");
     check("trust.add.updated.json", updated);
+}
+
+/// `trust list` with `role` keys in `trust.toml` (ADR-0045 결정 9): a pin
+/// with an explicit role, a pin with the explicit `none`, and a pin with no
+/// `role` key at all, whose JSON object must omit the field so a pre-ADR-0045
+/// pin stays distinguishable from `none`. No command writes `role` yet (the
+/// writing commands land in a later step), so the file is written by hand,
+/// which is also how an operator would provision it. Its own sandbox so
+/// `trust.list.json`'s single-pin store is not perturbed.
+#[test]
+fn golden_trust_list_with_role_fixture() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
+    std::fs::write(
+        sandbox.config_dir().join("trust.toml"),
+        format!(
+            "[[peer]]\n\
+             name = \"phone\"\n\
+             fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+             address = \"\"\n\
+             added_at = \"2026-10-12T00:00:00Z\"\n\
+             role = \"full\"\n\
+             \n\
+             [[peer]]\n\
+             name = \"dial-target\"\n\
+             fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+             address = \"dial-target.example.com:4433\"\n\
+             added_at = \"2026-10-12T00:00:00Z\"\n\
+             role = \"none\"\n\
+             \n\
+             [[peer]]\n\
+             name = \"legacy\"\n\
+             fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+             address = \"\"\n\
+             added_at = \"2026-08-17T00:00:00Z\"\n"
+        ),
+    )
+    .expect("write trust.toml fixture");
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    let peers = listed["data"]["peers"].as_array().expect("data.peers");
+    assert_eq!(peers[0]["role"], "full", "{listed}");
+    assert_eq!(peers[1]["role"], "none", "{listed}");
+    assert!(
+        peers[2].get("role").is_none(),
+        "a pin with no `role` key must omit the field, not emit null: {listed}"
+    );
+    check("trust.list.with_role.json", listed);
 }
 
 /// `trust accept` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11): a

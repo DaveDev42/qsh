@@ -35,6 +35,34 @@ fn record_has_only_structural_fields() {
             "ts"
         ]
     );
+    // ADR-0045 결정 16: `role` is optional and omitted when `None`, so the
+    // nine keys above are what every record written today carries.
+    let mut with_role = sample();
+    with_role.role = Some("full".into());
+    let value_with_role = serde_json::to_value(&with_role).unwrap();
+    let mut keys_with_role: Vec<_> = value_with_role
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    keys_with_role.sort();
+    assert_eq!(
+        keys_with_role,
+        [
+            "action",
+            "auth_path",
+            "decision",
+            "peer_addr",
+            "principal",
+            "request_id",
+            "resource",
+            "role",
+            "rule",
+            "ts"
+        ]
+    );
+    assert_eq!(value_with_role["role"], "full");
     assert_eq!(value["principal"], "device:laptop");
     assert_eq!(value["action"], "exec.run");
     assert_eq!(value["decision"], "allow");

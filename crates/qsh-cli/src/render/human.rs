@@ -243,6 +243,16 @@ pub fn print_trust_add_ca(data: &TrustAddCaData) -> io::Result<()> {
     writeln!(stdout, "{verb} CA root {}", sanitize(&data.name))
 }
 
+/// The role column of the pinned-peer table (ADR-0045 결정 9): the role
+/// string, or `(none, legacy)` for a pin whose `trust.toml` entry has no
+/// `role` key. Both read as "no role granted"; the second says the pin
+/// predates ADR-0045 and is authorized by `acl.toml` rows alone.
+const LEGACY_ROLE_CELL: &str = "(none, legacy)";
+
+fn role_cell(peer: &TrustPeer) -> &str {
+    peer.role.as_deref().unwrap_or(LEGACY_ROLE_CELL)
+}
+
 /// Print the pinned-peer table.
 pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
@@ -261,24 +271,27 @@ pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
     let name_w = width("NAME", |p| &p.name);
     let fp_w = width("FINGERPRINT", |p| &p.fingerprint);
     let addr_w = width("ADDRESS", |p| &p.address);
+    let role_w = width("ROLE", role_cell);
 
     writeln!(
         stdout,
-        "{:name_w$}  {:fp_w$}  {:addr_w$}  ADDED",
-        "NAME", "FINGERPRINT", "ADDRESS"
+        "{:name_w$}  {:fp_w$}  {:addr_w$}  {:role_w$}  ADDED",
+        "NAME", "FINGERPRINT", "ADDRESS", "ROLE"
     )?;
     for peer in &data.peers {
-        // `name_w`/`fp_w`/`addr_w` above are computed over the *raw*
-        // fields, same as `print_hosts` — `sanitize`'s 1:1 char-count
-        // invariant (`sanitize_preserves_char_count_for_control_character_
-        // input`, this module's own test) means the column width is
-        // identical either way, so the widths above never need to change.
+        // `name_w`/`fp_w`/`addr_w`/`role_w` above are computed over the
+        // *raw* fields, same as `print_hosts` — `sanitize`'s 1:1
+        // char-count invariant (`sanitize_preserves_char_count_for_control_
+        // character_input`, this module's own test) means the column width
+        // is identical either way, so the widths above never need to
+        // change. `role` is sanitized too: an open string on the wire.
         writeln!(
             stdout,
-            "{:name_w$}  {:fp_w$}  {:addr_w$}  {}",
+            "{:name_w$}  {:fp_w$}  {:addr_w$}  {:role_w$}  {}",
             sanitize(&peer.name),
             sanitize(&peer.fingerprint),
             sanitize(&peer.address),
+            sanitize(role_cell(peer)),
             peer.added_at
         )?;
     }

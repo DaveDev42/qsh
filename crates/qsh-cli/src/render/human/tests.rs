@@ -1,4 +1,4 @@
-use super::{format_trust_pin_line, render_doctor_lines, sanitize};
+use super::{format_trust_pin_line, render_doctor_lines, role_cell, sanitize};
 use qsh_proto::{DoctorData, DoctorFinding, TrustPeer};
 
 #[test]
@@ -45,6 +45,7 @@ fn format_trust_pin_line_sanitizes_the_name_and_keeps_the_fingerprint_intact() {
         fingerprint: "sha256:REALFINGERPRINT".to_string(),
         address: String::new(),
         added_at: "2026-08-31T00:00:00Z".to_string(),
+        role: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -69,6 +70,7 @@ fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
         fingerprint: "sha256:REALFINGERPRINT".to_string(),
         address: "198.51.100.7:4433".to_string(),
         added_at: "2026-08-31T00:00:00Z".to_string(),
+        role: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -109,4 +111,22 @@ fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independe
             "    remedy: do the thing".to_string(),
         ]
     );
+}
+
+/// ADR-0045 결정 9: the `trust list` role cell shows the stored role, and
+/// `(none, legacy)` for a pin whose entry has no `role` key.
+#[test]
+fn role_cell_shows_the_role_or_none_legacy() {
+    let mut peer = TrustPeer {
+        name: "phone".to_string(),
+        fingerprint: "sha256:REALFINGERPRINT".to_string(),
+        address: String::new(),
+        added_at: "2026-10-12T00:00:00Z".to_string(),
+        role: None,
+    };
+    assert_eq!(role_cell(&peer), "(none, legacy)");
+    peer.role = Some("read-only".to_string());
+    assert_eq!(role_cell(&peer), "read-only");
+    peer.role = Some("none".to_string());
+    assert_eq!(role_cell(&peer), "none");
 }

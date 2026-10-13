@@ -1,0 +1,30 @@
+{
+  "command": "trust.list",
+  "data": {
+    "peers": [
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "name": "phone",
+        "role": "full"
+      },
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "name": "dial-target",
+        "role": "none"
+      },
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "name": "legacy"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

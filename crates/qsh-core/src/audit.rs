@@ -143,6 +143,16 @@ pub struct AuditRecord {
     /// other field here, and old readers ignore a key they don't know.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub count: Option<u32>,
+    /// The trust role behind the record (ADR-0045 결정 16): on a remote
+    /// decision, only when the grant came from the peer's role
+    /// (`decision = "allow"`, `rule = null`); on a local trust write, the
+    /// role being written. `None` (and omitted from the JSONL line) on every
+    /// other record, so a record written today stays byte-identical. The
+    /// value comes from the closed six-name vocabulary
+    /// ([`crate::trust::TrustRole`]), so it is structural and cannot carry a
+    /// payload.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub role: Option<String>,
 }
 
 impl AuditRecord {
@@ -180,6 +190,7 @@ impl AuditRecord {
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
             count: None,
+            role: None,
         }
     }
 }
@@ -211,6 +222,7 @@ impl AuditRecord {
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
             count: None,
+            role: None,
         }
     }
 
@@ -231,6 +243,7 @@ impl AuditRecord {
             auth_path: "-".to_string(),
             peer_addr: peer_addr.to_string(),
             count: None,
+            role: None,
         }
     }
 
@@ -256,6 +269,7 @@ impl AuditRecord {
             auth_path: "-".to_string(),
             peer_addr: "-".to_string(),
             count: Some(count),
+            role: None,
         }
     }
 
@@ -304,6 +318,7 @@ impl AuditRecord {
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
             count: None,
+            role: None,
         }
     }
 
@@ -334,6 +349,7 @@ impl AuditRecord {
             auth_path: "-".to_string(),
             peer_addr: "-".to_string(),
             count: Some(count),
+            role: None,
         }
     }
 
@@ -359,6 +375,7 @@ impl AuditRecord {
             auth_path: auth_path_str(AuthPath::Pairing).to_string(),
             peer_addr: peer_addr.to_string(),
             count: None,
+            role: None,
         }
     }
 
@@ -392,6 +409,7 @@ impl AuditRecord {
             auth_path: "local".to_string(),
             peer_addr: "-".to_string(),
             count: None,
+            role: None,
         }
     }
 }

@@ -32,7 +32,7 @@ use std::collections::BTreeSet;
 use qsh_core::acl::{
     ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
     ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, Action,
-    PERMISSION_DENIED_MESSAGE,
+    PERMISSION_DENIED_MESSAGE, ROLE_GRANTS,
 };
 
 #[path = "support/docs.rs"]
@@ -204,5 +204,94 @@ fn cli_md_quotes_the_acl_startup_diagnostic_wording_verbatim() {
             "docs/CLI.md §6.12 must quote {fragment:?} verbatim \
              (StartupDiagnostic::render's fixed wording)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// ADR-0045 결정 2: the role-to-action table has one code copy
+// (`ROLE_GRANTS`) and two doc copies (`docs/CLI.md` §6.11, `docs/PRD.md`
+// §9). Both doc tables use the header `| role | 주는 action | 소유 축 |`;
+// each row is `| `role` | `a`, `b` | scope |` with `없음` for an empty
+// action set. Section-scoped, like the checks above.
+// ---------------------------------------------------------------------
+
+type RoleRow = (String, Vec<String>, String);
+
+/// The rows of the role table inside `section`, in document order.
+fn role_table_rows(section: &str) -> Vec<RoleRow> {
+    let mut lines = section.lines();
+    lines
+        .by_ref()
+        .find(|line| line.trim() == "| role | 주는 action | 소유 축 |")
+        .expect("the section must contain the role table header");
+    lines.next().expect("separator row after the header");
+    lines
+        .take_while(|line| line.starts_with('|'))
+        .map(|line| {
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            assert_eq!(cells.len(), 3, "role table row {line:?}");
+            let unquote = |s: &str| s.trim_matches('`').to_string();
+            let actions = if cells[1] == "없음" {
+                Vec::new()
+            } else {
+                cells[1].split(',').map(|a| unquote(a.trim())).collect()
+            };
+            (unquote(cells[0]), actions, cells[2].to_string())
+        })
+        .collect()
+}
+
+fn role_rows_from_code() -> Vec<RoleRow> {
+    ROLE_GRANTS
+        .iter()
+        .map(|grant| {
+            (
+                grant.role.as_str().to_string(),
+                grant
+                    .actions
+                    .iter()
+                    .map(|a| a.as_str().to_string())
+                    .collect(),
+                grant.scope.as_str().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn role_action_table_matches_docs() {
+    let code = role_rows_from_code();
+    assert_eq!(code.len(), 6, "ADR-0045 결정 2 fixes six roles");
+
+    let cli_md = read_doc("docs/CLI.md");
+    let cli_section = heading_section_slice(&cli_md, "### 6.11 Identity와 trust");
+    assert_eq!(
+        role_table_rows(cli_section),
+        code,
+        "docs/CLI.md §6.11's role table and ROLE_GRANTS have drifted apart"
+    );
+
+    let prd = read_doc("docs/PRD.md");
+    let prd_section = heading_section_slice(&prd, "## 9. 보안과 ACL");
+    assert_eq!(
+        role_table_rows(prd_section),
+        code,
+        "docs/PRD.md §9's role table and ROLE_GRANTS have drifted apart"
+    );
+}
+
+/// No role grants `forward.socks`, and `none` grants nothing: the two rows
+/// ADR-0045 결정 2 states in prose, checked against the code table so a
+/// hand edit of `ROLE_GRANTS` cannot widen either silently.
+#[test]
+fn role_table_never_grants_forward_socks_and_none_grants_nothing() {
+    for (role, actions, _) in role_rows_from_code() {
+        assert!(
+            !actions.iter().any(|a| a == "forward.socks"),
+            "{role} grants forward.socks"
+        );
+        if role == "none" {
+            assert!(actions.is_empty());
+        }
     }
 }
