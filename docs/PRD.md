@@ -167,7 +167,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - scp 호환 `qsh cp` (M15, ADR-0029)
 - SSH 부트스트랩 (M16, ADR-0044)
 - trust remove 시 열린 연결 종료 (M16, ADR-0031)
-- Windows client와 Windows host (M19, ADR-0035). 2026-10-13 사용자 결정으로 host를 P2에서 당겼다(§4 플랫폼 간 동등)
+- Windows client (M19)와 Windows host (M20), ADR-0035. 2026-10-13 사용자 결정으로 host를 P2에서 당겼다(§4 플랫폼 간 동등). 출고는 macOS와 같이 서명(Authenticode)과 패키지 관리자(scoop, winget)를 갖춘다
 - 세션 및 audit 관리 개선 (M17 (d))
 
 처음 P1에 있었으나 v1(M9)로 당겨 출고한 항목:
