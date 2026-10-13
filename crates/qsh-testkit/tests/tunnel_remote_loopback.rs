@@ -377,6 +377,7 @@ async fn remote_forward_close_is_indistinguishable_real_vs_fake_for_an_ungranted
     // `desktop` has no `forward.remote` grant at all — the ungranted case.
     let policy = qsh_core::acl::Policy {
         rules: vec![qsh_core::acl::Rule {
+            paths: None,
             principal: "device:laptop".to_string(),
             auth_path: qsh_transport::AuthPath::Pin,
             allow: vec![qsh_core::acl::ActionPattern::Exact(

@@ -1,0 +1,20 @@
+{
+  "command": "acl.check",
+  "data": {
+    "action": "file.read",
+    "auth_path": "pin",
+    "canonical_path": "/",
+    "decision": "deny",
+    "path": "<path>",
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 3,
+      "state": "loaded"
+    },
+    "principal": "device:laptop"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

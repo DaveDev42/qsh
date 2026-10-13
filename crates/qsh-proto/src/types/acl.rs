@@ -41,6 +41,13 @@ pub struct AclCheckReq {
     /// meaningless without [`Self::owner`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_auth_path: Option<String>,
+    /// The remote path a file action would target (`qsh acl check --path`,
+    /// ADR-0029 결정 19): required for `file.read`/`file.write` and refused
+    /// for every other action. Shape rules are the file ops' (absolute,
+    /// `~`, `~/…` or home-relative; no NUL, UTF-8, at most 4096 bytes).
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Data payload of `acl.check` (`docs/CLI.md` §6.15).
@@ -89,6 +96,17 @@ pub struct AclCheckData {
     /// (ADR-0045 결정 4). Present only for an allow. Open string. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_by: Option<String>,
+    /// Echoes [`AclCheckReq::path`] as given (ADR-0029 결정 19). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The request path after the host's normalization (ADR-0029 결정 6-2),
+    /// present only when normalization ran and succeeded. It runs only when
+    /// the principal has some ground for the file action (a role that grants
+    /// it, or a row granting it with `paths`), exactly as enforcement does,
+    /// so a principal with no file grant never makes the query touch the
+    /// filesystem. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_path: Option<String>,
 }
 
 /// Which `acl.toml` an `acl.check` decision was evaluated against
@@ -150,6 +168,16 @@ pub struct AclMatchingRule {
     pub auth_path: String,
     /// The row's `scope`: open string, `"owned"` | `"any"`.
     pub scope: String,
+    /// The row's `paths` entries exactly as written (ADR-0029 결정 19).
+    /// Omitted for a row without the key, which grants no file access.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// True when the row names a file action but has no `paths`, so it
+    /// grants no file access (ADR-0029 결정 19). Computed by the host so a
+    /// renderer holds no ACL logic. Omitted when false. Additive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub file_paths_missing: bool,
 }
 
 /// Data payload of `acl.show` (`docs/CLI.md` §6.19).
@@ -171,7 +199,10 @@ pub struct AclShowData {
     /// Actions the principal may take on an unowned resource, in vocabulary
     /// order: the union of what its trust role grants and what the matching
     /// rows grant (ADR-0045 결정 11). A ceiling for owned resources. Never
-    /// contains the always-denied actions.
+    /// contains the always-denied actions. A file action is in it when the
+    /// role grants it or some matching row grants it together with `paths`
+    /// (ADR-0029 결정 19); which paths open is what
+    /// [`AclMatchingRule::paths`] and `acl check --path` answer.
     pub effective_actions: Vec<String>,
     /// The principal's pin role, resolved exactly as
     /// [`AclCheckData::role`] (ADR-0045 결정 11). Omitted in the same cases.

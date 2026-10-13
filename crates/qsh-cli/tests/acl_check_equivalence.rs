@@ -174,6 +174,12 @@ fn acl_check(
         args.push("--owner-auth-path");
         args.push(oa);
     }
+    // A file action is decided per path (ADR-0029 결정 19); these tables
+    // ask about the root, which no table row's `paths` covers.
+    if action.starts_with("file.") {
+        args.push("--path");
+        args.push("/");
+    }
     args.push("--json");
     let (code, value) = host.json(&args);
     assert_eq!(code, 0, "acl check itself must not fail: {value}");
@@ -904,14 +910,16 @@ fn acl_show_never_lists_always_denied_actions_even_under_family_patterns() {
     for denied in ["forward.socks", "file.read", "file.write"] {
         assert!(!set.iter().any(|a| a == denied), "{denied} in {data}");
     }
-    // The row is still reported as matching, with its patterns as written.
+    // The row is still reported as matching, with its patterns as written;
+    // it names `file.*` without `paths`, which the host flags.
     assert_eq!(
         data["matching_rules"],
         serde_json::json!([{
             "index": 0,
             "allow": ["forward.*", "file.*"],
             "auth_path": "pin",
-            "scope": "owned"
+            "scope": "owned",
+            "file_paths_missing": true
         }]),
         "{data}"
     );

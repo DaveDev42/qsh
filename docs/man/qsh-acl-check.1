@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-acl\-check \- Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
 .SH SYNOPSIS
-\fBqsh acl check\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-resource\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-auth\-path\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-owner\fR] [\fB\-\-owner\-auth\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> <\fB\-\-action\fR> 
+\fBqsh acl check\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-resource\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-auth\-path\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-owner\fR] [\fB\-\-owner\-auth\-path\fR] [\fB\-\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> <\fB\-\-action\fR> 
 .SH DESCRIPTION
 Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
 .SH OPTIONS
@@ -38,6 +38,9 @@ Principal that owns `\-\-resource`, so `scope = "owned"` rows can be evaluated t
 .TP
 \fB\-\-owner\-auth\-path\fR \fI<pin|ca>\fR
 Auth path `\-\-owner` is assumed to have authenticated over. Only meaningful together with `\-\-owner`; omit to default to `"pin"`. `requires = "owner"` mirrors [`InteractiveArgs::escape_char`]\*(Aqs own `requires = "target"` (`docs/CLI.md` §6.15): giving this alone is a clap usage error (exit `2`), not a silently\-ignored no\-op
+.TP
+\fB\-\-path\fR \fI<ABS_PATH>\fR
+Remote path a file action would target (`docs/CLI.md` §6.15, ADR\-0029 결정 19). Required for `file.read`/`file.write` and refused for every other action; both are `INVALID_ARGUMENT`. The query normalizes it the way a host does
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

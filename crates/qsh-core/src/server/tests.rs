@@ -5339,6 +5339,7 @@ async fn rfwd_close_by_another_principal_under_owned_scope_is_permission_denied_
  {
     use crate::acl::{ActionPattern, Op, Policy, Rule, Scope};
     let row = |principal: &str| Rule {
+        paths: None,
         principal: principal.to_string(),
         auth_path: AuthPath::Pin,
         allow: vec![

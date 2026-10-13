@@ -691,6 +691,16 @@ pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
                 sanitize(&rule.auth_path),
                 sanitize(&rule.scope)
             )?;
+            match &rule.paths {
+                Some(paths) => {
+                    let paths: Vec<String> = paths.iter().map(|p| sanitize(p)).collect();
+                    writeln!(stdout, "      paths: {}", paths.join(", "))?;
+                }
+                None if rule.file_paths_missing => {
+                    writeln!(stdout, "      grants no file access: the row has no paths")?;
+                }
+                None => {}
+            }
         }
     }
     if data.effective_actions.is_empty() {

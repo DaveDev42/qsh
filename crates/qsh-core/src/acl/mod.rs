@@ -22,13 +22,16 @@
 //! reports the path alongside the principal and policy must use it.
 
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 use qsh_transport::{AuthPath, Principal};
 
 use crate::broker::PeerFingerprint;
+use crate::file::guard::Normalizer;
 
 mod load;
+mod paths;
 mod policy;
 mod registry;
 mod resolving;
@@ -229,6 +232,15 @@ impl Action {
     }
 }
 
+impl Action {
+    /// Whether this is one of the two file actions (`file.read`,
+    /// `file.write`), the ones a row can only grant together with `paths`
+    /// (ADR-0029 결정 4).
+    pub fn is_file(self) -> bool {
+        matches!(self, Action::FileRead | Action::FileWrite)
+    }
+}
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -346,6 +358,13 @@ pub struct ResourceRef<'a> {
     /// This resource's owner key ([`opener_key`]), or `None` for a
     /// resource kind that has no owner concept.
     pub owner: Option<&'a str>,
+    /// The canonical path of a remote file request (ADR-0029 결정 4-7), with
+    /// the function that produced it. `None` for every non-file action, and
+    /// for a file request whose normalization failed or was skipped. A row
+    /// granting a file action only matches when this is `Some` and one of its
+    /// `paths` entries covers it (evaluation step ③-1); a trust role's file
+    /// grant ignores it (ADR-0045 결정 5).
+    pub canonical_path: Option<CanonicalPath<'a>>,
 }
 
 impl<'a> ResourceRef<'a> {
@@ -353,7 +372,43 @@ impl<'a> ResourceRef<'a> {
     /// ownership-aware ones (`Server::authorize_session_control`,
     /// `Server::handle_rfwd_close`) construct their `ResourceRef` this way.
     pub fn unowned(id: &'a str) -> Self {
-        Self { id, owner: None }
+        Self {
+            id,
+            owner: None,
+            canonical_path: None,
+        }
+    }
+
+    /// This resource with the canonical path of a file request attached.
+    /// Files have no qsh owner, so only the path is added (ADR-0029
+    /// 결정 4-7).
+    pub fn with_canonical_path(self, path: &'a Path, normalizer: &'a dyn Normalizer) -> Self {
+        Self {
+            canonical_path: Some(CanonicalPath { path, normalizer }),
+            ..self
+        }
+    }
+}
+
+/// A file request's canonical path plus the normalization function that
+/// produced it (ADR-0029 결정 4-4·6-2). The evaluator normalizes each `paths`
+/// entry of a candidate row with the very same function, per request, so the
+/// request and the entries always meet in one form; an entry that cannot be
+/// normalized covers nothing.
+#[derive(Clone, Copy)]
+pub struct CanonicalPath<'a> {
+    /// The request's canonical path.
+    pub path: &'a Path,
+    /// The normalizer that produced [`Self::path`] and normalizes `paths`
+    /// entries.
+    pub normalizer: &'a dyn Normalizer,
+}
+
+impl fmt::Debug for CanonicalPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CanonicalPath")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 

@@ -162,6 +162,11 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.check.allow_by_role.json",
     "acl.check.missing_policy_role.json",
     "acl.show.with_role.json",
+    // The golden test that exercises these two is `cfg(unix)` (path shaping
+    // and the `paths` notation are host-specific), so on other targets this
+    // list only proves the files exist.
+    "acl.check.path.json",
+    "acl.show.with_paths.json",
     "error.RESOURCE_EXHAUSTED.json",
     "service.install.json",
     "service.status.json",
@@ -2271,4 +2276,97 @@ fn capabilities_host_form_reports_the_negotiated_set() {
         .map(|v| v.as_str().expect("capability is a string").to_string())
         .collect();
     assert_eq!(reported, local, "{response}");
+}
+
+#[cfg(unix)]
+/// Drop the file actions from every `effective_actions` array. A file action
+/// is in the set only once the always-deny gate stops covering it
+/// (ADR-0029 결정 19), so a fixture that predates that comparison must not
+/// depend on it; `matching_rules[].paths` and `acl check --path` carry the
+/// `paths` contract.
+fn strip_file_effective_actions(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(actions)) = map.get_mut("effective_actions") {
+                actions.retain(|a| !a.as_str().is_some_and(|a| a.starts_with("file.")));
+            }
+            map.values_mut().for_each(strip_file_effective_actions);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_file_effective_actions),
+        _ => {}
+    }
+}
+
+#[cfg(unix)]
+/// [`check`] with [`strip_file_effective_actions`] applied to both sides.
+fn check_ignoring_file_effective_actions(name: &str, envelope: Value) {
+    if updating() {
+        let mut actual = fixtures::normalize(envelope);
+        strip_file_effective_actions(&mut actual);
+        check(name, actual);
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_file_effective_actions(&mut actual);
+    strip_file_effective_actions(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (file effective actions ignored).\n\
+         Fixtures are append-only: if this is an intentional contract change \
+         it needs a new /v2 (docs/CLI.md §10)."
+    );
+}
+
+/// `acl.toml` row `paths` (ADR-0029 결정 4·19, `docs/CLI.md` §6.15·§6.19).
+/// Unix-only: path shaping and normalization are, and the `paths` notation
+/// is host-specific. The `acl check --path /` request is covered by no row,
+/// so its `deny` holds before and after the always-deny gate stops covering
+/// `file.read`; the `acl show` golden ignores the file actions in
+/// `effective_actions` for the same reason.
+#[cfg(unix)]
+#[test]
+fn golden_acl_paths_fixtures() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"file.read\"]\n\
+         paths = [\"/srv/share\", \"/var/log\"]\n\n\
+         [[acl]]\nprincipal = \"device:laptop\"\nallow = [\"file.write\"]\n\n\
+         [[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+
+    let (code, checked) = sandbox.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:laptop",
+        "--action",
+        "file.read",
+        "--path",
+        "/",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["data"]["decision"], "deny", "{checked}");
+    assert_eq!(checked["data"]["path"], "/", "{checked}");
+    assert_eq!(checked["data"]["canonical_path"], "/", "{checked}");
+    check("acl.check.path.json", checked);
+
+    let (code, shown) = sandbox.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    let rules = &shown["data"]["matching_rules"];
+    assert_eq!(
+        rules[0]["paths"],
+        serde_json::json!(["/srv/share", "/var/log"]),
+        "{shown}"
+    );
+    assert!(rules[0].get("file_paths_missing").is_none(), "{shown}");
+    assert!(rules[1].get("paths").is_none(), "{shown}");
+    assert_eq!(rules[1]["file_paths_missing"], true, "{shown}");
+    assert!(rules[2].get("paths").is_none(), "{shown}");
+    assert!(rules[2].get("file_paths_missing").is_none(), "{shown}");
+    check_ignoring_file_effective_actions("acl.show.with_paths.json", shown);
 }

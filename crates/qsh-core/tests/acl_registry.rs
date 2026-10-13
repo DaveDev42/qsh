@@ -1020,6 +1020,7 @@ mod dod2_audit {
         let policy = Policy {
             rules: vec![
                 Rule {
+                    paths: None,
                     principal: Principal::Device("owner".into()).to_string(),
                     auth_path: AuthPath::Pin,
                     allow: vec![
@@ -1029,6 +1030,7 @@ mod dod2_audit {
                     scope: Scope::Owned,
                 },
                 Rule {
+                    paths: None,
                     principal: Principal::Device("intruder".into()).to_string(),
                     auth_path: AuthPath::Pin,
                     allow: vec![ActionPattern::Exact(Action::SessionControl)],

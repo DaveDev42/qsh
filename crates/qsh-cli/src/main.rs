@@ -544,6 +544,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 auth_path: args.auth_path.clone(),
                 owner: args.owner.clone(),
                 owner_auth_path: args.owner_auth_path.clone(),
+                path: args.path.clone(),
             }),
             human::print_acl_check,
         ),

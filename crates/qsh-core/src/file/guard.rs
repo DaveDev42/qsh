@@ -428,6 +428,17 @@ fn is_under(path: &Path, root: &Path, fold: bool) -> bool {
     })
 }
 
+/// [`is_under`] for the ACL evaluator's `paths` match (ADR-0029 결정 4-4): a
+/// canonical request path against a canonical `paths` entry, component by
+/// component. `fold` is true only where the entry and the request may
+/// differ in case yet name the same file (Windows, M20); on macOS the two
+/// sides are both the on-disk spelling, so `paths` matching stays
+/// case-sensitive there while the protected-set comparison folds
+/// (ADR-0029 결정 23).
+pub(crate) fn path_within(path: &Path, root: &Path, fold: bool) -> bool {
+    is_under(path, root, fold)
+}
+
 fn same_path(a: &Path, b: &Path, fold: bool) -> bool {
     a.components().count() == b.components().count() && is_under(a, b, fold)
 }

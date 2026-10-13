@@ -7,6 +7,7 @@ use crate::trust::{PinRole, role_of_pin};
 
 fn rule(principal: &str, auth_path: AuthPath, allow: Vec<ActionPattern>) -> Rule {
     Rule {
+        paths: None,
         principal: principal.to_string(),
         auth_path,
         allow,
@@ -241,6 +242,7 @@ fn scope_owned_denies_a_request_from_a_different_owner() {
         None,
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&someone_elses_session),
         },
@@ -270,6 +272,7 @@ fn scope_owned_allows_the_resources_own_owner() {
         None,
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&daves_own_key),
         },
@@ -301,6 +304,7 @@ fn scope_any_admits_a_foreign_owner() {
         None,
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&someone_elses_session),
         },
@@ -340,6 +344,7 @@ fn scope_owned_does_not_let_a_different_auth_path_assert_the_same_principals_own
         None,
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&real_owner_key),
         },
@@ -438,6 +443,7 @@ fn arb_rule() -> impl Strategy<Value = Rule> {
         prop_oneof![Just(Scope::Owned), Just(Scope::Any)],
     )
         .prop_map(|(principal, auth_path, allow, scope)| Rule {
+            paths: None,
             principal,
             auth_path,
             allow,
@@ -596,7 +602,7 @@ proptest! {
             _ => Some(foreign_owner),
         };
         let resource = match owner.as_deref() {
-            Some(owner) => ResourceRef { id: "r", owner: Some(owner) },
+            Some(owner) => ResourceRef { id: "r", owner: Some(owner), canonical_path: None },
             None => ResourceRef::unowned("r"),
         };
         // The role dimension (PLAN M15 Step 4): the pin of `principal`'s
@@ -871,4 +877,230 @@ fn matching_rules_lists_rows_in_file_order_and_renders_patterns_as_written() {
     let rendered: Vec<String> = rows[0].1.allow.iter().map(ActionPattern::render).collect();
     assert_eq!(rendered, ["exec.run", "forward.*"]);
     assert!(policy.matching_rules(&principal, AuthPath::Ca).is_empty());
+}
+
+// ---------------------------------------------------------------
+// `paths` (ADR-0029 결정 4): evaluation step ③-1 and the ground helper.
+// The ① gate still denies `file.*` in `Policy::decide`, so these go through
+// `decide_past_gate`, the helper `decide` delegates to.
+// ---------------------------------------------------------------
+
+mod file_paths {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::file::guard::{NormalizeError, Normalizer};
+
+    /// Returns its input unchanged, so a test states the canonical form of
+    /// both the request and the entries directly.
+    struct Identity;
+
+    impl Normalizer for Identity {
+        fn normalize(&self, absolute: &Path) -> Result<PathBuf, NormalizeError> {
+            Ok(absolute.to_path_buf())
+        }
+    }
+
+    /// Normalizes nothing: every entry is unresolvable.
+    struct Refusing;
+
+    impl Normalizer for Refusing {
+        fn normalize(&self, _: &Path) -> Result<PathBuf, NormalizeError> {
+            Err(NormalizeError::Io(std::io::ErrorKind::PermissionDenied))
+        }
+    }
+
+    fn file_rule(paths: Option<&[&str]>) -> Rule {
+        Rule {
+            paths: paths.map(|p| p.iter().map(|s| (*s).to_string()).collect()),
+            principal: "user:dave".to_string(),
+            auth_path: AuthPath::Pin,
+            allow: vec![ActionPattern::Prefix(family_prefix(Action::FileRead))],
+            scope: Scope::Owned,
+        }
+    }
+
+    fn decide_for(
+        policy: &Policy,
+        action: Action,
+        request: &str,
+        normalizer: &dyn Normalizer,
+    ) -> Verdict {
+        let path = PathBuf::from(request);
+        policy.decide_past_gate(
+            &Principal::User("dave".into()),
+            AuthPath::Pin,
+            None,
+            action,
+            ResourceRef::unowned(request).with_canonical_path(&path, normalizer),
+        )
+    }
+
+    #[test]
+    fn file_paths_match_component_wise() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/srv/share"]))],
+        };
+        for (request, allowed) in [
+            ("/srv/share", true),
+            ("/srv/share/a.txt", true),
+            ("/srv/share/deep/er/a.txt", true),
+            ("/srv/shared/a.txt", false),
+            ("/srv/shar", false),
+            ("/srv", false),
+            ("/", false),
+            ("/other/srv/share/a.txt", false),
+        ] {
+            let verdict = decide_for(&policy, Action::FileRead, request, &Identity);
+            assert_eq!(verdict.is_allow(), allowed, "{request}");
+            assert_eq!(verdict.rule, allowed.then_some(0), "{request}");
+        }
+    }
+
+    #[test]
+    fn file_paths_root_entry_covers_everything() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/"]))],
+        };
+        assert!(decide_for(&policy, Action::FileWrite, "/etc/passwd", &Identity).is_allow());
+    }
+
+    #[test]
+    fn file_paths_any_entry_of_the_row_may_cover() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/a", "/b"]))],
+        };
+        assert!(decide_for(&policy, Action::FileRead, "/b/x", &Identity).is_allow());
+        assert!(!decide_for(&policy, Action::FileRead, "/c/x", &Identity).is_allow());
+    }
+
+    #[test]
+    fn file_row_without_paths_grants_no_file_access() {
+        let policy = Policy {
+            rules: vec![file_rule(None)],
+        };
+        assert!(!decide_for(&policy, Action::FileRead, "/srv/share/a", &Identity).is_allow());
+        let principal = Principal::User("dave".into());
+        assert!(!policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
+    }
+
+    #[test]
+    fn file_request_without_a_canonical_path_matches_no_row() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/"]))],
+        };
+        let verdict = policy.decide_past_gate(
+            &Principal::User("dave".into()),
+            AuthPath::Pin,
+            None,
+            Action::FileRead,
+            ResourceRef::unowned("/srv"),
+        );
+        assert!(!verdict.is_allow());
+    }
+
+    #[test]
+    fn file_entry_that_cannot_be_normalized_covers_nothing() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/srv/share"]))],
+        };
+        assert!(!decide_for(&policy, Action::FileRead, "/srv/share/a", &Refusing).is_allow());
+    }
+
+    #[test]
+    fn file_paths_never_narrow_a_non_file_action() {
+        let mut rule = file_rule(Some(&["/srv"]));
+        rule.allow = vec![ActionPattern::Exact(Action::ExecRun)];
+        let policy = Policy { rules: vec![rule] };
+        let verdict = policy.decide(
+            &Principal::User("dave".into()),
+            AuthPath::Pin,
+            None,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert!(verdict.is_allow());
+    }
+
+    #[test]
+    fn file_paths_pick_the_first_row_whose_paths_cover() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/a"])), file_rule(Some(&["/b"]))],
+        };
+        let verdict = decide_for(&policy, Action::FileRead, "/b/x", &Identity);
+        assert_eq!(verdict.rule, Some(1));
+    }
+
+    #[test]
+    fn file_grant_basis_needs_a_selecting_row_that_names_the_action_and_has_paths() {
+        let principal = Principal::User("dave".into());
+        let with = Policy {
+            rules: vec![file_rule(Some(&["/srv"]))],
+        };
+        assert!(with.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
+        assert!(with.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileWrite));
+        assert!(!with.file_grant_basis(&principal, AuthPath::Ca, None, Action::FileRead));
+        assert!(!with.file_grant_basis(
+            &Principal::User("other".into()),
+            AuthPath::Pin,
+            None,
+            Action::FileRead
+        ));
+        let mut read_only = file_rule(Some(&["/srv"]));
+        read_only.allow = vec![ActionPattern::Exact(Action::FileRead)];
+        let policy = Policy {
+            rules: vec![read_only],
+        };
+        assert!(policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
+        assert!(!policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileWrite));
+    }
+
+    #[test]
+    fn role_grant_of_a_file_action_ignores_paths() {
+        // ADR-0045 결정 5: the role stage never looks at `paths`.
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/srv"]))],
+        };
+        let device = Principal::Device("laptop".into());
+        let path = PathBuf::from("/elsewhere/a.txt");
+        let verdict = policy.decide_past_gate(
+            &device,
+            AuthPath::Pin,
+            Some(TrustRole::Full),
+            Action::FileRead,
+            ResourceRef::unowned("x").with_canonical_path(&path, &Identity),
+        );
+        assert!(verdict.is_allow());
+        assert_eq!(verdict.role, Some(TrustRole::Full));
+        assert!(policy.file_grant_basis(
+            &device,
+            AuthPath::Pin,
+            Some(TrustRole::Full),
+            Action::FileRead
+        ));
+        // `exec` grants no file action and `auth_path = ca` never carries a role.
+        assert!(!policy.file_grant_basis(
+            &device,
+            AuthPath::Pin,
+            Some(TrustRole::Exec),
+            Action::FileRead
+        ));
+        assert!(!policy.file_grant_basis(
+            &device,
+            AuthPath::Ca,
+            Some(TrustRole::Full),
+            Action::FileRead
+        ));
+    }
+
+    #[test]
+    fn effective_actions_keeps_the_gate_in_front_of_file_actions() {
+        let policy = Policy {
+            rules: vec![file_rule(Some(&["/srv"]))],
+        };
+        let actions =
+            policy.effective_actions(&Principal::User("dave".into()), AuthPath::Pin, None);
+        assert!(!actions.contains(&Action::FileRead));
+        assert!(!actions.contains(&Action::FileWrite));
+    }
 }

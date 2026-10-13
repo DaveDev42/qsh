@@ -549,6 +549,7 @@ impl Ops {
                 auth_path: Some("pin".to_string()),
                 owner: None,
                 owner_auth_path: None,
+                path: None,
             })?);
         }
         let loaded = results.first().is_some_and(|r| r.policy.loaded);

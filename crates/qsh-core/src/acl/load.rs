@@ -37,6 +37,7 @@ use crate::config::Paths;
 use crate::ops::OpError;
 use crate::trust::{SharedTrustStore, TrustStore};
 
+use super::paths::{PathStyle, validate_entry};
 use super::policy::FamilyPrefix;
 use super::{
     Action, ActionPattern, Authorizer, DenyAll, Policy, RoleResolvingAuthorizer, Rule, Scope,
@@ -71,6 +72,9 @@ mod caps {
     /// bytes); longest legitimate pattern is a family wildcard like
     /// `session.*` (10 bytes).
     pub(super) const MAX_PATTERN_LEN: usize = 128;
+    /// Most `paths` entries one row may carry (ADR-0029 결정 4-3). Each is
+    /// normalized per request, so the cap bounds that cost too.
+    pub(super) const MAX_PATHS_PER_RULE: usize = 64;
 }
 
 /// The outcome of loading `acl.toml`. Three states, deliberately explicit
@@ -456,6 +460,12 @@ pub struct PinnedPrincipalIndex {
     /// [`crate::doctor::ACL_FORWARD_SOCKS_INEFFECTIVE`]'s doc for the
     /// literal-principal-string matching limitation this implies.
     forward_socks_ineffective_rows: Vec<(u32, AuthPath)>,
+    /// Every row that names a file action and has no `paths`, as `(array
+    /// index, auth_path, device name)`. The device name is the `<name>` of a
+    /// pin-path `device:<name>` principal and `None` otherwise;
+    /// `acl_file_paths_missing` (ADR-0029 결정 19) needs it to stay silent
+    /// when the same-named pin has role `full`, and never prints it.
+    file_paths_missing_rows: Vec<(u32, AuthPath, Option<String>)>,
 }
 
 impl PinnedPrincipalIndex {
@@ -500,6 +510,19 @@ impl PinnedPrincipalIndex {
                 })
                 .map(|(index, rule)| (index as u32, rule.auth_path))
                 .collect(),
+            file_paths_missing_rows: policy
+                .rules
+                .iter()
+                .enumerate()
+                .filter(|(_, rule)| rule.paths.is_none() && rule.names_file_action())
+                .map(|(index, rule)| {
+                    let device = (rule.auth_path == AuthPath::Pin)
+                        .then(|| rule.principal.strip_prefix("device:"))
+                        .flatten()
+                        .map(str::to_string);
+                    (index as u32, rule.auth_path, device)
+                })
+                .collect(),
         }
     }
 
@@ -540,6 +563,14 @@ impl PinnedPrincipalIndex {
     /// `crate::ops::doctor`'s finding `detail` must not echo it).
     pub fn forward_socks_ineffective_rows(&self) -> &[(u32, AuthPath)] {
         &self.forward_socks_ineffective_rows
+    }
+
+    /// `(array index, auth_path, device name)` of every row that names a file
+    /// action and has no `paths` (`acl_file_paths_missing`, ADR-0029 결정 19).
+    /// The device name is for the caller's role lookup only; a finding's
+    /// `detail` carries the index and `auth_path`, never the name.
+    pub fn file_paths_missing_rows(&self) -> &[(u32, AuthPath, Option<String>)] {
+        &self.file_paths_missing_rows
     }
 }
 
@@ -774,6 +805,8 @@ struct RawRule {
     allow: Vec<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    paths: Option<Vec<String>>,
 }
 
 /// A fixed, single-line reason for a `toml::de::Error` — never
@@ -906,12 +939,58 @@ fn parse_rule(index: usize, raw: RawRule) -> Result<Rule, String> {
             ));
         }
     };
-    Ok(Rule {
+    let mut rule = Rule {
         principal: raw.principal,
         auth_path,
         allow,
         scope,
-    })
+        paths: None,
+    };
+    rule.paths = parse_paths(index, &rule, raw.paths)?;
+    if rule.paths.is_none() && rule.names_file_action() {
+        // The row loads, its other actions work, and it grants no file
+        // access (ADR-0029 결정 4-4). One structural line: the row index
+        // only, never the principal.
+        tracing::warn!(
+            target: "qsh::acl",
+            rule = index,
+            "acl.toml rule names a file action but has no paths; it grants no file access"
+        );
+    }
+    Ok(rule)
+}
+
+/// Validate a row's optional `paths` (ADR-0029 결정 4-3·4-5). Every violation
+/// invalidates the whole file, and the message names the row and the entry
+/// index but never the entry's text.
+fn parse_paths(
+    index: usize,
+    rule: &Rule,
+    raw: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(entries) = raw else {
+        return Ok(None);
+    };
+    if !rule.is_file_only() {
+        return Err(format!(
+            "rule {index}: paths applies only to file actions; put them in a row of their own"
+        ));
+    }
+    if entries.is_empty() {
+        return Err(format!("rule {index}: paths must not be empty"));
+    }
+    if entries.len() > caps::MAX_PATHS_PER_RULE {
+        return Err(format!(
+            "rule {index}: {} paths exceeds the {}-entry limit",
+            entries.len(),
+            caps::MAX_PATHS_PER_RULE
+        ));
+    }
+    for (item, entry) in entries.iter().enumerate() {
+        validate_entry(entry, PathStyle::HOST)
+            .map_err(|why| format!("rule {index}: paths[{item}] {}", why.reason()))?;
+    }
+    Ok(Some(entries))
 }
 
 /// Parse one `allow` entry: an exact match against [`Action::ALL`], or a

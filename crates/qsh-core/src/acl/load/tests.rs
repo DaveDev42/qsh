@@ -511,7 +511,7 @@ fn capture_qsh_acl_events(text: &str) -> (PolicyLoad, Vec<(String, String)>) {
 #[test]
 fn always_denied_named_action_warns_with_structural_fields_only() {
     let (load, events) = capture_qsh_acl_events(
-        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.socks\", \"file.read\"]\n",
+        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.socks\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\npaths = [\"/srv\"]\n",
     );
     assert!(matches!(load, PolicyLoad::Loaded(_)));
     assert_eq!(
@@ -530,7 +530,7 @@ fn always_denied_named_action_warns_with_structural_fields_only() {
 #[test]
 fn wildcard_covering_an_always_denied_action_emits_no_warning() {
     let (load, events) = capture_qsh_acl_events(
-        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.*\", \"file.*\"]\n",
+        "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.*\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.*\"]\npaths = [\"/srv\"]\n",
     );
     assert!(matches!(load, PolicyLoad::Loaded(_)));
     assert!(
@@ -1184,4 +1184,177 @@ fn load_or_deny_with_index_returns_the_empty_index_on_a_missing_or_invalid_polic
         "an unparseable acl.toml must diagnose"
     );
     assert!(!index.names_device("anything"));
+}
+
+// ---------------------------------------------------------------
+// `paths` (ADR-0029 결정 4-3·4-5): the row key's grammar and the one
+// warning for a file row without it. The notation is host-specific, so the
+// POSIX shapes run on unix only (the Windows grammar is unit-tested in
+// `acl/paths.rs`).
+// ---------------------------------------------------------------
+
+#[cfg(unix)]
+mod file_paths {
+    use super::*;
+
+    fn load_text(text: &str) -> PolicyLoad {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), text);
+        PolicySource::load(&paths_with(dir.path()))
+    }
+
+    fn file_row(paths_line: &str) -> String {
+        format!("[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\n{paths_line}\n")
+    }
+
+    #[test]
+    fn file_row_with_paths_loads_and_keeps_the_entries_as_written() {
+        let load = load_text(&file_row("paths = [\"/srv/share\", \"/\", \"/var/log\"]"));
+        let policy = load.as_loaded().expect("must load");
+        assert_eq!(
+            policy.rules[0].paths.as_deref(),
+            Some(
+                &[
+                    "/srv/share".to_string(),
+                    "/".to_string(),
+                    "/var/log".to_string()
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn family_wildcard_file_row_may_carry_paths() {
+        let load = load_text(
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.*\"]\npaths = [\"/srv\"]\n",
+        );
+        assert!(load.as_loaded().is_some());
+    }
+
+    #[test]
+    fn row_without_paths_loads_with_none() {
+        let load = load_text("[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n");
+        assert!(
+            load.as_loaded().expect("must load").rules[0]
+                .paths
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn paths_on_a_row_with_a_non_file_action_invalidates_the_file() {
+        for allow in [
+            "[\"exec.run\"]",
+            "[\"file.read\", \"exec.run\"]",
+            "[\"*.run\"]",
+        ] {
+            let load = load_text(&format!(
+                "[[acl]]\nprincipal = \"user:dave\"\nallow = {allow}\npaths = [\"/srv\"]\n"
+            ));
+            assert!(matches!(load, PolicyLoad::Invalid(_)), "{allow}");
+        }
+        let load = load_text(
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.*\"]\npaths = [\"/srv\"]\n",
+        );
+        assert!(matches!(load, PolicyLoad::Invalid(_)));
+    }
+
+    #[test]
+    fn empty_paths_invalidates_the_file() {
+        assert!(matches!(
+            load_text(&file_row("paths = []")),
+            PolicyLoad::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn paths_over_the_entry_cap_invalidate_the_file_at_the_boundary() {
+        let entries = |n: usize| {
+            let list: Vec<String> = (0..n).map(|i| format!("\"/d{i}\"")).collect();
+            file_row(&format!("paths = [{}]", list.join(", ")))
+        };
+        assert!(load_text(&entries(64)).as_loaded().is_some());
+        assert!(matches!(load_text(&entries(65)), PolicyLoad::Invalid(_)));
+    }
+
+    #[test]
+    fn malformed_path_entries_invalidate_the_file() {
+        let too_long = format!("/{}", "a".repeat(4096));
+        for entry in [
+            "relative/dir",
+            "~/share",
+            "/srv/",
+            "//srv",
+            "/srv//share",
+            "/srv/./share",
+            "/srv/../etc",
+            "",
+            too_long.as_str(),
+        ] {
+            let load = load_text(&file_row(&format!("paths = [\"{entry}\"]")));
+            assert!(matches!(load, PolicyLoad::Invalid(_)), "{entry:?}");
+        }
+    }
+
+    #[test]
+    fn a_nul_in_a_path_entry_invalidates_the_file() {
+        let load = load_text(&file_row("paths = [\"/srv/\\u0000x\"]"));
+        assert!(matches!(load, PolicyLoad::Invalid(_)));
+    }
+
+    #[test]
+    fn a_path_entry_for_a_missing_directory_still_loads() {
+        let load = load_text(&file_row("paths = [\"/no/such/qsh-test-dir\"]"));
+        assert!(load.as_loaded().is_some());
+    }
+
+    #[test]
+    fn paths_errors_name_the_row_and_item_but_never_the_entry_text() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(
+            dir.path(),
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\n\
+             [[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\n\
+             paths = [\"/ok\", \"/SENTINEL-ENTRY/../x\"]\n",
+        );
+        let message = invalid_message(dir.path());
+        assert!(message.contains("rule 1"), "{message}");
+        assert!(message.contains("paths[1]"), "{message}");
+        assert!(!message.contains("SENTINEL"), "{message}");
+        assert!(!message.contains("user:dave"), "{message}");
+        assert!(!message.contains('\n'), "{message}");
+    }
+
+    #[test]
+    fn file_row_without_paths_warns_once_with_the_row_index_only() {
+        let (load, events) = capture_qsh_acl_events(
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\n\
+             [[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.*\"]\n",
+        );
+        assert!(load.as_loaded().is_some());
+        assert_eq!(events.len(), 1, "{events:?}");
+        let fields = &events[0].1;
+        assert!(fields.contains("no paths"), "{fields}");
+        assert!(fields.contains("rule=1"), "{fields}");
+        assert!(!fields.contains("user:dave"), "{fields}");
+    }
+
+    #[test]
+    fn index_lists_the_file_rows_without_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(
+            dir.path(),
+            "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"file.read\"]\n\n\
+             [[acl]]\nprincipal = \"device:desk\"\nallow = [\"file.read\"]\npaths = [\"/srv\"]\n\n\
+             [[acl]]\nprincipal = \"device:phone\"\nauth_path = \"ca\"\nallow = [\"file.*\"]\n",
+        );
+        let (_, _, index) =
+            load_or_deny_with_index(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
+        let rows: Vec<(u32, AuthPath)> = index
+            .file_paths_missing_rows()
+            .iter()
+            .map(|(i, a, _)| (*i, *a))
+            .collect();
+        assert_eq!(rows, [(0, AuthPath::Pin), (2, AuthPath::Ca)]);
+    }
 }
