@@ -141,15 +141,18 @@ impl Server {
         // No request id: a stream is not a control-stream request, so this
         // is a connection-level record (`request_id: "-"`), same as
         // `reverse::admit`.
-        let recorded = self.audit.record(&AuditRecord::connection_level(
-            &ctx.principal,
-            ctx.auth_path,
-            action,
-            resource,
-            verdict.decision,
-            verdict.rule,
-            ctx.peer_addr,
-        ));
+        let recorded = self.audit.record(
+            &AuditRecord::connection_level(
+                &ctx.principal,
+                ctx.auth_path,
+                action,
+                resource,
+                verdict.decision,
+                verdict.rule,
+                ctx.peer_addr,
+            )
+            .with_verdict_role(verdict.role),
+        );
         // Fail-closed (`CLAUDE.md` "never create a resource before
         // authorization succeeds"): an unrecorded allow is treated as a
         // deny, same as an unrecorded allow at every other choke point.
@@ -166,16 +169,19 @@ impl Server {
         let verdict =
             self.authorizer
                 .check(&ctx.requester(), action, ResourceRef::unowned(resource));
-        let recorded = self.audit.record(&AuditRecord::now(
-            request_id,
-            &ctx.principal,
-            ctx.auth_path,
-            action,
-            resource,
-            verdict.decision,
-            verdict.rule,
-            ctx.peer_addr,
-        ));
+        let recorded = self.audit.record(
+            &AuditRecord::now(
+                request_id,
+                &ctx.principal,
+                ctx.auth_path,
+                action,
+                resource,
+                verdict.decision,
+                verdict.rule,
+                ctx.peer_addr,
+            )
+            .with_verdict_role(verdict.role),
+        );
         // Fail-closed: an allow verdict that failed to make it into the
         // audit log is denied — never create the resource this authorizes
         // without a durable record of having authorized it.
@@ -248,16 +254,19 @@ impl Server {
         resource: ResourceRef<'_>,
     ) -> Result<(), Box<ControlMessage>> {
         let verdict = self.authorizer.check(&ctx.requester(), action, resource);
-        let recorded = self.audit.record(&AuditRecord::now(
-            request_id,
-            &ctx.principal,
-            ctx.auth_path,
-            action,
-            resource.id,
-            verdict.decision,
-            verdict.rule,
-            ctx.peer_addr,
-        ));
+        let recorded = self.audit.record(
+            &AuditRecord::now(
+                request_id,
+                &ctx.principal,
+                ctx.auth_path,
+                action,
+                resource.id,
+                verdict.decision,
+                verdict.rule,
+                ctx.peer_addr,
+            )
+            .with_verdict_role(verdict.role),
+        );
         // Fail-closed: this is the terminal record for the combined
         // policy + ownership decision — an allow that failed to land in
         // the audit log flips to denied, same as `Self::authorize`.

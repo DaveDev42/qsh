@@ -636,6 +636,7 @@ impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
                 qsh_core::acl::Decision::Deny
             },
             rule: None,
+            role: None,
         }
     }
 }

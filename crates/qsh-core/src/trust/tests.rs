@@ -1109,8 +1109,7 @@ fn peer_entry(name: &str, seed: &[u8], role: Option<&str>) -> String {
 
 /// ADR-0045 결정 4's inputs to ⓡ: the role comes from the pin of the
 /// requester's own name whose fingerprint equals the connection's, and from
-/// nothing else. PLAN M15 Step 3 only wires this lookup; the evaluator does
-/// not read it yet.
+/// nothing else. The evaluator consumes it as stage ⓡ (PLAN M15 Step 4).
 #[test]
 fn resolve_role_requires_a_current_pin_with_the_connections_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
@@ -1194,4 +1193,194 @@ fn resolve_role_follows_the_file_without_a_restart() {
     std::fs::write(&path, "").unwrap();
     assert_eq!(resolve(b"phone"), None);
     assert_eq!(resolve(b"phone-2"), None);
+}
+
+/// ADR-0045 결정 4: a reload that fails keeps the last good snapshot for pin
+/// authentication but grants no role until a reload succeeds. The test name
+/// is the pin for threat-model B ("a broken trust.toml keeps an old role
+/// alive").
+#[test]
+fn trust_store_reload_failure_suspends_role_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let good = peer_entry("phone", b"phone", Some("full"));
+    std::fs::write(&path, &good).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let resolve = || shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone"));
+    assert_eq!(resolve(), Some(TrustRole::Full));
+    assert!(!shared.roles_suspended());
+
+    // A hand edit that does not parse: pin authentication keeps working off
+    // the last good snapshot, the role does not.
+    std::fs::write(&path, "[[peer]]\nname = ").unwrap();
+    assert_eq!(resolve(), None, "a parse failure suspends the role");
+    assert!(shared.roles_suspended());
+    assert_eq!(
+        shared.lookup_pin(&fp(b"phone")),
+        Some(Principal::Device("phone".into())),
+        "pin authentication still uses the last good snapshot"
+    );
+
+    // A file that parses as TOML but carries an unknown role is a parse
+    // failure of the whole file too (ADR-0045 결정 1).
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("superuser"))).unwrap();
+    assert_eq!(resolve(), None);
+    assert!(shared.roles_suspended());
+
+    // Putting back exactly the previous good text clears the suspension:
+    // it differs from the failed text, so it goes through the reload.
+    std::fs::write(&path, &good).unwrap();
+    assert_eq!(resolve(), Some(TrustRole::Full));
+    assert!(!shared.roles_suspended());
+}
+
+#[test]
+fn trust_store_reload_failure_is_cleared_by_a_different_good_file_and_not_by_the_same_bad_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("full"))).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let resolve = || shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone"));
+
+    std::fs::write(&path, "not toml [[").unwrap();
+    // Asking again with the same broken text stays suspended (the failed
+    // text is remembered, so this is not re-parsed into a wrong answer).
+    for _ in 0..3 {
+        assert_eq!(resolve(), None);
+        assert!(shared.roles_suspended());
+    }
+
+    // A different good file with a narrower role replaces the snapshot.
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("read-only"))).unwrap();
+    assert_eq!(resolve(), Some(TrustRole::ReadOnly));
+    assert!(!shared.roles_suspended());
+}
+
+/// A read error other than "no such file" (here: `trust.toml` replaced by a
+/// directory) suspends roles the same way, and recovers when the file is
+/// readable again.
+#[test]
+fn trust_store_reload_failure_on_a_read_error_suspends_role_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let good = peer_entry("phone", b"phone", Some("full"));
+    std::fs::write(&path, &good).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let resolve = || shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone"));
+    assert_eq!(resolve(), Some(TrustRole::Full));
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(resolve(), None, "an unreadable trust.toml grants no role");
+    assert!(shared.roles_suspended());
+    assert_eq!(
+        shared.lookup_pin(&fp(b"phone")),
+        Some(Principal::Device("phone".into())),
+        "pin authentication keeps the last good snapshot"
+    );
+
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, &good).unwrap();
+    assert_eq!(resolve(), Some(TrustRole::Full));
+    assert!(!shared.roles_suspended());
+}
+
+/// A persistent read error warns once per failure episode, not on every
+/// decision, and a later episode (after a successful read) warns again.
+#[test]
+fn a_persistent_read_error_warns_once_per_episode() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let good = peer_entry("phone", b"phone", Some("full"));
+    std::fs::write(&path, &good).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let resolve = || shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone"));
+
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_ansi(false)
+        .finish();
+    let warnings = || {
+        String::from_utf8(buf.0.lock().unwrap().clone())
+            .unwrap()
+            .matches("failed to read the trust store")
+            .count()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        for _ in 0..5 {
+            assert_eq!(resolve(), None);
+        }
+        assert_eq!(warnings(), 1, "one warning for the whole episode");
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, &good).unwrap();
+        assert_eq!(resolve(), Some(TrustRole::Full));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(resolve(), None);
+        assert_eq!(warnings(), 2, "a new episode warns again");
+    });
+}
+
+/// A deleted `trust.toml` is an empty store, not a failed reload: nobody has
+/// a role and nothing is suspended (the file being absent is a state, not
+/// an error).
+#[test]
+fn a_missing_trust_toml_means_no_role_and_is_not_a_failed_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("full"))).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone")),
+        None
+    );
+    assert!(!shared.roles_suspended());
+}
+
+#[test]
+fn role_of_pin_is_none_when_suspended_whatever_the_pin_says() {
+    let pins = vec![PinRole {
+        name: "phone".into(),
+        fingerprint: fp(b"phone"),
+        role: Some(TrustRole::Full),
+    }];
+    let phone = Principal::Device("phone".into());
+    assert_eq!(
+        role_of_pin(&pins, false, &phone, AuthPath::Pin, peer_fp(b"phone")),
+        Some(TrustRole::Full)
+    );
+    assert_eq!(
+        role_of_pin(&pins, true, &phone, AuthPath::Pin, peer_fp(b"phone")),
+        None
+    );
 }

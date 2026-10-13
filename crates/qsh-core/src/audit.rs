@@ -196,6 +196,16 @@ impl AuditRecord {
 }
 
 impl AuditRecord {
+    /// Attach the trust role a verdict rested on (ADR-0045 결정 16). `None`
+    /// leaves the record untouched, so every row-based or denied decision
+    /// stays byte-identical to what it was before roles existed.
+    pub fn with_verdict_role(mut self, role: Option<crate::trust::TrustRole>) -> Self {
+        if role.is_some() {
+            self.role = role.map(|r| r.as_str().to_string());
+        }
+        self
+    }
+
     /// A connection-level authorization decision: allow *or* deny, but
     /// never a reply to a specific control-stream request, so `request_id`
     /// is `"-"` (the field doc above reserves that value for exactly this

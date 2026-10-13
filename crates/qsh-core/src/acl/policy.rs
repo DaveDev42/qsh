@@ -12,7 +12,20 @@
 //! 1. [`crate::acl::Action::is_always_denied`] — checked before any rule is
 //!    even looked at. `forward.socks`/`file.read`/`file.write` cannot be
 //!    granted by any rule, wildcard or exact (`allow = ["forward.*"]` does
-//!    not reach `forward.socks`).
+//!    not reach `forward.socks`), and no trust role reaches them either.
+//!
+//! Between ① and ② sits the trust-role stage ⓡ (ADR-0045 결정 4). Only a
+//! `device:<name>` principal that authenticated over [`AuthPath::Pin`]
+//! and whose connection fingerprint matches that pin's current
+//! fingerprint carries a role into [`Policy::decide`] (the caller
+//! resolves it: [`crate::trust::SharedTrustStore::resolve_role`]). If the
+//! role's row in [`crate::acl::ROLE_GRANTS`] lists the action, and for an
+//! owned-axis role (`tunnel`) the resource is the requester's own or
+//! ownerless, the verdict is allow with [`Verdict::rule`] `None` and
+//! [`Verdict::role`] set. Otherwise evaluation continues: the result is
+//! the union of role and rows, and when both would allow, the basis is
+//! the role.
+//!
 //! 2. Principal exact match (`Rule::principal` against the connection's
 //!    `Principal::to_string()`) **and** `auth_path` match. A rule that
 //!    omits `auth_path` defaults to [`AuthPath::Pin`] and so never matches
@@ -31,7 +44,11 @@
 
 use qsh_transport::{AuthPath, Principal};
 
-use super::{Action, Authorizer, Decision, Requester, ResourceRef, opener_key};
+use crate::trust::TrustRole;
+
+use super::{
+    Action, Authorizer, Decision, Requester, ResourceRef, RoleScope, opener_key, role_grant,
+};
 
 /// A validated action-family prefix — dot included, non-empty stem —
 /// the only value [`ActionPattern::Prefix`] can hold. `FamilyPrefix` is
@@ -147,26 +164,71 @@ pub struct Rule {
     pub scope: Scope,
 }
 
-/// The outcome of `Policy::decide`: an allow/deny [`Decision`] plus,
-/// when a rule matched, that rule's array index in [`Policy::rules`] —
-/// the same value [`crate::audit::AuditRecord::rule`] and `acl check`'s
-/// `rule` field carry (M5 plan §4.1 #8 (2473c88): `Authorizer::check` returns
-/// this instead of a bare [`Decision`] so the two never have to be
-/// computed twice).
+/// The outcome of `Policy::decide`: an allow/deny [`Decision`] plus the
+/// basis of an allow — the matching rule's array index in
+/// [`Policy::rules`] (the same value [`crate::audit::AuditRecord::rule`]
+/// and `acl check`'s `rule` field carry), or the trust role that granted it
+/// (M5 plan §4.1 #8 (2473c88): `Authorizer::check` returns this instead of a
+/// bare [`Decision`] so the two never have to be computed twice).
+///
+/// `rule` and `role` are never both `Some`: an allow is based on exactly
+/// one of them ([`Verdict::granted_by`]), and a deny carries neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Verdict {
     /// Allow or deny.
     pub decision: Decision,
-    /// Index of the matching rule; always `None` for a `Deny` (allow-only
-    /// grammar — nothing ever matches and still denies) and for the
-    /// always-deny gate (which never gets far enough to look at rules).
+    /// Index of the matching rule; `None` for a `Deny` (allow-only grammar
+    /// — nothing ever matches and still denies), for the always-deny gate
+    /// (which never gets far enough to look at rules) and for an allow
+    /// granted by a trust role.
     pub rule: Option<u32>,
+    /// The trust role that granted an allow (ADR-0045 결정 4: the role
+    /// stage wins when role and rows would both allow). `None` for every
+    /// deny and for an allow granted by a row.
+    pub role: Option<TrustRole>,
+}
+
+/// What an allow rests on ([`Verdict::granted_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantBasis {
+    /// The `[[acl]]` row at this array index.
+    Rule(u32),
+    /// The requester's trust role.
+    Role(TrustRole),
 }
 
 impl Verdict {
+    /// A deny: no rule, no role.
+    pub const DENY: Verdict = Verdict {
+        decision: Decision::Deny,
+        rule: None,
+        role: None,
+    };
+
+    /// An allow with no basis to report (the interim allow-all-pinned
+    /// stand-in and test doubles).
+    pub const ALLOW_UNBASED: Verdict = Verdict {
+        decision: Decision::Allow,
+        rule: None,
+        role: None,
+    };
+
     /// Shorthand for `self.decision.is_allow()`.
     pub fn is_allow(&self) -> bool {
         self.decision.is_allow()
+    }
+
+    /// The basis of an allow: a role if one granted it, else the matching
+    /// row. `None` for a deny and for an allow with no reportable basis.
+    pub fn granted_by(&self) -> Option<GrantBasis> {
+        if !self.is_allow() {
+            return None;
+        }
+        match (self.role, self.rule) {
+            (Some(role), _) => Some(GrantBasis::Role(role)),
+            (None, Some(index)) => Some(GrantBasis::Rule(index)),
+            (None, None) => None,
+        }
     }
 }
 
@@ -202,9 +264,11 @@ impl Policy {
     /// compiler-enforced fact rather than a code-review claim is to make it
     /// impossible for any second evaluator to exist outside this crate.
     /// With this narrowed, the entire workspace has exactly three call
-    /// sites of `Policy::decide`: [`Authorizer for Policy`](Policy)'s own
-    /// `check` (production enforcement, `crate::server::Server::authorize`
-    /// and siblings, via `Arc<dyn Authorizer>`), `crate::ops::acl::Ops::
+    /// sites of `Policy::decide`: [`Policy::check_with_role`] (production
+    /// enforcement, `crate::server::Server::authorize` and siblings, via
+    /// `Arc<dyn Authorizer>` and `RoleResolvingAuthorizer`; the bare
+    /// `Authorizer for Policy` impl is a rows-only caller of it),
+    /// `crate::ops::acl::Ops::
     /// acl_check`, and [`Policy::effective_actions`] (`acl show`,
     /// ADR-0025 decision 3) - all inside `qsh-core`, all calling this one
     /// method. A second, explaining-only evaluator would have to either
@@ -219,16 +283,40 @@ impl Policy {
         &self,
         principal: &Principal,
         auth_path: AuthPath,
+        role: Option<TrustRole>,
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
         // ① Always-deny gate — before any rule is looked at, so no
-        // wildcard or explicit exact pattern can reach it.
+        // wildcard or explicit exact pattern can reach it, and before the
+        // role stage, so no role can either.
         if action.is_always_denied() {
-            return Verdict {
-                decision: Decision::Deny,
-                rule: None,
-            };
+            return Verdict::DENY;
+        }
+        // ⓡ Role stage (ADR-0045 결정 4). The caller resolved `role` from
+        // the current pin; the preconditions that make a role count at all
+        // are re-checked here so a mis-resolved role can never reach an
+        // `auth_path = Ca`, `user:` or `fp:` principal.
+        if let Some(role) = role
+            && auth_path == AuthPath::Pin
+            && matches!(principal, Principal::Device(_))
+        {
+            let grant = role_grant(role);
+            if grant.actions.contains(&action) {
+                let scope_ok = match (grant.scope, resource.owner) {
+                    (RoleScope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
+                    (RoleScope::Owned, None)
+                    | (RoleScope::Any, _)
+                    | (RoleScope::NotApplicable, _) => true,
+                };
+                if scope_ok {
+                    return Verdict {
+                        decision: Decision::Allow,
+                        rule: None,
+                        role: Some(role),
+                    };
+                }
+            }
         }
         let principal_str = principal.to_string();
         for (index, rule) in self.rules.iter().enumerate() {
@@ -257,12 +345,32 @@ impl Policy {
             return Verdict {
                 decision: Decision::Allow,
                 rule: Some(index),
+                role: None,
             };
         }
-        Verdict {
-            decision: Decision::Deny,
-            rule: None,
-        }
+        Verdict::DENY
+    }
+
+    /// [`Authorizer::check`]'s body with the requester's resolved trust
+    /// role as an explicit input: the one place the production
+    /// [`crate::acl::RoleResolvingAuthorizer`] reaches [`Policy::decide`]
+    /// from. `role` is `None` for "no role" (which is also what an
+    /// unresolvable role, a suspended trust store and a mismatched
+    /// fingerprint all resolve to).
+    pub(crate) fn check_with_role(
+        &self,
+        requester: &Requester<'_>,
+        role: Option<TrustRole>,
+        action: Action,
+        resource: ResourceRef<'_>,
+    ) -> Verdict {
+        self.decide(
+            requester.principal,
+            requester.auth_path,
+            role,
+            action,
+            resource,
+        )
     }
 }
 
@@ -274,6 +382,9 @@ impl Policy {
     /// always-deny gate and every future evaluation step apply here
     /// automatically. Because `scope = "owned"` only filters when a
     /// resource has an owner, this set is a ceiling for owned resources.
+    ///
+    /// Rows only (no role input): `acl show` learns the role dimension with
+    /// PLAN M15 Step 6 (ADR-0045 결정 11).
     pub(crate) fn effective_actions(
         &self,
         principal: &Principal,
@@ -282,7 +393,7 @@ impl Policy {
         Action::ALL
             .into_iter()
             .filter(|&action| {
-                self.decide(principal, auth_path, action, ResourceRef::unowned(""))
+                self.decide(principal, auth_path, None, action, ResourceRef::unowned(""))
                     .is_allow()
             })
             .collect()
@@ -335,9 +446,11 @@ impl Authorizer for Policy {
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
-        // The connection fingerprint is not an input here yet: the role
-        // stage ⓡ that reads it lands in `decide` with PLAN M15 Step 4.
-        self.decide(requester.principal, requester.auth_path, action, resource)
+        // A bare `Policy` knows nothing of `trust.toml`, so this is the
+        // rows-only judgment (no role). Production wraps the policy in
+        // `RoleResolvingAuthorizer`, which resolves the requester's role
+        // and goes through `Policy::check_with_role` instead.
+        self.check_with_role(requester, None, action, resource)
     }
 }
 

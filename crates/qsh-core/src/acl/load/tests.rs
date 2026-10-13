@@ -95,6 +95,7 @@ fn empty_acl_array_loads_with_all_deny() {
     let verdict = policy.decide(
         &Principal::Device("laptop".into()),
         AuthPath::Pin,
+        None,
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
@@ -132,6 +133,7 @@ fn a_rule_naming_an_always_denied_action_exactly_still_loads() {
     let verdict = policy.decide(
         &Principal::User("dave".into()),
         AuthPath::Pin,
+        None,
         Action::ForwardSocks,
         ResourceRef::unowned("x"),
     );
@@ -664,28 +666,63 @@ fn owner_only_acl_toml_does_not_warn() {
 // ---------------------------------------------------------------
 
 #[test]
-fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
+fn load_or_deny_on_missing_file_prints_one_informational_line_and_keeps_the_missing_code() {
     let dir = tempfile::tempdir().unwrap();
     let (authorizer, diag) =
         load_or_deny(&paths_with(dir.path()), Role::Serve, open_trust(dir.path()));
+    // No rows and no role pin: still a deny.
     let verdict = authorizer.check(
         &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
         Action::ExecRun,
         ResourceRef::unowned("exec"),
     );
-    assert_eq!(verdict.decision, Decision::Deny);
+    assert_eq!(verdict, crate::acl::Verdict::DENY);
     let diag = diag.expect("a missing acl.toml must produce a diagnostic");
     assert_eq!(diag.code, ACL_POLICY_MISSING_CODE);
     assert_eq!(diag.path, paths_with(dir.path()).acl_file());
     assert!(diag.detail.is_none());
+
+    // ADR-0045 결정 13: the startup banner is one line, not the error
+    // block. It names the code word and the path, says roles alone
+    // authorize, and does not claim that every request is denied (a role
+    // can be granted without a restart).
     let rendered = diag.render();
-    assert!(rendered.contains(ACL_POLICY_MISSING_CODE));
-    assert!(rendered.contains(ErrorCode::ConfigError.as_str()));
-    assert!(rendered.contains("[[acl]]"));
+    assert!(!rendered.contains('\n'), "one line only: {rendered:?}");
+    assert!(rendered.starts_with(ACL_STARTUP_MISSING_LINE), "{rendered}");
+    assert!(rendered.contains(ACL_POLICY_MISSING_CODE), "{rendered}");
+    assert!(
+        rendered.contains(&paths_with(dir.path()).acl_file().display().to_string()),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(ACL_STARTUP_ROLES_ONLY_CLAUSE),
+        "{rendered}"
+    );
+    assert!(rendered.contains("qsh trust list"), "{rendered}");
+    for absent in [
+        ACL_STARTUP_HEADLINE,
+        ACL_STARTUP_DENIED_CLAUSE,
+        ACL_STARTUP_NO_AUTOGEN,
+        ACL_STARTUP_CHECK_HINT,
+        ErrorCode::ConfigError.as_str(),
+        "[[acl]]",
+    ] {
+        assert!(
+            !rendered.contains(absent),
+            "the informational line must not carry the error block's {absent:?}: {rendered}"
+        );
+    }
+
+    // The block form survives for `qsh doctor`'s `acl_policy_missing`
+    // finding (it is only reported when nothing else authorizes either).
+    let block = diag.render_block();
+    assert!(block.contains(ACL_POLICY_MISSING_CODE));
+    assert!(block.contains(ErrorCode::ConfigError.as_str()));
+    assert!(block.contains("[[acl]]"));
     // The other half of the F4 L6 gate (`acl_docs.rs` pins the docs to
-    // these consts): pin `render()` itself to them too, so the banner
-    // cannot silently stop emitting a fragment the docs still quote
-    // verbatim as its wording.
+    // these consts): pin the block itself to them too, so it cannot
+    // silently stop emitting a fragment the docs still quote verbatim as
+    // its wording.
     for fragment in [
         ACL_STARTUP_HEADLINE,
         ACL_STARTUP_DENIED_CLAUSE,
@@ -693,8 +730,8 @@ fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
         ACL_STARTUP_CHECK_HINT,
     ] {
         assert!(
-            rendered.contains(fragment),
-            "render() must emit {fragment:?} (docs quote it as the banner's wording)"
+            block.contains(fragment),
+            "render_block() must emit {fragment:?} (docs quote it as the banner's wording)"
         );
     }
 }

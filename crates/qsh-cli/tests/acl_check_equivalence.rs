@@ -4,9 +4,9 @@
 //! `Server::authorize`/`authorize_owned` (`crates/qsh-core/src/server/
 //! mod.rs`) call the exact same `pub(crate) fn decide`
 //! (`crates/qsh-core/src/acl/policy.rs`) — that narrowing is DoD 1's
-//! *structural* half (exactly three call sites remain: `impl Authorizer for
-//! Policy::check`, `Ops::acl_check` and `Policy::effective_actions`, which
-//! `acl show` uses, all inside `qsh-core`; a second, explaining-only
+//! *structural* half (exactly three call sites remain: `Policy::check_with_role`
+//! (what the `Authorizer` impls reach), `Ops::acl_check` and
+//! `Policy::effective_actions`, which `acl show` uses, all inside `qsh-core`; a second, explaining-only
 //! evaluator has nowhere left to live without showing up next to them in
 //! `grep -rn 'policy\.decide(\|self\.decide(' crates/qsh-core/src/acl
 //! crates/qsh-core/src/ops --exclude=tests.rs`, which prints three lines;

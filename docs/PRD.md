@@ -247,7 +247,11 @@ added_at = "2026-10-12T00:00:00Z"
 role = "full"
 ```
 
-`role` 키가 없는 기존 pin은 `none`과 같이 판정되어 ACL 정책 파일의 행 없이는 아무것도 할 수 없다. role을 인가에 반영하는 판정 변경은 같은 마일스톤의 뒤 단계에서 이 절의 서술과 함께 바뀐다.
+`role` 키가 없는 기존 pin은 `none`과 같이 판정되어 ACL 정책 파일의 행 없이는 아무것도 할 수 없다.
+
+판정은 두 근거의 합집합이다. 항상 거부하는 action(`forward.socks`, `file.read`, `file.write`)은 role과 행보다 먼저 막는다. 그다음 요청자가 `pin`으로 인증한 `device:<name>`이고 trust.toml의 그 이름 pin이 연결의 fingerprint와 같으면 pin의 role을 본다. 마지막으로 `[[acl]]` 행을 본다. 둘 중 하나가 허용하면 허용이고, 둘 다 허용할 때 audit 레코드의 근거는 role이다. CA가 발급한 leaf는 같은 이름을 담아도 role에 닿지 않는다. role은 판정마다 trust.toml에서 읽으므로 `trust remove`나 role 변경이 다음 요청부터 적용된다.
+
+acl.toml은 세 상태다. 파일이 없으면 행이 없는 것이고 role은 그대로 동작한다. 읽을 수 있는 파일이면 행과 role이 함께 동작한다. 파싱할 수 없는 파일이면 role을 포함해 모든 요청을 거부한다. trust.toml reload가 파싱이나 읽기에 실패하면 pin 인증은 마지막 정상 snapshot으로 계속하되 role 부여는 다음 reload가 성공할 때까지 멈춘다.
 
 대화형 shell 권한은 사실상 임의 명령 실행 권한이다. 제한된 자동화에는 shell 대신 별도의 `exec.run` 정책을 사용한다.
 

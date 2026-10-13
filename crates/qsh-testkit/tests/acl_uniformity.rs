@@ -327,6 +327,7 @@ impl Authorizer for OpenOnlyDenyAttach {
         Verdict {
             decision,
             rule: None,
+            role: None,
         }
     }
 }
@@ -641,4 +642,201 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
          mismatch means either a registry row was added with no driver wired up here, \
          or a driver here no longer corresponds to a registry row"
     );
+}
+
+// --- PLAN M15 Step 4: the role stage denies exactly like the rest ---------
+
+/// A sandbox `trust.toml` pinning `fingerprint` as `name` with an optional
+/// role, plus the production authorizer over it (`load_or_deny`; no
+/// `acl.toml`, so the role is the only grant).
+struct RoleSandbox {
+    _dir: tempfile::TempDir,
+    paths: qsh_core::config::Paths,
+    trust: Arc<qsh_core::trust::SharedTrustStore>,
+}
+
+fn pin_block(name: &str, fingerprint: &qsh_transport::Fingerprint, role: Option<&str>) -> String {
+    let role = role.map_or(String::new(), |r| format!("role = \"{r}\"\n"));
+    format!(
+        "[[peer]]\nname = \"{name}\"\nfingerprint = \"{fingerprint}\"\naddress = \"\"\n\
+         added_at = \"2026-10-14T00:00:00Z\"\n{role}\n"
+    )
+}
+
+impl RoleSandbox {
+    fn new(name: &str, fingerprint: &qsh_transport::Fingerprint, role: Option<&str>) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths =
+            qsh_core::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        std::fs::create_dir_all(&paths.config_dir).expect("config dir");
+        std::fs::write(paths.trust_file(), pin_block(name, fingerprint, role))
+            .expect("write trust.toml");
+        let trust =
+            qsh_core::trust::SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
+        Self {
+            _dir: dir,
+            paths,
+            trust,
+        }
+    }
+
+    fn authorizer(&self, role: qsh_core::acl::Role) -> Arc<dyn Authorizer> {
+        qsh_core::acl::load_or_deny(&self.paths, role, Arc::clone(&self.trust)).0
+    }
+
+    fn break_trust_toml(&self) {
+        std::fs::write(self.paths.trust_file(), "[[peer]]\nname = ").expect("break trust.toml");
+    }
+}
+
+/// Drive every `ControlStreamOp` row (except those in `skip`) and require the
+/// uniform refusal plus a deny audit record under the row's own action.
+/// `session.attach` is driven through its dedicated path unless skipped.
+async fn assert_control_rows_denied(h: &LoopbackHarness, skip: &[&str], situation: &str) {
+    let mut s = h.session().await;
+    for seam in DENY_SEAMS.iter().filter(|seam| {
+        seam.kind == SeamKind::ControlStreamOp
+            && seam.name != "session.attach"
+            && !skip.contains(&seam.name)
+    }) {
+        let before = h.audit.records().len();
+        let result = drive_control_stream_op(&mut s, seam.name).await;
+        assert_denied(result, &format!("{situation}: {}", seam.name));
+        assert_new_audit_deny_for_seam(&h.audit, before, seam);
+    }
+    s.close();
+    if !skip.contains(&"session.attach") {
+        assert_denied(
+            drive_session_attach(h).await,
+            &format!("{situation}: session.attach"),
+        );
+    }
+}
+
+/// A peer with no role, a peer whose role does not cover the action, and a
+/// peer whose role was suspended by a broken `trust.toml` reload are all
+/// refused with the byte-identical `PERMISSION_DENIED_MESSAGE` and an audit
+/// deny under the row's own action. Nothing on the wire tells them apart
+/// (ADR-0045 결정 16, "거부는 균일").
+#[tokio::test(flavor = "multi_thread")]
+async fn role_absent_out_of_scope_and_reload_failure_denials_are_uniform() {
+    use qsh_core::acl::Role;
+
+    // (a) no role: the pin has no `role` key.
+    {
+        let client = make_identity();
+        let sandbox = RoleSandbox::new("laptop", &client.fingerprint, None);
+        let h = LoopbackHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        assert_control_rows_denied(&h, &[], "no role").await;
+        h.shutdown().await;
+
+        let t = TunnelHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        let result = t.tcp_connect("127.0.0.1", 9).await;
+        assert!(!result.ok);
+        assert_eq!(
+            result.message, PERMISSION_DENIED_MESSAGE,
+            "no role: forward.local"
+        );
+        t.shutdown().await;
+
+        let target = make_identity();
+        let sandbox = RoleSandbox::new("widget", &target.fingerprint, None);
+        let harness = ReverseHarness::start_with(
+            sandbox.authorizer(Role::Listen),
+            false,
+            pin(&target, "widget"),
+        )
+        .await;
+        let (code, message, _) = remote(expect_hello_err(
+            harness.register(&target, "widget").await,
+            "no role must deny host.reverse",
+        ));
+        assert_eq!(code, ErrorCode::PermissionDenied);
+        assert_eq!(message, PERMISSION_DENIED_MESSAGE, "no role: host.reverse");
+        harness.shutdown().await;
+    }
+
+    // (b) out of scope: `read-only` covers the session reads, nothing else.
+    {
+        let client = make_identity();
+        let sandbox = RoleSandbox::new("laptop", &client.fingerprint, Some("read-only"));
+        let h = LoopbackHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        // `session.list` (and its `session.get`), `session.read` and
+        // `session.attach` are what the role grants; the rest is refused.
+        assert_control_rows_denied(
+            &h,
+            &[
+                "session.list",
+                "session.get",
+                "session.read",
+                "session.attach",
+            ],
+            "out of scope",
+        )
+        .await;
+        h.shutdown().await;
+
+        let t = TunnelHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        let result = t.tcp_connect("127.0.0.1", 9).await;
+        assert!(!result.ok);
+        assert_eq!(
+            result.message, PERMISSION_DENIED_MESSAGE,
+            "out of scope: forward.local"
+        );
+        t.shutdown().await;
+    }
+
+    // (c) reload failure: `full` worked until `trust.toml` stopped parsing.
+    {
+        let client = make_identity();
+        let sandbox = RoleSandbox::new("laptop", &client.fingerprint, Some("full"));
+        let h = LoopbackHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        let mut s = h.session().await;
+        s.session_list()
+            .await
+            .expect("the role is in effect before the edit");
+        s.close();
+        sandbox.break_trust_toml();
+        assert_control_rows_denied(&h, &[], "reload failure").await;
+        h.shutdown().await;
+
+        let t = TunnelHarness::start_custom(
+            sandbox.authorizer(Role::Serve),
+            client.clone(),
+            pin(&client, "laptop"),
+        )
+        .await;
+        let result = t.tcp_connect("127.0.0.1", 9).await;
+        assert!(!result.ok);
+        assert_eq!(
+            result.message, PERMISSION_DENIED_MESSAGE,
+            "reload failure: forward.local"
+        );
+        t.shutdown().await;
+    }
 }

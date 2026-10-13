@@ -2,6 +2,8 @@ use proptest::prelude::*;
 use qsh_transport::Fingerprint;
 
 use super::*;
+use crate::broker::PeerFingerprint;
+use crate::trust::{PinRole, role_of_pin};
 
 fn rule(principal: &str, auth_path: AuthPath, allow: Vec<ActionPattern>) -> Rule {
     Rule {
@@ -49,7 +51,13 @@ fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
     };
     let principal = Principal::User("dave".into());
     for action in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
-        let verdict = policy.decide(&principal, AuthPath::Pin, action, ResourceRef::unowned("r"));
+        let verdict = policy.decide(
+            &principal,
+            AuthPath::Pin,
+            None,
+            action,
+            ResourceRef::unowned("r"),
+        );
         assert_eq!(verdict.decision, Decision::Deny, "{action} must be denied");
         assert_eq!(verdict.rule, None, "{action} must carry no rule index");
     }
@@ -59,6 +67,7 @@ fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
     let allowed = policy.decide(
         &principal,
         AuthPath::Pin,
+        None,
         Action::ForwardLocal,
         ResourceRef::unowned("r"),
     );
@@ -83,6 +92,7 @@ fn principal_match_is_exact_not_prefix_or_shape() {
         let verdict = policy.decide(
             &principal,
             AuthPath::Pin,
+            None,
             Action::ExecRun,
             ResourceRef::unowned("r"),
         );
@@ -97,6 +107,7 @@ fn principal_match_is_exact_not_prefix_or_shape() {
     let verdict = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::ExecRun,
         ResourceRef::unowned("r"),
     );
@@ -120,6 +131,7 @@ fn omitted_auth_path_defaults_to_pin_and_never_admits_ca() {
     let via_ca = policy.decide(
         &dave,
         AuthPath::Ca,
+        None,
         Action::SessionOpen,
         ResourceRef::unowned("r"),
     );
@@ -131,6 +143,7 @@ fn omitted_auth_path_defaults_to_pin_and_never_admits_ca() {
     let via_pin = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::SessionOpen,
         ResourceRef::unowned("r"),
     );
@@ -162,6 +175,7 @@ fn first_matching_rule_wins_and_its_index_is_reported() {
     let verdict = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::ExecRun,
         ResourceRef::unowned("r"),
     );
@@ -195,6 +209,7 @@ fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
         let verdict = policy.decide(
             &dave,
             AuthPath::Pin,
+            None,
             Action::SessionControl,
             ResourceRef::unowned(resource),
         );
@@ -223,6 +238,7 @@ fn scope_owned_denies_a_request_from_a_different_owner() {
     let verdict = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::SessionControl,
         ResourceRef {
             id: "sess-1",
@@ -251,6 +267,7 @@ fn scope_owned_allows_the_resources_own_owner() {
     let verdict = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::SessionControl,
         ResourceRef {
             id: "sess-1",
@@ -281,6 +298,7 @@ fn scope_any_admits_a_foreign_owner() {
     let verdict = policy.decide(
         &dave,
         AuthPath::Pin,
+        None,
         Action::SessionControl,
         ResourceRef {
             id: "sess-1",
@@ -319,6 +337,7 @@ fn scope_owned_does_not_let_a_different_auth_path_assert_the_same_principals_own
     let verdict = policy.decide(
         &laptop_over_ca,
         AuthPath::Ca,
+        None,
         Action::SessionControl,
         ResourceRef {
             id: "sess-1",
@@ -473,6 +492,72 @@ fn oracle_covers(
     })
 }
 
+/// The role table spelled out again, literally, from ADR-0045 결정 2 —
+/// never read from [`ROLE_GRANTS`], so a wrong row in the constant disagrees
+/// with this copy. Returns `(actions, owned)`.
+fn oracle_role_row(role: TrustRole) -> (&'static [Action], bool) {
+    match role {
+        TrustRole::Full => (
+            &[
+                Action::ExecRun,
+                Action::SessionOpen,
+                Action::SessionList,
+                Action::SessionAttach,
+                Action::SessionControl,
+                Action::ForwardLocal,
+                Action::ForwardRemote,
+                Action::HostReverse,
+            ],
+            false,
+        ),
+        TrustRole::Exec => (
+            &[
+                Action::ExecRun,
+                Action::SessionOpen,
+                Action::SessionList,
+                Action::SessionAttach,
+                Action::SessionControl,
+            ],
+            false,
+        ),
+        TrustRole::Tunnel => (&[Action::ForwardLocal, Action::ForwardRemote], true),
+        TrustRole::ReadOnly => (&[Action::SessionList, Action::SessionAttach], false),
+        TrustRole::Reverse => (&[Action::HostReverse], false),
+        TrustRole::None => (&[], false),
+    }
+}
+
+/// Whether the role row grants `(action, resource)`. `file.read` and
+/// `file.write` are in `full`'s real row but never reach this function: the
+/// always-deny gate (ADR-0019 결정 6) answers them first, which the property
+/// asserts separately, so the oracle's `full` row leaves them out.
+fn oracle_role_allows(
+    role: Option<TrustRole>,
+    action: Action,
+    principal: &Principal,
+    auth_path: AuthPath,
+    resource: ResourceRef<'_>,
+) -> bool {
+    let Some(role) = role else { return false };
+    let (actions, owned) = oracle_role_row(role);
+    if !actions.contains(&action) {
+        return false;
+    }
+    if !owned {
+        return true;
+    }
+    match resource.owner {
+        None => true,
+        Some(owner) => owner == opener_key(principal, auth_path),
+    }
+}
+
+fn arb_role() -> impl Strategy<Value = Option<TrustRole>> {
+    let mut roles: Vec<Option<TrustRole>> = vec![None];
+    roles.extend(TrustRole::ALL.into_iter().map(Some));
+    prop::sample::select(roles)
+}
+
 proptest! {
     /// DoD 3 (M5 plan Step 2 (2473c88), `docs/design/testing.md` L2/L8):
     /// for an arbitrary policy and an arbitrary request, `Policy::
@@ -499,6 +584,10 @@ proptest! {
         action in arb_action(),
         owner_kind in 0u8..3,
         foreign_owner_name in arb_principal_name(),
+        pin_role in arb_role(),
+        fingerprint_matches in any::<bool>(),
+        pin_name_matches in any::<bool>(),
+        reload_failed in any::<bool>(),
     ) {
         let foreign_owner = format!("{auth_path:?}:{foreign_owner_name}");
         let owner: Option<String> = match owner_kind {
@@ -510,7 +599,41 @@ proptest! {
             Some(owner) => ResourceRef { id: "r", owner: Some(owner) },
             None => ResourceRef::unowned("r"),
         };
-        let verdict = policy.decide(&principal, auth_path, action, resource);
+        // The role dimension (PLAN M15 Step 4): the pin of `principal`'s
+        // device name carries `pin_role`; the connection's fingerprint
+        // matches that pin or not; the trust store's last reload failed
+        // or not. `role_of_pin` is the one resolver production uses.
+        let pin_fingerprint = Fingerprint::of_spki_der(b"pin");
+        let connection_fingerprint = if fingerprint_matches {
+            PeerFingerprint::new(*pin_fingerprint.as_bytes())
+        } else {
+            PeerFingerprint::new(*Fingerprint::of_spki_der(b"other").as_bytes())
+        };
+        let pin_name = match (&principal, pin_name_matches) {
+            (Principal::Device(name), true) => name.clone(),
+            _ => "someone-else".to_string(),
+        };
+        let pins = vec![PinRole {
+            name: pin_name,
+            fingerprint: pin_fingerprint,
+            role: pin_role,
+        }];
+        let role = role_of_pin(
+            &pins,
+            reload_failed,
+            &principal,
+            auth_path,
+            Some(connection_fingerprint),
+        );
+        // The oracle's own statement of "a role is in effect": every
+        // precondition spelled out again, not read from `role_of_pin`.
+        let role_in_effect = !reload_failed
+            && fingerprint_matches
+            && pin_name_matches
+            && auth_path == AuthPath::Pin
+            && matches!(principal, Principal::Device(_));
+        prop_assert_eq!(role, if role_in_effect { pin_role } else { None });
+        let verdict = policy.decide(&principal, auth_path, role, action, resource);
         // F4 (M5 Step 2 adversarial review): the literal always-denied
         // trio (two P1-deferred, one undrivable by design, ADR-0019 결정
         // 6), spelled out again here rather than calling
@@ -523,22 +646,61 @@ proptest! {
         if matches!(action, Action::ForwardSocks | Action::FileRead | Action::FileWrite) {
             prop_assert_eq!(verdict.decision, Decision::Deny);
             prop_assert_eq!(verdict.rule, None);
+            prop_assert_eq!(verdict.role, None);
         } else {
             let covered = oracle_covers(&policy, &principal, auth_path, action, resource);
+            let by_role = oracle_role_allows(role, action, &principal, auth_path, resource);
             prop_assert_eq!(
                 verdict.is_allow(),
-                covered,
-                "evaluator/oracle disagreement for {} over {:?} on {} (owner {:?})",
+                covered || by_role,
+                "evaluator/oracle disagreement for {} over {:?} on {} (owner {:?}, role {:?})",
                 principal,
                 auth_path,
                 action,
                 resource.owner,
+                role,
             );
-            if !covered {
+            if by_role {
+                // The union's basis is the role when both would allow.
+                prop_assert_eq!(verdict.granted_by(), role.map(GrantBasis::Role));
+                prop_assert_eq!(verdict.rule, None);
+                prop_assert_eq!(verdict.role, role);
+            } else if covered {
+                prop_assert!(matches!(verdict.granted_by(), Some(GrantBasis::Rule(_))));
+                prop_assert_eq!(verdict.role, None);
+            } else {
                 prop_assert_eq!(verdict.decision, Decision::Deny);
                 prop_assert_eq!(verdict.rule, None);
+                prop_assert_eq!(verdict.role, None);
             }
         }
+    }
+
+    /// Defense in depth for ⓡ (ADR-0045 결정 4): `decide` re-checks the
+    /// role preconditions itself, so a *mis-resolved* role (a caller bug,
+    /// not something `role_of_pin` produces) handed in for an `auth_path =
+    /// Ca` request or a `user:`/`fp:` principal is ignored. The verdict is
+    /// exactly the one the same request gets with no role, and over an
+    /// empty policy it is a denial that names no role.
+    #[test]
+    fn decide_ignores_a_role_handed_in_for_a_non_pin_or_non_device_requester(
+        policy in arb_policy(),
+        principal in arb_principal(),
+        auth_path in arb_auth_path(),
+        action in arb_action(),
+        role in prop::sample::select(TrustRole::ALL.to_vec()),
+    ) {
+        prop_assume!(!(auth_path == AuthPath::Pin && matches!(principal, Principal::Device(_))));
+        let resource = ResourceRef::unowned("r");
+        let with_role = policy.decide(&principal, auth_path, Some(role), action, resource);
+        let without = policy.decide(&principal, auth_path, None, action, resource);
+        prop_assert_eq!(with_role.decision, without.decision);
+        prop_assert_eq!(with_role.rule, without.rule);
+        prop_assert_eq!(with_role.role, None);
+        let empty = Policy { rules: Vec::new() };
+        let verdict = empty.decide(&principal, auth_path, Some(role), action, resource);
+        prop_assert_eq!(verdict.decision, Decision::Deny);
+        prop_assert_eq!(verdict.role, None);
     }
 
     /// Wildcard property (`docs/design/testing.md` L8): a family
@@ -568,7 +730,7 @@ proptest! {
         let policy = Policy {
             rules: vec![rule(&a.to_string(), AuthPath::Pin, vec![ActionPattern::Exact(action)])],
         };
-        let verdict = policy.decide(&b, AuthPath::Pin, action, ResourceRef::unowned("r"));
+        let verdict = policy.decide(&b, AuthPath::Pin, None, action, ResourceRef::unowned("r"));
         prop_assert_eq!(verdict.decision, Decision::Deny);
     }
 }
@@ -658,8 +820,13 @@ fn effective_actions_every_allowed_action_names_a_rule_index_in_matching_rules()
                 .map(|(index, _)| index)
                 .collect();
             for action in policy.effective_actions(&principal, auth_path) {
-                let verdict =
-                    policy.decide(&principal, auth_path, action, ResourceRef::unowned(""));
+                let verdict = policy.decide(
+                    &principal,
+                    auth_path,
+                    None,
+                    action,
+                    ResourceRef::unowned(""),
+                );
                 let index = verdict.rule.expect("an allowed action names its rule");
                 assert!(
                     matching.contains(&index),

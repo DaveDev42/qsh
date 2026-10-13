@@ -714,14 +714,28 @@ struct Cached {
     /// `role` is `None` for a pin with no `role` key.
     pin_roles: Vec<PinRole>,
     cas: Vec<CertificateDer<'static>>,
+    /// The on-disk text (`None` = missing file) of the last reload that
+    /// failed to parse, while that text is still what the file holds.
+    /// `Some(_)` means the snapshot above is *stale*: pin authentication
+    /// keeps using it, but role grants are suspended until a reload
+    /// succeeds (ADR-0045 결정 4). Remembering the failed text, rather than
+    /// a bare flag, keeps a broken file from being re-parsed (and re-warned
+    /// about) on every decision, and is why a file restored to exactly the
+    /// previous good text still clears the state: that text differs from
+    /// this one, so the next refresh goes through the reload path.
+    failed_raw: Option<Option<String>>,
+    /// The last attempt to read the file failed (permissions, I/O error)
+    /// and no later read has succeeded. Same effect as `failed_raw`: the
+    /// snapshot may no longer match the disk, so role grants are suspended.
+    read_failed: bool,
 }
 
 /// One pin as [`SharedTrustStore::resolve_role`] sees it.
 #[derive(Debug)]
-struct PinRole {
-    name: String,
-    fingerprint: Fingerprint,
-    role: Option<TrustRole>,
+pub(crate) struct PinRole {
+    pub(crate) name: String,
+    pub(crate) fingerprint: Fingerprint,
+    pub(crate) role: Option<TrustRole>,
 }
 
 impl Cached {
@@ -733,8 +747,42 @@ impl Cached {
             store,
             raw,
             mtime,
+            failed_raw: None,
+            read_failed: false,
         }
     }
+
+    /// Whether the snapshot is known to be stale, so role grants must not
+    /// be served from it.
+    fn roles_suspended(&self) -> bool {
+        self.failed_raw.is_some() || self.read_failed
+    }
+}
+
+/// The pure half of [`SharedTrustStore::resolve_role`] (ADR-0045 결정 4's
+/// ⓡ preconditions): the role of the pin `principal` authenticated with, or
+/// `None` for "no role". `suspended` is the reload-failure state; a
+/// suspended store grants no role at all. Everything that is not a plain
+/// `device:<name>` pin connection whose leaf fingerprint equals the pin's
+/// current fingerprint is `None`, including an absent connection
+/// fingerprint (the leaf did not re-parse: fail closed).
+pub(crate) fn role_of_pin(
+    pins: &[PinRole],
+    suspended: bool,
+    principal: &Principal,
+    auth_path: AuthPath,
+    fingerprint: Option<PeerFingerprint>,
+) -> Option<TrustRole> {
+    if suspended || auth_path != AuthPath::Pin {
+        return None;
+    }
+    let Principal::Device(name) = principal else {
+        return None;
+    };
+    let fingerprint = fingerprint?;
+    pins.iter()
+        .find(|pin| pin.name == *name && pin.fingerprint.as_bytes() == fingerprint.as_bytes())
+        .and_then(|pin| pin.role)
 }
 
 /// A process-wide, reload-on-change view of `trust.toml` that satisfies
@@ -817,6 +865,8 @@ impl SharedTrustStore {
     /// fingerprint since the connection was made and a pin with no `role`
     /// key, is `None`: no role. A CA-authenticated principal, a
     /// `user:<name>` principal and a `fp:` principal never reach a role.
+    /// While the last reload failed ([`Self::roles_suspended`]) the answer
+    /// is `None` for everyone, whatever the stale snapshot says.
     ///
     /// Refreshes the store first (the same content comparison every
     /// handshake does), so a `trust set-role` or `trust remove` is visible
@@ -827,19 +877,31 @@ impl SharedTrustStore {
         auth_path: AuthPath,
         fingerprint: Option<PeerFingerprint>,
     ) -> Option<TrustRole> {
-        if auth_path != AuthPath::Pin {
+        // Cheap structural exits before touching the file.
+        if auth_path != AuthPath::Pin
+            || !matches!(principal, Principal::Device(_))
+            || fingerprint.is_none()
+        {
             return None;
         }
-        let Principal::Device(name) = principal else {
-            return None;
-        };
-        let fingerprint = fingerprint?;
         self.refresh();
-        self.read()
-            .pin_roles
-            .iter()
-            .find(|pin| pin.name == *name && pin.fingerprint.as_bytes() == fingerprint.as_bytes())
-            .and_then(|pin| pin.role)
+        let cache = self.read();
+        role_of_pin(
+            &cache.pin_roles,
+            cache.roles_suspended(),
+            principal,
+            auth_path,
+            fingerprint,
+        )
+    }
+
+    /// Whether the last reload failed (the file did not parse, or could not
+    /// be read) so that [`Self::resolve_role`] is currently granting no
+    /// role at all. Refreshes first. Pin authentication is unaffected: it
+    /// keeps using the last good snapshot.
+    pub fn roles_suspended(&self) -> bool {
+        self.refresh();
+        self.read().roles_suspended()
     }
 
     /// A copy of the current (possibly reloaded) store contents.
@@ -861,26 +923,55 @@ impl SharedTrustStore {
     /// last good snapshot rather than un-trusting everyone; a missing file
     /// reloads as an empty store — fail-closed, mirroring
     /// [`TrustStore::load`]'s own contract.
+    ///
+    /// **A failed reload suspends role grants** (ADR-0045 결정 4). Keeping
+    /// the last good snapshot is right for pin authentication (a
+    /// half-written file must not un-trust every peer), but a hand edit
+    /// that broke the file must not keep an older, wider `role` alive. So
+    /// whenever the file cannot be read or does not parse, the snapshot
+    /// keeps serving `lookup_pin`/`ca_roots` while
+    /// [`SharedTrustStore::resolve_role`] answers "no role" for everyone,
+    /// until a later reload succeeds. That includes the file being put back
+    /// to exactly the previous good text: it differs from the failed text,
+    /// so it goes through the reload path and clears the state.
     fn refresh(&self) {
         let raw = match read_raw(&self.path) {
             Ok(raw) => raw,
             Err(err) => {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    %err,
-                    "failed to read the trust store for a refresh; keeping the last good snapshot"
-                );
+                // Warn once per failure episode, not on every decision and
+                // handshake: a persistent read error (a permissions change)
+                // would otherwise flood the log. The flag clears on the next
+                // successful read, so a later episode warns again.
+                if self.read().read_failed {
+                    return;
+                }
+                let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+                if !cache.read_failed {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        %err,
+                        "failed to read the trust store for a refresh; keeping the last good \
+                         snapshot for pin authentication and suspending role grants"
+                    );
+                    cache.read_failed = true;
+                }
                 return;
             }
         };
         // Double-checked: a cheap read-lock check first (the common case,
         // where nothing changed), then re-check under the write lock in
         // case another thread already applied the same reload.
-        if self.read().raw == raw {
+        if Self::is_current(&self.read(), &raw) {
             return;
         }
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
-        if cache.raw == raw {
+        if Self::is_current(&cache, &raw) {
+            return;
+        }
+        // A successful read ends a read-failure episode; whether the text
+        // then parses is decided below.
+        cache.read_failed = false;
+        if cache.failed_raw.is_none() && cache.raw == raw {
             return;
         }
         let parsed = match &raw {
@@ -908,9 +999,26 @@ impl SharedTrustStore {
                 tracing::warn!(
                     path = %self.path.display(),
                     %err,
-                    "failed to reload the trust store; keeping the last good snapshot"
+                    "failed to reload the trust store; keeping the last good snapshot \
+                     for pin authentication and suspending role grants until the file \
+                     parses again"
                 );
+                cache.failed_raw = Some(raw);
             }
+        }
+    }
+
+    /// Whether `raw` is exactly what `cache` already accounts for and no
+    /// read failure is pending: either the text the snapshot was parsed
+    /// from, or the text that already failed to parse (not re-parsed or
+    /// re-warned on every decision).
+    fn is_current(cache: &Cached, raw: &Option<String>) -> bool {
+        if cache.read_failed {
+            return false;
+        }
+        match &cache.failed_raw {
+            Some(failed) => failed == raw,
+            None => cache.raw == *raw,
         }
     }
 }

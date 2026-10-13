@@ -253,6 +253,20 @@ pub const ACL_POLICY_INVALID_CODE: &str = "acl_policy_invalid";
 /// other way around).
 pub const ACL_STARTUP_HEADLINE: &str = "no usable acl.toml policy";
 
+/// [`StartupDiagnostic::render`]'s whole [`PolicyLoad::Missing`] message
+/// starts with this fragment. Unlike [`ACL_STARTUP_HEADLINE`] it is not an
+/// error: with no `acl.toml` the `[[acl]]` rows are simply empty and trust
+/// roles authorize alone (ADR-0045 결정 6, 13).
+pub const ACL_STARTUP_MISSING_LINE: &str = "no acl.toml";
+
+/// The tail of the [`PolicyLoad::Missing`] one-liner: what authorizes
+/// requests now, and where to look. The number of role pins at startup is
+/// deliberately not part of it, since a role can be granted without a
+/// restart (ADR-0045 결정 13); `qsh doctor`'s `acl_policy_missing` is what
+/// reports "everything is denied".
+pub const ACL_STARTUP_ROLES_ONLY_CLAUSE: &str =
+    "requests are authorized by trust roles only (see: qsh trust list)";
+
 /// [`StartupDiagnostic::render`]'s "nothing is granted yet" clause. See
 /// [`ACL_STARTUP_HEADLINE`].
 pub const ACL_STARTUP_DENIED_CLAUSE: &str = "every request is denied until this is fixed";
@@ -269,7 +283,10 @@ pub const ACL_STARTUP_CHECK_HINT: &str = "verify a fix before restarting: qsh ac
 
 /// The exactly-once, operator-facing startup banner M5 plan Step 6 (2473c88)
 /// requires whenever `acl.toml` did not produce a usable [`Policy`] —
-/// [`PolicyLoad::Missing`] or [`PolicyLoad::Invalid`]. [`load_or_deny`]
+/// [`PolicyLoad::Missing`] or [`PolicyLoad::Invalid`]. Since ADR-0045 the
+/// two differ in weight: [`PolicyLoad::Invalid`] still prints the error
+/// block ([`StartupDiagnostic::render`] = [`StartupDiagnostic::render_block`]),
+/// [`PolicyLoad::Missing`] prints one informational line. [`load_or_deny`]
 /// composes this; `qsh-cli` prints [`StartupDiagnostic::render`]'s output
 /// verbatim, once, and holds no ACL logic of its own (`CLAUDE.md`'s crate
 /// boundary: renderers carry zero auth/ACL logic).
@@ -307,6 +324,26 @@ impl StartupDiagnostic {
     /// "exactly once" holds without a second source of truth that could
     /// drift from this one.
     pub fn render(&self) -> String {
+        // A file that was never written is a normal state since ADR-0045:
+        // trust roles authorize on their own. One line, no error block.
+        if self.code == ACL_POLICY_MISSING_CODE {
+            return format!(
+                "{ACL_STARTUP_MISSING_LINE} ({}): {}; {ACL_STARTUP_ROLES_ONLY_CLAUSE}",
+                self.code,
+                self.path.display(),
+            );
+        }
+        self.render_block()
+    }
+
+    /// The full error block, whatever the code: headline, path, error
+    /// code, detail, the minimal example and the check hint. This is the
+    /// "nothing is authorized" wording, so it is the right text for a
+    /// consumer that has already established that (`qsh doctor`'s
+    /// `acl_policy_missing`, which is only reported when no trust role
+    /// grants anything either), and it is what [`Self::render`] prints for
+    /// an unparseable file.
+    pub fn render_block(&self) -> String {
         let mut out = format!(
             "{ACL_STARTUP_HEADLINE} ({}); {ACL_STARTUP_DENIED_CLAUSE}\n\
              acl.toml path: {}\n\
@@ -331,10 +368,14 @@ impl StartupDiagnostic {
 /// Load `acl.toml` and turn the result straight into an [`Authorizer`] for
 /// a production call site (M5 plan Step 6 (2473c88) — the only two callers are
 /// `crate::serve::host_runtime` and `crate::reverse::listen::run_listen_unix`'s
-/// controller side). [`PolicyLoad::Loaded`] becomes the real [`Policy`];
-/// every other outcome becomes [`DenyAll`] plus a [`StartupDiagnostic`] the
-/// caller must surface exactly once — fail-closed, never silent
-/// (`docs/design/architecture.md` §6: "오류 시 개방은 존재하지 않는다").
+/// controller side). [`PolicyLoad::Loaded`] becomes the real [`Policy`],
+/// whose rows and the requester's trust role form a union;
+/// [`PolicyLoad::Missing`] is a [`Policy`] with no rows, so only roles
+/// grant (ADR-0045 결정 6); [`PolicyLoad::Invalid`] becomes [`DenyAll`],
+/// which refuses role grants too. Both non-`Loaded` outcomes carry a
+/// [`StartupDiagnostic`] the caller must surface exactly once — never
+/// silent (`docs/design/architecture.md` §6: "오류 시 개방은 존재하지
+/// 않는다").
 ///
 /// Reads `paths.trust_file()` independently of any trust handle the caller
 /// may already hold (and may already have moved into `Listener::bind` by
@@ -522,29 +563,39 @@ pub fn load_or_deny_with_index(
     PinnedPrincipalIndex,
 ) {
     let (policy, diagnostic, index) = load_policy_or_deny(paths, role);
-    let authorizer: Arc<dyn Authorizer> = Arc::new(RoleResolvingAuthorizer::new(policy, trust));
+    let authorizer: Arc<dyn Authorizer> = match policy {
+        Some(policy) => Arc::new(RoleResolvingAuthorizer::new(policy, trust)),
+        // An unusable `acl.toml` refuses role grants too (ADR-0045 결정 6).
+        None => Arc::new(DenyAll),
+    };
     (authorizer, diagnostic, index)
 }
 
-/// [`load_or_deny_with_index`] without the trust-store half: the bare
-/// policy authorizer (a [`Policy`] or [`DenyAll`]) plus the diagnostic and
-/// index. For a caller that only reads the diagnostic and the index and
-/// never decides a request (`qsh doctor`).
+/// [`load_or_deny_with_index`] without the trust-store half: the policy
+/// the rows evaluate against, plus the diagnostic and index. For a caller
+/// that only reads the diagnostic and the index and never decides a request
+/// (`qsh doctor`).
+///
+/// The policy is `None` exactly when `acl.toml` is unusable
+/// ([`PolicyLoad::Invalid`]): the caller must then deny every request,
+/// role grants included. An absent file is `Some(Policy::default())`, a
+/// policy with no rows, under which only trust roles grant (ADR-0045
+/// 결정 6).
 pub(crate) fn load_policy_or_deny(
     paths: &Paths,
     role: Role,
 ) -> (
-    Arc<dyn Authorizer>,
+    Option<Policy>,
     Option<StartupDiagnostic>,
     PinnedPrincipalIndex,
 ) {
     match PolicySource::load(paths) {
         PolicyLoad::Loaded(policy) => {
             let index = PinnedPrincipalIndex::from_policy(&policy);
-            (Arc::new(policy), None, index)
+            (Some(policy), None, index)
         }
         PolicyLoad::Missing => (
-            Arc::new(DenyAll),
+            Some(Policy::default()),
             Some(StartupDiagnostic {
                 code: ACL_POLICY_MISSING_CODE,
                 path: paths.acl_file(),
@@ -554,7 +605,7 @@ pub(crate) fn load_policy_or_deny(
             PinnedPrincipalIndex::empty(),
         ),
         PolicyLoad::Invalid(err) => (
-            Arc::new(DenyAll),
+            None,
             Some(StartupDiagnostic {
                 code: ACL_POLICY_INVALID_CODE,
                 path: paths.acl_file(),

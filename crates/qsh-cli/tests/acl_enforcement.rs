@@ -100,10 +100,21 @@ fn no_acl_toml_denies_exec_run_uniformly_and_prints_the_startup_diagnostic_once(
         "qsh serve must never write to stdout: {:?}",
         String::from_utf8_lossy(&output.stdout)
     );
+    // ADR-0045 결정 13: an absent `acl.toml` is a normal state, so the
+    // diagnostic is one informational line (no error block, no claim that
+    // every request is denied), printed exactly once.
+    assert!(
+        !output
+            .stderr
+            .iter()
+            .any(|line| line.contains("no usable acl.toml policy")),
+        "a missing acl.toml must not print the error block: {:#?}",
+        output.stderr
+    );
     let diagnostic_lines: Vec<&String> = output
         .stderr
         .iter()
-        .filter(|line| line.contains("no usable acl.toml policy"))
+        .filter(|line| line.contains("acl_policy_missing"))
         .collect();
     assert_eq!(
         diagnostic_lines.len(),
@@ -112,7 +123,7 @@ fn no_acl_toml_denies_exec_run_uniformly_and_prints_the_startup_diagnostic_once(
         output.stderr
     );
     assert!(
-        diagnostic_lines[0].contains("acl_policy_missing"),
+        diagnostic_lines[0].contains("authorized by trust roles only"),
         "{diagnostic_lines:?}"
     );
 }
@@ -296,7 +307,7 @@ fn listen_without_acl_toml_denies_every_reverse_registration() {
     let controller_stderr = listen.stderr_lines();
     let diagnostic_lines: Vec<&String> = controller_stderr
         .iter()
-        .filter(|line| line.contains("no usable acl.toml policy"))
+        .filter(|line| line.contains("acl_policy_missing"))
         .collect();
     assert_eq!(
         diagnostic_lines.len(),

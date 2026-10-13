@@ -335,6 +335,7 @@ async fn a_denied_registration_cannot_learn_whether_the_controller_is_full() {
             crate::acl::Verdict {
                 decision: crate::acl::Decision::Deny,
                 rule: None,
+                role: None,
             }
         }
     }
