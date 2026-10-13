@@ -742,6 +742,7 @@ async fn session_control_scope_any_widens_to_a_non_owner_when_explicitly_granted
     let policy = Policy {
         rules: vec![
             Rule {
+                paths: None,
                 principal: "device:laptop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![
@@ -753,6 +754,7 @@ async fn session_control_scope_any_widens_to_a_non_owner_when_explicitly_granted
                 scope: Scope::Owned,
             },
             Rule {
+                paths: None,
                 principal: "device:desktop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![ActionPattern::Exact(Action::SessionControl)],
@@ -899,6 +901,7 @@ async fn session_close_is_exempt_from_scope_owned_while_write_and_resize_are_not
     let policy = Policy {
         rules: vec![
             Rule {
+                paths: None,
                 principal: "device:laptop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![
@@ -914,6 +917,7 @@ async fn session_close_is_exempt_from_scope_owned_while_write_and_resize_are_not
             // unless a row explicitly says `scope = "any"`
             // (`docs/design/architecture.md` §6).
             Rule {
+                paths: None,
                 principal: "device:desktop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![ActionPattern::Exact(Action::SessionControl)],
@@ -1014,6 +1018,7 @@ async fn session_write_scope_any_lets_a_foreign_first_writer_take_the_free_lease
     let policy = Policy {
         rules: vec![
             Rule {
+                paths: None,
                 principal: "device:laptop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![
@@ -1025,6 +1030,7 @@ async fn session_write_scope_any_lets_a_foreign_first_writer_take_the_free_lease
                 scope: Scope::Owned,
             },
             Rule {
+                paths: None,
                 principal: "device:desktop".to_string(),
                 auth_path: qsh_transport::AuthPath::Pin,
                 allow: vec![ActionPattern::Exact(Action::SessionControl)],

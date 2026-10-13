@@ -34,11 +34,11 @@ use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_exampl
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
-    ACL_CA_AUTH_PATH_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE, ACL_POLICY_INVALID_ROLE_CLAUSE,
-    ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED, CERT_EXPIRING_SOON,
-    CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED,
-    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
-    probe_audit_path_writable,
+    ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE,
+    ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED,
+    CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY,
+    PEER_UNTRUSTED, QSH_PATH_SHADOWED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -399,6 +399,39 @@ impl Ops {
         // string a row names.
         for (row_index, auth_path) in index.forward_socks_ineffective_rows() {
             let diag = &ACL_FORWARD_SOCKS_INEFFECTIVE;
+            out.push(DoctorFinding {
+                code: diag.code.to_string(),
+                status: "warn".to_string(),
+                detail: format!(
+                    "{} (row: {row_index}, auth_path: {})",
+                    diag.message,
+                    auth_path_str(*auth_path)
+                ),
+                remedy: Some(diag.remedy.to_string()),
+            });
+        }
+
+        // `acl_file_paths_missing` (ADR-0029 결정 19): a row that names a file
+        // action and has no `paths`. `detail` carries the row's index and
+        // `auth_path` only. A `device:<name>` pin-path row is silent when the
+        // same-named pin has role `full`: files are open to it by role, so no
+        // intent is broken. The index is empty for a missing or unparseable
+        // policy, which keeps this silent there.
+        for (row_index, auth_path, device) in index.file_paths_missing_rows() {
+            let role_opens_files = device.as_deref().is_some_and(|name| {
+                trust.peers().iter().any(|peer| {
+                    peer.name == name
+                        && peer
+                            .role
+                            .as_deref()
+                            .and_then(|r| r.parse::<TrustRole>().ok())
+                            == Some(TrustRole::Full)
+                })
+            });
+            if role_opens_files {
+                continue;
+            }
+            let diag = &ACL_FILE_PATHS_MISSING;
             out.push(DoctorFinding {
                 code: diag.code.to_string(),
                 status: "warn".to_string(),

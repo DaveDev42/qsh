@@ -17,9 +17,9 @@
 
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{
-    ACL_CA_AUTH_PATH_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT,
-    CERT_EXPIRING_SOON, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
-    TRUST_REMOVE_SCOPE,
+    ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE,
+    ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
+    TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
 };
 
 #[path = "support/docs.rs"]
@@ -140,6 +140,14 @@ fn cli_md_quotes_the_role_aware_doctor_wording_verbatim() {
         (
             "TRUST_FILE_ROLES_SUSPENDED_CLAUSE",
             TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
+        ),
+        (
+            "ACL_FILE_PATHS_MISSING.message",
+            ACL_FILE_PATHS_MISSING.message,
+        ),
+        (
+            "ACL_FILE_PATHS_MISSING.remedy",
+            ACL_FILE_PATHS_MISSING.remedy,
         ),
     ] {
         assert!(

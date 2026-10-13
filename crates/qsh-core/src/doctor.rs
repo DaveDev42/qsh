@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 25 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 26 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -43,6 +43,7 @@ pub mod probe;
 /// `ServiceRestartDropsSessions` (M13 graceful re-exec H1,
 /// `docs/design/reexec-estimate.md`) is the twenty-fourth, 23 → 24.
 /// `TrustPinRoleUnset` (ADR-0045 결정 12, M15) is the twenty-fifth, 24 → 25.
+/// `AclFilePathsMissing` (ADR-0029 결정 19, M15) is the twenty-sixth, 25 → 26.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -70,6 +71,7 @@ pub enum DiagnosticId {
     AclForwardSocksIneffective,
     ServiceRestartDropsSessions,
     TrustPinRoleUnset,
+    AclFilePathsMissing,
 }
 
 impl DiagnosticId {
@@ -109,6 +111,7 @@ impl DiagnosticId {
             DiagnosticId::AclForwardSocksIneffective => ACL_FORWARD_SOCKS_INEFFECTIVE.code,
             DiagnosticId::ServiceRestartDropsSessions => SERVICE_RESTART_DROPS_SESSIONS.code,
             DiagnosticId::TrustPinRoleUnset => TRUST_PIN_ROLE_UNSET.code,
+            DiagnosticId::AclFilePathsMissing => ACL_FILE_PATHS_MISSING.code,
         }
     }
 }
@@ -121,6 +124,7 @@ impl DiagnosticId {
 /// meaning needs a new code, not a repurposed one).
 pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "acl_ca_auth_path_missing",
+    "acl_file_paths_missing",
     "acl_forward_socks_ineffective",
     "acl_policy_invalid",
     "acl_policy_missing",
@@ -532,6 +536,33 @@ pub const ACL_FORWARD_SOCKS_INEFFECTIVE: Diagnostic = Diagnostic {
     message: "This row's allow names forward.socks, but forward.socks is always denied (ADR-0019) and -D is instead authorized per CONNECT as forward.local. No row for the same principal string and auth_path also grants forward.local, so this row authorizes nothing for -D. Detection matches on the literal principal string: splitting one peer across a device:<name> row and an fp:sha256:<fingerprint> row still flags this row even when the other row grants forward.local.",
     remedy: concat!(
         "Add \"forward.local\" to that row's allow; -D is authorized per CONNECT as forward.local and forward.socks alone grants nothing (ADR-0019), then ",
+        crate::acl::acl_restart_notice!()
+    ),
+};
+
+/// ADR-0029 결정 4-4·19, `warn`: an `acl.toml` row names a file action
+/// (`file.read`, `file.write`, `file.*`) and has no `paths` key. The row loads
+/// and its other actions work, but a row grants file access only inside its
+/// `paths`, so the file half of the operator's intent is a silent no-op, which
+/// is what no other ACL finding covers (the principal matches, so
+/// [`ACL_PRINCIPAL_UNMATCHED`] is quiet, and the file parses, so
+/// [`crate::acl::ACL_POLICY_INVALID_CODE`] is too). One finding per such row;
+/// `detail` carries the row's array index and `auth_path` and never its
+/// principal. Silent when the row's principal is `device:<name>` over the pin
+/// path and the same-named pin has role `full`, which already opens file
+/// access, and silent when the policy is missing or unparseable (those have
+/// their own findings). A `paths` entry that cannot be normalized is not
+/// flagged: this process's view of the filesystem need not match serve's, and
+/// such an entry only ever covers less.
+///
+/// `remedy`'s tail is [`crate::acl::ACL_RESTART_NOTICE`]'s wording, like the
+/// other `acl_*` findings that need a restart.
+pub const ACL_FILE_PATHS_MISSING: Diagnostic = Diagnostic {
+    id: DiagnosticId::AclFilePathsMissing,
+    code: "acl_file_paths_missing",
+    message: "This row's allow names a file action (file.read, file.write or file.*), but the row has no paths. A row grants file access only inside its paths (ADR-0029), so it grants none; its other actions are unaffected.",
+    remedy: concat!(
+        "Add paths = [\"/absolute/dir\"] to that row, or give the device a role that opens files with `qsh trust set-role <name> full`, then ",
         crate::acl::acl_restart_notice!()
     ),
 };

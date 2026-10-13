@@ -192,12 +192,14 @@ async fn forward_remote_close_owned_flag_matches_the_observed_ownership_gate() {
     let policy = Policy {
         rules: vec![
             Rule {
+                paths: None,
                 principal: Principal::Device("laptop".into()).to_string(),
                 auth_path: AuthPath::Pin,
                 allow: vec![ActionPattern::Exact(Action::ForwardRemote)],
                 scope: Scope::Owned,
             },
             Rule {
+                paths: None,
                 principal: Principal::Device("desktop".into()).to_string(),
                 auth_path: AuthPath::Pin,
                 allow: vec![ActionPattern::Exact(Action::ForwardRemote)],

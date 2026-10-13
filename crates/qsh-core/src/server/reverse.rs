@@ -365,6 +365,7 @@ impl Server {
             request_id,
             crate::acl::Op::ForwardRemoteClose.action(),
             ResourceRef {
+                canonical_path: None,
                 id: &req.forward_id,
                 owner: owner.as_deref(),
             },

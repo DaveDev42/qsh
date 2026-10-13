@@ -974,6 +974,7 @@ fn acl_check_req_omits_empty_optionals() {
         auth_path: None,
         owner: None,
         owner_auth_path: None,
+        path: None,
     };
     assert_eq!(
         serde_json::to_value(&req).unwrap(),
@@ -994,6 +995,7 @@ fn acl_check_req_omits_empty_optionals() {
         auth_path: Some("ca".into()),
         owner: Some("device:mac".into()),
         owner_auth_path: Some("pin".into()),
+        path: None,
     };
     let json = serde_json::to_value(&full).unwrap();
     assert_eq!(json["resource"], "localhost:5432");
@@ -1017,6 +1019,7 @@ fn acl_check_owner_fields_are_additive_and_round_trip() {
         auth_path: None,
         owner: Some("user:dave".into()),
         owner_auth_path: None,
+        path: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["owner"], "user:dave");
@@ -1055,6 +1058,8 @@ fn acl_check_owner_fields_are_additive_and_round_trip() {
         owner_auth_path: Some("pin".into()),
         role: None,
         granted_by: None,
+        path: None,
+        canonical_path: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["owner"], "user:dave");
@@ -1093,6 +1098,8 @@ fn acl_check_data_matches_documented_shape() {
         owner_auth_path: None,
         role: None,
         granted_by: None,
+        path: None,
+        canonical_path: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(
@@ -1285,4 +1292,100 @@ fn contract_types_have_json_schemas_for_doctor_run() {
     let _ = schemars::schema_for!(DoctorReq);
     let _ = schemars::schema_for!(DoctorData);
     let _ = schemars::schema_for!(DoctorFinding);
+}
+
+/// ADR-0029 결정 19: `--path`, its echo and the normalized form are additive
+/// optionals that omit (never `null`) when absent, and an old payload
+/// without them still deserializes.
+#[test]
+fn acl_check_path_fields_are_additive_and_round_trip() {
+    let req = AclCheckReq {
+        principal: "device:laptop".into(),
+        action: "file.read".into(),
+        resource: None,
+        auth_path: None,
+        owner: None,
+        owner_auth_path: None,
+        path: Some("~/share/a.txt".into()),
+    };
+    let json = serde_json::to_value(&req).unwrap();
+    assert_eq!(json["path"], "~/share/a.txt");
+    assert_eq!(serde_json::from_value::<AclCheckReq>(json).unwrap(), req);
+
+    let data = AclCheckData {
+        principal: "device:laptop".into(),
+        action: "file.read".into(),
+        resource: None,
+        auth_path: Some("pin".into()),
+        decision: "deny".into(),
+        rule: None,
+        policy: AclPolicyRef {
+            path: "/x/acl.toml".into(),
+            rules: 1,
+            loaded: true,
+            state: None,
+        },
+        owner: None,
+        owner_auth_path: None,
+        role: None,
+        granted_by: None,
+        path: Some("~/share/a.txt".into()),
+        canonical_path: Some("/home/dave/share/a.txt".into()),
+    };
+    let json = serde_json::to_value(&data).unwrap();
+    assert_eq!(json["path"], "~/share/a.txt");
+    assert_eq!(json["canonical_path"], "/home/dave/share/a.txt");
+    assert_eq!(serde_json::from_value::<AclCheckData>(json).unwrap(), data);
+
+    let bare = AclCheckData {
+        path: None,
+        canonical_path: None,
+        ..data
+    };
+    let json = serde_json::to_value(&bare).unwrap();
+    assert!(json.get("path").is_none(), "{json}");
+    assert!(json.get("canonical_path").is_none(), "{json}");
+}
+
+#[test]
+fn acl_matching_rule_paths_omit_when_absent_and_round_trip() {
+    let with = AclMatchingRule {
+        index: 0,
+        allow: vec!["file.read".into()],
+        auth_path: "pin".into(),
+        scope: "owned".into(),
+        paths: Some(vec!["/srv/share".into(), "/".into()]),
+        file_paths_missing: false,
+    };
+    let json = serde_json::to_value(&with).unwrap();
+    assert_eq!(json["paths"], serde_json::json!(["/srv/share", "/"]));
+    assert_eq!(
+        serde_json::from_value::<AclMatchingRule>(json).unwrap(),
+        with
+    );
+
+    let without = AclMatchingRule {
+        paths: None,
+        ..with
+    };
+    let json = serde_json::to_value(&without).unwrap();
+    assert!(json.get("paths").is_none(), "{json}");
+    let legacy: AclMatchingRule = serde_json::from_value(serde_json::json!({
+        "index": 1, "allow": ["exec.run"], "auth_path": "pin", "scope": "any"
+    }))
+    .unwrap();
+    assert_eq!(legacy.paths, None);
+    assert!(!legacy.file_paths_missing);
+    assert!(json.get("file_paths_missing").is_none(), "{json}");
+
+    let missing = AclMatchingRule {
+        file_paths_missing: true,
+        ..without
+    };
+    let json = serde_json::to_value(&missing).unwrap();
+    assert_eq!(json["file_paths_missing"], true, "{json}");
+    assert_eq!(
+        serde_json::from_value::<AclMatchingRule>(json).unwrap(),
+        missing
+    );
 }

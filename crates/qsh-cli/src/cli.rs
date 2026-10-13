@@ -983,6 +983,13 @@ pub struct AclCheckArgs {
     /// clap usage error (exit `2`), not a silently-ignored no-op.
     #[arg(long = "owner-auth-path", value_name = "pin|ca", requires = "owner")]
     pub owner_auth_path: Option<String>,
+
+    /// Remote path a file action would target (`docs/CLI.md` §6.15,
+    /// ADR-0029 결정 19). Required for `file.read`/`file.write` and refused
+    /// for every other action; both are `INVALID_ARGUMENT`. The query
+    /// normalizes it the way a host does.
+    #[arg(long, value_name = "ABS_PATH")]
+    pub path: Option<String>,
 }
 
 /// Arguments of `qsh acl show` (`docs/CLI.md` §6.19). There is no

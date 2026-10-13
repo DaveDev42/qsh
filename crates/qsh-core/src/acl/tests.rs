@@ -83,6 +83,7 @@ fn allow_all_pinned_denies_a_pinned_non_owner_on_an_owned_resource() {
         &Requester::new(&Principal::Device("desktop".into()), AuthPath::Pin, None),
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&owner_key),
         },
@@ -94,6 +95,7 @@ fn allow_all_pinned_denies_a_pinned_non_owner_on_an_owned_resource() {
         &Requester::new(&Principal::Device("laptop".into()), AuthPath::Pin, None),
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&owner_key),
         },
@@ -112,6 +114,7 @@ fn allow_all_pinned_denies_a_ca_leaf_asserting_the_pinned_owners_principal() {
         &Requester::new(&Principal::Device("laptop".into()), AuthPath::Ca, None),
         Action::SessionControl,
         ResourceRef {
+            canonical_path: None,
             id: "sess-1",
             owner: Some(&owner_key),
         },

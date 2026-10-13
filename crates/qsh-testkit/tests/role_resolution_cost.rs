@@ -88,6 +88,7 @@ fn trust_toml(client: &Fingerprint) -> String {
 fn rows_only_policy() -> Policy {
     Policy {
         rules: vec![Rule {
+            paths: None,
             principal: "device:laptop".to_string(),
             auth_path: AuthPath::Pin,
             allow: vec![ActionPattern::Exact(Action::ForwardLocal)],

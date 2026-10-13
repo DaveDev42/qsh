@@ -1,0 +1,51 @@
+{
+  "command": "acl.show",
+  "data": {
+    "auth_path": "pin",
+    "auth_path_defaulted": true,
+    "effective_actions": [
+      "exec.run"
+    ],
+    "matching_rules": [
+      {
+        "allow": [
+          "file.read"
+        ],
+        "auth_path": "pin",
+        "index": 0,
+        "paths": [
+          "/srv/share",
+          "/var/log"
+        ],
+        "scope": "owned"
+      },
+      {
+        "allow": [
+          "file.write"
+        ],
+        "auth_path": "pin",
+        "file_paths_missing": true,
+        "index": 1,
+        "scope": "owned"
+      },
+      {
+        "allow": [
+          "exec.run"
+        ],
+        "auth_path": "pin",
+        "index": 2,
+        "scope": "owned"
+      }
+    ],
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 3,
+      "state": "loaded"
+    },
+    "principal": "device:laptop"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

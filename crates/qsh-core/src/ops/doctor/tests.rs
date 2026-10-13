@@ -2793,6 +2793,103 @@ fn acl_forward_socks_ineffective_remedy_ends_with_the_acl_restart_notice() {
 }
 
 // -----------------------------------------------------------------
+// acl_file_paths_missing (ADR-0029 결정 19): a file-action row without
+// `paths` grants no file access.
+// -----------------------------------------------------------------
+
+fn write_acl_file(ops: &Ops, text: &str) {
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), text).unwrap();
+}
+
+#[test]
+fn doctor_acl_findings_reports_acl_file_paths_missing_for_a_file_row_without_paths() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    write_acl_file(
+        &ops,
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"exec.run\"]\n\n\
+         [[acl]]\nprincipal = \"device:mac\"\nauth_path = \"ca\"\nallow = [\"file.*\"]\n",
+    );
+
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let found: Vec<_> = findings
+        .iter()
+        .filter(|f| f.code == "acl_file_paths_missing")
+        .collect();
+    assert_eq!(found.len(), 1, "{findings:?}");
+    let finding = found[0];
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("row: 1"), "{finding:?}");
+    assert!(finding.detail.contains("auth_path: ca"), "{finding:?}");
+    assert!(
+        !finding.detail.contains("device:mac"),
+        "detail must not echo the principal string: {finding:?}"
+    );
+    let remedy = finding.remedy.as_deref().expect("remedy");
+    assert!(
+        remedy.ends_with(crate::acl::ACL_RESTART_NOTICE),
+        "{remedy:?}"
+    );
+    assert_eq!(remedy, ACL_FILE_PATHS_MISSING.remedy);
+}
+
+#[cfg(unix)]
+#[test]
+fn acl_file_paths_missing_is_silent_when_the_row_has_paths() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    write_acl_file(
+        &ops,
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"file.read\"]\npaths = [\"/srv\"]\n",
+    );
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    assert!(
+        findings.iter().all(|f| f.code != "acl_file_paths_missing"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+// Also pins that a non-`full` role pin is still flagged.
+fn acl_file_paths_missing_is_silent_for_a_role_full_pin() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_pin(&ops, "mac", Some("full"));
+    add_pin(&ops, "phone", Some("exec"));
+    write_acl_file(
+        &ops,
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"file.read\"]\n\n\
+         [[acl]]\nprincipal = \"device:phone\"\nallow = [\"file.read\"]\n",
+    );
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let rows: Vec<_> = findings
+        .iter()
+        .filter(|f| f.code == "acl_file_paths_missing")
+        .map(|f| f.detail.as_str())
+        .collect();
+    assert_eq!(rows.len(), 1, "{findings:?}");
+    assert!(rows[0].contains("row: 1"), "{rows:?}");
+}
+
+#[test]
+fn acl_file_paths_missing_is_silent_when_the_policy_is_missing_or_invalid() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    assert!(findings.iter().all(|f| f.code != "acl_file_paths_missing"));
+
+    // A `paths` key on a non-file row is a load error, not a finding.
+    write_acl_file(
+        &ops,
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"exec.run\"]\npaths = [\"/srv\"]\n",
+    );
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    assert!(findings.iter().any(|f| f.code == "acl_policy_invalid"));
+    assert!(findings.iter().all(|f| f.code != "acl_file_paths_missing"));
+}
+
+// -----------------------------------------------------------------
 // host_pinned_without_address — pure-function coverage lives in
 // `crate::ops::host::tests` (`host_pinned_without_address_*`); this is
 // only the doctor-side wiring.

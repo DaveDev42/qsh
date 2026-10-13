@@ -25,6 +25,7 @@
 //! running `qsh serve` gives while its role grants are suspended (ADR-0045
 //! 결정 4).
 
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use qsh_proto::{
@@ -36,6 +37,8 @@ use crate::acl::{
     Action, ActionPattern, GrantBasis, Policy, PolicyLoad, PolicySource, ResourceRef, Scope,
     Verdict, opener_key, role_grant,
 };
+use crate::file::guard::{FileOp, FsNormalizer, Normalizer, ShapeError, ShapedPath};
+use crate::file::guard::{serve_home_dir, shape_path};
 use crate::ops::{OpError, Operation, Ops};
 use crate::trust::{TrustRole, TrustStore};
 
@@ -104,6 +107,37 @@ fn policy_ref(path: String, rules: u32, state: &str) -> AclPolicyRef {
         rules,
         loaded: state == STATE_LOADED,
         state: Some(state.to_string()),
+    }
+}
+
+/// The `--path` argument of `acl check` (ADR-0029 결정 19): a file action
+/// needs it, every other action refuses it, and it must pass the file ops'
+/// own shape check (결정 6-1). No message echoes the path.
+fn shape_path_arg(action: Action, raw: Option<&str>) -> Result<Option<ShapedPath>, OpError> {
+    let invalid = |message: String| OpError::new(ErrorCode::InvalidArgument, message);
+    match (action.is_file(), raw) {
+        (true, None) => Err(invalid(format!(
+            "{action} needs --path: a file action is decided per path"
+        ))),
+        (false, Some(_)) => Err(invalid(
+            "--path applies only to file.read and file.write".to_string(),
+        )),
+        (false, None) => Ok(None),
+        (true, Some(raw)) => {
+            let op = if action == Action::FileRead {
+                FileOp::Read
+            } else {
+                FileOp::Write
+            };
+            match shape_path(raw.as_bytes(), op, serve_home_dir().as_deref()) {
+                Ok(shaped) => Ok(Some(shaped)),
+                // No file op exists off unix, so the question is still
+                // answerable (no row can cover a path nobody normalizes);
+                // the argument just goes unshaped.
+                Err(ShapeError::Unsupported) => Ok(None),
+                Err(other) => Err(invalid(other.to_string())),
+            }
+        }
     }
 }
 
@@ -178,11 +212,22 @@ impl Ops {
             _ => None,
         };
 
-        let resource_id = req.resource.as_deref().unwrap_or("");
+        // `--path` is checked before anything is loaded: a bad argument is
+        // `INVALID_ARGUMENT` whatever `acl.toml` says (ADR-0029 결정 19).
+        let shaped = shape_path_arg(action, req.path.as_deref())?;
+
+        // A file request's id is the path string as given, the same string
+        // enforcement audits as `resource` (ADR-0029 결정 4-7).
+        let resource_id = req
+            .resource
+            .as_deref()
+            .or(req.path.as_deref())
+            .unwrap_or("");
         let resource = match owner_key.as_deref() {
             Some(owner) => ResourceRef {
                 id: resource_id,
                 owner: Some(owner),
+                canonical_path: None,
             },
             None => ResourceRef::unowned(resource_id),
         };
@@ -190,6 +235,24 @@ impl Ops {
         let role = self.query_role(&principal, auth_path);
         let path = self.paths.acl_file().display().to_string();
         let (rows, state) = self.load_rows();
+        // The same three steps as enforcement (ADR-0029 결정 4-6): (a) the
+        // pure ground check, (b) normalize the request path only when there
+        // is a ground, (c) the one evaluator. A principal with no file grant
+        // never makes this query touch the filesystem, and a normalization
+        // failure goes on without a path, which no row can cover.
+        let normalizer = FsNormalizer;
+        let canonical: Option<PathBuf> = match (&shaped, &rows) {
+            (Some(shaped), Some(policy))
+                if policy.file_grant_basis(&principal, auth_path, role, action) =>
+            {
+                normalizer.normalize(&shaped.absolute).ok()
+            }
+            _ => None,
+        };
+        let resource = match &canonical {
+            Some(canonical) => resource.with_canonical_path(canonical, &normalizer),
+            None => resource,
+        };
         // One `decide` call for every state: an unusable file yields no
         // `Policy` and refuses everything, role grants included.
         let verdict = match &rows {
@@ -220,6 +283,8 @@ impl Ops {
             owner_auth_path: owner_ap.map(auth_path_str).map(str::to_string),
             role: role.map(|role| role.as_str().to_string()),
             granted_by,
+            path: req.path,
+            canonical_path: canonical.map(|p| p.to_string_lossy().into_owned()),
         })
     }
 
@@ -266,6 +331,8 @@ impl Ops {
                             Scope::Any => "any",
                         }
                         .to_string(),
+                        paths: rule.paths.clone(),
+                        file_paths_missing: rule.paths.is_none() && rule.names_file_action(),
                     })
                     .collect();
                 let effective = policy

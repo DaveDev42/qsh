@@ -38,6 +38,15 @@
 //!    requester's own [`super::opener_key`] — see [`Policy::decide`]'s
 //!    doc for the rationale.
 //!
+//! 3-1. Only for a file action (`file.read`, `file.write`): the row must
+//!    carry `paths`, the request must carry a canonical path, and one
+//!    `paths` entry (normalized per request by the same function that
+//!    produced the request's path) must equal or contain it, component by
+//!    component (ADR-0029 결정 4-4). A row that covers no path is simply not
+//!    matched and evaluation moves on to the next row; a row without `paths`
+//!    never passes. A trust role's file grant skips this step: role grants
+//!    carry no `paths` (ADR-0045 결정 5).
+//!
 //! First matching rule wins (allow-only grammar, so there is no
 //! conflict to resolve by priority) and its array index becomes
 //! [`Verdict::rule`]. No matching rule at all is [`Decision::Deny`].
@@ -46,6 +55,7 @@ use qsh_transport::{AuthPath, Principal};
 
 use crate::trust::TrustRole;
 
+use super::paths::entries_cover;
 use super::{
     Action, Authorizer, Decision, Requester, ResourceRef, RoleScope, opener_key, role_grant,
 };
@@ -162,6 +172,37 @@ pub struct Rule {
     /// Ownership scope, evaluated since M5 plan Step 5 (2473c88) (see
     /// [`Scope`]'s doc).
     pub scope: Scope,
+    /// The row's `paths` key (ADR-0029 결정 4), exactly as written: absolute
+    /// path strings the row's file actions are limited to. `None` when the
+    /// key is absent. The loader guarantees a `Some` is non-empty, holds at
+    /// most `MAX_PATHS_PER_RULE` well-formed entries, and sits on a row whose
+    /// patterns are all file actions. A row that names a file action and has
+    /// no `paths` grants no file access.
+    pub paths: Option<Vec<String>>,
+}
+
+impl Rule {
+    /// Whether some `allow` pattern covers a file action (`file.read`,
+    /// `file.write`): the rows that need `paths` to grant anything of the
+    /// file kind.
+    pub fn names_file_action(&self) -> bool {
+        self.allow.iter().any(|pattern| {
+            Action::ALL
+                .into_iter()
+                .any(|a| a.is_file() && pattern.matches(a))
+        })
+    }
+
+    /// Whether every `allow` pattern covers file actions only, the only shape
+    /// a row with `paths` may have.
+    pub fn is_file_only(&self) -> bool {
+        self.allow.iter().all(|pattern| {
+            Action::ALL
+                .into_iter()
+                .filter(|&a| pattern.matches(a))
+                .all(Action::is_file)
+        })
+    }
 }
 
 /// The outcome of `Policy::decide`: an allow/deny [`Decision`] plus the
@@ -293,29 +334,40 @@ impl Policy {
         if action.is_always_denied() {
             return Verdict::DENY;
         }
+        self.decide_past_gate(principal, auth_path, role, action, resource)
+    }
+
+    /// [`Policy::decide`] after the ① gate: the role stage ⓡ and the row
+    /// steps ②–④. Split out so the file-action steps (③-1) can be exercised
+    /// while ① still denies `file.*`; production reaches it only through
+    /// [`Policy::decide`].
+    fn decide_past_gate(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        role: Option<TrustRole>,
+        action: Action,
+        resource: ResourceRef<'_>,
+    ) -> Verdict {
         // ⓡ Role stage (ADR-0045 결정 4). The caller resolved `role` from
         // the current pin; the preconditions that make a role count at all
         // are re-checked here so a mis-resolved role can never reach an
         // `auth_path = Ca`, `user:` or `fp:` principal.
         if let Some(role) = role
-            && auth_path == AuthPath::Pin
-            && matches!(principal, Principal::Device(_))
+            && role_covers(principal, auth_path, role, action)
         {
-            let grant = role_grant(role);
-            if grant.actions.contains(&action) {
-                let scope_ok = match (grant.scope, resource.owner) {
-                    (RoleScope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
-                    (RoleScope::Owned, None)
-                    | (RoleScope::Any, _)
-                    | (RoleScope::NotApplicable, _) => true,
-                };
-                if scope_ok {
-                    return Verdict {
-                        decision: Decision::Allow,
-                        rule: None,
-                        role: Some(role),
-                    };
+            let scope_ok = match (role_grant(role).scope, resource.owner) {
+                (RoleScope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
+                (RoleScope::Owned, None) | (RoleScope::Any, _) | (RoleScope::NotApplicable, _) => {
+                    true
                 }
+            };
+            if scope_ok {
+                return Verdict {
+                    decision: Decision::Allow,
+                    rule: None,
+                    role: Some(role),
+                };
             }
         }
         let principal_str = principal.to_string();
@@ -326,6 +378,11 @@ impl Policy {
             }
             // ③ Action pattern match (exact or trailing-`.*`).
             if !rule_covers(rule, action) {
+                continue;
+            }
+            // ③-1 File actions only: `paths` must cover the request's
+            // canonical path (ADR-0029 결정 4-4).
+            if action.is_file() && !rule_covers_path(rule, &resource) {
                 continue;
             }
             // ④ `scope` judgment — see this method's own doc. `Scope::Any`
@@ -349,6 +406,37 @@ impl Policy {
             };
         }
         Verdict::DENY
+    }
+
+    /// Whether `principal` (authenticated via `auth_path`, carrying `role`)
+    /// has any ground to be granted the file `action` (ADR-0029 결정 4-6
+    /// (a)): its role grants the action, or some row selecting the
+    /// principal grants it together with `paths`. A pure judgment over the
+    /// policy alone, with no path and no filesystem; it is how enforcement
+    /// and `acl check` decide whether a request path is worth normalizing at
+    /// all, so a principal with no file grant never makes the host look at a
+    /// path. It deliberately does not apply the ① gate: that gate is a
+    /// separate, earlier decision of [`Policy::decide`], and `acl show`
+    /// applies it in front of this one.
+    pub(crate) fn file_grant_basis(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        role: Option<TrustRole>,
+        action: Action,
+    ) -> bool {
+        debug_assert!(action.is_file(), "file_grant_basis is for file actions");
+        if let Some(role) = role
+            && role_covers(principal, auth_path, role, action)
+        {
+            return true;
+        }
+        let principal_str = principal.to_string();
+        self.rules.iter().any(|rule| {
+            rule_selects(rule, &principal_str, auth_path)
+                && rule_covers(rule, action)
+                && rule.paths.is_some()
+        })
     }
 
     /// [`Authorizer::check`]'s body with the requester's resolved trust
@@ -378,13 +466,16 @@ impl Policy {
     /// Every action `principal` (authenticated via `auth_path`, carrying
     /// `role`) may take on an unowned resource, in [`Action::ALL`] order
     /// (`acl show`, ADR-0025 decision 3, ADR-0045 결정 11). Runs
-    /// [`Policy::decide`] once per action rather than re-deriving the answer
-    /// from the rules or the role table, so the always-deny gate, the role
-    /// stage and every future evaluation step apply here automatically. The
-    /// result is therefore the union of what `role` grants and what the
-    /// matching rows grant. Because `scope = "owned"` (rows) and the
-    /// `tunnel` role's owned axis only filter when a resource has an owner,
-    /// this set is a ceiling for owned resources.
+    /// [`Policy::decide`] once per non-file action rather than re-deriving
+    /// the answer from the rules or the role table, so the always-deny gate,
+    /// the role stage and every future evaluation step apply here
+    /// automatically. The result is therefore the union of what `role`
+    /// grants and what the matching rows grant. A file action cannot be
+    /// decided without a path, so it is answered by the ① gate and then the
+    /// ground helper [`Policy::file_grant_basis`] (ADR-0029 결정 4-6 (a), 19).
+    /// Because `scope = "owned"` (rows) and the `tunnel` role's owned axis
+    /// only filter when a resource has an owner, and because `paths` narrow
+    /// a file grant further, this set is a ceiling.
     pub(crate) fn effective_actions(
         &self,
         principal: &Principal,
@@ -394,6 +485,16 @@ impl Policy {
         Action::ALL
             .into_iter()
             .filter(|&action| {
+                if action.is_file() {
+                    // A file action has no path in this question, and a row
+                    // grant needs one, so `decide` alone cannot answer it.
+                    // The ① gate still stands in front, and behind it the
+                    // answer is the ground helper enforcement shares
+                    // (ADR-0029 결정 4-6 (a), 19): the set is a ceiling, and
+                    // `acl check --path` says which paths open.
+                    return !action.is_always_denied()
+                        && self.file_grant_basis(principal, auth_path, role, action);
+                }
                 self.decide(principal, auth_path, role, action, ResourceRef::unowned(""))
                     .is_allow()
             })
@@ -438,6 +539,32 @@ fn rule_selects(rule: &Rule, principal: &str, auth_path: AuthPath) -> bool {
 /// Evaluation step 3: some `allow` pattern covers `action`.
 fn rule_covers(rule: &Rule, action: Action) -> bool {
     rule.allow.iter().any(|pattern| pattern.matches(action))
+}
+
+/// Evaluation step ③-1: the row has `paths`, the request has a canonical
+/// path, and one entry covers it. Either missing means the row covers no
+/// path.
+fn rule_covers_path(rule: &Rule, resource: &ResourceRef<'_>) -> bool {
+    match (&rule.paths, &resource.canonical_path) {
+        (Some(entries), Some(request)) => entries_cover(entries, request),
+        _ => false,
+    }
+}
+
+/// The role stage's precondition and table lookup, shared by [`Policy::decide`]
+/// and [`Policy::file_grant_basis`] so the two cannot disagree: only a
+/// `device:` principal over the pin path carries a role, and the role's table
+/// row must list the action. (The ownership axis is a separate, resource-
+/// dependent check in `decide`.)
+fn role_covers(
+    principal: &Principal,
+    auth_path: AuthPath,
+    role: TrustRole,
+    action: Action,
+) -> bool {
+    auth_path == AuthPath::Pin
+        && matches!(principal, Principal::Device(_))
+        && role_grant(role).actions.contains(&action)
 }
 
 impl Authorizer for Policy {

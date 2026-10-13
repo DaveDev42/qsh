@@ -231,6 +231,7 @@ impl Server {
             request_id,
             action,
             ResourceRef {
+                canonical_path: None,
                 id: &id.0,
                 owner: owner.as_deref(),
             },

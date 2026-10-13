@@ -225,6 +225,15 @@ principal = "device:hermes"
 allow = ["session.list", "session.attach", "exec.run"]
 ```
 
+파일 action(`file.read`, `file.write`)을 적는 행은 `paths`로 접근 범위를 좁힌다(ADR-0029 결정 4). 이 행은 파일 action만 적을 수 있고, 요청 경로(정규화한 뒤)가 `paths`의 어느 항목 아래에 컴포넌트 단위로 들어 있을 때만 허용한다. `paths`가 없는 파일 행은 파일 접근을 주지 않는다.
+
+```toml
+[[acl]]
+principal = "device:hermes"
+allow = ["file.read"]
+paths = ["/srv/share"]
+```
+
 ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 권한 부여가 되게 한다. role은 고정된 여섯 값이고, 각 role이 주는 action과 소유 축은 다음과 같다(`docs/CLI.md` §6.11의 표와 같다).
 
 | role | 주는 action | 소유 축 |
