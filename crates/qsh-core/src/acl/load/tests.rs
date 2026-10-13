@@ -8,7 +8,16 @@ fn paths_with(dir: &std::path::Path) -> Paths {
 }
 
 fn write_acl(dir: &std::path::Path, text: &str) {
-    std::fs::write(dir.join("acl.toml"), text).unwrap();
+    let path = dir.join("acl.toml");
+    std::fs::write(&path, text).unwrap();
+    // Pin owner-only mode so the result never depends on the caller's
+    // umask: under umask 002 the file would be group-writable and the
+    // loader would add its writable-file warning to every capture.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 #[test]
