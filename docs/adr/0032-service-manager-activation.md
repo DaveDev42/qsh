@@ -1,9 +1,11 @@
 # ADR-0032: `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다
 
-날짜: 2026-10-11
+날짜: 2026-10-11 (개정 2026-10-13)
 상태: 제안됨
 
 개정 관계: 새 ADR이다. ADR-0024 결정 11이 "활성화까지 맡기려면 §6.18을 개정하는 별도 결정이 필요하다"고 남겨 둔 자리를 채운다. `docs/CLI.md` §6.18의 "`status`는 존재 여부만 본다" 문단과 "유닛 파일만 쓴다"는 계약을 플래그가 있을 때에 한해 개정하고, `docs/design/threat-model.md` §3의 `qsh service` 행(`launchctl`/`systemctl`을 호출하지 않는다는 서술)을 같은 범위로 고친다. `docs/ROADMAP.md` M17 (a)가 이 ADR을 요구한다. ADR-0017 결정 1(`acl.toml`을 쓰지 않는다)과 ADR-0024 결정 11의 나머지(`qsh setup`은 유닛을 활성화하지 않는다)는 그대로다.
+
+2026-10-13 개정: 사용자 결정("원칙에 예외는 없어", "전부 다 알아서 진행해")에 따라 플랫폼 간 동등(PRD §4, `docs/ROADMAP.md` §5.1 원칙 7)을 상시 기동에도 적용한다. 처음 판은 macOS LaunchDaemon을 M17의 명시적 out으로 남겨, Linux(사람이 `loginctl enable-linger`를 치는 레시피와 `systemd_linger_disabled`)와 Windows(ADR-0035 결정 27의 상시 기동 작업 레시피와 `logon_task_session_scoped`)가 가진 수준을 macOS만 갖지 못했다. 이 개정은 결정 12를 고치고 결정 13~17을 더한다. 어느 플랫폼에서도 qsh는 로그인 세션 밖 상시 기동을 스스로 설정하지 않는다는 선은 그대로이고, macOS도 사람이 한 번 치는 문서화된 레시피와 그것을 알리는 doctor finding을 얻는다. 같은 점검에서 드러난 keystore 문제(로그인 세션 밖 프로세스가 `platform` 개인키를 읽지 못한다, 결정 15)는 macOS와 Linux 모두에 해당해 함께 닫는다. ADR-0035 결정 27의 "macOS LaunchDaemon은 이 ADR의 범위가 아니다" 문장은 이 ADR을 가리키게 고친다(결과 절).
 
 ## 맥락
 
@@ -15,7 +17,8 @@
 - 매니저 호출은 되돌리기 어려운 부작용이 있다. 서비스 매니저의 재시작은 프로세스와 함께 detach된 세션을 전부 지운다(ADR-0003, `docs/deploy/service.md` Notes for both). 그래서 `install`을 다시 쳤다는 이유로 이미 떠 있는 유닛을 재시작하면 안 된다. `install`은 바이너리 경로를 갱신하려고 반복해서 치는 명령이다(§6.18 "바이너리 경로를 다시 잡는다").
 - 두 매니저의 "이미 적재됨" 처리가 다르다. `launchctl bootstrap`은 이미 적재된 label에 오류로 답하고, `systemctl --user enable --now`는 이미 떠 있는 유닛을 건드리지 않고 성공한다.
 - macOS의 `gui/<uid>` 도메인은 로그인한 GUI 세션이 있어야 존재한다. SSH로만 들어간 Mac에서는 `bootstrap`이 실패한다. WSL은 systemd가 PID 1이 아니면 `systemctl --user`가 소켓 오류로 실패한다(`docs/deploy/service.md` WSL 절).
-- `docs/ROADMAP.md` M17의 명시적 out이 범위를 닫는다. `acl.toml`을 쓰는 동작, 로그인 세션 밖 상시 기동(systemd linger 자동 설정, macOS LaunchDaemon), qsh 자체 데몬화는 이 ADR에 없다.
+- `docs/ROADMAP.md` M17의 명시적 out이 범위를 닫는다. `acl.toml`을 쓰는 동작과 qsh 자체 데몬화는 이 ADR에 없다. 로그인 세션 밖 상시 기동은 어느 플랫폼에서도 qsh가 자동으로 설정하지 않는다(linger 자동 설정, LaunchDaemon 설치, Windows 상시 기동 작업 등록 모두). 대신 플랫폼마다 사람이 root 또는 관리자 권한으로 한 번 치는 문서화된 레시피와, 상시 기동이 아닌 상태를 알리는 doctor finding이 있다(결정 12~14).
+- 개인키가 OS credential store에 있으면(`identity.key_store = "platform"`) 로그인 세션 밖에서 읽히지 않는다. macOS `platform`은 사용자의 login Keychain(`apple-native-keyring-store`)이고, login Keychain은 로그인 전과 로그아웃 뒤에 잠겨 있다. Linux `platform`은 Secret Service이며 linger로 뜬 유닛에는 D-Bus 세션도 잠금 해제된 collection도 없다. 적재 경로는 `identity.toml`에 기록된 store만 열고 대체 경로가 없으므로(`crates/qsh-core/src/identity/mod.rs`의 `open_store`), 이 조합의 `qsh serve`는 기동 시 개인키를 읽지 못하고 끝난다. `auto`의 파일 대체는 `qsh init` 때 한 번만 판정되므로, 데스크톱에서 init한 장비는 대개 `platform`이다. Windows는 상시 기동 작업이 `LogonType=Password`로 사용자 프로필과 DPAPI 키를 적재하므로 Credential Manager 항목을 그대로 읽는다(ADR-0035 결정 12·27).
 
 ## 결정
 
@@ -47,7 +50,29 @@
 
 11. 문서와 코드의 대조를 테스트가 고정한다. `crates/qsh-core/tests/service_docs.rs`가 이미 `docs/deploy/service.md`의 `xml`/`ini` 펜스를 렌더러 출력과 대조하는 틀이므로, 같은 파일에 `service.md`의 활성화 레시피(`launchctl bootstrap …`, `systemctl --user daemon-reload`, `enable --now …`, 비활성화 레시피)를 읽어 결정 3 표의 argv 빌더 출력과 같은지 확인하는 테스트를 더한다. `service.md`는 같은 커밋에서 비활성화 레시피와 `--activate` 안내를 얻는다.
 
-12. `launchctl`의 label과 `systemctl`의 유닛 이름은 오늘의 `io.qsh.<mode>`, `qsh-<mode>.service` 그대로다. `reverse` 유닛은 파일 이름과 label만 `reverse`라는 §6.18 규칙도 그대로다. linger, LaunchDaemon, 시스템 스코프 유닛은 이 ADR이 다루지 않는다(M17 명시적 out).
+12. `launchctl`의 label과 `systemctl`의 유닛 이름은 오늘의 `io.qsh.<mode>`, `qsh-<mode>.service` 그대로다. `reverse` 유닛은 파일 이름과 label만 `reverse`라는 §6.18 규칙도 그대로다. 로그인 세션 밖 상시 기동은 qsh가 어느 플랫폼에서도 자동으로 설정하지 않는다. `--activate`는 linger를 켜지 않고, LaunchDaemon을 설치하지 않으며, Windows에서 상시 기동 작업을 등록하지 않는다. 플랫폼마다 사람이 치는 레시피가 `docs/deploy/service.md`에 있다. Linux는 `loginctl enable-linger $USER`(오늘 있다), macOS는 결정 13의 LaunchDaemon, Windows는 ADR-0035 결정 27의 상시 기동 작업이다. 시스템 스코프 systemd 유닛(`/etc/systemd/system`)은 linger가 같은 효과를 내므로 레시피를 따로 두지 않는다.
+
+13. macOS 상시 기동 레시피는 `UserName`을 지정한 LaunchDaemon이다. 사람이 root로 설치하고 qsh는 그 파일을 쓰지도 `launchctl`에 넘기지도 않는다. `docs/deploy/service.md` launchd 절이 다음을 갖는다.
+    - 파일은 `/Library/LaunchDaemons/io.qsh.<mode>.plist`이고 label은 LaunchAgent와 같은 `io.qsh.<mode>`다. 둘을 동시에 적재하지 않으므로 label이 겹쳐도 혼동이 없고, doctor와 `status`가 같은 이름으로 찾는다.
+    - plist 본문은 LaunchAgent 렌더러가 내는 것과 같은 `ProgramArguments`·`KeepAlive`·`RunAtLoad`·로그 경로(`~/Library/Logs/qsh/`를 절대 경로로 펼친 것)에 `UserName`(그 사용자), `GroupName`(`staff`), `EnvironmentVariables`의 `HOME`을 더한 것이다. LaunchDaemon은 `HOME`을 채워 주지 않으므로 이 값이 있어야 `~/.config/qsh`를 찾는다.
+    - 설치는 `qsh service uninstall --deactivate`로 LaunchAgent를 먼저 내린 뒤, `sudo cp`로 파일을 놓고 `sudo chown root:wheel`, `sudo chmod 644`, `sudo launchctl bootstrap system /Library/LaunchDaemons/io.qsh.<mode>.plist` 순서다. 해제는 `sudo launchctl bootout system/io.qsh.<mode>`와 파일 삭제다. 바이너리를 옮기면 사람이 plist의 경로를 고쳐 다시 `bootout`/`bootstrap`하고, 이때 detach된 세션이 지워진다는 고지를 그대로 단다.
+    - 이 펜스는 렌더러가 만들지 않으므로 `service_docs.rs`의 대조는 바이트 일치가 아니다. 펜스의 `ProgramArguments`와 `KeepAlive`·`RunAtLoad`가 LaunchAgent 렌더러 출력과 같고 `UserName`·`HOME`이 있다는 것만 확인한다(결과 절의 `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`).
+
+14. doctor는 macOS 상시 기동을 Linux linger와 같은 수준으로 본다.
+    - `service_not_registered`는 macOS에서 LaunchAgent(`~/Library/LaunchAgents/io.qsh.<mode>.plist`)나 LaunchDaemon(`/Library/LaunchDaemons/io.qsh.<mode>.plist`) 중 하나가 있으면 등록된 것으로 본다. 두 경로 모두 파일 존재만 보고 `launchctl`을 부르지 않는다(`probe_systemd_linger`가 linger 파일만 보는 것과 같은 모양).
+    - `launchagent_session_scoped`는 LaunchAgent가 있고 같은 mode의 LaunchDaemon 파일이 없을 때만 낸다. 문구는 "일반 사용자 계정에는 헤드리스 대응물이 없다"에서 "로그인 세션 밖에서 돌리려면 `docs/deploy/service.md`의 LaunchDaemon 레시피를 root로 한 번 실행하라"로 바뀐다. code와 수준은 그대로라 기존 소비자에게 additive다.
+    - `qsh service status`의 `exists`는 오늘처럼 LaunchAgent 경로만 본다. LaunchDaemon은 사람이 설치한 파일이고 §6.18의 `service.*` op이 관리하는 대상이 아니다. `status --live`도 `gui/<uid>` 도메인만 묻는다.
+
+15. 상시 기동과 OS credential store가 겹치면 doctor가 알리고, 사람이 개인키를 파일 store로 옮기는 op을 둔다.
+    - 새 doctor finding `keystore_session_bound`(warn)는 `identity.key_store`가 `platform`이고 상시 기동 형태가 있을 때 낸다. 상시 기동 형태는 macOS에서 LaunchDaemon 파일, Linux에서 linger 파일과 등록된 user unit의 조합이다. Windows에서는 내지 않는다(맥락 절, 상시 기동 작업이 DPAPI를 적재한다). remedy는 `qsh identity move-key --to file`이다. 진단 코드 목록에 하나를 더하는 additive 변경이다.
+    - 새 op `identity.move_key`(`qsh identity move-key --to <file|platform>`)는 개인키를 store 사이에서 옮긴다. device_id, 인증서, fingerprint는 바뀌지 않으므로 상대 장비의 pin과 ACL 행은 그대로 유효하다. 순서는 원래 store에서 읽기, 새 store에 쓰기(파일이면 0600, Windows는 ADR-0035 결정 9의 DACL), 새 store에서 다시 읽어 공개키 대조, `identity.toml`의 `key_store` 갱신, 원래 store의 항목 삭제다. 어느 단계든 실패하면 그 앞까지 만든 것을 지우고 원래 상태로 끝나며, 마지막 삭제만 실패하면 성공으로 끝내되 결과에 `stale_entry_left: true`를 싣고 human 렌더가 남은 항목을 알린다. 이미 그 store면 아무것도 하지 않고 `moved: false`로 성공한다.
+    - 계약은 additive다. 결과 `data`는 `{ "from", "to", "moved", "stale_entry_left" }`이고 `from`/`to`는 기존 `key_store` 값 어휘(`platform`/`file`)를 쓴다. 오류는 기존 `ErrorCode`만 쓴다. 초기화 전이면 `identity.export`와 같은 `CONFIG_ERROR`, `--to platform`인데 store가 없으면 `identity.init --key-store platform`과 같은 `INTERNAL`이다. ADR-0013대로 개인키는 인자로도 결과로도 나가지 않는다.
+    - audit은 `trust.*`처럼 첫 변경 전에 한 건 쓰고(action `identity.move_key`, 구조 필드만), 실패하면 아무것도 옮기지 않는다. 원격에서 부를 수 없는 로컬 op이라 ACL 대상이 아니다.
+    - `qsh init`의 `auto`가 판정하는 규칙(platform 우선)은 바꾸지 않는다. 상시 기동을 쓰는지는 init 시점에 알 수 없고, 데스크톱에서는 OS store가 더 나은 기본값이다.
+
+16. 레시피를 자동화하지 않는다는 선은 세 플랫폼에 같다. qsh가 root나 관리자 권한을 요구하거나 `sudo`를 부르는 경로는 없다. `doctor`와 `setup`의 `next`는 레시피를 가리킬 수는 있어도 실행하지 않는다.
+
+17. 이 개정은 wire 프로토콜을 바꾸지 않는다. `qsh.cli/v1`에는 새 op 하나(`identity.move_key`)와 새 진단 코드 하나(`keystore_session_bound`)가 더해지고, 둘 다 additive다. 새 `ErrorCode`는 없다.
 
 ## 근거
 
@@ -64,7 +89,11 @@ argv를 문서와 대조하는 테스트는 이미 있는 장치(`service_docs.r
 - `install`이 기본으로 활성화한다. 기각한다. 위 근거의 세션 손실 때문이다. `--no-activate`로 끄는 모양도 같은 이유로 기각한다. 기본이 위험한 쪽이면 플래그를 빠뜨린 사람이 피해를 본다.
 - 별도 subcommand(`qsh service start`/`stop`)로 연다. 이번에는 채택하지 않는다. 의미는 같지만 세 op이 한 쌍(파일과 활성화)을 한 호출에서 같은 audit 한 건으로 다루는 편이 부분 성공 상태(파일은 있고 활성화는 안 됨)를 한 곳에서 처리한다. 실사용에서 파일 없이 start/stop만 필요하다는 요구가 관측되면 그때 additive로 연다.
 - 이미 떠 있는 유닛을 `--activate`에서 재시작한다(`bootout`+`bootstrap`, `restart`). 기각한다. 결정 4의 이유다. 재시작이 필요하면 사람이 `docs/deploy/service.md` 절차로 세션 손실을 감수하고 한다.
-- `launchctl bootstrap` 실패 시 `user/<uid>` 도메인으로 대체한다. 기각한다. 도메인이 다르면 LaunchAgent의 수명 모델(로그인 세션 종속)이 달라지고, 그 선택은 로그인 세션 밖 상시 기동으로 이어져 M17 명시적 out과 겹친다.
+- `launchctl bootstrap` 실패 시 `user/<uid>` 도메인으로 대체한다. 기각한다. 도메인이 다르면 LaunchAgent의 수명 모델(로그인 세션 종속)이 조용히 달라진다. 로그인 세션 밖 상시 기동은 사람이 의도해서 치는 결정 13의 레시피 하나로만 들어간다.
+- qsh가 LaunchDaemon을 직접 설치한다(`--system` 같은 플래그로 `/Library/LaunchDaemons`에 쓰고 `launchctl bootstrap system`). 기각한다. root가 필요하고, Linux의 linger와 Windows의 상시 기동 작업도 qsh가 대신 설정하지 않으므로 macOS만 자동화하면 그 자체로 플랫폼 간 차이가 생긴다(결정 16). 세 플랫폼을 함께 자동화하는 요구가 관측되면 별도 ADR로 연다.
+- LaunchDaemon이 System Keychain이나 별도 keychain 파일에서 개인키를 읽게 한다. 기각한다. System Keychain은 root 소유라 `UserName`으로 내려간 프로세스가 읽지 못하고, 별도 keychain은 잠금 해제 비밀번호를 어딘가에 저장해야 해서 0600 파일 store보다 나은 점이 없다. Linux Secret Service에도 같은 구조의 답이 없다.
+- 적재 시 `platform`이 Unavailable이면 파일 store로 대체한다. 기각한다. 파일 store에는 키가 없으므로 대체할 대상이 없고, 대체가 성공하는 경우가 있다면 두 store에 키가 따로 있다는 뜻이라 fail-closed 원칙에 어긋난다.
+- 사람이 `qsh init --key-store file`로 새 identity를 만든다. 기각한다. fingerprint가 바뀌어 상대 장비의 pin과 ACL 행을 전부 다시 만들어야 한다. `identity.move_key`는 fingerprint를 유지한다.
 - 매니저 호출 전에 `launchctl`/`systemctl` 존재를 `PATH`에서 탐색한다. 기각한다. 현행 코드가 의도적으로 탐색하지 않는 성질("probing for `systemctl`/`launchctl`, ever")을 깨고, 탐색과 호출 사이의 어긋남이 생긴다. spawn의 `NotFound`가 같은 정보를 준다.
 - `systemctl --user enable`만 하고 `--now`는 빼서 재부팅 때 뜨게 한다. 기각한다. `service.md`의 레시피가 `enable --now`이고 `doctor`의 `service_not_registered` 안내가 "등록하라"에서 끝나므로, 사람이 기대하는 상태는 "지금 떠 있다"이다. 둘을 어긋나게 두면 문서-코드 대조 테스트(결정 11)의 기준도 흐려진다.
 - 활성화 전용 audit 레코드를 더한다. 기각한다. 결정 9대로 필드가 없고, audit의 action 문자열은 op의 `COMMAND`(`ServiceInstallOp::COMMAND`)라서 새 action은 새 dotted op를 뜻하고, `docs/CLI.md` §2.4 목록과 `op_registration_completeness.rs`의 분류를 건드린다. 활성화 사실이 audit에 남아야 한다는 요구가 생기면 `AuditRecord`의 확장을 별도 ADR로 연다.
@@ -82,6 +111,14 @@ argv를 문서와 대조하는 테스트는 이미 있는 장치(`service_docs.r
   - `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code`, `a_manager_call_past_the_deadline_is_timeout`.
   - `service_md_activation_recipes_match_the_argv_builders`(`crates/qsh-core/tests/service_docs.rs`).
 - fixture: `crates/qsh-cli/tests/fixtures/cli-v1/`에 플래그를 준 호출의 성공 envelope 세 개(`activation`, `deactivation`, `active`)를 append하고 `REQUIRED_FIXTURES`에 등록한다. 기존 service fixture는 바뀌지 않는다. `qsh.cli/v1`은 additive만 쓰고, wire 프로토콜과 `ErrorCode`는 변하지 않는다.
-- `docs/deploy/service.md`가 비활성화 레시피와 `--activate` 안내를 얻는다. `docs/adr/README.md` 목록의 이 ADR 상태 열을 `승인됨`으로 고치고 ADR-0024 결정 11의 "별도 결정" 문장이 이 ADR을 가리키게 하는 것은 승인 뒤 같은 커밋에서 한다.
-- 크기는 ADR 0.2ew에 구현 0.3~0.5ew다(`docs/ROADMAP.md` M17 (a)). `ManagerRunner` seam과 플래그 세 개, 필드 세 개, 테스트와 문서 동기화로 구성된다.
+- `docs/deploy/service.md`가 비활성화 레시피와 `--activate` 안내를 얻는다. launchd 절의 "LaunchDaemon은 이 문서의 범위가 아니다" 문단은 결정 13의 LaunchDaemon 펜스, 설치·해제 레시피, 바이너리 이동 시 절차로 바뀐다. 상시 기동 세 레시피(linger, LaunchDaemon, Windows 상시 기동 작업) 각각에 "`platform` keystore면 먼저 `qsh identity move-key --to file`"이라는 한 줄이 붙는다. `docs/adr/README.md` 목록의 이 ADR 상태 열을 `승인됨`으로 고치고 ADR-0024 결정 11의 "별도 결정" 문장이 이 ADR을 가리키게 하는 것은 승인 뒤 같은 커밋에서 한다.
+- 2026-10-13 개정분의 착지 항목은 아래와 같다.
+  - `docs/CLI.md`: §2.4 op 목록에 `identity.move_key`, `identity.*` 절에 `qsh identity move-key` 시그니처와 결과·오류, §6.17 표에 `keystore_session_bound` 행과 `launchagent_session_scoped`·`service_not_registered`의 macOS 문구 갱신, 진단 코드 개수 문장, 버전 헤더의 additive 기록.
+  - `crates/qsh-core/src/doctor.rs`: `LAUNCHAGENT_SESSION_SCOPED` 문구, 새 `KEYSTORE_SESSION_BOUND`, 진단 코드 목록. `doctor/probe.rs`: LaunchDaemon 경로 존재 확인과 `service_unit_registered`의 macOS 분기.
+  - `docs/man/qsh-identity-move-key.1`(`cargo xtask man`), fixture `crates/qsh-cli/tests/fixtures/cli-v1/`에 `identity.move_key` 성공 envelope 둘(`moved: true`, `moved: false`)과 `keystore_session_bound`를 담은 doctor envelope 하나를 append하고 `REQUIRED_FIXTURES`에 등록, `op_registration_completeness.rs` 분류.
+  - `docs/design/threat-model.md` §3: `qsh service` 행에 "상시 기동은 사람이 설치한 파일이고 qsh는 읽기만 한다"를, 새 행 "`identity move-key`"(로컬 사용자, 개인키가 store 사이를 옮겨 가는 동안의 상태)를 더한다. §4 D(정보노출)에 파일 store로 옮긴 개인키의 0600·DACL 통제와 아래 핀 테스트를 적는다.
+  - `docs/design/testing.md` L1 「플랫폼 키스토어 릴리스 전 수동 단계」에 `move-key` 왕복(platform에서 file로, 다시 platform으로)을 세 OS에 더한다.
+  - ADR-0035 결정 27의 수명 항목에서 "macOS LaunchDaemon은 이 ADR의 범위가 아니다"를 "macOS 상시 기동 레시피는 ADR-0032 결정 13이다"로 고친다. README Known limitations의 LaunchAgent 문장도 레시피를 가리키게 한다.
+  - 고정할 테스트: `service_not_registered_accepts_a_launchdaemon_plist`, `launchagent_session_scoped_is_silent_when_a_launchdaemon_plist_exists`, `keystore_session_bound_fires_for_platform_store_under_launchdaemon`, `…_under_linger_with_a_registered_unit`, `keystore_session_bound_is_silent_for_file_store`, `move_key_keeps_the_fingerprint_and_device_id`, `move_key_to_the_current_store_is_a_no_op`, `a_failed_move_key_write_leaves_the_original_store_untouched`, `move_key_file_store_is_mode_0600`, `move_key_is_refused_when_the_audit_sink_fails`, `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`. 실제 Keychain과 Secret Service를 쓰는 왕복은 위 수동 단계가 맡는다.
+- 크기는 ADR 0.3ew(처음 판 0.2, 2026-10-13 개정 0.1)에 구현 1.0~1.5ew다(`docs/ROADMAP.md` M17 (a)). 처음 판 0.3~0.5는 `ManagerRunner` seam과 플래그 세 개, 필드 세 개, 테스트와 문서 동기화다. 개정분 0.7~1.0은 LaunchDaemon 레시피와 문서 대조 테스트 0.1~0.2, doctor의 LaunchDaemon 인식과 `keystore_session_bound` 0.2~0.3, `identity.move_key` op(세 플랫폼 store, 원자적 순서, audit, CLI·man·fixture) 0.4~0.5다.
 - 이 ADR이 `승인됨`이 되면 M17 (a)의 착수 조건이 풀린다.
