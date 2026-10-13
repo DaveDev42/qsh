@@ -1423,7 +1423,7 @@ impl Server {
     /// Unlike `trust add`'s own deliberate silent no-op on a name collision
     /// (`TrustStore::add_peer`'s own doc, M7 plan Step 2 (69dd788) decision B),
     /// pairing fails loudly on one (invariant #5): the `try_pin` hook below
-    /// returns `false` on a collision, which `crate::pairing::respond` turns
+    /// returns `None` on a collision, which `crate::pairing::respond` turns
     /// into `PairingError::PinCollision` (`SESSION_CONFLICT`) — and because
     /// that hook runs *before* the matched invite is marked consumed
     /// (`crate::trust::pairing::SharedInviteStore::redeem`'s `on_matched`),
@@ -1468,50 +1468,89 @@ impl Server {
         };
 
         let trust = &state.trust;
-        let result = crate::pairing::respond(conn, &state.invites, &self.device_name, |pin_name| {
-            let path = trust.path();
-            // Whole load→mutate→save under lock, not just the write —
-            // same discipline as `Ops::trust_add`/`trust_remove`
-            // (`TrustStore::lock`'s own doc, M7 plan Step 7-1 (69dd788)
-            // S1). This closure runs synchronously inside
-            // `SharedInviteStore::redeem`, which already holds its
-            // cache `RwLock` — that lock is acquired first, this one
-            // second, matching `TrustStore::lock`'s required order.
-            // Blocking here (a `flock` wait, then a small TOML
-            // rewrite) briefly parks the current tokio worker thread;
-            // see M7 plan Step 7-1 (69dd788)'s report for why that is
-            // accepted rather than moved to `spawn_blocking`.
-            let _lock = match crate::trust::TrustStore::lock(path) {
-                Ok(lock) => lock,
-                Err(err) => {
-                    tracing::error!(%err, "failed to lock the trust store during pairing");
-                    return false;
-                }
-            };
-            let mut store = match crate::trust::TrustStore::load(path) {
-                Ok(store) => store,
-                Err(err) => {
-                    tracing::error!(%err, "failed to load the trust store during pairing");
-                    return false;
-                }
-            };
-            let (peer, created, updated) =
-                store.add_peer(pin_name, None, observed_fp, crate::config::now_rfc3339());
-            if !created && !updated && peer.fingerprint != observed_fp.to_string() {
-                tracing::warn!(
-                    name = %pin_name,
-                    "pairing declined: name already pinned under a different identity"
+        let result = crate::pairing::respond(
+            conn,
+            &state.invites,
+            &self.device_name,
+            |pin_name, pin_role| {
+                let path = trust.path();
+                // Whole load→mutate→save under lock, not just the write —
+                // same discipline as `Ops::trust_add`/`trust_remove`
+                // (`TrustStore::lock`'s own doc, M7 plan Step 7-1 (69dd788)
+                // S1). This closure runs synchronously inside
+                // `SharedInviteStore::redeem`, which already holds its
+                // cache `RwLock` — that lock is acquired first, this one
+                // second, matching `TrustStore::lock`'s required order.
+                // Blocking here (a `flock` wait, then a small TOML
+                // rewrite) briefly parks the current tokio worker thread;
+                // see M7 plan Step 7-1 (69dd788)'s report for why that is
+                // accepted rather than moved to `spawn_blocking`.
+                let _lock = match crate::trust::TrustStore::lock(path) {
+                    Ok(lock) => lock,
+                    Err(err) => {
+                        tracing::error!(%err, "failed to lock the trust store during pairing");
+                        return None;
+                    }
+                };
+                let mut store = match crate::trust::TrustStore::load(path) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        tracing::error!(%err, "failed to load the trust store during pairing");
+                        return None;
+                    }
+                };
+                // ADR-0045 결정 8: the invite record fixed the role; the
+                // redeeming peer had no say in it.
+                let (peer, created, updated) = store.add_peer_with_role(
+                    pin_name,
+                    None,
+                    observed_fp,
+                    crate::config::now_rfc3339(),
+                    pin_role,
                 );
-                return false;
-            }
-            if (created || updated)
-                && let Err(err) = store.save(path)
-            {
-                tracing::error!(%err, "failed to persist the trust store during pairing");
-                return false;
-            }
-            true
-        })
+                if !created && !updated && peer.fingerprint != observed_fp.to_string() {
+                    tracing::warn!(
+                        name = %pin_name,
+                        "pairing declined: name already pinned under a different identity"
+                    );
+                    return None;
+                }
+                // A role other than `none` is a grant written by this call:
+                // no durable audit record, no pin (ADR-0045 결정 8). The
+                // decline surfaces as the same non-distinguishing pin refusal a
+                // name collision does, and the invite is left unconsumed.
+                if created && pin_role != crate::trust::TrustRole::None {
+                    let mut record = AuditRecord::local_op(
+                        "trust.invite",
+                        Principal::Device(pin_name.to_string()).to_string(),
+                        pin_name.to_string(),
+                    );
+                    record.role = Some(pin_role.as_str().to_string());
+                    if let Err(err) = self.audit.record(&record) {
+                        tracing::error!(%err, "failed to audit the role written during pairing");
+                        return None;
+                    }
+                }
+                if (created || updated)
+                    && let Err(err) = store.save(path)
+                {
+                    tracing::error!(%err, "failed to persist the trust store during pairing");
+                    return None;
+                }
+                // The role the pin holds now. A new pin has `pin_role`; an
+                // existing pin keeps its own, and no `role` key reads as
+                // `none` (ADR-0045 결정 3). A value outside the six names
+                // cannot occur (the store load refused the file).
+                Some(if created {
+                    pin_role
+                } else {
+                    peer.role
+                        .as_deref()
+                        .and_then(|role| role.parse().ok())
+                        .unwrap_or(crate::trust::TrustRole::None)
+                })
+            },
+        )
         .await;
 
         match result {
@@ -1535,6 +1574,7 @@ impl Server {
                     .is_some_and(|index| index.names_device(&success.pinned_name));
                 self.notify(&crate::pairing::pairing_pin_notice(
                     &success.pinned_name,
+                    success.pinned_role.unwrap_or(crate::trust::TrustRole::None),
                     acl_row_present,
                     success.pinned_by_invite,
                 ));

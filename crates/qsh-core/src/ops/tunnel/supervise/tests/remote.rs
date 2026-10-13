@@ -45,6 +45,7 @@ fn open_remote(bind_failures: usize) -> RemoteRig {
         address: Some(peer.addr.to_string()),
         fingerprint: Some(peer.fingerprint.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let hold = ops

@@ -152,6 +152,7 @@ fn supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_con
         address: Some(proxy.addr().to_string()),
         fingerprint: Some(host.server_identity.fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .expect("pin the host");
 

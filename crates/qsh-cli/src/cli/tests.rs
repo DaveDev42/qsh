@@ -719,13 +719,13 @@ fn trust_add_requires_a_name_only() {
 fn pair_invite_and_trust_invite_converge_on_the_same_parse() {
     let via_pair = Cli::try_parse_from(["qsh", "pair", "invite", "--as", "workbench"]).unwrap();
     let pair_as_name = match via_pair.command.unwrap() {
-        Command::Pair(PairCmd::Invite { as_name }) => as_name,
+        Command::Pair(PairCmd::Invite { as_name, .. }) => as_name,
         other => panic!("expected pair invite, got {other:?}"),
     };
 
     let via_trust = Cli::try_parse_from(["qsh", "trust", "invite", "--as", "workbench"]).unwrap();
     let trust_as_name = match via_trust.command.unwrap() {
-        Command::Trust(TrustCmd::Invite { as_name }) => as_name,
+        Command::Trust(TrustCmd::Invite { as_name, .. }) => as_name,
         other => panic!("expected trust invite, got {other:?}"),
     };
 
@@ -737,13 +737,19 @@ fn pair_invite_and_trust_invite_converge_on_the_same_parse() {
         Cli::try_parse_from(["qsh", "pair", "invite"])
             .unwrap()
             .command,
-        Some(Command::Pair(PairCmd::Invite { as_name: None }))
+        Some(Command::Pair(PairCmd::Invite {
+            as_name: None,
+            role: None
+        }))
     ));
     assert!(matches!(
         Cli::try_parse_from(["qsh", "trust", "invite"])
             .unwrap()
             .command,
-        Some(Command::Trust(TrustCmd::Invite { as_name: None }))
+        Some(Command::Trust(TrustCmd::Invite {
+            as_name: None,
+            role: None
+        }))
     ));
 }
 
@@ -753,20 +759,24 @@ fn pair_invite_and_trust_invite_converge_on_the_same_parse() {
 /// neither, and `--as`.
 #[test]
 fn pair_accept_and_trust_accept_converge_on_the_same_parse() {
-    fn accept_fields(cmd: Command) -> (String, Option<String>, bool, Option<String>) {
+    fn accept_fields(
+        cmd: Command,
+    ) -> (String, Option<String>, bool, Option<String>, Option<String>) {
         match cmd {
             Command::Pair(PairCmd::Accept {
                 address,
                 code,
                 code_stdin,
                 as_name,
+                role,
             })
             | Command::Trust(TrustCmd::Accept {
                 address,
                 code,
                 code_stdin,
                 as_name,
-            }) => (address, code, code_stdin, as_name),
+                role,
+            }) => (address, code, code_stdin, as_name, role),
             other => panic!("expected an accept command, got {other:?}"),
         }
     }
@@ -776,6 +786,7 @@ fn pair_accept_and_trust_accept_converge_on_the_same_parse() {
         &["box", "--code-stdin"],
         &["box"],
         &["box", "the-code", "--as", "chosen-name"],
+        &["box", "the-code", "--role", "exec"],
     ];
     for args in forms {
         let mut pair_argv = vec!["qsh", "pair", "accept"];
@@ -815,7 +826,10 @@ fn trust_invite_and_trust_accept_are_hidden_from_help_but_still_parse() {
         Cli::try_parse_from(["qsh", "trust", "invite"])
             .unwrap()
             .command,
-        Some(Command::Trust(TrustCmd::Invite { as_name: None }))
+        Some(Command::Trust(TrustCmd::Invite {
+            as_name: None,
+            role: None
+        }))
     ));
     assert!(matches!(
         Cli::try_parse_from(["qsh", "trust", "accept", "box"])
@@ -862,4 +876,46 @@ fn trust_rename_takes_two_required_positionals() {
     }
     assert!(Cli::try_parse_from(["qsh", "trust", "rename", "old"]).is_err());
     assert!(Cli::try_parse_from(["qsh", "trust", "rename"]).is_err());
+}
+
+/// ADR-0045 결정 8: the role-writing commands take an optional `--role`
+/// (validated in `qsh-core`, not by clap), and `trust set-role` takes the
+/// name and the role positionally, both required.
+#[test]
+fn role_flags_and_trust_set_role_parse() {
+    match Cli::try_parse_from(["qsh", "trust", "add", "mac", "--role", "read-only"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Trust(TrustCmd::Add(args)) => assert_eq!(args.role.as_deref(), Some("read-only")),
+        other => panic!("expected trust add, got {other:?}"),
+    }
+    match Cli::try_parse_from(["qsh", "trust", "add", "mac"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Trust(TrustCmd::Add(args)) => assert!(args.role.is_none()),
+        other => panic!("expected trust add, got {other:?}"),
+    }
+    match Cli::try_parse_from(["qsh", "pair", "invite", "--role", "tunnel"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Pair(PairCmd::Invite { role, .. }) => assert_eq!(role.as_deref(), Some("tunnel")),
+        other => panic!("expected pair invite, got {other:?}"),
+    }
+    match Cli::try_parse_from(["qsh", "trust", "set-role", "phone", "exec"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Trust(TrustCmd::SetRole { name, role }) => {
+            assert_eq!((name.as_str(), role.as_str()), ("phone", "exec"));
+        }
+        other => panic!("expected trust set-role, got {other:?}"),
+    }
+    assert!(Cli::try_parse_from(["qsh", "trust", "set-role", "phone"]).is_err());
 }

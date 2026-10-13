@@ -89,6 +89,7 @@ fn pin_by_fingerprint(ops: &crate::ops::Ops, name: &str, fingerprint: &str) {
         address: None,
         fingerprint: Some(fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 }

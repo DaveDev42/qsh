@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-add \- Pin a peer by name
 .SH SYNOPSIS
-\fBqsh trust add\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-fingerprint\fR] [\fB\-\-jsonl\fR] [\fB\-\-cert\-file\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
+\fBqsh trust add\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-fingerprint\fR] [\fB\-\-jsonl\fR] [\fB\-\-cert\-file\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-role\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
 .SH DESCRIPTION
 Pin a peer by name
 .SH OPTIONS
@@ -29,6 +29,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-role\fR \fI<ROLE>\fR
+Trust role for the new pin: one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none` (`docs/CLI.md` §6.11, ADR\-0045). Without it, a pin with no `\-\-address` is `full` and a pin with one is `none`. An already\-pinned name keeps its role; change it with `qsh trust set\-role`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -356,6 +356,7 @@ fn setup_refuses_second_name_for_pinned_fingerprint() {
             address: None,
             fingerprint: None,
             cert_pem: Some(pem.clone()),
+            role: None,
         })
         .unwrap();
     let data = sandbox
@@ -382,6 +383,7 @@ fn setup_pin_cert_pending_on_fingerprint_mismatch() {
             address: None,
             fingerprint: None,
             cert_pem: Some(pinned),
+            role: None,
         })
         .unwrap();
     let before = sandbox.ops.trust_list().unwrap().peers;

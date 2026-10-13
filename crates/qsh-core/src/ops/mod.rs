@@ -12,8 +12,8 @@ use qsh_proto::{
     BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
     KeyStoreMode, SchemaData, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq,
     TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSshPreviewData, TrustSshPreviewReq,
-    VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq,
+    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -21,7 +21,7 @@ use crate::audit::{AuditRecord, AuditSink, FileAuditSink};
 use crate::config::{Config, Paths, now_rfc3339};
 use crate::hosts::HostsFile;
 use crate::identity::LoadedIdentity;
-use crate::trust::{SharedTrustStore, TrustStore, normalize_peer_address};
+use crate::trust::{SharedTrustStore, TrustRole, TrustStore, normalize_peer_address};
 
 pub mod acl;
 pub mod cert;
@@ -443,6 +443,13 @@ pub struct TrustRenameOp;
 
 impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
+}
+
+/// The `trust.set_role` operation (`docs/CLI.md` §6.11, ADR-0045 결정 8).
+pub struct TrustSetRoleOp;
+
+impl Operation for TrustSetRoleOp {
+    const COMMAND: &'static str = "trust.set_role";
 }
 
 /// The `trust.ssh_preview` operation (`docs/CLI.md` §6.11, ADR-0026 결정 4).

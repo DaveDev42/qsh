@@ -51,9 +51,10 @@ use qsh_core::{
     Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp,
-    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
-    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
+    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
+    read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -61,8 +62,8 @@ use qsh_proto::{
     ExecRunReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, SetupRole,
     SetupRunReq, SetupStatus, SetupStepId, TrustAcceptReq, TrustAddCaReq, TrustAddReq,
-    TrustInviteReq, TrustRenameReq, TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq,
-    TunnelListReq, TunnelOpenReq,
+    TrustInviteReq, TrustRenameReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq,
+    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -456,15 +457,18 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         // `qsh pair invite` and its hidden pre-rename spelling `qsh trust
         // invite` (ADR-0012 결정 3/4) funnel into the same helper, so the
         // two dotted-name spellings can never drift apart in behavior.
-        Command::Trust(TrustCmd::Invite { as_name }) => {
-            run_trust_invite(cli, &ops, as_name.clone())
+        Command::Trust(TrustCmd::Invite { as_name, role }) => {
+            run_trust_invite(cli, &ops, as_name.clone(), role.clone())
         }
-        Command::Pair(PairCmd::Invite { as_name }) => run_trust_invite(cli, &ops, as_name.clone()),
+        Command::Pair(PairCmd::Invite { as_name, role }) => {
+            run_trust_invite(cli, &ops, as_name.clone(), role.clone())
+        }
         Command::Trust(TrustCmd::Accept {
             address,
             code,
             code_stdin,
             as_name,
+            role,
         }) => run_trust_accept(
             cli,
             &ops,
@@ -472,12 +476,14 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             code.clone(),
             *code_stdin,
             as_name.clone(),
+            role.clone(),
         ),
         Command::Pair(PairCmd::Accept {
             address,
             code,
             code_stdin,
             as_name,
+            role,
         }) => run_trust_accept(
             cli,
             &ops,
@@ -485,8 +491,18 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             code.clone(),
             *code_stdin,
             as_name.clone(),
+            role.clone(),
         ),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
+        Command::Trust(TrustCmd::SetRole { name, role }) => finish(
+            cli,
+            TrustSetRoleOp::COMMAND,
+            ops.trust_set_role(TrustSetRoleReq {
+                name: name.clone(),
+                role: role.clone(),
+            }),
+            human::print_trust_set_role,
+        ),
         Command::Trust(TrustCmd::SshPreview { path }) => finish(
             cli,
             TrustSshPreviewOp::COMMAND,
@@ -1556,6 +1572,7 @@ fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
         address: args.address.clone(),
         fingerprint,
         cert_pem: cert_pem.clone(),
+        role: args.role.clone(),
     };
 
     let mut result = ops.trust_add(request(args.fingerprint.clone()));
@@ -1576,7 +1593,18 @@ fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
         }
     }
 
-    finish(cli, TrustAddOp::COMMAND, result, human::print_trust_add)
+    // ADR-0045 결정 8: re-running `trust add` for a pinned name never
+    // changes its role. Say so on every re-add (`created: false`) whatever
+    // `--role` was, so a repeated command cannot be mistaken for a role
+    // change. Which role a call would have written is `qsh-core`'s decision
+    // and is not repeated here.
+    finish(cli, TrustAddOp::COMMAND, result, |data| {
+        human::print_trust_add(data)?;
+        if !data.created {
+            human::print_trust_add_role_unchanged()?;
+        }
+        Ok(())
+    })
 }
 
 /// `qsh trust add-ca` — register a foreign CA root supplied as a
@@ -1698,6 +1726,7 @@ fn run_trust_accept(
     code: Option<String>,
     code_stdin: bool,
     as_name: Option<String>,
+    role: Option<String>,
 ) -> i32 {
     if normalize_peer_address(address).port_filled {
         stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
@@ -1708,6 +1737,7 @@ fn run_trust_accept(
             address: address.to_string(),
             code,
             as_name: as_name.clone(),
+            role,
         })
     });
     // `--as` omitted: print the pinned self-asserted name and (address
@@ -1925,11 +1955,11 @@ fn run_setup(cli: &Cli, ops: &Ops, cmd: &Option<SetupCmd>) -> i32 {
 /// `qsh pair invite` and its hidden pre-rename spelling `qsh trust invite`
 /// (ADR-0012 결정 3/4) — one function, so the two dotted-name spellings
 /// can never drift apart in behavior.
-fn run_trust_invite(cli: &Cli, ops: &Ops, as_name: Option<String>) -> i32 {
+fn run_trust_invite(cli: &Cli, ops: &Ops, as_name: Option<String>, role: Option<String>) -> i32 {
     finish(
         cli,
         TrustInviteOp::COMMAND,
-        ops.trust_invite(TrustInviteReq { as_name }),
+        ops.trust_invite(TrustInviteReq { as_name, role }),
         // `ops.invite_address_advice()` must stay inline, as the second
         // argument `print_trust_invite` is called with, rather than
         // hoisted into a `let` above this closure: `finish` never calls
@@ -2164,6 +2194,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Trust(TrustCmd::SetRole { .. }) => TrustSetRoleOp::COMMAND,
         Command::Trust(TrustCmd::SshPreview { .. }) => TrustSshPreviewOp::COMMAND,
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,

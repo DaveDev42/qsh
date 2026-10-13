@@ -306,6 +306,7 @@ async fn setup(authorizer: Arc<dyn Authorizer>) -> Fixture {
                 address: Some(addr),
                 fingerprint: Some(fp),
                 cert_pem: None,
+                role: None,
             })
         }
     })

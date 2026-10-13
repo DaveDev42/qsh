@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, `trust list`의 role 열, audit의 optional `role` 키, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, ADR-0045, §6.11·§6.12·§6.13; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, ADR-0045, §6.11·§6.12·§6.13; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -84,6 +84,7 @@ trust.add_ca
 trust.list
 trust.remove
 trust.rename
+trust.set_role
 trust.ssh_preview
 trust.invite
 trust.accept
@@ -130,7 +131,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
-위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
+위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `trust.set_role`도 같은 부류다: 원격 peer가 요청할 수 없는 이 머신의 local op이지만 실행되고 나면 그 pin이 받는 action이 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
 
 역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh serve --to`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
@@ -739,7 +740,8 @@ qsh trust remove <name> --json
       "name": "personal-mac",
       "fingerprint": "sha256:BASE64FINGERPRINT",
       "address": "personal-mac.example.com:4433",
-      "added_at": "2026-08-17T00:00:00Z"
+      "added_at": "2026-08-17T00:00:00Z",
+      "role": "none"
     },
     "created": true
   }
@@ -840,9 +842,51 @@ human 출력의 `trust list`는 `ROLE` 열을 낸다. `role` 키가 없는 pin�
 - `full`의 `file.read`/`file.write`는 파일 복사(ADR-0029)가 항상-deny를 걷을 때 비로소 효과가 난다.
 - 소유 축은 role로 받은 grant가 `scope = "owned"` 행처럼 자기가 만든 자원으로 걸러지는지를 뜻한다.
 - `exec`는 의도를 나타내는 구분이지 `full`에 대한 보안 경계가 아니다. 셸이나 `exec.run`을 가진 peer는 serve 계정으로 `qsh trust set-role`을 실행해 자기 role을 올릴 수 있다. 보안 경계 구실을 하는 role은 명령 실행을 주지 않는 `tunnel`, `read-only`, `reverse`, `none`뿐이다.
-- 이 표는 role이 무엇을 주는지만 정한다. 이 단계에서는 role을 저장하고 보여 줄 뿐이고, 인가 판정은 아직 이 키를 읽지 않는다. 모든 pin이 지금처럼 `acl.toml` 행으로만 인가된다.
+- 이 표는 role이 무엇을 주는지만 정한다. 판정이 이 표를 읽는 방식(`acl.toml` 행과의 합집합, 없는 `acl.toml`과 파싱 불가의 구분)은 §6.12가 서술한다.
 
-role을 쓰는 명령(`--role`, `trust set-role`)과 role 기본값 표는 이 절에 같은 마일스톤(M15)의 뒤 단계에서 채운다. 그때까지 `trust add`와 `pair`가 새로 만드는 pin은 `role` 키를 쓰지 않는다.
+**role을 쓰는 명령(ADR-0045 결정 8).** 권한을 넓히는 쓰기는 아래 넷과 ADR-0044의 SSH 부트스트랩뿐이고, 모두 이 머신의 로컬 사용자가 실행하는 local op이다(§2.5 "인가 불요" 행). 원격 peer는 어느 것도 요청할 수 없다.
+
+| 명령 | op | role 지정 | 기본값 |
+|---|---|---|---|
+| `qsh trust add <name> … [--role <role>]` | `trust.add` | `--role` | `--address` 없이 등록하면 `full`, `--address`를 주면 `none` |
+| `qsh pair invite [--as <name>] [--role <role>]` | `trust.invite` | `--role` | `full` |
+| `qsh pair accept <address> … [--role <role>]` | `trust.accept` | `--role` | `none` |
+| `qsh trust set-role <name> <role>` | `trust.set_role` | 위치 인자 | 없음(필수) |
+
+기본값이 둘로 갈리는 이유는 pin에 방향이 없기 때문이다. 초대 코드를 들고 오는 장비를 들이는 `pair invite`와 인증서 파일로 client를 들이는 주소 없는 `trust add`는 이 장비로 들어올 pin이라 `full`이다. dial할 상대를 등록하는 `--address`를 준 `trust add`와 `pair accept`에 `full`을 얹으면, 이 장비가 `qsh serve`를 띄울 때 그 상대가 들어올 권한까지 얻는다. 그래서 `none`이다. 어느 쪽이든 `--role`이 기본값을 덮는다. `--role`의 값이 여섯 이름 밖이면 `INVALID_ARGUMENT`이고, 연결이나 쓰기 전에 거절한다. `qsh trust invite`와 `qsh trust accept`(숨김 별칭)도 같은 `--role`을 받는다.
+
+- `pair invite --role`은 role을 `invites.toml`의 초대 레코드에 저장하고, 상환 때 responder(`qsh serve`)가 그 role로 pin한다. 상환하는 쪽은 role을 고를 수 없다. wire의 페어링 교환에 role 필드는 없고, 초대를 만든 사람이 정한 값만 쓰인다. `--as`가 이름 결정권을 pin하는 쪽에 두는 것(ADR-0012 결정 6)과 같은 원칙이다. 결과에는 optional `assigned_role`이 실린다. `role` 키가 없는 옛 초대 레코드는 `none`으로 pin하므로 옛 초대가 권한을 넓히지 않는다. `invites.toml`의 `role`이 여섯 값 밖이면 파일 전체가 `CONFIG_ERROR`다.
+- `trust add`가 이미 있는 이름에 다시 불려도 role은 바꾸지 않는다. `--role`이 무엇이든 `created: false`이고, human 출력이 "role is unchanged; use `qsh trust set-role <name> <role>`" 뜻의 줄을 하나 낸다. 같은 명령을 자동화가 반복해 부르다 권한을 조용히 바꾸는 경로를 닫기 위해서다. 주소 갱신은 위에서 서술한 대로 일어난다.
+- `role`이 `none`이 아닌 값으로 pin을 쓰는 모든 경로(`trust add`, 초대 상환으로 생기는 pin, `trust set-role`)는 audit 레코드 하나를 먼저 남기고 나서 `trust.toml`을 쓴다. `action`은 그 op 이름(`trust.add`, `trust.invite`, `trust.set_role`), `auth_path`는 `"local"`, `principal`은 `device:<pin 이름>`, `resource`는 pin 이름, `role`은 쓴 role이다. 기록하지 못하면 쓰지 않는다. `none`을 쓰는 경로는 아무 action도 주지 않으므로 레코드를 남기지 않는다. 기록 실패의 오류는 `INTERNAL`이고 `retryable: true`다. 다만 `trust.accept`(`qsh pair accept --role`)는 예외다. 이 경로에서는 responder가 일회용 invite를 이미 소비한 뒤에 기록이 실패하므로 같은 code로 다시 실행해도 거부된다. 그래서 `INTERNAL`에 `retryable: false`이고 `details`가 `{"new_invite_required": true}`이며, 메시지가 상대에게 새 invite를 받으라고 안내한다. `trust.toml`은 이때도 바뀌지 않는다.
+- `qsh setup`은 이 단계에서 pin마다 `none`을 명시한다. setup 전용 `--peer-role`과 역할별 기본값은 이 절이 아니라 §6.20이 서술한다.
+
+```bash
+qsh trust set-role <name> <role> --json
+```
+
+`trust.set_role`은 이미 있는 pin의 role을 바꾸는 유일한 명령이다. `trust rename`과 같은 규율로 `trust.toml.lock` 아래에서 읽고, 바꾸고, audit 레코드를 남긴 뒤 저장한다. 이름이 어떤 `[[peer]]`도 가리키지 않으면(`[[ca]]` 이름 포함) `HOST_NOT_FOUND`, role이 여섯 값 밖이면 `INVALID_ARGUMENT`, `trust.toml`을 읽을 수 없으면 `CONFIG_ERROR`다. 이미 그 role이면 `changed: false`이고 파일과 audit 모두 건드리지 않는다. audit을 쓰지 못하면 `INTERNAL`(`retryable: true`)이고 `trust.toml`은 그대로다. 러닝 중인 `qsh serve`·`qsh listen`은 role을 판정마다 읽으므로 재시작 없이 다음 요청부터 새 role이 적용된다. `acl.toml` 행은 그렇지 않다(기동 시 1회). 이미 확립된 연결이 쥔 세션이나 터널은 그대로 두고, 그 연결의 다음 요청부터 새 role로 판정한다. `previous_role`은 `role` 키가 없던 pin이면 생략된다.
+
+`trust.set_role` 결과:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.set_role",
+  "ok": true,
+  "data": {
+    "peer": {
+      "name": "phone",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
+      "address": "",
+      "added_at": "2026-10-12T00:00:00Z",
+      "role": "exec"
+    },
+    "previous_role": "read-only",
+    "changed": true
+  }
+}
+```
 
 `trust.toml`의 `role`이 여섯 값 밖이면 파일 전체가 `CONFIG_ERROR`다. `trust rename`은 role을 새 이름으로 옮기고 `trust remove`는 지운다. 키가 없는 pin은 다시 쓸 때도 키가 생기지 않는다.
 
@@ -916,7 +960,8 @@ qsh pair accept <address>
   "data": {
     "code": "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
     "expires_at": "2026-08-31T00:10:00Z",
-    "accept_command": "qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
+    "accept_command": "qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
+    "assigned_role": "full"
   }
 }
 ```
@@ -935,7 +980,7 @@ human mode는 `accept_command` 아래에 이 host가 스스로 관측한 후보 
 
 이 증명이 보장하는 것은 "상대가 invite secret을 안다"까지다 — 그 이상의 신원 주장은 아니다. secret은 전화나 채팅처럼 사람이 개입하는 경로로 전달되는 경우가 많으므로, 더 높은 확신이 필요하면 pairing이 끝난 뒤 `trust list`가 보여주는 fingerprint를 out-of-band로 상대와 사후 대조하는 것도 방법이다 — pairing 자체가 요구하는 단계는 아니고, 원하는 operator가 추가로 얹는 defense-in-depth다(`docs/design/protocol.md` §15.4).
 
-성공하면 두 장치가 같은 교환 안에서 서로를 pin한다. responder(`qsh serve`) 쪽은 그 사실을 자기 stderr에 한 줄 더 낸다 — envelope과는 무관한 host-local 채널이고(ADR-0017 결정 3), 그 자리에서 이 프로세스가 강제 중인 `acl.toml`에 상대 이름을 부르는 `[[acl]]` 행이 있는지까지 함께 알린다. 관측절은 어느 이름이 실제로 pin됐는지에 따라 갈린다: `--as` 없이 상대가 자칭한 이름 그대로 pin됐으면 정확히 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`), invite 쪽에서 `qsh pair invite --as`로 미리 지정해 둔 이름이 pin됐으면 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)다. 이어지는 " \"<name>\". " 뒤로는 두 경우 모두 같은 두 갈래다: 행이 없으면 "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 재시작 문장이 빠지고 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"(`PAIRING_ACL_ROW_PRESENT`) — 그 행 유무는 `qsh serve`가 기동 시 1회 읽은 정책 그대로를 판정 근거로 삼으므로, 기동 이후에 `acl.toml`을 편집했다면 재시작 전까지는 여전히 없는 것으로 보고한다.
+성공하면 두 장치가 같은 교환 안에서 서로를 pin한다. responder(`qsh serve`) 쪽은 그 사실을 자기 stderr에 한 줄 더 낸다 — envelope과는 무관한 host-local 채널이고(ADR-0017 결정 3), 그 자리에서 이 프로세스가 강제 중인 `acl.toml`에 상대 이름을 부르는 `[[acl]]` 행이 있는지까지 함께 알린다. 관측절은 어느 이름이 실제로 pin됐는지에 따라 갈린다: `--as` 없이 상대가 자칭한 이름 그대로 pin됐으면 정확히 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`), invite 쪽에서 `qsh pair invite --as`로 미리 지정해 둔 이름이 pin됐으면 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)다. 이어지는 " \"<name>\". " 뒤로는 세 절이 차례로 온다. 첫째는 role 절이다: pin이 지금 가진 role(새 pin이면 이 invite가 정한 role, 같은 fingerprint로 이미 pin된 이름이면 그 pin의 기존 role이고 상환은 이를 바꾸지 않는다. `role` 키가 없는 pin은 `none`)이 action을 주면 "Its trust role is"(`PAIRING_ROLE_LEAD`) 뒤에 role 이름을 백틱으로 싸고 ", which grants: "와 §6.11 role 표 순서의 action 목록을 잇고, role이 `none`이면 정확히 "Its trust role is `none`, so the role grants no action."(`PAIRING_ROLE_NONE`)다. 둘째는 행 절이다: 행이 없으면 "No `[[acl]]` row names it, so only the role decides."(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 "An `[[acl]]` row already names it, so that row's grants are added to the role's, including any you did not mean for this device."(`PAIRING_ACL_ROW_PRESENT`)다. 셋째는 확인 절이고 정확히 "A role change applies from the next request; an acl.toml change needs a restart of this `qsh serve`. Check with:"(`PAIRING_CHECK_LEAD`) 뒤에 "qsh acl check --principal 'device:<name>' --action session.open"이 온다. role은 판정마다 읽히고 `acl.toml`은 기동 시 1회 읽히므로 두 절의 반영 시점이 다르다는 사실을 확인 절이 그대로 말한다. 행 유무는 `qsh serve`가 기동 시 1회 읽은 정책 그대로를 판정 근거로 삼으므로, 기동 이후에 `acl.toml`을 편집했다면 재시작 전까지는 여전히 없는 것으로 보고한다.
 
 pin은 `trust.add`와 같은 경로(`TrustStore::add_peer`)를 타므로 `trust.accept`의 결과 모양도 `trust.add`와 같다 — 다만 `address`는 `trust.add`의 기본값(생략 시 빈 문자열)과 달리 방금 dial에 성공한 그 주소가 그대로 채워진다: pairing은 항상 실제 연결을 전제하므로 채울 주소가 없는 경우가 없고, 이걸 비워 두면 `qsh exec <name>`(§6.1, §6.8)이 곧바로 `HOST_NOT_FOUND`가 되어 ADR-0002가 노리는 "페어링 후 바로 접속" 경험이 깨진다:
 
@@ -950,7 +995,8 @@ pin은 `trust.add`와 같은 경로(`TrustStore::add_peer`)를 타므로 `trust.
       "name": "personal-mac",
       "fingerprint": "sha256:BASE64FINGERPRINT",
       "address": "192.0.2.10:4433",
-      "added_at": "2026-08-31T00:05:00Z"
+      "added_at": "2026-08-31T00:05:00Z",
+      "role": "none"
     },
     "created": true
   }
@@ -1016,7 +1062,9 @@ qsh trust ssh-preview ~/.ssh/authorized_keys --json
 
 `malformed` 줄은 줄 번호와 상태만 싣고 그 줄의 바이트는 어디에도 싣지 않는다. `unsupported_key_type` 줄도 fingerprint를 싣지 않는다. `restricted_options` 줄은 두 fingerprint까지만 싣고 `trust_command`와 `acl_row`는 내지 않는다. options가 거는 제한을 qsh ACL로 옮길 수 없으니, 그 줄에서 넓게 여는 쪽으로 틀리지 않게 하려는 것이다.
 
-`<name>`은 자리표시자다. `trust_command`와 `acl_row` 두 곳에서 같은 이름으로 바꿔야 한다. 고치지 않은 `acl_row`를 그대로 붙이면 `acl.toml`은 로드되지만(로더는 principal의 접두와 비지 않은 나머지만 본다) 실제 이름으로 pin한 어떤 principal과도 매치되지 않아 요청은 default-deny로 거부되고, `qsh doctor`가 그 pin에 `acl_principal_unmatched`를 낸다. 고치지 않은 `trust_command`까지 붙이면 그 키는 문자 그대로 `<name>`이라는 이름으로 pin되고 초안 행을 받는다. 결과는 운영자가 이름을 골랐을 때보다 넓지 않다. 여러 `ok` 줄을 고치지 않고 붙이면 두 번째부터의 `trust add`는 이름이 같고 fingerprint가 달라 no-op이다. 셸에 붙일 때 `<`·`>`가 리다이렉션으로 해석될 수 있으니 `<name>`을 먼저 바꿔야 한다. human mode는 이 두 가지, 곧 두 곳의 `<name>`을 같은 이름으로 바꿔야 한다는 것과 예측 fingerprint는 상대가 같은 키를 `qsh init --import-ssh-key`로 들였을 때만 맞는다는 것을 출력 끝에 적는다.
+human 출력은 `trust_command`에 `--role full`을 붙여 보여 주고 `acl_row` 블록은 더 내지 않는다. 주소 없는 `trust add`가 이미 `full`이 되는 것을 명시적으로 적을 뿐이다. 좁히려면 `--role`을 바꾼다. JSON의 `trust_command`와 `acl_row`는 바뀌지 않는다(fixture `trust.ssh_preview.json`).
+
+`<name>`은 자리표시자다. JSON에서는 `trust_command`와 `acl_row` 두 곳에서 같은 이름으로 바꿔야 한다. human 출력은 `acl_row`를 내지 않으므로 `trust_command`의 `<name>` 한 곳만 바꾸면 된다. 고치지 않은 `acl_row`를 그대로 붙이면 `acl.toml`은 로드되지만(로더는 principal의 접두와 비지 않은 나머지만 본다) 실제 이름으로 pin한 어떤 principal과도 매치되지 않아 요청은 default-deny로 거부되고, `qsh doctor`가 그 pin에 `acl_principal_unmatched`를 낸다. 고치지 않은 `trust_command`까지 붙이면 그 키는 문자 그대로 `<name>`이라는 이름으로 pin되고 초안 행을 받는다. 결과는 운영자가 이름을 골랐을 때보다 넓지 않다. 여러 `ok` 줄을 고치지 않고 붙이면 두 번째부터의 `trust add`는 이름이 같고 fingerprint가 달라 no-op이다. 셸에 붙일 때 `<`·`>`가 리다이렉션으로 해석될 수 있으니 `<name>`을 먼저 바꿔야 한다. human mode는 이 두 가지, 곧 `<name>`을 pin할 이름으로 바꿔야 한다는 것과 예측 fingerprint는 상대가 같은 키를 `qsh init --import-ssh-key`로 들였을 때만 맞는다는 것을 출력 끝에 적는다.
 
 ```json
 {
@@ -1207,7 +1255,7 @@ qsh serve --to <listener|host:port> [--name <name>]
 - **stateless reset key(ADR-0036).** `qsh listen`도 인바운드 서버 endpoint라서 `qsh serve`와 같은 `config_dir/stateless_reset.key`를 같은 규칙으로 읽고 만든다(§6.12). 두 프로세스는 서로 다른 포트에 bind하므로 키를 나눠 써도 한쪽이 만든 token이 다른 쪽 연결에 닿지 않는다. 키 파일 진단은 `qsh listen: ` 접두로 stderr에 한 번 나가고 정책 진단과 같은 콜백을 지나므로 `on_bound`보다 먼저 나온다. `qsh serve --to`는 서버 endpoint가 없어서 이 파일을 읽지 않는다.
 - **keep-alive 간격(ADR-0021 결정 1).** `qsh listen`은 `[transport].keep_alive_ms`(§6.12, 기본 15000, `1000..=20000`)를 받는 모든 연결에 적용하고, `qsh serve --to`는 controller에 dial한 등록 연결에 적용한다. 범위 밖이면 두 모드 모두 clamp 없이 기동 전에 `CONFIG_ERROR`(`retryable: false`)로 거절하며, 파일은 기동 때 한 번만 읽으므로 바꾸면 재시작해야 한다. 각 프로세스가 자기 `config.toml`을 읽어서 target과 controller는 따로 정한다.
 - **경로 감시(ADR-0021 결정 4, ADR-0041).** `qsh listen`의 등록 연결 감시와 `qsh serve --to`의 등록 연결 감시는 대화형 attach와 다른 기본을 쓴다. `[recovery]`(§6.12)의 `probe_interval_ms`(250, attach와 공유)·`reverse_min_dead_after_ms`(기본 4250)·`reverse_strikes`(기본 3)를 읽고 `P×S+D ≤ 5000`, `S ≥ 2`, `50 ≤ P ≤ D`이다. 등록이 끊기면 그 위의 역방향 터널이 재생 없이 모두 끝나고 기다리는 사람이 없어서, 이슈 #10이 잰 최장 업링크 손실 구간(3.6초)을 넘기도록 기본 침묵 하한이 attach의 1초보다 길다. 일반 `min_dead_after_ms`와 `strikes`는 이 연결에 닿지 않는다. 범위 밖이면 두 모드 모두 clamp 없이 기동 전에 `CONFIG_ERROR`(`retryable: false`)로 거절하고 파일은 기동 때 한 번만 읽는다. 기본이 상한에 닿아 있으므로 `reverse_strikes`만 올리거나 `reverse_min_dead_after_ms`만 올리면 거절된다. 둘을 함께 맞추고, 공유 `probe_interval_ms`를 250보다 올릴 때도 같다. target과 controller가 각자 값을 정하지만 한쪽만 느슨하게 하면 다른 값을 쓰는 상대가 `CLOSE_CODE_PATH_DEAD`로 연결을 끊으므로, 양 끝을 같이 올려야 효과가 있다. 진짜로 죽은 등록이 `stale`로 표시되고 target이 재dial하기까지는 약 3.25초 늦어진다. 이 감지 시간은 등록이 쓰이는 동안의 값이다(ADR-0041 결정 8). 쓰임으로 세는 것은 `Ping`/`Pong`이 아닌 control message와 양 끝에서 터널 splice가 옮기는 바이트이고, 마지막 쓰임으로부터 15초(`active_window`) 안이면 probe가 250ms 간격으로 나가 마지막 생존 증거 뒤 4.25~4.5초에 판정이 선다. 15초 넘게 아무것도 나르지 않은 등록은 probe가 5초 간격(idle beat)으로 나가므로 `(strikes + 1) × 5초`, 기본 20초 안팎(최대 25초)에 서고 `P×S+D`는 적용되지 않는다. 터널 트래픽이 다시 흐르면 곧바로 250ms 간격으로 돌아온다. idle beat와 `active_window`는 설정이 없다.
-- **정책 파일 진단.** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh serve --to`(구 `qsh reverse`) 둘 다 시작 시 `acl.toml`을 1회 읽는다. 파일이 없으면 행이 없는 정책으로 시작하고 trust role이 그대로 동작하며, 파싱 불가면 role을 포함해 리소스를 생성하지 않고 도달하는 모든 인가 판정이 항상 `deny`다(`docs/design/architecture.md` §6). 운영자에게는 stderr에 없을 때 한 줄을, 파싱 불가일 때 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단 블록을 한 번 출력하고(§6.12와 같은 평문 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh serve --to`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지의 관측절은 §6.11이 서술하듯 pin된 이름이 자칭인지 `--as`-지정인지에 따라 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`) 또는 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)로 갈리고, 이어지는 " \"<name>\". " 뒤로는 행이 없으면 정확히 "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh serve --to`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 인바운드 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
+- **정책 파일 진단.** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh serve --to`(구 `qsh reverse`) 둘 다 시작 시 `acl.toml`을 1회 읽는다. 파일이 없으면 행이 없는 정책으로 시작하고 trust role이 그대로 동작하며, 파싱 불가면 role을 포함해 리소스를 생성하지 않고 도달하는 모든 인가 판정이 항상 `deny`다(`docs/design/architecture.md` §6). 운영자에게는 stderr에 없을 때 한 줄을, 파싱 불가일 때 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단 블록을 한 번 출력하고(§6.12와 같은 평문 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh serve --to`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지의 관측절은 §6.11이 서술하듯 pin된 이름이 자칭인지 `--as`-지정인지에 따라 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`) 또는 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)로 갈리고, 이어지는 " \"<name>\". " 뒤로는 role 절("Its trust role is"(`PAIRING_ROLE_LEAD`)로 시작하는 문장, role이 `none`이면 정확히 "Its trust role is `none`, so the role grants no action."(`PAIRING_ROLE_NONE`)), 행 절(행이 없으면 정확히 "No `[[acl]]` row names it, so only the role decides."(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 "An `[[acl]]` row already names it, so that row's grants are added to the role's, including any you did not mean for this device."(`PAIRING_ACL_ROW_PRESENT`)), 확인 절("A role change applies from the next request; an acl.toml change needs a restart of this `qsh serve`. Check with:"(`PAIRING_CHECK_LEAD`) 뒤에 'qsh acl check' 명령)이 차례로 온다 — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh serve --to`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 인바운드 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry|wake`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다. 이 진단은 `qsh.cli/v1`/`qsh.event/v1` 계약에 속하지 않는 열린 어휘다(issue #4 item 6). `denied`/`lost`/`retry`는 실패·유실 사유를 `cause` 필드(고정 9값 — `resolve`/`dial_timeout`/`refused`/`tls_rejected`/`registration_denied`/`peer_closed`/`path_dead`/`idle_timeout`/`local`. `idle_timeout`은 QUIC idle timeout 만료이며 상대가 보낸 path-dead close나 자기 쪽 경로 감시 판정과 구별된다. 실패 지점에서 분류되며 주소·토큰·peer가 보낸 오류 본문은 절대 담지 않는다)로 함께 내고, `registered`/`replaced`/`expired`는 이 필드를 생략한다. controller 주소가 여러 개로 resolve되는 경우(issue #4 item 2) 한 번의 접속 시도는 최대 4개까지 순서대로 dial을 시도하며, 그중 전부가 실패했을 때의 `cause`와 그 실패까지 걸린 `since_registered_ms`는 마지막으로 시도한 주소 하나의 실패만을 서술한다 — 그 이전에 실패한 주소들은 이 진단 줄에 남지 않는다. 모든 레코드는 RFC3339 `at` 필드를 갖는다 — 초 단위 정밀도이고(`crate::config::now_rfc3339`), wall-clock 기록일 뿐 정렬 키가 아니다(같은 `lost`/`retry` 쌍처럼 짧은 간격으로 이어지는 레코드는 `at`이 같은 초로 겹칠 수 있으며, 순서가 필요하면 stderr에 실제로 쓰인 `qsh::reverse` 줄 순서를 봐야 한다). `retry`는 언제나 `fingerprint`를 생략하고(그 시점에는 아직 TLS 핸드셰이크가 없어 알 수 없다), `lost`와 그 직후의 `retry`는 그 등록이 살아 있던 기간을 `since_registered_ms`(ms)로 함께 내는 반면 등록이 성립한 적 없는 `retry`(가령 `dial_and_register` 자체가 실패한 경우)는 이 필드도 생략한다 — 어느 쪽이든 `null`이 아니라 키 자체가 없다. `cause`가 `path_dead`인 `lost`는 그 판정을 이 프로세스의 경로 감시가 직접 내렸을 때만 `srtt_ms`(판정 시점의 smoothed RTT, ms)와 `silence_ms`(그 감시가 경로의 생존을 마지막으로 확인한 뒤 흐른 시간, ms)를 함께 싣는다. 둘 다 정수이고 payload는 없다. 상대가 보낸 path-dead close로 분류된 `path_dead`, 다른 모든 `cause`, `retry`와 나머지 이벤트에는 `null`이 아니라 키 자체가 없다. `silence_ms`는 제어 메시지뿐 아니라 UDP datagram 수신도 생존 증거로 세어, 그 가운데 가장 늦은 시각부터 잰다(`docs/design/protocol.md` §10). 제어 스트림의 `Pong`이 늦어도 datagram이 도착하는 동안은 침묵이 다시 0에서 시작하므로, 패킷은 계속 왔는데 침묵이 길게 찍히는 값은 나오지 않는다. datagram은 틱마다 한 번 표본으로 읽으므로 실제보다 최대 한 틱(기본 250ms) 짧게 나올 수 있고, 기본 설정에서는 `silence_ms`가 1000 이상이다. 경로 감시가 자기 tick이 한 `probe_interval`(기본 250ms) 이상 늦게 발화한 것을 보면 그 지연은 프로세스가 돌지 못한 시간이지 경로의 침묵이 아니므로 침묵에서 덜어내고, 그 tick은 지연만큼 더 쌓인 침묵이 아니면 사망을 선언하지 않는다(ADR-0042 결정 1). 그래서 `silence_ms`는 이 프로세스가 깨어서 본 침묵이다. 같은 줄에는 `tick_gap_ms`(정수, ms)가 `srtt_ms`·`silence_ms`와 함께 실린다. 이름과 달리 tick 사이의 간격이 아니라, 그 침묵 동안 이 감시의 tick이 잔 beat보다 가장 늦게 발화한 양(`간격 - 잔 beat`)이다. 대기 cadence는 빼므로 정상 프로세스는 활성이든 유휴(5초 beat)든 0 언저리이고 몇 초라면 그 프로세스가 굶고 있었다는 뜻이다. 존재 규칙은 `srtt_ms`와 같다. 양쪽 감시가 같은 등록을 보므로 한쪽이 먼저 판정하면 다른 쪽은 그 close를 읽어 이 필드 없이 `path_dead`로 분류한다. `wake`는 target(`qsh serve --to`)만 내는 이벤트로, 절전에서 깨어난 것을 감지했음을 뜻하며 `slept_ms`(ms)와 `at`만 싣는다(`host`는 다른 줄과 같고 `fingerprint`·`delay_ms`·`cause`·`since_registered_ms`는 없다). target은 wake를 받으면 backoff를 `backoff_initial_ms`부터 다시 세고, 진행 중인 재접속 대기를 끊어 곧바로 재dial한다. wake 뒤 60초(단조 시계) 동안은 재접속 지연이 `max(backoff_initial_ms, 2000)`ms를 넘지 않고, 설정한 `backoff_max_ms`가 그보다 작으면 그 값이 상한이다. 이 60초 창은 wake에만 열리고 유실에는 열리지 않는다. 유실 뒤 첫 재dial의 지연은 끝난 등록이 얼마나 살았는지에 따라 갈린다(ADR-0042 결정 2). 60초(`since_registered_ms` 60000) 이상 살았으면 `backoff_initial_ms`다. 60초가 못 되어 끝난 등록이 연속되면 첫 번째는 같고 두 번째부터 유실마다 두 배가 되어 `max(backoff_initial_ms, 8000)`ms에서 멈춘다(`backoff_max_ms`가 그보다 작으면 그 값이고, 위 wake 창 안에서는 창의 상한이 먼저 닿는다). 60초 넘게 산 등록이 끝나거나 wake가 오면 연속 횟수가 0으로 돌아간다. dial 실패가 이어질 때의 지수 backoff는 이와 별개로 그대로다. 이 지연은 그 `retry` 줄의 `delay_ms`로 읽는다. `[reverse]` 키와 기본값은 그대로다(ADR-0023 결정 20).
 - **`cause=local`의 뜻과 나오는 자리(이슈 #11 요청 3, ADR-0042).** `local`은 "이 프로세스 쪽에서 났거나 위 값 어디에도 못 넣는 끝"이라는 마지막 칸이다. 시간 초과는 담지 않는다. dial이나 `Hello` 응답이 시간 안에 오지 않으면 `dial_timeout`, 연결이 45초 침묵하면 `idle_timeout`, 경로 감시가 죽었다고 판정하면 `path_dead`이고, 상대의 close·stateless reset은 `peer_closed`(상대의 `CLOSE_CODE_PATH_DEAD`는 `path_dead`)다. 그래서 호스트가 부하로 굶는 상황은 이 넷으로 보이고, `local`이 거기서 나오는 것은 기대된 모습이 아니다. `local`이 반복해서 나오면 아래 자리 가운데 하나가 실제로 실패하고 있다는 뜻이고, 같은 시각 stderr의 `registration attempt failed`·`connection to the controller ended` 경고 본문이 어느 자리인지 가린다. 나오는 자리는 `crates/qsh-core/src/reverse/`의 분류 함수 전부이며 정확히 아래다.
   - `qsh serve --to`의 `retry`(등록이 서기 전이라 `since_registered_ms`가 없다): `hosts.toml`을 읽지 못함, controller 이름에 알려진 주소가 `hosts.toml`에도 trust pin에도 없음, dial용 endpoint를 만들지 못함(UDP 소켓·TLS 설정 단계), `Hello` 교환이 프로토콜에서 어긋남(첫 메시지가 `Hello`가 아님, 공통 wire minor 없음, 연결 오류가 없는 스트림 오류), 아래 "연결 종료 이유" 집합.

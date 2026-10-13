@@ -244,6 +244,7 @@ fn supervised_dynamic_redial_to_a_peer_without_dial_filter_ends_unsupported() {
         address: Some(peer.addr.to_string()),
         fingerprint: Some(peer.fingerprint.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -486,6 +487,7 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
         address: Some(relay.addr.to_string()),
         fingerprint: Some(peer.fingerprint.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let hold = ops
@@ -587,6 +589,7 @@ fn held_tunnel(accept_hold_ms: u32) -> HeldTunnel {
         address: Some(peer.addr.to_string()),
         fingerprint: Some(peer.fingerprint.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let port = free_port();

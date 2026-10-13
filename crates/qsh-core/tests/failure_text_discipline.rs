@@ -45,12 +45,13 @@ use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
 use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_host_not_found};
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
-    PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_INVITE_REPLAY_NOTICE,
-    PAIRING_PINNED_INVITE_ASSIGNED, PAIRING_PINNED_SELF_ASSERTED, PairingError, pairing_pin_notice,
+    PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_CHECK_LEAD,
+    PAIRING_INVITE_REPLAY_NOTICE, PAIRING_PINNED_INVITE_ASSIGNED, PAIRING_PINNED_SELF_ASSERTED,
+    PAIRING_ROLE_LEAD, PAIRING_ROLE_NONE, PairingError, pairing_pin_notice,
 };
 use qsh_core::serve::{BIND_UNAVAILABLE_REMEDY, bind_unavailable};
-use qsh_core::trust::ADDRESS_PORT_ASSUMED_NOTICE;
 use qsh_core::trust::invite_address::{INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE};
+use qsh_core::trust::{ADDRESS_PORT_ASSUMED_NOTICE, TrustRole};
 use qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE;
 
 #[path = "support/docs.rs"]
@@ -129,8 +130,11 @@ fn no_pairing_pin_notice_constant_still_says_asked_for_itself() {
             "PAIRING_PINNED_INVITE_ASSIGNED",
             PAIRING_PINNED_INVITE_ASSIGNED,
         ),
+        ("PAIRING_ROLE_LEAD", PAIRING_ROLE_LEAD),
+        ("PAIRING_ROLE_NONE", PAIRING_ROLE_NONE),
         ("PAIRING_ACL_ROW_ABSENT", PAIRING_ACL_ROW_ABSENT),
         ("PAIRING_ACL_ROW_PRESENT", PAIRING_ACL_ROW_PRESENT),
+        ("PAIRING_CHECK_LEAD", PAIRING_CHECK_LEAD),
     ] {
         assert!(
             !constant.contains("asked for itself"),
@@ -146,8 +150,11 @@ fn cli_md_section_6_11_quotes_the_pairing_pin_notice_constants_verbatim() {
     for fragment in [
         PAIRING_PINNED_SELF_ASSERTED,
         PAIRING_PINNED_INVITE_ASSIGNED,
+        PAIRING_ROLE_LEAD,
+        PAIRING_ROLE_NONE,
         PAIRING_ACL_ROW_ABSENT,
         PAIRING_ACL_ROW_PRESENT,
+        PAIRING_CHECK_LEAD,
     ] {
         assert!(
             section.contains(fragment),
@@ -166,8 +173,11 @@ fn cli_md_section_6_13_quotes_the_pairing_pin_notice_constants_verbatim() {
     for fragment in [
         PAIRING_PINNED_SELF_ASSERTED,
         PAIRING_PINNED_INVITE_ASSIGNED,
+        PAIRING_ROLE_LEAD,
+        PAIRING_ROLE_NONE,
         PAIRING_ACL_ROW_ABSENT,
         PAIRING_ACL_ROW_PRESENT,
+        PAIRING_CHECK_LEAD,
     ] {
         assert!(
             section.contains(fragment),
@@ -260,9 +270,12 @@ fn three_part_rows() -> Vec<ThreePartRow> {
     );
     let bind_message = bind_unavailable(&bind, &err).message;
 
-    let pairing_notice_row_absent = pairing_pin_notice("probe-device", false, false);
-    let pairing_notice_row_present = pairing_pin_notice("probe-device", true, false);
-    let pairing_notice_invite_assigned = pairing_pin_notice("probe-device", false, true);
+    let pairing_notice_row_absent =
+        pairing_pin_notice("probe-device", TrustRole::Full, false, false);
+    let pairing_notice_row_present =
+        pairing_pin_notice("probe-device", TrustRole::Exec, true, false);
+    let pairing_notice_invite_assigned =
+        pairing_pin_notice("probe-device", TrustRole::None, false, true);
 
     vec![
         ThreePartRow {
@@ -299,9 +312,11 @@ fn three_part_rows() -> Vec<ThreePartRow> {
                 "pinned a new peer under the name it sent for itself because the invite \
                  carried no --as:",
             ),
+            // The role clause is assembled from the role table, so the slice
+            // comes from the real notice, not from a constant.
             impact: ThreePartSlot::new(
-                PAIRING_ACL_ROW_ABSENT,
-                "it can authenticate but every action is still denied",
+                pairing_notice_row_absent.clone(),
+                "Its trust role is `full`, which grants:",
             ),
             // `qsh acl check --principal device:<name> --action
             // session.open` is assembled by `pairing_pin_notice`, not a
@@ -321,7 +336,7 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             ),
             impact: ThreePartSlot::new(
                 PAIRING_ACL_ROW_PRESENT,
-                "it inherits that row's grants exactly as written",
+                "that row's grants are added to the role's",
             ),
             // Same assembled-command shape as the T3 (absent) row above,
             // but with `acl_row_present: true`. T3's impact slot covers
@@ -351,10 +366,7 @@ fn three_part_rows() -> Vec<ThreePartRow> {
                 PAIRING_PINNED_INVITE_ASSIGNED,
                 "pinned a new peer under the name the invite assigned with --as:",
             ),
-            impact: ThreePartSlot::new(
-                PAIRING_ACL_ROW_ABSENT,
-                "it can authenticate but every action is still denied",
-            ),
+            impact: ThreePartSlot::new(PAIRING_ROLE_NONE, "so the role grants no action"),
             next_command: ThreePartSlot::new(
                 pairing_notice_invite_assigned,
                 "qsh acl check --principal 'device:probe-device' --action session.open",

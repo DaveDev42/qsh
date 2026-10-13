@@ -222,6 +222,7 @@ fn trust_add_list_remove_round_trip() {
             address: Some("mac.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(added.created);
@@ -235,6 +236,7 @@ fn trust_add_list_remove_round_trip() {
             address: Some("mac.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(!again.created);
@@ -266,6 +268,7 @@ fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
             address: Some("old.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(added.created);
@@ -276,6 +279,7 @@ fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
             address: Some("new.example:5555".into()),
             fingerprint: Some(fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(!moved.created, "identity already pinned — never re-created");
@@ -305,6 +309,7 @@ fn trust_add_with_a_port_less_address_pins_the_default_port() {
             address: Some("mac.example".into()),
             fingerprint: Some(fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert_eq!(added.peer.address, "mac.example:4433");
@@ -469,6 +474,7 @@ fn trust_accept_uses_the_normalized_address_for_the_dial_and_its_failure_message
             address: "mac.example.invalid".into(),
             code: "0000-0000-0000-0000-0000-0000-0000-0000".into(),
             as_name: None,
+            role: None,
         })
         .expect_err("an unresolvable host must fail before any dial opens");
 
@@ -508,6 +514,7 @@ fn concurrent_trust_add_through_ops_does_not_lose_a_peer() {
                 address: None,
                 fingerprint: Some(fingerprint),
                 cert_pem: None,
+                role: None,
             })
             .unwrap();
         }));
@@ -611,6 +618,7 @@ fn trust_accept_rejects_a_control_character_responder_device_name_and_leaves_tru
             address: addr.to_string(),
             code,
             as_name: None,
+            role: None,
         })
         .expect_err("a control-character responder device name must be rejected");
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -644,6 +652,7 @@ fn concurrent_trust_remove_through_ops_does_not_lose_a_removal() {
             address: None,
             fingerprint: Some(fingerprint),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     }
@@ -687,6 +696,7 @@ fn trust_add_rejects_a_different_fingerprint_for_an_already_pinned_name() {
             address: Some("mac.example:4433".into()),
             fingerprint: Some(first_fp.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(added.created);
@@ -697,6 +707,7 @@ fn trust_add_rejects_a_different_fingerprint_for_an_already_pinned_name() {
             address: Some("attacker.example:1".into()),
             fingerprint: Some(second_fp),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     assert!(!rejected.created);
@@ -720,6 +731,7 @@ fn trust_add_rejects_bad_input() {
             address: None,
             fingerprint: Some("not-a-fingerprint".into()),
             cert_pem: None,
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -730,6 +742,7 @@ fn trust_add_rejects_bad_input() {
             address: None,
             fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"x").to_string()),
             cert_pem: None,
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -740,6 +753,7 @@ fn trust_add_rejects_bad_input() {
             address: None,
             fingerprint: None,
             cert_pem: None,
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -752,6 +766,7 @@ fn seed_two_peers_and_a_ca(ops: &Ops) {
         address: Some("old.example:4433".into()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"old").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     ops.trust_add(TrustAddReq {
@@ -759,6 +774,7 @@ fn seed_two_peers_and_a_ca(ops: &Ops) {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"taken").to_string()),
         cert_pem: None,
+        role: Some("none".into()),
     })
     .unwrap();
 }
@@ -1035,6 +1051,7 @@ fn trust_rename_goes_through_trust_store_lock() {
             address: None,
             fingerprint: Some(fingerprint),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     }
@@ -1077,6 +1094,7 @@ fn trust_invite_rejects_a_bad_as_name() {
         let err = ops
             .trust_invite(TrustInviteReq {
                 as_name: Some(bad.to_string()),
+                role: None,
             })
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
@@ -1085,6 +1103,7 @@ fn trust_invite_rejects_a_bad_as_name() {
     let ok = ops
         .trust_invite(TrustInviteReq {
             as_name: Some("workbench".into()),
+            role: None,
         })
         .unwrap();
     assert_eq!(ok.assigned_name.as_deref(), Some("workbench"));
@@ -1103,6 +1122,7 @@ fn trust_accept_rejects_a_bad_as_name_before_dialing() {
                 address: "127.0.0.1:1".into(),
                 code: "0000-0000-0000-0000-0000-0000-0000-0000".into(),
                 as_name: Some(bad.to_string()),
+                role: None,
             })
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
@@ -1126,6 +1146,7 @@ fn open_trust_serves_pins_as_device_principals() {
         address: None,
         fingerprint: Some(fingerprint.to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1197,6 +1218,7 @@ fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
         address: Some("mac.example.com:4433".into()),
         fingerprint: Some(fingerprint),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1224,6 +1246,7 @@ fn resolve_serve_target_a_name_match_returns_the_literal_unchanged_and_fills_no_
         address: Some("mac.example.com:4433".into()),
         fingerprint: Some(fingerprint),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1243,6 +1266,7 @@ fn resolve_serve_target_falls_back_to_a_single_address_match_on_a_name_miss() {
         address: Some("203.0.113.5:4433".into()),
         fingerprint: Some(fingerprint),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1269,6 +1293,7 @@ fn resolve_serve_target_a_peer_literally_named_like_an_address_resolves_to_itsel
         address: Some("elsewhere.example.com:4433".into()),
         fingerprint: Some(self_fp),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let other_fp = qsh_transport::Fingerprint::of_spki_der(b"other").to_string();
@@ -1277,6 +1302,7 @@ fn resolve_serve_target_a_peer_literally_named_like_an_address_resolves_to_itsel
         address: Some("192.0.2.10:4433".into()),
         fingerprint: Some(other_fp),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1296,6 +1322,7 @@ fn resolve_serve_target_two_or_more_address_matches_is_invalid_argument_no_first
         address: Some("203.0.113.9:4433".into()),
         fingerprint: Some(fp_a),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let fp_b = qsh_transport::Fingerprint::of_spki_der(b"b").to_string();
@@ -1304,6 +1331,7 @@ fn resolve_serve_target_two_or_more_address_matches_is_invalid_argument_no_first
         address: Some("203.0.113.9".into()),
         fingerprint: Some(fp_b),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1457,6 +1485,7 @@ fn resolve_route_reverse_prefers_the_live_daemon_over_a_forward_pin() {
         address: Some("stale.example.com:4433".into()),
         fingerprint: Some(fingerprint),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     let runtime_dir = ops.paths().runtime_dir();
@@ -1999,6 +2028,7 @@ fn trust_add_rejects_cert_file_together_with_fingerprint() {
             address: None,
             fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"x").to_string()),
             cert_pem: Some(a_valid_cert_pem()),
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -2015,6 +2045,7 @@ fn trust_add_cert_file_rejects_a_chain_of_two_certificates() {
             address: None,
             fingerprint: None,
             cert_pem: Some(chain),
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -2040,6 +2071,7 @@ fn trust_add_cert_file_rejects_a_bundle_carrying_a_private_key_and_echoes_no_inp
             address: None,
             fingerprint: None,
             cert_pem: Some(bundle),
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -2063,6 +2095,7 @@ fn trust_add_cert_file_is_a_silent_no_op_when_the_name_holds_a_different_fingerp
         address: None,
         fingerprint: Some(original_fp.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2072,6 +2105,7 @@ fn trust_add_cert_file_is_a_silent_no_op_when_the_name_holds_a_different_fingerp
             address: None,
             fingerprint: None,
             cert_pem: Some(a_valid_cert_pem()),
+            role: None,
         })
         .unwrap();
     assert!(!added.created);
@@ -2236,6 +2270,7 @@ fn trust_add_rejects_an_oversized_cert_pem() {
             address: None,
             fingerprint: None,
             cert_pem: Some(oversized),
+            role: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -2435,4 +2470,458 @@ fn identity_export_never_opens_the_key_store() {
              only through crate::identity::read_identity"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Role-writing commands (ADR-0045 결정 8, `docs/CLI.md` §6.11)
+// ---------------------------------------------------------------------
+
+fn pin_req(name: &str, address: Option<&str>, role: Option<&str>) -> TrustAddReq {
+    TrustAddReq {
+        name: name.into(),
+        address: address.map(str::to_string),
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(name.as_bytes()).to_string()),
+        cert_pem: None,
+        role: role.map(str::to_string),
+    }
+}
+
+fn stored_role(ops: &Ops, name: &str) -> Option<String> {
+    ops.trust_list()
+        .unwrap()
+        .peers
+        .into_iter()
+        .find(|p| p.name == name)
+        .unwrap_or_else(|| panic!("no pin named {name}"))
+        .role
+}
+
+/// `trust add` without an address names no dial target, so its pin exists
+/// to be authorized: `full`. With an address the pin is a dial target for
+/// this machine's own client: `none`. An explicit `--role` wins over both.
+#[test]
+fn trust_add_defaults_by_address_and_honours_an_explicit_role() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, None)).unwrap();
+    ops.trust_add(pin_req("dial-target", Some("dial.example:4433"), None))
+        .unwrap();
+    ops.trust_add(pin_req("viewer", None, Some("read-only")))
+        .unwrap();
+    ops.trust_add(pin_req(
+        "dial-full",
+        Some("dial.example:4433"),
+        Some("full"),
+    ))
+    .unwrap();
+
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("full"));
+    assert_eq!(stored_role(&ops, "dial-target").as_deref(), Some("none"));
+    assert_eq!(stored_role(&ops, "viewer").as_deref(), Some("read-only"));
+    assert_eq!(stored_role(&ops, "dial-full").as_deref(), Some("full"));
+}
+
+/// The defaults the pairing commands apply live next to the role type:
+/// `pair invite` issues `full`, `pair accept` writes `none`, and a
+/// `trust add` with an address is `none` (ADR-0045 결정 8). Besides the
+/// constants, this drives `Ops::trust_accept` against a real responder and
+/// reads the stored role back.
+#[test]
+fn pair_accept_and_trust_add_default_to_role_none() {
+    use crate::trust::TrustRole;
+    assert_eq!(TrustRole::DEFAULT_FOR_ACCEPT, TrustRole::None);
+    assert_eq!(TrustRole::default_for_trust_add(true), TrustRole::None);
+    assert_eq!(TrustRole::default_for_trust_add(false), TrustRole::Full);
+
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+
+    let responder = spawn_pairing_responder();
+    let accepted = ops
+        .trust_accept(TrustAcceptReq {
+            address: responder.addr.to_string(),
+            code: responder.code.clone(),
+            as_name: None,
+            role: None,
+        })
+        .unwrap();
+    responder.join();
+    assert!(accepted.created);
+    assert_eq!(accepted.peer.role.as_deref(), Some("none"));
+    assert_eq!(stored_role(&ops, "host").as_deref(), Some("none"));
+
+    let responder = spawn_pairing_responder();
+    ops.trust_accept(TrustAcceptReq {
+        address: responder.addr.to_string(),
+        code: responder.code.clone(),
+        as_name: Some("other".into()),
+        role: Some("exec".into()),
+    })
+    .unwrap();
+    responder.join();
+    assert_eq!(stored_role(&ops, "other").as_deref(), Some("exec"));
+
+    ops.trust_add(pin_req("dial", Some("dial.example:4433"), None))
+        .unwrap();
+    assert_eq!(stored_role(&ops, "dial").as_deref(), Some("none"));
+}
+
+/// `pair invite` with no `--role` issues `full`; `--role` overrides it, and
+/// an unknown name is `INVALID_ARGUMENT` before any invite is written.
+#[test]
+fn pair_invite_defaults_to_role_full() {
+    let (_guard, ops) = temp_ops();
+    let default = ops
+        .trust_invite(TrustInviteReq {
+            as_name: None,
+            role: None,
+        })
+        .unwrap();
+    assert_eq!(default.assigned_role.as_deref(), Some("full"));
+
+    let narrowed = ops
+        .trust_invite(TrustInviteReq {
+            as_name: None,
+            role: Some("exec".into()),
+        })
+        .unwrap();
+    assert_eq!(narrowed.assigned_role.as_deref(), Some("exec"));
+
+    let invites_before = std::fs::read_to_string(ops.paths().invites_file()).unwrap();
+    let err = ops
+        .trust_invite(TrustInviteReq {
+            as_name: None,
+            role: Some("root".into()),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().invites_file()).unwrap(),
+        invites_before,
+        "a rejected role writes no invite"
+    );
+}
+
+/// A re-run of `trust add` over an existing name never changes its role,
+/// neither with a different `--role` nor with the default; only
+/// `trust set-role` does (ADR-0045 결정 8).
+#[test]
+fn trust_add_never_changes_an_existing_pin_role() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("read-only")))
+        .unwrap();
+
+    ops.trust_add(pin_req("phone", None, Some("full"))).unwrap();
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("read-only"));
+    ops.trust_add(pin_req("phone", None, None)).unwrap();
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("read-only"));
+    ops.trust_add(pin_req("phone", Some("phone.example:4433"), None))
+        .unwrap();
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("read-only"));
+
+    let changed = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "phone".into(),
+            role: "exec".into(),
+        })
+        .unwrap();
+    assert_eq!(changed.previous_role.as_deref(), Some("read-only"));
+    assert!(changed.changed);
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("exec"));
+}
+
+/// `trust set-role`: same role is `changed: false` and writes nothing; a
+/// pin that has no `role` key reports `previous_role: None`; an unknown
+/// pin is `HOST_NOT_FOUND` and an unknown role `INVALID_ARGUMENT`.
+#[test]
+fn trust_set_role_reports_previous_role_and_rejects_bad_input() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("exec"))).unwrap();
+
+    let same = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "phone".into(),
+            role: "exec".into(),
+        })
+        .unwrap();
+    assert!(!same.changed);
+    assert_eq!(same.previous_role.as_deref(), Some("exec"));
+
+    let missing = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "ghost".into(),
+            role: "exec".into(),
+        })
+        .unwrap_err();
+    assert_eq!(missing.code, ErrorCode::HostNotFound);
+
+    let bad = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "phone".into(),
+            role: "root".into(),
+        })
+        .unwrap_err();
+    assert_eq!(bad.code, ErrorCode::InvalidArgument);
+    assert_eq!(stored_role(&ops, "phone").as_deref(), Some("exec"));
+}
+
+/// Fail-closed (CLAUDE.md "no durable record, no operation"): when the
+/// audit sink cannot append, `trust set-role` refuses with `INTERNAL`
+/// and `trust.toml` is byte-identical afterwards. The responder has already
+/// consumed the one-time invite, so the error is not retryable and a second
+/// accept with the same code is refused.
+#[test]
+fn set_role_without_a_durable_audit_record_leaves_trust_toml_untouched() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("read-only")))
+        .unwrap();
+    let sink = Arc::new(crate::audit::FailingAuditSink::new());
+    sink.fail();
+    let ops = ops.with_audit_sink(sink.clone());
+    let before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    let err = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "phone".into(),
+            role: "full".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.retryable);
+    assert!(sink.records().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before
+    );
+
+    // A new pin with a role other than `none` is refused the same way and
+    // never appears.
+    let err = ops.trust_add(pin_req("new", None, None)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before
+    );
+}
+
+/// Every write of a role other than `none` leaves one `local_op` record
+/// carrying the role; a `none` write and an unchanged `set-role` leave
+/// none, and a re-run of `trust add` over an existing pin leaves none.
+#[test]
+fn role_writes_leave_a_local_op_audit_record_with_the_role() {
+    let (_guard, ops) = temp_ops();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+
+    ops.trust_add(pin_req("phone", None, None)).unwrap();
+    ops.trust_add(pin_req("dial", Some("dial.example:4433"), None))
+        .unwrap();
+    ops.trust_add(pin_req("phone", None, Some("exec"))).unwrap();
+    ops.trust_set_role(TrustSetRoleReq {
+        name: "dial".into(),
+        role: "tunnel".into(),
+    })
+    .unwrap();
+    ops.trust_set_role(TrustSetRoleReq {
+        name: "dial".into(),
+        role: "tunnel".into(),
+    })
+    .unwrap();
+    ops.trust_set_role(TrustSetRoleReq {
+        name: "dial".into(),
+        role: "none".into(),
+    })
+    .unwrap();
+
+    let records = sink.records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[0].action, "trust.add");
+    assert_eq!(records[0].principal, "device:phone");
+    assert_eq!(records[0].resource, "phone");
+    assert_eq!(records[0].auth_path, "local");
+    assert_eq!(records[0].role.as_deref(), Some("full"));
+    assert_eq!(records[1].action, "trust.set_role");
+    assert_eq!(records[1].principal, "device:dial");
+    assert_eq!(records[1].role.as_deref(), Some("tunnel"));
+}
+
+/// A one-shot, real pairing responder for `Ops::trust_accept` tests: a
+/// listener on a loopback port that answers exactly one pairing exchange
+/// against an invite for `code`. It pins nothing itself; only the
+/// initiator's side is under test.
+struct PairingResponder {
+    addr: std::net::SocketAddr,
+    code: String,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl PairingResponder {
+    fn join(self) {
+        self.thread.join().expect("pairing responder thread");
+    }
+}
+
+fn spawn_pairing_responder() -> PairingResponder {
+    spawn_pairing_responder_for(1)
+}
+
+/// A responder that serves `exchanges` dials against one invite store, so a
+/// second dial with the same code meets an already-consumed invite.
+fn spawn_pairing_responder_for(exchanges: usize) -> PairingResponder {
+    use qsh_proto::pairing::{INVITE_SECRET_LEN, encode_invite_code};
+    use qsh_transport::Listener;
+
+    let secret = [0x44u8; INVITE_SECRET_LEN];
+    let dir = tempfile::tempdir().unwrap();
+    let invites_path = dir.path().join("invites.toml");
+    let mut invite_store = crate::trust::pairing::InviteStore::load(&invites_path).unwrap();
+    invite_store.add(&secret, std::time::SystemTime::now(), None);
+    invite_store.save(&invites_path).unwrap();
+    let invites = crate::trust::pairing::SharedInviteStore::open(&invites_path).unwrap();
+
+    let (identity, _fp) = crate::tunnel::testutil::self_signed();
+    // `Listener::bind` needs a running reactor; build it inside the
+    // responder's own runtime and move both into the thread.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(async {
+        Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            identity,
+            Arc::new(StaticTrust::empty().with_pairing_open(true)),
+        )
+        .unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        rt.block_on(async move {
+            for _ in 0..exchanges {
+                let incoming = listener.accept().await.unwrap();
+                let conn = incoming.accept().await.unwrap();
+                let _ = crate::pairing::respond(&conn, &invites, "host", |_, _| {
+                    Some(crate::trust::TrustRole::None)
+                })
+                .await;
+            }
+        });
+        drop(dir);
+    });
+    PairingResponder {
+        addr,
+        code: encode_invite_code(&secret),
+        thread,
+    }
+}
+
+/// `trust accept` with a role other than `none` is a grant this call
+/// writes, so it leaves one `trust.accept` record carrying the role; the
+/// default `none` leaves none.
+#[test]
+fn trust_accept_with_a_role_leaves_a_local_op_audit_record() {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+
+    let responder = spawn_pairing_responder();
+    ops.trust_accept(TrustAcceptReq {
+        address: responder.addr.to_string(),
+        code: responder.code.clone(),
+        as_name: Some("quiet".into()),
+        role: None,
+    })
+    .unwrap();
+    responder.join();
+    assert!(sink.records().is_empty(), "{:?}", sink.records());
+
+    let responder = spawn_pairing_responder();
+    ops.trust_accept(TrustAcceptReq {
+        address: responder.addr.to_string(),
+        code: responder.code.clone(),
+        as_name: Some("loud".into()),
+        role: Some("tunnel".into()),
+    })
+    .unwrap();
+    responder.join();
+    let records = sink.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].action, "trust.accept");
+    assert_eq!(records[0].principal, "device:loud");
+    assert_eq!(records[0].resource, "loud");
+    assert_eq!(records[0].auth_path, "local");
+    assert_eq!(records[0].role.as_deref(), Some("tunnel"));
+}
+
+/// Fail-closed for the `trust accept` path: with a role other than `none`
+/// and an audit sink that cannot append, the call is `INTERNAL`
+/// and `trust.toml` is byte-identical afterwards. The responder has already
+/// consumed the one-time invite, so the error is not retryable and a second
+/// accept with the same code is refused.
+#[test]
+fn trust_accept_without_a_durable_audit_record_leaves_trust_toml_untouched() {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    ops.trust_add(pin_req("phone", None, Some("read-only")))
+        .unwrap();
+    let sink = Arc::new(crate::audit::FailingAuditSink::new());
+    sink.fail();
+    let ops = ops.with_audit_sink(sink.clone());
+    let before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    let responder = spawn_pairing_responder_for(2);
+    let req = || TrustAcceptReq {
+        address: responder.addr.to_string(),
+        code: responder.code.clone(),
+        as_name: None,
+        role: Some("full".into()),
+    };
+    let err = ops.trust_accept(req()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(!err.retryable, "{err:?}");
+    assert!(err.message.contains("new invite"), "{}", err.message);
+    assert_eq!(err.details["new_invite_required"], true);
+    assert!(sink.records().is_empty());
+    // The invite is spent: the same code is refused the second time.
+    let again = ops.trust_accept(req()).unwrap_err();
+    responder.join();
+    assert_ne!(again.code, ErrorCode::Internal, "{again:?}");
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before
+    );
+}
+
+/// A pin with no `role` key holds `none` (ADR-0045 결정 3), so
+/// `trust set-role X none` on it is `changed: false`: no write, no audit
+/// record, and `previous_role` still reports the absent key.
+#[test]
+fn set_role_none_on_a_pin_without_a_role_key_is_unchanged() {
+    let (_guard, ops) = temp_ops();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+    let path = ops.paths().trust_file();
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"legacy");
+    let mut store = TrustStore::load(&path).unwrap();
+    store.add_peer("legacy", None, fingerprint, "2026-01-01T00:00:00Z".into());
+    store.save(&path).unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let data = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "legacy".into(),
+            role: "none".into(),
+        })
+        .unwrap();
+    assert!(!data.changed);
+    assert_eq!(data.previous_role, None);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert!(sink.records().is_empty());
+
+    // Any other role is still a change from the absent key.
+    let data = ops
+        .trust_set_role(TrustSetRoleReq {
+            name: "legacy".into(),
+            role: "exec".into(),
+        })
+        .unwrap();
+    assert!(data.changed);
+    assert_eq!(data.previous_role, None);
 }

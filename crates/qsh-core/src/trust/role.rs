@@ -41,6 +41,26 @@ impl TrustRole {
         TrustRole::None,
     ];
 
+    /// The role a pin gets when its writing command is given no `--role`
+    /// (ADR-0045 결정 8). Pins are undirected, so the split is by whether the
+    /// pin carries a dial address: a pin without one lets a device in
+    /// (`full`), a pin with one names a peer to dial (`none`).
+    pub fn default_for_trust_add(address_given: bool) -> TrustRole {
+        if address_given {
+            TrustRole::None
+        } else {
+            TrustRole::Full
+        }
+    }
+
+    /// The role `qsh pair invite` pins its redeemer with when `--role` is
+    /// absent (ADR-0045 결정 8): the invite brings a device in.
+    pub const DEFAULT_FOR_INVITE: TrustRole = TrustRole::Full;
+
+    /// The role `qsh pair accept` writes for the responder it pins when
+    /// `--role` is absent (ADR-0045 결정 8): a peer to dial.
+    pub const DEFAULT_FOR_ACCEPT: TrustRole = TrustRole::None;
+
     /// The string written to `trust.toml`, the audit log and JSON.
     pub fn as_str(self) -> &'static str {
         match self {

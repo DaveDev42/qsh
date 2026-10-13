@@ -109,6 +109,11 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.add_ca.json",
     "trust.list.json",
     "trust.list.with_role.json",
+    "trust.add.with_role.json",
+    "trust.invite.with_role.json",
+    "trust.accept.with_role.json",
+    "trust.set_role.json",
+    "trust.set_role.unchanged.json",
     "trust.remove.json",
     "trust.remove.absent.json",
     "trust.invite.json",
@@ -203,6 +208,44 @@ fn check(name: &str, envelope: Value) {
          Fixtures are append-only: if this is an intentional contract change \
          it needs a new /v2 (docs/CLI.md §10). If you are adding a new \
          fixture, regenerate with {UPDATE_ENV}=1."
+    );
+}
+
+/// Drop every `role` and `assigned_role` key, at any depth. ADR-0045 added
+/// both as optional fields, and the role-writing commands now always fill
+/// them (`trust add` writes `none` or `full`, an invite carries its role),
+/// so the fixtures that predate roles stay byte-for-byte untouched and are
+/// compared with those two keys removed from both sides. The role-bearing
+/// shapes have their own fixtures (`trust.list.with_role.json`,
+/// `trust.add.with_role.json`, `trust.invite.with_role.json`,
+/// `trust.accept.with_role.json`, `trust.set_role*.json`) that compare in full.
+fn strip_role_keys(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("role");
+            map.remove("assigned_role");
+            map.values_mut().for_each(strip_role_keys);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_role_keys),
+        _ => {}
+    }
+}
+
+/// [`check`] for a fixture recorded before roles existed: never writes, and
+/// compares with [`strip_role_keys`] applied to both sides.
+fn check_without_roles(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_role_keys(&mut actual);
+    strip_role_keys(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (role keys ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
     );
 }
 
@@ -388,11 +431,11 @@ fn golden_local_fixtures() {
         "--json",
     ]);
     assert_eq!(code, 0, "{added}");
-    check("trust.add.json", added);
+    check_without_roles("trust.add.json", added);
 
     let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
     assert_eq!(code, 0, "{listed}");
-    check("trust.list.json", listed);
+    check_without_roles("trust.list.json", listed);
 
     // `trust invite` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11) is
     // pure local generation — no dial, no peer — so it belongs here rather
@@ -401,7 +444,7 @@ fn golden_local_fixtures() {
     // masked by `fixtures::normalize`.
     let (code, invited) = sandbox.json(&["trust", "invite", "--json"]);
     assert_eq!(code, 0, "{invited}");
-    check("trust.invite.json", invited);
+    check_without_roles("trust.invite.json", invited);
 
     // `host.list`/`host.get` (`docs/CLI.md` §6.1) forward-only: no
     // localctl daemon runs in this sandbox (`Sandbox::command` scrubs
@@ -579,7 +622,7 @@ fn golden_setup_run_fixtures() {
     let (code, host_run) = host.json(&["setup", "host", "--peer", "laptop", "--json"]);
     assert_eq!(code, 0, "{host_run}");
     assert_eq!(host_run["data"]["complete"], false, "{host_run}");
-    check("setup.run.host_pending_acl.json", host_run);
+    check_without_roles("setup.run.host_pending_acl.json", host_run);
 
     let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
     let cert_path = listener.home_dir().join("peer.pem");
@@ -594,7 +637,7 @@ fn golden_setup_run_fixtures() {
     ]);
     assert_eq!(code, 0, "{listener_run}");
     assert_eq!(listener_run["data"]["complete"], false, "{listener_run}");
-    check("setup.run.listener_pending_acl.json", listener_run);
+    check_without_roles("setup.run.listener_pending_acl.json", listener_run);
 
     let client = with_config("");
     // A doctor `overall` of "error" would keep `complete` false, and a
@@ -628,7 +671,7 @@ fn golden_setup_run_fixtures() {
             step["result"] = serde_json::json!({ "overall": "<overall>" });
         }
     }
-    check("setup.run.client_complete.json", client_run);
+    check_without_roles("setup.run.client_complete.json", client_run);
 
     // The same client with no `acl.toml` at all (ADR-0038): `complete` is
     // true and the doctor step still reports `overall: "error"`.
@@ -655,7 +698,7 @@ fn golden_setup_run_fixtures() {
             step["result"] = serde_json::json!({ "overall": "error" });
         }
     }
-    check("setup.run.client_complete_without_acl.json", bare_run);
+    check_without_roles("setup.run.client_complete_without_acl.json", bare_run);
 
     let missing = with_config("");
     let (code, missing_run) = missing.json(&[
@@ -790,7 +833,7 @@ fn golden_trust_add_update_fixture() {
     assert_eq!(code, 0, "{updated}");
     assert_eq!(updated["data"]["created"], false, "{updated}");
     assert_eq!(updated["data"]["updated"], true, "{updated}");
-    check("trust.add.updated.json", updated);
+    check_without_roles("trust.add.updated.json", updated);
 }
 
 /// `trust list` with `role` keys in `trust.toml` (ADR-0045 결정 9): a pin
@@ -842,6 +885,45 @@ fn golden_trust_list_with_role_fixture() {
     check("trust.list.with_role.json", listed);
 }
 
+/// The role-writing commands (ADR-0045 결정 8, `docs/CLI.md` §6.11): an
+/// explicit `trust add --role`, a `pair invite --role` whose role is fixed
+/// by the issuer, and `trust set-role` both changing a role and finding it
+/// already set. Own sandboxes so the legacy goldens' stores stay untouched.
+#[test]
+fn golden_trust_role_write_fixtures() {
+    let sandbox = Sandbox::new();
+    let (code, added) = sandbox.json(&[
+        "trust",
+        "add",
+        "phone",
+        "--fingerprint",
+        SAMPLE_FINGERPRINT,
+        "--role",
+        "read-only",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{added}");
+    assert_eq!(added["data"]["peer"]["role"], "read-only", "{added}");
+    check("trust.add.with_role.json", added);
+
+    let (code, changed) = sandbox.json(&["trust", "set-role", "phone", "exec", "--json"]);
+    assert_eq!(code, 0, "{changed}");
+    assert_eq!(changed["data"]["previous_role"], "read-only", "{changed}");
+    assert_eq!(changed["data"]["changed"], true, "{changed}");
+    check("trust.set_role.json", changed);
+
+    let (code, unchanged) = sandbox.json(&["trust", "set-role", "phone", "exec", "--json"]);
+    assert_eq!(code, 0, "{unchanged}");
+    assert_eq!(unchanged["data"]["changed"], false, "{unchanged}");
+    check("trust.set_role.unchanged.json", unchanged);
+
+    let issuer = Sandbox::initialized();
+    let (code, invited) = issuer.json(&["pair", "invite", "--role", "tunnel", "--json"]);
+    assert_eq!(code, 0, "{invited}");
+    assert_eq!(invited["data"]["assigned_role"], "tunnel", "{invited}");
+    check("trust.invite.with_role.json", invited);
+}
+
 /// `trust accept` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11): a
 /// live pairing round trip against a real `qsh serve`, redeemed with a real
 /// `qsh trust invite --json` code. Own host + client — never `Fleet::start`,
@@ -859,7 +941,34 @@ fn golden_trust_accept_fixture() {
 
     let (code, accepted) = client.json(&["trust", "accept", serve.addr(), invite_code, "--json"]);
     assert_eq!(code, 0, "{accepted}");
-    check("trust.accept.json", accepted);
+    check_without_roles("trust.accept.json", accepted);
+}
+
+/// `trust accept --role` pins the responder with an explicit role
+/// (ADR-0045 결정 8): the role keys stay in this fixture, which compares in
+/// full, unlike `trust.accept.json`.
+#[test]
+fn golden_trust_accept_with_role_fixture() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    let (code, invited) = host.json(&["trust", "invite", "--json"]);
+    assert_eq!(code, 0, "{invited}");
+    let invite_code = invited["data"]["code"].as_str().expect("data.code");
+
+    let (code, accepted) = client.json(&[
+        "trust",
+        "accept",
+        serve.addr(),
+        invite_code,
+        "--role",
+        "exec",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{accepted}");
+    assert_eq!(accepted["data"]["peer"]["role"], "exec", "{accepted}");
+    check("trust.accept.with_role.json", accepted);
 }
 
 /// Name-authority fixtures (ADR-0012 결정 3/4/6, `docs/CLI.md` §6.11):
@@ -881,7 +990,7 @@ fn golden_name_authority_fixtures() {
         invited["data"]["assigned_name"], "assigned-peer",
         "{invited}"
     );
-    check("trust.invite.assigned_name.json", invited);
+    check_without_roles("trust.invite.assigned_name.json", invited);
 
     let renamer = Sandbox::initialized();
     renamer.trust_add(
@@ -893,7 +1002,7 @@ fn golden_name_authority_fixtures() {
     assert_eq!(code, 0, "{renamed}");
     assert_eq!(renamed["data"]["old_name"], "old-name", "{renamed}");
     assert_eq!(renamed["data"]["peer"]["name"], "new-name", "{renamed}");
-    check("trust.rename.json", renamed);
+    check_without_roles("trust.rename.json", renamed);
 }
 
 /// The certificate-file exchange path (`docs/CLI.md` §6.11, ADR-0013):
@@ -935,7 +1044,7 @@ fn golden_cert_file_exchange_fixtures() {
     // the golden file: `normalize` masks `address` unconditionally, so
     // assert it here instead, before the mask erases it.
     assert_eq!(added["data"]["peer"]["address"], "", "{added}");
-    check("trust.add.cert_file.json", added);
+    check_without_roles("trust.add.cert_file.json", added);
 
     // `trust add-ca`'s foreign root: `cert init`'s own CA certificate
     // (`crates/qsh-core/src/ca.rs`'s `CA_CERT_FILE`, `<config_dir>/ca/

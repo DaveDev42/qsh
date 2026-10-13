@@ -117,6 +117,7 @@ async fn trust_add(ops: &Ops, name: &str, address: Option<SocketAddr>, fingerpri
             address,
             fingerprint: Some(fp),
             cert_pem: None,
+            role: None,
         })
     })
     .await

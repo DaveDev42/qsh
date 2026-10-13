@@ -538,6 +538,7 @@ fn doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned() {
         address: Some("mac.example:4433".into()),
         fingerprint: Some(fingerprint),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1024,6 +1025,7 @@ fn doctor_probing_the_controller_alias_as_extra_host_reports_one_code_only() {
         address: Some(addr.to_string()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"ctrl").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
@@ -1085,6 +1087,7 @@ fn doctor_probes_a_pinned_extra_host_and_classifies_a_black_hole_as_udp_egress_b
         address: Some(addr.to_string()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"quiet").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1135,6 +1138,7 @@ fn doctor_probe_gets_a_version_negotiation_reply_from_a_live_qsh_listener() {
         address: Some(addr.to_string()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"live").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1191,6 +1195,7 @@ fn doctor_reports_no_route_for_a_pinned_address_with_an_unparseable_port() {
         address: Some("203.0.113.9:ssh".into()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"bad").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -1242,6 +1247,7 @@ fn doctor_finding_status_is_always_one_of_the_locked_vocabulary() {
         address: Some("pinned.example:4433".into()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"vocab").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2040,6 +2046,7 @@ fn doctor_acl_findings_reports_acl_principal_unmatched_for_an_unmatched_pin() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2074,6 +2081,7 @@ fn acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row(
             address: None,
             fingerprint: Some(shared_fingerprint.clone()),
             cert_pem: None,
+            role: None,
         })
         .unwrap();
     }
@@ -2110,6 +2118,7 @@ fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_examp
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     ops.trust_add(TrustAddReq {
@@ -2117,6 +2126,7 @@ fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_examp
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"other").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2167,6 +2177,7 @@ fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_device() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2196,6 +2207,7 @@ fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_fingerprint() {
         address: None,
         fingerprint: Some(fingerprint.clone()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2281,6 +2293,7 @@ fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
     // No acl.toml at all: `PolicyLoad::Missing`.
@@ -2379,6 +2392,7 @@ fn doctor_wires_the_acl_principal_and_ca_findings_into_the_full_report() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 
@@ -2528,6 +2542,7 @@ fn doctor_wires_the_host_pinned_without_address_finding_into_the_full_report() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
+        role: None,
     })
     .unwrap();
 

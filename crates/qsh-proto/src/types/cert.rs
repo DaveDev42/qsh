@@ -92,6 +92,12 @@ pub struct TrustAcceptReq {
     /// is pinned, as it always was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub as_name: Option<String>,
+    /// The trust role to write on the responder's new pin here (`qsh pair
+    /// accept --role`, ADR-0045 결정 8). An open string on the wire; absent
+    /// means `none`, because the pin is a peer to dial. Additive
+    /// (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Data payload of `trust.accept`. Same shape as [`TrustAddData`] — a

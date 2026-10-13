@@ -1,4 +1,5 @@
 use super::*;
+use crate::trust::TrustRole;
 
 /// **Report F-1 regression.** Zero test in this crate directly pinned
 /// down channel binding at the exact layer that provides it: this
@@ -58,7 +59,7 @@ fn reject_control_chars_allows_an_ordinary_device_name() {
 /// `"Dave's MacBook Pro"` as a name a peer may legitimately assert.
 #[test]
 fn the_pin_notice_shell_quotes_a_device_name_containing_an_apostrophe() {
-    let notice = pairing_pin_notice("Dave's MacBook Pro", false, false);
+    let notice = pairing_pin_notice("Dave's MacBook Pro", TrustRole::Full, false, false);
     assert!(
         notice.contains(r"--principal 'device:Dave'\''s MacBook Pro' --action session.open"),
         "an apostrophe must be POSIX-escaped, not left to close the quote: {notice}"
@@ -71,7 +72,7 @@ fn the_pin_notice_shell_quotes_a_device_name_containing_an_apostrophe() {
 /// name that does not need it.
 #[test]
 fn the_pin_notice_wraps_an_apostrophe_free_name_without_escaping_it() {
-    let notice = pairing_pin_notice("probe-device", false, false);
+    let notice = pairing_pin_notice("probe-device", TrustRole::Full, false, false);
     assert!(
         notice.ends_with("qsh acl check --principal 'device:probe-device' --action session.open"),
         "{notice}"
@@ -223,4 +224,48 @@ fn reject_control_chars_rejects_bidi_and_zero_width() {
 fn reject_control_chars_allows_hangul_and_emoji_names() {
     assert!(reject_control_chars("데이브의 맥북", "PairingProof.device_name").is_ok());
     assert!(reject_control_chars("laptop 💻", "PairingProof.device_name").is_ok());
+}
+
+/// A role that grants actions lists them in `ROLE_GRANTS` order, then the
+/// row clause for "no `[[acl]]` row" and the check command (ADR-0045 결정 13).
+#[test]
+fn the_pin_notice_lists_the_actions_a_role_grants() {
+    let notice = pairing_pin_notice("phone", TrustRole::ReadOnly, false, true);
+    let expected = format!(
+        "{PAIRING_PINNED_INVITE_ASSIGNED} \"phone\". {PAIRING_ROLE_LEAD} `read-only`, which grants: session.list, session.attach. {PAIRING_ACL_ROW_ABSENT} {PAIRING_CHECK_LEAD} qsh acl check --principal 'device:phone' --action session.open"
+    );
+    assert_eq!(notice, expected);
+}
+
+/// The `none` role says it grants no action instead of listing any.
+#[test]
+fn the_pin_notice_for_the_none_role_says_it_grants_nothing() {
+    let notice = pairing_pin_notice("phone", TrustRole::None, false, false);
+    assert!(
+        notice.contains(
+            "Its trust role is `none`, so the role grants no action. No `[[acl]]` row names it, so only the role decides."
+        ),
+        "{notice}"
+    );
+    assert!(!notice.contains("which grants"), "{notice}");
+}
+
+/// When an `[[acl]]` row already names the principal, the notice says that
+/// row's grants are added to the role's.
+#[test]
+fn the_pin_notice_says_an_existing_acl_row_adds_to_the_role() {
+    let notice = pairing_pin_notice("phone", TrustRole::Exec, true, false);
+    assert!(
+        notice.contains(
+            "An `[[acl]]` row already names it, so that row's grants are added to the role's"
+        ),
+        "{notice}"
+    );
+    assert!(!notice.contains(PAIRING_ACL_ROW_ABSENT), "{notice}");
+    assert!(
+        notice.contains(
+            "`exec`, which grants: exec.run, session.open, session.list, session.attach, session.control."
+        ),
+        "{notice}"
+    );
 }

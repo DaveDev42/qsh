@@ -16,6 +16,8 @@
 //! mac_key = "BASE64(blake3::hash(secret))"
 //! created_at = "2026-08-31T00:00:00Z"
 //! consumed_at = "2026-08-31T00:03:00Z"   # absent while still open
+//! assigned_name = "laptop"                # optional (`pair invite --as`)
+//! role = "full"                           # optional (`pair invite --role`, ADR-0045)
 //! ```
 //!
 //! **Lifecycle.** A record is *redeemable* for [`INVITE_TTL`] (10 minutes)
@@ -58,6 +60,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::ops::OpError;
+use crate::trust::TrustRole;
 
 /// How long a fresh invite is redeemable (ADR-0002 design values,
 /// `docs/CLI.md` §6.11).
@@ -159,6 +162,13 @@ struct InviteRecordFile {
     /// trusted blind just because it parsed off disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assigned_name: Option<String>,
+    /// The trust role the redeeming peer is pinned with (`qsh pair invite
+    /// --role`, ADR-0045 결정 8). One of the six [`TrustRole`] names; any
+    /// other value makes the whole file `CONFIG_ERROR`, the way an unknown
+    /// `role` in `trust.toml` does. Absent on an invite minted before
+    /// ADR-0045, which pins `none`: an old invite never widens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
 }
 
 /// `invites.toml` as serialized.
@@ -175,6 +185,7 @@ struct Record {
     created_at: SystemTime,
     consumed_at: Option<SystemTime>,
     assigned_name: Option<String>,
+    role: TrustRole,
 }
 
 impl Record {
@@ -255,6 +266,19 @@ impl InviteStore {
             )
             .with_retryable(false)
         })?;
+        // ADR-0045 결정 3 applied to invites: an unknown `role` is a shape
+        // error in the whole file, not a value to guess at.
+        for record in &file.invites {
+            if let Some(role) = &record.role
+                && let Err(err) = role.parse::<TrustRole>()
+            {
+                return Err(OpError::new(
+                    ErrorCode::ConfigError,
+                    format!("invalid invite store {}: {err}", path.display()),
+                )
+                .with_retryable(false));
+            }
+        }
         Ok(Self {
             records: file.invites,
         })
@@ -377,11 +401,37 @@ impl InviteStore {
     /// (re-validated at redemption time, never here — see
     /// [`SharedInviteStore::redeem`]'s doc). Returns the RFC 3339
     /// `created_at`/`expires_at` pair.
+    ///
+    /// The record carries no `role` key, so redeeming it pins `none`. A
+    /// production mint goes through [`Self::add_with_role`].
     pub fn add(
         &mut self,
         secret: &[u8],
         now: SystemTime,
         assigned_name: Option<String>,
+    ) -> (String, String) {
+        self.push(secret, now, assigned_name, None)
+    }
+
+    /// [`Self::add`] that fixes the role the redeemer is pinned with (`qsh
+    /// pair invite --role`, ADR-0045 결정 8). The redeeming side never
+    /// chooses it.
+    pub fn add_with_role(
+        &mut self,
+        secret: &[u8],
+        now: SystemTime,
+        assigned_name: Option<String>,
+        role: TrustRole,
+    ) -> (String, String) {
+        self.push(secret, now, assigned_name, Some(role))
+    }
+
+    fn push(
+        &mut self,
+        secret: &[u8],
+        now: SystemTime,
+        assigned_name: Option<String>,
+        role: Option<TrustRole>,
     ) -> (String, String) {
         let created_at = rfc3339_at(now);
         let expires_at = rfc3339_at(now + INVITE_TTL);
@@ -390,6 +440,7 @@ impl InviteStore {
             created_at: created_at.clone(),
             consumed_at: None,
             assigned_name,
+            role: role.map(|role| role.as_str().to_string()),
         });
         (created_at, expires_at)
     }
@@ -409,6 +460,13 @@ impl InviteStore {
                         created_at,
                         consumed_at,
                         assigned_name: r.assigned_name.clone(),
+                        // Validated at parse time; a record that somehow
+                        // does not parse falls to the narrowest role.
+                        role: r
+                            .role
+                            .as_deref()
+                            .and_then(|role| role.parse().ok())
+                            .unwrap_or(TrustRole::None),
                     },
                 ))
             })
@@ -459,6 +517,19 @@ impl InviteStore {
 /// the file atomically.
 pub fn live_invite_counts(path: &Path, now: SystemTime) -> Result<LiveInviteCounts, OpError> {
     Ok(InviteStore::load(path)?.live_counts(now))
+}
+
+/// What a matched invite says about the pin its redeemer gets: handed to
+/// [`SharedInviteStore::redeem`]'s `on_matched` hook.
+#[derive(Debug, Clone, Copy)]
+pub struct InviteMatch<'a> {
+    /// The name `qsh pair invite --as` assigned, already re-validated.
+    /// `None` means the redeemer's self-asserted name is pinned.
+    pub assigned_name: Option<&'a str>,
+    /// The trust role to pin the redeemer with (`qsh pair invite --role`,
+    /// ADR-0045 결정 8): the issuer's choice, stored in the invite record.
+    /// `none` for an invite minted before ADR-0045.
+    pub role: TrustRole,
 }
 
 /// The outcome of a redemption attempt (`crate::pairing`'s wire exchange is
@@ -623,7 +694,7 @@ impl SharedInviteStore {
         exported_keying_material: &[u8],
         client_proof: &[u8; 32],
         now: SystemTime,
-        on_matched: impl FnOnce(Option<&str>) -> bool,
+        on_matched: impl FnOnce(InviteMatch<'_>) -> bool,
     ) -> Result<RedeemOutcome, OpError> {
         self.refresh();
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
@@ -652,7 +723,10 @@ impl SharedInviteStore {
         {
             return Ok(RedeemOutcome::InvalidAssignedName);
         }
-        if !on_matched(record.assigned_name.as_deref()) {
+        if !on_matched(InviteMatch {
+            assigned_name: record.assigned_name.as_deref(),
+            role: record.role,
+        }) {
             return Ok(RedeemOutcome::Rejected);
         }
         let server_proof = record

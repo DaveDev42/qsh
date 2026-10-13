@@ -31,8 +31,8 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 use crate::ops::OpError;
-use crate::trust::SharedInviteStore;
 use crate::trust::pairing::{RedeemOutcome, proofs_from_secret};
+use crate::trust::{SharedInviteStore, TrustRole};
 
 /// RFC 5705 TLS exporter label pairing derives its channel-binding proofs
 /// from (`docs/design/protocol.md` §15). Context is always empty — the
@@ -245,6 +245,14 @@ pub struct PairingSuccess {
     /// always `false` from [`accept`], which has no invite of its own to
     /// consult.
     pub pinned_by_invite: bool,
+    /// The trust role the pin holds after the redemption (ADR-0045 결정 8):
+    /// the invite record's role for a new pin, the existing pin's own role
+    /// when the name was already pinned with this fingerprint (a redemption
+    /// never changes it; `none` if that pin has no `role` key). `Some` only
+    /// from [`respond`];
+    /// [`accept`] always returns `None` (`Ops::trust_accept` writes its own
+    /// pin, with the role from its request).
+    pub pinned_role: Option<TrustRole>,
 }
 
 /// Pull this connection's RFC 5705 exported keying material under
@@ -309,6 +317,7 @@ pub async fn accept(
             Ok(PairingSuccess {
                 pinned_name: accepted.device_name,
                 pinned_by_invite: false,
+                pinned_role: None,
             })
         }
         Some(control_message::Body::Response(wire::Response {
@@ -340,42 +349,68 @@ pub const PAIRING_PINNED_SELF_ASSERTED: &str =
 pub const PAIRING_PINNED_INVITE_ASSIGNED: &str =
     "pinned a new peer under the name the invite assigned with --as:";
 
-/// [`pairing_pin_notice`]'s impact+next-command clause when no `[[acl]]`
-/// row names the newly-pinned principal yet: it can authenticate, but
-/// every action is still denied (default-deny, `docs/design/
-/// architecture.md`'s security-defaults). The restart clause comes
-/// *before* the `qsh acl check` command on purpose: `Ops::acl_check`
-/// re-reads `acl.toml` on every call (`ops/acl.rs`), so a row added after
-/// this `qsh serve` process started would otherwise look already-applied
-/// to `acl check` while the running process still denies everything.
-pub const PAIRING_ACL_ROW_ABSENT: &str = "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with:";
+/// The role clause of [`pairing_pin_notice`] for a pin whose role grants
+/// something (ADR-0045 결정 13): this lead, the role in backticks, then
+/// ", which grants: " and the actions in [`crate::acl::ROLE_GRANTS`]
+/// order. Role changes apply from the next request, so the clause is a
+/// statement about now, not a prediction.
+pub const PAIRING_ROLE_LEAD: &str = "Its trust role is";
 
-/// [`pairing_pin_notice`]'s impact+next-command clause when an `[[acl]]`
-/// row already names the newly-pinned principal — the peer inherits that
-/// row's grants exactly as written, including any the operator did not
-/// mean for this specific device (ADR-0017 결정 3, the condition that
-/// decision accepts). No restart clause here: this branch is computed from
-/// [`crate::acl::PinnedPrincipalIndex`], which is the very `Policy` this
-/// running process is enforcing, not a fresh re-read of `acl.toml` — so
-/// "inherits that row's grants exactly as written" is already true at the
-/// moment this notice prints.
-pub const PAIRING_ACL_ROW_PRESENT: &str = "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with:";
+/// The role clause of [`pairing_pin_notice`] for a pin whose role is
+/// `none`: it can authenticate, and the role grants no action.
+pub const PAIRING_ROLE_NONE: &str = "Its trust role is `none`, so the role grants no action.";
+
+/// [`pairing_pin_notice`]'s row clause when no `[[acl]]` row names the
+/// newly pinned principal: the role alone decides what it may do.
+pub const PAIRING_ACL_ROW_ABSENT: &str = "No `[[acl]]` row names it, so only the role decides.";
+
+/// [`pairing_pin_notice`]'s row clause when an `[[acl]]` row already names
+/// the newly pinned principal — the peer inherits that row's grants exactly
+/// as written, including any the operator did not mean for this specific
+/// device (ADR-0017 결정 3), now on top of the role's (ADR-0045 결정 13).
+/// Computed from [`crate::acl::PinnedPrincipalIndex`], which is the very
+/// `Policy` this running process is enforcing, not a fresh re-read of
+/// `acl.toml`, so the statement is already true when it prints.
+pub const PAIRING_ACL_ROW_PRESENT: &str = "An `[[acl]]` row already names it, so that row's grants are added to the role's, including any you did not mean for this device.";
+
+/// [`pairing_pin_notice`]'s lead-in to the command it ends with. The two
+/// halves differ in how fast they apply: a role is read on every request,
+/// while `acl.toml` is read once at startup, so a row edited after this
+/// `qsh serve` started needs a restart (`Ops::acl_check` re-reads
+/// `acl.toml` on every call, which would otherwise look already-applied).
+pub const PAIRING_CHECK_LEAD: &str = "A role change applies from the next request; an acl.toml change needs a restart of this `qsh serve`. Check with:";
 
 /// The full pairing-succeeded stderr notice (`Server::serve_pairing_connection`'s
 /// pin callback delivers this through the same `on_notice` sink
 /// `crate::serve::run_serve` wires — `qsh-core` never writes to stderr
 /// itself, ADR-0017 결정 3 / `docs/design/architecture.md` §1). `name` is
-/// the peer's self-reported device name, already pinned by the time this
-/// is called; `acl_row_present` comes from
+/// the pinned name, already written by the time this is called; `role` is
+/// the role the invite pinned it with and names the actions that role
+/// grants (ADR-0045 결정 13). `acl_row_present` comes from
 /// [`crate::acl::PinnedPrincipalIndex::names_device`] against the `Policy`
 /// this process loaded at startup, never a fresh read of `acl.toml`.
-pub fn pairing_pin_notice(name: &str, acl_row_present: bool, pinned_by_invite: bool) -> String {
+pub fn pairing_pin_notice(
+    name: &str,
+    role: TrustRole,
+    acl_row_present: bool,
+    pinned_by_invite: bool,
+) -> String {
     let observation = if pinned_by_invite {
         PAIRING_PINNED_INVITE_ASSIGNED
     } else {
         PAIRING_PINNED_SELF_ASSERTED
     };
-    let tail = if acl_row_present {
+    let grants = crate::acl::role_grant(role).actions;
+    let role_clause = if grants.is_empty() {
+        PAIRING_ROLE_NONE.to_string()
+    } else {
+        let actions: Vec<&str> = grants.iter().map(|action| action.as_str()).collect();
+        format!(
+            "{PAIRING_ROLE_LEAD} `{role}`, which grants: {}.",
+            actions.join(", ")
+        )
+    };
+    let row_clause = if acl_row_present {
         PAIRING_ACL_ROW_PRESENT
     } else {
         PAIRING_ACL_ROW_ABSENT
@@ -389,7 +424,7 @@ pub fn pairing_pin_notice(name: &str, acl_row_present: bool, pinned_by_invite: b
     // stays the command it claims to be.
     let principal = shell_single_quoted(&format!("device:{name}"));
     format!(
-        "{observation} \"{name}\". {tail} qsh acl check --principal {principal} --action session.open"
+        "{observation} \"{name}\". {role_clause} {row_clause} {PAIRING_CHECK_LEAD} qsh acl check --principal {principal} --action session.open"
     )
 }
 
@@ -430,19 +465,23 @@ pub const PAIRING_INVITE_REPLAY_NOTICE: &str = "an invite code was presented aga
 /// `handshake::respond`'s own rejection-drain discipline) before this
 /// returns `Err`.
 ///
-/// `try_pin` runs once the initiator's proof has verified against a live
-/// invite, but **before** that invite is marked consumed or `PairingAccepted`
+/// `try_pin` runs (with the name to pin and the invite's role, ADR-0045
+/// 결정 8) once the initiator's proof has verified against a live invite, but **before** that invite is marked consumed or `PairingAccepted`
 /// is sent (`crate::trust::pairing::SharedInviteStore::redeem`'s own
 /// `on_matched` hook) — the caller (`Server::serve_pairing_connection`)
 /// attempts its local `TrustStore::add_peer` pin here, passing the
-/// initiator's self-reported device name, and returns `false` on a name
+/// initiator's self-reported device name, and returns `None` on a name
 /// collision (this step's brief invariant #5). A decline surfaces as
-/// [`PairingError::PinCollision`] and leaves the invite untouched.
+/// [`PairingError::PinCollision`] and leaves the invite untouched. On
+/// success it returns the role the pin actually holds afterwards
+/// ([`PairingSuccess::pinned_role`]): the invite's role for a new pin, but
+/// the existing pin's own for a name already pinned with the same
+/// fingerprint, which a redemption never changes (ADR-0045 결정 8).
 pub async fn respond(
     conn: &Connection,
     store: &SharedInviteStore,
     local_device_name: &str,
-    try_pin: impl FnOnce(&str) -> bool,
+    try_pin: impl FnOnce(&str, TrustRole) -> Option<TrustRole>,
 ) -> Result<PairingSuccess, PairingError> {
     let (send, recv) = tokio::time::timeout(PAIRING_TIMEOUT, conn.accept_bi())
         .await
@@ -485,14 +524,17 @@ pub async fn respond(
     // protocol.md` §15.6) is that the pin decision happens *before* the
     // invite is marked consumed.
     let mut pin_name = String::new();
+    let mut pin_role = TrustRole::None;
     let mut pinned_by_invite = false;
     let outcome = store.redeem(
         &ekm,
         &client_proof,
         std::time::SystemTime::now(),
-        |assigned_name| {
-            pinned_by_invite = assigned_name.is_some();
-            let candidate = assigned_name.unwrap_or(proof_msg.device_name.as_str());
+        |matched| {
+            pinned_by_invite = matched.assigned_name.is_some();
+            let candidate = matched
+                .assigned_name
+                .unwrap_or(proof_msg.device_name.as_str());
             // The wire guard above only ran `wire::validate_device_name` on
             // the self-asserted name (no `/` check) — the effective name gets
             // the full `validate_peer_label` rule right before it is ever
@@ -505,7 +547,15 @@ pub async fn respond(
                 return false;
             }
             pin_name = candidate.to_string();
-            try_pin(candidate)
+            // The notice reports what the pin holds, not what the invite
+            // offered: an existing pin keeps its own role.
+            match try_pin(candidate, matched.role) {
+                Some(held) => {
+                    pin_role = held;
+                    true
+                }
+                None => false,
+            }
         },
     )?;
     let server_proof = match outcome {
@@ -554,6 +604,7 @@ pub async fn respond(
     Ok(PairingSuccess {
         pinned_name: pin_name,
         pinned_by_invite,
+        pinned_role: Some(pin_role),
     })
 }
 

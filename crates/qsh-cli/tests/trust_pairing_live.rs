@@ -943,3 +943,77 @@ fn pair_accept_suggested_name_notice_is_stderr_only_and_conditional() {
         "no suggested-name notice belongs here when --as was given: {stderr2:?}"
     );
 }
+
+/// ADR-0045 결정 8, 13: the invite fixes the redeemer's role. A default
+/// invite pins `full` on the host, `--role exec` pins `exec`, and the
+/// accepting side's own pin of the host is `none` unless `--role` is given
+/// to `pair accept`. The host's pin notice names the role and what it
+/// grants, and the redeemer cannot influence any of it.
+#[test]
+fn pairing_pins_the_invite_role_on_the_host_and_none_on_the_acceptor() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let mut serve = ServeGuard::start_without_policy(&host, &[]);
+
+    let (exit, invited) = host.json(&["pair", "invite", "--role", "exec", "--json"]);
+    assert_eq!(exit, 0, "{invited}");
+    assert_eq!(invited["data"]["assigned_role"], "exec", "{invited}");
+    let code = invited["data"]["code"].as_str().expect("code").to_string();
+
+    let (exit, accepted) = client.json(&["pair", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit, 0, "{accepted}");
+    assert_eq!(
+        accepted["data"]["peer"]["role"], "none",
+        "the acceptor pins the host with role none by default: {accepted}"
+    );
+
+    let (_, host_listed) = host.json(&["trust", "list", "--json"]);
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers.len(), 1, "{host_listed}");
+    assert_eq!(host_peers[0]["role"], "exec", "{host_listed}");
+
+    poll_until(
+        "the role clause of the pin notice on host stderr",
+        Duration::from_secs(5),
+        || {
+            serve
+                .stderr_snapshot()
+                .iter()
+                .any(|line| {
+                    line.contains("Its trust role is `exec`, which grants:")
+                        && line.contains(qsh_core::pairing::PAIRING_CHECK_LEAD)
+                })
+                .then_some(())
+        },
+    );
+    let _ = serve.finish();
+
+    // A default invite is `full`.
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start_without_policy(&host, &[]);
+    let (code, _cmd) = invite(&host);
+    let (exit, accepted) = client.json(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code,
+        "--role",
+        "read-only",
+        "--json",
+    ]);
+    assert_eq!(exit, 0, "{accepted}");
+    assert_eq!(accepted["data"]["peer"]["role"], "read-only", "{accepted}");
+    let (_, host_listed) = host.json(&["trust", "list", "--json"]);
+    assert_eq!(
+        host_listed["data"]["peers"][0]["role"], "full",
+        "{host_listed}"
+    );
+    let records = host.audit_records();
+    assert!(
+        records
+            .iter()
+            .any(|r| r["action"] == "trust.invite" && r["role"] == "full"),
+        "the non-none pin write leaves a role-bearing audit record: {records:#?}"
+    );
+}
