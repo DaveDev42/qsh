@@ -785,7 +785,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   (for example behind an enterprise VPN that intercepts DNS), pin the peer by
   IP literal or turn on the OS's encrypted DNS settings. A built-in forced
   DNS-over-HTTPS resolver is a P2 candidate (ADR-0039).
-- Windows is P1 for the client and P2 for the host. PTY code is gated
+- Windows support is planned for P1: the client in M19 and the host in M20
+  (ADR-0035), with the same features as Linux and macOS. Until then PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
   return `UNSUPPORTED` there, and a tunnel over a reverse connection
   inherits that. `qsh tunnel open --dynamic` is cross-platform like
@@ -859,7 +860,8 @@ old-glibc check.
 | M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
 | M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
 | M14 | TCP/TLS fallback | Withdrawn (ADR-0043); the transport abstraction stays |
-| M15–M19 | Rest of P1 | Design records drafted, awaiting approval; README rewrite (M17 b) done |
+| M15 | Trust roles and scp-compatible `qsh cp` | In progress |
+| M16–M20 | Rest of P1 (SSH bootstrap, revocation, ops surface, session home, Windows client and host) | Design records approved; README rewrite (M17 b) done |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the
