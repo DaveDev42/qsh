@@ -872,7 +872,12 @@ impl Ops {
                 None,
             ));
         }
-        let data = self.doctor(DoctorReq { host: None }, env.now)?;
+        // `env.now` was read when the run started, and the invite step stamps
+        // `created_at` from the clock later; a run that crosses a second
+        // boundary would otherwise date its own invite after "now" and not
+        // count it as live (`acl_policy_missing` on a role-granting setup).
+        let now = env.now.max(SystemTime::now());
+        let data = self.doctor(DoctorReq { host: None }, now)?;
         let mut detail = format!("overall: {}", data.overall);
         let result = to_value(&data)?;
         if let Some(code) = exempted_error_code(req.role, Some(&result)) {

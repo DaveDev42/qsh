@@ -908,3 +908,27 @@ fn setup_rejects_an_unknown_peer_role_before_any_write() {
     assert!(err.details.is_null(), "validation runs before any step");
     assert_eq!(Sandbox::snapshot(&sandbox.config_dir()), before);
 }
+
+#[test]
+fn setup_host_counts_its_own_invite_live_when_the_run_started_before_it_was_minted() {
+    // A run whose clock reading predates the invite's `created_at` (the run
+    // crossed a second boundary) must still see the invite it minted as live,
+    // so the role default completes without `acl_policy_missing`.
+    let sandbox = Sandbox::new();
+    let env = SetupEnv {
+        now: SystemTime::now() - Duration::from_secs(2),
+        ..sandbox.env()
+    };
+    let mut req = host("laptop");
+    req.peer_role = None;
+    let data = sandbox.ops.setup_run(&req, &env).unwrap();
+    assert!(data.complete, "{:?}", data.steps);
+    assert!(
+        !doctor_error_codes(&data)
+            .iter()
+            .any(|c| c == "acl_policy_missing"),
+        "{:?}",
+        data.steps
+    );
+    assert!(!sandbox.acl_path().exists());
+}

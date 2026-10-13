@@ -1172,6 +1172,13 @@ fn role_row_agrees(role: &str) {
                 "{label} {action}: {data}"
             );
 
+            // A Windows host has no PTY sessions yet (M20): `session.open`
+            // answers UNSUPPORTED there, so only the `acl check` columns
+            // above apply to it. `exec.run` and `session.list` run for real.
+            if cfg!(windows) && action == "session.open" {
+                continue;
+            }
+
             // The real op agrees.
             if allowed {
                 assert_eq!(code, 0, "{label} {action}: {value}");
