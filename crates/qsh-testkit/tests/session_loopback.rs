@@ -619,13 +619,14 @@ struct AllowAllAnyAuthPath;
 impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
     fn check(
         &self,
-        principal: &Principal,
-        auth_path: qsh_transport::AuthPath,
+        requester: &qsh_core::acl::Requester<'_>,
         _action: Action,
         resource: qsh_core::acl::ResourceRef<'_>,
     ) -> qsh_core::acl::Verdict {
         let owned = match resource.owner {
-            Some(owner) => owner == qsh_core::acl::opener_key(principal, auth_path),
+            Some(owner) => {
+                owner == qsh_core::acl::opener_key(requester.principal, requester.auth_path)
+            }
             None => true,
         };
         qsh_core::acl::Verdict {

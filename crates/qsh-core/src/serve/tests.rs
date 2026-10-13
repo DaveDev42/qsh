@@ -38,7 +38,12 @@ fn bind_precedence_flag_then_config_then_default() {
 async fn host_runtime_wires_device_id_and_a_shared_audit_sink() {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::new(dir.path(), dir.path());
-    let runtime = host_runtime(&paths, &Config::default(), "hermes");
+    let runtime = host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
     assert_eq!(runtime.server.local_hello(None).device_name, "hermes");
     assert_eq!(runtime.audit.path(), paths.audit_log());
     assert_eq!(runtime.server.pending_tickets(), 0);

@@ -255,7 +255,7 @@ async fn run_reverse_unix(
     // connection this loop dials (`docs/design/architecture.md` §3): built
     // once, reused across every attempt below, never rebuilt on a
     // reconnect. This is what makes "sessions survive reconnection" true.
-    let runtime = crate::serve::host_runtime(paths, config, device_id.clone());
+    let runtime = crate::serve::host_runtime(paths, config, device_id.clone(), Arc::clone(&trust));
     on_runtime(&runtime);
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: offered_name.clone(),

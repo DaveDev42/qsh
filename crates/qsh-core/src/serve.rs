@@ -400,7 +400,12 @@ pub async fn run_serve(
             format!("cannot read bound address: {err}"),
         )
     })?;
-    let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
+    let runtime = host_runtime(
+        paths,
+        config,
+        identity.identity.device_id.clone(),
+        Arc::clone(&trust),
+    );
     // Wired before `on_runtime`/`on_bound` so it is live for every
     // connection the accept loop below could ever admit.
     runtime
@@ -494,7 +499,12 @@ pub struct HostRuntime {
 /// (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a reverse target
 /// calls this once per process too (`crate::reverse::target::run_reverse_unix`),
 /// not once per reconnect, for the same reason.
-pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>) -> HostRuntime {
+pub fn host_runtime(
+    paths: &Paths,
+    config: &Config,
+    device_id: impl Into<String>,
+    trust: Arc<SharedTrustStore>,
+) -> HostRuntime {
     let audit = Arc::new(RotatingAuditSink::spawn(
         config.audit.path(paths),
         config.audit.max_bytes(),
@@ -516,7 +526,7 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
     // calling plain `load_or_deny`: a reverse target never reaches
     // `Server::serve_pairing_connection` at all.
     let (authorizer, policy_diagnostic, pinned_principals) =
-        load_or_deny_with_index(paths, Role::Serve);
+        load_or_deny_with_index(paths, Role::Serve, trust);
     // M8 plan Step 2 (52639fc): the same operator-configured admission bounds
     // for every host role this constructs (`qsh serve` and a reverse
     // target's own accept loop, `crate::reverse::target::run_reverse_unix`

@@ -328,8 +328,7 @@ async fn a_denied_registration_cannot_learn_whether_the_controller_is_full() {
     impl crate::acl::Authorizer for DenyEverything {
         fn check(
             &self,
-            _: &qsh_transport::Principal,
-            _: qsh_transport::AuthPath,
+            _requester: &crate::acl::Requester<'_>,
             _: crate::acl::Action,
             _: crate::acl::ResourceRef<'_>,
         ) -> crate::acl::Verdict {

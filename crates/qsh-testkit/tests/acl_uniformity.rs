@@ -55,11 +55,11 @@
 //! that row cannot be driven under a literal `DenyAll` at all).
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use qsh_core::acl::{
     Action, Authorizer, DENY_SEAMS, Decision, DenyAll, DenySeam, PERMISSION_DENIED_MESSAGE,
-    ResourceRef, SeamKind, Verdict,
+    Requester, ResourceRef, SeamKind, Verdict,
 };
 use qsh_core::audit::MemoryAuditSink;
 use qsh_core::broker::{PeerFingerprint, SessionBackend, SessionId, SessionSpec};
@@ -72,7 +72,7 @@ use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
 use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::TunnelHarness;
-use qsh_transport::{AuthPath, Dialed, FramedStream, Principal, StaticTrust};
+use qsh_transport::{Dialed, FramedStream, Principal, StaticTrust};
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
@@ -315,8 +315,7 @@ struct OpenOnlyDenyAttach;
 impl Authorizer for OpenOnlyDenyAttach {
     fn check(
         &self,
-        _principal: &Principal,
-        _auth_path: AuthPath,
+        _requester: &Requester<'_>,
         action: Action,
         _resource: ResourceRef<'_>,
     ) -> Verdict {
@@ -332,6 +331,82 @@ impl Authorizer for OpenOnlyDenyAttach {
     }
 }
 
+/// A recording wrapper around a real deny authorizer
+/// (PLAN M15 Step 3): delegates every decision unchanged and notes which
+/// `(action, connection fingerprint)` pairs it was asked about, so the sweep
+/// can assert that each seam hands the authorizer the connection's own
+/// fingerprint (ADR-0045 결정 6: the role stage compares it with the
+/// current pin).
+struct FingerprintProbe {
+    seen: Mutex<Vec<(Action, Option<PeerFingerprint>)>>,
+}
+
+impl FingerprintProbe {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// An authorizer that records, then delegates to `inner`.
+    fn wrapping(self: &Arc<Self>, inner: Arc<dyn Authorizer>) -> Arc<dyn Authorizer> {
+        Arc::new(RecordingAuthorizer {
+            inner,
+            probe: Arc::clone(self),
+        })
+    }
+
+    fn mark(&self) -> usize {
+        self.seen.lock().unwrap().len()
+    }
+
+    /// Since `mark`, the authorizer was asked about `seam.action` with
+    /// exactly `expected` as the connection fingerprint, and never with a
+    /// different or absent one.
+    fn assert_seam_saw(&self, mark: usize, seam: &DenySeam, expected: PeerFingerprint) {
+        let seen = self.seen.lock().unwrap();
+        let for_action: Vec<_> = seen[mark..]
+            .iter()
+            .filter(|(action, _)| *action == seam.action)
+            .collect();
+        assert!(
+            !for_action.is_empty(),
+            "{}: the authorizer was never asked about {:?}",
+            seam.name,
+            seam.action.as_str()
+        );
+        for (_, fingerprint) in for_action {
+            assert_eq!(
+                *fingerprint,
+                Some(expected),
+                "{}: the authorizer must receive the connection's own verified fingerprint",
+                seam.name
+            );
+        }
+    }
+}
+
+struct RecordingAuthorizer {
+    inner: Arc<dyn Authorizer>,
+    probe: Arc<FingerprintProbe>,
+}
+
+impl Authorizer for RecordingAuthorizer {
+    fn check(
+        &self,
+        requester: &Requester<'_>,
+        action: Action,
+        resource: ResourceRef<'_>,
+    ) -> Verdict {
+        self.probe
+            .seen
+            .lock()
+            .unwrap()
+            .push((action, requester.fingerprint));
+        self.inner.check(requester, action, resource)
+    }
+}
+
 /// The exhaustive DoD 4 sweep: every row in [`DENY_SEAMS`], driven by
 /// whichever driver its [`SeamKind`] calls for, denied with the
 /// wire-shape-appropriate refusal and a matching audit record (module
@@ -342,20 +417,61 @@ impl Authorizer for OpenOnlyDenyAttach {
 /// this test fails).
 #[tokio::test(flavor = "multi_thread")]
 async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
+    sweep(None).await;
+}
+
+/// PLAN M15 Step 3: every [`DENY_SEAMS`] row hands the authorizer the
+/// verified fingerprint of the connection it arrived on. Same sweep as the
+/// uniformity test above, with each host's authorizer wrapped in a
+/// [`FingerprintProbe`]; after every seam is driven the probe must have
+/// seen that seam's action with the driving identity's own fingerprint
+/// (ADR-0045 결정 6, "호출 지점이 모두 `ConnCtx`에서 그 값을 넘긴다").
+#[tokio::test(flavor = "multi_thread")]
+async fn authorizer_receives_the_connection_fingerprint_at_every_call_site() {
+    let probe = FingerprintProbe::new();
+    sweep(Some(&probe)).await;
+}
+
+fn peer(fingerprint: &qsh_transport::Fingerprint) -> PeerFingerprint {
+    PeerFingerprint::new(*fingerprint.as_bytes())
+}
+
+fn probe_mark(probe: Option<&Arc<FingerprintProbe>>) -> usize {
+    probe.map_or(0, |p| p.mark())
+}
+
+fn probe_assert(
+    probe: Option<&Arc<FingerprintProbe>>,
+    mark: usize,
+    seam: &DenySeam,
+    fingerprint: &qsh_transport::Fingerprint,
+) {
+    if let Some(p) = probe {
+        p.assert_seam_saw(mark, seam, peer(fingerprint));
+    }
+}
+
+async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
+    let wrap = |inner: Arc<dyn Authorizer>| match probe {
+        Some(p) => p.wrapping(inner),
+        None => inner,
+    };
     let mut driven: BTreeSet<&'static str> = BTreeSet::new();
 
     // (a) SeamKind::ControlStreamOp, except session.attach.
     {
-        let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
+        let h = LoopbackHarness::start_with(wrap(Arc::new(DenyAll))).await;
         let mut s = h.session().await;
         for seam in DENY_SEAMS
             .iter()
             .filter(|seam| seam.kind == SeamKind::ControlStreamOp && seam.name != "session.attach")
         {
             let before = h.audit.records().len();
+            let mark = probe_mark(probe);
             let result = drive_control_stream_op(&mut s, seam.name).await;
             assert_denied(result, seam.name);
             assert_new_audit_deny_for_seam(&h.audit, before, seam);
+            probe_assert(probe, mark, seam, &h.client.fingerprint);
             assert!(
                 driven.insert(seam.name),
                 "DENY_SEAMS has a duplicate row name {:?}",
@@ -370,15 +486,17 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
     // directly at the broker, which a shared session/harness above must
     // not be contaminated by.
     {
-        let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
+        let h = LoopbackHarness::start_with(wrap(Arc::new(DenyAll))).await;
         let seam = DENY_SEAMS
             .iter()
             .find(|s| s.name == "session.attach")
             .expect("DENY_SEAMS must have a session.attach row");
         let before = h.audit.records().len();
+        let mark = probe_mark(probe);
         let result = drive_session_attach(&h).await;
         assert_denied(result, "session.attach");
         assert_new_audit_deny_for_seam(&h.audit, before, seam);
+        probe_assert(probe, mark, seam, &h.client.fingerprint);
         assert!(
             driven.insert("session.attach"),
             "duplicate session.attach drive"
@@ -398,8 +516,9 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
             "forward.local: this block only knows how to drive a TunnelInline seam — a \
              different SeamKind here means the registry row and this driver have drifted apart"
         );
-        let h = TunnelHarness::start_with(Arc::new(DenyAll)).await;
+        let h = TunnelHarness::start_with(wrap(Arc::new(DenyAll))).await;
         let before = h.audit().records().len();
+        let mark = probe_mark(probe);
         let result = h.tcp_connect("127.0.0.1", 9).await;
         assert!(!result.ok, "forward.local: ConnectResult.ok must be false");
         assert_eq!(
@@ -412,6 +531,7 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
             "forward.local: message must be the uniform PERMISSION_DENIED_MESSAGE, byte for byte"
         );
         assert_new_audit_deny_for_seam(h.audit(), before, seam);
+        probe_assert(probe, mark, seam, &h.host.client.fingerprint);
         assert!(driven.insert(seam.name), "duplicate forward.local drive");
         h.shutdown().await;
     }
@@ -431,8 +551,10 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
         );
         let target = make_identity();
         let harness =
-            ReverseHarness::start_with(Arc::new(DenyAll), false, pin(&target, "widget")).await;
+            ReverseHarness::start_with(wrap(Arc::new(DenyAll)), false, pin(&target, "widget"))
+                .await;
         let before = harness.audit.records().len();
+        let mark = probe_mark(probe);
         let err = expect_hello_err(
             harness.register(&target, "widget").await,
             "DenyAll must deny host.reverse",
@@ -444,6 +566,7 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
             "host.reverse: message must be the uniform PERMISSION_DENIED_MESSAGE, byte for byte"
         );
         assert_new_audit_deny_for_seam(&harness.audit, before, seam);
+        probe_assert(probe, mark, seam, &target.fingerprint);
         assert!(driven.insert(seam.name), "duplicate host.reverse drive");
         harness.shutdown().await;
     }
@@ -463,13 +586,14 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
              seam — a different SeamKind here means the registry row and this driver have \
              drifted apart"
         );
-        let h = LoopbackHarness::start_with(Arc::new(OpenOnlyDenyAttach)).await;
+        let h = LoopbackHarness::start_with(wrap(Arc::new(OpenOnlyDenyAttach))).await;
         let mut s = h.session().await;
         let opened = s
             .session_open(open_req())
             .await
             .expect("OpenOnlyDenyAttach allows session.open — only session.attach is denied");
         let before = h.audit.records().len();
+        let mark = probe_mark(probe);
         let (send, recv) = s
             .connection()
             .open_bi()
@@ -495,6 +619,7 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
             ),
         }
         assert_new_audit_deny_for_seam(&h.audit, before, seam);
+        probe_assert(probe, mark, seam, &h.client.fingerprint);
         assert!(
             driven.insert(seam.name),
             "duplicate session.attach@data-stream drive"

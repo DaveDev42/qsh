@@ -135,12 +135,9 @@ impl Server {
     /// exactly like [`Server::authorize`], then answers yes/no — the caller
     /// resets the stream, which is non-distinguishing by construction.
     pub(super) fn authorize_stream(&self, ctx: &ConnCtx, action: Action, resource: &str) -> bool {
-        let verdict = self.authorizer.check(
-            &ctx.principal,
-            ctx.auth_path,
-            action,
-            ResourceRef::unowned(resource),
-        );
+        let verdict =
+            self.authorizer
+                .check(&ctx.requester(), action, ResourceRef::unowned(resource));
         // No request id: a stream is not a control-stream request, so this
         // is a connection-level record (`request_id: "-"`), same as
         // `reverse::admit`.
@@ -166,12 +163,9 @@ impl Server {
         action: Action,
         resource: &str,
     ) -> Result<(), Box<ControlMessage>> {
-        let verdict = self.authorizer.check(
-            &ctx.principal,
-            ctx.auth_path,
-            action,
-            ResourceRef::unowned(resource),
-        );
+        let verdict =
+            self.authorizer
+                .check(&ctx.requester(), action, ResourceRef::unowned(resource));
         let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
@@ -253,9 +247,7 @@ impl Server {
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Result<(), Box<ControlMessage>> {
-        let verdict = self
-            .authorizer
-            .check(&ctx.principal, ctx.auth_path, action, resource);
+        let verdict = self.authorizer.check(&ctx.requester(), action, resource);
         let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
