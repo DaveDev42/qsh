@@ -37,7 +37,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0031](0031-cert-rotation-revocation.md) | trust에서 peer를 빼거나 role을 줄이면 `qsh serve`·`qsh listen`·`qsh serve --to`가 2초 안에 살아 있는 연결을 재검증해 신뢰를 잃었거나 권한이 줄어든 연결을 닫는다. revocation 목록·rotation 문서·`trust rotate`·CA 발급 인증서 개별 revoke는 두지 않는다(2026-10-12 축소) | 제안됨 |
 | [0032](0032-service-manager-activation.md) | `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다 | 제안됨 |
 | [0033](0033-session-audit-management.md) | 세션 및 audit 관리 개선은 세션 목록 필터와 읽기 전용 로컬 `qsh audit`까지로 하고, audit 삭제 경로와 텔레메트리 계약 승격은 만들지 않는다 | 제안됨 |
-| [0035](0035-windows-client.md) | Windows client는 직접 연결 client 명령과 콘솔 raw 모드 대화형 attach까지 연다. host 역할과 localctl 대체는 열지 않는다 | 제안됨 |
+| [0035](0035-windows-client.md) | Windows client는 정방향·역방향의 client 쪽 명령(listener 데몬과 named pipe localctl 포함)과 콘솔 raw 모드 대화형 attach까지 연다. host 역할은 두 방향 모두 열지 않는다(2026-10-13 개정) | 제안됨 |
 | [0036](0036-stateless-reset-key.md) | stateless reset key는 config 디렉터리의 0600 파일 `stateless_reset.key`에 두고, 읽을 수 없거나 형식이 틀리면 파일을 건드리지 않은 채 이번 기동만 임시 키로 뜬다 | 승인됨 |
 | [0037](0037-stalled-tunnel-stream-eviction.md) | 연결 하나에서 정체한 터널 스트림이 연결 수신 창을 다 쓰기 전에 가장 오래 정체한 스트림부터 끊는다 | 승인됨 |
 | [0038](0038-setup-client-complete-without-acl.md) | `qsh setup client`의 `complete`는 doctor의 `acl_policy_missing` 하나를 세지 않는다(ADR-0024 결정 9 개정). doctor의 진단 등급과 host 쪽 역할의 판정은 그대로 둔다 | 승인됨 |
