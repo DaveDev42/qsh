@@ -1,9 +1,11 @@
 # ADR-0033: 세션 및 audit 관리 개선은 세션 목록 필터와 읽기 전용 로컬 `qsh audit`까지로 하고, audit 삭제 경로와 텔레메트리 계약 승격은 만들지 않는다
 
 날짜: 2026-10-11
-상태: 제안됨
+상태: 승인됨
 
 개정 관계: 새 ADR이다. `docs/PRD.md` §7 P1의 "세션 및 audit 관리 개선"은 항목 이름만 있고 범위가 없었다. `docs/ROADMAP.md` M17 (d)가 범위 ADR을 요구하고, 이 문서가 그것이다. `docs/CLI.md` §2.4(operation 이름 목록), §2.5(인가 불요 행), §6.2(세션 조회)를 개정하고 새 절을 하나 더한다. `crates/qsh-core/src/telemetry.rs` 모듈 doc의 "That promotion is a P1 decision"을 이 ADR의 결정으로 닫는다. 다른 ADR을 개정하지 않는다.
+
+승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. 결정 12까지 범위는 이미 닫혀 있었고, 남아 있던 빈칸인 Windows에서의 audit 조회(읽기 공유 모드, named pipe localctl 비노출)와 reverse route 위 세션 필터의 동등, CLI 새 절의 번호 규칙을 결정 13으로 닫았다.
 
 ## 맥락
 
@@ -23,7 +25,7 @@ PRD가 이 항목에 붙인 이름은 둘, 세션 관리와 audit 관리다. 오
 
 ## 결정
 
-범위는 네 가지다. 세션 목록 필터(1~3), audit 조회(4~9), retention(10~11), 텔레메트리 승격 여부(12).
+범위는 네 가지다. 세션 목록 필터(1~3), audit 조회(4~9), retention(10~11), 텔레메트리 승격 여부(12), 플랫폼과 route 동등(13).
 
 1. `qsh sessions`에 필터 `--state <값>`, `--writer <principal|none>`, `--attachable`을 더한다. 여러 개를 주면 AND다. `--state`는 §5 Session의 `state`(열린 문자열)와 정확 일치하고, 모르는 값은 오류가 아니라 빈 결과다. `--writer none`은 `writer: null`을 가리킨다. `--attachable`은 이 장비의 resume 상태 파일에 그 세션의 credential이 있는 세션만 남긴다(attach가 `no_resume_token`으로 실패하지 않을 세션).
 
@@ -31,15 +33,15 @@ PRD가 이 항목에 붙인 이름은 둘, 세션 관리와 audit 관리다. 오
 
 3. 필터 결과의 JSON 모양은 `{"sessions": […]}`로 같고 새 필드를 더하지 않는다. human 렌더는 필터가 걸려 있을 때 stderr에 "N개 중 M개 표시" 한 줄을 낸다(§2.2의 stdout 순수성). `--attachable` 판정은 `session_ref`당 한 번 상태 파일을 읽는 것이고 token 값은 어디에도 싣지 않는다(ADR-0007).
 
-4. audit 조회는 새 op `audit.query`이고 CLI는 `qsh audit`이다. 인가 불요 local operation이다. 원격 peer가 요청할 수 없고 wire 메시지를 만들지 않는다. `docs/CLI.md` §2.4 목록과 §2.5 "인가 불요" 행에 `audit.query`를 `acl.show` 옆에 더하며, 원격에서 부를 수 있으면 곧 열거 oracle이 된다는 이유를 ADR-0022 결정 4·ADR-0025 결정 4와 같은 문장으로 적는다. 이 op은 ACL action을 새로 요구하지 않는다. `qsh-proto`의 프레임 enum에도 대응하는 variant가 없고, localctl 데몬의 UDS 요청으로도 노출하지 않는다.
+4. audit 조회는 새 op `audit.query`이고 CLI는 `qsh audit`이다. 인가 불요 local operation이다. 원격 peer가 요청할 수 없고 wire 메시지를 만들지 않는다. `docs/CLI.md` §2.4 목록과 §2.5 "인가 불요" 행에 `audit.query`를 `acl.show` 옆에 더하며, 원격에서 부를 수 있으면 곧 열거 oracle이 된다는 이유를 ADR-0022 결정 4·ADR-0025 결정 4와 같은 문장으로 적는다. 이 op은 ACL action을 새로 요구하지 않는다. `qsh-proto`의 프레임 enum에도 대응하는 variant가 없고, localctl 데몬의 요청(UDS, Windows는 named pipe, ADR-0035 결정 14)으로도 노출하지 않는다.
 
 5. 인자는 `--since <RFC3339|N[smhd]>`, `--until <RFC3339>`, `--principal`, `--action`, `--resource`, `--decision <allow|deny>`, `--limit <N>`이다. 문자열 필터는 정확 일치이고 여러 개는 AND다. `--limit`의 기본은 100, 최대는 1000이며 넘으면 `INVALID_ARGUMENT`다. 결과는 최신이 먼저다. `--follow`는 두지 않는다.
 
-6. 조회는 활성 로그와 보관된 회전분을 모두 읽고(개수는 `[audit].retain`이 정한다), 읽기만 한다. writer의 파일 락을 잡지 않고, torn write 복구(`RotatingAuditSink`의 절단)를 흉내 내지 않으며, 어떤 파일도 열기 모드로 쓰지 않는다. 파싱되지 않는 줄(쓰는 도중이거나 잘린 줄)은 건너뛰고 그 수만 센다. 줄의 내용은 오류에도 출력에도 싣지 않는다. 로그 파일이 없으면 오류가 아니라 빈 결과다. 읽을 수 없으면(권한 거부, I/O) `INTERNAL`이고 메시지에 경로와 오류 종류만 싣는다.
+6. 조회는 활성 로그와 보관된 회전분을 모두 읽고(개수는 `[audit].retain`이 정한다), 읽기만 한다. writer의 파일 락을 잡지 않고, torn write 복구(`RotatingAuditSink`의 절단)를 흉내 내지 않으며, 어떤 파일도 열기 모드로 쓰지 않는다. 파싱되지 않는 줄(쓰는 도중이거나 잘린 줄)은 건너뛰고 그 수만 센다. 줄의 내용은 오류에도 출력에도 싣지 않는다. 로그 파일이 없으면 오류가 아니라 빈 결과다. 읽을 수 없으면(권한 거부, I/O) `INTERNAL`이고 메시지에 경로와 오류 종류만 싣는다. Windows에서는 로그와 회전분을 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`로 열어, writer가 쓰거나 회전하는 도중에도 조회가 막히지 않고 writer의 회전을 막지도 않는다(ADR-0035 결정 24의 `LockFileEx`는 잠금 파일에 걸리므로 조회와 겹치지 않는다).
 
 7. 조회는 audit 레코드를 남기지 않는다. 이유는 둘이다. 읽기가 로그를 키우면 조회를 반복하는 것만으로 회전과 retention이 밀리고, audit이 degraded(큐 포화·디스크 만실)로 latch된 상태에서는 fail-closed 규칙 때문에 조회 자체가 거부돼 가장 필요한 순간에 쓸 수 없게 된다. `acl.show`와 `acl.check`가 읽기라서 audit을 쓰지 않는 선례와 같다.
 
-8. 출력은 기존 구조 필드만 싣는다. `qsh-proto`에 `AuditRecordView`(`ts`, `request_id`, `principal`, `action`, `resource`, `decision`, `rule`, `auth_path`, `peer_addr`, `count`)를 두고, `qsh-core`의 `AuditRecord`에서 필드 단위로 옮긴다. 필드 집합이 같음을 테스트가 고정한다(F2의 확장). 새 필드를 만들지 않고, `resource`는 이미 저장된 구조적 식별자 그대로 보이며 가공이나 보강(DNS 역조회, 이름 해석)을 하지 않는다.
+8. 출력은 기존 구조 필드만 싣는다. `qsh-proto`에 `AuditRecordView`(`ts`, `request_id`, `principal`, `action`, `resource`, `decision`, `rule`, `auth_path`, `peer_addr`, `count`, 그리고 ADR-0045 결정 16의 optional `role`)를 두고, `qsh-core`의 `AuditRecord`에서 필드 단위로 옮긴다. `role`은 레코드에 키가 있을 때만 싣는다. ADR-0045(M15)가 이 ADR(M17)보다 먼저 착지하므로 처음부터 이 모양이다. 필드 집합이 같음을 테스트가 고정한다(F2의 확장). 새 필드를 만들지 않고, `resource`는 이미 저장된 구조적 식별자 그대로 보이며 가공이나 보강(DNS 역조회, 이름 해석)을 하지 않는다.
 
 9. `data`의 모양은 `{"records": [AuditRecordView, …], "skipped_lines": N, "oldest_ts": "…"|null, "truncated": bool}`이다. `oldest_ts`는 읽은 파일 전체에서 가장 오래된 레코드의 `ts`로, 운영자가 이 호스트의 보존 지평을 읽는 수단이다. `truncated`는 `--limit` 때문에 더 있는 레코드가 잘렸을 때 `true`다. 지원 출력 모드는 human과 `--json`이다.
 
@@ -48,6 +50,8 @@ PRD가 이 항목에 붙인 이름은 둘, 세션 관리와 audit 관리다. 오
 11. retention 가시성은 결정 9의 `oldest_ts`로 갈음하고 새 doctor finding은 만들지 않는다. `audit_path_unwritable`(기존)이 쓰기 실패를 이미 잡는다.
 
 12. 텔레메트리 줄(`qsh::recovery`)은 `qsh.event/v1`로 올리지 않는다. stderr의 단일 줄 JSON으로 남는다. 이 ADR이 승인되면 `telemetry.rs` 모듈 doc의 "That promotion is a P1 decision"을 "ADR-0033 결정 12가 승격하지 않기로 했다"는 인용으로 바꾼다. 재검토 조건은 저장소 안의 소비자가 stderr grep 대신 구조화된 스트림을 필요로 한다고 관측된 때이고, 그때는 ADR-0022 결정 3이 역방향 health에 둔 순서(필요가 관측된 뒤 `qsh.event/v1`에 additive로 연다)를 따른다. 다른 stderr 진단 줄(`qsh::lifecycle`, `qsh::reverse`, `qsh::tunnel::supervise`)은 이 ADR이 건드리지 않는다.
+
+13. 동등은 플랫폼과 route 양쪽에서 성립한다(`docs/PRD.md` §4, `docs/ROADMAP.md` §5.1 원칙 7). `qsh audit`은 Linux·macOS·Windows에서 같은 명령, 같은 필터, 같은 `data`를 낸다. 로그 경로는 각 플랫폼의 state dir(ADR-0035 결정 13의 Windows 경로 포함)이고 조회가 읽는 파일은 `RotatingAuditSink`가 쓰는 파일과 같다. 이 조회는 항상 이 프로세스가 도는 장비의 로컬 로그를 읽으므로 forward host로 쓰는 장비, reverse listener로 쓰는 장비, reverse target으로 쓰는 장비 모두에서 같게 동작한다. 세션 필터(결정 1~3)는 클라이언트 `Ops`가 응답을 받은 뒤 적용하므로 forward route와 reverse route(`qsh sessions <reverse host>`, 데몬의 reverse 항목 fan-out)에서 의미가 같다. 플랫폼 간 차이를 두는 필터나 필드는 없다. CLI 새 절의 번호는 `docs/CLI.md`의 그때 가장 큰 `§6.N` 다음 빈 번호로, 착륙 순서대로 구현 때 매긴다.
 
 ## 근거
 
@@ -74,7 +78,7 @@ audit 조회를 로컬로 못 박는 이유는 `acl.check`·`acl.show`와 같다
 
 ## 결과
 
-- 계약 문서: `docs/CLI.md` §2.4·§2.5에 `audit.query`가 오르고, §6.2에 필터 세 개의 서술이 들어가며, `qsh audit`의 새 절(§6.20 뒤에 붙는다. ADR-0029의 `qsh file` 절도 같은 자리를 쓰므로 번호는 착륙 순서대로 구현 때 매긴다)이 서고, 버전 헤더가 갱신된다. `docs/design/threat-model.md`에 새 진입점 행(`qsh audit`, 로컬 읽기, 열거 oracle 방지)과 F2의 필드 전수 테스트 확장이 오른다. `cargo xtask man`으로 `qsh-audit.1`이 생기고 `qsh-sessions.1`이 바뀌며, `checked_in_man_pages_match_the_generator`가 확인한다.
+- 계약 문서: `docs/CLI.md` §2.4·§2.5에 `audit.query`가 오르고, §6.2에 필터 세 개의 서술이 들어가며, `qsh audit`의 새 절(§6.20 뒤에 붙는다. ADR-0029의 `qsh cp` 절도 같은 자리를 쓰므로 번호는 결정 13의 규칙대로 착륙 순서에 매긴다)이 서고, 버전 헤더가 갱신된다. `docs/design/threat-model.md`에 새 진입점 행(`qsh audit`, 로컬 읽기, 열거 oracle 방지)과 F2의 필드 전수 테스트 확장이 오른다. `cargo xtask man`으로 `qsh-audit.1`이 생기고 `qsh-sessions.1`이 바뀌며, `checked_in_man_pages_match_the_generator`가 확인한다.
 - 고정할 테스트(이름은 구현 때 확정):
   - 분류: `crates/qsh-core/tests/op_registration_completeness.rs`와 `crates/qsh-core/tests/acl_registry.rs`가 `audit.query`를 local-only로 분류하고, 프레임 enum에 대응 variant가 없음을 단언한다(M17 DoD (d)).
   - `audit_query_has_no_wire_message_and_no_localctl_request`, `audit_record_view_fields_equal_audit_record_fields`.
@@ -82,6 +86,7 @@ audit 조회를 로컬로 못 박는 이유는 `acl.check`·`acl.show`와 같다
   - `audit_query_skips_a_torn_line_and_counts_it_without_echoing_it`, `audit_query_does_not_modify_the_log`(바이트 단위 불변), `audit_query_works_while_the_audit_sink_is_degraded`, `audit_query_writes_no_audit_record`, `audit_query_on_a_missing_log_is_empty_not_an_error`.
   - `audit_query_oldest_ts_matches_the_oldest_retained_record`.
   - 삭제 부재: audit 로그를 수정하는 op이 `ops/` 아래에 `audit.query` 말고 없음을 단언하는 분류 테스트 한 건(SC6).
+  - 플랫폼: `audit_query_reads_while_the_writer_rotates`(Windows leg는 `FILE_SHARE_*`로 연 핸들이 writer의 회전 rename을 막지 않음까지 본다). 위 케이스는 세 OS의 CI leg에서 같은 이름으로 돈다.
   - 세션: `sessions_filter_state_writer_attachable_and_combined`, `sessions_filter_does_not_change_the_wire_request`, `sessions_filter_keeps_unreachable_in_fan_out`, `sessions_attachable_never_prints_the_resume_token`.
   - 텔레메트리: `telemetry.rs` 모듈 doc의 인용 갱신 외에 코드 변화가 없다.
 - fixture: `crates/qsh-cli/tests/fixtures/cli-v1/`에 `audit.query` 성공 envelope(비어 있지 않은 것과 `truncated: true`인 것)과 필터를 건 `session.list` 하나를 append하고 `REQUIRED_FIXTURES`에 등록한다. 기존 fixture는 바뀌지 않는다. `qsh.cli/v1`은 additive만이고 `ErrorCode`와 wire 프로토콜은 변하지 않는다. `qsh-proto`에 타입이 하나 늘고 스키마(`schema.get`)에 반영된다.

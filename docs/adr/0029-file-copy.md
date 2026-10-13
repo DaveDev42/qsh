@@ -1,7 +1,8 @@
 # ADR-0029: 파일 복사는 scp 인자 문법의 `qsh cp [-r] [-p] [-q] SRC... DST` 하나로 연다. 디렉터리 순회는 client가 하고 wire에는 `file.list`·`file.mkdir` 두 op만 더한다. `full` role은 serve 계정이 닿는 경로 전부를 주되 qsh 자신의 상태 경로는 항상 거부하고, `[[acl]]` 행의 `paths`는 행으로 파일 권한을 줄 때만 쓴다
 
 날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13)
-상태: 제안됨
+상태: 승인됨
+승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. Windows host에서 경로 문법과 판정 수단이 어떻게 대응하는지(결정 23), 트리 전송 성능과 audit 처리량이 모자랄 때의 대체 경로, ADR-0045와의 착지 순서를 정해 남은 미정 항목이 없다.
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5) 시점에 이 번호를 파일 복사(M15) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `qsh file get`/`qsh file put`으로 파일 하나씩만 옮기고, 원격 경로는 그 action을 준 `[[acl]]` 행의 `paths` 아래로만 열었다. 2026-10-12 사용자 결정("권한 설정을 보다 간소화… 파일 단위로 복잡하게 관리하는게 귀찮아")이 P1을 다시 짜면서 이 초안을 네 곳에서 개정한다.
 
@@ -10,7 +11,7 @@
 - 덮어쓰기는 scp처럼 기본 허용이고(원자적 교체), 막으려면 `--no-clobber`를 쓴다(결정 7). 초안의 `--force`는 없다.
 - audit 키 집합은 아홉에 ADR-0045 결정 16의 optional 키 `role` 하나를 더한 것이다(결정 14). 크기는 4.3~6.3ew로 다시 센다.
 
-ADR-0045(제안됨)가 먼저 또는 함께 착지해야 `full` role이 파일 action을 준다. ADR-0044 결정 2의 자동 SSH 부트스트랩은 사람 모드의 `qsh cp`가 미등록 host 이름에 닿을 때도 발동하고, 이 ADR은 그 발동 지점에 아무것도 더하지 않는다. 승인되면 바뀌는 계약 문서는 셋이다. `docs/PRD.md` §9는 action 목록이 그대로이고 `file.read`/`file.write`가 항상-deny에서 풀리며, `acl.toml` 문법에 optional 키 `paths`가 는다. `docs/CLI.md`는 §2.4에 op 다섯(`file.copy`와 wire op 넷), §2.5에 매핑 넷, §6에 `qsh cp` 절 하나가 늘고, §6.15(`acl check --path`), §6.17(doctor 코드 하나), §6.19(`acl show`의 `paths` 필드)가 바뀐다. `docs/design/protocol.md`는 §4 capability 목록, §7 스트림 표, §9 `.proto`, §12 정체 장부의 범위가 바뀐다. TCP/TLS fallback은 철회됐으므로(ADR-0043) 이 ADR은 QUIC transport 하나만 다룬다.
+ADR-0045(승인됨)가 먼저 착지해야 `full` role이 파일 action을 준다. 같은 M15 안에서 ADR-0045가 앞서고 이 ADR이 뒤따른다. ADR-0044 결정 2의 자동 SSH 부트스트랩은 사람 모드의 `qsh cp`가 미등록 host 이름에 닿을 때도 발동하고, 이 ADR은 그 발동 지점에 아무것도 더하지 않는다. 승인되면 바뀌는 계약 문서는 셋이다. `docs/PRD.md` §9는 action 목록이 그대로이고 `file.read`/`file.write`가 항상-deny에서 풀리며, `acl.toml` 문법에 optional 키 `paths`가 는다. `docs/CLI.md`는 §2.4에 op 다섯(`file.copy`와 wire op 넷), §2.5에 매핑 넷, §6에 `qsh cp` 절 하나가 늘고, §6.15(`acl check --path`), §6.17(doctor 코드 하나), §6.19(`acl show`의 `paths` 필드)가 바뀐다. `docs/design/protocol.md`는 §4 capability 목록, §7 스트림 표, §9 `.proto`, §12 정체 장부의 범위가 바뀐다. TCP/TLS fallback은 철회됐으므로(ADR-0043) 이 ADR은 QUIC transport 하나만 다룬다.
 
 ## 맥락
 
@@ -48,7 +49,7 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
    qsh cp [-r] [-p] [-q] [--no-clobber] [--json | --jsonl] SRC... DST
    ```
 
-   - operand가 원격인지는 scp의 규칙으로 가린다. 첫 `/`보다 앞에 `:`가 있고 그 앞의 host 부분이 비어 있지 않으면 `[user@]host:path`다. IPv6는 `[::1]:path`처럼 대괄호로 싼다. `./a:b`는 로컬 파일이다. `host:`는 원격 계정의 home 디렉터리를 뜻한다. Windows client(ADR-0035)에서는 한 글자 뒤의 `:`가 드라이브 문자라서 로컬로 해석한다. 이 문장은 ADR-0035가 승인될 때 효력이 생긴다.
+   - operand가 원격인지는 scp의 규칙으로 가린다. 첫 `/`보다 앞에 `:`가 있고 그 앞의 host 부분이 비어 있지 않으면 `[user@]host:path`다. IPv6는 `[::1]:path`처럼 대괄호로 싼다. `./a:b`는 로컬 파일이다. `host:`는 원격 계정의 home 디렉터리를 뜻한다. Windows client(ADR-0035)에서는 한 글자 뒤의 `:`가 드라이브 문자라서 로컬로 해석한다. 이 문장은 ADR-0035 결정 1(Windows client, M19)과 함께 효력이 생긴다.
    - 한 호출의 operand 구성은 둘 중 하나여야 한다. SRC가 모두 로컬이고 DST가 원격이거나(put), SRC가 모두 같은 host의 원격이고 DST가 로컬이다(get). 그 밖의 구성, 곧 로컬과 원격이 섞인 SRC, host가 둘 이상, 양쪽이 같은 종류인 경우는 복사를 시작하기 전에 `INVALID_ARGUMENT`(exit `2`)다.
    - host 이름 해석은 `qsh exec`와 같다(`docs/CLI.md` §6.1 우선순위, live reverse 등록 우선). `user@`는 `qsh [user@]host`와 같은 뜻의 단언이다(`docs/CLI.md` §7). `FileReadOpen`/`FileWriteOpen`/`FileListOpen`/`FileMkdirOpen`이 optional `user`를 싣고, host는 ACL 판정 뒤에 serve 계정의 login name과 대조해 다르면 `UNSUPPORTED`(user switching is not supported)로 거부한다. `hosts.toml`의 `user` 기본값도 같은 규칙으로 채운다.
    - 원격 경로는 절대 경로, home 기준 상대 경로(`dir/x`), `~`, `~/x`를 받는다. `~name`은 `INVALID_ARGUMENT`다. home은 host가 serve 계정의 passwd 항목에서 구한다. 환경 변수 `HOME`은 쓰지 않는다. 경로 끝의 `/`는 "이것은 디렉터리여야 한다"는 단언이고, 디렉터리가 아니면 `INVALID_ARGUMENT`다.
@@ -189,7 +190,7 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
     - `role`: 판정 근거가 role이었을 때만 그 role 이름(ADR-0045 결정 16)
     - 크기, 해시, mode, 파일 내용 바이트는 어디에도 싣지 않는다. audit는 인가 판정의 기록이지 전송 기록이 아니고, 크기와 완료 여부는 판정 시점에 알 수 없다.
     - 한 요청이 남기는 줄: ACL 판정 한 줄(`paths` 밖과 정규화 실패도 여기서 deny). 상태 경로 거부면 deny 한 줄 더. quota 거부면 ADR-0010 모양의 한 줄. 열린 핸들 재검증 거부면 deny 한 줄 더.
-    - 트리 복사는 요청마다(목록 페이지, 디렉터리, 파일) 한 줄씩 남는다. 파일 수천 개를 옮기면 줄도 수천 개다. audit writer가 이 양을 감당하는지는 구현 커밋의 측정 테스트가 확인한다(결과 절).
+    - 트리 복사는 요청마다(목록 페이지, 디렉터리, 파일) 한 줄씩 남는다. 파일 수천 개를 옮기면 줄도 수천 개다. audit writer가 이 양을 감당하는지는 구현 커밋의 측정 테스트가 확인한다(결과 절). 모자라면 고치는 자리는 writer 쪽이다. 줄을 합치거나 솎지 않는다. 요청마다 한 줄이라는 규칙과 fail-closed(기록 없으면 op 없음)는 처리량 때문에 바꾸지 않고, writer 안에서 같은 내구성 계약을 지키는 묶음 기록(group commit)으로 푼다. 그래도 모자라면 `qsh cp`가 파일을 동시에 처리하는 수(`FILE_COPY_PARALLEL`)를 낮추는 것까지가 이 ADR이 허용하는 완화이고, 그보다 나가는 변경은 새 ADR이다.
 
 15. 우선순위와 역압.
     - `FILE_DATA` 송신은 band 0(§12의 tunnel/file)이고, 터널 splice와 같은 송신 깊이 상한 `SEND_DEPTH_CAP_BYTES`(128 KiB)를 적용한다.
@@ -271,13 +272,21 @@ M15가 반드시 담으라고 한 결정이 하나 더 있다. `file.write`는 `
 
 22. 원격이 주는 이름과 크기를 믿지 않는다. get에서 client가 받는 `FileEntry.name`은 신뢰할 수 없는 입력이다. client는 로컬 경로를 만들기 전에 이름이 비어 있지 않고, 255바이트 이하이며, `/`와 NUL을 담지 않고, `.`도 `..`도 아닌지 확인한다. 하나라도 어기면 그 항목을 `INVALID_ARGUMENT`로 실패시키고 로컬에는 아무것도 만들지 않는다. 로컬 경로는 항상 DST에서 시작해 검증된 단일 성분 이름을 하나씩 붙여 만들고(결정 7의 `*at` 호출), 성분 안에서 상위로 올라가는 일이 구조적으로 없다. `FileEntry.size`, `mode`, `mtime`과 `FileListed.more`는 안내용이다. 이 값들로 메모리나 디스크를 미리 잡지 않는다(디스크 여유는 로컬에서 쓰는 도중 `ENOSPC`가 판정한다). 호스트가 끝없이 페이지를 이어 주는 경우를 막으려고 client는 한 디렉터리에서 `FILE_LIST_DIR_MAX`를 넘는 항목을 받으면 그 디렉터리를 `RESOURCE_EXHAUSTED`로 실패시킨다.
 
+23. 플랫폼 동등(PRD §4). 위의 결정은 Linux, macOS, Windows host에서 같은 성질을 낸다. 판정 순서(모양 검사, ACL, user hint, 상태 경로, quota, 열기와 재검증), 상태 경로 항상 거부, 임시 파일과 교체, 해시, 오류 코드, audit 키, wire와 JSON은 OS마다 갈리지 않는다. 갈리는 것은 시스템 호출과 경로 표기뿐이고, 대응은 아래와 ADR-0035 결정 26이 정한다.
+    - macOS. 결정 6-4의 `fcntl(F_GETPATH)`를 쓴다. 기본 볼륨이 대소문자를 구분하지 않으므로 보호 집합 대조는 macOS와 Windows에서 성분 단위 대소문자 무시로 한다(더 많이 거부하는 방향이다). `paths` 매칭은 두 쪽이 같은 정규화 함수의 결과(디스크에 있는 표기)이므로 같은 비교를 한다. Linux는 대소문자를 구분한다.
+    - Windows host. 원격 경로 문자열은 `/`와 `\`를 같게 보고, 드라이브 절대 경로와 프로필 디렉터리(`USERPROFILE`에 해당하는 값. `HOME`을 쓰지 않는 규칙과 같이 환경 변수가 아니라 serve 계정 정보에서 구한다) 기준 상대 경로를 받는다. `~`와 `host:`는 그 프로필 디렉터리다. 드라이브 없이 `/`로 시작하는 경로, UNC, `\\?\`·`\\.\` 이름 공간은 모양 검사에서 `INVALID_ARGUMENT`다. 정규 경로는 `GetFinalPathNameByHandleW`의 결과이고, 열린 핸들 재검증·재분석 지점(symlink, junction) 거부·(볼륨 일련번호, 파일 인덱스) inode 대조·`FlushFileBuffers`·`GetDiskFreeSpaceExW`가 결정 6, 7, 13의 해당 호출에 대응한다. `--no-clobber`의 `linkat`은 덮어쓰기 없는 rename이 대응하고 대상이 이미 있으면 실패하므로 같은 경쟁 보장을 준다. mode의 합성과 수정 시각 설정은 ADR-0035 결정 26을 따른다.
+    - Windows host의 `paths`. 항목은 드라이브 절대 경로를 `C:/Users/dave/share`처럼 `/` 구분자만 써서 적는다. 결정 4-3의 어휘 검사는 "`/`로 시작" 대신 "드라이브 문자와 `:/`로 시작"을 요구하고 나머지 규칙(`.`·`..`·빈 성분 없음, NUL 없음, 4096바이트, 끝 `/` 금지, 드라이브 루트 `C:/` 예외)은 같다. `\`가 든 항목, 드라이브 없는 항목, `"/"`는 파일 전체의 `CONFIG_ERROR`다. 적힌 문자열이 곧 매칭에 쓰이는 문자열이라는 성질은 유지된다. 비교는 성분 단위 대소문자 무시다. 모든 드라이브를 덮고 싶으면 드라이브 루트를 각각 적는다. 이것은 표기 차이이고 권한의 모양은 같다. Windows가 아닌 host에서는 드라이브 형식 항목이 `CONFIG_ERROR`다. `acl.toml`은 host마다 따로 있으므로 한 파일이 두 OS를 오가는 일이 없다.
+    - 상태 경로 집합(결정 5)은 OS마다 `docs/design/architecture.md` §7의 해석 규칙이 정한 config·state·runtime 디렉터리다. Windows의 localctl은 named pipe(ADR-0035)라서 파일시스템의 runtime 디렉터리가 없을 수 있다. 있으면 같은 규칙으로 덮고, 없으면 그 항목은 비어 있다. 그 밖의 의미는 같다.
+    - client 쪽(`qsh cp`)은 세 OS에서 같은 인자 문법과 출력을 낸다. Windows client의 드라이브 문자 operand 해석은 결정 2가 이미 적었다. 로컬 쪽 쓰기는 결정 7의 `*at` 규칙에 대응하는 수단(디렉터리 핸들 기준 상대 열기, 재분석 지점 거부)으로 한다.
+    - 핀 테스트는 세 OS 각각에서 결정 5·6·7의 같은 성질 행을 돈다. Windows 전용 행은 대소문자 무시 보호 집합, `\`/`/` 동치, 드라이브 없는 경로와 UNC 거부, junction 우회, `paths`의 드라이브 표기다. macOS 전용 행은 대소문자만 다른 표기의 상태 경로 우회 거부다.
+
 ## 근거
 
 scp 인자 문법을 고르는 이유. 사용자가 원한 것은 새 파일 복사 어휘가 아니라 쓰던 `scp`를 그대로 치는 것이다. 2026-10-11 초안은 `host:path` 한 인자에서 얽히는 로컬 콜론, IPv6, 방향 추론을 이유로 scp식 단일 명령을 기각했다. 그 어려움은 scp의 규칙(첫 `/`보다 앞의 `:`가 원격 표지, IPv6는 대괄호)을 그대로 쓰면 풀리고, 방향은 operand 구성에서 정해진다. JSON 계약의 `command`가 방향을 정해야 한다는 걱정은 합성 operation `file.copy`와 `direction` 필드로 풀린다. 그래서 `qsh file get`/`put`은 별칭으로도 남기지 않는다. 출시된 적이 없어서 호환 부담이 없고, 표면이 둘이면 문서와 테스트가 두 배가 된다.
 
 scp 플래그를 무시하지 않고 거부하는 이유. `-P`, `-J`, `-l`, `-i`를 조용히 무시하면 사용자는 포트를 지정했고, jump를 거쳤고, 대역을 제한했다고 믿은 채 다른 동작을 겪는다. 네 가지(`-r`, `-p`, `-q`, `-v`)만 뜻이 같게 받고 나머지는 시작 전에 exit `2`로 끝내는 쪽이 fail closed에 맞다.
 
-디렉터리 순회를 client가 하고 wire에는 두 op만 더하는 이유. 트리를 한 스트림에 싣는 방식(tar류)은 host가 추출기를 갖거나 client가 풀어야 하고, 파일별 원자성(temp와 교체)과 파일별 해시·ACL 판정·audit 줄이 한 덩어리 스트림 안에서 사라지거나 다시 만들어져야 한다. 아카이브 파서는 새 신뢰 불가 입력 표면이기도 하다. 파일 단위 요청 위에 목록과 mkdir만 얹으면 기존 인가 파이프라인(모양 검사, ACL, 상태 경로, 열린 핸들 재검증)을 요청마다 그대로 타고, 부분 실패를 항목 단위로 말할 수 있다. 대가는 작은 파일이 많을 때 파일당 control 왕복이 드는 것이고, 결정 12의 병렬 둘이 그 일부를 가린다. 그 성능은 구현 커밋의 측정 테스트가 확인한다.
+디렉터리 순회를 client가 하고 wire에는 두 op만 더하는 이유. 트리를 한 스트림에 싣는 방식(tar류)은 host가 추출기를 갖거나 client가 풀어야 하고, 파일별 원자성(temp와 교체)과 파일별 해시·ACL 판정·audit 줄이 한 덩어리 스트림 안에서 사라지거나 다시 만들어져야 한다. 아카이브 파서는 새 신뢰 불가 입력 표면이기도 하다. 파일 단위 요청 위에 목록과 mkdir만 얹으면 기존 인가 파이프라인(모양 검사, ACL, 상태 경로, 열린 핸들 재검증)을 요청마다 그대로 타고, 부분 실패를 항목 단위로 말할 수 있다. 대가는 작은 파일이 많을 때 파일당 control 왕복이 드는 것이고, 결정 12의 병렬 둘이 그 일부를 가린다. 그 성능은 구현 커밋의 측정 테스트가 확인한다. 모자라면 client 상수 `FILE_COPY_PARALLEL`을 per-principal quota(기본 4) 안에서 올리는 것이 정해진 대체 경로이고 wire나 계약은 바뀌지 않는다. 트리를 한 스트림에 싣는 방식으로 돌아가지 않는다.
 
 새 action 없이 `file.read`/`file.write`로 목록과 mkdir을 인가하는 이유. 목록은 읽기이고 mkdir은 쓰기다. 새 action을 더하면 PRD §9 어휘와 ADR-0045의 role 표가 함께 바뀌고, 이미 `file.*`로 받은 권한이 의미 없이 갈라진다.
 
