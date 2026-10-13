@@ -160,15 +160,16 @@ pub enum Action {
     /// `acl.toml` rule, see [`Action::is_always_denied`], permanently by
     /// design rather than pending one.
     ForwardSocks,
-    /// Read a file over a (not-yet-defined) file-transfer operation
-    /// (`file.read`). PRD §9 vocabulary, P1-deferred, **always denied** —
-    /// same always-deny gate as [`Action::ForwardSocks`], for a different
-    /// reason (see [`Action::is_always_denied`]).
+    /// Read a file or list a directory over the remote file ops
+    /// (`file.read`, `file.list`; ADR-0029 decision 3). The wire ops exist
+    /// and reach the choke point, but the gate still **always denies** the
+    /// action until the host control plane lands (see
+    /// [`Action::is_always_denied`]).
     FileRead,
-    /// Write a file over a (not-yet-defined) file-transfer operation
-    /// (`file.write`). PRD §9 vocabulary, P1-deferred, **always denied** —
-    /// same always-deny gate as [`Action::ForwardSocks`], for a different
-    /// reason (see [`Action::is_always_denied`]).
+    /// Write a file or create a directory over the remote file ops
+    /// (`file.write`, `file.mkdir`; ADR-0029 decision 3). Same standing as
+    /// [`Action::FileRead`]: wire ops exist, the gate still **always
+    /// denies** it for now.
     FileWrite,
 }
 
@@ -215,8 +216,11 @@ impl Action {
     /// it opens is authorized on the peer as `forward.local`, and a
     /// client-attached label cannot carry authorization, so no wire op will
     /// ever drive `forward.socks` itself. `file.read` and `file.write` are
-    /// P1-deferred instead — defined in PRD §9 but not implemented in P0
-    /// (`docs/ROADMAP.md` §3 deferred-feature guardrail table).
+    /// denied only until the remote file ops are served (ADR-0029): their
+    /// wire ops exist and are authorized through this gate, which refuses
+    /// them, so a request ends in `PERMISSION_DENIED` plus one audit line
+    /// and touches nothing. The host control plane step lifts them from
+    /// this set.
     ///
     /// The M5 policy evaluator (M5 plan Step 2 (2473c88)) must apply this gate
     /// **before** wildcard rule matching, not fold it into matching itself:

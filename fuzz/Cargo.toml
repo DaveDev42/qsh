@@ -55,6 +55,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "decode_file_frame"
+path = "fuzz_targets/decode_file_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_session_frame"
 path = "fuzz_targets/decode_session_frame.rs"
 test = false

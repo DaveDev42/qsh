@@ -17,9 +17,9 @@
 //! 3. **DoD 2 — audit completeness** ([`dod2_audit`]): every `OP_REGISTRY`
 //!    row actually driven once under an allow policy and once under a
 //!    deny policy, asserting `MemoryAuditSink` gets exactly one new record
-//!    with that row's `action` and the expected `decision`. Ten of the
-//!    thirteen rows need nothing more than a bare `Server::dispatch` call
-//!    (`DISPATCH_DRIVABLE_OPS`) — this file drives those, extending
+//!    with that row's `action` and the expected `decision`. Fourteen of the
+//!    seventeen rows need nothing more than a bare `Server::dispatch` call
+//!    (`DISPATCH_DRIVABLE_OPS`; the four file ops of ADR-0029 are among them) — this file drives those, extending
 //!    `crates/qsh-core/src/server/tests.rs`'s own
 //!    `every_session_op_passes_the_choke_point_with_the_mapped_action`
 //!    precedent to an external integration test. The remaining three
@@ -33,7 +33,7 @@
 //!    `qsh_testkit::tunnel::TunnelHarness`/`reverse::ReverseHarness`.
 //!    [`single_source::every_op_registry_row_is_driven_somewhere`] is the
 //!    guard that keeps `OP_REGISTRY` as the *one* enumeration both files
-//!    consume — a 14th row added to the registry with neither file taught
+//!    consume — an eighteenth row added to the registry with neither file taught
 //!    to drive it fails there, not silently.
 //!
 //! **A named limit (F3, P2-2, M5 Step 8 adversarial review):** layer 3's
@@ -117,7 +117,7 @@ mod section_2_5 {
         let rows = rows(&cli_md);
         assert_eq!(
             rows.len(),
-            10,
+            12,
             "docs/CLI.md §2.5's table row count drifted from this test's row-by-row \
              expectations — update them alongside whatever row was added, removed or \
              reordered: {rows:?}"
@@ -211,15 +211,30 @@ mod section_2_5 {
             "forward.remote".to_string(),
         ));
 
-        // Row 9: host.list, host.get, identity.init, identity.export,
+        // Rows 9 and 10 (ADR-0029): the four remote file ops, two to an
+        // action, like rows 0-4: `file.read`, `file.list` -> `file.read`
+        // and `file.write`, `file.mkdir` -> `file.write`.
+        for (i, (left, right)) in rows.iter().enumerate().skip(9).take(2) {
+            let action_tokens = backtick_tokens(right);
+            assert_eq!(
+                action_tokens.len(),
+                1,
+                "§2.5 row {i}'s action cell must be exactly one backtick action: {right:?}"
+            );
+            for op in backtick_tokens(left) {
+                expected.insert((op.to_string(), action_tokens[0].to_string()));
+            }
+        }
+
+        // Row 11: host.list, host.get, identity.init, identity.export,
         // trust.*, cert.init, cert.issue, doctor.run, acl.check,
         // schema.get, capabilities.get, version.get, service.install,
         // service.uninstall, service.status — 인가 불요. Contributes no
         // OP_REGISTRY pair; verified as an exclusion list below instead.
-        let (left9, right9) = &rows[9];
+        let (left9, right9) = &rows[11];
         assert!(
             right9.contains("인가 불요"),
-            "row 9 must be the no-authorization-needed row: {right9:?}"
+            "row 11 must be the no-authorization-needed row: {right9:?}"
         );
         let no_authz_ops = backtick_tokens(left9);
         assert!(no_authz_ops.contains(&"host.list"));
@@ -323,9 +338,10 @@ mod dispatch_surface {
     use super::*;
     use qsh_proto::wire::control_message::Body;
     use qsh_proto::wire::{
-        ExecStart, Hello, PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose,
-        RemoteForwardOpen, Response, SessionAttach, SessionClose, SessionEvent, SessionGet,
-        SessionList, SessionOpen, SessionRead, SessionResize, SessionWrite,
+        ExecStart, FileListOpen, FileMkdirOpen, FileReadOpen, FileWriteOpen, Hello,
+        PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose, RemoteForwardOpen, Response,
+        SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList, SessionOpen,
+        SessionRead, SessionResize, SessionWrite,
     };
 
     enum Classification {
@@ -361,6 +377,10 @@ mod dispatch_surface {
             Body::ExecStart(_) => Classification::NeedsOp("exec.run"),
             Body::RfwdOpen(_) => Classification::NeedsOp("forward.remote"),
             Body::RfwdClose(_) => Classification::NeedsOp("forward.remote.close"),
+            Body::FileReadOpen(_) => Classification::NeedsOp("file.read"),
+            Body::FileWriteOpen(_) => Classification::NeedsOp("file.write"),
+            Body::FileListOpen(_) => Classification::NeedsOp("file.list"),
+            Body::FileMkdirOpen(_) => Classification::NeedsOp("file.mkdir"),
             Body::Ping(_) => Classification::NoAuthorizationSurface(
                 "keepalive, answered unconditionally with no ACL check",
             ),
@@ -397,6 +417,10 @@ mod dispatch_surface {
             Body::ExecStart(ExecStart::default()),
             Body::RfwdOpen(RemoteForwardOpen::default()),
             Body::RfwdClose(RemoteForwardClose::default()),
+            Body::FileReadOpen(FileReadOpen::default()),
+            Body::FileWriteOpen(FileWriteOpen::default()),
+            Body::FileListOpen(FileListOpen::default()),
+            Body::FileMkdirOpen(FileMkdirOpen::default()),
             Body::Ping(Ping::default()),
             Body::Pong(Pong::default()),
             Body::SessionEvent(SessionEvent::default()),
@@ -418,7 +442,7 @@ mod dispatch_surface {
     #[test]
     fn every_control_message_body_variant_needs_authorization_or_is_explicitly_exempt() {
         let samples = all_body_samples();
-        assert_eq!(samples.len(), 18, "Body sample count drifted");
+        assert_eq!(samples.len(), 22, "Body sample count drifted");
 
         let mut needs_op: HashSet<&'static str> = HashSet::new();
         let mut no_auth_count = 0usize;
@@ -488,9 +512,11 @@ mod dod2_audit {
     use qsh_proto::wire::{self, ControlMessage, control_message, response};
     use qsh_transport::{AuthPath, Principal};
 
-    /// The ten `OP_REGISTRY` rows this file drives — every op whose wire
-    /// handler needs nothing beyond `Server::dispatch` (module doc). The
-    /// remaining three live in `crates/qsh-testkit/tests/
+    /// The fourteen `OP_REGISTRY` rows this file drives — every op whose
+    /// wire handler needs nothing beyond `Server::dispatch` (module doc).
+    /// The last four are the ADR-0029 file ops, driven by the unix-only
+    /// `file_ops_*` tests below (off unix their shape check answers
+    /// `UNSUPPORTED` before any ACL decision). The remaining three live in `crates/qsh-testkit/tests/
     /// acl_registry_audit.rs`; `single_source` below is what keeps this
     /// split honest.
     pub(super) const DISPATCH_DRIVABLE_OPS: &[&str] = &[
@@ -504,6 +530,10 @@ mod dod2_audit {
         "session.close",
         "exec.run",
         "forward.remote.close",
+        "file.read",
+        "file.write",
+        "file.list",
+        "file.mkdir",
     ];
 
     fn ctx(principal: Principal) -> ConnCtx {
@@ -583,7 +613,8 @@ mod dod2_audit {
             ResourceKind::Session
             | ResourceKind::ForwardBinding
             | ResourceKind::ForwardDestination
-            | ResourceKind::ReverseHost => !is_exec_sentinel && !is_session_sentinel,
+            | ResourceKind::ReverseHost
+            | ResourceKind::FilePath => !is_exec_sentinel && !is_session_sentinel,
         };
         assert!(
             ok,
@@ -1113,9 +1144,102 @@ mod dod2_audit {
         .await;
     }
 
+    /// One request per file op, in `DISPATCH_DRIVABLE_OPS` order, each with
+    /// the absolute path it carries. Absolute, so the shape check needs no
+    /// passwd home and the result is the same on every unix host.
+    #[cfg(unix)]
+    fn file_op_requests() -> Vec<(&'static str, control_message::Body, &'static str)> {
+        vec![
+            (
+                "file.read",
+                control_message::Body::FileReadOpen(wire::FileReadOpen {
+                    path: "/srv/share/a.txt".into(),
+                    user: String::new(),
+                }),
+                "/srv/share/a.txt",
+            ),
+            (
+                "file.write",
+                control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+                    path: "/srv/share/b.txt".into(),
+                    size: 3,
+                    mode: 0o600,
+                    overwrite: true,
+                    ..Default::default()
+                }),
+                "/srv/share/b.txt",
+            ),
+            (
+                "file.list",
+                control_message::Body::FileListOpen(wire::FileListOpen {
+                    path: "/srv/share/".into(),
+                    ..Default::default()
+                }),
+                "/srv/share/",
+            ),
+            (
+                "file.mkdir",
+                control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
+                    path: "/srv/share/new".into(),
+                    mode: 0o700,
+                    ..Default::default()
+                }),
+                "/srv/share/new",
+            ),
+        ]
+    }
+
+    /// The file ops' deny leg: under `DenyAll` each op is one deny record on
+    /// its registered action and a uniform `PERMISSION_DENIED`, and the audit
+    /// `resource` is the request path exactly as sent (ADR-0029 decision 4-7).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_ops_are_audited_deny_with_the_request_path_as_resource() {
+        let rig = rig(Arc::new(DenyAll));
+        let ctx = ctx(Principal::Device("intruder".into()));
+        for (i, (op, body, path)) in file_op_requests().into_iter().enumerate() {
+            drive(
+                &rig,
+                &ctx,
+                i as u64 + 1,
+                body,
+                op,
+                "deny",
+                Some(ErrorCode::PermissionDenied),
+            )
+            .await;
+            assert_eq!(rig.audit.records().last().unwrap().resource, path, "{op}");
+        }
+    }
+
+    /// The file ops' allow leg, under the `AllowAllPinned` test double (the
+    /// double does not know the always-denied gate): the choke point records
+    /// an allow on the registered action, and the handler, which has nothing
+    /// to do past the decision yet, answers `UNSUPPORTED` instead of acting.
+    /// The fail-closed fallthrough of `Server::handle_file_op`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_ops_are_audited_allow_and_then_refuse_to_act() {
+        let rig = rig(Arc::new(AllowAllPinned));
+        let ctx = ctx(Principal::Device("laptop".into()));
+        for (i, (op, body, path)) in file_op_requests().into_iter().enumerate() {
+            drive(
+                &rig,
+                &ctx,
+                i as u64 + 1,
+                body,
+                op,
+                "allow",
+                Some(ErrorCode::Unsupported),
+            )
+            .await;
+            assert_eq!(rig.audit.records().last().unwrap().resource, path, "{op}");
+        }
+    }
+
     #[test]
     fn dispatch_drivable_ops_matches_its_own_declared_count() {
-        assert_eq!(DISPATCH_DRIVABLE_OPS.len(), 10);
+        assert_eq!(DISPATCH_DRIVABLE_OPS.len(), 14);
         for op in DISPATCH_DRIVABLE_OPS {
             assert!(
                 OP_REGISTRY.iter().any(|spec| spec.op.as_str() == *op),

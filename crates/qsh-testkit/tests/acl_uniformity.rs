@@ -153,10 +153,99 @@ async fn drive_control_stream_op(s: &mut Session, name: &str) -> Result<(), Clie
             })
             .await
         }
+        // The four remote file ops (ADR-0029): `Session` has no typed helper
+        // for them yet, so they go out as raw control messages.
+        "file.read" => {
+            drive_file_op(
+                s,
+                wire::control_message::Body::FileReadOpen(wire::FileReadOpen {
+                    path: FILE_PROBE_PATH.into(),
+                    user: String::new(),
+                }),
+            )
+            .await
+        }
+        "file.write" => {
+            drive_file_op(
+                s,
+                wire::control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+                    path: FILE_PROBE_PATH.into(),
+                    size: 1,
+                    mode: 0o600,
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
+        "file.list" => {
+            drive_file_op(
+                s,
+                wire::control_message::Body::FileListOpen(wire::FileListOpen {
+                    path: FILE_PROBE_PATH.into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
+        "file.mkdir" => {
+            drive_file_op(
+                s,
+                wire::control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
+                    path: FILE_PROBE_PATH.into(),
+                    mode: 0o700,
+                    ..Default::default()
+                }),
+            )
+            .await
+        }
         other => panic!(
             "drive_control_stream_op: DENY_SEAMS has a ControlStreamOp row {other:?} with no \
              driver in this match — teach acl_uniformity.rs how to drive it"
         ),
+    }
+}
+
+/// An absolute path every host accepts at the shape check, so a file op
+/// reaches the ACL choke point and is denied there, not rejected earlier.
+const FILE_PROBE_PATH: &str = "/srv/qsh-uniformity-probe/x";
+
+/// Whether `name` is one of the four ADR-0029 file seams.
+fn is_file_seam(name: &str) -> bool {
+    matches!(
+        name,
+        "file.read" | "file.write" | "file.list" | "file.mkdir"
+    )
+}
+
+/// Send one raw file-op request on `s`'s control stream and map the reply
+/// the way the typed helpers do: an `Error` response is `ClientError::Remote`,
+/// anything else is success.
+async fn drive_file_op(
+    s: &mut Session,
+    body: wire::control_message::Body,
+) -> Result<(), ClientError> {
+    const REQUEST_ID: u64 = 9_000;
+    s.send_control_message(&wire::ControlMessage::new(REQUEST_ID, body))
+        .await?;
+    loop {
+        let msg = s
+            .next_control_message()
+            .await?
+            .expect("the control stream stays open for the reply");
+        if msg.request_id != REQUEST_ID {
+            continue;
+        }
+        return match msg.body {
+            Some(wire::control_message::Body::Response(wire::Response {
+                body: Some(wire::response::Body::Error(e)),
+            })) => Err(ClientError::Remote {
+                code: e.error_code(),
+                message: e.message,
+                retryable: e.retryable,
+            }),
+            Some(wire::control_message::Body::Response(_)) => Ok(()),
+            other => panic!("unexpected reply to a raw file op: {other:?}"),
+        };
     }
 }
 
@@ -470,9 +559,27 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
             let before = h.audit.records().len();
             let mark = probe_mark(probe);
             let result = drive_control_stream_op(&mut s, seam.name).await;
-            assert_denied(result, seam.name);
-            assert_new_audit_deny_for_seam(&h.audit, before, seam);
-            probe_assert(probe, mark, seam, &h.client.fingerprint);
+            if cfg!(not(unix)) && is_file_seam(seam.name) {
+                // Off unix the shape check has no path judgement
+                // (ADR-0029 decision 23): `UNSUPPORTED` before any ACL
+                // decision, so there is no deny record to look for.
+                assert!(
+                    matches!(
+                        result,
+                        Err(ClientError::Remote {
+                            code: ErrorCode::Unsupported,
+                            ..
+                        })
+                    ),
+                    "{}: expected UNSUPPORTED off unix, got {result:?}",
+                    seam.name
+                );
+                assert_eq!(h.audit.records().len(), before, "{}", seam.name);
+            } else {
+                assert_denied(result, seam.name);
+                assert_new_audit_deny_for_seam(&h.audit, before, seam);
+                probe_assert(probe, mark, seam, &h.client.fingerprint);
+            }
             assert!(
                 driven.insert(seam.name),
                 "DENY_SEAMS has a duplicate row name {:?}",

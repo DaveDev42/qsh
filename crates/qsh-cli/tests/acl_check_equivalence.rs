@@ -32,13 +32,13 @@
 //! **One row is not end-to-end, flagged rather than silently substituted**:
 //! `forward.socks`/`file.read`/`file.write` (`Action::is_always_denied`)
 //! have no CLI-reachable producer anywhere in the tree, for two different
-//! reasons. `file.read`/`file.write` are P1, unimplemented (`fixtures.rs`'s
-//! own `DEFERRED` list documents the same kind of gap for other
-//! actions/codes). `forward.socks` is not pending an implementation at
-//! all — ADR-0019 결정 6 means no op will *ever* drive it, since a
-//! client-attached label cannot carry authorization. There is no live
-//! network op to run for any of the three and so no audit record a real
-//! request would leave;
+//! reasons. `file.read`/`file.write` have wire ops now (ADR-0029), but no
+//! `qsh` command sends them yet (`fixtures.rs`'s own `DEFERRED` list
+//! documents the same kind of gap for other actions/codes). `forward.socks`
+//! is not pending an implementation at all — ADR-0019 결정 6 means no op
+//! will *ever* drive it, since a client-attached label cannot carry
+//! authorization. There is no CLI command to run for any of the three and
+//! so no audit record a real request would leave;
 //! [`row_always_denied_action_overrides_an_explicit_allow_rule`] proves
 //! (ii)/(iii) instead by calling the exact same `Authorizer::check`
 //! `Server::authorize` calls, loaded from the same `acl.toml` a running
@@ -729,7 +729,7 @@ fn acl_check_does_not_modify_acl_toml() {
 /// capability-enumeration oracle).
 ///
 /// An exhaustive match with no `_` arm on the prost-generated oneof is a
-/// compile-time guarantee, not a text search: the moment a tenth wire
+/// compile-time guarantee, not a text search: the moment a further wire
 /// message is added — named `AclCheck` or anything else — this function
 /// fails to *compile* until the match is updated to say so explicitly,
 /// where a `.contains("acl_check")` grep could rot silently alongside a
@@ -769,6 +769,10 @@ fn assert_every_variant_is_accounted_for(body: qsh_proto::wire::control_message:
         Body::ExecStart(_) => {}
         Body::RfwdOpen(_) => {}
         Body::RfwdClose(_) => {}
+        Body::FileReadOpen(_) => {}
+        Body::FileWriteOpen(_) => {}
+        Body::FileListOpen(_) => {}
+        Body::FileMkdirOpen(_) => {}
         Body::Ping(_) => {}
         Body::Pong(_) => {}
         Body::SessionEvent(_) => {}

@@ -1226,6 +1226,10 @@ fn response_kind(body: &response::Body) -> &'static str {
         response::Body::SessionResized(_) => "SessionResized",
         response::Body::SessionClosed(_) => "SessionClosed",
         response::Body::RfwdOpened(_) => "RemoteForwardOpened",
+        response::Body::FileReadOpened(_) => "FileReadOpened",
+        response::Body::FileWriteOpened(_) => "FileWriteOpened",
+        response::Body::FileListed(_) => "FileListed",
+        response::Body::FileMkdirDone(_) => "FileMkdirDone",
     }
 }
 

@@ -106,6 +106,8 @@ version.get
 
 dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
+`file.read`·`file.write`·`file.list`·`file.mkdir`(ADR-0029)는 원격 peer가 요청하는 wire operation이지만 아직 CLI subcommand도 `qsh.cli/v1` envelope도 없다. 그래서 위 코드 펜스(CLI에서 부를 수 있는 operation 목록)에는 넣지 않았고 §2.5 표에서만 ACL action에 묶는다. 호스트는 모양 검사(`INVALID_ARGUMENT`, 비 unix 호스트는 `UNSUPPORTED`)를 ACL 앞에서 하고, 경로 문자열 그대로를 audit `resource`로 쓴다.
+
 `acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다. `setup.run`(§6.20, M12)도 같은 종류의 로컬 op이다. 기존 op을 순서대로 부르는 오케스트레이터이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다.
 
 `qsh serve`, `qsh listen`, `qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
@@ -127,9 +129,11 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
+| `file.read`, `file.list` | `file.read` |
+| `file.write`, `file.mkdir` | `file.write` |
 | `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status`, `setup.run` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
-`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
+`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 파일 op은 경로마다 판정한다(ADR-0029 결정 8). 원격 파일 op 넷(`file.read`·`file.list` → `file.read`, `file.write`·`file.mkdir` → `file.write`)은 wire와 dispatch 자리, 그리고 인가 seam까지 있지만, 항상-deny 게이트가 아직 `file.read`/`file.write`를 막으므로 어떤 정책으로도 허용되지 않는다(ADR-0029 결정 3·8). 게이트를 걷는 것은 파일 복사 본체의 몫이다.
 
 위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `trust.set_role`도 같은 부류다: 원격 peer가 요청할 수 없는 이 머신의 local op이지만 실행되고 나면 그 pin이 받는 action이 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
 

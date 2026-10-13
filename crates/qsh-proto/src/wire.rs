@@ -59,6 +59,14 @@ pub const CAP_RESUME_V1: &str = "resume.v1";
 /// — there is no fallback that filters without it.
 pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
 
+/// Capability string for the remote file ops (`file.read`, `file.write`,
+/// `file.list`, `file.mkdir`) and the `FILE_DATA` stream (ADR-0029). Defined
+/// ahead of the implementation: it is deliberately absent from
+/// [`LOCAL_CAPABILITIES`] until the host serves the ops (a capability string
+/// is a promise about behaviour), and a sender never emits a file op to a peer
+/// that has not advertised it.
+pub const CAP_FILE_V1: &str = "file.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -104,6 +112,20 @@ pub const SESSION_CHUNK_MAX: usize = 16 * 1024;
 /// clamped, never rejected.
 pub const SESSION_READ_MAX_BYTES: usize = 12 * SESSION_CHUNK_MAX;
 
+/// Maximum size of a single `FILE_DATA` payload chunk (the `data` field of a
+/// [`FileFrame`]), 32 KiB (ADR-0029 decision 9). Enforced at encode time by
+/// [`encode_file_frame`] and on receipt by [`FileFrame::validate`].
+pub const FILE_CHUNK_MAX: usize = 32 * 1024;
+
+/// Most entries one [`FileListed`] response carries (ADR-0029 decision 9).
+/// A full page of 255-byte names fits one [`CONTROL_FRAME_MAX`] frame
+/// (pinned by a test).
+pub const FILE_LIST_PAGE_MAX: usize = 512;
+
+/// Most entries one directory may hold for `file.list` to page through it;
+/// a larger directory is `RESOURCE_EXHAUSTED` (ADR-0029 decision 9).
+pub const FILE_LIST_DIR_MAX: usize = 65536;
+
 /// A payload chunk exceeds its per-chunk cap ([`SESSION_CHUNK_MAX`]).
 /// Returned by the encoders (sender side) and by the `validate()` helpers
 /// on decoded messages (receiver side — a peer not running our encoder is
@@ -139,11 +161,12 @@ pub enum WireEncodeError {
 }
 
 fn check_chunk(len: usize) -> Result<(), ChunkTooLarge> {
-    if len > SESSION_CHUNK_MAX {
-        return Err(ChunkTooLarge {
-            len,
-            max: SESSION_CHUNK_MAX,
-        });
+    check_chunk_max(len, SESSION_CHUNK_MAX)
+}
+
+fn check_chunk_max(len: usize, max: usize) -> Result<(), ChunkTooLarge> {
+    if len > max {
+        return Err(ChunkTooLarge { len, max });
     }
     Ok(())
 }
@@ -177,6 +200,52 @@ impl SessionFrame {
             Some(session_frame::Body::Input(i)) => check_chunk(i.data.len()),
             _ => Ok(()),
         }
+    }
+}
+
+impl FileFrame {
+    /// Receiver-side chunk check: a `data` chunk must not exceed
+    /// [`FILE_CHUNK_MAX`]. The `FILE_DATA` pump calls this on every decoded
+    /// frame; an over-cap chunk is a protocol violation (ADR-0029
+    /// decision 9). Whether a frame is legal at its position (nothing after
+    /// `end`, no requester-sent `result`) is the pump's state, not a property
+    /// of one frame.
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        match &self.body {
+            Some(file_frame::Body::Data(data)) => check_chunk_max(data.len(), FILE_CHUNK_MAX),
+            _ => Ok(()),
+        }
+    }
+
+    /// Wrap a body variant.
+    pub fn from_body(body: file_frame::Body) -> Self {
+        Self { body: Some(body) }
+    }
+
+    /// `data` frame.
+    pub fn data(data: Vec<u8>) -> Self {
+        Self::from_body(file_frame::Body::Data(data))
+    }
+
+    /// `end` frame closing a byte sequence of `size` bytes whose BLAKE3-256
+    /// digest is `blake3`.
+    pub fn end(size: u64, blake3: Vec<u8>) -> Self {
+        Self::from_body(file_frame::Body::End(FileEnd { size, blake3 }))
+    }
+
+    /// `result` frame (host to requester on `file.write` only).
+    pub fn result(
+        ok: bool,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        overwritten: bool,
+    ) -> Self {
+        Self::from_body(file_frame::Body::Result(FileWriteResult {
+            ok,
+            code: code.into(),
+            message: message.into(),
+            overwritten,
+        }))
     }
 }
 
@@ -216,6 +285,14 @@ pub fn encode_control(msg: &ControlMessage) -> Result<Vec<u8>, WireEncodeError> 
 
 /// Encode an [`ExecFrame`] as one data-stream frame.
 pub fn encode_exec_frame(msg: &ExecFrame) -> Result<Vec<u8>, WireEncodeError> {
+    encode_framed(msg, DATA_FRAME_MAX)
+}
+
+/// Encode a [`FileFrame`] as one data-stream frame. A `data` chunk larger
+/// than [`FILE_CHUNK_MAX`] is refused with [`WireEncodeError::ChunkTooLarge`]
+/// before framing.
+pub fn encode_file_frame(msg: &FileFrame) -> Result<Vec<u8>, WireEncodeError> {
+    msg.validate()?;
     encode_framed(msg, DATA_FRAME_MAX)
 }
 
@@ -735,6 +812,18 @@ impl StreamHeader {
     pub fn exec_data(ticket: Vec<u8>) -> Self {
         Self {
             kind: StreamKind::ExecData as i32,
+            ticket,
+            host: String::new(),
+            port: 0,
+            deny_host_local: false,
+        }
+    }
+
+    /// Header for a file data stream carrying `ticket` (from
+    /// [`FileReadOpened`] / [`FileWriteOpened`]).
+    pub fn file_data(ticket: Vec<u8>) -> Self {
+        Self {
+            kind: StreamKind::FileData as i32,
             ticket,
             host: String::new(),
             port: 0,

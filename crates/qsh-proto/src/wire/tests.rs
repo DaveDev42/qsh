@@ -371,7 +371,7 @@ fn arb_control() -> impl Strategy<Value = ControlMessage> {
 
 fn arb_stream_header() -> impl Strategy<Value = StreamHeader> {
     (
-        0i32..=4,
+        0i32..=5,
         arb_bytes(16),
         ".{0,32}",
         any::<u32>(),
@@ -414,6 +414,131 @@ fn arb_exec_frame() -> impl Strategy<Value = ExecFrame> {
         (any::<i32>(), proptest::option::of("[A-Z]{3,7}"))
             .prop_map(|(code, sig)| ExecFrame::exec_exit_timed_out(code, sig)),
         Just(ExecFrame { body: None }),
+    ]
+}
+
+fn arb_file_kind() -> impl Strategy<Value = i32> {
+    0i32..=4
+}
+
+fn arb_file_entry() -> impl Strategy<Value = FileEntry> {
+    (
+        ".{0,32}",
+        arb_file_kind(),
+        any::<u64>(),
+        any::<u32>(),
+        any::<i64>(),
+    )
+        .prop_map(|(name, kind, size, mode, mtime)| FileEntry {
+            name,
+            kind,
+            size,
+            mode,
+            mtime,
+        })
+}
+
+fn arb_file_listed() -> impl Strategy<Value = FileListed> {
+    (
+        arb_file_kind(),
+        any::<u64>(),
+        any::<u32>(),
+        any::<i64>(),
+        proptest::collection::vec(arb_file_entry(), 0..4),
+        any::<bool>(),
+        any::<u32>(),
+    )
+        .prop_map(
+            |(kind, size, mode, mtime, entries, more, unlistable)| FileListed {
+                kind,
+                size,
+                mode,
+                mtime,
+                entries,
+                more,
+                unlistable,
+            },
+        )
+}
+
+fn arb_file_write_open() -> impl Strategy<Value = FileWriteOpen> {
+    (
+        ".{0,32}",
+        any::<u64>(),
+        any::<u32>(),
+        any::<bool>(),
+        ".{0,16}",
+        any::<bool>(),
+        any::<i64>(),
+        ".{0,16}",
+    )
+        .prop_map(
+            |(path, size, mode, overwrite, name_if_dir, preserve, mtime, user)| FileWriteOpen {
+                path,
+                size,
+                mode,
+                overwrite,
+                name_if_dir,
+                preserve,
+                mtime,
+                user,
+            },
+        )
+}
+
+fn arb_file_mkdir_open() -> impl Strategy<Value = FileMkdirOpen> {
+    (".{0,32}", any::<u32>(), ".{0,16}", any::<bool>(), ".{0,16}").prop_map(
+        |(path, mode, name_if_dir, preserve, user)| FileMkdirOpen {
+            path,
+            mode,
+            name_if_dir,
+            preserve,
+            user,
+        },
+    )
+}
+
+fn arb_file_response() -> impl Strategy<Value = response::Body> {
+    prop_oneof![
+        (arb_bytes(16), any::<u64>(), any::<u32>(), any::<i64>()).prop_map(
+            |(ticket, size, mode, mtime)| response::Body::FileReadOpened(FileReadOpened {
+                ticket,
+                size,
+                mode,
+                mtime
+            })
+        ),
+        (arb_bytes(16), any::<bool>()).prop_map(|(ticket, into_dir)| {
+            response::Body::FileWriteOpened(FileWriteOpened { ticket, into_dir })
+        }),
+        arb_file_listed().prop_map(response::Body::FileListed),
+        (any::<bool>(), any::<bool>()).prop_map(|(created, into_dir)| {
+            response::Body::FileMkdirDone(FileMkdirDone { created, into_dir })
+        }),
+    ]
+}
+
+fn arb_file_control_body() -> impl Strategy<Value = control_message::Body> {
+    use control_message::Body;
+    prop_oneof![
+        (".{0,32}", ".{0,16}")
+            .prop_map(|(path, user)| Body::FileReadOpen(FileReadOpen { path, user })),
+        arb_file_write_open().prop_map(Body::FileWriteOpen),
+        (".{0,32}", ".{0,16}", ".{0,16}").prop_map(|(path, after, user)| {
+            Body::FileListOpen(FileListOpen { path, after, user })
+        }),
+        arb_file_mkdir_open().prop_map(Body::FileMkdirOpen),
+        arb_file_response().prop_map(|r| Body::Response(Response { body: Some(r) })),
+    ]
+}
+
+fn arb_file_frame() -> impl Strategy<Value = FileFrame> {
+    prop_oneof![
+        arb_bytes(64).prop_map(FileFrame::data),
+        (any::<u64>(), arb_bytes(32)).prop_map(|(size, hash)| FileFrame::end(size, hash)),
+        (any::<bool>(), "[A-Z_]{0,16}", ".{0,32}", any::<bool>())
+            .prop_map(|(ok, code, msg, over)| FileFrame::result(ok, code, msg, over)),
+        Just(FileFrame { body: None }),
     ]
 }
 
@@ -522,6 +647,35 @@ proptest! {
         prop_assert_eq!(via_helper, encode_framed(&m, DATA_FRAME_MAX).unwrap());
     }
 
+    #[test]
+    fn file_control_messages_roundtrip_and_are_canonical(
+        id in any::<u64>(),
+        body in arb_file_control_body(),
+    ) {
+        let m = ControlMessage { request_id: id, body: Some(body) };
+        roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
+        assert_canonical_via_frame(&m, CONTROL_FRAME_MAX);
+        // The control encoder accepts them unchanged.
+        prop_assert_eq!(encode_control(&m).unwrap(), encode_framed(&m, CONTROL_FRAME_MAX).unwrap());
+    }
+
+    #[test]
+    fn file_frame_roundtrips(m in arb_file_frame()) {
+        roundtrip_via_frame(&m, DATA_FRAME_MAX);
+        let via_helper = encode_file_frame(&m).unwrap();
+        prop_assert_eq!(via_helper, encode_framed(&m, DATA_FRAME_MAX).unwrap());
+    }
+
+    #[test]
+    fn framed_file_frame_prefixes_are_incomplete(m in arb_file_frame()) {
+        let wire = encode_file_frame(&m).unwrap();
+        for cut in 0..wire.len() {
+            let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
+            dec.push(&wire[..cut]);
+            prop_assert_eq!(dec.next_frame().unwrap(), None, "prefix len {}", cut);
+        }
+    }
+
     /// Every strict prefix of a framed encoding is "incomplete" at the
     /// frame layer (`Ok(None)`): never a frame, never a panic. The
     /// protobuf body itself is prefix-tolerant by design, so the
@@ -564,6 +718,7 @@ proptest! {
         let _ = decode_msg::<StreamHeader>(&bytes);
         let _ = decode_msg::<ExecFrame>(&bytes);
         let _ = decode_msg::<SessionFrame>(&bytes);
+        let _ = decode_msg::<FileFrame>(&bytes);
         let _ = decode_msg::<RemoteForwardOpen>(&bytes);
         let _ = decode_msg::<RemoteForwardOpened>(&bytes);
         let _ = decode_msg::<RemoteForwardClose>(&bytes);
@@ -1595,4 +1750,155 @@ fn golden_connect_result_err_frame() {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn file_constants_match_adr_0029() {
+    assert_eq!(FILE_CHUNK_MAX, 32 * 1024);
+    assert_eq!(FILE_LIST_PAGE_MAX, 512);
+    assert_eq!(FILE_LIST_DIR_MAX, 65536);
+    // A chunk plus its frame overhead fits one data frame.
+    const { assert!(FILE_CHUNK_MAX + 64 <= DATA_FRAME_MAX) };
+}
+
+/// The capability string is defined ahead of the implementation and stays
+/// out of what this build advertises until the host serves the ops.
+#[test]
+fn file_capability_is_defined_but_not_advertised() {
+    assert_eq!(CAP_FILE_V1, "file.v1");
+    assert!(!LOCAL_CAPABILITIES.contains(&CAP_FILE_V1));
+}
+
+#[test]
+fn file_op_numbers_are_the_adr_numbers() {
+    use control_message::Body;
+    let tag = |m: &ControlMessage| {
+        // Field 1 is request_id (varint), the oneof body follows as a
+        // length-delimited field; read its field number from the first
+        // tag after request_id.
+        let bytes = m.encode_to_vec();
+        let mut i = 0;
+        // request_id key + value (request_id < 128 in these samples)
+        assert_eq!(bytes[i] >> 3, 1);
+        i += 2;
+        let mut key = 0u64;
+        let mut shift = 0;
+        loop {
+            let b = bytes[i];
+            i += 1;
+            key |= u64::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        key >> 3
+    };
+    let sample = |body| ControlMessage::new(1, body);
+    assert_eq!(
+        tag(&sample(Body::FileReadOpen(FileReadOpen::default()))),
+        80
+    );
+    assert_eq!(
+        tag(&sample(Body::FileWriteOpen(FileWriteOpen::default()))),
+        81
+    );
+    assert_eq!(
+        tag(&sample(Body::FileListOpen(FileListOpen::default()))),
+        82
+    );
+    assert_eq!(
+        tag(&sample(Body::FileMkdirOpen(FileMkdirOpen::default()))),
+        83
+    );
+    assert_eq!(StreamKind::FileData as i32, 5);
+}
+
+#[test]
+fn file_stream_header_constructor_sets_the_kind() {
+    let h = StreamHeader::file_data(vec![1, 2, 3]);
+    assert_eq!(h.stream_kind(), Some(StreamKind::FileData));
+    assert_eq!(h.ticket, vec![1, 2, 3]);
+    assert!(h.host.is_empty() && h.port == 0 && !h.deny_host_local);
+}
+
+#[test]
+fn file_frame_data_at_the_cap_encodes_and_over_the_cap_is_refused() {
+    let at_cap = FileFrame::data(vec![0u8; FILE_CHUNK_MAX]);
+    assert!(at_cap.validate().is_ok());
+    encode_file_frame(&at_cap).unwrap();
+
+    let over = FileFrame::data(vec![0u8; FILE_CHUNK_MAX + 1]);
+    assert_eq!(
+        over.validate(),
+        Err(ChunkTooLarge {
+            len: FILE_CHUNK_MAX + 1,
+            max: FILE_CHUNK_MAX
+        })
+    );
+    // The chunk cap is tighter than the frame cap: this frame would fit
+    // DATA_FRAME_MAX and is still refused.
+    const { assert!(FILE_CHUNK_MAX + 1 < DATA_FRAME_MAX) };
+    assert!(matches!(
+        encode_file_frame(&over),
+        Err(WireEncodeError::ChunkTooLarge(_))
+    ));
+    // Non-data frames carry no chunk.
+    assert!(FileFrame::end(1, vec![0; 32]).validate().is_ok());
+    assert!(FileFrame::result(true, "", "", false).validate().is_ok());
+    assert!(FileFrame { body: None }.validate().is_ok());
+}
+
+/// A full `file.list` page of maximum-length names plus the response
+/// envelope fits one control frame (ADR-0029 decision 9).
+#[test]
+fn a_full_file_list_page_of_255_byte_names_fits_a_control_frame() {
+    let entries = (0..FILE_LIST_PAGE_MAX)
+        .map(|i| FileEntry {
+            name: format!("{i:0>255}"),
+            kind: FileKind::File as i32,
+            size: u64::MAX,
+            mode: u32::MAX,
+            mtime: i64::MIN,
+        })
+        .collect();
+    let msg = ControlMessage::response(
+        u64::MAX,
+        response::Body::FileListed(FileListed {
+            kind: FileKind::Dir as i32,
+            size: u64::MAX,
+            mode: u32::MAX,
+            mtime: i64::MIN,
+            entries,
+            more: true,
+            unlistable: u32::MAX,
+        }),
+    );
+    let wire = encode_control(&msg).unwrap();
+    assert!(wire.len() <= CONTROL_FRAME_MAX + 4);
+}
+
+/// Every `FileWriteOpen` field survives encode and decode.
+#[test]
+fn file_write_open_survives_a_frame_roundtrip_field_by_field() {
+    let open = FileWriteOpen {
+        path: "~/in/x".into(),
+        size: 7,
+        mode: 0o640,
+        overwrite: true,
+        name_if_dir: "x".into(),
+        preserve: true,
+        mtime: -5,
+        user: "dave".into(),
+    };
+    let wire = encode_control(&ControlMessage::new(
+        9,
+        control_message::Body::FileWriteOpen(open.clone()),
+    ))
+    .unwrap();
+    let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+    dec.push(&wire);
+    let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+    assert_eq!(back.request_id, 9);
+    assert_eq!(back.body, Some(control_message::Body::FileWriteOpen(open)));
 }

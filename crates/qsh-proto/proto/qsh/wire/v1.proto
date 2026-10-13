@@ -80,6 +80,16 @@ message ControlMessage {
     // above.
     PairingProof     pairing_proof     = 70;
     PairingAccepted  pairing_accepted  = 71;
+
+    // Remote file operations (ADR-0029, M15; the `file.v1` capability).
+    // Each is authorized against `file.read` / `file.write` before any
+    // resource exists (CLI.md §2.5). `FileReadOpen` / `FileWriteOpen` mint a
+    // ticket redeemed on a `FILE_DATA` stream; `FileListOpen` and
+    // `FileMkdirOpen` are answered on the control stream alone.
+    FileReadOpen     file_read_open    = 80;
+    FileWriteOpen    file_write_open   = 81;
+    FileListOpen     file_list_open    = 82;
+    FileMkdirOpen    file_mkdir_open   = 83;
   }
 }
 
@@ -144,6 +154,10 @@ message Response {
     SessionWritten    session_written     = 8;  // session_write
     SessionResized    session_resized     = 9;  // session_resize
     SessionClosed     session_closed      = 10; // session_close
+    FileReadOpened    file_read_opened    = 11; // file_read_open
+    FileWriteOpened   file_write_opened   = 12; // file_write_open
+    FileListed        file_listed         = 13; // file_list_open
+    FileMkdirDone     file_mkdir_done     = 14; // file_mkdir_open
     Error             error               = 15;
   }
 }
@@ -547,11 +561,15 @@ enum StreamKind {
   EXEC_DATA = 2;
   TCP_CONNECT = 3;
   TCP_ACCEPTED = 4;
+  // ADR-0029: a `file.read` / `file.write` transfer. Opened by the
+  // requester with the ticket from `FileReadOpened` / `FileWriteOpened`.
+  FILE_DATA = 5;
 }
 
 message StreamHeader {
   StreamKind kind = 1;
-  // SESSION_DATA / EXEC_DATA: the ticket from the corresponding response.
+  // SESSION_DATA / EXEC_DATA / FILE_DATA: the ticket from the corresponding
+  // response.
   // TCP_ACCEPTED: forward_id.
   bytes ticket = 2;
   // TCP_CONNECT only.
@@ -676,3 +694,76 @@ message ExecExit {
   // rather than as a plain signal exit.
   bool timed_out = 3;
 }
+
+// ---------------------------------------------------------------------------
+// Remote file operations (ADR-0029, M15; capability `file.v1`).
+//
+// `FileKind` is the kind of a filesystem object as the host sees it. A
+// `FileListed.kind` follows an existing symlink to its target; an entry's
+// `kind` is the `lstat` kind, so a symlink shows as FILE_KIND_SYMLINK.
+// ---------------------------------------------------------------------------
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_FILE = 1;
+  FILE_KIND_DIR = 2;
+  FILE_KIND_SYMLINK = 3;
+  FILE_KIND_OTHER = 4;
+}
+
+// `path` is absolute, home-relative (`dir/x`), `~` or `~/x`; `~name` is
+// refused. `user` is an optional assertion of the account (`user@host`),
+// compared with the serve account's login name after the ACL decision.
+message FileReadOpen    { string path = 1; string user = 2; }
+message FileReadOpened  { bytes ticket = 1; uint64 size = 2; uint32 mode = 3; int64 mtime = 4; }
+
+message FileWriteOpen {
+  string path = 1;
+  uint64 size = 2;
+  uint32 mode = 3;
+  bool overwrite = 4;
+  // When `path` is an existing directory the file is written inside it under
+  // this name.
+  string name_if_dir = 5;
+  bool preserve = 6;
+  int64 mtime = 7;
+  string user = 8;
+}
+message FileWriteOpened { bytes ticket = 1; bool into_dir = 2; }
+
+message FileListOpen    { string path = 1; string after = 2; string user = 3; }
+message FileEntry       { string name = 1; FileKind kind = 2; uint64 size = 3; uint32 mode = 4; int64 mtime = 5; }
+message FileListed {
+  FileKind kind = 1;
+  uint64 size = 2;
+  uint32 mode = 3;
+  int64 mtime = 4;
+  // Name byte order, only names greater than `after`, at most
+  // FILE_LIST_PAGE_MAX.
+  repeated FileEntry entries = 5;
+  bool more = 6;
+  // Number of names that are not UTF-8 and so cannot be listed.
+  uint32 unlistable = 7;
+}
+
+message FileMkdirOpen   { string path = 1; uint32 mode = 2; string name_if_dir = 3; bool preserve = 4; string user = 5; }
+message FileMkdirDone   { bool created = 1; bool into_dir = 2; }
+
+// ---------------------------------------------------------------------------
+// FILE_DATA stream. Framed like every other data stream (§5), each `data`
+// chunk is at most FILE_CHUNK_MAX. `FileEnd` closes the byte sequence;
+// `FileWriteResult` flows host -> requester on `file.write` streams only. A
+// chunk over the cap, a frame after `end`, or a requester-sent `result` is a
+// protocol violation.
+// ---------------------------------------------------------------------------
+
+message FileFrame {
+  oneof body {
+    bytes           data   = 1;
+    FileEnd         end    = 2;
+    FileWriteResult result = 3;
+  }
+}
+// `blake3` is the 32-byte BLAKE3-256 of every byte sent.
+message FileEnd         { uint64 size = 1; bytes blake3 = 2; }
+message FileWriteResult { bool ok = 1; string code = 2; string message = 3; bool overwritten = 4; }

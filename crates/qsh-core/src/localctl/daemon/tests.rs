@@ -449,6 +449,12 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
         }),
         None,
     );
+    // `FILE_DATA` (ADR-0029 decision 16): the reverse route carries no file
+    // transfer yet, so the daemon refuses it before opening anything on QUIC.
+    assert_eq!(
+        local_stream_relay_kind(&wire::StreamHeader::file_data(vec![1, 2, 3])),
+        None,
+    );
     // A kind value this build does not recognize at all — `stream_kind()`
     // returns `None` (`StreamKind::try_from` fails), which must be
     // rejected exactly like a recognized-but-wrong kind, never treated

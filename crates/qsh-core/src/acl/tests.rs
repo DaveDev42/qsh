@@ -204,9 +204,10 @@ fn is_always_denied_is_exactly_the_undrivable_trio() {
     // `forward.socks`/`file.read`/`file.write` are "defined but always
     // denied" — every other action is a normal, policy-evaluated one.
     // The three share the outcome but not the reason: `file.read`/
-    // `file.write` are P1-deferred (no wire op exists yet), while
-    // `forward.socks` is undrivable by design — `-D` authorizes every
-    // `CONNECT` as `forward.local` instead (ADR-0019 결정 6).
+    // `file.write` stay denied until the host serves the remote file ops
+    // (their wire ops exist, ADR-0029), while `forward.socks` is undrivable
+    // by design — `-D` authorizes every `CONNECT` as `forward.local`
+    // instead (ADR-0019 결정 6).
     let always_denied: std::collections::HashSet<Action> = Action::ALL
         .iter()
         .copied()

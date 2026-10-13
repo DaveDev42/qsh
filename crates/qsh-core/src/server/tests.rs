@@ -5686,3 +5686,305 @@ async fn redemption_without_a_durable_audit_record_writes_no_pin_and_keeps_the_i
     assert_eq!(written.len(), 1, "{records:?}");
     assert_eq!(written[0].role.as_deref(), Some("exec"));
 }
+
+// ---------------------------------------------------------------------
+// Remote file ops (ADR-0029, M15 Step 11): shape check, then the ACL choke
+// point. The gate still denies `file.read`/`file.write`, so every well-formed
+// request ends in `PERMISSION_DENIED` and one audit line.
+// ---------------------------------------------------------------------
+
+#[cfg(unix)]
+fn error_message(msg: &ControlMessage) -> Option<String> {
+    match &msg.body {
+        Some(control_message::Body::Response(wire::Response {
+            body: Some(response::Body::Error(e)),
+        })) => Some(e.message.clone()),
+        _ => None,
+    }
+}
+
+/// The four file requests for `path`, as `(op name, request)`.
+fn file_requests(path: &str, name_if_dir: &str) -> Vec<(&'static str, control_message::Body)> {
+    vec![
+        (
+            "file.read",
+            control_message::Body::FileReadOpen(wire::FileReadOpen {
+                path: path.into(),
+                user: String::new(),
+            }),
+        ),
+        (
+            "file.write",
+            control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+                path: path.into(),
+                size: 1,
+                mode: 0o600,
+                overwrite: true,
+                name_if_dir: name_if_dir.into(),
+                ..Default::default()
+            }),
+        ),
+        (
+            "file.list",
+            control_message::Body::FileListOpen(wire::FileListOpen {
+                path: path.into(),
+                ..Default::default()
+            }),
+        ),
+        (
+            "file.mkdir",
+            control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
+                path: path.into(),
+                mode: 0o700,
+                name_if_dir: name_if_dir.into(),
+                ..Default::default()
+            }),
+        ),
+    ]
+}
+
+/// A policy that names both file actions with `paths = ["/"]` for `laptop`:
+/// the broadest grant `acl.toml` can write. The always-deny gate (ADR-0029
+/// decision 8, ADR-0045 decision 5) still comes first.
+#[cfg(unix)]
+fn file_grant_policy() -> Arc<crate::acl::Policy> {
+    Arc::new(crate::acl::Policy {
+        rules: vec![crate::acl::Rule {
+            principal: Principal::Device("laptop".into()).to_string(),
+            auth_path: AuthPath::Pin,
+            allow: vec![
+                crate::acl::ActionPattern::Exact(Action::FileRead),
+                crate::acl::ActionPattern::Exact(Action::FileWrite),
+            ],
+            scope: crate::acl::Scope::Any,
+            paths: Some(vec!["/".into()]),
+        }],
+    })
+}
+
+/// PLAN M15 Step 11 (c): a well-formed file request is answered
+/// `PERMISSION_DENIED` with the uniform message and one audit line whose
+/// resource is the path as sent, and the injected normalizer is never called.
+/// No filesystem access happens before the decision: not even for a principal
+/// whose `acl.toml` row grants the action over `/`, because the always-deny
+/// gate denies first.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
+    use crate::file::guard::{CountingNormalizer, FsNormalizer, Normalizer};
+
+    for authorizer in [
+        Arc::new(DenyAll) as Arc<dyn Authorizer>,
+        file_grant_policy() as Arc<dyn Authorizer>,
+    ] {
+        let rig = rig(authorizer);
+        let counter = Arc::new(CountingNormalizer::new(FsNormalizer));
+        rig.server
+            .set_path_normalizer(counter.clone() as Arc<dyn Normalizer>);
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        // A path that cannot exist, so any filesystem lookup would have
+        // nothing to find and a normalizer call would be observable.
+        let path = "/qsh-no-such-root/dir/../file";
+        for (i, (op, body)) in file_requests(path, "n").into_iter().enumerate() {
+            rig.audit.clear();
+            let reply = rig
+                .server
+                .dispatch(&ctx, &ControlMessage::new(i as u64 + 1, body))
+                .await
+                .unwrap_or_else(|| panic!("{op}: dispatch must reply"));
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::PermissionDenied),
+                "{op}: {reply:?}"
+            );
+            assert_eq!(
+                error_message(&reply).as_deref(),
+                Some(crate::acl::PERMISSION_DENIED_MESSAGE),
+                "{op}"
+            );
+            let recs = rig.audit.records();
+            assert_eq!(recs.len(), 1, "{op}: {recs:?}");
+            assert_eq!(recs[0].decision, "deny", "{op}");
+            assert_eq!(recs[0].resource, path, "{op}");
+        }
+        assert_eq!(counter.calls(), 0, "the normalizer must not be called");
+        // Nothing was minted for a data stream either.
+        assert!(rig.server.tickets.lock().unwrap().is_empty());
+    }
+}
+
+/// The audit action follows ADR-0029 decision 3: `file.list` is `file.read`
+/// and `file.mkdir` is `file.write`.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_ops_are_audited_under_the_mapped_action() {
+    let rig = rig(Arc::new(DenyAll));
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let expected = [
+        ("file.read", Action::FileRead),
+        ("file.write", Action::FileWrite),
+        ("file.list", Action::FileRead),
+        ("file.mkdir", Action::FileWrite),
+    ];
+    for ((op, body), (name, action)) in file_requests("/srv/x", "").into_iter().zip(expected) {
+        assert_eq!(op, name);
+        rig.audit.clear();
+        rig.server
+            .dispatch(&ctx, &ControlMessage::new(1, body))
+            .await
+            .unwrap();
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1, "{op}");
+        assert_eq!(recs[0].action, action.as_str(), "{op}");
+        // The action comes off the registry row, not a second literal.
+        let registered = crate::acl::OP_REGISTRY
+            .iter()
+            .find(|s| s.op.as_str() == op)
+            .unwrap();
+        assert_eq!(registered.action, action, "{op}");
+    }
+}
+
+/// ADR-0029 decision 6-1: a shape violation is `INVALID_ARGUMENT` before any
+/// ACL decision, audit line or filesystem access, and the message does not
+/// echo the path.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
+    use crate::file::guard::{CountingNormalizer, FsNormalizer, Normalizer};
+
+    // Even an allow-everything double must never see these.
+    let rig = rig(Arc::new(AllowAllPinned));
+    let counter = Arc::new(CountingNormalizer::new(FsNormalizer));
+    rig.server
+        .set_path_normalizer(counter.clone() as Arc<dyn Normalizer>);
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+    let too_long = format!("/{}", "a".repeat(4096));
+    let cases: Vec<(&str, String, String)> = vec![
+        ("empty path", String::new(), String::new()),
+        ("NUL byte", "/srv/a\0b".into(), String::new()),
+        ("over 4096 bytes", too_long, String::new()),
+        ("~user", "~mallory/x".into(), String::new()),
+        ("name_if_dir with a slash", "/srv/x".into(), "a/b".into()),
+        ("name_if_dir `..`", "/srv/x".into(), "..".into()),
+        ("name_if_dir `.`", "/srv/x".into(), ".".into()),
+        (
+            "name_if_dir over 255 bytes",
+            "/srv/x".into(),
+            "n".repeat(256),
+        ),
+    ];
+    for (label, path, name) in &cases {
+        for (op, body) in file_requests(path, name.as_str()) {
+            // A bad `name_if_dir` only exists on the creating ops.
+            if !name.is_empty() && matches!(op, "file.read" | "file.list") {
+                continue;
+            }
+            let reply = rig
+                .server
+                .dispatch(&ctx, &ControlMessage::new(1, body))
+                .await
+                .unwrap();
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::InvalidArgument),
+                "{label} / {op}: {reply:?}"
+            );
+            let message = error_message(&reply).unwrap();
+            if path.len() > 1 && path.len() < 200 && !path.contains('\0') {
+                assert!(
+                    !message.contains(path.as_str()),
+                    "{label} / {op}: the message must not echo the path: {message}"
+                );
+            }
+        }
+    }
+    assert!(rig.audit.records().is_empty(), "{:?}", rig.audit.records());
+    assert_eq!(counter.calls(), 0);
+
+    // The creating ops also refuse a `.`/`..` last component; the reading
+    // ops leave that to normalization.
+    for tail in ["/srv/x/..", "/srv/x/.", "/srv/x/../"] {
+        for (op, body) in file_requests(tail, "") {
+            let reply = rig
+                .server
+                .dispatch(&ctx, &ControlMessage::new(1, body))
+                .await
+                .unwrap();
+            let creates = matches!(op, "file.write" | "file.mkdir");
+            if creates {
+                assert_eq!(
+                    error_code(&reply),
+                    Some(ErrorCode::InvalidArgument),
+                    "{op} {tail}"
+                );
+            } else {
+                // Reaches the choke point: allowed by the double, then
+                // refused to act (the handler has nothing past the decision
+                // yet).
+                assert_eq!(
+                    error_code(&reply),
+                    Some(ErrorCode::Unsupported),
+                    "{op} {tail}"
+                );
+            }
+        }
+    }
+}
+
+/// Off unix there is no path judgement yet (ADR-0029 decision 23, Windows is
+/// M20): every file op is `UNSUPPORTED` before any decision or audit line.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn file_ops_are_unsupported_off_unix_before_any_decision() {
+    let rig = rig(Arc::new(AllowAllPinned));
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    for (op, body) in file_requests("/srv/x", "") {
+        let reply = rig
+            .server
+            .dispatch(&ctx, &ControlMessage::new(1, body))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported), "{op}");
+    }
+    assert!(rig.audit.records().is_empty());
+}
+
+/// A durable audit record is part of the decision: a degraded sink turns
+/// even an allow into the uniform denial, for a file op as for any other.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_op_with_a_degraded_audit_sink_is_the_uniform_denial() {
+    let broker = Broker::new(
+        Arc::new(TestClock::new()),
+        BrokerConfig {
+            replay_bytes: 64 * 1024,
+            resume_ttl: Duration::from_secs(3600),
+            close_grace: Duration::from_millis(100),
+            quota_limits: crate::quota::QuotaLimits::default(),
+        },
+        Arc::new(PipeFactory::new(64 * 1024)),
+    );
+    let audit = Arc::new(FailingAuditSink::new());
+    let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), broker, "host");
+    audit.fail();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    for (op, body) in file_requests("/srv/x", "") {
+        let reply = server
+            .dispatch(&ctx, &ControlMessage::new(1, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::PermissionDenied),
+            "{op}: {reply:?}"
+        );
+        assert_eq!(
+            error_message(&reply).as_deref(),
+            Some(crate::acl::PERMISSION_DENIED_MESSAGE),
+            "{op}"
+        );
+    }
+}

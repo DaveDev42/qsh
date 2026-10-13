@@ -135,7 +135,7 @@ CLI 경계는 `crates/qsh-cli/tests/setup.rs`의 테스트 일곱(`setup_machine
 
 ## L8 — Fuzzing (`cargo-fuzz`)
 
-cargo-fuzz 타깃 **19종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
+cargo-fuzz 타깃 **20종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`, ADR-0029가 더한 `decode_file_frame`이다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
 
 | 타깃 | 내용 | 비고 |
 |---|---|---|
@@ -145,6 +145,7 @@ cargo-fuzz 타깃 **19종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`�
 | `decode_stream_header` | `decode_msg::<StreamHeader>` + `StreamKind::try_from`(unknown i32 포함) |  |
 | `decode_session_frame` | `decode_msg::<SessionFrame>` + `validate()` 체인 |  |
 | `decode_exec_frame` | `decode_msg::<ExecFrame>` — EXEC_DATA 경로 |  |
+| `decode_file_frame` | `decode_msg::<FileFrame>` + `validate()` + `encode_file_frame` 체인 — FILE_DATA 경로(ADR-0029 결정 9) | `docs/design/protocol.md` §13-9 |
 | `decode_connect_result` | `decode_msg::<ConnectResult>` — ticket/ACL 게이트가 없는 유일한 decode 경로 |  |
 | `decode_local_hello` | `decode_local::<LocalHello>` — localctl 첫 메시지 (`qsh.local.v1`) |  |
 | `decode_local_admin_request` | `decode_local::<LocalAdminRequest>` — localctl 두 번째 프레임 |  |

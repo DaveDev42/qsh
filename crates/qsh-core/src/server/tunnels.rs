@@ -374,6 +374,8 @@ impl Server {
         }
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
+            // `FILE_DATA` lands here too: its ticket is minted by the file
+            // ops, which this build never gets past the ACL decision.
             _ => {
                 tracing::debug!(principal = %ctx.principal, kind = header.kind, "unsupported stream kind");
                 stream.send.reset(RESET_CODE_BAD_HEADER);

@@ -2040,7 +2040,10 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
             ack_before_splice: true,
         }),
         Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
-        Some(wire::StreamKind::Unspecified) | None => None,
+        // ADR-0029 decision 16: the reverse route carries no file transfer
+        // yet, and the controller answers the four file ops UNSUPPORTED, so
+        // no ticket exists for a `FILE_DATA` stream to redeem.
+        Some(wire::StreamKind::FileData) | Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 
