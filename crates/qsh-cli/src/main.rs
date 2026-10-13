@@ -1769,6 +1769,7 @@ struct SetupArgs {
     code_stdin: bool,
     forward: bool,
     service: bool,
+    peer_role: Option<String>,
 }
 
 fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
@@ -1781,6 +1782,7 @@ fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
         code_stdin: false,
         forward: false,
         service: false,
+        peer_role: None,
     };
     match cmd {
         None => {}
@@ -1791,6 +1793,7 @@ fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
             peer_cert,
             forward,
             service,
+            peer_role,
         }) => {
             args.role = Some(if to.is_some() {
                 SetupRole::HostTo
@@ -1802,6 +1805,7 @@ fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
             args.peer_cert = peer_cert.clone();
             args.forward = *forward;
             args.service = *service;
+            args.peer_role = peer_role.clone();
         }
         Some(SetupCmd::Client {
             name,
@@ -1809,6 +1813,7 @@ fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
             code,
             code_stdin,
             peer_cert,
+            peer_role,
         }) => {
             args.role = Some(SetupRole::Client);
             args.name = name.clone();
@@ -1816,16 +1821,19 @@ fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
             args.code = code.clone();
             args.code_stdin = *code_stdin;
             args.peer_cert = peer_cert.clone();
+            args.peer_role = peer_role.clone();
         }
         Some(SetupCmd::Listener {
             peer,
             peer_cert,
             service,
+            peer_role,
         }) => {
             args.role = Some(SetupRole::Listener);
             args.name = peer.clone();
             args.peer_cert = peer_cert.clone();
             args.service = *service;
+            args.peer_role = peer_role.clone();
         }
     }
     args
@@ -1923,6 +1931,7 @@ fn run_setup(cli: &Cli, ops: &Ops, cmd: &Option<SetupCmd>) -> i32 {
         code,
         forward: args.forward,
         service,
+        peer_role: args.peer_role,
     };
 
     loop {

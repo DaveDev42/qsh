@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup\-host \- This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
 .SH SYNOPSIS
-\fBqsh setup host\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-to\fR] [\fB\-\-address\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-cert\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-forward\fR] [\fB\-\-service\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh setup host\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-to\fR] [\fB\-\-address\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-cert\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-forward\fR] [\fB\-\-service\fR] [\fB\-\-peer\-role\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
 .SH OPTIONS
@@ -38,6 +38,9 @@ Also require `forward.local` in the printed `[[acl]]` rows
 .TP
 \fB\-\-service\fR
 Also write the service unit file
+.TP
+\fB\-\-peer\-role\fR \fI<ROLE>\fR
+Trust role of the pin (or invite) this run writes: one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none` (default `full`; `none` prints `[[acl]]` rows instead, `docs/CLI.md` §6.20, ADR\-0045)
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup\-client \- This machine connects to a host with `qsh <name>`
 .SH SYNOPSIS
-\fBqsh setup client\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-code\-stdin\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fINAME\fR] [\fICODE\fR] 
+\fBqsh setup client\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-code\-stdin\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-role\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fINAME\fR] [\fICODE\fR] 
 .SH DESCRIPTION
 This machine connects to a host with `qsh <name>`
 .SH OPTIONS
@@ -26,6 +26,9 @@ Pin the host from its certificate file (`\-` reads standard input) instead of re
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-\-peer\-role\fR \fI<ROLE>\fR
+Trust role of the server pin: one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none` (default `none`: a host to dial, `docs/CLI.md` §6.20, ADR\-0045)
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr

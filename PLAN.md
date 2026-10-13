@@ -117,7 +117,7 @@ Step 1은 크기 내역 밖이다.
 | Step 7 | Step 5(`--peer-role`이 초대 레코드의 role 저장을 쓴다), Step 6 | — |
 | Step 8 | Step 2~7 | — |
 | Step 9 | Step 1만 | Step 5~7과 병렬 가능. 새 모듈 `crates/qsh-core/src/file/`과 `lib.rs` 한 줄만 만진다. 인가에 닿지 않으므로 "ADR-0045 먼저" 순서를 어기지 않는다 |
-| Step 10 | Step 7(doctor 개수 25 → 26 → 27 순서), Step 9 | Step 11과 병렬 가능. Step 10은 `acl/load*`, `acl/policy*`, `ops/acl.rs`, `ops/doctor*`, `doctor.rs`를 만지고 Step 11은 `.proto`, `wire.rs`, `server/dispatch.rs`, `acl/registry.rs`, `fuzz/`를 만진다 |
+| Step 10 | Step 7(doctor 개수 24 → 25 → 26 순서), Step 9 | Step 11과 병렬 가능. Step 10은 `acl/load*`, `acl/policy*`, `ops/acl.rs`, `ops/doctor*`, `doctor.rs`를 만지고 Step 11은 `.proto`, `wire.rs`, `server/dispatch.rs`, `acl/registry.rs`, `fuzz/`를 만진다 |
 | Step 11 | Step 4(`Authorizer::check` 입력이 바뀐 뒤) | Step 10과 병렬 가능(위와 같음) |
 | Step 12 | Step 9·10·11 | — |
 | Step 13 | Step 12 | — |
@@ -131,7 +131,7 @@ Step 1은 크기 내역 밖이다.
 - 계약 문서 델타는 그 표면을 바꾼 스텝의 같은 커밋에 싣는다.
   - `docs/CLI.md` 상태 헤더의 v0.26 항목은 CLI.md를 처음 고치는 Step 2가 열고 뒤 스텝이 덧붙인다(`crates/qsh-core/tests/cli_md_header.rs` 핀).
   - clap 트리가 바뀌는 스텝은 같은 커밋에서 `cargo xtask man`을 돌린다.
-  - doctor code를 더하는 스텝은 `EXPECTED_DOCTOR_CODES`, §6.17 표, §6.11·§6.17의 개수 문장을 같은 커밋에서 바꾼다(origin `09266dc` 기준 25 → Step 7에서 26 → Step 10에서 27).
+  - doctor code를 더하는 스텝은 `EXPECTED_DOCTOR_CODES`, §6.17 표, §6.11·§6.17의 개수 문장을 같은 커밋에서 바꾼다(origin `09266dc` 기준 24 → Step 7에서 25 → Step 10에서 26).
 - 판정 로직, role 표, 경로 판정, 전송 상태 기계, 트리 순회는 `qsh-core`에 둔다. `qsh-proto`에는 열린 문자열 필드, 새 op·wire 타입, 상수만 들어간다. `qsh-cli`에는 clap 정의, 렌더러 둘, 진행 표시, exit 매핑만 둔다. 새 모듈이 `xtask arch`의 경로 범위 금지 목록에 들어가는지는 그 모듈을 만드는 스텝이 판단하고, 들어가면 `xtask/src/arch.rs`를 같은 커밋에서 고친다(`CLAUDE.md`의 경로 범위 규칙).
 - (a) 스텝(2~8)은 wire를 바꾸지 않는다(ADR-0045 결정 17). 완료 판정마다 다음을 확인한다.
   - `git diff --stat -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다.
@@ -341,12 +341,12 @@ Step 1은 크기 내역 밖이다.
   | `trust_remove_scope` | message를 고친다 |
   | `trust.toml` 파싱 실패의 `CONFIG_ERROR` | 문면에 "실행 중인 serve/listen은 role grant를 거부한다"를 더한다 |
 
-- 신설 `trust_pin_role_unset`(info). role 키 없는 pin마다 하나를 내고 `detail`은 pin 이름만 싣는다. doctor code는 25 → 26이다.
+- 신설 `trust_pin_role_unset`(info). role 키 없는 pin마다 하나를 내고 `detail`은 pin 이름만 싣는다. doctor code는 24 → 25이다.
 - `qsh setup --peer-role`의 역할별 기본값: `host` → 초대에 `full`, `host --to` → listener pin에 `full`, `listener` → target pin에 `reverse`, `client` → server pin에 `none`.
   - ACL 단계는 `none`이 아니면 `done`이고 `detail`에 pin·초대와 role을 적으며 `acl_rows`를 내지 않는다.
   - `none`이면 지금처럼 동작한다.
   - `complete` 판정 문장은 그대로다.
-- 문서: `docs/CLI.md` §6.17(표, 개수 문장 26), §6.11 개수 문장, §6.20(`--peer-role`), man `qsh-setup`
+- 문서: `docs/CLI.md` §6.17(표, 개수 문장 25), §6.11 개수 문장, §6.20(`--peer-role`), man `qsh-setup`
 
 **(b) 테스트:**
 
@@ -360,7 +360,7 @@ Step 1은 크기 내역 밖이다.
 - `setup_host_roles_incomplete_without_acl_toml`는 `--peer-role none` 조건으로 좁힌다.
 - 새 `setup_host_roles_complete_with_a_role_and_no_acl_toml`과 fixture `setup.run.host_complete_with_role.json`
 
-**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 26이고 CLI.md 개수 문장이 같다. ADR-0038 client 면제 테스트가 무변경 초록이다.
+**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 25이고 CLI.md 개수 문장이 같다. ADR-0038 client 면제 테스트가 무변경 초록이다.
 
 ### Step 8 — (a) 정리: 잔여 위험, README, 부하 반복 (0.1~0.2ew)
 
@@ -433,7 +433,7 @@ Step 1은 크기 내역 밖이다.
 - 결정 4-6 (a)의 순수 판정 helper를 둔다. "이 principal·`auth_path`가 파일 action을 받을 근거가 있는가"를 보며, `acl show`의 `matching_rules`와 같은 helper다.
 - `acl check --path <abs-path>`: 파일 action인데 `--path`가 없거나, 비파일 action인데 있으면 `INVALID_ARGUMENT`다. `data.path`와 `data.canonical_path`를 더한다. 상태 경로 판정은 돌리지 않는다는 §6.15 문단을 고친다.
 - `acl show`: `matching_rules[].paths`를 더한다. 파일 action의 `effective_actions` 정의를 바꾸고, `paths` 없는 파일 행에는 human 줄을 더한다.
-- doctor `acl_file_paths_missing`(warn): 같은 이름 pin이 role `full`이면 침묵하고, 정책이 없거나 파싱 실패면 침묵한다. `detail`은 index와 `auth_path`만 싣는다. remedy 꼬리는 `ACL_RESTART_NOTICE`다. doctor code는 26 → 27이다.
+- doctor `acl_file_paths_missing`(warn): 같은 이름 pin이 role `full`이면 침묵하고, 정책이 없거나 파싱 실패면 침묵한다. `detail`은 index와 `auth_path`만 싣는다. remedy 꼬리는 `ACL_RESTART_NOTICE`다. doctor code는 25 → 26이다.
 - 문서: `docs/PRD.md` §9(문법과 예시, action 모양 inline code를 새로 쓰지 않음), `docs/design/architecture.md` §6(문법 줄 `paths?`, ③-1), `docs/CLI.md` §6.15·§6.17·§6.19, man `qsh-acl-check`
 
 **(b) 테스트:**
@@ -443,7 +443,7 @@ Step 1은 크기 내역 밖이다.
 - doctor: `doctor_acl_findings_reports_acl_file_paths_missing_for_a_file_row_without_paths`, `acl_file_paths_missing_is_silent_for_a_role_full_pin`, 정책 없음 침묵, `detail`에 principal 문자열이 없음. `doctor_docs.rs`
 - 새 fixture 이름은 이 계획의 초안이다(§7.1 #4): `acl.check.path.json`, `acl.show.with_paths.json`
 
-**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 27이다. 기존 ACL fixture가 무변경 초록이다. enforcement 결과 diff 0(①이 여전히 `file.*`를 막음).
+**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 26이다. 기존 ACL fixture가 무변경 초록이다. enforcement 결과 diff 0(①이 여전히 `file.*`를 막음).
 
 ### Step 11 — (b) wire와 fuzz, 네 op의 dispatch와 deny seam (0.4~0.5ew)
 
@@ -874,7 +874,7 @@ Step 1은 크기 내역 밖이다.
 - **복사 중 PTY echo.** `file_copy_echo_under_load`가 붉으면 ADR에 미리 정한 대체 경로가 없다. 수정이 band·송신 깊이·정체 장부 상수 조정을 넘으면 (b)를 닫지 못하고 ADR이 필요하다. Step 14 (c)에 판정 절차를 적었다.
 - **열린 핸들 재검증의 플랫폼 차이.** Linux `/proc` 미마운트 환경(일부 컨테이너)에서는 readlink가 실패한다. 실패는 거부로 접는다(fail closed). 그 경우 모든 파일 op이 거부되므로 Step 9가 진단 문면과 테스트 skip 조건을 정한다.
 - **macOS runner의 대소문자.** `macos-14` runner 볼륨은 대소문자를 구분하지 않는다. 보호 대조는 대소문자 무시이고 `paths` 매칭은 디스크 표기로 한다. 두 비교가 다른 결과를 내는 경계 행을 Step 9·10이 각각 둔다.
-- **CLI.md 상태 헤더와 `REQUIRED_FIXTURES` 충돌.** 병렬 스텝(5∥6, 10∥11)은 같은 한 줄과 같은 배열을 만진다. 늦게 착지하는 쪽이 rebase하고 개수 문장(doctor 25 → 26 → 27, seam 14 → 18, fuzz 19 → 20)을 착지 시점 값으로 맞춘다.
+- **CLI.md 상태 헤더와 `REQUIRED_FIXTURES` 충돌.** 병렬 스텝(5∥6, 10∥11)은 같은 한 줄과 같은 배열을 만진다. 늦게 착지하는 쪽이 rebase하고 개수 문장(doctor 24 → 25 → 26, seam 14 → 18, fuzz 19 → 20)을 착지 시점 값으로 맞춘다.
 - **README First run과 캠페인.** README First run은 m7·m9 스톱워치가 재는 "literal script"다. m9 대상 트리는 `docs/campaigns/m9-stopwatch.md` §8에 SHA로 고정됐고 m7은 pre-M9 커밋이라 문면을 바꿔도 측정이 흔들리지 않는다. `p1-setup-stopwatch`는 "실행 전에 채우는" 트리이므로 Step 7 이후 트리로 돌리면 ACL 단계가 사라져 다른 절차를 재게 된다(§9 #3).
 - **M16 착수 압력.** M16의 착수 조건은 "M15 (a) 착지"라 Step 8 뒤에 열 수 있다. 두 마일스톤을 동시에 열면 `trust/`·`ops/trust.rs`(M16 (a))와 `server/`(M15 (b)·M16 (b))가 겹친다(§9 #1).
 

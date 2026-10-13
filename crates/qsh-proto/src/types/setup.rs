@@ -95,6 +95,17 @@ pub struct SetupRunReq {
     /// Also write the service unit file.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub service: bool,
+    /// The trust role of the pin (or the invite) this run writes
+    /// (`--peer-role`, ADR-0045 결정 8·14): one of `full`, `exec`, `tunnel`,
+    /// `read-only`, `reverse`, `none`. An open string on the wire (the closed
+    /// vocabulary lives in `qsh-core`, like `TrustAddReq.role`). Omitted
+    /// means the default of the setup role: `host` pins its invite with
+    /// `full`, `host_to` pins the listener with `full`, `listener` pins the
+    /// target with `reverse`, `client` pins the server with `none`. `none`
+    /// keeps the pre-role behavior: the `acl` step prints `[[acl]]` rows.
+    /// Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_role: Option<String>,
 }
 
 /// One step of a `qsh setup` run (ADR-0024 결정 9).
@@ -130,7 +141,10 @@ pub struct SetupRunData {
     /// The steps, in run order.
     pub steps: Vec<SetupStep>,
     /// The `[[acl]]` rows to put in `acl.toml`, as text. Present when the
-    /// role has an `acl` step. `qsh setup` never writes `acl.toml`.
+    /// role has an `acl` step and the run's `peer_role` is `none`; with any
+    /// other role the pin or invite carries the authority and there is
+    /// nothing to paste (ADR-0045 결정 14). `qsh setup` never writes
+    /// `acl.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl_rows: Option<String>,
     /// Commands a person runs after this run, in order.

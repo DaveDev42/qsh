@@ -2046,11 +2046,11 @@ fn doctor_acl_findings_reports_acl_principal_unmatched_for_an_unmatched_pin() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     let finding = findings
         .iter()
         .find(|f| f.code == "acl_principal_unmatched")
@@ -2081,13 +2081,13 @@ fn acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row(
             address: None,
             fingerprint: Some(shared_fingerprint.clone()),
             cert_pem: None,
-            role: None,
+            role: Some("none".into()),
         })
         .unwrap();
     }
 
     let findings: Vec<_> = ops
-        .doctor_acl_findings("serve")
+        .doctor_acl_findings("serve", SystemTime::now())
         .unwrap()
         .into_iter()
         .filter(|f| f.code == "acl_principal_unmatched")
@@ -2118,7 +2118,7 @@ fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_examp
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
     ops.trust_add(TrustAddReq {
@@ -2126,12 +2126,12 @@ fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_examp
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"other").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
 
     let serve_finding = ops
-        .doctor_acl_findings("serve")
+        .doctor_acl_findings("serve", SystemTime::now())
         .unwrap()
         .into_iter()
         .find(|f| f.code == "acl_principal_unmatched")
@@ -2152,7 +2152,7 @@ fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_examp
     );
 
     let listen_detail = ops
-        .doctor_acl_findings("listen")
+        .doctor_acl_findings("listen", SystemTime::now())
         .unwrap()
         .into_iter()
         .find(|f| f.code == "acl_principal_unmatched")
@@ -2177,11 +2177,11 @@ fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_device() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings.iter().all(|f| f.code != "acl_principal_unmatched"),
         "{findings:?}"
@@ -2207,11 +2207,11 @@ fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_fingerprint() {
         address: None,
         fingerprint: Some(fingerprint.clone()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings.iter().all(|f| f.code != "acl_principal_unmatched"),
         "{findings:?}"
@@ -2226,7 +2226,7 @@ fn doctor_acl_findings_reports_acl_ca_auth_path_missing_when_no_row_sets_ca() {
     std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
     add_stub_ca(&ops, "corp-ca");
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     let finding = findings
         .iter()
         .find(|f| f.code == "acl_ca_auth_path_missing")
@@ -2253,7 +2253,7 @@ fn doctor_acl_findings_is_silent_when_a_row_sets_auth_path_ca() {
     .unwrap();
     add_stub_ca(&ops, "corp-ca");
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings
             .iter()
@@ -2269,7 +2269,7 @@ fn doctor_acl_findings_is_silent_about_ca_auth_path_with_no_ca_entries_at_all() 
     crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
     std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings
             .iter()
@@ -2278,11 +2278,12 @@ fn doctor_acl_findings_is_silent_about_ca_auth_path_with_no_ca_entries_at_all() 
     );
 }
 
-/// Both new checks only run once `acl.toml` actually loaded — a missing
-/// policy already reports `acl_policy_missing` and must not also pile
-/// on `acl_principal_unmatched`/`acl_ca_auth_path_missing` noise for
-/// data an unloaded `PinnedPrincipalIndex::empty()` cannot actually
-/// speak to.
+/// `acl_principal_unmatched` only runs once `acl.toml` actually loaded: a
+/// missing or unparseable policy has no rows to match against, and the
+/// invalid case is already reported as `acl_policy_invalid`. An unparseable
+/// file also skips `acl_ca_auth_path_missing`. A *missing* file does not
+/// skip it any more (ADR-0045 결정 12, see
+/// `doctor_acl_ca_auth_path_missing_fires_without_acl_toml`).
 #[test]
 fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
     let (_guard, ops) = temp_ops();
@@ -2293,13 +2294,22 @@ fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
     // No acl.toml at all: `PolicyLoad::Missing`.
-
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(findings.iter().any(|f| f.code == "acl_policy_missing"));
+    assert!(
+        findings.iter().all(|f| f.code != "acl_principal_unmatched"),
+        "{findings:?}"
+    );
+
+    // An unparseable acl.toml: `PolicyLoad::Invalid`.
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), "not valid toml {{{").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    assert!(findings.iter().any(|f| f.code == "acl_policy_invalid"));
     assert!(
         findings.iter().all(|f| f.code != "acl_principal_unmatched"),
         "{findings:?}"
@@ -2309,6 +2319,263 @@ fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
             .iter()
             .all(|f| f.code != "acl_ca_auth_path_missing"),
         "{findings:?}"
+    );
+}
+
+// -----------------------------------------------------------------
+// Trust roles (ADR-0045 결정 12, M15 Step 7).
+// -----------------------------------------------------------------
+
+fn add_pin(ops: &Ops, name: &str, role: Option<&str>) {
+    ops.trust_add(TrustAddReq {
+        name: name.into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(name.as_bytes()).to_string()),
+        cert_pem: None,
+        role: role.map(str::to_string),
+    })
+    .unwrap();
+}
+
+/// A pin written before ADR-0045: no `role` key. `trust add` always writes
+/// one now, so the legacy shape goes through the store directly.
+fn add_legacy_pin(ops: &Ops, name: &str, address: &str) {
+    let path = ops.paths().trust_file();
+    let mut store = crate::trust::TrustStore::load(&path).unwrap();
+    store.add_peer(
+        name,
+        Some(address.to_string()),
+        qsh_transport::Fingerprint::of_spki_der(name.as_bytes()),
+        crate::config::rfc3339_of(SystemTime::now()),
+    );
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    store.save(&path).unwrap();
+}
+
+fn codes_of(findings: &[DoctorFinding]) -> Vec<&str> {
+    findings.iter().map(|f| f.code.as_str()).collect()
+}
+
+#[test]
+fn doctor_trust_pin_role_unset_reports_each_legacy_pin_by_name_only() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_legacy_pin(&ops, "old-laptop", "old-laptop.example:4433");
+    add_legacy_pin(&ops, "old-phone", "10.9.8.7:4433");
+    add_pin(&ops, "new-mac", Some("none"));
+    add_pin(&ops, "new-box", Some("full"));
+
+    let findings = ops.doctor_trust_findings().unwrap();
+    let unset: Vec<&DoctorFinding> = findings
+        .iter()
+        .filter(|f| f.code == "trust_pin_role_unset")
+        .collect();
+    assert_eq!(unset.len(), 2, "{findings:?}");
+    for finding in &unset {
+        assert_eq!(finding.status, "info");
+    }
+    assert!(unset[0].detail.contains("(peer: old-laptop)"), "{unset:?}");
+    assert!(unset[1].detail.contains("(peer: old-phone)"), "{unset:?}");
+    // The name is all the detail says about the pin: no address, no
+    // fingerprint.
+    let everything = format!("{unset:?}");
+    assert!(!everything.contains("example:4433"), "{everything}");
+    assert!(!everything.contains("10.9.8.7"), "{everything}");
+    assert!(!everything.contains("sha256:"), "{everything}");
+    assert!(
+        unset[0]
+            .remedy
+            .as_deref()
+            .unwrap()
+            .contains("`qsh trust set-role old-laptop <role>`"),
+        "{unset:?}"
+    );
+    assert!(
+        !everything.contains("new-mac") && !everything.contains("new-box"),
+        "pins with a role key are not reported: {everything}"
+    );
+}
+
+#[test]
+fn doctor_acl_policy_missing_is_silent_when_a_role_pin_exists() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    let now = SystemTime::now();
+
+    // Nothing authorizes a request: the error stands, and its remedy now
+    // names `trust set-role`.
+    let findings = ops.doctor_acl_findings("serve", now).unwrap();
+    let missing = findings
+        .iter()
+        .find(|f| f.code == "acl_policy_missing")
+        .expect("acl_policy_missing");
+    assert!(
+        missing
+            .remedy
+            .as_deref()
+            .unwrap()
+            .contains("qsh trust set-role <name> full"),
+        "{missing:?}"
+    );
+
+    // A pin with role `none` and a legacy pin grant nothing by role.
+    add_pin(&ops, "dial-only", Some("none"));
+    add_legacy_pin(&ops, "legacy", "legacy.example:4433");
+    let findings = ops.doctor_acl_findings("serve", now).unwrap();
+    assert!(
+        codes_of(&findings).contains(&"acl_policy_missing"),
+        "{findings:?}"
+    );
+
+    // One pin with a role other than `none` silences it.
+    add_pin(&ops, "laptop", Some("read-only"));
+    let findings = ops.doctor_acl_findings("serve", now).unwrap();
+    assert!(
+        !codes_of(&findings).contains(&"acl_policy_missing"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn doctor_acl_policy_missing_is_silent_while_a_role_invite_is_live() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    let now = SystemTime::now();
+
+    // An invite that pins `none` authorizes nothing.
+    ops.trust_invite(qsh_proto::TrustInviteReq {
+        as_name: Some("quiet".into()),
+        role: Some("none".into()),
+    })
+    .unwrap();
+    let findings = ops.doctor_acl_findings("serve", now).unwrap();
+    assert!(codes_of(&findings).contains(&"acl_policy_missing"));
+
+    ops.trust_invite(qsh_proto::TrustInviteReq {
+        as_name: Some("laptop".into()),
+        role: Some("full".into()),
+    })
+    .unwrap();
+    let findings = ops.doctor_acl_findings("serve", now).unwrap();
+    assert!(
+        !codes_of(&findings).contains(&"acl_policy_missing"),
+        "{findings:?}"
+    );
+
+    // Past the ten-minute TTL the invite cannot be redeemed any more.
+    let later = now + Duration::from_secs(11 * 60);
+    let findings = ops.doctor_acl_findings("serve", later).unwrap();
+    assert!(
+        codes_of(&findings).contains(&"acl_policy_missing"),
+        "{findings:?}"
+    );
+}
+
+/// An unparseable `acl.toml` refuses role grants too (ADR-0045 결정 6), so a
+/// role pin does not silence `acl_policy_invalid`, and the finding says so.
+#[test]
+fn doctor_acl_policy_invalid_still_fires_with_a_role_pin_and_says_roles_are_refused() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_pin(&ops, "laptop", Some("full"));
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), "not valid toml {{{").unwrap();
+
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let invalid = findings
+        .iter()
+        .find(|f| f.code == "acl_policy_invalid")
+        .expect("acl_policy_invalid");
+    assert!(
+        invalid
+            .detail
+            .contains(crate::doctor::ACL_POLICY_INVALID_ROLE_CLAUSE),
+        "{invalid:?}"
+    );
+}
+
+#[test]
+fn doctor_acl_principal_unmatched_skips_role_pins() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+    add_pin(&ops, "with-role", Some("exec"));
+    add_pin(&ops, "dial-only", Some("none"));
+    add_legacy_pin(&ops, "legacy", "legacy.example:4433");
+
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let unmatched: Vec<&str> = findings
+        .iter()
+        .filter(|f| f.code == "acl_principal_unmatched")
+        .map(|f| f.detail.as_str())
+        .collect();
+    assert_eq!(unmatched.len(), 2, "{findings:?}");
+    assert!(unmatched.iter().any(|d| d.contains("(peer: dial-only)")));
+    assert!(unmatched.iter().any(|d| d.contains("(peer: legacy)")));
+    assert!(
+        unmatched.iter().all(|d| !d.contains("with-role")),
+        "a pin with a role needs no row: {unmatched:?}"
+    );
+}
+
+#[test]
+fn doctor_acl_ca_auth_path_missing_fires_without_acl_toml() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_stub_ca(&ops, "corp-ca");
+    // A role pin silences `acl_policy_missing`, so without this the CA path
+    // would be shut with nobody saying so.
+    add_pin(&ops, "laptop", Some("full"));
+
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    assert!(
+        !codes_of(&findings).contains(&"acl_policy_missing"),
+        "{findings:?}"
+    );
+    assert!(
+        codes_of(&findings).contains(&"acl_ca_auth_path_missing"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn doctor_trust_remove_scope_separates_role_and_row_reach() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_pin(&ops, "laptop", Some("full"));
+    let findings = ops.doctor_trust_findings().unwrap();
+    let scope = findings
+        .iter()
+        .find(|f| f.code == "trust_remove_scope")
+        .expect("trust_remove_scope");
+    assert_eq!(scope.detail, TRUST_REMOVE_SCOPE.message);
+    assert!(
+        scope
+            .detail
+            .contains("trust role starting with the peer's next request"),
+        "{scope:?}"
+    );
+}
+
+/// A `trust.toml` that does not parse ends `qsh doctor` with `CONFIG_ERROR`
+/// (the loader's own code), and the message now says what the same failure
+/// does to a running serve/listen (ADR-0045 결정 4·12).
+#[test]
+fn doctor_trust_parse_failure_names_the_role_suspension() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().trust_file(), "this is = [not valid").unwrap();
+
+    let err = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(
+        err.message
+            .contains(crate::doctor::TRUST_FILE_ROLES_SUSPENDED_CLAUSE),
+        "{err}"
     );
 }
 
@@ -2325,7 +2592,7 @@ fn doctor_acl_findings_minimal_policy_example_is_role_aware() {
     // fresh example each time.
 
     let serve_finding = ops
-        .doctor_acl_findings("serve")
+        .doctor_acl_findings("serve", SystemTime::now())
         .unwrap()
         .into_iter()
         .find(|f| f.code == "acl_policy_missing")
@@ -2340,7 +2607,7 @@ fn doctor_acl_findings_minimal_policy_example_is_role_aware() {
     );
 
     let listen_finding = ops
-        .doctor_acl_findings("listen")
+        .doctor_acl_findings("listen", SystemTime::now())
         .unwrap()
         .into_iter()
         .find(|f| f.code == "acl_policy_missing")
@@ -2371,7 +2638,7 @@ fn acl_principal_unmatched_and_ca_auth_path_missing_remedies_mention_restart() {
 }
 
 /// Wiring (mutation check): deleting `doctor_assemble`'s
-/// `findings.extend(self.doctor_acl_findings(mode)?)` line reds this
+/// `findings.extend(self.doctor_acl_findings(mode, …)?)` line reds this
 /// test. Goes through `doctor_assemble` with an injected environment
 /// (the same discipline
 /// `doctor_wires_the_service_not_registered_finding_into_the_full_report_deterministically`
@@ -2392,7 +2659,7 @@ fn doctor_wires_the_acl_principal_and_ca_findings_into_the_full_report() {
         address: None,
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
         cert_pem: None,
-        role: None,
+        role: Some("none".into()),
     })
     .unwrap();
 
@@ -2444,7 +2711,7 @@ fn acl_forward_socks_ineffective_flags_a_row_whose_allow_names_forward_socks_wit
     )
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     let finding = findings
         .iter()
         .find(|f| f.code == "acl_forward_socks_ineffective")
@@ -2469,7 +2736,7 @@ fn acl_forward_socks_ineffective_is_silent_when_the_same_row_also_covers_forward
     )
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings
             .iter()
@@ -2491,7 +2758,7 @@ fn acl_forward_socks_ineffective_is_silent_when_another_row_for_the_same_princip
     )
     .unwrap();
 
-    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
     assert!(
         findings
             .iter()
@@ -2512,7 +2779,7 @@ fn acl_forward_socks_ineffective_remedy_ends_with_the_acl_restart_notice() {
     .unwrap();
 
     let finding = ops
-        .doctor_acl_findings("serve")
+        .doctor_acl_findings("serve", SystemTime::now())
         .unwrap()
         .into_iter()
         .find(|f| f.code == "acl_forward_socks_ineffective")

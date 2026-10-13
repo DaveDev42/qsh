@@ -16,7 +16,11 @@
 //! (M3 plan Step 9 (d) (2473c88)).
 
 use qsh_core::CONTROLLER_UNREACHABLE;
-use qsh_core::doctor::{ACL_CA_AUTH_PATH_MISSING, CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
+use qsh_core::doctor::{
+    ACL_CA_AUTH_PATH_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT,
+    CERT_EXPIRING_SOON, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE,
+};
 
 #[path = "support/docs.rs"]
 mod docs;
@@ -112,6 +116,37 @@ fn cli_md_quotes_the_acl_ca_auth_path_missing_diagnostic_verbatim() {
         cli_md.contains(ACL_CA_AUTH_PATH_MISSING.remedy),
         "docs/CLI.md §6.17 must quote ACL_CA_AUTH_PATH_MISSING.remedy verbatim"
     );
+}
+
+/// ADR-0045 결정 12 (M15 Step 7): the role-aware wording of §6.17 is quoted
+/// from the constants, not retyped. `trust_pin_role_unset` is pinned word for
+/// word like the three diagnostics above; the three clauses the existing
+/// `acl_*` findings and the `trust.toml` `CONFIG_ERROR` gained are pinned the
+/// same way.
+#[test]
+fn cli_md_quotes_the_role_aware_doctor_wording_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    for (what, text) in [
+        ("TRUST_PIN_ROLE_UNSET.message", TRUST_PIN_ROLE_UNSET.message),
+        ("TRUST_PIN_ROLE_UNSET.remedy", TRUST_PIN_ROLE_UNSET.remedy),
+        (
+            "ACL_POLICY_MISSING_SET_ROLE_HINT",
+            ACL_POLICY_MISSING_SET_ROLE_HINT,
+        ),
+        (
+            "ACL_POLICY_INVALID_ROLE_CLAUSE",
+            ACL_POLICY_INVALID_ROLE_CLAUSE,
+        ),
+        (
+            "TRUST_FILE_ROLES_SUSPENDED_CLAUSE",
+            TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
+        ),
+    ] {
+        assert!(
+            cli_md.contains(text),
+            "docs/CLI.md §6.17 must quote {what} verbatim"
+        );
+    }
 }
 
 /// The stable half of a diagnostic is its `code`, not its prose: `code` is

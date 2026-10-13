@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 24 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 25 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -42,6 +42,7 @@ pub mod probe;
 /// 6·14, 결과 절 R6's doctor follow-up) is the twenty-third, 22 → 23.
 /// `ServiceRestartDropsSessions` (M13 graceful re-exec H1,
 /// `docs/design/reexec-estimate.md`) is the twenty-fourth, 23 → 24.
+/// `TrustPinRoleUnset` (ADR-0045 결정 12, M15) is the twenty-fifth, 24 → 25.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -68,6 +69,7 @@ pub enum DiagnosticId {
     ConfigServeToConflict,
     AclForwardSocksIneffective,
     ServiceRestartDropsSessions,
+    TrustPinRoleUnset,
 }
 
 impl DiagnosticId {
@@ -106,6 +108,7 @@ impl DiagnosticId {
             DiagnosticId::ConfigServeToConflict => CONFIG_SERVE_TO_CONFLICT.code,
             DiagnosticId::AclForwardSocksIneffective => ACL_FORWARD_SOCKS_INEFFECTIVE.code,
             DiagnosticId::ServiceRestartDropsSessions => SERVICE_RESTART_DROPS_SESSIONS.code,
+            DiagnosticId::TrustPinRoleUnset => TRUST_PIN_ROLE_UNSET.code,
         }
     }
 }
@@ -139,6 +142,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "service_not_registered",
     "service_restart_drops_sessions",
     "systemd_linger_disabled",
+    "trust_pin_role_unset",
     "trust_remove_scope",
     "udp_egress_blocked",
 ];
@@ -351,11 +355,13 @@ pub const CONFIG_SERVE_TO_CONFLICT: Diagnostic = Diagnostic {
 /// notice, not a problem — it surfaces whenever `trust.toml` has at least
 /// one pin, unconditionally, so an operator always sees this scope
 /// spelled out rather than discovering it only when a removal doesn't do
-/// what they expected.
+/// what they expected. Since ADR-0045 결정 12 it tells the two reaches
+/// apart: a role grant ends at the next request, a row grant at the next
+/// handshake.
 pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
     id: DiagnosticId::TrustRemoveScope,
     code: "trust_remove_scope",
-    message: "trust.toml has at least one pinned peer. `qsh trust remove` only takes effect starting with that peer's next handshake — an already-established connection keeps its entire negotiated authority (including opening brand-new sessions, tunnels and forwards) until that connection drops and has to handshake again.",
+    message: "trust.toml has at least one pinned peer. `qsh trust remove` takes effect for authority granted by a trust role starting with the peer's next request, but authority granted by an acl.toml row stays until that connection drops and has to handshake again — an already-established connection keeps its entire negotiated row authority (including opening brand-new sessions, tunnels and forwards) until then.",
     remedy: "Force-closing an already-established connection on removal is not implemented (P1). If that matters right now, restart the process holding the connection.",
 };
 
@@ -569,6 +575,39 @@ pub const HOST_PINNED_WITHOUT_ADDRESS: Diagnostic = Diagnostic {
     message: "This host is configured (a trust-store pin or a hosts.toml entry) but has no address from either source and no reverse registration is currently held.",
     remedy: "Add an address with `qsh trust add {name} --address <host:port> --fingerprint sha256:...`, or register it by running `qsh reverse <controller>` on that host.",
 };
+
+/// ADR-0045 결정 12: a `[[peer]]` entry in `trust.toml` has no `role` key,
+/// which is how every pin written before trust roles looks. It counts as
+/// role `none` (결정 3), so the pin is authorized by `acl.toml` rows alone.
+/// `info`, not `warn`: nothing is wrong and no behavior changes, the finding
+/// only points at the new command. One finding per such pin; `detail` carries
+/// the pin name and nothing else of the pin. `remedy`'s `{name}` is a
+/// template placeholder the caller (`Ops::doctor_trust_findings`) fills in,
+/// the way [`HOST_PINNED_WITHOUT_ADDRESS`] does.
+pub const TRUST_PIN_ROLE_UNSET: Diagnostic = Diagnostic {
+    id: DiagnosticId::TrustPinRoleUnset,
+    code: "trust_pin_role_unset",
+    message: "This trust.toml pin has no role key, so it counts as role none and is authorized only by acl.toml rows.",
+    remedy: "Give it a role with `qsh trust set-role {name} <role>`, or record that it stays row-only with `qsh trust set-role {name} none`.",
+};
+
+/// ADR-0045 결정 12, `acl_policy_missing`'s `remedy` lead: with no
+/// `acl.toml`, a device is let in by a trust role. Followed by
+/// [`crate::acl::ACL_STARTUP_NO_AUTOGEN`] and
+/// [`crate::acl::ACL_STARTUP_CHECK_HINT`] in the finding's `remedy`.
+pub const ACL_POLICY_MISSING_SET_ROLE_HINT: &str =
+    "admit a device by role with `qsh trust set-role <name> full`, or write acl.toml";
+
+/// ADR-0045 결정 12, appended to `acl_policy_invalid`'s `detail`: an
+/// unparseable `acl.toml` also refuses what trust roles would grant
+/// (`docs/design/architecture.md` §6, fail closed).
+pub const ACL_POLICY_INVALID_ROLE_CLAUSE: &str =
+    "role grants are refused too while acl.toml cannot be parsed";
+
+/// ADR-0045 결정 12, appended to the `CONFIG_ERROR` that `qsh doctor` ends
+/// with when `trust.toml` cannot be read or parsed (결정 4): the same file
+/// failing to reload is what suspends role grants in a running process.
+pub const TRUST_FILE_ROLES_SUSPENDED_CLAUSE: &str = "a running qsh serve/listen refuses role grants until this file parses again (pin authentication keeps using the last good snapshot)";
 
 /// M5 plan Step 3 (2473c88) (F9): attempts to open `path` for append, creating
 /// the parent directory and the file itself if either is missing —

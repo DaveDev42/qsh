@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup\-listener \- This machine runs `qsh listen` for a reverse peer
 .SH SYNOPSIS
-\fBqsh setup listener\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-\-service\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh setup listener\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-\-service\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-role\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 This machine runs `qsh listen` for a reverse peer
 .SH OPTIONS
@@ -26,6 +26,9 @@ Also write the service unit file
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-\-peer\-role\fR \fI<ROLE>\fR
+Trust role of the target pin: one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none` (default `reverse`: the target registers on this listener, `docs/CLI.md` §6.20, ADR\-0045)
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr

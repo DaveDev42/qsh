@@ -876,6 +876,12 @@ pub enum SetupCmd {
         /// Also write the service unit file.
         #[arg(long)]
         service: bool,
+        /// Trust role of the pin (or invite) this run writes: one of `full`,
+        /// `exec`, `tunnel`, `read-only`, `reverse`, `none` (default `full`;
+        /// `none` prints `[[acl]]` rows instead, `docs/CLI.md` §6.20,
+        /// ADR-0045).
+        #[arg(long, value_name = "ROLE")]
+        peer_role: Option<String>,
     },
     /// This machine connects to a host with `qsh <name>`.
     Client {
@@ -896,6 +902,11 @@ pub enum SetupCmd {
         /// input) instead of redeeming an invite.
         #[arg(long, value_name = "PATH")]
         peer_cert: Option<String>,
+        /// Trust role of the server pin: one of `full`, `exec`, `tunnel`,
+        /// `read-only`, `reverse`, `none` (default `none`: a host to dial,
+        /// `docs/CLI.md` §6.20, ADR-0045).
+        #[arg(long, value_name = "ROLE")]
+        peer_role: Option<String>,
     },
     /// This machine runs `qsh listen` for a reverse peer.
     Listener {
@@ -909,6 +920,11 @@ pub enum SetupCmd {
         /// Also write the service unit file.
         #[arg(long)]
         service: bool,
+        /// Trust role of the target pin: one of `full`, `exec`, `tunnel`,
+        /// `read-only`, `reverse`, `none` (default `reverse`: the target
+        /// registers on this listener, `docs/CLI.md` §6.20, ADR-0045).
+        #[arg(long, value_name = "ROLE")]
+        peer_role: Option<String>,
     },
 }
 
