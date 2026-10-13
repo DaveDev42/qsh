@@ -234,6 +234,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - 파일 복사와 PTY echo를 동시에 돌린 상태에서 M13 (b) 하네스가 같은 예산으로 초록이다.
   - 신규 op·명령마다 fixture 등재와 등록 완전성(`layer_2_every_schema_command_has_all_six_faces`), `capabilities.json` golden 재생성, man 재생성, 새 wire op의 decode 경로가 fuzz 타깃에 걸림, freeze 발효 전이면 `docs/design/protocol.md` §16.1 목록 동시 갱신.
   - `docs/design/threat-model.md` §3에 파일 op 진입점과 role 경로가, §4 B에 상태 경로 쓰기·경로 이탈·덮어쓰기·신뢰 등록이 권한 부여가 되는 위협 행이 핀 테스트와 함께 오른다.
+  - 안정성: M15가 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`), 지연 단언(복사 중 PTY echo p95)은 부하 없이 `-j 1`로 50회 연속 초록.
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 7.0~10.5ew. (a) ADR-0045 2.7~4.2(trust.toml role 키, 평가 단계 하나, `trust set-role`, acl show/check·doctor 변경, fixture 아홉) / (b) ADR-0029 4.3~6.3(2026-10-11 초안 3.3~5.0에 재귀 복사 1.0~1.3). 4ew를 넘으므로 (a)와 (b)를 순서대로 따로 닫아도 된다.
 
@@ -379,10 +380,10 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 
 | 항목 | 사전 고정 문서 | 만드는 마일스톤 | 선행 / 상태 |
 |---|---|---|---|
-| `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md`(사전 고정 `43da2fb`) | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12). 회차 미실행 |
+| `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md`(사전 고정 `43da2fb`) | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12). M15 Step 7(ADR-0045 `--peer-role`) 이후 트리는 ACL 단계가 `done`으로 끝나는 절차를 잰다. 회차 미실행 |
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`) | M12 (a) | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절). 회차 미실행 |
 | `cause` 분포 관측 기록 | 이슈 #10 본문과 2026-10-04T14:48Z 코멘트 | M11 (a) 빌드 | 기록됨, M13 (k) 착지 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md` | M13 (c) | PASS (2026-10-09 회차 1, v0.4.3, Debian 10 arm64 glibc 2.28, 에이전트가 네이티브 arm64 컨테이너에서 실행). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목 |
-| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃, M16 (a) `parse_ssh_bootstrap_line` | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
+| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line` | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
 | Windows client·host 확인 | `docs/campaigns/p1-windows.md`(M19가 사전 고정, M20이 host 회차를 더해 다시 고정) | M19·M20 | Windows 자산이 붙은 태그 |
 | Windows 서명·배포 준비 | ADR-0035 결정 16 | M19 | SSL.com 개인 인증서·신원 확인과 eSigner TOTP, 시크릿 `WINDOWS_SIGN_ESIGNER_*` 넷과 변수 `WINDOWS_SIGN_EXPECTED_SUBJECT`, scoop-bucket 저장소와 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출 |
