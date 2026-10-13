@@ -375,25 +375,26 @@ impl Policy {
 }
 
 impl Policy {
-    /// Every action the policy allows `principal` (authenticated via
-    /// `auth_path`) on an unowned resource, in [`Action::ALL`] order
-    /// (`acl show`, ADR-0025 decision 3). Runs [`Policy::decide`] once per
-    /// action rather than re-deriving the answer from the rules, so the
-    /// always-deny gate and every future evaluation step apply here
-    /// automatically. Because `scope = "owned"` only filters when a
-    /// resource has an owner, this set is a ceiling for owned resources.
-    ///
-    /// Rows only (no role input): `acl show` learns the role dimension with
-    /// PLAN M15 Step 6 (ADR-0045 결정 11).
+    /// Every action `principal` (authenticated via `auth_path`, carrying
+    /// `role`) may take on an unowned resource, in [`Action::ALL`] order
+    /// (`acl show`, ADR-0025 decision 3, ADR-0045 결정 11). Runs
+    /// [`Policy::decide`] once per action rather than re-deriving the answer
+    /// from the rules or the role table, so the always-deny gate, the role
+    /// stage and every future evaluation step apply here automatically. The
+    /// result is therefore the union of what `role` grants and what the
+    /// matching rows grant. Because `scope = "owned"` (rows) and the
+    /// `tunnel` role's owned axis only filter when a resource has an owner,
+    /// this set is a ceiling for owned resources.
     pub(crate) fn effective_actions(
         &self,
         principal: &Principal,
         auth_path: AuthPath,
+        role: Option<TrustRole>,
     ) -> Vec<Action> {
         Action::ALL
             .into_iter()
             .filter(|&action| {
-                self.decide(principal, auth_path, None, action, ResourceRef::unowned(""))
+                self.decide(principal, auth_path, role, action, ResourceRef::unowned(""))
                     .is_allow()
             })
             .collect()

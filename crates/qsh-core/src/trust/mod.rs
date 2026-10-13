@@ -744,6 +744,38 @@ impl TrustStore {
             .collect()
     }
 
+    /// The role a local query (`acl check`, `acl show`) evaluates for
+    /// `principal` (ADR-0045 결정 10·11), or `None` when the question has no
+    /// role: `principal` is not a `device:<name>`, the auth path is not
+    /// `pin`, or this store has no pin of that name. A pin without a `role`
+    /// key is `Some(TrustRole::None)`: it is judged exactly like `none`.
+    ///
+    /// A local query has no connection, so the pin's own fingerprint stands
+    /// in for the connection's and the grant goes through the same
+    /// [`role_of_pin`] enforcement uses; there is no second resolution.
+    pub(crate) fn query_role(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+    ) -> Option<TrustRole> {
+        let Principal::Device(name) = principal else {
+            return None;
+        };
+        if auth_path != AuthPath::Pin {
+            return None;
+        }
+        let peer = self.find(name)?;
+        let fingerprint = peer.fingerprint.parse::<Fingerprint>().ok()?;
+        let granted = role_of_pin(
+            &self.parsed_pin_roles(),
+            false,
+            principal,
+            auth_path,
+            Some(PeerFingerprint::new(*fingerprint.as_bytes())),
+        );
+        Some(granted.unwrap_or(TrustRole::None))
+    }
+
     /// CA roots as DER. Unparsable PEM is skipped with a `WARN`.
     fn parsed_cas(&self) -> Vec<CertificateDer<'static>> {
         self.cas

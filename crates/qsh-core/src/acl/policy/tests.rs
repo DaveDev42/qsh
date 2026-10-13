@@ -740,13 +740,18 @@ proptest! {
     /// independent model that never calls `decide`: the union of the
     /// `allow` patterns of every row whose principal and `auth_path` match,
     /// expanded over `Action::ALL`, minus the literal always-denied trio.
-    /// The resource is unowned, so `scope` is ignored.
+    /// The resource is unowned, so `scope` is ignored. The role dimension
+    /// (PLAN M15 Step 6, ADR-0045 결정 11) joins as a union: a role counts
+    /// only for a `device:` principal over `pin`, and grants what
+    /// [`oracle_role_row`] lists.
     #[test]
     fn effective_actions_equals_an_independent_model_over_arbitrary_policies(
         policy in arb_policy(),
         principal in arb_principal(),
         auth_path in arb_auth_path(),
+        role in arb_role(),
     ) {
+        let role_counts = auth_path == AuthPath::Pin && matches!(principal, Principal::Device(_));
         let principal_str = principal.to_string();
         let model: Vec<Action> = Action::ALL
             .into_iter()
@@ -757,14 +762,17 @@ proptest! {
                 )
             })
             .filter(|action| {
-                policy.rules.iter().any(|rule| {
+                let by_row = policy.rules.iter().any(|rule| {
                     rule.principal == principal_str
                         && rule.auth_path == auth_path
                         && rule.allow.iter().any(|p| expand(p).contains(action))
-                })
+                });
+                let by_role = role_counts
+                    && role.is_some_and(|role| oracle_role_row(role).0.contains(action));
+                by_row || by_role
             })
             .collect();
-        prop_assert_eq!(policy.effective_actions(&principal, auth_path), model);
+        prop_assert_eq!(policy.effective_actions(&principal, auth_path, role), model);
     }
 }
 
@@ -819,7 +827,7 @@ fn effective_actions_every_allowed_action_names_a_rule_index_in_matching_rules()
                 .into_iter()
                 .map(|(index, _)| index)
                 .collect();
-            for action in policy.effective_actions(&principal, auth_path) {
+            for action in policy.effective_actions(&principal, auth_path, None) {
                 let verdict = policy.decide(
                     &principal,
                     auth_path,

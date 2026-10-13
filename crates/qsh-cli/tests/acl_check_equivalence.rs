@@ -1050,3 +1050,387 @@ fn acl_show_human_output_carries_the_acl_restart_notice_byte_for_byte() {
         "the restart notice is prose and stays out of the JSON: {value}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The role dimension (PLAN M15 Step 6, ADR-0045 결정 10·11)
+//
+// ADR-0025 결정 3's three-way discipline, widened by the pin role: for a
+// pin carrying each role (and for a legacy pin with no `role` key), `acl
+// check`, `acl show`, the real op and the audit record must agree, with no
+// `acl.toml` (rows empty, only the role can grant) and with a row that adds
+// `session.list`.
+//
+// The real op column covers `exec.run`, `session.open` and `session.list`.
+// `forward.*` and `host.reverse` have no short-lived CLI producer (`qsh
+// tunnel open` runs until killed; `host.reverse` is a registration loop), so
+// those actions are covered by `acl check` against `acl show` and the
+// literal role table below, and by the enforcement tests in
+// `acl_enforcement.rs` and `qsh-core`'s `decide_agrees_with_naive_coverage_oracle`.
+// ---------------------------------------------------------------------------
+
+/// The role table of ADR-0045 결정 2, spelled out again here on purpose:
+/// never read from `qsh_core::acl::ROLE_GRANTS`, so a wrong row in the
+/// constant disagrees with this copy. `file.*` and `forward.socks` are left
+/// out because the always-deny gate answers them before any role.
+fn role_grants_literal(role: &str, action: &str) -> bool {
+    let granted: &[&str] = match role {
+        "full" => &[
+            "exec.run",
+            "session.open",
+            "session.list",
+            "session.attach",
+            "session.control",
+            "forward.local",
+            "forward.remote",
+            "host.reverse",
+        ],
+        "exec" => &[
+            "exec.run",
+            "session.open",
+            "session.list",
+            "session.attach",
+            "session.control",
+        ],
+        "tunnel" => &["forward.local", "forward.remote"],
+        "read-only" => &["session.list", "session.attach"],
+        "reverse" => &["host.reverse"],
+        "none" | "legacy" => &[],
+        other => panic!("unknown role row {other}"),
+    };
+    granted.contains(&action)
+}
+
+/// Pin `client_fp` on `host` as `CLIENT_ALIAS` with `role`. `"legacy"` is a
+/// pin written before ADR-0045: the `role` key is cut out of the file.
+fn pin_with_role(host: &Sandbox, client_fp: &str, role: &str) {
+    if role == "legacy" {
+        host.trust_add_with_role(CLIENT_ALIAS, None, client_fp, "none");
+        let path = host.config_dir().join("trust.toml");
+        let text = std::fs::read_to_string(&path).expect("read trust.toml");
+        let stripped: String = text
+            .lines()
+            .filter(|line| !line.starts_with("role = "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(!stripped.contains("role"), "{stripped}");
+        std::fs::write(&path, stripped).expect("write trust.toml");
+    } else {
+        host.trust_add_with_role(CLIENT_ALIAS, None, client_fp, role);
+    }
+}
+
+/// One row of the role table: a host whose pin of the client carries `role`,
+/// started once with no `acl.toml` and once with a row granting only
+/// `session.list`.
+fn role_row_agrees(role: &str) {
+    let expected_role = if role == "legacy" { "none" } else { role };
+    let ops: [(&str, &[&str]); 3] = [
+        ("exec.run", &["exec", HOST_ALIAS, "--json", "--", "true"]),
+        ("session.open", &["session", "open", HOST_ALIAS, "--json"]),
+        ("session.list", &["sessions", HOST_ALIAS, "--json"]),
+    ];
+    for with_row in [false, true] {
+        let host = Sandbox::new();
+        let client = Sandbox::new();
+        let host_fp = host.fingerprint();
+        let client_fp = client.fingerprint();
+        pin_with_role(&host, &client_fp, role);
+        if with_row {
+            write_acl_toml(
+                &host,
+                &format!(
+                    "[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"session.list\"]\n"
+                ),
+            );
+        }
+        let serve = ServeGuard::start_without_policy(&host, &[]);
+        client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
+        let label = format!("role {role}, row {with_row}");
+
+        for (action, args) in ops {
+            let (code, value) = client.json(args);
+            let data = acl_check(
+                &host,
+                CLIENT_PRINCIPAL,
+                action,
+                None,
+                Some("pin"),
+                None,
+                None,
+            );
+
+            // `acl check` against the literal table: the role grants it, or
+            // the one row does.
+            let by_role = role_grants_literal(role, action);
+            let by_row = with_row && action == "session.list";
+            let allowed = data["decision"] == "allow";
+            assert_eq!(allowed, by_role || by_row, "{label} {action}: {data}");
+            assert_eq!(data["role"], expected_role, "{label} {action}: {data}");
+            assert_eq!(
+                data["policy"]["state"],
+                if with_row { "loaded" } else { "missing" },
+                "{label} {action}: {data}"
+            );
+
+            // The real op agrees.
+            if allowed {
+                assert_eq!(code, 0, "{label} {action}: {value}");
+            } else {
+                assert_eq!(code, 255, "{label} {action}: {value}");
+                assert_eq!(value["error"]["code"], "PERMISSION_DENIED", "{value}");
+            }
+
+            // The audit record agrees on decision, rule and role. When a role
+            // and the row would both allow, the basis is the role.
+            let decision = if allowed { "allow" } else { "deny" };
+            let records = wait_for_audit(&host, &format!("{label}: {action} {decision}"), |r| {
+                r["action"] == action && r["decision"] == decision
+            });
+            let record = records
+                .iter()
+                .find(|r| r["action"] == action && r["decision"] == decision)
+                .expect("audit record");
+            if allowed {
+                let basis = if by_role { "role" } else { "acl" };
+                assert_eq!(data["granted_by"], basis, "{label} {action}: {data}");
+                if by_role {
+                    assert!(data.get("rule").is_none(), "{label} {action}: {data}");
+                    assert!(record["rule"].is_null(), "{label} {action}: {record}");
+                    assert_eq!(record["role"], expected_role, "{label} {action}: {record}");
+                } else {
+                    assert_eq!(data["rule"], 0, "{label} {action}: {data}");
+                    assert_eq!(record["rule"], 0, "{label} {action}: {record}");
+                    assert!(record.get("role").is_none(), "{label} {action}: {record}");
+                }
+            } else {
+                assert!(data.get("granted_by").is_none(), "{label} {action}: {data}");
+                assert!(record["rule"].is_null(), "{label} {action}: {record}");
+                assert!(record.get("role").is_none(), "{label} {action}: {record}");
+            }
+        }
+
+        // `acl show` against `acl check` for all eleven actions, and against
+        // the role table.
+        let shown = acl_show(&host, CLIENT_PRINCIPAL, Some("pin"));
+        assert_eq!(shown["role"], expected_role, "{label}: {shown}");
+        let table = qsh_core::acl::role_grant(expected_role.parse().expect("role name"));
+        let table: Vec<&str> = table.actions.iter().map(|a| a.as_str()).collect();
+        let role_actions: Vec<&str> = shown["role_actions"]
+            .as_array()
+            .expect("role_actions")
+            .iter()
+            .map(|v| v.as_str().expect("action string"))
+            .collect();
+        assert_eq!(role_actions, table, "{label}: {shown}");
+        let effective_set = effective(&shown);
+        for action in CoreAction::ALL {
+            let checked = acl_check(
+                &host,
+                CLIENT_PRINCIPAL,
+                action.as_str(),
+                None,
+                Some("pin"),
+                None,
+                None,
+            );
+            let allowed = checked["decision"] == "allow";
+            assert_eq!(
+                effective_set.iter().any(|a| a == action.as_str()),
+                allowed,
+                "{label} {}: show {effective_set:?} vs check {checked}",
+                action.as_str()
+            );
+            let literal = role_grants_literal(role, action.as_str())
+                || (with_row && action.as_str() == "session.list");
+            assert_eq!(allowed, literal, "{label} {}: {checked}", action.as_str());
+        }
+    }
+}
+
+macro_rules! role_row_tests {
+    ($($name:ident => $role:literal),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                role_row_agrees($role);
+            }
+        )*
+    };
+}
+
+role_row_tests! {
+    role_full_agrees_across_check_show_op_and_audit => "full",
+    role_exec_agrees_across_check_show_op_and_audit => "exec",
+    role_tunnel_agrees_across_check_show_op_and_audit => "tunnel",
+    role_read_only_agrees_across_check_show_op_and_audit => "read-only",
+    role_reverse_agrees_across_check_show_op_and_audit => "reverse",
+    role_none_agrees_across_check_show_op_and_audit => "none",
+    role_legacy_pin_agrees_across_check_show_op_and_audit => "legacy",
+}
+
+/// A `missing` policy is a policy with no rows: the role still grants, and
+/// `policy.loaded` stays `false`. An `invalid` one refuses role grants too,
+/// but the role is still reported so the operator sees what is being
+/// refused. `acl show` follows (ADR-0045 결정 6, 10, 11).
+#[test]
+fn missing_policy_keeps_role_grants_and_invalid_policy_refuses_them() {
+    let host = Sandbox::new();
+    pin_with_role(&host, &Sandbox::new().fingerprint(), "full");
+
+    let missing = acl_check(&host, CLIENT_PRINCIPAL, "exec.run", None, None, None, None);
+    assert_eq!(missing["decision"], "allow", "{missing}");
+    assert_eq!(missing["granted_by"], "role", "{missing}");
+    assert_eq!(missing["policy"]["loaded"], false, "{missing}");
+    assert_eq!(missing["policy"]["state"], "missing", "{missing}");
+    assert_eq!(missing["policy"]["rules"], 0, "{missing}");
+    let shown = acl_show(&host, CLIENT_PRINCIPAL, None);
+    assert_eq!(shown["policy"]["state"], "missing", "{shown}");
+    assert_eq!(shown["matching_rules"], serde_json::json!([]), "{shown}");
+    assert!(effective(&shown).iter().any(|a| a == "exec.run"), "{shown}");
+
+    write_acl_toml(&host, "not toml {{{");
+    let invalid = acl_check(&host, CLIENT_PRINCIPAL, "exec.run", None, None, None, None);
+    assert_eq!(invalid["decision"], "deny", "{invalid}");
+    assert!(invalid.get("granted_by").is_none(), "{invalid}");
+    assert_eq!(invalid["policy"]["loaded"], false, "{invalid}");
+    assert_eq!(invalid["policy"]["state"], "invalid", "{invalid}");
+    assert_eq!(invalid["role"], "full", "{invalid}");
+    let shown = acl_show(&host, CLIENT_PRINCIPAL, None);
+    assert_eq!(shown["policy"]["state"], "invalid", "{shown}");
+    assert!(effective(&shown).is_empty(), "{shown}");
+}
+
+/// The role is omitted whenever no pin role applies: a CA-path question, a
+/// `user:` or `fp:` principal, a name with no pin, and a `trust.toml` that
+/// does not parse (the state in which a running `qsh serve` grants no role).
+/// The rows alone then decide, with `granted_by: "acl"` when they allow.
+#[test]
+fn role_is_omitted_when_no_pin_role_applies() {
+    let host = Sandbox::new();
+    pin_with_role(&host, &Sandbox::new().fingerprint(), "full");
+    write_acl_toml(
+        &host,
+        "[[acl]]\nprincipal = \"device:laptop\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n\n\
+         [[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n",
+    );
+
+    // A CA-path question never reaches the role, even for a pinned name.
+    let ca = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "exec.run",
+        None,
+        Some("ca"),
+        None,
+        None,
+    );
+    assert!(ca.get("role").is_none(), "{ca}");
+    assert_eq!(ca["granted_by"], "acl", "{ca}");
+    let ca_denied = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "session.open",
+        None,
+        Some("ca"),
+        None,
+        None,
+    );
+    assert_eq!(ca_denied["decision"], "deny", "{ca_denied}");
+    let shown = acl_show(&host, CLIENT_PRINCIPAL, Some("ca"));
+    assert!(
+        shown.get("role").is_none() && shown.get("role_actions").is_none(),
+        "{shown}"
+    );
+    assert_eq!(effective(&shown), ["exec.run"], "{shown}");
+
+    // `user:` principals and unpinned names carry no role.
+    for principal in ["user:dave", "device:stranger"] {
+        let data = acl_check(&host, principal, "exec.run", None, None, None, None);
+        assert!(data.get("role").is_none(), "{principal}: {data}");
+    }
+    let stranger = acl_check(&host, "device:stranger", "exec.run", None, None, None, None);
+    assert_eq!(stranger["decision"], "deny", "{stranger}");
+    let user = acl_check(&host, "user:dave", "exec.run", None, None, None, None);
+    assert_eq!(user["granted_by"], "acl", "{user}");
+
+    // An unparseable trust.toml: no role, rows unaffected.
+    std::fs::write(
+        host.config_dir().join("trust.toml"),
+        "[[peer]]\nname = \"laptop\"\nfingerprint = \"sha256:AAAA\"\naddress = \"\"\n\
+         added_at = \"t\"\nrole = \"no-such-role\"\n",
+    )
+    .expect("write trust.toml");
+    let broken = acl_check(&host, CLIENT_PRINCIPAL, "exec.run", None, None, None, None);
+    assert!(broken.get("role").is_none(), "{broken}");
+    assert_eq!(broken["decision"], "deny", "{broken}");
+}
+
+/// A tunnel-role pin is `owned`-axis: `acl check` with an owner that is
+/// someone else denies `forward.remote`, with the pin's own principal as
+/// owner allows it (the same rule `decide` applies to enforcement).
+#[test]
+fn tunnel_role_honors_the_owner_axis_in_acl_check() {
+    let host = Sandbox::new();
+    pin_with_role(&host, &Sandbox::new().fingerprint(), "tunnel");
+    let own = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "forward.remote",
+        Some("127.0.0.1:1"),
+        None,
+        Some(CLIENT_PRINCIPAL),
+        None,
+    );
+    assert_eq!(own["decision"], "allow", "{own}");
+    assert_eq!(own["granted_by"], "role", "{own}");
+    let other = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "forward.remote",
+        Some("127.0.0.1:1"),
+        None,
+        Some("device:someone-else"),
+        None,
+    );
+    assert_eq!(other["decision"], "deny", "{other}");
+}
+
+/// Human output (ADR-0045 결정 11): `acl check` names a role basis, and
+/// `acl show` leads with the role and states the asymmetry between roles
+/// (next request) and rows (restart), the latter as `ACL_RESTART_NOTICE`.
+#[test]
+fn human_output_names_the_role_and_the_role_versus_row_asymmetry() {
+    let host = Sandbox::new();
+    pin_with_role(&host, &Sandbox::new().fingerprint(), "exec");
+
+    let output = host.qsh(&[
+        "acl",
+        "check",
+        "--principal",
+        CLIENT_PRINCIPAL,
+        "--action",
+        "exec.run",
+    ]);
+    assert_eq!(common::exit_code(&output), 0);
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert_eq!(stdout.trim_end(), "allow (role exec)", "{stdout}");
+
+    let output = host.qsh(&["acl", "show", "--principal", CLIENT_PRINCIPAL]);
+    assert_eq!(common::exit_code(&output), 0);
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].starts_with("principal: device:laptop"), "{stdout}");
+    assert!(
+        lines[1].starts_with("role: exec (exec.run, session.open"),
+        "the role line comes first: {stdout}"
+    );
+    let role_note = lines
+        .iter()
+        .position(|line| line.contains("a role change takes effect on the next request"))
+        .unwrap_or_else(|| panic!("no role-reload line: {stdout}"));
+    let row_note = lines
+        .iter()
+        .position(|line| *line == ACL_RESTART_NOTICE)
+        .unwrap_or_else(|| panic!("no restart notice line: {stdout}"));
+    assert!(role_note < row_note, "{stdout}");
+}

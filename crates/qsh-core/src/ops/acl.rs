@@ -14,6 +14,16 @@
 //! own doc on that method spells out the three-call-site invariant this
 //! relies on). No remote round trip, no re-implementation of `Policy::
 //! decide`'s matching logic.
+//!
+//! **The trust role is an input here too** (ADR-0045 결정 10·11, PLAN M15
+//! Step 6). For a `device:<name>` principal over `--auth-path pin`, the
+//! pin of that name in this machine's `trust.toml` supplies the role, and
+//! its own fingerprint stands in for the connection's (a local query has no
+//! connection). The role goes into the same `Policy::decide` as an explicit
+//! argument, so the role stage ⓡ cannot differ from enforcement. A
+//! `trust.toml` that does not parse yields no role, the same answer a
+//! running `qsh serve` gives while its role grants are suspended (ADR-0045
+//! 결정 4).
 
 use std::str::FromStr;
 
@@ -23,9 +33,11 @@ use qsh_proto::{
 use qsh_transport::{AuthPath, Principal};
 
 use crate::acl::{
-    Action, ActionPattern, Decision, PolicyLoad, PolicySource, ResourceRef, Scope, opener_key,
+    Action, ActionPattern, GrantBasis, Policy, PolicyLoad, PolicySource, ResourceRef, Scope,
+    Verdict, opener_key, role_grant,
 };
 use crate::ops::{OpError, Operation, Ops};
+use crate::trust::{TrustRole, TrustStore};
 
 /// The `acl.check` operation (`qsh acl check`).
 pub struct AclCheckOp;
@@ -81,7 +93,43 @@ fn parse_principal(s: &str) -> Result<Principal, OpError> {
     Principal::from_str(s).map_err(|err| OpError::new(ErrorCode::InvalidArgument, err.to_string()))
 }
 
+/// The `state` strings of [`AclPolicyRef`] (ADR-0045 결정 10).
+const STATE_LOADED: &str = "loaded";
+const STATE_MISSING: &str = "missing";
+const STATE_INVALID: &str = "invalid";
+
+fn policy_ref(path: String, rules: u32, state: &str) -> AclPolicyRef {
+    AclPolicyRef {
+        path,
+        rules,
+        loaded: state == STATE_LOADED,
+        state: Some(state.to_string()),
+    }
+}
+
 impl Ops {
+    /// The role a local query evaluates for `principal` over `auth_path`
+    /// (ADR-0045 결정 10·11): see the module doc. `None` means "no role in
+    /// the question"; a pin with no `role` key is `Some(TrustRole::None)`.
+    fn query_role(&self, principal: &Principal, auth_path: AuthPath) -> Option<TrustRole> {
+        match TrustStore::load(&self.paths.trust_file()) {
+            Ok(store) => store.query_role(principal, auth_path),
+            Err(_) => None,
+        }
+    }
+
+    /// This machine's `acl.toml` as the rows a decision runs over, plus its
+    /// [`AclPolicyRef::state`] (ADR-0045 결정 6): `Some(rows)` when loaded,
+    /// `Some(no rows)` when the file is missing (only a role can grant), and
+    /// `None` when it is unusable (everything is refused, roles included).
+    fn load_rows(&self) -> (Option<Policy>, &'static str) {
+        match PolicySource::load(&self.paths) {
+            PolicyLoad::Loaded(policy) => (Some(policy), STATE_LOADED),
+            PolicyLoad::Missing => (Some(Policy::default()), STATE_MISSING),
+            PolicyLoad::Invalid(_) => (None, STATE_INVALID),
+        }
+    }
+
     /// `acl.check` (`qsh acl check`, `docs/CLI.md` §6.15). Local,
     /// authorization-free (§2.5) — reads this machine's own `acl.toml` and
     /// evaluates it directly; never touches the network.
@@ -139,47 +187,39 @@ impl Ops {
             None => ResourceRef::unowned(resource_id),
         };
 
-        let path = self.paths.acl_file();
-        let (decision, rule, policy) = match PolicySource::load(&self.paths) {
-            PolicyLoad::Loaded(policy) => {
-                // Rows only: the role input (ADR-0045 결정 10) arrives with
-                // PLAN M15 Step 6; until then this answers "what do the rows
-                // say", which is the whole answer for a pin with no role.
-                let verdict = policy.decide(&principal, auth_path, None, action, resource);
-                let rules = u32::try_from(policy.rules.len()).expect(
-                    "rule count fits u32: crate::acl::load bounds rule count far below u32::MAX",
-                );
-                (
-                    verdict.decision,
-                    verdict.rule,
-                    AclPolicyRef {
-                        path: path.display().to_string(),
-                        rules,
-                        loaded: true,
-                    },
-                )
-            }
-            PolicyLoad::Missing | PolicyLoad::Invalid(_) => (
-                Decision::Deny,
-                None,
-                AclPolicyRef {
-                    path: path.display().to_string(),
-                    rules: 0,
-                    loaded: false,
-                },
-            ),
+        let role = self.query_role(&principal, auth_path);
+        let path = self.paths.acl_file().display().to_string();
+        let (rows, state) = self.load_rows();
+        // One `decide` call for every state: an unusable file yields no
+        // `Policy` and refuses everything, role grants included.
+        let verdict = match &rows {
+            Some(policy) => policy.decide(&principal, auth_path, role, action, resource),
+            None => Verdict::DENY,
         };
+        let rule_count = rows.as_ref().map_or(0, |policy| policy.rules.len());
+        let rule_count = u32::try_from(rule_count)
+            .expect("rule count fits u32: crate::acl::load bounds rule count far below u32::MAX");
+        let policy = policy_ref(path, rule_count, state);
+        let granted_by = verdict.granted_by().map(|basis| {
+            match basis {
+                GrantBasis::Role(_) => "role",
+                GrantBasis::Rule(_) => "acl",
+            }
+            .to_string()
+        });
 
         Ok(AclCheckData {
             principal: principal.to_string(),
             action: action.as_str().to_string(),
             resource: req.resource,
             auth_path: Some(auth_path_str(auth_path).to_string()),
-            decision: decision.as_str().to_string(),
-            rule,
+            decision: verdict.decision.as_str().to_string(),
+            rule: verdict.rule,
             policy,
             owner: req.owner,
             owner_auth_path: owner_ap.map(auth_path_str).map(str::to_string),
+            role: role.map(|role| role.as_str().to_string()),
+            granted_by,
         })
     }
 
@@ -190,10 +230,16 @@ impl Ops {
     ///
     /// The effective set comes from `crate::acl::Policy::effective_actions`,
     /// which runs the production `decide` once per action on an unowned
-    /// resource, and the matching rows from `Policy::matching_rules`, which
-    /// shares `decide`'s step 2 and 3 helpers. A missing, unparseable or
-    /// unreadable `acl.toml` is `PolicyLoad::Missing`/`Invalid`: both give
-    /// `loaded: false` with empty results and echo no rule content.
+    /// resource with the principal's pin role as an input, so it is the
+    /// union of the role and the matching rows (ADR-0045 결정 11); the
+    /// matching rows from `Policy::matching_rules`, which shares `decide`'s
+    /// step 2 and 3 helpers. `role` and `role_actions` (the role's table
+    /// row) are echoed when the principal has a pin role to evaluate.
+    /// A missing `acl.toml` is a policy with no rows: `loaded: false`,
+    /// `state: "missing"`, no matching rows, and the effective set is what
+    /// the role alone grants. An unparseable or unreadable one is
+    /// `state: "invalid"` with empty results (role grants are refused too)
+    /// and echoes no rule content.
     /// A malformed principal or an `auth_path` other than `pin`/`ca` is
     /// `INVALID_ARGUMENT`, like `acl.check`.
     pub fn acl_show(&self, req: AclShowReq) -> Result<AclShowData, OpError> {
@@ -203,13 +249,11 @@ impl Ops {
             None => (AuthPath::Pin, true),
         };
 
+        let role = self.query_role(&principal, auth_path);
         let path = self.paths.acl_file().display().to_string();
-        let (policy_ref, matching_rules, effective_actions) = match PolicySource::load(&self.paths)
-        {
-            PolicyLoad::Loaded(policy) => {
-                let rules = u32::try_from(policy.rules.len()).expect(
-                    "rule count fits u32: crate::acl::load bounds rule count far below u32::MAX",
-                );
+        let (rows, state) = self.load_rows();
+        let (matching_rules, effective_actions, rule_count) = match &rows {
+            Some(policy) => {
                 let matching = policy
                     .matching_rules(&principal, auth_path)
                     .into_iter()
@@ -225,38 +269,35 @@ impl Ops {
                     })
                     .collect();
                 let effective = policy
-                    .effective_actions(&principal, auth_path)
+                    .effective_actions(&principal, auth_path, role)
                     .into_iter()
                     .map(|a| a.as_str().to_string())
                     .collect();
-                (
-                    AclPolicyRef {
-                        path,
-                        rules,
-                        loaded: true,
-                    },
-                    matching,
-                    effective,
-                )
+                (matching, effective, policy.rules.len())
             }
-            PolicyLoad::Missing | PolicyLoad::Invalid(_) => (
-                AclPolicyRef {
-                    path,
-                    rules: 0,
-                    loaded: false,
-                },
-                Vec::new(),
-                Vec::new(),
-            ),
+            // An unusable file refuses everything, role grants included.
+            None => (Vec::new(), Vec::new(), 0),
         };
+        let rule_count = u32::try_from(rule_count)
+            .expect("rule count fits u32: crate::acl::load bounds rule count far below u32::MAX");
+        let policy = policy_ref(path, rule_count, state);
+        let role_actions = role.map(|role| {
+            role_grant(role)
+                .actions
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect()
+        });
 
         Ok(AclShowData {
             principal: principal.to_string(),
             auth_path: auth_path_str(auth_path).to_string(),
             auth_path_defaulted,
-            policy: policy_ref,
+            policy,
             matching_rules,
             effective_actions,
+            role: role.map(|role| role.as_str().to_string()),
+            role_actions,
         })
     }
 }

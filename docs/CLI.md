@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, ADR-0045, §6.11·§6.12·§6.13; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.26 (trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.19; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -1298,7 +1298,7 @@ supervisor는 stderr에 tracing target `qsh::tunnel::supervise`의 한 줄 JSON 
 qsh acl check --principal <principal> --action <action> [--resource <resource>] [--auth-path pin|ca] [--owner <principal>] [--owner-auth-path pin|ca] --json
 ```
 
-`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`)가 실제로 강제하는 것과 **같은 평가기**를 호출하므로) 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다. 이 예측에는 한계가 둘 있다. `policy.loaded: false`는 파일이 아예 없는 경우와 파싱에 실패한 경우를 구별하지 않으며, 파싱 실패의 상세(어떤 rule의 어떤 토큰이 문제였는지)는 `acl check`가 아니라 §6.12·§6.13의 시작 진단이 정본이다 — `acl check` 자신은 그 상세를 출력하지 않는다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서, audit 기록 자체가 실패하면 `allow` 판정이 `deny`로 뒤집히고 세션 소유자 조회가 실패해도 `deny`로 처리된다(`crates/qsh-core/src/server/mod.rs`) — 그래서 `acl check`의 `allow` 예측은 실제 운영 상태에 따라 `deny`로 뒤집힐 수 있지만, `deny` 예측이 `allow`로 뒤집히는 일은 없다.
+`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`)가 실제로 강제하는 것과 **같은 평가기**를 호출하므로) 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다. 이 예측에는 한계가 둘 있다. `policy.state`는 파일이 없는 경우(`missing`)와 읽을 수 없거나 파싱에 실패한 경우(`invalid`)를 가르지만, 파싱 실패의 상세(어떤 rule의 어떤 토큰이 문제였는지)는 `acl check`가 아니라 §6.12·§6.13의 시작 진단이 정본이다 — `acl check` 자신은 그 상세를 출력하지 않는다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서, audit 기록 자체가 실패하면 `allow` 판정이 `deny`로 뒤집히고 세션 소유자 조회가 실패해도 `deny`로 처리된다(`crates/qsh-core/src/server/mod.rs`) — 그래서 `acl check`의 `allow` 예측은 실제 운영 상태에 따라 `deny`로 뒤집힐 수 있지만, `deny` 예측이 `allow`로 뒤집히는 일은 없다.
 
 인자:
 
@@ -1324,18 +1324,38 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
     "auth_path": "pin",
     "decision": "allow",
     "rule": 0,
+    "granted_by": "acl",
     "policy": {
       "path": "/Users/dave/.config/qsh/acl.toml",
       "rules": 2,
-      "loaded": true
+      "loaded": true,
+      "state": "loaded"
     }
   }
 }
 ```
 
-`decision`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"allow"`/`"deny"`다. `rule`은 매칭된 정책 행의 배열 index이며, 아무 행도 매칭하지 않았거나(항상 `"deny"`를 동반) 정책이 로드되지 않은 경우 `null`이 아니라 필드 자체가 나타나지 않는다(`owner`/`owner_auth_path` 생략과 같은 규율 — `qsh.cli/v1`은 additive-only, `CLAUDE.md`). `policy.loaded: false`는 `acl.toml`이 없거나 파싱에 실패한 상태를 그대로 보여준다 — 그 상태에서는 `decision`이 항상 `"deny"`다(§6.12·§6.13의 정책 파일 진단). `qsh acl check`는 이 상태를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 "정책 없음"일 뿐이다. `owner`/`owner_auth_path`(additive)는 `--owner`/`--owner-auth-path`를 그대로 echo하며, 둘 다 생략됐을 때는 필드 자체가 나타나지 않는다(`qsh.cli/v1`은 additive-only, `CLAUDE.md`).
+`decision`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"allow"`/`"deny"`다. `rule`은 매칭된 정책 행의 배열 index이며, 아무 행도 매칭하지 않았거나(항상 `"deny"`를 동반), 정책이 로드되지 않았거나, 판정 근거가 role인 경우 `null`이 아니라 필드 자체가 나타나지 않는다(`owner`/`owner_auth_path` 생략과 같은 규율 — `qsh.cli/v1`은 additive-only, `CLAUDE.md`). `policy.loaded`는 `acl.toml`이 행으로 로드됐는지만 말하고, 그 상태의 뜻은 `policy.state`(열린 문자열)가 가른다.
 
-`--principal`/`--action`이 잘못된 모양이 아닌 한 `acl.check` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 한 줄 요약(`allow`/`deny` + 근거 rule index 또는 "no policy loaded")이다.
+| `policy.state` | `loaded` | 판정 |
+|---|---|---|
+| `loaded` | `true` | role과 행의 합집합 |
+| `missing` | `false` | 행 없는 정책으로 친다. role만 허용할 수 있다 |
+| `invalid` | `false` | 모든 요청이 `"deny"`다. role grant도 거부한다 |
+
+`qsh acl check`는 `missing`·`invalid`를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 그 상태일 뿐이다(§6.12·§6.13의 정책 파일 진단).
+
+`owner`/`owner_auth_path`(additive)는 `--owner`/`--owner-auth-path`를 그대로 echo하며, 둘 다 생략됐을 때는 필드 자체가 나타나지 않는다(`qsh.cli/v1`은 additive-only, `CLAUDE.md`).
+
+**role 차원(ADR-0045 결정 10).** `acl check`는 enforcement와 같은 role 해석을 한다. principal이 `device:<name>`이고 `--auth-path`가 `pin`(기본값)이면 이 머신의 `trust.toml`에서 그 이름의 pin을 찾아 그 pin의 role로 평가 단계 ⓡ(§6.11의 role 표)을 돈다. 로컬 질의라 연결 fingerprint가 없으므로 pin 자신의 fingerprint를 쓴다. `data`에 optional 필드가 셋 는다.
+
+- `role`: 평가에 쓴 role(`full` | `exec` | `tunnel` | `read-only` | `reverse` | `none`, 열린 문자열). `role` 키가 없는 pin(ADR-0045 이전의 pin)은 `none`과 똑같이 판정되므로 `"none"`으로 나온다. 그 이름의 pin이 없거나, 경로가 `ca`이거나, principal이 `device:`가 아니거나, `trust.toml`을 파싱할 수 없으면 필드가 생략된다. 마지막 경우는 돌고 있는 `qsh serve`가 role grant를 멈추는 상태와 같은 답이다(§6.12). `policy.state`가 `invalid`여도 pin의 role은 그대로 나오지만 판정은 `"deny"`다.
+- `granted_by`: `"role"` | `"acl"`. `decision`이 `"allow"`일 때만 나온다. role과 행이 둘 다 허용할 수 있으면 `"role"`이다. 순서를 고정해야 audit 레코드와 이 출력이 같은 근거를 말한다. `"role"`이면 `rule`이 없고, `"acl"`이면 `rule`이 행 index다.
+- `policy.state`: 위 표.
+
+"가정한 role로 판정해 보기"에 해당하는 `--role` 플래그는 없다. 지금의 role은 `qsh trust list`가, role별 action은 §6.11의 표와 `acl show`(§6.19)가 보여 준다. role은 판정마다 `trust.toml`에서 읽으므로 `qsh trust set-role`의 결과는 재시작 없이 이 출력에 바로 나타나고, 돌고 있는 `qsh serve`/`qsh listen`도 다음 요청부터 같은 답을 낸다.
+
+`--principal`/`--action`이 잘못된 모양이 아닌 한 `acl.check` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 한 줄 요약(`allow`/`deny` + 근거 `role <role>` 또는 `rule <index>`, 근거 없는 `deny`이고 `policy.loaded`가 `false`이면 "no policy loaded")이다.
 
 ### 6.16 `qsh cert` — private CA
 
@@ -1607,7 +1627,8 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
     "policy": {
       "path": "/Users/dave/.config/qsh/acl.toml",
       "rules": 2,
-      "loaded": true
+      "loaded": true,
+      "state": "loaded"
     },
     "matching_rules": [
       { "index": 0, "allow": ["forward.*", "session.open"], "auth_path": "pin", "scope": "owned" },
@@ -1619,15 +1640,23 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
 ```
 
 - `matching_rules`는 principal 정확 일치와 `auth_path` 일치(평가 순서 ②)를 통과하고 action 패턴이 어휘의 어떤 action이든 덮는(③) 행을 파일 순서로 담는다. 행마다 `index`(`acl.toml`의 배열 index, `acl check`의 `rule`과 같은 값), `allow`(패턴을 적힌 그대로. `exec.run` 같은 exact와 `forward.*` 같은 family 둘 다), `auth_path`(적지 않은 행은 `"pin"`), `scope`(`"owned"` | `"any"`, 열린 문자열)를 낸다. 매칭 판정은 `decide`와 같은 helper를 쓰고 두 번째 구현이 없다.
-- `effective_actions`는 `Action::ALL` 11종마다 enforcement가 쓰는 평가기(`Policy::decide`)를 소유자 없는 리소스로 불러 allow가 난 action만 어휘 순서로 모은 것이다. 그래서 `acl check`가 같은 정책 아래 action마다 내는 판정과 어긋나지 않는다.
+- `role`(optional)과 `role_actions`(optional)는 principal의 pin role과 그 role이 주는 action이다(ADR-0045 결정 11). 해석은 `acl check`(§6.15)와 같다. principal이 `device:<name>`이고 경로가 `pin`이면 이 머신의 `trust.toml`에서 그 이름의 pin을 찾고, `role` 키가 없는 pin은 `"none"`으로 나온다. 그 이름의 pin이 없거나 경로가 `ca`이거나 `trust.toml`을 파싱할 수 없으면 두 필드가 모두 생략된다. `role_actions`는 §6.11 role 표의 그 role 행을 표 순서 그대로 담는다. 항상-deny action(`file.read`, `file.write`)이 표에 있어도 담는다. 그 action은 `effective_actions`에 나오지 않는다. `role`이 `none`이면 `role_actions`는 빈 배열이다.
+- `effective_actions`는 `Action::ALL` 11종마다 enforcement가 쓰는 평가기(`Policy::decide`)를 role을 입력으로 줘서 소유자 없는 리소스로 불러 allow가 난 action만 어휘 순서로 모은 것이다. 그래서 role이 주는 action과 매칭 행이 주는 action의 합집합이고, `acl check`가 같은 정책 아래 action마다 내는 판정과 어긋나지 않는다. 합집합은 이 필드의 원래 뜻("이 principal이 지금 할 수 있는 것")을 따른 것이다. `matching_rules`는 행만 담는다.
 - 항상-deny action(`forward.socks`, `file.read`, `file.write`)은 어떤 행이 적어도(`forward.*`, `file.*` 같은 family 패턴 포함) 이 집합에 나오지 않는다. 평가기가 규칙보다 먼저 막기 때문이다. 그런 행은 `matching_rules`에는 나타난다.
 - 소유자 없는 리소스를 가정한 집합이므로, `scope = "owned"` 행은 소유된 리소스(열린 세션 등)에서 이 집합의 부분집합만 허용한다. 소유된 리소스에 대해 이 집합은 **상한**이다. 이 사실은 산문이라 JSON에 싣지 않고 human 출력과 이 문장이 맡는다.
 - `auth_path`를 적지 않은 `[[acl]]` 행은 `"pin"`을 받아 CA로 인증한 peer에게 매칭되지 않는다. `--auth-path`를 생략하면 `"pin"`으로 평가한다는 사실과 함께 human 출력이 고지하고, JSON에서는 `auth_path_defaulted: true`가 같은 사실을 구조로 싣는다(ADR-0025 결정 5).
+- role과 행은 반영 시점이 다르다. role은 판정마다 `trust.toml`에서 읽으므로 `qsh trust set-role`과 `qsh trust remove`는 돌고 있는 `qsh serve`/`qsh listen`에 다음 요청부터 반영된다(재시작 불필요). 행은 아래 문단대로 재시작이 필요하다. human 출력은 role 줄을 principal 줄 바로 다음에 내고, 이 비대칭을 두 줄로 나눠 적는다(role 쪽은 "a role change takes effect on the next request, without a restart.", 행 쪽은 아래 `ACL_RESTART_NOTICE`).
 - `acl.toml`은 프로세스 시작 시 한 번만 읽힌다. 이 명령은 호출마다 파일을 읽으므로 방금 고친 행도 보이지만 돌고 있는 `qsh serve`/`qsh listen`은 아직 모른다. human 출력은 이 사실을 `ACL_RESTART_NOTICE` 상수(`restart serve/listen — acl.toml is only read once at process start.`)를 바이트 그대로 한 줄로 찍어 알린다. 같은 상수를 doctor의 `acl_principal_unmatched`·`acl_ca_auth_path_missing` remedy가 꼬리로 쓴다(ADR-0025 결정 6). 이 문장은 산문이라 JSON에 싣지 않는다. 싣으면 append-only fixture가 문면을 `qsh.cli/v1`로 얼린다.
 
-`policy.loaded: false`는 `acl.toml`이 없거나, 파싱에 실패했거나, 권한 때문에 읽지 못한 상태를 구별 없이 나타낸다. 이 상태에서 `matching_rules`와 `effective_actions`는 빈 배열이고 규칙 내용은 한 줄도 나오지 않는다. `acl show`는 이 상태를 오류로 만들지 않는다. 조회는 성공했고(`ok: true`, exit `0`) 조회된 사실이 "정책 없음"일 뿐이다. 파싱 실패의 상세는 §6.12·§6.13의 시작 진단이 정본이다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서(§6.15) `effective_actions`에 든 action이 운영 상태에 따라 실제로는 거부될 수 있다. 반대 방향, 즉 이 명령이 빼먹은 action이 실제로 허용되는 일은 없다.
+`policy.state`(열린 문자열)는 `acl.toml`의 상태를 셋으로 가른다. 뜻은 `acl check`(§6.15)의 표와 같다.
 
-`--principal`이나 `--auth-path`가 잘못된 모양이 아닌 한 `acl.show` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 principal 한 줄, 매칭 행 목록(또는 "no policy loaded"), 실효 action 한 줄, 그 뒤 고지 줄들이다.
+- `loaded`: 행과 role의 합집합.
+- `missing`(`loaded: false`): 파일이 없다. 행 없는 정책으로 치므로 `matching_rules`는 빈 배열이고 `effective_actions`는 role이 주는 action이다.
+- `invalid`(`loaded: false`): 파싱에 실패했거나 권한 때문에 읽지 못했다. `matching_rules`와 `effective_actions`가 모두 빈 배열이고 규칙 내용은 한 줄도 나오지 않는다. role grant까지 거부하므로 `role_actions`가 있어도 `effective_actions`는 비어 있다.
+
+`acl show`는 어느 상태도 오류로 만들지 않는다. 조회는 성공했고(`ok: true`, exit `0`) 조회된 사실이 그 상태일 뿐이다. 파싱 실패의 상세는 §6.12·§6.13의 시작 진단이 정본이다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서(§6.15) `effective_actions`에 든 action이 운영 상태에 따라 실제로는 거부될 수 있다. 반대 방향, 즉 이 명령이 빼먹은 action이 실제로 허용되는 일은 없다.
+
+`--principal`이나 `--auth-path`가 잘못된 모양이 아닌 한 `acl.show` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 principal 한 줄, role 한 줄, 매칭 행 목록(또는 정책 상태를 말하는 한 줄), 실효 action 한 줄, 그 뒤 고지 줄들이다.
 
 ### 6.20 `qsh setup`
 

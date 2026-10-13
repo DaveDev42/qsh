@@ -159,6 +159,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.check.deny.json",
     "acl.show.json",
     "acl.show.no_policy.json",
+    "acl.check.allow_by_role.json",
+    "acl.check.missing_policy_role.json",
+    "acl.show.with_role.json",
     "error.RESOURCE_EXHAUSTED.json",
     "service.install.json",
     "service.status.json",
@@ -211,19 +214,28 @@ fn check(name: &str, envelope: Value) {
     );
 }
 
-/// Drop every `role` and `assigned_role` key, at any depth. ADR-0045 added
-/// both as optional fields, and the role-writing commands now always fill
-/// them (`trust add` writes `none` or `full`, an invite carries its role),
-/// so the fixtures that predate roles stay byte-for-byte untouched and are
-/// compared with those two keys removed from both sides. The role-bearing
-/// shapes have their own fixtures (`trust.list.with_role.json`,
+/// Drop every key ADR-0045 added as an optional field, at any depth: `role`
+/// and `assigned_role` (the trust commands and `acl check`/`acl show`),
+/// `granted_by` and `role_actions` (`acl check`/`acl show`), and the `state`
+/// of a `policy` object (`AclPolicyRef.state`). The role-writing commands
+/// now always fill the first two (`trust add` writes `none` or `full`, an
+/// invite carries its role) and the ACL queries always fill the rest, so the
+/// fixtures that predate roles stay byte-for-byte untouched and are compared
+/// with those keys removed from both sides. The role-bearing shapes have
+/// their own fixtures (`trust.list.with_role.json`,
 /// `trust.add.with_role.json`, `trust.invite.with_role.json`,
-/// `trust.accept.with_role.json`, `trust.set_role*.json`) that compare in full.
+/// `trust.accept.with_role.json`, `trust.set_role*.json`,
+/// `acl.check.allow_by_role.json`, `acl.check.missing_policy_role.json`,
+/// `acl.show.with_role.json`) that compare in full.
 fn strip_role_keys(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            map.remove("role");
-            map.remove("assigned_role");
+            for key in ["role", "assigned_role", "granted_by", "role_actions"] {
+                map.remove(key);
+            }
+            if let Some(Value::Object(policy)) = map.get_mut("policy") {
+                policy.remove("state");
+            }
             map.values_mut().for_each(strip_role_keys);
         }
         Value::Array(items) => items.iter_mut().for_each(strip_role_keys),
@@ -538,7 +550,7 @@ fn golden_local_fixtures() {
     ]);
     assert_eq!(code, 0, "{allow}");
     assert_eq!(allow["data"]["decision"], "allow", "{allow}");
-    check("acl.check.allow.json", allow);
+    check_without_roles("acl.check.allow.json", allow);
 
     let (code, deny) = acl_sandbox.json(&[
         "acl",
@@ -553,7 +565,7 @@ fn golden_local_fixtures() {
     ]);
     assert_eq!(code, 0, "{deny}");
     assert_eq!(deny["data"]["decision"], "deny", "{deny}");
-    check("acl.check.deny.json", deny);
+    check_without_roles("acl.check.deny.json", deny);
 }
 
 /// `acl show` (`docs/CLI.md` §6.19, ADR-0025): local, needs no identity, so
@@ -583,13 +595,106 @@ fn golden_acl_show_fixtures() {
         ]),
         "{show}"
     );
-    check("acl.show.json", show);
+    check_without_roles("acl.show.json", show);
 
     let none = Sandbox::new();
     let (code, no_policy) = none.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
     assert_eq!(code, 0, "{no_policy}");
     assert_eq!(no_policy["data"]["policy"]["loaded"], false, "{no_policy}");
-    check("acl.show.no_policy.json", no_policy);
+    check_without_roles("acl.show.no_policy.json", no_policy);
+}
+
+/// The role dimension of `acl check` and `acl show` (ADR-0045 결정 10·11,
+/// `docs/CLI.md` §6.15·§6.19). Own sandboxes with a hand-written
+/// `trust.toml` (the role-writing commands are not what is under test), so
+/// the legacy `acl.*` goldens above stay untouched.
+#[test]
+fn golden_acl_role_fixtures() {
+    let write_trust = |sandbox: &Sandbox, role: &str| {
+        std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
+        std::fs::write(
+            sandbox.config_dir().join("trust.toml"),
+            format!(
+                "[[peer]]\n\
+                 name = \"laptop\"\n\
+                 fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+                 address = \"\"\n\
+                 added_at = \"2026-10-12T00:00:00Z\"\n\
+                 role = \"{role}\"\n"
+            ),
+        )
+        .expect("write trust.toml fixture");
+    };
+
+    // A loaded policy with a row for someone else: the allow rests on the
+    // role alone.
+    let by_role = Sandbox::new();
+    write_trust(&by_role, "exec");
+    std::fs::write(
+        by_role.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:other\"\nallow = [\"session.open\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+    let (code, allow) = by_role.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:laptop",
+        "--action",
+        "exec.run",
+        "--resource",
+        "exec",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{allow}");
+    assert_eq!(allow["data"]["granted_by"], "role", "{allow}");
+    assert_eq!(allow["data"]["role"], "exec", "{allow}");
+    assert!(allow["data"].get("rule").is_none(), "{allow}");
+    check("acl.check.allow_by_role.json", allow);
+
+    // No acl.toml at all: a policy with no rows, so the role still grants.
+    let missing = Sandbox::new();
+    write_trust(&missing, "full");
+    let (code, allow) = missing.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:laptop",
+        "--action",
+        "session.open",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{allow}");
+    assert_eq!(allow["data"]["decision"], "allow", "{allow}");
+    assert_eq!(allow["data"]["policy"]["state"], "missing", "{allow}");
+    assert_eq!(allow["data"]["policy"]["loaded"], false, "{allow}");
+    check("acl.check.missing_policy_role.json", allow);
+
+    // `acl show`: role first, then the union with a row.
+    let show = Sandbox::new();
+    write_trust(&show, "exec");
+    std::fs::write(
+        show.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"forward.*\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+    let (code, shown) = show.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(shown["data"]["role"], "exec", "{shown}");
+    assert_eq!(
+        shown["data"]["effective_actions"],
+        serde_json::json!([
+            "exec.run",
+            "session.open",
+            "session.list",
+            "session.attach",
+            "session.control",
+            "forward.local",
+            "forward.remote"
+        ]),
+        "{shown}"
+    );
+    check("acl.show.with_role.json", shown);
 }
 
 /// `setup run` (`docs/CLI.md` §6.20, ADR-0024): three roles and the input
