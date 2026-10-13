@@ -54,7 +54,7 @@ nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh`
 
 체크박스는 근거가 되는 테스트와 CI run이 초록일 때만 채운다.
 
-- [ ] **DoD (a) — 역할 기반 권한(ADR-0045).** 테스트가 다음을 고정한다.
+- [x] **DoD (a) — 역할 기반 권한(ADR-0045).** 테스트가 다음을 고정한다.
   - role 키가 없는 기존 `trust.toml`은 오늘과 같은 판정을 낸다.
   - 새 pin은 role 키를 명시한다.
   - 모르는 role 값은 `CONFIG_ERROR`로 fail closed한다.
@@ -62,7 +62,7 @@ nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh`
   - `acl_check_equivalence.rs`와 `acl_uniformity.rs`가 role 경로를 포함한다.
   - role로 allow된 요청의 audit 레코드가 근거(`role`, `rule = null`)를 싣는다.
 
-  근거: Step 2~8. 소유: 에이전트.
+  근거: Step 2~8(`2d52a0f`·`b08b813`·`d659dbb`·`a7d94dd`·`9d99e36`·`64facab`·`85ea34f`, Windows 보정 `eb4216e`). CI run `38471301026`(eb4216e) 초록. 부하 반복 `scripts/stress/m15.filter` 50/50. wire diff 0. 소유: 에이전트.
 - [ ] **DoD (b) — 왕복과 트리.** 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두 같은 스텝에서 확인한다(QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다. 근거: Step 14·15.
 - [ ] **DoD — 권한 없음은 deny.** 새 seam 넷이 `DENY_SEAMS`에 행으로 오른다(14 → 18). `acl_uniformity.rs`가 문면 균일성을 단언한다. 항상-deny 예외 목록(`ALWAYS_DENIED_NO_OP`, `crates/qsh-core/tests/acl_registry.rs`)에는 `forward.socks`만 남는다. 근거: Step 11·12.
 - [ ] **DoD — 상태 경로 핀.** 다음을 핀 테스트가 단언한다.
