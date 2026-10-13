@@ -22,7 +22,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | M8 DoD 4 | wire freeze 발효와 독립 검증 계약(SC7) | 저장소 밖 조직 액션이라 캠페인 문서가 없다 | 소유: 운영자 |
 | M9 DoD 1 | SC1 재측정 3회 | `docs/campaigns/m9-stopwatch.md` | M7 DoD 1에 종속. `qsh setup` 캠페인의 비교 기준 |
 
-총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 33~52ew(추정, 2026-10-12·13 재기획 반영)에, ADR이 서야 산정할 수 있는 두 항목(M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
+총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 34~55ew(추정, 2026-10-12·13 재기획 반영)에, ADR이 서야 산정할 수 있는 두 항목(M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
 
 ## 1. 시퀀싱 원칙
 
@@ -291,20 +291,21 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 
 ### M19 — Windows client
 
-- **범위:** PRD P1의 Windows client. 착수 ADR(ADR-0035)이 Windows에서 여는 명령 집합을 정한다. 산정 전제는 client 역할만이다. `init`, `trust`/`pair accept`, `exec`, 대화형 attach, forward route의 `-L`/`-D`, `doctor`. host 역할(`serve`, `serve --to`)은 P2이고, `listen`과 그 데몬이 필요한 reverse route 소비는 ADR이 정한다. 콘솔 raw 모드와 VT 입력, `SIGWINCH` 없는 resize 전파, UDS 없는 환경에서 localctl 소비자의 처리, 키·상태 파일의 권한 모델, keystore 경로가 필요하다. `crates/qsh-core/src/resume.rs` 모듈 doc은 Windows에서 `resume.json`이 상속 디렉터리 ACL로 만들어진다고 적고 그 기밀성을 Windows client P1의 일부로 둔다. resume token은 ADR-0007의 custody 대상이다. 초대 코드 프롬프트는 에코 억제가 없어 오늘 Windows에서 `UNSUPPORTED`다(`crates/qsh-core/src/ops/mod.rs`의 `NO_TERMINAL_ECHO_SUPPRESSION`).
-- **착수 조건:** ADR-0035 승인. M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다.
-- **명시적 out:** Windows host와 ConPTY 백엔드(P2), Windows에서의 `qsh service`(M9가 `UNSUPPORTED`로 고정).
+- **범위:** PRD P1의 Windows client. 연결 방향과 무관하게 client 쪽 역할을 연다(`docs/PRD.md` §4, §5.1 원칙 7, 2026-10-13 사용자 결정). 정방향은 `init`, `trust`/`pair accept`/`pair ssh`, `exec`, 대화형 attach, `-L`/`-R`/`-D`, `qsh cp`, `doctor`다. 역방향은 `qsh listen`과 `setup listener`, 그 데몬을 거치는 같은 명령들, `hosts`와 `tunnels`의 데몬 항목이다. host 쪽 역할(`serve`, `serve --to`)은 두 방향 모두 P2다. 콘솔 raw 모드와 VT 입력, `SIGWINCH` 없는 resize 폴링, localctl의 Windows named pipe 대체(소유자 전용 DACL, 이름 선점 거부, 양방향 SID 확인), 키·상태 파일의 권한 모델, keystore가 필요하다. `crates/qsh-core/src/resume.rs` 모듈 doc은 Windows에서 `resume.json`이 상속 디렉터리 ACL로 만들어진다고 적고 그 기밀성을 Windows client P1의 일부로 둔다. resume token은 ADR-0007의 custody 대상이다. 초대 코드 프롬프트는 에코 억제가 없어 오늘 Windows에서 `UNSUPPORTED`다(`crates/qsh-core/src/ops/mod.rs`의 `NO_TERMINAL_ECHO_SUPPRESSION`).
+- **착수 조건:** ADR-0035 승인. M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다. `qsh cp`와 `pair ssh` 항목은 ADR-0029·ADR-0044 착지 뒤에 열린다.
+- **명시적 out:** Windows host와 ConPTY 백엔드(`qsh serve`와 `qsh serve --to`, 두 방향 모두 P2), `qsh setup host`/`pair invite`, Windows에서의 `qsh service`(서비스 매니저 백엔드 부재, 후속 결정. 원칙 7은 방향 간 동등이고 플랫폼 간 동등은 아니다).
 - **수용 기준 (DoD):**
   - `ci.yml`의 `windows-latest` leg이 build/clippy/portable 테스트를 넘어 ADR이 정한 명령의 기능 테스트를 돈다.
   - `release_smoke`의 `#[cfg(not(unix))]` 쌍둥이가 ADR이 정한 범위까지 넓어진다.
   - identity 키, `resume.json`, `trust.toml`이 소유자 전용 DACL로 만들어짐을 Windows leg 테스트가 단언한다. DACL을 설정할 수 없으면 파일을 만들지 않고 fail closed한다.
-  - localctl을 대체하는 IPC(named pipe 등)를 연다면 다른 사용자의 접속이 거부됨을 테스트한다. 열지 않는다면 그 명령이 `UNSUPPORTED`로 끝남을 fixture로 고정한다.
+  - named pipe localctl이 이름 선점 시 기동 실패, 보호 DACL, 주입한 SID 불일치 거부(서버·클라이언트)를 Windows leg 테스트로 단언한다.
+  - Windows `qsh listen`에 test-only target을 붙인 역방향 기능 테스트(exec, `-L` echo, 재등록, `hosts`의 reverse 항목, ADR-0029 착지 뒤 `qsh cp`)가 Windows leg에서 돈다.
   - 에코 없는 초대 코드 입력을 지원할지, 현행 `UNSUPPORTED`를 유지하고 `--code-stdin`만 열지를 ADR이 정하고 테스트가 그 결정을 고정한다.
-  - `docs/design/threat-model.md` §3에 Windows client 진입점이 오른다.
-  - Windows client에서 Linux·macOS host로 붙는 대화형 셸(bash/zsh, vim, resize, detach→attach resume)을 사람이 확인하는 캠페인 문서가 `docs/campaigns/`에 사전 고정돼 커밋된다. 회차는 §5.5.
+  - `docs/design/threat-model.md` §3에 Windows 콘솔 입력과 named pipe 진입점이, §4에 pipe 선점·다른 사용자 접속 위협이 오른다.
+  - Windows client에서 Linux·macOS host로 붙는 대화형 셸(bash/zsh, vim, resize, detach→attach resume)과 역방향 회차(Windows `qsh listen` ← Linux/macOS `qsh serve --to`, 데몬 재시작, 둘째 계정 거부)를 사람이 확인하는 캠페인 문서가 `docs/campaigns/`에 사전 고정돼 커밋된다. 회차는 §5.5.
   - README Known limitations와 §3 가드레일 표의 Windows 행이 새 지원 범위와 일치한다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
-- **크기:** 4.7~7.0ew. ADR 0.3 + 구현 4.0~6.0(콘솔 입출력과 resize, localctl 대체, 권한 모델, 테스트 이중화) + DACL·IPC 거부 테스트 0.3~0.5 / 마감 0.1~0.2. 비교 표본이 없어 신뢰도가 가장 낮은 산정이다.
+- **크기:** 5.7~9.5ew(ADR-0035 개정 2026-10-13. 초안 4.3~6.9ew + 역방향 1.4~2.6ew). 비교 표본이 없어 신뢰도가 가장 낮은 산정이다. 첫 스텝은 콘솔 probe·터미널 trait 추출과 `cfg(unix)` 게이트 제거를 같이 보고 다시 매긴다.
 
 ### 5.2 P1 크기 합
 
@@ -318,8 +319,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | ADR-0044·0031 승인(제안됨 2026-10-12), M15 (a) 착지. 0015·0016·0030은 기각 |
 | M17 운영 표면 | 1.3~2.0 + 미산정 하나 | (b) 착지, (c) 폐기. ADR-0032·0033 승인(제안됨 2026-10-11) |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
-| M19 Windows client | 4.7~7.0 (ADR-0035 초안은 4.3~6.9) | ADR-0035 승인 (제안됨 2026-10-11) |
-| 합 | 약 33~52 + 미산정 둘 | |
+| M19 Windows client | 5.7~9.5 | ADR-0035 승인 (제안됨, 2026-10-13 역방향 포함 개정) |
+| 합 | 약 34~55 + 미산정 둘 | |
 
 ### 5.3 P1 밖으로 보낸다
 
