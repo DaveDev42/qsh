@@ -52,7 +52,7 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 연결을 시작한 endpoint가 반드시 셸을 사용하는 쪽일 필요는 없다. target이 controller로 연결한 뒤 자신의 셸을 제공할 수 있다.
 
-정방향과 역방향은 같은 기능을 갖는다(2026-10-13 사용자 결정). 셸, exec, 세션, 터널, 파일 복사, 신뢰 부트스트랩처럼 정방향 route에서 되는 기능은 역방향 route에서도 되어야 한다. 한쪽 방향만 지원하는 설계는 그 이유를 ADR에 적고 사용자 승인을 받는다.
+정방향과 역방향은 같은 기능을 갖고, 이 동등은 모든 지원 플랫폼(Linux, macOS, Windows)에서 성립한다(2026-10-13 사용자 결정). 셸, exec, 세션, 터널, 파일 복사, 신뢰 부트스트랩처럼 정방향 route에서 되는 기능은 역방향 route에서도 되어야 하고, 한 플랫폼에서 되는 기능은 client 역할이든 host 역할이든 다른 플랫폼에서도 되어야 한다. 한쪽 방향이나 일부 플랫폼만 지원하는 설계는 그 이유(그 플랫폼에 개념 자체가 없다는 것 등)를 ADR에 적고 사용자 승인을 받는다.
 
 ### 명시적 권한
 
@@ -167,7 +167,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - scp 호환 `qsh cp` (M15, ADR-0029)
 - SSH 부트스트랩 (M16, ADR-0044)
 - trust remove 시 열린 연결 종료 (M16, ADR-0031)
-- Windows client (M19)
+- Windows client와 Windows host (M19, ADR-0035). 2026-10-13 사용자 결정으로 host를 P2에서 당겼다(§4 플랫폼 간 동등)
 - 세션 및 audit 관리 개선 (M17 (d))
 
 처음 P1에 있었으나 v1(M9)로 당겨 출고한 항목:
@@ -185,7 +185,6 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - read-only multi-attach
 - jump chaining
 - agent forwarding
-- Windows host
 
 mobile client SDK는 P2에서 뺐다(2026-10-12 사용자 결정). 모바일은 Rust client cross-compile로 충분하다.
 
