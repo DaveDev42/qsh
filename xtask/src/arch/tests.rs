@@ -134,7 +134,7 @@ fn module_ban_recurses_into_subdirectories() {
 /// Every configured module-ban target that doesn't exist is flagged
 /// once — not once per token bound to it (the ban targets must exist
 /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
-/// `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
+/// `REGISTRY_FILE`, `FILE_GUARD_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
 /// `SETUP_DIR` directory, the `CORE_SRC_DIR` directory the `quinn` ban
 /// scopes, and the `INVITE_ADDRESS_DIR` directory that two
 /// separate bans share — a shared target is still one entry in `reported_missing`, not two).
@@ -143,7 +143,7 @@ fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 9, "{violations:?}");
+    assert_eq!(violations.len(), 10, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"
@@ -422,6 +422,49 @@ fn module_ban_flags_a_leak_in_reverse_registry_but_not_its_sibling_listen_rs() {
     assert!(
         listen_hits.is_empty(),
         "listen.rs is not in scope for the registry rule: {violations:?}"
+    );
+}
+
+/// `file/guard.rs` is a pure path judgement: it must not name the async
+/// runtime or the session/ACL layers. The ban is file-scoped, so a sibling
+/// (`host.rs`, which will drive transport streams) and the guard's own
+/// `guard/tests.rs` are out of scope.
+#[test]
+fn module_ban_flags_a_leak_in_file_guard_but_not_its_siblings_or_tests() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("crates/qsh-core/src/file");
+    fs::create_dir_all(file.join("guard")).unwrap();
+    fs::write(
+        file.join("guard.rs"),
+        "use crate::acl::Policy;\nuse tokio::task;\n// crate::server in a comment is fine\n",
+    )
+    .unwrap();
+    fs::write(
+        file.join("host.rs"),
+        "use qsh_transport::Connection; // legitimate: the op module drives streams\n",
+    )
+    .unwrap();
+    fs::write(
+        file.join("guard").join("tests.rs"),
+        "use crate::acl::Policy;\n",
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+
+    let guard_hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("file/guard.rs"))
+        .collect();
+    assert_eq!(guard_hits.len(), 2, "{violations:?}");
+    assert!(guard_hits.iter().any(|v| v.contains("crate::acl")));
+    assert!(guard_hits.iter().any(|v| v.contains("tokio")));
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.contains("host.rs") || v.contains("guard/tests.rs")),
+        "siblings and the guard's tests are out of scope: {violations:?}"
     );
 }
 
