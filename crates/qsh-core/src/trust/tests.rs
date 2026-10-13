@@ -1384,3 +1384,42 @@ fn role_of_pin_is_none_when_suspended_whatever_the_pin_says() {
         None
     );
 }
+
+/// ADR-0045 결정 10·11: a local query (`acl check`, `acl show`) has no
+/// connection, so the pin's own fingerprint stands in. The answer is the
+/// pin's role, `none` for a pin with no `role` key (judged like `none`), and
+/// "no role in the question" for anything that is not a pin-authenticated
+/// `device:<name>` with a pin of that name.
+#[test]
+fn query_role_resolves_the_pins_own_role_and_nothing_else() {
+    let path = std::path::Path::new("trust.toml");
+    let text = format!(
+        "{}{}{}",
+        peer_entry("full-dev", b"full-dev", Some("full")),
+        peer_entry("explicit-none", b"explicit-none", Some("none")),
+        peer_entry("legacy", b"legacy", None),
+    );
+    let store = TrustStore::parse(path, &text).unwrap();
+    let device = |name: &str| Principal::Device(name.into());
+
+    assert_eq!(
+        store.query_role(&device("full-dev"), AuthPath::Pin),
+        Some(TrustRole::Full)
+    );
+    assert_eq!(
+        store.query_role(&device("explicit-none"), AuthPath::Pin),
+        Some(TrustRole::None)
+    );
+    assert_eq!(
+        store.query_role(&device("legacy"), AuthPath::Pin),
+        Some(TrustRole::None),
+        "a legacy pin is evaluated as `none`"
+    );
+    // Not a pin question, not a device principal, no such pin.
+    assert_eq!(store.query_role(&device("full-dev"), AuthPath::Ca), None);
+    assert_eq!(
+        store.query_role(&Principal::User("full-dev".into()), AuthPath::Pin),
+        None
+    );
+    assert_eq!(store.query_role(&device("nobody"), AuthPath::Pin), None);
+}

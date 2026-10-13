@@ -603,19 +603,24 @@ pub fn print_host(data: &Host) -> io::Result<()> {
 }
 
 /// Print `qsh acl check`'s verdict (`docs/CLI.md` §6.15) — one line to
-/// stdout, exactly the shape (a)/§4 asks for: `"allow (rule 0)"` when a
-/// rule matched, bare `"deny"`/`"allow"` when the decision stands without
-/// one (always the case for `"deny"`), or `"deny (no policy loaded)"` when
-/// `acl.toml` is missing or failed to parse. Zero authorization logic
-/// here — every field is already decided by `Ops::acl_check`; this only
-/// formats it. The policy file path is a separate stderr hint, not part
-/// of the one-line stdout summary.
+/// stdout: `"allow (role full)"` when a trust role granted it,
+/// `"allow (rule 0)"` when a row did, bare `"deny"`/`"allow"` when the
+/// decision stands without a basis (always the case for `"deny"`), or
+/// `"deny (no policy loaded)"` when `acl.toml` is missing or failed to
+/// parse and nothing else granted. Zero authorization logic here — every
+/// field is already decided by `Ops::acl_check`; this only formats it. The
+/// policy file path is a separate stderr hint, not part of the one-line
+/// stdout summary.
 pub fn print_acl_check(data: &AclCheckData) -> io::Result<()> {
     let decision = sanitize(&data.decision);
-    let line = if !data.policy.loaded {
-        format!("{decision} (no policy loaded)")
+    let line = if data.granted_by.as_deref() == Some("role")
+        && let Some(role) = &data.role
+    {
+        format!("{decision} (role {})", sanitize(role))
     } else if let Some(rule) = data.rule {
         format!("{decision} (rule {rule})")
+    } else if !data.policy.loaded {
+        format!("{decision} (no policy loaded)")
     } else {
         decision
     };
@@ -625,13 +630,15 @@ pub fn print_acl_check(data: &AclCheckData) -> io::Result<()> {
     Ok(())
 }
 
-/// Print `qsh acl show`'s summary (`docs/CLI.md` §6.19): the matching rows,
-/// the effective action set, then notice lines. Zero authorization logic
-/// here; everything is already decided by `Ops::acl_show`. The notices are
-/// prose that is deliberately absent from the JSON (ADR-0025 decisions 2, 5
-/// and 6): the pin default (only when `--auth-path` was omitted), the
-/// unowned-resource ceiling, and the shared `ACL_RESTART_NOTICE` printed as
-/// its own line, byte for byte.
+/// Print `qsh acl show`'s summary (`docs/CLI.md` §6.19): the principal's
+/// trust role first, then the matching rows, the effective action set, and
+/// notice lines. Zero authorization logic here; everything is already
+/// decided by `Ops::acl_show`. The notices are prose that is deliberately
+/// absent from the JSON (ADR-0025 decisions 2, 5 and 6, ADR-0045 결정 11):
+/// the pin default (only when `--auth-path` was omitted), the unowned-
+/// resource ceiling, and the two-line split between a role (takes effect on
+/// the next request) and the rows (need a restart), the second being the
+/// shared `ACL_RESTART_NOTICE` printed as its own line, byte for byte.
 pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(
@@ -640,8 +647,32 @@ pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
         sanitize(&data.principal),
         sanitize(&data.auth_path)
     )?;
-    if !data.policy.loaded {
-        writeln!(stdout, "no policy loaded ({})", sanitize(&data.policy.path))?;
+    match (&data.role, &data.role_actions) {
+        (Some(role), Some(actions)) if actions.is_empty() => {
+            writeln!(stdout, "role: {} (grants no action)", sanitize(role))?;
+        }
+        (Some(role), Some(actions)) => {
+            let actions: Vec<String> = actions.iter().map(|a| sanitize(a)).collect();
+            writeln!(stdout, "role: {} ({})", sanitize(role), actions.join(", "))?;
+        }
+        (Some(role), None) => writeln!(stdout, "role: {}", sanitize(role))?,
+        (None, _) => writeln!(
+            stdout,
+            "role: - (none applies: no pin of this name, or not a pin path)"
+        )?,
+    }
+    if data.policy.state.as_deref() == Some("invalid") {
+        writeln!(
+            stdout,
+            "no policy loaded ({}): acl.toml is unusable, so every request is denied, role grants included",
+            sanitize(&data.policy.path)
+        )?;
+    } else if !data.policy.loaded {
+        writeln!(
+            stdout,
+            "no acl.toml ({}): requests are authorized by the role alone",
+            sanitize(&data.policy.path)
+        )?;
     } else if data.matching_rules.is_empty() {
         writeln!(
             stdout,
@@ -676,7 +707,11 @@ pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
     }
     writeln!(
         stdout,
-        "note: the effective set assumes an unowned resource; for an owned resource (scope = \"owned\") it is an upper bound."
+        "note: the effective set assumes an unowned resource; for an owned resource (scope = \"owned\" or the tunnel role) it is an upper bound."
+    )?;
+    writeln!(
+        stdout,
+        "note: a role change takes effect on the next request, without a restart."
     )?;
     writeln!(stdout, "{}", qsh_core::acl::ACL_RESTART_NOTICE)?;
     Ok(())

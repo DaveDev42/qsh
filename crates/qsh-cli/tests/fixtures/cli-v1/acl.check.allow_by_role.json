@@ -1,0 +1,21 @@
+{
+  "command": "acl.check",
+  "data": {
+    "action": "exec.run",
+    "auth_path": "pin",
+    "decision": "allow",
+    "granted_by": "role",
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 1,
+      "state": "loaded"
+    },
+    "principal": "device:laptop",
+    "resource": "exec",
+    "role": "exec"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

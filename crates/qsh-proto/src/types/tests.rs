@@ -1049,9 +1049,12 @@ fn acl_check_owner_fields_are_additive_and_round_trip() {
             path: "/x/acl.toml".into(),
             rules: 1,
             loaded: true,
+            state: None,
         },
         owner: Some("user:dave".into()),
         owner_auth_path: Some("pin".into()),
+        role: None,
+        granted_by: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["owner"], "user:dave");
@@ -1084,9 +1087,12 @@ fn acl_check_data_matches_documented_shape() {
             path: "/Users/dave/.config/qsh/acl.toml".into(),
             rules: 2,
             loaded: true,
+            state: None,
         },
         owner: None,
         owner_auth_path: None,
+        role: None,
+        granted_by: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(
@@ -1119,6 +1125,7 @@ fn acl_check_data_matches_documented_shape() {
             path: "/Users/dave/.config/qsh/acl.toml".into(),
             rules: 0,
             loaded: false,
+            state: None,
         },
         ..data
     };
@@ -1130,6 +1137,55 @@ fn acl_check_data_matches_documented_shape() {
     assert_eq!(json["policy"]["loaded"], false);
     let back: AclCheckData = serde_json::from_value(json).unwrap();
     assert_eq!(back, denied);
+}
+
+/// ADR-0045 결정 10·11: the role fields are additive. They omit (never
+/// `null`) when absent, so every envelope recorded before roles stays valid,
+/// and they round-trip as open strings.
+#[test]
+fn acl_role_fields_are_additive_open_strings_and_omit_when_absent() {
+    let json = serde_json::json!({
+        "principal": "device:laptop",
+        "action": "exec.run",
+        "decision": "allow",
+        "policy": {"path": "/x/acl.toml", "rules": 0, "loaded": false, "state": "missing"},
+        "role": "future-role",
+        "granted_by": "future-basis"
+    });
+    let data: AclCheckData = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(data.role.as_deref(), Some("future-role"));
+    assert_eq!(data.granted_by.as_deref(), Some("future-basis"));
+    assert_eq!(data.policy.state.as_deref(), Some("missing"));
+    assert_eq!(serde_json::to_value(&data).unwrap(), json);
+
+    let bare = AclCheckData {
+        role: None,
+        granted_by: None,
+        policy: AclPolicyRef {
+            state: None,
+            ..data.policy
+        },
+        ..data
+    };
+    let out = serde_json::to_value(&bare).unwrap();
+    assert!(out.get("role").is_none() && out.get("granted_by").is_none());
+    assert!(out["policy"].get("state").is_none());
+
+    let show: AclShowData = serde_json::from_value(serde_json::json!({
+        "principal": "device:laptop",
+        "auth_path": "pin",
+        "auth_path_defaulted": true,
+        "policy": {"path": "/x/acl.toml", "rules": 0, "loaded": true},
+        "matching_rules": [],
+        "effective_actions": []
+    }))
+    .unwrap();
+    assert_eq!(
+        (show.role.as_ref(), show.role_actions.as_ref()),
+        (None, None)
+    );
+    let out = serde_json::to_value(&show).unwrap();
+    assert!(out.get("role").is_none() && out.get("role_actions").is_none());
 }
 
 #[test]

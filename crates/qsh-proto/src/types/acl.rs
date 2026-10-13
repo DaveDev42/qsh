@@ -75,6 +75,20 @@ pub struct AclCheckData {
     /// `None` whenever [`Self::owner`] itself is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_auth_path: Option<String>,
+    /// The trust role the decision was evaluated with (ADR-0045 결정 10):
+    /// the `role` key of this machine's pin named by a `device:<name>`
+    /// principal, evaluated with the pin's own fingerprint. A pin without a
+    /// `role` key is evaluated as `"none"`. Omitted when the principal is not
+    /// a `device:` name, the auth path is `"ca"`, no pin has that name, or
+    /// `trust.toml` could not be parsed (enforcement grants no role then).
+    /// Open string, same discipline as [`Self::decision`]. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// What an `"allow"` rests on (ADR-0045 결정 10): `"role"` | `"acl"`.
+    /// When a role and a row would both allow, the basis is `"role"`
+    /// (ADR-0045 결정 4). Present only for an allow. Open string. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_by: Option<String>,
 }
 
 /// Which `acl.toml` an `acl.check` decision was evaluated against
@@ -85,11 +99,17 @@ pub struct AclPolicyRef {
     pub path: String,
     /// Number of rules the loaded policy has; `0` when `loaded` is `false`.
     pub rules: u32,
-    /// `false` when `acl.toml` is missing or failed to parse — every
-    /// decision is `"deny"` in that state (`PLAN.md` M5 §4.1 #1), and this
-    /// is how an operator distinguishes "denied by a rule" from "denied
-    /// because there is no policy at all".
+    /// `false` when `acl.toml` is missing or failed to parse. Whether every
+    /// decision is `"deny"` then depends on [`Self::state`]: an `"invalid"`
+    /// file denies everything, trust roles included, while a `"missing"`
+    /// file is a policy with no rows and trust roles still grant
+    /// (ADR-0045 결정 6).
     pub loaded: bool,
+    /// Why `loaded` is what it is (ADR-0045 결정 10): `"loaded"` |
+    /// `"missing"` (no file) | `"invalid"` (unreadable or unparseable; every
+    /// decision is `"deny"`, role grants included). Open string. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,10 +168,24 @@ pub struct AclShowData {
     pub policy: AclPolicyRef,
     /// Rows matching the principal and auth path, in file order.
     pub matching_rules: Vec<AclMatchingRule>,
-    /// Actions the policy allows for an unowned resource, in vocabulary
-    /// order. A ceiling for owned resources. Never contains the
-    /// always-denied actions.
+    /// Actions the principal may take on an unowned resource, in vocabulary
+    /// order: the union of what its trust role grants and what the matching
+    /// rows grant (ADR-0045 결정 11). A ceiling for owned resources. Never
+    /// contains the always-denied actions.
     pub effective_actions: Vec<String>,
+    /// The principal's pin role, resolved exactly as
+    /// [`AclCheckData::role`] (ADR-0045 결정 11). Omitted in the same cases.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The actions that role grants, in the order of the role table
+    /// (ADR-0045 결정 2), always-denied actions the table lists included.
+    /// Present exactly when [`Self::role`] is. A role's grants are refused
+    /// wholesale when `policy.state` is `"invalid"`, and
+    /// [`Self::effective_actions`] is what is left after every gate.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_actions: Option<Vec<String>>,
 }
 
 /// Request for `capabilities.get` (`docs/CLI.md` §6.10, `qsh capabilities

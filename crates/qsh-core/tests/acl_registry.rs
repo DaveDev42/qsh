@@ -1276,4 +1276,59 @@ mod source_scan {
              authorize_stream(&ctx, Action::SessionAttach, ...) call: {literal_lines:?}"
         );
     }
+
+    /// Every production `.rs` file under `dir` (relative to the repo root),
+    /// recursively, minus the sibling `tests.rs` modules.
+    fn production_source_under(dir: &str) -> String {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir)
+                .unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()))
+            {
+                let path = entry.expect("read_dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && path.file_name().is_some_and(|name| name != "tests.rs")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&repo_root().join(dir), &mut paths);
+        paths.sort();
+        paths
+            .iter()
+            .map(|path| read_doc(&path.strip_prefix(repo_root()).unwrap().to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// ADR-0045 결정 7 / PLAN M15 Step 6: `Policy::decide` has exactly three
+    /// production call sites, all inside `qsh-core` — `Policy::check_with_role`
+    /// (enforcement), `Policy::effective_actions` (`acl show`) and
+    /// `Ops::acl_check` (`acl check`). The role stage ⓡ lives inside `decide`,
+    /// so a fourth caller would be a second evaluator that could disagree
+    /// with enforcement about roles. This is the mechanical form of the
+    /// `grep -rn 'policy\.decide(\|self\.decide(' crates/qsh-core/src/acl
+    /// crates/qsh-core/src/ops --exclude=tests.rs` check
+    /// `Policy::decide`'s doc names.
+    #[test]
+    fn policy_decide_has_exactly_three_production_call_sites() {
+        let source = format!(
+            "{}\n{}",
+            production_source_under("crates/qsh-core/src/acl"),
+            production_source_under("crates/qsh-core/src/ops")
+        );
+        let call_sites: Vec<&str> = non_comment_lines(&source)
+            .into_iter()
+            .filter(|line| line.contains("policy.decide(") || line.contains("self.decide("))
+            .collect();
+        assert_eq!(
+            call_sites.len(),
+            3,
+            "Policy::decide must have exactly three production call sites \
+             (check_with_role, effective_actions, Ops::acl_check): {call_sites:?}"
+        );
+    }
 }
