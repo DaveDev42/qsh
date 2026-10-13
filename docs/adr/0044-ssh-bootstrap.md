@@ -1,10 +1,12 @@
 # ADR-0044: pin이 없는 대상에 `qsh <dest>`를 부르면 시스템 ssh를 한 번 거쳐 양쪽 pin을 등록하고 QUIC로 접속한다. ssh 설정·인증·known_hosts는 ssh가 그대로 처리하고 qsh는 SSH 키를 읽지 않으며, 원격 쪽 pin은 ADR-0045의 role `full`로 쓴다
 
-날짜: 2026-10-12
+날짜: 2026-10-12 (개정 2026-10-13)
 상태: 제안됨
 
 개정 관계: 새 ADR이다. 다른 ADR의 결정을 개정하지 않는다. ADR-0013 결정 6이 이미 통과시킨 파이프(`qsh identity export | ssh box 'qsh trust add laptop --cert-file -'`)를 양방향으로 자동화한 것이고, ADR-0017 결정 1(`acl.toml`을 쓰지 않는다)과 결정 5(TOFU 없음)를 재확인한다. ADR-0026의 `--import-ssh-key`와 `trust ssh-preview`는 그대로 남지만 그 동기(SSH 쪽 자산으로 qsh 신뢰를 빨리 세운다)는 이 ADR이 대신한다(결정 15). ADR-0015와 ADR-0016은 2026-10-12에 기각됐고 그 기각 사유가 이 ADR을 대체 경로로 가리킨다. ADR-0045(역할 기반 권한, 제안됨)의 pin `role`을 쓰므로 ADR-0045가 먼저 또는 같이 승인돼야 한다. 승인되면 바뀌는 계약 문서는 `docs/CLI.md`(§2.4, §2.5, §6.11, §7), `docs/design/protocol.md`(새 절), `docs/design/threat-model.md`(§3, §4, §7)다.
 
+
+2026-10-13 사용자 확인: 자동 발동을 기본으로 둔다(결정 2). ssh가 받아들인 host key 신뢰를 그대로 이어받고 `StrictHostKeyChecking`을 덮어쓰지 않는다(결정 20). "qsh는 모든 경우에서 정방향과 역방향에 같은 기능을 준다"(PRD §4)에 따라 역방향 구도의 부트스트랩을 결정 22에 더했다.
 ## 맥락
 
 2026-10-12 사용자 요구 원문은 이렇다. "기존 SSH 키를 import 하는게 아니라, SSH 설정들을 모두 자동으로 가져와서 그대로 하위호환 지원… 기존 SSH의 설정과 키를 활용해서 바로 qsh가 동작할 수 있게."
@@ -105,7 +107,12 @@ mosh가 같은 문제를 푼 모양이 있다. `mosh host`는 시스템 ssh로 �
 
 21. pin 방향과 role. pin에는 방향 축이 없다(ADR-0017 결정 5, ADR-0030 기각). 그래서 이 장비가 원격을 pin하면 원격이 이 장비로 들어올 때의 인증도 통과한다. 이 장비 쪽 pin을 `role = "none"`으로 쓰는 이유가 이것이다. ADR-0045에서 `none` pin은 `acl.toml`만으로 판정하므로, 이 장비가 `qsh serve`를 띄우고 있어도 원격은 `acl.toml` 행 없이 아무것도 할 수 없다(default-deny). 원격 쪽 pin의 `full`은 근거 절 셋째 항목대로 ssh 로그인이 이미 준 권한을 넘지 않는다. 원격이 `acl.toml`을 읽을 수 없으면 role과 무관하게 모든 요청이 거부되는 ADR-0045의 fail closed와, 자원 생성 전 단일 choke point 인가는 그대로다. 새 pin의 role은 재시작 없이 효력을 가진다. ADR-0045 결정이 role을 판정마다 `trust.toml`에서 다시 읽기 때문이다.
 
-22. 역방향 route. 자동 발동은 reverse 등록이 있는 이름에서 일어나지 않는다(결정 2). 방향 축이 없으므로 이 ADR이 세운 두 pin은 `qsh serve --to`/`qsh listen` 구도에서도 그대로 신원 증명에 쓰인다. 다만 부트스트랩은 `[serve].to`를 쓰지 않고 원격에서 아무것도 띄우지 않으며, listener 쪽이 target의 `host.reverse`를 받으려면 지금처럼 `acl.toml` 행(또는 ADR-0045가 정하는 role)이 필요하다. 이 장비 쪽 pin의 role이 `none`이기 때문이다. reverse 전용 원격은 hello가 `serve_listening: false`를 내므로 `qsh pair ssh`가 `verified: false`로 끝나는 것이 정상이다.
+22. 역방향 route. 정방향과 역방향은 같은 기능을 갖는다(PRD §4). 부트스트랩도 두 구도를 다 연다.
+   - 정방향(기본): 결정 1~21 그대로다. 자동 발동은 reverse 등록이 있는 이름에서 일어나지 않는다(결정 2). 그 이름은 이미 닿는 경로가 있기 때문이다.
+   - 역방향: `qsh pair ssh <dest> --reverse --to <이 장비의 주소>`. 원격(target)이 이 장비(listener)로 dial하는 구도다. 원격 쪽 pin은 이 장비를 `--to` 주소와 함께 role `full`로 쓴다. controller가 중계하는 요청을 target이 이 장비의 principal로 인가하기 때문이다(ADR-0045 결정 14의 `host --to` 기본값과 같다). 이 장비 쪽 pin은 원격을 주소 없이 role `reverse`로 쓴다. target이 `host.reverse` 등록만 할 수 있고 이 장비에서 셸은 얻지 못한다. 이 경우는 주소 없는 pin이지만 ADR-0045의 `full` 기본값 대신 `reverse`를 쓴다(`--role`로 덮을 수 있다).
+   - 역방향 부트스트랩도 원격에서 아무것도 띄우지 않고 `[serve].to`를 쓰지 않는다. 결과의 다음 명령으로 원격에서 실행할 `qsh serve --to <이름>`(또는 `qsh service install`)을 안내한다. 원격 hello가 `serve_listening: false`를 내는 것이 정상이고 `verified`는 `false`다. 원격이 등록하면 `qsh hosts`에 live로 오른다.
+   - ssh가 원격에 닿아야 하는 것은 정방향과 같다. NAT 뒤 target이면 ssh의 ProxyJump 같은 경로로 한 번만 닿으면 되고, 그 뒤로는 target이 dial하므로 ssh 경로가 필요 없다.
+   - 자동 발동은 역방향을 고르지 않는다. 어느 쪽이 dial할지는 이름만으로 알 수 없기 때문이다.
 
 23. ADR-0026과의 관계. `qsh init --import-ssh-key`와 `qsh trust ssh-preview`는 그대로 둔다. 같은 키로 두 시스템을 묶고 싶은 사용자와 `authorized_keys` 이행을 미리 보고 싶은 사용자가 여전히 쓴다. 다만 ADR-0026이 다룬 동기, 곧 ssh 쪽에 이미 있는 것으로 qsh 신뢰를 빨리 세우는 일은 이 ADR이 키 재료를 옮기지 않고 해결한다. ADR-0026 결정 7이 미룬 암호 걸린 키와 ssh-agent는 이 경로에서 ssh가 처리하므로 qsh에 서명 seam을 낼 이유가 사라진다. ADR-0026 결정 7의 별도 결정은 열지 않는다.
 
@@ -167,4 +174,4 @@ mosh가 같은 문제를 푼 모양이 있다. `mosh host`는 시스템 ssh로 �
   - `ssh_bootstrap_envelope_is_the_only_stdout_line`(`--json`)
   - 사람 캠페인 하나: 실제 OpenSSH(ProxyJump, ssh-agent, 암호 걸린 키, Windows `ssh.exe`) 위에서 처음 `qsh box`부터 셸 프롬프트까지. 문서는 `docs/campaigns/`에 구현 마지막 스텝 전에 고정한다.
 - **ADR-0035.** 결정 1의 명령 목록에 `qsh pair ssh`와 대화형 형태의 자동 발동을 더한다. 이 ADR이 M16, ADR-0035가 M19이므로 ADR-0035 구현 때 반영한다.
-- **크기.** 2.3~3.5ew. ADR과 계약 문서 0.2 + `ssh -G` 읽기와 ssh 자식 관리(인자, 종료 코드 사상, 타임아웃, Unix와 Windows) 0.3~0.5 + 부트스트랩 스트림 타입·줄 파서·fuzz 타깃·protocol.md 절 0.3~0.4 + 응답자(identity 읽기, UDP bind 확인, 잠금 아래 pin, audit, 플랫폼 거부) 0.3~0.5 + `pair.ssh` op(두 단계 쓰기, 확인 dial, 오류 사상), 렌더러 두 벌, fixture·schema 등록·man 0.5~0.7 + 자동 발동 분기와 `[ssh]` 설정 0.2~0.4 + 가짜 ssh 하네스와 핀 테스트 0.4~0.6 + 캠페인과 README 0.1~0.2. ADR-0045의 role 필드와 handshake 시점 읽기는 ADR-0045 몫이라 여기 넣지 않았다.
+- **크기.** 2.6~4.0ew(2026-10-13 결정 22의 `--reverse` 0.3~0.5 포함). ADR과 계약 문서 0.2 + `ssh -G` 읽기와 ssh 자식 관리(인자, 종료 코드 사상, 타임아웃, Unix와 Windows) 0.3~0.5 + 부트스트랩 스트림 타입·줄 파서·fuzz 타깃·protocol.md 절 0.3~0.4 + 응답자(identity 읽기, UDP bind 확인, 잠금 아래 pin, audit, 플랫폼 거부) 0.3~0.5 + `pair.ssh` op(두 단계 쓰기, 확인 dial, 오류 사상), 렌더러 두 벌, fixture·schema 등록·man 0.5~0.7 + 자동 발동 분기와 `[ssh]` 설정 0.2~0.4 + 가짜 ssh 하네스와 핀 테스트 0.4~0.6 + 캠페인과 README 0.1~0.2. ADR-0045의 role 필드와 handshake 시점 읽기는 ADR-0045 몫이라 여기 넣지 않았다.

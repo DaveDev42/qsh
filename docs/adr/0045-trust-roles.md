@@ -1,6 +1,6 @@
 # ADR-0045: trust pin에 role 하나를 두어 신뢰 등록이 곧 권한 부여가 되게 한다. `acl.toml`은 세밀한 제어용 선택 사항으로 남고, role이 없는 기존 pin은 지금처럼 `acl.toml`만 따른다
 
-날짜: 2026-10-12
+날짜: 2026-10-12 (개정 2026-10-13)
 상태: 제안됨
 
 개정 관계: 새 ADR이다. 2026-10-12 사용자 결정("권한 설정을 보다 간소화… 파일 단위로 복잡하게 관리하는게 귀찮아")을 받아 P1을 다시 짠 결과 M15에 이 ADR과 ADR-0029(개정판, `qsh cp`)가 함께 놓인다. 다음 결정들을 개정한다.
@@ -92,12 +92,12 @@
 
    | 명령 | op | 플래그 | 기본값 |
    |---|---|---|---|
-   | `qsh trust add <name> … [--role <role>]` | `trust.add` | `--role` | `none` |
+   | `qsh trust add <name> … [--role <role>]` | `trust.add` | `--role` | `--address` 없이 등록하면 `full`, `--address`를 주면 `none` |
    | `qsh pair invite [--as <name>] [--role <role>]` | `trust.invite` | `--role` | `full` |
    | `qsh pair accept <address> … [--role <role>]` | `trust.accept` | `--role` | `none` |
    | `qsh trust set-role <name> <role>` | `trust.set_role`(신설) | 위치 인자 | 없음(필수) |
 
-   - 기본값은 "그 명령을 실행한 쪽이 상대를 들이는가"로 정한다. `pair invite`는 이 장비가 초대 코드를 들고 오는 장비를 들이는 행위이므로 `full`이다. `trust add`와 `pair accept`는 대개 dial할 상대를 pin하는 행위이고, pin에는 방향이 없어서 여기에 권한을 기본으로 얹으면 dial하려고 등록한 상대가 이 장비로 들어올 권한까지 얻는다. 그래서 `none`이다. host가 인증서 파일로 client를 들일 때는 `qsh trust add <name> --cert-file <path> --role full`처럼 명시한다. ADR-0044의 SSH 부트스트랩은 같은 원칙으로 원격 쪽 pin에 `full`(`--role`로 지정 가능), 로컬 쪽 pin에 `none`을 쓴다.
+   - 기본값은 `full`이고 좁히고 싶을 때 `--role`로 opt-out한다(2026-10-13 사용자 결정). 예외는 하나, dial할 상대를 pin하는 경우다. pin에는 방향이 없어서(ADR-0030 기각) 여기에 `full`을 얹으면 dial하려고 등록한 상대가 이 장비가 `qsh serve`를 띄울 때 이 장비로 들어올 권한까지 얻는다. 그래서 "들이는 pin"과 "dial 상대 pin"을 주소 유무로 가른다. `pair invite`(초대 코드를 들고 오는 장비를 들인다)와 `--address` 없는 `trust add`(인증서 파일로 client를 들이는 inbound 전용 pin, `docs/CLI.md` §6.11)는 `full`이다. `--address`를 준 `trust add`와 `pair accept`는 dial 상대를 pin하므로 `none`이다. 어느 쪽이든 `--role`이 기본값을 덮는다. ADR-0044의 SSH 부트스트랩은 같은 원칙으로 원격 쪽 pin(주소 없는 inbound pin)에 `full`(`--role`로 지정 가능), 로컬 쪽 pin(dial 상대)에 `none`을 쓴다.
    - `pair invite --role`은 role을 `invites.toml`의 초대 레코드에 저장하고, 상환 때 responder(`qsh serve`)가 그 role로 pin한다. 상환하는 쪽은 role을 고를 수 없다. wire의 페어링 교환에 role 필드는 없고(결정 17), 초대를 만든 사람이 정한 값만 쓰인다. `--as`가 이름 결정권을 pin하는 쪽에 두는 것(ADR-0012 결정 6)과 같은 원칙이다.
    - `trust add`가 이미 있는 이름에 같은 fingerprint로 다시 불리면 role은 바꾸지 않는다. `--role`이 저장된 값과 달라도 `created: false`, `updated: false`이고, human 출력이 "role is unchanged; use `qsh trust set-role`" 뜻의 줄을 하나 낸다. 같은 명령을 자동화가 반복해 부르다 권한을 조용히 바꾸는 경로를 닫기 위해서다. 주소 갱신(`docs/CLI.md` §6.11)은 지금처럼 일어난다.
    - `trust set-role`은 권한을 바꾸는 유일한 명령이다. `trust rename`과 같은 규율로 동작한다. `trust.toml.lock` 아래에서 load → 변경 → audit 기록 → save 순서이고, audit을 쓰지 못하면 `INTERNAL`(`retryable: true`)로 끝나고 파일은 그대로다. 이름이 없으면 `HOST_NOT_FOUND`, role 문자열이 여섯 값 밖이면 `INVALID_ARGUMENT`다. 같은 값으로 다시 부르면 `changed: false`이고 audit도 쓰지 않는다. `[[ca]]` 항목에는 role이 없다. CA 이름을 주면 `HOST_NOT_FOUND`다(`trust rename`이 peer만 다루는 것과 같다).
@@ -151,7 +151,7 @@
 - 1인·소수 장비 사용에서 "이 장비를 믿는다"와 "이 장비가 내 셸을 쓴다"는 거의 언제나 같은 결정이다. SSH가 `authorized_keys` 한 줄로 두 결정을 함께 내리는 것도 같은 이유다. 지금 qsh는 이 한 결정을 두 파일, 두 명령, 한 번의 재시작으로 쪼개 놓았다. role 하나가 그 거리를 없앤다.
 - role을 `acl.toml`이 아니라 `trust.toml`에 두는 이유는 ADR-0017과 ADR-0025가 `acl.toml` writer를 기각한 이유가 `trust.toml`에는 없어서다. `trust.toml`은 이미 `FileLock`으로 read-modify-write를 직렬화하고 handshake마다 다시 읽힌다. 명령이 성공을 보고했는데 재시작 전까지 적용되지 않는 간극(ADR-0025 대안 절)이 생기지 않는다. 그리고 role이 pin에 붙어 있으면 pin을 지우는 순간 권한도 사라진다. 이름 문자열로 두 파일을 잇는 지금의 구조에서는 `trust rename`이나 이름 재사용이 권한을 조용히 옮긴다(B10, B12).
 - 기존 pin을 `none`으로 해석하는 것은 손해가 없다. 오늘 그 pin이 받는 권한은 정확히 `acl.toml` 행이 주는 것이고, 업그레이드 뒤에도 그대로다. 반대로 `full`로 해석하면 client로만 쓰려고 pin한 상대가 업그레이드 순간 이 장비의 셸을 얻는다.
-- 새 pin의 기본 role을 명령마다 다르게 두는 것은 ADR-0030(pin 방향)을 폐기하면서 남은 문제를 role로 푸는 방법이다. 방향 축 없이도 "dial하려고 등록한 상대"(`trust add`, `pair accept`, 로컬 쪽 SSH 부트스트랩)는 권한이 `none`이고 "들이려고 등록한 상대"(`pair invite`, 원격 쪽 SSH 부트스트랩)는 `full`이다. 사람이 다른 뜻을 가졌으면 플래그 하나로 바꾼다.
+- 새 pin의 기본 role을 명령마다 다르게 두는 것은 ADR-0030(pin 방향)을 폐기하면서 남은 문제를 role로 푸는 방법이다. 방향 축 없이도 "dial하려고 등록한 상대"(`--address`를 준 `trust add`, `pair accept`, 로컬 쪽 SSH 부트스트랩)는 권한이 `none`이고 "들이려고 등록한 상대"(`pair invite`, 주소 없는 `trust add`, 원격 쪽 SSH 부트스트랩)는 `full`이다. 기본이 `full`이라 사람이 손댈 일은 좁히는 쪽(opt-out)뿐이다. 사람이 다른 뜻을 가졌으면 플래그 하나로 바꾼다.
 - `acl.toml`이 없는 상태를 role만 동작하는 정상 상태로 두되 파싱 실패는 계속 전부 거부하는 것은 CLAUDE.md의 fail closed 원칙을 지키는 가장 좁은 변경이다. 없는 파일은 "아무 행도 쓰지 않았다"는 분명한 상태이고, 깨진 파일은 "무언가 쓰려 했는데 무엇인지 모른다"는 모호한 상태다.
 - role을 판정마다 읽는 것은 비용이 거의 없다. `SharedTrustStore::refresh`는 파일 내용이 바뀌지 않았으면 다시 파싱하지 않는다. 판정마다 파일을 한 번 읽는 비용은 `forward.local` 인라인 게이트처럼 잦은 지점에서도 `tunnel_echo_under_load` 예산 안에 든다고 보지만, 측정값은 아니다. 구현 커밋이 그 테스트로 확인한다.
 - role 집합을 작게 고정하면 매핑이 문서·코드·테스트 한 곳에서 대조된다(`acl_docs.rs`가 PRD §9 action 목록을 대조하는 것과 같은 방식). 사용자 정의 role은 결국 `acl.toml`을 하나 더 만드는 일이다.
@@ -162,7 +162,7 @@
 - role을 `acl.toml`에 둔다(`[[role]] principal = "device:phone", role = "full"`): 기각. 권한이 한 파일에 모이는 장점은 있지만 위 기각과 같은 이유로 어떤 명령도 그 파일을 쓸 수 없어서 "등록하면 바로 된다"를 이룰 수 없다.
 - CA 발급 인증서 확장에 role을 싣는다: 기각. 발급이 곧 권한 부여가 되고, 발급한 뒤에는 role을 바꾸거나 거둘 방법이 없다(폐기 목록은 ADR-0031 축소로 빠졌다). CA 경로는 지금처럼 `auth_path = "ca"` 행으로만 인가한다.
 - role 없는 기존 pin을 `full`로 해석한다: 기각. 근거 절의 조용한 확장이다.
-- `trust add`의 기본 role도 `full`로 둔다: 기각. pin에 방향이 없어서 dial 상대를 등록하는 흔한 사용이 inbound 권한을 준다(ADR-0017 결정 5가 TOFU를 기각한 것과 같은 모양).
+- 모든 `trust add`(주소를 준 dial 상대 pin 포함)의 기본 role을 `full`로 둔다: 기각. pin에 방향이 없어서 dial 상대를 등록하는 흔한 사용이 inbound 권한을 준다(ADR-0017 결정 5가 TOFU를 기각한 것과 같은 모양). 2026-10-12 초안은 반대로 `trust add` 전체를 `none`으로 두었으나, 2026-10-13 사용자 결정("기본을 full로 하고 opt-out")으로 주소 없는 inbound pin은 `full`이 되었다.
 - `acl.toml`에 deny 행을 들여 role을 깎는다: 기각. allow 전용 first-match 평가기에 우선순위 규칙이 생기고, `decide_agrees_with_naive_coverage_oracle`의 oracle과 `acl show`의 실효 집합 정의가 함께 복잡해진다. 더 작은 role과 행의 합으로 같은 결과를 낸다.
 - role을 연결 수립 때 한 번 정해 연결 내내 쓴다: 기각. `trust set-role`과 `trust remove`가 재연결 전까지 효과가 없어서 `acl.toml`의 재시작 간극을 trust 쪽에 다시 만든다. 이름만으로 판정마다 찾는 안도 기각한다. 같은 이름이 다른 fingerprint로 다시 등록되면 옛 연결이 새 role을 얻는다.
 - role 없이 "신뢰하면 전부"라는 불리언 하나: 기각. listener가 target에게 등록만 허용하는 경우(`reverse`)와 dial 상대를 신원만 등록하는 경우(`none`)를 나타낼 수 없다.

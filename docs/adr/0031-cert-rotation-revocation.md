@@ -1,6 +1,6 @@
 # ADR-0031: trust에서 peer를 빼거나 role을 줄이면, 장기 실행 프로세스(`qsh serve`, `qsh listen`, `qsh serve --to`)는 2초 안에 살아 있는 연결을 재검증해 더는 신뢰하지 않는 연결과 권한이 줄어든 연결을 닫는다. revocation 목록, rotation 문서, `trust rotate`, CA가 서명한 인증서의 개별 revoke는 두지 않는다
 
-날짜: 2026-10-11 (개정 2026-10-12)
+날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13)
 상태: 제안됨
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5)에서 이 번호를 인증서 rotation·revocation(M16 (d)) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `trust.toml`의 `[[revoked]]` 목록, `qsh trust revoke`, `qsh identity rotate`(rotation 문서와 `--keep-key` 갱신), `qsh trust rotate`, 연결 재검증, 유효기간 기한을 한 묶음으로 제안했다. 2026-10-12 사용자 결정이 P1을 다시 짜면서 앞의 넷을 뺐다. 이 문서는 남은 하나, 곧 "trust를 거두면 이미 열린 연결도 닫는다"만 정한다. 빠진 것은 대안과 기각 사유 절에 사용자 결정으로 옮겼다.

@@ -22,7 +22,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | M8 DoD 4 | wire freeze 발효와 독립 검증 계약(SC7) | 저장소 밖 조직 액션이라 캠페인 문서가 없다 | 소유: 운영자 |
 | M9 DoD 1 | SC1 재측정 3회 | `docs/campaigns/m9-stopwatch.md` | M7 DoD 1에 종속. `qsh setup` 캠페인의 비교 기준 |
 
-총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 33~51ew(추정, 2026-10-12 재기획 반영)에, ADR이 서야 산정할 수 있는 두 항목(M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
+총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 33~52ew(추정, 2026-10-12·13 재기획 반영)에, ADR이 서야 산정할 수 있는 두 항목(M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
 
 ## 1. 시퀀싱 원칙
 
@@ -182,6 +182,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 4. (철회) transport 추상 뒤에 TCP를 붙이고 파일 복사를 두 transport에서 검증한다는 원칙이었다. ADR-0043이 TCP fallback을 철회해 파일 복사는 QUIC 하나에서 검증한다.
 5. 권한 모델을 먼저 단순화한 뒤 신뢰 경로를 넓힌다. ADR-0045의 role이 M15에서 서야 M16의 SSH 부트스트랩(ADR-0044)이 원격 pin에 role을 쓸 수 있고, `qsh cp`(ADR-0029)도 role이 파일 권한을 준다는 전제 위에 선다. 2026-10-12 이전의 원칙(신뢰의 방향을 정한 뒤 pairing을 넓힌다)은 pin 방향 축·listener pairing이 폐기되며 대상을 잃었다. `qsh setup`은 새 경로가 열리면 ADR-0024 결정 2의 역할 표에 행을 더하는 식으로 뒤따른다.
 6. 사람 회차는 마일스톤 DoD에 넣지 않는다. DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다. 회차 기록은 §5.5에 모으고 P1 완료를 선언할 때의 조건으로 둔다. P0의 M7~M10은 회차를 DoD에 넣었기 때문에 "기능 완료 · DoD 잔여"로 멈춰 있다. 사람 회차를 착수 조건으로 거는 마일스톤은 M18 하나다(M8 DoD 3). 조건이 닫히지 않았으면 M18을 건너 M19를 먼저 열고, 건너뛴 사실을 이 절에 날짜와 함께 적는다.
+7. 정방향과 역방향은 같은 기능을 갖는다(PRD §4, 2026-10-13 사용자 결정). P1 기능은 마일스톤 안에서 두 route를 함께 착지시키고, DoD가 두 route 모두에서 같은 테스트를 요구한다. 한쪽만 여는 예외는 ADR이 이유를 적고 사용자가 승인한다.
 
 ### M11 — 이슈 후속과 ACL 가시성 ✅ 완료 (2026-09-30)
 
@@ -224,7 +225,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **명시적 out:** 디렉터리 동기화(rsync류), 원격↔원격 복사, 재개, UDP forwarding, 원격 파일 브라우징, role 추가·매핑 변경(새 ADR).
 - **수용 기준 (DoD):**
   - (a) ADR-0045가 `승인됨`이다. role 키가 없는 기존 `trust.toml`이 오늘과 같은 판정을 내고, 새 pin은 role 키를 명시하며, 모르는 role 값은 `CONFIG_ERROR`로 fail closed함을 테스트가 고정한다. `acl.toml` 세 상태(있음·없음·파싱 불가)마다 role grant의 동작이 ADR대로임을 oracle 테스트가 고정하고, `acl_check_equivalence.rs`와 `acl_uniformity.rs`가 role 경로를 포함한다. role로 allow된 요청의 audit 레코드가 근거를 싣는다.
-  - (b) 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와(ADR이 포함하면) reverse route 모두에서다(transport는 QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다.
+  - (b) 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두에서다(§5.1 원칙 7, transport는 QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다.
   - 권한이 없으면 deny다. 새 seam이 `DENY_SEAMS`에 행으로 오르고 `acl_uniformity.rs`가 문면 균일성을 단언한다. `acl_registry.rs`의 항상-deny 예외 목록에서 `file.read`/`file.write`가 빠지고 `forward.socks`만 남는다.
   - `full` role과 `allow = ["file.*"]` 행 어느 쪽으로도 qsh 자신의 상태 경로에 대한 `file.*`가 `PERMISSION_DENIED`이고 파일 바이트가 그대로임을 핀 테스트가 단언한다. 적어도 `acl.toml`, `trust.toml`, `invites.toml`, identity 파일, audit 로그를 덮고, 그 경로를 가리키는 symlink와 `..`로 이탈하는 경로 두 우회도 같은 결과임을 단언한다.
   - 인가 전 자원 생성이 없다. deny된 `file.write`·`file.mkdir` 뒤 목적지와 그 디렉터리에 새 파일·임시 파일·디렉터리가 없고 기존 파일은 바이트 단위로 같다.
@@ -239,17 +240,17 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 ### M16 — SSH 부트스트랩과 신뢰 철회
 
 - **범위:** 2026-10-12 사용자 결정("기존 SSH의 설정과 키를 활용해서 바로 qsh가 동작할 수 있게")으로 다시 짰다. 이전 범위의 pin 방향 축(ADR-0030), listener 초대 상환(ADR-0015), CSR 다대 CA 서명(ADR-0016)은 기각했고, rotation·revocation(ADR-0031)은 (b) 하나로 줄였다.
-  - (a) SSH 부트스트랩(ADR-0044). pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 `ssh`를 한 번 거쳐 원격의 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. `~/.ssh/config`, ssh-agent, 암호 걸린 키, known_hosts는 ssh가 처리하고 qsh는 `ssh -G`로 HostName만 읽는다. 원격 pin은 ADR-0045 role `full`(`--role`로 바꿈), 이 장비 쪽 pin은 role `none`이다. 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다. 원격 설치와 serve 기동은 대신하지 않는다.
+  - (a) SSH 부트스트랩(ADR-0044). pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 `ssh`를 한 번 거쳐 원격의 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. `~/.ssh/config`, ssh-agent, 암호 걸린 키, known_hosts는 ssh가 처리하고 qsh는 `ssh -G`로 HostName만 읽는다. 원격 pin은 ADR-0045 role `full`(`--role`로 바꿈), 이 장비 쪽 pin은 role `none`이다. 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다. 역방향 구도는 `qsh pair ssh <dest> --reverse --to <이 장비의 주소>`가 같은 절차로 연다(원격 pin `full`, 이 장비 쪽 pin `reverse`). 원격 설치와 serve 기동은 대신하지 않는다.
   - (b) trust 철회 시 열린 연결 닫기(ADR-0031 축소판). `trust remove`나 role 축소 뒤 `qsh serve`·`qsh listen`·`qsh serve --to`가 2초 안에 살아 있는 연결을 재검증해 신뢰를 잃었거나 권한이 줄어든 연결을 닫는다. `TrustRemoveScope` remedy의 "(P1)"이 여기서 풀린다.
 - **착수 조건:** ADR-0044·0031 승인, 그리고 M15 (a)(ADR-0045 role) 착지. (a)는 원격 pin에 role을 쓰고 (b)는 role grant 축소를 비교한다.
 - **명시적 out:** 조직 계정·중앙 관리(PRD §12 경계 밖), SSH 공개키를 principal로 쓰는 것(ADR-0026이 거부), 원격 qsh 설치·serve 기동, `StrictHostKeyChecking` 덮어쓰기, revocation 목록·rotation 문서·`trust rotate`·CA 발급 인증서 개별 revoke(2026-10-12 폐기).
 - **수용 기준 (DoD):**
   - ADR-0044·0031이 `승인됨`이다.
-  - (a) 가짜 `ssh` 실행 파일로 부트스트랩을 끝까지 돌리는 테스트가 양쪽 pin(이름, 주소, role)과 이어진 handshake를 고정한다. pin 충돌은 아무것도 쓰지 않고 끝나고, role 없는 기존 원격 pin을 `full`로 넓히지 않으며, 원격 audit를 쓸 수 없으면 pin도 쓰지 않음을 테스트가 단언한다. `--json`/`--jsonl`에서는 자동 발동하지 않고 ssh 자식이 BatchMode로 뜬다. stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 키 재료와 rc 출력이 로그에 남지 않는다.
+  - (a) 가짜 `ssh` 실행 파일로 부트스트랩을 끝까지 돌리는 테스트가 양쪽 pin(이름, 주소, role)과 이어진 handshake를 고정한다. pin 충돌은 아무것도 쓰지 않고 끝나고, role 없는 기존 원격 pin을 `full`로 넓히지 않으며, 원격 audit를 쓸 수 없으면 pin도 쓰지 않음을 테스트가 단언한다. `--json`/`--jsonl`에서는 자동 발동하지 않고 ssh 자식이 BatchMode로 뜬다. `--reverse` 부트스트랩 뒤 원격이 `serve --to`로 등록하면 reverse route 위의 attach·exec·`qsh cp`가 정방향과 같은 테스트를 통과한다. stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 키 재료와 rc 출력이 로그에 남지 않는다.
   - (b) `trust remove` 뒤 기존 연결이 2초 안에 CLOSE로 끝나고 audit 한 줄이 남음을 테스트가 고정한다(`an_established_connection_survives_the_hosts_trust_remove`는 반대 단언으로 바뀐다). role 축소 뒤 연결 처리, trust.toml 파싱 실패 중 처분이 ADR대로다. `TrustRemoveScope` message·remedy와 `docs/CLI.md` §6.11·§6.17 문면이 같은 커밋에서 바뀐다. 만료 30일 전 doctor 경고(P0)는 유지된다.
   - 새 명령·필드는 fixture 등재와 등록 완전성, man 재생성을 갖춘다. 부트스트랩 직후 pin 이름·role 고지가 나온다. `docs/design/threat-model.md` §3·§4가 ssh 신뢰 승계와 연결 재검증을 다룬다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
-- **크기:** 3.3~5.1ew. (a) ADR-0044 2.3~3.5(ADR-0045 role 몫 제외) / (b) ADR-0031 축소판 0.9~1.35 / 마감 0.1~0.2.
+- **크기:** 3.6~5.6ew. (a) ADR-0044 2.6~4.0(`--reverse` 포함, ADR-0045 role 몫 제외) / (b) ADR-0031 축소판 0.9~1.35 / 마감 0.1~0.2.
 
 ### M17 — 운영 표면
 
@@ -314,11 +315,11 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M13 측정·배포 기반 | 3.1~6.1 | 완료 |
 | M14 TCP/TLS fallback | 1.0~1.8 | 철회(ADR-0043). (a)만 착지 |
 | M15 역할 기반 권한과 scp 호환 파일 복사 | 7.0~10.5 | ADR-0045·0029 승인 (제안됨 2026-10-12, M13 (b)는 충족) |
-| M16 SSH 부트스트랩과 신뢰 철회 | 3.3~5.1 | ADR-0044·0031 승인(제안됨 2026-10-12), M15 (a) 착지. 0015·0016·0030은 기각 |
+| M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | ADR-0044·0031 승인(제안됨 2026-10-12), M15 (a) 착지. 0015·0016·0030은 기각 |
 | M17 운영 표면 | 1.3~2.0 + 미산정 하나 | (b) 착지, (c) 폐기. ADR-0032·0033 승인(제안됨 2026-10-11) |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
 | M19 Windows client | 4.7~7.0 (ADR-0035 초안은 4.3~6.9) | ADR-0035 승인 (제안됨 2026-10-11) |
-| 합 | 약 33~51 + 미산정 둘 | |
+| 합 | 약 33~52 + 미산정 둘 | |
 
 ### 5.3 P1 밖으로 보낸다
 
