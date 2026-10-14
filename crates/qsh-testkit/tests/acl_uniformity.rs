@@ -808,6 +808,28 @@ async fn assert_control_rows_denied(h: &LoopbackHarness, skip: &[&str], situatio
     }) {
         let before = h.audit.records().len();
         let result = drive_control_stream_op(&mut s, seam.name).await;
+        if cfg!(not(unix)) && is_file_seam(seam.name) {
+            // Off unix a file op is `UNSUPPORTED` before any decision
+            // (ADR-0029 decision 23), so there is no deny to compare.
+            assert!(
+                matches!(
+                    result,
+                    Err(ClientError::Remote {
+                        code: ErrorCode::Unsupported,
+                        ..
+                    })
+                ),
+                "{situation}: {}: {result:?}",
+                seam.name
+            );
+            assert_eq!(
+                h.audit.records().len(),
+                before,
+                "{situation}: {}",
+                seam.name
+            );
+            continue;
+        }
         assert_denied(result, &format!("{situation}: {}", seam.name));
         assert_new_audit_deny_for_seam(&h.audit, before, seam);
     }
