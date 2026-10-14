@@ -50,6 +50,18 @@ impl std::fmt::Debug for RoleResolvingAuthorizer {
 }
 
 impl Authorizer for RoleResolvingAuthorizer {
+    fn has_file_grant(&self, requester: &Requester<'_>, action: Action) -> bool {
+        // The same role resolution `check` does, so the pre-filter and the
+        // decision cannot see different roles. No role means the rows alone.
+        let role = self.trust.resolve_role(
+            requester.principal,
+            requester.auth_path,
+            requester.fingerprint,
+        );
+        self.policy
+            .file_grant_basis(requester.principal, requester.auth_path, role, action)
+    }
+
     fn check(
         &self,
         requester: &Requester<'_>,

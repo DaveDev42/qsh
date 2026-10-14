@@ -374,8 +374,10 @@ impl Server {
         }
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
-            // `FILE_DATA` lands here too: its ticket is minted by the file
-            // ops, which this build never gets past the ACL decision.
+            // `FILE_DATA` lands here too: the file ops mint its tickets, but
+            // the data plane that redeems them is not accepted yet, so the
+            // stream is refused before any ticket is looked at (a ticket
+            // only ever expires and releases what it holds).
             _ => {
                 tracing::debug!(principal = %ctx.principal, kind = header.kind, "unsupported stream kind");
                 stream.send.reset(RESET_CODE_BAD_HEADER);
@@ -419,6 +421,13 @@ impl Server {
                         tracing::warn!(principal = %ctx.principal, %exec_id, %err, "exec failed")
                     }
                 }
+            }
+            // Unreachable while `FILE_DATA` is refused above; if it is ever
+            // reached early, the ticket (already removed from the map)
+            // drops here, closing its fd and returning its quota slot.
+            TicketPurpose::File(_) => {
+                stream.send.reset(RESET_CODE_BAD_HEADER);
+                stream.recv.stop(RESET_CODE_BAD_HEADER);
             }
             TicketPurpose::Session {
                 session_id,

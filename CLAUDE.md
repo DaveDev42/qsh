@@ -78,8 +78,9 @@ If a change requires putting logic in `qsh-cli` to make something work, that's a
 
 ## Security defaults
 
-- Authorization is default-deny, evaluated at a single choke point before any resource exists: a request is allowed only when the peer's pin `role` (`trust.toml`, ADR-0045) or an `[[acl]]` row grants it, and the always-deny gate (`forward.socks`, `file.read`, `file.write`) is checked before either. A missing `acl.toml` means no rows and the roles still work. An unparseable `acl.toml` denies every request from every peer, roles included. If a `trust.toml` reload fails to parse or read, role grants stop until a reload succeeds, while pin authentication keeps using the last good snapshot. The process still binds and still answers; it just refuses. `acl.toml` loads once at startup, with no hot reload; roles are read on every decision.
+- Authorization is default-deny, evaluated at a single choke point before any resource exists: a request is allowed only when the peer's pin `role` (`trust.toml`, ADR-0045) or an `[[acl]]` row grants it, and the always-deny gate (`forward.socks`) is checked before either. A missing `acl.toml` means no rows and the roles still work. An unparseable `acl.toml` denies every request from every peer, roles included. If a `trust.toml` reload fails to parse or read, role grants stop until a reload succeeds, while pin authentication keeps using the last good snapshot. The process still binds and still answers; it just refuses. `acl.toml` loads once at startup, with no hot reload; roles are read on every decision.
 - Never create a resource (session, tunnel, listener) before authorization succeeds.
+- Remote file ops never reach qsh's own config, state or runtime paths, whatever the role or `paths` row says; every denial there is the same uniform `PERMISSION_DENIED`.
 - Fail closed on any ambiguous auth/ACL state. The audit writer is fail-closed too: no durable record, no operation.
 - Never log key material or PTY/command contents — audit records are structural (op, principal, result) and have no field that could hold a payload.
 

@@ -366,8 +366,10 @@ both_routes!(role_table_scenario =>
 
 /// The actions with no control-stream wire call in this build. They are not
 /// drivable, so the authorizer is asked directly: `forward.socks` is behind
-/// the always-deny gate for every role, and `file.read`/`file.write` stay
-/// there until the file ops arrive (PLAN M15 Step 12 flips those two rows).
+/// the always-deny gate for every role; `file.read` and `file.write` are
+/// `full`'s alone since the always-deny gate stopped covering them
+/// (ADR-0029 decision 3), and a role's file grant ignores the request path (ADR-0045
+/// 결정 5). The file ops themselves are driven in `file_host.rs`.
 #[test]
 fn role_full_without_acl_toml_allows_every_action_but_forward_socks_undrivable_actions() {
     for role in ROLES {
@@ -375,13 +377,20 @@ fn role_full_without_acl_toml_allows_every_action_but_forward_socks_undrivable_a
         let authorizer = env.authorizer(Role::Serve);
         let (principal, fingerprint) = requester_for(&env);
         let requester = Requester::new(&principal, AuthPath::Pin, fingerprint);
-        for action in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
+        let verdict = authorizer.check(&requester, Action::ForwardSocks, ResourceRef::unowned("x"));
+        assert_eq!(
+            verdict.decision,
+            Decision::Deny,
+            "role {role} must not reach forward.socks"
+        );
+        for action in [Action::FileRead, Action::FileWrite] {
             let verdict = authorizer.check(&requester, action, ResourceRef::unowned("x"));
-            assert_eq!(
-                verdict.decision,
-                Decision::Deny,
-                "role {role} must not reach {action}"
-            );
+            let want = if role == "full" {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+            assert_eq!(verdict.decision, want, "role {role} and {action}");
         }
     }
 }

@@ -567,6 +567,21 @@ pub struct ServeConfig {
     /// connection cap (`crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS`,
     /// 8) has no config key of its own.
     pub max_connections: Option<usize>,
+    /// Per-principal cap on concurrently open `file.read`/`file.write`
+    /// transfers (`crate::quota::QuotaKind::FilesPerPrincipal`, ADR-0029
+    /// decision 12). Counts from the moment the ticket is issued until the
+    /// stream ends or the ticket expires. Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_FILE_TRANSFERS_PER_PRINCIPAL`] (4). Same
+    /// no-off-switch discipline.
+    pub max_file_transfers_per_principal: Option<usize>,
+    /// Accept-arm-wide cap on concurrently open `file.read`/`file.write`
+    /// transfers (`crate::quota::QuotaKind::FilesHost`), checked before the
+    /// per-principal axis. Per accept arm like `max_connections`: `qsh
+    /// serve` and a `qsh serve --to` target each read this same key for
+    /// their own budget. Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_FILE_TRANSFERS`] (64). Same no-off-switch
+    /// discipline.
+    pub max_file_transfers: Option<usize>,
 }
 
 impl ServeConfig {
@@ -623,6 +638,12 @@ impl ServeConfig {
     pub const DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL: usize = 32;
     /// Default accept-arm-wide concurrent-connection cap: 512.
     pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
+    /// Default per-principal concurrent file-transfer cap: 4 (ADR-0029
+    /// decision 12; two `qsh cp` runs at the client's own parallelism of two
+    /// fit).
+    pub const DEFAULT_MAX_FILE_TRANSFERS_PER_PRINCIPAL: usize = 4;
+    /// Default accept-arm-wide concurrent file-transfer cap: 64.
+    pub const DEFAULT_MAX_FILE_TRANSFERS: usize = 64;
 
     /// Effective replay budget (never zero; a `0` in config is treated as
     /// the default rather than an unusable ring).
@@ -749,6 +770,24 @@ impl ServeConfig {
         match self.max_connections {
             Some(n) if n > 0 => n,
             _ => Self::DEFAULT_MAX_CONNECTIONS,
+        }
+    }
+
+    /// Effective per-principal concurrent file-transfer cap (never zero,
+    /// same discipline).
+    pub fn max_file_transfers_per_principal(&self) -> usize {
+        match self.max_file_transfers_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_FILE_TRANSFERS_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective accept-arm-wide concurrent file-transfer cap (never zero,
+    /// same discipline).
+    pub fn max_file_transfers(&self) -> usize {
+        match self.max_file_transfers {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_FILE_TRANSFERS,
         }
     }
 }

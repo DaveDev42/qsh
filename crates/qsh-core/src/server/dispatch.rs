@@ -1,5 +1,6 @@
 //! The control-message dispatch choke point of [`Server`] and its authorization helpers.
 
+use super::file::FileRequest;
 use super::*;
 
 impl Server {
@@ -114,38 +115,22 @@ impl Server {
             // the ACL choke point. `file.list` authorizes as `file.read` and
             // `file.mkdir` as `file.write` (decision 3). Only `file.write`
             // and `file.mkdir` carry a `name_if_dir`.
-            Some(control_message::Body::FileReadOpen(req)) => Some(self.handle_file_op(
-                ctx,
-                request_id,
-                crate::acl::Op::FileRead,
-                crate::file::guard::FileOp::Read,
-                &req.path,
-                "",
-            )),
-            Some(control_message::Body::FileWriteOpen(req)) => Some(self.handle_file_op(
-                ctx,
-                request_id,
-                crate::acl::Op::FileWrite,
-                crate::file::guard::FileOp::Write,
-                &req.path,
-                &req.name_if_dir,
-            )),
-            Some(control_message::Body::FileListOpen(req)) => Some(self.handle_file_op(
-                ctx,
-                request_id,
-                crate::acl::Op::FileList,
-                crate::file::guard::FileOp::List,
-                &req.path,
-                "",
-            )),
-            Some(control_message::Body::FileMkdirOpen(req)) => Some(self.handle_file_op(
-                ctx,
-                request_id,
-                crate::acl::Op::FileMkdir,
-                crate::file::guard::FileOp::Mkdir,
-                &req.path,
-                &req.name_if_dir,
-            )),
+            Some(control_message::Body::FileReadOpen(req)) => Some(
+                self.handle_file_op(ctx, request_id, FileRequest::Read(req))
+                    .await,
+            ),
+            Some(control_message::Body::FileWriteOpen(req)) => Some(
+                self.handle_file_op(ctx, request_id, FileRequest::Write(req))
+                    .await,
+            ),
+            Some(control_message::Body::FileListOpen(req)) => Some(
+                self.handle_file_op(ctx, request_id, FileRequest::List(req))
+                    .await,
+            ),
+            Some(control_message::Body::FileMkdirOpen(req)) => Some(
+                self.handle_file_op(ctx, request_id, FileRequest::Mkdir(req))
+                    .await,
+            ),
             // No body this build understands. prost drops unknown fields,
             // so a reserved (25 `SessionSignal`) or future control number
             // decodes to `body: None` exactly like an empty message;
@@ -324,7 +309,7 @@ impl Server {
     /// reaches the wire (that would turn the message into a capability-
     /// enumeration oracle, see that constant's doc) and is used only for
     /// a host-side `tracing` diagnostic, never logged to the peer.
-    fn permission_denied(request_id: u64, action: Action) -> ControlMessage {
+    pub(super) fn permission_denied(request_id: u64, action: Action) -> ControlMessage {
         tracing::debug!(%request_id, %action, "denying: PERMISSION_DENIED");
         ControlMessage::error(
             request_id,

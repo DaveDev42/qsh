@@ -42,6 +42,7 @@ use crate::config::ServeConfig;
 mod audit;
 mod connection;
 mod exec;
+mod file;
 mod pairing;
 mod remote_forward;
 mod tunnel_stream;
@@ -97,6 +98,15 @@ pub enum QuotaKind {
     /// ([`MAX_CONCURRENT_PAIRING_CONNECTIONS`], not configurable) —
     /// enforced in a later M8 Step 3b stage.
     PairingConnections,
+    /// The per-principal cap on concurrently open `file.read`/`file.write`
+    /// transfers (`[serve].max_file_transfers_per_principal`, ADR-0029
+    /// decision 12) — enforced by [`Quotas::reserve_file_transfer`].
+    FilesPerPrincipal,
+    /// The accept-arm-wide cap on concurrently open `file.read`/
+    /// `file.write` transfers (`[serve].max_file_transfers`) — enforced by
+    /// [`Quotas::reserve_file_transfer`], checked *before* the per-principal
+    /// axis like [`QuotaKind::ExecHost`]. Derived as `Σ files_in_use`.
+    FilesHost,
 }
 
 /// Fixed cap on concurrently open pairing connections (`Principal::
@@ -138,6 +148,8 @@ impl QuotaKind {
         QuotaKind::ConnectionsPerPrincipal,
         QuotaKind::Connections,
         QuotaKind::PairingConnections,
+        QuotaKind::FilesPerPrincipal,
+        QuotaKind::FilesHost,
     ];
 
     /// The audit/log category word — the exact `quota_*` vocabulary
@@ -155,6 +167,8 @@ impl QuotaKind {
             QuotaKind::ConnectionsPerPrincipal => "quota_connections_principal",
             QuotaKind::Connections => "quota_connections_host",
             QuotaKind::PairingConnections => "quota_connections_pairing",
+            QuotaKind::FilesPerPrincipal => "quota_files_principal",
+            QuotaKind::FilesHost => "quota_files_host",
         }
     }
 
@@ -171,7 +185,9 @@ impl QuotaKind {
     /// matching the relevant `crate::acl::Action::as_str()` byte for byte
     /// without pulling an `acl` dependency into this leaf-most module — see
     /// [`crate::audit::AuditRecord::quota_rejected`], which is the sole
-    /// caller.
+    /// caller. The one word that is not an ACL action is `"file.transfer"`
+    /// (either file axis): a transfer is a `file.read` or a `file.write`,
+    /// and one quota kind counts both, so no single action word fits.
     pub fn action(self) -> &'static str {
         match self {
             QuotaKind::Sessions | QuotaKind::SessionsPerPrincipal => "session.open",
@@ -183,6 +199,7 @@ impl QuotaKind {
             QuotaKind::ConnectionsPerPrincipal
             | QuotaKind::Connections
             | QuotaKind::PairingConnections => "connect",
+            QuotaKind::FilesPerPrincipal | QuotaKind::FilesHost => "file.transfer",
         }
     }
 
@@ -211,6 +228,7 @@ impl QuotaKind {
             QuotaKind::ConnectionsPerPrincipal
             | QuotaKind::Connections
             | QuotaKind::PairingConnections => "connection quota exceeded",
+            QuotaKind::FilesPerPrincipal | QuotaKind::FilesHost => "file transfer quota exceeded",
         }
     }
 }
@@ -246,6 +264,13 @@ pub struct QuotaLimits {
     /// Accept-arm-wide cap on concurrently open connections
     /// (`[serve].max_connections`).
     pub max_connections: usize,
+    /// Per-principal cap on concurrently open file transfers
+    /// (`[serve].max_file_transfers_per_principal`).
+    pub max_file_transfers_per_principal: usize,
+    /// Accept-arm-wide cap on concurrently open file transfers
+    /// (`[serve].max_file_transfers`), checked before the per-principal axis
+    /// ([`Quotas::reserve_file_transfer`]).
+    pub max_file_transfers: usize,
 }
 
 impl Default for QuotaLimits {
@@ -261,6 +286,8 @@ impl Default for QuotaLimits {
                 ServeConfig::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL,
             max_connections_per_principal: ServeConfig::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL,
             max_connections: ServeConfig::DEFAULT_MAX_CONNECTIONS,
+            max_file_transfers_per_principal: ServeConfig::DEFAULT_MAX_FILE_TRANSFERS_PER_PRINCIPAL,
+            max_file_transfers: ServeConfig::DEFAULT_MAX_FILE_TRANSFERS,
         }
     }
 }
@@ -280,6 +307,8 @@ impl QuotaLimits {
             max_remote_forwards_per_principal: serve.max_remote_forwards_per_principal(),
             max_connections_per_principal: serve.max_connections_per_principal(),
             max_connections: serve.max_connections(),
+            max_file_transfers_per_principal: serve.max_file_transfers_per_principal(),
+            max_file_transfers: serve.max_file_transfers(),
         }
     }
 }
@@ -323,6 +352,11 @@ struct QuotaState {
     /// plain counter, not a map: a pairing connection has no principal to
     /// key by, so there is only ever this one fixed-cap axis.
     pairing_connections_in_use: usize,
+    /// Live file-transfer reservations per opener key (ADR-0029 decision 12,
+    /// [`Quotas::reserve_file_transfer`]) — same "no entry without a live
+    /// resource" invariant as `exec_in_use`; the host axis
+    /// ([`QuotaKind::FilesHost`]) is `Σ files_in_use.values()`.
+    files_in_use: HashMap<String, usize>,
 }
 
 /// One [`QuotaKind`] category's audit-window bookkeeping (R2 설계 검토
@@ -351,17 +385,17 @@ struct QuotaState {
 /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] entries per category (a closed window
 /// is deleted, not merely reset — see [`Quotas::flush_expired`]), so the
 /// whole `Quotas` never holds more than `QuotaKind::ALL.len() ×
-/// (MAX_AUDIT_WINDOW_PRINCIPALS + 1)` windows at once — 10 × 65 = 650
+/// (MAX_AUDIT_WINDOW_PRINCIPALS + 1)` windows at once — 12 × 65 = 780
 /// today. Each entry is a `String` key (principal name, length `L`) plus
 /// a small `WindowState`; with hashbrown's ~2× load-factor overhead the
-/// skeleton (`L = 0`) is bounded by roughly `2 × 650 × 64` bytes ≈ 83
-/// KiB, plus `2 × 650 × L` for the strings themselves. **`L` is not
+/// skeleton (`L = 0`) is bounded by roughly `2 × 780 × 64` bytes ≈ 100
+/// KiB, plus `2 × 780 × L` for the strings themselves. **`L` is not
 /// bounded by this module** (R2 review A/B, F4/B6) — on the CA path
 /// `qsh_transport::identity::valid_segment` accepts any non-empty SAN
 /// segment containing no `/`, so `L` is bounded only by the peer
 /// certificate the attacker presents, not by anything this module
-/// controls: a realistic `L ≤ 1 KiB` gives ~1.4 MB total, a pathological
-/// 64 KiB SAN gives ~83 MB. Bounding principal-name length itself is a
+/// controls: a realistic `L ≤ 1 KiB` gives ~1.6 MB total, a pathological
+/// 64 KiB SAN gives ~100 MB. Bounding principal-name length itself is a
 /// separate question, out of scope here. This is not a *new* attack
 /// surface of that shape, though — the same principal string already
 /// lives in at least one longer-lived structure (a live connection's own
@@ -662,6 +696,40 @@ impl Drop for RemoteForwardPermit {
                 state
                     .remote_forwards_per_principal
                     .remove(&self.principal_key);
+            }
+        }
+    }
+}
+
+/// RAII file-transfer reservation ([`Quotas::reserve_file_transfer`],
+/// ADR-0029 decision 12). Held by the `file.read`/`file.write` ticket from
+/// the moment it is issued until the data stream ends or the ticket
+/// expires; `Drop` decrements the principal's count (removing the entry at
+/// zero), the same discipline as [`ExecPermit`] and for the same reason: the
+/// ticket map's every removal site releases it by dropping the ticket.
+#[derive(Debug)]
+pub struct FilePermit {
+    quotas: Weak<Quotas>,
+    principal_key: String,
+}
+
+impl Drop for FilePermit {
+    fn drop(&mut self) {
+        // Same B4 lock-order tripwire as `ExecPermit::drop`: never run while
+        // a higher-level lock (the ticket map) is held.
+        #[cfg(test)]
+        if lock_order::DEPTH.with(|d| d.get()) > 0 {
+            lock_order::VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let Some(quotas) = self.quotas.upgrade() else {
+            return;
+        };
+        let mut state = quotas.lock();
+        if let Some(count) = state.files_in_use.get_mut(&self.principal_key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.files_in_use.remove(&self.principal_key);
             }
         }
     }

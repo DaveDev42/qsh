@@ -5688,9 +5688,10 @@ async fn redemption_without_a_durable_audit_record_writes_no_pin_and_keeps_the_i
 }
 
 // ---------------------------------------------------------------------
-// Remote file ops (ADR-0029, M15 Step 11): shape check, then the ACL choke
-// point. The gate still denies `file.read`/`file.write`, so every well-formed
-// request ends in `PERMISSION_DENIED` and one audit line.
+// Remote file ops (ADR-0029, M15 Steps 11 and 12): shape check, then the ACL
+// choke point. A principal with no file grant ends in `PERMISSION_DENIED` and
+// one audit line; the allowed paths are covered end to end in
+// `crates/qsh-testkit/tests/file_host.rs`.
 // ---------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -5743,11 +5744,11 @@ fn file_requests(path: &str, name_if_dir: &str) -> Vec<(&'static str, control_me
     ]
 }
 
-/// A policy that names both file actions with `paths = ["/"]` for `laptop`:
-/// the broadest grant `acl.toml` can write. The always-deny gate (ADR-0029
-/// decision 8, ADR-0045 decision 5) still comes first.
+/// A policy that names both file actions for `laptop`, with `paths` when
+/// `paths` is `Some`. `Some(["/"])` is the broadest grant `acl.toml` can
+/// write.
 #[cfg(unix)]
-fn file_grant_policy() -> Arc<crate::acl::Policy> {
+fn file_grant_policy(paths: Option<Vec<String>>) -> Arc<crate::acl::Policy> {
     Arc::new(crate::acl::Policy {
         rules: vec![crate::acl::Rule {
             principal: Principal::Device("laptop".into()).to_string(),
@@ -5757,17 +5758,17 @@ fn file_grant_policy() -> Arc<crate::acl::Policy> {
                 crate::acl::ActionPattern::Exact(Action::FileWrite),
             ],
             scope: crate::acl::Scope::Any,
-            paths: Some(vec!["/".into()]),
+            paths,
         }],
     })
 }
 
-/// PLAN M15 Step 11 (c): a well-formed file request is answered
-/// `PERMISSION_DENIED` with the uniform message and one audit line whose
-/// resource is the path as sent, and the injected normalizer is never called.
-/// No filesystem access happens before the decision: not even for a principal
-/// whose `acl.toml` row grants the action over `/`, because the always-deny
-/// gate denies first.
+/// A well-formed file request from a
+/// principal with no ground to receive the action (no rule, or a rule
+/// without `paths`) is answered `PERMISSION_DENIED` with the uniform message
+/// and one audit line whose resource is the path as sent, and the injected
+/// normalizer is never called: the host does not look at the path of a
+/// request it would refuse anyway.
 #[cfg(unix)]
 #[tokio::test]
 async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
@@ -5775,7 +5776,7 @@ async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
 
     for authorizer in [
         Arc::new(DenyAll) as Arc<dyn Authorizer>,
-        file_grant_policy() as Arc<dyn Authorizer>,
+        file_grant_policy(None) as Arc<dyn Authorizer>,
     ] {
         let rig = rig(authorizer);
         let counter = Arc::new(CountingNormalizer::new(FsNormalizer));
@@ -5812,6 +5813,75 @@ async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
         // Nothing was minted for a data stream either.
         assert!(rig.server.tickets.lock().unwrap().is_empty());
     }
+}
+
+/// A host that was never told where its state tree is cannot say what is
+/// protected, so an ACL allow is not enough: the request is refused with the
+/// uniform reply and a second audit line (`deny`, no rule, no role), and
+/// nothing is created. Production always calls `Server::set_file_host`.
+#[cfg(unix)]
+#[tokio::test]
+async fn file_op_without_a_configured_state_tree_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let rig = rig(file_grant_policy(Some(vec![root.display().to_string()])) as Arc<dyn Authorizer>);
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let path = root.join("x").display().to_string();
+    for (i, (op, body)) in file_requests(&path, "").into_iter().enumerate() {
+        rig.audit.clear();
+        let reply = rig
+            .server
+            .dispatch(&ctx, &ControlMessage::new(i as u64 + 1, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::PermissionDenied),
+            "{op}: {reply:?}"
+        );
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 2, "{op}: {recs:?}");
+        assert_eq!(recs[0].decision, "allow", "{op}");
+        assert_eq!(recs[1].decision, "deny", "{op}");
+        assert_eq!(recs[1].rule, None, "{op}");
+        assert_eq!(recs[1].role, None, "{op}");
+    }
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    assert!(rig.server.tickets.lock().unwrap().is_empty());
+}
+
+/// A file ticket nobody redeems stops holding its descriptor and its
+/// transfer slot when it expires: the housekeeping sweep drops it, which
+/// closes the fd and releases the permit (ADR-0029 decision 8 step 6). The
+/// ticket is back-dated instead of waiting out `TICKET_TTL`.
+#[cfg(unix)]
+#[test]
+fn an_expired_file_ticket_releases_its_descriptor_and_its_transfer_slot() {
+    let rig = rig(Arc::new(DenyAll));
+    let permit = rig.quotas.reserve_file_transfer("device:laptop").unwrap();
+    let file = std::fs::File::open("/dev/null").unwrap();
+    let key = rig.server.issue_ticket(
+        7,
+        TicketPurpose::File(PendingFile {
+            op: PendingFileOp::Read { file, size: 0 },
+            permit,
+        }),
+    );
+    assert_eq!(rig.quotas.files_in_use("device:laptop"), 1);
+    assert_eq!(rig.server.pending_unexpired_tickets(), 1);
+
+    rig.server
+        .tickets
+        .lock()
+        .unwrap()
+        .get_mut(&key)
+        .expect("ticket is stored")
+        .expires_at = Instant::now() - Duration::from_secs(1);
+    rig.server.quota_housekeeping();
+
+    assert!(rig.server.tickets.lock().unwrap().is_empty());
+    assert_eq!(rig.quotas.files_in_use("device:laptop"), 0);
+    assert_eq!(rig.quotas.files_in_use_total(), 0);
 }
 
 /// The audit action follows ADR-0029 decision 3: `file.list` is `file.read`
@@ -5921,12 +5991,11 @@ async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
                     "{op} {tail}"
                 );
             } else {
-                // Reaches the choke point: allowed by the double, then
-                // refused to act (the handler has nothing past the decision
-                // yet).
+                // Reaches the choke point: the double allows, then this rig
+                // has no configured state tree and so refuses (fail closed).
                 assert_eq!(
                     error_code(&reply),
-                    Some(ErrorCode::Unsupported),
+                    Some(ErrorCode::PermissionDenied),
                     "{op} {tail}"
                 );
             }

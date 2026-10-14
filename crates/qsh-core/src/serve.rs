@@ -557,6 +557,11 @@ pub fn host_runtime(
         quotas,
     );
     server.set_pinned_principals(pinned_principals);
+    // The remote file ops resolve qsh's own state tree (config, state and
+    // runtime directories, the audit file) per request from these; a reverse
+    // target gets the same set because it comes through here too (ADR-0029
+    // decision 5).
+    server.set_file_host(paths.clone(), config.audit.clone());
     HostRuntime {
         server,
         audit,

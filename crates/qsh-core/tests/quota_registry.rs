@@ -125,3 +125,142 @@ fn reserve_connection_has_exactly_one_production_call_site_in_reverse_listen() {
         sites.len()
     );
 }
+
+// ---------------------------------------------------------------------
+// The file-transfer axes (ADR-0029 decision 12).
+// ---------------------------------------------------------------------
+
+/// Real `.reserve_file_transfer(` call sites in `relative`'s production code.
+fn reserve_file_transfer_call_sites(relative: &str) -> Vec<String> {
+    non_comment_lines(&production_source(relative))
+        .into_iter()
+        .filter(|line| line.contains(".reserve_file_transfer("))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// A file-transfer slot is reserved in exactly one place, the host's file-op
+/// pipeline (`crates/qsh-core/src/server/file_host.rs`), and in no other
+/// `server/` source: a second reservation site would count a transfer the
+/// ticket does not hold, or hold one the quota never counted.
+#[test]
+fn reserve_file_transfer_has_exactly_one_production_call_site() {
+    let dir = repo_root().join("crates/qsh-core/src/server");
+    let mut total = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "tests.rs" {
+            continue;
+        }
+        let sites = reserve_file_transfer_call_sites(&format!("crates/qsh-core/src/server/{name}"));
+        if name == "file_host.rs" {
+            assert_eq!(sites.len(), 1, "file_host.rs: {sites:?}");
+        } else {
+            assert!(
+                sites.is_empty(),
+                "{name} must not reserve a slot: {sites:?}"
+            );
+        }
+        total += sites.len();
+    }
+    assert_eq!(total, 1);
+}
+
+/// ADR-0029 decision 8 puts the quota after the ACL decision and the
+/// state-path check and before anything is opened. The pipeline is one
+/// function, so source order is execution order: the choke point, then the
+/// protected-set comparison, then the reservation, then the first open.
+#[test]
+fn file_transfer_quota_follows_the_acl_and_state_path_stages_and_precedes_the_first_open() {
+    let source = production_source("crates/qsh-core/src/server/file_host.rs");
+    let at = |needle: &str| {
+        source
+            .find(needle)
+            .unwrap_or_else(|| panic!("file_host.rs lost `{needle}`"))
+    };
+    let acl = at("self.authorize_owned(");
+    let state = at("protected.denies(&canonical)");
+    let quota = at("self.reserve_file_permit(");
+    let open = at("guard::open_read_nofollow(");
+    assert!(acl < state, "ACL decision before the state-path check");
+    assert!(state < quota, "state-path check before the quota");
+    assert!(quota < open, "quota before the first open");
+}
+
+// ---------------------------------------------------------------------
+// The production wiring of the remote file ops (ADR-0029 decision 5).
+// ---------------------------------------------------------------------
+
+/// Real `.set_file_host(` call sites in `relative`'s production code.
+fn set_file_host_call_sites(relative: &str) -> Vec<String> {
+    non_comment_lines(&production_source(relative))
+        .into_iter()
+        .filter(|line| line.contains(".set_file_host("))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// `Server::set_file_host` hands the host its state tree (config, state and
+/// runtime directories, audit file). Without it every file request that the
+/// ACL allows fails closed with `PERMISSION_DENIED`, so a dropped call would
+/// leave the feature silently dead while every hand-wired test stays green.
+/// The call lives in `serve::host_runtime`, the one factory `qsh serve`, `qsh
+/// listen`'s controller and a `qsh serve --to` target share, and nowhere
+/// else in production code.
+#[test]
+fn set_file_host_is_called_once_and_only_inside_host_runtime() {
+    let source = production_source("crates/qsh-core/src/serve.rs");
+    let sites = set_file_host_call_sites("crates/qsh-core/src/serve.rs");
+    assert_eq!(sites.len(), 1, "serve.rs: {sites:?}");
+
+    let start = source
+        .find("pub fn host_runtime(")
+        .expect("serve.rs lost host_runtime");
+    // The function ends at the first closing brace in column 0.
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .expect("host_runtime has no closing brace");
+    let body = &source[start..end];
+    assert!(
+        body.contains(".set_file_host("),
+        "set_file_host must be called inside serve::host_runtime"
+    );
+
+    for relative in [
+        "crates/qsh-core/src/server/mod.rs",
+        "crates/qsh-core/src/server/file.rs",
+        "crates/qsh-core/src/server/file_host.rs",
+        "crates/qsh-core/src/reverse/target/mod.rs",
+        "crates/qsh-cli/src/main.rs",
+    ] {
+        let sites = set_file_host_call_sites(relative);
+        // `server/file.rs` defines the method (`pub fn set_file_host(`
+        // has no leading dot) and no other file may call it.
+        assert!(
+            sites.is_empty(),
+            "{relative} must not wire the file host: {sites:?}"
+        );
+    }
+}
+
+/// Both production hosts reach `set_file_host` through `host_runtime`:
+/// `run_serve` and the reverse target each call it exactly once.
+#[test]
+fn run_serve_and_the_reverse_target_both_build_their_server_through_host_runtime() {
+    for relative in [
+        "crates/qsh-core/src/serve.rs",
+        "crates/qsh-core/src/reverse/target/mod.rs",
+    ] {
+        let calls: Vec<String> = non_comment_lines(&production_source(relative))
+            .into_iter()
+            .filter(|line| line.contains("host_runtime(") && !line.contains("fn host_runtime("))
+            .map(|line| line.trim().to_string())
+            .collect();
+        assert_eq!(calls.len(), 1, "{relative}: {calls:?}");
+    }
+}

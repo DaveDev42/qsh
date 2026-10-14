@@ -43,7 +43,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
-- `file.v1`(ADR-0029)은 상수 `CAP_FILE_V1`로 정의만 되어 있고 **아직 광고하지 않는다**(`LOCAL_CAPABILITIES`에 없다). 파일 op의 wire와 인가 seam은 이 문자열 없이도 dispatch되며, 항상-deny 게이트가 걷히는 단계에서 광고와 negotiation 규칙이 함께 선다.
+- `file.v1`(ADR-0029)은 상수 `CAP_FILE_V1`로 정의만 되어 있고 **아직 광고하지 않는다**(`LOCAL_CAPABILITIES`에 없다). 파일 op의 wire와 host 쪽 제어 평면(인가, 상태 경로, 재검증, quota, ticket 발급, `file.list`, `file.mkdir`)은 이 문자열 없이도 dispatch되고 동작한다. 정상 client는 광고를 확인하고 보내므로 이 시점에는 요청을 보내지 않는다. 광고와 negotiation 규칙은 `FILE_DATA` 데이터 평면과 함께 선다.
 
 ## 5. Frame layer
 
@@ -80,7 +80,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 
 **`FILE_DATA`(ADR-0029 결정 9).** `FileReadOpen`/`FileWriteOpen`이 ACL을 통과한 뒤 발급되는 ticket으로만 열린다. 프레임은 §5 그대로(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이고 `data` 청크는 `FILE_CHUNK_MAX`(32 KiB) 이하다. `FileEnd{size, blake3}`가 바이트열을 닫고, `FileWriteResult`는 `file.write` 스트림에서 host가 요청자에게만 보낸다. 청크 상한 초과·`end` 뒤의 frame·요청자가 보낸 `result`는 프로토콜 위반이다. 이 단계(M15 (b))에는 `FILE_DATA` 스트림을 받는 pump가 없어서 host는 이 header를 `BAD_HEADER`로 거절한다 — 파일 복사 본체가 오는 단계에서 pump가 선다. `FileListOpen`/`FileMkdirOpen`은 control 스트림 안에서만 답하며 `FileListed` 한 페이지는 `FILE_LIST_PAGE_MAX`(512)개 항목으로 `CONTROL_FRAME_MAX` 안에 들어간다(`FILE_LIST_DIR_MAX` 65536은 디렉터리당 상한).
 
-**파일 op의 host 쪽 순서(ADR-0029 결정 8, 이 단계의 몫).** 1) 경로 모양 검사와 home 해석(`file::guard::shape_path`) — 실패는 `INVALID_ARGUMENT`(비 unix host는 `UNSUPPORTED`), 판정할 것이 없으므로 ACL도 audit도 없다. 2) ACL choke point — 경로 문자열 그대로가 audit `resource`이고 거절은 균일한 `PERMISSION_DENIED`다. 항상-deny 게이트가 아직 `file.read`/`file.write`를 막으므로 실 정책에서는 여기서 끝나고 정규화기는 불리지 않는다. 3) 이후 단계(사용자 힌트·상태 경로·쿼터·열기·응답)는 아직 없고, 인가를 통과한 요청은 `UNSUPPORTED`로 답한다.
+**파일 op의 host 쪽 순서(ADR-0029 결정 8).** 앞 단계가 실패하면 뒤 단계는 돌지 않는다. 1) 경로 모양 검사와 home 해석(`file::guard::shape_path`) — 실패는 `INVALID_ARGUMENT`(비 unix host는 `UNSUPPORTED`), 판정할 것이 없으므로 ACL도 audit도 없다. 2) ACL choke point — 근거 판정(`Authorizer::has_file_grant`)이 참일 때만 정규화하고, 경로 문자열 그대로가 audit `resource`다. 근거가 없는 요청은 정규화기를 부르지 않는다. 3) `user@` 힌트가 serve 계정과 다르면 `UNSUPPORTED`(허용된 뒤에만). 4) 상태 경로 판정 — 보호 집합에 들면 거절하고 audit 한 줄이 더 남는다. 5) `file.read`/`file.write`의 전송 quota. 6) 디렉터리 fd 기준으로 열고 연 핸들의 실제 경로를 보호 집합과 평가기에 다시 대조한다(불일치는 audit 한 줄 추가). `file.read`는 보호 inode와 파일 종류도 본다. 7) 응답: `file.read`/`file.write`는 연 fd를 묶은 ticket(`FileReadOpened`/`FileWriteOpened`)을, `file.list`/`file.mkdir`은 결과를 바로 돌려준다. ticket은 §7의 다른 ticket과 같이 128비트·단회·30초이고 연결당 예산을 공유하며, 소비되지 않고 만료되거나 연결이 끊기면 fd와 quota slot이 풀린다. 정책으로 인한 거절은 모두 같은 `PERMISSION_DENIED`다(행 없음, `paths` 없음·밖, 정규화 실패, 상태 경로, 재검증 불일치, 보호 inode, 보호 inode 스캔 실패, OS `EACCES`). `FILE_DATA` 스트림은 받는 pump가 아직 없어 `BAD_HEADER`로 닫힌다.
 
 **`ConnectResult`(§9의 data-stream message, `qsh.wire.v1`):** `{ bool ok = 1; string code = 2; string message = 3; }`. frame layer는 위와 같은 §5 재사용(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이며, `ok = true` 이후로는 frame 없이 raw bytes로 전환된다(§5의 터널 스트림 예외). `ok = false`일 때 `code`는 CLI.md §3.3 어휘에서 온다 — dial 실패는 `CONNECTION_FAILED`, 위 inline ACL 거부는 `PERMISSION_DENIED`.
 

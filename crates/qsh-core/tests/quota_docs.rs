@@ -172,6 +172,7 @@ fn cli_md_names_every_quota_reject_action() {
             "forward.local",
             "forward.remote",
             "connect",
+            "file.transfer",
         ]),
         "QuotaKind::action() vocabulary changed — update the assertion \
          (and docs/CLI.md §6.12's action sentence) deliberately, not by \
@@ -230,6 +231,11 @@ fn cli_md_and_architecture_md_name_every_quota_config_key_and_its_default() {
             defaults.max_connections_per_principal as u64,
         ),
         ("max_connections", defaults.max_connections as u64),
+        (
+            "max_file_transfers_per_principal",
+            defaults.max_file_transfers_per_principal as u64,
+        ),
+        ("max_file_transfers", defaults.max_file_transfers as u64),
     ];
 
     for (key, default) in keys {

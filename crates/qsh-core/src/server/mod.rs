@@ -60,6 +60,8 @@ use crate::tunnel::splice::splice_tcp_quic;
 mod dispatch;
 mod exec;
 mod file;
+#[cfg(unix)]
+mod file_host;
 mod reverse;
 mod sessions;
 mod tunnels;
@@ -308,6 +310,60 @@ pub struct PendingWrite {
     data: Vec<u8>,
 }
 
+/// An authorized `file.read`/`file.write` waiting for its `FILE_DATA`
+/// stream (ADR-0029 decision 8): everything the host opened at stage 6,
+/// held by the ticket until a stream redeems it or the ticket expires. Both
+/// resources release on drop, so every ticket-map removal site (expiry
+/// sweep, connection purge) closes the fd and returns the quota slot without
+/// a manual step. Nothing is visible on disk yet: the temp file of a write
+/// is created only after redemption.
+///
+/// Not [`Clone`] — see [`PendingExec`]'s own doc.
+#[derive(Debug)]
+pub struct PendingFile {
+    /// What the data stream will do.
+    pub op: PendingFileOp,
+    /// The transfer slot this ticket holds (`[serve].max_file_transfers_
+    /// per_principal` and `max_file_transfers`, ADR-0029 decision 12).
+    pub permit: crate::quota::FilePermit,
+}
+
+/// The two data-carrying file ops, with the handle each opened at stage 6.
+#[derive(Debug)]
+pub enum PendingFileOp {
+    /// `file.read`: the file, already opened `O_NOFOLLOW` and checked
+    /// (regular file, not a protected inode, path rechecked).
+    Read {
+        /// The open file.
+        file: std::fs::File,
+        /// `fstat` size at open time (advisory).
+        size: u64,
+    },
+    /// `file.write`: the destination directory's fd and the final
+    /// component. The temp file, the replacement and the free-space check
+    /// belong to the data stream.
+    Write {
+        /// The destination directory, opened `O_DIRECTORY | O_NOFOLLOW` and
+        /// rechecked; every later create, link, rename and unlink goes
+        /// through this fd.
+        dir: std::fs::File,
+        /// The destination's final component inside `dir`.
+        name: std::ffi::OsString,
+        /// The size the requester announced.
+        size: u64,
+        /// Source permission bits (`& 0o777`).
+        mode: u32,
+        /// Whether an existing destination is replaced.
+        overwrite: bool,
+        /// `-p`: apply `mode` exactly and `mtime`.
+        preserve: bool,
+        /// Source modification time (seconds), used when `preserve`.
+        mtime: i64,
+        /// Whether the destination existed when it was opened.
+        existed: bool,
+    },
+}
+
 /// What a ticket authorizes once a data stream redeems it.
 ///
 /// Not [`Clone`] — see [`PendingExec`]'s own doc.
@@ -315,6 +371,8 @@ pub struct PendingWrite {
 pub enum TicketPurpose {
     /// An `EXEC_DATA` stream for this exec.
     Exec(PendingExec),
+    /// A `FILE_DATA` stream for this `file.read` or `file.write`.
+    File(PendingFile),
     /// A `SESSION_DATA` stream attached to this session.
     Session {
         /// The session the stream attaches to.
@@ -350,6 +408,7 @@ impl TicketPurpose {
     fn stream_kind(&self) -> StreamKind {
         match self {
             TicketPurpose::Exec(_) => StreamKind::ExecData,
+            TicketPurpose::File(_) => StreamKind::FileData,
             TicketPurpose::Session { .. } => StreamKind::SessionData,
         }
     }
@@ -525,6 +584,13 @@ pub struct Server {
     /// filesystem normalizer; a test injects a counting one
     /// (ADR-0029 decision 6-2).
     path_normalizer: OnceLock<Arc<dyn crate::file::guard::Normalizer>>,
+    /// The config the remote file ops need to know which paths are qsh's
+    /// own state (ADR-0029 decision 5), set at most once by
+    /// [`Server::set_file_host`]. Unset reads as "cannot tell what is
+    /// protected", and an allowed file request is then refused (fail
+    /// closed).
+    #[cfg(unix)]
+    file_host: OnceLock<FileHostConfig>,
     /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
     /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
@@ -546,6 +612,15 @@ pub struct Server {
     /// operator's actual `[serve]` limits via
     /// [`Server::with_admission_and_quotas`].
     quotas: Arc<crate::quota::Quotas>,
+}
+
+/// The configuration [`Server::set_file_host`] hands the remote file ops:
+/// the directories and the audit file whose protected set they resolve per
+/// request.
+#[cfg(unix)]
+struct FileHostConfig {
+    paths: crate::config::Paths,
+    audit: crate::config::AuditConfig,
 }
 
 /// [`Server`]'s own write access to the trust store (to pin a
@@ -694,6 +769,8 @@ impl Server {
             pinned_principals: OnceLock::new(),
             notice_sink: OnceLock::new(),
             path_normalizer: OnceLock::new(),
+            #[cfg(unix)]
+            file_host: OnceLock::new(),
             admission,
             quotas,
         })

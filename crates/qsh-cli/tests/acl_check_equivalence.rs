@@ -30,15 +30,11 @@
 //! before this, leaving that loader axis half-closed.
 //!
 //! **One row is not end-to-end, flagged rather than silently substituted**:
-//! `forward.socks`/`file.read`/`file.write` (`Action::is_always_denied`)
-//! have no CLI-reachable producer anywhere in the tree, for two different
-//! reasons. `file.read`/`file.write` have wire ops now (ADR-0029), but no
-//! `qsh` command sends them yet (`fixtures.rs`'s own `DEFERRED` list
-//! documents the same kind of gap for other actions/codes). `forward.socks`
-//! is not pending an implementation at all — ADR-0019 결정 6 means no op
-//! will *ever* drive it, since a client-attached label cannot carry
-//! authorization. There is no CLI command to run for any of the three and
-//! so no audit record a real request would leave;
+//! `forward.socks` (`Action::is_always_denied`) has no CLI-reachable
+//! producer anywhere in the tree. It is not pending an implementation at
+//! all: ADR-0019 결정 6 means no op will *ever* drive it, since a
+//! client-attached label cannot carry authorization. There is no CLI command
+//! to run for it and so no audit record a real request would leave;
 //! [`row_always_denied_action_overrides_an_explicit_allow_rule`] proves
 //! (ii)/(iii) instead by calling the exact same `Authorizer::check`
 //! `Server::authorize` calls, loaded from the same `acl.toml` a running
@@ -905,14 +901,18 @@ fn acl_show_distinguishes_a_loaded_policy_with_no_matching_row_from_no_policy() 
 }
 
 #[test]
-fn acl_show_never_lists_always_denied_actions_even_under_family_patterns() {
+fn acl_show_never_lists_forward_socks_and_lists_no_file_action_for_a_row_without_paths() {
     let host = Sandbox::new();
     write_acl_toml(&host, &table_toml("family_wildcards"));
     let data = acl_show(&host, CLIENT_PRINCIPAL, None);
     let set = effective(&data);
     assert_eq!(set, ["forward.local", "forward.remote"], "{data}");
-    for denied in ["forward.socks", "file.read", "file.write"] {
-        assert!(!set.iter().any(|a| a == denied), "{denied} in {data}");
+    // `forward.socks` is refused by the always-deny gate whatever the row
+    // says. The file actions are absent only because the row has no `paths`
+    // (ADR-0029 decision 4); a row with `paths` lists them (see
+    // `file_rows_agree_between_acl_check_path_and_acl_show`).
+    for absent in ["forward.socks", "file.read", "file.write"] {
+        assert!(!set.iter().any(|a| a == absent), "{absent} in {data}");
     }
     // The row is still reported as matching, with its patterns as written;
     // it names `file.*` without `paths`, which the host flags.
@@ -927,6 +927,119 @@ fn acl_show_never_lists_always_denied_actions_even_under_family_patterns() {
         }]),
         "{data}"
     );
+}
+
+/// `acl check --path` against one path, returning the exit code and the
+/// whole envelope (the argument-contract rows are errors, not decisions).
+#[cfg(unix)]
+fn acl_check_path(host: &Sandbox, action: &str, path: Option<&str>) -> (i32, Value) {
+    let mut args = vec![
+        "acl",
+        "check",
+        "--principal",
+        CLIENT_PRINCIPAL,
+        "--action",
+        action,
+    ];
+    if let Some(path) = path {
+        args.push("--path");
+        args.push(path);
+    }
+    args.push("--json");
+    host.json(&args)
+}
+
+/// The file rows of the three-way discipline (ADR-0029 결정 4·19): for
+/// `file.read` and `file.write`, `acl check --path` decides per path and
+/// `acl show` lists the action exactly when the principal has a ground for
+/// it (a row with `paths`, or the role). Enforcement is the third voice:
+/// `file_host.rs` (`acl_check_path_agrees_with_enforcement_*`) drives the
+/// same rows through a running host, and asserts the same expectations
+/// spelled out here. Rows: inside `paths`, a sibling, a symlink out, a `..`
+/// escape, a row without `paths`, role `full` on any path, `--path` missing,
+/// and `--path` on a non-file action.
+#[cfg(unix)]
+#[test]
+fn file_rows_agree_between_acl_check_path_and_acl_show() {
+    fn expect_invalid(host: &Sandbox, action: &str, path: Option<&str>) {
+        let (code, out) = acl_check_path(host, action, path);
+        assert_eq!(code, 255, "{action} {path:?}: {out}");
+        assert_eq!(out["error"]["code"], "INVALID_ARGUMENT", "{out}");
+    }
+
+    let paths_row = Sandbox::new();
+    let share = paths_row.home_dir().join("share");
+    let outside = paths_row.home_dir().join("outside");
+    std::fs::create_dir_all(share.join("sub")).expect("create share");
+    std::fs::create_dir_all(&outside).expect("create outside");
+    std::fs::write(share.join("a.txt"), b"alpha").expect("write a.txt");
+    std::fs::write(outside.join("secret.txt"), b"x").expect("write secret");
+    std::os::unix::fs::symlink(outside.join("secret.txt"), share.join("out")).expect("symlink");
+    let share = std::fs::canonicalize(&share).expect("canonical share");
+    let outside = std::fs::canonicalize(&outside).expect("canonical outside");
+    let share_path = |rel: &str| format!("{}/{rel}", share.display());
+    let rows: Vec<(String, bool)> = vec![
+        (share_path("a.txt"), true),
+        (share_path("sub/../a.txt"), true),
+        (share_path("new.txt"), true),
+        (outside.join("secret.txt").display().to_string(), false),
+        (share_path("out"), false),
+        (share_path("../outside/secret.txt"), false),
+    ];
+    let acl = |paths: Option<&str>| {
+        let paths = paths.map_or(String::new(), |p| format!("paths = [\"{p}\"]\n"));
+        format!(
+            "[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"file.read\", \"file.write\"]\n{paths}"
+        )
+    };
+
+    // A row with `paths`.
+    write_acl_toml(&paths_row, &acl(Some(&share.display().to_string())));
+    let shown = effective(&acl_show(&paths_row, CLIENT_PRINCIPAL, None));
+    for action in ["file.read", "file.write"] {
+        assert!(shown.iter().any(|a| a == action), "{action} in {shown:?}");
+        for (path, expected) in &rows {
+            let (code, out) = acl_check_path(&paths_row, action, Some(path));
+            assert_eq!(code, 0, "{action} {path}: {out}");
+            assert_eq!(
+                out["data"]["decision"] == "allow",
+                *expected,
+                "{action} {path}: {out}"
+            );
+        }
+        expect_invalid(&paths_row, action, None);
+    }
+    expect_invalid(&paths_row, "exec.run", Some(&share_path("a.txt")));
+
+    // A row without `paths` grants no file access and is not listed.
+    let nopaths = Sandbox::new();
+    write_acl_toml(&nopaths, &acl(None));
+    let shown = effective(&acl_show(&nopaths, CLIENT_PRINCIPAL, None));
+    for action in ["file.read", "file.write"] {
+        assert!(!shown.iter().any(|a| a == action), "{action} in {shown:?}");
+        for (path, _) in &rows {
+            let (code, out) = acl_check_path(&nopaths, action, Some(path));
+            assert_eq!(code, 0, "{action} {path}: {out}");
+            assert_eq!(out["data"]["decision"], "deny", "{action} {path}: {out}");
+        }
+        expect_invalid(&nopaths, action, None);
+    }
+
+    // Role `full` reaches every path and `acl show` lists both actions.
+    let full = Sandbox::new();
+    let client = Sandbox::new();
+    pin_with_role(&full, &client.fingerprint(), "full");
+    let shown = effective(&acl_show(&full, CLIENT_PRINCIPAL, None));
+    for action in ["file.read", "file.write"] {
+        assert!(shown.iter().any(|a| a == action), "{action} in {shown:?}");
+        for (path, _) in &rows {
+            let (code, out) = acl_check_path(&full, action, Some(path));
+            assert_eq!(code, 0, "{action} {path}: {out}");
+            assert_eq!(out["data"]["decision"], "allow", "{action} {path}: {out}");
+            assert_eq!(out["data"]["role"], "full", "{action} {path}: {out}");
+        }
+        expect_invalid(&full, action, None);
+    }
 }
 
 #[test]
@@ -1082,8 +1195,9 @@ fn acl_show_human_output_carries_the_acl_restart_notice_byte_for_byte() {
 
 /// The role table of ADR-0045 결정 2, spelled out again here on purpose:
 /// never read from `qsh_core::acl::ROLE_GRANTS`, so a wrong row in the
-/// constant disagrees with this copy. `file.*` and `forward.socks` are left
-/// out because the always-deny gate answers them before any role.
+/// constant disagrees with this copy. `forward.socks` is left out because
+/// the always-deny gate answers it before any role; `file.read` and
+/// `file.write` ride on `full` alone (ADR-0029 decision 4).
 fn role_grants_literal(role: &str, action: &str) -> bool {
     let granted: &[&str] = match role {
         "full" => &[
@@ -1095,6 +1209,8 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "forward.local",
             "forward.remote",
             "host.reverse",
+            "file.read",
+            "file.write",
         ],
         "exec" => &[
             "exec.run",
