@@ -6,8 +6,8 @@
 //! written by hand, so the whole chain under test is the real one:
 //! `SharedTrustStore::resolve_role` -> `RoleResolvingAuthorizer` ->
 //! `Policy::check_with_role` -> the wire handler's refusal and audit record.
-//! The commands that write `role` keys arrive in Step 5; this file builds the
-//! files itself.
+//! The commands that write `role` keys arrive in M15 plan Step 5 (1a4af3b); this
+//! file builds the files itself.
 //!
 //! **Routes.** A control-stream scenario is generic over [`Route`] and runs
 //! on the forward route (`qsh serve`, [`LoopbackHarness`]) and the reverse

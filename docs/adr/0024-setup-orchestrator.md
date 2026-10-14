@@ -5,7 +5,7 @@
 
 개정 관계: ADR-0025 결정 7의 마지막 문장("이슈 #3의 온보딩 흐름 전체가 그렇듯 … SC1 재측정이 어디에서 시간을 쓰는지 보여준 뒤에 우선순위가 정해진다") 가운데 `qsh setup`에 해당하는 부분만 개정한다. `qsh setup`의 착수는 SC1 재측정을 기다리지 않고, 효과는 결정 12의 캠페인이 사후에 판정한다. `acl show`의 배치는 건드리지 않는다. 그 밖의 기존 ADR은 대체하거나 개정하지 않는다. ADR-0012 결정 1·6·8과 대안 절의 `serve --pair` 기각, ADR-0013 결정 4·8, ADR-0014 결정 7, ADR-0015(예약), ADR-0017 결정 1·3·5, ADR-0025 결정 6을 전제로 삼는다.
 
-개정 이력: 결정 9의 마지막 조건(`complete`의 doctor 조건)은 `client` 역할에 한해 [ADR-0038](0038-setup-client-complete-without-acl.md)로 개정됐다(doctor의 `acl_policy_missing`을 세지 않는다).
+개정 이력: 결정 9의 마지막 조건(`complete`의 doctor 조건)은 `client` 역할에 한해 [ADR-0038](0038-setup-client-complete-without-acl.md)로 개정됐다(doctor의 `acl_policy_missing`을 세지 않는다). 결정 4(ACL 단계는 행을 인쇄하고 검증만 한다)와 결정 9의 `complete` 조건은 role로 인가되는 경우를 받아들이도록 [ADR-0045](0045-trust-roles.md) 결정 14로 바뀌었다(`--peer-role`). 결정 3·6은 그대로다.
 
 ## 맥락
 

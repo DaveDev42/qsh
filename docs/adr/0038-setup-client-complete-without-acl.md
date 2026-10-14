@@ -3,6 +3,8 @@
 날짜: 2026-10-01
 상태: 승인됨 (2026-10-01 사용자 확정)
 
+개정 이력: 면제 목록과 판정 규칙은 그대로다. 면제 대상 `acl_policy_missing`이 나오는 조건만 [ADR-0045](0045-trust-roles.md) 결정 12로 좁아졌다(role이 `none`이 아닌 pin이 있으면 나오지 않는다).
+
 개정 관계: [ADR-0024](0024-setup-orchestrator.md) 결정 9의 마지막 조건("`complete`는 `pending`·`blocked` 단계가 없고 doctor의 `overall`이 `"error"`가 아닐 때만 `true`다")을 `client` 역할에 한해 개정한다. 결정 9의 나머지(`SetupRunData`의 필드, `steps[].result`가 op의 `data`를 그대로 담는 규율, `complete`가 첫 셸의 성공을 뜻하지 않는다는 문장)와 ADR-0024의 다른 결정은 바뀌지 않는다. ADR-0017 결정 1·5, ADR-0024 결정 3·4·6, `docs/CLI.md` §6.17의 진단 코드 표를 전제로 삼는다. 제안 상태인 ADR-0027(`doctor --fail-on`)과는 서로 닿지 않는다.
 
 ## 맥락

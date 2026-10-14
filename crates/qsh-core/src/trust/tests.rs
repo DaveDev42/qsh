@@ -1065,8 +1065,8 @@ fn rewriting_a_pin_without_a_role_key_does_not_add_one() {
     );
     assert_eq!(TrustStore::load(&path).unwrap(), store);
 
-    // A brand-new pin written by `add_peer` has no role key either (Step 5
-    // gives the writing commands a role to write).
+    // A brand-new pin written by `add_peer` has no role key either (M15 plan Step 5
+    // (1a4af3b) gives the writing commands a role to write).
     let mut store = TrustStore::load(&path).unwrap();
     store.add_peer("fresh", None, fp(b"fresh"), "t".into());
     store.save(&path).unwrap();
