@@ -62,15 +62,15 @@ tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-# Test-only: armor the synthesized OpenSSH key files (`tests/ssh_golden`).
+# Test-only: armor the synthesized OpenSSH key files (`tests/it/ssh_golden`).
 base64.workspace = true
 jsonschema.workspace = true
 qsh-testkit.workspace = true
 # Test-only, direct transport-level types two integration-test files need
 # and `qsh-core` does not re-export:
-# - `crates/qsh-cli/tests/reverse_blackout.rs`: pins a `StaticTrust` for
+# - `crates/qsh-cli/tests/it/reverse_blackout.rs`: pins a `StaticTrust` for
 #   `qsh_testkit::reverse::ReverseHarness`.
-# - `crates/qsh-cli/tests/acl_check_equivalence.rs`: `AuthPath` (its
+# - `crates/qsh-cli/tests/it/acl_check_equivalence.rs`: `AuthPath` (its
 #   `Principal` usage comes from `qsh-core`'s own re-export instead,
 #   `qsh-core/src/lib.rs`).
 # A dev-dependency, so `xtask arch`'s manifest matrix (which reads only

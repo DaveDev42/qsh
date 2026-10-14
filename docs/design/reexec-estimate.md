@@ -80,7 +80,7 @@ ew 신뢰도는 중간 이하다. 앵커는 ROADMAP M0–M10 열한 개(`docs/RO
 
 H4의 최대 미확인은 4.2ew에서 끝나지 않는다는 점이다. snapshot 필드 목록은 사람이 유지하고, 세션에 상태가 하나 붙을 때마다 넣지 않으면 handoff에서만 조용히 사라진다 — 컴파일·테스트·CI가 녹색인 채로. arch-lint·fixture append-only·`ErrorCode` 전수 도달성과 달리 "옮길 필드냐 재생성 대상이냐"는 기계가 판단하지 못한다. 여기에 더해 execve가 CLOEXEC 소켓을 커널이 닫게 두고 재바인드한다는 전제 자체가 `quinn::Endpoint::new` 이후까지는 미확인이다(§3 말미) — 재바인드 실패는 비가역이므로 실측 1건이 착수 전 선행 조건이다.
 
-H5의 최대 미확인 둘. 대화형 출력 전체가 UDS 프레임+protobuf를 추가 통과하는 회귀 폭을 숫자로 내지 못했다(오늘 그 자리는 in-process `Mutex<Box<dyn ReplayStore>>` 하나, `broker/session.rs`). M4 acceptance echo와 M8 T2 PTY echo 예산이 그 경로를 지나고, 예산을 넘으면 설계가 fd 직접 전달로 회귀해 이 후보의 이점 자체가 사라진다. 그리고 resume registry가 supervisor로 가면 평문 토큰이 로컬 IPC를 건너는데, `localctl/mod.rs`가 모듈 불변식으로 금지하고 `crates/qsh-testkit/tests/resume_secrecy.rs`가 L6 규율로 지키는 바로 그 경로다. 새 conduit이라 형식적으로는 적용되지 않지만 금지의 이유(ADR-0007 custody)는 conduit 이름과 무관하고, 보안 리뷰가 이 경로를 거부하면 H5 전체가 성립하지 않는다.
+H5의 최대 미확인 둘. 대화형 출력 전체가 UDS 프레임+protobuf를 추가 통과하는 회귀 폭을 숫자로 내지 못했다(오늘 그 자리는 in-process `Mutex<Box<dyn ReplayStore>>` 하나, `broker/session.rs`). M4 acceptance echo와 M8 T2 PTY echo 예산이 그 경로를 지나고, 예산을 넘으면 설계가 fd 직접 전달로 회귀해 이 후보의 이점 자체가 사라진다. 그리고 resume registry가 supervisor로 가면 평문 토큰이 로컬 IPC를 건너는데, `localctl/mod.rs`가 모듈 불변식으로 금지하고 `crates/qsh-testkit/tests/it/resume_secrecy.rs`가 L6 규율로 지키는 바로 그 경로다. 새 conduit이라 형식적으로는 적용되지 않지만 금지의 이유(ADR-0007 custody)는 conduit 이름과 무관하고, 보안 리뷰가 이 경로를 거부하면 H5 전체가 성립하지 않는다.
 
 Windows는 어느 후보에서도 P0 범위 밖이다. H3·H4는 PTY 백엔드 부재(`pty/mod.rs`)로 이중 부채, H5는 `#[cfg(unix)]` 컴파일 아웃으로 새 부채가 없다.
 

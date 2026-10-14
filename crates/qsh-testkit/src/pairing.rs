@@ -5,7 +5,7 @@
 //! clients use (report §B3: pairing's authentication is possession of the
 //! secret, not the TLS identity).
 //!
-//! Promoted from `crates/qsh-testkit/tests/pairing_loopback.rs`'s private
+//! Promoted from `crates/qsh-testkit/tests/it/pairing_loopback.rs`'s private
 //! `PairingHost` (M8 plan Step 4 (52639fc)) so a second
 //! test file can share it without duplicating the wiring.
 

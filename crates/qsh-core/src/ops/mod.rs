@@ -777,7 +777,7 @@ impl Ops {
     /// `schema.get` (`docs/CLI.md` §6.10) — the JSON Schema of the
     /// `qsh.cli/v1` envelope and every command's `data` payload, generated
     /// straight from `qsh_proto::schema`: the exact same function
-    /// `crates/qsh-cli/tests/fixtures.rs` validates every golden fixture
+    /// `crates/qsh-cli/tests/it/fixtures.rs` validates every golden fixture
     /// against (`docs/design/testing.md` L6), so this and the fixture
     /// validator cannot drift apart.
     pub fn schema(&self) -> Result<SchemaData, OpError> {

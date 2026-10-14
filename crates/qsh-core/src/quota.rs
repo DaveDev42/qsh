@@ -126,7 +126,7 @@ pub const MAX_CONCURRENT_PAIRING_CONNECTIONS: usize = 8;
 ///
 /// `pub` for the same reason [`crate::admission::AUDIT_AGGREGATION_
 /// WINDOW`] is: `docs/CLI.md`/`docs/design/architecture.md`'s doc-drift
-/// pin (`crates/qsh-core/tests/quota_docs.rs`'s `cli_md_and_architecture_
+/// pin (`crates/qsh-core/tests/it/quota_docs.rs`'s `cli_md_and_architecture_
 /// md_name_the_audit_window_principal_cap_and_row_bound`) reads this
 /// constant instead of a hardcoded copy of `64`, not an invitation for
 /// another crate to depend on the value.

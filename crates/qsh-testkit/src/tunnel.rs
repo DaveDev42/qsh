@@ -180,7 +180,7 @@ const FLOOD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// A TCP source on `127.0.0.1:0` for exactly one connection: writes a
 /// shared buffer in a loop until the peer closes or a write fails — the
 /// converse of [`DiscardServer`]. Used by the M4 DoD 4 saturation
-/// benchmark (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`) to
+/// benchmark (`crates/qsh-testkit/tests/it/tunnel_echo_under_load.rs`) to
 /// saturate the **host→client** direction of a `-L` tunnel: point the
 /// forward's destination at this server, and the bulk bytes it emits ride
 /// the tunnel stream *back toward the client* — landing on the **host's**
@@ -280,7 +280,7 @@ impl TunnelHarness {
     /// [`qsh_core::quota::QuotaLimits`] instead of `ServeConfig`'s
     /// defaults — the tunnel-flavored twin of [`LoopbackHarness::
     /// start_with_quotas`], for the tunnel-stream quota's own e2e pins
-    /// (`crates/qsh-testkit/tests/quota.rs`, M8 Step 3b).
+    /// (`crates/qsh-testkit/tests/it/quota.rs`, M8 Step 3b).
     pub async fn start_with_quotas(limits: qsh_core::quota::QuotaLimits) -> Self {
         Self::start_inner(LoopbackHarness::start_with_quotas(limits).await).await
     }

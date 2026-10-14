@@ -3,7 +3,7 @@
 날짜: 2026-10-01
 상태: 승인됨 (2026-10-01 사용자 확정)
 
-개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. `CONNECTION_RECEIVE_WINDOW`(8 MiB, M8 DoD 2의 세션당 buffer 상한)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB, `docs/design/protocol.md` §12가 측정으로 확정한 값)는 그대로 두고, ADR-0010의 터널 스트림 quota 기본값도 건드리지 않는다. 느린 스트림 역압 하네스(`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`, 커밋 `209e764`)의 strict 결과가 이 ADR의 입력이다.
+개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. `CONNECTION_RECEIVE_WINDOW`(8 MiB, M8 DoD 2의 세션당 buffer 상한)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB, `docs/design/protocol.md` §12가 측정으로 확정한 값)는 그대로 두고, ADR-0010의 터널 스트림 quota 기본값도 건드리지 않는다. 느린 스트림 역압 하네스(`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`, 커밋 `209e764`)의 strict 결과가 이 ADR의 입력이다.
 
 ## 맥락
 
@@ -73,7 +73,7 @@
 ## 결과
 
 - `crates/qsh-core/src/tunnel/splice.rs`의 `pump`와 `splice_tcp_quic`, `localctl::daemon`의 중계가 연결 단위 장부에 진전 시각을 기록하고, 장부가 결정 3·4의 조건으로 대상 스트림의 guard를 발동시킨다. `CONNECTION_RECEIVE_WINDOW`와 `TUNNEL_STREAM_RECEIVE_WINDOW`의 값은 바뀌지 않는다. 두 상수의 doc에는 창 관계가 더는 PTY 기아를 막는 유일한 방어가 아니라는 문장을 더한다.
-- `crates/qsh-testkit/tests/tunnel_stalled_streams.rs`의 네 테스트가 strict에서 초록이 되어야 하고, 그 테스트를 `ci.yml` acceptance job에 `QSH_ACCEPTANCE_STRICT`로 넣는다. `CLAUDE.md` Commands 절의 acceptance 목록과 `docs/design/testing.md`의 게이트 환경변수 표, L9/L10의 "덮는 축은 포화(고속) 하나다" 문단을 같이 고친다.
+- `crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`의 네 테스트가 strict에서 초록이 되어야 하고, 그 테스트를 `ci.yml` acceptance job에 `QSH_ACCEPTANCE_STRICT`로 넣는다. `CLAUDE.md` Commands 절의 acceptance 목록과 `docs/design/testing.md`의 게이트 환경변수 표, L9/L10의 "덮는 축은 포화(고속) 하나다" 문단을 같이 고친다.
 - 고치지 않은 기준으로 `tunnel_throughput_meets_raw_quinn_ratio`, `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`, `transport_config_sets_connection_receive_window`, `tunnel_stream_receive_window_never_regresses_below_quinns_own_default`, `socks_curl`이 초록이어야 한다. 정체 판정을 끄는 mutation 하나가 N=4 진행 테스트를 붉혀야 한다.
 - 새 단위 테스트는 적어도 넷을 고정한다. 상한을 넘은 정체 스트림만 끊긴다. 끊긴 스트림 말고 다른 터널 스트림과 PTY는 영향을 받지 않는다. 끊긴 스트림은 로컬 앱에 정상 종료가 아니라 RST로 보인다. 느리게라도 읽는 스트림은 정체로 잡히지 않는다.
 - `docs/design/protocol.md` §7의 내부 reset 코드 목록에 `0x200E`를 더하고, §16.3·§16.5의 코드 범위 문구를 `0x200E`까지로 고친다. §16.2 상호운용 계약 표에는 행이 늘지 않는다. §12의 backpressure 서술에 이 정체 상한을 더한다.

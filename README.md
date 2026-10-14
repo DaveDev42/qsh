@@ -551,7 +551,7 @@ peer from its own trust store. The older `qsh reverse controller
 
 <!-- Behavior below is pinned by: lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint,
      lookup_pin_follows_a_reordered_trust_toml_without_a_restart (qsh-core trust tests),
-     an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered (qsh-cli/tests/trust_alias_order.rs),
+     an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered (qsh-cli/tests/it/trust_alias_order.rs),
      acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row (qsh-core doctor tests).
      Per-direction pins were considered and dropped (ADR-0030, rejected 2026-10-12). -->
 #### One machine, two aliases

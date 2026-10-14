@@ -54,7 +54,7 @@ push가 아예 없는 것도 아니다. `qsh::reverse` 줄은 한 줄 JSON이고
 
 ## 대안
 
-- 신규 local op(`qsh status`)을 만들어 등록 health를 전용 표면으로 낸다. 기각한다. 새 op 하나는 `docs/ROADMAP.md` M9 DoD가 요구하는 등록 완전성을 전부 갚아야 한다. 새 fixture와 `REQUIRED_FIXTURES` 등록(`crates/qsh-cli/tests/fixtures.rs`), schemars 타입, `cli_v1_data_schema` arm과 `CLI_V1_SCHEMA_COMMANDS` 등록(`crates/qsh-proto/src/schema.rs`), 렌더러 둘, `docs/CLI.md` 행, man 항목이다. 그렇게 갚고 돌려주는 값은 `host.list`가 이미 주는 값을 다시 배열한 것이다. `host.list`로 안 된다는 관측이 먼저 있어야 이 비용이 정당해진다.
+- 신규 local op(`qsh status`)을 만들어 등록 health를 전용 표면으로 낸다. 기각한다. 새 op 하나는 `docs/ROADMAP.md` M9 DoD가 요구하는 등록 완전성을 전부 갚아야 한다. 새 fixture와 `REQUIRED_FIXTURES` 등록(`crates/qsh-cli/tests/it/fixtures.rs`), schemars 타입, `cli_v1_data_schema` arm과 `CLI_V1_SCHEMA_COMMANDS` 등록(`crates/qsh-proto/src/schema.rs`), 렌더러 둘, `docs/CLI.md` 행, man 항목이다. 그렇게 갚고 돌려주는 값은 `host.list`가 이미 주는 값을 다시 배열한 것이다. `host.list`로 안 된다는 관측이 먼저 있어야 이 비용이 정당해진다.
 - `Host.state`에 새 값(예: `"reconnecting"`)을 더한다. `state`는 열린 문자열이라 값 추가 자체는 additive지만(`docs/CLI.md` §10) 기각한다. controller는 target이 재시도 중인지 포기했는지 모른다. 재dial의 주체는 언제나 target이고 controller는 새 등록을 기다릴 뿐이다(`docs/design/protocol.md` §11-4). 관측하지 못한 상태를 보고하지 않는다는 규율은 forward host를 `"reachable"`로 적지 않는 §5의 판단과 같다.
 - 등록 상태 조회를 원격 op으로 연다. 기각한다. 결정 4의 oracle 논거가 그대로 적용된다. 어느 이름이 지금 살아 있는지는 공격자에게 표적 목록이다.
 - `qsh::reverse` 줄을 `qsh.cli/v1` 계약으로 승격한다. 기각한다. 승격하면 진단 field를 하나 더할 때마다 계약 심사가 붙고 이슈 #4 item 6이 정하려는 `cause` 어휘가 관측 경험이 쌓이기 전에 얼어붙는다. 진단은 자유롭게 늘어나는 편이 낫다.

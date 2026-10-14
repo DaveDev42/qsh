@@ -288,7 +288,7 @@ permit을 다시 얻을 수 있다. 이는 3b의 I6 계열 테스트가 확인�
 - **(해소됨, M8 Step 3a 정합 스윕)** ~~`purge_connection`이 `Quotas::flush_expired`를 부르지
   않는다~~ — 정합 스윕에서 `purge_connection`이 `Server::quota_housekeeping`을 호출하도록(§9),
   reverse target arm이 자체 주기 tick을 두도록(§7 닫는 경로 ③) 배선했다. `reverse_target_flushes_
-  the_per_principal_summary_on_the_periodic_tick`(`crates/qsh-testkit/tests/quota.rs`)이 target
+  the_per_principal_summary_on_the_periodic_tick`(`crates/qsh-testkit/tests/it/quota.rs`)이 target
   arm의 주기 tick 경로를 직접 고정한다.
 - **(해소됨, F2 conformance)** ~~`Quotas::record_rejection`의 만료-경계 사건 손실~~ —
   `record_rejection`이 최대 2건(stale 창 summary + 새 창 first)을 반환하도록 정정되어 창이 막
@@ -309,7 +309,7 @@ permit을 다시 얻을 수 있다. 이는 3b의 I6 계열 테스트가 확인�
 채워졌다. wire 매핑 표에는 `RESET_CODE_RESOURCE_EXHAUSTED = 0x200D`와 `CLOSE_CODE_RESOURCE_EXHAUSTED
 = 0x1003`가 실제 상수로 등재됐고 `MAX_CONCURRENT_PAIRING_CONNECTIONS = 8`이 코드에 있다. `docs/
 CLI.md`·`docs/design/architecture.md`·`docs/design/protocol.md`·`crates/qsh-proto/proto/qsh/wire/
-v1.proto`도 M8 Step 3b 문서 스테이지에서 이미 갱신됐다(`crates/qsh-core/tests/quota_docs.rs`가
+v1.proto`도 M8 Step 3b 문서 스테이지에서 이미 갱신됐다(`crates/qsh-core/tests/it/quota_docs.rs`가
 doc-contract로 고정).
 
 이 문서는 M8 Step 3b 마감 커밋에서 `docs/adr/`에 배치됐고 `docs/adr/README.md` 색인에 등재됐다. §6.4 이월

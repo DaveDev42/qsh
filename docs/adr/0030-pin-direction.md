@@ -16,7 +16,7 @@
 이 구조가 오늘 만드는 문제는 셋이다.
 
 - **outbound로만 쓸 pin이 inbound를 연다.** `pair accept`나 `trust add --address`로 host를 pin한 laptop이 나중에 `qsh serve`나 `qsh listen`을 띄우면, 그 host는 laptop으로 들어올 때도 같은 pin으로 인증을 통과한다. default-deny ACL이 인가를 막아도 handshake, admission, quota 예약, 페어링 창은 인증 통과만으로 열린다(ADR-0017 결정 5 첫 문단).
-- **두 별칭 배치가 파일 순서에 묶인다(M11 (e)).** `SharedTrustStore::lookup_pin`(`crates/qsh-core/src/trust/mod.rs`)은 fingerprint가 같은 첫 항목을 돌려준다. 한 장비를 `workshop-lan`(직접 dial용, 주소 있음)과 `workshop`(역방향 등록용)으로 pin하면 inbound principal은 파일에서 앞선 이름 하나다. 뒤 이름을 겨눈 `[[acl]]` 행은 조용히 매칭되지 않는다. README "One machine, two aliases"는 이것을 "앞 이름에 ACL을 쓰고 뒤 이름은 outbound 별칭으로만 쓰라"는 처방으로 안내하고, `crates/qsh-cli/tests/trust_alias_order.rs`의 `an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered`와 trust 단위 테스트 `lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint`, `lookup_pin_follows_a_reordered_trust_toml_without_a_restart`가 그 동작을 고정한다. 같은 절 끝이 "방향으로 별칭을 가르는 일은 M16 계획"이라고 적는다.
+- **두 별칭 배치가 파일 순서에 묶인다(M11 (e)).** `SharedTrustStore::lookup_pin`(`crates/qsh-core/src/trust/mod.rs`)은 fingerprint가 같은 첫 항목을 돌려준다. 한 장비를 `workshop-lan`(직접 dial용, 주소 있음)과 `workshop`(역방향 등록용)으로 pin하면 inbound principal은 파일에서 앞선 이름 하나다. 뒤 이름을 겨눈 `[[acl]]` 행은 조용히 매칭되지 않는다. README "One machine, two aliases"는 이것을 "앞 이름에 ACL을 쓰고 뒤 이름은 outbound 별칭으로만 쓰라"는 처방으로 안내하고, `crates/qsh-cli/tests/it/trust_alias_order.rs`의 `an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered`와 trust 단위 테스트 `lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint`, `lookup_pin_follows_a_reordered_trust_toml_without_a_restart`가 그 동작을 고정한다. 같은 절 끝이 "방향으로 별칭을 가르는 일은 M16 계획"이라고 적는다.
 - **ADR-0015 결정 7이 답을 기다린다.** listener 상대 pairing은 target이 outbound로만 쓰는 pin을 새로 만드는 경로라서, 방향 축 없이 결론을 내면 그 pin이 listener의 inbound 인증까지 연다.
 
 설계를 가르는 사실은 이렇다.
@@ -100,7 +100,7 @@ TLS 오류를 미지 peer와 같게 둔 것(결정 5)은 원격 오류와 로컬
 
 - **코드.** `qsh-transport`에서는 `TrustEvaluator::lookup_pin`의 시그니처(역할 인자, 세 갈래 반환), `RejectReason::WrongDirection`, `verify_core`의 분기가 바뀐다. `qsh-core`에서는 `TrustPeer`의 해석과 `parsed_pins`의 방향 거르기, pairing responder 규칙, doctor 검출기 둘(새 code 하나와 `acl_principal_unmatched` 후보 집합)이 바뀐다. `qsh-proto`에서는 `TrustPeer.direction`, `TrustAddReq.direction`, pairing 요청 두 타입의 `direction`이 optional 문자열로 늘어난다. `qsh-cli`는 clap 플래그와 렌더만 갖는다. `xtask arch`의 금지에 걸리는 이동은 없다.
 - **고정할 테스트.**
-  - `crates/qsh-transport/tests/handshake_matrix.rs`에 행이 는다.
+  - `crates/qsh-transport/tests/it/handshake_matrix.rs`에 행이 는다.
     - `outbound` pin만 있는 상대의 inbound handshake 거부.
     - `inbound` pin만 있는 상대에게 하는 outbound handshake 거부.
     - `both`와 필드 없음이 두 역할 모두 오늘과 같은 결과.

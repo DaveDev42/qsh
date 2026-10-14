@@ -83,7 +83,7 @@ pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 /// chosen against a representative broadband/mobile RTT (~50 ms): 2 MiB /
 /// 50 ms ≈ 42 MB/s, comfortably above what a single forwarded TCP
 /// connection needs. M4 Step 7's saturated-tunnel-vs-PTY-echo perf gate
-/// (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs` and
+/// (`crates/qsh-testkit/tests/it/tunnel_echo_under_load.rs` and
 /// `tunnel_throughput.rs`) first tried the low end of that reasoning —
 /// 128 KiB — and rejected it: 128 KiB / 50 ms ≈ 2.6 MB/s, a throughput
 /// ceiling *every* stream on the connection now shares, PTY/exec/replay
@@ -99,7 +99,7 @@ pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 /// stream whose local consumer never reads holds up to this much of
 /// [`CONNECTION_RECEIVE_WINDOW`], so four of them used to hold all of it
 /// and stop the same connection's PTY output
-/// (`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`). The ratio of the
+/// (`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`). The ratio of the
 /// two windows now sets a limit instead of being the defense:
 /// `qsh_core::tunnel::stall` stops the oldest stalled tunnel streams once
 /// more than `CONNECTION_RECEIVE_WINDOW / TUNNEL_STREAM_RECEIVE_WINDOW - 1`
@@ -519,7 +519,7 @@ fn tune_socket_buffer(
 /// Every step here is best-effort except the bind itself: a platform that
 /// refuses (or silently caps) the buffer request keeps its own default,
 /// which only degrades *how fast* a loopback benchmark can measure, never
-/// correctness (`crates/qsh-testkit/tests/tunnel_throughput.rs`'s own
+/// correctness (`crates/qsh-testkit/tests/it/tunnel_throughput.rs`'s own
 /// module doc walks through why the M4 DoD 3 ratio gate is tolerant of
 /// this either way).
 pub fn bind_tuned_udp_socket(
@@ -989,7 +989,7 @@ impl Dialer {
     /// instead of qsh's tuned `transport_config()` (no BBR override, no
     /// `send_fairness`, no widened `stream_receive_window`). Exists for
     /// the M4 DoD 3 throughput gate
-    /// (`crates/qsh-testkit/tests/tunnel_throughput.rs`), which needs an
+    /// (`crates/qsh-testkit/tests/it/tunnel_throughput.rs`), which needs an
     /// *untuned* quinn baseline to compare qsh's tuning against — without
     /// this, the gate's raw-quinn leg would share `transport_config()`
     /// with the tunnel leg, and the ratio would only ever measure

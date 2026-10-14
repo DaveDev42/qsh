@@ -21,7 +21,7 @@ ADR-0028을 쓰면서 드러난 비용은 이렇다.
 
 1. QSH는 TCP/TLS fallback을 만들지 않는다. transport는 QUIC 하나다. P1에서 빼고, P2 후보로도 두지 않는다. 다시 열려면 새 ADR이 이 결정을 개정해야 하고, 그 ADR은 이 ADR의 근거 절이 적은 비용을 다시 따진다.
 2. `docs/ROADMAP.md` M14는 철회로 닫는다. 마일스톤 번호 M15~M19는 다시 매기지 않는다(코드와 문서가 번호로 인용한다). M14 (a)의 착지 기록은 남긴다.
-3. M14 (a)로 착지한 transport 중립 facade(`Connection`·`SendStream`·`RecvStream`·`Endpoint`와 중립 오류 타입, `crates/qsh-transport/tests/conformance.rs`)는 유지한다. `qsh-core`·`qsh-cli`가 QUIC 스택 이름을 쓰지 않는다는 `cargo xtask arch` 규칙도 유지한다. 이 경계는 fallback이 없어도 quinn 버전 갱신과 오류 분류를 한 crate에 가둔다. ADR-0028 결과 절이 적은 테스트 접근자 교체 편집은 이 ADR로 받아들인다.
+3. M14 (a)로 착지한 transport 중립 facade(`Connection`·`SendStream`·`RecvStream`·`Endpoint`와 중립 오류 타입, `crates/qsh-transport/tests/it/conformance.rs`)는 유지한다. `qsh-core`·`qsh-cli`가 QUIC 스택 이름을 쓰지 않는다는 `cargo xtask arch` 규칙도 유지한다. 이 경계는 fallback이 없어도 quinn 버전 갱신과 오류 분류를 한 crate에 가둔다. ADR-0028 결과 절이 적은 테스트 접근자 교체 편집은 이 ADR로 받아들인다.
 4. `docs/design/protocol.md` §14의 제약(wire가 stream ID·datagram·transport parameter에 기대지 않음, 스트림 정체성은 in-band `StreamHeader`)은 계속 지킨다. 근거를 "TCP fallback 준비"에서 "transport 중립 wire"로 바꾼다.
 5. doctor `udp_egress_blocked`의 message는 "(P1, ADR-0005)" 대신 이 ADR을 가리킨다. 진단 코드, 등급, remedy는 바꾸지 않는다.
 6. README Known limitations는 "TCP fallback 없음"을 계획 중인 기능이 아니라 범위 결정으로 적고, UDP가 막힌 망에서는 SSH나 overlay를 쓰라고 안내한다.

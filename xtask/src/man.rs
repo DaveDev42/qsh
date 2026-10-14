@@ -83,7 +83,7 @@ mod tests {
     /// clap `about`/`long_about` edit, or a subcommand added, renamed, or
     /// removed, without re-running `cargo xtask man` fails here — the
     /// same "regenerate and commit the diff" discipline
-    /// `crates/qsh-cli/tests/fixtures.rs`'s `QSH_UPDATE_FIXTURES` flow
+    /// `crates/qsh-cli/tests/it/fixtures.rs`'s `QSH_UPDATE_FIXTURES` flow
     /// uses for golden JSON fixtures.
     ///
     /// Byte-exact means line endings count, so `.gitattributes` pins the

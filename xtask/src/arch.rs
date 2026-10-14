@@ -215,7 +215,7 @@ const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only; it must not
 
 /// `qsh-cli/src` never opens a UDS socket directly — it goes through
 /// `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
-/// root: `crates/qsh-cli/tests/localctl_perms.rs` pokes UDS permissions
+/// root: `crates/qsh-cli/tests/it/localctl_perms.rs` pokes UDS permissions
 /// directly and legitimately needs `UnixStream` (`docs/design/architecture.md` §1).
 const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
 const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \

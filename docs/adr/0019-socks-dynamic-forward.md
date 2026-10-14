@@ -7,7 +7,7 @@
 
 2026-09-17 초안은 `-D`를 v1 내내 P1로 두자고 제안했고 구현 결정이 답해야 할 미결 질문 아홉 개를 남겼다. 사용자가 2026-09-19에 구현하기로 결정했다. 이 판은 그 초안을 대체한다. 초안의 사실 목록은 대부분 유효해서 여기에 옮겨 쓰되 인용 위치를 갱신했다. 초안이 `crates/qsh-core/src/server/mod.rs`로 가리키던 `TCP_CONNECT` 인가·dial 경로는 이제 `crates/qsh-core/src/server/tunnels.rs`에 있다.
 
-오늘의 `-D`는 이렇다. 두 spelling(대화형 `qsh host -D spec`, `qsh tunnel open host --dynamic spec`)이 파싱만 되고 `crates/qsh-cli/src/main.rs`의 두 호출 지점이 `Ops` 호출 전에 `dynamic_forward_unsupported()`로 거절한다. 거절 문면은 `crates/qsh-core/src/ops/tunnel.rs`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`와 `DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE` 두 상수다. 앞의 것은 append-only fixture `crates/qsh-cli/tests/fixtures/cli-v1/error.UNSUPPORTED.json`이 봉투째 고정하고 뒤의 것은 `crates/qsh-core/tests/tunnel_docs.rs`가 README와 `docs/CLI.md` §6.9의 축자 인용으로 고정한다.
+오늘의 `-D`는 이렇다. 두 spelling(대화형 `qsh host -D spec`, `qsh tunnel open host --dynamic spec`)이 파싱만 되고 `crates/qsh-cli/src/main.rs`의 두 호출 지점이 `Ops` 호출 전에 `dynamic_forward_unsupported()`로 거절한다. 거절 문면은 `crates/qsh-core/src/ops/tunnel.rs`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`와 `DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE` 두 상수다. 앞의 것은 append-only fixture `crates/qsh-cli/tests/fixtures/cli-v1/error.UNSUPPORTED.json`이 봉투째 고정하고 뒤의 것은 `crates/qsh-core/tests/it/tunnel_docs.rs`가 README와 `docs/CLI.md` §6.9의 축자 인용으로 고정한다.
 
 설계를 가르는 사실은 다음과 같다.
 
@@ -85,9 +85,9 @@ SOCKS는 실제로 wire가 아니라 목적지를 고르는 주체를 바꾼다.
 
 12. 로그 규율은 이렇다. host audit은 지금처럼 목적지를 구조적 메타데이터로 남긴다. client는 연결별 목적지를 debug 수준에서만 남긴다. warn 이상에는 개수와 오류 범주만 싣는다. `-L` accept 루프의 `warn!(host, port, …)` 호출을 SOCKS 루프에 옮겨 쓰지 않는다. handshake 이후 바이트는 보지 않는다. SNI나 Host 헤더를 엿보는 일도 하지 않는다.
 
-13. fixture 처리는 이렇다. `error.UNSUPPORTED.json`은 바이트 그대로 둔다. `-D`가 더는 그 봉투를 만들지 않으므로 `crates/qsh-cli/tests/fixtures.rs`에서 생성 코드를 지우고 그 파일 이름을 새 상수 `RETIRED_PRODUCERS`에 사유와 함께 올린다. `ErrorCode` 도달성 테스트는 retired 파일을 커버리지에서 뺀다. 따라서 `UNSUPPORTED`에는 살아 있는 생성자가 새로 있어야 하고 역방향 route `-D` 거절(결정 10)이 새 fixture `error.UNSUPPORTED.dynamic_reverse.json`을 만든다. 이 fixture는 ADR-0020 결정 4가 철회했다. 새 fixture로 `tunnel.dynamic.json`과 `error.INVALID_ARGUMENT.dynamic_bind.json`도 추가하고 `REQUIRED_FIXTURES`에 등록한다. `capabilities.json`은 `dial-filter.v1` 때문에 `QSH_UPDATE_FIXTURES=1`로 다시 만들고 계약 변경과 같은 무게로 리뷰한다(`docs/design/testing.md` L6).
+13. fixture 처리는 이렇다. `error.UNSUPPORTED.json`은 바이트 그대로 둔다. `-D`가 더는 그 봉투를 만들지 않으므로 `crates/qsh-cli/tests/it/fixtures.rs`에서 생성 코드를 지우고 그 파일 이름을 새 상수 `RETIRED_PRODUCERS`에 사유와 함께 올린다. `ErrorCode` 도달성 테스트는 retired 파일을 커버리지에서 뺀다. 따라서 `UNSUPPORTED`에는 살아 있는 생성자가 새로 있어야 하고 역방향 route `-D` 거절(결정 10)이 새 fixture `error.UNSUPPORTED.dynamic_reverse.json`을 만든다. 이 fixture는 ADR-0020 결정 4가 철회했다. 새 fixture로 `tunnel.dynamic.json`과 `error.INVALID_ARGUMENT.dynamic_bind.json`도 추가하고 `REQUIRED_FIXTURES`에 등록한다. `capabilities.json`은 `dial-filter.v1` 때문에 `QSH_UPDATE_FIXTURES=1`로 다시 만들고 계약 변경과 같은 무게로 리뷰한다(`docs/design/testing.md` L6).
 
-14. 거절 상수 둘(`DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`, `DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE`)과 `dynamic_forward_unsupported()`는 지운다. 대신 상수 `DYNAMIC_FORWARD_ACL_NOTE`를 둔다. 문면은 "`-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted."이다. README와 `docs/CLI.md` §6.9가 이를 축자 인용하고 `crates/qsh-core/tests/tunnel_docs.rs`가 대조한다. 거절 문면에 걸려 있던 문서-상수 대조 장치를 보안상 중요한 이 사실로 옮긴다.
+14. 거절 상수 둘(`DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`, `DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE`)과 `dynamic_forward_unsupported()`는 지운다. 대신 상수 `DYNAMIC_FORWARD_ACL_NOTE`를 둔다. 문면은 "`-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted."이다. README와 `docs/CLI.md` §6.9가 이를 축자 인용하고 `crates/qsh-core/tests/it/tunnel_docs.rs`가 대조한다. 거절 문면에 걸려 있던 문서-상수 대조 장치를 보안상 중요한 이 사실로 옮긴다.
 
 15. 초안의 미결 질문 아홉 개는 이렇게 처분한다. 이유는 근거 절에 있다.
     - Q1 목적지 ACL 문법: 이 ADR의 선행 조건이 아니다. 문법은 `forward.local`을 대상으로 하는 별도 ADR로 만든다. 그 문법은 `allow` 토큰 안에 인코딩해서 구버전 바이너리가 파일을 `CONFIG_ERROR`(전부 거부)로 읽게 한다. 이름 패턴은 요청 문자열에, CIDR은 해석된 주소에 맞춘다. 결정 2 덕분에 그 문법은 `-L`과 `-D`를 함께 덮는다.
@@ -138,9 +138,9 @@ codec을 `qsh-proto`에 두는 이유는 ADR-0001이 신뢰할 수 없는 입력
 - wire 변경은 `StreamHeader.deny_host_local = 5`와 capability `dial-filter.v1` 둘이다. 새 client와 구버전 host 조합에서 `-D`는 `UNSUPPORTED`로 거절되고 `-L`은 영향이 없다. `decode_stream_header` fuzz 타깃이 새 필드를 자동으로 덮는다.
 - 빨개지는 기존 테스트와 그 처리는 다음과 같다. 모두 옛 계약(항상 거절)을 고정하던 테스트라 새 계약으로 바꿀 뿐 검사를 느슨하게 하지 않는다.
   - `crates/qsh-cli/tests/dynamic_forward_stub.rs`는 `dynamic_forward.rs`로 대체한다. 무자원 속성은 실패 경로(비-loopback bind, 역방향, capability 부재)의 새 테스트로 옮겨 남긴다.
-  - `crates/qsh-core/tests/tunnel_docs.rs`는 `DYNAMIC_FORWARD_ACL_NOTE` 대조로 바꾼다.
-  - `crates/qsh-core/tests/failure_text_discipline.rs`의 T6 행과 `CHANNEL_CONSTRAINED` 항목은 역방향·capability 부재 거절 문면으로 바꾼다. 새 문면은 처음부터 관측·영향·다음 명령 세 부분을 envelope `message`에 다 담는다.
-  - `crates/qsh-cli/tests/fixtures.rs`의 `-D` 생성 블록은 지운다. 결정 13대로 도달성 검사는 오히려 엄격해진다.
+  - `crates/qsh-core/tests/it/tunnel_docs.rs`는 `DYNAMIC_FORWARD_ACL_NOTE` 대조로 바꾼다.
+  - `crates/qsh-core/tests/it/failure_text_discipline.rs`의 T6 행과 `CHANNEL_CONSTRAINED` 항목은 역방향·capability 부재 거절 문면으로 바꾼다. 새 문면은 처음부터 관측·영향·다음 명령 세 부분을 envelope `message`에 다 담는다.
+  - `crates/qsh-cli/tests/it/fixtures.rs`의 `-D` 생성 블록은 지운다. 결정 13대로 도달성 검사는 오히려 엄격해진다.
   - `checked_in_man_pages_match_the_generator`는 `cli.rs` doc 주석을 고친 뒤 `cargo xtask man`으로 맞춘다.
   - `capabilities.json` golden은 다시 만들고 리뷰한다.
 - ACL 쪽 테스트의 단언은 바뀌지 않는다. `is_always_denied_is_exactly_the_p1_deferred_trio`는 이름만 `is_always_denied_is_exactly_the_undrivable_trio`로 바꾼다.

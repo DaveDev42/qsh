@@ -541,7 +541,7 @@ fn concurrent_trust_add_through_ops_does_not_lose_a_peer() {
 /// must still not get pinned under an escape-sequence name). Proven
 /// against the store itself (`trust.toml` is never even created), not
 /// just the returned error — mirroring
-/// `qsh-testkit/tests/pairing_loopback.rs`'s responder-side sibling of
+/// `qsh-testkit/tests/it/pairing_loopback.rs`'s responder-side sibling of
 /// this test. The rogue responder here hand-crafts its own wire reply
 /// (rather than going through `crate::server::Server`) so it can send
 /// a genuinely verifying proof alongside a bad device name — something

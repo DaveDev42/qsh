@@ -477,7 +477,7 @@ impl Server {
     /// it is the **opener's own subsequent write** that then meets
     /// `Conflict` instead
     /// (`session_write_scope_any_lets_a_foreign_first_writer_take_the_free_lease`,
-    /// `crates/qsh-testkit/tests/session_loopback.rs`). This residual
+    /// `crates/qsh-testkit/tests/it/session_loopback.rs`). This residual
     /// window is the documented trade-off, not a bug: `scope` only ever
     /// decides who may *reach* the lease, never who wins a race for a free
     /// one. The two gates are independent on purpose.
@@ -644,7 +644,7 @@ impl Server {
         // `SESSION_NOT_FOUND`이며, 조회·읽기·종료는 ACL 범위에서 가능하다" — and
         // M3 already shipped `close` cross-device
         // (`session_control_binding_does_not_reach_get_read_or_close`,
-        // `crates/qsh-testkit/tests/session_loopback.rs`). This step's own
+        // `crates/qsh-testkit/tests/it/session_loopback.rs`). This step's own
         // invariant is "no behavior change" to that: a `scope = "owned"`
         // rule still narrows `write`/`resize` to the opener
         // (`Self::authorize_session_control`, above) but never narrows

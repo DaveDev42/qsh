@@ -85,7 +85,7 @@ jobs:
       - name: Measure
         run: |
           rm -f "$PERF_OUT"
-          cargo nextest run -p qsh-testkit --test tunnel_throughput --test tunnel_echo_under_load --no-fail-fast --success-output final
+          cargo nextest run -p qsh-testkit --test it -E 'test(/^(tunnel_throughput|tunnel_echo_under_load)::/)' --no-fail-fast --success-output final
         env:
           QSH_ACCEPTANCE_STRICT: 1
           QSH_PERF_OUT: ${{ env.PERF_OUT }}

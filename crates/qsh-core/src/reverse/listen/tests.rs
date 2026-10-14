@@ -619,7 +619,7 @@ fn admit(listen: &Listen, name: &str) -> u64 {
 /// (M3 plan Step 8 (c) (2473c88)'s unit tests exercise
 /// [`Listen::control_hub_wait`] directly, not the daemon frame loop
 /// around it — that path is covered at L3 by
-/// `crates/qsh-testkit/tests/local_control_reverse.rs`).
+/// `crates/qsh-testkit/tests/it/local_control_reverse.rs`).
 #[cfg(unix)]
 fn publish_hub(listen: &Listen, name: &str, generation: u64) -> Arc<ControlHub> {
     let hub = ControlHub::new(
@@ -1029,7 +1029,7 @@ async fn run_listen_is_unsupported_on_non_unix() {
 // [`ControlHub::unregister_conduit`] and [`Listen::handle_tcp_accepted_stream`]
 // directly — the full wire-level round trip through a real reverse
 // connection and daemon `LOCAL_STREAM` conduit is
-// `crates/qsh-testkit/tests/reverse_tunnel.rs`'s job (L3), not this
+// `crates/qsh-testkit/tests/it/reverse_tunnel.rs`'s job (L3), not this
 // crate's unit tests (the same split `local_stream_at_the_stream_pools_cap_...`
 // above already draws for `LOCAL_STREAM`'s own cap).
 // ------------------------------------------------------------------
@@ -1129,7 +1129,7 @@ async fn a_forward_id_never_resolves_to_a_different_conduits_registration() {
 // `list_forwards`/`admin_close_forward`'s own registry-level behavior.
 // The full wire-level round trip through a real localctl daemon and
 // `Ops::tunnel_list`/`Ops::tunnel_close` is
-// `crates/qsh-testkit/tests/reverse_tunnel.rs`'s
+// `crates/qsh-testkit/tests/it/reverse_tunnel.rs`'s
 // `tunnel_list_and_close_manage_a_daemon_held_remote_forward` (L3), not
 // this crate's unit tests.
 // ------------------------------------------------------------------

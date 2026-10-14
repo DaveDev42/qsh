@@ -155,7 +155,7 @@ pub async fn run_reverse(
 /// is this function with no-op hooks; the CLI entry point supplies
 /// `on_runtime` as a no-op (it never needs the runtime handle — only a
 /// test that wants to observe session state *across* a reconnect does,
-/// `crates/qsh-testkit/tests/reverse_chaos.rs`) but wires `on_unreachable`
+/// `crates/qsh-testkit/tests/it/reverse_chaos.rs`) but wires `on_unreachable`
 /// up to a one-time stderr diagnostic (M3 plan Step 9 (2473c88), `docs/CLI.md`
 /// §6.13). `on_unreachable` fires at most once per call, the first time an
 /// attempt fails to dial/register (module docs, `run_reverse_unix`'s

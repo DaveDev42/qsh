@@ -816,7 +816,7 @@ async fn dial_and_register_classifies_and_maps_the_last_addresss_dial_error_cons
 /// production body, with only the resolve step swapped for a synthetic
 /// one, its `Resolver`-pattern seam) with two real, unreachable loopback
 /// UDP ports — bind-then-drop, the same technique
-/// `crates/qsh-cli/tests/reverse_unreachable_diagnostic.rs` uses — so
+/// `crates/qsh-cli/tests/it/reverse_unreachable_diagnostic.rs` uses — so
 /// this is a real `Dialer::dial` attempt against each, not a canned
 /// `DialError`. `with_timeout` keeps each attempt to well under a second
 /// instead of the production 10 s default. A mutation that truncates the
@@ -1105,7 +1105,7 @@ async fn classify_target_connection_loss_maps_a_task_panic_to_local() {
 /// so both ends see pure silence, and both `PathWatch` floors are raised
 /// above the 45 s idle timeout (`crate::reverse::path_watch_config`), so
 /// `PathWatch` cannot win the race that
-/// `crates/qsh-testkit/tests/reverse_lost_cause_and_since_registered_ms.rs`'s
+/// `crates/qsh-testkit/tests/it/reverse_lost_cause_and_since_registered_ms.rs`'s
 /// `run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead`
 /// pins for a real path. Runs only under `QSH_ACCEPTANCE_SLOW`
 /// (`.github/workflows/ci.yml` acceptance job).

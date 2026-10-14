@@ -24,7 +24,7 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # `adversarial_load.rs`) is different: it spawns a real `qsh serve` child
 # per test with piped stdout/stderr, so the leaky path is reachable in
 # principle there — what actually keeps it closed is `ServeGuard`'s
-# `Drop` (`crates/qsh-cli/tests/common/mod.rs`), which kills the child,
+# `Drop` (`crates/qsh-cli/tests/it/common/mod.rs`), which kills the child,
 # waits for it, and joins its reader threads before returning, so the fd
 # is reclaimed even on an assertion panic.
 leak-timeout = "200ms"
@@ -51,7 +51,7 @@ leak-timeout = "200ms"
 #   512-socket accept sweep has its own multi-second drain; 60s reads
 #   several of T2's scenarios as "slow" under ordinary host load, not only
 #   under a real hang. 120s was itself too tight once M8 Step 5 added the
-#   short-mode soak scenario (`crates/qsh-cli/tests/soak.rs`) to this same
+#   short-mode soak scenario (`crates/qsh-cli/tests/it/soak.rs`) to this same
 #   profile in `load.yml`: that scenario's fixed sleeps alone (120s steady
 #   + a 90s drain wait) sum to 210s, measured at 216.8s/217.4s wall-clock
 #   on a loaded WSL host — inside 120s x terminate-after(3) = 360s, but
@@ -92,7 +92,7 @@ slow-timeout = { period = "3600s" }
 
 # `long.yml`'s 30-minute blackout round
 # (`a_real_30_minute_blackout_is_resumed_within_the_ttl`,
-# `crates/qsh-cli/tests/reverse_blackout.rs`), the release-gate evidence for
+# `crates/qsh-cli/tests/it/reverse_blackout.rs`), the release-gate evidence for
 # `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" row. Two departures
 # from `[profile.default]`:
 # - `slow-timeout`'s `period` is an hour and `terminate-after` is omitted —

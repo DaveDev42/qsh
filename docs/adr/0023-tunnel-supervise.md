@@ -19,7 +19,7 @@
 
 - forward route의 `-L`/`-R`/`-D`는 그것을 연 CLI 프로세스가 dial한 QUIC connection에 결합된다. connection이 죽으면 `TunnelHold::hold`(`crates/qsh-core/src/ops/tunnel.rs`)가 `Connected::wait_dead`로 그것을 알고 오류를 돌려주며 프로세스는 exit `255`로 끝난다. path migration은 connection을 살려 보내므로 터널도 산다.
 - reverse route의 `-R`만 예외다. target의 listener는 상주 `qsh listen` 데몬의 reverse connection에 결합돼 CLI가 죽어도 남지만, claim conduit이 CLI와 함께 죽으므로 그 뒤의 `TCP_ACCEPTED`는 reset된다.
-- reverse route의 `-L`과 `-D`는 예외가 아니다. `TunnelHold::hold`가 `LOCAL_CONTROL` conduit의 종료를 기다리므로 등록이 stale이 되면 프로세스가 끝난다. listener 밑의 `LocalForward`는 등록 drop을 연결 단위로 견딘다. `crates/qsh-testkit/tests/reverse_tunnel.rs`의 `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`이 이 성질을 고정하고, 같은 파일의 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`가 프로세스는 끝난다는 규칙을 고정한다.
+- reverse route의 `-L`과 `-D`는 예외가 아니다. `TunnelHold::hold`가 `LOCAL_CONTROL` conduit의 종료를 기다리므로 등록이 stale이 되면 프로세스가 끝난다. listener 밑의 `LocalForward`는 등록 drop을 연결 단위로 견딘다. `crates/qsh-testkit/tests/it/reverse_tunnel.rs`의 `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`이 이 성질을 고정하고, 같은 파일의 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`가 프로세스는 끝난다는 규칙을 고정한다.
 - `--wait`는 최초 route 해석이 `reverse_registration_stale`을 만났을 때만 재시도하고 예산은 요청값과 `[listen].stale_retention`(기본 120초) 중 작은 쪽이다(`Ops::cap_wait_budget_to_stale_retention`). 연 뒤의 수명은 바꾸지 않는다. `-D`에는 `--wait`가 없다.
 
 2026-09-30에 현장 자료 두 건이 더 들어왔다.
@@ -33,7 +33,7 @@
 - `docs/design/protocol.md` §2는 "절전 복귀 시 클라이언트는 monotonic clock 점프/PTO 실패로 죽은 연결을 즉시 버리고"라고 적지만 단조 시계는 절전 뒤에 뛰지 않는다. 그 문장이 약속한 감지는 오늘 코드에 없다.
 - 이 ADR의 결정 10(초안)은 500ms에서 30초까지 2배씩 늘린다. 깨어난 뒤 망이 2~30초 동안 쓸 수 없는 경우가 흔해서, 망이 돌아온 순간 다음 시도가 8~16초 뒤에 있을 수 있다.
 - target의 backoff(`crates/qsh-core/src/reverse/target/mod.rs`의 `Backoff`, `[reverse]` 설정)도 tokio sleep으로 기다리므로 절전 전에 걸린 대기는 깨어난 뒤 남은 만큼 이어진다. 등록 성공에서만 `reset()`한다.
-- 사람용 수명 줄은 `stderr_note!`로 바로 쓰인다(`crates/qsh-cli/src/main.rs`의 `qsh serve: listening on {addr}`, `qsh serve: shutting down`, `qsh listen: …`, `crates/qsh-core/src/ops/session/link.rs`의 `the connection carrying this tunnel closed: …`). 시각이 없다. 앞의 둘은 `crates/qsh-cli/tests/common/mod.rs`의 `LISTENING_PREFIX`·`LISTEN_LISTENING_PREFIX`가 접두어를 떼어 주소를 파싱하고 바깥 스크립트도 같은 방식으로 읽을 수 있다. `docs/CLI.md` §2.2는 stderr를 진단 채널로만 규정하므로 이 줄들은 계약이 아니지만, 접두어나 꼬리를 바꾸면 그 파서가 깨진다.
+- 사람용 수명 줄은 `stderr_note!`로 바로 쓰인다(`crates/qsh-cli/src/main.rs`의 `qsh serve: listening on {addr}`, `qsh serve: shutting down`, `qsh listen: …`, `crates/qsh-core/src/ops/session/link.rs`의 `the connection carrying this tunnel closed: …`). 시각이 없다. 앞의 둘은 `crates/qsh-cli/tests/it/common/mod.rs`의 `LISTENING_PREFIX`·`LISTEN_LISTENING_PREFIX`가 접두어를 떼어 주소를 파싱하고 바깥 스크립트도 같은 방식으로 읽을 수 있다. `docs/CLI.md` §2.2는 stderr를 진단 채널로만 규정하므로 이 줄들은 계약이 아니지만, 접두어나 꼬리를 바꾸면 그 파서가 깨진다.
 - route 해석(`crates/qsh-core/src/ops/host.rs`의 `resolve_route`)은 live reverse 등록, forward pin, stale 등록, 주소 없는 pin 순으로 본다. 주소 없이 fingerprint만 가진 pin은 forward 분기를 지나쳐 stale 분기에 닿으므로 `--wait`가 동작한다. `qsh doctor`의 `host_pinned_without_address`가 이 배치를 "순정 reverse 대상"으로 정상 취급한다. `trust.accept`는 pairing에 성공한 주소를 pin에 채우므로(`docs/CLI.md` §6.11) pairing으로 만든 pin에는 관측 주소가 남는다.
 
 ADR-0018 결정 2는 "`-L` listener를 쥔 프로세스는 resume 뒤에도 그 listener로 들어오는 새 연결에 reset을 돌려준다"이고, 결정 3은 "`-R` 자동 재발행은 P1 백로그로 옮긴다. 필요해지면 additive 필드(예: `reclaim: bool`)로 넣을 수 있다"이다. 5b는 이 두 결정을 바꾸는 계약 변경이라 결함 수정으로 처리할 수 없다. 그래서 ADR이 먼저다.
@@ -169,7 +169,7 @@ ADR-0018 결정 2는 "`-L` listener를 쥔 프로세스는 resume 뒤에도 그 
 
 21. 수명 줄에 시각을 준다(이슈 #6 요청 6). 사람용 줄의 바이트는 바꾸지 않고 옆에 기계용 줄을 더한다.
     - 새 tracing target `qsh::lifecycle`이 한 줄 JSON을 낸다. 첫 키는 `lifecycle`이고 값은 `listening`, `shutting_down`, `tunnel_opened`, `tunnel_ended` 넷이다. 모든 줄에 `at`(RFC3339, 초 단위)과 `process`(`serve`, `listen`, `serve_to`, `tunnel`)가 있다. `tunnel_*` 줄은 `tunnel_id`, `mode`, `supervise`(bool)를 싣고 `tunnel_ended`는 `code`와 알 수 있으면 `cause`(결정 12와 같은 어휘와 대응)를 싣는다. 주소, bind 주소, 토큰, 오류 본문은 싣지 않는다. bind 주소는 사람용 줄에 이미 있다.
-    - `qsh serve: listening on {addr}`, `qsh listen: listening on {addr}`, `… shutting down`, `the connection carrying this tunnel closed: …`의 바이트는 그대로다. 접두어 뒤를 주소로 파싱하는 소비자(`crates/qsh-cli/tests/common/mod.rs`의 `LISTENING_PREFIX`, `LISTEN_LISTENING_PREFIX`와 바깥 스크립트)가 있어서 RFC3339 접두어나 꼬리를 붙이면 그 파서가 깨진다. 그래서 이슈가 제시한 두 방법 가운데 "`qsh::reverse`와 같은 한 줄 JSON 진단으로 보낸다"를 택한다.
+    - `qsh serve: listening on {addr}`, `qsh listen: listening on {addr}`, `… shutting down`, `the connection carrying this tunnel closed: …`의 바이트는 그대로다. 접두어 뒤를 주소로 파싱하는 소비자(`crates/qsh-cli/tests/it/common/mod.rs`의 `LISTENING_PREFIX`, `LISTEN_LISTENING_PREFIX`와 바깥 스크립트)가 있어서 RFC3339 접두어나 꼬리를 붙이면 그 파서가 깨진다. 그래서 이슈가 제시한 두 방법 가운데 "`qsh::reverse`와 같은 한 줄 JSON 진단으로 보낸다"를 택한다.
     - `init_tracing`에 `qsh::reverse`와 같은 전용 layer와 `{default},qsh::lifecycle=info` 필터를 더한다. 기본 verbosity에서 보이고 `--quiet`에서만 꺼진다. `qsh.cli/v1`/`qsh.event/v1` 밖의 열린 어휘이고 stdout에는 쓰지 않는다(§2.2).
     - 이 결정은 `--supervise`와 무관하게 모든 holder와 두 데몬에 붙는다. 결정 1의 "바이트 단위로 같다"에 대한 유일한 예외이고 stderr 진단에만 닿는다.
 
@@ -268,7 +268,7 @@ accept 유지는 2초로 묶는다. 이슈의 관측은 1~2초짜리 복귀를 �
   - `docs/design/protocol.md` §16.4의 ADR-0018 결정 3 항목에는 "ADR-0023은 이 길을 쓰지 않았다"는 한 줄만 붙인다.
   - `docs/ROADMAP.md` §3 가드레일 표의 "Forward-route live carrier·`-R` 자동 재발행" 행에 이 ADR을 잇는 갱신이 필요하다. 2026-09-26 P1 착수 때 그 행에 M12 귀속과 이 ADR의 개정 범위를 적었다. §5 M12 (a)의 범위·DoD·크기 줄은 결정 17~24와 아래 크기로 고친다. §5.5에 `p1-supervise-wake` 회차 행을 더한다.
 - wire, `.proto`(`qsh.local.v1` 포함), capability 문자열, `ErrorCode`는 바뀌지 않는다. `acl.toml`을 쓰는 명령도 생기지 않는다(ADR-0017 결정 1). 코드에서 바뀌는 peer 동작은 결정 16의 close 응답 시점 하나다.
-- 그대로 두는 테스트: `crates/qsh-testkit/tests/tunnel_chaos.rs`의 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`, `crates/qsh-testkit/tests/reverse_tunnel.rs`의 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`, `tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires`. 넷 다 기본 모드의 계약이고 이 ADR은 기본 모드를 바꾸지 않는다. `crates/qsh-cli/tests/reverse_blackout.rs`의 테스트도 그대로 둔다.
+- 그대로 두는 테스트: `crates/qsh-testkit/tests/it/tunnel_chaos.rs`의 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`, `crates/qsh-testkit/tests/it/reverse_tunnel.rs`의 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`, `tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires`. 넷 다 기본 모드의 계약이고 이 ADR은 기본 모드를 바꾸지 않는다. `crates/qsh-cli/tests/it/reverse_blackout.rs`의 테스트도 그대로 둔다.
 - 구현이 더할 테스트. 이름은 구현 때 정하되 각 줄이 대응하는 결정을 doc에 적는다.
   - 결정 1: `--supervise` 범위 밖 값은 listener가 생기기 전에 `INVALID_ARGUMENT`다. `tunnel_open_and_hold`에 `supervise_ms`를 주면 연결 전에 `INVALID_ARGUMENT`다.
   - 결정 2: `--supervise`를 줘도 최초 open 실패는 재시도 없이 지금의 봉투와 exit `255`로 끝난다. `--wait`와 함께 줘도 대기 예산은 `stale_retention`으로 깎인다.
@@ -283,7 +283,7 @@ accept 유지는 2초로 묶는다. 이슈의 관측은 1~2초짜리 복귀를 �
   - 결정 8, 9: `forward.remote`가 빠진 `acl.toml`로 재시작한 peer에 대해 supervisor가 `PERMISSION_DENIED`로 끝나고, peer audit에 거부 줄이 하나 남고, 로컬 listener가 놓인다.
   - 결정 9: 출처와 `ErrorCode`의 모든 조합에 대한 분류 단위 테스트. 표에 없는 조합과 `Unknown(_)`은 끝낸다.
   - 결정 10: `--supervise 5000`에서 3초 끊김, 재수립, 20초 뒤 재유실이면 약 2초의 추가 끊김 뒤 `gave_up`이다. 30초를 채운 뒤의 유실은 예산을 새로 채운다.
-  - 결정 11: 예산이 끝나면 `gave_up` 줄, 마지막 오류, exit `255`가 순서대로 나온다. 재수립을 두 번 거친 뒤에도 stdout은 봉투 한 줄뿐이다(`crates/qsh-cli/tests/jsonl_purity.rs`의 `a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr`와 같은 모양). 유실 중 SIGTERM을 받으면 listener를 놓고 exit `0`으로 끝나며 `-R`은 peer에 `RemoteForwardClose`가 닿는다.
+  - 결정 11: 예산이 끝나면 `gave_up` 줄, 마지막 오류, exit `255`가 순서대로 나온다. 재수립을 두 번 거친 뒤에도 stdout은 봉투 한 줄뿐이다(`crates/qsh-cli/tests/it/jsonl_purity.rs`의 `a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr`와 같은 모양). 유실 중 SIGTERM을 받으면 listener를 놓고 exit `0`으로 끝나며 `-R`은 peer에 `RemoteForwardClose`가 닿는다.
   - 결정 12: 기본 verbosity에서 `lost`와 `gave_up` 줄이 stderr에 보이고 `--quiet`에서는 보이지 않는다. 어느 줄에도 주소·토큰 필드가 없다.
   - 결정 13: `-R` 재발행 뒤 `reestablished` 줄의 `tunnel_id`와 `previous_tunnel_id`가 다르고, reverse route의 `qsh tunnels`가 새 값을 보인다.
   - 결정 14: reverse route의 supervised `-R`을 `qsh tunnel close <현재 id>`로 닫으면 `closed` 줄과 exit `0`으로 끝나고 다시 열지 않는다. 등록 유실은 운영자 닫기로 읽히지 않는다.

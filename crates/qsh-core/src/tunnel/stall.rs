@@ -7,7 +7,7 @@
 //! [`TUNNEL_STREAM_RECEIVE_WINDOW`] of [`CONNECTION_RECEIVE_WINDOW`], and
 //! four of them pin all of it: the peer has no connection-level credit left
 //! for the same connection's `SESSION_DATA`, and the shell stops
-//! (`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`). [`pump`] is not
+//! (`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`). [`pump`] is not
 //! at fault (it stalls only its own direction, as designed); the shared
 //! connection window is.
 //!

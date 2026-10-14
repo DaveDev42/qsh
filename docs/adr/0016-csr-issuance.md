@@ -118,8 +118,8 @@ CSR(Certificate Signing Request) 흐름은 이 문제의 통상적 해법이다.
 
 **고정할 테스트.**
 
-- 왕복: 장비 B `identity request` → 장비 A `cert sign` → B `trust add-ca` + `identity install` → 루트를 등재한 제3 장비 C와의 실 QUIC handshake에서 B가 server·client 어느 쪽이어도 `Principal::Device(<B의 device_id>)` + `AuthPath::Ca`. B를 SPKI로 pin해 둔 peer는 설치 뒤에도 `AuthPath::Pin`(ADR-0008 결정 6). `crates/qsh-cli/tests/cert_e2e.rs`의 선례를 잇는다.
-- `crates/qsh-transport/tests/handshake_matrix.rs` 새 행 둘: subject DN이 같은 두 루트를 함께 등재했을 때 둘째 루트가 서명한 leaf가 통과한다. 등재되지 않은 루트가 서명한 leaf는 거부된다(ROADMAP M16 DoD의 handshake matrix 행).
+- 왕복: 장비 B `identity request` → 장비 A `cert sign` → B `trust add-ca` + `identity install` → 루트를 등재한 제3 장비 C와의 실 QUIC handshake에서 B가 server·client 어느 쪽이어도 `Principal::Device(<B의 device_id>)` + `AuthPath::Ca`. B를 SPKI로 pin해 둔 peer는 설치 뒤에도 `AuthPath::Pin`(ADR-0008 결정 6). `crates/qsh-cli/tests/it/cert_e2e.rs`의 선례를 잇는다.
+- `crates/qsh-transport/tests/it/handshake_matrix.rs` 새 행 둘: subject DN이 같은 두 루트를 함께 등재했을 때 둘째 루트가 서명한 leaf가 통과한다. 등재되지 않은 루트가 서명한 leaf는 거부된다(ROADMAP M16 DoD의 handshake matrix 행).
 - `cert sign` 거부 행렬: 위조 서명, Ed25519가 아닌 키(`UNSUPPORTED`), SAN 없음·둘·`qsh://user/`·qsh 밖 URI, `device_<ULID>` 모양 위반, 서명 장비 자신의 `device_id`, 장부 충돌(같은 id·다른 SPKI), `PRIVATE KEY` 블록 혼입과 다중 블록. 거부 문면에 입력 바이트가 없음을 단언한다.
 - `cert sign`은 CSR이 `basicConstraints CA=true`, keyUsage `keyCertSign`, 임의 subject를 요청해도 결과 leaf가 `IsCa::NoCa`이고 subject가 `CN=<device_id>`다(threat-model 새 A 행의 핀).
 - 장부: 같은 id·같은 SPKI의 재서명은 `renewed: true`. 동시 `cert sign` 두 개가 장부를 잃지 않는다(`ca/.lock`).

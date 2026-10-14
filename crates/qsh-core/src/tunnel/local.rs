@@ -451,7 +451,7 @@ impl LocalForwardHandle {
     ///
     /// `pub`, not `pub(crate)` — the same Stage D widening
     /// `crate::tunnel::RemoteForwardAcceptor::spawn_reverse` already
-    /// got: `crates/qsh-testkit/tests/reverse_tunnel.rs` (L3, Step 5 (a))
+    /// got: `crates/qsh-testkit/tests/it/reverse_tunnel.rs` (L3, Step 5 (a))
     /// drives the real `-L over reverse` requester leg end to end rather
     /// than re-implementing it, which needs this callable from outside
     /// `qsh-core`. `Ops`'s route-aware entry point (PR 5b) is still the

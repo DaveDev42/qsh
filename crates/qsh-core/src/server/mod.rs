@@ -462,7 +462,7 @@ struct RemoteForwardEntry {
     /// the same device while the first connection is untouched — can close
     /// a forward it opened on the first, which is exactly what
     /// `remote_forward_close_allows_the_same_principal_from_a_different_connection`
-    /// (`crates/qsh-testkit/tests/tunnel_remote_loopback.rs`) drives and
+    /// (`crates/qsh-testkit/tests/it/tunnel_remote_loopback.rs`) drives and
     /// proves. Keying on principal instead of `conn_id` also keeps this
     /// axis the same vocabulary `session.control`'s ownership gate uses —
     /// `opener_key` is shared, not reimplemented — so the win here is

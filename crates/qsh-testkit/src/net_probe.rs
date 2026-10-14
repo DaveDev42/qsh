@@ -1,6 +1,6 @@
 //! Non-loopback IPv4 route discovery, plus the CI-aware skip-or-fail policy
 //! for tests that need a real network path — shared by
-//! `crates/qsh-testkit/tests/dynamic_loopback.rs` and any future `-D`/`-L`
+//! `crates/qsh-testkit/tests/it/dynamic_loopback.rs` and any future `-D`/`-L`
 //! reverse-route suite that needs the same address.
 //!
 //! **Why a probe, not just a route.** A route existing in the kernel

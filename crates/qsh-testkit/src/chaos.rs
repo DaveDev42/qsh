@@ -39,7 +39,7 @@
 //! witnesses proves nothing on its own. Two things keep it honest:
 //! [`ChaosStats::is_balanced`] ties the fault counters to the counters bumped
 //! at the actual `send_to` syscall (a fault that bumps without acting breaks
-//! the identity), and `tests/chaos_relay.rs` observes each fault directly on
+//! the identity), and `tests/it/chaos_relay.rs` observes each fault directly on
 //! the wire, with no QUIC in the way.
 //!
 //! The only timers here are the injected delays themselves. Tests must stay
@@ -81,13 +81,13 @@ pub const MAX_PENDING: usize = 4_096;
 /// **Where the real gate lives.** The client-side detector
 /// (`qsh_core::client::pathwatch`) and the resume half both landed in M2
 /// Step 7, and the criterion is enforced end to end by
-/// `qsh-cli/tests/attach_recovery.rs`: it severs the path under a live
+/// `qsh-cli/tests/it/attach_recovery.rs`: it severs the path under a live
 /// `Ops::session_attach` stream and asserts the driver's own
 /// `qsh::recovery` record carries `time_to_recovery_ms <= 2000` — the clock
 /// starts at path death, the test never closes or re-attaches the session
 /// by hand, and the whole scenario is bounded far inside quinn's 45 s idle
-/// timeout so "it eventually timed out" cannot pass. `tests/chaos_proxy.rs`
-/// and `tests/resume_chaos.rs` use this constant to bound re-dials the
+/// timeout so "it eventually timed out" cannot pass. `tests/it/chaos_proxy.rs`
+/// and `tests/it/resume_chaos.rs` use this constant to bound re-dials the
 /// *test* initiates — the scenario, not the criterion.
 pub const REDIAL_DEADLINE: Duration = Duration::from_secs(2);
 

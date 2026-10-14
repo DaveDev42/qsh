@@ -449,7 +449,7 @@ mod tests {
     /// and `resume`'s durable session-file writer), and fsync itself is not
     /// observable in-process (no crash-injection harness here). A
     /// source-text pin — the same precedent
-    /// `tests/acl_registry.rs::authorize_stream_has_exactly_two_production_call_sites`
+    /// `tests/it/acl_registry.rs::authorize_stream_has_exactly_two_production_call_sites`
     /// uses for an unobservable property — turns a future edit that
     /// silently flips `resume.rs`'s `true` to `false`, or drops the call
     /// entirely, into a failing test instead of a silent durability

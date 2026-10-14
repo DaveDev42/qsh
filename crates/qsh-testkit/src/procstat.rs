@@ -1,12 +1,12 @@
 //! Process resource-usage helpers shared by `qsh-cli`'s load/soak
 //! integration tests (T2 `adversarial_load.rs`, M8 Step 5's `soak.rs`).
 //!
-//! Moved here from `crates/qsh-cli/tests/common/mod.rs`
+//! Moved here from `crates/qsh-cli/tests/it/common/mod.rs`
 //! (docs/campaigns/m8-soak.md §4, precedent: `raw_quic.rs`'s move in 4c): both test
 //! files need the same `/proc`-based RSS/fd readers and the same
 //! poll-until-stable convergence helper, and `qsh-cli` already carries
 //! `qsh-testkit` as a dev-dependency, so a second copy in `soak.rs` would
-//! just be drift waiting to happen. `crates/qsh-cli/tests/common/mod.rs`
+//! just be drift waiting to happen. `crates/qsh-cli/tests/it/common/mod.rs`
 //! keeps `pub use` re-exports of everything here so the existing test
 //! files' `use common::{...}` lines do not need to change.
 

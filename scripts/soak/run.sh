@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drive the 24h/100-session soak run (`docs/campaigns/m8-soak.md` §4,
-# `crates/qsh-cli/tests/soak.rs`) under `[profile.soak]` and capture
+# `crates/qsh-cli/tests/it/soak.rs`) under `[profile.soak]` and capture
 # everything a campaign round needs to fill in the record template.
 #
 # This script does not judge anything itself — it runs the nextest binary
@@ -164,7 +164,7 @@ cd "$ROOT"
 # instead of silently occupying the host indefinitely.
 set +e
 timeout "$((QSH_SOAK_DURATION_SECS + 1800))" \
-    cargo nextest run --profile soak -p qsh-cli --test soak 2>&1 | tee "$OUT/run.log"
+    cargo nextest run --profile soak -p qsh-cli --test it -E 'test(/^soak::/)' 2>&1 | tee "$OUT/run.log"
 TEST_STATUS=${PIPESTATUS[0]}
 set -e
 

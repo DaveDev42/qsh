@@ -651,7 +651,7 @@ fn admin_control_and_stream_pools_are_independent_semaphores() {
 /// mid-handshake (hello sent, `LocalAdminRequest` body deliberately
 /// withheld) rather than a live `LOCAL_CONTROL` host, which needs a
 /// real reverse QUIC registration this crate's own unit tests cannot
-/// stand up — `crates/qsh-testkit/tests/local_control_reverse.rs`
+/// stand up — `crates/qsh-testkit/tests/it/local_control_reverse.rs`
 /// covers the same pool end to end over a real reverse connection.
 #[tokio::test]
 async fn local_admin_at_the_admin_pools_cap_answers_resource_exhausted_not_a_silent_drop() {
