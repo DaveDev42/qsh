@@ -145,4 +145,54 @@ mod tests {
             authorizer.check(&matching, Action::ForwardSocks, ResourceRef::unowned("h:1"));
         assert_eq!(verdict, Verdict::DENY);
     }
+
+    /// ADR-0031 결정 4: the connection watch compares the set
+    /// `SharedTrustStore::role_grants_for` returns, the authorizer decides on
+    /// the role `resolve_role` returns, and the two are one resolution. For
+    /// every connection shape, the set is exactly what the authorizer allows
+    /// on an unowned resource when no `acl.toml` row exists.
+    #[test]
+    fn authorizer_and_reverify_share_one_role_grant_function() {
+        use crate::acl::RoleGrants;
+
+        let fingerprint = Fingerprint::of_spki_der(b"phone");
+        let phone = Principal::Device("phone".into());
+        let matching = Some(PeerFingerprint::new(*fingerprint.as_bytes()));
+        let stranger = Some(PeerFingerprint::new([7; 32]));
+        for role in TrustRole::ALL {
+            let trust = store_with(&format!("role = \"{role}\"\n"), &fingerprint);
+            let authorizer = RoleResolvingAuthorizer::new(Policy::default(), trust.clone());
+            let shapes = [
+                (&phone, AuthPath::Pin, matching),
+                (&phone, AuthPath::Pin, stranger),
+                (&phone, AuthPath::Pin, None),
+                (&phone, AuthPath::Ca, matching),
+                (&Principal::User("phone".into()), AuthPath::Pin, matching),
+            ];
+            for (principal, auth_path, peer) in shapes {
+                let grants = trust.role_grants_for(principal, auth_path, peer);
+                assert_eq!(
+                    grants,
+                    RoleGrants::of_role(trust.resolve_role(principal, auth_path, peer)),
+                    "{role}: role_grants_for is resolve_role through the table"
+                );
+                let requester = Requester::new(principal, auth_path, peer);
+                for action in Action::ALL {
+                    let allowed = if action.is_file() {
+                        authorizer.has_file_grant(&requester, action)
+                    } else {
+                        authorizer
+                            .check(&requester, action, ResourceRef::unowned("r"))
+                            .decision
+                            == Decision::Allow
+                    };
+                    assert_eq!(
+                        allowed,
+                        grants.contains(action),
+                        "{role}, {principal} over {auth_path:?}: {action}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -1423,3 +1423,114 @@ fn query_role_resolves_the_pins_own_role_and_nothing_else() {
     );
     assert_eq!(store.query_role(&device("nobody"), AuthPath::Pin), None);
 }
+
+/// ADR-0031 결정 3: the generation moves exactly when `refresh` replaces the
+/// snapshot, so a watcher woken by it has something to judge.
+#[test]
+fn trust_store_generation_bumps_only_when_the_snapshot_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let good = peer_entry("phone", b"phone", Some("full"));
+    std::fs::write(&path, &good).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let refresh = || {
+        // Any lookup refreshes first.
+        let _ = shared.lookup_pin(&fp(b"phone"));
+        shared.generation()
+    };
+    let mut rx = shared.subscribe();
+    assert_eq!(shared.generation(), 0, "opening does not count as a change");
+    assert_eq!(refresh(), 0, "nothing changed on disk");
+
+    // The same bytes rewritten (a new mtime, identical content): no change.
+    std::fs::write(&path, &good).unwrap();
+    assert_eq!(refresh(), 0);
+    assert!(!rx.has_changed().unwrap());
+
+    // New content that parses: one step.
+    let narrowed = peer_entry("phone", b"phone", Some("exec"));
+    std::fs::write(&path, &narrowed).unwrap();
+    assert_eq!(refresh(), 1);
+    assert_eq!(refresh(), 1, "a second look at the same text is no change");
+    assert!(rx.has_changed().unwrap());
+    assert_eq!(*rx.borrow_and_update(), 1);
+
+    // Content that does not parse keeps the last good snapshot: no bump,
+    // however often it is looked at.
+    std::fs::write(&path, "[[peer]]\nname = ").unwrap();
+    for _ in 0..3 {
+        assert_eq!(refresh(), 1);
+    }
+    assert!(!rx.has_changed().unwrap());
+    assert_eq!(
+        shared.resolve_role(&phone, AuthPath::Pin, peer_fp(b"phone")),
+        None,
+        "the failed parse suspended roles without moving the generation"
+    );
+
+    // The file put back to the last good text ends the failed state: the
+    // snapshot is replaced, so watchers are woken to judge against it.
+    std::fs::write(&path, &narrowed).unwrap();
+    assert_eq!(refresh(), 2);
+    assert!(rx.has_changed().unwrap());
+    let _ = rx.borrow_and_update();
+
+    // Deleting the file empties the store: a change.
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(refresh(), 3);
+    assert_eq!(shared.lookup_pin(&fp(b"phone")), None);
+    // Still missing: no further change.
+    assert_eq!(refresh(), 3);
+}
+
+/// ADR-0031 결정 3: the poll task makes an edit by another process visible
+/// to subscribers within one tick, with no handshake and no lookup. Time is
+/// paused, so "one tick" is exact, not a wall-clock hope.
+#[tokio::test(start_paused = true)]
+async fn trust_store_poll_notifies_subscribers_within_one_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("full"))).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let mut rx = shared.subscribe();
+    shared.start_poll();
+    shared.start_poll(); // idempotent: still one task
+
+    // Nothing changed: a whole tick passes with no notification.
+    let quiet = tokio::time::timeout(TRUST_POLL_INTERVAL * 2, rx.changed()).await;
+    assert!(quiet.is_err(), "no change on disk, no wake-up");
+    assert_eq!(shared.generation(), 0);
+
+    std::fs::write(&path, "").unwrap();
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        TRUST_POLL_INTERVAL + Duration::from_millis(500),
+        rx.changed(),
+    )
+    .await
+    .expect("the poll must notice the edit")
+    .unwrap();
+    assert!(
+        started.elapsed() <= TRUST_POLL_INTERVAL,
+        "noticed after {:?}, more than one tick",
+        started.elapsed()
+    );
+    assert_eq!(shared.generation(), 1);
+}
+
+/// The poll task holds a weak handle: dropping the store ends it, so a
+/// process that builds a store per command does not accumulate tasks.
+#[tokio::test(start_paused = true)]
+async fn trust_store_poll_ends_when_the_store_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = SharedTrustStore::open(dir.path().join("trust.toml")).unwrap();
+    let weak = Arc::downgrade(&shared);
+    shared.start_poll();
+    drop(shared);
+    tokio::time::sleep(TRUST_POLL_INTERVAL * 2).await;
+    assert!(
+        weak.upgrade().is_none(),
+        "the poll task must not own the store"
+    );
+}

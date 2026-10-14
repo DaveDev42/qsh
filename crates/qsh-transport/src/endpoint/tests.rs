@@ -517,3 +517,190 @@ async fn measure_incoming_buffered_bytes_during_delayed_accept() {
     dial_task.abort();
     relay_task.abort();
 }
+
+/// Handshake a client with `client_id` against a server trusting
+/// `server_trust`; the client trusts `server_fp` by pin. Returns the
+/// server-side connection (peer role `Client`) and the client's dial.
+async fn handshake_pair(
+    server_id: LocalIdentity,
+    server_fp: Fingerprint,
+    server_trust: StaticTrust,
+    client_id: LocalIdentity,
+) -> (Connection, Dialed) {
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(server_trust),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept = tokio::spawn(async move {
+        let incoming = listener.accept().await.expect("one attempt");
+        incoming.accept().await.expect("handshake must succeed")
+    });
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+    let dialed = Dialer::new(client_id, Arc::new(client_trust))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("dial must succeed");
+    let conn = tokio::time::timeout(Duration::from_secs(10), accept)
+        .await
+        .expect("accept did not finish")
+        .expect("accept task panicked");
+    (conn, dialed)
+}
+
+/// A private CA plus a leaf it signs with a `qsh://device/<name>` SAN.
+fn ca_and_leaf(name: &str) -> (CertificateDer<'static>, LocalIdentity) {
+    use rcgen::string::Ia5String;
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_der = CertificateDer::from(ca_cert.der().to_vec());
+    let leaf_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    leaf_params.subject_alt_names = vec![rcgen::SanType::URI(
+        Ia5String::try_from(format!("qsh://device/{name}")).unwrap(),
+    )];
+    let issuer = rcgen::Issuer::new(ca_params, &ca_key);
+    let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+    (
+        ca_der,
+        LocalIdentity {
+            cert_chain: vec![CertificateDer::from(leaf.der().to_vec())],
+            key_pkcs8_der: Zeroizing::new(leaf_key.serialize_der()),
+        },
+    )
+}
+
+/// ADR-0031 decision 4: `reverify` is the handshake's own verification core
+/// run again over the kept chain, so under an unchanged trust store it
+/// returns the handshake's principal and `auth_path` for each of the three
+/// paths, and under a changed store it returns what a new handshake would.
+#[tokio::test(flavor = "multi_thread")]
+async fn reverify_agrees_with_the_handshake_verdict_for_pin_ca_and_pairing() {
+    // Pin path.
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, _dialed) = handshake_pair(server_id, server_fp, pinned.clone(), client_id).await;
+    let again = conn.reverify(&pinned).expect("same store, same verdict");
+    assert_eq!(again.principal, *conn.principal());
+    assert_eq!(again.auth_path, conn.auth_path());
+    assert_eq!(again.auth_path, AuthPath::Pin);
+    // The pin is gone: a fresh handshake would be rejected, and so is this.
+    assert_eq!(
+        conn.reverify(&StaticTrust::empty()).unwrap_err(),
+        RejectReason::Untrusted
+    );
+    // Pin removed but a pairing invite is open: the connection is now only
+    // admissible as Pairing, which is a different verdict from the one it
+    // was admitted with.
+    let paired = conn
+        .reverify(&StaticTrust::empty().with_pairing_open(true))
+        .expect("pairing fallback admits");
+    assert_eq!(paired.auth_path, AuthPath::Pairing);
+    assert_eq!(paired.principal, Principal::Pairing);
+
+    // CA path.
+    let ((server_id, server_fp), _) = test_pair();
+    let (ca_der, client_id) = ca_and_leaf("ci");
+    let ca_trust = StaticTrust::empty().with_ca(ca_der.clone());
+    let (conn, _dialed) = handshake_pair(server_id, server_fp, ca_trust.clone(), client_id).await;
+    assert_eq!(conn.auth_path(), AuthPath::Ca);
+    let again = conn.reverify(&ca_trust).expect("same store, same verdict");
+    assert_eq!(again.principal, *conn.principal());
+    assert_eq!(again.auth_path, AuthPath::Ca);
+    // The CA is removed.
+    assert_eq!(
+        conn.reverify(&StaticTrust::empty()).unwrap_err(),
+        RejectReason::Untrusted
+    );
+    // The same leaf, now pinned: same principal source differs, the
+    // auth path moves from Ca to Pin.
+    let leaf_fp = conn.peer_fingerprint().expect("leaf fingerprint");
+    let moved = conn
+        .reverify(
+            &StaticTrust::empty()
+                .with_ca(ca_der)
+                .with_pin(leaf_fp, Principal::Device("ci".into())),
+        )
+        .expect("pin path admits first");
+    assert_eq!(moved.auth_path, AuthPath::Pin);
+
+    // Pairing path (admitted only because an invite was open).
+    let ((server_id, server_fp), (client_id, _)) = test_pair();
+    let open = StaticTrust::empty().with_pairing_open(true);
+    let (conn, _dialed) = handshake_pair(server_id, server_fp, open.clone(), client_id).await;
+    assert_eq!(conn.auth_path(), AuthPath::Pairing);
+    let again = conn.reverify(&open).expect("invite still open");
+    assert_eq!(again.auth_path, AuthPath::Pairing);
+    assert_eq!(
+        conn.reverify(&StaticTrust::empty()).unwrap_err(),
+        RejectReason::Untrusted
+    );
+}
+
+/// ADR-0031 decision 5: a connection whose kept chain is empty (or whose
+/// leaf cannot be parsed) cannot be judged, and not being able to judge is
+/// a rejection.
+#[tokio::test(flavor = "multi_thread")]
+async fn reverify_rejects_a_connection_with_an_empty_chain() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, _dialed) = handshake_pair(server_id, server_fp, pinned.clone(), client_id).await;
+    assert!(
+        conn.reverify(&pinned).is_ok(),
+        "control: the real chain passes"
+    );
+
+    let mut empty = conn.clone();
+    empty.peer_chain = Arc::from(Vec::new());
+    assert_eq!(
+        empty.reverify(&pinned).unwrap_err(),
+        RejectReason::Untrusted
+    );
+    // An evaluator that would admit anything still cannot admit nothing.
+    let open = StaticTrust::empty().with_pairing_open(true);
+    assert_eq!(empty.reverify(&open).unwrap_err(), RejectReason::Untrusted);
+
+    let mut garbage = conn.clone();
+    garbage.peer_chain = Arc::from(vec![CertificateDer::from(vec![0u8; 8])]);
+    assert_eq!(
+        garbage.reverify(&pinned).unwrap_err(),
+        RejectReason::Malformed
+    );
+}
+
+/// ADR-0031 decision 7: the close helper uses the new code with the fixed
+/// reason, and both sides can tell afterwards that it was a withdrawal. A
+/// plain close with another code is not one.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_trust_withdrawn_is_visible_to_both_sides_and_only_for_its_code() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+    assert!(!conn.closed_by_trust_withdrawal(), "open connection");
+
+    conn.close_trust_withdrawn();
+    assert!(conn.closed_by_trust_withdrawal(), "the closing side");
+    let seen = tokio::time::timeout(Duration::from_secs(10), dialed.connection.closed())
+        .await
+        .expect("peer must observe the close");
+    match seen {
+        ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(close.error_code.into_inner(), 0x1005);
+            assert_eq!(&close.reason[..], TRUST_WITHDRAWN_REASON);
+        }
+        other => panic!("expected an application close, got {other:?}"),
+    }
+    assert!(dialed.connection.closed_by_trust_withdrawal(), "the peer");
+
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+    conn.close(CLOSE_CODE_PROTOCOL, b"protocol error");
+    let _ = tokio::time::timeout(Duration::from_secs(10), dialed.connection.closed()).await;
+    assert!(!conn.closed_by_trust_withdrawal());
+    assert!(!dialed.connection.closed_by_trust_withdrawal());
+}

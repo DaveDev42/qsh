@@ -28,6 +28,7 @@
 //! | 16 | client presents no certificate at all                     | handshake fails, no `Connection` |
 //! | 17 | server `pairing_open()==true`, client cert pinned nowhere | OK, `Principal::Pairing`/`AuthPath::Pairing` |
 //! | 18 | client dials with a mismatched ALPN (`qsh/0`), cert otherwise valid/pinned | client `DialError::RemoteRejected` (TLS `no_application_protocol`), server `HandshakeErr` before any principal/`Connection` |
+//! | 19 | mixed pin/CA as case 15, then `Connection::reverify` on both ends | each end's `reverify` equals its handshake principal and `auth_path`; with an empty store it is `Untrusted` |
 //!
 //! Case 17 is the M7 Step 4 (ADR-0002) addition: the pairing fallback only
 //! ever applies *after* both the pin and CA paths have already failed
@@ -1057,4 +1058,68 @@ async fn case18_control_lookup_pin_wrapper_counts_a_successful_handshake() {
          that actually reaches verification -- otherwise case18's \
          lookup_count() == 0 assertion would not be distinguishing anything"
     );
+}
+
+// ---------------------------------------------------------------------
+// 19. `Connection::reverify` after a real handshake (ADR-0031 decision 4):
+//     the mixed pin/CA shape of case 15, so one end re-derives by pin and
+//     the other by CA chain, and each end uses its own TLS role.
+// ---------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn case19_reverify_after_a_real_handshake_returns_the_handshake_verdict() {
+    let ca1 = make_ca();
+    let server = ca_signed(&ca1, Some("qsh://device/box"));
+    let client = self_signed_valid();
+    let server_trust =
+        StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_ca(ca1.der.clone());
+
+    let listener =
+        Listener::bind(loopback(), server.identity, Arc::new(server_trust.clone())).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn({
+        let server_trust = server_trust.clone();
+        async move {
+            let incoming = listener.accept().await.expect("one attempt");
+            let conn = incoming.accept().await.expect("handshake must succeed");
+            let again = conn.reverify(&server_trust);
+            let emptied = conn.reverify(&StaticTrust::empty());
+            let handshake = (conn.principal().clone(), conn.auth_path());
+            let _ = conn.closed().await;
+            (handshake, again, emptied)
+        }
+    });
+
+    let dialed = Dialer::new(client.identity, Arc::new(client_trust.clone()))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("dial must succeed");
+
+    // Client end: the server is accepted by CA chain, TLS role `Server`.
+    let again = dialed
+        .connection
+        .reverify(&client_trust)
+        .expect("same store, same verdict");
+    assert_eq!(&again.principal, dialed.connection.principal());
+    assert_eq!(again.auth_path, dialed.connection.auth_path());
+    assert_eq!(again.auth_path, AuthPath::Ca);
+    assert_eq!(
+        dialed
+            .connection
+            .reverify(&StaticTrust::empty())
+            .unwrap_err(),
+        RejectReason::Untrusted
+    );
+
+    dialed.connection.close(0, b"case19 done");
+    let (handshake, again, emptied) = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("server task did not finish (possible hang)")
+        .expect("server task panicked");
+
+    // Server end: the client is accepted by pin, TLS role `Client`.
+    let again = again.expect("same store, same verdict");
+    assert_eq!((again.principal, again.auth_path), handshake);
+    assert_eq!(handshake.1, AuthPath::Pin);
+    assert_eq!(emptied.unwrap_err(), RejectReason::Untrusted);
 }
