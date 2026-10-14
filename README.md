@@ -1015,8 +1015,9 @@ old-glibc check.
 | M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
 | M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
 | M14 | TCP/TLS fallback | Withdrawn (ADR-0043); the transport abstraction stays |
-| M15 | Trust roles and scp-compatible `qsh cp` | Features done; `decode_file_frame` fuzz hours open |
-| M16–M20 | Rest of P1 (SSH bootstrap, revocation, ops surface, session home, Windows client and host) | Design records approved; README rewrite (M17 b) done |
+| M15 | Trust roles and scp-compatible `qsh cp` | Done (2026-10-15); `decode_file_frame` fuzz hours open |
+| M16 | SSH bootstrap and trust revocation | In progress |
+| M17–M20 | Rest of P1 (ops surface, session home, Windows client and host) | Design records approved; README rewrite (M17 b) done |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the

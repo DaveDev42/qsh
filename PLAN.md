@@ -1,24 +1,25 @@
-# PLAN.md — M15: 역할 기반 권한과 scp 호환 파일 복사
+# PLAN.md — M16: SSH 부트스트랩과 신뢰 철회
 
-P1 M15의 실행 계획이다. 직전 내용은 승인 대기용 자리표시자였고, 이 문서가 그 자리를 전면 교체한다. 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 착수 ADR 둘(ADR-0045 역할 기반 권한, ADR-0029 `qsh cp`)이 `승인됨`이 되어 착수 조건이 모두 충족됐다. 구속 근거는 다음과 같다.
+P1 M16의 실행 계획이다. M15가 닫혀(2026-10-15) 이 문서가 M15 계획(마지막 커밋 `7cbeced`)을 전면 교체했다. 착수 ADR 둘(ADR-0044 SSH 부트스트랩, ADR-0031 축소판 trust 철회 시 연결 닫기)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 `승인됨`이 되었고(`09266dc`), M15 (a)(ADR-0045 role)는 `85ea34f`로 착지했으므로 착수 조건은 모두 충족됐다. 구속 근거는 다음과 같다.
 
-- `docs/ROADMAP.md` §5의 M15 절(범위 (a)(b), 착수 조건, 명시적 out, 수용 기준, 크기), §5.1 시퀀싱 원칙(특히 원칙 3·5·6·7), §5.4 일정 리스크 2, §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2)
-- ADR-0045 결정 1~20과 결과 절, ADR-0029 결정 1~23과 결과 절
-- 두 ADR이 개정하는 ADR-0017 결정 2·3, ADR-0024 결정 4·9, ADR-0025 결정 2·3·6, ADR-0038
-- 참조 ADR: ADR-0010(quota 모양), ADR-0037(정체 장부), ADR-0043(QUIC 하나), ADR-0035 결정 1·24·26(Windows 대응, M19·M20)
-- `docs/CLI.md` §2.4·§2.5·§4·§6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20과 새 `qsh cp` 절
-- `docs/design/protocol.md` §4·§7·§9·§12·§13·§16.1, `docs/design/architecture.md` §6·§7, `docs/design/threat-model.md` §2·§3·§4 B·§7, `docs/PRD.md` §9
+- `docs/ROADMAP.md` §5의 M16 절(범위 (a)(b), 착수 조건, 명시적 out, 수용 기준, 크기), §5.1 시퀀싱 원칙(특히 원칙 5·6·7), §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2)
+- ADR-0044 결정 1~26과 결과 절, ADR-0031 결정 1~10과 결과 절
+- 두 ADR이 기대는 결정: ADR-0045 결정 4(ⓡ 단계와 role 조회 함수)·8(기본 role, local op audit)·12(`trust_remove_scope` 문면)·13(페어링 직후 고지), ADR-0012 결정 3·4·6·7, ADR-0013 결정 6, ADR-0014 결정 1·2·6, ADR-0017 결정 1·5, ADR-0026 결정 7
+- 참조 ADR: ADR-0010(연결 수 상한), ADR-0043(QUIC 하나, transport 중립 타입), ADR-0035 결정 1·5·14·25(Windows client M19, Windows host M20)
+- `docs/CLI.md` §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.14·§6.17·§6.21·§7
+- `docs/design/protocol.md` §3·§7·§13·§16.2·§16.3·§16.5와 새 부트스트랩 스트림 절, `docs/design/architecture.md` §6·§7, `docs/design/threat-model.md` §3·§4 A·B·D·E·§5 g2·§7(h4·h5·h35)
 - `CLAUDE.md` "Security defaults"
 
 이 계획과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
-인용 규율은 M13판과 같다. 문서는 절 이름, ADR 번호와 결정 번호, 테스트 이름, 커밋 해시로 가리킨다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, 줄 수나 개수를 적을 때는 origin `09266dc` 트리에서 잰 값임을 밝힌다. 옛 계획의 스텝 번호는 새로 인용하지 않는다.
+인용 규율은 M15판과 같다. 문서는 절 이름, ADR 번호와 결정 번호, 테스트 이름, 커밋 해시로 가리킨다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, 줄 수나 개수를 적을 때는 origin `1a4af3b` 트리에서 잰 값임을 밝힌다. 옛 계획의 스텝은 "M15 plan Step N (<해시>)" 꼴로만 인용한다.
 
 ## 0. 열린 사람 몫
 
-여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다.
+여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다. M15 계획 §0의 상태를 M15 마감 시점 그대로 옮겼다.
 
 ### 0.1 P0에서 열린 일곱
+
 
 - [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. Linux 회차는 PASS(v0.3.0 세 회차 `69a6414`, v0.4.3 Ubuntu 24.04 x86_64 회차 4, 2026-10-09). macOS arm64·x86_64 두 회차가 남았고 둘 다 클린 macOS VM과 Gatekeeper 판정이 필요하다. 소유: 사람.
 - [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 서명·공증 태그는 `v0.4.0`부터 있다. 회차는 `docs/campaigns/m10-clean-vm.md`. 소유: 사람.
@@ -26,20 +27,21 @@ P1 M15의 실행 계획이다. 직전 내용은 승인 대기용 자리표시자
 - [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`(예행 1회만 끝남). 소유: 사람.
 - [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건. 소유: 사람.
 - [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 저장소 밖 조직 액션. 소유: 운영자.
-- [ ] **M9 DoD 1 — SC1 스톱워치 재측정 3회.** 기준은 `docs/campaigns/m9-stopwatch.md`. M7 DoD 1에 종속. 소유: 사람.
 
 ### 0.2 P1 마일스톤이 만든 사람 몫 (`docs/ROADMAP.md` §5.5)
+
 
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 출처 M11. 소유: 사람.
 - [ ] **`p1-supervise-wake` 회차 넷.** 기준은 `docs/campaigns/p1-supervise-wake.md`. 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 기준은 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 출처 M12. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
-- [x] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 2026-10-09 회차 1 PASS(`docs/campaigns/p1-aarch64-musl.md`). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목이다.
+- [ ] **`decode_file_frame` fuzz 타깃의 누적 72 fuzz-hours.** M15 (b)가 타깃을 더했다(`a86123d`). 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고, §5.5 표의 "새 파서 fuzz 타깃" 행("M15의 새 decode 타깃")에 상태를 적는다. 공개 beta 전에 끝나야 한다(`docs/design/protocol.md` §13). 소유: 사람.
 
-### 0.3 M15가 새로 만드는 사람 몫 (`docs/ROADMAP.md` §5.5)
+### 0.3 M16이 새로 만드는 사람 몫 (`docs/ROADMAP.md` §5.5)
 
-M15 DoD에는 들지 않는다(§5.1 원칙 6). 에이전트는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경을 어느 스텝에서도 하지 않는다.
+M16 DoD에는 들지 않는다(§5.1 원칙 6). 에이전트는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경을 어느 스텝에서도 하지 않는다.
 
-- [ ] **`decode_file_frame` fuzz 타깃의 누적 72 fuzz-hours.** Step 11이 타깃을 더한다. 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고, §5.5 표의 "새 파서 fuzz 타깃" 행("M15의 새 decode 타깃")에 상태를 적는다. 공개 beta 전에 끝나야 한다(`docs/design/protocol.md` §13). 소유: 사람.
+- [ ] **`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** Step 4가 타깃을 더한다. 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고 §5.5 표의 "새 파서 fuzz 타깃" 행(이미 "M16 (a) `parse_ssh_bootstrap_line`"을 적어 둠)에 상태를 적는다. 공개 beta 전에 끝나야 한다(`docs/design/protocol.md` §13). 소유: 사람.
+- [ ] **실제 OpenSSH 위의 SSH 부트스트랩 회차.** ADR-0044 결과 절의 사람 캠페인이다. ProxyJump, ssh-agent, 암호 걸린 키 위에서 처음 `qsh box`부터 셸 프롬프트까지, 그리고 `--reverse` 구도 한 회. 문서 `docs/campaigns/p1-ssh-bootstrap.md`는 Step 8이 사전 고정한다(구현 마지막 스텝 전). Windows `ssh.exe` client 회차는 Windows 대화형 client가 서는 M19의 `docs/campaigns/p1-windows.md`가 이어받는다(§9 #3). §5.5 표에 행을 더하는 일은 main 세션이 Step 1에서 한다. 소유: 사람.
 
 ## 1. 유지보수에서 남은 확인
 
@@ -48,42 +50,37 @@ M15 DoD에는 들지 않는다(§5.1 원칙 6). 에이전트는 `gh secret set`,
 
 ## 2. 테스트 환경
 
-nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh` 표였다. 이 표가 loopback UDP 60000~61000을 버려서 ephemeral 범위(32768~60999)와 겹쳤고 bind(0) QUIC endpoint의 약 4%가 닿지 않았다. 호스트는 dave-environment `c6c5359c`가 고쳤다. 저장소 쪽은 `414f1fd`가 막는다. loopback UDP 자가 점검이 같은 상황을 즉시 원인과 함께 실패시키고, `scripts/test/nextest-ns.sh`가 격리 네트워크 namespace에서 스위트를 돌리며, 긴 TMPDIR에서는 nextest setup script가 unix 소켓 경로를 줄인다(`docs/design/testing.md` CI 규율).
+M15와 같다. 호스트 nftables의 `inet dave_mosh` 표 문제는 dave-environment `c6c5359c`와 저장소 `414f1fd`가 막는다(loopback UDP 자가 점검, `scripts/test/nextest-ns.sh`, 긴 TMPDIR에서의 unix 소켓 경로 단축).
 
-## 3. DoD 체크리스트 (ROADMAP M15)
+M16이 더하는 것은 가짜 `ssh` 하네스 하나다(Step 5). 실제 sshd와 OpenSSH 설정 없이 돈다. 하네스는 셸 스크립트가 아니라 testkit이 빌드하는 Rust 실행 파일이라 Windows 다리에서도 같은 바이너리가 돈다. 실제 OpenSSH 동작(ProxyJump, agent, 암호 키, host key 프롬프트)은 §0.3의 사람 캠페인 몫이다.
+
+## 3. DoD 체크리스트 (ROADMAP M16)
 
 체크박스는 근거가 되는 테스트와 CI run이 초록일 때만 채운다.
 
-- [x] **DoD (a) — 역할 기반 권한(ADR-0045).** 테스트가 다음을 고정한다.
-  - role 키가 없는 기존 `trust.toml`은 오늘과 같은 판정을 낸다.
-  - 새 pin은 role 키를 명시한다.
-  - 모르는 role 값은 `CONFIG_ERROR`로 fail closed한다.
-  - `acl.toml` 세 상태(있음·없음·파싱 불가)마다 role grant의 동작이 ADR대로임을 oracle 테스트가 고정한다.
-  - `acl_check_equivalence.rs`와 `acl_uniformity.rs`가 role 경로를 포함한다.
-  - role로 allow된 요청의 audit 레코드가 근거(`role`, `rule = null`)를 싣는다.
+- [x] **DoD — ADR-0044·0031이 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
+- [ ] **DoD (a) — 가짜 `ssh`로 끝까지 도는 부트스트랩.** 다음을 테스트가 고정한다.
+  - 양쪽 pin(이름, 주소, role)과 이어진 handshake: `ssh_bootstrap_pins_both_sides_and_connects`.
+  - pin 충돌은 아무것도 쓰지 않고 끝난다: `ssh_bootstrap_never_overwrites_a_pin_with_a_different_fingerprint`.
+  - role 없는 기존 원격 pin을 `full`로 넓히지 않는다: `ssh_bootstrap_does_not_widen_an_existing_roleless_pin`.
+  - 원격 audit를 쓸 수 없으면 pin도 쓰지 않는다: `ssh_respond_refuses_to_pin_when_audit_is_unwritable`.
+  - `--json`/`--jsonl`에서는 자동 발동하지 않고 ssh 자식이 BatchMode로 뜬다: `ssh_bootstrap_is_never_implicit_in_machine_mode`, `ssh_bootstrap_ssh_argv_is_fixed`.
 
-  근거: Step 2~8(`2d52a0f`·`b08b813`·`d659dbb`·`a7d94dd`·`9d99e36`·`64facab`·`85ea34f`, Windows 보정 `eb4216e`). CI run `38471301026`(eb4216e) 초록. 부하 반복 `scripts/stress/m15.filter` 50/50. wire diff 0. 소유: 에이전트.
-- [x] **DoD (b) — 왕복과 트리.** 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두 같은 스텝에서 확인한다(QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다. 근거: Step 14·15(`b1fcf3a`·`1a4af3b`, `file_round_trip_is_byte_identical_*`·`cp_recursive` forward·reverse).
-- [x] **DoD — 권한 없음은 deny.** 새 seam 넷이 `DENY_SEAMS`에 행으로 오른다(14 → 18). `acl_uniformity.rs`가 문면 균일성을 단언한다. 항상-deny 예외 목록(`ALWAYS_DENIED_NO_OP`, `crates/qsh-core/tests/acl_registry.rs`)에는 `forward.socks`만 남는다. 근거: Step 11·12.
-- [x] **DoD — 상태 경로 핀.** 다음을 핀 테스트가 단언한다.
-  - `full` role과 `allow = ["file.*"]` 행 어느 쪽으로도 상태 경로에 대한 `file.*`는 `PERMISSION_DENIED`이고 파일 바이트는 그대로다.
-  - 대상은 `acl.toml`, `trust.toml`, `invites.toml`, identity 파일, audit 로그다.
-  - 그 경로를 가리키는 symlink와 `..` 이탈 두 우회도 결과가 같다.
-
-  근거: Step 9·12.
-- [x] **DoD — 인가 전 자원 생성 없음.** deny된 `file.write`·`file.mkdir` 뒤 목적지에 새 파일, 임시 파일, 디렉터리가 없고 기존 파일은 바이트 단위로 같다. 근거: Step 12.
-- [x] **DoD — 동시 전송 quota.** ADR-0010 모양으로 인가 뒤·열기 전에 판정한다. `quota_registry.rs`에 두 행이 오르고, `quota_docs.rs`가 문서의 거부 범주와 기본값을 대조한다. 근거: Step 12.
-- [x] **DoD — audit 필드 집합.** 키는 아홉에 optional `role`을 더한 것이다. 파일 내용 바이트가 어떤 필드에도 들어갈 수 없음을 `record_has_only_structural_fields` 형식의 테스트가 고정한다. 근거: Step 2(키), Step 4(role 판정 레코드), Step 12(`file_audit_record_carries_path_but_no_payload`).
-- [x] **DoD — 복사 중 PTY echo.** 파일 복사와 PTY echo를 동시에 돌린 상태에서 M13 (b) 하네스가 같은 예산으로 초록이다. 근거: Step 14(`file_copy_echo_under_load`), Step 15(`cp_many_small_files_stays_within_the_echo_budget`).
-- [x] **DoD — 등록 완전성.** 신규 op·명령마다 다음을 갖춘다. 근거: Step 5·6·7·10·11·13·14·15.
-  - fixture 등재와 `layer_2_every_schema_command_has_all_six_faces`
-  - `capabilities.json` golden 재생성(`file.v1`)
-  - man 재생성
-  - 새 wire op의 decode 경로가 fuzz 타깃에 걸림(`decode_file_frame` 신설)
-  - freeze 발효 전이므로 `docs/design/protocol.md` §16.1 목록 동시 갱신
-- [x] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 파일 op 진입점과 role 경로가 오른다. §4 B에 상태 경로 쓰기, 경로 이탈, 덮어쓰기, 신뢰 등록이 곧 권한 부여가 되는 위협 행이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 4·5·9·11·12·13·15. §7 잔여 위험은 Step 8·16.
-- [x] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 16(`08f663c`, 태그 대조 drift `ce0a84c`). (b) 커밋: Step 9~16 `bd0ae57`·`3855954`·`a86123d`·`f64f3ba`·`16388d9`·`b1fcf3a`·`1a4af3b`·`08f663c`, Windows·macOS·의존성 보정 `668214b`·`1d02860`·`a9748a4`·`dbd6a5b`·`5f0b838`. CI run `38614653051`(ce0a84c, acceptance 포함) 초록. `crates/qsh-proto/proto` diff는 Step 2 부모 이후 `a86123d`(Step 11) 하나, Step 13은 Rust 상수만.
-- [x] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M15 DoD에는 없는 줄이다(§9 #2). M12·M13의 규율대로 M15가 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 지연 단언(`file_copy_echo_under_load`, `cp_many_small_files_stays_within_the_echo_budget`의 p95 단언)은 부하 없이 `-j 1`로 50회 연속 초록이어야 한다. 근거: Step 8·16. 2026-10-15 Dave-Windows-WSL(8 vCPU, 31 GB): `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh "$(cat scripts/stress/m15.filter)" 50` → "50/50 passed under load"(156개), `m15-latency.filter` 3개를 부하 없이 `-j 1`·`QSH_ACCEPTANCE_STRICT=1`로 50/50.
+  근거: Step 5·6·7·9.
+- [ ] **DoD (a) — 역방향 동등.** `--reverse` 부트스트랩 뒤 원격이 `serve --to`로 등록하면 reverse route 위의 attach·exec·`qsh cp`가 정방향과 같은 테스트를 통과한다(§5.1 원칙 7). 근거: Step 8(`ssh_bootstrap_reverse_*`, `bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite`).
+- [ ] **DoD (a) — 줄 파서와 fuzz.** stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 근거: Step 4.
+- [ ] **DoD (a) — 키 재료와 rc 출력이 로그에 남지 않는다.** 근거: Step 5(로그 규율), Step 7(`ssh_bootstrap_skips_untagged_stdout_and_never_logs_it`, `ssh_respond_audit_record_has_only_structural_fields`).
+- [ ] **DoD (b) — `trust remove` 뒤 2초 안에 CLOSE와 audit 한 줄.** `an_established_connection_survives_the_hosts_trust_remove`가 반대 단언 `an_established_connection_is_closed_within_two_seconds_of_trust_remove`로 바뀐다. 세 프로세스(`qsh serve`, `qsh serve --to`, `qsh listen`) 모두에서 같다. 근거: Step 3.
+- [ ] **DoD (b) — role 축소와 파싱 실패 처분이 ADR대로다.** role 축소(`full`→`exec`, `full`→`tunnel`의 `any`→`owned` 포함)는 `grants_reduced`로 닫히고, 넓히면 닫히지 않으며, `trust.toml` 파싱 실패 중에는 닫지 않고 role 요청만 멈춘다(ADR-0031 결정 5·6). 근거: Step 3.
+- [ ] **DoD (b) — 문면.** `TrustRemoveScope`(`crates/qsh-core/src/doctor.rs`의 `TRUST_REMOVE_SCOPE`) message·remedy와 `docs/CLI.md` §6.11·§6.17 문면이 같은 커밋에서 바뀐다. 만료 30일 전 doctor 경고(P0)는 유지된다(`doctor_reports_cert_expiring_soon_within_the_30_day_window` 무변경 초록). 근거: Step 3.
+- [ ] **DoD — 등록 완전성.** 새 명령·필드마다 다음을 갖춘다. 근거: Step 5·6·7·8·9.
+  - fixture 등재(`REQUIRED_FIXTURES`)와 `layer_2_every_schema_command_has_all_six_faces`
+  - man 재생성(`qsh-pair-ssh.1`, `checked_in_man_pages_match_the_generator`)
+  - `capabilities.json` golden은 바뀌지 않는다(두 ADR 모두 peer capability를 더하지 않음). 바뀌면 그 스텝이 잘못된 것이다.
+  - 부트스트랩 직후 pin 이름·role 고지(Step 7)
+- [ ] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 진입점 두 행(ssh 자식과 부트스트랩 스트림, `pair ssh-respond`의 stdin)이, §4에 ssh 신뢰 승계(A), `full` pin 생성·방향 없는 pin·role 확대(B), 로그 유출(D), 응답자 출력 조작·옵션 주입(E), 연결 재검증(B)이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 3·4·5·6·7·8. §7 잔여 위험은 Step 3(h4·h5·h35 개정)과 Step 10(ADR-0044 잔여 둘).
+- [ ] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 10.
+- [ ] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M16 DoD에는 없는 줄이다(§9 #1). M12·M13·M15 규율대로 M16이 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 근거: Step 3·10.
 
 ## 4. 실행 단계 (PR 단위)
 
@@ -91,829 +88,586 @@ nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh`
 
 | 묶음 | 스텝 | 합(ew) | ADR 산정 | 비고 |
 |---|---|---|---|---|
-| (a) ADR-0045 | Step 2~8 | 2.6~4.0 | 2.7~4.2 | 차이는 이미 끝난 ADR 작성분이다 |
-| (b) ADR-0029 | Step 9~16 | 4.6~6.0 | 4.3~6.3 | ADR 0.3을 빼면 4.0~6.0. 경로 판정과 wire를 스텝으로 쪼개면서 하한이 0.6 올랐다 |
-| 합 | | 7.2~10.0 | ROADMAP 7.0~10.5 | 범위 안이다 |
+| (b) ADR-0031 축소판 | Step 2~3 | 0.8~1.25 | 0.9~1.35 | 차이 0.1은 이미 끝난 ADR 작성분이다 |
+| (a) ADR-0044 | Step 4~9 | 2.4~3.8 | 2.6~4.0 | 차이 0.2는 이미 끝난 ADR 작성분이다. 계약 문서 델타는 각 스텝에 나눠 실었다 |
+| 마감 | Step 10 | 0.1~0.2 | 0.1~0.2 | |
+| 합 | | 3.3~5.25 | ROADMAP 3.6~5.6 | 끝난 ADR 작성분 0.3을 더하면 3.6~5.55로 범위 안이다 |
 
 Step 1은 크기 내역 밖이다.
 
 **순서의 근거.**
 
-- (a)가 (b)보다 먼저다. ADR-0045 결정 2 각주와 결정 19, ADR-0029 머리말이 정한 순서다. `full` role의 `file.*`는 ADR-0029가 항상-deny를 걷을 때 비로소 효과가 난다.
-- (a) 안에서는 측정을 먼저 한다(§5.1 원칙 3). Step 3은 판정마다 `trust.toml`을 읽는 비용을 판정 의미를 바꾸지 않은 채 먼저 잰다. 예산을 넘으면 ADR-0045 근거 절이 정해 둔 대체 경로를 그 스텝 안에서 고른다. 그 위에 Step 4가 판정 의미를 바꾼다.
-- 권한을 쓰는 명령(Step 5)은 판정기(Step 4) 뒤에 둔다. 그 사이에 생기는 pin은 role 키가 없어 `none`으로 판정되므로 권한이 넓어지는 창이 없다.
-- (b) 안에서는 보안 층을 먼저 세운다. 경로 판정 모듈(Step 9), 행 `paths`(Step 10), wire와 deny 전용 seam(Step 11)이 먼저 오고, 항상-deny를 걷는 일(Step 12)은 상태 경로·재검증·자원 생성 전 인가 테스트를 모두 같은 커밋에 싣는다.
-- 데이터 평면(Step 13)은 그 뒤에 온다. `file.v1` capability는 데이터 평면이 끝나는 Step 13에서야 광고한다. client(Step 14·15)는 마지막이다.
+- (b)를 (a)보다 먼저 둔다. ADR-0044 결과 절의 잔여 위험("ssh 접근을 거둬도 이미 선 qsh pin은 남는다")의 처방이 "원격에서 `qsh trust remove`, ADR-0031이 그 순간 열린 연결까지 끊는다"이다. 부트스트랩이 `full` pin을 명령 한 번으로 심게 되기 전에, 그 pin을 거두는 수단이 열린 연결까지 닿아야 한다. (b)는 작고(1ew 남짓) `trust/mod.rs`의 `SharedTrustStore`를 바꾸는데, (a)의 응답자·client 쓰기(Step 6·7)가 같은 파일의 `TrustStore::lock`·`save`를 쓰므로 (b)를 먼저 착지시키면 충돌 면적이 준다.
+- (b) 안에서는 판정 입력을 먼저 세우고(Step 2, 동작 변화 없음) 닫기를 나중에 켠다(Step 3). 닫기를 켜는 커밋이 테스트 교체와 문면 변경을 같이 싣는다(ROADMAP M16 DoD (b)의 "같은 커밋" 요구).
+- (a) 안에서는 신뢰할 수 없는 입력의 파서(Step 4)를 먼저 세운다. 그다음 ssh 쪽 기계 장치(Step 5), 원격 응답자(Step 6), 이 장비 쪽 op(Step 7), 역방향(Step 8), 자동 발동(Step 9) 순이다. 자동 발동은 명시 명령이 완전히 선 뒤에 켜서, 사람이 모르게 ssh가 불리는 경로가 미완성 op을 부르는 창을 두지 않는다.
 
 **의존과 병렬.**
 
 | 스텝 | 선행 | 다른 에이전트와 병렬 가능 여부 |
 |---|---|---|
-| Step 2 | Step 1 | — |
-| Step 3 | Step 2 | — |
-| Step 4 | Step 3 | — |
-| Step 5 | Step 4 | Step 6과 병렬 가능. Step 5는 `ops/trust.rs`, `trust/pairing.rs`, `qsh-proto/src/types/trust.rs`, CLI trust·pair 명령을 만지고, Step 6은 `ops/acl.rs`, `qsh-proto/src/types/acl.rs`, CLI acl 명령을 만진다. 겹치는 곳은 `docs/CLI.md` 상태 헤더 한 줄, `crates/qsh-cli/tests/fixtures.rs`의 `REQUIRED_FIXTURES`, `docs/man/`이고 rebase로 푼다 |
-| Step 6 | Step 4 | Step 5와 병렬 가능(위와 같음) |
-| Step 7 | Step 5(`--peer-role`이 초대 레코드의 role 저장을 쓴다), Step 6 | — |
-| Step 8 | Step 2~7 | — |
-| Step 9 | Step 1만 | Step 5~7과 병렬 가능. 새 모듈 `crates/qsh-core/src/file/`과 `lib.rs` 한 줄만 만진다. 인가에 닿지 않으므로 "ADR-0045 먼저" 순서를 어기지 않는다 |
-| Step 10 | Step 7(doctor 개수 24 → 25 → 26 순서), Step 9 | Step 11과 병렬 가능. Step 10은 `acl/load*`, `acl/policy*`, `ops/acl.rs`, `ops/doctor*`, `doctor.rs`를 만지고 Step 11은 `.proto`, `wire.rs`, `server/dispatch.rs`, `acl/registry.rs`, `fuzz/`를 만진다 |
-| Step 11 | Step 4(`Authorizer::check` 입력이 바뀐 뒤) | Step 10과 병렬 가능(위와 같음) |
-| Step 12 | Step 9·10·11 | — |
-| Step 13 | Step 12 | — |
-| Step 14 | Step 13 | — |
-| Step 15 | Step 14 | — |
-| Step 16 | 전부 | — |
+| Step 2 | Step 1 | Step 4와 병렬 가능. Step 2는 `qsh-transport`의 `endpoint.rs`·`tls.rs`와 `qsh-core/src/trust/`를 만지고, Step 4는 `qsh-proto`의 새 모듈과 `fuzz/`, `docs/design/protocol.md` 새 절을 만진다 |
+| Step 3 | Step 2 | Step 4·5와 병렬 가능. Step 3은 `server/`, `reverse/`, `audit.rs`, `doctor.rs`, `docs/CLI.md` §6.9·§6.11·§6.14·§6.17을 만진다. 겹치는 곳은 `docs/CLI.md` 상태 헤더 한 줄과 threat-model §4이고 rebase로 푼다 |
+| Step 4 | Step 1 | Step 2·3과 병렬 가능(위와 같음) |
+| Step 5 | Step 4 | Step 3과 병렬 가능. Step 5는 새 모듈 `crates/qsh-core/src/ssh_bootstrap/`, `config.rs`의 `[ssh]` 절, testkit의 가짜 `ssh`를 만진다 |
+| Step 6 | Step 3(`trust/mod.rs` 충돌 회피), Step 5 | — |
+| Step 7 | Step 6 | — |
+| Step 8 | Step 7 | — |
+| Step 9 | Step 7 | Step 8과 병렬 가능하지만 권하지 않는다. 둘 다 `crates/qsh-cli/src/cli.rs`와 `docs/CLI.md` §6.11을 만진다 |
+| Step 10 | 전부 | — |
 
-**규율.** 앞 마일스톤 그대로이고 M15에서 몇 가지를 덧붙인다.
+**규율.** 앞 마일스톤 그대로이고 M16에서 몇 가지를 덧붙인다.
 
-- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy와 test는 `ci.yml`의 `windows-latest`·`macos-14` 다리에서도 돈다.
+- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy와 test는 `ci.yml`의 `windows-latest`·`macos-14` 다리에서도 돈다. M15는 Windows·macOS 다리에서만 깨지는 실패를 착지 뒤 보정 커밋으로 넷이나 고쳤다(`eb4216e`, `668214b`, `1d02860`, `a9748a4`). 그래서 M16은 `cfg(unix)`/`cfg(windows)` 분기나 경로 표기, 자식 프로세스, 소켓 옵션을 건드리는 스텝마다 push 전에 로컬에서 Windows 타깃 검사(`cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings`와 같은 타깃의 `cargo xwin doc`)를 돌린다. xwin이 없는 머신에서는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 같은 두 명령을 돌린다. 이 검사로 CI의 Windows 다리를 대신하지 않는다. 착지 판정은 CI 초록이다.
 - 계약 문서 델타는 그 표면을 바꾼 스텝의 같은 커밋에 싣는다.
-  - `docs/CLI.md` 상태 헤더의 v0.26 항목은 CLI.md를 처음 고치는 Step 2가 열고 뒤 스텝이 덧붙인다(`crates/qsh-core/tests/cli_md_header.rs` 핀).
-  - clap 트리가 바뀌는 스텝은 같은 커밋에서 `cargo xtask man`을 돌린다.
-  - doctor code를 더하는 스텝은 `EXPECTED_DOCTOR_CODES`, §6.17 표, §6.11·§6.17의 개수 문장을 같은 커밋에서 바꾼다(origin `09266dc` 기준 24 → Step 7에서 25 → Step 10에서 26).
-- 판정 로직, role 표, 경로 판정, 전송 상태 기계, 트리 순회는 `qsh-core`에 둔다. `qsh-proto`에는 열린 문자열 필드, 새 op·wire 타입, 상수만 들어간다. `qsh-cli`에는 clap 정의, 렌더러 둘, 진행 표시, exit 매핑만 둔다. 새 모듈이 `xtask arch`의 경로 범위 금지 목록에 들어가는지는 그 모듈을 만드는 스텝이 판단하고, 들어가면 `xtask/src/arch.rs`를 같은 커밋에서 고친다(`CLAUDE.md`의 경로 범위 규칙).
-- (a) 스텝(2~8)은 wire를 바꾸지 않는다(ADR-0045 결정 17). 완료 판정마다 다음을 확인한다.
+  - `docs/CLI.md` 상태 헤더의 v0.32 항목은 CLI.md를 처음 고치는 Step 3이 열고 뒤 스텝이 덧붙인다(`crates/qsh-core/tests/it/cli_md_header.rs` 핀).
+  - clap 트리가 바뀌는 스텝(Step 6·7·8)은 같은 커밋에서 `cargo xtask man`을 돌린다.
+  - doctor code는 더하지 않는다. `trust_remove_scope`는 code·status·노출 조건이 그대로이고 문면만 바뀐다(ADR-0031 결정 9). `config_unknown_key`의 알려진 키 목록에 `[ssh]` 세 키가 오르는 것은 code 추가가 아니다(Step 5).
+- 판정 로직, 재검증, 부트스트랩 절차, ssh 자식 관리, 응답자, UDP bind 확인은 `qsh-core`에 둔다. `qsh-proto`에는 부트스트랩 메시지 타입과 줄 파서(sans-IO), `PairSshReq`·`PairSshData` 계약 타입만 들어간다. `qsh-transport`에는 chain 보관, `Connection::reverify`, `CLOSE_CODE_TRUST_WITHDRAWN`만 들어가고 QUIC 스택을 이름 짓지 않는 중립 타입을 쓴다(ADR-0043 결정 3). `qsh-cli`에는 clap 정의(`pair ssh`, 숨김 `pair ssh-respond`), 자동 발동 분기, 렌더러 둘만 둔다. 새 모듈이 `xtask arch`의 경로 범위 금지 목록에 들어가는지는 그 모듈을 만드는 스텝이 판단하고, 들어가면 `xtask/src/arch.rs`를 같은 커밋에서 고친다(`CLAUDE.md`의 경로 범위 규칙, §7.1 #1).
+- **wire 소유.** M16의 어느 스텝도 `.proto`를 바꾸지 않는다. ADR-0044 결과 절("wire(`.proto`)와 `capabilities.json`은 바뀌지 않는다")과 ADR-0031 결정 1·10("새 wire 메시지 없음")이 근거다. 새 CLOSE 코드 `0x1005`는 `docs/design/protocol.md` §16.3이 동결 밖에 둔 대역이고(Step 2), 부트스트랩 스트림은 QUIC wire가 아닌 상호운용 계약이다(Step 4). 완료 판정마다 다음을 확인한다.
   - `git diff --stat -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다.
-  - `ErrorCode`는 어느 스텝에서도 바뀌지 않는다(ADR-0029 결정 17).
-- fixture는 추가만 한다. 새 fixture마다 실제 바이너리로 재현하는 `golden_*` 생산 테스트를 같은 커밋에 둔다. 기존 `trust.*`·`acl.*`·`setup.run.*` fixture는 role 키 없는 샌드박스에서 만들었으므로 고치지 않은 채 초록이어야 한다(ADR-0045 결정 15).
-- route 동등(§5.1 원칙 7). 인가나 파일 동작을 바꾸는 스텝은 forward route(`qsh serve` ← client)와 reverse route(`qsh listen` ← `qsh serve --to`)의 같은 성질을 같은 스텝의 테스트로 단언한다. 한쪽만 덮는 PR은 착지하지 않는다.
-- 플랫폼 동등. role(ADR-0045 결정 20)은 플랫폼 중립 코드라 M15에서 세 OS 모두 같다. 파일 op의 Windows 대응은 범위 밖이다. Windows host 경로 판정, `paths`의 드라이브 표기, `FILE_DATA` host 처리는 M20(ADR-0029 결정 23, ADR-0035 결정 26)이 하고, Windows client의 `qsh cp`와 드라이브 문자 operand 해석은 M19(ADR-0035 결정 1)가 한다. M15에서 Windows 빌드의 `qsh serve`는 `file.v1`을 광고하지 않고 네 op에 `UNSUPPORTED`로 답한다(§6). macOS는 M15 범위다(`F_GETPATH`, 대소문자 무시 보호 집합).
-- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. origin `09266dc` 기준 `crates/qsh-core/src/acl/load.rs`(881줄), `trust/mod.rs`(869줄), `server/mod.rs`(2492줄), `ops/doctor.rs`(1144줄), `qsh-proto/src/wire.rs`(918줄)가 이미 넘었으므로 인라인 테스트가 남아 있는지 먼저 확인한다.
-- 안정성 규율은 M13과 같다. 시계를 주입하고, 관찰 가능한 상태를 넉넉한 `timeout`으로 기다리며, 고정 `sleep()`은 쓰지 않는다. 타이밍 민감 테스트는 그 스텝의 완료 판정에서 부하 아래 50회 연속 초록이어야 착지한다. 지연 단언은 부하 없이 50회다.
+  - `ErrorCode`는 어느 스텝에서도 바뀌지 않는다. 새 실패는 모두 기존 코드에 붙는 additive `details.reason`이다(ADR-0044 결정 14, ADR-0031 결정 1).
+  - 구현 중 wire 변경이 필요해 보이면 그 스텝은 착지하지 않고, main 세션이 새 ADR 필요 여부를 정한다(`CLAUDE.md` 머리말).
+- fixture는 추가만 한다. 새 fixture마다 실제 바이너리로 재현하는 `golden_*` 생산 테스트를 같은 커밋에 둔다. 기존 `trust.*`·`pair`·`error.*` fixture는 고치지 않은 채 초록이어야 한다.
+- **테스트 배치.** 통합 테스트는 `crates/<crate>/tests/it/<name>.rs` 모듈로 두고 같은 커밋에서 `crates/<crate>/tests/it/main.rs`에 `mod <name>;`을 등재한다(`0e1215e`가 crate마다 통합 테스트 바이너리를 하나로 합쳤다). 새 `tests/*.rs` 파일을 crate 최상위에 두지 않는다. nextest 이름은 `<name>::<test>`이고 한 모듈만 돌릴 때는 `--test it -E 'test(/^<name>::/)'`이다. 단위 테스트는 소스 옆 `tests.rs`에 둔다.
+- **route 동등(§5.1 원칙 7, PRD §4).** 인가·신뢰 동작을 바꾸는 스텝은 forward route(`qsh serve` ← client)와 reverse route(`qsh listen` ← `qsh serve --to`)의 같은 성질을 같은 스텝의 테스트로 단언한다. 한쪽만 덮는 PR은 착지하지 않는다. (b)는 Step 3 하나가 세 프로세스를 모두 덮고, (a)는 정방향 부트스트랩(Step 7)과 역방향 부트스트랩(Step 8)이 각자의 route로 이어지는 같은 attach·exec·`qsh cp` 묶음을 통과해야 마일스톤이 닫힌다.
+- **플랫폼 동등(PRD §4, 예외 없음).** 결정의 동작은 세 OS에서 같다. 플랫폼 차이는 ADR이 이미 M19·M20에 귀속시킨 것만 미루고, 스텝마다 무엇을 미루는지를 그 스텝의 "Windows" 항목에 적는다. 요약은 다음과 같다.
+  - (b) 재검증은 이식 가능한 코드다(ADR-0031 결정 3의 플랫폼 문단). Windows 빌드의 `qsh serve`(오늘도 exec·터널을 냄)는 M16에서 감시 작업을 갖고 Windows 다리에서 그 테스트가 돈다. `qsh serve --to`와 `qsh listen`은 오늘 unix 전용(`run_reverse_unix`, localctl)이라 그 Windows 쌍둥이의 테스트는 각각 M20(ADR-0035 결정 25)과 M19(ADR-0035 결정 14)가 연다. 코드는 M16에서 플랫폼 분기 없이 쓴다.
+  - (a) client 쪽 `qsh pair ssh`(명시 명령)는 Windows client에서도 M16에 연다(ADR-0044 결정 25, ADR-0035 결정 1의 "착지와 함께 열린다"). `ssh.exe` 탐색과 `ssh_not_found` 문면은 Step 5다. 대화형 형태와 `qsh cp`의 자동 발동은 Windows의 대화형 attach와 `qsh cp` 자체가 M19(ADR-0035 결정 1·5)라 M19가 그 분기를 켠다. 응답자 `qsh pair ssh-respond`의 Windows 판(`SO_EXCLUSIVEADDRUSE` probe, cmd.exe·PowerShell 사상의 응답자 쪽)은 M20(ADR-0044 결정 10, ADR-0035 결정 25)이다. 그 전의 Windows 빌드는 이 하위 명령을 몰라 client가 `remote_qsh_too_old`로 받는다(§9 #2). 원격 기본 셸이 `cmd.exe`·PowerShell일 때의 종료 코드 사상(9009, 1)은 client 쪽 코드라 M16 Step 5에서 연다.
+  - macOS는 M16 범위다. `ssh -G` 출력과 BSD `ssh`의 종료 코드는 Linux와 같은 OpenSSH이고, macOS 다리에서 가짜 `ssh` 하네스 전체가 돈다.
+- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. origin `1a4af3b` 기준 `crates/qsh-core/src/server/mod.rs`(2639줄), `reverse/target/mod.rs`(1242줄), `trust/mod.rs`(1172줄), `config.rs`(1383줄), `ops/trust.rs`(846줄), `qsh-transport/src/endpoint.rs`(1378줄), `qsh-cli/src/cli.rs`(1310줄)가 이미 넘었으므로 인라인 테스트가 남아 있는지 먼저 확인한다.
+- 안정성 규율은 M13·M15와 같다. 시계를 주입하고, 관찰 가능한 상태를 넉넉한 `timeout`으로 기다리며, 고정 `sleep()`은 쓰지 않는다. 타이밍 민감 테스트는 그 스텝의 완료 판정에서 부하 아래 50회 연속 초록이어야 착지한다(`scripts/stress/run.sh`, 필터는 Step 10이 묶는 `scripts/stress/m16.filter`의 초안을 Step 3이 먼저 만든다). 2초 보장의 계약 핀은 tokio 시간을 멈춘 테스트가 맡는다(ADR-0031 결과 절). 실제 시계로 2초를 재는 테스트가 부하 아래에서 흔들리면 §9 #4의 절차를 따른다.
 
-### Step 1 — M15 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖)
+### Step 1 — M16 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖)
 
-근거: `docs/ROADMAP.md` 현재 위치와 M15 절, ADR-0045 결정 19, ADR-0029 결과 절의 "메인 세션이 고친다" 문장들. 선행: 두 ADR 승인(2026-10-14, `09266dc`).
+근거: `docs/ROADMAP.md` 현재 위치와 M16 절, ADR-0044·0031 결과 절의 문서 목록. 선행: M15 마감(M15 plan Step 16)과 그 마감 노트. 두 ADR 승인(`09266dc`).
 
 **(a) 범위:**
 
-1. `PLAN.md`를 이 문서로 바꾼다.
+1. `PLAN.md`를 이 문서로 바꾼다. ROADMAP M15 마감 노트에 M15 계획의 마지막 커밋 해시가 적혀 있는지 확인한다.
 2. `docs/ROADMAP.md`를 고친다.
-   - M15 DoD에 안정성 줄을 더한다(§9 #2). 문면은 M12의 안정성 줄을 따르고 지연 단언 예외를 한 구절로 붙인다.
-   - ADR-0029 결과 절이 메인 세션 몫으로 남긴 두 편집(DoD transport 문구, 명시적 out의 재귀 복사)이 이미 반영됐는지 확인하고, 빠졌으면 고친다.
-   - §5.5 표 "새 파서 fuzz 타깃" 행의 "M15의 새 decode 타깃"에 `decode_file_frame`을 적는다.
-3. README Roadmap 표의 P1 행을 "M15 진행 중"으로 고친다.
+   - 현재 위치를 "현재 마일스톤은 M16"으로 바꾼다.
+   - M16 DoD에 안정성 줄을 더한다(§9 #1). 문면은 M15의 안정성 줄을 따른다.
+   - §5.5 표에 "SSH 부트스트랩 실제 OpenSSH 회차" 행을 더한다. 사전 고정 문서 `docs/campaigns/p1-ssh-bootstrap.md`(Step 8), 만드는 마일스톤 M16 (a), 선행은 M16 (a)가 담긴 태그.
+3. README Roadmap 표의 P1 행을 "M16 진행 중"으로 고친다.
+4. ADR 준비 점검. 두 ADR은 승인됐고 M16에 새 ADR은 필요 없다. 다만 다음 두 문장의 실제 상태를 확인해 이 계획 §9에 적는다(ADR 본문은 고치지 않는다).
+   - ADR-0044 결정 10의 "그 전의 Windows 빌드는 이 하위 명령을 몰라"가 M16 Windows 빌드의 `pair ssh-respond` 처분을 정한다(§9 #2).
+   - ADR-0044 결정 11의 "§16의 freeze 규칙 중 additive-only를 같은 방식으로 따른다"를 `docs/design/protocol.md` §16.2 목록 등재로 읽는다(§9 #5).
 
 **(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록.
 
-**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. ROADMAP M15 DoD에 안정성 줄이 있다.
+**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. ROADMAP 현재 위치가 M16을 가리키고 M16 DoD에 안정성 줄이 있다.
 
-### Step 2 — (a) `TrustRole`, `trust.toml`의 `role` 키, role 표 상수, audit optional 키 (0.3~0.5ew)
+### Step 2 — (b) 재검증의 입력: chain 보관, `Connection::reverify`, CLOSE 상수, trust store 세대 번호와 poll (0.3~0.5ew)
 
-근거: ADR-0045 결정 2·3·9·16, 결정 15의 `TrustPeer.role`. 선행: Step 1. 이 스텝은 판정을 바꾸지 않는다. role을 저장하고 보여 주기만 하고, 평가기는 아직 읽지 않는다.
-
-**(a) 범위:**
-
-- `crate::trust::TrustRole`(`full`·`exec`·`tunnel`·`read-only`·`reverse`·`none`)을 둔다. 이름이 겹치지 않도록 `crate::acl::load::Role`(Serve/Listen)과 분리한다.
-- `trust.toml`의 `[[peer]]` optional 키 `role`을 다룬다.
-  - 읽기: 여섯 값 밖이면 파일 전체가 `CONFIG_ERROR`다.
-  - 쓰기: 키가 없던 pin은 키 없이 다시 쓴다.
-  - `trust rename`은 role을 옮기고 `trust remove`는 지운다.
-- 결정 2의 표를 `crate::acl` 안의 닫힌 상수 하나(가칭 `ROLE_GRANTS`)로 둔다. 각 행은 action 배열과 소유 축이다. 평가기, `acl show`, doctor, 렌더러가 뒤 스텝에서 모두 이 상수를 읽는다.
-- `qsh-proto`의 `TrustPeer`에 optional `role`(열린 문자열)을 더한다. 키가 없으면 필드를 생략한다.
-- `trust list` human 출력에 role 열을 더한다. 키 없는 pin은 `(none, legacy)`로 적는다.
-- `AuditRecord`에 optional 키 `role`을 더하고 직렬화에서 `None`이면 생략한다. 아직 아무 레코드도 채우지 않는다. `record_has_only_structural_fields`는 아홉 키에 optional `role`을 허용하도록 넓힌다.
-- 문서:
-  - `docs/CLI.md` §6.11에 role 표, 기본값 표 자리, `trust list`의 role 열을 적는다. 기본값과 `trust set-role` 문단은 Step 5가 채운다.
-  - `docs/PRD.md` §9에 role 표와 `full` 예시를 더한다. 인가 서술 문장은 Step 4에서 바뀐다.
-  - `docs/design/architecture.md` §7에 `trust.toml`의 `role` 키를 적는다.
-  - `docs/CLI.md` 상태 헤더 v0.26을 연다.
-
-**(b) 테스트:**
-
-- `unknown_role_string_makes_trust_toml_a_config_error`
-- `role_action_table_matches_docs`: 상수가 CLI.md §6.11의 role 표와 PRD §9와 일치한다. `acl_docs.rs`와 같은 형식이고 자리는 `crates/qsh-core/tests/acl_docs.rs`다.
-- `trust/tests.rs`에 rename이 role을 옮기고, remove가 지우고, 키 없는 pin을 다시 써도 키가 생기지 않는 행을 더한다.
-- `record_has_only_structural_fields` 갱신.
-- 새 fixture `trust.list.with_role.json`과 `golden_*` 생산 테스트를 `REQUIRED_FIXTURES`에 등재한다.
-
-**(c) 완료 판정:** 기존 trust fixture가 고치지 않은 채 초록이다. 판정 결과가 바뀐 테스트가 0개다(`acl_check_equivalence.rs`, `acl_enforcement.rs` 무변경 초록). wire diff 0.
-
-### Step 3 — (a) `Authorizer` 입력에 연결 fingerprint, 판정마다 role 해석의 배선과 비용 측정 (0.3~0.4ew)
-
-근거: ADR-0045 결정 6 둘째 문단(Authorizer 입력과 구성), 근거 절의 "판정마다 읽는 비용… 구현 커밋이 그 테스트로 확인한다"와 대체 경로. 선행: Step 2. 판정 의미는 바꾸지 않는다. ⓡ 자리는 있지만 role 표 적용은 Step 4에서 켠다.
+근거: ADR-0031 결정 3(세대 번호·`watch`·poll), 4(재검증 입력), 7의 상수 정의. 선행: Step 1. 이 스텝은 연결을 닫지 않는다. 판정 입력과 알림 통로만 세운다.
 
 **(a) 범위:**
 
-- `Authorizer::check` 입력에 연결의 검증된 fingerprint(`ConnCtx::peer_fingerprint`)를 더한다. 이것은 `qsh-core` 내부 trait 변경이다. 요청자 묶음 구조체로 할지 인자로 할지는 이 스텝이 정한다(§7.1 #1).
-- 호출 지점(`Server::authorize`, `authorize_stream`, `authorize_session_control`, `authorize_owned`, `forward.local` 인라인 게이트 `authorize_and_dial_tunnel`, `authorize_and_bind_remote_forward`, `reverse::admit`)이 모두 값을 넘긴다.
-- 테스트 대역(`AllowAllPinned`, `DenyAll`, testkit의 대역들)을 기계적으로 고친다.
-- production `Authorizer`는 `load_or_deny`가 `SharedTrustStore` 핸들을 함께 쥐도록 구성한다. `qsh serve`, `qsh listen`, `qsh serve --to` 세 구성이 같다.
-- 판정마다 `SharedTrustStore`를 refresh하고 pin을 찾는 경로를 켜되, 결과는 아직 판정에 쓰지 않는다. 이렇게 해야 비용을 의미 변경과 분리해서 잴 수 있다.
-- **측정.** `QSH_ACCEPTANCE_STRICT=1`로 다음을 이 스텝 전과 후에 돌려 값을 커밋 본문에 적는다.
-  - `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`(`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`. ADR이 `tunnel_echo_under_load`라 부른 것)
-  - `tunnel_throughput_meets_raw_quinn_ratio`
-  - 새 측정 행 하나. 짧은 `-L` 연결을 연속으로 여는 경우다. 판정이 `TCP_CONNECT`마다 일어나는 경로이며, `trust.toml`에 pin 100개를 둔다(§7.1 #2).
-- **미리 정한 대체 경로.** 예산을 넘으면 `SharedTrustStore::refresh`가 파일 내용을 읽기 전에 (크기, 수정 시각 나노초, dev·inode)를 먼저 보고, 달라졌을 때만 다시 읽게 이 스텝 안에서 바꾼다. "role 변경은 다음 요청부터 보인다"는 의미는 그대로다. 지금 refresh 문서가 내용 전체를 비교하는 이유로 적은 것(M7의 mtime 해상도 우려)과 부딪히므로, 그 문서를 같은 커밋에서 고치고 §7 리스크의 조건을 확인한다.
+- `qsh-transport`(`crates/qsh-transport/src/endpoint.rs`의 `Connection`):
+  - handshake 때 `peer_chain`으로 얻은 peer chain(DER)과 TLS 역할(`PeerRole::Server`/`Client`)을 보관한다. 지금은 `peer_fingerprint`만 남기고 chain은 버린다.
+  - `Connection::reverify(&self, evaluator: &dyn TrustEvaluator) -> Result<VerifiedPeer, RejectReason>`를 더한다. 보관한 chain과 역할로 `crates/qsh-transport/src/tls.rs`의 `verify_peer` 코어를 다시 부른다. 새 검증 경로를 만들지 않는다. chain이 비었거나 leaf를 파싱할 수 없으면 거부를 돌려준다(결정 5의 판정 불능 = 거부).
+  - `CLOSE_CODE_TRUST_WITHDRAWN: u32 = 0x1005`를 `CLOSE_CODE_UNVERIFIED_PEER`·`CLOSE_CODE_PROTOCOL` 옆에 두고, `Connection::close`가 이 코드와 고정 reason `b"trust withdrawn"`로 닫는 경로를 연다. peer가 이 코드로 닫았는지 읽는 중립 접근자(가칭 `Connection::closed_by_trust_withdrawal`)를 둔다. Step 3의 `serve --to` 재dial 분류가 쓴다.
+- `qsh-core`(`crates/qsh-core/src/trust/mod.rs`):
+  - `SharedTrustStore`에 단조 증가 세대 번호와 `tokio::sync::watch` 송신단을 둔다. `refresh`가 snapshot을 실제로 바꿀 때(새 내용 파싱, 파일 소실로 빈 store)만 세대를 올린다. 읽기·파싱 실패로 마지막 정상 snapshot을 유지하면 올리지 않는다.
+  - `SharedTrustStore::subscribe()`와 1초 간격 poll 작업 하나(`refresh`만 부름)를 둔다. poll 간격은 상수(가칭 `TRUST_POLL_INTERVAL`)이고 테스트가 시계를 멈춰 쓴다.
+  - ADR-0045 ⓡ 단계가 쓰는 role 조회(`role_of_pin`, `TrustStore::query_role`)를 "연결의 기록된 principal과 fingerprint → (action, 소유 축) 집합" 함수(가칭 `role_grants_for`)로 노출하고, 인가 판정과 재검증이 같은 함수를 부르게 한다. 덮음 관계(`any`가 `owned`를 덮음)를 계산하는 순수 함수(가칭 `RoleGrants::covers`)를 같이 둔다.
+- 문서: `docs/design/protocol.md` §16.3의 CLOSE 코드 목록과 §7·§16.5의 값 범위 서술에 `0x1005`를 반영한다(ADR-0031 결정 10). §3 한 문장은 동작이 켜지는 Step 3이 싣는다.
+- Windows: 전부 이식 가능한 코드다. Windows 다리에서 단위 테스트가 그대로 돈다.
 
-**(b) 테스트:**
+**(b) 테스트·게이트:**
 
-- 전 스위트가 판정 변화 0으로 초록이다.
-- 새 단위 테스트 `authorizer_receives_the_connection_fingerprint_at_every_call_site`. seam 표(`DENY_SEAMS`)를 돌며 대역 authorizer가 받은 fingerprint가 연결의 값과 같음을 본다. 이름은 이 계획이 정했다.
+- `qsh-transport` 단위(`endpoint` 옆 tests): `reverify_agrees_with_the_handshake_verdict_for_pin_ca_and_pairing`, `reverify_rejects_a_connection_with_an_empty_chain`
+- `crates/qsh-transport/tests/it/handshake_matrix.rs`에 실제 handshake 뒤 `reverify`가 같은 principal·`auth_path`를 돌려주는 행
+- `trust/tests.rs`: `trust_store_generation_bumps_only_when_the_snapshot_changes`(같은 바이트 재기록은 올리지 않음, 파싱 실패는 올리지 않음, 파일 삭제는 올림), `trust_store_poll_notifies_subscribers_within_one_tick`(tokio 시간 정지)
+- `role_grants_cover_relation_treats_any_as_covering_owned`, `authorizer_and_reverify_share_one_role_grant_function`(같은 입력에 같은 집합)
+- 기존 `crates/qsh-cli/tests/it/trust_lifecycle_live.rs`의 `an_established_connection_survives_the_hosts_trust_remove`는 이 스텝에서 그대로 초록이다(아직 닫지 않으므로).
 
-**(c) 완료 판정:** 측정값 셋과, 대체 경로를 썼는지가 커밋 본문에 있다. 지연 단언 둘은 부하 없이 50회 초록이다.
+**(c) 완료 판정:** 동작 변화 0(기존 trust·acl 테스트 무변경 초록). wire diff 0. Windows 타깃 로컬 검사와 CI Windows 다리 초록.
 
-### Step 4 — (a) 평가 단계 ⓡ, `acl.toml` 세 상태, reload 실패 시 role 정지, role audit, 시작 진단 (0.6~0.9ew)
+### Step 3 — (b) 세 프로세스의 연결별 감시와 닫기, audit, 재dial 분류, 문면 (0.5~0.75ew)
 
-근거: ADR-0045 결정 1·4·6(세 상태)·7·13(시작 진단)·16(판정 레코드)·20. 선행: Step 3. 인가 의미를 바꾸는 스텝이므로 fail-closed 테스트와 `CLAUDE.md` 문장을 같은 커밋에 싣는다.
-
-**(a) 범위:**
-
-- `Policy::decide`(`pub(crate)` 유지)에 role 입력을 더하고 ①과 ② 사이에 ⓡ을 넣는다. ⓡ은 다음이 모두 참일 때만 본다.
-  - `auth_path = Pin`이다.
-  - principal이 `device:<name>`이다.
-  - 그 이름의 pin이 있고, pin의 fingerprint가 연결의 fingerprint와 같다. `None`이면 role이 없다.
-- 결정 2 표의 소유 축은 `tunnel`만 owned로 적용한다.
-- `Verdict`에 판정 근거가 role임을 싣는 필드를 더한다(rule = `None`).
-- 판정 함수 호출 지점은 셋 그대로다(결정 7. `grep` 기계 점검 문장 유지).
-- `acl.toml` 세 상태를 바꾼다.
-  - `Missing`은 행 없는 `Policy` + role이다. 지금은 `DenyAll`이다.
-  - `Invalid`는 `DenyAll` 그대로이고 role까지 거부한다.
-- `SharedTrustStore`가 마지막 reload의 실패 여부를 가진다. 실패 중이면 pin 인증은 마지막 정상 snapshot으로 하되 role은 전부 `none`으로 친다. 기존 reload 실패 경고 줄에 "role grant를 멈춘다" 구절을 더한다.
-- role 근거 allow의 audit 레코드에 `role`을 싣는다.
-- `StartupDiagnostic`: `Missing`이면 블록 대신 "acl.toml이 없다. 요청은 trust role로만 인가된다(`qsh trust list`)" 뜻의 한 줄을 낸다. `Invalid`는 지금 블록 그대로다.
-- 문서:
-  - `CLAUDE.md` "Security defaults" 첫 항목을 고친다(ADR-0045 결과 절 "문서 밖"). 새 문장의 요지는 다음과 같다. 요청은 pin role이나 `[[acl]]` 행이 줄 때만 허용된다. 없는 `acl.toml`은 행 없음이고 role은 동작한다. 파싱할 수 없는 `acl.toml`은 role을 포함해 모든 요청을 거부한다. `trust.toml` reload가 파싱에 실패하면 role grant를 멈춘다. `acl.toml`은 시작 때 한 번 읽고 role은 판정마다 읽는다. 단일 choke point, 자원 생성 전 인가, fail-closed audit 문장은 그대로다.
-  - `docs/PRD.md` §9의 인가 서술
-  - `docs/design/architecture.md` §6의 평가 순서(ⓡ, 세 상태)
-  - `docs/CLI.md` §6.12·§6.13의 시작 진단 문단
-  - `docs/design/threat-model.md`: §2 "pin된 원격 peer" 행을 합집합으로 고친다. B4 통제 문장을 "없는 `acl.toml`은 행 없음이고 role만 동작한다. 파손은 role까지 전면 거부"로 고친다. §4 B 새 행 셋(CA leaf가 pin된 이름을 실음, 이름 재등록 뒤 옛 연결, 깨진 `trust.toml`이 옛 role을 살림)을 더한다.
-
-**(b) 테스트 (route 동등: 각 행을 `qsh serve`·`qsh serve --to`에서, `host.reverse` 행은 `qsh listen`에서):**
-
-- `legacy_pin_without_role_is_authorized_by_acl_rows_only`
-- `role_full_without_acl_toml_allows_every_action_but_forward_socks`. 여섯 role 전부를 같은 표에 둔다. `full`의 `file.*`는 이 시점에 ①이 막으므로 deny로 기대하고, Step 12가 그 행을 allow로 뒤집는다.
-- `invalid_acl_toml_denies_role_grants_too`
-- `role_grant_does_not_reach_a_ca_leaf_naming_a_pinned_device`(`cert_e2e.rs`의 CA leaf 도구 재사용)
-- `role_requires_the_connection_fingerprint_to_match_the_current_pin`
-- `trust_remove_ends_role_grants_on_the_next_request`
-- `trust_store_reload_failure_suspends_role_grants`
-- `role_grant_audit_record_names_the_role_and_no_rule`
-- `role_tunnel_cannot_close_another_principals_remote_forward`, `role_read_only_can_attach_but_not_write`
-- `decide_agrees_with_naive_coverage_oracle`(`crates/qsh-core/src/acl/policy/tests.rs`)에 role 차원을 더한다. 여섯 값과 "role 없음", fingerprint 일치 여부, `auth_path`, reload 실패 플래그다.
-- `crates/qsh-testkit/tests/acl_uniformity.rs`: role 없음 거부, role 범위 밖 거부, reload 실패 중 거부가 같은 `PERMISSION_DENIED_MESSAGE`를 낸다.
-- 시작 진단 테스트: `Missing` 한 줄 문면, `Invalid` 블록 불변.
-- 이 스텝의 테스트는 role 키를 손으로 쓴 `trust.toml`로 샌드박스를 만든다. 명령은 Step 5에서 생긴다.
-
-**(c) 완료 판정:** 위 테스트가 초록이고 부하 아래 50회 초록이다. `acl.toml`이 있는 기존 판정 테스트(`acl_enforcement.rs`, `acl_check_equivalence.rs` 기존 행)가 고치지 않은 채 초록이다. `CLAUDE.md` diff가 이 커밋에 있다.
-
-### Step 5 — (a) 권한을 쓰는 명령: `--role`, 초대 레코드의 role, `trust set-role`, 페어링 고지 (0.6~0.9ew)
-
-근거: ADR-0045 결정 8(`setup` 줄 제외), 결정 13(페어링 고지), 결정 15의 `TrustAddReq.role`·`TrustInviteReq.role`·`TrustInviteData.assigned_role`·`TrustAcceptReq.role`·`TrustSetRoleReq`·`TrustSetRoleData`, 결정 18. 선행: Step 4. Step 6과 병렬 가능.
+근거: ADR-0031 결정 1, 2, 3(연결별 감시와 수명 묶음, 플랫폼 문단), 5, 6, 7(닫는 동작, `serve --to`·`listen` 처분), 8, 9, 10과 결과 절. 선행: Step 2.
 
 **(a) 범위:**
 
-- 기본값(주소 유무 규칙)과 `--role` 플래그:
-
-  | 명령 | 기본 role |
-  |---|---|
-  | `trust add`, `--address` 없음 | `full` |
-  | `trust add`, `--address` 있음 | `none` |
-  | `pair invite` | `full` |
-  | `pair accept` | `none` |
-
-  이 뒤로 pin을 만드는 모든 경로는 `role` 키를 명시한다(`none` 포함).
-- `invites.toml` 초대 레코드에 role을 저장한다. 상환 때 `qsh serve`는 레코드의 role로 pin한다. 상환하는 쪽은 role을 고를 수 없다.
-- 이미 있는 이름과 같은 fingerprint로 `trust add`를 다시 부르면 role을 바꾸지 않는다. `created: false`, `updated: false`이고 human 출력이 "role is unchanged; use `qsh trust set-role`" 줄을 낸다.
-- 새 local op `trust.set_role`과 `qsh trust set-role <name> <role>`:
-  - 순서는 `trust.toml.lock` → load → 변경 → `AuditRecord::local_op` → save다. audit 실패면 `INTERNAL`(`retryable: true`)이고 파일은 그대로다.
-  - 이름이 없거나 CA 이름이면 `HOST_NOT_FOUND`다. role 문자열이 틀리면 `INVALID_ARGUMENT`다.
-  - 같은 값이면 `changed: false`이고 audit도 쓰지 않는다.
-- role을 `none`이 아닌 값으로 쓰는 모든 경로(add, 상환, set-role)가 `local_op` 레코드 하나를 남긴다(`action` = op 이름, `resource` = pin 이름, `role` = 새 role). 기록이 없으면 쓰기도 없다.
-- 등록 완전성: schemars 타입, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS`, 렌더러 둘, CLI.md 새 문단, man `qsh-trust-set-role`. `crates/qsh-core/tests/acl_registry.rs`의 §2.5 "인가 불요" 대조에 `trust.set_role`이 오르고 `OP_REGISTRY` 행은 없다.
-- 페어링 직후 고지를 바꾼다(ADR-0017 결정 3 문면 개정). pin 이름, role, role이 주는 action을 적고, 같은 이름의 행이 있으면 "그 행의 grant도 더해진다"를 덧붙인다. 자칭 이름 경고와 stderr 전용은 그대로다.
-- ADR-0026 `trust ssh-preview`가 내는 ACL 초안을 `--role`을 단 pin 명령으로 바꾼다.
-- 문서:
-  - `docs/CLI.md` §2.4·§2.5(`trust.set_role`), §6.11(기본값 표, `trust set-role`, `--role`, 결정 18의 "`exec`는 `full`에 대한 보안 경계가 아니다" 문장)
-  - man `qsh-trust-add`, `qsh-pair-invite`, `qsh-pair-accept`
-  - threat-model §3 진입점(`trust set-role`, 세 `--role`)
-  - §4 B 새 행 셋(상환 쪽이 role을 고름, 업그레이드나 `trust add` 재실행이 넓힘, 권한 변경이 audit에 없음)
-
-**(b) 테스트 (route 동등: `set_role` 반영을 forward와 `serve --to` 두 route에서):**
-
-- `set_role_takes_effect_on_the_next_request_without_restart`
-- `trust_add_never_changes_an_existing_pin_role`
-- `invite_role_is_fixed_by_the_issuer`
-- `pair_accept_and_trust_add_default_to_role_none`(`trust add`는 `--address`를 준 경우), `pair_invite_defaults_to_role_full`. 주소 없는 `trust add`가 `full`인 행도 같은 표에 둔다.
-- `set_role_without_a_durable_audit_record_leaves_trust_toml_untouched`, `role_writes_leave_a_local_op_audit_record_with_the_role`
-- 페어링 고지 문면 테스트(`trust_pairing_live.rs`의 기존 셋을 새 문면으로 고치고 role 행을 더한다)
-- 새 fixture `trust.set_role.json`, `trust.set_role.unchanged.json`, `trust.add.with_role.json`, `trust.invite.with_role.json`과 각 `golden_*`
-
-**(c) 완료 판정:** `layer_2_every_schema_command_has_all_six_faces`, `section_2_4_fence_matches_every_implemented_operation_bidirectionally`가 초록이다. man diff가 커밋에 있다. 기존 trust fixture가 무변경 초록이다.
-
-### Step 6 — (a) `acl check`·`acl show`의 role 필드와 3-way 대조 (0.3~0.5ew)
-
-근거: ADR-0045 결정 10·11, 결정 15의 `AclCheckData.role`·`granted_by`·`AclPolicyRef.state`·`AclShowData.role`·`role_actions`. 선행: Step 4. Step 5와 병렬 가능.
-
-**(a) 범위:**
-
-- `Ops::acl_check`가 principal이 `device:<name>`이고 `--auth-path pin`이면 pin 자신의 fingerprint로 ⓡ을 돈다.
-- `acl check` `data`에 optional 필드를 더한다. `role`(그 이름의 pin이 없거나 `ca`면 생략), `granted_by`(`"role"`|`"acl"`, allow일 때만), `policy.state`(`"loaded"`|`"missing"`|`"invalid"`). `AclPolicyRef.loaded` field doc의 "deny" 문장을 `state = invalid`로 고친다.
-- `acl show`:
-  - `role`, `role_actions`(표 순서)를 더한다.
-  - `effective_actions`를 role ∪ 행으로 넓힌다.
-  - human 출력은 role 줄을 먼저 내고, role은 즉시 반영되며 행은 재시작해야 반영된다는 두 줄을 낸다. 행 줄은 `ACL_RESTART_NOTICE`를 축자로 쓴다.
-- 문서: `docs/CLI.md` §6.15·§6.19.
-
-**(b) 테스트:**
-
-- `crates/qsh-cli/tests/acl_check_equivalence.rs`에 role pin 샌드박스 행들을 더한다. `acl check`, `acl show`, 실제 op, audit 넷이 일치하는지 보고, `full`·`exec`·`tunnel`·`read-only`·`none`·legacy를 덮는다. ADR-0025 결정 3의 3-way를 role 차원으로 넓힌 것이다.
-- `missing` 정책 상태에서 role allow 행을 둔다.
-- 새 fixture `acl.check.allow_by_role.json`, `acl.check.missing_policy_role.json`, `acl.show.with_role.json`
-
-**(c) 완료 판정:** 기존 `acl.check.*`·`acl.show.*` fixture가 무변경 초록이다. `grep` 기계 점검으로 `decide` 호출 지점이 셋이다.
-
-### Step 7 — (a) doctor와 `qsh setup` (0.4~0.6ew)
-
-근거: ADR-0045 결정 8의 `setup` 줄(`--peer-role`), 결정 12, 결정 14, 결정 15의 `SetupRunReq.peer_role`. 선행: Step 5·6.
-
-**(a) 범위:**
-
-- doctor 조건과 문면을 바꾼다.
-
-  | code | 바뀌는 것 |
-  |---|---|
-  | `acl_policy_missing` | role이 `none`이 아닌 pin도, 그런 초대도 없을 때만 낸다. remedy에 `trust set-role`을 더한다 |
-  | `acl_policy_invalid` | 문면에 "role grant도 거부"를 더한다 |
-  | `acl_principal_unmatched` | role이 `none`이 아닌 pin은 세지 않는다 |
-  | `acl_ca_auth_path_missing` | `acl.toml`이 없어도 낸다 |
-  | `trust_remove_scope` | message를 고친다 |
-  | `trust.toml` 파싱 실패의 `CONFIG_ERROR` | 문면에 "실행 중인 serve/listen은 role grant를 거부한다"를 더한다 |
-
-- 신설 `trust_pin_role_unset`(info). role 키 없는 pin마다 하나를 내고 `detail`은 pin 이름만 싣는다. doctor code는 24 → 25이다.
-- `qsh setup --peer-role`의 역할별 기본값: `host` → 초대에 `full`, `host --to` → listener pin에 `full`, `listener` → target pin에 `reverse`, `client` → server pin에 `none`.
-  - ACL 단계는 `none`이 아니면 `done`이고 `detail`에 pin·초대와 role을 적으며 `acl_rows`를 내지 않는다.
-  - `none`이면 지금처럼 동작한다.
-  - `complete` 판정 문장은 그대로다.
-- 문서: `docs/CLI.md` §6.17(표, 개수 문장 25), §6.11 개수 문장, §6.20(`--peer-role`), man `qsh-setup`
-
-**(b) 테스트:**
-
-- `crates/qsh-core/src/ops/doctor/tests.rs`에 이 계획이 이름을 정한 테스트를 둔다(ADR은 이름을 정하지 않았다).
-  - `doctor_trust_pin_role_unset_reports_each_legacy_pin_by_name_only`
-  - `doctor_acl_policy_missing_is_silent_when_a_role_pin_exists`
-  - `doctor_acl_principal_unmatched_skips_role_pins`
-  - `doctor_acl_ca_auth_path_missing_fires_without_acl_toml`
-- `doctor_docs.rs` 잠금 어휘 대조
-- `setup_never_writes_acl_toml_in_any_role` 무변경 초록
-- `setup_host_roles_incomplete_without_acl_toml`는 `--peer-role none` 조건으로 좁힌다.
-- 새 `setup_host_roles_complete_with_a_role_and_no_acl_toml`과 fixture `setup.run.host_complete_with_role.json`
-
-**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 25이고 CLI.md 개수 문장이 같다. ADR-0038 client 면제 테스트가 무변경 초록이다.
-
-### Step 8 — (a) 정리: 잔여 위험, README, 부하 반복 (0.1~0.2ew)
-
-근거: ADR-0045 결정 17·18과 결과 절의 위협 모델·"문서 밖" 문단, ROADMAP M15 크기 줄의 "(a)와 (b)를 순서대로 따로 닫아도 된다". 선행: Step 2~7.
-
-**(a) 범위:**
-
-- `docs/design/threat-model.md` §7 잔여 위험 다섯을 적는다.
-  1. `exec`·`full`은 serve uid와 같은 힘이다.
-  2. `tunnel`의 `forward.local` egress는 host가 닿는 모든 TCP 목적지에 닿는다.
-  3. `read-only`는 다른 장비 세션의 화면 출력을 본다.
-  4. role을 줄여도 이미 만든 자원은 M16 ADR-0031 전까지 끝까지 간다.
-  5. 이 ADR 이전 바이너리가 `trust.toml`을 다시 쓰면 `role` 키가 사라져 그 pin이 `none`이 된다.
-- README First run과 보안 절을 role 기준으로 고친다(§9 #3). README 축자 게이트가 걸린 문장을 먼저 확인한다.
-- (a) 타이밍 민감 테스트를 `scripts/stress/m15.filter`에 묶어 50회 돌린다.
-- (a) wire diff 0을 기록한다(결정 17).
-- ROADMAP M15 절에 (a) 착지 노트를 적는다(main 세션).
-
-**(b) 테스트·게이트:** 일곱 게이트, CI 초록, 부하 반복 50/50.
-
-**(c) 완료 판정:** §3 DoD (a)가 근거 커밋, run id와 함께 `[x]`다. `git diff --stat <Step 2 부모>..HEAD -- crates/qsh-proto/proto crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다.
-
-### Step 9 — (b) 경로 판정 모듈 `file::guard` (0.5~0.7ew)
-
-근거: ADR-0029 결정 5·6, 결정 23의 macOS 항목. 선행: Step 1. Step 5~7과 병렬 가능하다. 인가 경로에 아직 연결하지 않는 순수 모듈이다.
-
-**(a) 범위:** `crates/qsh-core/src/file/guard.rs`(새 모듈)에 다음을 둔다.
-
-1. **모양 검사와 home 해석(6-1).** home은 serve 계정의 passwd 항목에서 구하고 `HOME`은 쓰지 않는다. `~name`, NUL, 4096바이트 초과, 비UTF-8을 거부한다. 쓰기 계열은 마지막 성분이 `.`·`..`이면 거부하고, `name_if_dir`는 단일 성분이어야 한다.
-2. **정규화(6-2).** 존재하는 가장 긴 조상을 `realpath`로 풀고, 나머지 성분을 어휘적으로 접는다. 존재하는 symlink는 끝까지 따른다. 정규화 함수는 주입 가능하게 두어 호출 수를 셀 수 있게 한다. Step 12의 `file_request_without_a_file_grant_touches_no_filesystem`이 쓴다.
-3. **보호 집합(5).**
-   - 보호 디렉터리: config, state, runtime(localctl 소켓 디렉터리 포함)
-   - 보호 파일: `[audit].path`가 디렉터리 밖이면 그 파일·회전 파일·회전 임시 이름. file-mode keystore 경로
-   - 실제 경로(`$QSH_CONFIG_DIR`·`$XDG_*` 반영)와 `$HOME` 기본값 경로의 합집합이다.
-   - 요청마다 새로 해석한다.
-4. **보호 대조(6-3).** 존재하지 않는 경로도 보호 디렉터리 아래면 거부한다. macOS(와 Windows, 그 구현은 M20)에서는 성분 단위 대소문자를 무시하고 비교한다.
-5. **열린 핸들 재검증 기본 요소(6-4).** Linux는 `/proc/self/fd/<n>` readlink, macOS는 `fcntl(F_GETPATH)`이다. 평가기 재호출은 Step 12가 연결한다.
-6. **보호 파일 `(dev, ino)` 집합(6-5)과 파일 종류 판정(6-6).**
-
-추가로:
-- `docs/design/architecture.md` §7에 "이 트리는 원격 파일 op에서 항상 거부된다" 한 문장과 집합을 적는다.
-- `xtask arch` 금지 목록 편입 여부를 이 스텝이 판단한다.
-- `cfg(not(unix))`에서는 모듈이 모든 경로를 거부하는 stub이다. Windows 구현은 M20, ADR-0029 결정 23·ADR-0035 결정 26.
-
-**(b) 테스트:**
-
-- `state_path_guard_denies_nonexistent_paths_under_state_dirs`
-- `state_path_guard_covers_env_overridden_and_default_dirs`
-- `state_path_guard_rechecks_the_opened_handle`. 판정과 열기 사이에 디렉터리 성분을 symlink로 바꾸는 경쟁을 재현한다.
-- macOS 전용 행: 대소문자만 다른 표기로 상태 경로를 우회하는 시도를 거부한다(`cfg(target_os = "macos")`, `macos-14` 다리).
-- 모양 검사·home 해석 단위 행
-
-**(c) 완료 판정:** 모듈이 인가 경로 어디에서도 호출되지 않는다(`grep`). Linux·macOS 다리가 초록이다. Windows 다리에서 stub이 컴파일된다.
-
-### Step 10 — (b) `acl.toml` 행의 `paths`: 로더, 평가 ③-1, `acl check --path`, `acl show`, doctor (0.5~0.7ew)
-
-근거: ADR-0029 결정 4(4-1~4-8), 결정 19, ADR-0045 결정 5. 선행: Step 7(doctor 개수 순서), Step 9. Step 11과 병렬 가능. 이 시점에는 ①이 아직 `file.*`를 막으므로 enforcement 결과는 바뀌지 않는다.
-
-**(a) 범위:**
-
-- 로더:
-  - optional `paths`를 읽는다. 다음은 모두 파일 전체의 `CONFIG_ERROR`이고 문면에는 행·항목 index만 싣는다.
-    - 절대 경로가 아닌 항목
-    - `.`·`..`·빈 성분, 끝 `/`(`"/"` 예외)
-    - NUL, 4096바이트 초과
-    - 빈 배열, `MAX_PATHS_PER_RULE` 64개 초과
-    - 파일 action이 아닌 행이나 섞인 행의 `paths`
-  - 파일 패턴이 있는데 `paths`가 없는 행은 로드에 성공한다. `tracing::warn!` 한 줄을 내고 파일 권한은 주지 않는다.
-- 평가: ③-1 성분 단위 포함 판정을 둔다. 항목도 요청마다 같은 정규화 함수로 정규화하고, 실패한 항목은 아무것도 덮지 않는다. `ResourceRef`에 optional 정규 경로 필드를 더한다. role grant에는 `paths`를 적용하지 않는다(ADR-0045 결정 5).
-- 결정 4-6 (a)의 순수 판정 helper를 둔다. "이 principal·`auth_path`가 파일 action을 받을 근거가 있는가"를 보며, `acl show`의 `matching_rules`와 같은 helper다.
-- `acl check --path <abs-path>`: 파일 action인데 `--path`가 없거나, 비파일 action인데 있으면 `INVALID_ARGUMENT`다. `data.path`와 `data.canonical_path`를 더한다. 상태 경로 판정은 돌리지 않는다는 §6.15 문단을 고친다.
-- `acl show`: `matching_rules[].paths`를 더한다. 파일 action의 `effective_actions` 정의를 바꾸고, `paths` 없는 파일 행에는 human 줄을 더한다.
-- doctor `acl_file_paths_missing`(warn): 같은 이름 pin이 role `full`이면 침묵하고, 정책이 없거나 파싱 실패면 침묵한다. `detail`은 index와 `auth_path`만 싣는다. remedy 꼬리는 `ACL_RESTART_NOTICE`다. doctor code는 25 → 26이다.
-- 문서: `docs/PRD.md` §9(문법과 예시, action 모양 inline code를 새로 쓰지 않음), `docs/design/architecture.md` §6(문법 줄 `paths?`, ③-1), `docs/CLI.md` §6.15·§6.17·§6.19, man `qsh-acl-check`
-
-**(b) 테스트:**
-
-- `crates/qsh-core/src/acl/load/tests.rs`: 모양 위반 전 행, 비파일·섞인 행, 문면에 경로 문자열이 없음, `paths` 없는 파일 행의 로드와 경고
-- `crates/qsh-core/src/acl/policy/tests.rs`: `file_paths_match_component_wise`(`/srv/share` 대 `/srv/shared`), 같음 매칭, `"/"` 항목, first-match가 불일치 행을 건너뜀, 경로 없는 파일 요청의 행 deny. ①을 우회하는 helper 단위로 둔다.
-- doctor: `doctor_acl_findings_reports_acl_file_paths_missing_for_a_file_row_without_paths`, `acl_file_paths_missing_is_silent_for_a_role_full_pin`, 정책 없음 침묵, `detail`에 principal 문자열이 없음. `doctor_docs.rs`
-- 새 fixture 이름은 이 계획의 초안이다(§7.1 #4): `acl.check.path.json`, `acl.show.with_paths.json`
-
-**(c) 완료 판정:** `EXPECTED_DOCTOR_CODES`가 26이다. 기존 ACL fixture가 무변경 초록이다. enforcement 결과 diff 0(①이 여전히 `file.*`를 막음).
-
-### Step 11 — (b) wire와 fuzz, 네 op의 dispatch와 deny seam (0.4~0.5ew)
-
-근거: ADR-0029 결정 3·9, 결과 절의 fuzz·ACL 테스트 갱신 문단. 선행: Step 4. Step 10과 병렬 가능. 이 스텝 뒤에도 네 op은 ①로 모두 거부된다. 자원도 파일시스템 접근도 없다.
-
-**(a) 범위:**
-
-- `.proto`(`crates/qsh-proto/proto/qsh/wire/v1.proto`)에 다음을 더한다. 번호는 origin `09266dc`에서 비어 있음을 확인했다.
-  - `ControlMessage` 80~83(`FileReadOpen`·`FileWriteOpen`·`FileListOpen`·`FileMkdirOpen`)
-  - `Response` 11~14
-  - `StreamKind FILE_DATA = 5`
-  - message 12종과 `FileKind`
-- `crates/qsh-proto/src/wire.rs`에 상수 `FILE_CHUNK_MAX`(32 KiB), `FILE_LIST_PAGE_MAX`(512), `FILE_LIST_DIR_MAX`(65536)를 둔다. capability 상수 `file.v1`도 정의하지만 `LOCAL_CAPABILITIES`에는 넣지 않는다(Step 13).
-- `Server::dispatch`가 네 op을 받아 결정 8의 1단계(모양 검사)와 2단계(ACL) 앞부분까지 돈다. ①이 `file.*`를 막으므로 `PERMISSION_DENIED`와 audit 한 줄로 끝난다.
-- `qsh listen` controller는 네 op에 `UNSUPPORTED`로 답한다(결정 16).
-- `DENY_SEAMS`에 `SeamKind::ControlStreamOp` 네 행을 더한다(14 → 18). `ALWAYS_DENIED_NO_OP`에서 `file.read`/`file.write`를 빼서 `forward.socks`만 남긴다. op이 생겼기 때문이다.
-- `docs/CLI.md` §2.4에 wire op 넷, §2.5에 매핑 넷을 더한다.
-- fuzz:
-  - 새 타깃 `decode_file_frame`(`FileFrame`)을 둔다.
-  - 새 `Response` message 넷이 `decode_control` 경로에 걸리는지 확인하고, 걸리지 않으면 타깃에 더한다.
-  - `fuzz/README.md`와 `docs/design/protocol.md` §13의 타깃 수를 19에서 20으로 고친다.
-- `docs/design/protocol.md` §7(`FILE_DATA`와 ticket 규칙), §9(`.proto` 발췌), §16.1(freeze 발효 전 목록)
-- threat-model §3 진입점 "`Server::dispatch`의 파일 op 넷과 `FILE_DATA` 스트림"
-
-**(b) 테스트:**
-
-- `deny_seams_row_names_and_count_are_pinned`(18), `deny_seams_cover_every_action_except_the_always_denied_trio`(갱신), `crates/qsh-core/tests/acl_registry.rs`
-- `acl_uniformity.rs`: `every_deny_seam_in_the_registry_denies_with_the_uniform_message`가 네 seam을 덮는다.
-- `acl_check_never_appears_as_a_control_message_wire_variant`(B2 트랩)의 variant 전수 대조 갱신
-- wire round-trip 단위 테스트, 새 fuzz 타깃 smoke
-
-**(c) 완료 판정:** `is_always_denied`가 아직 셋을 막는다. 네 op의 응답이 전부 `PERMISSION_DENIED`이고, 정규화 함수 호출이 0회다(주입 계수). `capabilities.json` diff 0.
-
-### Step 12 — (b) host 제어 평면: 항상-deny 해제, 상태 경로, 재검증, quota, `file.list`·`file.mkdir` 완결, ticket (0.8~1.0ew)
-
-근거: ADR-0029 결정 3(항상-deny 해제), 4-6, 5, 6-4~6-6의 연결, 8, 12(host quota), 14, 16(host 쪽), 20의 host 디렉터리 해석(`name_if_dir`/`into_dir`), ADR-0045 결정 18의 상태 경로 행. 선행: Step 9·10·11. 이 스텝이 `file.*`를 처음 연다. 거부 층과 그 테스트가 모두 같은 커밋이다.
-
-**(a) 범위:**
-
-- `Action::is_always_denied`에는 `forward.socks`만 남긴다.
-- 결정 8 순서를 그대로 구현한다. 앞 단계가 실패하면 뒤 단계는 돌지 않는다.
-  1. 모양 검사와 home 해석
-  2. ACL: (a) 근거 판정 → (b) 근거가 있을 때만 정규화 → (c) `Authorizer::check` + audit
-  3. user hint 대조(`UNSUPPORTED`)
-  4. 상태 경로(role만으로 allow됐으면 여기서 처음 정규화한다. deny면 audit 한 줄 더)
-  5. `file.read`/`file.write`의 quota 예약
-  6. 열기와 재검증(보호 집합 + 평가기 재호출, deny면 audit 한 줄 더). `file.read`의 inode 대조와 종류 판정, `file.write`의 대상 존재·`overwrite`·디렉터리 해석
-  7. 응답
-- `file.read`/`file.write`는 연 fd를 ticket에 묶는다(30초, 단회). 만료되면 fd를 닫고 quota를 돌려준다. temp는 아직 만들지 않는다.
-- `file.mkdir`은 3~5단계를 통과한 뒤에만 `mkdirat`을 부른다.
-- `file.list`는 이름 바이트 순서, `after` 커서, `FILE_LIST_PAGE_MAX`, `unlistable` 계수, `FILE_LIST_DIR_MAX` 초과 시 `RESOURCE_EXHAUSTED`다.
-- quota:
-  - `[serve].max_file_transfers_per_principal`(기본 4)와 `[serve].max_file_transfers`(기본 64)를 둔다.
-  - `QuotaKind` 두 값을 더하고 audit `resource`는 `quota_files_principal`, `quota_files_host`다.
-  - `docs/CLI.md` §6.12 quota 문단에 적는다. `serve --to`도 같은 `[serve]` 키를 쓴다(§7.1 #5).
-- 쓰기 여유 공간 확인(결정 13)은 Step 13의 데이터 평면과 함께 둔다. 6단계의 `statvfs` 자리만 이 스텝에서 연다.
-- 문서:
-  - threat-model §4 B 새 행: 상태 파일 쓰기로 role·인가를 올림, symlink·`..`·경쟁·hard link 우회, `paths` 밖 도달, 정규화 시간 차로 구조를 더듬음, `file.read`로 키·token 읽기, qsh 밖 비밀, `file.list` 반복 CPU
-  - `CLAUDE.md` "Security defaults"에 "원격 파일 op은 role이나 행과 무관하게 qsh 자신의 config·state·runtime 경로에 닿지 못한다" 한 항목을 더한다(§9 #6).
-
-**(b) 테스트 (route 동등: 각 행을 `qsh serve`와 `qsh serve --to` 두 harness에서. 이 스텝에는 client가 없으므로 testkit의 raw wire 요청자로 돈다):**
-
-- `file_ops_are_denied_without_a_matching_rule_or_role`
-- `role_full_file_ops_allow_any_path_but_still_deny_state_paths`(ADR-0029). 대상은 `acl.toml`, `trust.toml`, `invites.toml`, `identity/device.key`, `audit.log` 다섯과 symlink, `..` 이탈이고 네 op이다. 바이트 불변을 단언한다.
-- `role_full_file_ops_still_deny_state_paths`(ADR-0045)는 같은 테스트 파일 안의 별도 함수다. `full`로 `trust.toml`, `invites.toml`, `acl.toml`, identity 키를 읽거나 쓰지 못한다.
-- `file_write_to_state_paths_is_denied_even_with_root_paths`, `file_read_of_state_paths_is_denied_even_with_root_paths`(hard link 우회 포함)
-- `file_list_and_mkdir_in_state_dirs_are_denied`
-- `file_rule_without_paths_grants_no_file_access`
-- `file_read_through_a_symlink_out_of_paths_is_denied`, `file_dotdot_escape_out_of_paths_is_denied`, `file_paths_recheck_the_opened_handle`
-- `file_request_without_a_file_grant_touches_no_filesystem`(정규화 함수 주입 계수 0)
-- `denied_file_write_leaves_no_file_or_temp_behind`, `unredeemed_file_write_ticket_leaves_nothing_behind`
-- `file_list_pages_are_sorted_and_resumable_by_cursor`, `file_list_rejects_directories_over_the_entry_cap`
-- `file_audit_record_carries_path_but_no_payload`
-- `crates/qsh-core/tests/quota_registry.rs` 두 행, `quota_docs.rs`의 키·기본값 대조, `saturated_quota_still_answers_permission_denied_to_an_unauthorized_principal_end_to_end`의 파일 행
-- `is_always_denied_is_exactly_the_undrivable_trio`를 `forward.socks` 하나로 고치고 이름도 바꾼다.
-- `acl_check_equivalence.rs`: `file.read`·`file.write` 두 action 행, `paths` 안·형제 밖·symlink 밖·`..` 이탈·`--path` 누락·비파일 `--path` 행, role `full`이 경로와 무관하게 allow인 행. 각 행에서 `acl check --path`, enforcement, `acl show`가 일치해야 한다.
-- `acl_uniformity.rs`: `paths` 밖, `paths` 없음, 정규화 실패, 상태 경로, 재검증 불일치가 같은 `PERMISSION_DENIED_MESSAGE`를 낸다(네 seam).
-- Step 4의 `role_full_without_acl_toml_allows_every_action_but_forward_socks`에서 `file.*` 행을 allow로 뒤집는다.
-
-**(c) 완료 판정:** 위 테스트가 초록이고 부하 아래 50회 초록이다. 상태 경로 핀의 바이트 대조가 sha256으로 커밋 본문 재현 절차와 일치한다. 이 시점에 `file.v1`은 광고되지 않으므로 정상 client는 요청을 보내지 않는다.
-
-### Step 13 — (b) host 데이터 평면: `FILE_DATA`, 원자적 교체, 무결성, 여유 공간, 정체 장부, `file.v1` 광고 (0.7~0.9ew)
-
-근거: ADR-0029 결정 1의 capability, 7(host 쪽), 10, 11(host 쪽), 13, 15, 16의 데몬 중계 정체 장부. 선행: Step 12.
-
-**(a) 범위:**
-
-- `FILE_DATA` 스트림(`StreamHeader{FILE_DATA, ticket}`)을 다룬다.
-  - read: host가 `data`를 보내고 마지막에 `FileEnd`(size, BLAKE3-256)를 보낸다.
-  - write: host가 `data`와 `FileEnd`를 받는다. `size` 초과는 즉시 끊는다.
-  - 상한을 넘는 `data`, `end` 뒤의 frame, 요청자의 `result`는 `BAD_HEADER`(0x2001) reset이다.
-- write 흐름:
-  1. 디렉터리 fd에서 temp `.<name>.qsh-<16 hex>.part`(`O_CREAT|O_EXCL|O_NOFOLLOW`, 0600)를 만든다.
-  2. 검증, `fsync`, `fchmod`(mode/umask/`preserve`와 `futimens`)를 한다.
-  3. `overwrite`면 `renameat`, 아니면 `linkat` + `unlinkat`이다. `EEXIST`면 `FileWriteResult{ok=false, INVALID_ARGUMENT}`다.
-  4. 디렉터리 `fsync`를 하고 `FileWriteResult`를 보낸 뒤 `finish()`한다.
-  - 실패, 취소, 연결 유실, 정체 끊음이면 temp를 `unlinkat`한다.
-- `FILE_WRITE_FREE_RESERVE`(256 MiB)를 `statvfs`로 확인한다. `ENOSPC`는 `RESOURCE_EXHAUSTED`다.
-- `file.mkdir` mode 규칙 `((mode & ~umask) | 0o700)`
-- band 0과 `SEND_DEPTH_CAP_BYTES`를 적용한다. 받는 쪽 디스크 쓰기를 ADR-0037 장부(`crates/qsh-core/src/tunnel/stall.rs`, `STALL_AGE`, `0x200E`)에 올린다. 연결 양 끝과 localctl 데몬 중계 모두다.
-- `LOCAL_CAPABILITIES`에 `file.v1`을 더한다(`cfg(unix)` 빌드만, §4 규율). `QSH_UPDATE_FIXTURES=1`로 `capabilities.json` golden을 다시 만든다.
-- 문서: `docs/design/protocol.md` §4(`file.v1`), §12(정체 장부 범위), §16.1. threat-model §4 새 행: 덮어쓰기가 반쯤 쓴 파일이나 temp를 남김, 디스크를 채워 audit fail-closed가 host를 멈춤, 정체한 `FILE_DATA`가 수신 창을 묶음.
-
-**(b) 테스트 (route 동등: forward와 `serve --to` 두 harness):**
-
-- `file_write_overwrites_atomically_by_default`, `file_write_no_clobber_never_replaces_an_existing_file`(확인과 교체 사이 경쟁 포함)
-- `interrupted_file_write_removes_its_temp_file`(연결 유실, 취소, 정체 장부 끊음 세 경우)
-- `file_write_size_or_hash_mismatch_renames_nothing`
-- 여유 공간 거부 행(주입한 `statvfs`)
-- `capabilities.json` golden 대조 테스트
-
-**(c) 완료 판정:** M13 (b)의 `tunnel_stalled_streams` 네 테스트와 `tunnel_throughput_meets_raw_quinn_ratio`가 고치지 않은 기준으로 초록이다. 부하 반복 50/50이다.
-
-### Step 14 — (b) client `qsh cp`: 단일 파일, operand 문법, JSON, forward·reverse 왕복, 복사 중 PTY echo 측정 (0.8~1.0ew)
-
-근거: ADR-0029 결정 1(client 쪽 거부와 capability 확인), 2, 7(client 로컬 쓰기), 11(client 정리, Ctrl-C), 16(client·데몬 conduit), 17, 18, 21. 선행: Step 13.
-
-**(a) 범위:**
-
-- `Ops::file_copy`(합성 local op `file.copy`, `qsh-core`)를 둔다.
-- operand 판별은 scp 규칙이다. 첫 `/` 앞의 `:`가 원격 표지이고, IPv6는 대괄호로 싸며, `host:`는 `~`이다. 거부와 exit는 다음과 같다.
-
-  | 상황 | 결과 |
-  |---|---|
-  | put/get 구성이 아님(원격↔원격, 섞인 operand, host가 둘 이상) | `INVALID_ARGUMENT` exit 2 |
-  | `-` operand | `INVALID_ARGUMENT` |
-  | 지원하지 않는 scp 플래그 | exit 2 + stderr 한 줄 |
-
-- 플래그는 `-r`(Step 15), `-p`, `-q`, `--no-clobber`, `--json`/`--jsonl`이다.
-- host 해석은 `qsh exec`과 같다(§6.1, live reverse 우선). `user@`는 user hint다.
-- peer capability에 `file.v1`이 없으면 보내기 전에 `UNSUPPORTED`다. 역방향이면 `LocalHelloAck.capabilities`로 확인하고, 원인 둘을 짚는 문면을 낸다.
-- get의 로컬 쓰기는 temp + link/rename + fsync이고 DST 디렉터리 fd 기준 `*at`으로 한다. DST 아래 기존 symlink는 `INVALID_ARGUMENT`다.
-- `FILE_COPY_PARALLEL = 2`
-- Ctrl-C는 `CANCELED` exit 255다.
-- JSON: 결정 18 모양(`direction`, `entries`, `COPY_JSON_ENTRIES_MAX` 1000). `--jsonl`은 `qsh.event/v1` `file.entry` 줄 + 마지막 envelope이다.
-- 부분 실패는 결정 21 모양이다(`error.details`의 다섯 수와 `failures`, `COPY_JSON_FAILURES_MAX` 64). 여러 SRC를 주면 `-r` 없이도 부분 실패가 생긴다.
-- human 진행 표시는 stderr TTY일 때만 그리고 요약은 stdout 한 줄이다.
-- `qsh-cli`에는 clap, 렌더러 둘, 진행 표시만 둔다.
-- 등록 완전성: schemars, `cli_v1_data_schema`, `CLI_V1_SCHEMA_COMMANDS`, 렌더러 둘, man `qsh-cp`, CLI.md §2.4(`file.copy`)·§2.5("인가 불요" 행), 새 `qsh cp` 절(결정 2·3·4-8 범위 문장·17·18·21·22). §2.5 끝의 "향후 예약: streaming file copy" 문장을 지운다.
-- `docs/CLI.md` §10에 `file.entry` event type을 더한다.
-- `file_copy_echo_under_load`(새 testkit 파일. M13 (b) 하네스 모양)를 `ci.yml` acceptance job에 strict로 넣고, `CLAUDE.md` Commands 절의 acceptance 목록과 `docs/design/testing.md` 게이트 환경변수 표에 이름을 더한다.
-
-**(b) 테스트:**
-
-- `file_round_trip_is_byte_identical_forward`, `file_round_trip_is_byte_identical_reverse`(64 MiB 이상 무작위 파일, BLAKE3와 sha256 대조)
-- `cp_operand_grammar_separates_remote_from_local`(`./a:b`, `[::1]:p`, `host:`, `host:dir/x`)
-- `cp_rejects_unsupported_scp_flags_with_exit_2`, `cp_remote_to_remote_is_invalid_argument`, `cp_mixed_operands_are_invalid_argument`
-- `cp_into_existing_directory_uses_the_source_name_get_and_put`, `cp_multiple_sources_require_an_existing_directory`
-- `cp_home_relative_paths_expand_against_the_serve_account`, `cp_tilde_user_is_invalid_argument`, `cp_user_hint_mismatch_is_unsupported_after_acl`
-- `cp_preserve_sets_mode_and_mtime`, `cp_without_preserve_applies_the_umask`
-- `cp_partial_failure_exits_255_and_reports_failures`
-- `cp_json_and_jsonl_report_every_entry`
-- `file_copy_never_appears_as_a_control_message_wire_variant`(`setup_run_never_appears_as_a_control_message_wire_variant` 형식)
-- `file_copy_echo_under_load`(acceptance strict, 예산은 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`와 같은 측정 RTT + 10ms)
-- `jsonl_purity.rs`·`exit_code_matrix.rs`에 `cp` 행을 더한다.
-- 새 fixture `file.copy.get.json`, `file.copy.put.json`, `error.file.copy.partial.json`, `file.entry` event 예시(이름 §7.1 #4)
+- 기록값. `ConnCtx`(`crates/qsh-core/src/server/mod.rs`)에 수립 시점 `Established { principal, auth_path, role_grants }`를 둔다. `Principal::Pairing` 연결은 기록하지 않는다(결정 2).
+- 감시 작업. 연결마다 `SharedTrustStore::subscribe()`를 기다리는 작업을 그 연결을 서빙하는 작업과 같은 `select!`에 묶는다. 붙이는 곳은 셋이다.
+  - `qsh serve` inbound: `Server::serve_connection`(→ `serve_connection_inner`)
+  - `qsh serve --to` outbound: `crates/qsh-core/src/reverse/target/mod.rs`의 연결 수명 안(`Server::serve_control`을 도는 자리)
+  - `qsh listen` inbound 등록: `crates/qsh-core/src/reverse/listen/registration.rs`와 등록표(`reverse/registry.rs`). 등록 연결의 role grant는 `reverse`가 주는 `host.reverse` 하나다.
+- 닫는 조건은 결정 5의 다섯 항목 순서 그대로다(`reverify` 거부, `auth_path` 변화, `Pairing`, 판정 불능, role grant 축소). 넓어지면 닫지 않고 기록값을 갈아 끼운다. role 없는 pin의 rename, `acl.toml` 행 grant, 무관한 항목 변경은 닫지 않는다. 판정은 매번 돌고 관련 항목을 미리 가리는 최적화는 하지 않는다.
+- fail closed(결정 6). 빈 store는 전부 닫는다. 파싱 실패 중에는 세대가 오르지 않아 감시가 돌지 않고, role 요청은 ADR-0045 결정 4대로 멈춘다. 닫기는 audit보다 먼저 하고, audit 실패는 로그 줄로만 남는다.
+- 닫기(결정 7). `Connection::close(CLOSE_CODE_TRUST_WITHDRAWN, b"trust withdrawn")`. 그 위 세션은 오늘의 연결 유실과 같은 규칙으로 detach된다.
+  - `serve --to` 재dial 루프(`classify_target_connection_loss`)는 로컬이 닫았든 상대가 닫았든 `0x1005`를 신뢰 철회로 분류하고, 로그 한 줄만 남기며, 빠른 재dial 경로(`loss_delay`)가 아니라 handshake 거부와 같은 일반 backoff를 탄다.
+  - `listen`은 닫힌 등록을 등록표에서 빼고 그 위 relay를 끝낸다.
+- audit(결정 8). `AuditRecord::connection_withdrawn(principal, auth_path, peer_addr, reason)`를 `crates/qsh-core/src/audit.rs`의 `handshake_rejected` 옆에 둔다. `resource`는 `trust_withdrawn` 또는 `grants_reduced`, `action` `connect`, `decision` `deny`, `rule` `null`, `request_id` `"-"`, `role` 키 없음.
+- 문면(결정 9). 좁히는 명령(`trust remove`, role을 낮추는 `trust set-role`, role이 있는 pin의 `trust rename`)의 사람용 출력이 "언제·어디에·무엇을 하지 않는가" 세 문장을 `qsh-core` 상수 한 벌(가칭 `TRUST_NARROWING_SCOPE`)로 말한다. `qsh-cli`는 받은 것을 쓰기만 한다. JSON 필드는 바뀌지 않는다.
+  - `crates/qsh-core/src/doctor.rs`의 `TRUST_REMOVE_SCOPE` message·remedy를 같은 규율로 바꾼다. code·status(`info`)·노출 조건은 그대로다. remedy에서 "(P1)"과 재시작 권고가 빠지고, 다른 장비에서도 같은 명령을 실행하라는 안내가 들어간다.
+- 문서(모두 이 커밋):
+  - `docs/CLI.md` 상태 헤더 v0.32를 연다. §6.11의 "`trust.remove`의 유효 범위" 문단, `trust rename` 문단의 "이미 확립된 연결" 문장(role이 있는 pin은 닫힘), `trust set-role` 절의 세 문장, 파싱 실패 중 미반영 창. §6.9·§6.14의 `--supervise` 설명. §6.17 `trust_remove_scope` 인용과 표 설명. audit `resource` 범주에 두 값.
+  - `docs/design/architecture.md` §6 audit `resource` 범주.
+  - `docs/design/protocol.md` §3에 "확립된 연결은 trust 변경 뒤 재검증된다" 한 문장.
+  - README "Known limitations"의 `trust remove` 줄과 M15가 남긴 "role을 줄여도 열린 연결은 M16까지 유지" 줄.
+  - `docs/design/threat-model.md`: §5 g2 설명 교체, §4 B에 "신뢰를 거둔 peer가 기존 연결로 권한을 유지한다" 행(통제 결정 3·5, 핀은 아래 연결 닫힘 테스트, 잔여 h5), §7 h4·h5·h35 개정과 "h4·h5를 함께 읽으라" 문단의 "2초 안에 끊는다", 새 잔여 한 줄("닫는 것은 연결이지 세션이 아니다").
+- Windows: `qsh serve` 감시는 Windows 빌드에도 붙고 아래 serve inbound 테스트 중 PTY가 필요 없는 것(exec·터널 위의 연결)이 Windows 다리에서 돈다. `serve --to`·`listen` 테스트는 기존 reverse 테스트처럼 `cfg(unix)`이고 Windows 쌍둥이는 M19(listen)·M20(serve --to)이 연다.
+- 부하 필터 초안 `scripts/stress/m16.filter`를 만든다(Step 10이 완성).
+
+**(b) 테스트·게이트:**
+
+새 통합 모듈 `crates/qsh-testkit/tests/it/trust_withdrawal.rs`(실제 QUIC loopback, `tests/it/main.rs` 등재)와 기존 파일의 교체·추가다.
+
+- 교체: `crates/qsh-cli/tests/it/trust_lifecycle_live.rs`의 `an_established_connection_survives_the_hosts_trust_remove` → `an_established_connection_is_closed_within_two_seconds_of_trust_remove`(실제 바이너리, `0x1005`, audit 한 줄 `trust_withdrawn`)
+- 세 프로세스: `serve_inbound_connection_closes_on_trust_remove`, `serve_to_outbound_connection_closes_on_trust_remove`, `listen_registration_closes_on_trust_remove`
+- 시계: `trust_withdrawal_closes_within_one_poll_tick_under_paused_time`(2초 보장의 계약 핀)
+- 경로: `pin_and_ca_path_connections_each_close_on_trust_remove`, `removing_a_ca_closes_ca_path_connections_and_spares_pin_path_ones`, `pin_removed_but_ca_still_accepts_closes_on_auth_path_change`, `deleting_trust_toml_closes_every_connection`
+- listen role: `listen_registration_closes_with_grants_reduced_when_target_role_drops_to_none`, `listen_registration_survives_a_same_or_wider_target_role`
+- role: `set_role_narrowing_closes_with_grants_reduced`(`full`→`exec`, `full`→`tunnel`의 `any`→`owned` 행 포함), `set_role_widening_does_not_close`, `widen_then_narrow_closes_against_the_widened_record`, `rename_of_a_role_pin_closes_and_rename_of_a_roleless_pin_does_not`, `alias_reorder_does_not_close`
+- 다른 항목: `unrelated_trust_changes_do_not_close_a_connection`, `acl_row_only_connection_survives_while_its_pin_remains`
+- fail closed: `unparseable_trust_toml_keeps_connections_but_suspends_role_requests`, `an_unverifiable_connection_is_closed`(chain을 비운 합성 연결), `audit_failure_does_not_keep_a_withdrawn_connection_open`
+- 닫힘 뒤: `closed_connection_sessions_detach_and_a_still_trusted_peer_resumes_with_reduced_grants`, `a_withdrawn_peer_cannot_handshake_again`, `supervised_tunnel_gives_up_after_trust_withdrawal`
+- 재dial: `reverse/target/tests.rs`의 `trust_withdrawn_close_is_not_a_transient_loss`(로컬·상대 양쪽, 일반 backoff)
+- audit: `record_has_only_structural_fields`(`crates/qsh-core/src/audit/tests.rs`)가 `connection_withdrawn`을 포함해 키 집합 그대로임을 계속 단언
+- 문면: `cli_md_quotes_the_trust_narrowing_scope_verbatim`(새, `crates/qsh-core/tests/it/doctor_docs.rs` 옆 형식), 기존 `cli_md_quotes_the_trust_remove_scope_diagnostic_verbatim` 새 문면으로 초록, `doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned` 초록
+- P0 유지: `doctor_reports_cert_expiring_soon_within_the_30_day_window`와 `doctor_reports_cert_expiring_soon_at_exactly_the_30_day_window` 무변경 초록
+- 새 fixture 없음(ADR-0031 결과 절). 기존 `trust.remove.json`·`trust.set_role.json`·`trust.rename.json` 무변경 초록
 
 **(c) 완료 판정:**
-- 두 route 왕복이 같은 커밋에서 초록이다.
-- `file_copy_echo_under_load`가 부하 없이 50회 초록이다.
-- 붉으면 수정은 band·송신 깊이·정체 장부 쪽에서 한다. ADR이 이 축의 대체 경로를 미리 정하지 않았으므로, 상수 조정을 넘는 변경이면 착지하지 않고 판정을 기록한 뒤 main 세션이 ADR 필요 여부를 정한다(§7).
+- 세 프로세스가 같은 커밋에서 닫히고, 테스트 교체와 `TRUST_REMOVE_SCOPE`·CLI.md §6.11·§6.17 문면 변경이 같은 커밋에 있다.
+- 위 테스트 중 시간 민감한 것(실제 시계 2초 단언, 세 프로세스, 닫힘 뒤)이 부하 아래 50회 연속 초록이다.
+- `git diff`에 새 `ErrorCode`, 새 op, 새 fixture, 새 CLI 필드가 없다(ADR-0031 결정 1). wire diff 0.
 
-### Step 15 — (b) 재귀 복사 `-r`: 트리 순회, 이름 검증, 병렬과 quota 재시도, 트리 측정과 audit 처리량 (0.8~1.0ew)
+### Step 4 — (a) 부트스트랩 스트림: 메시지 타입, 줄 파서, 버전 협상, fuzz 타깃, protocol.md 절 (0.3~0.4ew)
 
-근거: ADR-0029 결정 12(client 병렬·재시도), 20, 22, 결정 14와 근거 절의 처리량·성능 대체 경로. 선행: Step 14.
-
-**(a) 범위:**
-
-- get `-r`: `file.list` 페이지를 이름 바이트 순서로 받고, 로컬 mkdir(0o700 보장) 뒤 재귀한다.
-- put `-r`: 로컬 트리를 이름 바이트 순서로 걷고, 부모를 먼저 `file.mkdir`한 뒤 파일을 `file.write`한다. 최상위는 `name_if_dir`이고 `into_dir`로 기준 경로를 정한다.
-- 트리 안 symlink는 `skipped`(reason `symlink`)다. 최상위 operand symlink는 따른다. 특수 파일은 그 항목이 `INVALID_ARGUMENT`다.
-- `unlistable`은 실패 항목 하나다. 4096바이트를 넘는 경로는 실패다.
-- `.` 같은 이름 없는 SRC는 내용 복사다.
-- 원격 항목 이름 검증(결정 22): 빈 이름, 255바이트 초과, `/`·NUL, `.`·`..`는 그 항목 실패이고 로컬에는 아무것도 만들지 않는다. 디렉터리 하나에서 `FILE_LIST_DIR_MAX`를 넘으면 그 디렉터리를 `RESOURCE_EXHAUSTED`로 실패시킨다.
-- 연결 수준 실패는 순회를 멈추고 `not_attempted`를 센다.
-- quota 초과면 자기 전송 하나가 끝나기를 기다렸다 재시도한다. 자기 전송이 없는데도 거부되면 실패다.
-- **측정.** `cp_many_small_files_stays_within_the_echo_budget`가 파일 수천 개 트리를 옮기는 동안 PTY echo p95와 audit writer 처리량을 같이 잰다. 처리량은 writer의 bounded queue가 차서 fail-closed 거부가 난 횟수와 초당 레코드 수다. 값은 커밋 본문에 적는다.
-- **미리 정한 대체 경로**(ADR-0029 결정 14, 근거 절):
-  1. audit 처리량이 모자라면 writer 안에서 같은 내구성 계약을 지키는 group commit을 한다(`crates/qsh-core/src/audit/writer.rs`). 줄을 합치거나 솎지 않는다.
-  2. 그래도 모자라면 `FILE_COPY_PARALLEL`을 낮춘다.
-  3. 트리 처리 시간이 모자라면 `FILE_COPY_PARALLEL`을 per-principal quota(기본 4) 안에서 올린다.
-  4. 이 셋을 넘는 변경은 새 ADR이다.
-- 문서: threat-model §4 새 행 "악의적인 host가 `..`나 `/`가 든 이름으로 client 로컬 경로를 벗어난다"와 "트리 일부 실패가 성공으로 보인다". `docs/CLI.md` `qsh cp` 절의 재귀 문단.
-
-**(b) 테스트:**
-
-- `cp_recursive_round_trip_tree_is_identical_forward`, `cp_recursive_round_trip_tree_is_identical_reverse`
-- `cp_recursive_skips_symlinks_inside_trees_and_follows_an_operand_symlink`
-- `cp_special_files_fail_their_entry_and_the_walk_continues`
-- `cp_connection_loss_stops_the_walk_and_reports_not_attempted`
-- `cp_rejects_hostile_entry_names`(`..`, `a/b`, 빈 이름, NUL을 돌려주는 가짜 host)
-- `cp_dot_source_copies_contents`, `cp_directories_are_owner_writable_while_filling`
-- `cp_json_truncates_entries_but_not_totals`
-- `cp_many_small_files_stays_within_the_echo_budget`
-- 새 fixture `file.copy.tree.json`
-
-**(c) 완료 판정:** 두 route 트리 왕복이 같은 커밋에서 초록이다. 측정값, 그리고 대체 경로를 썼는지와 어느 것인지가 커밋 본문에 있다. 지연 단언은 부하 없이 50회, 나머지는 부하 아래 50회 초록이다.
-
-### Step 16 — 마감 (0.1~0.2ew)
-
-근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, §4 안정성 규율. 선행: Step 2~15.
+근거: ADR-0044 결정 11과 결과 절의 fuzz·계약 문서 항목. 선행: Step 1.
 
 **(a) 범위:**
 
-- **부하 반복.** M15 타이밍 민감 테스트 전부를 `scripts/stress/m15.filter`로, 지연 단언을 `scripts/stress/m15-latency.filter`로 묶는다. 앞의 것은 `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh`로 50회, 뒤의 것은 부하 없이 `-j 1`로 50회 돌린다. "50/50 passed under load" 줄과 호스트 사양을 마감 노트에 적는다.
+- 새 모듈 `crates/qsh-proto/src/ssh_bootstrap.rs`(sans-IO, async 없음):
+  - 메시지 셋: `Hello { versions, qsh_version, status, fingerprint?, serve_bind?, serve_listening? }`, `Commit { version, fingerprint, name, role, address? }`, `BootstrapResult { status, name, role?, created, code?, message? }`. `status`는 열린 문자열을 닫힌 enum으로 읽되 모르는 값은 별도 변종으로 보존한다(결정 11 "알 수 없는 `status` 값은 `REMOTE_ERROR`(`bootstrap_protocol`)"). 모르는 필드는 무시한다.
+  - 상수: 접두 `qsh-bootstrap `(`BOOTSTRAP_LINE_PREFIX`), 한 줄 상한 8 KiB(`BOOTSTRAP_LINE_MAX`), hello 앞 접두 없는 줄 합계 상한 64 KiB(`BOOTSTRAP_PREAMBLE_MAX`), 이 ADR의 버전 목록 `[1]`.
+  - `parse_ssh_bootstrap_line(&[u8]) -> Result<BootstrapLine, BootstrapLineError>`와, hello 앞 접두 없는 줄을 개수만 세고 내용은 버리는 수신 상태 기계(가칭 `BootstrapReader`). hello 뒤의 접두 없는 줄, 상한 초과, 순서 위반은 프로토콜 오류다.
+  - `negotiate_version(ours, theirs) -> Option<u32>`(교집합의 최댓값, 비면 `None` → client가 `UNSUPPORTED`).
+  - 직렬화는 `serde_json`이고 한 줄에 개행이 들어가지 않음을 보장한다.
+- fuzz: `fuzz/fuzz_targets/parse_ssh_bootstrap_line.rs`(줄 파서와 `BootstrapReader`에 임의 바이트를 넣음), `fuzz/Cargo.toml` 등록, 씨앗 corpus `fuzz/corpus/parse_ssh_bootstrap_line/`(정상 hello·commit·result 각 하나, rc 출력 섞인 입력).
+- 문서:
+  - `docs/design/protocol.md`에 새 절 "SSH 부트스트랩 스트림 (ADR-0044)"(접두, 상한, 메시지 셋, 버전 규칙, additive-only). §13 fuzz 표에 행. §16.2 목록에 상호운용 계약 한 행(§9 #5).
+  - fuzz 개수 문장 20 → 21: `fuzz/README.md`, `docs/design/protocol.md` §13, `docs/design/threat-model.md` §3 끝 문장. 개수는 착지 시점의 실제 `fuzz/fuzz_targets` 수로 맞춘다.
+  - `docs/design/threat-model.md` §4 E에 "조작된 응답자 출력이 client 파서를 깨거나 다른 이름·fingerprint를 심는다" 행의 파서 쪽 통제(상한, fuzz). 덮어쓰기 없음 쪽 핀은 Step 7이 같은 행에 덧붙인다.
+- Windows: sans-IO라 플랫폼 차이 없음.
+
+**(b) 테스트·게이트:**
+
+- `crates/qsh-proto/src/ssh_bootstrap` 옆 tests: `bootstrap_line_round_trips_every_message`, `bootstrap_line_rejects_lines_over_8_kib`, `bootstrap_reader_skips_untagged_preamble_up_to_64_kib_and_keeps_only_a_count`, `bootstrap_reader_rejects_untagged_lines_after_hello`, `bootstrap_unknown_fields_are_ignored`, `bootstrap_unknown_status_is_preserved_as_unknown`, `negotiate_version_picks_the_largest_common_and_none_when_disjoint`
+- fuzz 타깃 빌드 확인(`cargo +nightly fuzz build parse_ssh_bootstrap_line`이 도는 환경에서, 아니면 `fuzz/README.md`의 기존 절차)과 corpus 재생 단계(기존 타깃과 같은 방식)
+- `crates/qsh-core/tests/it/op_registration_completeness.rs`·`failure_text_discipline.rs`는 이 스텝에서 영향 없음(op이 아직 없음)
+
+**(c) 완료 판정:** fuzz 타깃 수가 문서 세 곳에서 실제 수와 같다. wire diff 0(이 스트림은 `.proto` 밖이다).
+
+### Step 5 — (a) ssh 쪽 기계 장치: `[ssh]` 설정, `ssh -G`, 인자와 인용, ssh 자식, 종료 코드 사상, 가짜 `ssh` 하네스 (0.45~0.7ew)
+
+근거: ADR-0044 결정 4, 6(키 읽기), 7, 9(로컬 ssh 자식 인자와 `<remote_qsh>` 인용), 14(ssh 종료 코드와 원격 셸별 사상), 16(터미널·BatchMode·타임아웃·Ctrl-C), 19(로그 규율), 20(`StrictHostKeyChecking` 비덮어쓰기), 25(`ssh.exe`), 결과 절의 하네스 문단. 선행: Step 4.
+
+**(a) 범위:**
+
+- 새 모듈 `crates/qsh-core/src/ssh_bootstrap/`(가칭 `mod.rs`, `ssh.rs`, `dest.rs`). 이 스텝은 원격과 말하지 않는 부분만 세운다.
+- `[ssh]` 설정(`crates/qsh-core/src/config.rs`): `bootstrap`(`"auto"` 기본 | `"off"`, 그 밖은 `CONFIG_ERROR`), `program`(없으면 `PATH`의 `ssh`, Windows는 `ssh.exe`), `remote_qsh`(없으면 `qsh`). doctor `config_unknown_key`의 알려진 키 목록에 세 키. `docs/CLI.md` §6.12의 `config.toml` 키 목록과 §7의 `[ssh]` 문단.
+- `<dest>` 검증(결정 7): `-`로 시작하면 ssh를 부르기 전에 `INVALID_ARGUMENT`, `ssh://` 꼴 거부, 이 장비가 쓸 pin 이름 기본값 = host 부분(마지막 `@`에서 자름, `crates/qsh-cli/src/cli.rs`의 `parse_target`과 같은 규칙을 `qsh-core`에 둔다), `validate_peer_label`과 `/` 금지.
+- `ssh -G -- <dest>` 읽기(결정 4): 출력 64 KiB·줄 길이 상한, `hostname`·`user`·`proxyjump`·`proxycommand` 네 키만 꺼낸다(`user`는 저장하지 않는다, 결정 26). `proxyjump`/`proxycommand`가 `none`이 아니면 `ssh_proxied`(결정 6, 고지와 `data` 필드는 Step 7).
+- 응답자 호출 인자(결정 9): `ssh -T -a -x -o ClearAllForwardings=yes -o RemoteCommand=none -o RequestTTY=no -o PermitLocalCommand=no [-o BatchMode=yes] -- <dest> <remote_qsh> pair ssh-respond`. `StrictHostKeyChecking`·`UserKnownHostsFile` 등 그 밖의 설정은 건드리지 않는다(결정 20). `<remote_qsh>`는 `[A-Za-z0-9_./~+:\\-]`만이면 그대로, 아니면 POSIX 작은따옴표 인용. `--remote-as`·`--role` 같은 사용자 문자열은 명령줄에 싣지 않는다.
+- ssh 자식(결정 16): stdin·stdout 파이프, stderr와 제어 터미널은 물려받음. `BatchMode=yes`는 machine mode이거나 stdin이 터미널이 아닐 때만. hello까지 대기는 사람 모드 무제한·BatchMode 60초, hello 뒤 메시지마다 30초. SIGINT(Windows는 콘솔 Ctrl-C)에서 ssh가 끝나면 `CANCELED`로 끝나고 아무것도 쓰지 않는다. 자식이 끝날 때까지 기다려 좀비를 남기지 않는다.
+- 종료 코드 사상(결정 14): 127과 9009 → `REMOTE_ERROR`(`remote_qsh_missing`, message에 `--remote-qsh`와 `[ssh].remote_qsh`), hello 없이 2 → `UNSUPPORTED`(`remote_qsh_too_old`), hello 없이 1 → `REMOTE_ERROR`(`remote_command_failed`, `details.remote_exit`, PowerShell 안내), 255 → `CONNECTION_FAILED`(`ssh_failed`, `details.ssh_exit`), ssh 실행 파일 없음 → `CONFIG_ERROR`(`ssh_not_found`, Windows는 선택적 기능 "OpenSSH Client"를 적음). ssh stderr는 다시 해석하지 않는다. 모든 `details.reason`은 additive다.
+- 로그 규율(결정 19): tracing에는 단계와 결과 코드만. 접두 없는 줄은 개수만, ssh stderr는 로그로 복사하지 않는다. 키 재료를 읽는 코드 경로가 없다.
+- 가짜 `ssh` 하네스(`crates/qsh-testkit`): testkit이 빌드하는 작은 Rust 실행 파일(가칭 `qsh-fake-ssh`, §7.1 #2). 받은 argv를 파일에 기록하고, 환경변수로 고른 모드에 따라 (1) `-G`에 미리 정한 출력을 내거나, (2) 다른 `QSH_CONFIG_DIR`로 로컬 `qsh pair ssh-respond`를 실행해 stdin·stdout을 이어 주거나(Step 6부터), (3) 정해진 종료 코드(127, 9009, 2, 1, 255)나 rc 출력·조작된 줄을 낸다. 하네스 헬퍼는 그 실행 파일을 `PATH` 앞에 두거나 `[ssh].program`으로 가리킨다.
+- `docs/design/threat-model.md` §3에 진입점 행 "`qsh pair ssh`의 ssh 자식과 부트스트랩 스트림"(로컬 사용자 + ssh로 인증된 원격 계정의 출력, 신뢰할 수 없는 입력으로 파싱). §4 E에 "`<dest>`나 `--remote-qsh`로 ssh 옵션이나 원격 셸 명령을 주입한다" 행(결정 7·9). §4 A에 "처음 보는 host key를 받아들인 ssh 접속 위의 중간자" 행(결정 20, 잔여 위험은 Step 10이 §7에).
+- 새 모듈의 arch 금지 편입 여부를 판단한다(§7.1 #1).
+- Windows: 이 스텝의 코드는 전부 Windows 빌드에 들어간다(`ssh.exe` 탐색, 콘솔 Ctrl-C, 9009·1 사상). 가짜 `ssh` 하네스도 Windows에서 빌드된다. 응답자를 부르는 (2) 모드 테스트는 Windows 응답자가 M20이라 `cfg(unix)`이다.
+
+**(b) 테스트·게이트:**
+
+새 통합 모듈 `crates/qsh-cli/tests/it/ssh_bootstrap.rs`(`tests/it/main.rs` 등재)와 `ssh_bootstrap/` 옆 단위 tests.
+
+- `ssh_bootstrap_ssh_argv_is_fixed`: 결정 9의 인자 집합, `--` 위치, `BatchMode`가 machine mode와 비터미널 stdin에서만 붙음, `StrictHostKeyChecking`이 argv에 없음
+- `ssh_bootstrap_rejects_a_dest_that_looks_like_an_option`: ssh를 한 번도 부르지 않음(하네스 기록 0줄)
+- `ssh_bootstrap_remote_qsh_quoting_is_bare_for_safe_chars_and_single_quoted_otherwise`(`C:/Program Files/qsh/qsh.exe` 같은 Windows 경로 행 포함)
+- `ssh_g_output_is_capped_and_only_four_keys_are_read`, `ssh_g_proxyjump_marks_the_bootstrap_as_proxied`
+- `ssh_exit_codes_map_to_the_adr_reasons`(127, 9009, 2, 1, 255 각각과 `ssh_not_found`)
+- `ssh_config_bootstrap_value_outside_auto_off_is_a_config_error`, `config_unknown_key_knows_the_three_ssh_keys`
+- `ssh_bootstrap_rc_output_is_counted_not_logged`(단위: tracing 캡처에 rc 줄 바이트가 없음)
+- `ssh_child_is_reaped_on_cancel`(Unix SIGINT, Windows는 해당 쌍둥이를 `cfg(windows)`로)
+
+**(c) 완료 판정:** Windows·macOS 다리에서 응답자 없는 테스트가 모두 돈다. 응답자를 부르는 경로가 아직 없으므로 사용자에게 보이는 명령은 없다(clap 변경 없음, man diff 0). wire diff 0.
+
+### Step 6 — (a) 원격 응답자 `qsh pair ssh-respond` (0.3~0.5ew)
+
+근거: ADR-0044 결정 9(숨김 하위 명령, envelope 없음, "operation 아님"), 10, 12의 응답자 쪽(잠금 아래 검사·쓰기, `exists`·`conflict`, role 불변, audit 순서), 결과 절의 응답자 핀. 선행: Step 3, Step 5.
+
+**(a) 범위:**
+
+- `qsh-cli`: 숨김 하위 명령 `pair ssh-respond`(`--help`에 나오지 않음, ADR-0012 결정 4의 숨김 방식). `qsh.cli/v1` envelope을 내지 않고 stdout은 부트스트랩 스트림, stdin은 commit이다. Unix 빌드에만 등록한다(§9 #2).
+- `qsh-core` `ssh_bootstrap::respond`:
+  - identity(`identity/device.pem`)를 읽고, 없으면 쓰기 없이 `status: not_initialized` hello. 원격 identity를 만들지 않는다.
+  - serve 포트를 `[serve].bind`(없으면 `[::]:4433`)에서 정하고 그 주소로 UDP bind를 한 번 시도해 곧바로 닫는다. `EADDRINUSE` → `serve_listening: true`, 성공 → `false`, 그 밖 → `null`.
+  - hello를 보내고 commit을 30초 기다린다. 오지 않으면 쓰지 않고 끝난다. 버전이 hello의 목록 밖이면 쓰지 않고 `error`.
+  - commit을 받으면 `TrustStore::lock` 아래에서 load → 검사 → mutate → audit → save. 이 장비의 fingerprint가 이미 어떤 이름으로든 pin돼 있으면 `exists`(기존 이름과 role, role은 바꾸지 않음). 같은 이름이 다른 fingerprint로 있으면 `conflict`. 새로 쓸 때는 commit의 `address` 유무로 inbound 전용 pin 또는 주소 담은 pin(역방향 주소 갱신 규칙은 Step 8), role은 commit에 실린 값을 그대로 쓴다(기본값 `full`은 client가 정해 commit에 싣는다, Step 7. 응답자는 기본값을 따로 두지 않는다). `AuditRecord::local_op("pair.ssh_respond", <pin 이름>, <role>)`. audit를 쓸 수 없으면 pin도 쓰지 않고 `error`.
+- 문서: `docs/CLI.md` §2.4에 "`qsh pair ssh-respond`는 operation이 아니다" 문장(`qsh serve` 문장과 같은 꼴)과 audit `action` 문자열 `pair.ssh_respond`. `docs/design/threat-model.md` §3 진입점 행 "`qsh pair ssh-respond`의 stdin"(ssh로 그 계정에 인증된 주체), §4 B "ssh로 그 계정에 로그인할 수 있는 누구나 `full` pin을 만든다" 행(결정 8, 근거 셋째 항목, audit 기록). man: 숨김 하위 명령의 페이지 처분을 확인한다(§7.1 #3).
+- Windows: 응답자는 M20(ADR-0044 결정 10, ADR-0035 결정 25). M16 Windows 빌드는 이 하위 명령을 등록하지 않아 clap이 exit 2로 끝나고, client 쪽 사상(Step 5)이 `remote_qsh_too_old`로 읽는다. `SO_EXCLUSIVEADDRUSE` probe는 M20이 더한다.
+
+**(b) 테스트·게이트:**
+
+`crates/qsh-cli/tests/it/ssh_bootstrap.rs`와 `ssh_bootstrap/respond` 옆 단위 tests. 응답자를 직접 띄우고 stdin에 commit을 써 넣는 방식이다.
+
+- `ssh_respond_reports_not_initialized_without_writing`
+- `ssh_respond_serve_listening_reflects_a_bound_udp_port`(실제 `qsh serve` 하나를 띄운 행과 띄우지 않은 행)
+- `ssh_respond_writes_an_inbound_only_pin_with_the_committed_role`
+- `ssh_respond_returns_exists_and_keeps_the_role_for_a_known_fingerprint`
+- `ssh_respond_returns_conflict_for_the_same_name_with_another_fingerprint`(`trust.toml` 바이트 불변)
+- `ssh_respond_writes_nothing_when_commit_times_out`(시계 주입)
+- `ssh_respond_refuses_to_pin_when_audit_is_unwritable`
+- `ssh_respond_audit_record_has_only_structural_fields`(`record_has_only_structural_fields`와 같은 형식)
+- `ssh_respond_is_hidden_from_help`
+- `pair_ssh_respond_is_unknown_on_windows_before_m20`(`cfg(windows)`, exit 2)
+
+**(c) 완료 판정:** 응답자 쓰기가 lock → load → mutate → audit → save 순서임을 테스트가 고정한다. wire diff 0. Windows 다리에서 `cfg(windows)` 테스트 초록.
+
+### Step 7 — (a) `pair.ssh` op(정방향): 두 단계 쓰기, 확인 dial, 오류 사상, `PairSshData`, 렌더러, fixture, man (0.65~0.95ew)
+
+근거: ADR-0044 결정 1(정방향 플래그 `--as`·`--remote-as`·`--role`·`--address`·`--remote-qsh`, local op), 5, 6(고지와 `data.ssh_proxied`), 8, 12의 client 쪽, 13(정방향 처분), 14의 hello 기반 사상, 15, 17, 18, 21, 26, 결과 절의 계약 문서·코드·핀 항목. 선행: Step 6.
+
+**(a) 범위:**
+
+- `qsh-proto`: `PairSshReq`·`PairSshData`(`direction`, `peer`(통일 pin 객체 `TrustPeer`), `created`, `remote { name, role, created }`, `next_command?`, `identity_created`, `ssh_proxied`, `verified`, `verify_error?`). 자리는 `crates/qsh-proto/src/types/trust.rs` 또는 새 `types/pair.rs`(§7.1 #4).
+- `qsh-core` `Ops::pair_ssh`(새 파일 `crates/qsh-core/src/ops/pair_ssh.rs`, 인가 불요 local op `pair.ssh`):
+  1. 이 장비 identity가 없으면 `Ops::identity_init`(멱등)을 먼저 부르고 `identity_created`(결정 18).
+  2. `<dest>` 검증과 `ssh -G`(Step 5).
+  3. ssh 자식으로 응답자를 띄우고 hello를 받는다. `not_initialized` → `REMOTE_ERROR`(`remote_not_initialized`, 원격에서 `qsh setup host` 안내). 버전 교집합 없음 → commit 없이 `UNSUPPORTED`.
+  4. 쓰기 전 로컬 검사: 같은 이름이 다른 fingerprint로 있거나 원격 fingerprint가 다른 이름으로 pin돼 있으면 commit 없이 `SESSION_CONFLICT`(`pin_conflict`, `side: local`, `name`, `pinned_fingerprint`, `observed_fingerprint`).
+  5. commit(`name` = 결정 8의 기본값 또는 `--remote-as`, `role` = `--role` 또는 `full`). 결과 `conflict` → `SESSION_CONFLICT`(`side: remote`), `error` → 응답자 `code`, `pinned`/`exists` → 계속. 결과 role이 요청과 다르면 사람 모드 stderr 한 줄과 `data.remote.role`에 실제 값(결정 12).
+  6. 이 장비 pin을 쓴다. 주소는 `<ssh -G hostname>:<hello.serve_bind의 포트>`를 `normalize_peer_address`로(`--address`가 덮음), `role = "none"` 명시. `none`이라 audit 레코드는 없다(ADR-0045 결정 8, ADR-0044 결정 12). 디스크 오류로 실패하면 원격 pin만 남고 재실행이 수렴한다.
+  7. 확인(결정 13). `serve_listening: false`면 dial하지 않고 `verified: false`, `verify_error`(`CONNECTION_FAILED`, `remote_serve_not_listening`). 그 밖에는 handshake와 mTLS 양방향 pin 검증까지만 하고 세션을 열지 않는다. 다른 인증서면 `AUTH_FAILED`(`remote_serve_identity_mismatch`), pin은 고치지 않는다. dial 실패는 기존 `CONNECTION_FAILED`에 `ssh_proxied` 사실을 덧붙인다. 확인이 실패해도 pin이 섰으면 exit 0.
+  - `hosts.toml`, `config.toml`, `acl.toml`을 어느 쪽에서도 쓰지 않고 ssh `User`를 저장하지 않는다(결정 26).
+- `qsh-cli`: clap `pair ssh <[user@]host>`와 정방향 플래그(`--reverse`/`--to`는 Step 8), human 렌더러(부트스트랩 직후 두 pin의 이름·role 고지, ADR-0045 결정 13의 페어링 고지와 같은 꼴, `ssh_proxied` 한 줄, role 불일치 한 줄, 충돌 시 재부트스트랩 두 줄과 `--remote-as` 안내), JSON 렌더러(envelope 하나만 stdout).
+- 등록 완전성: schemars, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS`(`crates/qsh-core/tests/it/schema_commands_registry.rs`), 렌더러 둘, man `qsh-pair-ssh.1`(`cargo xtask man`), `docs/CLI.md` §2.4(`pair.ssh`), §2.5 "인가 불요" 행, §6.11 pairing 절의 `qsh pair ssh`(결정 1·7·8·12~18)와 `PairSshData`와 오류 표(결정 14·15).
+- fixture(추가만, `REQUIRED_FIXTURES` 등재, `golden_*` 생산 테스트): `pair.ssh.json`(정방향 성공·`verified: true`), `pair.ssh.unverified.json`(`remote_serve_not_listening`), `error.SESSION_CONFLICT.pin_conflict.json`, `error.REMOTE_ERROR.remote_qsh_missing.json`.
+- threat-model §4 B "이 장비 쪽 pin이 방향 없이 원격의 inbound 인증까지 통과시킨다"(결정 21), "기존 role 없는 pin을 부트스트랩이 `full`로 넓힌다"(결정 12), §4 D "rc 출력이나 ssh stderr에 섞인 비밀이 qsh 로그에 남는다"(결정 11·19), §4 E 응답자 출력 조작 행에 덮어쓰기 없음 핀 덧붙임.
+- Windows: `qsh pair ssh`는 Windows client에서 연다(ADR-0044 결정 25). 원격 응답자가 필요한 테스트는 `cfg(unix)`이고, Windows 다리는 `remote_qsh_too_old`·`ssh_not_found`·`INVALID_ARGUMENT` 경로와 렌더러 테스트를 돈다.
+
+**(b) 테스트·게이트:**
+
+`crates/qsh-cli/tests/it/ssh_bootstrap.rs`(가짜 `ssh` 하네스가 다른 `QSH_CONFIG_DIR`의 응답자를 부름).
+
+- `ssh_bootstrap_pins_both_sides_and_connects`: 이 장비 pin은 ssh 별칭 이름과 `hostname:4433`, role `none`. 원격 pin은 address 빈 값, role `full`. 이어진 handshake 성공
+- `ssh_bootstrap_role_flag_sets_the_remote_role`, `ssh_bootstrap_local_pin_has_explicit_role_none`
+- `ssh_bootstrap_does_not_widen_an_existing_roleless_pin`
+- `ssh_bootstrap_never_overwrites_a_pin_with_a_different_fingerprint`(로컬·원격 각각, 양쪽 `trust.toml` 바이트 불변)
+- `ssh_bootstrap_writes_nothing_when_the_remote_cannot_respond`(127, 종료 코드 2, `not_initialized`, 9009, 버전 교집합 없음, commit 타임아웃 각각 양쪽 무변경)
+- `ssh_bootstrap_reports_the_actual_remote_role_when_an_existing_pin_differs`
+- `ssh_bootstrap_skips_untagged_stdout_and_never_logs_it`(rc 줄이 있어도 성공, 그 바이트가 stdout·stderr·로그 어디에도 없음, 64 KiB 초과면 `bootstrap_protocol`)
+- `ssh_bootstrap_reports_identity_mismatch_when_serve_runs_another_identity`
+- `ssh_bootstrap_unverified_when_remote_serve_is_not_listening`
+- `ssh_bootstrap_initializes_a_missing_local_identity_once`
+- `ssh_bootstrap_never_writes_hosts_config_or_acl_files`(결정 26, 양쪽 파일 집합 불변)
+- `ssh_bootstrap_envelope_is_the_only_stdout_line`(`--json`)
+- `pair_ssh_never_appears_as_a_control_message_wire_variant`(`setup_run_never_appears_as_a_control_message_wire_variant` 형식)
+- `jsonl_purity.rs`·`exit_code_matrix.rs`에 `pair ssh` 행, `layer_2_every_schema_command_has_all_six_faces`, `checked_in_man_pages_match_the_generator`
+- `failure_text_discipline.rs`가 새 `details.reason` 문면을 덮는다
+
+**(c) 완료 판정:** 정방향 부트스트랩 뒤 기존 forward e2e 묶음(attach, exec, `qsh cp`)이 부트스트랩이 만든 pin만으로 초록이다(`bootstrapped_forward_route_passes_the_attach_exec_cp_suite`). 새 fixture 넷과 man 페이지가 같은 커밋에 있다. `capabilities.json` diff 0, wire diff 0.
+
+### Step 8 — (a) 역방향 부트스트랩 `--reverse --to`, reverse route 동등, 캠페인 사전 고정 (0.4~0.7ew)
+
+근거: ADR-0044 결정 1(`--reverse`·`--to` 조합 규칙), 12의 역방향 갈래(commit `address`, 주소 갱신, 이 장비 pin `reverse`와 그 audit), 13의 역방향 처분, 17의 `next_command`, 22, 결과 절의 역방향 핀과 사람 캠페인. 선행: Step 7.
+
+**(a) 범위:**
+
+- 플래그 검증: `--reverse`만, `--to`만, `--reverse`와 `--address` 조합은 ssh를 부르기 전에 `INVALID_ARGUMENT`. `--to`는 `trust add --address`와 같은 정규화.
+- commit에 `address`(= 정규화한 `--to`)를 싣고 원격 pin role 기본값 `full`(ADR-0045 결정 8의 `host --to` listener pin 예외). 응답자는 기존 pin의 주소가 다르면 `trust add` 규칙으로 주소만 갱신한다(Step 6 응답자 코드에 갈래 추가).
+- 이 장비 pin은 주소 없이 `role = "reverse"`. `AuditRecord::local_op("pair.ssh", <pin 이름>, "reverse")`를 lock → load → mutate → audit → save 순서로 남기고, audit를 쓸 수 없으면 이 장비 pin을 쓰지 않는다.
+- 확인 dial을 하지 않고 `verified: false`, `verify_error` 없음. `data.next_command`와 사람 모드 stderr 한 줄이 원격에서 실행할 `qsh serve --to <이 장비를 pin한 이름>`(또는 `qsh service install`)을 안내한다. 원격에서 아무것도 띄우지 않고 `[serve].to`를 쓰지 않는다.
+- clap `--reverse`·`--to`, man 재생성, `docs/CLI.md` §6.11 역방향 문단, fixture `pair.ssh.reverse.json`(+ `golden_*`).
+- reverse route 동등: 역방향 부트스트랩이 만든 pin 둘만으로 원격 config가 `qsh serve --to`로 이 장비의 `qsh listen`에 등록하고, 기존 reverse e2e 묶음(`crates/qsh-cli/tests/it/reverse_e2e.rs`의 attach·exec, `cp_e2e.rs`의 reverse 왕복)과 같은 단언을 통과한다.
+- 사람 캠페인 `docs/campaigns/p1-ssh-bootstrap.md`를 사전 고정해 커밋한다(구현 마지막 스텝인 Step 9 전, ADR-0044 결과 절). 정방향 ProxyJump·ssh-agent·암호 걸린 키 회차, 역방향 회차, 기록 표, PASS 판정. `CLAUDE.md` 문서 지도의 `docs/campaigns/` 목록에 `p1-ssh-bootstrap`을 더한다.
+- threat-model: §4 B 결정 21 행에 역방향 `reverse` role 문장을 덧붙인다.
+- Windows: 역방향의 이 장비 쪽(`qsh listen`)이 Windows에서 M19(ADR-0035 결정 14)라 Windows 다리는 플래그 검증 테스트만 돈다. 원격(target) 쪽 Windows는 M20.
+
+**(b) 테스트·게이트:**
+
+- `ssh_bootstrap_reverse_pins_listener_full_with_address_and_target_reverse_without`(원격 pin 주소와 `full`, 이 장비 pin 주소 없이 `reverse`, 확인 dial 없음, `verified: false`, `data.next_command`, 한쪽 플래그만·`--address` 조합은 ssh 호출 0회로 `INVALID_ARGUMENT`)
+- `ssh_bootstrap_reverse_local_reverse_role_leaves_an_audit_record_and_needs_it`
+- `ssh_bootstrap_reverse_updates_only_the_address_of_an_existing_remote_pin`
+- `bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite`
+- `golden_pair_ssh_reverse`(fixture 생산)
+- 타이밍 민감한 reverse 등록 테스트는 부하 아래 50회
+
+**(c) 완료 판정:** 정방향(Step 7)과 역방향이 같은 attach·exec·`qsh cp` 단언을 통과한다. 캠페인 문서가 Step 9 착지 전에 커밋돼 있다. wire diff 0.
+
+### Step 9 — (a) 자동 발동: `qsh [user@]host`와 `qsh cp`의 미등록 이름, `[ssh].bootstrap`, 사전 고지, README First run (0.3~0.55ew)
+
+근거: ADR-0044 결정 2, 3, 16의 "대화형 형태는 ssh 자식이 끝난 뒤에야 raw 모드", ADR-0029 결정 2 마지막 항목(`qsh cp`의 발동), 결과 절의 §6.1·§7·`qsh cp` 절·README 항목. 선행: Step 7.
+
+**(a) 범위:**
+
+- 발동 조건은 `HOST_NOT_FOUND`의 첫 갈래("이름이 아예 미등록", `docs/CLI.md` §6.1)뿐이다. 다음이면 발동하지 않는다: `--json`/`--jsonl`, `hosts.toml`에 이름이 있음, reverse 등록이 stale로라도 있음, `trust.toml`에 그 이름의 pin이 있음, `[ssh].bootstrap = "off"`, `qsh exec`·`qsh session open`·`qsh tunnel open`·`qsh sessions`.
+- 발동 전 stderr 한 줄 `qsh_core::ssh_bootstrap::AUTO_BOOTSTRAP_NOTICE`. 성공하면 원래 명령을 그대로 이어 간다. 대화형 형태는 ssh 자식이 끝난 뒤 raw 모드에 들어간다(TUI 진입점 `crates/qsh-cli/src/tui/`). 자동 경로의 확인은 원래 명령의 연결 자체이고, `serve_listening: false`면 `CONNECTION_FAILED`(`remote_serve_not_listening`)로 끝나며 pin은 남는다.
+- 자동 발동은 역방향을 고르지 않는다(결정 22 마지막 항목).
+- 발동 판정은 `qsh-core`(가칭 `Ops::should_auto_bootstrap`)에 둔다. `qsh-cli`는 분기만 한다.
+- 사람 모드 `HOST_NOT_FOUND` message에 다음 명령 `qsh pair ssh <host>`를 적는다. `details`는 바꾸지 않는다(기존 `error.HOST_NOT_FOUND*` fixture 무변경 초록).
+- 문서: `docs/CLI.md` §6.1 `HOST_NOT_FOUND` 문단, §7 자동 발동(결정 2·16), §6.21 `qsh cp` 절의 발동 문장. README First run에 `qsh box` 한 줄로 시작하는 경로를 기존 경로 앞에 둔다(§7의 README·스톱워치 항목).
+- Windows: 대화형 attach와 `qsh cp`가 Windows에서 M19라 이 분기는 Windows에서 M19가 켠다(ADR-0035 결정 1·5, ADR-0044 결정 25). M16 Windows 빌드에서 그 두 표면은 지금처럼 `UNSUPPORTED`이고 발동 판정 함수의 단위 테스트는 Windows 다리에서도 돈다.
+
+**(b) 테스트·게이트:**
+
+- `ssh_bootstrap_is_never_implicit_in_machine_mode`(`qsh cp --json`이 가짜 ssh를 부르지 않음, 기록 0줄)
+- `ssh_bootstrap_is_not_triggered_for_hosts_toml_or_reverse_names`, `ssh_bootstrap_off_in_config_is_respected`
+- `ssh_bootstrap_is_not_triggered_for_exec_session_tunnel_or_sessions`
+- `auto_bootstrap_prints_the_notice_before_ssh_runs`(stderr 순서: 고지 줄이 하네스의 첫 기록보다 먼저)
+- `auto_bootstrap_then_cp_completes_the_original_command`(미등록 이름으로 `qsh cp` put 하나가 부트스트랩 뒤 그대로 끝남)
+- `auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits`(`tui_expect.rs` 형식, `cfg(unix)`)
+- `host_not_found_human_message_names_qsh_pair_ssh`
+- `golden_*` 기존 `error.HOST_NOT_FOUND*` 무변경 초록
+
+**(c) 완료 판정:** 발동 경계 여섯이 테스트로 고정됐다. machine mode에서 ssh 호출이 한 번도 없다. wire diff 0.
+
+### Step 10 — 마감 (0.1~0.2ew)
+
+근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, §4 안정성 규율. 선행: Step 2~9.
+
+**(a) 범위:**
+
+- **부하 반복.** M16 타이밍 민감 테스트 전부를 `scripts/stress/m16.filter`로 묶는다(§7.1 #5). `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh`로 50회 돌리고 "50/50 passed under load" 줄과 호스트 사양을 마감 노트에 적는다. M16에는 새 지연 단언(p95 예산)이 없으므로 `m16-latency.filter`는 두지 않는다. §9 #4로 실제 시계 2초 단언을 옮겼다면 `scripts/stress/m16-latency.filter`를 두고 부하 없이 `-j 1`로 50회 돌린다.
 - **절차 1. 구속 문서 태그 대조.** 대상은 다음과 같다.
-  - `docs/CLI.md` v0.26 항목: §2.4·§2.5·§6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20·§10·`qsh cp` 절
-  - `docs/PRD.md` §9
-  - `docs/design/architecture.md` §6·§7
-  - `docs/design/protocol.md` §4·§7·§9·§12·§13·§16.1
-  - `docs/design/threat-model.md` §2·§3·§4 B·§7
-  - `docs/design/testing.md` 게이트 표
-  - `fuzz/README.md`
-  - ADR-0045·0029 결과 절 문서 목록 전수, ADR-0017·0024·0025·0038의 개정 대상 결정 문장
-  - ADR-0029 결정 23의 Windows 문장이 M19·M20에 귀속됐다는 기록
-- **절차 2. README 동기화.** 기능 목록(`qsh cp`, role), Known limitations("role을 줄여도 열린 연결은 M16까지 유지", Windows `qsh cp`는 M19·M20, 재개 없음, 트리 원자성 없음, 교체로 소유자·xattr가 바뀜), 보안 절.
-- threat-model §7 잔여 위험(ADR-0029 결과 절의 다섯 + 교체 의미)
-- ROADMAP M15 마감 노트(main 세션). 이 `PLAN.md`의 마지막 커밋 해시를 적고 다음 계획(M16)으로 교체한다. 계획 원문은 커밋 해시로 인용한다(ROADMAP 머리말 규칙).
+  - `docs/CLI.md` v0.32 항목: §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.14·§6.17·§6.21·§7
+  - `docs/design/protocol.md` §3·§7·§13·§16.2·§16.3·§16.5와 부트스트랩 스트림 절
+  - `docs/design/architecture.md` §6(audit `resource` 두 값)과 `ssh_bootstrap` 모듈 서술
+  - `docs/design/threat-model.md` §3·§4 A·B·D·E·§5 g2·§7
+  - `fuzz/README.md`(21종)
+  - ADR-0044·0031 결과 절 문서 목록 전수, ADR-0045 결정 4·12 문장이 ADR-0031 착지로 대체됐다는 기록
+  - ADR-0044 결정 23·24(ADR-0026 결정 7의 별도 결정을 열지 않음, ADR-0015·0016 기각 사유의 대체 경로)가 문서에서 어긋나지 않음
+  - Windows 귀속 기록: 자동 발동 Windows 분기 M19, 응답자 M20, `serve --to`·`listen` 재검증 테스트 쌍둥이 M19·M20(ADR-0035 결정 1·14·25)
+- **절차 2. README 동기화.** 기능 목록(`qsh pair ssh`, 첫 `qsh box`의 자동 부트스트랩, trust 철회 시 2초 안 연결 닫기), Known limitations(ssh host 인증 강도 승계, ssh 접근을 거둬도 qsh pin은 남음, Windows 응답자는 M20, 거둔 신뢰는 그 장비에서만), 보안 절.
+- threat-model §7 잔여 위험에 ADR-0044 결과 절의 둘을 적는다(qsh 신뢰는 그 ssh 접속의 host 인증 강도를 넘지 않음, ssh 접근 철회가 qsh pin에 전파되지 않음. 처방은 원격 `qsh trust remove`이고 Step 3이 그 순간 열린 연결까지 닫음).
+- ROADMAP M16 마감 노트(main 세션). 이 `PLAN.md`의 마지막 커밋 해시를 적고 다음 계획으로 교체한다. 계획 원문은 커밋 해시로 인용한다(ROADMAP 머리말 규칙). §5.5에 M16이 만든 사람 몫 둘(§0.3)의 상태를 적는다.
 
-**(b) 테스트·게이트:** 일곱 게이트, CI(acceptance 포함) 초록, 부하 반복 두 세트 50/50.
+**(b) 테스트·게이트:** 일곱 게이트, CI(acceptance 포함) 초록, 부하 반복 50/50.
 
-**(c) 완료 판정:** §3의 DoD가 근거 커밋, run id와 함께 `[x]`다. `git diff --stat <Step 2 부모>..<Step 10 머지> -- crates/qsh-proto/proto`가 비어 있다. wire 변경은 Step 11과 Step 13에만 있다.
+**(c) 완료 판정:** §3의 DoD가 근거 커밋, run id와 함께 `[x]`다. `git diff --stat <Step 2 부모>..<Step 9 머지> -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다. M16에는 wire 변경을 소유한 스텝이 없다.
 
 ## 5. 결정·핀 테스트 대응표
 
 각 결정과 핀 테스트의 주인은 스텝 하나다. 한 결정이 여러 스텝에 걸치면 하위 항목으로 나눠 각각 주인 하나를 적는다.
 
-### 5.1 ADR-0045 결정
+### 5.1 ADR-0031 결정
 
 | 결정 | 스텝 |
 |---|---|
-| 1 신뢰 등록이 곧 권한 부여, 불변식 유지 | 4 |
-| 2 role 여섯과 표, 소유 축 | 2 |
-| 3 `trust.toml` `role` 키, 키 없음 = `none`, `TrustRole` | 2 |
-| 4 평가 ⓡ, 합집합, fingerprint 대조, CA 제외, 판정마다 읽기, reload 정지 | 4 |
-| 5 role grant에는 `paths`를 적용하지 않음 | 10 |
-| 6 Authorizer 입력과 구성(둘째 문단) | 3 |
-| 6 `acl.toml` 세 상태 | 4 |
-| 7 판정 함수 하나 | 4 |
-| 8 `--role`, 기본값, 초대 role, `trust add` 불변, `trust set-role`, local_op audit | 5 |
-| 8 `qsh setup --peer-role` | 7 |
-| 9 `TrustPeer.role`, `trust list` role 열 | 2 |
-| 10 `acl check` | 6 |
-| 11 `acl show` | 6 |
-| 12 doctor | 7 |
-| 13 시작 진단 | 4 |
-| 13 페어링 직후 고지 | 5 |
-| 14 `qsh setup` ACL 단계 | 7 |
-| 15 필드: `TrustPeer.role` | 2 |
-| 15 필드: `TrustAddReq`·`TrustInviteReq`·`TrustInviteData.assigned_role`·`TrustAcceptReq`·`TrustSetRole*` | 5 |
-| 15 필드: `AclCheckData`·`AclPolicyRef.state`·`AclShowData` | 6 |
-| 15 필드: `SetupRunReq.peer_role` | 7 |
-| 16 audit optional `role` 키 | 2 |
-| 17 wire 불변(검증) | 8 |
-| 18 권한 확대 경로 목록, `exec`는 경계가 아님 문장 | 5 |
-| 19 마일스톤 배치·순서 | 1 |
-| 20 플랫폼·route 동등 | 4 |
+| 1 범위와 불변식, 새 표면 없음 | 3 |
+| 2 재검증하는 연결 셋, 방향 간 동등 | 3 |
+| 3 세대 번호, `watch`, 1초 poll | 2 |
+| 3 연결별 감시와 수명 묶음, 플랫폼 문단 | 3 |
+| 4 chain·역할 보관, `Connection::reverify`, 기록값 모양, role grant 함수 공유 | 2 |
+| 5 닫는 조건과 닫지 않는 경우 | 3 |
+| 6 fail closed | 3 |
+| 7 `CLOSE_CODE_TRUST_WITHDRAWN` 정의 | 2 |
+| 7 닫는 동작, `serve --to` 재dial 분류, `listen` 등록표 | 3 |
+| 8 audit `connection_withdrawn`, `resource` 두 값 | 3 |
+| 9 문면 상수, doctor `TRUST_REMOVE_SCOPE`, CLI.md·README 문장 | 3 |
+| 10 protocol.md §3 문장 | 3 |
+| 10 protocol.md §16.3·§7·§16.5 `0x1005` | 2 |
 
-### 5.2 ADR-0045 핀 테스트
-
-| 테스트 | 스텝 |
-|---|---|
-| `legacy_pin_without_role_is_authorized_by_acl_rows_only` | 4 |
-| `role_full_without_acl_toml_allows_every_action_but_forward_socks` | 4 |
-| `invalid_acl_toml_denies_role_grants_too` | 4 |
-| `role_grant_does_not_reach_a_ca_leaf_naming_a_pinned_device` | 4 |
-| `role_requires_the_connection_fingerprint_to_match_the_current_pin` | 4 |
-| `set_role_takes_effect_on_the_next_request_without_restart` | 5 |
-| `trust_remove_ends_role_grants_on_the_next_request` | 4 |
-| `trust_store_reload_failure_suspends_role_grants` | 4 |
-| `trust_add_never_changes_an_existing_pin_role` | 5 |
-| `invite_role_is_fixed_by_the_issuer` | 5 |
-| `pair_accept_and_trust_add_default_to_role_none` | 5 |
-| `pair_invite_defaults_to_role_full` | 5 |
-| `set_role_without_a_durable_audit_record_leaves_trust_toml_untouched` | 5 |
-| `role_writes_leave_a_local_op_audit_record_with_the_role` | 5 |
-| `role_grant_audit_record_names_the_role_and_no_rule` | 4 |
-| `role_tunnel_cannot_close_another_principals_remote_forward` | 4 |
-| `role_read_only_can_attach_but_not_write` | 4 |
-| `role_full_file_ops_still_deny_state_paths` | 12 |
-| `unknown_role_string_makes_trust_toml_a_config_error` | 2 |
-| `role_action_table_matches_docs` | 2 |
-| `decide_agrees_with_naive_coverage_oracle`의 role 차원 | 4 |
-| `acl_check_equivalence.rs` role 행 | 6 |
-| `acl_uniformity.rs` role 거부 셋 | 4 |
-| `setup_never_writes_acl_toml_in_any_role` 무변경 초록 | 7 |
-| `setup_host_roles_incomplete_without_acl_toml` 축소 + role 기본값 `complete` 새 테스트 | 7 |
-| fixture 아홉: `trust.list.with_role` | 2 |
-| fixture 아홉: `trust.set_role`, `trust.set_role.unchanged`, `trust.add.with_role`, `trust.invite.with_role` | 5 |
-| fixture 아홉: `acl.check.allow_by_role`, `acl.check.missing_policy_role`, `acl.show.with_role` | 6 |
-| fixture 아홉: `setup.run.host_complete_with_role` | 7 |
-| doctor code `trust_pin_role_unset`과 조건이 바뀐 넷 | 7 |
-| 측정: 판정마다 `trust.toml` 읽기 비용 | 3 |
-
-### 5.3 ADR-0029 결정
-
-| 결정 | 스텝 |
-|---|---|
-| 1 범위, 원격↔원격 거부, client capability 확인 | 14 |
-| 1 capability `file.v1` 정의 | 11 |
-| 1 capability `file.v1` 광고 | 13 |
-| 2 CLI 모양과 operand 문법 | 14 |
-| 3 op↔action 매핑, seam | 11 |
-| 3 항상-deny 해제 | 12 |
-| 4 role과 행 두 길, `paths` 문법·매칭·정규화 시점·resource, 4-6 helper | 10 |
-| 4-6 ACL 단계의 host 연결 | 12 |
-| 5 상태 경로 집합 | 9 |
-| 6 경로 판정 절차(모듈) | 9 |
-| 6-4~6-6 host 연결 | 12 |
-| 7 host 원자적 교체·mode | 13 |
-| 7 client 로컬 쓰기 | 14 |
-| 8 host 처리 순서 | 12 |
-| 9 wire | 11 |
-| 10 무결성 | 13 |
-| 11 재개 없음, host 정리 | 13 |
-| 11 client 정리, Ctrl-C | 14 |
-| 12 host quota | 12 |
-| 12 client 병렬·재시도 | 15 |
-| 13 여유 공간 | 13 |
-| 14 audit 필드 | 12 |
-| 14 처리량 대체 경로 | 15 |
-| 15 band, 송신 깊이, 정체 장부 | 13 |
-| 15 PTY echo 측정 | 14 |
-| 16 host 쪽(serve --to 판정, listen `UNSUPPORTED`) | 11 |
-| 16 데몬 중계 정체 장부 | 13 |
-| 16 client conduit와 capability relay | 14 |
-| 17 오류 코드 | 14 |
-| 18 JSON | 14 |
-| 19 `acl check --path`, `acl show` `paths`, `acl_file_paths_missing` | 10 |
-| 20 재귀 의미 | 15 |
-| 20 host `name_if_dir`·`into_dir` | 12 |
-| 21 부분 실패와 exit | 14 |
-| 22 원격 이름·크기 불신 | 15 |
-| 23 macOS 행 | 9 |
-| 23 Windows host | M20 밖(ADR-0035 결정 26) |
-| 23 Windows client | M19 밖(ADR-0035 결정 1) |
-
-### 5.4 ADR-0029 핀 테스트와 결과 절 항목
+### 5.2 ADR-0031 핀 테스트와 결과 절 항목
 
 | 항목 | 스텝 |
 |---|---|
-| `file_ops_are_denied_without_a_matching_rule_or_role` | 12 |
-| `role_full_file_ops_allow_any_path_but_still_deny_state_paths` | 12 |
-| `file_write_to_state_paths_is_denied_even_with_root_paths` | 12 |
-| `file_read_of_state_paths_is_denied_even_with_root_paths` | 12 |
-| `file_list_and_mkdir_in_state_dirs_are_denied` | 12 |
-| `state_path_guard_denies_nonexistent_paths_under_state_dirs` | 9 |
-| `state_path_guard_covers_env_overridden_and_default_dirs` | 9 |
-| `state_path_guard_rechecks_the_opened_handle` | 9 |
-| `file_rule_without_paths_grants_no_file_access` | 12 |
-| `file_paths_match_component_wise` | 10 |
-| `file_read_through_a_symlink_out_of_paths_is_denied` | 12 |
-| `file_dotdot_escape_out_of_paths_is_denied` | 12 |
-| `file_paths_recheck_the_opened_handle` | 12 |
-| `file_request_without_a_file_grant_touches_no_filesystem` | 12 |
-| `denied_file_write_leaves_no_file_or_temp_behind` | 12 |
-| `unredeemed_file_write_ticket_leaves_nothing_behind` | 12 |
-| `file_write_overwrites_atomically_by_default` | 13 |
-| `file_write_no_clobber_never_replaces_an_existing_file` | 13 |
-| `interrupted_file_write_removes_its_temp_file` | 13 |
-| `file_write_size_or_hash_mismatch_renames_nothing` | 13 |
-| `file_round_trip_is_byte_identical_forward` / `_reverse` | 14 |
-| `file_audit_record_carries_path_but_no_payload` | 12 |
-| `quota_registry.rs` 두 행, `quota_docs.rs` | 12 |
-| `file_copy_echo_under_load` | 14 |
-| `cp_operand_grammar_separates_remote_from_local` | 14 |
-| `cp_rejects_unsupported_scp_flags_with_exit_2` | 14 |
-| `cp_remote_to_remote_is_invalid_argument` | 14 |
-| `cp_mixed_operands_are_invalid_argument` | 14 |
-| `cp_into_existing_directory_uses_the_source_name_get_and_put` | 14 |
-| `cp_multiple_sources_require_an_existing_directory` | 14 |
-| `cp_dot_source_copies_contents` | 15 |
-| `cp_home_relative_paths_expand_against_the_serve_account` | 14 |
-| `cp_tilde_user_is_invalid_argument` | 14 |
-| `cp_user_hint_mismatch_is_unsupported_after_acl` | 14 |
-| `cp_recursive_round_trip_tree_is_identical_forward` / `_reverse` | 15 |
-| `cp_recursive_skips_symlinks_inside_trees_and_follows_an_operand_symlink` | 15 |
-| `cp_special_files_fail_their_entry_and_the_walk_continues` | 15 |
-| `cp_partial_failure_exits_255_and_reports_failures` | 14 |
-| `cp_connection_loss_stops_the_walk_and_reports_not_attempted` | 15 |
-| `cp_rejects_hostile_entry_names` | 15 |
-| `cp_preserve_sets_mode_and_mtime` | 14 |
-| `cp_without_preserve_applies_the_umask` | 14 |
-| `cp_directories_are_owner_writable_while_filling` | 15 |
-| `file_list_pages_are_sorted_and_resumable_by_cursor` | 12 |
-| `file_list_rejects_directories_over_the_entry_cap` | 12 |
-| `cp_json_and_jsonl_report_every_entry` | 14 |
-| `cp_json_truncates_entries_but_not_totals` | 15 |
-| `cp_many_small_files_stays_within_the_echo_budget` | 15 |
-| `acl_check_equivalence.rs` paths 행과 두 action 행 | 12 |
-| `acl_uniformity.rs` 네 seam 문면 | 11 |
-| `acl_uniformity.rs` paths·상태 경로·재검증 거부 문면 | 12 |
-| `acl/load/tests.rs` paths 행 | 10 |
-| `acl/policy/tests.rs` paths 행 | 10 |
-| doctor `acl_file_paths_missing` 테스트, `acl_file_paths_missing_is_silent_for_a_role_full_pin` | 10 |
-| `is_always_denied_is_exactly_the_undrivable_trio` 갱신 | 12 |
-| `deny_seams_row_names_and_count_are_pinned`(14 → 18), `ALWAYS_DENIED_NO_OP` | 11 |
-| `file_copy_never_appears_as_a_control_message_wire_variant` | 14 |
-| fixture `acl.show`(paths)·`acl.check`(--path) | 10 |
-| fixture `capabilities.json` | 13 |
-| fixture `file.copy.get`·`file.copy.put`·`error.file.copy.partial`·`file.entry` 예시 | 14 |
-| fixture `file.copy.tree` | 15 |
-| fuzz `decode_file_frame`, Response 넷 decode 확인 | 11 |
-| man `qsh-acl-check` | 10 |
-| man `qsh-cp` | 14 |
-| macOS 대소문자 우회 행 | 9 |
-| Windows 행(대소문자 무시, `\`/`/`, UNC, junction, 드라이브 `paths`) | M20 밖 |
+| `an_established_connection_is_closed_within_two_seconds_of_trust_remove`(교체) | 3 |
+| `serve_inbound_connection_closes_on_trust_remove` | 3 |
+| `serve_to_outbound_connection_closes_on_trust_remove` | 3 |
+| `listen_registration_closes_on_trust_remove` | 3 |
+| `trust_withdrawal_closes_within_one_poll_tick_under_paused_time` | 3 |
+| `pin_and_ca_path_connections_each_close_on_trust_remove` | 3 |
+| `removing_a_ca_closes_ca_path_connections_and_spares_pin_path_ones` | 3 |
+| `pin_removed_but_ca_still_accepts_closes_on_auth_path_change` | 3 |
+| `deleting_trust_toml_closes_every_connection` | 3 |
+| `listen_registration_closes_with_grants_reduced_when_target_role_drops_to_none` | 3 |
+| `listen_registration_survives_a_same_or_wider_target_role` | 3 |
+| `set_role_narrowing_closes_with_grants_reduced` | 3 |
+| `set_role_widening_does_not_close` | 3 |
+| `widen_then_narrow_closes_against_the_widened_record` | 3 |
+| `rename_of_a_role_pin_closes_and_rename_of_a_roleless_pin_does_not` | 3 |
+| `alias_reorder_does_not_close` | 3 |
+| `unrelated_trust_changes_do_not_close_a_connection` | 3 |
+| `acl_row_only_connection_survives_while_its_pin_remains` | 3 |
+| `unparseable_trust_toml_keeps_connections_but_suspends_role_requests` | 3 |
+| `an_unverifiable_connection_is_closed` | 3 |
+| `audit_failure_does_not_keep_a_withdrawn_connection_open` | 3 |
+| `closed_connection_sessions_detach_and_a_still_trusted_peer_resumes_with_reduced_grants` | 3 |
+| `a_withdrawn_peer_cannot_handshake_again` | 3 |
+| `supervised_tunnel_gives_up_after_trust_withdrawal` | 3 |
+| `trust_withdrawn_close_is_not_a_transient_loss` | 3 |
+| `cli_md_quotes_the_trust_narrowing_scope_verbatim` | 3 |
+| `record_has_only_structural_fields` 키 집합 불변 | 3 |
+| `reverify_agrees_with_the_handshake_verdict_for_pin_ca_and_pairing` | 2 |
+| `reverify_rejects_a_connection_with_an_empty_chain` | 2 |
+| `trust_store_generation_bumps_only_when_the_snapshot_changes` | 2 |
+| `trust_store_poll_notifies_subscribers_within_one_tick` | 2 |
+| `role_grants_cover_relation_treats_any_as_covering_owned` | 2 |
+| `authorizer_and_reverify_share_one_role_grant_function` | 2 |
+| threat-model §5 g2, §4 B 행, §7 h4·h5·h35 | 3 |
+| 새 fixture 없음, 새 `ErrorCode` 없음(검증) | 3 |
+
+### 5.3 ADR-0044 결정
+
+| 결정 | 스텝 |
+|---|---|
+| 1 `qsh pair ssh`, `pair.ssh` 이름, local op, 정방향 플래그 | 7 |
+| 1 `--reverse`·`--to` 조합 규칙 | 8 |
+| 2 자동 발동과 경계, `AUTO_BOOTSTRAP_NOTICE`, `[ssh].bootstrap` 판정 | 9 |
+| 2 `[ssh].bootstrap` 설정 키와 `CONFIG_ERROR` | 5 |
+| 3 pin 뒤 ssh 미호출 | 9 |
+| 4 `ssh -G`, `[ssh].program`, 최소 버전, 64 KiB 상한 | 5 |
+| 5 dial 주소 | 7 |
+| 6 proxy 키 읽기 | 5 |
+| 6 proxy 고지와 `data.ssh_proxied` | 7 |
+| 7 이름 기본값과 `<dest>` 검증 | 5 |
+| 8 원격이 쓰는 이름 기본값과 role `full` | 7 |
+| 9 ssh 인자와 `<remote_qsh>` 인용 | 5 |
+| 9 숨김 `pair ssh-respond`, "operation 아님", audit `action` | 6 |
+| 10 응답자 순서와 UDP bind 확인(Unix·macOS) | 6 |
+| 10 Windows 응답자와 `SO_EXCLUSIVEADDRUSE` | M20 밖(ADR-0035 결정 25) |
+| 11 스트림 형식, 상한, 메시지, 버전, 파서, fuzz | 4 |
+| 12 응답자 쪽 검사·쓰기·audit | 6 |
+| 12 client 쪽 검사·쓰기, role 불일치 안내 | 7 |
+| 12 역방향 주소 갱신과 이 장비 `reverse` pin audit | 8 |
+| 13 정방향 확인 dial 처분 | 7 |
+| 13 역방향 무확인 | 8 |
+| 13 자동 경로의 확인 = 원래 연결 | 9 |
+| 14 ssh 종료 코드·원격 셸별 사상, `ssh_not_found` | 5 |
+| 14 hello 기반 사상(`remote_not_initialized`) | 7 |
+| 15 pin 불일치 fail closed와 문면 | 7 |
+| 16 터미널, BatchMode, 타임아웃, Ctrl-C | 5 |
+| 16 raw 모드는 ssh 뒤 | 9 |
+| 17 `PairSshData`와 machine mode | 7 |
+| 17 `next_command` | 8 |
+| 18 로컬 identity 자동 생성 | 7 |
+| 19 키 재료·rc 출력·ssh stderr 로그 규율 | 5 |
+| 20 `StrictHostKeyChecking` 비덮어쓰기 | 5 |
+| 20 잔여 위험 문장 | 10 |
+| 21 pin 방향과 role `none` | 7 |
+| 22 역방향 route | 8 |
+| 23 ADR-0026과의 관계(문서 대조) | 10 |
+| 24 ADR-0015·0016 기각과의 관계(문서 대조) | 10 |
+| 25 Windows client `ssh.exe`와 사상 | 5 |
+| 25 Windows client 자동 발동 | M19 밖(ADR-0035 결정 1·5) |
+| 25 Windows 응답자 | M20 밖(ADR-0035 결정 25) |
+| 26 하지 않는 일 | 7 |
+
+### 5.4 ADR-0044 핀 테스트와 결과 절 항목
+
+| 항목 | 스텝 |
+|---|---|
+| `ssh_bootstrap_pins_both_sides_and_connects` | 7 |
+| `ssh_bootstrap_role_flag_sets_the_remote_role` | 7 |
+| `ssh_bootstrap_local_pin_has_explicit_role_none` | 7 |
+| `ssh_bootstrap_does_not_widen_an_existing_roleless_pin` | 7 |
+| `ssh_bootstrap_never_overwrites_a_pin_with_a_different_fingerprint` | 7 |
+| `ssh_bootstrap_writes_nothing_when_the_remote_cannot_respond` | 7 |
+| `ssh_bootstrap_reverse_pins_listener_full_with_address_and_target_reverse_without` | 8 |
+| `ssh_bootstrap_reverse_local_reverse_role_leaves_an_audit_record_and_needs_it` | 8 |
+| `ssh_bootstrap_reports_the_actual_remote_role_when_an_existing_pin_differs` | 7 |
+| `ssh_bootstrap_remote_qsh_quoting_is_bare_for_safe_chars_and_single_quoted_otherwise` | 5 |
+| `ssh_bootstrap_ssh_argv_is_fixed` | 5 |
+| `ssh_bootstrap_rejects_a_dest_that_looks_like_an_option` | 5 |
+| `ssh_bootstrap_skips_untagged_stdout_and_never_logs_it` | 7 |
+| `ssh_bootstrap_is_never_implicit_in_machine_mode` | 9 |
+| `ssh_bootstrap_is_not_triggered_for_hosts_toml_or_reverse_names` | 9 |
+| `ssh_bootstrap_off_in_config_is_respected` | 9 |
+| `ssh_bootstrap_reports_identity_mismatch_when_serve_runs_another_identity` | 7 |
+| `ssh_respond_refuses_to_pin_when_audit_is_unwritable` | 6 |
+| `ssh_respond_audit_record_has_only_structural_fields` | 6 |
+| `ssh_bootstrap_envelope_is_the_only_stdout_line` | 7 |
+| 계획 추가: `ssh_exit_codes_map_to_the_adr_reasons`, `ssh_g_output_is_capped_and_only_four_keys_are_read`, `ssh_g_proxyjump_marks_the_bootstrap_as_proxied`, `ssh_config_bootstrap_value_outside_auto_off_is_a_config_error`, `config_unknown_key_knows_the_three_ssh_keys`, `ssh_bootstrap_rc_output_is_counted_not_logged`, `ssh_child_is_reaped_on_cancel` | 5 |
+| 계획 추가: `ssh_respond_reports_not_initialized_without_writing`, `ssh_respond_serve_listening_reflects_a_bound_udp_port`, `ssh_respond_writes_an_inbound_only_pin_with_the_committed_role`, `ssh_respond_returns_exists_and_keeps_the_role_for_a_known_fingerprint`, `ssh_respond_returns_conflict_for_the_same_name_with_another_fingerprint`, `ssh_respond_writes_nothing_when_commit_times_out`, `ssh_respond_is_hidden_from_help`, `pair_ssh_respond_is_unknown_on_windows_before_m20` | 6 |
+| 계획 추가: `ssh_bootstrap_unverified_when_remote_serve_is_not_listening`, `ssh_bootstrap_initializes_a_missing_local_identity_once`, `ssh_bootstrap_never_writes_hosts_config_or_acl_files`, `pair_ssh_never_appears_as_a_control_message_wire_variant`, `bootstrapped_forward_route_passes_the_attach_exec_cp_suite` | 7 |
+| 계획 추가: `ssh_bootstrap_reverse_updates_only_the_address_of_an_existing_remote_pin`, `bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite` | 8 |
+| 계획 추가: `ssh_bootstrap_is_not_triggered_for_exec_session_tunnel_or_sessions`, `auto_bootstrap_prints_the_notice_before_ssh_runs`, `auto_bootstrap_then_cp_completes_the_original_command`, `auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits`, `host_not_found_human_message_names_qsh_pair_ssh` | 9 |
+| 줄 파서 단위 일곱(`bootstrap_line_*`, `bootstrap_reader_*`, `bootstrap_unknown_*`, `negotiate_version_*`) | 4 |
+| fuzz `parse_ssh_bootstrap_line`, corpus, 개수 문장 20 → 21 | 4 |
+| `docs/design/protocol.md` 부트스트랩 스트림 절, §13, §16.2 행 | 4 |
+| `PairSshData`의 `CLI_V1_SCHEMA_COMMANDS`·`cli_v1_data_schema` 등록 | 7 |
+| fixture `pair.ssh`·`pair.ssh.unverified`·`error.SESSION_CONFLICT.pin_conflict`·`error.REMOTE_ERROR.remote_qsh_missing` | 7 |
+| fixture `pair.ssh.reverse` | 8 |
+| man `qsh-pair-ssh.1` 신설 | 7 |
+| man `qsh-pair-ssh.1` `--reverse`·`--to` 갱신 | 8 |
+| `docs/CLI.md` §2.4 "operation 아님" 문장 | 6 |
+| `docs/CLI.md` §2.4 `pair.ssh`, §2.5, §6.11 | 7 |
+| `docs/CLI.md` §6.12 `[ssh]` 키 | 5 |
+| `docs/CLI.md` §6.1, §7, §6.21 | 9 |
+| threat-model §3 진입점 "ssh 자식과 부트스트랩 스트림" | 5 |
+| threat-model §3 진입점 "`pair ssh-respond`의 stdin" | 6 |
+| threat-model §4 A ssh host 인증 승계 | 5 |
+| threat-model §4 B `full` pin 생성 | 6 |
+| threat-model §4 B 방향 없는 pin, role 확대 | 7 |
+| threat-model §4 D 로그 유출 | 7 |
+| threat-model §4 E 응답자 출력 조작(파서 쪽) | 4 |
+| threat-model §4 E 옵션·셸 주입 | 5 |
+| threat-model §7 잔여 둘 | 10 |
+| 사람 캠페인 `docs/campaigns/p1-ssh-bootstrap.md` 사전 고정 | 8 |
+| README First run | 9 |
+| README 기능 목록·Known limitations·보안 절 | 10 |
 
 ## 6. 명시적 non-goals
 
-- 디렉터리 동기화(rsync류), 원격↔원격 복사(`-3`), 재개, `qsh ls`·원격 파일 브라우징, UDP forwarding. ROADMAP M15 명시적 out, ADR-0029 결정 1·11.
-- symlink 만들기, 소유자·xattr·ACL·hard link 옮기기, stdin/stdout `-`, scp/sftp 프로토콜 호환, `file.stat` op, `paths` glob, `deny_paths`. ADR-0029 결정 1·2·20과 대안 절.
-- role 추가·매핑 변경, 사용자 정의 role, `acl.toml` deny 행, `acl check --role`, `acl grant`/`revoke`. ADR-0045 결정 2·4·10과 대안 절, ADR-0025.
-- `trust remove`·role 축소·rename 뒤 열린 연결 닫기. M16 (b) ADR-0031. M15 동안은 알려진 잔여 위험이고 `an_established_connection_survives_the_hosts_trust_remove`는 그대로다.
-- SSH 부트스트랩과 `qsh cp`의 미등록 host 자동 부트스트랩. M16 (a) ADR-0044. ADR-0029 결정 2 마지막 항목은 M16이 착지할 때 효력이 생긴다.
-- Windows. client `qsh cp`와 드라이브 문자 operand는 M19, host 파일 op·경로 판정·`paths` 드라이브 표기·`FILE_DATA` host 처리는 M20(ADR-0035 결정 1·26, ADR-0029 결정 23). M15의 Windows 빌드 `qsh serve`는 `file.v1`을 광고하지 않는다.
-- 새 `ErrorCode`, `qsh.local.v1` 변경, 새 `LocalStreamKind`. ADR-0029 결정 16·17.
-- (a) 범위의 wire·capability 변경. ADR-0045 결정 17.
+- 조직 계정·중앙 관리(PRD §12 경계 밖), SSH 공개키를 principal로 쓰는 것(ADR-0026이 거부), 원격 qsh 설치·serve 기동·서비스 유닛 등록(ADR-0044 결정 26). ROADMAP M16 명시적 out.
+- `StrictHostKeyChecking` 덮어쓰기(ADR-0044 결정 20), `~/.ssh/config` 직접 파싱, ssh를 세션 transport로 계속 쓰는 폴백(ADR-0043), `--replace` 덮어쓰기 플래그(ADR-0044 대안 절).
+- revocation 목록·`qsh trust revoke`, rotation 문서·`qsh identity rotate`·`qsh trust rotate`, CA 발급 인증서 개별 revoke와 CRL·OCSP, leaf 유효기간 기한 연결 만료(ADR-0031 대안 절, 2026-10-12 폐기).
+- 신뢰를 거둔 principal의 세션 즉시 종료(ADR-0031 결정 7, ADR-0033 몫), 다른 장비로의 철회 전파, 파일 감시·프로세스 간 신호(ADR-0031 대안 절).
+- 새 `ErrorCode`, 새 wire 메시지, `.proto` 변경, `capabilities.json` 변경, 새 doctor code.
+- Windows: 대화형·`qsh cp` 자동 발동은 M19, 응답자 `pair ssh-respond`는 M20, `serve --to`·`listen` 재검증의 Windows 테스트 쌍둥이는 M20·M19(ADR-0035 결정 1·5·14·25).
 - 에이전트가 하는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경.
-- P2 전부.
+- P2 전부(jump chaining 포함).
 
 ## 7. 리스크와 감시 항목
 
-- **판정마다 `trust.toml` 읽기 비용.** 지금 `SharedTrustStore::refresh`는 호출마다 파일 내용 전체를 읽어 비교한다(M7에서 mtime 해상도 때문에 고른 방식). `forward.local` 인라인 게이트처럼 잦은 지점에서는 연결마다 파일 읽기가 하나 는다. Step 3이 의미를 바꾸지 않은 채 먼저 잰다. 넘치면 (크기, 수정 시각 ns, dev·inode) 선확인으로 바꾼다. 거친 mtime 해상도의 파일시스템에서 같은 크기·같은 시각의 편집을 놓치면 role 축소가 늦게 보이는 쪽(fail-open 방향)이 된다. 대체 경로를 쓰게 되면 Step 3이 이 조건을 테스트로 고정하거나 커밋 본문에 잔여로 적는다(§10 영문 노트 #2).
-- **`Authorizer::check` 시그니처 변경의 파급.** testkit 대역, `qsh-core` 내부 테스트, `reverse::admit` 경로가 함께 바뀐다. Step 3을 기계적 변경과 측정만으로 좁혀 리뷰 면적을 줄인다.
-- **(a) Step 4와 5 사이의 간극.** 판정기는 role을 읽지만 명령은 아직 role을 쓰지 않는다. 이 사이에 생기는 pin은 키 없음 = `none`이라 좁아지는 방향이다. Step 5의 "새 pin은 role 키를 명시" 테스트가 간극을 닫는다.
-- **audit writer 처리량.** writer는 bounded queue + fail-closed다. 작은 파일 수천 개 트리에서 queue가 차면 op이 거부되고 복사가 `failed` 항목으로 끝난다. Step 15가 재고, 대체 경로는 group commit → `FILE_COPY_PARALLEL` 낮춤 순이다. 그 너머는 새 ADR이다.
-- **복사 중 PTY echo.** `file_copy_echo_under_load`가 붉으면 ADR에 미리 정한 대체 경로가 없다. 수정이 band·송신 깊이·정체 장부 상수 조정을 넘으면 (b)를 닫지 못하고 ADR이 필요하다. Step 14 (c)에 판정 절차를 적었다.
-- **열린 핸들 재검증의 플랫폼 차이.** Linux `/proc` 미마운트 환경(일부 컨테이너)에서는 readlink가 실패한다. 실패는 거부로 접는다(fail closed). 그 경우 모든 파일 op이 거부되므로 Step 9가 진단 문면과 테스트 skip 조건을 정한다.
-- **macOS runner의 대소문자.** `macos-14` runner 볼륨은 대소문자를 구분하지 않는다. 보호 대조는 대소문자 무시이고 `paths` 매칭은 디스크 표기로 한다. 두 비교가 다른 결과를 내는 경계 행을 Step 9·10이 각각 둔다.
-- **CLI.md 상태 헤더와 `REQUIRED_FIXTURES` 충돌.** 병렬 스텝(5∥6, 10∥11)은 같은 한 줄과 같은 배열을 만진다. 늦게 착지하는 쪽이 rebase하고 개수 문장(doctor 24 → 25 → 26, seam 14 → 18, fuzz 19 → 20)을 착지 시점 값으로 맞춘다.
-- **README First run과 캠페인.** README First run은 m7·m9 스톱워치가 재는 "literal script"다. m9 대상 트리는 `docs/campaigns/m9-stopwatch.md` §8에 SHA로 고정됐고 m7은 pre-M9 커밋이라 문면을 바꿔도 측정이 흔들리지 않는다. `p1-setup-stopwatch`는 "실행 전에 채우는" 트리이므로 Step 7 이후 트리로 돌리면 ACL 단계가 사라져 다른 절차를 재게 된다(§9 #3).
-- **M16 착수 압력.** M16의 착수 조건은 "M15 (a) 착지"라 Step 8 뒤에 열 수 있다. 두 마일스톤을 동시에 열면 `trust/`·`ops/trust.rs`(M16 (a))와 `server/`(M15 (b)·M16 (b))가 겹친다(§9 #1).
+- **2초 보장과 부하.** poll 1초에 연결당 판정 여유 1초다. CPU 부하 아래에서 tokio 타이머와 감시 작업 스케줄이 밀리면 실제 시계 단언이 흔들릴 수 있다. 계약 핀은 시간 정지 테스트가 맡고, 실제 시계 테스트는 부하 아래 50회로 확인한다. 흔들리면 §9 #4.
+- **CA 경로 재검증 비용.** 연결마다 chain 검증을 다시 한다. 연결 수는 ADR-0010 상한이 묶지만 `trust.toml`이 바뀔 때마다 모든 연결이 동시에 깬다. Step 3이 연결 수 상한 근처(기본 상한 연결 수)에서 한 번의 변경이 끝나는 시간을 재고 커밋 본문에 적는다. 2초를 넘으면 착지하지 않고 main 세션이 정한다.
+- **chain 보관의 메모리.** 연결당 수 KB(ADR-0031 맥락). 상한 연결 수에서 MB 단위라 문제로 보지 않지만 Step 2 커밋 본문에 상한 기준 추정치를 적는다.
+- **`trust/mod.rs`와 `server/mod.rs`의 충돌.** (b)와 (a)가 같은 파일을 만진다. 순서(§4)와 병렬 표가 줄이고, Step 6은 Step 3 뒤로 묶었다.
+- **가짜 `ssh`와 실제 OpenSSH의 차이.** 하네스는 argv와 stdio만 흉내 낸다. ProxyJump·ControlMaster·host key 프롬프트·`RemoteCommand` 충돌 같은 실제 동작은 사람 캠페인 몫이다. 특히 결정 9의 `-o RemoteCommand=none`이 설정 파일의 `RemoteCommand`와 충돌하지 않는지는 OpenSSH 7.6 이상의 실제 ssh로만 확인된다. 에이전트는 Step 5에서 머신에 있는 실제 `ssh -G`(네트워크 없음)로 인자 수용 여부를 한 번 확인하고 버전을 커밋 본문에 적는다.
+- **원격 셸 종료 코드의 모호성.** PowerShell의 1은 다른 실패와 구별되지 않는다(ADR-0044 결정 14). `remote_command_failed`의 message가 안내를 대신한다. 사람 캠페인이 Windows 원격 회차를 갖는 것은 M20 이후다.
+- **README First run과 스톱워치.** First run은 m7·m9 스톱워치가 재는 "literal script"다. m9 대상 트리는 `docs/campaigns/m9-stopwatch.md` §8에 SHA로 고정돼 있어 Step 9의 First run 변경이 측정을 흔들지 않는다. `p1-setup-stopwatch`는 실행 전에 SHA를 채우므로 문서를 고치지 않는다.
+- **CLI.md 상태 헤더와 `REQUIRED_FIXTURES` 충돌.** 병렬 스텝(2∥4, 3∥4·5)이 같은 한 줄, 같은 배열, threat-model §3 개수 문장을 만진다. 늦게 착지하는 쪽이 rebase하고 개수 문장(fuzz 20 → 21)을 착지 시점 값으로 맞춘다.
+- **Windows 다리의 늦은 실패.** M15의 보정 커밋 넷이 보여 준 패턴이다. §4 규율의 로컬 Windows 타깃 검사로 줄이고, 그래도 CI Windows 다리에서 깨지면 보정 커밋을 같은 스텝 이름으로 단다.
 
 ### 7.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
 
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
-| 1 | `Authorizer::check`의 fingerprint 전달 모양 | `(principal, auth_path, fingerprint)`를 묶은 요청자 구조체 하나. 인자 넷을 늘리지 않는다 | Step 3 |
-| 2 | 짧은 연결 측정 행의 모양 | `-L`로 1000회 연속 연결·닫기, `trust.toml`에 pin 100개, 연결당 시간 중앙값·p95를 Step 3 전후로 비교. 차이 10% 이내면 대체 경로를 쓰지 않는다 | Step 3 |
-| 3 | role 근거를 싣는 `Verdict` 필드 | `granted_by: GrantBasis { Rule(u32), Role(TrustRole) }`로 두고 `rule`은 파생값. 이름과 모양은 Step 4가 정한다 | Step 4 |
-| 4 | ADR이 이름을 정하지 않은 fixture | `acl.check.path.json`, `acl.show.with_paths.json`, `file.entry` event는 `event.file.entry.json`(cli-v1에 event fixture 선례가 없어 Step 14가 자리를 정한다). `error.file.copy.partial.json`은 `error.<CODE>.<variant>` 관례와 다르지만 ADR 이름대로 둔다 | Step 10·14 |
-| 5 | `serve --to` target의 파일 quota 키 | `[serve]` 두 키를 그대로 쓴다(`serve --to`가 `[serve]` 절을 읽는 지금 규칙) | Step 12 |
-| 6 | 파일 op 모듈 자리와 arch 금지 | `crates/qsh-core/src/file/`(guard·host·copy). `qsh_transport`·`quinn` 금지 목록 편입 여부는 Step 9가 판단 | Step 9 |
-| 7 | identity 파일 핀 대상 | `identity/device.key`(file keystore)와 `identity/device.pem` 둘 다 행으로 둔다 | Step 12 |
-| 9 | 판정마다 읽기의 대체 경로가 fail-open이 되는 경계(ADR-0045 근거 절의 stat 선검사) | 확정: stat 선검사를 쓰게 되면 git의 racy-clean 규칙을 함께 둔다. 마지막으로 읽은 시각과 파일 mtime의 차가 2초 안이면 크기·시각·inode가 같아도 내용을 다시 읽는다. 거친 mtime 해상도에서도 같은 크기의 role 축소를 놓치지 않는다. 테스트 `trust_store_refresh_rereads_a_racily_clean_file`를 Step 3에 둔다 | Step 3 |
-| 10 | 모르는 role 값: 시작과 reload | 확정: 시작 때는 `CONFIG_ERROR`로 기동 실패, 실행 중 reload에서는 마지막 정상 pin을 유지하고 role을 전부 멈춘다(ADR-0045 결정 4의 reload 실패와 같은 경로) | Step 2·4 |
-| 11 | M15 동안 Windows `qsh serve`의 파일 op | 확정: `file.v1`을 광고하지 않고 네 op에 `UNSUPPORTED`로 답한다. M20이 연다 | Step 11 |
-| 12 | `file_copy_echo_under_load`가 붉을 때 | 확정: `FILE_DATA`를 band 0보다 낮은 송신 우선순위로 두고 송신 깊이 상한을 줄이는 조정까지 허용한다. 그 너머는 ADR-0029 개정이다 | Step 14 |
-| 8 | M15 부하 filterset | 테스트 이름 접두 `role_`, `trust_store_reload_`, `set_role_`, `file_`, `state_path_guard_`, `cp_`, `denied_file_`, `unredeemed_file_`, `interrupted_file_`. 지연 단언은 별도 식 | Step 8·16 |
+| 1 | `ssh_bootstrap` 모듈의 arch 금지 편입 | `crates/qsh-core/src/ssh_bootstrap/`은 자식 프로세스와 UDP probe만 쓰고 QUIC를 이름 짓지 않으므로 `crates/qsh-core/src/`의 `quinn::` 금지로 충분하다. 확인 dial은 `qsh_transport`의 중립 타입으로 한다. 디렉터리 범위 금지를 새로 더하지 않는 쪽이 초안 | Step 5 |
+| 2 | 가짜 `ssh` 실행 파일의 자리 | `crates/qsh-testkit`에 `[[bin]] qsh-fake-ssh`를 두고 하네스 헬퍼가 `env!("CARGO_BIN_EXE_qsh-fake-ssh")`로 찾는다. testkit bin이 cargo-deny나 release 묶음에 들어가지 않는지 확인 | Step 5 |
+| 3 | 숨김 `pair ssh-respond`의 man 페이지 | 생성기가 숨김 하위 명령을 건너뛰면 페이지 없음. 건너뛰지 않으면 생성기에서 숨김을 걸러 내는 쪽(사용자 표면이 아니므로) | Step 6 |
+| 4 | `PairSshReq`·`PairSshData`의 자리 | `crates/qsh-proto/src/types/trust.rs`(origin `1a4af3b` 기준 360줄)에 더한다. 800줄을 넘기게 되면 새 `types/pair.rs` | Step 7 |
+| 5 | M16 부하 filterset | 테스트 이름 접두 `trust_withdrawal::`, `an_established_connection_is_closed`, `ssh_bootstrap`, `ssh_respond`, `auto_bootstrap`, `bootstrapped_`, `trust_store_poll_` | Step 3·10 |
+| 6 | `TRUST_NARROWING_SCOPE` 상수의 모양 | 세 문장(언제·어디에·무엇을 하지 않는가)을 한 `&'static str`로. `trust remove`·`set-role`·`rename` 렌더러와 doctor message가 같은 상수를 인용 | Step 3 |
+| 7 | 감시 작업이 쓰는 trust store 핸들 | 세 프로세스가 이미 각자 여는 `SharedTrustStore` 하나에 poll 작업 하나(ADR-0031 결정 3). `qsh listen`의 handshake verifier와 감시가 같은 핸들을 공유하는지 Step 3이 확인 | Step 3 |
+| 8 | 응답자 commit 대기 시계 | `ssh_bootstrap::respond`에 시계를 주입해 30초 타임아웃을 시간 정지 테스트로 고정 | Step 6 |
+| 9 | 역방향 원격 pin 주소 갱신의 audit | ADR-0044 결정 12는 새 pin 쓰기의 audit만 적는다. 주소만 갱신하는 `exists` 갈래는 `trust add`의 주소 갱신과 같은 처분을 따른다(현재 `trust add`가 그 경우 audit를 남기는지 Step 8이 확인하고 같게 맞춘다) | Step 8 |
 
 ## 8. 완료 절차
 
 1. §3 DoD 전건을 실제 테스트와 CI run으로 확인한다. 체크박스는 근거가 초록일 때만 채운다.
-2. 부하 반복 50/50과 지연 단언의 부하 없는 50/50을 기록한다(Step 8·16).
-3. 구속 문서 태그를 대조한다(Step 16 (a)의 목록 전수).
+2. 부하 반복 50/50을 기록한다(Step 3·10).
+3. 구속 문서 태그를 대조한다(Step 10 (a)의 목록 전수).
 4. README를 동기화한다.
-5. `docs/design/testing.md`의 M15 반영(게이트 환경변수 표의 새 acceptance 행)을 확인한다.
-6. `docs/ROADMAP.md` "현재 위치"와 M15 절을 갱신하고 마감 노트를 적는다.
-7. §0.1 일곱, §0.2, §0.3의 상태를 승계한다.
-8. 이 `PLAN.md`를 다음 계획(M16)으로 교체하고, 마감 노트에 이 계획의 마지막 커밋 해시를 적는다.
+5. `docs/ROADMAP.md` "현재 위치"와 M16 절을 갱신하고 마감 노트를 적는다(main 세션).
+6. §0.1, §0.2, §0.3의 상태를 승계한다.
+7. 이 `PLAN.md`를 다음 계획으로 교체하고, 마감 노트에 이 계획의 마지막 커밋 해시를 적는다.
 
 ## 9. 열린 질문
 
-각 항목 끝의 **결정** 문장은 main 세션이 Step 1 커밋(2026-10-14)에서 확정했다.
+각 항목의 권고는 main 세션이 Step 1 커밋(2026-10-15)에서 그대로 결정으로 확정했다. 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")의 범위다.
 
-1. **(a)를 따로 닫고 M16을 먼저 열 것인가.** ROADMAP M15 크기 줄은 (a)와 (b)를 따로 닫아도 된다고 하고, M16 착수 조건은 "M15 (a) 착지"다. **결정:** Step 8이 ROADMAP M15 절에 (a) 착지 노트를 적는다. M16은 M15가 닫힌 뒤 연다. 다만 (b)가 Step 14의 PTY echo 판정처럼 ADR 대기로 멈추면, 그날 main 세션이 M16 (a)를 여는 것을 허용한다.
-2. **ROADMAP M15 DoD에 안정성 줄을 더할 것인가.** M12에는 있었고 M13은 계획 규율로 넣었다. **결정:** 더한다. Step 1이 M12 문면에 지연 단언 예외 구절을 붙여 넣는다.
-3. **README First run과 `p1-setup-stopwatch`.** ADR-0045 결과 절은 README First run을 고치라고 한다. **결정:** First run은 Step 8에서 role 기준(주소 없는 `trust add`·`pair invite`가 `full`이라 손으로 쓰는 `acl.toml` 행이 필요 없음)으로 고친다. m7·m9 대상은 SHA로 고정돼 있어 측정이 흔들리지 않는다. `p1-setup-stopwatch`는 그 문서의 "qsh 커밋 SHA" 칸이 실행 전에 채워지므로 문서를 고치지 않는다. 대신 §5.5 그 행에 "M15 Step 7 이후 트리는 ACL 단계가 `done`으로 끝나는 절차를 잰다"를 적는다(main 세션).
-4. **`full` role 해제 직후 `role_full_without_acl_toml_…`의 `file.*` 행.** Step 4 시점에는 ①이 막고 Step 12에서 뒤집힌다. **결정:** 같은 테스트 표의 기대값을 Step 12가 고친다. 테스트 이름과 주인(Step 4)은 그대로다.
-5. **`acl_check_equivalence.rs`의 `paths` 행 시점.** ADR은 enforcement(`Server::dispatch`)와의 대조를 요구하므로 op이 열리는 Step 12에 둔다. Step 10은 `acl check`·`acl show` 쪽 단위 대조만 둔다. **결정:** 그대로 한다.
-6. **`CLAUDE.md`에 상태 경로 규칙을 더할 것인가.** ADR-0029는 `CLAUDE.md`를 문서 목록에 적지 않았지만, 이 성질은 "role이나 행으로 열 수 없다"는 보안 기본값이다. **결정:** Step 12가 "Security defaults"에 한 항목을 더한다. Step 4의 role 문장 개정(ADR-0045 결과 절)과는 별개 편집이다.
-7. **태그.** M15 DoD에는 태그가 필요 없다. **결정:** 찍을지는 유지보수자가 정한다. 권고는 Step 15 뒤 태그 하나다. §1의 두 확인(macOS Keychain, `release.yml` provenance)과 `decode_file_frame` 사람 몫이 그 바이너리로 돌 수 있다.
+1. **ROADMAP M16 DoD에 안정성 줄을 더할 것인가.** M12·M15에는 있다. **권고:** 더한다. Step 1이 M15 문면을 옮긴다.
+2. **M16 Windows 빌드의 `pair ssh-respond`.** ADR-0044 결정 10은 "M20 전의 Windows 빌드는 이 하위 명령을 몰라 `remote_qsh_too_old`"라고 적고, ADR-0035 결정 1의 "착지와 함께 열린다"는 client 쪽 `pair ssh`와 응답자를 한 문장에 묶는다. 두 문장은 ADR-0035 결과 절의 M20 목록(`pair ssh-respond`)과 결정 25로 맞춰진다. **권고:** client `qsh pair ssh`는 M16에서 Windows에도 열고, 응답자는 Unix 빌드에만 등록한다. Windows는 clap이 exit 2로 끝나 client가 `remote_qsh_too_old`로 읽는다(`pair_ssh_respond_is_unknown_on_windows_before_m20`). ADR 개정은 필요 없다.
+3. **Windows `ssh.exe` 사람 회차.** ADR-0044 결과 절의 캠페인은 Windows `ssh.exe`를 포함한다. 그러나 Windows의 대화형 `qsh box`(자동 발동의 대표 경로)는 M19다. **권고:** `p1-ssh-bootstrap.md`는 Linux·macOS client 회차와 Windows client의 명시 `qsh pair ssh` 회차를 갖고, Windows 대화형 회차는 M19의 `p1-windows.md`가 이어받는다고 문서에 적는다.
+4. **실제 시계 2초 단언이 부하 아래에서 흔들릴 때.** **권고:** 실제 시계 테스트의 단언은 "trust.toml 쓰기 시각부터 2초"로 두고 부하 아래 50회를 먼저 시도한다. 50/50이 안 되면 그 테스트들만 `scripts/stress/m16-latency.filter`로 옮겨 부하 없이 `-j 1`로 50회를 요구하고, 계약 핀은 `trust_withdrawal_closes_within_one_poll_tick_under_paused_time`이 맡는다. 단언을 2초보다 느슨하게 바꾸지는 않는다.
+5. **부트스트랩 스트림의 freeze 지위.** ADR-0044 결정 11은 "§16의 freeze 규칙 중 additive-only를 같은 방식으로 따른다"고만 적는다. **권고:** `docs/design/protocol.md` §16.2(`.proto` 밖의 상호운용 계약)에 한 행으로 올린다. freeze 발효(M8 DoD 4) 뒤에도 같은 규칙이 적용된다는 뜻이고, 결정 11의 문장과 어긋나지 않는다.
+6. **(b)와 (a)의 순서.** ROADMAP M16 범위는 (a)를 먼저 적지만 순서를 정하지 않는다. **권고:** §4 "순서의 근거"대로 (b)를 먼저 둔다. (a)의 첫 스텝(Step 4)은 Step 2·3과 병렬로 열 수 있어 일정상 손실이 없다.
+7. **태그.** M16 DoD에는 태그가 필요 없다. **권고:** 찍을지는 유지보수자가 정한다. §0.3의 사람 캠페인과 `parse_ssh_bootstrap_line` fuzz-hours가 그 바이너리로 돌 수 있으므로 Step 9 뒤 태그 하나를 권한다.
