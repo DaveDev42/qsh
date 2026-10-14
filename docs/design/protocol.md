@@ -43,7 +43,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
-- `file.v1`(ADR-0029)은 상수 `CAP_FILE_V1`로 정의만 되어 있고 **아직 광고하지 않는다**(`LOCAL_CAPABILITIES`에 없다). 파일 op의 wire와 host 쪽 제어 평면(인가, 상태 경로, 재검증, quota, ticket 발급, `file.list`, `file.mkdir`)은 이 문자열 없이도 dispatch되고 동작한다. 정상 client는 광고를 확인하고 보내므로 이 시점에는 요청을 보내지 않는다. 광고와 negotiation 규칙은 `FILE_DATA` 데이터 평면과 함께 선다.
+- `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **unix 빌드만 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_FILE_V1`). Windows host는 M20 전까지 네 op에 `UNSUPPORTED`로 답하므로 광고하지 않는다(ADR-0029 결정 23). client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 unix 빌드의 집합을 기록하고, Windows 빌드의 대조 테스트는 이 항목 하나를 더해 비교한다.
 
 ## 5. Frame layer
 
@@ -78,7 +78,12 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 
 **Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
 
-**`FILE_DATA`(ADR-0029 결정 9).** `FileReadOpen`/`FileWriteOpen`이 ACL을 통과한 뒤 발급되는 ticket으로만 열린다. 프레임은 §5 그대로(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이고 `data` 청크는 `FILE_CHUNK_MAX`(32 KiB) 이하다. `FileEnd{size, blake3}`가 바이트열을 닫고, `FileWriteResult`는 `file.write` 스트림에서 host가 요청자에게만 보낸다. 청크 상한 초과·`end` 뒤의 frame·요청자가 보낸 `result`는 프로토콜 위반이다. 이 단계(M15 (b))에는 `FILE_DATA` 스트림을 받는 pump가 없어서 host는 이 header를 `BAD_HEADER`로 거절한다 — 파일 복사 본체가 오는 단계에서 pump가 선다. `FileListOpen`/`FileMkdirOpen`은 control 스트림 안에서만 답하며 `FileListed` 한 페이지는 `FILE_LIST_PAGE_MAX`(512)개 항목으로 `CONTROL_FRAME_MAX` 안에 들어간다(`FILE_LIST_DIR_MAX` 65536은 디렉터리당 상한).
+**`FILE_DATA`(ADR-0029 결정 9).** `FileReadOpen`/`FileWriteOpen`이 ACL을 통과한 뒤 발급되는 ticket으로만 열린다. 프레임은 §5 그대로(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이고 `data` 청크는 `FILE_CHUNK_MAX`(32 KiB) 이하다. `FileEnd{size, blake3}`가 바이트열을 닫고, `FileWriteResult`는 `file.write` 스트림에서 host가 요청자에게만 보낸다. 청크 상한 초과·`end` 뒤의 frame·요청자가 보낸 `result`·`FileWriteOpen.size`를 넘는 바이트·`end` 없이 끝난 요청자 send half는 `BAD_HEADER`(`0x2001`) reset이다. 알 수 없거나 이미 쓴 ticket도 같은 reset이다. 송신은 band 0이고 `SEND_DEPTH_CAP_BYTES`(128 KiB)마다 양보한다(ADR-0029 결정 15). 아래 두 흐름이 host의 동작이다.
+
+- `file.read`: host가 `data`를 보내고 마지막에 실제로 보낸 바이트의 `FileEnd{size, blake3}`를 보낸 뒤 `finish()`한다. 읽는 도중 실패하면 `end` 없이 reset(`0x2007`)해서 잘린 전송이 정상 끝으로 보이지 않는다. 요청자는 header 뒤에 아무것도 보내지 않는다.
+- `file.write`: 요청자가 `data`, `end`를 보내고 send half를 `finish()`한다. host는 대상 디렉터리 fd 안에 임시 파일 `.<name>.qsh-<16 hex>.part`(`O_EXCL|O_NOFOLLOW`, `0600`)를 만들어 받은 바이트를 쓰고 BLAKE3-256을 센다. 받은 총 길이와 해시가 `end`와 `FileWriteOpen.size`에 모두 맞을 때만 `fsync`, `fchmod`(`-p`면 `futimens`)를 하고, `overwrite`면 `renameat`, 아니면 `linkat`과 `unlinkat`으로 제자리에 놓은 뒤 디렉터리를 `fsync`한다. 결과는 `FileWriteResult` 한 frame과 `finish()`다. 불일치와 `--no-clobber`의 `EEXIST`는 `ok=false`, `INVALID_ARGUMENT`이고 `ENOSPC`는 `RESOURCE_EXHAUSTED`다. 실패, 취소, 연결 유실, 정체 장부의 끊음, 프로토콜 위반 어느 경우든 임시 파일은 지워지고 대상은 그대로다. 전송 slot은 결과 frame을 보내기 전에 놓는다.
+
+`FileListOpen`/`FileMkdirOpen`은 control 스트림 안에서만 답하며 `FileListed` 한 페이지는 `FILE_LIST_PAGE_MAX`(512)개 항목으로 `CONTROL_FRAME_MAX` 안에 들어간다(`FILE_LIST_DIR_MAX` 65536은 디렉터리당 상한).
 
 **파일 op의 host 쪽 순서(ADR-0029 결정 8).** 앞 단계가 실패하면 뒤 단계는 돌지 않는다. 1) 경로 모양 검사와 home 해석(`file::guard::shape_path`) — 실패는 `INVALID_ARGUMENT`(비 unix host는 `UNSUPPORTED`), 판정할 것이 없으므로 ACL도 audit도 없다. 2) ACL choke point — 근거 판정(`Authorizer::has_file_grant`)이 참일 때만 정규화하고, 경로 문자열 그대로가 audit `resource`다. 근거가 없는 요청은 정규화기를 부르지 않는다. 3) `user@` 힌트가 serve 계정과 다르면 `UNSUPPORTED`(허용된 뒤에만). 4) 상태 경로 판정 — 보호 집합에 들면 거절하고 audit 한 줄이 더 남는다. 5) `file.read`/`file.write`의 전송 quota. 6) 디렉터리 fd 기준으로 열고 연 핸들의 실제 경로를 보호 집합과 평가기에 다시 대조한다(불일치는 audit 한 줄 추가). `file.read`는 보호 inode와 파일 종류도 본다. 7) 응답: `file.read`/`file.write`는 연 fd를 묶은 ticket(`FileReadOpened`/`FileWriteOpened`)을, `file.list`/`file.mkdir`은 결과를 바로 돌려준다. ticket은 §7의 다른 ticket과 같이 128비트·단회·30초이고 연결당 예산을 공유하며, 소비되지 않고 만료되거나 연결이 끊기면 fd와 quota slot이 풀린다. 정책으로 인한 거절은 모두 같은 `PERMISSION_DENIED`다(행 없음, `paths` 없음·밖, 정규화 실패, 상태 경로, 재검증 불일치, 보호 inode, 보호 inode 스캔 실패, OS `EACCES`). `FILE_DATA` 스트림은 받는 pump가 아직 없어 `BAD_HEADER`로 닫힌다.
 
@@ -495,7 +500,7 @@ message FileFrame {
   - **끊는 규칙:** 정체 스트림이 `CONNECTION_RECEIVE_WINDOW / TUNNEL_STREAM_RECEIVE_WINDOW - 1`(3)을 넘으면 마지막 진전이 가장 오래된 것부터 끊는다. peer의 `DATA_BLOCKED` 계수가 최근 2초 안에 늘었고 정체 스트림이 있으면 가장 오래된 하나를 끊는다.
   - **끊는 방법:** §7의 splice 중단 신호와 같고 코드는 `0x200E`다. quinn은 stop된 스트림의 읽지 않은 바이트만큼 연결 credit을 곧바로 돌려준다.
   - **한계:** 느리게라도 읽는 소비자는 쓰기가 조금씩 진전하므로 정체가 아니고 역압을 그대로 받는다. 다만 진전을 알리는 것은 커널이고 막힌 쓰기는 자동 조정된 송신 버퍼가 절반쯤 비워진 뒤에야 깨어나므로, 그 절반을 `STALL_AGE` 안에 비우지 못할 만큼 느린 소비자는 읽고 있어도 정체로 셀 수 있다(`docs/design/threat-model.md` C14).
-  - **범위:** control·`SESSION_DATA`·`EXEC_DATA` 스트림은 장부에 오르지 않는다. 연결 양 끝과 `localctl` daemon의 UDS·QUIC 중계가 같은 규칙을 쓴다. 설정 키는 없다.
+  - **범위:** 터널 스트림과 `FILE_DATA` 스트림이 장부에 오른다(ADR-0029 결정 15). `file.write`의 "로컬 쓰기"는 받은 청크를 디스크 writer에 넘기는 일이고, 끊긴 쓰기는 `0x200E`로 reset되며 임시 파일이 지워진다. control·`SESSION_DATA`·`EXEC_DATA` 스트림은 장부에 오르지 않는다. 연결 양 끝과 `localctl` daemon의 UDS·QUIC 중계(`FILE_DATA`는 터널과 같은 half-close 중계 다리를 쓰되 tunnel permit은 받지 않는다)가 같은 규칙을 쓴다. 설정 키는 없다.
 - **Replay ring = 만능 decoupler:** PTY reader task는 항상 ring에만 쓰고 네트워크에 블록되지 않는다. 각 attach/read 소비자는 ring 위의 cursor다. 느린 소비자는 cursor가 밀릴 뿐이고, ring 밖으로 밀리면 `Gap`을 받고 전진한다. 세션당 메모리는 ring 8MB + 소비자별 소량으로 유계이며(CLI.md §11 backpressure 규칙), 멈춘 reader가 child process의 stdout을 막을 수 없다.
 - `session read --wait`/`--follow`는 같은 cursor-pull primitive의 다른 표면이다([architecture.md](architecture.md) §3).
 
@@ -640,7 +645,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 | Frame 헤더 레이아웃 | `crates/qsh-proto/src/frame.rs` 머리 주석; 1차 결정 `docs/adr/0001-custom-quic-protocol.md` | `u32` BE length prefix + prost body. ADR-0001이 이 모양을 고른 결정적 이유는 P1 TCP fallback(ADR-0005)을 wire 변경 없이 얹기 위해서다 — 이 layer를 얼리는 것은 그 경로도 함께 지키는 일이다 |
 | `CONTROL_FRAME_MAX` / `DATA_FRAME_MAX` | `crates/qsh-proto/src/frame.rs` | 256 KiB / 64 KiB |
 | `EXEC_CHUNK_MAX` / `SESSION_CHUNK_MAX` / `SESSION_READ_MAX_BYTES` | `crates/qsh-proto/src/wire.rs` | 16 KiB / 16 KiB / 192 KiB |
-| `FILE_CHUNK_MAX` / `FILE_LIST_PAGE_MAX` / `FILE_LIST_DIR_MAX` | `crates/qsh-proto/src/wire.rs` | 32 KiB / 512 / 65536 |
+| `FILE_CHUNK_MAX` / `FILE_LIST_PAGE_MAX` / `FILE_LIST_DIR_MAX` / `FILE_WRITE_FREE_RESERVE` | `crates/qsh-proto/src/wire.rs` | 32 KiB / 512 / 65536 / 256 MiB |
 | `enum FileKind` | 같은 파일의 `enum FileKind` | `UNSPECIFIED=0`/`FILE=1`/`DIR=2`/`SYMLINK=3`/`OTHER=4` |
 | `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`. 0값의 취급은 §16.8 |
 | sequence 시맨틱 | §8; `crates/qsh-core/src/broker/ring.rs` 머리 주석 | 세션 수명 누적 output byte offset(`u64`). 오프셋 배정은 `ReplayStore::push` 한 곳뿐 |

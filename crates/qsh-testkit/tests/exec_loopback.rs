@@ -26,10 +26,12 @@ fn spec(argv: &[&str]) -> ExecSpec {
 async fn exec_dod_case_stdout_stderr_and_exit_code() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
-    assert_eq!(
-        s.capabilities,
-        vec!["exec", "session", "resume.v1", "dial-filter.v1"]
-    );
+    // `file.v1` is advertised by unix hosts only (ADR-0029 decision 23).
+    let mut expected = vec!["exec", "session", "resume.v1", "dial-filter.v1"];
+    if cfg!(unix) {
+        expected.push("file.v1");
+    }
+    assert_eq!(s.capabilities, expected);
 
     let r = s
         .exec(
@@ -312,10 +314,10 @@ async fn bogus_ticket_stream_is_reset_without_spawn_or_audit() {
     assert_eq!(h.server.pending_tickets(), 0);
 }
 
-/// ADR-0029 decision 9 adds `FILE_DATA`, but no ticket for it exists in this
-/// build (the four file ops are all refused before one is minted), so a peer
-/// that opens one anyway is reset with the same non-distinguishing code as any
-/// other unredeemable header: no resource, no audit line.
+/// ADR-0029 decision 9 adds `FILE_DATA`, which the data plane now accepts, but
+/// only against a ticket a file op minted. A peer that opens one with a ticket
+/// nobody issued is reset with the same non-distinguishing code as any other
+/// unredeemable header: no resource, no audit line.
 #[tokio::test(flavor = "multi_thread")]
 async fn file_data_stream_is_reset_without_resource_or_audit() {
     let h = LoopbackHarness::start().await;

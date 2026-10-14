@@ -6057,3 +6057,34 @@ async fn file_op_with_a_degraded_audit_sink_is_the_uniform_denial() {
         );
     }
 }
+
+/// The errno table both file planes share (`file_io_error`, ADR-0029
+/// decisions 7, 13 and 17): the data plane's `result` frame and the control
+/// plane's error reply must say the same thing for the same OS error.
+#[cfg(unix)]
+#[test]
+fn file_io_errors_map_to_the_documented_codes() {
+    use super::file_host::file_io_error;
+    let code = |errno: i32| file_io_error(&std::io::Error::from_raw_os_error(errno));
+    assert_eq!(code(libc::ENOENT).error_code(), ErrorCode::InvalidArgument);
+    // `--no-clobber` lost the race at `linkat`.
+    let exists = code(libc::EEXIST);
+    assert_eq!(exists.error_code(), ErrorCode::InvalidArgument);
+    assert_eq!(exists.message, "destination exists");
+    for errno in [libc::EACCES, libc::EPERM, libc::ELOOP, libc::ENOTDIR] {
+        let denied = code(errno);
+        assert_eq!(denied.error_code(), ErrorCode::PermissionDenied, "{errno}");
+        assert_eq!(denied.message, crate::acl::PERMISSION_DENIED_MESSAGE);
+    }
+    for errno in [libc::ENOSPC, libc::EDQUOT] {
+        assert_eq!(
+            code(errno).error_code(),
+            ErrorCode::ResourceExhausted,
+            "{errno}"
+        );
+    }
+    // Anything else is opaque: no OS text reaches the wire.
+    let other = code(libc::EIO);
+    assert_eq!(other.error_code(), ErrorCode::Internal);
+    assert_eq!(other.message, "file operation failed");
+}

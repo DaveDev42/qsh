@@ -1040,7 +1040,7 @@ impl LocalctlDaemon {
         // kinds are relayable at all and how, so a mutation here cannot
         // silently diverge from what this function's own unit tests
         // assert (`local_stream_relay_kind`'s own doc).
-        let (priority, tunnel_permit, reset_on_uds_eof, ack_before_splice) =
+        let (priority, tunnel_permit, reset_on_uds_eof, ack_before_splice, file_splice) =
             match local_stream_relay_kind(&header) {
                 Some(LocalStreamRelay::ClaimTcpAccepted) => {
                     // What is left of the *one* `deadline` budget after
@@ -1069,7 +1069,14 @@ impl LocalctlDaemon {
                     tunnel_permit,
                     reset_on_uds_eof,
                     ack_before_splice,
-                }) => (priority, tunnel_permit, reset_on_uds_eof, ack_before_splice),
+                    file_splice,
+                }) => (
+                    priority,
+                    tunnel_permit,
+                    reset_on_uds_eof,
+                    ack_before_splice,
+                    file_splice,
+                ),
                 None => {
                     // Nothing opened on QUIC — the whole point of checking
                     // the kind before `open_bi` (HARD RULES: "a non-
@@ -1081,7 +1088,7 @@ impl LocalctlDaemon {
                             body: Some(local_response::Body::Error(LocalError::from_code(
                                 ErrorCode::InvalidArgument,
                                 "LOCAL_STREAM's first frame must be a SESSION_DATA, TCP_CONNECT, \
-                             TCP_ACCEPTED, or EXEC_DATA StreamHeader",
+                             TCP_ACCEPTED, EXEC_DATA, or FILE_DATA StreamHeader",
                             ))),
                         })
                         .await;
@@ -1251,7 +1258,7 @@ impl LocalctlDaemon {
 
         let (uds_read, uds_write) = uds.into_split();
 
-        if tunnel_permit {
+        if tunnel_permit || file_splice {
             // `TCP_CONNECT`'s post-handshake body is unframed tunnel
             // payload, not `SessionFrame`s — `tunnel_splice_uds_quic`'s
             // own doc on why it cannot reuse `pump_uds_to_quic`/
@@ -1259,10 +1266,21 @@ impl LocalctlDaemon {
             // prefetch were already flushed onto `quic_send` above, and
             // nothing has been read from the freshly opened `quic_recv`
             // yet, so both legs start with an empty prefix here.
-            let watch = crate::tunnel::stall::StallWatch::on(
-                &conn,
-                format!("{}:{}", header.host, header.port),
-            );
+            //
+            // `FILE_DATA` (ADR-0029 decision 15) takes the same leg: it is
+            // an unframed byte stream after the header too, it needs the
+            // half-close this splice keeps (a requester finishing its
+            // upload while still reading the host's `result`), and its
+            // receive-direction local write is what the stall ledger must
+            // see at this end of the relay. It draws no tunnel permit: the
+            // target's transfer quota bounds it. The label names the kind,
+            // never the path.
+            let label = if file_splice {
+                "file.data".to_string()
+            } else {
+                format!("{}:{}", header.host, header.port)
+            };
+            let watch = crate::tunnel::stall::StallWatch::on(&conn, label);
             tunnel_splice_uds_quic(
                 uds_read,
                 uds_write,
@@ -2003,6 +2021,13 @@ enum LocalStreamRelay {
         /// (`map_local_stream_open_error`'s own doc, `client::mod`'s
         /// `exec_data_rejected_by_an_old_daemon_names_the_stale_qsh_listen`).
         ack_before_splice: bool,
+        /// Whether the splice is the half-closing, stall-watched byte pump
+        /// `TCP_CONNECT` uses, without its tunnel permit (`FILE_DATA`
+        /// only, ADR-0029 decisions 15 and 16). No `ack_before_splice`:
+        /// the requester's first read is the host's first `FILE_DATA`
+        /// frame (or the stream's reset), so a header the host refuses
+        /// reaches it as a reset, as for `TCP_CONNECT`.
+        file_splice: bool,
     },
     /// Claim an already-open QUIC stream the target opened
     /// (`LocalctlDaemon::serve_tcp_accepted`'s own path) instead of
@@ -2026,24 +2051,35 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
             tunnel_permit: false,
             reset_on_uds_eof: false,
             ack_before_splice: false,
+            file_splice: false,
         }),
         Some(wire::StreamKind::TcpConnect) => Some(LocalStreamRelay::OpenBidiAndSplice {
             priority: wire::PRIORITY_TUNNEL,
             tunnel_permit: true,
             reset_on_uds_eof: false,
             ack_before_splice: false,
+            file_splice: false,
         }),
         Some(wire::StreamKind::ExecData) => Some(LocalStreamRelay::OpenBidiAndSplice {
             priority: wire::PRIORITY_EXEC_DATA,
             tunnel_permit: false,
             reset_on_uds_eof: true,
             ack_before_splice: true,
+            file_splice: false,
+        }),
+        // ADR-0029 decision 16: `FILE_DATA` rides the `LOCAL_STREAM`
+        // conduit with no new `LocalStreamKind`. Authorization and the
+        // state-path check were the target's, at the control request that
+        // minted the ticket; this only relays bytes.
+        Some(wire::StreamKind::FileData) => Some(LocalStreamRelay::OpenBidiAndSplice {
+            priority: wire::PRIORITY_TUNNEL,
+            tunnel_permit: false,
+            reset_on_uds_eof: false,
+            ack_before_splice: false,
+            file_splice: true,
         }),
         Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
-        // ADR-0029 decision 16: the reverse route carries no file transfer
-        // yet, and the controller answers the four file ops UNSUPPORTED, so
-        // no ticket exists for a `FILE_DATA` stream to redeem.
-        Some(wire::StreamKind::FileData) | Some(wire::StreamKind::Unspecified) | None => None,
+        Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 

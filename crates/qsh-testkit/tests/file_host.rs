@@ -1,10 +1,10 @@
-//! The host control plane of the remote file ops
-//! (ADR-0029 decisions 3, 4-6, 5, 6-4 to 6-6, 8, 9, 12 and 20; ADR-0045
-//! decision 18), driven end to end by a raw wire requester. There is no
-//! client in this step, so each request is a hand-built `ControlMessage`
-//! sent on a real connection, and the reply is read back the same way. Data
-//! never flows: a `file.read`/`file.write` ticket is only ever issued, then
-//! dropped or left to expire (the `FILE_DATA` stream lands in Step 13).
+//! The host side of the remote file ops: the control plane (ADR-0029
+//! decisions 3, 4-6, 5, 6-4 to 6-6, 8, 9, 12 and 20; ADR-0045 decision 18)
+//! and the `FILE_DATA` data plane (decisions 7, 9, 10, 11, 13 and 15),
+//! driven end to end by a raw wire requester. There is no client in this
+//! file, so each request is a hand-built `ControlMessage` sent on a real
+//! connection, the reply is read back the same way, and a `FILE_DATA` stream
+//! is a bare framed bidi stream opened with the ticket the reply carried.
 //!
 //! Every host here gets its authorizer from [`qsh_core::acl::load_or_deny`]
 //! over a sandbox whose `trust.toml` and `acl.toml` are written by hand, so
@@ -33,16 +33,19 @@ use qsh_core::audit::AuditRecord;
 use qsh_core::client::Session;
 use qsh_core::config::{AuditConfig, Paths};
 use qsh_core::file::guard::{CountingNormalizer, FsNormalizer, NormalizeError, Normalizer};
+use qsh_core::file::host::{FreeSpace, WriteGate};
 use qsh_core::server::Server;
 use qsh_core::trust::SharedTrustStore;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{
-    self, ControlMessage, FILE_LIST_DIR_MAX, FILE_LIST_PAGE_MAX, control_message, response,
+    self, ControlMessage, FILE_CHUNK_MAX, FILE_LIST_DIR_MAX, FILE_LIST_PAGE_MAX,
+    FILE_WRITE_FREE_RESERVE, FileFrame, FileWriteResult, StreamHeader, control_message, file_frame,
+    response,
 };
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
 use qsh_testkit::pair::HostedPair;
 use qsh_testkit::reverse::{ReversePairHarness, wait_for};
-use qsh_transport::{Principal, StaticTrust};
+use qsh_transport::{FramedStream, Principal, ReadError, StaticTrust, StreamError};
 
 // ---------------------------------------------------------------------------
 // Sandbox
@@ -88,6 +91,10 @@ struct Env {
     trust: Arc<SharedTrustStore>,
     client: TestIdentity,
     normalizer: Arc<CountingNormalizer<Switch>>,
+    /// An injected free-space probe (production uses `fstatvfs`).
+    free_space: Option<Arc<dyn FreeSpace>>,
+    /// An injected hold on the disk writer (production has none).
+    write_gate: Option<Arc<dyn WriteGate>>,
 }
 
 fn write_private(path: &Path, bytes: &[u8]) {
@@ -141,7 +148,21 @@ impl Env {
             trust,
             client,
             normalizer: Arc::new(CountingNormalizer::new(Switch { lexical: false })),
+            free_space: None,
+            write_gate: None,
         }
+    }
+
+    /// Make every `file.write` see `probe` as the free-space reading.
+    fn with_free_space(mut self, probe: Arc<dyn FreeSpace>) -> Self {
+        self.free_space = Some(probe);
+        self
+    }
+
+    /// Hold every disk write behind `gate`.
+    fn with_write_gate(mut self, gate: Arc<dyn WriteGate>) -> Self {
+        self.write_gate = Some(gate);
+        self
     }
 
     /// Use the lexical normalizer (see [`Switch`]).
@@ -216,6 +237,12 @@ impl Env {
     fn wire(&self, server: &Server) {
         server.set_path_normalizer(self.normalizer.clone() as Arc<dyn Normalizer>);
         server.set_file_host(self.paths.clone(), self.audit_cfg.clone());
+        if let Some(probe) = &self.free_space {
+            server.set_free_space(Arc::clone(probe));
+        }
+        if let Some(gate) = &self.write_gate {
+            server.set_file_write_gate(Arc::clone(gate));
+        }
     }
 
     fn share_path(&self, rel: &str) -> String {
@@ -1148,10 +1175,27 @@ async fn audit_has_path_but_no_payload<R: Route>() {
     // The path as sent, `..` and all, is the resource; the canonical form
     // and the bytes behind it are not.
     let sent = env.share_path("sub/../payload.txt");
-    conn.read(&sent).await.read();
-    conn.write(&env.share_path("sentinel-name.txt"), true, "")
-        .await
-        .write();
+    // Content bytes really flow over `FILE_DATA` in both directions, so the
+    // absence below is a property of the audit record, not of a transfer that
+    // never happened.
+    let (downloaded, end) = conn.get(&sent).await;
+    assert_eq!(downloaded, b"SENTINEL-FILE-CONTENT");
+    assert_eq!(end.size, downloaded.len() as u64);
+    let uploaded = b"SENTINEL-UPLOAD-CONTENT".to_vec();
+    let result = conn
+        .put(
+            &env.share_path("sentinel-name.txt"),
+            &Put::new(uploaded.len()),
+            &uploaded,
+        )
+        .await;
+    assert!(result.ok, "{result:?}");
+    assert_eq!(
+        std::fs::read(env.share.join("sentinel-name.txt")).unwrap(),
+        uploaded
+    );
+
+    // The data plane adds no line: two control requests, two lines.
     let records = file_records(&h);
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].resource, sent);
@@ -1169,7 +1213,10 @@ async fn audit_has_path_but_no_payload<R: Route>() {
         "auth_path",
         "peer_addr",
     ];
-    for record in &records {
+    // Every record the host wrote, not only the file ones.
+    let everything = h.audit().records();
+    assert!(everything.len() >= records.len());
+    for record in &everything {
         let value = serde_json::to_value(record).unwrap();
         let keys: Vec<&str> = value
             .as_object()
@@ -1187,8 +1234,13 @@ async fn audit_has_path_but_no_payload<R: Route>() {
             );
         }
         let text = value.to_string();
-        assert!(!text.contains("SENTINEL-FILE-CONTENT"), "{text}");
-        assert!(!text.contains("TOPSECRET"), "{text}");
+        for needle in [
+            "SENTINEL-FILE-CONTENT",
+            "SENTINEL-UPLOAD-CONTENT",
+            "TOPSECRET",
+        ] {
+            assert!(!text.contains(needle), "{needle} in {text}");
+        }
     }
     h.shutdown().await;
 }
@@ -1344,3 +1396,842 @@ async fn acl_check_agrees_with_enforcement<R: Route>() {
 both_routes!(acl_check_agrees_with_enforcement =>
     acl_check_path_agrees_with_enforcement_forward,
     acl_check_path_agrees_with_enforcement_reverse);
+
+// ---------------------------------------------------------------------------
+// FILE_DATA: the data plane
+// ---------------------------------------------------------------------------
+
+/// Bound on every "the host answers" wait of the data plane.
+const STEP: Duration = Duration::from_secs(20);
+
+fn digest(bytes: &[u8]) -> Vec<u8> {
+    blake3::hash(bytes).as_bytes().to_vec()
+}
+
+/// Deterministic content that does not repeat at the chunk size, so a
+/// dropped, duplicated or reordered chunk changes the bytes.
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| {
+            (i.wrapping_mul(131)
+                .wrapping_add(i >> 8)
+                .wrapping_add(usize::from(seed))
+                % 251) as u8
+        })
+        .collect()
+}
+
+/// The temp files (`.<name>.qsh-<16 hex>.part`) directly inside `dir`.
+fn temps(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .filter_map(|entry| {
+            let name = entry.expect("entry").file_name().into_string().ok()?;
+            (name.starts_with('.') && name.contains(".qsh-") && name.ends_with(".part"))
+                .then_some(name)
+        })
+        .collect()
+}
+
+async fn wait_no_temps(dir: &Path) {
+    let dir = dir.to_path_buf();
+    wait_for(STEP, || temps(&dir).is_empty().then_some(())).await;
+}
+
+/// The shape of a `file.write` request.
+#[derive(Clone)]
+struct Put {
+    size: u64,
+    mode: u32,
+    overwrite: bool,
+    preserve: bool,
+    mtime: i64,
+    name_if_dir: String,
+}
+
+impl Put {
+    fn new(size: usize) -> Self {
+        Self {
+            size: size as u64,
+            mode: 0o644,
+            overwrite: true,
+            preserve: false,
+            mtime: 0,
+            name_if_dir: String::new(),
+        }
+    }
+
+    fn no_clobber(mut self) -> Self {
+        self.overwrite = false;
+        self
+    }
+
+    fn mode(mut self, mode: u32) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    fn preserving(mut self, mtime: i64) -> Self {
+        self.preserve = true;
+        self.mtime = mtime;
+        self
+    }
+
+    fn into_dir(mut self, name: &str) -> Self {
+        self.name_if_dir = name.into();
+        self
+    }
+}
+
+impl Conn {
+    async fn write_with(&mut self, path: &str, put: &Put) -> Reply {
+        self.send(control_message::Body::FileWriteOpen(wire::FileWriteOpen {
+            path: path.into(),
+            size: put.size,
+            mode: put.mode,
+            overwrite: put.overwrite,
+            name_if_dir: put.name_if_dir.clone(),
+            preserve: put.preserve,
+            mtime: put.mtime,
+            ..Default::default()
+        }))
+        .await
+    }
+
+    /// A `FILE_DATA` stream redeeming `ticket`.
+    async fn data(&self, ticket: Vec<u8>) -> FramedStream {
+        let (send, recv) = self
+            .s
+            .connection()
+            .open_bi()
+            .await
+            .expect("open a data stream");
+        let mut data = FramedStream::data(send, recv);
+        data.send
+            .send(&StreamHeader::file_data(ticket))
+            .await
+            .expect("send the FILE_DATA header");
+        data
+    }
+
+    /// Open a write and start its data stream, sending nothing yet.
+    async fn begin_put(&mut self, path: &str, put: &Put) -> FramedStream {
+        let opened = self.write_with(path, put).await.write();
+        self.data(opened.ticket).await
+    }
+
+    /// A whole, well-formed upload: open, every chunk, `end`, finish, and the
+    /// host's `result`.
+    async fn put(&mut self, path: &str, put: &Put, bytes: &[u8]) -> FileWriteResult {
+        let mut data = self.begin_put(path, put).await;
+        send_data(&mut data, bytes).await;
+        send_end(&mut data, bytes.len() as u64, digest(bytes)).await;
+        data.send.finish().expect("finish the upload");
+        result_of(&mut data).await
+    }
+
+    /// A whole download: every `data` chunk (each within the cap) and the
+    /// `end` frame, after which the stream must finish cleanly.
+    async fn get(&mut self, path: &str) -> (Vec<u8>, wire::FileEnd) {
+        let opened = self.read(path).await.read();
+        let mut data = self.data(opened.ticket).await;
+        data.send.finish().expect("a read requester sends nothing");
+        let mut bytes = Vec::new();
+        let end = loop {
+            let frame = next_frame(&mut data)
+                .await
+                .expect("a readable stream")
+                .expect("the host ends with an `end` frame, not a bare finish");
+            match frame.body {
+                Some(file_frame::Body::Data(chunk)) => {
+                    assert!(chunk.len() <= FILE_CHUNK_MAX, "chunk over the cap");
+                    assert!(!chunk.is_empty(), "no empty chunks");
+                    bytes.extend_from_slice(&chunk);
+                }
+                Some(file_frame::Body::End(end)) => break end,
+                other => panic!("unexpected frame on a read stream: {other:?}"),
+            }
+        };
+        let after = next_frame(&mut data).await.expect("a clean finish");
+        assert!(after.is_none(), "nothing follows `end`: {after:?}");
+        (bytes, end)
+    }
+}
+
+async fn send_data(data: &mut FramedStream, bytes: &[u8]) {
+    for chunk in bytes.chunks(FILE_CHUNK_MAX) {
+        data.send
+            .send(&FileFrame::data(chunk.to_vec()))
+            .await
+            .expect("send a chunk");
+    }
+}
+
+async fn send_end(data: &mut FramedStream, size: u64, hash: Vec<u8>) {
+    data.send
+        .send(&FileFrame::end(size, hash))
+        .await
+        .expect("send `end`");
+}
+
+async fn next_frame(data: &mut FramedStream) -> Result<Option<FileFrame>, StreamError> {
+    tokio::time::timeout(STEP, data.recv.recv::<FileFrame>())
+        .await
+        .expect("the host answers in time")
+}
+
+async fn result_of(data: &mut FramedStream) -> FileWriteResult {
+    match next_frame(data).await {
+        Ok(Some(FileFrame {
+            body: Some(file_frame::Body::Result(result)),
+        })) => result,
+        other => panic!("expected the host's `result` frame, got {other:?}"),
+    }
+}
+
+/// The reset code the host ended the stream with, past any frames already in
+/// flight.
+async fn reset_code_of(data: &mut FramedStream) -> u64 {
+    let end = tokio::time::timeout(STEP, async {
+        loop {
+            match data.recv.recv::<FileFrame>().await {
+                Ok(Some(_)) => continue,
+                other => break other,
+            }
+        }
+    })
+    .await
+    .expect("the host ends the stream in time");
+    match end {
+        Err(StreamError::Read(ReadError::Reset(code))) => code.into_inner(),
+        other => panic!("expected a reset, got {other:?}"),
+    }
+}
+
+const RESET_BAD_HEADER: u64 = 0x2001;
+const RESET_TUNNEL_STALLED: u64 = 0x200E;
+
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+}
+
+fn ino_of(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).expect("stat").ino()
+}
+
+// ---- capability --------------------------------------------------------
+
+async fn file_capability<R: Route>() {
+    let env = Env::new(Some("full"));
+    let h = R::start(&env).await;
+    let session = h.session().await;
+    assert!(
+        session.capabilities.iter().any(|c| c == "file.v1"),
+        "a unix host advertises file.v1: {:?}",
+        session.capabilities
+    );
+    session.close();
+    h.shutdown().await;
+}
+both_routes!(file_capability =>
+    file_v1_is_negotiated_by_a_unix_host_forward,
+    file_v1_is_negotiated_by_a_unix_host_reverse);
+
+// ---- file.read ---------------------------------------------------------
+
+async fn read_streams<R: Route>() {
+    let env = Env::new(Some("full"));
+    // Empty, one byte, exactly one chunk, a chunk and a bit, and a size that
+    // takes the send-depth yield several times over.
+    let sizes = [
+        0usize,
+        1,
+        FILE_CHUNK_MAX,
+        FILE_CHUNK_MAX + 1,
+        2 * 1024 * 1024 + 17,
+    ];
+    for (i, size) in sizes.iter().enumerate() {
+        std::fs::write(env.share.join(format!("r{i}.bin")), pattern(*size, i as u8)).unwrap();
+    }
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    h.audit().clear();
+    for (i, size) in sizes.iter().enumerate() {
+        let expected = pattern(*size, i as u8);
+        let (bytes, end) = conn.get(&env.share_path(&format!("r{i}.bin"))).await;
+        assert_eq!(bytes, expected, "size {size}");
+        assert_eq!(end.size, *size as u64, "size {size}");
+        assert_eq!(end.blake3, digest(&expected), "size {size}");
+    }
+    // The data plane writes no audit line of its own: the control request
+    // was the decision, and each of the five is one `file.read` line.
+    assert_eq!(file_records(&h).len(), sizes.len());
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(read_streams =>
+    file_read_streams_chunks_and_a_matching_end_forward,
+    file_read_streams_chunks_and_a_matching_end_reverse);
+
+async fn ticket_is_single_use<R: Route>() {
+    let env = Env::new(Some("full"));
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let opened = conn.read(&env.share_path("a.txt")).await.read();
+    let mut first = conn.data(opened.ticket.clone()).await;
+    let frame = next_frame(&mut first).await.unwrap().unwrap();
+    assert!(matches!(frame.body, Some(file_frame::Body::Data(_))));
+    // The ticket was removed at the first redemption.
+    let mut second = conn.data(opened.ticket).await;
+    assert_eq!(reset_code_of(&mut second).await, RESET_BAD_HEADER);
+    h.shutdown().await;
+}
+both_routes!(ticket_is_single_use =>
+    file_data_ticket_is_single_use_forward,
+    file_data_ticket_is_single_use_reverse);
+
+// ---- file.write: replacement ------------------------------------------
+
+async fn write_overwrites<R: Route>() {
+    let env = Env::new(Some("full"));
+    let old = b"old content that must stay whole until the new one is complete";
+    std::fs::write(env.share.join("a.txt"), old).unwrap();
+    // A second name for the same inode: replacement puts a new inode in the
+    // name, it does not rewrite the old one (ADR-0029 decision 7).
+    std::fs::hard_link(env.share.join("a.txt"), env.share.join("a.link")).unwrap();
+    let old_ino = ino_of(&env.share.join("a.txt"));
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let umask = qsh_core::file::host::process_umask();
+
+    // Half-way through, the destination is still the old file whole, and the
+    // new bytes are going to a temp file nobody can reach by the final name.
+    let bytes = pattern(300 * 1024, 7);
+    let mut data = conn
+        .begin_put(&env.share_path("a.txt"), &Put::new(bytes.len()))
+        .await;
+    send_data(&mut data, &bytes[..FILE_CHUNK_MAX * 3]).await;
+    let share = env.share.clone();
+    let names = wait_for(STEP, || {
+        let names = temps(&share);
+        (!names.is_empty()).then_some(names)
+    })
+    .await;
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].starts_with(".a.txt.qsh-"), "{names:?}");
+    assert_eq!(names[0].len(), ".a.txt.qsh-".len() + 16 + ".part".len());
+    assert_eq!(mode_of(&env.share.join(&names[0])), 0o600);
+    assert_eq!(std::fs::read(env.share.join("a.txt")).unwrap(), old);
+
+    send_data(&mut data, &bytes[FILE_CHUNK_MAX * 3..]).await;
+    send_end(&mut data, bytes.len() as u64, digest(&bytes)).await;
+    data.send.finish().unwrap();
+    let result = result_of(&mut data).await;
+    assert!(result.ok, "{result:?}");
+    assert!(result.overwritten, "{result:?}");
+    assert_eq!(std::fs::read(env.share.join("a.txt")).unwrap(), bytes);
+    assert_ne!(ino_of(&env.share.join("a.txt")), old_ino);
+    assert_eq!(std::fs::read(env.share.join("a.link")).unwrap(), old);
+    assert_eq!(mode_of(&env.share.join("a.txt")), 0o644 & !umask);
+    assert!(temps(&env.share).is_empty());
+
+    // A new name: created, not overwritten.
+    let fresh = pattern(10, 1);
+    let result = conn
+        .put(&env.share_path("new.txt"), &Put::new(fresh.len()), &fresh)
+        .await;
+    assert!(result.ok && !result.overwritten, "{result:?}");
+    assert_eq!(std::fs::read(env.share.join("new.txt")).unwrap(), fresh);
+
+    // `-p`: the mode exactly, and the modification time.
+    let result = conn
+        .put(
+            &env.share_path("kept.txt"),
+            &Put::new(fresh.len()).mode(0o751).preserving(1_000_000_000),
+            &fresh,
+        )
+        .await;
+    assert!(result.ok, "{result:?}");
+    let kept = env.share.join("kept.txt");
+    assert_eq!(mode_of(&kept), 0o751);
+    let mtime = std::fs::metadata(&kept).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime,
+        std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    );
+
+    // Into an existing directory under the sent name.
+    let result = {
+        let opened = conn
+            .write_with(
+                &env.share_path(""),
+                &Put::new(fresh.len()).into_dir("into.txt"),
+            )
+            .await
+            .write();
+        assert!(opened.into_dir);
+        let mut data = conn.data(opened.ticket).await;
+        send_data(&mut data, &fresh).await;
+        send_end(&mut data, fresh.len() as u64, digest(&fresh)).await;
+        data.send.finish().unwrap();
+        result_of(&mut data).await
+    };
+    assert!(result.ok, "{result:?}");
+    assert_eq!(std::fs::read(env.share.join("into.txt")).unwrap(), fresh);
+
+    // A transfer slot is free again the moment the result is visible: many
+    // more sequential transfers than the per-principal limit (4) all open.
+    for i in 0..8u8 {
+        let body = pattern(1000, i);
+        let result = conn
+            .put(&env.share_path("loop.txt"), &Put::new(body.len()), &body)
+            .await;
+        assert!(result.ok, "round {i}: {result:?}");
+        let (back, end) = conn.get(&env.share_path("loop.txt")).await;
+        assert_eq!(back, body);
+        assert_eq!(end.blake3, digest(&body));
+    }
+    assert!(temps(&env.share).is_empty());
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(write_overwrites =>
+    file_write_overwrites_atomically_by_default_forward,
+    file_write_overwrites_atomically_by_default_reverse);
+
+async fn write_no_clobber<R: Route>() {
+    let env = Env::new(Some("full"));
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+
+    // Already there at the open step: refused before any ticket.
+    let before = snapshot(&env.share);
+    let reply = conn
+        .write_with(&env.share_path("a.txt"), &Put::new(5).no_clobber())
+        .await;
+    assert_eq!(reply.code(), Some(ErrorCode::InvalidArgument), "{reply:?}");
+    assert_eq!(snapshot(&env.share), before);
+    assert_eq!(h.server().pending_tickets(), 0);
+
+    // Absent: created through a link, and no temp is left.
+    let body = pattern(5000, 3);
+    let result = conn
+        .put(
+            &env.share_path("fresh.txt"),
+            &Put::new(body.len()).no_clobber(),
+            &body,
+        )
+        .await;
+    assert!(result.ok && !result.overwritten, "{result:?}");
+    assert_eq!(std::fs::read(env.share.join("fresh.txt")).unwrap(), body);
+    assert!(temps(&env.share).is_empty());
+
+    // The race: absent when the ticket is issued, present when the data is
+    // done. The winner's bytes stay, the result says why, nothing is left.
+    let mut data = conn
+        .begin_put(
+            &env.share_path("race.txt"),
+            &Put::new(body.len()).no_clobber(),
+        )
+        .await;
+    std::fs::write(env.share.join("race.txt"), b"WINNER").unwrap();
+    send_data(&mut data, &body).await;
+    send_end(&mut data, body.len() as u64, digest(&body)).await;
+    data.send.finish().unwrap();
+    let result = result_of(&mut data).await;
+    assert!(!result.ok, "{result:?}");
+    assert_eq!(result.code, "INVALID_ARGUMENT");
+    assert!(!result.overwritten);
+    assert_eq!(
+        std::fs::read(env.share.join("race.txt")).unwrap(),
+        b"WINNER"
+    );
+    assert!(temps(&env.share).is_empty());
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(write_no_clobber =>
+    file_write_no_clobber_never_replaces_an_existing_file_forward,
+    file_write_no_clobber_never_replaces_an_existing_file_reverse);
+
+// ---- file.write: interruption -------------------------------------------
+
+async fn interrupted_by_connection_loss<R: Route>() {
+    let env = Env::new(Some("full"));
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let before = snapshot(&env.share);
+    let bytes = pattern(200 * 1024, 5);
+    let mut data = conn
+        .begin_put(&env.share_path("a.txt"), &Put::new(bytes.len()))
+        .await;
+    send_data(&mut data, &bytes[..FILE_CHUNK_MAX * 2]).await;
+    let share = env.share.clone();
+    wait_for(STEP, || (!temps(&share).is_empty()).then_some(())).await;
+    conn.s.connection().close(0, b"gone");
+    wait_no_temps(&env.share).await;
+    assert_eq!(snapshot(&env.share), before, "the destination is untouched");
+    h.shutdown().await;
+}
+both_routes!(interrupted_by_connection_loss =>
+    interrupted_file_write_removes_its_temp_file_on_connection_loss_forward,
+    interrupted_file_write_removes_its_temp_file_on_connection_loss_reverse);
+
+async fn interrupted_by_cancel<R: Route>() {
+    let env = Env::new(Some("full"));
+    std::fs::write(env.share.join("a.txt"), b"old").unwrap();
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let before = snapshot(&env.share);
+    let bytes = pattern(200 * 1024, 5);
+    let mut data = conn
+        .begin_put(&env.share_path("a.txt"), &Put::new(bytes.len()))
+        .await;
+    send_data(&mut data, &bytes[..FILE_CHUNK_MAX * 2]).await;
+    let share = env.share.clone();
+    wait_for(STEP, || (!temps(&share).is_empty()).then_some(())).await;
+    // Ctrl-C of a client: the stream is reset, the connection stays.
+    data.send.reset(0x2007);
+    wait_no_temps(&env.share).await;
+    assert_eq!(snapshot(&env.share), before);
+    assert_eq!(h.server().pending_tickets(), 0);
+    // The connection is still good for the next transfer.
+    let result = conn
+        .put(&env.share_path("a.txt"), &Put::new(bytes.len()), &bytes)
+        .await;
+    assert!(result.ok, "{result:?}");
+    h.shutdown().await;
+}
+both_routes!(interrupted_by_cancel =>
+    interrupted_file_write_removes_its_temp_file_on_cancel_forward,
+    interrupted_file_write_removes_its_temp_file_on_cancel_reverse);
+
+/// A disk writer that waits until it is released, so a transfer's local
+/// write can be held still on demand (the ADR-0037 stall).
+struct Hold {
+    open: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Hold {
+    fn closed() -> Arc<Self> {
+        Arc::new(Self {
+            open: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        })
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+impl WriteGate for Hold {
+    fn before_write(&self, _written: u64) {
+        let guard = self.open.lock().unwrap();
+        // Bounded, so a failed test cannot park a blocking thread forever.
+        let _ = self
+            .cv
+            .wait_timeout_while(guard, Duration::from_secs(60), |open| !*open)
+            .unwrap();
+    }
+}
+
+async fn interrupted_by_the_stall_ledger<R: Route>() {
+    let hold = Hold::closed();
+    let env = Env::new(Some("full")).with_write_gate(hold.clone() as Arc<dyn WriteGate>);
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+
+    // Four uploads whose disk writes are held: more than
+    // `MAX_STALLED_STREAMS_PER_CONNECTION` (3) stalled at once, so the
+    // ledger stops the oldest (ADR-0037 decision 3).
+    let size = 1024 * 1024;
+    let mut streams = Vec::new();
+    let mut bodies = Vec::new();
+    for i in 0..4u8 {
+        let body = pattern(size, i);
+        let mut data = conn
+            .begin_put(&env.share_path(&format!("s{i}.bin")), &Put::new(size))
+            .await;
+        send_data(&mut data, &body).await;
+        send_end(&mut data, size as u64, digest(&body)).await;
+        data.send.finish().unwrap();
+        streams.push(data);
+        bodies.push(body);
+    }
+
+    // Exactly one of them ends with the ledger's reset code, and its temp
+    // file goes while the other three are still held.
+    let (stopped, mut rest) = {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut handles = Vec::new();
+        for (i, mut data) in streams.into_iter().enumerate() {
+            let tx = tx.clone();
+            handles.push(tokio::spawn(async move {
+                let end = match data.recv.recv::<FileFrame>().await {
+                    Ok(Some(frame)) => Ok(frame),
+                    Ok(None) => Err(None),
+                    Err(StreamError::Read(ReadError::Reset(code))) => Err(Some(code.into_inner())),
+                    Err(other) => panic!("stream {i}: {other:?}"),
+                };
+                let _ = tx.send((i, end));
+            }));
+        }
+        drop(tx);
+        let first = tokio::time::timeout(STEP, rx.recv())
+            .await
+            .expect("the ledger stops a stalled upload in time")
+            .expect("a stream reports");
+        (first, (rx, handles))
+    };
+    let (stopped_index, outcome) = stopped;
+    assert_eq!(
+        outcome.map(|_| ()).unwrap_err(),
+        Some(RESET_TUNNEL_STALLED),
+        "stream {stopped_index} is stopped with the ledger's code"
+    );
+    let share = env.share.clone();
+    wait_for(STEP, || (temps(&share).len() == 3).then_some(())).await;
+    assert!(
+        !env.share.join(format!("s{stopped_index}.bin")).exists(),
+        "a stopped upload leaves no file"
+    );
+
+    // Release the disk: the three that were not stopped finish normally.
+    hold.release();
+    let mut ok = 0;
+    while let Some((i, outcome)) = tokio::time::timeout(STEP, rest.0.recv())
+        .await
+        .expect("the remaining uploads answer")
+    {
+        let frame = outcome.unwrap_or_else(|code| panic!("stream {i} ended with {code:?}"));
+        match frame.body {
+            Some(file_frame::Body::Result(result)) => {
+                assert!(result.ok, "stream {i}: {result:?}");
+                assert_eq!(
+                    std::fs::read(env.share.join(format!("s{i}.bin"))).unwrap(),
+                    bodies[i]
+                );
+                ok += 1;
+            }
+            other => panic!("stream {i}: {other:?}"),
+        }
+    }
+    assert_eq!(ok, 3);
+    wait_no_temps(&env.share).await;
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(interrupted_by_the_stall_ledger =>
+    interrupted_file_write_removes_its_temp_file_on_a_ledger_stop_forward,
+    interrupted_file_write_removes_its_temp_file_on_a_ledger_stop_reverse);
+
+// ---- file.write: integrity and violations --------------------------------
+
+async fn write_mismatch<R: Route>() {
+    let env = Env::new(Some("full"));
+    std::fs::write(env.share.join("a.txt"), b"old").unwrap();
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let before = snapshot(&env.share);
+    let body = pattern(70_000, 9);
+    let wrong = pattern(70_000, 10);
+
+    // (announced size, bytes sent, `end.size`, `end.blake3`)
+    type Case<'a> = (&'a str, usize, &'a [u8], u64, Vec<u8>);
+    let cases: [Case<'_>; 5] = [
+        (
+            "hash differs",
+            body.len(),
+            &body,
+            body.len() as u64,
+            digest(&wrong),
+        ),
+        (
+            "end size short",
+            body.len(),
+            &body,
+            body.len() as u64 - 1,
+            digest(&body),
+        ),
+        (
+            "fewer bytes than announced",
+            body.len() + 1,
+            &body,
+            body.len() as u64,
+            digest(&body),
+        ),
+        (
+            "short hash",
+            body.len(),
+            &body,
+            body.len() as u64,
+            vec![0u8; 3],
+        ),
+        ("no hash", body.len(), &body, body.len() as u64, Vec::new()),
+    ];
+    for (name, announced, sent, end_size, end_hash) in cases {
+        let mut data = conn
+            .begin_put(&env.share_path("a.txt"), &Put::new(announced))
+            .await;
+        send_data(&mut data, sent).await;
+        send_end(&mut data, end_size, end_hash).await;
+        data.send.finish().unwrap();
+        let result = result_of(&mut data).await;
+        assert!(!result.ok, "{name}: {result:?}");
+        assert_eq!(result.code, "INVALID_ARGUMENT", "{name}");
+        assert!(!result.overwritten, "{name}");
+        wait_no_temps(&env.share).await;
+        assert_eq!(snapshot(&env.share), before, "{name}: nothing was renamed");
+    }
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(write_mismatch =>
+    file_write_size_or_hash_mismatch_renames_nothing_forward,
+    file_write_size_or_hash_mismatch_renames_nothing_reverse);
+
+async fn write_violations<R: Route>() {
+    let env = Env::new(Some("full"));
+    std::fs::write(env.share.join("a.txt"), b"old").unwrap();
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let before = snapshot(&env.share);
+    let body = pattern(70_000, 9);
+
+    // More bytes than `FileWriteOpen.size`: cut on the spot.
+    let mut data = conn
+        .begin_put(&env.share_path("a.txt"), &Put::new(body.len() - 1))
+        .await;
+    send_data(&mut data, &body).await;
+    assert_eq!(
+        reset_code_of(&mut data).await,
+        RESET_BAD_HEADER,
+        "excess bytes"
+    );
+    wait_no_temps(&env.share).await;
+    assert_eq!(snapshot(&env.share), before);
+
+    // A chunk over `FILE_CHUNK_MAX` (within the 64 KiB frame cap, so it
+    // reaches the host's check).
+    let mut data = conn
+        .begin_put(&env.share_path("a.txt"), &Put::new(FILE_CHUNK_MAX * 2))
+        .await;
+    data.send
+        .send(&FileFrame::data(vec![1u8; FILE_CHUNK_MAX + 1]))
+        .await
+        .unwrap();
+    assert_eq!(
+        reset_code_of(&mut data).await,
+        RESET_BAD_HEADER,
+        "over-cap chunk"
+    );
+
+    // A frame after `end`.
+    let mut data = conn.begin_put(&env.share_path("a.txt"), &Put::new(4)).await;
+    send_data(&mut data, b"abcd").await;
+    send_end(&mut data, 4, digest(b"abcd")).await;
+    data.send
+        .send(&FileFrame::data(b"more".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(
+        reset_code_of(&mut data).await,
+        RESET_BAD_HEADER,
+        "data after end"
+    );
+
+    // A second `end`.
+    let mut data = conn.begin_put(&env.share_path("a.txt"), &Put::new(4)).await;
+    send_data(&mut data, b"abcd").await;
+    send_end(&mut data, 4, digest(b"abcd")).await;
+    send_end(&mut data, 4, digest(b"abcd")).await;
+    assert_eq!(
+        reset_code_of(&mut data).await,
+        RESET_BAD_HEADER,
+        "end after end"
+    );
+
+    // A `result` frame sent by the requester.
+    let mut data = conn.begin_put(&env.share_path("a.txt"), &Put::new(4)).await;
+    data.send
+        .send(&FileFrame::result(true, "", "", false))
+        .await
+        .unwrap();
+    assert_eq!(
+        reset_code_of(&mut data).await,
+        RESET_BAD_HEADER,
+        "requester result"
+    );
+
+    // Finishing without any `end`.
+    let mut data = conn.begin_put(&env.share_path("a.txt"), &Put::new(4)).await;
+    send_data(&mut data, b"abcd").await;
+    data.send.finish().unwrap();
+    assert_eq!(reset_code_of(&mut data).await, RESET_BAD_HEADER, "no end");
+
+    wait_no_temps(&env.share).await;
+    assert_eq!(snapshot(&env.share), before, "nothing was renamed");
+    assert_eq!(h.server().pending_tickets(), 0);
+    h.shutdown().await;
+}
+both_routes!(write_violations =>
+    file_write_protocol_violations_reset_the_stream_and_rename_nothing_forward,
+    file_write_protocol_violations_reset_the_stream_and_rename_nothing_reverse);
+
+// ---- file.write: free space ----------------------------------------------
+
+struct Free(u64);
+
+impl FreeSpace for Free {
+    fn available_bytes(&self, _dir: &std::fs::File) -> std::io::Result<u64> {
+        Ok(self.0)
+    }
+}
+
+async fn write_free_space<R: Route>() {
+    // The reading is the reserve plus 99 bytes: a 99-byte file fits exactly, a
+    // 100-byte one does not (ADR-0029 decision 13).
+    let env = Env::new(Some("full"))
+        .with_free_space(Arc::new(Free(FILE_WRITE_FREE_RESERVE + 99)) as Arc<dyn FreeSpace>);
+    let h = R::start(&env).await;
+    let mut conn = Conn::open(&h).await;
+    let before = snapshot(&env.share);
+
+    let refused = conn
+        .write_with(&env.share_path("big.bin"), &Put::new(100))
+        .await;
+    assert_eq!(
+        refused.code(),
+        Some(ErrorCode::ResourceExhausted),
+        "{refused:?}"
+    );
+    assert_eq!(h.server().pending_tickets(), 0, "no ticket for a refusal");
+    assert_eq!(snapshot(&env.share), before, "no temp, no file");
+
+    let body = pattern(99, 2);
+    let result = conn
+        .put(&env.share_path("fits.bin"), &Put::new(99), &body)
+        .await;
+    assert!(result.ok, "{result:?}");
+    assert_eq!(std::fs::read(env.share.join("fits.bin")).unwrap(), body);
+
+    // The refusal is the same for an overwrite and for a write into a dir.
+    for put in [Put::new(100), Put::new(100).into_dir("x.bin")] {
+        let path = if put.name_if_dir.is_empty() {
+            env.share_path("fits.bin")
+        } else {
+            env.share_path("")
+        };
+        let refused = conn.write_with(&path, &put).await;
+        assert_eq!(refused.code(), Some(ErrorCode::ResourceExhausted));
+    }
+    h.shutdown().await;
+}
+both_routes!(write_free_space =>
+    file_write_refused_below_the_free_space_reserve_forward,
+    file_write_refused_below_the_free_space_reserve_reverse);

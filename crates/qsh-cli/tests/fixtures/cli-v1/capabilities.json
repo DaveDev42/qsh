@@ -5,7 +5,8 @@
       "exec",
       "session",
       "resume.v1",
-      "dial-filter.v1"
+      "dial-filter.v1",
+      "file.v1"
     ]
   },
   "ok": true,

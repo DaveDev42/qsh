@@ -400,6 +400,7 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
             tunnel_permit: false,
             reset_on_uds_eof: false,
             ack_before_splice: false,
+            file_splice: false,
         }),
     );
     assert_eq!(
@@ -409,6 +410,7 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
             tunnel_permit: false,
             reset_on_uds_eof: true,
             ack_before_splice: true,
+            file_splice: false,
         }),
         "EXEC_DATA must relay at PRIORITY_EXEC_DATA, take no tunnel permit, reset (not \
          finish) the QUIC send side on a clean UDS EOF, and get an explicit ack before the \
@@ -427,6 +429,7 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
             tunnel_permit: true,
             reset_on_uds_eof: false,
             ack_before_splice: false,
+            file_splice: false,
         }),
     );
     assert_eq!(
@@ -449,11 +452,19 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
         }),
         None,
     );
-    // `FILE_DATA` (ADR-0029 decision 16): the reverse route carries no file
-    // transfer yet, so the daemon refuses it before opening anything on QUIC.
+    // `FILE_DATA` (ADR-0029 decisions 15 and 16): relayed at band 0 through
+    // the half-closing, stall-watched splice, with no tunnel permit, no
+    // reset on a clean UDS EOF (the requester finishes its upload and keeps
+    // reading the host's `result`) and no ack frame.
     assert_eq!(
         local_stream_relay_kind(&wire::StreamHeader::file_data(vec![1, 2, 3])),
-        None,
+        Some(LocalStreamRelay::OpenBidiAndSplice {
+            priority: wire::PRIORITY_TUNNEL,
+            tunnel_permit: false,
+            reset_on_uds_eof: false,
+            ack_before_splice: false,
+            file_splice: true,
+        }),
     );
     // A kind value this build does not recognize at all — `stream_kind()`
     // returns `None` (`StreamKind::try_from` fails), which must be

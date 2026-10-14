@@ -1757,16 +1757,21 @@ fn file_constants_match_adr_0029() {
     assert_eq!(FILE_CHUNK_MAX, 32 * 1024);
     assert_eq!(FILE_LIST_PAGE_MAX, 512);
     assert_eq!(FILE_LIST_DIR_MAX, 65536);
+    assert_eq!(FILE_WRITE_FREE_RESERVE, 256 * 1024 * 1024);
     // A chunk plus its frame overhead fits one data frame.
     const { assert!(FILE_CHUNK_MAX + 64 <= DATA_FRAME_MAX) };
 }
 
-/// The capability string is defined ahead of the implementation and stays
-/// out of what this build advertises until the host serves the ops.
+/// `file.v1` is advertised exactly where the host serves the file ops: unix
+/// builds (the data plane is unix-only until M20, ADR-0029 decision 23).
 #[test]
-fn file_capability_is_defined_but_not_advertised() {
+fn file_capability_is_advertised_by_unix_builds_only() {
     assert_eq!(CAP_FILE_V1, "file.v1");
-    assert!(!LOCAL_CAPABILITIES.contains(&CAP_FILE_V1));
+    assert_eq!(LOCAL_CAPABILITIES.contains(&CAP_FILE_V1), cfg!(unix));
+    // Appended after the four that predate it, so the golden list only grows.
+    if cfg!(unix) {
+        assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_FILE_V1));
+    }
 }
 
 #[test]

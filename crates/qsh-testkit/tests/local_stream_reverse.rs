@@ -487,9 +487,64 @@ async fn a_forged_ticket_on_local_stream_is_rejected_promptly_never_a_hang() {
     harness.shutdown().await;
 }
 
+/// `FILE_DATA` (ADR-0029 decision 16) is relayable on `LOCAL_STREAM` with no
+/// new conduit kind: the daemon opens a QUIC stream for it, forwards the
+/// header, and becomes the half-closing byte pump (the `TCP_CONNECT` leg,
+/// without its tunnel permit). A ticket nobody issued is the target's own
+/// reset, relayed as an ended conduit: never the daemon's
+/// `INVALID_ARGUMENT` for an unrelayable kind (which is what a build before
+/// this relay answered), never a hang, never a frame. Bytes flowing through
+/// the relay need a target with a file host and a role plus a client that
+/// speaks `FILE_DATA`, which is the `qsh cp` round trip over a reverse
+/// registration; `file_host.rs` drives the host's data plane over the
+/// reverse-route pair (the target dials the controller) instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_data_header_on_local_stream_is_relayed_and_a_forged_ticket_is_reset_by_the_target()
+{
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (_dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+
+        let mut data = connect_stream(&localctl.socket_path, "widget").await;
+        data.send(&wire::StreamHeader::file_data(vec![0xCCu8; TICKET_LEN]))
+            .await
+            .expect("send StreamHeader");
+
+        let outcome = tokio::time::timeout(TIMEOUT, data.recv::<wire::FileFrame>())
+            .await
+            .expect("a forged ticket must be rejected promptly, never hang");
+        match outcome {
+            // The pump ends the conduit when the target resets the stream;
+            // whether that reads as an end or as a framing error, it is not
+            // an answer.
+            Ok(None) | Err(_) => {}
+            Ok(Some(frame)) => {
+                panic!("a forged ticket must never be answered as if it redeemed: {frame:?}")
+            }
+        }
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
 /// A `LOCAL_STREAM` conduit's first post-ack frame must be one of the
 /// relayable kinds (`SESSION_DATA`, `TCP_CONNECT`, `TCP_ACCEPTED`,
-/// `EXEC_DATA` — HARD RULES: "a non-SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED/
+/// `EXEC_DATA`, `FILE_DATA` — HARD RULES: "a non-SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED/
 /// EXEC_DATA or missing header -> LocalError INVALID_ARGUMENT, nothing
 /// opened on QUIC") — the real, end-to-end version of
 /// `crate::localctl::daemon`'s own unit test

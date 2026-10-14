@@ -35,9 +35,13 @@
 //! returns a stopped stream's unread bytes to the connection's credit at
 //! once, which is what un-starves the shell.
 //!
-//! Only tunnel splices register here: control, `SESSION_DATA` and
+//! Only tunnel splices and `FILE_DATA` transfers register here (ADR-0029
+//! decision 15 widens the scope by the second): control, `SESSION_DATA` and
 //! `EXEC_DATA` streams never appear in a ledger and are never stopped by
-//! one (decision 5). There is no configuration switch (decision 9).
+//! one (decision 5). A `file.write`'s "local write" is the hand-off of each
+//! received chunk to the disk writer (`server/file_data.rs`), and a stopped
+//! write is cleaned up like any other failed one. There is no configuration
+//! switch (decision 9).
 //!
 //! The ledger holds byte *counts* and timestamps only — there is no field a
 //! payload byte could be put in (`crate::tunnel::splice`'s module doc).
@@ -153,8 +157,9 @@ impl StallParams {
 /// byte counts the eviction diagnostic reports, and the eviction signal.
 pub(crate) struct StreamTrack {
     id: u64,
-    /// `host:port` or `forward_id` — the tunnel identifier the diagnostic
-    /// names (ADR-0037 decision 7). Never payload.
+    /// `host:port` or `forward_id` for a tunnel, `file.read`/`file.write`
+    /// for a file transfer — the identifier the diagnostic names (ADR-0037
+    /// decision 7). Never payload, never a path.
     label: String,
     epoch: Instant,
     /// Microseconds since `epoch`, plus one, at which the receive-direction

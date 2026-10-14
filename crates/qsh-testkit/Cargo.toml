@@ -30,6 +30,9 @@ zeroize.workspace = true
 
 [dev-dependencies]
 qsh-proto.workspace = true
+# `tests/file_host.rs` hashes the bytes it sends and receives over `FILE_DATA`
+# the way the host does (ADR-0029 decision 10).
+blake3.workspace = true
 # `tests/resume_secrecy.rs` captures every tracing event the host and the
 # client emit during a resume and asserts the credential is in none of them.
 tracing.workspace = true
