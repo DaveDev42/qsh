@@ -250,7 +250,7 @@ pub const ACL_POLICY_INVALID_CODE: &str = "acl_policy_invalid";
 
 /// [`StartupDiagnostic::render`]'s headline fragment (F4, the M5 plan (2473c88)
 /// Step 6 PR 6a adversarial ②) — pulled out to a named const, rather than
-/// inlined in the `format!` below, so `crates/qsh-core/tests/acl_docs.rs`
+/// inlined in the `format!` below, so `crates/qsh-core/tests/it/acl_docs.rs`
 /// can pin it against `README.md`/`docs/CLI.md` byte-for-byte
 /// (`doctor.rs`'s `CONTROLLER_UNREACHABLE` precedent: the wording's one
 /// source of truth is code, and the docs are gated to match it, not the

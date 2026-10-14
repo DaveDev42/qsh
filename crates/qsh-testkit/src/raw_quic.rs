@@ -6,7 +6,7 @@
 //! source address `qsh_transport::Dialer::dial` has no seam to choose
 //! (it always binds `0.0.0.0`).
 //!
-//! Moved here from `crates/qsh-cli/tests/adversarial_load.rs` (docs/campaigns/
+//! Moved here from `crates/qsh-cli/tests/it/adversarial_load.rs` (docs/campaigns/
 //! m8-adversarial-load.md §3, adversarial review finding B13): `qsh-cli`
 //! already carries `qsh-testkit` as a dev-dependency, and this crate already
 //! depends on `quinn` as a real (non-dev) dependency, so adding `rustls` here

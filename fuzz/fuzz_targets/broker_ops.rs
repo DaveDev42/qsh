@@ -5,9 +5,9 @@
 //! replays a *sequence* of ops against a model and asserts the broker's
 //! real state matches the model's prediction after every op — the harness
 //! doing the decoding, modeling, and assertion lives in
-//! `crates/qsh-core/tests/support/broker_ops_harness.rs` and is included
+//! `crates/qsh-core/tests/it/support/broker_ops_harness.rs` and is included
 //! here by path so the same file also runs as a plain nextest binary
-//! (`crates/qsh-core/tests/broker_ops_corpus.rs`, seed replay) with no
+//! (`crates/qsh-core/tests/it/broker_ops_corpus.rs`, seed replay) with no
 //! divergence between what the fuzzer explores and what CI replays.
 //!
 //! Ops reach real production call sites, not synthetic shortcuts:
@@ -32,7 +32,7 @@
 //! covers.
 #![no_main]
 
-#[path = "../../crates/qsh-core/tests/support/broker_ops_harness.rs"]
+#[path = "../../crates/qsh-core/tests/it/support/broker_ops_harness.rs"]
 mod harness;
 
 use libfuzzer_sys::fuzz_target;

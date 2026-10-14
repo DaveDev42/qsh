@@ -11,7 +11,7 @@
 # this needs no `--renormalize` pass.
 * text=auto eol=lf
 
-# broker_ops_corpus.rs (crates/qsh-core/tests/broker_ops_corpus.rs) is the
+# broker_ops_corpus.rs (crates/qsh-core/tests/it/broker_ops_corpus.rs) is the
 # first checked-in-file consumer that compares bytes exactly, not lines —
 # it replays fuzz/corpus/broker_ops/ seeds through a fixed op byte-format.
 # A future seed with no NUL byte and a stray CRLF pair would fall under

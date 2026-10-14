@@ -61,11 +61,11 @@
   | `[recovery].min_dead_after_ms` | 1000 | 같음 | `PathWatchConfig::min_dead_after` |
   | `[recovery].strikes` | 3 | 같음 | `PathWatchConfig::strikes` |
 
-  `[recovery]` 세 값의 범위는 감지 예산 회귀 테스트가 지키는 상한 아래로 잡는다. `crates/qsh-cli/tests/reverse_blackout.rs`·`crates/qsh-cli/tests/attach_recovery.rs`·`crates/qsh-testkit/tests/reverse_resume_chaos.rs`의 `detection_budget`이 이미 "어떤 `PathWatchConfig`도 스스로 올릴 수 없는 상한"을 고정하고 있으므로, 설정으로 그 상한을 넘길 수 있게 되면 그 테스트들이 지키던 성질이 사라진다. 구체적인 숫자는 구현 시 그 상한에서 역산한다.
+  `[recovery]` 세 값의 범위는 감지 예산 회귀 테스트가 지키는 상한 아래로 잡는다. `crates/qsh-cli/tests/it/reverse_blackout.rs`·`crates/qsh-cli/tests/it/attach_recovery.rs`·`crates/qsh-testkit/tests/it/reverse_resume_chaos.rs`의 `detection_budget`이 이미 "어떤 `PathWatchConfig`도 스스로 올릴 수 없는 상한"을 고정하고 있으므로, 설정으로 그 상한을 넘길 수 있게 되면 그 테스트들이 지키던 성질이 사라진다. 구체적인 숫자는 구현 시 그 상한에서 역산한다.
 
 - `config.toml`은 기동 시 1회 읽힌다. 두 절도 같다. 값을 바꾸면 그 프로세스를 재시작해야 반영된다.
 
-- `crates/qsh-transport/tests/loopback.rs`의 `keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips`에서 `MAX_IDLE_TIMEOUT == 45초` 단언은 그대로 남고 이 ADR이 그 단언을 우연한 현황에서 계약으로 승격한다. 같은 테스트의 `KEEP_ALIVE_INTERVAL == 15초` 단언은 "설정이 없을 때의 기본값"을 고정하는 단언으로 뜻이 바뀐다. 구현은 범위 밖 값이 `CONFIG_ERROR`로 fail closed되는 테스트를 `ReverseConfig::backoff`의 검증 테스트와 같은 형식으로 더한다.
+- `crates/qsh-transport/tests/it/loopback.rs`의 `keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips`에서 `MAX_IDLE_TIMEOUT == 45초` 단언은 그대로 남고 이 ADR이 그 단언을 우연한 현황에서 계약으로 승격한다. 같은 테스트의 `KEEP_ALIVE_INTERVAL == 15초` 단언은 "설정이 없을 때의 기본값"을 고정하는 단언으로 뜻이 바뀐다. 구현은 범위 밖 값이 `CONFIG_ERROR`로 fail closed되는 테스트를 `ReverseConfig::backoff`의 검증 테스트와 같은 형식으로 더한다.
 
 - `docs/design/testing.md` L4 표의 `blackhole(dur)` 행("PTO/keep-alive 튜닝, idle timeout 동작")은 chaos 하네스가 기본값으로 도는 한 그대로다. 이 ADR은 그 행이 검증하는 대상을 바꾸지 않는다.
 

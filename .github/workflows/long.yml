@@ -75,16 +75,16 @@ jobs:
       - name: Blackout round — 60s control
         run: |
           set -o pipefail
-          cargo nextest run --profile long -p qsh-cli --test reverse_blackout \
-            -E 'test(a_real_60_second_blackout_survives_and_resumes_the_same_session)' \
+          cargo nextest run --profile long -p qsh-cli --test it \
+            -E 'test(/^reverse_blackout::/) & test(a_real_60_second_blackout_survives_and_resumes_the_same_session)' \
             2>&1 | tee "${{ runner.temp }}/blackout.log"
         env:
           QSH_ACCEPTANCE_SLOW: 1
       - name: Blackout round — dispatched long round
         run: |
           set -o pipefail
-          cargo nextest run --profile long -p qsh-cli --test reverse_blackout \
-            -E 'test(a_real_30_minute_blackout_is_resumed_within_the_ttl)' \
+          cargo nextest run --profile long -p qsh-cli --test it \
+            -E 'test(/^reverse_blackout::/) & test(a_real_30_minute_blackout_is_resumed_within_the_ttl)' \
             2>&1 | tee -a "${{ runner.temp }}/blackout.log"
         env:
           QSH_ACCEPTANCE_LONG: 1

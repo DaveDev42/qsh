@@ -131,7 +131,7 @@ const _: () = assert!(
 /// that two independent copies of this format string is exactly how one
 /// gets a remedy and the other does not. The observation clause
 /// (`cannot listen on {bind}: {err}`) stays byte-identical to the
-/// pre-M9 wording: `qsh-cli/tests/exit_code_matrix.rs` asserts
+/// pre-M9 wording: `qsh-cli/tests/it/exit_code_matrix.rs` asserts
 /// `starts_with("qsh: cannot listen on")` on the rendered line.
 pub fn bind_unavailable(bind: &SocketAddr, err: &dyn std::fmt::Display) -> OpError {
     OpError::new(

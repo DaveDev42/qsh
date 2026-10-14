@@ -68,8 +68,8 @@ pub use role::{TrustRole, TrustRoleParseError};
 /// (`so this command uses port 4433 everywhere that address goes`), and
 /// what to do about it (`Re-run with an explicit \`host:port\` to use a
 /// different port.`). The leading seven words are byte-identical to the
-/// pre-M9 wording on purpose: `qsh-cli/tests/init_trust.rs` and
-/// `qsh-cli/tests/trust_pairing_live.rs` each assert
+/// pre-M9 wording on purpose: `qsh-cli/tests/it/init_trust.rs` and
+/// `qsh-cli/tests/it/trust_pairing_live.rs` each assert
 /// `stderr.matches("assuming port 4433").count() == 1`, and this notice
 /// fires from three call sites (`qsh trust add`, `qsh trust accept`, and
 /// `qsh serve --to`) that share one wording rather than one

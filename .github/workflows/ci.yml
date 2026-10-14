@@ -129,7 +129,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y tmux vim zsh curl
-      - run: cargo nextest run -p qsh-cli --test tui_expect
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^tui_expect::/)'
         env:
           QSH_ACCEPTANCE_STRICT: bash,zsh,vim,tmux
       # ADR-0019 / docs/CLI.md §6.9: a real `curl --socks5-hostname`
@@ -143,7 +143,7 @@ jobs:
       # the promise is explicit, and `QSH_ACCEPTANCE_STRICT` below turns a
       # missing install into a failure instead of a skip, same discipline as
       # `tui_expect` above.
-      - run: cargo nextest run -p qsh-cli --test socks_curl
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^socks_curl::/)'
         env:
           QSH_ACCEPTANCE_STRICT: curl
       # The literal 60-second reverse-route blackout (M3 plan Step 8 (2473c88)
@@ -152,7 +152,7 @@ jobs:
       # "no sleep()" discipline names this test as the one deliberate
       # exception) while still making it an always-on gate here, the same
       # way `QSH_ACCEPTANCE_STRICT` does above for the interactive shell set.
-      - run: cargo nextest run -p qsh-cli --test reverse_blackout
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^reverse_blackout::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
       # The two ~50-second `idle_timeout` tests (`docs/design/testing.md` L4,
@@ -171,7 +171,7 @@ jobs:
       # (`docs/design/testing.md` L4). Same `QSH_ACCEPTANCE_SLOW` gate as
       # above. On a runner (`CI` set) a missing LAN address is a failure,
       # not a skip (`net_probe::require_non_loopback_v4`).
-      - run: cargo nextest run -p qsh-testkit --test supervised_dynamic_blackhole
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^supervised_dynamic_blackhole::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
@@ -188,10 +188,10 @@ jobs:
       # coverage is the `test`/`clippy`/`arch` matrix jobs' unconditional
       # `cargo nextest run --workspace`/`clippy --all-targets`, which build
       # and skip-run these same two binaries there.
-      - run: cargo nextest run -p qsh-testkit --test tunnel_throughput
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_throughput::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
-      - run: cargo nextest run -p qsh-testkit --test tunnel_echo_under_load
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_echo_under_load::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
       # ADR-0037 (`docs/design/testing.md` L9/L10): the starvation axis next
@@ -199,7 +199,7 @@ jobs:
       # not stop PTY output or push PTY echo p95 past measured RTT + 10ms;
       # `QSH_ACCEPTANCE_STRICT` turns the progress and latency assertions
       # on (the harness-fault check asserts either way).
-      - run: cargo nextest run -p qsh-testkit --test tunnel_stalled_streams
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_stalled_streams::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
 

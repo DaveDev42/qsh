@@ -122,7 +122,7 @@ mod tests {
     /// (adversarial review, reproduced with the mutation applied). This
     /// is the value-pinning half of that guard, run wherever
     /// `V4_DESTINATION`/`V6_DESTINATION` are actually in scope; the
-    /// companion in `crates/qsh-cli/tests/init_trust.rs` pins the same
+    /// companion in `crates/qsh-cli/tests/it/init_trust.rs` pins the same
     /// fact end to end, through the CLI's real stdout, on a machine
     /// this crate's tests never reach.
     ///

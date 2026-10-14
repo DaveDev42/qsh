@@ -1,0 +1,47 @@
+//! The single integration-test binary of `qsh-testkit`: every former `tests/<name>.rs` is
+//! a module here, so the workspace links one test executable per crate instead of
+//! one per file. Run one former file with `-E 'test(/^<name>::/)'`.
+
+mod acl_registry_audit;
+mod acl_uniformity;
+mod admission;
+mod admission_retry_sever;
+mod attach_loopback;
+mod chaos_proxy;
+mod chaos_relay;
+mod dynamic_loopback;
+mod dynamic_reverse;
+mod exec_loopback;
+mod file_host;
+mod host_list_reverse;
+mod liveness_config;
+mod local_control_reverse;
+mod local_stream_reverse;
+mod pairing_loopback;
+mod pairing_quota;
+mod perf_out;
+mod quota;
+mod resume_chaos;
+mod resume_loopback;
+mod resume_secrecy;
+mod reverse_attach;
+mod reverse_chaos;
+mod reverse_exec;
+mod reverse_loopback;
+mod reverse_lost_cause_and_since_registered_ms;
+mod reverse_resume_chaos;
+mod reverse_session_ops;
+mod reverse_tunnel;
+mod reverse_unreachable_hook;
+mod role_authorization;
+mod role_resolution_cost;
+mod serve_restart_reset;
+mod session_loopback;
+mod supervised_dynamic_blackhole;
+mod supervised_reverse;
+mod tunnel_chaos;
+mod tunnel_echo_under_load;
+mod tunnel_loopback;
+mod tunnel_remote_loopback;
+mod tunnel_stalled_streams;
+mod tunnel_throughput;

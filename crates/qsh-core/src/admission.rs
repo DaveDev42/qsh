@@ -81,7 +81,7 @@ const EPOCH: Duration = Duration::from_secs(2);
 /// summary is never delayed past one more tick after the flood stops —
 /// not "possibly never", as it was when only the lazy path existed.
 ///
-/// `pub`, not `pub(crate)`: `crates/qsh-cli/tests/adversarial_load.rs`
+/// `pub`, not `pub(crate)`: `crates/qsh-cli/tests/it/adversarial_load.rs`
 /// (scenario 12a) reads this across the crate boundary instead of
 /// carrying its own hardcoded copy of the window length (the M8 plan (52639fc)
 /// Step 5 (b-0)). Widening visibility here is not a contract change —

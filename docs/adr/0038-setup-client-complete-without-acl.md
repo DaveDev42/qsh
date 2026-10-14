@@ -11,7 +11,7 @@ GitHub 이슈 #3의 흐름으로 들어온 `qsh setup`(ADR-0024)은 마지막 �
 
 client 전용 장비에는 보통 `acl.toml`이 없다. 그 장비는 다이얼만 하고 인바운드 요청을 받지 않으므로 정책 파일이 할 일이 없다. 그런데 doctor는 그 장비에서도 `acl_policy_missing`을 `error`로 낸다(`docs/CLI.md` §6.17 표). doctor는 장비의 역할을 모른다. `doctor_acl_findings`(`crates/qsh-core/src/ops/doctor.rs`)는 `infer_run_mode`로 역할을 고르고, 그 함수는 `[listen]`도 outbound 대상도 없는 `config.toml`을 `serve`로 추론한다. client 전용 장비와 `acl.toml`을 빠뜨린 host는 doctor가 보는 입력으로는 구별되지 않는다.
 
-그 결과 `qsh setup client`는 모든 단계가 `done`이나 `already`여도 `complete: false`를 낸다. README "Known limitations"가 이 한계를 적고 `acl.toml`을 client에 두거나 doctor 단계의 그 finding을 무시하라고 안내한다. `golden_setup_run_fixtures`(`crates/qsh-cli/tests/fixtures.rs`)도 `setup.run.client_complete.json`을 만들려고 client 샌드박스에 쓸모없는 `acl.toml`을 써 넣는다. 시험이 사용자에게 권하지 않는 우회를 스스로 쓰고 있는 셈이다.
+그 결과 `qsh setup client`는 모든 단계가 `done`이나 `already`여도 `complete: false`를 낸다. README "Known limitations"가 이 한계를 적고 `acl.toml`을 client에 두거나 doctor 단계의 그 finding을 무시하라고 안내한다. `golden_setup_run_fixtures`(`crates/qsh-cli/tests/it/fixtures.rs`)도 `setup.run.client_complete.json`을 만들려고 client 샌드박스에 쓸모없는 `acl.toml`을 써 넣는다. 시험이 사용자에게 권하지 않는 우회를 스스로 쓰고 있는 셈이다.
 
 `complete`가 틀리게 `false`면 두 가지가 무너진다. 에이전트나 프로비저닝 스크립트가 `complete`로 분기하지 못하고 findings를 직접 걸러야 한다. 그리고 `next`가 비어 있다. `assemble`은 `complete`일 때만 역할별 다음 명령(`client`는 `qsh <name>`)을 넣기 때문이다. 이슈 #3의 "안내 명령만 따라 첫 셸까지"라는 기준에서 client 쪽 마지막 안내가 사라진다.
 
@@ -63,7 +63,7 @@ client 장비에서도 doctor의 다른 error(`cert_expired`, `clock_skew`, `pee
 ## 결과
 
 - 이 결정을 고정할 테스트다. 이름은 구현 시 확정한다.
-  - `setup_client_completes_without_acl_toml` (`crates/qsh-core/tests/setup.rs`): `acl.toml` 없는 client 샌드박스에서 `--peer-cert`로 `pin_cert`까지 마친 실행이 `complete: true`이고 `next`에 `qsh <name>`이 있다. 실행 뒤에도 `acl.toml`은 존재하지 않고, doctor 단계 `result.overall`은 `"error"`이며 `acl_policy_missing` finding을 담는다.
+  - `setup_client_completes_without_acl_toml` (`crates/qsh-core/tests/it/setup.rs`): `acl.toml` 없는 client 샌드박스에서 `--peer-cert`로 `pin_cert`까지 마친 실행이 `complete: true`이고 `next`에 `qsh <name>`이 있다. 실행 뒤에도 `acl.toml`은 존재하지 않고, doctor 단계 `result.overall`은 `"error"`이며 `acl_policy_missing` finding을 담는다.
   - `setup_client_incomplete_on_invalid_acl_toml`: 파싱되지 않는 `acl.toml`이 있으면 client도 `complete: false`다(결정 3).
   - `setup_client_incomplete_on_other_doctor_error`: `acl_policy_missing` 외의 error finding(예: 만료된 device leaf)이 있으면 `complete: false`다.
   - `setup_complete_exemption_applies_to_client_only` (`crates/qsh-core/src/setup/tests.rs`): `assemble`에 `acl_policy_missing` 하나만 error인 doctor `result`를 넣었을 때 `client`만 `complete: true`이고 `host`, `host_to`, `listener`는 `false`다. 다른 단계는 모두 `done`으로 두어 doctor 조건만 격리한다.

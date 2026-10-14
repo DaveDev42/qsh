@@ -16,7 +16,7 @@
 - §4 일반 명령 표에 있는 값은 `0`, `2`, `255` 셋뿐이다. `2`는 clap의 CLI syntax·argument 오류이고 `255`는 "연결, 인증, 정책 등 QSH runtime 실패"다. `qsh exec`와 대화형 세션은 원격 exit code `0..=254`를 그대로 넘기지만, 그것은 원격 프로세스의 값이지 qsh가 매기는 값이 아니다. `crates/qsh-cli/src`에는 `1`을 직접 내는 경로가 없다.
 - envelope의 `ok`는 operation이 성공했는지를 말하고, `ok: false`는 `ErrorCode` enum(`qsh-proto`)의 값 하나를 `error.code`로 요구한다(§3.2). doctor의 finding 어휘(`EXPECTED_DOCTOR_CODES`, 23종)는 `ErrorCode`가 아니다.
 - `DoctorFinding.status`는 `"warn"`/`"error"`/`"info"` 셋이다. `"info"`는 구조적 고지다. `trust_remove_scope`는 pin이 하나라도 있으면 늘 뜨고 `service_not_registered`는 유닛이 없는 머신이면 늘 뜬다. `data.overall`도 `"info"`를 `"ok"`로 접는다.
-- §4 마지막 문단은 출력 모드에 따라 exit 의미가 달라지면 안 된다고 적고, `crates/qsh-cli/tests/exit_code_matrix.rs`가 그 문장을 두 출력 모드의 표 테스트로 고정한다.
+- §4 마지막 문단은 출력 모드에 따라 exit 의미가 달라지면 안 된다고 적고, `crates/qsh-cli/tests/it/exit_code_matrix.rs`가 그 문장을 두 출력 모드의 표 테스트로 고정한다.
 
 ## 결정
 
@@ -52,7 +52,7 @@ envelope을 `ok: true`로 두는 이유는 §6.17이 세운 "finding은 data" �
 ## 결과
 
 - `docs/CLI.md` §4 일반 명령 표에 `1` 행이 는다. §6.17의 "exit code는 항상 `0`이다" 문단에 `--fail-on` 예외를 한 문장 더하고, "`--fail-on` 플래그는 아직 없다" 문단을 결정 1~6의 동작 설명으로 바꾼다. 상태 헤더에 이 변경을 적는다.
-- `crates/qsh-cli/tests/exit_code_matrix.rs`에 `--fail-on` 행이 는다. 기존 `Succeeds(i32)` 모양이 `ok: true`와 0이 아닌 exit를 이미 표현하므로 표의 틀은 바뀌지 않는다.
+- `crates/qsh-cli/tests/it/exit_code_matrix.rs`에 `--fail-on` 행이 는다. 기존 `Succeeds(i32)` 모양이 `ok: true`와 0이 아닌 exit를 이미 표현하므로 표의 틀은 바뀌지 않는다.
 - clap 트리가 바뀌므로 `cargo xtask man`으로 `docs/man/qsh-doctor.1`을 다시 만들고, `checked_in_man_pages_match_the_generator`가 그 diff를 확인한다.
 - `crates/qsh-cli/tests/fixtures/`는 바뀌지 않는다. 기존 doctor fixture는 `--fail-on` 없는 호출이라 결정 1대로 바이트가 같다.
 - `qsh.cli/v1`, `ErrorCode`, wire 프로토콜에 변화가 없다. `docs/design/protocol.md` §16의 동결 대상에 걸리는 항목도 없다.

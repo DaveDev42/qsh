@@ -17,7 +17,7 @@
 - `trust.toml`과 `invites.toml`은 `crates/qsh-core/src/config.rs`의 `FileLock`이 read-modify-write 전체를 직렬화한다(`Ops::trust_add` 같은 경로가 load에서 save까지를 그 lock 안에서 한다). `acl.toml`에는 그런 규율이 없다.
 - `[[acl]]` 한 행(`Rule`)은 `principal`, `auth_path`, `allow`, `scope` 넷을 갖는다. `auth_path`를 적지 않은 행은 `AuthPath::Pin`이 기본값으로 매겨진다. 그래서 CA로만 인증한 peer는 그 행에 영원히 매칭되지 않는다(`crates/qsh-core/src/acl/policy.rs` 모듈 doc의 평가 순서 ②와 `Rule::auth_path`의 field doc). 파일이 틀린 것도 파싱이 실패한 것도 아니라서 이 상태는 조용하다.
 - ADR-0017 결정 2가 신설하기로 한 진단 `acl_ca_auth_path_missing`은 파일 전체 수준의 거친 검사가 될 것이다. `[[ca]]`가 있는데 `auth_path = "ca"` 행이 하나도 없으면 finding이 뜬다. 어느 principal이 빠졌는지는 답하지 않고 답할 수도 없다. CA로 인증한 principal도 `device:<id>` 모양이라 발급 가능한 이름을 미리 열거할 수 없기 때문이다.
-- `Policy::decide`는 `pub(crate)`다. 그 메서드 자신의 doc이 적었듯 워크스페이스 전체에 호출 지점이 둘뿐이다(`impl Authorizer for Policy`의 `check`와 `Ops::acl_check`). 둘 다 `qsh-core` 안에 있다. 설명 전용 두 번째 평가기가 밖에서 생길 수 없다는 뜻이다. `crates/qsh-cli/tests/acl_check_equivalence.rs`가 그 규율의 표 절반으로, 행마다 `acl check`의 판정과 실제 op의 결과와 그 op이 남긴 audit 기록 셋이 모두 일치함을 건다.
+- `Policy::decide`는 `pub(crate)`다. 그 메서드 자신의 doc이 적었듯 워크스페이스 전체에 호출 지점이 둘뿐이다(`impl Authorizer for Policy`의 `check`와 `Ops::acl_check`). 둘 다 `qsh-core` 안에 있다. 설명 전용 두 번째 평가기가 밖에서 생길 수 없다는 뜻이다. `crates/qsh-cli/tests/it/acl_check_equivalence.rs`가 그 규율의 표 절반으로, 행마다 `acl check`의 판정과 실제 op의 결과와 그 op이 남긴 audit 기록 셋이 모두 일치함을 건다.
 - `acl.check`는 인가 불요 local operation이다(`docs/CLI.md` §2.5 매핑 표의 마지막 행). 원격에서 정책을 조회할 수 있게 하면 그 자체가 capability 열거 oracle이 된다(`docs/CLI.md` §6.15, `docs/ROADMAP.md` M5 감사 개정 ③).
 
 ## 결정
@@ -26,7 +26,7 @@
 
 2. `qsh acl show --principal <p> [--auth-path pin|ca]`를 신설한다. `--json`에서 내는 것은 둘이다. 하나는 그 principal과 auth path에 매칭되는 `[[acl]]` 행들이다. 행마다 `acl.toml` 안의 배열 index, `allow` 패턴 목록(`ActionPattern`이 적힌 그대로, 즉 `exec.run` 같은 exact와 `forward.*` 같은 family 둘 다), 그 행의 `auth_path`, 그 행의 `scope`를 낸다. 다른 하나는 그 행들에서 나오는 실효 action 집합이다. 이 집합은 소유자 없는 리소스를 가정해 계산한다. `Scope::Owned`(행의 기본값)는 리소스에 소유자가 있을 때만 걸러내므로(`Policy::decide`의 doc), 소유된 리소스에 대해서는 이 집합이 상한이다. 출력은 그 점을 명시한다. `--resource`나 `--owner` 축은 이 명령에 두지 않는다. 그 축이 필요한 질문은 `acl check`가 이미 답한다.
 
-3. 판정은 `Policy`의 기존 matcher를 그대로 재사용한다. 규칙을 두 번 구현하지 않는다. 구현은 `qsh-core` 안에서 `Action::ALL` 11종마다 `Policy::decide`를 부르고 allow가 난 것만 모은다. 매칭 행 목록도 같은 `Policy`의 `rules` 위에서 평가 순서 ②(principal 정확 일치 + `auth_path` 일치)와 ③(action 패턴 일치)을 돌려 뽑는다. `Policy::decide`의 `pub(crate)` 가시성은 그대로 두고 호출 지점만 `qsh-core` 안에서 하나 는다. `crates/qsh-cli/tests/acl_check_equivalence.rs`가 세운 3-way 대조 규율은 이 명령에도 그대로 이어진다. `acl show`가 내는 실효 집합과 같은 정책 아래 `acl check`가 action마다 내는 판정이 어긋나면 테스트가 붉어진다.
+3. 판정은 `Policy`의 기존 matcher를 그대로 재사용한다. 규칙을 두 번 구현하지 않는다. 구현은 `qsh-core` 안에서 `Action::ALL` 11종마다 `Policy::decide`를 부르고 allow가 난 것만 모은다. 매칭 행 목록도 같은 `Policy`의 `rules` 위에서 평가 순서 ②(principal 정확 일치 + `auth_path` 일치)와 ③(action 패턴 일치)을 돌려 뽑는다. `Policy::decide`의 `pub(crate)` 가시성은 그대로 두고 호출 지점만 `qsh-core` 안에서 하나 는다. `crates/qsh-cli/tests/it/acl_check_equivalence.rs`가 세운 3-way 대조 규율은 이 명령에도 그대로 이어진다. `acl show`가 내는 실효 집합과 같은 정책 아래 `acl check`가 action마다 내는 판정이 어긋나면 테스트가 붉어진다.
 
 4. 인가 불요 local operation이다. `docs/CLI.md` §2.5 매핑 표의 마지막 행에 `acl.show`를 `acl.check` 옆에 더한다. 원격 peer가 이 op을 요청할 수 없고 wire 메시지도 만들지 않는다. 이유는 `acl.check`를 local-only로 못박은 것과 같다. 원격에서 남의 정책을 열람할 수 있으면 그것이 곧 capability 열거 oracle이다. `acl show`는 삼중 하나가 아니라 집합을 통째로 돌려주므로 oracle로서의 효율이 `acl check`보다 높다.
 
@@ -48,9 +48,9 @@
 
 ## 결과
 
-- 신규 op `acl.show` 하나가 는다. `docs/ROADMAP.md` M9 수용 기준의 등록 완전성 항목이 요구하는 것을 전부 갚는다. 새 fixture 파일과 `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/fixtures.rs`) 등록, schemars 타입, `cli_v1_data_schema` arm, `qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS` 등록, 렌더러 둘(human 쪽은 `crates/qsh-cli/src/render/human.rs`의 `print_acl_check` 옆), `docs/CLI.md` 새 절, man 항목이 모두 있어야 한다. `crates/qsh-core/tests/schema_commands_registry.rs`가 등록 누락을 잡는다.
+- 신규 op `acl.show` 하나가 는다. `docs/ROADMAP.md` M9 수용 기준의 등록 완전성 항목이 요구하는 것을 전부 갚는다. 새 fixture 파일과 `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/it/fixtures.rs`) 등록, schemars 타입, `cli_v1_data_schema` arm, `qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS` 등록, 렌더러 둘(human 쪽은 `crates/qsh-cli/src/render/human.rs`의 `print_acl_check` 옆), `docs/CLI.md` 새 절, man 항목이 모두 있어야 한다. `crates/qsh-core/tests/it/schema_commands_registry.rs`가 등록 누락을 잡는다.
 - 기존 fixture는 한 바이트도 바뀌지 않는다. `acl.check.allow.json`과 `acl.check.deny.json`은 그대로다. `acl.check` 자신의 요청 타입, 데이터 타입, 인자 집합도 변경이 없다.
-- `Policy::decide`의 호출 지점이 둘에서 셋이 된다. 셋 다 여전히 `qsh-core` 안이므로 `pub(crate)` 가시성이 지키는 불변식(설명 전용 두 번째 평가기가 crate 밖에 살 수 없다)은 그대로다. 다만 그 메서드의 doc과 `crates/qsh-cli/tests/acl_check_equivalence.rs`의 모듈 doc이 둘 다 "정확히 두 호출 지점"이라고 적고 있으므로, 구현 커밋이 두 산문을 같이 고쳐야 한다. 조용히 세 번째를 더하면 그 문서가 거짓이 된다.
+- `Policy::decide`의 호출 지점이 둘에서 셋이 된다. 셋 다 여전히 `qsh-core` 안이므로 `pub(crate)` 가시성이 지키는 불변식(설명 전용 두 번째 평가기가 crate 밖에 살 수 없다)은 그대로다. 다만 그 메서드의 doc과 `crates/qsh-cli/tests/it/acl_check_equivalence.rs`의 모듈 doc이 둘 다 "정확히 두 호출 지점"이라고 적고 있으므로, 구현 커밋이 두 산문을 같이 고쳐야 한다. 조용히 세 번째를 더하면 그 문서가 거짓이 된다.
 - CLI 쪽은 `crates/qsh-cli/src/cli.rs`의 `AclCmd`에 variant 하나와 args struct 하나가 는다. `qsh-cli`에는 clap 정의와 렌더러만 들어가고 판정은 전부 `Ops`에 남는다. 아키텍처 규칙에 새 예외를 만들지 않는다.
 - `acl.toml`을 사람이 손으로 쓴다는 성질은 그대로다. `ACL_STARTUP_NO_AUTOGEN`과 `crates/qsh-core/src/acl/load.rs`의 `minimal_policy_example`은 이 ADR로 바뀌지 않는다.
 - wire 프로토콜과 `qsh.event/v1`에는 아무 변화가 없다. 새 op은 local이라 control 메시지를 만들지 않고 `docs/design/protocol.md` §16의 동결 대상에 걸리는 항목도 없다.

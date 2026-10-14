@@ -622,7 +622,7 @@ type RemoteForwardTable = Arc<Mutex<HashMap<String, (String, u16)>>>;
 ///
 /// **Stage D:** `pub`, not `pub(crate)` — the same widening
 /// [`crate::tunnel::LocalForwardHandle`] already got in Step 3, and for
-/// the same reason: `crates/qsh-testkit/tests/tunnel_remote_loopback.rs`
+/// the same reason: `crates/qsh-testkit/tests/it/tunnel_remote_loopback.rs`
 /// (L3, `docs/design/testing.md`) drives the real requester leg end to
 /// end rather than re-implementing it, which needs this type nameable
 /// from outside `qsh-core`. `mod remote` itself stays `pub(crate)`
