@@ -27,6 +27,11 @@
 //!   parser like [`wire::parse_forward_spec`], not a `qsh` peer-to-peer
 //!   wire contract — `docs/design/protocol.md` §16.3 lists it outside the
 //!   wire freeze.
+//! - [`ssh_bootstrap`]: the line-oriented stream `qsh pair ssh` speaks
+//!   over a system `ssh` child's stdio (ADR-0044 decision 11): message
+//!   types, the sans-IO line parser and reader, version negotiation. Not a
+//!   QUIC wire; `docs/design/protocol.md` §17 documents it and §16.2 holds
+//!   it to the same additive-only rule.
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -40,6 +45,7 @@ pub mod openssh;
 pub mod pairing;
 pub mod schema;
 pub mod socks5;
+pub mod ssh_bootstrap;
 pub mod types;
 pub mod wire;
 

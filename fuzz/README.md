@@ -3,11 +3,11 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds twenty `cargo-fuzz` targets.
-Nineteen are parser harnesses over that surface; one of them,
+anything else touches it. This crate holds twenty-one `cargo-fuzz` targets.
+Twenty are parser harnesses over that surface; one of them,
 `fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
-paths (trust store files, ACL principal text). The twentieth, stateful
+paths (trust store files, ACL principal text). The twenty-first, stateful
 target, `broker_ops`, drives `qsh-core`'s session broker state machine
 (append/read/lease/resume/attach/tick/reap) against a model oracle instead
 of decoding a single message; see "The `broker_ops` state machine target"
@@ -90,6 +90,7 @@ Run from `fuzz/`. `cargo fuzz list` prints the same set.
 | `parse_forward_spec` | `wire.rs` | `parse_forward_spec` — the `-L`/`-R` forward-spec grammar (`[bind:]listen_port:host:host_port`, IPv6 bracket tokenizing). Local-CLI-origin text, included because it's part of qsh-proto's sans-IO parser surface. |
 | `parse_socks5` | `crates/qsh-proto/src/socks5.rs` | `parse_greeting`/`parse_request` — the SOCKS5 sans-IO codec `-D` drives against its loopback listener (ADR-0019). Local-CLI-adjacent input like `parse_forward_spec`, not a `qsh`-to-`qsh` wire message. Checks no panic, `consumed <= input.len()`, and that every strict prefix of a valid message parses as `Incomplete`. |
 | `parse_openssh_key` | `crates/qsh-proto/src/openssh/` | The hand-written OpenSSH key parsers behind `qsh init --import-ssh-key` and the `authorized_keys` preview (ADR-0026). The first input byte picks the layer: PEM envelope decode, binary `openssh-key-v1` body, or the `authorized_keys` line classifier. Checks no panic, well-formed wire blob for every accepted key, and line numbers that stay inside the input. Local-file input like `parse_forward_spec`. |
+| `parse_ssh_bootstrap_line` | `crates/qsh-proto/src/ssh_bootstrap.rs` | `parse_ssh_bootstrap_line` and the incremental `BootstrapReader` — the line-oriented stream `qsh pair ssh` reads from its `ssh` child's stdout (ADR-0044 decision 11): remote rc output, then `hello`/`result`. The first input byte picks how the rest is chunked when fed to the reader. Checks no panic, that an accepted line re-encodes to one line that parses back equal, and that the reader's messages, skipped counts and error do not depend on chunking. Not a QUIC wire message, but an interoperability contract (`docs/design/protocol.md` §17). |
 | `fingerprint_principal` | `crates/qsh-transport/src/identity.rs` | `Fingerprint::from_str` and `Principal::from_str`, selected by a leading byte. Fingerprint text is reached from `trust.toml` on disk and `qsh trust add`; Principal text from `qsh acl check --principal` (and composes `Fingerprint::from_str` for its `fp:` branch). |
 | `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into 12 of the `qsh_proto::types` request types an agent hands in as `--json` payload on qsh's JSON CLI surface (ADR-0011), selected by a leading byte. |
 | `broker_ops` | `crates/qsh-core/src/broker/` | **Stateful**, not a single-message decode: a fixed byte-format op sequence (append/read/lease/resume/attach/detach/tick/reap, 19 opcodes) driven against `qsh-core`'s public broker API and checked against a `ModelSession` oracle every op — sequence/gap/byte-identity, writer lease `Acquired`/`Conflict`/steal semantics, resume issue/verify/rotate, and TTL/reap. See "The `broker_ops` state machine target" below. |
@@ -243,6 +244,7 @@ tests and fixtures — not random bytes — per target:
   secret scanner would flag), a mixed `authorized_keys` file (layer byte
   `2`: comment and blank lines, CRLF, a quoted-options prefix, an RSA line,
   a bad-base64 line), a plain `authorized_keys` line, and the empty input.
+- `parse_ssh_bootstrap_line`: a selector byte (`0`, whole buffer; `1`/`7`, that many bytes per chunk) followed by the stream: a ready `hello`, a not-initialized `hello`, a `hello` with an unknown `status` and an unknown field, a `commit` without and with a reverse `address`, a `pinned` and a `conflict` `result`, a full hello-plus-result stream, the same behind realistic shell rc output with CRLF line ends, an untagged line after the `hello`, a `result` before the `hello`, prefix lookalikes (`qsh-boot`, `qsh-bootstrap` without the space), a truncated JSON line, and the empty stream.
 - `fingerprint_principal`: valid and case-variant fingerprints, wrong
   base64 length, a multi-byte character straight after the `sha256:`
   prefix, and all four `Principal` shapes (`device:`/`user:`/`fp:`/

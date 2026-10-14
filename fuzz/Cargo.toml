@@ -165,3 +165,10 @@ path = "fuzz_targets/parse_openssh_key.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_ssh_bootstrap_line"
+path = "fuzz_targets/parse_ssh_bootstrap_line.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,5 @@
+Last login: Mon Jan  1 00:00:00 2026 from 10.0.0.2
+Welcome to box
+
+qsh-bootstrap {"type":"hello","versions":[1],"qsh_version":"0.4.3","status":"ready","fingerprint":"sha256:q2Hh0y8m0W2c0cQw1nGZ3m0lq3z5Ew9o1bQ2j0kP9mA=","serve_bind":"[::]:4433","serve_listening":false}
+qsh-bootstrap {"type":"result","status":"pinned","name":"laptop","role":"full","created":true}

@@ -2,7 +2,7 @@
 
 **상태:** 설계 확정 (2026-08-17)
 **적용 범위:** 현재 구현된 `qsh/1` wire 전체
-**관련 문서:** [ADR-0001 custom QUIC](../adr/0001-custom-quic-protocol.md) · [ADR-0043 TCP fallback 없음](../adr/0043-no-tcp-fallback.md) · [CLI/JSON 계약](../CLI.md) · [아키텍처](architecture.md) · [테스트 전략](testing.md)
+**관련 문서:** [ADR-0001 custom QUIC](../adr/0001-custom-quic-protocol.md) · [ADR-0043 TCP fallback 없음](../adr/0043-no-tcp-fallback.md) · [ADR-0044 SSH 부트스트랩](../adr/0044-ssh-bootstrap.md) · [CLI/JSON 계약](../CLI.md) · [아키텍처](architecture.md) · [테스트 전략](testing.md)
 
 > **규칙:** 구현이 이 문서와 어긋나게 되는 경우, 코드를 우회하지 말고 이 문서(필요 시 ADR)를 먼저 갱신한 뒤 구현한다. JSON envelope·오류 코드·sequence의 사용자 노출 계약은 [docs/CLI.md](../CLI.md)가 canonical이며 여기서는 중복 기술하지 않는다.
 
@@ -510,7 +510,7 @@ message FileFrame {
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **20종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9)가 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **21종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9), `parse_ssh_bootstrap_line`(10)이 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
 
 1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
 2. **wire·local 메시지 decode 8종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로), `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`, localctl UDS 첫 두 메시지). 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
@@ -529,7 +529,9 @@ message FileFrame {
 
 **9. `decode_file_frame`(ADR-0029 결정 9).** `FILE_DATA` 스트림의 프레임(`FileFrame`: `data`/`end`/`result` oneof)을 흔든다. `ExecFrame`·`SessionFrame`과 같은 종류의 신뢰 불가 peer 입력이지만 자기 프레임 상한(`DATA_FRAME_MAX`)과 청크 상한(`FILE_CHUNK_MAX` 32 KiB), 자기 인코더(`encode_file_frame`)를 가지므로 `decode_control`과 별도 타깃이다. `FileReadOpen` 등 control 쪽 새 메시지는 `ControlMessage` 안에 있어 `decode_control`이 이미 덮는다. 항목 7·8과 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. decode 뒤 `validate()`를 체인한다. 불변식: panic 없음, 수신 쪽이 받아들인 프레임은 송신 쪽 청크 상한에 걸리지 않고(전체 프레임 크기 초과만 예외), 거절된 프레임은 `ChunkTooLarge`로 거절된다.
 
-corpus는 `fuzz/corpus/`에 체크인한다. **20종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 19종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+**10. `parse_ssh_bootstrap_line`(ADR-0044 결정 11).** `crates/qsh-proto/src/ssh_bootstrap.rs`의 줄 파서 `parse_ssh_bootstrap_line`과 수신 상태 기계 `BootstrapReader`를 흔다. `qsh pair ssh`가 ssh 자식의 stdout에서 읽는 바이트는 원격 계정이 찍는 출력이라(rc 파일 출력, 그다음 응답자의 메시지) 신뢰할 수 없는 입력이다. QUIC wire는 아니지만 서로 다른 버전의 qsh 둘이 말하는 상호운용 계약이어서(§17) 이 표면에 둔다. 첫 입력 바이트가 나머지를 reader에 몇 바이트씩 나눠 먹일지 고른다(0이면 통째로). 불변식: panic 없음, 받아들인 줄은 다시 인코딩해 파싱해도 같고 한 줄이다, reader의 결과(메시지, 건너뛴 줄·바이트 수, 오류)는 청크 경계와 무관하다, 건너뛴 바이트는 `BOOTSTRAP_PREAMBLE_MAX`를 넘지 않는다. 항목 7~9와 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. 타깃당 누적 72 fuzz-hours는 아직 쌓지 않았다(`docs/campaigns/m8-fuzz.md` 형식으로 사람이 기록한다).
+
+corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
 
@@ -666,6 +668,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 | `session_id` / `forward_id` 모양 | `session_id`: `crates/qsh-core/src/server/mod.rs`의 `valid_session_id`(상한 `SESSION_ID_MAX_LEN = 64`; §9 "세션 id는 모양부터 검사한다"). `forward_id`: `crates/qsh-proto/src/wire.rs`의 `valid_forward_id`(§7) | 둘 다 `1..=64` bytes `[A-Za-z0-9_-]` |
 | `device_name` / `offered_name` 검증 | §15.5; `crates/qsh-proto/src/wire.rs`의 `validate_device_name`·`valid_host_name` | `device_name`은 `1..=64` bytes, 제어문자·bidi override/isolate·zero-width 거부(homoglyph는 의도적 미검사, §15.5). `offered_name`은 빈 문자열이거나 `1..=64` bytes `[A-Za-z0-9._-]`(빈 값은 controller가 이름을 정하는 정상 경로, §9 `ReverseRegistration.offered_name`, 모양 규칙은 §11-2) |
 | priority band | §12; `crates/qsh-proto/src/wire.rs`의 `PRIORITY_*` | control=200 / session_data=100 / exec_data=50 / tunnel=0. 송신 큐 힌트라 peer가 관측하는 값은 아니지만 이 문서가 명문화한 값이다 |
+| SSH 부트스트랩 스트림 | §17; `crates/qsh-proto/src/ssh_bootstrap.rs` | 줄 접두 `qsh-bootstrap `, 한 줄 8 KiB, hello 앞 접두 없는 줄 합계 64 KiB, 메시지 셋(`hello`·`commit`·`result`)과 `type` 태그, 부트스트랩 버전 `[1]`, `status` 어휘. `.proto`에 실리지 않지만 서로 다른 버전의 qsh 둘이 ssh 파이프 위에서 말하므로 §16.4의 additive-only를 같은 방식으로 따른다 |
 
 ### 16.3 동결 밖
 
@@ -724,3 +727,36 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 2. 이 절 머리의 상태를 "발효"로 바꾸고 발효 일자·커밋을 채운다.
 3. `README.md`의 Known limitations 또는 Security posture 절에 한 줄을 더한다 — wire format `qsh/1`이 그 일자·커밋부터 동결됐다는 것과, 변경 규율이 이 절이라는 것.
 4. 판정이 (나)(예약 없이 freeze만 진행)라면 `docs/PRD.md`의 SC7 문장도 함께 개정한다 — 이 개정은 이 절이 아니라 그 판정을 낸 세션의 몫이다.
+
+## 17. SSH 부트스트랩 스트림 (ADR-0044)
+
+`qsh pair ssh <dest>`는 시스템 `ssh`로 원격에서 `qsh pair ssh-respond`를 부르고, 두 프로세스는 그 ssh 자식의 stdin·stdout으로 말한다(ADR-0044 결정 9). 이 스트림은 QUIC wire가 아니다. `.proto`도 없고 `qsh/1` ALPN과도 무관하다. 그래도 서로 다른 버전의 qsh 둘이 말하는 상호운용 계약이라서 여기에 싣고, §16.2 목록에 올려 §16.4의 additive-only 규칙을 같은 방식으로 적용한다(ADR-0044 결정 11, §16 freeze 발효 뒤에도 같다). 구현은 `crates/qsh-proto/src/ssh_bootstrap.rs`(sans-IO)이고 신뢰 불가 입력 파서라서 fuzz 타깃 `parse_ssh_bootstrap_line`이 붙는다(§13-10). ssh를 부르고 pin을 쓰는 절차는 `qsh-core`의 몫이고 이 절은 바이트에 실리는 것만 정한다.
+
+### 17.1 줄 형식과 상한
+
+- 메시지 하나가 한 줄이다. 줄은 `\n`으로 끝나고(`\r\n`도 받는다) 고정 접두 `qsh-bootstrap `(끝의 공백 포함, `BOOTSTRAP_LINE_PREFIX`) 뒤에 JSON 객체 하나가 온다. 직렬화는 개행을 이스케이프하므로 객체 안에 개행 문자가 들어가지 않는다.
+- 한 줄은 접두를 포함해 8 KiB(`BOOTSTRAP_LINE_MAX`, 8192바이트)를 넘지 않는다. 수신 쪽은 줄이 끝나기를 기다리지 않고 상한을 넘는 순간 버린다. 송신 쪽 인코더도 상한을 넘는 메시지는 내보내지 않는다.
+- 객체의 `type`이 `hello`, `commit`, `result` 중 하나로 메시지를 가른다. ADR-0044 결정 11은 세 메시지의 필드만 적고 구별 방식을 적지 않아서, 필드 구성에 기대지 않는 명시 태그를 이 절이 정한다. 모르는 `type`은 형식 오류다.
+- hello 앞에는 원격 셸의 rc 파일이나 배너가 찍은 접두 없는 줄이 올 수 있다. 수신 쪽은 이런 줄을 합계 64 KiB(`BOOTSTRAP_PREAMBLE_MAX`, 개행 포함)까지 건너뛰고 줄 수와 바이트 수만 센다. 내용은 저장하지도 로그나 출력에 내지도 않는다. 줄이 접두로 시작하는지는 첫 14바이트로 정해서, 상한 없이 이어지는 한 줄이 메모리를 쓰지 못한다.
+- hello 뒤로는 접두 없는 줄이 하나라도 오면 프로토콜 오류다. result 뒤에 오는 어떤 줄도 오류이므로 client는 result를 받으면 읽기를 멈춘다.
+
+### 17.2 메시지
+
+| 방향 | `type` | 필드 |
+|---|---|---|
+| 응답자 → client | `hello` | `versions`(지원하는 부트스트랩 버전, 이 절은 `[1]`), `qsh_version`, `status`(`ready`·`not_initialized`), `status`가 `ready`일 때 `fingerprint`(`sha256:BASE64`)·`serve_bind`·`serve_listening`(`true`·`false`, 모르면 `null` 또는 생략) |
+| client → 응답자 | `commit` | `version`(고른 버전), `fingerprint`(client의 것), `name`, `role`, 역방향일 때만 `address` |
+| 응답자 → client | `result` | `status`(`pinned`·`exists`·`conflict`·`error`), `name`, `role`(없으면 `null`), `created`, 실패면 `code`(`ErrorCode` 어휘)와 `message` |
+
+순서는 hello, (client가 commit을 보냄), result 하나씩이다. client 쪽 수신 상태 기계는 첫 접두 줄이 hello가 아니거나, hello가 둘이거나, result 앞의 다른 메시지이거나, result 뒤에 줄이 있으면 순서 위반으로 끝낸다.
+
+### 17.3 버전과 호환
+
+- 버전은 정수 목록이다. client가 `hello.versions`와 자기 목록의 교집합에서 가장 큰 값을 `commit.version`으로 고른다(`negotiate_version`). 교집합이 비면 commit을 보내지 않고 `UNSUPPORTED`로 끝난다.
+- 알 수 없는 필드는 무시한다. 필수 필드가 없거나 타입이 어긋나면 형식 오류다. 필수 여부는 위 표의 필드 목록이 그대로 기준이고, 선택 필드(`fingerprint`·`serve_bind`·`serve_listening`·`address`·`code`·`message`)는 없어도 된다. 파서를 느슨하게 푸는 변경은 호환되지만 조이는 변경은 아니므로 필수로 두는 쪽을 보수적으로 골랐다.
+- `status`는 열린 문자열이다. 이 빌드가 모르는 값은 별도 변종(`Unknown`)으로 보존해 호출자가 `REMOTE_ERROR`(`details.reason: "bootstrap_protocol"`)로 끝내게 한다. 파서가 추측하지 않는다. 그 문자열은 peer가 쓴 것이므로 화면에 내기 전에 `sanitize_peer_text`를 거친다.
+- 허용되는 변경은 §16.4와 같다. 새 선택 필드와 새 `status` 값을 더하는 것은 부트스트랩 버전을 올리지 않는다. 기존 필드의 제거, 의미 변경, 타입 변경, 그리고 새 `type`(모르는 쪽이 형식 오류로 끝낸다)은 새 부트스트랩 버전이 필요하다.
+
+### 17.4 오류와 로그
+
+줄 파서와 수신 상태 기계의 오류(접두 없음, 8 KiB 초과, 형식 오류, 64 KiB 초과, hello 뒤 접두 없는 줄, 순서 위반)는 모두 `REMOTE_ERROR`(`details.reason: "bootstrap_protocol"`)로 사상된다(ADR-0044 결정 14). 오류 값은 입력 바이트를 담지 않는다. rc 출력과 ssh stderr는 로그로 복사하지 않는다(ADR-0044 결정 19). 어떤 fingerprint와 이름을 pin하는지, 충돌을 어떻게 판정하는지는 `qsh-core`가 정하고 이 절의 범위 밖이다.
