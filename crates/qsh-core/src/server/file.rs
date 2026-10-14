@@ -24,10 +24,10 @@
 //! path, recheck mismatch, protected inode, an `EACCES` from the OS) is the
 //! same `PERMISSION_DENIED` reply, byte for byte.
 //!
-//! This build issues the `file.read`/`file.write` tickets and answers
-//! `file.list` and `file.mkdir`. The `FILE_DATA` stream that would redeem a
-//! ticket is not accepted yet, so a ticket only ever expires and releases
-//! what it holds.
+//! The `file.read`/`file.write` tickets are redeemed by a `FILE_DATA` stream
+//! (`file_data.rs`, the data plane: chunks, the end frame's size and BLAKE3
+//! digest, the atomic replace). A ticket that is never redeemed expires and
+//! releases what it holds.
 
 use super::*;
 #[cfg(unix)]
@@ -129,9 +129,40 @@ impl Server {
     /// first call and off unix.
     pub fn set_file_host(&self, paths: crate::config::Paths, audit: crate::config::AuditConfig) {
         #[cfg(unix)]
-        let _ = self.file_host.set(FileHostConfig { paths, audit });
+        {
+            // The umask is read once, here, while the host is still
+            // starting (ADR-0029 decision 7).
+            crate::file::host::init_umask();
+            let _ = self.file_host.set(FileHostConfig { paths, audit });
+        }
         #[cfg(not(unix))]
         let _ = (paths, audit);
+    }
+
+    /// Inject the free-space probe `file.write` uses (ADR-0029 decision 13).
+    /// Production never calls this and gets the real `fstatvfs` probe; a test
+    /// injects one that reports a chosen number. No-op past the first call.
+    /// Unix only: the file host has no other platform yet.
+    #[cfg(unix)]
+    pub fn set_free_space(&self, probe: Arc<dyn crate::file::host::FreeSpace>) {
+        let _ = self.free_space.set(probe);
+    }
+
+    /// The free-space probe in force: the injected one, else the real
+    /// `fstatvfs`.
+    #[cfg(unix)]
+    pub(super) fn free_space(&self) -> Arc<dyn crate::file::host::FreeSpace> {
+        self.free_space.get().cloned().unwrap_or_else(|| {
+            Arc::new(crate::file::host::StatvfsFreeSpace) as Arc<dyn crate::file::host::FreeSpace>
+        })
+    }
+
+    /// Inject a gate the blocking disk writer of a `file.write` passes before
+    /// each chunk (see [`crate::file::host::WriteGate`]). Production never
+    /// calls this. No-op past the first call. Unix only.
+    #[cfg(unix)]
+    pub fn set_file_write_gate(&self, gate: Arc<dyn crate::file::host::WriteGate>) {
+        let _ = self.file_write_gate.set(gate);
     }
 
     /// One of the four file ops. Stage 1 failures are `INVALID_ARGUMENT` (or

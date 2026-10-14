@@ -61,6 +61,8 @@ mod dispatch;
 mod exec;
 mod file;
 #[cfg(unix)]
+mod file_data;
+#[cfg(unix)]
 mod file_host;
 mod reverse;
 mod sessions;
@@ -591,6 +593,15 @@ pub struct Server {
     /// closed).
     #[cfg(unix)]
     file_host: OnceLock<FileHostConfig>,
+    /// The free-space probe `file.write` consults (ADR-0029 decision 13),
+    /// set at most once by [`Server::set_free_space`]. Unset (production)
+    /// reads as the real `fstatvfs` probe.
+    #[cfg(unix)]
+    free_space: OnceLock<Arc<dyn crate::file::host::FreeSpace>>,
+    /// A seam on the blocking disk writer of a `file.write`, set at most once
+    /// by [`Server::set_file_write_gate`]. Production sets none.
+    #[cfg(unix)]
+    file_write_gate: OnceLock<Arc<dyn crate::file::host::WriteGate>>,
     /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
     /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
@@ -771,6 +782,10 @@ impl Server {
             path_normalizer: OnceLock::new(),
             #[cfg(unix)]
             file_host: OnceLock::new(),
+            #[cfg(unix)]
+            free_space: OnceLock::new(),
+            #[cfg(unix)]
+            file_write_gate: OnceLock::new(),
             admission,
             quotas,
         })

@@ -60,11 +60,12 @@ pub const CAP_RESUME_V1: &str = "resume.v1";
 pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
 
 /// Capability string for the remote file ops (`file.read`, `file.write`,
-/// `file.list`, `file.mkdir`) and the `FILE_DATA` stream (ADR-0029). Defined
-/// ahead of the implementation: it is deliberately absent from
-/// [`LOCAL_CAPABILITIES`] until the host serves the ops (a capability string
-/// is a promise about behaviour), and a sender never emits a file op to a peer
-/// that has not advertised it.
+/// `file.list`, `file.mkdir`) and the `FILE_DATA` stream (ADR-0029). It is
+/// advertised by unix builds only ([`LOCAL_CAPABILITIES`]): the host data
+/// plane exists there, while a Windows host answers the four ops
+/// `UNSUPPORTED` until M20 (ADR-0029 decision 23), and a capability string is
+/// a promise about behaviour. A sender never emits a file op to a peer that
+/// has not advertised it.
 pub const CAP_FILE_V1: &str = "file.v1";
 
 /// Capabilities this build advertises in [`Hello`]. Advertised and
@@ -75,7 +76,21 @@ pub const CAP_FILE_V1: &str = "file.v1";
 /// resume credential, replays from the requested offset (or opens with a
 /// `Gap`), and deduplicates retransmitted input. [`CAP_DIAL_FILTER_V1`]
 /// joined with the host-local dial filter (ADR-0019 decision 3): the
-/// advertisement and the filter land in the same commit.
+/// advertisement and the filter land in the same commit. [`CAP_FILE_V1`]
+/// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9), on
+/// unix builds only: the same commit that serves the stream advertises it.
+#[cfg(unix)]
+pub const LOCAL_CAPABILITIES: &[&str] = &[
+    CAP_EXEC,
+    CAP_SESSION,
+    CAP_RESUME_V1,
+    CAP_DIAL_FILTER_V1,
+    CAP_FILE_V1,
+];
+
+/// See the unix definition: a non-unix build serves no file op, so it does
+/// not advertise [`CAP_FILE_V1`].
+#[cfg(not(unix))]
 pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1, CAP_DIAL_FILTER_V1];
 
 /// quinn send priority of the control stream — the top of the
@@ -125,6 +140,13 @@ pub const FILE_LIST_PAGE_MAX: usize = 512;
 /// Most entries one directory may hold for `file.list` to page through it;
 /// a larger directory is `RESOURCE_EXHAUSTED` (ADR-0029 decision 9).
 pub const FILE_LIST_DIR_MAX: usize = 65536;
+
+/// Free bytes the destination filesystem must keep beyond a `file.write`'s
+/// announced size, 256 MiB (ADR-0029 decision 13). A write that would leave
+/// less is refused `RESOURCE_EXHAUSTED` before any temp file exists: the
+/// audit writer is fail-closed, so a remote write that fills the disk the
+/// audit log lives on would stop the whole host.
+pub const FILE_WRITE_FREE_RESERVE: u64 = 256 * 1024 * 1024;
 
 /// A payload chunk exceeds its per-chunk cap ([`SESSION_CHUNK_MAX`]).
 /// Returned by the encoders (sender side) and by the `validate()` helpers

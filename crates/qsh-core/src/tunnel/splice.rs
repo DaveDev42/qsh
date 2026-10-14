@@ -105,13 +105,16 @@ const SPLICE_BUF_LEN: usize = 64 * 1024;
 ///   above the 0.85 "no threshold change needed" bar); DoD 4 p95
 ///   {7.919, 7.621, 7.672, 7.766, 7.146} ms (bar <10ms).
 ///
+/// `FILE_DATA` sends (`crate::server`'s file data plane) yield on the same
+/// cap (ADR-0029 decision 15).
+///
 /// 128 KiB applies uniformly to every [`pump`] direction, including the
 /// two that never touch quinn (`splice_tcp_uds`'s UDS halves) — an extra
 /// yield point on a plain TCP/UDS copy is harmless (fairness with
 /// whatever else is on that runtime), so a single constant is simpler to
 /// reason about than threading a "this direction matters" flag through
 /// every call site.
-const SEND_DEPTH_CAP_BYTES: u64 = 128 * 1024;
+pub(crate) const SEND_DEPTH_CAP_BYTES: u64 = 128 * 1024;
 
 /// QUIC application error code used to reset a tunnel stream whose splice
 /// died mid-transfer. Internal (like `crate::server`'s `RESET_CODE_*` and

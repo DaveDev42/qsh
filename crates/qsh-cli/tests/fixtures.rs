@@ -414,6 +414,19 @@ fn golden_local_fixtures() {
     // way an ordinary CLI fixture would.
     let (code, capabilities) = sandbox.json(&["capabilities", "--json"]);
     assert_eq!(code, 0, "{capabilities}");
+    // `file.v1` is advertised by unix builds only (ADR-0029 decision 23:
+    // a Windows host answers the file ops `UNSUPPORTED` until M20), so the
+    // golden, which records the unix set, is compared against the Windows
+    // build's set plus that one entry.
+    #[cfg(not(unix))]
+    let capabilities = {
+        let mut capabilities = capabilities;
+        capabilities["data"]["capabilities"]
+            .as_array_mut()
+            .expect("capabilities is an array")
+            .push("file.v1".into());
+        capabilities
+    };
     check("capabilities.json", capabilities);
 
     let (code, created) = sandbox.json(&["init", "--json", "--key-store", "file"]);

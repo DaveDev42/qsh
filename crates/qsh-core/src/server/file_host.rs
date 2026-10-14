@@ -230,23 +230,7 @@ impl Server {
     /// the state-path check); `EACCES`/`EPERM` and the errors a swapped path
     /// component produces are the uniform denial (ADR-0029 decision 17).
     fn io_reply(&self, st: &Stage<'_>, err: &io::Error) -> ControlMessage {
-        match err.raw_os_error() {
-            Some(libc::ENOENT) => invalid(st.request_id, "no such file or directory"),
-            Some(libc::EACCES | libc::EPERM | libc::ELOOP | libc::ENOTDIR) => {
-                Self::permission_denied(st.request_id, st.action)
-            }
-            Some(libc::ENOSPC | libc::EDQUOT) => ControlMessage::error(
-                st.request_id,
-                wire::Error::new(ErrorCode::ResourceExhausted, "no space left", false),
-            ),
-            _ => {
-                tracing::debug!(kind = ?err.kind(), "file operation failed");
-                ControlMessage::error(
-                    st.request_id,
-                    wire::Error::new(ErrorCode::Internal, "file operation failed", false),
-                )
-            }
-        }
+        ControlMessage::error(st.request_id, file_io_error(err))
     }
 
     // ------------------------------------------------------------------
@@ -405,10 +389,21 @@ impl Server {
         if st.must_be_dir && !target.into_dir {
             return invalid(st.request_id, "path is not a directory");
         }
-        // ADR-0029 decision 13's free-space check (`statvfs`) belongs here,
-        // between the destination checks and the ticket. It lands with the
-        // data plane, which owns the reserve constant and the injectable
-        // `statvfs`.
+        // ADR-0029 decision 13: the destination filesystem must have the
+        // announced size plus the fixed reserve free, or nothing is made. The
+        // check is one `fstatvfs` on the already-opened directory fd; a
+        // failing `fstatvfs` is the OS error's own reply.
+        match self.free_space().available_bytes(&target.dir) {
+            Ok(available) => {
+                if available < req.size.saturating_add(wire::FILE_WRITE_FREE_RESERVE) {
+                    return ControlMessage::error(
+                        st.request_id,
+                        wire::Error::new(ErrorCode::ResourceExhausted, "no space left", false),
+                    );
+                }
+            }
+            Err(e) => return self.io_reply(st, &e),
+        }
         let ticket = self.issue_ticket(
             st.ctx.conn_id,
             TicketPurpose::File(PendingFile {
@@ -581,6 +576,39 @@ fn wire_kind(kind: FsKind) -> wire::FileKind {
         FsKind::Directory => wire::FileKind::Dir,
         FsKind::Symlink => wire::FileKind::Symlink,
         FsKind::Other => wire::FileKind::Other,
+    }
+}
+
+/// The wire error for an OS error from a file op, shared by the control
+/// plane (`io_reply`) and the `FILE_DATA` data plane (`file_data.rs`) so the
+/// same errno reads the same on both. `ENOENT` is the one thing that is the
+/// caller's mistake (`INVALID_ARGUMENT`, only reachable past the ACL and the
+/// state-path check); `EACCES`/`EPERM` and the errors a swapped path
+/// component produces are the uniform denial (ADR-0029 decision 17); `EEXIST`
+/// is the `--no-clobber` race lost at `linkat` (decision 7); `ENOSPC` and
+/// `EDQUOT` are `RESOURCE_EXHAUSTED` (decision 13).
+pub(super) fn file_io_error(err: &io::Error) -> wire::Error {
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => wire::Error::new(
+            ErrorCode::InvalidArgument,
+            "no such file or directory",
+            false,
+        ),
+        Some(libc::EEXIST) => {
+            wire::Error::new(ErrorCode::InvalidArgument, "destination exists", false)
+        }
+        Some(libc::EACCES | libc::EPERM | libc::ELOOP | libc::ENOTDIR) => wire::Error::new(
+            ErrorCode::PermissionDenied,
+            crate::acl::PERMISSION_DENIED_MESSAGE,
+            false,
+        ),
+        Some(libc::ENOSPC | libc::EDQUOT) => {
+            wire::Error::new(ErrorCode::ResourceExhausted, "no space left", false)
+        }
+        _ => {
+            tracing::debug!(kind = ?err.kind(), "file operation failed");
+            wire::Error::new(ErrorCode::Internal, "file operation failed", false)
+        }
     }
 }
 

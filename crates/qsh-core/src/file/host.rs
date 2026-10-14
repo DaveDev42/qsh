@@ -9,6 +9,11 @@
 //! function here acts on a directory fd and a single component name (`*at`
 //! calls), so a path component swapped after the check cannot redirect it.
 //!
+//! The write side (the temporary file next to its destination, the final
+//! attributes, the replace or the no-clobber link, the free-space probe) lives
+//! here too: the `FILE_DATA` pump in `server/file_data.rs` owns the stream and
+//! the order, and calls these blocking steps from `spawn_blocking`.
+//!
 //! Unix only: the whole module is compiled out elsewhere, where the ops are
 //! refused at the shape check (Windows is M20).
 
@@ -18,6 +23,9 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
+use std::sync::OnceLock;
+
+use rand::Rng;
 
 /// The kind of a filesystem object as an `lstat` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +357,234 @@ pub fn list_dir(
         more,
         unlistable,
     })
+}
+
+// ---------------------------------------------------------------------------
+// file.write: temp file, final attributes, replace or no-clobber link
+// ---------------------------------------------------------------------------
+
+/// The longest file name the filesystems qsh serves accept.
+const NAME_MAX: usize = 255;
+
+/// A freshly created temporary file and the name it has inside its
+/// directory.
+#[derive(Debug)]
+pub struct TempFile {
+    /// The open file, write-only, mode `0600`.
+    pub file: File,
+    /// Its name inside the directory fd it was created through.
+    pub name: OsString,
+}
+
+/// `.<name>.qsh-<16 hex>.part` (ADR-0029 decision 7). The embedded name is
+/// cut (on a byte boundary, which any unix name tolerates) when the whole
+/// would overrun `NAME_MAX`, so a long destination name can still be written.
+fn temp_name(name: &OsStr) -> OsString {
+    let mut random = [0u8; 8];
+    rand::rng().fill_bytes(&mut random);
+    let hex: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let tail = format!(".qsh-{hex}.part");
+    let room = NAME_MAX - 1 - tail.len();
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(1 + bytes.len().min(room) + tail.len());
+    out.push(b'.');
+    out.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    out.extend_from_slice(tail.as_bytes());
+    OsString::from_vec(out)
+}
+
+/// Create the temporary file for a write to `name` inside `dir`:
+/// `openat(O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)`. `O_EXCL` makes
+/// an existing entry of that name (planted or a collision) a failure that is
+/// retried under a new random name, never an open of someone else's file.
+pub fn create_temp(dir: &File, name: &OsStr) -> io::Result<TempFile> {
+    let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
+    for _ in 0..4 {
+        let temp = temp_name(name);
+        let cname = cstring(&temp)?;
+        // SAFETY: `dir` is open and `cname` is a live NUL-terminated string;
+        // the mode is read as `unsigned int` by the variadic `openat`.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                cname.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd >= 0 {
+            // SAFETY: `fd` is a fresh descriptor this call owns.
+            let file = unsafe { File::from_raw_fd(fd) };
+            return Ok(TempFile { file, name: temp });
+        }
+        last = io::Error::last_os_error();
+        if last.raw_os_error() != Some(libc::EEXIST) {
+            break;
+        }
+    }
+    Err(last)
+}
+
+/// `unlinkat(dir, name, 0)`: remove a (temporary) file by name. Never
+/// follows a symlink and never removes a directory.
+pub fn unlink_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    let cname = cstring(name)?;
+    // SAFETY: `dir` is open and `cname` is a live NUL-terminated string.
+    let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The process umask, read once (ADR-0029 decision 7: "읽어 둔다").
+///
+/// Linux reads it from `/proc/self/status`, which changes nothing. Elsewhere
+/// the only way to read a umask is to set one, so the value is swapped for
+/// the most restrictive one a moment and put back: a file another thread
+/// creates in that moment can only end up with fewer permissions, never
+/// more. `Server::set_file_host` calls [`init_umask`] while the host is
+/// still starting, before any connection is accepted.
+#[allow(clippy::useless_conversion)]
+pub fn process_umask() -> u32 {
+    static UMASK: OnceLock<u32> = OnceLock::new();
+    *UMASK.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status")
+            && let Some(value) = status.lines().find_map(|line| line.strip_prefix("Umask:"))
+            && let Ok(mask) = u32::from_str_radix(value.trim(), 8)
+        {
+            return mask & 0o777;
+        }
+        // SAFETY: `umask` has no failure mode; the previous value is put
+        // back at once.
+        let old = unsafe { libc::umask(0o077) };
+        // SAFETY: as above.
+        unsafe { libc::umask(old) };
+        u32::from(old) & 0o777
+    })
+}
+
+/// Read the umask now, so a later [`process_umask`] never has to.
+pub fn init_umask() {
+    let _ = process_umask();
+}
+
+/// Apply the final attributes to the finished temp file through its own fd
+/// (ADR-0029 decision 7): without `preserve` the mode is `mode & ~umask` and
+/// the modification time stays the write time, with it the mode is `mode`
+/// exactly and `mtime` is set with `futimens` (access time untouched).
+pub fn apply_final_attrs(file: &File, mode: u32, preserve: bool, mtime: i64) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = mode & 0o777;
+    let mode = if preserve {
+        mode
+    } else {
+        mode & !process_umask()
+    };
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    if preserve {
+        set_mtime(file, mtime)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn set_mtime(file: &File, mtime: i64) -> io::Result<()> {
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: mtime as libc::time_t,
+            tv_nsec: 0,
+        },
+    ];
+    // SAFETY: the fd is open and `times` is two live timespecs.
+    let rc = unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `renameat(dir, temp, dir, name)`: put the finished temp file in place,
+/// replacing whatever `name` was (a symlink is replaced, not followed).
+pub fn replace_at(dir: &File, temp: &OsStr, name: &OsStr) -> io::Result<()> {
+    let from = cstring(temp)?;
+    let to = cstring(name)?;
+    // SAFETY: `dir` is open and both names are live NUL-terminated strings.
+    let rc =
+        unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `linkat(dir, temp, dir, name, 0)`: give the finished temp file a second
+/// name without replacing anything. `EEXIST` when `name` exists, however it
+/// came to, which is what makes `--no-clobber` hold across the gap between
+/// the host's existence check and the replace (ADR-0029 decision 7). The
+/// caller removes the temp name afterwards ([`unlink_at`]).
+pub fn link_new_at(dir: &File, temp: &OsStr, name: &OsStr) -> io::Result<()> {
+    let from = cstring(temp)?;
+    let to = cstring(name)?;
+    // SAFETY: `dir` is open and both names are live NUL-terminated strings.
+    let rc = unsafe {
+        libc::linkat(
+            dir.as_raw_fd(),
+            from.as_ptr(),
+            dir.as_raw_fd(),
+            to.as_ptr(),
+            0,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Free bytes on the filesystem a directory fd lives on (ADR-0029 decision
+/// 13). A trait so a test can make a disk look full or empty without one.
+pub trait FreeSpace: Send + Sync {
+    /// Bytes an unprivileged writer can still use below `dir`.
+    fn available_bytes(&self, dir: &File) -> io::Result<u64>;
+}
+
+/// The real probe: `fstatvfs`, `f_bavail * f_frsize`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatvfsFreeSpace;
+
+impl FreeSpace for StatvfsFreeSpace {
+    #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
+    fn available_bytes(&self, dir: &File) -> io::Result<u64> {
+        // SAFETY: an all-zero `statvfs` is a valid initial value that
+        // fstatvfs overwrites.
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the fd is open and `st` is a live local.
+        let rc = unsafe { libc::fstatvfs(dir.as_raw_fd(), &mut st) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+    }
+}
+
+/// A seam on the blocking writer thread of a `file.write`: called before each
+/// chunk is written to the temp file. Production sets none. A test uses it to
+/// hold the disk write still, which is how a stalled local write (ADR-0037)
+/// is made on demand.
+pub trait WriteGate: Send + Sync {
+    /// About to write the next chunk; `written` bytes are already in the
+    /// file.
+    fn before_write(&self, written: u64);
 }
 
 #[cfg(test)]
