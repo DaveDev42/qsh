@@ -1473,7 +1473,7 @@ fn doctor_reports_no_config_unknown_key_when_config_toml_is_absent() {
 /// fails this test.
 #[test]
 fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
-    const ALL_SERVE_KEYS: [&str; 17] = [
+    const ALL_SERVE_KEYS: [&str; 19] = [
         "bind",
         "to",
         "replay_bytes",
@@ -1491,6 +1491,8 @@ fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
         "max_remote_forwards_per_principal",
         "max_connections_per_principal",
         "max_connections",
+        "max_file_transfers_per_principal",
+        "max_file_transfers",
     ];
     let serve = crate::config::ServeConfig {
         bind: Some("[::]:4433".to_string()),
@@ -1510,6 +1512,8 @@ fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
         max_remote_forwards_per_principal: Some(13),
         max_connections_per_principal: Some(14),
         max_connections: Some(15),
+        max_file_transfers_per_principal: Some(16),
+        max_file_transfers: Some(17),
     };
     let config = Config {
         serve,

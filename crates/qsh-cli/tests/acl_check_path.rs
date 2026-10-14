@@ -132,8 +132,10 @@ fn role_that_grants_files_makes_the_query_normalize_without_any_row() {
     let (code, out) = check(&host, "file.read", Some("/"));
     assert_eq!(code, 0, "{out}");
     assert_eq!(out["data"]["canonical_path"], "/", "{out}");
-    // The always-deny gate still stands in front of `file.*`.
-    assert_eq!(out["data"]["decision"], "deny", "{out}");
+    // `full` grants `file.read` whatever the path; enforcement adds the
+    // state-path check on top, which `acl check` does not run (ADR-0029
+    // decision 4-6 and CLI.md section 6.15).
+    assert_eq!(out["data"]["decision"], "allow", "{out}");
 }
 
 #[cfg(unix)]

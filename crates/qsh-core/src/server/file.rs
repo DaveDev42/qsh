@@ -1,20 +1,36 @@
 //! The remote file ops' control-stream handlers (`docs/adr/0029-file-copy.md`
 //! decisions 3 and 8).
 //!
-//! Decision 8 fixes the host order: (1) shape check and home resolution,
-//! (2) ACL, (3) user hint, (4) state path, (5) quota, (6) open and recheck,
-//! (7) respond. This build runs stage 1 and the `Authorizer::check` half of
-//! stage 2 only. [`Action::is_always_denied`] still denies `file.read` and
-//! `file.write` at the gate (ADR-0029 decision 8, ADR-0045 decision 5), so
-//! every well-formed request ends in `PERMISSION_DENIED` plus one audit line,
-//! and nothing that follows the decision exists yet: no grant-basis check, no
-//! path normalization, no filesystem access, no ticket, no stream. The
-//! injectable [`Normalizer`] ([`Server::set_path_normalizer`]) is the seam the
-//! grant-basis stage will call, and the pin
-//! `file_ops_are_denied_without_normalizing_or_touching_the_filesystem` holds
-//! its call count at zero until then.
+//! Decision 8 fixes the host order and an earlier stage that fails stops
+//! every later one:
+//!
+//! 1. shape check and home resolution (this file; lexical, no audit, no
+//!    filesystem access);
+//! 2. the ACL: (a) is there any ground for this principal to get this file
+//!    action at all ([`Authorizer::has_file_grant`]), (b) only then
+//!    normalize the path, (c) [`Authorizer::check`] plus one audit line;
+//! 3. the `user` hint (`UNSUPPORTED`);
+//! 4. the state-path check against the protected set, with one more audit
+//!    line on a refusal;
+//! 5. the transfer quota (`file.read`/`file.write` only);
+//! 6. open through directory fds and recheck the opened handle (protected
+//!    set, evaluator re-call, protected inode, file kind), with one more
+//!    audit line on a refusal;
+//! 7. respond.
+//!
+//! Stages 2 to 7 live in `file_host.rs` (unix only; Windows answers
+//! `UNSUPPORTED` at stage 1, ADR-0029 decision 23). Every refusal that is a
+//! policy outcome (no ground, outside `paths`, normalization failure, state
+//! path, recheck mismatch, protected inode, an `EACCES` from the OS) is the
+//! same `PERMISSION_DENIED` reply, byte for byte.
+//!
+//! This build issues the `file.read`/`file.write` tickets and answers
+//! `file.list` and `file.mkdir`. The `FILE_DATA` stream that would redeem a
+//! ticket is not accepted yet, so a ticket only ever expires and releases
+//! what it holds.
 
 use super::*;
+#[cfg(unix)]
 use crate::acl::Op;
 use crate::file::guard::{
     FileOp, FsNormalizer, Normalizer, ShapeError, serve_home_dir, shape_name_if_dir, shape_path,
@@ -22,6 +38,69 @@ use crate::file::guard::{
 
 /// The default normalizer when none was injected.
 static FS_NORMALIZER: FsNormalizer = FsNormalizer;
+
+/// One of the four file requests, borrowed from the decoded control message.
+pub(super) enum FileRequest<'a> {
+    Read(&'a wire::FileReadOpen),
+    Write(&'a wire::FileWriteOpen),
+    List(&'a wire::FileListOpen),
+    Mkdir(&'a wire::FileMkdirOpen),
+}
+
+impl FileRequest<'_> {
+    /// The registry row, which names the action.
+    #[cfg(unix)]
+    pub(super) fn op(&self) -> Op {
+        match self {
+            Self::Read(_) => Op::FileRead,
+            Self::Write(_) => Op::FileWrite,
+            Self::List(_) => Op::FileList,
+            Self::Mkdir(_) => Op::FileMkdir,
+        }
+    }
+
+    /// The path rule of the shape check.
+    fn shape(&self) -> FileOp {
+        match self {
+            Self::Read(_) => FileOp::Read,
+            Self::Write(_) => FileOp::Write,
+            Self::List(_) => FileOp::List,
+            Self::Mkdir(_) => FileOp::Mkdir,
+        }
+    }
+
+    /// The request path exactly as sent (also the audit `resource`,
+    /// ADR-0029 decision 4-7).
+    pub(super) fn path(&self) -> &str {
+        match self {
+            Self::Read(r) => &r.path,
+            Self::Write(r) => &r.path,
+            Self::List(r) => &r.path,
+            Self::Mkdir(r) => &r.path,
+        }
+    }
+
+    /// The optional single-component name (empty when absent). Only the
+    /// creating ops carry one.
+    pub(super) fn name_if_dir(&self) -> &str {
+        match self {
+            Self::Write(r) => &r.name_if_dir,
+            Self::Mkdir(r) => &r.name_if_dir,
+            Self::Read(_) | Self::List(_) => "",
+        }
+    }
+
+    /// The `user@` assertion (empty when absent).
+    #[cfg(unix)]
+    pub(super) fn user(&self) -> &str {
+        match self {
+            Self::Read(r) => &r.user,
+            Self::Write(r) => &r.user,
+            Self::List(r) => &r.user,
+            Self::Mkdir(r) => &r.user,
+        }
+    }
+}
 
 impl Server {
     /// Inject the path normalizer the file ops use (ADR-0029 decision 6-2).
@@ -41,57 +120,62 @@ impl Server {
         }
     }
 
-    /// One of the four file ops: `op` names the registry row (and so the
-    /// action), `shape` the path rule, `path` is the request path exactly as
-    /// sent (it is also the audit `resource`, ADR-0029 decision 4-7), and
-    /// `name_if_dir` is the optional single-component name (empty when
-    /// absent).
-    ///
-    /// Stage 1 failures are `INVALID_ARGUMENT` (or `UNSUPPORTED` where the
-    /// platform has no path judgement) before any ACL decision, audit line or
-    /// filesystem access. Stage 2 then asks the authorizer; today the answer
-    /// is always a denial (module doc).
-    pub(super) fn handle_file_op(
+    /// Tell the file ops where qsh's own config, state and runtime
+    /// directories and its audit file are, so the protected set can be
+    /// resolved per request (ADR-0029 decision 5). Production
+    /// (`crate::serve::host_runtime`) calls this once; without it every
+    /// file request that passes the ACL is refused (fail closed: a host that
+    /// cannot say what is protected protects everything). No-op past the
+    /// first call and off unix.
+    pub fn set_file_host(&self, paths: crate::config::Paths, audit: crate::config::AuditConfig) {
+        #[cfg(unix)]
+        let _ = self.file_host.set(FileHostConfig { paths, audit });
+        #[cfg(not(unix))]
+        let _ = (paths, audit);
+    }
+
+    /// One of the four file ops. Stage 1 failures are `INVALID_ARGUMENT` (or
+    /// `UNSUPPORTED` where the platform has no path judgement) before any
+    /// ACL decision, audit line or filesystem access; the rest of the
+    /// pipeline is `file_host.rs`.
+    pub(super) async fn handle_file_op(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
-        op: Op,
-        shape: FileOp,
-        path: &str,
-        name_if_dir: &str,
+        req: FileRequest<'_>,
     ) -> ControlMessage {
         // ---- stage 1: shape check and home resolution (lexical only). ----
-        if let Err(e) = shape_path(path.as_bytes(), shape, serve_home_dir().as_deref()) {
-            return shape_error(request_id, e);
-        }
-        if shape.creates()
-            && !name_if_dir.is_empty()
-            && let Err(e) = shape_name_if_dir(name_if_dir.as_bytes())
+        let shaped = match shape_path(
+            req.path().as_bytes(),
+            req.shape(),
+            serve_home_dir().as_deref(),
+        ) {
+            Ok(shaped) => shaped,
+            Err(e) => return shape_error(request_id, e),
+        };
+        if req.shape().creates()
+            && !req.name_if_dir().is_empty()
+            && let Err(e) = shape_name_if_dir(req.name_if_dir().as_bytes())
         {
             return shape_error(request_id, e);
         }
 
-        // ---- stage 2: ACL choke point, decide + audit. ----
-        if let Err(denied) = self.authorize(ctx, request_id, op.action(), path) {
-            return *denied;
+        #[cfg(unix)]
+        {
+            self.file_op_after_shape(ctx, request_id, &req, shaped)
+                .await
         }
-
-        // An allow needs `Action::is_always_denied` to stop covering the file
-        // actions, which lands with the host control plane. Until then this
-        // is unreachable; if it is ever reached early, refuse rather than
-        // act: nothing past the decision exists in this build.
-        ControlMessage::error(
-            request_id,
-            wire::Error::new(
-                ErrorCode::Unsupported,
-                "remote file operations are not available on this host",
-                false,
-            ),
-        )
+        #[cfg(not(unix))]
+        {
+            // `shape_path` already answered `UNSUPPORTED`; this is the same
+            // answer for a compiler that cannot see that.
+            let _ = (ctx, shaped);
+            shape_error(request_id, ShapeError::Unsupported)
+        }
     }
 }
 
-fn shape_error(request_id: u64, err: ShapeError) -> ControlMessage {
+pub(super) fn shape_error(request_id: u64, err: ShapeError) -> ControlMessage {
     let code = match err {
         ShapeError::Unsupported => ErrorCode::Unsupported,
         _ => ErrorCode::InvalidArgument,

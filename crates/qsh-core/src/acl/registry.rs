@@ -36,11 +36,11 @@
 //! to be excluded as well, while no wire op existed; the four remote file
 //! ops (`file.read`, `file.write`, `file.list`, `file.mkdir`, ADR-0029
 //! decision 3) gave them rows, so [`ALWAYS_DENIED_NO_OP`] shrank to
-//! `forward.socks`. The gate still denies them for now
-//! (`Action::is_always_denied` is unchanged until the host control plane
-//! lands), so those rows are driven as denials only. This exclusion is
+//! `forward.socks`. The host control plane then lifted the file actions out
+//! of `Action::is_always_denied` (ADR-0029 decision 3), so those rows are
+//! ordinary policy-evaluated seams now. This exclusion is
 //! anchored by this module's own `#[cfg(test)]`
-//! `deny_seams_cover_every_action_except_the_always_denied_trio`: it fails
+//! `deny_seams_cover_every_action_except_forward_socks`: it fails
 //! the moment a new `Action` has neither a row nor a documented exclusion
 //! here.
 
@@ -501,11 +501,11 @@ mod tests {
     /// only exclusion is `ForwardSocks`, undrivable by design, permanently
     /// (`-D` authorizes every `CONNECT` as `forward.local`, ADR-0019 결정 6).
     /// `FileRead`/`FileWrite` are covered since the four file ops landed
-    /// (ADR-0029 decision 3), even though `Action::is_always_denied` still
-    /// denies them. A newly added `Action` fails this test until it either
-    /// gets a seam row or is added to [`ALWAYS_DENIED_NO_OP`] with a reason.
+    /// (ADR-0029 decision 3). A newly added `Action` fails this test until it
+    /// either gets a seam row or is added to [`ALWAYS_DENIED_NO_OP`] with a
+    /// reason.
     #[test]
-    fn deny_seams_cover_every_action_except_the_always_denied_trio() {
+    fn deny_seams_cover_every_action_except_forward_socks() {
         let covered: std::collections::HashSet<Action> =
             DENY_SEAMS.iter().map(|s| s.action).collect();
         let excluded: std::collections::HashSet<Action> =
@@ -713,11 +713,7 @@ mod tests {
     }
 
     /// `ALWAYS_DENIED_NO_OP` must name exactly the always-denied actions
-    /// that no [`OP_REGISTRY`] row constructs. Today `Action::is_always_denied`
-    /// still names the trio, and the file ops gave two of them rows, so the
-    /// exclusion list is the third alone. When the gate stops denying
-    /// `file.*` the left-hand side shrinks to `forward.socks` and this test
-    /// needs no edit.
+    /// that no [`OP_REGISTRY`] row constructs: `forward.socks` alone.
     #[test]
     fn always_denied_no_op_names_the_always_denied_actions_that_have_no_op() {
         let excluded: std::collections::HashSet<Action> =

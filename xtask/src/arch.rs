@@ -288,6 +288,13 @@ const SETUP_TOKEN_SET: [&str; 8] = [
 const FILE_GUARD_FILE: &str = "crates/qsh-core/src/file/guard.rs";
 const FILE_GUARD_REASON: &str = "file/guard.rs is a pure path judgement: no transport, async runtime, or session/ACL layer; \
      the evaluator re-call is an injected closure (ADR-0029 decision 6-4)";
+/// `file/host.rs` holds the host-side filesystem steps (`*at` calls over
+/// directory fds, the directory listing). Same discipline as the guard: it
+/// acts on fds it is handed, and `Server::handle_file_op` owns the decision
+/// order, the audit and the transport. `file/host/tests.rs` is out of scope.
+const FILE_HOST_FILE: &str = "crates/qsh-core/src/file/host.rs";
+const FILE_HOST_REASON: &str = "file/host.rs is blocking filesystem code over open fds: no transport, async runtime, or session/ACL layer; \
+     the dispatch owns the decision order (ADR-0029 decision 8)";
 const FILE_GUARD_TOKEN_SET: [&str; 7] = [
     "qsh_transport",
     "tokio",
@@ -384,6 +391,11 @@ fn module_bans() -> Vec<ModuleBan> {
             scope: Scope::File(FILE_GUARD_FILE),
             forbidden,
             reason: FILE_GUARD_REASON,
+        });
+        bans.push(ModuleBan {
+            scope: Scope::File(FILE_HOST_FILE),
+            forbidden,
+            reason: FILE_HOST_REASON,
         });
     }
 

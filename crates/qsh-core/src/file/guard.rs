@@ -787,7 +787,15 @@ pub fn recheck_handle(
     recheck_handle_path(handle_path(file), protected, reevaluate)
 }
 
-/// Why [`ProtectedInodes::collect`] failed. The caller refuses the read.
+/// Why [`ProtectedInodes::collect`] failed. The caller refuses the read, and
+/// refuses it with the same `PERMISSION_DENIED` reply as every other policy
+/// denial (ADR-0029 decision 17): a scan that cannot finish leaves open
+/// whether the file is a hard link into the state tree, so the answer is
+/// "no", whichever variant this is and whatever the file is. It is not told
+/// apart from "this is a protected inode" on the wire, and not retried with
+/// a smaller scan. The cost is that a host whose protected tree outgrows
+/// [`INODE_SCAN_MAX_ENTRIES`] or [`INODE_SCAN_MAX_DEPTH`] refuses every
+/// `file.read` (`docs/design/threat-model.md` section 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InodeScanError {
     /// The protected tree is larger or deeper than the scan limits.
@@ -810,6 +818,13 @@ pub enum InodeScanError {
 /// (not just the files decision 5 names), the key, the audit file with its
 /// rotations and lock. Symlink entries are skipped: a link is not an inode
 /// to alias. Collected per request, like the set.
+///
+/// This is broader than decision 6-5 asks for, on purpose: an unlisted file
+/// in a protected directory (a keystore file, a future state file) cannot be
+/// read through a hard link either. The price is the scan limits
+/// ([`INODE_SCAN_MAX_ENTRIES`], [`INODE_SCAN_MAX_DEPTH`]); past them
+/// [`ProtectedInodes::collect`] fails with [`InodeScanError::TooLarge`] and
+/// the caller refuses the read, uniformly (see [`InodeScanError`]).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProtectedInodes {
     ids: HashSet<(u64, u64)>,

@@ -24,6 +24,8 @@ use qsh_core::server::RESET_CODE_RESOURCE_EXHAUSTED;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, make_ca, make_identity};
+#[cfg(unix)]
+use qsh_testkit::pair::HostedPair;
 use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::TunnelHarness;
 use qsh_transport::{Dialer, FramedRecv, FramedSend, Principal, StaticTrust};
@@ -467,13 +469,21 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
         server_trust,
         QuotaLimits {
             max_sessions: 1,
+            max_file_transfers: 1,
             ..QuotaLimits::default()
         },
     )
     .await;
+    #[cfg(unix)]
+    let (_file_dir, file) = file_ops_sandbox(&h);
 
     let mut s = h.session().await;
     let _opened = s.session_open(open_req()).await.unwrap();
+    // The file row: one `file.read` ticket fills the host-wide transfer cap.
+    #[cfg(unix)]
+    raw_file_read(&mut s, 1_000, &file)
+        .await
+        .expect("fills the file transfer cap");
 
     let client_trust = StaticTrust::empty().with_pin(
         h.server_identity.fingerprint,
@@ -495,11 +505,119 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
         "ACL must run before the quota check, even though the quota is saturated"
     );
 
+    // The same for the file op: the refused principal sees the uniform
+    // denial, never "the host is at its transfer cap", while the pinned
+    // principal does see the cap.
+    #[cfg(unix)]
+    {
+        let (code, _, message) = raw_file_read(&mut mallory, 1_001, &file)
+            .await
+            .expect_err("refused");
+        assert_eq!(code, ErrorCode::PermissionDenied);
+        assert_eq!(message, qsh_core::acl::PERMISSION_DENIED_MESSAGE);
+        let (code, _, _) = raw_file_read(&mut s, 1_002, &file)
+            .await
+            .expect_err("the cap is full for the allowed principal");
+        assert_eq!(code, ErrorCode::ResourceExhausted);
+    }
+
     // Nothing was created for the refused attempt — the one allowed
     // session is still the only one.
     let list = s.session_list().await.unwrap();
     assert_eq!(list.len(), 1);
 
+    h.shutdown().await;
+}
+
+/// A host-side state tree for the file ops (they refuse every request on a
+/// host that was never told where it is) and one readable file under a data
+/// directory of its own. Returns the guard and the file's path.
+#[cfg(unix)]
+fn file_ops_sandbox(h: &LoopbackHarness) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let paths = qsh_core::config::Paths::new(root.join("config"), root.join("state"))
+        .with_runtime_dir(root.join("run"));
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    let file = root.join("data/a.txt");
+    std::fs::write(&file, b"alpha\n").unwrap();
+    h.server()
+        .set_file_host(paths, qsh_core::config::AuditConfig::default());
+    (dir, file.display().to_string())
+}
+
+/// One raw `file.read` request; `Ok` is the ticket reply, `Err` the peer's
+/// `(code, retryable, message)`.
+#[cfg(unix)]
+async fn raw_file_read(
+    s: &mut Session,
+    id: u64,
+    path: &str,
+) -> Result<wire::FileReadOpened, (ErrorCode, bool, String)> {
+    use qsh_proto::wire::{ControlMessage, control_message, response};
+    s.send_control_message(&ControlMessage::new(
+        id,
+        control_message::Body::FileReadOpen(wire::FileReadOpen {
+            path: path.into(),
+            user: String::new(),
+        }),
+    ))
+    .await
+    .expect("send file.read");
+    loop {
+        let msg = s
+            .next_control_message()
+            .await
+            .expect("readable control stream")
+            .expect("open control stream");
+        let Some(control_message::Body::Response(wire::Response { body: Some(body) })) = msg.body
+        else {
+            continue;
+        };
+        return match body {
+            response::Body::FileReadOpened(opened) => Ok(opened),
+            response::Body::Error(e) => Err((e.error_code(), e.retryable, e.message)),
+            other => panic!("unexpected reply {other:?}"),
+        };
+    }
+}
+
+/// ADR-0029 decision 12 end to end: `[serve].max_file_transfers_per_principal`
+/// bounds the tickets one principal holds open. A `file.read` ticket holds
+/// its slot from issue (the open fd rides on the ticket), so with a cap of 1
+/// the second request is `RESOURCE_EXHAUSTED`/`retryable`, and the slot
+/// comes back when the connection, and with it the ticket, is gone.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn file_read_past_the_transfer_quota_answers_resource_exhausted_end_to_end() {
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_file_transfers_per_principal: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+    let (_dir, file) = file_ops_sandbox(&h);
+
+    let mut s = h.session().await;
+    let opened = raw_file_read(&mut s, 1, &file).await.expect("first ticket");
+    assert!(!opened.ticket.is_empty());
+    let (code, retryable, _) = raw_file_read(&mut s, 2, &file)
+        .await
+        .expect_err("the cap of 1 is full");
+    assert_eq!(code, ErrorCode::ResourceExhausted);
+    assert!(retryable);
+    assert_eq!(h.server().pending_tickets(), 1);
+
+    drop(s);
+    qsh_testkit::reverse::wait_for(Duration::from_secs(20), || {
+        (h.server().pending_tickets() == 0).then_some(())
+    })
+    .await;
+    let mut again = h.session().await;
+    raw_file_read(&mut again, 1, &file)
+        .await
+        .expect("the slot came back");
     h.shutdown().await;
 }
 

@@ -161,15 +161,13 @@ pub enum Action {
     /// design rather than pending one.
     ForwardSocks,
     /// Read a file or list a directory over the remote file ops
-    /// (`file.read`, `file.list`; ADR-0029 decision 3). The wire ops exist
-    /// and reach the choke point, but the gate still **always denies** the
-    /// action until the host control plane lands (see
-    /// [`Action::is_always_denied`]).
+    /// (`file.read`, `file.list`; ADR-0029 decision 3). A role grants it for
+    /// any path, a row only together with `paths`; the host's state tree
+    /// stays out of reach either way.
     FileRead,
     /// Write a file or create a directory over the remote file ops
     /// (`file.write`, `file.mkdir`; ADR-0029 decision 3). Same standing as
-    /// [`Action::FileRead`]: wire ops exist, the gate still **always
-    /// denies** it for now.
+    /// [`Action::FileRead`].
     FileWrite,
 }
 
@@ -210,17 +208,15 @@ impl Action {
     }
 
     /// Whether this action is denied unconditionally, independent of any
-    /// `acl.toml` rule — the closed set of PRD §9 actions this build always
-    /// refuses, for two different reasons. `forward.socks` is always denied
-    /// by design (ADR-0019 결정 6): `-D` is implemented, but every `CONNECT`
-    /// it opens is authorized on the peer as `forward.local`, and a
-    /// client-attached label cannot carry authorization, so no wire op will
-    /// ever drive `forward.socks` itself. `file.read` and `file.write` are
-    /// denied only until the remote file ops are served (ADR-0029): their
-    /// wire ops exist and are authorized through this gate, which refuses
-    /// them, so a request ends in `PERMISSION_DENIED` plus one audit line
-    /// and touches nothing. The host control plane step lifts them from
-    /// this set.
+    /// `acl.toml` rule and any trust role: today only `forward.socks`,
+    /// which is always denied by design (ADR-0019 결정 6). `-D` is
+    /// implemented, but every `CONNECT` it opens is authorized on the peer
+    /// as `forward.local`, and a client-attached label cannot carry
+    /// authorization, so no wire op will ever drive `forward.socks` itself.
+    /// `file.read` and `file.write` left this set when the host control
+    /// plane landed (ADR-0029 결정 3); they are granted by a role or by a
+    /// row with `paths`, and the protected state tree stays out of reach
+    /// whatever grants them (ADR-0029 결정 5, checked after the decision).
     ///
     /// The M5 policy evaluator (M5 plan Step 2 (2473c88)) must apply this gate
     /// **before** wildcard rule matching, not fold it into matching itself:
@@ -229,10 +225,7 @@ impl Action {
     /// alone cannot express "defined but never allowed" — only this
     /// upfront gate can.
     pub fn is_always_denied(self) -> bool {
-        matches!(
-            self,
-            Action::ForwardSocks | Action::FileRead | Action::FileWrite
-        )
+        matches!(self, Action::ForwardSocks)
     }
 }
 
@@ -471,6 +464,20 @@ pub trait Authorizer: Send + Sync + 'static {
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict;
+
+    /// Whether `requester` has any ground to be granted the file `action`
+    /// at all (ADR-0029 결정 4-6 (a)): a role that lists it, or a row that
+    /// selects the requester, covers the action and carries `paths`. A pure
+    /// judgment with no path in it. The host asks it before it normalizes
+    /// the request path, so a requester with no ground never makes the host
+    /// look at a path. It is a pre-filter, not the decision: [`Self::check`]
+    /// still decides, and a `false` here must agree with a deny there.
+    ///
+    /// The default answers `true` ("normalize, then let `check` decide"),
+    /// which is right for any evaluator that does not model `paths`.
+    fn has_file_grant(&self, _requester: &Requester<'_>, _action: Action) -> bool {
+        true
+    }
 }
 
 /// The opener/ownership key folding `(principal, auth_path)` into the one
@@ -544,6 +551,10 @@ impl Authorizer for AllowAllPinned {
 pub struct DenyAll;
 
 impl Authorizer for DenyAll {
+    fn has_file_grant(&self, _requester: &Requester<'_>, _action: Action) -> bool {
+        false
+    }
+
     fn check(
         &self,
         _requester: &Requester<'_>,

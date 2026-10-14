@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.27 (`acl.toml` 행의 `paths`(파일 action의 접근 범위)와 `acl check --path`, `AclCheckReq.path`·`AclCheckData.path`·`AclCheckData.canonical_path`, `AclMatchingRule.paths`·`AclMatchingRule.file_paths_missing`, `acl show`의 `paths`와 파일 action의 `effective_actions` 의미, doctor `acl_file_paths_missing`(코드 집합이 26개가 됨), ADR-0029 결정 4·19·23, §6.15·§6.17·§6.19; v0.26 = trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, doctor `trust_pin_role_unset`과 role에 따라 바뀐 `acl_*` 조건, `setup --peer-role`과 role 기본값, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.28 (항상-deny 게이트에서 `file.read`·`file.write`가 빠지고 `forward.socks`만 남음, 원격 파일 op의 host 처리(상태 경로 거절, 열린 핸들 재검증, 균일한 `PERMISSION_DENIED`), `[serve].max_file_transfers_per_principal`·`max_file_transfers`와 quota 범주 `quota_files_principal`·`quota_files_host`, `acl check --path`의 `decision`이 `"allow"`가 될 수 있음, ADR-0029 결정 3·5·6·8·12, §2.5·§6.11·§6.12·§6.15·§6.19; v0.27 = `acl.toml` 행의 `paths`(파일 action의 접근 범위)와 `acl check --path`, `AclCheckReq.path`·`AclCheckData.path`·`AclCheckData.canonical_path`, `AclMatchingRule.paths`·`AclMatchingRule.file_paths_missing`, `acl show`의 `paths`와 파일 action의 `effective_actions` 의미, doctor `acl_file_paths_missing`(코드 집합이 26개가 됨), ADR-0029 결정 4·19·23, §6.15·§6.17·§6.19; v0.26 = trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, doctor `trust_pin_role_unset`과 role에 따라 바뀐 `acl_*` 조건, `setup --peer-role`과 role 기본값, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -133,7 +133,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `file.write`, `file.mkdir` | `file.write` |
 | `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status`, `setup.run` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
-`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 파일 op은 경로마다 판정한다(ADR-0029 결정 8). 원격 파일 op 넷(`file.read`·`file.list` → `file.read`, `file.write`·`file.mkdir` → `file.write`)은 wire와 dispatch 자리, 그리고 인가 seam까지 있지만, 항상-deny 게이트가 아직 `file.read`/`file.write`를 막으므로 어떤 정책으로도 허용되지 않는다(ADR-0029 결정 3·8). 게이트를 걷는 것은 파일 복사 본체의 몫이다.
+`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 파일 op은 경로마다 판정한다(ADR-0029 결정 8). 원격 파일 op 넷(`file.read`·`file.list` → `file.read`, `file.write`·`file.mkdir` → `file.write`)은 role이 그 action을 주거나 `paths`가 있는 행이 경로를 덮을 때 허용된다. 항상-deny 게이트에는 `forward.socks`만 남았다(ADR-0029 결정 3·8). 허용된 뒤에도 qsh 자신의 config·state·runtime 경로, audit 파일과 그 회전 슬롯, 키 파일에는 role과 행에 무관하게 닿지 못한다(ADR-0029 결정 5, 끄는 설정 키 없음). 이 거절과 `paths` 밖·`paths` 없음·정규화 실패·열린 핸들 재검증 불일치는 모두 같은 `PERMISSION_DENIED`와 같은 문면이다. `file.v1`은 아직 광고하지 않으므로 정상 client는 이 op을 보내지 않는다(데이터 평면은 뒤 단계).
 
 위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `trust.set_role`도 같은 부류다: 원격 peer가 요청할 수 없는 이 머신의 local op이지만 실행되고 나면 그 pin이 받는 action이 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
 
@@ -843,7 +843,7 @@ human 출력의 `trust list`는 `ROLE` 열을 낸다. `role` 키가 없는 pin�
 | `none` | 없음 | 해당 없음 |
 
 - `forward.socks`는 어느 role에도 없다. 항상-deny 게이트가 role보다 먼저 돈다.
-- `full`의 `file.read`/`file.write`는 파일 복사(ADR-0029)가 항상-deny를 걷을 때 비로소 효과가 난다.
+- `full`의 `file.read`/`file.write`는 경로와 무관하게 허용된다(ADR-0045 결정 5). 다만 qsh 자신의 config·state·runtime 경로에는 role로도 닿지 못한다(ADR-0029 결정 5, ADR-0045 결정 18).
 - 소유 축은 role로 받은 grant가 `scope = "owned"` 행처럼 자기가 만든 자원으로 걸러지는지를 뜻한다.
 - `exec`는 의도를 나타내는 구분이지 `full`에 대한 보안 경계가 아니다. 셸이나 `exec.run`을 가진 peer는 serve 계정으로 `qsh trust set-role`을 실행해 자기 role을 올릴 수 있다. 보안 경계 구실을 하는 role은 명령 실행을 주지 않는 `tunnel`, `read-only`, `reverse`, `none`뿐이다.
 - 이 표는 role이 무엇을 주는지만 정한다. 판정이 이 표를 읽는 방식(`acl.toml` 행과의 합집합, 없는 `acl.toml`과 파싱 불가의 구분)은 §6.12가 서술한다.
@@ -1145,7 +1145,7 @@ qsh serve --to <listener|host:port> [--name <name>]
   `Retry` 발급 자체는 audit하지 않으며 창(10초)당 category별 1행 + 요약 1행으로 집계된다 — flood가
   audit flood가 되지 않는다.
 - **세션·exec·터널·연결 quota(`docs/adr/0010-resource-quotas.md`).** `[serve]`의
-  9개 키 모두 `0`은 "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다. 알 수 없는
+  11개 키 모두 `0`은 "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다. 알 수 없는
   `[serve]` 키는 오류 없이 무시된다. 상한 키 하나를 잘못 쓰면 그 상한은 오류 없이 기본값으로
   남는다. `max_sessions`(기본
   256)는 전체 principal을 합친 live 세션 수의 전역 상한, `max_sessions_per_principal`(기본 32)는
@@ -1163,11 +1163,12 @@ qsh serve --to <listener|host:port> [--name <name>]
   accept arm 단위**다: `qsh serve` 호스트의 accept loop과 `qsh listen` 컨트롤러는 각자 독립된
   512를 가지며 reverse target이 그 listener로 거는 outbound 연결은 이 상한에 잡히지 않는다(그
   개수는 operator가 설정한 listener 수로만 늘어나고 peer가 늘릴 수 없다). 신원이 아직 확정되지
-  않은 pairing 연결에는 별도 고정 상한(동시 8개, 설정 불가)이 있다. **ACL 판정이 quota보다
+  않은 pairing 연결에는 별도 고정 상한(동시 8개, 설정 불가)이 있다.
+  `max_file_transfers_per_principal`(기본 4)과 `max_file_transfers`(기본 64)는 각각 principal별·accept arm 전역으로 동시에 열려 있는 `file.read`/`file.write` 전송 수의 상한이다(ADR-0029 결정 12). slot은 ticket 발급 시점(열린 fd가 ticket에 묶이는 때)부터 전송이 끝나거나 ticket이 만료될 때까지 잡히고, 인가와 상태 경로 검사 뒤·파일을 열기 전에 검사한다. host 축이 principal 축보다 먼저다. `file.list`와 `file.mkdir`은 남기는 자원이 없어 세지 않는다. `qsh serve --to`도 같은 `[serve]` 키를 쓴다. **ACL 판정이 quota보다
   먼저다.** 인가되지 않은 principal은 quota가 이미 포화돼 있어도 여전히 `PERMISSION_DENIED`를
   보며 그 응답만으로는 quota 상태를 유추할 수 없다(연결 축은 ACL choke point가 없으므로 예외 —
   mTLS pin/CA 검증 자체가 그 경계다). 상한 초과는 자원(세션·child process·터널 스트림·listener·
-  연결) 생성 전 거부다. 세션·exec·remote-forward listener·(pairing 아닌) 연결 축 거부는
+  연결·열린 파일) 생성 전 거부다. 세션·exec·remote-forward listener·파일 전송·(pairing 아닌) 연결 축 거부는
   클라이언트에게 `RESOURCE_EXHAUSTED`(`retryable: true`)로 보인다. 터널 축(`TCP_CONNECT`)은
   control 응답이 아니라 스트림 자체의 `ConnectResult{ok:false, code:"RESOURCE_EXHAUSTED",
   message}`와 스트림 stop code `0x200D`로 답한다. 이 프레임에는 `retryable` 필드가 없다 —
@@ -1181,12 +1182,12 @@ qsh serve --to <listener|host:port> [--name <name>]
   실행 중이든 점유량은 같다(detach는 quota를 풀어주지 않는다). 거부는 audit에 구조적으로만
   남는다: `action`은 `"session.open"`(세션)·`"exec.run"`(exec 2종)·`"forward.local"`(터널
   2종)·`"forward.remote"`(remote-forward listener)·`"connect"`(연결 3종, `handshake_rejected`가
-  이미 쓰는 것과 같은 단어) 중 하나이고 `resource`는 `"quota_sessions_host"`·
+  이미 쓰는 것과 같은 단어)·`"file.transfer"`(파일 전송 2종) 중 하나이고 `resource`는 `"quota_sessions_host"`·
   `"quota_sessions_principal"`·`"quota_exec_principal"`·`"quota_exec_host"`·
   `"quota_tunnels_principal"`·`"quota_tunnels_forward"`·`"quota_remote_forwards_principal"`·
-  `"quota_connections_principal"`·`"quota_connections_host"`·`"quota_connections_pairing"`
-  가운데 하나다. `peer_addr`는 각 거부가 실제로 관측된 peer 주소를 담는다(요약 행만 여러 peer를
-  합치므로 `"-"`로 남는다). `request_id`는 control 요청(세션·exec·`RemoteForwardOpen`)에 대한
+  `"quota_connections_principal"`·`"quota_connections_host"`·`"quota_connections_pairing"`·
+  `"quota_files_principal"`·`"quota_files_host"` 가운데 하나다. `peer_addr`는 각 거부가 실제로 관측된 peer 주소를 담는다(요약 행만 여러 peer를
+  합치므로 `"-"`로 남는다). `request_id`는 control 요청(세션·exec·`RemoteForwardOpen`·파일 op)에 대한
   거부는 그 요청의 실제 id를, 대응하는 control 요청이 없는 데이터 스트림(터널)·연결 축 거부는
   `authorize_stream`의 connection-level 거부와 같은 sentinel `"-"`를 싣는다. 어느 축이든
   admission과 같은 10초 창으로 집계하지만 창 키는 category 하나가 아니라 `(category, principal)`이다
@@ -1350,7 +1351,7 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
 
 `qsh acl check`는 `missing`·`invalid`를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 그 상태일 뿐이다(§6.12·§6.13의 정책 파일 진단).
 
-`path`(additive)는 `--path`를 받은 그대로 echo하고, `canonical_path`(additive)는 정규화가 돌아 성공했을 때만 나오는 정규화된 경로다. 둘 다 파일 action이 아니면 필드 자체가 나타나지 않는다. role만 그 파일 action을 주는 경우에도 정규화가 돌므로 `canonical_path`가 나온다(질의는 로컬이고, 근거를 role까지 세는 §6.19의 `effective_actions`와 같은 기준이다. enforcement의 ACL 단계는 role-only allow를 정규화하지 않는다). `canonical_path`가 없는 `deny`는 정규화가 돌지 않았거나 실패했다는 뜻이다. 현재 항상-deny 게이트(①)가 `file.read`·`file.write`를 먼저 막으므로 이 두 action의 `decision`은 모든 경로에서 `"deny"`이고 `rule`이 없다. 게이트가 풀리면 `paths`가 덮는 경로에서 `"allow"`와 `rule`이 나온다.
+`path`(additive)는 `--path`를 받은 그대로 echo하고, `canonical_path`(additive)는 정규화가 돌아 성공했을 때만 나오는 정규화된 경로다. 둘 다 파일 action이 아니면 필드 자체가 나타나지 않는다. role만 그 파일 action을 주는 경우에도 정규화가 돌므로 `canonical_path`가 나온다(질의는 로컬이고, 근거를 role까지 세는 §6.19의 `effective_actions`와 같은 기준이다. enforcement의 ACL 단계는 role-only allow를 정규화하지 않는다). `canonical_path`가 없는 `deny`는 정규화가 돌지 않았거나 실패했다는 뜻이다. `paths`가 덮는 경로에서는 `"allow"`와 `rule`이 나오고, role이 주는 경우에는 `"allow"`에 `role`이 나온다. 이 질의는 상태 경로 검사와 열린 핸들 재검증을 돌리지 않는다. 그래서 `"allow"`는 "ACL이 허용한다"는 뜻이지 "호스트가 열어 준다"는 보장이 아니다. qsh 자신의 상태 경로는 `"allow"`여도 enforcement에서 거절된다.
 
 `owner`/`owner_auth_path`(additive)는 `--owner`/`--owner-auth-path`를 그대로 echo하며, 둘 다 생략됐을 때는 필드 자체가 나타나지 않는다(`qsh.cli/v1`은 additive-only, `CLAUDE.md`).
 
@@ -1669,9 +1670,9 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
 ```
 
 - `matching_rules`는 principal 정확 일치와 `auth_path` 일치(평가 순서 ②)를 통과하고 action 패턴이 어휘의 어떤 action이든 덮는(③) 행을 파일 순서로 담는다. 행마다 `index`(`acl.toml`의 배열 index, `acl check`의 `rule`과 같은 값), `allow`(패턴을 적힌 그대로. `exec.run` 같은 exact와 `forward.*` 같은 family 둘 다), `auth_path`(적지 않은 행은 `"pin"`), `scope`(`"owned"` | `"any"`, 열린 문자열)를 낸다. 매칭 판정은 `decide`와 같은 helper를 쓰고 두 번째 구현이 없다. 행이 `paths`를 적었으면 `paths`(optional)가 항목을 적힌 그대로 담는다(ADR-0029 결정 19). 키가 없는 행은 필드 자체가 나타나지 않는다. 파일 action을 적고 `paths`가 없는 행은 파일 접근을 주지 않으므로 호스트가 그 행에 `file_paths_missing: true`(optional, additive, false면 필드 자체가 나타나지 않음)를 싣고, human 출력은 이 필드를 보고 그 행 밑에 `grants no file access: the row has no paths` 줄을 낸다. 렌더러는 ACL 문법을 판정하지 않는다. `paths`가 있는 행은 `paths:` 줄에 항목을 나열한다.
-- `role`(optional)과 `role_actions`(optional)는 principal의 pin role과 그 role이 주는 action이다(ADR-0045 결정 11). 해석은 `acl check`(§6.15)와 같다. principal이 `device:<name>`이고 경로가 `pin`이면 이 머신의 `trust.toml`에서 그 이름의 pin을 찾고, `role` 키가 없는 pin은 `"none"`으로 나온다. 그 이름의 pin이 없거나 경로가 `ca`이거나 `trust.toml`을 파싱할 수 없으면 두 필드가 모두 생략된다. `role_actions`는 §6.11 role 표의 그 role 행을 표 순서 그대로 담는다. 항상-deny action(`file.read`, `file.write`)이 표에 있어도 담는다. 그 action은 `effective_actions`에 나오지 않는다. `role`이 `none`이면 `role_actions`는 빈 배열이다.
-- `effective_actions`는 `Action::ALL` 11종마다 enforcement가 쓰는 평가기(`Policy::decide`)를 role을 입력으로 줘서 소유자 없는 리소스로 불러 allow가 난 action만 어휘 순서로 모은 것이다. 그래서 role이 주는 action과 매칭 행이 주는 action의 합집합이고, `acl check`가 같은 정책 아래 action마다 내는 판정과 어긋나지 않는다. 합집합은 이 필드의 원래 뜻("이 principal이 지금 할 수 있는 것")을 따른 것이다. `matching_rules`는 행만 담는다. 파일 action(`file.read`·`file.write`)은 경로 없이는 판정할 수 없으므로 이 집합에서는 경로와 무관한 근거로 센다. role이 그 action을 주거나 주체를 고르는 행이 `paths`와 함께 그 action을 주면 포함하고(항상-deny 게이트가 먼저이므로 지금은 어느 쪽이든 나오지 않는다), 어느 경로가 열리는지는 `matching_rules`의 `paths`와 `acl check --path`(§6.15)가 답한다.
-- 항상-deny action(`forward.socks`, `file.read`, `file.write`)은 어떤 행이 적어도(`forward.*`, `file.*` 같은 family 패턴 포함) 이 집합에 나오지 않는다. 평가기가 규칙보다 먼저 막기 때문이다. 그런 행은 `matching_rules`에는 나타난다.
+- `role`(optional)과 `role_actions`(optional)는 principal의 pin role과 그 role이 주는 action이다(ADR-0045 결정 11). 해석은 `acl check`(§6.15)와 같다. principal이 `device:<name>`이고 경로가 `pin`이면 이 머신의 `trust.toml`에서 그 이름의 pin을 찾고, `role` 키가 없는 pin은 `"none"`으로 나온다. 그 이름의 pin이 없거나 경로가 `ca`이거나 `trust.toml`을 파싱할 수 없으면 두 필드가 모두 생략된다. `role_actions`는 §6.11 role 표의 그 role 행을 표 순서 그대로 담는다. `role`이 `none`이면 `role_actions`는 빈 배열이다.
+- `effective_actions`는 `Action::ALL` 11종마다 enforcement가 쓰는 평가기(`Policy::decide`)를 role을 입력으로 줘서 소유자 없는 리소스로 불러 allow가 난 action만 어휘 순서로 모은 것이다. 그래서 role이 주는 action과 매칭 행이 주는 action의 합집합이고, `acl check`가 같은 정책 아래 action마다 내는 판정과 어긋나지 않는다. 합집합은 이 필드의 원래 뜻("이 principal이 지금 할 수 있는 것")을 따른 것이다. `matching_rules`는 행만 담는다. 파일 action(`file.read`·`file.write`)은 경로 없이는 판정할 수 없으므로 이 집합에서는 경로와 무관한 근거로 센다. role이 그 action을 주거나 주체를 고르는 행이 `paths`와 함께 그 action을 주면 포함하고, 어느 경로가 열리는지는 `matching_rules`의 `paths`와 `acl check --path`(§6.15)가 답한다.
+- 항상-deny action(`forward.socks`)은 어떤 행이 적어도(`forward.*` 같은 family 패턴 포함) 이 집합에 나오지 않는다. 평가기가 규칙보다 먼저 막기 때문이다. 그런 행은 `matching_rules`에는 나타난다. `file.read`·`file.write`를 적은 행이 `paths`를 가지면 이 집합에 들고, `paths`가 없으면 들지 않는다(그 행은 `matching_rules`에 `file_paths_missing`으로 나온다).
 - 소유자 없는 리소스를 가정한 집합이므로, `scope = "owned"` 행은 소유된 리소스(열린 세션 등)에서 이 집합의 부분집합만 허용한다. 소유된 리소스에 대해 이 집합은 **상한**이다. 이 사실은 산문이라 JSON에 싣지 않고 human 출력과 이 문장이 맡는다.
 - `auth_path`를 적지 않은 `[[acl]]` 행은 `"pin"`을 받아 CA로 인증한 peer에게 매칭되지 않는다. `--auth-path`를 생략하면 `"pin"`으로 평가한다는 사실과 함께 human 출력이 고지하고, JSON에서는 `auth_path_defaulted: true`가 같은 사실을 구조로 싣는다(ADR-0025 결정 5).
 - role과 행은 반영 시점이 다르다. role은 판정마다 `trust.toml`에서 읽으므로 `qsh trust set-role`과 `qsh trust remove`는 돌고 있는 `qsh serve`/`qsh listen`에 다음 요청부터 반영된다(재시작 불필요). 행은 아래 문단대로 재시작이 필요하다. human 출력은 role 줄을 principal 줄 바로 다음에 내고, 이 비대칭을 두 줄로 나눠 적는다(role 쪽은 "a role change takes effect on the next request, without a restart.", 행 쪽은 아래 `ACL_RESTART_NOTICE`).

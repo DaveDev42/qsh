@@ -1212,28 +1212,47 @@ mod dod2_audit {
         }
     }
 
-    /// The file ops' allow leg, under the `AllowAllPinned` test double (the
-    /// double does not know the always-denied gate): the choke point records
-    /// an allow on the registered action, and the handler, which has nothing
-    /// to do past the decision yet, answers `UNSUPPORTED` instead of acting.
-    /// The fail-closed fallthrough of `Server::handle_file_op`.
+    /// The file ops' allow leg, under the `AllowAllPinned` test double: the
+    /// choke point records an allow on the registered action with the request
+    /// path as `resource`. This bare `Server::new` was never told where its
+    /// state tree is (`Server::set_file_host`), so the state-path stage cannot
+    /// say what is protected and refuses (fail closed): a second record
+    /// (`deny`, same action and resource) and the uniform `PERMISSION_DENIED`.
+    /// The state-path and recheck stages themselves are driven end to end in
+    /// `crates/qsh-testkit/tests/file_host.rs`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn file_ops_are_audited_allow_and_then_refuse_to_act() {
+    async fn file_ops_are_audited_allow_and_then_fail_closed_without_a_state_tree() {
         let rig = rig(Arc::new(AllowAllPinned));
         let ctx = ctx(Principal::Device("laptop".into()));
         for (i, (op, body, path)) in file_op_requests().into_iter().enumerate() {
-            drive(
-                &rig,
-                &ctx,
-                i as u64 + 1,
-                body,
-                op,
-                "allow",
-                Some(ErrorCode::Unsupported),
-            )
-            .await;
-            assert_eq!(rig.audit.records().last().unwrap().resource, path, "{op}");
+            let spec = OP_REGISTRY
+                .iter()
+                .find(|s| s.op.as_str() == op)
+                .unwrap_or_else(|| panic!("{op:?} is not an OP_REGISTRY row"));
+            let before = rig.audit.records().len();
+            let reply = rig
+                .server
+                .dispatch(&ctx, &ControlMessage::new(i as u64 + 1, body))
+                .await
+                .expect("dispatch always replies to a control-stream request");
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::PermissionDenied),
+                "{op}: {reply:?}"
+            );
+            let records = rig.audit.records();
+            assert_eq!(records.len(), before + 2, "{op}: {records:?}");
+            let (allow, deny) = (&records[before], &records[before + 1]);
+            assert_eq!(allow.decision, "allow", "{op}");
+            assert_eq!(deny.decision, "deny", "{op}");
+            for rec in [allow, deny] {
+                assert_eq!(rec.action, spec.action.as_str(), "{op}");
+                assert_eq!(rec.resource, path, "{op}");
+            }
+            assert_resource_matches_declared_kind(spec, &allow.resource);
+            assert_eq!(deny.rule, None, "{op}");
+            assert_eq!(deny.role, None, "{op}");
         }
     }
 

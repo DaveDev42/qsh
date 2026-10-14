@@ -32,6 +32,59 @@ fn reserve_exec_refuses_past_the_cap_and_release_frees_the_slot() {
     assert_eq!(quotas.exec_in_use("device:a"), 0);
 }
 
+fn quotas_with_files(per_principal: usize, host: usize) -> Arc<Quotas> {
+    Quotas::new(
+        QuotaLimits {
+            max_file_transfers_per_principal: per_principal,
+            max_file_transfers: host,
+            ..QuotaLimits::default()
+        },
+        Arc::new(TestClock::new()),
+    )
+}
+
+/// ADR-0029 decision 12: the host-wide axis is checked first, then the
+/// principal's, and a released permit frees its slot and its map entry.
+#[test]
+fn reserve_file_transfer_checks_host_then_principal_and_release_frees_the_slot() {
+    let quotas = quotas_with_files(2, 3);
+    let a1 = quotas.reserve_file_transfer("device:a").unwrap();
+    let a2 = quotas.reserve_file_transfer("device:a").unwrap();
+    assert_eq!(
+        quotas.reserve_file_transfer("device:a").unwrap_err(),
+        QuotaKind::FilesPerPrincipal
+    );
+    let b1 = quotas.reserve_file_transfer("device:b").unwrap();
+    assert_eq!(quotas.files_in_use("device:a"), 2);
+    assert_eq!(quotas.files_in_use_total(), 3);
+    // Both axes are full for `device:b` now; the host axis answers first.
+    assert_eq!(
+        quotas.reserve_file_transfer("device:b").unwrap_err(),
+        QuotaKind::FilesHost
+    );
+
+    drop(a1);
+    assert_eq!(quotas.files_in_use("device:a"), 1);
+    let a3 = quotas.reserve_file_transfer("device:a").unwrap();
+    drop((a2, a3, b1));
+    assert_eq!(quotas.files_in_use_total(), 0);
+    assert_eq!(
+        quotas.files_in_use_entry_count(),
+        0,
+        "no entry without a live transfer"
+    );
+}
+
+/// A refused reservation against a zero cap plants no zero-valued entry.
+#[test]
+fn reserve_file_transfer_leaves_no_entry_behind_when_a_cap_is_zero() {
+    for quotas in [quotas_with_files(0, 64), quotas_with_files(4, 0)] {
+        assert!(quotas.reserve_file_transfer("device:a").is_err());
+        assert_eq!(quotas.files_in_use("device:a"), 0);
+        assert_eq!(quotas.files_in_use_entry_count(), 0);
+    }
+}
+
 /// Adversary finding A8: `exec_in_use`'s comparison against
 /// `max_exec_per_principal` used to cast the limit down to `u32`,
 /// truncating any limit above `u32::MAX` back into a small (even
@@ -727,8 +780,8 @@ fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
 }
 
 /// M8 Step 3b S5: `Quotas::windows` grew from 3 slots to
-/// `QuotaKind::ALL.len()` (10) across S1-S4. This pins that every one
-/// of the 7 categories S1 added closes its own window with a real
+/// `QuotaKind::ALL.len()` (12) across S1-S4 and the M15 file axes. This pins that every one
+/// of the categories added after the first three closes its own window with a real
 /// summary — not just that `flush_expired_summary_names_the_correct_
 /// kind_for_every_category` above sees *a* record (which a stray
 /// hardcoded `windows: [AuditWindow; 3]` would already fail loudly
@@ -745,6 +798,8 @@ fn flush_expired_closes_every_new_category_window() {
         QuotaKind::ConnectionsPerPrincipal,
         QuotaKind::Connections,
         QuotaKind::PairingConnections,
+        QuotaKind::FilesPerPrincipal,
+        QuotaKind::FilesHost,
     ];
     assert_eq!(
         new_kinds.len() + 3,
@@ -1131,20 +1186,21 @@ fn quota_kind_all_stays_in_lockstep_with_the_window_array() {
     // `Quotas::windows` is declared `[AuditWindow; QuotaKind::ALL.len()]`
     // — its length can never mechanically diverge from `ALL.len()`, so
     // the invariant this test exists to pin is that *count* against a
-    // literal (10, the full 3b vocabulary), not against `ALL.len()`
+    // literal (12, the 3b vocabulary plus the two M15 file axes), not
+    // against `ALL.len()`
     // itself: comparing a derived quantity to the very expression it
     // was derived from can never fail no matter how many variants a
     // mutation drops from `ALL`.
     assert_eq!(
         quotas.windows.len(),
-        10,
+        12,
         "Quotas::windows must have exactly one slot per QuotaKind::ALL entry \
-         (10 variants after M8 Step 3b S1)"
+         (12 variants once the file-transfer axes exist)"
     );
     assert_eq!(
         QuotaKind::ALL.len(),
-        10,
-        "QuotaKind::ALL must list all 10 variants"
+        12,
+        "QuotaKind::ALL must list all 12 variants"
     );
     // Every kind must be reachable as a valid index — a variant added
     // to the enum but left out of ALL would panic here instead of
@@ -1155,7 +1211,7 @@ fn quota_kind_all_stays_in_lockstep_with_the_window_array() {
 }
 
 /// M8 Step 3b ruling R5: pins the full, exact vocabulary for every one
-/// of the 10 `QuotaKind` variants — `category()`, `action()`, and
+/// of the 12 `QuotaKind` variants — `category()`, `action()`, and
 /// `wire_message()` — against the ruling's own table, so a variant
 /// added to the enum without a matching arm in one of these three
 /// functions (or a typo in the string a match arm returns) fails here
@@ -1222,6 +1278,18 @@ fn every_quota_kind_maps_to_its_documented_category_action_and_wire_message() {
             "quota_connections_pairing",
             "connect",
             "connection quota exceeded",
+        ),
+        (
+            QuotaKind::FilesPerPrincipal,
+            "quota_files_principal",
+            "file.transfer",
+            "file transfer quota exceeded",
+        ),
+        (
+            QuotaKind::FilesHost,
+            "quota_files_host",
+            "file.transfer",
+            "file transfer quota exceeded",
         ),
     ];
     assert_eq!(
@@ -1865,7 +1933,7 @@ fn a_rejection_audited_under_the_reserved_dash_principal_lands_in_overflow() {
 #[test]
 fn flush_expired_worst_case_burst_fits_under_the_default_audit_queue_depth() {
     let worst_case_burst = QuotaKind::ALL.len() * (MAX_AUDIT_WINDOW_PRINCIPALS + 1);
-    assert_eq!(worst_case_burst, 650, "documented worst-case burst drifted");
+    assert_eq!(worst_case_burst, 780, "documented worst-case burst drifted");
     assert!(
         (worst_case_burst as u32) < crate::config::AuditConfig::DEFAULT_QUEUE_DEPTH,
         "flush_expired's worst-case per-tick burst ({worst_case_burst}) \

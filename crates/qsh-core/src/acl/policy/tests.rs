@@ -33,11 +33,11 @@ fn family_prefix(action: Action) -> FamilyPrefix {
 }
 
 #[test]
-fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
+fn always_deny_denies_forward_socks_under_the_most_generous_policy_with_no_rule_index() {
     // `docs/design/architecture.md` §6 / M5 plan Step 2 (a) (2473c88): even
     // the most permissive policy an operator could write cannot grant
-    // the always-denied trio (two P1-deferred, one undrivable by design —
-    // ADR-0019 결정 6).
+    // `forward.socks`, undrivable by design (ADR-0019 결정 6). The file
+    // actions left the gate with the host control plane (ADR-0029 결정 3).
     let policy = Policy {
         rules: vec![rule(
             "user:dave",
@@ -51,20 +51,19 @@ fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
         )],
     };
     let principal = Principal::User("dave".into());
-    for action in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
-        let verdict = policy.decide(
-            &principal,
-            AuthPath::Pin,
-            None,
-            action,
-            ResourceRef::unowned("r"),
-        );
-        assert_eq!(verdict.decision, Decision::Deny, "{action} must be denied");
-        assert_eq!(verdict.rule, None, "{action} must carry no rule index");
-    }
+    let action = Action::ForwardSocks;
+    let verdict = policy.decide(
+        &principal,
+        AuthPath::Pin,
+        None,
+        action,
+        ResourceRef::unowned("r"),
+    );
+    assert_eq!(verdict.decision, Decision::Deny, "{action} must be denied");
+    assert_eq!(verdict.rule, None, "{action} must carry no rule index");
     // Sanity: the same policy *does* grant an ordinary action in one
-    // of those families, so the trio's denial isn't just "the rule
-    // never matches anything".
+    // of those families, so the denial isn't just "the rule never matches
+    // anything".
     let allowed = policy.decide(
         &principal,
         AuthPath::Pin,
@@ -495,6 +494,12 @@ fn oracle_covers(
                 (Scope::Any, _) | (Scope::Owned, None) => true,
                 (Scope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
             }
+            // A file action is only ever granted by a row that carries
+            // `paths` (ADR-0029 결정 4) and whose entries cover the request's
+            // canonical path. This property's resources carry no path, so a
+            // row covers no file action here; the `paths` match has its own
+            // tests below.
+            && !(matches!(action, Action::FileRead | Action::FileWrite))
     })
 }
 
@@ -512,6 +517,8 @@ fn oracle_role_row(role: TrustRole) -> (&'static [Action], bool) {
                 Action::SessionControl,
                 Action::ForwardLocal,
                 Action::ForwardRemote,
+                Action::FileRead,
+                Action::FileWrite,
                 Action::HostReverse,
             ],
             false,
@@ -533,10 +540,7 @@ fn oracle_role_row(role: TrustRole) -> (&'static [Action], bool) {
     }
 }
 
-/// Whether the role row grants `(action, resource)`. `file.read` and
-/// `file.write` are in `full`'s real row but never reach this function: the
-/// always-deny gate (ADR-0019 결정 6) answers them first, which the property
-/// asserts separately, so the oracle's `full` row leaves them out.
+/// Whether the role row grants `(action, resource)`.
 fn oracle_role_allows(
     role: Option<TrustRole>,
     action: Action,
@@ -569,7 +573,7 @@ proptest! {
     /// for an arbitrary policy and an arbitrary request, `Policy::
     /// decide`'s allow/deny agrees with an independent naive oracle —
     /// in particular, whenever the oracle finds no covering rule, the
-    /// evaluator MUST deny. The always-deny trio is asserted to
+    /// evaluator MUST deny. The always-deny action (`forward.socks`) is asserted to
     /// override any oracle coverage, since no rule can grant it.
     ///
     /// `owner_kind` (M5 plan Step 5 (2473c88)) draws the resource into one
@@ -641,15 +645,15 @@ proptest! {
         prop_assert_eq!(role, if role_in_effect { pin_role } else { None });
         let verdict = policy.decide(&principal, auth_path, role, action, resource);
         // F4 (M5 Step 2 adversarial review): the literal always-denied
-        // trio (two P1-deferred, one undrivable by design, ADR-0019 결정
+        // action (`forward.socks`, undrivable by design, ADR-0019 결정
         // 6), spelled out again here rather than calling
         // `Action::is_always_denied()` — the very function `decide`
         // itself calls to implement this gate. Branching the oracle on
         // the code under test meant a mutation to `is_always_denied`
-        // (e.g. dropping `FileWrite`) changed this test's expectation
+        // (e.g. adding `FileWrite`) changed this test's expectation
         // in lockstep with `decide`'s behavior, so the oracle could
         // never disagree and the mutation went undetected.
-        if matches!(action, Action::ForwardSocks | Action::FileRead | Action::FileWrite) {
+        if matches!(action, Action::ForwardSocks) {
             prop_assert_eq!(verdict.decision, Decision::Deny);
             prop_assert_eq!(verdict.rule, None);
             prop_assert_eq!(verdict.role, None);
@@ -745,7 +749,7 @@ proptest! {
     /// `acl show`'s effective set (ADR-0025 decision 3) equals an
     /// independent model that never calls `decide`: the union of the
     /// `allow` patterns of every row whose principal and `auth_path` match,
-    /// expanded over `Action::ALL`, minus the literal always-denied trio.
+    /// expanded over `Action::ALL`, minus the literal always-denied action.
     /// The resource is unowned, so `scope` is ignored. The role dimension
     /// (PLAN M15 Step 6, ADR-0045 결정 11) joins as a union: a role counts
     /// only for a `device:` principal over `pin`, and grants what
@@ -762,16 +766,17 @@ proptest! {
         let model: Vec<Action> = Action::ALL
             .into_iter()
             .filter(|action| {
-                !matches!(
-                    action,
-                    Action::ForwardSocks | Action::FileRead | Action::FileWrite
-                )
+                !matches!(action, Action::ForwardSocks)
             })
             .filter(|action| {
+                // A file action needs a row with `paths` (ADR-0029 결정 4);
+                // this model's rows carry none, so only a role grants one.
                 let by_row = policy.rules.iter().any(|rule| {
                     rule.principal == principal_str
                         && rule.auth_path == auth_path
                         && rule.allow.iter().any(|p| expand(p).contains(action))
+                        && (!matches!(action, Action::FileRead | Action::FileWrite)
+                            || rule.paths.is_some())
                 });
                 let by_role = role_counts
                     && role.is_some_and(|role| oracle_role_row(role).0.contains(action));
@@ -881,8 +886,6 @@ fn matching_rules_lists_rows_in_file_order_and_renders_patterns_as_written() {
 
 // ---------------------------------------------------------------
 // `paths` (ADR-0029 결정 4): evaluation step ③-1 and the ground helper.
-// The ① gate still denies `file.*` in `Policy::decide`, so these go through
-// `decide_past_gate`, the helper `decide` delegates to.
 // ---------------------------------------------------------------
 
 mod file_paths {
@@ -927,7 +930,7 @@ mod file_paths {
         normalizer: &dyn Normalizer,
     ) -> Verdict {
         let path = PathBuf::from(request);
-        policy.decide_past_gate(
+        policy.decide(
             &Principal::User("dave".into()),
             AuthPath::Pin,
             None,
@@ -989,7 +992,7 @@ mod file_paths {
         let policy = Policy {
             rules: vec![file_rule(Some(&["/"]))],
         };
-        let verdict = policy.decide_past_gate(
+        let verdict = policy.decide(
             &Principal::User("dave".into()),
             AuthPath::Pin,
             None,
@@ -1063,7 +1066,7 @@ mod file_paths {
         };
         let device = Principal::Device("laptop".into());
         let path = PathBuf::from("/elsewhere/a.txt");
-        let verdict = policy.decide_past_gate(
+        let verdict = policy.decide(
             &device,
             AuthPath::Pin,
             Some(TrustRole::Full),
@@ -1094,12 +1097,19 @@ mod file_paths {
     }
 
     #[test]
-    fn effective_actions_keeps_the_gate_in_front_of_file_actions() {
-        let policy = Policy {
+    fn effective_actions_lists_file_actions_only_with_a_grant_basis() {
+        let principal = Principal::User("dave".into());
+        let with = Policy {
             rules: vec![file_rule(Some(&["/srv"]))],
         };
-        let actions =
-            policy.effective_actions(&Principal::User("dave".into()), AuthPath::Pin, None);
+        let actions = with.effective_actions(&principal, AuthPath::Pin, None);
+        assert!(actions.contains(&Action::FileRead));
+        assert!(actions.contains(&Action::FileWrite));
+        // A row with no `paths` grants no file access (ADR-0029 결정 4).
+        let without = Policy {
+            rules: vec![file_rule(None)],
+        };
+        let actions = without.effective_actions(&principal, AuthPath::Pin, None);
         assert!(!actions.contains(&Action::FileRead));
         assert!(!actions.contains(&Action::FileWrite));
     }

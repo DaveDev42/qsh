@@ -521,9 +521,12 @@ fn always_denied_named_action_warns_with_structural_fields_only() {
         "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"forward.socks\"]\n\n[[acl]]\nprincipal = \"user:dave\"\nallow = [\"file.read\"]\npaths = [\"{SRV}\"]\n",
     ));
     assert!(matches!(load, PolicyLoad::Loaded(_)));
+    // `forward.socks` is the one always-denied action left; the `file.read`
+    // row is an ordinary row with `paths` and warns about nothing
+    // (ADR-0029 decision 3).
     assert_eq!(
         events.len(),
-        2,
+        1,
         "one warning per exactly-named always-denied action, got {events:?}"
     );
     for (_, fields) in &events {

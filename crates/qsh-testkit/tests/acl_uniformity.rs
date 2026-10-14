@@ -947,3 +947,201 @@ async fn role_absent_out_of_scope_and_reload_failure_denials_are_uniform() {
         t.shutdown().await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// The file ops' policy outcomes are one denial (ADR-0029 decision 17).
+// ---------------------------------------------------------------------------
+
+/// The four file requests for `path`, as `(seam name, body)`.
+#[cfg(unix)]
+fn file_bodies(path: &str) -> [(&'static str, wire::control_message::Body); 4] {
+    use wire::control_message::Body;
+    [
+        (
+            "file.read",
+            Body::FileReadOpen(wire::FileReadOpen {
+                path: path.into(),
+                user: String::new(),
+            }),
+        ),
+        (
+            "file.write",
+            Body::FileWriteOpen(wire::FileWriteOpen {
+                path: path.into(),
+                size: 1,
+                mode: 0o600,
+                overwrite: true,
+                ..Default::default()
+            }),
+        ),
+        (
+            "file.list",
+            Body::FileListOpen(wire::FileListOpen {
+                path: path.into(),
+                ..Default::default()
+            }),
+        ),
+        (
+            "file.mkdir",
+            Body::FileMkdirOpen(wire::FileMkdirOpen {
+                path: path.into(),
+                mode: 0o700,
+                ..Default::default()
+            }),
+        ),
+    ]
+}
+
+/// A normalizer that folds `.` and `..` lexically and follows no symlink:
+/// the stand-in for "the path looked fine when it was normalized" that the
+/// opened-handle recheck exists for.
+#[cfg(unix)]
+struct LexicalNormalizer;
+
+#[cfg(unix)]
+impl qsh_core::file::guard::Normalizer for LexicalNormalizer {
+    fn normalize(
+        &self,
+        absolute: &std::path::Path,
+    ) -> Result<std::path::PathBuf, qsh_core::file::guard::NormalizeError> {
+        let mut out = std::path::PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Start a host that grants `laptop` the file actions with `paths`, wired to
+/// a state tree under `root`, and drive every path in `paths_to_try` through
+/// all four file seams. Returns each reply's `(code, message)`.
+#[cfg(unix)]
+async fn file_denials(
+    root: &std::path::Path,
+    grant_paths: Option<Vec<String>>,
+    lexical: bool,
+    paths_to_try: &[String],
+) -> Vec<(ErrorCode, String)> {
+    use qsh_core::acl::{ActionPattern, Policy, Rule, Scope};
+    use qsh_testkit::pair::HostedPair;
+
+    let policy = Policy {
+        rules: vec![Rule {
+            principal: Principal::Device("laptop".into()).to_string(),
+            auth_path: qsh_transport::AuthPath::Pin,
+            allow: vec![
+                ActionPattern::Exact(Action::FileRead),
+                ActionPattern::Exact(Action::FileWrite),
+            ],
+            scope: Scope::Any,
+            paths: grant_paths,
+        }],
+    };
+    let h = LoopbackHarness::start_with(Arc::new(policy)).await;
+    let paths = qsh_core::config::Paths::new(root.join("host/config"), root.join("host/state"))
+        .with_runtime_dir(root.join("host/run"));
+    h.server()
+        .set_file_host(paths, qsh_core::config::AuditConfig::default());
+    if lexical {
+        h.server().set_path_normalizer(
+            Arc::new(LexicalNormalizer) as Arc<dyn qsh_core::file::guard::Normalizer>
+        );
+    }
+    let mut s = h.session().await;
+    let mut out = Vec::new();
+    for path in paths_to_try {
+        for (seam, body) in file_bodies(path) {
+            match drive_file_op(&mut s, body).await {
+                Err(ClientError::Remote { code, message, .. }) => out.push((code, message)),
+                other => panic!("{seam} {path}: expected a remote refusal, got {other:?}"),
+            }
+        }
+    }
+    h.shutdown().await;
+    out
+}
+
+/// A request outside `paths`, a row without `paths`, a path that cannot be
+/// normalized, a state path, and a symlink swapped in under a lexically
+/// fine path (the recheck) all answer the same `PERMISSION_DENIED` with the
+/// same message, on each of the four file seams: nothing in the reply says
+/// which check refused (ADR-0029 decision 17).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn file_policy_outcomes_all_answer_the_same_denial() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    for sub in [
+        "share",
+        "outside/sub",
+        "host/config",
+        "host/state",
+        "host/run",
+    ] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    std::fs::write(root.join("share/a.txt"), b"a").unwrap();
+    std::fs::write(root.join("outside/secret.txt"), b"s").unwrap();
+    std::fs::write(root.join("outside/sub/new.txt"), b"n").unwrap();
+    std::fs::write(root.join("host/config/trust.toml"), b"t").unwrap();
+    std::os::unix::fs::symlink(root.join("outside"), root.join("share/swap")).unwrap();
+    let share = root.join("share").display().to_string();
+    let p = |rel: &str| format!("{}/{rel}", root.display());
+
+    let mut replies: Vec<(&str, Vec<(ErrorCode, String)>)> = Vec::new();
+    // Outside `paths`, and a path whose normalization fails (a file used as
+    // a directory).
+    replies.push((
+        "outside paths / normalization failure",
+        file_denials(
+            &root,
+            Some(vec![share.clone()]),
+            false,
+            &[p("outside/secret.txt"), p("share/a.txt/x")],
+        )
+        .await,
+    ));
+    // A row without `paths`.
+    replies.push((
+        "row without paths",
+        file_denials(&root, None, false, &[p("share/a.txt")]).await,
+    ));
+    // The broadest grant, aimed at the state tree.
+    replies.push((
+        "state path",
+        file_denials(
+            &root,
+            Some(vec!["/".to_string()]),
+            false,
+            &[p("host/config/trust.toml"), p("host/state")],
+        )
+        .await,
+    ));
+    // A symlink the normalizer did not see: only the recheck catches it.
+    replies.push((
+        "recheck mismatch",
+        file_denials(
+            &root,
+            Some(vec![share]),
+            true,
+            &[p("share/swap/sub/new.txt")],
+        )
+        .await,
+    ));
+
+    for (situation, list) in &replies {
+        assert!(!list.is_empty(), "{situation}");
+        for (code, message) in list {
+            assert_eq!(*code, ErrorCode::PermissionDenied, "{situation}");
+            assert_eq!(message, PERMISSION_DENIED_MESSAGE, "{situation}");
+        }
+    }
+    let total: usize = replies.iter().map(|(_, l)| l.len()).sum();
+    assert_eq!(total, 4 * 6, "four seams over six requests");
+}

@@ -10,9 +10,13 @@
 //! (`docs/design/architecture.md` §6):
 //!
 //! 1. [`crate::acl::Action::is_always_denied`] — checked before any rule is
-//!    even looked at. `forward.socks`/`file.read`/`file.write` cannot be
-//!    granted by any rule, wildcard or exact (`allow = ["forward.*"]` does
-//!    not reach `forward.socks`), and no trust role reaches them either.
+//!    even looked at. `forward.socks` cannot be granted by any rule,
+//!    wildcard or exact (`allow = ["forward.*"]` does not reach
+//!    `forward.socks`), and no trust role reaches it either. The file
+//!    actions left this set when the host control plane landed
+//!    (ADR-0029 결정 3); what still keeps a file request away from qsh's
+//!    own state is the state-path check after the decision, which no grant
+//!    can lift (ADR-0029 결정 5).
 //!
 //! Between ① and ② sits the trust-role stage ⓡ (ADR-0045 결정 4). Only a
 //! `device:<name>` principal that authenticated over [`AuthPath::Pin`]
@@ -334,21 +338,6 @@ impl Policy {
         if action.is_always_denied() {
             return Verdict::DENY;
         }
-        self.decide_past_gate(principal, auth_path, role, action, resource)
-    }
-
-    /// [`Policy::decide`] after the ① gate: the role stage ⓡ and the row
-    /// steps ②–④. Split out so the file-action steps (③-1) can be exercised
-    /// while ① still denies `file.*`; production reaches it only through
-    /// [`Policy::decide`].
-    fn decide_past_gate(
-        &self,
-        principal: &Principal,
-        auth_path: AuthPath,
-        role: Option<TrustRole>,
-        action: Action,
-        resource: ResourceRef<'_>,
-    ) -> Verdict {
         // ⓡ Role stage (ADR-0045 결정 4). The caller resolved `role` from
         // the current pin; the preconditions that make a role count at all
         // are re-checked here so a mis-resolved role can never reach an
@@ -415,9 +404,9 @@ impl Policy {
     /// policy alone, with no path and no filesystem; it is how enforcement
     /// and `acl check` decide whether a request path is worth normalizing at
     /// all, so a principal with no file grant never makes the host look at a
-    /// path. It deliberately does not apply the ① gate: that gate is a
-    /// separate, earlier decision of [`Policy::decide`], and `acl show`
-    /// applies it in front of this one.
+    /// path. It is not the decision: [`Policy::decide`] still runs the ①
+    /// gate, the role scope and the `paths` match, and a ground is only
+    /// necessary for an allow, never sufficient.
     pub(crate) fn file_grant_basis(
         &self,
         principal: &Principal,
@@ -488,12 +477,10 @@ impl Policy {
                 if action.is_file() {
                     // A file action has no path in this question, and a row
                     // grant needs one, so `decide` alone cannot answer it.
-                    // The ① gate still stands in front, and behind it the
-                    // answer is the ground helper enforcement shares
+                    // The answer is the ground helper enforcement shares
                     // (ADR-0029 결정 4-6 (a), 19): the set is a ceiling, and
                     // `acl check --path` says which paths open.
-                    return !action.is_always_denied()
-                        && self.file_grant_basis(principal, auth_path, role, action);
+                    return self.file_grant_basis(principal, auth_path, role, action);
                 }
                 self.decide(principal, auth_path, role, action, ResourceRef::unowned(""))
                     .is_allow()
@@ -568,6 +555,11 @@ fn role_covers(
 }
 
 impl Authorizer for Policy {
+    fn has_file_grant(&self, requester: &Requester<'_>, action: Action) -> bool {
+        // Rows only, same as `check` below.
+        self.file_grant_basis(requester.principal, requester.auth_path, None, action)
+    }
+
     fn check(
         &self,
         requester: &Requester<'_>,

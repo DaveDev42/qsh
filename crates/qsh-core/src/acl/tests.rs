@@ -199,15 +199,13 @@ fn action_from_str_round_trips_action_all_and_rejects_wildcards_and_garbage() {
 }
 
 #[test]
-fn is_always_denied_is_exactly_the_undrivable_trio() {
-    // docs/ROADMAP.md §3 deferred-feature guardrail table: exactly
-    // `forward.socks`/`file.read`/`file.write` are "defined but always
-    // denied" — every other action is a normal, policy-evaluated one.
-    // The three share the outcome but not the reason: `file.read`/
-    // `file.write` stay denied until the host serves the remote file ops
-    // (their wire ops exist, ADR-0029), while `forward.socks` is undrivable
-    // by design — `-D` authorizes every `CONNECT` as `forward.local`
-    // instead (ADR-0019 결정 6).
+fn is_always_denied_is_exactly_forward_socks() {
+    // docs/ROADMAP.md §3 deferred-feature guardrail table: only
+    // `forward.socks` is "defined but always denied" — undrivable by design,
+    // since `-D` authorizes every `CONNECT` as `forward.local` instead
+    // (ADR-0019 결정 6). `file.read`/`file.write` left the set when the host
+    // control plane landed (ADR-0029 결정 3); the state tree they must not
+    // reach is guarded after the decision, not by this gate.
     let always_denied: std::collections::HashSet<Action> = Action::ALL
         .iter()
         .copied()
@@ -215,15 +213,8 @@ fn is_always_denied_is_exactly_the_undrivable_trio() {
         .collect();
     assert_eq!(
         always_denied,
-        std::collections::HashSet::from([
-            Action::ForwardSocks,
-            Action::FileRead,
-            Action::FileWrite,
-        ])
+        std::collections::HashSet::from([Action::ForwardSocks])
     );
-    for a in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
-        assert!(a.is_always_denied(), "{a} must be always-denied");
-    }
     for a in [
         Action::ExecRun,
         Action::SessionOpen,
@@ -233,6 +224,8 @@ fn is_always_denied_is_exactly_the_undrivable_trio() {
         Action::HostReverse,
         Action::ForwardLocal,
         Action::ForwardRemote,
+        Action::FileRead,
+        Action::FileWrite,
     ] {
         assert!(!a.is_always_denied(), "{a} must not be always-denied");
     }
