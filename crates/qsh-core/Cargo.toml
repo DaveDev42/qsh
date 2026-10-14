@@ -75,6 +75,9 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 portable-pty.workspace = true
 
 [dev-dependencies]
+# `Connection::with_peer_chain_dropped` stands in for a connection the trust
+# watch cannot judge (`trust::connection_watch` tests); not in a normal build.
+qsh-transport = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 proptest.workspace = true
 # `serve::bind_setup_error`'s unit tests construct a real

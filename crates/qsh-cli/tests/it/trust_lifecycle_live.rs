@@ -7,12 +7,13 @@
 //! change (byte comparison is the sole arbiter — not mtime), and the
 //! host's `QshPeerVerifier` calls that lookup synchronously on every TLS
 //! handshake (`crates/qsh-transport/src/tls.rs`) — so a running daemon
-//! picks up a `trust remove`/`trust add` without a restart, *for new
-//! handshakes*. This file is the real-QUIC proof of that (E1,
+//! picks up a `trust remove`/`trust add` without a restart, for new
+//! handshakes and, through its per-connection trust watch, for the
+//! connections it already holds. This file is the real-QUIC proof of that (E1,
 //! M7 plan Step 2 (69dd788) §A) plus the two behaviors decision A commits to:
 //!
-//! - an **established** connection survives a `trust remove` of its own
-//!   principal — the same PTY-backed attach keeps writing and reading;
+//! - an **established** connection is closed within two seconds of a
+//!   `trust remove` of its own principal (ADR-0031), with one audit line;
 //! - the **next** handshake against the same running `qsh serve` (no
 //!   restart) is rejected.
 //!
@@ -110,12 +111,14 @@ fn read_until(stream: &mut SessionAttachStream, needle: &str) -> String {
     panic!("attach stream ended before {needle:?} arrived; saw {seen:?}");
 }
 
-/// **E1 (i) / DoD 4 first half.** `trust remove` on a *running* `qsh
-/// serve` (no restart) does not touch a connection that is already
-/// established: the client keeps writing to, and reading from, the same
-/// live PTY session after the host un-pins it.
+/// **E1 (i) / DoD 4 first half, as ADR-0031 changed it.** `trust remove` on
+/// a *running* `qsh serve` (no restart) reaches a connection that is
+/// already established: within two seconds the host closes it
+/// (`CLOSE_CODE_TRUST_WITHDRAWN`) and writes one connection-level deny to
+/// its audit log, with the coarse reason `trust_withdrawn`. Before M16 the
+/// same test pinned the opposite, that the PTY kept answering.
 #[test]
-fn an_established_connection_survives_the_hosts_trust_remove() {
+fn an_established_connection_is_closed_within_two_seconds_of_trust_remove() {
     let client = Sandbox::new();
     let (host, _serve, _host_fp) = start(&client);
     let ops = client_ops(&client);
@@ -130,13 +133,74 @@ fn an_established_connection_survives_the_hosts_trust_remove() {
     let (code, removed) = host.json(&["trust", "remove", CLIENT_ALIAS, "--json"]);
     assert_eq!(code, 0, "{removed}");
     assert_eq!(removed["data"]["removed"], true, "{removed}");
+    let removed_at = std::time::Instant::now();
 
-    // The already-established connection must not notice: same stream,
-    // same principal, no re-handshake.
-    stream
-        .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
-        .expect("write after remove");
-    read_until(&mut stream, "AFTER1");
+    let withdrawn = loop {
+        let found = host
+            .audit_records()
+            .into_iter()
+            .find(|record| record["resource"] == "trust_withdrawn");
+        if let Some(record) = found {
+            break record;
+        }
+        assert!(
+            removed_at.elapsed() < std::time::Duration::from_secs(2),
+            "no trust_withdrawn audit line within 2 seconds of the removal"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(withdrawn["action"], "connect", "{withdrawn}");
+    assert_eq!(withdrawn["decision"], "deny", "{withdrawn}");
+    assert_eq!(withdrawn["request_id"], "-", "{withdrawn}");
+    assert_eq!(withdrawn["auth_path"], "pin", "{withdrawn}");
+    assert_eq!(
+        withdrawn["principal"],
+        format!("device:{CLIENT_ALIAS}"),
+        "{withdrawn}"
+    );
+    assert!(withdrawn["rule"].is_null(), "{withdrawn}");
+    // One line per connection: give the watch more than a poll interval to
+    // (wrongly) judge again, then count. The close code 0x1005 is not
+    // visible at this layer; `serve_inbound_connection_closes_on_trust_remove`
+    // in qsh-testkit pins it.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let withdrawn_lines = host
+        .audit_records()
+        .into_iter()
+        .filter(|record| record["resource"] == "trust_withdrawn")
+        .count();
+    assert_eq!(withdrawn_lines, 1, "exactly one trust_withdrawn line");
+
+    // The old connection is gone: the attach stream cannot go on answering.
+    // A write may still be accepted into the client's buffer, so the proof
+    // is that the reply never comes back.
+    let _ = stream.write(b"printf 'AFTER%s\\n' 1\n".to_vec());
+    let outcome = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut seen = String::new();
+            while let Some(event) = stream.next_event() {
+                match event {
+                    Ok(SessionEvent::Output { data_b64, .. }) => {
+                        let data = base64::engine::general_purpose::STANDARD
+                            .decode(data_b64.as_bytes())
+                            .unwrap_or_default();
+                        seen.push_str(&String::from_utf8_lossy(&data));
+                        if seen.contains("AFTER1") {
+                            return true;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+            false
+        });
+        reader.join().expect("reader thread")
+    });
+    assert!(
+        !outcome,
+        "the closed connection must not answer a new write"
+    );
 
     stream.close();
 }
@@ -437,10 +501,13 @@ fn renamed_principal_has_no_acl_row_until_restart() {
     assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
 }
 
-/// **The `trust remove` survival test's `trust rename` counterpart.** An
-/// already-established connection keeps the authority it negotiated at
-/// open time straight through a rename of its own principal — the same
-/// live PTY session keeps writing and reading with no re-handshake.
+/// **The `trust rename` counterpart of the closing test above, for a pin
+/// without a `role`.** The pin here was added with no role key, so there is
+/// no role grant for the rename to take away (ADR-0031 결정 5): the
+/// established connection keeps its authority straight through a rename of
+/// its own principal and the same live PTY session keeps writing and
+/// reading with no re-handshake. A pin that has a role closes instead
+/// (`rename_of_a_role_pin_closes_and_rename_of_a_roleless_pin_does_not`).
 #[test]
 fn an_established_connection_keeps_its_authority_across_a_rename() {
     let client = Sandbox::new();

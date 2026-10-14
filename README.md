@@ -316,7 +316,8 @@ qsh trust set-role laptop exec            # change a pin later
 qsh trust list                            # ROLE column
 ```
 
-A role change applies from the next request, with no restart. A pin without
+A role change applies from the next request, with no restart, and lowering
+a role also closes the peer's open connections within 2 seconds. A pin without
 a `role` key (made before roles existed) is judged as `none`, so upgrading
 never widens anything. `exec` is a statement of intent, not a boundary
 against `full`: a peer that can run commands as the `qsh serve` account can
@@ -865,19 +866,23 @@ Some of these are MVP scope decisions, some are unfinished work.
   (`[serve].max_sessions` and friends, `docs/CLI.md` §6.12). A key set to
   `0` or left unset means the default, not unlimited, and no switch turns a
   cap off. The ACL engine itself never enforces quotas.
-- `qsh trust remove` only affects future handshakes. A removed peer's role
-  stops counting from its next request, but the peer keeps what its
-  `acl.toml` rows grant, including the ability to open new sessions,
-  tunnels and forwards within the scope loaded at startup, and keeps
-  everything it already opened (a session, a tunnel, a transfer in flight),
-  until that connection drops. Lowering a role with `qsh trust set-role`
-  behaves the same way. The host re-reads `trust.toml` on
-  every handshake, so the next connection attempt from the removed peer is
-  rejected immediately, with no restart (`docs/CLI.md` §6.11). A tunnel with
-  `--supervise` on such a connection keeps running too; only its next
-  re-establishment meets the rejected handshake, after which it retries
-  within its budget and gives up. Force-closing an established connection on
-  removal is P1.
+- `qsh trust remove` closes the removed peer's established connections on
+  this device within 2 seconds (ADR-0031), in a running `qsh serve`, `qsh
+  listen` or `qsh serve --to`, and the next handshake from that peer is
+  rejected with no restart (`docs/CLI.md` §6.11). Lowering a role with `qsh
+  trust set-role` and renaming a pin that has a role close the connection
+  the same way. Raising a role, renaming a pin without a role and
+  unrelated edits to `trust.toml` leave connections alone. Three limits
+  stay. It applies on this device only, so run the same command on every
+  device that trusts the peer. Sessions are not ended: a session on a
+  closed connection is detached, and a peer that is still trusted can
+  reconnect and resume it. And while `trust.toml` cannot be read or parsed,
+  the change is not seen: connections stay open and role requests are
+  refused until the file is fixed. For up to 2 seconds after a change, a
+  request on the old connection can still pass on the strength of an
+  `acl.toml` row. A tunnel with `--supervise` on a closed connection
+  retries within its budget and gives up when the rejected handshake
+  repeats.
 - `qsh trust rename` also takes effect on the next handshake without a
   restart, and the pin's role moves with it, but `acl.toml` rows do not:
   they match the pre-rename name until `qsh serve` is restarted (ADR-0012

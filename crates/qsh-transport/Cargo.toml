@@ -13,6 +13,11 @@ categories = ["network-programming", "asynchronous"]
 # workspace root Cargo.toml). Anchored so `src/**/tests/` module dirs ship.
 exclude = ["/tests/"]
 
+[features]
+# Test seams for sibling crates' tests (`Connection::with_peer_chain_dropped`).
+# Never enabled by a normal build; `qsh-core` turns it on in dev-dependencies.
+test-support = []
+
 [dependencies]
 qsh-proto.workspace = true
 quinn.workspace = true

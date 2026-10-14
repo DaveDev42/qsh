@@ -43,6 +43,7 @@ use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
 use crate::ops::OpError;
 
+pub(crate) mod connection_watch;
 pub mod invite_address;
 pub mod pairing;
 mod role;
@@ -1088,6 +1089,20 @@ impl SharedTrustStore {
         RoleGrants::of_role(self.resolve_role(principal, auth_path, fingerprint))
     }
 
+    /// The store as the connection watch judges against it: the snapshot of
+    /// the last reload, **without** re-reading the file (ADR-0031 결정 3,
+    /// "판정은 snapshot만 읽고 I/O가 없다").
+    ///
+    /// The poll task and every handshake already refresh the store, and the
+    /// watch is woken only after a refresh replaced the snapshot, so a
+    /// judgment that read the file again would repeat that work once per
+    /// connection. Nothing else may use this view: a decision for a request
+    /// goes through the refreshing [`TrustEvaluator`] methods and
+    /// [`Self::resolve_role`].
+    pub(crate) fn snapshot_view(self: &Arc<Self>) -> SnapshotView {
+        SnapshotView(Arc::clone(self))
+    }
+
     /// Whether the last reload failed (the file did not parse, or could not
     /// be read) so that [`Self::resolve_role`] is currently granting no
     /// role at all. Refreshes first. Pin authentication is unaffected: it
@@ -1217,6 +1232,58 @@ impl SharedTrustStore {
             Some(failed) => failed == raw,
             None => cache.raw == *raw,
         }
+    }
+}
+
+/// [`SharedTrustStore::snapshot_view`]: the cached snapshot as a
+/// [`TrustEvaluator`], for [`crate::trust::connection_watch`]. It answers pin and CA
+/// questions exactly like the store's own evaluator, only without the
+/// refresh in front, and resolves roles through the same [`role_of_pin`].
+pub(crate) struct SnapshotView(Arc<SharedTrustStore>);
+
+impl SnapshotView {
+    /// The grants [`SharedTrustStore::role_grants_for`] would give, or `None`
+    /// while the store's role grants are suspended (the last reload failed).
+    ///
+    /// One read lock decides both the suspension and the role, so a reload
+    /// failing in between cannot turn into an empty set that looks like a
+    /// reduction. A watcher keeps its recorded set on `None` and asks again.
+    pub(crate) fn role_grants_unless_suspended(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        fingerprint: Option<PeerFingerprint>,
+    ) -> Option<RoleGrants> {
+        let cache = self.0.read();
+        if cache.roles_suspended() {
+            return None;
+        }
+        Some(RoleGrants::of_role(role_of_pin(
+            &cache.pin_roles,
+            false,
+            principal,
+            auth_path,
+            fingerprint,
+        )))
+    }
+}
+
+impl TrustEvaluator for SnapshotView {
+    fn lookup_pin(&self, fingerprint: &Fingerprint) -> Option<Principal> {
+        self.0
+            .read()
+            .pins
+            .iter()
+            .find(|(fp, _)| fp == fingerprint)
+            .map(|(_, principal)| principal.clone())
+    }
+
+    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+        self.0.read().cas.clone()
+    }
+
+    fn pairing_open(&self) -> bool {
+        self.0.pairing_open()
     }
 }
 

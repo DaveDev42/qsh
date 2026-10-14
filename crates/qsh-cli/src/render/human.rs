@@ -303,7 +303,8 @@ pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
 pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     if data.removed {
-        writeln!(stdout, "removed {}", sanitize(&data.name))
+        writeln!(stdout, "removed {}", sanitize(&data.name))?;
+        writeln!(stdout, "{}", qsh_core::doctor::TRUST_NARROWING_SCOPE)
     } else {
         writeln!(stdout, "{} not found (nothing to do)", sanitize(&data.name))
     }
@@ -313,7 +314,9 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
 /// §6.11). Takes effect at the next handshake with no restart; `acl.toml`
 /// rows keep matching the old name until the daemon restarts and reloads
 /// them (`acl.toml` has no hot reload) — worth one reminder line here since
-/// nothing else in this command's own output says so.
+/// nothing else in this command's own output says so. A pin that carries a
+/// role loses its established connections (ADR-0031 결정 5), so that case
+/// also prints the narrowing scope (결정 9).
 pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(
@@ -325,7 +328,11 @@ pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
     writeln!(
         stdout,
         "any acl.toml rows for either name need a restart to take effect"
-    )
+    )?;
+    if data.peer.role.is_some() {
+        writeln!(stdout, "{}", qsh_core::doctor::TRUST_NARROWING_SCOPE)?;
+    }
+    Ok(())
 }
 
 /// Print the outcome of `qsh trust set-role <name> <role>` (`docs/CLI.md`
@@ -345,10 +352,19 @@ pub fn print_trust_set_role(data: &TrustSetRoleData) -> io::Result<()> {
         .map(sanitize)
         .unwrap_or_else(|| LEGACY_ROLE_CELL.to_string());
     writeln!(stdout, "{name}: role {previous} -> {role}")?;
-    writeln!(
-        stdout,
-        "takes effect from its next request; open sessions and tunnels keep running"
-    )
+    if qsh_core::acl::role_change_narrows(data.previous_role.as_deref(), data.peer.role.as_deref())
+    {
+        // A lower role closes the peer's established connections within 2
+        // seconds (ADR-0031 결정 5); the three-sentence scope is the whole
+        // statement of what that does and does not reach (결정 9).
+        writeln!(
+            stdout,
+            "takes effect from its next request; a lower role also closes the peer's established connections"
+        )?;
+        writeln!(stdout, "{}", qsh_core::doctor::TRUST_NARROWING_SCOPE)
+    } else {
+        writeln!(stdout, "takes effect from its next request")
+    }
 }
 
 /// The one line `qsh trust add` adds when it is run again for a name that

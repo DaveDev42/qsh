@@ -77,7 +77,6 @@ use crate::localctl::daemon::{LocalctlDaemon, LocalctlListener};
 #[cfg(unix)]
 use crate::localctl::mux::{ConduitId, ControlMux, Exhausted};
 use crate::ops::OpError;
-#[cfg(unix)]
 use crate::trust::SharedTrustStore;
 
 use super::admit::{AdmitRequest, admit};
@@ -330,6 +329,7 @@ async fn run_listen_unix(
     // role through it); `load_or_deny` still opens `paths.trust_file()`
     // itself to fill the diagnostic's example policy with this machine's
     // actual pins.
+    let trust_for_watch = trust.clone();
     let (authorizer, policy_diagnostic) =
         crate::acl::load_or_deny(paths, crate::acl::Role::Listen, trust);
     if let Some(diag) = &policy_diagnostic {
@@ -364,6 +364,7 @@ async fn run_listen_unix(
         quotas,
     );
     listen.set_path_watch(liveness.reverse_watch);
+    listen.set_trust_watch(trust_for_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(
         device_id = %identity.identity.device_id,
@@ -499,6 +500,9 @@ pub struct Listen {
     /// [`PathWatchConfig::reverse_default`], the same default `config.toml`
     /// gives an absent section.
     path_watch: std::sync::OnceLock<PathWatchConfig>,
+    /// The trust store whose changes close registered connections
+    /// (ADR-0031 결정 2~3, [`Self::set_trust_watch`]). Unset means no watch.
+    trust_watch: std::sync::OnceLock<Arc<SharedTrustStore>>,
     /// Test-only override for [`Self::path_watch_config`].
     #[cfg(test)]
     test_path_watch: std::sync::Mutex<Option<PathWatchConfig>>,
@@ -668,6 +672,7 @@ impl Listen {
             admission,
             quotas,
             path_watch: std::sync::OnceLock::new(),
+            trust_watch: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_path_watch: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -707,6 +712,16 @@ impl Listen {
     /// ignored.
     pub fn set_path_watch(&self, config: PathWatchConfig) {
         let _ = self.path_watch.set(config);
+    }
+
+    /// Wire the trust store whose changes close registered connections
+    /// (ADR-0031 결정 2~3): from now on every registration is watched, so a
+    /// `trust remove` of the target, or a role cut that takes away its
+    /// `host.reverse`, ends the registration within the poll interval plus
+    /// one judgment. `run_listen_unix` passes the store the listener's TLS
+    /// verifier reads. No-op past the first call.
+    pub fn set_trust_watch(&self, trust: Arc<SharedTrustStore>) {
+        let _ = self.trust_watch.set(trust);
     }
 
     /// Test-only: replace the liveness-watch config for every connection

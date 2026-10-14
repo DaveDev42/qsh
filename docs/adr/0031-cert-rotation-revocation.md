@@ -1,7 +1,9 @@
 # ADR-0031: trust에서 peer를 빼거나 role을 줄이면, 장기 실행 프로세스(`qsh serve`, `qsh listen`, `qsh serve --to`)는 2초 안에 살아 있는 연결을 재검증해 더는 신뢰하지 않는 연결과 권한이 줄어든 연결을 닫는다. revocation 목록, rotation 문서, `trust rotate`, CA가 서명한 인증서의 개별 revoke는 두지 않는다
 
-날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13, 2026-10-14)
+날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13, 2026-10-14, 2026-10-15)
 상태: 승인됨
+
+개정 이력: 2026-10-15에 결정 7의 `qsh listen` 문장을 착지한 동작에 맞춰 고쳤다. 닫힌 등록은 등록표에서 즉시 빠지지 않고 연결 유실과 같은 정리 경로를 타서 `[listen].stale_retention` 동안 Stale로 남는다. 연결은 그대로 `0x1005`로 닫히고 재등록은 handshake에서 거부되므로 보안 성질은 같다.
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5)에서 이 번호를 인증서 rotation·revocation(M16 (d)) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `trust.toml`의 `[[revoked]]` 목록, `qsh trust revoke`, `qsh identity rotate`(rotation 문서와 `--keep-key` 갱신), `qsh trust rotate`, 연결 재검증, 유효기간 기한을 한 묶음으로 제안했다. 2026-10-12 사용자 결정이 P1을 다시 짜면서 앞의 넷을 뺐다. 이 문서는 남은 하나, 곧 "trust를 거두면 이미 열린 연결도 닫는다"만 정한다. 빠진 것은 대안과 기각 사유 절에 사용자 결정으로 옮겼다.
 
@@ -79,7 +81,7 @@ ADR-0045가 role을 도입하면서 같은 공백이 한 겹 더 생긴다. role
 
 7. 닫는 방법. 새 CLOSE 코드 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)를 `crates/qsh-transport/src/endpoint.rs`의 다른 CLOSE 상수 옆에 정의하고, `Connection::close(0x1005, b"trust withdrawn")`로 닫는다. reason 문자열은 고정이고 어떤 principal이나 사유도 싣지 않는다. peer는 값에 따라 분기하지 않는다(§7). 닫힌 연결 위의 세션은 오늘의 연결 유실과 같은 규칙으로 detach된다. 신뢰를 거둔 peer는 다시 handshake할 수 없어 resume으로 돌아오지 못하고, role만 줄어든 peer는 다시 붙어 줄어든 grant로 resume할 수 있다. 열린 터널, 진행 중인 전송, 열려 있는 스트림은 연결과 함께 끝난다. 거둔 principal의 세션을 즉시 종료하는 것은 이 ADR의 결정이 아니다.
    - `qsh serve --to` 쪽은 연결이 닫히면 지금의 재dial 루프로 돌아간다. 이 루프는 로컬이 `0x1005`로 닫은 경우와 상대가 `0x1005`로 닫은 경우를 모두 일시적 네트워크 유실이 아니라 신뢰 철회로 분류하고, 로그 한 줄만 남기며, 일시 유실용 빠른 재dial 경로를 타지 않고 handshake 거부와 같은 일반 backoff로 간다. 재dial은 handshake에서 거부되거나(신뢰가 거둬진 경우) 줄어든 grant로 받아들여진다(role만 줄어든 경우).
-   - `qsh listen` 쪽은 등록 연결이 닫히면 등록표에서 빠지고 그 위의 relay가 끝난다. target이 다시 등록하려 하면 listen의 verifier가 handshake에서 거부하고 `handshake_rejected`가 남는다.
+   - `qsh listen` 쪽은 등록 연결이 닫히면 그 위의 relay가 끝나고, 등록은 연결 유실과 같은 정리 경로(`loss_cause = TlsRejected`)를 타서 `[listen].stale_retention`이 지날 때까지 등록표에 Stale로 남은 뒤 sweeper가 거둔다. 등록표에서 즉시 빼지 않는 것은 철회와 일시 유실을 가르는 별도 경로를 만들지 않기 위해서이고, 연결이 닫혔고 target이 다시 handshake할 수 없어 보안상 차이는 없다. target이 다시 등록하려 하면 listen의 verifier가 handshake에서 거부하고 `handshake_rejected`가 남는다.
 
 8. audit. 닫을 때 연결 수준 deny 한 줄을 남긴다. 키 집합은 바뀌지 않는다(아홉 키와 ADR-0045 결정 16의 optional `role`, 여기서는 `role` 키를 싣지 않는다).
    - 새 생성자 `AuditRecord::connection_withdrawn(principal, auth_path, peer_addr, reason)`를 `handshake_rejected` 옆에 둔다. `request_id`는 `"-"`, `action`은 `connect`, `decision`은 `deny`, `rule`은 `null`, `principal`과 `auth_path`는 수립 때의 값, `peer_addr`는 연결의 현재 주소다.

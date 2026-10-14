@@ -625,8 +625,8 @@ fn forward_local_records(rig: &Rig) -> usize {
         .count()
 }
 
-/// ADR-0023 decision 8 and `docs/CLI.md` §6.9: a removal applies from the
-/// peer's next handshake, so a re-establishment after it is rejected at the
+/// ADR-0023 decision 8 and `docs/CLI.md` §6.9: a removal rejects the peer's
+/// next handshake, so a re-establishment after it is rejected at the
 /// handshake. The supervisor keeps retrying inside its budget, never gets a
 /// carrier, and gives up.
 #[test]
@@ -665,33 +665,37 @@ fn supervised_forward_peer_that_trust_removed_the_client_rejects_the_reestablish
     );
 }
 
-/// The other half of the same fact (`docs/CLI.md` §6.9, §6.14, README Known
-/// limitations): removal does not touch a connection that is already up, so
-/// a supervised tunnel on it keeps relaying and never declares a loss.
+/// ADR-0031 결정 7 and `docs/CLI.md` §6.9, §6.14: removal now reaches a
+/// connection that is already up. The host closes it with `0x1005` on its
+/// own, with no `sever` from the test, so the supervised tunnel declares a
+/// loss, meets the rejected handshake on the way back, and gives up without
+/// ever getting a carrier again.
 #[test]
-fn supervised_forward_tunnel_on_a_live_connection_keeps_running_after_trust_remove() {
+fn supervised_tunnel_gives_up_after_trust_withdrawal() {
     let rig = Rig::start();
     let echo = start_echo();
     let hold = rig
         .ops()
-        .tunnel_open(local_req(echo, BUDGET_MS))
+        .tunnel_open(local_req(echo, 4_000))
         .expect("open the supervised tunnel");
     let id = hold.tunnel().tunnel_id.clone();
     let port = u16::try_from(hold.tunnel().actual_port.unwrap()).unwrap();
     round_trip(port, b"warm");
 
     host_trust_remove_client(&rig);
-    // Fresh TCP connections keep riding the connection that was negotiated
-    // before the removal.
-    round_trip(port, b"after the removal");
-    round_trip(port, b"and again");
+    let err = hold.hold();
 
+    assert_eq!(err.code, ErrorCode::AuthFailed, "{err:?}");
     assert!(
-        lines_of(&id, "lost").is_empty(),
-        "trust remove must not look like a lost carrier: {:?}",
-        lines_of(&id, "lost")
+        !lines_of(&id, "lost").is_empty(),
+        "the host's close is a lost carrier for the supervisor"
     );
-    hold.close();
+    assert_eq!(lines_of(&id, "gave_up").len(), 1);
+    assert_eq!(
+        lines_of(&id, "reestablished").len(),
+        0,
+        "a withdrawn peer must never get a carrier back"
+    );
 }
 
 // ---------------------------------------------------------------------------

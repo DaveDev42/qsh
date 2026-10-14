@@ -10,8 +10,8 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -656,12 +656,72 @@ pub struct Connection {
     /// Which side of the handshake the peer was, for the chain verifier's
     /// key-usage check.
     peer_role: PeerRole,
-    /// Set when this side closed the connection with
-    /// [`CLOSE_CODE_TRUST_WITHDRAWN`]. The transport reports a local close
-    /// as plain "locally closed" with no code, so the flag is the only way
+    /// The code of the close **this side** performed first, if it did. The
+    /// transport reports a local close as plain "locally closed" with no
+    /// code, so this record is the only way
     /// [`Connection::closed_by_trust_withdrawal`] can tell this side's own
     /// withdrawal from any other local close. Shared by clones.
-    withdrawn_locally: Arc<AtomicBool>,
+    local_close: Arc<Mutex<LocalClose>>,
+}
+
+/// What this side's own [`Connection::close`] calls tell about how the
+/// connection ended (ADR-0031 decision 7's trust-withdrawal classification).
+///
+/// The transport cannot answer "who closed first" afterwards: on any local
+/// `close` it overwrites the connection's error with "locally closed", even
+/// when the peer's close (or a timeout) had already ended the connection and
+/// the local call changed nothing on the wire. So the answer has to be
+/// sampled **before** the first local close, under the lock that serializes
+/// local closes, and kept:
+///
+/// - the connection had no close reason: this side's close is the one that
+///   ended it, and its `code` is recorded;
+/// - it already had one (the peer's close, an idle timeout): that `prior`
+///   reason is the end of the connection, and the later local close, which
+///   the transport turns into "locally closed", must not hide it. A peer's
+///   `0x1005` therefore stays a withdrawal even after this side's own
+///   shutdown close runs over it.
+///
+/// The one gap left is the transport's own: a peer close processed between
+/// the sample and the close call is invisible, and the connection is then
+/// recorded as closed by this side. That reading is the right one for the
+/// consumer, since this side did decide to close it, and the transport
+/// itself reports "locally closed" in that case too.
+#[derive(Debug, Default)]
+struct LocalClose {
+    /// The code of the close this side performed on an open connection.
+    code: Option<u32>,
+    /// The reason the connection already had when this side first closed it.
+    prior: Option<ConnectionError>,
+}
+
+impl LocalClose {
+    /// Account for one `close(code)` call; `before` is the connection's
+    /// close reason read just ahead of it. Only the first call counts.
+    fn record(&mut self, code: u32, before: Option<ConnectionError>) {
+        if self.code.is_some() || self.prior.is_some() {
+            return;
+        }
+        match before {
+            None => self.code = Some(code),
+            Some(reason) => self.prior = Some(reason),
+        }
+    }
+
+    /// Whether the connection ended with [`CLOSE_CODE_TRUST_WITHDRAWN`],
+    /// judged from what was recorded, or from `live` (the transport's
+    /// current reason) when no local close happened.
+    fn is_trust_withdrawal(&self, live: Option<ConnectionError>) -> bool {
+        if let Some(code) = self.code {
+            return code == CLOSE_CODE_TRUST_WITHDRAWN;
+        }
+        match self.prior.clone().or(live) {
+            Some(ConnectionError::ApplicationClosed(close)) => {
+                close.error_code.into_inner() == u64::from(CLOSE_CODE_TRUST_WITHDRAWN)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The transports a [`Connection`] can run over. Every method that touches
@@ -684,7 +744,7 @@ impl Connection {
             peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
             peer_chain: chain.into(),
             peer_role: role,
-            withdrawn_locally: Arc::new(AtomicBool::new(false)),
+            local_close: Arc::new(Mutex::new(LocalClose::default())),
             inner: ConnBackend::Quic(QuicConn(conn)),
             id: next_connection_id(),
             principal: verified.principal,
@@ -754,15 +814,25 @@ impl Connection {
     /// did. `false` while the
     /// connection is open and for every other close.
     pub fn closed_by_trust_withdrawal(&self) -> bool {
-        if self.withdrawn_locally.load(Ordering::Acquire) {
-            return true;
-        }
-        match self.close_reason() {
-            Some(ConnectionError::ApplicationClosed(close)) => {
-                close.error_code.into_inner() == u64::from(CLOSE_CODE_TRUST_WITHDRAWN)
-            }
-            _ => false,
-        }
+        let local = self.local_close.lock().unwrap_or_else(|e| e.into_inner());
+        local.is_trust_withdrawal(self.close_reason())
+    }
+
+    /// A copy of this connection that has forgotten the peer chain kept from
+    /// the handshake, standing in for a connection the trust watch cannot
+    /// judge ([`Connection::reverify`] rejects it, ADR-0031 decision 5).
+    /// The copy shares the live transport connection with `self`.
+    ///
+    /// A test seam, compiled only for this crate's tests and under the
+    /// `test-support` feature: no production path loses the chain. It is not
+    /// in a test module because the connection-watch tests sit in another
+    /// crate and cannot reach the private field.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_peer_chain_dropped(&self) -> Connection {
+        let mut copy = self.clone();
+        copy.peer_chain = Arc::from(Vec::new());
+        copy
     }
 
     /// Peer socket address (may change over the connection's life via
@@ -808,10 +878,14 @@ impl Connection {
     }
 
     /// Close with an application error code and reason. Idempotent.
+    ///
+    /// Local closes go through one lock, and the first one records what the
+    /// connection looked like just before it (`LocalClose`), because the
+    /// transport overwrites the close reason of an already-closed connection
+    /// with "locally closed".
     pub fn close(&self, code: u32, reason: &[u8]) {
-        if code == CLOSE_CODE_TRUST_WITHDRAWN && self.close_reason().is_none() {
-            self.withdrawn_locally.store(true, Ordering::Release);
-        }
+        let mut local = self.local_close.lock().unwrap_or_else(|e| e.into_inner());
+        local.record(code, self.close_reason());
         match &self.inner {
             ConnBackend::Quic(c) => c.close(code, reason),
         }

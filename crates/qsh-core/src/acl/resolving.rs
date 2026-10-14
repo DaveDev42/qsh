@@ -176,6 +176,16 @@ mod tests {
                     RoleGrants::of_role(trust.resolve_role(principal, auth_path, peer)),
                     "{role}: role_grants_for is resolve_role through the table"
                 );
+                // The connection watch reads the same function through the
+                // cached snapshot view (ADR-0031 결정 4); a store that is
+                // not suspended gives it the very same set.
+                assert_eq!(
+                    trust
+                        .snapshot_view()
+                        .role_grants_unless_suspended(principal, auth_path, peer),
+                    Some(grants.clone()),
+                    "{role}: the snapshot view and role_grants_for agree"
+                );
                 let requester = Requester::new(principal, auth_path, peer);
                 for action in Action::ALL {
                     let allowed = if action.is_file() {

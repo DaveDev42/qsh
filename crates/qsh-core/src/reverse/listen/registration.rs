@@ -402,7 +402,7 @@ impl Listen {
         // `docs/CLI.md` §6.13's `cause` bullet). Deferred init, no `mut`:
         // every arm that can `break` assigns this exactly once, first —
         // the only way to reach the read after the loop.
-        let loss_cause;
+        let mut loss_cause;
         // What this process's own watchdog measured; set only when it ruled
         // the path dead itself (no pre-existing close), and carried on the
         // `lost` line alone.
@@ -443,9 +443,38 @@ impl Listen {
         // this method's own body stays platform-agnostic end to end.
         let mut outbound_rx = self.take_hub_outbound_receiver(&name, generation);
 
+        // The trust watch (ADR-0031 결정 2~3, 7): a registration's one grant
+        // is `host.reverse`, so that is all it compares. Resolves only after
+        // it closed the connection; without a wired store it never does. Its
+        // own task, so the close never waits for this loop: the awaited
+        // `send_ping`/`send_pong` below block on a peer that stops reading.
+        let mut withdrawal = self.trust_watch.get().map(|trust| {
+            let conn = session.connection();
+            let fingerprint = conn
+                .peer_fingerprint()
+                .map(|fp| crate::broker::PeerFingerprint::new(*fp.as_bytes()));
+            crate::trust::connection_watch::ConnectionWatch::begin(
+                Arc::clone(trust),
+                conn,
+                conn.principal(),
+                conn.auth_path(),
+                fingerprint,
+                Some(&[crate::acl::Action::HostReverse]),
+            )
+            .spawn(Arc::clone(&self.audit))
+        });
+
         loop {
             tokio::select! {
                 biased;
+                // First, so a withdrawn registration is recorded as such even
+                // when the path watch also fires in the same poll. The close
+                // is already done; the teardown below removes the entry and
+                // ends the relay like for any lost registration.
+                () = crate::trust::connection_watch::withdrawn(&mut withdrawal) => {
+                    loss_cause = crate::reverse::ReconnectCause::TlsRejected;
+                    break;
+                }
                 () = watch.dead() => {
                     // `CLOSE_CODE_PATH_DEAD`'s own doc: without this, a
                     // `LOCAL_STREAM` splice pump still reading on this
@@ -589,6 +618,13 @@ impl Listen {
                 }
             }
         }
+        // The loop can also end on the read/write error the watch's own close
+        // caused, before the arm above is polled; the transport records which
+        // side closed and why, so the classification does not race the task.
+        if session.connection().closed_by_trust_withdrawal() {
+            loss_cause = crate::reverse::ReconnectCause::TlsRejected;
+        }
+        drop(withdrawal);
         watchdog.abort();
         if let Some(task) = tunnel_accept_task {
             task.abort();

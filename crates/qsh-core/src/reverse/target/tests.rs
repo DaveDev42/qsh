@@ -1020,6 +1020,52 @@ fn classify_target_connection_loss_reads_the_close_reason_behind_an_ok_return() 
     );
 }
 
+/// ADR-0031 결정 7: a connection that ended with `CLOSE_CODE_TRUST_WITHDRAWN`,
+/// closed by this side's watch or by the controller, is not a transient
+/// network loss. It maps to `tls_rejected` whatever the transport says about
+/// the close, and its redial takes the general backoff of a refused
+/// handshake, leaving the quick-loss streak untouched.
+#[test]
+fn trust_withdrawn_close_is_not_a_transient_loss() {
+    let clean: Result<Result<(), crate::server::ConnError>, tokio::task::JoinError> = Ok(Ok(()));
+    let locally_closed = qsh_transport::ConnectionError::LocallyClosed;
+    let peer_withdrawn =
+        qsh_transport::ConnectionError::ApplicationClosed(qsh_transport::ApplicationClose {
+            error_code: qsh_transport::StreamCode::from_u32(0x1005),
+            reason: bytes::Bytes::from_static(b"trust withdrawn"),
+        });
+    // Local close (the transport only says "locally closed") and peer close
+    // both classify by the withdrawal flag.
+    for reason in [None, Some(&locally_closed), Some(&peer_withdrawn)] {
+        assert_eq!(
+            classify_target_end(&clean, reason, true),
+            ReconnectCause::TlsRejected,
+            "{reason:?}"
+        );
+    }
+    // Without the flag nothing changes: a local close is still `local`.
+    assert_eq!(
+        classify_target_end(&clean, Some(&locally_closed), false),
+        classify_target_connection_loss(&clean, Some(&locally_closed))
+    );
+
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    backoff.reset();
+    // The general sequence, not the quick-loss one: it keeps doubling past
+    // the 8 s quick-loss cap.
+    let observed: Vec<u64> = (0..6)
+        .map(|_| redial_delay(&mut backoff, true, quick()).as_millis() as u64)
+        .collect();
+    assert_eq!(observed, vec![500, 1_000, 2_000, 4_000, 8_000, 16_000]);
+    // The quick-loss streak did not move: the next transient loss starts it.
+    backoff.reset();
+    assert_eq!(redial_delay(&mut backoff, false, quick()).as_millis(), 500);
+    assert_eq!(
+        redial_delay(&mut backoff, false, quick()).as_millis(),
+        1_000
+    );
+}
+
 /// Issue #11 request 3: a `Hello` reply that never arrives is the dial not
 /// completing, which is what a stalled controller or a starved host
 /// produces. It was `local`.

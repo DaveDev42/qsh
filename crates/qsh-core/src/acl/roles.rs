@@ -154,6 +154,27 @@ impl RoleGrants {
         self.entries.iter().any(|&(a, _)| a == action)
     }
 
+    /// The grants of `self` for the actions in `actions`, in the same order,
+    /// with the ownership axis dropped (every kept pair carries
+    /// [`RoleScope::NotApplicable`]). The connection watch of `qsh listen`
+    /// compares only `host.reverse` (ADR-0031 결정 2): a registration never
+    /// exercises the rest of what a `full` pin grants, so losing it is not a
+    /// reduction of this connection, and `host.reverse` is not a
+    /// resource-bound action, so `full` (axis `any`) moving to `reverse`
+    /// (axis not applicable) takes nothing away from a registration. The
+    /// restricted set therefore answers one question, whether each named
+    /// action is still granted.
+    pub fn restricted_to(&self, actions: &[Action]) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(action, _)| actions.contains(action))
+                .map(|&(action, _)| (action, RoleScope::NotApplicable))
+                .collect(),
+        }
+    }
+
     /// Whether `self` is at least as wide as `recorded` (ADR-0031 결정 5's
     /// last condition, read from the new set's side): for every
     /// `(action, axis)` in `recorded`, `self` has the same action and its
@@ -171,6 +192,18 @@ impl RoleGrants {
     }
 }
 
+/// Whether moving a pin from role `previous` to role `new` (the words
+/// `trust.toml` and `trust.set_role` carry; `None` is a pin without a `role`
+/// key) takes grants away, by the same covering relation the connection
+/// watch closes on (ADR-0031 결정 5). `qsh-cli` asks this to decide whether
+/// `qsh trust set-role` prints the narrowing scope (결정 9); an unknown word
+/// grants nothing, like a missing one.
+pub fn role_change_narrows(previous: Option<&str>, new: Option<&str>) -> bool {
+    let grants =
+        |word: Option<&str>| RoleGrants::of_role(word.and_then(|w| w.parse::<TrustRole>().ok()));
+    !grants(new).covers(&grants(previous))
+}
+
 /// `new` reaches everything `old` reached: the same axis, or `any`.
 fn scope_covers(new: RoleScope, old: RoleScope) -> bool {
     new == RoleScope::Any || new == old
@@ -179,6 +212,31 @@ fn scope_covers(new: RoleScope, old: RoleScope) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_grants_drop_the_ownership_axis() {
+        let host_reverse = [Action::HostReverse];
+        let full = RoleGrants::of_role(Some(TrustRole::Full)).restricted_to(&host_reverse);
+        let reverse = RoleGrants::of_role(Some(TrustRole::Reverse)).restricted_to(&host_reverse);
+        let exec = RoleGrants::of_role(Some(TrustRole::Exec)).restricted_to(&host_reverse);
+        assert_eq!(full, reverse, "host.reverse has no axis to compare");
+        assert!(full.covers(&reverse) && reverse.covers(&full));
+        assert!(exec.is_empty());
+        assert!(!exec.covers(&full), "losing host.reverse is a reduction");
+        assert!(reverse.covers(&exec));
+    }
+
+    #[test]
+    fn role_change_narrows_follows_the_covering_relation() {
+        assert!(role_change_narrows(Some("full"), Some("exec")));
+        assert!(role_change_narrows(Some("full"), Some("tunnel")));
+        assert!(role_change_narrows(Some("exec"), Some("none")));
+        assert!(!role_change_narrows(Some("exec"), Some("full")));
+        assert!(!role_change_narrows(Some("exec"), Some("exec")));
+        assert!(!role_change_narrows(None, Some("none")));
+        assert!(!role_change_narrows(None, Some("full")));
+        assert!(role_change_narrows(Some("exec"), Some("bogus")));
+    }
 
     #[test]
     fn role_grants_cover_every_role_once_in_all_order() {

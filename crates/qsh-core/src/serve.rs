@@ -525,6 +525,7 @@ pub fn host_runtime(
     // that type is erased. `crate::reverse::listen::run_listen_unix` keeps
     // calling plain `load_or_deny`: a reverse target never reaches
     // `Server::serve_pairing_connection` at all.
+    let trust_for_watch = Arc::clone(&trust);
     let (authorizer, policy_diagnostic, pinned_principals) =
         load_or_deny_with_index(paths, Role::Serve, trust);
     // M8 plan Step 2 (52639fc): the same operator-configured admission bounds
@@ -557,6 +558,11 @@ pub fn host_runtime(
         quotas,
     );
     server.set_pinned_principals(pinned_principals);
+    // The same store the transport verifier reads, for both the inbound
+    // connections of `qsh serve` and the outbound one of `qsh serve --to`
+    // (ADR-0031 결정 2~3): `trust_watch` is how this host's connections hear
+    // that trust was withdrawn.
+    server.set_trust_watch(Arc::clone(&trust_for_watch));
     // The remote file ops resolve qsh's own state tree (config, state and
     // runtime directories, the audit file) per request from these; a reverse
     // target gets the same set because it comes through here too (ADR-0029

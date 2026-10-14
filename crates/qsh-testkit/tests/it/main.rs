@@ -42,6 +42,7 @@ mod serve_restart_reset;
 mod session_loopback;
 mod supervised_dynamic_blackhole;
 mod supervised_reverse;
+mod trust_withdrawal;
 mod tunnel_chaos;
 mod tunnel_echo_under_load;
 mod tunnel_loopback;

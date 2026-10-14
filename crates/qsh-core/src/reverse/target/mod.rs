@@ -507,6 +507,10 @@ async fn run_reverse_unix(
         // the path dead itself (the `None` close-reason branch below); the
         // `lost` line carries it and no other line does.
         let mut own_verdict: Option<crate::client::pathwatch::DeadVerdict> = None;
+        // Whether the connection ended with `CLOSE_CODE_TRUST_WITHDRAWN`,
+        // closed by this side's trust watch or by the controller (ADR-0031
+        // 결정 7). Decides which delay the redial below waits.
+        let trust_withdrawn;
         'serve: loop {
             tokio::select! {
                 _ = &mut shutdown => {
@@ -568,9 +572,11 @@ async fn run_reverse_unix(
                     // nominally open and this really was watchdog-declared
                     // silence.
                     let pre_close_reason = conn.close_reason();
+                    trust_withdrawn = conn.closed_by_trust_withdrawal();
                     conn.close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
                     let _ = (&mut serve_control).await;
                     loss_cause = match pre_close_reason {
+                        Some(_) if trust_withdrawn => ReconnectCause::TlsRejected,
                         Some(err) => super::classify_connection_error(&err),
                         None => {
                             own_verdict = watch.dead_verdict();
@@ -587,8 +593,12 @@ async fn run_reverse_unix(
                     };
                     // Same ROADMAP M9 (b) rationale as the two messages above.
                     tracing::info!(controller, %detail, "connection to the controller ended");
-                    loss_cause =
-                        classify_target_connection_loss(&joined, conn.close_reason().as_ref());
+                    trust_withdrawn = conn.closed_by_trust_withdrawal();
+                    loss_cause = classify_target_end(
+                        &joined,
+                        conn.close_reason().as_ref(),
+                        trust_withdrawn,
+                    );
                     break 'serve;
                 }
                 _ = quota_flush.tick() => {
@@ -622,6 +632,15 @@ async fn run_reverse_unix(
         // construction — that arm never sees this variable at all.
         let since_registered_ms =
             Some(u64::try_from(registered_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+        if trust_withdrawn {
+            // One line, whichever side closed (ADR-0031 결정 7). The `lost`
+            // and `retry` lines below carry the vocabulary cause.
+            tracing::info!(
+                controller,
+                "the connection was closed because trust was withdrawn; redialling on the \
+                 ordinary backoff"
+            );
+        }
         let lost_at = crate::config::now_rfc3339();
         ReconnectEvent {
             event: "lost",
@@ -641,7 +660,7 @@ async fn run_reverse_unix(
         // The delay depends on how long the registration lived: a run of
         // quick losses backs the redial off instead of dialling straight
         // back into the same conditions (ADR-0042 decision 2).
-        let delay = backoff.loss_delay(registered_at.elapsed());
+        let delay = redial_delay(&mut backoff, trust_withdrawn, registered_at.elapsed());
         ReconnectEvent {
             event: "retry",
             host: controller,
@@ -909,6 +928,46 @@ fn classify_target_connection_loss(
             qsh_transport::WriteError::ConnectionLost(e),
         )))) => super::classify_connection_error(e),
         Ok(Err(_)) | Err(_) => ReconnectCause::Local,
+    }
+}
+
+/// [`classify_target_connection_loss`] with the trust-withdrawal judgment in
+/// front of it. `trust_withdrawn` is `Connection::closed_by_trust_withdrawal`:
+/// the connection ended with `CLOSE_CODE_TRUST_WITHDRAWN`, sent by this
+/// side's own watch or by the controller (ADR-0031 결정 7). It is judged
+/// first because a local close leaves the transport saying only "locally
+/// closed". The cause is `tls_rejected`: one side's trust store stopped
+/// accepting the other's credential, the same thing a handshake refusal
+/// says, and no new vocabulary value is needed.
+#[cfg(any(unix, test))]
+fn classify_target_end(
+    joined: &Result<Result<(), crate::server::ConnError>, tokio::task::JoinError>,
+    close_reason: Option<&qsh_transport::ConnectionError>,
+    trust_withdrawn: bool,
+) -> ReconnectCause {
+    if trust_withdrawn {
+        ReconnectCause::TlsRejected
+    } else {
+        classify_target_connection_loss(joined, close_reason)
+    }
+}
+
+/// The delay before redialling a registration that ended (ADR-0042
+/// decision 2, ADR-0031 결정 7). A transient loss uses the quick-loss
+/// schedule; a trust withdrawal does not: the redial is going to meet the
+/// same refusal a handshake rejection meets, so it takes the ordinary
+/// doubling backoff of a failed attempt ([`Backoff::next_delay`]) and does
+/// not touch the quick-loss count.
+#[cfg(any(unix, test))]
+fn redial_delay<R: rand::Rng>(
+    backoff: &mut Backoff<R>,
+    trust_withdrawn: bool,
+    lived: Duration,
+) -> Duration {
+    if trust_withdrawn {
+        backoff.next_delay()
+    } else {
+        backoff.loss_delay(lived)
     }
 }
 

@@ -623,6 +623,11 @@ pub struct Server {
     /// operator's actual `[serve]` limits via
     /// [`Server::with_admission_and_quotas`].
     quotas: Arc<crate::quota::Quotas>,
+    /// The trust store whose changes the per-connection trust watch follows
+    /// (ADR-0031 결정 3, [`Self::set_trust_watch`]). Unset means no watch:
+    /// every embedding that never wires one (the unit-test harnesses) serves
+    /// connections exactly as before.
+    trust_watch: OnceLock<Arc<crate::trust::SharedTrustStore>>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -788,7 +793,19 @@ impl Server {
             file_write_gate: OnceLock::new(),
             admission,
             quotas,
+            trust_watch: OnceLock::new(),
         })
+    }
+
+    /// Wire the trust store whose changes close this host's connections
+    /// (ADR-0031 결정 2~3): every connection [`Self::serve_control`] drives
+    /// from now on is watched, so one `trust remove` or role cut closes it
+    /// within the poll interval plus one judgment. `crate::serve::host_runtime`
+    /// calls this with the store the transport's verifier reads, which puts
+    /// the inbound connections of `qsh serve` and the outbound connection of
+    /// `qsh serve --to` under the same rule. No-op past the first call.
+    pub fn set_trust_watch(&self, trust: Arc<crate::trust::SharedTrustStore>) {
+        let _ = self.trust_watch.set(trust);
     }
 
     /// Wire this host's trust store and invite store together so `qsh
@@ -1811,6 +1828,25 @@ impl Server {
             });
         }
 
+        // The trust watch (ADR-0031 decision 3): one task per connection,
+        // spawned on its own so that closing a withdrawn connection never
+        // depends on this loop being polled (a peer that stops reading
+        // blocks the awaited sends below). The guard aborts it when the loop
+        // ends. Built here so it subscribes to the store before the loop can
+        // spend a moment on the connection; without a wired store there is
+        // no task.
+        let mut withdrawal = self.trust_watch.get().map(|trust| {
+            crate::trust::connection_watch::ConnectionWatch::begin(
+                Arc::clone(trust),
+                conn,
+                &ctx.principal,
+                ctx.auth_path,
+                ctx.peer_fingerprint,
+                None,
+            )
+            .spawn(Arc::clone(&self.audit))
+        });
+
         // Nothing detached may still be running when `purge_connection`
         // releases this connection's leases: `JoinSet::drop` only *requests*
         // an abort, so a data stream that already queued its `TakeLease`
@@ -1908,6 +1944,11 @@ impl Server {
                     Some(reply) = reply_rx.recv() => {
                         ctl.send.send(&reply).await?;
                     }
+                    // The watch closed the connection (trust withdrawn or
+                    // role grants reduced). Sessions detach as for any lost
+                    // connection; the tail below joins every task. The close
+                    // itself does not wait for this arm.
+                    () = crate::trust::connection_watch::withdrawn(&mut withdrawal) => return Ok(()),
                     // Reap finished tasks so the set never grows unbounded.
                     Some(_) = blocking.join_next(), if !blocking.is_empty() => {}
                     stream = conn.accept_bi() => match stream {
