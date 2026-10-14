@@ -74,7 +74,7 @@ pub(crate) use load::{
 };
 pub use policy::{ActionPattern, GrantBasis, Policy, Rule, Scope, Verdict};
 pub use resolving::RoleResolvingAuthorizer;
-pub use roles::{ROLE_GRANTS, RoleGrant, RoleScope, role_grant};
+pub use roles::{ROLE_GRANTS, RoleGrant, RoleGrants, RoleScope, role_grant};
 
 // Expands to the literal restart-notice string below. A `macro_rules!`
 // rather than a plain `&str` fn/const alias so `crate::doctor`'s two

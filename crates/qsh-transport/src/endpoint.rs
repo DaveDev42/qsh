@@ -11,7 +11,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -27,6 +27,7 @@ use crate::quic::QuicConn;
 use crate::stream::{RecvStream, SendStream};
 use crate::tls::{
     AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator, VerifiedPeer,
+    reverify_chain,
 };
 
 /// Application-level keep-alive interval (`protocol.md` §2). The default
@@ -151,6 +152,15 @@ pub const CLOSE_CODE_UNVERIFIED_PEER: u32 = 0x1001;
 /// QUIC application close code for a protocol violation on the control
 /// stream (bad Hello, oversize frame, unknown stream header…).
 pub const CLOSE_CODE_PROTOCOL: u32 = 0x1002;
+/// QUIC application close code for a connection closed because the local
+/// trust store no longer vouches for it: the peer was un-pinned, its CA was
+/// removed, or the role grants it was admitted with shrank (ADR-0031
+/// decision 7). The value sits in the band `docs/design/protocol.md` §16.3
+/// leaves outside the freeze; a peer never branches on it (§7).
+pub const CLOSE_CODE_TRUST_WITHDRAWN: u32 = 0x1005;
+/// The fixed reason phrase sent with [`CLOSE_CODE_TRUST_WITHDRAWN`]. It names
+/// no principal and no cause; the audit record carries the coarse category.
+pub const TRUST_WITHDRAWN_REASON: &[u8] = b"trust withdrawn";
 
 /// The local device's cert chain and private key (PKCS#8 DER).
 #[derive(Clone)]
@@ -639,6 +649,19 @@ pub struct Connection {
     principal: Principal,
     auth_path: AuthPath,
     peer_fingerprint: Option<Fingerprint>,
+    /// The peer's certificate chain (DER, leaf first) from the handshake,
+    /// kept so [`Connection::reverify`] can re-run the verifier later
+    /// (ADR-0031 decision 4). A few KB per connection; shared by clones.
+    peer_chain: Arc<[CertificateDer<'static>]>,
+    /// Which side of the handshake the peer was, for the chain verifier's
+    /// key-usage check.
+    peer_role: PeerRole,
+    /// Set when this side closed the connection with
+    /// [`CLOSE_CODE_TRUST_WITHDRAWN`]. The transport reports a local close
+    /// as plain "locally closed" with no code, so the flag is the only way
+    /// [`Connection::closed_by_trust_withdrawal`] can tell this side's own
+    /// withdrawal from any other local close. Shared by clones.
+    withdrawn_locally: Arc<AtomicBool>,
 }
 
 /// The transports a [`Connection`] can run over. Every method that touches
@@ -654,10 +677,14 @@ impl Connection {
     fn from_quic(
         conn: quinn::Connection,
         chain: &[CertificateDer<'static>],
+        role: PeerRole,
         verified: VerifiedPeer,
     ) -> Self {
         Self {
             peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
+            peer_chain: chain.into(),
+            peer_role: role,
+            withdrawn_locally: Arc::new(AtomicBool::new(false)),
             inner: ConnBackend::Quic(QuicConn(conn)),
             id: next_connection_id(),
             principal: verified.principal,
@@ -699,6 +726,43 @@ impl Connection {
     /// [`principal`](Self::principal).
     pub fn peer_fingerprint(&self) -> Option<Fingerprint> {
         self.peer_fingerprint
+    }
+
+    /// Re-run the handshake's verification over the peer chain kept from
+    /// the handshake, against `evaluator`'s current view of the trust
+    /// store (ADR-0031 decision 4).
+    ///
+    /// This is the same `verify_peer` core the handshake used, so validity
+    /// window, pin lookup, CA chain and the pairing fallback are judged by
+    /// the handshake's own rules. A connection whose kept chain is empty or
+    /// whose leaf no longer parses cannot be judged and is rejected
+    /// (decision 5: undecidable means untrusted).
+    pub fn reverify(&self, evaluator: &dyn TrustEvaluator) -> Result<VerifiedPeer, RejectReason> {
+        reverify_chain(evaluator, &self.peer_chain, self.peer_role)
+    }
+
+    /// Close because the trust store no longer vouches for this connection:
+    /// [`close`](Self::close) with [`CLOSE_CODE_TRUST_WITHDRAWN`] and the
+    /// fixed [`TRUST_WITHDRAWN_REASON`] (ADR-0031 decision 7). Idempotent.
+    pub fn close_trust_withdrawn(&self) {
+        self.close(CLOSE_CODE_TRUST_WITHDRAWN, TRUST_WITHDRAWN_REASON);
+    }
+
+    /// Whether this connection ended with [`CLOSE_CODE_TRUST_WITHDRAWN`],
+    /// whether this side sent it
+    /// ([`close_trust_withdrawn`](Self::close_trust_withdrawn)) or the peer
+    /// did. `false` while the
+    /// connection is open and for every other close.
+    pub fn closed_by_trust_withdrawal(&self) -> bool {
+        if self.withdrawn_locally.load(Ordering::Acquire) {
+            return true;
+        }
+        match self.close_reason() {
+            Some(ConnectionError::ApplicationClosed(close)) => {
+                close.error_code.into_inner() == u64::from(CLOSE_CODE_TRUST_WITHDRAWN)
+            }
+            _ => false,
+        }
     }
 
     /// Peer socket address (may change over the connection's life via
@@ -745,6 +809,9 @@ impl Connection {
 
     /// Close with an application error code and reason. Idempotent.
     pub fn close(&self, code: u32, reason: &[u8]) {
+        if code == CLOSE_CODE_TRUST_WITHDRAWN && self.close_reason().is_none() {
+            self.withdrawn_locally.store(true, Ordering::Release);
+        }
         match &self.inner {
             ConnBackend::Quic(c) => c.close(code, reason),
         }
@@ -1058,7 +1125,7 @@ impl Dialer {
             }
         };
         Ok(Dialed {
-            connection: Connection::from_quic(conn, &chain, verified),
+            connection: Connection::from_quic(conn, &chain, PeerRole::Server, verified),
             endpoint: Endpoint::from_quic(endpoint),
             verifier,
         })
@@ -1362,7 +1429,12 @@ impl Incoming {
         let conn = self.incoming.await.map_err(ConnectionError::from)?;
         let chain = peer_chain(&conn);
         match self.verifier.verify_peer(&chain, PeerRole::Client) {
-            Ok(verified) => Ok(Connection::from_quic(conn, &chain, verified)),
+            Ok(verified) => Ok(Connection::from_quic(
+                conn,
+                &chain,
+                PeerRole::Client,
+                verified,
+            )),
             Err(reason) => {
                 conn.close(
                     quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),

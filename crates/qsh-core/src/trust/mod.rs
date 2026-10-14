@@ -28,13 +28,16 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::time::{Duration, SystemTime};
 
 use qsh_proto::{ErrorCode, TrustPeer};
 use qsh_transport::{AuthPath, CertificateDer, Fingerprint, Principal, TrustEvaluator};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
+use crate::acl::RoleGrants;
 use crate::broker::PeerFingerprint;
 use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
@@ -887,6 +890,12 @@ pub(crate) fn role_of_pin(
         .and_then(|pin| pin.role)
 }
 
+/// How often the one poll task of a process re-reads `trust.toml`
+/// ([`SharedTrustStore::start_poll`], ADR-0031 결정 3). With one tick of
+/// slack for the per-connection judgment this is the 2-second bound on
+/// closing a connection whose trust was withdrawn.
+pub const TRUST_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 /// A process-wide, reload-on-change view of `trust.toml` that satisfies
 /// [`TrustEvaluator`].
 ///
@@ -914,6 +923,20 @@ pub struct SharedTrustStore {
     /// to `TrustEvaluator::pairing_open`'s own default, so an evaluator that
     /// never attaches one behaves exactly as it did before this step.
     pairing: OnceLock<Arc<SharedInviteStore>>,
+    /// The snapshot generation (ADR-0031 결정 3): starts at 0 and is raised
+    /// by exactly one each time [`SharedTrustStore::refresh`] replaces the
+    /// snapshot (new content parsed, the file gone so the store is empty,
+    /// or a reload that clears a parse failure with changed content). Not
+    /// raised when a read or a parse fails and the last good snapshot stays,
+    /// nor when the bytes are unchanged, so the end of a read failure over
+    /// identical content changes the role suspension without a bump (a
+    /// watcher must not assume a bump on every suspension change). Held in
+    /// a `watch` channel so a per-connection watcher can wait for the next
+    /// change.
+    generation: watch::Sender<u64>,
+    /// Whether [`SharedTrustStore::start_poll`] already spawned the poll
+    /// task: a process has one.
+    poll_started: AtomicBool,
 }
 
 impl std::fmt::Debug for SharedTrustStore {
@@ -937,7 +960,54 @@ impl SharedTrustStore {
             cache: RwLock::new(Cached::new(raw, mtime_of(&path), store)),
             path,
             pairing: OnceLock::new(),
+            generation: watch::channel(0).0,
+            poll_started: AtomicBool::new(false),
         }))
+    }
+
+    /// The current snapshot generation. Raised by one for every snapshot
+    /// change a reload applies (new content parsed, the file gone, or a
+    /// failed state ended); not raised by a failed read or parse.
+    pub fn generation(&self) -> u64 {
+        *self.generation.borrow()
+    }
+
+    /// A receiver that wakes on every later generation change (ADR-0031
+    /// 결정 3). It starts "seen" at the current generation, so
+    /// `changed().await` resolves only for a change after this call.
+    ///
+    /// A watcher that records a decision input and then waits must
+    /// subscribe **before** it reads the input: a change landing between
+    /// the read and the subscribe would otherwise be missed.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    /// Spawn the process's one poll task: every [`TRUST_POLL_INTERVAL`] it
+    /// re-reads `trust.toml` (the same refresh every handshake does) and
+    /// does nothing else, so a change made by another process
+    /// (`qsh trust remove`) raises the generation within one tick even when
+    /// no handshake arrives. Idempotent: a second call is
+    /// a no-op. The task holds only a `Weak` handle and ends when the store
+    /// is dropped. Needs a Tokio runtime.
+    pub fn start_poll(self: &Arc<Self>) {
+        if self.poll_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let store: Weak<Self> = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + TRUST_POLL_INTERVAL,
+                TRUST_POLL_INTERVAL,
+            );
+            // A slow tick must not be followed by a burst of catch-up reads.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let Some(store) = store.upgrade() else { return };
+                store.refresh();
+            }
+        });
     }
 
     /// The file this view is backed by.
@@ -995,6 +1065,27 @@ impl SharedTrustStore {
             auth_path,
             fingerprint,
         )
+    }
+
+    /// The `(action, ownership axis)` set the role of the pin a connection
+    /// authenticated with grants right now (ADR-0031 결정 4).
+    ///
+    /// This is [`resolve_role`](Self::resolve_role)'s answer run through the
+    /// role table ([`RoleGrants::of_role`]), and nothing else: the
+    /// authorizer decides on the role `resolve_role` returns, the connection
+    /// watch compares the set this returns, and both start from the same
+    /// resolution. The inputs are the connection's recorded principal and
+    /// fingerprint, not a pin's current name, so a renamed or re-pinned
+    /// peer resolves to the empty set. Empty also for every connection that
+    /// has no role (CA path, `user:` principal, a pin without a `role` key,
+    /// a suspended store).
+    pub fn role_grants_for(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        fingerprint: Option<PeerFingerprint>,
+    ) -> RoleGrants {
+        RoleGrants::of_role(self.resolve_role(principal, auth_path, fingerprint))
     }
 
     /// Whether the last reload failed (the file did not parse, or could not
@@ -1096,6 +1187,10 @@ impl SharedTrustStore {
                     );
                 }
                 *cache = Cached::new(raw, new_mtime, store);
+                // The snapshot changed (or a failed state ended): wake the
+                // watchers. Only this arm raises the generation; a failed
+                // parse below keeps the old snapshot and leaves it alone.
+                self.generation.send_modify(|generation| *generation += 1);
             }
             Err(err) => {
                 tracing::warn!(

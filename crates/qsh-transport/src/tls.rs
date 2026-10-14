@@ -17,7 +17,7 @@
 //! owns the verification mechanics.
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
@@ -168,12 +168,7 @@ impl QshPeerVerifier {
         chain: &[CertificateDer<'_>],
         role: PeerRole,
     ) -> Result<VerifiedPeer, RejectReason> {
-        let (end_entity, intermediates) = match chain.split_first() {
-            Some(x) => x,
-            None => return Err(RejectReason::Untrusted),
-        };
-        self.verify_core(end_entity, intermediates, UnixTime::now(), role)
-            .map_err(|(reason, _)| reason)
+        verify_chain(&*self.evaluator, self.algs, chain, role)
     }
 
     /// The verification core. Returns the principal or the coarse reason
@@ -185,124 +180,14 @@ impl QshPeerVerifier {
         now: UnixTime,
         role: PeerRole,
     ) -> Result<VerifiedPeer, (RejectReason, TlsError)> {
-        let fingerprint = Fingerprint::of_cert_der(end_entity).map_err(|_| {
-            (
-                RejectReason::Malformed,
-                TlsError::InvalidCertificate(CertificateError::BadEncoding),
-            )
-        })?;
-
-        // Validity window first: it applies to both paths.
-        let (not_before, not_after) = validity_unix(end_entity).map_err(|_| {
-            (
-                RejectReason::Malformed,
-                TlsError::InvalidCertificate(CertificateError::BadEncoding),
-            )
-        })?;
-        let now_secs = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
-        if now_secs < not_before {
-            return Err((
-                RejectReason::Expired,
-                TlsError::InvalidCertificate(CertificateError::NotValidYet),
-            ));
-        }
-        if now_secs > not_after {
-            return Err((
-                RejectReason::Expired,
-                TlsError::InvalidCertificate(CertificateError::Expired),
-            ));
-        }
-
-        // 1. Pin.
-        if let Some(principal) = self.evaluator.lookup_pin(&fingerprint) {
-            return Ok(VerifiedPeer {
-                principal,
-                auth_path: AuthPath::Pin,
-            });
-        }
-
-        // 2. Private CA chain. Wrapped in a closure so its several distinct
-        // failure points share one tail check (3, below) instead of each
-        // needing its own copy of it.
-        let ca_result: Result<VerifiedPeer, (RejectReason, TlsError)> = (|| {
-            let roots = self.evaluator.ca_roots();
-            if roots.is_empty() {
-                return Err((
-                    RejectReason::Untrusted,
-                    TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
-                ));
-            }
-            let anchors = roots
-                .iter()
-                .map(|der| {
-                    webpki::anchor_from_trusted_cert(der)
-                        .map(|anchor| anchor.to_owned())
-                        .map_err(|_| {
-                            (
-                                RejectReason::Untrusted,
-                                TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let ee = EndEntityCert::try_from(end_entity).map_err(|_| {
-                (
-                    RejectReason::Malformed,
-                    TlsError::InvalidCertificate(CertificateError::BadEncoding),
-                )
-            })?;
-            let usage = match role {
-                PeerRole::Server => KeyUsage::server_auth(),
-                PeerRole::Client => KeyUsage::client_auth(),
-            };
-            ee.verify_for_usage(
-                self.algs.all,
-                &anchors,
-                intermediates,
-                now,
-                usage,
-                None,
-                None,
-            )
-            .map_err(|e| (RejectReason::Untrusted, webpki_to_tls(e)))?;
-
-            // CA path: identity comes from the leaf's SAN URI.
-            match principal_from_san(end_entity) {
-                Ok(Some(principal)) => Ok(VerifiedPeer {
-                    principal,
-                    auth_path: AuthPath::Ca,
-                }),
-                Ok(None) => Err((
-                    RejectReason::NoPrincipal,
-                    TlsError::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
-                )),
-                Err(_) => Err((
-                    RejectReason::Malformed,
-                    TlsError::InvalidCertificate(CertificateError::BadEncoding),
-                )),
-            }
-        })();
-
-        // 3. Pairing fallback (ADR-0002, `docs/design/protocol.md` §15):
-        // only reached once both the pin and CA paths above have failed.
-        // The cert already passed the fingerprint/validity-window checks
-        // above this function's pin/CA section, so this only ever admits a
-        // well-formed, currently-valid cert that simply is not (yet)
-        // trusted by either other path — exactly "any new device's own
-        // self-signed identity", which is the case pairing exists for.
-        match ca_result {
-            Ok(v) => Ok(v),
-            Err(err) => {
-                if self.evaluator.pairing_open() {
-                    Ok(VerifiedPeer {
-                        principal: Principal::Pairing,
-                        auth_path: AuthPath::Pairing,
-                    })
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        verify_core(
+            &*self.evaluator,
+            self.algs,
+            end_entity,
+            intermediates,
+            now,
+            role,
+        )
     }
 
     fn verify_and_record(
@@ -323,6 +208,173 @@ impl QshPeerVerifier {
             outcome,
         });
         result.map_err(|(_, err)| err)
+    }
+}
+
+/// Verify a whole peer chain (leaf first) against `evaluator` at the current
+/// time. The one entry point behind both the handshake
+/// ([`QshPeerVerifier::verify_peer`]) and a later re-check of an established
+/// connection ([`reverify_chain`]), so the two can never apply different rules.
+fn verify_chain(
+    evaluator: &dyn TrustEvaluator,
+    algs: WebPkiSupportedAlgorithms,
+    chain: &[CertificateDer<'_>],
+    role: PeerRole,
+) -> Result<VerifiedPeer, RejectReason> {
+    let (end_entity, intermediates) = match chain.split_first() {
+        Some(x) => x,
+        None => return Err(RejectReason::Untrusted),
+    };
+    verify_core(
+        evaluator,
+        algs,
+        end_entity,
+        intermediates,
+        UnixTime::now(),
+        role,
+    )
+    .map_err(|(reason, _)| reason)
+}
+
+/// Re-run the handshake's verification core over a chain kept from an
+/// earlier handshake (`Connection::reverify`, ADR-0031 decision 4). Same
+/// code path as the handshake: validity window, pin lookup, CA chain,
+/// pairing fallback. An empty chain is an `Untrusted` rejection.
+pub(crate) fn reverify_chain(
+    evaluator: &dyn TrustEvaluator,
+    chain: &[CertificateDer<'_>],
+    role: PeerRole,
+) -> Result<VerifiedPeer, RejectReason> {
+    verify_chain(evaluator, default_algs(), chain, role)
+}
+
+/// The signature algorithms every verifier in this crate uses, built once.
+fn default_algs() -> WebPkiSupportedAlgorithms {
+    static ALGS: OnceLock<WebPkiSupportedAlgorithms> = OnceLock::new();
+    *ALGS.get_or_init(|| {
+        rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms
+    })
+}
+
+/// The verification core. Returns the principal or the coarse reason
+/// plus the precise rustls error to hand back to the handshake.
+fn verify_core(
+    evaluator: &dyn TrustEvaluator,
+    algs: WebPkiSupportedAlgorithms,
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    now: UnixTime,
+    role: PeerRole,
+) -> Result<VerifiedPeer, (RejectReason, TlsError)> {
+    let fingerprint = Fingerprint::of_cert_der(end_entity).map_err(|_| {
+        (
+            RejectReason::Malformed,
+            TlsError::InvalidCertificate(CertificateError::BadEncoding),
+        )
+    })?;
+
+    // Validity window first: it applies to both paths.
+    let (not_before, not_after) = validity_unix(end_entity).map_err(|_| {
+        (
+            RejectReason::Malformed,
+            TlsError::InvalidCertificate(CertificateError::BadEncoding),
+        )
+    })?;
+    let now_secs = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    if now_secs < not_before {
+        return Err((
+            RejectReason::Expired,
+            TlsError::InvalidCertificate(CertificateError::NotValidYet),
+        ));
+    }
+    if now_secs > not_after {
+        return Err((
+            RejectReason::Expired,
+            TlsError::InvalidCertificate(CertificateError::Expired),
+        ));
+    }
+
+    // 1. Pin.
+    if let Some(principal) = evaluator.lookup_pin(&fingerprint) {
+        return Ok(VerifiedPeer {
+            principal,
+            auth_path: AuthPath::Pin,
+        });
+    }
+
+    // 2. Private CA chain. Wrapped in a closure so its several distinct
+    // failure points share one tail check (3, below) instead of each
+    // needing its own copy of it.
+    let ca_result: Result<VerifiedPeer, (RejectReason, TlsError)> = (|| {
+        let roots = evaluator.ca_roots();
+        if roots.is_empty() {
+            return Err((
+                RejectReason::Untrusted,
+                TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
+            ));
+        }
+        let anchors = roots
+            .iter()
+            .map(|der| {
+                webpki::anchor_from_trusted_cert(der)
+                    .map(|anchor| anchor.to_owned())
+                    .map_err(|_| {
+                        (
+                            RejectReason::Untrusted,
+                            TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ee = EndEntityCert::try_from(end_entity).map_err(|_| {
+            (
+                RejectReason::Malformed,
+                TlsError::InvalidCertificate(CertificateError::BadEncoding),
+            )
+        })?;
+        let usage = match role {
+            PeerRole::Server => KeyUsage::server_auth(),
+            PeerRole::Client => KeyUsage::client_auth(),
+        };
+        ee.verify_for_usage(algs.all, &anchors, intermediates, now, usage, None, None)
+            .map_err(|e| (RejectReason::Untrusted, webpki_to_tls(e)))?;
+
+        // CA path: identity comes from the leaf's SAN URI.
+        match principal_from_san(end_entity) {
+            Ok(Some(principal)) => Ok(VerifiedPeer {
+                principal,
+                auth_path: AuthPath::Ca,
+            }),
+            Ok(None) => Err((
+                RejectReason::NoPrincipal,
+                TlsError::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
+            )),
+            Err(_) => Err((
+                RejectReason::Malformed,
+                TlsError::InvalidCertificate(CertificateError::BadEncoding),
+            )),
+        }
+    })();
+
+    // 3. Pairing fallback (ADR-0002, `docs/design/protocol.md` §15):
+    // only reached once both the pin and CA paths above have failed.
+    // The cert already passed the fingerprint/validity-window checks
+    // above this function's pin/CA section, so this only ever admits a
+    // well-formed, currently-valid cert that simply is not (yet)
+    // trusted by either other path — exactly "any new device's own
+    // self-signed identity", which is the case pairing exists for.
+    match ca_result {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            if evaluator.pairing_open() {
+                Ok(VerifiedPeer {
+                    principal: Principal::Pairing,
+                    auth_path: AuthPath::Pairing,
+                })
+            } else {
+                Err(err)
+            }
+        }
     }
 }
 
