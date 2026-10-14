@@ -9,7 +9,8 @@ fn open_dir(path: &Path) -> File {
 #[test]
 fn list_dir_sorts_by_name_bytes_and_resumes_after_the_cursor() {
     let tmp = tempfile::tempdir().unwrap();
-    for name in ["b", "a", "B", "ab", "z"] {
+    // No two names differ only by case: APFS (macOS) folds case.
+    for name in ["b", "a", "C", "ab", "z"] {
         std::fs::write(tmp.path().join(name), name).unwrap();
     }
     std::fs::create_dir(tmp.path().join("d")).unwrap();
@@ -18,7 +19,7 @@ fn list_dir_sorts_by_name_bytes_and_resumes_after_the_cursor() {
     let all = list_dir(&dir, b"", 100, 100).unwrap();
     let names: Vec<&str> = all.entries.iter().map(|e| e.name.as_str()).collect();
     // Byte order: uppercase before lowercase, prefix before extension.
-    assert_eq!(names, ["B", "a", "ab", "b", "d", "z"]);
+    assert_eq!(names, ["C", "a", "ab", "b", "d", "z"]);
     assert!(!all.more);
     let d = all.entries.iter().find(|e| e.name == "d").unwrap();
     assert_eq!(d.info.kind, FsKind::Directory);
@@ -37,7 +38,7 @@ fn list_dir_sorts_by_name_bytes_and_resumes_after_the_cursor() {
         }
         after = page.entries.last().unwrap().name.clone().into_bytes();
     }
-    assert_eq!(seen, ["B", "a", "ab", "b", "d", "z"]);
+    assert_eq!(seen, ["C", "a", "ab", "b", "d", "z"]);
 }
 
 #[test]
@@ -62,7 +63,13 @@ fn list_dir_counts_names_that_are_not_utf8_and_skips_them() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("ok"), b"").unwrap();
     let bad = OsStr::from_bytes(b"bad\xff");
-    std::fs::write(tmp.path().join(bad), b"").unwrap();
+    match std::fs::write(tmp.path().join(bad), b"") {
+        Ok(()) => {}
+        // APFS (macOS) refuses names that are not UTF-8, so there is
+        // nothing to skip; Linux CI exercises this.
+        Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => return,
+        Err(e) => panic!("create non-UTF-8 name: {e}"),
+    }
     let dir = open_dir(tmp.path());
     let page = list_dir(&dir, b"", 10, 10).unwrap();
     assert_eq!(page.entries.len(), 1);
