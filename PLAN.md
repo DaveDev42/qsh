@@ -63,27 +63,27 @@ nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh`
   - role로 allow된 요청의 audit 레코드가 근거(`role`, `rule = null`)를 싣는다.
 
   근거: Step 2~8(`2d52a0f`·`b08b813`·`d659dbb`·`a7d94dd`·`9d99e36`·`64facab`·`85ea34f`, Windows 보정 `eb4216e`). CI run `38471301026`(eb4216e) 초록. 부하 반복 `scripts/stress/m15.filter` 50/50. wire diff 0. 소유: 에이전트.
-- [ ] **DoD (b) — 왕복과 트리.** 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두 같은 스텝에서 확인한다(QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다. 근거: Step 14·15.
-- [ ] **DoD — 권한 없음은 deny.** 새 seam 넷이 `DENY_SEAMS`에 행으로 오른다(14 → 18). `acl_uniformity.rs`가 문면 균일성을 단언한다. 항상-deny 예외 목록(`ALWAYS_DENIED_NO_OP`, `crates/qsh-core/tests/acl_registry.rs`)에는 `forward.socks`만 남는다. 근거: Step 11·12.
-- [ ] **DoD — 상태 경로 핀.** 다음을 핀 테스트가 단언한다.
+- [x] **DoD (b) — 왕복과 트리.** 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두 같은 스텝에서 확인한다(QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다. 근거: Step 14·15(`b1fcf3a`·`1a4af3b`, `file_round_trip_is_byte_identical_*`·`cp_recursive` forward·reverse).
+- [x] **DoD — 권한 없음은 deny.** 새 seam 넷이 `DENY_SEAMS`에 행으로 오른다(14 → 18). `acl_uniformity.rs`가 문면 균일성을 단언한다. 항상-deny 예외 목록(`ALWAYS_DENIED_NO_OP`, `crates/qsh-core/tests/acl_registry.rs`)에는 `forward.socks`만 남는다. 근거: Step 11·12.
+- [x] **DoD — 상태 경로 핀.** 다음을 핀 테스트가 단언한다.
   - `full` role과 `allow = ["file.*"]` 행 어느 쪽으로도 상태 경로에 대한 `file.*`는 `PERMISSION_DENIED`이고 파일 바이트는 그대로다.
   - 대상은 `acl.toml`, `trust.toml`, `invites.toml`, identity 파일, audit 로그다.
   - 그 경로를 가리키는 symlink와 `..` 이탈 두 우회도 결과가 같다.
 
   근거: Step 9·12.
-- [ ] **DoD — 인가 전 자원 생성 없음.** deny된 `file.write`·`file.mkdir` 뒤 목적지에 새 파일, 임시 파일, 디렉터리가 없고 기존 파일은 바이트 단위로 같다. 근거: Step 12.
-- [ ] **DoD — 동시 전송 quota.** ADR-0010 모양으로 인가 뒤·열기 전에 판정한다. `quota_registry.rs`에 두 행이 오르고, `quota_docs.rs`가 문서의 거부 범주와 기본값을 대조한다. 근거: Step 12.
-- [ ] **DoD — audit 필드 집합.** 키는 아홉에 optional `role`을 더한 것이다. 파일 내용 바이트가 어떤 필드에도 들어갈 수 없음을 `record_has_only_structural_fields` 형식의 테스트가 고정한다. 근거: Step 2(키), Step 4(role 판정 레코드), Step 12(`file_audit_record_carries_path_but_no_payload`).
-- [ ] **DoD — 복사 중 PTY echo.** 파일 복사와 PTY echo를 동시에 돌린 상태에서 M13 (b) 하네스가 같은 예산으로 초록이다. 근거: Step 14(`file_copy_echo_under_load`), Step 15(`cp_many_small_files_stays_within_the_echo_budget`).
-- [ ] **DoD — 등록 완전성.** 신규 op·명령마다 다음을 갖춘다. 근거: Step 5·6·7·10·11·13·14·15.
+- [x] **DoD — 인가 전 자원 생성 없음.** deny된 `file.write`·`file.mkdir` 뒤 목적지에 새 파일, 임시 파일, 디렉터리가 없고 기존 파일은 바이트 단위로 같다. 근거: Step 12.
+- [x] **DoD — 동시 전송 quota.** ADR-0010 모양으로 인가 뒤·열기 전에 판정한다. `quota_registry.rs`에 두 행이 오르고, `quota_docs.rs`가 문서의 거부 범주와 기본값을 대조한다. 근거: Step 12.
+- [x] **DoD — audit 필드 집합.** 키는 아홉에 optional `role`을 더한 것이다. 파일 내용 바이트가 어떤 필드에도 들어갈 수 없음을 `record_has_only_structural_fields` 형식의 테스트가 고정한다. 근거: Step 2(키), Step 4(role 판정 레코드), Step 12(`file_audit_record_carries_path_but_no_payload`).
+- [x] **DoD — 복사 중 PTY echo.** 파일 복사와 PTY echo를 동시에 돌린 상태에서 M13 (b) 하네스가 같은 예산으로 초록이다. 근거: Step 14(`file_copy_echo_under_load`), Step 15(`cp_many_small_files_stays_within_the_echo_budget`).
+- [x] **DoD — 등록 완전성.** 신규 op·명령마다 다음을 갖춘다. 근거: Step 5·6·7·10·11·13·14·15.
   - fixture 등재와 `layer_2_every_schema_command_has_all_six_faces`
   - `capabilities.json` golden 재생성(`file.v1`)
   - man 재생성
   - 새 wire op의 decode 경로가 fuzz 타깃에 걸림(`decode_file_frame` 신설)
   - freeze 발효 전이므로 `docs/design/protocol.md` §16.1 목록 동시 갱신
-- [ ] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 파일 op 진입점과 role 경로가 오른다. §4 B에 상태 경로 쓰기, 경로 이탈, 덮어쓰기, 신뢰 등록이 곧 권한 부여가 되는 위협 행이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 4·5·9·11·12·13·15. §7 잔여 위험은 Step 8·16.
-- [ ] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 16.
-- [ ] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M15 DoD에는 없는 줄이다(§9 #2). M12·M13의 규율대로 M15가 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 지연 단언(`file_copy_echo_under_load`, `cp_many_small_files_stays_within_the_echo_budget`의 p95 단언)은 부하 없이 `-j 1`로 50회 연속 초록이어야 한다. 근거: Step 8·16.
+- [x] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 파일 op 진입점과 role 경로가 오른다. §4 B에 상태 경로 쓰기, 경로 이탈, 덮어쓰기, 신뢰 등록이 곧 권한 부여가 되는 위협 행이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 4·5·9·11·12·13·15. §7 잔여 위험은 Step 8·16.
+- [x] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 16(`08f663c`, 태그 대조 drift `ce0a84c`). (b) 커밋: Step 9~16 `bd0ae57`·`3855954`·`a86123d`·`f64f3ba`·`16388d9`·`b1fcf3a`·`1a4af3b`·`08f663c`, Windows·macOS·의존성 보정 `668214b`·`1d02860`·`a9748a4`·`dbd6a5b`·`5f0b838`. CI run `38614653051`(ce0a84c, acceptance 포함) 초록. `crates/qsh-proto/proto` diff는 Step 2 부모 이후 `a86123d`(Step 11) 하나, Step 13은 Rust 상수만.
+- [x] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M15 DoD에는 없는 줄이다(§9 #2). M12·M13의 규율대로 M15가 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 지연 단언(`file_copy_echo_under_load`, `cp_many_small_files_stays_within_the_echo_budget`의 p95 단언)은 부하 없이 `-j 1`로 50회 연속 초록이어야 한다. 근거: Step 8·16. 2026-10-15 Dave-Windows-WSL(8 vCPU, 31 GB): `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh "$(cat scripts/stress/m15.filter)" 50` → "50/50 passed under load"(156개), `m15-latency.filter` 3개를 부하 없이 `-j 1`·`QSH_ACCEPTANCE_STRICT=1`로 50/50.
 
 ## 4. 실행 단계 (PR 단위)
 
