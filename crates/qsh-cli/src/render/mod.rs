@@ -2,5 +2,6 @@
 //! envelope ([`json`]) or human-readable text ([`human`]). Nothing outside
 //! this module may format output for either mode.
 
+pub mod cp;
 pub mod human;
 pub mod json;

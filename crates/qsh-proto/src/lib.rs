@@ -44,21 +44,23 @@ pub mod types;
 pub mod wire;
 
 pub use error::ErrorCode;
-pub use event::SessionEvent;
+pub use event::{FileEntryEvent, SessionEvent};
 pub use types::{
     AclCheckData, AclCheckReq, AclMatchingRule, AclPolicyRef, AclShowData, AclShowReq, BuildInfo,
     CLI_SCHEMA_V1, CaRegistration, CapabilitiesData, CapabilitiesReq, CertInitData, CertInitReq,
     CertIssueData, CertIssueReq, CliEnvelope, CliError, DoctorData, DoctorFinding, DoctorReq,
-    DynamicTunnel, EnvVar, ExecRunData, ExecRunReq, Host, HostGetReq, HostListData, HostListReq,
-    IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq, KeyStoreKind,
-    KeyStoreMode, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
-    SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq, SessionListData,
-    SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq,
-    SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq, SetupRole,
-    SetupRunData, SetupRunReq, SetupStatus, SetupStep, SetupStepId, SshPreviewEntry,
-    SshPreviewStatus, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData,
-    TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer, TrustRemoveData,
-    TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData,
-    TrustSshPreviewReq, Tunnel, TunnelCloseData, TunnelCloseReq, TunnelDynamicReq, TunnelListData,
-    TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost, VersionData,
+    DynamicTunnel, EnvVar, ExecRunData, ExecRunReq, FileCopyData, FileCopyEntry,
+    FileCopyErrorDetails, FileCopyFailure, FileCopyReq, Host, HostGetReq, HostListData,
+    HostListReq, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
+    KeyStoreKind, KeyStoreMode, SchemaData, ServiceInstallData, ServiceStatusData,
+    ServiceUninstallData, Session, SessionAttachReq, SessionCloseData, SessionCloseReq,
+    SessionGetReq, SessionListData, SessionListReq, SessionOpenData, SessionOpenReq,
+    SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData,
+    SessionWriteReq, SetupRole, SetupRunData, SetupRunReq, SetupStatus, SetupStep, SetupStepId,
+    SshPreviewEntry, SshPreviewStatus, TrustAcceptData, TrustAcceptReq, TrustAddCaData,
+    TrustAddCaReq, TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData,
+    TrustPeer, TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq,
+    TrustSshPreviewData, TrustSshPreviewReq, Tunnel, TunnelCloseData, TunnelCloseReq,
+    TunnelDynamicReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq,
+    UnreachableHost, VersionData,
 };

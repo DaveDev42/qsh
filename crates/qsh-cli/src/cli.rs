@@ -314,6 +314,16 @@ pub enum Command {
     /// through verbatim.
     Exec(ExecArgs),
 
+    /// Copy files between this machine and one qsh host, scp-style
+    /// (`docs/CLI.md` §6.21).
+    ///
+    /// `qsh cp SRC... DST`: either every SRC is local and DST is
+    /// `[user@]host:path` (put), or every SRC is `[user@]host:path` of one
+    /// host and DST is local (get). A `:` before the first `/` marks the
+    /// remote operand; `host:` is the account's home directory. Only qsh
+    /// hosts are spoken to: scp's transport options are refused (exit 2).
+    Cp(CpArgs),
+
     /// Re-attach this terminal to a session that is already running.
     ///
     /// Only possible from the device that opened the session, whose resume
@@ -595,6 +605,95 @@ pub struct ExecArgs {
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub argv: Vec<String>,
+}
+
+/// Arguments of `qsh cp` (`docs/adr/0029-file-copy.md` decision 2).
+///
+/// The hidden flags are scp's that qsh refuses on purpose: they parse so a
+/// person who types one gets the exit-2 refusal with its one-line reason
+/// instead of a bare clap usage message, and none of them is ever
+/// ignored. The global `-q` and `-v` are the ones `qsh cp` documents.
+#[derive(Debug, Args)]
+#[command(override_usage = "qsh cp [OPTIONS] SRC... DST")]
+pub struct CpArgs {
+    /// Copy directories recursively.
+    #[arg(short = 'r')]
+    pub recursive: bool,
+
+    /// Carry the file mode and modification time over.
+    #[arg(short = 'p')]
+    pub preserve: bool,
+
+    /// Skip a destination file that already exists instead of replacing
+    /// it.
+    #[arg(long = "no-clobber")]
+    pub no_clobber: bool,
+
+    /// One or more sources, then the destination.
+    #[arg(required = true, num_args = 2.., value_name = "SRC... DST")]
+    pub operands: Vec<String>,
+
+    #[arg(short = 'P', hide = true, value_name = "PORT")]
+    pub scp_p_port: Option<String>,
+    #[arg(short = 'i', hide = true, value_name = "FILE")]
+    pub scp_i: Option<String>,
+    #[arg(short = 'o', hide = true, value_name = "OPTION")]
+    pub scp_o: Vec<String>,
+    #[arg(short = 'F', hide = true, value_name = "FILE")]
+    pub scp_f: Option<String>,
+    #[arg(short = 'J', hide = true, value_name = "HOST")]
+    pub scp_j: Option<String>,
+    #[arg(short = 'l', hide = true, value_name = "LIMIT")]
+    pub scp_l: Option<String>,
+    #[arg(short = 'c', hide = true, value_name = "CIPHER")]
+    pub scp_c: Option<String>,
+    #[arg(short = 'S', hide = true, value_name = "PROGRAM")]
+    pub scp_s_program: Option<String>,
+    #[arg(short = 'C', hide = true)]
+    pub scp_compress: bool,
+    #[arg(short = 'B', hide = true)]
+    pub scp_batch: bool,
+    #[arg(short = '3', hide = true)]
+    pub scp_three: bool,
+    #[arg(short = '4', hide = true)]
+    pub scp_four: bool,
+    #[arg(short = '6', hide = true)]
+    pub scp_six: bool,
+    #[arg(short = 'T', hide = true)]
+    pub scp_t: bool,
+    #[arg(short = 'O', hide = true)]
+    pub scp_o_legacy: bool,
+    #[arg(short = 's', hide = true)]
+    pub scp_s_sftp: bool,
+}
+
+impl CpArgs {
+    /// The first scp flag that was given, as scp spells it. `qsh cp`
+    /// refuses all of them (exit 2) and never ignores one.
+    pub fn unsupported_flag(&self) -> Option<&'static str> {
+        let flags: [(bool, &'static str); 16] = [
+            (self.scp_p_port.is_some(), "-P"),
+            (self.scp_i.is_some(), "-i"),
+            (!self.scp_o.is_empty(), "-o"),
+            (self.scp_f.is_some(), "-F"),
+            (self.scp_j.is_some(), "-J"),
+            (self.scp_l.is_some(), "-l"),
+            (self.scp_c.is_some(), "-c"),
+            (self.scp_s_program.is_some(), "-S"),
+            (self.scp_compress, "-C"),
+            (self.scp_batch, "-B"),
+            (self.scp_three, "-3"),
+            (self.scp_four, "-4"),
+            (self.scp_six, "-6"),
+            (self.scp_t, "-T"),
+            (self.scp_o_legacy, "-O"),
+            (self.scp_s_sftp, "-s"),
+        ];
+        flags
+            .iter()
+            .find(|(given, _)| *given)
+            .map(|(_, name)| *name)
+    }
 }
 
 /// Arguments of `qsh attach`.

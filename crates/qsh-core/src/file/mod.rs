@@ -7,7 +7,13 @@
 //! - `host` (unix only): the filesystem steps behind the decisions, pure
 //!   functions over open directory fds (list a page, make a directory, stat
 //!   by name).
+//! - [`operand`]: the scp operand grammar of `qsh cp` (pure).
+//! - `xfer` (unix only): the blocking pieces of a `FILE_DATA` transfer the host
+//!   and the client share (temp file guard, disk writer, commit).
 
 pub mod guard;
 #[cfg(unix)]
 pub mod host;
+pub mod operand;
+#[cfg(unix)]
+pub(crate) mod xfer;

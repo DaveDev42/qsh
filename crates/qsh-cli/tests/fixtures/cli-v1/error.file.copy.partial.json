@@ -1,0 +1,26 @@
+{
+  "command": "file.copy",
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "details": {
+      "copied": 1,
+      "created": 0,
+      "failed": 1,
+      "failures": [
+        {
+          "code": "INVALID_ARGUMENT",
+          "path": "<path>",
+          "side": "local"
+        }
+      ],
+      "failures_truncated": false,
+      "not_attempted": 0,
+      "skipped": 0
+    },
+    "message": "1 of 2 entries failed: no such file or directory",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

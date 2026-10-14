@@ -177,6 +177,12 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.listener_pending_acl.json",
     "setup.run.host_complete_with_role.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
+    // `qsh cp` (`docs/CLI.md` §6.21, ADR-0029 decision 18·21). The golden test
+    // is `cfg(unix)`: the file host is unix-only until M20, so on other
+    // targets this list only proves the files exist.
+    "file.copy.get.json",
+    "file.copy.put.json",
+    "error.file.copy.partial.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -2382,4 +2388,144 @@ fn golden_acl_paths_fixtures() {
     assert!(rules[2].get("paths").is_none(), "{shown}");
     assert!(rules[2].get("file_paths_missing").is_none(), "{shown}");
     check_ignoring_file_effective_actions("acl.show.with_paths.json", shown);
+}
+
+// ---------------------------------------------------------------------------
+// qsh cp (docs/CLI.md §6.21)
+// ---------------------------------------------------------------------------
+
+/// Where the `qsh.event/v1` line fixtures live. They are not `qsh.cli/v1`
+/// envelopes, so `fixtures::all_cli_v1` and its envelope checks never see
+/// them (`cli-v1` had no event fixture before `file.entry`).
+fn event_fixture_path(name: &str) -> PathBuf {
+    fixtures::cli_v1_dir()
+        .parent()
+        .expect("fixtures dir")
+        .join("event-v1")
+        .join(name)
+}
+
+/// Replace the transfer's scratch directory with a fixed token, so the paths
+/// in `entries` and `failures` are stable across runs, and mask each entry's
+/// `mode`, which follows the runner's umask when `--preserve` is absent.
+#[cfg(unix)]
+fn mask_work_dir(value: &Value, work: &std::path::Path) -> Value {
+    fn mask_mode(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                if let Some(mode) = map.get_mut("mode") {
+                    *mode = Value::from(0);
+                }
+                map.values_mut().for_each(mask_mode);
+            }
+            Value::Array(items) => items.iter_mut().for_each(mask_mode),
+            _ => {}
+        }
+    }
+    let text = serde_json::to_string(value).expect("encode");
+    let text = text.replace(&work.display().to_string(), "<work>");
+    let mut masked: Value = serde_json::from_str(&text).expect("decode");
+    mask_mode(&mut masked);
+    masked
+}
+
+/// `qsh cp` goldens: a put and a get of one file, the partial-failure
+/// envelope, and the `file.entry` event line of `--jsonl`. The host pins the
+/// client with the `full` role, so no `acl.toml` is involved.
+#[cfg(unix)]
+#[test]
+fn golden_cp_fixtures() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    host.trust_add_with_role(CLIENT_ALIAS, None, &client.fingerprint(), "full");
+    let serve = ServeGuard::start(&host);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host.fingerprint());
+    let work = tempfile::tempdir().expect("work dir");
+    let work_path = std::fs::canonicalize(work.path()).expect("canonical work dir");
+    let local = work_path.join("local.txt");
+    std::fs::write(&local, b"hello from the client\n").expect("write local source");
+    let remote_dir = work_path.join("remote");
+    std::fs::create_dir(&remote_dir).expect("remote dir");
+    let remote_file = format!("{HOST_ALIAS}:{}", remote_dir.join("hello.txt").display());
+
+    // put
+    let (code, put) = client.json(&["cp", "--json", local.to_str().unwrap(), &remote_file]);
+    assert_eq!(code, 0, "{put}");
+    assert_eq!(put["data"]["direction"], "put", "{put}");
+    check("file.copy.put.json", mask_work_dir(&put, &work_path));
+
+    // get
+    let back = work_path.join("back.txt");
+    let (code, get) = client.json(&["cp", "--json", &remote_file, back.to_str().unwrap()]);
+    assert_eq!(code, 0, "{get}");
+    assert_eq!(get["data"]["direction"], "get", "{get}");
+    assert_eq!(
+        std::fs::read(&back).expect("downloaded copy"),
+        b"hello from the client\n"
+    );
+    check("file.copy.get.json", mask_work_dir(&get, &work_path));
+
+    // partial failure: a missing second source, the first still copied
+    let missing = work_path.join("missing.txt");
+    let (code, partial) = client.json(&[
+        "cp",
+        "--json",
+        local.to_str().unwrap(),
+        missing.to_str().unwrap(),
+        &format!("{HOST_ALIAS}:{}", remote_dir.display()),
+    ]);
+    assert_eq!(code, 255, "{partial}");
+    assert_eq!(partial["error"]["details"]["copied"], 1, "{partial}");
+    assert_eq!(partial["error"]["details"]["failed"], 1, "{partial}");
+    check(
+        "error.file.copy.partial.json",
+        mask_work_dir(&partial, &work_path),
+    );
+
+    // The `file.entry` event line (--jsonl): the first stdout line.
+    let output = client.qsh(&["cp", "--jsonl", local.to_str().unwrap(), &remote_file]);
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let first = stdout.lines().next().expect("a file.entry line");
+    let event: Value = serde_json::from_str(first).expect("event line is JSON");
+    assert_eq!(event["type"], "file.entry", "{event}");
+    assert_eq!(event["schema"], "qsh.event/v1", "{event}");
+    let actual = fixtures::normalize(mask_work_dir(&event, &work_path));
+    let path = event_fixture_path("event.file.entry.json");
+    if updating() {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create event fixture dir");
+        let mut text = serde_json::to_string_pretty(&actual).expect("encode fixture");
+        text.push('\n');
+        std::fs::write(&path, text).expect("write event fixture");
+        eprintln!("regenerated {}", path.display());
+    } else {
+        let expected: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display())),
+        )
+        .expect("event fixture is JSON");
+        assert_eq!(pretty(&actual), pretty(&expected), "event.file.entry.json");
+    }
+}
+
+/// The `file.entry` event fixture is a contract anchor of its own: it must
+/// decode into [`qsh_proto::FileEntryEvent`] and encode back to the same
+/// object, so a renamed or retyped field fails here even though the golden
+/// test that regenerates it is unix-only and masks `mode`. `all_cli_v1` never
+/// sees it (it is not an envelope), so this is the only check that covers it
+/// on every platform.
+#[test]
+fn file_entry_event_fixture_round_trips_through_the_proto_type() {
+    if skip_while_regenerating() {
+        return;
+    }
+    let path = event_fixture_path("event.file.entry.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let fixture: Value = serde_json::from_str(&text).expect("event fixture is JSON");
+    let event: qsh_proto::FileEntryEvent =
+        serde_json::from_value(fixture.clone()).expect("fixture decodes as a FileEntryEvent");
+    assert_eq!(event.schema, qsh_proto::event::EVENT_SCHEMA);
+    assert_eq!(event.event_type, qsh_proto::event::FILE_ENTRY_EVENT_TYPE);
+    let again = serde_json::to_value(&event).expect("encode");
+    assert_eq!(pretty(&again), pretty(&fixture), "event.file.entry.json");
 }

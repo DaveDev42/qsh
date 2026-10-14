@@ -202,6 +202,13 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_stalled_streams::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
+      # ADR-0029 decision 15 (PLAN M15 Step 14): a `qsh cp` file transfer on
+      # the same connection as an attached PTY must keep the echo p95 inside
+      # the same measured RTT + 10ms budget. Same standing-gate shape as the
+      # tunnel harnesses above; `QSH_ACCEPTANCE_STRICT` turns the gate on.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^file_copy_echo_under_load::/)'
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
 
   arch:
     name: arch-lint

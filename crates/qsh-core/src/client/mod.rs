@@ -27,6 +27,8 @@ use crate::localctl::client::ControlConduit;
 #[cfg(unix)]
 use crate::ops::OpError;
 
+#[cfg(unix)]
+pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;
 pub mod reconnect;

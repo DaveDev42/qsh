@@ -117,3 +117,16 @@ qsh-core = { path = "crates/qsh-core", version = "0.4.3" }
 # matters: an unanchored `tests/` would also drop the `src/**/tests/` module
 # directories and break the build.
 qsh-testkit = { path = "crates/qsh-testkit" }
+
+# The hash crates sit on the data path of every file transfer (BLAKE3 in
+# `qsh-core`, SHA-256 in the 64 MiB round-trip tests of `cp_e2e`). At the dev
+# profile's opt-level 0 their SIMD intrinsics are not inlined and a debug-build
+# hash is several times slower, which doubled the wall time of those two tests
+# (about 16 s to 8 s on a loaded 8-core box, against nextest's 60 s slow
+# period). Release builds already optimize them; this only touches
+# `cargo build`/`cargo test`.
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

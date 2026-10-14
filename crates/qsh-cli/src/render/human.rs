@@ -10,12 +10,13 @@ use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
-    DynamicTunnel, Host, HostListData, IdentityExportData, IdentityInitData, SchemaData,
-    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
-    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, SetupRole,
-    SetupRunData, SetupStatus, SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData,
-    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
-    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
+    SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
+    SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
+    SessionWriteData, SetupRole, SetupRunData, SetupStatus, SetupStepId, TrustAcceptData,
+    TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData,
+    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData,
+    TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -745,6 +746,26 @@ pub fn print_exec(output: &ExecRunOutput) -> io::Result<()> {
         stderr_note!("qsh: remote command terminated by {}", sanitize(signal));
     }
     Ok(())
+}
+
+/// Print the one-line summary of `qsh cp` (`docs/CLI.md` §6.21): the files,
+/// bytes and time, with the skipped count when there is one. Failures were
+/// already reported per item on stderr, and a failed copy has no summary.
+pub fn print_file_copy(data: &FileCopyData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let files = if data.files == 1 { "file" } else { "files" };
+    write!(
+        stdout,
+        "{} {} copied, {} in {:.1}s",
+        data.files,
+        files,
+        super::cp::human_bytes(data.bytes),
+        data.duration_ms as f64 / 1000.0
+    )?;
+    if data.skipped > 0 {
+        write!(stdout, ", {} skipped", data.skipped)?;
+    }
+    writeln!(stdout)
 }
 
 /// Print the outcome of `qsh session open`.

@@ -23,6 +23,8 @@ use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::types::FileCopyEntry;
+
 /// The `schema` value stamped on every [`SessionEvent`].
 pub const EVENT_SCHEMA: &str = "qsh.event/v1";
 
@@ -148,6 +150,41 @@ impl<'de> Deserialize<'de> for SessionEvent {
             }
             // Unknown or missing type: preserved verbatim for skipping.
             _ => Ok(SessionEvent::Unknown(value)),
+        }
+    }
+}
+
+/// The `type` of a [`FileEntryEvent`].
+pub const FILE_ENTRY_EVENT_TYPE: &str = "file.entry";
+
+/// A `file.entry` event: one item `qsh cp --jsonl` finished (ADR-0029
+/// decision 18, `docs/CLI.md` §6.21). The fields after `type` are those of
+/// one `entries[]` element of the `file.copy` envelope.
+///
+/// Deliberately its own type and not a [`SessionEvent`] variant: it belongs
+/// to no session, and [`KNOWN_EVENT_TYPES`] is the session event set. A
+/// consumer that only knows session events sees it as
+/// [`SessionEvent::Unknown`] and skips it, which is what `docs/CLI.md` §10
+/// asks of a type it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileEntryEvent {
+    /// Always [`EVENT_SCHEMA`].
+    pub schema: String,
+    /// Always [`FILE_ENTRY_EVENT_TYPE`].
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// The item, flattened into the event object.
+    #[serde(flatten)]
+    pub entry: FileCopyEntry,
+}
+
+impl FileEntryEvent {
+    /// The event for `entry`.
+    pub fn new(entry: FileCopyEntry) -> Self {
+        Self {
+            schema: EVENT_SCHEMA.to_string(),
+            event_type: FILE_ENTRY_EVENT_TYPE.to_string(),
+            entry,
         }
     }
 }

@@ -27,6 +27,7 @@ pub mod acl;
 pub mod cert;
 pub mod doctor;
 pub mod exec;
+pub mod file;
 pub mod host;
 pub mod service;
 pub mod session;
@@ -41,6 +42,12 @@ pub use acl::{AclCheckOp, AclShowOp};
 pub use cert::{CertInitOp, CertIssueOp};
 pub use doctor::{DoctorOp, DoctorThreshold, meets_threshold};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
+#[cfg(unix)]
+pub use file::file_copy_over;
+pub use file::{
+    CancelToken, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp, FileProgress,
+    SilentObserver,
+};
 pub use host::{HostGetOp, HostListOp, HostRoute};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,

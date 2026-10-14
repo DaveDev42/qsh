@@ -1,0 +1,28 @@
+{
+  "command": "file.copy",
+  "data": {
+    "bytes": 22,
+    "direction": "put",
+    "directories": 0,
+    "duration_ms": 0,
+    "entries": [
+      {
+        "blake3": "3d02d7ee50a64156fa1b0fe18cb0fcfafefaab7f3ae9b3380f0988314be41c88",
+        "bytes": 22,
+        "kind": "file",
+        "local_path": "<work>/local.txt",
+        "mode": 0,
+        "overwritten": false,
+        "remote_path": "<work>/remote/hello.txt",
+        "status": "copied"
+      }
+    ],
+    "entries_truncated": false,
+    "files": 1,
+    "host": "box",
+    "skipped": 0
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
