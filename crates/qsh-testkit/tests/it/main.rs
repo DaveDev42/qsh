@@ -12,6 +12,7 @@ mod chaos_relay;
 mod dynamic_loopback;
 mod dynamic_reverse;
 mod exec_loopback;
+mod file_copy_echo_under_load;
 mod file_host;
 mod host_list_reverse;
 mod liveness_config;

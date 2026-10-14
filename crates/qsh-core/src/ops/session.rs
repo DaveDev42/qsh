@@ -496,7 +496,7 @@ impl Ops {
     /// default-fill, rather than only the
     /// interactive command growing it, so the three frontends can't drift
     /// into different behavior for the same host name.
-    fn resolve_user_hint(
+    pub(crate) fn resolve_user_hint(
         &self,
         host: &str,
         explicit: Option<String>,
@@ -1154,6 +1154,20 @@ impl Ops {
             // Generation is only ever needed to seed a `session.attach`'s
             // recovery baseline (`Self::connect_reverse`'s own doc) — none
             // of this method's six value-op callers attach anything.
+            PeerRoute::Reverse(route) => {
+                self.connect_reverse(&route).map(|(conn, _generation)| conn)
+            }
+        }
+    }
+
+    /// [`connect`](Self::connect) for a route the caller already resolved
+    /// (`qsh cp` resolves like `exec.run` does, with the identity loaded
+    /// before the route, so an uninitialized device fails `CONFIG_ERROR`
+    /// whatever the host name).
+    #[cfg(unix)]
+    pub(crate) fn connect_routed(&self, route: PeerRoute) -> Result<Connected, OpError> {
+        match route {
+            PeerRoute::Forward(target) => self.connect_target(&target, TransportTuning::default()),
             PeerRoute::Reverse(route) => {
                 self.connect_reverse(&route).map(|(conn, _generation)| conn)
             }

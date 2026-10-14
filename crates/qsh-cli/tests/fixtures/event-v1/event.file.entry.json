@@ -1,0 +1,12 @@
+{
+  "blake3": "3d02d7ee50a64156fa1b0fe18cb0fcfafefaab7f3ae9b3380f0988314be41c88",
+  "bytes": 22,
+  "kind": "file",
+  "local_path": "<work>/local.txt",
+  "mode": 0,
+  "overwritten": true,
+  "remote_path": "<work>/remote/hello.txt",
+  "schema": "qsh.event/v1",
+  "status": "copied",
+  "type": "file.entry"
+}

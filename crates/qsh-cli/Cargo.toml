@@ -77,8 +77,15 @@ qsh-testkit.workspace = true
 # `[dependencies]`) does not see it — `qsh-cli`'s production code still
 # never depends on `qsh-transport`.
 qsh-transport.workspace = true
+# Test-only: `tests/cp_e2e.rs` compares a 64 MiB round trip by BLAKE3 and
+# SHA-256 (ADR-0029 decision 10 hashes the stream with BLAKE3; SHA-256 is
+# the independent second opinion).
+blake3.workspace = true
+sha2.workspace = true
 
 # The expect harness runs `qsh` itself under a pty so the termios path
 # really executes (`docs/design/testing.md` L5).
 [target.'cfg(unix)'.dev-dependencies]
 expectrl.workspace = true
+# `tests/cp_e2e.rs`: the process umask and the passwd home directory.
+nix = { workspace = true, features = ["fs", "user"] }

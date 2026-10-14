@@ -239,6 +239,19 @@ impl DataSend {
         }
     }
 
+    /// Abandon this send half: reset the QUIC stream with `code` on the
+    /// forward route; on the reverse `LOCAL_STREAM` carrier, which has no
+    /// per-stream reset, shut the whole conduit down through `kill`
+    /// ([`DataRecv::abort`]'s rule). The peer sees a truncated stream, never
+    /// a clean end.
+    #[cfg(unix)]
+    pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
+        match self {
+            DataSend::Direct(send) => send.reset(code),
+            DataSend::Local(_) => kill.kill(),
+        }
+    }
+
     /// End this stream's framed phase and surrender the raw QUIC send
     /// stream, for the one caller that needs an unframed byte pipe: a
     /// tunnel stream past its handshake (`docs/design/protocol.md` §5, §7,

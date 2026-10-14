@@ -10,6 +10,7 @@ mod attach_ops;
 mod attach_recovery;
 mod cert_e2e;
 mod cert_file_exchange;
+mod cp_e2e;
 mod doctor_fail_on;
 mod dynamic_forward;
 mod exec_e2e;

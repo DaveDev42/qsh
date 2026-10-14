@@ -46,32 +46,32 @@ use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, AclShowOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp,
-    ExecStdin, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError,
-    Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
-    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
-    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
-    read_cert_file_arg, resolve_invite_code_source,
+    AclCheckOp, AclShowOp, CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp,
+    ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
+    InviteCodeSource, OpError, Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp,
+    ServiceUninstallOp, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp,
+    SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp,
+    TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
+    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
     AclCheckReq, AclShowReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode,
-    ExecRunReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
-    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, SetupRole,
-    SetupRunReq, SetupStatus, SetupStepId, TrustAcceptReq, TrustAddCaReq, TrustAddReq,
-    TrustInviteReq, TrustRenameReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq,
-    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    ExecRunReq, FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq,
+    SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq,
+    SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId, TrustAcceptReq,
+    TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
+    TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
-    IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, SetupCmd,
-    TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
+    AclCmd, AttachArgs, CertCmd, Cli, Command, CpArgs, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs,
+    HostCmd, IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs,
+    SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -558,6 +558,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             human::print_acl_show,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
+        Command::Cp(args) => run_cp(cli, &ops, args),
         Command::Attach(AttachArgs {
             session_ref,
             escape_char,
@@ -869,6 +870,110 @@ fn run_exec(cli: &Cli, ops: &Ops, args: &ExecArgs) -> i32 {
         return EXIT_IO_FAILURE;
     }
     remote_exit_code_to_process_exit(output.data.remote_exit_code)
+}
+
+/// `qsh cp` (`docs/CLI.md` §6.21): copy files to or from one qsh host.
+///
+/// A command-line mistake (an scp flag qsh refuses, a bad operand list)
+/// exits `2` before anything is resolved. Everything else is `Ops`'
+/// `file.copy`: exit `0` when every item copied, was created or was
+/// skipped, `255` when any item failed or the copy stopped (Ctrl-C
+/// included), with the per-item results in the envelope's
+/// `error.details`. `--jsonl` streams one `file.entry` event per finished
+/// item, then the envelope.
+fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
+    if let Some(flag) = args.unsupported_flag() {
+        return cp_usage_error(
+            cli,
+            &format!("scp option {flag} is not supported by qsh cp"),
+            true,
+        );
+    }
+    let Some((destination, sources)) = args.operands.split_last() else {
+        return cp_usage_error(cli, "expected at least one source and a destination", false);
+    };
+    let request = FileCopyReq {
+        sources: sources.to_vec(),
+        destination: destination.clone(),
+        recursive: args.recursive,
+        preserve: args.preserve,
+        no_clobber: args.no_clobber,
+    };
+    let mode = if cli.jsonl {
+        render::cp::CpMode::Jsonl
+    } else if cli.json {
+        render::cp::CpMode::Silent
+    } else {
+        render::cp::CpMode::Human {
+            progress: io::stderr().is_terminal(),
+            quiet: cli.quiet,
+        }
+    };
+    let cancel = CancelToken::new();
+    arm_cancel_on_interrupt(&cancel);
+    let observer = std::sync::Arc::new(render::cp::CpObserver::new(mode));
+    let mut data = match ops.file_copy(request, observer, &cancel) {
+        Ok(data) => data,
+        Err(err) if err.usage => return cp_usage_error(cli, &err.error.message, false),
+        Err(err) => return report_error(cli, FileCopyOp::COMMAND, &err.error),
+    };
+    if cli.jsonl {
+        // The items were streamed as `file.entry` events.
+        data.entries.clear();
+        data.entries_truncated = false;
+    }
+    if cli.wants_json() {
+        match serde_json::to_value(&data) {
+            Ok(value) => emit(Envelope::success(FileCopyOp::COMMAND, value).print()),
+            Err(err) => {
+                stderr_note!("qsh: failed to encode result: {err}");
+                EXIT_IO_FAILURE
+            }
+        }
+    } else if cli.quiet {
+        0
+    } else {
+        emit(human::print_file_copy(&data))
+    }
+}
+
+/// Exit `2` for a `qsh cp` command line that cannot start a copy. A refused
+/// scp flag (`scp_flag`) is a command-line refusal like clap's own: one
+/// stderr line, nothing on stdout in any mode. Every other operand error in
+/// a machine mode answers with an `INVALID_ARGUMENT` envelope.
+fn cp_usage_error(cli: &Cli, message: &str, scp_flag: bool) -> i32 {
+    if scp_flag {
+        stderr_note!("qsh: {message}");
+        return EXIT_USAGE;
+    }
+    let err = OpError::new(ErrorCode::InvalidArgument, message);
+    if cli.wants_json() {
+        if let Err(io_err) = Envelope::failure(FileCopyOp::COMMAND, &err).print() {
+            stderr_note!("qsh: failed to write output: {io_err}");
+        }
+    } else if let Err(io_err) = human::print_error(&err) {
+        stderr_note!("qsh: failed to write output: {io_err}");
+    }
+    EXIT_USAGE
+}
+
+/// Cancel `cancel` on the first SIGINT, from a helper thread with its own
+/// tiny runtime (the copy itself runs on `Ops`' dial runtime).
+fn arm_cancel_on_interrupt(cancel: &CancelToken) {
+    let cancel = cancel.clone();
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel.cancel();
+            }
+        });
+    });
 }
 
 /// `docs/CLI.md` §4: remote `0..=254` verbatim, remote `255` → `254`.
@@ -2216,6 +2321,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,
         Command::Acl(AclCmd::Show(_)) => AclShowOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
+        Command::Cp(_) => FileCopyOp::COMMAND,
         Command::Attach(_) => SessionAttachOp::COMMAND,
         Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,
         Command::Session(SessionCmd::Get { .. }) => SessionGetOp::COMMAND,

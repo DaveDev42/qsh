@@ -252,6 +252,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-exec.1",
     },
     OpFace {
+        op: "file.copy",
+        marker: "FileCopyOp",
+        renderer: "print_file_copy",
+        cli_spelling: "qsh cp",
+        man_file: "qsh-cp.1",
+    },
+    OpFace {
         op: "host.get",
         marker: "HostGetOp",
         renderer: "print_host",

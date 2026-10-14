@@ -1832,6 +1832,7 @@ name = "qsh-cli"
 version = "0.4.3"
 dependencies = [
  "base64",
+ "blake3",
  "clap",
  "expectrl",
  "jsonschema",
@@ -1842,6 +1843,7 @@ dependencies = [
  "qsh-transport",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tikv-jemallocator",
  "tokio",

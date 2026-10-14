@@ -845,3 +845,57 @@ fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
         assert_eq!(lines[0]["command"], "service.install", "{label}");
     }
 }
+
+/// `qsh cp` (ADR-0029 decision 18, `docs/CLI.md` §6.21): at high verbosity
+/// `--json` is one envelope line, and `--jsonl` is `qsh.event/v1`
+/// `file.entry` lines followed by the envelope. No line is anything else,
+/// and nothing of the file's contents reaches stdout or stderr.
+#[cfg(unix)]
+#[test]
+fn cp_keeps_stdout_pure_json_at_every_verbosity() {
+    const CANARY: &str = "cp-purity-canary-payload";
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    host.trust_add_with_role(common::CLIENT_ALIAS, None, &client.fingerprint(), "full");
+    let serve = ServeGuard::start(&host);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host.fingerprint());
+    let work = tempfile::tempdir().expect("work dir");
+    let src = work.path().join("src.txt");
+    std::fs::write(&src, CANARY).expect("write source");
+    let src = src.to_str().expect("utf-8 path");
+
+    for (label, mode, verbosity, lines_expected) in [
+        ("--jsonl -vv", "--jsonl", "-vv", 2),
+        ("--json -vvv", "--json", "-vvv", 1),
+    ] {
+        let dst = format!(
+            "{HOST_ALIAS}:{}",
+            work.path()
+                .join(format!("out{lines_expected}.txt"))
+                .display()
+        );
+        let output = client.qsh(&["cp", verbosity, mode, src, &dst]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let text = std::str::from_utf8(&output.stdout).expect("stdout must be utf-8");
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|err| panic!("{label}: not a JSON line: {err}: {line:?}"))
+            })
+            .collect();
+        assert_eq!(lines.len(), lines_expected, "{label}: {text}");
+        let (envelope, events) = lines.split_last().expect("at least the envelope");
+        assert_eq!(envelope["schema"], "qsh.cli/v1", "{label}");
+        assert_eq!(envelope["command"], "file.copy", "{label}");
+        assert_eq!(envelope["ok"], true, "{label}");
+        for event in events {
+            assert_eq!(event["schema"], "qsh.event/v1", "{label}");
+            assert_eq!(event["type"], "file.entry", "{label}");
+        }
+        assert!(
+            !text.contains(CANARY) && !String::from_utf8_lossy(&output.stderr).contains(CANARY),
+            "{label}: file contents must never be printed"
+        );
+    }
+}

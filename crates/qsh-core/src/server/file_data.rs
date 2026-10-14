@@ -39,7 +39,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 
 use qsh_proto::wire::{FILE_CHUNK_MAX, FileEnd, FileFrame, file_frame};
 use qsh_transport::{FramedRecv, FramedSend, FramedStream, StreamError};
@@ -47,15 +47,11 @@ use tokio::sync::mpsc;
 
 use super::file_host::file_io_error;
 use super::*;
-use crate::file::host::{self, FsKind, StatInfo, WriteGate};
+use crate::file::host::{self, WriteGate};
+use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, TempGuard, Written, write_loop};
 use crate::quota::FilePermit;
 use crate::tunnel::splice::{RESET_CODE_TUNNEL_ABORT, SEND_DEPTH_CAP_BYTES};
 use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch, StreamTrack};
-
-/// Chunks queued between the stream and the disk. Small on purpose: a disk
-/// that stops taking chunks must back up into the stream's receive window
-/// quickly (where the stall ledger can see it), not into memory.
-const DISK_QUEUE_CHUNKS: usize = 4;
 
 /// How long the host waits, after `end`, for the requester to finish its send
 /// half. A requester that sends `end` and then neither finishes nor sends
@@ -220,82 +216,6 @@ async fn serve_read(
 // file.write
 // ---------------------------------------------------------------------------
 
-/// Removes the temp file when it goes out of scope still armed, so every way
-/// out of a write (an early return, a panic, the task being dropped) leaves
-/// no temp file behind. The removal is one `unlinkat` through the directory
-/// fd the temp file was created through.
-struct TempGuard {
-    dir: Arc<File>,
-    name: Option<OsString>,
-}
-
-impl TempGuard {
-    fn new(dir: Arc<File>, name: OsString) -> Self {
-        Self {
-            dir,
-            name: Some(name),
-        }
-    }
-
-    /// Remove the temp file now (idempotent).
-    fn clean(&mut self) {
-        if let Some(name) = self.name.take() {
-            let _ = host::unlink_at(&self.dir, &name);
-        }
-    }
-
-    /// The temp file is gone (renamed into place): nothing to remove.
-    fn disarm(&mut self) {
-        self.name = None;
-    }
-}
-
-impl Drop for TempGuard {
-    fn drop(&mut self) {
-        self.clean();
-    }
-}
-
-/// What the blocking writer reports once its channel closes.
-struct Written {
-    file: File,
-    bytes: u64,
-    hash: blake3::Hash,
-    error: Option<io::Error>,
-}
-
-fn write_loop(
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    mut file: File,
-    gate: Option<Arc<dyn WriteGate>>,
-) -> Written {
-    let mut hasher = blake3::Hasher::new();
-    let mut bytes = 0u64;
-    while let Some(chunk) = rx.blocking_recv() {
-        if let Some(gate) = &gate {
-            gate.before_write(bytes);
-        }
-        if let Err(error) = file.write_all(&chunk) {
-            // Returning drops the receiver: the pump's next hand-off fails
-            // and it stops reading.
-            return Written {
-                file,
-                bytes,
-                hash: hasher.finalize(),
-                error: Some(error),
-            };
-        }
-        hasher.update(&chunk);
-        bytes += chunk.len() as u64;
-    }
-    Written {
-        file,
-        bytes,
-        hash: hasher.finalize(),
-        error: None,
-    }
-}
-
 /// Why the receive loop of a write ended without a verified-able `end`.
 enum UploadStop {
     /// The requester broke the stream contract (an over-cap chunk, a frame
@@ -381,44 +301,26 @@ fn mismatch() -> wire::Error {
     wire::Error::new(ErrorCode::InvalidArgument, "size or hash mismatch", false)
 }
 
-/// What a finished commit tells the caller.
-struct Committed {
-    overwritten: bool,
-    /// The temp name no longer exists (it was renamed into place, or its
-    /// extra link was removed).
-    temp_gone: bool,
-}
-
-/// The blocking tail of a write: make the data durable, set the final
-/// attributes, put the file in place, make the directory entry durable
-/// (decision 7).
-fn commit(dir: &File, temp: &OsString, written: &File, job: &WriteJob) -> io::Result<Committed> {
-    written.sync_all()?;
-    host::apply_final_attrs(written, job.mode, job.preserve, job.mtime)?;
-    let committed = if job.overwrite {
-        let overwritten = matches!(
-            host::stat_at(dir, &job.name)?,
-            Some(StatInfo {
-                kind: FsKind::Regular,
-                ..
-            })
-        );
-        host::replace_at(dir, temp, &job.name)?;
-        Committed {
-            overwritten,
-            temp_gone: true,
-        }
-    } else {
-        // `linkat` fails with `EEXIST` when the name appeared since the
-        // control request checked: an existing file is never replaced.
-        host::link_new_at(dir, temp, &job.name)?;
-        Committed {
-            overwritten: false,
-            temp_gone: host::unlink_at(dir, temp).is_ok(),
-        }
-    };
-    dir.sync_all()?;
-    Ok(committed)
+/// The blocking tail of a write (`xfer::commit_temp`) with this job's
+/// attributes.
+fn commit(
+    dir: &File,
+    temp: &OsString,
+    written: &File,
+    job: &WriteJob,
+) -> io::Result<xfer::Committed> {
+    xfer::commit_temp(
+        dir,
+        temp,
+        written,
+        &xfer::Placement {
+            name: &job.name,
+            mode: job.mode,
+            overwrite: job.overwrite,
+            preserve: job.preserve,
+            mtime: job.mtime,
+        },
+    )
 }
 
 async fn serve_write(
@@ -533,7 +435,7 @@ async fn serve_write(
         return finish_with(send, failure_frame(&mismatch())).await;
     }
 
-    let temp_name = guard.name.clone().expect("armed until here");
+    let temp_name = guard.name().expect("armed until here");
     let committed = {
         let dir = Arc::clone(&dir);
         tokio::task::spawn_blocking(move || commit(&dir, &temp_name, &written.file, &job)).await

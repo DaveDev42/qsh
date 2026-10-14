@@ -140,7 +140,7 @@ impl Ops {
     /// frozen legacy text (`error.HOST_NOT_FOUND.json`), rather than
     /// [`Ops::resolve_host_route`]'s newer, longer wording every other
     /// caller of that routing gets.
-    fn resolve_exec_route(
+    pub(crate) fn resolve_exec_route(
         &self,
         host: &str,
         identity: LoadedIdentity,

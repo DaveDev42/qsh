@@ -1,0 +1,44 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-cp 1  "cp 0.4.3" 
+.SH NAME
+qsh\-cp \- Copy files between this machine and one qsh host, scp\-style (`docs/CLI.md` §6.21)
+.SH SYNOPSIS
+\fBqsh cp\fR [OPTIONS] SRC... DST
+.SH DESCRIPTION
+Copy files between this machine and one qsh host, scp\-style (`docs/CLI.md` §6.21).
+.PP
+`qsh cp SRC... DST`: either every SRC is local and DST is `[user@]host:path` (put), or every SRC is `[user@]host:path` of one host and DST is local (get). A `:` before the first `/` marks the remote operand; `host:` is the account\*(Aqs home directory. Only qsh hosts are spoken to: scp\*(Aqs transport options are refused (exit 2).
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-r\fR
+Copy directories recursively
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-p\fR
+Carry the file mode and modification time over
+.TP
+\fB\-\-no\-clobber\fR
+Skip a destination file that already exists instead of replacing it
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fISRC... DST\fR>
+One or more sources, then the destination
+.SH VERSION
+v0.4.3

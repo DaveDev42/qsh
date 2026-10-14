@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.29 (`file.v1`을 unix 빌드가 광고함(`LOCAL_CAPABILITIES`의 마지막 항목, `qsh capabilities`와 협상 결과에 나타나고 Windows 빌드는 광고하지 않음), `capabilities.json` golden에 `file.v1`이 더해짐, host의 `FILE_DATA` 데이터 평면(원자적 교체, BLAKE3와 크기 검증, 쓰기 여유 공간 reserve, 정체 장부), 에러 의미는 그대로, ADR-0029 결정 1·7·9·10·11·13·15·16·23, §6.10; v0.28 = 항상-deny 게이트에서 `file.read`·`file.write`가 빠지고 `forward.socks`만 남음, 원격 파일 op의 host 처리(상태 경로 거절, 열린 핸들 재검증, 균일한 `PERMISSION_DENIED`), `[serve].max_file_transfers_per_principal`·`max_file_transfers`와 quota 범주 `quota_files_principal`·`quota_files_host`, `acl check --path`의 `decision`이 `"allow"`가 될 수 있음, ADR-0029 결정 3·5·6·8·12, §2.5·§6.11·§6.12·§6.15·§6.19; v0.27 = `acl.toml` 행의 `paths`(파일 action의 접근 범위)와 `acl check --path`, `AclCheckReq.path`·`AclCheckData.path`·`AclCheckData.canonical_path`, `AclMatchingRule.paths`·`AclMatchingRule.file_paths_missing`, `acl show`의 `paths`와 파일 action의 `effective_actions` 의미, doctor `acl_file_paths_missing`(코드 집합이 26개가 됨), ADR-0029 결정 4·19·23, §6.15·§6.17·§6.19; v0.26 = trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, doctor `trust_pin_role_unset`과 role에 따라 바뀐 `acl_*` 조건, `setup --peer-role`과 role 기본값, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
+**상태:** Draft v0.30 (`qsh cp`(`file.copy`)가 생김: 합성 local operation, scp 호환 operand 문법(put과 get, 첫 `/` 앞의 `:`), `-p`·`-q`·`--no-clobber`와 거부하는 scp 플래그(exit 2), forward·역방향 route의 단일 파일 왕복, `--json`의 `FileCopyData`와 `--jsonl`의 `file.entry` event, 부분 실패의 `error.details`, 새 §6.21, §2.4·§2.5·§6.10·§10, ADR-0029 결정 1·2·3·4·7·10·11·15·16·17·18·21·22; v0.29 = `file.v1`을 unix 빌드가 광고함(`LOCAL_CAPABILITIES`의 마지막 항목, `qsh capabilities`와 협상 결과에 나타나고 Windows 빌드는 광고하지 않음), `capabilities.json` golden에 `file.v1`이 더해짐, host의 `FILE_DATA` 데이터 평면(원자적 교체, BLAKE3와 크기 검증, 쓰기 여유 공간 reserve, 정체 장부), 에러 의미는 그대로, ADR-0029 결정 1·7·9·10·11·13·15·16·23, §6.10; v0.28 = 항상-deny 게이트에서 `file.read`·`file.write`가 빠지고 `forward.socks`만 남음, 원격 파일 op의 host 처리(상태 경로 거절, 열린 핸들 재검증, 균일한 `PERMISSION_DENIED`), `[serve].max_file_transfers_per_principal`·`max_file_transfers`와 quota 범주 `quota_files_principal`·`quota_files_host`, `acl check --path`의 `decision`이 `"allow"`가 될 수 있음, ADR-0029 결정 3·5·6·8·12, §2.5·§6.11·§6.12·§6.15·§6.19; v0.27 = `acl.toml` 행의 `paths`(파일 action의 접근 범위)와 `acl check --path`, `AclCheckReq.path`·`AclCheckData.path`·`AclCheckData.canonical_path`, `AclMatchingRule.paths`·`AclMatchingRule.file_paths_missing`, `acl show`의 `paths`와 파일 action의 `effective_actions` 의미, doctor `acl_file_paths_missing`(코드 집합이 26개가 됨), ADR-0029 결정 4·19·23, §6.15·§6.17·§6.19; v0.26 = trust pin의 optional `role` 키와 `TrustPeer.role`, role 표, role을 쓰는 명령(`trust add`·`pair invite`·`pair accept`의 `--role`, `trust set-role`)과 기본값 표, 초대 레코드의 role, 페어링 고지의 role 절, `trust list`의 role 열, audit의 optional `role` 키, `TrustInviteData.assigned_role`, 평가 단계 ⓡ과 `acl.toml` 세 상태, 없는 `acl.toml`의 시작 진단이 한 줄이 됨, `acl check`의 `role`·`granted_by`·`policy.state`와 `acl show`의 `role`·`role_actions`, `effective_actions`가 role ∪ 행이 됨, doctor `trust_pin_role_unset`과 role에 따라 바뀐 `acl_*` 조건, `setup --peer-role`과 role 기본값, ADR-0045, §6.11·§6.12·§6.13·§6.15·§6.17·§6.19·§6.20; v0.25 = 역방향 등록의 경로 감시가 터널 splice 바이트도 생존 신호로 센다, ADR-0041 결정 8, §6.13·§6.12; v0.24 = `qsh::reverse` `lost` 줄에 `tick_gap_ms`, `cause` 분류 보정, 재dial backoff, ADR-0042, §6.13; v0.23 = 역방향 등록의 경로 감시 예산 분리와 `[recovery]`의 `reverse_min_dead_after_ms`·`reverse_strikes`, ADR-0041, §6.12·§6.13; v0.22 = `lost` 줄의 `srtt_ms`·`silence_ms`, `[transport].keep_alive_ms`(ADR-0021 결정 1), `[recovery]` 감시 키(ADR-0021 결정 4), §6.4·§6.9·§6.12·§6.13; v0.21 = doctor의 UDP probe가 QUIC version negotiation 패킷이 됨(§6.17), 주소 해석의 시스템 resolver 한계(§6.1, ADR-0039); v0.20 = `doctor --fail-on`(ADR-0027, §4·§6.17), `stateless_reset.key`(ADR-0036, §6.12·§6.13), `setup client`의 `complete`(ADR-0038, §6.20); v0.19 = doctor `service_restart_drops_sessions`와 `qsh::lifecycle`의 `drained` 값(§6.11·§6.12·§6.13·§6.17); v0.18 = `tunnel open --supervise`·`--accept-hold`(§6.9, §6.14)와 `qsh::lifecycle` 수명 줄; v0.17 = `setup.run`(`qsh setup`, §6.20, ADR-0024); v0.16 = doctor `acl_forward_socks_ineffective`와 `cause`의 `idle_timeout`(§6.13, §6.17); v0.15 = `qsh init --import-ssh-key`와 `trust ssh-preview`(ADR-0026, §6.11); v0.14 = `acl.show`(`qsh acl show`, §6.19, ADR-0025); v0.13 = `qsh exec`가 §6.1 라우팅 우선순위를 공유함(§6.1·§6.8·§6.13); v0.12 = `CERT_PEM_MAX` 상한과 `trust add-ca` 라벨 검증(§6.11); v0.11 = 사람용 표면 재정렬(ADR-0012~0014, ADR-0019/0020): `serve --to`·`pair --as`·`trust add-ca`·`service`(§6.18)·`-D`, §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10; v0.10 = 역방향 위 resume의 `registration_wait_ms`(§6.4); v0.9 = 대화형 attach의 역방향 경로(§6.13); v0.8 = `Host`의 `state`/`device_id`와 역방향 등록 ACL 매핑(§2.5·§5), §6.13 신설; v0.7 = `session.attach`의 resume credential 필수(§6.3·§6.4); v0.6 = `session read --follow` 출력 형태; v0.5 = 계약 확정; v0.4 = 구현과 동기화)
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -73,6 +73,7 @@ session.resize
 session.close
 session.attach
 exec.run
+file.copy
 tunnel.open
 tunnel.dynamic
 tunnel.close
@@ -106,9 +107,9 @@ version.get
 
 dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
-`file.read`·`file.write`·`file.list`·`file.mkdir`(ADR-0029)는 원격 peer가 요청하는 wire operation이지만 아직 CLI subcommand도 `qsh.cli/v1` envelope도 없다. 그래서 위 코드 펜스(CLI에서 부를 수 있는 operation 목록)에는 넣지 않았고 §2.5 표에서만 ACL action에 묶는다. 호스트는 모양 검사(`INVALID_ARGUMENT`, 비 unix 호스트는 `UNSUPPORTED`)를 ACL 앞에서 하고, 경로 문자열 그대로를 audit `resource`로 쓴다.
+`file.read`·`file.write`·`file.list`·`file.mkdir`(ADR-0029)는 원격 peer가 요청하는 wire operation이지만 자기 CLI subcommand도 `qsh.cli/v1` envelope도 없다. 그래서 위 코드 펜스(CLI에서 부를 수 있는 operation 목록)에는 넣지 않았고 §2.5 표에서만 ACL action에 묶는다. 이 넷을 엮어 부르는 것이 `file.copy`(`qsh cp`, §6.21)이고, 이쪽은 위 펜스에 있다. 호스트는 모양 검사(`INVALID_ARGUMENT`, 비 unix 호스트는 `UNSUPPORTED`)를 ACL 앞에서 하고, 경로 문자열 그대로를 audit `resource`로 쓴다.
 
-`acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다. `setup.run`(§6.20, M12)도 같은 종류의 로컬 op이다. 기존 op을 순서대로 부르는 오케스트레이터이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다.
+`acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다. `setup.run`(§6.20, M12)도 같은 종류의 로컬 op이다. 기존 op을 순서대로 부르는 오케스트레이터이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다. `file.copy`(§6.21)도 같은 지위다. client가 `file.read`와 `file.write`를 엮는 합성 op이라 wire 메시지도 ACL 행도 없다.
 
 `qsh serve`, `qsh listen`, `qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
@@ -131,9 +132,9 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
 | `file.read`, `file.list` | `file.read` |
 | `file.write`, `file.mkdir` | `file.write` |
-| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status`, `setup.run` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status`, `setup.run`, `file.copy` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
-`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 파일 op은 경로마다 판정한다(ADR-0029 결정 8). 원격 파일 op 넷(`file.read`·`file.list` → `file.read`, `file.write`·`file.mkdir` → `file.write`)은 role이 그 action을 주거나 `paths`가 있는 행이 경로를 덮을 때 허용된다. 항상-deny 게이트에는 `forward.socks`만 남았다(ADR-0029 결정 3·8). 허용된 뒤에도 qsh 자신의 config·state·runtime 경로, audit 파일과 그 회전 슬롯, 키 파일에는 role과 행에 무관하게 닿지 못한다(ADR-0029 결정 5, 끄는 설정 키 없음). 이 거절과 `paths` 밖·`paths` 없음·정규화 실패·열린 핸들 재검증 불일치는 모두 같은 `PERMISSION_DENIED`와 같은 문면이다. `file.v1`은 아직 광고하지 않으므로 정상 client는 이 op을 보내지 않는다(데이터 평면은 뒤 단계).
+`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 파일 op은 경로마다 판정한다(ADR-0029 결정 8). 원격 파일 op 넷(`file.read`·`file.list` → `file.read`, `file.write`·`file.mkdir` → `file.write`)은 role이 그 action을 주거나 `paths`가 있는 행이 경로를 덮을 때 허용된다. 항상-deny 게이트에는 `forward.socks`만 남았다(ADR-0029 결정 3·8). 허용된 뒤에도 qsh 자신의 config·state·runtime 경로, audit 파일과 그 회전 슬롯, 키 파일에는 role과 행에 무관하게 닿지 못한다(ADR-0029 결정 5, 끄는 설정 키 없음). 이 거절과 `paths` 밖·`paths` 없음·정규화 실패·열린 핸들 재검증 불일치는 모두 같은 `PERMISSION_DENIED`와 같은 문면이다. 이 op들을 보내는 정상 client는 `qsh cp`(§6.21)이고, 협상된 capability 집합에 `file.v1`이 없는 peer에게는 보내지 않는다.
 
 위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `trust.set_role`도 같은 부류다: 원격 peer가 요청할 수 없는 이 머신의 local op이지만 실행되고 나면 그 pin이 받는 action이 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
 
@@ -640,7 +641,7 @@ qsh version --json
 
 host 없이 호출한 결과에는 `host` field가 없다 — omitted, `null`이 아니다.
 
-`file.v1`(ADR-0029)은 host가 원격 파일 op와 `FILE_DATA` 스트림을 처리한다는 뜻이다. unix 빌드만 광고하고(Windows host는 M20 전까지 네 op에 `UNSUPPORTED`로 답한다), 그래서 `capabilities.json` golden은 unix 빌드의 집합을 기록한다. 광고하지 않는 peer에게는 파일 op를 보내지 않는다.
+`file.v1`(ADR-0029)은 host가 원격 파일 op와 `FILE_DATA` 스트림을 처리한다는 뜻이다. unix 빌드만 광고하고(Windows host는 M20 전까지 네 op에 `UNSUPPORTED`로 답한다), 그래서 `capabilities.json` golden은 unix 빌드의 집합을 기록한다. 광고하지 않는 peer에게 `qsh cp`(§6.21)는 요청을 보내기 전에 `UNSUPPORTED`로 끝난다.
 
 `version`의 `data.build.commit`은 이 binary가 컴파일될 때 `QSH_BUILD_COMMIT` 환경변수가 있었을 때만 채워지는 additive optional field다(`docs/ROADMAP.md` M7 감사 개정 ③): CI는 commit sha를 주입하고, 그런 변수 없이 만든 local build는 `build` field 자체가 통째로 생략된다 — 조작된 값이나 빈 문자열이 아니라 부재다.
 
@@ -1771,6 +1772,125 @@ qsh setup listener --peer <name> --peer-cert <path|-> [--service] [--peer-role <
 
 **exit.** 부른 op이 하나도 실패하지 않았으면 `0`이고, `pending` 단계가 남아 있어도 `0`이며 `complete: false`가 그 사실을 담는다. 부른 op이 실패하면 `255`와 오류 envelope이고 `code`와 `retryable`은 그 op의 값 그대로다. `error.details.step`이 실패한 단계 id를, `error.details.steps`가 그때까지의 단계 id와 상태만 담는다(`result` 없음). service op의 `UNSUPPORTED`는 오류가 아니라 `service` 단계 `skipped`다. 이미 끝난 단계는 되돌리지 않고 같은 명령을 다시 부르면 이어서 진행한다. 쓰는 단계가 모두 `already`나 `skipped`인 재실행은 어떤 파일도 바꾸지 않는다. 예외는 상환 전 `host` 재실행으로, 새 초대를 발급한다. clap 인자 사용 오류는 `2`다.
 
+### 6.21 `qsh cp`
+
+```bash
+qsh cp [-p] [-q] [--no-clobber] [--json | --jsonl] SRC... DST
+qsh cp ./build.tar.zst personal-mac:/srv/builds/
+qsh cp dave@personal-mac:out/app.log ./logs/
+```
+
+scp와 같은 인자 문법으로 이 머신과 qsh host 하나 사이에서 파일을 복사한다(ADR-0029). `qsh cp`는 qsh host하고만 말한다. scp 프로토콜이나 sftp와는 호환되지 않고 인자 문법이 같을 뿐이다. envelope의 `command`는 `file.copy`다. 이 operation은 client가 `file.read`와 `file.write`를 엮는 합성 local operation이라서 wire 메시지도 ACL 행도 없고 원격 peer가 요청할 수 없다(§2.4, §2.5의 "인가 불요" 행).
+
+현재 범위는 파일 하나씩의 복사다. `-r`(디렉터리 재귀)은 예약된 플래그이고 `UNSUPPORTED`를 돌려준다.
+
+**operand.** 첫 `/`보다 앞에 `:`가 있고 그 앞의 host 부분이 비어 있지 않으면 `[user@]host:path`인 원격 operand다. IPv6는 `[::1]:path`처럼 대괄호로 싼다. `./a:b`는 로컬 파일이고 `host:`는 원격 계정의 home 디렉터리다. 원격 경로는 절대 경로, home 기준 상대 경로(`dir/x`), `~`, `~/x`를 받는다. `~name`은 `INVALID_ARGUMENT`다. home은 host가 serve 계정의 passwd 항목에서 구하고 환경 변수 `HOME`은 쓰지 않는다. 경로 끝의 `/`는 "디렉터리여야 한다"는 단언이다. `-`(stdin/stdout)는 받지 않는다.
+
+한 호출의 구성은 둘 중 하나다. SRC가 모두 로컬이고 DST가 원격이거나(put), SRC가 모두 같은 host의 원격이고 DST가 로컬이다(get). 원격↔원격, 로컬과 원격이 섞인 SRC, host가 둘 이상인 호출은 아무것도 하기 전에 `INVALID_ARGUMENT`이고 exit `2`다. 결과 위치는 scp와 같다. SRC가 둘 이상이면 DST는 이미 있는 디렉터리여야 하고, SRC가 하나이고 DST가 이미 있는 디렉터리면 그 안에 SRC의 마지막 성분 이름으로 놓는다. 그렇지 않으면 DST가 새 이름이다.
+
+host 이름은 `qsh exec`와 같은 규칙으로 해석한다(§6.1, live reverse 등록이 우선). `user@`는 `qsh [user@]host`와 같은 뜻의 단언이다. host는 ACL 판정 뒤에 serve 계정의 login name과 대조해 다르면 `UNSUPPORTED`로 답한다.
+
+**플래그.**
+
+| 플래그 | 뜻 |
+|---|---|
+| `-p` | 파일 mode와 수정 시각을 옮긴다. 접근 시각과 소유자는 옮기지 않는다. 없으면 mode는 `원본 mode & ~umask`, 수정 시각은 쓴 시각이다 |
+| `-q` | 진행 표시와 human 요약 줄을 끈다(전역 `--quiet`) |
+| `--no-clobber` | 이미 있는 대상 파일을 덮지 않고 그 항목을 `skipped`(reason `exists`)로 건너뛴다 |
+| `-r` | 디렉터리 재귀 복사. 아직 `UNSUPPORTED` |
+
+그 밖의 scp 플래그(`-P`, `-i`, `-o`, `-F`, `-J`, `-l`, `-c`, `-C`, `-S`, `-B`, `-3`, `-4`, `-6`, `-T`, `-O`, `-s` 등)는 무시하지 않고 거부한다. 복사를 시작하기 전에 stderr에 "scp option -P is not supported by qsh cp" 뜻의 한 줄을 내고 exit `2`로 끝난다. stdout에는 어떤 출력 모드에서도 아무것도 쓰지 않는다.
+
+**권한 범위.** 파일 action을 주는 길은 pin의 role과 `acl.toml` 행(`paths`)이고 둘은 합집합이다(§6.11, §6.15, ADR-0045). `full` role은 serve 계정이 접근할 수 있는 경로 전부에서 qsh 자신의 상태 경로(ADR-0029 결정 5)를 뺀 범위에 `file.read`와 `file.write`를 준다. `~/.bashrc`, `~/.ssh/authorized_keys`, systemd user unit 디렉터리처럼 나중에 실행되는 파일에도 쓸 수 있으므로 `file.write`는 사실상 `exec.run`과 같은 힘이다. `full`은 이미 `exec.run`을 주므로 이 사실은 `full`의 힘에 아무것도 더하지 않는다. 쓰는 범위를 좁히려면 `full`을 쓰지 않고 role `none`에 `paths`가 있는 행을 얹는다. 행의 `paths`가 같은 파일을 덮으면 같은 힘이 되는 점은 같다.
+
+**capability와 route.** 협상된 capability 집합에 `file.v1`이 없으면 요청을 보내기 전에 `UNSUPPORTED`다. 역방향 route(live reverse 등록)에서는 control 요청이 `LOCAL_CONTROL`로, 데이터가 `LOCAL_STREAM`으로 `qsh listen` 데몬을 거쳐 target에 가고, capability는 데몬이 relay한 target의 집합으로 확인한다. 이때의 `UNSUPPORTED` 문면은 원인 둘, 곧 target이 `file.v1` 이전 버전이거나 로컬 데몬이 업그레이드 전부터 떠 있었다는 점을 짚는다. 인가와 상태 경로 판정은 어느 route에서나 파일을 쥔 쪽(`qsh serve`, `qsh serve --to`)이 한다.
+
+**전송.** 파일마다 `FILE_DATA` 스트림이 하나이고 최대 2개(`FILE_COPY_PARALLEL`)가 동시에 돈다. 한 연결이 PTY 등 다른 스트림과 같이 쓰이는 동안 대역 0(`PRIORITY_TUNNEL`)과 송신 깊이 상한, 정체 장부(ADR-0037)가 PTY echo를 보호한다. get의 로컬 쓰기는 DST 디렉터리 fd 기준의 `*at` 호출로 한다. 임시 파일 `.<name>.qsh-<16hex>.part`에 쓰고 BLAKE3와 크기를 검증한 뒤 `fsync`하고, `renameat`(`--no-clobber`면 `linkat`과 `unlinkat`)으로 제자리에 놓은 다음 디렉터리를 `fsync`한다. 실패하거나 중단된 전송은 임시 파일까지 지운다. DST 디렉터리 아래에 이미 있는 symlink는 따라가지 않고 그 항목을 `INVALID_ARGUMENT`로 실패시킨다(DST로 직접 준 경로는 사용자가 고른 것이므로 따라간다). 재개는 없고, 연결이 죽으면 진행 중인 파일은 `CONNECTION_FAILED`로 끝난다. 원격이 주는 이름과 크기는 믿지 않는다(ADR-0029 결정 22).
+
+Ctrl-C는 진행 중인 스트림을 reset하고 임시 파일을 지운 뒤 남은 항목을 시도하지 않고 `CANCELED`와 exit `255`로 끝난다.
+
+**출력.** human 모드는 stderr가 TTY일 때 파일별 진행 표시를 stderr에 그리고(`-q`로 끈다), 끝나면 stdout에 요약 한 줄(파일 수, 바이트, 시간, 건너뜀과 실패 수)을 쓴다. machine 모드는 진행 표시를 내지 않는다. `--json`은 envelope 하나다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "file.copy",
+  "ok": true,
+  "data": {
+    "host": "personal-mac",
+    "direction": "get",
+    "files": 1,
+    "directories": 0,
+    "bytes": 104857600,
+    "skipped": 0,
+    "duration_ms": 912,
+    "entries": [
+      {
+        "status": "copied",
+        "kind": "file",
+        "remote_path": "/home/dave/build/app.tar.zst",
+        "local_path": "./out/app.tar.zst",
+        "bytes": 104857600,
+        "blake3": "5f0c…(64 hex)",
+        "mode": 420,
+        "overwritten": false
+      }
+    ],
+    "entries_truncated": false
+  }
+}
+```
+
+`direction`은 `get` 또는 `put`이다. `entries`는 항목 하나당 한 원소이고 `status`는 `copied`, `created`(디렉터리), `skipped`(`reason`: `exists`, `symlink`), `failed`(`code`와 `message`) 중 하나다. 열린 문자열이다. 원소는 처음 `COPY_JSON_ENTRIES_MAX`(1000)개까지만 싣고 넘으면 `entries_truncated`가 `true`다. `remote_path`와 `local_path`는 operand에서 파생한 문자열 그대로이고 host가 해석한 정규 경로가 아니다. `mode`는 10진 정수다. `blake3`는 전송한 바이트의 BLAKE3-256 소문자 hex 64자라서 사용자가 원본과 대조할 수 있다.
+
+`--jsonl`은 항목이 끝나는 대로 `file.entry` event 한 줄(§10)을 stdout에 쓰고, 마지막 줄은 `--json`과 같은 envelope이다(성공이면 `entries`는 빈 배열). event는 `schema`가 `qsh.event/v1`이고 envelope은 `qsh.cli/v1`이라 그 필드로 가른다. event의 `type` 뒤 필드는 `entries[]` 원소와 같다.
+
+**부분 실패.** scp와 같이 한 항목의 실패가 나머지를 멈추지 않는다(SRC가 여럿이면 `-r` 없이도 일어난다). 연결 수준의 실패(`CONNECTION_FAILED`, `CANCELED`, capability `UNSUPPORTED`, 인증 오류)는 남은 항목을 시도하지 않고 멈추고, 시도하지 못한 수를 `not_attempted`로 센다. 끝난 항목은 되돌리지 않는다. 모든 항목이 `copied`, `created`, `skipped`이면 exit `0`이고, 하나라도 `failed`이거나 중간에 멈췄으면 exit `255`이며 envelope은 `ok: false`다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "file.copy",
+  "ok": false,
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "message": "1 of 2 entries failed: no such file or directory",
+    "retryable": false,
+    "details": {
+      "copied": 1,
+      "created": 0,
+      "skipped": 0,
+      "failed": 1,
+      "not_attempted": 0,
+      "failures": [
+        { "side": "local", "path": "./missing.txt", "code": "INVALID_ARGUMENT" }
+      ],
+      "failures_truncated": false
+    }
+  }
+}
+```
+
+`error.code`는 첫 `failed` 항목의 code이고 연결 수준 실패로 멈췄으면 그 code다. `retryable`은 멈춘 이유가 `CONNECTION_FAILED`일 때만 `true`다. `failures`는 처음 `COPY_JSON_FAILURES_MAX`(64)개의 `{side, path, code}`이고 `side`는 이 머신에서 실패했으면 `local`, host가 거절하거나 실패했으면 `remote`다. 파일 하나의 복사가 실패해도 같은 모양이다. 인자 오류는 복사를 시작하기 전에 exit `2`로 끝나고 아무것도 바꾸지 않는다.
+
+**오류 코드.** 새 `ErrorCode`는 없다.
+
+| 상황 | code |
+|---|---|
+| operand 구성 오류, `~name`, `-`, 원본 없음, 정규 파일이 아님, 대상이 디렉터리, symlink 대상, 크기·해시 불일치(`file.write`), 이름 검증 실패, scp 플래그 | `INVALID_ARGUMENT` |
+| ACL deny, 상태 경로 판정, 재검증 불일치, OS의 `EACCES`/`EPERM` | `PERMISSION_DENIED`(균일한 문면) |
+| quota, 여유 공간, `ENOSPC`, 정체 장부의 끊음 | `RESOURCE_EXHAUSTED` |
+| 크기·해시 불일치(`file.read`, client 판정) | `REMOTE_ERROR` |
+| connection 유실 | `CONNECTION_FAILED`(`retryable: true`) |
+| peer에 `file.v1` 없음, `user@` 불일치, `-r` | `UNSUPPORTED` |
+| Ctrl-C | `CANCELED` |
+
+`ENOENT`(원본 없음의 `INVALID_ARGUMENT`)는 ACL과 상태 경로 판정을 모두 통과한 경로에서만 드러난다. 그래서 파일 존재 여부를 오류 차이로 알아낼 수 있는 범위는 그 principal이 닿는 범위 안으로 한정된다.
+
+Windows client의 `qsh cp`는 M19, Windows host의 파일 op는 M20이 한다. 그 전까지 Windows 빌드는 operand 문법 오류를 위 규칙대로 거절하고 나머지는 `UNSUPPORTED`로 답한다.
+
 ## 7. Human interactive mode
 
 다음 명령은 위의 session operation을 조합한 편의 인터페이스다.
@@ -1833,6 +1953,7 @@ QSH operation은 두 종류로 나뉜다.
 ## 10. Compatibility policy
 
 - `qsh.cli/v1`과 `qsh.event/v1`에는 optional field를 추가할 수 있다. `qsh.event/v1`에는 새 event `type`도 추가할 수 있으며, 소비자는 알 수 없는 `type`을 무시해야 한다(§6.4).
+- `file.entry`(`qsh.event/v1`)는 `qsh cp --jsonl`(§6.21)이 항목 하나가 끝날 때마다 쓰는 event다. 세션에 속하지 않으므로 §6.4의 session event 집합에 들지 않고, 필드는 `schema`, `type`, 그리고 `file.copy` `entries[]` 원소의 필드다. session event만 아는 소비자에게는 알 수 없는 `type`이라 무시 대상이다.
 - `reason`·`state`·`error.code`처럼 값 집합이 열린 문자열 field에는 새 값을 추가할 수 있다. 소비자는 알 수 없는 값을 오류 없이 처리해야 한다(`ErrorCode` 미지 코드 pass-through와 같은 원칙, §3.3).
 - Field 삭제, type 변경과 의미 변경은 `/v2`가 필요하다.
 - Deprecated field는 최소 두 minor release 동안 유지한다.

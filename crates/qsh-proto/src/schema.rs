@@ -9,7 +9,7 @@ use schemars::{Schema, schema_for};
 
 use crate::types::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope,
-    DoctorData, DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData,
+    DoctorData, DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData, IdentityExportData,
     IdentityInitData, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData,
     Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
     SessionResizeData, SessionWriteData, SetupRunData, TrustAcceptData, TrustAddCaData,
@@ -31,6 +31,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "cert.issue",
     "doctor.run",
     "exec.run",
+    "file.copy",
     "host.get",
     "host.list",
     "identity.export",
@@ -82,6 +83,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "cert.issue" => schema_for!(CertIssueData),
         "doctor.run" => schema_for!(DoctorData),
         "exec.run" => schema_for!(ExecRunData),
+        "file.copy" => schema_for!(FileCopyData),
         "host.get" => schema_for!(Host),
         "host.list" => schema_for!(HostListData),
         "identity.export" => schema_for!(IdentityExportData),

@@ -722,6 +722,33 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         },
     ];
 
+    // `qsh cp` (ADR-0029, `docs/CLI.md` §6.21). A scp transport flag is a
+    // clap-level refusal (exit 2, nothing on stdout, in both modes). The
+    // runtime rows are unix-only: a Windows client answers every copy that
+    // gets past the operand grammar with `UNSUPPORTED` (ADR-0035 decision 1).
+    cases.push(Case {
+        name: "usage: cp with an scp transport flag",
+        sandbox: &fleet.client,
+        args: &["cp", "-P", "22", "a.txt", "box:/tmp/qsh-cp-never"],
+        outcome: Outcome::Usage,
+    });
+    #[cfg(unix)]
+    cases.push(Case {
+        name: "cp: put of a local file that does not exist",
+        sandbox: &fleet.client,
+        args: &["cp", "/nonexistent/qsh-cp-source", "box:/tmp/qsh-cp-never"],
+        outcome: Outcome::Fails("INVALID_ARGUMENT"),
+    });
+    // The fleet host pins its client with role `none` and its `acl.toml` has
+    // no file row: default-deny, the uniform refusal (ADR-0029 decision 8).
+    #[cfg(unix)]
+    cases.push(Case {
+        name: "cp: get from a host that grants this client no file access",
+        sandbox: &fleet.client,
+        args: &["cp", "box:/tmp/qsh-cp-never", "/tmp/qsh-cp-never-out"],
+        outcome: Outcome::Fails("PERMISSION_DENIED"),
+    });
+
     #[cfg(unix)]
     cases.push(Case {
         name: "host get: duplicate name held live by two reverse daemons at once",
