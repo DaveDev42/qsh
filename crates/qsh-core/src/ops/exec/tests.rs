@@ -72,7 +72,7 @@ fn exec_run_shares_the_connect_runtime_across_calls() {
 /// production body, with only the resolve step swapped for a
 /// synthetic one, its `Resolver`-pattern seam) with two real,
 /// unreachable loopback UDP ports — bind-then-drop, the same
-/// technique `crates/qsh-cli/tests/reverse_unreachable_diagnostic.rs`
+/// technique `crates/qsh-cli/tests/it/reverse_unreachable_diagnostic.rs`
 /// uses — so this is a real `Dialer::dial` attempt against each, not
 /// a canned `DialError`. `with_timeout` keeps each attempt to well
 /// under a second instead of the production 10s default. A mutation
@@ -240,7 +240,7 @@ fn timeout_error_is_retryable_and_carries_the_budget() {
 /// whichever branch happens to need it". A device that never ran `qsh
 /// init` has no identity to build either the forward `PeerTarget` or
 /// the reverse `LocalRoute` with, and the frozen `error.CONFIG_ERROR.json`
-/// fixture (`qsh exec HOST_ALIAS`, `crates/qsh-cli/tests/fixtures.rs`)
+/// fixture (`qsh exec HOST_ALIAS`, `crates/qsh-cli/tests/it/fixtures.rs`)
 /// and `exit_code_matrix.rs`'s "exec: no device identity" row both pin
 /// this same order for a *configured* name; this pins it independently
 /// for one that is not, so a regression that moved identity-loading
@@ -304,7 +304,7 @@ fn exec_host_not_found_keeps_the_frozen_text_for_a_wholly_unconfigured_name() {
 /// not in the trust store" for this exact shape (the host *is* pinned;
 /// see issue #5's reverse-only counterpart,
 /// `exec_run_reaches_a_reverse_only_host_pinned_without_address` in
-/// `crates/qsh-testkit/tests/reverse_exec.rs`).
+/// `crates/qsh-testkit/tests/it/reverse_exec.rs`).
 #[test]
 fn exec_host_not_found_names_a_pinned_host_without_address_truthfully() {
     let (_dir, ops) = temp_ops();
@@ -339,7 +339,7 @@ fn exec_host_not_found_names_a_pinned_host_without_address_truthfully() {
 /// The `user@`-prefix branch, exercised through `exec_run`'s own
 /// `resolve_exec_route` rather than the shared `host::resolve_route`
 /// unit tests (`ops/host/tests.rs`) — this file's module doc in
-/// `qsh-testkit/tests/reverse_exec.rs` used to claim this split was
+/// `qsh-testkit/tests/it/reverse_exec.rs` used to claim this split was
 /// unit tested against `Ops::resolve_exec_route` when no such test
 /// existed. `"dave@phone"` with `phone` pinned must give the same
 /// `user_prefix_not_accepted_host_not_found` wording every other

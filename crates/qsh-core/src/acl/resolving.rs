@@ -15,7 +15,7 @@
 //!
 //! The per-decision `trust.toml` refresh was wired and measured without a
 //! change in meaning first (PLAN M15 Step 3,
-//! `crates/qsh-testkit/tests/role_resolution_cost.rs`); this is the step
+//! `crates/qsh-testkit/tests/it/role_resolution_cost.rs`); this is the step
 //! that makes the resolved role count.
 
 use std::sync::Arc;

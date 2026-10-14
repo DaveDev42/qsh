@@ -1,4 +1,4 @@
-//! The single source of the JSON Schemas `crates/qsh-cli/tests/fixtures.rs`
+//! The single source of the JSON Schemas `crates/qsh-cli/tests/it/fixtures.rs`
 //! validates every golden fixture against and `qsh schema --json` serves
 //! (`docs/design/testing.md` L6, `docs/CLI.md` §10, §6.10). One function
 //! each side calls, so the fixture validator and the CLI surface cannot

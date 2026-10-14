@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """summarize.py — judge a qsh soak-run CSV against the thresholds in docs/campaigns/m8-soak.md §3.
 
-`crates/qsh-cli/tests/soak.rs` writes one CSV row per sample (the
+`crates/qsh-cli/tests/it/soak.rs` writes one CSV row per sample (the
 `SOAK_CSV_HEADER` columns, pinned by `soak_csv_header_is_pinned` and
 checked against `CSV_HEADER` below; the pre-#6 ten-column header is still
 read, see `LEGACY_CSV_HEADER`) and
@@ -50,7 +50,7 @@ import sys
 from typing import NamedTuple
 
 # Kept as one contiguous literal (not split across concatenated strings)
-# so `crates/qsh-cli/tests/soak.rs`'s `summarize_py_pins_the_same_csv_header`
+# so `crates/qsh-cli/tests/it/soak.rs`'s `summarize_py_pins_the_same_csv_header`
 # test can `include_str!` this file and grep for the exact `SOAK_CSV_HEADER`
 # text byte-for-byte — a value built
 # from adjacent string literals never appears as one contiguous run in the
@@ -90,15 +90,15 @@ ECHO_P95_BOUND_MS = 50.0  # floor of the adaptive bound — see `evaluate`'s `ec
 # contends for a shared 4-vCPU runner, and a 24h/100-session run (on the
 # order of 17k steady windows) is certain to hit that at least once, so it
 # was judging CI noise, not degradation. Mirrors
-# `crates/qsh-cli/tests/soak.rs`'s identical `ECHO_SPIKE_FRACTION_MAX`.
+# `crates/qsh-cli/tests/it/soak.rs`'s identical `ECHO_SPIKE_FRACTION_MAX`.
 ECHO_SPIKE_FRACTION_MAX = 0.10
 # `qsh_core::broker::REAPER_TICK`, mirrored (not importable from Rust) —
-# `crates/qsh-cli/tests/soak.rs`'s `ttl_reap_deadline` uses the same value.
+# `crates/qsh-cli/tests/it/soak.rs`'s `ttl_reap_deadline` uses the same value.
 REAPER_TICK_SECS = 30
 TREND_MIN_SPAN_SECS = 3600  # below this, too few samples for a fitted slope to mean anything
 # Minimum steady-phase sample count before a fd-growth quarters check is
 # trusted as a hard assert rather than downgraded to a recorded note —
-# mirrors `crates/qsh-cli/tests/soak.rs`'s identical `MIN_QUARTER_SAMPLES`
+# mirrors `crates/qsh-cli/tests/it/soak.rs`'s identical `MIN_QUARTER_SAMPLES`
 # (`docs/campaigns/m8-soak.md` §3).
 MIN_QUARTER_SAMPLES = 8
 
@@ -162,7 +162,7 @@ def read_rows(stream) -> list[Row]:
             f"CSV header does not match the soak.rs-pinned column order — "
             f"got {got!r}, want {CSV_HEADER!r} "
             f"(or the pre-#6 {LEGACY_CSV_HEADER!r}) "
-            f"(crates/qsh-cli/tests/soak.rs SOAK_CSV_HEADER)"
+            f"(crates/qsh-cli/tests/it/soak.rs SOAK_CSV_HEADER)"
         )
     # Buffered (not streamed row-by-row) so a malformed row can be told
     # apart from "the last line in the file": a `qsh serve` subprocess or
@@ -250,7 +250,7 @@ def quarter_split(values: list[int]) -> tuple[list[int], list[int]]:
     assert or only recorded as a note when the series is short (fewer than
     MIN_QUARTER_SAMPLES total) is entirely the caller's call in `evaluate`
     — this function never downgrades or refuses to split (mirrors
-    `crates/qsh-cli/tests/soak.rs`'s identical `quarter_split` —
+    `crates/qsh-cli/tests/it/soak.rs`'s identical `quarter_split` —
     `docs/campaigns/m8-soak.md` §3)."""
     n = len(values)
     if n == 0:
@@ -482,7 +482,7 @@ def evaluate(
     # reached that deadline yet has nothing to judge. The CSV has no
     # abandon-signal timestamp of its own, so this approximates it as the
     # boot row's t_secs (abandon is signaled immediately after ramp, close
-    # to t=0) — same approximation `crates/qsh-cli/tests/soak.rs` makes by
+    # to t=0) — same approximation `crates/qsh-cli/tests/it/soak.rs` makes by
     # measuring from its own in-process `abandon_signaled_at` instant,
     # which likewise lands right after boot.
     result["idle_end_abandoned_live"] = idle_end.abandoned_live
@@ -1018,7 +1018,7 @@ def self_test() -> int:
     )
 
     # ECHO_SPIKE_FRACTION_MAX's fraction-of-windows rule, mirroring
-    # `crates/qsh-cli/tests/soak.rs`'s `judge_echo_windows` unit tests
+    # `crates/qsh-cli/tests/it/soak.rs`'s `judge_echo_windows` unit tests
     # exactly: GHA run 34203445617's actual shape was 59 steady windows with
     # 2 spikes (129.495ms, 114.632ms) against a ~1.2ms baseline — 2/59 =
     # 3.4%, under the 10% fraction, so that shape passes; the same 2 spikes
@@ -1260,7 +1260,7 @@ def main(argv: list[str] | None = None) -> int:
         "--resume-ttl-secs", type=int, default=None,
         help="QSH_SOAK_RESUME_TTL_SECS used for the run — when given, the TTL-reap check is "
              "judged against resume_ttl_secs + REAPER_TICK (30s) instead of an unconditional "
-             "'abandoned_live must be 0 at drain' (crates/qsh-cli/tests/soak.rs's identical "
+             "'abandoned_live must be 0 at drain' (crates/qsh-cli/tests/it/soak.rs's identical "
              "ttl_reap_deadline rule); omitted, the old unconditional check applies",
     )
     parser.add_argument(
@@ -1269,7 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
              "wins outright over the CSV's own 'phase == ramp' row. Omitted (the normal case), "
              "the baseline is derived from that CSV row automatically, and the echo p95 bound "
              "becomes max(3 x baseline, 50ms), the same adaptive rule adversarial_load.rs's T2 "
-             "scenario and crates/qsh-cli/tests/soak.rs use; with neither a ramp row nor this "
+             "scenario and crates/qsh-cli/tests/it/soak.rs use; with neither a ramp row nor this "
              "flag, the bound stays the fixed 50ms floor",
     )
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")

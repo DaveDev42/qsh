@@ -173,7 +173,7 @@ pub enum Action {
 
 impl Action {
     /// Every action this build can evaluate, in a stable order — the full
-    /// PRD §9 vocabulary (`crates/qsh-core/tests/acl_docs.rs` fails CI if
+    /// PRD §9 vocabulary (`crates/qsh-core/tests/it/acl_docs.rs` fails CI if
     /// this ever drifts from that list).
     pub const ALL: [Action; 11] = [
         Action::ExecRun,
@@ -322,7 +322,7 @@ impl Decision {
 /// `Server::require_opener`'s thin broker lookup), or by an audit-record
 /// failure forcing fail-closed: the non-distinguishing error policy
 /// `docs/design/protocol.md` §10-2 requires (re-pinned for
-/// `session.control` in `crates/qsh-testkit/tests/session_loopback.rs`).
+/// `session.control` in `crates/qsh-testkit/tests/it/session_loopback.rs`).
 ///
 /// `localctl`'s `NotOwner` refusal ("this forward is owned by another
 /// client on this host", `crate::localctl::daemon`) is deliberately

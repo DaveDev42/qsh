@@ -170,7 +170,7 @@ readelf -d "$(command -v qsh)" | grep NEEDED || echo "no DT_NEEDED"
 
 ## 6. 기능 스모크 네 축의 수동 재현
 
-네 축은 `docs/ROADMAP.md` M10 수용 기준의 2026-08-21 감사 개정이 정의하고 `crates/qsh-cli/tests/release_smoke.rs`의 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`가 CI에서 돌리는 것과 같다. 여기서는 사람이 손으로 같은 순서를 밟는다.
+네 축은 `docs/ROADMAP.md` M10 수용 기준의 2026-08-21 감사 개정이 정의하고 `crates/qsh-cli/tests/it/release_smoke.rs`의 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`가 CI에서 돌리는 것과 같다. 여기서는 사람이 손으로 같은 순서를 밟는다.
 
 이 절은 **한 VM 안에서 loopback으로** 호스트 역할과 클라이언트 역할을 둘 다 세운다. 두 장비 사이의 첫 연결 UX를 재는 것은 `docs/campaigns/m7-stopwatch.md`와 `docs/campaigns/m9-stopwatch.md`의 일이고 이 캠페인이 묻는 것은 "이 플랫폼에 설치된 이 바이너리가 네 축을 다 도는가"다.
 
@@ -401,4 +401,4 @@ FAIL이 나오면 먼저 원인을 분류한다.
 
 ## 관련 문서
 
-`docs/ROADMAP.md` M10(범위, 수용 기준과 2026-08-21 감사 개정, 결정 기록 Q2·Q3·Q4, 태그 정책), `docs/PRD.md` §13·§16, `docs/CLI.md` §2.2(stdout 순수성)·§6.2(`sessions`)·§6.8(`exec`)·§6.10(`version`)·§6.11(`--key-store`)·§7(대화형 모드와 `~d`), `docs/deploy/release-secrets.md`(Apple 시크릿 여섯, `HOMEBREW_TAP_DEPLOY_KEY`), `docs/design/testing.md`(CI 규율의 macOS 서명·공증 불릿, musl RSS 주장 범위), `docs/campaigns/m8-soak.md`(sha256 규율과 재사용 형식), `docs/campaigns/m9-stopwatch.md`(게이트형 캠페인의 형식 선례), `crates/qsh-cli/tests/release_smoke.rs`(네 축의 CI 대응물), `scripts/README.md`(installer와 `gh attestation verify --signer-workflow`).
+`docs/ROADMAP.md` M10(범위, 수용 기준과 2026-08-21 감사 개정, 결정 기록 Q2·Q3·Q4, 태그 정책), `docs/PRD.md` §13·§16, `docs/CLI.md` §2.2(stdout 순수성)·§6.2(`sessions`)·§6.8(`exec`)·§6.10(`version`)·§6.11(`--key-store`)·§7(대화형 모드와 `~d`), `docs/deploy/release-secrets.md`(Apple 시크릿 여섯, `HOMEBREW_TAP_DEPLOY_KEY`), `docs/design/testing.md`(CI 규율의 macOS 서명·공증 불릿, musl RSS 주장 범위), `docs/campaigns/m8-soak.md`(sha256 규율과 재사용 형식), `docs/campaigns/m9-stopwatch.md`(게이트형 캠페인의 형식 선례), `crates/qsh-cli/tests/it/release_smoke.rs`(네 축의 CI 대응물), `scripts/README.md`(installer와 `gh attestation verify --signer-workflow`).

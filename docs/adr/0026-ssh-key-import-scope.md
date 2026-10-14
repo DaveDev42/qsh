@@ -63,7 +63,7 @@ fingerprint 두 값을 나란히 내라는 것은 문서 취향이 아니라 실
 
 - v1 표면은 한 바이트도 바뀌지 않는다. `qsh init`의 flag 집합, `IdentityInitReq`, `IdentityInitData`, wire 형식, `docs/CLI.md` §6.11 모두 그대로다. 이 ADR은 문서만 더한다.
 - `docs/ROADMAP.md` §3 유예 가드레일 표에 행이 하나 늘어야 한다. 가드레일 문면은 "구현 0줄, 명령·flag·ACL action 신설 없음, P1 착수 시의 모양은 이 ADR이 이미 고정"이다. 그 편집은 메인 세션 소관이다.
-- P1에서 착수하면 새 의존과 `cargo deny check`, 새 flag에 따른 man 재생성(`checked_in_man_pages_match_the_generator`), 새 fuzz 타깃과 `fuzz/README.md`의 개수 서술을 등록 항목으로 갚아야 한다. value op을 하나 신설한다면 `CLI_V1_SCHEMA_COMMANDS` 등록과 `cli_v1_data_schema` 대응 arm(`crates/qsh-core/tests/schema_commands_registry.rs`), fixture 추가와 `REQUIRED_FIXTURES` 등재, human과 JSON 렌더러 두 벌, `docs/CLI.md` §6.11 갱신까지 함께 간다.
+- P1에서 착수하면 새 의존과 `cargo deny check`, 새 flag에 따른 man 재생성(`checked_in_man_pages_match_the_generator`), 새 fuzz 타깃과 `fuzz/README.md`의 개수 서술을 등록 항목으로 갚아야 한다. value op을 하나 신설한다면 `CLI_V1_SCHEMA_COMMANDS` 등록과 `cli_v1_data_schema` 대응 arm(`crates/qsh-core/tests/it/schema_commands_registry.rs`), fixture 추가와 `REQUIRED_FIXTURES` 등재, human과 JSON 렌더러 두 벌, `docs/CLI.md` §6.11 갱신까지 함께 간다.
 - 이 ADR은 ADR-0008과 ADR-0017을 개정하지 않는다. ADR-0008 결정 5와 그 대안 절의 `fp:` 기각, ADR-0017 결정 1과 결정 5를 명시적으로 재확인한다.
 - 이슈 #3 항목 e는 이 ADR이 승인되는 시점에 닫힌다. 답은 "v1에는 없다"다. 없다는 사실이 이제 이름과 근거를 갖는다.
 - 이 ADR을 다시 여는 조건은 둘 중 하나다. P1 착수, 또는 rotation ADR이 먼저 서서 두 번째 키 경로가 어차피 필요해지는 경우다. 후자라면 가져오기는 그 경로에 얹히는 입력 하나가 되므로 비용 구조가 달라진다.

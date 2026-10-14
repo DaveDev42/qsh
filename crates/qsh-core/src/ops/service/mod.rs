@@ -62,7 +62,7 @@ pub const SERVICE_UNSUPPORTED_PLATFORM: &str = "`qsh service` manages user servi
 
 /// The example binary path `docs/deploy/service.md`'s launchd fences show.
 /// Production passes `std::env::current_exe()`; only the doc-contract test
-/// (`crates/qsh-core/tests/service_docs.rs`) passes this.
+/// (`crates/qsh-core/tests/it/service_docs.rs`) passes this.
 pub const DOC_EXAMPLE_EXE_MACOS: &str = "/Users/YOU/.local/bin/qsh";
 /// The example `$HOME` `docs/deploy/service.md`'s launchd fences show.
 pub const DOC_EXAMPLE_HOME_MACOS: &str = "/Users/YOU";

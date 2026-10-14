@@ -7,7 +7,7 @@ use crate::trust::TrustRole;
 /// replacing its body with `Ok([0u8; EKM_LEN])` (i.e. deriving both
 /// proofs from a constant instead of the TLS session) left every
 /// existing test green — the wire-level DoD-quadrant tests in
-/// `qsh-testkit/tests/pairing_loopback.rs` only ever exercise a single
+/// `qsh-testkit/tests/it/pairing_loopback.rs` only ever exercise a single
 /// live connection at a time, so they cannot distinguish "bound to
 /// this session's TLS key material" from "bound to nothing at all".
 ///
@@ -42,7 +42,7 @@ async fn export_keying_material_differs_across_separate_connections() {
 
 /// Fix A2's ingest guard, at the pure-predicate level: an ordinary
 /// device name (letters, digits, hyphens, spaces — the shapes every
-/// existing pairing test in `qsh-testkit/tests/pairing_loopback.rs`
+/// existing pairing test in `qsh-testkit/tests/it/pairing_loopback.rs`
 /// already uses, e.g. `"laptop"`) must pass, so the guard is not
 /// over-broad.
 #[test]

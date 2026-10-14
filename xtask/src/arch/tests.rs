@@ -503,7 +503,7 @@ fn module_ban_flags_a_leak_in_file_host_but_not_its_tests() {
 }
 
 /// `qsh-cli/src` bans `UnixStream`/`UnixListener` — but the ban is
-/// scoped to `src/` only, so `crates/qsh-cli/tests/localctl_perms.rs`
+/// scoped to `src/` only, so `crates/qsh-cli/tests/it/localctl_perms.rs`
 /// (which legitimately needs `UnixStream` to probe UDS permissions) is
 /// unaffected.
 #[test]

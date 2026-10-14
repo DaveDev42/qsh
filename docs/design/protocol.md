@@ -495,7 +495,7 @@ message FileFrame {
   - `TUNNEL_STREAM_RECEIVE_WINDOW = 2 MiB`. quinn 기본 STREAM_RWND(약 1.25 MB)보다 크다. 128 KiB는 기각됐다. 128 KiB / 50ms ≈ 2.6 MB/s가 연결 위 *모든* 스트림(PTY/exec/replay 포함)이 공유하는 처리량 상한이 되는데, loopback 기준 처리량 게이트는 raw-quinn 기준선과 tunnel 다리가 같은 연결 전체 window를 공유하므로 이 리그레션을 볼 수 없다. 그래서 이 상수에는 quinn 기본값 1,250,000 이상을 강제하는 floor assertion이 유닛 테스트(`crates/qsh-transport/src/endpoint.rs`)로 따로 있다.
   - `SEND_DEPTH_CAP_BYTES = 128 KiB`(`qsh_core::tunnel::splice`). 우선순위 band만으로는 부족했다. cap 없이 잰 echo p95는 30.579ms(요구 <10ms에 크게 미달)였고, 128 KiB cap에서는 5회 반복 p95 7.1–7.9ms, raw-quinn 대비 처리량 비율 0.899–0.945로 두 게이트(p95 <10ms, 처리량 ≥0.80 floor와 0.85 안정 기준)를 함께 만족했다.
   - UDP 소켓 버퍼(SO_RCVBUF/SO_SNDBUF)는 이 window와 별개다. OS 기본값을 낮추지 않는 하향 ladder(8/4/2/1 MiB)로, OS가 실제로 승인한 값보다 클 때만 적용한다(`bind_tuned_udp_socket`, `crates/qsh-transport/src/endpoint.rs`).
-- **정체 터널 스트림 상한(ADR-0037):** 수신 창은 버퍼이기도 하다. 로컬 소비자가 읽지 않는 터널 스트림은 받은 바이트로 자기 스트림 창과 함께 연결 창도 붙잡는다. 그런 스트림 넷이면 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB) × 4가 `CONNECTION_RECEIVE_WINDOW`(8 MiB)를 다 써서 같은 연결의 `SESSION_DATA`가 credit을 잃는다(`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`). 두 상수는 그대로 두고 연결마다 정체 장부(`crates/qsh-core/src/tunnel/stall.rs`)를 둔다.
+- **정체 터널 스트림 상한(ADR-0037):** 수신 창은 버퍼이기도 하다. 로컬 소비자가 읽지 않는 터널 스트림은 받은 바이트로 자기 스트림 창과 함께 연결 창도 붙잡는다. 그런 스트림 넷이면 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB) × 4가 `CONNECTION_RECEIVE_WINDOW`(8 MiB)를 다 써서 같은 연결의 `SESSION_DATA`가 credit을 잃는다(`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`). 두 상수는 그대로 두고 연결마다 정체 장부(`crates/qsh-core/src/tunnel/stall.rs`)를 둔다.
   - **정체의 정의:** 수신 방향(QUIC에서 로컬로)의 로컬 쓰기가 `STALL_AGE`(1초) 넘게 한 바이트도 진전하지 않은 터널 스트림이다.
   - **끊는 규칙:** 정체 스트림이 `CONNECTION_RECEIVE_WINDOW / TUNNEL_STREAM_RECEIVE_WINDOW - 1`(3)을 넘으면 마지막 진전이 가장 오래된 것부터 끊는다. peer의 `DATA_BLOCKED` 계수가 최근 2초 안에 늘었고 정체 스트림이 있으면 가장 오래된 하나를 끊는다.
   - **끊는 방법:** §7의 splice 중단 신호와 같고 코드는 `0x200E`다. quinn은 stop된 스트림의 읽지 않은 바이트만큼 연결 credit을 곧바로 돌려준다.
@@ -515,7 +515,7 @@ message FileFrame {
 5. **proptest 모델 테스트** — ACL `decide`를 naive coverage 오라클과 대조(`crates/qsh-core/src/acl/policy.rs`), ring buffer를 naive Vec 오라클과 대조(임의 append/attach/evict 후 replay·gap 정확성, `crates/qsh-core/src/broker/ring.rs`), reverse registry의 `generation` 단조성(`crates/qsh-core/src/reverse/registry.rs`), reverse target의 backoff 단조성(`crates/qsh-core/src/reverse/target.rs`), localctl mux의 request-id 교차 부재(`crates/qsh-core/src/localctl/mux.rs`).
 
 **6. stateful broker fuzzer: `broker_ops`.** `arbitrary`로 생성한 control message *시퀀스*와 연결 단절 이벤트를 sans-IO broker에 주입해 default deny 유지·writer lease 단일성·sequence 단조성·gap 범위 정확성·resume token 단회성을 흔드는 stateful 타깃이다. 위 8종 decode 타깃은 메시지 하나의 decode만 흔들고 시퀀스 상태를 주입하지 않으므로 이 타깃이 따로 필요했다.
-- 하네스는 `crates/qsh-core/tests/support/broker_ops_harness.rs`(19종 op 어휘: 세션 append/read/control, writer lease, resume issue/verify/rotate, attach/detach, tick, reap)이다. 같은 파일을 fuzz 타깃(`fuzz/fuzz_targets/broker_ops.rs`)과 nextest 회귀 재생(`crates/qsh-core/tests/broker_ops_corpus.rs`, `fuzz/corpus/broker_ops/` seed 15개)이 `#[path]`로 나눠 include한다.
+- 하네스는 `crates/qsh-core/tests/it/support/broker_ops_harness.rs`(19종 op 어휘: 세션 append/read/control, writer lease, resume issue/verify/rotate, attach/detach, tick, reap)이다. 같은 파일을 fuzz 타깃(`fuzz/fuzz_targets/broker_ops.rs`)과 nextest 회귀 재생(`crates/qsh-core/tests/it/broker_ops_corpus.rs`, `fuzz/corpus/broker_ops/` seed 15개)이 `#[path]`로 나눠 include한다.
 - oracle은 naive `ModelSession`(전체 히스토리 `Vec<u8>` + lease/resume/TTL 상태를 독립 재구현) 대조다.
 - **default deny 축은 `acl/policy.rs`의 proptest(§13-5)가 담당한다.** `broker_ops`는 그 대신 상태 부재·불일치 → `Err(ResumeDenied)`·`Conflict`·`CursorBeyondEnd`의 fail-closed 성질을 잰다.
 
@@ -531,7 +531,7 @@ corpus는 `fuzz/corpus/`에 체크인한다. **20종 중 `broker_ops`는 모든 
 
 ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지한 제약이다. QSH의 transport는 QUIC 하나지만 wire와 프로토콜 코드는 QUIC 고유 개념에 기대지 않는다:
 
-- 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
+- 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/it/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
 - wire 구조는 QUIC 고유 개념(stream ID, datagram, transport parameter)에 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
 

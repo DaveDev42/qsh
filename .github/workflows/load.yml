@@ -2,7 +2,7 @@ name: load
 
 # T2 — the adversarial-load harness (M8 plan Step 4c (52639fc),
 # `docs/design/testing.md` L9/L10, `docs/ROADMAP.md` M8 DoD 5,
-# `crates/qsh-cli/tests/adversarial_load.rs`). Measures a **release**
+# `crates/qsh-cli/tests/it/adversarial_load.rs`). Measures a **release**
 # `qsh serve` subprocess under fixed adversarial N (source flood, connection
 # flood, session flood, sustained rejection flood — split into row-count
 # aggregation / rotation+retention volume / rotation-failure fail-closed,
@@ -67,7 +67,7 @@ jobs:
     # this split's addition.
     #
     # M8 Step 5 added a second nextest run in this job — the short-mode
-    # soak scenario (`crates/qsh-cli/tests/soak.rs`, default 120s steady
+    # soak scenario (`crates/qsh-cli/tests/it/soak.rs`, default 120s steady
     # state + 8 sessions + a 90s drain wait for `CLOSED_RETENTION` +
     # `REAPER_TICK`), a few more minutes on top of adversarial_load's own
     # budget above. 40 minutes (raised from 30 when the soak step was
@@ -93,7 +93,7 @@ jobs:
           echo "net.core.rmem_max: $(cat /proc/sys/net/core/rmem_max)"
       - run: cargo build --release -p qsh-cli
       # The same release binary this job already built, driven through the
-      # functional smoke (`crates/qsh-cli/tests/release_smoke.rs`,
+      # functional smoke (`crates/qsh-cli/tests/it/release_smoke.rs`,
       # `docs/design/testing.md` L6's M10 paragraph). The release *binary*
       # is reused for free, but this step still compiles the dev-profile
       # `qsh-cli` test tree (including the `cfg(unix)` dev-dependencies)
@@ -103,11 +103,11 @@ jobs:
       # violation. `QSH_SMOKE_STRICT=1` keeps a missing `QSH_SMOKE_BIN`
       # from quietly certifying the debug binary, same discipline as
       # `QSH_LOAD_STRICT` below.
-      - run: cargo nextest run -p qsh-cli --test release_smoke --success-output final
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^release_smoke::/)' --success-output final
         env:
           QSH_SMOKE_STRICT: 1
           QSH_SMOKE_BIN: ${{ github.workspace }}/target/release/qsh
-      - run: cargo nextest run --profile load -p qsh-cli --test adversarial_load --no-fail-fast
+      - run: cargo nextest run --profile load -p qsh-cli --test it -E 'test(/^adversarial_load::/)' --no-fail-fast
         env:
           QSH_LOAD_STRICT: 1
           QSH_LOAD_BIN: ${{ github.workspace }}/target/release/qsh
@@ -121,7 +121,7 @@ jobs:
       # still asserts its own always-checked axes, but the CSV-only axes
       # (per-session buffer, RSS trend, quarters notes) never get any CI
       # coverage at all (`docs/campaigns/m8-soak.md` §3).
-      - run: cargo nextest run --profile load -p qsh-cli --test soak --no-fail-fast
+      - run: cargo nextest run --profile load -p qsh-cli --test it -E 'test(/^soak::/)' --no-fail-fast
         env:
           QSH_LOAD_STRICT: 1
           QSH_LOAD_BIN: ${{ github.workspace }}/target/release/qsh

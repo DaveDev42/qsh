@@ -12,7 +12,7 @@
 //! - [`stream`]: transport-neutral [`SendStream`]/[`RecvStream`].
 //! - `mux` and `quic` (private): the contract every backend implements
 //!   (`MuxConn`, `SendHalf`, `RecvHalf`) and the QUIC backend that does.
-//!   `tests/conformance.rs` holds each backend to the same behavior list.
+//!   `tests/it/conformance.rs` holds each backend to the same behavior list.
 //! - [`error`]: transport-neutral error and code types
 //!   ([`ConnectionError`], [`ReadError`], [`WriteError`], [`StreamCode`]),
 //!   whose `Display` matches the QUIC stack's byte for byte.

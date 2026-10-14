@@ -267,7 +267,7 @@ impl ReverseHarness {
     /// ServeConfig`'s defaults (M8 Step 3b ruling R6) — mirrors
     /// `crate::loopback::LoopbackHarness::start_with_quotas` for the
     /// `Listen` arm's own connection-cap integration test
-    /// (`crates/qsh-testkit/tests/quota.rs`, I12): this controller keeps
+    /// (`crates/qsh-testkit/tests/it/quota.rs`, I12): this controller keeps
     /// its own [`qsh_core::quota::Quotas`] instance, entirely independent of
     /// `crate::server::Server`'s, even when both run in the same process
     /// (ruling R6 — arm-scoped, not process-scoped).
@@ -710,7 +710,7 @@ impl ReverseHarness {
     /// `None`, and the daemon answers `HOST_NOT_FOUND` even though the
     /// registry already has the name. That is exactly what CI run
     /// 35912049994 hit in `ping_on_a_conduit_is_answered_locally_with_pong`
-    /// (`crates/qsh-testkit/tests/local_control_reverse.rs`) — a test-side
+    /// (`crates/qsh-testkit/tests/it/local_control_reverse.rs`) — a test-side
     /// ordering bug, not a product bug: `registry()` is simply not the
     /// table the daemon itself looks up.
     #[cfg(unix)]
@@ -845,7 +845,7 @@ pub async fn wait_for<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) ->
             }
             // A poll interval inside a `tokio::time::timeout`-bounded loop,
             // not the unconditioned fixed delay `docs/design/testing.md`
-            // bans — same distinction `qsh-cli/tests/common/mod.rs`'s
+            // bans — same distinction `qsh-cli/tests/it/common/mod.rs`'s
             // `wait_for_audit` draws for its own deadline-bounded poll.
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -1115,7 +1115,7 @@ impl ReversePairHarness {
             // `qsh listen` daemon multiplexing many local CLI processes
             // over *one* connection, so it must not be mistaken for one
             // (`ConnCtx::is_reverse_registration`'s own doc — a real
-            // registration is `qsh-testkit/tests/reverse_attach.rs`'s and
+            // registration is `qsh-testkit/tests/it/reverse_attach.rs`'s and
             // `reverse_session_ops.rs`'s `register_reverse`, built off
             // `ReverseHarness::register` against the real registry).
             is_reverse_registration: false,

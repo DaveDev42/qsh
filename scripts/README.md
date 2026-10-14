@@ -101,7 +101,7 @@ recovery diagnostics. See
 ## soak/
 
 `run.sh` drives the 24h/100-session soak scenario
-(`crates/qsh-cli/tests/soak.rs`) under nextest's `[profile.soak]` on a
+(`crates/qsh-cli/tests/it/soak.rs`) under nextest's `[profile.soak]` on a
 dedicated Linux host. `preflight_udp.py` checks beforehand that the host
 does not drop loopback UDP. `summarize.py` (stdlib only) reads the CSV that
 `run.sh` writes and judges it against the thresholds fixed in

@@ -115,7 +115,7 @@ impl Operation for TunnelDynamicOp {
 /// `forward.local` reused, and `forward.socks` — despite sitting right
 /// next to it in the action vocabulary — plays no part in authorizing it.
 /// `README.md` and `docs/CLI.md` §6.9 quote this verbatim
-/// (`crates/qsh-core/tests/tunnel_docs.rs` pins both), the same anti-drift
+/// (`crates/qsh-core/tests/it/tunnel_docs.rs` pins both), the same anti-drift
 /// discipline that used to guard the P0 stub's own refusal wording before
 /// `-D` was implemented.
 pub const DYNAMIC_FORWARD_ACL_NOTE: &str = "`-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.";
@@ -830,7 +830,7 @@ impl Ops {
     /// against a fake attempt closure without a real daemon or peer
     /// (`docs/design/testing.md` L2) — the real-daemon case (registration
     /// actually coming back mid-wait) is
-    /// `crates/qsh-testkit/tests/reverse_tunnel.rs`'s job.
+    /// `crates/qsh-testkit/tests/it/reverse_tunnel.rs`'s job.
     fn connect_with_wait(
         &self,
         host: &str,

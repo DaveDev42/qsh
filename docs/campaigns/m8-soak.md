@@ -2,7 +2,7 @@
 
 ## 1. 목적
 
-`crates/qsh-cli/tests/soak.rs`는 두 속도로 도는 한 시나리오다. 짧은 모드
+`crates/qsh-cli/tests/it/soak.rs`는 두 속도로 도는 한 시나리오다. 짧은 모드
 (기본 120s/8세션)는 `[profile.load]`로 `.github/workflows/load.yml`이
 push(main)마다 자동으로 돌리는 회귀 감시자다. 24h/100-session 모드는
 `[profile.soak]`로 GHA 6h 상한 밖에서, 사람이 전용 호스트에 붙어 도는
@@ -94,7 +94,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
-이 표는 `crates/qsh-cli/tests/soak.rs`와
+이 표는 `crates/qsh-cli/tests/it/soak.rs`와
 `scripts/soak/summarize.py`가 **동일하게** 계산한다 — 캠페인은 같은 판정을
 24h/100세션 규모로 반복하는 것이지 새 기준을 세우는 것이 아니다. 테스트
 바이너리 자신은 짧은 런 안에서 판단 가능한 축만 강한 assert로 검사하고,
@@ -173,7 +173,7 @@ scripts/soak/run.sh --duration 86400 --sessions 100 --out /tmp/soak-$(date -u +%
 2. `QSH_SOAK_DURATION_SECS=86400 QSH_SOAK_SESSIONS=100`(그 외
    `QSH_SOAK_*`는 `scripts/soak/run.sh`가 채우는 기본값 — 필요하면 호출 전에 개별
    env로 덮어쓴다)과 `QSH_LOAD_STRICT=1`로 `cargo nextest run --profile
-   soak -p qsh-cli --test soak`을 돌리고 `run.log`에 tee한다. 이 전체
+   soak -p qsh-cli --test it -E 'test(/^soak::/)'`을 돌리고 `run.log`에 tee한다. 이 전체
    실행을 `timeout $((QSH_SOAK_DURATION_SECS + 1800))`으로 감싼다.
 3. 테스트가 쓴 `samples.csv`를 `scripts/soak/summarize.py`에 넘겨
    §3 표를 계산·출력하고, 0h/1h/6h/12h/24h 스냅숏 행을 함께 찍는다
@@ -380,7 +380,7 @@ DIAL_EXHAUSTED가 assert 위반으로 처음 관측된 회차다. `env.txt`는 �
 실제 교체 dial은 ≈0.17/s다.
 
 관측 공백을 같이 기록해 둔다. `ServeGuard::start_with_bin`
-(`crates/qsh-cli/tests/common/mod.rs:119`)이 서버 서브프로세스에서
+(`crates/qsh-cli/tests/it/common/mod.rs:119`)이 서버 서브프로세스에서
 `QSH_LOG`를 `env_remove`하므로, admission 결정별 카운터는 이 회차에
 아예 수집되지 않았다. 위 문단의 admission 관련 판단은 설정 headroom
 계산에서 나온 것이고 관측된 카운터가 근거가 아니다. 다음 회차는 listener의
@@ -390,7 +390,7 @@ admission 결정 로그를 남기도록 해서 이 축을 추론이 아니라 �
 태그 대상 트리 감사: `git diff dd66e0f..525a2a5`는
 `.github/workflows/release.yml`·`Cargo.lock`·`README.md`·`docs/ROADMAP.md`
 4개 파일만 건드리고, transport·admission·config·quota·server·broker·serve와
-`crates/qsh-cli/tests/soak.rs`에는 변경이 0줄이다. 이 회차가 관측한 동작은
+`crates/qsh-cli/tests/it/soak.rs`에는 변경이 0줄이다. 이 회차가 관측한 동작은
 현재 트리에 그대로 남아 있다.
 
 DIAL_EXHAUSTED의 근본 원인은 이 호스트의 방화벽 규칙이다. 제품 결함이
