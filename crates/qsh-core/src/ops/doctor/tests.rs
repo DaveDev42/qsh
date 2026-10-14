@@ -2327,7 +2327,7 @@ fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
 }
 
 // -----------------------------------------------------------------
-// Trust roles (ADR-0045 결정 12, M15 Step 7).
+// Trust roles (ADR-0045 결정 12, M15 plan Step 7 (1a4af3b)).
 // -----------------------------------------------------------------
 
 fn add_pin(ops: &Ops, name: &str, role: Option<&str>) {

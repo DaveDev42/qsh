@@ -62,6 +62,21 @@ impl Drop for TempGuard {
     }
 }
 
+/// Create the temp file and arm its guard in one blocking step. The guard is
+/// built on the blocking thread, before the result travels back, so a caller
+/// that is dropped while it awaits the `spawn_blocking` handle (a connection
+/// closing, a cancel) still has the finished result dropped, and the guard
+/// removes the file. Creating the file on the thread and the guard in the
+/// awaiting task leaves a window in which the file exists and nothing owns it.
+pub(crate) fn create_guarded_temp(
+    dir: &Arc<File>,
+    name: &std::ffi::OsStr,
+) -> io::Result<(File, TempGuard)> {
+    let temp = host::create_temp(dir, name)?;
+    let guard = TempGuard::new(Arc::clone(dir), temp.name);
+    Ok((temp.file, guard))
+}
+
 /// What the blocking writer reports once its channel closes.
 pub(crate) struct Written {
     pub(crate) file: File,
@@ -163,4 +178,40 @@ pub(crate) fn commit_temp(
     };
     dir.sync_all()?;
     Ok(committed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_guarded_temp_is_removed_when_the_awaiting_task_never_collects_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Arc::new(crate::file::guard::open_dir_nofollow(tmp.path()).unwrap());
+        let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let dir = Arc::clone(&dir);
+            let created = Arc::clone(&created);
+            tokio::task::spawn_blocking(move || {
+                let made = create_guarded_temp(&dir, std::ffi::OsStr::new("data.bin"));
+                created.store(true, std::sync::atomic::Ordering::SeqCst);
+                made
+            })
+        };
+        // The awaiting task goes away (a closed connection, a cancel) without
+        // collecting the result: the finished output is dropped with its
+        // armed guard, which removes the file.
+        drop(handle);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let empty = std::fs::read_dir(tmp.path()).unwrap().next().is_none();
+                if created.load(std::sync::atomic::Ordering::SeqCst) && empty {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the temp file is removed with the dropped result");
+    }
 }

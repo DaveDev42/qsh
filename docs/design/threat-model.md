@@ -19,6 +19,7 @@
 - 사람용 표면 명령 여섯 — `pair invite|accept --as`, `identity export`, `trust add --cert-file`, `trust add-ca`, `trust rename`, `service install|uninstall|status`. 진입점은 §3, 위협은 §4, 핀이 없는 것은 §5와 §7에 있다.
 - 로컬 표면 셋 — `qsh acl show`, `qsh init --import-ssh-key`, `qsh trust ssh-preview`. 진입점은 §3, 위협은 §4(A14·D13), 잔여 위험은 §7(h28·h29)에 있다.
 - 로컬 표면 하나 — `qsh setup`. 진입점은 §3, 잔여 위험은 §7(h30·h31)에 있다.
+- 원격 파일 op 넷과 `FILE_DATA` 스트림, 그 client인 `qsh cp`. 진입점은 §3, 위협은 §4(B22~B28·C16·C17·E13·E14), 잔여 위험은 §7(h37~h41)에 있다.
 
 비범위:
 
@@ -84,6 +85,7 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | `qsh acl show --principal <p> [--auth-path pin|ca]` | 로컬 사용자 → `acl.toml` 읽기 | 로컬 전용 op이다. 인가 불요(`docs/CLI.md` §2.5)이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다 (`acl_show_never_appears_as_a_control_message_wire_variant`). 원격 열람이 열리면 capability 열거 oracle이 되고, 집합을 통째로 돌려주므로 `acl check`보다 효율이 높기 때문이다(ADR-0025 결정 4). 읽기 전용이라 `acl.toml`을 쓰지 않는다 (`acl_show_does_not_modify_acl_toml`). 판정은 `Policy::decide`를 그대로 불러 모으고(`effective_actions`) 항상-deny action은 어떤 패턴으로도 집합에 들지 않는다(`acl_show_never_lists_always_denied_actions_even_under_family_patterns`). 파일을 읽지 못하면 "정책 없음"이고 규칙 내용은 한 줄도 나오지 않는다(`acl_show_on_an_unreadable_acl_toml_reports_no_policy_and_no_rule_content`) |
 | `qsh setup <role>` | 로컬 사용자 → 기존 로컬 op 여럿 | 로컬 전용 op이다. 인가 불요(`docs/CLI.md` §2.5)이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다 (`setup_run_never_appears_as_a_control_message_wire_variant`). 새 능력이 없다. 상태를 바꾸는 호출은 `identity.init`, `trust.invite`, `trust.accept`, `trust.add`, `service.install`뿐이고 `acl.toml`·`config.toml`·`hosts.toml`은 쓰지 않는다. 이 경계는 `crates/qsh-core/src/setup/` 디렉터리 범위 금지 여덟 토큰(`cargo xtask arch`)과 `setup_never_writes_acl_toml_in_any_role`이 고정한다. 자동 신뢰가 없다. `TrustAddReq`는 항상 `cert_pem`을 채우고(`setup_trust_add_always_carries_cert_pem`) fingerprint 탐침 토큰이 금지돼 있다. 발급하는 초대는 항상 `--as <name>`을 달고(`setup_invite_always_carries_assigned_name`), 이름 없는 미상환 초대가 살아 있으면 `acl` 단계가 충족되지 않는다(`setup_acl_step_pending_while_unassigned_invite_is_live`). 같은 fingerprint의 두 번째 이름은 거절한다(`setup_refuses_second_name_for_pinned_fingerprint`). machine mode는 프롬프트를 열지 않고 입력 오류는 아무것도 쓰기 전에 거절한다(`setup_machine_mode_rejects_missing_input_before_any_write`). 초대 코드는 `host`의 `invite` 단계 `result`에만 나가고 키 재료는 어느 출력에도 없다(`setup_output_never_carries_key_material`) |
 | 원격 파일 op 넷(`FileReadOpen`·`FileWriteOpen`·`FileListOpen`·`FileMkdirOpen`)과 `FILE_DATA` 스트림 | 인증된 peer | 경로 문자열은 peer가 정한 값이다. host는 모양 검사(길이·NUL·`~name` 거절, `INVALID_ARGUMENT`)를 ACL 앞에서 하고, 경로 그대로를 audit `resource`로 쓰며, 정책으로 인한 거절은 모두 같은 `PERMISSION_DENIED`와 같은 문면이다(행 없음, `paths` 없음·밖, 정규화 실패, 상태 경로, 재검증 불일치, 보호 inode, inode 스캔 실패, OS `EACCES`). 순서는 ADR-0029 결정 8이다: ACL의 근거 판정(정규화 없음) → 정규화 → 판정 → 사용자 힌트 → 상태 경로 → quota → 열기와 재검증. 앞 단계가 실패하면 뒤 단계는 돌지 않아, 권한이 없는 principal은 파일시스템을 건드리게 하지 못한다. `FILE_DATA` 스트림은 이 인가를 통과해 발급된 단회 ticket으로만 열리고, 스트림은 바이트만 옮긴다(인가·audit·상태 경로 판정은 control 요청의 몫이고 데이터 평면은 audit 줄을 쓰지 않는다). 알 수 없는 ticket, 청크 상한 초과, `end` 뒤의 frame, 요청자의 `result`, `size` 초과 바이트는 `BAD_HEADER` reset이다. wire 디코드는 fuzz 대상이다(`decode_file_frame`, `decode_control`) |
+| `qsh cp`가 받는 원격 항목 이름(`file.list` 응답의 `name`, 읽기 응답의 경로 사실) | 인증된 host가 정한 값 | 악의적인 host가 `..`나 `/`가 든 이름을 돌려줘 client 로컬 경로를 벗어나게 하려는 입력이다. 이름은 로컬 경로가 되기 전에 항목마다 검증하고 위반은 그 항목의 실패로 끝난다. 로컬 경로는 열린 디렉터리 fd 안에 이름 하나를 `*at` 호출로 만드는 방식으로만 생긴다(E13, ADR-0029 결정 22) |
 | `Server::dispatch` | 인증된 peer | `server/mod.rs` — 디코딩된 모든 요청의 단일 통과점 |
 
 `.proto` 디코더와 로컬 입력 파서가 이 진입점들의 첫 코드다. 그 표면 전체가 freeze 대상이자 fuzz 대상이며(`protocol.md` §16.9, ADR-0001 결과 4번째 불릿), fuzz 타깃 20종 중 19종의 상태는 [m8-fuzz.md](../campaigns/m8-fuzz.md)가 기록한다. `decode_file_frame`의 캠페인 상태는 아직 기록하지 않았다.
@@ -321,7 +323,8 @@ g1~g5는 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지 않�
 | h37 | `full` role과 넓은 `paths`는 serve 계정의 전 범위다. `file.write`는 `exec.run`과 같은 힘이고(`~/.bashrc`, `~/.ssh/authorized_keys`, 서비스 유닛 디렉터리에 쓸 수 있다), 행의 `paths`가 그런 파일을 덮으면 마찬가지다. 상태 경로 보호는 qsh 자신의 파일만 지킨다 | ADR-0029 결정 4-8 |
 | h38 | `paths` 안에 누군가 밖의 inode로 hard link를 만들어 두면 경로 판정만으로는 그 읽기를 막지 못한다(만들려면 그 디렉터리에 로컬 쓰기 권한이 필요하다). inode 대조는 qsh의 보호 트리만 본다. bind mount는 정규 경로가 마운트 지점 쪽으로 해석되므로 `paths` 안에 마운트된 밖의 트리는 안으로 보인다 | ADR-0029 결정 6-5, §7 잔여 위험 |
 | h39 | 교체로 쓰기 때문에 기존 대상 파일의 소유자·hard link·xattr·ACL이 바뀐다. scp가 제자리에서 덮어쓰는 것과 다른 점이다 | ADR-0029 결정 7 |
-| h40 | `file.read`의 보호 inode 스캔은 보호 트리의 항목이 4096개를 넘거나 깊이가 4를 넘거나 항목 하나를 검사하지 못하면 끝나지 못하고, 그 호스트는 모든 `file.read`를 균일한 `PERMISSION_DENIED`로 거절한다(`InodeScanError::TooLarge`/`Io`). 스캔 범위는 결정 6-5가 요구하는 열거된 파일보다 넓어(보호 디렉터리 아래 모든 비디렉터리 항목), config·state·runtime 디렉터리에 많은 파일을 쌓은 호스트에서 먼저 닿는다. 스캔은 요청마다 돌고 항목 수 상한이 비용을 묶는다. 거절을 읽는 쪽은 "보호 inode"와 "스캔 실패"를 구별하지 못한다. 열린 상태로 두는 쪽(fail open)보다 닫힌 쪽을 골랐다 | ADR-0029 결정 6-5·17; `guard.rs` `InodeScanError`, `ProtectedInodes` |
+| h40 | `file.read`의 보호 inode 스캔은 보호 트리의 항목이 4096개를 넘거나 깊이가 4를 넘거나 항목 하나를 검사하지 못하면 끝나지 못하고, 그 호스트는 모든 `file.read`를 균일한 `PERMISSION_DENIED`로 거절한다(`InodeScanError::TooLarge`/`Io`). 스캔 범위는 결정 6-5가 요구하는 열거된 파일보다 넓어(보호 디렉터리 아래 모든 비디렉터리 항목), config·state·runtime 디렉터리에 많은 파일을 쌓은 호스트에서 먼저 닿는다. 스캔은 요청마다 돌고 항목 수 상한이 비용을 묶는다. 거절을 읽는 쪽은 "보호 inode"와 "스캔 실패"를 구별하지 못한다. 열린 상태로 두는 쪽(fail open)보다 닫힌 쪽을 골랐다. 승인된 ADR-0029의 결정 6-5 문면은 고치지 않았고, 구현이 문면보다 넓다는 사실은 이 행과 B24가 기록한다 | ADR-0029 결정 6-5·17; `guard.rs` `InodeScanError`, `ProtectedInodes` |
+| h41 | 쓰기 전 여유 공간 검사(`size + 256 MiB`)는 같은 파일시스템을 다른 프로세스가 동시에 채우는 경우를 막지 못하고, 여러 전송이 여유가 reserve를 조금 넘는 상태에서 함께 쓰는 경우도 막지 못한다. audit 로그가 그 파일시스템에 있으면 audit writer가 쓰지 못해 fail-closed로 host의 모든 op이 멈출 수 있다. 트리 복사(`qsh cp -r`)는 전체 원자성이 없어 중간 실패 뒤 끝난 항목이 그대로 남는다 | ADR-0029 결정 13·20·결과 절. 동시 전송 수는 quota가 묶고(C15) 회복은 audit 디스크가 다시 쓰일 때 자동이다. 트리 원자성은 ADR-0029 결정 20이 의도적으로 범위 밖에 둔 성질이고 `cp_partial_failure_exits_255_and_reports_failures`가 그 보고 모양을 고정한다 |
 
 h4와 h5는 함께 읽어야 한다. revocation 메커니즘이 없고 `trust remove`도 소급되지 않으므로, 손상된 peer를 즉시 끊는 수단이 v1에는 없다. 실무적 대응은 그 연결이 끊길 때까지 기다리거나 `qsh serve`를 재시작하는 것이고, 후자는 h12에 따라 모든 세션을 끝낸다.
 
@@ -331,7 +334,7 @@ h23~h27은 사람용 표면을 훑어 처음 적은 것이다. 후보 일곱 중
 
 h32~h36은 ADR-0045(trust role)가 "잔여 위험에 다섯을 적는다"고 정한 것이다. h32~h34는 role 표가 주는 권한 자체의 폭이고 통제로 좁힐 수 없다. h35는 h5가 role로 넓어진 모양이며 M16의 ADR-0031이 닫는다. h36은 다운그레이드가 권한을 좁히는 방향이라 수용한다. 위협 표 B16~B21이 role 경로의 통제 쪽을 맡는다.
 
-h37~h40은 M15 (b)의 host 제어 평면이 원격 파일 op을 열면서 적은 것이다. h37~h39는 ADR-0029가 "잔여 위험에 적는다"고 정한 항목의 host 쪽이고, h40은 `ProtectedInodes::collect`의 범위가 결정 6-5보다 넓은 데서 오는 실패 모양을 문서에 고정한 것이다.
+h37~h41은 M15 (b)가 원격 파일 op을 열면서 적은 것이다. h37~h39와 h41은 ADR-0029가 "잔여 위험에 적는다"고 정한 항목이다(보호 디렉터리 안 열거되지 않은 파일의 hard link는 h40이 말하는 더 넓은 스캔이 덮고, 스캔이 끝나지 못하면 읽기를 거절하므로 열린 채 남는 경우가 없다). h40은 `ProtectedInodes::collect`의 범위가 결정 6-5보다 넓은 데서 오는 실패 모양을 문서에 고정한 것이다.
 
 ## 8. 운영 가정
 

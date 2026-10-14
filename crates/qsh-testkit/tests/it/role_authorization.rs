@@ -1,4 +1,4 @@
-//! PLAN M15 Step 4: the role stage of the evaluator (ADR-0045 결정 1·4·6·7·16)
+//! M15 plan Step 4 (1a4af3b): the role stage of the evaluator (ADR-0045 결정 1·4·6·7·16)
 //! driven end to end through the production wiring.
 //!
 //! Every host here gets its authorizer from [`qsh_core::acl::load_or_deny`]

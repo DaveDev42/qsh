@@ -15,8 +15,8 @@
 //! relies on). No remote round trip, no re-implementation of `Policy::
 //! decide`'s matching logic.
 //!
-//! **The trust role is an input here too** (ADR-0045 결정 10·11, PLAN M15
-//! Step 6). For a `device:<name>` principal over `--auth-path pin`, the
+//! **The trust role is an input here too** (ADR-0045 결정 10·11, M15 plan
+//! Step 6 (1a4af3b)). For a `device:<name>` principal over `--auth-path pin`, the
 //! pin of that name in this machine's `trust.toml` supplies the role, and
 //! its own fingerprint stands in for the connection's (a local query has no
 //! connection). The role goes into the same `Policy::decide` as an explicit

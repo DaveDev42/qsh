@@ -47,8 +47,8 @@ use tokio::sync::mpsc;
 
 use super::file_host::file_io_error;
 use super::*;
-use crate::file::host::{self, WriteGate};
-use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, TempGuard, Written, write_loop};
+use crate::file::host::WriteGate;
+use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, Written, write_loop};
 use crate::quota::FilePermit;
 use crate::tunnel::splice::{RESET_CODE_TUNNEL_ABORT, SEND_DEPTH_CAP_BYTES};
 use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch, StreamTrack};
@@ -348,10 +348,10 @@ async fn serve_write(
     let created = {
         let dir = Arc::clone(&dir);
         let name = job.name.clone();
-        tokio::task::spawn_blocking(move || host::create_temp(&dir, &name)).await
+        tokio::task::spawn_blocking(move || xfer::create_guarded_temp(&dir, &name)).await
     };
-    let temp = match created {
-        Ok(Ok(temp)) => temp,
+    let (temp_file, mut guard) = match created {
+        Ok(Ok(made)) => made,
         Ok(Err(e)) => {
             drop(permit);
             return finish_with(send, failure_frame(&file_io_error(&e))).await;
@@ -361,13 +361,12 @@ async fn serve_write(
             return finish_with(send, failure_frame(&internal())).await;
         }
     };
-    let mut guard = TempGuard::new(Arc::clone(&dir), temp.name.clone());
 
     // The label names the kind of stream, never the path (the ledger's
     // eviction line is a log line; paths live in the audit record only).
     let watch = StallWatch::on(conn, "file.write");
     let (tx, rx) = mpsc::channel(DISK_QUEUE_CHUNKS);
-    let writer = tokio::task::spawn_blocking(move || write_loop(rx, temp.file, gate));
+    let writer = tokio::task::spawn_blocking(move || write_loop(rx, temp_file, gate));
 
     // Scoped so the receive future, which borrows `recv`, is gone before
     // `recv` is touched again below.

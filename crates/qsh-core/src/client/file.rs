@@ -34,8 +34,8 @@ use tokio::sync::{mpsc, watch};
 
 use super::link::{DataKillSwitch, DataRecv, DataSend};
 use super::{ClientError, Session, unexpected};
-use crate::file::host::{self, WriteGate};
-use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, TempGuard, Written, write_loop};
+use crate::file::host::WriteGate;
+use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, Written, write_loop};
 use crate::tunnel::splice::{RESET_CODE_TUNNEL_ABORT, SEND_DEPTH_CAP_BYTES};
 use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch};
 
@@ -418,10 +418,10 @@ pub(crate) async fn download(
     let created = {
         let dir = Arc::clone(&dest.dir);
         let name = dest.name.clone();
-        tokio::task::spawn_blocking(move || host::create_temp(&dir, &name)).await
+        tokio::task::spawn_blocking(move || xfer::create_guarded_temp(&dir, &name)).await
     };
-    let temp = match created {
-        Ok(Ok(temp)) => temp,
+    let (temp_file, mut guard) = match created {
+        Ok(Ok(made)) => made,
         Ok(Err(e)) => {
             send.abort(RESET_CODE_TUNNEL_ABORT, &kill);
             recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
@@ -429,12 +429,11 @@ pub(crate) async fn download(
         }
         Err(_) => return Err(internal_local("file operation failed")),
     };
-    let mut guard = TempGuard::new(Arc::clone(&dest.dir), temp.name.clone());
     // A read requester sends nothing after its header (decision 9).
     send.finish();
 
     let (tx, rx) = mpsc::channel(DISK_QUEUE_CHUNKS);
-    let writer = tokio::task::spawn_blocking(move || write_loop(rx, temp.file, gate));
+    let writer = tokio::task::spawn_blocking(move || write_loop(rx, temp_file, gate));
     let pumped = {
         let pump = receive_download(&mut recv, tx, &watch, progress);
         tokio::pin!(pump);
@@ -850,14 +849,26 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let now = tokio::time::Instant::now().into_std() + Duration::from_secs(10);
-        ledger.force_writing_since(id, now - Duration::from_secs(5));
-        ledger.tick_for_test(now);
-
-        let result = tokio::time::timeout(Duration::from_secs(20), download)
-            .await
-            .expect("the download ended")
-            .expect("the download task did not panic");
+        // The first observation can be the brief write of the first chunk,
+        // which the writer takes before it blocks: a stamp forced onto it is
+        // cleared again when that write returns. The ledger is unstarted, so
+        // age the write and tick again until the download ends; once the
+        // pump sits in the blocked hand-off the next tick evicts it.
+        let mut download = download;
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let now = tokio::time::Instant::now().into_std() + Duration::from_secs(10);
+                ledger.force_writing_since(id, now - Duration::from_secs(5));
+                ledger.tick_for_test(now);
+                tokio::select! {
+                    joined = &mut download => return joined,
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the download ended")
+        .expect("the download task did not panic");
         hold.release();
         match result {
             Err(XferFailure::Local(ErrorCode::ResourceExhausted, message)) => {

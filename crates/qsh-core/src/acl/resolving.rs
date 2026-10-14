@@ -1,4 +1,4 @@
-//! The production [`Authorizer`] (ADR-0045 결정 4·6, PLAN M15 Step 3·4).
+//! The production [`Authorizer`] (ADR-0045 결정 4·6, M15 plan Step 3·4 (1a4af3b)).
 //!
 //! [`RoleResolvingAuthorizer`] pairs the [`Policy`] `acl::load` built from
 //! `acl.toml` (rows; an empty policy when the file is absent) with the
@@ -14,7 +14,7 @@
 //! authorization state, and ambiguity closes (ADR-0045 결정 6).
 //!
 //! The per-decision `trust.toml` refresh was wired and measured without a
-//! change in meaning first (PLAN M15 Step 3,
+//! change in meaning first (M15 plan Step 3 (1a4af3b),
 //! `crates/qsh-testkit/tests/it/role_resolution_cost.rs`); this is the step
 //! that makes the resolved role count.
 

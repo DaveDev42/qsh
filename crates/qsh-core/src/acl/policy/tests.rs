@@ -609,7 +609,7 @@ proptest! {
             Some(owner) => ResourceRef { id: "r", owner: Some(owner), canonical_path: None },
             None => ResourceRef::unowned("r"),
         };
-        // The role dimension (PLAN M15 Step 4): the pin of `principal`'s
+        // The role dimension (M15 plan Step 4 (1a4af3b)): the pin of `principal`'s
         // device name carries `pin_role`; the connection's fingerprint
         // matches that pin or not; the trust store's last reload failed
         // or not. `role_of_pin` is the one resolver production uses.
@@ -751,7 +751,7 @@ proptest! {
     /// `allow` patterns of every row whose principal and `auth_path` match,
     /// expanded over `Action::ALL`, minus the literal always-denied action.
     /// The resource is unowned, so `scope` is ignored. The role dimension
-    /// (PLAN M15 Step 6, ADR-0045 결정 11) joins as a union: a role counts
+    /// (M15 plan Step 6 (1a4af3b), ADR-0045 결정 11) joins as a union: a role counts
     /// only for a `device:` principal over `pin`, and grants what
     /// [`oracle_role_row`] lists.
     #[test]

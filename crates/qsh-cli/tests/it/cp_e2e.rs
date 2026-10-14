@@ -1,4 +1,4 @@
-//! L5 — `qsh cp` end to end (ADR-0029, `docs/CLI.md` §6.21), PLAN M15 Step 14.
+//! L5 — `qsh cp` end to end (ADR-0029, `docs/CLI.md` §6.21), M15 plan Step 14 (1a4af3b).
 //!
 //! Real processes, no fakes: a `qsh serve` host (forward route) or a
 //! `qsh listen` controller plus a `qsh serve --to` target (reverse route,

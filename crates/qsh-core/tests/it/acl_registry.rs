@@ -1448,7 +1448,7 @@ mod source_scan {
             .join("\n")
     }
 
-    /// ADR-0045 결정 7 / PLAN M15 Step 6: `Policy::decide` has exactly three
+    /// ADR-0045 결정 7 / M15 plan Step 6 (1a4af3b): `Policy::decide` has exactly three
     /// production call sites, all inside `qsh-core` — `Policy::check_with_role`
     /// (enforcement), `Policy::effective_actions` (`acl show`) and
     /// `Ops::acl_check` (`acl check`). The role stage ⓡ lives inside `decide`,

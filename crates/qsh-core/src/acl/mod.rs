@@ -410,7 +410,7 @@ impl fmt::Debug for CanonicalPath<'_> {
 }
 
 /// Who is asking: the authenticated identity of the connection a request
-/// arrived on, as one bundle (ADR-0045 결정 6, PLAN M15 Step 3).
+/// arrived on, as one bundle (ADR-0045 결정 6, M15 plan Step 3 (1a4af3b)).
 ///
 /// Three fields rather than three loose [`Authorizer::check`] arguments so
 /// that adding a requester-side input never again changes every call site's

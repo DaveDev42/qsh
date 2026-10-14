@@ -1,4 +1,4 @@
-//! PLAN M15 Step 15 / `docs/ROADMAP.md` M15 DoD "복사 중 PTY echo"
+//! M15 plan Step 15 (1a4af3b) / `docs/ROADMAP.md` M15 DoD "복사 중 PTY echo"
 //! (ADR-0029 decisions 14 and 15, `docs/design/testing.md` L9/L10): a
 //! recursive `qsh cp` of a tree of thousands of small files runs
 //! concurrently, on the **same QUIC connection**, with PTY-echo round trips,
