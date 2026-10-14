@@ -1,5 +1,6 @@
 //! The unix body of `file.copy`: plan, connect, run the items, assemble the
-//! result. See the parent module for the contract.
+//! result. See the parent module for the contract. The `-r` half, the tree
+//! walks of a get and a put, is in [`tree`].
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -7,7 +8,7 @@ use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use qsh_proto::types::{COPY_JSON_ENTRIES_MAX, COPY_JSON_FAILURES_MAX};
 use qsh_proto::{
@@ -25,6 +26,8 @@ use crate::file::host::{self, FsKind};
 use crate::file::operand::{self, CopyPlan, Direction};
 use crate::ops::exec::map_client_error;
 use crate::ops::{OpError, Ops, PeerRoute};
+
+mod tree;
 
 /// The longest file name a local destination accepts.
 const NAME_MAX: usize = 255;
@@ -54,6 +57,8 @@ struct Ctx {
     /// there are several sources: the host then insists on a directory).
     put_dst: String,
     reverse: bool,
+    /// `-r`.
+    recursive: bool,
 }
 
 /// What one item left behind.
@@ -73,6 +78,26 @@ enum Outcome {
 struct ItemMeta {
     remote: String,
     local: String,
+    /// `file` or `directory`.
+    kind: &'static str,
+}
+
+impl ItemMeta {
+    fn file(remote: String, local: String) -> Self {
+        Self {
+            remote,
+            local,
+            kind: "file",
+        }
+    }
+
+    fn directory(remote: String, local: String) -> Self {
+        Self {
+            remote,
+            local,
+            kind: "directory",
+        }
+    }
 }
 
 struct Done {
@@ -116,8 +141,13 @@ fn build_ctx(
         local,
         put_dst,
         reverse,
+        recursive: req.recursive,
     })
 }
+
+/// How long a canceled copy waits for the host to acknowledge before it
+/// closes the connection (`Connected::settle_before_close`).
+const CANCEL_CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) fn file_copy(
     ops: &Ops,
@@ -141,7 +171,8 @@ pub(super) fn file_copy(
     })?;
     let route = ops.resolve_exec_route(&ctx.plan.host, identity)?;
     let reverse = matches!(route, PeerRoute::Reverse(_));
-    let mut connected = ops.connect_routed(route)?;
+    // The dial and handshake give way to Ctrl-C (decision 11).
+    let mut connected = ops.connect_routed(route, cancel)?;
     let Some(mut session) = connected.take_session() else {
         return Err(OpError::new(ErrorCode::Internal, "connection already closed").into());
     };
@@ -151,6 +182,11 @@ pub(super) fn file_copy(
     let report = connected
         .runtime()
         .block_on(run(&mut session, &ctx, cancel));
+    if cancel.is_canceled() {
+        // A canceled transfer still has data in flight; let the host
+        // acknowledge before closing, or it never hears of the close.
+        connected.settle_before_close(CANCEL_CLOSE_GRACE);
+    }
     session.close();
     connected.close();
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -256,7 +292,6 @@ fn split_file_dst(path: &Path, display: &str) -> Result<LocalDst, OpError> {
 // ---------------------------------------------------------------------------
 
 struct Report {
-    total: u64,
     entries: Vec<FileCopyEntry>,
     entries_truncated: bool,
     copied: u64,
@@ -272,9 +307,8 @@ struct Report {
 }
 
 impl Report {
-    fn new(total: usize) -> Self {
+    fn new() -> Self {
         Self {
-            total: total as u64,
             entries: Vec::new(),
             entries_truncated: false,
             copied: 0,
@@ -376,7 +410,7 @@ impl Report {
         let message = format!(
             "{} of {} entries failed: {}",
             self.failed + self.not_attempted,
-            self.total,
+            self.copied + self.created + self.skipped + self.failed + self.not_attempted,
             tail
         );
         let details = FileCopyErrorDetails {
@@ -416,68 +450,135 @@ fn capability_error(reverse: bool) -> OpError {
     OpError::new(ErrorCode::Unsupported, message)
 }
 
-async fn run(session: &mut Session, ctx: &Ctx, cancel: &CancelToken) -> Report {
-    let sources = &ctx.plan.sources;
-    let total = sources.len();
-    let mut report = Report::new(total);
-    if !session.has_file_capability() {
-        report.not_attempted = total as u64;
-        report.stop(capability_error(ctx.reverse));
-        return report;
-    }
-
-    let mut tasks: JoinSet<Outcome> = JoinSet::new();
-    for (index, source) in sources.iter().enumerate() {
-        while tasks.len() >= FILE_COPY_PARALLEL {
-            join_one(&mut tasks, &mut report, ctx).await;
-        }
-        if cancel.is_canceled() {
-            report.stop(canceled_error());
-        }
-        if report.stop.is_some() {
-            report.not_attempted += (total - index) as u64;
-            break;
-        }
-        let immediate = match ctx.plan.direction {
-            Direction::Put => prepare_put(session, ctx, cancel, &mut tasks, source).await,
-            Direction::Get => prepare_get(session, ctx, cancel, &mut tasks, source).await,
-        };
-        if let Some(outcome) = immediate {
-            report.record(outcome, &*ctx.observer);
-        }
-    }
-    while !tasks.is_empty() {
-        join_one(&mut tasks, &mut report, ctx).await;
-    }
-    report
+/// One thing the run still has to do. The stack of them is walked
+/// depth-first in name order: a directory's children are pushed in reverse,
+/// so the first name pops first.
+enum Work {
+    /// An operand of the command line.
+    Top(String),
+    /// An item found while walking a remote tree (a get).
+    Get(tree::GetItem),
+    /// An item found while walking a local tree (a put).
+    Put(tree::PutItem),
 }
 
-async fn join_one(tasks: &mut JoinSet<Outcome>, report: &mut Report, ctx: &Ctx) {
-    match tasks.join_next().await {
-        Some(Ok(outcome)) => report.record(outcome, &*ctx.observer),
-        Some(Err(_)) => report.record(
-            Outcome::Entry {
+/// The state of one run: the session (control requests are made on it one at
+/// a time), the transfers in flight, what has been reported and what is left
+/// to do.
+struct Run<'a> {
+    session: &'a mut Session,
+    ctx: &'a Ctx,
+    cancel: &'a CancelToken,
+    tasks: JoinSet<Outcome>,
+    report: Report,
+    stack: Vec<Work>,
+}
+
+async fn run(session: &mut Session, ctx: &Ctx, cancel: &CancelToken) -> Report {
+    let sources = &ctx.plan.sources;
+    let mut run = Run {
+        session,
+        ctx,
+        cancel,
+        tasks: JoinSet::new(),
+        report: Report::new(),
+        stack: sources.iter().rev().map(|s| Work::Top(s.clone())).collect(),
+    };
+    if !run.session.has_file_capability() {
+        run.report.not_attempted = sources.len() as u64;
+        run.report.stop(capability_error(ctx.reverse));
+        return run.report;
+    }
+    while let Some(work) = run.stack.pop() {
+        while run.tasks.len() >= FILE_COPY_PARALLEL {
+            run.join_one().await;
+        }
+        if cancel.is_canceled() {
+            run.report.stop(canceled_error());
+        }
+        if run.report.stop.is_some() {
+            // What is still known and untried: this item and the ones
+            // queued behind it (a directory counts as one).
+            run.report.not_attempted += 1 + run.stack.len() as u64;
+            run.stack.clear();
+            break;
+        }
+        run.step(work).await;
+    }
+    while !run.tasks.is_empty() {
+        run.join_one().await;
+    }
+    run.report
+}
+
+impl Run<'_> {
+    async fn join_one(&mut self) {
+        let outcome = match self.tasks.join_next().await {
+            Some(Ok(outcome)) => outcome,
+            Some(Err(_)) => Outcome::Entry {
                 entry: Box::new(failed_entry(
-                    &ItemMeta {
-                        remote: String::new(),
-                        local: String::new(),
-                    },
+                    &ItemMeta::file(String::new(), String::new()),
                     ErrorCode::Internal,
                     "file operation failed".to_string(),
                 )),
                 side: "local",
                 stop: None,
             },
-            &*ctx.observer,
-        ),
-        None => {}
+            None => return,
+        };
+        self.record(outcome);
+    }
+
+    fn record(&mut self, outcome: Outcome) {
+        self.report.record(outcome, &*self.ctx.observer);
+    }
+
+    /// An item that ended before a transfer started.
+    fn fail(&mut self, meta: &ItemMeta, failure: XferFailure) {
+        let outcome = settle(meta, Err(failure));
+        self.record(outcome);
+    }
+
+    /// Record a directory the copy made.
+    fn created(&mut self, meta: &ItemMeta, mode: u32) {
+        let mut entry = base_entry("created", meta);
+        entry.mode = Some(mode);
+        self.record(Outcome::Entry {
+            entry: Box::new(entry),
+            side: "",
+            stop: None,
+        });
+    }
+
+    /// Record an item skipped for `reason`.
+    fn skipped(&mut self, meta: &ItemMeta, reason: &str) {
+        let mut entry = base_entry("skipped", meta);
+        entry.reason = Some(reason.to_string());
+        self.record(Outcome::Entry {
+            entry: Box::new(entry),
+            side: "",
+            stop: None,
+        });
+    }
+
+    async fn step(&mut self, work: Work) {
+        match work {
+            Work::Top(src) => match (self.ctx.plan.direction, self.ctx.recursive) {
+                (Direction::Put, false) => self.put_top(&src).await,
+                (Direction::Get, false) => self.get_top(&src).await,
+                (Direction::Put, true) => self.put_top_recursive(&src).await,
+                (Direction::Get, true) => self.get_top_recursive(&src).await,
+            },
+            Work::Get(item) => self.get_item(item).await,
+            Work::Put(item) => self.put_item(item).await,
+        }
     }
 }
 
 fn base_entry(status: &str, meta: &ItemMeta) -> FileCopyEntry {
     FileCopyEntry {
         status: status.to_string(),
-        kind: "file".to_string(),
+        kind: meta.kind.to_string(),
         remote_path: meta.remote.clone(),
         local_path: meta.local.clone(),
         bytes: None,
@@ -545,10 +646,6 @@ fn settle(meta: &ItemMeta, result: Result<Done, XferFailure>) -> Outcome {
     }
 }
 
-fn immediate(meta: &ItemMeta, failure: XferFailure) -> Option<Outcome> {
-    Some(settle(meta, Err(failure)))
-}
-
 /// A control-plane failure of one request: the host's refusal belongs to the
 /// item, anything else is the connection's.
 fn classify(err: ClientError) -> XferFailure {
@@ -582,14 +679,29 @@ fn progress_for(ctx: &Ctx, name: String, total: u64) -> impl Fn(u64) + Send + Sy
     }
 }
 
+/// The host refused for lack of a transfer slot (its per-principal or
+/// per-host quota, decision 12).
+fn is_quota_refusal(failure: &XferFailure) -> bool {
+    matches!(
+        failure,
+        XferFailure::Remote(ErrorCode::ResourceExhausted, _)
+    )
+}
+
 // ---------------------------------------------------------------------------
 // put
 // ---------------------------------------------------------------------------
 
-fn open_source(src: &str) -> Result<(File, host::StatInfo), XferFailure> {
-    // The source operand is what the person typed: a symlink there is
-    // followed, as `scp` does.
-    let md = std::fs::metadata(src).map_err(|e| local_io_failure(&e))?;
+/// Open a local source file. A source operand is what the person typed, so a
+/// symlink there is followed (`follow`), as `scp` does; a file found while
+/// walking a tree is opened without following one.
+fn open_source(src: &Path, follow: bool) -> Result<(File, host::StatInfo), XferFailure> {
+    let md = if follow {
+        std::fs::metadata(src)
+    } else {
+        std::fs::symlink_metadata(src)
+    }
+    .map_err(|e| local_io_failure(&e))?;
     if md.is_dir() {
         return Err(XferFailure::Local(
             ErrorCode::InvalidArgument,
@@ -602,7 +714,16 @@ fn open_source(src: &str) -> Result<(File, host::StatInfo), XferFailure> {
             "not a regular file".to_string(),
         ));
     }
-    let file = File::open(src).map_err(|e| local_io_failure(&e))?;
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(if follow {
+            libc::O_CLOEXEC
+        } else {
+            libc::O_CLOEXEC | libc::O_NOFOLLOW
+        });
+        options.open(src).map_err(|e| local_io_failure(&e))?
+    };
     let info = host::fstat(&file).map_err(|e| local_io_failure(&e))?;
     if info.kind != FsKind::Regular {
         return Err(XferFailure::Local(
@@ -613,79 +734,106 @@ fn open_source(src: &str) -> Result<(File, host::StatInfo), XferFailure> {
     Ok((file, info))
 }
 
-async fn prepare_put(
-    session: &mut Session,
-    ctx: &Ctx,
-    cancel: &CancelToken,
-    tasks: &mut JoinSet<Outcome>,
-    src: &str,
-) -> Option<Outcome> {
-    let mut meta = ItemMeta {
-        remote: ctx.put_dst.clone(),
-        local: src.to_string(),
-    };
-    let (file, info) = match open_source(src) {
-        Ok(opened) => opened,
-        Err(failure) => return immediate(&meta, failure),
-    };
-    let name = operand::source_name(src).unwrap_or("").to_string();
-    let request = wire::FileWriteOpen {
-        path: ctx.put_dst.clone(),
-        size: info.size,
-        mode: info.mode,
-        overwrite: !ctx.no_clobber,
-        name_if_dir: name.clone(),
-        preserve: ctx.preserve,
-        mtime: info.mtime,
-        user: ctx.user.clone(),
-    };
-    let opened = match control(cancel, session.file_write_open(request)).await {
-        Ok(opened) => opened,
-        Err(XferFailure::Remote(ErrorCode::InvalidArgument, message))
-            if ctx.no_clobber && message == "destination exists" =>
-        {
-            return immediate(&meta, XferFailure::Exists);
-        }
-        Err(failure) => return immediate(&meta, failure),
-    };
-    if opened.into_dir && !name.is_empty() {
-        meta.remote = operand::join_path(&ctx.put_dst, &name);
+/// One file to send.
+struct PutFile {
+    /// The local path to open.
+    local: std::path::PathBuf,
+    /// The local path as shown.
+    display: String,
+    /// The path on the wire.
+    remote: String,
+    /// `FileWriteOpen.name_if_dir`: the source's name for a top-level file,
+    /// empty for a file inside a tree.
+    name_if_dir: String,
+    /// Follow a symlink at `local` (an operand does, a tree entry does not).
+    follow: bool,
+}
+
+impl Run<'_> {
+    async fn put_top(&mut self, src: &str) {
+        let name = operand::source_name(src).unwrap_or("").to_string();
+        self.put_file(PutFile {
+            local: std::path::PathBuf::from(src),
+            display: src.to_string(),
+            remote: self.ctx.put_dst.clone(),
+            name_if_dir: name,
+            follow: true,
+        })
+        .await;
     }
-    let conduit = match control(cancel, session.file_conduit(opened.ticket, None)).await {
-        Ok(conduit) => conduit,
-        Err(failure) => return immediate(&meta, failure),
-    };
-    let progress = progress_for(
-        ctx,
-        if name.is_empty() {
-            src.to_string()
-        } else {
-            name
-        },
-        info.size,
-    );
-    let cancel_rx = cancel.subscribe();
-    let mode = info.mode;
-    tasks.spawn(async move {
-        let result = upload(
-            conduit,
-            UploadSource {
-                file,
-                size: info.size,
-            },
-            &progress,
-            cancel_rx,
-        )
-        .await
-        .map(|up| Done {
-            bytes: up.bytes,
-            blake3: up.blake3,
-            mode,
-            overwritten: up.overwritten,
+
+    async fn put_file(&mut self, spec: PutFile) {
+        let ctx = self.ctx;
+        let cancel = self.cancel;
+        let mut meta = ItemMeta::file(spec.remote.clone(), spec.display.clone());
+        let (file, info) = match open_source(&spec.local, spec.follow) {
+            Ok(opened) => opened,
+            Err(failure) => return self.fail(&meta, failure),
+        };
+        let request = wire::FileWriteOpen {
+            path: spec.remote.clone(),
+            size: info.size,
+            mode: info.mode,
+            overwrite: !ctx.no_clobber,
+            name_if_dir: spec.name_if_dir.clone(),
+            preserve: ctx.preserve,
+            mtime: info.mtime,
+            user: ctx.user.clone(),
+        };
+        // A refusal for lack of a transfer slot waits for one of this
+        // copy's own transfers to end and asks again; with none in flight
+        // the refusal stands (decision 12).
+        let opened = loop {
+            let attempt = control(cancel, self.session.file_write_open(request.clone())).await;
+            match attempt {
+                Err(failure) if is_quota_refusal(&failure) && !self.tasks.is_empty() => {
+                    self.join_one().await;
+                }
+                other => break other,
+            }
+        };
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(XferFailure::Remote(ErrorCode::InvalidArgument, message))
+                if ctx.no_clobber && message == "destination exists" =>
+            {
+                return self.fail(&meta, XferFailure::Exists);
+            }
+            Err(failure) => return self.fail(&meta, failure),
+        };
+        if opened.into_dir && !spec.name_if_dir.is_empty() {
+            meta.remote = operand::join_path(&spec.remote, &spec.name_if_dir);
+        }
+        let conduit = match control(cancel, self.session.file_conduit(opened.ticket, None)).await {
+            Ok(conduit) => conduit,
+            Err(failure) => return self.fail(&meta, failure),
+        };
+        let label = operand::source_name(&spec.display)
+            .unwrap_or(&spec.display)
+            .to_string();
+        let progress = progress_for(ctx, label, info.size);
+        let cancel_rx = cancel.subscribe();
+        let mode = info.mode;
+        self.tasks.spawn(async move {
+            let result = upload(
+                conduit,
+                UploadSource {
+                    file,
+                    size: info.size,
+                },
+                &progress,
+                cancel_rx,
+            )
+            .await
+            .map(|up| Done {
+                bytes: up.bytes,
+                blake3: up.blake3,
+                mode,
+                overwritten: up.overwritten,
+            });
+            settle(&meta, result)
         });
-        settle(&meta, result)
-    });
-    None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +866,14 @@ fn get_target(ctx: &Ctx, src: &str) -> Result<(Arc<File>, OsString, String), Xfe
         }
         LocalDst::File { dir, name, display } => (Arc::clone(dir), name.clone(), display.clone()),
     };
-    match host::stat_at(&dir, &name).map_err(|e| local_io_failure(&e))? {
+    check_file_dest(&dir, &name, ctx.no_clobber)?;
+    Ok((dir, name, display))
+}
+
+/// What a get may do with the name it is about to write: nothing exists
+/// there, or a regular file does and may be replaced (decision 7).
+fn check_file_dest(dir: &File, name: &OsString, no_clobber: bool) -> Result<(), XferFailure> {
+    match host::stat_at(dir, name).map_err(|e| local_io_failure(&e))? {
         Some(info) => match info.kind {
             FsKind::Symlink => Err(XferFailure::Local(
                 ErrorCode::InvalidArgument,
@@ -732,73 +887,102 @@ fn get_target(ctx: &Ctx, src: &str) -> Result<(Arc<File>, OsString, String), Xfe
                 ErrorCode::InvalidArgument,
                 "destination is not a regular file".to_string(),
             )),
-            FsKind::Regular if ctx.no_clobber => Err(XferFailure::Exists),
-            FsKind::Regular => Ok((dir, name, display)),
+            FsKind::Regular if no_clobber => Err(XferFailure::Exists),
+            FsKind::Regular => Ok(()),
         },
-        None => Ok((dir, name, display)),
+        None => Ok(()),
     }
 }
 
-async fn prepare_get(
-    session: &mut Session,
-    ctx: &Ctx,
-    cancel: &CancelToken,
-    tasks: &mut JoinSet<Outcome>,
-    src: &str,
-) -> Option<Outcome> {
-    let mut meta = ItemMeta {
-        remote: src.to_string(),
-        local: String::new(),
-    };
-    let (dir, name, display) = match get_target(ctx, src) {
-        Ok(target) => target,
-        Err(failure) => {
-            // Show where it would have landed when the destination is
-            // known.
-            if let Some(LocalDst::File { display, .. }) = &ctx.local {
-                meta.local = display.clone();
-            } else if let Some(LocalDst::Dir { display, .. }) = &ctx.local {
-                meta.local = match operand::source_name(src) {
-                    Some(name) => operand::join_path(display, name),
-                    None => display.clone(),
-                };
+/// The local side of a top-level get source, for an item that failed before
+/// it had a destination of its own.
+fn top_local_display(ctx: &Ctx, src: &str) -> String {
+    match &ctx.local {
+        Some(LocalDst::File { display, .. }) => display.clone(),
+        Some(LocalDst::Dir { display, .. }) => match operand::source_name(src) {
+            Some(name) => operand::join_path(display, name),
+            None => display.clone(),
+        },
+        None => String::new(),
+    }
+}
+
+/// One file to fetch.
+struct GetFile {
+    /// The path on the wire.
+    remote: String,
+    /// The directory it lands in.
+    dir: Arc<File>,
+    /// Its final name there (one validated component).
+    name: OsString,
+    /// The local path as shown.
+    display: String,
+}
+
+impl Run<'_> {
+    async fn get_top(&mut self, src: &str) {
+        let meta = ItemMeta::file(src.to_string(), top_local_display(self.ctx, src));
+        match get_target(self.ctx, src) {
+            Ok((dir, name, display)) => {
+                self.get_file(GetFile {
+                    remote: src.to_string(),
+                    dir,
+                    name,
+                    display,
+                })
+                .await;
             }
-            return immediate(&meta, failure);
+            Err(failure) => self.fail(&meta, failure),
         }
-    };
-    meta.local = display;
-    let opened = match control(cancel, session.file_read_open(src, &ctx.user)).await {
-        Ok(opened) => opened,
-        Err(failure) => return immediate(&meta, failure),
-    };
-    let conduit = match control(
-        cancel,
-        session.file_conduit(opened.ticket.clone(), Some("file.read")),
-    )
-    .await
-    {
-        Ok(conduit) => conduit,
-        Err(failure) => return immediate(&meta, failure),
-    };
-    let label = name.to_string_lossy().into_owned();
-    let progress = progress_for(ctx, label, opened.size);
-    let cancel_rx = cancel.subscribe();
-    let dest = DownloadDest {
-        dir,
-        name,
-        overwrite: !ctx.no_clobber,
-        preserve: ctx.preserve,
-    };
-    tasks.spawn(async move {
-        let result = download(conduit, &opened, dest, None, &progress, cancel_rx)
-            .await
-            .map(|down| Done {
-                bytes: down.bytes,
-                blake3: down.blake3,
-                mode: down.mode,
-                overwritten: down.overwritten,
-            });
-        settle(&meta, result)
-    });
-    None
+    }
+
+    async fn get_file(&mut self, spec: GetFile) {
+        let ctx = self.ctx;
+        let cancel = self.cancel;
+        let meta = ItemMeta::file(spec.remote.clone(), spec.display.clone());
+        let opened = loop {
+            let attempt =
+                control(cancel, self.session.file_read_open(&spec.remote, &ctx.user)).await;
+            match attempt {
+                Err(failure) if is_quota_refusal(&failure) && !self.tasks.is_empty() => {
+                    self.join_one().await;
+                }
+                other => break other,
+            }
+        };
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(failure) => return self.fail(&meta, failure),
+        };
+        let conduit = match control(
+            cancel,
+            self.session
+                .file_conduit(opened.ticket.clone(), Some("file.read")),
+        )
+        .await
+        {
+            Ok(conduit) => conduit,
+            Err(failure) => return self.fail(&meta, failure),
+        };
+        let label = spec.name.to_string_lossy().into_owned();
+        let progress = progress_for(ctx, label, opened.size);
+        let cancel_rx = cancel.subscribe();
+        let dest = DownloadDest {
+            dir: spec.dir,
+            name: spec.name,
+            overwrite: !ctx.no_clobber,
+            preserve: ctx.preserve,
+        };
+        self.tasks.spawn(async move {
+            let result = download(conduit, &opened, dest, None, &progress, cancel_rx)
+                .await
+                .map(|down| Done {
+                    bytes: down.bytes,
+                    blake3: down.blake3,
+                    mode: down.mode,
+                    overwritten: down.overwritten,
+                });
+            settle(&meta, result)
+        });
+    }
 }

@@ -165,12 +165,6 @@ pub async fn file_copy_over(
     cancel: &CancelToken,
 ) -> Result<FileCopyData, FileCopyError> {
     let plan = crate::file::operand::plan(req).map_err(|e| FileCopyError::usage(e.message))?;
-    if req.recursive {
-        return Err(FileCopyError::plain(OpError::new(
-            qsh_proto::ErrorCode::Unsupported,
-            "recursive copy (-r) is not available in this build",
-        )));
-    }
     copy::file_copy_on(session, plan, req, observer, cancel).await
 }
 
@@ -189,12 +183,6 @@ impl Ops {
         cancel: &CancelToken,
     ) -> Result<FileCopyData, FileCopyError> {
         let plan = crate::file::operand::plan(&req).map_err(|e| FileCopyError::usage(e.message))?;
-        if req.recursive {
-            return Err(FileCopyError::plain(OpError::new(
-                qsh_proto::ErrorCode::Unsupported,
-                "recursive copy (-r) is not available in this build",
-            )));
-        }
         self.file_copy_planned(plan, &req, observer, cancel)
     }
 

@@ -209,6 +209,12 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^file_copy_echo_under_load::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
+      # ADR-0029 decisions 14 and 15 (PLAN M15 Step 15): the same budget for
+      # a recursive copy of thousands of small files against the production
+      # audit writer, which must not refuse a record under that load.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^cp_many_small_files::/)'
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
 
   arch:
     name: arch-lint

@@ -27,15 +27,15 @@ use sha2::Digest as _;
 
 /// An isolated forward rig: a serving host that pins the client with the
 /// `full` role, and a client that pins the host by address.
-struct Forward {
-    client: Sandbox,
+pub(crate) struct Forward {
+    pub(crate) client: Sandbox,
     _host: Sandbox,
     _serve: ServeGuard,
-    work: tempfile::TempDir,
+    pub(crate) work: tempfile::TempDir,
 }
 
 impl Forward {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let host = Sandbox::initialized();
         let client = Sandbox::initialized();
         host.trust_add_with_role(CLIENT_ALIAS, None, &client.fingerprint(), "full");
@@ -49,21 +49,21 @@ impl Forward {
         }
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.work.path().join(name)
     }
 
-    fn remote(&self, name: &str) -> String {
+    pub(crate) fn remote(&self, name: &str) -> String {
         format!("{HOST_ALIAS}:{}", self.path(name).display())
     }
 
-    fn cp(&self, args: &[&str]) -> Output {
+    pub(crate) fn cp(&self, args: &[&str]) -> Output {
         let mut argv = vec!["cp"];
         argv.extend_from_slice(args);
         self.client.qsh(&argv)
     }
 
-    fn cp_json(&self, args: &[&str]) -> (i32, Value) {
+    pub(crate) fn cp_json(&self, args: &[&str]) -> (i32, Value) {
         let mut argv = vec!["cp", "--json"];
         argv.extend_from_slice(args);
         self.client.json(&argv)
@@ -73,19 +73,19 @@ impl Forward {
 /// A reverse rig. The client runs from the controller's own sandbox so it
 /// finds the controller's localctl daemon, which relays FILE_DATA to the
 /// target (`docs/design/architecture.md` §7).
-struct Reverse {
-    controller: Sandbox,
+pub(crate) struct Reverse {
+    pub(crate) controller: Sandbox,
     _target: Sandbox,
     _listen: ListenGuard,
     _reverse: ReverseGuard,
-    work: tempfile::TempDir,
+    pub(crate) work: tempfile::TempDir,
 }
 
-const TARGET_NAME: &str = "nat-target";
-const CONTROLLER_ALIAS: &str = "hub";
+pub(crate) const TARGET_NAME: &str = "nat-target";
+pub(crate) const CONTROLLER_ALIAS: &str = "hub";
 
 impl Reverse {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let controller = Sandbox::initialized();
         let target = Sandbox::initialized();
         controller.trust_add(TARGET_NAME, None, &target.fingerprint());
@@ -120,15 +120,15 @@ impl Reverse {
         }
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(crate) fn path(&self, name: &str) -> PathBuf {
         self.work.path().join(name)
     }
 
-    fn remote(&self, name: &str) -> String {
+    pub(crate) fn remote(&self, name: &str) -> String {
         format!("{TARGET_NAME}:{}", self.path(name).display())
     }
 
-    fn cp_json(&self, args: &[&str]) -> (i32, Value) {
+    pub(crate) fn cp_json(&self, args: &[&str]) -> (i32, Value) {
         let mut argv = vec!["cp", "--json"];
         argv.extend_from_slice(args);
         self.controller.json(&argv)
@@ -138,7 +138,7 @@ impl Reverse {
 /// A deterministic pseudo-random byte stream (splitmix64), so a 64 MiB file
 /// costs no extra dependency and an accidental all-zero or repeating
 /// pattern cannot hide a reordered chunk.
-fn write_random_file(path: &Path, len: usize, seed: u64) {
+pub(crate) fn write_random_file(path: &Path, len: usize, seed: u64) {
     let mut state = seed;
     let mut file = std::fs::File::create(path).expect("create random file");
     let mut written = 0usize;
@@ -160,12 +160,12 @@ fn write_random_file(path: &Path, len: usize, seed: u64) {
     file.sync_all().expect("sync random file");
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// BLAKE3 and SHA-256 of a file, streamed.
-fn digests(path: &Path) -> (String, String) {
+pub(crate) fn digests(path: &Path) -> (String, String) {
     let mut file = std::fs::File::open(path).expect("open for hashing");
     let mut blake = blake3::Hasher::new();
     let mut sha = sha2::Sha256::new();
@@ -181,13 +181,13 @@ fn digests(path: &Path) -> (String, String) {
     (blake.finalize().to_hex().to_string(), hex(&sha.finalize()))
 }
 
-fn stderr_of(output: &Output) -> String {
+pub(crate) fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// Remove the `.<name>.qsh-<hex>.part` leftovers check: no temp file may
 /// stay behind in `dir`.
-fn assert_no_part_files(dir: &Path) {
+pub(crate) fn assert_no_part_files(dir: &Path) {
     for entry in std::fs::read_dir(dir).expect("read dir") {
         let name = entry.expect("dir entry").file_name();
         let name = name.to_string_lossy();
@@ -268,7 +268,6 @@ fn cp_mixed_operands_are_invalid_argument() {
     let rig = Forward::start();
     let local = rig.path("l");
     std::fs::write(&local, b"x").unwrap();
-    let remote = rig.remote("r");
     // A local and a remote source, and a remote destination.
     let (code, value) = rig.cp_json(&[local.to_str().unwrap(), "box:/a", "box:/d"]);
     assert_eq!(code, 2, "{value}");
@@ -279,7 +278,6 @@ fn cp_mixed_operands_are_invalid_argument() {
     assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
     // Nothing was created on either side.
     assert!(!rig.path("r").exists() && !Path::new("./elsewhere").exists());
-    let _ = remote;
 }
 
 #[test]
@@ -394,7 +392,12 @@ fn cp_multiple_sources_require_an_existing_directory() {
         b.to_str().unwrap(),
         &rig.remote("missing"),
     ]);
-    assert_ne!(code, 0, "{value}");
+    // Both items fail on the host (`path is not a directory`), so the copy
+    // ends 255 with INVALID_ARGUMENT as the first failure's code.
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+    assert_eq!(value["error"]["details"]["failed"], 2, "{value}");
+    assert_eq!(value["error"]["details"]["copied"], 0, "{value}");
     assert!(!rig.path("missing").exists(), "{value}");
 
     // Into an existing directory both land.
@@ -413,7 +416,10 @@ fn cp_multiple_sources_require_an_existing_directory() {
         &rig.remote("dir/b.txt"),
         rig.path("no-such-local").to_str().unwrap(),
     ]);
-    assert_ne!(code, 0, "{value}");
+    // The local destination is checked before anything is dialed: nothing
+    // was fetched, so there is no per-item `details`.
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
     assert!(!rig.path("no-such-local").exists(), "{value}");
 }
 

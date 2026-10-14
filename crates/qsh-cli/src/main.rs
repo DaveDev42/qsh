@@ -915,7 +915,7 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     let mut data = match ops.file_copy(request, observer, &cancel) {
         Ok(data) => data,
         Err(err) if err.usage => return cp_usage_error(cli, &err.error.message, false),
-        Err(err) => return report_error(cli, FileCopyOp::COMMAND, &err.error),
+        Err(err) => return report_cp_error(cli, &err.error),
     };
     if cli.jsonl {
         // The items were streamed as `file.entry` events.
@@ -957,8 +957,13 @@ fn cp_usage_error(cli: &Cli, message: &str, scp_flag: bool) -> i32 {
     EXIT_USAGE
 }
 
-/// Cancel `cancel` on the first SIGINT, from a helper thread with its own
-/// tiny runtime (the copy itself runs on `Ops`' dial runtime).
+/// Cancel `cancel` on the first SIGINT and end the process at once on the
+/// second (`docs/CLI.md` §6.21, ADR-0029 decision 11). It runs on a helper
+/// thread with its own tiny runtime, because the copy itself blocks on
+/// `Ops`' dial runtime. The first interrupt arms the cancellation, which
+/// the dial, the handshake and every transfer honor; the second does not
+/// wait for them to wind down, so a copy stuck somewhere a token cannot
+/// reach never traps the person at the keyboard.
 fn arm_cancel_on_interrupt(cancel: &CancelToken) {
     let cancel = cancel.clone();
     std::thread::spawn(move || {
@@ -969,11 +974,35 @@ fn arm_cancel_on_interrupt(cancel: &CancelToken) {
             return;
         };
         runtime.block_on(async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+            cancel.cancel();
             if tokio::signal::ctrl_c().await.is_ok() {
-                cancel.cancel();
+                std::process::exit(EXIT_RUNTIME_FAILURE);
             }
         });
     });
+}
+
+/// A failed `qsh cp`. A machine mode gets the whole envelope. Human mode has
+/// already printed one stderr line per failed item, so what is left is one
+/// summary line that does not say any of it again.
+fn report_cp_error(cli: &Cli, err: &OpError) -> i32 {
+    if cli.wants_json() {
+        return report_error(cli, FileCopyOp::COMMAND, err);
+    }
+    let result = match render::cp::summary_line(err) {
+        Some(line) => {
+            let mut stderr = io::stderr().lock();
+            writeln!(stderr, "{line}")
+        }
+        None => human::print_error(err),
+    };
+    if let Err(io_err) = result {
+        stderr_note!("qsh: failed to write output: {io_err}");
+    }
+    EXIT_RUNTIME_FAILURE
 }
 
 /// `docs/CLI.md` §4: remote `0..=254` verbatim, remote `255` → `254`.

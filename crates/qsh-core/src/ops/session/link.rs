@@ -369,6 +369,35 @@ impl Connected {
         }
     }
 
+    /// Give the peer a bounded chance to acknowledge something before the
+    /// connection is closed (forward route; the reverse route has no
+    /// connection of its own here).
+    ///
+    /// quinn-proto will not put a `CONNECTION_CLOSE` on the wire while the
+    /// congestion window is full of unacknowledged data and stream frames
+    /// are still queued, which is exactly the state of a transfer canceled
+    /// mid-flight. Closing at once then only starts the closing timer: the
+    /// connection drains a few hundred milliseconds later without the peer
+    /// ever hearing of it, and its half of the transfer (a host's temp
+    /// file) lives until the idle timeout. An authenticated frame from the
+    /// peer is an acknowledgment that frees window, so the close frame goes
+    /// out right after. `grace` caps the wait for a peer that is gone.
+    #[cfg(unix)]
+    pub(crate) fn settle_before_close(&self, grace: Duration) {
+        let (Some(runtime), ConnectedLink::Forward(link)) = (self.runtime.as_ref(), &self.link)
+        else {
+            return;
+        };
+        let connection = link.connection();
+        runtime.block_on(async move {
+            let seen = connection.rx_frames();
+            let deadline = tokio::time::Instant::now() + grace;
+            while connection.rx_frames() == seen && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+    }
+
     /// Close the control stream and the connection, then let the QUIC close
     /// frames drain (forward route) — or just the control stream (reverse
     /// route: there is no separate connection here to close, and no QUIC
