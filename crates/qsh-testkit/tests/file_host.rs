@@ -1000,12 +1000,20 @@ async fn list_pages<R: Route>() {
     let dir = env.share.join("many");
     std::fs::create_dir(&dir).unwrap();
     let mut expected: Vec<String> = (0..1100).map(|i| format!("f{i:04}")).collect();
+    // No two names differ only by case: APFS (macOS) folds case.
     expected.extend(["B".to_string(), "Z".to_string(), "a".to_string()]);
     for name in &expected {
         std::fs::write(dir.join(name), b"").unwrap();
     }
-    // One name that is not UTF-8 cannot be listed, only counted.
-    std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name")), b"").unwrap();
+    // One name that is not UTF-8 cannot be listed, only counted. APFS
+    // (macOS) refuses to create such a name at all, so there it counts zero.
+    let unlistable =
+        match std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name")), b"") {
+            Ok(()) => 1,
+            // EILSEQ in macOS <sys/errno.h>.
+            Err(e) if cfg!(target_os = "macos") && e.raw_os_error() == Some(92) => 0,
+            Err(e) => panic!("create non-UTF-8 name: {e}"),
+        };
     expected.sort();
 
     let h = R::start(&env).await;
@@ -1018,7 +1026,7 @@ async fn list_pages<R: Route>() {
         let page = conn.list(&dir_s, &after).await.list();
         pages += 1;
         assert_eq!(page.kind, wire::FileKind::Dir as i32);
-        assert_eq!(page.unlistable, 1);
+        assert_eq!(page.unlistable, unlistable);
         assert!(page.entries.len() <= FILE_LIST_PAGE_MAX);
         if page.more {
             assert_eq!(page.entries.len(), FILE_LIST_PAGE_MAX);
