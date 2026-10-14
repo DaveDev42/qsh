@@ -105,6 +105,43 @@ impl Session {
         }
     }
 
+    /// `file.list`: one page of a directory (or the facts of a non-directory
+    /// path, with no entries), names after the cursor `after`.
+    pub(crate) async fn file_list_open(
+        &mut self,
+        path: &str,
+        after: &str,
+        user: &str,
+    ) -> Result<wire::FileListed, ClientError> {
+        let req = wire::FileListOpen {
+            path: path.to_string(),
+            after: after.to_string(),
+            user: user.to_string(),
+        };
+        match self
+            .file_request(control_message::Body::FileListOpen(req))
+            .await?
+        {
+            response::Body::FileListed(listed) => Ok(listed),
+            other => Err(unexpected("FileListOpen", &other)),
+        }
+    }
+
+    /// `file.mkdir`: make one directory on the host (or find it already
+    /// there).
+    pub(crate) async fn file_mkdir_open(
+        &mut self,
+        req: wire::FileMkdirOpen,
+    ) -> Result<wire::FileMkdirDone, ClientError> {
+        match self
+            .file_request(control_message::Body::FileMkdirOpen(req))
+            .await?
+        {
+            response::Body::FileMkdirDone(done) => Ok(done),
+            other => Err(unexpected("FileMkdirOpen", &other)),
+        }
+    }
+
     /// Open the `FILE_DATA` stream that redeems `ticket`, in band 0
     /// (decision 15). `label` names the kind of stream in the stall ledger's
     /// diagnostic (never a path); `None` registers nothing.

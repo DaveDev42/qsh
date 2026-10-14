@@ -1164,14 +1164,59 @@ impl Ops {
     /// (`qsh cp` resolves like `exec.run` does, with the identity loaded
     /// before the route, so an uninitialized device fails `CONFIG_ERROR`
     /// whatever the host name).
+    ///
+    /// The dial and handshake give way to `cancel` (Ctrl-C, ADR-0029
+    /// decision 11): the dial future is dropped, which abandons the
+    /// attempt, and the call returns `CANCELED`. `qsh-transport`'s contract
+    /// is untouched; only this caller stops waiting for it.
     #[cfg(unix)]
-    pub(crate) fn connect_routed(&self, route: PeerRoute) -> Result<Connected, OpError> {
-        match route {
-            PeerRoute::Forward(target) => self.connect_target(&target, TransportTuning::default()),
-            PeerRoute::Reverse(route) => {
-                self.connect_reverse(&route).map(|(conn, _generation)| conn)
-            }
+    pub(crate) fn connect_routed(
+        &self,
+        route: PeerRoute,
+        cancel: &crate::ops::CancelToken,
+    ) -> Result<Connected, OpError> {
+        let canceled = || OpError::new(qsh_proto::ErrorCode::Canceled, "copy canceled");
+        if cancel.is_canceled() {
+            return Err(canceled());
         }
+        let runtime = self.connect_runtime()?;
+        let connected = match route {
+            PeerRoute::Forward(target) => {
+                let dialed = runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        () = cancel.canceled() => Err(canceled()),
+                        dialed = dial_peer(&target, TransportTuning::default()) => dialed,
+                    }
+                });
+                let (endpoint, connection, session) = dialed?;
+                Connected {
+                    runtime: Some(runtime),
+                    link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+                    session: Some(session),
+                }
+            }
+            PeerRoute::Reverse(route) => {
+                let dialed = runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        () = cancel.canceled() => Err(canceled()),
+                        dialed = dial_reverse(&route) => dialed,
+                    }
+                });
+                let (session, peer_fingerprint, _generation) = dialed?;
+                Connected {
+                    runtime: Some(runtime),
+                    link: ConnectedLink::Reverse {
+                        peer_fingerprint,
+                        socket: route.socket.clone(),
+                        host: route.host.clone(),
+                    },
+                    session: Some(session),
+                }
+            }
+        };
+        Ok(connected)
     }
 
     /// [`connect`](Self::connect), also handing back what a supervised

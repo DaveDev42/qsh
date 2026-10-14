@@ -438,6 +438,14 @@ impl Server {
             Ok(target) => target,
             Err(reply) => return reply,
         };
+        // A trailing `/` asserts that the destination is a directory
+        // (decision 6-1). With a `name_if_dir` that is a claim about a
+        // directory that must already be there to hold the new one (several
+        // sources went to one destination), and nothing is made when it is
+        // not, as `file.write` does.
+        if st.must_be_dir && !req.name_if_dir.is_empty() && !target.into_dir {
+            return invalid(st.request_id, "path is not a directory");
+        }
         // Stages 3 to 5 and the recheck are behind us: only now is a
         // directory made.
         let outcome = match host::mkdir_at(&target.dir, &target.name, req.mode, req.preserve) {

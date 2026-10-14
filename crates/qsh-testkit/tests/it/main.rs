@@ -9,6 +9,8 @@ mod admission_retry_sever;
 mod attach_loopback;
 mod chaos_proxy;
 mod chaos_relay;
+mod cp_many_small_files;
+mod cp_scripted_host;
 mod dynamic_loopback;
 mod dynamic_reverse;
 mod exec_loopback;

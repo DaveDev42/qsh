@@ -1133,6 +1133,15 @@ async fn replies_for_allowed_requests<R: Route>() {
     let nested = conn.mkdir(&env.share_path("m"), "inner").await.mkdir();
     assert!(nested.created && nested.into_dir);
     assert!(env.share.join("m/inner").is_dir());
+
+    // A trailing `/` says the destination is a directory. With a
+    // `name_if_dir` that is a claim about a directory that must already be
+    // there, so a missing one is refused and nothing is made (several
+    // sources copied to one destination, `qsh cp`).
+    let missing = format!("{}/", env.share_path("not-there"));
+    let reply = conn.mkdir(&missing, "inner").await;
+    assert_eq!(reply.code(), Some(ErrorCode::InvalidArgument), "{reply:?}");
+    assert!(!env.share.join("not-there").exists());
     h.shutdown().await;
 }
 both_routes!(replies_for_allowed_requests =>

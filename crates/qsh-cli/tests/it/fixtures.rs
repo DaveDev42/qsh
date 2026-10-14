@@ -183,6 +183,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "file.copy.get.json",
     "file.copy.put.json",
     "error.file.copy.partial.json",
+    "file.copy.tree.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -2481,6 +2482,31 @@ fn golden_cp_fixtures() {
         "error.file.copy.partial.json",
         mask_work_dir(&partial, &work_path),
     );
+
+    // A recursive put: a directory made, a nested one, a file in each, and a
+    // symlink inside the tree that is skipped. The files finish in parallel,
+    // so the entries are sorted by path to make the golden deterministic.
+    let tree = work_path.join("tree");
+    std::fs::create_dir_all(tree.join("sub")).expect("tree dirs");
+    std::fs::write(tree.join("a.txt"), b"alpha\n").expect("tree file");
+    std::fs::write(tree.join("sub/b.txt"), b"beta\n").expect("tree file");
+    std::os::unix::fs::symlink("a.txt", tree.join("link")).expect("tree symlink");
+    let (code, copied) = client.json(&[
+        "cp",
+        "--json",
+        "-r",
+        tree.to_str().unwrap(),
+        &format!("{HOST_ALIAS}:{}", work_path.join("tree-copy").display()),
+    ]);
+    assert_eq!(code, 0, "{copied}");
+    assert_eq!(copied["data"]["files"], 2, "{copied}");
+    assert_eq!(copied["data"]["directories"], 2, "{copied}");
+    assert_eq!(copied["data"]["skipped"], 1, "{copied}");
+    let mut masked = mask_work_dir(&copied, &work_path);
+    if let Some(entries) = masked["data"]["entries"].as_array_mut() {
+        entries.sort_by_key(|e| e["remote_path"].as_str().unwrap_or_default().to_string());
+    }
+    check("file.copy.tree.json", masked);
 
     // The `file.entry` event line (--jsonl): the first stdout line.
     let output = client.qsh(&["cp", "--jsonl", local.to_str().unwrap(), &remote_file]);

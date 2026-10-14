@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use qsh_core::acl::{AllowAllPinned, Authorizer};
-use qsh_core::audit::MemoryAuditSink;
+use qsh_core::audit::{AuditSink, MemoryAuditSink};
 use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
 use qsh_core::client::Session;
 use qsh_core::server::Server;
@@ -316,6 +316,29 @@ impl LoopbackHarness {
         Self::start_inner(authorizer, client, server_trust, Some(policy), None, None).await
     }
 
+    /// [`Self::start_custom`] with the host writing its audit records to
+    /// `sink` instead of the in-memory one — for a test that needs the
+    /// production writer (`qsh_core::audit::RotatingAuditSink`, its bounded
+    /// queue and its fail-closed refusals) under load. [`Self::audit`] stays
+    /// empty in that case.
+    pub async fn start_custom_with_audit_sink(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+        sink: Arc<dyn AuditSink>,
+    ) -> Self {
+        Self::start_inner_with_audit(
+            authorizer,
+            client,
+            server_trust,
+            None,
+            None,
+            None,
+            Some(sink),
+        )
+        .await
+    }
+
     async fn start_inner(
         authorizer: Arc<dyn Authorizer>,
         client: TestIdentity,
@@ -323,6 +346,27 @@ impl LoopbackHarness {
         chaos: Option<ChaosPolicy>,
         admission: Option<(usize, u32, u32)>,
         quota_limits: Option<qsh_core::quota::QuotaLimits>,
+    ) -> Self {
+        Self::start_inner_with_audit(
+            authorizer,
+            client,
+            server_trust,
+            chaos,
+            admission,
+            quota_limits,
+            None,
+        )
+        .await
+    }
+
+    async fn start_inner_with_audit(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+        chaos: Option<ChaosPolicy>,
+        admission: Option<(usize, u32, u32)>,
+        quota_limits: Option<qsh_core::quota::QuotaLimits>,
+        audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Self {
         let server_identity = make_identity();
         let client_pin = server_trust.lookup_pin(&client.fingerprint);
@@ -337,6 +381,7 @@ impl LoopbackHarness {
         .expect("bind loopback");
         let host_addr = listener.local_addr().expect("local addr");
         let audit = Arc::new(MemoryAuditSink::new());
+        let host_audit: Arc<dyn AuditSink> = audit_sink.unwrap_or_else(|| audit.clone());
         let pipes = Arc::new(PipeFactory::new(64 * 1024));
         let broker = Broker::new(
             Arc::new(SystemClock),
@@ -366,14 +411,16 @@ impl LoopbackHarness {
                 let quotas = qsh_core::quota::Quotas::new(limits, Arc::new(SystemClock));
                 Server::with_admission_and_quotas(
                     authorizer,
-                    audit.clone(),
+                    host_audit.clone(),
                     broker.clone(),
                     "box",
                     gate,
                     quotas,
                 )
             }
-            None => Server::with_admission(authorizer, audit.clone(), broker.clone(), "box", gate),
+            None => {
+                Server::with_admission(authorizer, host_audit.clone(), broker.clone(), "box", gate)
+            }
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let conns: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(Vec::new()));

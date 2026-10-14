@@ -1,0 +1,59 @@
+{
+  "command": "file.copy",
+  "data": {
+    "bytes": 11,
+    "direction": "put",
+    "directories": 2,
+    "duration_ms": 0,
+    "entries": [
+      {
+        "kind": "directory",
+        "local_path": "<work>/tree",
+        "mode": 0,
+        "remote_path": "<work>/tree-copy",
+        "status": "created"
+      },
+      {
+        "blake3": "ac678d92b3d739773d18cd952cfcea443fa4a5a98ffc9554b66795bb22d5532d",
+        "bytes": 6,
+        "kind": "file",
+        "local_path": "<work>/tree/a.txt",
+        "mode": 0,
+        "overwritten": false,
+        "remote_path": "<work>/tree-copy/a.txt",
+        "status": "copied"
+      },
+      {
+        "kind": "file",
+        "local_path": "<work>/tree/link",
+        "reason": "symlink",
+        "remote_path": "<work>/tree-copy/link",
+        "status": "skipped"
+      },
+      {
+        "kind": "directory",
+        "local_path": "<work>/tree/sub",
+        "mode": 0,
+        "remote_path": "<work>/tree-copy/sub",
+        "status": "created"
+      },
+      {
+        "blake3": "488c11dd70fcd9ee40dd3e30ca2bd7be9b899ba4cce90aa65d85e3491f316e1f",
+        "bytes": 5,
+        "kind": "file",
+        "local_path": "<work>/tree/sub/b.txt",
+        "mode": 0,
+        "overwritten": false,
+        "remote_path": "<work>/tree-copy/sub/b.txt",
+        "status": "copied"
+      }
+    ],
+    "entries_truncated": false,
+    "files": 2,
+    "host": "box",
+    "skipped": 1
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
