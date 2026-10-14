@@ -130,7 +130,7 @@ pub struct LoopbackHarness {
     pub server_identity: TestIdentity,
     /// A second client identity the host also pins, as `device:phone` —
     /// only set by [`Self::start_with_quotas`], for per-principal quota
-    /// tests (`crates/qsh-testkit/tests/quota.rs`) that need two distinct
+    /// tests (`crates/qsh-testkit/tests/it/quota.rs`) that need two distinct
     /// principals against the one host. `None` for every other
     /// constructor.
     pub second_client: Option<TestIdentity>,
@@ -147,7 +147,7 @@ pub struct LoopbackHarness {
     /// it. Before this field existed, every dial's endpoint was simply
     /// dropped at the end of whatever scope built it — harmless for a
     /// connection torn down promptly, but `two_principals_have_
-    /// independent_session_budgets` (`crates/qsh-testkit/tests/quota.rs`)
+    /// independent_session_budgets` (`crates/qsh-testkit/tests/it/quota.rs`)
     /// holds its second-principal connection open across the whole test
     /// body, and nextest flagged the resulting undriven endpoint as a
     /// LEAK. `Self::shutdown` closes every endpoint stashed here.
@@ -187,7 +187,7 @@ impl LoopbackHarness {
     /// [`qsh_core::quota::QuotaLimits`] — for a quota test that also needs
     /// [`Self::start_custom`]'s caller-built `server_trust` (e.g. a
     /// CA-pinned, ACL-denied second peer alongside the quota-saturating
-    /// pinned one, `crates/qsh-testkit/tests/quota.rs`'s ACL→quota
+    /// pinned one, `crates/qsh-testkit/tests/it/quota.rs`'s ACL→quota
     /// order-pin test). [`Self::start_with_quotas`] covers the common
     /// single-identity case.
     pub async fn start_custom_with_quotas(
@@ -204,7 +204,7 @@ impl LoopbackHarness {
     /// validated_rate_per_source)` `crate::admission::Gate` instead of
     /// `crate::config::ServeConfig`'s defaults (M8 plan Step 2 (52639fc), P2-3
     /// wiring added Step 3) — the admission integration tests
-    /// (`crates/qsh-testkit/tests/admission.rs`) use a small cap so they
+    /// (`crates/qsh-testkit/tests/it/admission.rs`) use a small cap so they
     /// don't need hundreds of real connections to reach it.
     pub async fn start_with_admission(
         max_concurrent_handshakes: usize,
@@ -232,7 +232,7 @@ impl LoopbackHarness {
     /// [`Self::start`], but with an explicit
     /// [`qsh_core::quota::QuotaLimits`] instead of
     /// `crate::config::ServeConfig`'s defaults (M8 plan Step 3 (52639fc)) — for
-    /// quota integration tests (`crates/qsh-testkit/tests/quota.rs`). The
+    /// quota integration tests (`crates/qsh-testkit/tests/it/quota.rs`). The
     /// host also pins a second, distinct client identity under
     /// `device:phone` ([`Self::second_client`]/[`Self::second_dialer`]) so
     /// a per-principal test can drive two budgets against the one host
@@ -272,7 +272,7 @@ impl LoopbackHarness {
     /// combined (`start_inner` already takes both) — for a test that needs
     /// quota limits pinned down tight while the *admission* axis (handshake
     /// concurrency, per-source rate limits) is opened wide so it never becomes
-    /// the bottleneck being measured (`crates/qsh-testkit/tests/quota.rs`'s
+    /// the bottleneck being measured (`crates/qsh-testkit/tests/it/quota.rs`'s
     /// connection-/session-flood-vs-existing-session-echo tests). Single
     /// pinned client identity — no [`Self::second_client`]/
     /// [`Self::second_dialer`], same as [`Self::start_custom_with_quotas`].

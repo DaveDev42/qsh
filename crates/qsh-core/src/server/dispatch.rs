@@ -224,7 +224,7 @@ impl Server {
     /// deny) had to work to preserve (M3 plan Step 3 (2473c88).5 PR② review: a
     /// foreign principal's refused write must not also read as an `allow`
     /// in the audit log — see
-    /// `crates/qsh-testkit/tests/session_loopback.rs`'s
+    /// `crates/qsh-testkit/tests/it/session_loopback.rs`'s
     /// `session_control_binds_write_and_resize_to_the_opener`), now true by
     /// construction instead of by careful sequencing.
     /// `action` is the caller's own `crate::acl::Op::X.action()` lookup

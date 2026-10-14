@@ -195,7 +195,7 @@ struct Meta {
 /// The four facts the TTL rules read, detached from the actor so the same
 /// rule serves the reaper ([`SessionHandle::ttl_reap_reason`],
 /// [`SessionHandle::resume_deadline`]) and the `broker_ops` fuzz harness
-/// (`crates/qsh-core/tests/support/broker_ops_harness.rs`), which has no
+/// (`crates/qsh-core/tests/it/support/broker_ops_harness.rs`), which has no
 /// actor to ask and drives these four fields directly against a model.
 #[derive(Debug, Clone, Copy)]
 pub struct TtlWindow {

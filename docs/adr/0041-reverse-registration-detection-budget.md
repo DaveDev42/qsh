@@ -84,7 +84,7 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
   `[recovery].probe_interval_ms`는 attach와 역방향 등록이 공유한다. `min_dead_after_ms`와 `strikes`는 attach와 supervised 터널에만 적용한다.
 - 구현은 `PathWatchConfig::reverse_default()`, `RecoverySection::reverse_path_watch()`, `Liveness::reverse_watch`, `REVERSE_DETECTION_CEILING_MS`다. 두 reverse watch(`reverse::target::run_reverse_unix`, `reverse::listen::Listen`)가 그 값을 읽고, 값을 주지 않은 `Listen`(테스트, 임베딩)의 기본도 같은 `reverse_default()`다.
 - 새 기본은 양 끝에 같은 빌드가 들어가야 효과가 있다. 상대가 이전 빌드면 상대의 1초 watch가 먼저 연결을 끊는다. 한쪽만 키로 느슨하게 한 배포도 같다. `docs/CLI.md` §6.12·§6.13에 이 문장을 적는다.
-- ADR-0021 결과 절의 상한 문장이 "연결 종류별 상한"으로 바뀐다. `crates/qsh-cli/tests/reverse_blackout.rs`와 `crates/qsh-testkit/tests/reverse_resume_chaos.rs`는 역방향 등록의 상한을 5000ms로 보고 실제 역방향 watch 설정에서 감지 예산을 계산한다. `crates/qsh-cli/tests/attach_recovery.rs`는 2000ms로 남는다.
+- ADR-0021 결과 절의 상한 문장이 "연결 종류별 상한"으로 바뀐다. `crates/qsh-cli/tests/it/reverse_blackout.rs`와 `crates/qsh-testkit/tests/it/reverse_resume_chaos.rs`는 역방향 등록의 상한을 5000ms로 보고 실제 역방향 watch 설정에서 감지 예산을 계산한다. `crates/qsh-cli/tests/it/attach_recovery.rs`는 2000ms로 남는다.
 - 진짜로 죽은 등록이 `stale`로 표시되고 target이 재dial하기까지가 약 3.25초 늦어진다(1초에서 4.25초). 이 수치는 등록이 쓰이는 동안의 것이다(결정 8). 15초 넘게 아무것도 나르지 않은 등록은 20초 안팎이다. 역방향 route 위의 attach가 재등록을 기다리기 시작하는 시점도 그만큼 늦다. 재등록 시점부터 resume 완료까지 2초라는 약속은 그대로다.
 - 설정이 없을 때의 `PathWatchConfig` Debug 출력은 attach 쪽이 오늘과 같다. 이 불변을 구현 테스트가 byte 단위로 고정한다. 역방향 등록의 기본은 새 값이고 그 값도 테스트가 고정한다.
 - `docs/ROADMAP.md`와 `PLAN.md`의 배치는 메인 세션이 정한다.

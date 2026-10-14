@@ -3,7 +3,7 @@
 ## 1. 목적
 
 `.github/workflows/load.yml`은 고정된 N(source 8개, dial 64개, TCP 512개)으로
-`crates/qsh-cli/tests/adversarial_load.rs`를 push(main)마다 자동으로 돌리는
+`crates/qsh-cli/tests/it/adversarial_load.rs`를 push(main)마다 자동으로 돌리는
 단일 판정이다. 이 자동 실행은 회귀 감시자이지 규모 탐색이 아니다 — bound가
 실제로 어디서 깨지기 시작하는지는 사람이 더 큰 N을 손으로 돌려야 보인다.
 
@@ -22,7 +22,7 @@ main이 Dave-Windows-WSL에서 돌린 실측이
 ## 2. 전제 조건
 
 1. **Linux.** 시나리오 1의 `127.0.0.0/8` source 다중화(alias 없이 전역
-   bind)와 `/proc` 기반 RSS/fd 리더(`crates/qsh-cli/tests/common/mod.rs`의
+   bind)와 `/proc` 기반 RSS/fd 리더(`crates/qsh-cli/tests/it/common/mod.rs`의
    `rss_kib`/`open_fd_count`) 둘 다 Linux 전용이다. macOS는 `127.0.0.2` bind
    가 `Errno 49`로 실패하고 `/proc`이 없어 strict 실행 자체가 성립하지
    않는다.
@@ -68,7 +68,7 @@ rename만 막을 뿐, 이미 열려 있는 파일 핸들의 append는 디렉터�
 티켓 상한(`Server::MAX_PENDING_TICKETS_PER_CONN`, 32)에 먼저 걸렸다. 필수
 판정(4a의 in-crate fail-closed 유닛 테스트)은 이 축소와 무관하다.
 
-이 표는 `crates/qsh-cli/tests/adversarial_load.rs`의 단언과 동일하다 — 캠페인은
+이 표는 `crates/qsh-cli/tests/it/adversarial_load.rs`의 단언과 동일하다 — 캠페인은
 같은 판정을 더 큰 N으로 반복하는 것이지 새 기준을 세우는 것이 아니다.
 
 ## 4. 실행 절차
@@ -81,7 +81,7 @@ nproc
 cat /proc/sys/net/core/rmem_max
 cargo build --release -p qsh-cli
 QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh \
-  cargo nextest run -p qsh-cli --test adversarial_load --profile load --no-fail-fast
+  cargo nextest run -p qsh-cli --test it -E 'test(/^adversarial_load::/)' --profile load --no-fail-fast
 ```
 
 더 큰 N으로 손으로 반복하려면 `adversarial_load.rs`의 시나리오별 상수(source
@@ -103,7 +103,7 @@ QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh \
 | `nproc` | 8 (2026-09-10 재조회) |
 | `net.core.rmem_max` | 4194304 (2026-09-10 재조회) |
 | qsh 커밋 SHA | `2f52958` |
-| 바이너리 경로 | WSL 작업 사본 `~/Projects/github.com/qsh/target/release/qsh` (`QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh cargo nextest run -p qsh-cli --test adversarial_load --profile load`, §4) |
+| 바이너리 경로 | WSL 작업 사본 `~/Projects/github.com/qsh/target/release/qsh` (`QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh cargo nextest run -p qsh-cli --test it -E 'test(/^adversarial_load::/)' --profile load`, §4) |
 | CI 대조 실행 | `.github/workflows/load.yml` run 34148240215 (ubuntu-24.04 4 vCPU, `ulimit -n` 65536, 10-of-10) |
 
 ## 6. 회차 기록

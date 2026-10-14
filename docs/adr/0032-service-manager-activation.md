@@ -53,7 +53,7 @@
 
 10. 매니저 호출은 `qsh-core`의 `ops/service/` 안에서 `ManagerRunner` seam(argv와 제한 시간을 받아 exit 상태와 stderr 첫 줄을 돌려주는 trait 하나) 뒤에 두고, Windows의 실행 상태 질의는 그 옆의 작은 trait 하나(작업 이름을 받아 실행 중 여부를 돌려준다, ADR-0035 결정 28)로 둔다. Windows 분기의 구현은 백엔드가 서는 M19가 하고 seam은 M17 (a)가 그 모양으로 세운다. `qsh-cli`는 clap 플래그와 결과 렌더만 갖는다(`docs/design/architecture.md` §1). 테스트는 기록용 가짜 runner를 주입하며 실제 `launchctl`/`systemctl`을 부르는 테스트는 만들지 않는다. 기본 runner는 공개 `Ops::service_*` 메서드만 만든다. `*_with_home` 쌍둥이는 runner를 인자로 받는다.
 
-11. 문서와 코드의 대조를 테스트가 고정한다. `crates/qsh-core/tests/service_docs.rs`가 이미 `docs/deploy/service.md`의 `xml`/`ini` 펜스를 렌더러 출력과 대조하는 틀이므로, 같은 파일에 `service.md`의 활성화 레시피(`launchctl bootstrap …`, `systemctl --user daemon-reload`, `enable --now …`, 비활성화 레시피, Windows는 `schtasks` 레시피)를 읽어 결정 3 표의 argv 빌더 출력과 같은지 확인하는 테스트를 더한다. Windows 레시피는 ADR-0035 백엔드와 함께 들어온다. `service.md`는 같은 커밋에서 비활성화 레시피와 `--activate` 안내를 얻는다.
+11. 문서와 코드의 대조를 테스트가 고정한다. `crates/qsh-core/tests/it/service_docs.rs`가 이미 `docs/deploy/service.md`의 `xml`/`ini` 펜스를 렌더러 출력과 대조하는 틀이므로, 같은 파일에 `service.md`의 활성화 레시피(`launchctl bootstrap …`, `systemctl --user daemon-reload`, `enable --now …`, 비활성화 레시피, Windows는 `schtasks` 레시피)를 읽어 결정 3 표의 argv 빌더 출력과 같은지 확인하는 테스트를 더한다. Windows 레시피는 ADR-0035 백엔드와 함께 들어온다. `service.md`는 같은 커밋에서 비활성화 레시피와 `--activate` 안내를 얻는다.
 
 12. `launchctl`의 label과 `systemctl`의 유닛 이름은 오늘의 `io.qsh.<mode>`, `qsh-<mode>.service` 그대로다. `reverse` 유닛은 파일 이름과 label만 `reverse`라는 §6.18 규칙도 그대로다. 로그인 세션 밖 상시 기동은 qsh가 어느 플랫폼에서도 자동으로 설정하지 않는다. `--activate`는 linger를 켜지 않고, LaunchDaemon을 설치하지 않으며, Windows에서 상시 기동 작업을 등록하지 않는다. 플랫폼마다 사람이 치는 레시피가 `docs/deploy/service.md`에 있다. Linux는 `loginctl enable-linger $USER`(오늘 있다), macOS는 결정 13의 LaunchDaemon, Windows는 ADR-0035 결정 27의 상시 기동 작업이다. 시스템 스코프 systemd 유닛(`/etc/systemd/system`)은 linger가 같은 효과를 내므로 레시피를 따로 두지 않는다.
 
@@ -121,7 +121,7 @@ argv를 문서와 대조하는 테스트는 이미 있는 장치(`service_docs.r
   - `activate_does_not_restart_an_already_active_unit`: active 응답에서 `bootstrap`/`restart`가 호출되지 않고 `activation`이 `already_active`다.
   - `deactivate_runs_before_the_unit_file_is_removed`, `a_failed_deactivate_keeps_the_unit_file`.
   - `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code`, `a_manager_call_past_the_deadline_is_timeout`.
-  - `service_md_activation_recipes_match_the_argv_builders`(`crates/qsh-core/tests/service_docs.rs`).
+  - `service_md_activation_recipes_match_the_argv_builders`(`crates/qsh-core/tests/it/service_docs.rs`).
 - fixture: `crates/qsh-cli/tests/fixtures/cli-v1/`에 플래그를 준 호출의 성공 envelope 세 개(`activation`, `deactivation`, `active`)를 append하고 `REQUIRED_FIXTURES`에 등록한다. 기존 service fixture는 바뀌지 않는다. `qsh.cli/v1`은 additive만 쓰고, wire 프로토콜과 `ErrorCode`는 변하지 않는다.
 - `docs/deploy/service.md`가 비활성화 레시피와 `--activate` 안내를 얻는다. launchd 절의 "LaunchDaemon은 이 문서의 범위가 아니다" 문단은 결정 13의 LaunchDaemon 펜스, 설치·해제 레시피, 바이너리 이동 시 절차로 바뀐다. 상시 기동 레시피 가운데 linger와 LaunchDaemon에는 "`platform` keystore면 먼저 `qsh identity move-key --to file`"이라는 한 줄이 붙는다. Windows 상시 기동 작업 레시피에는 그 줄 대신, `Password` 주체 작업이 프로필과 DPAPI를 적재하므로 Credential Manager 키를 그대로 읽는다는 한 줄이 붙는다(결정 15의 실측 결과가 반대면 다른 두 레시피와 같은 줄이 붙는다). 같은 파일이 Windows 절의 `--activate` 안내와 비활성화 레시피(`/End`, `/Delete /F`)를 얻는다. `docs/adr/README.md` 목록의 이 ADR 상태 열을 `승인됨`으로 고치고 ADR-0024 결정 11의 "별도 결정" 문장이 이 ADR을 가리키게 하는 것은 승인 뒤 같은 커밋에서 한다.
 - 2026-10-13 개정분의 착지 항목은 아래와 같다.

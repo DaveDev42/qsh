@@ -115,7 +115,7 @@ pin 조회에는 설계가 피해야 할 성질이 하나 있다. `SharedTrustSt
 ## 결과
 
 - `docs/CLI.md`가 바뀐다. §2.4 목록과 §2.5 "인가 불요" 행에 `setup.run`을 더하고, §6.18 뒤에 `qsh setup` 절을 신설한다. 번호는 ADR-0025의 `acl show` 절과의 착지 순서로 정한다. 새 절은 결정 2의 역할 표, 결정 8의 어휘 표, 결정 10의 exit 규칙, 그리고 `setup`이라는 host 별칭이 이 서브커맨드에 가려진다는 사실을 담는다. §4의 exit code 표는 바뀌지 않는다. `qsh.cli/v1`은 additive로만 는다. `docs/PRD.md` §11 명령 체계 표에 `qsh setup` 행이 는다.
-- `crates/qsh-proto`에 `SetupRunReq`·`SetupRunData`·`SetupStep`이 붙는다. fixture는 append만 한다. 예컨대 `setup.run.host_pending_acl.json`, `setup.run.client_complete.json`, `error.INVALID_ARGUMENT.setup_missing_input.json`을 더하고 `REQUIRED_FIXTURES`에 등록한다. `layer_2_every_schema_command_has_all_six_faces`가 새 command를 덮고, `crates/qsh-core/tests/acl_registry.rs`의 "인가 불요" 목록에 `setup.run`이 는다. `capabilities.json`은 wire capability 목록이라 바뀌지 않고 `docs/design/protocol.md` §16에 닿는 변경도 없다.
+- `crates/qsh-proto`에 `SetupRunReq`·`SetupRunData`·`SetupStep`이 붙는다. fixture는 append만 한다. 예컨대 `setup.run.host_pending_acl.json`, `setup.run.client_complete.json`, `error.INVALID_ARGUMENT.setup_missing_input.json`을 더하고 `REQUIRED_FIXTURES`에 등록한다. `layer_2_every_schema_command_has_all_six_faces`가 새 command를 덮고, `crates/qsh-core/tests/it/acl_registry.rs`의 "인가 불요" 목록에 `setup.run`이 는다. `capabilities.json`은 wire capability 목록이라 바뀌지 않고 `docs/design/protocol.md` §16에 닿는 변경도 없다.
 - 이 결정을 고정할 테스트다. 이름은 구현 시 확정한다.
   - `setup_never_writes_acl_toml_in_any_role`: 네 역할 각각, `acl.toml`이 없을 때와 있을 때 모두 실행 뒤 존재 여부와 바이트가 같다.
   - `setup_rerun_after_completion_changes_no_file`: 쓰는 단계가 모두 `already`나 `skipped`인 재실행 뒤 config 디렉터리와 유닛 경로의 모든 파일 바이트가 같다.
@@ -125,7 +125,7 @@ pin 조회에는 설계가 피해야 할 성질이 하나 있다. `SharedTrustSt
   - `setup_trust_add_always_carries_cert_pem`: 결정 3의 탐침 차단.
   - `setup_mode_config_pending_on_wrong_run_mode`: 결정 8. `[serve].to`가 `--to`와 다른 경우를 포함한다.
   - `setup_output_never_carries_key_material`: 모든 역할의 stdout·stderr와 오류 envelope에 키 재료가 없고, 초대 코드는 `host`의 `invite` 단계 `result`에만 있다.
-  - `setup_step_vocabulary_matches_cli_md`: 단계 id·상태 어휘와 `docs/CLI.md` 새 절 표의 일치. `crates/qsh-core/tests/doctor_docs.rs`의 잠금 어휘 규율을 따른다.
+  - `setup_step_vocabulary_matches_cli_md`: 단계 id·상태 어휘와 `docs/CLI.md` 새 절 표의 일치. `crates/qsh-core/tests/it/doctor_docs.rs`의 잠금 어휘 규율을 따른다.
   - `xtask/src/arch.rs`의 `crates/qsh-core/src/setup/` 금지 토큰 여덟과 `broker/` 중첩 디렉터리 자기 테스트 형식의 자기 테스트. 새 범위이므로 그 파일이 경고한 `//` 주석 제거 방식을 다시 확인한다.
   - 재시작 상수를 뽑은 뒤에도 doctor 두 remedy의 문면이 바이트 단위로 같고, `--forward` 확장 뒤에도 `minimal_policy_example_fills_in_actual_pinned_peer_names` 등 기존 예시 행 테스트가 그대로 초록이다.
 - `docs/man/`에 `qsh-setup` 계열 페이지가 생긴다. `cargo xtask man`으로 생성하고 `checked_in_man_pages_match_the_generator`가 대조한다.

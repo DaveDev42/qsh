@@ -17,7 +17,7 @@ rcgen.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
 # `raw_quic`: a raw client `quinn::Endpoint` bound to a caller-chosen
-# loopback source address, for `crates/qsh-cli/tests/adversarial_load.rs`
+# loopback source address, for `crates/qsh-cli/tests/it/adversarial_load.rs`
 # scenario 1's spoofed-flood harness (`docs/campaigns/
 # m8-adversarial-load.md` §2). `qsh_transport::Dialer::dial` always binds
 # `0.0.0.0` with no seam to override it, and admission's `Gate::decide`
@@ -30,15 +30,15 @@ zeroize.workspace = true
 
 [dev-dependencies]
 qsh-proto.workspace = true
-# `tests/file_host.rs` hashes the bytes it sends and receives over `FILE_DATA`
+# `tests/it/file_host.rs` hashes the bytes it sends and receives over `FILE_DATA`
 # the way the host does (ADR-0029 decision 10).
 blake3.workspace = true
-# `tests/resume_secrecy.rs` captures every tracing event the host and the
+# `tests/it/resume_secrecy.rs` captures every tracing event the host and the
 # client emit during a resume and asserts the credential is in none of them.
 tracing.workspace = true
 tracing-subscriber.workspace = true
 base64.workspace = true
-# `tests/reverse_lost_cause_and_since_registered_ms.rs`: parses a real
+# `tests/it/reverse_lost_cause_and_since_registered_ms.rs`: parses a real
 # `ReconnectEvent`/`RegistrationEvent` `at` field as RFC3339 (issue #4 item
 # 6) — the workspace-pinned version, same as `qsh-core`'s own `now_rfc3339`.
 time.workspace = true

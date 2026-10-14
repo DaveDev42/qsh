@@ -158,7 +158,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
 /// yet. `message`/`remedy` are also pinned: `docs/CLI.md` §6.13,
 /// `docs/PRD.md` §6, and `README.md`'s "Known limitations" section each
 /// embed them verbatim, and an integration test
-/// (`crates/qsh-core/tests/doctor_docs.rs`) asserts the docs and this
+/// (`crates/qsh-core/tests/it/doctor_docs.rs`) asserts the docs and this
 /// constant never drift apart.
 pub struct Diagnostic {
     pub id: DiagnosticId,

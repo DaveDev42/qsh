@@ -30,7 +30,7 @@ fn transport_config_sets_send_fairness_and_tunnel_receive_window() {
 
 /// M4 Step 7's loud regression guard for
 /// [`TUNNEL_STREAM_RECEIVE_WINDOW`]: the DoD 3 loopback throughput
-/// ratio gate (`crates/qsh-testkit/tests/tunnel_throughput.rs`)
+/// ratio gate (`crates/qsh-testkit/tests/it/tunnel_throughput.rs`)
 /// structurally *cannot* catch a window regression — even with a
 /// stock-quinn baseline (`Dialer::dial_stock_transport`), a loopback
 /// path's near-zero RTT means almost any window value clears the
@@ -265,7 +265,7 @@ fn debug_never_prints_the_private_key() {
 }
 
 /// A trust store that pins nothing and trusts no CA — same role as
-/// `crates/qsh-transport/tests/loopback.rs`'s `make_identity`, but
+/// `crates/qsh-transport/tests/it/loopback.rs`'s `make_identity`, but
 /// this module cannot import from an integration test file, so it
 /// gets its own tiny copy.
 fn test_pair() -> ((LocalIdentity, Fingerprint), (LocalIdentity, Fingerprint)) {

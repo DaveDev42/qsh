@@ -699,7 +699,7 @@ fn stale_host_not_found(
 /// text (issue #5), extracted verbatim from what
 /// `crate::ops::resolve_peer_address`'s `ok_or_else` used to build
 /// inline. `error.HOST_NOT_FOUND.json` (`qsh exec nowhere`,
-/// `crates/qsh-cli/tests/fixtures.rs`) compares this message byte for
+/// `crates/qsh-cli/tests/it/fixtures.rs`) compares this message byte for
 /// byte, so it is kept exactly as it read before issue #5 gave `exec`
 /// [`Ops::resolve_host_route`]'s own routing (fixtures are append-only —
 /// `CLAUDE.md`) — even though [`unconfigured_host_not_found`] below says
@@ -1066,7 +1066,7 @@ impl Ops {
     /// is itself already executing inside a Tokio runtime panics ("Cannot
     /// start a runtime from within a runtime"). PR 5b's own callers are all
     /// sync (`Ops::host_list`, `Ops::host_get`, the CLI frontend), so this
-    /// is not reached today — `crates/qsh-testkit/tests/host_list_reverse.rs`
+    /// is not reached today — `crates/qsh-testkit/tests/it/host_list_reverse.rs`
     /// calls this method from `#[tokio::test]` code via
     /// `tokio::task::spawn_blocking`, which sidesteps the panic by running
     /// the `block_on` on a blocking-pool thread rather than the calling
@@ -1126,7 +1126,7 @@ impl Ops {
     /// external-process host, or any other async entry point — that needs
     /// the same routing decision without the sync method's "cannot start a
     /// runtime from within a runtime" hazard — so that caller never has to
-    /// reach for `crates/qsh-testkit/tests/host_list_reverse.rs`'s
+    /// reach for `crates/qsh-testkit/tests/it/host_list_reverse.rs`'s
     /// `spawn_blocking` workaround the way today's sync-only callers do.
     pub async fn resolve_host_route_async(&self, name: &str) -> Result<HostRoute, OpError> {
         let reverse = self.reverse_host_entries_async().await;

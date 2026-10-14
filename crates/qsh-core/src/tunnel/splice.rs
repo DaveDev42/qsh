@@ -80,7 +80,7 @@ const SPLICE_BUF_LEN: usize = 64 * 1024;
 /// therefore quinn's own connection-driver task — gets scheduled to ask.
 ///
 /// **Measured evidence (M4 Step 7 DoD 4).** The saturated-tunnel-vs-PTY-
-/// echo gate (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`),
+/// echo gate (`crates/qsh-testkit/tests/it/tunnel_echo_under_load.rs`),
 /// fixed to saturate host→client (the direction that actually contends
 /// with PTY output on the host's own send scheduler) and to measure a
 /// genuine client-originated round trip, first measured p95=30.579ms

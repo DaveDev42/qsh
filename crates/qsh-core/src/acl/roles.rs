@@ -2,7 +2,7 @@
 //!
 //! One closed constant. The evaluator, `acl show`, doctor and the renderers
 //! read [`ROLE_GRANTS`] and nothing else, so no second copy of the table can
-//! drift. `crates/qsh-core/tests/acl_docs.rs` pins it to `docs/CLI.md` §6.11
+//! drift. `crates/qsh-core/tests/it/acl_docs.rs` pins it to `docs/CLI.md` §6.11
 //! and `docs/PRD.md` §9.
 
 use crate::trust::TrustRole;

@@ -3,7 +3,7 @@
 //!
 //! This is not a test fixture that happens to live in `qsh-core` — it is
 //! the one table both this milestone's exhaustive uniformity test
-//! (`crates/qsh-testkit/tests/acl_uniformity.rs`) and M5 plan Step 8 (2473c88)'s
+//! (`crates/qsh-testkit/tests/it/acl_uniformity.rs`) and M5 plan Step 8 (2473c88)'s
 //! SC6 op registry enumeration are meant to consume. Adding a new
 //! remote-facing deny seam (a new control-stream op, a new inline gate, a
 //! new registration-time check) without adding a row here is a defect:

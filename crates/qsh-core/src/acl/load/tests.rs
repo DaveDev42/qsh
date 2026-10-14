@@ -933,7 +933,7 @@ fn load_or_deny_on_loaded_policy_has_no_diagnostic_and_evaluates_rules() {
 // explicit `auth_path = "ca"` rule does. No CA issuance harness exists
 // at the real-binary level yet (private CA is M6 scope,
 // `crate::trust`'s own module doc), so this exercises the same
-// `AuthPath` distinction `crates/qsh-cli/tests/acl_enforcement.rs`'s
+// `AuthPath` distinction `crates/qsh-cli/tests/it/acl_enforcement.rs`'s
 // owed tests (1)/(2)/(3)/(5) exercise for the pin path, through the
 // one function production actually calls (`load_or_deny`), not just
 // `Policy::decide` against a hand-built `Policy` (`policy.rs`'s own

@@ -243,7 +243,7 @@ pub struct Session {
 }
 
 /// Data payload of `schema.get` (`docs/CLI.md` §6.10). Serves exactly the
-/// JSON Schemas `crates/qsh-cli/tests/fixtures.rs` generates for golden
+/// JSON Schemas `crates/qsh-cli/tests/it/fixtures.rs` generates for golden
 /// fixture validation — one source (`docs/design/testing.md` L6),
 /// `qsh_proto::schema` is where both sides read them from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

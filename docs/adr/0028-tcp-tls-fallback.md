@@ -25,7 +25,7 @@ ADR-0005는 TCP fallback을 P1으로 미루면서 두 가지만 정했다. wire 
 - 계약 trait(`MuxConn`, `SendHalf`, `RecvHalf`)은 `qsh-transport` 안에서 비공개다. 두 backend가 같은 적합성 스위트를 통과하는 것이 계약이다. `docs/design/testing.md` L4가 mock transport를 기각하므로 열린 trait 집합이 줄 이득은 없다.
 - `qsh-core`의 `Cargo.toml`에서 quinn 의존을 지우고, `cargo xtask arch`에 `crates/qsh-core/src`와 `crates/qsh-cli/src`의 `quinn` 토큰 금지(디렉터리 범위)를 더한다. 의존 행렬은 `qsh-*` crate만 보므로 이 금지가 따로 필요하다.
 - carrier enum의 `Quic` variant(`ControlLink`, `DataLink`, `DataSend`, `DataRecv`, `ForwardCarrier`, `OpenedTunnel`, `AcceptDispatch`)는 `Direct`로, `into_raw_quic`은 `into_raw_direct`로 바꾼다. 이 variant가 가르는 축은 transport가 아니라 직접 연결과 localctl 중계이므로, TCP가 같은 variant 아래에 들어간 뒤에 `Quic`이라는 이름은 틀린 말이 된다.
-- `Connection::quinn()`은 `#[doc(hidden)] pub`으로 남는다. `qsh-transport`의 백엔드 통합 테스트(`tests/loopback.rs`의 handshake data downcast, `tests/reset_key.rs`)가 별도 crate라서 부르기 때문이다. `qsh-core`와 `qsh-cli`의 호출은 `xtask arch`가 막는다.
+- `Connection::quinn()`은 `#[doc(hidden)] pub`으로 남는다. `qsh-transport`의 백엔드 통합 테스트(`tests/it/loopback.rs`의 handshake data downcast, `tests/it/reset_key.rs`)가 별도 crate라서 부르기 때문이다. `qsh-core`와 `qsh-cli`의 호출은 `xtask arch`가 막는다.
 
 ### 결정 1. 선택 정책: `[transport].mode` = `quic`(기본) | `tcp` | `auto`
 
@@ -72,7 +72,7 @@ TCP에서 `keep_alive_ms` 동안 mux 프레임을 보내지 않았으면 `PING`�
 - (iv) `mode = "quic"`(기본)은 fallback을 금지한다.
 - (v) `docs/design/threat-model.md` §7 잔여 위험에 h행을 더한다. "`auto`에서 UDP를 막는 on-path 공격자는 migration 없는 TCP 경로를 강제할 수 있다."
 
-동등성 논거: 인증은 두 transport에서 같다. 같은 `QshPeerVerifier`(pin → CA → 거부), TLS 1.3만, ALPN `qsh/1`, 0-RTT·ticket·resumption 금지, SNI 끔이다. 강제 downgrade가 빼앗는 것은 migration, 손실 아래 PTY 격리, 일부 가용성이고 기밀성과 신원은 아니다. 워크스페이스 rustls가 `tls12` feature를 켜므로 TCP 경로도 `with_protocol_versions(&[TLS13])`를 유지해야 한다. 이 성질은 `crates/qsh-transport/tests/loopback.rs` 형식의 TLS 설정 동등성 단언과 "QUIC 인증 실패는 TCP 시도를 부르지 않는다" 테스트로 고정한다.
+동등성 논거: 인증은 두 transport에서 같다. 같은 `QshPeerVerifier`(pin → CA → 거부), TLS 1.3만, ALPN `qsh/1`, 0-RTT·ticket·resumption 금지, SNI 끔이다. 강제 downgrade가 빼앗는 것은 migration, 손실 아래 PTY 격리, 일부 가용성이고 기밀성과 신원은 아니다. 워크스페이스 rustls가 `tls12` feature를 켜므로 TCP 경로도 `with_protocol_versions(&[TLS13])`를 유지해야 한다. 이 성질은 `crates/qsh-transport/tests/it/loopback.rs` 형식의 TLS 설정 동등성 단언과 "QUIC 인증 실패는 TCP 시도를 부르지 않는다" 테스트로 고정한다.
 
 ### 결정 8. admission과 quota는 같은 표를 쓰고 `transport`를 additive 필드로 드러낸다
 
@@ -105,15 +105,15 @@ TCP에서 `keep_alive_ms` 동안 mux 프레임을 보내지 않았으면 `PING`�
 ## 결과
 
 - M14 (a)는 이 ADR의 승인 전에 착지할 수 있다(`docs/ROADMAP.md` M14 착수 조건). 결정 0이 그 모양이다. (c)는 승인 뒤에 연다.
-- DoD (a)의 "`qsh-core` 비테스트 코드에 `quinn::` 경로가 남지 않음"은 결정 0의 arch 금지로 강제한다. `qsh-core`와 `qsh-cli`에 남는 자리는 없다. 워크스페이스에서 quinn을 계속 쓰는 곳은 셋이고 사유가 있다. `qsh-transport` 자신(QUIC 백엔드와 그 백엔드 테스트), `crates/qsh-testkit/src/raw_quic.rs`(Initial flood를 위조하는 비-qsh QUIC 클라이언트. 중립 API로는 손으로 만든 QUIC peer를 표현할 수 없다), `crates/qsh-testkit/tests/tunnel_throughput.rs`의 raw quinn 기준선(`tunnel_throughput_meets_raw_quinn_ratio`, M4 DoD 3의 비교 대상이 정의상 raw quinn이다)이다.
+- DoD (a)의 "`qsh-core` 비테스트 코드에 `quinn::` 경로가 남지 않음"은 결정 0의 arch 금지로 강제한다. `qsh-core`와 `qsh-cli`에 남는 자리는 없다. 워크스페이스에서 quinn을 계속 쓰는 곳은 셋이고 사유가 있다. `qsh-transport` 자신(QUIC 백엔드와 그 백엔드 테스트), `crates/qsh-testkit/src/raw_quic.rs`(Initial flood를 위조하는 비-qsh QUIC 클라이언트. 중립 API로는 손으로 만든 QUIC peer를 표현할 수 없다), `crates/qsh-testkit/tests/it/tunnel_throughput.rs`의 raw quinn 기준선(`tunnel_throughput_meets_raw_quinn_ratio`, M4 DoD 3의 비교 대상이 정의상 raw quinn이다)이다.
 - DoD (a)의 "테스트 파일은 import 경로와 타입 이름 외에는 고치지 않는다"에서 벗어난 편집이 있다. 모두 기계적인 접근자 교체이고 단언하는 값은 같다. 이 ADR을 승인할 때 함께 받아들일지 정한다.
-  - `.quinn().stats().path.rtt` → `.rtt()`: `crates/qsh-cli/tests/adversarial_load.rs`, `crates/qsh-testkit/tests/tunnel_echo_under_load.rs`, `crates/qsh-testkit/tests/tunnel_stalled_streams.rs`.
+  - `.quinn().stats().path.rtt` → `.rtt()`: `crates/qsh-cli/tests/it/adversarial_load.rs`, `crates/qsh-testkit/tests/it/tunnel_echo_under_load.rs`, `crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`.
   - `.quinn().stats().frame_rx.{data_blocked,stream_data_blocked}` → `.stats().{peer_blocked_events,peer_stream_blocked_events}`: `tunnel_stalled_streams.rs`.
-  - `.quinn().stats().path.lost_packets` → `.stats().lost_packets.unwrap_or_default()`: `crates/qsh-testkit/tests/chaos_proxy.rs`.
-  - `.quinn()` 호출 제거(facade가 같은 메서드를 가진다): `crates/qsh-testkit/tests/serve_restart_reset.rs`, `crates/qsh-core/src/localctl/daemon/tests.rs`, `crates/qsh-core/src/tunnel/{splice,stall}/tests.rs`.
-  - `is_crypto_failure(&err)` → `is_crypto_failure(&err.clone().into())`: `crates/qsh-transport/tests/handshake_matrix.rs`(백엔드 수준 테스트라 `err`가 아직 quinn 타입이다).
+  - `.quinn().stats().path.lost_packets` → `.stats().lost_packets.unwrap_or_default()`: `crates/qsh-testkit/tests/it/chaos_proxy.rs`.
+  - `.quinn()` 호출 제거(facade가 같은 메서드를 가진다): `crates/qsh-testkit/tests/it/serve_restart_reset.rs`, `crates/qsh-core/src/localctl/daemon/tests.rs`, `crates/qsh-core/src/tunnel/{splice,stall}/tests.rs`.
+  - `is_crypto_failure(&err)` → `is_crypto_failure(&err.clone().into())`: `crates/qsh-transport/tests/it/handshake_matrix.rs`(백엔드 수준 테스트라 `err`가 아직 quinn 타입이다).
   - `xtask/src/arch/tests.rs`: 디렉터리 범위 금지가 하나 늘어 누락 대상 수 단언이 8에서 9가 됐고, `daemon.rs` 예외를 보이던 fixture에서 `use quinn::Endpoint;` 줄을 뺐다.
-- 적합성 스위트(`crates/qsh-transport/tests/conformance.rs`)에서 얻은 사실 하나를 (c)에 넘긴다. quinn은 stream 자리를 window의 1/8 단위로 묶어 돌려주므로 stream 하나가 끝난 직후에도 `open_bi`가 막혀 있을 수 있다. TCP mux의 포화 테스트는 stream마다 자리가 바로 돌아온다고 가정하지 않는다.
+- 적합성 스위트(`crates/qsh-transport/tests/it/conformance.rs`)에서 얻은 사실 하나를 (c)에 넘긴다. quinn은 stream 자리를 window의 1/8 단위로 묶어 돌려주므로 stream 하나가 끝난 직후에도 `open_bi`가 막혀 있을 수 있다. TCP mux의 포화 테스트는 stream마다 자리가 바로 돌아온다고 가정하지 않는다.
 - wire: application protocol과 `.proto` v1은 바뀌지 않는다. `docs/design/protocol.md` §16.2에 mux 행이 하나 더해진다. freeze 발효 전이므로 §16.1 목록도 같은 커밋에서 갱신한다.
 - 계약: `qsh.cli/v1`에 additive `transport` 필드가 생기고 `capabilities.json` golden이 바뀐다. `hosts.toml`의 `transport` 키, `[transport].mode`, `[serve].tcp_bind`, `--transport`, `--tcp-bind`, 주소 scheme이 `docs/CLI.md`에 오른다.
 - threat model: §3에 TCP listener와 mux 파서 진입점, §4 C에 행, §7에 `auto` downgrade h행이 핀 테스트와 함께 오른다.

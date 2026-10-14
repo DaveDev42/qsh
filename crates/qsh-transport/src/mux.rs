@@ -5,7 +5,7 @@
 //! [`RecvStream`](crate::RecvStream) are closed enums over the backends, and
 //! each enum's variant payload implements one of the traits below. The
 //! traits are private on purpose: they exist so that adding a backend with a
-//! missing method fails to compile, and so that `tests/conformance.rs` has
+//! missing method fails to compile, and so that `tests/it/conformance.rs` has
 //! one behavior list to hold every backend to. They are not a seam for
 //! mocking a transport (`docs/design/testing.md` L4), and no `dyn` or
 //! generic parameter reaches `qsh-core`: dispatch is a `match` over a

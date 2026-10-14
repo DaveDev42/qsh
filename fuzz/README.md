@@ -274,11 +274,11 @@ tests and fixtures — not random bytes — per target:
   stays dead across further rotations, a `ReadAt` that surfaces only
   pushed controls, and a session marked `closing` that survives two
   `Reap` passes well past its TTL. Generated (not hand-typed) by
-  `crates/qsh-core/tests/broker_ops_corpus.rs`'s `#[ignore]` test
+  `crates/qsh-core/tests/it/broker_ops_corpus.rs`'s `#[ignore]` test
   `regenerate_seeds` (`BROKER_OPS_WRITE_SEEDS=1 cargo nextest run -p
   qsh-core -E 'test(regenerate_seeds)' --run-ignored ignored-only`); the
   fixed op byte-format is documented in the doc comment at the top of
-  `crates/qsh-core/tests/support/broker_ops_harness.rs`.
+  `crates/qsh-core/tests/it/support/broker_ops_harness.rs`.
 
 The generator that produced the protobuf-encoded seeds above (a throwaway `prost`-based binary, not
 checked in — it isn't part of the repo, just the tool that wrote the files
@@ -302,10 +302,10 @@ the model's prediction, and only then are the doomed slots closed and
 forgotten. A tokref of kind 1 (`Spent`) is a no-op when nothing has
 been spent yet, and otherwise always presents the real superseded bytes
 rather than a sentinel. The harness lives at
-`crates/qsh-core/tests/support/broker_ops_harness.rs` and is compiled into
+`crates/qsh-core/tests/it/support/broker_ops_harness.rs` and is compiled into
 two places: this fuzz target (`fuzz/fuzz_targets/broker_ops.rs`, via
 `#[path]`) and a plain nextest binary
-(`crates/qsh-core/tests/broker_ops_corpus.rs`, same `#[path]`) that replays
+(`crates/qsh-core/tests/it/broker_ops_corpus.rs`, same `#[path]`) that replays
 every checked-in seed under `corpus/broker_ops/` twice each (to catch
 non-determinism) on every `cargo nextest run -p qsh-core` — that's the
 "regression replay" this crate's parser targets don't yet have (see

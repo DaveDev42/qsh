@@ -107,4 +107,4 @@ gnu 거부(§2.2): `QSH_LIBC` 없이 `QSH_VERSION=v0.4.3`으로 설치하자 스
 
 ## 관련 문서
 
-`docs/ROADMAP.md` M13(범위 (c)), `docs/campaigns/m10-clean-vm.md`(§2.3, §5, §6, §8~§11의 형식과 절차), `docs/design/testing.md`(L9/L10의 M10 musl 바이너리 RSS 주장 범위), `crates/qsh-cli/tests/release_smoke.rs`(네 축의 CI 대응물), `scripts/README.md`(설치 스크립트와 `QSH_LIBC`).
+`docs/ROADMAP.md` M13(범위 (c)), `docs/campaigns/m10-clean-vm.md`(§2.3, §5, §6, §8~§11의 형식과 절차), `docs/design/testing.md`(L9/L10의 M10 musl 바이너리 RSS 주장 범위), `crates/qsh-cli/tests/it/release_smoke.rs`(네 축의 CI 대응물), `scripts/README.md`(설치 스크립트와 `QSH_LIBC`).
