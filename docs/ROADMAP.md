@@ -2,11 +2,11 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). 현재 마일스톤은 M15(역할 기반 권한과 scp 호환 파일 복사)이고 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)는 2026-10-15 닫혔다. 현재 마일스톤은 M16(SSH 부트스트랩과 신뢰 철회)이고 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M20)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
-닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`.
+닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`.
 
 ## P0 MVP 완료 선언의 조건
 
@@ -215,15 +215,15 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **남긴 것:** (a) `qsh-transport`의 transport 중립 facade. 착지 2026-10-09, `e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0. `qsh-core`·`qsh-cli`에 quinn 의존과 `quinn::` 경로가 없고 `cargo xtask arch`가 잠근다. 처리량 비율과 포화 터널 PTY echo p95는 기준선 범위 안이다. ADR-0043 결정 3이 이 경계를 유지하고, ADR-0028 결과 절이 적은 테스트 접근자 교체 편집을 받아들였다. doctor `udp_egress_blocked`의 message는 ADR-0043을 가리킨다.
 - **크기:** (a) 1.0~1.8ew 소진. 나머지 3.3~5.1ew는 P1 합에서 뺐다.
 
-### M15 — 역할 기반 권한과 scp 호환 파일 복사
+### M15 — 역할 기반 권한과 scp 호환 파일 복사 ✅ 완료 (2026-10-15)
 
 - **범위:** 2026-10-12 사용자 결정("권한 설정을 보다 간소화", "scp 명령어와 호환")으로 다시 짰다.
   - (a) 역할 기반 권한(ADR-0045). trust pin에 role(`full`·`exec`·`tunnel`·`read-only`·`reverse`·`none`) 하나를 두어 신뢰 등록이 곧 권한 부여가 되게 한다. role grant와 `acl.toml` 행은 합집합이고 `acl.toml`은 세밀한 제어용 선택 사항이 된다. role 키가 없는 기존 pin은 `acl.toml`만 따르고(업그레이드로 권한이 넓어지지 않음), 파싱할 수 없는 `acl.toml`은 role grant까지 거부한다. `trust set-role`과 `--role` 플래그를 더하고 `acl show`/`acl check`/doctor가 role을 보여 준다. ADR-0017·0024·0025·0038의 관련 결정을 개정한다.
   - (b) scp 호환 파일 복사(ADR-0029 개정판). `qsh cp [-r] [-p] [-q] [--no-clobber] SRC... DST`, 인자 문법은 `[user@]host:path`, 로컬↔원격 한 방향. 디렉터리 순회는 client가 하고 wire에는 `file.read`/`file.write`에 더해 `file.list`·`file.mkdir`가 오른다. `full` role은 serve 계정이 닿는 경로 전부를 준다. `[[acl]]` `paths`는 행으로 파일 권한을 줄 때만 쓴다.
   - 이 ADR이 반드시 담아야 하는 결정이 하나 있다. `file.write`는 `qsh serve`의 uid로 파일을 쓰고, 그 uid는 `acl.toml`, `trust.toml`, `invites.toml`, identity와 keystore, `resume.json`, audit 로그를 쓸 수 있다. `file.write`가 `acl.toml`에 닿으면 원격 peer가 ACL writer가 되어 ADR-0017 결정 1과 ADR-0025 결정 1이 닫은 자리를 원격 op이 우회한다. `trust.toml`은 더 나쁘다. pin과 role이 판정마다 다시 읽히므로 원격 쓰기 하나가 재시작 없이 새 pin이나 `full` role을 심는다. audit 로그를 덮어쓰면 SC6 추적성이 지워진다. 그래서 qsh의 config·data·state·runtime 디렉터리(`docs/design/architecture.md` §7의 경로 전부, 곧 `config.toml`, `acl.toml`, `trust.toml`, `invites.toml`, `hosts.toml`, identity·keystore 파일, `resume.json`, audit 경로, localctl 소켓 디렉터리, M13 (f)의 reset key 파일)는 role·ACL 행과 무관하게 `file.*`의 대상에서 항상 거부한다. 판정은 symlink를 해석한 뒤의 정규 경로로 한다. 이 성질은 role로도 행으로도 열 수 없어야 한다.
 - **착수 조건:** ADR-0045 승인((a), 충족 2026-10-14), ADR-0029 승인((b), 충족 2026-10-14). (b)는 (a)의 role 판정 위에 선다. M13 (b)의 역압 하네스가 선 뒤(충족).
-- **명시적 out:** 디렉터리 동기화(rsync류), 원격↔원격 복사, 재개, UDP forwarding, 원격 파일 브라우징, role 추가·매핑 변경(새 ADR).
-- **수용 기준 (DoD):**
+- **명시적 out:** 디렉터리 동기화(rsync류), 원격↔원격 복사, 재개, UDP forwarding, 원격 파일 브라우징, role 추가·매핑 변경(새 ADR), Windows의 파일 op·`qsh cp`(ADR-0029 결정 23: Windows client는 M19, Windows host는 M20).
+- **DoD (달성):**
   - (a) ADR-0045가 `승인됨`이다. role 키가 없는 기존 `trust.toml`이 오늘과 같은 판정을 내고, 새 pin은 role 키를 명시하며, 모르는 role 값은 `CONFIG_ERROR`로 fail closed함을 테스트가 고정한다. `acl.toml` 세 상태(있음·없음·파싱 불가)마다 role grant의 동작이 ADR대로임을 oracle 테스트가 고정하고, `acl_check_equivalence.rs`와 `acl_uniformity.rs`가 role 경로를 포함한다. role로 allow된 요청의 audit 레코드가 근거를 싣는다.
   - (b) 큰 파일과 디렉터리 트리 왕복이 해시 기준으로 byte-identical이다. forward route와 reverse route 모두에서다(§5.1 원칙 7, transport는 QUIC 하나, ADR-0043). 트리 안 symlink와 특수 파일 처리, 부분 실패의 exit code와 JSON 레코드가 ADR대로다. 지원하지 않는 scp 플래그는 exit 2다.
   - 권한이 없으면 deny다. 새 seam이 `DENY_SEAMS`에 행으로 오르고 `acl_uniformity.rs`가 문면 균일성을 단언한다. `acl_registry.rs`의 항상-deny 예외 목록에서 `file.read`/`file.write`가 빠지고 `forward.socks`만 남는다.
@@ -236,7 +236,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - `docs/design/threat-model.md` §3에 파일 op 진입점과 role 경로가, §4 B에 상태 경로 쓰기·경로 이탈·덮어쓰기·신뢰 등록이 권한 부여가 되는 위협 행이 핀 테스트와 함께 오른다.
   - 안정성: M15가 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`), 지연 단언(복사 중 PTY echo p95)은 부하 없이 `-j 1`로 50회 연속 초록.
   - 마일스톤 마감 공통 절차(§2) 1·2.
-- **(a) 착지 (2026-10-14):** Step 2~8(`2d52a0f`..`85ea34f`)과 Windows 보정 `eb4216e`. CI run `38471301026` 초록, 타이밍 민감 테스트 부하 아래 50/50(`scripts/stress/m15.filter`), `crates/qsh-proto/proto`와 `capabilities.json` diff 0(ADR-0045 결정 17). 잔여 위험 다섯은 `docs/design/threat-model.md` §7. (b)는 `file::guard`(Step 9, ADR-0029 결정 5·6)부터 진행 중이다.
+- **(a) 착지 (2026-10-14):** Step 2~8(`2d52a0f`..`85ea34f`)과 Windows 보정 `eb4216e`. CI run `38471301026` 초록, 타이밍 민감 테스트 부하 아래 50/50(`scripts/stress/m15.filter`), `crates/qsh-proto/proto`와 `capabilities.json` diff 0(ADR-0045 결정 17). 잔여 위험 다섯은 `docs/design/threat-model.md` §7. (b)는 아래 마감 노트.
+- **마감 노트 (2026-10-15):** 전 DoD 충족. (b) Step 9~16 `bd0ae57`·`3855954`·`a86123d`·`f64f3ba`·`16388d9`·`b1fcf3a`·`1a4af3b`·`08f663c`, 태그 대조 drift `ce0a84c`, Windows·macOS·의존성 보정 `668214b`·`1d02860`·`a9748a4`·`dbd6a5b`·`5f0b838`. CI run `38614653051`(acceptance 포함) 초록. 부하 아래 `scripts/stress/m15.filter` 50/50(156개, Dave-Windows-WSL 8 vCPU), 지연 단언 `m15-latency.filter` 셋은 부하 없이 `-j 1`로 50/50. wire 변경은 `a86123d`(`FileReadOpen`·`FileWriteOpen`·`FileListOpen`·`FileMkdirOpen`과 `FILE_DATA`) 하나다. Windows는 `file.v1`을 광고하지 않고 네 op에 `UNSUPPORTED`로 답한다(M19·M20). 같은 기간 통합 테스트를 crate당 바이너리 하나(`tests/it`)로 합쳤다(`8a557c2`). 사람 몫 `decode_file_frame` 누적 fuzz-hours는 §5.5. 계획 원문은 `7cbeced`(코드 인용은 같은 스텝 번호의 `1a4af3b`).
 - **크기:** 7.0~10.5ew. (a) ADR-0045 2.7~4.2(trust.toml role 키, 평가 단계 하나, `trust set-role`, acl show/check·doctor 변경, fixture 아홉) / (b) ADR-0029 4.3~6.3(2026-10-11 초안 3.3~5.0에 재귀 복사 1.0~1.3). 4ew를 넘으므로 (a)와 (b)를 순서대로 따로 닫아도 된다.
 
 ### M16 — SSH 부트스트랩과 신뢰 철회
@@ -251,6 +252,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - (a) 가짜 `ssh` 실행 파일로 부트스트랩을 끝까지 돌리는 테스트가 양쪽 pin(이름, 주소, role)과 이어진 handshake를 고정한다. pin 충돌은 아무것도 쓰지 않고 끝나고, role 없는 기존 원격 pin을 `full`로 넓히지 않으며, 원격 audit를 쓸 수 없으면 pin도 쓰지 않음을 테스트가 단언한다. `--json`/`--jsonl`에서는 자동 발동하지 않고 ssh 자식이 BatchMode로 뜬다. `--reverse` 부트스트랩 뒤 원격이 `serve --to`로 등록하면 reverse route 위의 attach·exec·`qsh cp`가 정방향과 같은 테스트를 통과한다. stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 키 재료와 rc 출력이 로그에 남지 않는다.
   - (b) `trust remove` 뒤 기존 연결이 2초 안에 CLOSE로 끝나고 audit 한 줄이 남음을 테스트가 고정한다(`an_established_connection_survives_the_hosts_trust_remove`는 반대 단언으로 바뀐다). role 축소 뒤 연결 처리, trust.toml 파싱 실패 중 처분이 ADR대로다. `TrustRemoveScope` message·remedy와 `docs/CLI.md` §6.11·§6.17 문면이 같은 커밋에서 바뀐다. 만료 30일 전 doctor 경고(P0)는 유지된다.
   - 새 명령·필드는 fixture 등재와 등록 완전성, man 재생성을 갖춘다. 부트스트랩 직후 pin 이름·role 고지가 나온다. `docs/design/threat-model.md` §3·§4가 ssh 신뢰 승계와 연결 재검증을 다룬다.
+  - 안정성: M16이 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`), 실제 시계 2초 단언이 부하 아래에서 흔들리면 그 테스트만 부하 없이 `-j 1`로 50회 연속 초록이고 주입 시계 테스트가 계약을 고정한다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 3.6~5.6ew. (a) ADR-0044 2.6~4.0(`--reverse` 포함, ADR-0045 role 몫 제외) / (b) ADR-0031 축소판 0.9~1.35 / 마감 0.1~0.2.
 
@@ -386,5 +388,6 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | `cause` 분포 관측 기록 | 이슈 #10 본문과 2026-10-04T14:48Z 코멘트 | M11 (a) 빌드 | 기록됨, M13 (k) 착지 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md` | M13 (c) | PASS (2026-10-09 회차 1, v0.4.3, Debian 10 arm64 glibc 2.28, 에이전트가 네이티브 arm64 컨테이너에서 실행). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목 |
 | 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line` | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
+| SSH 부트스트랩 실제 OpenSSH 회차(ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회) | `docs/campaigns/p1-ssh-bootstrap.md`(M16 (a)가 사전 고정) | M16 (a) | M16 (a)가 담긴 태그 |
 | Windows client·host 확인 | `docs/campaigns/p1-windows.md`(M19가 사전 고정, M20이 host 회차를 더해 다시 고정) | M19·M20 | Windows 자산이 붙은 태그 |
 | Windows 서명·배포 준비 | ADR-0035 결정 16 | M19 | SSL.com 개인 인증서·신원 확인과 eSigner TOTP, 시크릿 `WINDOWS_SIGN_ESIGNER_*` 넷과 변수 `WINDOWS_SIGN_EXPECTED_SUBJECT`, scoop-bucket 저장소와 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출 |
