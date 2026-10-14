@@ -704,3 +704,147 @@ async fn close_trust_withdrawn_is_visible_to_both_sides_and_only_for_its_code() 
     assert!(!conn.closed_by_trust_withdrawal());
     assert!(!dialed.connection.closed_by_trust_withdrawal());
 }
+
+/// ADR-0031 decision 7 (the classification the redial loop relies on):
+/// `record` is fed the connection's close reason sampled just before the
+/// first local close. An open connection makes that close the end, a closed
+/// one keeps the reason it already had, and nothing later (a second local
+/// close, which the transport turns into "locally closed") can replace
+/// either.
+#[test]
+fn local_close_keeps_whichever_close_ended_the_connection() {
+    let app_closed = |code: u32| {
+        ConnectionError::ApplicationClosed(crate::error::ApplicationClose {
+            error_code: quinn::VarInt::from_u32(code).into(),
+            reason: Default::default(),
+        })
+    };
+
+    // This side's withdrawal ended an open connection.
+    let mut won = LocalClose::default();
+    won.record(CLOSE_CODE_TRUST_WITHDRAWN, None);
+    assert!(won.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+    // A later local close of another code cannot take it over, nor can one
+    // that sees the transport's "locally closed".
+    won.record(CLOSE_CODE_PROTOCOL, Some(ConnectionError::LocallyClosed));
+    assert!(won.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+
+    // The reverse: another code ended it, a withdrawal close afterwards is a
+    // no-op that must not read as one.
+    let mut other = LocalClose::default();
+    other.record(CLOSE_CODE_PROTOCOL, None);
+    other.record(
+        CLOSE_CODE_TRUST_WITHDRAWN,
+        Some(ConnectionError::LocallyClosed),
+    );
+    assert!(!other.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+
+    // The peer had already closed with another code: this side's withdrawal
+    // came second and is not the end.
+    let mut lost = LocalClose::default();
+    lost.record(
+        CLOSE_CODE_TRUST_WITHDRAWN,
+        Some(app_closed(CLOSE_CODE_UNVERIFIED_PEER)),
+    );
+    assert!(!lost.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+    // The peer's own withdrawal stays one after this side's shutdown close
+    // ran over it.
+    let mut theirs = LocalClose::default();
+    theirs.record(0, Some(app_closed(CLOSE_CODE_TRUST_WITHDRAWN)));
+    assert!(theirs.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+    // An idle timeout that ended it first is not a withdrawal either.
+    let mut timed_out = LocalClose::default();
+    timed_out.record(CLOSE_CODE_TRUST_WITHDRAWN, Some(ConnectionError::TimedOut));
+    assert!(!timed_out.is_trust_withdrawal(Some(ConnectionError::LocallyClosed)));
+
+    // No local close at all: the live reason decides.
+    let untouched = LocalClose::default();
+    assert!(untouched.is_trust_withdrawal(Some(app_closed(CLOSE_CODE_TRUST_WITHDRAWN))));
+    assert!(!untouched.is_trust_withdrawal(Some(app_closed(CLOSE_CODE_PROTOCOL))));
+    assert!(!untouched.is_trust_withdrawal(None));
+}
+
+/// The same property on real connections, in both orders. A peer close that
+/// reached this side first decides the classification, whatever this side
+/// closes with afterwards (the transport reports every later local close as
+/// "locally closed", which would hide the peer's code), and the other way
+/// round a withdrawal this side sent first stays one when the peer closes
+/// next.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_withdrawal_classification_follows_the_close_that_came_first() {
+    async fn closed_with(conn: &Connection) {
+        tokio::time::timeout(Duration::from_secs(10), conn.closed())
+            .await
+            .expect("the connection must end");
+    }
+
+    // Peer closes with another code first; this side then tries to withdraw.
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+    dialed.connection.close(CLOSE_CODE_UNVERIFIED_PEER, b"x");
+    closed_with(&conn).await;
+    conn.close_trust_withdrawn();
+    assert!(
+        !conn.closed_by_trust_withdrawal(),
+        "the peer's close was first"
+    );
+
+    // Peer withdraws first; this side then closes for its own reason.
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+    dialed.connection.close_trust_withdrawn();
+    closed_with(&conn).await;
+    conn.close(0, b"shutdown");
+    assert!(
+        conn.closed_by_trust_withdrawal(),
+        "the peer's 0x1005 survives a later local close"
+    );
+
+    // This side withdraws first; the peer's later close changes nothing.
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+    conn.close_trust_withdrawn();
+    dialed.connection.close(CLOSE_CODE_UNVERIFIED_PEER, b"x");
+    closed_with(&dialed.connection).await;
+    assert!(conn.closed_by_trust_withdrawal());
+    conn.close_trust_withdrawn();
+    assert!(conn.closed_by_trust_withdrawal(), "idempotent");
+
+    // Both close at once: whichever wins, repeating the call and reading the
+    // answer from any clone gives one stable result, never a panic.
+    for _ in 0..16 {
+        let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+        let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+        let (conn, dialed) = handshake_pair(server_id, server_fp, pinned, client_id).await;
+        let (local, peer) = (conn.clone(), dialed.connection.clone());
+        let a = tokio::task::spawn_blocking(move || local.close_trust_withdrawn());
+        let b = tokio::task::spawn_blocking(move || peer.close(CLOSE_CODE_UNVERIFIED_PEER, b"x"));
+        a.await.unwrap();
+        b.await.unwrap();
+        let first = conn.closed_by_trust_withdrawal();
+        conn.close_trust_withdrawn();
+        assert_eq!(conn.clone().closed_by_trust_withdrawal(), first);
+    }
+}
+
+/// `with_peer_chain_dropped` is what the watch tests use for a connection
+/// the trust store cannot judge: the copy rejects, the original still passes,
+/// and both share one live transport connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_with_its_chain_dropped_cannot_be_reverified() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let pinned = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let (conn, _dialed) = handshake_pair(server_id, server_fp, pinned.clone(), client_id).await;
+    let blind = conn.with_peer_chain_dropped();
+    assert!(conn.reverify(&pinned).is_ok());
+    assert_eq!(
+        blind.reverify(&pinned).unwrap_err(),
+        RejectReason::Untrusted
+    );
+    assert_eq!(blind.stable_id(), conn.stable_id());
+    blind.close_trust_withdrawn();
+    assert!(conn.closed_by_trust_withdrawal(), "one shared close record");
+}

@@ -257,6 +257,36 @@ impl AuditRecord {
         }
     }
 
+    /// A connection closed because the trust store no longer vouches for it
+    /// (ADR-0031 결정 8): the connection-level deny of an established
+    /// connection, next to [`AuditRecord::handshake_rejected`]'s deny of one
+    /// that never got established. `principal` and `auth_path` are the values
+    /// the connection was established with, `peer_addr` its current address,
+    /// `request_id` is `"-"` and `action` is `"connect"`. `resource` is the
+    /// coarse reason, one of `trust_withdrawn` (the trust credential is gone
+    /// or changed) and `grants_reduced` (still trusted, role grants shrank);
+    /// which pin changed how is never recorded. No `role` key and no rule.
+    pub fn connection_withdrawn(
+        principal: &Principal,
+        auth_path: AuthPath,
+        peer_addr: std::net::SocketAddr,
+        reason: &str,
+    ) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: principal.to_string(),
+            action: "connect".to_string(),
+            resource: reason.to_string(),
+            decision: Decision::Deny.as_str().to_string(),
+            rule: None,
+            auth_path: auth_path_str(auth_path).to_string(),
+            peer_addr: peer_addr.to_string(),
+            count: None,
+            role: None,
+        }
+    }
+
     /// The windowed-summary half of [`AuditRecord::handshake_rejected`]'s
     /// aggregation (M8 plan Step 2 (52639fc), ADR-0009, `crate::admission::Gate`):
     /// one record per `(category, 10s window)`, standing in for `count`

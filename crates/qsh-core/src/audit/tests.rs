@@ -69,6 +69,75 @@ fn record_has_only_structural_fields() {
     assert_eq!(value["request_id"], "7");
     assert_eq!(value["auth_path"], "pin");
     assert!(value["rule"].is_null());
+    // ADR-0031 결정 8: the withdrawn-connection constructor adds no key
+    // either (the separate test below pins its values).
+    let withdrawn = AuditRecord::connection_withdrawn(
+        &Principal::Device("laptop".into()),
+        AuthPath::Pin,
+        "192.0.2.7:4433".parse().unwrap(),
+        "trust_withdrawn",
+    );
+    let withdrawn = serde_json::to_value(&withdrawn).unwrap();
+    let mut withdrawn_keys: Vec<_> = withdrawn.as_object().unwrap().keys().cloned().collect();
+    withdrawn_keys.sort();
+    assert_eq!(
+        withdrawn_keys,
+        [
+            "action",
+            "auth_path",
+            "decision",
+            "peer_addr",
+            "principal",
+            "request_id",
+            "resource",
+            "rule",
+            "ts"
+        ]
+    );
+}
+
+/// ADR-0031 결정 8: the record of a withdrawn connection adds no key. It is
+/// the nine of every record, with `request_id` `"-"`, action `connect`, a
+/// deny without a rule, and the established principal and path.
+#[test]
+fn connection_withdrawn_record_keeps_the_structural_key_set() {
+    let addr: std::net::SocketAddr = "192.0.2.7:4433".parse().unwrap();
+    for (reason, path) in [
+        ("trust_withdrawn", AuthPath::Pin),
+        ("grants_reduced", AuthPath::Ca),
+    ] {
+        let record = AuditRecord::connection_withdrawn(
+            &qsh_transport::Principal::Device("laptop".into()),
+            path,
+            addr,
+            reason,
+        );
+        let value = serde_json::to_value(&record).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "action",
+                "auth_path",
+                "decision",
+                "peer_addr",
+                "principal",
+                "request_id",
+                "resource",
+                "rule",
+                "ts"
+            ]
+        );
+        assert_eq!(value["action"], "connect");
+        assert_eq!(value["decision"], "deny");
+        assert_eq!(value["request_id"], "-");
+        assert_eq!(value["resource"], reason);
+        assert_eq!(value["principal"], "device:laptop");
+        assert_eq!(value["auth_path"], auth_path_str(path));
+        assert_eq!(value["peer_addr"], "192.0.2.7:4433");
+        assert!(value["rule"].is_null());
+    }
 }
 
 #[test]

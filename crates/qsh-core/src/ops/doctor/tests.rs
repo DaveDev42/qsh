@@ -2557,10 +2557,14 @@ fn doctor_trust_remove_scope_separates_role_and_row_reach() {
         .find(|f| f.code == "trust_remove_scope")
         .expect("trust_remove_scope");
     assert_eq!(scope.detail, TRUST_REMOVE_SCOPE.message);
+    // The message carries the shared narrowing scope (ADR-0031 결정 9):
+    // a lowered role closes connections, and acl.toml rows are not touched.
     assert!(
-        scope
-            .detail
-            .contains("trust role starting with the peer's next request"),
+        scope.detail.contains("lowering its role closes"),
+        "{scope:?}"
+    );
+    assert!(
+        scope.detail.ends_with(crate::doctor::TRUST_NARROWING_SCOPE),
         "{scope:?}"
     );
 }

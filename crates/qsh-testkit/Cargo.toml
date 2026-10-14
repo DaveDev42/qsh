@@ -42,3 +42,6 @@ base64.workspace = true
 # `ReconnectEvent`/`RegistrationEvent` `at` field as RFC3339 (issue #4 item
 # 6) — the workspace-pinned version, same as `qsh-core`'s own `now_rfc3339`.
 time.workspace = true
+# `tests/it/trust_withdrawal.rs` pauses the clock after the connection is up to
+# pin the one-poll-tick bound (ADR-0031 결정 3); test-only, same pinned version.
+tokio = { workspace = true, features = ["test-util"] }

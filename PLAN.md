@@ -199,7 +199,7 @@ Step 1은 크기 내역 밖이다.
 - fail closed(결정 6). 빈 store는 전부 닫는다. 파싱 실패 중에는 세대가 오르지 않아 감시가 돌지 않고, role 요청은 ADR-0045 결정 4대로 멈춘다. 닫기는 audit보다 먼저 하고, audit 실패는 로그 줄로만 남는다.
 - 닫기(결정 7). `Connection::close(CLOSE_CODE_TRUST_WITHDRAWN, b"trust withdrawn")`. 그 위 세션은 오늘의 연결 유실과 같은 규칙으로 detach된다.
   - `serve --to` 재dial 루프(`classify_target_connection_loss`)는 로컬이 닫았든 상대가 닫았든 `0x1005`를 신뢰 철회로 분류하고, 로그 한 줄만 남기며, 빠른 재dial 경로(`loss_delay`)가 아니라 handshake 거부와 같은 일반 backoff를 탄다.
-  - `listen`은 닫힌 등록을 등록표에서 빼고 그 위 relay를 끝낸다.
+  - `listen`은 닫힌 등록의 relay를 끝내고, 등록은 연결 유실과 같은 정리 경로로 `[listen].stale_retention` 동안 Stale로 남는다(ADR-0031 결정 7 개정 이력).
 - audit(결정 8). `AuditRecord::connection_withdrawn(principal, auth_path, peer_addr, reason)`를 `crates/qsh-core/src/audit.rs`의 `handshake_rejected` 옆에 둔다. `resource`는 `trust_withdrawn` 또는 `grants_reduced`, `action` `connect`, `decision` `deny`, `rule` `null`, `request_id` `"-"`, `role` 키 없음.
 - 문면(결정 9). 좁히는 명령(`trust remove`, role을 낮추는 `trust set-role`, role이 있는 pin의 `trust rename`)의 사람용 출력이 "언제·어디에·무엇을 하지 않는가" 세 문장을 `qsh-core` 상수 한 벌(가칭 `TRUST_NARROWING_SCOPE`)로 말한다. `qsh-cli`는 받은 것을 쓰기만 한다. JSON 필드는 바뀌지 않는다.
   - `crates/qsh-core/src/doctor.rs`의 `TRUST_REMOVE_SCOPE` message·remedy를 같은 규율로 바꾼다. code·status(`info`)·노출 조건은 그대로다. remedy에서 "(P1)"과 재시작 권고가 빠지고, 다른 장비에서도 같은 명령을 실행하라는 안내가 들어간다.

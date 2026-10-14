@@ -354,19 +354,39 @@ pub const CONFIG_SERVE_TO_CONFLICT: Diagnostic = Diagnostic {
     remedy: "Delete one of the two keys, keep [serve].to, then restart qsh serve — config.toml is only read once at start.",
 };
 
-/// `docs/CLI.md` §6.17, M7 plan Step 2 (69dd788)'s confirmed `trust remove`
-/// semantics (README "Known limitations", `docs/CLI.md` §6.11): an `info`
-/// notice, not a problem — it surfaces whenever `trust.toml` has at least
-/// one pin, unconditionally, so an operator always sees this scope
-/// spelled out rather than discovering it only when a removal doesn't do
-/// what they expected. Since ADR-0045 결정 12 it tells the two reaches
-/// apart: a role grant ends at the next request, a row grant at the next
-/// handshake.
+/// The three-sentence scope of a command that narrows trust (ADR-0031
+/// 결정 9): when it applies, where, and what it does not do. One macro so
+/// [`TRUST_NARROWING_SCOPE`] and the doctor message below share the same
+/// bytes; `docs/CLI.md` quotes it verbatim and
+/// `cli_md_quotes_the_trust_narrowing_scope_verbatim` pins that.
+macro_rules! trust_narrowing_scope {
+    () => {
+        "It applies to new connections from the next handshake, and to connections held open by a running `qsh serve`, `qsh listen` or `qsh serve --to` within 2 seconds. It applies on this device only; no other device is told. It does not end sessions: a session on a closed connection is detached, and a peer that is still trusted can reconnect and resume it."
+    };
+}
+
+/// What `qsh trust remove`, a `qsh trust set-role` that lowers a role and a
+/// `qsh trust rename` of a pin that has a role print after they succeed
+/// (human mode only; the JSON data is unchanged). The renderers in
+/// `qsh-cli` write this constant and own no wording of their own
+/// (ADR-0031 결정 9).
+pub const TRUST_NARROWING_SCOPE: &str = trust_narrowing_scope!();
+
+/// `docs/CLI.md` §6.17: an `info` notice, not a problem. It surfaces
+/// whenever `trust.toml` has at least one pin, unconditionally, so an
+/// operator always sees the scope of a trust change spelled out rather than
+/// discovering it only when a removal doesn't do what they expected. The
+/// message is [`TRUST_NARROWING_SCOPE`] behind a one-clause lead (ADR-0031
+/// 결정 9); the code, status and exposure condition are the M7 ones
+/// (M7 plan Step 2 (69dd788)).
 pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
     id: DiagnosticId::TrustRemoveScope,
     code: "trust_remove_scope",
-    message: "trust.toml has at least one pinned peer. `qsh trust remove` takes effect for authority granted by a trust role starting with the peer's next request, but authority granted by an acl.toml row stays until that connection drops and has to handshake again — an already-established connection keeps its entire negotiated row authority (including opening brand-new sessions, tunnels and forwards) until then.",
-    remedy: "Force-closing an already-established connection on removal is not implemented (P1). If that matters right now, restart the process holding the connection.",
+    message: concat!(
+        "trust.toml has at least one pinned peer. Removing a pin or lowering its role closes that peer's established connections. ",
+        trust_narrowing_scope!()
+    ),
+    remedy: "Trust is withdrawn per device: run the same `qsh trust remove` (or `qsh trust set-role`) on every other device that trusts the peer. To end the peer's sessions as well, close them with `qsh session close`.",
 };
 
 /// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: no platform service unit

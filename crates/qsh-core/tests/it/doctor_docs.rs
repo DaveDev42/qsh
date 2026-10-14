@@ -91,6 +91,29 @@ fn cli_md_quotes_the_trust_remove_scope_diagnostic_verbatim() {
     );
 }
 
+/// ADR-0031 결정 9: the three-sentence scope `qsh-cli` prints after a trust
+/// narrowing is one constant in `qsh-core`, quoted byte for byte by
+/// `docs/CLI.md`, and the doctor notice carries the same bytes.
+#[test]
+fn cli_md_quotes_the_trust_narrowing_scope_verbatim() {
+    use qsh_core::doctor::TRUST_NARROWING_SCOPE;
+
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains(TRUST_NARROWING_SCOPE),
+        "docs/CLI.md §6.11 must quote TRUST_NARROWING_SCOPE verbatim"
+    );
+    assert!(
+        TRUST_REMOVE_SCOPE.message.ends_with(TRUST_NARROWING_SCOPE),
+        "the trust_remove_scope notice must carry the same three sentences"
+    );
+    assert_eq!(
+        TRUST_NARROWING_SCOPE.matches(". ").count() + 1,
+        3,
+        "three sentences, no more and no fewer"
+    );
+}
+
 #[test]
 fn cli_md_quotes_the_cert_expiring_soon_diagnostic_verbatim() {
     let cli_md = read_doc("docs/CLI.md");
