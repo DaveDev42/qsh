@@ -422,7 +422,7 @@ impl Authorizer for OpenOnlyDenyAttach {
 }
 
 /// A recording wrapper around a real deny authorizer
-/// (PLAN M15 Step 3): delegates every decision unchanged and notes which
+/// (M15 plan Step 3 (1a4af3b)): delegates every decision unchanged and notes which
 /// `(action, connection fingerprint)` pairs it was asked about, so the sweep
 /// can assert that each seam hands the authorizer the connection's own
 /// fingerprint (ADR-0045 결정 6: the role stage compares it with the
@@ -510,7 +510,7 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
     sweep(None).await;
 }
 
-/// PLAN M15 Step 3: every [`DENY_SEAMS`] row hands the authorizer the
+/// M15 plan Step 3 (1a4af3b): every [`DENY_SEAMS`] row hands the authorizer the
 /// verified fingerprint of the connection it arrived on. Same sweep as the
 /// uniformity test above, with each host's authorizer wrapped in a
 /// [`FingerprintProbe`]; after every seam is driven the probe must have
@@ -751,7 +751,7 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
     );
 }
 
-// --- PLAN M15 Step 4: the role stage denies exactly like the rest ---------
+// --- M15 plan Step 4 (1a4af3b): the role stage denies exactly like the rest ---------
 
 /// A sandbox `trust.toml` pinning `fingerprint` as `name` with an optional
 /// role, plus the production authorizer over it (`load_or_deny`; no

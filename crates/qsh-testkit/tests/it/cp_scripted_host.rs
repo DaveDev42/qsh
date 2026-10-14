@@ -1,4 +1,4 @@
-//! PLAN M15 Step 15, ADR-0029 decisions 21 and 22: `qsh cp -r` against a
+//! M15 plan Step 15 (1a4af3b), ADR-0029 decisions 21 and 22: `qsh cp -r` against a
 //! scripted host.
 //!
 //! A real `Server` never lists a name like `..` and never drops a

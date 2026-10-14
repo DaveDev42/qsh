@@ -122,15 +122,18 @@ reproduce load poorly and 50 rounds take tens of minutes. A new
 timing-sensitive test must be green for 50 consecutive rounds here before it
 lands (`docs/design/testing.md`, CI discipline). `m13.filter` and
 `m13-latency.filter` are nextest filtersets for the M13 timing-sensitive
-tests. `m15.filter` is the M15 trust-role set: the live-server tests that
-open real connections and change `trust.toml` underneath them, plus the
-`trust.toml` reload and role-write unit tests in `qsh-core` (selected by
-module path, since nextest matches the full name). A few pure table and
-fixture checks ride along because their names share the `role_` prefix. It
-leaves out
-`role_resolution_per_decision_costs_within_ten_percent_on_short_local_forwards`,
-a latency measurement that is gated by `QSH_ACCEPTANCE_STRICT` and run
-without competing load.
+tests. `m15.filter` is the M15 set: the trust-role tests (live-server tests
+that open real connections and change `trust.toml` underneath them, plus the
+`trust.toml` reload and role-write unit tests in `qsh-core`) and the `qsh cp`
+file-op tests (host, client, cancel, recursive copy, state-path guard, FILE_DATA
+relay). Integration tests are selected by module prefix (`file_`, `cp_`, ...),
+unit tests by module path, since nextest matches the full name. A few pure
+table and fixture checks ride along because their names share a prefix. It
+leaves out the three p95/throughput measurements, which are gated by
+`QSH_ACCEPTANCE_STRICT` or `QSH_ACCEPTANCE_SLOW` and fail by design under CPU
+saturation. `m15-latency.filter` selects exactly those three
+(`role_resolution_per_decision_costs_*`, `file_copy_echo_under_load`,
+`cp_many_small_files`); run them 50 times with no competing load at `-j 1`.
 
 ## test/
 

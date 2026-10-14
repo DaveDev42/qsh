@@ -202,14 +202,14 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_stalled_streams::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
-      # ADR-0029 decision 15 (PLAN M15 Step 14): a `qsh cp` file transfer on
+      # ADR-0029 decision 15 (M15 plan Step 14 (1a4af3b)): a `qsh cp` file transfer on
       # the same connection as an attached PTY must keep the echo p95 inside
       # the same measured RTT + 10ms budget. Same standing-gate shape as the
       # tunnel harnesses above; `QSH_ACCEPTANCE_STRICT` turns the gate on.
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^file_copy_echo_under_load::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
-      # ADR-0029 decisions 14 and 15 (PLAN M15 Step 15): the same budget for
+      # ADR-0029 decisions 14 and 15 (M15 plan Step 15 (1a4af3b)): the same budget for
       # a recursive copy of thousands of small files against the production
       # audit writer, which must not refuse a record under that load.
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^cp_many_small_files::/)'

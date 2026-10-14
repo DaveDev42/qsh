@@ -5688,7 +5688,7 @@ async fn redemption_without_a_durable_audit_record_writes_no_pin_and_keeps_the_i
 }
 
 // ---------------------------------------------------------------------
-// Remote file ops (ADR-0029, M15 Steps 11 and 12): shape check, then the ACL
+// Remote file ops (ADR-0029, M15 plan Steps 11 and 12 (1a4af3b)): shape check, then the ACL
 // choke point. A principal with no file grant ends in `PERMISSION_DENIED` and
 // one audit line; the allowed paths are covered end to end in
 // `crates/qsh-testkit/tests/it/file_host.rs`.

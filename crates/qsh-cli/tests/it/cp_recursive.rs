@@ -1,5 +1,5 @@
 //! L5 — `qsh cp -r` end to end (ADR-0029 decisions 12, 14, 20 to 22,
-//! `docs/CLI.md` §6.21), PLAN M15 Step 15.
+//! `docs/CLI.md` §6.21), M15 plan Step 15 (1a4af3b).
 //!
 //! The same real-process rigs as `cp_e2e.rs`: a `qsh serve` host (forward)
 //! or a `qsh listen` controller plus a `qsh serve --to` target (reverse),

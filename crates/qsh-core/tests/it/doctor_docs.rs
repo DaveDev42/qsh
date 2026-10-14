@@ -117,7 +117,7 @@ fn cli_md_quotes_the_acl_ca_auth_path_missing_diagnostic_verbatim() {
     );
 }
 
-/// ADR-0045 결정 12 (M15 Step 7): the role-aware wording of §6.17 is quoted
+/// ADR-0045 결정 12 (M15 plan Step 7 (1a4af3b)): the role-aware wording of §6.17 is quoted
 /// from the constants, not retyped. `trust_pin_role_unset` is pinned word for
 /// word like the three diagnostics above; the three clauses the existing
 /// `acl_*` findings and the `trust.toml` `CONFIG_ERROR` gained are pinned the

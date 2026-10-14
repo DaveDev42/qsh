@@ -1,0 +1,1 @@
+test(/^(?:\w+::)?role_resolution_per_decision_costs_/) | test(/^(?:\w+::)?file_copy_echo_under_load::/) | test(/^(?:\w+::)?cp_many_small_files::/)

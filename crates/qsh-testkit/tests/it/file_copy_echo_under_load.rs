@@ -1,4 +1,4 @@
-//! PLAN M15 Step 14 / `docs/ROADMAP.md` M15 DoD "복사 중 PTY echo"
+//! M15 plan Step 14 (1a4af3b) / `docs/ROADMAP.md` M15 DoD "복사 중 PTY echo"
 //! (ADR-0029 decision 15, `docs/design/testing.md` L9/L10): a `qsh cp`
 //! transfer runs *concurrently*, on the **same QUIC connection**, with
 //! repeated PTY-echo round trips over a `SESSION_DATA` attach stream, and the

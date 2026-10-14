@@ -1177,7 +1177,7 @@ fn acl_show_human_output_carries_the_acl_restart_notice_byte_for_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// The role dimension (PLAN M15 Step 6, ADR-0045 결정 10·11)
+// The role dimension (M15 plan Step 6 (1a4af3b), ADR-0045 결정 10·11)
 //
 // ADR-0025 결정 3's three-way discipline, widened by the pin role: for a
 // pin carrying each role (and for a legacy pin with no `role` key), `acl

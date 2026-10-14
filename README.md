@@ -21,9 +21,9 @@ authenticated by TLS 1.3 mutual authentication against certificates you have
 pinned.
 
 Beyond the shell, the same connection carries one-shot commands (`qsh exec`),
-port forwards (`-L`, `-R`, and a SOCKS5 proxy with `-D`), reverse connections
-for hosts behind NAT, and a JSON CLI contract (`qsh.cli/v1`) for scripts and
-agents.
+scp-style file copy (`qsh cp`), port forwards (`-L`, `-R`, and a SOCKS5 proxy
+with `-D`), reverse connections for hosts behind NAT, and a JSON CLI contract
+(`qsh.cli/v1`) for scripts and agents.
 
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)).
@@ -39,7 +39,7 @@ Several campaigns that a person runs by hand are also still open; see
 - [Install](#install): prebuilt binaries, Homebrew, or from source.
 - [First run](#first-run): pin two machines to each other and open a shell.
 - [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
-- [Everyday use](#everyday-use): commands, detach and reattach, forwards, reverse connections.
+- [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, reverse connections.
 - [Automation](#automation): the JSON CLI for scripts and agents.
 - [Security posture](#security-posture): authentication, the ACL, the audit log.
 - [Known limitations](#known-limitations), including that QSH needs UDP.
@@ -302,7 +302,7 @@ are no custom ones, and each grants a fixed set of actions:
 
 | role | grants |
 |---|---|
-| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `host.reverse` (and `file.read`/`file.write`, which stay denied for now) |
+| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `host.reverse`, `file.read`, `file.write` (never qsh's own config and state files, see [Security posture](#security-posture)) |
 | `exec` | `exec.run`, `session.*` |
 | `tunnel` | `forward.local`, `forward.remote` (it can only close remote forwards it opened itself) |
 | `read-only` | `session.list`, `session.attach`: watch sessions, no input |
@@ -334,9 +334,21 @@ principal = "device:laptop"
 allow = ["session.list", "session.attach", "exec.run"]
 ```
 
+A row that names `file.read` or `file.write` also needs `paths`, the
+directories it covers. A file row without `paths` grants nothing and `qsh
+doctor` warns about it:
+
+```toml
+[[acl]]
+principal = "device:laptop"
+allow = ["file.read", "file.write"]
+paths = ["/srv/share"]
+```
+
 Rows can only add to a role, never take away. To give a peer less than a
 role, pick a smaller role and add rows for the rest. `qsh acl check` and
-`qsh acl show` report the role, the rows, and which one allowed a request.
+`qsh acl show` report the role, the rows, and which one allowed a request;
+`qsh acl check --path` does the same for a file path.
 
 ## Guided setup (`qsh setup`)
 
@@ -416,6 +428,35 @@ it in the OS credential store (Keychain on macOS, Secret Service on Linux)
 and falls back to a 0600 file where none is reachable. `qsh init --key-store
 file` skips the credential store entirely, which is what you want on a shared
 or managed machine (`docs/CLI.md` §6.11).
+
+### Copying files
+
+`qsh cp` copies between this machine and one qsh host with scp's operand
+syntax. A colon before the first slash marks the remote side, and `box:` on
+its own is the account's home directory:
+
+```bash
+qsh cp ./build.tar.zst box:/srv/builds/       # put
+qsh cp -r ./site box:/srv/www/                # a whole tree
+qsh cp box:out/app.log ./logs/                # get
+qsh cp -p --no-clobber box:out/app.log .      # keep mode and mtime, never overwrite
+```
+
+Only qsh hosts are spoken to, so the syntax is all it shares with scp; the
+transport options (`-P`, `-i`, `-o` and the rest) are refused with exit `2`
+instead of being ignored. Remote-to-remote copies are refused too. The host
+needs the `file.read` and `file.write` actions, which role `full` gives and
+an `acl.toml` row can give for the directories in its `paths`. Over a reverse
+connection the command works the same way, through the local `qsh listen`
+daemon.
+
+A file is written to a temporary name, checked against its size and BLAKE3
+hash, and renamed into place, so a reader never sees half a file and a failed
+transfer removes its temporary file. `--json` and `--jsonl` report each entry
+(`file.entry` events for `--jsonl`). One failed entry does not stop the
+others, but the exit code is then `255` and the envelope has `"ok":false` with
+the failed paths in `error.details`. `Ctrl-C` stops the copy and removes the
+temporary file.
 
 ### An interactive session that outlives the connection
 
@@ -669,13 +710,18 @@ runs, pin authentication keeps using the last good snapshot but role grants
 stop until the file parses again, so a half-edited file cannot keep an old,
 wider role alive. Rows still work in that window.
 
-`file.read` and `file.write` are in the action vocabulary but always denied,
-because those operations are not implemented. `forward.socks` is also always
-denied, for a different reason: no operation is ever authorized through it
+`forward.socks` is always denied: no operation is ever authorized through it
 ([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)); `-D` reuses
-`forward.local`. Every refusal a remote peer sees is the same opaque
+`forward.local`. The file operations behind `qsh cp` have one more fixed
+limit. Whatever the role or the rows say, `file.read`, `file.write`,
+`file.list` and `file.mkdir` never reach qsh's own config, state and runtime
+directories, the audit log and the key files, including through a symlink, a
+`..` path or a hard link. This is what keeps a remote write from editing
+`trust.toml` or `acl.toml` and handing itself a role, and there is no setting
+to turn it off. Every refusal a remote peer sees is the same opaque
 `PERMISSION_DENIED` message, whether it came from a missing role or rule, a
-policy file that failed to load, or an audit-write failure.
+path outside `paths`, a protected path, a policy file that failed to load, or
+an audit-write failure.
 
 The `acl.toml` rows load once, when `qsh serve`/`qsh listen`/`qsh serve --to`
 starts, so an edit to the file only takes effect on the next restart. Roles
@@ -710,9 +756,12 @@ host by a permissions slip has no way back in. Windows ACL checking is out
 of scope. Pin only devices you would hand a shell to, and choose each
 one's role on purpose. The default for a machine that connects in is `full`,
 which is the power of the account running `qsh serve`: `exec` and `full`
-can run any command as that account, a `tunnel` peer's `forward.local`
-reaches any TCP destination the host can reach, and a `read-only` peer sees
-the screen output of sessions other devices opened, secrets included.
+can run any command as that account, and `full` (or a row with a wide
+`paths`) can write any file that account can, `~/.bashrc` and
+`~/.ssh/authorized_keys` included. Only qsh's own files are protected. A
+`tunnel` peer's `forward.local` reaches any TCP destination the host can
+reach, and a `read-only` peer sees the screen output of sessions other
+devices opened, secrets included.
 An older `qsh` binary that rewrites `trust.toml` drops the `role` key it does
 not know, which turns that pin into `none` (narrower, never wider);
 `qsh trust set-role` restores it and `qsh doctor` lists pins without a role.
@@ -798,26 +847,31 @@ Some of these are MVP scope decisions, some are unfinished work.
   posture](#security-posture).
 - The audit log is fail-closed. `qsh serve`/`qsh serve --to` deny an
   otherwise-allowed `session.open`, `session.attach`, session write,
-  `exec.run` or `host.reverse` registration rather than let it through with
-  no durable audit record. A full disk, a permissions problem on the audit
-  directory, or a writer backlogged past its bounded queue all deny the way
-  a policy refusal does, with no override and no degraded-but-serving mode.
-  Recovery is automatic: once the audit log is writable again, the writer's
-  background retry clears the condition without a restart. Audit records are
+  `exec.run`, file operation or `host.reverse` registration rather than let
+  it through with no durable audit record. A full disk, a permissions
+  problem on the audit directory, or a writer backlogged past its bounded
+  queue all deny the way a policy refusal does, with no override and no
+  degraded-but-serving mode. Recovery is automatic: once the audit log is
+  writable again, the writer's background retry clears the condition without
+  a restart. Audit records are
   structural; argv, PTY bytes and key material never appear in them.
   `audit.log_argv` is named in the design docs as a sanctioned future
   exception, and M5 does not implement it.
 - Quotas are fixed defaults. Concurrent sessions, `exec.run` runs and
   connections are capped per listener and per principal, tunnel streams per
-  principal and per forward, remote forwards per principal, and the
-  admission gate caps concurrent handshakes and the per-source rate
+  principal and per forward, remote forwards per principal, and file
+  transfers per principal and per listener. The admission gate caps
+  concurrent handshakes and the per-source rate
   (`[serve].max_sessions` and friends, `docs/CLI.md` §6.12). A key set to
   `0` or left unset means the default, not unlimited, and no switch turns a
   cap off. The ACL engine itself never enforces quotas.
-- `qsh trust remove` only affects future handshakes. A removed peer keeps
-  the connection's entire negotiated authority, including the ability to
-  open new sessions, tunnels and forwards within the ACL scope loaded at
-  startup, until that connection drops. The host re-reads `trust.toml` on
+- `qsh trust remove` only affects future handshakes. A removed peer's role
+  stops counting from its next request, but the peer keeps what its
+  `acl.toml` rows grant, including the ability to open new sessions,
+  tunnels and forwards within the scope loaded at startup, and keeps
+  everything it already opened (a session, a tunnel, a transfer in flight),
+  until that connection drops. Lowering a role with `qsh trust set-role`
+  behaves the same way. The host re-reads `trust.toml` on
   every handshake, so the next connection attempt from the removed peer is
   rejected immediately, with no restart (`docs/CLI.md` §6.11). A tunnel with
   `--supervise` on such a connection keeps running too; only its next
@@ -873,9 +927,22 @@ Some of these are MVP scope decisions, some are unfinished work.
   (for example behind an enterprise VPN that intercepts DNS), pin the peer by
   IP literal or turn on the OS's encrypted DNS settings. A built-in forced
   DNS-over-HTTPS resolver is a P2 candidate (ADR-0039).
+- `qsh cp` is scp's syntax and nothing else of scp: it only talks to qsh
+  hosts, refuses scp's transport options, and does not copy between two
+  remote hosts. There is no resume, so an interrupted transfer starts over.
+  A tree copy is not atomic: a failure leaves the entries already copied in
+  place and exits `255`. Symlinks found inside a tree are skipped and
+  reported; a symlink named as an operand is followed. Overwriting replaces
+  the destination file with a new one (that is what makes it atomic), so the
+  old file's owner, hard links and extended attributes do not carry over,
+  unlike scp, which writes into the existing file. With role `full` or a wide
+  `paths`, `file.write` is as strong as `exec.run`.
 - Windows support is planned for P1: the client in M19 and the host in M20
-  (ADR-0035), with the same features as Linux and macOS. Until then PTY code is gated
-  `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
+  (ADR-0035), with the same features as Linux and macOS. Until then a
+  Windows build of `qsh cp` rejects malformed operands and answers
+  everything else with `UNSUPPORTED`, a Windows host does not advertise
+  `file.v1` and answers the file operations with `UNSUPPORTED`, and PTY code
+  is gated `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
   return `UNSUPPORTED` there, and a tunnel over a reverse connection
   inherits that. `qsh tunnel open --dynamic` is cross-platform like
   `--local`/`--remote`; the interactive `-D` spelling is not, since the
@@ -948,7 +1015,7 @@ old-glibc check.
 | M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
 | M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
 | M14 | TCP/TLS fallback | Withdrawn (ADR-0043); the transport abstraction stays |
-| M15 | Trust roles and scp-compatible `qsh cp` | In progress |
+| M15 | Trust roles and scp-compatible `qsh cp` | Features done; `decode_file_frame` fuzz hours open |
 | M16–M20 | Rest of P1 (SSH bootstrap, revocation, ops surface, session home, Windows client and host) | Design records approved; README rewrite (M17 b) done |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job

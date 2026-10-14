@@ -1109,7 +1109,7 @@ fn peer_entry(name: &str, seed: &[u8], role: Option<&str>) -> String {
 
 /// ADR-0045 결정 4's inputs to ⓡ: the role comes from the pin of the
 /// requester's own name whose fingerprint equals the connection's, and from
-/// nothing else. The evaluator consumes it as stage ⓡ (PLAN M15 Step 4).
+/// nothing else. The evaluator consumes it as stage ⓡ (M15 plan Step 4 (1a4af3b)).
 #[test]
 fn resolve_role_requires_a_current_pin_with_the_connections_fingerprint() {
     let dir = tempfile::tempdir().unwrap();
