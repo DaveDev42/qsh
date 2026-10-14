@@ -3,6 +3,8 @@
 날짜: 2026-09-09
 상태: 승인됨
 
+개정 이력: 맥락 절의 전제(페어링이 상대를 pin해도 아무 action도 얻지 못한다)는 role 키를 가진 새 pin에 대해 [ADR-0045](0045-trust-roles.md)로 더는 참이 아니다. 결정 2의 `acl_principal_unmatched`·`acl_ca_auth_path_missing`이 나오는 조건과 결정 3의 페어링 직후 고지 문면이 같은 ADR 결정 12·13으로 바뀌었다. 결정 1(`acl.toml`을 쓰지 않는다)과 결정 5(TOFU 없음)는 그대로다.
+
 ## 맥락
 
 `acl.toml`은 `crates/qsh-core/src/acl/load.rs`의 `PolicySource::load`가 `<config_dir>/acl.toml`에서 읽는 사람 손으로 쓰는 파일이고, 프로세스 시작 시 1회만 로드된다("process-start-once by design", `acl/load.rs`). 이 파일을 만드는 프로덕션 코드 경로는 없다. `acl_file()`에 쓰는 지점은 테스트뿐이고, `ACL_STARTUP_NO_AUTOGEN` 상수 자체가 "acl.toml is never auto-generated — create it by hand"라고 못박는다. 파일이 없으면 `PolicyLoad::Missing`이 되고, 이 상태를 파일로 영구화하지 않는다는 것은 `docs/design/architecture.md` §6("acl.toml이 없거나 파싱 불가 → 전부 deny")과 `acl/load.rs` 모듈 문서("absent `acl.toml` … means nobody has been granted anything yet")가 이미 정한 바다.

@@ -13,7 +13,7 @@
 //!   the requester's pin up and allows `forward.local` through its `full`
 //!   role. This is the production wiring (`acl::load_or_deny`).
 //!
-//! The decision is allow in both arms; only the lookup differs. (Step 3
+//! The decision is allow in both arms; only the lookup differs. (M15 plan Step 3 (1a4af3b)
 //! measured the lookup alone, with the role discarded; since Step 4 the
 //! role is the grant, so arm B pays for both the lookup and the role
 //! stage.) The two
