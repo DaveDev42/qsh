@@ -74,23 +74,23 @@ M17이 더하는 것은 실제 외부 상태를 건드리지 않는 주입점 �
 체크박스는 근거가 되는 테스트와 CI run이 초록일 때만 채운다.
 
 - [x] **DoD (a) — ADR-0032가 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
-- [ ] **DoD (a) — 플래그 없이는 매니저를 부르지 않는다.** `install_without_activate_never_invokes_the_manager`, `uninstall_without_deactivate_never_invokes_the_manager`, `status_without_live_never_invokes_the_manager`. 플래그 없는 호출의 출력은 기존 fixture와 바이트가 같다. 근거: Step 2.
-- [ ] **DoD (a) — 부르는 argv가 `docs/deploy/service.md`의 안내와 같다.** 문서-코드 대조 `service_md_activation_recipes_match_the_argv_builders`. 테스트는 실제 매니저를 부르지 않는다. 근거: Step 2.
-- [ ] **DoD (a) — `docs/CLI.md` §6.18과 man이 같은 커밋에서 바뀐다.** `qsh-service-install.1`·`qsh-service-uninstall.1`·`qsh-service-status.1`, `checked_in_man_pages_match_the_generator`. 근거: Step 2.
-- [ ] **DoD (a) — LaunchDaemon 펜스가 LaunchAgent 렌더러와 같은 인자를 쓴다.** `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`. 근거: Step 4.
-- [ ] **DoD (a) — `keystore_session_bound`와 `identity.move_key`의 테스트와 fixture 등록 완전성, `move-key`가 fingerprint를 바꾸지 않음.** 다음을 갖춘다. 근거: Step 3·4.
+- [x] **DoD (a) — 플래그 없이는 매니저를 부르지 않는다.** `install_without_activate_never_invokes_the_manager`, `uninstall_without_deactivate_never_invokes_the_manager`, `status_without_live_never_invokes_the_manager`. 플래그 없는 호출의 출력은 기존 fixture와 바이트가 같다(사람 모드 문면도 같음). 근거: `1790cad`.
+- [x] **DoD (a) — 부르는 argv가 `docs/deploy/service.md`의 안내와 같다.** 문서-코드 대조 `service_md_activation_recipes_match_the_argv_builders`. 테스트는 실제 매니저를 부르지 않는다(단위는 `FakeRunner`, 통합은 PATH의 가짜 `launchctl`/`systemctl`). 순서와 범위까지 대조한다. 근거: `1790cad`.
+- [x] **DoD (a) — `docs/CLI.md` §6.18과 man이 같은 커밋에서 바뀐다.** `qsh-service-install.1`·`qsh-service-uninstall.1`·`qsh-service-status.1`, `checked_in_man_pages_match_the_generator`. 근거: `1790cad`(CLI.md v0.36과 man 넷이 한 커밋).
+- [x] **DoD (a) — LaunchDaemon 펜스가 LaunchAgent 렌더러와 같은 인자를 쓴다.** `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`. 근거: `2a92a45`.
+- [x] **DoD (a) — `keystore_session_bound`와 `identity.move_key`의 테스트와 fixture 등록 완전성, `move-key`가 fingerprint를 바꾸지 않음.** 다음을 갖춘다. 근거: `5100fdc`·`2a92a45`(doctor fixture 이름은 `doctor.run.keystore_session_bound.json`).
   - `move_key_keeps_the_fingerprint_and_device_id`
   - `identity.move_key` fixture 둘과 doctor fixture 하나의 `REQUIRED_FIXTURES` 등재, `layer_2_every_schema_command_has_all_six_faces`, `op_registration_completeness.rs`의 `OP_FACES` 행
   - man `qsh-identity-move-key.1`
 - [x] **DoD (b) — README 재작성판, 두 SHA 고정 커밋 뒤.** 재작성 `2fc879b`(2026-10-11)는 m9 대상 트리 고정 `1a7798d`와 `p1-setup-stopwatch` 고정 `43da2fb`의 자손이다(`git merge-base --is-ancestor`로 확인). 마감 공통 절차 2를 재작성판에 대해 수행하는 일은 아래 마감 줄이 맡는다.
 - [x] **DoD (c) — PRD §17 개정 결정이 기록된다.** 2026-10-12 폐기로 충족.
-- [ ] **DoD (d) — ADR-0033이 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인). 이 줄은 Step 1이 확인하고 채운다.
-- [ ] **DoD (d) — 범위 ADR이 정한 항목마다 테스트와 fixture 등록 완전성.** 세션 필터(결정 1~3), `audit.query`(결정 4~9), retention 가시성(결정 10·11), 텔레메트리 처분(결정 12), 동등(결정 13). 근거: Step 5·6·7.
-- [ ] **DoD (d) — `audit.query`에 대응하는 wire 메시지가 없음을 op registry 분류 테스트가 확인한다.** `op_registration_completeness.rs`·`acl_registry.rs`의 local-only 분류와 `audit_query_has_no_wire_message_and_no_localctl_request`. 근거: Step 7.
-- [ ] **계획 규율 — route·플랫폼 동등.** 각 스텝의 동등 테스트가 초록이고, M19·M20으로 미룬 Windows 항목이 §6과 각 스텝 "Windows" 줄에 ADR 결정과 함께 귀속돼 있다(§5.1 원칙 7). 근거: Step 2~7.
-- [ ] **계획 규율 — 위협 모델.** `docs/design/threat-model.md` §3의 `qsh service` 행 개정과 새 진입점 둘(`identity move-key`, `qsh audit`), §4의 매니저 인자 주입(E)·재시작 부재(G)·이동 중 개인키 노출(D)·audit 열람 oracle과 삭제 경로 부재(F)가 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 2·3·4·7.
-- [ ] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 8.
-- [ ] **안정성 — 새 타이밍 민감 테스트의 부하 반복.** M17이 더한 타이밍 민감 테스트 전부가 `scripts/stress/m17.filter`로 묶여 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이다. M17에는 지연 예산 단언이 없으므로 `-j 1` 대체 필터를 두지 않는다. ROADMAP M17 DoD에는 아직 이 줄이 없고 Step 1이 더한다(§9 #1). 근거: Step 3·5·6·7·8.
+- [x] **DoD (d) — ADR-0033이 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
+- [x] **DoD (d) — 범위 ADR이 정한 항목마다 테스트와 fixture 등록 완전성.** 세션 필터(결정 1~3), `audit.query`(결정 4~9), retention 가시성(결정 10·11), 텔레메트리 처분(결정 12), 동등(결정 13). 근거: `b0169d7`·`e47ffd9`·`55b1a2e`(fixture `session.list.filtered.json`·`audit.query.json`·`audit.query.truncated.json`).
+- [x] **DoD (d) — `audit.query`에 대응하는 wire 메시지가 없음을 op registry 분류 테스트가 확인한다.** `op_registration_completeness.rs`·`acl_registry.rs`의 local-only 분류와 `audit_query_has_no_wire_message_and_no_localctl_request`. 근거: `55b1a2e`. named pipe 행은 M19(ADR-0035 결정 14).
+- [x] **계획 규율 — route·플랫폼 동등.** 각 스텝의 동등 테스트가 초록이고, M19·M20으로 미룬 Windows 항목이 §6과 각 스텝 "Windows" 줄에 ADR 결정과 함께 귀속돼 있다(§5.1 원칙 7). 근거: route 동등 테스트 `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`, `keystore_session_bound_covers_serve_listen_and_reverse_units`, `sessions_filter_applies_identically_to_forward_and_reverse_hosts`, `audit_query_reads_records_written_by_serve_listen_and_serve_to`. Windows 귀속은 `f87692e`의 대조로 확인.
+- [x] **계획 규율 — 위협 모델.** `docs/design/threat-model.md` §3의 `qsh service` 행 개정과 새 진입점 둘(`identity move-key`, `qsh audit`), §4의 매니저 인자 주입(E)·재시작 부재(G)·이동 중 개인키 노출(D)·audit 열람 oracle과 삭제 경로 부재(F)가 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: E17·G8·h45 `1790cad`, §3·D16 `5100fdc`, §3 `2a92a45`, D17·F5·F6·h26·h46 `55b1a2e`.
+- [x] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: `f87692e`, CI run 38782168398(acceptance 포함).
+- [x] **안정성 — 새 타이밍 민감 테스트의 부하 반복.** M17이 더한 타이밍 민감 테스트 전부가 `scripts/stress/m17.filter`로 묶여 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이다. M17에는 지연 예산 단언이 없으므로 `-j 1` 대체 필터를 두지 않는다. ROADMAP M17 DoD의 안정성 줄은 `c9b2f22`가 더했다. 근거: `scripts/stress/m17.filter`(95개) 부하 아래 50/50(Dave-Windows-WSL 8 vCPU, `55b1a2e` 트리).
 
 ## 4. 실행 단계 (PR 단위)
 
