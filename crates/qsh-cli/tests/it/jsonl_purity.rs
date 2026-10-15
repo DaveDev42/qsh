@@ -879,6 +879,37 @@ fn identity_move_key_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `qsh audit` (`docs/CLI.md` §6.22): stdout is exactly one `qsh.cli/v1`
+/// line at every verbosity, with a planted log that holds a skipped line,
+/// and the skipped line's content never reaches either stream.
+#[test]
+fn audit_query_keeps_stdout_pure_json_at_every_verbosity() {
+    let sandbox = Sandbox::initialized();
+    crate::audit_query::plant(
+        &sandbox,
+        &crate::audit_query::series(),
+        Some("{\"torn\":\"SECRET-PAYLOAD-must-not-leak"),
+    );
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = sandbox.qsh(&["audit", verbosity, mode]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}: one envelope line");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        assert_eq!(lines[0]["command"], "audit.query", "{label}");
+        assert_eq!(lines[0]["data"]["skipped_lines"], 1, "{label}");
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!all.contains("SECRET-PAYLOAD"), "{label}: {all}");
+    }
+}
+
 /// `qsh service install` (`docs/CLI.md` §6.18, ROADMAP M9 (g)): at high
 /// verbosity stdout must still be exactly one `qsh.cli/v1` line, with any
 /// human-readable activation hint the renderer might print going to

@@ -73,8 +73,8 @@ pub use ops::service::{
     systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
 };
 pub use ops::{
-    AclCheckOp, AclShowOp, AttachHandle, AutoBootstrap, AutoBootstrapReport, CancelToken,
-    CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorHostState, DoctorOp,
+    AclCheckOp, AclShowOp, AttachHandle, AuditQueryOp, AutoBootstrap, AutoBootstrapReport,
+    CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorHostState, DoctorOp,
     DoctorThreshold, ExecRunOp, ExecRunOutput, ExecStdin, FILE_COPY_PARALLEL, FileCopyError,
     FileCopyObserver, FileCopyOp, FileProgress, HostGetOp, HostListOp, HostRoute,
     INVITE_CODE_PROMPT, INVITE_CODE_STDIN_MAX, IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp,

@@ -415,6 +415,41 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Usage,
         },
         Case {
+            // ADR-0033 결정 4: local-only and authorization-free, so even a
+            // machine with no log yet answers with an empty success.
+            name: "audit: empty log",
+            sandbox: &fleet.client,
+            args: &["audit"],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            // ADR-0033 결정 9: the limit range is checked by the core, so a
+            // bad value is a runtime failure (255), not a clap usage error.
+            name: "audit: --limit 0",
+            sandbox: &fleet.client,
+            args: &["audit", "--limit", "0"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            name: "audit: --limit above 1000",
+            sandbox: &fleet.client,
+            args: &["audit", "--limit", "5000"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            name: "audit: unknown --decision",
+            sandbox: &fleet.client,
+            args: &["audit", "--decision", "maybe"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // There is no remote form: a host operand is not accepted.
+            name: "usage: audit with a host operand",
+            sandbox: &fleet.client,
+            args: &["audit", HOST_ALIAS],
+            outcome: Outcome::Usage,
+        },
+        Case {
             name: "init --import-ssh-key: passphrase-protected key",
             sandbox: &uninitialized,
             args: &import_encrypted_args,

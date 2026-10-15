@@ -279,6 +279,15 @@ pub enum Command {
     #[command(subcommand)]
     Acl(AclCmd),
 
+    /// Read this machine's own audit log: the authorization decisions
+    /// `qsh serve`, `qsh listen` and `qsh serve --to` recorded, newest
+    /// first, filtered on this machine (`docs/CLI.md` §6.22).
+    ///
+    /// Read-only and local only: it never reaches a remote peer, writes no
+    /// audit record, and there is no command that deletes or shortens the
+    /// log. Run it on the host whose log you want.
+    Audit(AuditArgs),
+
     /// Set this machine up for one role, step by step, using only the
     /// commands you could run yourself (ADR-0024, `docs/CLI.md` §6.20).
     /// Prints the `[[acl]]` rows to add and never writes `acl.toml`; never
@@ -1226,6 +1235,46 @@ pub struct AclShowArgs {
     /// Omit to use `acl.toml`'s own default (`"pin"`).
     #[arg(long = "auth-path", value_name = "pin|ca")]
     pub auth_path: Option<String>,
+}
+
+/// Arguments of `qsh audit` (`docs/CLI.md` §6.22, ADR-0033 decision 5).
+///
+/// Every filter is an exact match and they combine with AND. The values
+/// are validated by `qsh_core` (`INVALID_ARGUMENT`, exit `255`), not by clap,
+/// the same split `qsh -L` and `qsh acl check` use: one place decides what
+/// a bad value earns.
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    /// Only records at or after this time: an RFC 3339 timestamp, or a
+    /// span back from now written `N[smhd]` (`90m`, `24h`, `7d`).
+    #[arg(long, value_name = "RFC3339|N[smhd]")]
+    pub since: Option<String>,
+
+    /// Only records at or before this time (RFC 3339).
+    #[arg(long, value_name = "RFC3339")]
+    pub until: Option<String>,
+
+    /// Only records of this principal (`device:<name>`, `user:<name>`,
+    /// `fp:sha256:<base64>`, or `-` for a connection with none).
+    #[arg(long, value_name = "PRINCIPAL")]
+    pub principal: Option<String>,
+
+    /// Only records of this action (`session.open`, `file.read`, or
+    /// `connect` for a connection-level record).
+    #[arg(long, value_name = "ACTION")]
+    pub action: Option<String>,
+
+    /// Only records of this resource identifier, exactly as stored.
+    #[arg(long, value_name = "RESOURCE")]
+    pub resource: Option<String>,
+
+    /// Only records with this decision.
+    #[arg(long, value_name = "allow|deny")]
+    pub decision: Option<String>,
+
+    /// Most records to return, newest first: 1 to 1000, default 100.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u32>,
 }
 
 /// `qsh host …` subcommands (`docs/CLI.md` §6.1).

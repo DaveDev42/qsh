@@ -1,0 +1,36 @@
+{
+  "command": "audit.query",
+  "data": {
+    "oldest_ts": "2026-10-16T01:00:01Z",
+    "records": [
+      {
+        "action": "session.open",
+        "auth_path": "pin",
+        "decision": "allow",
+        "peer_addr": "100.64.0.7:51234",
+        "principal": "device:ci",
+        "request_id": "<request_id>",
+        "resource": "session",
+        "role": "exec",
+        "rule": 0,
+        "ts": "<timestamp>"
+      },
+      {
+        "action": "exec.run",
+        "auth_path": "pin",
+        "decision": "deny",
+        "peer_addr": "100.64.0.7:51234",
+        "principal": "device:phone",
+        "request_id": "<request_id>",
+        "resource": "exec",
+        "rule": null,
+        "ts": "<timestamp>"
+      }
+    ],
+    "skipped_lines": 0,
+    "truncated": true
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
