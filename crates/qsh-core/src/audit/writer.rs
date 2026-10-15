@@ -452,14 +452,10 @@ impl RotatingFile {
         // cheapest to do it exactly when a fresh handle is about to be
         // opened (startup, and after every rotation).
         sweep_stale_rotated(&self.active_path, self.retain);
-        let mut opts = OpenOptions::new();
-        opts.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let file = opts.open(&self.active_path)?;
+        let file = crate::fsutil::open_private_file(
+            crate::fsutil::PrivateOpen::Append,
+            &self.active_path,
+        )?;
         let size = file.metadata()?.len();
         Ok((file, size))
     }

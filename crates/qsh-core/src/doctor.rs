@@ -706,16 +706,30 @@ pub const TRUST_FILE_ROLES_SUSPENDED_CLAUSE: &str = "a running qsh serve/listen 
 /// `RotatingAuditSink::record` consults — that would reintroduce exactly
 /// the extra I/O per decision the async writer thread exists to avoid.
 pub fn probe_audit_path_writable(path: &std::path::Path) -> bool {
-    if let Some(parent) = path.parent()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return false;
+    if let Some(parent) = path.parent() {
+        // The probe creates what the writer would create, so on Windows it
+        // takes the same owner-only DACL path rather than leaving behind a
+        // file or directory with an inherited ACL (ADR-0035 decision 9).
+        #[cfg(windows)]
+        let created = crate::fsutil::create_private_dir(parent);
+        #[cfg(not(windows))]
+        let created = std::fs::create_dir_all(parent);
+        if created.is_err() {
+            return false;
+        }
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .is_ok()
+    #[cfg(windows)]
+    {
+        crate::fsutil::open_private_file(crate::fsutil::PrivateOpen::Append, path).is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .is_ok()
+    }
 }
 
 #[cfg(test)]

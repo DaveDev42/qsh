@@ -836,10 +836,10 @@ the offending rule (unknown action pattern, `auth_path` or scope).
 
 On unix, a group- or world-writable `acl.toml` gets a one-time stderr
 warning instead of a refusal to load: an operator locked out of their own
-host by a permissions slip has no way back in. Windows ACL checking is out
-of scope. Pin only devices you would hand a shell to, and choose each
-one's role on purpose. The default for a machine that connects in is `full`,
-which is the power of the account running `qsh serve`: `exec` and `full`
+host by a permissions slip has no way back in. Pin only devices you would
+hand a shell to, and choose each one's role on purpose. The default for a
+machine that connects in is `full`, which is the power of the account running
+`qsh serve`: `exec` and `full`
 can run any command as that account, and `full` (or a row with a wide
 `paths`) can write any file that account can, `~/.bashrc` and
 `~/.ssh/authorized_keys` included. Only qsh's own files are protected. A
@@ -1060,7 +1060,12 @@ Some of these are MVP scope decisions, some are unfinished work.
   (ADR-0035), with the same features as Linux and macOS. The Windows
   console layer (raw VT input and output, UTF-8 code page, resize polling, mode
   restore on every exit path) and the echo-free invite-code prompt are in; they
-  need Windows 10 1809 or later. Terminals that hand `qsh` a pipe instead of a
+  need Windows 10 1809 or later. The files `qsh` keeps private (the identity
+  key, `resume.json`, `trust.toml`, the audit log, the CA files, the stateless
+  reset key) are created with an owner-only DACL, the counterpart of mode
+  0600 on unix; where that cannot be applied, for example on a FAT/exFAT
+  volume or a share without ACLs, `qsh` creates nothing and fails with
+  `CONFIG_ERROR`. Terminals that hand `qsh` a pipe instead of a
   console (mintty, which Git Bash uses) get no raw mode: run `qsh` from Windows
   Terminal, or start it as `winpty qsh ...`. The ssh bootstrap
   follows that split. `qsh pair ssh` runs from a Windows client with the

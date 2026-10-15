@@ -428,6 +428,64 @@ fn genuine_io_failure_latches_and_recovers_automatically_through_the_retry_path(
     );
 }
 
+/// The Windows row of the fail-closed rule for the rotating sink: while the
+/// DACL cannot be built the writer latches degraded, no file or directory
+/// appears, and once it can be built the production retry path recovers and
+/// creates the file with the owner-only DACL.
+#[cfg(windows)]
+#[test]
+fn rotating_audit_sink_fails_closed_when_the_dacl_cannot_be_applied() {
+    use crate::fsutil::dacl::testing::{NoSid, assert_owner_only};
+    use crate::fsutil::dacl::{ObjectKind, inject_for_test};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let path = state.join("audit.log");
+
+    let inject = inject_for_test(Arc::new(NoSid));
+    let (audit, handle) = RotatingAuditSink::spawn_joinable_with_retry_tick(
+        &path,
+        64 * 1024,
+        5,
+        8,
+        Duration::from_millis(15),
+    );
+    // Drive calls until the latch trips: a bounded poll on the observable
+    // result, never a `sleep()`.
+    let mut tripped = false;
+    for i in 0..200_000u64 {
+        if audit.record(&record_for(i)) == Err(AuditError::Degraded) {
+            tripped = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(
+        tripped,
+        "an unbuildable DACL must latch the writer degraded"
+    );
+    assert!(!path.exists());
+    assert!(!state.exists());
+
+    // Repair: the production retry path clears the latch on its own.
+    drop(inject);
+    let mut spins = 0u64;
+    while audit.is_degraded() && spins < 50_000_000 {
+        std::thread::yield_now();
+        spins += 1;
+    }
+    assert!(
+        !audit.is_degraded(),
+        "the latch must clear through the retry path"
+    );
+    assert_eq!(audit.record(&record_for(999_999)), Ok(()));
+
+    drop(audit);
+    handle.join().unwrap();
+    assert_owner_only(&path, ObjectKind::File);
+    assert_owner_only(&state, ObjectKind::Dir);
+}
+
 // ---- F5: stale rotated files ---------------------------------------
 
 #[test]

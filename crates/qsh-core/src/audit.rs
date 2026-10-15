@@ -18,7 +18,8 @@
 //! connection, so a failed enqueue there gets a diagnostic, never a changed
 //! outcome (there is nothing left to fail closed *toward*).
 
-use std::fs::{self, OpenOptions};
+#[cfg(test)]
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -551,7 +552,8 @@ pub trait AuditSink: Send + Sync + 'static {
 /// `qsh reverse` via `serve::host_runtime`, and `qsh listen`'s controller
 /// as of M5 plan Step 3 (2473c88) F7) — this stays as the simplest-possible
 /// sink for callers that just want one, mainly this crate's own tests.
-/// Creates the parent directory (0700) and the file (0600) on first use.
+/// Creates the parent directory (0700) and the file (0600) on first use; on
+/// Windows both get an owner-only DACL instead (ADR-0035 decision 9).
 #[derive(Debug)]
 pub struct FileAuditSink {
     path: PathBuf,
@@ -577,14 +579,8 @@ impl FileAuditSink {
         if let Some(parent) = self.path.parent() {
             create_private_dir(parent)?;
         }
-        let mut opts = OpenOptions::new();
-        opts.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&self.path)?;
+        let mut file =
+            crate::fsutil::open_private_file(crate::fsutil::PrivateOpen::Append, &self.path)?;
         // F3: payload and the trailing newline as ONE buffer, ONE
         // `write_all` — two separate calls (as this used to be) leave a
         // window where the payload lands but the newline doesn't, which
@@ -732,14 +728,21 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     if dir.exists() {
         return Ok(());
     }
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        crate::fsutil::create_private_dir(dir)
     }
-    builder.create(dir)
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)
+    }
 }
 
 #[cfg(test)]

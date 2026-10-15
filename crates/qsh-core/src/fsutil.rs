@@ -6,10 +6,81 @@
 //! cleans up whichever of those two ever gets orphaned by a crash between
 //! the temp write and the rename.
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
+
+// The Windows counterpart of the 0600/0700 modes (ADR-0035 decisions 9 and
+// 10): `dacl::open_private_file` and `dacl::create_private_dir` are what
+// [`open_private_file`] and [`create_private_dir`] call there. A child of
+// this file rather than a directory-style `fsutil/mod.rs`, so `fsutil.rs`
+// stays the one place the shared writers live.
+#[cfg(windows)]
+pub(crate) mod dacl;
+
+/// How [`open_private_file`] opens its file. The variants are the four
+/// shapes this crate's private files are opened in, each the same
+/// `OpenOptions` combination on every platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrivateOpen {
+    /// Write; create if missing; truncate (the temp file of an atomic write).
+    CreateTruncate,
+    /// Write; fail with `AlreadyExists` if the file is there.
+    CreateNew,
+    /// Append; create if missing (audit logs).
+    Append,
+    /// Write without truncating; create if missing (sidecar lock files).
+    Lock,
+}
+
+/// Open `path` as `how`; a file this call creates is private to the owner
+/// from the moment it exists: mode 0600 on unix, an owner-only protected
+/// DACL on Windows (ADR-0035 decision 9). An existing file is opened as it
+/// is. On Windows a DACL that cannot be built, or a volume that stores no
+/// ACLs, is an error and nothing is created (decision 10).
+///
+/// Every private-file creation in this crate goes through here, so the
+/// permission rule has one definition per platform.
+pub(crate) fn open_private_file(how: PrivateOpen, path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut options = std::fs::OpenOptions::new();
+        match how {
+            PrivateOpen::CreateTruncate => options.write(true).create(true).truncate(true),
+            PrivateOpen::CreateNew => options.write(true).create_new(true),
+            PrivateOpen::Append => options.create(true).append(true),
+            PrivateOpen::Lock => options.write(true).create(true).truncate(false),
+        };
+        options.mode(0o600);
+        options.open(path)
+    }
+    #[cfg(windows)]
+    {
+        dacl::open_private_file(how, path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let mut options = std::fs::OpenOptions::new();
+        match how {
+            PrivateOpen::CreateTruncate => options.write(true).create(true).truncate(true),
+            PrivateOpen::CreateNew => options.write(true).create_new(true),
+            PrivateOpen::Append => options.create(true).append(true),
+            PrivateOpen::Lock => options.write(true).create(true).truncate(false),
+        };
+        options.open(path)
+    }
+}
+
+/// Create `dir` and its missing parents as private directories on Windows
+/// (an owner-only DACL its children inherit). An existing directory is left
+/// as it is. The unix callers keep their own 0700 handling.
+#[cfg(windows)]
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
+    dacl::create_private_dir(dir)
+}
 
 /// Ticket source for [`write_atomically`]'s temp file name — unique per
 /// *writer*, not just per process. Two writers in the same process
@@ -57,6 +128,36 @@ pub(crate) fn next_write_ticket_for_test() -> u64 {
 /// private files stop one step short of it, same as before this helper
 /// existed.
 pub(crate) fn write_atomically(path: &Path, contents: &[u8], durable: bool) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        write_atomically_with(path, contents, durable, &dacl::CurrentUser)
+    }
+    #[cfg(not(windows))]
+    {
+        write_atomically_via(path, contents, durable, &open_private_file)
+    }
+}
+
+/// [`write_atomically`] with an explicit DACL source, so a test can make the
+/// DACL fail and check that no file appears.
+#[cfg(windows)]
+pub(crate) fn write_atomically_with(
+    path: &Path,
+    contents: &[u8],
+    durable: bool,
+    source: &dyn dacl::DaclSource,
+) -> io::Result<()> {
+    write_atomically_via(path, contents, durable, &|how, tmp| {
+        dacl::open_private_file_with(how, tmp, source)
+    })
+}
+
+fn write_atomically_via(
+    path: &Path,
+    contents: &[u8],
+    durable: bool,
+    open: &dyn Fn(PrivateOpen, &Path) -> io::Result<File>,
+) -> io::Result<()> {
     use std::io::Write as _;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -66,16 +167,14 @@ pub(crate) fn write_atomically(path: &Path, contents: &[u8], durable: bool) -> i
     let ticket = WRITE_TICKET.fetch_add(1, Ordering::Relaxed);
     let tmp = temp_path(dir, file_name, std::process::id(), ticket);
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-
     let result = (|| -> io::Result<()> {
-        let mut file = options.open(&tmp)?;
+        // A creation DACL only applies to a file that does not exist yet, and
+        // the unix mode is re-asserted below for the same reason. The
+        // Windows equivalent is not to reuse a leftover of this name (a
+        // reused pid restarts the ticket) but to start from a fresh file.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = open(PrivateOpen::CreateTruncate, &tmp)?;
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);

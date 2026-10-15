@@ -206,15 +206,9 @@ fn create(path: &Path) -> io::Result<()> {
     rand::rng().fill_bytes(key.as_mut());
 
     let tmp = crate::fsutil::temp_path_for(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
     let result = (|| -> io::Result<()> {
-        let mut file = options.open(&tmp)?;
+        let mut file =
+            crate::fsutil::open_private_file(crate::fsutil::PrivateOpen::CreateNew, &tmp)?;
         file.write_all(key.as_ref())?;
         file.sync_all()?;
         drop(file);

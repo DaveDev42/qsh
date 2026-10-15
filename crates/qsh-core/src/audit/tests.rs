@@ -211,6 +211,33 @@ fn file_sink_returns_err_when_the_path_cannot_be_written() {
     assert_eq!(sink.record(&sample()), Err(AuditError::Degraded));
 }
 
+/// The Windows row of the fail-closed rule: a DACL that cannot be built is a
+/// write that cannot be performed, so the sink refuses and nothing, neither
+/// the file nor its directory, is left with a weaker ACL
+/// (ADR-0035 decision 10).
+#[cfg(windows)]
+#[test]
+fn audit_sink_fails_closed_when_the_dacl_cannot_be_applied() {
+    use crate::fsutil::dacl::testing::{NoSid, assert_owner_only};
+    use crate::fsutil::dacl::{ObjectKind, inject_for_test};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let path = state.join("audit.log");
+    let sink = FileAuditSink::new(&path);
+    {
+        let _inject = inject_for_test(Arc::new(NoSid));
+        assert_eq!(sink.record(&sample()), Err(AuditError::Degraded));
+    }
+    assert!(!path.exists());
+    assert!(!state.exists());
+
+    // The failure is not sticky: with a working DACL the next write lands.
+    sink.record(&sample()).unwrap();
+    assert_owner_only(&path, ObjectKind::File);
+    assert_owner_only(&state, ObjectKind::Dir);
+}
+
 #[test]
 fn now_rfc3339_has_second_precision_and_z_suffix() {
     let ts = now_rfc3339();

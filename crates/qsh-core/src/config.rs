@@ -254,7 +254,9 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 /// Create `dir` (and its parents) with mode 0700, and tighten an existing
-/// directory's mode to 0700.
+/// directory's mode to 0700. On Windows a directory this creates gets an
+/// owner-only DACL that its children inherit; an existing directory is left
+/// as it is.
 ///
 /// Private-by-construction: the identity directory holds a 0600 key in file
 /// mode, so the enclosing directory must be as tight as an sshd host-key
@@ -278,17 +280,44 @@ pub(crate) fn ensure_private_dir_io(dir: &Path) -> io::Result<()> {
         std::fs::set_permissions(dir, perms)?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Owner-only, inheriting DACL on every directory this call creates
+        // (ADR-0035 decision 9); an existing directory is left alone, and the
+        // private files inside it carry their own protected DACL.
+        crate::fsutil::create_private_dir(dir)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::create_dir_all(dir)
     }
 }
 
-/// Write `contents` to `path` with mode 0600, atomically (temp file in the
-/// same directory + rename) so a crash never leaves a half-written key,
-/// certificate or trust store.
+/// Write `contents` to `path` with mode 0600 (an owner-only DACL on
+/// Windows), atomically (temp file in the same directory + rename) so a
+/// crash never leaves a half-written key, certificate or trust store.
 pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), OpError> {
-    write_private_file_io(path, contents).map_err(|err| config_io_error(path, "write", &err))
+    #[cfg(windows)]
+    {
+        write_private_file_with(path, contents, &crate::fsutil::dacl::CurrentUser)
+    }
+    #[cfg(not(windows))]
+    {
+        write_private_file_io(path, contents).map_err(|err| config_io_error(path, "write", &err))
+    }
+}
+
+/// [`write_private_file`] with an explicit DACL source: a DACL that cannot
+/// be built is a `CONFIG_ERROR` naming the path and the cause, and no file
+/// exists afterwards (ADR-0035 decision 10).
+#[cfg(windows)]
+pub(crate) fn write_private_file_with(
+    path: &Path,
+    contents: &[u8],
+    dacl: &dyn crate::fsutil::dacl::DaclSource,
+) -> Result<(), OpError> {
+    crate::fsutil::write_atomically_with(path, contents, false, dacl)
+        .map_err(|err| config_io_error(path, "write", &err))
 }
 
 /// The ticket [`write_private_file_io`]'s *next* call will consume. Lets a
@@ -370,15 +399,7 @@ pub(crate) struct FileLock {
 
 impl FileLock {
     pub(crate) fn acquire(path: &Path) -> Result<Self, OpError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
+        let file = crate::fsutil::open_private_file(crate::fsutil::PrivateOpen::Lock, path)
             .map_err(|e| config_io_error(path, "open lock file", &e))?;
         // Blocking exclusive lock: every critical section behind this lock
         // is a small file rewrite (no network I/O, see the call sites'
