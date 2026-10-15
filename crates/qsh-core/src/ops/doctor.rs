@@ -67,6 +67,19 @@ const DOCTOR_PROBE_TIMEOUT: Duration = super::PROBE_DIAL_TIMEOUT;
 /// 30일 전 doctor 경고", design brief row #5).
 const CERT_EXPIRING_SOON_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 
+/// The host state [`Ops::doctor_with_host_state`] takes instead of reading
+/// the real machine: the key store the diagnosed identity records, `$HOME`,
+/// the root under which `Library/LaunchDaemons` is looked up, the systemd
+/// linger marker directory and `$USER`. Each is the value
+/// [`Ops::doctor`] reads from the environment, made explicit.
+pub struct DoctorHostState<'a> {
+    pub keystore: &'a dyn KeyStore,
+    pub home_dir: Option<&'a Path>,
+    pub system_root: &'a Path,
+    pub linger_dir: &'a Path,
+    pub username: Option<&'a str>,
+}
+
 /// The real-process inputs [`Ops::doctor_assemble`]'s
 /// `keystore_unavailable`/`qsh_path_shadowed`/`service_not_registered`/
 /// `systemd_linger_disabled`/`launchagent_session_scoped`/
@@ -100,6 +113,17 @@ struct DoctorEnvironment<'a> {
     /// `/var/lib/systemd/linger` in production; a test points this at a
     /// tempdir instead ([`probe::probe_systemd_linger`]'s own doc).
     linger_dir: &'a Path,
+    /// `/` in production. The macOS LaunchDaemon plist is looked up under
+    /// it (`<system_root>/Library/LaunchDaemons`, ADR-0032 결정 14), so a test
+    /// points it at a tempdir and never reads the real `/Library`.
+    system_root: &'a Path,
+    /// The OS whose service layout the registration probes read:
+    /// [`probe::HostOs::current`] in production, any value in a test, so the
+    /// macOS rules run on a Linux host too.
+    os: probe::HostOs,
+    /// `identity.key_store` of the device being diagnosed, which
+    /// `keystore_session_bound` (ADR-0032 결정 15) keys off.
+    key_store: KeyStoreKind,
     /// `$USER` — `None` when the real environment could not resolve one
     /// (no finding either way; matches [`probe::LingerProbe::Unknown`]'s
     /// own "cannot tell" reading rather than guessing an account name).
@@ -193,11 +217,50 @@ impl Ops {
             path_dirs: &path_dirs,
             home_dir: home_dir.as_deref(),
             linger_dir,
+            system_root: Path::new("/"),
+            os: probe::HostOs::current(),
+            key_store: identity.key_store,
             username: username.as_deref(),
             bindv6only_probe: probe::probe_bindv6only,
         };
 
         self.doctor_assemble(req, now_unix, &identity, &config, &env)
+    }
+
+    /// [`Ops::doctor`] with the host state it reads outside `self.paths`
+    /// handed in, the seam that keeps tests off the real key store,
+    /// `$HOME`, `/Library/LaunchDaemons` and `/var/lib/systemd/linger`
+    /// (`docs/design/testing.md` L1). The executable path, `$PATH` and the
+    /// IPv6 bind probe are left out: this entry reports none of
+    /// `qsh_path_shadowed` or `bindv6only_blocks_ipv4`. Production code
+    /// calls [`Ops::doctor`].
+    pub fn doctor_with_host_state(
+        &self,
+        req: DoctorReq,
+        now: SystemTime,
+        host: &DoctorHostState<'_>,
+    ) -> Result<DoctorData, OpError> {
+        let identity = crate::identity::read_identity(&self.paths)?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+            .with_retryable(false)
+        })?;
+        let config = self.config()?;
+        let env = DoctorEnvironment {
+            keystore: host.keystore,
+            current_exe: None,
+            path_dirs: &[],
+            home_dir: host.home_dir,
+            linger_dir: host.linger_dir,
+            system_root: host.system_root,
+            os: probe::HostOs::current(),
+            key_store: identity.key_store,
+            username: host.username,
+            bindv6only_probe: |_| Ok(false),
+        };
+        self.doctor_assemble(req, unix_seconds(now), &identity, &config, &env)
     }
 
     /// The rest of `doctor.run` past reading `identity`/`config` and this
@@ -738,17 +801,35 @@ impl Ops {
         env: &DoctorEnvironment<'_>,
     ) -> Vec<DoctorFinding> {
         let mut out = Vec::new();
-        match probe::service_unit_registered(env.home_dir, mode) {
+        match probe::service_unit_registered(env.os, env.home_dir, env.system_root, mode) {
             Some(true) => {
                 out.extend(probe::service_restart_drops_sessions_finding(mode));
-                if cfg!(target_os = "macos") {
+                // The LaunchAgent notice is silent once the same mode has a
+                // LaunchDaemon plist: the always-on form already answers it
+                // (ADR-0032 결정 14).
+                if env.os == probe::HostOs::Macos
+                    && probe::macos_launchagent_present(env.home_dir, mode)
+                    && !probe::macos_launchdaemon_present(env.system_root, mode)
+                {
                     out.push(probe::launchagent_session_scoped_finding(mode));
                 }
-                if cfg!(target_os = "linux")
-                    && let Some(username) = env.username
+                let linger = match env.username {
+                    Some(username) if env.os == probe::HostOs::Linux => {
+                        probe::probe_systemd_linger(env.linger_dir, username)
+                    }
+                    _ => probe::LingerProbe::Unknown,
+                };
+                out.extend(probe::linger_finding(linger, mode));
+                if env.key_store == KeyStoreKind::Platform
+                    && probe::always_on_form_present(
+                        env.os,
+                        env.home_dir,
+                        env.system_root,
+                        linger,
+                        mode,
+                    )
                 {
-                    let probe = probe::probe_systemd_linger(env.linger_dir, username);
-                    out.extend(probe::linger_finding(probe, mode));
+                    out.push(probe::keystore_session_bound_finding(mode));
                 }
             }
             Some(false) => out.push(probe::service_not_registered_finding(mode)),

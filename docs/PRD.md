@@ -173,7 +173,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 처음 P1에 있었으나 v1(M9)로 당겨 출고한 항목:
 
 - SOCKS5 dynamic forwarding — 2026-09-19 사용자 결정(ADR-0019)
-- background service 설치 — ROADMAP M9 (g). `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18). 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 v1 범위 밖이다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알린다
+- background service 설치 — ROADMAP M9 (g). `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18). 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 `qsh service`가 설치하지 않는다. macOS LaunchDaemon은 `docs/deploy/service.md`의 레시피를 사람이 root로 한 번 깐다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알리고, 같은 mode의 LaunchDaemon 파일이 있으면 후자는 침묵한다
 
 처음 P1에 있었으나 폐기한 항목(2026-10-12 사용자 결정): pin 방향(ADR-0030), CSR 발급(ADR-0016), listener 초대 코드 pairing(ADR-0015), QR pairing. 1인·소수 장비 사용에서 가치가 낮고, 장비 다수의 신뢰 부트스트랩은 SSH 부트스트랩(ADR-0044)이 대체한다. 인증서 rotation 문서와 `[[revoked]]` 목록도 만들지 않는다(ADR-0031은 열린 연결 종료로 줄었다).
 

@@ -74,19 +74,20 @@ pub use ops::service::{
 };
 pub use ops::{
     AclCheckOp, AclShowOp, AttachHandle, AutoBootstrap, AutoBootstrapReport, CancelToken,
-    CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorOp, DoctorThreshold, ExecRunOp,
-    ExecRunOutput, ExecStdin, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp,
-    FileProgress, HostGetOp, HostListOp, HostRoute, INVITE_CODE_PROMPT, INVITE_CODE_STDIN_MAX,
-    IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops,
-    PairSshEnv, PairSshOp, PairSshOutput, RecoveryConfig, SchemaOp, ServiceInstallOp,
-    ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
-    SessionResizeOp, SessionWriteOp, SetupRunOp, SilentObserver, TrustAcceptOp, TrustAddCaOp,
-    TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp,
-    TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp,
-    VersionOp, cert_file_fingerprint_conflict, meets_threshold, normalize_invite_code,
-    parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards, read_cert_file_arg,
-    resolve_invite_code_source, unconfigured_host_name,
+    CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorHostState, DoctorOp,
+    DoctorThreshold, ExecRunOp, ExecRunOutput, ExecStdin, FILE_COPY_PARALLEL, FileCopyError,
+    FileCopyObserver, FileCopyOp, FileProgress, HostGetOp, HostListOp, HostRoute,
+    INVITE_CODE_PROMPT, INVITE_CODE_STDIN_MAX, IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp,
+    InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, PairSshOutput,
+    RecoveryConfig, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
+    SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
+    SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
+    SessionWriteOp, SetupRunOp, SilentObserver, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
+    TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    cert_file_fingerprint_conflict, meets_threshold, normalize_invite_code, parse_dynamic_forwards,
+    parse_local_forwards, parse_remote_forwards, read_cert_file_arg, resolve_invite_code_source,
+    unconfigured_host_name,
 };
 pub use setup::SetupEnv;
 pub use trust::{SharedTrustStore, TrustStore};

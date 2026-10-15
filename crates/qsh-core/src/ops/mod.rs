@@ -43,7 +43,7 @@ mod trust;
 pub use acl::{AclCheckOp, AclShowOp};
 pub use auto_bootstrap::{AutoBootstrap, AutoBootstrapReport};
 pub use cert::{CertInitOp, CertIssueOp};
-pub use doctor::{DoctorOp, DoctorThreshold, meets_threshold};
+pub use doctor::{DoctorHostState, DoctorOp, DoctorThreshold, meets_threshold};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 #[cfg(unix)]
 pub use file::file_copy_over;

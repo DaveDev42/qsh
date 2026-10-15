@@ -308,41 +308,223 @@ fn probe_bindv6only_does_not_bind_the_caller_supplied_port() {
 // over an injected `home`, no real `$HOME`.
 // -----------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
+/// A `system_root` no test machine has a `Library/LaunchDaemons` under, so a
+/// test that does not exercise the LaunchDaemon never reads the real one.
+fn no_system_root() -> &'static Path {
+    Path::new("/nonexistent-m17-probe-test-system-root")
+}
+
+/// Writes `<root>/Library/LaunchDaemons/io.qsh.<mode>.plist`.
+fn write_launchdaemon(root: &Path, mode: &str) {
+    let path = macos_launchdaemon_path(root, mode);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"<plist/>").unwrap();
+}
+
+/// Writes `~/Library/LaunchAgents/io.qsh.<mode>.plist` under `home`.
+fn write_launchagent(home: &Path, mode: &str) {
+    let path = macos_launchagent_path(home, mode);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"<plist/>").unwrap();
+}
+
+/// Writes `~/.config/systemd/user/qsh-<mode>.service` under `home`.
+fn write_user_unit(home: &Path, mode: &str) {
+    let path = linux_systemd_user_unit_path(home, mode);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"[Unit]").unwrap();
+}
+
 #[test]
-fn service_unit_registered_reads_the_launchagent_plist_on_macos() {
+fn service_unit_registered_reads_the_launchagent_plist_for_macos() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    assert_eq!(service_unit_registered(Some(home), "serve"), Some(false));
+    let reg = |mode| service_unit_registered(HostOs::Macos, Some(home), no_system_root(), mode);
+    assert_eq!(reg("serve"), Some(false));
 
-    let plist_dir = home.join("Library").join("LaunchAgents");
-    std::fs::create_dir_all(&plist_dir).unwrap();
-    std::fs::write(plist_dir.join("io.qsh.serve.plist"), b"<plist/>").unwrap();
-    assert_eq!(service_unit_registered(Some(home), "serve"), Some(true));
+    write_launchagent(home, "serve");
+    assert_eq!(reg("serve"), Some(true));
     // A different mode's unit does not count.
-    assert_eq!(service_unit_registered(Some(home), "listen"), Some(false));
+    assert_eq!(reg("listen"), Some(false));
 }
 
-#[cfg(target_os = "linux")]
+/// ADR-0032 결정 14: on macOS a LaunchDaemon plist of the same mode counts as
+/// registered by itself, even with no LaunchAgent and no resolvable home.
 #[test]
-fn service_unit_registered_reads_the_systemd_user_unit_on_linux() {
+fn service_unit_registered_counts_a_launchdaemon_plist_for_macos() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    write_launchdaemon(root.path(), "serve");
+
+    let reg = |home, mode| service_unit_registered(HostOs::Macos, home, root.path(), mode);
+    assert_eq!(reg(Some(home.path()), "serve"), Some(true));
+    assert_eq!(reg(None, "serve"), Some(true));
+    // The plist is per mode, and with no home nothing can be said otherwise.
+    assert_eq!(reg(Some(home.path()), "listen"), Some(false));
+    assert_eq!(reg(None, "listen"), None);
+}
+
+#[test]
+fn service_unit_registered_reads_the_systemd_user_unit_for_linux() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
-    assert_eq!(service_unit_registered(Some(home), "serve"), Some(false));
+    let reg = |mode| service_unit_registered(HostOs::Linux, Some(home), no_system_root(), mode);
+    assert_eq!(reg("serve"), Some(false));
 
-    let unit_dir = home.join(".config").join("systemd").join("user");
-    std::fs::create_dir_all(&unit_dir).unwrap();
-    std::fs::write(unit_dir.join("qsh-serve.service"), b"[Unit]").unwrap();
-    assert_eq!(service_unit_registered(Some(home), "serve"), Some(true));
-    assert_eq!(service_unit_registered(Some(home), "listen"), Some(false));
+    write_user_unit(home, "serve");
+    assert_eq!(reg("serve"), Some(true));
+    assert_eq!(reg("listen"), Some(false));
+    // A LaunchDaemon plist means nothing on Linux.
+    let root = tempfile::tempdir().unwrap();
+    write_launchdaemon(root.path(), "listen");
+    assert_eq!(
+        service_unit_registered(HostOs::Linux, Some(home), root.path(), "listen"),
+        Some(false)
+    );
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
-fn service_unit_registered_is_none_off_macos_and_linux() {
+fn service_unit_registered_is_none_for_other_targets() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(service_unit_registered(Some(dir.path()), "serve"), None);
-    assert_eq!(service_unit_registered(None, "serve"), None);
+    write_launchagent(dir.path(), "serve");
+    write_user_unit(dir.path(), "serve");
+    write_launchdaemon(dir.path(), "serve");
+    assert_eq!(
+        service_unit_registered(HostOs::Other, Some(dir.path()), dir.path(), "serve"),
+        None
+    );
+    assert_eq!(
+        service_unit_registered(HostOs::Other, None, dir.path(), "serve"),
+        None
+    );
+}
+
+/// The probes agree with the build target: the doctor passes
+/// [`HostOs::current`], and nothing but the build target picks it.
+#[test]
+fn host_os_current_matches_the_build_target() {
+    let expected = if cfg!(target_os = "macos") {
+        HostOs::Macos
+    } else if cfg!(target_os = "linux") {
+        HostOs::Linux
+    } else {
+        HostOs::Other
+    };
+    assert_eq!(HostOs::current(), expected);
+}
+
+#[test]
+fn always_on_form_present_is_the_launchdaemon_plist_on_macos() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let present = |mode| {
+        always_on_form_present(
+            HostOs::Macos,
+            Some(home.path()),
+            root.path(),
+            LingerProbe::Unknown,
+            mode,
+        )
+    };
+    assert!(!present("serve"));
+    // A LaunchAgent is session scoped, never an always-on form.
+    write_launchagent(home.path(), "serve");
+    assert!(!present("serve"));
+    write_launchdaemon(root.path(), "serve");
+    assert!(present("serve"));
+    assert!(!present("listen"));
+}
+
+#[test]
+fn always_on_form_present_is_linger_plus_the_user_unit_on_linux() {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let present = |linger, mode| {
+        always_on_form_present(HostOs::Linux, Some(home.path()), root.path(), linger, mode)
+    };
+    assert!(!present(LingerProbe::Enabled, "serve"));
+    write_user_unit(home.path(), "serve");
+    assert!(present(LingerProbe::Enabled, "serve"));
+    assert!(!present(LingerProbe::Disabled, "serve"));
+    assert!(!present(LingerProbe::Unknown, "serve"));
+    assert!(!present(LingerProbe::Enabled, "listen"));
+    assert!(
+        !always_on_form_present(
+            HostOs::Linux,
+            None,
+            root.path(),
+            LingerProbe::Enabled,
+            "serve"
+        ),
+        "no home, no unit path"
+    );
+}
+
+/// ADR-0032 결정 15, ADR-0035 결정 27: no always-on form is ever reported for
+/// a target that is neither macOS nor Linux, whatever files exist, because
+/// the Windows verdict waits for M19's measurement.
+#[test]
+fn always_on_form_present_is_false_for_other_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    write_launchdaemon(dir.path(), "serve");
+    write_user_unit(dir.path(), "serve");
+    for linger in [
+        LingerProbe::Enabled,
+        LingerProbe::Disabled,
+        LingerProbe::Unknown,
+    ] {
+        assert!(!always_on_form_present(
+            HostOs::Other,
+            Some(dir.path()),
+            dir.path(),
+            linger,
+            "serve"
+        ));
+    }
+}
+
+#[test]
+fn keystore_session_bound_finding_is_a_warn_with_the_move_key_remedy() {
+    let finding = keystore_session_bound_finding("listen");
+    assert_eq!(finding.code, "keystore_session_bound");
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("listen"), "{finding:?}");
+    let remedy = finding.remedy.as_deref().expect("a remedy");
+    assert!(
+        remedy.contains("qsh identity move-key --to file"),
+        "{remedy}"
+    );
+}
+
+/// ADR-0032 결정 14: the doctor reads an always-on form by file existence and
+/// never asks the service manager. Reading the sources is the pin: neither
+/// the probe module nor the op that drives it names a process API or either
+/// manager binary outside comments.
+#[test]
+fn doctor_probe_never_invokes_launchctl() {
+    for (file, source) in [
+        ("doctor/probe.rs", include_str!("../probe.rs")),
+        ("ops/doctor.rs", include_str!("../../ops/doctor.rs")),
+    ] {
+        for (index, line) in source.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for forbidden in [
+                "Command",
+                "std::process",
+                "tokio::process",
+                "launchctl",
+                "systemctl",
+            ] {
+                assert!(
+                    !line.contains(forbidden),
+                    "{file}:{} must not name `{forbidden}`: {line}",
+                    index + 1
+                );
+            }
+        }
+    }
 }
 
 #[test]

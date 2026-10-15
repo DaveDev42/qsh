@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 26 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 27 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -44,6 +44,10 @@ pub mod probe;
 /// `docs/design/reexec-estimate.md`) is the twenty-fourth, 23 → 24.
 /// `TrustPinRoleUnset` (ADR-0045 결정 12, M15) is the twenty-fifth, 24 → 25.
 /// `AclFilePathsMissing` (ADR-0029 결정 19, M15) is the twenty-sixth, 25 → 26.
+/// `KeystoreSessionBound` (ADR-0032 결정 15, M17) is the twenty-seventh, 26 → 27.
+/// The set is the same on every target: Windows builds know all 27 codes, and
+/// [`KEYSTORE_SESSION_BOUND`] is simply never emitted there before M19
+/// (ADR-0032 결정 15, ADR-0035 결정 27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -72,6 +76,7 @@ pub enum DiagnosticId {
     ServiceRestartDropsSessions,
     TrustPinRoleUnset,
     AclFilePathsMissing,
+    KeystoreSessionBound,
 }
 
 impl DiagnosticId {
@@ -112,6 +117,7 @@ impl DiagnosticId {
             DiagnosticId::ServiceRestartDropsSessions => SERVICE_RESTART_DROPS_SESSIONS.code,
             DiagnosticId::TrustPinRoleUnset => TRUST_PIN_ROLE_UNSET.code,
             DiagnosticId::AclFilePathsMissing => ACL_FILE_PATHS_MISSING.code,
+            DiagnosticId::KeystoreSessionBound => KEYSTORE_SESSION_BOUND.code,
         }
     }
 }
@@ -138,6 +144,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "config_unknown_key",
     "controller_unreachable",
     "host_pinned_without_address",
+    "keystore_session_bound",
     "keystore_unavailable",
     "launchagent_session_scoped",
     "no_route",
@@ -286,6 +293,27 @@ pub const KEYSTORE_UNAVAILABLE: Diagnostic = Diagnostic {
     remedy: "Nothing is broken by itself — `auto`/`file` key-store mode already falls back to the 0600 file store. To use the platform key store, make sure a Secret Service (Linux) or Keychain (macOS) session is reachable.",
 };
 
+/// ADR-0032 결정 15, `docs/CLI.md` §6.17: this device's key lives in the OS
+/// credential store (`identity.key_store = "platform"`) while the inferred
+/// mode's service is installed in a form that runs with nobody logged in.
+/// The Keychain and the Secret Service belong to a login session, so a
+/// process started outside one cannot be sure to read the key back. The
+/// always-on forms are a macOS LaunchDaemon plist and, on Linux, a user unit
+/// together with the systemd linger marker ([`probe::always_on_form_present`]).
+/// Both are found by file existence alone, never by asking the service
+/// manager (ADR-0032 결정 14). The finding is never emitted on Windows before
+/// M19, which measures whether a `Password`-principal task reads Credential
+/// Manager (ADR-0032 결정 15, ADR-0035 결정 27). `warn`, because the service
+/// works until the key store is unreachable; `remedy` names the command that
+/// ends the dependency without changing the device id, certificate or
+/// fingerprint.
+pub const KEYSTORE_SESSION_BOUND: Diagnostic = Diagnostic {
+    id: DiagnosticId::KeystoreSessionBound,
+    code: "keystore_session_bound",
+    message: "This device's private key lives in the OS credential store, which belongs to a login session, while the service is installed to run without one. After a reboot the service may be unable to read its key until someone logs in.",
+    remedy: "Run `qsh identity move-key --to file` to keep the key in the 0600 key file. The device id, certificate and fingerprint do not change, so peers' pins and ACL rows stay valid.",
+};
+
 /// `docs/CLI.md` §6.17: the local clock reads earlier than this device's
 /// own certificate's backdated `not_before` — `crate::identity`'s 5-minute
 /// backdate margin (`crate::identity::CERT_BACKDATE_MINUTES`) exists
@@ -401,7 +429,9 @@ pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
 /// haven't registered a unit yet.
 ///
 /// Platform-gated in [`probe::service_unit_registered`]: macOS reads
-/// `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux reads
+/// `~/Library/LaunchAgents/io.qsh.<mode>.plist` and
+/// `/Library/LaunchDaemons/io.qsh.<mode>.plist` (either one counts, file
+/// existence only, ADR-0032 결정 14), Linux reads
 /// `~/.config/systemd/user/qsh-<mode>.service`; every other target
 /// (Windows included) never fires this — `qsh service install` is
 /// `UNSUPPORTED`/P1 there, so flagging its absence would be noise for a
@@ -437,17 +467,19 @@ pub const SYSTEMD_LINGER_DISABLED: Diagnostic = Diagnostic {
 
 /// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: macOS only, fires
 /// whenever the inferred mode's LaunchAgent is registered
-/// ([`probe::service_unit_registered`]) — unconditional once true, the
-/// same "structural fact, not a misconfiguration" shape
-/// [`TRUST_REMOVE_SCOPE`] already has: a user LaunchAgent has no
-/// headless equivalent (`docs/deploy/service.md`, "launchd (macOS)" section), so an operator
-/// who registered one should always see this spelled out, not only once
-/// something goes wrong.
+/// ([`probe::service_unit_registered`]) and the same mode has no LaunchDaemon
+/// plist (ADR-0032 결정 14) — otherwise the same "structural fact, not a
+/// misconfiguration" shape [`TRUST_REMOVE_SCOPE`] already has: a user
+/// LaunchAgent only runs inside a login session, so an operator who
+/// registered one should always see this spelled out, not only once
+/// something goes wrong. `remedy` points at the LaunchDaemon recipe in
+/// `docs/deploy/service.md`, which a person runs as root; qsh never installs
+/// it (ADR-0032 결정 12, 16).
 pub const LAUNCHAGENT_SESSION_SCOPED: Diagnostic = Diagnostic {
     id: DiagnosticId::LaunchagentSessionScoped,
     code: "launchagent_session_scoped",
-    message: "qsh's service is registered as a user LaunchAgent, which only runs inside an active login session and stops at logout — unlike a systemd user unit with linger enabled, no headless equivalent exists for a normal user account.",
-    remedy: "Keep a session logged in, or accept the limitation. A LaunchDaemon (root, out of scope) is the only headless option on macOS.",
+    message: "qsh's service is registered as a user LaunchAgent, which only runs inside an active login session and stops at logout. No LaunchDaemon for this mode is installed on this machine.",
+    remedy: "To keep it running with nobody logged in, run the LaunchDaemon recipe in docs/deploy/service.md once, as root. Otherwise keep a session logged in.",
 };
 
 /// `docs/ROADMAP.md` M9 (h) (ROADMAP's own shorthand is the bare
