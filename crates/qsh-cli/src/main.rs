@@ -101,6 +101,11 @@ const LISTEN_MODE: &str = "listen";
 /// no envelope (`docs/CLI.md` §6.13).
 const REVERSE_MODE: &str = "reverse";
 
+/// The name `qsh pair ssh-respond` reports in diagnostics. Not an operation
+/// — it has no envelope (`docs/CLI.md` §2.4, ADR-0044 decision 9).
+#[cfg(unix)]
+const SSH_RESPOND_MODE: &str = "pair ssh-respond";
+
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
 
@@ -493,6 +498,8 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             as_name.clone(),
             role.clone(),
         ),
+        #[cfg(unix)]
+        Command::Pair(PairCmd::SshRespond) => run_ssh_respond(&ops),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
         Command::Trust(TrustCmd::SetRole { name, role }) => finish(
             cli,
@@ -1440,6 +1447,33 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) 
     }
 }
 
+/// `qsh pair ssh-respond` (ADR-0044 decisions 9 and 10): the remote half of
+/// the SSH bootstrap. Standard output carries the bootstrap stream and
+/// nothing else, standard input the client's `commit`; no envelope is
+/// written on any path, so a failure goes to stderr as text only.
+///
+/// The process exits with 0 once it has said what it had to say, including
+/// when it wrote nothing because the client never committed. A tokio stdin
+/// read cannot be cancelled, so the runtime is dropped in the background
+/// instead of waited for.
+#[cfg(unix)]
+fn run_ssh_respond(ops: &Ops) -> i32 {
+    let result = (|| -> Result<(), OpError> {
+        let responder = ops.ssh_responder()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        let end = runtime.block_on(responder.run(tokio::io::stdin(), tokio::io::stdout()));
+        runtime.shutdown_background();
+        end.map(|_| ())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(err) => report_long_running_setup_error(SSH_RESPOND_MODE, &err),
+    }
+}
+
 /// Whether `command` is one of the long-running modes whose setup failures
 /// must stay off stdout entirely (`docs/CLI.md` §2.2, §6.12, §6.13), and if
 /// so, which mode name to report under. `None` for every ordinary
@@ -1452,6 +1486,8 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
         Some(Command::Serve { .. }) => Some(SERVE_MODE),
         Some(Command::Listen { .. }) => Some(LISTEN_MODE),
         Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
+        #[cfg(unix)]
+        Some(Command::Pair(PairCmd::SshRespond)) => Some(SSH_RESPOND_MODE),
         _ => None,
     }
 }
@@ -2342,6 +2378,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::SshPreview { .. }) => TrustSshPreviewOp::COMMAND,
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
+        #[cfg(unix)]
+        Command::Pair(PairCmd::SshRespond) => SSH_RESPOND_MODE,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
         Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,
         Command::Setup { .. } => SetupRunOp::COMMAND,

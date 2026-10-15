@@ -760,3 +760,7 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 ### 17.4 오류와 로그
 
 줄 파서와 수신 상태 기계의 오류(접두 없음, 8 KiB 초과, 형식 오류, 64 KiB 초과, hello 뒤 접두 없는 줄, 순서 위반)는 모두 `REMOTE_ERROR`(`details.reason: "bootstrap_protocol"`)로 사상된다(ADR-0044 결정 14). 오류 값은 입력 바이트를 담지 않는다. rc 출력과 ssh stderr는 로그로 복사하지 않는다(ADR-0044 결정 19). 어떤 fingerprint와 이름을 pin하는지, 충돌을 어떻게 판정하는지는 `qsh-core`가 정하고 이 절의 범위 밖이다.
+
+### 17.5 응답자 쪽 순서
+
+`qsh pair ssh-respond`(ADR-0044 결정 9·10·12)는 이 절의 응답자 쪽이다. Unix 빌드에만 등록돼 있고 Windows 빌드의 응답자는 M20이다(ADR-0044 결정 10. 그 전의 Windows 빌드는 이 하위 명령을 몰라 client가 `remote_qsh_too_old`로 받는다). 신원 파일만 읽어 fingerprint를 얻고(키 저장소는 열지 않는다), 그 `serve` 주소로 UDP bind를 시험해 `serve_listening`을 채운 뒤 hello 한 줄을 내보낸다. 이어서 commit을 30초까지 기다린다. 잠금 안에서 `trust.toml`을 읽고 판정하고, audit(`pair.ssh_respond`)을 쓴 다음 저장하는 순서이며 audit이 실패하면 저장하지 않는다. 판정은 `pinned`(새로 씀), `exists`(같은 fingerprint가 이미 같은 이름과 role로 있음), `conflict`(같은 이름에 다른 fingerprint, 메시지에 기존 fingerprint를 싣는다), `error`다. result를 낸 뒤에는 stdin을 더 읽지 않는다. 줄 끝은 `\n`으로 내보내고 commit 줄 끝의 `\r\n`은 받아서 처리한다.

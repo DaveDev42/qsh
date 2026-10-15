@@ -934,6 +934,22 @@ pub enum PairCmd {
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
     },
+    /// The remote half of `qsh pair ssh`: send a `hello` on standard output,
+    /// read the client's `commit` on standard input, pin the client
+    /// (ADR-0044 decisions 9, 10, 12).
+    ///
+    /// Not an operation and not for people: it writes the bootstrap stream
+    /// (`docs/design/protocol.md` §17), never a `qsh.cli/v1` envelope, and
+    /// is run by the ssh command `qsh pair ssh` starts. Hidden from
+    /// `qsh pair --help` (ADR-0012 decision 4's hiding), so it has no man
+    /// page (`docs/CLI.md` §2.4).
+    ///
+    /// Unix builds only until M20 (ADR-0044 decision 10): a Windows build
+    /// does not know it, clap exits 2, and the client reads that as
+    /// `remote_qsh_too_old`.
+    #[cfg(unix)]
+    #[command(hide = true)]
+    SshRespond,
 }
 
 /// `qsh setup <role>` (`docs/CLI.md` §6.20, ADR-0024 decision 2). Each role

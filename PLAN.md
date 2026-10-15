@@ -648,7 +648,7 @@ Step 1은 크기 내역 밖이다.
 |---|---|---|---|
 | 1 | `ssh_bootstrap` 모듈의 arch 금지 편입 | `crates/qsh-core/src/ssh_bootstrap/`은 자식 프로세스와 UDP probe만 쓰고 QUIC를 이름 짓지 않으므로 `crates/qsh-core/src/`의 `quinn::` 금지로 충분하다. 확인 dial은 `qsh_transport`의 중립 타입으로 한다. 디렉터리 범위 금지를 새로 더하지 않는 쪽이 초안 | Step 5 |
 | 2 | 가짜 `ssh` 실행 파일의 자리 (확정: `crates/qsh-testkit/src/bin/qsh-fake-ssh.rs`, `FakeSsh::locate_bin`이 nextest 빌드 산출물을 찾고 없으면 `cargo build` 한 번, mode는 환경 변수가 아니라 복사한 바이너리 옆 `fake-ssh.cfg`로 고른다(`set_var` 경합 회피, testing.md)) | `crates/qsh-testkit`에 `[[bin]] qsh-fake-ssh`를 두고 하네스 헬퍼가 `env!("CARGO_BIN_EXE_qsh-fake-ssh")`로 찾는다. testkit bin이 cargo-deny나 release 묶음에 들어가지 않는지 확인 | Step 5 |
-| 3 | 숨김 `pair ssh-respond`의 man 페이지 | 생성기가 숨김 하위 명령을 건너뛰면 페이지 없음. 건너뛰지 않으면 생성기에서 숨김을 걸러 내는 쪽(사용자 표면이 아니므로) | Step 6 |
+| 3 | 숨김 `pair ssh-respond`의 man 페이지 (확정: 생성기가 숨김 하위 명령을 건너뛰어 페이지 없음, `qsh reverse`·`qsh trust invite`와 같다. Windows 빌드는 하위 명령을 등록하지 않고 Windows 응답자는 M20(ADR-0044 결정 10)) | 생성기가 숨김 하위 명령을 건너뛰면 페이지 없음. 건너뛰지 않으면 생성기에서 숨김을 걸러 내는 쪽(사용자 표면이 아니므로) | Step 6 |
 | 4 | `PairSshReq`·`PairSshData`의 자리 | `crates/qsh-proto/src/types/trust.rs`(origin `1a4af3b` 기준 360줄)에 더한다. 800줄을 넘기게 되면 새 `types/pair.rs` | Step 7 |
 | 5 | M16 부하 filterset | 테스트 이름 접두 `trust_withdrawal::`, `an_established_connection_is_closed`, `ssh_bootstrap`, `ssh_respond`, `auto_bootstrap`, `bootstrapped_`, `trust_store_poll_` | Step 3·10 |
 | 6 | `TRUST_NARROWING_SCOPE` 상수의 모양 | 세 문장(언제·어디에·무엇을 하지 않는가)을 한 `&'static str`로. `trust remove`·`set-role`·`rename` 렌더러와 doctor message가 같은 상수를 인용 | Step 3 |
