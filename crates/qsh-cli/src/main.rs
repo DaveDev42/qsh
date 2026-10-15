@@ -1935,10 +1935,12 @@ fn run_trust_accept(
 /// cancel token (the call then ends `CANCELED` with nothing further written)
 /// and the second ends the process.
 fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
-    if let Some(address) = &args.address
-        && normalize_peer_address(address).port_filled
-    {
-        stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+    // `--to` is normalized like `--address` (ADR-0044 decision 1), so it
+    // fills the default port the same way and says so.
+    for address in [&args.address, &args.to].into_iter().flatten() {
+        if normalize_peer_address(address).port_filled {
+            stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+        }
     }
     let cancel = CancelToken::new();
     arm_cancel_on_interrupt(&cancel);
@@ -1954,6 +1956,8 @@ fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
             remote_as: args.remote_as.clone(),
             role: args.role.clone(),
             address: args.address.clone(),
+            reverse: args.reverse,
+            to: args.to.clone(),
             remote_qsh: args.remote_qsh.clone(),
         },
         env,

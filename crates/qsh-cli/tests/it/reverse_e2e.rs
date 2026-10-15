@@ -404,13 +404,31 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
         "reverse-only pin: exactly one entry, {merged:?}"
     );
 
+    attach_detach_reattach_suite(&controller, TARGET_NAME, &reverse);
+
+    reverse.shut_down();
+    drop(listen);
+}
+
+/// Everything the DoD 1 scenario asserts once a target is registered: the
+/// target owns no listening socket, and a real pty client attaches,
+/// detaches and reattaches to the same shell through the controller's local
+/// daemon. Shared with `ssh_bootstrap.rs`, whose reverse route is built from
+/// the pins `qsh pair ssh --reverse --to` wrote and must pass the same
+/// assertions (ADR-0044 decision 22). `target_name` is the name the
+/// controller's trust store gives the target.
+pub(crate) fn attach_detach_reattach_suite(
+    controller: &Sandbox,
+    target_name: &str,
+    reverse: &ReverseGuard,
+) {
     // DoD 1's central "behind NAT by construction" proof: the target owns
     // no listening socket, and never ran `qsh serve`/`qsh listen`.
     assert_owns_no_listening_socket(reverse.pid());
 
     // --- the interactive path, under a real pty, routed to the target
     // entirely through the controller's local daemon --------------------
-    let mut client = Client::spawn(&controller, &[TARGET_NAME]);
+    let mut client = Client::spawn(controller, &[target_name]);
     client.round_trip("QSH-E2E-LOGIN");
     assert!(
         !client.is_cooked(),
@@ -427,7 +445,7 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
 
     // The session must still be `running` — a detach never ends it
     // (`docs/CLI.md` §7).
-    let (code, listed) = controller.json(&["sessions", TARGET_NAME, "--json"]);
+    let (code, listed) = controller.json(&["sessions", target_name, "--json"]);
     assert_eq!(code, 0, "{listed}");
     let sessions = listed["data"]["sessions"].as_array().expect("sessions");
     assert_eq!(sessions.len(), 1, "a detach must not remove the session");
@@ -437,12 +455,12 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
         .expect("session_ref")
         .to_string();
 
-    let snapshot = session_get(&controller, &session_ref);
+    let snapshot = session_get(controller, &session_ref);
     assert_eq!(snapshot["state"], "running", "{snapshot}");
 
     // Reattach: a second terminal, same reverse route, picks the session
     // back up.
-    let mut client = Client::spawn(&controller, &["attach", &session_ref]);
+    let mut client = Client::spawn(controller, &["attach", &session_ref]);
     // Continuity, not merely "a shell answered": the pre-detach output
     // must be replayed from the session's retained ring before anything
     // new is typed — proving this is the *same* shell with its own
@@ -454,7 +472,4 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
     client.type_("exit\r");
     client.expect_exit(0);
     assert!(client.is_cooked());
-
-    reverse.shut_down();
-    drop(listen);
 }

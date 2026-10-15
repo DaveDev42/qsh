@@ -213,6 +213,83 @@ async fn ssh_respond_returns_exists_and_keeps_the_role_for_a_known_fingerprint()
 }
 
 #[tokio::test]
+async fn ssh_respond_a_reverse_commit_updates_only_the_address_of_a_known_pin() {
+    let (_dir, ops) = tree(true);
+    // Known under another name, with a role that must stay as it is, and an
+    // address that is not the one the commit names.
+    {
+        let path = ops.paths().trust_file();
+        let _lock = TrustStore::lock(&path).unwrap();
+        let mut store = TrustStore::load(&path).unwrap();
+        store.add_peer_with_role(
+            "ctl",
+            Some("old.example:4433".into()),
+            fp(0xB1).parse().unwrap(),
+            now_rfc3339(),
+            TrustRole::ReadOnly,
+        );
+        store.save(&path).unwrap();
+    }
+    let audit = Arc::new(MemoryAuditSink::new());
+    let responder = responder(&ops, audit.clone());
+    let input = commit_bytes(commit("hub", &fp(0xB1), "full", Some("new.example:4500")));
+    let (end, lines) = converse(&responder, &input).await;
+    assert_eq!(end, RespondEnd::Answered(ResultStatus::Exists));
+    let result = result_of(&lines);
+    assert_eq!(result.name, "ctl");
+    assert_eq!(result.role.as_deref(), Some("read-only"), "role unchanged");
+    assert!(!result.created);
+    let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+    assert_eq!(store.peers().len(), 1, "no second pin");
+    let held = store.find("ctl").unwrap();
+    assert_eq!(held.address, "new.example:4500");
+    assert_eq!(held.role.as_deref(), Some("read-only"));
+    // `trust add` leaves no record for an address refresh, and neither does
+    // this (the pin's grants did not change).
+    assert!(audit.records().is_empty());
+
+    // The same address again changes nothing on disk.
+    let before = trust_bytes(&ops);
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).status, ResultStatus::Exists);
+    assert_eq!(trust_bytes(&ops), before);
+
+    // An inbound-only pin (no address) gains the address and keeps its role.
+    let (_dir, ops) = tree(true);
+    pin(&ops, "ctl", &fp(0xB2), Some("full"));
+    let responder = self::responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let input = commit_bytes(commit("hub", &fp(0xB2), "exec", Some("hub.example:4433")));
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).role.as_deref(), Some("full"));
+    let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+    assert_eq!(store.find("ctl").unwrap().address, "hub.example:4433");
+}
+
+#[tokio::test]
+async fn ssh_respond_a_forward_commit_never_touches_the_address_of_a_known_pin() {
+    let (_dir, ops) = tree(true);
+    {
+        let path = ops.paths().trust_file();
+        let _lock = TrustStore::lock(&path).unwrap();
+        let mut store = TrustStore::load(&path).unwrap();
+        store.add_peer_with_role(
+            "ctl",
+            Some("old.example:4433".into()),
+            fp(0xB1).parse().unwrap(),
+            now_rfc3339(),
+            TrustRole::Full,
+        );
+        store.save(&path).unwrap();
+    }
+    let before = trust_bytes(&ops);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let input = commit_bytes(commit("hub", &fp(0xB1), "full", None));
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).status, ResultStatus::Exists);
+    assert_eq!(trust_bytes(&ops), before);
+}
+
+#[tokio::test]
 async fn ssh_respond_returns_conflict_for_the_same_name_with_another_fingerprint() {
     let (_dir, ops) = tree(true);
     pin(&ops, "laptop", &fp(0xC2), Some("full"));

@@ -1,0 +1,26 @@
+{
+  "command": "pair.ssh",
+  "data": {
+    "created": true,
+    "direction": "reverse",
+    "identity_created": false,
+    "next_command": "qsh serve --to hub",
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "box",
+      "role": "reverse"
+    },
+    "remote": {
+      "created": true,
+      "name": "hub",
+      "role": "full"
+    },
+    "ssh_proxied": false,
+    "verified": false
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
