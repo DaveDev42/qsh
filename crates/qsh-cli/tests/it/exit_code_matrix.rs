@@ -476,6 +476,31 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Usage,
         },
         Case {
+            // ADR-0044 decision 7: a destination that looks like an ssh
+            // option is refused by `Ops` before the identity or any ssh
+            // process exists, so it is an `INVALID_ARGUMENT` op error
+            // (exit 255), not a clap usage error.
+            name: "pair ssh: destination that looks like an ssh option",
+            sandbox: &fleet.client,
+            args: &["pair", "ssh", "--", "-oProxyCommand=touch /tmp/pwned"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // ADR-0044 decision 7: a host part that is not a valid pin name
+            // needs `--as`; the refusal comes before any ssh process.
+            name: "pair ssh: host part is not a pin name and no --as",
+            sandbox: &fleet.client,
+            args: &["pair", "ssh", "box/alias"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // The destination is a required operand: clap usage error.
+            name: "pair ssh: no destination",
+            sandbox: &fleet.client,
+            args: &["pair", "ssh"],
+            outcome: Outcome::Usage,
+        },
+        Case {
             // ADR-0024 decision 7: a missing required input is not a clap
             // error. No role given in machine mode, and in human mode the
             // matrix runs without a terminal, so both are

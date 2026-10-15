@@ -21,12 +21,14 @@ fn dest_keeps_the_text_for_ssh_and_names_the_pin_after_the_host_half() {
     let d = dest("dave@box");
     assert_eq!(d.as_ssh_arg(), "dave@box");
     assert_eq!(d.user(), Some("dave"));
-    assert_eq!(d.pin_name(), "box");
+    assert_eq!(d.host(), "box");
+    assert_eq!(d.pin_name(None).unwrap(), "box");
 
     // Split at the last `@`, like ssh and the `qsh [user@]host` positional.
     let d = dest("dave@corp@box.example");
     assert_eq!(d.user(), Some("dave@corp"));
-    assert_eq!(d.pin_name(), "box.example");
+    assert_eq!(d.host(), "box.example");
+    assert_eq!(d.pin_name(None).unwrap(), "box.example");
 
     let d = dest("box");
     assert_eq!(d.user(), None);
@@ -34,7 +36,7 @@ fn dest_keeps_the_text_for_ssh_and_names_the_pin_after_the_host_half() {
 }
 
 #[test]
-fn dest_rejects_option_lookalikes_uris_and_unusable_pin_names() {
+fn dest_rejects_option_lookalikes_uris_and_unusable_operands() {
     for bad in [
         "-oProxyCommand=touch /tmp/x",
         "-",
@@ -45,10 +47,10 @@ fn dest_rejects_option_lookalikes_uris_and_unusable_pin_names() {
         "",
         "@box",
         "dave@",
-        "a/b",
-        "dave@a/b",
         "box\n",
         "bo\u{0}x",
+        "bo x",
+        "dave@bo\tx",
     ] {
         let err = Dest::parse(bad).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad:?}");
@@ -61,10 +63,35 @@ fn dest_errors_do_not_echo_the_operand() {
     for bad in [
         "-oSecretToken123",
         "ssh://SecretToken123",
-        "SecretToken123/x",
+        "Secret Token123",
     ] {
         let err = Dest::parse(bad).unwrap_err();
         assert!(!err.message.contains("SecretToken123"), "{}", err.message);
+    }
+    let err = Dest::parse("SecretToken123/x")
+        .unwrap()
+        .pin_name(None)
+        .unwrap_err();
+    assert!(!err.message.contains("SecretToken123"), "{}", err.message);
+    let err = dest("box").pin_name(Some("Secret/Token123")).unwrap_err();
+    assert!(!err.message.contains("Token123"), "{}", err.message);
+}
+
+#[test]
+fn a_host_alias_that_breaks_the_pin_name_rule_works_with_as() {
+    // ssh accepts the alias; only the default pin name is unusable.
+    for alias in ["web/prod", "dave@web/prod"] {
+        let d = dest(alias);
+        assert_eq!(d.as_ssh_arg(), alias);
+        let err = d.pin_name(None).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{alias}");
+        assert!(err.message.contains("--as"), "{}", err.message);
+        assert_eq!(d.pin_name(Some("web-prod")).unwrap(), "web-prod");
+    }
+    // `--as` itself is held to the rule.
+    for bad in ["", "a/b", "a\nb"] {
+        let err = dest("box").pin_name(Some(bad)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad:?}");
     }
 }
 

@@ -33,5 +33,8 @@ Mint a one\-time invite code for another device to pair with this one (ADR\-0002
 .TP
 qsh\-pair\-accept(1)
 Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
+.TP
+qsh\-pair\-ssh(1)
+Pin this machine and a remote one to each other over ssh, then check the pair with a QUIC handshake (ADR\-0044, `docs/CLI.md` §6.11)
 .SH VERSION
 v0.4.3

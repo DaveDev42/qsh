@@ -1,0 +1,25 @@
+{
+  "command": "pair.ssh",
+  "data": {
+    "created": true,
+    "direction": "forward",
+    "identity_created": false,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "box",
+      "role": "none"
+    },
+    "remote": {
+      "created": true,
+      "name": "laptop",
+      "role": "full"
+    },
+    "ssh_proxied": false,
+    "verified": true
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -11,8 +11,9 @@
 //! Every call appends its argv to `argv.<n>` (arguments NUL-terminated, the
 //! program name left out) and writes its process id to `last.pid`. Then:
 //!
-//! - `-G` as the first argument prints the file named by `g_file` (a minimal
-//!   `hostname` stanza when unset) and exits with `g_exit` (0).
+//! - `-G` as the first argument blocks forever when `g_hang` is set;
+//!   otherwise it prints the file named by `g_file` (a minimal `hostname`
+//!   stanza when unset) and exits with `g_exit` (0).
 //! - Anything else is the responder call. It prints `stderr` to stderr, the
 //!   file named by `script` to stdout, then, in this order:
 //!   - blocks forever when `hang` is set;
@@ -65,6 +66,11 @@ fn main() {
     let _ = fs::write(dir.join("last.pid"), std::process::id().to_string());
 
     if args.first().map(String::as_str) == Some("-G") {
+        if cfg.get("g_hang").is_some_and(|v| v == "1") {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
         match cfg.get("g_file") {
             Some(path) => {
                 let bytes = fs::read(path).expect("read g_file");

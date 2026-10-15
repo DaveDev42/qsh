@@ -43,6 +43,11 @@ use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
 use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_host_not_found};
+use qsh_core::ops::pair_ssh::{
+    bootstrap_version_unsupported, local_fingerprint_conflict, local_pin_conflict,
+    remote_not_initialized, remote_pin_conflict, remote_responder_error, serve_identity_mismatch,
+    serve_not_listening, serve_rejected_this_device,
+};
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
     PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_CHECK_LEAD,
@@ -50,6 +55,7 @@ use qsh_core::pairing::{
     PAIRING_ROLE_LEAD, PAIRING_ROLE_NONE, PairingError, pairing_pin_notice,
 };
 use qsh_core::serve::{BIND_UNAVAILABLE_REMEDY, bind_unavailable};
+use qsh_core::ssh_bootstrap::{Dest, SshExit, map_ssh_exit};
 use qsh_core::trust::invite_address::{INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE};
 use qsh_core::trust::{ADDRESS_PORT_ASSUMED_NOTICE, TrustRole};
 use qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE;
@@ -595,7 +601,11 @@ fn exempted_uniform_messages_never_become_a_three_part_slot() {
     // Chains in `host_not_found_rows()` (issue #3 item b2, PR-D) so a
     // table added after `three_part_rows()` still inherits the ADR-0017
     // 결정 4 uniformity guard rather than sitting outside it silently.
-    for row in three_part_rows().into_iter().chain(host_not_found_rows()) {
+    for row in three_part_rows()
+        .into_iter()
+        .chain(host_not_found_rows())
+        .chain(pair_ssh_rows())
+    {
         for (part, slot) in [
             ("observation", &row.observation),
             ("impact", &row.impact),
@@ -668,6 +678,201 @@ fn host_not_found_rows() -> Vec<ThreePartRow> {
             ),
         },
     ]
+}
+
+// ---------------------------------------------------------------------
+// `qsh pair ssh` (ADR-0044 decision 14, 15, 13): the refusals that carry a
+// remedy of their own, in a table apart from T1-T7 for the same reason as
+// `host_not_found_rows`. Each wording is a real function's return value.
+// ---------------------------------------------------------------------
+
+fn pair_ssh_rows() -> Vec<ThreePartRow> {
+    let dest = Dest::parse("dave@box").expect("a valid destination");
+    let local = local_pin_conflict("box", "dave@box", "sha256:AAAA", "sha256:BBBB").message;
+    let local_other =
+        local_fingerprint_conflict("box", "old-box", "dave@box", "sha256:BBBB").message;
+    let remote = remote_pin_conflict(
+        "laptop",
+        "dave@box",
+        &"sha256:Uu0LCCmjUIKNZ4TCDBcp4Q4lJtAmx7iF0rnU9z4pbsE="
+            .parse()
+            .expect("a well-formed fingerprint"),
+        None,
+    )
+    .message;
+    let not_initialized = remote_not_initialized(&dest).message;
+    let version = bootstrap_version_unsupported().message;
+    let missing = map_ssh_exit(SshExit::Code(127), false).message;
+    let too_old = map_ssh_exit(SshExit::Code(2), false).message;
+    let failed = map_ssh_exit(SshExit::Code(1), false).message;
+    let not_listening = serve_not_listening("box").message;
+    let mismatch = serve_identity_mismatch("10.0.0.1:4433", "box", &dest, false).message;
+    let rejected = serve_rejected_this_device("10.0.0.1:4433", "box", &dest).message;
+    let responder =
+        remote_responder_error(qsh_proto::ErrorCode::RemoteError, "disk full", "dave@box").message;
+
+    vec![
+        ThreePartRow {
+            label: "pair.ssh remote responder error",
+            observation: ThreePartSlot::new(
+                responder.clone(),
+                "the remote qsh could not write the pin (disk full)",
+            ),
+            impact: ThreePartSlot::new(responder.clone(), "so nothing was written on this machine"),
+            next_command: ThreePartSlot::new(
+                responder,
+                "check the remote with `ssh dave@box qsh doctor`, then run this again",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh local pin conflict",
+            observation: ThreePartSlot::new(
+                local.clone(),
+                "is already pinned on this machine under a different identity",
+            ),
+            impact: ThreePartSlot::new(local.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(
+                local,
+                "run `qsh trust remove box` and then `qsh pair ssh dave@box`",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh local fingerprint conflict",
+            observation: ThreePartSlot::new(
+                local_other.clone(),
+                "the remote's identity is already pinned on this machine as \"old-box\"",
+            ),
+            impact: ThreePartSlot::new(
+                local_other.clone(),
+                "so a second pin named \"box\" was not written and nothing was written on the remote",
+            ),
+            next_command: ThreePartSlot::new(
+                local_other,
+                "use `qsh old-box` as it is, or run `qsh trust remove old-box`",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh remote pin conflict",
+            observation: ThreePartSlot::new(
+                remote.clone(),
+                "is already pinned on the remote under a different identity",
+            ),
+            impact: ThreePartSlot::new(remote.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(
+                remote,
+                "pass --remote-as <other name>, or remove the stale entry with \
+                 `ssh dave@box qsh trust remove laptop`",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh remote not initialized",
+            observation: ThreePartSlot::new(
+                not_initialized.clone(),
+                "the remote qsh has no device identity yet",
+            ),
+            impact: ThreePartSlot::new(
+                not_initialized.clone(),
+                "so nothing was written on either side",
+            ),
+            next_command: ThreePartSlot::new(
+                not_initialized,
+                "run `ssh dave@box qsh setup host` (or `qsh init` there)",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh no common bootstrap version",
+            observation: ThreePartSlot::new(version.clone(), "share no bootstrap version"),
+            impact: ThreePartSlot::new(version.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(version, "upgrade the older one and run this again"),
+        },
+        ThreePartRow {
+            label: "pair.ssh remote qsh missing",
+            observation: ThreePartSlot::new(missing.clone(), "the remote shell did not find `qsh`"),
+            impact: ThreePartSlot::new(missing.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(
+                missing,
+                "pass --remote-qsh <path> or set [ssh].remote_qsh in config.toml",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh remote qsh too old",
+            observation: ThreePartSlot::new(
+                too_old.clone(),
+                "the remote qsh does not know `pair ssh-respond`",
+            ),
+            impact: ThreePartSlot::new(too_old.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(too_old, "upgrade qsh on the remote host"),
+        },
+        ThreePartRow {
+            label: "pair.ssh remote command failed",
+            observation: ThreePartSlot::new(
+                failed.clone(),
+                "the remote command failed before answering",
+            ),
+            impact: ThreePartSlot::new(failed.clone(), "so nothing was written on either side"),
+            next_command: ThreePartSlot::new(
+                failed,
+                "put qsh.exe on the remote PATH or pass its full path with --remote-qsh",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh serve not listening",
+            observation: ThreePartSlot::new(
+                not_listening.clone(),
+                "no `qsh serve` is listening on its serve port",
+            ),
+            impact: ThreePartSlot::new(
+                not_listening.clone(),
+                "so no connection was tried; both pins stay in place",
+            ),
+            next_command: ThreePartSlot::new(
+                not_listening,
+                "once the remote runs `qsh serve` (or `qsh service install`) `qsh box` connects",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh serve identity mismatch",
+            observation: ThreePartSlot::new(
+                mismatch.clone(),
+                "presented a different identity than the one the ssh account reported",
+            ),
+            impact: ThreePartSlot::new(
+                mismatch.clone(),
+                "so the connection was refused and the pins were left as they are",
+            ),
+            next_command: ThreePartSlot::new(
+                mismatch,
+                "run `qsh trust remove box` and then `qsh pair ssh dave@box --address <host:port>`",
+            ),
+        },
+        ThreePartRow {
+            label: "pair.ssh serve rejected this device",
+            observation: ThreePartSlot::new(rejected.clone(), "rejected this device's certificate"),
+            impact: ThreePartSlot::new(
+                rejected.clone(),
+                "so no connection was made and the pins were left as they are",
+            ),
+            next_command: ThreePartSlot::new(
+                rejected,
+                "run `qsh trust remove box` and then `qsh pair ssh dave@box --address <host:port>`",
+            ),
+        },
+    ]
+}
+
+#[test]
+fn pair_ssh_wordings_have_observation_impact_and_next_command() {
+    let rows = pair_ssh_rows();
+    assert_eq!(
+        rows.len(),
+        12,
+        "one row per remedy-bearing pair.ssh refusal"
+    );
+    for row in &rows {
+        row.observation.assert_holds(row.label, "observation");
+        row.impact.assert_holds(row.label, "impact");
+        row.next_command.assert_holds(row.label, "next-command");
+    }
 }
 
 #[test]

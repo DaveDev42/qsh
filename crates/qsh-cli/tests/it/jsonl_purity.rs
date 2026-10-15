@@ -899,3 +899,44 @@ fn cp_keeps_stdout_pure_json_at_every_verbosity() {
         );
     }
 }
+
+/// `pair ssh` is a value operation: `--json` and `--jsonl` both print the
+/// one envelope and nothing else on stdout, even at `-vvv`, while the ssh
+/// child's own output and the bootstrap diagnostics stay off it.
+#[cfg(unix)]
+#[test]
+fn pair_ssh_keeps_stdout_pure_json_at_every_verbosity() {
+    use crate::ssh_bootstrap::pair::World;
+
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        // A fresh pair per mode: the second run would otherwise find both
+        // pins already in place.
+        let world = World::new();
+        let output = world.client.qsh(&[
+            "pair",
+            "ssh",
+            "box",
+            "--remote-as",
+            "laptop",
+            verbosity,
+            mode,
+        ]);
+        assert_eq!(
+            exit_code(&output),
+            0,
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(
+            lines.len(),
+            1,
+            "{label}: pair.ssh is a value operation — one envelope, one line"
+        );
+        assert_eq!(lines[0]["command"], "pair.ssh", "{label}");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+    }
+}

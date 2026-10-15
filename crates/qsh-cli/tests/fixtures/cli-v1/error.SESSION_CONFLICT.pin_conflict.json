@@ -1,0 +1,18 @@
+{
+  "command": "pair.ssh",
+  "error": {
+    "code": "SESSION_CONFLICT",
+    "details": {
+      "name": "box",
+      "observed_fingerprint": "<fingerprint>",
+      "pinned_fingerprint": "<fingerprint>",
+      "reason": "pin_conflict",
+      "side": "local"
+    },
+    "message": "\"box\" is already pinned on this machine under a different identity than the one the remote reported, so nothing was written on either side; if the remote was re-initialized, run `qsh trust remove box` and then `qsh pair ssh box`, or keep the old pin and pass --as <other name>",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

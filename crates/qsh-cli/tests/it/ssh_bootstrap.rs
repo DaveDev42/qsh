@@ -3,10 +3,9 @@
 //!
 //! `qsh_testkit::fake_ssh::FakeSsh` stands in for the system `ssh`: it
 //! records its argv and prints what the test scripts. There is no sshd, no
-//! OpenSSH configuration and no remote qsh. These tests drive
-//! `qsh_core::ssh_bootstrap` directly, because no command uses it yet; the
-//! `pair.ssh` operation and its CLI surface come with the steps that need
-//! them.
+//! OpenSSH configuration and no remote qsh. The first half drives
+//! `qsh_core::ssh_bootstrap` directly (the ssh child layer); the `pair`
+//! module runs `qsh pair ssh` itself against the fake.
 //!
 //! The remote half is covered here too: the hidden `qsh pair ssh-respond`
 //! is started as a real process against a sandbox (the `ssh_respond_*`
@@ -97,6 +96,17 @@ fn process_is_gone(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), None) == Err(Errno::ESRCH)
+}
+
+/// `tasklist` lists a process by its quoted pid in CSV mode; an empty match
+/// prints an INFO line instead.
+#[cfg(windows)]
+fn process_is_gone(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("run tasklist");
+    !String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
 
 // ---------------------------------------------------------------------
@@ -411,12 +421,10 @@ async fn ssh_child_hello_and_message_deadlines_are_timeout_errors() {
     assert_eq!(err.code, ErrorCode::Timeout);
     assert_eq!(reason(&err), "bootstrap_timeout");
     assert_eq!(err.details["stage"], "hello");
-    #[cfg(unix)]
     assert!(
         process_is_gone(pid),
         "the timed out ssh is ended and reaped"
     );
-    let _ = pid;
 
     // A result that never comes after the hello.
     let mut fake = FakeSsh::new();
@@ -461,9 +469,79 @@ async fn ssh_child_is_reaped_when_the_cancel_token_fires() {
         .unwrap()
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Canceled);
-    #[cfg(unix)]
     assert!(process_is_gone(pid), "the canceled ssh is ended and reaped");
-    let _ = pid;
+}
+
+/// `ssh -G` can sit on a slow resolver or a hanging `Match exec`; cancel must
+/// end that child too, on Windows as on Unix (ADR-0044 decision 4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ssh_g_child_is_reaped_when_the_cancel_token_fires() {
+    let mut fake = FakeSsh::new();
+    fake.g_hang();
+    let cancel = CancelToken::new();
+    let program = fake.program().to_path_buf();
+    let target = dest("box");
+    let waiting = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { SshRunner::new(&program).resolve(&target, &cancel).await }
+    });
+    let pid = fake.wait_for_pid(GENEROUS).expect("the fake started");
+    cancel.cancel();
+    let err = tokio::time::timeout(GENEROUS, waiting)
+        .await
+        .expect("cancel ends the wait")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Canceled);
+    assert!(!err.retryable);
+    assert!(
+        process_is_gone(pid),
+        "the canceled ssh -G is ended and reaped"
+    );
+}
+
+/// A real OpenSSH can outlive the connection's SIGINT and report 255 ("Killed
+/// by signal 2") after closing its stdout. The cancel token is what knows the
+/// user pressed Ctrl-C, so the call is `CANCELED`, not `ssh_failed`.
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_child_exit_255_after_a_cancel_is_canceled_not_ssh_failed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("ssh");
+    std::fs::write(&script, "#!/bin/sh\nexec 1>&-\nsleep 1\nexit 255\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Control: with no cancel the same child is an ordinary ssh failure.
+    let mut child = SshRunner::new(&script)
+        .spawn_responder(&dest("box"), "qsh", options(true))
+        .unwrap();
+    let err = tokio::time::timeout(GENEROUS, child.recv())
+        .await
+        .expect("the script ends")
+        .unwrap_err();
+    assert_eq!(reason(&err), "ssh_failed", "{err:?}");
+
+    let cancel = CancelToken::new();
+    let mut child = SshRunner::new(&script)
+        .spawn_responder(
+            &dest("box"),
+            "qsh",
+            ResponderOptions::new(true, cancel.clone()),
+        )
+        .unwrap();
+    let waiting = tokio::spawn(async move { child.recv().await });
+    // After the script closed stdout and while it is still in its sleep.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    cancel.cancel();
+    let err = tokio::time::timeout(GENEROUS, waiting)
+        .await
+        .expect("the script ends")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Canceled, "{err:?}");
+    assert!(!err.retryable);
 }
 
 /// A Ctrl-C in the terminal reaches ssh in the same foreground process group.
@@ -1104,4 +1182,945 @@ fn pair_ssh_respond_is_unknown_on_windows_before_m20() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+// ---------------------------------------------------------------------
+// qsh pair ssh, the client half, on every platform
+// ---------------------------------------------------------------------
+
+/// The parts of `qsh pair ssh` that run on this machine alone: argument
+/// checks, the ssh program lookup, and the mapping of an ssh failure. They
+/// need a `Sandbox` and the fake, not a remote qsh, so the Windows leg runs
+/// them too.
+mod pair_client {
+    use super::*;
+    use crate::common::{Sandbox, exit_code};
+    use serde_json::Value;
+
+    /// A client whose `[ssh].program` is `fake`. A TOML literal string, so
+    /// a Windows path needs no escaping.
+    fn client_for(fake: &FakeSsh) -> Sandbox {
+        let client = Sandbox::initialized();
+        std::fs::write(
+            client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+        )
+        .unwrap();
+        client
+    }
+
+    fn pair_json(client: &Sandbox, args: &[&str]) -> (i32, Value) {
+        let mut argv = vec!["pair", "ssh"];
+        argv.extend_from_slice(args);
+        argv.push("--json");
+        client.json(&argv)
+    }
+
+    fn trust_file_exists(client: &Sandbox) -> bool {
+        client.config_dir().join("trust.toml").exists()
+    }
+
+    #[test]
+    fn ssh_bootstrap_an_old_remote_is_unsupported_and_writes_nothing() {
+        // A remote that does not know `pair ssh-respond` (clap exit 2, which
+        // is also what a Windows host answers until M20).
+        let mut fake = FakeSsh::new();
+        fake.exit(2);
+        let client = client_for(&fake);
+        let (code, got) = pair_json(&client, &["box"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["command"], "pair.ssh", "{got}");
+        assert_eq!(got["ok"], false, "{got}");
+        assert_eq!(got["error"]["code"], "UNSUPPORTED", "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_qsh_too_old",
+            "{got}"
+        );
+        assert!(!trust_file_exists(&client));
+        // `ssh -G`, then the responder: two calls, in that order.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0], ["-G", "--", "box"]);
+    }
+
+    /// cmd.exe answers 9009 for a program it cannot find; only a Windows
+    /// process can exit with that value (a Unix status is one byte).
+    #[cfg(windows)]
+    #[test]
+    fn ssh_bootstrap_a_remote_cmd_exe_9009_is_a_missing_qsh_and_writes_nothing() {
+        let mut fake = FakeSsh::new();
+        fake.exit(9009);
+        let client = client_for(&fake);
+        let (code, got) = pair_json(&client, &["box"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "REMOTE_ERROR", "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_qsh_missing",
+            "{got}"
+        );
+        assert_eq!(got["error"]["details"]["remote_exit"], 9009, "{got}");
+        assert!(!trust_file_exists(&client));
+    }
+
+    #[test]
+    fn ssh_bootstrap_a_missing_ssh_program_is_a_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-ssh");
+        let client = Sandbox::initialized();
+        std::fs::write(
+            client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", missing.display()),
+        )
+        .unwrap();
+        let (code, got) = pair_json(&client, &["box"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "CONFIG_ERROR", "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "ssh_not_found", "{got}");
+        assert!(!trust_file_exists(&client));
+    }
+
+    /// Validation happens before the identity is made and before ssh runs
+    /// (ADR-0044 decisions 7 and 18): a dest that looks like an ssh option
+    /// reaches no process at all.
+    #[test]
+    fn ssh_bootstrap_an_option_like_dest_runs_no_ssh_and_creates_no_identity() {
+        let fake = FakeSsh::new();
+        let client = Sandbox::new();
+        std::fs::write(
+            client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+        )
+        .unwrap();
+        for bad in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "-F/etc/passwd",
+            "ssh://dave@box",
+        ] {
+            let (code, got) = client.json(&["pair", "ssh", "--json", "--", bad]);
+            assert_eq!(code, 255, "{bad}: {got}");
+            assert_eq!(got["error"]["code"], "INVALID_ARGUMENT", "{bad}: {got}");
+        }
+        assert_eq!(fake.calls().len(), 0, "ssh must not run for a refused dest");
+        assert!(
+            !client.config_dir().join("identity").exists(),
+            "an invalid command line must not create the identity"
+        );
+        assert!(!trust_file_exists(&client));
+    }
+
+    #[test]
+    fn ssh_bootstrap_other_invalid_arguments_run_no_ssh() {
+        let fake = FakeSsh::new();
+        let client = client_for(&fake);
+        for args in [
+            vec!["box", "--role", "root"],
+            vec!["box", "--as", "a/b"],
+            vec!["box", "--remote-as", "a/b"],
+            vec!["box", "--address", ""],
+            vec!["box", "--remote-qsh", "bad\u{7}word"],
+        ] {
+            let (code, got) = pair_json(&client, &args);
+            assert_eq!(code, 255, "{args:?}: {got}");
+            assert_eq!(got["error"]["code"], "INVALID_ARGUMENT", "{args:?}: {got}");
+        }
+        assert_eq!(fake.calls().len(), 0);
+    }
+
+    /// `--as` names the pin, so a `Host` alias that is not a valid pin name
+    /// is fine as the ssh operand once `--as` is given.
+    #[test]
+    fn ssh_bootstrap_as_makes_a_non_label_host_alias_usable() {
+        let mut fake = FakeSsh::new();
+        fake.exit(2);
+        let client = client_for(&fake);
+        let (_, got) = pair_json(&client, &["box/alias"]);
+        assert_eq!(got["error"]["code"], "INVALID_ARGUMENT", "{got}");
+        assert_eq!(
+            fake.calls().len(),
+            0,
+            "the default pin name is checked first"
+        );
+        let (_, got) = pair_json(&client, &["box/alias", "--as", "prod"]);
+        // Past validation: it reached the (failing) ssh call.
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_qsh_too_old",
+            "{got}"
+        );
+        assert_eq!(fake.calls().len(), 2);
+    }
+
+    #[test]
+    fn ssh_bootstrap_the_real_caller_passes_batch_mode_in_machine_mode() {
+        let mut fake = FakeSsh::new();
+        fake.exit(2);
+        let client = client_for(&fake);
+        let _ = pair_json(&client, &["dave@box"]);
+        let calls = fake.calls();
+        let responder = calls.last().expect("the responder call");
+        assert!(
+            responder.windows(2).any(|w| w == ["-o", "BatchMode=yes"]),
+            "{responder:?}"
+        );
+        // The tests run without a terminal on stdin, so human mode is batch too.
+        let fake2 = {
+            let mut f = FakeSsh::new();
+            f.exit(2);
+            f
+        };
+        let client = client_for(&fake2);
+        let out = client.qsh(&["pair", "ssh", "dave@box"]);
+        assert_eq!(exit_code(&out), 255);
+        let calls = fake2.calls();
+        assert!(
+            calls
+                .last()
+                .unwrap()
+                .windows(2)
+                .any(|w| w == ["-o", "BatchMode=yes"]),
+            "{calls:?}"
+        );
+        // The human renderer writes the failure to stderr and nothing to stdout.
+        assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("UNSUPPORTED"), "{stderr}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// qsh pair ssh end to end (Unix: the remote half is `pair ssh-respond`)
+// ---------------------------------------------------------------------
+
+/// Two sandboxes, a real `qsh serve` on the remote one, and a fake `ssh`
+/// that runs the remote's `qsh pair ssh-respond` against the remote tree.
+/// This is everything `qsh pair ssh` touches except OpenSSH itself.
+#[cfg(unix)]
+pub(crate) mod pair {
+    use super::*;
+    use crate::common::{Sandbox, ServeGuard, exit_code};
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    const QSH: &str = env!("CARGO_BIN_EXE_qsh");
+
+    pub(crate) struct World {
+        pub client: Sandbox,
+        pub remote: Sandbox,
+        pub serve: ServeGuard,
+        pub fake: FakeSsh,
+    }
+
+    impl World {
+        pub fn new() -> Self {
+            Self::with_client(Sandbox::initialized())
+        }
+
+        pub fn with_client(client: Sandbox) -> Self {
+            let remote = Sandbox::initialized();
+            let serve = ServeGuard::start(&remote);
+            // What the responder reports as the serve bind.
+            std::fs::write(
+                remote.config_dir().join("config.toml"),
+                format!("[serve]\nbind = \"{}\"\n", serve.addr()),
+            )
+            .unwrap();
+            let mut fake = FakeSsh::new();
+            fake.run_local_responder(Path::new(QSH), remote.config_dir(), remote.state_dir());
+            std::fs::write(
+                client.config_dir().join("config.toml"),
+                format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+            )
+            .unwrap();
+            Self {
+                client,
+                remote,
+                serve,
+                fake,
+            }
+        }
+
+        /// `qsh pair ssh <args> --json` on the client.
+        pub fn pair(&self, args: &[&str]) -> (i32, Value) {
+            let mut argv = vec!["pair", "ssh"];
+            argv.extend_from_slice(args);
+            argv.push("--json");
+            self.client.json(&argv)
+        }
+    }
+
+    pub(super) fn trust_file(sandbox: &Sandbox) -> PathBuf {
+        sandbox.config_dir().join("trust.toml")
+    }
+
+    pub(super) fn trust_bytes(sandbox: &Sandbox) -> Vec<u8> {
+        std::fs::read(trust_file(sandbox)).unwrap_or_default()
+    }
+
+    pub(super) fn store(sandbox: &Sandbox) -> qsh_core::TrustStore {
+        qsh_core::TrustStore::load(&trust_file(sandbox)).unwrap()
+    }
+
+    /// A well-formed fingerprint nobody owns the key of.
+    pub(super) fn other_fingerprint(byte: u8) -> String {
+        use base64::Engine as _;
+        format!(
+            "sha256:{}",
+            base64::engine::general_purpose::STANDARD.encode([byte; 32])
+        )
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// Every file under `dir`, relative, with its bytes.
+    fn snapshot(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().display().to_string();
+                    out.insert(rel, std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    #[test]
+    fn ssh_bootstrap_pins_both_sides_and_connects() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+        let data = &got["data"];
+        assert_eq!(got["command"], "pair.ssh");
+        assert_eq!(data["direction"], "forward");
+        assert_eq!(data["verified"], true, "{got}");
+        assert!(data.get("verify_error").is_none(), "{got}");
+        assert_eq!(data["created"], true);
+        assert_eq!(data["identity_created"], false);
+        assert_eq!(data["ssh_proxied"], false);
+        assert_eq!(data["peer"]["name"], "box");
+        assert_eq!(data["peer"]["address"], w.serve.addr());
+        assert_eq!(data["peer"]["fingerprint"], w.remote.fingerprint());
+        assert_eq!(data["remote"]["name"], "laptop");
+        assert_eq!(data["remote"]["created"], true);
+        assert_eq!(data["remote"]["role"], "full");
+
+        // This machine pins the remote by address; the remote pins this
+        // machine inbound-only under the name it was asked to use.
+        let local = store(&w.client);
+        let pin = local.find("box").expect("the local pin");
+        assert_eq!(pin.fingerprint, w.remote.fingerprint());
+        assert_eq!(pin.address, w.serve.addr());
+        let remote_pin = store(&w.remote)
+            .find("laptop")
+            .cloned()
+            .expect("the remote pin");
+        assert_eq!(remote_pin.fingerprint, w.client.fingerprint());
+        assert_eq!(remote_pin.address, "");
+        assert_eq!(remote_pin.role.as_deref(), Some("full"));
+
+        // The pin works: `qsh exec box` reaches the remote serve.
+        let (code, exec) =
+            w.client
+                .json(&["exec", "box", "--json", "--", "sh", "-c", "echo paired"]);
+        assert_eq!(code, 0, "{exec}");
+        assert_eq!(exec["data"]["stdout_b64"], "cGFpcmVkCg==", "{exec}");
+    }
+
+    #[test]
+    fn ssh_bootstrap_role_flag_sets_the_remote_role() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--role", "exec"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["remote"]["role"], "exec");
+        assert_eq!(
+            store(&w.remote).find("laptop").unwrap().role.as_deref(),
+            Some("exec")
+        );
+        // The remote audit record names the role it wrote.
+        let audits: Vec<_> = w
+            .remote
+            .audit_records()
+            .into_iter()
+            .filter(|r| r["action"] == "pair.ssh_respond")
+            .collect();
+        assert_eq!(audits.len(), 1, "{audits:?}");
+        assert_eq!(audits[0]["role"], "exec");
+    }
+
+    #[test]
+    fn ssh_bootstrap_local_pin_has_explicit_role_none() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["peer"]["role"], "none", "{got}");
+        assert_eq!(
+            store(&w.client).find("box").unwrap().role.as_deref(),
+            Some("none")
+        );
+        // The `none` pin grants nothing: this machine's own serve would deny
+        // the remote every action (default-deny, ADR-0045 decision 8).
+        let (code, checked) = w.client.json(&[
+            "acl",
+            "check",
+            "--principal",
+            "device:box",
+            "--action",
+            "exec.run",
+            "--json",
+        ]);
+        assert_eq!(code, 0, "{checked}");
+        assert_eq!(checked["data"]["decision"], "deny", "{checked}");
+        // A `none` pin writes no audit record (ADR-0045 decision 8).
+        assert!(
+            w.client
+                .audit_records()
+                .iter()
+                .all(|r| r["action"] != "trust.add"),
+            "{:?}",
+            w.client.audit_records()
+        );
+    }
+
+    #[test]
+    fn ssh_bootstrap_does_not_widen_an_existing_roleless_pin() {
+        let w = World::new();
+        // A pin written before roles existed: no `role` key.
+        {
+            let path = trust_file(&w.remote);
+            let mut store = qsh_core::TrustStore::load(&path).unwrap();
+            let fp: qsh_core::Fingerprint = w.client.fingerprint().parse().unwrap();
+            store.add_peer("laptop", None, fp, "2026-01-01T00:00:00Z".into());
+            store.save(&path).unwrap();
+        }
+        let before = trust_bytes(&w.remote);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--role", "full"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["remote"]["created"], false, "{got}");
+        assert!(got["data"]["remote"].get("role").is_none(), "{got}");
+        assert_eq!(
+            trust_bytes(&w.remote),
+            before,
+            "an existing pin is never widened"
+        );
+    }
+
+    #[test]
+    fn ssh_bootstrap_never_overwrites_a_pin_with_a_different_fingerprint() {
+        // Local side: `box` is pinned here under another identity.
+        let w = World::new();
+        w.client
+            .trust_add("box", Some("10.0.0.9:4433"), &other_fingerprint(7));
+        let local_before = trust_bytes(&w.client);
+        let remote_before = snapshot(w.remote.config_dir());
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "pin_conflict");
+        assert_eq!(got["error"]["details"]["side"], "local");
+        assert_eq!(trust_bytes(&w.client), local_before);
+        assert_eq!(
+            snapshot(w.remote.config_dir()),
+            remote_before,
+            "nothing on the remote"
+        );
+
+        // Remote side: `laptop` is pinned there under another identity.
+        let w = World::new();
+        w.remote.trust_add("laptop", None, &other_fingerprint(9));
+        let remote_before = trust_bytes(&w.remote);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
+        assert_eq!(got["error"]["details"]["side"], "remote");
+        assert_eq!(
+            got["error"]["details"]["pinned_fingerprint"],
+            other_fingerprint(9)
+        );
+        assert_eq!(trust_bytes(&w.remote), remote_before);
+        assert!(!trust_file(&w.client).exists(), "nothing on this machine");
+
+        // The remote identity already pinned here under another name.
+        let w = World::new();
+        w.client
+            .trust_add("old-box", Some("10.0.0.9:4433"), &w.remote.fingerprint());
+        let local_before = trust_bytes(&w.client);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["details"]["pinned_name"], "old-box", "{got}");
+        assert_eq!(trust_bytes(&w.client), local_before);
+        assert!(!trust_file(&w.remote).exists());
+    }
+
+    #[test]
+    fn ssh_bootstrap_writes_nothing_when_the_remote_cannot_respond() {
+        // (what the fake does, error code, reason)
+        let hello_versions = |versions: Vec<u32>| {
+            BootstrapLine::Hello(Hello {
+                versions,
+                qsh_version: "9.9.9".into(),
+                status: HelloStatus::Ready,
+                fingerprint: Some(other_fingerprint(3)),
+                serve_bind: Some("127.0.0.1:4433".into()),
+                serve_listening: Some(true),
+            })
+            .encode_line()
+            .unwrap()
+            .into_bytes()
+        };
+        type Setup = Box<dyn Fn(&mut FakeSsh)>;
+        let cases: Vec<(&str, Setup, &[&str], &str, &str)> = vec![
+            (
+                // A shell that cannot find the program answers 127.
+                "127",
+                Box::new(|f| {
+                    f.respond_through_shell();
+                }),
+                &["--remote-qsh", "/nonexistent/qsh"],
+                "REMOTE_ERROR",
+                "remote_qsh_missing",
+            ),
+            (
+                "exit 2",
+                Box::new(|f| {
+                    f.exit(2);
+                }),
+                &[],
+                "UNSUPPORTED",
+                "remote_qsh_too_old",
+            ),
+            (
+                "no common version",
+                Box::new(move |f| {
+                    f.script(&hello_versions(vec![99])).exit(0);
+                }),
+                &[],
+                "UNSUPPORTED",
+                "bootstrap_version",
+            ),
+        ];
+        for (label, setup, extra, code_name, reason) in cases {
+            let mut w = World::new();
+            // The 127 row keeps the fake that runs the real responder; the
+            // others use one that only prints what the row scripts.
+            if label != "127" {
+                w.fake = FakeSsh::new();
+                std::fs::write(
+                    w.client.config_dir().join("config.toml"),
+                    format!("[ssh]\nprogram = '{}'\n", w.fake.program().display()),
+                )
+                .unwrap();
+            }
+            setup(&mut w.fake);
+            let mut args = vec!["box", "--remote-as", "laptop"];
+            args.extend_from_slice(extra);
+            let (code, got) = w.pair(&args);
+            assert_eq!(code, 255, "{label}: {got}");
+            assert_eq!(got["error"]["code"], code_name, "{label}: {got}");
+            assert_eq!(got["error"]["details"]["reason"], reason, "{label}: {got}");
+            assert!(!trust_file(&w.client).exists(), "{label}");
+            assert!(!trust_file(&w.remote).exists(), "{label}");
+        }
+
+        // The remote has no identity: reported, and not created.
+        let mut w = World::new();
+        let bare = Sandbox::new();
+        w.fake
+            .run_local_responder(Path::new(QSH), bare.config_dir(), bare.state_dir());
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "REMOTE_ERROR", "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "remote_not_initialized");
+        assert!(!bare.config_dir().join("identity").exists());
+        assert!(!trust_file(&bare).exists());
+        assert!(!trust_file(&w.client).exists());
+    }
+
+    /// The remote says `hello` and then never answers the `commit`: the
+    /// client gives up after the message deadline and neither side has a
+    /// pin. Runs the real 30 s deadline, so it is a test of its own.
+    #[test]
+    fn ssh_bootstrap_writes_nothing_when_the_commit_is_never_answered() {
+        let mut w = World::new();
+        w.fake = FakeSsh::new();
+        std::fs::write(
+            w.client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", w.fake.program().display()),
+        )
+        .unwrap();
+        let hello = BootstrapLine::Hello(Hello {
+            versions: vec![1],
+            qsh_version: "9.9.9".into(),
+            status: HelloStatus::Ready,
+            fingerprint: Some(other_fingerprint(3)),
+            serve_bind: Some("127.0.0.1:4433".into()),
+            serve_listening: Some(true),
+        })
+        .encode_line()
+        .unwrap()
+        .into_bytes();
+        w.fake.script(&hello).hang();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "TIMEOUT", "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "bootstrap_timeout",
+            "{got}"
+        );
+        assert!(!trust_file(&w.client).exists());
+        assert!(!trust_file(&w.remote).exists());
+    }
+
+    #[test]
+    fn ssh_bootstrap_reports_the_actual_remote_role_when_an_existing_pin_differs() {
+        let w = World::new();
+        w.remote
+            .trust_add_with_role("laptop", None, &w.client.fingerprint(), "read-only");
+        let before = trust_bytes(&w.remote);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--role", "full"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["remote"]["created"], false);
+        assert_eq!(got["data"]["remote"]["role"], "read-only", "{got}");
+        assert_eq!(trust_bytes(&w.remote), before, "the role is not changed");
+
+        // Human mode says so on stderr.
+        let w2 = World::new();
+        w2.remote
+            .trust_add_with_role("laptop", None, &w2.client.fingerprint(), "read-only");
+        let out = w2.client.qsh(&[
+            "pair",
+            "ssh",
+            "box",
+            "--remote-as",
+            "laptop",
+            "--role",
+            "full",
+        ]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("read-only"), "{stderr}");
+    }
+
+    #[test]
+    fn ssh_bootstrap_skips_untagged_stdout_and_never_logs_it() {
+        let mut w = World::new();
+        w.fake
+            .run_local_responder(Path::new(QSH), w.remote.config_dir(), w.remote.state_dir())
+            .script(b"Welcome to box\nexport TOKEN=hunter2-secret\n");
+        let mut command =
+            w.client
+                .command(&["pair", "ssh", "box", "--remote-as", "laptop", "--json"]);
+        let output = command
+            .env("QSH_LOG", "trace")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert_eq!(
+            exit_code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!all.contains("hunter2-secret"), "rc output leaked: {all}");
+        assert!(!all.contains("Welcome to box"), "rc output leaked: {all}");
+
+        // More than 64 KiB of such lines before any hello: a protocol error,
+        // with nothing written.
+        let mut w = World::new();
+        let noise: Vec<u8> = (0..2000)
+            .flat_map(|n| format!("noise line {n} {}\n", "x".repeat(60)).into_bytes())
+            .collect();
+        assert!(noise.len() > 64 * 1024);
+        w.fake
+            .run_local_responder(Path::new(QSH), w.remote.config_dir(), w.remote.state_dir())
+            .script(&noise);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "bootstrap_protocol",
+            "{got}"
+        );
+        assert!(!trust_file(&w.client).exists());
+        assert!(!trust_file(&w.remote).exists());
+    }
+
+    #[test]
+    fn ssh_bootstrap_reports_identity_mismatch_when_serve_runs_another_identity() {
+        let w = World::new();
+        // Another machine answers on the address ssh's remote reported.
+        let other = Sandbox::initialized();
+        let other_serve = ServeGuard::start(&other);
+        let (code, got) = w.pair(&[
+            "box",
+            "--remote-as",
+            "laptop",
+            "--address",
+            other_serve.addr(),
+        ]);
+        assert_eq!(code, 0, "the pins stand: {got}");
+        assert_eq!(got["data"]["verified"], false, "{got}");
+        assert_eq!(
+            got["data"]["verify_error"]["details"]["reason"], "remote_serve_identity_mismatch",
+            "{got}"
+        );
+        // Both pins were written, with the address the user asked for.
+        assert_eq!(
+            store(&w.client).find("box").unwrap().address,
+            other_serve.addr()
+        );
+        assert!(store(&w.remote).find("laptop").is_some());
+    }
+
+    /// The serve at the address runs with the ssh account's identity but
+    /// another trust store (another config directory in a real deployment
+    /// would change the identity too; here only the trust differs), so it
+    /// does not know this device and closes right after the handshake.
+    #[test]
+    fn ssh_bootstrap_reports_a_serve_that_does_not_know_this_device() {
+        let mut w = World::new();
+        // The account the responder runs as: the same identity files, its own
+        // trust store.
+        let account = Sandbox::new();
+        copy_dir(
+            &w.remote.config_dir().join("identity"),
+            &account.config_dir().join("identity"),
+        );
+        std::fs::write(
+            account.config_dir().join("config.toml"),
+            format!("[serve]\nbind = \"{}\"\n", w.serve.addr()),
+        )
+        .unwrap();
+        w.fake
+            .run_local_responder(Path::new(QSH), account.config_dir(), account.state_dir());
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "the pins stand: {got}");
+        assert_eq!(got["data"]["verified"], false, "{got}");
+        assert_eq!(
+            got["data"]["verify_error"]["details"]["reason"], "remote_serve_rejected_this_device",
+            "{got}"
+        );
+        assert!(store(&account).find("laptop").is_some());
+        assert!(!trust_file(&w.remote).exists() || store(&w.remote).find("laptop").is_none());
+    }
+
+    #[test]
+    fn ssh_bootstrap_unverified_when_remote_serve_is_not_listening() {
+        let w = World::new();
+        let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let spec = free.local_addr().unwrap().to_string();
+        drop(free);
+        std::fs::write(
+            w.remote.config_dir().join("config.toml"),
+            format!("[serve]\nbind = \"{spec}\"\n"),
+        )
+        .unwrap();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["verified"], false, "{got}");
+        assert_eq!(
+            got["data"]["verify_error"]["details"]["reason"], "remote_serve_not_listening",
+            "{got}"
+        );
+        assert_eq!(got["data"]["peer"]["address"], spec);
+        assert!(store(&w.client).find("box").is_some());
+        assert!(store(&w.remote).find("laptop").is_some());
+    }
+
+    #[test]
+    fn ssh_bootstrap_initializes_a_missing_local_identity_once() {
+        let w = World::with_client(Sandbox::new());
+        assert!(!w.client.config_dir().join("identity").exists());
+        let (code, first) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{first}");
+        assert_eq!(first["data"]["identity_created"], true, "{first}");
+        let fingerprint = w.client.fingerprint();
+        assert_eq!(
+            store(&w.remote).find("laptop").unwrap().fingerprint,
+            fingerprint
+        );
+
+        // A rerun converges: same identity, nothing new.
+        let local_before = trust_bytes(&w.client);
+        let remote_before = trust_bytes(&w.remote);
+        let (code, second) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{second}");
+        assert_eq!(second["data"]["identity_created"], false);
+        assert_eq!(second["data"]["created"], false);
+        assert_eq!(second["data"]["remote"]["created"], false);
+        assert_eq!(w.client.fingerprint(), fingerprint);
+        assert_eq!(trust_bytes(&w.client), local_before);
+        assert_eq!(trust_bytes(&w.remote), remote_before);
+    }
+
+    #[test]
+    fn ssh_bootstrap_never_writes_hosts_config_or_acl_files() {
+        let w = World::new();
+        let client_before = snapshot(w.client.config_dir());
+        let remote_before = snapshot(w.remote.config_dir());
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+        for (label, dir, before) in [
+            ("client", w.client.config_dir(), client_before),
+            ("remote", w.remote.config_dir(), remote_before),
+        ] {
+            let after = snapshot(dir);
+            let changed: Vec<&String> = after
+                .iter()
+                .filter(|(name, bytes)| before.get(*name) != Some(*bytes))
+                .map(|(name, _)| name)
+                // The advisory lock file next to the trust store.
+                .filter(|name| !name.ends_with(".lock"))
+                .collect();
+            assert_eq!(
+                changed,
+                ["trust.toml"],
+                "{label}: only the trust store changes"
+            );
+            for forbidden in ["hosts.toml", "acl.toml", "config.toml"] {
+                assert_eq!(
+                    after.get(forbidden),
+                    before.get(forbidden),
+                    "{label}: {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_bootstrap_envelope_is_the_only_stdout_line() {
+        let w = World::new();
+        for mode in ["--json", "--jsonl"] {
+            // At the loudest verbosity: diagnostics stay on stderr.
+            let out = w
+                .client
+                .qsh(&["pair", "ssh", "box", "--remote-as", "laptop", "-vvv", mode]);
+            assert_eq!(
+                exit_code(&out),
+                0,
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(text.lines().count(), 1, "{mode}: {text:?}");
+            let value: Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(value["command"], "pair.ssh");
+            assert_eq!(value["ok"], true);
+        }
+    }
+
+    #[test]
+    fn ssh_bootstrap_human_mode_prints_both_pins_and_the_verified_line() {
+        let w = World::new();
+        let out = w
+            .client
+            .qsh(&["pair", "ssh", "box", "--remote-as", "laptop"]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        // This machine's pin names the remote identity, fingerprint included.
+        assert!(
+            lines[0].starts_with(&format!("pinned box ({}) [", w.remote.fingerprint())),
+            "{stdout}"
+        );
+        assert_eq!(lines[1], "remote: pinned laptop role full", "{stdout}");
+        assert_eq!(lines[2], "verified", "{stdout}");
+    }
+
+    #[test]
+    fn pair_ssh_never_appears_as_a_control_message_wire_variant() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../qsh-proto/proto/qsh/wire/v1.proto"
+        ))
+        .expect("read v1.proto");
+        assert!(source.contains("message "), "v1.proto looks empty");
+        let lower = source.to_lowercase();
+        assert!(
+            !lower.contains("pairssh")
+                && !lower.contains("pair_ssh")
+                && !lower.contains("pair.ssh"),
+            "the wire proto must never gain a pair.ssh message"
+        );
+    }
+
+    /// The bootstrapped pin is an ordinary forward route: exec, a file
+    /// round trip and a session all work through it.
+    #[test]
+    fn bootstrapped_forward_route_passes_the_attach_exec_cp_suite() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+
+        let (code, exec) = w.client.json(&[
+            "exec",
+            "box",
+            "--json",
+            "--",
+            "sh",
+            "-c",
+            "echo out; exit 3",
+        ]);
+        assert_eq!(code, 3, "{exec}");
+
+        let work = tempfile::tempdir().unwrap();
+        let src = work.path().join("src.txt");
+        std::fs::write(&src, b"through the bootstrapped pin\n").unwrap();
+        let dst = work.path().join("dst.txt");
+        let remote_dst = format!("box:{}", dst.display());
+        let (code, put) = w
+            .client
+            .json(&["cp", "--json", src.to_str().unwrap(), &remote_dst]);
+        assert_eq!(code, 0, "{put}");
+        assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap());
+        let back = work.path().join("back.txt");
+        let (code, get) = w
+            .client
+            .json(&["cp", "--json", &remote_dst, back.to_str().unwrap()]);
+        assert_eq!(code, 0, "{get}");
+        assert_eq!(std::fs::read(&back).unwrap(), std::fs::read(&src).unwrap());
+
+        let (code, opened) = w.client.json(&[
+            "session",
+            "open",
+            "box",
+            "--json",
+            "--",
+            "sh",
+            "-c",
+            "echo attached",
+        ]);
+        assert_eq!(code, 0, "{opened}");
+        let session = opened["data"]["session_ref"].as_str().unwrap().to_string();
+        let (code, listed) = w.client.json(&["session", "get", &session, "--json"]);
+        assert_eq!(code, 0, "{listed}");
+    }
 }

@@ -128,7 +128,7 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         "name" if matches!(child, serde_json::Value::String(s) if s.starts_with("device_")) => {
                             *child = serde_json::Value::String("<device_id>".into())
                         }
-                        "fingerprint" | "observed_fingerprint" => {
+                        "fingerprint" | "observed_fingerprint" | "pinned_fingerprint" => {
                             *child = serde_json::Value::String("<fingerprint>".into())
                         }
                         // `identity.export`'s and `trust.add_ca`'s
