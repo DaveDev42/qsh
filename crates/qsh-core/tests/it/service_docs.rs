@@ -22,8 +22,9 @@ use qsh_core::doctor::SERVICE_NOT_REGISTERED;
 use qsh_core::{
     DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_HOME_MACOS,
     SERVICE_UNSUPPORTED_PLATFORM, launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv,
-    render_launchd_plist, render_systemd_unit, systemd_daemon_reload_argv,
-    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
+    launchd_print_system_argv, render_launchd_plist, render_systemd_unit,
+    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
+    systemd_is_active_argv,
 };
 
 use crate::docs;
@@ -275,5 +276,162 @@ fn service_md_activation_recipes_match_the_argv_builders() {
             .any(|line| line.starts_with("systemctl --user restart")
                 || line.starts_with("launchctl kickstart")),
         "the recipes must not restart a unit"
+    );
+}
+
+/// The single top-level entry of a plist after `<key>{key}</key>`: the one
+/// line for a scalar (`<string>`, `<true/>`), or every line through the
+/// matching close for an `<array>` or `<dict>`. The plists on this page indent
+/// their top-level keys by two spaces, which is what closes a container.
+fn plist_entry(plist: &str, key: &str) -> String {
+    let lines: Vec<&str> = plist.lines().collect();
+    let marker = format!("  <key>{key}</key>");
+    let at = lines
+        .iter()
+        .position(|line| *line == marker)
+        .unwrap_or_else(|| panic!("plist has no top-level `{key}` key:\n{plist}"));
+    let first = lines[at + 1];
+    let close = match first.trim() {
+        "<array>" => Some("  </array>"),
+        "<dict>" => Some("  </dict>"),
+        _ => None,
+    };
+    match close {
+        None => first.to_string(),
+        Some(close) => {
+            let end = lines[at + 1..]
+                .iter()
+                .position(|line| *line == close)
+                .unwrap_or_else(|| panic!("`{key}` never closes"));
+            lines[at + 1..=at + 1 + end].join("\n")
+        }
+    }
+}
+
+/// ADR-0032 decision 13: the LaunchDaemon recipe in `docs/deploy/service.md`
+/// is the LaunchAgent plist of the same mode plus `UserName`, `GroupName`
+/// and a `HOME`. The fence is not rendered by qsh, so the comparison is not
+/// byte for byte: the keys that decide what runs (`Label`,
+/// `ProgramArguments`, `RunAtLoad`, `KeepAlive`, the two log paths) must equal
+/// what the LaunchAgent renderer emits, and the additions must be there.
+/// Nothing here runs `launchctl` or reads `/Library`.
+#[test]
+fn service_md_launchdaemon_recipe_matches_the_agent_program_arguments() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let daemon = fence_after(
+        &service_md,
+        "`/Library/LaunchDaemons/io.qsh.serve.plist`:",
+        "plist",
+    );
+    let agent = render_launchd_plist(
+        "serve",
+        DOC_EXAMPLE_EXE_MACOS,
+        DOC_EXAMPLE_HOME_MACOS,
+        DOC_EXAMPLE_CONTROLLER,
+    );
+
+    for key in [
+        "Label",
+        "ProgramArguments",
+        "RunAtLoad",
+        "KeepAlive",
+        "StandardOutPath",
+        "StandardErrorPath",
+    ] {
+        assert_eq!(
+            plist_entry(&daemon, key),
+            plist_entry(&agent, key),
+            "the LaunchDaemon fence's `{key}` must equal the LaunchAgent renderer's"
+        );
+    }
+
+    // `UserName` is the account the example home belongs to, and the daemon
+    // gets no `HOME` of its own, so the recipe has to carry it.
+    let user = DOC_EXAMPLE_HOME_MACOS
+        .rsplit('/')
+        .next()
+        .expect("example home has a last component");
+    assert_eq!(
+        plist_entry(&daemon, "UserName"),
+        format!("  <string>{user}</string>")
+    );
+    assert_eq!(
+        plist_entry(&daemon, "GroupName"),
+        "  <string>staff</string>"
+    );
+    let environment = plist_entry(&daemon, "EnvironmentVariables");
+    assert!(
+        environment.contains(&format!(
+            "<key>HOME</key>\n    <string>{DOC_EXAMPLE_HOME_MACOS}</string>"
+        )),
+        "the LaunchDaemon fence must set HOME:\n{environment}"
+    );
+    assert!(
+        !agent.contains("<key>UserName</key>") && !agent.contains("<key>GroupName</key>"),
+        "the LaunchAgent renderer must not emit the daemon-only keys"
+    );
+}
+
+/// ADR-0032 decisions 12, 13 and 16: the install, check and removal steps the
+/// LaunchDaemon recipe gives, in the order a person runs them. They are the
+/// human's commands: qsh runs none of them.
+#[test]
+fn service_md_launchdaemon_install_steps_are_in_order() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let recipes = bash_fence_lines(&service_md);
+    let daemon = "/Library/LaunchDaemons/io.qsh.serve.plist";
+    let install = [
+        "qsh service uninstall --deactivate".to_string(),
+        format!("sudo cp io.qsh.serve.plist {daemon}"),
+        format!("sudo chown root:wheel {daemon}"),
+        format!("sudo chmod 644 {daemon}"),
+        format!("sudo launchctl bootstrap system {daemon}"),
+    ];
+    let positions: Vec<usize> = install
+        .iter()
+        .map(|line| {
+            recipes
+                .iter()
+                .position(|recipe| recipe == line)
+                .unwrap_or_else(|| panic!("docs/deploy/service.md has no `{line}` line"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "the LaunchDaemon install steps are out of order: {positions:?}"
+    );
+    for line in [
+        "sudo launchctl bootout system/io.qsh.serve".to_string(),
+        format!("sudo rm {daemon}"),
+        "sudo launchctl print system/io.qsh.serve".to_string(),
+    ] {
+        assert!(
+            recipes.contains(&line),
+            "docs/deploy/service.md has no `{line}` line"
+        );
+    }
+    // The check line is the same query `status --live` would run as root.
+    assert_eq!(
+        launchd_print_system_argv("serve").join(" "),
+        "launchctl print system/io.qsh.serve"
+    );
+}
+
+/// ADR-0032 decision 15: both always-on recipes (linger and the LaunchDaemon)
+/// tell a `platform` key store holder to move the key first, and the page
+/// names the command the doctor finding recommends.
+#[test]
+fn service_md_always_on_recipes_point_at_move_key() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let flattened = service_md.replace("\n", " ").replace("  ", " ");
+    assert_eq!(
+        flattened.matches("qsh identity move-key --to file").count(),
+        2,
+        "the launchd and the linger recipe each carry one move-key line"
+    );
+    assert!(
+        qsh_core::doctor::KEYSTORE_SESSION_BOUND
+            .remedy
+            .contains("qsh identity move-key --to file")
     );
 }

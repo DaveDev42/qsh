@@ -32,6 +32,13 @@ fn no_linger_dir() -> &'static Path {
     Path::new("/nonexistent-m9-step4-doctor-test-linger-root")
 }
 
+/// A `system_root` no machine has a `Library/LaunchDaemons` under, so a
+/// [`DoctorEnvironment`] that is not exercising the LaunchDaemon form never
+/// reads the real `/Library` (ADR-0032 결정 14).
+fn no_system_root() -> &'static Path {
+    Path::new("/nonexistent-m17-doctor-test-system-root")
+}
+
 /// A `bindv6only_probe` stub for every [`DoctorEnvironment`] literal that
 /// is not itself exercising `bindv6only_blocks_ipv4` — `Ok(false)` never
 /// fires [`probe::bindv6only_finding`] — the mutation check has its own
@@ -50,7 +57,7 @@ fn always_v6_only(_addr: SocketAddr) -> std::io::Result<bool> {
 /// A [`DoctorEnvironment`] with every probe stubbed to "not present"/
 /// "cannot tell" — every ROADMAP M9 (h) test below overrides only the one or
 /// two fields its own probe actually reads, via struct-update syntax,
-/// rather than repeating all seven fields at every call site.
+/// rather than repeating every field at every call site.
 fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
     DoctorEnvironment {
         keystore,
@@ -58,6 +65,9 @@ fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
         path_dirs: &[],
         home_dir: None,
         linger_dir: no_linger_dir(),
+        system_root: no_system_root(),
+        os: probe::HostOs::current(),
+        key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
     }
@@ -644,6 +654,9 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
         path_dirs: &[],
         home_dir: None,
         linger_dir: no_linger_dir(),
+        system_root: no_system_root(),
+        os: probe::HostOs::current(),
+        key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
     };
@@ -768,6 +781,9 @@ fn doctor_wires_the_path_shadow_finding_into_the_full_report_deterministically()
         path_dirs: &path_dirs,
         home_dir: None,
         linger_dir: no_linger_dir(),
+        system_root: no_system_root(),
+        os: probe::HostOs::current(),
+        key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
     };
@@ -1934,6 +1950,380 @@ fn doctor_wires_the_service_not_registered_finding_into_the_full_report_determin
             data.findings
         );
     }
+}
+
+// -----------------------------------------------------------------
+// Always-on forms (ADR-0032 결정 14, 15): the macOS LaunchDaemon plist and
+// Linux's linger marker plus a user unit. Every test names the OS it reads
+// (`env.os`), so the macOS rules run on a Linux host too, and every
+// system path is a tempdir (`env.system_root`, `env.linger_dir`): none of
+// them reads the real `/Library` or `/var/lib/systemd/linger`.
+// -----------------------------------------------------------------
+
+/// The three run modes `infer_run_mode` can return.
+const MODES: [&str; 3] = ["serve", "listen", "reverse"];
+
+fn codes(findings: &[DoctorFinding]) -> Vec<&str> {
+    findings.iter().map(|f| f.code.as_str()).collect()
+}
+
+/// A macOS host with `mode`'s LaunchDaemon plist under a tempdir root and
+/// no LaunchAgent. Returns `(home, system_root)`.
+fn macos_with_launchdaemon(mode: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let plist = probe::macos_launchdaemon_path(root.path(), mode);
+    std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    std::fs::write(plist, b"<plist/>").unwrap();
+    (home, root)
+}
+
+/// A Linux host with `mode`'s user unit and the linger marker for
+/// `ACCOUNT`. Returns `(home, linger_dir)`.
+fn linux_with_linger_and_unit(mode: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    let unit = probe::linux_systemd_user_unit_path(home.path(), mode);
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(unit, b"[Unit]").unwrap();
+    let linger = tempfile::tempdir().unwrap();
+    std::fs::write(linger.path().join(ACCOUNT), b"").unwrap();
+    (home, linger)
+}
+
+const ACCOUNT: &str = "m17-step4-test-account";
+
+#[test]
+fn service_not_registered_accepts_a_launchdaemon_plist() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let (home, root) = macos_with_launchdaemon("serve");
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Macos,
+        home_dir: Some(home.path()),
+        system_root: root.path(),
+        ..minimal_env(&keystore)
+    };
+
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        !codes(&findings).contains(&"service_not_registered"),
+        "a LaunchDaemon plist registers the service: {findings:?}"
+    );
+    // Registered means the session-drop notice speaks, as for a LaunchAgent.
+    assert!(
+        codes(&findings).contains(&"service_restart_drops_sessions"),
+        "{findings:?}"
+    );
+
+    // The plist is per mode: another mode still has no unit.
+    let findings = ops.doctor_service_registration_findings("listen", &env);
+    assert_eq!(codes(&findings), ["service_not_registered"], "{findings:?}");
+}
+
+#[test]
+fn launchagent_session_scoped_is_silent_when_a_launchdaemon_plist_exists() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let (home, root) = macos_with_launchdaemon("serve");
+    let agent = probe::macos_launchagent_path(home.path(), "serve");
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(&agent, b"<plist/>").unwrap();
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Macos,
+        home_dir: Some(home.path()),
+        system_root: root.path(),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        !codes(&findings).contains(&"launchagent_session_scoped"),
+        "{findings:?}"
+    );
+
+    // Without the LaunchDaemon the same LaunchAgent is reported, and its
+    // remedy points at the recipe.
+    let bare_root = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        system_root: bare_root.path(),
+        ..env
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "launchagent_session_scoped")
+        .unwrap_or_else(|| panic!("launchagent_session_scoped missing: {findings:?}"));
+    assert_eq!(finding.status, "warn");
+    assert!(
+        finding
+            .remedy
+            .as_deref()
+            .is_some_and(|remedy| remedy.contains("LaunchDaemon recipe in docs/deploy/service.md")),
+        "{finding:?}"
+    );
+}
+
+#[test]
+fn keystore_session_bound_fires_for_platform_store_under_launchdaemon() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let (home, root) = macos_with_launchdaemon("serve");
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Macos,
+        home_dir: Some(home.path()),
+        system_root: root.path(),
+        key_store: KeyStoreKind::Platform,
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "keystore_session_bound")
+        .unwrap_or_else(|| panic!("keystore_session_bound missing: {findings:?}"));
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("serve"), "{finding:?}");
+    assert!(
+        finding
+            .remedy
+            .as_deref()
+            .is_some_and(|remedy| remedy.contains("qsh identity move-key --to file")),
+        "{finding:?}"
+    );
+
+    // A LaunchAgent alone is session scoped by design: no always-on form,
+    // so the key store is not what ends the service.
+    let agent_home = tempfile::tempdir().unwrap();
+    let agent = probe::macos_launchagent_path(agent_home.path(), "serve");
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(&agent, b"<plist/>").unwrap();
+    let bare_root = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(agent_home.path()),
+        system_root: bare_root.path(),
+        ..env
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        !codes(&findings).contains(&"keystore_session_bound"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn keystore_session_bound_fires_for_platform_store_under_linger_with_a_registered_unit() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let (home, linger) = linux_with_linger_and_unit("serve");
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Linux,
+        home_dir: Some(home.path()),
+        linger_dir: linger.path(),
+        username: Some(ACCOUNT),
+        key_store: KeyStoreKind::Platform,
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        codes(&findings).contains(&"keystore_session_bound"),
+        "{findings:?}"
+    );
+
+    // Linger alone is not a registered service: with no user unit only
+    // `service_not_registered` speaks.
+    let no_unit_home = tempfile::tempdir().unwrap();
+    let alone = DoctorEnvironment {
+        home_dir: Some(no_unit_home.path()),
+        ..env
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &alone);
+    assert_eq!(codes(&findings), ["service_not_registered"], "{findings:?}");
+
+    // A registered unit without linger stops at logout, which is
+    // `systemd_linger_disabled`'s finding, not this one.
+    let (home, _) = linux_with_linger_and_unit("serve");
+    let no_linger = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Linux,
+        home_dir: Some(home.path()),
+        linger_dir: no_linger.path(),
+        username: Some(ACCOUNT),
+        key_store: KeyStoreKind::Platform,
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        codes(&findings).contains(&"systemd_linger_disabled")
+            && !codes(&findings).contains(&"keystore_session_bound"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn keystore_session_bound_is_silent_for_file_store() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+
+    let (home, root) = macos_with_launchdaemon("serve");
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Macos,
+        home_dir: Some(home.path()),
+        system_root: root.path(),
+        key_store: KeyStoreKind::File,
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        !codes(&findings).contains(&"keystore_session_bound"),
+        "macOS: {findings:?}"
+    );
+
+    let (home, linger) = linux_with_linger_and_unit("serve");
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Linux,
+        home_dir: Some(home.path()),
+        linger_dir: linger.path(),
+        username: Some(ACCOUNT),
+        key_store: KeyStoreKind::File,
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        !codes(&findings).contains(&"keystore_session_bound"),
+        "Linux: {findings:?}"
+    );
+}
+
+/// Route equivalence (PRD §4): the finding does not depend on which of the
+/// three role units is the always-on one.
+#[test]
+fn keystore_session_bound_covers_serve_listen_and_reverse_units() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    for mode in MODES {
+        let (home, root) = macos_with_launchdaemon(mode);
+        let env = DoctorEnvironment {
+            os: probe::HostOs::Macos,
+            home_dir: Some(home.path()),
+            system_root: root.path(),
+            key_store: KeyStoreKind::Platform,
+            ..minimal_env(&keystore)
+        };
+        let findings = ops.doctor_service_registration_findings(mode, &env);
+        assert!(
+            codes(&findings).contains(&"keystore_session_bound"),
+            "macOS {mode}: {findings:?}"
+        );
+
+        let (home, linger) = linux_with_linger_and_unit(mode);
+        let env = DoctorEnvironment {
+            os: probe::HostOs::Linux,
+            home_dir: Some(home.path()),
+            linger_dir: linger.path(),
+            username: Some(ACCOUNT),
+            key_store: KeyStoreKind::Platform,
+            ..minimal_env(&keystore)
+        };
+        let findings = ops.doctor_service_registration_findings(mode, &env);
+        assert!(
+            codes(&findings).contains(&"keystore_session_bound"),
+            "Linux {mode}: {findings:?}"
+        );
+    }
+}
+
+/// ADR-0032 결정 15, ADR-0035 결정 27: no target but macOS and Linux reports
+/// the finding, whatever files are present.
+#[test]
+fn keystore_session_bound_is_silent_for_other_targets() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let (home, linger) = linux_with_linger_and_unit("serve");
+    let root = tempfile::tempdir().unwrap();
+    let plist = probe::macos_launchdaemon_path(root.path(), "serve");
+    std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+    std::fs::write(plist, b"<plist/>").unwrap();
+    let env = DoctorEnvironment {
+        os: probe::HostOs::Other,
+        home_dir: Some(home.path()),
+        linger_dir: linger.path(),
+        system_root: root.path(),
+        username: Some(ACCOUNT),
+        key_store: KeyStoreKind::Platform,
+        ..minimal_env(&keystore)
+    };
+    for mode in MODES {
+        assert!(
+            ops.doctor_service_registration_findings(mode, &env)
+                .is_empty()
+        );
+    }
+}
+
+/// The same pin on the Windows build itself, where the environment is the
+/// real one (`HostOs::current()` is `Other`), not an injected value.
+#[cfg(windows)]
+#[test]
+fn keystore_session_bound_is_silent_on_windows_before_m19() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        key_store: KeyStoreKind::Platform,
+        username: Some(ACCOUNT),
+        ..minimal_env(&keystore)
+    };
+    assert_eq!(env.os, probe::HostOs::Other);
+    for mode in MODES {
+        let findings = ops.doctor_service_registration_findings(mode, &env);
+        assert!(findings.is_empty(), "{mode}: {findings:?}");
+    }
+    assert!(
+        crate::doctor::EXPECTED_DOCTOR_CODES.contains(&"keystore_session_bound"),
+        "the code set is the same 27 on every target"
+    );
+}
+
+/// Wiring (mutation check: deleting the `key_store` field's use reds this):
+/// `Ops::doctor_with_host_state` reads the identity's recorded key store and
+/// the injected always-on forms, then assembles the report, the same path
+/// `Ops::doctor` takes.
+#[test]
+fn doctor_wires_keystore_session_bound_into_the_full_report_deterministically() {
+    let (_guard, ops) = healthy_ops();
+    let platform = crate::identity::MemoryKeyStore::new();
+    ops.identity_move_key_with_platform_store(
+        qsh_proto::IdentityMoveKeyReq {
+            to: KeyStoreKind::Platform,
+        },
+        &platform,
+    )
+    .expect("file -> platform");
+
+    // Both OS shapes exist; the one that matches the build target is read.
+    let (mac_home, root) = macos_with_launchdaemon("serve");
+    let (linux_home, linger) = linux_with_linger_and_unit("serve");
+    let home = if cfg!(target_os = "macos") {
+        mac_home.path()
+    } else {
+        linux_home.path()
+    };
+    let host = DoctorHostState {
+        keystore: &platform,
+        home_dir: Some(home),
+        system_root: root.path(),
+        linger_dir: linger.path(),
+        username: Some(ACCOUNT),
+    };
+    let data = ops
+        .doctor_with_host_state(DoctorReq { host: None }, SystemTime::now(), &host)
+        .unwrap();
+    let count = data
+        .findings
+        .iter()
+        .filter(|f| f.code == "keystore_session_bound")
+        .count();
+    let expected = usize::from(cfg!(any(target_os = "macos", target_os = "linux")));
+    assert_eq!(count, expected, "{:?}", data.findings);
 }
 
 // -----------------------------------------------------------------

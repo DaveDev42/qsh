@@ -18,8 +18,9 @@
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE,
-    ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
-    TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
+    ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, KEYSTORE_SESSION_BOUND,
+    LAUNCHAGENT_SESSION_SCOPED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE,
 };
 
 use crate::docs;
@@ -177,6 +178,55 @@ fn cli_md_quotes_the_role_aware_doctor_wording_verbatim() {
             "docs/CLI.md §6.17 must quote {what} verbatim"
         );
     }
+}
+
+/// ADR-0032 결정 14·15 (M17): the always-on wording of §6.17 is quoted from the
+/// constants. `keystore_session_bound` is the 27th code and the macOS
+/// `launchagent_session_scoped` text now points at the LaunchDaemon recipe.
+#[test]
+fn cli_md_quotes_the_always_on_doctor_wording_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    for (what, text) in [
+        (
+            "KEYSTORE_SESSION_BOUND.message",
+            KEYSTORE_SESSION_BOUND.message,
+        ),
+        (
+            "KEYSTORE_SESSION_BOUND.remedy",
+            KEYSTORE_SESSION_BOUND.remedy,
+        ),
+        (
+            "LAUNCHAGENT_SESSION_SCOPED.message",
+            LAUNCHAGENT_SESSION_SCOPED.message,
+        ),
+        (
+            "LAUNCHAGENT_SESSION_SCOPED.remedy",
+            LAUNCHAGENT_SESSION_SCOPED.remedy,
+        ),
+    ] {
+        assert!(
+            cli_md.contains(text),
+            "docs/CLI.md §6.17 must quote {what} verbatim"
+        );
+    }
+}
+
+/// The LaunchAgent diagnostic's remedy and the recipe it names agree: the
+/// recipe heading exists in `docs/deploy/service.md`.
+#[test]
+fn launchagent_session_scoped_remedy_names_a_recipe_that_exists() {
+    let service_md = read_doc("docs/deploy/service.md");
+    assert!(
+        LAUNCHAGENT_SESSION_SCOPED
+            .remedy
+            .contains("LaunchDaemon recipe in docs/deploy/service.md"),
+        "{}",
+        LAUNCHAGENT_SESSION_SCOPED.remedy
+    );
+    assert!(
+        service_md.contains("### Always-on: a LaunchDaemon you install as root"),
+        "docs/deploy/service.md must keep the LaunchDaemon recipe the remedy names"
+    );
 }
 
 /// The stable half of a diagnostic is its `code`, not its prose: `code` is

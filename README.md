@@ -956,6 +956,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   differs per platform: macOS keeps a Homebrew Cellar symlink unresolved on
   purpose, so `brew upgrade` does not pin a stale path, while Linux's
   `/proc/self/exe` has already resolved any symlink.
+- A LaunchAgent that `qsh service install` writes on macOS runs only while
+  you are logged in and stops at logout. To run with nobody logged in,
+  install a LaunchDaemon by hand with the recipe in
+  [docs/deploy/service.md](docs/deploy/service.md#always-on-a-launchdaemon-you-install-as-root).
+  `qsh` does not write or load that file, and `qsh doctor` reports
+  `launchagent_session_scoped` until it exists. If the device key is in the
+  OS credential store, `qsh doctor` also reports `keystore_session_bound`
+  for an always-on service; `qsh identity move-key --to file` fixes it.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin and the invite's consumption happen first, in
   the wire exchange; the client's local pin happens after. If the client then

@@ -438,30 +438,103 @@ pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
         .join(format!("qsh-{mode}.service"))
 }
 
+/// The operating system whose service layout a probe reads. The doctor
+/// passes [`HostOs::current`]; naming it as a value instead of reading `cfg`
+/// inside each probe lets a test exercise the macOS rules on a Linux host and
+/// the reverse, and keeps every path builder compiled on every target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOs {
+    Macos,
+    Linux,
+    /// Windows and every other target: `qsh service` is `UNSUPPORTED` there
+    /// until M19, and no service or always-on form is reported.
+    Other,
+}
+
+impl HostOs {
+    /// The OS this binary was built for.
+    pub const fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            HostOs::Macos
+        } else if cfg!(target_os = "linux") {
+            HostOs::Linux
+        } else {
+            HostOs::Other
+        }
+    }
+}
+
+/// Whether the human-installed always-on form of `mode` exists on macOS: the
+/// LaunchDaemon plist [`macos_launchdaemon_path`] names (ADR-0032 결정 13,
+/// 14). File existence only, never `launchctl`, the same shape as
+/// [`probe_systemd_linger`].
+pub fn macos_launchdaemon_present(system_root: &Path, mode: &str) -> bool {
+    macos_launchdaemon_path(system_root, mode).exists()
+}
+
+/// Whether the per-user LaunchAgent plist for `mode` exists under `home`.
+/// `false` when `home` could not be resolved.
+pub fn macos_launchagent_present(home: Option<&Path>, mode: &str) -> bool {
+    home.is_some_and(|home| macos_launchagent_path(home, mode).exists())
+}
+
 /// Whether this platform's service unit for `mode` is registered —
 /// `Some(true)`/`Some(false)` on macOS/Linux (existence of the path
-/// `macos_launchagent_path`/`linux_systemd_user_unit_path` names),
+/// `macos_launchagent_path`/`linux_systemd_user_unit_path` names; on macOS
+/// the LaunchDaemon plist [`macos_launchdaemon_path`] counts as registered
+/// too, ADR-0032 결정 14),
 /// `None` everywhere else (Windows included) — `docs/CLI.md` §6.17: `qsh
 /// service install` is `UNSUPPORTED`/P1 off macOS/Linux, so there is
 /// nothing to report there. `home` is `None` when
 /// the caller could not resolve one (`crate::config::home_dir()`
 /// returning `None` in the real environment) — also `None`, since no
-/// unit path could even be built.
-pub fn service_unit_registered(home: Option<&Path>, mode: &str) -> Option<bool> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = home?;
-        Some(macos_launchagent_path(home, mode).exists())
+/// unit path could even be built (on macOS a LaunchDaemon plist still
+/// reports `Some(true)`). `system_root` is `/` in production and a tempdir
+/// in tests, and only the macOS arm reads it.
+pub fn service_unit_registered(
+    os: HostOs,
+    home: Option<&Path>,
+    system_root: &Path,
+    mode: &str,
+) -> Option<bool> {
+    match os {
+        HostOs::Macos => {
+            if macos_launchagent_present(home, mode)
+                || macos_launchdaemon_present(system_root, mode)
+            {
+                Some(true)
+            } else {
+                home.map(|_| false)
+            }
+        }
+        HostOs::Linux => Some(linux_systemd_user_unit_path(home?, mode).exists()),
+        HostOs::Other => None,
     }
-    #[cfg(target_os = "linux")]
-    {
-        let home = home?;
-        Some(linux_systemd_user_unit_path(home, mode).exists())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (home, mode);
-        None
+}
+
+/// Whether `mode`'s service is installed in a form that runs with nobody
+/// logged in (ADR-0032 결정 15): on macOS the LaunchDaemon plist, on Linux
+/// the systemd user unit together with the linger marker (`linger` is the
+/// already-observed [`probe_systemd_linger`] result). Always `false` for
+/// [`HostOs::Other`]. In particular Windows never reports an always-on form
+/// here before M19, which measures whether a `Password`-principal task reads
+/// Credential Manager (ADR-0032 결정 15, ADR-0035 결정 27), so
+/// `keystore_session_bound` is never emitted there. File existence only;
+/// nothing here starts a process.
+pub fn always_on_form_present(
+    os: HostOs,
+    home: Option<&Path>,
+    system_root: &Path,
+    linger: LingerProbe,
+    mode: &str,
+) -> bool {
+    match os {
+        HostOs::Macos => macos_launchdaemon_present(system_root, mode),
+        HostOs::Linux => {
+            linger == LingerProbe::Enabled
+                && home.is_some_and(|home| linux_systemd_user_unit_path(home, mode).exists())
+        }
+        HostOs::Other => false,
     }
 }
 
@@ -484,6 +557,19 @@ pub fn service_not_registered_finding(mode: &str) -> DoctorFinding {
 /// own doc: a structural fact, not a misconfiguration).
 pub fn launchagent_session_scoped_finding(mode: &str) -> DoctorFinding {
     let diag = &super::LAUNCHAGENT_SESSION_SCOPED;
+    DoctorFinding {
+        code: diag.code.to_string(),
+        status: "warn".to_string(),
+        detail: format!("{} (mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    }
+}
+
+/// `keystore_session_bound`'s finding (ADR-0032 결정 15), pure over the
+/// already-decided condition: the caller fires it only for
+/// `identity.key_store = "platform"` plus [`always_on_form_present`].
+pub fn keystore_session_bound_finding(mode: &str) -> DoctorFinding {
+    let diag = &super::KEYSTORE_SESSION_BOUND;
     DoctorFinding {
         code: diag.code.to_string(),
         status: "warn".to_string(),

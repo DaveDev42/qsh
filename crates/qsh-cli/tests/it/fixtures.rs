@@ -97,6 +97,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.init.imported_ssh_key.json",
     "identity.move_key.moved.json",
     "identity.move_key.noop.json",
+    "doctor.run.keystore_session_bound.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -1224,6 +1225,94 @@ fn golden_identity_move_key_fixtures() {
     };
     check(
         "identity.move_key.moved.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `doctor.run` with `keystore_session_bound` (`docs/CLI.md` §6.17,
+/// ADR-0032 결정 15). The finding needs the always-on service forms
+/// (`/Library/LaunchDaemons`, `/var/lib/systemd/linger`) and an identity
+/// whose key lives in the platform store, none of which a spawned binary can
+/// be given in a test, and no test may read the real ones. So the fixture is
+/// produced in-process: the same `Ops` assembly the binary runs
+/// ([`Ops::doctor_with_host_state`]), against a fake platform store and
+/// tempdir roots, wrapped in the same `qsh.cli/v1` envelope the binary's
+/// `Envelope::success` builds. Both OS shapes are laid down and the one for
+/// the build target is read, so macOS and Linux produce the same bytes. The
+/// Windows build never emits the finding before M19 and skips this test.
+#[test]
+fn golden_doctor_keystore_session_bound_fixture() {
+    use qsh_core::{DoctorHostState, Ops, Paths};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorReq, IdentityMoveKeyReq, KeyStoreKind};
+
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::initialized();
+    let run_dir = tempfile::tempdir().expect("run dir");
+    let ops = Ops::new(
+        Paths::new(sandbox.config_dir(), sandbox.state_dir()).with_runtime_dir(run_dir.path()),
+    );
+    // A policy file keeps `acl_policy_missing` (whose detail carries the
+    // sandbox path) out of the envelope.
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"user:x\"\nallow = [\"exec.run\"]\n",
+    )
+    .expect("write acl.toml");
+    let platform = qsh_core::identity::MemoryKeyStore::new();
+    ops.identity_move_key_with_platform_store(
+        IdentityMoveKeyReq {
+            to: KeyStoreKind::Platform,
+        },
+        &platform,
+    )
+    .expect("file -> platform");
+
+    // macOS: the LaunchDaemon plist under a tempdir root.
+    let system_root = tempfile::tempdir().expect("system root");
+    let plist = qsh_core::doctor::probe::macos_launchdaemon_path(system_root.path(), "serve");
+    std::fs::create_dir_all(plist.parent().unwrap()).expect("LaunchDaemons dir");
+    std::fs::write(&plist, b"<plist/>").expect("write plist");
+    // Linux: a user unit for `serve` plus the linger marker for the account.
+    let home = tempfile::tempdir().expect("home");
+    let unit = qsh_core::doctor::probe::linux_systemd_user_unit_path(home.path(), "serve");
+    std::fs::create_dir_all(unit.parent().unwrap()).expect("unit dir");
+    std::fs::write(&unit, b"[Unit]").expect("write unit");
+    let linger = tempfile::tempdir().expect("linger dir");
+    std::fs::write(linger.path().join("golden-user"), b"").expect("linger marker");
+
+    let host = DoctorHostState {
+        keystore: &platform,
+        home_dir: Some(home.path()),
+        system_root: system_root.path(),
+        linger_dir: linger.path(),
+        username: Some("golden-user"),
+    };
+    let data = ops
+        .doctor_with_host_state(
+            DoctorReq { host: None },
+            std::time::SystemTime::now(),
+            &host,
+        )
+        .expect("doctor");
+    assert!(
+        data.findings
+            .iter()
+            .any(|f| f.code == "keystore_session_bound" && f.status == "warn"),
+        "{:?}",
+        data.findings
+    );
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor.run.keystore_session_bound.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
 }

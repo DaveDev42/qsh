@@ -7,9 +7,11 @@ reboot, or a crash is the OS service manager's job. `qsh service
 install|uninstall|status` (`docs/CLI.md` §6.18) generates a unit for this
 machine's inferred run mode, and with `--activate`, `--deactivate` and
 `--live` also loads, releases and checks it through the service manager. The
-fences on this page are exactly what it writes, byte for byte, not merely
-illustrative examples, and the commands in the recipes below are exactly the
-ones the flags run.
+`xml` and `ini` fences on this page are exactly what it writes, byte for byte,
+not merely illustrative examples, and the launchd and systemd commands in the
+recipes below are exactly the ones the flags run. The `plist` fences (the
+LaunchDaemon and the supervised tunnel) are recipes you install yourself;
+`qsh` does not write them.
 
 Without a flag, `qsh service` writes and removes the unit file and never
 calls `launchctl` or `systemctl`. The flags are the only way it does, and no
@@ -193,12 +195,113 @@ commands, and none of these three modes are JSON commands).
 
 A LaunchAgent runs only inside a login session: it starts when you log in
 and stops when you log out, same as any other per-user agent. `linger`
-(below) is a systemd concept with no launchd equivalent: on macOS, a
-service that must run with nobody logged in is a LaunchDaemon
-(`/Library/LaunchDaemons`, root-owned, loaded by `launchctl` as root), not
-a LaunchAgent. That's a different lifecycle and permission model, and out
-of scope for this page, which only covers the LaunchAgent path a normal
-user account can set up without `sudo`.
+(below) is a systemd concept with no launchd equivalent. On macOS, a service
+that must run with nobody logged in is a LaunchDaemon, and the next section
+is the recipe for it.
+
+### Always-on: a LaunchDaemon you install as root
+
+A LaunchDaemon lives in `/Library/LaunchDaemons`, is owned by root and is
+loaded into the `system` domain. `qsh` never writes that directory, never
+loads the file and never runs `sudo`. You install it by hand, once, with the
+commands below. After that `qsh` only looks for the file: `qsh service
+install --activate` and `qsh service uninstall --deactivate` leave the
+daemon alone and report `always_on_present`, and `qsh doctor` counts the
+file as a registered unit (it checks that the file exists and does not call
+`launchctl`).
+
+The daemon uses the same label as the LaunchAgent, `io.qsh.<mode>`. Never
+load both at once, because both would try to bind the same port. The steps
+below take the LaunchAgent down first.
+
+`/Library/LaunchDaemons/io.qsh.serve.plist`:
+
+```plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.qsh.serve</string>
+  <key>UserName</key>
+  <string>YOU</string>
+  <key>GroupName</key>
+  <string>staff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/qsh</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/qsh/serve.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/qsh/serve.err.log</string>
+</dict>
+</plist>
+```
+
+This is the LaunchAgent's plist for the same mode with two keys added.
+`UserName` (your account) and `GroupName` (`staff`) make the daemon run as
+you instead of root, so it reads your `~/.config/qsh`. A LaunchDaemon gets no
+`HOME` of its own, which is why the `HOME` entry in `EnvironmentVariables`
+matters. For `listen` and `reverse`, take `Label`, `ProgramArguments` and the
+log file names from the LaunchAgent fence of that mode above and keep the
+three other additions. Write the file somewhere you can read it, for
+example the current directory, because the first command below removes the
+LaunchAgent copy.
+
+If `qsh identity` keeps the device key in the OS credential store
+(`key_store = "platform"` in `identity/identity.toml`), run `qsh identity
+move-key --to file` first. The Keychain belongs to a login session, so a
+daemon started at boot cannot be sure to read the key from it. `qsh doctor`
+reports this as `keystore_session_bound`. The move keeps the device id,
+certificate and fingerprint, so peers' pins and ACL rows stay valid.
+
+Install it:
+
+```bash
+qsh service uninstall --deactivate
+sudo cp io.qsh.serve.plist /Library/LaunchDaemons/io.qsh.serve.plist
+sudo chown root:wheel /Library/LaunchDaemons/io.qsh.serve.plist
+sudo chmod 644 /Library/LaunchDaemons/io.qsh.serve.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.qsh.serve.plist
+```
+
+Check that it is loaded. `qsh service status --live` does not read the
+`system` domain without root and says so, so ask `launchctl` yourself:
+
+```bash
+sudo launchctl print system/io.qsh.serve
+```
+
+Remove it:
+
+```bash
+sudo launchctl bootout system/io.qsh.serve
+sudo rm /Library/LaunchDaemons/io.qsh.serve.plist
+```
+
+If you move the `qsh` binary, edit the path in `ProgramArguments`, then run
+`bootout` and `bootstrap` again. The daemon does not pick up a new binary any
+other way, and `qsh service install` does not rewrite this file. That restart
+ends every detached session on the listener (see Notes for both below), so
+detach first only if you can lose the shell.
 
 ## systemd (Linux, user units)
 
@@ -282,6 +385,14 @@ enabled):
 ```bash
 loginctl enable-linger $USER
 ```
+
+If `qsh identity` keeps the device key in the OS credential store
+(`key_store = "platform"` in `identity/identity.toml`), run `qsh identity
+move-key --to file` before you rely on linger. The Secret Service belongs to
+a login session, so a unit started at boot cannot be sure to read the key
+from it. `qsh doctor` reports this as `keystore_session_bound` once linger is
+on and the unit is registered. The move keeps the device id, certificate and
+fingerprint, so peers' pins and ACL rows stay valid.
 
 ### WSL
 
