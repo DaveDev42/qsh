@@ -36,7 +36,7 @@ use std::process::Stdio;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
 #[cfg(unix)]
-use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
+use common::{FakeServiceManager, ListenGuard, ReverseGuard, hosts_array, poll_until};
 use qsh_proto::ErrorCode;
 use qsh_testkit::fixtures;
 use serde_json::Value;
@@ -172,8 +172,11 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.check.path.json",
     "acl.show.with_paths.json",
     "error.RESOURCE_EXHAUSTED.json",
+    "service.install.activated.json",
     "service.install.json",
     "service.status.json",
+    "service.status.live.json",
+    "service.uninstall.deactivated.json",
     "service.uninstall.json",
     "setup.run.host_pending_acl.json",
     "setup.run.client_complete.json",
@@ -1296,6 +1299,89 @@ fn golden_service_fixtures() {
     let (code, reuninstalled) = sandbox.json(&["service", "uninstall", "--json"]);
     assert_eq!(code, 0, "{reuninstalled}");
     assert_eq!(reuninstalled["data"]["removed"], false, "{reuninstalled}");
+}
+
+/// `qsh service install --activate`, `uninstall --deactivate` and
+/// `status --live` (`docs/CLI.md` §6.18, ADR-0032). The service manager is
+/// a fake `launchctl`/`systemctl` script on `PATH` ([`FakeServiceManager`]):
+/// the test never touches a real manager, and it also pins what the binary
+/// asked of it (the documented argv, no restart). Unix only, because the
+/// fake is a shell script; the Windows leg has
+/// [`service_ops_are_unsupported_off_macos_and_linux`].
+///
+/// The integration binary resolves the macOS always-on path under the real
+/// root, so a developer Mac that has `/Library/LaunchDaemons/io.qsh.serve.plist`
+/// gets `always_on_present` here instead of the golden envelopes. CI runners
+/// carry no such file; remove it (or run on another machine) to reproduce.
+#[cfg(unix)]
+#[test]
+fn golden_service_activation_fixtures() {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let manager = FakeServiceManager::new();
+
+    // 1. `install --activate` writes the unit and loads it.
+    let (code, installed) = manager.json(&sandbox, &["service", "install", "--activate", "--json"]);
+    assert_eq!(code, 0, "{installed}");
+    assert_eq!(installed["data"]["created"], true, "{installed}");
+    assert_eq!(installed["data"]["activation"], "started", "{installed}");
+    assert!(manager.loaded(), "the fake unit must be loaded");
+    check("service.install.activated.json", installed);
+
+    // 2. `status --live` reads one exit code: active.
+    let (code, live) = manager.json(&sandbox, &["service", "status", "--live", "--json"]);
+    assert_eq!(code, 0, "{live}");
+    assert_eq!(live["data"]["installed"], true, "{live}");
+    assert_eq!(live["data"]["active"], true, "{live}");
+    check("service.status.live.json", live);
+
+    // 3. `install --activate` again never restarts the loaded unit.
+    let (code, again) = manager.json(&sandbox, &["service", "install", "--activate", "--json"]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["created"], false, "{again}");
+    assert_eq!(again["data"]["activation"], "already_active", "{again}");
+    assert!(
+        manager
+            .calls()
+            .iter()
+            .all(|call| !call.contains("restart") && !call.contains("kickstart")),
+        "no call may restart a unit: {:?}",
+        manager.calls()
+    );
+
+    // 4. `uninstall --deactivate` releases the unit, then removes the file.
+    let (code, uninstalled) = manager.json(
+        &sandbox,
+        &["service", "uninstall", "--deactivate", "--json"],
+    );
+    assert_eq!(code, 0, "{uninstalled}");
+    assert_eq!(uninstalled["data"]["removed"], true, "{uninstalled}");
+    assert_eq!(
+        uninstalled["data"]["deactivation"], "stopped",
+        "{uninstalled}"
+    );
+    assert!(!manager.loaded(), "the fake unit must be released");
+    check("service.uninstall.deactivated.json", uninstalled);
+
+    // 5. Without a flag the manager is never called: the whole scenario
+    // above is the only source of calls.
+    let before = manager.calls().len();
+    let (code, plain) = manager.json(&sandbox, &["service", "install", "--json"]);
+    assert_eq!(code, 0, "{plain}");
+    assert!(plain["data"].get("activation").is_none(), "{plain}");
+    let (code, plain) = manager.json(&sandbox, &["service", "status", "--json"]);
+    assert_eq!(code, 0, "{plain}");
+    assert!(plain["data"].get("active").is_none(), "{plain}");
+    let (code, plain) = manager.json(&sandbox, &["service", "uninstall", "--json"]);
+    assert_eq!(code, 0, "{plain}");
+    assert!(plain["data"].get("deactivation").is_none(), "{plain}");
+    assert_eq!(
+        manager.calls().len(),
+        before,
+        "flagless runs must not call the manager"
+    );
 }
 
 /// The M7 Step 6 trap: an early `return` off the platforms where

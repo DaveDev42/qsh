@@ -846,6 +846,44 @@ fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `qsh service install --activate`, `status --live` and `uninstall
+/// --deactivate` (ADR-0032) over a fake `launchctl`/`systemctl`: stdout stays
+/// exactly one `qsh.cli/v1` line at high verbosity, and what the manager
+/// printed or the renderer would say goes to stderr only. Unix only because
+/// the fake manager is a shell script; no real manager is ever called.
+#[cfg(unix)]
+#[test]
+fn service_activation_flags_keep_stdout_pure_json_at_every_verbosity() {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let manager = common::FakeServiceManager::new();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        for (args, command) in [
+            (["service", "install", "--activate"], "service.install"),
+            (["service", "status", "--live"], "service.status"),
+            (
+                ["service", "uninstall", "--deactivate"],
+                "service.uninstall",
+            ),
+        ] {
+            let mut full = args.to_vec();
+            full.push(verbosity);
+            full.push(mode);
+            let output = manager.run(&sandbox, &full);
+            assert_eq!(exit_code(&output), 0, "{label} {args:?}");
+            let lines = parse_stdout_lines(&output.stdout, label);
+            assert_eq!(lines.len(), 1, "{label} {args:?}");
+            assert_eq!(lines[0]["ok"], true, "{label} {args:?}");
+            assert_eq!(lines[0]["command"], command, "{label} {args:?}");
+        }
+    }
+}
+
 /// `qsh cp` (ADR-0029 decision 18, `docs/CLI.md` §6.21): at high verbosity
 /// `--json` is one envelope line, and `--jsonl` is `qsh.event/v1`
 /// `file.entry` lines followed by the envelope. No line is anything else,

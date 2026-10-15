@@ -4,9 +4,25 @@
 `docs/CLI.md` §6.13) are foreground-only (`docs/CLI.md` §6.12/§6.13/§6.18);
 qsh does not daemonize itself. Keeping one of them running across logout,
 reboot, or a crash is the OS service manager's job. `qsh service
-install|uninstall|status` (`docs/CLI.md` §6.18) generates and registers a
-unit for this machine's inferred run mode; the fences on this page are
-exactly what it writes, byte for byte, not merely illustrative examples.
+install|uninstall|status` (`docs/CLI.md` §6.18) generates a unit for this
+machine's inferred run mode, and with `--activate`, `--deactivate` and
+`--live` also loads, releases and checks it through the service manager. The
+fences on this page are exactly what it writes, byte for byte, not merely
+illustrative examples, and the commands in the recipes below are exactly the
+ones the flags run.
+
+Without a flag, `qsh service` writes and removes the unit file and never
+calls `launchctl` or `systemctl`. The flags are the only way it does, and no
+config key or environment variable turns them on:
+
+| Command | What it adds to the unit file operation |
+|---|---|
+| `qsh service install --activate` | Loads and starts the unit as the last step. A unit that is already running is **not** restarted, so a new binary path applies at the next restart. |
+| `qsh service uninstall --deactivate` | Releases the unit from the manager first, then removes the file. If the release fails the file stays. Without the flag a running unit keeps running. |
+| `qsh service status --live` | Reports whether the unit is running, from one exit code of the manager. |
+
+`qsh service` never restarts a unit. A restart ends every detached session
+(Notes for both below), so it stays a decision for a person.
 
 The examples below assume the binary is at `~/.local/bin/qsh`, the default
 install path (see [Install](../../README.md#install)). Substitute your own
@@ -145,12 +161,29 @@ the hidden `qsh reverse` alias (`docs/CLI.md` §6.13, §6.18):
 pass to `qsh serve --to <controller>` by hand (`docs/CLI.md` §6.13), not a
 literal string to copy.
 
-Load and check one:
+Load and check one, which is what `qsh service install --activate` and
+`qsh service status --live` run (`install` has already made the log
+directory):
 
 ```bash
 mkdir -p ~/Library/Logs/qsh
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/io.qsh.serve.plist
 launchctl print gui/$UID/io.qsh.serve
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/io.qsh.serve.plist
+```
+
+`launchctl print` exits 0 when the label is loaded. `--activate` runs it
+first and skips `bootstrap` when it is, because `launchctl bootstrap` fails
+on a label that is already loaded and a reload would end detached sessions.
+The `gui/$UID` domain exists only inside a logged-in GUI session: over SSH
+alone `bootstrap` fails, and `qsh service install --activate` reports that
+failure instead of falling back to the `user/$UID` domain.
+
+Release one, which is what `qsh service uninstall --deactivate` runs when
+`launchctl print` says the label is loaded:
+
+```bash
+launchctl bootout gui/$UID/io.qsh.serve
+rm ~/Library/LaunchAgents/io.qsh.serve.plist
 ```
 
 `launchctl print` shows the last exit status and PID; the plist's own
@@ -218,13 +251,27 @@ RestartSec=2
 WantedBy=default.target
 ```
 
-Enable and check one:
+Enable and check one, which is what `qsh service install --activate` and
+`qsh service status --live` run:
 
 ```bash
+systemctl --user is-active qsh-serve.service
 systemctl --user daemon-reload
 systemctl --user enable --now qsh-serve.service
 systemctl --user status qsh-serve.service
 journalctl --user -u qsh-serve -f
+```
+
+`is-active` exits 0 for a running unit. `enable --now` leaves a running unit
+alone, so `--activate` on one reports `already_active` and the new binary path
+applies at the next restart.
+
+Release one, which is what `qsh service uninstall --deactivate` runs whenever
+the unit file exists, running or not:
+
+```bash
+systemctl --user disable --now qsh-serve.service
+rm ~/.config/systemd/user/qsh-serve.service
 ```
 
 A user unit stops when your last session ends unless you enable linger,

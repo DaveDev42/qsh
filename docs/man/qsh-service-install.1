@@ -2,12 +2,15 @@
 .el .ds Aq '
 .TH qsh-service-install 1  "install 0.4.3" 
 .SH NAME
-qsh\-service\-install \- Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories
+qsh\-service\-install \- Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
 .SH SYNOPSIS
-\fBqsh service install\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service install\fR [\fB\-\-activate\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories
+Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
 .SH OPTIONS
+.TP
+\fB\-\-activate\fR
+Also load and start the unit through the service manager (`launchctl bootstrap` / `systemctl \-\-user enable \-\-now`) once the unit file is written. A unit that is already running is not restarted, so a new binary path applies at the next restart
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text

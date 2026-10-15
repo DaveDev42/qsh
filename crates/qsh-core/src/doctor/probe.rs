@@ -416,6 +416,19 @@ pub fn macos_launchagent_path(home: &Path, mode: &str) -> PathBuf {
         .join(format!("io.qsh.{mode}.plist"))
 }
 
+/// `<system_root>/Library/LaunchDaemons/io.qsh.<mode>.plist` — the
+/// human-installed always-on form of the same mode (ADR-0032 decisions 13,
+/// 18). qsh never writes it; `qsh service install --activate`, `uninstall
+/// --deactivate` and `status --live` only look for it, and the doctor probe
+/// shares this builder. `system_root` is `/` in production and a tempdir in
+/// tests, the same injection the other probes use.
+pub fn macos_launchdaemon_path(system_root: &Path, mode: &str) -> PathBuf {
+    system_root
+        .join("Library")
+        .join("LaunchDaemons")
+        .join(format!("io.qsh.{mode}.plist"))
+}
+
 /// `~/.config/systemd/user/qsh-<mode>.service` — the Linux twin of
 /// [`macos_launchagent_path`].
 pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {

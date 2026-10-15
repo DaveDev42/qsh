@@ -893,6 +893,100 @@ const LISTEN_LISTENING_PREFIX: &str = "qsh listen: listening on ";
 #[cfg(unix)]
 const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Stand-in `launchctl` and `systemctl` for the `qsh service` flag tests
+/// (ADR-0032 decision 10): no test runs a real service manager. Two shell
+/// scripts sit first on `PATH` for the `qsh` child, answer the calls
+/// `--activate`, `--deactivate` and `--live` make with a one-bit state
+/// (loaded or not), and log every call, so the test asserts both the
+/// envelope and what the binary asked of the "manager".
+#[cfg(unix)]
+pub struct FakeServiceManager {
+    dir: TempDir,
+}
+
+#[cfg(unix)]
+impl FakeServiceManager {
+    const SCRIPT: &'static str = r#"#!/bin/sh
+state="$QSH_FAKE_MANAGER_STATE"
+name=$(basename "$0")
+echo "$name $*" >> "$state/calls"
+if [ "$name" = launchctl ]; then
+    case "$1" in
+        print) [ -f "$state/loaded" ]; exit $? ;;
+        bootstrap) : > "$state/loaded" ;;
+        bootout) rm -f "$state/loaded" ;;
+    esac
+else
+    case "$2" in
+        is-active) [ -f "$state/loaded" ]; exit $? ;;
+        enable) : > "$state/loaded" ;;
+        disable) rm -f "$state/loaded" ;;
+    esac
+fi
+exit 0
+"#;
+
+    /// A fresh fake manager with nothing loaded.
+    pub fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("fake manager dir");
+        std::fs::create_dir_all(dir.path().join("bin")).expect("fake manager bin dir");
+        std::fs::create_dir_all(dir.path().join("state")).expect("fake manager state dir");
+        for name in ["launchctl", "systemctl"] {
+            let path = dir.path().join("bin").join(name);
+            std::fs::write(&path, Self::SCRIPT).expect("write fake manager script");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake manager script");
+        }
+        Self { dir }
+    }
+
+    /// `sandbox`'s `qsh` command with this fake manager first on `PATH`.
+    pub fn command(&self, sandbox: &Sandbox, args: &[&str]) -> Command {
+        let mut path = std::ffi::OsString::from(self.dir.path().join("bin"));
+        if let Some(rest) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(rest);
+        }
+        let mut command = sandbox.command(args);
+        command
+            .env("PATH", path)
+            .env("QSH_FAKE_MANAGER_STATE", self.dir.path().join("state"))
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// Run `qsh` against this fake manager and parse the sole envelope.
+    pub fn json(&self, sandbox: &Sandbox, args: &[&str]) -> (i32, Value) {
+        let output = self
+            .command(sandbox, args)
+            .output()
+            .expect("failed to run qsh");
+        (exit_code(&output), sole_envelope(&output.stdout, args))
+    }
+
+    /// Run `qsh` against this fake manager and return the raw output.
+    pub fn run(&self, sandbox: &Sandbox, args: &[&str]) -> Output {
+        self.command(sandbox, args)
+            .output()
+            .expect("failed to run qsh")
+    }
+
+    /// Every call the binary made, one `<program> <args>` string per call.
+    pub fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("state").join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Whether the fake unit is loaded.
+    pub fn loaded(&self) -> bool {
+        self.dir.path().join("state").join("loaded").exists()
+    }
+}
+
 /// A running real `qsh listen` child (the reverse-mode controller),
 /// killed on drop.
 #[cfg(unix)]

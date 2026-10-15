@@ -4,6 +4,11 @@
 //! `UNSUPPORTED` on every other platform, before anything is read or
 //! written.
 //!
+//! Without a flag the ops never touch the service manager. With
+//! `--activate`, `--deactivate` or `--live` (ADR-0032 decision 1) they make
+//! the calls of the decision 3 table through a [`ManagerRunner`], and read
+//! only exit codes.
+//!
 //! Every op runs the same strict prefix in the same order, so `status`
 //! fails the same way `install`/`uninstall` do on a bad config:
 //!
@@ -20,26 +25,48 @@
 //! 6. the unit path, via the de-`cfg`'d [`crate::doctor::probe`] builders;
 //! 7. (install only) resolve the running binary and render the unit text;
 //! 8. (install/uninstall only) one fail-closed [`AuditRecord::local_op`];
-//! 9. the filesystem mutation (or, for `status`, `path.exists()`).
+//! 9. the filesystem mutation (or, for `status`, `path.exists()`);
+//! 10. (flags only) the manager calls: `install --activate` after the unit
+//!     file is written, `uninstall --deactivate` before it is removed,
+//!     `status --live` as the one read (ADR-0032 decisions 2, 5, 6). A
+//!     failed audit write or unit write means no manager call, and a failed
+//!     release keeps the unit file.
 //!
 //! **The test seam.** `crate::config::home_dir` wraps
 //! `std::env::home_dir()`, which cannot be mocked without an unsafe,
 //! repo-wide-banned `std::env::set_var` (edition 2024, data races against
 //! concurrent env readers). So the three public `Ops::service_*` methods
 //! are the *only* callers of it; every step after "resolve home" lives in
-//! a `pub(crate)` `*_with_home` twin parameterized on `home: Option<PathBuf>`,
-//! which `tests.rs` drives with an explicit tempdir. This is the same
-//! "detection reads real state, everything else is a pure function of its
-//! inputs" split `crate::doctor::probe`'s own module doc describes — here
-//! extended past the unit-text renderers to the whole op, because nothing
-//! about `install`/`uninstall`/`status` besides "what is `$HOME`" is
-//! actually untestable.
+//! a `pub(crate)` `*_with_home` twin parameterized on `home: Option<PathBuf>`
+//! and on a `ServiceHost` (the manager, the [`ManagerRunner`], the euid,
+//! the root `/Library/LaunchDaemons` hangs under), which `tests.rs` drives
+//! with an explicit tempdir and a recording runner. Only `resolve_manager`
+//! has a `cfg`; the launchd and systemd rows run on every build target
+//! (ADR-0032 decision 10). This is the same "detection reads real state,
+//! everything else is a pure function of its inputs" split
+//! `crate::doctor::probe`'s own module doc describes — here extended past
+//! the unit-text renderers to the whole op, because nothing about
+//! `install`/`uninstall`/`status` besides "what is `$HOME`" is actually
+//! untestable.
+
+mod manager;
+
+pub use manager::{
+    CommandRunner, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock, ManagerOutput,
+    ManagerRunner, RunError, SystemManagerClock, TaskStateQuery, launchd_bootout_argv,
+    launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
+    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
+    systemd_is_active_argv,
+};
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use qsh_proto::{ErrorCode, ServiceInstallData, ServiceStatusData, ServiceUninstallData};
+use qsh_proto::{
+    ErrorCode, ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
+    ServiceUninstallData,
+};
 
 use crate::audit::{AuditRecord, AuditSink, FileAuditSink};
 use crate::config::Config;
@@ -82,7 +109,7 @@ pub(crate) enum Manager {
 }
 
 impl Manager {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Manager::Launchd => "launchd",
             Manager::Systemd => "systemd",
@@ -314,6 +341,287 @@ fn home_not_found() -> OpError {
     .with_retryable(false)
 }
 
+/// Everything a flag-driven manager step needs besides the unit file, so
+/// the `*_with_home` twins run the launchd and systemd rows on any build
+/// target with a recording [`ManagerRunner`] (ADR-0032 decision 10).
+pub(crate) struct ServiceHost<'a> {
+    /// The service manager that owns the unit.
+    pub(crate) manager: Manager,
+    /// Where every manager call goes.
+    pub(crate) runner: &'a dyn ManagerRunner,
+    /// The effective uid the `gui/<uid>` domain is named after.
+    pub(crate) euid: u32,
+    /// The root `/Library/LaunchDaemons` hangs under: `/` in production, a
+    /// tempdir in tests (the injection `crate::doctor::probe` uses).
+    pub(crate) system_root: PathBuf,
+    /// Whether this is WSL, which only changes the wording of a missing or
+    /// failing `systemctl`.
+    pub(crate) wsl: bool,
+}
+
+impl<'a> ServiceHost<'a> {
+    /// The first step of every public op: the manager for this build target
+    /// (`UNSUPPORTED` elsewhere) plus the real uid, root and WSL state.
+    pub(crate) fn resolve(runner: &'a dyn ManagerRunner) -> Result<Self, OpError> {
+        Ok(Self {
+            manager: resolve_manager()?,
+            runner,
+            euid: current_euid(),
+            system_root: PathBuf::from("/"),
+            wsl: running_under_wsl(),
+        })
+    }
+
+    /// The human-installed always-on form of `mode` on macOS: a LaunchDaemon
+    /// plist (ADR-0032 decisions 13, 18). qsh only looks for the file.
+    fn launchdaemon_present(&self, mode: &str) -> bool {
+        self.manager == Manager::Launchd
+            && crate::doctor::probe::macos_launchdaemon_path(&self.system_root, mode).exists()
+    }
+
+    /// One manager call that must run to the end, mapped to the ADR-0032
+    /// decision 8 vocabulary when it cannot.
+    fn call(&self, step: &'static str, argv: &[String]) -> Result<ManagerOutput, OpError> {
+        self.runner
+            .run(argv, MANAGER_CALL_DEADLINE)
+            .map_err(|err| self.run_error(step, argv, err))
+    }
+
+    /// A query whose exit code is the answer: `true` for exit 0, `false` for
+    /// any other exit (ADR-0032 decisions 3, 6).
+    fn probe(&self, step: &'static str, argv: &[String]) -> Result<bool, OpError> {
+        Ok(self.call(step, argv)?.success())
+    }
+
+    /// A change that must exit 0.
+    fn run_ok(&self, step: &'static str, argv: &[String]) -> Result<(), OpError> {
+        let output = self.call(step, argv)?;
+        if output.success() {
+            Ok(())
+        } else {
+            Err(self.nonzero_error(step, argv, &output))
+        }
+    }
+
+    fn program(argv: &[String]) -> &str {
+        argv.first().map_or("the service manager", String::as_str)
+    }
+
+    fn run_error(&self, step: &'static str, argv: &[String], err: RunError) -> OpError {
+        let program = Self::program(argv);
+        match err {
+            RunError::NotFound => {
+                let hint = if self.wsl && self.manager == Manager::Systemd {
+                    "under WSL, systemd must run as PID 1: set `systemd=true` under `[boot]` in \
+                     /etc/wsl.conf and restart the distro (docs/deploy/service.md, WSL)"
+                } else {
+                    "docs/deploy/service.md has the recipe to run by hand"
+                };
+                OpError::new(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "`{program}` was not found, so the unit was not {}; {hint}",
+                        step_past(step)
+                    ),
+                )
+                .with_retryable(false)
+                .with_details(serde_json::json!({ "step": step }))
+            }
+            RunError::TimedOut => OpError::new(
+                ErrorCode::Timeout,
+                format!(
+                    "`{program}` did not finish within {} seconds; the call was stopped ({})",
+                    MANAGER_CALL_DEADLINE.as_secs(),
+                    step_effect(step)
+                ),
+            )
+            .with_details(serde_json::json!({ "step": step })),
+            RunError::Io(detail) => OpError::new(
+                ErrorCode::Internal,
+                format!(
+                    "`{program}` could not be run ({detail}); {}",
+                    step_effect(step)
+                ),
+            )
+            .with_details(serde_json::json!({ "step": step })),
+        }
+    }
+
+    fn nonzero_error(
+        &self,
+        step: &'static str,
+        argv: &[String],
+        output: &ManagerOutput,
+    ) -> OpError {
+        let program = Self::program(argv);
+        let exit = output.exit_code.map_or_else(
+            || "ended by a signal".to_string(),
+            |code| format!("exit {code}"),
+        );
+        let line = manager::cap_bytes(&output.stderr_first_line, MANAGER_STDERR_CAP);
+        let mut message = format!("`{program}` failed ({exit})");
+        if !line.is_empty() {
+            message.push_str(": ");
+            message.push_str(line);
+        }
+        message.push_str("; ");
+        message.push_str(step_effect(step));
+        match (self.manager, step) {
+            (Manager::Launchd, "activate") => message.push_str(&format!(
+                ". The `gui/{}` domain exists only inside a logged-in GUI session; \
+                 docs/deploy/service.md (launchd) has the details",
+                self.euid
+            )),
+            (Manager::Systemd, _) if self.wsl => message.push_str(
+                ". Under WSL, systemd must run as PID 1: set `systemd=true` under `[boot]` in \
+                 /etc/wsl.conf (docs/deploy/service.md, WSL)",
+            ),
+            _ => {}
+        }
+        OpError::new(ErrorCode::Internal, message)
+            .with_details(serde_json::json!({ "step": step, "exit_code": output.exit_code }))
+    }
+
+    /// `install --activate`, after the unit file is written (ADR-0032
+    /// decisions 2, 4, 18). Never restarts a unit that is already up.
+    fn activate(&self, mode: &str, unit_path: &Path) -> Result<ServiceActivation, OpError> {
+        let uid = self.euid.to_string();
+        match self.manager {
+            Manager::Launchd => {
+                if self.launchdaemon_present(mode) {
+                    return Ok(ServiceActivation::AlwaysOnPresent);
+                }
+                if self.probe("activate", &launchd_print_argv(&uid, mode))? {
+                    return Ok(ServiceActivation::AlreadyActive);
+                }
+                let unit = unit_path.display().to_string();
+                self.run_ok("activate", &launchd_bootstrap_argv(&uid, &unit))?;
+                Ok(ServiceActivation::Started)
+            }
+            Manager::Systemd => {
+                let was_active = self.probe("activate", &systemd_is_active_argv(mode))?;
+                self.run_ok("activate", &systemd_daemon_reload_argv())?;
+                self.run_ok("activate", &systemd_enable_now_argv(mode))?;
+                Ok(if was_active {
+                    ServiceActivation::AlreadyActive
+                } else {
+                    ServiceActivation::Started
+                })
+            }
+        }
+    }
+
+    /// `uninstall --deactivate`, before the unit file is removed (ADR-0032
+    /// decisions 5, 18). Judged by registration, not by whether the unit is
+    /// running.
+    fn deactivate(&self, mode: &str, unit_path: &Path) -> Result<ServiceDeactivation, OpError> {
+        let uid = self.euid.to_string();
+        match self.manager {
+            Manager::Launchd => {
+                let always_on = self.launchdaemon_present(mode);
+                let registered = self.probe("deactivate", &launchd_print_argv(&uid, mode))?;
+                if registered {
+                    self.run_ok("deactivate", &launchd_bootout_argv(&uid, mode))?;
+                }
+                Ok(if always_on {
+                    ServiceDeactivation::AlwaysOnPresent
+                } else if registered {
+                    ServiceDeactivation::Stopped
+                } else {
+                    ServiceDeactivation::NotActive
+                })
+            }
+            Manager::Systemd => {
+                if unit_path.exists() {
+                    self.run_ok("deactivate", &systemd_disable_now_argv(mode))?;
+                    Ok(ServiceDeactivation::Stopped)
+                } else {
+                    Ok(ServiceDeactivation::NotActive)
+                }
+            }
+        }
+    }
+
+    /// `status --live` (ADR-0032 decisions 6, 14, 18): one exit code. No
+    /// manager call when there is no unit file to ask about.
+    fn live(&self, mode: &str, installed: bool) -> Result<bool, OpError> {
+        let uid = self.euid.to_string();
+        match self.manager {
+            Manager::Launchd => {
+                if self.launchdaemon_present(mode) {
+                    // Whether `launchctl print system/…` answers without root
+                    // is not verified (ADR-0032 decision 18, third item), and
+                    // an exit code from a refused query would read as "not
+                    // running". Until that is checked on a Mac, the run state
+                    // of the always-on form is the person's to read.
+                    let command = launchd_print_system_argv(mode).join(" ");
+                    return Err(OpError::new(
+                        ErrorCode::Internal,
+                        format!(
+                            "the always-on LaunchDaemon form of the {mode} unit is installed, and \
+                             its run state is not read without root; run `sudo {command}` to check it"
+                        ),
+                    )
+                    .with_retryable(false)
+                    .with_details(serde_json::json!({ "step": "live" })));
+                }
+                if !installed {
+                    return Ok(false);
+                }
+                self.probe("live", &launchd_print_argv(&uid, mode))
+            }
+            Manager::Systemd => {
+                if !installed {
+                    return Ok(false);
+                }
+                self.probe("live", &systemd_is_active_argv(mode))
+            }
+        }
+    }
+}
+
+/// What a failed step leaves, for the tail of an error message.
+fn step_effect(step: &str) -> &'static str {
+    match step {
+        "deactivate" => "the unit file was kept; run `qsh service uninstall --deactivate` again",
+        "live" => "the unit's run state was not read",
+        _ => "the unit file is written; run `qsh service install --activate` again",
+    }
+}
+
+/// The past participle of a step, for "the unit was not …".
+fn step_past(step: &str) -> &'static str {
+    match step {
+        "deactivate" => "released",
+        "live" => "queried",
+        _ => "activated",
+    }
+}
+
+/// This process's effective user id, the `<uid>` of a `gui/<uid>` domain
+/// (ADR-0032 decision 3). Windows has no uid and ends in `UNSUPPORTED`
+/// before this value could matter.
+fn current_euid() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid(2)` takes no arguments, touches no memory, and
+        // cannot fail.
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Whether this is a WSL distro: only the wording of a `systemctl` failure
+/// depends on it (ADR-0032 decision 8).
+fn running_under_wsl() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
+}
+
 impl Ops {
     /// `service.install` — write (or rewrite) the unit for this machine's
     /// inferred run mode, creating its parent directory (and, on macOS,
@@ -327,23 +635,59 @@ impl Ops {
     /// rewrites: `created` reports only whether the path was absent
     /// *before* this call, so a repeated `install` is a repair path for a
     /// hand-edited unit rather than a no-op.
-    pub fn service_install(&self) -> Result<ServiceInstallData, OpError> {
-        self.service_install_with_home(crate::config::home_dir())
+    ///
+    /// `activate` (`--activate`, ADR-0032 decisions 2 and 4) additionally
+    /// asks the service manager to load and start the unit, as the last
+    /// step. A unit that is already up is not restarted, and a human-
+    /// installed always-on form is left alone (decision 18).
+    pub fn service_install(&self, activate: bool) -> Result<ServiceInstallData, OpError> {
+        let runner = CommandRunner::system();
+        let host = ServiceHost::resolve(&runner)?;
+        self.service_install_with_home(&host, crate::config::home_dir(), activate)
     }
 
     /// `service.uninstall` — remove the unit for this machine's inferred
     /// run mode. `NotFound` is not an error (`removed: false`, the
     /// `trust.remove` precedent); a unit `qsh` did not write is removed
     /// all the same, since the contract is the path, not provenance.
-    pub fn service_uninstall(&self) -> Result<ServiceUninstallData, OpError> {
-        self.service_uninstall_with_home(crate::config::home_dir())
+    ///
+    /// `deactivate` (`--deactivate`, ADR-0032 decision 5) first releases the
+    /// unit from the service manager when it is registered there, and keeps
+    /// the unit file if that fails. Without it a running unit stays up.
+    pub fn service_uninstall(&self, deactivate: bool) -> Result<ServiceUninstallData, OpError> {
+        let runner = CommandRunner::system();
+        let host = ServiceHost::resolve(&runner)?;
+        self.service_uninstall_with_home(&host, crate::config::home_dir(), deactivate)
     }
 
     /// `service.status` — whether the unit for this machine's inferred run
-    /// mode exists. Presence only, never activation: `launchctl print`/
-    /// `systemctl --user status` are an explicit non-goal.
-    pub fn service_status(&self) -> Result<ServiceStatusData, OpError> {
-        self.service_status_with_home(crate::config::home_dir())
+    /// mode exists. Presence only unless `live` (`--live`, ADR-0032 decision
+    /// 6) is set, which adds one exit-code read of the service manager.
+    pub fn service_status(&self, live: bool) -> Result<ServiceStatusData, OpError> {
+        let runner = CommandRunner::system();
+        let host = ServiceHost::resolve(&runner)?;
+        self.service_status_with_home(&host, crate::config::home_dir(), live)
+    }
+
+    /// `qsh setup`'s unit-file step: `install` without a flag, so the
+    /// manager is never called (ADR-0032 decision 1).
+    pub(crate) fn service_install_for_setup(
+        &self,
+        home: Option<PathBuf>,
+    ) -> Result<ServiceInstallData, OpError> {
+        let runner = CommandRunner::system();
+        let host = ServiceHost::resolve(&runner)?;
+        self.service_install_with_home(&host, home, false)
+    }
+
+    /// `qsh setup`'s presence check: `status` without a flag.
+    pub(crate) fn service_status_for_setup(
+        &self,
+        home: Option<PathBuf>,
+    ) -> Result<ServiceStatusData, OpError> {
+        let runner = CommandRunner::system();
+        let host = ServiceHost::resolve(&runner)?;
+        self.service_status_with_home(&host, home, false)
     }
 
     /// The fail-closed audit write shared by `install`/`uninstall`
@@ -355,7 +699,9 @@ impl Ops {
     /// set one, else a fresh [`FileAuditSink`] on the daemon's own
     /// `audit.log` path, mirroring `trust_rename`'s identical shape. A
     /// failed write is `INTERNAL`/`retryable: true`, and the caller must
-    /// not mutate the filesystem afterward.
+    /// not mutate the filesystem afterward. An activation or deactivation
+    /// is part of the same op and writes no second record (ADR-0032
+    /// decision 9).
     fn record_service_audit(
         &self,
         action: &'static str,
@@ -378,18 +724,21 @@ impl Ops {
         })
     }
 
-    /// Steps 2-9 of `service_install`, parameterized on `home` so
-    /// `tests.rs` can drive the whole op — config load, the two-key
-    /// conflict, mode inference, path building, rendering, the fail-closed
-    /// audit record and the write itself — against an explicit tempdir
-    /// without ever touching `crate::config::home_dir()`'s real value
+    /// Steps 2-10 of `service_install`, parameterized on `home` and on the
+    /// [`ServiceHost`] so `tests.rs` can drive the whole op — config load,
+    /// the two-key conflict, mode inference, path building, rendering, the
+    /// fail-closed audit record, the write and the manager calls — against
+    /// an explicit tempdir and a recording runner without ever touching
+    /// `crate::config::home_dir()`'s real value or a real service manager
     /// (module doc). `home: None` is exactly what a real environment with
     /// no resolvable home directory looks like.
     pub(crate) fn service_install_with_home(
         &self,
+        host: &ServiceHost<'_>,
         home: Option<PathBuf>,
+        activate: bool,
     ) -> Result<ServiceInstallData, OpError> {
-        let manager = resolve_manager()?;
+        let manager = host.manager;
         let config = Config::load(&self.paths)?;
         let controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
@@ -425,22 +774,34 @@ impl Ops {
         let created = !path.exists();
         crate::config::write_private_file(&path, text.as_bytes())?;
 
+        // The last step, and only on request: a failed write above has
+        // already returned, so the manager is never asked to load a unit
+        // that was not written (ADR-0032 decision 2).
+        let activation = if activate {
+            Some(host.activate(mode, &path)?)
+        } else {
+            None
+        };
+
         Ok(ServiceInstallData {
             manager: manager.as_str().to_string(),
             mode: mode.to_string(),
             path: path.display().to_string(),
             created,
+            activation,
         })
     }
 
-    /// Steps 2-9 of `service_uninstall` — see
-    /// [`Self::service_install_with_home`]'s doc for why `home` is a
-    /// parameter here.
+    /// Steps 2-10 of `service_uninstall` — see
+    /// [`Self::service_install_with_home`]'s doc for why `home` and `host`
+    /// are parameters here.
     pub(crate) fn service_uninstall_with_home(
         &self,
+        host: &ServiceHost<'_>,
         home: Option<PathBuf>,
+        deactivate: bool,
     ) -> Result<ServiceUninstallData, OpError> {
-        let manager = resolve_manager()?;
+        let manager = host.manager;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
@@ -448,6 +809,16 @@ impl Ops {
         let path = unit_path(manager, &home, mode);
 
         self.record_service_audit(ServiceUninstallOp::COMMAND, mode, "no unit was removed")?;
+
+        // Release first, delete second: a unit file removed while the
+        // manager still has it registered would leave an orphan that comes
+        // back at the next login with the old path (ADR-0032 decision 5). A
+        // failed release returns here and keeps the file.
+        let deactivation = if deactivate {
+            Some(host.deactivate(mode, &path)?)
+        } else {
+            None
+        };
 
         let removed = match std::fs::remove_file(&path) {
             Ok(()) => true,
@@ -460,29 +831,38 @@ impl Ops {
             mode: mode.to_string(),
             path: path.display().to_string(),
             removed,
+            deactivation,
         })
     }
 
-    /// Steps 2-9 of `service_status` — see
-    /// [`Self::service_install_with_home`]'s doc for why `home` is a
-    /// parameter here.
+    /// Steps 2-10 of `service_status` — see
+    /// [`Self::service_install_with_home`]'s doc for why `home` and `host`
+    /// are parameters here.
     pub(crate) fn service_status_with_home(
         &self,
+        host: &ServiceHost<'_>,
         home: Option<PathBuf>,
+        live: bool,
     ) -> Result<ServiceStatusData, OpError> {
-        let manager = resolve_manager()?;
+        let manager = host.manager;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
         let home = home.ok_or_else(home_not_found)?;
         let path = unit_path(manager, &home, mode);
         let installed = path.exists();
+        let active = if live {
+            Some(host.live(mode, installed)?)
+        } else {
+            None
+        };
 
         Ok(ServiceStatusData {
             manager: manager.as_str().to_string(),
             mode: mode.to_string(),
             path: path.display().to_string(),
             installed,
+            active,
         })
     }
 }

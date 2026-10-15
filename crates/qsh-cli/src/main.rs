@@ -610,22 +610,22 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             cli.quiet,
         ),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
-        Command::Service(ServiceCmd::Install) => finish(
+        Command::Service(ServiceCmd::Install { activate }) => finish(
             cli,
             ServiceInstallOp::COMMAND,
-            ops.service_install(),
+            ops.service_install(*activate),
             human::print_service_install,
         ),
-        Command::Service(ServiceCmd::Uninstall) => finish(
+        Command::Service(ServiceCmd::Uninstall { deactivate }) => finish(
             cli,
             ServiceUninstallOp::COMMAND,
-            ops.service_uninstall(),
+            ops.service_uninstall(*deactivate),
             human::print_service_uninstall,
         ),
-        Command::Service(ServiceCmd::Status) => finish(
+        Command::Service(ServiceCmd::Status { live }) => finish(
             cli,
             ServiceStatusOp::COMMAND,
-            ops.service_status(),
+            ops.service_status(*live),
             human::print_service_status,
         ),
         Command::Reverse {
@@ -2516,9 +2516,9 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Tunnels => TunnelListOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
-        Command::Service(ServiceCmd::Install) => ServiceInstallOp::COMMAND,
-        Command::Service(ServiceCmd::Uninstall) => ServiceUninstallOp::COMMAND,
-        Command::Service(ServiceCmd::Status) => ServiceStatusOp::COMMAND,
+        Command::Service(ServiceCmd::Install { .. }) => ServiceInstallOp::COMMAND,
+        Command::Service(ServiceCmd::Uninstall { .. }) => ServiceUninstallOp::COMMAND,
+        Command::Service(ServiceCmd::Status { .. }) => ServiceStatusOp::COMMAND,
         Command::Reverse { .. } => REVERSE_MODE,
     }
 }

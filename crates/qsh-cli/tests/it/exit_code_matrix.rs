@@ -774,6 +774,38 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         outcome: Outcome::Fails("PERMISSION_DENIED"),
     });
 
+    // ADR-0032 decision 1: each flag belongs to exactly one subcommand, and
+    // clap refuses a flag on the wrong one before any op (or manager) runs.
+    // No row here runs a real manager; the success faces of the three flags
+    // live in `fixtures::golden_service_activation_fixtures` over a fake.
+    cases.push(Case {
+        name: "usage: service install takes --activate, not --deactivate",
+        sandbox: &fleet.client,
+        args: &["service", "install", "--deactivate"],
+        outcome: Outcome::Usage,
+    });
+    cases.push(Case {
+        name: "usage: service uninstall takes --deactivate, not --live",
+        sandbox: &fleet.client,
+        args: &["service", "uninstall", "--live"],
+        outcome: Outcome::Usage,
+    });
+    cases.push(Case {
+        name: "usage: service status takes --live, not --activate",
+        sandbox: &fleet.client,
+        args: &["service", "status", "--activate"],
+        outcome: Outcome::Usage,
+    });
+    // Off macOS/Linux the platform check comes before the manager is
+    // resolved, so the flag still ends in UNSUPPORTED and nothing is spawned.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    cases.push(Case {
+        name: "service install --activate: no service manager on this platform",
+        sandbox: &fleet.client,
+        args: &["service", "install", "--activate"],
+        outcome: Outcome::Fails("UNSUPPORTED"),
+    });
+
     #[cfg(unix)]
     cases.push(Case {
         name: "host get: duplicate name held live by two reverse daemons at once",
