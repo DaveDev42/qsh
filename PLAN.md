@@ -316,7 +316,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** §7.1 #2는 `fsutil.rs`를 파일로 두고 하위 모듈 `fsutil/dacl.rs`(테스트는 `fsutil/dacl/tests.rs`)를 더하는 쪽으로 정했다. 경로 단위 금지에 걸리는 이동이 없어 `xtask/src/arch.rs`는 그대로다. "옛 상속 ACL 파일은 다음 쓰기가 바꿔 놓는다"는 임시 파일 + rename으로 쓰는 파일(키, `trust.toml`, `resume.json`)에만 성립한다. append로 여는 audit 로그는 회전이 새 파일을 만들 때, lock 모드로 여는 resume `.lock`은 지워졌다 다시 만들어질 때 바뀐다. 이 잔여는 threat-model D18과 architecture.md에 적었다. audit writer의 Windows 사이드카 잠금 파일은 `LockFileEx`와 함께 M20이다(ADR-0035 결정 24). Windows 다리: `wintest.sh -p qsh-core` 단위 1422개·통합 124개 초록.
 
-### Step 5 — Credential Manager `platform` store와 Windows `move-key` 왕복 (0.4~0.7ew)
+### Step 5 — Credential Manager `platform` store와 Windows `move-key` 왕복 (0.4~0.7ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 12, ADR-0032 결정 15 둘째~넷째 항목·17, ROADMAP M19 DoD의 `move-key` 왕복 줄. `docs/CLI.md` §6.11 `move-key` Windows 문단, threat-model §3 `identity move-key` 행, `docs/design/testing.md` L1. 선행: Step 4(파일 대체가 DACL을 씀), Step 2의 keystore 판정.
 
@@ -338,6 +338,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - route 동등(부분): `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`의 inbound `serve` 행이 Windows에서 초록
 
 **(c) 완료 판정:** Windows에서 `qsh init --key-store platform`이 `INTERNAL`이 아니다. 왕복 핀이 Windows 다리에서 초록이다. `cargo deny check` 초록. L1에 Windows 줄이 있다. wire diff 0.
+
+**(d) 결과 (2026-10-16):** 항목 target은 (a)의 `qsh`가 아니라 store crate 기본 방식의 `<device_id>.qsh`다(ADR-0035 개정 이력 2026-10-16). 실제 Credential Manager 테스트 `credential_manager_round_trip_on_the_runner`와 `credential_manager_blob_is_the_same_pkcs8_base64_as_other_platforms`는 Dave-Windows에서 초록이었고 실행 뒤 `cmdkey /list`에 남은 항목이 없었다. windows-latest 러너가 `CredWriteW`를 거부하면 §7.1 #6대로 두 테스트를 빼고 L1 수동 단계만 둔다. 바이너리 수준의 Windows `qsh init --key-store platform` 테스트는 OS 자격 증명 저장소를 건드리므로 두지 않았고, (c)의 "INTERNAL이 아니다"는 주입 store 왕복과 실제 `PlatformKeyStore` 왕복이 덮는다. M17의 Windows 처분 테스트 `move_key_to_platform_is_internal_on_windows_before_m19`는 지웠다. 이 스텝과 Step 4가 `qsh-core` 의존을 늘려 `fuzz/Cargo.lock`을 같은 커밋에서 갱신했다(fuzz-smoke의 `--locked` 실패, run 38817991446).
 
 ### Step 6 — named pipe localctl transport (1.1~1.8ew)
 
