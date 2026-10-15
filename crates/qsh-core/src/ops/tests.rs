@@ -1613,6 +1613,11 @@ fn resolve_peer_address_leaves_an_at_free_host_byte_identical() {
 /// substring (both mention `--code-stdin`) would otherwise pass under
 /// a looser check even after one arm's wording silently became the
 /// other's.
+///
+/// The table has no platform column: a terminal's echo can be suppressed on
+/// every platform (ADR-0035 decision 11), so a human-mode terminal always
+/// gets the prompt and `--code-stdin` on one always suppresses echo. The
+/// former Windows rows that answered `UNSUPPORTED` are gone.
 #[test]
 fn resolve_invite_code_source_decision_table() {
     let code = || Some("abcd-efgh".to_string());
@@ -1623,17 +1628,15 @@ fn resolve_invite_code_source_decision_table() {
         bool,
         bool,
         bool,
-        bool,
         Result<InviteCodeSource, (ErrorCode, &'static str)>,
     )] = &[
-        // (label, code, code_stdin, machine_mode, stdin_is_tty, echo_can_be_suppressed, expected)
+        // (label, code, code_stdin, machine_mode, stdin_is_tty, expected)
         (
             "explicit code",
             code(),
             false,
             true,
             false,
-            true,
             Ok(InviteCodeSource::UseCode("abcd-efgh".into())),
         ),
         (
@@ -1642,7 +1645,6 @@ fn resolve_invite_code_source_decision_table() {
             true,
             true,
             false,
-            true,
             Ok(InviteCodeSource::ReadStdin {
                 suppress_echo: false,
             }),
@@ -1653,26 +1655,13 @@ fn resolve_invite_code_source_decision_table() {
             true,
             false,
             true,
-            true,
             Ok(InviteCodeSource::ReadStdin {
                 suppress_echo: true,
             }),
         ),
         (
-            "--code-stdin, terminal, human, platform cannot suppress echo",
-            None,
-            true,
-            false,
-            true,
-            false,
-            Ok(InviteCodeSource::ReadStdin {
-                suppress_echo: false,
-            }),
-        ),
-        (
             "--code-stdin, terminal, machine mode",
             None,
-            true,
             true,
             true,
             true,
@@ -1684,19 +1673,9 @@ fn resolve_invite_code_source_decision_table() {
             false,
             false,
             true,
-            true,
             Ok(InviteCodeSource::Prompt {
                 text: INVITE_CODE_PROMPT.to_string(),
             }),
-        ),
-        (
-            "human tty, platform cannot suppress echo",
-            None,
-            false,
-            false,
-            true,
-            false,
-            Err((ErrorCode::Unsupported, NO_TERMINAL_ECHO_SUPPRESSION)),
         ),
         (
             "machine, none",
@@ -1704,14 +1683,12 @@ fn resolve_invite_code_source_decision_table() {
             false,
             true,
             false,
-            true,
             Err((ErrorCode::InvalidArgument, NO_CODE_IN_MACHINE_MODE)),
         ),
         (
             "machine, none, terminal",
             None,
             false,
-            true,
             true,
             true,
             Err((ErrorCode::InvalidArgument, NO_CODE_IN_MACHINE_MODE)),
@@ -1722,7 +1699,6 @@ fn resolve_invite_code_source_decision_table() {
             true,
             false,
             false,
-            true,
             Err((ErrorCode::InvalidArgument, BOTH_CODE_SOURCES)),
         ),
         (
@@ -1731,12 +1707,11 @@ fn resolve_invite_code_source_decision_table() {
             false,
             false,
             false,
-            true,
             Err((ErrorCode::InvalidArgument, NO_CODE_WITHOUT_A_TERMINAL)),
         ),
     ];
-    for (label, code, code_stdin, machine, tty, echo_ok, expected) in cases {
-        let got = resolve_invite_code_source(code.clone(), *code_stdin, *machine, *tty, *echo_ok);
+    for (label, code, code_stdin, machine, tty, expected) in cases {
+        let got = resolve_invite_code_source(code.clone(), *code_stdin, *machine, *tty);
         match expected {
             Ok(want) => assert_eq!(got.as_ref().ok(), Some(want), "{label}"),
             Err((want_code, want_message)) => {
@@ -1759,7 +1734,6 @@ fn resolve_invite_code_source_ignores_the_mode_when_a_code_is_given() {
                 false,
                 machine_mode,
                 stdin_is_tty,
-                true,
             );
             assert_eq!(
                 got,
@@ -1776,7 +1750,7 @@ fn resolve_invite_code_source_ignores_the_mode_when_a_code_is_given() {
 /// `/dev/null`.
 #[test]
 fn resolve_invite_code_source_rejects_a_missing_code_without_a_terminal() {
-    let err = resolve_invite_code_source(None, false, false, false, true).unwrap_err();
+    let err = resolve_invite_code_source(None, false, false, false).unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert_eq!(err.message, NO_CODE_WITHOUT_A_TERMINAL);
 }
@@ -1785,8 +1759,8 @@ fn resolve_invite_code_source_rejects_a_missing_code_without_a_terminal() {
 /// resolver still answers it — this test is that arm's only caller.
 #[test]
 fn resolve_invite_code_source_rejects_a_code_from_both_sources() {
-    let err = resolve_invite_code_source(Some("abcd-efgh".to_string()), true, false, false, true)
-        .unwrap_err();
+    let err =
+        resolve_invite_code_source(Some("abcd-efgh".to_string()), true, false, false).unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert_eq!(err.message, BOTH_CODE_SOURCES);
 }
@@ -1795,8 +1769,8 @@ fn resolve_invite_code_source_rejects_a_code_from_both_sources() {
 /// (machine mode vs. no terminal) survives into the error message.
 #[test]
 fn the_two_missing_code_rejections_have_distinct_messages() {
-    let machine = resolve_invite_code_source(None, false, true, false, true).unwrap_err();
-    let no_tty = resolve_invite_code_source(None, false, false, false, true).unwrap_err();
+    let machine = resolve_invite_code_source(None, false, true, false).unwrap_err();
+    let no_tty = resolve_invite_code_source(None, false, false, false).unwrap_err();
     assert_ne!(machine.message, no_tty.message);
     assert!(
         machine.message.contains("--json/--jsonl"),

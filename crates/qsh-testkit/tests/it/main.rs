@@ -9,7 +9,6 @@ mod admission_retry_sever;
 mod attach_loopback;
 mod chaos_proxy;
 mod chaos_relay;
-mod conpty;
 mod console_probe;
 mod cp_many_small_files;
 mod cp_scripted_host;

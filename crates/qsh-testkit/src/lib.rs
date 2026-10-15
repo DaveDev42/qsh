@@ -40,12 +40,18 @@
 //! - [`testbin`]: finds a helper executable this crate builds
 //!   (`qsh-fake-ssh`, `qsh-console-probe`) from a test.
 //!
-//! `src/bin/qsh-console-probe.rs` is the Windows console probe the ConPTY
-//! harness in `tests/it/conpty.rs` runs (`docs/design/testing.md`).
+//! - `conpty` (Windows only): a ConPTY harness that runs a program in a
+//!   pseudo-console and reads what it printed.
+//!
+//! `src/bin/qsh-console-probe/` is the Windows console probe the ConPTY
+//! harness runs; it drives `qsh-cli`'s console layer
+//! (`docs/design/testing.md`).
 //!
 //! This crate may depend on any workspace crate.
 
 pub mod chaos;
+#[cfg(windows)]
+pub mod conpty;
 pub mod env_check;
 pub mod fake_ssh;
 pub mod fixtures;

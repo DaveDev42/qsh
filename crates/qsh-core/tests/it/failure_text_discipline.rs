@@ -43,6 +43,7 @@ use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
 use qsh_core::audit::reader;
+use qsh_core::ops::CONSOLE_VT_UNAVAILABLE_MESSAGE;
 use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_host_not_found};
 use qsh_core::ops::pair_ssh::{
     bootstrap_version_unsupported, local_fingerprint_conflict, local_pin_conflict,
@@ -1038,5 +1039,33 @@ fn host_not_found_i_and_iii_never_leak_an_at_sign() {
         pinned_without_address_host_not_found("dave").message,
     ] {
         assert!(!message.contains('@'), "leaked an @: {message:?}");
+    }
+}
+
+/// The Windows console's VT floor (ADR-0035 decision 7): one wording that
+/// ends an interactive session before `session.open`.
+fn console_vt_floor_rows() -> Vec<ThreePartRow> {
+    vec![ThreePartRow {
+        label: "console VT floor",
+        observation: ThreePartSlot::new(
+            CONSOLE_VT_UNAVAILABLE_MESSAGE,
+            "this console cannot interpret VT escape sequences",
+        ),
+        impact: ThreePartSlot::new(CONSOLE_VT_UNAVAILABLE_MESSAGE, "so no session was opened"),
+        next_command: ThreePartSlot::new(
+            CONSOLE_VT_UNAVAILABLE_MESSAGE,
+            "use Windows 10 version 1809 or later, or run qsh in Windows Terminal",
+        ),
+    }]
+}
+
+#[test]
+fn console_vt_floor_wording_has_observation_impact_and_next_command() {
+    let rows = console_vt_floor_rows();
+    assert_eq!(rows.len(), 1);
+    for row in &rows {
+        row.observation.assert_holds(row.label, "observation");
+        row.impact.assert_holds(row.label, "impact");
+        row.next_command.assert_holds(row.label, "next-command");
     }
 }

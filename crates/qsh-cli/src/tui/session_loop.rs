@@ -8,8 +8,8 @@
 //! platform turns into a resize, a `^C` or a hang-up. See the module docs in
 //! [`super`] for the thread layout and why it is three threads.
 
-// The Windows terminal that consumes this driver has not landed, so a
-// non-test Windows build would see all of it as unused. The module is not
+// `tui::run` does not yet drive the Windows terminal through this loop, so
+// a non-test Windows build would see all of it as unused. The module is not
 // compiled at all on a non-test, non-Unix build otherwise (`super`).
 #![cfg_attr(not(unix), allow(dead_code))]
 
@@ -46,6 +46,9 @@ pub(super) fn run(
     escape: Option<u8>,
     terminal: Arc<dyn Terminal>,
 ) -> Result<i32, OpError> {
+    // Before anything exists on the host: a terminal that cannot be driven
+    // must not cost the operator a session to find out.
+    terminal.preflight()?;
     let size = terminal.window_size();
 
     // Authorization, session creation and the attach all happen here, in
@@ -78,7 +81,11 @@ pub(super) fn run(
             let dynamic_specs = qsh_core::parse_dynamic_forwards(&dynamic_forwards)?;
             let requires_dynamic = !dynamic_specs.is_empty();
             (
-                open_session(ops, open_request(host, user, size), requires_dynamic)?,
+                open_session(
+                    ops,
+                    open_request(host, user, size, terminal.fallback_term()),
+                    requires_dynamic,
+                )?,
                 true,
                 specs,
                 remote_specs,

@@ -298,6 +298,14 @@ impl Operation for TrustAcceptOp {
 /// writes what it is handed.
 pub const INVITE_CODE_PROMPT: &str = "Invite code: ";
 
+/// What `UNSUPPORTED` says when a Windows console cannot interpret VT escape
+/// sequences, so an interactive session cannot start (`docs/CLI.md` §7). It
+/// is in `qsh-core` with the other failure wordings so the observation,
+/// impact and next-command discipline test sees it.
+pub const CONSOLE_VT_UNAVAILABLE_MESSAGE: &str = "this console cannot interpret VT escape \
+     sequences, which an interactive session needs, so no session was opened; use Windows 10 \
+     version 1809 or later, or run qsh in Windows Terminal";
+
 /// Upper bound on the bytes read for `--code-stdin`. The display form is 39
 /// bytes (`docs/CLI.md` §6.11); the slack is for whitespace and CRLF. The
 /// frontend reads one byte past it and lets
@@ -323,11 +331,11 @@ pub enum InviteCodeSource {
     /// Use this value, already on the command line.
     UseCode(String),
     /// Read this process's stdin to end of input (`--code-stdin`).
-    /// `suppress_echo` is set only when stdin is a terminal *and* the
-    /// platform can suppress its echo — the same guard
-    /// [`Prompt`](InviteCodeSource::Prompt) needs, reused here because
-    /// `--code-stdin` on a terminal is just as interactive as the prompt
-    /// and must not echo the code into the scrollback either.
+    /// `suppress_echo` is set exactly when stdin is a terminal (a console
+    /// on Windows) — the same guard [`Prompt`](InviteCodeSource::Prompt)
+    /// needs, reused here because `--code-stdin` on a terminal is just as
+    /// interactive as the prompt and must not echo the code into the
+    /// scrollback either.
     ReadStdin { suppress_echo: bool },
     /// Write `text` to **stderr**, then read one line from the terminal
     /// with echo suppressed.
@@ -353,19 +361,8 @@ const CODE_STDIN_BLOCKS_MACHINE_MODE: &str = "invite code: --code-stdin on a ter
      --json/--jsonl mode never blocks on a terminal, so redirect stdin from a pipe or file, or pass the \
      code as an argument";
 
-/// This build cannot suppress a terminal's echo, so the interactive prompt
-/// is refused rather than opened with the code landing in the scrollback —
-/// the CLI's Windows-client precedent for the same reason (`tui::run`,
-/// `docs/design/architecture.md` §8, client Windows is P1).
-const NO_TERMINAL_ECHO_SUPPRESSION: &str = "reading an invite code from the terminal needs a POSIX \
-     terminal; pass the code as an argument or read it from stdin with --code-stdin";
-
 fn no_invite_code(message: &'static str) -> OpError {
     OpError::new(ErrorCode::InvalidArgument, message).with_retryable(false)
-}
-
-fn terminal_echo_unsupported(message: &'static str) -> OpError {
-    OpError::new(ErrorCode::Unsupported, message).with_retryable(false)
 }
 
 /// Decide where `trust accept`'s invite code comes from, or refuse
@@ -377,18 +374,15 @@ fn terminal_echo_unsupported(message: &'static str) -> OpError {
 /// [`parse_dynamic_forwards`] already follow for this crate's other
 /// CLI-preflight judgments.
 ///
-/// `echo_can_be_suppressed` is the frontend's `cfg!(unix)` at the call
-/// site: whether a no-echo prompt is even possible carries the same
-/// prompt-vs-refuse judgment as everything else here, so it belongs in
-/// this resolver rather than as a second, untested branch in `qsh-cli`
-/// (`main.rs`'s `read_invite_code_from_terminal` used to answer this on
-/// its own, invisibly to this function's unit tests).
+/// Every platform can suppress a terminal's echo (termios `ECHO` on POSIX,
+/// `ENABLE_ECHO_INPUT` on a Windows console, ADR-0035 decision 11), so the
+/// platform plays no part in the decision: the prompt opens whenever stdin
+/// is a terminal and the mode is human.
 pub fn resolve_invite_code_source(
     code: Option<String>,
     code_stdin: bool,
     machine_mode: bool,
     stdin_is_tty: bool,
-    echo_can_be_suppressed: bool,
 ) -> Result<InviteCodeSource, OpError> {
     match (code, code_stdin) {
         // Unreachable through the CLI: clap's `conflicts_with` refuses this
@@ -410,7 +404,7 @@ pub fn resolve_invite_code_source(
                 return Err(no_invite_code(CODE_STDIN_BLOCKS_MACHINE_MODE));
             }
             Ok(InviteCodeSource::ReadStdin {
-                suppress_echo: stdin_is_tty && echo_can_be_suppressed,
+                suppress_echo: stdin_is_tty,
             })
         }
         (None, false) => {
@@ -419,9 +413,6 @@ pub fn resolve_invite_code_source(
             }
             if !stdin_is_tty {
                 return Err(no_invite_code(NO_CODE_WITHOUT_A_TERMINAL));
-            }
-            if !echo_can_be_suppressed {
-                return Err(terminal_echo_unsupported(NO_TERMINAL_ECHO_SUPPRESSION));
             }
             Ok(InviteCodeSource::Prompt {
                 text: INVITE_CODE_PROMPT.to_string(),

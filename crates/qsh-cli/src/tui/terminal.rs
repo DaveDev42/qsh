@@ -1,11 +1,14 @@
 //! What the interactive driver needs from a terminal, and nothing else.
 //!
-//! The driver in [`super::session_loop`] is the same on every platform: it
+//! The driver in `super::session_loop` is the same on every platform: it
 //! forwards stdin bytes through the line-start escape machine, turns size
 //! changes into `session.resize`, and maps the end of the session onto an
 //! exit code. The four things below are the part that is not: switching
 //! the terminal to raw mode and back, asking for its size, reading what the
-//! operator types, and hearing that the terminal is gone or changed.
+//! operator types, and hearing that the terminal is gone or changed. Two
+//! small hooks run before a session exists: whether the terminal can be
+//! driven at all, and which `TERM` to announce when the environment has
+//! none.
 //! Writing session output to stdout is deliberately not here — both
 //! platforms write to `std::io::Stdout`.
 
@@ -14,11 +17,29 @@
 
 use std::io;
 
+use qsh_core::OpError;
+
 /// A terminal the interactive client can drive.
 ///
 /// Shared by the three threads of an attach (`super`'s module doc), hence
 /// `Send + Sync`.
-pub(super) trait Terminal: Send + Sync + 'static {
+pub(crate) trait Terminal: Send + Sync + 'static {
+    /// Whether this terminal can be driven, answered before the first
+    /// `session.open` so a refusal never leaves an orphan session on the
+    /// host. The POSIX terminal has no requirement; the Windows console
+    /// refuses with `UNSUPPORTED` when it cannot interpret VT sequences
+    /// (`docs/CLI.md` §7).
+    fn preflight(&self) -> Result<(), OpError> {
+        Ok(())
+    }
+
+    /// The `TERM` to send in `session.open` when the environment has none.
+    /// `None` leaves the choice to the host. Only meaningful after a
+    /// successful [`preflight`](Terminal::preflight).
+    fn fallback_term(&self) -> Option<&'static str> {
+        None
+    }
+
     /// The window size in columns and rows, or `None` when stdin is not a
     /// terminal (then the host picks: `cols`/`rows` of `0` normalise to
     /// 80x24, `docs/design/architecture.md` §4).
@@ -46,7 +67,7 @@ pub(super) trait Terminal: Send + Sync + 'static {
 }
 
 /// The raw-mode guard. Dropping it restores the terminal.
-pub(super) trait RawGuard {
+pub(crate) trait RawGuard {
     /// Whether the terminal is actually in raw mode (`false` for a piped
     /// stdin). Escape processing is on only for a terminal
     /// (`docs/CLI.md` §7), and raw mode has no output post-processing, so
@@ -55,14 +76,14 @@ pub(super) trait RawGuard {
 }
 
 /// What a terminal reports to the signal thread.
-pub(super) trait EventSource {
+pub(crate) trait EventSource {
     /// Block for the next event, or `None` when no more can come.
     fn next_event(&mut self) -> Option<TermEvent>;
 }
 
 /// An event the driver acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TermEvent {
+pub(crate) enum TermEvent {
     /// The window size may have changed: ask [`Terminal::window_size`].
     Resize,
     /// An interrupt that did not arrive as a keystroke (`kill -INT`, or a
@@ -75,4 +96,4 @@ pub(super) enum TermEvent {
 /// Which hang-up it was, as the terminal implementation numbers it (the
 /// signal number on POSIX). Opaque to the driver, which hands it back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct HangupCause(pub(super) i32);
+pub(crate) struct HangupCause(pub(crate) i32);
