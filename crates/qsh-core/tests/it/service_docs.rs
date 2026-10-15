@@ -21,7 +21,9 @@
 use qsh_core::doctor::SERVICE_NOT_REGISTERED;
 use qsh_core::{
     DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_HOME_MACOS,
-    SERVICE_UNSUPPORTED_PLATFORM, render_launchd_plist, render_systemd_unit,
+    SERVICE_UNSUPPORTED_PLATFORM, launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv,
+    render_launchd_plist, render_systemd_unit, systemd_daemon_reload_argv,
+    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
 };
 
 use crate::docs;
@@ -172,5 +174,106 @@ fn cli_md_service_not_registered_row_points_at_the_installer() {
     assert!(
         !cli_md.contains("`qsh service install`은 아직 없으므로"),
         "docs/CLI.md §6.17's service_not_registered row must not claim the installer is missing"
+    );
+}
+
+/// Every trimmed line inside a ` ```bash` fence of the doc.
+fn bash_fence_lines(doc: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for line in doc.lines() {
+        if line.starts_with("```bash") {
+            inside = true;
+        } else if line.starts_with("```") {
+            inside = false;
+        } else if inside {
+            lines.push(line.trim().to_string());
+        }
+    }
+    lines
+}
+
+/// ADR-0032 decision 11: the activation, query and release recipes in
+/// `docs/deploy/service.md` are the argv `qsh service --activate`,
+/// `--deactivate` and `--live` run. The builders take the recipe's own
+/// placeholders (`$UID` for the uid, the example unit path) so the text
+/// compared is the text a person types. Nothing here runs a manager.
+/// The Task Scheduler recipes join this check with the Windows backend.
+#[test]
+fn service_md_activation_recipes_match_the_argv_builders() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let recipes = bash_fence_lines(&service_md);
+    assert!(
+        recipes.iter().any(|line| line.starts_with("launchctl ")),
+        "the bash fence scan found no launchctl recipe: {recipes:?}"
+    );
+
+    let uid = "$UID";
+    let agent = "~/Library/LaunchAgents/io.qsh.serve.plist";
+    let expected: Vec<(&str, Vec<String>)> = vec![
+        ("launchd query", launchd_print_argv(uid, "serve")),
+        ("launchd activate", launchd_bootstrap_argv(uid, agent)),
+        ("launchd release", launchd_bootout_argv(uid, "serve")),
+        ("systemd query", systemd_is_active_argv("serve")),
+        ("systemd reload", systemd_daemon_reload_argv()),
+        ("systemd activate", systemd_enable_now_argv("serve")),
+        ("systemd release", systemd_disable_now_argv("serve")),
+    ];
+    // Each recipe line is present, and the lines of one manager appear in
+    // the order the ops run them: the query before the activation, the
+    // activation before the release, and `daemon-reload` before
+    // `enable --now`.
+    let mut positions: Vec<(&str, usize)> = Vec::new();
+    for (what, argv) in &expected {
+        let line = argv.join(" ");
+        let position = recipes.iter().position(|recipe| *recipe == line);
+        let Some(position) = position else {
+            panic!("docs/deploy/service.md has no `{line}` line ({what}) in a bash fence");
+        };
+        positions.push((what, position));
+    }
+    for manager in ["launchd", "systemd"] {
+        let ordered: Vec<(&str, usize)> = positions
+            .iter()
+            .copied()
+            .filter(|(what, _)| what.starts_with(manager))
+            .collect();
+        assert!(
+            ordered.windows(2).all(|pair| pair[0].1 < pair[1].1),
+            "the {manager} recipe lines are out of order: {ordered:?}"
+        );
+    }
+    let position_of = |what: &str| {
+        positions
+            .iter()
+            .find(|(name, _)| *name == what)
+            .map(|(_, position)| *position)
+            .unwrap()
+    };
+    assert!(position_of("systemd reload") < position_of("systemd activate"));
+    assert!(position_of("launchd query") < position_of("launchd activate"));
+
+    // Every manager line in a bash fence is either one of the argv above or
+    // a read-only line the ops do not run, so a new activation step cannot
+    // enter the doc without entering the builders.
+    let expected_lines: Vec<String> = expected.iter().map(|(_, argv)| argv.join(" ")).collect();
+    let documented_only = ["systemctl --user status qsh-serve.service"];
+    for line in &recipes {
+        let is_manager_line = line.starts_with("launchctl ") || line.starts_with("systemctl ");
+        assert!(
+            !is_manager_line
+                || expected_lines.contains(line)
+                || documented_only.contains(&line.as_str()),
+            "docs/deploy/service.md has a manager line the argv builders do not produce: `{line}`"
+        );
+    }
+    // The doc names no restart as a step: the ops never run one
+    // (ADR-0032 decision 4).
+    assert!(
+        !recipes
+            .iter()
+            .any(|line| line.starts_with("systemctl --user restart")
+                || line.starts_with("launchctl kickstart")),
+        "the recipes must not restart a unit"
     );
 }

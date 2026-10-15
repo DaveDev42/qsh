@@ -142,6 +142,13 @@ fake `ssh` harness). It leaves out
 `one_change_closes_many_connections_within_two_seconds`, a measurement whose
 connection count is raised with `QSH_M16_CONNECTIONS`. M16 adds no p95
 budget, so there is no `m16-latency.filter`.
+`m17.filter` is the M17 set. For now it covers `qsh service`: the unit tests
+in `ops::service::tests` (the argv per manager, the deadline paths of
+`CommandRunner` on an injected clock and on a real child), the golden
+activation scenario over a fake `launchctl`/`systemctl` on `PATH`, the
+`--json`/`--jsonl` purity rows, and the doc-versus-argv comparison. None of
+them calls a real service manager. M17 adds no p95 budget, so there is no
+`m17-latency.filter`.
 
 ## test/
 

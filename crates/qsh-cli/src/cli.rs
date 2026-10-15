@@ -441,15 +441,35 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// Write (or rewrite) the unit for this machine's inferred run mode
-    /// and create its parent directories.
-    Install,
+    /// and create its parent directories. Without `--activate` nothing is
+    /// started.
+    Install {
+        /// Also load and start the unit through the service manager
+        /// (`launchctl bootstrap` / `systemctl --user enable --now`) once
+        /// the unit file is written. A unit that is already running is not
+        /// restarted, so a new binary path applies at the next restart.
+        #[arg(long)]
+        activate: bool,
+    },
 
     /// Remove the unit for this machine's inferred run mode, if any.
-    Uninstall,
+    /// Without `--deactivate` a running unit stays running.
+    Uninstall {
+        /// Release the unit from the service manager first
+        /// (`launchctl bootout` / `systemctl --user disable --now`), then
+        /// remove the unit file. The file is kept if the release fails.
+        #[arg(long)]
+        deactivate: bool,
+    },
 
     /// Report whether the unit for this machine's inferred run mode
-    /// exists. Presence only, never activation.
-    Status,
+    /// exists. Presence only unless `--live` is given.
+    Status {
+        /// Also ask the service manager whether the unit is running (one
+        /// exit code, no output parsing).
+        #[arg(long)]
+        live: bool,
+    },
 }
 
 /// `qsh tunnel …` subcommands (`docs/CLI.md` §6.9).

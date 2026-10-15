@@ -819,7 +819,7 @@ impl Ops {
                 Err(err)
             }
         };
-        let status = match self.service_status_with_home(env.home.clone()) {
+        let status = match self.service_status_for_setup(env.home.clone()) {
             Ok(status) => status,
             Err(err) => return skip_or_fail(err),
         };
@@ -845,7 +845,7 @@ impl Ops {
                 None,
             ));
         }
-        match self.service_install_with_home(env.home.clone()) {
+        match self.service_install_for_setup(env.home.clone()) {
             Ok(data) => Ok(step(
                 SetupStepId::Service,
                 SetupStatus::Done,
@@ -1035,7 +1035,8 @@ pub(super) fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData
         match req.role {
             SetupRole::Host => {
                 next.push(if req.service {
-                    "activate the unit as in docs/deploy/service.md".to_string()
+                    "qsh service install --activate (or start the unit as in docs/deploy/service.md)"
+                        .to_string()
                 } else {
                     "qsh serve".to_string()
                 });

@@ -2,12 +2,15 @@
 .el .ds Aq '
 .TH qsh-service-uninstall 1  "uninstall 0.4.3" 
 .SH NAME
-qsh\-service\-uninstall \- Remove the unit for this machine\*(Aqs inferred run mode, if any
+qsh\-service\-uninstall \- Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running
 .SH SYNOPSIS
-\fBqsh service uninstall\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service uninstall\fR [\fB\-\-deactivate\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Remove the unit for this machine\*(Aqs inferred run mode, if any
+Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running
 .SH OPTIONS
+.TP
+\fB\-\-deactivate\fR
+Release the unit from the service manager first (`launchctl bootout` / `systemctl \-\-user disable \-\-now`), then remove the unit file. The file is kept if the release fails
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text

@@ -29,12 +29,12 @@ Print version
 .SH SUBCOMMANDS
 .TP
 qsh\-service\-install(1)
-Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories
+Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
 .TP
 qsh\-service\-uninstall(1)
-Remove the unit for this machine\*(Aqs inferred run mode, if any
+Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running
 .TP
 qsh\-service\-status(1)
-Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only, never activation
+Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only unless `\-\-live` is given
 .SH VERSION
 v0.4.3

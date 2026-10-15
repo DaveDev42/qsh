@@ -65,8 +65,12 @@ pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::service::{
-    DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_HOME_MACOS,
-    SERVICE_UNSUPPORTED_PLATFORM, render_launchd_plist, render_systemd_unit,
+    CommandRunner, DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS,
+    DOC_EXAMPLE_HOME_MACOS, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock, ManagerOutput,
+    ManagerRunner, RunError, SERVICE_UNSUPPORTED_PLATFORM, SystemManagerClock, TaskStateQuery,
+    launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
+    render_launchd_plist, render_systemd_unit, systemd_daemon_reload_argv,
+    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
 };
 pub use ops::{
     AclCheckOp, AclShowOp, AttachHandle, AutoBootstrap, AutoBootstrapReport, CancelToken,

@@ -2,15 +2,18 @@
 .el .ds Aq '
 .TH qsh-service-status 1  "status 0.4.3" 
 .SH NAME
-qsh\-service\-status \- Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only, never activation
+qsh\-service\-status \- Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only unless `\-\-live` is given
 .SH SYNOPSIS
-\fBqsh service status\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service status\fR [\fB\-\-json\fR] [\fB\-\-live\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only, never activation
+Report whether the unit for this machine\*(Aqs inferred run mode exists. Presence only unless `\-\-live` is given
 .SH OPTIONS
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-live\fR
+Also ask the service manager whether the unit is running (one exit code, no output parsing)
 .TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)

@@ -415,7 +415,7 @@ pub const SERVICE_NOT_REGISTERED: Diagnostic = Diagnostic {
     id: DiagnosticId::ServiceNotRegistered,
     code: "service_not_registered",
     message: "No platform service unit is registered for this machine's inferred run mode. Until one is, this mode only runs in the foreground; it does not survive logout, reboot, or a crash.",
-    remedy: "Run `qsh service install` to write this mode's unit, then activate it with `launchctl bootstrap gui/$UID …` (macOS) or `systemctl --user enable --now …` (Linux) — docs/deploy/service.md has both.",
+    remedy: "Run `qsh service install --activate` to write this mode's unit and start it. docs/deploy/service.md has the same steps by hand: `launchctl bootstrap gui/$UID …` (macOS) or `systemctl --user enable --now …` (Linux).",
 };
 
 /// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: Linux only, and only

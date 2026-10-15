@@ -11,12 +11,12 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
     DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
-    PairSshData, PairSshDirection, SchemaData, ServiceInstallData, ServiceStatusData,
-    ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
-    SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
-    SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
-    TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel,
-    TunnelCloseData, TunnelListData, VersionData,
+    PairSshData, PairSshDirection, SchemaData, ServiceActivation, ServiceDeactivation,
+    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
+    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, SetupRole,
+    SetupRunData, SetupStatus, SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData,
+    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
+    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -1186,53 +1186,93 @@ pub fn print_notice(line: &str) -> io::Result<()> {
 }
 
 /// Print the outcome of `qsh service install` (`docs/CLI.md` §6.18). Zero
-/// logic — `manager`/`mode`/`path` plus `created` in words, and a fixed
-/// second line pointing at the activation recipe (`install` alone never
-/// starts anything).
+/// logic — `manager`/`mode`/`path` plus `created` in words, then one line
+/// for what `activation` says (ADR-0032 decisions 4 and 18), or, without
+/// `--activate`, the flagless pointer at the activation recipe, byte for
+/// byte (ADR-0032 decision 1; `install` alone never starts anything).
 pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
+    let manager = sanitize(&data.manager);
     writeln!(
         stdout,
         "{} {} unit for {} mode at {}",
-        sanitize(&data.manager),
+        manager,
         if data.created { "wrote" } else { "rewrote" },
         sanitize(&data.mode),
         sanitize(&data.path)
     )?;
-    writeln!(
-        stdout,
-        "Activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
-         systemctl --user enable --now on Linux)."
-    )
+    match data.activation {
+        None => writeln!(
+            stdout,
+            "Activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
+             systemctl --user enable --now on Linux)."
+        ),
+        Some(ServiceActivation::Started) => writeln!(stdout, "{manager} loaded and started it."),
+        Some(ServiceActivation::AlreadyActive) => writeln!(
+            stdout,
+            "{manager} already runs it, so it was not restarted; a changed binary path applies \
+             at the next restart. A restart ends every detached session \
+             (docs/deploy/service.md, Notes for both)."
+        ),
+        Some(ServiceActivation::AlwaysOnPresent) => writeln!(
+            stdout,
+            "An always-on form of this unit is installed, so {manager} was not called. If the \
+             binary path changed, repeat the always-on recipe in docs/deploy/service.md."
+        ),
+    }
 }
 
-/// Print the outcome of `qsh service uninstall` (`docs/CLI.md` §6.18).
+/// Print the outcome of `qsh service uninstall` (`docs/CLI.md` §6.18),
+/// with one line for what `deactivation` says (ADR-0032 decisions 5 and
+/// 18). Without `--deactivate` the output is the flagless text, byte for
+/// byte (ADR-0032 decision 1).
 pub fn print_service_uninstall(data: &ServiceUninstallData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
+    let manager = sanitize(&data.manager);
     if data.removed {
         writeln!(
             stdout,
             "{} removed the {} mode unit at {}",
-            sanitize(&data.manager),
+            manager,
             sanitize(&data.mode),
             sanitize(&data.path)
-        )
+        )?;
     } else {
         writeln!(
             stdout,
             "{} has nothing to remove for {} mode at {}",
-            sanitize(&data.manager),
+            manager,
             sanitize(&data.mode),
             sanitize(&data.path)
-        )
+        )?;
+    }
+    match data.deactivation {
+        None => Ok(()),
+        Some(ServiceDeactivation::Stopped) => {
+            writeln!(
+                stdout,
+                "It was released from {manager} before the file was removed."
+            )
+        }
+        Some(ServiceDeactivation::NotActive) => {
+            writeln!(
+                stdout,
+                "{manager} had no registration for it, so nothing was released."
+            )
+        }
+        Some(ServiceDeactivation::AlwaysOnPresent) => writeln!(
+            stdout,
+            "An always-on form of this unit is installed and was left as it is; release it with \
+             the always-on recipe in docs/deploy/service.md."
+        ),
     }
 }
 
 /// Print the outcome of `qsh service status` (`docs/CLI.md` §6.18).
-/// Presence only, never activation.
+/// Presence only, plus the run state when `--live` was given.
 pub fn print_service_status(data: &ServiceStatusData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    writeln!(
+    write!(
         stdout,
         "{} unit for {} mode at {} is {}",
         sanitize(&data.manager),
@@ -1243,7 +1283,12 @@ pub fn print_service_status(data: &ServiceStatusData) -> io::Result<()> {
         } else {
             "not installed"
         }
-    )
+    )?;
+    match data.active {
+        None => writeln!(stdout),
+        Some(true) => writeln!(stdout, " and running"),
+        Some(false) => writeln!(stdout, " and not running"),
+    }
 }
 
 #[cfg(test)]
