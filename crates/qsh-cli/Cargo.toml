@@ -30,10 +30,22 @@ tracing-subscriber.workspace = true
 tokio.workspace = true
 
 # Raw-mode terminal for the interactive TUI (`docs/design/architecture.md`
-# §8). unix-only: `qsh-cli` is also built for `x86_64-pc-windows-msvc`, where
-# the TUI path answers `UNSUPPORTED` instead (Windows client is P1).
+# §8). unix-only: the Windows console has its own layer below.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["term", "ioctl", "signal"] }
+
+# The Windows console layer of the interactive client and of the invitation-code
+# prompt (`src/tui/windows.rs`, ADR-0035 decisions 4-8 and 11): console modes
+# and code pages, the window size, control events and the stdin read, called
+# directly. Only the features those calls need; crossterm is not used
+# (`docs/design/architecture.md` §8).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+] }
 
 # jemalloc as the global allocator for the `qsh` serve/listener on glibc
 # Linux, so freed pages return to the OS at idle via background purge

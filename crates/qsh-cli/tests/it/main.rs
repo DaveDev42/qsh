@@ -12,6 +12,7 @@ mod audit_query;
 mod auto_bootstrap;
 mod cert_e2e;
 mod cert_file_exchange;
+mod console_probe;
 mod cp_cancel;
 mod cp_e2e;
 mod cp_recursive;

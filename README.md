@@ -1057,7 +1057,12 @@ Some of these are MVP scope decisions, some are unfinished work.
   unlike scp, which writes into the existing file. With role `full` or a wide
   `paths`, `file.write` is as strong as `exec.run`.
 - Windows support is planned for P1: the client in M19 and the host in M20
-  (ADR-0035), with the same features as Linux and macOS. The ssh bootstrap
+  (ADR-0035), with the same features as Linux and macOS. The Windows
+  console layer (raw VT input and output, UTF-8 code page, resize polling, mode
+  restore on every exit path) and the echo-free invite-code prompt are in; they
+  need Windows 10 1809 or later. Terminals that hand `qsh` a pipe instead of a
+  console (mintty, which Git Bash uses) get no raw mode: run `qsh` from Windows
+  Terminal, or start it as `winpty qsh ...`. The ssh bootstrap
   follows that split. `qsh pair ssh` runs from a Windows client with the
   system `ssh.exe`, but the automatic bootstrap on `qsh box` and `qsh cp`
   arrives with Windows interactive attach and `qsh cp` in M19, and the

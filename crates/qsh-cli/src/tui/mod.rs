@@ -45,22 +45,27 @@
 //! The two helpers are detached, never joined: both park in a blocking
 //! syscall, and the process exits as soon as the event loop is done.
 
-// Windows console mode arithmetic: pure, so its tests run on every leg; the
-// Windows terminal that applies it is not built yet.
+// Windows console mode arithmetic: pure, so its tests run on every leg.
 #[cfg(any(windows, test))]
 mod console_mode;
-// The platform-neutral driver and the terminal trait it runs on. Compiled
-// for the POSIX client and, so the fake-terminal tests run on every leg, for
-// tests everywhere; on Windows `run` still refuses before there is anything
-// to drive.
+// The platform-neutral driver. Compiled for the POSIX client and, so the
+// fake-terminal tests run on every leg, for tests everywhere; on Windows
+// `run` still refuses before there is anything to drive.
 #[cfg(any(unix, test))]
 mod session_loop;
 #[cfg(unix)]
 mod term;
-#[cfg(any(unix, test))]
+// The terminal trait, shared by the POSIX terminal and the Windows console.
+#[cfg(any(unix, windows, test))]
 mod terminal;
 #[cfg(unix)]
 mod unix;
+// The Windows console: the terminal behind the trait and the echo-off mode
+// of the invitation-code prompt. Its logic sits behind a fake-able console
+// API, so the unit tests run on every leg; the real console calls are
+// Windows-only.
+#[cfg(any(windows, test))]
+pub(crate) mod windows;
 
 use qsh_core::{OpError, Ops};
 use qsh_proto::ErrorCode;
@@ -200,14 +205,30 @@ fn locale_env() -> Vec<qsh_proto::EnvVar> {
         .collect()
 }
 
+/// The `TERM` for `SessionOpen.term`: the environment's value when it has
+/// one, else the terminal's own default (the Windows console announces
+/// `xterm-256color` once VT is on), else nothing and the host picks
+/// (`docs/CLI.md` §7).
+#[cfg(any(unix, test))]
+fn session_term(env_term: Option<String>, fallback: Option<&str>) -> Option<String> {
+    env_term
+        .filter(|t| !t.is_empty())
+        .or_else(|| fallback.map(str::to_string))
+}
+
 /// Build the `session.open` request for the bare `qsh [user@]host` form.
 #[cfg(any(unix, test))]
-fn open_request(host: String, user: Option<String>, size: Option<(u16, u16)>) -> SessionOpenReq {
+fn open_request(
+    host: String,
+    user: Option<String>,
+    size: Option<(u16, u16)>,
+    fallback_term: Option<&str>,
+) -> SessionOpenReq {
     SessionOpenReq {
         host,
         argv: Vec::new(),
         env: locale_env(),
-        term: std::env::var("TERM").ok().filter(|t| !t.is_empty()),
+        term: session_term(std::env::var("TERM").ok(), fallback_term),
         cols: size.map(|(cols, _)| u32::from(cols)),
         rows: size.map(|(_, rows)| u32::from(rows)),
         user,
@@ -345,6 +366,28 @@ mod tests {
             .into_iter()
             .flat_map(|p| p.forward)
             .collect()
+    }
+
+    #[test]
+    fn session_open_term_defaults_to_xterm_256color_when_term_is_unset() {
+        // The console's fallback applies only when the environment has no
+        // usable `TERM`; an empty value counts as none (as before).
+        assert_eq!(
+            session_term(None, Some("xterm-256color")).as_deref(),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            session_term(Some(String::new()), Some("xterm-256color")).as_deref(),
+            Some("xterm-256color")
+        );
+        // A set `TERM` wins over the fallback, and with neither the host
+        // picks.
+        assert_eq!(
+            session_term(Some("screen".into()), Some("xterm-256color")).as_deref(),
+            Some("screen")
+        );
+        assert_eq!(session_term(None, None), None);
+        assert_eq!(session_term(Some(String::new()), None), None);
     }
 
     #[test]

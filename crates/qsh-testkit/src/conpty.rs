@@ -1,15 +1,14 @@
 //! A ConPTY harness for the Windows console tests.
 //!
-//! [`ConPtyProbe`] opens a pseudo-console with `portable-pty`, runs the
-//! `qsh-console-probe` executable in it, and exposes what the probe reports
-//! as parsed records. The pseudo-console's output is a VT stream: the
+//! [`ConPtyProbe`] opens a pseudo-console with `portable-pty`, runs a
+//! program in it (usually `qsh-console-probe`, or `qsh` itself), and exposes
+//! what the probe reports as parsed records and everything the program
+//! printed as text. The pseudo-console's output is a VT stream: the
 //! harness strips the escape sequences, finds the probe's
 //! `<<QSH-PROBE key fields>>` tokens, and answers the cursor-position query
 //! (`ESC [ 6 n`) that a pseudo-console may send at start-up and wait on.
 //!
 //! Waiting is on observable state with a deadline, never on a fixed sleep.
-
-#![cfg(windows)]
 
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -27,7 +26,7 @@ pub const WAIT: Duration = Duration::from_secs(60);
 /// The probe executable (`QSH_CONSOLE_PROBE_BIN`, next to the test
 /// executable, or one `cargo build`).
 pub fn probe_bin() -> PathBuf {
-    qsh_testkit::testbin::locate("qsh-console-probe", "QSH_CONSOLE_PROBE_BIN")
+    crate::testbin::locate("qsh-console-probe", "QSH_CONSOLE_PROBE_BIN")
 }
 
 /// One probe report: its key and the whitespace-separated fields after it.
@@ -51,6 +50,18 @@ pub struct ConPtyProbe {
 impl ConPtyProbe {
     /// Start `program` in a pseudo-console of `cols` x `rows`.
     pub fn spawn(program: &std::path::Path, cols: u16, rows: u16) -> Self {
+        Self::spawn_with(program, &[], &[], cols, rows)
+    }
+
+    /// Start `program` with `args` and the extra environment `env` in a
+    /// pseudo-console of `cols` x `rows`.
+    pub fn spawn_with(
+        program: &std::path::Path,
+        args: &[&str],
+        env: &[(&str, &std::ffi::OsStr)],
+        cols: u16,
+        rows: u16,
+    ) -> Self {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -59,10 +70,15 @@ impl ConPtyProbe {
                 pixel_height: 0,
             })
             .expect("open a ConPTY");
+        let mut command = CommandBuilder::new(program);
+        command.args(args);
+        for (name, value) in env {
+            command.env(name, value);
+        }
         let child = pair
             .slave
-            .spawn_command(CommandBuilder::new(program))
-            .expect("start the probe in the ConPTY");
+            .spawn_command(command)
+            .expect("start the program in the ConPTY");
         let mut reader = pair.master.try_clone_reader().expect("ConPTY reader");
         let writer: Arc<Mutex<Box<dyn std::io::Write + Send>>> = Arc::new(Mutex::new(
             pair.master.take_writer().expect("ConPTY writer"),
@@ -152,6 +168,33 @@ impl ConPtyProbe {
         }
     }
 
+    /// Everything the program has printed so far, as text with the escape
+    /// sequences removed. Only what earlier waits drained is in it, so wait
+    /// for a record that comes after the output of interest first.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&strip_vt(&self.raw)).into_owned()
+    }
+
+    /// Wait until the program's output contains `needle`, up to [`WAIT`],
+    /// and return all the text so far. Panics with what was seen if it
+    /// never comes.
+    pub fn wait_text(&mut self, needle: &str) -> String {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let text = self.text();
+            if text.contains(needle) {
+                return text;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.output.recv_timeout(left) {
+                Ok(chunk) => self.raw.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                    panic!("no {needle:?} within {WAIT:?}; the console text so far:\n{text:?}")
+                }
+            }
+        }
+    }
+
     /// Wait for the probe to exit and return its status.
     pub fn wait_exit(&mut self) -> u32 {
         let deadline = Instant::now() + WAIT;
@@ -159,7 +202,7 @@ impl ConPtyProbe {
             if let Some(status) = self.child.try_wait().expect("poll the probe") {
                 return status.exit_code();
             }
-            assert!(Instant::now() < deadline, "the probe did not exit");
+            assert!(Instant::now() < deadline, "the program did not exit");
             // Keep draining so the pseudo-console never blocks on a full
             // pipe; a short receive timeout doubles as the poll interval.
             if let Ok(chunk) = self.output.recv_timeout(Duration::from_millis(50)) {

@@ -390,3 +390,115 @@ fn spawn_success_returns_ok() {
     )
     .expect("spawn_signal_pump must return Ok when the spawner succeeds");
 }
+
+/// A console whose conhost cannot interpret VT output, as one older than
+/// Windows 10 1809: everything else works.
+struct NoVtConsole;
+
+impl crate::tui::windows::ConsoleApi for NoVtConsole {
+    fn input_mode(&self) -> Option<u32> {
+        Some(0x07)
+    }
+
+    fn set_input_mode(&self, _mode: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn output_mode(&self) -> Option<u32> {
+        Some(0x03)
+    }
+
+    fn set_output_mode(&self, mode: u32) -> io::Result<()> {
+        if mode & crate::tui::console_mode::ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return Err(io::Error::other("VT processing refused"));
+        }
+        Ok(())
+    }
+
+    fn code_pages(&self) -> (u32, u32) {
+        (437, 437)
+    }
+
+    fn set_code_pages(&self, _input: u32, _output: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn window_size(&self) -> Option<(u16, u16)> {
+        Some((80, 24))
+    }
+
+    fn read_stdin(&self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    fn install_ctrl_handler(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct NoSleep;
+
+impl crate::tui::windows::Sleep for NoSleep {
+    fn sleep(&self, _duration: std::time::Duration) {}
+}
+
+/// A console that cannot show VT output ends the interactive form with
+/// `UNSUPPORTED` that names Windows 10 1809, and ends it *before*
+/// `session.open`: the host is pinned and listening, and it sees no
+/// datagram at all, so no session was opened there to be orphaned.
+#[test]
+fn vt_unavailable_is_unsupported_before_session_open() {
+    use qsh_core::Paths;
+    use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ops = Ops::new(Paths::new(
+        dir.path().join("config"),
+        dir.path().join("state"),
+    ));
+    ops.identity_init(IdentityInitReq {
+        key_store: Some(KeyStoreMode::File),
+        import_ssh_key: None,
+    })
+    .expect("init an identity");
+
+    let host = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind the fake host");
+    host.set_nonblocking(true).expect("non-blocking");
+    ops.trust_add(TrustAddReq {
+        name: "fakehost".into(),
+        address: Some(host.local_addr().expect("address").to_string()),
+        fingerprint: Some(format!("sha256:{}", "A".repeat(43))),
+        cert_pem: None,
+        role: None,
+    })
+    .expect("pin the fake host");
+
+    let terminal = Arc::new(crate::tui::windows::WindowsTerminal::new(
+        Arc::new(NoVtConsole),
+        Arc::new(NoSleep),
+    ));
+    let err = run(
+        &ops,
+        Attach::Open {
+            host: "fakehost".into(),
+            user: None,
+            forwards: Vec::new(),
+            remote_forwards: Vec::new(),
+            dynamic_forwards: Vec::new(),
+        },
+        Some(b'~'),
+        terminal,
+    )
+    .expect_err("a console without VT cannot run an interactive session");
+
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert!(err.message.contains("1809"), "{}", err.message);
+    let mut datagram = [0u8; 2048];
+    assert!(
+        matches!(
+            host.recv_from(&mut datagram),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock
+        ),
+        "the host heard from the client although the console was refused"
+    );
+}

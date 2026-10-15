@@ -2326,22 +2326,17 @@ fn run_trust_rename(cli: &Cli, ops: &Ops, old: &str, new: &str) -> i32 {
 /// Obtain the invite code from wherever `qsh-core` says it lives, then
 /// normalize it in exactly one place.
 ///
-/// `echo_can_be_suppressed` is `cfg!(unix)`: whether a no-echo prompt is
-/// even possible is itself part of the resolver's decision now (`ops::
-/// resolve_invite_code_source`'s own doc), not a second judgment made
-/// here.
+/// Whether a no-echo prompt is possible is not decided here or per platform:
+/// a terminal's echo can be switched off on every platform (termios on POSIX,
+/// the console input mode on Windows), so the resolver's answer depends only
+/// on the mode and on whether stdin is a terminal.
 fn invite_code(
     code: Option<String>,
     code_stdin: bool,
     machine_mode: bool,
 ) -> Result<String, OpError> {
-    let source = resolve_invite_code_source(
-        code,
-        code_stdin,
-        machine_mode,
-        io::stdin().is_terminal(),
-        cfg!(unix),
-    )?;
+    let source =
+        resolve_invite_code_source(code, code_stdin, machine_mode, io::stdin().is_terminal())?;
     let raw = match source {
         InviteCodeSource::UseCode(code) => code,
         InviteCodeSource::ReadStdin { suppress_echo } => {
@@ -2357,24 +2352,16 @@ fn invite_code(
 /// `--code-stdin`: read to end of input, bounded. `suppress_echo` is only
 /// ever `true` when stdin is a terminal (the resolver's call), in which
 /// case this suppresses echo the same way [`read_invite_code_from_terminal`]
-/// does — reusing the unix-only `EchoSuppressed` guard (not an intra-doc
-/// link: the item does not exist on other targets, and rustdoc under
-/// `-D warnings` rejects a dangling one) rather than duplicating the
-/// termios plumbing — so a typed code does not land in the operator's scrollback
-/// just because they used `--code-stdin` instead of waiting for the
-/// prompt.
+/// does — reusing the same [`EchoSuppressed`] guard rather than duplicating
+/// the terminal plumbing — so a typed code does not land in the operator's
+/// scrollback just because they used `--code-stdin` instead of waiting for
+/// the prompt.
 fn read_invite_code_from_stdin(suppress_echo: bool) -> Result<String, OpError> {
-    #[cfg(unix)]
     let _quiet = if suppress_echo {
         Some(EchoSuppressed::new()?)
     } else {
         None
     };
-    // Only reachable with `suppress_echo: true` when `cfg!(unix)` is also
-    // true (`ops::resolve_invite_code_source`'s `echo_can_be_suppressed`
-    // gate), so there is nothing to suppress here on any other platform.
-    #[cfg(not(unix))]
-    let _ = suppress_echo;
 
     let mut raw = String::new();
     let cap = qsh_core::ops::INVITE_CODE_STDIN_MAX as u64 + 1;
@@ -2438,8 +2425,23 @@ impl Drop for EchoSuppressed {
     }
 }
 
+/// The Windows twin: clears `ENABLE_ECHO_INPUT` on the console input and
+/// puts the original mode back on every exit path, a panic, `CTRL_BREAK` and
+/// a closing window included (`tui::windows::EchoSuppressed`, ADR-0035
+/// decision 11). Line editing and Ctrl-C handling stay as they were.
+#[cfg(windows)]
+struct EchoSuppressed(#[allow(dead_code)] tui::windows::EchoSuppressed);
+
+#[cfg(windows)]
+impl EchoSuppressed {
+    fn new() -> Result<Self, OpError> {
+        tui::windows::EchoSuppressed::enter(tui::windows::system::console())
+            .map(Self)
+            .map_err(invite_code_read_failure)
+    }
+}
+
 /// Prompt on stderr and read one line from the terminal with echo off.
-#[cfg(unix)]
 fn read_invite_code_from_terminal(prompt: &str) -> Result<String, OpError> {
     let _quiet = EchoSuppressed::new()?;
 
@@ -2456,24 +2458,6 @@ fn read_invite_code_from_terminal(prompt: &str) -> Result<String, OpError> {
     stderr_note!("");
     read.map_err(invite_code_read_failure)?;
     Ok(line)
-}
-
-/// Unreachable in practice: `invite_code` passes `cfg!(unix)` as
-/// `echo_can_be_suppressed`, so on this platform
-/// `ops::resolve_invite_code_source` already refuses
-/// (`NO_TERMINAL_ECHO_SUPPRESSION`, `ErrorCode::Unsupported`) before ever
-/// constructing `InviteCodeSource::Prompt` — that is the actual contract
-/// `docs/CLI.md` §6.11 documents for the Windows client (P1,
-/// `docs/design/architecture.md` §8), and it is now unit-tested there
-/// (`ops::tests::resolve_invite_code_source_decision_table`). This exists
-/// only so the `Prompt` match arm in `invite_code` type-checks on every
-/// platform.
-#[cfg(not(unix))]
-fn read_invite_code_from_terminal(_prompt: &str) -> Result<String, OpError> {
-    unreachable!(
-        "resolve_invite_code_source refuses before returning Prompt when \
-         echo_can_be_suppressed is false"
-    )
 }
 
 /// Render one op result in whichever output mode was requested and return
