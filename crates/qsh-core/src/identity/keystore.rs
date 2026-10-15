@@ -3,7 +3,7 @@
 //!
 //! | mode | store | notes |
 //! |---|---|---|
-//! | `platform` | [`PlatformKeyStore`] | keyring-core 1.x with a per-platform store crate: macOS Keychain / Linux Secret Service |
+//! | `platform` | [`PlatformKeyStore`] | keyring-core 1.x with a per-platform store crate: macOS Keychain / Linux Secret Service / Windows Credential Manager |
 //! | `file` | [`FileKeyStore`] | `identity/device.key`, 0600 in a 0700 directory |
 //! | (tests) | [`MemoryKeyStore`] | process-local, never touches disk |
 //!
@@ -126,9 +126,10 @@ impl KeyStore for FileKeyStore {
 // Platform
 // ---------------------------------------------------------------------------
 
-/// The OS credential store (macOS Keychain, Linux Secret Service) via
-/// keyring-core 1.x plus `apple-native-keyring-store` (macOS) or
-/// `zbus-secret-service-keyring-store` (Linux), keyed by
+/// The OS credential store (macOS Keychain, Linux Secret Service, Windows
+/// Credential Manager) via keyring-core 1.x plus `apple-native-keyring-store`
+/// (macOS), `zbus-secret-service-keyring-store` (Linux) or
+/// `windows-native-keyring-store` (Windows), keyed by
 /// `("qsh", <device_id>)` so two config directories on one machine never
 /// collide. The stored format (service `qsh`, account `device_id`, Base64
 /// PKCS#8 DER) is the same one the keyring 3.x backends wrote, so an
@@ -136,6 +137,17 @@ impl KeyStore for FileKeyStore {
 ///
 /// The key is stored Base64-encoded because the credential stores this
 /// backend targets hold UTF-8 secrets.
+///
+/// **Windows entry:** a `CRED_TYPE_GENERIC` credential whose `UserName` is
+/// the `device_id`, whose `TargetName` is `<device_id>.qsh`
+/// (`windows_target_name`) and whose persistence is
+/// `CRED_PERSIST_LOCAL_MACHINE` (`WINDOWS_PERSISTENCE`): it survives
+/// reboots and stays on this machine instead of roaming with the profile.
+/// The target carries the device id because a Credential Manager entry is
+/// addressed by target alone, so a bare `qsh` target would let a second
+/// config directory overwrite the first one's key. The blob is the Base64
+/// text as UTF-16, far below the 2560-byte `CRED_MAX_CREDENTIAL_BLOB_SIZE`
+/// for the 48-byte Ed25519 PKCS#8 key (`windows_blob_for_an_ed25519_key_fits_the_credential_limit`).
 ///
 /// **Runtime note:** the Linux backend drives D-Bus with its own blocking
 /// executor, which must never run *on* a tokio worker (it would panic on a
@@ -164,7 +176,23 @@ impl PlatformKeyStore {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// The `persistence` modifier `windows-native-keyring-store` maps to
+/// `CRED_PERSIST_LOCAL_MACHINE` (its default, `Enterprise`, would roam with
+/// a domain profile). Pure so every target's tests can pin it.
+#[cfg(any(windows, test))]
+pub(crate) const WINDOWS_PERSISTENCE: &str = "Local";
+
+/// The Credential Manager `TargetName` for `account`: the store's default
+/// scheme, `<account>.<service>`. Test-only on purpose: production leaves the
+/// target to the store (an explicit `target` modifier would drop the entry's
+/// `UserName`), and `credential_manager_round_trip_on_the_runner` compares
+/// this name with the real entry to catch drift.
+#[cfg(test)]
+pub(crate) fn windows_target_name(account: &str) -> String {
+    format!("{account}.{KEYRING_SERVICE}")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod platform_impl {
     use super::{KeyStoreError, PlatformKeyStore};
 
@@ -204,9 +232,34 @@ mod platform_impl {
         Ok(store)
     }
 
+    #[cfg(windows)]
+    fn open_store() -> keyring_core::Result<std::sync::Arc<keyring_core::api::CredentialStore>> {
+        let store: std::sync::Arc<keyring_core::api::CredentialStore> =
+            windows_native_keyring_store::Store::new()?;
+        Ok(store)
+    }
+
+    /// Per-entry modifiers: none on macOS and Linux; on Windows only the
+    /// persistence class ([`super::WINDOWS_PERSISTENCE`]). The target name is
+    /// deliberately left to the store's default scheme: an explicit `target`
+    /// modifier makes the store drop the user name, and the entry must carry
+    /// `device_id` as its `UserName` (`windows_target_name` pins the result).
+    #[cfg(windows)]
+    fn modifiers() -> Option<std::collections::HashMap<&'static str, &'static str>> {
+        Some(std::collections::HashMap::from([(
+            "persistence",
+            super::WINDOWS_PERSISTENCE,
+        )]))
+    }
+
+    #[cfg(not(windows))]
+    fn modifiers() -> Option<std::collections::HashMap<&'static str, &'static str>> {
+        None
+    }
+
     pub(super) fn entry(store: &PlatformKeyStore) -> Result<keyring_core::Entry, KeyStoreError> {
         open_store()
-            .and_then(|s| s.build(super::KEYRING_SERVICE, &store.account, None))
+            .and_then(|s| s.build(super::KEYRING_SERVICE, &store.account, modifiers().as_ref()))
             .map_err(map_error)
     }
 
@@ -227,7 +280,7 @@ mod platform_impl {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 impl KeyStore for PlatformKeyStore {
     fn kind(&self) -> KeyStoreKind {
         KeyStoreKind::Platform
@@ -279,7 +332,7 @@ impl KeyStore for PlatformKeyStore {
 /// On targets QSH does not (yet) support as hosts there is no credential
 /// store wired up at all: every operation reports `Unavailable`, so
 /// `auto` degrades to the file store and `platform` fails loudly.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl KeyStore for PlatformKeyStore {
     fn kind(&self) -> KeyStoreKind {
         KeyStoreKind::Platform
@@ -298,7 +351,7 @@ impl KeyStore for PlatformKeyStore {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn unsupported() -> KeyStoreError {
     KeyStoreError::Unavailable(format!(
         "no OS credential store is wired up for {}",
@@ -423,9 +476,164 @@ mod tests {
         assert!(matches!(err, KeyStoreError::Other(_)), "{err:?}");
     }
 
+    /// ADR-0035 결정 12: the Windows entry is a generic credential with
+    /// `LOCAL_MACHINE` persistence, user name `device_id`, under a target
+    /// that ends in the `qsh` service. The pure half of the pin; the entry
+    /// the store really writes is read back in
+    /// `credential_manager_round_trip_on_the_runner`.
+    #[test]
+    fn credential_entry_attributes_are_generic_local_machine_under_target_qsh() {
+        assert_eq!(KEYRING_SERVICE, "qsh");
+        assert_eq!(WINDOWS_PERSISTENCE, "Local");
+        assert_eq!(
+            windows_target_name("device_01JABCDEF"),
+            "device_01JABCDEF.qsh"
+        );
+        // Two devices on one machine never share an entry.
+        assert_ne!(
+            windows_target_name("device_a"),
+            windows_target_name("device_b")
+        );
+    }
+
+    /// The Credential Manager keeps the Base64 text as UTF-16; the key
+    /// `qsh init` generates (and the only kind `--import-ssh-key` reads,
+    /// Ed25519) stays far below its 2560-byte blob limit.
+    #[test]
+    fn windows_blob_for_an_ed25519_key_fits_the_credential_limit() {
+        use base64::Engine as _;
+
+        const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 5 * 512;
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(key.serialize_der());
+        assert!(encoded.encode_utf16().count() * 2 <= CRED_MAX_CREDENTIAL_BLOB_SIZE);
+    }
+
+    /// A unique `qsh` entry that is deleted when the test ends, even when an
+    /// assertion fails first, so the real Credential Manager keeps nothing.
+    #[cfg(windows)]
+    struct ScratchEntry(PlatformKeyStore);
+
+    #[cfg(windows)]
+    impl ScratchEntry {
+        fn new() -> Self {
+            Self(PlatformKeyStore::new(format!(
+                "device_test_{}",
+                ulid::Ulid::generate()
+            )))
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ScratchEntry {
+        fn drop(&mut self) {
+            let _ = self.0.delete();
+        }
+    }
+
+    /// What `CredReadW` returns for `target` as a generic credential:
+    /// `(user name, persistence, blob bytes)`, or `None` when no generic
+    /// credential has that target.
+    #[cfg(windows)]
+    fn raw_generic_credential(target: &str) -> Option<(String, u32, Vec<u8>)> {
+        use windows_sys::Win32::Security::Credentials::{
+            CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW,
+        };
+
+        let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut raw: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; on success
+        // `raw` points at a credential that is read and then freed once.
+        unsafe {
+            if CredReadW(wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) == 0 {
+                return None;
+            }
+            let credential = &*raw;
+            let mut user = Vec::new();
+            let mut at = credential.UserName;
+            while !at.is_null() && *at != 0 {
+                user.push(*at);
+                at = at.add(1);
+            }
+            let blob = std::slice::from_raw_parts(
+                credential.CredentialBlob,
+                credential.CredentialBlobSize as usize,
+            )
+            .to_vec();
+            let persist = credential.Persist;
+            CredFree(raw as *const _);
+            Some((String::from_utf16_lossy(&user), persist, blob))
+        }
+    }
+
+    /// The real Credential Manager of the account running the tests (the
+    /// runner's, or the user's in a manual run): a unique target name per
+    /// test, deleted by [`ScratchEntry`]'s drop even on failure
+    /// (ADR-0035 결정 12). Reads the entry back with `CredReadW` to pin what
+    /// the store crate wrote: a generic credential, `CRED_PERSIST_LOCAL_MACHINE`,
+    /// user name `device_id`, target `<device_id>.qsh`.
+    #[cfg(windows)]
+    #[test]
+    fn credential_manager_round_trip_on_the_runner() {
+        use windows_sys::Win32::Security::Credentials::CRED_PERSIST_LOCAL_MACHINE;
+
+        let scratch = ScratchEntry::new();
+        let store = &scratch.0;
+        assert_eq!(store.kind(), KeyStoreKind::Platform);
+        assert!(store.load().unwrap().is_none(), "a fresh entry is absent");
+        store.store(KEY).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().as_slice(), KEY);
+
+        let target = windows_target_name(store.account());
+        let (user, persist, _) = raw_generic_credential(&target)
+            .expect("a CRED_TYPE_GENERIC credential under <device_id>.qsh");
+        assert_eq!(user, store.account());
+        assert_eq!(persist, CRED_PERSIST_LOCAL_MACHINE);
+
+        // Writing again replaces the value instead of failing or duplicating.
+        store.store(b"another key").unwrap();
+        assert_eq!(store.load().unwrap().unwrap().as_slice(), b"another key");
+
+        store.delete().unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(raw_generic_credential(&target).is_none());
+        store.delete().unwrap();
+    }
+
+    /// The blob is the Base64 text of the PKCS#8 DER, as UTF-16 (the form a
+    /// keyring-based reader on any platform decodes), so the key stored on
+    /// Windows is the same bytes the other stores hold.
+    #[cfg(windows)]
+    #[test]
+    fn credential_manager_blob_is_the_same_pkcs8_base64_as_other_platforms() {
+        use base64::Engine as _;
+
+        let scratch = ScratchEntry::new();
+        let store = &scratch.0;
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let der = key.serialize_der();
+        store.store(&der).unwrap();
+
+        let (_, _, blob) = raw_generic_credential(&windows_target_name(store.account()))
+            .expect("the entry was written");
+        let units: Vec<u16> = blob
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        let text = String::from_utf16(&units).expect("the blob is UTF-16 text");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .unwrap(),
+            der
+        );
+    }
+
     /// Touches the real OS credential store, so it is opt-in:
     /// `QSH_TEST_PLATFORM_KEYSTORE=1 cargo test -- --ignored`.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[test]
     #[ignore = "touches the OS credential store; run with QSH_TEST_PLATFORM_KEYSTORE=1 -- --ignored"]
     fn platform_store_round_trips() {

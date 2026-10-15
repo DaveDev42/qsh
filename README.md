@@ -1007,8 +1007,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   copy the files elsewhere before rotation pushes them out if you need
   longer. `oldest_ts` in the result shows what is still kept.
 - The Windows service backend (the Task Scheduler commands behind `qsh
-  service`, and the Credential Manager and file-permission side of `qsh
-  identity move-key`) arrives with M19. Until then `qsh service` returns
+  service`) arrives with M19. Until then `qsh service` returns
   `UNSUPPORTED` on Windows.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin and the invite's consumption happen first, in

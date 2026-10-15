@@ -485,6 +485,98 @@ fn move_key_keeps_the_fingerprint_and_device_id() {
     assert_eq!(bytes_of(&paths, KEY_FILE), None);
 }
 
+/// ROADMAP M19 DoD, ADR-0035 결정 12: the key goes Credential Manager ->
+/// file -> Credential Manager and the device id, certificate and
+/// fingerprint are the ones from before. The platform store is the injected
+/// stand-in, so this never touches the real one; the real entry is pinned by
+/// `credential_manager_round_trip_on_the_runner`. After `--to file` the key
+/// file is owner-only (a protected DACL on Windows, 0600 elsewhere); after
+/// `--to platform` there is no key file at all.
+#[test]
+fn move_key_round_trips_between_credential_manager_and_file_with_the_same_fingerprint() {
+    let (_guard, paths, created, fake) = platform_identity();
+    let cert = bytes_of(&paths, CERT_FILE).unwrap();
+    let key = fake.holds().unwrap();
+
+    run_move(&paths, KeyStoreKind::File, &fake).0.unwrap();
+    assert_eq!(fake.holds(), None);
+    let key_file = paths.identity_dir().join(KEY_FILE);
+    assert!(key_file.exists());
+    #[cfg(windows)]
+    {
+        use crate::fsutil::dacl::ObjectKind;
+        use crate::fsutil::dacl::testing::assert_owner_only;
+
+        assert_owner_only(&key_file, ObjectKind::File);
+        assert_owner_only(&paths.identity_dir(), ObjectKind::Dir);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(&key_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let on_file = read_identity(&paths).unwrap().unwrap();
+    assert_eq!(on_file.key_store, KeyStoreKind::File);
+    assert_eq!(on_file.device_id, created.device_id);
+    assert_eq!(on_file.fingerprint.to_string(), created.fingerprint);
+
+    run_move(&paths, KeyStoreKind::Platform, &fake).0.unwrap();
+    assert!(
+        !key_file.exists(),
+        "no key file once the key is in the store"
+    );
+    assert_eq!(fake.holds().unwrap(), key);
+    let back = read_identity(&paths).unwrap().unwrap();
+    assert_eq!(back.key_store, KeyStoreKind::Platform);
+    assert_eq!(back.device_id, created.device_id);
+    assert_eq!(back.fingerprint.to_string(), created.fingerprint);
+    assert_eq!(bytes_of(&paths, CERT_FILE).unwrap(), cert);
+}
+
+/// ADR-0035 결정 12: `auto` tries the platform store first and, only when
+/// that store reports `Unavailable`, falls back to the (owner-only) key
+/// file; `platform` does not fall back; a reachable store is used and
+/// leaves no key file.
+#[test]
+fn auto_falls_back_to_the_file_store_when_credential_manager_is_unavailable() {
+    let key = b"stand-in pkcs8 bytes";
+
+    let (_guard, paths) = temp_paths();
+    let down = FakePlatform::default();
+    FakePlatform::flip(&down.unavailable);
+    let kind = store_key_in(&paths, KeyStoreMode::Auto, key, &down).unwrap();
+    assert_eq!(kind, KeyStoreKind::File);
+    assert!(paths.identity_dir().join(KEY_FILE).exists());
+    assert_eq!(down.holds(), None);
+    #[cfg(windows)]
+    {
+        use crate::fsutil::dacl::ObjectKind;
+        use crate::fsutil::dacl::testing::assert_owner_only;
+
+        assert_owner_only(&paths.identity_dir().join(KEY_FILE), ObjectKind::File);
+    }
+
+    let (_guard, paths) = temp_paths();
+    let err = store_key_in(&paths, KeyStoreMode::Platform, key, &down).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(
+        err.message.contains("platform key store unavailable"),
+        "{err}"
+    );
+    assert!(!paths.identity_dir().join(KEY_FILE).exists());
+
+    let (_guard, paths) = temp_paths();
+    let up = FakePlatform::default();
+    for mode in [KeyStoreMode::Auto, KeyStoreMode::Platform] {
+        let kind = store_key_in(&paths, mode, key, &up).unwrap();
+        assert_eq!(kind, KeyStoreKind::Platform, "{mode:?}");
+    }
+    assert_eq!(up.holds().as_deref(), Some(&key[..]));
+    assert!(!paths.identity_dir().join(KEY_FILE).exists());
+}
+
 /// `issued_by_ca` and the record's own `fingerprint` string survive the
 /// rewrite of `identity.toml` untouched.
 #[test]

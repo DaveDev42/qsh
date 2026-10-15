@@ -11,13 +11,20 @@ use crate::common;
 
 use common::{Sandbox, exit_code};
 
-#[cfg(unix)]
 use {
-    common::{HOST_ALIAS, ListenGuard, ReverseGuard, ServeGuard, hosts_array, poll_until},
+    common::{HOST_ALIAS, ServeGuard},
     qsh_core::identity::MemoryKeyStore,
     qsh_core::{Ops, Paths},
     qsh_proto::{IdentityMoveKeyReq, KeyStoreKind},
     serde_json::Value,
+};
+
+/// The reverse roles (`qsh listen`, `qsh serve --to`) have no Windows
+/// implementation until the Windows reverse role lands, so their guards and
+/// the waits that use them are unix only.
+#[cfg(unix)]
+use {
+    common::{ListenGuard, ReverseGuard, hosts_array, poll_until},
     std::time::Duration,
 };
 
@@ -110,33 +117,12 @@ fn move_key_rejects_auto_and_unknown_stores_as_usage_errors() {
     }
 }
 
-/// Windows builds open the op, but their `platform` store is the Credential
-/// Manager, which is M19 (ADR-0035 결정 12): `--to platform` is the same
-/// `INTERNAL` as `init --key-store platform`, and nothing changes. The
-/// error comes from "no platform store here", so this touches no real one.
-#[cfg(windows)]
-#[test]
-fn move_key_to_platform_is_internal_on_windows_before_m19() {
-    let sandbox = Sandbox::initialized();
-    let record = identity_file(&sandbox, "identity.toml");
-    let key = identity_file(&sandbox, "device.key");
-
-    let (code, envelope) = sandbox.json(&["identity", "move-key", "--to", "platform", "--json"]);
-    assert_eq!(code, 255, "{envelope}");
-    assert_eq!(envelope["error"]["code"], "INTERNAL", "{envelope}");
-    assert_eq!(identity_file(&sandbox, "identity.toml"), record);
-    assert_eq!(identity_file(&sandbox, "device.key"), key);
-
-    let (code, envelope) = sandbox.json(&["identity", "move-key", "--to", "file", "--json"]);
-    assert_eq!(code, 0, "{envelope}");
-    assert_eq!(envelope["data"]["moved"], false, "{envelope}");
-}
-
 /// Move this sandbox's key `file -> platform -> file` through a fake
 /// platform store, in-process, and return `(device_id, fingerprint)`
 /// before and after. The two moves are the whole operator story: the key
-/// leaves the file, sits only in the fake store, and comes back.
-#[cfg(unix)]
+/// leaves the file, sits only in the fake store, and comes back. The spawned
+/// binary cannot do this on any OS: its `platform` store is the real OS
+/// credential store, which no test here touches.
 fn round_trip_through_a_fake_platform_store(
     sandbox: &Sandbox,
 ) -> ((String, String), (String, String)) {
@@ -183,7 +169,6 @@ fn round_trip_through_a_fake_platform_store(
 }
 
 /// `trust.toml` as bytes: what a peer's pin of this device is stored in.
-#[cfg(unix)]
 fn trust_file(sandbox: &Sandbox) -> Vec<u8> {
     std::fs::read(sandbox.config_dir().join("trust.toml")).expect("trust.toml")
 }
@@ -199,20 +184,31 @@ fn trust_file(sandbox: &Sandbox) -> Vec<u8> {
 ///    registers into it;
 /// 3. this device is the reverse target (`qsh serve --to`), registering
 ///    into a listener.
-#[cfg(unix)]
+///
+/// Role 1 runs on every OS. Roles 2 and 3 need `qsh listen` and
+/// `qsh serve --to`, which a Windows host does not have yet, so they are
+/// unix only until it does.
 #[test]
 fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     let device = Sandbox::initialized();
     let device_fp = device.fingerprint();
 
-    // Three peers, each pinning this device by the fingerprint it had
-    // before the move.
+    // Peers, each pinning this device by the fingerprint it had before the
+    // move.
     let client = Sandbox::initialized(); // role 1: execs on this device
-    let target = Sandbox::initialized(); // role 2: registers into this device
-    let controller = Sandbox::initialized(); // role 3: this device registers into it
     let client_fp = client.fingerprint();
-    let target_fp = target.fingerprint();
-    let controller_fp = controller.fingerprint();
+    #[cfg(unix)]
+    let (target, target_fp) = {
+        let target = Sandbox::initialized(); // role 2: registers into this device
+        let fp = target.fingerprint();
+        (target, fp)
+    };
+    #[cfg(unix)]
+    let (controller, controller_fp) = {
+        let controller = Sandbox::initialized(); // role 3: this device registers into it
+        let fp = controller.fingerprint();
+        (controller, fp)
+    };
 
     // Role 1 and role 2 need this device to run first, for the address
     // the peers pin; start nothing until the key has moved.
@@ -238,38 +234,61 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     assert_eq!(trust_file(&client), client_trust, "client trust.toml");
     drop(serve);
 
+    #[cfg(unix)]
+    reverse_roles_after_move(
+        &device,
+        &device_fp,
+        &target,
+        &target_fp,
+        &controller,
+        &controller_fp,
+    );
+}
+
+/// Roles 2 and 3 of the route test: this device as the reverse listener a
+/// target registers into, then as the reverse target registering into a
+/// controller.
+#[cfg(unix)]
+fn reverse_roles_after_move(
+    device: &Sandbox,
+    device_fp: &str,
+    target: &Sandbox,
+    target_fp: &str,
+    controller: &Sandbox,
+    controller_fp: &str,
+) {
     // --- Role 2: reverse listener.
-    device.trust_add_with_role("nat-target", None, &target_fp, "reverse");
-    let listen = ListenGuard::start(&device);
-    target.trust_add("hub", Some(listen.addr()), &device_fp);
-    let target_trust = trust_file(&target);
-    let reverse = ReverseGuard::start_serve_to(&target, "hub");
+    device.trust_add_with_role("nat-target", None, target_fp, "reverse");
+    let listen = ListenGuard::start(device);
+    target.trust_add("hub", Some(listen.addr()), device_fp);
+    let target_trust = trust_file(target);
+    let reverse = ReverseGuard::start_serve_to(target, "hub");
     let hosts = poll_until("the target to register into this device", WAIT, || {
-        let hosts = hosts_array(&device);
+        let hosts = hosts_array(device);
         hosts
             .iter()
             .any(|h| h["connection_mode"] == "reverse" && h["state"] == "reachable")
             .then_some(hosts)
     });
     assert!(!hosts.is_empty());
-    assert_eq!(trust_file(&target), target_trust, "target trust.toml");
+    assert_eq!(trust_file(target), target_trust, "target trust.toml");
     reverse.shut_down();
     drop(listen);
 
     // --- Role 3: reverse target.
-    controller.trust_add_with_role("moved-device", None, &device_fp, "reverse");
-    let controller_listen = ListenGuard::start(&controller);
-    device.trust_add("hub", Some(controller_listen.addr()), &controller_fp);
-    let controller_trust = trust_file(&controller);
-    let moved_target = ReverseGuard::start_serve_to(&device, "hub");
+    controller.trust_add_with_role("moved-device", None, device_fp, "reverse");
+    let controller_listen = ListenGuard::start(controller);
+    device.trust_add("hub", Some(controller_listen.addr()), controller_fp);
+    let controller_trust = trust_file(controller);
+    let moved_target = ReverseGuard::start_serve_to(device, "hub");
     poll_until("this device to register into the controller", WAIT, || {
-        hosts_array(&controller)
+        hosts_array(controller)
             .iter()
             .any(|h| h["connection_mode"] == "reverse" && h["state"] == "reachable")
             .then_some(())
     });
     assert_eq!(
-        trust_file(&controller),
+        trust_file(controller),
         controller_trust,
         "controller trust.toml"
     );
