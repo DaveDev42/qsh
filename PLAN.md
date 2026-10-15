@@ -351,6 +351,12 @@ Step 1은 크기 내역 밖이다.
 - threat-model §4 B "이 장비 쪽 pin이 방향 없이 원격의 inbound 인증까지 통과시킨다"(결정 21), "기존 role 없는 pin을 부트스트랩이 `full`로 넓힌다"(결정 12), §4 D "rc 출력이나 ssh stderr에 섞인 비밀이 qsh 로그에 남는다"(결정 11·19), §4 E 응답자 출력 조작 행에 덮어쓰기 없음 핀 덧붙임.
 - Windows: `qsh pair ssh`는 Windows client에서 연다(ADR-0044 결정 25). 원격 응답자가 필요한 테스트는 `cfg(unix)`이고, Windows 다리는 `remote_qsh_too_old`·`ssh_not_found`·`INVALID_ARGUMENT` 경로와 렌더러 테스트를 돈다.
 
+- Step 5 리뷰에서 넘어온 것(`crates/qsh-core/src/ssh_bootstrap/`):
+  - `Dest::parse`는 host 절반에 `validate_peer_label`을 늘 건다. 결정 7의 `--as`가 기본 pin 이름을 대신하므로, label 규칙에 맞지 않는 Host alias도 `--as`와 함께면 쓸 수 있어야 한다. ssh 피연산자 검증과 pin 이름 검증을 나눈다.
+  - 실제 OpenSSH는 연결 뒤 SIGINT에 signal로 죽지 않고 255(`Killed by signal 2`)로 끝날 수 있다. 취소 토큰이 늦게 서면 `map_ssh_exit`가 `CONNECTION_FAILED`를 낸다. 호출자를 배선할 때 `reap_after_close`가 `cancel.is_canceled()`를 먼저 보고 `CANCELED`를 고른다. 테스트로 고정한다.
+  - 옵션처럼 보이는 dest 거부를 pair 수준에서 단언한다(가짜 `ssh` 호출 0회). Step 5의 `ssh_bootstrap_rejects_a_dest_that_looks_like_an_option`은 `Dest::parse`만 부르므로 이 단언을 대신하지 못한다. 실제 호출자의 BatchMode 배선도 같이 고정한다.
+  - `resolve`의 취소 경로(취소 시 `ssh -G` 자식 종료)와 Windows에서 실제 자식이 회수되는지를 테스트로 덮는다.
+
 **(b) 테스트·게이트:**
 
 `crates/qsh-cli/tests/it/ssh_bootstrap.rs`(가짜 `ssh` 하네스가 다른 `QSH_CONFIG_DIR`의 응답자를 부름).
@@ -641,7 +647,7 @@ Step 1은 크기 내역 밖이다.
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
 | 1 | `ssh_bootstrap` 모듈의 arch 금지 편입 | `crates/qsh-core/src/ssh_bootstrap/`은 자식 프로세스와 UDP probe만 쓰고 QUIC를 이름 짓지 않으므로 `crates/qsh-core/src/`의 `quinn::` 금지로 충분하다. 확인 dial은 `qsh_transport`의 중립 타입으로 한다. 디렉터리 범위 금지를 새로 더하지 않는 쪽이 초안 | Step 5 |
-| 2 | 가짜 `ssh` 실행 파일의 자리 | `crates/qsh-testkit`에 `[[bin]] qsh-fake-ssh`를 두고 하네스 헬퍼가 `env!("CARGO_BIN_EXE_qsh-fake-ssh")`로 찾는다. testkit bin이 cargo-deny나 release 묶음에 들어가지 않는지 확인 | Step 5 |
+| 2 | 가짜 `ssh` 실행 파일의 자리 (확정: `crates/qsh-testkit/src/bin/qsh-fake-ssh.rs`, `FakeSsh::locate_bin`이 nextest 빌드 산출물을 찾고 없으면 `cargo build` 한 번, mode는 환경 변수가 아니라 복사한 바이너리 옆 `fake-ssh.cfg`로 고른다(`set_var` 경합 회피, testing.md)) | `crates/qsh-testkit`에 `[[bin]] qsh-fake-ssh`를 두고 하네스 헬퍼가 `env!("CARGO_BIN_EXE_qsh-fake-ssh")`로 찾는다. testkit bin이 cargo-deny나 release 묶음에 들어가지 않는지 확인 | Step 5 |
 | 3 | 숨김 `pair ssh-respond`의 man 페이지 | 생성기가 숨김 하위 명령을 건너뛰면 페이지 없음. 건너뛰지 않으면 생성기에서 숨김을 걸러 내는 쪽(사용자 표면이 아니므로) | Step 6 |
 | 4 | `PairSshReq`·`PairSshData`의 자리 | `crates/qsh-proto/src/types/trust.rs`(origin `1a4af3b` 기준 360줄)에 더한다. 800줄을 넘기게 되면 새 `types/pair.rs` | Step 7 |
 | 5 | M16 부하 filterset | 테스트 이름 접두 `trust_withdrawal::`, `an_established_connection_is_closed`, `ssh_bootstrap`, `ssh_respond`, `auto_bootstrap`, `bootstrapped_`, `trust_store_poll_` | Step 3·10 |

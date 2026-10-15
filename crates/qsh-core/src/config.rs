@@ -455,6 +455,9 @@ pub struct Config {
     /// strike count (ADR-0021 decision 4). Named [`RecoverySection`]
     /// because [`crate::RecoveryConfig`] is the attach-recovery struct.
     pub recovery: RecoverySection,
+    /// `[ssh]` — the system `ssh` that `qsh pair ssh` runs once to pin both
+    /// sides (`docs/adr/0044-ssh-bootstrap.md` decisions 2, 4, 9).
+    pub ssh: SshConfig,
 }
 
 /// `[serve]` section.
@@ -798,6 +801,82 @@ impl ServeConfig {
 pub struct IdentityConfig {
     /// Private-key store preference; `qsh init --key-store` wins over it.
     pub key_store: Option<KeyStoreMode>,
+}
+
+/// `[ssh]` section (ADR-0044 decisions 2, 4, 9). Three keys, all optional.
+///
+/// An unknown value of `bootstrap` is a `CONFIG_ERROR` at load, like every
+/// other enumerated key (`[identity].key_store`): a typo must not silently
+/// turn the automatic bootstrap on or off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshConfig {
+    /// `"auto"` (the default) lets `qsh [user@]host` and `qsh cp` start the
+    /// bootstrap for a name nothing resolves; `"off"` never does. The
+    /// explicit `qsh pair ssh` ignores it.
+    pub bootstrap: Option<SshBootstrapMode>,
+    /// The `ssh` executable. Unset: `ssh` found on `PATH`, `ssh.exe` on
+    /// Windows.
+    pub program: Option<String>,
+    /// The `qsh` the remote shell runs for `pair ssh-respond`. Unset: `qsh`.
+    /// `qsh pair ssh --remote-qsh` wins over it.
+    pub remote_qsh: Option<String>,
+}
+
+/// Value of `[ssh].bootstrap`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshBootstrapMode {
+    /// The default: an unresolvable name may start the bootstrap.
+    #[default]
+    Auto,
+    /// The bootstrap starts only from the explicit `qsh pair ssh`.
+    Off,
+}
+
+impl SshConfig {
+    /// The `ssh` program used when `[ssh].program` is unset.
+    pub const DEFAULT_PROGRAM: &'static str = if cfg!(windows) { "ssh.exe" } else { "ssh" };
+    /// The remote `qsh` used when `[ssh].remote_qsh` is unset.
+    pub const DEFAULT_REMOTE_QSH: &'static str = "qsh";
+
+    /// Effective `[ssh].bootstrap`.
+    pub fn bootstrap_mode(&self) -> SshBootstrapMode {
+        self.bootstrap.unwrap_or_default()
+    }
+
+    /// Effective `ssh` executable. An empty or blank `program` is a
+    /// `CONFIG_ERROR`: running "" would fail with a less useful message.
+    pub fn program(&self) -> Result<&str, OpError> {
+        non_blank(self.program.as_deref(), "program", Self::DEFAULT_PROGRAM)
+    }
+
+    /// Effective remote `qsh` (before quoting, see
+    /// [`crate::ssh_bootstrap::quote_remote_program`]). Blank is a
+    /// `CONFIG_ERROR`.
+    pub fn remote_qsh(&self) -> Result<&str, OpError> {
+        non_blank(
+            self.remote_qsh.as_deref(),
+            "remote_qsh",
+            Self::DEFAULT_REMOTE_QSH,
+        )
+    }
+}
+
+fn non_blank<'a>(
+    value: Option<&'a str>,
+    key: &str,
+    default: &'static str,
+) -> Result<&'a str, OpError> {
+    match value {
+        None => Ok(default),
+        Some(v) if v.trim().is_empty() => Err(OpError::new(
+            ErrorCode::ConfigError,
+            format!("[ssh].{key} must not be empty"),
+        )
+        .with_retryable(false)),
+        Some(v) => Ok(v),
+    }
 }
 
 /// `[audit]` section — audit log lifecycle (`docs/design/architecture.md`

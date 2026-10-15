@@ -33,10 +33,16 @@
 //!   `crates/qsh-testkit/tests/it/dynamic_loopback.rs` and its reverse-route
 //!   twin).
 //!
+//! - [`fake_ssh`]: [`fake_ssh::FakeSsh`], a private directory holding a copy
+//!   of the `qsh-fake-ssh` executable this crate builds, which records its
+//!   argv and plays the system `ssh` of the SSH bootstrap tests (ADR-0044)
+//!   with no sshd and no OpenSSH configuration.
+//!
 //! This crate may depend on any workspace crate.
 
 pub mod chaos;
 pub mod env_check;
+pub mod fake_ssh;
 pub mod fixtures;
 pub mod loopback;
 pub mod net_probe;

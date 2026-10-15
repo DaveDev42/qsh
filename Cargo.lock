@@ -1909,6 +1909,7 @@ version = "0.4.3"
 dependencies = [
  "base64",
  "blake3",
+ "libc",
  "qsh-core",
  "qsh-proto",
  "qsh-transport",
