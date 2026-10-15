@@ -2,11 +2,11 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)는 2026-10-15 닫혔다. 현재 마일스톤은 M16(SSH 부트스트랩과 신뢰 철회)이고 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)와 M16(SSH 부트스트랩과 신뢰 철회)은 2026-10-15 닫혔다. 현재 마일스톤은 M17(운영 표면)이고 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M20)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
-닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`.
+닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`, M16 `66b6f4d`.
 
 ## P0 MVP 완료 선언의 조건
 
@@ -22,7 +22,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | M8 DoD 4 | wire freeze 발효와 독립 검증 계약(SC7) | 저장소 밖 조직 액션이라 캠페인 문서가 없다 | 소유: 운영자 |
 | M9 DoD 1 | SC1 재측정 3회 | `docs/campaigns/m9-stopwatch.md` | M7 DoD 1에 종속. `qsh setup` 캠페인의 비교 기준 |
 
-총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 40~65ew(추정, 2026-10-12·13 재기획 반영)에, ADR이 서야 산정할 수 있는 두 항목(M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
+총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 41~67ew(추정, 2026-10-12·13 재기획 반영, M17 (d) 구현은 ADR-0033이 1.2~1.8ew로 산정)에, ADR이 서야 산정할 수 있는 M18의 보안 가산분이 더해진다. 내역은 §5.2.
 
 ## 1. 시퀀싱 원칙
 
@@ -240,7 +240,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **마감 노트 (2026-10-15):** 전 DoD 충족. (b) Step 9~16 `bd0ae57`·`3855954`·`a86123d`·`f64f3ba`·`16388d9`·`b1fcf3a`·`1a4af3b`·`08f663c`, 태그 대조 drift `ce0a84c`, Windows·macOS·의존성 보정 `668214b`·`1d02860`·`a9748a4`·`dbd6a5b`·`5f0b838`. CI run `38614653051`(acceptance 포함) 초록. 부하 아래 `scripts/stress/m15.filter` 50/50(156개, Dave-Windows-WSL 8 vCPU), 지연 단언 `m15-latency.filter` 셋은 부하 없이 `-j 1`로 50/50. wire 변경은 `a86123d`(`FileReadOpen`·`FileWriteOpen`·`FileListOpen`·`FileMkdirOpen`과 `FILE_DATA`) 하나다. Windows는 `file.v1`을 광고하지 않고 네 op에 `UNSUPPORTED`로 답한다(M19·M20). 같은 기간 통합 테스트를 crate당 바이너리 하나(`tests/it`)로 합쳤다(`8a557c2`). 사람 몫 `decode_file_frame` 누적 fuzz-hours는 §5.5. 계획 원문은 `7cbeced`(코드 인용은 같은 스텝 번호의 `1a4af3b`).
 - **크기:** 7.0~10.5ew. (a) ADR-0045 2.7~4.2(trust.toml role 키, 평가 단계 하나, `trust set-role`, acl show/check·doctor 변경, fixture 아홉) / (b) ADR-0029 4.3~6.3(2026-10-11 초안 3.3~5.0에 재귀 복사 1.0~1.3). 4ew를 넘으므로 (a)와 (b)를 순서대로 따로 닫아도 된다.
 
-### M16 — SSH 부트스트랩과 신뢰 철회
+### M16 — SSH 부트스트랩과 신뢰 철회 ✅ 완료 (2026-10-15)
 
 - **범위:** 2026-10-12 사용자 결정("기존 SSH의 설정과 키를 활용해서 바로 qsh가 동작할 수 있게")으로 다시 짰다. 이전 범위의 pin 방향 축(ADR-0030), listener 초대 상환(ADR-0015), CSR 다대 CA 서명(ADR-0016)은 기각했고, rotation·revocation(ADR-0031)은 (b) 하나로 줄였다.
   - (a) SSH 부트스트랩(ADR-0044). pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 `ssh`를 한 번 거쳐 원격의 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. `~/.ssh/config`, ssh-agent, 암호 걸린 키, known_hosts는 ssh가 처리하고 qsh는 `ssh -G`로 HostName만 읽는다. 원격 pin은 ADR-0045 role `full`(`--role`로 바꿈), 이 장비 쪽 pin은 role `none`이다. 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다. 역방향 구도는 `qsh pair ssh <dest> --reverse --to <이 장비의 주소>`가 같은 절차로 연다(원격 pin `full`, 이 장비 쪽 pin `reverse`). 원격 설치와 serve 기동은 대신하지 않는다.
@@ -254,6 +254,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - 새 명령·필드는 fixture 등재와 등록 완전성, man 재생성을 갖춘다. 부트스트랩 직후 pin 이름·role 고지가 나온다. `docs/design/threat-model.md` §3·§4가 ssh 신뢰 승계와 연결 재검증을 다룬다.
   - 안정성: M16이 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`), 실제 시계 2초 단언이 부하 아래에서 흔들리면 그 테스트만 부하 없이 `-j 1`로 50회 연속 초록이고 주입 시계 테스트가 계약을 고정한다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
+- **마감 노트 (2026-10-15):** 전 DoD 충족. (b) 신뢰 철회 Step 2·3 `fd92130`·`029c83b`(연결 512개가 한 번의 변경에 240ms 안에 닫힘), (a) SSH 부트스트랩 Step 4~9 `aba7bd6`·`6db09a3`·`ddb39fb`·`6445922`·`e8cd7a3`·`7c43332`, 마감 절차 1·2 `b880aab`. CI run `38704818413`(acceptance 포함) 초록. 부하 아래 `scripts/stress/m16.filter` 50/50(195개, Dave-Windows-WSL 8 vCPU). 새 지연 단언이 없어 `m16-latency.filter`는 두지 않았다. `19cc424..b880aab`의 wire(`crates/qsh-proto/proto`, `wire.rs`, `local.rs`)와 `capabilities.json` diff는 0이다. ADR-0031 결정 7의 `listen` 문장은 착지 동작(닫힌 등록은 Stale로 남음)에 맞춰 개정 이력과 함께 고쳤다. Windows 귀속은 자동 발동 M19, 응답자 M20, `serve --to`·`listen` 재검증 쌍둥이 M19·M20이다(ADR-0035 개정 이력). 사람 몫 `parse_ssh_bootstrap_line` 누적 fuzz-hours와 실제 OpenSSH 회차(`docs/campaigns/p1-ssh-bootstrap.md`)는 §5.5. 계획 원문은 `66b6f4d`.
 - **크기:** 3.6~5.6ew. (a) ADR-0044 2.6~4.0(`--reverse` 포함, ADR-0045 role 몫 제외) / (b) ADR-0031 축소판 0.9~1.35 / 마감 0.1~0.2.
 
 ### M17 — 운영 표면
@@ -270,8 +271,9 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - (b) 마감 공통 절차 2(README 동기화)를 전면 재작성판에 대해 수행한다. 재작성 커밋이 두 SHA 고정 커밋보다 뒤다.
   - (c) PRD §17 개정 결정이 기록된다(2026-10-12 폐기로 충족).
   - (d) ADR-0033이 `승인됨`이다. 범위 ADR이 정한 항목마다 테스트와 fixture 등록 완전성을 갖추고, audit 조회 op에 대응하는 wire 메시지가 없음을 op registry 분류 테스트가 확인한다.
+  - 안정성: M17이 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`, `scripts/stress/m17.filter`).
   - 마일스톤 마감 공통 절차(§2) 1·2.
-- **크기:** 2.1~3.1ew + (d) 구현 미산정. (a) ADR 0.3 + 구현 1.0~1.5 / (b) 0.5~0.8 / (c) 0(폐기) / (d) 범위 ADR 0.2~0.3 / 마감 0.1~0.2.
+- **크기:** 3.3~4.9ew. (a) ADR 0.3 + 구현 1.0~1.5 / (b) 0.5~0.8(착지) / (c) 0(폐기) / (d) 범위 ADR 0.2~0.3 + 구현 1.2~1.8(ADR-0033) / 마감 0.1~0.2.
 
 ### M18 — 세션 거처
 
@@ -308,6 +310,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - `docs/design/threat-model.md` §3에 Windows 콘솔 입력, named pipe, 작업 정의 진입점이, §4에 pipe 선점·다른 사용자 접속 위협이 오른다.
   - CI가 볼 수 없는 회차(실제 터미널 렌더링, 두 장비 사이 역방향, 절전 복귀, 둘째 계정 거부, 로그온 작업과 상시 기동 변형의 수명, Windows OpenSSH Server 상대 `pair ssh`, Credential Manager, Windows on ARM, SmartScreen과 세 설치 경로)를 사람이 확인하는 캠페인 문서 `docs/campaigns/p1-windows.md`가 사전 고정돼 커밋된다. 회차는 §5.5.
   - README Known limitations·설치 절과 §3 가드레일 표의 Windows 행이 새 범위와 일치한다.
+  - ADR-0032 Windows 열(작업 스케줄러 argv와 실행 상태 질의)의 핀 테스트가 Windows leg에서 초록이고, `qsh identity move-key`가 Credential Manager와 파일 store 사이를 왕복해도 fingerprint가 바뀌지 않음을 Windows leg 테스트가 고정한다(ADR-0032 결정 10·15, ADR-0035).
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 7.7~12.9ew(ADR-0035 세 번째 개정 2026-10-13). 비교 표본이 없어 신뢰도가 낮다. 첫 스텝은 콘솔 probe·터미널 trait 추출과 `cfg(unix)` 게이트 제거이고, 그 뒤 다시 매긴다.
 
@@ -335,12 +338,12 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M13 측정·배포 기반 | 3.1~6.1 | 완료 |
 | M14 TCP/TLS fallback | 1.0~1.8 | 철회(ADR-0043). (a)만 착지 |
 | M15 역할 기반 권한과 scp 호환 파일 복사 | 7.0~10.5 | ADR-0045·0029 승인됨 2026-10-14, M13 (b) 충족 |
-| M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | ADR-0044·0031 승인됨 2026-10-14, M15 (a) 착지 2026-10-14. 0015·0016·0030은 기각 |
-| M17 운영 표면 | 2.1~3.1 + 미산정 하나 | (b) 착지, (c) 폐기. ADR-0032·0033 승인됨 2026-10-14 |
+| M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | 완료 2026-10-15. 0015·0016·0030은 기각 |
+| M17 운영 표면 | 3.3~4.9 | (b) 착지, (c) 폐기. ADR-0032·0033 승인됨 2026-10-14 |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
 | M19 Windows client | 7.7~12.9 | ADR-0035 승인됨 2026-10-14 |
 | M20 Windows host | 3.6~6.3 | M19 닫힘 |
-| 합 | 약 40~65 + 미산정 둘 | |
+| 합 | 약 41~67 + 미산정 하나 | |
 
 ### 5.3 P1 밖으로 보낸다
 
@@ -370,7 +373,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 
 ### 5.4 P1 일정 리스크
 
-1. **사용자 승인.** 승인이 필요한 ADR이 남아 있다. 제안 ADR 여섯(0029, 0031~0033, 0035, 0044, 0045)과 조건부 하나(0034, M18). 대응: 마일스톤마다 ADR 초안을 첫 스텝으로 두고, 승인을 기다리는 동안 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
+1. **사용자 승인.** 착수 ADR 여섯(0029, 0031~0033, 0035, 0044, 0045)은 2026-10-14 모두 승인됐다. 남은 것은 조건부 하나(0034, M18)다. 대응: 마일스톤마다 ADR 초안을 첫 스텝으로 두고, 승인을 기다리는 동안 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
 2. **SC7 범위가 P1 표면만큼 넓어진다.** M8 DoD 4의 독립 검증 계약이 아직 없는데 P1은 wire 필드(H2), 새 op(M15)를 더한다. 대응: freeze 발효 전에는 `docs/design/protocol.md` §16.1 목록을, 발효 뒤에는 §16.4 규칙을 같은 커밋에서 지키고, threat model 행을 각 마일스톤 DoD에 넣었다.
 3. (해소) TCP 경로의 PTY 우선순위. ADR-0043이 TCP fallback을 철회해 위험이 사라졌다. 번호는 인용 때문에 남긴다.
 4. **M18의 echo 회귀와 IPC 보안.** H5는 대화형 echo가 로컬 IPC를 한 번 더 지나고 resume token custody(ADR-0007)와 부딪힐 수 있다. 대응: ADR-0034가 세 후보를 같은 표로 비교하고, 기존 echo 예산을 고치지 않는 것과 소켓 권한 모델을 DoD로 둔다.
@@ -387,7 +390,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`) | M12 (a) | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절). 회차 미실행 |
 | `cause` 분포 관측 기록 | 이슈 #10 본문과 2026-10-04T14:48Z 코멘트 | M11 (a) 빌드 | 기록됨, M13 (k) 착지 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md` | M13 (c) | PASS (2026-10-09 회차 1, v0.4.3, Debian 10 arm64 glibc 2.28, 에이전트가 네이티브 arm64 컨테이너에서 실행). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목 |
-| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line` | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
-| SSH 부트스트랩 실제 OpenSSH 회차(ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회) | `docs/campaigns/p1-ssh-bootstrap.md`(M16 (a)가 사전 고정) | M16 (a) | M16 (a)가 담긴 태그 |
+| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line`(`aba7bd6`, smoke 20,000 runs만) | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
+| SSH 부트스트랩 실제 OpenSSH 회차(ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회) | `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`) | M16 (a) | M16 (a)가 담긴 태그(`7c43332` 이후). 열림, 회차 0 |
 | Windows client·host 확인 | `docs/campaigns/p1-windows.md`(M19가 사전 고정, M20이 host 회차를 더해 다시 고정) | M19·M20 | Windows 자산이 붙은 태그 |
 | Windows 서명·배포 준비 | ADR-0035 결정 16 | M19 | SSL.com 개인 인증서·신원 확인과 eSigner TOTP, 시크릿 `WINDOWS_SIGN_ESIGNER_*` 넷과 변수 `WINDOWS_SIGN_EXPECTED_SUBJECT`, scoop-bucket 저장소와 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출 |
