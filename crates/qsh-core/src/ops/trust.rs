@@ -330,6 +330,18 @@ impl Ops {
         })
     }
 
+    /// The audit sink a fail-closed local write records to: the injected
+    /// one ([`Self::with_audit_sink`]), otherwise a [`FileAuditSink`] on the
+    /// configured `audit.log` path, built now.
+    pub(crate) fn audit_sink(&self) -> Result<Arc<dyn AuditSink>, OpError> {
+        Ok(match &self.audit {
+            Some(sink) => Arc::clone(sink),
+            None => Arc::new(FileAuditSink::new(
+                Config::load(&self.paths)?.audit.path(&self.paths),
+            )),
+        })
+    }
+
     /// The audit record every write of a role other than `none` leaves
     /// (ADR-0045 결정 8): `action` the op name, `principal` the pin acted on,
     /// `resource` the pin name, `role` the role written. Fail-closed like
@@ -351,12 +363,7 @@ impl Ops {
             pin.to_string(),
         );
         record.role = Some(role.as_str().to_string());
-        let sink: Arc<dyn AuditSink> = match &self.audit {
-            Some(sink) => Arc::clone(sink),
-            None => Arc::new(FileAuditSink::new(
-                Config::load(&self.paths)?.audit.path(&self.paths),
-            )),
-        };
+        let sink = self.audit_sink()?;
         sink.record(&record).map_err(|err| {
             OpError::new(
                 ErrorCode::Internal,

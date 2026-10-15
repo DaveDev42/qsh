@@ -102,6 +102,36 @@ impl FakeSsh {
         self.set("stdin_log", path.display().to_string())
     }
 
+    /// Make the responder call run `qsh_bin pair ssh-respond` against the
+    /// tree `config_dir`/`state_dir` (the remote account's, not the caller's)
+    /// with the fake's own stdin and stdout, in place of printing a script.
+    /// The remote qsh word the caller put in the ssh argv is replaced by
+    /// `qsh_bin`; see [`Self::respond_through_shell`] to keep it.
+    pub fn run_local_responder(
+        &mut self,
+        qsh_bin: &Path,
+        config_dir: &Path,
+        state_dir: &Path,
+    ) -> &mut Self {
+        self.set("respond_bin", qsh_bin.display().to_string());
+        self.set("respond_config_dir", config_dir.display().to_string());
+        self.set("respond_state_dir", state_dir.display().to_string())
+    }
+
+    /// With [`Self::run_local_responder`]: hand the remote command (the
+    /// caller's remote qsh word included, quoting and all) to a shell, as
+    /// sshd does: `sh -c` on Unix, `cmd.exe /C` on Windows.
+    pub fn respond_through_shell(&mut self) -> &mut Self {
+        self.set("respond_shell", "1".to_string())
+    }
+
+    /// With [`Self::run_local_responder`]: deliver the responder's stdout
+    /// with every `\n` turned into `\r\n`, like a Windows remote whose
+    /// console translates line ends.
+    pub fn respond_with_crlf(&mut self) -> &mut Self {
+        self.set("respond_crlf", "1".to_string())
+    }
+
     /// What the responder call received on stdin; empty before it ended.
     pub fn stdin_log(&self) -> Vec<u8> {
         std::fs::read(self.dir().join("stdin.log")).unwrap_or_default()
