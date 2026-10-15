@@ -290,7 +290,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** Linux 부하 아래 `m19.filter`(19개) 50/50. Windows 부하 반복은 Dave-Windows 박스에서 WSL interop으로 Windows 테스트 실행 파일을 직접 돌리고 Windows 쪽에 PowerShell busy loop 8개를 띄운 채 `console_probe::`(12개) 50/50이었다. Git for Windows bash의 `scripts/stress/run.sh` 대신 이 방식을 썼고 대상 OS·장비는 같다(§7.1 #12). 남은 약점: `session_open_term_defaults_to_xterm_256color_when_term_is_unset`은 `session_term` 순수 함수만 보고 `session_loop::run`이 `fallback_term()`을 `session.open`에 싣는 배선은 Step 9의 Windows attach 종단이 덮는다. close 이벤트 ConPTY 테스트는 ConPTY가 실제 `CTRL_CLOSE_EVENT`를 전달하지 못해 핸들러 본문을 직접 부르고, 실제 `SetConsoleCtrlHandler` 등록은 `CTRL_BREAK` 테스트가 본다. `preflight`는 출력뿐 아니라 입력의 `ENABLE_VIRTUAL_TERMINAL_INPUT` 거부도 `UNSUPPORTED`로 본다(1809 하한과 같은 판정).
 
-### Step 4 — 소유자 전용 DACL 모듈과 적용처 전부 (0.7~1.1ew)
+### Step 4 — 소유자 전용 DACL 모듈과 적용처 전부 (0.7~1.1ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 9·10, 결정 17 첫 항목, 결정 19의 threat-model §4 D와 README Known limitations, `resume.rs` 모듈 doc. ADR-0033 결정 6의 Windows 읽기 불가 행(`crates/qsh-core/src/audit/reader/tests.rs` 주석, `docs/design/architecture.md` §6 audit 조회 문단). 선행: Step 1.
 
@@ -313,6 +313,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - 기존 unix 0600/0700 테스트 무변경 초록
 
 **(c) 완료 판정:** 결정 9 목록의 모든 생성 경로가 같은 모듈을 부르고(`rg`로 `cfg(windows)` 생성 분기 전수 확인), DACL 실패 주입에서 파일이 없다. README 문장이 지워졌다. wire diff 0.
+
+**(d) 결과 (2026-10-16):** §7.1 #2는 `fsutil.rs`를 파일로 두고 하위 모듈 `fsutil/dacl.rs`(테스트는 `fsutil/dacl/tests.rs`)를 더하는 쪽으로 정했다. 경로 단위 금지에 걸리는 이동이 없어 `xtask/src/arch.rs`는 그대로다. "옛 상속 ACL 파일은 다음 쓰기가 바꿔 놓는다"는 임시 파일 + rename으로 쓰는 파일(키, `trust.toml`, `resume.json`)에만 성립한다. append로 여는 audit 로그는 회전이 새 파일을 만들 때, lock 모드로 여는 resume `.lock`은 지워졌다 다시 만들어질 때 바뀐다. 이 잔여는 threat-model D18과 architecture.md에 적었다. audit writer의 Windows 사이드카 잠금 파일은 `LockFileEx`와 함께 M20이다(ADR-0035 결정 24). Windows 다리: `wintest.sh -p qsh-core` 단위 1422개·통합 124개 초록.
 
 ### Step 5 — Credential Manager `platform` store와 Windows `move-key` 왕복 (0.4~0.7ew)
 
