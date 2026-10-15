@@ -33,6 +33,7 @@ mod reverse_unreachable_diagnostic;
 mod serve_sigterm_drain;
 mod session_follow;
 mod session_kill9;
+mod sessions_filter;
 mod setup;
 mod soak;
 mod socks_curl;

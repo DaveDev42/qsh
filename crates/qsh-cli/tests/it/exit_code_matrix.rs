@@ -630,6 +630,32 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Succeeds(0),
         },
         Case {
+            name: "sessions: filtered",
+            sandbox: &fleet.client,
+            args: &[
+                "sessions",
+                HOST_ALIAS,
+                "--state",
+                "running",
+                "--writer",
+                "none",
+                "--attachable",
+            ],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            name: "sessions: unknown state filter is empty, not an error",
+            sandbox: &fleet.client,
+            args: &["sessions", HOST_ALIAS, "--state", "no-such-state"],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            name: "sessions: a filter flag without its value",
+            sandbox: &fleet.client,
+            args: &["sessions", HOST_ALIAS, "--writer"],
+            outcome: Outcome::Usage,
+        },
+        Case {
             name: "sessions: every pinned host unreachable",
             sandbox: &all_dead,
             args: &["sessions"],

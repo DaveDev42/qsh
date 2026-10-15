@@ -144,6 +144,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "session.open.json",
     "session.get.json",
     "session.list.json",
+    "session.list.filtered.json",
     "session.read.json",
     "session.write.json",
     "session.resize.json",
@@ -2024,6 +2025,59 @@ fn golden_tunnel_fixtures() {
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
     listener.local_addr().expect("picked port").port()
+}
+
+/// `session.list` with the three client-side filters set (`docs/CLI.md`
+/// §6.2, ADR-0033 decisions 1-3). Two sessions on the host, one running and
+/// one exited; the filter keeps only the running, writer-less one this
+/// device can attach to. The JSON shape is `session.list.json`'s, with no
+/// field for the filter.
+// Sessions are PTY-backed, so this path only exists on POSIX hosts
+// (Windows host is M20); the fixture is validated everywhere by the
+// whole-directory contract tests below.
+#[cfg(unix)]
+#[test]
+fn golden_session_list_filtered_fixture() {
+    let fleet = Fleet::start();
+    let client = &fleet.client;
+
+    let open = |argv: &[&str]| {
+        let mut args = vec!["session", "open", HOST_ALIAS, "--json", "--"];
+        args.extend_from_slice(argv);
+        let (code, opened) = client.json(&args);
+        assert_eq!(code, 0, "{opened}");
+        opened["data"]["session_ref"]
+            .as_str()
+            .expect("session_ref")
+            .to_string()
+    };
+    let running = open(&["cat"]);
+    let exited = open(&["sh", "-c", "exit 0"]);
+    poll_until(
+        "the short-lived session to exit",
+        std::time::Duration::from_secs(60),
+        || {
+            let (code, got) = client.json(&["session", "get", &exited, "--json"]);
+            assert_eq!(code, 0, "{got}");
+            (got["data"]["state"] == "exited").then_some(())
+        },
+    );
+
+    let (code, listed) = client.json(&[
+        "sessions",
+        HOST_ALIAS,
+        "--state",
+        "running",
+        "--writer",
+        "none",
+        "--attachable",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{listed}");
+    let sessions = listed["data"]["sessions"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 1, "{listed}");
+    assert_eq!(sessions[0]["session_ref"], running.as_str(), "{listed}");
+    check("session.list.filtered.json", listed);
 }
 
 /// The `session.*` value ops against a real `qsh serve` (PTY-backed

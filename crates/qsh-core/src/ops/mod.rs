@@ -55,9 +55,9 @@ pub use host::{HostGetOp, HostListOp, HostRoute, unconfigured_host_name};
 pub use pair_ssh::{PairSshEnv, PairSshOutput};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,
-    SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionReadOutput, SessionReader, SessionRef, SessionResizeOp, SessionWriteOp,
-    make_session_ref, parse_session_ref,
+    SessionAttachStream, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
+    SessionReadOp, SessionReadOutput, SessionReader, SessionRef, SessionResizeOp, SessionWriteOp,
+    WRITER_NONE, make_session_ref, parse_session_ref,
 };
 pub use trust::{cert_file_fingerprint_conflict, read_cert_file_arg};
 pub(crate) use trust::{cert_pem_op_error, check_cert_pem_size, validate_peer_label_arg};
