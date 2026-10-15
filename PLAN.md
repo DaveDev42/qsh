@@ -260,7 +260,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP §5.2·§5.4 리스크 5를 다시 
 
 **(d) 결과 (2026-10-16):** 터미널 경계는 `Terminal` trait 메서드 다섯(`window_size`, `enter_raw`, `read_stdin`, `open_events`, `leave_on_hangup`)과 보조 trait `RawGuard`·`EventSource`로 섰고, `tui/unix.rs`는 768줄에서 154줄로 줄었다. ConPTY 하니스와 probe는 `portable-pty`·`windows-sys`만으로 섰다. keystore 판정은 §7.1 #5. 재산정: Step 3~11의 크기 범위는 그대로 둔다. trait 경계가 예상보다 작아 Step 3은 아래쪽(0.9) 근처로 보고, crate 판정으로 Step 5도 아래쪽(0.4)으로 보지만, named pipe(Step 6)와 작업 스케줄러 COM(Step 10·11)의 불확실성이 그대로라 합계 7.7~12.9ew는 바꾸지 않는다. `session_loop.rs`의 `signal_number`는 비 unix에서 `None`을 돌려주는 위임이고 Windows에서는 Step 9의 대화형 attach가 쓰기 전까지 쓰이지 않는다.
 
-### Step 3 — Windows 콘솔 계층과 초대 코드 프롬프트 (0.9~1.5ew)
+### Step 3 — Windows 콘솔 계층과 초대 코드 프롬프트 (0.9~1.5ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 4~8·11, 결정 17 콘솔 계층 항목, 결정 19의 threat-model §3 "Windows 콘솔 입력" 행과 `docs/CLI.md` §6.11·§7. 선행: Step 2.
 
@@ -287,6 +287,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - 부하 필터 초안 `scripts/stress/m19.filter`에 `console_probe::`를 넣는다.
 
 **(c) 완료 판정:** `NO_TERMINAL_ECHO_SUPPRESSION`이 소스에 없다. ConPTY 테스트가 Windows 다리에서 초록이고 Dave-Windows 부하 아래 50회 연속 초록이다. unix 회귀 0. wire diff 0.
+
+**(d) 결과 (2026-10-16):** Linux 부하 아래 `m19.filter`(19개) 50/50. Windows 부하 반복은 Dave-Windows 박스에서 WSL interop으로 Windows 테스트 실행 파일을 직접 돌리고 Windows 쪽에 PowerShell busy loop 8개를 띄운 채 `console_probe::`(12개) 50/50이었다. Git for Windows bash의 `scripts/stress/run.sh` 대신 이 방식을 썼고 대상 OS·장비는 같다(§7.1 #12). 남은 약점: `session_open_term_defaults_to_xterm_256color_when_term_is_unset`은 `session_term` 순수 함수만 보고 `session_loop::run`이 `fallback_term()`을 `session.open`에 싣는 배선은 Step 9의 Windows attach 종단이 덮는다. close 이벤트 ConPTY 테스트는 ConPTY가 실제 `CTRL_CLOSE_EVENT`를 전달하지 못해 핸들러 본문을 직접 부르고, 실제 `SetConsoleCtrlHandler` 등록은 `CTRL_BREAK` 테스트가 본다. `preflight`는 출력뿐 아니라 입력의 `ENABLE_VIRTUAL_TERMINAL_INPUT` 거부도 `UNSUPPORTED`로 본다(1809 하한과 같은 판정).
 
 ### Step 4 — 소유자 전용 DACL 모듈과 적용처 전부 (0.7~1.1ew)
 
