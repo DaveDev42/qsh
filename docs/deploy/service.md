@@ -408,6 +408,11 @@ then restart the distro (`wsl --shutdown` from Windows, then reopen it).
 Without this, `systemctl` fails with a socket-connect error and the unit
 above never starts.
 
+`qsh service install --activate` hits the same wall. If `systemctl` is not
+found it ends with `UNSUPPORTED`, and if it is found but cannot reach the
+manager it ends with `INTERNAL`. Both messages name `/etc/wsl.conf` under WSL.
+The unit file is still written, so run the command again once systemd is up.
+
 ## Supervised tunnels
 
 `qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost `--local`, `--dynamic` or `--remote` tunnel by itself, over a forward or a reverse route, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). A `--local` or `--dynamic` listener stays bound across the loss. The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
