@@ -364,6 +364,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-session-write.1",
     },
     OpFace {
+        op: "pair.ssh",
+        marker: "PairSshOp",
+        renderer: "print_pair_ssh",
+        cli_spelling: "qsh pair ssh",
+        man_file: "qsh-pair-ssh.1",
+    },
+    OpFace {
         op: "setup.run",
         marker: "SetupRunOp",
         renderer: "print_setup_run",

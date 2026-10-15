@@ -6,11 +6,15 @@
 //! evaluates them. The only parts qsh derives from it are the host half
 //! (the default pin name) and the user half (a hint, never stored,
 //! decision 26).
+//!
+//! Two checks live apart on purpose. [`Dest::parse`] vets the ssh operand;
+//! [`Dest::pin_name`] vets the name this machine pins the remote under.
+//! A `Host` alias ssh accepts can break the pin-name rule (`web/prod`), and
+//! `--as` must then be able to stand in for it.
 
 use qsh_proto::ErrorCode;
 
-use crate::ops::OpError;
-use crate::trust::validate_peer_label;
+use crate::ops::{OpError, validate_peer_label_arg};
 
 /// Split a `[user@]host` operand at the last `@`, like ssh: an alias may not
 /// contain one, but a user name conceivably does. The same rule backs the
@@ -45,14 +49,18 @@ pub struct Dest {
 }
 
 impl Dest {
-    /// Validate `raw` before any ssh process exists (ADR-0044 decision 7).
+    /// Validate `raw` as an ssh operand before any ssh process exists
+    /// (ADR-0044 decision 7).
     ///
     /// - A leading `-` would let ssh read the operand as an option, so it is
     ///   `INVALID_ARGUMENT`. (The `--` the argument builder puts in front of
     ///   it is the second line of defence, not the first.)
     /// - `ssh://` URIs are not accepted.
-    /// - The host half must be a valid pin name: `validate_peer_label` and no
-    ///   `/`, the rule `--as` follows (`docs/CLI.md` §6.11).
+    /// - Whitespace and control characters are refused: no ssh destination
+    ///   contains them, and they would only reach a log or a terminal.
+    ///
+    /// Whether the host half is usable as a pin name is a separate question
+    /// ([`Self::pin_name`]): a `Host` alias with a `/` is a fine ssh operand.
     ///
     /// Errors never echo the operand beyond the fixed reason.
     pub fn parse(raw: &str) -> Result<Self, OpError> {
@@ -66,14 +74,13 @@ impl Dest {
                 "ssh:// URIs are not accepted; give [user@]host as ssh_config knows it",
             ));
         }
+        if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(invalid(
+                "the destination must not contain whitespace or control characters",
+            ));
+        }
         let (user, host) = split_user_host(raw).map_err(|_| {
             invalid("the destination must be [user@]host with a non-empty host and user")
-        })?;
-        validate_peer_label(host).map_err(|err| {
-            invalid(format!(
-                "the host part of the destination is not a valid pin name ({err}); \
-                 name the pin with --as"
-            ))
         })?;
         Ok(Self {
             raw: raw.to_string(),
@@ -93,11 +100,30 @@ impl Dest {
         self.user.as_deref()
     }
 
-    /// The host half, which is the default name this machine pins the
-    /// remote under (ADR-0044 decision 7): the ssh `Host` alias as typed, not
-    /// the `HostName` ssh resolves.
-    pub fn pin_name(&self) -> &str {
+    /// The host half: the ssh `Host` alias as typed, not the `HostName` ssh
+    /// resolves.
+    pub fn host(&self) -> &str {
         &self.host
+    }
+
+    /// The name this machine pins the remote under (ADR-0044 decision 7):
+    /// `as_name` (`--as`) when given, otherwise the host half, so the next
+    /// `qsh <host>` finds the pin under the name the user types.
+    ///
+    /// Either one must pass the one pin-name rule (`validate_peer_label` and
+    /// no `/`, `docs/CLI.md` §6.11). The error is `INVALID_ARGUMENT` and
+    /// names the rule, never the value.
+    pub fn pin_name(&self, as_name: Option<&str>) -> Result<String, OpError> {
+        match as_name {
+            Some(name) => validate_peer_label_arg(name),
+            None => validate_peer_label_arg(&self.host).map_err(|err| {
+                invalid(format!(
+                    "the host part of the destination is not a valid pin name ({}); \
+                     name the pin with --as",
+                    err.message
+                ))
+            }),
+        }
     }
 }
 

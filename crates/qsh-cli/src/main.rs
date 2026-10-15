@@ -48,10 +48,10 @@ use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, AclShowOp, CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp,
     ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
-    InviteCodeSource, OpError, Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp,
-    ServiceUninstallOp, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp,
-    SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp,
-    TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp, ServiceInstallOp,
+    ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp, SessionGetOp,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv,
+    SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
     TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
     TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
     parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
@@ -59,10 +59,10 @@ use qsh_core::{
 };
 use qsh_proto::{
     AclCheckReq, AclShowReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode,
-    ExecRunReq, FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq,
-    SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq,
-    SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId, TrustAcceptReq,
-    TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
+    ExecRunReq, FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq, PairSshReq,
+    SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
+    SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
+    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
     TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
@@ -70,8 +70,8 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, CpArgs, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs,
-    HostCmd, IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs,
-    SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
+    HostCmd, IdentityCmd, PairCmd, PairSshArgs, ServiceCmd, SessionCmd, SessionReadArgs,
+    SessionWriteArgs, SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -498,6 +498,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             as_name.clone(),
             role.clone(),
         ),
+        Command::Pair(PairCmd::Ssh(args)) => run_pair_ssh(cli, &ops, args),
         #[cfg(unix)]
         Command::Pair(PairCmd::SshRespond) => run_ssh_respond(&ops),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
@@ -1929,6 +1930,43 @@ fn run_trust_accept(
     })
 }
 
+/// `qsh pair ssh` (ADR-0044, `docs/CLI.md` §6.11). The ssh child may sit at
+/// a password prompt on the terminal, so the first Ctrl-C only arms the
+/// cancel token (the call then ends `CANCELED` with nothing further written)
+/// and the second ends the process.
+fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
+    if let Some(address) = &args.address
+        && normalize_peer_address(address).port_filled
+    {
+        stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+    }
+    let cancel = CancelToken::new();
+    arm_cancel_on_interrupt(&cancel);
+    let env = PairSshEnv {
+        machine_mode: cli.wants_json(),
+        stdin_is_terminal: io::stdin().is_terminal(),
+        cancel,
+    };
+    let result = ops.pair_ssh(
+        PairSshReq {
+            dest: args.dest.clone(),
+            as_name: args.as_name.clone(),
+            remote_as: args.remote_as.clone(),
+            role: args.role.clone(),
+            address: args.address.clone(),
+            remote_qsh: args.remote_qsh.clone(),
+        },
+        env,
+    );
+    let (result, notices) = match result {
+        Ok(output) => (Ok(output.data), output.notices),
+        Err(err) => (Err(err), Vec::new()),
+    };
+    finish(cli, PairSshOp::COMMAND, result, |data| {
+        human::print_pair_ssh(data, &notices)
+    })
+}
+
 /// The flags one `qsh setup` role line carried, before any prompt fills a
 /// gap (`docs/CLI.md` §6.20).
 struct SetupArgs {
@@ -2378,6 +2416,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::SshPreview { .. }) => TrustSshPreviewOp::COMMAND,
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
+        Command::Pair(PairCmd::Ssh(_)) => PairSshOp::COMMAND,
         #[cfg(unix)]
         Command::Pair(PairCmd::SshRespond) => SSH_RESPOND_MODE,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,

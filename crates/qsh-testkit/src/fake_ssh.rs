@@ -70,6 +70,12 @@ impl FakeSsh {
         self.set("g_exit", code.to_string())
     }
 
+    /// Make the `-G` call block forever, like an `ssh -G` stuck on a slow
+    /// resolver or a hanging `Match exec`. Only a signal ends it.
+    pub fn g_hang(&mut self) -> &mut Self {
+        self.set("g_hang", "1".to_string())
+    }
+
     /// Make the responder call print `bytes` to stdout first: the remote
     /// shell's rc output, the `hello`, tampered lines.
     pub fn script(&mut self, bytes: &[u8]) -> &mut Self {

@@ -1,0 +1,15 @@
+{
+  "command": "pair.ssh",
+  "error": {
+    "code": "REMOTE_ERROR",
+    "details": {
+      "reason": "remote_qsh_missing",
+      "remote_exit": 127
+    },
+    "message": "the remote shell did not find `qsh`, so nothing was written on either side; pass --remote-qsh <path> or set [ssh].remote_qsh in config.toml (a non-interactive ssh shell often lacks ~/.cargo/bin or /usr/local/bin in its PATH) and run this again",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

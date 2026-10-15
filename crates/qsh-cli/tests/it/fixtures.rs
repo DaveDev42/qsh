@@ -71,7 +71,6 @@ const DEFERRED: &[(&str, &str)] = &[
         "no producer anywhere in the tree yet — reserved for caller-side \
          cancellation, which no M2 op offers",
     ),
-    ("REMOTE_ERROR", "no deterministic producer"),
     ("INTERNAL", "no deterministic producer"),
 ];
 
@@ -148,6 +147,10 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "session.close.json",
     "error.SESSION_NOT_FOUND.json",
     "error.SESSION_CONFLICT.json",
+    "error.SESSION_CONFLICT.pin_conflict.json",
+    "error.REMOTE_ERROR.remote_qsh_missing.json",
+    "pair.ssh.json",
+    "pair.ssh.unverified.json",
     "error.UNSUPPORTED.json",
     "tunnel.open.json",
     "tunnel.dynamic.json",
@@ -1981,6 +1984,72 @@ fn golden_session_conflict_fixture() {
     assert_eq!(code, 255, "{conflict}");
     assert_eq!(conflict["error"]["code"], "SESSION_CONFLICT", "{conflict}");
     check("error.SESSION_CONFLICT.json", conflict);
+}
+
+/// `pair ssh` (ADR-0044, `docs/CLI.md` §6.11): the success shape with a
+/// confirming handshake, the shape when the remote `qsh serve` is not
+/// running (pins stand, `verified: false`), and the two refusals that have a
+/// shape of their own: a pin conflict and a missing remote `qsh`. The remote
+/// is a real `qsh pair ssh-respond` run by the fake `ssh`, so these are the
+/// binary's own envelopes.
+#[cfg(unix)]
+#[test]
+fn golden_pair_ssh_fixtures() {
+    use crate::ssh_bootstrap::pair::World;
+
+    let w = World::new();
+    let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["verified"], true, "{got}");
+    check("pair.ssh.json", got);
+
+    // Nothing listens where the remote says its serve binds.
+    let w = World::new();
+    let free = std::net::UdpSocket::bind("127.0.0.1:0").expect("free port");
+    let spec = free.local_addr().expect("local addr").to_string();
+    drop(free);
+    std::fs::write(
+        w.remote.config_dir().join("config.toml"),
+        format!("[serve]\nbind = \"{spec}\"\n"),
+    )
+    .expect("write remote config");
+    let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["verified"], false, "{got}");
+    check("pair.ssh.unverified.json", got);
+
+    // The name is already pinned here under another identity.
+    let w = World::new();
+    let stranger = Sandbox::initialized();
+    w.client
+        .trust_add("box", Some("203.0.113.9:4433"), &stranger.fingerprint());
+    let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+    assert_eq!(code, 255, "{got}");
+    assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
+    check("error.SESSION_CONFLICT.pin_conflict.json", got);
+}
+
+/// `pair ssh` against a remote where the shell cannot find `qsh` (ssh exit
+/// 127 before any hello): `REMOTE_ERROR` with a `details.reason`. The fake
+/// `ssh` needs no remote at all.
+#[test]
+fn golden_pair_ssh_remote_qsh_missing_fixture() {
+    let mut fake = qsh_testkit::fake_ssh::FakeSsh::new();
+    fake.exit(127);
+    let client = Sandbox::initialized();
+    std::fs::write(
+        client.config_dir().join("config.toml"),
+        format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+    )
+    .expect("write client config");
+    let (code, got) = client.json(&["pair", "ssh", "box", "--json"]);
+    assert_eq!(code, 255, "{got}");
+    assert_eq!(got["error"]["code"], "REMOTE_ERROR", "{got}");
+    assert_eq!(
+        got["error"]["details"]["reason"], "remote_qsh_missing",
+        "{got}"
+    );
+    check("error.REMOTE_ERROR.remote_qsh_missing.json", got);
 }
 
 // ---------------------------------------------------------------------------

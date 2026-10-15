@@ -1,0 +1,33 @@
+{
+  "command": "pair.ssh",
+  "data": {
+    "created": true,
+    "direction": "forward",
+    "identity_created": false,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "box",
+      "role": "none"
+    },
+    "remote": {
+      "created": true,
+      "name": "laptop",
+      "role": "full"
+    },
+    "ssh_proxied": false,
+    "verified": false,
+    "verify_error": {
+      "code": "CONNECTION_FAILED",
+      "details": {
+        "reason": "remote_serve_not_listening"
+      },
+      "message": "the remote reported that no `qsh serve` is listening on its serve port, so no connection was tried; both pins stay in place, and once the remote runs `qsh serve` (or `qsh service install`) `qsh box` connects",
+      "retryable": true
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

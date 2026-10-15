@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod exec;
 pub mod file;
 pub mod host;
+pub mod pair_ssh;
 pub mod service;
 pub mod session;
 pub mod setup;
@@ -49,6 +50,7 @@ pub use file::{
     SilentObserver,
 };
 pub use host::{HostGetOp, HostListOp, HostRoute};
+pub use pair_ssh::{PairSshEnv, PairSshOutput};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,
     SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
@@ -464,6 +466,13 @@ pub struct TrustSshPreviewOp;
 
 impl Operation for TrustSshPreviewOp {
     const COMMAND: &'static str = "trust.ssh_preview";
+}
+
+/// The `pair.ssh` operation (`docs/CLI.md` §6.11, ADR-0044 decision 1).
+pub struct PairSshOp;
+
+impl Operation for PairSshOp {
+    const COMMAND: &'static str = "pair.ssh";
 }
 
 /// The `service.install` operation (`docs/CLI.md` §6.18).

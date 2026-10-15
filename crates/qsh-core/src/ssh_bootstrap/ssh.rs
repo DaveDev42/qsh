@@ -312,15 +312,16 @@ pub fn map_ssh_exit(exit: SshExit, hello_seen: bool) -> OpError {
         SshExit::Code(code @ (127 | 9009)) => reason(
             ErrorCode::RemoteError,
             "remote_qsh_missing",
-            "the remote shell did not find `qsh`; pass --remote-qsh <path> or set [ssh].remote_qsh \
-             in config.toml (a non-interactive ssh shell often lacks ~/.cargo/bin or \
-             /usr/local/bin in its PATH)",
+            "the remote shell did not find `qsh`, so nothing was written on either side; pass \
+             --remote-qsh <path> or set [ssh].remote_qsh in config.toml (a non-interactive ssh \
+             shell often lacks ~/.cargo/bin or /usr/local/bin in its PATH) and run this again",
             json!({ "remote_exit": code }),
         ),
         SshExit::Code(2) => reason(
             ErrorCode::Unsupported,
             "remote_qsh_too_old",
-            "the remote qsh does not know `pair ssh-respond`; upgrade qsh on the remote host",
+            "the remote qsh does not know `pair ssh-respond`, so nothing was written on either \
+             side; upgrade qsh on the remote host and run this again",
             json!({ "remote_exit": 2 }),
         ),
         SshExit::Code(0) => reason(
@@ -332,9 +333,10 @@ pub fn map_ssh_exit(exit: SshExit, hello_seen: bool) -> OpError {
         SshExit::Code(code) => reason(
             ErrorCode::RemoteError,
             "remote_command_failed",
-            "the remote command failed before answering; if the remote default shell is \
-             PowerShell, a missing qsh looks like this (exit 1): put qsh.exe on the remote PATH \
-             or pass its full path with --remote-qsh / [ssh].remote_qsh",
+            "the remote command failed before answering, so nothing was written on either side; \
+             if the remote default shell is PowerShell, a missing qsh looks like this (exit 1): \
+             put qsh.exe on the remote PATH or pass its full path with --remote-qsh / \
+             [ssh].remote_qsh, then run this again",
             json!({ "remote_exit": code }),
         ),
     }
@@ -783,9 +785,18 @@ impl SshChild {
         self.reap_after_close_exit().await
     }
 
+    /// The error for a child that ended on its own. An interrupt is
+    /// `CANCELED` whatever the exit status says: a real OpenSSH can outlive
+    /// the connection's SIGINT and report 255 ("Killed by signal 2") instead
+    /// of dying of the signal, and the cancel token is what knows the user
+    /// pressed Ctrl-C.
     async fn reap_after_close(&mut self) -> OpError {
         let exit = self.reap_after_close_exit().await;
-        tracing::debug!(target: "qsh::ssh_bootstrap", stage = "ssh_exit", interrupted = exit == SshExit::Interrupted);
+        let canceled = self.cancel.is_canceled();
+        tracing::debug!(target: "qsh::ssh_bootstrap", stage = "ssh_exit", interrupted = exit == SshExit::Interrupted, canceled);
+        if canceled {
+            return canceled_error();
+        }
         map_ssh_exit(exit, self.stream.hello_seen())
     }
 

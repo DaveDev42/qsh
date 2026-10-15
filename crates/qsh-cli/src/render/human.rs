@@ -11,7 +11,7 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
     DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
-    SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
+    PairSshData, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
     SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
     SessionWriteData, SetupRole, SetupRunData, SetupStatus, SetupStepId, TrustAcceptData,
     TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData,
@@ -510,6 +510,51 @@ pub fn print_trust_accept(data: &TrustAcceptData) -> io::Result<()> {
         "already pinned"
     };
     writeln!(stdout, "{}", format_trust_pin_line(verb, &data.peer))
+}
+
+/// Print the outcome of `qsh pair ssh` (ADR-0044, `docs/CLI.md` §6.11):
+/// this machine's pin, the remote's pin and whether the confirming
+/// handshake passed on stdout, then the notices `Ops` decided on stderr
+/// (the two pins' roles, a changed role, a proxied ssh path). Every field
+/// that came from the remote is sanitized here as well.
+pub fn print_pair_ssh(data: &PairSshData, notices: &[String]) -> io::Result<()> {
+    {
+        let mut stdout = io::stdout().lock();
+        let verb = if data.created {
+            "pinned"
+        } else {
+            "already pinned"
+        };
+        writeln!(stdout, "{}", format_trust_pin_line(verb, &data.peer))?;
+        let remote_verb = if data.remote.created {
+            "pinned"
+        } else {
+            "already pinned"
+        };
+        match &data.remote.role {
+            Some(role) => writeln!(
+                stdout,
+                "remote: {remote_verb} {} role {}",
+                sanitize(&data.remote.name),
+                sanitize(role)
+            )?,
+            None => writeln!(
+                stdout,
+                "remote: {remote_verb} {}",
+                sanitize(&data.remote.name)
+            )?,
+        }
+        match &data.verify_error {
+            None if data.verified => writeln!(stdout, "verified")?,
+            None => writeln!(stdout, "not verified")?,
+            Some(error) => writeln!(stdout, "not verified: {}", sanitize(&error.message))?,
+        }
+    }
+    let mut stderr = io::stderr().lock();
+    for notice in notices {
+        writeln!(stderr, "qsh: {}", sanitize(notice))?;
+    }
+    Ok(())
 }
 
 /// Format one `{verb} {name} ({fingerprint}) [{address}]`-shaped result

@@ -934,6 +934,17 @@ pub enum PairCmd {
         #[arg(long, value_name = "ROLE")]
         role: Option<String>,
     },
+    /// Pin this machine and a remote one to each other over ssh, then check
+    /// the pair with a QUIC handshake (ADR-0044, `docs/CLI.md` §6.11).
+    ///
+    /// Runs the system `ssh` to `DEST` (anything `ssh` accepts, so
+    /// `~/.ssh/config` aliases, keys, agents and 2FA prompts apply) and has
+    /// the remote `qsh` pin this machine's public fingerprint; this machine
+    /// then pins the remote's, with trust role `none`. ssh authenticates the
+    /// exchange: no key, passphrase or agent socket is ever read by qsh. It
+    /// installs and starts nothing on the remote and writes no `hosts.toml`,
+    /// `config.toml` or `acl.toml`.
+    Ssh(PairSshArgs),
     /// The remote half of `qsh pair ssh`: send a `hello` on standard output,
     /// read the client's `commit` on standard input, pin the client
     /// (ADR-0044 decisions 9, 10, 12).
@@ -950,6 +961,40 @@ pub enum PairCmd {
     #[cfg(unix)]
     #[command(hide = true)]
     SshRespond,
+}
+
+/// Arguments of `qsh pair ssh` (`docs/CLI.md` §6.11, ADR-0044 decision 1).
+#[derive(Debug, Args)]
+pub struct PairSshArgs {
+    /// `[user@]host`, exactly as `ssh` takes it: a `Host` alias from
+    /// `~/.ssh/config` works. The host part is also the default name this
+    /// machine pins the remote under; it must not start with `-`.
+    #[arg(value_name = "[USER@]HOST")]
+    pub dest: String,
+    /// Name this machine pins the remote under, instead of the host part of
+    /// `DEST`.
+    #[arg(long = "as", value_name = "NAME")]
+    pub as_name: Option<String>,
+    /// Name the remote pins this machine under (default: the first label of
+    /// this machine's host name, then its device id).
+    #[arg(long, value_name = "NAME")]
+    pub remote_as: Option<String>,
+    /// Trust role of the pin written on the remote: one of `full`, `exec`,
+    /// `tunnel`, `read-only`, `reverse`, `none` (default `full`, which is
+    /// what the ssh login on that account could do anyway, ADR-0044
+    /// decision 8). An existing remote pin keeps its role. This machine's
+    /// own pin is always `none`.
+    #[arg(long, value_name = "ROLE")]
+    pub role: Option<String>,
+    /// `host[:port]` this machine records for the remote, instead of the
+    /// ssh `HostName` plus the port the remote `qsh serve` reports. With no
+    /// `:port`, port 4433 is assumed.
+    #[arg(long, value_name = "HOST[:PORT]")]
+    pub address: Option<String>,
+    /// The `qsh` to run on the remote (default: `[ssh].remote_qsh` in
+    /// `config.toml`, then `qsh`).
+    #[arg(long, value_name = "PATH")]
+    pub remote_qsh: Option<String>,
 }
 
 /// `qsh setup <role>` (`docs/CLI.md` §6.20, ADR-0024 decision 2). Each role

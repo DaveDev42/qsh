@@ -400,16 +400,7 @@ pub fn pairing_pin_notice(
     } else {
         PAIRING_PINNED_SELF_ASSERTED
     };
-    let grants = crate::acl::role_grant(role).actions;
-    let role_clause = if grants.is_empty() {
-        PAIRING_ROLE_NONE.to_string()
-    } else {
-        let actions: Vec<&str> = grants.iter().map(|action| action.as_str()).collect();
-        format!(
-            "{PAIRING_ROLE_LEAD} `{role}`, which grants: {}.",
-            actions.join(", ")
-        )
-    };
+    let role_clause = pairing_role_clause(role);
     let row_clause = if acl_row_present {
         PAIRING_ACL_ROW_PRESENT
     } else {
@@ -428,6 +419,24 @@ pub fn pairing_pin_notice(
     )
 }
 
+/// The role clause of a pin notice: [`PAIRING_ROLE_NONE`] for a role that
+/// grants nothing, otherwise [`PAIRING_ROLE_LEAD`], the role and the actions
+/// the role table grants it. Shared by every notice that names a freshly
+/// written pin's role (`pairing_pin_notice`, the `qsh pair ssh` notices), so
+/// the sentence is stated once (ADR-0045 결정 13).
+pub(crate) fn pairing_role_clause(role: TrustRole) -> String {
+    let grants = crate::acl::role_grant(role).actions;
+    if grants.is_empty() {
+        PAIRING_ROLE_NONE.to_string()
+    } else {
+        let actions: Vec<&str> = grants.iter().map(|action| action.as_str()).collect();
+        format!(
+            "{PAIRING_ROLE_LEAD} `{role}`, which grants: {}.",
+            actions.join(", ")
+        )
+    }
+}
+
 /// POSIX single-quote a string so it survives a shell as one word.
 ///
 /// Wrapping in single quotes alone is not enough: a `'` inside `text` would
@@ -436,7 +445,7 @@ pub fn pairing_pin_notice(
 /// apostrophe, and [`pairing_pin_notice`] advertises its output as a
 /// command the operator can paste. A `text` with no apostrophe comes back
 /// simply wrapped, which is what the notice's pinned wording expects.
-fn shell_single_quoted(text: &str) -> String {
+pub(crate) fn shell_single_quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
