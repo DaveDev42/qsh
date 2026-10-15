@@ -422,6 +422,22 @@ fn store_key(
     mode: KeyStoreMode,
     key_pkcs8_der: &[u8],
 ) -> Result<KeyStoreKind, OpError> {
+    store_key_in(
+        paths,
+        mode,
+        key_pkcs8_der,
+        &PlatformKeyStore::new(device_id.to_string()),
+    )
+}
+
+/// [`store_key`] with the platform store handed in, the seam tests use so
+/// none of them touches the OS credential store.
+fn store_key_in(
+    paths: &Paths,
+    mode: KeyStoreMode,
+    key_pkcs8_der: &[u8],
+    platform: &dyn KeyStore,
+) -> Result<KeyStoreKind, OpError> {
     let file_store = || FileKeyStore::new(paths.identity_dir().join(KEY_FILE));
 
     match mode {
@@ -431,40 +447,34 @@ fn store_key(
                 .map_err(internal_store_err)?;
             Ok(KeyStoreKind::File)
         }
-        KeyStoreMode::Platform => {
-            let platform = PlatformKeyStore::new(device_id.to_string());
-            match platform.store(key_pkcs8_der) {
-                Ok(()) => Ok(KeyStoreKind::Platform),
-                Err(err @ KeyStoreError::Unavailable(_)) => Err(OpError::new(
-                    ErrorCode::Internal,
-                    format!(
-                        "platform key store unavailable ({err}); re-run with --key-store auto or \
+        KeyStoreMode::Platform => match platform.store(key_pkcs8_der) {
+            Ok(()) => Ok(KeyStoreKind::Platform),
+            Err(err @ KeyStoreError::Unavailable(_)) => Err(OpError::new(
+                ErrorCode::Internal,
+                format!(
+                    "platform key store unavailable ({err}); re-run with --key-store auto or \
                          --key-store file"
-                    ),
-                )
-                .with_retryable(false)),
-                Err(err) => Err(internal_store_err(err)),
+                ),
+            )
+            .with_retryable(false)),
+            Err(err) => Err(internal_store_err(err)),
+        },
+        KeyStoreMode::Auto => match platform.store(key_pkcs8_der) {
+            Ok(()) => Ok(KeyStoreKind::Platform),
+            Err(KeyStoreError::Unavailable(reason)) => {
+                let path = paths.identity_dir().join(KEY_FILE);
+                tracing::warn!(
+                    %reason,
+                    path = %path.display(),
+                    "platform key store unavailable, falling back to file store"
+                );
+                file_store()
+                    .store(key_pkcs8_der)
+                    .map_err(internal_store_err)?;
+                Ok(KeyStoreKind::File)
             }
-        }
-        KeyStoreMode::Auto => {
-            let platform = PlatformKeyStore::new(device_id.to_string());
-            match platform.store(key_pkcs8_der) {
-                Ok(()) => Ok(KeyStoreKind::Platform),
-                Err(KeyStoreError::Unavailable(reason)) => {
-                    let path = paths.identity_dir().join(KEY_FILE);
-                    tracing::warn!(
-                        %reason,
-                        path = %path.display(),
-                        "platform key store unavailable, falling back to file store"
-                    );
-                    file_store()
-                        .store(key_pkcs8_der)
-                        .map_err(internal_store_err)?;
-                    Ok(KeyStoreKind::File)
-                }
-                Err(err) => Err(internal_store_err(err)),
-            }
-        }
+            Err(err) => Err(internal_store_err(err)),
+        },
     }
 }
 

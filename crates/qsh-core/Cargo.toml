@@ -57,9 +57,13 @@ socket2.workspace = true
 # `identity/keystore.rs`, never registered as keyring's global default store.
 # Linux uses the pure-Rust zbus Secret Service store with the `crypto-rust`
 # feature (the `openssl` feature is banned by `deny.toml`), so no libdbus /
-# system C dependency is needed; where neither table applies
-# (`PlatformKeyStore`) reports `Unavailable` and `auto` falls back to file.
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# system C dependency is needed. Windows uses `windows-native-keyring-store`
+# (Credential Manager, ADR-0035 decision 12) with `default-features = false`,
+# which drops its `search` feature and the `regex` dependency; the store only
+# ever builds, reads, writes and deletes one entry per operation. Where no
+# table applies (`PlatformKeyStore`) reports `Unavailable` and `auto` falls
+# back to file.
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 keyring-core = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -83,12 +87,19 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }
+windows-native-keyring-store = { version = "1.1", default-features = false }
 
 # POSIX PTY backend (`docs/design/architecture.md` §4): openpty + spawn with
 # setsid/controlling tty. The whole `pty` module is unix-only (`docs/ROADMAP.md`
 # §3: no Windows host in P0), so the crate builds on Windows without it.
 [target.'cfg(unix)'.dependencies]
 portable-pty.workspace = true
+
+# The Credential Manager tests (`identity/keystore.rs`) read the entry back
+# with `CredReadW` to pin its type, persistence and target; the store crate
+# already links this feature, so it adds nothing to the build.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [dev-dependencies]
 # `Connection::with_peer_chain_dropped` stands in for a connection the trust
