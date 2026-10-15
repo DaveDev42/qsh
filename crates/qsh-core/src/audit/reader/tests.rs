@@ -632,9 +632,47 @@ fn audit_query_refuses_a_non_regular_audit_path_without_blocking() {
     );
 }
 
-// The Windows row for an unreadable log (an ACL denying read access) lands
-// with the DACL module in M19 (ADR-0035 결정 9); until then the share-mode
-// behaviour is covered by the rotation test below.
+/// The Windows row of the test above: a DACL that denies read access plays
+/// the part of mode 0 (ADR-0033 decision 6, ADR-0035 decision 9).
+#[cfg(windows)]
+#[test]
+fn audit_query_unreadable_log_is_internal_with_path_and_kind_only() {
+    use crate::fsutil::dacl::testing::deny_all_access;
+
+    const SECRET: &str = "UNREADABLE-CONTENT-MARKER";
+    let dir = tempfile::tempdir().unwrap();
+    let path = log_in(&dir);
+    let mut r = simple(1);
+    r.resource = SECRET.to_string();
+    write_log(&path, &[r]);
+    deny_all_access(&path);
+
+    let err = query(&path, 0, &AuditQueryReq::default(), fixed_now()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(
+        err.message.contains(&path.display().to_string()),
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("permission denied"), "{}", err.message);
+    assert!(!err.message.contains(SECRET));
+    assert!(
+        !err.message.contains("os error"),
+        "kind only: {}",
+        err.message
+    );
+
+    // The same holds for a rotated file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = log_in(&dir);
+    write_log(&path, &[simple(1)]);
+    let rotated = rotated_path(&path, 1);
+    write_log(&rotated, &[simple(2)]);
+    deny_all_access(&rotated);
+    let err = query(&path, 1, &AuditQueryReq::default(), fixed_now()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.message.contains(&rotated.display().to_string()));
+}
 
 #[test]
 fn audit_query_truncated_is_set_only_when_the_limit_cut_records() {

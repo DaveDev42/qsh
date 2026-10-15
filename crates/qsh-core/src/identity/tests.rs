@@ -107,6 +107,23 @@ fn identity_directory_and_files_are_private() {
     assert_eq!(mode_of(paths.identity_dir().join(IDENTITY_FILE)), 0o600);
 }
 
+/// The Windows twin of `identity_directory_and_files_are_private`.
+#[cfg(windows)]
+#[test]
+fn identity_directory_and_files_have_an_owner_only_dacl() {
+    use crate::fsutil::dacl::ObjectKind;
+    use crate::fsutil::dacl::testing::assert_owner_only;
+
+    let (_guard, paths) = temp_paths();
+    init(&paths, KeyStoreMode::File).unwrap();
+
+    assert_owner_only(&paths.config_dir, ObjectKind::Dir);
+    assert_owner_only(&paths.identity_dir(), ObjectKind::Dir);
+    for file in [KEY_FILE, CERT_FILE, IDENTITY_FILE] {
+        assert_owner_only(&paths.identity_dir().join(file), ObjectKind::File);
+    }
+}
+
 /// The headless-Linux path `docs/ROADMAP.md` §4 risk 3 calls out: with
 /// no D-Bus session there is no Secret Service, so `auto` must report
 /// `file` — silently reporting `platform` would be a security-posture
@@ -588,6 +605,21 @@ fn move_key_file_store_is_mode_0600() {
     assert_eq!(mode_of(paths.identity_dir().join(KEY_FILE)), 0o600);
     assert_eq!(mode_of(paths.identity_dir()), 0o700);
     assert_eq!(mode_of(paths.identity_dir().join(IDENTITY_FILE)), 0o600);
+}
+
+/// The Windows twin of `move_key_file_store_is_mode_0600`: the key that
+/// `--to file` writes, and the record rewritten beside it, are owner-only.
+#[cfg(windows)]
+#[test]
+fn move_key_file_store_has_an_owner_only_dacl() {
+    use crate::fsutil::dacl::ObjectKind;
+    use crate::fsutil::dacl::testing::assert_owner_only;
+
+    let (_guard, paths, _created, fake) = platform_identity();
+    run_move(&paths, KeyStoreKind::File, &fake).0.unwrap();
+    assert_owner_only(&paths.identity_dir(), ObjectKind::Dir);
+    assert_owner_only(&paths.identity_dir().join(KEY_FILE), ObjectKind::File);
+    assert_owner_only(&paths.identity_dir().join(IDENTITY_FILE), ObjectKind::File);
 }
 
 /// A store that answers with the wrong key fails the check against the

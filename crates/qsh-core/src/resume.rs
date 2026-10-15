@@ -26,10 +26,10 @@
 //!   replaced with an empty one. A single bad byte must not orphan every
 //!   live session on the device.
 //!
-//! What it does **not** guarantee yet: on Windows the file is created with
-//! the inherited directory ACL, because there is no `mode(0o600)` there —
-//! the Windows client is P1 (`docs/ROADMAP.md` §3), and confidentiality of
-//! `resume.json` on that platform is part of it.
+//! On Windows the file and its lock are created through
+//! `crate::fsutil`, which gives them a protected owner-only DACL at
+//! creation (the equivalent of `0600`); if the DACL cannot be applied the
+//! file is not created.
 //! - **Peer binding.** An entry records the `peer_spki_sha256` it was
 //!   issued to. [`ResumeStore::take_for`] hands a token out only if the
 //!   connected peer matches; a mismatch discards the entry and fails closed
@@ -604,6 +604,27 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "resume.json must be 0600");
         }
+    }
+
+    /// The Windows twin of the 0600 assertion above. `resume.json` is its
+    /// temp file renamed into place, so its DACL is the one the temp file was
+    /// created with; the sidecar lock file is created by the same module.
+    #[cfg(windows)]
+    #[test]
+    fn resume_tmp_and_lock_have_an_owner_only_dacl() {
+        use crate::fsutil::dacl::ObjectKind;
+        use crate::fsutil::dacl::testing::assert_owner_only;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let store = ResumeStore::at(state.join("resume.json"));
+        store
+            .put("mac/01K0", "mac", "01K0", token(0xAB), PEER, &far_future())
+            .unwrap();
+        assert_owner_only(store.path(), ObjectKind::File);
+        assert_owner_only(&state.join("resume.json.lock"), ObjectKind::File);
+        // The directory the store created is private too.
+        assert_owner_only(&state, ObjectKind::Dir);
     }
 
     #[test]

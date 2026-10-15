@@ -244,3 +244,34 @@ fn reset_key_never_appears_in_logs_audit_or_diagnostics() {
     }
     assert!(outputs.iter().any(|o| o.contains("<redacted>")));
 }
+
+/// The Windows twin of the 0600 assertion above, and the fail-closed rule:
+/// the key file is created with an owner-only protected DACL, and when the
+/// DACL cannot be built no file is created and the key is the ephemeral
+/// fallback with a diagnostic (ADR-0036, ADR-0035 decisions 9 and 10).
+#[cfg(windows)]
+#[test]
+fn stateless_reset_key_has_an_owner_only_dacl() {
+    use crate::fsutil::dacl::testing::{NoSid, assert_owner_only};
+    use crate::fsutil::dacl::{ObjectKind, inject_for_test};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = key_path(&dir);
+    let loaded = load_or_create(&path);
+    assert!(loaded.is_persistent());
+    assert_owner_only(&path, ObjectKind::File);
+    assert_eq!(
+        dir_entries(&dir),
+        vec![RESET_KEY_FILE_NAME.to_string()],
+        "no temp file is left behind"
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let blocked = key_path(&other);
+    let _inject = inject_for_test(std::sync::Arc::new(NoSid));
+    let fallback = load_or_create(&blocked);
+    assert!(!fallback.is_persistent());
+    assert!(fallback.diagnostic.is_some());
+    assert!(!blocked.exists());
+    assert!(dir_entries(&other).is_empty());
+}

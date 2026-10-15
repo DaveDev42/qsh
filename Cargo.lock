@@ -1884,6 +1884,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
  "zeroize",
 ]

@@ -68,6 +68,22 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
+# The owner-only DACL module (`src/fsutil/dacl.rs`, ADR-0035 decisions 9 and
+# 10) builds a security descriptor from the process token's user SID and hands
+# it to `CreateFileW` / `CreateDirectoryW`, so a private file or directory
+# never exists with an inherited ACL. Only the features those calls need;
+# `Win32_Security_Authorization` is the reader (`GetNamedSecurityInfoW`) the
+# tests use to pin the result and the setter the unreadable-log test uses.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 # POSIX PTY backend (`docs/design/architecture.md` §4): openpty + spawn with
 # setsid/controlling tty. The whole `pty` module is unix-only (`docs/ROADMAP.md`
 # §3: no Windows host in P0), so the crate builds on Windows without it.
