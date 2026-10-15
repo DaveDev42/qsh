@@ -5,6 +5,7 @@
 mod acl_docs;
 mod acl_registry;
 mod admission_docs;
+mod audit_query_classification;
 mod broker_ops_corpus;
 mod cli_md_header;
 mod doctor_docs;

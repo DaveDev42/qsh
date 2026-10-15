@@ -156,7 +156,14 @@ store). It also covers `qsh sessions` filters: the `sessions_filter::` module,
 including the route-equivalence test
 `sessions_filter_applies_identically_to_forward_and_reverse_hosts` (real
 `qsh serve`, `qsh listen` and `qsh serve --to` processes, with a pty client
-holding a writer lease on each host). M17 adds no p95 budget, so there is no
+holding a writer lease on each host). It also covers `qsh audit`: the
+`audit_query::` module (real binary against a planted log), the op-level
+`ops::audit::tests::` and `audit_query_classification::` source-scan pins, and
+the route-equivalence test
+`audit_query_reads_records_written_by_serve_listen_and_serve_to` (real
+`qsh serve`, `qsh listen` and `qsh serve --to` processes writing one device's
+audit log, read back by one `qsh audit`). The `audit_query_reads_while_the_writer_rotates`
+reader test is part of the same set. M17 adds no p95 budget, so there is no
 `m17-latency.filter`.
 
 ## test/

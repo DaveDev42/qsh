@@ -149,7 +149,8 @@ impl<'a> Filter<'a> {
             Some(n) if (1..=MAX_LIMIT).contains(&n) => n,
             Some(n) => {
                 return Err(invalid(format!(
-                    "limit {n} is out of range: expected 1..={MAX_LIMIT}"
+                    "audit limit {n} is out of range (expected 1..={MAX_LIMIT}), so nothing was \
+                     read; run `qsh audit --limit {MAX_LIMIT}` or a smaller value"
                 )));
             }
         };
@@ -158,7 +159,9 @@ impl<'a> Filter<'a> {
             && decision != "deny"
         {
             return Err(invalid(
-                "invalid decision: expected \"allow\" or \"deny\"".to_string(),
+                "invalid decision filter: expected \"allow\" or \"deny\", so nothing was read; \
+                 run `qsh audit --decision deny` or `qsh audit --decision allow`"
+                    .to_string(),
             ));
         }
         let since = req
@@ -170,8 +173,13 @@ impl<'a> Filter<'a> {
             .until
             .as_deref()
             .map(|text| {
-                parse_instant(text)
-                    .ok_or_else(|| invalid("invalid until: expected an RFC 3339 timestamp".into()))
+                parse_instant(text).ok_or_else(|| {
+                    invalid(
+                        "invalid until: expected an RFC 3339 timestamp, so nothing was read; \
+                         run `qsh audit --until 2026-10-16T00:00:00Z`"
+                            .into(),
+                    )
+                })
             })
             .transpose()?;
         Ok(Self {
@@ -222,7 +230,13 @@ fn parse_since(text: &str, now: SystemTime) -> Result<OffsetDateTime, OpError> {
     if let Some(at) = parse_instant(text) {
         return Ok(at);
     }
-    let bad = || invalid("invalid since: expected an RFC 3339 timestamp or N[smhd]".to_string());
+    let bad = || {
+        invalid(
+            "invalid since: expected an RFC 3339 timestamp or N[smhd], so nothing was read; \
+             run `qsh audit --since 24h`"
+                .to_string(),
+        )
+    };
     let unit = match text.chars().last() {
         Some('s') => 1_i64,
         Some('m') => 60,
@@ -257,7 +271,7 @@ fn open_read_only(path: &Path) -> Result<Option<File>, OpError> {
         return Err(OpError::new(
             ErrorCode::Internal,
             format!(
-                "cannot read audit log {}: not a regular file",
+                "cannot read audit log {}: not a regular file, {UNREADABLE_REMEDY}",
                 path.display()
             ),
         ));
@@ -297,9 +311,18 @@ fn open_read_only(path: &Path) -> Result<Option<File>, OpError> {
 fn unreadable(path: &Path, err: &io::Error) -> OpError {
     OpError::new(
         ErrorCode::Internal,
-        format!("cannot read audit log {}: {}", path.display(), err.kind()),
+        format!(
+            "cannot read audit log {}: {}, {UNREADABLE_REMEDY}",
+            path.display(),
+            err.kind()
+        ),
     )
 }
+
+/// Impact and next step of an unreadable log, shared by every `INTERNAL`
+/// this module returns. It names no file content (결정 6).
+const UNREADABLE_REMEDY: &str = "so no records were returned; make the log readable by this account \
+     or point `[audit].path` in config.toml at a readable file";
 
 /// Feed every line of `file` to `sink`: `Some(record)` for a parsed line,
 /// `None` for a line that was skipped.

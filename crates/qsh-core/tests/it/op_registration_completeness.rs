@@ -217,6 +217,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-acl-show.1",
     },
     OpFace {
+        op: "audit.query",
+        marker: "AuditQueryOp",
+        renderer: "print_audit_query",
+        cli_spelling: "qsh audit",
+        man_file: "qsh-audit.1",
+    },
+    OpFace {
         op: "capabilities.get",
         marker: "CapabilitiesOp",
         renderer: "print_capabilities",

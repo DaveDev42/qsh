@@ -1,0 +1,53 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-audit 1  "audit 0.4.3" 
+.SH NAME
+qsh\-audit \- Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22)
+.SH SYNOPSIS
+\fBqsh audit\fR [\fB\-\-json\fR] [\fB\-\-since\fR] [\fB\-\-jsonl\fR] [\fB\-\-until\fR] [\fB\-\-principal\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-action\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-resource\fR] [\fB\-\-decision\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+.SH DESCRIPTION
+Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22).
+.PP
+Read\-only and local only: it never reaches a remote peer, writes no audit record, and there is no command that deletes or shortens the log. Run it on the host whose log you want.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-since\fR \fI<RFC3339|N[smhd]>\fR
+Only records at or after this time: an RFC 3339 timestamp, or a span back from now written `N[smhd]` (`90m`, `24h`, `7d`)
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-until\fR \fI<RFC3339>\fR
+Only records at or before this time (RFC 3339)
+.TP
+\fB\-\-principal\fR \fI<PRINCIPAL>\fR
+Only records of this principal (`device:<name>`, `user:<name>`, `fp:sha256:<base64>`, or `\-` for a connection with none)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-\-action\fR \fI<ACTION>\fR
+Only records of this action (`session.open`, `file.read`, or `connect` for a connection\-level record)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-\-resource\fR \fI<RESOURCE>\fR
+Only records of this resource identifier, exactly as stored
+.TP
+\fB\-\-decision\fR \fI<allow|deny>\fR
+Only records with this decision
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Most records to return, newest first: 1 to 1000, default 100
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v0.4.3

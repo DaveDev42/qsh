@@ -42,6 +42,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
+use qsh_core::audit::reader;
 use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_host_not_found};
 use qsh_core::ops::pair_ssh::{
     bootstrap_version_unsupported, local_fingerprint_conflict, local_pin_conflict,
@@ -605,6 +606,7 @@ fn exempted_uniform_messages_never_become_a_three_part_slot() {
         .into_iter()
         .chain(host_not_found_rows())
         .chain(pair_ssh_rows())
+        .chain(audit_query_rows())
     {
         for (part, slot) in [
             ("observation", &row.observation),
@@ -858,6 +860,127 @@ fn pair_ssh_rows() -> Vec<ThreePartRow> {
             ),
         },
     ]
+}
+
+// ---------------------------------------------------------------------
+// `audit.query` (ADR-0033 결정 5, 6): the refusals of a bad filter and of an
+// unreadable log. Each wording is what the real `reader::query` returns, so
+// the table cannot drift from the message a user sees. A skipped log line is
+// not a refusal and carries no wording (only a count, 결정 6).
+// ---------------------------------------------------------------------
+
+fn audit_query_message(req: &qsh_proto::AuditQueryReq, log: &std::path::Path) -> String {
+    reader::query(log, 5, req, std::time::SystemTime::UNIX_EPOCH)
+        .expect_err("this request must be refused")
+        .message
+}
+
+fn audit_query_rows() -> Vec<ThreePartRow> {
+    let missing = std::path::Path::new("no-such-audit.log");
+    let bad_limit = audit_query_message(
+        &qsh_proto::AuditQueryReq {
+            limit: Some(5000),
+            ..Default::default()
+        },
+        missing,
+    );
+    let bad_decision = audit_query_message(
+        &qsh_proto::AuditQueryReq {
+            decision: Some("maybe".into()),
+            ..Default::default()
+        },
+        missing,
+    );
+    let bad_since = audit_query_message(
+        &qsh_proto::AuditQueryReq {
+            since: Some("yesterday".into()),
+            ..Default::default()
+        },
+        missing,
+    );
+    let bad_until = audit_query_message(
+        &qsh_proto::AuditQueryReq {
+            until: Some("tomorrow".into()),
+            ..Default::default()
+        },
+        missing,
+    );
+    // A directory where the log should be: a real, deterministic way to make
+    // the log unreadable on every platform.
+    let not_a_file =
+        audit_query_message(&qsh_proto::AuditQueryReq::default(), &std::env::temp_dir());
+
+    vec![
+        ThreePartRow {
+            label: "audit.query limit out of range",
+            observation: ThreePartSlot::new(
+                bad_limit.clone(),
+                "audit limit 5000 is out of range (expected 1..=1000)",
+            ),
+            impact: ThreePartSlot::new(bad_limit.clone(), "so nothing was read"),
+            next_command: ThreePartSlot::new(
+                bad_limit,
+                "run `qsh audit --limit 1000` or a smaller value",
+            ),
+        },
+        ThreePartRow {
+            label: "audit.query invalid decision",
+            observation: ThreePartSlot::new(
+                bad_decision.clone(),
+                "invalid decision filter: expected \"allow\" or \"deny\"",
+            ),
+            impact: ThreePartSlot::new(bad_decision.clone(), "so nothing was read"),
+            next_command: ThreePartSlot::new(
+                bad_decision,
+                "run `qsh audit --decision deny` or `qsh audit --decision allow`",
+            ),
+        },
+        ThreePartRow {
+            label: "audit.query invalid since",
+            observation: ThreePartSlot::new(
+                bad_since.clone(),
+                "invalid since: expected an RFC 3339 timestamp or N[smhd]",
+            ),
+            impact: ThreePartSlot::new(bad_since.clone(), "so nothing was read"),
+            next_command: ThreePartSlot::new(bad_since, "run `qsh audit --since 24h`"),
+        },
+        ThreePartRow {
+            label: "audit.query invalid until",
+            observation: ThreePartSlot::new(
+                bad_until.clone(),
+                "invalid until: expected an RFC 3339 timestamp",
+            ),
+            impact: ThreePartSlot::new(bad_until.clone(), "so nothing was read"),
+            next_command: ThreePartSlot::new(
+                bad_until,
+                "run `qsh audit --until 2026-10-16T00:00:00Z`",
+            ),
+        },
+        ThreePartRow {
+            label: "audit.query unreadable log",
+            observation: ThreePartSlot::new(not_a_file.clone(), "not a regular file"),
+            impact: ThreePartSlot::new(not_a_file.clone(), "so no records were returned"),
+            next_command: ThreePartSlot::new(
+                not_a_file,
+                "point `[audit].path` in config.toml at a readable file",
+            ),
+        },
+    ]
+}
+
+#[test]
+fn audit_query_wordings_have_observation_impact_and_next_command() {
+    let rows = audit_query_rows();
+    assert_eq!(
+        rows.len(),
+        5,
+        "one row per audit.query refusal: limit, decision, since, until, unreadable log"
+    );
+    for row in &rows {
+        row.observation.assert_holds(row.label, "observation");
+        row.impact.assert_holds(row.label, "impact");
+        row.next_command.assert_holds(row.label, "next-command");
+    }
 }
 
 #[test]

@@ -237,6 +237,13 @@ mod section_2_5 {
         );
         let no_authz_ops = backtick_tokens(left9);
         assert!(no_authz_ops.contains(&"host.list"));
+        // `audit.query` (ADR-0033 결정 4) is local-only like `acl.show`: it
+        // sits in this row, so the bidirectional exclusion below proves it
+        // has no OP_REGISTRY row.
+        assert!(
+            no_authz_ops.contains(&"audit.query"),
+            "§2.5's 인가 불요 row must name audit.query"
+        );
 
         // `host.reverse` is not a table row at all (§2.5's own prose: a
         // connection-time check, not an operation) — it lives in the

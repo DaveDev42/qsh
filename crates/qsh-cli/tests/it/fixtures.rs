@@ -97,6 +97,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.init.imported_ssh_key.json",
     "identity.move_key.moved.json",
     "identity.move_key.noop.json",
+    "audit.query.json",
+    "audit.query.truncated.json",
     "doctor.run.keystore_session_bound.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
@@ -1175,6 +1177,26 @@ fn golden_name_authority_fixtures() {
     assert_eq!(renamed["data"]["old_name"], "old-name", "{renamed}");
     assert_eq!(renamed["data"]["peer"]["name"], "new-name", "{renamed}");
     check_without_roles("trust.rename.json", renamed);
+}
+
+/// `qsh audit` (`docs/CLI.md` §6.22, ADR-0033 결정 9): a planted log with
+/// fixed timestamps, so even `oldest_ts` (which `normalize` leaves alone) is
+/// deterministic. The second fixture is cut by `--limit`, so `truncated` is
+/// true.
+#[test]
+fn golden_audit_query_fixtures() {
+    let sandbox = Sandbox::initialized();
+    crate::audit_query::plant(&sandbox, &crate::audit_query::series(), None);
+
+    let (code, all) = sandbox.json(&["audit", "--json"]);
+    assert_eq!(code, 0, "{all}");
+    assert_eq!(all["data"]["truncated"], false, "{all}");
+    check("audit.query.json", all);
+
+    let (code, cut) = sandbox.json(&["audit", "--limit", "2", "--json"]);
+    assert_eq!(code, 0, "{cut}");
+    assert_eq!(cut["data"]["truncated"], true, "{cut}");
+    check("audit.query.truncated.json", cut);
 }
 
 /// `qsh identity move-key` (`docs/CLI.md` §6.11, ADR-0032 결정 15).

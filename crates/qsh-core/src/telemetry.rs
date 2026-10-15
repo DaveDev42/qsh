@@ -23,7 +23,8 @@
 //! It is **not** a `qsh.event/v1` event and never reaches stdout: stdout
 //! carries the contract envelope alone (CLI.md §2.2), and promoting
 //! recovery to the event contract would freeze a field set we are still
-//! learning the shape of. That promotion is a P1 decision.
+//! learning the shape of. ADR-0033 decision 12 settled that: the line stays a
+//! single-line JSON record on stderr and is not promoted.
 //!
 //! There is no field here that could carry a secret. `session_ref` is the
 //! same public handle `qsh session list` prints; there is no token field,

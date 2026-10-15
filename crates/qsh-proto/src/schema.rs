@@ -8,14 +8,14 @@
 use schemars::{Schema, schema_for};
 
 use crate::types::{
-    AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope,
-    DoctorData, DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData, IdentityExportData,
-    IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData, ServiceInstallData,
-    ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionListData,
-    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, SetupRunData,
-    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData,
-    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData, TunnelListData,
-    TunnelOpenData, VersionData,
+    AclCheckData, AclShowData, AuditQueryData, CapabilitiesData, CertInitData, CertIssueData,
+    CliEnvelope, DoctorData, DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData,
+    IdentityExportData, IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData,
+    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
+    SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
+    SetupRunData, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
+    TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData,
+    TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -26,6 +26,7 @@ use crate::types::{
 pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "acl.check",
     "acl.show",
+    "audit.query",
     "capabilities.get",
     "cert.init",
     "cert.issue",
@@ -80,6 +81,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
     Some(match command {
         "acl.check" => schema_for!(AclCheckData),
         "acl.show" => schema_for!(AclShowData),
+        "audit.query" => schema_for!(AuditQueryData),
         "capabilities.get" => schema_for!(CapabilitiesData),
         "cert.init" => schema_for!(CertInitData),
         "cert.issue" => schema_for!(CertIssueData),

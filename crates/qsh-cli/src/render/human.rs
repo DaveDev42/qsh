@@ -9,9 +9,9 @@ use std::io::{self, Write};
 use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
-    DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
-    IdentityMoveKeyData, KeyStoreKind, PairSshData, PairSshDirection, SchemaData,
+    AclCheckData, AclShowData, AuditQueryData, AuditRecordView, CapabilitiesData, CertInitData,
+    CertIssueData, DoctorData, DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData,
+    IdentityInitData, IdentityMoveKeyData, KeyStoreKind, PairSshData, PairSshDirection, SchemaData,
     ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
@@ -200,6 +200,91 @@ pub fn print_identity_move_key(data: &IdentityMoveKeyData) -> io::Result<()> {
             data.from.as_str(),
             data.to.as_str()
         )?;
+    }
+    Ok(())
+}
+
+/// Print `qsh audit`'s records (`docs/CLI.md` §6.22): one table on stdout,
+/// newest first, then the facts the table cannot show on stderr - the
+/// retention horizon (`oldest_ts`), whether `--limit` cut the result, and
+/// how many lines were skipped. Only the structural fields of the stored
+/// records are shown; a skipped line contributes its count and nothing of
+/// its content (ADR-0033 decisions 6 and 8). `request_id` is left out of
+/// the table and stays in `--json`.
+pub fn print_audit_query(data: &AuditQueryData) -> io::Result<()> {
+    let result = print_audit_table(&data.records);
+    match &data.oldest_ts {
+        Some(oldest) => stderr_note!("qsh: oldest retained record: {}", sanitize(oldest)),
+        None => stderr_note!("qsh: the audit log holds no records"),
+    }
+    if data.truncated {
+        stderr_note!(
+            "qsh: showing the newest {} matching records; more match, narrow the filters or raise --limit",
+            data.records.len()
+        );
+    }
+    if data.skipped_lines > 0 {
+        stderr_note!(
+            "qsh: skipped {} unreadable audit log lines",
+            data.skipped_lines
+        );
+    }
+    result
+}
+
+fn print_audit_table(records: &[AuditRecordView]) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if records.is_empty() {
+        return writeln!(stdout, "no audit records");
+    }
+    let rows: Vec<[String; 9]> = records
+        .iter()
+        .map(|r| {
+            [
+                sanitize(&r.ts),
+                sanitize(&r.decision),
+                sanitize(&r.principal),
+                sanitize(&r.action),
+                sanitize(&r.resource),
+                r.rule.map_or_else(|| "-".to_string(), |n| n.to_string()),
+                sanitize(&r.auth_path),
+                sanitize(&r.peer_addr),
+                r.role.as_deref().map_or_else(|| "-".to_string(), sanitize),
+            ]
+        })
+        .collect();
+    const HEADERS: [&str; 9] = [
+        "TS",
+        "DECISION",
+        "PRINCIPAL",
+        "ACTION",
+        "RESOURCE",
+        "RULE",
+        "AUTH_PATH",
+        "PEER",
+        "ROLE",
+    ];
+    let mut widths = HEADERS.map(|h| h.chars().count());
+    for row in &rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let line = |cells: &[&str]| -> String {
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:width$}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    writeln!(stdout, "{}  COUNT", line(&HEADERS))?;
+    for (row, record) in rows.iter().zip(records) {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        let count = record
+            .count
+            .map_or_else(|| "-".to_string(), |n| n.to_string());
+        writeln!(stdout, "{}  {count}", line(&cells))?;
     }
     Ok(())
 }
