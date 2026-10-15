@@ -134,6 +134,14 @@ leaves out the three p95/throughput measurements, which are gated by
 saturation. `m15-latency.filter` selects exactly those three
 (`role_resolution_per_decision_costs_*`, `file_copy_echo_under_load`,
 `cp_many_small_files`); run them 50 times with no competing load at `-j 1`.
+`m16.filter` is the M16 set: the trust-withdrawal tests (per-connection
+watch, close code `0x1005`, the three processes `serve`, `serve --to` and
+`listen`, the trust-store poll) and the SSH bootstrap tests (`ssh_bootstrap`,
+`ssh_respond`, `auto_bootstrap`, `bootstrapped_` prefixes, run against the
+fake `ssh` harness). It leaves out
+`one_change_closes_many_connections_within_two_seconds`, a measurement whose
+connection count is raised with `QSH_M16_CONNECTIONS`. M16 adds no p95
+budget, so there is no `m16-latency.filter`.
 
 ## test/
 
