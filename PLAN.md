@@ -59,7 +59,7 @@ M16이 더하는 것은 가짜 `ssh` 하네스 하나다(Step 5). 실제 sshd와
 체크박스는 근거가 되는 테스트와 CI run이 초록일 때만 채운다.
 
 - [x] **DoD — ADR-0044·0031이 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
-- [ ] **DoD (a) — 가짜 `ssh`로 끝까지 도는 부트스트랩.** 다음을 테스트가 고정한다.
+- [x] **DoD (a) — 가짜 `ssh`로 끝까지 도는 부트스트랩.** 다음을 테스트가 고정한다. 결과: 근거: `6db09a3`·`ddb39fb`·`6445922`·`7c43332`.
   - 양쪽 pin(이름, 주소, role)과 이어진 handshake: `ssh_bootstrap_pins_both_sides_and_connects`.
   - pin 충돌은 아무것도 쓰지 않고 끝난다: `ssh_bootstrap_never_overwrites_a_pin_with_a_different_fingerprint`.
   - role 없는 기존 원격 pin을 `full`로 넓히지 않는다: `ssh_bootstrap_does_not_widen_an_existing_roleless_pin`.
@@ -67,20 +67,20 @@ M16이 더하는 것은 가짜 `ssh` 하네스 하나다(Step 5). 실제 sshd와
   - `--json`/`--jsonl`에서는 자동 발동하지 않고 ssh 자식이 BatchMode로 뜬다: `ssh_bootstrap_is_never_implicit_in_machine_mode`, `ssh_bootstrap_ssh_argv_is_fixed`.
 
   근거: Step 5·6·7·9.
-- [ ] **DoD (a) — 역방향 동등.** `--reverse` 부트스트랩 뒤 원격이 `serve --to`로 등록하면 reverse route 위의 attach·exec·`qsh cp`가 정방향과 같은 테스트를 통과한다(§5.1 원칙 7). 근거: Step 8(`ssh_bootstrap_reverse_*`, `bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite`).
-- [ ] **DoD (a) — 줄 파서와 fuzz.** stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 근거: Step 4.
-- [ ] **DoD (a) — 키 재료와 rc 출력이 로그에 남지 않는다.** 근거: Step 5(로그 규율), Step 7(`ssh_bootstrap_skips_untagged_stdout_and_never_logs_it`, `ssh_respond_audit_record_has_only_structural_fields`).
-- [ ] **DoD (b) — `trust remove` 뒤 2초 안에 CLOSE와 audit 한 줄.** `an_established_connection_survives_the_hosts_trust_remove`가 반대 단언 `an_established_connection_is_closed_within_two_seconds_of_trust_remove`로 바뀐다. 세 프로세스(`qsh serve`, `qsh serve --to`, `qsh listen`) 모두에서 같다. 근거: Step 3.
-- [ ] **DoD (b) — role 축소와 파싱 실패 처분이 ADR대로다.** role 축소(`full`→`exec`, `full`→`tunnel`의 `any`→`owned` 포함)는 `grants_reduced`로 닫히고, 넓히면 닫히지 않으며, `trust.toml` 파싱 실패 중에는 닫지 않고 role 요청만 멈춘다(ADR-0031 결정 5·6). 근거: Step 3.
-- [ ] **DoD (b) — 문면.** `TrustRemoveScope`(`crates/qsh-core/src/doctor.rs`의 `TRUST_REMOVE_SCOPE`) message·remedy와 `docs/CLI.md` §6.11·§6.17 문면이 같은 커밋에서 바뀐다. 만료 30일 전 doctor 경고(P0)는 유지된다(`doctor_reports_cert_expiring_soon_within_the_30_day_window` 무변경 초록). 근거: Step 3.
-- [ ] **DoD — 등록 완전성.** 새 명령·필드마다 다음을 갖춘다. 근거: Step 5·6·7·8·9.
+- [x] **DoD (a) — 역방향 동등.** `--reverse` 부트스트랩 뒤 원격이 `serve --to`로 등록하면 reverse route 위의 attach·exec·`qsh cp`가 정방향과 같은 테스트를 통과한다(§5.1 원칙 7). 근거: Step 8(`ssh_bootstrap_reverse_*`, `bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite`). 결과: 근거: `e8cd7a3`.
+- [x] **DoD (a) — 줄 파서와 fuzz.** stdio 줄 파서는 `qsh-proto`에 있고 fuzz 타깃 `parse_ssh_bootstrap_line`이 걸린다. 근거: Step 4. 결과: 근거: `aba7bd6`(fuzz smoke 20,000 runs clean, 누적 72 fuzz-hours는 §0.3 사람 몫).
+- [x] **DoD (a) — 키 재료와 rc 출력이 로그에 남지 않는다.** 근거: Step 5(로그 규율), Step 7(`ssh_bootstrap_skips_untagged_stdout_and_never_logs_it`, `ssh_respond_audit_record_has_only_structural_fields`). 결과: 근거: `6db09a3`·`6445922`.
+- [x] **DoD (b) — `trust remove` 뒤 2초 안에 CLOSE와 audit 한 줄.** `an_established_connection_survives_the_hosts_trust_remove`가 반대 단언 `an_established_connection_is_closed_within_two_seconds_of_trust_remove`로 바뀐다. 세 프로세스(`qsh serve`, `qsh serve --to`, `qsh listen`) 모두에서 같다. 근거: Step 3. 결과: 근거: `029c83b`(연결 512개가 한 번의 변경에 240ms 안에 닫힘).
+- [x] **DoD (b) — role 축소와 파싱 실패 처분이 ADR대로다.** role 축소(`full`→`exec`, `full`→`tunnel`의 `any`→`owned` 포함)는 `grants_reduced`로 닫히고, 넓히면 닫히지 않으며, `trust.toml` 파싱 실패 중에는 닫지 않고 role 요청만 멈춘다(ADR-0031 결정 5·6). 근거: Step 3. 결과: 근거: `fd92130`·`029c83b`.
+- [x] **DoD (b) — 문면.** `TrustRemoveScope`(`crates/qsh-core/src/doctor.rs`의 `TRUST_REMOVE_SCOPE`) message·remedy와 `docs/CLI.md` §6.11·§6.17 문면이 같은 커밋에서 바뀐다. 만료 30일 전 doctor 경고(P0)는 유지된다(`doctor_reports_cert_expiring_soon_within_the_30_day_window` 무변경 초록). 근거: Step 3. 결과: 근거: `029c83b`.
+- [x] **DoD — 등록 완전성.** 새 명령·필드마다 다음을 갖춘다. 근거: Step 5·6·7·8·9. 결과: 근거: `6445922`·`e8cd7a3`(fixture 다섯, `qsh-pair-ssh.1`, `capabilities.json` diff 0).
   - fixture 등재(`REQUIRED_FIXTURES`)와 `layer_2_every_schema_command_has_all_six_faces`
   - man 재생성(`qsh-pair-ssh.1`, `checked_in_man_pages_match_the_generator`)
   - `capabilities.json` golden은 바뀌지 않는다(두 ADR 모두 peer capability를 더하지 않음). 바뀌면 그 스텝이 잘못된 것이다.
   - 부트스트랩 직후 pin 이름·role 고지(Step 7)
-- [ ] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 진입점 두 행(ssh 자식과 부트스트랩 스트림, `pair ssh-respond`의 stdin)이, §4에 ssh 신뢰 승계(A), `full` pin 생성·방향 없는 pin·role 확대(B), 로그 유출(D), 응답자 출력 조작·옵션 주입(E), 연결 재검증(B)이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 3·4·5·6·7·8. §7 잔여 위험은 Step 3(h4·h5·h35 개정)과 Step 10(ADR-0044 잔여 둘).
-- [ ] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 10.
-- [ ] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M16 DoD에는 없는 줄이다(§9 #1). M12·M13·M15 규율대로 M16이 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 근거: Step 3·10.
+- [x] **DoD — 위협 모델.** `docs/design/threat-model.md` §3에 진입점 두 행(ssh 자식과 부트스트랩 스트림, `pair ssh-respond`의 stdin)이, §4에 ssh 신뢰 승계(A), `full` pin 생성·방향 없는 pin·role 확대(B), 로그 유출(D), 응답자 출력 조작·옵션 주입(E), 연결 재검증(B)이 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 3·4·5·6·7·8. §7 잔여 위험은 Step 3(h4·h5·h35 개정)과 Step 10(ADR-0044 잔여 둘). 결과: 근거: `029c83b`·`aba7bd6`·`6db09a3`·`ddb39fb`·`6445922`·`e8cd7a3`·`b880aab`(§7 h42·h43·h44).
+- [x] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 10. 결과: 근거: `b880aab`, CI run `38704818413`(acceptance 포함) 초록.
+- [x] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M16 DoD에는 없는 줄이다(§9 #1). M12·M13·M15 규율대로 M16이 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 근거: Step 3·10. 결과: 근거: `b880aab`, 부하 아래 `scripts/stress/m16.filter` 50/50 passed under load(195개, Dave-Windows-WSL 8 vCPU·31 GB).
 
 ## 4. 실행 단계 (PR 단위)
 
