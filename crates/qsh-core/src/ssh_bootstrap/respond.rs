@@ -236,11 +236,29 @@ impl Responder {
             .peers()
             .iter()
             .find(|peer| peer.fingerprint == fingerprint_text)
+            .cloned()
         {
+            // Reverse direction (decision 12): the commit names where to dial
+            // this client. A known client whose pin has another address, or
+            // none, gets that address and nothing else, the way `trust add`
+            // refreshes one (no role change, no audit record: the pin's
+            // grants are the ones it already had).
+            if address.is_some() {
+                let (_, _, updated) = store.add_peer_with_role(
+                    existing.name.clone(),
+                    address,
+                    fingerprint,
+                    now_rfc3339(),
+                    role,
+                );
+                if updated {
+                    store.save(&path)?;
+                }
+            }
             return Ok(BootstrapResult {
                 status: ResultStatus::Exists,
-                name: existing.name.clone(),
-                role: existing.role.clone(),
+                name: existing.name,
+                role: existing.role,
                 created: false,
                 code: None,
                 message: None,

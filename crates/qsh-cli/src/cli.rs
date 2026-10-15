@@ -991,6 +991,21 @@ pub struct PairSshArgs {
     /// `:port`, port 4433 is assumed.
     #[arg(long, value_name = "HOST[:PORT]")]
     pub address: Option<String>,
+    /// Reverse direction: the remote dials this machine's `qsh listen`
+    /// instead of this machine dialing the remote. Goes with `--to`, and
+    /// does not combine with `--address` (either mistake is an
+    /// `INVALID_ARGUMENT` before ssh runs). The
+    /// remote pins this machine at the `--to` address with the `--role`
+    /// role; this machine pins the remote without an address and with
+    /// role `reverse`. Nothing is started on the remote and no connection
+    /// is tried: the result names the `qsh serve --to` command to run
+    /// there.
+    #[arg(long)]
+    pub reverse: bool,
+    /// With `--reverse`: the `host[:port]` the remote dials to reach this
+    /// machine's `qsh listen`. With no `:port`, port 4433 is assumed.
+    #[arg(long, value_name = "HOST[:PORT]")]
+    pub to: Option<String>,
     /// The `qsh` to run on the remote (default: `[ssh].remote_qsh` in
     /// `config.toml`, then `qsh`).
     #[arg(long, value_name = "PATH")]

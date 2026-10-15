@@ -348,7 +348,7 @@ impl Ops {
     /// [`Self::trust_rename`]'s: no durable record, no write — a failed
     /// append is `INTERNAL` (`retryable: true`) and the caller must not
     /// save. A `none` role writes no record, since it grants nothing.
-    fn record_role_write(
+    pub(super) fn record_role_write(
         &self,
         action: &'static str,
         pin: &str,

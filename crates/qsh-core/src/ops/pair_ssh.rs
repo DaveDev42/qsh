@@ -13,6 +13,13 @@
 //!    machine writes its pin (role `none`), then a QUIC handshake with
 //!    mutual pin verification confirms the pair (decision 13).
 //!
+//! `--reverse --to` runs the same conversation the other way round
+//! (decision 22): the commit carries the address the remote dials, this
+//! machine's pin of the remote has no address and role `reverse` (with an
+//! audit record, written before the pin is saved), and no confirming dial is
+//! made because nothing listens on the remote yet; the result names the
+//! command to run there instead.
+//!
 //! Nothing here reads a key, a passphrase or an agent socket; ssh does all of
 //! that in its own process (decision 19). `hosts.toml`, `config.toml` and
 //! `acl.toml` are never written, and the ssh `User` is stored nowhere
@@ -80,9 +87,17 @@ struct Plan {
     remote_as: Option<String>,
     role: TrustRole,
     address: Option<String>,
+    /// `--to`, normalized: `Some` is the reverse direction (decision 22).
+    to: Option<String>,
     remote_qsh: String,
     runner: SshRunner,
     batch: bool,
+}
+
+impl Plan {
+    fn is_reverse(&self) -> bool {
+        self.to.is_some()
+    }
 }
 
 impl Ops {
@@ -133,9 +148,12 @@ impl Ops {
             None => default_remote_name(local_hostname().as_deref(), &loaded.identity.device_id),
         };
 
-        let address = match &plan.address {
-            Some(address) => address.clone(),
-            None => {
+        // Forward: where this machine dials the remote. Reverse: where the
+        // remote dials this machine.
+        let address = match (&plan.to, &plan.address) {
+            (Some(to), _) => to.clone(),
+            (None, Some(address)) => address.clone(),
+            (None, None) => {
                 normalize_peer_address(&qsh_proto::wire::format_host_port(
                     &resolved.hostname,
                     hello.port,
@@ -159,7 +177,7 @@ impl Ops {
             fingerprint: our_fingerprint.to_string(),
             name: remote_name.clone(),
             role: plan.role.as_str().to_string(),
-            address: None,
+            address: plan.to.clone(),
         };
         let result = runtime.block_on(async {
             child.send(&BootstrapLine::Commit(commit)).await?;
@@ -183,22 +201,29 @@ impl Ops {
             return Err(canceled());
         }
 
-        let (peer, created) = self
-            .write_local_pin(&plan, &address, &hello.fingerprint)
-            .map_err(|err| {
-                OpError::new(
-                    err.code,
-                    format!(
-                        "{}; the remote pin was written, so run this command again to finish",
-                        err.message
-                    ),
-                )
-                .with_retryable(err.retryable)
-                .with_details(err.details)
-            })?;
+        let written = if plan.is_reverse() {
+            self.write_local_reverse_pin(&plan, &hello.fingerprint)
+        } else {
+            self.write_local_pin(&plan, &address, &hello.fingerprint)
+        };
+        let (peer, created) = written.map_err(|err| {
+            OpError::new(
+                err.code,
+                format!(
+                    "{}; the remote pin was written, so run this command again to finish",
+                    err.message
+                ),
+            )
+            .with_retryable(err.retryable)
+            .with_details(err.details)
+        })?;
 
-        // Confirmation: the pins stand whatever this says.
-        let (verified, verify_error) = if hello.listening == Some(false) {
+        // Confirmation: the pins stand whatever this says. The reverse
+        // direction makes no dial (decision 13): the remote is not serving
+        // anything yet, and that is the expected state.
+        let (verified, verify_error) = if plan.is_reverse() {
+            (false, None)
+        } else if hello.listening == Some(false) {
             (false, Some(cli_error(serve_not_listening(&peer.name))))
         } else {
             match self.confirm_dial(
@@ -217,12 +242,20 @@ impl Ops {
             }
         };
 
+        let (direction, next_command) = if plan.is_reverse() {
+            (
+                PairSshDirection::Reverse,
+                Some(reverse_next_command(&remote.name)),
+            )
+        } else {
+            (PairSshDirection::Forward, None)
+        };
         let data = PairSshData {
-            direction: PairSshDirection::Forward,
+            direction,
             peer,
             created,
             remote,
-            next_command: None,
+            next_command,
             identity_created: init.created,
             ssh_proxied: resolved.proxied,
             verified,
@@ -234,6 +267,33 @@ impl Ops {
 
     /// Validate every argument that can be validated without a side effect.
     fn pair_ssh_plan(&self, req: &PairSshReq, env: &PairSshEnv) -> Result<Plan, OpError> {
+        // The direction flags first (decision 1): no other argument can make
+        // an inconsistent pair valid.
+        let to = match req.to.as_deref() {
+            None => None,
+            Some("") => {
+                return Err(
+                    OpError::new(ErrorCode::InvalidArgument, "--to must not be empty")
+                        .with_retryable(false),
+                );
+            }
+            Some(to) => Some(normalize_peer_address(to).address),
+        };
+        if req.reverse != to.is_some() {
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                "--reverse and --to go together: the remote dials the address given with --to",
+            )
+            .with_retryable(false));
+        }
+        if req.reverse && req.address.is_some() {
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                "--address is the address this machine dials, so it does not combine with \
+                 --reverse; the remote dials the --to address",
+            )
+            .with_retryable(false));
+        }
         let dest = Dest::parse(&req.dest)?;
         let pin_name = dest.pin_name(req.as_name.as_deref())?;
         let remote_as = req
@@ -271,6 +331,7 @@ impl Ops {
             remote_as,
             role,
             address,
+            to,
             remote_qsh,
             runner,
             batch: batch_mode(env.machine_mode, env.stdin_is_terminal),
@@ -311,6 +372,36 @@ impl Ops {
             TrustRole::None,
         );
         if created || updated {
+            store.save(&path)?;
+        }
+        Ok((peer, created))
+    }
+
+    /// Write this machine's pin of the remote in the reverse direction: no
+    /// address, role `reverse` (decision 12, 22). The role grants an action,
+    /// so the order is lock, load, check again, mutate, audit, save, and with
+    /// no durable audit record there is no pin. An existing pin for the same
+    /// identity is left as it is; its role is reported, not changed.
+    fn write_local_reverse_pin(
+        &self,
+        plan: &Plan,
+        remote: &Fingerprint,
+    ) -> Result<(TrustPeer, bool), OpError> {
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        if let Some(err) = local_conflict(&store, &plan.pin_name, remote, plan.dest.as_ssh_arg()) {
+            return Err(err);
+        }
+        let (peer, created, _updated) = store.add_peer_with_role(
+            plan.pin_name.clone(),
+            None,
+            *remote,
+            now_rfc3339(),
+            TrustRole::Reverse,
+        );
+        if created {
+            self.record_role_write(PairSshOp::COMMAND, &peer.name, TrustRole::Reverse)?;
             store.save(&path)?;
         }
         Ok((peer, created))
@@ -562,6 +653,13 @@ fn local_hostname() -> Option<String> {
 #[cfg(not(unix))]
 fn local_hostname() -> Option<String> {
     std::env::var("COMPUTERNAME").ok()
+}
+
+/// The command to run on the remote once a reverse pair is in place
+/// (decision 22): `qsh serve --to` registers with this machine under the name
+/// the remote pinned it by.
+fn reverse_next_command(remote_name: &str) -> String {
+    format!("qsh serve --to {}", shell_word(remote_name))
 }
 
 // ---------------------------------------------------------------------
@@ -877,7 +975,7 @@ fn cli_error(err: OpError) -> CliError {
 // ---------------------------------------------------------------------
 
 /// The stderr lines a human run adds to the result (ADR-0044 decisions 6,
-/// 12, 18, ADR-0045 decision 13).
+/// 12, 18, 22, ADR-0045 decision 13).
 fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if data.identity_created {
@@ -892,11 +990,36 @@ fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &st
     } else {
         "already pinned"
     };
-    lines.push(format!(
-        "{verb} \"{}\" on this machine at {address}. {}",
-        data.peer.name,
-        pairing_role_clause(TrustRole::None),
-    ));
+    if plan.is_reverse() {
+        // No address on this side: the remote is the one that dials.
+        let role = data
+            .peer
+            .role
+            .as_deref()
+            .and_then(|role| role.parse::<TrustRole>().ok());
+        // An existing pin from an earlier forward pair keeps its address
+        // (`add_peer_with_role` only changes the address for a known name),
+        // so say what the pin really holds rather than assuming none.
+        let held_address = if data.peer.address.is_empty() {
+            "without an address".to_string()
+        } else {
+            format!("at {}", data.peer.address)
+        };
+        lines.push(format!(
+            "{verb} \"{}\" on this machine {held_address}. {}",
+            data.peer.name,
+            pairing_role_clause(role.unwrap_or(TrustRole::Reverse)),
+        ));
+        if let Some(line) = local_role_notice(data) {
+            lines.push(line);
+        }
+    } else {
+        lines.push(format!(
+            "{verb} \"{}\" on this machine at {address}. {}",
+            data.peer.name,
+            pairing_role_clause(TrustRole::None),
+        ));
+    }
     let remote_role = data
         .remote
         .role
@@ -907,8 +1030,13 @@ fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &st
             || "Its trust role there has no `role` key, so only `[[acl]]` rows apply.".into(),
             pairing_role_clause,
         );
+        let at = if plan.is_reverse() {
+            format!(" with address {address}")
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "pinned this machine on {} as \"{}\". {clause}",
+            "pinned this machine on {} as \"{}\"{at}. {clause}",
             plan.dest.as_ssh_arg(),
             data.remote.name,
         ));
@@ -922,7 +1050,13 @@ fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &st
     if let Some(line) = role_mismatch_notice(data, plan) {
         lines.push(line);
     }
-    if resolved.proxied {
+    if let Some(command) = &data.next_command {
+        lines.push(format!(
+            "nothing was started on {}; there, run `{command}` (or `qsh service install` to keep \
+             it running) to register with this machine at {address}",
+            plan.dest.as_ssh_arg(),
+        ));
+    } else if resolved.proxied {
         lines.push(format!(
             "ssh reached {} through ProxyJump or ProxyCommand, but qsh dials {} directly (it has \
              no relay), so the QUIC connection may not get through",
@@ -931,6 +1065,24 @@ fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &st
         ));
     }
     lines
+}
+
+/// An existing pin of the remote on this machine keeps the role it has. In
+/// the reverse direction that is worth saying when it is not `reverse`,
+/// because the remote's registration is then judged by `acl.toml` rows alone.
+fn local_role_notice(data: &PairSshData) -> Option<String> {
+    if data.created || data.peer.role.as_deref() == Some(TrustRole::Reverse.as_str()) {
+        return None;
+    }
+    let held = match data.peer.role.as_deref() {
+        Some(role) => format!("role {role}"),
+        None => "no role (only `[[acl]]` rows apply)".to_string(),
+    };
+    let name = shell_word(&data.peer.name);
+    Some(format!(
+        "local pin {name} keeps {held}; run `qsh trust set-role {name} reverse` to let the \
+         remote register"
+    ))
 }
 
 /// The ADR-0044 decision 12 line for an existing remote pin whose role

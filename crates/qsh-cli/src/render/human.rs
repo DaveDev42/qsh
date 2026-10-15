@@ -11,12 +11,12 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
     DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
-    PairSshData, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
-    SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
-    SessionWriteData, SetupRole, SetupRunData, SetupStatus, SetupStepId, TrustAcceptData,
-    TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData,
-    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData,
-    TunnelListData, VersionData,
+    PairSshData, PairSshDirection, SchemaData, ServiceInstallData, ServiceStatusData,
+    ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
+    SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
+    SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
+    TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel,
+    TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -544,10 +544,18 @@ pub fn print_pair_ssh(data: &PairSshData, notices: &[String]) -> io::Result<()> 
                 sanitize(&data.remote.name)
             )?,
         }
-        match &data.verify_error {
-            None if data.verified => writeln!(stdout, "verified")?,
-            None => writeln!(stdout, "not verified")?,
-            Some(error) => writeln!(stdout, "not verified: {}", sanitize(&error.message))?,
+        match (&data.direction, &data.next_command) {
+            // The reverse direction makes no dial; what is left to do is a
+            // command on the remote (ADR-0044 decision 22).
+            (PairSshDirection::Reverse, Some(command)) => {
+                writeln!(stdout, "next, on the remote: {}", sanitize(command))?;
+            }
+            (PairSshDirection::Reverse, None) => {}
+            (PairSshDirection::Forward, _) => match &data.verify_error {
+                None if data.verified => writeln!(stdout, "verified")?,
+                None => writeln!(stdout, "not verified")?,
+                Some(error) => writeln!(stdout, "not verified: {}", sanitize(&error.message))?,
+            },
         }
     }
     let mut stderr = io::stderr().lock();

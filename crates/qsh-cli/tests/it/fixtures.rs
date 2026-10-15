@@ -151,6 +151,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.REMOTE_ERROR.remote_qsh_missing.json",
     "pair.ssh.json",
     "pair.ssh.unverified.json",
+    "pair.ssh.reverse.json",
     "error.UNSUPPORTED.json",
     "tunnel.open.json",
     "tunnel.dynamic.json",
@@ -2027,6 +2028,28 @@ fn golden_pair_ssh_fixtures() {
     assert_eq!(code, 255, "{got}");
     assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
     check("error.SESSION_CONFLICT.pin_conflict.json", got);
+}
+
+/// `pair ssh --reverse --to` (ADR-0044 decision 22): the remote dials this
+/// machine, so this machine's pin has no address and role `reverse`, no
+/// connection is made (`verified: false`, no `verify_error`) and the result
+/// names the command to run on the remote. The remote is a real
+/// `qsh pair ssh-respond` run by the fake `ssh`.
+#[cfg(unix)]
+#[test]
+fn golden_pair_ssh_reverse() {
+    use crate::ssh_bootstrap::pair_reverse::World;
+
+    let w = World::new();
+    let (code, got) = w.pair(&[]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["direction"], "reverse", "{got}");
+    assert_eq!(got["data"]["verified"], false, "{got}");
+    // `normalize` masks `address` unconditionally, so the fixture shows
+    // `<address>`; the real value is the empty string (this machine's pin
+    // has no dial target), asserted here before the mask erases it.
+    assert_eq!(got["data"]["peer"]["address"], "", "{got}");
+    check("pair.ssh.reverse.json", got);
 }
 
 /// `pair ssh` against a remote where the shell cannot find `qsh` (ssh exit

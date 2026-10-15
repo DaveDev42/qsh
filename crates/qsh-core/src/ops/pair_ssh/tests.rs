@@ -167,6 +167,7 @@ fn plan(role: TrustRole) -> Plan {
         remote_as: None,
         role,
         address: None,
+        to: None,
         remote_qsh: "qsh".into(),
         runner: SshRunner::new("ssh"),
         batch: true,
@@ -267,4 +268,107 @@ fn an_existing_remote_pin_with_another_role_gets_the_set_role_command() {
     data.remote.role = None;
     let line = role_mismatch_notice(&data, &plan(TrustRole::Full)).expect("a notice");
     assert!(line.contains("no role"), "{line}");
+}
+
+fn reverse_plan(role: TrustRole) -> Plan {
+    Plan {
+        to: Some("hub.example:4433".into()),
+        ..plan(role)
+    }
+}
+
+fn reverse_data(remote: PairSshRemote) -> PairSshData {
+    let mut data = data(remote);
+    data.direction = PairSshDirection::Reverse;
+    data.peer.address = String::new();
+    data.peer.role = Some("reverse".into());
+    data.next_command = Some(reverse_next_command(&data.remote.name));
+    data.verified = false;
+    data
+}
+
+#[test]
+fn reverse_notices_say_no_address_and_name_the_command_to_run_there() {
+    let data = reverse_data(PairSshRemote {
+        name: "laptop".into(),
+        role: Some("full".into()),
+        created: true,
+    });
+    let lines = notices(
+        &data,
+        &reverse_plan(TrustRole::Full),
+        // A proxied ssh path is not mentioned: the remote dials, not this
+        // machine.
+        &resolved(true),
+        "hub.example:4433",
+    );
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[0].starts_with("pinned \"box\" on this machine without an address."),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].contains("with address hub.example:4433"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[2].contains("`qsh serve --to laptop`") && lines[2].contains("hub.example:4433"),
+        "{lines:?}"
+    );
+    assert!(lines.iter().all(|line| !line.contains("ProxyJump")));
+}
+
+#[test]
+fn reverse_notice_names_the_address_an_existing_local_pin_still_holds() {
+    let mut data = reverse_data(PairSshRemote {
+        name: "laptop".into(),
+        role: Some("full".into()),
+        created: true,
+    });
+    data.created = false;
+    data.peer.address = "box.example:4433".into();
+    let lines = notices(
+        &data,
+        &reverse_plan(TrustRole::Full),
+        &resolved(false),
+        "hub.example:4433",
+    );
+    assert!(
+        lines[0].starts_with("already pinned \"box\" on this machine at box.example:4433."),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("without an address")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn reverse_next_command_quotes_a_name_that_needs_it() {
+    assert_eq!(reverse_next_command("laptop"), "qsh serve --to laptop");
+    assert_eq!(
+        reverse_next_command("o'neil"),
+        "qsh serve --to 'o'\\''neil'"
+    );
+}
+
+#[test]
+fn an_existing_local_pin_with_another_role_gets_the_set_role_command() {
+    let mut data = reverse_data(PairSshRemote {
+        name: "laptop".into(),
+        role: Some("full".into()),
+        created: true,
+    });
+    // A new pin, and one that already is `reverse`, say nothing.
+    assert!(local_role_notice(&data).is_none());
+    data.created = false;
+    assert!(local_role_notice(&data).is_none());
+    data.peer.role = Some("none".into());
+    let line = local_role_notice(&data).expect("a notice");
+    assert!(line.contains("keeps role none"), "{line}");
+    assert!(line.contains("`qsh trust set-role box reverse`"), "{line}");
+    data.peer.role = None;
+    assert!(local_role_notice(&data).unwrap().contains("no role"));
 }

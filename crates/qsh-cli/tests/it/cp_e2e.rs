@@ -200,7 +200,12 @@ pub(crate) fn assert_no_part_files(dir: &Path) {
 }
 
 /// put then get a large file over `rig`, comparing both hashes at every hop.
-fn round_trip(work: &Path, put_dst: &str, get_src: &str, run: impl Fn(&[&str]) -> (i32, Value)) {
+pub(crate) fn round_trip(
+    work: &Path,
+    put_dst: &str,
+    get_src: &str,
+    run: impl Fn(&[&str]) -> (i32, Value),
+) {
     const LEN: usize = 64 * 1024 * 1024 + 12_345;
     let original = work.join("original.bin");
     write_random_file(&original, LEN, 0x5EED_0001);

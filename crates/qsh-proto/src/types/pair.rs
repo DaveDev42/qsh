@@ -29,8 +29,19 @@ pub struct PairSshReq {
     pub role: Option<String>,
     /// `--address`: the `host[:port]` this machine records for the remote,
     /// instead of `<ssh hostname>:<remote serve port>` (ADR-0044 결정 5).
+    /// Not allowed with `reverse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// `--reverse`: the remote dials this machine instead of the other way
+    /// round (ADR-0044 결정 22). Goes with `to`: one without the other is
+    /// `INVALID_ARGUMENT` before ssh runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse: bool,
+    /// `--to`: the `host[:port]` the remote dials to reach this machine's
+    /// `qsh listen`, written on the remote's pin of this machine. Needs
+    /// `reverse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     /// `--remote-qsh`: the `qsh` executable to run on the remote. Absent
     /// means `[ssh].remote_qsh`, then `qsh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,6 +54,8 @@ pub struct PairSshReq {
 pub enum PairSshDirection {
     /// This machine dials the remote.
     Forward,
+    /// The remote dials this machine's `qsh listen` (`qsh serve --to`).
+    Reverse,
 }
 
 /// What the remote reported about the pin it holds for this machine.
@@ -73,8 +86,8 @@ pub struct PairSshData {
     pub created: bool,
     /// The remote's side of the exchange.
     pub remote: PairSshRemote,
-    /// The command to run on the remote to finish a reverse setup. Absent in
-    /// the forward direction.
+    /// The command to run on the remote to finish a reverse setup (ADR-0044
+    /// 결정 17, 22). Absent in the forward direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_command: Option<String>,
     /// `true` if this call created this machine's device identity first
@@ -84,10 +97,11 @@ pub struct PairSshData {
     /// `ProxyCommand`, which the QUIC dial does not use (결정 6).
     pub ssh_proxied: bool,
     /// `true` if a QUIC handshake with mutual pin verification to the
-    /// recorded address succeeded (결정 13). No session is opened.
+    /// recorded address succeeded (결정 13). No session is opened. Always
+    /// `false` in the reverse direction, which has no dial to make.
     pub verified: bool,
     /// Why `verified` is `false`, when the check failed. Absent when it
-    /// passed. The pins stand either way, so the call still succeeds.
+    /// passed, and absent in the reverse direction (nothing was skipped). The pins stand either way, so the call still succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_error: Option<CliError>,
 }

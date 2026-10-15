@@ -1326,6 +1326,47 @@ mod pair_client {
         assert_eq!(fake.calls().len(), 0);
     }
 
+    /// `--reverse` and `--to` go together, and `--address` is the forward
+    /// direction's dial address (ADR-0044 decision 1): every misuse is
+    /// refused before the identity is made and before ssh runs.
+    #[test]
+    fn ssh_bootstrap_reverse_flag_misuse_runs_no_ssh() {
+        let fake = FakeSsh::new();
+        let client = Sandbox::new();
+        std::fs::write(
+            client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+        )
+        .unwrap();
+        for args in [
+            vec!["box", "--reverse"],
+            vec!["box", "--to", "hub.example:4433"],
+            vec!["box", "--reverse", "--to", ""],
+            vec![
+                "box",
+                "--reverse",
+                "--to",
+                "hub.example:4433",
+                "--address",
+                "10.0.0.2:4433",
+            ],
+        ] {
+            let (code, got) = pair_json(&client, &args);
+            assert_eq!(code, 255, "{args:?}: {got}");
+            assert_eq!(got["error"]["code"], "INVALID_ARGUMENT", "{args:?}: {got}");
+        }
+        assert_eq!(
+            fake.calls().len(),
+            0,
+            "ssh must not run for a refused flag set"
+        );
+        assert!(
+            !client.config_dir().join("identity").exists(),
+            "an invalid command line must not create the identity"
+        );
+        assert!(!trust_file_exists(&client));
+    }
+
     /// `--as` names the pin, so a `Host` alias that is not a valid pin name
     /// is fine as the ssh operand once `--as` is given.
     #[test]
@@ -2122,5 +2163,411 @@ pub(crate) mod pair {
         let session = opened["data"]["session_ref"].as_str().unwrap().to_string();
         let (code, listed) = w.client.json(&["session", "get", &session, "--json"]);
         assert_eq!(code, 0, "{listed}");
+    }
+}
+
+// ---------------------------------------------------------------------
+// qsh pair ssh --reverse --to end to end (ADR-0044 decision 22)
+// ---------------------------------------------------------------------
+
+/// The reverse direction: the remote is the target behind NAT, this machine
+/// is the controller whose `qsh listen` it registers with. The fake `ssh`
+/// runs the real responder against the target's tree; nothing is pre-pinned.
+#[cfg(unix)]
+pub(crate) mod pair_reverse {
+    use super::pair::{other_fingerprint, store, trust_bytes, trust_file};
+    use super::*;
+    use crate::common::{ListenGuard, ReverseGuard, Sandbox, exit_code, hosts_array, poll_until};
+    use serde_json::Value;
+    use std::path::Path;
+
+    const QSH: &str = env!("CARGO_BIN_EXE_qsh");
+
+    /// The name the target pins the controller under, and the name
+    /// `qsh serve --to` takes there.
+    const HUB: &str = "hub";
+    /// The name the controller pins the target under (the ssh alias).
+    const BOX: &str = "box";
+
+    pub(crate) struct World {
+        pub controller: Sandbox,
+        pub target: Sandbox,
+        pub listen: ListenGuard,
+        pub fake: FakeSsh,
+    }
+
+    impl World {
+        pub fn new() -> Self {
+            let controller = Sandbox::initialized();
+            let target = Sandbox::initialized();
+            let listen = ListenGuard::start(&controller);
+            let mut fake = FakeSsh::new();
+            fake.run_local_responder(Path::new(QSH), target.config_dir(), target.state_dir());
+            write_client_config(&controller, &fake, "");
+            Self {
+                controller,
+                target,
+                listen,
+                fake,
+            }
+        }
+
+        /// `qsh pair ssh box --remote-as hub <extra> --reverse --to <listen> --json`.
+        pub fn pair(&self, extra: &[&str]) -> (i32, Value) {
+            let mut argv = vec!["pair", "ssh", BOX, "--remote-as", HUB];
+            argv.extend_from_slice(extra);
+            argv.extend_from_slice(&["--reverse", "--to", self.listen.addr(), "--json"]);
+            self.controller.json(&argv)
+        }
+    }
+
+    fn write_client_config(client: &Sandbox, fake: &FakeSsh, extra: &str) {
+        std::fs::write(
+            client.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n{extra}", fake.program().display()),
+        )
+        .unwrap();
+    }
+
+    fn pair_audits(sandbox: &Sandbox) -> Vec<Value> {
+        sandbox
+            .audit_records()
+            .into_iter()
+            .filter(|record| record["action"] == "pair.ssh")
+            .collect()
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_pins_listener_full_with_address_and_target_reverse_without() {
+        let w = World::new();
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 0, "{got}");
+        let data = &got["data"];
+        assert_eq!(got["command"], "pair.ssh");
+        assert_eq!(data["direction"], "reverse", "{got}");
+        // No dial was made and none was skipped: unverified, and no reason.
+        assert_eq!(data["verified"], false, "{got}");
+        assert!(data.get("verify_error").is_none(), "{got}");
+        assert_eq!(data["next_command"], "qsh serve --to hub", "{got}");
+        assert_eq!(data["created"], true);
+        assert_eq!(data["identity_created"], false);
+        assert_eq!(data["peer"]["name"], BOX);
+        assert_eq!(data["peer"]["address"], "", "{got}");
+        assert_eq!(data["peer"]["role"], "reverse", "{got}");
+        assert_eq!(data["peer"]["fingerprint"], w.target.fingerprint());
+        assert_eq!(data["remote"]["name"], HUB);
+        assert_eq!(data["remote"]["created"], true);
+        assert_eq!(data["remote"]["role"], "full");
+
+        // The target pins this machine by the --to address with `full`; this
+        // machine pins the target without an address and with `reverse`.
+        let target_pin = store(&w.target).find(HUB).cloned().expect("target pin");
+        assert_eq!(target_pin.fingerprint, w.controller.fingerprint());
+        assert_eq!(target_pin.address, w.listen.addr());
+        assert_eq!(target_pin.role.as_deref(), Some("full"));
+        let local_pin = store(&w.controller).find(BOX).cloned().expect("local pin");
+        assert_eq!(local_pin.fingerprint, w.target.fingerprint());
+        assert_eq!(local_pin.address, "");
+        assert_eq!(local_pin.role.as_deref(), Some("reverse"));
+
+        // ssh ran twice (`-G` and the responder), and the target runs
+        // nothing: no `[serve].to` and no config file written there.
+        assert_eq!(w.fake.calls().len(), 2, "{:?}", w.fake.calls());
+        assert!(
+            !w.target.config_dir().join("config.toml").exists(),
+            "nothing is written to the target's config"
+        );
+
+        // `--role` still chooses the target's pin; this machine's stays `reverse`.
+        let w = World::new();
+        let (code, got) = w.pair(&["--role", "exec"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["remote"]["role"], "exec", "{got}");
+        assert_eq!(got["data"]["peer"]["role"], "reverse", "{got}");
+
+        // The port is filled in like `trust add --address` does.
+        let w = World::new();
+        let host = w.listen.addr().rsplit_once(':').unwrap().0.to_string();
+        let (code, got) = w.controller.json(&[
+            "pair",
+            "ssh",
+            BOX,
+            "--remote-as",
+            HUB,
+            "--reverse",
+            "--to",
+            &host,
+            "--json",
+        ]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(
+            store(&w.target).find(HUB).unwrap().address,
+            format!("{host}:4433")
+        );
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_flag_misuse_runs_no_ssh_here_too() {
+        let w = World::new();
+        let to = w.listen.addr();
+        for args in [
+            vec!["pair", "ssh", BOX, "--reverse"],
+            vec!["pair", "ssh", BOX, "--to", to],
+            vec!["pair", "ssh", BOX, "--reverse", "--to", to, "--address", to],
+        ] {
+            let mut argv = args.clone();
+            argv.push("--json");
+            let (code, got) = w.controller.json(&argv);
+            assert_eq!(code, 255, "{args:?}: {got}");
+            assert_eq!(got["error"]["code"], "INVALID_ARGUMENT", "{args:?}: {got}");
+        }
+        assert_eq!(w.fake.calls().len(), 0);
+        assert!(!trust_file(&w.controller).exists());
+        assert!(!trust_file(&w.target).exists());
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_local_reverse_role_leaves_an_audit_record_and_needs_it() {
+        let w = World::new();
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 0, "{got}");
+        let records = pair_audits(&w.controller);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["principal"], "device:box");
+        assert_eq!(records[0]["resource"], BOX);
+        assert_eq!(records[0]["role"], "reverse");
+        // The target's audit record is the responder's, under its own action.
+        assert_eq!(
+            w.target
+                .audit_records()
+                .iter()
+                .filter(|r| r["action"] == "pair.ssh_respond")
+                .count(),
+            1
+        );
+
+        // An audit log that cannot be appended to: no record, no local pin.
+        // The target's pin already stands, so the message says to run again.
+        let w = World::new();
+        let blocked = w.controller.state_dir().join("audit-is-a-directory");
+        std::fs::create_dir_all(&blocked).unwrap();
+        write_client_config(
+            &w.controller,
+            &w.fake,
+            &format!("[audit]\npath = '{}'\n", blocked.display()),
+        );
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "INTERNAL", "{got}");
+        assert!(
+            got["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("run this command again"),
+            "{got}"
+        );
+        assert!(
+            !trust_file(&w.controller).exists(),
+            "no audit record, no local pin"
+        );
+        assert!(
+            store(&w.target).find(HUB).is_some(),
+            "the remote pin stands"
+        );
+
+        // Once the log works, the same command converges.
+        write_client_config(&w.controller, &w.fake, "");
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["created"], true, "{got}");
+        assert_eq!(got["data"]["remote"]["created"], false, "{got}");
+        assert_eq!(pair_audits(&w.controller).len(), 1);
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_updates_only_the_address_of_an_existing_remote_pin() {
+        let w = World::new();
+        // The target already pins this machine: inbound only, `exec`.
+        w.target
+            .trust_add_with_role("old-hub", None, &w.controller.fingerprint(), "exec");
+        let (code, got) = w.pair(&["--role", "full"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["remote"]["created"], false, "{got}");
+        assert_eq!(got["data"]["remote"]["name"], "old-hub", "{got}");
+        assert_eq!(got["data"]["remote"]["role"], "exec", "{got}");
+        let target_store = store(&w.target);
+        assert_eq!(target_store.peers().len(), 1, "no second pin");
+        let pin = target_store.find("old-hub").unwrap();
+        assert_eq!(pin.address, w.listen.addr(), "the address was filled in");
+        assert_eq!(pin.role.as_deref(), Some("exec"), "the role was kept");
+        assert_eq!(got["data"]["next_command"], "qsh serve --to old-hub");
+        assert!(
+            w.target
+                .audit_records()
+                .iter()
+                .all(|r| r["action"] != "pair.ssh_respond"),
+            "an address refresh writes no pin and no record"
+        );
+
+        // A rerun changes nothing on either side.
+        let controller_before = trust_bytes(&w.controller);
+        let target_before = trust_bytes(&w.target);
+        let (code, got) = w.pair(&["--role", "full"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["created"], false, "{got}");
+        assert_eq!(trust_bytes(&w.controller), controller_before);
+        assert_eq!(trust_bytes(&w.target), target_before);
+        assert_eq!(pair_audits(&w.controller).len(), 1, "no second record");
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_never_overwrites_a_pin_with_a_different_fingerprint() {
+        // Local: `box` is pinned here under another identity.
+        let w = World::new();
+        w.controller
+            .trust_add(BOX, Some("10.0.0.9:4433"), &other_fingerprint(7));
+        let before = trust_bytes(&w.controller);
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "pin_conflict");
+        assert_eq!(got["error"]["details"]["side"], "local");
+        assert_eq!(trust_bytes(&w.controller), before);
+        assert!(!trust_file(&w.target).exists());
+
+        // Remote: `hub` is pinned there under another identity.
+        let w = World::new();
+        w.target.trust_add(HUB, None, &other_fingerprint(9));
+        let before = trust_bytes(&w.target);
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["details"]["side"], "remote");
+        assert_eq!(trust_bytes(&w.target), before);
+        assert!(!trust_file(&w.controller).exists());
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_says_so_when_a_local_pin_keeps_another_role() {
+        let w = World::new();
+        // A forward bootstrap came first: this machine's pin is `none`.
+        w.controller.trust_add_with_role(
+            BOX,
+            Some("10.0.0.9:4433"),
+            &w.target.fingerprint(),
+            "none",
+        );
+        let out = w.controller.qsh(&[
+            "pair",
+            "ssh",
+            BOX,
+            "--remote-as",
+            HUB,
+            "--reverse",
+            "--to",
+            w.listen.addr(),
+        ]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("qsh trust set-role box reverse"),
+            "{stderr}"
+        );
+        // The pin was not changed, and no audit record was written for it.
+        assert_eq!(
+            store(&w.controller).find(BOX).unwrap().role.as_deref(),
+            Some("none")
+        );
+        assert!(pair_audits(&w.controller).is_empty());
+    }
+
+    #[test]
+    fn ssh_bootstrap_reverse_human_mode_names_the_command_to_run_on_the_remote() {
+        let w = World::new();
+        let out = w.controller.qsh(&[
+            "pair",
+            "ssh",
+            BOX,
+            "--remote-as",
+            HUB,
+            "--reverse",
+            "--to",
+            w.listen.addr(),
+        ]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        // No address on this side: nothing in brackets, and the role shows.
+        assert_eq!(
+            lines[0],
+            format!("pinned box ({}) role reverse", w.target.fingerprint()),
+            "{stdout}"
+        );
+        assert_eq!(lines[1], "remote: pinned hub role full", "{stdout}");
+        assert_eq!(
+            lines[2], "next, on the remote: qsh serve --to hub",
+            "{stdout}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("qsh serve --to hub"), "{stderr}");
+        assert!(stderr.contains("qsh service install"), "{stderr}");
+    }
+
+    /// The pins `qsh pair ssh --reverse --to` wrote are all the reverse
+    /// route has: the target registers with `qsh serve --to hub`, and the
+    /// existing reverse acceptance suite (a real pty attach, detach and
+    /// reattach; `qsh cp` put and get through the controller's relay;
+    /// exec) passes against it unchanged.
+    #[test]
+    fn bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite() {
+        let w = World::new();
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 0, "{got}");
+
+        // The target's config is exactly what a person has after the
+        // bootstrap: `qsh serve --to <name>` is the only thing run there.
+        let reverse = ReverseGuard::start_serve_to(&w.target, HUB);
+        let merged = poll_until(
+            "the reverse registration to appear reachable",
+            std::time::Duration::from_secs(20),
+            || {
+                let hosts = hosts_array(&w.controller);
+                hosts
+                    .iter()
+                    .any(|h| {
+                        h["name"] == BOX
+                            && h["connection_mode"] == "reverse"
+                            && h["state"] == "reachable"
+                    })
+                    .then_some(hosts)
+            },
+        );
+        assert_eq!(merged.len(), 1, "reverse-only pin: one entry, {merged:?}");
+
+        let (code, exec) =
+            w.controller
+                .json(&["exec", BOX, "--json", "--", "sh", "-c", "echo out; exit 3"]);
+        assert_eq!(code, 3, "{exec}");
+
+        // `qsh cp` put and get through the controller's relay.
+        let work = tempfile::tempdir().unwrap();
+        let dst = format!("{BOX}:{}", work.path().join("stored.bin").display());
+        crate::cp_e2e::round_trip(work.path(), &dst, &dst, |args| {
+            let mut argv = vec!["cp", "--json"];
+            argv.extend_from_slice(args);
+            w.controller.json(&argv)
+        });
+
+        crate::reverse_e2e::attach_detach_reattach_suite(&w.controller, BOX, &reverse);
+        reverse.shut_down();
     }
 }
