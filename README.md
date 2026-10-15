@@ -173,6 +173,11 @@ name `qsh` belongs to an unrelated project, which is why the crate is
 
 `scripts/README.md` covers the installer in more detail. To keep a listener
 running, see [docs/deploy/service.md](docs/deploy/service.md).
+`qsh service install` writes the unit file and stops there. Add `--activate`
+to also load and start it through launchd or systemd, `qsh service uninstall
+--deactivate` to release it before the file is removed, and `qsh service
+status --live` to ask the manager whether it is running. Without a flag qsh
+never calls `launchctl` or `systemctl`.
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
@@ -461,11 +466,23 @@ Every authorized request is written as one structured line to
 (`identity.toml`, `trust.toml`, `config.toml`). `QSH_CONFIG_DIR` and
 `QSH_STATE_DIR` override both.
 
+`qsh audit` reads that log on the machine where you run it, newest record
+first. It filters with `--since` (a time or a span such as `24h`),
+`--until`, `--principal`, `--action`, `--resource` and `--decision
+allow|deny`, and returns at most `--limit` records (100 by default, 1000 at
+most). It only reads, so it still works when writing new records is failing, and
+it adds nothing to the log. A remote peer cannot run it, and there is no command
+that deletes or trims the log: rotation by size and count is the only
+deletion (`docs/CLI.md` §6.22).
+
 The private key does not live in any of those files by default: `init` puts
 it in the OS credential store (Keychain on macOS, Secret Service on Linux)
 and falls back to a 0600 file where none is reachable. `qsh init --key-store
 file` skips the credential store entirely, which is what you want on a shared
-or managed machine (`docs/CLI.md` §6.11).
+or managed machine (`docs/CLI.md` §6.11). `qsh identity move-key --to file`
+and `--to platform` move an existing key between the two without changing the
+device id, certificate or fingerprint, so peers' pins stay valid. Do this
+before running a service that has to start with nobody logged in.
 
 ### Copying files
 
@@ -505,6 +522,12 @@ qsh sessions box                         # list what is still alive over there
 qsh attach box/01K0SESSION               # reattach, replaying what you missed
 qsh session close box/01K0SESSION        # end it for real
 ```
+
+`qsh sessions` also takes filters that combine with AND: `--state <value>`,
+`--writer <principal|none>` and `--attachable`, which keeps only the sessions
+this device holds a resume credential for. They are applied on your machine
+after the host answers, so the host sees the same request either way
+(`docs/CLI.md` §6.2).
 
 `~.` also detaches. It does not kill the session, which is the one place
 QSH deliberately breaks SSH muscle memory. `~~` sends a literal tilde, `~?`
@@ -829,6 +852,11 @@ not know, which turns that pin into `none` (narrower, never wider);
 Every write that gives a pin a role other than `none` leaves an audit record
 first, and without a durable record it does not happen.
 
+Reading the audit log is a local operation. `qsh audit` has no wire message
+and no ACL action, so no remote peer can list who connected or what was
+refused, and moving the device key with `qsh identity move-key` leaves its own
+audit record first and does nothing if that record cannot be written.
+
 ## Known limitations
 
 Some of these are MVP scope decisions, some are unfinished work.
@@ -964,6 +992,24 @@ Some of these are MVP scope decisions, some are unfinished work.
   `launchagent_session_scoped` until it exists. If the device key is in the
   OS credential store, `qsh doctor` also reports `keystore_session_bound`
   for an always-on service; `qsh identity move-key --to file` fixes it.
+- qsh does not set up always-on running for you. It does not run `loginctl
+  enable-linger`, install a LaunchDaemon or create a Windows task that runs
+  without a login; those are recipes you run yourself
+  ([docs/deploy/service.md](docs/deploy/service.md)). `qsh service install
+  --activate` does not restart a unit that is already running, so a new
+  binary path applies at the next restart, and a restart ends every detached
+  session. If a LaunchDaemon form is installed, `--activate` and
+  `--deactivate` leave it alone and `status --live` does not read its run
+  state without root.
+- `qsh audit` reads only this machine's log. To see another host's records,
+  run it there. There is no command that deletes or shortens the log, so how
+  far back it reaches depends on `[audit].max_bytes` and `[audit].retain`;
+  copy the files elsewhere before rotation pushes them out if you need
+  longer. `oldest_ts` in the result shows what is still kept.
+- The Windows service backend (the Task Scheduler commands behind `qsh
+  service`, and the Credential Manager and file-permission side of `qsh
+  identity move-key`) arrives with M19. Until then `qsh service` returns
+  `UNSUPPORTED` on Windows.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin and the invite's consumption happen first, in
   the wire exchange; the client's local pin happens after. If the client then
@@ -1111,8 +1157,10 @@ old-glibc check.
 | M14 | TCP/TLS fallback | Withdrawn (ADR-0043); the transport abstraction stays |
 | M15 | Trust roles and scp-compatible `qsh cp` | Done (2026-10-15); `decode_file_frame` fuzz hours open |
 | M16 | SSH bootstrap and trust revocation | Done (2026-10-15); `parse_ssh_bootstrap_line` fuzz hours and the real-OpenSSH campaign open |
-| M17 | Ops surface | In progress; README rewrite (M17 b) done |
-| M18–M20 | Rest of P1 (session home, Windows client and host) | Design records approved |
+| M17 | Ops surface (service activation, `move-key`, session filters, `qsh audit`) | Done (2026-10-16) |
+| M18 | Session home | Waits on the real-device mobility campaign (M8 DoD 3) |
+| M19 | Windows client | In progress |
+| M20 | Windows host | Design record approved |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the
