@@ -236,7 +236,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP §5.2·§5.4 리스크 5를 다시 
 
 **(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. ROADMAP 현재 위치가 M19를 가리키고 §5.1에 M18 건너뜀이 날짜와 함께 있으며, M19 DoD에 안정성 줄이 있고 `cp` 종단이 M20 DoD에 있다.
 
-### Step 2 — 터미널 trait 추출, ConPTY probe 하니스, 모드 계산 순수 함수, keystore 경로 판정 (0.5~1.0ew)
+### Step 2 — 터미널 trait 추출, ConPTY probe 하니스, 모드 계산 순수 함수, keystore 경로 판정 (0.5~1.0ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 4·5·11의 모드 계산, 결정 12의 "첫 스텝 판정", 결정 17 콘솔 계층 항목, 결과 절 "크기" 마지막 항목(첫 스텝 뒤 재산정). 선행: Step 1.
 
@@ -257,6 +257,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP §5.2·§5.4 리스크 5를 다시 
 - 하니스(Windows 다리): `console_probe::probe_reports_its_initial_size_under_conpty`
 
 **(c) 완료 판정:** unix attach 경로의 동작 diff가 0이다(위 회귀 초록). ConPTY 하니스가 Windows 다리에서 probe를 띄운다. keystore 판정과 재산정이 커밋 본문에 있다. wire diff 0.
+
+**(d) 결과 (2026-10-16):** 터미널 경계는 `Terminal` trait 메서드 다섯(`window_size`, `enter_raw`, `read_stdin`, `open_events`, `leave_on_hangup`)과 보조 trait `RawGuard`·`EventSource`로 섰고, `tui/unix.rs`는 768줄에서 154줄로 줄었다. ConPTY 하니스와 probe는 `portable-pty`·`windows-sys`만으로 섰다. keystore 판정은 §7.1 #5. 재산정: Step 3~11의 크기 범위는 그대로 둔다. trait 경계가 예상보다 작아 Step 3은 아래쪽(0.9) 근처로 보고, crate 판정으로 Step 5도 아래쪽(0.4)으로 보지만, named pipe(Step 6)와 작업 스케줄러 COM(Step 10·11)의 불확실성이 그대로라 합계 7.7~12.9ew는 바꾸지 않는다. `session_loop.rs`의 `signal_number`는 비 unix에서 `None`을 돌려주는 위임이고 Windows에서는 Step 9의 대화형 attach가 쓰기 전까지 쓰이지 않는다.
 
 ### Step 3 — Windows 콘솔 계층과 초대 코드 프롬프트 (0.9~1.5ew)
 
@@ -838,7 +840,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 | 2 | DACL 모듈의 자리 | `fsutil.rs`를 디렉터리로 바꾸지 않고 형제 `fsutil_dacl.rs`(가칭)를 둔다. `fsutil`은 `xtask arch`의 path-scoped 금지 대상이 아님을 확인하고, 바꾼다면 같은 커밋에서 `arch.rs`를 본다 | Step 4 |
 | 3 | DACL 실패 주입 seam | 생성 함수가 `&dyn SecurityDescriptorSource`(가칭)를 받는 `*_with` 쌍둥이를 두고 공개 함수만 기본 구현을 만든다(`ManagerRunner`와 같은 모양) | Step 4 |
 | 4 | Windows client attach의 종단 host | Windows host PTY가 M20이므로 qsh-testkit의 `EchoPipeFactory`를 쓰는 in-process host(forward: `loopback`, reverse: testkit target이 실제 Windows `qsh listen`에 등록)를 실제 UDP loopback에 띄우고, ConPTY 안의 실제 `qsh` 바이너리가 붙는다. 역방향 CI 종단(Step 7)은 실제 CLI 양쪽이라 ADR-0035 결정 17의 "test-only 하니스 없음"과 겹치지 않는다. M20이 같은 케이스를 실제 `qsh serve`로 바꾼다(§9 #4) | Step 9 |
-| 5 | Credential Manager 구현 경로 | keyring-core 계열 Windows store crate가 `cargo deny`를 넘으면 그것, 아니면 `windows-sys` `Win32_Security_Credentials` 직접 구현 | Step 2(판정), Step 5 |
+| 5 | Credential Manager 구현 경로 | keyring-core 계열 Windows store crate가 `cargo deny`를 넘으면 그것, 아니면 `windows-sys` `Win32_Security_Credentials` 직접 구현. **판정(2026-10-16):** `windows-native-keyring-store` 1.1.0(MIT OR Apache-2.0, keyring-core 1, 의존은 `windows-sys` 0.61·`zeroize`·`byteorder`, `default-features = false`로 `regex` 제외)을 `qsh-core`의 `cfg(windows)` 의존으로 시험 추가했을 때 `cargo deny check`의 advisories·bans·licenses·sources가 모두 ok였다. 그래서 crate를 쓴다. macOS·Linux와 같은 keyring-core 1 계열이라 `identity/keystore.rs`의 store 생성 분기 하나만 늘어난다 | Step 2(판정), Step 5 |
 | 6 | 러너 위 실제 Credential Manager | `CredWriteW`가 러너 계정에서 되면 고유 target 이름으로 왕복 테스트 하나를 둔다. 안 되면 두지 않고 L1 수동 단계만 | Step 5 |
 | 7 | 한 글자 host와 드라이브 문자의 경계 | Windows 빌드에서 `C:path`는 로컬. 한 글자 host는 `user@c:path`나 `[c]:path`로만 원격(ADR-0029 결정 2의 대괄호 규칙). unix 빌드는 지금 그대로. CLI.md §6.21에 한 문장 | Step 9 |
 | 8 | Windows 콘솔 닫힘과 `qsh listen` 종료 | `SetConsoleCtrlHandler`를 `qsh listen`과 대화형 client가 공유하는 `qsh-cli` 헬퍼 하나로 두고, `qsh-core`는 종료 future만 받는다 | Step 7 |
