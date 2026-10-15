@@ -17,6 +17,8 @@
 //!   `trust`'s pinned peers (M7 plan Step 3 (69dd788)). Never a trust source.
 //! - [`mod@file`]: remote file operations; today only the shared path judgement
 //!   [`file::guard`] (`docs/adr/0029-file-copy.md`).
+//! - [`ssh_bootstrap`]: the ssh child, `ssh -G` and argument building behind
+//!   `qsh pair ssh` (`docs/adr/0044-ssh-bootstrap.md`).
 //! - [`ops`]: the typed operation façade.
 
 pub mod acl;
@@ -52,12 +54,13 @@ pub mod serve;
 pub mod server;
 pub mod session_stream;
 pub mod setup;
+pub mod ssh_bootstrap;
 pub mod telemetry;
 pub mod trust;
 pub mod tunnel;
 
 pub use client::pathwatch::PathWatchConfig;
-pub use config::{Config, Paths, now_rfc3339};
+pub use config::{Config, Paths, SshBootstrapMode, SshConfig, now_rfc3339};
 pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};

@@ -1380,6 +1380,32 @@ fn doctor_reports_no_config_unknown_key_when_every_key_is_recognized() {
     assert!(config_unknown_key_findings(&ops).is_empty());
 }
 
+/// ADR-0044: `[ssh].bootstrap`, `program` and `remote_qsh` are known keys;
+/// a typo next to them is still reported.
+#[test]
+fn config_unknown_key_knows_the_three_ssh_keys() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[ssh]\nbootstrap = \"off\"\nprogram = \"/usr/bin/ssh\"\nremote_qsh = \"qsh\"\n",
+    )
+    .unwrap();
+    assert!(config_unknown_key_findings(&ops).is_empty());
+
+    std::fs::write(
+        ops.paths().config_file(),
+        "[ssh]\nbootstrap = \"auto\"\nremote_qs = \"qsh\"\n",
+    )
+    .unwrap();
+    let findings = config_unknown_key_findings(&ops);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].detail.contains("ssh.remote_qs"),
+        "{:?}",
+        findings[0]
+    );
+}
+
 /// A-P1-1/B-P1-3 (4b adversarial round): `ServeConfig::resume_ttl` is
 /// documented (`config.rs`) to accept `resume_ttl_secs` as a
 /// `#[serde(alias)]`. `Serialize` never re-emits that alias — only

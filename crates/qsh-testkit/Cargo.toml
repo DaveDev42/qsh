@@ -28,6 +28,12 @@ serde_json.workspace = true
 rustls.workspace = true
 zeroize.workspace = true
 
+# `src/bin/qsh-fake-ssh.rs` (the stand-in `ssh` of the SSH bootstrap tests,
+# ADR-0044) resets SIGINT and SIGTERM to their default dispositions at
+# startup, because a test runner may have started it with SIGINT ignored.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 qsh-proto.workspace = true
 # `tests/it/file_host.rs` hashes the bytes it sends and receives over `FILE_DATA`

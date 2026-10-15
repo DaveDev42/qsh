@@ -170,18 +170,9 @@ pub struct Target {
 
 /// clap value parser for the `[user@]host` positional.
 fn parse_target(value: &str) -> Result<Target, String> {
-    // Split at the *last* `@`, like ssh: an alias may not contain one, but
-    // a user name conceivably does.
-    let (user, host) = match value.rsplit_once('@') {
-        Some((user, host)) => (Some(user), host),
-        None => (None, value),
-    };
-    if host.is_empty() {
-        return Err(format!("expected [user@]host, got {value:?}"));
-    }
-    if user.is_some_and(str::is_empty) {
-        return Err(format!("empty user in {value:?}"));
-    }
+    // The split at the last `@` is `qsh-core`'s, shared with the ssh
+    // bootstrap's `<dest>` (ADR-0044 decision 7).
+    let (user, host) = qsh_core::ssh_bootstrap::split_user_host(value)?;
     Ok(Target {
         user: user.map(str::to_string),
         host: host.to_string(),

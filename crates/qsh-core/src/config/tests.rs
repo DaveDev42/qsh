@@ -985,3 +985,60 @@ fn private_dir_and_file_modes() {
         .collect();
     assert!(leftovers.is_empty(), "temp file left behind");
 }
+
+// ---------------------------------------------------------------------
+// `[ssh]` (ADR-0044 decisions 2, 4, 9)
+// ---------------------------------------------------------------------
+
+fn load_text(text: &str) -> Result<Config, OpError> {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path(), dir.path());
+    std::fs::write(paths.config_file(), text).unwrap();
+    Config::load(&paths)
+}
+
+#[test]
+fn ssh_section_defaults_are_auto_ssh_and_qsh() {
+    let config = Config::default();
+    assert_eq!(config.ssh.bootstrap_mode(), SshBootstrapMode::Auto);
+    assert_eq!(config.ssh.program().unwrap(), SshConfig::DEFAULT_PROGRAM);
+    assert_eq!(
+        SshConfig::DEFAULT_PROGRAM,
+        if cfg!(windows) { "ssh.exe" } else { "ssh" }
+    );
+    assert_eq!(config.ssh.remote_qsh().unwrap(), "qsh");
+}
+
+#[test]
+fn ssh_section_reads_the_three_keys() {
+    let config = load_text(
+        "[ssh]\nbootstrap = \"off\"\nprogram = \"/opt/openssh/bin/ssh\"\n\
+         remote_qsh = \"/usr/local/bin/qsh\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.ssh.bootstrap_mode(), SshBootstrapMode::Off);
+    assert_eq!(config.ssh.program().unwrap(), "/opt/openssh/bin/ssh");
+    assert_eq!(config.ssh.remote_qsh().unwrap(), "/usr/local/bin/qsh");
+    let auto = load_text("[ssh]\nbootstrap = \"auto\"\n").unwrap();
+    assert_eq!(auto.ssh.bootstrap_mode(), SshBootstrapMode::Auto);
+}
+
+#[test]
+fn ssh_config_bootstrap_value_outside_auto_off_is_a_config_error() {
+    for bad in ["\"on\"", "\"Auto\"", "\"\"", "true", "1", "\"always\""] {
+        let err = load_text(&format!("[ssh]\nbootstrap = {bad}\n")).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError, "{bad}");
+        assert!(!err.retryable, "{bad}");
+    }
+}
+
+#[test]
+fn ssh_config_blank_program_or_remote_qsh_is_a_config_error() {
+    let config = load_text("[ssh]\nprogram = \"  \"\nremote_qsh = \"\"\n").unwrap();
+    let program = config.ssh.program().unwrap_err();
+    assert_eq!(program.code, ErrorCode::ConfigError);
+    assert!(program.message.contains("[ssh].program"));
+    let remote = config.ssh.remote_qsh().unwrap_err();
+    assert_eq!(remote.code, ErrorCode::ConfigError);
+    assert!(remote.message.contains("[ssh].remote_qsh"));
+}

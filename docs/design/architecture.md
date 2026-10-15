@@ -136,7 +136,7 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 
 ```
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
-├── config.toml           # [serve] [identity] [audit] [listen] [reverse] [transport] [recovery] — 키와 기본값은 아래 목록
+├── config.toml           # [serve] [identity] [audit] [listen] [reverse] [transport] [recovery] [ssh] — 키와 기본값은 아래 목록
 ├── hosts.toml            # [[host]] name·address·user — 클라이언트 쪽 순수 주소록 (아래 설명)
 ├── trust.toml            # pinned peers (+ optional role 키, ADR-0045) + CAs
 ├── acl.toml              # serve/listen 역할만 읽음
@@ -157,6 +157,7 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 - `[reverse]`: `controller`(legacy — `[serve].to`가 설정되면 읽지 않는다. `qsh reverse <controller>`의 CLI positional은 이 키와 무관하게 항상 필수), `offered_name`, `backoff_initial_ms`(500), `backoff_max_ms`(30000), `backoff_jitter_pct`(±20).
 - `[transport]`: `keep_alive_ms`(15000, 1000..=20000).
 - `[recovery]`: attach·supervised 터널용 `probe_interval_ms`(250)·`min_dead_after_ms`(1000)·`strikes`(3)(P×S+D≤2000, S≥2, 50≤P≤D). 역방향 등록 연결의 두 watch는 `reverse_min_dead_after_ms`(4250)·`reverse_strikes`(3)(P×S+D≤5000, 나머지 규칙은 같고 `probe_interval_ms`는 공유, 일반 `min_dead_after_ms`·`strikes`는 닿지 않는다, ADR-0041).
+- `[ssh]`: `bootstrap`(`"auto"`가 기본, `"off"`, 그 밖의 값은 `CONFIG_ERROR`), `program`(없으면 `PATH`의 `ssh`, Windows는 `ssh.exe`), `remote_qsh`(없으면 `qsh`). `qsh pair ssh`와 자동 발동이 쓰는 시스템 ssh의 설정이다(ADR-0044 결정 2·4·9). 공백뿐인 `program`·`remote_qsh`는 `CONFIG_ERROR`다.
 
 `hosts.toml`은 `host.list`/`host.get`/`exec`/`session.open`/`reverse`의 단일 주소 해석 choke point(`crate::ops::host::resolve_forward`)가 읽는다.
 

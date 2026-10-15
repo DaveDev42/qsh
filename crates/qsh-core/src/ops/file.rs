@@ -104,7 +104,6 @@ impl CancelToken {
     }
 
     /// Resolves once canceled.
-    #[cfg(unix)]
     pub(crate) async fn canceled(&self) {
         let mut rx = self.tx.subscribe();
         loop {
