@@ -1,0 +1,392 @@
+//! Tests of the platform-neutral driver, on a fake [`Terminal`].
+//!
+//! Compiled on every CI leg: nothing here touches a real terminal, signal or
+//! console. The pumps are started on [`InlineSpawn`], which runs the thread
+//! body to completion on the calling thread, so each test reads its result
+//! after the call returns instead of waiting for it.
+
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use super::*;
+use crate::tui::terminal::{EventSource, HangupCause, RawGuard, TermEvent, Terminal};
+
+/// Runs the thread body inline, to completion.
+struct InlineSpawn;
+
+impl ThreadSpawn for InlineSpawn {
+    fn spawn(&self, _name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        body();
+        Ok(())
+    }
+}
+
+/// A terminal that reads a script and records what the driver asked of it.
+#[derive(Default)]
+struct FakeTerminal {
+    size: Mutex<Option<(u16, u16)>>,
+    input: Mutex<VecDeque<Vec<u8>>>,
+    events: Mutex<VecDeque<TermEvent>>,
+    hangups: Mutex<Vec<HangupCause>>,
+}
+
+impl FakeTerminal {
+    fn arc() -> Arc<dyn Terminal> {
+        Arc::new(Self::default())
+    }
+
+    /// A terminal whose stdin delivers `chunks`, one `read` each, then EOF.
+    fn with_input(chunks: &[&[u8]]) -> Arc<Self> {
+        let terminal = Self::default();
+        *terminal.input.lock().unwrap() = chunks.iter().map(|c| c.to_vec()).collect();
+        Arc::new(terminal)
+    }
+
+    /// A terminal of the given size that reports `events` in order.
+    fn with_events(size: Option<(u16, u16)>, events: &[TermEvent]) -> Arc<Self> {
+        let terminal = Self::default();
+        *terminal.size.lock().unwrap() = size;
+        *terminal.events.lock().unwrap() = events.iter().copied().collect();
+        Arc::new(terminal)
+    }
+}
+
+struct FakeRaw;
+
+impl RawGuard for FakeRaw {
+    fn is_raw(&self) -> bool {
+        true
+    }
+}
+
+struct FakeEvents(VecDeque<TermEvent>);
+
+impl EventSource for FakeEvents {
+    fn next_event(&mut self) -> Option<TermEvent> {
+        self.0.pop_front()
+    }
+}
+
+impl Terminal for FakeTerminal {
+    fn window_size(&self) -> Option<(u16, u16)> {
+        *self.size.lock().unwrap()
+    }
+
+    fn enter_raw(&self) -> io::Result<Box<dyn RawGuard>> {
+        Ok(Box::new(FakeRaw))
+    }
+
+    fn read_stdin(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(chunk) = self.input.lock().unwrap().pop_front() else {
+            return Ok(0);
+        };
+        assert!(
+            chunk.len() <= buf.len(),
+            "a scripted chunk exceeds the read size"
+        );
+        buf[..chunk.len()].copy_from_slice(&chunk);
+        Ok(chunk.len())
+    }
+
+    fn open_events(&self) -> io::Result<Box<dyn EventSource>> {
+        Ok(Box::new(FakeEvents(std::mem::take(
+            &mut *self.events.lock().unwrap(),
+        ))))
+    }
+
+    fn leave_on_hangup(&self, cause: HangupCause) {
+        self.hangups.lock().unwrap().push(cause);
+    }
+}
+
+/// What the pumps asked of the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Call {
+    Write(Vec<u8>),
+    TryWrite(Vec<u8>),
+    TryResize(u16, u16),
+    Detach,
+}
+
+/// A [`PumpHandle`] that records every call.
+#[derive(Clone, Default)]
+struct RecordingHandle(Arc<Mutex<Vec<Call>>>);
+
+impl RecordingHandle {
+    fn calls(&self) -> Vec<Call> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Every byte the session was given, in order, however it was sent.
+    fn written(&self) -> Vec<u8> {
+        self.calls()
+            .into_iter()
+            .flat_map(|call| match call {
+                Call::Write(bytes) | Call::TryWrite(bytes) => bytes,
+                Call::TryResize(..) | Call::Detach => Vec::new(),
+            })
+            .collect()
+    }
+}
+
+impl PumpHandle for RecordingHandle {
+    fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
+        self.0.lock().unwrap().push(Call::Write(data));
+        Ok(())
+    }
+
+    fn try_write(&self, data: Vec<u8>) -> Result<bool, OpError> {
+        self.0.lock().unwrap().push(Call::TryWrite(data));
+        Ok(true)
+    }
+
+    fn try_resize(&self, cols: u16, rows: u16) -> Result<bool, OpError> {
+        self.0.lock().unwrap().push(Call::TryResize(cols, rows));
+        Ok(true)
+    }
+
+    fn detach(&self) -> DetachFlush {
+        self.0.lock().unwrap().push(Call::Detach);
+        DetachFlush::Applied
+    }
+}
+
+/// Run the input pump over `chunks` and return what the session saw and
+/// whether the pump announced a detach.
+fn run_input(escape: Option<u8>, chunks: &[&[u8]]) -> (RecordingHandle, bool) {
+    let handle = RecordingHandle::default();
+    let detached = Arc::new(AtomicBool::new(false));
+    spawn_input_pump(
+        handle.clone(),
+        escape,
+        Arc::clone(&detached),
+        true,
+        FakeTerminal::with_input(chunks),
+        &InlineSpawn,
+    )
+    .expect("the inline spawner cannot fail");
+    (handle, detached.load(Ordering::SeqCst))
+}
+
+/// Run the signal pump over `events` and return the session's calls and the
+/// terminal, for what it was asked to do.
+fn run_events(
+    size: Option<(u16, u16)>,
+    events: &[TermEvent],
+) -> (RecordingHandle, Arc<FakeTerminal>) {
+    let handle = RecordingHandle::default();
+    let terminal = FakeTerminal::with_events(size, events);
+    spawn_signal_pump(handle.clone(), terminal.clone(), &InlineSpawn)
+        .expect("the inline spawner cannot fail");
+    (handle, terminal)
+}
+
+/// Every byte value reaches the session unchanged and in order, with the
+/// escape machine on and with it off, however the input is chunked. The
+/// escape character is only special at the start of a line, and the run
+/// 0..=255 never leaves a `~` at one.
+#[test]
+fn session_loop_forwards_stdin_bytes_verbatim() {
+    let bytes: Vec<u8> = (0u8..=255).collect();
+    for escape in [Some(b'~'), None] {
+        let (handle, detached) = run_input(escape, &[&bytes]);
+        assert_eq!(handle.written(), bytes, "escape {escape:?}");
+        assert!(!detached);
+        assert!(!handle.calls().contains(&Call::Detach));
+
+        let (first, second) = bytes.split_at(97);
+        let (handle, _) = run_input(escape, &[first, second]);
+        assert_eq!(handle.written(), bytes, "split input, escape {escape:?}");
+    }
+}
+
+/// `~.` right after a newline detaches: what was typed before it is
+/// delivered, the detach is announced before it is sent, and nothing after
+/// it is read.
+#[test]
+fn session_loop_tilde_dot_at_line_start_detaches() {
+    let (handle, detached) = run_input(Some(b'~'), &[b"ls\r", b"~.", b"never read\r"]);
+    assert_eq!(
+        handle.calls(),
+        vec![Call::Write(b"ls\r".to_vec()), Call::Detach]
+    );
+    assert!(
+        detached,
+        "the event pump has to see a detach, not a lost connection"
+    );
+
+    // The same at the very start of the input, where nothing has been
+    // forwarded yet.
+    let (handle, detached) = run_input(Some(b'~'), &[b"~."]);
+    assert_eq!(handle.calls(), vec![Call::Detach]);
+    assert!(detached);
+}
+
+/// `~.` in the middle of a line is ordinary input.
+#[test]
+fn session_loop_tilde_inside_a_line_is_plain_input() {
+    let (handle, detached) = run_input(Some(b'~'), &[b"echo a ~.", b"\r"]);
+    assert_eq!(handle.written(), b"echo a ~.\r");
+    assert!(!detached);
+    assert!(!handle.calls().contains(&Call::Detach));
+}
+
+/// One size event becomes exactly one resize, carrying the size the
+/// terminal reports when the event is handled.
+#[test]
+fn session_loop_size_change_sends_one_resize() {
+    let (handle, terminal) = run_events(Some((100, 40)), &[TermEvent::Resize]);
+    assert_eq!(handle.calls(), vec![Call::TryResize(100, 40)]);
+    assert!(terminal.hangups.lock().unwrap().is_empty());
+
+    // A terminal that cannot report a size (stdin is not one) sends nothing.
+    let (handle, _) = run_events(None, &[TermEvent::Resize]);
+    assert_eq!(handle.calls(), vec![]);
+}
+
+/// A hang-up hands the terminal to its `leave_on_hangup` once and ends the
+/// pump: nothing is written to the session, no detach or close is sent, and
+/// events behind it are not acted on. The host keeps the session
+/// (`docs/CLI.md` §7).
+#[test]
+fn session_loop_hangup_signal_detaches_and_keeps_the_session() {
+    let cause = HangupCause(1);
+    let (handle, terminal) = run_events(
+        Some((80, 24)),
+        &[
+            TermEvent::Hangup(cause),
+            TermEvent::Resize,
+            TermEvent::Interrupt,
+        ],
+    );
+    assert_eq!(*terminal.hangups.lock().unwrap(), vec![cause]);
+    assert_eq!(handle.calls(), vec![], "the session is left as it is");
+}
+
+/// An interrupt that did not come from the keyboard is the `^C` byte.
+#[test]
+fn session_loop_interrupt_is_forwarded_as_ctrl_c() {
+    let (handle, _) = run_events(None, &[TermEvent::Interrupt]);
+    assert_eq!(handle.calls(), vec![Call::TryWrite(vec![0x03])]);
+}
+
+/// A spawner that always fails, standing in for a process that has hit
+/// its thread limit — deterministic in a way the real OS failure never
+/// is.
+struct FailingThreadSpawn;
+
+impl ThreadSpawn for FailingThreadSpawn {
+    fn spawn(&self, _name: &str, _body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        Err(io::Error::other("no threads left (test double)"))
+    }
+}
+
+/// [`RealThreadSpawn`]'s `Ok` path: it actually starts a thread, whose
+/// body runs on it rather than inline.
+#[test]
+fn real_thread_spawn_starts_a_thread() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    RealThreadSpawn
+        .spawn(
+            "qsh-tui-test",
+            Box::new(move || {
+                let _ = tx.send(());
+            }),
+        )
+        .expect("spawn");
+    rx.recv_timeout(std::time::Duration::from_secs(1))
+        .expect("the spawned thread ran its body");
+}
+
+/// [`PumpHandle`] double: reports success on every call. Stands in for
+/// a live `qsh_core::AttachHandle` (verify-lens 2, finding P2) — its
+/// fields are private to `qsh-core::ops::session` with no
+/// test constructor exposed to `qsh-cli`, so building a real one means
+/// driving `Ops::session_attach` against a running host or
+/// `qsh-testkit`'s harness, integration-test weight for a spawn-only
+/// question. `spawn_input_pump`/`spawn_signal_pump` only ever call
+/// `spawner.spawn(...)` before touching the handle at all, so a handle
+/// that is never actually exercised still lets a real
+/// `spawn_input_pump(...)`/`spawn_signal_pump(...)` call run and return.
+#[derive(Clone)]
+struct StubHandle;
+
+impl PumpHandle for StubHandle {
+    fn write(&self, _data: Vec<u8>) -> Result<(), OpError> {
+        Ok(())
+    }
+
+    fn try_write(&self, _data: Vec<u8>) -> Result<bool, OpError> {
+        Ok(true)
+    }
+
+    fn try_resize(&self, _cols: u16, _rows: u16) -> Result<bool, OpError> {
+        Ok(true)
+    }
+
+    fn detach(&self) -> DetachFlush {
+        DetachFlush::Applied
+    }
+}
+
+/// Pins the one moving part `spawn_input_pump`/`spawn_signal_pump`
+/// changed: a spawn failure now reaches the caller as a plain
+/// `io::Result::Err` through [`ThreadSpawn::spawn`], not a
+/// `.expect()` panic.
+///
+/// This is the seam (`ThreadSpawn`) both pumps call through
+/// unconditionally; `run()`'s two call sites then just
+/// `.map_err`/`if let Err` that same `io::Error` into an `OpError`,
+/// which is ordinary, already-covered control flow.
+#[test]
+fn failing_spawner_reports_err_not_panic() {
+    let err = FailingThreadSpawn
+        .spawn("qsh-tui-test", Box::new(|| {}))
+        .expect_err("a failing spawner must report Err, not panic");
+    assert_eq!(err.to_string(), "no threads left (test double)");
+}
+
+/// The actual `spawn_input_pump`/`spawn_signal_pump` `Err` path
+/// (verify-lens 2 finding P2 / mutation d1: restoring
+/// `.expect("spawn the stdin pump")` must make this test fail).
+/// `StubHandle` is never touched — both functions only reach the
+/// handle from inside the spawned closure, which `FailingThreadSpawn`
+/// never runs.
+#[test]
+fn spawn_failure_is_returned_not_panicked() {
+    spawn_input_pump(
+        StubHandle,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        false,
+        FakeTerminal::arc(),
+        &FailingThreadSpawn,
+    )
+    .expect_err("spawn_input_pump must surface a failing spawner as Err");
+
+    spawn_signal_pump(StubHandle, FakeTerminal::arc(), &FailingThreadSpawn)
+        .expect_err("spawn_signal_pump must surface a failing spawner as Err");
+}
+
+/// The `Ok` path, through the real spawner — checked with the signal
+/// pump only. The input pump's body blocks in stdin `read(2)` for the
+/// life of the process once spawned (by design: it is detached and
+/// never joined, see the pump's own doc comment), so spawning it for
+/// real here would leave a thread parked on this test binary's stdin
+/// for the rest of the run; that is harmless in a production client
+/// that exits with the process, but in `cargo nextest`'s per-test
+/// process it is one more live thread than the next test in this
+/// process needs. `real_thread_spawn_starts_a_thread` above already
+/// pins `RealThreadSpawn`'s `Ok` path in isolation, so the signal pump
+/// is enough to confirm `spawn_signal_pump` itself returns `Ok` end to
+/// end (handlers installed, `ready` signalled, no `Err` mapped).
+#[cfg(unix)]
+#[test]
+fn spawn_success_returns_ok() {
+    spawn_signal_pump(
+        StubHandle,
+        Arc::new(super::super::unix::UnixTerminal),
+        &RealThreadSpawn,
+    )
+    .expect("spawn_signal_pump must return Ok when the spawner succeeds");
+}

@@ -600,7 +600,7 @@ fn claude_starts_inside_a_session() {
 /// with an unusable shell and a stair-stepped backtrace.
 ///
 /// Only meaningful against a debug binary — the seam it uses does not
-/// exist in a release build (`tui::unix::test_panic_hook`), which is
+/// exist in a release build (`tui::session_loop::test_panic_hook`), which is
 /// exactly the point: a shipped `qsh` cannot be talked into panicking by
 /// its environment.
 #[test]

@@ -34,6 +34,31 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# `src/bin/qsh-console-probe.rs` drives the Win32 console API directly
+# (GetConsoleMode/SetConsoleMode/ReadFile on the console handles and
+# GetConsoleScreenBufferInfo), the same surface the Windows client's console
+# layer uses. Windows-only: on other platforms the probe builds as a stub.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+] }
+
+# `tests/it/conpty.rs` opens a ConPTY with portable-pty (the crate the POSIX
+# PTY backend already uses) and runs the console probe inside it. A dev
+# dependency on Windows only, so no other build pulls its Windows tree.
+[target.'cfg(windows)'.dev-dependencies]
+portable-pty.workspace = true
+
+[[bin]]
+name = "qsh-console-probe"
+path = "src/bin/qsh-console-probe.rs"
+# The probe includes the console mode arithmetic from qsh-cli by path; that
+# file's own unit tests run in qsh-cli, not again here.
+test = false
+
 [dev-dependencies]
 qsh-proto.workspace = true
 # `tests/it/file_host.rs` hashes the bytes it sends and receives over `FILE_DATA`

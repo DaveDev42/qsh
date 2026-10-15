@@ -37,6 +37,11 @@
 //!   of the `qsh-fake-ssh` executable this crate builds, which records its
 //!   argv and plays the system `ssh` of the SSH bootstrap tests (ADR-0044)
 //!   with no sshd and no OpenSSH configuration.
+//! - [`testbin`]: finds a helper executable this crate builds
+//!   (`qsh-fake-ssh`, `qsh-console-probe`) from a test.
+//!
+//! `src/bin/qsh-console-probe.rs` is the Windows console probe the ConPTY
+//! harness in `tests/it/conpty.rs` runs (`docs/design/testing.md`).
 //!
 //! This crate may depend on any workspace crate.
 
@@ -52,6 +57,7 @@ pub mod perf;
 pub mod procstat;
 pub mod raw_quic;
 pub mod reverse;
+pub mod testbin;
 pub mod tunnel;
 
 pub use chaos::{ChaosPolicy, ChaosProxy, ChaosStats, DelayDist};
