@@ -7,7 +7,8 @@
 //! (`docs/CLI.md` §7.1, §11). What is left here is terminal work:
 //!
 //! - put the local terminal in raw mode and restore it on *every* exit
-//!   path — normal, error, panic, signal (`term`, `#[cfg(unix)]` only);
+//!   path — normal, error, panic, signal (`term` for POSIX, behind the
+//!   `terminal::Terminal` trait);
 //! - forward stdin bytes **verbatim**, recognising nothing except the
 //!   line-start escape sequences (`Escape`);
 //! - turn `SIGWINCH` into `session.resize`, and an externally delivered
@@ -44,14 +45,28 @@
 //! The two helpers are detached, never joined: both park in a blocking
 //! syscall, and the process exits as soon as the event loop is done.
 
+// Windows console mode arithmetic: pure, so its tests run on every leg; the
+// Windows terminal that applies it is not built yet.
+#[cfg(any(windows, test))]
+mod console_mode;
+// The platform-neutral driver and the terminal trait it runs on. Compiled
+// for the POSIX client and, so the fake-terminal tests run on every leg, for
+// tests everywhere; on Windows `run` still refuses before there is anything
+// to drive.
+#[cfg(any(unix, test))]
+mod session_loop;
 #[cfg(unix)]
 mod term;
+#[cfg(any(unix, test))]
+mod terminal;
+#[cfg(unix)]
+mod unix;
 
 use qsh_core::{OpError, Ops};
 use qsh_proto::ErrorCode;
-// Only the POSIX driver builds requests; on Windows `run` refuses before
-// there is anything to ask for.
-#[cfg(unix)]
+// The driver builds the requests; on Windows `run` refuses before there is
+// anything to ask for.
+#[cfg(any(unix, test))]
 use qsh_proto::{SessionAttachReq, SessionOpenReq};
 
 /// What to attach to.
@@ -69,7 +84,7 @@ pub enum Attach {
         /// specs and decides their error code — `docs/CLI.md` §6.9). Only
         /// this form carries them: `qsh attach` takes no `-L`, and the
         /// standalone tunnel form is `qsh tunnel open`.
-        // Read only by the `#[cfg(unix)]` driver below (`tui::unix::run`);
+        // Read only by the `#[cfg(unix)]` driver below (`tui::run`);
         // the Windows `run` refuses the whole interactive form before it
         // could look at a forward, so the field is constructed but never
         // read there — dead, not absent, on Windows.
@@ -121,7 +136,7 @@ impl Attach {
 /// sends exactly the `--env` its caller asked for, so a machine caller's
 /// session is never shaped by whatever locale the process that started it
 /// happened to have.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE"];
 
 /// Run an interactive session to completion and return the process exit
@@ -129,7 +144,7 @@ const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COL
 /// `254`; a detach is `0`).
 #[cfg(unix)]
 pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> {
-    unix::run(ops, what, escape)
+    session_loop::run(ops, what, escape, std::sync::Arc::new(unix::UnixTerminal))
 }
 
 /// Windows client is P1 (`docs/design/architecture.md` §8): the interactive
@@ -172,7 +187,7 @@ pub fn json_mode_unsupported() -> OpError {
 
 /// Locale variables of this process, to be layered over the remote login
 /// environment.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn locale_env() -> Vec<qsh_proto::EnvVar> {
     LOCALE_VARS
         .iter()
@@ -186,7 +201,7 @@ fn locale_env() -> Vec<qsh_proto::EnvVar> {
 }
 
 /// Build the `session.open` request for the bare `qsh [user@]host` form.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn open_request(host: String, user: Option<String>, size: Option<(u16, u16)>) -> SessionOpenReq {
     SessionOpenReq {
         host,
@@ -202,7 +217,7 @@ fn open_request(host: String, user: Option<String>, size: Option<(u16, u16)>) ->
 /// The attach request. `no_steal` is deliberately false: taking over the
 /// writer lease is what makes re-attaching after a dead client work at all
 /// (`docs/design/protocol.md` §10).
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn attach_request(session_ref: String) -> SessionAttachReq {
     SessionAttachReq {
         session_ref,
@@ -315,9 +330,6 @@ fn escape_help(escape: u8) -> String {
          (Escapes are only recognised immediately after a newline.)\r\n"
     )
 }
-
-#[cfg(unix)]
-mod unix;
 
 #[cfg(test)]
 mod tests {

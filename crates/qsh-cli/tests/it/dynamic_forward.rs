@@ -505,7 +505,7 @@ fn interactive_dash_d_opens_listener_beside_session() {
 /// line, is refused before `session.open` — same technique
 /// `tunnel_e2e.rs`'s `a_non_loopback_bind_is_refused_before_a_session_exists`
 /// uses for `-L` alone. `parse_dynamic_forwards` runs (and fails) before
-/// `session.open` regardless of flag order (`tui::unix::run`'s own doc),
+/// `session.open` regardless of flag order (`tui::session_loop::run`'s own doc),
 /// so the `-L` spec here never gets a chance to open anything either.
 ///
 /// `#[cfg(unix)]`: this contract only exists on unix. On Windows,

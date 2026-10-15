@@ -1252,7 +1252,7 @@ pub fn print_tunnel_close(data: &TunnelCloseData) -> io::Result<()> {
 /// stderr, not stdout: on the interactive form stdout is the remote
 /// terminal's (`docs/CLI.md` §2.2). Structural only — a destination and a
 /// bound address, never a byte of what the tunnel carries.
-// Called only from `crate::tui::unix`, the `#[cfg(unix)]` interactive
+// Called only from `crate::tui::session_loop`, the `#[cfg(unix)]` interactive
 // driver (`tui::run` is `UNSUPPORTED` on Windows, so no `-L` listener is
 // ever started there) — dead, not absent, on Windows. `print_tunnel_open`
 // above stays live everywhere: `run_tunnel_open` in `main.rs` is not gated.
