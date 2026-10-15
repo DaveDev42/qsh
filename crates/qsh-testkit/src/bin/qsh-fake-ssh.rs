@@ -12,10 +12,12 @@
 //! program name left out) and writes its process id to `last.pid`. Then:
 //!
 //! - `-G` as the first argument blocks forever when `g_hang` is set;
-//!   otherwise it prints the file named by `g_file` (a minimal `hostname`
-//!   stanza when unset) and exits with `g_exit` (0).
-//! - Anything else is the responder call. It prints `stderr` to stderr, the
-//!   file named by `script` to stdout, then, in this order:
+//!   otherwise it prints `g_stderr` to stderr when set, then the file named
+//!   by `g_file` (a minimal `hostname` stanza when unset), and exits with
+//!   `g_exit` (0).
+//! - Anything else is the responder call. It prints `stderr` to stderr, then
+//!   waits until the file named by `gate_file` exists when that is set, then
+//!   writes the file named by `script` to stdout, then, in this order:
 //!   - blocks forever when `hang` is set;
 //!   - runs a local responder when `respond_bin` is set (below) and exits
 //!     with its status;
@@ -71,6 +73,9 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }
         }
+        if let Some(text) = cfg.get("g_stderr") {
+            eprintln!("{text}");
+        }
         match cfg.get("g_file") {
             Some(path) => {
                 let bytes = fs::read(path).expect("read g_file");
@@ -85,6 +90,9 @@ fn main() {
 
     if let Some(text) = cfg.get("stderr") {
         eprintln!("{text}");
+    }
+    if let Some(gate) = cfg.get("gate_file") {
+        wait_for_file(Path::new(gate));
     }
     if let Some(path) = cfg.get("script") {
         let bytes = fs::read(path).expect("read script");
@@ -106,6 +114,19 @@ fn main() {
         let _ = fs::write(path, input);
     }
     std::process::exit(int(&cfg, "exit"));
+}
+
+/// Block until `path` exists: a test holds the ssh child open, like a
+/// password prompt would, and releases it by creating the file. Bounded, so a
+/// test that never releases it fails with exit 99 instead of hanging.
+fn wait_for_file(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !path.exists() {
+        if std::time::Instant::now() >= deadline {
+            std::process::exit(99);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// The words of the remote command: everything after the destination

@@ -20,6 +20,11 @@
 //! made because nothing listens on the remote yet; the result names the
 //! command to run there instead.
 //!
+//! The automatic bootstrap of `qsh [user@]host` and `qsh cp` (decision 2)
+//! runs the forward conversation with `Confirmation::Deferred`: the same
+//! two phases, but no confirming dial, because the original command's own
+//! connection is the confirmation (decision 13).
+//!
 //! Nothing here reads a key, a passphrase or an agent socket; ssh does all of
 //! that in its own process (decision 19). `hosts.toml`, `config.toml` and
 //! `acl.toml` are never written, and the ssh `User` is stored nowhere
@@ -54,6 +59,20 @@ pub const CONFIRM_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// judged the client's certificate, so "the server does not know this
 /// device" arrives as a close shortly after the handshake.
 pub const CONFIRM_SETTLE: Duration = Duration::from_millis(500);
+
+/// What follows the pins: who confirms them (ADR-0044 decision 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Confirmation {
+    /// `qsh pair ssh`: a QUIC handshake with mutual pin verification, no
+    /// session.
+    Dial,
+    /// The automatic path (decision 2): the original command's own
+    /// connection is the confirmation, so no second dial is made here. A
+    /// remote that reported no serve on its port still ends the call, with
+    /// the same `remote_serve_not_listening` error as the explicit command
+    /// reports as `verify_error`.
+    Deferred,
+}
 
 /// What a frontend tells `pair.ssh` about its environment.
 #[derive(Clone)]
@@ -115,6 +134,18 @@ impl Ops {
     /// identity synchronously (see [`Self::load_identity`]): call it from an
     /// ordinary thread, not from inside a tokio runtime.
     pub fn pair_ssh(&self, req: PairSshReq, env: PairSshEnv) -> Result<PairSshOutput, OpError> {
+        self.pair_ssh_with(req, env, Confirmation::Dial)
+    }
+
+    /// [`Self::pair_ssh`] with the confirmation chosen by the caller: the
+    /// automatic bootstrap runs the same conversation and leaves the dial to
+    /// the command it started for (decision 13).
+    pub(super) fn pair_ssh_with(
+        &self,
+        req: PairSshReq,
+        env: PairSshEnv,
+        confirmation: Confirmation,
+    ) -> Result<PairSshOutput, OpError> {
         let plan = self.pair_ssh_plan(&req, &env)?;
 
         let init = self.identity_init(IdentityInitReq {
@@ -225,6 +256,8 @@ impl Ops {
             (false, None)
         } else if hello.listening == Some(false) {
             (false, Some(cli_error(serve_not_listening(&peer.name))))
+        } else if confirmation == Confirmation::Deferred {
+            (false, None)
         } else {
             match self.confirm_dial(
                 &runtime,

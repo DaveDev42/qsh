@@ -286,7 +286,7 @@ qsh host get personal-mac --json
 
 라우팅(`host.get`, `exec`, attach)이 이름을 찾지 못하면 `HOST_NOT_FOUND`이지만, 그 원인에 따라 `retryable`이 달라진다(§3.2의 "응답마다 값이 붙는다" 규칙의 실례):
 
-- 이름이 아예 미등록이거나(라이브 reverse 등록도, forward pin도 없음), 등록됐던 이름이 `[listen].stale_retention` 보존 창을 넘겨 이미 sweep된 경우: `retryable: false`. `details`는 비어 있다.
+- 이름이 아예 미등록이거나(라이브 reverse 등록도, forward pin도 없음), 등록됐던 이름이 `[listen].stale_retention` 보존 창을 넘겨 이미 sweep된 경우: `retryable: false`. `details`는 비어 있다. 이 첫 갈래가 `qsh [user@]host`와 `qsh cp`의 자동 부트스트랩이 발동하는 조건의 전부다(§7 "이름이 없을 때의 자동 부트스트랩"). `hosts.toml`에 이름이 있거나, `trust.toml`에 pin이 있거나, reverse 등록이 stale로라도 남아 있으면 이 갈래가 아니다. 사람 모드는 이 갈래의 오류 줄 끝에 다음 명령을 덧붙인다: `qsh: <message>; or, if you can ssh to it, set it up with \`qsh pair ssh <name>\` (HOST_NOT_FOUND)`. envelope의 `message`와 `details`는 그대로라서 `--json`/`--jsonl` 출력과 기존 `error.HOST_NOT_FOUND*` fixture는 달라지지 않는다. 힌트는 이 갈래의 두 메시지(`host.get`·attach 쪽과 `qsh exec`의 "not in the trust store")에만 붙고, stale 갈래와 pin은 있으나 주소가 없는 갈래에는 붙지 않는다.
 - 이름의 reverse 등록이 살아있지 않지만(연결이 끊겨 `state: "stale"`) 아직 그 daemon의 목록에 남아 있는 경우(`sweep_expired`가 아직 지우지 않았다는 뜻) — target이 재등록할 것으로 예상되는 일시적 상태이므로 `retryable: true`, `details`: `reason: "reverse_registration_stale"`, `lost_ago_ms`(`lost_at` 이후 경과 밀리초 — `lost_at` 자체가 초 단위로 기록되므로 최대 999ms까지 실제보다 크게 보고될 수 있다), `retry_after_ms`(컨트롤러의 `[reverse].backoff_max_ms` 유효값을 재시도 간격 힌트로 내려준 것 — 기본 30000). forward pin이 이 이름에 있으면 이 분기보다 먼저 그 pin으로 라우팅된다 — stale 등록은 live 등록과 마찬가지로 forward pin을 앞지르지 않는다.
 
 **forward host 해석 우선순위 (`hosts.toml` vs `trust.toml`):** 같은 이름이 `hosts.toml`과 `trust.toml` 양쪽에 있으면 **`hosts.toml`의 `address`가 이긴다**. `trust.toml`에만 있으면 그 주소를, `hosts.toml`에만 있으면 그 주소를 쓴다. **fingerprint(신원)는 항상 `trust.toml`에서만 온다** — `hosts.toml`은 이름과 주소, `user` hint만 담는 순수 주소록이며 신원 판단에 절대 관여하지 않는다: `hosts.toml`이 어떤 이름에 주소를 대더라도 실제 dial 시 TLS 계층에서 그 주소가 제시한 fingerprint가 trust store 어딘가에 핀되어 있지 않으면 인증은 그대로 실패한다(pin 조회는 이름이 아니라 fingerprint 기준이다). `hosts.toml` 파일이 없거나 비어 있으면 이 절차에서 `trust.toml`의 pin이 유일한 출처다. `hosts.toml`은 **read-only 디렉터리**다 — 이를 쓰는 CLI 명령은 없으며 수동으로 직접 편집한다. `hosts.toml`에 쓰기 권한이 있다는 것은 곧 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 그런 redirect는 `host.list`/`host.get`의 `source: "hosts"`로 드러난다(§5).
@@ -1851,7 +1851,7 @@ scp와 같은 인자 문법으로 이 머신과 qsh host 하나 사이에서 파
 
 한 호출의 구성은 둘 중 하나다. SRC가 모두 로컬이고 DST가 원격이거나(put), SRC가 모두 같은 host의 원격이고 DST가 로컬이다(get). 원격↔원격, 로컬과 원격이 섞인 SRC, host가 둘 이상인 호출은 아무것도 하기 전에 `INVALID_ARGUMENT`이고 exit `2`다. 결과 위치는 scp와 같다. SRC가 둘 이상이면 DST는 이미 있는 디렉터리여야 하고, SRC가 하나이고 DST가 이미 있는 디렉터리면 그 안에 SRC의 마지막 성분 이름으로 놓는다. 그렇지 않으면 DST가 새 이름이다.
 
-host 이름은 `qsh exec`와 같은 규칙으로 해석한다(§6.1, live reverse 등록이 우선). `user@`는 `qsh [user@]host`와 같은 뜻의 단언이다. host는 ACL 판정 뒤에 serve 계정의 login name과 대조해 다르면 `UNSUPPORTED`로 답한다.
+host 이름은 `qsh exec`와 같은 규칙으로 해석한다(§6.1, live reverse 등록이 우선). 사람 모드에서 그 이름이 어디에도 등록돼 있지 않으면 `qsh cp`는 `HOST_NOT_FOUND`로 끝나기 전에 ssh 부트스트랩을 먼저 돌리고 복사를 이어 간다(§7 "이름이 없을 때의 자동 부트스트랩", ADR-0029 결정 2). `--json`/`--jsonl`과 `[ssh].bootstrap = "off"`에서는 돌리지 않는다. `user@`는 `qsh [user@]host`와 같은 뜻의 단언이다. host는 ACL 판정 뒤에 serve 계정의 login name과 대조해 다르면 `UNSUPPORTED`로 답한다.
 
 **플래그.**
 
@@ -1987,6 +1987,19 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 - **터미널과 `BatchMode`.** ssh의 stderr와 제어 터미널은 그대로 물려받아 암호·passphrase·host key 확인을 ssh가 직접 묻는다. `BatchMode=yes`는 `--json`/`--jsonl`이거나 stdin이 터미널이 아닐 때만 붙는다. 응답자의 `hello`를 기다리는 시간은 사람 모드에서 제한이 없고 `BatchMode`에서는 60초이며, 그 뒤 메시지마다 30초다(넘으면 `TIMEOUT`, `details.reason: "bootstrap_timeout"`). ssh 프롬프트에서 Ctrl-C로 ssh가 끝나면 `CANCELED`이고 아무것도 쓰지 않는다.
 - **종료 코드 사상.** 응답자의 `hello` 전에 ssh가 끝나면 종료 코드로 갈린다. 127(`cmd.exe`는 9009)은 `REMOTE_ERROR`(`details.reason: "remote_qsh_missing"`)이고 message가 `--remote-qsh`와 `[ssh].remote_qsh`를 안내한다. 2는 `UNSUPPORTED`(`"remote_qsh_too_old"`), 1은 `REMOTE_ERROR`(`"remote_command_failed"`, `details.remote_exit`)다. 원격 기본 셸이 PowerShell이면 `qsh`가 없을 때도 1이라 message가 `qsh.exe`를 원격 `PATH`에 두거나 전체 경로를 주라고 안내한다. 255는 `CONNECTION_FAILED`(`"ssh_failed"`, `details.ssh_exit`)이고 ssh가 stderr에 쓴 원인은 다시 해석하지 않는다. ssh 실행 파일이 없으면 `CONFIG_ERROR`(`"ssh_not_found"`)이고 Windows에서는 선택적 기능 "OpenSSH Client"를 안내한다. 줄 형식 위반은 `REMOTE_ERROR`(`"bootstrap_protocol"`)다. 모든 `details.reason`은 기존 코드에 붙는 선택 필드다.
 - **로그.** 단계와 결과 코드만 남긴다. 응답자 앞에 오는 접두 없는 줄(원격 rc 출력)은 개수만 세고, ssh의 stderr는 로그로 복사하지 않는다. qsh는 SSH 개인키·암호·agent 소켓을 읽지 않는다.
+
+**이름이 없을 때의 자동 부트스트랩(ADR-0044 결정 2·3·13·16·22).** `qsh [user@]host`(`-L`/`-R`을 곁들인 형태 포함)와 `qsh cp`가 받은 이름이 §6.1의 첫 `HOST_NOT_FOUND` 갈래에 해당하면, 오류로 끝내지 않고 `qsh pair ssh <dest>`와 같은 부트스트랩(정방향, 기본 플래그)을 먼저 돌린 뒤 원래 명령을 그대로 이어 간다. `<dest>`는 사용자가 친 `[user@]host`다. 발동은 아래가 모두 참일 때만이다.
+
+- 사람 모드다. `--json`/`--jsonl`에서는 ssh를 부르지 않고 지금처럼 `HOST_NOT_FOUND`다. 이 두 표면의 machine 모드는 암묵적으로 ssh를 부르지 않는다.
+- 이름이 `hosts.toml`에도, `trust.toml`의 pin에도, reverse 등록(live와 stale 모두)에도 없다. pin이 하나라도 있으면 ssh는 다시 불리지 않는다.
+- `config.toml`의 `[ssh].bootstrap`이 `"off"`가 아니다(기본 `"auto"`, §6.12). `"off"`면 발동하지 않고 `HOST_NOT_FOUND`다.
+- 이름이 ssh operand와 pin 이름 규칙(위 `<dest>` 검증)을 통과한다. 통과하지 못하면 발동하지 않고 원래 명령의 `HOST_NOT_FOUND`가 난다.
+
+`qsh exec`, `qsh session open`, `qsh tunnel open`, `qsh sessions`는 기계 지향 표면이라 사람 모드에서도 발동하지 않는다. 자동 경로는 역방향(`--reverse --to`)을 고르지 않는다. 이름만으로는 어느 쪽이 dial하는지 알 수 없기 때문이다(결정 22).
+
+ssh를 부르기 전에 stderr에 한 줄을 쓴다: `qsh: no qsh pin for "<host>"; setting one up over ssh (ssh <dest>); set [ssh].bootstrap = "off" to disable`. `--quiet`는 이 줄을 끄지 않는다(ssh가 불린다는 경고다). 이어서 `qsh pair ssh`가 사람 모드에서 쓰는 pin 안내 줄이 stderr에 나가고 `--quiet`는 이 줄들을 끈다. stdout은 원래 명령의 것만 쓴다. 자동 경로는 확인용 dial을 하지 않는다. 원래 명령의 연결이 곧 확인이다(결정 13). 원격 응답자가 serve 포트에서 아무것도 보지 못했다고 보고했으면(`serve_listening: false`) 양쪽 pin을 쓴 채로 원래 명령이 dial 없이 `CONNECTION_FAILED`(`details.reason: "remote_serve_not_listening"`)로 끝나고 pin은 남는다. 부트스트랩이 다른 오류로 실패하면 그 오류가 곧 명령의 오류이고 원래 명령은 시작하지 않는다.
+
+터미널 순서는 이렇다. 대화형 form은 ssh 자식이 끝나고 pin이 선 뒤에야 raw 모드에 들어간다. ssh가 암호·passphrase·host key 질문을 하는 동안 터미널은 cooked 상태 그대로다(결정 16). `qsh cp`도 ssh가 끝난 뒤에 복사를 시작한다. 부트스트랩 중 Ctrl-C는 ssh를 끝내고 `CANCELED`로 아무것도 쓰지 않으며 원래 명령도 시작하지 않는다. stdin이 터미널이 아니면 ssh에 `BatchMode=yes`가 붙는다(위 "터미널과 `BatchMode`"). 이 분기는 Unix 빌드에만 있다. Windows의 대화형 attach와 `qsh cp`는 M19라 그때 같은 분기가 켜진다(ADR-0044 결정 25).
 
 **`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
 

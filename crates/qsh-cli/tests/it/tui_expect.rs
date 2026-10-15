@@ -905,3 +905,42 @@ fn trust_accept_prompt_suppresses_echo_and_never_opens_in_machine_mode() {
     machine.expect(r#""code":"INVALID_ARGUMENT""#);
     machine.expect_exit(255);
 }
+
+/// `qsh <name>` on an unregistered name runs the ssh bootstrap first, and the
+/// client takes the terminal raw only after ssh has exited: while ssh holds
+/// the terminal (a password prompt, a host-key question) the line discipline
+/// is still the cooked one it needs (ADR-0044 decisions 2 and 16).
+#[test]
+fn auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits() {
+    use crate::ssh_bootstrap::pair::{World, store};
+
+    let mut world = World::new();
+    let gate_dir = tempfile::tempdir().expect("gate dir");
+    let gate = gate_dir.path().join("release-ssh");
+    world.fake.gate_file(&gate);
+
+    let mut client = Client::spawn(&world.client, &["box"]);
+    // The notice is on the terminal before ssh does anything.
+    client.expect("setting one up over ssh (ssh box)");
+    // ssh is held at its "prompt": the responder has not answered, so the
+    // terminal is cooked and no pin is written yet.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        client.is_cooked(),
+        "the client must not hold the terminal raw while ssh runs"
+    );
+    assert!(store(&world.client).find("box").is_none());
+
+    std::fs::write(&gate, b"").expect("release ssh");
+    // ssh finished, the pins stand, the original command attached.
+    client.round_trip("QSH-AFTER-SSH");
+    assert!(
+        !client.is_cooked(),
+        "the client holds the terminal raw once attached"
+    );
+    assert!(store(&world.client).find("box").is_some());
+
+    client.type_("exit\r");
+    client.expect_exit(0);
+    assert!(client.is_cooked());
+}

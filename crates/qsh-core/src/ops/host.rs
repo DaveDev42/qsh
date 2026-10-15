@@ -746,6 +746,42 @@ pub fn unconfigured_host_not_found(display_name: &str) -> OpError {
     )
 }
 
+/// The message [`Ops::host_is_unconfigured`]'s probe constructor builds. Never
+/// shown: it only tells the one "wholly unconfigured" branch of
+/// [`resolve_route`] apart from every other `HOST_NOT_FOUND` without
+/// restating the routing rule a second time.
+const UNCONFIGURED_PROBE: &str = "unconfigured-host-probe";
+
+fn unconfigured_probe(_display_name: &str) -> OpError {
+    OpError::new(ErrorCode::HostNotFound, UNCONFIGURED_PROBE).with_retryable(false)
+}
+
+/// What follows the quoted name in the two messages of the "wholly
+/// unconfigured" branch: [`unconfigured_host_not_found`] and `qsh exec`'s
+/// frozen [`not_in_trust_store_host_not_found`].
+const UNCONFIGURED_TAILS: [&str; 2] = [
+    " is not configured on this machine:",
+    " is not in the trust store;",
+];
+
+/// The name in a "wholly unconfigured" `HOST_NOT_FOUND` (`docs/CLI.md`
+/// §6.1's first branch: no `hosts.toml` entry, no pin, no reverse
+/// registration), or `None` for any other error. A human renderer uses it to
+/// add the next command `qsh pair ssh <name>` to the message without
+/// changing the message or `details` an envelope carries (ADR-0044 decision
+/// 2).
+pub fn unconfigured_host_name(err: &OpError) -> Option<&str> {
+    if err.code != ErrorCode::HostNotFound || err.retryable || !err.details.is_null() {
+        return None;
+    }
+    let rest = err.message.strip_prefix("host \"")?;
+    let (name, tail) = rest.split_once('"')?;
+    if name.is_empty() || !UNCONFIGURED_TAILS.iter().any(|t| tail.starts_with(t)) {
+        return None;
+    }
+    Some(name)
+}
+
 /// `HOST_NOT_FOUND` for a name `resolve_route` already knows about — a
 /// trust-store pin, or a `hosts.toml` entry with an explicit empty
 /// address (`crate::hosts::HostEntry::address`'s doc: parses, but is "no
@@ -1035,6 +1071,22 @@ impl Ops {
                 remedy: Some(diag.remedy.replace("{name}", &name)),
             })
             .collect())
+    }
+
+    /// Whether `name` is in the first `HOST_NOT_FOUND` branch of
+    /// `docs/CLI.md` §6.1: nothing on this machine mentions it. A live or
+    /// stale reverse registration, a `hosts.toml` entry and a `trust.toml`
+    /// pin each make it `false`, and so does any error while looking. The
+    /// answer comes from [`resolve_route`] itself, so the rule has one
+    /// definition (ADR-0044 decision 2).
+    ///
+    /// Sync, with the caveat of [`Self::resolve_host_route`]: not callable
+    /// from inside a running Tokio runtime.
+    pub(crate) fn host_is_unconfigured(&self, name: &str) -> bool {
+        matches!(
+            self.resolve_host_route_with(name, unconfigured_probe),
+            Err(err) if err.code == ErrorCode::HostNotFound && err.message == UNCONFIGURED_PROBE
+        )
     }
 
     /// `host.get` (`qsh host get <name>`, `docs/CLI.md` §6.1). Authorization-

@@ -1007,6 +1007,14 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
 #[test]
 fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
     let sandbox = Sandbox::initialized();
+    // An unregistered alias in human mode would start the ssh bootstrap on
+    // unix (ADR-0044 decision 2); this test is about the routing failure
+    // behind it, so the bootstrap is off and no ssh is ever run.
+    std::fs::write(
+        sandbox.config_dir().join("config.toml"),
+        "[ssh]\nbootstrap = \"off\"\n",
+    )
+    .unwrap();
 
     // Human mode: on unix nothing outranks host resolution here, so a
     // valid `-D` spec against an alias this sandbox never registered

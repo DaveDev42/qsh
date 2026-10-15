@@ -24,6 +24,7 @@ use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustRole, TrustStore, normalize_peer_address};
 
 pub mod acl;
+pub mod auto_bootstrap;
 pub mod cert;
 pub mod doctor;
 pub mod exec;
@@ -40,6 +41,7 @@ mod probe;
 mod trust;
 
 pub use acl::{AclCheckOp, AclShowOp};
+pub use auto_bootstrap::{AutoBootstrap, AutoBootstrapReport};
 pub use cert::{CertInitOp, CertIssueOp};
 pub use doctor::{DoctorOp, DoctorThreshold, meets_threshold};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
@@ -49,7 +51,7 @@ pub use file::{
     CancelToken, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp, FileProgress,
     SilentObserver,
 };
-pub use host::{HostGetOp, HostListOp, HostRoute};
+pub use host::{HostGetOp, HostListOp, HostRoute, unconfigured_host_name};
 pub use pair_ssh::{PairSshEnv, PairSshOutput};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,

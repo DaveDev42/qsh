@@ -183,10 +183,41 @@ page directly: `man ./man/qsh-trust-add.1` from an unpacked archive, or
 
 ## First run
 
-Six commands, two machines. This is the literal script that
-`docs/campaigns/m9-stopwatch.md` and `docs/campaigns/m7-stopwatch.md`
-time: two machines that have never run `qsh` before, nothing but this section
-open, stopwatch running from the first command.
+If you can already `ssh` to the host and `qsh` is installed there, start with
+three commands and let `qsh` do the pinning:
+
+```bash
+# Host, the machine that will run the shell:
+qsh init
+qsh serve                                    # leave this running, listens on [::]:4433
+
+# Client:
+qsh init
+qsh box                                      # "box" is whatever you type after `ssh`
+```
+
+`box` is not pinned yet, so `qsh` says so on stderr and runs `ssh box` for
+you. ssh asks its own questions (password, passphrase, host key) on your
+terminal. Over that ssh connection the two machines exchange fingerprints and
+pin each other, and then the shell you asked for opens as usual. The host
+pins the client with role `full`, the client pins the host with role `none`.
+The next `qsh box` does not touch ssh. Once the pins exist, nothing about
+the connection depends on ssh any more.
+
+This only happens for the interactive `qsh [user@]host` and `qsh cp`, never
+with `--json`/`--jsonl`, and never for a name that is already in
+`hosts.toml`, `trust.toml` or a reverse registration. Put `bootstrap = "off"`
+under `[ssh]` in `config.toml` to turn it off, or run the step yourself with
+`qsh pair ssh box`. If the host is not running `qsh serve` when ssh finishes,
+the pins stay and the command ends with `CONNECTION_FAILED`; start `serve`
+and run it again. A Windows host cannot answer the bootstrap yet: `qsh`
+reports `REMOTE_ERROR` and pins nothing on either side.
+
+Without ssh, six commands pin the two machines by hand. This path, not the
+one above, is the literal script that `docs/campaigns/m9-stopwatch.md` and
+`docs/campaigns/m7-stopwatch.md` time: two machines that have never run `qsh`
+before, nothing but this section open, stopwatch running from the first
+command.
 
 ```bash
 # Host, the machine that will run the shell:

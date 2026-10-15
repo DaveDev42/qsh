@@ -2,6 +2,8 @@
 //! this crate only parses arguments, calls `qsh_core::Ops`, and renders the
 //! result (`docs/CLI.md` §11).
 
+#[cfg(unix)]
+mod auto_bootstrap;
 mod render;
 mod tui;
 
@@ -660,10 +662,63 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     // exactly like `-L`/`-R`: parsed before the session opens, opened
     // (via `SessionAttachStream::open_dynamic_forwards`) right after
     // attach (`docs/CLI.md` §6.9, ADR-0019 decision 1).
+    // An unregistered name may set itself up over ssh first (ADR-0044
+    // decision 2). This is before `tui::run`, so ssh has the cooked terminal
+    // to prompt on and raw mode starts only after the ssh child is gone
+    // (decision 16).
+    #[cfg(unix)]
+    if let Some(code) = auto_bootstrap_before_open(cli, ops, command, &what) {
+        return code;
+    }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
     match tui::run(ops, what, escape) {
         Ok(code) => code,
         Err(err) => report_error(cli, command, &err),
+    }
+}
+
+/// The automatic bootstrap in front of `qsh [user@]host` (ADR-0044 decision
+/// 2). `None` means go on to the attach: the name is registered, the
+/// bootstrap is off, or it ran and the pins stand. `Some(code)` is the exit
+/// code of a bootstrap that failed, already reported.
+///
+/// Malformed `-L`/`-R`/`-D` specs skip the bootstrap: the attach reports them
+/// before it opens anything, and ssh should not run for a command line that
+/// cannot start.
+#[cfg(unix)]
+fn auto_bootstrap_before_open(
+    cli: &Cli,
+    ops: &Ops,
+    command: &'static str,
+    what: &tui::Attach,
+) -> Option<i32> {
+    let tui::Attach::Open {
+        host,
+        user,
+        forwards,
+        remote_forwards,
+        dynamic_forwards,
+    } = what
+    else {
+        return None;
+    };
+    if qsh_core::parse_local_forwards(forwards).is_err()
+        || qsh_core::parse_remote_forwards(remote_forwards).is_err()
+        || parse_dynamic_forwards(dynamic_forwards).is_err()
+    {
+        return None;
+    }
+    let plan = match ops.should_auto_bootstrap(host, user.as_deref(), cli.wants_json()) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return None,
+        Err(err) => return Some(report_error(cli, command, &err)),
+    };
+    let cancel = CancelToken::new();
+    // Scoped: the attach's own signal handling takes over afterwards.
+    let _interrupts = auto_bootstrap::InterruptScope::new(&cancel);
+    match auto_bootstrap::run(ops, &plan, cancel, cli.quiet) {
+        Ok(()) => None,
+        Err(err) => Some(report_error(cli, command, &err)),
     }
 }
 
@@ -919,6 +974,19 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     };
     let cancel = CancelToken::new();
     arm_cancel_on_interrupt(&cancel);
+    // An unregistered host sets itself up over ssh first and the copy then
+    // runs unchanged (ADR-0044 decision 2). The Ctrl-C handling above covers
+    // the ssh child too.
+    #[cfg(unix)]
+    match ops.should_auto_bootstrap_cp(&request, cli.wants_json()) {
+        Ok(Some(plan)) => {
+            if let Err(err) = auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet) {
+                return report_cp_error(cli, &err);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => return report_cp_error(cli, &err),
+    }
     let observer = std::sync::Arc::new(render::cp::CpObserver::new(mode));
     let mut data = match ops.file_copy(request, observer, &cancel) {
         Ok(data) => data,
