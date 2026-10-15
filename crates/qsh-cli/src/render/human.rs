@@ -11,12 +11,13 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
     DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
-    PairSshData, PairSshDirection, SchemaData, ServiceActivation, ServiceDeactivation,
-    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
-    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, SetupRole,
-    SetupRunData, SetupStatus, SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData,
-    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
-    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    IdentityMoveKeyData, KeyStoreKind, PairSshData, PairSshDirection, SchemaData,
+    ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
+    ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
+    SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
+    SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
+    TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel,
+    TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -163,6 +164,44 @@ pub fn print_identity_export(data: &IdentityExportData) -> io::Result<()> {
             sanitize(data.path.as_deref().unwrap_or(""))
         ),
     }
+}
+
+/// Print the outcome of `qsh identity move-key` (`docs/CLI.md` §6.11,
+/// ADR-0032 결정 15). One line for the move or for the no-op; when the old
+/// entry could not be deleted, a second block says where the leftover copy
+/// of the key is and that deleting it by hand is safe.
+pub fn print_identity_move_key(data: &IdentityMoveKeyData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if !data.moved {
+        return writeln!(
+            stdout,
+            "the device key is already in the {} key store; nothing changed",
+            data.to.as_str()
+        );
+    }
+    writeln!(
+        stdout,
+        "moved the device key from the {} key store to the {} key store",
+        data.from.as_str(),
+        data.to.as_str()
+    )?;
+    if data.stale_entry_left {
+        let location = match data.from {
+            KeyStoreKind::File => "identity/device.key in the config directory",
+            KeyStoreKind::Platform => {
+                "the OS credential store entry for service `qsh` (account: this device's id, \
+                 `name` in `qsh identity export --json`)"
+            }
+        };
+        writeln!(
+            stdout,
+            "warning: a copy of the key is still in the {} key store: {location}. \
+             The identity already uses the {} key store; delete the old entry by hand.",
+            data.from.as_str(),
+            data.to.as_str()
+        )?;
+    }
+    Ok(())
 }
 
 /// Print the CA root `qsh cert init` created (or found) — no key material,

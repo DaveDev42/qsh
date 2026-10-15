@@ -21,6 +21,7 @@ mod exit_code_matrix;
 mod fixtures;
 mod hosts_reverse;
 mod hosts_toml;
+mod identity_move_key;
 mod init_trust;
 mod jsonl_purity;
 mod lifecycle_lines;

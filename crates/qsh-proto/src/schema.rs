@@ -10,12 +10,12 @@ use schemars::{Schema, schema_for};
 use crate::types::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope,
     DoctorData, DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData, IdentityExportData,
-    IdentityInitData, PairSshData, SchemaData, ServiceInstallData, ServiceStatusData,
-    ServiceUninstallData, Session, SessionCloseData, SessionListData, SessionOpenData,
-    SessionReadData, SessionResizeData, SessionWriteData, SetupRunData, TrustAcceptData,
-    TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData, TrustRenameData,
-    TrustSetRoleData, TrustSshPreviewData, TunnelCloseData, TunnelListData, TunnelOpenData,
-    VersionData,
+    IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData, ServiceInstallData,
+    ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionListData,
+    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, SetupRunData,
+    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData,
+    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData, TunnelListData,
+    TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -36,6 +36,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "host.list",
     "identity.export",
     "identity.init",
+    "identity.move_key",
     "pair.ssh",
     "schema.get",
     "service.install",
@@ -89,6 +90,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "host.list" => schema_for!(HostListData),
         "identity.export" => schema_for!(IdentityExportData),
         "identity.init" => schema_for!(IdentityInitData),
+        "identity.move_key" => schema_for!(IdentityMoveKeyData),
         "pair.ssh" => schema_for!(PairSshData),
         "schema.get" => schema_for!(SchemaData),
         "service.install" => schema_for!(ServiceInstallData),

@@ -41,6 +41,7 @@ dbus-run-session -- sh -c '
 
 - 저장 형식 호환은 같은 세션 안에서 이전 릴리스 바이너리로 `QSH_CONFIG_DIR`을 격리해 `qsh init --key-store platform`을 한 뒤 새 바이너리의 `qsh doctor --json`과 `qsh init`이 같은 fingerprint를 보는지, 반대 방향도 같은지로 확인한다. 2026-10-09 keyring 3.6에서 옮길 때 이 왕복을 Linux에서 양방향으로 확인했다.
 - Secret Service가 없는 박스에서는 `auto`가 파일 저장소로 내려가고 `platform` 명시는 `Unavailable`로 실패해야 한다(옛 바이너리와 같은 동작).
+- `qsh identity move-key` 왕복(ADR-0032 결정 15·17): 같은 세션에서 `QSH_CONFIG_DIR`을 격리하고 `qsh init --key-store platform`, `qsh identity move-key --to file`, `qsh identity move-key --to platform`을 차례로 돌린다. 매번 `qsh identity export`의 fingerprint와 `device_id`가 그대로이고 다시 돌린 `qsh init --json`(멱등)의 `data.key_store`가 바뀐 저장소를 가리키며, `--to file` 뒤에는 `identity/device.key`가 0600으로 있고 `--to platform` 뒤에는 그 파일이 없고 OS 항목만 남아야 한다. 자동 테스트(`identity::tests`, `identity_move_key::`)는 가짜 플랫폼 저장소만 쓰므로 실제 Keychain·Secret Service 쪽 확인은 이 단계뿐이다. macOS와 Linux에서 돌리고, Windows는 M19에서 Credential Manager 왕복으로 채운다(ADR-0035 결정 9·12).
 
 ## L2 — Session broker (순수 로직, 네트워크 없음)
 

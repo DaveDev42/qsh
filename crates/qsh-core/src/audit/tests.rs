@@ -94,6 +94,32 @@ fn record_has_only_structural_fields() {
             "ts"
         ]
     );
+    // ADR-0032 결정 15: a local `identity.move_key` record is the same nine
+    // keys — nothing in the struct could carry the key being moved.
+    let moved = AuditRecord::local_op(
+        "identity.move_key",
+        "-".to_string(),
+        "platform->file".to_string(),
+    );
+    let moved = serde_json::to_value(&moved).unwrap();
+    let mut moved_keys: Vec<_> = moved.as_object().unwrap().keys().cloned().collect();
+    moved_keys.sort();
+    assert_eq!(
+        moved_keys,
+        [
+            "action",
+            "auth_path",
+            "decision",
+            "peer_addr",
+            "principal",
+            "request_id",
+            "resource",
+            "rule",
+            "ts"
+        ]
+    );
+    assert_eq!(moved["action"], "identity.move_key");
+    assert_eq!(moved["auth_path"], "local");
 }
 
 /// ADR-0031 결정 8: the record of a withdrawn connection adds no key. It is

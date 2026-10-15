@@ -386,6 +386,35 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("CONFIG_ERROR"),
         },
         Case {
+            // ADR-0032 결정 15: the same `CONFIG_ERROR` as `identity export`
+            // before `qsh init` (`identity_move_key.rs` pins the message).
+            name: "identity move-key: no device identity",
+            sandbox: &uninitialized,
+            args: &["identity", "move-key", "--to", "file"],
+            outcome: Outcome::Fails("CONFIG_ERROR"),
+        },
+        Case {
+            // The key already lives in the file store, so this is the
+            // no-op success (`moved: false`) and touches no key store.
+            name: "identity move-key: already in the requested store",
+            sandbox: &fleet.client,
+            args: &["identity", "move-key", "--to", "file"],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            // `auto` is a policy for `init`, not a store to move a key to.
+            name: "usage: identity move-key --to auto",
+            sandbox: &fleet.client,
+            args: &["identity", "move-key", "--to", "auto"],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            name: "usage: identity move-key without --to",
+            sandbox: &fleet.client,
+            args: &["identity", "move-key"],
+            outcome: Outcome::Usage,
+        },
+        Case {
             name: "init --import-ssh-key: passphrase-protected key",
             sandbox: &uninitialized,
             args: &import_encrypted_args,

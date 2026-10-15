@@ -287,6 +287,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-init.1",
     },
     OpFace {
+        op: "identity.move_key",
+        marker: "IdentityMoveKeyOp",
+        renderer: "print_identity_move_key",
+        cli_spelling: "qsh identity move-key",
+        man_file: "qsh-identity-move-key.1",
+    },
+    OpFace {
         op: "schema.get",
         marker: "SchemaOp",
         renderer: "print_schema",

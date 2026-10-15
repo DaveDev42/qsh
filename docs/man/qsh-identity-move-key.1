@@ -1,0 +1,33 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-identity-move-key 1  "move-key 0.4.3" 
+.SH NAME
+qsh\-identity\-move\-key \- Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
+.SH SYNOPSIS
+\fBqsh identity move\-key\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-to\fR> 
+.SH DESCRIPTION
+Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-to\fR \fI<STORE>\fR
+The store the private key should live in afterwards: `file` (`identity/device.key`, mode 0600) or `platform` (the OS credential store). A key that already lives there is left alone
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v0.4.3

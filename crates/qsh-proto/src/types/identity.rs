@@ -68,6 +68,20 @@ impl KeyStoreKind {
     }
 }
 
+impl std::str::FromStr for KeyStoreKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "platform" => Ok(KeyStoreKind::Platform),
+            "file" => Ok(KeyStoreKind::File),
+            other => Err(format!(
+                "invalid key store {other:?} (expected file or platform)"
+            )),
+        }
+    }
+}
+
 /// Request for `identity.init`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct IdentityInitReq {
@@ -137,4 +151,37 @@ pub struct IdentityExportData {
     /// gave it (not canonicalized). Present only when `--out` was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// identity.move_key (`docs/CLI.md` §6.11, ADR-0032 결정 15)
+// ---------------------------------------------------------------------------
+
+/// Request for `identity.move_key`.
+///
+/// Carries only the destination store. The private key never travels
+/// through this contract type (ADR-0013): `qsh-core` moves it between the
+/// two stores itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IdentityMoveKeyReq {
+    /// The store the private key should live in afterwards.
+    pub to: KeyStoreKind,
+}
+
+/// Data payload of `identity.move_key` (`docs/CLI.md` §6.11, ADR-0032
+/// 결정 15). No field can hold key material: both stores are named by the
+/// closed [`KeyStoreKind`] vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IdentityMoveKeyData {
+    /// The store that held the key when the call started.
+    pub from: KeyStoreKind,
+    /// The store that holds it now (the requested one).
+    pub to: KeyStoreKind,
+    /// `true` if the key was moved, `false` if it already lived in `to`
+    /// and nothing was touched.
+    pub moved: bool,
+    /// `true` when the move succeeded but deleting the entry in the old
+    /// store failed, so a copy of the key is still there. `false`
+    /// otherwise, including when nothing moved.
+    pub stale_entry_left: bool,
 }

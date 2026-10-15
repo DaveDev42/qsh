@@ -1,0 +1,12 @@
+{
+  "command": "identity.move_key",
+  "data": {
+    "from": "platform",
+    "moved": true,
+    "stale_entry_left": false,
+    "to": "file"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

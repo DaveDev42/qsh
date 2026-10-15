@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use qsh_proto::{
     BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
-    KeyStoreMode, SchemaData, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq,
-    TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq,
-    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
+    IdentityMoveKeyData, IdentityMoveKeyReq, KeyStoreMode, SchemaData, TrustAcceptData,
+    TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustInviteData,
+    TrustInviteReq, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustRenameReq,
+    TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -253,6 +253,14 @@ pub struct IdentityExportOp;
 
 impl Operation for IdentityExportOp {
     const COMMAND: &'static str = "identity.export";
+}
+
+/// The `identity.move_key` operation (`qsh identity move-key`, ADR-0032
+/// 결정 15).
+pub struct IdentityMoveKeyOp;
+
+impl Operation for IdentityMoveKeyOp {
+    const COMMAND: &'static str = "identity.move_key";
 }
 
 /// The `trust.add` operation.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::identity::KeyStore as _;
 use crate::ops::test_support::temp_ops;
 use qsh_proto::KeyStoreKind;
 
@@ -2470,6 +2471,143 @@ fn identity_export_never_opens_the_key_store() {
              only through crate::identity::read_identity"
         );
     }
+}
+
+/// `identity.move_key` writes one local audit record per move that changes
+/// something (ADR-0032 결정 15): `principal` `-`, `resource` `<from>-><to>`,
+/// `auth_path: "local"`. A move to the store the key is already in writes
+/// none.
+#[test]
+fn identity_move_key_writes_exactly_one_audit_record_per_move() {
+    let (_guard, ops) = temp_ops();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+    ops.identity_init(file_mode()).unwrap();
+    let platform = crate::identity::MemoryKeyStore::new();
+
+    let to_platform = ops
+        .identity_move_key_with_platform_store(
+            IdentityMoveKeyReq {
+                to: KeyStoreKind::Platform,
+            },
+            &platform,
+        )
+        .unwrap();
+    assert!(to_platform.moved);
+    let records = sink.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].action, "identity.move_key");
+    assert_eq!(records[0].principal, "-");
+    assert_eq!(records[0].resource, "file->platform");
+    assert_eq!(records[0].auth_path, "local");
+    assert_eq!(records[0].decision, "allow");
+
+    let again = ops
+        .identity_move_key_with_platform_store(
+            IdentityMoveKeyReq {
+                to: KeyStoreKind::Platform,
+            },
+            &platform,
+        )
+        .unwrap();
+    assert!(!again.moved);
+    assert_eq!(sink.records().len(), 1, "a no-op writes no record");
+
+    ops.identity_move_key_with_platform_store(
+        IdentityMoveKeyReq {
+            to: KeyStoreKind::File,
+        },
+        &platform,
+    )
+    .unwrap();
+    let records = sink.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].resource, "platform->file");
+}
+
+/// Fail-closed (`CLAUDE.md`: no durable record, no operation): when the
+/// audit sink cannot append, nothing is moved.
+#[test]
+fn move_key_is_refused_when_the_audit_sink_fails() {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    let sink = Arc::new(crate::audit::FailingAuditSink::new());
+    sink.fail();
+    let ops = ops.with_audit_sink(sink.clone());
+    let platform = crate::identity::MemoryKeyStore::new();
+
+    let identity_dir = ops.paths().identity_dir();
+    let record = std::fs::read(identity_dir.join(crate::identity::IDENTITY_FILE)).unwrap();
+    let key = std::fs::read(identity_dir.join(crate::identity::KEY_FILE)).unwrap();
+
+    let err = ops
+        .identity_move_key_with_platform_store(
+            IdentityMoveKeyReq {
+                to: KeyStoreKind::Platform,
+            },
+            &platform,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.retryable);
+    assert!(sink.records().is_empty());
+    assert_eq!(
+        std::fs::read(identity_dir.join(crate::identity::IDENTITY_FILE)).unwrap(),
+        record,
+        "identity.toml must be byte-identical after a failed audit append"
+    );
+    assert_eq!(
+        std::fs::read(identity_dir.join(crate::identity::KEY_FILE)).unwrap(),
+        key
+    );
+    assert!(
+        platform.load().unwrap().is_none(),
+        "nothing reached the store"
+    );
+}
+
+/// A record written for `identity.move_key` carries exactly the structural
+/// keys every record carries, and nothing the key could ride on.
+#[test]
+fn move_key_audit_record_has_only_structural_fields() {
+    let (_guard, ops) = temp_ops();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+    ops.identity_init(file_mode()).unwrap();
+    let key = crate::identity::KeyStore::load(&crate::identity::FileKeyStore::new(
+        ops.paths().identity_dir().join(crate::identity::KEY_FILE),
+    ))
+    .unwrap()
+    .unwrap();
+    ops.identity_move_key_with_platform_store(
+        IdentityMoveKeyReq {
+            to: KeyStoreKind::Platform,
+        },
+        &crate::identity::MemoryKeyStore::new(),
+    )
+    .unwrap();
+
+    let value = serde_json::to_value(&sink.records()[0]).unwrap();
+    let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "action",
+            "auth_path",
+            "decision",
+            "peer_addr",
+            "principal",
+            "request_id",
+            "resource",
+            "rule",
+            "ts"
+        ]
+    );
+    let line = value.to_string();
+    let seed = &key[key.len() - 32..];
+    let hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+    assert!(!line.contains(&hex));
 }
 
 // ---------------------------------------------------------------------
