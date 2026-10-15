@@ -147,8 +147,12 @@ in `ops::service::tests` (the argv per manager, the deadline paths of
 `CommandRunner` on an injected clock and on a real child), the golden
 activation scenario over a fake `launchctl`/`systemctl` on `PATH`, the
 `--json`/`--jsonl` purity rows, and the doc-versus-argv comparison. None of
-them calls a real service manager. M17 adds no p95 budget, so there is no
-`m17-latency.filter`.
+them calls a real service manager. It also covers `qsh identity move-key`:
+the `identity_move_key::` module and the route-equivalence test
+`move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`
+(real `qsh serve`, `qsh listen` and `qsh serve --to` processes after a key
+moved through a fake platform store; no test touches the OS credential
+store). M17 adds no p95 budget, so there is no `m17-latency.filter`.
 
 ## test/
 

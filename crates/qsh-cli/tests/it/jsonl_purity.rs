@@ -816,6 +816,29 @@ fn identity_export_human_mode_without_out_prints_exactly_one_certificate_block()
     assert!(!stdout.contains("PRIVATE KEY"), "{stdout:?}");
 }
 
+/// `qsh identity move-key` (ADR-0032 결정 15) is a value operation: one
+/// `qsh.cli/v1` line at any verbosity, in both machine modes, and nothing of
+/// the key anywhere. The key is already in the requested store here, so the
+/// run touches no key store (the moving path needs a fake platform store
+/// that a spawned binary cannot have; `identity_move_key.rs` covers it
+/// in-process).
+#[test]
+fn identity_move_key_keeps_stdout_pure_json_at_every_verbosity() {
+    let sandbox = Sandbox::initialized();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = sandbox.qsh(&["identity", "move-key", "--to", "file", verbosity, mode]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}: one envelope line");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        assert_eq!(lines[0]["command"], "identity.move_key", "{label}");
+        assert_eq!(lines[0]["data"]["moved"], false, "{label}");
+    }
+}
+
 /// `qsh service install` (`docs/CLI.md` §6.18, ROADMAP M9 (g)): at high
 /// verbosity stdout must still be exactly one `qsh.cli/v1` line, with any
 /// human-readable activation hint the renderer might print going to

@@ -95,6 +95,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.init.created.json",
     "identity.init.existing.json",
     "identity.init.imported_ssh_key.json",
+    "identity.move_key.moved.json",
+    "identity.move_key.noop.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -1171,6 +1173,59 @@ fn golden_name_authority_fixtures() {
     assert_eq!(renamed["data"]["old_name"], "old-name", "{renamed}");
     assert_eq!(renamed["data"]["peer"]["name"], "new-name", "{renamed}");
     check_without_roles("trust.rename.json", renamed);
+}
+
+/// `qsh identity move-key` (`docs/CLI.md` §6.11, ADR-0032 결정 15).
+///
+/// `identity.move_key.noop.json` is the real binary: the key is already in
+/// the file store, so the run reaches no credential store. A spawned binary
+/// cannot be given a fake platform store, and no test may touch the real
+/// one, so `identity.move_key.moved.json` is produced in-process: the same
+/// `Ops` call the binary makes, against a fake platform store, wrapped in
+/// the same `qsh.cli/v1` envelope (`CliEnvelope`, the type the binary's
+/// `Envelope::success` builds). Both go through `check`, so a drift in the
+/// data shape fails here exactly as it would for a binary-produced fixture.
+#[test]
+fn golden_identity_move_key_fixtures() {
+    use qsh_core::{Ops, Paths};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, IdentityMoveKeyReq, KeyStoreKind};
+
+    let sandbox = Sandbox::initialized();
+    let (code, noop) = sandbox.json(&["identity", "move-key", "--to", "file", "--json"]);
+    assert_eq!(code, 0, "{noop}");
+    assert_eq!(noop["data"]["moved"], false, "{noop}");
+    check("identity.move_key.noop.json", noop);
+
+    let ops = Ops::new(Paths::new(sandbox.config_dir(), sandbox.state_dir()));
+    let platform = qsh_core::identity::MemoryKeyStore::new();
+    ops.identity_move_key_with_platform_store(
+        IdentityMoveKeyReq {
+            to: KeyStoreKind::Platform,
+        },
+        &platform,
+    )
+    .expect("file -> platform");
+    let moved = ops
+        .identity_move_key_with_platform_store(
+            IdentityMoveKeyReq {
+                to: KeyStoreKind::File,
+            },
+            &platform,
+        )
+        .expect("platform -> file");
+    assert!(moved.moved && !moved.stale_entry_left, "{moved:?}");
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "identity.move_key".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&moved).expect("encode data")),
+        error: None,
+    };
+    check(
+        "identity.move_key.moved.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
 }
 
 /// The certificate-file exchange path (`docs/CLI.md` §6.11, ADR-0013):

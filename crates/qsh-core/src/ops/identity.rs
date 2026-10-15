@@ -1,4 +1,5 @@
-//! `identity.init`/`identity.export` and loading this device's identity.
+//! `identity.init`/`identity.export`/`identity.move_key` and loading this
+//! device's identity.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -28,6 +29,63 @@ impl Ops {
             Some(path) => crate::identity::init_importing(&self.paths, mode, path),
             None => crate::identity::init(&self.paths, mode),
         }
+    }
+
+    /// `identity.move_key` — move this device's private key to the `req.to`
+    /// store without changing its device id, certificate or fingerprint
+    /// (`docs/CLI.md` §6.11, ADR-0032 결정 15). A local operator op: no
+    /// authorization row, never reachable from a remote peer.
+    ///
+    /// Writes one fail-closed audit record (action `identity.move_key`,
+    /// `resource` `<from>-><to>`) after the move is known to change
+    /// something and before the first change; a failed write moves nothing.
+    /// A move to the store the key already lives in changes nothing, so it
+    /// writes no record and answers `moved: false`. See
+    /// [`crate::identity::move_key`] for the order of steps and what each
+    /// failure leaves behind.
+    ///
+    /// **Runtime caveat:** with a platform store on either end this blocks
+    /// on the OS credential store — call it outside a tokio runtime, or
+    /// from `spawn_blocking`.
+    pub fn identity_move_key(
+        &self,
+        req: IdentityMoveKeyReq,
+    ) -> Result<IdentityMoveKeyData, OpError> {
+        self.identity_move_key_via(req, None)
+    }
+
+    /// [`Self::identity_move_key`] with `platform` standing in for the OS
+    /// credential store, the seam that keeps tests off the real one
+    /// (`docs/design/testing.md` L1). `platform` is the store the device's
+    /// own `platform` entry would be, already addressed. Production code
+    /// calls [`Self::identity_move_key`].
+    pub fn identity_move_key_with_platform_store(
+        &self,
+        req: IdentityMoveKeyReq,
+        platform: &dyn crate::identity::KeyStore,
+    ) -> Result<IdentityMoveKeyData, OpError> {
+        self.identity_move_key_via(req, Some(platform))
+    }
+
+    fn identity_move_key_via(
+        &self,
+        req: IdentityMoveKeyReq,
+        platform: Option<&dyn crate::identity::KeyStore>,
+    ) -> Result<IdentityMoveKeyData, OpError> {
+        crate::identity::move_key(&self.paths, req.to, platform, |from, to| {
+            let record = AuditRecord::local_op(
+                IdentityMoveKeyOp::COMMAND,
+                "-".to_string(),
+                format!("{}->{}", from.as_str(), to.as_str()),
+            );
+            self.audit_sink()?.record(&record).map_err(|err| {
+                OpError::new(
+                    ErrorCode::Internal,
+                    format!("audit record could not be written; no key was moved: {err}"),
+                )
+                .with_retryable(true)
+            })
+        })
     }
 
     /// This device's identity plus its private key, or `None` before

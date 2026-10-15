@@ -15,6 +15,7 @@
 
 mod import;
 pub mod keystore;
+mod move_key;
 pub(crate) mod pem;
 
 use std::io;
@@ -31,6 +32,7 @@ pub use import::{
 pub use keystore::{
     FileKeyStore, KEYRING_SERVICE, KeyStore, KeyStoreError, MemoryKeyStore, PlatformKeyStore,
 };
+pub use move_key::move_key;
 
 use crate::config::{Paths, config_io_error, ensure_private_dir, now_rfc3339, write_private_file};
 use crate::ops::OpError;
@@ -169,6 +171,10 @@ fn init_inner(
     let identity_dir = paths.identity_dir();
     ensure_private_dir(&identity_dir)?;
     crate::fsutil::sweep_stale_temp_files(&identity_dir);
+    // Held to the end: the existence check and the record write below are
+    // one read-modify-write that `identity.move_key` must not interleave
+    // with (ADR-0032 결정 15).
+    let _lock = move_key::lock_identity(paths)?;
 
     if let Some(existing) = read_identity(paths)? {
         if imported.is_some() {
@@ -326,9 +332,17 @@ pub fn promote_to_ca_issued(
     ca_fingerprint: &str,
 ) -> Result<Identity, OpError> {
     let identity_dir = paths.identity_dir();
-    let existing = read_identity(paths)?.ok_or_else(|| {
-        OpError::new(ErrorCode::ConfigError, NO_LOCAL_IDENTITY).with_retryable(false)
-    })?;
+    // The record is rewritten from `existing`, so a concurrent
+    // `identity.move_key` changing `key_store` in between would be undone.
+    let no_identity =
+        || OpError::new(ErrorCode::ConfigError, NO_LOCAL_IDENTITY).with_retryable(false);
+    // Before the lock, so a missing identity never creates a lock file in
+    // a directory that does not exist.
+    if read_identity(paths)?.is_none() {
+        return Err(no_identity());
+    }
+    let _lock = move_key::lock_identity(paths)?;
+    let existing = read_identity(paths)?.ok_or_else(no_identity)?;
 
     let fingerprint = Fingerprint::of_cert_der(cert_der).map_err(|err| {
         OpError::new(

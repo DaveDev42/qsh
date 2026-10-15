@@ -1,4 +1,5 @@
 use super::*;
+use qsh_proto::IdentityMoveKeyData;
 
 fn temp_paths() -> (tempfile::TempDir, Paths) {
     let dir = tempfile::tempdir().unwrap();
@@ -295,4 +296,485 @@ fn init_importing_issues_a_leaf_over_the_imported_key_and_stores_it() {
 
     // The source key file is never modified.
     assert_eq!(std::fs::read(&key_path).unwrap(), unhex(GOLDEN_HEX));
+}
+
+// ---------------------------------------------------------------------------
+// `identity.move_key` (ADR-0032 결정 15)
+//
+// No test here touches the OS credential store: the `platform` side is a
+// [`FakePlatform`] handed to `move_key` (`Ops::identity_move_key_with_platform_store`
+// in production code's shape).
+// ---------------------------------------------------------------------------
+
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// A stand-in for the OS credential store, with one switch per failure the
+/// move has to survive.
+#[derive(Default)]
+struct FakePlatform {
+    inner: MemoryKeyStore,
+    unavailable: AtomicBool,
+    fail_store: AtomicBool,
+    fail_delete: AtomicBool,
+    /// After a write, `load` answers with some other valid key, as a store
+    /// that returns the wrong bytes would.
+    wrong_key_on_load: AtomicBool,
+    written: AtomicBool,
+}
+
+impl FakePlatform {
+    fn flip(flag: &AtomicBool) {
+        flag.store(true, Ordering::SeqCst);
+    }
+
+    fn holds(&self) -> Option<Vec<u8>> {
+        self.inner.load().unwrap().map(|key| key.to_vec())
+    }
+}
+
+impl KeyStore for FakePlatform {
+    fn kind(&self) -> KeyStoreKind {
+        KeyStoreKind::Platform
+    }
+
+    fn store(&self, key_pkcs8_der: &[u8]) -> Result<(), KeyStoreError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(KeyStoreError::Unavailable("fake store is down".into()));
+        }
+        if self.fail_store.load(Ordering::SeqCst) {
+            return Err(KeyStoreError::Other("fake store refused the write".into()));
+        }
+        self.written.store(true, Ordering::SeqCst);
+        self.inner.store(key_pkcs8_der)
+    }
+
+    fn load(&self) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, KeyStoreError> {
+        if self.unavailable.load(Ordering::SeqCst) {
+            return Err(KeyStoreError::Unavailable("fake store is down".into()));
+        }
+        if self.wrong_key_on_load.load(Ordering::SeqCst) && self.written.load(Ordering::SeqCst) {
+            let other = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+            return Ok(Some(zeroize::Zeroizing::new(other.serialize_der())));
+        }
+        self.inner.load()
+    }
+
+    fn delete(&self) -> Result<(), KeyStoreError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(KeyStoreError::Io(io::Error::other(
+                "fake store is read-only",
+            )));
+        }
+        self.inner.delete()
+    }
+}
+
+/// A device whose key is in the `file` store.
+fn file_identity() -> (tempfile::TempDir, Paths, IdentityInitData) {
+    let (guard, paths) = temp_paths();
+    let data = init(&paths, KeyStoreMode::File).unwrap();
+    (guard, paths, data)
+}
+
+/// A device whose key is in the fake `platform` store, built without the
+/// code under test: the key moves by hand and `identity.toml` is edited.
+fn platform_identity() -> (tempfile::TempDir, Paths, IdentityInitData, FakePlatform) {
+    let (guard, paths, data) = file_identity();
+    let fake = FakePlatform::default();
+    let key_path = paths.identity_dir().join(KEY_FILE);
+    let key = FileKeyStore::new(&key_path).load().unwrap().unwrap();
+    fake.store(&key).unwrap();
+    std::fs::remove_file(&key_path).unwrap();
+    let record_path = paths.identity_dir().join(IDENTITY_FILE);
+    let record = std::fs::read_to_string(&record_path).unwrap();
+    assert!(record.contains("key_store = \"file\""), "{record}");
+    std::fs::write(
+        &record_path,
+        record.replace("key_store = \"file\"", "key_store = \"platform\""),
+    )
+    .unwrap();
+    (guard, paths, data, fake)
+}
+
+fn bytes_of(paths: &Paths, name: &str) -> Option<Vec<u8>> {
+    std::fs::read(paths.identity_dir().join(name)).ok()
+}
+
+/// Run `move_key`, counting the audit calls.
+fn run_move(
+    paths: &Paths,
+    to: KeyStoreKind,
+    platform: &FakePlatform,
+) -> (Result<IdentityMoveKeyData, OpError>, u32) {
+    let audited = Cell::new(0);
+    let result = move_key(paths, to, Some(platform), |_, _| {
+        audited.set(audited.get() + 1);
+        Ok(())
+    });
+    (result, audited.get())
+}
+
+/// ADR-0032 결정 15: the device id, certificate and fingerprint do not
+/// change, in either direction, so a peer's pin and ACL rows stay valid.
+#[test]
+fn move_key_keeps_the_fingerprint_and_device_id() {
+    let (_guard, paths, created, fake) = platform_identity();
+    let cert_before = bytes_of(&paths, CERT_FILE).unwrap();
+    let record_before = read_identity(&paths).unwrap().unwrap();
+    let key_before = fake.holds().unwrap();
+
+    let (to_file, audited) = run_move(&paths, KeyStoreKind::File, &fake);
+    let data = to_file.unwrap();
+    assert_eq!(audited, 1);
+    assert_eq!(
+        data,
+        IdentityMoveKeyData {
+            from: KeyStoreKind::Platform,
+            to: KeyStoreKind::File,
+            moved: true,
+            stale_entry_left: false
+        }
+    );
+    let after = read_identity(&paths).unwrap().unwrap();
+    assert_eq!(after.device_id, created.device_id);
+    assert_eq!(after.fingerprint.to_string(), created.fingerprint);
+    assert_eq!(after.created_at, record_before.created_at);
+    assert_eq!(after.cert_der, record_before.cert_der);
+    assert_eq!(after.key_store, KeyStoreKind::File);
+    assert_eq!(bytes_of(&paths, CERT_FILE).unwrap(), cert_before);
+    assert_eq!(fake.holds(), None, "the old entry is gone");
+    assert!(bytes_of(&paths, KEY_FILE).is_some());
+    let loaded = load(&paths).unwrap().expect("identity loads from the file");
+    assert_eq!(loaded.local.key_pkcs8_der.as_slice(), key_before.as_slice());
+
+    // And back again.
+    let (to_platform, audited) = run_move(&paths, KeyStoreKind::Platform, &fake);
+    assert_eq!(audited, 1);
+    assert_eq!(
+        to_platform.unwrap(),
+        IdentityMoveKeyData {
+            from: KeyStoreKind::File,
+            to: KeyStoreKind::Platform,
+            moved: true,
+            stale_entry_left: false
+        }
+    );
+    let back = read_identity(&paths).unwrap().unwrap();
+    assert_eq!(back.device_id, created.device_id);
+    assert_eq!(back.fingerprint.to_string(), created.fingerprint);
+    assert_eq!(back.key_store, KeyStoreKind::Platform);
+    assert_eq!(fake.holds().unwrap(), key_before);
+    assert_eq!(bytes_of(&paths, KEY_FILE), None);
+}
+
+/// `issued_by_ca` and the record's own `fingerprint` string survive the
+/// rewrite of `identity.toml` untouched.
+#[test]
+fn move_key_rewrites_only_the_key_store_line_of_the_record() {
+    let (_guard, paths, _created, fake) = platform_identity();
+    let before = std::fs::read_to_string(paths.identity_dir().join(IDENTITY_FILE)).unwrap();
+    run_move(&paths, KeyStoreKind::File, &fake).0.unwrap();
+    let after = std::fs::read_to_string(paths.identity_dir().join(IDENTITY_FILE)).unwrap();
+    assert_eq!(
+        after,
+        before.replace("key_store = \"platform\"", "key_store = \"file\"")
+    );
+}
+
+#[test]
+fn move_key_to_the_current_store_is_a_no_op() {
+    let (_guard, paths, _created) = file_identity();
+    let fake = FakePlatform::default();
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let key = bytes_of(&paths, KEY_FILE);
+
+    let (result, audited) = run_move(&paths, KeyStoreKind::File, &fake);
+    assert_eq!(
+        result.unwrap(),
+        IdentityMoveKeyData {
+            from: KeyStoreKind::File,
+            to: KeyStoreKind::File,
+            moved: false,
+            stale_entry_left: false
+        }
+    );
+    assert_eq!(
+        audited, 0,
+        "a no-op changes nothing, so it writes no record"
+    );
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), key);
+    assert_eq!(fake.holds(), None);
+
+    // The platform side too.
+    let (_guard, paths, _created, fake) = platform_identity();
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let held = fake.holds();
+    let (result, audited) = run_move(&paths, KeyStoreKind::Platform, &fake);
+    assert!(!result.unwrap().moved);
+    assert_eq!(audited, 0);
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(fake.holds(), held);
+}
+
+/// Every failure path ends with the original store and `identity.toml`
+/// byte for byte as they were.
+#[test]
+fn a_failed_move_key_write_leaves_the_original_store_untouched() {
+    // file -> platform, the platform write is refused.
+    let (_guard, paths, _created) = file_identity();
+    let fake = FakePlatform::default();
+    FakePlatform::flip(&fake.fail_store);
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let key = bytes_of(&paths, KEY_FILE);
+    let (result, audited) = run_move(&paths, KeyStoreKind::Platform, &fake);
+    let err = result.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(!err.retryable);
+    assert_eq!(audited, 1, "the attempt was recorded before it began");
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), key);
+    assert_eq!(fake.holds(), None);
+
+    // platform -> file, the file write cannot happen: `device.key` is a
+    // directory.
+    let (_guard, paths, _created, fake) = platform_identity();
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let held = fake.holds();
+    std::fs::create_dir(paths.identity_dir().join(KEY_FILE)).unwrap();
+    let (result, _) = run_move(&paths, KeyStoreKind::File, &fake);
+    assert_eq!(result.unwrap_err().code, ErrorCode::Internal);
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(fake.holds(), held);
+}
+
+/// The step after the key is stored and verified: `identity.toml` cannot
+/// be rewritten. The destination goes back to what it held before, even
+/// when that was a stale entry, and the original store is not touched.
+#[test]
+fn a_failed_identity_record_rewrite_rolls_the_destination_back() {
+    let (_guard, paths, _created) = file_identity();
+    let fake = FakePlatform::default();
+    fake.inner.store(b"an older entry").unwrap();
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let key = bytes_of(&paths, KEY_FILE);
+
+    // The platform write is no file write, so the record's temp file gets
+    // the next write ticket; occupy that name with a directory.
+    let ticket = crate::config::next_write_ticket_for_test();
+    std::fs::create_dir(paths.identity_dir().join(format!(
+        "{IDENTITY_FILE}.tmp{}-{ticket}",
+        std::process::id()
+    )))
+    .unwrap();
+
+    let (result, _) = run_move(&paths, KeyStoreKind::Platform, &fake);
+    assert!(result.is_err());
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), key);
+    assert_eq!(fake.holds().as_deref(), Some(b"an older entry".as_slice()));
+}
+
+#[cfg(unix)]
+#[test]
+fn move_key_file_store_is_mode_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_guard, paths, _created, fake) = platform_identity();
+    run_move(&paths, KeyStoreKind::File, &fake).0.unwrap();
+    let mode_of =
+        |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode_of(paths.identity_dir().join(KEY_FILE)), 0o600);
+    assert_eq!(mode_of(paths.identity_dir()), 0o700);
+    assert_eq!(mode_of(paths.identity_dir().join(IDENTITY_FILE)), 0o600);
+}
+
+/// A store that answers with the wrong key fails the check against the
+/// device certificate; the write is undone.
+#[test]
+fn move_key_readback_mismatch_rolls_back() {
+    let (_guard, paths, _created) = file_identity();
+    let fake = FakePlatform::default();
+    FakePlatform::flip(&fake.wrong_key_on_load);
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let key = bytes_of(&paths, KEY_FILE);
+
+    let (result, _) = run_move(&paths, KeyStoreKind::Platform, &fake);
+    let err = result.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.message.contains("not the key of this device"), "{err}");
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), key);
+    assert_eq!(fake.holds(), None, "the verified-bad copy is removed");
+}
+
+#[test]
+fn move_key_reports_stale_entry_left_when_only_the_final_delete_fails() {
+    let (_guard, paths, created, fake) = platform_identity();
+    FakePlatform::flip(&fake.fail_delete);
+    let held = fake.holds();
+
+    let data = run_move(&paths, KeyStoreKind::File, &fake).0.unwrap();
+    assert!(data.moved);
+    assert!(data.stale_entry_left);
+    // The identity already uses the file store; the copy that stayed behind
+    // is the same key.
+    let after = read_identity(&paths).unwrap().unwrap();
+    assert_eq!(after.key_store, KeyStoreKind::File);
+    assert_eq!(after.fingerprint.to_string(), created.fingerprint);
+    assert!(load(&paths).unwrap().is_some());
+    assert_eq!(fake.holds(), held);
+}
+
+#[test]
+fn move_key_before_init_is_config_error() {
+    let (_guard, paths) = temp_paths();
+    let fake = FakePlatform::default();
+    let (result, audited) = run_move(&paths, KeyStoreKind::File, &fake);
+    let err = result.unwrap_err();
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert_eq!(err.message, NO_LOCAL_IDENTITY);
+    assert_eq!(audited, 0);
+    assert!(
+        !paths.identity_dir().exists(),
+        "nothing is created for an identity that does not exist"
+    );
+}
+
+#[test]
+fn move_key_to_platform_without_a_store_is_internal() {
+    let (_guard, paths, _created) = file_identity();
+    let fake = FakePlatform::default();
+    FakePlatform::flip(&fake.unavailable);
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let key = bytes_of(&paths, KEY_FILE);
+
+    let err = run_move(&paths, KeyStoreKind::Platform, &fake)
+        .0
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(!err.retryable);
+    assert!(
+        err.message.contains("platform key store unavailable"),
+        "{err}"
+    );
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), key);
+}
+
+/// The audit callback runs once and a failure from it stops the move before
+/// any store is touched.
+#[test]
+fn move_key_stops_at_a_failed_audit_callback() {
+    let (_guard, paths, _created, fake) = platform_identity();
+    let record = bytes_of(&paths, IDENTITY_FILE);
+    let held = fake.holds();
+    let err = move_key(&paths, KeyStoreKind::File, Some(&fake), |_, _| {
+        Err(OpError::new(ErrorCode::Internal, "audit down"))
+    })
+    .unwrap_err();
+    assert_eq!(err.message, "audit down");
+    assert_eq!(bytes_of(&paths, IDENTITY_FILE), record);
+    assert_eq!(bytes_of(&paths, KEY_FILE), None);
+    assert_eq!(fake.holds(), held);
+}
+
+/// ADR-0013: whatever the outcome, the key (raw, base64, hex or PEM) is in
+/// no returned data, error message, error details or log line.
+#[test]
+fn move_key_never_emits_key_bytes() {
+    use base64::Engine as _;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let mut shown = String::new();
+    let mut key = Vec::new();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut outcome = |label: &str, result: Result<IdentityMoveKeyData, OpError>| {
+            shown.push_str(&format!("{label}: {result:?}\n"));
+            if let Err(err) = &result {
+                shown.push_str(&format!("{err} {}\n", err.details));
+            }
+        };
+
+        // A clean round trip, with the key known up front.
+        let (_guard, paths, _created, fake) = platform_identity();
+        key = fake.holds().unwrap();
+        outcome("to file", run_move(&paths, KeyStoreKind::File, &fake).0);
+        outcome(
+            "to platform",
+            run_move(&paths, KeyStoreKind::Platform, &fake).0,
+        );
+        // A move that leaves a stale entry.
+        FakePlatform::flip(&fake.fail_delete);
+        outcome("stale", run_move(&paths, KeyStoreKind::File, &fake).0);
+
+        // Failures at every step that handles the key.
+        let (_guard, paths, _created) = file_identity();
+        let down = FakePlatform::default();
+        FakePlatform::flip(&down.unavailable);
+        outcome("down", run_move(&paths, KeyStoreKind::Platform, &down).0);
+        let refusing = FakePlatform::default();
+        FakePlatform::flip(&refusing.fail_store);
+        outcome(
+            "refused",
+            run_move(&paths, KeyStoreKind::Platform, &refusing).0,
+        );
+        let lying = FakePlatform::default();
+        FakePlatform::flip(&lying.wrong_key_on_load);
+        outcome(
+            "mismatch",
+            run_move(&paths, KeyStoreKind::Platform, &lying).0,
+        );
+    });
+
+    let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("device key moved"),
+        "the success line is logged, so this test reads real output: {logged}"
+    );
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&key);
+    let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+    // PKCS#8 Ed25519 is a 16-byte header and the 32-byte seed; these
+    // windows lie inside the seed, so a leak of any slice of it matches.
+    let needles = [
+        b64.clone(),
+        b64[24..48].to_string(),
+        hex.clone(),
+        hex[40..72].to_string(),
+        pem::encode(pem::PRIVATE_KEY, &key),
+    ];
+    for output in [&shown, &logged] {
+        for needle in &needles {
+            assert!(
+                !output.contains(needle.as_str()),
+                "key material in output: {output}"
+            );
+        }
+    }
 }

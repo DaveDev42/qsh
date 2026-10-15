@@ -4,7 +4,7 @@
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use qsh_core::DoctorThreshold;
-use qsh_proto::{EnvVar, KeyStoreMode};
+use qsh_proto::{EnvVar, KeyStoreKind, KeyStoreMode};
 
 /// QSH: a QUIC-based direct-connect remote shell.
 #[derive(Debug, Parser)]
@@ -756,6 +756,24 @@ pub enum IdentityCmd {
     /// only thing this command writes to stdout, so it pipes directly
     /// into `qsh trust add --cert-file -` on another host.
     Export(IdentityExportArgs),
+    /// Move this device's private key to another key store (`file` or
+    /// `platform`) without changing the device id, certificate or
+    /// fingerprint, so peers' pins and ACL rows stay valid
+    /// (`docs/CLI.md` §6.11, ADR-0032). A local command: it cannot be
+    /// run against a remote host. Run it before an always-on service
+    /// (a LaunchDaemon, systemd linger) if the OS credential store is not
+    /// reachable from there, as `qsh doctor` reports.
+    MoveKey(IdentityMoveKeyArgs),
+}
+
+/// Arguments of `qsh identity move-key`.
+#[derive(Debug, Args)]
+pub struct IdentityMoveKeyArgs {
+    /// The store the private key should live in afterwards: `file`
+    /// (`identity/device.key`, mode 0600) or `platform` (the OS credential
+    /// store). A key that already lives there is left alone.
+    #[arg(long, value_name = "STORE", value_parser = parse_key_store_kind)]
+    pub to: KeyStoreKind,
 }
 
 /// Arguments of `qsh identity export`.
@@ -1256,6 +1274,12 @@ pub struct TrustAddCaArgs {
 
 /// clap value parser for `doctor --fail-on`.
 fn parse_doctor_threshold(value: &str) -> Result<DoctorThreshold, String> {
+    value.parse()
+}
+
+/// clap value parser for `identity move-key --to`: `file` or `platform`,
+/// never `auto` (a move needs a concrete destination).
+fn parse_key_store_kind(value: &str) -> Result<KeyStoreKind, String> {
     value.parse()
 }
 
