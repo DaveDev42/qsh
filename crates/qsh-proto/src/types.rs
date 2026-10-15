@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::ErrorCode;
 
 mod acl;
+mod audit;
 mod cert;
 mod doctor;
 mod exec;
@@ -26,6 +27,7 @@ mod trust;
 mod tunnel;
 
 pub use acl::*;
+pub use audit::*;
 pub use cert::*;
 pub use doctor::*;
 pub use exec::*;

@@ -31,6 +31,7 @@ use crate::acl::{Action, Decision};
 use crate::config::now_rfc3339;
 use crate::quota::QuotaKind;
 
+pub mod reader;
 pub mod writer;
 
 pub use writer::RotatingAuditSink;
