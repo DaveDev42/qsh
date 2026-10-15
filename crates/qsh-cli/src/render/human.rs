@@ -1156,12 +1156,33 @@ pub fn print_dynamic_forward_started(tunnel: &DynamicTunnel) -> io::Result<()> {
 /// Print a human-readable error line to stderr.
 pub fn print_error(err: &OpError) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    writeln!(
-        stderr,
-        "qsh: {} ({})",
-        sanitize(&err.message),
-        sanitize(err.code.as_str())
-    )
+    writeln!(stderr, "{}", error_line(err))
+}
+
+/// The line [`print_error`] writes. A `HOST_NOT_FOUND` for a name nothing on
+/// this machine mentions gets the next command `qsh pair ssh <name>`
+/// appended (ADR-0044 decision 2). That is human mode only: the envelope's
+/// `message` and `details` stay what they were, so `--json` consumers and
+/// the `error.HOST_NOT_FOUND*` fixtures see no change.
+fn error_line(err: &OpError) -> String {
+    let message = sanitize(&err.message);
+    let code = sanitize(err.code.as_str());
+    match qsh_core::unconfigured_host_name(err) {
+        Some(name) => format!(
+            "qsh: {message}; or, if you can ssh to it, set it up with `qsh pair ssh {}` ({code})",
+            sanitize(name)
+        ),
+        None => format!("qsh: {message} ({code})"),
+    }
+}
+
+/// Print one informational stderr line of the automatic bootstrap
+/// (ADR-0044 decision 2): the notice before ssh runs, and the lines
+/// `qsh pair ssh` would print about the pins it wrote.
+#[cfg(unix)]
+pub fn print_notice(line: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr, "qsh: {}", sanitize(line))
 }
 
 /// Print the outcome of `qsh service install` (`docs/CLI.md` §6.18). Zero

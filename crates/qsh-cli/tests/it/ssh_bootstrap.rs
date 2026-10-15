@@ -91,7 +91,7 @@ fn reason(err: &qsh_core::ops::OpError) -> &str {
 }
 
 #[cfg(unix)]
-fn process_is_gone(pid: u32) -> bool {
+pub(crate) fn process_is_gone(pid: u32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -101,7 +101,7 @@ fn process_is_gone(pid: u32) -> bool {
 /// `tasklist` lists a process by its quoted pid in CSV mode; an empty match
 /// prints an INFO line instead.
 #[cfg(windows)]
-fn process_is_gone(pid: u32) -> bool {
+pub(crate) fn process_is_gone(pid: u32) -> bool {
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
@@ -1488,20 +1488,20 @@ pub(crate) mod pair {
         }
     }
 
-    pub(super) fn trust_file(sandbox: &Sandbox) -> PathBuf {
+    pub(crate) fn trust_file(sandbox: &Sandbox) -> PathBuf {
         sandbox.config_dir().join("trust.toml")
     }
 
-    pub(super) fn trust_bytes(sandbox: &Sandbox) -> Vec<u8> {
+    pub(crate) fn trust_bytes(sandbox: &Sandbox) -> Vec<u8> {
         std::fs::read(trust_file(sandbox)).unwrap_or_default()
     }
 
-    pub(super) fn store(sandbox: &Sandbox) -> qsh_core::TrustStore {
+    pub(crate) fn store(sandbox: &Sandbox) -> qsh_core::TrustStore {
         qsh_core::TrustStore::load(&trust_file(sandbox)).unwrap()
     }
 
     /// A well-formed fingerprint nobody owns the key of.
-    pub(super) fn other_fingerprint(byte: u8) -> String {
+    pub(crate) fn other_fingerprint(byte: u8) -> String {
         use base64::Engine as _;
         format!(
             "sha256:{}",

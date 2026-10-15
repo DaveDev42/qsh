@@ -1617,3 +1617,59 @@ mod reverse_route_async_tests {
         daemon.await.unwrap();
     }
 } // mod reverse_route_async_tests
+
+// ---- the automatic bootstrap's "wholly unconfigured" probe (ADR-0044 decision 2) ----
+
+fn probe_fires(
+    reverse: &[ReverseHostEntry],
+    store: &TrustStore,
+    hosts: &HostsFile,
+    name: &str,
+) -> bool {
+    matches!(
+        resolve_route(
+            reverse,
+            store,
+            hosts,
+            name,
+            TEST_NOW,
+            TEST_RETRY_AFTER_MS,
+            unconfigured_probe,
+        ),
+        Err(err) if err.message == UNCONFIGURED_PROBE
+    )
+}
+
+/// Only the first `HOST_NOT_FOUND` branch of `docs/CLI.md` §6.1 starts the
+/// bootstrap: a live or a stale reverse registration, a pin with or without
+/// an address, and a `hosts.toml` entry each count as "qsh already knows this
+/// name".
+#[test]
+fn the_unconfigured_probe_fires_only_when_nothing_mentions_the_name() {
+    let empty_store = TrustStore::default();
+    let empty_hosts = HostsFile::default();
+    assert!(probe_fires(&[], &empty_store, &empty_hosts, "box"));
+    assert!(!probe_fires(&[], &empty_store, &empty_hosts, "  "));
+
+    let live = [reverse_entry(100, "box", "reachable", FP_A)];
+    assert!(!probe_fires(&live, &empty_store, &empty_hosts, "box"));
+    let stale = [reverse_entry(100, "box", "stale", FP_A)];
+    assert!(!probe_fires(&stale, &empty_store, &empty_hosts, "box"));
+    assert!(probe_fires(&stale, &empty_store, &empty_hosts, "other"));
+
+    let pinned = forward_store("box", "203.0.113.5:4433", FP_A);
+    assert!(!probe_fires(&[], &pinned, &empty_hosts, "box"));
+    // A `user@` hint on a configured alias is its own branch.
+    assert!(!probe_fires(&[], &pinned, &empty_hosts, "dave@box"));
+    let book = hosts_with(&[("book", "203.0.113.6:4433", None), ("blank", "", None)]);
+    assert!(!probe_fires(&[], &empty_store, &book, "book"));
+    assert!(!probe_fires(&[], &empty_store, &book, "blank"));
+    let mut inbound = TrustStore::default();
+    inbound.add_peer(
+        "box",
+        None,
+        FP_A.parse().unwrap(),
+        "2026-01-01T00:00:00Z".into(),
+    );
+    assert!(!probe_fires(&[], &inbound, &empty_hosts, "box"));
+}

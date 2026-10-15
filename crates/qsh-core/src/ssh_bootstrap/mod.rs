@@ -23,6 +23,23 @@
 //! `quinn::` ban on `qsh-core/src/` covers it and it needs no
 //! directory-scoped ban of its own.
 
+/// The line `qsh [user@]host` and `qsh cp` write to stderr before they start
+/// the bootstrap on their own (ADR-0044 decision 2). `{host}` is the name
+/// nothing resolved and `{dest}` the operand ssh receives; fill them with
+/// [`auto_bootstrap_notice`]. The wording is fixed here so a person learns
+/// that ssh is about to run, and how to stop it, before ssh prompts for
+/// anything.
+pub const AUTO_BOOTSTRAP_NOTICE: &str = "no qsh pin for \"{host}\"; setting one up over ssh \
+     (ssh {dest}); set [ssh].bootstrap = \"off\" to disable";
+
+/// [`AUTO_BOOTSTRAP_NOTICE`] for one name. Both arguments passed
+/// [`Dest::parse`], so neither holds whitespace or a control character.
+pub fn auto_bootstrap_notice(host: &str, dest: &str) -> String {
+    AUTO_BOOTSTRAP_NOTICE
+        .replace("{host}", host)
+        .replace("{dest}", dest)
+}
+
 mod dest;
 #[cfg(unix)]
 mod respond;

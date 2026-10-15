@@ -76,6 +76,20 @@ impl FakeSsh {
         self.set("g_hang", "1".to_string())
     }
 
+    /// Make the `-G` call print `text` and a newline to stderr, as the first
+    /// thing the fake does after it records its argv. A test reads it on the
+    /// caller's stderr to learn where ssh first ran.
+    pub fn g_stderr(&mut self, text: &str) -> &mut Self {
+        self.set("g_stderr", text.to_string())
+    }
+
+    /// Make the responder call wait, after its `stderr` line, until `path`
+    /// exists, like an ssh waiting at a prompt for a person. The test
+    /// releases it by creating the file.
+    pub fn gate_file(&mut self, path: &Path) -> &mut Self {
+        self.set("gate_file", path.display().to_string())
+    }
+
     /// Make the responder call print `bytes` to stdout first: the remote
     /// shell's rc output, the `hello`, tampered lines.
     pub fn script(&mut self, bytes: &[u8]) -> &mut Self {

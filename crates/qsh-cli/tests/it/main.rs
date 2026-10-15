@@ -8,6 +8,7 @@ mod acl_enforcement;
 mod adversarial_load;
 mod attach_ops;
 mod attach_recovery;
+mod auto_bootstrap;
 mod cert_e2e;
 mod cert_file_exchange;
 mod cp_cancel;

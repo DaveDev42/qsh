@@ -1,4 +1,4 @@
-use super::{format_trust_pin_line, render_doctor_lines, role_cell, sanitize};
+use super::{error_line, format_trust_pin_line, render_doctor_lines, role_cell, sanitize};
 use qsh_proto::{DoctorData, DoctorFinding, TrustPeer};
 
 #[test]
@@ -129,4 +129,31 @@ fn role_cell_shows_the_role_or_none_legacy() {
     assert_eq!(role_cell(&peer), "read-only");
     peer.role = Some("none".to_string());
     assert_eq!(role_cell(&peer), "none");
+}
+
+#[test]
+fn host_not_found_for_an_unconfigured_name_names_qsh_pair_ssh_in_human_mode() {
+    use qsh_core::OpError;
+    use qsh_core::ops::host::{
+        not_in_trust_store_host_not_found, pinned_without_address_host_not_found,
+        unconfigured_host_not_found,
+    };
+
+    for err in [
+        unconfigured_host_not_found("box"),
+        not_in_trust_store_host_not_found("box"),
+    ] {
+        let line = error_line(&err);
+        assert!(line.starts_with("qsh: "), "{line}");
+        assert!(line.contains("`qsh pair ssh box`"), "{line}");
+        assert!(line.ends_with("(HOST_NOT_FOUND)"), "{line}");
+        // The envelope's own text is untouched.
+        assert!(!err.message.contains("pair ssh"), "{}", err.message);
+    }
+
+    // A name qsh already knows something about is not an ssh candidate.
+    let known = pinned_without_address_host_not_found("box");
+    assert!(!error_line(&known).contains("pair ssh"));
+    let other = OpError::new(qsh_proto::ErrorCode::PermissionDenied, "no");
+    assert_eq!(error_line(&other), "qsh: no (PERMISSION_DENIED)");
 }
