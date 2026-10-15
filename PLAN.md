@@ -1,601 +1,877 @@
-# PLAN.md — M17: 운영 표면
+# PLAN.md — M19: Windows client
 
-P1 M17의 실행 계획이다. M16이 닫혀 이 문서가 M16 계획(마지막 커밋 `66b6f4d`)을 전면 교체했다. 착수 ADR 둘(ADR-0032 서비스 매니저 실호출, ADR-0033 세션 및 audit 관리 개선)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 `승인됨`이 되었다(`09266dc`). (b) README 재작성은 `2fc879b`로 착지했고 (c) QR pairing은 2026-10-12에 폐기했다. 남은 범위는 (a)와 (d)이고 착수 조건은 모두 충족됐다. M17에 새 ADR은 필요 없다(Step 1 (a) 4). 구속 근거는 다음과 같다.
+P1 M19의 실행 계획이다. M17이 닫혀 이 문서가 M17 계획(마지막 커밋 `047db25`)을 전면 교체했다. 다음 마일스톤 순서상 M18(세션 거처)이 먼저지만 착수 조건인 M8 DoD 3(실기기 mobility 60회)이 아직 기록되지 않아 `docs/ROADMAP.md` §5.1 원칙 6대로 M18을 건너 M19를 먼저 연다. 건너뛴 사실과 날짜는 Step 1이 §5.1에 적는다. 착수 ADR인 ADR-0035(Windows client·host)는 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 `승인됨`이다. 기능 의존인 ADR-0029(`qsh cp`, M15)와 ADR-0044(SSH 부트스트랩, M16)는 이미 착지했고, ADR-0032의 `ManagerRunner`·`TaskStateQuery` seam은 M17이 세웠다(`1790cad`). 그래서 M19의 착수 조건은 모두 충족됐고 새 ADR은 필요 없다(Step 1 (a) 4). 구속 근거는 다음과 같다.
 
-- `docs/ROADMAP.md` §5의 M17 절(범위 (a)~(d), 착수 조건, 명시적 out, 수용 기준, 크기), §5.1 시퀀싱 원칙(특히 원칙 6·7), §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2), §3 유예 가드레일의 "Service 설치" 행
-- ADR-0032 결정 1~18과 결과 절, ADR-0033 결정 1~13과 결과 절
-- 두 ADR이 기대는 결정: ADR-0024 결정 11(활성화는 별도 결정), ADR-0017 결정 1(`acl.toml`을 쓰지 않음), ADR-0007(resume token custody), ADR-0010(audit 회전·retention의 유계), ADR-0013(개인키는 인자·결과로 나가지 않음), ADR-0022 결정 3·4, ADR-0025 결정 4(열거 oracle), ADR-0045 결정 16(audit `role` 키)
-- 참조 ADR: ADR-0035 결정 9·12·13·14·24·25·27·28(Windows DACL, Credential Manager, Windows 경로, named pipe localctl, host audit 잠금, Windows host, 작업 스케줄러 백엔드와 상시 기동 작업, COM 상태 질의. Windows client는 M19, Windows host는 M20)
-- `docs/CLI.md` §2.4·§2.5·§6.2·§6.11·§6.17·§6.18과 새 `qsh audit` 절
-- `docs/deploy/service.md`, `docs/design/architecture.md` §2·§6·§7, `docs/design/testing.md` L1, `docs/design/threat-model.md` §3·§4 D·E·F·G·§7
-- `CLAUDE.md` "Security defaults"
+- `docs/ROADMAP.md` §5의 M19 절(범위, 착수 조건, 명시적 out, 수용 기준, 크기), §5.1 시퀀싱 원칙(특히 원칙 6·7), §5.4 리스크 5(Windows 산정 신뢰도), §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2), §3 유예 가드레일의 Windows 행
+- ADR-0035 결정 1~28과 결과 절(특히 "마일스톤 배치"와 "크기"의 M19 항목)
+- ADR-0035가 Windows 쪽 착지를 M19로 넘긴 다른 ADR의 문장: ADR-0032 결정 3·4·5·6·8·10·11·15·18(작업 스케줄러 열, `keystore_session_bound`의 Windows 실측, 상시 기동 형태 보존의 Windows 갈래), ADR-0033 결정 6·13(Windows share mode, named pipe 비노출, reverse fan-out 필터 동등), ADR-0031 결정 3과 개정 이력(재검증 감시의 Windows 쌍둥이), ADR-0029 결정 2·23(드라이브 문자 operand, client 로컬 쓰기), ADR-0044 결정 1·5·22·25(Windows client의 자동 발동과 `--reverse`), ADR-0023 결정의 절전 감지 전제(Windows 확인)
+- 참조 ADR: ADR-0013(개인키는 인자·결과로 나가지 않음), ADR-0007(resume token custody), ADR-0010(audit 회전·retention), ADR-0017 결정 1(`acl.toml`을 쓰지 않음), ADR-0036(stateless reset key)
+- `docs/CLI.md` §6.7·§6.9·§6.11·§6.12·§6.13·§6.14·§6.17·§6.18·§6.20·§6.21·§7
+- `docs/deploy/service.md`, `docs/deploy/release-secrets.md`, `docs/design/architecture.md` §1·§4·§7·§8, `docs/design/testing.md` L1·L5와 Windows leg 문단, `docs/design/threat-model.md` §3·§4 A·B·D·E·§7
+- `CLAUDE.md` "Security defaults"와 "Hard architecture rules"
 
 이 계획과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
-인용 규율은 M16판과 같다. 문서는 절 이름, ADR 번호와 결정 번호, 테스트 이름, 커밋 해시로 가리킨다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, 줄 수나 개수를 적을 때는 origin `7c43332` 트리에서 잰 값임을 밝힌다. 옛 계획의 스텝은 "M16 plan Step N (`66b6f4d`)" 꼴로만 인용한다. 코드 주석과 문서에는 이 계획의 스텝 번호를 쓰지 않는다.
+인용 규율은 M17판과 같다. 문서는 절 이름, ADR 번호와 결정 번호, 테스트 이름, 커밋 해시로 가리킨다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, 줄 수나 개수를 적을 때는 origin `e47ffd9` 트리에서 잰 값임을 밝힌다(Step 1이 이 기준을 유지하기로 했다). 옛 계획의 스텝은 "M17 plan Step N (`047db25`)" 꼴로만 인용한다. 코드 주석과 문서에는 이 계획의 스텝 번호를 쓰지 않는다.
+
+**M19가 하지 않는 것(M20의 일).** Windows host 역할 전부는 M20이다. ConPTY 백엔드와 PTY 세션(ADR-0035 결정 20·21), 세션 신호 일곱의 Windows 사상과 `qsh internal console-ctrl`(결정 22), host 쪽 `exec`의 Job Object와 환경 고정(결정 23), host audit writer의 `LockFileEx` 잠금·재검증과 `acl.toml` DACL 경고(결정 24), `setup host`·`pair invite`·`pair ssh-respond`(결정 25의 나머지), host 쪽 `qsh cp`와 `paths` 드라이브 표기(결정 26, ADR-0029 결정 23), `release_smoke`의 PTY 축, `exit_code_matrix.rs`의 `session close --signal` Windows 행, PTY를 포함한 정방향·역방향 종단, 캠페인 host 회차다. M19가 걷는 Windows host 쪽 게이트는 `qsh serve --to`의 게이트 하나이고, 그 목적은 역방향 CI다(ADR-0035 결과 절 "마일스톤 배치"). M19 동안 Windows host(인바운드 `qsh serve`와 `serve --to`)는 PTY 세션과 파일 op에 `UNSUPPORTED`로 답하고 `exec`와 터널만 낸다. 이 중간 상태는 지원 약속이 아니다.
 
 ## 0. 열린 사람 몫
 
-여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다. M16 계획 §0의 상태를 M16 마감 시점 그대로 옮겼다.
+여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다. M17 계획 §0의 상태를 M17 마감 시점 그대로 옮겼다(main 세션이 Step 1에서 M17 마감 노트와 대조한다).
 
 ### 0.1 P0에서 열린 일곱
-
 
 - [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. Linux 회차는 PASS(v0.3.0 세 회차 `69a6414`, v0.4.3 Ubuntu 24.04 x86_64 회차 4, 2026-10-09). macOS arm64·x86_64 두 회차가 남았고 둘 다 클린 macOS VM과 Gatekeeper 판정이 필요하다. 소유: 사람.
 - [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 서명·공증 태그는 `v0.4.0`부터 있다. 회차는 `docs/campaigns/m10-clean-vm.md`. 소유: 사람.
 - [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정. Debian 10(glibc 2.28) 회차 2(v0.3.0)와 회차 5(v0.4.3, 2026-10-09)가 `DoD 3 = PASS`다. 캠페인 §9 판정과 함께 닫히므로 macOS 두 회차를 기다린다. 두 회차 모두 에이전트가 컨테이너에서 돌렸으니, 캠페인을 닫을 때 사람이 이것을 회차로 셀지 다시 본다. 소유: 사람.
 - [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`(예행 1회만 끝남). 소유: 사람.
-- [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건. 소유: 사람.
+- [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건이고, 이것이 닫히지 않아 M19를 먼저 열었다. 소유: 사람.
 - [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 저장소 밖 조직 액션. 소유: 운영자.
 - [ ] **M9 DoD 1 — SC1 스톱워치 재측정 3회.** 기준은 `docs/campaigns/m9-stopwatch.md`. M7 DoD 1에 종속. 소유: 사람.
 
-마지막 줄(M9 DoD 1)은 M16 계획 §0.1에서 빠져 있었다. 제목은 "일곱"인데 여섯 줄만 있었다. M15 계획(`7cbeced`)의 같은 줄을 문면 그대로 되살렸고, `docs/ROADMAP.md` "P0 MVP 완료 선언의 조건" 표의 일곱과 맞는다(§9 #7).
-
 ### 0.2 P1 마일스톤이 만든 사람 몫 (`docs/ROADMAP.md` §5.5)
-
 
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 출처 M11. 소유: 사람.
 - [ ] **`p1-supervise-wake` 회차 넷.** 기준은 `docs/campaigns/p1-supervise-wake.md`. 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 기준은 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 출처 M12. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
-- [ ] **`decode_file_frame` fuzz 타깃의 누적 72 fuzz-hours.** M15 (b)가 타깃을 더했다(`a86123d`). 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고, §5.5 표의 "새 파서 fuzz 타깃" 행("M15의 새 decode 타깃")에 상태를 적는다. 공개 beta 전에 끝나야 한다(`docs/design/protocol.md` §13). 소유: 사람.
+- [ ] **`decode_file_frame` fuzz 타깃의 누적 72 fuzz-hours.** M15 (b)가 타깃을 더했다(`a86123d`). 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고 §5.5 표의 "새 파서 fuzz 타깃" 행에 상태를 적는다. 공개 beta 전(`docs/design/protocol.md` §13). 소유: 사람.
 
 ### 0.3 M16이 만든 사람 몫 (`docs/ROADMAP.md` §5.5)
 
-아래 두 줄은 M16 계획 §0.3을 문면 그대로 옮긴 것이다. 줄 안의 "Step 4", "Step 8", "Step 1", "§9 #3"은 M16 계획(`66b6f4d`)의 번호이고 이 문서의 스텝이 아니다.
+- [ ] **`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** 타깃은 `aba7bd6`이 더했다(smoke 20,000 runs만). 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고 §5.5 표의 "새 파서 fuzz 타깃" 행에 상태를 적는다. 공개 beta 전(`docs/design/protocol.md` §13). 소유: 사람.
+- [ ] **실제 OpenSSH 위의 SSH 부트스트랩 회차.** 기준은 `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`). ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회. 그 문서의 R5(Windows client 명시 `qsh pair ssh`)는 요건 4·6(`qsh box`의 대화형 attach와 `qsh cp`)을 M19로 미뤘고, 그 몫은 이 계획 Step 14가 `docs/campaigns/p1-windows.md`에 회차로 받는다(§9 #10). 소유: 사람.
 
-- [ ] **`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** Step 4가 타깃을 더한다. 기록 자리는 `docs/campaigns/m8-fuzz.md` 형식이고 §5.5 표의 "새 파서 fuzz 타깃" 행(이미 "M16 (a) `parse_ssh_bootstrap_line`"을 적어 둠)에 상태를 적는다. 공개 beta 전에 끝나야 한다(`docs/design/protocol.md` §13). 소유: 사람.
-- [ ] **실제 OpenSSH 위의 SSH 부트스트랩 회차.** ADR-0044 결과 절의 사람 캠페인이다. ProxyJump, ssh-agent, 암호 걸린 키 위에서 처음 `qsh box`부터 셸 프롬프트까지, 그리고 `--reverse` 구도 한 회. 문서 `docs/campaigns/p1-ssh-bootstrap.md`는 Step 8이 사전 고정한다(구현 마지막 스텝 전). Windows `ssh.exe` client 회차는 Windows 대화형 client가 서는 M19의 `docs/campaigns/p1-windows.md`가 이어받는다(§9 #3). §5.5 표에 행을 더하는 일은 main 세션이 Step 1에서 한다. 소유: 사람.
+### 0.4 M17이 만든 사람 몫
 
-### 0.4 M17이 새로 만드는 사람 몫
+M17은 새 캠페인 문서를 만들지 않았다(M17 plan §0.4 (`047db25`)). 실제 Keychain·Secret Service 위의 `move-key` 왕복은 `docs/design/testing.md` L1의 릴리스 전 수동 단계이고 §1이 추적한다.
 
-M17은 새 캠페인 문서를 만들지 않는다. ADR-0032·0033 결과 절 어디에도 사람 회차가 없다. 실제 Keychain·Secret Service 위의 `move-key` 왕복은 캠페인이 아니라 `docs/design/testing.md` L1의 릴리스 전 수동 단계이고(ADR-0032 결과 절), §1이 추적한다. 에이전트는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경을 어느 스텝에서도 하지 않는다.
+### 0.5 M19가 새로 만드는 사람 몫
+
+- [ ] **Windows client 확인 회차.** 문서 `docs/campaigns/p1-windows.md`는 Step 14가 구현 마지막 스텝(Step 15) 전에 사전 고정한다(ADR-0035 결정 18). M19 몫은 client·서비스·서명·패키지 회차((1), (3)의 Windows `qsh listen` 쪽, (4), (5), (6), (8), (9), (10), (11))이고, host 회차((2), (3)의 Windows target 쪽, (7))는 M20이 더해 다시 고정한다. 회차는 Windows 자산이 붙은 태그에서 돈다. 소유: 사람.
+- [ ] **Windows 서명·배포 준비(ADR-0035 결정 16, 결과 절 "사람이 할 일").** SSL.com 개인 신원 검증 코드 서명 인증서 구매와 신원 확인, eSigner 등록과 TOTP 발급, 저장소 시크릿 넷 `WINDOWS_SIGN_ESIGNER_USERNAME`·`WINDOWS_SIGN_ESIGNER_PASSWORD`·`WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID`·`WINDOWS_SIGN_ESIGNER_TOTP_SECRET`과 저장소 변수 `WINDOWS_SIGN_EXPECTED_SUBJECT`, `DaveDev42/scoop-bucket` 저장소와 배포 키 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 `DaveDev42.qsh` 첫 매니페스트의 수동 제출. M19를 막지 않는다. 시크릿이 없는 동안 서명·검증 스텝은 경고와 함께 건너뛰고 scoop·winget job은 green인 채 건너뛴다. 소유: 사람.
+
+에이전트는 `gh secret set`, `gh variable set`, `gh workflow run`, 태그 push, 저장소 설정 변경, 외부 저장소(`scoop-bucket`, `winget-pkgs`) 쓰기를 어느 스텝에서도 하지 않는다. 시크릿은 이름만 문서에 적고 값은 어디에도 적지 않는다(`docs/deploy/release-secrets.md`).
 
 ## 1. 유지보수에서 남은 확인
 
-- [ ] macOS Keychain 왕복. `keyring-core` 1과 플랫폼 store crate로 옮긴 변경(`08a6173`)의 Linux Secret Service 왕복은 확인했지만, macOS 쪽은 Dave-MBP16이 오프라인이라 못 했다. 다음 태그 전에 `docs/design/testing.md` L1의 수동 단계로 돌린다.
-- [ ] 다음 태그 run에서 `release.yml` 액션 갱신(`1557f50`) 뒤의 서명·공증·provenance를 확인한다.
-- [ ] `qsh identity move-key` 왕복(platform → file → platform)을 macOS Keychain과 Linux Secret Service에서 돌린다. Step 3이 `docs/design/testing.md` L1에 더하는 수동 단계다. Windows Credential Manager 왕복은 Windows `platform` store가 서는 M19(ADR-0035 결정 12)의 몫이다. 위 첫 항목과 같은 회차에 묶을 수 있다.
-- [ ] `launchctl print system/io.qsh.<mode>`가 root 없이 exit code로 실행 여부를 돌려주는지 실제 Mac에서 확인한다(ADR-0032 결정 18 셋째 항목). 확인 전에는 Step 2가 ADR이 미리 정한 대체(`INTERNAL`, `step: "live"`, `sudo` 안내)로 착지한다(§9 #5). Dave-MBP16이 돌아오면 에이전트가 확인하고 결과를 커밋 본문에 적는다.
+M17 계획 §1의 네 항목을 M17 마감 시점 상태로 승계한다(main 세션이 Step 1에서 채운다).
+
+- [ ] macOS Keychain 왕복(`08a6173` 이후 keyring-core 1). `docs/design/testing.md` L1 수동 단계.
+- [ ] 다음 태그 run에서 `release.yml` 액션 갱신(`1557f50`) 뒤의 서명·공증·provenance 확인.
+- [ ] `qsh identity move-key` 왕복을 macOS Keychain·Linux Secret Service에서. Windows Credential Manager 왕복은 Step 5가 L1에 줄을 더하고 같은 회차에 묶는다(ADR-0035 결정 12).
+- [ ] `launchctl print system/io.qsh.<mode>`의 root 요구 확인(ADR-0032 결정 18 셋째 항목, M17 plan §9 #5 (`047db25`)).
+
+M19가 더하는 확인은 다음과 같다.
+
+- [ ] Windows Credential Manager 위의 `qsh init --key-store platform` → `move-key --to file` → `move-key --to platform` 왕복. Step 5가 `docs/design/testing.md` L1에 Windows 줄로 더하고, Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 에이전트가 태그 전에 돌려 결과를 커밋 본문에 적는다. CI 러너가 실제 Credential Manager 쓰기를 허용하면 Step 5의 자동 테스트가 이를 대신 고정한다(§7.1 #6).
+- [ ] 첫 서비스 스텝(Step 10)이 실측하는 셋. (i) `RestartOnFailure`가 실행 중 동작의 비정상 종료에도 다시 띄우는지(ADR-0035 결정 27 재시작 항목), (ii) 일반 사용자가 `BootTrigger`·`LogonType=Password` 작업을 관리자 없이 등록할 수 있는지(결정 27 수명 항목), (iii) `LogonType=Password` 작업이 Credential Manager 항목을 읽는지(ADR-0032 결정 15 첫 항목, ADR-0035 결정 12). (iii)은 Step 11이 `keystore_session_bound`의 Windows 판정에 쓴다. 셋 모두 Dave-Windows에서 에이전트가 사람 승인 아래 돌리고 결과를 커밋 본문과 `docs/deploy/service.md`에 적는다. 실제 작업 등록은 Dave-Windows의 테스트 계정 작업 이름(`\qsh-test\…`)으로만 하고 끝나면 지운다.
+- [ ] `schtasks /Create /F`가 실행 중 인스턴스를 멈추는지(ADR-0032 결정 4). Step 11이 같은 머신에서 실측한다.
 
 ## 2. 테스트 환경
 
-M16과 같다. 호스트 nftables의 `inet dave_mosh` 표 문제는 dave-environment `c6c5359c`와 저장소 `414f1fd`가 막는다(loopback UDP 자가 점검, `scripts/test/nextest-ns.sh`, 긴 TMPDIR에서의 unix 소켓 경로 단축). M16의 가짜 `ssh` 하네스(`crates/qsh-testkit/src/bin/qsh-fake-ssh.rs`)는 그대로 남는다.
+M17과 같고, Windows가 주 무대가 된다.
 
-M17이 더하는 것은 실제 외부 상태를 건드리지 않는 주입점 셋이다.
+- CI는 `ci.yml`의 `windows-latest` leg(clippy, `cargo nextest run --workspace`, `cargo doc -D warnings`)이 착지 판정이다. M19는 이 leg에서 `cfg(unix)`로 빠져 있던 client·reverse 테스트를 `cfg(windows)` 쌍둥이로 연다. ConPTY probe는 `qsh-testkit`의 작은 실행 파일과 `portable-pty`(Windows dev 의존)로 러너 위에서 돈다(ADR-0035 결정 17, 결과 절 "의존 추가").
+- 로컬 Windows 검사는 Dave-Windows(16c/64GB, `ssh dave-windows.tail91e9e.ts.net`, pwsh)에서 네이티브로 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo nextest run --workspace`, `cargo doc`을 돌린다. M17까지 쓰던 `cargo xwin clippy`는 Linux에서의 빠른 컴파일 확인으로만 남는다. 로컬 검사로 CI를 대신하지 않는다.
+- 실제 외부 상태를 건드리지 않는 주입점은 M17의 셋(가짜 `ManagerRunner`, `KeyStore` 주입, doctor probe의 `system_root`)에 넷을 더한다.
+  - 가짜 `TaskStateQuery`와 가짜 작업 정의 읽기(주체 `InteractiveToken`/`Password`/읽기 실패). 실제 COM을 부르는 테스트는 `status --live`의 Windows 실경로 하나만 둔다(§7.1 #9).
+  - "프로세스 ID → 사용자 SID" 함수 주입(ADR-0035 결정 17 (3)). 진짜 둘째 계정은 캠페인 (5)다.
+  - DACL 적용 실패 주입(결정 17 첫 항목).
+  - Credential Manager 백엔드 주입(`MemoryKeyStore` 자리, Step 5).
+- 부하 반복은 두 곳에서 돈다. Linux·공통 테스트는 지금처럼 Dave-Windows-WSL(8 vCPU)의 `scripts/stress/run.sh`, Windows 전용 타이밍 민감 테스트는 Dave-Windows에서 Git for Windows bash로 같은 스크립트를 돌린다(§7.1 #12). 두 결과를 마감 노트에 따로 적는다.
 
-- 기록용 가짜 `ManagerRunner`(ADR-0032 결정 10). 실제 `launchctl`/`systemctl`/`schtasks`를 부르는 테스트는 만들지 않는다.
-- `move-key`의 store 주입. 기존 `KeyStore` trait과 `MemoryKeyStore`(`crates/qsh-core/src/identity/keystore.rs`)를 `platform` 자리에 꽂는다. 실제 OS store 왕복은 §1의 수동 단계다.
-- doctor probe의 시스템 경로 뿌리. `/Library/LaunchDaemons`와 linger 디렉터리를 tempdir 아래로 돌려 읽는다(§7.1 #3).
-
-부하 반복은 Dave-Windows-WSL(8 vCPU)에서 돈다. M15·M16 기록과 같은 호스트다.
-
-## 3. DoD 체크리스트 (ROADMAP M17)
+## 3. DoD 체크리스트 (ROADMAP M19)
 
 체크박스는 근거가 되는 테스트와 CI run이 초록일 때만 채운다.
 
-- [x] **DoD (a) — ADR-0032가 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
-- [x] **DoD (a) — 플래그 없이는 매니저를 부르지 않는다.** `install_without_activate_never_invokes_the_manager`, `uninstall_without_deactivate_never_invokes_the_manager`, `status_without_live_never_invokes_the_manager`. 플래그 없는 호출의 출력은 기존 fixture와 바이트가 같다(사람 모드 문면도 같음). 근거: `1790cad`.
-- [x] **DoD (a) — 부르는 argv가 `docs/deploy/service.md`의 안내와 같다.** 문서-코드 대조 `service_md_activation_recipes_match_the_argv_builders`. 테스트는 실제 매니저를 부르지 않는다(단위는 `FakeRunner`, 통합은 PATH의 가짜 `launchctl`/`systemctl`). 순서와 범위까지 대조한다. 근거: `1790cad`.
-- [x] **DoD (a) — `docs/CLI.md` §6.18과 man이 같은 커밋에서 바뀐다.** `qsh-service-install.1`·`qsh-service-uninstall.1`·`qsh-service-status.1`, `checked_in_man_pages_match_the_generator`. 근거: `1790cad`(CLI.md v0.36과 man 넷이 한 커밋).
-- [x] **DoD (a) — LaunchDaemon 펜스가 LaunchAgent 렌더러와 같은 인자를 쓴다.** `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`. 근거: `2a92a45`.
-- [x] **DoD (a) — `keystore_session_bound`와 `identity.move_key`의 테스트와 fixture 등록 완전성, `move-key`가 fingerprint를 바꾸지 않음.** 다음을 갖춘다. 근거: `5100fdc`·`2a92a45`(doctor fixture 이름은 `doctor.run.keystore_session_bound.json`).
-  - `move_key_keeps_the_fingerprint_and_device_id`
-  - `identity.move_key` fixture 둘과 doctor fixture 하나의 `REQUIRED_FIXTURES` 등재, `layer_2_every_schema_command_has_all_six_faces`, `op_registration_completeness.rs`의 `OP_FACES` 행
-  - man `qsh-identity-move-key.1`
-- [x] **DoD (b) — README 재작성판, 두 SHA 고정 커밋 뒤.** 재작성 `2fc879b`(2026-10-11)는 m9 대상 트리 고정 `1a7798d`와 `p1-setup-stopwatch` 고정 `43da2fb`의 자손이다(`git merge-base --is-ancestor`로 확인). 마감 공통 절차 2를 재작성판에 대해 수행하는 일은 아래 마감 줄이 맡는다.
-- [x] **DoD (c) — PRD §17 개정 결정이 기록된다.** 2026-10-12 폐기로 충족.
-- [x] **DoD (d) — ADR-0033이 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
-- [x] **DoD (d) — 범위 ADR이 정한 항목마다 테스트와 fixture 등록 완전성.** 세션 필터(결정 1~3), `audit.query`(결정 4~9), retention 가시성(결정 10·11), 텔레메트리 처분(결정 12), 동등(결정 13). 근거: `b0169d7`·`e47ffd9`·`55b1a2e`(fixture `session.list.filtered.json`·`audit.query.json`·`audit.query.truncated.json`).
-- [x] **DoD (d) — `audit.query`에 대응하는 wire 메시지가 없음을 op registry 분류 테스트가 확인한다.** `op_registration_completeness.rs`·`acl_registry.rs`의 local-only 분류와 `audit_query_has_no_wire_message_and_no_localctl_request`. 근거: `55b1a2e`. named pipe 행은 M19(ADR-0035 결정 14).
-- [x] **계획 규율 — route·플랫폼 동등.** 각 스텝의 동등 테스트가 초록이고, M19·M20으로 미룬 Windows 항목이 §6과 각 스텝 "Windows" 줄에 ADR 결정과 함께 귀속돼 있다(§5.1 원칙 7). 근거: route 동등 테스트 `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`, `keystore_session_bound_covers_serve_listen_and_reverse_units`, `sessions_filter_applies_identically_to_forward_and_reverse_hosts`, `audit_query_reads_records_written_by_serve_listen_and_serve_to`. Windows 귀속은 `f87692e`의 대조로 확인.
-- [x] **계획 규율 — 위협 모델.** `docs/design/threat-model.md` §3의 `qsh service` 행 개정과 새 진입점 둘(`identity move-key`, `qsh audit`), §4의 매니저 인자 주입(E)·재시작 부재(G)·이동 중 개인키 노출(D)·audit 열람 oracle과 삭제 경로 부재(F)가 핀 테스트와 함께 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: E17·G8·h45 `1790cad`, §3·D16 `5100fdc`, §3 `2a92a45`, D17·F5·F6·h26·h46 `55b1a2e`.
-- [x] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: `f87692e`, CI run 38782168398(acceptance 포함).
-- [x] **안정성 — 새 타이밍 민감 테스트의 부하 반복.** M17이 더한 타이밍 민감 테스트 전부가 `scripts/stress/m17.filter`로 묶여 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이다. M17에는 지연 예산 단언이 없으므로 `-j 1` 대체 필터를 두지 않는다. ROADMAP M17 DoD의 안정성 줄은 `c9b2f22`가 더했다. 근거: `scripts/stress/m17.filter`(95개) 부하 아래 50/50(Dave-Windows-WSL 8 vCPU, `55b1a2e` 트리).
+- [x] **착수 — ADR-0035가 `승인됨`이다.** 근거: `09266dc`(2026-10-14). 소유: 에이전트(main 세션 확인).
+- [ ] **DoD 1 — Windows leg의 역방향 종단과 콘솔 계층.** 실제 CLI로 Windows `qsh listen` ← Windows `qsh serve --to`의 `exec`, 터널 echo, `qsh hosts`의 reverse 항목, 데몬 재시작 뒤 재등록(`windows_reverse_e2e::`), 같은 케이스 목록의 정방향 쌍둥이(`windows_forward_e2e::`), ConPTY probe로 raw 입력·resize 폴링·모드 복원·초대 코드 에코 부재(`console_probe::`). ROADMAP 문장의 "ADR-0029 착지 뒤 `qsh cp`"는 Windows host 파일 op가 M20이라 이 leg에서 돌 수 없다. client 쪽 `cp`는 Step 9의 단위·통합 테스트가 고정하고 종단은 M20 DoD로 옮긴다(§9 #1). 근거: Step 3·7·9.
+- [ ] **DoD 2 — 소유자 전용 DACL과 fail closed.** identity 키, `resume.json`, `trust.toml`, audit 로그, `stateless_reset.key`(그리고 ADR-0035 결정 9 목록 전부)가 보호된 단일 ACE DACL로 만들어지고, 적용할 수 없으면 파일을 만들지 않는다. `windows_private_files_have_an_owner_only_protected_dacl`, `a_dacl_failure_creates_no_file`. 근거: Step 4.
+- [ ] **DoD 3 — named pipe localctl.** 이름 선점 시 기동 실패, 보호 DACL, 주입한 SID 불일치 거부(서버·클라이언트). `listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken`, `pipe_instance_dacl_is_protected_and_owner_only`, `pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`, `pipe_client_writes_nothing_to_a_server_with_another_sid`. 근거: Step 6·7.
+- [ ] **DoD 4 — 작업 정의 펜스와 `logon_task_session_scoped`.** `service_md_windows_task_fence_matches_the_renderer`(바이트 단위), `logon_task_session_scoped_fires_for_an_interactive_token_task`, `logon_task_session_scoped_is_silent_for_a_password_task`, `logon_task_session_scoped_is_silent_when_the_task_cannot_be_read`. 근거: Step 10.
+- [ ] **DoD 5 — `exit_code_matrix.rs`에 client 쪽과 서비스 명령의 Windows 전용 `UNSUPPORTED` 행이 없다.** 남는 Windows 행은 host 쪽 `session open`(PTY, M20) 하나다. 근거: Step 9·11, 확인 Step 16.
+- [ ] **DoD 6 — 출고.** `release.yml` Windows leg이 Authenticode 서명 뒤 `signtool verify /pa /v`와 `Get-AuthenticodeSignature`로 상태·주체·타임스탬프를 검증하고, zip의 `man/`이 `docs/man/`과 같음을 대조하며, scoop·winget job이 `homebrew-tap`과 같은 게이트로 돈다. 근거: Step 12·13·15.
+- [ ] **DoD 7 — 위협 모델.** §3에 Windows 콘솔 입력·localctl named pipe·Windows 작업 스케줄러 작업 정의 진입점이, §4에 pipe 선점·가짜 데몬(A)·다른 사용자 접속(B)·DACL(D)이, §7에 PID 재사용 틈이 오른다. 각 행은 그 통제를 구현한 스텝에서 오른다. 근거: Step 3·4·6·10.
+- [ ] **DoD 8 — 캠페인 문서 `docs/campaigns/p1-windows.md` 사전 고정.** 구현 마지막 스텝(Step 15) 전 커밋. 근거: Step 14.
+- [ ] **DoD 9 — README Known limitations·설치 절과 ROADMAP §3 Windows 행.** README는 Step 16, §3 행은 main 세션이 마감 노트와 함께.
+- [ ] **DoD 10 — ADR-0032 Windows 열과 `move-key` 왕복.** `install_activate_runs_the_documented_argv_on_task_scheduler`, `windows_activate_updates_the_stored_task_without_running_it_when_already_running`, `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched`(작업 스케줄러 행), `status_live_reports_the_always_on_form_when_present`(작업 스케줄러 행), `service_md_activation_recipes_match_the_argv_builders`(Windows 행)가 Windows leg에서 초록이고, `move_key_round_trips_between_credential_manager_and_file_with_the_same_fingerprint`가 Windows leg에서 초록이다. 근거: Step 5·11.
+- [ ] **계획 규율 — route 동등(§5.1 원칙 7).** Windows client에서 여는 기능마다 forward와 reverse route의 같은 테스트가 Windows leg에서 초록이다(§4 규율 "route 동등" 표). 근거: Step 7~9.
+- [ ] **계획 규율 — M19 유예 전수 귀속.** `rg -n "M19"`의 모든 hit가 §5.7의 표에서 스텝이나 M20·범위 밖 사유에 귀속돼 있고, 착지 뒤에는 그 문장이 착지 상태로 고쳐졌다. 근거: Step 16.
+- [ ] **안정성 — 새 타이밍 민감 테스트의 부하 반복.** M19가 더한 타이밍 민감 테스트 전부가 `scripts/stress/m19.filter`로 묶여 Linux(Dave-Windows-WSL)와 Windows(Dave-Windows) 각각에서 CPU 부하 아래 50회 연속 초록이다. M19에는 지연 예산 단언이 없으므로 `-j 1` 대체 필터를 두지 않는다. ROADMAP M19 DoD에는 아직 이 줄이 없고 Step 1이 더한다(§9 #2). 근거: Step 3·6·7·8·9·10·16.
+- [ ] **DoD 마감 — 마감 공통 절차(§2) 1·2.** 근거: Step 16.
 
 ## 4. 실행 단계 (PR 단위)
 
-스텝 번호는 이 문서 안에서만 쓰는 참조다. 크기는 다음과 같다.
+스텝 번호는 이 문서 안에서만 쓰는 참조다. 크기는 ADR-0035 결과 절 "크기"의 M19 내역을 그대로 나눈 것이다.
 
-| 묶음 | 스텝 | 합(ew) | ADR·ROADMAP 산정 | 비고 |
-|---|---|---|---|---|
-| (a) ADR-0032 | Step 2~4 | 1.0~1.5 | 구현 1.0~1.5(ADR-0032 결과 절) | ADR 작성분 0.3은 이미 소진 |
-| (d) ADR-0033 | Step 5~7 | 1.2~1.8 | 구현 1.2~1.8(ADR-0033 결과 절) | ROADMAP은 "구현 미산정"으로 남아 있다(§9 #2). 범위 ADR 0.2~0.3은 이미 소진 |
-| 마감 | Step 8 | 0.1~0.2 | 0.1~0.2 | |
-| 합 | | 2.3~3.5 | ROADMAP 2.1~3.1 + 미산정 | ROADMAP 2.1~3.1에서 소진분((a) ADR 0.3, (b) 0.5~0.8, (d) ADR 0.2~0.3)을 빼면 1.1~1.7이고, 여기에 (d) 구현 1.2~1.8을 더하면 2.3~3.5로 이 표와 같다 |
+| ADR-0035 산정 항목 | 크기(ew) | 스텝 |
+|---|---|---|
+| 첫 개정 client 범위(test-only 하니스 제외) | 5.6~9.3 | Step 2(0.5~1.0), 3 중 0.8~1.3, 4(0.7~1.1), 5(0.4~0.7), 6(1.1~1.8), 7 중 0.7~1.2, 8 중 0.2~0.3, 9(0.8~1.3), 14(0.3~0.4), 16(0.1~0.2) |
+| 초대 코드 에코 억제와 ConPTY 단언 | 0.1~0.2 | Step 3 |
+| `serve --to` 게이트 제거와 PTY 없는 역방향 CLI 종단 | 0.1 | Step 7 |
+| 절전 감지 표본 함수 | 0.1~0.2 | Step 8 |
+| 서비스 백엔드 | 0.6~1.0 | Step 10(0.5~0.8), Step 11(0.1~0.2) |
+| 상시 기동 레시피와 `logon_task_session_scoped` COM 읽기 | 0.2~0.4 | Step 10 |
+| `--live` COM 질의 | 0.1~0.2 | Step 11 |
+| aarch64 자산과 `install.ps1`, zip의 man 페이지와 목록 대조 | 0.3~0.5 | Step 12 |
+| Authenticode 서명·검증, 시크릿 게이트, `release-secrets.md` | 0.3~0.5 | Step 13 |
+| scoop·winget job과 매니페스트 | 0.3~0.5 | Step 15 |
+| 합 | 7.7~12.9 | ROADMAP M19 크기와 같다 |
 
-Step 1은 크기 내역 밖이다.
+스텝별 크기는 다음과 같다. Step 1은 크기 내역 밖이다.
+
+| 스텝 | 내용 | 크기(ew) |
+|---|---|---|
+| 2 | 터미널 trait 추출, ConPTY probe 하니스, 모드 계산 순수 함수, keystore 경로 판정, 재산정 | 0.5~1.0 |
+| 3 | Windows 콘솔 계층(raw·VT·복원·resize 폴링·하한)과 초대 코드 프롬프트 | 0.9~1.5 |
+| 4 | 소유자 전용 DACL 모듈과 적용처 전부 | 0.7~1.1 |
+| 5 | Credential Manager `platform` store와 Windows `move-key` 왕복 | 0.4~0.7 |
+| 6 | named pipe localctl transport | 1.1~1.8 |
+| 7 | Windows reverse 역할: `qsh listen`·`setup listener`·`serve --to` 게이트, reverse dial, `hosts`·`tunnels` 데몬 항목, 정방향·역방향 CLI 종단 | 0.8~1.3 |
+| 8 | supervise와 절전 감지, reverse 쌍둥이(신뢰 철회 `listen`, 세션 필터 fan-out) | 0.3~0.5 |
+| 9 | client 기능 동등: 대화형 attach, `-L`/`-R`/`-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`의 이 장비 쪽, doctor, `release_smoke` | 0.8~1.3 |
+| 10 | 작업 스케줄러 서비스 백엔드, `qsh service run`, 상시 기동 레시피, `logon_task_session_scoped` | 0.7~1.2 |
+| 11 | ADR-0032 Windows 열: `schtasks` argv, COM `TaskStateQuery`, `--live`, 상시 기동 형태 보존, `keystore_session_bound` Windows 판정 | 0.2~0.4 |
+| 12 | aarch64 자산, `install.ps1`, zip의 man 페이지와 목록 대조 | 0.3~0.5 |
+| 13 | Authenticode 서명·검증과 시크릿 게이트 | 0.3~0.5 |
+| 14 | 캠페인 문서 `p1-windows.md` 사전 고정 | 0.3~0.4 |
+| 15 | scoop·winget job | 0.3~0.5 |
+| 16 | 마감 | 0.1~0.2 |
+| 합 | | 7.7~12.9 |
+
+Step 2 뒤 main 세션이 이 표와 ROADMAP §5.2·§5.4 리스크 5를 다시 매긴다(ROADMAP M19 크기 줄, ADR-0035 결과 절 마지막 항목).
 
 **순서의 근거.**
 
-- (a)와 (d)는 코드가 겹치지 않는다. (a)는 `crates/qsh-core/src/ops/service/`, `ops/identity.rs`, `identity/`, `doctor.rs`·`doctor/probe.rs`, `docs/deploy/service.md`를 만지고, (d)는 `ops/session.rs`, `audit.rs`·`audit/`, 새 `ops/audit.rs`, `qsh-proto`의 새 타입을 만진다. 그래서 두 사슬을 병렬로 연다. 겹치는 곳은 `docs/CLI.md` 상태 헤더와 §2.4·§2.5, `REQUIRED_FIXTURES`, `OP_FACES`, `CLI_V1_SCHEMA_COMMANDS`, threat-model §3이고 늦게 착지하는 쪽이 rebase로 푼다.
-- (a) 안에서는 활성화(Step 2)를 먼저 둔다. ADR-0032 처음 판의 핵심이고 §6.18 계약 개정이 여기 있다. 사람이 설치한 상시 기동 형태를 건드리지 않는 규칙(결정 18)은 `--activate`·`--deactivate`의 분기라서 활성화와 같은 스텝에 싣는다. 나중 스텝으로 미루면 그 사이 macOS에서 `--activate`가 LaunchDaemon과 같은 label을 `gui` 도메인에 적재하는 창이 생긴다.
-- `move-key`(Step 3)를 doctor(Step 4)보다 먼저 둔다. `keystore_session_bound`의 remedy와 `service.md` 상시 기동 레시피의 한 줄이 `qsh identity move-key --to file`을 가리키므로, 그 명령이 먼저 있어야 안내가 실제 명령을 가리킨다.
-- (d) 안에서는 세션 필터(Step 5)가 가장 작고 독립적이라 먼저 둔다. audit 조회는 읽기 코어(Step 6, 사용자 표면 없음)를 먼저 세우고 op·CLI·계약 문서(Step 7)를 나중에 얹는다. M16의 줄 파서 → op 순서와 같은 모양이다.
+- 콘솔(Step 2·3)을 맨 앞에 둔다. ADR-0035 결과 절과 ROADMAP §5.4 리스크 5가 첫 스텝을 "콘솔 probe·터미널 trait 추출과 `cfg(unix)` 게이트 제거"로 정했고, 재산정의 근거가 여기서 나온다. trait 추출은 unix 동작을 바꾸지 않는 리팩터라 Windows 구현(Step 3)과 나눠 unix 회귀(`tui_expect::`)를 먼저 확인한다.
+- DACL 모듈(Step 4)은 Credential Manager의 `auto` 대체(Step 5), named pipe 인스턴스(Step 6), 작업 정의 파일과 서비스 로그(Step 10)가 모두 부르므로 그 셋보다 앞이다. 콘솔 사슬과는 코드가 겹치지 않아 병렬이다.
+- named pipe(Step 6)는 `qsh listen`(Step 7)의 전제다. pipe transport와 데몬 기동을 한 PR에 넣으면 1.9~3.1ew가 되므로 transport·자격 확인·이름 규칙(Step 6)과 run mode 개방·종단(Step 7)으로 나눈다. 이름 선점 시 "QUIC listener를 열기 전에 실패"는 기동 경로의 성질이라 Step 7이 단언한다.
+- 대화형 attach의 Windows 개방(`tui::run`의 비unix 분기 제거)은 Step 3이 아니라 Step 9에 둔다. reverse route의 attach는 localctl 위 reverse dial(Step 7)이 있어야 하고, 한쪽 route만 여는 PR은 착지하지 않기 때문이다(§4 규율 "route 동등"). Step 3은 route와 무관한 콘솔 계층만 연다.
+- 서비스(Step 10·11)는 DACL 뒤면 언제든 열 수 있어 콘솔·pipe 사슬과 병렬이다. Step 11은 Step 10의 작업 정의 경로와 COM 읽기를 쓴다. `setup listener --service`는 Step 7의 `setup listener`와 Step 10의 백엔드가 모두 있어야 하므로 Step 10이 Step 7 뒤면 Step 10이, 앞이면 Step 7이 그 테스트를 착지시킨다.
+- 출고(Step 12·13·15)는 `release.yml`만 만지므로 Step 1 직후부터 병렬이다. 캠페인 문서(Step 14)는 ADR-0035 결정 18이 "구현 마지막 스텝 전"을 요구하므로 마지막 구현 스텝(Step 15) 앞에 둔다. 회차 (11)이 세 설치 경로를 보므로 `install.ps1`(Step 12)과 서명(Step 13)의 이름이 굳은 뒤에 쓴다.
 
 **의존과 병렬.**
 
 | 스텝 | 선행 | 다른 에이전트와 병렬 가능 여부 |
 |---|---|---|
-| Step 2 | Step 1 | Step 5·6과 병렬 가능 |
-| Step 3 | Step 2(`docs/CLI.md` 헤더 순서, `ops/` 등록 표) | Step 5·6·7과 병렬 가능. Step 3은 `identity/`와 `ops/identity.rs`를 만진다 |
-| Step 4 | Step 2(결정 18의 LaunchDaemon 경로 상수), Step 3(remedy가 가리킬 명령) | Step 6·7과 병렬 가능. 겹치는 곳은 `docs/CLI.md` §6.17 진단 개수 문장 하나뿐이다(Step 7은 진단을 더하지 않는다) |
-| Step 5 | Step 1 | Step 2·3·4와 병렬 가능 |
-| Step 6 | Step 1 | Step 2·3·4·5와 병렬 가능. 사용자 표면이 없어 계약 문서를 만지지 않는다 |
-| Step 7 | Step 6 | Step 3·4와 병렬 가능하지만 `REQUIRED_FIXTURES`·`OP_FACES`·§2.4·§2.5가 같은 줄 근처라 rebase가 필요하다 |
-| Step 8 | 전부 | — |
+| Step 2 | Step 1 | Step 4·12와 병렬 |
+| Step 3 | Step 2 | Step 4·5·6·10·12·13과 병렬 |
+| Step 4 | Step 1 | Step 2·3·12와 병렬 |
+| Step 5 | Step 4 | Step 3·6·10·12·13과 병렬 |
+| Step 6 | Step 4 | Step 3·5·10·12·13과 병렬. `xtask/src/arch.rs`를 만지는 유일한 스텝 |
+| Step 7 | Step 6 | Step 10·12·13과 병렬 |
+| Step 8 | Step 7 | Step 9·10·11과 병렬 |
+| Step 9 | Step 3, Step 7(reverse attach·`-R`), Step 5(`init`의 `auto`) | Step 8·10·11과 병렬. `exit_code_matrix.rs`·`release_smoke.rs`는 Step 11과 같은 줄 근처라 rebase |
+| Step 10 | Step 4 | Step 3·5·6·7·8·9와 병렬. `docs/CLI.md` §6.17·§6.18은 Step 11과 겹침 |
+| Step 11 | Step 10 | Step 8·9와 병렬 |
+| Step 12 | Step 1 | 전부와 병렬(`release.yml`, `scripts/`) |
+| Step 13 | Step 12 | 전부와 병렬 |
+| Step 14 | Step 3·5·7·9·10·12·13(회차가 가리키는 명령과 자산 이름) | Step 15 앞 |
+| Step 15 | Step 12, Step 14 | — |
+| Step 16 | 전부 | — |
 
-**규율.** 앞 마일스톤 그대로이고 M17에서 몇 가지를 덧붙인다.
+**규율.** 앞 마일스톤 그대로이고 M19에서 몇 가지를 덧붙인다.
 
-- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy와 test는 `ci.yml`의 `windows-latest`·`macos-14` 다리에서도 돈다. M16 규율대로 `cfg(unix)`/`cfg(windows)` 분기, 경로 표기, 자식 프로세스, 파일 열기 모드를 건드리는 스텝(Step 2·3·4·6)은 push 전에 로컬에서 Windows 타깃 검사(`cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings`와 같은 타깃의 `cargo xwin doc`)를 돌린다. xwin이 없는 머신에서는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 같은 두 명령을 돌린다. 이 검사로 CI의 Windows 다리를 대신하지 않는다. 착지 판정은 CI 초록이다. 특히 Step 2·4의 launchd 분기는 macOS 다리에서만 컴파일되는 코드가 생기지 않게, 판정·argv 빌더를 `cfg` 없는 순수 함수로 두고 `cfg`는 `resolve_manager` 한 곳에만 남긴다(§7.1 #1).
+- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy·test·doc은 `ci.yml`의 네 test 다리(`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-14`, `windows-latest`)에서 돈다. `cfg(windows)` 코드를 더하는 스텝(Step 2~11)은 push 전에 Dave-Windows에서 네이티브 clippy·nextest·doc을 돌리고, unix 쪽을 리팩터하는 스텝(Step 2·6·7)은 Linux와 macOS 다리를 같은 무게로 본다. 착지 판정은 CI 초록이다.
+- **unix 회귀 0.** 터미널 trait 추출(Step 2)과 localctl transport 분리(Step 6), reverse 쌍둥이 제거(Step 7)는 unix 동작을 바꾸지 않는다. `tui_expect::`, `attach_ops::`, `attach_recovery::`, `localctl_perms::`, `reverse_e2e::`, `hosts_reverse::`, `reverse_blackout::`, `tunnel_supervise::`, `trust_withdrawal::` 기존 테스트가 고치지 않은 채 초록이어야 한다. acceptance job(`tui_expect`, `reverse_blackout`, `quinn_idle_timeout_as_idle_timeout`, 터널·파일 echo 예산, `socks_curl`, supervised 50초 blackhole)도 같다.
+- **Windows 의존.** `windows-sys`는 `qsh-core`·`qsh-cli`의 `[target.'cfg(windows)'.dependencies]`로만 들어오고 feature는 스텝마다 필요한 것만 더한다(콘솔 Step 3, 보안·파일 Step 4, 자격 증명 Step 5, pipe·프로세스 Step 6, 전원·시간 Step 8). 작업 스케줄러 COM은 `windows` crate의 해당 feature만 `qsh-core`의 `cfg(windows)`로(Step 10). `portable-pty`는 `qsh-testkit`의 Windows dev 의존(Step 2). 새 의존마다 같은 커밋에서 `cargo deny check`가 초록이어야 한다. 의존 방향 행렬은 바뀌지 않는다.
 - 계약 문서 델타는 그 표면을 바꾼 스텝의 같은 커밋에 싣는다.
-  - `docs/CLI.md` 상태 헤더의 v0.35 항목은 CLI.md를 처음 고치는 스텝(Step 2 또는 Step 5 중 먼저 착지하는 쪽)이 열고, 뒤 스텝은 "같은 v0.35에"로 덧붙이거나 다음 판을 연다(`crates/qsh-core/tests/it/cli_md_header.rs` 핀, 새 판이 옛 판 뒤에 오지 않음).
-  - clap 트리가 바뀌는 스텝(Step 2·3·5·7)은 같은 커밋에서 `cargo xtask man`을 돌린다.
-  - doctor code는 Step 4가 하나(`keystore_session_bound`)만 더한다. 진단 개수 문장 26 → 27은 `docs/CLI.md` §6.11 끝 문장과 §6.17 머리 문장 두 곳이고 `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)와 같은 커밋에서 바뀐다.
-- 판정 로직은 `qsh-core`에 둔다. 매니저 호출과 상시 기동 판정은 `ops/service/`, 키 이동은 `ops/identity.rs`와 `identity/`, 세션 필터는 클라이언트 `Ops`(`ops/session.rs`), audit 읽기와 필터는 `qsh-core`의 새 모듈(가칭 `audit/reader.rs`)과 `ops/audit.rs`다. `qsh-proto`에는 계약 타입(`ServiceInstallData` 등의 additive 필드, `IdentityMoveKeyReq`·`IdentityMoveKeyData`, `AuditQueryReq`·`AuditQueryData`·`AuditRecordView`)만 들어간다. `qsh-cli`에는 clap 플래그, 렌더러, 필터 인자 전달만 둔다(ADR-0032 결정 10, ADR-0033 결과 절 "아키텍처 규칙").
-- **wire 소유.** M17의 어느 스텝도 `.proto`를 바꾸지 않는다. ADR-0032 결정 17과 ADR-0033 결정 2·4가 근거다. 완료 판정마다 다음을 확인한다.
+  - `docs/CLI.md` 상태 헤더는 M17 마감 뒤의 다음 판(가칭 v0.N)을 CLI.md를 처음 고치는 스텝이 열고, 뒤 스텝은 덧붙이거나 다음 판을 연다(`crates/qsh-core/tests/it/cli_md_header.rs` 핀).
+  - additive 계약은 ADR-0035 결과 절의 셋이 전부다. M19 몫은 `manager` 값 `"task_scheduler"`(§6.18, Step 10)와 doctor finding `logon_task_session_scoped`(§6.17, `EXPECTED_DOCTOR_CODES`, 진단 개수 27 → 28, Step 10)다. 세션 환경변수 `QSH_SIGNAL_EVENT_USR1`·`USR2`는 M20이다.
+  - 숨김 subcommand `qsh service run <mode>`(Step 10)는 `hide = true`이고 `docs/man/`은 바뀌지 않는다. `checked_in_man_pages_match_the_generator`가 숨김 항목을 렌더하지 않음을 Step 10이 확인한다(ADR-0035 결과 절 "계약").
+  - clap 트리가 바뀌는 스텝이 있으면 같은 커밋에서 `cargo xtask man`을 돌린다. M19의 공개 플래그 변화는 예상되지 않는다.
+- 판정 로직은 `qsh-core`에 둔다. DACL(`fsutil` 하위 새 모듈), Credential Manager store(`identity/keystore.rs` 옆), named pipe transport(`localctl/transport/windows.rs`), 절전 표본(`client/wake.rs`), 작업 정의 렌더러·COM 읽기(`ops/service/`)는 `qsh-core`다. `qsh-cli`에는 Win32 콘솔 계층(`tui/windows.rs`, ADR-0035 결정 4)과 렌더러만 둔다. 콘솔 모드 비트 계산 같은 순수 함수는 `cfg` 없이 두어 네 다리 모두에서 테스트가 돈다(M17 plan §7.1 #1 (`047db25`)과 같은 규율).
+- **wire 소유.** M19의 어느 스텝도 `.proto`를 바꾸지 않는다(ADR-0035 결과 절 "계약", 결정 14의 `qsh.local.v1` 불변). 완료 판정마다 다음을 확인한다.
   - `git diff --stat -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다.
-  - `ErrorCode`는 어느 스텝에서도 바뀌지 않는다. 새 실패는 기존 코드(`UNSUPPORTED`, `INTERNAL`, `TIMEOUT`, `CONFIG_ERROR`, `INVALID_ARGUMENT`)에 붙는다.
-  - `SessionListReq`는 바뀌지 않는다(ADR-0033 결정 2). 필터는 그 밖의 인자로 `Ops`에 들어간다(§7.1 #6).
-  - 구현 중 wire 변경이 필요해 보이면 그 스텝은 착지하지 않고, main 세션이 새 ADR 필요 여부를 정한다(`CLAUDE.md` 머리말).
-- fixture는 추가만 한다. 새 fixture마다 실제 바이너리로 재현하는 `golden_*` 생산 테스트를 같은 커밋에 둔다. 기존 `service.*`·`identity.*`·`session.list`·`doctor.*` fixture는 고치지 않은 채 초록이어야 한다. `capabilities.json`은 바뀌지 않는다(새 peer capability 없음). 바뀌면 그 스텝이 잘못된 것이다.
-- **테스트 배치.** 통합 테스트는 `crates/<crate>/tests/it/<name>.rs` 모듈로 두고 같은 커밋에서 `crates/<crate>/tests/it/main.rs`에 `mod <name>;`을 등재한다. 새 `tests/*.rs` 파일을 crate 최상위에 두지 않는다. nextest 이름은 `<name>::<test>`이고 한 모듈만 돌릴 때는 `--test it -E 'test(/^<name>::/)'`이다. 단위 테스트는 소스 옆 `tests.rs`에 둔다.
-- **route 동등(§5.1 원칙 7, PRD §4).** M17의 표면은 원격 op을 더하지 않지만, 운영 표면은 세 역할(forward host `qsh serve`, reverse listener `qsh listen`, reverse target `qsh serve --to`) 모두에 같아야 한다. 스텝마다 다음을 같은 스텝의 테스트로 단언한다.
-  - (a) 활성화·비활성화·`--live`는 세 mode(`serve`, `listen`, `reverse`)의 유닛 이름과 label에서 같은 argv 모양이다(Step 2). `keystore_session_bound`는 세 mode 유닛 어느 것이 상시 기동이어도 낸다(Step 4). `move-key` 뒤 세 프로세스가 상대 장비의 pin을 고치지 않은 채 다시 handshake한다(Step 3).
-  - (d) 세션 필터는 forward host와 reverse host(`qsh sessions <reverse host>`, 데몬의 reverse 항목 fan-out)에서 같은 결과다(Step 5). `qsh audit`은 세 프로세스가 쓴 레코드를 같은 모양으로 돌려준다(Step 7).
-  - 한쪽 route만 덮는 PR은 착지하지 않는다.
-- **플랫폼 동등(PRD §4, 예외 없음).** 결정의 동작은 세 OS에서 같다. 플랫폼 차이는 ADR이 이미 M19·M20에 귀속시킨 것만 미루고, 스텝마다 무엇을 미루는지를 그 스텝의 "Windows" 항목에 적는다. 요약은 다음과 같다.
-  - (a) 활성화. Linux(systemd)와 macOS(launchd)는 M17이다. 작업 스케줄러 분기(`schtasks` argv, COM 실행 상태 질의, Windows 레시피와 그 문서 대조, `/Create /F`의 실행 중 인스턴스 실측)는 M19다(ADR-0032 결정 4·10·11, ADR-0035 결정 27·28). M17은 `ManagerRunner`와 실행 상태 질의 trait을 그 모양으로 세우고 Windows 빌드에서도 컴파일한다. M17 Windows 빌드의 `qsh service`는 플래그가 있어도 지금처럼 `SERVICE_UNSUPPORTED_PLATFORM`으로 먼저 끝난다.
-  - (a) 상시 기동 레시피. Linux linger는 이미 있고 macOS LaunchDaemon은 M17이다. Windows 상시 기동 작업 레시피와 `Password` 주체 판정(결정 18의 Windows 갈래)은 M19다(ADR-0035 결정 27).
-  - (a) `keystore_session_bound`. macOS·Linux는 M17이다. Windows는 `LogonType=Password` 작업이 Credential Manager를 읽는지 실측한 뒤 M19가 정한다(ADR-0032 결정 15 첫 항목).
-  - (a) `move-key`. op과 순서·결과는 세 OS에 M17에서 연다. Windows `platform` store(Credential Manager)는 M19(ADR-0035 결정 12)라서 M17 Windows 빌드의 `--to platform`은 `identity.init --key-store platform`과 같은 `INTERNAL`이고, Windows의 파일 store 소유자 전용 DACL은 M19(ADR-0035 결정 9)다. M17 Windows 빌드에는 옮길 `platform` 키가 존재할 수 없으므로 실제로 일어나는 것은 `moved: false`뿐이다.
-  - (d) `qsh audit`. 세 OS 모두 M17이다(ADR-0033 결정 13). Windows는 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`로 연다(결정 6). host audit writer의 `LockFileEx` 잠금은 M20(ADR-0035 결정 24)이고 조회와 겹치지 않는다.
-  - (d) 세션 필터. 필터 함수와 forward route는 세 OS 모두 M17이다. 실제 PTY 세션이 필요한 e2e는 Windows host PTY가 M20(ADR-0035 결정 25)이라 `cfg(unix)`이고, Windows `qsh listen` 데몬 fan-out의 reverse 쌍둥이는 M19(ADR-0035 결정 14)다.
-- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. origin `7c43332` 기준 `crates/qsh-core/src/ops/session.rs`(1327줄)가 이미 넘었으므로 인라인 테스트가 남아 있는지 먼저 확인한다. `ops/service/mod.rs`(491줄)와 `doctor.rs`(690줄), `audit.rs`(745줄)는 M17 변경으로 800줄을 넘길 수 있고, 넘기는 커밋이 옮긴다.
-- 안정성 규율은 M16과 같다. 시계를 주입하고(매니저 호출 30초 기한, `--since`의 상대 시각), 관찰 가능한 상태를 넉넉한 `timeout`으로 기다리며, 고정 `sleep()`은 쓰지 않는다. 타이밍 민감 테스트(실제 QUIC loopback, 실제 프로세스 기동, writer 회전과 겹치는 읽기)는 그 스텝의 완료 판정에서 부하 아래 50회 연속 초록이어야 착지한다. 필터 `scripts/stress/m17.filter`의 초안은 타이밍 민감 테스트를 처음 더하는 스텝(Step 3 또는 Step 5, 먼저 착지하는 쪽)이 만들고 Step 8이 완성한다. 부하 아래에서 흔들리는 테스트는 대기 조건을 고친다. 필터에서 빼거나 `-j 1`로 옮기지 않는다(M17에는 지연 예산 단언이 없다).
+  - `ErrorCode`는 바뀌지 않는다. 새 실패는 기존 코드(`UNSUPPORTED`는 Windows 10 1809 미만 VT 하한 하나, `CONFIG_ERROR`, `INTERNAL`, `TIMEOUT`, `INVALID_ARGUMENT`)에 붙는다.
+  - capability 문자열은 바뀌지 않는다. Windows host는 M19 동안 `file.v1`을 광고하지 않는다(ADR-0029 결정 23).
+- fixture는 추가만 한다. ADR-0035 결과 절은 새 fixture가 없다고 적는다. 그대로 따르되, `logon_task_session_scoped`의 doctor fixture를 둘지는 M17의 `doctor.run.keystore_session_bound.json` 선례와 함께 Step 10이 정한다(§7.1 #10). 기존 fixture는 고치지 않은 채 초록이다.
+- **테스트 배치.** 통합 테스트는 `crates/<crate>/tests/it/<name>.rs` 모듈로 두고 같은 커밋에서 `tests/it/main.rs`에 `mod <name>;`을 등재한다. Windows 전용 모듈(예: `console_probe`, `windows_reverse_e2e`)도 같은 규칙이고, 모듈 안에서 `#![cfg(windows)]`로 가른다. `cfg(unix)` 테스트의 `cfg(windows)` 쌍둥이는 가능하면 같은 함수 본문을 두 cfg에서 부르는 꼴로 둔다(`cp_e2e.rs`의 `round_trip` 공유 선례). 쌍둥이를 가질 수 없는 테스트는 빠진 이유를 주석으로 남긴다(ADR-0035 결정 3).
+- **route 동등(§5.1 원칙 7, PRD §4, 예외 없음).** Windows client에서 여는 기능마다 forward route(Windows `qsh` → Windows 인바운드 `qsh serve`)와 reverse route(Windows `qsh` → Windows `qsh listen` 데몬 → Windows `qsh serve --to`)를 같은 케이스 목록으로 Windows leg에서 돈다. 같은 러너의 loopback이다(ADR-0035 결정 17). PTY 세션이 필요한 케이스는 Windows host PTY가 M20이라 이 계획에서는 qsh-testkit의 `EchoPipeFactory` host로 대신하고(§7.1 #4), 실제 PTY 쌍둥이는 M20이 같은 목록에 더한다. 한쪽 route만 덮는 PR은 착지하지 않는다. 기능별 배치는 다음과 같다.
 
-### Step 1 — M17 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖)
+  | 기능 | forward 테스트 | reverse 테스트 | 스텝 |
+  |---|---|---|---|
+  | `exec` | `windows_forward_e2e::exec_round_trip` | `windows_reverse_e2e::exec_round_trip` | 7 |
+  | `-L` 터널 echo | `windows_forward_e2e::local_tunnel_echo` | `windows_reverse_e2e::local_tunnel_echo` | 7 |
+  | `-R` 터널 echo | `windows_forward_e2e::remote_tunnel_echo` | `windows_reverse_e2e::remote_tunnel_echo` | 7 |
+  | `qsh hosts`·`tunnels`·`tunnel close` | forward 항목만(데몬 없음은 오류 아님) | 데몬의 reverse 항목, 데몬 재시작 뒤 재등록 | 7 |
+  | supervise·절전 감지 | `-L`/`-D --supervise` | `-R --supervise`(데몬 carrier) | 8 |
+  | 신뢰 철회 | inbound `serve`(M16에서 이미 Windows) | `listen` 등록 연결(이 계획), `serve --to` 연결(§9 #3) | 8 |
+  | `qsh sessions` 필터 | forward host | `qsh listen` 데몬 fan-out의 reverse 항목 | 8 |
+  | 대화형 attach·detach·resume | echo host forward | echo target reverse | 9 |
+  | `-D` SOCKS | `windows_forward_e2e::dynamic_forward_connect` | `windows_reverse_e2e::dynamic_forward_connect` | 9 |
+  | `qsh cp` client | 단위·통합(드라이브 문자, 로컬 쓰기). 종단은 M20 | 같음. 종단은 M20 | 9 |
+  | 자동 부트스트랩 | 가짜 ssh로 `qsh box` 대화형 form | 가짜 ssh로 `--reverse` 뒤 `qsh listen` 쪽 | 9 |
+  | `qsh service`·`--service` | `serve` mode 유닛 | `listen`·`reverse` mode 유닛 | 10·11 |
+  | `move-key` | 이동 뒤 inbound `serve` handshake | 이동 뒤 `listen`·`serve --to` handshake | 5 |
+  | `qsh audit` | `serve`가 쓴 레코드 | `listen`·`serve --to`가 쓴 레코드 | 7 |
 
-근거: `docs/ROADMAP.md` 현재 위치와 M17 절, ADR-0032·0033 결과 절의 문서 목록. 선행: M16 마감(M16 plan Step 10 (`66b6f4d`))과 그 마감 노트. 두 ADR 승인(`09266dc`).
+- **플랫폼 동등.** 결정의 동작은 세 OS에서 같다. unix에 없는 Windows 고유 통제(DACL, pipe SID 대조)는 unix 대응물(0600/0700, `peer_cred`)과 같은 성질을 같은 이름 꼴의 테스트로 단언한다. Windows host 쪽 차이는 M20으로 미루고, 스텝마다 그 스텝의 "M20" 항목에 무엇을 미루는지 적는다.
+- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. origin `e47ffd9` 기준 `crates/qsh-core/src/reverse/listen.rs`(1197줄), `localctl/client.rs`(1480줄), `localctl/daemon.rs`(2139줄), `tunnel/remote.rs`(1489줄), `ops/service/mod.rs`(871줄), `crates/qsh-cli/src/main.rs`(2595줄)가 이미 넘었으므로 인라인 테스트가 남아 있는지 먼저 확인한다. `tui/unix.rs`(768줄)는 Step 2의 추출로 줄어들 것이고, 새 `tui/windows.rs`와 `localctl/transport/windows.rs`는 처음부터 `tests.rs`를 둔다.
+- 안정성 규율은 M17과 같다. 시계를 주입하고(resize 폴링 200 ms, 절전 표본, 매니저 호출 30초 기한), 관찰 가능한 상태를 넉넉한 `timeout`으로 기다리며, 고정 `sleep()`은 쓰지 않는다. resize 폴링 테스트는 "폴링이 한 번만 콜백을 부른다"를 ConPTY 크기 변경 뒤 콜백 기록으로 기다려 단언하고 간격 자체를 재지 않는다. 타이밍 민감 테스트(ConPTY probe, 실제 QUIC loopback, 실제 프로세스 기동, pipe accept 경합, 데몬 재시작 재등록)는 그 스텝의 완료 판정에서 부하 아래 50회 연속 초록이어야 착지한다. `scripts/stress/m19.filter`의 초안은 타이밍 민감 테스트를 처음 더하는 스텝이 만들고 Step 16이 완성한다. 흔들리는 테스트는 대기 조건을 고친다. 필터에서 빼거나 `-j 1`로 옮기지 않는다.
+
+### Step 1 — M19 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖) ✅ 2026-10-16
+
+근거: `docs/ROADMAP.md` 현재 위치, §5.1 원칙 6, M19 절, ADR-0035 결과 절. 선행: M17 마감(M17 plan Step 8 (`047db25`))과 그 마감 노트.
 
 **(a) 범위:**
 
-1. `PLAN.md`를 이 문서로 바꾼다. ROADMAP M16 마감 노트에 M16 계획의 마지막 커밋 해시가 적혀 있는지 확인하고, 이 문서의 `66b6f4d` 자리 전부를 그 해시로 바꾼다.
+1. `PLAN.md`를 이 문서로 바꾼다. ROADMAP M17 마감 노트에 M17 계획의 마지막 커밋 해시가 적혀 있는지 확인하고 이 문서의 `047db25` 자리 전부를 그 해시로 바꾼다. 줄 수·개수의 기준 `e47ffd9`는 그대로 둔다. 그 뒤 M17 커밋은 `qsh audit` 표면과 문서만 더했고 측정 대상의 기준을 고정 해시로 두는 편이 재현 가능하다. §0·§1의 승계 상태를 M17 마감 노트와 대조한다.
 2. `docs/ROADMAP.md`를 고친다.
-   - 현재 위치를 "현재 마일스톤은 M17"로 바꾼다.
-   - M17 DoD에 안정성 줄을 더한다(§9 #1).
-   - M17 크기 줄, §5.2 표의 M17 행, 머리말 "총 크기" 문장의 "미산정 둘"을 ADR-0033 결과 절의 (d) 구현 1.2~1.8ew로 갱신한다(§9 #2).
-   - §5.4 리스크 1의 "제안 ADR 여섯" 문장을 2026-10-14 승인 뒤의 상태로 고친다(§9 #3).
-   - M19 수용 기준에 ADR-0032 Windows 열의 귀속 한 줄을 더한다(§9 #4).
-3. README Roadmap 표의 M16 행을 "Done"으로, M17 행을 "In progress"로 고친다(현재 `M17–M20` 한 행이므로 M17을 따로 뗀다).
-4. ADR 준비 점검. 두 ADR은 승인됐고 M17에 새 ADR은 필요 없다. 다음 셋의 실제 상태를 확인해 이 계획 §9에 적는다(ADR 본문은 고치지 않는다).
-   - ADR-0032 결정 18 셋째 항목의 `launchctl print system/…` root 여부는 ADR이 대체를 미리 정했으므로 개정 없이 구현 중 정한다(§9 #5).
-   - ADR-0033 결정 13의 "CLI 새 절 번호는 그때 가장 큰 `§6.N` 다음"은 origin `7c43332` 기준 §6.21(`qsh cp`) 다음인 §6.22다(§9 #9).
-   - ADR-0033 맥락 절의 "로컬 op 중 audit을 남기는 것은 `trust.rename`과 `service.*`뿐(F5)"은 ADR-0045·0044 착지로 낡았다. 결정에는 영향이 없고, threat-model F5·h26 문면만 Step 7이 대조한다.
-5. 이 문서 §3의 "DoD (d) — ADR-0033이 `승인됨`" 줄을 채운다.
+   - 현재 위치를 "현재 마일스톤은 M19"로 바꾸고 M17 닫힘을 적는다.
+   - §5.1 원칙 6 아래에 "M18의 착수 조건(M8 DoD 3)이 닫히지 않아 M18을 건너 M19를 먼저 열었다(날짜)"를 적는다.
+   - M19 DoD에 안정성 줄을 더한다(§9 #2).
+   - M19 DoD 첫 줄의 "ADR-0029 착지 뒤 `qsh cp`"를 M20 DoD로 옮기고 M19 쪽은 client 쪽 단위·통합 테스트로 바꾼다(§9 #1).
+   - M19 범위 문장에 ADR-0035 결정 1 목록 중 빠진 `qsh identity move-key`와 `qsh audit`을 더하고, M16·M17이 M19로 넘긴 쌍둥이(신뢰 철회 `listen`, 세션 필터 fan-out, `audit.query` pipe 비노출, 자동 부트스트랩의 Windows 분기)를 한 줄로 적는다(§9 #4).
+3. README Roadmap 표의 M17 행을 "Done"으로, M19 행을 "In progress"로 고치고 M18 행에 "waiting on M8 DoD 3"을 적는다.
+4. ADR 준비 점검. ADR-0035는 승인됐고 M19에 새 ADR은 필요 없다. 다음의 실제 상태를 확인해 이 계획 §9에 적는다(ADR 본문은 고치지 않는다).
+   - ADR-0035 결정 12의 keystore 구현 판정(crate냐 `CredReadW` 직접이냐)은 "구현 선택이라 ADR을 개정하지 않는다"고 적혀 있다. Step 2가 판정한다(§7.1 #5).
+   - ADR-0035 결정 20의 "ConPTY 배치가 서지 않으면 ADR 개정"은 M20의 일이다.
+   - ADR-0031 결정 3의 `serve --to` 쌍둥이 귀속(M20)과 이 계획의 당겨 오기(§9 #3).
+   - ADR-0023의 "Windows에서 `Instant` 전제가 맞는지는 M19가 확인한다"는 ADR-0035 결정 15(`QueryUnbiasedInterruptTime`)가 대체했다. 개정 없이 Step 8이 결정 15를 인용한다(§9 #11).
+5. `CLAUDE.md` Document map의 "M11–M19 (P1)"를 "M11–M20"으로, campaigns 목록의 중복 `p1-ssh-bootstrap`을 지우고 Step 14 착지 뒤 `p1-windows`를 더한다(§9 #7). 이 편집은 사용자 지시 범위(main 세션)다.
 
 **(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록.
 
-**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. ROADMAP 현재 위치가 M17을 가리키고 M17 DoD에 안정성 줄이 있으며, M17 크기에 "미산정"이 남아 있지 않다.
+**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. ROADMAP 현재 위치가 M19를 가리키고 §5.1에 M18 건너뜀이 날짜와 함께 있으며, M19 DoD에 안정성 줄이 있고 `cp` 종단이 M20 DoD에 있다.
 
-### Step 2 — (a) 서비스 매니저 실호출: `ManagerRunner`, `--activate`·`--deactivate`·`--live`, 상시 기동 형태 보존, §6.18·man·fixture (0.35~0.55ew)
+### Step 2 — 터미널 trait 추출, ConPTY probe 하니스, 모드 계산 순수 함수, keystore 경로 판정 (0.5~1.0ew)
 
-근거: ADR-0032 결정 1~11, 18과 결과 절의 첫 세 항목. 선행: Step 1.
+근거: ADR-0035 결정 4·5·11의 모드 계산, 결정 12의 "첫 스텝 판정", 결정 17 콘솔 계층 항목, 결과 절 "크기" 마지막 항목(첫 스텝 뒤 재산정). 선행: Step 1.
 
 **(a) 범위:**
 
-- `crates/qsh-core/src/ops/service/`:
-  - `ManagerRunner` trait(argv와 제한 시간을 받아 exit 상태와 stderr 첫 줄을 돌려줌)과 Windows 실행 상태 질의 trait(작업 이름 → 실행 중 여부)을 둔다(결정 10). 기본 runner는 `std::process::Command`에 인자 배열로 넘기고 셸을 거치지 않는다. 공개 `Ops::service_*`만 기본 runner를 만들고 `*_with_home` 쌍둥이는 runner를 인자로 받는다.
-  - 결정 3 표의 argv 빌더(launchd, systemd)를 `cfg` 없는 순수 함수로 둔다. 인자는 euid, 유닛 경로, 닫힌 집합 `<mode>`뿐이다. Windows 열의 빌더는 M19다.
-  - `install --activate`: 오늘의 prefix 전체 성공 뒤 마지막 단계(결정 2). launchd는 `launchctl print gui/<uid>/io.qsh.<mode>`가 0이면 `bootstrap`을 부르지 않고 `already_active`, systemd는 `daemon-reload`와 `enable --now`를 부르고 `restart`는 어떤 경우에도 부르지 않는다(결정 4). 유닛 파일 쓰기 실패와 audit 실패면 매니저를 부르지 않는다.
-  - `uninstall --deactivate`: 등록 여부로 판정하고 해제가 먼저, 파일 삭제가 나중이다(결정 5). 해제가 실패하면 파일을 지우지 않는다. `stopped`/`not_active`.
-  - `status --live`: 결정 3 "이미 떠 있는지" 질의의 exit code 하나만 읽는다. 유닛 파일이 없으면 매니저를 부르지 않고 `active: false`(결정 6).
-  - 상시 기동 형태 보존(결정 18의 macOS 갈래). 같은 mode의 `/Library/LaunchDaemons/io.qsh.<mode>.plist`가 있으면 `--activate`는 파일만 쓰고 `always_on_present`, `--deactivate`는 `gui` 도메인 해제만 결정 5대로 하고 파일을 지운 뒤 `always_on_present`. `--live`는 그 형태의 실행 여부다. `launchctl print system/…`가 root 없이 되는지 확인되기 전에는 ADR이 정한 대체(`INTERNAL`, `step: "live"`, message가 `sudo launchctl print system/io.qsh.<mode>` 안내)로 착지한다(§9 #5). LaunchDaemon 경로 상수는 Step 4의 doctor probe와 공유한다.
-  - 오류(결정 8): spawn `NotFound`는 `UNSUPPORTED`(WSL이면 `/etc/wsl.conf`의 `systemd=true`, 그 밖에는 `docs/deploy/service.md` 안내), 0이 아닌 exit는 `INTERNAL`(`details.step`, `details.exit_code`, stderr 첫 줄 512바이트), 30초 초과는 `TIMEOUT`. macOS `gui/<uid>` 도메인 부재는 `user/<uid>`로 우회하지 않는다.
-  - audit은 오늘 그대로 한 건이고 활성화 레코드를 더하지 않는다(결정 9). `status --live`는 audit을 쓰지 않는다.
-  - 플래그는 config 키나 환경 변수로 기본값을 바꿀 수 없다(결정 1). `qsh setup`과 doctor는 이 플래그를 넘기지 않는다. `service_not_registered` remedy와 `setup`의 `next`가 `qsh service install --activate`를 안내하는 문면 변경은 이 스텝에서 한다.
-- `qsh-proto`: `ServiceInstallData.activation`, `ServiceUninstallData.deactivation`, `ServiceStatusData.active`를 선택 필드로 더한다(`skip_serializing_if`, 결정 7).
-- `qsh-cli`: clap 플래그 셋, human 렌더(`already_active`의 "다음 재시작에 반영" 한 줄과 `docs/deploy/service.md` 세션 손실 고지 안내, `always_on_present`의 레시피 재실행 안내).
-- 문서(모두 이 커밋):
-  - `docs/CLI.md` 상태 헤더 v0.35(또는 Step 5가 먼저 열었으면 덧붙임), §6.18 세 시그니처, "`status`는 존재 여부만 본다"와 "유닛 파일만 쓴다"의 플래그 예외, `data` 필드 설명, `--deactivate` 없는 `uninstall`은 떠 있는 유닛을 남긴다는 문장.
-  - man 셋 재생성(`cargo xtask man`).
-  - `docs/deploy/service.md`: launchd·systemd 절의 `--activate` 안내와 비활성화 레시피(결정 11). LaunchDaemon 레시피는 Step 4.
-  - `docs/design/threat-model.md` §3 `qsh service` 행: "호출하지 않는다"를 "플래그가 있을 때만 결정 3 argv를 부르고 exit code만 읽는다"로. §4 E에 "매니저 호출 인자에 사용자 입력이 들어가 옵션·명령을 주입한다" 행(결정 3, 핀 `manager_argv_never_contains_user_input`), §4 G에 "`install` 재실행이 떠 있는 유닛을 재시작해 detach된 세션을 지운다" 행(결정 4, 핀 `activate_does_not_restart_an_already_active_unit`).
-- fixture(추가만, `REQUIRED_FIXTURES`, `golden_*`): 플래그를 준 성공 envelope 셋(이름은 §7.1 #4). 기존 `service.install.json`·`service.uninstall.json`·`service.status.json`은 무변경 초록.
-- Windows: trait 둘과 플래그는 Windows 빌드에도 들어간다. Windows `qsh service`는 플래그가 있어도 `SERVICE_UNSUPPORTED_PLATFORM`으로 먼저 끝나고 아무것도 부르지 않는다. 작업 스케줄러 argv 빌더, COM 질의 구현, `install_activate_runs_the_documented_argv_on_task_scheduler`, `windows_activate_updates_the_stored_task_without_running_it_when_already_running`, 결정 18의 Windows 갈래는 M19다(ADR-0032 결정 10, ADR-0035 결정 27·28).
+- `crates/qsh-cli/src/tui/`: `tui/unix.rs`에서 플랫폼 중립 부분(행 시작 escape 처리, 이벤트 루프, 입출력 스레드 구성, 종료 코드 매핑)을 꺼내 새 `tui/session_loop.rs`(가칭)에 두고, 작은 터미널 trait(raw 모드 guard, 창 크기 조회, stdin 읽기, 끊김 신호)에 올린다(결정 4). unix 구현은 `tui/unix.rs`에 남고 동작은 바뀌지 않는다. trait의 가짜 구현을 테스트에 둔다.
+- 콘솔 모드 계산 순수 함수(`cfg` 없음, `tui/console_mode.rs` 가칭): 원래 입력·출력 모드에서 raw 모드(`ENABLE_LINE_INPUT`·`ENABLE_ECHO_INPUT`·`ENABLE_PROCESSED_INPUT` 끔, `ENABLE_VIRTUAL_TERMINAL_INPUT` 켬)와 출력 모드(`ENABLE_VIRTUAL_TERMINAL_PROCESSING`·`DISABLE_NEWLINE_AUTO_RETURN` 켬), 에코 억제 모드(`ENABLE_ECHO_INPUT`만 끔)를 만든다(결정 5·11). 비트 상수는 Win32 값을 이 파일에 직접 둔다(`windows-sys` 없이 네 다리에서 컴파일).
+- `qsh-testkit`: ConPTY 하니스(`portable-pty` Windows dev 의존)와 콘솔 probe 바이너리 `qsh-console-probe`(`src/bin/`, 표준 라이브러리와 `windows-sys`만). probe는 raw 모드 진입 뒤 읽은 바이트, resize 콜백 횟수, 종료 전후 콘솔 모드를 stdout 한 줄씩으로 보고한다(결정 17). 바이너리 위치 탐색은 `qsh-fake-ssh`와 같은 순서(`QSH_CONSOLE_PROBE_BIN`, 테스트 실행 파일 옆, `cargo build -p qsh-testkit --bin`)를 쓴다(`docs/design/testing.md`의 가짜 ssh 하네스 문단).
+- keystore 경로 판정(결정 12): keyring-core 계열 Windows store crate가 있는지, `cargo deny check`(license·advisory)를 넘는지 확인한다. 못 넘으면 `CredReadW`·`CredWriteW`·`CredDeleteW` 직접 구현으로 정한다. 결과를 §7.1 #5와 커밋 본문에 적는다. 구현은 Step 5다.
+- 재산정: Step 3~11의 크기를 이 스텝에서 본 trait 경계와 probe 비용으로 다시 매겨 커밋 본문에 적는다. main 세션이 §4 표, ROADMAP M19 크기 줄·§5.2·§5.4 리스크 5를 갱신한다.
+- M20: 없음(host 쪽을 만지지 않는다).
 
 **(b) 테스트·게이트:**
 
-`crates/qsh-core/src/ops/service/tests.rs`(가짜 runner 주입)와 `crates/qsh-core/tests/it/service_docs.rs`.
+- unix 회귀: `tui_expect::` 전부, `attach_ops::`, `attach_recovery::`, `crates/qsh-cli/src/tui/` 기존 단위 테스트가 무변경 초록. acceptance job 초록.
+- 중립 루프(가짜 터미널, 네 다리): `session_loop_forwards_stdin_bytes_verbatim`, `session_loop_tilde_dot_at_line_start_detaches`, `session_loop_tilde_inside_a_line_is_plain_input`, `session_loop_size_change_sends_one_resize`, `session_loop_hangup_signal_detaches_and_keeps_the_session`
+- 모드 계산(네 다리): `raw_input_mode_clears_line_echo_processed_and_sets_vt_input`, `raw_output_mode_sets_vt_processing_and_disables_newline_auto_return`, `echo_suppressed_mode_clears_only_echo_input`, `mode_computation_preserves_unrelated_bits`
+- 하니스(Windows 다리): `console_probe::probe_reports_its_initial_size_under_conpty`
 
-- 부르지 않음: `install_without_activate_never_invokes_the_manager`, `uninstall_without_deactivate_never_invokes_the_manager`, `status_without_live_never_invokes_the_manager`
-- argv: `install_activate_runs_the_documented_argv_on_launchd`, `install_activate_runs_the_documented_argv_on_systemd`, `install_activate_argv_covers_serve_listen_and_reverse_modes`(계획 추가, route 동등), `manager_argv_never_contains_user_input`(계획 추가, 컨트롤러 이름에 공백·따옴표·`--`를 넣은 config)
-- 재시작 부재: `activate_does_not_restart_an_already_active_unit`
-- 비활성화: `deactivate_calls_disable_for_a_registered_but_inactive_unit`, `deactivate_skips_when_the_unit_is_not_registered`, `deactivate_runs_before_the_unit_file_is_removed`, `a_failed_deactivate_keeps_the_unit_file`
-- 상시 기동 보존: `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched`(launchd 행. 작업 스케줄러 행은 M19), `status_live_reports_the_always_on_form_when_present`(launchd 행, §9 #5의 대체가 착지했으면 그 `INTERNAL`을 단언)
-- 실패 순서: `activate_is_skipped_when_the_unit_write_fails`, `activate_is_skipped_when_the_audit_sink_fails`(기존 `install_is_refused_when_the_audit_sink_fails` 무변경 초록)
-- 오류: `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code`, `a_manager_call_past_the_deadline_is_timeout`(시계 주입), `manager_stderr_first_line_is_capped_at_512_bytes`(계획 추가), `wsl_without_systemd_unsupported_message_names_wsl_conf`(계획 추가)
-- 플래그 기본값 불가: `activation_flags_cannot_be_defaulted_by_config_or_env`(계획 추가, 결정 1)
-- 문서 대조: `service_md_activation_recipes_match_the_argv_builders`
-- `crates/qsh-cli/tests/it/exit_code_matrix.rs`·`jsonl_purity.rs`에 플래그 행, `checked_in_man_pages_match_the_generator`, `golden_*` 셋
-- Windows 다리: `service_activation_flags_are_unsupported_on_windows_before_m19`(계획 추가, `cfg(windows)`, 가짜 runner 호출 0회)
+**(c) 완료 판정:** unix attach 경로의 동작 diff가 0이다(위 회귀 초록). ConPTY 하니스가 Windows 다리에서 probe를 띄운다. keystore 판정과 재산정이 커밋 본문에 있다. wire diff 0.
 
-**(c) 완료 판정:** 플래그 없는 세 op의 출력이 기존 fixture와 바이트가 같다. §6.18·man·`service.md`가 같은 커밋이다. 실제 매니저를 부르는 테스트가 없다(`Command::new("launchctl"|"systemctl")`이 기본 runner 한 곳에만 있음). wire diff 0, `ErrorCode` diff 0. Windows 타깃 로컬 검사와 CI 세 다리 초록.
+### Step 3 — Windows 콘솔 계층과 초대 코드 프롬프트 (0.9~1.5ew)
 
-### Step 3 — (a) `qsh identity move-key` (`identity.move_key`) (0.4~0.5ew)
-
-근거: ADR-0032 결정 15 둘째~넷째 항목, 17과 결과 절의 개정분 착지 항목(CLI.md §2.4·identity 절, man, fixture, threat-model §3·§4 D, testing.md L1). 선행: Step 2.
+근거: ADR-0035 결정 4~8·11, 결정 17 콘솔 계층 항목, 결정 19의 threat-model §3 "Windows 콘솔 입력" 행과 `docs/CLI.md` §6.11·§7. 선행: Step 2.
 
 **(a) 범위:**
 
-- `qsh-core`(`ops/identity.rs`, `identity/`): `Ops::identity_move_key(to)`. 인가 불요 local op이고 원격에서 부를 수 없다.
-  - 순서: audit 한 건(action `identity.move_key`, 구조 필드만) → 원래 store에서 읽기 → 새 store에 쓰기(파일이면 0600) → 새 store에서 다시 읽어 공개키 대조 → `identity.toml`의 `key_store` 갱신 → 원래 store 항목 삭제.
-  - 실패 처분: audit 실패면 아무것도 옮기지 않는다. 쓰기·대조·`identity.toml` 갱신 중 어느 단계든 실패하면 그 앞까지 만든 것을 지우고 원래 상태로 끝난다. 마지막 삭제만 실패하면 성공에 `stale_entry_left: true`.
-  - 이미 그 store면 아무것도 하지 않고 `moved: false`(audit도 쓰지 않는지는 §7.1 #5).
-  - 오류: 초기화 전이면 `identity.export`와 같은 `CONFIG_ERROR`, `--to platform`인데 store가 없으면 `identity.init --key-store platform`과 같은 `INTERNAL`. 새 `ErrorCode` 없음.
-  - 개인키는 인자·결과·오류 message·`details`·로그 어디에도 나가지 않는다(ADR-0013). 읽기 버퍼는 `Zeroizing`이다.
-  - device_id, 인증서, fingerprint는 바뀌지 않는다. `qsh init`의 `auto` 규칙은 바꾸지 않는다.
-  - 동시성: 같은 config 디렉터리에서 다른 `move-key`나 `init`이 겹치지 않게 잠근다(§7.1 #5).
-- `qsh-proto`: `IdentityMoveKeyReq { to }`, `IdentityMoveKeyData { from, to, moved, stale_entry_left }`. `from`/`to`는 기존 `key_store` 어휘(`platform`/`file`).
-- `qsh-cli`: clap `qsh identity move-key --to <file|platform>`, human 렌더(`stale_entry_left`일 때 남은 항목 안내), JSON 렌더.
-- 등록 완전성: schemars, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS`, `OP_FACES` 행, man `qsh-identity-move-key.1`, `docs/CLI.md` §2.4(`identity.move_key`)·§2.5 "인가 불요" 행·§6.11 identity 절의 시그니처·결과·오류.
-- fixture(추가만): `identity.move_key.moved.json`, `identity.move_key.noop.json`(이름은 §7.1 #4).
-- 문서: `docs/design/threat-model.md` §3 새 행 "`qsh identity move-key`"(로컬 사용자, 옮기는 동안의 상태), §4 D에 "store 사이를 옮기는 개인키가 권한이 넓은 파일·로그·출력으로 샌다" 행(0600, 비노출, 핀은 아래). `docs/design/testing.md` L1 「플랫폼 키스토어 릴리스 전 수동 단계」에 `move-key` 왕복(platform → file → platform)을 macOS·Linux에 더하고 Windows는 M19라고 적는다. `docs/design/architecture.md` §5에 이동 순서 한 문단.
-- Windows: op은 Windows 빌드에도 열린다. Windows `platform` store(Credential Manager)는 M19(ADR-0035 결정 12)라서 M17 Windows 빌드에서 `--to platform`은 `INTERNAL`이고 `--to file`은 `moved: false`다. 파일 store의 소유자 전용 DACL과 그 테스트 쌍둥이는 M19(ADR-0035 결정 9)다.
+- `crates/qsh-cli/src/tui/windows.rs`: Step 2 trait의 Windows 구현.
+  - raw 모드: 입출력 핸들의 원래 모드와 코드 페이지를 저장하고 결정 5의 모드와 UTF-8(65001)로 바꾼다. 키는 파싱하지 않는다.
+  - 복원(결정 6): guard의 `Drop`, 전역 slot을 쓰는 panic hook, `SetConsoleCtrlHandler`(`CTRL_CLOSE_EVENT`·`CTRL_BREAK_EVENT`·`CTRL_LOGOFF_EVENT`·`CTRL_SHUTDOWN_EVENT`)를 detach로 처리. 복원 함수는 멱등.
+  - 하한(결정 7): 출력 핸들에 VT 처리를 켤 수 없으면 `session.open` 전에 `UNSUPPORTED`이고 message가 Windows 10 1809를 적는다. stdin이 콘솔이 아니면(파이프, 리디렉션, mintty) unix 비 tty 경로와 같이 raw·escape 없이 흘린다.
+  - resize(결정 8): 전용 스레드가 200 ms마다 `srWindow` 크기를 읽어 바뀔 때만 콜백. 간격은 상수이고 시계는 주입한다. `SessionOpen.term`은 `TERM`이 있으면 그 값, 없으면 VT가 켜졌을 때 `xterm-256color`.
+- 초대 코드 프롬프트(결정 11): `crates/qsh-cli/src/main.rs`의 `read_invite_code_from_terminal`·`read_invite_code_from_stdin` 비unix 분기를 에코 억제 경로로 바꾼다. `qsh-core`의 `NO_TERMINAL_ECHO_SUPPRESSION`과 `resolve_invite_code_source`의 `echo_can_be_suppressed` 플랫폼 게이트를 지운다(ADR-0035 결정 2·11). machine mode와 비 콘솔 stdin의 `INVALID_ARGUMENT` 규칙은 그대로.
+- 이 스텝은 `tui::run`의 비unix 분기를 아직 지우지 않는다(대화형 attach 개방은 Step 9, §4 "순서의 근거").
+- 문서: `docs/CLI.md` §6.11 콘솔 프롬프트 개방 문장, §7 Windows 지원 범위(VT 하한, mintty 안내, `TERM` 기본값). `docs/design/threat-model.md` §3 "Windows 콘솔 입력" 행(로컬 사용자, VT 입력 바이트는 키 해석 없이 원격으로, 해석은 원격 PTY). README에 mintty 계열은 Windows Terminal이나 `winpty`를 쓰라는 한 줄.
+- M20: 없음.
 
 **(b) 테스트·게이트:**
 
-`crates/qsh-core/src/identity/tests.rs`·`ops/tests.rs`(store 주입)와 새 통합 모듈 `crates/qsh-cli/tests/it/identity_move_key.rs`(`tests/it/main.rs` 등재).
+ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_probe.rs`(`#![cfg(windows)]`, `tests/it/main.rs` 등재).
 
-- 핀: `move_key_keeps_the_fingerprint_and_device_id`, `move_key_to_the_current_store_is_a_no_op`, `a_failed_move_key_write_leaves_the_original_store_untouched`, `move_key_file_store_is_mode_0600`(`cfg(unix)`), `move_key_is_refused_when_the_audit_sink_fails`
-- 계획 추가: `move_key_readback_mismatch_rolls_back`, `move_key_reports_stale_entry_left_when_only_the_final_delete_fails`, `move_key_before_init_is_config_error`, `move_key_to_platform_without_a_store_is_internal`, `move_key_never_emits_key_bytes`(stdout·stderr·tracing 캡처·audit 레코드에 키 바이트 없음)
-- route 동등(계획 추가, 실제 QUIC loopback): `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`(이 장비가 forward host, reverse listener, reverse target일 때 각각 상대 장비의 `trust.toml`을 고치지 않은 채 handshake 성공, `cfg(unix)`)
-- 등록: `layer_2_every_schema_command_has_all_six_faces`, `checked_in_man_pages_match_the_generator`, `golden_*` 둘, `jsonl_purity.rs`·`exit_code_matrix.rs` 행, `record_has_only_structural_fields`가 `identity.move_key` 레코드를 포함해 키 집합 그대로
-- 부하 필터 초안 `scripts/stress/m17.filter`에 route 동등 테스트를 넣는다(Step 5가 먼저 만들었으면 덧붙인다).
+- 콘솔 계층: `conpty_raw_mode_reads_input_bytes_unprocessed`(`Ctrl-C`가 `0x03`으로 읽힘 포함), `conpty_resize_poll_fires_once_per_size_change`, `conpty_console_modes_are_restored_after_normal_exit`, `conpty_console_modes_are_restored_after_panic`, `conpty_console_modes_are_restored_after_a_close_event`, `conpty_code_page_is_restored_on_exit`
+- 하한과 비 콘솔: `vt_unavailable_is_unsupported_before_session_open`(VT 켜기 실패 주입, 가짜 host에 `session.open` 0건), `non_console_stdin_passes_bytes_verbatim_on_windows`, `session_open_term_defaults_to_xterm_256color_when_term_is_unset`
+- 초대 코드: `invite_code_prompt_never_echoes_under_conpty`(ConPTY 출력 스트림에 코드 문자 없음), `invite_code_prompt_restores_the_console_mode`, `code_stdin_from_a_console_suppresses_echo`, 기존 `ops::tests::resolve_invite_code_source_decision_table`을 새 표로 갱신(Windows 행이 `UNSUPPORTED`가 아님)
+- `failure_text_discipline.rs`가 VT 하한 message를 덮음
+- 부하 필터 초안 `scripts/stress/m19.filter`에 `console_probe::`를 넣는다.
 
-**(c) 완료 판정:** fingerprint·device_id 불변이 테스트로 고정됐다. 실패 경로마다 원래 store와 `identity.toml`이 바이트 단위로 같다. route 동등 테스트가 부하 아래 50회 연속 초록이다. wire diff 0.
+**(c) 완료 판정:** `NO_TERMINAL_ECHO_SUPPRESSION`이 소스에 없다. ConPTY 테스트가 Windows 다리에서 초록이고 Dave-Windows 부하 아래 50회 연속 초록이다. unix 회귀 0. wire diff 0.
 
-### Step 4 — (a) LaunchDaemon 레시피, doctor의 상시 기동 인식, `keystore_session_bound` (0.25~0.45ew)
+### Step 4 — 소유자 전용 DACL 모듈과 적용처 전부 (0.7~1.1ew)
 
-근거: ADR-0032 결정 12, 13, 14, 15 첫 항목, 16과 결과 절의 개정분(`service.md` launchd 절, doctor 문구, 진단 목록, fixture, threat-model §3 문장, README Known limitations). 선행: Step 2, Step 3.
+근거: ADR-0035 결정 9·10, 결정 17 첫 항목, 결정 19의 threat-model §4 D와 README Known limitations, `resume.rs` 모듈 doc. ADR-0033 결정 6의 Windows 읽기 불가 행(`crates/qsh-core/src/audit/reader/tests.rs` 주석, `docs/design/architecture.md` §6 audit 조회 문단). 선행: Step 1.
 
 **(a) 범위:**
 
-- `docs/deploy/service.md` launchd 절: "LaunchDaemon은 이 문서의 범위가 아니다" 문단을 결정 13의 LaunchDaemon 펜스(LaunchAgent 렌더러와 같은 `ProgramArguments`·`KeepAlive`·`RunAtLoad`·로그 경로에 `UserName`, `GroupName` `staff`, `EnvironmentVariables`의 `HOME`), 설치(`qsh service uninstall --deactivate` 먼저, `sudo cp`, `chown root:wheel`, `chmod 644`, `sudo launchctl bootstrap system …`)·해제·바이너리 이동 절차와 세션 손실 고지로 바꾼다. linger와 LaunchDaemon 레시피에 "`platform` keystore면 먼저 `qsh identity move-key --to file`" 한 줄. qsh는 이 파일을 쓰지도 `launchctl`에 넘기지도 않는다(결정 12·16).
-- doctor(`crates/qsh-core/src/doctor.rs`, `doctor/probe.rs`):
-  - `service_not_registered`는 macOS에서 LaunchAgent나 LaunchDaemon 파일 중 하나가 있으면 등록으로 본다. 파일 존재만 보고 `launchctl`을 부르지 않는다(결정 14).
-  - `LAUNCHAGENT_SESSION_SCOPED`는 같은 mode의 LaunchDaemon 파일이 없을 때만 내고 문구가 LaunchDaemon 레시피를 가리킨다. code와 수준은 그대로다.
-  - 새 `KEYSTORE_SESSION_BOUND`(warn): `identity.key_store = "platform"`이고 상시 기동 형태(macOS LaunchDaemon 파일, Linux linger 파일과 등록된 user unit)가 있을 때. remedy는 `qsh identity move-key --to file`. `EXPECTED_DOCTOR_CODES`에 하나를 더한다(26 → 27).
-  - probe가 시스템 경로를 읽는 자리는 주입 가능한 뿌리를 받는다(§7.1 #3).
-- `qsh service status`의 `exists`는 오늘처럼 LaunchAgent 경로만 본다(결정 14 셋째 항목).
-- 문서: `docs/CLI.md` §6.17 표에 `keystore_session_bound` 행, `launchagent_session_scoped`·`service_not_registered`의 macOS 문구, 개수 문장 두 곳(§6.11 끝, §6.17 머리). `docs/design/threat-model.md` §3 `qsh service` 행에 "상시 기동은 사람이 설치한 파일이고 qsh는 읽기만 한다". README Known limitations의 LaunchAgent 문장이 레시피를 가리키게 한다.
-- fixture(추가만): `keystore_session_bound`를 담은 doctor envelope 하나(이름은 §7.1 #4).
-- Windows: `keystore_session_bound`는 Windows에서 내지 않는다. Windows 상시 기동 작업이 Credential Manager를 읽는지의 실측과 그 결과에 따른 Windows 판정은 M19다(ADR-0032 결정 15 첫 항목, ADR-0035 결정 27). Windows 상시 기동 작업 레시피와 그 문서 대조도 M19다. 진단 코드 집합 자체는 세 OS에서 같다(Windows 빌드도 27종을 안다).
+- `qsh-core`의 `fsutil` 하위 새 모듈(가칭 `fsutil/dacl.rs`, `fsutil.rs`를 디렉터리로 바꾸는지는 §7.1 #2): 프로세스 토큰 사용자 SID로 보호된 DACL 하나를 만든다. 파일은 그 SID에 `FILE_ALL_ACCESS` ACE 하나, 디렉터리는 `OBJECT_INHERIT | CONTAINER_INHERIT` ACE 하나. `CreateFileW`의 `SECURITY_ATTRIBUTES`로 만드는 순간부터 적용하고 `icacls`를 부르지 않는다.
+- 적용처(`cfg(windows)` 분기): `ensure_private_dir_io`, `write_private_file_io`, resume 저장소의 임시 파일·`.lock`, audit 로그·회전 파일·잠금 파일과 디렉터리(`audit.rs`, `audit/writer.rs`), `identity/device.pem`·`device.key`(`move-key --to file` 포함), private CA 산출물(`ca.rs`), `trust.toml`, `config.toml`(쓰는 경우), `stateless_reset.key`(ADR-0036), config·state·audit 디렉터리. 서비스 작업 정의 파일과 서비스 로그는 Step 10이 같은 모듈을 부른다.
+- fail closed(결정 10): SID 조회 실패, ACL 미지원 파일시스템이면 파일을 만들지 않고 기존 `config_io_error`의 `CONFIG_ERROR`(경로와 원인). audit 경로는 writer의 fail closed 규칙 그대로. 옛 상속 ACL 파일은 다음 쓰기(임시 파일 + rename)가 바꿔 놓는다. 읽기 경로는 ACL을 검사하지 않는다.
+- audit 읽기 코어의 Windows 읽기 불가 행: 읽기를 거부하는 DACL을 건 로그에 대해 `audit.query`가 경로와 오류 종류만 담은 `INTERNAL`인지(ADR-0033 결정 6).
+- 문서: `docs/design/threat-model.md` §4 D에 "Windows에서 키·상태·audit 파일이 상속 ACL로 다른 사용자에게 읽힌다" 행(통제 결정 9·10, 핀은 아래). README Known limitations의 "Windows ACL checking is out of scope" 삭제. `crates/qsh-core/src/resume.rs` 모듈 doc의 "inherited directory ACL" 문단, `docs/design/architecture.md` §7 Windows 경로 줄, `docs/CLI.md` §6.11의 `move-key` Windows 문단 중 DACL 부분(나머지는 Step 5).
+- M20: host audit writer의 `LockFileEx` 잠금·(볼륨 일련번호, 파일 인덱스) 재검증과 `acl.toml` DACL 경고(결정 24)는 M20이다. 이 스텝은 writer가 만드는 파일의 DACL만 한다.
 
 **(b) 테스트·게이트:**
 
-`crates/qsh-core/src/doctor/tests.rs`, `crates/qsh-core/tests/it/service_docs.rs`, `crates/qsh-core/tests/it/doctor_docs.rs`.
+`crates/qsh-core/src/fsutil/` 단위 테스트(`cfg(windows)`)와 각 소유 모듈의 Windows 쌍둥이.
 
-- 핀: `service_not_registered_accepts_a_launchdaemon_plist`, `launchagent_session_scoped_is_silent_when_a_launchdaemon_plist_exists`, `keystore_session_bound_fires_for_platform_store_under_launchdaemon`, `keystore_session_bound_fires_for_platform_store_under_linger_with_a_registered_unit`, `keystore_session_bound_is_silent_for_file_store`, `service_md_launchdaemon_recipe_matches_the_agent_program_arguments`
-- 계획 추가: `keystore_session_bound_covers_serve_listen_and_reverse_units`(route 동등), `keystore_session_bound_is_silent_on_windows_before_m19`(`cfg(windows)`), `doctor_probe_never_invokes_launchctl`(probe 경로에 `Command`가 없음)
-- 기존 `doctor_docs.rs`의 코드 전수 대조와 `cli_md`가 문면을 그대로 인용하는 테스트가 27종으로 초록
-- `golden_*` 하나, `checked_in_man_pages_match_the_generator`(clap 변화 없음 확인)
+- 핀: `windows_private_files_have_an_owner_only_protected_dacl`(대상 파일 전부를 표로 돌며 `GetNamedSecurityInfoW`로 SE_DACL_PROTECTED, ACE 하나, 그 SID가 토큰 사용자, 마스크 `FILE_ALL_ACCESS`), `windows_private_dirs_have_an_inheriting_owner_only_dacl`, `a_dacl_failure_creates_no_file`(주입), `a_legacy_inherited_acl_file_is_replaced_on_the_next_write`, `a_sid_lookup_failure_is_config_error_with_the_path`
+- 소유 모듈 쌍둥이: `move_key_file_store_has_an_owner_only_dacl`(`move_key_file_store_is_mode_0600`의 Windows 쌍둥이), `audit_sink_fails_closed_when_the_dacl_cannot_be_applied`, `stateless_reset_key_has_an_owner_only_dacl`, `resume_tmp_and_lock_have_an_owner_only_dacl`
+- audit 조회: `audit_query_unreadable_log_is_internal_with_path_and_kind_only`의 Windows 행(읽기 거부 DACL)
+- 기존 unix 0600/0700 테스트 무변경 초록
 
-**(c) 완료 판정:** 진단 개수 27이 코드·CLI.md 두 곳에서 같다. LaunchDaemon 펜스 대조가 초록이다. qsh가 `/Library/LaunchDaemons`에 쓰는 경로가 없다. wire diff 0.
+**(c) 완료 판정:** 결정 9 목록의 모든 생성 경로가 같은 모듈을 부르고(`rg`로 `cfg(windows)` 생성 분기 전수 확인), DACL 실패 주입에서 파일이 없다. README 문장이 지워졌다. wire diff 0.
 
-### Step 5 — (d) `qsh sessions`의 `--state`·`--writer`·`--attachable` (0.3~0.5ew)
+### Step 5 — Credential Manager `platform` store와 Windows `move-key` 왕복 (0.4~0.7ew)
 
-근거: ADR-0033 결정 1, 2, 3, 13의 세션 문장과 결과 절의 세션 테스트·fixture·man 항목. 선행: Step 1.
+근거: ADR-0035 결정 12, ADR-0032 결정 15 둘째~넷째 항목·17, ROADMAP M19 DoD의 `move-key` 왕복 줄. `docs/CLI.md` §6.11 `move-key` Windows 문단, threat-model §3 `identity move-key` 행, `docs/design/testing.md` L1. 선행: Step 4(파일 대체가 DACL을 씀), Step 2의 keystore 판정.
 
 **(a) 범위:**
 
-- `qsh-core`(`ops/session.rs`): 호스트 응답을 받은 뒤 클라이언트 `Ops`가 필터를 적용한다. `--state`는 `state` 문자열 정확 일치(모르는 값은 빈 결과), `--writer <principal|none>`(`none`은 `writer: null`), `--attachable`은 이 장비 resume 상태 파일에 그 `session_ref`의 credential이 있는 세션만. 여러 개는 AND다. host 없는 fan-out의 `data.unreachable`은 필터와 무관하게 그대로 남는다.
-- `SessionListReq`와 wire 메시지는 바뀌지 않는다. 필터 인자의 자리는 §7.1 #6.
-- JSON 모양은 `{"sessions": […]}` 그대로이고 새 필드가 없다. human 렌더는 필터가 걸렸을 때 stderr에 "N개 중 M개 표시" 한 줄. `--attachable` 판정은 `session_ref`당 상태 파일을 한 번 읽고 token 값은 어디에도 싣지 않는다(ADR-0007).
-- `qsh-cli`: clap 플래그 셋.
-- 문서: `docs/CLI.md` 상태 헤더(v0.35를 열거나 덧붙임), §6.2 필터 서술. man `qsh-sessions.1` 재생성.
-- fixture(추가만): 필터를 건 `session.list` 하나(이름은 §7.1 #4). 기존 `session.list.json` 무변경 초록.
-- Windows: 필터 함수와 forward route 위의 필터는 Windows client에서 같은 커밋에 연다. 실제 PTY 세션을 여는 e2e는 Windows host PTY가 M20(ADR-0035 결정 25)이라 `cfg(unix)`이고, Windows `qsh listen` 데몬 fan-out의 reverse 쌍둥이는 M19(ADR-0035 결정 14)가 연다.
+- `qsh-core` `identity/keystore.rs` 옆: Step 2가 정한 경로(store crate 또는 `CredReadW`·`CredWriteW`·`CredDeleteW`)로 Windows `platform` store를 붙인다. 항목은 target `qsh`·사용자 이름 `device_id`·`CRED_TYPE_GENERIC`·`CRED_PERSIST_LOCAL_MACHINE`, blob은 다른 플랫폼과 같은 base64 PKCS#8 DER. store는 연산마다 열고 전역 기본 store를 등록하지 않는다. 읽기 버퍼는 `Zeroizing`.
+- `auto`(결정 12): platform을 먼저 시도하고 `Unavailable`이면 파일 모드(Step 4 DACL)로 떨어진다.
+- `move-key`: M17 Windows 빌드의 처분(`--to platform`은 `INTERNAL`, `--to file`은 `moved: false`, M17 plan §9 #10 (`047db25`))을 걷고 다른 OS와 같은 순서·결과로 동작한다. op·순서·audit·잠금 코드는 M17(`5100fdc`) 그대로이고 store만 붙는다.
+- 문서: `docs/CLI.md` §6.11의 `move-key` Windows 문단을 착지 상태로("Windows `platform`은 Credential Manager"), 상태 헤더 v0.37 서술은 고치지 않고 새 판에 적는다. threat-model §3 `identity move-key` 행의 "Windows 빌드에서는 … 구현은 M19" 문장 갱신. `docs/design/testing.md` L1 「플랫폼 키스토어 릴리스 전 수동 단계」에 Windows 줄과 `move-key` 왕복(ADR-0035 결정 12). `docs/design/architecture.md` §8 keystore 행의 Windows 항목.
+- route 동등: 이동 뒤 이 장비가 forward host, reverse listener, reverse target일 때 상대 pin을 고치지 않은 채 handshake한다. M17의 `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`는 `cfg(unix)`이고 Windows `listen`·`serve --to`는 Step 7이 연다. 그래서 이 스텝은 inbound `serve` 행만 Windows에서 열고, `listen`·`serve --to` 행은 Step 7이 같은 테스트의 `cfg(unix)`를 걷어 연다(§5.6에 귀속).
+- M20: 없음.
 
 **(b) 테스트·게이트:**
 
-필터 단위(`ops/session` 옆 tests, 세 다리)와 새 통합 모듈 `crates/qsh-cli/tests/it/sessions_filter.rs`(실제 바이너리, `tests/it/main.rs` 등재).
+- 핀(ROADMAP DoD): `move_key_round_trips_between_credential_manager_and_file_with_the_same_fingerprint`(Windows 다리, 주입 백엔드로 platform → file → platform, fingerprint·device_id 불변, file 뒤 DACL, platform 뒤 파일 부재)
+- 실제 Credential Manager(§7.1 #6): `credential_manager_round_trip_on_the_runner`(`cfg(windows)`, 테스트마다 고유 target 이름, 끝나면 삭제). 러너가 허용하지 않으면 이 테스트는 두지 않고 §1의 수동 단계만 남긴다.
+- 계획 추가: `credential_entry_attributes_are_generic_local_machine_under_target_qsh`(순수 함수), `auto_falls_back_to_the_file_store_when_credential_manager_is_unavailable`, `credential_manager_blob_is_the_same_pkcs8_base64_as_other_platforms`, `move_key_never_emits_key_bytes`의 Windows 행
+- 기존 `identity_move_key::` Windows 처분 테스트(`--to platform`이 `INTERNAL`인 행, `crates/qsh-cli/tests/it/identity_move_key.rs`의 M19 주석)를 성공 행으로 바꾸는 것은 fixture 편집이 아니라 테스트 기대 변경이다. 기존 `identity.move_key.*` fixture는 무변경.
+- route 동등(부분): `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`의 inbound `serve` 행이 Windows에서 초록
 
-- 핀: `sessions_filter_state_writer_attachable_and_combined`, `sessions_filter_does_not_change_the_wire_request`, `sessions_filter_keeps_unreachable_in_fan_out`, `sessions_attachable_never_prints_the_resume_token`
-- 계획 추가: `sessions_filter_unknown_state_is_empty_not_an_error`, `sessions_filter_human_count_line_goes_to_stderr_only`
-- route 동등(계획 추가, 실제 QUIC loopback, `cfg(unix)`): `sessions_filter_applies_identically_to_forward_and_reverse_hosts`(`qsh sessions <forward host>`, `qsh sessions <reverse host>`, host 없는 fan-out 셋이 같은 세션 집합에 같은 결과)
-- `checked_in_man_pages_match_the_generator`, `golden_*` 하나, `jsonl_purity.rs` 행
-- 부하 필터 초안 `scripts/stress/m17.filter`에 통합 모듈을 넣는다(Step 3이 먼저 만들었으면 덧붙인다).
+**(c) 완료 판정:** Windows에서 `qsh init --key-store platform`이 `INTERNAL`이 아니다. 왕복 핀이 Windows 다리에서 초록이다. `cargo deny check` 초록. L1에 Windows 줄이 있다. wire diff 0.
 
-**(c) 완료 판정:** `SessionListReq`와 wire diff 0. 기존 `session.list.json` 무변경. route 동등 테스트가 부하 아래 50회 연속 초록이다.
+### Step 6 — named pipe localctl transport (1.1~1.8ew)
 
-### Step 6 — (d) audit 읽기 코어: `AuditRecordView`, 활성·회전 파일 읽기, 필터, `oldest_ts`·`truncated` (0.5~0.75ew)
-
-근거: ADR-0033 결정 5, 6, 7(읽기 쪽), 8, 9, 10, 11, 13의 플랫폼 문장. 선행: Step 1. 사용자 표면(op·CLI)은 Step 7이다.
+근거: ADR-0035 결정 14(이름·생성·접근 통제·자격 확인·공통 부분·모듈 구조), 결정 17 named pipe 항목 (2)~(6), 결정 19의 threat-model §3·§4 A·B·§7과 `xtask/src/arch.rs`, `docs/design/architecture.md` §1·§7, `localctl/mod.rs` 모듈 doc. ADR-0033 결정 4·13의 named pipe 비노출. 선행: Step 4.
 
 **(a) 범위:**
 
-- `qsh-proto`: `AuditRecordView`(`ts`, `request_id`, `principal`, `action`, `resource`, `decision`, `rule`, `auth_path`, `peer_addr`, `count`, 선택 `role`)와 `AuditQueryReq`(`since`, `until`, `principal`, `action`, `resource`, `decision`, `limit`), `AuditQueryData`(`records`, `skipped_lines`, `oldest_ts`, `truncated`). 자리는 §7.1 #7.
-- `qsh-core` 새 모듈(가칭 `crates/qsh-core/src/audit/reader.rs`):
-  - `[audit].path`(또는 `Paths::audit_log()`)의 활성 로그와 `<path>.1` … `<path>.<retain>` 회전분을 읽는다. 회전 파일 이름 규칙은 `audit/writer.rs`의 `rotated_path` 하나를 공유하고 다시 만들지 않는다.
-  - 읽기만 한다. writer의 파일 락을 잡지 않고, torn write 복구를 흉내 내지 않고, 어떤 파일도 쓰기 모드로 열지 않는다. Unix는 읽기 전용 open, Windows는 `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`를 명시한다(`std::os::windows::fs::OpenOptionsExt::share_mode`).
-  - 파싱되지 않는 줄과 상한을 넘는 줄은 건너뛰고 개수만 센다(§7.1 #8). 줄 내용은 오류에도 출력에도 싣지 않는다.
-  - 파일이 없으면 빈 결과. 읽을 수 없으면 `INTERNAL`, message에 경로와 오류 종류만.
-  - 필터는 정확 일치 AND, `--since <RFC3339|N[smhd]>`(상대 시각은 주입 시계 기준), `--until <RFC3339>`, `--decision <allow|deny>`, `--limit` 기본 100·최대 1000(넘으면 `INVALID_ARGUMENT`). 결과는 최신이 먼저다. `truncated`는 `--limit` 때문에 잘렸을 때 `true`, `oldest_ts`는 읽은 파일 전체에서 가장 오래된 레코드의 `ts`(필터와 무관).
-  - `AuditRecord` → `AuditRecordView`는 필드 단위로 옮기고 가공·보강(역조회, 별칭 해석)이 없다. `role`은 레코드에 키가 있을 때만.
-  - 읽기는 audit 레코드를 남기지 않는다. writer가 degraded로 latch돼 있어도 읽는다(결정 7). 이 성질의 op 수준 핀은 Step 7이다.
-- 삭제 경로 없음(결정 10). reader 모듈에 삭제·절단·쓰기 API가 없다. `[audit].max_bytes`·`retain`의 의미와 기본값은 바뀌지 않는다. 새 doctor finding은 없다(결정 11).
-- 문서: `docs/design/architecture.md` §6에 "조회는 읽기 전용, 락 없음, 복구 없음" 한 문단. 사용자 계약 문서는 Step 7.
-- Windows: reader와 그 테스트 전부가 Windows 다리에서 돈다. `audit_query_reads_while_the_writer_rotates`의 Windows 행은 share mode로 연 핸들이 writer의 회전 rename을 막지 않음까지 본다. host 쪽 writer의 `LockFileEx` 잠금은 M20(ADR-0035 결정 24)이고 잠금 파일에 걸리므로 이 reader와 겹치지 않는다.
+- 모듈 구조: `localctl/frame.rs`·`client.rs`를 `AsyncRead + AsyncWrite` 스트림에 대해 일반화하고, 연결·인스턴스 생성·자격 확인을 `localctl/transport/unix.rs`(지금의 UDS 코드)와 `localctl/transport/windows.rs`로 옮긴다. `frame.rs`·`client.rs`는 파일로 남는다. `localctl/mod.rs`의 `#[cfg(unix)]` 게이트와 `lib.rs`의 모듈 선언 주석을 걷는다.
+- Windows transport:
+  - 이름 `\\.\pipe\qsh-<scope>-<pid>`, `<scope>`는 사용자 SID 문자열과 `Paths::runtime_dir()` 정규 경로(소문자)를 NUL로 이은 SHA-256 앞 16 hex(순수 함수).
+  - 첫 인스턴스는 `FILE_FLAG_FIRST_PIPE_INSTANCE`, 항상 `PIPE_REJECT_REMOTE_CLIENTS`, `PIPE_TYPE_BYTE`·`PIPE_READMODE_BYTE`. 이름이 있으면 bind가 실패한다.
+  - 모든 인스턴스는 Step 4 모듈의 보호된 소유자 전용 DACL(소유자 SID에 읽기·쓰기·`FILE_CREATE_PIPE_INSTANCE`). 다음 인스턴스는 현재 연결을 넘기기 전에 만든다.
+  - 서버는 accept마다 프레임을 읽기 전에 `GetNamedPipeClientProcessId` → `PROCESS_QUERY_LIMITED_INFORMATION` → 토큰 사용자 SID를 대조하고 다르거나 실패하면 말 없이 끊는다. 클라이언트는 `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`으로 열고 첫 프레임 전에 `GetNamedPipeServerProcessId`로 서버 SID를 대조해 다르면 그 후보를 건너뛴다. "pid → SID" 함수는 주입 가능하게 쪼갠다.
+  - 발견: `\\.\pipe\` 열거에서 `qsh-<scope>-*` 접두만 후보(unix `candidate_sockets` 대응). stale 정리 경로는 없다.
+- 공통: `qsh.local.v1` 프레이밍과 `LOCAL_ADMIN`·`LOCAL_CONTROL`·`LOCAL_STREAM`은 그대로. 데몬은 `Authorizer::check`를 conduit에 부르지 않고 클라이언트가 보낸 principal을 믿지 않으며 resume token은 어떤 프레임에도 실리지 않는다. `audit.query`는 어떤 localctl 요청으로도 노출되지 않는다(ADR-0033 결정 4·13).
+- `xtask/src/arch.rs`: 새 `localctl/transport/{unix,windows}.rs`를 `frame.rs`·`client.rs`와 같은 파일 단위 금지(`qsh_transport`·`quinn`·`rustls`)에 올리고, `qsh-cli/src` 금지 토큰에 `named_pipe`와 `\\.\pipe`를 더한다. `daemon.rs` 면제는 그대로. 같은 커밋(`CLAUDE.md` path-scoped 금지 규칙).
+- 문서: threat-model §3 "localctl named pipe" 행(기존 "localctl UDS" 옆), §4 A(pipe 이름 선점, 가짜 데몬과 클라이언트 토큰 가장), §4 B(다른 로컬 사용자의 pipe 접속), §7 잔여 위험(PID 재사용 틈 하나, same-SID 모델은 unix와 같음). `docs/design/architecture.md` §1 localctl 줄(pure UDS → pure 로컬 스트림), §7 runtime dir·pipe 이름 줄. `localctl/mod.rs` 모듈 doc의 trust model 문단에 Windows 대응을 더한다.
+- 이 스텝은 `qsh listen`을 Windows에서 아직 열지 않는다(Step 7). 데몬 쪽 transport는 테스트에서 in-process로 띄운다.
+- M20: 없음(host 쪽 overlapped pipe는 ConPTY 배치로 M20, 결정 20).
 
 **(b) 테스트·게이트:**
 
-`crates/qsh-core/src/audit/` 옆 tests(세 다리).
+`localctl/transport/windows/tests.rs`(가칭)와 기존 `localctl/frame.rs`·`client.rs` 테스트.
 
-- 핀: `audit_record_view_fields_equal_audit_record_fields`, `audit_query_reads_active_and_rotated_files_newest_first`, `audit_query_filters_are_and_combined`, `audit_query_limit_above_the_cap_is_invalid_argument`, `audit_query_skips_a_torn_line_and_counts_it_without_echoing_it`, `audit_query_does_not_modify_the_log`(활성·회전 파일 바이트 불변), `audit_query_works_while_the_audit_sink_is_degraded`, `audit_query_on_a_missing_log_is_empty_not_an_error`, `audit_query_oldest_ts_matches_the_oldest_retained_record`, `audit_query_reads_while_the_writer_rotates`
-- 계획 추가: `audit_query_since_accepts_rfc3339_and_relative_units`(시계 주입), `audit_query_role_key_is_present_only_when_recorded`, `audit_query_unreadable_log_is_internal_with_path_and_kind_only`(`cfg(unix)` 권한 행, Windows는 ACL 행을 M19 DACL 모듈과 함께), `audit_query_skips_overlong_lines_and_counts_them`, `audit_query_truncated_is_set_only_when_the_limit_cut_records`
-- `audit_query_reads_while_the_writer_rotates`를 `scripts/stress/m17.filter`에 넣는다.
+- DoD 핀: `pipe_instance_dacl_is_protected_and_owner_only`(SE_DACL_PROTECTED, 소유자 ACE 하나, Everyone·익명 ACE 없음), `pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`(주입), `pipe_client_writes_nothing_to_a_server_with_another_sid`(주입)
+- 결정 17 (2)~(6): `pipe_create_options_reject_remote_clients_and_claim_the_first_instance`(순수 함수), `pipe_bind_fails_when_the_name_already_exists`, `pipe_client_opens_with_sqos_identification`(순수 함수), `pipe_name_differs_by_sid_or_state_dir_and_matches_otherwise`, `pipe_enumeration_picks_only_scope_prefixed_names`, `the_next_pipe_instance_exists_before_the_current_connection_is_handed_off`
+- 공통 케이스: `localctl::frame::tests`와 `localctl::client::tests`가 `cfg(unix)` 없이 두 OS에서 같은 케이스로 돈다(결정 17 (6))
+- ADR-0033: `audit_query_has_no_wire_message_and_no_localctl_request`가 Windows 다리에서도 돈다(지금 cfg가 있으면 걷는다), 계획 추가 `localctl_request_enum_has_no_audit_variant_on_any_platform`
+- arch: `cargo xtask arch` 초록, `xtask` 단위 테스트에 새 금지 행(`localctl_transport_files_are_banned_from_naming_quic`, `cli_src_bans_named_pipe_tokens`)
+- unix 회귀: `localctl_perms::`, `localctl::daemon` 테스트, `hosts_reverse::` 무변경 초록
+- pipe accept 경합 테스트를 `m19.filter`에 넣는다.
 
-**(c) 완료 판정:** reader가 쓰기 모드로 여는 경로가 없다(`OpenOptions`의 write·append·truncate가 reader 모듈에 없음). 세 다리 초록, 회전 겹침 테스트가 부하 아래 50회 연속 초록이다. 사용자 표면 변화 0(clap·man·fixture diff 0). wire diff 0.
+**(c) 완료 판정:** `localctl` 모듈이 Windows에서 컴파일되고 `cfg(unix)` 게이트가 없다. DoD 3의 핀 셋 중 두 개(DACL, SID 불일치)가 Windows 다리에서 초록이다(선점 기동 실패는 Step 7). xtask 금지 목록이 같은 커밋이다. wire diff 0, `local.rs` diff 0.
 
-### Step 7 — (d) `qsh audit` 표면: op `audit.query`, CLI, 렌더러, 계약 문서, 분류 테스트, 텔레메트리 처분 (0.4~0.55ew)
+### Step 7 — Windows reverse 역할과 정방향·역방향 CLI 종단 (0.8~1.3ew)
 
-근거: ADR-0033 결정 4, 7(op 수준), 9의 출력 모드, 10의 문서 문장, 12, 13과 결과 절의 계약 문서·분류·fixture·threat-model 항목. 선행: Step 6.
+근거: ADR-0035 결정 1·2(client 쪽), 14의 "`qsh listen`의 나머지"·"동작 요약", 17의 정방향·역방향 종단 항목(PTY 없는 부분), 25 가운데 `serve --to` 게이트 제거, 결과 절 "마일스톤 배치"의 M19 역방향 CI. `docs/CLI.md` §6.9·§6.13·§6.14. 선행: Step 6.
 
 **(a) 범위:**
 
-- `qsh-core` 새 `ops/audit.rs`: `Ops::audit_query`, 인가 불요 local op `audit.query`. 원격 peer가 요청할 수 없고, `qsh-proto` 프레임 enum에 variant가 없으며, localctl 데몬의 요청(UDS, Windows named pipe)으로도 노출하지 않는다. ACL action을 새로 요구하지 않는다. `Config::load`가 실패하면 기존 `CONFIG_ERROR`(§7.1 #9).
-- `qsh-cli`: clap `qsh audit`과 결정 5의 인자, human 렌더(표 하나와 `skipped_lines`·`oldest_ts`·`truncated` 요약), JSON 렌더. 지원 모드는 human과 `--json`이고 `--jsonl`은 기존 value op 관례대로 처리한다(§7.1 #10). `--follow`는 두지 않는다.
-- 등록 완전성: schemars, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS`, `OP_FACES` 행, man `qsh-audit.1`, `op_registration_completeness.rs`·`acl_registry.rs`의 local-only 분류.
-- 문서:
-  - `docs/CLI.md` 상태 헤더, §2.4 목록에 `audit.query`(`acl.show` 옆), §2.5 "인가 불요" 행과 "원격에서 부를 수 있으면 열거 oracle" 문장(ADR-0022 결정 4·ADR-0025 결정 4와 같은 문장), 새 §6.22 `qsh audit`(인자, `data`, 읽기 전용, 조회가 audit을 남기지 않음, 삭제·축약 명령이 없고 개수 기반 회전이 유일한 삭제이며 더 긴 보존은 qsh 밖 복사라는 문장, `oldest_ts`).
-  - `docs/design/threat-model.md` §3 새 행 "`qsh audit`"(로컬 사용자, 로컬 읽기, 열거 oracle 방지), §4 F2에 `AuditRecordView` 필드 전수 테스트 확장, §4 F에 "audit을 지우거나 줄이는 경로가 원격 또는 로컬 op으로 생긴다" 행(결정 10, 핀은 아래 삭제 부재 테스트), §4 D 또는 B에 "원격 peer가 audit 열람으로 principal과 거부 이력을 열거한다" 행(결정 4, 핀 `audit_query_has_no_wire_message_and_no_localctl_request`). F5·h26 문면이 ADR-0045·0044 착지 뒤 상태와 맞는지 대조한다(Step 1 (a) 4).
-  - `docs/design/architecture.md` §2 local op 목록.
-- 텔레메트리(결정 12): `crates/qsh-core/src/telemetry.rs` 모듈 doc의 "That promotion is a P1 decision"을 ADR-0033 결정 12 인용으로 바꾼다. 코드 변화 없음. 다른 stderr 진단 줄은 건드리지 않는다.
-- fixture(추가만): `audit.query` 성공 envelope 둘(비어 있지 않은 것, `truncated: true`인 것. 이름은 §7.1 #4).
-- Windows: op·CLI·렌더러·분류 테스트가 세 다리에서 같은 이름으로 돈다(결정 13). 로그 경로는 ADR-0035 결정 13의 Windows state dir이다. Windows named pipe localctl 자체는 M19(ADR-0035 결정 14)이고, 그때 이 op이 pipe 요청에도 없다는 단언이 같은 테스트에 한 행으로 붙는다.
+- 게이트 제거: `reverse/listen.rs`의 `windows_unsupported()`와 부르는 곳, `run_listen`의 `cfg` 분기, `reverse/listen/hub.rs`·`registration.rs`·`reverse/target`(`run_reverse_unix`를 이식 가능한 `run_reverse`로)·`client/link.rs`·`ops/exec.rs`의 reverse 분기·`ops/session.rs`의 `dial_reverse`·`ops/mod.rs`의 관련 `cfg(unix)`. `windows_unsupported()`를 지운다.
+- `qsh listen`(Windows): 종료는 `tokio::signal::ctrl_c`와 콘솔 닫힘 이벤트(Step 3의 핸들러 계열). config·정책 진단·감사·ACL 규율은 unix와 같고 감사 로그·reset key는 Step 4 모듈로 만든다. 이름 선점이면 QUIC listener를 열기 전에 기동이 실패한다. `qsh setup listener`(`--service` 없이)도 연다.
+- `qsh serve --to`(Windows): 게이트만 걷는다. PTY 세션 요청과 파일 op는 M20까지 `UNSUPPORTED`이고 `exec`와 터널을 낸다. Windows Defender 방화벽 첫 허용 프롬프트 안내는 README.
+- `qsh hosts`는 forward와 데몬의 reverse 항목(데몬 없음은 오류 아님), `qsh tunnels`는 데몬 항목 포함, `qsh tunnel close <id>`는 데몬들에 묻는다.
+- `qsh audit`의 route 동등: 같은 장비가 Windows `serve`·`listen`·`serve --to`로 남긴 레코드를 같은 `AuditRecordView` 모양으로 돌려준다(ADR-0033 결정 13).
+- 문서: `docs/CLI.md` §6.13("Windows에서는 `qsh listen`/`qsh serve --to` 둘 다 `UNSUPPORTED`" 문단 삭제, 방화벽 안내), §6.9·§6.14의 Windows 문장(데몬 항목, supervise 판별은 Step 8), §6.12는 M20이 고친다(Windows `serve`의 PTY). `crates/qsh-core/src/localctl/mod.rs`·`reverse/listen.rs` 모듈 doc의 Windows 문장.
+- M20: `serve --to`의 PTY 세션과 host 쪽 `cp`, `setup host`(`--to` 형태 포함), `pair invite`, `pair ssh-respond`. 이 스텝은 그 게이트를 걷지 않는다.
 
 **(b) 테스트·게이트:**
 
-새 통합 모듈 `crates/qsh-cli/tests/it/audit_query.rs`(실제 바이너리, `tests/it/main.rs` 등재)와 `crates/qsh-core/tests/it/`의 분류 테스트.
+새 통합 모듈 `crates/qsh-cli/tests/it/windows_forward_e2e.rs`와 `windows_reverse_e2e.rs`(`#![cfg(windows)]`, 같은 케이스 함수를 공유하고 route만 바꾼다).
 
-- 분류: `op_registration_completeness.rs`·`acl_registry.rs`의 `audit.query` local-only 행, `audit_query_has_no_wire_message_and_no_localctl_request`, `audit_query_never_appears_as_a_control_message_wire_variant`(`pair_ssh_never_appears_as_a_control_message_wire_variant` 형식)
-- 삭제 부재: `no_op_other_than_audit_query_reads_the_audit_log_and_none_writes_it`(가칭, `ops/` 아래에서 audit 경로를 여는 op이 `audit.query` 하나이고 그것도 읽기만, SC6)
-- op 수준: `audit_query_writes_no_audit_record`, `audit_query_envelope_is_the_only_stdout_line`(`--json`), `audit_query_human_mode_never_prints_skipped_line_contents`
-- route 동등(계획 추가, 실제 QUIC loopback, `cfg(unix)`): `audit_query_reads_records_written_by_serve_listen_and_serve_to`(같은 장비가 forward host, reverse listener, reverse target으로 남긴 레코드가 같은 `AuditRecordView` 모양으로 나옴)
-- 등록: `layer_2_every_schema_command_has_all_six_faces`, `checked_in_man_pages_match_the_generator`, `golden_*` 둘, `jsonl_purity.rs`·`exit_code_matrix.rs` 행, `failure_text_discipline.rs`가 새 message를 덮음
-- route 동등 테스트와 실제 바이너리 테스트를 `scripts/stress/m17.filter`에 넣는다.
+- 정방향(Windows `qsh` → Windows 인바운드 `qsh serve`): `exec_round_trip`, `local_tunnel_echo`, `remote_tunnel_echo`, `hosts_lists_the_forward_host_without_a_daemon`
+- 역방향(Windows `qsh listen` ← Windows `qsh serve --to`, 실제 CLI 양쪽, test-only 하니스 없음): `exec_round_trip`, `local_tunnel_echo`, `remote_tunnel_echo`, `hosts_lists_the_reverse_entry`, `hosts_drops_the_reverse_entry_after_the_daemon_dies`, `target_re_registers_with_a_new_daemon`, `tunnels_and_tunnel_close_reach_the_daemon`
+- DoD 3 마지막 핀: `listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken`
+- route 동등 잔여: `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`의 `listen`·`serve --to` 행이 Windows에서 초록(Step 5에서 넘어옴), `audit_query_reads_records_written_by_serve_listen_and_serve_to`가 Windows에서 초록
+- 기존 `reverse_e2e::`, `hosts_reverse::`, `reverse_unreachable_diagnostic::`의 `cfg(unix)` 중 PTY와 무관한 케이스를 Windows에서 연다. PTY가 필요한 케이스는 주석으로 M20을 적는다(ADR-0035 결정 3).
+- `exit_code_matrix.rs`: `listen`·`serve --to`·`setup listener`의 Windows 행이 성공 또는 기능 오류(Windows 전용 `UNSUPPORTED` 아님)
+- 종단 모듈 둘을 `m19.filter`에 넣는다.
 
-**(c) 완료 판정:** `audit.query`가 local-only로 분류되고 wire·localctl variant가 없음을 테스트가 고정한다. 새 fixture 둘과 man 페이지가 같은 커밋에 있다. `capabilities.json` diff 0, wire diff 0. route 동등 테스트가 부하 아래 50회 연속 초록이다.
+**(c) 완료 판정:** `windows_unsupported`와 `run_reverse_unix`가 소스에 없다. 정방향·역방향 종단이 Windows 다리와 Dave-Windows 부하 아래 50회 연속 초록이다. unix 회귀 0. wire diff 0.
 
-### Step 8 — 마감 (0.1~0.2ew)
+### Step 8 — supervise와 절전 감지, reverse 쌍둥이 (0.3~0.5ew)
 
-근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, 이 문서 §4의 안정성 규율. 선행: Step 2~7.
+근거: ADR-0035 결정 15, ADR-0023의 절전 감지 전제(Windows 확인을 결정 15가 대체), ADR-0031 결정 3과 개정 이력(`listen` 쌍둥이 M19), ADR-0033 결정 13(세션 필터의 reverse fan-out), `docs/CLI.md` §6.2 route 문단·§6.14 절전 감지 문장, `crates/qsh-core/src/client/wake.rs` 모듈 doc, `crates/qsh-cli/tests/it/sessions_filter.rs` 모듈 doc. 선행: Step 7.
 
 **(a) 범위:**
 
-- **부하 반복.** M17 타이밍 민감 테스트 전부를 `scripts/stress/m17.filter`로 묶는다(§7.1 #11). `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh`로 50회 돌리고 "50/50 passed under load" 줄, 테스트 개수, 호스트 사양을 마감 노트에 적는다. `m17-latency.filter`는 두지 않는다.
+- 절전 감지: `client/wake.rs`의 단조 시계 표본 함수 하나만 `cfg`로 갈라 Windows에서 `QueryUnbiasedInterruptTime`을 읽는다. 감지 알고리즘(`WAKE_TICK`, `WAKE_SKEW`, 앞으로 뛴 차이만 셈)과 tokio 타이머는 그대로. `qsh.event/v1`의 `wake`와 supervise·target backoff의 즉시 재시도가 Windows에서도 나온다.
+- `qsh tunnel open --supervise`: forward route(`-L`/`-D`)는 이미 이식 가능하고, reverse route `-R`은 데몬 reverse connection이 carrier이며 운영자 닫기를 `LocalHostList`·`LocalTunnelList`로 판별한다. named pipe 위에서 같은 값을 돌려주므로 규칙은 그대로다.
+- 신뢰 철회: `crates/qsh-testkit/tests/it/trust_withdrawal.rs`의 `listen` 모듈 `cfg(unix)`를 걷는다(ADR-0031 결정 3). `serve_to` 모듈의 `cfg(unix)`도 같이 걷는다(§9 #3 확정, ADR-0031 2026-10-16 개정 이력).
+- 세션 필터: `sessions_filter_applies_identically_to_forward_and_reverse_hosts`를 Windows에서 연다. Windows host는 PTY 세션이 없으므로 세션 0개 위에서 필터와 `data.unreachable` 유지, fan-out의 reverse 항목을 본다(`sessions_filter.rs` 모듈 doc의 M19 문장 갱신).
+- 문서: `docs/CLI.md` §6.14의 "절전 감지 Windows 미확인" 문장 삭제, §6.2 route 문단의 "M19가 연다" 갱신, `client/wake.rs` 모듈 doc, `docs/design/testing.md`의 신뢰 철회 문단 플랫폼 줄.
+- M20: PTY 세션이 있는 필터 e2e.
+
+**(b) 테스트·게이트:**
+
+- 절전: `windows_wake_sample_is_monotonic`(Windows), `wake_sample_excludes_suspended_time_by_contract`(표본 함수의 출처 상수 확인. 실제 절전은 캠페인 (4)), 기존 `client::wake` 감지 테스트(주입 표본)가 네 다리에서 초록
+- supervise: `tunnel_supervise::`·`tunnel_supervise_cli::`의 reverse `-R` 케이스 중 PTY와 무관한 것을 Windows에서 연다. 계획 추가 `windows_supervised_remote_tunnel_survives_a_target_reconnect`
+- 신뢰 철회: `trust_withdrawal::listen::`와 `trust_withdrawal::serve_to::` 전부가 Windows 다리에서 초록
+- 세션 필터: `sessions_filter_applies_identically_to_forward_and_reverse_hosts`, `sessions_filter_keeps_unreachable_in_fan_out`가 Windows 다리에서 초록
+- 위 셋을 `m19.filter`에 넣는다.
+
+**(c) 완료 판정:** `client/wake.rs`의 Windows 분기가 표본 함수 하나다. 신뢰 철회 `listen` 쌍둥이와 세션 필터 reverse 쌍둥이가 Windows 부하 아래 50회 연속 초록이다. wire diff 0.
+
+### Step 9 — client 기능 동등: 대화형 attach, `-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`, doctor, `release_smoke` (0.8~1.3ew)
+
+근거: ADR-0035 결정 1·2·3(client 쪽), 5~8의 attach, 17의 `release_smoke` 항목(PTY 축 제외), ADR-0029 결정 2·23(드라이브 문자 operand, client 로컬 쓰기)과 ADR-0035 결정 26 마지막 항목(client get의 로컬 쓰기), ADR-0044 결정 1·5·22·25(Windows client 자동 발동과 `--reverse`의 이 장비 쪽). `docs/CLI.md` §6.21 Windows 문장, ADR-0044 터미널 순서 문단(§6.11 근처의 "Unix 빌드에만 있다"), README Known limitations의 부트스트랩 문단. 선행: Step 3, Step 5, Step 7.
+
+**(a) 범위:**
+
+- 대화형 attach: `tui::run`의 비unix 분기를 지우고 Step 3의 Windows 터미널로 `qsh [user@]host`와 `qsh attach <session-ref>`를 연다. 콘솔 이벤트는 detach, 세션은 남는다. route와 무관하게 같은 루프다.
+- `-L`/`-R`/`-D` 대화형 플래그와 `qsh tunnel open --dynamic`: `crates/qsh-cli/src/main.rs`의 `TunnelShutdown` 등 비unix 분기를 Windows 의미(`ctrl_c`와 콘솔 닫힘)로 정리하고, `dynamic_forward.rs`의 `cfg(unix)` 중 이식 가능한 것을 연다.
+- `qsh cp` client: `crates/qsh-core/src/file/operand.rs`에 드라이브 문자 규칙(한 글자 뒤 `:`는 로컬, ADR-0029 결정 2)을 Windows 빌드에서 켠다. get의 로컬 쓰기는 결정 26 규칙(mode 합성, 소유자 쓰기 비트가 꺼졌을 때만 읽기 전용 특성, 임시 파일은 Step 4 DACL로 만들고 rename 직전 보호를 풀어 상속 ACL을 받음, `-p`는 `SetFileTime`). Windows host는 M20까지 파일 op에 `UNSUPPORTED`이므로 이 스텝의 종단은 Windows client → Windows host의 `UNSUPPORTED` 경로와 client 쪽 단위·통합 테스트다(§9 #1).
+- 자동 부트스트랩: `crates/qsh-cli/src/auto_bootstrap.rs`의 unix 한정을 걷어 Windows의 대화형 attach와 `qsh cp`에서 같은 분기를 켠다(ADR-0044 결정 25). 터미널 순서(ssh 동안 cooked, 끝난 뒤 raw)를 Windows 콘솔에서도 지킨다.
+- `qsh pair ssh --reverse`: 이 장비 쪽(`qsh listen`이 서는 쪽, ADR-0044 결정 22)을 Windows에서 연다. 원격 쪽 응답자(`pair ssh-respond`)는 M20이라 응답자 모드 가짜 ssh 종단은 Windows 원격으로는 돌 수 없다. 이 장비 쪽만으로 끝나는 부분은 `pair_client` 모듈이 이미 Windows 다리에서 돈다(`docs/design/testing.md` 가짜 ssh 문단).
+- `qsh doctor`: Windows에서 client 쪽 finding이 다른 OS와 같은 집합으로 돈다. `controller_unreachable` 문안 그대로, 방화벽 안내는 README.
+- `release_smoke`의 `#[cfg(not(unix))]` 쌍둥이를 넓힌다: 기존 `init` → `trust` → `exec --json`에 `doctor --json`, `tunnel open --local`의 TCP echo 왕복, 만든 파일의 DACL 단언(Step 4)을 더한다. PTY session open·write·read·close 축은 M20.
+- `exit_code_matrix.rs`: client 쪽 Windows 전용 `UNSUPPORTED` 행을 지운다(대화형 형태, `cp`의 client 쪽, `pair accept` 프롬프트). 남는 Windows 행은 `session open`(host PTY, M20)과 Step 11이 지울 `service install --activate` 행이다. `session open` 행의 주석 "Windows host is P2"를 "Windows host PTY is M20 (ADR-0035)"로 고친다.
+- 문서: `docs/CLI.md` §6.21의 "Windows client의 `qsh cp`는 M19" 문단을 착지 상태로, ADR-0044 터미널 순서 문단의 "Unix 빌드에만" 문장 갱신, §7 Windows 범위. README Known limitations의 부트스트랩 문단(Windows client 자동 발동은 착지, 응답자는 M20).
+- M20: Windows host 쪽 파일 op와 `cp` 종단, `pair ssh-respond`, PTY 축.
+
+**(b) 테스트·게이트:**
+
+- attach(§7.1 #4의 echo host, Windows 다리, ConPTY 안의 실제 `qsh` 바이너리): `windows_attach::echo_round_trip_forward`, `windows_attach::echo_round_trip_reverse`, `windows_attach::detach_then_attach_resumes_forward`, `windows_attach::detach_then_attach_resumes_reverse`, `windows_attach::console_close_detaches_and_keeps_the_session`
+- `-D`: `windows_forward_e2e::dynamic_forward_connect`, `windows_reverse_e2e::dynamic_forward_connect`(curl 없이 SOCKS5 CONNECT를 테스트 코드가 직접 보냄)
+- `cp` client: `drive_letter_operand_is_local_on_windows`, `drive_letter_operand_with_a_user_host_prefix_is_remote`, `a_one_letter_host_needs_brackets_or_user_on_windows`(계획 추가, 규칙 경계는 §7.1 #7), `windows_get_writes_a_read_only_attribute_only_when_owner_write_is_clear`, `windows_get_temp_file_is_owner_only_until_rename`, `windows_get_preserves_mtime_with_p`, `cp_to_a_windows_host_is_unsupported_before_m20`(forward와 reverse 두 route, file.v1 미광고)
+- 자동 부트스트랩: `auto_bootstrap::` 중 대화형 form 케이스를 Windows에서 연다(가짜 ssh, `ssh.exe`). 계획 추가 `auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`
+- `pair ssh --reverse`: `ssh_bootstrap::pair_client` 기존 행 초록, 계획 추가 `pair_ssh_reverse_local_side_runs_on_windows_and_names_serve_to_as_the_next_command`
+- `release_smoke` 확장 쌍둥이, `exit_code_matrix.rs`의 Windows 전용 `UNSUPPORTED`가 `session open` 하나와 `service install --activate`(Step 11 몫)뿐
+- `windows_attach::`를 `m19.filter`에 넣는다.
+
+**(c) 완료 판정:** `tui::run`에 비unix 분기가 없다. 표의 client 기능마다 두 route 테스트가 Windows 다리에서 초록이다. `auto_bootstrap.rs` 모듈 doc에 unix 한정이 없다. wire diff 0, `capabilities.json` diff 0.
+
+### Step 10 — 작업 스케줄러 서비스 백엔드, `qsh service run`, 상시 기동 레시피, `logon_task_session_scoped` (0.7~1.2ew)
+
+근거: ADR-0035 결정 27(작업 정의, 콘솔과 로그, 재시작, 수명, 등록, doctor, `manager` 값), 결정 9(작업 정의 파일 DACL), 결정 17의 `service_docs.rs` 확장과 `ops/service/tests.rs` 항목, 결정 19의 threat-model §3 작업 정의 행과 `docs/CLI.md` §6.17·§6.18·§6.20, `docs/deploy/service.md` Windows 절. ADR-0032 결정 12(상시 기동 자동 설정 없음)·16. 선행: Step 4. `setup listener --service`는 Step 7.
+
+**(a) 범위:**
+
+- `ops/service/`: `SERVICE_UNSUPPORTED_PLATFORM`의 Windows 분기를 걷고 작업 스케줄러 백엔드를 연다.
+  - `install`은 `<config_dir>\service\qsh-<mode>.task.xml`을 Step 4 DACL로 쓴다. 내용은 고정: `LogonTrigger` 하나, 현재 사용자 `InteractiveToken`·`LeastPrivilege`, `MultipleInstancesPolicy=IgnoreNew`, `ExecutionTimeLimit=PT0S`, 배터리 조건 끔, `RestartOnFailure`(1분). 동작은 `current_exe()` 절대 경로와 `service run <mode>`. 작업 이름 `\qsh\qsh-<mode>`.
+  - `status`는 파일 존재만, `uninstall`은 파일 삭제만(플래그 없는 동작, M9 계약 그대로). audit 한 건 뒤 쓰기.
+  - `manager` 값 `"task_scheduler"`(additive).
+- 숨김 subcommand `qsh service run <mode>`(clap `hide = true`, 모든 플랫폼에서 파싱): `FreeConsole` 뒤 stdout·stderr를 `<state_dir>\log\<mode>.out.log`·`<mode>.err.log`(Step 4 DACL, 덧붙이기)로 돌리고 같은 run mode 진입 함수를 부른다. unix에서 직접 치면 같은 리디렉션 뒤 같은 진입 함수.
+- 재시작 실측(§1 (i)): `RestartOnFailure`가 실행 중 비정상 종료에 다시 띄우지 않으면 로그온 트리거에 1분 간격 무기한 `Repetition`을 더한다(`IgnoreNew`가 중복을 막음). 결과를 커밋 본문과 렌더러에 반영.
+- 상시 기동 레시피: `docs/deploy/service.md` Windows 절에 기본 작업 정의 펜스, 등록·해제 레시피(`schtasks /Create /F /TN \qsh\qsh-<mode> /XML <file>`, `/End`, `/Delete /F`), 상시 기동 변형 펜스(`BootTrigger` 추가, `LogonType=Password`)와 `/RU <DOMAIN\user> /RP` 등록, 암호 변경 시 재등록 고지, 관리자 프롬프트 필요 여부(§1 (ii) 실측), supervised tunnel 작업 예시. `Password` 주체의 Credential Manager 한 줄은 Step 11의 실측(§1 (iii)) 결과로 채운다. qsh는 상시 기동 작업을 대신 등록하지 않는다(ADR-0032 결정 12).
+- doctor: `service_not_registered`·`service_restart_drops_sessions`를 작업 정의 파일 경로로 Windows에서 낸다. 새 warn `logon_task_session_scoped`(Windows에서만, 해당 mode의 작업이 등록돼 있고 주체가 `InteractiveToken`이면). 등록 상태와 주체는 COM(`ITaskService` → `IRegisteredTask`의 정의 주체)으로 읽고 subprocess는 띄우지 않는다. 못 읽으면 내지 않는다. remedy는 상시 기동 레시피. `EXPECTED_DOCTOR_CODES` 27 → 28, `docs/CLI.md` §6.11 끝 문장과 §6.17 머리 문장의 개수.
+- `qsh setup listener --service`(Step 7 뒤)와 `setup` 단계가 이 백엔드를 부른다. `setup host --service`는 M20.
+- 문서: `docs/CLI.md` §6.18(`manager` 값 목록, 버전 헤더, `SERVICE_UNSUPPORTED_PLATFORM` 인용문 갱신과 `service_docs.rs`의 인용 단언 갱신), §6.17 행, §6.20 `--service`. threat-model §3 "Windows 작업 스케줄러 작업 정의" 행(기존 `qsh service` 행의 Windows 변형). `ops/service/mod.rs` 모듈 doc의 Windows 문장.
+- M20: `setup host --service`의 Windows host 경로.
+
+**(b) 테스트·게이트:**
+
+`crates/qsh-core/src/ops/service/tests.rs`와 `crates/qsh-core/tests/it/service_docs.rs`.
+
+- DoD 4 핀: `service_md_windows_task_fence_matches_the_renderer`(바이트 단위, 세 mode), `logon_task_session_scoped_fires_for_an_interactive_token_task`, `logon_task_session_scoped_is_silent_for_a_password_task`, `logon_task_session_scoped_is_silent_when_the_task_cannot_be_read`(가짜 COM 읽기)
+- 렌더·경로·존재(ADR-0035 결과 절): `windows_task_definition_renders_the_fixed_settings`, `windows_task_path_is_under_config_dir_service`, `windows_task_definition_file_has_an_owner_only_dacl`, `windows_status_reports_existence_from_the_task_file_only`, `windows_install_writes_one_audit_record_before_the_file`
+- `qsh service run`: `service_run_redirects_stdout_and_stderr_to_the_mode_logs`, `service_run_log_files_have_an_owner_only_dacl`, `service_run_is_hidden_from_help_and_man`(`checked_in_man_pages_match_the_generator` 무변경 초록 포함)
+- route 동등: `windows_task_definition_covers_serve_listen_and_reverse_modes`(세 mode 인자가 launchd·systemd 렌더러와 같은 규칙)
+- doctor: `service_not_registered_reads_the_windows_task_file`, `logon_task_session_scoped_covers_serve_listen_and_reverse_tasks`, `doctor_probe_never_spawns_schtasks`, `EXPECTED_DOCTOR_CODES` 대조와 `doctor_docs.rs`
+- 플래그 없는 호출은 매니저를 부르지 않음: `install_without_activate_never_invokes_the_manager` 등 M17 셋이 Windows 다리에서 초록(`ManagerRunner` 호출 0회)
+- `setup::`의 `--service` 행이 Windows에서 성공(Step 7 뒤)
+- `qsh service run` 리디렉션 테스트(실제 프로세스)를 `m19.filter`에 넣는다.
+
+**(c) 완료 판정:** Windows `qsh service install|uninstall|status`가 `UNSUPPORTED`가 아니고 매니저를 부르지 않는다. 펜스 대조가 바이트 단위로 초록이다. §1 (i)(ii)의 실측 결과가 커밋 본문과 `service.md`에 있다. `docs/man/` diff 0. wire diff 0.
+
+### Step 11 — ADR-0032 Windows 열: `schtasks` argv, COM `TaskStateQuery`, `--live`, 상시 기동 형태 보존, `keystore_session_bound` Windows 판정 (0.2~0.4ew)
+
+근거: ADR-0032 결정 3 표의 작업 스케줄러 열, 4(실행 중 재등록), 5(등록 여부 기준 비활성화, `/Query`), 6(COM 상태값 하나), 8(`schtasks` 오류, `InteractiveToken` 시작 실패의 `INTERNAL`), 10(Windows 분기 구현), 11(Windows 레시피 대조), 15 첫 항목(Windows 실측), 18(Windows `Password` 주체 갈래). ADR-0035 결정 12 마지막 문장, 27·28. M17 plan §5.1·§5.2의 "M19 밖" 행 전부 (`047db25`). 코드 쪽 M19 주석(`doctor.rs`의 `KEYSTORE_SESSION_BOUND` 문단, `doctor/probe.rs`, `doctor/tests.rs`, `doctor/probe/tests.rs`, `crates/qsh-cli/tests/it/fixtures.rs`). 선행: Step 10.
+
+**(a) 범위:**
+
+- argv 빌더(`cfg` 없는 순수 함수): 활성화 `schtasks /Create /F /TN \qsh\qsh-<mode> /XML <task path>`, 실행 중이 아니면 `schtasks /Run /TN …`. 비활성화는 `/Query` exit 0(등록)이면 실행 중일 때만 `/End`, 그다음 `/Delete /F`. 인자는 닫힌 집합 `<mode>`와 qsh가 정한 경로뿐.
+- `TaskStateQuery`의 COM 구현(`IRegisteredTask::get_State`가 `TASK_STATE_RUNNING`인지, M17 seam `1790cad`). 외부 출력을 파싱하지 않는다.
+- 결정 4 실측(§1 마지막 항목): `/Create /F`가 실행 중 인스턴스를 멈추면 실행 중일 때 `/Create`도 부르지 않고 `already_active`로 끝나도록 ADR-0032 결정 4가 정한 처분을 따른다. 결과를 커밋 본문에.
+- 결정 18 Windows 갈래: `\qsh\qsh-<mode>` 작업이 `Password` 주체로 등록돼 있으면(Step 10의 COM 읽기) `--activate`는 파일만 쓰고 `/Create`·`/Run`을 부르지 않으며 `always_on_present`, `--deactivate`는 `/End`·`/Delete`를 부르지 않고 파일을 지운 뒤 `always_on_present`. `--live`는 그 작업의 실행 여부.
+- 오류(결정 8): `schtasks.exe` `NotFound`는 `UNSUPPORTED`, 0이 아닌 exit는 `INTERNAL`(`step`, `exit_code`, stderr 첫 줄 512바이트), 30초 초과 `TIMEOUT`. `InteractiveToken` 작업이 대화형 세션 없이 시작 못 하면 같은 `INTERNAL`이고 다른 주체로 우회하지 않는다.
+- `keystore_session_bound`의 Windows 판정(§1 (iii)): `Password` 주체 작업이 Credential Manager를 읽으면 Windows에서 내지 않는 지금 동작을 유지하고 코드 주석의 "M19 전에는 내지 않음"을 실측 결과로 바꾼다. 못 읽으면 `BootTrigger`·`Password` 주체로 등록된 작업(Step 10 COM 읽기)에 같은 remedy(`qsh identity move-key --to file`)로 낸다. 어느 쪽이든 `docs/deploy/service.md` Windows 상시 기동 레시피의 한 줄을 결과에 맞추고(ADR-0032 결과 절), `docs/CLI.md` §6.17 `keystore_session_bound` 행의 Windows 문장을 고친다.
+- `service_activation_flags_are_unsupported_on_windows_before_m19`(M17 계획 추가 테스트)를 지우고, `exit_code_matrix.rs`의 `service install --activate` Windows `UNSUPPORTED` 행을 성공 행으로 바꾼다.
+- 문서: `docs/deploy/service.md` Windows 절의 `--activate` 안내와 비활성화 레시피(ADR-0032 결정 11), `docs/CLI.md` §6.18 플래그 문단의 Windows 서술. threat-model §4 E "매니저 호출 인자 주입" 행에 Windows 열(인자에 사용자 입력·uid 없음), §4 G "재시작 부재" 행에 Windows 처분.
+- M20: 없음.
+
+**(b) 테스트·게이트:**
+
+- DoD 10 핀(Windows 다리, 가짜 runner와 가짜 `TaskStateQuery`): `install_activate_runs_the_documented_argv_on_task_scheduler`, `windows_activate_updates_the_stored_task_without_running_it_when_already_running`, `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched`의 작업 스케줄러 행, `status_live_reports_the_always_on_form_when_present`의 작업 스케줄러 행
+- 비활성화: `deactivate_calls_disable_for_a_registered_but_inactive_unit`의 Windows 행(`/End` 없이 `/Delete /F`), `deactivate_skips_when_the_unit_is_not_registered`의 Windows 행(`/Query` 0 아님)
+- argv·오류: `install_activate_argv_covers_serve_listen_and_reverse_modes`의 Windows 행, `manager_argv_never_contains_user_input`의 Windows 행, `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code`의 Windows 행, 계획 추가 `interactive_token_start_failure_is_internal_without_a_fallback_principal`
+- 문서 대조: `service_md_activation_recipes_match_the_argv_builders`의 Windows 행
+- 실경로(Windows 다리, 1건): `status_live_queries_the_real_task_scheduler_for_an_unregistered_task`(등록되지 않은 이름에 대해 `active: false`, 작업을 만들지 않음, §7.1 #9)
+- `keystore_session_bound`: 실측이 "읽음"이면 `keystore_session_bound_is_silent_for_a_password_task_that_reads_credential_manager`, "못 읽음"이면 `keystore_session_bound_fires_for_platform_store_under_a_password_boot_task`. M17의 `keystore_session_bound_is_silent_on_windows_before_m19`는 그 결과 테스트로 바꾼다.
+
+**(c) 완료 판정:** M17 plan §5.1·§5.2의 "M19 밖" 행이 모두 이 스텝의 테스트로 덮였다. `Command::new("schtasks")`가 기본 runner 한 곳에만 있다. `exit_code_matrix.rs`의 Windows 전용 `UNSUPPORTED`가 `session open` 하나다. wire diff 0.
+
+### Step 12 — aarch64 자산, `install.ps1`, zip의 man 페이지와 목록 대조 (0.3~0.5ew)
+
+근거: ADR-0035 결정 16 자산·man 페이지·설치 스크립트 항목, `docs/design/architecture.md` §8의 `windows-sys` 행. 선행: Step 1.
+
+**(a) 범위:**
+
+- `release.yml`: `aarch64-pc-windows-msvc`를 x86_64 러너에서 교차 빌드하는 matrix 행을 더한다. `Check every target is published`와 `verify-publish-path`의 목록, `SHA256SUMS`, attestation 대상에 같은 규칙으로 넣는다. aarch64 기능 확인은 캠페인 (9)다.
+- Windows 패키징: zip에 `qsh.exe`와 `man/*.1`(`docs/man/`과 같은 바이트)을 담고, 패키징 스텝에 zip 안 `man/` 목록이 `docs/man/`과 같은지 대조하는 검사를 둔다.
+- `scripts/install.ps1`: 아키텍처를 골라 zip을 받고 `SHA256SUMS`로 대조, `%USERPROFILE%\.local\bin`에 `qsh.exe`, `%USERPROFILE%\.local\share\man\man1`에 페이지, 사용자 `PATH`에 bin이 없으면 더한다. 관리자 권한 없음. release 자산으로도 올린다(서명은 Step 13).
+- 문서: README 설치 절의 Windows 한 줄(`irm <URL> | iex`), `scripts/README.md`의 `install.ps1` 절, `RELEASE-NOTES.md`는 Windows 자산이 처음 서명된 태그 절에서(Step 13).
+- M20: 없음.
+
+**(b) 테스트·게이트:**
+
+- `xtask/tests/install_script.rs`와 같은 무게의 `install.ps1` 검사: 계획 추가 `install_ps1_verifies_the_checksum_before_extracting`, `install_ps1_refuses_an_unknown_architecture`, `install_ps1_does_not_require_elevation`. 실행 위치는 §7.1 #11(Windows 다리의 pwsh로 로컬 가짜 release 디렉터리를 대상으로).
+- `release.yml`은 브랜치 `workflow_dispatch` dry-run 경로(`verify-publish-path`)가 초록. 에이전트는 workflow를 실행하지 않는다. 실행은 사람이 하거나 PR의 CI가 하는 경로만 쓴다.
+- `checked_in_man_pages_match_the_generator` 무변경 초록
+
+**(c) 완료 판정:** 두 Windows 자산이 목록 검사에 있고 man 대조 스텝이 있다. `install.ps1`이 체크섬 대조를 건너뛰는 경로가 없다.
+
+### Step 13 — Authenticode 서명·검증과 시크릿 게이트 (0.3~0.5ew)
+
+근거: ADR-0035 결정 16 코드 서명·서명 검증·시크릿 게이트 항목, 결과 절의 시크릿 게이트 세 경우, 결정 19의 `docs/deploy/release-secrets.md`와 `RELEASE-NOTES.md`. 선행: Step 12.
+
+**(a) 범위:**
+
+- `release.yml` Windows leg: `Check for Windows signing secrets` 스텝(macOS `Check for Apple signing secrets`와 같은 셸 로직, 전부-또는-전무). 시크릿 넷이 모두 있으면 `Sign the binary`가 `sslcom/esigner-codesign`로 `qsh.exe`(두 아키텍처)와 `install.ps1`에 SHA-256 다이제스트와 RFC 3161 타임스탬프(`http://ts.ssl.com`)를 붙이고, `Verify the signature`가 `signtool verify /pa /v`와 `Get-AuthenticodeSignature`로 상태 `Valid`, 주체가 `WINDOWS_SIGN_EXPECTED_SUBJECT`, 타임스탬프 서명 존재를 확인한다. 하나도 없으면 건너뛰고 태그 push에서 `Unsigned release` 경고, 일부만 있으면 태그 push는 오류, 브랜치 `workflow_dispatch`는 경고 뒤 건너뜀.
+- 순서: 빌드, 서명, 서명 검증, `release_smoke`, 패키징(서명된 바이트). `release_smoke`의 Windows 쌍둥이는 서명된 바이너리로 돈다.
+- macOS와 공유하는 게이트 셸 로직을 한 스크립트(가칭 `scripts/release/secret-gate.sh`)로 빼서 세 경우를 한 번에 고정한다(ADR-0035 결과 절).
+- 문서: `docs/deploy/release-secrets.md`에 Windows 서명 시크릿 넷과 변수 하나의 절(이름, 발급처 SSL.com eSigner, 회전 절차, 값은 적지 않음). `RELEASE-NOTES.md`는 Windows 자산이 처음 서명되는 태그 절에 적는다(그 태그는 사람 몫 시크릿 뒤).
+- 사람 몫: 인증서와 시크릿(§0.5). 에이전트는 시크릿을 설정하지 않는다.
+- M20: 없음.
+
+**(b) 테스트·게이트:**
+
+- `secret_gate_signs_when_all_secrets_are_present`, `secret_gate_skips_with_a_warning_when_none_are_present`, `secret_gate_fails_a_tag_push_when_some_are_present`(게이트 스크립트를 가짜 환경 변수로 돌리는 셸 테스트, 위치는 §7.1 #11)
+- 서명 검증 스텝의 판정 함수(주체·상태·타임스탬프)를 pwsh 스크립트로 두고 서명되지 않은 바이너리에서 `NotSigned`로 실패함을 Windows 다리 테스트로 고정한다: 계획 추가 `windows_signature_check_fails_on_an_unsigned_binary`
+- 실서명은 시크릿이 준비된 태그 run에서만 돈다. 그 전까지 DoD 6의 "검증한다"는 스텝 존재와 위 판정 테스트로 본다(§9 #8).
+
+**(c) 완료 판정:** 시크릿 없는 PR CI와 브랜치 dry-run이 초록이고 경고를 낸다. `release-secrets.md`에 이름만 있다. 에이전트가 시크릿 관련 `gh` 명령을 부른 흔적이 없다.
+
+### Step 14 — 캠페인 문서 `docs/campaigns/p1-windows.md` 사전 고정 (0.3~0.4ew)
+
+근거: ADR-0035 결정 18, ROADMAP M19 DoD 캠페인 줄과 §5.5, `docs/campaigns/p1-ssh-bootstrap.md` R5(요건 4·6의 M19 이월). 선행: Step 3·5·7·9·10·12·13(회차가 가리키는 명령·자산 이름). Step 15(구현 마지막 스텝) 앞.
+
+**(a) 범위:**
+
+- 회차와 합격 기준. M19 몫은 (1) Windows Terminal과 conhost 각각에서 Linux·macOS host로 attach(bash/zsh 입력, 한글·이모지, vim 전체 화면과 복원, 콘솔 창 닫기 뒤 세션 생존과 모드 복원), (3)의 Windows `qsh listen` ← Linux/macOS `qsh serve --to`(attach·`cp`·터널), (4) 절전 복귀, (5) 둘째 Windows 계정의 pipe 접속 거부와 이름 선점 기동 실패, (6) 로그온 작업의 로그온 기동·강제 종료 뒤 재기동·로그오프 정지, (8) Credential Manager 왕복, (9) Windows on ARM에서 (1) 축약, (10) 상시 기동 변형의 로그오프·재부팅 생존과 `logon_task_session_scoped` 소멸, (11) 서명 주체 표시·SmartScreen·`install.ps1`·`scoop install`·`winget install`. 그리고 `p1-ssh-bootstrap` R5가 넘긴 Windows client 자동 부트스트랩(`qsh box`가 `ssh.exe`로 pin을 세우고 attach, `qsh cp` 한 번).
+- host 회차 (2), (3)의 Windows target 쪽, (7)은 자리만 두고 "M20이 더해 다시 고정"이라고 적는다.
+- 대상 트리 SHA 고정 칸, 회차 표, 판정 규칙. 형식은 `p1-ssh-bootstrap.md`를 따른다.
+- `docs/ROADMAP.md` §5.5 행의 사전 고정 해시는 main 세션이 채운다. `CLAUDE.md` campaigns 목록에 `p1-windows`(main 세션, §9 #7).
+
+**(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록. 회차가 가리키는 명령 이름이 착지한 clap 트리와 같은지 손으로 대조한다.
+
+**(c) 완료 판정:** 문서가 Step 15 착지 전에 main에 있다. M19 회차와 M20 자리가 구분돼 있다.
+
+### Step 15 — scoop·winget job (0.3~0.5ew)
+
+근거: ADR-0035 결정 16 패키지 관리자 항목. 선행: Step 12, Step 14.
+
+**(a) 범위:**
+
+- `release.yml`에 `scoop-bucket` job: `DaveDev42/scoop-bucket`의 `bucket/qsh.json`을 새 버전·URL·해시로 bump한다(두 아키텍처, `checkver`·`autoupdate`). 쓰기는 `SCOOP_BUCKET_DEPLOY_KEY` 하나로 범위를 좁힌다.
+- `winget` job: `wingetcreate update --submit`으로 `microsoft/winget-pkgs`에 `DaveDev42.qsh` 갱신 PR(설치 형식 zip 안 portable). `WINGET_PAT`.
+- 두 job은 `homebrew-tap`과 같이 시크릿이 없으면 green인 채 건너뛰고 `continue-on-error`로 release를 붉히지 않는다. 매니페스트는 `man/*.1`을 설치하지 않는다(같은 내용은 `qsh help`).
+- 매니페스트 템플릿을 저장소에 두고(가칭 `packaging/scoop/qsh.json.in`, `packaging/winget/`) job이 값을 채운다.
+- 문서: `docs/deploy/release-secrets.md`에 `SCOOP_BUCKET_DEPLOY_KEY`·`WINGET_PAT` 절, README 설치 절의 `scoop install`·`winget install` 줄(첫 매니페스트 제출 전에는 "after the first manifest is accepted" 단서).
+- 사람 몫: 저장소 생성, 배포 키, PAT, 첫 winget 매니페스트 제출(§0.5).
+- M20: 없음.
+
+**(b) 테스트·게이트:**
+
+- 매니페스트 렌더 테스트: 계획 추가 `scoop_manifest_renders_both_architectures_with_hashes_from_sha256sums`, `winget_manifest_renders_a_portable_zip_installer`(xtask 또는 셸 테스트, §7.1 #11)
+- 게이트: `package_jobs_skip_green_without_secrets`(시크릿 없는 dry-run에서 두 job이 건너뜀)
+
+**(c) 완료 판정:** 시크릿 없는 run에서 두 job이 green으로 건너뛴다. 에이전트가 외부 저장소에 쓰지 않았다.
+
+### Step 16 — 마감 (0.1~0.2ew)
+
+근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, 이 문서 §4의 안정성 규율과 §5.7 유예 대응표. 선행: Step 2~15.
+
+**(a) 범위:**
+
+- **부하 반복.** M19 타이밍 민감 테스트 전부를 `scripts/stress/m19.filter`로 묶는다(§7.1 #12). Linux·공통은 Dave-Windows-WSL에서, Windows 전용은 Dave-Windows에서 `QSH_ACCEPTANCE_SLOW=1 scripts/stress/run.sh`로 50회 돌리고 각각의 "50/50 passed under load" 줄, 테스트 개수, 호스트 사양을 마감 노트에 적는다. `m19-latency.filter`는 두지 않는다.
 - **절차 1. 구속 문서 태그 대조.** 대상은 다음과 같다.
-  - `docs/CLI.md` v0.35 이후 항목: §2.4·§2.5·§6.2·§6.11·§6.17·§6.18·§6.22
-  - `docs/deploy/service.md` launchd·systemd 절과 WSL 절
-  - `docs/design/architecture.md` §2·§5·§6
-  - `docs/design/testing.md` L1
-  - `docs/design/threat-model.md` §3·§4 D·E·F·G·§7
-  - ADR-0032·0033 결과 절 문서 목록 전수, ADR-0024 결정 11의 "별도 결정" 문장이 ADR-0032를 가리킴, ADR-0035 결정 27·28이 ADR-0032를 가리킴
-  - `crates/qsh-core/src/telemetry.rs` 모듈 doc
-  - Windows 귀속 기록: 작업 스케줄러 분기와 Windows 레시피·`keystore_session_bound` 실측·`move-key`의 Credential Manager와 DACL은 M19, Windows host audit 잠금과 PTY 세션 e2e는 M20(ADR-0032 결정 10·15, ADR-0035 결정 9·12·14·24·25·27·28)
-- **절차 2. README 동기화.** 재작성판(`2fc879b`) 위에서 한다(DoD (b)). 기능 목록(`qsh service install --activate`, `qsh identity move-key`, `qsh sessions` 필터, `qsh audit`), Known limitations(qsh는 linger·LaunchDaemon·Windows 상시 기동 작업을 대신 설정하지 않음, `--activate`는 떠 있는 유닛을 재시작하지 않음, audit 조회는 로컬 전용이고 삭제 명령이 없음, Windows 서비스 백엔드는 M19), 보안 절. M16 마감 뒤 README Roadmap 표의 M17 행을 "Done"으로.
-- §3 유예 가드레일 "Service 설치" 행의 "서비스 매니저 실호출은 M17 (a)"를 착지 상태로 고치는 일은 main 세션이 마감 노트와 함께 한다.
-- ROADMAP M17 마감 노트(main 세션). 이 `PLAN.md`의 마지막 커밋 해시를 적고 다음 계획으로 교체한다. 계획 원문은 커밋 해시로 인용한다(ROADMAP 머리말 규칙). §5.5에는 M17이 만든 사람 몫이 없다고 적는다.
+  - `docs/CLI.md` M19 판 이후 항목: §6.2·§6.9·§6.11·§6.13·§6.14·§6.17·§6.18·§6.20·§6.21·§7
+  - `docs/deploy/service.md` Windows 절, `docs/deploy/release-secrets.md` Windows 절
+  - `docs/design/architecture.md` §1·§6·§7·§8, `docs/design/testing.md` L1·L5·Windows leg 문단·신뢰 철회 문단·가짜 ssh 문단
+  - `docs/design/threat-model.md` §3·§4 A·B·D·E·G·§7
+  - ADR-0035 결과 절 "마일스톤 배치"의 M19 항목 전수와 결정 19의 client 쪽 문서 목록, ADR-0032 결정 3·4·10·11·15·18의 Windows 문장, ADR-0033 결정 6·13, ADR-0031 결정 3, ADR-0029 결정 2·23, ADR-0044 결정 25, ADR-0023의 절전 전제
+  - 코드 모듈 doc: `localctl/mod.rs`, `resume.rs`, `client/wake.rs`, `ops/service/mod.rs`, `file/operand.rs`, `auto_bootstrap.rs`, `doctor.rs`·`doctor/probe.rs`
+  - §5.7 유예 대응표의 모든 행이 착지했거나 M20·범위 밖으로 남았다. `rg -n "M19"`를 다시 돌려 남은 hit가 기록(ADR 개정 이력, ROADMAP 마감 노트, 캠페인 문서)뿐임을 확인한다.
+  - M20 귀속 기록: ConPTY·PTY 세션·신호·host `exec`·host audit 잠금과 `acl.toml` 경고·`setup host`·`pair invite`·`pair ssh-respond`·host `cp`·`release_smoke` PTY 축·`session close --signal` 행·PTY를 포함한 종단과 `cp` 종단·캠페인 host 회차(ADR-0035 결정 20~26, 결과 절)
+- **절차 2. README 동기화.** 기능 목록(Windows client), 설치 절(`install.ps1`, scoop, winget, 서명), Known limitations(Windows host는 M20, mintty, VT 하한 1809, 방화벽 프롬프트, Windows ACL 문장 삭제 확인, 부트스트랩 응답자는 M20), 보안 절(named pipe 신뢰 모델). README Roadmap 표의 M19 행을 "Done"으로.
+- §3 유예 가드레일 Windows 행을 "client는 M19 착지, host는 M20"으로 고치는 일은 main 세션이 마감 노트와 함께 한다.
+- ROADMAP M19 마감 노트(main 세션). 이 `PLAN.md`의 마지막 커밋 해시를 적고 다음 계획으로 교체한다. §5.5에 M19가 만든 사람 몫(캠페인, 서명·배포 준비)을 적는다.
 
-**(b) 테스트·게이트:** 일곱 게이트, CI(acceptance 포함) 초록, 부하 반복 50/50.
+**(b) 테스트·게이트:** 일곱 게이트, CI(acceptance 포함) 초록, 부하 반복 50/50 두 호스트.
 
-**(c) 완료 판정:** §3의 DoD가 근거 커밋, run id와 함께 `[x]`다. `git diff --stat <Step 2 부모>..<마지막 구현 스텝 머지> -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다. M17에는 wire 변경을 소유한 스텝이 없다.
+**(c) 완료 판정:** §3의 DoD가 근거 커밋, run id와 함께 `[x]`다. `git diff --stat <Step 2 부모>..<마지막 구현 스텝 머지> -- crates/qsh-proto/proto crates/qsh-proto/src/wire.rs crates/qsh-proto/src/local.rs crates/qsh-cli/tests/fixtures/cli-v1/capabilities.json`이 비어 있다. M19에는 wire 변경을 소유한 스텝이 없다.
 
 ## 5. 결정·핀 테스트 대응표
 
-각 결정과 핀 테스트의 주인은 스텝 하나다. 한 결정이 여러 스텝에 걸치면 하위 항목으로 나눠 각각 주인 하나를 적는다.
+각 결정과 핀 테스트의 주인은 스텝 하나다. 한 결정이 여러 스텝에 걸치면 하위 항목으로 나눠 각각 주인 하나를 적는다. "M20 밖"은 이 계획이 하지 않고 M20이 하는 것이다.
 
-### 5.1 ADR-0032 결정
-
-| 결정 | 스텝 |
-|---|---|
-| 1 명시적 플래그 셋, config·환경 변수 기본값 불가, setup·doctor는 넘기지 않음 | 2 |
-| 2 활성화는 `install` 마지막 단계 | 2 |
-| 3 argv 표의 launchd·systemd 열 | 2 |
-| 3 argv 표의 작업 스케줄러 열과 COM 질의 | M19 밖(ADR-0035 결정 27·28) |
-| 4 재시작 부재(launchd·systemd) | 2 |
-| 4 Windows `/Create /F` 실측과 처분 | M19 밖(ADR-0035 결정 27) |
-| 5 등록 여부 기준 비활성화, 해제가 먼저 | 2 |
-| 6 `status --live`는 exit code 하나 | 2 |
-| 7 `activation`·`deactivation`·`active` 필드 | 2 |
-| 8 오류 사상(`UNSUPPORTED`·`INTERNAL`·`TIMEOUT`, `user/<uid>` 우회 금지) | 2 |
-| 9 audit 한 건, 활성화 레코드 없음 | 2 |
-| 10 `ManagerRunner`와 상태 질의 trait의 모양 | 2 |
-| 10 Windows 분기 구현 | M19 밖(ADR-0032 결정 10) |
-| 11 launchd·systemd 레시피 문서 대조 | 2 |
-| 11 Windows 레시피 문서 대조 | M19 밖(ADR-0035 백엔드) |
-| 12 label·유닛 이름 유지, 상시 기동 자동 설정 없음 | 4 |
-| 13 macOS LaunchDaemon 레시피와 펜스 대조 | 4 |
-| 14 doctor의 LaunchDaemon 인식, `status`의 `exists` 범위 | 4 |
-| 15 `keystore_session_bound`(macOS·Linux) | 4 |
-| 15 `keystore_session_bound`의 Windows 실측과 판정 | M19 밖(ADR-0032 결정 15) |
-| 15 `identity.move_key` op, 순서, 결과, audit | 3 |
-| 15 `move-key`의 Windows Credential Manager와 DACL | M19 밖(ADR-0035 결정 9·12) |
-| 16 레시피 비자동화, root·`sudo` 경로 없음 | 4 |
-| 17 wire 불변, additive 계약 | 2(검증), 3·4(각 additive 항목) |
-| 18 상시 기동 형태 보존(macOS) | 2 |
-| 18 상시 기동 형태 보존(Windows `Password` 주체) | M19 밖(ADR-0035 결정 27) |
-
-### 5.2 ADR-0032 핀 테스트와 결과 절 항목
-
-| 항목 | 스텝 |
-|---|---|
-| `install_without_activate_never_invokes_the_manager` | 2 |
-| `uninstall_without_deactivate_never_invokes_the_manager` | 2 |
-| `status_without_live_never_invokes_the_manager` | 2 |
-| `install_activate_runs_the_documented_argv_on_launchd` | 2 |
-| `install_activate_runs_the_documented_argv_on_systemd` | 2 |
-| `install_activate_runs_the_documented_argv_on_task_scheduler` | M19 밖 |
-| `deactivate_calls_disable_for_a_registered_but_inactive_unit` | 2 |
-| `deactivate_skips_when_the_unit_is_not_registered` | 2 |
-| `windows_activate_updates_the_stored_task_without_running_it_when_already_running` | M19 밖 |
-| `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched`(launchd 행) | 2 |
-| 같은 테스트의 작업 스케줄러 행 | M19 밖 |
-| `status_live_reports_the_always_on_form_when_present`(launchd 행) | 2 |
-| `activate_is_skipped_when_the_unit_write_fails` | 2 |
-| `activate_is_skipped_when_the_audit_sink_fails` | 2 |
-| `activate_does_not_restart_an_already_active_unit` | 2 |
-| `deactivate_runs_before_the_unit_file_is_removed` | 2 |
-| `a_failed_deactivate_keeps_the_unit_file` | 2 |
-| `a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_exit_code` | 2 |
-| `a_manager_call_past_the_deadline_is_timeout` | 2 |
-| `service_md_activation_recipes_match_the_argv_builders` | 2 |
-| `service_not_registered_accepts_a_launchdaemon_plist` | 4 |
-| `launchagent_session_scoped_is_silent_when_a_launchdaemon_plist_exists` | 4 |
-| `keystore_session_bound_fires_for_platform_store_under_launchdaemon` | 4 |
-| `keystore_session_bound_fires_for_platform_store_under_linger_with_a_registered_unit` | 4 |
-| `keystore_session_bound_is_silent_for_file_store` | 4 |
-| `move_key_keeps_the_fingerprint_and_device_id` | 3 |
-| `move_key_to_the_current_store_is_a_no_op` | 3 |
-| `a_failed_move_key_write_leaves_the_original_store_untouched` | 3 |
-| `move_key_file_store_is_mode_0600` | 3 |
-| `move_key_is_refused_when_the_audit_sink_fails` | 3 |
-| `service_md_launchdaemon_recipe_matches_the_agent_program_arguments` | 4 |
-| 계획 추가: `install_activate_argv_covers_serve_listen_and_reverse_modes`, `manager_argv_never_contains_user_input`, `manager_stderr_first_line_is_capped_at_512_bytes`, `wsl_without_systemd_unsupported_message_names_wsl_conf`, `activation_flags_cannot_be_defaulted_by_config_or_env`, `service_activation_flags_are_unsupported_on_windows_before_m19` | 2 |
-| 계획 추가: `move_key_readback_mismatch_rolls_back`, `move_key_reports_stale_entry_left_when_only_the_final_delete_fails`, `move_key_before_init_is_config_error`, `move_key_to_platform_without_a_store_is_internal`, `move_key_never_emits_key_bytes`, `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins` | 3 |
-| 계획 추가: `keystore_session_bound_covers_serve_listen_and_reverse_units`, `keystore_session_bound_is_silent_on_windows_before_m19`, `doctor_probe_never_invokes_launchctl` | 4 |
-| `docs/CLI.md` §6.18, man 셋, fixture 셋 | 2 |
-| `docs/deploy/service.md` `--activate` 안내와 비활성화 레시피 | 2 |
-| `docs/deploy/service.md` LaunchDaemon 펜스·설치·해제, `move-key` 한 줄 | 4 |
-| `docs/CLI.md` §2.4·§2.5·§6.11 `identity.move_key`, man `qsh-identity-move-key.1`, fixture 둘, `OP_FACES` | 3 |
-| `docs/CLI.md` §6.17 `keystore_session_bound` 행·문구·개수, doctor fixture 하나 | 4 |
-| `service_not_registered` remedy의 `--activate` 안내 | 2 |
-| threat-model §3 `qsh service` 행(호출 서술) | 2 |
-| threat-model §3 `qsh service` 행(상시 기동은 읽기만) | 4 |
-| threat-model §3 `identity move-key` 행, §4 D 개인키 이동 | 3 |
-| threat-model §4 E 매니저 인자 주입, §4 G 재시작 부재 | 2 |
-| `docs/design/testing.md` L1 `move-key` 왕복 | 3 |
-| README Known limitations LaunchAgent 문장 | 4 |
-| ADR-0024 결정 11·ADR-0035 결정 27·28 상호 인용 대조 | 8 |
-
-### 5.3 ADR-0033 결정
+### 5.1 ADR-0035 결정
 
 | 결정 | 스텝 |
 |---|---|
-| 1 세션 필터 셋과 AND | 5 |
-| 2 클라이언트 적용, `SessionListReq`·wire 불변, `unreachable` 유지 | 5 |
-| 3 JSON 모양 불변, stderr 한 줄, token 비노출 | 5 |
-| 4 `audit.query` local op, wire·localctl 비노출, §2.4·§2.5 | 7 |
-| 5 인자, 정확 일치 AND, `--limit` 상한, 최신 먼저 | 6 |
-| 6 읽기 전용, 락·복구 없음, torn line 계수, 없음은 빈 결과, Windows share mode | 6 |
-| 7 조회는 audit을 남기지 않음(읽기 코어) | 6 |
-| 7 같은 성질의 op 수준 핀 | 7 |
-| 8 `AuditRecordView`와 필드 전수 | 6 |
-| 9 `data` 모양 | 6 |
-| 9 출력 모드(human·`--json`) | 7 |
-| 10 삭제·축약 op 없음, 회전 의미 불변(코드) | 6 |
-| 10 삭제 부재 분류 테스트와 CLI.md 문장 | 7 |
-| 11 새 doctor finding 없음 | 6 |
-| 12 텔레메트리 비승격과 모듈 doc 인용 | 7 |
-| 13 세션 필터의 route 동등 | 5 |
-| 13 audit 조회의 플랫폼·역할 동등 | 6(reader), 7(op) |
-| 13 CLI 새 절 번호(§6.22) | 7 |
-| 13 Windows named pipe localctl 비노출 행 | M19 밖(ADR-0035 결정 14) |
+| 1 client 쪽 명령 집합(`init`~`schema`), `move-key`·`audit` 포함 | 3·5·7·8·9(명령별) |
+| 1 host 쪽 명령 집합 | M20 밖 |
+| 1 서비스 명령과 `setup listener --service` | 10 |
+| 1 `setup host --service` | M20 밖 |
+| 1 `qsh cp` 드라이브 문자 operand | 9 |
+| 2 UNSUPPORTED 경로 제거: `NO_TERMINAL_ECHO_SUPPRESSION` | 3 |
+| 2 같은 항목: `windows_unsupported()`, `ops/exec.rs` reverse 분기 | 7 |
+| 2 같은 항목: `tui::run` 비unix 분기 | 9 |
+| 2 같은 항목: `SERVICE_UNSUPPORTED_PLATFORM` Windows 분기 | 10 |
+| 2 같은 항목: `UnsupportedFactory` | M20 밖 |
+| 3 client·서비스 행의 매트릭스 조건 | 9(client), 11(서비스), 16(확인) |
+| 3 `session close --signal` Windows 행 | M20 밖 |
+| 4 터미널 trait 추출 | 2 |
+| 4 Windows 구현 | 3 |
+| 5 raw 모드 비트(순수 함수) | 2 |
+| 5 raw 모드 적용과 UTF-8 코드 페이지 | 3 |
+| 6 복원 경로 | 3 |
+| 7 VT 하한과 비 콘솔 경로 | 3 |
+| 8 resize 폴링, `term` 기본값 | 3 |
+| 9 DACL 모듈과 적용처(작업 정의 파일 제외) | 4 |
+| 9 작업 정의 파일·서비스 로그 | 10 |
+| 10 fail closed, 옛 ACL 교체, README 문장 삭제 | 4 |
+| 11 에코 억제 모드 비트 | 2 |
+| 11 콘솔 프롬프트 개방과 ConPTY 단언 | 3 |
+| 12 store 경로 판정 | 2 |
+| 12 Credential Manager store, `auto`, `move-key` 왕복 | 5 |
+| 12 `Password` 작업의 Credential Manager 실측 | 11 |
+| 13 Windows 경로(`%USERPROFILE%\.config\qsh` 등) | 4(DACL 대상 확인과 architecture §7) |
+| 14 transport·이름·DACL·SID 대조·xtask | 6 |
+| 14 `qsh listen`의 나머지, 동작 요약 | 7 |
+| 15 supervise와 절전 표본 | 8 |
+| 16 aarch64 자산, man, `install.ps1` | 12 |
+| 16 Authenticode 서명·검증·시크릿 게이트 | 13 |
+| 16 scoop·winget | 15 |
+| 17 DACL 테스트 | 4 |
+| 17 named pipe 테스트 (2)~(6) | 6 |
+| 17 named pipe 테스트 (1) 기동 실패 | 7 |
+| 17 콘솔 계층 테스트 | 2(하니스), 3(단언) |
+| 17 host 테스트 | M20 밖 |
+| 17 정방향·역방향 종단(PTY 없음) | 7 |
+| 17 같은 종단의 attach 케이스(echo host) | 9 |
+| 17 같은 종단의 PTY·`cp` 케이스 | M20 밖 |
+| 17 절전 표본 단위 테스트 | 8 |
+| 17 `service_docs.rs` Windows 펜스 | 10 |
+| 17 `release_smoke` 쌍둥이(PTY 축 제외) | 9 |
+| 17 `release_smoke` PTY 축 | M20 밖 |
+| 18 캠페인 사전 고정(client·서비스·서명·패키지 회차) | 14 |
+| 18 host 회차 추가와 재고정 | M20 밖 |
+| 19 threat-model §3 콘솔 입력 | 3 |
+| 19 threat-model §4 D | 4 |
+| 19 threat-model §3 pipe, §4 A·B, §7 | 6 |
+| 19 threat-model §3 작업 정의 | 10 |
+| 19 threat-model PTY 행, §4 E `acl.toml` | M20 밖 |
+| 19 architecture §1·§7 localctl | 6 |
+| 19 architecture §8 keystore 행 | 5 |
+| 19 architecture §8 `windows-sys` 행 | 3(첫 의존 착지) |
+| 19 architecture §4 PTY 절 | M20 밖 |
+| 19 testing.md L5·Windows leg 문단 | 16(client 쪽 대조), M20(host) |
+| 19 CLI.md §6.9·§6.13·§6.14 | 7·8 |
+| 19 CLI.md §6.11 | 3·5 |
+| 19 CLI.md §6.17·§6.18·§6.20 | 10·11 |
+| 19 CLI.md §6.7·§6.12, §7의 host 환경변수 | M20 밖 |
+| 19 CLI.md §7 client 범위 | 3·9 |
+| 19 release-secrets.md, RELEASE-NOTES.md | 13·15 |
+| 19 service.md Windows 절 | 10·11 |
+| 19 xtask/arch.rs | 6 |
+| 19 README Known limitations·설치 절 | 4·12·16 |
+| 19 ROADMAP §3 Windows 행 | 16(main 세션) |
+| 19 모듈 doc(`resume.rs`, `localctl/mod.rs`, `client/wake.rs`, `ops/service/mod.rs`) | 4·6·8·10 |
+| 19 모듈 doc(`pty/mod.rs`) | M20 밖 |
+| 20~24, 26 | M20 밖 |
+| 25 `serve --to` 게이트 제거 | 7 |
+| 25 나머지 | M20 밖 |
+| 27 작업 정의·`service run`·재시작·수명·등록·doctor·`manager` 값 | 10 |
+| 28 Windows 열 활성화·비활성화·COM 상태·상시 기동 형태 보존 | 11 |
 
-### 5.4 ADR-0033 핀 테스트와 결과 절 항목
+### 5.2 ADR-0035 결과 절의 고정 테스트
 
 | 항목 | 스텝 |
 |---|---|
-| `op_registration_completeness.rs`·`acl_registry.rs`의 `audit.query` local-only 분류 | 7 |
-| `audit_query_has_no_wire_message_and_no_localctl_request` | 7 |
-| `audit_record_view_fields_equal_audit_record_fields` | 6 |
-| `audit_query_reads_active_and_rotated_files_newest_first` | 6 |
-| `audit_query_filters_are_and_combined` | 6 |
-| `audit_query_limit_above_the_cap_is_invalid_argument` | 6 |
-| `audit_query_skips_a_torn_line_and_counts_it_without_echoing_it` | 6 |
-| `audit_query_does_not_modify_the_log` | 6 |
-| `audit_query_works_while_the_audit_sink_is_degraded` | 6 |
-| `audit_query_writes_no_audit_record` | 7 |
-| `audit_query_on_a_missing_log_is_empty_not_an_error` | 6 |
-| `audit_query_oldest_ts_matches_the_oldest_retained_record` | 6 |
-| 삭제 부재 분류 테스트(가칭 `no_op_other_than_audit_query_reads_the_audit_log_and_none_writes_it`) | 7 |
-| `audit_query_reads_while_the_writer_rotates`(세 다리) | 6 |
-| `sessions_filter_state_writer_attachable_and_combined` | 5 |
-| `sessions_filter_does_not_change_the_wire_request` | 5 |
-| `sessions_filter_keeps_unreachable_in_fan_out` | 5 |
-| `sessions_attachable_never_prints_the_resume_token` | 5 |
-| 계획 추가: `sessions_filter_unknown_state_is_empty_not_an_error`, `sessions_filter_human_count_line_goes_to_stderr_only`, `sessions_filter_applies_identically_to_forward_and_reverse_hosts` | 5 |
-| 계획 추가: `audit_query_since_accepts_rfc3339_and_relative_units`, `audit_query_role_key_is_present_only_when_recorded`, `audit_query_unreadable_log_is_internal_with_path_and_kind_only`, `audit_query_skips_overlong_lines_and_counts_them`, `audit_query_truncated_is_set_only_when_the_limit_cut_records` | 6 |
-| 계획 추가: `audit_query_never_appears_as_a_control_message_wire_variant`, `audit_query_envelope_is_the_only_stdout_line`, `audit_query_human_mode_never_prints_skipped_line_contents`, `audit_query_reads_records_written_by_serve_listen_and_serve_to` | 7 |
-| `docs/CLI.md` §6.2 필터, man `qsh-sessions.1`, 필터 건 `session.list` fixture | 5 |
-| `docs/CLI.md` §2.4·§2.5·§6.22, man `qsh-audit.1`, `audit.query` fixture 둘 | 7 |
-| threat-model §3 `qsh audit` 행, F2 확장, F 삭제 경로 행, 열거 oracle 행 | 7 |
-| `docs/design/architecture.md` §6 조회 문단 | 6 |
-| `telemetry.rs` 모듈 doc 인용 | 7 |
+| `exit_code_matrix.rs` client·서비스 Windows `UNSUPPORTED` 행 없음 | 9·11 |
+| 같은 파일의 `session close --signal` 일곱 값 행 | M20 밖 |
+| Windows DACL 테스트(보호·단일 ACE·SID·마스크, 실패 주입, 옛 ACL 교체, audit·reset key) | 4 |
+| 콘솔 모드 계산 단위 테스트 | 2 |
+| ConPTY probe 테스트(raw, resize 한 번, 복원, 비 콘솔, VT 하한, 초대 코드) | 3 |
+| named pipe 테스트(선점 기동 실패) | 7 |
+| named pipe 테스트(DACL, SID 불일치, 이름·열거, 공통 케이스) | 6 |
+| `pty/tests.rs` Windows 쌍둥이, `exec` 트리 종료, audit 잠금, `acl.toml` 경고 | M20 밖 |
+| 정방향·역방향 종단(`exec`, 터널, `hosts`, 재등록) | 7 |
+| 같은 종단의 attach(echo host) | 9 |
+| 같은 종단의 PTY attach와 `cp` | M20 밖 |
+| 절전 표본 단위 테스트 | 8 |
+| `service_docs.rs` Windows 펜스, 작업 정의 렌더·경로·존재, `service run` 리디렉션, `logon_task_session_scoped` 세 경우 | 10 |
+| `--live` 판정(가짜 COM) | 11 |
+| `release.yml` 서명 검증 스텝, zip `man/` 대조 | 12·13 |
+| 시크릿 게이트 세 경우 | 13 |
+| `release_smoke` 쌍둥이 확장(PTY 제외) | 9 |
+| unix 회귀(`tui_expect`, attach·localctl 테스트) | 2·6·7 |
+
+### 5.3 ADR-0032 Windows 갈래 (M17 plan §5.1·§5.2 (`047db25`)의 "M19 밖" 행)
+
+| 항목 | 스텝 |
+|---|---|
+| 결정 3 작업 스케줄러 열과 COM 질의 | 11 |
+| 결정 4 Windows `/Create /F` 실측과 처분 | 11 |
+| 결정 5 Windows 등록 기준(`/Query`) 비활성화 | 11 |
+| 결정 6 COM 상태값 하나 | 11 |
+| 결정 8 Windows 오류 사상 | 11 |
+| 결정 10 Windows 분기 구현 | 11 |
+| 결정 11 Windows 레시피 문서 대조 | 10(작업 정의 펜스), 11(`schtasks` 레시피) |
+| 결정 12 상시 기동 자동 설정 없음(Windows) | 10 |
+| 결정 15 `keystore_session_bound` Windows 실측과 판정 | 11 |
+| 결정 15 `move-key` Credential Manager와 DACL | 5(store), 4(DACL) |
+| 결정 18 상시 기동 형태 보존(Windows `Password` 주체) | 11 |
+| `install_activate_runs_the_documented_argv_on_task_scheduler` | 11 |
+| `windows_activate_updates_the_stored_task_without_running_it_when_already_running` | 11 |
+| `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched` 작업 스케줄러 행 | 11 |
+| `status_live_reports_the_always_on_form_when_present` 작업 스케줄러 행 | 11 |
+| `service_activation_flags_are_unsupported_on_windows_before_m19` 제거 | 11 |
+| `keystore_session_bound_is_silent_on_windows_before_m19` 교체 | 11 |
+| `move_key_file_store_is_mode_0600`의 Windows 쌍둥이 | 4 |
+| `docs/design/testing.md` L1 Windows `move-key` 왕복 | 5 |
+
+### 5.4 ADR-0033 Windows 항목
+
+| 항목 | 스텝 |
+|---|---|
+| 결정 4·13 named pipe localctl 비노출 | 6 |
+| 결정 6 읽기 불가 로그의 Windows ACL 행 | 4 |
+| 결정 13 `qsh audit`의 세 역할 동등(Windows) | 7 |
+| 결정 13 세션 필터 reverse fan-out(Windows `qsh listen`) | 8 |
+
+### 5.5 다른 ADR이 M19로 넘긴 항목
+
+| 항목 | 스텝 |
+|---|---|
+| ADR-0031 결정 3 `trust_withdrawal.rs` `listen` 쌍둥이 | 8 |
+| ADR-0031 결정 3 `serve_to` 쌍둥이 | 8(§9 #3) |
+| ADR-0029 결정 2 드라이브 문자 operand | 9 |
+| ADR-0029 결정 23 Windows client 로컬 쓰기 | 9 |
+| ADR-0029 결정 23 Windows host 파일 op | M20 밖 |
+| ADR-0044 결정 1·5·25 Windows client 자동 발동 | 9 |
+| ADR-0044 결정 22 `--reverse`의 이 장비 쪽 | 9 |
+| ADR-0044 결정 10·14·25 응답자 | M20 밖 |
+| ADR-0023 절전 감지의 Windows 전제(ADR-0035 결정 15가 대체) | 8 |
+
+### 5.6 route 동등 핀의 귀속
+
+§4 규율 "route 동등" 표가 정본이다. 한 테스트가 두 스텝에 걸치는 것은 `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`(inbound `serve` 행 Step 5, `listen`·`serve --to` 행 Step 7) 하나다.
+
+### 5.7 M19 유예 hit 대응표 (`rg -n "M19"`, origin `e47ffd9`)
+
+`PLAN.md`(M17 계획)와 `docs/ROADMAP.md`, ADR-0035의 hit는 위 §5.1~§5.5가 덮는다. 나머지는 다음과 같다.
+
+| 위치 | 내용 | 귀속 |
+|---|---|---|
+| `README.md` Known limitations(Windows 계획 문단) | client M19·host M20, 자동 부트스트랩은 M19 | 9(부트스트랩 문장), 16(문단 갱신) |
+| `CLAUDE.md` Document map | "M11–M19 (P1)" | Step 1 (main 세션, §9 #7). 유예가 아니라 낡은 범위 |
+| `docs/adr/README.md` ADR-0035 행 | 제목의 "M19 client" | 귀속 불요(ADR 제목) |
+| `docs/adr/0043-no-tcp-fallback.md` 결정 2 | 번호 M15~M19 유지 | 귀속 불요(번호 기록) |
+| `docs/adr/0039-forced-doh-resolver.md` 맥락 | M11~M19에 resolver 없음 | 귀속 불요(사실 기록) |
+| `docs/adr/0023-tunnel-supervise.md` 절전 전제 | Windows 확인은 M19 | 8 |
+| `docs/adr/0031-cert-rotation-revocation.md` 개정 이력·결정 3 | `listen` 쌍둥이 M19 | 8 |
+| `docs/adr/0029-file-copy.md` 결정 2·23 | Windows client operand·로컬 쓰기 | 9 |
+| `docs/adr/0044-ssh-bootstrap.md` ADR-0035 문단 | Windows client 자동 발동 | 9 |
+| `docs/adr/0032-service-manager-activation.md` 결정 10·결과 절 크기 | Windows 분기 구현 | 11(크기 문장은 귀속 불요) |
+| `docs/PRD.md` P1 목록 | Windows client M19 | 16(대조) |
+| `docs/CLI.md` 상태 헤더 v0.37·v0.38 | `move-key`·`keystore_session_bound` Windows | 5·11(새 판에 적고 옛 판 문면은 두지 않고 고치지도 않음) |
+| `docs/CLI.md` §6.2 route 문단 | Windows `qsh listen` fan-out | 8 |
+| `docs/CLI.md` §6.11 `move-key` Windows 문단 | Credential Manager·DACL | 4·5 |
+| `docs/CLI.md` §6.17 진단 머리 문장·`keystore_session_bound` 행 | Windows는 M19 전 미발화 | 11 |
+| `docs/CLI.md` §6.21 Windows 문단 | Windows client `cp` | 9 |
+| `docs/CLI.md` 부트스트랩 터미널 순서 문단 | Windows 분기 | 9 |
+| `docs/design/architecture.md` §6 audit 조회 문단 | 읽기 불가 Windows ACL 행 | 4 |
+| `docs/design/threat-model.md` §3 `identity move-key` 행 | Windows 구현 M19 | 5 |
+| `docs/design/testing.md` L1 `move-key` 왕복 | Windows 줄 | 5 |
+| `docs/design/testing.md` 가짜 ssh 문단 | 역방향의 이 장비 쪽 `qsh listen` Windows M19 | 9 |
+| `docs/design/testing.md` 신뢰 철회 문단 | `listen` 쌍둥이 M19 | 8 |
+| `docs/campaigns/p1-ssh-bootstrap.md` R5 | 요건 4·6 이월 | 14(p1-windows 회차로 받음, 사전 고정된 R5 문면은 고치지 않음) |
+| `crates/qsh-core/src/doctor.rs`(`KEYSTORE_SESSION_BOUND` 문단 둘) | Windows 미발화 | 11 |
+| `crates/qsh-core/src/doctor/probe.rs`(두 곳) | Windows 미발화 | 11 |
+| `crates/qsh-core/src/doctor/tests.rs`, `doctor/probe/tests.rs` | 같음 | 11 |
+| `crates/qsh-cli/tests/it/fixtures.rs` doctor fixture Windows 건너뜀 | 같음 | 11 |
+| `crates/qsh-cli/src/auto_bootstrap.rs` 모듈 doc | Windows 자동 발동 | 9 |
+| `crates/qsh-core/src/audit/reader/tests.rs` 주석 | Windows 읽기 불가 행 | 4 |
+| `crates/qsh-cli/tests/it/identity_move_key.rs` 주석 | Windows `--to platform` | 5 |
+| `crates/qsh-core/src/file/operand.rs` 모듈 doc | 드라이브 문자 규칙 | 9 |
+| `crates/qsh-cli/tests/it/sessions_filter.rs` 모듈 doc | Windows fan-out 쌍둥이 | 8 |
+| `crates/qsh-core/src/client/wake.rs` 모듈 doc | Windows 절전 전제 | 8 |
 
 ## 6. 명시적 non-goals
 
-- `acl.toml`을 쓰는 어떤 동작(ADR-0017 결정 1, ADR-0025 결정 1), 핫 리로드, qsh 자체 데몬화(§5.3). ROADMAP M17 명시적 out.
-- 로그인 세션 밖 상시 기동의 자동 설정. 어느 플랫폼에서도 qsh가 linger·LaunchDaemon·Windows 상시 기동 작업을 대신 설정하지 않고 `sudo`를 부르지 않는다(ADR-0032 결정 12·16). LaunchDaemon을 직접 설치하는 `--system` 류 플래그(ADR-0032 대안 절).
-- 강제 재시작 플래그, `qsh service start`/`stop`, `launchctl bootstrap` 실패 시 `user/<uid>` 우회, 매니저 존재의 `PATH` 탐색, 활성화 전용 audit 레코드(ADR-0032 결정 4·8·9와 대안 절).
-- 적재 시 `platform`이 없을 때의 파일 store 자동 대체, System Keychain·별도 keychain(ADR-0032 대안 절). `qsh init`의 `auto` 규칙 변경(결정 15 넷째 항목).
-- 원격 `qsh audit <host>`, 새 ACL action, `qsh audit prune`·`export --delete`, 시간 기반 retention(`retain_days`), 새 doctor finding(`audit_retention_short` 등), `--follow`, 조회 출력의 역조회·별칭 보강, 조회 자신의 audit 기록(ADR-0033 대안 절).
-- 호스트 쪽 세션 필터(`SessionListReq` 필드), 텔레메트리 `qsh.event/v1` 승격(ADR-0033 결정 2·12).
-- h26(trust 조작 audit의 소급 확장)과 세션 상태 영속화(M18). ADR-0033 결과 절 마지막 문장.
-- 새 `ErrorCode`, 새 wire 메시지, `.proto` 변경, `capabilities.json` 변경.
-- Windows: 작업 스케줄러 분기·Windows 상시 기동 레시피·`keystore_session_bound` 실측·`move-key`의 Credential Manager와 DACL·named pipe 비노출 행은 M19, host audit writer 잠금과 PTY 세션 e2e는 M20(ADR-0032 결정 10·15, ADR-0035 결정 9·12·14·24·25·27·28).
-- 에이전트가 하는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경.
+- Windows host 역할 전부(M20). ConPTY 백엔드와 PTY 세션, 세션 신호 일곱과 `qsh internal console-ctrl`, host `exec`의 Job Object·환경 고정, host audit writer 잠금·재검증, `acl.toml` DACL 경고, `setup host`, `pair invite`, `pair ssh-respond`, host 쪽 `qsh cp`와 `paths` 드라이브 표기, `release_smoke` PTY 축, `session close --signal` 매트릭스 행, PTY와 `cp`를 포함한 종단, 캠페인 host 회차(ADR-0035 결정 20~26, ROADMAP M20).
+- MSI 설치 관리자(ROADMAP M19 명시적 out). 내장 roff 렌더러(결정 16).
+- crossterm 채택, 키 파싱, `ReadConsoleInput` 이벤트 기반 resize, resize 간격 설정 키(결정 4·5·8).
+- `%APPDATA%`·`%LOCALAPPDATA%` 경로, runtime dir 생성(결정 13).
+- `icacls` 호출, 읽을 때의 ACL 검사(결정 9·10).
+- 로그인 세션 밖 상시 기동의 자동 설정. qsh는 Windows 상시 기동 작업을 대신 등록하지 않는다(ADR-0032 결정 12·16, ADR-0035 결정 27). S4U 주체(결정 27).
+- `schtasks /Query` 본문 파싱(ADR-0032 결정 6).
+- test-only 역방향 하니스(ADR-0035 결정 17). §7.1 #4의 echo host는 PTY attach를 대신하는 테스트 host이고 역방향 CI 종단은 실제 CLI 양쪽이다.
+- 새 `ErrorCode`, 새 wire 메시지, `.proto`·`local.rs` 변경, `capabilities.json` 변경.
+- 에이전트가 하는 `gh secret set`, `gh variable set`, `gh workflow run`, 태그 push, 저장소 설정 변경, 외부 저장소 쓰기.
 - P2 전부.
 
 ## 7. 리스크와 감시 항목
 
-- **launchd 분기가 macOS 다리에서만 컴파일되는 문제.** 오늘 `resolve_manager`가 `cfg!(target_os)`로 매니저를 정하므로 launchd 경로의 테스트는 macOS 다리에서만 돈다. M15는 macOS 다리에서만 깨지는 실패를 착지 뒤 보정했다(`1d02860`). 판정·argv 빌더를 `cfg` 없는 순수 함수로 두고, 테스트가 매니저를 인자로 주입해 Linux에서도 launchd 행을 돌게 한다(§7.1 #1).
-- **`launchctl print system/…`의 root 요구.** Dave-MBP16이 오프라인이라 확인이 늦을 수 있다. ADR이 대체를 정해 두었으므로 막히지 않는다. 대체로 착지하면 `--live`가 LaunchDaemon이 있는 Mac에서 `INTERNAL`이고, 확인 뒤 질의로 바꾸는 작은 커밋이 따른다(§9 #5).
-- **`move-key`의 중간 상태.** 원래 store 삭제와 `identity.toml` 갱신 사이에 다른 qsh 프로세스(`qsh serve` 재시작 등)가 키를 적재할 수 있다. 결정 15의 순서(갱신 뒤 삭제)라면 어느 순간에도 `identity.toml`이 가리키는 store에 키가 있다. 같은 디렉터리의 `move-key`·`init` 동시 실행은 잠금으로 막는다(§7.1 #5). 이미 떠 있는 `qsh serve`는 메모리의 키를 계속 쓰므로 재시작이 필요 없다는 사실을 human 렌더가 알린다.
-- **실제 OS store 왕복의 공백.** CI는 `MemoryKeyStore`로만 돈다. Keychain·Secret Service의 실제 쓰기·읽기·삭제는 §1 수동 단계 몫이고, 태그 전에 돌지 않으면 README Known limitations에 "수동 확인 전"을 적을지 마감 때 정한다.
-- **audit reader와 writer 회전의 경합.** Unix에서는 rename 중 열린 핸들이 옛 파일을 계속 읽어 같은 레코드가 두 번 보이거나 한 줄이 잘려 보일 수 있다. 잘린 줄은 `skipped_lines`로 세고, 중복은 파일을 회전분 번호 역순으로 한 번씩만 여는 순서로 줄인다. 결정 6이 정확성보다 "막지 않음"을 우선했으므로, 회전 겹침 테스트는 "오류 없이 끝나고 writer가 막히지 않음"을 단언하고 레코드 수의 정확성은 단언하지 않는다.
-- **`docs/CLI.md` 상태 헤더와 `REQUIRED_FIXTURES`·`OP_FACES` 충돌.** 두 사슬이 병렬이라 같은 줄을 만진다. 늦게 착지하는 쪽이 rebase하고, 헤더 판 번호가 역순이 되지 않게 `cli_md_header.rs`로 확인한다.
-- **Windows 다리의 늦은 실패.** Step 6의 share mode와 Step 3의 Windows `--to platform` 처분은 Windows에서만 갈리는 경로다. §4 규율의 로컬 Windows 타깃 검사로 줄이고, 그래도 깨지면 보정 커밋을 같은 스텝 이름으로 단다.
-- **부하 반복의 비용.** M17의 타이밍 민감 테스트는 M16보다 적다(실제 QUIC loopback 넷과 회전 겹침 하나 남짓). 50회 반복은 한 번에 끝낼 수 있지만 stress run이 머신을 쓰는 동안 다른 cargo 작업을 겹치지 않는다.
+- **산정 신뢰도(ROADMAP §5.4 리스크 5).** 비교 표본이 없다. Step 2 뒤 재산정하고, 그 뒤에도 Step 6(pipe)과 Step 3(콘솔)이 예상 상한을 넘으면 main 세션이 범위 순서를 다시 정한다. 출고 사슬(Step 12·13·15)은 독립이라 일정 압박의 완충으로 쓴다.
+- **unix 회귀.** trait 추출과 localctl 분리는 unix의 가장 민감한 경로(attach echo 예산, localctl 권한)를 만진다. acceptance job과 `localctl_perms::`를 각 PR의 필수 확인으로 둔다. echo 예산 단언(`tunnel_echo_under_load` 등)이 흔들리면 그 PR은 착지하지 않는다.
+- **Windows 러너의 ConPTY 안정성.** `windows-latest`의 ConPTY는 conhost 버전에 따라 출력 순서·초기 크기 보고가 다를 수 있다. probe는 바이트 흐름이 아니라 probe가 보고한 줄로 단언하고, 대기는 관찰 가능한 줄로 한다.
+- **pipe accept 경합.** "다음 인스턴스를 넘기기 전에 만든다"를 어기면 이름이 비는 틈이 생기고 테스트가 간헐로 실패한다. 경합 테스트를 Windows 부하 반복에 넣는다.
+- **CI 러너에서의 Credential Manager·COM.** 러너가 서비스 계정으로 돌아 Credential Manager 쓰기나 작업 스케줄러 COM 연결이 다르게 동작할 수 있다. 실경로 테스트는 각각 하나로 줄이고(§7.1 #6·#9), 안 되면 주입 테스트와 §1의 Dave-Windows 수동 단계로 덮는다.
+- **서명 시크릿의 공백.** 사람 몫이 늦으면 서명된 Windows 태그가 M19 마감 뒤로 밀린다. DoD 6은 스텝 존재와 판정 테스트로 닫고, 실서명 태그는 캠페인 (11)의 선행 조건으로 §5.5에 둔다(§9 #8).
+- **방화벽 프롬프트.** Windows 러너의 loopback UDP는 방화벽 프롬프트 없이 열리지만 실제 장비에서는 첫 실행에 프롬프트가 뜬다. README와 캠페인 (3)이 본다.
+- **Windows 다리의 시간.** Windows 종단과 ConPTY 테스트가 test leg 시간을 늘린다. nextest 병렬도와 필터를 바꾸지 않고, 길어지면 main 세션이 Windows 종단을 별도 job으로 뗄지 정한다(§9 #9).
 
 ### 7.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
 
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
-| 1 | 매니저 판정과 테스트 주입 | `resolve_manager`만 `cfg`를 갖고, `*_with_home` 쌍둥이가 `manager: Manager`와 `runner: &dyn ManagerRunner`를 함께 받아 세 다리 모두에서 launchd·systemd 행을 돈다. 실제 플랫폼 경로의 테스트는 다리별로 하나씩만 둔다 | Step 2 |
-| 2 | `ManagerRunner`의 시계 | 30초 기한을 runner 밖의 주입 시계로 재고 가짜 runner가 "끝나지 않음"을 흉내 내 `TIMEOUT`을 시간 정지 테스트로 고정한다 | Step 2 |
-| 3 | doctor probe의 시스템 경로 뿌리 | probe 함수가 `system_root: &Path`(기본 `/`)를 받아 `/Library/LaunchDaemons`와 `/var/lib/systemd/linger`를 그 아래에서 찾는다. 기존 `probe_systemd_linger`의 주입 방식을 먼저 확인하고 같은 모양으로 맞춘다 | Step 4 |
-| 4 | 새 fixture 이름 | `service.install.activated.json`, `service.uninstall.deactivated.json`, `service.status.live.json`, `identity.move_key.moved.json`, `identity.move_key.noop.json`, `doctor.run.keystore_session_bound.json`(doctor의 command가 `doctor.run`이라 기존 `doctor.run.*` 규칙을 따름), `session.list.filtered.json`, `audit.query.json`, `audit.query.truncated.json`. 기존 이름 규칙(`<op>.<variant>.json`)과 대조해 맞춘다 | 각 스텝 |
-| 5 | `move-key`의 잠금과 no-op audit | identity 디렉터리에 `init`이 쓰는 잠금이 있으면 그것을 쓰고 없으면 `TrustStore::lock`과 같은 모양의 파일 잠금을 identity 쪽에 둔다. 결정 15 셋째 항목은 "첫 변경 전에 한 건"이라 적으므로, 이미 그 store인 no-op은 변경이 없어 audit을 쓰지 않는 쪽이 초안이다. ADR 문면과 어긋나면 main 세션이 정한다 | Step 3 |
-| 6 | 세션 필터 인자의 자리 | `SessionListReq`는 그대로 두고 `qsh-core`의 새 구조체(가칭 `SessionFilter { state, writer, attachable }`)를 `Ops::session_list`의 둘째 인자로 받는다. `qsh-proto`에는 넣지 않는다(계약 타입이 아니라 클라이언트 쪽 인자). `SessionListReq`가 localctl(`local.rs`)에도 쓰이는지 확인하고, 쓰인다면 데몬 fan-out 경로가 응답을 받은 뒤 같은 필터를 적용한다 | Step 5 |
-| 7 | `AuditRecordView`·`AuditQuery*`의 자리 | `crates/qsh-proto/src/types/` 아래 새 `audit.rs`. 기존 `acl.show` 타입의 자리와 같은 규칙 | Step 6 |
-| 8 | audit 줄 상한 | writer가 쓰는 레코드의 최대 길이보다 넉넉한 64 KiB. 넘는 줄은 읽어 버리지 않고 건너뛰며 `skipped_lines`에 센다(결정 6의 "파싱되지 않는 줄"로 본다). fuzz 타깃은 더하지 않는다. 입력이 같은 uid의 qsh가 쓴 로컬 파일이고 파서가 `serde_json`이기 때문이다 | Step 6 |
-| 9 | config를 읽을 수 없을 때의 `qsh audit` | `Config::load` 실패는 기존 `CONFIG_ERROR`. 운영자가 config를 고치는 동안에도 읽고 싶다면 기본 경로를 읽는 대체를 둘 수 있으나, `[audit].path`가 바뀐 장비에서 엉뚱한 파일을 읽게 되므로 대체하지 않는 쪽이 초안 | Step 7 |
-| 10 | `qsh audit --jsonl` | `acl.show` 등 value op이 `--jsonl`에 하는 처분을 그대로 따른다(`jsonl_purity.rs`의 기존 행 확인) | Step 7 |
-| 11 | M17 부하 filterset | 모듈 접두 `identity_move_key::`, `sessions_filter::`, `audit_query::`와 이름 `audit_query_reads_while_the_writer_rotates`, `move_key_then_serve_listen_and_serve_to_`. `m16.filter`와 같은 `(?:\w+::)?` 접두 허용 꼴 | Step 3·5·8 |
-| 12 | `--live`의 Windows 상태 질의 trait 이름과 반환형 | `TaskStateQuery::is_running(name) -> Result<bool, OpError>`. M19가 COM으로 구현한다. M17에서는 가짜 구현만 있고 Windows 빌드에서 호출 경로가 없다 | Step 2 |
+| 1 | 터미널 trait의 경계 | raw guard·크기 조회·stdin 읽기·끊김 신호 넷. stdout 쓰기는 trait 밖(양쪽 모두 `std::io::Stdout`) | Step 2 |
+| 2 | DACL 모듈의 자리 | `fsutil.rs`를 디렉터리로 바꾸지 않고 형제 `fsutil_dacl.rs`(가칭)를 둔다. `fsutil`은 `xtask arch`의 path-scoped 금지 대상이 아님을 확인하고, 바꾼다면 같은 커밋에서 `arch.rs`를 본다 | Step 4 |
+| 3 | DACL 실패 주입 seam | 생성 함수가 `&dyn SecurityDescriptorSource`(가칭)를 받는 `*_with` 쌍둥이를 두고 공개 함수만 기본 구현을 만든다(`ManagerRunner`와 같은 모양) | Step 4 |
+| 4 | Windows client attach의 종단 host | Windows host PTY가 M20이므로 qsh-testkit의 `EchoPipeFactory`를 쓰는 in-process host(forward: `loopback`, reverse: testkit target이 실제 Windows `qsh listen`에 등록)를 실제 UDP loopback에 띄우고, ConPTY 안의 실제 `qsh` 바이너리가 붙는다. 역방향 CI 종단(Step 7)은 실제 CLI 양쪽이라 ADR-0035 결정 17의 "test-only 하니스 없음"과 겹치지 않는다. M20이 같은 케이스를 실제 `qsh serve`로 바꾼다(§9 #4) | Step 9 |
+| 5 | Credential Manager 구현 경로 | keyring-core 계열 Windows store crate가 `cargo deny`를 넘으면 그것, 아니면 `windows-sys` `Win32_Security_Credentials` 직접 구현 | Step 2(판정), Step 5 |
+| 6 | 러너 위 실제 Credential Manager | `CredWriteW`가 러너 계정에서 되면 고유 target 이름으로 왕복 테스트 하나를 둔다. 안 되면 두지 않고 L1 수동 단계만 | Step 5 |
+| 7 | 한 글자 host와 드라이브 문자의 경계 | Windows 빌드에서 `C:path`는 로컬. 한 글자 host는 `user@c:path`나 `[c]:path`로만 원격(ADR-0029 결정 2의 대괄호 규칙). unix 빌드는 지금 그대로. CLI.md §6.21에 한 문장 | Step 9 |
+| 8 | Windows 콘솔 닫힘과 `qsh listen` 종료 | `SetConsoleCtrlHandler`를 `qsh listen`과 대화형 client가 공유하는 `qsh-cli` 헬퍼 하나로 두고, `qsh-core`는 종료 future만 받는다 | Step 7 |
+| 9 | COM 실경로 테스트 | 등록되지 않은 작업 이름(`\qsh-test\absent-<난수>`)에 대한 `TaskStateQuery`가 "실행 중 아님"이고 아무것도 만들지 않음 하나만. 실제 등록을 만드는 테스트는 두지 않는다 | Step 11 |
+| 10 | `logon_task_session_scoped` fixture | ADR-0035 결과 절대로 새 fixture를 두지 않는다. M17의 `doctor.run.keystore_session_bound.json`은 Linux에서 재현 가능했지만 이 finding은 Windows에서만 나므로 golden 생산 테스트가 Windows 다리 전용이 된다. `EXPECTED_DOCTOR_CODES`·§6.17 대조와 단위 테스트로 충분하다고 본다. main 세션이 다르게 정하면 Windows 전용 golden 하나를 더한다 | Step 10 |
+| 11 | 릴리스 스크립트 테스트의 자리 | `install.ps1`·게이트 스크립트·매니페스트 렌더는 `xtask/tests/` 아래 새 파일이 아니라 기존 `xtask/tests/install_script.rs`에 모듈을 더하는 쪽(통합 파일 하나 규칙 유지). pwsh가 필요한 케이스는 `cfg(windows)` | Step 12 |
+| 12 | M19 부하 filterset과 Windows 실행 | 모듈 접두 `console_probe::`, `windows_forward_e2e::`, `windows_reverse_e2e::`, `windows_attach::`, `trust_withdrawal::listen::`, `sessions_filter::`와 pipe 경합·`service run` 리디렉션 테스트 이름. `m17.filter`와 같은 `(?:\w+::)?` 꼴. Windows는 Dave-Windows의 Git for Windows bash로 `scripts/stress/run.sh`를 돌리고, 부하 생성기가 POSIX 전용이면 같은 커밋에서 Windows 분기를 더한다 | Step 3·16 |
+| 13 | `qsh service run`의 숨김 확인 | `checked_in_man_pages_match_the_generator`가 `hide = true` 항목을 렌더하지 않으면 그대로, 렌더하면 생성기에서 거른다(ADR-0035 결과 절) | Step 10 |
+| 14 | 데몬 재시작 재등록 테스트의 대기 | target의 재등록 backoff를 config로 줄이고(기존 키가 있으면 그것), `qsh hosts --json`의 reverse 항목 출현을 넉넉한 timeout으로 기다린다 | Step 7 |
 
 ## 8. 완료 절차
 
 1. §3 DoD 전건을 실제 테스트와 CI run으로 확인한다. 체크박스는 근거가 초록일 때만 채운다.
-2. 부하 반복 50/50을 기록한다(Step 3·5·6·7·8).
-3. 구속 문서 태그를 대조한다(Step 8 (a)의 목록 전수).
-4. README를 동기화한다(재작성판 위에서).
-5. `docs/ROADMAP.md` "현재 위치"와 M17 절을 갱신하고 마감 노트를 적는다(main 세션).
-6. §0.1, §0.2, §0.3, §0.4의 상태를 승계한다.
-7. 이 `PLAN.md`를 다음 계획으로 교체하고, 마감 노트에 이 계획의 마지막 커밋 해시를 적는다. 다음 마일스톤은 M18 착수 조건(M8 DoD 3)이 닫혀 있으면 M18, 아니면 M19다(§5.1 원칙 6). M19를 먼저 열면 건너뛴 사실을 §5.1에 날짜와 함께 적는다.
+2. 부하 반복 50/50을 두 호스트에서 기록한다(Step 3·6·7·8·9·10·16).
+3. 구속 문서 태그를 대조하고 §5.7 표의 모든 행을 확인한다(Step 16 (a)).
+4. README를 동기화한다.
+5. `docs/ROADMAP.md` "현재 위치"와 M19 절을 갱신하고 마감 노트를 적는다(main 세션). §3 Windows 행과 §5.5 사람 몫 행을 고친다.
+6. §0.1~§0.5의 상태를 승계한다.
+7. 이 `PLAN.md`를 다음 계획으로 교체하고, 마감 노트에 이 계획의 마지막 커밋 해시를 적는다. 다음 마일스톤은 M18 착수 조건(M8 DoD 3)이 그때 닫혀 있으면 M18, 아니면 M20이다(M20의 착수 조건은 M19 닫힘). M18을 다시 건너면 그 사실을 §5.1에 날짜와 함께 적는다.
 
 ## 9. 열린 질문
 
-각 항목의 권고는 main 세션이 Step 1 커밋에서 결정으로 확정한다. 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")의 범위다.
+각 항목의 권고는 main 세션이 Step 1 커밋에서 결정으로 확정했다(2026-10-16, 1~12 모두 권고대로). 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")의 범위다. #3은 ADR-0031 개정 이력에 2026-10-16 줄로, #1·#2·#4는 ROADMAP M19·M20 절에, #7의 앞 두 항목은 M17 마감 절차 커밋 `f87692e`에 반영됐다.
 
-1. **ROADMAP M17 DoD에 안정성 줄을 더할 것인가.** M12·M15·M16에는 있고 M17에는 없다. **권고:** 더한다. 문면은 "M17이 더한 타이밍 민감 테스트는 부하 아래 50회 연속 초록(`scripts/stress/run.sh`)"이다. M17에는 지연 예산 단언이 없으므로 M15·M16의 `-j 1` 대체 문장은 넣지 않는다.
-2. **M17 크기의 "(d) 구현 미산정".** ADR-0033 결과 절이 1.2~1.8ew로 매겼는데 ROADMAP M17 크기 줄, §5.2 표("2.1~3.1 + 미산정 하나"), 머리말 "총 크기"("미산정 둘(M17 (d)의 구현, M18의 보안 가산분)")가 그대로다. **권고:** M17 크기를 "3.3~4.9ew. (a) ADR 0.3 + 구현 1.0~1.5 / (b) 0.5~0.8 / (c) 0 / (d) ADR 0.2~0.3 + 구현 1.2~1.8 / 마감 0.1~0.2"로, §5.2 행과 P1 합을 그에 맞추고, 머리말의 미산정을 M18 하나로 줄인다. 남은 작업은 이 계획 §4의 2.3~3.5ew다.
-3. **§5.4 리스크 1의 낡은 문장.** "제안 ADR 여섯(0029, 0031~0033, 0035, 0044, 0045)"은 2026-10-14 승인 뒤 사실이 아니다. **권고:** "착수 ADR은 모두 승인됐고(2026-10-14) 남은 것은 조건부 0034(M18)다"로 고친다.
-4. **ADR-0032 Windows 열의 M19 귀속이 ROADMAP M19 DoD에 이름으로 없다.** M17 (a) 범위 문장은 "Windows 분기의 구현은 M19"라고 적지만, M19 수용 기준은 작업 정의 펜스와 `logon_task_session_scoped`만 적고 `--activate`의 `schtasks` argv·문서 대조, 결정 18의 Windows 갈래, `keystore_session_bound`의 Windows 실측, `move-key`의 Credential Manager·DACL을 적지 않는다. 마감 공통 절차 1의 "후속 마일스톤에 명시 귀속"을 M17 마감에서 증명하려면 M19 쪽에 이름이 있어야 한다. **권고:** Step 1이 M19 수용 기준에 "ADR-0032 Windows 열(결정 3·4·5·6·11·15·18의 Windows 갈래)의 핀 테스트 `install_activate_runs_the_documented_argv_on_task_scheduler`, `windows_activate_updates_the_stored_task_without_running_it_when_already_running`과 `move-key`의 Credential Manager 왕복" 한 줄을 더한다.
-5. **`launchctl print system/…`가 root 없이 되는지 모를 때.** ADR-0032 결정 18 셋째 항목이 대체를 이미 정했다. 확인 없이 질의 경로로 착지하면, root가 필요한 경우 권한 실패의 0이 아닌 exit가 `active: false`로 잘못 읽힌다. **권고:** Step 2는 대체(`INTERNAL`, `step: "live"`, `sudo` 안내)로 착지한다. 실제 Mac에서 root 없이 실행 여부가 exit code로 갈림을 확인하면 질의 경로로 바꾸는 작은 커밋을 단다(§1 넷째 항목). ADR 개정은 필요 없다.
-6. **(a)와 (d)의 순서.** ROADMAP은 순서를 정하지 않는다. **권고:** §4 "순서의 근거"대로 두 사슬(Step 2→3→4, Step 5→6→7)을 병렬로 연다. 한 에이전트만 쓴다면 Step 2, 5, 3, 6, 4, 7 순으로 번갈아 계약 문서 충돌을 작게 나눈다.
-7. **M16 계획 §0.1에서 빠진 M9 DoD 1.** "일곱" 제목 아래 여섯 줄만 있었다. **권고:** 이 문서 §0.1처럼 M15 계획의 줄을 되살린다. ROADMAP의 P0 표에는 이미 있으므로 ROADMAP 수정은 없다.
-8. **태그.** M17 DoD에는 태그가 필요 없다. **권고:** 찍을지는 유지보수자가 정한다. §1의 Keychain·Secret Service `move-key` 왕복과 macOS `launchctl` 확인이 그 바이너리로 돌 수 있으므로 Step 4 뒤 태그 하나를 권한다.
-9. **`qsh audit` 절 번호.** ADR-0033 결과 절은 "§6.20 뒤"라고 적었지만 그 자리를 ADR-0029의 `qsh cp`(§6.21)가 먼저 차지했다. 결정 13의 규칙("그때 가장 큰 `§6.N` 다음 빈 번호")대로 §6.22다. **권고:** §6.22로 하고 ADR 본문은 고치지 않는다. `identity move-key`는 새 절을 만들지 않고 §6.11 identity 절에 넣는다(ADR-0032 결과 절 "`identity.*` 절").
-10. **Windows `move-key`의 M17 처분.** M17 Windows 빌드에는 `platform` store가 없어 옮길 키가 존재할 수 없다. **권고:** 표면 동등을 위해 op을 Windows에도 M17에서 열고, `--to platform`은 `identity.init --key-store platform`과 같은 `INTERNAL`, `--to file`은 `moved: false`로 둔다. Windows의 실제 이동(Credential Manager, DACL)은 M19가 같은 op 위에 얹는다. ADR 개정은 필요 없다.
+1. **ROADMAP M19 DoD 첫 줄의 `qsh cp`.** "Windows `qsh listen` ← Windows `qsh serve --to`의 실제 CLI로 역방향 종단(… ADR-0029 착지 뒤 `qsh cp`)"은 M19에서 돌 수 없다. Windows host의 파일 op는 M20이고(ADR-0029 결정 23, ADR-0035 결정 26), 그 전까지 Windows host는 `file.v1`을 광고하지 않는다. ADR-0029는 이미 M15에 착지했으니 "착지 뒤"라는 조건이 이미 참이 되어 DoD가 불가능한 항목을 요구하게 된다. **권고:** M19 DoD에서 `cp` 종단을 빼고 "Windows client의 `qsh cp`는 드라이브 문자 operand와 로컬 쓰기 규칙을 단위·통합 테스트가 고정한다"로 바꾼다. 종단은 M20 DoD의 기존 `qsh cp` 줄이 두 route로 맡는다. 실제 Linux·macOS host 상대 Windows client `cp`는 캠페인 (3)이 본다.
+2. **ROADMAP M19 DoD에 안정성 줄.** M12·M15·M16·M17에는 있고 M19에는 없다. **권고:** "M19가 더한 타이밍 민감 테스트는 Linux와 Windows 각각에서 부하 아래 50회 연속 초록(`scripts/stress/run.sh`, `scripts/stress/m19.filter`)"을 더한다. 지연 예산 단언이 없으므로 `-j 1` 대체 문장은 넣지 않는다.
+3. **`trust_withdrawal.rs`의 `serve_to` 쌍둥이.** ADR-0031 결정 3과 개정 이력, `docs/design/testing.md`, ROADMAP M16 마감 노트는 이것을 M20(Windows host)으로 적었다. 그러나 M19가 `qsh serve --to`의 Windows 게이트를 걷고(ADR-0035 결정 25 일부) 역방향 CI가 실제 Windows `serve --to`를 돌린다. 재검증 감시는 PTY와 무관해서 M19에서 돌 수 있다. **권고:** Step 8에서 `serve_to` 모듈의 `cfg(unix)`도 걷고, ADR-0031 개정 이력에 "M19가 `serve --to` 게이트를 걷으면서 쌍둥이도 당겼다"는 한 줄을 main 세션이 더한다(결정 내용은 바뀌지 않음). 당기지 않는다면 Step 8 범위에서 빼고 §5.5 행을 M20으로 둔다.
+4. **ROADMAP M19 범위 문장의 누락.** ADR-0035 결정 1 목록의 `qsh identity move-key`·`qsh audit`, 그리고 M16·M17이 M19로 넘긴 쌍둥이(신뢰 철회 `listen`, 세션 필터 fan-out, `audit.query` pipe 비노출, Windows client 자동 부트스트랩)가 M19 범위·DoD 문장에 이름으로 없다. 마감 공통 절차 1의 "후속 마일스톤에 명시 귀속"을 M16·M17 쪽에서 증명하려면 M19 쪽에 이름이 있어야 한다. 함께, Windows client의 대화형 attach 종단은 Windows host PTY가 없어 테스트 host(§7.1 #4)로 돈다는 사실도 적는다. **권고:** Step 1이 M19 범위에 한 문장, DoD에 "M16·M17이 넘긴 Windows 쌍둥이(…)가 Windows leg에서 초록" 한 줄을 더한다.
+5. **CLI.md 상태 헤더의 옛 판 서술.** v0.37·v0.38 항목이 "Windows는 M19 전에는 …"이라고 적는다. 헤더는 판별 기록이라 옛 판 문면을 고치지 않는 것이 지금까지의 관행이다. **권고:** 옛 판은 그대로 두고 M19 판 항목이 "v0.37·v0.38의 Windows 단서를 걷는다"로 적는다. §5.7 표의 해당 행은 이것으로 닫는다.
+6. **ROADMAP M19 DoD의 DACL 대상.** DoD는 identity 키, `resume.json`, `trust.toml`, audit 로그, `stateless_reset.key` 다섯만 적고 ADR-0035 결정 9는 CA 산출물, `config.toml`, 잠금·임시 파일, 디렉터리, 작업 정의 파일까지 적는다. **권고:** DoD 문장은 그대로 두고 이 계획의 테스트가 결정 9 목록 전부를 덮는다(Step 4·10). ROADMAP 수정은 필요 없다.
+7. **`CLAUDE.md`의 낡은 문장.** Document map이 ROADMAP을 "M11–M19 (P1)"로 적지만 P1은 M11~M20이다. campaigns 목록에 `p1-ssh-bootstrap`이 두 번 있다. **권고:** Step 1에서 main 세션이 고치고, `p1-windows`는 Step 14 착지 뒤 더한다.
+8. **DoD 6의 "서명 검증"과 사람 몫 시크릿.** 시크릿이 없으면 서명·검증 스텝은 건너뛴다. DoD가 실서명 run을 요구하면 M19가 사람 몫에 막힌다(§5.1 원칙 6은 사람 회차를 DoD에 넣지 않는다). **권고:** DoD 6은 스텝 존재, 게이트 세 경우의 테스트, 서명되지 않은 바이너리에서 판정 스크립트가 실패하는 테스트로 닫는다. 첫 실서명 태그는 §5.5 "Windows 서명·배포 준비" 행의 결과로 기록한다. ROADMAP M19 착수 조건 문장("그 전까지는 게이트가 경고와 함께 건너뛴다")과 맞는다.
+9. **Windows 종단을 별도 job으로.** 종단과 ConPTY 테스트는 지금의 `test (windows-latest)` 안에서 돈다. CI 시간이 크게 늘면 acceptance처럼 별도 job으로 뗄 수 있다. **권고:** 일단 같은 leg에 두고, Step 7 뒤 Windows leg 시간이 Linux leg의 두 배를 넘으면 main 세션이 job 분리를 정한다. 분리하면 그 job도 merge 필수로 둔다.
+10. **`p1-ssh-bootstrap` R5의 이월.** 사전 고정된 R5는 Windows의 대화형 attach와 `qsh cp`를 M19로 미뤄 요건 4·6을 보지 않는다. **권고:** R5 문면은 고치지 않고 `p1-windows.md`에 "Windows client 자동 부트스트랩" 회차를 두어 요건 4·6을 Windows에서 본다(Step 14). M16 계획 §0.3이 이미 그렇게 적었다.
+11. **ADR-0023의 "M19가 확인한다".** ADR-0023은 Windows `Instant`가 절전 중 멈추는지를 M19가 확인한다고 적었고, ADR-0035 결정 15는 확인 대신 `QueryUnbiasedInterruptTime`을 표본으로 쓰기로 정했다. **권고:** ADR-0023은 고치지 않는다. Step 8이 결정 15를 인용하고 `client/wake.rs` 모듈 doc을 고치며, 실제 절전 복귀는 캠페인 (4)가 본다.
+12. **태그.** M19 DoD에는 태그가 필요 없다. 캠페인 회차 전부가 Windows 자산이 붙은 태그를 요구한다. **권고:** 사람 몫 서명 시크릿이 준비된 뒤 Step 15 직후 태그 하나를 권한다. 시크릿 전이라면 서명 없는 태그(`Unsigned release` 경고)를 찍을지는 유지보수자가 정한다. 그 태그로는 캠페인 (11)을 돌릴 수 없다.
