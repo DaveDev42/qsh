@@ -142,10 +142,18 @@ fn conpty_resize_poll_fires_once_per_size_change() {
         ("120", "40", "1")
     );
 
-    // The same size again is not a change; a different one is.
+    // The same size again is not a change; a different one is. ConPTY
+    // repaints the screen on a resize, so the first record can come through
+    // the stream again: skip copies of it by its callback count, which a
+    // callback for the repeated size would have advanced.
     probe.resize(120, 40);
     probe.resize(90, 25);
-    let second = probe.wait_record("resize");
+    let second = loop {
+        let record = probe.wait_record("resize");
+        if field(&record, 2) != "1" {
+            break record;
+        }
+    };
     assert_eq!(
         (field(&second, 0), field(&second, 1), field(&second, 2)),
         ("90", "25", "2"),
