@@ -645,8 +645,9 @@ impl RotatingFile {
     }
 }
 
-/// `<active>.<n>` — the rotated-file naming scheme.
-fn rotated_path(active: &Path, n: u32) -> PathBuf {
+/// `<active>.<n>` — the rotated-file naming scheme. Shared with
+/// [`super::reader`], which must never re-derive it (ADR-0033 결정 6).
+pub(super) fn rotated_path(active: &Path, n: u32) -> PathBuf {
     let mut name = active.as_os_str().to_os_string();
     name.push(format!(".{n}"));
     PathBuf::from(name)
