@@ -97,6 +97,46 @@ fn a_noisy_exec_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `qsh sessions` with all three filters set: the count line is a human
+/// diagnostic, so machine mode keeps one envelope on stdout and no filter
+/// echo anywhere in `data` (ADR-0033 decision 3).
+#[test]
+fn a_filtered_sessions_listing_keeps_stdout_pure_json_at_every_verbosity() {
+    let fleet = Fleet::start();
+
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = fleet.client.qsh(&[
+            "sessions",
+            HOST_ALIAS,
+            "--state",
+            "running",
+            "--writer",
+            "none",
+            "--attachable",
+            verbosity,
+            mode,
+        ]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}: one envelope, one line");
+        assert_eq!(lines[0]["command"], "session.list", "{label}");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        let keys: Vec<&String> = lines[0]["data"]
+            .as_object()
+            .expect("data object")
+            .keys()
+            .collect();
+        assert_eq!(keys, ["sessions"], "{label}: no new field in data");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("showing"),
+            "{label}: the human count line is not a machine-mode diagnostic"
+        );
+    }
+}
+
 /// M9 plan Step 2 (b9a621b): refusing `trust accept` for lack of a code must
 /// not leak the terminal-prompt wording onto stdout at any verbosity —
 /// the resolver never opens the prompt in machine mode, so there is

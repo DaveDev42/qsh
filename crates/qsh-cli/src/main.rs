@@ -52,9 +52,9 @@ use qsh_core::{
     ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
     IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp,
     ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
-    SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
+    SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp,
+    SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
+    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
     TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
     normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
@@ -587,12 +587,30 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             *escape_char,
         ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
-        Command::Sessions { host } => finish(
-            cli,
-            SessionListOp::COMMAND,
-            ops.session_list(SessionListReq { host: host.clone() }),
-            human::print_session_list,
-        ),
+        Command::Sessions {
+            host,
+            state,
+            writer,
+            attachable,
+        } => {
+            let filter = SessionFilter {
+                state: state.clone(),
+                writer: writer.clone(),
+                attachable: *attachable,
+            };
+            let counted = ops.session_list_counted(SessionListReq { host: host.clone() }, &filter);
+            // The pre-filter count is for the human "M of N" line only; it
+            // is not part of the JSON data (ADR-0033 decision 3).
+            let shown_of = (!filter.is_empty())
+                .then(|| counted.as_ref().ok().map(|(_, total)| *total))
+                .flatten();
+            finish(
+                cli,
+                SessionListOp::COMMAND,
+                counted.map(|(data, _)| data),
+                |data| human::print_session_list(data, shown_of),
+            )
+        }
         Command::Tunnel(TunnelCmd::Open(args)) => run_tunnel_open(cli, &ops, args),
         Command::Tunnel(TunnelCmd::Close { tunnel_id }) => finish(
             cli,

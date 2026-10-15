@@ -327,10 +327,25 @@ pub enum Command {
     Session(SessionCmd),
 
     /// List sessions on one pinned host, or on every pinned host.
+    // The filters run on this machine after the hosts answer, are
+    // AND-combined, and never change what a host is asked (ADR-0033
+    // decisions 1-2, `docs/CLI.md` §6.2).
     Sessions {
         /// Host alias from the trust store; omit for every host with an
         /// address.
         host: Option<String>,
+        /// Only sessions whose state is exactly this string (for example
+        /// `running`). An unknown state matches nothing.
+        #[arg(long, value_name = "STATE")]
+        state: Option<String>,
+        /// Only sessions held by this writer principal, or `none` for
+        /// sessions nobody holds the writer lease of.
+        #[arg(long, value_name = "PRINCIPAL|none")]
+        writer: Option<String>,
+        /// Only sessions this device can attach to, i.e. holds a resume
+        /// credential for.
+        #[arg(long)]
+        attachable: bool,
     },
 
     /// Run the host: accept connections from pinned peers, or (with

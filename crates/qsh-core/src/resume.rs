@@ -304,6 +304,24 @@ impl ResumeStore {
         self.load().ok()?.sessions.get(session_ref).cloned()
     }
 
+    /// The `session_ref`s this device holds a usable credential for, read
+    /// from the state file once. Expired entries are left out (an attach
+    /// would discard them, [`Self::take_for`]). Only the keys leave this
+    /// function: a token value is never copied out of the document, so a
+    /// caller cannot print one by accident (ADR-0007, ADR-0033 decision 3).
+    pub fn held_session_refs(&self) -> std::collections::HashSet<String> {
+        let now = SystemTime::now();
+        self.load()
+            .map(|doc| {
+                doc.sessions
+                    .into_iter()
+                    .filter(|(_, entry)| !is_expired(entry, now))
+                    .map(|(session_ref, _)| session_ref)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// How many credentials are stored.
     pub fn len(&self) -> usize {
         self.load().map(|d| d.sessions.len()).unwrap_or(0)

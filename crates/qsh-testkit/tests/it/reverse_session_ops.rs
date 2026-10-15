@@ -46,7 +46,7 @@ use qsh_core::broker::{Broker, BrokerConfig, PeerFingerprint, PipeFactory, Syste
 use qsh_core::handshake;
 use qsh_core::resume::{NoToken, ResumeStore};
 use qsh_core::server::{ConnCtx, Server};
-use qsh_core::{Fingerprint, Ops, Paths, Principal};
+use qsh_core::{Fingerprint, Ops, Paths, Principal, SessionFilter};
 use qsh_proto::{
     EnvVar, ErrorCode, IdentityInitReq, KeyStoreMode, SessionCloseReq, SessionGetReq,
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
@@ -273,7 +273,7 @@ async fn full_lifecycle_open_get_list_read_write_resize_close(ops: &Ops, host: &
 
     let listed = blocking(ops, {
         let h = host_s.clone();
-        move |ops| ops.session_list(SessionListReq { host: Some(h) })
+        move |ops| ops.session_list(SessionListReq { host: Some(h) }, &SessionFilter::default())
     })
     .await
     .unwrap_or_else(|err| panic!("session.list on {host}: {err:?}"));
@@ -626,9 +626,12 @@ async fn killing_the_daemon_mid_session_gives_the_cli_a_clear_error_while_the_ta
     // The target's own session is still running — proven over the
     // forward alias, never by retrying the now-dead reverse route.
     let listed = blocking(&ops, |ops| {
-        ops.session_list(SessionListReq {
-            host: Some("fwdhost".into()),
-        })
+        ops.session_list(
+            SessionListReq {
+                host: Some("fwdhost".into()),
+            },
+            &SessionFilter::default(),
+        )
     })
     .await
     .expect("session.list over the forward route, unaffected by the dead daemon");

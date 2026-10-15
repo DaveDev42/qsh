@@ -152,7 +152,12 @@ the `identity_move_key::` module and the route-equivalence test
 `move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`
 (real `qsh serve`, `qsh listen` and `qsh serve --to` processes after a key
 moved through a fake platform store; no test touches the OS credential
-store). M17 adds no p95 budget, so there is no `m17-latency.filter`.
+store). It also covers `qsh sessions` filters: the `sessions_filter::` module,
+including the route-equivalence test
+`sessions_filter_applies_identically_to_forward_and_reverse_hosts` (real
+`qsh serve`, `qsh listen` and `qsh serve --to` processes, with a pty client
+holding a writer lease on each host). M17 adds no p95 budget, so there is no
+`m17-latency.filter`.
 
 ## test/
 

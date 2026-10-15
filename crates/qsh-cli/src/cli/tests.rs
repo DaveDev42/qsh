@@ -605,10 +605,42 @@ fn session_subcommands_parse_per_cli_md() {
     let cli = Cli::try_parse_from(["qsh", "sessions"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Sessions { host: None }
+        Command::Sessions {
+            host: None,
+            state: None,
+            writer: None,
+            attachable: false,
+        }
     ));
     let cli = Cli::try_parse_from(["qsh", "sessions", "box", "--json"]).unwrap();
-    assert!(matches!(cli.command.unwrap(), Command::Sessions { host: Some(ref h) } if h == "box"));
+    assert!(
+        matches!(cli.command.unwrap(), Command::Sessions { host: Some(ref h), .. } if h == "box")
+    );
+
+    // The three filters (ADR-0033 decision 1) combine with a host.
+    let cli = Cli::try_parse_from([
+        "qsh",
+        "sessions",
+        "box",
+        "--state",
+        "running",
+        "--writer",
+        "none",
+        "--attachable",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Sessions {
+            host: Some(ref h),
+            state: Some(ref st),
+            writer: Some(ref w),
+            attachable: true,
+        } if h == "box" && st == "running" && w == "none"
+    ));
+    // A filter flag needs its value; `--attachable` takes none.
+    assert!(Cli::try_parse_from(["qsh", "sessions", "--state"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "sessions", "--writer"]).is_err());
 }
 
 /// The bare `qsh [user@]host` form and `qsh attach` (`docs/CLI.md` §7).

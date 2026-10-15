@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-sessions \- List sessions on one pinned host, or on every pinned host
 .SH SYNOPSIS
-\fBqsh sessions\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIHOST\fR] 
+\fBqsh sessions\fR [\fB\-\-json\fR] [\fB\-\-state\fR] [\fB\-\-jsonl\fR] [\fB\-\-writer\fR] [\fB\-\-attachable\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIHOST\fR] 
 .SH DESCRIPTION
 List sessions on one pinned host, or on every pinned host
 .SH OPTIONS
@@ -12,8 +12,17 @@ List sessions on one pinned host, or on every pinned host
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
 .TP
+\fB\-\-state\fR \fI<STATE>\fR
+Only sessions whose state is exactly this string (for example `running`). An unknown state matches nothing
+.TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-writer\fR \fI<PRINCIPAL|none>\fR
+Only sessions held by this writer principal, or `none` for sessions nobody holds the writer lease of
+.TP
+\fB\-\-attachable\fR
+Only sessions this device can attach to, i.e. holds a resume credential for
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)

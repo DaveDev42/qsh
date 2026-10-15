@@ -41,6 +41,7 @@ use crate::resume::{NoToken, ResumeStore, StoredToken};
 mod attach;
 mod context;
 mod drive;
+mod filter;
 mod link;
 mod pump;
 mod reader;
@@ -48,6 +49,7 @@ mod reconnect;
 mod recovery;
 
 pub use attach::{AttachHandle, DetachFlush, SessionAttachOp, SessionAttachStream};
+pub use filter::{SessionFilter, WRITER_NONE};
 pub(crate) use link::{Connected, Link};
 pub use reader::SessionReader;
 pub(crate) use recovery::probe_alive;
@@ -574,7 +576,29 @@ impl Ops {
     /// laptop must not hide every other host's sessions — so unreachable
     /// hosts are reported in `unreachable` (additive) and the call only
     /// fails when *no* host answered.
-    pub fn session_list(&self, req: SessionListReq) -> Result<SessionListData, OpError> {
+    ///
+    /// `filter` is applied here, to the answers the hosts gave: the wire
+    /// request is identical with and without it, so the hosts return their
+    /// usual ACL-scoped set and the filter only narrows it (ADR-0033
+    /// decisions 1-2). `unreachable` is never filtered: a filter that
+    /// removes every session must not hide a host that did not answer.
+    pub fn session_list(
+        &self,
+        req: SessionListReq,
+        filter: &SessionFilter,
+    ) -> Result<SessionListData, OpError> {
+        self.session_list_counted(req, filter).map(|(data, _)| data)
+    }
+
+    /// [`Self::session_list`] plus the number of sessions the hosts
+    /// returned before `filter` was applied, for the human renderer's
+    /// "M of N shown" line (ADR-0033 decision 3). The count is not part of
+    /// the JSON data.
+    pub fn session_list_counted(
+        &self,
+        req: SessionListReq,
+        filter: &SessionFilter,
+    ) -> Result<(SessionListData, usize), OpError> {
         let (hosts, fan_out) = match req.host {
             Some(host) => (vec![host], false),
             None => (
@@ -626,10 +650,25 @@ impl Ops {
                 details,
             });
         }
-        Ok(SessionListData {
-            sessions,
-            unreachable,
-        })
+        let total = sessions.len();
+        if !filter.is_empty() {
+            // One read of the state file for the whole listing, and only
+            // the `session_ref` keys come out of it: a token never reaches
+            // the filter, the data or a log line (ADR-0007).
+            let held = if filter.needs_resume_state() {
+                ResumeStore::new(&self.paths).held_session_refs()
+            } else {
+                Default::default()
+            };
+            sessions = filter.apply(sessions, &held);
+        }
+        Ok((
+            SessionListData {
+                sessions,
+                unreachable,
+            },
+            total,
+        ))
     }
 
     /// `session.read` — one pull of the replay ring from the

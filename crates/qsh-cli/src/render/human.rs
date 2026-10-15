@@ -900,8 +900,14 @@ pub fn print_session(session: &Session) -> io::Result<()> {
     writeln!(stdout, "last_sequence: {}", session.last_sequence)
 }
 
-/// Print the session table (`qsh sessions`).
-pub fn print_session_list(data: &SessionListData) -> io::Result<()> {
+/// Print the session table (`qsh sessions`). `filtered_from` is the number
+/// of sessions the hosts returned when a filter narrowed them; it is
+/// reported on stderr, never on stdout, and never in JSON (ADR-0033
+/// decision 3, `docs/CLI.md` §2.2).
+pub fn print_session_list(data: &SessionListData, filtered_from: Option<usize>) -> io::Result<()> {
+    if let Some(total) = filtered_from {
+        stderr_note!("qsh: showing {} of {} sessions", data.sessions.len(), total);
+    }
     // Hosts the fan-out could not reach are a stderr diagnostic, never a
     // table row (`docs/CLI.md` §2.2, §6.2).
     for h in &data.unreachable {
