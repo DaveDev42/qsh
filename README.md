@@ -25,6 +25,11 @@ scp-style file copy (`qsh cp`), port forwards (`-L`, `-R`, and a SOCKS5 proxy
 with `-D`), reverse connections for hosts behind NAT, and a JSON CLI contract
 (`qsh.cli/v1`) for scripts and agents.
 
+If you can already `ssh` to a machine, `qsh pair ssh` uses that ssh connection
+to pin both machines to each other, and the first `qsh box` does the same
+without being asked. Taking a peer out of the trust store, or lowering its
+role, closes its open connections on that machine within 2 seconds.
+
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)).
 
@@ -37,7 +42,7 @@ Several campaigns that a person runs by hand are also still open; see
 ## Contents
 
 - [Install](#install): prebuilt binaries, Homebrew, or from source.
-- [First run](#first-run): pin two machines to each other and open a shell.
+- [First run](#first-run): pin two machines to each other, over ssh or by hand, and open a shell.
 - [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
 - [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, reverse connections.
 - [Automation](#automation): the JSON CLI for scripts and agents.
@@ -210,8 +215,9 @@ with `--json`/`--jsonl`, and never for a name that is already in
 under `[ssh]` in `config.toml` to turn it off, or run the step yourself with
 `qsh pair ssh box`. If the host is not running `qsh serve` when ssh finishes,
 the pins stay and the command ends with `CONNECTION_FAILED`; start `serve`
-and run it again. A Windows host cannot answer the bootstrap yet: `qsh`
-reports `REMOTE_ERROR` and pins nothing on either side.
+and run it again. A Windows host cannot answer the bootstrap yet (see
+[Known limitations](#known-limitations)): `qsh` ends with an error and pins
+nothing on either side.
 
 Without ssh, six commands pin the two machines by hand. This path, not the
 one above, is the literal script that `docs/campaigns/m9-stopwatch.md` and
@@ -613,6 +619,14 @@ the controller with `--address … --role full`, because the controller's
 requests are authorized by the target's trust store. Without that `--role`
 an address pin is `none` and the target refuses them.
 
+If you can reach the target over ssh, the controller can do both pins in one
+step: `qsh pair ssh workshop --reverse --to controller.example.com:4433`. The
+target pins the controller at that address with role `full` (`--role`
+overrides it) and the controller pins the target with role `reverse`. Nothing
+is started on the target. The command prints the line to run there,
+`qsh serve --to <name>`, and the target shows up in `qsh hosts` once it has
+registered. The automatic bootstrap never picks this direction.
+
 A peer address with no port defaults to 4433: `controller` and `controller:4433` resolve the same way, and an IPv6 literal needs brackets once a port follows it, as in `[::1]:4433`.
 
 `qsh serve --to` keeps reconnecting with backoff, so the target comes back
@@ -713,6 +727,21 @@ into a dedicated pairing exchange that can do nothing but verify possession
 of the invite's secret and, on success, pin. It never reaches a session,
 tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side names the peer explicitly with `--as <name>` on `pair invite`/`pair accept`; without it, the peer's own self-reported name is used.
 
+The ssh bootstrap is a second way to create pins, and it is not trust on
+first connect: the remote fingerprint comes from the remote account over an
+ssh connection that ssh has authenticated, and qsh adds no check of its own
+on top of ssh's host authentication. qsh never reads an SSH private key, a
+passphrase or an agent socket; ssh does all of that in its own process. The
+pin written on the remote has role `full`, which is no more than the ssh
+login already gives that account; `--role` narrows it. The pin written on the
+local machine has role `none`, so the remote gets nothing from it without an
+`acl.toml` row. A bootstrap never overwrites a pin: a name or fingerprint that
+conflicts with an existing pin stops it with `SESSION_CONFLICT`, and an
+existing pin keeps its role. Every pin the remote responder writes leaves an
+audit record first, and without a durable record it does not write the pin.
+Trust that the bootstrap inherited from a bad ssh connection is covered under
+[Known limitations](#known-limitations).
+
 Authorization has two sources, and a request is allowed when either one
 grants it. The first is the trust role on the peer's pin in `trust.toml`
 (see [Choosing what a peer may do](#choosing-what-a-peer-may-do)): registering
@@ -759,9 +788,9 @@ The `acl.toml` rows load once, when `qsh serve`/`qsh listen`/`qsh serve --to`
 starts, so an edit to the file only takes effect on the next restart. Roles
 are the opposite: they are read from `trust.toml` on every request, so
 `qsh trust set-role` and `qsh trust remove` apply from the next request with
-no restart. A role that shrinks does not close what the peer already opened
-(an attached session, an open tunnel, a transfer in flight); that waits for
-connection-closing on removal (ADR-0031). If the file is missing, the process
+no restart. A role that shrinks, or a pin that is removed, closes the
+peer's established connections within 2 seconds (ADR-0031). The sessions on
+them are detached, not ended. If the file is missing, the process
 comes up and prints one line to stderr (`no acl.toml`, code
 `acl_policy_missing`, and that requests are authorized by trust roles only);
 `qsh doctor` reports `acl_policy_missing` only when no role grants anything
@@ -950,7 +979,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   invite codes, so `qsh pair invite`/`qsh pair accept` cannot pin a `qsh
   listen` or `qsh serve --to` peer. Pin it by certificate file (`qsh
   identity export`, `qsh trust add --cert-file`; `docs/CLI.md` §6.11,
-  §6.13).
+  §6.13), or over ssh with `qsh pair ssh --reverse --to`.
 - `exec.run` output is capped at 64 MiB. Stdout plus stderr come back in one
   envelope, and anything beyond the cap is `RESOURCE_EXHAUSTED`. Use `qsh
   session read` or an interactive session for streaming output.
@@ -974,7 +1003,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   unlike scp, which writes into the existing file. With role `full` or a wide
   `paths`, `file.write` is as strong as `exec.run`.
 - Windows support is planned for P1: the client in M19 and the host in M20
-  (ADR-0035), with the same features as Linux and macOS. Until then a
+  (ADR-0035), with the same features as Linux and macOS. The ssh bootstrap
+  follows that split. `qsh pair ssh` runs from a Windows client with the
+  system `ssh.exe`, but the automatic bootstrap on `qsh box` and `qsh cp`
+  arrives with Windows interactive attach and `qsh cp` in M19, and the
+  remote responder (`qsh pair ssh-respond`) arrives with the Windows host in
+  M20, so a Windows machine cannot be the remote end of a bootstrap before
+  then. Until then a
   Windows build of `qsh cp` rejects malformed operands and answers
   everything else with `UNSUPPORTED`, a Windows host does not advertise
   `file.v1` and answers the file operations with `UNSUPPORTED`, and PTY code
@@ -1014,6 +1049,21 @@ Some of these are MVP scope decisions, some are unfinished work.
   sign it yourself (`codesign -fs "<cert>" $(which qsh)`) or register it with
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
+- The ssh bootstrap (`qsh pair ssh` and the automatic one on `qsh box` and
+  `qsh cp`) trusts the remote fingerprint exactly as far as it trusts that ssh
+  connection's host authentication, and no further
+  ([ADR-0044](docs/adr/0044-ssh-bootstrap.md)). qsh never overrides your ssh
+  settings. If they accept a host key you have not seen before
+  (`StrictHostKeyChecking=accept-new`, or answering yes at the prompt), whoever
+  sits in the middle of that first connection can plant their own fingerprint,
+  and the pin keeps it. Put the host's key in `known_hosts` beforehand if that
+  matters to you.
+- Ending ssh access does not end qsh access. Removing a key from
+  `authorized_keys` or locking the account leaves the qsh pins that the
+  bootstrap created, and the machine that holds one can still dial in over
+  QUIC. On the remote, run `qsh trust remove <name>`, which also closes the
+  connections open at that moment. That takes effect on the machine where you
+  run it only; run it on every machine that trusts the peer.
 - `qsh init --import-ssh-key <path>` makes an existing OpenSSH Ed25519 key
   the device key, so SSH and qsh share one key and its lifetime: if either
   side leaks it, both are exposed. qsh has no key rotation or revocation

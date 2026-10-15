@@ -3,7 +3,7 @@
 날짜: 2026-10-11 (개정 2026-10-12, 2026-10-13, 2026-10-14, 2026-10-15)
 상태: 승인됨
 
-개정 이력: 2026-10-15에 결정 7의 `qsh listen` 문장을 착지한 동작에 맞춰 고쳤다. 닫힌 등록은 등록표에서 즉시 빠지지 않고 연결 유실과 같은 정리 경로를 타서 `[listen].stale_retention` 동안 Stale로 남는다. 연결은 그대로 `0x1005`로 닫히고 재등록은 handshake에서 거부되므로 보안 성질은 같다.
+개정 이력: 2026-10-15에 결정 7의 `qsh listen` 문장을 착지한 동작에 맞춰 고쳤다. 닫힌 등록은 등록표에서 즉시 빠지지 않고 연결 유실과 같은 정리 경로를 타서 `[listen].stale_retention` 동안 Stale로 남는다. 연결은 그대로 `0x1005`로 닫히고 재등록은 handshake에서 거부되므로 보안 성질은 같다. 같은 날 결정 3의 플랫폼 문단에 테스트 귀속을 더했다. 감시 코드는 플랫폼 분기가 없고, Windows 빌드의 `qsh serve`(inbound)는 M16에서 이 감시를 얻어 이식 가능한 테스트가 Windows 다리에서 돈다. `qsh listen`과 `qsh serve --to`는 오늘 unix 전용(`run_reverse_unix`, localctl)이라 그 재검증 테스트의 Windows 쌍둥이는 `listen`이 M19(ADR-0035 결정 14), `serve --to`가 M20(ADR-0035 결정 25)에서 열린다.
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5)에서 이 번호를 인증서 rotation·revocation(M16 (d)) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `trust.toml`의 `[[revoked]]` 목록, `qsh trust revoke`, `qsh identity rotate`(rotation 문서와 `--keep-key` 갱신), `qsh trust rotate`, 연결 재검증, 유효기간 기한을 한 묶음으로 제안했다. 2026-10-12 사용자 결정이 P1을 다시 짜면서 앞의 넷을 뺐다. 이 문서는 남은 하나, 곧 "trust를 거두면 이미 열린 연결도 닫는다"만 정한다. 빠진 것은 대안과 기각 사유 절에 사용자 결정으로 옮겼다.
 
@@ -51,7 +51,7 @@ ADR-0045가 role을 도입하면서 같은 공백이 한 겹 더 생긴다. role
    - `SharedTrustStore`에 단조 증가하는 세대 번호를 더한다. `refresh`가 snapshot을 실제로 바꿀 때마다(새로 파싱한 내용이든, 파일이 없어져 빈 store가 된 경우든) 세대를 올리고 `tokio::sync::watch` 채널로 알린다. 파싱에 실패해 마지막 정상 snapshot을 유지한 경우에는 세대를 올리지 않는다.
    - 프로세스 하나에 1초 간격 poll 작업을 하나 둔다. 이 작업은 `refresh`만 부른다. handshake의 `lookup_pin`이 먼저 `refresh`해 세대를 올릴 수도 있고, 그 경우 같은 알림이 즉시 간다.
    - 연결마다 감시 작업이 채널의 변경을 기다린다. 변경이 오면 결정 4의 판정을 연결마다 한 번 돌린다. 감시 작업은 그 연결을 서빙하는 작업과 같은 수명에 묶는다(`select!`로 같이 끝난다). 감시 작업만 죽고 연결이 남는 상태를 만들지 않는다.
-   - 플랫폼 차이는 없다. poll과 `watch` 채널과 `Connection::close`는 모두 이식 가능한 코드이고, Windows host(ADR-0035 M20)의 `serve`·`listen`·`serve --to`도 같은 감시 작업을 쓴다. `trust.toml`을 바꾸는 쓰기가 원자적 rename이든 Windows의 교체 쓰기든 감시는 파일 내용 바이트만 본다.
+   - 플랫폼 차이는 없다. 테스트의 Windows 쌍둥이는 `listen`이 M19, `serve --to`가 M20에서 열린다(2026-10-15 개정). poll과 `watch` 채널과 `Connection::close`는 모두 이식 가능한 코드이고, Windows host(ADR-0035 M20)의 `serve`·`listen`·`serve --to`도 같은 감시 작업을 쓴다. `trust.toml`을 바꾸는 쓰기가 원자적 rename이든 Windows의 교체 쓰기든 감시는 파일 내용 바이트만 본다.
    - 보장은 "`trust.toml`의 바이트가 바뀐 시점부터 2초 안에 닫힌다"이다. poll 1초와 연결당 판정 시간의 여유다. 파일 감시(inotify, FSEvents)와 프로세스 간 신호는 쓰지 않는다(근거 절).
    - 연결 수는 기존 연결 수 상한(ADR-0010)이 묶는다. 판정은 snapshot만 읽고 I/O가 없다. CA 경로의 chain 검증이 연결당 가장 비싼 일이고, 연결마다 독립 작업이라 한 작업이 모든 연결을 순서대로 돌지 않는다.
 

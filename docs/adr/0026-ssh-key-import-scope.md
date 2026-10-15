@@ -3,7 +3,7 @@
 날짜: 2026-09-24
 상태: 승인됨 (2026-09-26 사용자 확정)
 
-개정 이력: 결정 4의 human 출력은 [ADR-0045](0045-trust-roles.md) 이후 `trust_command`에 `--role full`을 붙여 보이고 `acl_row` 블록을 내지 않는다(JSON 필드는 불변, `docs/CLI.md` §6.11).
+개정 이력: 2026-10-15에 결정 7이 분리해 둔 암호 걸린 키와 `ssh-agent` 서명 위임의 별도 결정은 열지 않기로 했다. ADR-0044가 그 동기, 곧 ssh 쪽에 이미 있는 것으로 qsh 신뢰를 빨리 세우는 일을 키 재료를 옮기지 않고 해결하고, 암호와 agent는 ssh 프로세스가 처리하므로 qsh에 서명 seam을 낼 이유가 없다(ADR-0044 결정 23). `--import-ssh-key`와 `trust ssh-preview`는 그대로 남는다. 결정 4의 human 출력은 [ADR-0045](0045-trust-roles.md) 이후 `trust_command`에 `--role full`을 붙여 보이고 `acl_row` 블록을 내지 않는다(JSON 필드는 불변, `docs/CLI.md` §6.11).
 
 개정 관계: ADR-0008을 확장한다(결정 5는 유지). ADR-0017의 결정 1과 결정 5가 세운 제약은 개정하지 않고 인수한다.
 

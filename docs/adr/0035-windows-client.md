@@ -1,7 +1,9 @@
 # ADR-0035: Windows는 Linux·macOS와 같은 기능을 연다. client 쪽(콘솔 raw 모드 attach, named pipe localctl과 listener 데몬)과 host 쪽(ConPTY 백엔드의 `serve`·`serve --to`, 작업 스케줄러 서비스 백엔드)을 정방향·역방향 모두 연다
 
-날짜: 2026-10-11 (개정 2026-10-13, 같은 날 두 번째·세 번째 개정, 승인 2026-10-14)
+날짜: 2026-10-11 (개정 2026-10-13, 같은 날 두 번째·세 번째 개정, 승인 2026-10-14, 개정 2026-10-15)
 상태: 승인됨
+
+개정 이력: 2026-10-15에 M16이 착지시킨 두 결정의 Windows 귀속을 기록한다. 결정 14(M19)의 `qsh listen`과 결정 25(M20)의 `qsh serve --to`는 ADR-0031(신뢰 철회 시 연결 닫기)의 재검증 감시를 같은 코드로 쓰고, 그 Windows 쌍둥이 테스트(`crates/qsh-testkit/tests/it/trust_withdrawal.rs`의 `listen`·`serve_to` 모듈, 오늘 `cfg(unix)`)는 각각 M19, M20이 연다. ADR-0044의 자동 부트스트랩은 Windows의 대화형 attach와 `qsh cp`가 M19라 그 분기를 M19가 켜고(결정 1·5), 명시 명령 `qsh pair ssh`는 결정 1대로 M16 착지와 함께 Windows client에서 열렸으며, 응답자 `qsh pair ssh-respond`는 결정 25대로 M20이다. 다른 결정은 바뀌지 않는다.
 
 개정 관계: 새 ADR이다. `docs/ROADMAP.md` M19(§5)가 이 번호를 Windows 착수 ADR로 예약했다. 첫 개정(2026-10-13)은 정방향과 역방향은 같은 기능을 갖는다는 사용자 결정(`docs/PRD.md` §4 '연결 방향과 역할의 분리', `docs/ROADMAP.md` §5.1 원칙 7)에 따라 초안이 닫아 둔 `qsh listen`과 localctl 대체(named pipe)를 열었다. 두 번째 개정(2026-10-13)은 "정방향, 역방향, 모든 플랫폼에서 평등한 기능 지원"이라는 사용자 결정을 반영한다. 동등은 방향 사이만이 아니라 Linux·macOS·Windows 사이에도 성립해야 하므로, 첫 개정이 남겨 둔 예외(host 역할 두 방향의 P2, Windows `qsh service` 부재, 콘솔 초대 코드 프롬프트 거부, 절전 감지 미확인, 역방향 CI의 test-only 하니스)를 걷어 낸다. 결정 2·3·10·11·15~19와 맥락·근거·대안·결과를 고쳤고, host 역할(결정 20~26)과 서비스 매니저 백엔드(결정 27~28)를 새로 더했다. 결정 번호 1~19의 주제는 그대로 두어 다른 ADR의 인용이 깨지지 않게 했다. 세 번째 개정(2026-10-13)은 두 번째 개정이 남긴 열린 질문과 남는 차이에 대한 사용자 답("전부 다 알아서 진행해. 원칙에 예외는 없어. Windows도 코드 서명 진행해.")을 반영한다. 신호 `Quit`·`Usr1`·`Usr2`에 Windows 의미를 주고(결정 22), man 페이지를 Windows 자산에도 싣고(결정 16), Authenticode 서명과 winget·scoop 배포를 범위에 넣고(결정 16), 로그인 세션 밖 상시 기동을 Linux linger와 같은 수준으로 열고(결정 27), 서비스 쪽 열린 질문 넷(`manager` 값, 숨김 진입점, doctor finding, 실행 상태 질의)을 정했다(결정 27·28). 마일스톤은 M19 Windows client와 M20 Windows host로 나뉘었고 결과 절이 결정마다 착지할 마일스톤을 적는다.
 
