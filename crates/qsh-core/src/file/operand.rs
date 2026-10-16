@@ -7,8 +7,9 @@
 //! exists (decision 17: `INVALID_ARGUMENT`, exit `2`).
 //!
 //! The Windows client's drive-letter rule (a `:` one character in is a drive,
-//! not a host) takes effect with ADR-0035 decision 1 (M19); until then every
-//! build reads `C:\x` as host `C`.
+//! not a host, ADR-0029 decision 2) is on in a Windows build and off
+//! elsewhere; [`parse_operand_with`] takes the platform as a flag so the
+//! rule is tested on every leg.
 
 use qsh_proto::FileCopyReq;
 
@@ -115,7 +116,18 @@ pub struct CopyPlan {
 /// An operand is remote when a `:` comes before the first `/` and the host
 /// part before it is not empty (`host:path`, `user@host:path`,
 /// `[::1]:path`); `./a:b` is a local file. `-` (stdin/stdout) is refused.
+///
+/// On Windows a single letter before the `:` is a drive, not a host, so
+/// `C:\x` and `c:x` are local. A one-letter host is written `user@c:path`
+/// or `[c]:path`. Both separators end the host part there, so `.\a:b` is
+/// local too.
 pub fn parse_operand(operand: &str) -> Result<Operand, OperandError> {
+    parse_operand_with(operand, cfg!(windows))
+}
+
+/// [`parse_operand`] with the Windows drive-letter rule chosen by the
+/// caller: `windows` is true for a Windows client.
+pub fn parse_operand_with(operand: &str, windows: bool) -> Result<Operand, OperandError> {
     if operand == "-" {
         return Err(OperandError::new(
             "`-` (stdin/stdout) is not supported by qsh cp",
@@ -124,7 +136,12 @@ pub fn parse_operand(operand: &str) -> Result<Operand, OperandError> {
     if operand.is_empty() {
         return Err(OperandError::new("empty operand"));
     }
-    let head_end = operand.find('/').unwrap_or(operand.len());
+    let head_end = if windows {
+        operand.find(['/', '\\'])
+    } else {
+        operand.find('/')
+    }
+    .unwrap_or(operand.len());
     let head = &operand[..head_end];
 
     // `[user@][v6]:path`. The colons inside the brackets are not the
@@ -165,11 +182,21 @@ pub fn parse_operand(operand: &str) -> Result<Operand, OperandError> {
         // `:x` has no host: not a remote operand.
         return Ok(Operand::Local(operand.to_string()));
     }
+    // A bare letter and a colon is a drive on Windows. Naming the user
+    // (`me@c:path`) or bracketing the host (handled above) makes it a host.
+    if windows && user.is_none() && is_drive_letter(host) {
+        return Ok(Operand::Local(operand.to_string()));
+    }
     Ok(Operand::Remote(RemoteOperand {
         user: user_part(user, operand)?,
         host: host.to_string(),
         path: operand[colon + 1..].to_string(),
     }))
+}
+
+fn is_drive_letter(host: &str) -> bool {
+    let mut chars = host.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if c.is_ascii_alphabetic())
 }
 
 fn user_part(user: Option<&str>, operand: &str) -> Result<Option<String>, OperandError> {
@@ -183,6 +210,11 @@ fn user_part(user: Option<&str>, operand: &str) -> Result<Option<String>, Operan
 /// Decide what an operand list means (decision 2). Every refusal is
 /// `INVALID_ARGUMENT` and happens before anything is opened.
 pub fn plan(req: &FileCopyReq) -> Result<CopyPlan, OperandError> {
+    plan_with(req, cfg!(windows))
+}
+
+/// [`plan`] with the Windows drive-letter rule chosen by the caller.
+pub fn plan_with(req: &FileCopyReq, windows: bool) -> Result<CopyPlan, OperandError> {
     if req.sources.is_empty() {
         return Err(OperandError::new(
             "expected at least one source and a destination",
@@ -191,9 +223,9 @@ pub fn plan(req: &FileCopyReq) -> Result<CopyPlan, OperandError> {
     let sources = req
         .sources
         .iter()
-        .map(|s| parse_operand(s))
+        .map(|s| parse_operand_with(s, windows))
         .collect::<Result<Vec<_>, _>>()?;
-    let destination = parse_operand(&req.destination)?;
+    let destination = parse_operand_with(&req.destination, windows)?;
 
     match destination {
         Operand::Remote(dest) => {
@@ -276,9 +308,79 @@ pub fn join_path(base: &str, name: &str) -> String {
     }
 }
 
+/// The name a local source is stored under when it is copied into a
+/// directory: [`source_name`] for a path of this machine. On Windows both
+/// separators split a path and a drive prefix (`C:`) is not part of a name,
+/// so `C:\data\a.txt` is `a.txt` and `C:\` has no name.
+pub fn local_source_name(path: &str) -> Option<&str> {
+    local_source_name_with(path, cfg!(windows))
+}
+
+/// [`local_source_name`] with the platform chosen by the caller.
+pub fn local_source_name_with(path: &str, windows: bool) -> Option<&str> {
+    if !windows {
+        return source_name(path);
+    }
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let last = trimmed.rsplit(['/', '\\']).next().unwrap_or("");
+    let bytes = last.as_bytes();
+    // `C:name` (a drive-relative path) and `C:` (a drive) carry the drive in
+    // their only component.
+    let name = if trimmed.len() == last.len()
+        && bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+    {
+        &last[2..]
+    } else {
+        last
+    };
+    match name {
+        "" | "." | ".." | "~" => None,
+        name => Some(name),
+    }
+}
+
+/// [`join_path`] for a path of this machine: on Windows a base spelled with
+/// backslashes is extended with a backslash. A display string only.
+pub fn join_local(base: &str, name: &str) -> String {
+    join_local_with(base, name, cfg!(windows))
+}
+
+/// [`join_local`] with the platform chosen by the caller.
+pub fn join_local_with(base: &str, name: &str, windows: bool) -> String {
+    if !windows {
+        return join_path(base, name);
+    }
+    let trimmed = base.trim_end_matches(['/', '\\']);
+    let sep = if base.contains('\\') && !base.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    if trimmed.is_empty() && base.starts_with(['/', '\\']) {
+        format!("{sep}{name}")
+    } else if trimmed.is_empty() {
+        name.to_string()
+    } else {
+        format!("{trimmed}{sep}{name}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The cases below that do not mention Windows read operands the way a
+    // unix client does, on every platform the tests run on; the Windows
+    // drive-letter rule has its own cases further down.
+    fn parse_operand(operand: &str) -> Result<Operand, OperandError> {
+        parse_operand_with(operand, false)
+    }
+
+    fn plan(req: &FileCopyReq) -> Result<CopyPlan, OperandError> {
+        plan_with(req, false)
+    }
 
     fn remote(user: Option<&str>, host: &str, path: &str) -> Operand {
         Operand::Remote(RemoteOperand {
@@ -412,5 +514,96 @@ mod tests {
         assert_eq!(join_path("dir/", "x"), "dir/x");
         assert_eq!(join_path("/", "x"), "/x");
         assert_eq!(join_path("/a/b", "x"), "/a/b/x");
+    }
+
+    #[test]
+    fn drive_letter_operand_is_local_on_windows() {
+        for operand in ["C:\\Users\\dave\\a.txt", "c:a.txt", "C:/x/y", "D:", "z:\\"] {
+            assert_eq!(
+                parse_operand_with(operand, true).unwrap(),
+                Operand::Local(operand.to_string()),
+                "{operand:?}"
+            );
+        }
+        // A backslash ends the host part, so a colon after it is a file name.
+        assert_eq!(
+            parse_operand_with(".\\a:b", true).unwrap(),
+            Operand::Local(".\\a:b".to_string())
+        );
+        // The same text on a unix client names host `C`.
+        assert_eq!(
+            parse_operand_with("C:\\x", false).unwrap(),
+            remote(None, "C", "\\x")
+        );
+        assert_eq!(
+            parse_operand_with("c:a.txt", false).unwrap(),
+            remote(None, "c", "a.txt")
+        );
+    }
+
+    #[test]
+    fn drive_letter_operand_with_a_user_host_prefix_is_remote() {
+        assert_eq!(
+            parse_operand_with("me@c:path", true).unwrap(),
+            remote(Some("me"), "c", "path")
+        );
+        assert_eq!(
+            parse_operand_with("me@C:\\data\\f", true).unwrap(),
+            remote(Some("me"), "C", "\\data\\f")
+        );
+        // The user hint is still checked on a Windows client.
+        assert!(parse_operand_with("@c:path", true).is_err());
+    }
+
+    #[test]
+    fn a_one_letter_host_needs_brackets_or_user_on_windows() {
+        assert_eq!(
+            parse_operand_with("c:path", true).unwrap(),
+            Operand::Local("c:path".to_string())
+        );
+        assert_eq!(
+            parse_operand_with("[c]:path", true).unwrap(),
+            remote(None, "c", "path")
+        );
+        assert_eq!(
+            parse_operand_with("me@c:path", true).unwrap(),
+            remote(Some("me"), "c", "path")
+        );
+        // Two letters are never a drive.
+        assert_eq!(
+            parse_operand_with("ab:path", true).unwrap(),
+            remote(None, "ab", "path")
+        );
+        // A whole copy: the drive-letter operand is the local side.
+        let plan = plan_with(&req(&["host:a.txt"], "C:\\out"), true).unwrap();
+        assert_eq!(plan.direction, Direction::Get);
+        assert_eq!(plan.destination, "C:\\out");
+        let plan = plan_with(&req(&["C:\\in\\a.txt"], "host:dir"), true).unwrap();
+        assert_eq!(plan.direction, Direction::Put);
+        assert_eq!(plan.sources, ["C:\\in\\a.txt"]);
+    }
+
+    #[test]
+    fn local_source_names_and_joins_on_windows() {
+        for (path, name) in [
+            ("C:\\data\\a.txt", Some("a.txt")),
+            ("C:/data/a.txt", Some("a.txt")),
+            ("data\\sub\\", Some("sub")),
+            ("a.txt", Some("a.txt")),
+            ("C:a.txt", Some("a.txt")),
+            ("C:\\", None),
+            ("C:", None),
+            (".\\", None),
+            ("..\\", None),
+        ] {
+            assert_eq!(local_source_name_with(path, true), name, "{path:?}");
+        }
+        // Unix paths keep the remote rule: a backslash is part of a name.
+        assert_eq!(local_source_name_with("dir/a\\b", false), Some("a\\b"));
+        assert_eq!(join_local_with("C:\\out", "x", true), "C:\\out\\x");
+        assert_eq!(join_local_with("C:\\out\\", "x", true), "C:\\out\\x");
+        assert_eq!(join_local_with("out/dir", "x", true), "out/dir/x");
+        assert_eq!(join_local_with("", "x", true), "x");
+        assert_eq!(join_local_with("dir/", "x", false), "dir/x");
     }
 }

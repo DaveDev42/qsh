@@ -41,7 +41,7 @@ const CODE_PIECES: [&str; 2] = ["abcdefgh", "jkmnpqrs"];
 /// The `qsh` under test: the cargo-built one, or `qsh.exe` next to the test
 /// executable when the tests were built elsewhere and run natively (the
 /// cross-compiled run under WSL, where `CARGO_BIN_EXE_qsh` is a Linux path).
-fn qsh_bin() -> PathBuf {
+pub(crate) fn qsh_bin() -> PathBuf {
     let built = PathBuf::from(env!("CARGO_BIN_EXE_qsh"));
     if built.is_file() {
         return built;

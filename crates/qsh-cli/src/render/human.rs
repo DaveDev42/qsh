@@ -1252,11 +1252,6 @@ pub fn print_tunnel_close(data: &TunnelCloseData) -> io::Result<()> {
 /// stderr, not stdout: on the interactive form stdout is the remote
 /// terminal's (`docs/CLI.md` §2.2). Structural only — a destination and a
 /// bound address, never a byte of what the tunnel carries.
-// Called only from `crate::tui::session_loop`, the `#[cfg(unix)]` interactive
-// driver (`tui::run` is `UNSUPPORTED` on Windows, so no `-L` listener is
-// ever started there) — dead, not absent, on Windows. `print_tunnel_open`
-// above stays live everywhere: `run_tunnel_open` in `main.rs` is not gated.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
     writeln!(
@@ -1269,9 +1264,7 @@ pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
 }
 
 /// [`print_forward_started`]'s `-D` twin, on **stderr**
-/// (`qsh [user@]host -D …`). Same reasoning on stdout vs stderr, and the
-/// same platform gating — dead, not absent, on Windows.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// (`qsh [user@]host -D …`). Same reasoning on stdout vs stderr.
 pub fn print_dynamic_forward_started(tunnel: &DynamicTunnel) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
     writeln!(
@@ -1309,7 +1302,6 @@ fn error_line(err: &OpError) -> String {
 /// Print one informational stderr line of the automatic bootstrap
 /// (ADR-0044 decision 2): the notice before ssh runs, and the lines
 /// `qsh pair ssh` would print about the pins it wrote.
-#[cfg(unix)]
 pub fn print_notice(line: &str) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
     writeln!(stderr, "qsh: {}", sanitize(line))

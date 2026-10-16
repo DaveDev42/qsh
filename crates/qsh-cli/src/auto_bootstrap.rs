@@ -12,9 +12,9 @@
 //! path never runs in a machine mode, and `qsh [user@]host` has no machine
 //! mode at all).
 //!
-//! Unix only for now: the interactive attach and `qsh cp` are not available
-//! on Windows until M19 (ADR-0035 decisions 1 and 5), and the bootstrap
-//! must not run for a command that would then refuse.
+//! The same on Windows: the ssh child inherits the console, which stays in
+//! cooked mode until `tui::run` switches it, and the first interrupt ends
+//! the child through the cancel token (ADR-0035 decision 1).
 
 use std::io::{self, IsTerminal};
 

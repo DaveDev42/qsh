@@ -38,11 +38,6 @@
 //! `qsh-proto` because `qsh-testkit`'s console probe includes it by path to
 //! exercise the real code under a ConPTY.
 
-// The attach driver does not run on Windows yet: `tui::run` still refuses
-// there, so the terminal half of this file has no caller in a Windows build
-// until it is opened. The prompt half is used from `main.rs`.
-#![allow(dead_code)]
-
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -170,6 +165,11 @@ struct ShutdownSink {
     finished_cv: Condvar,
 }
 
+/// How long the console handler holds a closing window after it has told an
+/// attached session to leave. Zero unless the terminal was built with
+/// [`WindowsTerminal::detaching_on_hangup`].
+static HANGUP_GRACE: Mutex<Duration> = Mutex::new(Duration::ZERO);
+
 /// The armed shutdown sink, if any.
 static SHUTDOWN: Mutex<Option<Arc<ShutdownSink>>> = Mutex::new(None);
 
@@ -271,9 +271,21 @@ pub fn on_console_event(ctrl_type: u32) -> bool {
     restore_active();
     let events = EVENTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match events {
-        Some(events) => events
-            .send(TermEvent::Hangup(HangupCause(cause as i32)))
-            .is_ok(),
+        Some(events) => {
+            let told = events
+                .send(TermEvent::Hangup(HangupCause(cause as i32)))
+                .is_ok();
+            // The system ends the process as soon as this handler returns,
+            // and a detach needs the signal thread and then the main thread
+            // to run first. The process ends itself when the client is done,
+            // so this wait is cut short by the exit and only runs out when
+            // the client is stuck.
+            let grace = *HANGUP_GRACE.lock().unwrap_or_else(|e| e.into_inner());
+            if told && !grace.is_zero() {
+                std::thread::sleep(grace);
+            }
+            told
+        }
         None => request_shutdown(),
     }
 }
@@ -286,6 +298,9 @@ pub struct WindowsTerminal {
     /// Set by a successful [`preflight`](Terminal::preflight) on a console
     /// stdout.
     vt: AtomicBool,
+    /// Whether a closing console detaches the attach
+    /// ([`Self::detaching_on_hangup`]).
+    detach_on_hangup: bool,
 }
 
 impl WindowsTerminal {
@@ -297,7 +312,21 @@ impl WindowsTerminal {
             sleeper,
             restorer,
             vt: AtomicBool::new(false),
+            detach_on_hangup: false,
         }
+    }
+
+    /// Have a closing console detach the attached client, and hold the
+    /// closing window while it does ([`SHUTDOWN_GRACE`]). The host then sees
+    /// the client go at once instead of when the connection idles out, so an
+    /// attach from another console is not kept waiting. Off by default: the
+    /// probes and the unit tests drive the handler with nothing behind it to
+    /// detach.
+    #[must_use]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn detaching_on_hangup(mut self) -> Self {
+        self.detach_on_hangup = true;
+        self
     }
 }
 
@@ -379,6 +408,11 @@ impl Terminal for WindowsTerminal {
         self.api.install_ctrl_handler()?;
         let (tx, rx) = channel();
         *EVENTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx.clone());
+        *HANGUP_GRACE.lock().unwrap_or_else(|e| e.into_inner()) = if self.detach_on_hangup {
+            SHUTDOWN_GRACE
+        } else {
+            Duration::ZERO
+        };
         let api = Arc::clone(&self.api);
         let sleeper = Arc::clone(&self.sleeper);
         let mut poller = ResizePoller::new(self.window_size());
@@ -401,6 +435,10 @@ impl Terminal for WindowsTerminal {
             }
         }
         Ok(Box::new(WindowsEvents { rx }))
+    }
+
+    fn detaches_on_hangup(&self) -> bool {
+        self.detach_on_hangup
     }
 
     /// Put the console back and leave; the session stays on the host. The

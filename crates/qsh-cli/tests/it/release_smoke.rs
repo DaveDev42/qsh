@@ -29,9 +29,11 @@
 //!   prevent has a twin: a typo'd path that fails deep inside a spawn.
 //!
 //! The pty half is `#[cfg(unix)]`: `expectrl` is a `cfg(unix)`
-//! dev-dependency and `qsh`'s interactive client answers `UNSUPPORTED` off
-//! unix. The `#[cfg(not(unix))]` twin runs init, trust and `exec --json`
-//! only, and says so in its name.
+//! dev-dependency, and a Windows host has no PTY sessions yet. The
+//! `#[cfg(not(unix))]` twin runs init, trust and `exec --json`, then
+//! `doctor --json`, a `tunnel open --local` TCP round trip and, on Windows,
+//! an owner-only check of the files the run created. The Windows client's
+//! interactive attach is `windows_attach.rs`, against an in-process echo host.
 //!
 //! `Client` here is a trimmed copy of `tui_expect.rs`'s, not a move into
 //! `tests/it/common/mod.rs`: that module is compiled into every test binary
@@ -299,10 +301,72 @@ fn release_smoke_covers_init_trust_exec_pty_detach_and_reattach() {
     assert!(client.is_cooked());
 }
 
+/// The client's own routes: the shared route cases drive a `Fleet` through
+/// whichever binary the smoke certifies.
+#[cfg(not(unix))]
+struct SmokeRoute<'a>(&'a Fleet);
+
+#[cfg(not(unix))]
+impl crate::route_cases::Route for SmokeRoute<'_> {
+    fn client(&self) -> &common::Sandbox {
+        &self.0.client
+    }
+
+    fn host(&self) -> &str {
+        HOST_ALIAS
+    }
+}
+
+/// On Windows the files the run created are the account's alone: one
+/// access-control entry, the account's, none inherited from the parent
+/// directory (ADR-0035 decision 6). `icacls` prints the path and the first
+/// entry on one line and each further entry on its own line.
+#[cfg(windows)]
+fn assert_account_only(path: &std::path::Path) {
+    let out = std::process::Command::new("icacls")
+        .arg(path)
+        .output()
+        .expect("run icacls");
+    assert!(out.status.success(), "icacls {}: {out:?}", path.display());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let entries: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(":(") || line.trim_start().starts_with('('))
+        .collect();
+    assert_eq!(entries.len(), 1, "{}: {text}", path.display());
+    assert!(!entries[0].contains("(I)"), "{}: {text}", path.display());
+    assert!(entries[0].contains("(F)"), "{}: {text}", path.display());
+}
+
+/// The Windows scenario: init, trust, `exec --json`, plus what has a Windows
+/// client and no pty host to need yet: `doctor --json`, a `tunnel open
+/// --local` TCP round trip, and the ownership of the files created. The
+/// interactive attach is `windows_attach.rs`.
 #[cfg(not(unix))]
 #[test]
-fn release_smoke_covers_init_trust_and_exec_on_a_platform_without_a_pty_client() {
+fn release_smoke_covers_init_trust_exec_doctor_and_a_tunnel_on_a_platform_without_a_pty_host() {
     let bin = smoke_bin();
     let fleet = Fleet::start_with_bin(&bin, &[]);
     assert_machine_axes(&fleet);
+
+    let (code, report) = fleet.client.json(&["doctor", "--json"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["command"], "doctor.run", "{report}");
+    assert_eq!(report["ok"], true, "{report}");
+    assert!(report["data"]["overall"].is_string(), "{report}");
+    assert!(report["data"]["findings"].is_array(), "{report}");
+
+    crate::route_cases::local_tunnel_echo(&SmokeRoute(&fleet));
+
+    #[cfg(windows)]
+    {
+        let config = fleet.client.config_dir();
+        for file in [
+            config.join("trust.toml"),
+            config.join("identity").join("device.key"),
+            config.join("identity").join("identity.toml"),
+        ] {
+            assert_account_only(&file);
+        }
+    }
 }

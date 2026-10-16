@@ -47,7 +47,6 @@ pub use auto_bootstrap::{AutoBootstrap, AutoBootstrapReport};
 pub use cert::{CertInitOp, CertIssueOp};
 pub use doctor::{DoctorHostState, DoctorOp, DoctorThreshold, meets_threshold};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
-#[cfg(unix)]
 pub use file::file_copy_over;
 pub use file::{
     CancelToken, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp, FileProgress,

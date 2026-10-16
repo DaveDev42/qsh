@@ -42,16 +42,25 @@
 //! | input | blocking `read(2)` on stdin → `Escape` → `AttachHandle::write` |
 //! | signals | `SIGWINCH` → `resize`, `SIGINT` → `^C`, `SIGTERM`/`SIGHUP` → restore and die |
 //!
+//! On Windows the same three threads run against the console (`windows`):
+//! the signals thread hosts the console control handler and the resize
+//! poll, and a closed console is the hang-up that detaches. The system ends
+//! a Windows process as soon as its control handler returns, so the Windows
+//! terminal asks (`Terminal::detaches_on_hangup`) for a real detach before
+//! exit and holds the handler while the QUIC close goes out; the host then
+//! sees the client leave and the session can be taken over from another
+//! console at once. The POSIX terminal just dies of the signal, and the host
+//! learns of it when the connection idles out.
+//!
 //! The two helpers are detached, never joined: both park in a blocking
 //! syscall, and the process exits as soon as the event loop is done.
 
 // Windows console mode arithmetic: pure, so its tests run on every leg.
 #[cfg(any(windows, test))]
 mod console_mode;
-// The platform-neutral driver. Compiled for the POSIX client and, so the
-// fake-terminal tests run on every leg, for tests everywhere; on Windows
-// `run` still refuses before there is anything to drive.
-#[cfg(any(unix, test))]
+// The platform-neutral driver. Compiled for both clients and, so the
+// fake-terminal tests run on every leg, for tests everywhere.
+#[cfg(any(unix, windows, test))]
 mod session_loop;
 #[cfg(unix)]
 mod term;
@@ -69,9 +78,7 @@ pub(crate) mod windows;
 
 use qsh_core::{OpError, Ops};
 use qsh_proto::ErrorCode;
-// The driver builds the requests; on Windows `run` refuses before there is
-// anything to ask for.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use qsh_proto::{SessionAttachReq, SessionOpenReq};
 
 /// What to attach to.
@@ -89,25 +96,16 @@ pub enum Attach {
         /// specs and decides their error code — `docs/CLI.md` §6.9). Only
         /// this form carries them: `qsh attach` takes no `-L`, and the
         /// standalone tunnel form is `qsh tunnel open`.
-        // Read only by the `#[cfg(unix)]` driver below (`tui::run`);
-        // the Windows `run` refuses the whole interactive form before it
-        // could look at a forward, so the field is constructed but never
-        // read there — dead, not absent, on Windows.
-        #[cfg_attr(not(unix), allow(dead_code))]
         forwards: Vec<String>,
         /// `-R` remote forward specs, unparsed
         /// (`qsh_core::parse_remote_forwards` turns them into specs;
         /// M4 plan Step 4 (2473c88)). Same scope as `forwards` — only this
-        /// form carries them, and only the `#[cfg(unix)]` driver reads
-        /// them.
-        #[cfg_attr(not(unix), allow(dead_code))]
+        /// form carries them.
         remote_forwards: Vec<String>,
         /// `-D` SOCKS dynamic forward specs, unparsed
         /// (`qsh_core::parse_dynamic_forwards` turns them into specs;
         /// ADR-0019 decision 1). Same scope as `forwards`/
-        /// `remote_forwards` — only this form carries them, and only the
-        /// `#[cfg(unix)]` driver reads them.
-        #[cfg_attr(not(unix), allow(dead_code))]
+        /// `remote_forwards` — only this form carries them.
         dynamic_forwards: Vec<String>,
     },
     /// `qsh attach <session-ref>` — attach to a session already running.
@@ -141,7 +139,7 @@ impl Attach {
 /// sends exactly the `--env` its caller asked for, so a machine caller's
 /// session is never shaped by whatever locale the process that started it
 /// happened to have.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE"];
 
 /// Run an interactive session to completion and return the process exit
@@ -152,30 +150,18 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     session_loop::run(ops, what, escape, std::sync::Arc::new(unix::UnixTerminal))
 }
 
-/// Windows client is P1 (`docs/design/architecture.md` §8): the interactive
-/// path is refused with `UNSUPPORTED` rather than silently degrading to a
-/// cooked-mode pipe.
-#[cfg(not(unix))]
-pub fn run(_ops: &Ops, what: Attach, _escape: Option<u8>) -> Result<i32, OpError> {
-    let target = match &what {
-        Attach::Open {
-            host,
-            user: Some(user),
-            ..
-        } => format!("{user}@{host}"),
-        Attach::Open {
-            host, user: None, ..
-        } => host.clone(),
-        Attach::Existing { session_ref } => session_ref.clone(),
-    };
-    Err(OpError::new(
-        ErrorCode::Unsupported,
-        format!(
-            "interactive attach to {target} needs a POSIX terminal; use \
-             `qsh session open` with `qsh session read --follow` and \
-             `qsh session write` on this platform"
-        ),
-    ))
+/// Run an interactive session to completion on the Windows console and
+/// return the process exit code. The console must interpret VT sequences;
+/// when it cannot, the driver refuses with `UNSUPPORTED` before a session
+/// exists (`docs/CLI.md` §7).
+#[cfg(windows)]
+pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> {
+    session_loop::run(
+        ops,
+        what,
+        escape,
+        std::sync::Arc::new(windows::system::terminal().detaching_on_hangup()),
+    )
 }
 
 /// Reject `--json`/`--jsonl` on the interactive path: an attach is a
@@ -192,7 +178,7 @@ pub fn json_mode_unsupported() -> OpError {
 
 /// Locale variables of this process, to be layered over the remote login
 /// environment.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn locale_env() -> Vec<qsh_proto::EnvVar> {
     LOCALE_VARS
         .iter()
@@ -209,7 +195,7 @@ fn locale_env() -> Vec<qsh_proto::EnvVar> {
 /// one, else the terminal's own default (the Windows console announces
 /// `xterm-256color` once VT is on), else nothing and the host picks
 /// (`docs/CLI.md` §7).
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn session_term(env_term: Option<String>, fallback: Option<&str>) -> Option<String> {
     env_term
         .filter(|t| !t.is_empty())
@@ -217,7 +203,7 @@ fn session_term(env_term: Option<String>, fallback: Option<&str>) -> Option<Stri
 }
 
 /// Build the `session.open` request for the bare `qsh [user@]host` form.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn open_request(
     host: String,
     user: Option<String>,
@@ -238,7 +224,7 @@ fn open_request(
 /// The attach request. `no_steal` is deliberately false: taking over the
 /// writer lease is what makes re-attaching after a dead client work at all
 /// (`docs/design/protocol.md` §10).
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn attach_request(session_ref: String) -> SessionAttachReq {
     SessionAttachReq {
         session_ref,
@@ -256,9 +242,8 @@ fn attach_request(session_ref: String) -> SessionAttachReq {
 /// **both** on, so input is never silently swallowed.
 ///
 /// Deliberately portable and free of terminal I/O so it can be unit-tested
-/// on any host — the Windows CI leg compiles and runs these tests too,
-/// even though nothing there drives it yet.
-#[cfg(any(unix, test))]
+/// on any host; the POSIX and Windows terminals both feed it.
+#[cfg(any(unix, windows, test))]
 #[derive(Debug)]
 pub struct Escape {
     /// The escape character, or `None` when escape processing is off
@@ -271,7 +256,7 @@ pub struct Escape {
 }
 
 /// What one chunk of stdin turned into.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Processed {
     /// Bytes to forward to the remote PTY, in order.
@@ -283,7 +268,7 @@ pub struct Processed {
     pub help: bool,
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 impl Escape {
     /// A machine for `escape`, which is `None` when escape processing is
     /// disabled (then every byte is forwarded verbatim).
@@ -339,7 +324,7 @@ impl Escape {
 
 /// The `~?` help text (`docs/CLI.md` §7). CR-LF terminated: the local
 /// terminal is in raw mode, so `\n` alone would stair-step.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 fn escape_help(escape: u8) -> String {
     let e = escape as char;
     format!(

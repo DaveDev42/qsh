@@ -1,11 +1,13 @@
 //! The blocking pieces of a `FILE_DATA` transfer that both ends share
-//! (`docs/adr/0029-file-copy.md` decisions 7 and 10), unix only.
+//! (`docs/adr/0029-file-copy.md` decisions 7 and 10).
 //!
-//! The host (`server/file_data.rs`) writes an upload into a temporary file
-//! next to its destination and puts it in place once the bytes verified; the
-//! client (`client/file.rs`) does the same for a download. The temporary
-//! file's cleanup guard, the disk writer thread and the final commit are the
-//! same code on both sides, so a fix to one reaches the other.
+//! The host (`server/file_data.rs`, unix) writes an upload into a temporary
+//! file next to its destination and puts it in place once the bytes
+//! verified; the client (`client/file.rs`, both platforms) does the same for
+//! a download. The temporary file's cleanup guard, the disk writer thread
+//! and the final commit are the same code on both sides, so a fix to one
+//! reaches the other. The filesystem steps they call are
+//! [`super::local`]'s: the unix `*at` calls, or their Windows counterparts.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -14,7 +16,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::host::{self, FsKind, StatInfo, WriteGate};
+use super::local::{self, FsKind, StatInfo};
+use super::stat::WriteGate;
 
 /// Chunks queued between the stream and the disk. Small on purpose: a disk
 /// that stops taking chunks must back up into the stream's receive window
@@ -24,7 +27,8 @@ pub(crate) const DISK_QUEUE_CHUNKS: usize = 4;
 /// Removes the temp file when it goes out of scope still armed, so every way
 /// out of a transfer (an early return, a panic, the task being dropped)
 /// leaves no temp file behind. The removal is one `unlinkat` through the
-/// directory fd the temp file was created through.
+/// directory fd the temp file was created through (a removal by path under
+/// the directory handle on Windows).
 pub(crate) struct TempGuard {
     dir: Arc<File>,
     name: Option<OsString>,
@@ -46,7 +50,7 @@ impl TempGuard {
     /// Remove the temp file now (idempotent).
     pub(crate) fn clean(&mut self) {
         if let Some(name) = self.name.take() {
-            let _ = host::unlink_at(&self.dir, &name);
+            let _ = local::unlink_at(&self.dir, &name);
         }
     }
 
@@ -72,7 +76,7 @@ pub(crate) fn create_guarded_temp(
     dir: &Arc<File>,
     name: &std::ffi::OsStr,
 ) -> io::Result<(File, TempGuard)> {
-    let temp = host::create_temp(dir, name)?;
+    let temp = local::create_temp(dir, name)?;
     let guard = TempGuard::new(Arc::clone(dir), temp.name);
     Ok((temp.file, guard))
 }
@@ -121,6 +125,7 @@ pub(crate) fn write_loop(
 }
 
 /// What a finished commit tells the caller.
+#[derive(Debug)]
 pub(crate) struct Committed {
     pub(crate) overwritten: bool,
     /// The temp name no longer exists (it was renamed into place, or its
@@ -135,7 +140,8 @@ pub(crate) struct Placement<'a> {
     /// Permission bits of the source.
     pub(crate) mode: u32,
     /// Replace an existing file (`renameat`); `false` is `--no-clobber`
-    /// (`linkat`, which never replaces).
+    /// (`linkat` on unix, a no-replace rename on Windows: neither ever
+    /// replaces).
     pub(crate) overwrite: bool,
     /// Carry the mode and modification time over (`-p`).
     pub(crate) preserve: bool,
@@ -153,30 +159,29 @@ pub(crate) fn commit_temp(
     place: &Placement<'_>,
 ) -> io::Result<Committed> {
     written.sync_all()?;
-    host::apply_final_attrs(written, place.mode, place.preserve, place.mtime)?;
+    local::apply_final_attrs(written, place.mode, place.preserve, place.mtime)?;
     let committed = if place.overwrite {
         let overwritten = matches!(
-            host::stat_at(dir, place.name)?,
+            local::stat_at(dir, place.name)?,
             Some(StatInfo {
                 kind: FsKind::Regular,
                 ..
             })
         );
-        host::replace_at(dir, temp, place.name)?;
+        local::replace_at(dir, temp, place.name)?;
         Committed {
             overwritten,
             temp_gone: true,
         }
     } else {
-        // `linkat` fails with `EEXIST` when the name appeared since the
-        // caller checked: an existing file is never replaced.
-        host::link_new_at(dir, temp, place.name)?;
+        // The placement fails with `AlreadyExists` when the name appeared
+        // since the caller checked: an existing file is never replaced.
         Committed {
             overwritten: false,
-            temp_gone: host::unlink_at(dir, temp).is_ok(),
+            temp_gone: local::place_new(dir, temp, place.name)?,
         }
     };
-    dir.sync_all()?;
+    local::sync_dir(dir)?;
     Ok(committed)
 }
 
@@ -187,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn a_guarded_temp_is_removed_when_the_awaiting_task_never_collects_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = Arc::new(crate::file::guard::open_dir_nofollow(tmp.path()).unwrap());
+        let dir = Arc::new(local::open_dir(tmp.path()).unwrap());
         let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = {
             let dir = Arc::clone(&dir);

@@ -11,6 +11,11 @@ use std::sync::Mutex;
 use super::*;
 use crate::tui::terminal::{EventSource, HangupCause, RawGuard, TermEvent, Terminal};
 
+/// A fresh "detached" flag, as the driver creates one per attach.
+fn no_detach() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 /// Runs the thread body inline, to completion.
 struct InlineSpawn;
 
@@ -28,6 +33,8 @@ struct FakeTerminal {
     input: Mutex<VecDeque<Vec<u8>>>,
     events: Mutex<VecDeque<TermEvent>>,
     hangups: Mutex<Vec<HangupCause>>,
+    /// What [`Terminal::detaches_on_hangup`] answers.
+    detaches: bool,
 }
 
 impl FakeTerminal {
@@ -92,6 +99,10 @@ impl Terminal for FakeTerminal {
         Ok(Box::new(FakeEvents(std::mem::take(
             &mut *self.events.lock().unwrap(),
         ))))
+    }
+
+    fn detaches_on_hangup(&self) -> bool {
+        self.detaches
     }
 
     fn leave_on_hangup(&self, cause: HangupCause) {
@@ -176,7 +187,7 @@ fn run_events(
 ) -> (RecordingHandle, Arc<FakeTerminal>) {
     let handle = RecordingHandle::default();
     let terminal = FakeTerminal::with_events(size, events);
-    spawn_signal_pump(handle.clone(), terminal.clone(), &InlineSpawn)
+    spawn_signal_pump(handle.clone(), terminal.clone(), no_detach(), &InlineSpawn)
         .expect("the inline spawner cannot fail");
     (handle, terminal)
 }
@@ -261,6 +272,32 @@ fn session_loop_hangup_signal_detaches_and_keeps_the_session() {
     );
     assert_eq!(*terminal.hangups.lock().unwrap(), vec![cause]);
     assert_eq!(handle.calls(), vec![], "the session is left as it is");
+}
+
+/// A terminal whose process ends with its hang-up handler asks for a detach
+/// instead: the attach is detached as `~d` does, flagged first so the event
+/// pump reports a detach, and the terminal is not asked to leave (the client
+/// ends through its ordinary exit).
+#[test]
+fn session_loop_hangup_is_a_detach_when_the_terminal_asks() {
+    let handle = RecordingHandle::default();
+    let terminal = Arc::new(FakeTerminal {
+        detaches: true,
+        ..FakeTerminal::default()
+    });
+    *terminal.events.lock().unwrap() =
+        [TermEvent::Hangup(HangupCause(2)), TermEvent::Interrupt].into();
+    let detached = no_detach();
+    spawn_signal_pump(
+        handle.clone(),
+        terminal.clone(),
+        Arc::clone(&detached),
+        &InlineSpawn,
+    )
+    .expect("the inline spawner cannot fail");
+    assert!(detached.load(Ordering::SeqCst));
+    assert_eq!(handle.calls(), vec![Call::Detach]);
+    assert!(terminal.hangups.lock().unwrap().is_empty());
 }
 
 /// An interrupt that did not come from the keyboard is the `^C` byte.
@@ -364,8 +401,13 @@ fn spawn_failure_is_returned_not_panicked() {
     )
     .expect_err("spawn_input_pump must surface a failing spawner as Err");
 
-    spawn_signal_pump(StubHandle, FakeTerminal::arc(), &FailingThreadSpawn)
-        .expect_err("spawn_signal_pump must surface a failing spawner as Err");
+    spawn_signal_pump(
+        StubHandle,
+        FakeTerminal::arc(),
+        no_detach(),
+        &FailingThreadSpawn,
+    )
+    .expect_err("spawn_signal_pump must surface a failing spawner as Err");
 }
 
 /// The `Ok` path, through the real spawner — checked with the signal
@@ -386,6 +428,7 @@ fn spawn_success_returns_ok() {
     spawn_signal_pump(
         StubHandle,
         Arc::new(super::super::unix::UnixTerminal),
+        no_detach(),
         &RealThreadSpawn,
     )
     .expect("spawn_signal_pump must return Ok when the spawner succeeds");
@@ -501,4 +544,36 @@ fn vt_unavailable_is_unsupported_before_session_open() {
         ),
         "the host heard from the client although the console was refused"
     );
+}
+
+/// The Windows client's signal table agrees with the POSIX one on every
+/// name it knows, so a remote death by signal exits with the same code from
+/// either client; a name it does not know is `None`, never a wrong number.
+#[test]
+fn portable_signal_numbers_are_the_shared_posix_ones() {
+    for (name, signo) in [
+        ("SIGHUP", 1),
+        ("SIGINT", 2),
+        ("SIGQUIT", 3),
+        ("SIGKILL", 9),
+        ("SIGSEGV", 11),
+        ("SIGPIPE", 13),
+        ("SIGTERM", 15),
+        ("SIG34", 34),
+    ] {
+        assert_eq!(portable_signal_number(name), Some(signo), "{name}");
+    }
+    assert_eq!(portable_signal_number("SIGUSR1"), None);
+    assert_eq!(portable_signal_number("TERM"), None);
+    #[cfg(unix)]
+    for name in [
+        "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGFPE", "SIGKILL",
+        "SIGSEGV", "SIGPIPE", "SIGALRM", "SIGTERM",
+    ] {
+        assert_eq!(
+            portable_signal_number(name),
+            qsh_core::exec::signal_number(name),
+            "{name}"
+        );
+    }
 }

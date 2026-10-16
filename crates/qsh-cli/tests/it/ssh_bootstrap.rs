@@ -2167,6 +2167,126 @@ pub(crate) mod pair {
 }
 
 // ---------------------------------------------------------------------
+// qsh pair ssh --reverse --to, this machine's side (ADR-0044 decision 22)
+// ---------------------------------------------------------------------
+
+/// The controller's half of the reverse pairing against a scripted remote,
+/// so it runs wherever the client does: the fake `ssh` prints the remote's
+/// `hello` and its `pinned` answer, and records what the client sent. The
+/// remote's own half is `pair_reverse` below, Unix only until the Windows
+/// responder lands.
+mod pair_reverse_local {
+    use super::*;
+    use crate::common::{ListenGuard, Sandbox, exit_code};
+    use qsh_proto::ssh_bootstrap::{BootstrapResult, ResultStatus, parse_ssh_bootstrap_line};
+
+    const HUB: &str = "hub";
+    const BOX: &str = "box";
+
+    fn remote_fingerprint() -> String {
+        use base64::Engine as _;
+        format!(
+            "sha256:{}",
+            base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+        )
+    }
+
+    /// What a ready remote prints and answers: its `hello`, then a `pinned`
+    /// result for the name the controller asked it to use.
+    fn scripted_remote() -> Vec<u8> {
+        let mut bytes = BootstrapLine::Hello(Hello {
+            versions: vec![1],
+            qsh_version: "0.0.0".into(),
+            status: HelloStatus::Ready,
+            fingerprint: Some(remote_fingerprint()),
+            serve_bind: None,
+            serve_listening: None,
+        })
+        .encode_line()
+        .unwrap()
+        .into_bytes();
+        bytes.extend(
+            BootstrapLine::Result(BootstrapResult {
+                status: ResultStatus::Pinned,
+                name: HUB.into(),
+                role: Some("full".into()),
+                created: true,
+                code: None,
+                message: None,
+            })
+            .encode_line()
+            .unwrap()
+            .into_bytes(),
+        );
+        bytes
+    }
+
+    #[test]
+    fn pair_ssh_reverse_local_side_runs_on_windows_and_names_serve_to_as_the_next_command() {
+        let controller = Sandbox::initialized();
+        let listen = ListenGuard::start(&controller);
+        let mut fake = FakeSsh::new();
+        fake.script(&scripted_remote()).record_stdin();
+        std::fs::write(
+            controller.config_dir().join("config.toml"),
+            format!("[ssh]\nprogram = '{}'\n", fake.program().display()),
+        )
+        .unwrap();
+
+        let out = controller.qsh(&[
+            "pair",
+            "ssh",
+            BOX,
+            "--remote-as",
+            HUB,
+            "--reverse",
+            "--to",
+            listen.addr(),
+        ]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(exit_code(&out), 0, "{stderr}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        assert_eq!(
+            lines[0],
+            format!("pinned {BOX} ({}) role reverse", remote_fingerprint()),
+            "{stdout}"
+        );
+        assert_eq!(lines[1], "remote: pinned hub role full", "{stdout}");
+        assert_eq!(
+            lines[2], "next, on the remote: qsh serve --to hub",
+            "{stdout}"
+        );
+        assert!(stderr.contains("qsh serve --to hub"), "{stderr}");
+        assert!(stderr.contains("qsh service install"), "{stderr}");
+
+        // The controller's pin of the remote has no address and role
+        // `reverse`; the remote was asked to dial the `--to` address.
+        let trust = std::fs::read_to_string(controller.config_dir().join("trust.toml")).unwrap();
+        let store =
+            qsh_core::TrustStore::load(&controller.config_dir().join("trust.toml")).unwrap();
+        let pin = store.find(BOX).unwrap_or_else(|| panic!("{trust}"));
+        assert_eq!(pin.role.as_deref(), Some("reverse"), "{trust}");
+        assert!(pin.address.is_empty(), "{trust}");
+        crate::common::poll_until("ssh to record the commit", GENEROUS, || {
+            (!fake.stdin_log().is_empty()).then_some(())
+        });
+        let log = String::from_utf8(fake.stdin_log()).unwrap();
+        let BootstrapLine::Commit(sent) =
+            parse_ssh_bootstrap_line(log.lines().next().unwrap().as_bytes()).unwrap()
+        else {
+            panic!("the client sent something other than a commit: {log}");
+        };
+        assert_eq!(sent.name, HUB, "{log}");
+        assert_eq!(sent.role, "full", "{log}");
+        assert_eq!(sent.address.as_deref(), Some(listen.addr()), "{log}");
+        assert_eq!(sent.fingerprint, controller.fingerprint(), "{log}");
+        assert_eq!(fake.calls().len(), 2, "{:?}", fake.calls());
+    }
+}
+
+// ---------------------------------------------------------------------
 // qsh pair ssh --reverse --to end to end (ADR-0044 decision 22)
 // ---------------------------------------------------------------------
 

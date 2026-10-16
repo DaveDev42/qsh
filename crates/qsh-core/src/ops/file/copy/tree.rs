@@ -14,8 +14,6 @@
 //! that is already open, never from a string that could climb out of it.
 
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 use qsh_proto::wire::{FILE_LIST_DIR_MAX, FileKind};
@@ -28,13 +26,21 @@ const PATH_MAX_BYTES: usize = 4096;
 
 /// Whether `name`, as a remote host listed it, may become one component of a
 /// local path (decision 22): not empty, at most [`NAME_MAX`] bytes, no `/`
-/// or NUL, and neither `.` nor `..`.
+/// or NUL, and neither `.` nor `..`. The Windows client adds what Windows
+/// reserves (`\`, `:`, `<>"|?*`, control characters, a trailing dot or
+/// space, device names), so a host cannot name a stream or a device.
+///
+/// It does not detect names that differ only by case. On a case-insensitive
+/// local filesystem (Windows, default macOS) a recursive get of a tree
+/// holding both `B` and `b` ends with the second replacing the first, as
+/// `scp -r` does.
 pub(in crate::ops) fn valid_remote_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= NAME_MAX
         && !name.contains(['/', '\0'])
         && name != "."
         && name != ".."
+        && local::name_is_local_safe(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +91,7 @@ impl Run<'_> {
             FileKind::Dir => {
                 let place = match local {
                     LocalDst::Dir { dir, display } => match operand::source_name(src) {
-                        Some(name) if name.len() > NAME_MAX || name.contains('\0') => {
+                        Some(name) if !usable_local_name(name) => {
                             let meta = ItemMeta::directory(src.to_string(), display.clone());
                             return self.fail(
                                 &meta,
@@ -98,7 +104,7 @@ impl Run<'_> {
                         Some(name) => DirPlace {
                             dir: Arc::clone(dir),
                             name: Some(OsString::from(name)),
-                            display: operand::join_path(display, name),
+                            display: operand::join_local(display, name),
                         },
                         None => DirPlace {
                             dir: Arc::clone(dir),
@@ -106,11 +112,23 @@ impl Run<'_> {
                             display: display.clone(),
                         },
                     },
-                    LocalDst::File { dir, name, display } => DirPlace {
-                        dir: Arc::clone(dir),
-                        name: Some(name.clone()),
-                        display: display.clone(),
-                    },
+                    LocalDst::File { dir, name, display } => {
+                        if !usable_local_name_os(name) {
+                            let meta = ItemMeta::directory(src.to_string(), display.clone());
+                            return self.fail(
+                                &meta,
+                                XferFailure::Local(
+                                    ErrorCode::InvalidArgument,
+                                    "not a usable file name on this platform".to_string(),
+                                ),
+                            );
+                        }
+                        DirPlace {
+                            dir: Arc::clone(dir),
+                            name: Some(name.clone()),
+                            display: display.clone(),
+                        }
+                    }
                 };
                 let mode = listed.mode;
                 self.get_dir(src.to_string(), mode, Some(listed), place)
@@ -128,7 +146,7 @@ impl Run<'_> {
 
     /// One entry found in a remote directory.
     pub(super) async fn get_item(&mut self, item: GetItem) {
-        let display = operand::join_path(&item.parent_display, &item.name);
+        let display = operand::join_local(&item.parent_display, &item.name);
         let meta = if item.kind == FileKind::Dir {
             ItemMeta::directory(item.remote.clone(), display.clone())
         } else {
@@ -258,10 +276,10 @@ impl Run<'_> {
         let local = match &place.name {
             None => Arc::clone(&place.dir),
             Some(name) => {
-                match host::mkdir_at(&place.dir, name, mode & 0o777, ctx.preserve) {
-                    Ok(host::MkdirOutcome::Created) => self.created(&meta, mode & 0o777),
-                    Ok(host::MkdirOutcome::Existed) => {}
-                    Ok(host::MkdirOutcome::ExistsNotDirectory) => {
+                match local::mkdir_at(&place.dir, name, mode & 0o777, ctx.preserve) {
+                    Ok(local::MkdirOutcome::Created) => self.created(&meta, mode & 0o777),
+                    Ok(local::MkdirOutcome::Existed) => {}
+                    Ok(local::MkdirOutcome::ExistsNotDirectory) => {
                         let failure = XferFailure::Local(
                             ErrorCode::InvalidArgument,
                             "destination exists and is not a directory".to_string(),
@@ -270,7 +288,7 @@ impl Run<'_> {
                     }
                     Err(e) => return self.fail(&meta, local_io_failure(&e)),
                 }
-                match host::open_dir_at(&place.dir, name) {
+                match local::open_dir_at(&place.dir, name) {
                     Ok(dir) => Arc::new(dir),
                     Err(e) => return self.fail(&meta, local_io_failure(&e)),
                 }
@@ -340,7 +358,7 @@ fn read_local_dir(dir: &std::path::Path) -> std::io::Result<Vec<(OsString, Local
     let mut names: Vec<OsString> = std::fs::read_dir(dir)?
         .map(|entry| entry.map(|e| e.file_name()))
         .collect::<std::io::Result<_>>()?;
-    names.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    local::sort_names(&mut names);
     let mut out = Vec::with_capacity(names.len());
     for name in names {
         let md = match std::fs::symlink_metadata(dir.join(&name)) {
@@ -358,7 +376,7 @@ fn read_local_dir(dir: &std::path::Path) -> std::io::Result<Vec<(OsString, Local
         } else {
             LocalKind::Other
         };
-        out.push((name, kind, md.mode() & 0o777));
+        out.push((name, kind, local::mode_of(&md)));
     }
     Ok(out)
 }
@@ -370,13 +388,13 @@ impl Run<'_> {
     pub(super) async fn put_top_recursive(&mut self, src: &str) {
         match std::fs::metadata(src) {
             Ok(md) if md.is_dir() => {
-                let name = operand::source_name(src).unwrap_or("").to_string();
+                let name = operand::local_source_name(src).unwrap_or("").to_string();
                 self.put_dir(PutDir {
                     local: PathBuf::from(src),
                     display: src.to_string(),
                     remote: self.ctx.put_dst.clone(),
                     name_if_dir: name,
-                    mode: md.mode() & 0o777,
+                    mode: local::mode_of(&md),
                 })
                 .await;
             }
@@ -483,7 +501,7 @@ impl Run<'_> {
                 .unwrap_or_else(|| name.to_string_lossy().into_owned());
             self.stack.push(Work::Put(PutItem {
                 local: spec.local.join(&name),
-                display: operand::join_path(&spec.display, &shown),
+                display: operand::join_local(&spec.display, &shown),
                 remote: operand::join_path(&base, &shown),
                 name: text,
                 kind,
@@ -499,9 +517,12 @@ mod tests {
 
     #[test]
     fn a_remote_name_is_one_plain_path_component() {
-        for ok in ["a", "with space", "ünï", ".hidden", "...", "a.b", "-rf"] {
+        for ok in ["a", "with space", "ünï", ".hidden", "a.b", "-rf"] {
             assert!(valid_remote_name(ok), "{ok:?}");
         }
+        // Three dots are a plain name on unix; Windows strips a trailing dot,
+        // so the Windows client refuses the spelling.
+        assert_eq!(valid_remote_name("..."), cfg!(unix));
         let longest = "x".repeat(NAME_MAX);
         assert!(valid_remote_name(&longest));
     }

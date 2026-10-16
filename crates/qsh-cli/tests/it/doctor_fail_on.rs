@@ -147,3 +147,43 @@ fn doctor_fail_on_does_not_change_the_255_of_a_doctor_that_cannot_start() {
         assert_eq!(env["error"]["code"], "CONFIG_ERROR", "{env}");
     }
 }
+
+/// The findings a freshly initialized client reports are the same on every
+/// platform (ADR-0035 decision 17, `docs/CLI.md` §6.17): only the ones that
+/// read the machine differ. `qsh_path_shadowed` depends on `$PATH`;
+/// `service_not_registered` needs a service backend, which Windows gets with
+/// the Windows service; `bindv6only_blocks_ipv4` fires where the OS defaults
+/// a dual-stack bind to IPv6-only, Windows among them. Everything else is
+/// what the client's own state says, and every code is one of the shared
+/// vocabulary.
+#[test]
+fn doctor_on_an_initialized_client_reports_the_same_findings_on_every_platform() {
+    const MACHINE_DEPENDENT: &[&str] = &[
+        "qsh_path_shadowed",
+        "service_not_registered",
+        "bindv6only_blocks_ipv4",
+    ];
+    let sandbox = Sandbox::initialized();
+    let (code, env) = sandbox.json(&["doctor", "--json"]);
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["command"], "doctor.run", "{env}");
+    let codes: Vec<&str> = env["data"]["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|finding| finding["code"].as_str().expect("code"))
+        .collect();
+    for code in &codes {
+        assert!(
+            qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(code),
+            "{code} is not in the shared vocabulary"
+        );
+    }
+    let client_state: Vec<&str> = codes
+        .iter()
+        .copied()
+        .filter(|code| !MACHINE_DEPENDENT.contains(code))
+        .collect();
+    assert_eq!(client_state, ["acl_policy_missing"], "{env}");
+    assert_eq!(env["data"]["overall"], "error", "{env}");
+}

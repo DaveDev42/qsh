@@ -9,8 +9,9 @@
 //! controller's restart, and its `tunnels` and `tunnel close`.
 //!
 //! No test-only harness stands in for either side. Attaching a pty session
-//! through the route needs ConPTY and is M20's, so those cases stay in
-//! `reverse_e2e.rs`.
+//! through the route needs a host with PTY sessions, which a Windows host does
+//! not have yet, so those cases stay in `reverse_e2e.rs` and the client side
+//! of the attach is `windows_attach.rs`, against the in-process echo host.
 
 #![cfg(windows)]
 
@@ -44,6 +45,11 @@ fn remote_tunnel_echo() {
 #[test]
 fn local_tunnel_delivers_the_destinations_close() {
     cases::local_tunnel_delivers_the_destinations_close(&ReverseRoute::start());
+}
+
+#[test]
+fn dynamic_forward_connect() {
+    cases::dynamic_forward_connect(&ReverseRoute::start());
 }
 
 #[test]
@@ -223,4 +229,9 @@ fn windows_supervised_remote_tunnel_survives_a_target_reconnect() {
         rest.is_empty(),
         "stdout carried more than the envelope: {rest:?}"
     );
+}
+
+#[test]
+fn cp_to_a_windows_host_is_unsupported_before_m20() {
+    cases::cp_to_a_windows_host_is_unsupported_before_m20(&ReverseRoute::start(), true);
 }
