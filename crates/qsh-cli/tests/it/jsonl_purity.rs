@@ -230,7 +230,7 @@ fn parse_stdout_events(stdout: &[u8], label: &str) -> Vec<Value> {
 /// lines and across chunk boundaries — a partially flushed `session.output`
 /// would fail to parse here. Verbosity still only ever adds stderr.
 // Sessions are PTY-backed, so this whole path only exists on POSIX hosts
-// (Windows host is P2), and `sh` is not there to run either.
+// (Windows host is M20), and `sh` is not there to run either.
 #[cfg(unix)]
 #[test]
 fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {

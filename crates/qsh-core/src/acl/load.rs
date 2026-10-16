@@ -133,9 +133,9 @@ impl PolicySource {
         // trusts can grant itself anything the policy is capable of
         // granting. Non-fatal and independent of whether the file goes on
         // to parse — fires whenever the file exists, on every load
-        // outcome. Windows ACL checking is an explicit non-goal: Windows'
-        // permission model has no analogue to the unix rwx bits this reads,
-        // and `docs/ROADMAP.md` already defers the Windows host role to P2.
+        // outcome. This reads unix rwx bits, which Windows does not have;
+        // the Windows host's DACL-based warning arrives with the Windows
+        // host role in M20 (ADR-0035 decision 24).
         #[cfg(unix)]
         warn_if_group_or_world_writable(path, &file);
         // Cheap early-out on a regular file's reported size. This is NOT

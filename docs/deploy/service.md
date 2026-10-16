@@ -638,7 +638,7 @@ task state from the Task Scheduler COM API, as `qsh doctor` does.
 `qsh doctor` reads the file, not the scheduler, for these two: it reports
 `service_not_registered` (info) when the file is absent, and
 `service_restart_drops_sessions` (info) when it is present, for `serve` and
-`reverse`. A Windows host has no PTY sessions yet, so for now the notice
+`reverse`. A Windows host has no PTY sessions until M20, so until then the notice
 means that `/End` or a restart ends the connections the host holds, as on the
 other platforms (Notes for both below).
 

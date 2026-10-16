@@ -33,6 +33,11 @@ role, closes its open connections on that machine within 2 seconds.
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)).
 
+Linux and macOS run both ends. Windows 10 1809 or later runs the client,
+including interactive sessions, `qsh cp`, port forwards, reverse mode and the
+ssh bootstrap; the Windows host, with PTY sessions and file operations, is
+planned (see [Known limitations](#known-limitations)).
+
 **Status.** Version 0.4.3, not for production use. The independent review of
 the protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
 has not been contracted, and the wire-format freeze waits on that decision.
@@ -886,7 +891,9 @@ the offending rule (unknown action pattern, `auth_path` or scope).
 
 On unix, a group- or world-writable `acl.toml` gets a one-time stderr
 warning instead of a refusal to load: an operator locked out of their own
-host by a permissions slip has no way back in. Pin only devices you would
+host by a permissions slip has no way back in. Windows has no such warning
+yet; the equivalent check on the file's DACL arrives with the Windows host
+in M20. Pin only devices you would
 hand a shell to, and choose each one's role on purpose. The default for a
 machine that connects in is `full`, which is the power of the account running
 `qsh serve`: `exec` and `full`
@@ -906,6 +913,20 @@ Reading the audit log is a local operation. `qsh audit` has no wire message
 and no ACL action, so no remote peer can list who connected or what was
 refused, and moving the device key with `qsh identity move-key` leaves its own
 audit record first and does nothing if that record cannot be written.
+
+The local control endpoint that `qsh listen` and `qsh serve --to` keep for the
+commands on the same machine (`qsh hosts`, `qsh tunnels`, reverse attach) is
+not an authorization layer. It answers the account that runs the daemon and
+no one else, and a process of that account can already read the device key.
+On unix it is a socket with mode 0600 whose peer uid is checked before the
+first frame. On Windows it is a named pipe whose every instance carries an
+owner-only DACL, which also refuses remote clients; the daemon fails to start
+if the name is already taken, the client opens it so the server cannot
+impersonate it, and both sides compare the other end's user SID with their own
+before a frame is read or written. That SID check is a second layer behind the
+DACL. It reads the peer's token in two steps (client pid, then the process), so
+a pid that is reused in between leaves a narrow gap, which the DACL still
+covers (`docs/design/threat-model.md` §7, ADR-0035 decision 14).
 
 ## Known limitations
 
@@ -1116,7 +1137,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   old file's owner, hard links and extended attributes do not carry over,
   unlike scp, which writes into the existing file. With role `full` or a wide
   `paths`, `file.write` is as strong as `exec.run`.
-- Windows support is planned for P1: the client in M19 and the host in M20
+- The Windows client ships in M19 and the Windows host is planned for M20
   (ADR-0035), with the same features as Linux and macOS. The Windows
   console layer (raw VT input and output, UTF-8 code page, resize polling, mode
   restore on every exit path) and the echo-free invite-code prompt are in; they

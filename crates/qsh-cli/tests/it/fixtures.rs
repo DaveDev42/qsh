@@ -2116,7 +2116,7 @@ fn golden_session_list_filtered_fixture() {
 /// invariants — cursor monotonicity and the shape of each envelope — while
 /// the fixtures themselves mask payload and offsets.
 // Sessions are PTY-backed, so this whole path only exists on POSIX hosts
-// (Windows host is P2). The fixtures it writes are checked in and are
+// (Windows host is M20). The fixtures it writes are checked in and are
 // still validated everywhere by the whole-directory contract tests below.
 #[cfg(unix)]
 #[test]
