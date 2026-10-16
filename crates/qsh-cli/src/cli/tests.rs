@@ -425,6 +425,63 @@ fn reverse_is_hidden_from_help_but_still_parses() {
     assert!(reverse_help.contains("controller"));
 }
 
+/// ADR-0035 decision 27: `qsh service run` is the Task Scheduler task's
+/// action, hidden from `qsh service --help` (and so from the generated man
+/// pages) but parseable, with the controller required for `reverse` alone.
+#[test]
+fn service_run_is_hidden_from_help_and_man() {
+    let service_help = Cli::command()
+        .find_subcommand("service")
+        .expect("service subcommand exists")
+        .clone()
+        .render_help()
+        .to_string();
+    assert!(
+        !service_help.lines().any(|line| {
+            line.strip_prefix("  ")
+                .is_some_and(|rest| !rest.starts_with(' ') && rest.starts_with("run"))
+        }),
+        "qsh service --help must not list the hidden `run` subcommand: {service_help:?}"
+    );
+    assert!(
+        Cli::command()
+            .find_subcommand("service")
+            .unwrap()
+            .find_subcommand("run")
+            .expect("hidden subcommand must still be reachable by name")
+            .is_hide_set()
+    );
+
+    for mode in ["serve", "listen"] {
+        match Cli::try_parse_from(["qsh", "service", "run", mode])
+            .unwrap()
+            .command
+            .unwrap()
+        {
+            Command::Service(ServiceCmd::Run {
+                mode: parsed,
+                controller: None,
+            }) => assert_eq!(parsed, mode),
+            other => panic!("expected service run {mode}, got {other:?}"),
+        }
+    }
+    match Cli::try_parse_from(["qsh", "service", "run", "reverse", "box"])
+        .unwrap()
+        .command
+        .unwrap()
+    {
+        Command::Service(ServiceCmd::Run { mode, controller }) => {
+            assert_eq!(mode, "reverse");
+            assert_eq!(controller.as_deref(), Some("box"));
+        }
+        other => panic!("expected service run reverse, got {other:?}"),
+    }
+    // The controller is required for `reverse`, and the mode set is closed.
+    assert!(Cli::try_parse_from(["qsh", "service", "run", "reverse"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "service", "run", "bogus"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "service", "run"]).is_err());
+}
+
 #[test]
 fn listen_bind_is_optional() {
     let cli = Cli::try_parse_from(["qsh", "listen"]).unwrap();

@@ -5,13 +5,15 @@
 qsh does not daemonize itself. Keeping one of them running across logout,
 reboot, or a crash is the OS service manager's job. `qsh service
 install|uninstall|status` (`docs/CLI.md` §6.18) generates a unit for this
-machine's inferred run mode, and with `--activate`, `--deactivate` and
-`--live` also loads, releases and checks it through the service manager. The
-`xml` and `ini` fences on this page are exactly what it writes, byte for byte,
-not merely illustrative examples, and the launchd and systemd commands in the
-recipes below are exactly the ones the flags run. The `plist` fences (the
-LaunchDaemon and the supervised tunnel) are recipes you install yourself;
-`qsh` does not write them.
+machine's inferred run mode, and on macOS and Linux, with `--activate`,
+`--deactivate` and `--live`, also loads, releases and checks it through the
+service manager. On Windows the unit is a Task Scheduler task definition file
+that you register yourself (see Task Scheduler below). The `xml` and `ini`
+fences on this page are exactly what it writes, byte for byte, not merely
+illustrative examples, and the launchd and systemd commands in the recipes
+below are exactly the ones the flags run. The `plist` fences (the LaunchDaemon
+and the supervised tunnel) and the always-on Task Scheduler variant are
+recipes you install yourself; `qsh` does not write them.
 
 Without a flag, `qsh service` writes and removes the unit file and never
 calls `launchctl` or `systemctl`. The flags are the only way it does, and no
@@ -23,6 +25,9 @@ config key or environment variable turns them on:
 | `qsh service uninstall --deactivate` | Releases the unit from the manager first, then removes the file. If the release fails the file stays. Without the flag a running unit keeps running. |
 | `qsh service status --live` | Reports whether the unit is running, from one exit code of the manager. |
 
+On Windows the three flags answer `UNSUPPORTED` and change nothing: the Task
+Scheduler task is registered with the `schtasks` commands below.
+
 `qsh service` never restarts a unit. A restart ends every detached session
 (Notes for both below), so it stays a decision for a person.
 
@@ -32,10 +37,11 @@ path if you built elsewhere; `qsh service install` fills in the binary's
 actual, currently running path for you.
 
 `qsh service install` also creates the unit's parent directory
-(`~/Library/LaunchAgents` on macOS, `~/.config/systemd/user` on Linux) and,
-on macOS, `~/Library/Logs/qsh`, when they are missing, but never changes the
-mode of a directory that already exists. The unit file itself is written
-0600 regardless of manager.
+(`~/Library/LaunchAgents` on macOS, `~/.config/systemd/user` on Linux,
+`%USERPROFILE%\.config\qsh\service` on Windows) and, on macOS,
+`~/Library/Logs/qsh`, when they are missing, but never changes the mode of a
+directory that already exists. The unit file itself is written 0600 regardless
+of manager (on Windows an owner-only DACL).
 
 ## launchd (macOS)
 
@@ -412,6 +418,334 @@ above never starts.
 found it ends with `UNSUPPORTED`, and if it is found but cannot reach the
 manager it ends with `INTERNAL`. Both messages name `/etc/wsl.conf` under WSL.
 The unit file is still written, so run the command again once systemd is up.
+
+## Task Scheduler (Windows)
+
+`qsh service install` writes one task definition per run mode to
+`%USERPROFILE%\.config\qsh\service\qsh-<mode>.task.xml` (`<config_dir>\service`),
+with an owner-only DACL. `qsh service status` reports whether that file
+exists, and `qsh service uninstall` deletes it. None of the three starts
+`schtasks`, registers anything or reads the scheduler. Registering the task is
+the recipe below, run by you. The task name is `\qsh\qsh-<mode>`.
+
+The file is UTF-16 little-endian with a byte order mark, and the XML says
+`encoding="UTF-16"`. That is the one encoding `schtasks /Create /XML` accepted
+when it was tried (see Measured below). The `<UserId>` elements hold the SID of
+the user who ran `qsh service install`, so the file does not depend on how the
+account name is spelled or localized. The fences show an example SID and
+binary path.
+
+The task does not run `qsh serve` directly. A console program started by the
+Task Scheduler gets a console window and nowhere to put its output, and the
+task definition has no field for a log path. The action is `qsh service run
+<mode>`, a hidden subcommand that detaches from the console, appends stdout to
+`%USERPROFILE%\.local\state\qsh\log\<mode>.out.log` and stderr to
+`<mode>.err.log` (each created with an owner-only DACL), and then runs exactly
+what `qsh serve`, `qsh listen` or `qsh serve --to` runs. The `listening on`
+line and every error land in the `.err.log`. `qsh service run` does the same
+redirection on macOS and Linux, but their units do not call it.
+
+`%USERPROFILE%\.config\qsh\service\qsh-serve.task.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>qsh serve</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Users\YOU\.local\bin\qsh.exe</Command>
+      <Arguments>service run serve</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+`%USERPROFILE%\.config\qsh\service\qsh-listen.task.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>qsh listen</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Users\YOU\.local\bin\qsh.exe</Command>
+      <Arguments>service run listen</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+`%USERPROFILE%\.config\qsh\service\qsh-reverse.task.xml` — file name and task
+name still say `reverse`, but the action runs `qsh serve --to controller`
+(the controller literal is frozen into `Arguments` at install time and
+quoted for the command line when it holds whitespace):
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>qsh serve --to</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Users\YOU\.local\bin\qsh.exe</Command>
+      <Arguments>service run reverse controller</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+What each setting is for:
+
+| Setting | Why |
+|---|---|
+| `LogonTrigger` for the installing user, with a `Repetition` of `PT1M` and no duration | Starts the task at logon and again every minute. See Measured: this is what restarts a process that died. |
+| `MultipleInstancesPolicy` `IgnoreNew` | A repetition tick that finds the process still running does nothing, so there is one process and a restart within a minute of a death. |
+| `Principal` `InteractiveToken`, `RunLevel` `LeastPrivilege` | Runs as you, only while you are logged on, with your normal token. No password is stored and no elevation is asked for. |
+| `ExecutionTimeLimit` `PT0S` | The scheduler's default of 72 hours would end a long-running host. |
+| `DisallowStartIfOnBatteries` and `StopIfGoingOnBatteries` `false` | A laptop on battery keeps the host. |
+| `RestartOnFailure` `PT1M`, `Count` 999 | Kept as a second line of defence, but it did not restart anything in the measurements below. The repetition does the work. |
+
+### Register, check, stop
+
+`qsh service install` stops after writing the file. Register it as the user
+the file names, from a normal (not elevated) prompt:
+
+```powershell
+schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\service\qsh-serve.task.xml"
+schtasks /Query /TN \qsh\qsh-serve
+```
+
+`/F` replaces an existing task of that name. The task starts at your next
+logon; to start it now, log off and on, or run `schtasks /Run /TN
+\qsh\qsh-serve`. Registering a task with this definition needed no elevation.
+
+Stop and remove it:
+
+```powershell
+schtasks /End /TN \qsh\qsh-serve
+schtasks /Delete /F /TN \qsh\qsh-serve
+```
+
+`/End` stops the running process, and the repetition starts it again at the
+next minute. `/Delete /F` is the way to stop it for good. `qsh service
+uninstall` deletes only the file; it does not touch a registered task, so run
+`/Delete` first.
+
+`qsh doctor` reads the file, not the scheduler, for these two: it reports
+`service_not_registered` (info) when the file is absent, and
+`service_restart_drops_sessions` (info) when it is present, for `serve` and
+`reverse`. A Windows host has no PTY sessions yet, so for now the notice
+means that `/End` or a restart ends the connections the host holds, as on the
+other platforms (Notes for both below).
+
+### Always-on: a task that runs with nobody logged on
+
+The default task is an `InteractiveToken` task: it exists only while you are
+logged on. It starts at logon and ends at logoff, like a macOS LaunchAgent
+(`qsh doctor` says so as `logon_task_session_scoped`, a warning, once the
+scheduler reports the task registered with that principal). To keep a host
+running at boot with nobody logged on, register a variant yourself. `qsh` does
+not register it for you and has no flag that does.
+
+Copy `qsh-serve.task.xml` to `qsh-serve.always-on.xml` next to it and make two
+changes: replace the `LogonTrigger` element with a `BootTrigger`, which has no
+`UserId`, and set the principal's `LogonType` to `Password`. Save the copy as
+UTF-16 with a byte order mark, as the original is (in Windows PowerShell,
+`Get-Content` the original and pipe it to `Set-Content -Encoding Unicode`
+after editing). The result:
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>qsh serve</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-21-1111111111-2222222222-3333333333-1001</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Users\YOU\.local\bin\qsh.exe</Command>
+      <Arguments>service run serve</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+Register it from an **elevated** prompt, naming the account and letting
+`schtasks` ask for its password, so the password never lands in your shell
+history or in this file:
+
+```powershell
+schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\service\qsh-serve.always-on.xml" /RU DOMAIN\you /RP *
+```
+
+Replace `DOMAIN\you` with the account (`COMPUTER\you` for a local account).
+Without the password the registration fails: a `LogonType` of `Password` with
+no password gave `ERROR: The user name or password is incorrect.` The
+Task Scheduler keeps the password it was registered with. When the account's
+password changes, the task cannot start at the next trigger until you run the
+same `schtasks /Create /F ... /RP *` again, and a task that fails this way
+fails silently from qsh's point of view. Re-register after every password
+change.
+
+The `qsh doctor` warning `logon_task_session_scoped` is silent for this task,
+because the scheduler reports a `Password` principal.
+
+The always-on variant was not run during the measurements below: a
+`BootTrigger` cannot be registered without elevation, and the stored password
+is yours to supply. The file is the default task with the two changes above
+and nothing else, and `crates/qsh-core/tests/it/service_docs.rs` keeps it
+that way.
+
+### Measured
+
+These were measured on Windows 11 (build 26100) as a standard, non-elevated
+user, with throwaway tasks in a folder of their own that was deleted
+afterwards. No password was typed or stored.
+
+| Question | Result |
+|---|---|
+| Does `RestartOnFailure` start the action again after it exits non-zero? | No. A task that exited with code 3 and one that crashed with `FailFast` (exit code `0xE0434352`), each with `RestartOnFailure` `PT1M` and `Count` 3, were started once and never again over 4 minutes. |
+| Does a `Repetition` of `PT1M` with no `Duration`, plus `IgnoreNew`, start a dead task again? | Yes. A 5 second task that exits with 3 started at 22:42:33, 22:43:34, 22:44:34 and 22:45:34. For a 100 second task the tick at 60 seconds was ignored and the next start was at 121 seconds, so there was never a second copy. |
+| Does a `LogonTrigger` with a `Repetition` register, and does the scheduler report it back? | Yes, with no elevation. Read back through the COM API, `Repetition.Interval` was `PT1M`. |
+| Can a standard user register a `BootTrigger` task? | No. With an `InteractiveToken`, a `Password` and an `S4U` principal alike, `schtasks /Create` answered `ERROR: Access is denied.` The always-on variant needs an elevated prompt. |
+| Can a standard user register a `LogonType` of `Password` task? | Not without the password: `ERROR: The user name or password is incorrect.` |
+| Which encodings does `schtasks /Create /XML` accept? | UTF-16 little-endian with a byte order mark and `encoding="UTF-16"`. UTF-8 with the declaration, and UTF-8 with a byte order mark, were both rejected as `task XML is malformed`. |
+
+### A supervised tunnel as a task
+
+A tunnel task runs `qsh tunnel open` itself, not `qsh service run`, so nothing
+collects its output unless you wrap it. Take the default task file and replace
+its `Exec` element, wrapping the command in `cmd.exe` so stdout (the
+`tunnel.open` envelope) and stderr (the `qsh::lifecycle` and
+`qsh::tunnel::supervise` lines) go to a file:
+
+```xml
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>/c ""C:\Users\YOU\.local\bin\qsh.exe" tunnel open hub --dynamic 1080 --supervise 300000 &gt;&gt; "C:\Users\YOU\.local\state\qsh\tunnel-hub.log" 2&gt;&amp;1"</Arguments>
+    </Exec>
+```
+
+Change `Description` to say what the task is, save the file under another
+name, and register it under another task name (`\qsh\qsh-tunnel-hub`). The
+host alias `hub`, the port `1080`, the budget and the paths are yours. The
+repetition restarts the process after a total outage past `--supervise`
+(`gave_up`, exit `255`) and after a failed first `open`, and `IgnoreNew` keeps
+the supervised process from being doubled. The console window of this task
+stays open on screen. The doubled quote after `/c` is what `cmd.exe` strips,
+and it keeps a path with spaces working; the form was run as a task with a
+harmless executable in a directory whose name contains spaces.
 
 ## Supervised tunnels
 

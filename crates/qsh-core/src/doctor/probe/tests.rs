@@ -407,6 +407,8 @@ fn host_os_current_matches_the_build_target() {
         HostOs::Macos
     } else if cfg!(target_os = "linux") {
         HostOs::Linux
+    } else if cfg!(windows) {
+        HostOs::Windows
     } else {
         HostOs::Other
     };

@@ -1,11 +1,13 @@
 # ADR-0032: `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다
 
-날짜: 2026-10-11 (개정 2026-10-13)
+날짜: 2026-10-11 (개정 2026-10-13, 2026-10-17)
 상태: 승인됨
 
 개정 관계: 새 ADR이다. ADR-0024 결정 11이 "활성화까지 맡기려면 §6.18을 개정하는 별도 결정이 필요하다"고 남겨 둔 자리를 채운다. `docs/CLI.md` §6.18의 "`status`는 존재 여부만 본다" 문단과 "유닛 파일만 쓴다"는 계약을 플래그가 있을 때에 한해 개정하고, `docs/design/threat-model.md` §3의 `qsh service` 행(`launchctl`/`systemctl`을 호출하지 않는다는 서술)을 같은 범위로 고친다. `docs/ROADMAP.md` M17 (a)가 이 ADR을 요구한다. ADR-0017 결정 1(`acl.toml`을 쓰지 않는다)과 ADR-0024 결정 11의 나머지(`qsh setup`은 유닛을 활성화하지 않는다)는 그대로다.
 
 2026-10-13 개정: 사용자 결정("원칙에 예외는 없어", "전부 다 알아서 진행해")에 따라 플랫폼 간 동등(PRD §4, `docs/ROADMAP.md` §5.1 원칙 7)을 상시 기동에도 적용한다. 처음 판은 macOS LaunchDaemon을 M17의 명시적 out으로 남겨, Linux(사람이 `loginctl enable-linger`를 치는 레시피와 `systemd_linger_disabled`)와 Windows(ADR-0035 결정 27의 상시 기동 작업 레시피와 `logon_task_session_scoped`)가 가진 수준을 macOS만 갖지 못했다. 이 개정은 결정 12를 고치고 결정 13~17을 더한다. 어느 플랫폼에서도 qsh는 로그인 세션 밖 상시 기동을 스스로 설정하지 않는다는 선은 그대로이고, macOS도 사람이 한 번 치는 문서화된 레시피와 그것을 알리는 doctor finding을 얻는다. 같은 점검에서 드러난 keystore 문제(로그인 세션 밖 프로세스가 `platform` 개인키를 읽지 못한다, 결정 15)는 macOS와 Linux 모두에 해당해 함께 닫는다. ADR-0035 결정 27의 "macOS LaunchDaemon은 이 ADR의 범위가 아니다" 문장은 이 ADR을 가리키게 고쳤다(결과 절).
+
+2026-10-17 개정: ADR-0035 결정 27의 첫 서비스 스텝 실측에 맞춰 결정 12와 16의 Windows 문장을 적는다. 결정 12의 "Windows에서 상시 기동 작업을 등록하지 않는다"는 그대로이고, 그 레시피(ADR-0035 결정 27의 상시 기동 작업)가 일반 사용자 권한으로는 등록되지 않는다는 사실이 더해졌다. `BootTrigger` 작업은 주체가 `InteractiveToken`·`Password`·`S4U` 어느 것이든 일반 사용자의 `schtasks /Create`가 `Access is denied`로 거부했고 `LogonType=Password`는 사용자 암호가 있어야 등록된다. 그래서 Windows 레시피는 관리자 프롬프트에서 사람이 암호를 넣어 치는 한 번의 명령이다. 결정 16의 "qsh가 root나 관리자 권한을 요구하거나 `sudo`를 부르는 경로는 없다"는 이 레시피에도 그대로 걸린다. qsh는 관리자 프롬프트를 열지도 암호를 받지도 않고, `doctor`의 `logon_task_session_scoped`(ADR-0035 결정 27)는 레시피를 가리킬 뿐 실행하지 않는다. 결정 15의 Credential Manager 읽기 실측은 이 개정이 닫지 않는다. 결정의 나머지는 바뀌지 않는다.
 
 승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. 결정 3의 매니저 호출 표가 Windows 열을 갖지 않아 "원칙에 예외 없음"과 어긋나던 점을 Windows 열 추가(결정 3·4·5·6·8·10)로 닫았고, 비활성화가 실행 여부만 보고 등록은 보지 않아 멈춘 채 등록된 유닛이 파일 삭제 뒤 고아로 남던 틈을 닫았으며(결정 5), Windows 상시 기동 작업이 Credential Manager를 읽는다는 가정에 실측 뒤 대체 경로를 정했다(결정 15) 사람이 설치한 상시 기동 형태(macOS LaunchDaemon, Windows `Password` 주체 작업)를 `--activate`의 재등록이 덮거나 `--deactivate`가 해제하던 틈은 결정 18로 닫았다.
 

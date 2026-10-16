@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 27 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 28 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -45,9 +45,12 @@ pub mod probe;
 /// `TrustPinRoleUnset` (ADR-0045 결정 12, M15) is the twenty-fifth, 24 → 25.
 /// `AclFilePathsMissing` (ADR-0029 결정 19, M15) is the twenty-sixth, 25 → 26.
 /// `KeystoreSessionBound` (ADR-0032 결정 15, M17) is the twenty-seventh, 26 → 27.
-/// The set is the same on every target: Windows builds know all 27 codes, and
+/// `LogonTaskSessionScoped` (ADR-0035 결정 27, M19) is the twenty-eighth,
+/// 27 → 28.
+/// The set is the same on every target: Windows builds know all 28 codes, and
 /// [`KEYSTORE_SESSION_BOUND`] is simply never emitted there before M19
-/// (ADR-0032 결정 15, ADR-0035 결정 27).
+/// (ADR-0032 결정 15, ADR-0035 결정 27), while [`LOGON_TASK_SESSION_SCOPED`] is
+/// emitted on Windows only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -77,6 +80,7 @@ pub enum DiagnosticId {
     TrustPinRoleUnset,
     AclFilePathsMissing,
     KeystoreSessionBound,
+    LogonTaskSessionScoped,
 }
 
 impl DiagnosticId {
@@ -118,6 +122,7 @@ impl DiagnosticId {
             DiagnosticId::TrustPinRoleUnset => TRUST_PIN_ROLE_UNSET.code,
             DiagnosticId::AclFilePathsMissing => ACL_FILE_PATHS_MISSING.code,
             DiagnosticId::KeystoreSessionBound => KEYSTORE_SESSION_BOUND.code,
+            DiagnosticId::LogonTaskSessionScoped => LOGON_TASK_SESSION_SCOPED.code,
         }
     }
 }
@@ -147,6 +152,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "keystore_session_bound",
     "keystore_unavailable",
     "launchagent_session_scoped",
+    "logon_task_session_scoped",
     "no_route",
     "peer_untrusted",
     "qsh_path_shadowed",
@@ -314,6 +320,24 @@ pub const KEYSTORE_SESSION_BOUND: Diagnostic = Diagnostic {
     remedy: "Run `qsh identity move-key --to file` to keep the key in the 0600 key file. The device id, certificate and fingerprint do not change, so peers' pins and ACL rows stay valid.",
 };
 
+/// ADR-0035 결정 27, `docs/CLI.md` §6.17: Windows only. The Task Scheduler
+/// task of the inferred mode (`\qsh\qsh-<mode>`) is registered with an
+/// `InteractiveToken` principal, which exists only while that user is logged
+/// on: the task starts at logon and ends at logoff, the Windows counterpart of
+/// [`LAUNCHAGENT_SESSION_SCOPED`] and the Task Scheduler analogue of
+/// `systemd_linger_disabled`. The registration and the principal are read
+/// through the Task Scheduler COM API (`crate::ops::service::TaskDefinitionReader`),
+/// never by starting a process; a task that cannot be read reports
+/// nothing, the way an unreadable linger marker does. `warn`; `remedy` points
+/// at the always-on recipe in `docs/deploy/service.md`, which a person
+/// registers (ADR-0032 결정 12, 16).
+pub const LOGON_TASK_SESSION_SCOPED: Diagnostic = Diagnostic {
+    id: DiagnosticId::LogonTaskSessionScoped,
+    code: "logon_task_session_scoped",
+    message: "The scheduled task for this machine's run mode runs as an interactive-token task, which exists only while you are logged on. It starts at logon and stops when your session ends.",
+    remedy: "To keep it running with nobody logged on, register the always-on variant described in docs/deploy/service.md (a BootTrigger and a stored-password principal, registered from an elevated prompt).",
+};
+
 /// `docs/CLI.md` §6.17: the local clock reads earlier than this device's
 /// own certificate's backdated `not_before` — `crate::identity`'s 5-minute
 /// backdate margin (`crate::identity::CERT_BACKDATE_MINUTES`) exists
@@ -432,8 +456,9 @@ pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
 /// `~/Library/LaunchAgents/io.qsh.<mode>.plist` and
 /// `/Library/LaunchDaemons/io.qsh.<mode>.plist` (either one counts, file
 /// existence only, ADR-0032 결정 14), Linux reads
-/// `~/.config/systemd/user/qsh-<mode>.service`; every other target
-/// (Windows included) never fires this — `qsh service install` is
+/// `~/.config/systemd/user/qsh-<mode>.service`, Windows reads
+/// `<config_dir>\service\qsh-<mode>.task.xml` (ADR-0035 결정 27); every
+/// other target never fires this — `qsh service install` is
 /// `UNSUPPORTED`/P1 there, so flagging its absence would be noise for a
 /// thing the platform cannot do.
 ///

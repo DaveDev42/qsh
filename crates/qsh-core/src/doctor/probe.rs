@@ -438,6 +438,32 @@ pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
         .join(format!("qsh-{mode}.service"))
 }
 
+/// `\qsh\qsh-<mode>` — the Task Scheduler name of `mode`'s task
+/// (ADR-0035 결정 27), the Windows counterpart of the launchd label
+/// `io.qsh.<mode>` and the systemd unit `qsh-<mode>.service`. The one
+/// spelling the task definition path, the COM reader and the `schtasks`
+/// argv all share.
+pub fn windows_task_name(mode: &str) -> String {
+    format!("\\qsh\\qsh-{mode}")
+}
+
+/// `<config_dir>\service\qsh-<mode>.task.xml` — the Task Scheduler task
+/// definition `qsh service install` writes on Windows (ADR-0035 결정 27) and
+/// [`windows_task_definition_present`] reads. It lives under the config
+/// directory rather than `$HOME`: Windows has no dot-directory convention to
+/// follow, and the config directory is already owner-only.
+pub fn windows_task_definition_path(config_dir: &Path, mode: &str) -> PathBuf {
+    config_dir
+        .join("service")
+        .join(format!("qsh-{mode}.task.xml"))
+}
+
+/// Whether the task definition file of `mode` exists under `config_dir`. File
+/// existence only, the same contract as [`service_unit_registered`].
+pub fn windows_task_definition_present(config_dir: &Path, mode: &str) -> bool {
+    windows_task_definition_path(config_dir, mode).exists()
+}
+
 /// The operating system whose service layout a probe reads. The doctor
 /// passes [`HostOs::current`]; naming it as a value instead of reading `cfg`
 /// inside each probe lets a test exercise the macOS rules on a Linux host and
@@ -446,8 +472,12 @@ pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
 pub enum HostOs {
     Macos,
     Linux,
-    /// Windows and every other target: `qsh service` is `UNSUPPORTED` there
-    /// until M19, and no service or always-on form is reported.
+    /// Task Scheduler: the task definition file under the config directory
+    /// ([`windows_task_definition_path`]) and, for the principal, the COM
+    /// reader.
+    Windows,
+    /// Every other target: `qsh service` is `UNSUPPORTED` there, and no
+    /// service or always-on form is reported.
     Other,
 }
 
@@ -458,6 +488,8 @@ impl HostOs {
             HostOs::Macos
         } else if cfg!(target_os = "linux") {
             HostOs::Linux
+        } else if cfg!(windows) {
+            HostOs::Windows
         } else {
             HostOs::Other
         }
@@ -483,9 +515,11 @@ pub fn macos_launchagent_present(home: Option<&Path>, mode: &str) -> bool {
 /// `macos_launchagent_path`/`linux_systemd_user_unit_path` names; on macOS
 /// the LaunchDaemon plist [`macos_launchdaemon_path`] counts as registered
 /// too, ADR-0032 결정 14),
-/// `None` everywhere else (Windows included) — `docs/CLI.md` §6.17: `qsh
-/// service install` is `UNSUPPORTED`/P1 off macOS/Linux, so there is
-/// nothing to report there. `home` is `None` when
+/// `None` everywhere else — `docs/CLI.md` §6.17: `qsh service install` is
+/// `UNSUPPORTED`/P1 off macOS/Linux/Windows, so there is nothing to report
+/// there. Windows is `None` here too: its task definition lives under the
+/// config directory, not `$HOME`, so [`windows_task_definition_present`]
+/// answers for it. `home` is `None` when
 /// the caller could not resolve one (`crate::config::home_dir()`
 /// returning `None` in the real environment) — also `None`, since no
 /// unit path could even be built (on macOS a LaunchDaemon plist still
@@ -508,7 +542,7 @@ pub fn service_unit_registered(
             }
         }
         HostOs::Linux => Some(linux_systemd_user_unit_path(home?, mode).exists()),
-        HostOs::Other => None,
+        HostOs::Windows | HostOs::Other => None,
     }
 }
 
@@ -534,7 +568,7 @@ pub fn always_on_form_present(
             linger == LingerProbe::Enabled
                 && home.is_some_and(|home| linux_systemd_user_unit_path(home, mode).exists())
         }
-        HostOs::Other => false,
+        HostOs::Windows | HostOs::Other => false,
     }
 }
 
@@ -548,6 +582,19 @@ pub fn service_not_registered_finding(mode: &str) -> DoctorFinding {
         code: diag.code.to_string(),
         status: "info".to_string(),
         detail: format!("{} (inferred mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    }
+}
+
+/// `logon_task_session_scoped`'s finding — the Windows counterpart of
+/// [`launchagent_session_scoped_finding`]. The caller fires it only for a
+/// task that is registered with an `InteractiveToken` principal.
+pub fn logon_task_session_scoped_finding(mode: &str) -> DoctorFinding {
+    let diag = &super::LOGON_TASK_SESSION_SCOPED;
+    DoctorFinding {
+        code: diag.code.to_string(),
+        status: "warn".to_string(),
+        detail: format!("{} (mode: {mode})", diag.message),
         remedy: Some(diag.remedy.to_string()),
     }
 }

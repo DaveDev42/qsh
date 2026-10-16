@@ -20,11 +20,11 @@
 
 use qsh_core::doctor::SERVICE_NOT_REGISTERED;
 use qsh_core::{
-    DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_HOME_MACOS,
-    SERVICE_UNSUPPORTED_PLATFORM, launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv,
-    launchd_print_system_argv, render_launchd_plist, render_systemd_unit,
-    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
-    systemd_is_active_argv,
+    DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_EXE_WINDOWS,
+    DOC_EXAMPLE_HOME_MACOS, DOC_EXAMPLE_USER_SID, SERVICE_UNSUPPORTED_PLATFORM,
+    launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
+    render_launchd_plist, render_systemd_unit, render_windows_task, systemd_daemon_reload_argv,
+    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
 };
 
 use crate::docs;
@@ -83,11 +83,35 @@ fn count_ini_fences_containing(doc: &str, needle: &str) -> usize {
     count
 }
 
+/// Same as [`count_ini_fences_containing`], for ` ```xml` fences: this page
+/// has launchd plists, Task Scheduler task definitions and one `Exec`
+/// fragment, all tagged `xml`.
+fn count_xml_fences_containing(doc: &str, needle: &str) -> usize {
+    let open = "```xml\n";
+    let mut count = 0;
+    let mut rest = doc;
+    while let Some(start) = rest.find(open) {
+        let body_start = start + open.len();
+        let after = &rest[body_start..];
+        let Some(end) = after.find("```") else {
+            break;
+        };
+        if after[..end].contains(needle) {
+            count += 1;
+        }
+        rest = &after[end..];
+    }
+    count
+}
+
+// The name predates the Windows section (M17): the six plist and ini fences are
+// still pinned here, and the xml fence counts for the Task Scheduler section are
+// asserted in the same test. The name stays so older references keep resolving.
 #[test]
 fn service_md_declares_exactly_six_unit_fences() {
     let service_md = read_doc("docs/deploy/service.md");
     assert_eq!(
-        count_fences(&service_md, "xml"),
+        count_xml_fences_containing(&service_md, "<plist"),
         3,
         "docs/deploy/service.md must have exactly 3 ```xml launchd plist fences (serve/listen/reverse)"
     );
@@ -96,6 +120,17 @@ fn service_md_declares_exactly_six_unit_fences() {
         3,
         "docs/deploy/service.md must have exactly 3 ```ini systemd unit fences (serve/listen/reverse)"
     );
+    assert_eq!(
+        count_xml_fences_containing(&service_md, "<LogonTrigger>"),
+        3,
+        "docs/deploy/service.md must have exactly 3 ```xml Task Scheduler task fences (serve/listen/reverse)"
+    );
+    assert_eq!(
+        count_xml_fences_containing(&service_md, "<BootTrigger>"),
+        1,
+        "docs/deploy/service.md must have exactly 1 ```xml always-on task fence"
+    );
+    assert_eq!(count_fences(&service_md, "xml"), 3 + 3 + 1 + 1);
 }
 
 #[test]
@@ -135,6 +170,109 @@ fn service_md_systemd_fences_match_the_generated_units() {
             "docs/deploy/service.md's {mode} systemd fence must equal render_systemd_unit({mode}, ...) byte for byte"
         );
     }
+}
+
+/// ADR-0035 decision 27: the fences under "Task Scheduler (Windows)" are
+/// exactly what `qsh service install` writes on Windows, up to the binary
+/// path and the SID, which the doc shows as the `DOC_EXAMPLE_*` constants.
+#[test]
+fn service_md_windows_task_fence_matches_the_renderer() {
+    let service_md = read_doc("docs/deploy/service.md");
+    for (mode, marker) in [
+        (
+            "serve",
+            r"`%USERPROFILE%\.config\qsh\service\qsh-serve.task.xml`:",
+        ),
+        (
+            "listen",
+            r"`%USERPROFILE%\.config\qsh\service\qsh-listen.task.xml`:",
+        ),
+        (
+            "reverse",
+            r"`%USERPROFILE%\.config\qsh\service\qsh-reverse.task.xml`",
+        ),
+    ] {
+        let fence = fence_after(&service_md, marker, "xml");
+        let generated = render_windows_task(
+            mode,
+            DOC_EXAMPLE_EXE_WINDOWS,
+            DOC_EXAMPLE_CONTROLLER,
+            DOC_EXAMPLE_USER_SID,
+        );
+        assert_eq!(
+            fence, generated,
+            "docs/deploy/service.md's {mode} Task Scheduler fence must equal render_windows_task({mode}, ...) byte for byte"
+        );
+    }
+}
+
+/// The always-on variant is the default `serve` task with two documented
+/// changes: the `LogonTrigger` becomes a `BootTrigger` (which has no
+/// `UserId`) and the principal's `LogonType` becomes `Password`. Nothing
+/// else differs, so a change to the default task cannot leave the variant
+/// behind.
+#[test]
+fn service_md_windows_always_on_fence_is_the_default_task_with_two_changes() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let fence = fence_after(&service_md, "The result:", "xml");
+    let default = render_windows_task(
+        "serve",
+        DOC_EXAMPLE_EXE_WINDOWS,
+        DOC_EXAMPLE_CONTROLLER,
+        DOC_EXAMPLE_USER_SID,
+    );
+    let logon = format!(
+        "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{DOC_EXAMPLE_USER_SID}</UserId>\n"
+    );
+    let boot = "    <BootTrigger>\n      <Enabled>true</Enabled>\n";
+    assert!(default.contains(&logon));
+    let expected = default
+        .replacen(&logon, boot, 1)
+        .replacen("    </LogonTrigger>\n", "    </BootTrigger>\n", 1)
+        .replacen(
+            "<LogonType>InteractiveToken</LogonType>",
+            "<LogonType>Password</LogonType>",
+            1,
+        );
+    assert_ne!(expected, default);
+    assert_eq!(
+        fence, expected,
+        "docs/deploy/service.md's always-on fence must be the default serve task with a BootTrigger and a Password principal"
+    );
+}
+
+/// ADR-0035 decision 27: the recipes name the task by the same name the
+/// doctor reads (`\qsh\qsh-<mode>`) and the default file by the path
+/// `qsh service install` writes.
+#[test]
+fn service_md_windows_recipes_use_the_task_name_and_file_path_of_the_ops() {
+    let service_md = read_doc("docs/deploy/service.md");
+    assert!(service_md.contains(&format!(
+        "schtasks /Create /F /TN {} /XML",
+        qsh_core::doctor::probe::windows_task_name("serve")
+    )));
+    for verb in ["/End", "/Delete /F", "/Query"] {
+        assert!(
+            service_md.contains(&format!(
+                "schtasks {verb} /TN {}",
+                qsh_core::doctor::probe::windows_task_name("serve")
+            )),
+            "missing the schtasks {verb} recipe"
+        );
+    }
+    let path = qsh_core::doctor::probe::windows_task_definition_path(
+        std::path::Path::new(r"%USERPROFILE%\.config\qsh"),
+        "serve",
+    );
+    assert!(
+        service_md.contains(&path.display().to_string().replace('/', "\\")),
+        "docs/deploy/service.md must name {}",
+        path.display()
+    );
+    // qsh never takes a password: the registration recipe has the scheduler
+    // ask for it.
+    assert!(service_md.contains("/RP *"));
+    assert!(!service_md.contains("/RP \""));
 }
 
 #[test]

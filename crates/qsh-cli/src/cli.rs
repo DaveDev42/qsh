@@ -458,10 +458,11 @@ pub enum Command {
     },
 }
 
-/// `qsh service …` subcommands (`docs/CLI.md` §6.18). None takes an
-/// argument beyond the global `--json`/`--jsonl`/`-v` flags flattened onto
-/// [`Cli`] — the run mode is always inferred from `config.toml`, never
-/// selected on the command line.
+/// `qsh service …` subcommands (`docs/CLI.md` §6.18). The three visible ones
+/// take no argument beyond the global `--json`/`--jsonl`/`-v` flags flattened
+/// onto [`Cli`] — the run mode is always inferred from `config.toml`, never
+/// selected on the command line. The hidden `run` is the one subcommand that
+/// names a mode, because the Windows task definition has to.
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// Write (or rewrite) the unit for this machine's inferred run mode
@@ -493,6 +494,27 @@ pub enum ServiceCmd {
         /// exit code, no output parsing).
         #[arg(long)]
         live: bool,
+    },
+
+    /// The entry the Windows Task Scheduler task runs (ADR-0035 decision
+    /// 27): detach from the console, point stdout and stderr at
+    /// `<state_dir>/log/<mode>.out.log` and `.err.log`, then run the same
+    /// foreground entry as `qsh serve`, `qsh listen` or `qsh serve --to`.
+    ///
+    /// Hidden from `qsh --help` and the man pages: it is plumbing for the
+    /// unit a person installs with `qsh service install`, not something to
+    /// type. It runs on every platform and does the same redirection.
+    #[command(hide = true)]
+    Run {
+        /// Which entry to run.
+        #[arg(value_name = "MODE", value_parser = ["serve", "listen", "reverse"])]
+        mode: String,
+
+        /// The controller literal `reverse` dials, frozen into the task
+        /// definition at install time. Required for `reverse`, refused for
+        /// the other modes.
+        #[arg(value_name = "CONTROLLER", required_if_eq("mode", "reverse"))]
+        controller: Option<String>,
     },
 }
 

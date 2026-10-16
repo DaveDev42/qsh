@@ -70,6 +70,7 @@ fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
         key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
+        task_reader: &UnreadableTaskScheduler,
     }
 }
 
@@ -659,6 +660,7 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
         key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
+        task_reader: &UnreadableTaskScheduler,
     };
 
     let data = ops
@@ -786,6 +788,7 @@ fn doctor_wires_the_path_shadow_finding_into_the_full_report_deterministically()
         key_store: KeyStoreKind::File,
         username: None,
         bindv6only_probe: never_v6_only,
+        task_reader: &UnreadableTaskScheduler,
     };
 
     let data = ops
@@ -1661,7 +1664,7 @@ fn doctor_service_registration_findings_reports_not_registered_when_home_has_no_
     };
 
     let findings = ops.doctor_service_registration_findings("listen", &env);
-    if cfg!(any(target_os = "macos", target_os = "linux")) {
+    if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         assert_eq!(findings.len(), 1, "{findings:?}");
         let finding = &findings[0];
         assert_eq!(finding.code, "service_not_registered");
@@ -1673,25 +1676,28 @@ fn doctor_service_registration_findings_reports_not_registered_when_home_has_no_
 }
 
 /// `None` `home_dir` (the real environment's own "could not even build
-/// the path" case) is silent everywhere — portable, no platform cfg
-/// needed: [`probe::service_unit_registered`] returns `None` on macOS/
-/// Linux too once `home` is `None`.
+/// the path" case) is silent everywhere but Windows, whose task definition
+/// lives under the config directory and needs no home:
+/// [`probe::service_unit_registered`] returns `None` on macOS/Linux once
+/// `home` is `None`.
 #[test]
 fn doctor_service_registration_findings_is_silent_with_no_home_dir() {
     let keystore = crate::identity::MemoryKeyStore::new();
     let (_guard, ops) = healthy_ops();
     let env = minimal_env(&keystore);
-    assert!(
-        ops.doctor_service_registration_findings("serve", &env)
-            .is_empty()
-    );
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    if cfg!(windows) {
+        assert_eq!(codes(&findings), ["service_not_registered"], "{findings:?}");
+    } else {
+        assert!(findings.is_empty(), "{findings:?}");
+    }
 }
 
 /// Off macOS/Linux, `service_unit_registered` is unconditionally `None`
 /// (`infer_run_mode` never runs off macOS/Linux) — an injected `home_dir` that *would* trigger
 /// `service_not_registered` on macOS/Linux must still report nothing
 /// here.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 #[test]
 fn doctor_service_registration_findings_is_always_silent_off_macos_and_linux() {
     let keystore = crate::identity::MemoryKeyStore::new();
@@ -1962,6 +1968,8 @@ fn doctor_wires_the_service_not_registered_finding_into_the_full_report_determin
 
 /// The three run modes `infer_run_mode` can return.
 const MODES: [&str; 3] = ["serve", "listen", "reverse"];
+
+mod logon_task;
 
 fn codes(findings: &[DoctorFinding]) -> Vec<&str> {
     findings.iter().map(|f| f.code.as_str()).collect()
@@ -2259,7 +2267,7 @@ fn keystore_session_bound_is_silent_for_other_targets() {
 }
 
 /// The same pin on the Windows build itself, where the environment is the
-/// real one (`HostOs::current()` is `Other`), not an injected value.
+/// real one (`HostOs::current()` is `Windows`), not an injected value.
 #[cfg(windows)]
 #[test]
 fn keystore_session_bound_is_silent_on_windows_before_m19() {
@@ -2272,14 +2280,17 @@ fn keystore_session_bound_is_silent_on_windows_before_m19() {
         username: Some(ACCOUNT),
         ..minimal_env(&keystore)
     };
-    assert_eq!(env.os, probe::HostOs::Other);
+    assert_eq!(env.os, probe::HostOs::Windows);
     for mode in MODES {
         let findings = ops.doctor_service_registration_findings(mode, &env);
-        assert!(findings.is_empty(), "{mode}: {findings:?}");
+        assert!(
+            !codes(&findings).contains(&"keystore_session_bound"),
+            "{mode}: {findings:?}"
+        );
     }
     assert!(
         crate::doctor::EXPECTED_DOCTOR_CODES.contains(&"keystore_session_bound"),
-        "the code set is the same 27 on every target"
+        "the code set is the same 28 on every target"
     );
 }
 

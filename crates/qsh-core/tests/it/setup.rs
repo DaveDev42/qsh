@@ -540,9 +540,10 @@ fn setup_service_unsupported_is_skipped() {
     sandbox.put_acl(rows);
     let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
     let service = step_of(&data, SetupStepId::Service);
-    if cfg!(any(target_os = "macos", target_os = "linux")) {
-        // A service manager exists: the unit is written, and the request
-        // without `--service` skips the step instead.
+    if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
+        // A service manager exists (the Task Scheduler on Windows, where the
+        // task definition file is what gets written): the unit is written,
+        // and the request without `--service` skips the step instead.
         assert_eq!(service.status, SetupStatus::Done, "{service:?}");
     } else {
         assert_eq!(service.status, SetupStatus::Skipped, "{service:?}");
