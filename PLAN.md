@@ -462,7 +462,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** Windows host에는 PTY와 `file.v1`이 없어(M20) attach 종단은 testkit의 headless echo host(`qsh_testkit::echo_host`, 정방향은 QUIC listener, 역방향은 실제 `qsh listen` 데몬)에 ConPTY 안의 실제 `qsh`를 붙인다. 콘솔 닫힘은 정상 detach가 되도록 모드 복원 뒤 QUIC 연결을 먼저 닫고 최대 4초 핸들러를 붙잡는다(정방향 콘솔 닫기 테스트의 시간 초과를 근본 원인으로 고친 결과). client 로컬 파일 계층은 `file/local`(unix·Windows)과 `file/stat`로 나뉘었고 Windows 규칙은 ADR-0035 개정 이력(결정 26)과 ADR-0029 개정 이력(결정 2·22, 2026-10-16)에 적었다. 대소문자만 다른 원격 이름은 대소문자 비구분 로컬 FS에서 `scp -r`처럼 뒤의 것이 덮고 테스트는 없다. 자동 부트스트랩의 cooked 콘솔 증명은 가짜 ssh가 `CONIN$` 입력 모드를 기록하는 방식이다. `exit_code_matrix.rs`에는 host 쪽 이유의 Windows 전용 `UNSUPPORTED` 행 둘(`cp` put 없는 로컬 파일, `cp` get 접근 없는 host)이 새로 생겼다. Windows host가 `file.v1`을 광고하지 않아서이고 M20이 지운다. 그동안 put 행의 client 쪽 `INVALID_ARGUMENT` 종단은 Windows에서 비고 client 쪽 검증은 단위·통합 테스트가 본다. Step 16의 DoD 5 확인은 이 둘을 host 쪽 M20 행으로 센다. `auto_bootstrap`의 두 테스트(`..._when_ssh_fails`, `ssh_bootstrap_is_never_implicit_in_machine_mode`)는 플랫폼 공통 fixture로 옮겼고 빠진 응답기 호출 0 단언은 원래 공허했거나 ssh 자리 fake의 호출 0으로 같은 강도다. Dave-Windows 부하 아래 `windows_attach::`(6개) 50/50, `dynamic_forward_connect`(2개) 50/50, `auto_bootstrap::console::`(2개) 50/50. `wintest.sh` 한 프로세스 직렬 실행의 전역 상태 충돌(qsh-core 10, qsh-cli 1)은 모두 단독 실행에서 초록이다.
 
-### Step 10 — 작업 스케줄러 서비스 백엔드, `qsh service run`, 상시 기동 레시피, `logon_task_session_scoped` (0.7~1.2ew)
+### Step 10 — 작업 스케줄러 서비스 백엔드, `qsh service run`, 상시 기동 레시피, `logon_task_session_scoped` (0.7~1.2ew) ✅ 2026-10-17
 
 근거: ADR-0035 결정 27(작업 정의, 콘솔과 로그, 재시작, 수명, 등록, doctor, `manager` 값), 결정 9(작업 정의 파일 DACL), 결정 17의 `service_docs.rs` 확장과 `ops/service/tests.rs` 항목, 결정 19의 threat-model §3 작업 정의 행과 `docs/CLI.md` §6.17·§6.18·§6.20, `docs/deploy/service.md` Windows 절. ADR-0032 결정 12(상시 기동 자동 설정 없음)·16. 선행: Step 4. `setup listener --service`는 Step 7.
 
@@ -494,6 +494,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - `qsh service run` 리디렉션 테스트(실제 프로세스)를 `m19.filter`에 넣는다.
 
 **(c) 완료 판정:** Windows `qsh service install|uninstall|status`가 `UNSUPPORTED`가 아니고 매니저를 부르지 않는다. 펜스 대조가 바이트 단위로 초록이다. §1 (i)(ii)의 실측 결과가 커밋 본문과 `service.md`에 있다. `docs/man/` diff 0. wire diff 0.
+
+**(d) 결과 (2026-10-17):** `8c5ef13`. §1 (i)·(ii) 실측(Dave-Windows, Windows 11 26100, 일반 사용자, `\qsh-m19-probe\` 임시 폴더, 암호 없음, 끝난 뒤 폴더 삭제 확인): `RestartOnFailure`는 exit 3·`FailFast` 뒤 동작을 다시 띄우지 않아 결정 27이 미리 적은 대체(기간 없는 1분 `Repetition`+`IgnoreNew`)를 채택했고 `RestartOnFailure`는 두 번째 방어선으로만 남았다. `BootTrigger`는 주체와 무관하게 일반 사용자 등록이 `Access is denied`, `Password` 주체는 암호 없이 등록되지 않아 상시 기동 레시피는 관리자 프롬프트에서 사람이 암호를 넣는 한 번의 명령이다. `/Create /XML`은 UTF-16 LE+BOM만 받아 작업 정의를 그 인코딩으로 쓰고 `<UserId>`는 SID로 적는다. (iii) Credential Manager 읽기는 Step 11 몫으로 남았다. Windows `service run` 테스트는 `FreeConsole` 뒤 CTRL_BREAK가 닿지 않아 kill로 멈춘다(작업 스케줄러 `/End`도 강제 종료라 실제 정지 경로와 같다). `windows` 0.62.2 의존 사슬로 tempfile의 getrandom이 0.3.4 → 0.4.3으로 옮겨 갔다. 구현 에이전트가 ADR-0035 결정 9·27 본문을 고친 것은 되돌리고 개정 이력 줄로만 남겼다. 부하: Dave-Windows에서 qsh-cli 서비스 셋 50/50(250회), qsh-core 서비스·doctor 셋 50/50(3650회). nextest 3220/3220.
 
 ### Step 11 — ADR-0032 Windows 열: `schtasks` argv, COM `TaskStateQuery`, `--live`, 상시 기동 형태 보존, `keystore_session_bound` Windows 판정 (0.2~0.4ew)
 
