@@ -36,6 +36,7 @@ mod reverse_unreachable_diagnostic;
 #[cfg(windows)]
 mod route_cases;
 mod serve_sigterm_drain;
+mod service_run;
 mod session_follow;
 mod session_kill9;
 mod sessions_filter;

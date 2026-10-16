@@ -1,13 +1,16 @@
 //! `service.*` operations — `qsh service install|uninstall|status`
 //! (`docs/CLI.md` §6.18). Writes, removes and reports the launchd (macOS)
-//! or systemd (Linux) user unit for this machine's inferred run mode.
+//! or systemd (Linux) user unit, or the Task Scheduler task definition
+//! (Windows, ADR-0035 decision 27), for this machine's inferred run mode.
 //! `UNSUPPORTED` on every other platform, before anything is read or
 //! written.
 //!
 //! Without a flag the ops never touch the service manager. With
 //! `--activate`, `--deactivate` or `--live` (ADR-0032 decision 1) they make
 //! the calls of the decision 3 table through a [`ManagerRunner`], and read
-//! only exit codes.
+//! only exit codes. The flags are `UNSUPPORTED` for the Task Scheduler row,
+//! whose argv and COM state query are not part of this backend yet; the
+//! file-only ops are complete there.
 //!
 //! Every op runs the same strict prefix in the same order, so `status`
 //! fails the same way `install`/`uninstall` do on a bad config:
@@ -50,6 +53,18 @@
 //! untestable.
 
 mod manager;
+mod run;
+mod task;
+#[cfg(windows)]
+mod task_com;
+
+pub use run::SERVICE_RUN_MODES;
+pub use task::{
+    DOC_EXAMPLE_EXE_WINDOWS, DOC_EXAMPLE_USER_SID, TaskDefinitionReader, TaskLogonType,
+    UnreadableTaskScheduler, encode_task_file, render_windows_task,
+};
+#[cfg(windows)]
+pub use task_com::ComTaskScheduler;
 
 pub use manager::{
     CommandRunner, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock, ManagerOutput,
@@ -74,15 +89,15 @@ use crate::config::Config;
 use super::{OpError, Operation, Ops, ServiceInstallOp, ServiceUninstallOp};
 
 /// `qsh service install|uninstall|status` (`docs/CLI.md` §6.18) manage
-/// user service units for launchd (macOS) and systemd (Linux) only; unit
-/// installation on this platform is P1 and not implemented. Nothing was
-/// written. `docs/deploy/service.md` has a hand-written unit for each
-/// supported manager.
+/// user service units for launchd (macOS), systemd (Linux) and the Task
+/// Scheduler (Windows) only; unit installation on this platform is P1 and not
+/// implemented. Nothing was written. `docs/deploy/service.md` has a
+/// hand-written unit for each supported manager.
 ///
-/// One constant for all three ops and every non-macOS/Linux target
+/// One constant for all three ops and every other target
 /// (the "P1 예정" convention of `docs/ROADMAP.md` §3's TCP/TLS fallback row).
 /// Compiled on every target, quoted verbatim in `docs/CLI.md` §6.18.
-pub const SERVICE_UNSUPPORTED_PLATFORM: &str = "`qsh service` manages user service units for launchd (macOS) and systemd (Linux) only; unit installation on this platform is P1 and not implemented. Nothing was written. `docs/deploy/service.md` has a hand-written unit for each supported manager.";
+pub const SERVICE_UNSUPPORTED_PLATFORM: &str = "`qsh service` manages user service units for launchd (macOS), systemd (Linux) and the Task Scheduler (Windows) only; unit installation on this platform is P1 and not implemented. Nothing was written. `docs/deploy/service.md` has a hand-written unit for each supported manager.";
 
 /// The example binary path `docs/deploy/service.md`'s launchd fences show.
 /// Production passes `std::env::current_exe()`; only the doc-contract test
@@ -103,6 +118,7 @@ pub const DOC_EXAMPLE_CONTROLLER: &str = "controller";
 pub(crate) enum Manager {
     Launchd,
     Systemd,
+    TaskScheduler,
 }
 
 impl Manager {
@@ -110,19 +126,22 @@ impl Manager {
         match self {
             Manager::Launchd => "launchd",
             Manager::Systemd => "systemd",
+            Manager::TaskScheduler => "task_scheduler",
         }
     }
 }
 
 /// Step 1 of every op: the manager for this compile target, from
 /// `cfg!(target_os = …)` alone. `Err(UNSUPPORTED)` on every other target
-/// (Windows included) before anything is read or written — no probing for
-/// `systemctl`/`launchctl`, ever.
+/// before anything is read or written — no probing for
+/// `systemctl`/`launchctl`/`schtasks`, ever.
 fn resolve_manager() -> Result<Manager, OpError> {
     if cfg!(target_os = "macos") {
         Ok(Manager::Launchd)
     } else if cfg!(target_os = "linux") {
         Ok(Manager::Systemd)
+    } else if cfg!(windows) {
+        Ok(Manager::TaskScheduler)
     } else {
         Err(
             OpError::new(ErrorCode::Unsupported, SERVICE_UNSUPPORTED_PLATFORM)
@@ -131,12 +150,26 @@ fn resolve_manager() -> Result<Manager, OpError> {
     }
 }
 
+/// Step 5: `$HOME` for the manager that places its unit under it. The Task
+/// Scheduler definition lives under the config directory instead, so a missing
+/// home is no error there and the empty path returned stands for "unused".
+fn resolve_home(manager: Manager, home: Option<PathBuf>) -> Result<PathBuf, OpError> {
+    match (manager, home) {
+        (_, Some(home)) => Ok(home),
+        (Manager::TaskScheduler, None) => Ok(PathBuf::new()),
+        (_, None) => Err(home_not_found()),
+    }
+}
+
 /// Step 6: the unit path for `manager`/`mode`, via the de-`cfg`'d
 /// `crate::doctor::probe` builders — never a third, hand-rolled join.
-fn unit_path(manager: Manager, home: &Path, mode: &str) -> PathBuf {
+fn unit_path(manager: Manager, home: &Path, config_dir: &Path, mode: &str) -> PathBuf {
     match manager {
         Manager::Launchd => crate::doctor::probe::macos_launchagent_path(home, mode),
         Manager::Systemd => crate::doctor::probe::linux_systemd_user_unit_path(home, mode),
+        Manager::TaskScheduler => {
+            crate::doctor::probe::windows_task_definition_path(config_dir, mode)
+        }
     }
 }
 
@@ -338,6 +371,18 @@ fn home_not_found() -> OpError {
     .with_retryable(false)
 }
 
+/// `INTERNAL` for a Task Scheduler `install` that cannot name the current
+/// user: the definition's trigger and principal need the SID, and nothing has
+/// been written yet.
+fn user_sid_unavailable() -> OpError {
+    OpError::new(
+        ErrorCode::Internal,
+        "the current user's SID could not be read, which the task definition needs; \
+         nothing was written",
+    )
+    .with_retryable(false)
+}
+
 /// Everything a flag-driven manager step needs besides the unit file, so
 /// the `*_with_home` twins run the launchd and systemd rows on any build
 /// target with a recording [`ManagerRunner`] (ADR-0032 decision 10).
@@ -354,6 +399,12 @@ pub(crate) struct ServiceHost<'a> {
     /// Whether this is WSL, which only changes the wording of a missing or
     /// failing `systemctl`.
     pub(crate) wsl: bool,
+    /// The string form of the current user's SID, which the Task Scheduler
+    /// definition names as its trigger user and principal. `None` on every
+    /// platform without one, and when the token could not be read, which
+    /// makes a Task Scheduler `install` an `INTERNAL` error before anything is
+    /// written.
+    pub(crate) user_sid: Option<String>,
 }
 
 impl<'a> ServiceHost<'a> {
@@ -366,7 +417,19 @@ impl<'a> ServiceHost<'a> {
             euid: current_euid(),
             system_root: PathBuf::from("/"),
             wsl: running_under_wsl(),
+            user_sid: current_user_sid(),
         })
+    }
+
+    /// The Task Scheduler row has no `--activate`, `--deactivate` or `--live`
+    /// yet: its `schtasks` argv and its COM run-state query are not part of
+    /// this backend. Asked for one, an op ends here with `UNSUPPORTED`, before
+    /// it reads or writes anything, the way an unsupported platform does.
+    fn require_manager_calls(&self, flag: bool, name: &str) -> Result<(), OpError> {
+        if flag && self.manager == Manager::TaskScheduler {
+            return Err(task_scheduler_flag_unsupported(name));
+        }
+        Ok(())
     }
 
     /// The human-installed always-on form of `mode` on macOS: a LaunchDaemon
@@ -505,6 +568,7 @@ impl<'a> ServiceHost<'a> {
                     ServiceActivation::Started
                 })
             }
+            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--activate")),
         }
     }
 
@@ -536,6 +600,7 @@ impl<'a> ServiceHost<'a> {
                     Ok(ServiceDeactivation::NotActive)
                 }
             }
+            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--deactivate")),
         }
     }
 
@@ -573,8 +638,23 @@ impl<'a> ServiceHost<'a> {
                 }
                 self.probe("live", &systemd_is_active_argv(mode))
             }
+            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--live")),
         }
     }
+}
+
+/// `UNSUPPORTED` for `--activate`/`--deactivate`/`--live` on the Task
+/// Scheduler row.
+fn task_scheduler_flag_unsupported(name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::Unsupported,
+        format!(
+            "`{name}` does not call the Windows Task Scheduler yet; nothing was changed. \
+             `qsh service install` writes the task definition, and docs/deploy/service.md \
+             has the `schtasks` steps to register it by hand"
+        ),
+    )
+    .with_retryable(false)
 }
 
 /// What a failed step leaves, for the tail of an error message.
@@ -596,8 +676,8 @@ fn step_past(step: &str) -> &'static str {
 }
 
 /// This process's effective user id, the `<uid>` of a `gui/<uid>` domain
-/// (ADR-0032 decision 3). Windows has no uid and ends in `UNSUPPORTED`
-/// before this value could matter.
+/// (ADR-0032 decision 3). Windows has no uid; its Task Scheduler row never
+/// reads this value.
 fn current_euid() -> u32 {
     #[cfg(unix)]
     {
@@ -611,6 +691,20 @@ fn current_euid() -> u32 {
     }
 }
 
+/// The current user's SID as a string, for the Task Scheduler definition.
+/// Windows only; every other platform has none.
+fn current_user_sid() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let sid = crate::fsutil::dacl::token_user_sid().ok()?;
+        crate::fsutil::dacl::sid_to_string(&sid).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Whether this is a WSL distro: only the wording of a `systemctl` failure
 /// depends on it (ADR-0032 decision 8).
 fn running_under_wsl() -> bool {
@@ -620,7 +714,8 @@ fn running_under_wsl() -> bool {
 }
 
 impl Ops {
-    /// `service.install` — write (or rewrite) the unit for this machine's
+    /// `service.install` — write (or rewrite) the unit (on Windows the task
+    /// definition file, UTF-16 under `<config_dir>\service`) for this machine's
     /// inferred run mode, creating its parent directory (and, on macOS,
     /// `~/Library/Logs/qsh`) if absent, via a plain `create_dir_all` — never
     /// changing the mode of a directory that already exists, since qsh does
@@ -736,31 +831,49 @@ impl Ops {
         activate: bool,
     ) -> Result<ServiceInstallData, OpError> {
         let manager = host.manager;
+        host.require_manager_calls(activate, "--activate")?;
         let config = Config::load(&self.paths)?;
         let controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
-        let home = home.ok_or_else(home_not_found)?;
+        let home = resolve_home(manager, home)?;
         let exe = resolve_current_exe()?;
-        let path = unit_path(manager, &home, mode);
-        let text = match manager {
+        let path = unit_path(manager, &home, &self.paths.config_dir, mode);
+        let controller = controller.as_deref().unwrap_or("");
+        let bytes = match manager {
             Manager::Launchd => render_launchd_plist(
                 mode,
                 &exe.display().to_string(),
                 &home.display().to_string(),
-                controller.as_deref().unwrap_or(""),
-            ),
-            Manager::Systemd => render_systemd_unit(
-                mode,
-                &exe.display().to_string(),
-                controller.as_deref().unwrap_or(""),
-            ),
+                controller,
+            )
+            .into_bytes(),
+            Manager::Systemd => {
+                render_systemd_unit(mode, &exe.display().to_string(), controller).into_bytes()
+            }
+            Manager::TaskScheduler => {
+                let sid = host.user_sid.as_deref().ok_or_else(user_sid_unavailable)?;
+                encode_task_file(&render_windows_task(
+                    mode,
+                    &exe.display().to_string(),
+                    controller,
+                    sid,
+                ))
+            }
         };
 
         self.record_service_audit(ServiceInstallOp::COMMAND, mode, "no unit was written")?;
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| crate::config::config_io_error(parent, "create directory", &err))?;
+            if manager == Manager::TaskScheduler {
+                // The task definition directory is qsh's own, so it is
+                // private; the launchd and systemd directories hold other
+                // applications' units too and keep their mode.
+                crate::config::ensure_private_dir(parent)?;
+            } else {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    crate::config::config_io_error(parent, "create directory", &err)
+                })?;
+            }
         }
         if manager == Manager::Launchd {
             let logs_dir = home.join("Library").join("Logs").join("qsh");
@@ -769,7 +882,7 @@ impl Ops {
             })?;
         }
         let created = !path.exists();
-        crate::config::write_private_file(&path, text.as_bytes())?;
+        crate::config::write_private_file(&path, &bytes)?;
 
         // The last step, and only on request: a failed write above has
         // already returned, so the manager is never asked to load a unit
@@ -799,11 +912,12 @@ impl Ops {
         deactivate: bool,
     ) -> Result<ServiceUninstallData, OpError> {
         let manager = host.manager;
+        host.require_manager_calls(deactivate, "--deactivate")?;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
-        let home = home.ok_or_else(home_not_found)?;
-        let path = unit_path(manager, &home, mode);
+        let home = resolve_home(manager, home)?;
+        let path = unit_path(manager, &home, &self.paths.config_dir, mode);
 
         self.record_service_audit(ServiceUninstallOp::COMMAND, mode, "no unit was removed")?;
 
@@ -842,11 +956,12 @@ impl Ops {
         live: bool,
     ) -> Result<ServiceStatusData, OpError> {
         let manager = host.manager;
+        host.require_manager_calls(live, "--live")?;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
-        let home = home.ok_or_else(home_not_found)?;
-        let path = unit_path(manager, &home, mode);
+        let home = resolve_home(manager, home)?;
+        let path = unit_path(manager, &home, &self.paths.config_dir, mode);
         let installed = path.exists();
         let active = if live {
             Some(host.live(mode, installed)?)

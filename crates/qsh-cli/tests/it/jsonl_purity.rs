@@ -916,16 +916,12 @@ fn audit_query_keeps_stdout_pure_json_at_every_verbosity() {
 /// stderr only — `render/human.rs`'s `print_service_install` output never
 /// reaches stdout in `--json`/`--jsonl` mode, mirroring
 /// `trust_accept_with_no_code_keeps_stdout_pure_json_at_every_verbosity`.
-/// Runs only where `service.*` is implemented; on every other platform the
-/// single `UNSUPPORTED` envelope already satisfies "exactly one JSON line"
-/// trivially, and [`fixtures::service_ops_are_unsupported_off_macos_and_linux`]
-/// (`crates/qsh-cli/tests/it/fixtures.rs`) is the dedicated companion for that
-/// leg.
+/// Runs on every platform: the Windows leg writes the Task Scheduler task
+/// definition file and nothing else, and
+/// [`fixtures::service_ops_on_windows_use_the_task_definition_file`]
+/// (`crates/qsh-cli/tests/it/fixtures.rs`) pins its envelopes.
 #[test]
 fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
-        return;
-    }
     let sandbox = Sandbox::new();
     for (label, mode, verbosity) in [
         ("--jsonl -vv", "--jsonl", "-vv"),

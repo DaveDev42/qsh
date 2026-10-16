@@ -667,6 +667,9 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.service_status(*live),
             human::print_service_status,
         ),
+        Command::Service(ServiceCmd::Run { mode, controller }) => {
+            run_service_run(cli, &ops, mode, controller.as_deref())
+        }
         Command::Reverse {
             controller,
             offered_name,
@@ -677,6 +680,37 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             offered_name.as_deref(),
             cli.quiet,
         ),
+    }
+}
+
+/// The hidden `qsh service run <mode> [controller]` (`docs/CLI.md` §6.18):
+/// the redirection of [`Ops::service_run_redirect`], then the entry function
+/// the foreground `qsh serve`, `qsh listen` and `qsh serve --to` use. Not an
+/// operation: no envelope, nothing on stdout, and a redirection failure is
+/// reported on the stderr the process still has.
+fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -> i32 {
+    let (name, controller) = match (mode, controller) {
+        ("serve", None) => (SERVE_MODE, None),
+        ("listen", None) => (LISTEN_MODE, None),
+        ("reverse", Some(controller)) => (SERVE_MODE, Some(controller)),
+        _ => {
+            // clap already requires the controller for `reverse`; this arm is
+            // a controller given to a mode that takes none.
+            let _ = Cli::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "only `reverse` takes a controller",
+                )
+                .print();
+            return EXIT_USAGE;
+        }
+    };
+    if let Err(err) = ops.service_run_redirect(mode) {
+        return report_long_running_setup_error(name, &err);
+    }
+    match (mode, controller) {
+        ("listen", _) => run_listen(ops, None),
+        (_, controller) => run_serve(ops, None, controller, None, cli.quiet),
     }
 }
 
@@ -1609,6 +1643,10 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
         Some(Command::Serve { .. }) => Some(SERVE_MODE),
         Some(Command::Listen { .. }) => Some(LISTEN_MODE),
         Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
+        Some(Command::Service(ServiceCmd::Run { mode, .. })) => Some(match mode.as_str() {
+            "listen" => LISTEN_MODE,
+            _ => SERVE_MODE,
+        }),
         #[cfg(unix)]
         Some(Command::Pair(PairCmd::SshRespond)) => Some(SSH_RESPOND_MODE),
         _ => None,
@@ -2620,6 +2658,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Service(ServiceCmd::Install { .. }) => ServiceInstallOp::COMMAND,
         Command::Service(ServiceCmd::Uninstall { .. }) => ServiceUninstallOp::COMMAND,
         Command::Service(ServiceCmd::Status { .. }) => ServiceStatusOp::COMMAND,
+        // Never reaches an envelope; named for the long-running route.
+        Command::Service(ServiceCmd::Run { .. }) => "service.run",
         Command::Reverse { .. } => REVERSE_MODE,
     }
 }

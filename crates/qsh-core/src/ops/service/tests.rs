@@ -90,7 +90,14 @@ fn host_for<'a>(manager: Manager, runner: &'a FakeRunner, system_root: &Path) ->
         euid: 501,
         system_root: system_root.to_path_buf(),
         wsl: false,
+        user_sid: Some(DOC_EXAMPLE_USER_SID.to_string()),
     }
+}
+
+/// `unit_path` for the two managers whose unit lives under `$HOME`; the
+/// config directory only matters to the Task Scheduler row.
+fn unit_of(manager: Manager, home: &Path, mode: &str) -> PathBuf {
+    unit_path(manager, home, Path::new(""), mode)
 }
 
 /// The host the pre-activation tests run against: this platform's manager,
@@ -221,11 +228,11 @@ fn install_path_matches_the_doctor_probe_path_for_every_mode() {
     let home = temp_home();
     for mode in ["serve", "listen", "reverse"] {
         assert_eq!(
-            unit_path(Manager::Launchd, home.path(), mode),
+            unit_of(Manager::Launchd, home.path(), mode),
             crate::doctor::probe::macos_launchagent_path(home.path(), mode)
         );
         assert_eq!(
-            unit_path(Manager::Systemd, home.path(), mode),
+            unit_of(Manager::Systemd, home.path(), mode),
             crate::doctor::probe::linux_systemd_user_unit_path(home.path(), mode)
         );
     }
@@ -373,7 +380,7 @@ fn install_leaves_an_existing_unit_directory_mode_alone() {
     let host = platform_host(&runner);
     let home = temp_home();
     let manager = platform_manager();
-    let parent = unit_path(manager, home.path(), "serve")
+    let parent = unit_of(manager, home.path(), "serve")
         .parent()
         .unwrap()
         .to_path_buf();
@@ -404,7 +411,7 @@ fn install_creates_a_missing_unit_directory() {
     let host = platform_host(&runner);
     let home = temp_home();
     let manager = platform_manager();
-    let parent = unit_path(manager, home.path(), "serve")
+    let parent = unit_of(manager, home.path(), "serve")
         .parent()
         .unwrap()
         .to_path_buf();
@@ -432,7 +439,7 @@ fn uninstall_on_an_absent_unit_is_ok_and_reports_removed_false() {
     // A unit `qsh` did not write is removed all the same (`docs/CLI.md`
     // §6.18) — the contract is the path, not provenance.
     let manager = platform_manager();
-    let path = unit_path(manager, home.path(), "serve");
+    let path = unit_of(manager, home.path(), "serve");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
@@ -466,7 +473,7 @@ fn status_flips_from_false_to_true_across_install() {
 
 #[test]
 fn unsupported_platform_is_reported_before_the_home_directory_is_even_read() {
-    if cfg!(any(target_os = "macos", target_os = "linux")) {
+    if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         return;
     }
     let (_dir, ops) = temp_ops();
@@ -499,7 +506,7 @@ fn install_is_refused_when_the_audit_sink_fails() {
     assert!(sink.records().is_empty());
 
     let manager = platform_manager();
-    let path = unit_path(manager, home.path(), "serve");
+    let path = unit_of(manager, home.path(), "serve");
     assert!(
         !path.exists(),
         "no unit may be written when the audit record fails"
@@ -556,7 +563,7 @@ fn status(
 /// Puts a unit file at `manager`'s path for `mode`, as a previous
 /// `install` would have.
 fn seed_unit(manager: Manager, home: &tempfile::TempDir, mode: &str) -> PathBuf {
-    let path = unit_path(manager, home.path(), mode);
+    let path = unit_of(manager, home.path(), mode);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "unit").unwrap();
     path
@@ -696,6 +703,7 @@ fn install_activate_argv_covers_serve_listen_and_reverse_modes() {
                     "systemctl --user daemon-reload".to_string(),
                     format!("systemctl --user enable --now qsh-{mode}.service"),
                 ],
+                Manager::TaskScheduler => unreachable!("BOTH_MANAGERS has no Task Scheduler"),
             };
             assert_eq!(calls, expected, "{manager:?} {mode}");
             assert!(
@@ -744,6 +752,7 @@ fn manager_argv_never_contains_user_input() {
                 systemd_enable_now_argv("reverse").join(" "),
                 systemd_disable_now_argv("reverse").join(" "),
             ],
+            Manager::TaskScheduler => unreachable!("BOTH_MANAGERS has no Task Scheduler"),
         };
         for call in runner.calls() {
             assert!(
@@ -932,7 +941,7 @@ fn a_failed_activation_keeps_the_written_unit_file() {
         assert_eq!(err.code, ErrorCode::Internal, "{manager:?}");
         assert_eq!(err.details["step"], "activate");
         assert!(
-            unit_path(manager, home.path(), "serve").exists(),
+            unit_of(manager, home.path(), "serve").exists(),
             "{manager:?}: the file stays so a repeated install continues"
         );
         if manager == Manager::Launchd {
@@ -1039,6 +1048,7 @@ fn status_live_reads_one_exit_code() {
         let query = match manager {
             Manager::Launchd => "launchctl print gui/501/io.qsh.serve",
             Manager::Systemd => "systemctl --user is-active qsh-serve.service",
+            Manager::TaskScheduler => unreachable!("BOTH_MANAGERS has no Task Scheduler"),
         };
         let root = temp_home();
 
@@ -1077,7 +1087,7 @@ fn activate_is_skipped_when_the_unit_write_fails() {
         let host = host_for(manager, &runner, root.path());
         let home = temp_home();
         // A directory where the unit file belongs: the write cannot succeed.
-        let path = unit_path(manager, home.path(), "serve");
+        let path = unit_of(manager, home.path(), "serve");
         std::fs::create_dir_all(&path).unwrap();
         install(&ops, &host, &home, true).unwrap_err();
         assert!(
@@ -1103,7 +1113,7 @@ fn activate_is_skipped_when_the_audit_sink_fails() {
         let err = install(&ops, &host, &home, true).unwrap_err();
         assert_eq!(err.code, ErrorCode::Internal);
         assert!(runner.calls().is_empty(), "{manager:?}");
-        assert!(!unit_path(manager, home.path(), "serve").exists());
+        assert!(!unit_of(manager, home.path(), "serve").exists());
 
         // The same holds for a release: the file and the manager are both
         // left alone.
@@ -1311,9 +1321,10 @@ fn activation_flags_cannot_be_defaulted_by_config_or_env() {
     }
 }
 
-/// Windows ends in `UNSUPPORTED` before any flag is looked at; the Task
-/// Scheduler backend is later work (ADR-0032 decision 10, ADR-0035
-/// decisions 27 and 28).
+/// The Task Scheduler row's `--activate`, `--deactivate` and `--live` are
+/// later work (ADR-0032 decision 10, ADR-0035 decisions 27 and 28): on
+/// Windows they end in `UNSUPPORTED` before the config is read or anything is
+/// written, and no manager is called.
 #[cfg(windows)]
 #[test]
 fn service_activation_flags_are_unsupported_on_windows_before_m19() {
@@ -1321,10 +1332,7 @@ fn service_activation_flags_are_unsupported_on_windows_before_m19() {
     std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
     std::fs::write(ops.paths().config_file(), "not valid toml === {{{").unwrap();
     let runner = FakeRunner::default();
-    assert_eq!(
-        ServiceHost::resolve(&runner).err().map(|err| err.code),
-        Some(ErrorCode::Unsupported)
-    );
+    assert!(ServiceHost::resolve(&runner).is_ok());
     for err in [
         ops.service_install(true).unwrap_err(),
         ops.service_uninstall(true).unwrap_err(),
@@ -1334,6 +1342,8 @@ fn service_activation_flags_are_unsupported_on_windows_before_m19() {
     }
     assert!(runner.calls().is_empty());
 }
+
+mod windows_task;
 
 /// The stand-in for the Task Scheduler COM state query (ADR-0035 decision
 /// 28): the tasks named at construction are running, every other name is

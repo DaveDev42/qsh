@@ -1414,8 +1414,8 @@ fn golden_cert_file_exchange_fixtures() {
 /// neither op reads it) — never `golden_local_fixtures`', to keep this
 /// scenario's writes to `sandbox.home_dir()` isolated from every other
 /// fixture. Runs only on macOS/Linux, where the op is implemented; see
-/// [`service_ops_are_unsupported_off_macos_and_linux`] for the companion
-/// half that keeps every other CI leg from silently skipping this file's
+/// [`service_ops_on_windows_use_the_task_definition_file`] for the companion
+/// half that keeps the Windows CI leg from silently skipping this file's
 /// only exercise of `service.*`.
 #[test]
 fn golden_service_fixtures() {
@@ -1474,7 +1474,7 @@ fn golden_service_fixtures() {
 /// the test never touches a real manager, and it also pins what the binary
 /// asked of it (the documented argv, no restart). Unix only, because the
 /// fake is a shell script; the Windows leg has
-/// [`service_ops_are_unsupported_off_macos_and_linux`].
+/// [`service_ops_on_windows_use_the_task_definition_file`].
 ///
 /// The integration binary resolves the macOS always-on path under the real
 /// root, so a developer Mac that has `/Library/LaunchDaemons/io.qsh.serve.plist`
@@ -1551,51 +1551,55 @@ fn golden_service_activation_fixtures() {
     );
 }
 
-/// The M7 Step 6 trap: an early `return` off the platforms where
-/// `service.*` is implemented is, by itself, exactly the "conditional
-/// assert that passes in the real environment and is vacuous in CI" bug
-/// the milestone plan warned against. This is the always-compiled companion —
-/// [`golden_service_fixtures`] does the real work on macOS/Linux, this one
-/// does the real work everywhere else, so exactly one of the two is
-/// non-trivial on any given CI leg and neither leg silently no-ops both.
+/// The Windows twin of [`golden_service_fixtures`]: `service.*` there is the
+/// Task Scheduler backend, which only writes, checks and removes the task
+/// definition file under `<config_dir>\\service` (`docs/CLI.md` §6.18). No
+/// `schtasks` is ever started, so the test runs against the real binary in a
+/// sandbox like the macOS/Linux one. Exactly one of the two is non-trivial on
+/// any given CI leg.
 #[test]
-fn service_ops_are_unsupported_off_macos_and_linux() {
-    if cfg!(any(target_os = "macos", target_os = "linux")) {
+fn service_ops_on_windows_use_the_task_definition_file() {
+    if !cfg!(windows) {
         return;
     }
     let sandbox = Sandbox::new();
+    let task = sandbox
+        .config_dir()
+        .join("service")
+        .join("qsh-serve.task.xml");
 
-    for args in [
-        ["service", "install", "--json"],
-        ["service", "uninstall", "--json"],
-        ["service", "status", "--json"],
-    ] {
-        let (code, value) = sandbox.json(&args);
-        assert_eq!(code, 255, "{value}");
-        assert_eq!(value["ok"], false, "{value}");
-        assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
-    }
+    let (code, value) = sandbox.json(&["service", "status", "--json"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["manager"], "task_scheduler", "{value}");
+    assert_eq!(value["data"]["installed"], false, "{value}");
 
-    // No unit directory of either manager's shape was ever created under
-    // this sandbox's HOME — the strongest available proof that resolving
-    // the manager genuinely happens before any path is built or touched.
-    assert!(
-        !sandbox
-            .home_dir()
-            .join("Library")
-            .join("LaunchAgents")
-            .exists(),
-        "no macOS unit directory should exist on a platform where service.* is UNSUPPORTED"
+    let (code, value) = sandbox.json(&["service", "install", "--json"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["command"], "service.install", "{value}");
+    assert_eq!(value["data"]["manager"], "task_scheduler", "{value}");
+    assert_eq!(value["data"]["created"], true, "{value}");
+    assert_eq!(
+        value["data"]["path"].as_str().map(std::path::Path::new),
+        Some(task.as_path()),
+        "{value}"
     );
-    assert!(
-        !sandbox
-            .home_dir()
-            .join(".config")
-            .join("systemd")
-            .join("user")
-            .exists(),
-        "no Linux unit directory should exist on a platform where service.* is UNSUPPORTED"
-    );
+    assert!(task.is_file(), "the task definition file was written");
+
+    let (code, value) = sandbox.json(&["service", "status", "--json"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["installed"], true, "{value}");
+
+    let (code, value) = sandbox.json(&["service", "uninstall", "--json"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["removed"], true, "{value}");
+    assert!(!task.exists(), "the task definition file was removed");
+
+    // The activation flags stay UNSUPPORTED on this manager, before any file
+    // is touched.
+    let (code, value) = sandbox.json(&["service", "install", "--activate", "--json"]);
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
+    assert!(!task.exists(), "a refused install writes nothing");
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

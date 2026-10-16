@@ -44,6 +44,9 @@ use crate::hosts::HostsFile;
 use crate::identity::{
     CERT_BACKDATE_MINUTES, FileKeyStore, Identity, KEY_FILE, KeyStore, PlatformKeyStore,
 };
+#[cfg(windows)]
+use crate::ops::service::ComTaskScheduler;
+use crate::ops::service::{TaskDefinitionReader, TaskLogonType, UnreadableTaskScheduler};
 use crate::ops::{OpError, Operation, Ops, resolve_peer_address};
 use crate::trust::{TrustRole, TrustStore};
 
@@ -139,6 +142,11 @@ struct DoctorEnvironment<'a> {
     /// [`keystore_finding_of`]/[`path_shadow_finding`] already close for
     /// their own probes.
     bindv6only_probe: fn(SocketAddr) -> std::io::Result<bool>,
+    /// The Task Scheduler read behind `logon_task_session_scoped`
+    /// (ADR-0035 결정 27): the COM reader in production on Windows, a fake in
+    /// a test, and a reader that reads nothing everywhere else. Only
+    /// consulted when `os` is [`probe::HostOs::Windows`].
+    task_reader: &'a dyn TaskDefinitionReader,
 }
 
 impl Ops {
@@ -211,6 +219,10 @@ impl Ops {
         // this for a tempdir via `DoctorEnvironment` directly.
         let linger_dir = Path::new("/var/lib/systemd/linger");
         let username = std::env::var("USER").ok();
+        #[cfg(windows)]
+        let task_reader = ComTaskScheduler;
+        #[cfg(not(windows))]
+        let task_reader = UnreadableTaskScheduler;
         let env = DoctorEnvironment {
             keystore: keystore.as_ref(),
             current_exe: current_exe.as_deref(),
@@ -222,6 +234,7 @@ impl Ops {
             key_store: identity.key_store,
             username: username.as_deref(),
             bindv6only_probe: probe::probe_bindv6only,
+            task_reader: &task_reader,
         };
 
         self.doctor_assemble(req, now_unix, &identity, &config, &env)
@@ -232,8 +245,9 @@ impl Ops {
     /// `$HOME`, `/Library/LaunchDaemons` and `/var/lib/systemd/linger`
     /// (`docs/design/testing.md` L1). The executable path, `$PATH` and the
     /// IPv6 bind probe are left out: this entry reports none of
-    /// `qsh_path_shadowed` or `bindv6only_blocks_ipv4`. Production code
-    /// calls [`Ops::doctor`].
+    /// `qsh_path_shadowed` or `bindv6only_blocks_ipv4`, and it reads no Task
+    /// Scheduler, so it reports no `logon_task_session_scoped` either. Production
+    /// code calls [`Ops::doctor`].
     pub fn doctor_with_host_state(
         &self,
         req: DoctorReq,
@@ -259,6 +273,7 @@ impl Ops {
             key_store: identity.key_store,
             username: host.username,
             bindv6only_probe: |_| Ok(false),
+            task_reader: &UnreadableTaskScheduler,
         };
         self.doctor_assemble(req, unix_seconds(now), &identity, &config, &env)
     }
@@ -801,7 +816,18 @@ impl Ops {
         env: &DoctorEnvironment<'_>,
     ) -> Vec<DoctorFinding> {
         let mut out = Vec::new();
-        match probe::service_unit_registered(env.os, env.home_dir, env.system_root, mode) {
+        // Windows keeps its task definition under the config directory, so
+        // its file-existence answer cannot come from `$HOME` like the other
+        // two.
+        let registered = if env.os == probe::HostOs::Windows {
+            Some(probe::windows_task_definition_present(
+                &self.paths.config_dir,
+                mode,
+            ))
+        } else {
+            probe::service_unit_registered(env.os, env.home_dir, env.system_root, mode)
+        };
+        match registered {
             Some(true) => {
                 out.extend(probe::service_restart_drops_sessions_finding(mode));
                 // The LaunchAgent notice is silent once the same mode has a
@@ -835,7 +861,30 @@ impl Ops {
             Some(false) => out.push(probe::service_not_registered_finding(mode)),
             None => {}
         }
+        if env.os == probe::HostOs::Windows {
+            out.extend(Self::logon_task_session_scoped(mode, env.task_reader));
+        }
         out
+    }
+
+    /// `logon_task_session_scoped` (ADR-0035 결정 27): the task of `mode` is
+    /// registered with an `InteractiveToken` principal. The registration and
+    /// the principal come from the Task Scheduler COM read (`reader`), not
+    /// from the task definition file, because the task may have been
+    /// registered from a file qsh did not write and re-registered since.
+    /// Nothing is reported for an unregistered task, for any other principal
+    /// (the always-on `Password` variant), or when the scheduler cannot be
+    /// read, the way an unreadable linger marker reports nothing.
+    fn logon_task_session_scoped(
+        mode: &str,
+        reader: &dyn TaskDefinitionReader,
+    ) -> Option<DoctorFinding> {
+        match reader.logon_type(&probe::windows_task_name(mode)) {
+            Ok(Some(TaskLogonType::InteractiveToken)) => {
+                Some(probe::logon_task_session_scoped_finding(mode))
+            }
+            Ok(Some(TaskLogonType::Password | TaskLogonType::Other) | None) | Err(_) => None,
+        }
     }
 
     /// `bindv6only_blocks_ipv4` (ROADMAP M9 (h)) —

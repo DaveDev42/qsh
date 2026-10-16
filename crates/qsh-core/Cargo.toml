@@ -85,6 +85,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Console",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Pipes",
@@ -93,6 +94,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_WindowsProgramming",
 ] }
 windows-native-keyring-store = { version = "1.1", default-features = false }
+# The Task Scheduler COM reader (`ops/service/task_com.rs`, ADR-0035
+# decision 27): `ITaskService` -> `IRegisteredTask` -> the definition's
+# principal. Only the interfaces that call chain needs.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
+] }
 
 # POSIX PTY backend (`docs/design/architecture.md` §4): openpty + spawn with
 # setsid/controlling tty. The whole `pty` module is unix-only (`docs/ROADMAP.md`

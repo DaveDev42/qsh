@@ -125,7 +125,7 @@ fn keystore_session_bound_has_the_stable_snake_case_code() {
         DiagnosticId::KeystoreSessionBound
     );
     assert_eq!(KEYSTORE_SESSION_BOUND.code, "keystore_session_bound");
-    assert_eq!(EXPECTED_DOCTOR_CODES.len(), 27);
+    assert_eq!(EXPECTED_DOCTOR_CODES.len(), 28);
     assert!(
         KEYSTORE_SESSION_BOUND
             .remedy
@@ -133,16 +133,33 @@ fn keystore_session_bound_has_the_stable_snake_case_code() {
     );
 }
 
+/// ADR-0035 결정 27: the twenty-eighth code, a warn that only a Windows run
+/// can emit and every target knows.
+#[test]
+fn logon_task_session_scoped_has_the_stable_snake_case_code() {
+    assert_eq!(
+        LOGON_TASK_SESSION_SCOPED.id,
+        DiagnosticId::LogonTaskSessionScoped
+    );
+    assert_eq!(LOGON_TASK_SESSION_SCOPED.code, "logon_task_session_scoped");
+    assert!(EXPECTED_DOCTOR_CODES.contains(&"logon_task_session_scoped"));
+    assert!(
+        LOGON_TASK_SESSION_SCOPED
+            .remedy
+            .contains("docs/deploy/service.md")
+    );
+}
+
 /// M7 plan §4.1 #5 (69dd788)'s "code 안정성 fixture": every [`DiagnosticId`]
 /// variant, exhaustively hand-listed (a variant added here without a
 /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
 /// exactly the drift this test exists to catch), must map to a unique
-/// code and the frozen set must be exactly those 27 codes — no more, no
+/// code and the frozen set must be exactly those 28 codes — no more, no
 /// fewer. Mirrors `qsh_proto::schema`'s
 /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
 #[test]
 fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-    const ALL: [DiagnosticId; 27] = [
+    const ALL: [DiagnosticId; 28] = [
         DiagnosticId::ControllerUnreachable,
         DiagnosticId::AuditPathUnwritable,
         DiagnosticId::AclPolicyMissing,
@@ -170,6 +187,7 @@ fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
         DiagnosticId::TrustPinRoleUnset,
         DiagnosticId::AclFilePathsMissing,
         DiagnosticId::KeystoreSessionBound,
+        DiagnosticId::LogonTaskSessionScoped,
     ];
     let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
     codes.sort_unstable();
