@@ -431,7 +431,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** 플랫폼별로 갈라지는 지점은 `mono_sample` 하나이고, Windows 쪽에 `windows_sample` 모듈(`unbiased`·`anchor`·`now`, 카운터를 못 읽으면 `Instant::now`로 폴백)과 출처 상수 `MONO_SAMPLE_SOURCE`, `unbiased_ticks_to_duration`이 딸린다. 감지 알고리즘과 상수는 그대로다. `with_mono_source`는 `cfg(test)`이고 `subscribe()`에 표본 출처를 남기는 debug 로그가 하나 늘었다. `wake_sample_excludes_suspended_time_by_contract`는 출처 상수 확인이고 실제 절전 복귀는 캠페인 (4)다. SIGTERM으로 멈추던 supervise 테스트 셋(`*_without_forward_*_ends_permission_denied_with_one_audit_deny` 둘, `supervised_sigterm_during_an_outage_releases_the_listener_and_exits_zero`)도 Windows에서 열었다. Windows `qsh tunnel open --supervise`는 Ctrl-C만 받고 있어 `CTRL_BREAK`와 콘솔 닫힘을 `qsh serve`·`qsh listen`과 같은 정지 경로에 붙였고(`docs/CLI.md` §6.14), 테스트는 새 process group의 자식에 `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)`를 보낸다. 세션 필터 Windows 쌍둥이는 세션 0개 위에서 돌고 세션이 있는 판은 M20이다. ADR-0023에 2026-10-16 개정 이력 줄을 더했다(결정 17의 Windows 문장과 알려진 한계의 Windows 미확인 항목을 이 줄이 대체). `windows-sys` feature가 늘었지만 `fuzz/Cargo.lock`은 바뀌지 않았다. Dave-Windows 부하 아래 `trust_withdrawal::` 50/50(1200회), `sessions_filter::` 50/50(200회), `tunnel_supervise(_cli)::` 50/50(750회), 정지 테스트 셋 50/50(150회).
 
-### Step 9 — client 기능 동등: 대화형 attach, `-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`, doctor, `release_smoke` (0.8~1.3ew)
+### Step 9 — client 기능 동등: 대화형 attach, `-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`, doctor, `release_smoke` (0.8~1.3ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 1·2·3(client 쪽), 5~8의 attach, 17의 `release_smoke` 항목(PTY 축 제외), ADR-0029 결정 2·23(드라이브 문자 operand, client 로컬 쓰기)과 ADR-0035 결정 26 마지막 항목(client get의 로컬 쓰기), ADR-0044 결정 1·5·22·25(Windows client 자동 발동과 `--reverse`의 이 장비 쪽). `docs/CLI.md` §6.21 Windows 문장, ADR-0044 터미널 순서 문단(§6.11 근처의 "Unix 빌드에만 있다"), README Known limitations의 부트스트랩 문단. 선행: Step 3, Step 5, Step 7.
 
@@ -459,6 +459,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - `windows_attach::`를 `m19.filter`에 넣는다.
 
 **(c) 완료 판정:** `tui::run`에 비unix 분기가 없다. 표의 client 기능마다 두 route 테스트가 Windows 다리에서 초록이다. `auto_bootstrap.rs` 모듈 doc에 unix 한정이 없다. wire diff 0, `capabilities.json` diff 0.
+
+**(d) 결과 (2026-10-16):** Windows host에는 PTY와 `file.v1`이 없어(M20) attach 종단은 testkit의 headless echo host(`qsh_testkit::echo_host`, 정방향은 QUIC listener, 역방향은 실제 `qsh listen` 데몬)에 ConPTY 안의 실제 `qsh`를 붙인다. 콘솔 닫힘은 정상 detach가 되도록 모드 복원 뒤 QUIC 연결을 먼저 닫고 최대 4초 핸들러를 붙잡는다(정방향 콘솔 닫기 테스트의 시간 초과를 근본 원인으로 고친 결과). client 로컬 파일 계층은 `file/local`(unix·Windows)과 `file/stat`로 나뉘었고 Windows 규칙은 ADR-0035 개정 이력(결정 26)과 ADR-0029 개정 이력(결정 2·22, 2026-10-16)에 적었다. 대소문자만 다른 원격 이름은 대소문자 비구분 로컬 FS에서 `scp -r`처럼 뒤의 것이 덮고 테스트는 없다. 자동 부트스트랩의 cooked 콘솔 증명은 가짜 ssh가 `CONIN$` 입력 모드를 기록하는 방식이다. `exit_code_matrix.rs`에는 host 쪽 이유의 Windows 전용 `UNSUPPORTED` 행 둘(`cp` put 없는 로컬 파일, `cp` get 접근 없는 host)이 새로 생겼다. Windows host가 `file.v1`을 광고하지 않아서이고 M20이 지운다. 그동안 put 행의 client 쪽 `INVALID_ARGUMENT` 종단은 Windows에서 비고 client 쪽 검증은 단위·통합 테스트가 본다. Step 16의 DoD 5 확인은 이 둘을 host 쪽 M20 행으로 센다. `auto_bootstrap`의 두 테스트(`..._when_ssh_fails`, `ssh_bootstrap_is_never_implicit_in_machine_mode`)는 플랫폼 공통 fixture로 옮겼고 빠진 응답기 호출 0 단언은 원래 공허했거나 ssh 자리 fake의 호출 0으로 같은 강도다. Dave-Windows 부하 아래 `windows_attach::`(6개) 50/50, `dynamic_forward_connect`(2개) 50/50, `auto_bootstrap::console::`(2개) 50/50. `wintest.sh` 한 프로세스 직렬 실행의 전역 상태 충돌(qsh-core 10, qsh-cli 1)은 모두 단독 실행에서 초록이다.
 
 ### Step 10 — 작업 스케줄러 서비스 백엔드, `qsh service run`, 상시 기동 레시피, `logon_task_session_scoped` (0.7~1.2ew)
 
