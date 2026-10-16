@@ -464,7 +464,7 @@ fn always_on_form_present_is_linger_plus_the_user_unit_on_linux() {
 
 /// ADR-0032 결정 15, ADR-0035 결정 27: no always-on form is ever reported for
 /// a target that is neither macOS nor Linux, whatever files exist, because
-/// the Windows verdict waits for M19's measurement.
+/// the Windows form is a registered task that no file can stand for.
 #[test]
 fn always_on_form_present_is_false_for_other_targets() {
     let dir = tempfile::tempdir().unwrap();

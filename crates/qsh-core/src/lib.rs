@@ -65,8 +65,9 @@ pub use ops::service::{
     SERVICE_UNSUPPORTED_PLATFORM, SystemManagerClock, TaskDefinitionReader, TaskLogonType,
     TaskStateQuery, UnreadableTaskScheduler, encode_task_file, launchd_bootout_argv,
     launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv, render_launchd_plist,
-    render_systemd_unit, render_windows_task, systemd_daemon_reload_argv, systemd_disable_now_argv,
-    systemd_enable_now_argv, systemd_is_active_argv,
+    render_systemd_unit, render_windows_task, schtasks_create_argv, schtasks_delete_argv,
+    schtasks_end_argv, schtasks_query_argv, schtasks_run_argv, systemd_daemon_reload_argv,
+    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
 };
 pub use ops::{
     AclCheckOp, AclShowOp, AttachHandle, AuditQueryOp, AutoBootstrap, AutoBootstrapReport,

@@ -905,14 +905,17 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         args: &["service", "status", "--activate"],
         outcome: Outcome::Usage,
     });
-    // Off macOS/Linux the platform check comes before the manager is
-    // resolved, so the flag still ends in UNSUPPORTED and nothing is spawned.
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // `status --live` is the one flag no row may leave to a real manager
+    // elsewhere: with no unit file in the sandbox it answers `active: false`
+    // without asking launchd, systemd or the Task Scheduler, so it succeeds on
+    // every platform. The Windows `--activate` and `--deactivate` rows would
+    // register or delete a real task, and are covered over a recording runner
+    // in `qsh-core`.
     cases.push(Case {
-        name: "service install --activate: no service manager on this platform",
+        name: "service status --live: no unit file, no manager is asked",
         sandbox: &fleet.client,
-        args: &["service", "install", "--activate"],
-        outcome: Outcome::Fails("UNSUPPORTED"),
+        args: &["service", "status", "--live"],
+        outcome: Outcome::Succeeds(0),
     });
 
     cases.push(Case {

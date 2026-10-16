@@ -4,18 +4,20 @@
 //! spawned ([`CommandRunner`]).
 //!
 //! The builders are plain functions of a uid, a unit path and the closed
-//! `<mode>` set (`serve`/`listen`/`reverse`), with no `cfg`: the launchd and
-//! systemd rows run on every build target, so the Windows CI leg exercises
-//! them too. Only `resolve_manager` in the parent module is `cfg`-gated.
-//! No user-supplied string reaches an argv (decision 3): the controller
-//! literal of a `reverse` unit lives in the unit file, never on a manager
-//! command line.
+//! `<mode>` set (`serve`/`listen`/`reverse`), with no `cfg`: the launchd,
+//! systemd and Task Scheduler rows run on every build target, so every CI leg
+//! exercises all three. Only `resolve_manager` in the parent module is
+//! `cfg`-gated. No user-supplied string reaches an argv (decision 3): the
+//! controller literal of a `reverse` unit lives in the unit file, never on a
+//! manager command line.
 //!
-//! The Task Scheduler column of the decision 3 table is not here.
-//! [`TaskStateQuery`] fixes the shape of its run-state query so the Windows
-//! backend (ADR-0035 decisions 27 and 28) can add the `schtasks` argv
-//! builders and a COM implementation without changing the op code; the
-//! Windows branch itself is not implemented in this milestone.
+//! The Task Scheduler column of the decision 3 table is the `schtasks_*`
+//! builders below plus [`TaskStateQuery`], whose Windows implementation reads
+//! the run state through COM, because `schtasks /Query` reports registration
+//! in its exit code and the run state only in localized text. This module is
+//! also the only place a manager process is spawned: `schtasks` is started by
+//! [`CommandRunner`] like `launchctl` and `systemctl`, from an argv these
+//! builders made.
 
 use std::io::Read as _;
 use std::process::{Command, Stdio};
@@ -75,11 +77,11 @@ pub trait ManagerRunner: Send + Sync {
 
 /// The run-state query of the Task Scheduler backend (ADR-0032 decision 3
 /// table, ADR-0035 decision 28): a task name in, whether it is running out.
-/// The Windows backend implements it over the Task Scheduler COM API
+/// The Windows implementation is the Task Scheduler COM API
 /// (`IRegisteredTask::get_State`), because `schtasks /Query` only reports
-/// registration in its exit code. Only a test fake implements it in this
-/// milestone, and the Windows `qsh service` ends in `UNSUPPORTED` before it
-/// could be called.
+/// registration in its exit code. A task that is not registered is not
+/// running. Tests inject a fake; a production run on any other OS never calls
+/// it.
 pub trait TaskStateQuery: Send + Sync {
     /// Whether the task named `task_name` (for example `\qsh\qsh-serve`) is
     /// currently running.
@@ -316,4 +318,51 @@ pub fn systemd_enable_now_argv(mode: &str) -> Vec<String> {
 pub fn systemd_disable_now_argv(mode: &str) -> Vec<String> {
     let unit = systemd_unit(mode);
     argv(&["systemctl", "--user", "disable", "--now", &unit])
+}
+
+// ---------------------------------------------------------------------
+// argv builders — ADR-0032 decision 3, Task Scheduler column.
+// ---------------------------------------------------------------------
+
+/// `\qsh\qsh-<mode>`, the one task name every `schtasks` argv and the COM
+/// reads share (`crate::doctor::probe::windows_task_name`).
+fn task_name(mode: &str) -> String {
+    crate::doctor::probe::windows_task_name(closed_mode(mode))
+}
+
+/// "Registered?" on the Task Scheduler: exit 0 means a task of that name
+/// exists. Only the exit code is read.
+pub fn schtasks_query_argv(mode: &str) -> Vec<String> {
+    argv(&["schtasks", "/Query", "/TN", &task_name(mode)])
+}
+
+/// Activation on the Task Scheduler, first step: register the task from the
+/// definition file, replacing a task of that name. `/F` does not stop a
+/// running instance (`docs/deploy/service.md`, Windows, measured).
+pub fn schtasks_create_argv(mode: &str, task_path: &str) -> Vec<String> {
+    argv(&[
+        "schtasks",
+        "/Create",
+        "/F",
+        "/TN",
+        &task_name(mode),
+        "/XML",
+        task_path,
+    ])
+}
+
+/// Activation on the Task Scheduler, second step, only for a task that is not
+/// running: start it now instead of at the next logon.
+pub fn schtasks_run_argv(mode: &str) -> Vec<String> {
+    argv(&["schtasks", "/Run", "/TN", &task_name(mode)])
+}
+
+/// Deactivation on the Task Scheduler, first step, only for a running task.
+pub fn schtasks_end_argv(mode: &str) -> Vec<String> {
+    argv(&["schtasks", "/End", "/TN", &task_name(mode)])
+}
+
+/// Deactivation on the Task Scheduler, last step: unregister the task.
+pub fn schtasks_delete_argv(mode: &str) -> Vec<String> {
+    argv(&["schtasks", "/Delete", "/F", "/TN", &task_name(mode)])
 }

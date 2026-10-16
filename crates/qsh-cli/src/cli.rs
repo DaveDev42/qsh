@@ -470,9 +470,10 @@ pub enum ServiceCmd {
     /// started.
     Install {
         /// Also load and start the unit through the service manager
-        /// (`launchctl bootstrap` / `systemctl --user enable --now`) once
-        /// the unit file is written. A unit that is already running is not
-        /// restarted, so a new binary path applies at the next restart.
+        /// (`launchctl bootstrap` / `systemctl --user enable --now` /
+        /// `schtasks /Create` then `/Run`) once the unit file is written. A
+        /// unit that is already running is not restarted, so a new binary
+        /// path applies at the next restart.
         #[arg(long)]
         activate: bool,
     },
@@ -481,8 +482,9 @@ pub enum ServiceCmd {
     /// Without `--deactivate` a running unit stays running.
     Uninstall {
         /// Release the unit from the service manager first
-        /// (`launchctl bootout` / `systemctl --user disable --now`), then
-        /// remove the unit file. The file is kept if the release fails.
+        /// (`launchctl bootout` / `systemctl --user disable --now` /
+        /// `schtasks /End` then `/Delete`), then remove the unit file. The
+        /// file is kept if the release fails.
         #[arg(long)]
         deactivate: bool,
     },

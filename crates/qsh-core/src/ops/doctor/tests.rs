@@ -2238,8 +2238,8 @@ fn keystore_session_bound_covers_serve_listen_and_reverse_units() {
     }
 }
 
-/// ADR-0032 결정 15, ADR-0035 결정 27: no target but macOS and Linux reports
-/// the finding, whatever files are present.
+/// ADR-0032 결정 15: a target that is none of macOS, Linux and Windows reports
+/// nothing, whatever files are present.
 #[test]
 fn keystore_session_bound_is_silent_for_other_targets() {
     let keystore = crate::identity::MemoryKeyStore::new();
@@ -2264,34 +2264,6 @@ fn keystore_session_bound_is_silent_for_other_targets() {
                 .is_empty()
         );
     }
-}
-
-/// The same pin on the Windows build itself, where the environment is the
-/// real one (`HostOs::current()` is `Windows`), not an injected value.
-#[cfg(windows)]
-#[test]
-fn keystore_session_bound_is_silent_on_windows_before_m19() {
-    let keystore = crate::identity::MemoryKeyStore::new();
-    let (_guard, ops) = healthy_ops();
-    let home = tempfile::tempdir().unwrap();
-    let env = DoctorEnvironment {
-        home_dir: Some(home.path()),
-        key_store: KeyStoreKind::Platform,
-        username: Some(ACCOUNT),
-        ..minimal_env(&keystore)
-    };
-    assert_eq!(env.os, probe::HostOs::Windows);
-    for mode in MODES {
-        let findings = ops.doctor_service_registration_findings(mode, &env);
-        assert!(
-            !codes(&findings).contains(&"keystore_session_bound"),
-            "{mode}: {findings:?}"
-        );
-    }
-    assert!(
-        crate::doctor::EXPECTED_DOCTOR_CODES.contains(&"keystore_session_bound"),
-        "the code set is the same 28 on every target"
-    );
 }
 
 /// Wiring (mutation check: deleting the `key_store` field's use reds this):

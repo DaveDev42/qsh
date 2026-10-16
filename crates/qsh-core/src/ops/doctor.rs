@@ -143,7 +143,8 @@ struct DoctorEnvironment<'a> {
     /// their own probes.
     bindv6only_probe: fn(SocketAddr) -> std::io::Result<bool>,
     /// The Task Scheduler read behind `logon_task_session_scoped`
-    /// (ADR-0035 결정 27): the COM reader in production on Windows, a fake in
+    /// (ADR-0035 결정 27) and the Windows half of `keystore_session_bound`
+    /// (ADR-0032 결정 15): the COM reader in production on Windows, a fake in
     /// a test, and a reader that reads nothing everywhere else. Only
     /// consulted when `os` is [`probe::HostOs::Windows`].
     task_reader: &'a dyn TaskDefinitionReader,
@@ -862,14 +863,23 @@ impl Ops {
             None => {}
         }
         if env.os == probe::HostOs::Windows {
-            out.extend(Self::logon_task_session_scoped(mode, env.task_reader));
+            // One scheduler read answers both Windows findings. The task is
+            // what is registered, not the file qsh wrote, so neither depends
+            // on the file being there.
+            let logon = env.task_reader.logon_type(&probe::windows_task_name(mode));
+            out.extend(Self::logon_task_session_scoped(mode, &logon));
+            if env.key_store == KeyStoreKind::Platform
+                && matches!(logon, Ok(Some(TaskLogonType::Password)))
+            {
+                out.push(probe::keystore_session_bound_finding(mode));
+            }
         }
         out
     }
 
     /// `logon_task_session_scoped` (ADR-0035 결정 27): the task of `mode` is
     /// registered with an `InteractiveToken` principal. The registration and
-    /// the principal come from the Task Scheduler COM read (`reader`), not
+    /// the principal come from the Task Scheduler COM read (`logon`), not
     /// from the task definition file, because the task may have been
     /// registered from a file qsh did not write and re-registered since.
     /// Nothing is reported for an unregistered task, for any other principal
@@ -877,9 +887,9 @@ impl Ops {
     /// read, the way an unreadable linger marker reports nothing.
     fn logon_task_session_scoped(
         mode: &str,
-        reader: &dyn TaskDefinitionReader,
+        logon: &Result<Option<TaskLogonType>, OpError>,
     ) -> Option<DoctorFinding> {
-        match reader.logon_type(&probe::windows_task_name(mode)) {
+        match logon {
             Ok(Some(TaskLogonType::InteractiveToken)) => {
                 Some(probe::logon_task_session_scoped_finding(mode))
             }

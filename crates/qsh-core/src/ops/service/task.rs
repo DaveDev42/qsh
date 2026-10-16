@@ -25,6 +25,7 @@
 
 use crate::ops::OpError;
 
+use super::manager::TaskStateQuery;
 use super::{mode_description, xml_escape};
 
 /// The example binary path `docs/deploy/service.md`'s Windows fences show.
@@ -179,11 +180,22 @@ pub trait TaskDefinitionReader: Send + Sync {
 }
 
 /// The reader of every host that has no Task Scheduler, and of the doctor
-/// entry that takes its host state by value: it reads nothing.
+/// entry that takes its host state by value: it reads nothing, for the
+/// principal and for the run state alike.
 pub struct UnreadableTaskScheduler;
 
 impl TaskDefinitionReader for UnreadableTaskScheduler {
     fn logon_type(&self, _task_name: &str) -> Result<Option<TaskLogonType>, OpError> {
+        Err(OpError::new(
+            qsh_proto::ErrorCode::Unsupported,
+            "the Task Scheduler is not available on this platform",
+        )
+        .with_retryable(false))
+    }
+}
+
+impl TaskStateQuery for UnreadableTaskScheduler {
+    fn is_running(&self, _task_name: &str) -> Result<bool, OpError> {
         Err(OpError::new(
             qsh_proto::ErrorCode::Unsupported,
             "the Task Scheduler is not available on this platform",

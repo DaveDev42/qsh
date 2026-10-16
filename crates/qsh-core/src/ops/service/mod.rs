@@ -8,9 +8,11 @@
 //! Without a flag the ops never touch the service manager. With
 //! `--activate`, `--deactivate` or `--live` (ADR-0032 decision 1) they make
 //! the calls of the decision 3 table through a [`ManagerRunner`], and read
-//! only exit codes. The flags are `UNSUPPORTED` for the Task Scheduler row,
-//! whose argv and COM state query are not part of this backend yet; the
-//! file-only ops are complete there.
+//! only exit codes. The Task Scheduler row reads two more things through COM
+//! instead of through a process: whether the task is running
+//! ([`TaskStateQuery`]) and under which principal it is registered
+//! ([`TaskDefinitionReader`]), the latter to leave a person's always-on task
+//! alone (ADR-0032 decision 18).
 //!
 //! Every op runs the same strict prefix in the same order, so `status`
 //! fails the same way `install`/`uninstall` do on a bad config:
@@ -69,7 +71,8 @@ pub use task_com::ComTaskScheduler;
 pub use manager::{
     CommandRunner, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock, ManagerOutput,
     ManagerRunner, RunError, SystemManagerClock, TaskStateQuery, launchd_bootout_argv,
-    launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
+    launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv, schtasks_create_argv,
+    schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv, schtasks_run_argv,
     systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
     systemd_is_active_argv,
 };
@@ -383,9 +386,18 @@ fn user_sid_unavailable() -> OpError {
     .with_retryable(false)
 }
 
+/// The Task Scheduler reads of this build target: the COM reader on Windows,
+/// one that reads nothing elsewhere (where no Task Scheduler row is ever
+/// resolved).
+#[cfg(windows)]
+static PLATFORM_TASK_SCHEDULER: ComTaskScheduler = ComTaskScheduler;
+#[cfg(not(windows))]
+static PLATFORM_TASK_SCHEDULER: UnreadableTaskScheduler = UnreadableTaskScheduler;
+
 /// Everything a flag-driven manager step needs besides the unit file, so
-/// the `*_with_home` twins run the launchd and systemd rows on any build
-/// target with a recording [`ManagerRunner`] (ADR-0032 decision 10).
+/// the `*_with_home` twins run the launchd, systemd and Task Scheduler rows
+/// on any build target with a recording [`ManagerRunner`] and fake COM reads
+/// (ADR-0032 decision 10).
 pub(crate) struct ServiceHost<'a> {
     /// The service manager that owns the unit.
     pub(crate) manager: Manager,
@@ -405,6 +417,11 @@ pub(crate) struct ServiceHost<'a> {
     /// makes a Task Scheduler `install` an `INTERNAL` error before anything is
     /// written.
     pub(crate) user_sid: Option<String>,
+    /// Whether a registered task is running (the Task Scheduler row only).
+    pub(crate) task_state: &'a dyn TaskStateQuery,
+    /// Under which principal a task is registered (the Task Scheduler row
+    /// only).
+    pub(crate) task_reader: &'a dyn TaskDefinitionReader,
 }
 
 impl<'a> ServiceHost<'a> {
@@ -418,18 +435,34 @@ impl<'a> ServiceHost<'a> {
             system_root: PathBuf::from("/"),
             wsl: running_under_wsl(),
             user_sid: current_user_sid(),
+            task_state: &PLATFORM_TASK_SCHEDULER,
+            task_reader: &PLATFORM_TASK_SCHEDULER,
         })
     }
 
-    /// The Task Scheduler row has no `--activate`, `--deactivate` or `--live`
-    /// yet: its `schtasks` argv and its COM run-state query are not part of
-    /// this backend. Asked for one, an op ends here with `UNSUPPORTED`, before
-    /// it reads or writes anything, the way an unsupported platform does.
-    fn require_manager_calls(&self, flag: bool, name: &str) -> Result<(), OpError> {
-        if flag && self.manager == Manager::TaskScheduler {
-            return Err(task_scheduler_flag_unsupported(name));
-        }
-        Ok(())
+    /// Whether the task of `mode` is registered under a stored-password
+    /// principal, which is the always-on form a person installed
+    /// (ADR-0032 decision 18; `docs/deploy/service.md`, Windows). The
+    /// scheduler is asked, not the task file, because the task may have been
+    /// registered from a file qsh did not write. A scheduler that cannot be
+    /// read ends the step: qsh does not guess whether a replacement would
+    /// overwrite that task.
+    fn always_on_task_present(&self, step: &'static str, mode: &str) -> Result<bool, OpError> {
+        let name = crate::doctor::probe::windows_task_name(mode);
+        let logon = self
+            .task_reader
+            .logon_type(&name)
+            .map_err(|err| scheduler_read_error(step, err))?;
+        Ok(logon == Some(TaskLogonType::Password))
+    }
+
+    /// Whether the task of `mode` is running, from the COM state value
+    /// (ADR-0032 decisions 3 and 6).
+    fn task_running(&self, step: &'static str, mode: &str) -> Result<bool, OpError> {
+        let name = crate::doctor::probe::windows_task_name(mode);
+        self.task_state
+            .is_running(&name)
+            .map_err(|err| scheduler_read_error(step, err))
     }
 
     /// The human-installed always-on form of `mode` on macOS: a LaunchDaemon
@@ -527,6 +560,14 @@ impl<'a> ServiceHost<'a> {
         message.push_str("; ");
         message.push_str(step_effect(step));
         match (self.manager, step) {
+            (Manager::TaskScheduler, "activate") if argv.get(1).is_some_and(|v| v == "/Run") => {
+                message.push_str(
+                    ". A task registered with an InteractiveToken principal starts only inside \
+                     a logged-on interactive session, which a session reached over ssh alone \
+                     does not have; qsh registers it under no other principal. \
+                     docs/deploy/service.md (Task Scheduler) has the details",
+                );
+            }
             (Manager::Launchd, "activate") => message.push_str(&format!(
                 ". The `gui/{}` domain exists only inside a logged-in GUI session; \
                  docs/deploy/service.md (launchd) has the details",
@@ -568,7 +609,26 @@ impl<'a> ServiceHost<'a> {
                     ServiceActivation::Started
                 })
             }
-            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--activate")),
+            Manager::TaskScheduler => {
+                // A person's always-on task keeps its definition: `/Create /F`
+                // would replace it with the default logon-scoped one.
+                if self.always_on_task_present("activate", mode)? {
+                    return Ok(ServiceActivation::AlwaysOnPresent);
+                }
+                // The scheduler keeps the definition inside itself, so the
+                // new binary path reaches it only through `/Create /F`, which
+                // is called whether or not the task runs. Measured: it leaves
+                // a running instance alone, so the path applies at the next
+                // start and only `/Run` is skipped.
+                let running = self.task_running("activate", mode)?;
+                let file = unit_path.display().to_string();
+                self.run_ok("activate", &schtasks_create_argv(mode, &file))?;
+                if running {
+                    return Ok(ServiceActivation::AlreadyActive);
+                }
+                self.run_ok("activate", &schtasks_run_argv(mode))?;
+                Ok(ServiceActivation::Started)
+            }
         }
     }
 
@@ -600,7 +660,23 @@ impl<'a> ServiceHost<'a> {
                     Ok(ServiceDeactivation::NotActive)
                 }
             }
-            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--deactivate")),
+            Manager::TaskScheduler => {
+                // The always-on task is the form a person installed, so no
+                // `/End` or `/Delete` reaches it; the file is still removed.
+                if self.always_on_task_present("deactivate", mode)? {
+                    return Ok(ServiceDeactivation::AlwaysOnPresent);
+                }
+                // Registration decides, not the run state (decision 5): a
+                // task that exists but is stopped is still unregistered here.
+                if !self.probe("deactivate", &schtasks_query_argv(mode))? {
+                    return Ok(ServiceDeactivation::NotActive);
+                }
+                if self.task_running("deactivate", mode)? {
+                    self.run_ok("deactivate", &schtasks_end_argv(mode))?;
+                }
+                self.run_ok("deactivate", &schtasks_delete_argv(mode))?;
+                Ok(ServiceDeactivation::Stopped)
+            }
         }
     }
 
@@ -638,23 +714,28 @@ impl<'a> ServiceHost<'a> {
                 }
                 self.probe("live", &systemd_is_active_argv(mode))
             }
-            Manager::TaskScheduler => Err(task_scheduler_flag_unsupported("--live")),
+            Manager::TaskScheduler => {
+                // The task name is the same for the default task and the
+                // always-on one, so the COM state is the answer for both
+                // (ADR-0032 decision 18).
+                if !installed {
+                    return Ok(false);
+                }
+                self.task_running("live", mode)
+            }
         }
     }
 }
 
-/// `UNSUPPORTED` for `--activate`/`--deactivate`/`--live` on the Task
-/// Scheduler row.
-fn task_scheduler_flag_unsupported(name: &str) -> OpError {
+/// A failed Task Scheduler COM read, in the vocabulary of decision 8:
+/// `INTERNAL` with the step, and what the failure left behind.
+fn scheduler_read_error(step: &'static str, err: OpError) -> OpError {
     OpError::new(
-        ErrorCode::Unsupported,
-        format!(
-            "`{name}` does not call the Windows Task Scheduler yet; nothing was changed. \
-             `qsh service install` writes the task definition, and docs/deploy/service.md \
-             has the `schtasks` steps to register it by hand"
-        ),
+        ErrorCode::Internal,
+        format!("{}; {}", err.message, step_effect(step)),
     )
     .with_retryable(false)
+    .with_details(serde_json::json!({ "step": step }))
 }
 
 /// What a failed step leaves, for the tail of an error message.
@@ -831,7 +912,6 @@ impl Ops {
         activate: bool,
     ) -> Result<ServiceInstallData, OpError> {
         let manager = host.manager;
-        host.require_manager_calls(activate, "--activate")?;
         let config = Config::load(&self.paths)?;
         let controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
@@ -912,7 +992,6 @@ impl Ops {
         deactivate: bool,
     ) -> Result<ServiceUninstallData, OpError> {
         let manager = host.manager;
-        host.require_manager_calls(deactivate, "--deactivate")?;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);
@@ -956,7 +1035,6 @@ impl Ops {
         live: bool,
     ) -> Result<ServiceStatusData, OpError> {
         let manager = host.manager;
-        host.require_manager_calls(live, "--live")?;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
         let mode = super::doctor::infer_run_mode(&config);

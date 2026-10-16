@@ -550,10 +550,10 @@ pub fn service_unit_registered(
 /// logged in (ADR-0032 결정 15): on macOS the LaunchDaemon plist, on Linux
 /// the systemd user unit together with the linger marker (`linger` is the
 /// already-observed [`probe_systemd_linger`] result). Always `false` for
-/// [`HostOs::Other`]. In particular Windows never reports an always-on form
-/// here before M19, which measures whether a `Password`-principal task reads
-/// Credential Manager (ADR-0032 결정 15, ADR-0035 결정 27), so
-/// `keystore_session_bound` is never emitted there. File existence only;
+/// [`HostOs::Other`]. Windows is `false` here too, whatever files exist: its
+/// always-on form is a task registered under a `Password` principal, which is
+/// not a file and which the doctor reads through the Task Scheduler COM
+/// reader instead (ADR-0032 결정 18, ADR-0035 결정 27). File existence only;
 /// nothing here starts a process.
 pub fn always_on_form_present(
     os: HostOs,

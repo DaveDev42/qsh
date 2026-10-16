@@ -222,8 +222,8 @@ to also load and start it through launchd or systemd, `qsh service uninstall
 --deactivate` to release it before the file is removed, and `qsh service
 status --live` to ask the manager whether it is running. Without a flag qsh
 never calls `launchctl` or `systemctl`. On Windows it writes a Task Scheduler
-task definition file and you register it with `schtasks` (see the service
-page); the three flags are not available there yet.
+task definition file; the same three flags register it with `schtasks`,
+unregister it, and read its state (see the service page).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
@@ -1058,14 +1058,18 @@ Some of these are MVP scope decisions, some are unfinished work.
   copy the files elsewhere before rotation pushes them out if you need
   longer. `oldest_ts` in the result shows what is still kept.
 - On Windows, `qsh service install` writes a Task Scheduler task definition
-  file under `%USERPROFILE%\.config\qsh\service` and stops there: it does not
-  call `schtasks`, and `--activate`, `--deactivate` and `--live` return
-  `UNSUPPORTED` for now. You register the task with the `schtasks` recipe in
+  file under `%USERPROFILE%\.config\qsh\service`. Without a flag it stops
+  there and does not call `schtasks`; `--activate` registers the task and
+  starts it, `--deactivate` ends and deletes it, and `--live` reads its state.
+  You can also register the task by hand with the `schtasks` recipe in
   [docs/deploy/service.md](docs/deploy/service.md#task-scheduler-windows). The
   task starts at your logon and ends at logoff, and `qsh doctor` reports
   `logon_task_session_scoped` while it is registered that way. A task that
   runs at boot with nobody logged on needs an elevated prompt and a stored
   password; the same page has that variant, and qsh does not register it.
+  `--activate` and `--deactivate` leave such a task alone. Over an ssh login
+  with no desktop session the task cannot start, and `--activate` ends with
+  `INTERNAL` after registering it.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin and the invite's consumption happen first, in
   the wire exchange; the client's local pin happens after. If the client then
