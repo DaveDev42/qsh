@@ -4,7 +4,8 @@
 //!
 //! The reverse route runs the same cases in `windows_reverse_e2e.rs`, so a
 //! behaviour that differs between the routes shows up as one module failing
-//! where the other passes. The interactive form needs a pty and is M20's.
+//! where the other passes. The interactive form is `windows_attach.rs`, against
+//! the in-process echo host, since a Windows host has no PTY sessions yet.
 
 #![cfg(windows)]
 
@@ -31,6 +32,11 @@ fn local_tunnel_delivers_the_destinations_close() {
 }
 
 #[test]
+fn dynamic_forward_connect() {
+    cases::dynamic_forward_connect(&ForwardRoute::start());
+}
+
+#[test]
 fn hosts_lists_the_forward_host_without_a_daemon() {
     let route = ForwardRoute::start();
     cases::hosts_names_the_host(&route, "forward");
@@ -40,4 +46,9 @@ fn hosts_lists_the_forward_host_without_a_daemon() {
         cases::reverse_entries(&route.fleet.client).is_empty(),
         "a forward-only machine listed a reverse entry"
     );
+}
+
+#[test]
+fn cp_to_a_windows_host_is_unsupported_before_m20() {
+    cases::cp_to_a_windows_host_is_unsupported_before_m20(&ForwardRoute::start(), false);
 }

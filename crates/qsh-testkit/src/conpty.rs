@@ -38,7 +38,8 @@ pub struct Record {
 
 /// A program running in a ConPTY, with its reports.
 pub struct ConPtyProbe {
-    master: Box<dyn MasterPty + Send>,
+    /// `None` once [`Self::close_console`] has closed the pseudo-console.
+    master: Option<Box<dyn MasterPty + Send>>,
     writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
     output: Receiver<Vec<u8>>,
@@ -115,7 +116,7 @@ impl ConPtyProbe {
         // kept for `resize`.
         drop(pair.slave);
         Self {
-            master: pair.master,
+            master: Some(pair.master),
             writer,
             child,
             output,
@@ -134,6 +135,8 @@ impl ConPtyProbe {
     /// Change the pseudo-console's size.
     pub fn resize(&self, cols: u16, rows: u16) {
         self.master
+            .as_ref()
+            .expect("the console is open")
             .resize(PtySize {
                 rows,
                 cols,
@@ -141,6 +144,15 @@ impl ConPtyProbe {
                 pixel_height: 0,
             })
             .expect("resize the ConPTY");
+    }
+
+    /// Close the pseudo-console the way closing its window does: the console
+    /// host sends `CTRL_CLOSE_EVENT` to the processes attached to it and
+    /// ends them if they linger. The program is not killed from here, so
+    /// what it does with the event is what a test observes. [`Self::wait_exit`]
+    /// still works afterwards; the output so far stays readable.
+    pub fn close_console(&mut self) {
+        drop(self.master.take());
     }
 
     /// The next record of `key` that no earlier wait returned, waiting up to
@@ -205,8 +217,14 @@ impl ConPtyProbe {
             assert!(Instant::now() < deadline, "the program did not exit");
             // Keep draining so the pseudo-console never blocks on a full
             // pipe; a short receive timeout doubles as the poll interval.
-            if let Ok(chunk) = self.output.recv_timeout(Duration::from_millis(50)) {
-                self.raw.extend_from_slice(&chunk);
+            match self.output.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => self.raw.extend_from_slice(&chunk),
+                // The reader is gone (the console closed), so the receive
+                // no longer paces the loop.
+                Err(RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }

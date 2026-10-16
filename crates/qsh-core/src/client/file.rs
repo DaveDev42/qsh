@@ -1,6 +1,6 @@
 //! Requester side of the remote file ops (`docs/adr/0029-file-copy.md`),
-//! unix only: the control requests that mint a ticket and the two
-//! `FILE_DATA` pumps, [`download`] (`file.read`) and [`upload`]
+//! on both client platforms: the control requests that mint a ticket and the
+//! two `FILE_DATA` pumps, [`download`] (`file.read`) and [`upload`]
 //! (`file.write`).
 //!
 //! The pumps are the mirror of `server/file_data.rs`, and share its blocking
@@ -34,7 +34,8 @@ use tokio::sync::{mpsc, watch};
 
 use super::link::{DataKillSwitch, DataRecv, DataSend};
 use super::{ClientError, Session, unexpected};
-use crate::file::host::WriteGate;
+use crate::file::local::IoClass;
+use crate::file::stat::WriteGate;
 use crate::file::xfer::{self, DISK_QUEUE_CHUNKS, Written, write_loop};
 use crate::tunnel::splice::{RESET_CODE_TUNNEL_ABORT, SEND_DEPTH_CAP_BYTES};
 use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch};
@@ -195,34 +196,41 @@ fn internal_local(message: impl Into<String>) -> XferFailure {
 
 /// A local I/O error as an item failure.
 pub(crate) fn local_io_failure(err: &io::Error) -> XferFailure {
-    match err.raw_os_error() {
-        Some(libc::EEXIST) => XferFailure::Exists,
-        Some(libc::ENOENT) => XferFailure::Local(
+    match crate::file::local::classify(err) {
+        IoClass::Exists => XferFailure::Exists,
+        IoClass::NotFound => XferFailure::Local(
             ErrorCode::InvalidArgument,
             "no such file or directory".to_string(),
         ),
-        Some(libc::EACCES | libc::EPERM | libc::EROFS) => {
+        IoClass::Denied => {
             XferFailure::Local(ErrorCode::PermissionDenied, "permission denied".to_string())
         }
-        Some(libc::ENOTDIR) => {
+        IoClass::NotDirectory => {
             XferFailure::Local(ErrorCode::InvalidArgument, "not a directory".to_string())
         }
-        Some(libc::EISDIR) => {
+        IoClass::IsDirectory => {
             XferFailure::Local(ErrorCode::InvalidArgument, "is a directory".to_string())
         }
-        Some(libc::ELOOP) => XferFailure::Local(
+        IoClass::SymlinkRefused => XferFailure::Local(
             ErrorCode::InvalidArgument,
-            "too many levels of symbolic links".to_string(),
+            if cfg!(windows) {
+                "a symbolic link or junction is not followed"
+            } else {
+                "too many levels of symbolic links"
+            }
+            .to_string(),
         ),
-        Some(libc::ENOSPC | libc::EDQUOT) => XferFailure::Local(
+        IoClass::NoSpace => XferFailure::Local(
             ErrorCode::ResourceExhausted,
             "no space left on device".to_string(),
         ),
-        Some(libc::EMFILE | libc::ENFILE) => XferFailure::Local(
+        IoClass::TooManyOpen => XferFailure::Local(
             ErrorCode::ResourceExhausted,
             "too many open files".to_string(),
         ),
-        _ => XferFailure::Local(ErrorCode::Internal, format!("local I/O error: {err}")),
+        IoClass::Other => {
+            XferFailure::Local(ErrorCode::Internal, format!("local I/O error: {err}"))
+        }
     }
 }
 
@@ -808,7 +816,7 @@ mod tests {
         });
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let dest_dir = Arc::new(File::open(dir.path()).expect("open dir"));
+        let dest_dir = Arc::new(crate::file::local::open_dir(dir.path()).expect("open dir"));
         let watch = ledger.watch("file.data");
         let id = watch.id();
         let conduit = FileConduit {

@@ -1205,8 +1205,6 @@ impl Ops {
     /// decision 11): the dial future is dropped, which abandons the
     /// attempt, and the call returns `CANCELED`. `qsh-transport`'s contract
     /// is untouched; only this caller stops waiting for it.
-    // Only the file-copy path (unix) connects through a resolved route.
-    #[cfg(unix)]
     pub(crate) fn connect_routed(
         &self,
         route: PeerRoute,

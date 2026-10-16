@@ -89,6 +89,21 @@ impl FakeSsh {
         self.set("gate_file", path.display().to_string())
     }
 
+    /// Make the responder call record the input mode of its console before it
+    /// waits at [`Self::gate_file`], the way an ssh about to ask for a
+    /// password would find it. Read the result with [`Self::console_mode`].
+    pub fn record_console_mode(&mut self) -> &mut Self {
+        let path = self.dir().join("console.mode");
+        self.set("console_mode_file", path.display().to_string())
+    }
+
+    /// The console input mode the responder call recorded: `Some(None)` when
+    /// it had no console to ask, `None` while it has not recorded anything.
+    pub fn console_mode(&self) -> Option<Option<u32>> {
+        let text = std::fs::read_to_string(self.dir().join("console.mode")).ok()?;
+        Some(text.trim().parse().ok())
+    }
+
     /// Make the responder call print `bytes` to stdout first: the remote
     /// shell's rc output, the `hello`, tampered lines.
     pub fn script(&mut self, bytes: &[u8]) -> &mut Self {

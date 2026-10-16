@@ -27,33 +27,7 @@ use std::sync::OnceLock;
 
 use rand::Rng;
 
-/// The kind of a filesystem object as an `lstat` reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FsKind {
-    /// A regular file.
-    Regular,
-    /// A directory.
-    Directory,
-    /// A symbolic link.
-    Symlink,
-    /// A FIFO, socket, device or anything else.
-    Other,
-}
-
-/// The facts of one `lstat`/`fstat` the wire reports (`FileEntry`,
-/// `FileListed`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatInfo {
-    /// The object's kind.
-    pub kind: FsKind,
-    /// Size in bytes.
-    pub size: u64,
-    /// Permission bits, `st_mode & 0o777` (setuid, setgid and sticky are
-    /// never reported, ADR-0029 decision 7).
-    pub mode: u32,
-    /// Modification time, seconds since the epoch.
-    pub mtime: i64,
-}
+pub use super::stat::{FsKind, MkdirOutcome, StatInfo, TempFile, WriteGate};
 
 fn kind_of(st_mode: libc::mode_t) -> FsKind {
     match st_mode & libc::S_IFMT {
@@ -154,18 +128,6 @@ pub fn open_dir_at(dir: &File, name: &OsStr) -> io::Result<File> {
     }
     // SAFETY: `fd` is a fresh descriptor this call owns.
     Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-/// What [`mkdir_at`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MkdirOutcome {
-    /// A new directory was made.
-    Created,
-    /// A directory of that name already existed (merged into, ADR-0029
-    /// decision 7).
-    Existed,
-    /// Something that is not a directory has that name.
-    ExistsNotDirectory,
 }
 
 /// `file.mkdir`'s `mkdirat` (ADR-0029 decision 7): the directory is made
@@ -366,16 +328,6 @@ pub fn list_dir(
 /// The longest file name the filesystems qsh serves accept.
 const NAME_MAX: usize = 255;
 
-/// A freshly created temporary file and the name it has inside its
-/// directory.
-#[derive(Debug)]
-pub struct TempFile {
-    /// The open file, write-only, mode `0600`.
-    pub file: File,
-    /// Its name inside the directory fd it was created through.
-    pub name: OsString,
-}
-
 /// `.<name>.qsh-<16 hex>.part` (ADR-0029 decision 7). The embedded name is
 /// cut (on a byte boundary, which any unix name tolerates) when the whole
 /// would overrun `NAME_MAX`, so a long destination name can still be written.
@@ -575,16 +527,6 @@ impl FreeSpace for StatvfsFreeSpace {
         }
         Ok((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
     }
-}
-
-/// A seam on the blocking writer thread of a `file.write`: called before each
-/// chunk is written to the temp file. Production sets none. A test uses it to
-/// hold the disk write still, which is how a stalled local write (ADR-0037)
-/// is made on demand.
-pub trait WriteGate: Send + Sync {
-    /// About to write the next chunk; `written` bytes are already in the
-    /// file.
-    fn before_write(&self, written: u64);
 }
 
 #[cfg(test)]

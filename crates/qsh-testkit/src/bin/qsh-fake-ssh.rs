@@ -16,6 +16,9 @@
 //!   by `g_file` (a minimal `hostname` stanza when unset), and exits with
 //!   `g_exit` (0).
 //! - Anything else is the responder call. It prints `stderr` to stderr, then
+//!   writes the input mode of its console (`CONIN$`) to the file named by
+//!   `console_mode_file` when that is set (Windows; `none` when there is no
+//!   console to ask), like an ssh about to read a password from it, then
 //!   waits until the file named by `gate_file` exists when that is set, then
 //!   writes the file named by `script` to stdout, then, in this order:
 //!   - blocks forever when `hang` is set;
@@ -91,6 +94,9 @@ fn main() {
     if let Some(text) = cfg.get("stderr") {
         eprintln!("{text}");
     }
+    if let Some(path) = cfg.get("console_mode_file") {
+        let _ = fs::write(path, console_input_mode());
+    }
     if let Some(gate) = cfg.get("gate_file") {
         wait_for_file(Path::new(gate));
     }
@@ -114,6 +120,45 @@ fn main() {
         let _ = fs::write(path, input);
     }
     std::process::exit(int(&cfg, "exit"));
+}
+
+/// The input mode of the console this process is attached to, as decimal
+/// text, or `none` when it has none (or this is not Windows).
+#[cfg(windows)]
+fn console_input_mode() -> String {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+
+    let name: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+    // SAFETY: `name` is NUL-terminated and outlives the call; the handle is
+    // only used for the one query below.
+    unsafe {
+        let handle = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return "none".to_string();
+        }
+        let mut mode = 0u32;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return "none".to_string();
+        }
+        mode.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn console_input_mode() -> String {
+    "none".to_string()
 }
 
 /// Block until `path` exists: a test holds the ssh child open, like a

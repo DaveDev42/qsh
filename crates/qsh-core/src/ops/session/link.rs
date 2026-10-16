@@ -374,7 +374,6 @@ impl Connected {
     /// file) lives until the idle timeout. An authenticated frame from the
     /// peer is an acknowledgment that frees window, so the close frame goes
     /// out right after. `grace` caps the wait for a peer that is gone.
-    #[cfg(unix)]
     pub(crate) fn settle_before_close(&self, grace: Duration) {
         let (Some(runtime), ConnectedLink::Forward(link)) = (self.runtime.as_ref(), &self.link)
         else {

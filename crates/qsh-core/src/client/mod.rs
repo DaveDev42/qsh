@@ -22,7 +22,6 @@ use crate::exec::ExecSpec;
 use crate::localctl::client::ControlConduit;
 use crate::ops::OpError;
 
-#[cfg(unix)]
 pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;

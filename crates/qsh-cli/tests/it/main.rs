@@ -18,6 +18,7 @@ mod cp_e2e;
 mod cp_recursive;
 mod doctor_fail_on;
 mod dynamic_forward;
+mod echo_host;
 mod exec_e2e;
 mod exit_code_matrix;
 mod fixtures;
@@ -51,6 +52,8 @@ mod tunnel_e2e;
 mod tunnel_supervise;
 mod tunnel_supervise_cli;
 mod version;
+#[cfg(windows)]
+mod windows_attach;
 #[cfg(windows)]
 mod windows_forward_e2e;
 #[cfg(windows)]

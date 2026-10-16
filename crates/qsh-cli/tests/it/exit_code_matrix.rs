@@ -660,7 +660,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             sandbox: &fleet.client,
             // Sessions are PTY-backed; a host without a PTY backend
             // answers UNSUPPORTED without creating anything (Windows host
-            // is P2 — README "Known limitations", CLI.md §7).
+            // PTY is M20, ADR-0035 — README "Known limitations", CLI.md §7).
             args: &["session", "open", HOST_ALIAS],
             #[cfg(unix)]
             outcome: Outcome::Succeeds(0),
@@ -848,29 +848,36 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
 
     // `qsh cp` (ADR-0029, `docs/CLI.md` §6.21). A scp transport flag is a
     // clap-level refusal (exit 2, nothing on stdout, in both modes). The
-    // runtime rows are unix-only: a Windows client answers every copy that
-    // gets past the operand grammar with `UNSUPPORTED` (ADR-0035 decision 1).
+    // runtime rows run on every client; a Windows host does not advertise
+    // `file.v1` until its file operations land, so the get row ends in
+    // `UNSUPPORTED` against the Windows fleet host (ADR-0035 decision 2).
     cases.push(Case {
         name: "usage: cp with an scp transport flag",
         sandbox: &fleet.client,
         args: &["cp", "-P", "22", "a.txt", "box:/tmp/qsh-cp-never"],
         outcome: Outcome::Usage,
     });
-    #[cfg(unix)]
     cases.push(Case {
         name: "cp: put of a local file that does not exist",
         sandbox: &fleet.client,
         args: &["cp", "/nonexistent/qsh-cp-source", "box:/tmp/qsh-cp-never"],
+        // The capability check comes first: a host without `file.v1` ends
+        // the run before any source is looked at.
+        #[cfg(unix)]
         outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        #[cfg(not(unix))]
+        outcome: Outcome::Fails("UNSUPPORTED"),
     });
     // The fleet host pins its client with role `none` and its `acl.toml` has
     // no file row: default-deny, the uniform refusal (ADR-0029 decision 8).
-    #[cfg(unix)]
     cases.push(Case {
         name: "cp: get from a host that grants this client no file access",
         sandbox: &fleet.client,
         args: &["cp", "box:/tmp/qsh-cp-never", "/tmp/qsh-cp-never-out"],
+        #[cfg(unix)]
         outcome: Outcome::Fails("PERMISSION_DENIED"),
+        #[cfg(not(unix))]
+        outcome: Outcome::Fails("UNSUPPORTED"),
     });
 
     // ADR-0032 decision 1: each flag belongs to exactly one subcommand, and
@@ -1096,21 +1103,9 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
         1,
         "expected exactly one stderr line: {stderr:?}"
     );
-    // The error the single stderr line names is the one platform-difference
-    // in this command: on unix, interactive attach reaches route
-    // resolution and reports `HOST_NOT_FOUND` for the missing registration;
-    // on Windows the PTY/TTY path is `cfg(unix)`, so `run_interactive`
-    // answers `UNSUPPORTED` ("needs a POSIX terminal") *before* it ever
-    // reaches host resolution — interactive mode is the PTY/TTY path, which
-    // is `cfg(unix)` (`docs/CLI.md` §7 human interactive mode) — a
-    // pre-existing platform fact, not a Step-7 regression. Everything else
-    // this test pins (exit 255, empty stdout, exactly one stderr line) is
-    // identical on both, so the assertion branches only on the code name.
-    let expected_code = if cfg!(unix) {
-        "(HOST_NOT_FOUND)"
-    } else {
-        "(UNSUPPORTED)"
-    };
+    // The interactive client has one code path on every platform, so the
+    // routing failure is the same `HOST_NOT_FOUND` on unix and on Windows.
+    let expected_code = "(HOST_NOT_FOUND)";
     assert!(
         lines[0].contains(expected_code),
         "stderr must name {expected_code}: {stderr:?}"
@@ -1120,9 +1115,7 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
 // ---------------------------------------------------------------------
 // Interactive `-D` — deliberately **not** a `Case` row above, for the
 // same reason as the attach test just above: the two output modes
-// disagree *on purpose*, and human mode itself has the same unix/Windows
-// split `attach_on_an_unregistered_host_is_host_not_found_and_stdout_
-// stays_empty` documents. `docs/CLI.md` §7 states that
+// disagree *on purpose*. `docs/CLI.md` §7 states that
 // `--json`/`--jsonl` on either interactive form is refused with
 // `INVALID_ARGUMENT` **before a session is even opened**, because the
 // interactive form has no machine mode at all. `run_interactive`
@@ -1145,15 +1138,10 @@ fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
     )
     .unwrap();
 
-    // Human mode: on unix nothing outranks host resolution here, so a
-    // valid `-D` spec against an alias this sandbox never registered
-    // reaches `Ops::session_open` and reports `HOST_NOT_FOUND`, exactly
-    // like a bare interactive attach with no `-D` at all. On Windows the
-    // interactive PTY path is `cfg(unix)`, so `run_interactive` answers
-    // `UNSUPPORTED` ("needs a POSIX terminal") before ever reaching host
-    // resolution — the identical platform split
-    // `attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty`
-    // pins.
+    // Human mode: nothing outranks host resolution here, so a valid `-D`
+    // spec against an alias this sandbox never registered reaches
+    // `Ops::session_open` and reports `HOST_NOT_FOUND`, exactly like a bare
+    // interactive attach with no `-D` at all, on every platform.
     let human = sandbox.qsh(&[HOST_ALIAS, "-D", "1080"]);
     assert_eq!(exit_code(&human), EXIT_RUNTIME_FAILURE, "{human:?}");
     assert!(
@@ -1162,11 +1150,7 @@ fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
         String::from_utf8_lossy(&human.stdout)
     );
     let stderr = String::from_utf8_lossy(&human.stderr);
-    let expected_code = if cfg!(unix) {
-        "(HOST_NOT_FOUND)"
-    } else {
-        "(UNSUPPORTED)"
-    };
+    let expected_code = "(HOST_NOT_FOUND)";
     assert!(
         stderr.contains(expected_code),
         "stderr must name {expected_code}: {stderr:?}"

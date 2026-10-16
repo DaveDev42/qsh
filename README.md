@@ -220,7 +220,8 @@ with `--json`/`--jsonl`, and never for a name that is already in
 under `[ssh]` in `config.toml` to turn it off, or run the step yourself with
 `qsh pair ssh box`. If the host is not running `qsh serve` when ssh finishes,
 the pins stay and the command ends with `CONNECTION_FAILED`; start `serve`
-and run it again. A Windows host cannot answer the bootstrap yet (see
+and run it again. A Windows client runs the same bootstrap with `ssh.exe`,
+but a Windows host cannot answer it yet (see
 [Known limitations](#known-limitations)): `qsh` ends with an error and pins
 nothing on either side.
 
@@ -1067,26 +1068,29 @@ Some of these are MVP scope decisions, some are unfinished work.
   volume or a share without ACLs, `qsh` creates nothing and fails with
   `CONFIG_ERROR`. Terminals that hand `qsh` a pipe instead of a
   console (mintty, which Git Bash uses) get no raw mode: run `qsh` from Windows
-  Terminal, or start it as `winpty qsh ...`. The ssh bootstrap
-  follows that split. `qsh pair ssh` runs from a Windows client with the
-  system `ssh.exe`, but the automatic bootstrap on `qsh box` and `qsh cp`
-  arrives with Windows interactive attach and `qsh cp` in M19, and the
-  remote responder (`qsh pair ssh-respond`) arrives with the Windows host in
-  M20, so a Windows machine cannot be the remote end of a bootstrap before
-  then. Until then a
-  Windows build of `qsh cp` rejects malformed operands and answers
-  everything else with `UNSUPPORTED`, a Windows host does not advertise
-  `file.v1` and answers the file operations with `UNSUPPORTED`, and PTY code
-  is gated `#[cfg(unix)]`. Reverse mode runs on Windows: `qsh listen` keeps
+  Terminal, or start it as `winpty qsh ...`. The Windows client attaches
+  interactively through both routes, takes `-L`/`-R`/`-D` like the unix one,
+  and a closed console window detaches the session so another console can
+  take it over. `qsh cp` works from a Windows client with scp's syntax, with
+  one change: a single letter and a colon at the start of an operand is a
+  drive (`C:\x`), so a one-letter host name needs `user@` or brackets. The
+  ssh bootstrap works the same way: `qsh pair ssh` and the automatic
+  bootstrap on `qsh box` and `qsh cp` run the system `ssh.exe` with the
+  console left in cooked mode until ssh exits. The remote responder
+  (`qsh pair ssh-respond`) arrives with the Windows host in M20, so a
+  Windows machine cannot be the remote end of a bootstrap before then; the
+  bootstrap against one ends with an error and pins nothing. Until M20 a
+  Windows host does not advertise `file.v1`, so `qsh cp` to it ends with
+  `UNSUPPORTED` before anything is sent, and it answers PTY sessions with
+  `UNSUPPORTED` too. Reverse mode runs on Windows: `qsh listen` keeps
   its local control endpoint on a named pipe, and `qsh exec`, tunnels,
   `qsh hosts`, `qsh tunnels` and `qsh tunnel close` work over a reverse
   connection as they do on unix. A Windows `qsh serve --to` target serves
   `exec` and tunnels; its PTY sessions and file operations wait for M20.
   On a reverse connection a local program that closes only its write side
   and waits for the answer is seen by the destination, as on unix
-  (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` is cross-platform like
-  `--local`/`--remote`; the interactive `-D` spelling is not, since the
-  interactive PTY driver it rides is `#[cfg(unix)]`. The first time
+  (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` and the interactive `-D`
+  spelling work like `--local`/`--remote`. The first time
   `qsh serve` or `qsh listen` opens its UDP port, Windows Defender Firewall
   may ask whether to allow it. Allow it on private networks for peers on
   other machines to connect; connections from the same machine do not need

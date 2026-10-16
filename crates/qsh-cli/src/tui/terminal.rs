@@ -12,9 +12,6 @@
 //! Writing session output to stdout is deliberately not here — both
 //! platforms write to `std::io::Stdout`.
 
-// The only implementation outside tests is the POSIX one; see `super`.
-#![cfg_attr(not(unix), allow(dead_code))]
-
 use std::io;
 
 use qsh_core::OpError;
@@ -58,6 +55,16 @@ pub(crate) trait Terminal: Send + Sync + 'static {
     /// in the returned source; a failure leaves the client running without
     /// event handling.
     fn open_events(&self) -> io::Result<Box<dyn EventSource>>;
+
+    /// Whether a hang-up is a detach the client finishes itself, instead of
+    /// a [`Self::leave_on_hangup`]. The POSIX terminal dies of the signal and
+    /// the host notices when the connection idles out. A terminal whose
+    /// process is ended the moment its hang-up handler returns asks for the
+    /// detach: the driver detaches as `~d` does, so the host sees the client
+    /// go and the client exits `0` through its ordinary path.
+    fn detaches_on_hangup(&self) -> bool {
+        false
+    }
 
     /// The terminal is gone (hang-up, termination, console closed): put it
     /// back the way it was and leave. The session stays on the host

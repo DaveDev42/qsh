@@ -209,8 +209,6 @@ impl DataSend {
     /// per-stream reset, shut the whole conduit down through `kill`
     /// ([`DataRecv::abort`]'s rule). The peer sees a truncated stream, never
     /// a clean end.
-    // Only the file-copy path (unix) aborts a send half this way.
-    #[cfg(unix)]
     pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
         match self {
             DataSend::Direct(send) => send.reset(code),

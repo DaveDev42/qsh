@@ -1,4 +1,4 @@
-//! The unix body of `file.copy`: plan, connect, run the items, assemble the
+//! The body of `file.copy` for both client platforms: plan, connect, run the items, assemble the
 //! result. See the parent module for the contract. The `-r` half, the tree
 //! walks of a get and a put, is in [`tree`].
 
@@ -22,8 +22,9 @@ use crate::client::file::{
     DownloadDest, UploadSource, XferFailure, download, local_io_failure, upload,
 };
 use crate::client::{ClientError, Session};
-use crate::file::host::{self, FsKind};
+use crate::file::local::{self, FsKind};
 use crate::file::operand::{self, CopyPlan, Direction};
+use crate::file::stat::StatInfo;
 use crate::ops::exec::map_client_error;
 use crate::ops::{OpError, Ops, PeerRoute};
 
@@ -31,6 +32,24 @@ mod tree;
 
 /// The longest file name a local destination accepts.
 const NAME_MAX: usize = 255;
+
+/// Whether `name`, derived from a source path, may be created locally: at
+/// most [`NAME_MAX`] bytes, no NUL, and whatever else the platform's file
+/// names require (the Windows client refuses the characters and device
+/// names Windows reserves).
+fn usable_local_name(name: &str) -> bool {
+    name.len() <= NAME_MAX && !name.contains('\0') && local::name_is_local_safe(name)
+}
+
+/// [`usable_local_name`] for a name the person typed as the destination.
+fn usable_local_name_os(name: &OsString) -> bool {
+    match name.to_str() {
+        Some(name) => usable_local_name(name),
+        // Not UTF-8: the unix client takes any bytes it was given; the
+        // Windows one has no spelling to check against.
+        None => cfg!(unix),
+    }
+}
 
 /// Where a get puts its files (decision 2's result-position rules).
 enum LocalDst {
@@ -213,14 +232,6 @@ pub(super) async fn file_copy_on(
 // The local destination of a get
 // ---------------------------------------------------------------------------
 
-fn open_dir(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)
-}
-
 fn invalid(message: impl Into<String>) -> OpError {
     OpError::new(ErrorCode::InvalidArgument, message)
 }
@@ -238,11 +249,11 @@ fn failure_to_op(failure: XferFailure) -> OpError {
 /// a symlink there is followed; what is created under it never follows one
 /// (decision 7).
 fn resolve_local_dst(dst: &str, multiple: bool) -> Result<LocalDst, OpError> {
-    let trailing = dst.ends_with('/');
+    let trailing = local::ends_with_separator(dst);
     let path = Path::new(dst);
     match std::fs::metadata(path) {
         Ok(md) if md.is_dir() => {
-            let dir = open_dir(path).map_err(|e| failure_to_op(local_io_failure(&e)))?;
+            let dir = local::open_dir(path).map_err(|e| failure_to_op(local_io_failure(&e)))?;
             Ok(LocalDst::Dir {
                 dir: Arc::new(dir),
                 display: dst.to_string(),
@@ -276,7 +287,7 @@ fn split_file_dst(path: &Path, display: &str) -> Result<LocalDst, OpError> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    let dir = open_dir(parent).map_err(|e| match e.kind() {
+    let dir = local::open_dir(parent).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => invalid(format!("{display}: no such directory")),
         _ => failure_to_op(local_io_failure(&e)),
     })?;
@@ -695,7 +706,7 @@ fn is_quota_refusal(failure: &XferFailure) -> bool {
 /// Open a local source file. A source operand is what the person typed, so a
 /// symlink there is followed (`follow`), as `scp` does; a file found while
 /// walking a tree is opened without following one.
-fn open_source(src: &Path, follow: bool) -> Result<(File, host::StatInfo), XferFailure> {
+fn open_source(src: &Path, follow: bool) -> Result<(File, StatInfo), XferFailure> {
     let md = if follow {
         std::fs::metadata(src)
     } else {
@@ -714,17 +725,8 @@ fn open_source(src: &Path, follow: bool) -> Result<(File, host::StatInfo), XferF
             "not a regular file".to_string(),
         ));
     }
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).custom_flags(if follow {
-            libc::O_CLOEXEC
-        } else {
-            libc::O_CLOEXEC | libc::O_NOFOLLOW
-        });
-        options.open(src).map_err(|e| local_io_failure(&e))?
-    };
-    let info = host::fstat(&file).map_err(|e| local_io_failure(&e))?;
+    let file = local::open_source(src, follow).map_err(|e| local_io_failure(&e))?;
+    let info = local::fstat(&file).map_err(|e| local_io_failure(&e))?;
     if info.kind != FsKind::Regular {
         return Err(XferFailure::Local(
             ErrorCode::InvalidArgument,
@@ -751,7 +753,7 @@ struct PutFile {
 
 impl Run<'_> {
     async fn put_top(&mut self, src: &str) {
-        let name = operand::source_name(src).unwrap_or("").to_string();
+        let name = operand::local_source_name(src).unwrap_or("").to_string();
         self.put_file(PutFile {
             local: std::path::PathBuf::from(src),
             display: src.to_string(),
@@ -808,7 +810,7 @@ impl Run<'_> {
             Ok(conduit) => conduit,
             Err(failure) => return self.fail(&meta, failure),
         };
-        let label = operand::source_name(&spec.display)
+        let label = operand::local_source_name(&spec.display)
             .unwrap_or(&spec.display)
             .to_string();
         let progress = progress_for(ctx, label, info.size);
@@ -852,7 +854,7 @@ fn get_target(ctx: &Ctx, src: &str) -> Result<(Arc<File>, OsString, String), Xfe
                     format!("cannot derive a file name from {src}; name the destination"),
                 ));
             };
-            if name.len() > NAME_MAX || name.contains('\0') {
+            if !usable_local_name(name) {
                 return Err(XferFailure::Local(
                     ErrorCode::InvalidArgument,
                     "file name is too long or malformed".to_string(),
@@ -861,10 +863,18 @@ fn get_target(ctx: &Ctx, src: &str) -> Result<(Arc<File>, OsString, String), Xfe
             (
                 Arc::clone(dir),
                 OsString::from(name),
-                operand::join_path(display, name),
+                operand::join_local(display, name),
             )
         }
-        LocalDst::File { dir, name, display } => (Arc::clone(dir), name.clone(), display.clone()),
+        LocalDst::File { dir, name, display } => {
+            if !usable_local_name_os(name) {
+                return Err(XferFailure::Local(
+                    ErrorCode::InvalidArgument,
+                    format!("{display}: not a usable file name on this platform"),
+                ));
+            }
+            (Arc::clone(dir), name.clone(), display.clone())
+        }
     };
     check_file_dest(&dir, &name, ctx.no_clobber)?;
     Ok((dir, name, display))
@@ -873,7 +883,7 @@ fn get_target(ctx: &Ctx, src: &str) -> Result<(Arc<File>, OsString, String), Xfe
 /// What a get may do with the name it is about to write: nothing exists
 /// there, or a regular file does and may be replaced (decision 7).
 fn check_file_dest(dir: &File, name: &OsString, no_clobber: bool) -> Result<(), XferFailure> {
-    match host::stat_at(dir, name).map_err(|e| local_io_failure(&e))? {
+    match local::stat_at(dir, name).map_err(|e| local_io_failure(&e))? {
         Some(info) => match info.kind {
             FsKind::Symlink => Err(XferFailure::Local(
                 ErrorCode::InvalidArgument,
@@ -900,7 +910,7 @@ fn top_local_display(ctx: &Ctx, src: &str) -> String {
     match &ctx.local {
         Some(LocalDst::File { display, .. }) => display.clone(),
         Some(LocalDst::Dir { display, .. }) => match operand::source_name(src) {
-            Some(name) => operand::join_path(display, name),
+            Some(name) => operand::join_local(display, name),
             None => display.clone(),
         },
         None => String::new(),

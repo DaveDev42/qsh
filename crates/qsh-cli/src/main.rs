@@ -2,7 +2,6 @@
 //! this crate only parses arguments, calls `qsh_core::Ops`, and renders the
 //! result (`docs/CLI.md` §11).
 
-#[cfg(unix)]
 mod auto_bootstrap;
 mod render;
 mod tui;
@@ -706,7 +705,6 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     // decision 2). This is before `tui::run`, so ssh has the cooked terminal
     // to prompt on and raw mode starts only after the ssh child is gone
     // (decision 16).
-    #[cfg(unix)]
     if let Some(code) = auto_bootstrap_before_open(cli, ops, command, &what) {
         return code;
     }
@@ -725,7 +723,6 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
 /// Malformed `-L`/`-R`/`-D` specs skip the bootstrap: the attach reports them
 /// before it opens anything, and ssh should not run for a command line that
 /// cannot start.
-#[cfg(unix)]
 fn auto_bootstrap_before_open(
     cli: &Cli,
     ops: &Ops,
@@ -1017,7 +1014,6 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     // An unregistered host sets itself up over ssh first and the copy then
     // runs unchanged (ADR-0044 decision 2). The Ctrl-C handling above covers
     // the ssh child too.
-    #[cfg(unix)]
     match ops.should_auto_bootstrap_cp(&request, cli.wants_json()) {
         Ok(Some(plan)) => {
             if let Err(err) = auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet) {

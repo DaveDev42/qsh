@@ -8,11 +8,6 @@
 //! platform turns into a resize, a `^C` or a hang-up. See the module docs in
 //! [`super`] for the thread layout and why it is three threads.
 
-// `tui::run` does not yet drive the Windows terminal through this loop, so
-// a non-test Windows build would see all of it as unused. The module is not
-// compiled at all on a non-test, non-Unix build otherwise (`super`).
-#![cfg_attr(not(unix), allow(dead_code))]
-
 use std::io::{self, Write as _};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -164,7 +159,14 @@ pub(super) fn run(
     // report (`spawn` used to `.expect()`, which would panic *after* the
     // session was created but leave the operator with no idea it was still
     // running).
-    spawn_signal_pump(stream.handle(), Arc::clone(&terminal), &RealThreadSpawn).map_err(|err| {
+    let detached = Arc::new(AtomicBool::new(false));
+    spawn_signal_pump(
+        stream.handle(),
+        Arc::clone(&terminal),
+        Arc::clone(&detached),
+        &RealThreadSpawn,
+    )
+    .map_err(|err| {
         orphan(OpError::new(
             ErrorCode::Internal,
             format!("cannot start the signal-handling thread: {err}"),
@@ -180,7 +182,6 @@ pub(super) fn run(
     #[cfg(debug_assertions)]
     test_panic_hook();
 
-    let detached = Arc::new(AtomicBool::new(false));
     // Escape processing is a *terminal* feature: with a pipe or a file on
     // stdin every byte is forwarded verbatim (`docs/CLI.md` §7).
     let is_raw = raw.is_raw();
@@ -365,18 +366,42 @@ fn finish(outcome: Outcome) -> Result<i32, OpError> {
 }
 
 /// The signal number behind a `session.exit` signal name, for the
-/// `128 + signo` exit code. `qsh_core::exec::signal_number` is POSIX-only,
-/// and so is this until a client on another platform attaches.
+/// `128 + signo` exit code. On a POSIX client this is the local libc table,
+/// the same one `qsh exec` uses.
 #[cfg(unix)]
 fn signal_number(name: &str) -> Option<i32> {
     qsh_core::exec::signal_number(name)
 }
 
-/// See the POSIX twin above: without a number the exit code falls back to
-/// the one the session reported.
+/// The Windows client has no libc table. It knows the numbers every POSIX
+/// host agrees on, which covers the signals a shell actually dies of; a
+/// name outside that set falls back to the exit status the session
+/// reported, exactly as a name the host sent without a number does.
 #[cfg(not(unix))]
-fn signal_number(_name: &str) -> Option<i32> {
-    None
+fn signal_number(name: &str) -> Option<i32> {
+    portable_signal_number(name)
+}
+
+/// Signal numbers fixed across Linux and the BSDs (`SIG<n>` spellings of
+/// any number are also accepted, as on the POSIX table).
+#[cfg(any(not(unix), test))]
+fn portable_signal_number(name: &str) -> Option<i32> {
+    let signo = match name {
+        "SIGHUP" => 1,
+        "SIGINT" => 2,
+        "SIGQUIT" => 3,
+        "SIGILL" => 4,
+        "SIGTRAP" => 5,
+        "SIGABRT" => 6,
+        "SIGFPE" => 8,
+        "SIGKILL" => 9,
+        "SIGSEGV" => 11,
+        "SIGPIPE" => 13,
+        "SIGALRM" => 14,
+        "SIGTERM" => 15,
+        other => return other.strip_prefix("SIG")?.parse().ok(),
+    };
+    Some(signo)
 }
 
 /// One diagnostic line on stderr (`docs/CLI.md` §2.2 keeps all of this off
@@ -493,6 +518,7 @@ fn spawn_input_pump<H: PumpHandle>(
 fn spawn_signal_pump<H: PumpHandle>(
     handle: H,
     terminal: Arc<dyn Terminal>,
+    detached: Arc<AtomicBool>,
     spawner: &dyn ThreadSpawn,
 ) -> io::Result<()> {
     let (ready, installed) = std::sync::mpsc::sync_channel(1);
@@ -529,6 +555,14 @@ fn spawn_signal_pump<H: PumpHandle>(
                     // host keeps it (`docs/CLI.md` §7). The POSIX terminal
                     // never returns from here.
                     Some(TermEvent::Hangup(cause)) => {
+                        if terminal.detaches_on_hangup() {
+                            // The same detach `~d` makes: announced first,
+                            // so the event pump reports a detach and the
+                            // client ends through its ordinary exit.
+                            detached.store(true, Ordering::SeqCst);
+                            let _ = handle.detach();
+                            return;
+                        }
                         terminal.leave_on_hangup(cause);
                         return;
                     }

@@ -36,12 +36,15 @@
 //! second independently re-derived `if`, so those two unit tests already
 //! cover every call site's behavior, standalone and interactive alike.
 //!
-//! `cfg(unix)` is only on the reverse-route case
+//! `cfg(unix)` is on the reverse-route case
 //! (`dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination`,
-//! which needs `qsh listen`/UDS) and the interactive tests (the
-//! interactive form itself is `cfg(unix)` in the client,
-//! `crates/qsh-cli/src/tui/`) — every other test here exercises
-//! `qsh tunnel open --dynamic`, which is cross-platform.
+//! which needs the unix daemon socket) and on the interactive tests, which
+//! need a unix pty and a PTY host. Every other test here exercises `qsh
+//! tunnel open --dynamic`, which is cross-platform. On Windows the same
+//! contract is `windows_forward_e2e::dynamic_forward_connect` and
+//! `windows_reverse_e2e::dynamic_forward_connect` (a SOCKS5 CONNECT written
+//! by the test, no curl), and the interactive form's argument checks are the
+//! client's own `tui::run`, which has one code path on every platform.
 
 use crate::common;
 
@@ -508,12 +511,10 @@ fn interactive_dash_d_opens_listener_beside_session() {
 /// `session.open` regardless of flag order (`tui::session_loop::run`'s own doc),
 /// so the `-L` spec here never gets a chance to open anything either.
 ///
-/// `#[cfg(unix)]`: this contract only exists on unix. On Windows,
-/// `tui::run`'s `#[cfg(not(unix))]` branch (`crates/qsh-cli/src/tui/mod.rs`)
-/// refuses the interactive form with `UNSUPPORTED` before spec validation
-/// ever runs, so the `INVALID_ARGUMENT` this test expects never happens
-/// there — same platform split every other interactive-entry test in this
-/// file already draws.
+/// `#[cfg(unix)]`: the test drives the interactive form with no terminal on
+/// stdin and a PTY host behind it. The refusal itself happens in the client
+/// before any connection, the same on every platform (`tui::run` has no
+/// per-platform branch).
 #[cfg(unix)]
 #[test]
 fn interactive_dash_d_non_loopback_bind_creates_no_session_even_combined_with_local_forward() {

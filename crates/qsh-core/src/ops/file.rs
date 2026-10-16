@@ -19,7 +19,6 @@ use tokio::sync::watch;
 
 use crate::ops::{OpError, Operation, Ops};
 
-#[cfg(unix)]
 mod copy;
 
 /// How many transfers one `file.copy` runs at the same time (ADR-0029
@@ -98,7 +97,6 @@ impl CancelToken {
     }
 
     /// A receiver the transfers watch.
-    #[cfg(unix)]
     pub(crate) fn subscribe(&self) -> watch::Receiver<bool> {
         self.tx.subscribe()
     }
@@ -155,8 +153,7 @@ impl From<OpError> for FileCopyError {
 /// streams (a PTY attach, tunnels): the acceptance harness
 /// `file_copy_echo_under_load` uses this to measure echo latency while a copy
 /// shares the connection. The host name in the operands is not resolved;
-/// the copy goes over `session` whatever it says. Unix only.
-#[cfg(unix)]
+/// the copy goes over `session` whatever it says.
 pub async fn file_copy_over(
     session: &mut crate::client::Session,
     req: &FileCopyReq,
@@ -185,7 +182,6 @@ impl Ops {
         self.file_copy_planned(plan, &req, observer, cancel)
     }
 
-    #[cfg(unix)]
     fn file_copy_planned(
         &self,
         plan: crate::file::operand::CopyPlan,
@@ -194,19 +190,5 @@ impl Ops {
         cancel: &CancelToken,
     ) -> Result<FileCopyData, FileCopyError> {
         copy::file_copy(self, plan, req, observer, cancel)
-    }
-
-    #[cfg(not(unix))]
-    fn file_copy_planned(
-        &self,
-        _plan: crate::file::operand::CopyPlan,
-        _req: &FileCopyReq,
-        _observer: Arc<dyn FileCopyObserver>,
-        _cancel: &CancelToken,
-    ) -> Result<FileCopyData, FileCopyError> {
-        Err(FileCopyError::plain(OpError::new(
-            qsh_proto::ErrorCode::Unsupported,
-            "qsh cp is not available on this platform yet (ADR-0035 decision 1)",
-        )))
     }
 }

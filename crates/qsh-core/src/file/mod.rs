@@ -7,13 +7,20 @@
 //! - `host` (unix only): the filesystem steps behind the decisions, pure
 //!   functions over open directory fds (list a page, make a directory, stat
 //!   by name).
+//! - `local`: the steps a `qsh cp` client takes on its own machine, one
+//!   interface over the unix `*at` calls and the Windows handle-and-path
+//!   equivalents (ADR-0035 decision 26). [`stat`] holds the types both share.
 //! - [`operand`]: the scp operand grammar of `qsh cp` (pure).
-//! - `xfer` (unix only): the blocking pieces of a `FILE_DATA` transfer the host
-//!   and the client share (temp file guard, disk writer, commit).
+//! - `xfer` (unix and Windows): the blocking pieces of a `FILE_DATA`
+//!   transfer the host and the client share (temp file guard, disk writer,
+//!   commit).
 
 pub mod guard;
 #[cfg(unix)]
 pub mod host;
+#[cfg(any(unix, windows))]
+pub(crate) mod local;
 pub mod operand;
-#[cfg(unix)]
+pub mod stat;
+#[cfg(any(unix, windows))]
 pub(crate) mod xfer;

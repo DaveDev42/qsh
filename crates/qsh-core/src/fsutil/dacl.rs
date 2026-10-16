@@ -38,12 +38,15 @@ use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, CopySid,
-    EqualSid, GetLengthSid, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
-    OBJECT_INHERIT_ACE, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid, GetTokenInformation, InitializeAcl,
+    InitializeSecurityDescriptor, OBJECT_INHERIT_ACE, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
+    TOKEN_USER, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_ALWAYS, CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS,
@@ -250,6 +253,51 @@ pub(crate) fn open_private_file_with(
     }
     // SAFETY: a valid handle that nothing else owns.
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// Drop the owner-only protection of the file at `path`, so it holds only
+/// the access control its directory hands down. The explicit owner ACE of
+/// [`open_private_file`] goes with it.
+///
+/// This is the second half of a download's temp file (ADR-0035 decision 26):
+/// created owner-only so nobody reads half a file, then made to look like
+/// any other file in its directory just before the rename puts it in place.
+/// The DACL set is empty and unprotected, which the system turns into the
+/// inherited ACEs of the parent. A volume that stores no ACLs has nothing to
+/// drop and is left alone.
+pub(crate) fn inherit_parent_dacl(path: &Path) -> io::Result<()> {
+    if !volume_keeps_acls(path)? {
+        return Ok(());
+    }
+    let wide = to_wide(path)?;
+    // An empty ACL: the header and no ACE.
+    let mut acl = vec![0u32; size_of::<ACL>().div_ceil(4)];
+    let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
+    // SAFETY: a zeroed, DWORD-aligned buffer of exactly the header size.
+    check(
+        unsafe { InitializeAcl(acl_ptr, (acl.len() * 4) as u32, ACL_REVISION) },
+        "InitializeAcl",
+    )?;
+    // SAFETY: `wide` is NUL-terminated and `acl` is a valid, empty ACL; no
+    // owner, group or SACL is passed.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl_ptr,
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        return Err(context(
+            io::Error::from_raw_os_error(rc as i32),
+            "SetNamedSecurityInfoW",
+        ));
+    }
+    Ok(())
 }
 
 /// Create `dir` and every missing parent with the owner-only, inheriting

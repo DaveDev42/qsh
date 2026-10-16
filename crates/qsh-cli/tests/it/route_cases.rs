@@ -19,7 +19,7 @@
 use crate::common;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -204,6 +204,24 @@ pub fn start_echo() -> SocketAddr {
                 // drop of the two handles can reset the connection on
                 // Windows, which discards echoed bytes the peer has not
                 // read yet.
+                let _ = writer.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    });
+    addr
+}
+
+/// [`start_echo`] bound to `ip` instead of the loopback address.
+pub fn start_echo_at(ip: Ipv4Addr) -> SocketAddr {
+    let listener = TcpListener::bind((ip, 0)).expect("bind the echo server off loopback");
+    let addr = listener.local_addr().expect("echo server address");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            thread::spawn(move || {
+                let mut reader = stream.try_clone().expect("clone the echo socket");
+                let mut writer = stream;
+                let _ = std::io::copy(&mut reader, &mut writer);
                 let _ = writer.shutdown(std::net::Shutdown::Write);
             });
         }
@@ -539,4 +557,143 @@ pub fn hosts_names_the_host(route: &impl Route, mode: &str) {
         .json(&["host", "get", route.host(), "--json"]);
     assert_eq!(code, 0, "{got}");
     assert_eq!(got["data"]["connection_mode"], mode, "{got}");
+}
+
+/// `qsh tunnel open --dynamic`: the SOCKS5 listener the holder binds takes a
+/// `CONNECT` the test sends itself (no curl), the host dials the destination,
+/// and bytes come back unchanged. A destination on the host's own loopback is
+/// refused with a non-zero reply and the listener stays up (ADR-0019
+/// decision 3).
+///
+/// The destination that succeeds has to be off loopback, so the case needs a
+/// local IPv4 route; without one it is skipped off CI and fails on CI
+/// ([`qsh_testkit::net_probe::in_ci`]).
+pub fn dynamic_forward_connect(route: &impl Route) {
+    let lan = qsh_testkit::gap_or_return!(
+        qsh_testkit::net_probe::require_non_loopback_v4_route(
+            "no non-loopback IPv4 route on this host"
+        ),
+        "dynamic_forward_connect"
+    );
+    let echo = start_echo_at(lan);
+    let loopback_echo = start_echo();
+    let port = free_port();
+
+    let (mut tunnel, envelope) = TunnelHolder::open(route, "--dynamic", &port.to_string());
+    let data = &envelope["data"];
+    assert_eq!(envelope["command"], "tunnel.dynamic", "{envelope}");
+    assert_eq!(data["mode"], "dynamic", "{envelope}");
+    assert_eq!(data["host"], route.host(), "{envelope}");
+    assert_eq!(data["dial_policy"], "deny_host_local", "{envelope}");
+    assert_eq!(data["bind"], format!("127.0.0.1:{port}"), "{envelope}");
+
+    // A destination on the host's own loopback is filtered.
+    let mut refused = socks_connect(port, loopback_echo);
+    let mut reply = [0u8; 10];
+    refused
+        .read_exact(&mut reply)
+        .expect("read the reply to a filtered CONNECT");
+    assert_eq!(reply[0], 0x05, "{reply:?}");
+    assert_ne!(
+        reply[1], 0x00,
+        "a CONNECT to the host's loopback must be refused: {reply:?}"
+    );
+    drop(refused);
+
+    // The one off loopback is dialed and echoed.
+    let mut socket = socks_connect(port, echo);
+    socket
+        .read_exact(&mut reply)
+        .expect("read the reply to a CONNECT");
+    assert_eq!(
+        reply[1],
+        0x00,
+        "CONNECT to {echo} through the {} route failed: {reply:?}",
+        route.host()
+    );
+    let sent = payload();
+    let writer = socket.try_clone().expect("clone the SOCKS socket");
+    let sender = thread::spawn({
+        let sent = sent.clone();
+        move || -> std::io::Result<()> {
+            let mut writer = writer;
+            writer.write_all(&sent)?;
+            writer.flush()?;
+            writer.shutdown(std::net::Shutdown::Write)
+        }
+    });
+    let mut back = Vec::new();
+    socket
+        .read_to_end(&mut back)
+        .expect("read the echo through the SOCKS tunnel");
+    sender
+        .join()
+        .expect("the sender thread panicked")
+        .expect("write through the SOCKS tunnel");
+    assert_same_payload(&back, &sent, "the dynamic forward");
+
+    assert!(tunnel.is_running(), "the holder exited while serving");
+    let rest = tunnel.finish();
+    assert!(
+        rest.is_empty(),
+        "machine mode printed more than one stdout line: {rest:?}"
+    );
+}
+
+/// Greet the SOCKS5 listener on `port` and send a no-auth IPv4 `CONNECT` to
+/// `target`; the reply is left unread.
+fn socks_connect(port: u16, target: SocketAddr) -> TcpStream {
+    let SocketAddr::V4(target) = target else {
+        panic!("the destinations of this case are IPv4");
+    };
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the SOCKS port");
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .expect("read timeout");
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .expect("write timeout");
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .expect("write the greeting");
+    let mut method = [0u8; 2];
+    stream
+        .read_exact(&mut method)
+        .expect("read the method selection");
+    assert_eq!(method, [0x05, 0x00], "the listener must select no-auth");
+    let mut request = vec![0x05, 0x01, 0x00, 0x01];
+    request.extend_from_slice(&target.ip().octets());
+    request.extend_from_slice(&target.port().to_be_bytes());
+    stream.write_all(&request).expect("write the CONNECT");
+    stream
+}
+
+/// `qsh cp` to a Windows host: the host does not advertise `file.v1` until
+/// its file operations land, so the client refuses before it sends anything,
+/// on the forward route and on the reverse one (ADR-0035 decision 2,
+/// `docs/CLI.md` §6.21).
+pub fn cp_to_a_windows_host_is_unsupported_before_m20(route: &impl Route, reverse: bool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src.txt");
+    std::fs::write(&src, b"never sent\n").unwrap();
+    let dst = dir.path().join("dst.txt");
+
+    let (code, value) = route.client().json(&[
+        "cp",
+        "--json",
+        src.to_str().unwrap(),
+        &format!("{}:{}", route.host(), dst.display()),
+    ]);
+
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
+    let message = value["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("file.v1"), "{value}");
+    assert_eq!(
+        message.contains("reverse route"),
+        reverse,
+        "the message names the route it refused on: {value}"
+    );
+    assert!(message.contains("nothing was sent"), "{value}");
+    assert!(!dst.exists(), "nothing reached the host");
 }

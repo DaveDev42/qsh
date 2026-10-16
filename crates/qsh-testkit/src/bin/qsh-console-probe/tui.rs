@@ -7,7 +7,9 @@
 
 #[path = "../../../../qsh-cli/src/tui/console_mode.rs"]
 pub mod console_mode;
+#[allow(dead_code)]
 #[path = "../../../../qsh-cli/src/tui/terminal.rs"]
 pub mod terminal;
+#[allow(dead_code)]
 #[path = "../../../../qsh-cli/src/tui/windows.rs"]
 pub mod windows;

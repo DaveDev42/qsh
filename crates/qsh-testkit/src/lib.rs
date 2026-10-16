@@ -33,6 +33,9 @@
 //!   `crates/qsh-testkit/tests/it/dynamic_loopback.rs` and its reverse-route
 //!   twin).
 //!
+//! - [`echo_host`]: [`echo_host::EchoHost`], a host whose sessions are the
+//!   broker's headless echo, reachable forward or as a reverse target, for
+//!   driving the real client where the host has no PTY.
 //! - [`fake_ssh`]: [`fake_ssh::FakeSsh`], a private directory holding a copy
 //!   of the `qsh-fake-ssh` executable this crate builds, which records its
 //!   argv and plays the system `ssh` of the SSH bootstrap tests (ADR-0044)
@@ -52,6 +55,7 @@
 pub mod chaos;
 #[cfg(windows)]
 pub mod conpty;
+pub mod echo_host;
 pub mod env_check;
 pub mod fake_ssh;
 pub mod fixtures;
