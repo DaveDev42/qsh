@@ -341,7 +341,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** 항목 target은 (a)의 `qsh`가 아니라 store crate 기본 방식의 `<device_id>.qsh`다(ADR-0035 개정 이력 2026-10-16). 실제 Credential Manager 테스트 `credential_manager_round_trip_on_the_runner`와 `credential_manager_blob_is_the_same_pkcs8_base64_as_other_platforms`는 Dave-Windows에서 초록이었고 실행 뒤 `cmdkey /list`에 남은 항목이 없었다. windows-latest 러너가 `CredWriteW`를 거부하면 §7.1 #6대로 두 테스트를 빼고 L1 수동 단계만 둔다. 바이너리 수준의 Windows `qsh init --key-store platform` 테스트는 OS 자격 증명 저장소를 건드리므로 두지 않았고, (c)의 "INTERNAL이 아니다"는 주입 store 왕복과 실제 `PlatformKeyStore` 왕복이 덮는다. M17의 Windows 처분 테스트 `move_key_to_platform_is_internal_on_windows_before_m19`는 지웠다. 이 스텝과 Step 4가 `qsh-core` 의존을 늘려 `fuzz/Cargo.lock`을 같은 커밋에서 갱신했다(fuzz-smoke의 `--locked` 실패, run 38817991446).
 
-### Step 6 — named pipe localctl transport (1.1~1.8ew)
+### Step 6 — named pipe localctl transport (1.1~1.8ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 14(이름·생성·접근 통제·자격 확인·공통 부분·모듈 구조), 결정 17 named pipe 항목 (2)~(6), 결정 19의 threat-model §3·§4 A·B·§7과 `xtask/src/arch.rs`, `docs/design/architecture.md` §1·§7, `localctl/mod.rs` 모듈 doc. ADR-0033 결정 4·13의 named pipe 비노출. 선행: Step 4.
 
@@ -373,6 +373,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - pipe accept 경합 테스트를 `m19.filter`에 넣는다.
 
 **(c) 완료 판정:** `localctl` 모듈이 Windows에서 컴파일되고 `cfg(unix)` 게이트가 없다. DoD 3의 핀 셋 중 두 개(DACL, SID 불일치)가 Windows 다리에서 초록이다(선점 기동 실패는 Step 7). xtask 금지 목록이 같은 커밋이다. wire diff 0, `local.rs` diff 0.
+
+**(d) 결과 (2026-10-16):** Windows 다리 `wintest.sh -p qsh-core` lib 1487·it 125 초록, pipe accept 경합 `pipe_accept_serves_concurrent_clients_without_a_name_gap` Windows 부하 아래 50/50. Step 7이 이어받을 것: `daemon`이 아직 `cfg(unix)`라 `transport/windows.rs`의 `cfg_attr(not(test), allow(dead_code))`와 `client.rs`의 `cfg_attr(windows, allow(dead_code))`는 임시이고 Step 7이 지운다. byte 모드 pipe에는 half-close가 없어 Windows `shutdown_write`는 no-op이고, `DataSendHalf::finish` 뒤의 EOF는 stream drop 때 보인다. Step 7은 데몬 relay가 finish 뒤 EOF에 기대는 곳을 Windows에서 확인한다. socket 파일 전용 client 케이스 다섯과 `discover_moves_past_a_silent_daemon_instead_of_hanging_on_it_forever`는 `cfg(unix)`이고, Windows 쌍둥이 `discover_moves_past_a_candidate_that_never_answers_instead_of_hanging_on_it`가 같은 발견 기한 계약을 본다.
 
 ### Step 7 — Windows reverse 역할과 정방향·역방향 CLI 종단 (0.8~1.3ew)
 
