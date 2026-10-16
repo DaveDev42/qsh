@@ -376,7 +376,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** Windows 다리 `wintest.sh -p qsh-core` lib 1487·it 125 초록, pipe accept 경합 `pipe_accept_serves_concurrent_clients_without_a_name_gap` Windows 부하 아래 50/50. Step 7이 이어받을 것: `daemon`이 아직 `cfg(unix)`라 `transport/windows.rs`의 `cfg_attr(not(test), allow(dead_code))`와 `client.rs`의 `cfg_attr(windows, allow(dead_code))`는 임시이고 Step 7이 지운다. byte 모드 pipe에는 half-close가 없어 Windows `shutdown_write`는 no-op이고, `DataSendHalf::finish` 뒤의 EOF는 stream drop 때 보인다. Step 7은 데몬 relay가 finish 뒤 EOF에 기대는 곳을 Windows에서 확인한다. socket 파일 전용 client 케이스 다섯과 `discover_moves_past_a_silent_daemon_instead_of_hanging_on_it_forever`는 `cfg(unix)`이고, Windows 쌍둥이 `discover_moves_past_a_candidate_that_never_answers_instead_of_hanging_on_it`가 같은 발견 기한 계약을 본다.
 
-### Step 7 — Windows reverse 역할과 정방향·역방향 CLI 종단 (0.8~1.3ew)
+### Step 7 — Windows reverse 역할과 정방향·역방향 CLI 종단 (0.8~1.3ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 1·2(client 쪽), 14의 "`qsh listen`의 나머지"·"동작 요약", 17의 정방향·역방향 종단 항목(PTY 없는 부분), 25 가운데 `serve --to` 게이트 제거, 결과 절 "마일스톤 배치"의 M19 역방향 CI. `docs/CLI.md` §6.9·§6.13·§6.14. 선행: Step 6.
 
@@ -403,6 +403,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - 종단 모듈 둘을 `m19.filter`에 넣는다.
 
 **(c) 완료 판정:** `windows_unsupported`와 `run_reverse_unix`가 소스에 없다. 정방향·역방향 종단이 Windows 다리와 Dave-Windows 부하 아래 50회 연속 초록이다. unix 회귀 0. wire diff 0.
+
+**(d) 결과 (2026-10-16):** `run_reverse_unix`는 플랫폼 공통 `run_reverse_observed`가 됐고 옛 이름을 부르던 ADR-0021·0031·0041에는 날짜 줄을 더했다. byte 모드 pipe에 half-close가 없는 문제는 한계로 두지 않고 Windows conduit의 raw byte 구간을 chunk(4바이트 big-endian 길이, 길이 0이 end chunk, 상한 65536)로 실어 풀었다(`localctl/chunked.rs`, ADR-0035 개정 이력 2026-10-16, `docs/design/protocol.md` localctl 절). unix는 바이트 그대로이고 `qsh.local.v1` proto·`qsh-proto`·fixture·ErrorCode diff는 0이다. Windows 종단은 unix와 같은 단언(쓰기를 닫고 응답을 EOF까지 읽기)을 쓴다. 부하 반복 중 역방향 `local_tunnel_echo`가 100회에 1~4회 잘린 원인은 framing이 아니라 테스트 echo 서버가 copy 뒤 소켓을 그냥 놓아 Windows에서 RST로 끊긴 것이었고, echo 서버가 먼저 `shutdown(Write)`를 보내게 고쳤다. 데몬은 Windows에서 터널 양방향이 깨끗하게 끝난 뒤 상대가 conduit을 닫을 때까지 최대 10초 기다린다. Dave-Windows 부하 아래 `windows_reverse_e2e::` 100/100, `windows_forward_e2e::` 50/50, Linux 부하 아래 바뀐 Linux 타이밍 테스트(`hosts_reverse::`·`identity_move_key::`·`audit_query_reads*`·`exit_code_matrix::qsh_(listen|serve_to|reverse)*`) 50/50. `listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken`은 `reverse/listen/tests.rs`의 cfg(windows) 단위 테스트다. `wintest.sh`로 qsh-core lib을 한 프로세스에서 직렬로 돌리면 이번에 Windows에서 처음 열린 `reverse::` 테스트 넷(`datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is` 등)이 `wait_for_line` 기한을 넘긴다. 단독과 `reverse::` 묶음(157개)에서는 초록이고 nextest는 테스트마다 프로세스를 나누므로 CI에는 해당하지 않는다. supervise의 reverse route `cfg` 제거는 컴파일이 요구해 이 스텝에 들어왔고 supervise 테스트와 §6.14의 supervise 판별 문구는 Step 8이 맡는다.
 
 ### Step 8 — supervise와 절전 감지, reverse 쌍둥이 (0.3~0.5ew)
 
