@@ -24,7 +24,6 @@ use crate::common;
 use crate::ssh_golden;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
-#[cfg(unix)]
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 
 /// What a scenario produces, independent of output mode.
@@ -133,15 +132,12 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     // `resolve_host_route_async_is_invalid_argument_when_two_daemons_both_hold_it_live`
     // unit test, reproduced here against two real OS processes instead of
     // two fake admin daemons.
-    #[cfg(unix)]
     let dup_controller = Sandbox::initialized();
-    #[cfg(unix)]
     let dup_target = Sandbox::initialized();
     // Bound to `_` in each guard's own binding (not a block) so normal
     // end-of-function `Drop` order kills every child — no `mem::forget`,
     // no leaked processes; these just need to outlive the `host get dup`
     // case below, exactly like `fleet`/`rogue`/`all_dead` above.
-    #[cfg(unix)]
     let (_listen_a, _listen_b, _reverse_a, _reverse_b) = {
         let target_fp = dup_target.fingerprint();
         let controller_fp = dup_controller.fingerprint();
@@ -173,11 +169,8 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     // row does not reach at all (that row's name was never registered
     // anywhere). Same rig shape as the `dup` case just above, one target
     // instead of two, shut down instead of duplicated.
-    #[cfg(unix)]
     let stale_controller = Sandbox::initialized();
-    #[cfg(unix)]
     let stale_target = Sandbox::initialized();
-    #[cfg(unix)]
     let _stale_listen = {
         let target_fp = stale_target.fingerprint();
         let controller_fp = stale_controller.fingerprint();
@@ -270,9 +263,8 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         &ssh_garbage,
     ];
 
-    // `mut` is only needed for the `#[cfg(unix)] cases.push(..)` below —
-    // unused (and clippy-denied) on the Windows leg, where that push is
-    // compiled out entirely.
+    // `mut` is needed for the `cases.push(..)` calls below, some of which are
+    // compiled out on Windows (the `qsh cp` rows).
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut cases = vec![
         Case {
@@ -537,6 +529,23 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
                 "--peer-cert",
                 "peer.pem",
             ],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            // `docs/CLI.md` §6.20: `--forward` is a host-side flag, so the
+            // listener role does not define it and clap refuses it before
+            // any step runs. The listener role runs on every platform, so
+            // this row has no `cfg`.
+            name: "setup listener: a flag the role does not define",
+            sandbox: &fleet.client,
+            args: &["setup", "listener", "--peer", "m", "--forward"],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            // The same refusal for `--to`, which names a target-side slot.
+            name: "setup listener: --to is not a listener flag",
+            sandbox: &fleet.client,
+            args: &["setup", "listener", "--to", "m"],
             outcome: Outcome::Usage,
         },
         Case {
@@ -896,7 +905,6 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         outcome: Outcome::Fails("UNSUPPORTED"),
     });
 
-    #[cfg(unix)]
     cases.push(Case {
         name: "host get: duplicate name held live by two reverse daemons at once",
         sandbox: &dup_controller,
@@ -909,7 +917,6 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     // "exec: unpinned host name" row above — `retryable` changes what the
     // caller *should do next*, never the exit code itself
     // (`docs/CLI.md` §3.2/§4).
-    #[cfg(unix)]
     cases.push(Case {
         name: "host get: stale reverse registration, no forward pin to fall back to",
         sandbox: &stale_controller,
@@ -1186,7 +1193,6 @@ fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
 // be expressed as an `Outcome` the shared `check()` machinery understands.
 // ---------------------------------------------------------------------
 
-#[cfg(unix)]
 #[test]
 fn qsh_listen_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
     let sandbox = Sandbox::initialized();
@@ -1266,14 +1272,12 @@ fn qsh_serve_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
 /// captured — deliberately not `common::ReverseGuard` (which discards its
 /// child's output), since this scenario's entire point is inspecting
 /// stdout/stderr while the process is still alive and retrying.
-#[cfg(unix)]
 struct CapturedReverse {
     child: std::process::Child,
     stdout: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
-#[cfg(unix)]
 impl CapturedReverse {
     fn start(sandbox: &Sandbox, controller: &str) -> Self {
         Self::start_with(sandbox, &["-v", "reverse", controller])
@@ -1294,8 +1298,8 @@ impl CapturedReverse {
         // child closes it (i.e. exits), which this scenario's process
         // deliberately never does on its own.
         use std::io::BufRead as _;
-        let mut child = sandbox
-            .command(args)
+        let mut command = sandbox.command(args);
+        let mut child = common::own_process_group(&mut command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1352,29 +1356,13 @@ impl CapturedReverse {
             .clone()
     }
 
-    /// `SIGTERM`, bounded wait for the graceful-shutdown line, same
-    /// discipline as `hosts_reverse.rs::ReverseGuard::shut_down`.
+    /// A graceful stop, bounded wait for the process to end (`SIGTERM` on
+    /// unix, `CTRL_BREAK` to its own process group on Windows).
     fn shut_down(mut self) {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.child.id() as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        common::stop_gracefully(&mut self.child);
     }
 }
 
-#[cfg(unix)]
 impl Drop for CapturedReverse {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -1396,7 +1384,6 @@ impl Drop for CapturedReverse {
 /// many attempts fail, and the process is still alive (retrying, not
 /// crashed, not hung on the first attempt) well past the time a single
 /// dial could plausibly take.
-#[cfg(unix)]
 #[test]
 fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
     let controller = Sandbox::initialized();
@@ -1446,7 +1433,6 @@ fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
 /// (`main.rs`'s own doc). Same refused-registration rig as
 /// `qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout`
 /// above, spelled with `--to` instead of the hidden alias.
-#[cfg(unix)]
 #[test]
 fn qsh_serve_to_registration_refusal_uses_the_serve_stderr_prefix_not_reverse() {
     let controller = Sandbox::initialized();
@@ -1502,7 +1488,6 @@ fn qsh_serve_to_registration_refusal_uses_the_serve_stderr_prefix_not_reverse() 
 /// `"event":"retry"` line the sibling tests above poll for) is enough to
 /// prove the process is actually running and has had a chance to print
 /// it.
-#[cfg(unix)]
 #[test]
 fn qsh_serve_to_emits_the_port_assumed_notice_only_on_the_address_branch() {
     const PEER_FINGERPRINT: &str = "sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";

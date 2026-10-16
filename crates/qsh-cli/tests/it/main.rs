@@ -32,6 +32,8 @@ mod release_smoke;
 mod reverse_blackout;
 mod reverse_e2e;
 mod reverse_unreachable_diagnostic;
+#[cfg(windows)]
+mod route_cases;
 mod serve_sigterm_drain;
 mod session_follow;
 mod session_kill9;
@@ -49,6 +51,10 @@ mod tunnel_e2e;
 mod tunnel_supervise;
 mod tunnel_supervise_cli;
 mod version;
+#[cfg(windows)]
+mod windows_forward_e2e;
+#[cfg(windows)]
+mod windows_reverse_e2e;
 
 mod common;
 mod ssh_golden;

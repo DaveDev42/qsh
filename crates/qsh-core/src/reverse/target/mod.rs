@@ -16,7 +16,7 @@
 //! **Step 4: the reconnect loop.** Registration is the target's only
 //! reachability path, so a dead connection is never fatal — the process
 //! stays up and keeps trying, forever (`docs/design/protocol.md` §11-4).
-//! One connection's lifetime, inside the loop in `run_reverse_unix`, is:
+//! One connection's lifetime, inside the loop in `run_reverse_observed`, is:
 //!
 //! 1. Dial + `Hello.reverse` exchange (`dial_and_register`). A rejection
 //!    from the controller (`PERMISSION_DENIED`/`INVALID_ARGUMENT`/
@@ -38,7 +38,7 @@
 //!    held — **never** the sessions themselves (`docs/design/
 //!    architecture.md` §3: session lifetime is decoupled from connection
 //!    lifetime, and the whole point of this loop is that the *same*
-//!    broker, built once in `run_reverse_unix` before the loop starts,
+//!    broker, built once in `run_reverse_observed` before the loop starts,
 //!    outlives every connection it dials).
 //! 4. Backoff (exponential + jitter, ±%, `[reverse]` config,
 //!    `docs/design/protocol.md` §11-4) via `Backoff`, then back to step 1
@@ -52,56 +52,29 @@
 //! reloaded on a reconnect (M3 plan Step 4 (a) (2473c88): the macOS Keychain watch
 //! item this device's key may live behind must not be re-opened per dial).
 
-// Most of this import block is consumed only by the unix body (and this
-// module's tests) — the Windows `run_reverse` refuses before touching any
-// of it, so ungated these would trip `unused_imports` under the Windows
-// leg's `clippy -D warnings` (same gating as `tui/mod.rs`).
-// `#[cfg(any(unix, test))]`, not plain `#[cfg(unix)]`: `dial_and_register`
-// itself and its own unit test both need `Arc`/`Dialed`/`Dialer`/
-// `FramedStream`/`TrustEvaluator`/`SharedTrustStore` on every CI target
-// (the windows-latest test leg included), not just a unix build — see
-// `dial_and_register`'s own doc comment.
-#[cfg(any(unix, test))]
 use std::sync::Arc;
-#[cfg(any(unix, test))]
 use std::time::Duration;
 
-#[cfg(any(unix, test))]
 use tokio::sync::watch;
-#[cfg(any(unix, test))]
 use tokio::time::Instant;
 
-#[cfg(any(unix, test))]
 use qsh_proto::wire;
-#[cfg(any(unix, test))]
 use qsh_transport::{Dialed, Dialer, FramedStream, TrustEvaluator};
-// Only consumed by `run_reverse_unix`'s `StdRng::try_from_rng(&mut SysRng)` (below) —
+// Consumed by `run_reverse_observed`'s `StdRng::try_from_rng(&mut SysRng)` (below) —
 // production's replacement for `rand::rng()`'s `!Send` `ThreadRng`
 // (adversarial review finding: it made `run_reverse`'s returned future
-// `!Send`, so `tokio::spawn`ing it failed to compile). `#[cfg(unix)]`
-// rather than `#[cfg(any(unix, test))]`: the test module seeds its own
-// `StdRng` directly via `SeedableRng::seed_from_u64`, imported locally
-// inside `mod tests` (Windows leg trap (b) — an ungated import consumed
-// only by unix code trips `unused_imports` under Windows clippy).
-#[cfg(unix)]
+// `!Send`, so `tokio::spawn`ing it failed to compile).
 use rand::SeedableRng;
 
-#[cfg(unix)]
 use crate::broker::PeerFingerprint;
-#[cfg(unix)]
 use crate::client::pathwatch::{PathWatch, watch_path_with_wake};
-#[cfg(any(unix, test))]
 use crate::client::wake::WakeEvent;
-#[cfg(any(unix, test))]
 use crate::config::BackoffLimits;
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
-#[cfg(any(unix, test))]
 use crate::reverse::ReconnectCause;
-#[cfg(unix)]
 use crate::server::ConnCtx;
-#[cfg(any(unix, test))]
 use crate::trust::SharedTrustStore;
 
 /// Resolve the offered name: `--offered-name` > `[reverse].offered_name` >
@@ -148,6 +121,15 @@ pub async fn run_reverse(
     .await
 }
 
+/// Close code for the connection this target's own path-death watchdog
+/// (`docs/design/protocol.md` §10) condemns — a silent NAT/path death,
+/// never a clean QUIC close. Local to this module, same rationale as
+/// [`super::listen`]'s `CLOSE_CODE_REPLACED`: the meaning is
+/// reconnect-loop-specific, not a transport concern
+/// (`docs/design/architecture.md` §1). Only [`run_reverse_observed`] ever
+/// closes a connection for this reason.
+const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
+
 /// [`run_reverse`], plus two hooks: `on_runtime` fires exactly once —
 /// synchronously, before the first dial — with the long-lived host runtime
 /// (broker included, `docs/design/architecture.md` §3) the reconnect loop
@@ -158,7 +140,7 @@ pub async fn run_reverse(
 /// `crates/qsh-testkit/tests/it/reverse_chaos.rs`) but wires `on_unreachable`
 /// up to a one-time stderr diagnostic (M3 plan Step 9 (2473c88), `docs/CLI.md`
 /// §6.13). `on_unreachable` fires at most once per call, the first time an
-/// attempt fails to dial/register (module docs, `run_reverse_unix`'s
+/// attempt fails to dial/register (module docs, `run_reverse_observed`'s
 /// reconnect loop) — never once per backoff retry; a doctor-item render
 /// belongs to `qsh-cli`, so this only signals *that* a first failure
 /// happened, never *what to print* (`qsh_core::doctor::
@@ -166,63 +148,6 @@ pub async fn run_reverse(
 /// Mirrors [`super::listen::run_listen`]'s `on_bound` hook in shape.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_reverse_observed(
-    paths: &Paths,
-    config: &Config,
-    identity: LoadedIdentity,
-    controller: &str,
-    offered_name_flag: Option<&str>,
-    on_runtime: impl FnOnce(&crate::serve::HostRuntime),
-    on_unreachable: impl FnOnce(),
-    shutdown: impl std::future::Future<Output = ()>,
-) -> Result<(), OpError> {
-    // Twin cfg blocks as alternative tail expressions — the exact shape
-    // `pty::factory` established; a `return` here instead would trip
-    // clippy's `needless_return` on the Windows leg (probed empirically).
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            paths,
-            config,
-            identity,
-            controller,
-            offered_name_flag,
-            on_runtime,
-            on_unreachable,
-            shutdown,
-        );
-        Err(super::listen::windows_unsupported())
-    }
-    #[cfg(unix)]
-    {
-        run_reverse_unix(
-            paths,
-            config,
-            identity,
-            controller,
-            offered_name_flag,
-            on_runtime,
-            on_unreachable,
-            shutdown,
-        )
-        .await
-    }
-}
-
-/// Close code for the connection this target's own path-death watchdog
-/// (`docs/design/protocol.md` §10) condemns — a silent NAT/path death,
-/// never a clean QUIC close. Local to this module, same rationale as
-/// [`super::listen`]'s `CLOSE_CODE_REPLACED`: the meaning is
-/// reconnect-loop-specific, not a transport concern
-/// (`docs/design/architecture.md` §1). Only [`run_reverse_unix`] ever
-/// closes a connection for this reason, so this stays `#[cfg(unix)]` too.
-#[cfg(unix)]
-const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
-
-/// `docs/CLI.md` §6.13's Windows gate (module docs on
-/// [`super::listen::windows_unsupported`]) — this is the target's half.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-async fn run_reverse_unix(
     paths: &Paths,
     config: &Config,
     identity: LoadedIdentity,
@@ -692,7 +617,6 @@ async fn run_reverse_unix(
 /// A wake reached the target (ADR-0023 decision 20): restart its backoff at
 /// `backoff_initial_ms`, open the 60 s fast window, and say so on the
 /// `qsh::reverse` line.
-#[cfg(unix)]
 fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: WakeEvent) {
     backoff.wake(Instant::now());
     ReconnectEvent {
@@ -714,7 +638,7 @@ fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: Wa
 /// One dial+register attempt: resolve `controller`'s address fresh (it may
 /// have moved since the last attempt — DNS, a dynamic IP, or an operator
 /// edit to `hosts.toml`), dial, and run the `Hello.reverse` exchange. Never
-/// retries on its own — the reconnect loop in [`run_reverse_unix`] owns
+/// retries on its own — the reconnect loop in [`run_reverse_observed`] owns
 /// backoff between attempts (`docs/design/protocol.md` §11-4).
 ///
 /// Address resolution reloads `hosts.toml` fresh on every attempt (never
@@ -740,16 +664,9 @@ fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: Wa
 /// [`crate::ops::MAX_DIAL_ADDRESSES`]) — `cause` and the mapped
 /// [`OpError`] both describe only the *last* address's failure.
 ///
-/// Only ever driven in production from [`run_reverse_unix`]
-/// (`#[cfg(unix)]`), but gated `#[cfg(any(unix, test))]` rather than
-/// plain `#[cfg(unix)]` so its own unit test
-/// (`dial_and_register_maps_an_unresolvable_controller_to_resolve_cause`)
-/// builds and runs on every CI target, including the windows-latest
-/// clippy/test leg — that test is the only place
-/// [`ReconnectCause::Resolve`] is ever constructed, so without this a
-/// non-unix build has no way to exercise it and the variant is dead code
-/// there.
-#[cfg(any(unix, test))]
+/// Only ever driven in production from [`run_reverse_observed`]; its own
+/// unit test (`dial_and_register_maps_an_unresolvable_controller_to_resolve_cause`)
+/// is the only place [`ReconnectCause::Resolve`] is constructed on its own.
 async fn dial_and_register(
     dialer: &Dialer,
     trust: &SharedTrustStore,
@@ -778,7 +695,6 @@ async fn dial_and_register(
 /// [`crate::ops::dial_first_reachable`] — tries every resolved address,
 /// not only the first
 /// (`dial_and_register_tries_every_resolved_address_not_only_the_first`).
-#[cfg(any(unix, test))]
 async fn dial_and_register_resolving(
     dialer: &Dialer,
     trust: &SharedTrustStore,
@@ -831,7 +747,6 @@ async fn dial_and_register_resolving(
 /// instead of `CONNECTION_FAILED` is what makes this answer
 /// `tls_rejected` instead of `refused`, so the two classifications never
 /// disagree about the same failure.
-#[cfg(any(unix, test))]
 fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
     use qsh_transport::DialError;
     match err {
@@ -869,7 +784,6 @@ fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
 /// initiator call, per that enum's own doc) is a protocol-shaped anomaly
 /// this fixed nine-value vocabulary has no sharper bucket for, so it falls
 /// to `local`.
-#[cfg(any(unix, test))]
 fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
     use crate::handshake::HelloError;
     match err {
@@ -887,7 +801,7 @@ fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
     }
 }
 
-/// Classify why the `'serve` loop in [`run_reverse_unix`] exited via its
+/// Classify why the `'serve` loop in [`run_reverse_observed`] exited via its
 /// `serve_control` join arm (issue #4 item 6) — reached whenever
 /// `serve_control` itself notices the connection ended first; the
 /// `watch.dead()` arm races the same connection dying and classifies its
@@ -910,7 +824,6 @@ fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
 /// ever ran, or a stream error with no connection error under it) falls to
 /// `local`. `Err(_)` is `serve_control`'s task itself panicking/being
 /// aborted — `local`, a bug on this side, never a peer/path judgment.
-#[cfg(any(unix, test))]
 fn classify_target_connection_loss(
     joined: &Result<Result<(), crate::server::ConnError>, tokio::task::JoinError>,
     close_reason: Option<&qsh_transport::ConnectionError>,
@@ -939,7 +852,6 @@ fn classify_target_connection_loss(
 /// closed". The cause is `tls_rejected`: one side's trust store stopped
 /// accepting the other's credential, the same thing a handshake refusal
 /// says, and no new vocabulary value is needed.
-#[cfg(any(unix, test))]
 fn classify_target_end(
     joined: &Result<Result<(), crate::server::ConnError>, tokio::task::JoinError>,
     close_reason: Option<&qsh_transport::ConnectionError>,
@@ -958,7 +870,6 @@ fn classify_target_end(
 /// same refusal a handshake rejection meets, so it takes the ordinary
 /// doubling backoff of a failed attempt ([`Backoff::next_delay`]) and does
 /// not touch the quick-loss count.
-#[cfg(any(unix, test))]
 fn redial_delay<R: rand::Rng>(
     backoff: &mut Backoff<R>,
     trust_withdrawn: bool,
@@ -972,7 +883,6 @@ fn redial_delay<R: rand::Rng>(
 }
 
 /// How one backoff wait ended.
-#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackoffWait {
     /// The delay elapsed in full.
@@ -987,7 +897,6 @@ enum BackoffWait {
 /// The next wake on `rx`, or never if the detector side is gone (only an
 /// injected sender can be). `changed()` returns at once for a wake that
 /// landed while nobody was waiting, and is cancel-safe.
-#[cfg(any(unix, test))]
 async fn next_wake(rx: &mut watch::Receiver<WakeEvent>) -> WakeEvent {
     match rx.changed().await {
         Ok(()) => *rx.borrow_and_update(),
@@ -1001,7 +910,6 @@ async fn next_wake(rx: &mut watch::Receiver<WakeEvent>) -> WakeEvent {
 /// reaching the cap the loop waits ~30s between attempts" is testable under
 /// `tokio::time::pause()` without a real dial. `shutdown` wins over a wake
 /// that is already pending.
-#[cfg(any(unix, test))]
 async fn wait_backoff(
     delay: Duration,
     shutdown: &mut (impl std::future::Future<Output = ()> + Unpin),
@@ -1017,12 +925,10 @@ async fn wait_backoff(
 
 /// How long after a wake the fast cap applies (ADR-0023 decision 20),
 /// measured on the monotonic clock.
-#[cfg(any(unix, test))]
 const WAKE_FAST_WINDOW: Duration = Duration::from_secs(60);
 
 /// The delay ceiling inside the fast window, before it is lowered to a
 /// smaller configured `backoff_max_ms`.
-#[cfg(any(unix, test))]
 const WAKE_FAST_CAP: Duration = Duration::from_secs(2);
 
 /// A registration that lived at least this long before it ended counts as
@@ -1032,7 +938,6 @@ const WAKE_FAST_CAP: Duration = Duration::from_secs(2);
 /// (ADR-0041), so a connection that outlives it was carrying traffic under
 /// the conditions that are now failing, and the next loss is news rather
 /// than a continuation.
-#[cfg(any(unix, test))]
 const STABLE_REGISTRATION: Duration = Duration::from_secs(60);
 
 /// The ceiling on the redial delay that consecutive quick losses build up
@@ -1043,7 +948,6 @@ const STABLE_REGISTRATION: Duration = Duration::from_secs(60);
 /// from being dialled into at four attempts a second, and small enough that
 /// a real outage right after a flapping spell is still recovered within
 /// seconds of the network returning.
-#[cfg(any(unix, test))]
 const QUICK_LOSS_CAP: Duration = Duration::from_secs(8);
 
 /// Exponential backoff with jitter between reconnect attempts
@@ -1072,8 +976,7 @@ const QUICK_LOSS_CAP: Duration = Duration::from_secs(8);
 /// Generic over the RNG so `docs/design/testing.md` L2's property tests can
 /// inject a seeded `rand::rngs::StdRng` for a fully deterministic sequence;
 /// production uses `rand::rngs::StdRng::try_from_rng(&mut SysRng)` — `Send`, unlike
-/// `rand::rng()`'s `ThreadRng` (`run_reverse_unix`'s own doc comment).
-#[cfg(any(unix, test))]
+/// `rand::rng()`'s `ThreadRng` (`run_reverse_observed`'s own doc comment).
 struct Backoff<R> {
     limits: BackoffLimits,
     /// The un-jittered delay the last call returned; `None` before the
@@ -1089,7 +992,6 @@ struct Backoff<R> {
     rng: R,
 }
 
-#[cfg(any(unix, test))]
 impl<R: rand::Rng> Backoff<R> {
     /// The multiplier the un-jittered delay doubles by on each failure
     /// (`docs/design/protocol.md` §11-4 — fixed, not configurable).
@@ -1192,7 +1094,6 @@ impl<R: rand::Rng> Backoff<R> {
 /// Apply `±jitter_pct%` to `delay`, drawing the offset from `rng`.
 /// `jitter_pct == 0` short-circuits to an exact, deterministic delay
 /// (and never touches `rng`).
-#[cfg(any(unix, test))]
 fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::Rng) -> Duration {
     if jitter_pct == 0 {
         return delay;
@@ -1220,7 +1121,6 @@ fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::Rng) -> Duration
 /// right after a `lost` — fires before this attempt's own TLS handshake,
 /// so it is always absent there, never the `"-"` placeholder earlier
 /// revisions used.
-#[cfg(any(unix, test))]
 #[derive(serde::Serialize)]
 struct ReconnectEvent<'a> {
     event: &'static str,
@@ -1270,7 +1170,6 @@ struct ReconnectEvent<'a> {
     tick_gap_ms: Option<u64>,
 }
 
-#[cfg(any(unix, test))]
 impl ReconnectEvent<'_> {
     /// Emit on [`super::listen::TARGET`] at `INFO` — the exact JSON line a
     /// stderr-reading campaign script parses whole, built by `serde_json`

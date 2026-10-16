@@ -17,14 +17,9 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::exec::ExecSpec;
-// `crate::localctl` is `#[cfg(unix)]`-only (`lib.rs`) — this whole reverse
-// (`LOCAL_CONTROL`) leg is unix-only, mirroring `ops/session.rs`'s own
-// `connect_reverse`/`dial_reverse` twin-cfg discipline (Windows leg trap
-// (b): an ungated import consumed only by unix-only code trips
-// `unused_imports` under Windows clippy).
-#[cfg(unix)]
+// `crate::localctl` builds on every platform, so the reverse
+// (`LOCAL_CONTROL`) leg does too.
 use crate::localctl::client::ControlConduit;
-#[cfg(unix)]
 use crate::ops::OpError;
 
 #[cfg(unix)]
@@ -157,7 +152,6 @@ pub struct Session {
     /// [`crate::ops::LocalRoute`] through (which would reach backwards
     /// from `client` into `ops`, the wrong dependency direction —
     /// `CLAUDE.md`'s workspace map).
-    #[cfg(unix)]
     local: Option<(std::path::PathBuf, String)>,
     /// The `LOCAL_CONTROL` leg's own `LocalHelloAck` identity —
     /// `(peer_fingerprint, generation)` — `Some` exactly when
@@ -167,7 +161,6 @@ pub struct Session {
     /// between the two handshakes is caught as a stale route rather than
     /// silently opening a data stream against a peer the control leg
     /// never actually bound to (see that method's own doc).
-    #[cfg(unix)]
     local_ack: Option<(String, u64)>,
     next_request_id: u64,
     /// Capabilities both sides support.
@@ -206,9 +199,7 @@ impl Session {
         Self {
             conn: Some(conn),
             link: ControlLink::Direct(ctl),
-            #[cfg(unix)]
             local: None,
-            #[cfg(unix)]
             local_ack: None,
             next_request_id: 1,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
@@ -224,7 +215,6 @@ impl Session {
     /// with the peer on the CLI process's behalf), so `capabilities` and
     /// `peer_device_name` come straight from the ack instead —
     /// `LocalHelloAck.capabilities` and `.host` respectively.
-    #[cfg(unix)]
     pub(crate) fn from_local_control(
         conduit: ControlConduit,
         capabilities: Vec<String>,
@@ -297,7 +287,6 @@ impl Session {
     /// `LOCAL_STREAM` conduit to [`Self::local`]'s daemon socket and host
     /// (`crate::localctl::client::open_stream` sends `header` itself —
     /// see that function's own doc for why).
-    #[cfg(unix)]
     async fn open_local_data_link(
         &self,
         header: &StreamHeader,
@@ -336,20 +325,6 @@ impl Session {
             DataSend::Local(handshake.send),
             DataRecv::Local(handshake.recv),
             kill,
-        ))
-    }
-
-    /// Windows twin of [`Self::open_local_data_link`]: unreachable in
-    /// practice (`Self::local` is always `None` there — localctl/UDS does
-    /// not exist on that platform, `link::ControlLink`'s own doc), kept so
-    /// [`Self::open_data_link`]'s `None` branch compiles everywhere.
-    #[cfg(not(unix))]
-    async fn open_local_data_link(
-        &self,
-        _header: &StreamHeader,
-    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-        Err(ClientError::Unsupported(
-            "this platform has no LOCAL_CONTROL/LOCAL_STREAM carrier".into(),
         ))
     }
 
@@ -1252,7 +1227,6 @@ fn response_kind(body: &response::Body) -> &'static str {
 /// protocol-shape rejection, not reclassified as `Unsupported`); only the
 /// message names the cause and the fix (`exec_data_rejected_by_an_old_daemon_names_the_stale_qsh_listen`
 /// below, `docs/CLI.md` §6.13's reverse-relay list).
-#[cfg(unix)]
 fn map_local_stream_open_error(err: OpError, header: &StreamHeader, host: &str) -> ClientError {
     if err.code == ErrorCode::InvalidArgument
         && header.stream_kind() == Some(wire::StreamKind::ExecData)
@@ -1298,8 +1272,8 @@ async fn pump_stdin(
     send.send(&ExecFrame::stdin_eof()).await
 }
 
-// `Session::from_local_control`/`open_local_data_link` are unix-only
-// (`crate::localctl` is a `#[cfg(unix)]` module — `lib.rs`), so the whole
-// module is rather than gating each test individually.
+// These tests drive `Session::from_local_control`/`open_local_data_link`
+// against a fake daemon bound to a `UnixListener`, so the whole module is
+// unix-only, rather than gating each test individually.
 #[cfg(all(test, unix))]
 mod reverse_tests;

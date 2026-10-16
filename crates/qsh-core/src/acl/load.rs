@@ -17,7 +17,7 @@
 //!
 //! [`load_or_deny`] is M5 plan Step 6 (2473c88)'s production wiring: the one
 //! function `crate::serve::host_runtime` and
-//! `crate::reverse::listen::run_listen_unix` both call to turn this
+//! `crate::reverse::listen::run_listen` both call to turn this
 //! module's [`PolicyLoad`] into a real [`super::Authorizer`], falling back
 //! to [`super::DenyAll`] (plus a [`StartupDiagnostic`] the caller must
 //! surface) on anything short of [`PolicyLoad::Loaded`]. Everything above
@@ -371,7 +371,7 @@ impl StartupDiagnostic {
 
 /// Load `acl.toml` and turn the result straight into an [`Authorizer`] for
 /// a production call site (M5 plan Step 6 (2473c88) — the only two callers are
-/// `crate::serve::host_runtime` and `crate::reverse::listen::run_listen_unix`'s
+/// `crate::serve::host_runtime` and `crate::reverse::listen::run_listen`'s
 /// controller side). [`PolicyLoad::Loaded`] becomes the real [`Policy`],
 /// whose rows and the requester's trust role form a union;
 /// [`PolicyLoad::Missing`] is a [`Policy`] with no rows, so only roles
@@ -416,7 +416,7 @@ pub enum Role {
     /// `qsh serve` / `crate::serve::host_runtime` — the 5 session/exec
     /// actions.
     Serve,
-    /// `qsh listen` / `crate::reverse::listen::run_listen_unix` — reverse
+    /// `qsh listen` / `crate::reverse::listen::run_listen` — reverse
     /// registration (`host.reverse`) only.
     Listen,
 }
@@ -579,7 +579,7 @@ impl PinnedPrincipalIndex {
 /// (`Arc::new(policy)` below). `crate::serve::host_runtime` needs the
 /// index to compose ADR-0017 결정 3's pairing-pin notice;
 /// `crate::ops::doctor` needs it (ROADMAP M9 (h)) for `acl_principal_unmatched`/
-/// `acl_ca_auth_path_missing`. `crate::reverse::listen::run_listen_unix`
+/// `acl_ca_auth_path_missing`. `crate::reverse::listen::run_listen`
 /// keeps calling [`load_or_deny`] itself, unchanged — a reverse target
 /// never reaches `crate::server::Server::serve_pairing_connection` at all,
 /// so it has no pairing notice to compose and no doctor diagnostic of its

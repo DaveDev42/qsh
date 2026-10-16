@@ -24,58 +24,48 @@
 //! (`crate::handshake::REJECTION_DRAIN_TIMEOUT`) before the caller closes
 //! the connection — nothing here re-implements that ordering.
 //!
-//! `run_listen_unix` also binds this process's `localctl` UDS admin
-//! socket (`crate::localctl::daemon`, M3 plan Step 5 (a) (2473c88)) alongside
-//! the QUIC listener and runs its accept loop for as long as
-//! [`Listen::run`]'s does, unlinking the socket immediately after — on a
-//! clean shutdown and on the QUIC listener dying on its own alike, so the
-//! socket file never outlives this process.
+//! `run_listen` also binds this process's `localctl` admin endpoint (a UDS
+//! socket, or a named pipe on Windows; `crate::localctl::daemon`, M3 plan
+//! Step 5 (a) (2473c88)) alongside the QUIC listener and runs its accept loop
+//! for as long as [`Listen::run`]'s does, removing the socket immediately
+//! after — on a clean shutdown and on the QUIC listener dying on its own
+//! alike, so the socket file never outlives this process. On Windows the
+//! pipe name is claimed before the QUIC listener opens, so a name somebody
+//! else holds fails the start before any UDP port is bound
+//! (`listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken`).
 
-use std::collections::HashMap;
-#[cfg(unix)]
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, Hello};
 use qsh_transport::{AcceptError, Connection, FramedStream, Incoming, Listener};
-#[cfg(unix)]
 use qsh_transport::{RecvStream, SendStream};
 use tokio::sync::mpsc;
-#[cfg(unix)]
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-// The next four imports are consumed only by the unix entry point (and
-// this module's tests) — on the Windows lib build nothing constructs a
-// controller, so ungated they would trip `unused_imports` under the
-// Windows leg's `clippy -D warnings` (same gating as `tui/mod.rs`).
-// `AllowAllPinned` itself is test-only now (M5 Step 6): production builds
-// its `Authorizer` from `acl::load_or_deny` below, never this interim
-// stand-in — the test module's `test_listen`/`test_listen_with_clock`
-// helpers are the only remaining callers.
+// `AllowAllPinned` is test-only: production builds its
+// `Authorizer` from `acl::load_or_deny` below, never this interim stand-in —
+// the test module's `test_listen`/`test_listen_with_clock` helpers are the
+// only remaining callers.
 #[cfg(test)]
 use crate::acl::AllowAllPinned;
 use crate::acl::Authorizer;
-#[cfg(unix)]
 use crate::audit::RotatingAuditSink;
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::Clock;
-#[cfg(unix)]
 use crate::broker::SessionId;
-#[cfg(any(unix, test))]
 use crate::broker::SystemClock;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::{ClientError, Session};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
-#[cfg(unix)]
 use crate::localctl::daemon::{LocalctlDaemon, LocalctlListener};
-#[cfg(unix)]
 use crate::localctl::mux::{ConduitId, ControlMux, Exhausted};
+use crate::localctl::transport;
 use crate::ops::OpError;
 use crate::trust::SharedTrustStore;
 
@@ -87,15 +77,12 @@ mod hub;
 mod registration;
 
 use conn_table::{ConnTable, Published, rollback_target};
-#[cfg(unix)]
 use hub::{
     RESET_CODE_TUNNEL_HUB_EXHAUSTED, RESET_CODE_TUNNEL_UNKNOWN_FORWARD,
     TUNNEL_ARRIVAL_SWEEP_INTERVAL,
 };
 
-#[cfg(unix)]
 pub use hub::{ConduitInbound, ControlHub, HubSendError};
-#[cfg(unix)]
 pub(crate) use hub::{TunnelCloseTarget, tunnel_close_target};
 
 /// How often [`Listen::run_stale_sweeper`] checks the registry for stale
@@ -114,9 +101,6 @@ pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 /// small enough that a re-registration a few hundred milliseconds into a
 /// re-dial's backoff is still noticed promptly, large enough that a full
 /// `wait_ms` window of waiting never becomes a hot loop.
-// Consumed only by `control_hub_wait`/`connection_for_wait`, both `#[cfg(unix)]`
-// (localctl is a Unix-domain socket) — dead, not absent, on Windows.
-#[cfg_attr(not(unix), allow(dead_code))]
 const HUB_WAIT_POLL: Duration = Duration::from_millis(75);
 
 /// Close code for the connection a NAT-rebind reconnect displaces
@@ -189,60 +173,6 @@ pub async fn run_listen(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
-    on_policy_diagnostic: impl FnMut(&str),
-    shutdown: impl std::future::Future<Output = ()>,
-) -> Result<(), OpError> {
-    // Twin cfg blocks as alternative tail expressions — the exact shape
-    // `pty::factory` established; a `return` here instead would trip
-    // clippy's `needless_return` on the Windows leg (probed empirically).
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            paths,
-            config,
-            identity,
-            bind_flag,
-            on_bound,
-            on_policy_diagnostic,
-            shutdown,
-        );
-        Err(windows_unsupported())
-    }
-    #[cfg(unix)]
-    {
-        run_listen_unix(
-            paths,
-            config,
-            identity,
-            bind_flag,
-            on_bound,
-            on_policy_diagnostic,
-            shutdown,
-        )
-        .await
-    }
-}
-
-/// `docs/CLI.md` §6.13: `qsh listen`/`qsh reverse` create no resources on
-/// Windows and answer `UNSUPPORTED` + exit `255` — localctl (UDS) and the
-/// host role (PTY, `crate::pty`) are both `cfg(unix)`, so there is nothing
-/// for either to actually do there. Shared by [`run_listen`] and
-/// [`super::target::run_reverse`] so the message and code stay identical.
-#[cfg(not(unix))]
-pub(super) fn windows_unsupported() -> OpError {
-    OpError::new(
-        ErrorCode::Unsupported,
-        "reverse mode is not supported on this platform (localctl and the PTY host role are unix-only)",
-    )
-}
-
-#[cfg(unix)]
-async fn run_listen_unix(
-    paths: &Paths,
-    config: &Config,
-    identity: LoadedIdentity,
-    bind_flag: Option<&str>,
-    on_bound: impl FnOnce(SocketAddr),
     mut on_policy_diagnostic: impl FnMut(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
@@ -254,11 +184,12 @@ async fn run_listen_unix(
     let stale_retention = config.stale_retention()?;
     let liveness = config.liveness()?;
 
-    // localctl (M3 plan Step 5 (a) (2473c88)): bind this process's UDS admin
-    // socket before the QUIC listener, so a runtime directory whose
-    // permissions this process cannot pin to 0700 fails the whole startup
-    // closed rather than leaving a QUIC listener half-serving with no
-    // local control surface behind it.
+    // localctl (M3 plan Step 5 (a) (2473c88)): bind this process's admin
+    // endpoint before the QUIC listener, so a runtime directory whose
+    // permissions this process cannot pin to 0700 (or, on Windows, a pipe
+    // name somebody else already holds) fails the whole startup closed
+    // rather than leaving a QUIC listener half-serving with no local
+    // control surface behind it.
     let pid = std::process::id();
     let localctl_bound = LocalctlListener::bind(paths, pid)?;
     let localctl_socket_path = localctl_bound.socket_path.clone();
@@ -273,7 +204,7 @@ async fn run_listen_unix(
     // socket must not outlive the process" on every exit path, not only the
     // clean-shutdown one the accept loop's own tail covers.
     let trust = SharedTrustStore::open(paths.trust_file()).inspect_err(|_| {
-        let _ = std::fs::remove_file(&localctl_socket_path);
+        transport::remove_endpoint(&localctl_socket_path);
     })?;
     // The stateless reset key (ADR-0036) is read or created before the
     // bind; an unusable key file never fails the start, it yields one
@@ -286,14 +217,14 @@ async fn run_listen_unix(
         liveness.tuning(),
     )
     .map_err(|err| {
-        let _ = std::fs::remove_file(&localctl_socket_path);
+        transport::remove_endpoint(&localctl_socket_path);
         crate::serve::bind_setup_error(&bind, err)
     })?;
     if let Some(diagnostic) = &reset_key_diagnostic {
         on_policy_diagnostic(diagnostic);
     }
     let actual = listener.local_addr().map_err(|err| {
-        let _ = std::fs::remove_file(&localctl_socket_path);
+        transport::remove_endpoint(&localctl_socket_path);
         OpError::new(
             ErrorCode::Internal,
             format!("cannot read bound address: {err}"),
@@ -408,7 +339,7 @@ async fn run_listen_unix(
     if let Err(join_err) = localctl_task.await {
         tracing::warn!(%join_err, "localctl daemon task panicked");
     }
-    let _ = std::fs::remove_file(&localctl_socket_path);
+    transport::remove_endpoint(&localctl_socket_path);
 
     // F2 (M5 plan Step 3 (2473c88)): `Listen::run` detaches each accepted
     // connection's task the same way `server::Server::run` does — a
@@ -425,7 +356,7 @@ async fn run_listen_unix(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod control_hub_tests;
 
 #[cfg(test)]
@@ -452,10 +383,8 @@ pub struct Listen {
     /// The `LOCAL_CONTROL` relay for each live registration, keyed by
     /// `name` exactly like [`Self::conns`] — a *separate* table
     /// (`M3 Step 6`), not a field alongside `Connection` in `conns`
-    /// itself, purely so this whole table (and its type, [`ControlHub`])
-    /// can be `#[cfg(unix)]`-only without splitting `conns`'s type across
-    /// platforms (localctl has no meaning on Windows — this file's own
-    /// module docs on `crate::localctl`). Published/removed in lock-step
+    /// itself, so the registry's connection table does not depend on
+    /// the relay's type ([`ControlHub`]). Published/removed in lock-step
     /// with `conns` by [`Self::finish_registration`]/
     /// [`Self::drive_registered_session`], via the same generation-guarded
     /// [`ConnTable::publish`]/[`ConnTable::remove_if`] `conns` uses — two
@@ -465,7 +394,6 @@ pub struct Listen {
     /// self-healing (the conduit that raced into it sees the hub die
     /// immediately after, the same as any other host-death path) rather
     /// than worth a joint lock over.
-    #[cfg(unix)]
     hubs: ConnTable<Arc<ControlHub>>,
     /// The same clock [`Registry`] was built with — [`Listen::run_stale_sweeper`]
     /// needs it too (to pace its own tick), so it is threaded through here
@@ -494,7 +422,7 @@ pub struct Listen {
     /// order) even when both run in the same `qsh listen` process.
     quotas: Arc<crate::quota::Quotas>,
     /// The reverse registration watch from the `[recovery]` section of this
-    /// process's `config.toml`, validated by `run_listen_unix` and set once
+    /// process's `config.toml`, validated by `run_listen` and set once
     /// before the accept loop starts ([`Self::set_path_watch`]). Unset
     /// (every test and embedding that builds a `Listen` directly) means
     /// [`PathWatchConfig::reverse_default`], the same default `config.toml`
@@ -525,14 +453,14 @@ impl Listen {
     /// stale-eviction parameters. `clock` should be the same clock `registry`
     /// was built with (`Listen::clock`'s doc comment) — production callers
     /// share one `Arc<dyn Clock>` between the two constructions exactly the
-    /// way `run_listen_unix` does. [`Self::new`] paces
+    /// way `run_listen` does. [`Self::new`] paces
     /// [`Self::run_stale_sweeper`] at the production [`STALE_SWEEP_TICK`]; a
     /// test that actually wants to observe a sweep fire without paying that
     /// real wall-clock cost uses [`Self::new_with_sweep_tick`] instead
     /// (`sweep_tick`'s own doc comment). Its admission
     /// gate (M8 plan Step 2 (52639fc)) defaults to
     /// `crate::config::ServeConfig`'s own defaults on `clock` — production
-    /// (`run_listen_unix`) instead builds one from the operator's actual
+    /// (`run_listen`) instead builds one from the operator's actual
     /// `[serve]` values (`[listen]` has no admission keys of its own — the
     /// design arbitration's own call: inherit `[serve]`) via
     /// [`Self::with_admission`].
@@ -585,7 +513,7 @@ impl Listen {
     }
 
     /// [`Self::new`] plus an explicit [`crate::admission::Gate`] —
-    /// `run_listen_unix` uses this to build the gate from the operator's
+    /// `run_listen` uses this to build the gate from the operator's
     /// actual `[serve].max_concurrent_handshakes`/`handshake_rate_per_source`
     /// (`[listen]` inherits `[serve]`'s admission values, design
     /// arbitration) instead of the hardcoded defaults [`Self::new`] uses.
@@ -638,7 +566,7 @@ impl Listen {
     }
 
     /// [`Self::with_admission_and_sweep_tick`] plus an explicit
-    /// [`crate::quota::Quotas`] — `run_listen_unix` uses this to build
+    /// [`crate::quota::Quotas`] — `run_listen` uses this to build
     /// the tracker from the operator's actual `[serve].max_connections`/
     /// `max_connections_per_principal` the same way `[listen]` already
     /// inherits `[serve]`'s admission values (`Self::with_admission`'s own
@@ -664,7 +592,6 @@ impl Listen {
             audit,
             device_name: device_name.into(),
             conns: ConnTable::new(),
-            #[cfg(unix)]
             hubs: ConnTable::new(),
             clock,
             stale_retention,
@@ -708,7 +635,7 @@ impl Listen {
     /// Store the validated reverse registration watch config every
     /// registered connection's liveness watch uses (ADR-0021 decision 4,
     /// ADR-0041). Called once
-    /// by `run_listen_unix` before the accept loop; a second call is
+    /// by `run_listen` before the accept loop; a second call is
     /// ignored.
     pub fn set_path_watch(&self, config: PathWatchConfig) {
         let _ = self.path_watch.set(config);
@@ -718,7 +645,7 @@ impl Listen {
     /// (ADR-0031 결정 2~3): from now on every registration is watched, so a
     /// `trust remove` of the target, or a role cut that takes away its
     /// `host.reverse`, ends the registration within the poll interval plus
-    /// one judgment. `run_listen_unix` passes the store the listener's TLS
+    /// one judgment. `run_listen` passes the store the listener's TLS
     /// verifier reads. No-op past the first call.
     pub fn set_trust_watch(&self, trust: Arc<SharedTrustStore>) {
         let _ = self.trust_watch.set(trust);
@@ -726,7 +653,7 @@ impl Listen {
 
     /// Test-only: replace the liveness-watch config for every connection
     /// registered from now on (see [`Self::path_watch_config`]).
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn set_test_path_watch(&self, config: PathWatchConfig) {
         *self
             .test_path_watch
@@ -739,7 +666,7 @@ impl Listen {
     /// and answers no `Ping`, which is what a `Pong` stuck behind loss
     /// recovery on the ordered control stream looks like from the peer,
     /// while the QUIC connection underneath keeps running (issue #10).
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn set_test_control_stall(&self, stalled: bool) {
         self.test_control_stall.send_replace(stalled);
     }
@@ -790,7 +717,6 @@ impl Listen {
     /// indistinguishable here on purpose: this table only ever holds a
     /// genuinely live hub, [`Self::registry`] is what still knows a name
     /// existed at all).
-    #[cfg(unix)]
     pub fn control_hub(&self, name: &str) -> Option<Arc<ControlHub>> {
         self.hubs.get(name)
     }
@@ -803,7 +729,6 @@ impl Listen {
     /// host at all (`docs/CLI.md` §6.9's own usage examples), so this
     /// controller must consider every live registration it holds, the
     /// same shape [`Self::registry`]'s own `snapshot` gives `LocalHostList`.
-    #[cfg(unix)]
     pub fn hubs_snapshot(&self) -> Vec<(String, Arc<ControlHub>)> {
         self.hubs.snapshot()
     }
@@ -826,7 +751,6 @@ impl Listen {
     /// acquisitions (`ConnTable::get`/`get_matching` each take and
     /// release their own), never held across an `.await` — both return
     /// owned clones.
-    #[cfg(unix)]
     pub fn connection_for(&self, name: &str) -> Option<(Connection, Arc<ControlHub>)> {
         let hub = self.hubs.get(name)?;
         let conn = self.conns.get_matching(name, hub.generation)?;
@@ -862,7 +786,6 @@ impl Listen {
     /// `docs/design/protocol.md` §11-4's `stale_retention` is what actually
     /// bounds that case in practice, this check is just not wasting the
     /// caller's remaining budget once it has already fired).
-    #[cfg(unix)]
     pub async fn control_hub_wait(
         &self,
         name: &str,
@@ -905,7 +828,6 @@ impl Listen {
     /// directly) — the same reasoning [`Self::connection_for`]'s own doc
     /// gives for why hub and connection must come from one fixed
     /// generation, not two independent lookups.
-    #[cfg(unix)]
     pub async fn connection_for_wait(
         &self,
         name: &str,
@@ -1059,10 +981,8 @@ impl Listen {
 /// this name; kept local rather than shared because it is three lines and
 /// each copy states the lifetime it guards
 /// ([`Listen::run_tunnel_accept_loop`]'s sweeper, here).
-#[cfg(unix)]
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
-#[cfg(unix)]
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
@@ -1071,12 +991,9 @@ impl Drop for AbortOnDrop {
 
 /// [`Listen::drive_registered_session`]'s `select!` arm for its hub's
 /// outbound-relay channel — a receiver that may not exist at all (no hub
-/// for this generation, or this build has no `ControlHub` at all —
-/// [`Listen::take_hub_outbound_receiver`]'s `#[cfg(not(unix))]` twin
-/// always returns `None`) resolves to a future that never completes, so
+/// for this generation) resolves to a future that never completes, so
 /// that `select!` branch simply never fires rather than the whole loop
-/// needing a second, platform-conditional shape
-/// (`tokio::select!` has no per-branch `#[cfg]`, unlike `futures::select!`).
+/// needing a second shape.
 async fn recv_outbound(
     rx: &mut Option<mpsc::UnboundedReceiver<(u64, wire::control_message::Body)>>,
 ) -> Option<(u64, wire::control_message::Body)> {

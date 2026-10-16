@@ -281,7 +281,6 @@ impl SessionAttachStream {
     /// decision 3): each forward's listener relays through this machine's
     /// resident `qsh listen` daemon instead of dialing a QUIC connection
     /// this process does not hold on the reverse route.
-    #[cfg(unix)]
     fn start_local_forwards_reverse(
         &self,
         specs: &[qsh_proto::wire::ForwardSpec],
@@ -307,22 +306,6 @@ impl SessionAttachStream {
             started.push(handle);
         }
         Ok(started)
-    }
-
-    /// Windows twin: localctl (UDS) has no meaning there, and
-    /// `Ops::resolve_route` never produces a reverse route there either, so
-    /// this is unreachable in practice rather than dead code — see
-    /// `crate::ops::tunnel::Ops::tunnel_open_reverse`'s own Windows twin
-    /// for the identical reasoning.
-    #[cfg(not(unix))]
-    fn start_local_forwards_reverse(
-        &self,
-        _specs: &[qsh_proto::wire::ForwardSpec],
-    ) -> Result<Vec<crate::tunnel::LocalForwardHandle>, OpError> {
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "reverse routing (localctl) is not available on this platform",
-        ))
     }
 
     /// Bind and start this attach's `-D` dynamic (SOCKS5) forwards
@@ -400,7 +383,6 @@ impl SessionAttachStream {
     /// connection this process does not hold on the reverse route. The
     /// capability gate has already run in [`Self::open_dynamic_forwards`]
     /// by the time this is reached.
-    #[cfg(unix)]
     fn start_dynamic_forwards_reverse(
         &self,
         specs: &[qsh_proto::wire::DynamicSpec],
@@ -427,19 +409,6 @@ impl SessionAttachStream {
             started.push(handle);
         }
         Ok(started)
-    }
-
-    /// Windows twin — see [`Self::start_local_forwards_reverse`]'s own doc
-    /// on why this is unreachable in practice rather than dead code.
-    #[cfg(not(unix))]
-    fn start_dynamic_forwards_reverse(
-        &self,
-        _specs: &[qsh_proto::wire::DynamicSpec],
-    ) -> Result<Vec<crate::tunnel::DynamicForwardHandle>, OpError> {
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "reverse routing (localctl) is not available on this platform",
-        ))
     }
 
     /// This attach's `-R` remote forward [`Tunnel`](qsh_proto::Tunnel)

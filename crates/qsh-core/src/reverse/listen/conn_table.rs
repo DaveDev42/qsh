@@ -121,7 +121,6 @@ impl<T: Clone> ConnTable<T> {
     /// [`Listen::control_hub`]'s lookup: a caller outside this file that
     /// just wants "the live one, if any" rather than a specific
     /// generation (see [`Self::get_matching`] for that).
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn get(&self, name: &str) -> Option<T> {
         self.lock().get(name).map(|(_, v)| v.clone())
     }
@@ -133,7 +132,6 @@ impl<T: Clone> ConnTable<T> {
     /// [`ControlHub`] only when it is genuinely still that host's live
     /// one, never a generation a newer registration has already
     /// superseded.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn get_matching(&self, name: &str, generation: u64) -> Option<T> {
         match self.lock().get(name) {
             Some((g, v)) if *g == generation => Some(v.clone()),
@@ -149,7 +147,6 @@ impl<T: Clone> ConnTable<T> {
     /// registration this controller currently holds, the same "no host
     /// named, consider everything live" shape [`Registry::snapshot`]
     /// already has for [`LocalHostList`](qsh_proto::local::LocalHostList).
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn snapshot(&self) -> Vec<(String, T)> {
         self.lock()
             .iter()

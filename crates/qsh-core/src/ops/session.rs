@@ -61,17 +61,14 @@ use context::{
 use drive::drive_attach;
 use link::ConnectedLink;
 use pump::{attach_event_json, pump_attach_control, pump_attach_input};
-#[cfg(unix)]
 use reader::dial_reverse_wait;
 use reader::{dial_peer, forget_if_closed};
 // Wider than `session`'s own use of it needs (`pub(super)` would do for
 // every call site in this module): `crate::ops::exec::exec_async_reverse`
 // (issue #5) is the one caller outside this module, so this re-export is
 // `pub(in crate::ops)` rather than plain `use`.
-#[cfg(unix)]
 pub(in crate::ops) use reader::dial_reverse;
 use reconnect::{DialReconnect, LocalReconnect};
-#[cfg(any(unix, test))]
 use recovery::abandoned;
 use recovery::{ReattachTask, Recovery, lock, map_resume_error, recover_attach, spawn_reattach};
 
@@ -1208,6 +1205,7 @@ impl Ops {
     /// decision 11): the dial future is dropped, which abandons the
     /// attempt, and the call returns `CANCELED`. `qsh-transport`'s contract
     /// is untouched; only this caller stops waiting for it.
+    // Only the file-copy path (unix) connects through a resolved route.
     #[cfg(unix)]
     pub(crate) fn connect_routed(
         &self,
@@ -1316,7 +1314,6 @@ impl Ops {
     /// needs it to seed [`AttachContext`]'s reverse-route baseline (Step
     /// 8's `LocalReconnect` input); every other caller of
     /// [`Self::connect`] discards it.
-    #[cfg(unix)]
     fn connect_reverse(&self, route: &LocalRoute) -> Result<(Connected, u64), OpError> {
         let runtime = self.connect_runtime()?;
         let (session, peer_fingerprint, generation) = runtime.block_on(dial_reverse(route))?;
@@ -1333,19 +1330,6 @@ impl Ops {
             generation,
         ))
     }
-
-    /// Windows twin of [`Self::connect_reverse`]: localctl (UDS) has no
-    /// meaning there, and [`Ops::resolve_route`] never actually produces
-    /// [`PeerRoute::Reverse`] on that platform (`Ops::host::reverse_host_entries_async`
-    /// always returns empty), so this exists only so `connect`'s match
-    /// compiles — it is unreachable in practice.
-    #[cfg(not(unix))]
-    fn connect_reverse(&self, _route: &LocalRoute) -> Result<(Connected, u64), OpError> {
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "reverse routing (localctl) is not available on this platform",
-        ))
-    }
 }
 
 /// What the first open of a supervised tunnel learned about its route
@@ -1356,8 +1340,7 @@ pub(crate) enum RouteSeed {
     /// Reverse route: the generation of the registration the first open
     /// rode. The daemon socket and host name are on the `Connected`.
     Reverse {
-        // Read only by the unix-only reverse supervisor.
-        #[cfg_attr(not(unix), allow(dead_code))]
+        // Read only by the reverse supervisor.
         generation: u64,
     },
 }

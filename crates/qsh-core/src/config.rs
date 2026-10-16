@@ -213,8 +213,7 @@ impl Paths {
     /// computes the path, so both the daemon and a discovering CLI process
     /// agree on where to look whether or not the directory exists yet — a
     /// missing runtime directory just means no `qsh listen` has ever run
-    /// here (`localctl::client::candidate_sockets`, `#[cfg(unix)]`-only,
-    /// treats it the same way).
+    /// here (`localctl::client::candidate_sockets` treats it the same way).
     pub fn runtime_dir(&self) -> PathBuf {
         if let Some(dir) = &self.runtime_dir_override {
             return dir.clone();
@@ -1008,7 +1007,7 @@ impl ListenConfig {
     /// `Config::reverse` field so this section stays ignorant of its
     /// sibling's shape (`Config::stale_retention` below is the one call site
     /// that wires the two together, the same split
-    /// `reverse::listen::run_listen_unix` already keeps between config
+    /// `reverse::listen::run_listen` already keeps between config
     /// sections).
     ///
     /// **Why `× 3`:** a target's worst-case re-registration delay is
@@ -1451,7 +1450,7 @@ impl Config {
     /// this same config's `[reverse].backoff_max_ms` — the one call site
     /// that wires [`ListenConfig::stale_retention`] to
     /// [`ReverseConfig::backoff`] (`docs/design/protocol.md` §11-4). Used by
-    /// `reverse::listen::run_listen_unix` before constructing the
+    /// `reverse::listen::run_listen` before constructing the
     /// controller's stale sweeper — fail closed on either section's
     /// nonsense before any resource is created.
     pub fn stale_retention(&self) -> Result<std::time::Duration, OpError> {

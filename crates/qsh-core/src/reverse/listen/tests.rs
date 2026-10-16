@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use super::hub::*;
 use super::*;
 
@@ -576,7 +575,6 @@ async fn listen_run_flushes_its_quota_audit_window_on_the_periodic_tick() {
 /// [`Listen::control_hub_wait`]'s poll loop advances only when a test
 /// calls [`crate::broker::TestClock::advance`], never on real wall
 /// time (`docs/design/testing.md` L2, M3 plan Step 8 (c) (2473c88)).
-#[cfg(unix)]
 fn test_listen_with_clock(clock: Arc<crate::broker::TestClock>) -> Arc<Listen> {
     let registry = Registry::new(clock.clone(), false);
     Listen::new(
@@ -595,7 +593,6 @@ fn test_listen_with_clock(clock: Arc<crate::broker::TestClock>) -> Arc<Listen> {
 /// assigned — the first admission under a fresh name, always `0`
 /// ([`ConnTable`]'s own doc: "starting from a pre-existing occupant at
 /// generation `0`").
-#[cfg(unix)]
 fn admit(listen: &Listen, name: &str) -> u64 {
     listen
         .registry()
@@ -620,7 +617,6 @@ fn admit(listen: &Listen, name: &str) -> u64 {
 /// [`Listen::control_hub_wait`] directly, not the daemon frame loop
 /// around it — that path is covered at L3 by
 /// `crates/qsh-testkit/tests/it/local_control_reverse.rs`).
-#[cfg(unix)]
 fn publish_hub(listen: &Listen, name: &str, generation: u64) -> Arc<ControlHub> {
     let hub = ControlHub::new(
         name.to_string(),
@@ -646,7 +642,6 @@ fn publish_hub(listen: &Listen, name: &str, generation: u64) -> Arc<ControlHub> 
 /// with `None` — the same outcome
 /// `crate::localctl::daemon`'s `LOCAL_CONTROL` serve path turns into
 /// `ErrorCode::HostNotFound` (daemon.rs's own doc on this call site).
-#[cfg(unix)]
 #[tokio::test]
 async fn control_hub_wait_does_not_resolve_on_a_registration_still_at_the_known_generation() {
     let clock = Arc::new(crate::broker::TestClock::new());
@@ -701,7 +696,6 @@ async fn control_hub_wait_does_not_resolve_on_a_registration_still_at_the_known_
 /// production path, driven here without a real target re-dial or a
 /// real daemon frame loop (`docs/design/protocol.md` §11-4's mapping
 /// paragraph: "controller의 attach driver는 새 세대 등록을 기다린다").
-#[cfg(unix)]
 #[tokio::test]
 async fn control_hub_wait_resolves_once_a_strictly_newer_generation_registers() {
     let clock = Arc::new(crate::broker::TestClock::new());
@@ -755,7 +749,6 @@ async fn control_hub_wait_resolves_once_a_strictly_newer_generation_registers() 
 /// window) — [`Listen::control_hub_wait`] keeps polling, because the
 /// registry still knows the name (it went stale, not gone), and gives
 /// up at exactly its deadline rather than early or late.
-#[cfg(unix)]
 #[tokio::test]
 async fn control_hub_wait_times_out_when_nothing_ever_registers() {
     let clock = Arc::new(crate::broker::TestClock::new());
@@ -860,19 +853,27 @@ async fn run_stale_sweeper_removes_a_retention_expired_entry() {
         .unwrap();
 }
 
+/// Whether this process's localctl endpoint exists right now: its socket
+/// file on unix, its named pipe on Windows, where no path names the pipe and
+/// the endpoint list is the way to see one.
+fn localctl_endpoint_exists(paths: &Paths) -> bool {
+    crate::localctl::transport::candidate_endpoints(&paths.runtime_dir())
+        .map(|found| found.iter().any(|(pid, _)| *pid == std::process::id()))
+        .unwrap_or(false)
+}
+
 /// M3 plan Step 5 (a) (2473c88): the localctl socket this process bound must
-/// not outlive it. Drives the real `run_listen`/`run_listen_unix` end
+/// not outlive it. Drives the real `run_listen`/`run_listen` end
 /// to end — a genuine on-disk identity via `identity::init`/
 /// `identity::load` (`File` key-store mode, so nothing touches an OS
 /// credential store) — rather than constructing `Listen` directly the
 /// way `qsh_testkit::reverse::ReverseHarness` does, because this test
-/// is specifically about `run_listen_unix`'s own composition of the
+/// is specifically about `run_listen`'s own composition of the
 /// localctl accept loop with the QUIC one's drain, which `ReverseHarness`
 /// does not build at all (it calls `Listen::new`/`Listen::run` straight,
 /// never `run_listen`/`LocalctlListener`).
-#[cfg(unix)]
 #[tokio::test]
-async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
+async fn run_listen_unlinks_its_localctl_socket_on_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     // `.with_runtime_dir` pins the localctl socket inside this test's
     // own tempdir, independent of `$XDG_RUNTIME_DIR` — otherwise this
@@ -887,8 +888,6 @@ async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
     let identity = crate::identity::load(&paths)
         .expect("identity::load")
         .expect("identity was just created");
-
-    let socket_path = paths.localctl_socket(std::process::id());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<()>();
@@ -916,7 +915,7 @@ async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
 
     bound_rx.await.expect("qsh listen bound");
     assert!(
-        socket_path.exists(),
+        localctl_endpoint_exists(&paths),
         "localctl socket must exist once the daemon is up"
     );
 
@@ -926,7 +925,7 @@ async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
         .expect("run_listen exits cleanly on shutdown");
 
     assert!(
-        !socket_path.exists(),
+        !localctl_endpoint_exists(&paths),
         "localctl socket must be unlinked once shutdown has drained"
     );
 }
@@ -936,9 +935,8 @@ async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
 /// `trust.toml` so `SharedTrustStore::open` — the first fallible step
 /// *after* `LocalctlListener::bind` already created the socket file —
 /// fails startup outright; the socket must still not be left behind.
-#[cfg(unix)]
 #[tokio::test]
-async fn run_listen_unix_unlinks_its_localctl_socket_when_startup_fails_after_binding_it() {
+async fn run_listen_unlinks_its_localctl_socket_when_startup_fails_after_binding_it() {
     let dir = tempfile::tempdir().unwrap();
     // See the sibling test above for why `.with_runtime_dir` is
     // required here rather than optional.
@@ -955,9 +953,8 @@ async fn run_listen_unix_unlinks_its_localctl_socket_when_startup_fails_after_bi
     // empty store (`TrustStore::load`), not a startup failure.
     std::fs::write(paths.trust_file(), b"this is not valid toml [[[").unwrap();
 
-    let socket_path = paths.localctl_socket(std::process::id());
     assert!(
-        !socket_path.exists(),
+        !localctl_endpoint_exists(&paths),
         "nothing has bound this pid's socket yet"
     );
 
@@ -975,49 +972,45 @@ async fn run_listen_unix_unlinks_its_localctl_socket_when_startup_fails_after_bi
     assert_eq!(err.code, ErrorCode::ConfigError);
 
     assert!(
-        !socket_path.exists(),
+        !localctl_endpoint_exists(&paths),
         "the localctl socket bound before the failing step must not survive it"
     );
 }
 
-/// `docs/CLI.md` §6.13's Windows gate, mechanically: `run_listen`
-/// refuses on every non-unix target before it ever touches its
-/// arguments (module docs on [`windows_unsupported`]), so the
-/// identity/paths/config below are throwaway. This is the positive
-/// Windows-leg assertion M9 plan Step 3 (d) (b9a621b) owes ("Windows leg의
-/// nextest green … 나머지가 컴파일·통과") — a real `#[tokio::test]` that
-/// runs and passes on the Windows CI leg, not just an absence of a
-/// compile error there.
-#[cfg(not(unix))]
+/// On Windows the admin endpoint is a named pipe whose first instance is
+/// claimed exclusively, and `run_listen` claims it before the QUIC listener
+/// opens (ADR-0035 decision 14): a name somebody else already holds fails the
+/// start before any UDP port is bound, so no half-serving controller is left
+/// behind. The holder here is this very process, whose pid names the pipe.
+#[cfg(windows)]
 #[tokio::test]
-async fn run_listen_is_unsupported_on_non_unix() {
-    let identity = LoadedIdentity {
-        identity: crate::identity::Identity {
-            device_id: "device".into(),
-            fingerprint: qsh_transport::Fingerprint::of_spki_der(&[]),
-            key_store: qsh_proto::KeyStoreKind::File,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            cert_der: Vec::new(),
-            issued_by_ca: None,
-        },
-        local: qsh_transport::LocalIdentity {
-            cert_chain: Vec::new(),
-            key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
-        },
-    };
-    let paths = Paths::new("unused-config", "unused-state");
+async fn listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).expect("identity::init");
+    let identity = crate::identity::load(&paths)
+        .expect("identity::load")
+        .expect("identity was just created");
+
+    let holder = LocalctlListener::bind(&paths, std::process::id())
+        .expect("the first claim of the pipe name succeeds");
+
     let err = run_listen(
         &paths,
         &Config::default(),
         identity,
-        None,
-        |_addr| {},
-        |_diag| {},
+        Some("127.0.0.1:0"),
+        |_addr| panic!("must fail before the QUIC listener ever reports bound"),
+        |_diag| panic!("must fail before the policy diagnostic is ever composed"),
         std::future::pending::<()>(),
     )
     .await
-    .expect_err("non-unix must refuse to run");
-    assert_eq!(err.code, ErrorCode::Unsupported);
+    .expect_err("a pipe name that is already held must fail startup");
+    assert_eq!(err.code, ErrorCode::ConfigError, "{err:?}");
+
+    // The failed start left the holder's claim alone.
+    drop(holder);
 }
 
 // ------------------------------------------------------------------
@@ -1034,7 +1027,6 @@ async fn run_listen_is_unsupported_on_non_unix() {
 // above already draws for `LOCAL_STREAM`'s own cap).
 // ------------------------------------------------------------------
 
-#[cfg(unix)]
 fn test_hub() -> Arc<ControlHub> {
     ControlHub::new("widget".into(), "sha256:test".into(), 1, Vec::new())
 }
@@ -1048,7 +1040,6 @@ fn test_hub() -> Arc<ControlHub> {
 /// [`ControlHub::deliver_tcp_accepted`]'s own doc on why a bare drop
 /// here would be wrong), and the registry gained no trace of the
 /// unknown id.
-#[cfg(unix)]
 #[tokio::test]
 async fn deliver_tcp_accepted_refuses_an_unregistered_forward_id_and_queues_nothing() {
     let hub = test_hub();
@@ -1078,7 +1069,6 @@ async fn deliver_tcp_accepted_refuses_an_unregistered_forward_id_and_queues_noth
 /// second conduit's claim on its own id must see nothing, and the
 /// first conduit's claim on its own id must see exactly the arrival
 /// it registered.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_forward_id_never_resolves_to_a_different_conduits_registration() {
     let hub = test_hub();
@@ -1145,7 +1135,6 @@ async fn a_forward_id_never_resolves_to_a_different_conduits_registration() {
 /// random ULID, distinct from every hardcoded field below — is
 /// asserted absent from every string field as a belt-and-suspenders
 /// runtime check on top of that type-level guarantee.
-#[cfg(unix)]
 #[tokio::test]
 async fn list_forwards_reports_only_structural_fields_never_the_claim_token() {
     let hub = test_hub();
@@ -1185,7 +1174,6 @@ async fn list_forwards_reports_only_structural_fields_never_the_claim_token() {
 /// naming the right `forward_id`, never a second one; and closing is
 /// idempotent — an unknown id, or the same id again, is `false`, not
 /// an error, and sends nothing further.
-#[cfg(unix)]
 #[tokio::test]
 async fn admin_close_forward_removes_the_registration_and_notifies_the_target_exactly_once() {
     let hub = test_hub();
@@ -1238,7 +1226,6 @@ async fn admin_close_forward_removes_the_registration_and_notifies_the_target_ex
 /// a single byte of fid-a's traffic ever reached fid-b's claimed
 /// stream (or vice versa), the marker comparisons below catch it
 /// directly — a leak here is detectable, not merely improbable.
-#[cfg(unix)]
 #[tokio::test]
 async fn distinguishable_payloads_never_cross_between_two_conduits_claimed_forwards() {
     let hub = test_hub();
@@ -1352,7 +1339,6 @@ async fn distinguishable_payloads_never_cross_between_two_conduits_claimed_forwa
 /// claimant, never duplicated to two racing callers — duplicating it
 /// would itself be a byte leak, the same payload spliced into two
 /// different processes.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_single_queued_arrival_is_won_by_exactly_one_of_two_racing_claimants() {
     let hub = test_hub();
@@ -1396,7 +1382,6 @@ async fn a_single_queued_arrival_is_won_by_exactly_one_of_two_racing_claimants()
 /// ever seeing the queue, and conduit A's own subsequent claim (its
 /// *first*, seating its token as this id's owner) must still succeed
 /// untouched by B's attempt.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_conduit_that_only_knows_another_conduits_forward_id_cannot_claim_it() {
     let hub = test_hub();
@@ -1450,7 +1435,6 @@ async fn a_conduit_that_only_knows_another_conduits_forward_id_cannot_claim_it()
 /// has accepted merely for being first, which is exactly the race
 /// finding A closed. A mismatched token is refused immediately,
 /// before any wait, and the id itself stays registered.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_token_not_seated_at_registration_is_refused_and_the_real_one_still_works() {
     let hub = test_hub();
@@ -1500,7 +1484,6 @@ async fn a_token_not_seated_at_registration_is_refused_and_the_real_one_still_wo
 /// owned is removed and every `TCP_ACCEPTED` stream still queued for
 /// one of them is reset — but a *different* conduit's own
 /// registration is untouched by that same call.
-#[cfg(unix)]
 #[tokio::test]
 async fn unregister_conduit_sweeps_its_own_forwards_and_resets_queued_streams_but_spares_others() {
     let hub = test_hub();
@@ -1563,7 +1546,6 @@ async fn unregister_conduit_sweeps_its_own_forwards_and_resets_queued_streams_bu
 /// the precise, exhaustive assertion; per-id [`ControlHub::forward_owner`]
 /// checks alone could pass even if the sweep leaked some other id
 /// nobody thought to check.
-#[cfg(unix)]
 #[tokio::test]
 async fn unregister_conduit_leaves_zero_trace_of_a_conduit_that_owned_several_forwards() {
     let hub = test_hub();
@@ -1633,7 +1615,6 @@ async fn unregister_conduit_leaves_zero_trace_of_a_conduit_that_owned_several_fo
 /// [`ControlHub::try_acquire_tunnel_permit`] call is refused while
 /// every permit up to the cap is still held, and releasing one frees
 /// exactly one slot back.
-#[cfg(unix)]
 #[tokio::test]
 async fn tunnel_permit_cap_is_exact_not_advisory() {
     let hub = test_hub();
@@ -1661,7 +1642,6 @@ async fn tunnel_permit_cap_is_exact_not_advisory() {
 /// once a slot frees, a *different* conduit's registered forward must
 /// be able to use it immediately (M4 plan Step 5 (a) (2473c88): exceeding
 /// the cap "does not wedge the hub for other conduits").
-#[cfg(unix)]
 #[tokio::test]
 async fn exceeding_the_hub_cap_refuses_the_new_stream_without_wedging_the_hub_for_others() {
     let hub = test_hub();
@@ -1745,7 +1725,6 @@ async fn exceeding_the_hub_cap_refuses_the_new_stream_without_wedging_the_hub_fo
 /// itself ([`MAX_PARKED_CLAIMS_PER_CONDUIT`]) — the ceiling is what
 /// this test is about, and it must still be exact once the shares
 /// that fill it are spread across their owners.
-#[cfg(unix)]
 #[tokio::test]
 async fn claim_permit_hub_ceiling_is_exact_not_advisory() {
     let hub = test_hub();
@@ -1810,7 +1789,6 @@ async fn claim_permit_hub_ceiling_is_exact_not_advisory() {
 /// still be able to park and claim its own forward *without A giving
 /// anything back*. The ceiling still holds at the same time: A is
 /// capped at its share, far below the pool.
-#[cfg(unix)]
 #[tokio::test]
 async fn one_conduit_cannot_take_more_than_its_share_or_block_another_conduits_claim() {
     let hub = test_hub();
@@ -1901,7 +1879,6 @@ async fn one_conduit_cannot_take_more_than_its_share_or_block_another_conduits_c
 /// [`TunnelArrival::reset`]'s own doc). The registration itself must
 /// survive: an idle `-R` whose backlog aged out is still a live
 /// forward.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing_its_permit() {
     let hub = test_hub();
@@ -1988,7 +1965,6 @@ async fn a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing
 /// helper plays back the identical handshake for the direct-connect
 /// leg). Returns the target-side halves so a test can observe how
 /// [`Listen::handle_tcp_accepted_stream`] answered.
-#[cfg(unix)]
 async fn open_fake_target_tcp_accepted(
     conn: &Connection,
     ticket: &[u8],
@@ -2016,7 +1992,6 @@ async fn open_fake_target_tcp_accepted(
 /// all — proven here by registering `"not valid!"` (space and `!` are
 /// outside `[A-Za-z0-9_-]`) to a real conduit first: if the shape
 /// check were skipped, this delivery would succeed.
-#[cfg(unix)]
 #[tokio::test]
 async fn handle_tcp_accepted_stream_rejects_a_malformed_ticket_before_any_registry_lookup() {
     assert!(!wire::valid_forward_id("not valid!"));
@@ -2056,7 +2031,6 @@ async fn handle_tcp_accepted_stream_rejects_a_malformed_ticket_before_any_regist
 /// is queued by [`Listen::handle_tcp_accepted_stream`] and reachable
 /// by [`ControlHub::claim_tcp_accepted`] for exactly that id —
 /// the ordinary, successful path this whole relay exists to serve.
-#[cfg(unix)]
 #[tokio::test]
 async fn handle_tcp_accepted_stream_queues_a_registered_forward_id_for_its_conduit_to_claim() {
     let hub = test_hub();
@@ -2084,7 +2058,6 @@ async fn handle_tcp_accepted_stream_queues_a_registered_forward_id_for_its_condu
 /// already at [`MAX_TUNNEL_STREAMS_PER_HUB`] is reset with
 /// [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] before it is ever queued — the
 /// cap is exact even for a legitimately-registered id.
-#[cfg(unix)]
 #[tokio::test]
 async fn handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues() {
     let hub = test_hub();
@@ -2136,7 +2109,6 @@ async fn handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues() {
 /// [`ControlHub::deliver_response`] — the only path that ever seats
 /// one in production — instead of the `register_forward_for_test`
 /// shortcut.
-#[cfg(unix)]
 fn rfwd_open_body_with_token(token: &[u8]) -> wire::control_message::Body {
     wire::control_message::Body::RfwdOpen(wire::RemoteForwardOpen {
         claim_token: token.to_vec(),
@@ -2147,7 +2119,6 @@ fn rfwd_open_body_with_token(token: &[u8]) -> wire::control_message::Body {
 /// The `RemoteForwardOpened` a target answers with — this module's
 /// own copy of `control_hub_tests`' identical helper (a sibling test
 /// module's private items are not in scope here).
-#[cfg(unix)]
 fn rfwd_opened_response(forward_id: &str) -> wire::Response {
     wire::Response {
         body: Some(wire::response::Body::RfwdOpened(
@@ -2159,7 +2130,6 @@ fn rfwd_opened_response(forward_id: &str) -> wire::Response {
     }
 }
 
-#[cfg(unix)]
 fn rfwd_close_body(forward_id: &str) -> wire::control_message::Body {
     wire::control_message::Body::RfwdClose(wire::RemoteForwardClose {
         forward_id: forward_id.to_string(),
@@ -2172,7 +2142,6 @@ fn rfwd_close_body(forward_id: &str) -> wire::control_message::Body {
 /// stream was ever reset (`TunnelArrival::reset`) — dropping the
 /// connection instead would make every read fail for the wrong
 /// reason.
-#[cfg(unix)]
 async fn queue_one_arrival(
     hub: &Arc<ControlHub>,
     forward_id: &str,
@@ -2204,7 +2173,6 @@ async fn queue_one_arrival(
 /// A must leave with nothing, and B — the conduit that actually owns
 /// the id at the moment the arrival exists — must be able to claim
 /// it afterwards, proving the arrival was never consumed by A's wake.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_forward_id_re_seated_mid_wait_never_delivers_to_the_conduit_that_parked_first() {
     let hub = test_hub();
@@ -2264,7 +2232,6 @@ async fn a_forward_id_re_seated_mid_wait_never_delivers_to_the_conduit_that_park
 /// A check that compared only the owning conduit would happily hand
 /// the new instance's stream to the stale one; only comparing the
 /// token catches it.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_stale_claim_is_refused_even_when_the_re_seat_keeps_the_same_owner() {
     let hub = test_hub();
@@ -2324,7 +2291,6 @@ async fn a_stale_claim_is_refused_even_when_the_re_seat_keeps_the_same_owner() {
 /// unclaimable**: no token claims it, an empty one least of all, and
 /// no arrival is ever queued for it — so it holds no hub permit and
 /// no live QUIC stream on the strength of a capability nobody holds.
-#[cfg(unix)]
 #[tokio::test]
 async fn an_open_that_carried_no_claim_token_is_registered_permanently_unclaimable() {
     let hub = test_hub();
@@ -2404,7 +2370,6 @@ async fn an_open_that_carried_no_claim_token_is_registered_permanently_unclaimab
 /// instead of feeding it to `pending_rfwd_opens`, and the
 /// real-token claim at the end gets refused, failing the last
 /// assertion) — proving this is a relocation, not a loss.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_claim_token_is_taken_off_the_body_actually_sent_to_the_peer() {
     let hub = test_hub();
@@ -2456,7 +2421,6 @@ async fn a_claim_token_is_taken_off_the_body_actually_sent_to_the_peer() {
 /// just against the unclaimable one. All three producers are covered:
 /// a real token over the wire path, no token over the wire path, and
 /// the `register_forward_for_test` shortcut the other unit tests use.
-#[cfg(unix)]
 #[tokio::test]
 async fn an_empty_claim_token_is_refused_against_every_seat_this_hub_can_hold() {
     let hub = test_hub();
@@ -2531,7 +2495,6 @@ async fn an_empty_claim_token_is_refused_against_every_seat_this_hub_can_hold() 
 ///
 /// And the guard refuses non-owners rather than everyone: A's own
 /// close of its own forward still tears it down.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_conduit_can_neither_relay_nor_land_a_close_for_another_conduits_forward() {
     let hub = test_hub();
@@ -2633,7 +2596,6 @@ async fn a_conduit_can_neither_relay_nor_land_a_close_for_another_conduits_forwa
 /// `deliver_response` and the first assertion fails —
 /// `forward_registry_len()` is 1, the squatted registration owned by
 /// conduit A.
-#[cfg(unix)]
 #[tokio::test]
 async fn an_rfwd_opened_answering_a_request_that_was_never_an_open_registers_nothing() {
     let hub = test_hub();
@@ -2733,7 +2695,6 @@ async fn an_rfwd_opened_answering_a_request_that_was_never_an_open_registers_not
 /// `tunnel_notify.notify_waiters()` and the parked claimants never
 /// wake — the bounded `timeout` around the join handle fails with
 /// "must wake when its forward is swept".
-#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn unregister_conduit_wakes_the_claims_parked_on_the_forwards_it_sweeps() {
     let hub = test_hub();
@@ -2836,7 +2797,6 @@ async fn unregister_conduit_wakes_the_claims_parked_on_the_forwards_it_sweeps() 
 /// `run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_timeout`
 /// in `reverse/target/tests.rs`, and gated the same way on
 /// `QSH_ACCEPTANCE_SLOW`.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn controller_lost_line_reports_a_quinn_idle_timeout_as_idle_timeout() {
     use crate::reverse::test_harness as harness;
@@ -2882,7 +2842,6 @@ async fn controller_lost_line_reports_a_quinn_idle_timeout_as_idle_timeout() {
 /// Wall-clock (about 15 s), real sockets, default `PathWatchConfig` on both
 /// ends. The `datagram_liveness_` prefix selects it for the load repeat in
 /// `scripts/stress/run.sh`.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is() {
     use crate::client::pathwatch::PathWatchConfig;
@@ -2968,7 +2927,6 @@ fn registration_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_p
 }
 
 // `set_test_path_watch` exists only on unix, like the other test hooks here.
-#[cfg(unix)]
 #[test]
 fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wins() {
     use std::time::Duration;
@@ -2987,7 +2945,7 @@ fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wi
 
     // The setter takes the validated reverse watch of `[recovery]` (the
     // general `min_dead_after_ms`/`strikes` are not what `reverse_watch`
-    // carries). That `run_listen_unix` calls it with the configured value is
+    // carries). That `run_listen` calls it with the configured value is
     // covered end to end by `reverse::target::tests::
     // configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_
     // blackhole_dead`.

@@ -317,7 +317,6 @@ impl Listen {
         let name = outcome.entry.name.clone();
         let fingerprint = outcome.entry.fingerprint.clone();
         let generation = outcome.entry.generation;
-        #[cfg(unix)]
         let capabilities = outcome.entry.capabilities.clone();
 
         match self.conns.publish(name.clone(), generation, conn.clone()) {
@@ -345,7 +344,6 @@ impl Listen {
         // here (this generation's hub itself losing a race after `conns`
         // already won one) is left unhandled on purpose, nothing to do
         // either way; the hub is simply dropped unpublished.
-        #[cfg(unix)]
         {
             let hub = ControlHub::new(name.clone(), fingerprint.clone(), generation, capabilities);
             if let Published::Installed(Some(old_hub)) =
@@ -422,9 +420,7 @@ impl Listen {
         // stream this connection legitimately carries is a `TCP_ACCEPTED`
         // the target opens for a `-R` this hub's own conduits registered
         // (module docs' kind table for every stream `serve_stream`
-        // itself opens instead). Its own task, exactly like `watchdog` —
-        // see [`Self::spawn_tunnel_accept_loop`]'s doc for the unix/
-        // non-unix split.
+        // itself opens instead). Its own task, exactly like `watchdog`.
         let tunnel_accept_task =
             self.spawn_tunnel_accept_loop(session.connection().clone(), &name, generation);
 
@@ -432,15 +428,11 @@ impl Listen {
         // `session`'s control stream (this method's own long-standing
         // contract), so it is also the natural sole relay point for every
         // `LOCAL_CONTROL` conduit of this host. `tokio::select!` has no
-        // per-branch `#[cfg]` (unlike `futures::select!`), so rather than
-        // duplicate this whole loop behind a platform split, every
-        // `ControlHub`-touching step below goes through a same-signature
-        // `#[cfg(unix)]`/`#[cfg(not(unix))]` twin method
+        // per-branch `#[cfg]` (unlike `futures::select!`); every
+        // `ControlHub`-touching step below goes through a small method
         // (`Self::take_hub_outbound_receiver`/`Self::deliver_hub_response`/
         // `Self::deliver_hub_event`/`Self::mark_hub_dead`/
-        // `Self::remove_hub_if`) — a no-op returning the same shape on a
-        // non-unix build, where `ControlHub` does not exist at all — so
-        // this method's own body stays platform-agnostic end to end.
+        // `Self::remove_hub_if`) so this method's own body stays a flat loop.
         let mut outbound_rx = self.take_hub_outbound_receiver(&name, generation);
 
         // The trust watch (ADR-0031 결정 2~3, 7): a registration's one grant
@@ -654,21 +646,17 @@ impl Listen {
     }
 
     // ------------------------------------------------------------------
-    // `ControlHub` access for `Listen::drive_registered_session` — one
-    // same-signature `#[cfg(unix)]`/`#[cfg(not(unix))]` pair per step, so
-    // that method's own body needs no `#[cfg]` at all (this section's own
-    // doc comment there). Every method here takes `(name, generation)`
-    // rather than a cached `hub: Option<Arc<ControlHub>>`, trading one
-    // extra `ConnTable` lookup per control message (never a hot path —
-    // bounded by real CLI activity, not wire throughput) for a
-    // `drive_registered_session` body that compiles identically on both
-    // platforms.
+    // `ControlHub` access for `Listen::drive_registered_session`. Every
+    // method here takes `(name, generation)` rather than a cached
+    // `hub: Option<Arc<ControlHub>>`, trading one extra `ConnTable` lookup
+    // per control message (never a hot path — bounded by real CLI
+    // activity, not wire throughput) for a `drive_registered_session`
+    // body that never holds a hub across an await.
     // ------------------------------------------------------------------
 
     /// Take this generation's hub's outbound-relay receiver, if it has a
     /// hub at all (`Listen::hubs`'s own doc comment on the tiny window
     /// where it might not). Called once, before the select loop starts.
-    #[cfg(unix)]
     fn take_hub_outbound_receiver(
         &self,
         name: &str,
@@ -679,18 +667,8 @@ impl Listen {
             .and_then(|hub| hub.take_outbound_receiver())
     }
 
-    #[cfg(not(unix))]
-    fn take_hub_outbound_receiver(
-        &self,
-        _name: &str,
-        _generation: u64,
-    ) -> Option<mpsc::UnboundedReceiver<(u64, wire::control_message::Body)>> {
-        None
-    }
-
     /// Route one correlated `Response` through this generation's hub, if
     /// it still has one — see [`ControlHub::deliver_response`].
-    #[cfg(unix)]
     fn deliver_hub_response(
         &self,
         name: &str,
@@ -703,53 +681,31 @@ impl Listen {
         }
     }
 
-    #[cfg(not(unix))]
-    fn deliver_hub_response(
-        &self,
-        _name: &str,
-        _generation: u64,
-        _request_id: u64,
-        _resp: wire::Response,
-    ) {
-    }
-
     /// Fan one asynchronous `SessionEvent` out through this generation's
     /// hub, if it still has one — see [`ControlHub::deliver_event`].
-    #[cfg(unix)]
     fn deliver_hub_event(&self, name: &str, generation: u64, event: wire::SessionEvent) {
         if let Some(hub) = self.hubs.get_matching(name, generation) {
             hub.deliver_event(event);
         }
     }
 
-    #[cfg(not(unix))]
-    fn deliver_hub_event(&self, _name: &str, _generation: u64, _event: wire::SessionEvent) {}
-
     /// End every conduit of this generation's hub together, if it still
     /// has one — see [`ControlHub::mark_dead`]. Called once, right after
     /// the select loop exits, before [`Self::conns`]/[`Self::hubs`] are
     /// cleaned up (so a conduit racing a lookup in between still finds a
     /// hub, just one already mid-teardown, rather than none at all).
-    #[cfg(unix)]
     fn mark_hub_dead(&self, name: &str, generation: u64) {
         if let Some(hub) = self.hubs.get_matching(name, generation) {
             hub.mark_dead();
         }
     }
 
-    #[cfg(not(unix))]
-    fn mark_hub_dead(&self, _name: &str, _generation: u64) {}
-
     /// [`ConnTable::remove_if`] on [`Self::hubs`] — the hub-table
     /// counterpart to the `self.conns.remove_if(&name, generation)` this
     /// runs alongside.
-    #[cfg(unix)]
     fn remove_hub_if(&self, name: &str, generation: u64) {
         let _ = self.hubs.remove_if(name, generation);
     }
-
-    #[cfg(not(unix))]
-    fn remove_hub_if(&self, _name: &str, _generation: u64) {}
 
     /// Spawn [`Self::run_tunnel_accept_loop`] for this generation's hub,
     /// if it still has one (the same tiny window [`Self::hubs`]'s own doc
@@ -757,7 +713,6 @@ impl Listen {
     /// stream can ever be delivered for this generation, not a startup
     /// failure worth surfacing; a `-R` opened through it would simply
     /// have nowhere to register a `forward_id` either.
-    #[cfg(unix)]
     fn spawn_tunnel_accept_loop(
         &self,
         conn: Connection,
@@ -766,16 +721,6 @@ impl Listen {
     ) -> Option<tokio::task::JoinHandle<()>> {
         let hub = self.hubs.get_matching(name, generation)?;
         Some(tokio::spawn(Listen::run_tunnel_accept_loop(conn, hub)))
-    }
-
-    #[cfg(not(unix))]
-    fn spawn_tunnel_accept_loop(
-        &self,
-        _conn: Connection,
-        _name: &str,
-        _generation: u64,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        None
     }
 
     /// Accept every peer-initiated bidi stream on `conn` for as long as
@@ -796,7 +741,6 @@ impl Listen {
     /// header never blocks the next `accept_bi` — the same reasoning
     /// [`crate::tunnel::remote::dispatch_remote_forwards`]'s doc gives for
     /// the direct-connect leg's mirror-image accept loop.
-    #[cfg(unix)]
     async fn run_tunnel_accept_loop(conn: Connection, hub: Arc<ControlHub>) {
         // The queued-arrival sweeper lives exactly as long as this loop
         // does — its own task rather than a `select!` arm here, so
@@ -832,7 +776,6 @@ impl Listen {
     /// tick is missed, the next sweep should be one interval *later*, not
     /// a burst of catch-up sweeps that each take this hub's lock for
     /// nothing.
-    #[cfg(unix)]
     async fn run_tunnel_arrival_sweeper(hub: Arc<ControlHub>) {
         let mut ticker = tokio::time::interval(TUNNEL_ARRIVAL_SWEEP_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -861,7 +804,6 @@ impl Listen {
     /// the string is `[A-Za-z0-9_-]{1,64}` by construction and safe to
     /// log as-is, but a string that *failed* the check is arbitrary
     /// peer-controlled text.
-    #[cfg(unix)]
     pub(super) async fn handle_tcp_accepted_stream(
         send: SendStream,
         recv: RecvStream,

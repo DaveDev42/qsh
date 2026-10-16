@@ -143,7 +143,6 @@ impl RemoteTunnel {
         )
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn forward_id(&self) -> &str {
         &self.forward_id
     }
@@ -166,7 +165,6 @@ impl RemoteTunnel {
 
     /// The next claim loop that found its forward gone, if this route
     /// reports them.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) async fn vanished(&mut self) -> Option<String> {
         match &mut self.vanished {
             Some(rx) => rx.recv().await,
@@ -175,7 +173,6 @@ impl RemoteTunnel {
     }
 
     /// Stop listening for a channel that has closed.
-    #[cfg(unix)]
     pub(super) fn stop_watching_vanished(&mut self) {
         self.vanished = None;
     }
@@ -274,7 +271,6 @@ impl Supervisor {
             Established::Forward { connection, .. } => {
                 (RemoteForwardAcceptor::spawn(connection.clone()).await, None)
             }
-            #[cfg(unix)]
             Established::Reverse(next) => {
                 let host = match &self.params.route {
                     Route::Reverse(route) => route.host.clone(),
@@ -313,7 +309,6 @@ impl Supervisor {
         let op = crate::ops::OpError::new(ErrorCode::ConnectionFailed, what.to_string());
         let source = match &self.params.route {
             Route::Forward { .. } => Source::LocalDial,
-            #[cfg(unix)]
             Route::Reverse(_) => Source::LocalDaemon,
         };
         AttemptError {

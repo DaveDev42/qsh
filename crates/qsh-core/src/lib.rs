@@ -36,10 +36,6 @@ pub mod handshake;
 pub mod hosts;
 pub mod identity;
 pub mod lifecycle;
-// localctl (IPC to this machine's resident `qsh listen` daemon) compiles on
-// every platform: `localctl::transport` picks a Unix domain socket or a named
-// pipe, and only the daemon half is unix-only (`localctl/mod.rs` module docs,
-// `docs/CLI.md` §6.13, ADR-0035 decision 14).
 pub mod localctl;
 pub mod ops;
 pub mod pairing;

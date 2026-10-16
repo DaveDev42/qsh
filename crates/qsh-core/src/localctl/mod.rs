@@ -74,11 +74,16 @@
 //!
 //! [`transport`] is where the platform shows. [`frame`] and [`client`] speak
 //! to a [`transport::LocalStream`] (a `UnixStream` on unix, a named pipe end
-//! on Windows) and compile everywhere, so a Windows CLI process can reach a
-//! daemon (`docs/CLI.md` §6.13). `daemon` stays `#[cfg(unix)]`: it is built
-//! on `reverse::listen`, which has no Windows build, and `qsh listen` is
-//! `UNSUPPORTED` there (ADR-0035 decision 14). The Windows server half of the
-//! transport is complete and tested without it.
+//! on Windows) and compile everywhere, and so does `daemon`, which binds the
+//! endpoint through `transport::bind` and takes each connection from
+//! `transport::Listener::accept` together with the verdict of the
+//! credential check (`docs/CLI.md` §6.13, ADR-0035 decision 14). A socket can
+//! end its write direction while the peer can still answer, a byte-mode pipe
+//! cannot, so on Windows the raw byte phase of a conduit, after its framed
+//! `qsh.local.v1` messages, carries its bytes in length-prefixed chunks with a
+//! zero-length end chunk ([`chunked`]; `docs/design/protocol.md` §11-3). Every
+//! relay of raw bytes goes through the transport's `raw_*` helpers, so
+//! half-close works the same on both platforms.
 //!
 //! ## What must never cross a localctl frame
 //!
@@ -89,8 +94,8 @@
 //! through it (`docs/design/testing.md` L6 `resume_secrecy` discipline
 //! extends here, made mechanical by PR 5b's fixtures).
 
+pub mod chunked;
 pub mod client;
-#[cfg(unix)]
 pub mod daemon;
 pub mod frame;
 pub mod mux;

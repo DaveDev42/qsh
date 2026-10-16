@@ -131,15 +131,9 @@ pub(crate) enum PeerRoute {
 /// LocalHelloAck.peer_fingerprint" rule).
 pub(crate) struct LocalRoute {
     /// The host alias to ask the daemon for (`LocalHello.host`).
-    // Only ever read by `ops/session.rs`'s `dial_reverse`, `#[cfg(unix)]`
-    // (localctl/UDS is unix-only) — `resolve_route` below still
-    // *constructs* a `LocalRoute` on every platform (it mirrors
-    // `HostRoute::Reverse` unconditionally), so the fields are genuinely
-    // unread, not unconstructed, on Windows.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    // Read by `ops/session.rs`'s `dial_reverse`.
     pub host: String,
     /// The daemon's localctl socket path.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub socket: std::path::PathBuf,
 }
 

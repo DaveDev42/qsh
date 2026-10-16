@@ -55,7 +55,7 @@ pub const AUDIT_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 /// `Arc<dyn AuditSink>` clone alive for a little while after `run(..)`
 /// itself returns. This gives such a straggler up to `grace` to drop its
 /// clone before the caller (`serve::run_serve`/`reverse::listen::
-/// run_listen_unix`) drops its own — best effort, not a guarantee: gives
+/// run_listen`) drops its own — best effort, not a guarantee: gives
 /// up and returns anyway past the deadline, because shutdown must never
 /// hang on one wedged task. Whichever clone turns out to be the last one,
 /// `RotatingAuditSink::drop` still performs its own final flush.

@@ -18,7 +18,6 @@ use crate::tunnel::testutil::{ScriptedResolver, addr, loopback_pair};
 /// `Timeout` retried instantly regardless — this is the exact
 /// condition (`elapsed` near zero) that turned into an unbounded hot
 /// spin.
-#[cfg(unix)]
 #[test]
 fn a_near_instant_timeout_needs_backoff() {
     assert!(
@@ -33,7 +32,6 @@ fn a_near_instant_timeout_needs_backoff() {
 /// spent close to the real ~60s wait budget is the long-poll draining
 /// normally, and retrying at once *is* the wait — backing it off too
 /// would silently slow down every healthy `-R`'s throughput.
-#[cfg(unix)]
 #[test]
 fn a_genuine_long_poll_timeout_does_not_need_backoff() {
     assert!(!timeout_needs_backoff(FAST_TIMEOUT_THRESHOLD));

@@ -80,11 +80,8 @@ use super::{OpError, Operation, Ops, ServiceInstallOp, ServiceUninstallOp};
 /// supported manager.
 ///
 /// One constant for all three ops and every non-macOS/Linux target
-/// (the "P1 예정" convention of `docs/ROADMAP.md` §3's TCP/TLS fallback row) — `crates/qsh-core/src/
-/// reverse/listen.rs`'s `windows_unsupported()` is `#[cfg(not(unix))]`,
-/// `pub(super)`-scoped to `reverse`, and has no "P1" in its wording, so it
-/// is neither reachable here nor the right text to reuse (recorded finding,
-/// `docs/CLI.md` §6.18). Compiled on every target, quoted verbatim there.
+/// (the "P1 예정" convention of `docs/ROADMAP.md` §3's TCP/TLS fallback row).
+/// Compiled on every target, quoted verbatim in `docs/CLI.md` §6.18.
 pub const SERVICE_UNSUPPORTED_PLATFORM: &str = "`qsh service` manages user service units for launchd (macOS) and systemd (Linux) only; unit installation on this platform is P1 and not implemented. Nothing was written. `docs/deploy/service.md` has a hand-written unit for each supported manager.";
 
 /// The example binary path `docs/deploy/service.md`'s launchd fences show.

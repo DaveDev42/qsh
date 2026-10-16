@@ -96,11 +96,8 @@ pub(super) struct ReverseRoute {
     // constructed on every platform, so they are dead — not absent — on
     // Windows. (`registration_wait_ms` below stays live everywhere: the
     // recovery-report getter that reads it is not gated.)
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) host: String,
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) socket: std::path::PathBuf,
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) generation: std::sync::atomic::AtomicU64,
     /// Milliseconds the most recently *completed* [`LocalReconnect`] wait
     /// spent blocked on the daemon's new-generation registration before it
@@ -147,7 +144,6 @@ impl ReverseKill {
     /// (mirrors [`Link::replace`]).
     // Only the `#[cfg(unix)]` `LocalReconnect` recovery swap calls this;
     // `kill`/`new` above are used cross-platform, `replace` is not.
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn replace(&self, new: DataKillSwitch) -> DataKillSwitch {
         std::mem::replace(&mut *lock(&self.0), new)
     }

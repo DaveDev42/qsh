@@ -22,23 +22,16 @@
 //! file's "`host.list` never dials" proof: a call that *did* dial it
 //! would not return in this test's bounded window.
 //!
-//! `#![cfg(unix)]` for the same reason as `localctl_perms.rs`: `qsh
-//! listen` never binds a localctl socket on Windows and `qsh reverse`
-//! never dials there (`docs/CLI.md` §6.13).
-
-#![cfg(unix)]
+//! Runs on Windows too, over the daemon's named pipe (ADR-0035 decision 14).
+//! The graceful stop of the target is `SIGTERM` on unix and `CTRL_BREAK` on
+//! Windows, both behind `ReverseGuard::shut_down`.
 
 use crate::common;
 
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::Sandbox;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
+use common::{ListenGuard, ReverseGuard, Sandbox};
 use serde_json::Value;
 
 /// The name registered on both sides.
@@ -48,15 +41,6 @@ const DUP_NAME: &str = "dup-host";
 /// the forward pin's address so a `host.list`/`host.get` call that
 /// actually dialed it would not return within [`NO_DIAL_BOUND`].
 const UNREACHABLE_ADDRESS: &str = "192.0.2.1:1";
-
-/// How long we are willing to wait for `qsh listen` to report its bound
-/// address before declaring the test broken — mirrors
-/// `localctl_perms.rs`'s own `ListenGuard`.
-const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The stderr line `qsh listen` prints once it is up (`main.rs`'s
-/// `run_listen`).
-const LISTENING_PREFIX: &str = "qsh listen: listening on ";
 
 /// A bound on every "wait for cross-process state" poll below — a hard
 /// deadline, never a bare sleep standing in for one (mirrors
@@ -72,128 +56,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// would block for at least a TCP/QUIC connect timeout, several seconds
 /// at minimum) still fails it.
 const NO_DIAL_BOUND: Duration = Duration::from_secs(3);
-
-/// A running real `qsh listen` child, killed on drop. Deliberately not
-/// shared with `localctl_perms.rs`'s own `ListenGuard` — the same
-/// "no shared state between test binaries" reasoning that struct's module
-/// doc gives for not folding it into `common::ServeGuard` either.
-struct ListenGuard {
-    child: Child,
-    addr: String,
-}
-
-impl ListenGuard {
-    fn start(sandbox: &Sandbox) -> Self {
-        // M5 plan Step 6 (2473c88): `qsh listen` now default-denies `host.reverse`
-        // registrations without an `acl.toml` of its own — this struct is
-        // deliberately not `common::ListenGuard` (see this file's module
-        // doc), so it does not get that guard's automatic planting for
-        // free and has to call the same choke point directly.
-        common::plant_allow_all_acl(sandbox);
-        let mut child = sandbox
-            .command(&["listen", "--bind", "127.0.0.1:0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn qsh listen");
-
-        // `qsh listen` never writes to stdout; drop the pipe reader in the
-        // background purely so the child can never block on a full pipe.
-        if let Some(mut out) = child.stdout.take() {
-            thread::spawn(move || {
-                let _ = std::io::copy(&mut out, &mut std::io::sink());
-            });
-        }
-
-        let stderr = child.stderr.take().expect("listen stderr pipe");
-        let (tx, rx) = mpsc::channel::<String>();
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Some(addr) = line.strip_prefix(LISTENING_PREFIX) {
-                    let _ = tx.send(addr.to_string());
-                }
-                // Drain (and drop) every other line silently.
-            }
-        });
-        let addr = rx
-            .recv_timeout(LISTEN_START_TIMEOUT)
-            .expect("qsh listen never reported a bound address");
-
-        Self { child, addr }
-    }
-
-    fn addr(&self) -> &str {
-        &self.addr
-    }
-}
-
-impl Drop for ListenGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// A running real `qsh reverse` child. [`Self::shut_down`] sends `SIGTERM`
-/// and waits (bounded) for the graceful-shutdown path
-/// (`reverse/target.rs`'s `conn.close(0, b"shutdown")`) to actually close
-/// the QUIC connection — the reason this test sends `SIGTERM` rather than
-/// `child.kill()` (`SIGKILL`): a killed process sends no `CONNECTION_CLOSE`
-/// frame, so the controller would only notice via
-/// `qsh_transport::endpoint::MAX_IDLE_TIMEOUT` (45s) instead of the
-/// near-immediate detection a clean close gives `Registry::mark_stale`.
-struct ReverseGuard {
-    child: Child,
-}
-
-impl ReverseGuard {
-    fn start(sandbox: &Sandbox, controller: &str) -> Self {
-        let mut child = sandbox
-            .command(&["reverse", controller])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn qsh reverse");
-        if let Some(mut out) = child.stdout.take() {
-            thread::spawn(move || {
-                let _ = std::io::copy(&mut out, &mut std::io::sink());
-            });
-        }
-        if let Some(mut err) = child.stderr.take() {
-            thread::spawn(move || {
-                let _ = std::io::copy(&mut err, &mut std::io::sink());
-            });
-        }
-        Self { child }
-    }
-
-    /// `SIGTERM`, then wait up to 5s for the child to actually exit —
-    /// bounded, never a bare kill-and-hope.
-    fn shut_down(mut self) {
-        let _ = signal::kill(Pid::from_raw(self.child.id() as i32), Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                return;
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-}
-
-impl Drop for ReverseGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 /// `qsh hosts --json` in `sandbox`, asserted to succeed, returning the
 /// `data.hosts` array.

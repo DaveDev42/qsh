@@ -945,13 +945,10 @@ impl Ops {
     /// [`remote_forward_open_from_spec`]'s forward-route build leaves this
     /// field empty on purpose, so it is overwritten here, never reused).
     ///
-    /// Windows has no localctl (UDS) and `Ops::resolve_route` never
-    /// produces a reverse route there (`Ops::connect_reverse`'s own
-    /// Windows twin), so `conn.connection()` returning `None` — this
-    /// function's only caller — is unreachable in practice on that
-    /// platform; the `#[cfg(not(unix))]` twin below exists only so the
-    /// match in [`Self::tunnel_open`] compiles there.
-    #[cfg(unix)]
+    /// `conn.connection()` returning `None` is the reverse route on every
+    /// platform: localctl is a Unix socket or a Windows named pipe
+    /// (`crate::localctl::transport`), and `Ops::resolve_route` produces a
+    /// reverse route on both.
     fn tunnel_open_reverse(
         mut conn: Connected,
         spec: &ForwardSpec,
@@ -1028,21 +1025,6 @@ impl Ops {
                 })
             }
         }
-    }
-
-    /// Windows twin — see [`Self::tunnel_open_reverse`]'s own doc on why
-    /// this is unreachable in practice rather than dead code.
-    #[cfg(not(unix))]
-    fn tunnel_open_reverse(
-        conn: Connected,
-        _spec: &ForwardSpec,
-        _host: &str,
-    ) -> Result<TunnelHold, OpError> {
-        conn.close();
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "reverse routing (localctl) is not available on this platform",
-        ))
     }
 
     /// `tunnel.open` for a long-running, multi-call host process (e.g. an
@@ -1232,12 +1214,8 @@ impl Ops {
     /// [`DynamicForwardHandle::start_reverse`] in place of
     /// `LocalForwardHandle::start_reverse`.
     ///
-    /// Windows has no localctl (UDS) and `Ops::resolve_route` never
-    /// produces a reverse route there, so `conn.connection()` returning
-    /// `None` — this function's only caller — is unreachable in practice
-    /// on that platform; the `#[cfg(not(unix))]` twin below exists only so
-    /// the match in [`Self::tunnel_dynamic_with_connected`] compiles there.
-    #[cfg(unix)]
+    /// `conn.connection()` returning `None` is the reverse route on every
+    /// platform, same as [`Self::tunnel_open_reverse`].
     fn tunnel_dynamic_reverse(
         conn: Connected,
         bind: Option<&str>,
@@ -1272,22 +1250,6 @@ impl Ops {
             forward: ForwardResource::Dynamic(forward),
             tunnel: TunnelDto::Dynamic(tunnel),
         })
-    }
-
-    /// Windows twin — see [`Self::tunnel_dynamic_reverse`]'s own doc on why
-    /// this is unreachable in practice rather than dead code.
-    #[cfg(not(unix))]
-    fn tunnel_dynamic_reverse(
-        conn: Connected,
-        _bind: Option<&str>,
-        _listen_port: u16,
-        _host: &str,
-    ) -> Result<TunnelHold, OpError> {
-        conn.close();
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "reverse routing (localctl) is not available on this platform",
-        ))
     }
 
     /// [`Self::tunnel_open_and_hold`]'s `tunnel.dynamic` twin (ADR-0019
@@ -1437,7 +1399,6 @@ impl Ops {
         })
     }
 
-    #[cfg(unix)]
     fn reverse_tunnel_entries(&self) -> Vec<Tunnel> {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1460,7 +1421,6 @@ impl Ops {
         runtime.block_on(self.reverse_tunnel_entries_async())
     }
 
-    #[cfg(unix)]
     async fn reverse_tunnel_entries_async(&self) -> Vec<Tunnel> {
         let runtime_dir = self.paths().runtime_dir();
         crate::localctl::client::admin_tunnel_list_all(&runtime_dir)
@@ -1470,15 +1430,6 @@ impl Ops {
             .collect()
     }
 
-    /// Windows twin: localctl (UDS) has no meaning there, so the reverse
-    /// source — the only source `tunnel.list` has — is always empty
-    /// (`docs/CLI.md` §6.13).
-    #[cfg(not(unix))]
-    fn reverse_tunnel_entries(&self) -> Vec<Tunnel> {
-        Vec::new()
-    }
-
-    #[cfg(unix)]
     fn admin_close_tunnel(&self, tunnel_id: &str) -> bool {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1499,16 +1450,6 @@ impl Ops {
             &runtime_dir,
             tunnel_id,
         ))
-    }
-
-    /// Windows twin: localctl (UDS) has no meaning there, so there is no
-    /// daemon to ask and nothing is ever closed by this op
-    /// (`docs/CLI.md` §6.13). This is not a gap on Windows specifically:
-    /// `tunnel_open_reverse`'s own Windows twin already means no `"remote"`
-    /// forward is ever daemon-held there in the first place.
-    #[cfg(not(unix))]
-    fn admin_close_tunnel(&self, _tunnel_id: &str) -> bool {
-        false
     }
 }
 
@@ -1682,43 +1623,31 @@ impl Ops {
         ),
         OpError,
     > {
-        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut open_req = remote_forward_open_from_spec(spec);
-        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut vanished = None;
         let acceptor = match conn.connection() {
             Some(connection) => conn
                 .runtime()
                 .block_on(RemoteForwardAcceptor::spawn(connection)),
             None => {
-                #[cfg(unix)]
-                {
-                    let Some((socket, route_host)) = conn.reverse_route() else {
-                        return Err(OpError::new(
-                            ErrorCode::Internal,
-                            "reverse connection is missing its localctl route",
-                        ));
-                    };
-                    let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
-                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                    vanished = Some(rx);
-                    let acceptor =
-                        conn.runtime()
-                            .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
-                                socket,
-                                route_host,
-                                Some(tx),
-                            ));
-                    open_req.claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
-                    acceptor
-                }
-                #[cfg(not(unix))]
-                {
+                let Some((socket, route_host)) = conn.reverse_route() else {
                     return Err(OpError::new(
-                        ErrorCode::Unsupported,
-                        "reverse routing (localctl) is not available on this platform",
+                        ErrorCode::Internal,
+                        "reverse connection is missing its localctl route",
                     ));
-                }
+                };
+                let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                vanished = Some(rx);
+                let acceptor =
+                    conn.runtime()
+                        .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
+                            socket,
+                            route_host,
+                            Some(tx),
+                        ));
+                open_req.claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
+                acceptor
             }
         };
         let sent = open_req.clone();
@@ -1796,7 +1725,6 @@ impl Ops {
 
     /// The control stream, the first carrier and the route a supervisor
     /// takes over from a `Connected`. `alias` is the host the user typed.
-    #[cfg_attr(not(unix), allow(unused_variables))]
     fn supervision_parts(
         conn: &mut Connected,
         seed: RouteSeed,
@@ -1819,7 +1747,6 @@ impl Ops {
                     initial,
                 })
             }
-            #[cfg(unix)]
             RouteSeed::Reverse { generation } => {
                 let (socket, route_host) = conn.reverse_route().ok_or_else(internal)?;
                 let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
@@ -1844,8 +1771,6 @@ impl Ops {
                     initial,
                 })
             }
-            #[cfg(not(unix))]
-            RouteSeed::Reverse { .. } => Err(internal()),
         }
     }
 }
@@ -1858,7 +1783,6 @@ impl Ops {
 /// registration name instead (there is no per-entry ambiguity to resolve
 /// here: one `LocalTunnel` is always exactly one forward on exactly one
 /// host).
-#[cfg(unix)]
 fn to_tunnel_dto(local: qsh_proto::local::LocalTunnel) -> Tunnel {
     Tunnel {
         tunnel_id: local.tunnel_id,

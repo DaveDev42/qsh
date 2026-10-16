@@ -52,10 +52,8 @@ use crate::tunnel::supervise::budget::Budget;
 use crate::tunnel::supervise::classify::{Disposition, Source, classify};
 
 mod remote;
-#[cfg(unix)]
 mod reverse;
 pub(super) use remote::{RemoteHandle, RemoteTunnel};
-#[cfg(unix)]
 pub(super) use reverse::ReverseRoute;
 
 /// The channel ends a supervised forward is built around. Created before
@@ -142,7 +140,6 @@ pub(super) enum Route {
         link: Link,
     },
     /// This machine's `qsh listen` daemon, asked again.
-    #[cfg(unix)]
     Reverse(reverse::ReverseRoute),
 }
 
@@ -150,7 +147,6 @@ impl Route {
     fn label(&self) -> &'static str {
         match self {
             Route::Forward { .. } => "forward",
-            #[cfg(unix)]
             Route::Reverse(_) => "reverse",
         }
     }
@@ -246,8 +242,7 @@ enum Ended {
     /// The tunnel ends, without a retry.
     Fatal(OpError),
     /// An operator closed the tunnel (decision 14). Only the reverse route
-    /// can tell, and that route is unix-only.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// can tell.
     Closed,
 }
 
@@ -276,7 +271,6 @@ impl AttemptError {
     }
 
     /// Asking this machine's own daemon failed.
-    #[cfg(unix)]
     fn daemon(op: OpError) -> Self {
         Self {
             op,
@@ -293,7 +287,6 @@ enum Established {
         connection: qsh_transport::Connection,
         session: Session,
     },
-    #[cfg(unix)]
     Reverse(reverse::ReverseEstablished),
 }
 
@@ -302,7 +295,6 @@ impl Established {
     fn session_mut(&mut self) -> &mut Session {
         match self {
             Established::Forward { session, .. } => session,
-            #[cfg(unix)]
             Established::Reverse(next) => &mut next.session,
         }
     }
@@ -323,7 +315,6 @@ struct Supervisor {
     denied_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
     /// Carriers whose registration turned out to have changed (decision
     /// 7-5). Read by the reverse monitor only.
-    #[cfg_attr(not(unix), allow(dead_code))]
     changed_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
     current: Arc<ForwardCarrier>,
     /// How many times the carrier has been replaced. Peer denials only end
@@ -400,7 +391,6 @@ impl Supervisor {
     fn route_host(&self) -> Option<&str> {
         match &self.params.route {
             Route::Forward { .. } => None,
-            #[cfg(unix)]
             Route::Reverse(route) => Some(route.alias.as_str()),
         }
     }
@@ -466,7 +456,6 @@ impl Supervisor {
     async fn monitor(&mut self, session: Session) -> Ended {
         let link = match &self.params.route {
             Route::Forward { link, .. } => link.clone(),
-            #[cfg(unix)]
             Route::Reverse(_) => return self.monitor_reverse(session).await,
         };
         self.monitor_forward(session, link).await
@@ -654,9 +643,7 @@ impl Supervisor {
 
     /// Swap the new carrier in and open the gate (decision 5).
     fn install(&mut self, next: Established, reissued: Option<remote::Reissued>) -> Session {
-        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut generation = None;
-        #[cfg_attr(not(unix), allow(irrefutable_let_patterns))]
         let (carrier, session) = match next {
             Established::Forward {
                 endpoint,
@@ -671,7 +658,6 @@ impl Supervisor {
                 }
                 (ForwardCarrier::Direct(connection), session)
             }
-            #[cfg(unix)]
             Established::Reverse(next) => {
                 generation = Some(next.generation);
                 self.install_reverse(next)
@@ -699,7 +685,6 @@ impl Supervisor {
     fn discard(next: Established) {
         match next {
             Established::Forward { connection, .. } => connection.close(0, b"done"),
-            #[cfg(unix)]
             Established::Reverse(_) => {}
         }
     }
@@ -708,7 +693,6 @@ impl Supervisor {
     async fn attempt(&self) -> Result<Established, AttemptError> {
         match &self.params.route {
             Route::Forward { target, .. } => self.attempt_forward(target).await,
-            #[cfg(unix)]
             Route::Reverse(route) => self.attempt_reverse(route).await,
         }
     }

@@ -55,7 +55,6 @@ pub(super) async fn dial_peer(
 /// reverse route (issue #5) dials this directly under its own `--timeout`
 /// deadline, the same way `session.rs` re-exports it (`ops/session.rs`'s
 /// `pub(in crate::ops) use reader::dial_reverse` doc explains why).
-#[cfg(unix)]
 pub(in crate::ops) async fn dial_reverse(
     route: &LocalRoute,
 ) -> Result<(Session, Option<String>, u64), OpError> {
@@ -71,7 +70,6 @@ pub(in crate::ops) async fn dial_reverse(
 /// the `LOCAL_CONTROL` conduit this returns *and* nothing else — the data
 /// conduit is a separate `open_stream` call the caller makes once it has
 /// something to attach.
-#[cfg(unix)]
 pub(super) async fn dial_reverse_wait(
     route: &LocalRoute,
     wait_ms: u32,

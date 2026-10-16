@@ -1,0 +1,472 @@
+//! The cases `windows_forward_e2e.rs` and `windows_reverse_e2e.rs` share, and
+//! the two routes they run over (ADR-0035 decisions 1, 2 and 14).
+//!
+//! A case takes a [`Route`] and drives only real `qsh` processes through it:
+//! the forward route is a `qsh serve` host that pins a client, the reverse
+//! route is a `qsh listen` controller with a `qsh serve --to` target
+//! registered on it and the client running in the controller's sandbox (the
+//! client finds the daemon through the sandbox's runtime directory, so it has
+//! to share it). No test-only harness stands in for either side, so the same
+//! function proves the same behaviour on both routes and only the way the
+//! route is built differs.
+//!
+//! Half-close works through both routes the same way on every platform: a
+//! client that shuts only its write side has that end delivered to the
+//! destination, which can still answer. (On Windows the local conduit is a
+//! byte-mode pipe and carries the close as a chunk-framing end marker,
+//! ADR-0035 decision 14.)
+
+use crate::common;
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use common::{Fleet, HOST_ALIAS, ListenGuard, ReverseGuard, Sandbox, hosts_array, poll_until};
+use qsh_testkit::net_probe::free_port;
+use serde_json::Value;
+
+/// How long one blocking socket read or write may take before the case fails.
+pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a registration or a tunnel may take to show up.
+pub const READY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Bytes sent through a tunnel: more than one splice buffer, and not a
+/// repeat of any single buffer's worth, so a dropped or reordered chunk
+/// cannot look correct.
+const PAYLOAD_LEN: usize = 96 * 1024;
+
+/// The name the controller's trust store gives the reverse target.
+pub const REVERSE_NAME: &str = "nat-target";
+
+/// The alias the target's trust store uses for the controller it dials.
+pub const CONTROLLER_ALIAS: &str = "hub";
+
+/// A route from a client to a host, as a case sees it.
+pub trait Route {
+    /// The sandbox every client command of the case runs in.
+    fn client(&self) -> &Sandbox;
+    /// The name of the host, as the client knows it.
+    fn host(&self) -> &str;
+}
+
+/// Client to a `qsh serve` host over QUIC.
+pub struct ForwardRoute {
+    pub fleet: Fleet,
+}
+
+impl ForwardRoute {
+    pub fn start() -> Self {
+        Self {
+            fleet: Fleet::start(),
+        }
+    }
+}
+
+impl Route for ForwardRoute {
+    fn client(&self) -> &Sandbox {
+        &self.fleet.client
+    }
+
+    fn host(&self) -> &str {
+        HOST_ALIAS
+    }
+}
+
+/// Client to a `qsh serve --to` target registered on a `qsh listen` daemon
+/// of the same sandbox.
+pub struct ReverseRoute {
+    /// The controller, and the sandbox the client commands run in.
+    pub controller: Sandbox,
+    /// The target's own sandbox.
+    pub target: Sandbox,
+    pub listen: ListenGuard,
+    pub reverse: ReverseGuard,
+}
+
+impl ReverseRoute {
+    /// Controller, target, and the registration between them, up and
+    /// reachable from the controller's `qsh hosts`.
+    pub fn start() -> Self {
+        let route = Self::start_unregistered(None);
+        route.wait_registered();
+        route
+    }
+
+    /// Like [`Self::start`], with the controller on `bind` instead of an
+    /// ephemeral port, so a restarted controller can come back to the address
+    /// the target dials. Waits for the registration as well.
+    pub fn start_at(bind: &str) -> Self {
+        let route = Self::start_unregistered(Some(bind));
+        route.wait_registered();
+        route
+    }
+
+    fn start_unregistered(bind: Option<&str>) -> Self {
+        let controller = Sandbox::initialized();
+        let target = Sandbox::initialized();
+        let target_fp = target.fingerprint();
+        let controller_fp = controller.fingerprint();
+
+        // The controller pins the target by fingerprint only, with no
+        // address: the only route to `REVERSE_NAME` is a live registration,
+        // never a forward dial.
+        controller.trust_add(REVERSE_NAME, None, &target_fp);
+        let listen = match bind {
+            Some(bind) => ListenGuard::start_with(&controller, bind),
+            None => ListenGuard::start(&controller),
+        };
+        target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
+        fast_reconnect(&target);
+        let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
+        Self {
+            controller,
+            target,
+            listen,
+            reverse,
+        }
+    }
+
+    /// Wait until the controller's `qsh hosts` shows the target as a
+    /// reachable reverse entry.
+    pub fn wait_registered(&self) {
+        wait_reverse_entry(&self.controller, "reachable", READY_DEADLINE);
+    }
+}
+
+impl Route for ReverseRoute {
+    fn client(&self) -> &Sandbox {
+        &self.controller
+    }
+
+    fn host(&self) -> &str {
+        REVERSE_NAME
+    }
+}
+
+/// A target that retries quickly, so a controller that goes away and comes
+/// back is found again within a test's patience instead of a backoff's.
+fn fast_reconnect(target: &Sandbox) {
+    std::fs::write(
+        target.config_dir().join("config.toml"),
+        "[reverse]\nbackoff_initial_ms = 100\nbackoff_max_ms = 400\nbackoff_jitter_pct = 0\n",
+    )
+    .expect("write the target's config.toml");
+}
+
+/// Poll `qsh hosts` in `controller` until the reverse entry for
+/// [`REVERSE_NAME`] is in `state`, and return it.
+pub fn wait_reverse_entry(controller: &Sandbox, state: &str, deadline: Duration) -> Value {
+    poll_until(
+        &format!("the reverse entry to be {state}"),
+        deadline,
+        || {
+            hosts_array(controller)
+                .into_iter()
+                .find(|h| h["name"] == REVERSE_NAME && h["connection_mode"] == "reverse")
+                .filter(|h| h["state"] == state)
+        },
+    )
+}
+
+/// The reverse entries `qsh hosts` shows right now.
+pub fn reverse_entries(controller: &Sandbox) -> Vec<Value> {
+    hosts_array(controller)
+        .into_iter()
+        .filter(|h| h["connection_mode"] == "reverse")
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Destinations and the client side of a tunnel
+// ---------------------------------------------------------------------------
+
+/// A loopback TCP echo server: every connection is echoed back until the
+/// peer closes. The accept loop is detached and lives as long as the test
+/// process.
+pub fn start_echo() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the echo server");
+    let addr = listener.local_addr().expect("echo server address");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            thread::spawn(move || {
+                let mut reader = stream.try_clone().expect("clone the echo socket");
+                let mut writer = stream;
+                let _ = std::io::copy(&mut reader, &mut writer);
+                // Send the end of stream before the sockets close. A plain
+                // drop of the two handles can reset the connection on
+                // Windows, which discards echoed bytes the peer has not
+                // read yet.
+                let _ = writer.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    });
+    addr
+}
+
+/// A loopback TCP server that writes `greeting` to each connection and closes
+/// it at once, without reading.
+pub fn start_greeter(greeting: &'static [u8]) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the greeter");
+    let addr = listener.local_addr().expect("greeter address");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let _ = stream.write_all(greeting);
+            let _ = stream.flush();
+        }
+    });
+    addr
+}
+
+fn payload() -> Vec<u8> {
+    (0..PAYLOAD_LEN).map(|i| (i % 251) as u8).collect()
+}
+
+/// Write `payload` into `127.0.0.1:<port>`, shut only the write side, and read
+/// the reply to its end. The echo destination closes its side only after it has seen the
+/// client's end of stream, so a close that did not travel through the route
+/// leaves the read waiting until the timeout. The write runs on its own
+/// thread because a payload larger than the socket buffers would otherwise
+/// deadlock against an echo that is itself blocked writing to us.
+fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    let socket = TcpStream::connect(("127.0.0.1", port))?;
+    socket.set_read_timeout(Some(IO_TIMEOUT))?;
+    socket.set_write_timeout(Some(IO_TIMEOUT))?;
+    let mut writer = socket.try_clone()?;
+    let sender = thread::spawn(move || -> std::io::Result<()> {
+        writer.write_all(&payload)?;
+        writer.flush()?;
+        writer.shutdown(std::net::Shutdown::Write)
+    });
+    let mut back = Vec::new();
+    let read = {
+        let mut reader = socket;
+        reader.read_to_end(&mut back)
+    };
+    let sent = sender.join().expect("the sender thread panicked");
+    read.and(sent).map(|_| back)
+}
+
+/// Compare an echoed payload with what was sent, naming the length and the
+/// first differing offset when they differ.
+fn assert_same_payload(back: &[u8], sent: &[u8], what: &str) {
+    if back != sent {
+        let first = back.iter().zip(sent).position(|(a, b)| a != b);
+        panic!(
+            "{what} corrupted the payload: got {} bytes, sent {}, first difference at {first:?}",
+            back.len(),
+            sent.len()
+        );
+    }
+}
+
+/// A running `qsh tunnel open … --json` child, killed on drop. The process
+/// is the tunnel's holder (`docs/CLI.md` §6.14), so killing it is the
+/// teardown of a forward route's tunnel.
+pub struct TunnelHolder {
+    child: Child,
+    /// Everything after the envelope line, read on a thread so a full pipe
+    /// never blocks the child.
+    reader: Option<thread::JoinHandle<String>>,
+}
+
+impl TunnelHolder {
+    /// `qsh tunnel open <host> <flag> <spec> --json` in the route's client
+    /// sandbox; returns the holder and the envelope it printed.
+    pub fn open(route: &impl Route, flag: &str, spec: &str) -> (Self, Value) {
+        let mut command: Command =
+            route
+                .client()
+                .command(&["tunnel", "open", route.host(), flag, spec, "--json"]);
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qsh tunnel open");
+        let mut stdout = BufReader::new(child.stdout.take().expect("tunnel open stdout pipe"));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            let _ = stdout.read_line(&mut line);
+            let _ = tx.send(line);
+            let mut rest = String::new();
+            let _ = stdout.read_to_string(&mut rest);
+            rest
+        });
+        let mut holder = Self {
+            child,
+            reader: Some(reader),
+        };
+        let line = rx.recv_timeout(READY_DEADLINE).unwrap_or_else(|err| {
+            panic!(
+                "qsh tunnel open printed no envelope within {READY_DEADLINE:?} ({err}); \
+                 stderr:\n{}",
+                common::drain_stderr(&mut holder.child)
+            )
+        });
+        assert!(
+            !line.trim().is_empty(),
+            "qsh tunnel open printed no envelope; stderr:\n{}",
+            common::drain_stderr(&mut holder.child)
+        );
+        let envelope: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("stdout is not JSON: {e}: {line:?}"));
+        assert_eq!(envelope["schema"], "qsh.cli/v1");
+        assert_eq!(
+            envelope["ok"], true,
+            "qsh tunnel open did not succeed: {envelope}"
+        );
+        (holder, envelope)
+    }
+
+    /// Whether the holder is still running.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Kill the holder and return the rest of its stdout, which must be empty:
+    /// machine mode prints one envelope line and nothing else.
+    pub fn finish(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.reader
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for TunnelHolder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The cases
+// ---------------------------------------------------------------------------
+
+/// `qsh exec <host> -- cmd /c …` returns the remote's streams and exit code
+/// through the route (`docs/CLI.md` §6.8).
+pub fn exec_round_trip(route: &impl Route) {
+    let args = [
+        "exec",
+        route.host(),
+        "--json",
+        "--",
+        "cmd",
+        "/c",
+        "echo hello&exit 7",
+    ];
+    let (code, value) = route.client().json(&args);
+
+    assert_eq!(code, 7, "the process exit code is the remote one: {value}");
+    assert_eq!(value["command"], "exec.run");
+    assert_eq!(value["ok"], true, "{value}");
+    let data = &value["data"];
+    assert_eq!(data["remote_exit_code"], 7, "{value}");
+    assert_eq!(data["stdout_b64"], BASE64.encode("hello\r\n"), "{value}");
+}
+
+/// `qsh tunnel open --local`: a TCP write to the local port reaches the
+/// destination the host dials and comes back.
+pub fn local_tunnel_echo(route: &impl Route) {
+    let echo = start_echo();
+    let local_port = free_port();
+    let spec = format!("{local_port}:127.0.0.1:{}", echo.port());
+
+    let (mut tunnel, envelope) = TunnelHolder::open(route, "--local", &spec);
+    let data = &envelope["data"];
+    assert_eq!(envelope["command"], "tunnel.open");
+    assert_eq!(data["mode"], "local");
+    assert_eq!(data["host"], route.host());
+    assert_eq!(data["bind"], format!("127.0.0.1:{local_port}"));
+    assert_eq!(data["forward_to"], format!("127.0.0.1:{}", echo.port()));
+
+    let sent = payload();
+    let back = round_trip(local_port, sent.clone()).expect("round trip through the local forward");
+    assert_same_payload(&back, &sent, "the local forward");
+
+    assert!(tunnel.is_running(), "the holder exited while serving");
+    let rest = tunnel.finish();
+    assert!(
+        rest.is_empty(),
+        "machine mode printed more than one stdout line: {rest:?}"
+    );
+}
+
+/// `qsh tunnel open --remote`: the host binds a port on its loopback and each
+/// connection to it comes back to the requester's destination.
+pub fn remote_tunnel_echo(route: &impl Route) {
+    let echo = start_echo();
+    let remote_port = free_port();
+    let spec = format!("{remote_port}:127.0.0.1:{}", echo.port());
+
+    let (mut tunnel, envelope) = TunnelHolder::open(route, "--remote", &spec);
+    let data = &envelope["data"];
+    assert_eq!(data["mode"], "remote");
+    assert_eq!(data["host"], route.host());
+    assert_eq!(data["bind"], format!("127.0.0.1:{remote_port}"));
+    assert_eq!(data["forward_to"], format!("127.0.0.1:{}", echo.port()));
+
+    let sent = payload();
+    let back =
+        round_trip(remote_port, sent.clone()).expect("round trip through the remote forward");
+    assert_same_payload(&back, &sent, "the remote forward");
+
+    assert!(tunnel.is_running(), "the holder exited while serving");
+    let rest = tunnel.finish();
+    assert!(
+        rest.is_empty(),
+        "machine mode printed more than one stdout line: {rest:?}"
+    );
+}
+
+/// A destination that closes its side first: the local client reads what it
+/// sent and then the end of the stream, without ever writing. The end is
+/// delivered and nothing waits for the client to speak.
+pub fn local_tunnel_delivers_the_destinations_close(route: &impl Route) {
+    let greeter = start_greeter(b"hello from the destination");
+    let local_port = free_port();
+    let spec = format!("{local_port}:127.0.0.1:{}", greeter.port());
+
+    let (tunnel, _envelope) = TunnelHolder::open(route, "--local", &spec);
+
+    let mut socket = TcpStream::connect(("127.0.0.1", local_port)).expect("connect to the forward");
+    socket
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .expect("read timeout");
+    let mut got = Vec::new();
+    let read = socket.read_to_end(&mut got);
+    assert!(
+        read.is_ok() || !got.is_empty(),
+        "the destination's close never reached the client: {read:?}"
+    );
+    assert_eq!(got, b"hello from the destination");
+    drop(tunnel);
+}
+
+/// `qsh hosts` and `qsh host get` name the route's host.
+pub fn hosts_names_the_host(route: &impl Route, mode: &str) {
+    let hosts = hosts_array(route.client());
+    let entry = hosts
+        .iter()
+        .find(|h| h["name"] == route.host() && h["connection_mode"] == mode)
+        .unwrap_or_else(|| panic!("no {mode} entry for {} in {hosts:?}", route.host()));
+    assert_eq!(entry["name"], route.host());
+
+    let (code, got) = route
+        .client()
+        .json(&["host", "get", route.host(), "--json"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["connection_mode"], mode, "{got}");
+}

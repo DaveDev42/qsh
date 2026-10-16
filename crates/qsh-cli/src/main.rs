@@ -1546,6 +1546,8 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) 
             shutdown,
         ))
     })();
+    // Lets a console close that is waiting on this process go (Windows only).
+    console_shutdown_finished();
     match result {
         Ok(()) => {
             stderr_note!("qsh serve: shutting down");
@@ -1672,6 +1674,8 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             shutdown,
         ))
     })();
+    // Lets a console close that is waiting on this process go (Windows only).
+    console_shutdown_finished();
     match result {
         Ok(()) => {
             stderr_note!("qsh listen: shutting down");
@@ -1755,6 +1759,8 @@ fn run_reverse(
             shutdown,
         ))
     })();
+    // Lets a console close that is waiting on this process go (Windows only).
+    console_shutdown_finished();
     match result {
         Ok(()) => {
             stderr_note!("qsh {mode}: shutting down");
@@ -1767,6 +1773,7 @@ fn run_reverse(
 
 /// [`shutdown_signal`] with the Unix handlers registered on `runtime` at
 /// call time instead of at the first poll.
+#[cfg(not(windows))]
 fn arm_shutdown_signal(
     runtime: &tokio::runtime::Runtime,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -1790,7 +1797,55 @@ fn arm_shutdown_signal(
     Box::pin(shutdown_signal())
 }
 
+/// The Windows twin of [`arm_shutdown_signal`]: `Ctrl-C` through the
+/// runtime's own listener, and a closing console (window close, log off,
+/// shutdown, `CTRL_BREAK`) through the console control handler the
+/// interactive client shares (`tui::windows::arm_shutdown`). Both are
+/// registered here, before the `listening` line can be written. The caller
+/// reports [`console_shutdown_finished`] once it has stopped, which is what
+/// lets the handler release a closing window.
+#[cfg(windows)]
+fn arm_shutdown_signal(
+    runtime: &tokio::runtime::Runtime,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let _guard = runtime.enter();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    tui::windows::arm_shutdown(move || {
+        if let Some(tx) = tx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(());
+        }
+    });
+    if let Err(err) = tui::windows::system::console().install_ctrl_handler() {
+        tracing::warn!(%err, "cannot install the console control handler; Ctrl-C only");
+    }
+    match tokio::signal::windows::ctrl_c() {
+        Ok(mut ctrl_c) => Box::pin(async move {
+            tokio::select! {
+                _ = ctrl_c.recv() => {}
+                _ = rx => {}
+            }
+        }),
+        Err(err) => {
+            tracing::warn!(%err, "cannot listen for Ctrl-C; console close only");
+            Box::pin(async move {
+                let _ = rx.await;
+            })
+        }
+    }
+}
+
+/// The process armed by [`arm_shutdown_signal`] has stopped.
+#[cfg(windows)]
+fn console_shutdown_finished() {
+    tui::windows::shutdown_finished();
+}
+
+#[cfg(not(windows))]
+fn console_shutdown_finished() {}
+
 /// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+#[cfg(not(windows))]
 async fn shutdown_signal() {
     #[cfg(unix)]
     {

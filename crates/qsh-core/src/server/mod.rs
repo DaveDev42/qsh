@@ -2488,7 +2488,7 @@ fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
 /// `watch`, spawns [`drive_probes`] against it (owned by its own
 /// `blocking` `JoinSet`), and its own read arm calls
 /// [`ControlPinger::record`] on every inbound `ControlMessage` before
-/// `dispatch` ever sees it. `reverse/target.rs`'s `run_reverse_unix` is the
+/// `dispatch` ever sees it. `reverse/target.rs`'s `run_reverse_observed` is the
 /// only caller that passes `Some(..)` today — the target watching the one
 /// connection it dialed to its controller — so this is symmetric probing
 /// from the target's side. `reverse/listen.rs`'s

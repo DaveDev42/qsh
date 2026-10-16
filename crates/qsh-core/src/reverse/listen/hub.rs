@@ -1,15 +1,13 @@
-//! The `LOCAL_CONTROL` relay hub ([`ControlHub`]) and its conduit, claim and tunnel-arrival machinery. Every item is `#[cfg(unix)]`, as in the flat file it came from.
+//! The `LOCAL_CONTROL` relay hub ([`ControlHub`]) and its conduit, claim and tunnel-arrival machinery. It builds on every platform: the local end of each conduit is a `crate::localctl::transport::LocalStream`, a Unix socket or a named pipe.
 
-#[cfg(unix)]
 use super::*;
 
 // --------------------------------------------------------------------
 // LOCAL_CONTROL relay hub (M3 plan Step 6 (2473c88), `docs/design/protocol.md`
 // §11-3's "다중화 규칙" — `crates/qsh-core/src/localctl/mux.rs`, Stage A1,
-// is the pure state machine this wires up). `#[cfg(unix)]` throughout:
-// localctl has no meaning on Windows (this file's own module docs on
-// `crate::localctl`) — same discipline as the `LocalctlDaemon`/
-// `LocalctlListener` import above, just a level lower.
+// is the pure state machine this wires up). Nothing here is platform
+// specific: the daemon hands each conduit over as a `LocalStream`
+// (`crate::localctl::transport`).
 // --------------------------------------------------------------------
 
 /// How many undelivered [`ConduitInbound`] messages one conduit's inbox
@@ -20,7 +18,6 @@ use super::*;
 /// memory against a conduit that stops reading altogether
 /// ([`ControlHub::deliver_response`]/[`ControlHub::deliver_event`]'s doc
 /// comments).
-#[cfg(unix)]
 const CONDUIT_INBOX_CAPACITY: usize = 256;
 
 /// Upper bound on `SessionRead`/`SessionClose` long-polls this hub relays
@@ -42,7 +39,6 @@ const CONDUIT_INBOX_CAPACITY: usize = 256;
 /// permit the instant its issuing conduit dies; it bounds how much of the
 /// shared budget can ever be held at once in the first place, which is
 /// the actual DoS surface the finding demonstrated.
-#[cfg(unix)]
 pub(super) const MAX_INFLIGHT_LONG_POLL_PER_HUB: usize = 16;
 
 /// Upper bound on tunnel data streams this hub carries **at once** —
@@ -73,7 +69,6 @@ pub(super) const MAX_INFLIGHT_LONG_POLL_PER_HUB: usize = 16;
 /// just its handshake, because an unclaimed backlog of accepted-but-not-
 /// yet-spliced connections is exactly as much of a held QUIC stream as an
 /// active one ([`TunnelArrival`]'s own doc).
-#[cfg(unix)]
 pub(super) const MAX_TUNNEL_STREAMS_PER_HUB: usize = 64;
 
 /// Upper bound on concurrently *parked* `TCP_ACCEPTED` claims per hub —
@@ -89,7 +84,6 @@ pub(super) const MAX_TUNNEL_STREAMS_PER_HUB: usize = 64;
 /// `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS` (256) so a single host at its
 /// own cap can never come close to exhausting that pool for every other
 /// host.
-#[cfg(unix)]
 pub(super) const MAX_PARKED_CLAIMS_PER_HUB: usize = 32;
 
 /// The share of [`MAX_PARKED_CLAIMS_PER_HUB`] any **one** owning conduit
@@ -119,10 +113,8 @@ pub(super) const MAX_PARKED_CLAIMS_PER_HUB: usize = 32;
 /// single CLI running eight concurrent reverse forwards against one host,
 /// already well past ordinary use, while still leaving three quarters of
 /// the hub for everyone else.
-#[cfg(unix)]
 pub(super) const MAX_PARKED_CLAIMS_PER_CONDUIT: usize = MAX_PARKED_CLAIMS_PER_HUB / 4;
 
-#[cfg(unix)]
 const _: () = assert!(
     MAX_PARKED_CLAIMS_PER_HUB.is_multiple_of(MAX_PARKED_CLAIMS_PER_CONDUIT)
         && MAX_PARKED_CLAIMS_PER_HUB / MAX_PARKED_CLAIMS_PER_CONDUIT >= 4,
@@ -140,7 +132,6 @@ const _: () = assert!(
 /// is a documented wire contract (`crate::tunnel::splice`'s own doc on
 /// why these codes are internal, like `crate::localctl::daemon`'s
 /// `0x2005`/`0x2006` and `crate::tunnel::remote`'s `0x2008`/`0x2009`).
-#[cfg(unix)]
 pub(super) const RESET_CODE_TUNNEL_UNKNOWN_FORWARD: u32 = 0x200A;
 
 /// How long a `TCP_ACCEPTED` arrival may sit in [`HubState::tunnel_queue`]
@@ -169,7 +160,6 @@ pub(super) const RESET_CODE_TUNNEL_UNKNOWN_FORWARD: u32 = 0x200A;
 /// `REVERSE_CLAIM_RETRY_BACKOFF` (200 ms) drains in ~13 s — inside this
 /// budget, so contention slows a claimant down without costing it its
 /// connections.
-#[cfg(unix)]
 pub(super) const MAX_QUEUED_TUNNEL_ARRIVAL_AGE: Duration = Duration::from_secs(30);
 
 /// How often [`Listen::run_tunnel_arrival_sweeper`] wakes to enforce
@@ -179,7 +169,6 @@ pub(super) const MAX_QUEUED_TUNNEL_ARRIVAL_AGE: Duration = Duration::from_secs(3
 /// second budget) and coarse in absolute terms (so a hub with an empty
 /// queue — the overwhelmingly common case — costs one uncontended lock
 /// acquisition every few seconds and nothing else).
-#[cfg(unix)]
 pub(super) const TUNNEL_ARRIVAL_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Reset code for a queued `TCP_ACCEPTED` stream that reached
@@ -191,7 +180,6 @@ pub(super) const TUNNEL_ARRIVAL_SWEEP_INTERVAL: Duration = Duration::from_secs(5
 /// can tell "nobody was listening for you" from "you were refused at the
 /// door". Like its siblings it is internal, not a wire contract
 /// (`crate::tunnel::splice`'s own doc).
-#[cfg(unix)]
 pub(super) const RESET_CODE_TUNNEL_CLAIM_EXPIRED: u32 = 0x200C;
 
 /// Reset code for a `TCP_ACCEPTED` stream that named a real, still-
@@ -201,7 +189,6 @@ pub(super) const RESET_CODE_TUNNEL_CLAIM_EXPIRED: u32 = 0x200C;
 /// ResourceExhausted`'s CLI-facing edition of the same refusal is what
 /// `crate::localctl::daemon`'s `TCP_CONNECT` leg answers when it hits
 /// this same semaphore).
-#[cfg(unix)]
 pub(super) const RESET_CODE_TUNNEL_HUB_EXHAUSTED: u32 = 0x200B;
 
 /// One `TCP_ACCEPTED` stream the target opened for a `forward_id` this
@@ -216,7 +203,6 @@ pub(super) const RESET_CODE_TUNNEL_HUB_EXHAUSTED: u32 = 0x200B;
 /// connection's real QUIC bidi stream slots); dropping a [`TunnelArrival`]
 /// that was never claimed (a conduit died first, or the whole hub did)
 /// releases the permit automatically along with the streams themselves.
-#[cfg(unix)]
 pub(crate) struct TunnelArrival {
     send: SendStream,
     recv: RecvStream,
@@ -240,7 +226,6 @@ pub(crate) struct TunnelArrival {
     _permit: OwnedSemaphorePermit,
 }
 
-#[cfg(unix)]
 impl TunnelArrival {
     /// Reset both halves with `code` rather than letting them drop bare —
     /// a bare `SendStream`/`RecvStream` drop finishes/stops *cleanly*
@@ -274,7 +259,6 @@ impl TunnelArrival {
 /// controller-side relay; the classification itself is a wire-contract
 /// fact, not shared state, so duplicating the two-arm match here is
 /// simpler and safer than reaching across that boundary).
-#[cfg(unix)]
 fn is_long_poll_body(body: &wire::control_message::Body) -> bool {
     matches!(
         body,
@@ -285,7 +269,6 @@ fn is_long_poll_body(body: &wire::control_message::Body) -> bool {
 /// One delivery `crate::localctl::daemon`'s `LOCAL_CONTROL` conduit-serve
 /// loop reads from its inbox and turns into exactly one outbound
 /// `qsh.wire.v1.ControlMessage` back to the CLI process.
-#[cfg(unix)]
 pub enum ConduitInbound {
     /// A correlated reply — `peer_request_id` is already restored
     /// (`ControlMux::map_inbound`), so the conduit only has to wrap it in
@@ -307,7 +290,6 @@ pub enum ConduitInbound {
 }
 
 /// Why [`ControlHub::send_request`] could not forward a conduit's request.
-#[cfg(unix)]
 #[derive(Debug)]
 pub enum HubSendError {
     /// `conduit` already has `crate::localctl::mux::MAX_INFLIGHT_PER_CONDUIT`
@@ -343,7 +325,6 @@ pub enum HubSendError {
 /// to test one is [`ClaimSeat::admits`] — a future edit cannot construct
 /// a claimable-but-empty seat, and cannot compare tokens by hand and get
 /// the empty case wrong, because it has no access to the bytes at all.
-#[cfg(unix)]
 mod claim_seat {
     /// See the module-level type doc above the `mod` keyword.
     #[derive(Clone, Debug)]
@@ -399,7 +380,6 @@ mod claim_seat {
     }
 }
 
-#[cfg(unix)]
 use claim_seat::ClaimSeat;
 
 /// One live `forward_id` registration: the conduit that owns it and the
@@ -411,7 +391,6 @@ use claim_seat::ClaimSeat;
 /// *owner* map while the *token* map was the one that mattered). Inserted
 /// and removed as a unit, so "registered" and "has a seat" are the same
 /// fact and no edit can separate them.
-#[cfg(unix)]
 #[derive(Debug)]
 struct ForwardRegistration {
     /// The `LOCAL_CONTROL` conduit whose `RemoteForwardOpen` minted this
@@ -435,7 +414,6 @@ struct ForwardRegistration {
 /// The structural half of [`ForwardRegistration`] — everything
 /// `LocalTunnelList` reports about one forward, and nothing else: no
 /// payload byte has ever passed through this type.
-#[cfg(unix)]
 #[derive(Debug, Clone)]
 struct ForwardMeta {
     /// Always `"remote"`: only `-R`'s host-bound listener ever registers a
@@ -488,7 +466,6 @@ struct ForwardMeta {
 /// closing this gap for real is left to M5's quota work, per M4 plan §4 (2473c88)'s
 /// own framing — this comment is that "still open, not silently dropped"
 /// record, not a fix.
-#[cfg(unix)]
 pub(crate) struct ForwardSummary {
     pub(crate) forward_id: String,
     pub(crate) mode: &'static str,
@@ -501,7 +478,6 @@ pub(crate) struct ForwardSummary {
 /// [`ControlHub::send_request`] alongside its claim token — see
 /// [`HubState::pending_rfwd_opens`]'s own doc for why the two are one
 /// entry rather than two maps.
-#[cfg(unix)]
 #[derive(Debug, Default)]
 struct PendingRfwdOpen {
     claim_token: Vec<u8>,
@@ -538,7 +514,6 @@ struct PendingRfwdOpen {
 /// before it ever awaits, and its permit is released immediately — so it
 /// can occupy another conduit's share only for the microseconds that
 /// refusal takes, never durably.
-#[cfg(unix)]
 #[derive(Default)]
 struct ClaimPoolState {
     /// Permits outstanding across every bucket — the hub-wide ceiling's
@@ -557,13 +532,11 @@ struct ClaimPoolState {
     per_owner: HashMap<Option<ConduitId>, usize>,
 }
 
-#[cfg(unix)]
 #[derive(Default)]
 struct ClaimPool {
     slots: Mutex<ClaimPoolState>,
 }
 
-#[cfg(unix)]
 impl ClaimPool {
     /// One permit for `owner`, or `None` when either the hub ceiling or
     /// `owner`'s own share is already spent. Never blocks and never
@@ -621,20 +594,17 @@ impl ClaimPool {
 /// discipline of dropping it explicitly the instant the parked wait ends
 /// (its own comment on why the live splice must be bounded by
 /// [`MAX_TUNNEL_STREAMS_PER_HUB`] instead).
-#[cfg(unix)]
 pub(crate) struct ClaimPermit {
     pool: Arc<ClaimPool>,
     owner: Option<ConduitId>,
 }
 
-#[cfg(unix)]
 impl Drop for ClaimPermit {
     fn drop(&mut self) {
         self.pool.release(self.owner);
     }
 }
 
-#[cfg(unix)]
 pub(super) struct HubState {
     mux: ControlMux,
     next_conduit_id: u64,
@@ -739,7 +709,6 @@ pub(super) struct HubState {
     dead: bool,
 }
 
-#[cfg(unix)]
 impl HubState {
     /// **The one place a presented claim token is ever compared against a
     /// seat** (adversarial-review hole 1: the previous shape validated the
@@ -811,7 +780,6 @@ impl HubState {
 /// awaiting another, so there is no lock-order hazard against the
 /// registry, the Step 4 probe driver, or the stale sweeper (all of which
 /// already only ever touch the registry's own lock).
-#[cfg(unix)]
 pub struct ControlHub {
     host: String,
     peer_fingerprint: String,
@@ -869,7 +837,6 @@ pub struct ControlHub {
     tunnel_notify: Notify,
 }
 
-#[cfg(unix)]
 impl ControlHub {
     pub(super) fn new(
         host: String,
@@ -1997,7 +1964,6 @@ impl ControlHub {
 /// sockets/tasks, and this whole relay's own discipline is never to log
 /// its state as a blob — every log site names specific structural fields
 /// instead), so `One`'s variant just prints its host-agnostic shape.
-#[cfg(unix)]
 pub(crate) enum TunnelCloseTarget<'a> {
     /// No registered host's hub currently holds `tunnel_id`.
     None,
@@ -2009,7 +1975,6 @@ pub(crate) enum TunnelCloseTarget<'a> {
     Ambiguous(usize),
 }
 
-#[cfg(unix)]
 impl std::fmt::Debug for TunnelCloseTarget<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2044,7 +2009,6 @@ impl std::fmt::Debug for TunnelCloseTarget<'_> {
 /// colliding id (accidental, or a non-ULID-minting peer) could trigger.
 /// Refusing instead follows this codebase's own default (`CLAUDE.md`:
 /// "Fail closed on any ambiguous auth/ACL state").
-#[cfg(unix)]
 pub(crate) fn tunnel_close_target<'a>(
     hubs: &'a [(String, Arc<ControlHub>)],
     tunnel_id: &str,

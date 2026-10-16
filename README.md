@@ -1076,11 +1076,20 @@ Some of these are MVP scope decisions, some are unfinished work.
   Windows build of `qsh cp` rejects malformed operands and answers
   everything else with `UNSUPPORTED`, a Windows host does not advertise
   `file.v1` and answers the file operations with `UNSUPPORTED`, and PTY code
-  is gated `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
-  return `UNSUPPORTED` there, and a tunnel over a reverse connection
-  inherits that. `qsh tunnel open --dynamic` is cross-platform like
+  is gated `#[cfg(unix)]`. Reverse mode runs on Windows: `qsh listen` keeps
+  its local control endpoint on a named pipe, and `qsh exec`, tunnels,
+  `qsh hosts`, `qsh tunnels` and `qsh tunnel close` work over a reverse
+  connection as they do on unix. A Windows `qsh serve --to` target serves
+  `exec` and tunnels; its PTY sessions and file operations wait for M20.
+  On a reverse connection a local program that closes only its write side
+  and waits for the answer is seen by the destination, as on unix
+  (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` is cross-platform like
   `--local`/`--remote`; the interactive `-D` spelling is not, since the
-  interactive PTY driver it rides is `#[cfg(unix)]`. CI builds, lints and
+  interactive PTY driver it rides is `#[cfg(unix)]`. The first time
+  `qsh serve` or `qsh listen` opens its UDP port, Windows Defender Firewall
+  may ask whether to allow it. Allow it on private networks for peers on
+  other machines to connect; connections from the same machine do not need
+  it. `qsh serve --to` only dials out and does not trigger the prompt. CI builds, lints and
   runs the portable test subset on `windows-latest`, but POSIX-only behavior
   such as signal exits and process-group kill is never exercised there.
 - Reverse mode needs a directly reachable path from the target to the

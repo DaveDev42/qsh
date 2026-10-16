@@ -412,6 +412,21 @@ message FileFrame {
 
 **`exec` conduit(issue #5).** `StreamHeader{EXEC_DATA, ticket}`도 새 `LocalStreamKind` 없이 같은 `LOCAL_STREAM` conduit을 탄다. `ExecStart`(control, `LOCAL_CONTROL`)가 발급한 ticket을 `LOCAL_STREAM` conduit이 `StreamHeader{EXEC_DATA, ticket}`으로 상환하는 흐름은 `session.open`의 `SESSION_DATA` 상환과 같다.
 
+**raw 구간의 chunk framing (Windows).** conduit은 `LocalHello`·`LocalHelloAck`·`StreamHeader`·ack 같은 framed `qsh.local.v1` 메시지를 마친 뒤 raw byte 중계로 바뀐다(`SESSION_DATA`·`TCP_CONNECT`·`TCP_ACCEPTED`·`EXEC_DATA`·`FILE_DATA`). unix 소켓은 이 구간에서 쓰기 방향만 닫을 수 있어 바이트를 그대로 나르지만, Windows byte 모드 named pipe는 그럴 수 없다(ADR-0035 결정 14). 그래서 Windows는 raw 구간의 두 방향을 모두 chunk로 나른다.
+
+```
+chunk := length (4바이트, big-endian u32) || length 바이트
+```
+
+- 길이 `0`은 end chunk다. 쓰는 쪽이 자기 방향을 끝냈다는 뜻이고(half-close), 읽는 쪽은 end of stream을 보고하며 반대 방향은 계속 흐른다.
+- 길이 상한은 65536이다. 그보다 큰 길이는 프로토콜 오류이고 I/O 오류와 같은 abort로 conduit을 끊는다.
+- end chunk 뒤에 오는 바이트도 프로토콜 오류다.
+- chunk 경계에서 end chunk 없이 스트림이 끝나면 소켓의 drop과 같은 평범한 EOF로 읽는다. chunk 헤더나 본문 중간에서 끝나면 `UnexpectedEof`다.
+- framed 구간과 그 마지막 메시지 뒤에 같이 읽혀 들어온 바이트(read-ahead)도 chunk 스트림의 시작이므로 같은 해석기로 푼다.
+- 데몬이 QUIC data 스트림을 열지 못했을 때 raw 구간으로 보내는 한 바이트 sentinel(`0x00`)도 chunk 하나로 감싼다. `EXEC_DATA`는 ack 전까지 framed 구간이라 그 시점의 sentinel은 감싸지 않는다.
+
+unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적용하지 않는다. Windows의 localctl은 이 변경 전에 배포된 적이 없어 버전 불일치가 없다. 구현은 `qsh-core`의 `localctl/chunked.rs`이고 두 OS에서 컴파일·시험된다. 접점은 `localctl/transport`의 `raw_reader`·`raw_writer`·`raw_bytes`·`shutdown_write`다.
+
 **UDS EOF는 QUIC stream reset으로 옮겨진다. clean close가 아니다.** `SESSION_DATA`/`TCP_CONNECT`/`TCP_ACCEPTED`는 순수 byte splice라서, 로컬 UDS 쪽이 정상 종료되면 QUIC stream도 정상 종료(FIN)로 닫아도 된다. 그러나 `EXEC_DATA`는 framed 프로토콜(`Stdin`/`StdinEof`/`Stdout`/`Stderr`/`ExecExit`, §7)이고 `StdinEof`가 이미 "이 방향은 끝"을 명시적으로 나른다. 그래서 로컬 UDS 쪽이 (exec 클라이언트 프로세스가 종료·drop·취소되어) EOF로 끝나면 데몬은 이를 clean close가 아니라 QUIC stream reset으로 옮긴다. stdin을 닫는 경우는 해당하지 않는다.
 
 이유는 `run_exec`(`crates/qsh-core/src/exec/mod.rs`)의 stdin 펌프에 있다. 그 루프는 읽기 *오류*만 "peer가 사라졌다" 신호로 보고 자식을 죽이고, 깨끗한 스트림 종료(`Ok(None)`)는 루프를 빠져나가는 무동작이라 아무도 자식을 죽이지 않는다. reset이 없으면 output 없는 명령이 exec 클라이언트가 사라진 뒤에도 host에 고아로 남는다(`local_stream_relay_kind`, `crates/qsh-core/src/localctl/daemon.rs`). 이 규칙은 로컬 UDS→QUIC 방향에만 적용된다. target이 보내는 `Stdout`/`Stderr`/`ExecExit`는 그대로 splice되고, `ExecExit`가 그 exec의 논리적 끝을 명시한다.

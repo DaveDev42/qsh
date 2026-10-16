@@ -225,7 +225,6 @@ fn spawn_local_reattach(
 /// `ctx.reverse_route`/`ctx.link` mismatches this function bails out on
 /// below are defence in depth against a future call site breaking that
 /// pairing, not a path this function's only caller can currently reach.
-#[cfg(unix)]
 async fn local_reattach(
     ctx: &Arc<AttachContext>,
     pending: &Arc<std::sync::Mutex<PendingInput>>,
@@ -367,21 +366,4 @@ async fn local_reattach(
     let old_kill = kill.replace(attached.kill.clone());
     old_kill.kill();
     Ok((session, attached))
-}
-
-/// Windows twin of [`local_reattach`]: unreachable in practice (no
-/// `RecoveryLink::Reverse` attach exists off unix — `Ops::connect_reverse`'s
-/// non-unix arm always fails first), kept only so `LocalReconnect`'s
-/// `Reconnect` impl compiles on every platform.
-#[cfg(not(unix))]
-async fn local_reattach(
-    ctx: &Arc<AttachContext>,
-    _pending: &Arc<std::sync::Mutex<PendingInput>>,
-    _last_output_seq: u64,
-) -> Result<(Session, crate::client::Attached), ResumeError> {
-    let _ = ctx;
-    Err(ResumeError::Local(OpError::new(
-        ErrorCode::Unsupported,
-        "reverse routing (localctl) is not available on this platform",
-    )))
 }
