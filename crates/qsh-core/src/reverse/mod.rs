@@ -24,11 +24,11 @@ pub mod listen;
 pub mod registry;
 pub mod target;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod test_harness;
 
 /// The [`PathWatchConfig`] the target's registered-session watchdog uses
-/// (`target::run_reverse_unix`). Production gets `configured`, which is the
+/// (`target::run_reverse_observed`). Production gets `configured`, which is the
 /// validated reverse registration watch of the `[recovery]` section in this
 /// process's own `config.toml` (ADR-0021 decision 4, ADR-0041;
 /// [`crate::client::pathwatch::PathWatchConfig::reverse_default`] when the
@@ -41,7 +41,6 @@ pub(crate) mod test_harness;
 /// `[recovery]` config surface, and it is deliberately not a cargo feature
 /// (workspace feature unification could switch it on in the shipped
 /// binary).
-#[cfg(unix)]
 pub(crate) fn path_watch_config(
     configured: crate::client::pathwatch::PathWatchConfig,
 ) -> crate::client::pathwatch::PathWatchConfig {
@@ -53,10 +52,9 @@ pub(crate) fn path_watch_config(
 }
 
 /// The wake signal the target's reconnect loop listens to
-/// (`target::run_reverse_unix`). Production always gets the process-wide
+/// (`target::run_reverse_observed`). Production always gets the process-wide
 /// detector's subscription. Under `#[cfg(test)]` only, a test can wrap the
 /// target future in [`TEST_WAKE`]`.scope(..)` to inject wakes by hand.
-#[cfg(unix)]
 pub(crate) fn wake_subscription() -> tokio::sync::watch::Receiver<crate::client::wake::WakeEvent> {
     #[cfg(test)]
     if let Ok(mut rx) = TEST_WAKE.try_with(|rx| rx.clone()) {
@@ -66,14 +64,14 @@ pub(crate) fn wake_subscription() -> tokio::sync::watch::Receiver<crate::client:
     crate::client::wake::subscribe()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 tokio::task_local! {
     /// Test-only override read by [`wake_subscription`]. A task-local, not a
     /// process global, so it only reaches the future it scopes.
     pub(crate) static TEST_WAKE: tokio::sync::watch::Receiver<crate::client::wake::WakeEvent>;
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 tokio::task_local! {
     /// Test-only override read by [`path_watch_config`]. A task-local, not
     /// a process global, so it only reaches the future it scopes.
@@ -125,24 +123,17 @@ pub(crate) fn millis(d: std::time::Duration) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReconnectCause {
     /// DNS/resolver error, or the resolver returned no addresses at all
-    /// (`ops::resolve_all`). Constructed only from `target::dial_and_register`
-    /// (`#[cfg(any(unix, test))]` — the dial path is unix-only in
-    /// production, so this variant is otherwise dead on a non-unix,
-    /// non-test build; see the sibling `#[cfg_attr]`s below).
-    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
+    /// (`ops::resolve_all`). Constructed only from `target::dial_and_register`.
     Resolve,
     /// The dial did not complete within the per-attempt timeout, or the
     /// controller's `Hello` reply after it did not arrive within
     /// `HELLO_TIMEOUT` (issue #11 request 3).
-    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     DialTimeout,
     /// Transport-level refusal or connect error (peer at capacity,
     /// connection refused, unreachable, reset).
-    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     Refused,
     /// Either side rejected the TLS peer — a local pin mismatch/missing
     /// pin, or the peer rejecting ours.
-    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     TlsRejected,
     /// The controller's `host.reverse` ACL/registry choke point refused
     /// the registration.
@@ -201,7 +192,7 @@ impl ReconnectCause {
     }
 }
 
-/// Close code both `listen::registration` and `target::run_reverse_unix`
+/// Close code both `listen::registration` and `target::run_reverse_observed`
 /// send when their own watchdog (`PathWatch`) declares an established
 /// connection's path dead (`listen.rs`'s and `target.rs`'s identically-
 /// valued, identically-named private consts — duplicated across those two

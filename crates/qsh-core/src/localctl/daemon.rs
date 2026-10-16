@@ -1,20 +1,23 @@
 //! Daemon side of localctl: the bridge module (`crate::localctl` module
 //! docs — the one place in this tree allowed to touch `qsh_transport`
 //! indirectly, through [`crate::reverse::listen::Listen`]) that binds this
-//! `qsh listen` process's UDS socket, enforces the peer-credential trust
-//! boundary, and answers the `LOCAL_ADMIN` conduit
+//! `qsh listen` process's local endpoint (a UDS socket, or a named pipe on
+//! Windows), enforces the peer-credential trust boundary, and answers the
+//! `LOCAL_ADMIN` conduit
 //! (`docs/design/protocol.md` §11-3, M3 plan Step 5 (2473c88), PR 5a).
 //!
 //! Two pieces:
 //!
-//! - [`LocalctlListener`] — binds `paths.localctl_socket(pid)`: creates the
-//!   runtime directory 0700 if absent (fails closed if that mode cannot be
-//!   pinned — [`crate::config::ensure_private_dir`]), then tightens the
-//!   socket file itself to 0600.
+//! - [`LocalctlListener`] — binds the endpoint (`super::transport::bind`).
+//!   On unix that is `paths.localctl_socket(pid)`: the runtime directory is
+//!   created 0700 if absent (fails closed if that mode cannot be pinned —
+//!   [`crate::config::ensure_private_dir`]) and the socket file itself is
+//!   0600. On Windows it is the first instance of the pipe
+//!   `\\.\pipe\qsh-<scope>-<pid>`, and binding fails if the name exists.
 //! - [`LocalctlDaemon`] — the accept loop and per-conduit serve logic.
 //!   Every accepted connection is peer-credential-checked (this process's
-//!   own euid, via [`tokio::net::UnixStream::peer_cred`] — `SO_PEERCRED` on
-//!   Linux, `getpeereid` on macOS) **before a single frame is read**; a
+//!   own euid, via `SO_PEERCRED` on Linux and `getpeereid` on macOS, or the
+//!   user SID of the connecting process on Windows) **before a single frame is read**; a
 //!   mismatch (or a failed credential lookup) is rejected silently, with no
 //!   attempt to speak the protocol to a peer this process does not trust
 //!   (`crate::localctl` module docs: "localctl grants no new authority").
@@ -35,7 +38,7 @@
 //!   (`crate::localctl` module docs).
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
@@ -47,74 +50,42 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire;
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 
-use crate::config::{Paths, ensure_private_dir};
+use crate::config::Paths;
 use crate::localctl::mux::{MessageKind, classify};
 use crate::ops::OpError;
 use crate::reverse::listen::{ConduitInbound, HubSendError, Listen};
 use crate::reverse::registry::{EntryState, ReverseEntry};
 
 use super::frame::LocalConduit;
-#[cfg(test)]
-use super::transport::peer_is_authorized;
-use super::transport::{authorized_peer, bind_with_narrow_umask, tighten_socket_mode};
+use super::transport::{self, LocalStream, OwnedReadHalf, OwnedWriteHalf, RawReader, RawWriter};
 
-/// This daemon's bound localctl UDS socket, plus the path it owns —
-/// unlinking it is the caller's job once every accept loop tied to it has
-/// stopped (`reverse/listen.rs`'s `run_listen_unix`, which composes this
-/// with the QUIC accept loop's own drain).
+/// This daemon's bound localctl endpoint, plus the path or pipe name it owns.
+/// Removing a socket file is the caller's job once every accept loop tied to
+/// it has stopped (`transport::remove_endpoint`; `reverse/listen.rs`'s
+/// `run_listen`, which composes this with the QUIC accept loop's own drain);
+/// a pipe name needs no cleanup.
 pub struct LocalctlListener {
-    listener: UnixListener,
-    /// Absolute path this socket was bound at
-    /// (`paths.localctl_socket(pid)`).
+    listener: transport::Listener,
+    /// The endpoint this daemon bound: the absolute socket path
+    /// (`paths.localctl_socket(pid)`) on unix, the pipe name on Windows.
     pub socket_path: PathBuf,
 }
 
 impl LocalctlListener {
-    /// Bind `paths.localctl_socket(pid)`:
-    ///
-    /// 1. Create/tighten the runtime directory to 0700
-    ///    ([`ensure_private_dir`]) — **fails closed** (refuses to bind at
-    ///    all) if that mode cannot be pinned, rather than binding into a
-    ///    directory whose permissions this process does not actually
-    ///    control (M3 plan Step 5 (a) (2473c88)).
-    /// 2. Remove any leftover file at the exact socket path first — `bind`
-    ///    fails with `AddrInUse` on an existing path, and a `<pid>.sock`
-    ///    left over from a previous process that reused this pid (or that
-    ///    crashed without unlinking) is garbage, not state to preserve
-    ///    (exactly the judgment `crate::localctl::client::discover` already
-    ///    makes for a stale socket it finds `ECONNREFUSED` on).
-    /// 3. Tighten the socket file itself to 0600.
+    /// Bind this daemon's endpoint for `pid` (`transport::bind`). Fails
+    /// closed: a runtime directory whose mode cannot be pinned to 0700
+    /// (unix), or a pipe name that already exists (Windows), refuses the
+    /// bind instead of serving from an endpoint this process does not
+    /// control (ADR-0035 decision 14).
     pub fn bind(paths: &Paths, pid: u32) -> Result<Self, OpError> {
-        let runtime_dir = paths.runtime_dir();
-        ensure_private_dir(&runtime_dir)?;
-        let socket_path = paths.localctl_socket(pid);
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
-        let listener =
-            bind_with_narrow_umask(&socket_path).map_err(|err| bind_error(&socket_path, &err))?;
-        // Belt-and-suspenders: `bind_with_narrow_umask` already creates the
-        // node at 0600 (`bind(2)`'s default 0666, narrowed by the 0177
-        // umask it holds for the syscall alone), but tighten it again
-        // explicitly so the final mode does not depend on that umask trick
-        // alone — a caller relying only on the observable end state, not
-        // the mechanism, still gets exactly 0600.
-        tighten_socket_mode(&socket_path).map_err(|err| bind_error(&socket_path, &err))?;
+        let (listener, socket_path) = transport::bind(paths, pid)?;
         Ok(Self {
             listener,
             socket_path,
         })
     }
-}
-
-fn bind_error(path: &Path, err: &io::Error) -> OpError {
-    OpError::new(
-        ErrorCode::ConfigError,
-        format!("localctl: cannot bind {}: {err}", path.display()),
-    )
 }
 
 /// Upper bound on connections *still being handshaked* (peer-cred check
@@ -270,7 +241,7 @@ impl LocalctlDaemon {
     /// take the whole daemon down.
     pub async fn run(
         self: Arc<Self>,
-        bound: LocalctlListener,
+        mut bound: LocalctlListener,
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_LOCALCTL_HANDSHAKES));
@@ -280,7 +251,7 @@ impl LocalctlDaemon {
                 _ = &mut shutdown => break,
                 accepted = bound.listener.accept() => {
                     match accepted {
-                        Ok((stream, _addr)) => {
+                        Ok((stream, authorized)) => {
                             // Never blocks the accept loop itself: at the
                             // cap, the new connection is simply dropped
                             // (closed) rather than served, so a burst of
@@ -292,7 +263,8 @@ impl LocalctlDaemon {
                                 Ok(permit) => {
                                     let this = self.clone();
                                     tokio::spawn(async move {
-                                        this.serve_conduit(stream, permit).await;
+                                        this.serve_authorized_conduit(stream, authorized, permit)
+                                            .await;
                                     });
                                 }
                                 Err(_) => {
@@ -318,36 +290,24 @@ impl LocalctlDaemon {
         }
     }
 
-    /// Peer-credential-check, then dispatch on `LocalHello.kind`. Every
-    /// return path here is a plain function return — nothing in this
-    /// module ever panics on a malformed or unexpected peer message
-    /// (M3 plan Step 5 (2473c88): "never a panic or a hang").
-    async fn serve_conduit(
-        self: Arc<Self>,
-        stream: UnixStream,
-        handshake_permit: tokio::sync::OwnedSemaphorePermit,
-    ) {
-        let authorized = Self::authorized_peer(&stream);
-        self.serve_authorized_conduit(stream, authorized, handshake_permit)
-            .await;
-    }
-
-    /// The rest of [`Self::serve_conduit`], taking the peer-credential
-    /// check's outcome as a parameter rather than computing it itself.
+    /// Dispatch on `LocalHello.kind`, once the peer-credential check
+    /// (`transport::Listener::accept` runs it before the connection reaches
+    /// this loop) says `authorized`. Every return path here is a plain
+    /// function return — nothing in this module ever panics on a malformed or
+    /// unexpected peer message (M3 plan Step 5 (2473c88): "never a panic or a
+    /// hang").
     ///
-    /// This split exists purely so the enforcement wiring is
-    /// unit-testable: [`Self::serve_conduit`] cannot be driven with a
-    /// rejected peer without a second real OS user (`daemon_euid`'s
-    /// `unsafe { libc::geteuid() }` has no injectable seam), so nothing
-    /// previously asserted that a `false`/`Err` outcome from
-    /// [`Self::authorized_peer`] actually stops this function from ever
-    /// reading a frame — an adversarial review confirmed this by deleting
-    /// the gate entirely and finding every localctl test still green. This
-    /// function is what the negative-outcome test drives directly, with a
-    /// literal `Ok(false)` standing in for a genuinely different euid.
+    /// The outcome is a parameter, not something this function looks up
+    /// itself, so the enforcement wiring is unit-testable: the daemon cannot
+    /// be driven with a rejected peer without a second real OS user, so
+    /// nothing would otherwise assert that a `false`/`Err` outcome stops this
+    /// function from ever reading a frame — an adversarial review confirmed
+    /// this by deleting the gate entirely and finding every localctl test
+    /// still green. The negative-outcome test drives this function directly,
+    /// with a literal `Ok(false)` standing in for a genuinely different user.
     async fn serve_authorized_conduit(
         self: Arc<Self>,
-        stream: UnixStream,
+        stream: LocalStream,
         authorized: io::Result<bool>,
         handshake_permit: tokio::sync::OwnedSemaphorePermit,
     ) {
@@ -355,7 +315,7 @@ impl LocalctlDaemon {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!(
-                    "localctl: rejected a connecting peer whose euid did not match this daemon's"
+                    "localctl: rejected a connecting peer that is not this daemon's own user"
                 );
                 return;
             }
@@ -529,7 +489,7 @@ impl LocalctlDaemon {
     /// of these three request shapes are fieldless and therefore wire-
     /// identical, so a bare top-level message could never tell them
     /// apart).
-    async fn serve_admin(&self, mut conduit: LocalConduit<UnixStream>) {
+    async fn serve_admin(&self, mut conduit: LocalConduit<LocalStream>) {
         let request = match conduit.recv::<LocalAdminRequest>().await {
             Ok(Some(request)) => request,
             Ok(None) | Err(_) => return,
@@ -561,7 +521,7 @@ impl LocalctlDaemon {
     /// `HostList` arm of [`Self::serve_admin`]: this controller's current
     /// registry snapshot — every entry, live or stale, never filtered and
     /// never dialed (`docs/CLI.md` §6.2, module docs).
-    async fn serve_admin_host_list(&self, mut conduit: LocalConduit<UnixStream>) {
+    async fn serve_admin_host_list(&self, mut conduit: LocalConduit<LocalStream>) {
         let hosts = self
             .listen
             .registry()
@@ -586,7 +546,7 @@ impl LocalctlDaemon {
     /// [`Listen::hubs_snapshot`] entry is keyed under, the same "this
     /// table's own key is the alias" pattern [`to_local_host`] relies on
     /// for `LocalHost.name`.
-    async fn serve_admin_tunnel_list(&self, mut conduit: LocalConduit<UnixStream>) {
+    async fn serve_admin_tunnel_list(&self, mut conduit: LocalConduit<LocalStream>) {
         let tunnels = self
             .listen
             .hubs_snapshot()
@@ -644,7 +604,7 @@ impl LocalctlDaemon {
     /// host or any payload).
     async fn serve_admin_tunnel_close(
         &self,
-        mut conduit: LocalConduit<UnixStream>,
+        mut conduit: LocalConduit<LocalStream>,
         tunnel_id: &str,
     ) {
         let hubs = self.listen.hubs_snapshot();
@@ -704,7 +664,7 @@ impl LocalctlDaemon {
         host: &str,
         wait_ms: u32,
         known_generation: Option<u64>,
-        mut conduit: LocalConduit<UnixStream>,
+        mut conduit: LocalConduit<LocalStream>,
     ) {
         let deadline = clamp_wait(wait_ms);
         let Some(hub) = self
@@ -904,7 +864,7 @@ impl LocalctlDaemon {
         host: &str,
         wait_ms: u32,
         known_generation: Option<u64>,
-        mut conduit: LocalConduit<UnixStream>,
+        mut conduit: LocalConduit<LocalStream>,
     ) {
         let deadline = clamp_wait(wait_ms);
         // `deadline` is the CLI's *one* total wait budget for this whole
@@ -1145,7 +1105,7 @@ impl LocalctlDaemon {
                 // clear typed error" — same reasoning as
                 // `pump_quic_to_uds`'s own ambiguous-boundary case).
                 let mut uds = uds;
-                let _ = uds.write_all(&[0u8]).await;
+                let _ = uds.write_all(&failure_sentinel(ack_before_splice)).await;
                 return;
             }
             Err(_elapsed) => {
@@ -1156,7 +1116,7 @@ impl LocalctlDaemon {
                      stream limit is likely exhausted"
                 );
                 let mut uds = uds;
-                let _ = uds.write_all(&[0u8]).await;
+                let _ = uds.write_all(&failure_sentinel(ack_before_splice)).await;
                 return;
             }
         };
@@ -1215,14 +1175,19 @@ impl LocalctlDaemon {
                 return;
             }
         };
+        // The raw phase of the conduit starts here (on Windows its bytes are
+        // chunks, `crate::localctl::chunked`); `prefetched` comes back as
+        // whatever still has to be delivered ahead of the reader.
+        let (uds_read, uds_write) = transport::split(uds);
+        let (uds_read, prefetched) = transport::raw_reader(uds_read, prefetched);
+        let uds_write = transport::raw_writer(uds_write);
+
         if quic_send.write_all(&header_bytes).await.is_err() {
             return;
         }
         if !prefetched.is_empty() && quic_send.write_all(&prefetched).await.is_err() {
             return;
         }
-
-        let (uds_read, uds_write) = uds.into_split();
 
         if tunnel_permit || file_splice {
             // `TCP_CONNECT`'s post-handshake body is unframed tunnel
@@ -1334,7 +1299,7 @@ impl LocalctlDaemon {
         conn: &qsh_transport::Connection,
         header: &wire::StreamHeader,
         deadline: std::time::Duration,
-        mut conduit: LocalConduit<UnixStream>,
+        mut conduit: LocalConduit<LocalStream>,
     ) {
         // `header.ticket` is `forward_id`, a NUL byte, then this
         // claimant's opaque claim token
@@ -1486,7 +1451,9 @@ impl LocalctlDaemon {
         // From here on this conduit never speaks framed `qsh.local.v1`
         // again, same as the `TCP_CONNECT`/`SESSION_DATA` legs above.
         let (uds, prefetched) = conduit.into_raw();
-        let (uds_read, uds_write) = uds.into_split();
+        let (uds_read, uds_write) = transport::split(uds);
+        let (uds_read, prefetched) = transport::raw_reader(uds_read, prefetched);
+        let uds_write = transport::raw_writer(uds_write);
         // `_permit` (bound above, held here) must outlive the splice — it
         // is what keeps this stream counted against
         // `MAX_TUNNEL_STREAMS_PER_HUB` for its whole life, not just its
@@ -1498,13 +1465,6 @@ impl LocalctlDaemon {
             uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
         )
         .await;
-    }
-
-    /// Whether `stream`'s connecting peer is this process's own euid — the
-    /// only fact localctl ever authorizes on (`crate::localctl` module
-    /// docs). Runs before any frame is read.
-    fn authorized_peer(stream: &UnixStream) -> io::Result<bool> {
-        authorized_peer(stream)
     }
 }
 
@@ -1520,7 +1480,7 @@ impl LocalctlDaemon {
 /// data" from "something went wrong", never the data itself). That finish
 /// does not cancel the sibling leg: the target may still owe an answer, so
 /// the sibling is told only once the CLI hangs up entirely
-/// ([`wait_for_conduit_hangup`]). A QUIC
+/// ([`transport::wait_for_hangup`]). A QUIC
 /// write failure (the target reset or stopped this stream from its own
 /// end) simply ends this direction on its own.
 ///
@@ -1541,7 +1501,7 @@ impl LocalctlDaemon {
 /// a `read()` that has no reason left to ever resolve (module docs'
 /// cross-leg cancellation; see `serve_stream`'s call site).
 async fn pump_uds_to_quic(
-    mut uds_read: tokio::net::unix::OwnedReadHalf,
+    mut uds_read: RawReader<OwnedReadHalf>,
     mut quic_send: qsh_transport::SendStream,
     reset_on_uds_eof: bool,
     done_tx: tokio::sync::oneshot::Sender<()>,
@@ -1580,7 +1540,7 @@ async fn pump_uds_to_quic(
                         tokio::select! {
                             biased;
                             _ = &mut cancel_rx => return,
-                            () = wait_for_conduit_hangup(uds_read.as_ref()) => {}
+                            () = transport::wait_for_hangup(&uds_read) => {}
                         }
                     }
                     let _ = done_tx.send(());
@@ -1612,47 +1572,12 @@ async fn pump_uds_to_quic(
     }
 }
 
-/// Resolves once the CLI has closed its end of `conduit` entirely (both
-/// directions), as opposed to merely half-closing its write side.
-///
-/// After a half-close the read half is at EOF for good, so reading cannot
-/// tell the two apart, and an idle target writes nothing whose failure
-/// would. The poller reports the write side as closed (`EPOLLHUP` /
-/// kqueue `EV_EOF` on the write filter) only when the peer is gone for
-/// good, never for a bare `shutdown(SHUT_WR)`. That readiness is watched on
-/// a `dup` of the socket with its own registration, so clearing it here
-/// cannot starve the sibling leg's writes on the shared one. This keeps the
-/// idle-detach release (`RESET_CODE_LOCAL_PEER_GONE`'s own doc) without
-/// cancelling a leg that is still owed data. If the watch cannot be set up
-/// it resolves at once, which is the old cancel-on-EOF behavior.
-async fn wait_for_conduit_hangup(conduit: &tokio::net::UnixStream) {
-    use std::os::fd::AsFd as _;
-    use tokio::io::Interest;
-    use tokio::io::unix::AsyncFd;
-
-    let Ok(fd) = conduit.as_fd().try_clone_to_owned() else {
-        return;
-    };
-    let Ok(watch) = AsyncFd::with_interest(fd, Interest::WRITABLE) else {
-        return;
-    };
-    loop {
-        let Ok(mut guard) = watch.ready(Interest::WRITABLE).await else {
-            return;
-        };
-        if guard.ready().is_write_closed() {
-            return;
-        }
-        guard.clear_ready();
-    }
-}
-
 /// Keep reading and dropping the CLI's bytes after the QUIC send half
 /// died, until the CLI closes its write side (EOF or error) or the sibling
 /// QUIC→UDS leg ends (`cancel_rx`). The conduit's read side must not simply
 /// stop: the sibling leg may still be delivering the target's final frames.
 async fn discard_until_gone(
-    uds_read: &mut tokio::net::unix::OwnedReadHalf,
+    uds_read: &mut RawReader<OwnedReadHalf>,
     cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
 ) {
     use tokio::io::AsyncReadExt as _;
@@ -1713,7 +1638,7 @@ async fn discard_until_gone(
 /// blocking on target output that may never come on an idle session.
 async fn pump_quic_to_uds(
     mut quic_recv: qsh_transport::RecvStream,
-    mut uds_write: tokio::net::unix::OwnedWriteHalf,
+    mut uds_write: RawWriter<OwnedWriteHalf>,
     done_tx: tokio::sync::oneshot::Sender<()>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -1862,8 +1787,8 @@ impl Drop for TunnelQuicGuard {
 /// `crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED` and the UDS side is
 /// dropped, the same asymmetric teardown as an error here.
 async fn tunnel_splice_uds_quic(
-    mut uds_read: tokio::net::unix::OwnedReadHalf,
-    mut uds_write: tokio::net::unix::OwnedWriteHalf,
+    mut uds_read: RawReader<OwnedReadHalf>,
+    mut uds_write: RawWriter<OwnedWriteHalf>,
     quic_send: qsh_transport::SendStream,
     quic_recv: qsh_transport::RecvStream,
     up_prefix: Vec<u8>,
@@ -1929,10 +1854,35 @@ async fn tunnel_splice_uds_quic(
     } else if matches!(up, Some(Ok(_))) && matches!(down, Some(Ok(_))) {
         // Clean end on both directions: nothing left to reset.
         guard.disarm();
+        // A named pipe can discard bytes the peer has not read yet once its
+        // other end is closed, so the relay holds the conduit open until the
+        // peer has taken everything and closed its side. Unix sockets deliver
+        // what was written before a close, so nothing waits there.
+        if cfg!(windows) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                transport::wait_for_hangup(&uds_read),
+            )
+            .await;
+        }
     }
     // Otherwise `guard` falls out of scope still armed, and its `Drop`
     // resets the QUIC side — the same truncation teardown
     // `splice_tcp_quic`'s doc describes, applied to this relay hop.
+}
+
+/// The one byte the daemon writes when it cannot open the QUIC data stream
+/// after the CLI believes the handshake succeeded. It can never complete a
+/// real frame, so the CLI's decoder reports a broken conduit. When the CLI is
+/// still in the framed phase (`EXEC_DATA` waits for the ack) it goes out as it
+/// is; otherwise the conduit is already in its raw phase and the byte is
+/// carried the way that phase carries bytes.
+fn failure_sentinel(still_framed: bool) -> Vec<u8> {
+    if still_framed {
+        vec![0u8]
+    } else {
+        transport::raw_bytes(&[0u8]).into_owned()
+    }
 }
 
 /// Clamp a caller's `LocalHello.wait_ms` to [`LOCAL_WAIT_MAX`] — the same

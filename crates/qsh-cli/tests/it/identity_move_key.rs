@@ -12,25 +12,16 @@ use crate::common;
 use common::{Sandbox, exit_code};
 
 use {
-    common::{HOST_ALIAS, ServeGuard},
+    common::{HOST_ALIAS, ListenGuard, ReverseGuard, ServeGuard, hosts_array, poll_until},
     qsh_core::identity::MemoryKeyStore,
     qsh_core::{Ops, Paths},
     qsh_proto::{IdentityMoveKeyReq, KeyStoreKind},
     serde_json::Value,
-};
-
-/// The reverse roles (`qsh listen`, `qsh serve --to`) have no Windows
-/// implementation until the Windows reverse role lands, so their guards and
-/// the waits that use them are unix only.
-#[cfg(unix)]
-use {
-    common::{ListenGuard, ReverseGuard, hosts_array, poll_until},
     std::time::Duration,
 };
 
 /// Generous: each wait polls an observable state, so a loaded machine
 /// slows a case down without failing it.
-#[cfg(unix)]
 const WAIT: Duration = Duration::from_secs(60);
 
 /// `<config>/identity/<name>` as bytes, if the file exists.
@@ -185,9 +176,7 @@ fn trust_file(sandbox: &Sandbox) -> Vec<u8> {
 /// 3. this device is the reverse target (`qsh serve --to`), registering
 ///    into a listener.
 ///
-/// Role 1 runs on every OS. Roles 2 and 3 need `qsh listen` and
-/// `qsh serve --to`, which a Windows host does not have yet, so they are
-/// unix only until it does.
+/// All three roles run on every OS.
 #[test]
 fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     let device = Sandbox::initialized();
@@ -197,13 +186,11 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     // move.
     let client = Sandbox::initialized(); // role 1: execs on this device
     let client_fp = client.fingerprint();
-    #[cfg(unix)]
     let (target, target_fp) = {
         let target = Sandbox::initialized(); // role 2: registers into this device
         let fp = target.fingerprint();
         (target, fp)
     };
-    #[cfg(unix)]
     let (controller, controller_fp) = {
         let controller = Sandbox::initialized(); // role 3: this device registers into it
         let fp = controller.fingerprint();
@@ -229,12 +216,11 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     let serve = ServeGuard::start(&device);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &device_fp);
     let client_trust = trust_file(&client);
-    let (code, envelope) = client.json(&["exec", HOST_ALIAS, "--json", "--", "true"]);
+    let (code, envelope) = client.json(&common::exec_true_args(HOST_ALIAS));
     assert_eq!(code, 0, "forward host after move-key: {envelope}");
     assert_eq!(trust_file(&client), client_trust, "client trust.toml");
     drop(serve);
 
-    #[cfg(unix)]
     reverse_roles_after_move(
         &device,
         &device_fp,
@@ -248,7 +234,6 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
 /// Roles 2 and 3 of the route test: this device as the reverse listener a
 /// target registers into, then as the reverse target registering into a
 /// controller.
-#[cfg(unix)]
 fn reverse_roles_after_move(
     device: &Sandbox,
     device_fp: &str,

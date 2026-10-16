@@ -127,7 +127,7 @@ const _: () = assert!(
 
 /// The single place a bind failure becomes a `CONFIG_ERROR`, for both
 /// `qsh serve` ([`run_serve`], below) and `qsh listen`
-/// (`crate::reverse::listen::run_listen_unix`) — `ADR-0014` 결정 9 warns
+/// (`crate::reverse::listen::run_listen`) — `ADR-0014` 결정 9 warns
 /// that two independent copies of this format string is exactly how one
 /// gets a remedy and the other does not. The observation clause
 /// (`cannot listen on {bind}: {err}`) stays byte-identical to the
@@ -497,7 +497,7 @@ pub struct HostRuntime {
 ///
 /// Policy loads exactly once, here, at process start — never hot-reloaded
 /// (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a reverse target
-/// calls this once per process too (`crate::reverse::target::run_reverse_unix`),
+/// calls this once per process too (`crate::reverse::target::run_reverse_observed`),
 /// not once per reconnect, for the same reason.
 pub fn host_runtime(
     paths: &Paths,
@@ -522,7 +522,7 @@ pub fn host_runtime(
     // name this principal", which only the concrete `Policy` this call
     // just loaded can answer (`crate::acl::PinnedPrincipalIndex`'s own
     // doc) — by the time `authorizer` below is an `Arc<dyn Authorizer>`
-    // that type is erased. `crate::reverse::listen::run_listen_unix` keeps
+    // that type is erased. `crate::reverse::listen::run_listen` keeps
     // calling plain `load_or_deny`: a reverse target never reaches
     // `Server::serve_pairing_connection` at all.
     let trust_for_watch = Arc::clone(&trust);
@@ -530,7 +530,7 @@ pub fn host_runtime(
         load_or_deny_with_index(paths, Role::Serve, trust);
     // M8 plan Step 2 (52639fc): the same operator-configured admission bounds
     // for every host role this constructs (`qsh serve` and a reverse
-    // target's own accept loop, `crate::reverse::target::run_reverse_unix`
+    // target's own accept loop, `crate::reverse::target::run_reverse_observed`
     // — both are internet-exposed accept loops per the design's own audit
     // finding).
     let admission = crate::admission::Gate::new(

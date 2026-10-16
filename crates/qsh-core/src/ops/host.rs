@@ -13,7 +13,7 @@
 //!   (`forward_hosts`). Never probed: `state` is always `"unknown"`.
 //! - **reverse** — the union of `LocalHostList` across every localctl
 //!   daemon discovered on this machine
-//!   (`crate::localctl::client::admin_host_list_all`, unix only). A
+//!   (`crate::localctl::client::admin_host_list_all`). A
 //!   daemon this machine cannot reach is dropped from the result, never
 //!   turned into an error — one sleeping laptop must not hide every other
 //!   host (`docs/CLI.md` §6.2). `state` is whatever the daemon reported
@@ -459,7 +459,6 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
 ///   not come back yet;
 /// - no daemon at all is `CONNECTION_FAILED`, also retried: a restarting
 ///   `qsh listen` binds a new socket.
-#[cfg(unix)]
 pub(crate) fn pick_reverse_socket(
     daemons: &[crate::localctl::client::DaemonHostList],
     name: &str,
@@ -513,7 +512,6 @@ pub(crate) fn pick_reverse_socket(
 }
 
 /// [`pick_reverse_socket`] over the daemons found under `runtime_dir`.
-#[cfg(unix)]
 pub(crate) async fn find_reverse_socket(
     runtime_dir: &std::path::Path,
     name: &str,
@@ -1218,9 +1216,8 @@ impl Ops {
     }
 
     /// The reverse source: the union of `LocalHostList` across every
-    /// localctl daemon discovered on this machine — unix only, since
-    /// localctl (UDS) has no meaning on Windows (`docs/CLI.md` §6.13:
-    /// Windows `qsh hosts` returns forward hosts only, not an error).
+    /// localctl daemon discovered on this machine, a Unix socket or a Windows
+    /// named pipe (`docs/CLI.md` §6.13).
     ///
     /// Sync wrapper around [`Self::reverse_host_entries_async`]: builds a
     /// throwaway current-thread runtime and `block_on`s it, exactly the
@@ -1228,7 +1225,6 @@ impl Ops {
     /// runtime-management, factored out so the async logic itself lives in
     /// exactly one place.
     fn reverse_host_entries(&self) -> Vec<ReverseHostEntry> {
-        #[cfg(unix)]
         {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1251,16 +1247,11 @@ impl Ops {
             };
             runtime.block_on(self.reverse_host_entries_async())
         }
-        #[cfg(not(unix))]
-        {
-            Vec::new()
-        }
     }
 
     /// The truly-async half of [`Self::reverse_host_entries`] — no runtime
     /// of its own, so it is safe to `.await` directly from inside a
     /// caller's own runtime (see [`Self::resolve_host_route_async`]).
-    #[cfg(unix)]
     async fn reverse_host_entries_async(&self) -> Vec<ReverseHostEntry> {
         let runtime_dir = self.paths().runtime_dir();
         crate::localctl::client::admin_host_list_all(&runtime_dir)
@@ -1276,14 +1267,6 @@ impl Ops {
                 })
             })
             .collect()
-    }
-
-    /// Windows twin of [`Self::reverse_host_entries_async`]: localctl (UDS)
-    /// has no meaning there, so the reverse source is always empty
-    /// (`docs/CLI.md` §6.13).
-    #[cfg(not(unix))]
-    async fn reverse_host_entries_async(&self) -> Vec<ReverseHostEntry> {
-        Vec::new()
     }
 }
 

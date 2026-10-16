@@ -18,6 +18,17 @@
 //! the restorer, which a process-wide slot points at while a terminal state
 //! is armed, because the hook and the handler own no guard.
 //!
+//! # Shutting a long-running process down
+//!
+//! `qsh listen`, `qsh serve` and `qsh serve --to` have no terminal session to
+//! hang up. They arm [`arm_shutdown`] instead, and the same console control
+//! handler then turns a window close, log off or shutdown (and `CTRL_BREAK`)
+//! into a call of their notifier, so the process stops through the path
+//! `Ctrl-C` takes. The system ends the process as soon as the handler
+//! returns, so the handler waits for [`shutdown_finished`] (bounded by
+//! [`SHUTDOWN_GRACE`]) before it does. `Ctrl-C` itself stays with the
+//! runtime's own `ctrl_c`.
+//!
 //! # Seams
 //!
 //! The Win32 calls sit behind [`ConsoleApi`] and the resize poll's pause
@@ -35,7 +46,7 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::Duration;
 
 use qsh_core::OpError;
@@ -55,6 +66,11 @@ pub const CTRL_CLOSE_EVENT: u32 = 2;
 pub const CTRL_LOGOFF_EVENT: u32 = 5;
 /// `CTRL_SHUTDOWN_EVENT`.
 pub const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+/// How long the console handler holds a closing window for a process armed
+/// with [`arm_shutdown`] to finish stopping. Windows gives a closing
+/// console process about five seconds, so this stays below that.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 
 /// The UTF-8 code page.
 pub const CP_UTF8: u32 = 65001;
@@ -147,7 +163,56 @@ static ACTIVE: Mutex<Option<Arc<Restorer>>> = Mutex::new(None);
 /// Where console control events go while a session is attached.
 static EVENTS: Mutex<Option<Sender<TermEvent>>> = Mutex::new(None);
 
+/// What a process armed with [`arm_shutdown`] is told, and what it tells back.
+struct ShutdownSink {
+    notify: Box<dyn Fn() + Send + Sync>,
+    finished: Mutex<bool>,
+    finished_cv: Condvar,
+}
+
+/// The armed shutdown sink, if any.
+static SHUTDOWN: Mutex<Option<Arc<ShutdownSink>>> = Mutex::new(None);
+
 static HOOK: Once = Once::new();
+
+/// Route a closing console (`CTRL_CLOSE`, log off, shutdown, `CTRL_BREAK`)
+/// to `notify` while no terminal session is attached. `notify` runs on the
+/// system's handler thread and must only signal; the process stops on its
+/// own thread, then calls [`shutdown_finished`]. Arming again replaces the
+/// previous notifier.
+pub fn arm_shutdown(notify: impl Fn() + Send + Sync + 'static) {
+    let sink = Arc::new(ShutdownSink {
+        notify: Box::new(notify),
+        finished: Mutex::new(false),
+        finished_cv: Condvar::new(),
+    });
+    *SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+}
+
+/// The process armed with [`arm_shutdown`] has stopped: let a console
+/// handler that is holding a closing window go. A no-op when nothing is
+/// armed.
+pub fn shutdown_finished() {
+    let sink = SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(sink) = sink {
+        *sink.finished.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        sink.finished_cv.notify_all();
+    }
+}
+
+/// Tell the armed process to stop and wait for it, up to [`SHUTDOWN_GRACE`].
+/// `false` when nothing is armed, so the default action runs.
+fn request_shutdown() -> bool {
+    let sink = SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(sink) = sink else { return false };
+    (sink.notify)();
+    let finished = sink.finished.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = sink
+        .finished_cv
+        .wait_timeout_while(finished, SHUTDOWN_GRACE, |done| !*done)
+        .unwrap_or_else(|e| e.into_inner());
+    true
+}
 
 /// Restore whatever is armed. Used by the panic hook and the console
 /// handler.
@@ -180,7 +245,8 @@ fn install_panic_hook() {
 /// the driver to detach on (the session stays on the host,
 /// `docs/CLI.md` §7). With nobody listening (the
 /// invitation-code prompt) the default action, ending the process, is left
-/// to run on the restored console.
+/// to run on the restored console, unless the process armed [`arm_shutdown`]:
+/// then the event is handed to it and held until it has stopped.
 pub fn on_console_event(ctrl_type: u32) -> bool {
     let cause = match ctrl_type {
         CTRL_C_EVENT => {
@@ -208,7 +274,7 @@ pub fn on_console_event(ctrl_type: u32) -> bool {
         Some(events) => events
             .send(TermEvent::Hangup(HangupCause(cause as i32)))
             .is_ok(),
-        None => false,
+        None => request_shutdown(),
     }
 }
 

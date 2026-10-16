@@ -423,20 +423,16 @@ impl Rig {
         trust_store
             .save(&paths.trust_file())
             .expect("save target trust.toml");
-        std::fs::write(
-            paths.acl_file(),
+        crate::config::write_private_file(
+            &paths.acl_file(),
             format!(
                 "[[acl]]\nprincipal = \"device:{controller_alias}\"\nallow = [\"exec.run\", \
                  \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
                  \"host.reverse\", \"forward.local\", \"forward.remote\"]\n"
-            ),
+            )
+            .as_bytes(),
         )
         .expect("write target acl.toml");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(paths.acl_file(), std::fs::Permissions::from_mode(0o600))
-                .expect("chmod target acl.toml");
-        }
         // A short backoff keeps the post-loss `retry` prompt; the scenario's
         // own bound is [`WAIT`].
         let config = Config {
@@ -542,8 +538,8 @@ impl Rig {
 /// [`Config::load`]. Nothing here uses `Listen::set_test_path_watch` or the
 /// target's test `PathWatch` override, so the death time of a blackholed
 /// registration is whatever the configured `[recovery]` and `[transport]`
-/// values made it. That is the only way a test can see that `run_listen_unix`
-/// and `run_reverse_unix` pass the validated values on to the watch they build.
+/// values made it. That is the only way a test can see that `run_listen`
+/// and `run_reverse_observed` pass the validated values on to the watch they build.
 pub(super) struct ConfiguredRig {
     relay: UdpRelay,
     controller_shutdown: Option<oneshot::Sender<()>>,
@@ -694,9 +690,7 @@ impl ConfiguredRig {
     }
 }
 
-/// Write `text` to `path` with mode 0600, the mode `acl.toml` must have.
+/// Write `text` to `path` owner-only, the protection `acl.toml` must have.
 fn write_private(path: &std::path::Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, text).expect("write file");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod file");
+    crate::config::write_private_file(path, text.as_bytes()).expect("write private file");
 }

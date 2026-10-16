@@ -159,8 +159,7 @@ pub(crate) enum SpliceError {
 #[derive(Clone, Copy)]
 pub(crate) enum Probe<'a> {
     /// Nothing: a hop that never touches a QUIC receive window. Only the
-    /// unix-only UDS hops ([`pump`]) use it.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// local-conduit hops ([`pump`]) use it.
     Off,
     /// The send direction (local to QUIC): byte counts only.
     Sent(&'a StreamTrack),
@@ -225,7 +224,6 @@ where
 /// UDS<->QUIC hop instead of re-deriving it: tunnel payload is unframed
 /// past the handshake on *both* legs of that relay, not just the direct-
 /// connect one this module was first written for.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn pump<R, W>(from: &mut R, to: &mut W, prefix: &[u8]) -> io::Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
@@ -520,13 +518,11 @@ pub(crate) async fn splice_tcp_quic(
 /// So this guard, unlike [`SpliceGuard`], only ever holds the TCP halves —
 /// the UDS halves are plain local variables in [`splice_tcp_uds`] and drop
 /// however they drop.
-#[cfg(unix)]
 struct LocalTcpGuard {
     local_read: Option<OwnedReadHalf>,
     local_write: Option<OwnedWriteHalf>,
 }
 
-#[cfg(unix)]
 impl LocalTcpGuard {
     fn new(local_read: OwnedReadHalf, local_write: OwnedWriteHalf) -> Self {
         Self {
@@ -542,7 +538,6 @@ impl LocalTcpGuard {
     }
 }
 
-#[cfg(unix)]
 impl Drop for LocalTcpGuard {
     fn drop(&mut self) {
         // Reached only on a truncated transfer or this future being
@@ -574,7 +569,6 @@ impl Drop for LocalTcpGuard {
 /// local TCP side gets the same `SO_LINGER 0` RST-on-truncation treatment
 /// [`splice_tcp_quic`] gives it, while the UDS side (a process-local hop to
 /// this machine's own daemon) is simply dropped, clean or not.
-#[cfg(unix)]
 pub(crate) async fn splice_tcp_uds(
     local: TcpStream,
     mut uds_write: crate::localctl::client::RawUdsWrite,

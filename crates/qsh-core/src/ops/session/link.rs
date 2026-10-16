@@ -42,13 +42,6 @@ pub(super) enum ConnectedLink {
     /// reported (`None` only if the daemon's ack omitted it, which never
     /// happens on a live registration but is not this type's job to
     /// assume).
-    // Only ever constructed by `connect_reverse`'s `#[cfg(unix)]` body
-    // (localctl/UDS is unix-only) in the non-test lib build — the
-    // Windows twin returns `Err` before ever reaching a `Connected`, so
-    // this variant is genuinely unconstructed there outside `#[cfg(test)]`
-    // (where a unit test builds it directly to pin
-    // `Connected::peer_fingerprint`'s reverse-leg behavior).
-    #[cfg_attr(not(unix), allow(dead_code))]
     Reverse {
         peer_fingerprint: Option<String>,
         /// This machine's resident `qsh listen` daemon's localctl socket
@@ -284,7 +277,6 @@ impl Connected {
     /// forward route (the mirror image of [`Self::connection`] being
     /// `None` on the reverse route) — a caller branches on one or the
     /// other, never both.
-    #[cfg(unix)]
     pub(crate) fn reverse_route(&self) -> Option<(&std::path::Path, &str)> {
         match &self.link {
             ConnectedLink::Forward(_) => None,

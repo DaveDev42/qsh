@@ -3,6 +3,8 @@
 날짜: 2026-09-24
 상태: 승인됨 (2026-09-26 사용자 확정)
 
+개정 이력: 2026-10-16에 reverse target의 진입점 이름이 바뀐 것을 적는다. 이 문서가 `run_reverse_unix`로 부르는 함수는 M19가 cfg(unix) 쌍둥이를 없애면서 플랫폼 공통의 `run_reverse_observed`(`crates/qsh-core/src/reverse/target/mod.rs`)가 되었고, 본문의 옛 이름은 그 함수를 가리킨다. 결정 내용은 바뀌지 않는다.
+
 개정 관계: `docs/design/protocol.md` §1 요약표와 §2를 개정한다. §10이 이미 적어 둔 "세 값 모두 상수가 아니라 설정(`RecoveryConfig`)이다"는 개정 대상이 아니라 이행 대상이다. 기존 ADR은 하나도 대체하지 않는다. 두 타이머를 다룬 ADR은 오늘 없다.
 
 ## 맥락

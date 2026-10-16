@@ -29,6 +29,12 @@
 //! A small subset of `tui_expect.rs`'s `Client` is copied here rather than
 //! imported — `tui_expect.rs` is a test *binary*, not a library module,
 //! and per this stage's own instructions is left untouched.
+//!
+//! Every case here attaches a PTY session through the reverse route, which
+//! needs a pseudo-terminal on both ends, so the module stays unix only until
+//! M20 brings ConPTY sessions to Windows. The cases that do not need a PTY
+//! (exec, tunnels, `hosts`, re-registration) run on Windows in
+//! `windows_reverse_e2e.rs`.
 
 #![cfg(unix)]
 

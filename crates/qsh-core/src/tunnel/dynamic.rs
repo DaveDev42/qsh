@@ -506,7 +506,6 @@ impl DynamicForwardHandle {
     /// point is still the only *production* caller.
     ///
     /// [`LocalForwardHandle::start_reverse`]: crate::tunnel::local::LocalForwardHandle::start_reverse
-    #[cfg(unix)]
     pub async fn start_reverse(
         bind: Option<&str>,
         listen_port: u16,

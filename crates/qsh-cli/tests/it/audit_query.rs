@@ -407,7 +407,6 @@ fn audit_query_human_mode_never_prints_skipped_line_contents() {
 
 /// The keys an `AuditRecordView` may carry. The first nine are always
 /// present.
-#[cfg(unix)]
 const VIEW_KEYS: &[&str] = &[
     "ts",
     "request_id",
@@ -431,7 +430,6 @@ const VIEW_KEYS: &[&str] = &[
 /// 2. `qsh listen`: a NAT target registers into this device.
 /// 3. `qsh serve --to`: this device registers into a controller, which then
 ///    execs on it through the reverse route.
-#[cfg(unix)]
 #[test]
 fn audit_query_reads_records_written_by_serve_listen_and_serve_to() {
     use common::{HOST_ALIAS, ListenGuard, ReverseGuard, ServeGuard, hosts_array, poll_until};
@@ -453,7 +451,7 @@ fn audit_query_reads_records_written_by_serve_listen_and_serve_to() {
     device.trust_add_with_role("laptop", None, &client_fp, "full");
     let serve = ServeGuard::start(&device);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &device_fp);
-    let (code, envelope) = client.json(&["exec", HOST_ALIAS, "--json", "--", "true"]);
+    let (code, envelope) = client.json(&common::exec_true_args(HOST_ALIAS));
     assert_eq!(code, 0, "forward host: {envelope}");
     common::wait_for_audit(&device, "the forward host's exec.run allow", |r| {
         r["action"] == "exec.run" && r["principal"] == "device:laptop" && r["decision"] == "allow"
@@ -495,7 +493,7 @@ fn audit_query_reads_records_written_by_serve_listen_and_serve_to() {
             .any(|h| h["name"] == "dev" && h["state"] == "reachable")
             .then_some(())
     });
-    let (code, envelope) = controller.json(&["exec", "dev", "--json", "--", "true"]);
+    let (code, envelope) = controller.json(&common::exec_true_args("dev"));
     assert_eq!(code, 0, "reverse target: {envelope}");
     common::wait_for_audit(&device, "the reverse target's exec.run allow", |r| {
         r["action"] == "exec.run" && r["principal"] == "device:hub" && r["decision"] == "allow"

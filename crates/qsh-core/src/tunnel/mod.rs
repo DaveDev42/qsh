@@ -78,10 +78,7 @@ pub(crate) async fn open_stream(
 /// M4 plan Step 5 (a) (2473c88)).
 ///
 /// That one caller lives inside `remote::RemoteForwardAcceptor`'s
-/// `#[cfg(unix)]` reverse-claim dispatch (localctl is a Unix-domain
-/// socket), so this function itself is dead — not absent — on Windows;
-/// same idiom as `HUB_WAIT_POLL` (`reverse/listen.rs`).
-#[cfg_attr(not(unix), allow(dead_code))]
+/// reverse-claim dispatch.
 pub(crate) async fn open_stream_with_wait(
     link: &DataLink<'_>,
     header: &StreamHeader,
@@ -123,7 +120,6 @@ mod tests {
             DataSend::Direct(quic_send) => {
                 assert_eq!(quic_send.priority().unwrap(), PRIORITY_TUNNEL);
             }
-            #[cfg(unix)]
             DataSend::Local(_) => unreachable!("loopback_pair only opens the forward Direct route"),
         }
 
@@ -144,7 +140,6 @@ mod tests {
                 SENTINEL_PRIORITY,
                 "the seam must apply the priority it is passed, not quinn's default"
             ),
-            #[cfg(unix)]
             DataSend::Local(_) => unreachable!("forward Direct route only"),
         }
         sentinel_send.finish();

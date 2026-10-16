@@ -49,14 +49,16 @@
 //! the interactive `-R`'s entry point (and, on the standalone-op side, by
 //! [`crate::ops::Ops::tunnel_open`]'s `"remote"` mode).
 //!
-//! **Unix-only.** Like `crate::tunnel::local`'s reverse carrier, this
-//! module's listener/accept-loop leg is host-only infrastructure gated the
-//! same way the rest of M4's host-side tunnel code is — see
+//! **Host leg.** This module's listener/accept-loop leg is host-only
+//! infrastructure gated the same way the rest of M4's host-side tunnel code
+//! is — see
 //! `crates/qsh-core/Cargo.toml`'s platform split and the Windows-leg notes in
 //! The M4 plan (2473c88) for M4 Step 3/4 (compiles, does not run the
 //! integration leg on Windows). [`RemoteForwardAcceptor`] is the
 //! requester leg, not the host leg, and is **not** `cfg(unix)`-gated —
-//! same reasoning as `crate::tunnel::local`'s own requester-side listener.
+//! same reasoning as `crate::tunnel::local`'s own requester-side listener —
+//! and neither is its reverse-claim dispatch, since localctl builds on every
+//! platform.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -65,9 +67,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-// The reverse claim loop's backoff decision is the only consumer, and it
-// is `cfg(unix)` with the rest of the reverse leg.
-#[cfg(unix)]
+// The reverse claim loop's backoff decision is the only consumer.
 use std::time::Instant;
 
 use qsh_proto::wire::{StreamHeader, StreamKind, sanitize_peer_text, valid_forward_id};
@@ -655,7 +655,6 @@ enum AcceptDispatch {
     /// Reverse route: this machine's resident daemon socket, plus one
     /// claim-loop task per currently-registered `forward_id`
     /// (`claim_remote_forward_reverse`).
-    #[cfg(unix)]
     Local {
         socket: std::path::PathBuf,
         host: String,
@@ -714,7 +713,6 @@ impl RemoteForwardAcceptor {
     /// dedicated claim loop starts for exactly that id
     /// (`AcceptDispatch::Local`'s own doc on why one loop per id, not
     /// one shared loop).
-    #[cfg(unix)]
     pub async fn spawn_reverse(socket_path: std::path::PathBuf, host: String) -> Self {
         Self::spawn_reverse_watching(socket_path, host, None).await
     }
@@ -722,7 +720,6 @@ impl RemoteForwardAcceptor {
     /// [`Self::spawn_reverse`] that also reports, on `vanished`, each time
     /// a claim loop's attempt returns at once (`AcceptDispatch::Local`'s
     /// `vanished`).
-    #[cfg(unix)]
     pub(crate) async fn spawn_reverse_watching(
         socket_path: std::path::PathBuf,
         host: String,
@@ -765,7 +762,6 @@ impl RemoteForwardAcceptor {
     pub fn claim_token(&self) -> Option<&[u8]> {
         match &self.dispatch {
             AcceptDispatch::Direct { .. } => None,
-            #[cfg(unix)]
             AcceptDispatch::Local { claim_token, .. } => Some(claim_token.as_slice()),
         }
     }
@@ -781,7 +777,6 @@ impl RemoteForwardAcceptor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(forward_id.clone(), (host.clone(), port));
-        #[cfg(unix)]
         if let AcceptDispatch::Local {
             socket,
             host: daemon_host,
@@ -823,7 +818,6 @@ impl RemoteForwardAcceptor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(forward_id);
-        #[cfg(unix)]
         if let AcceptDispatch::Local { claims, .. } = &self.dispatch
             && let Some(task) = claims
                 .lock()
@@ -861,7 +855,6 @@ impl Drop for RemoteForwardAcceptor {
         // a connection someone else already committed to.
         match &self.dispatch {
             AcceptDispatch::Direct { task } => task.abort(),
-            #[cfg(unix)]
             AcceptDispatch::Local { claims, .. } => {
                 for (_, task) in claims.lock().unwrap_or_else(|e| e.into_inner()).drain() {
                     task.abort();
@@ -1062,7 +1055,6 @@ async fn handle_accepted_stream(
 /// daemon itself clamps every `LOCAL_STREAM` wait to
 /// (`crate::localctl::daemon`'s `clamp_wait`/`LOCAL_WAIT_MAX`), so this
 /// asks for the largest budget the daemon will actually honor.
-#[cfg(unix)]
 const REVERSE_CLAIM_WAIT_MS: u32 = qsh_proto::local::LOCAL_WAIT_MAX.as_millis() as u32;
 
 /// How long to pause before retrying a claim that failed for a reason
@@ -1071,7 +1063,6 @@ const REVERSE_CLAIM_WAIT_MS: u32 = qsh_proto::local::LOCAL_WAIT_MAX.as_millis() 
 /// should not be hammered with a fresh UDS connect in a tight loop. Same
 /// order of magnitude as [`crate::tunnel::local::ACCEPT_BACKOFF`], for the
 /// same reason.
-#[cfg(unix)]
 const REVERSE_CLAIM_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Build a `TCP_ACCEPTED` claim's `ticket`: `forward_id`, a NUL byte,
@@ -1081,7 +1072,6 @@ const REVERSE_CLAIM_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// safe, unambiguous separator because `forward_id` can never contain one
 /// (`wire::valid_forward_id`'s charset is `[A-Za-z0-9_-]`) while
 /// `claim_token` is opaque bytes with no charset restriction of its own.
-#[cfg(unix)]
 fn claim_ticket(forward_id: &str, claim_token: &[u8]) -> Vec<u8> {
     let mut ticket = Vec::with_capacity(forward_id.len() + 1 + claim_token.len());
     ticket.extend_from_slice(forward_id.as_bytes());
@@ -1141,7 +1131,6 @@ impl Drop for DrainSplicesOnDrop {
 /// `socket`/`daemon_host`/`header` move into the spawned future so it is
 /// fully self-contained (`'static`), independent of the loop's own stack
 /// frame.
-#[cfg(unix)]
 type ClaimAttemptHandle = tokio::task::JoinHandle<
     Result<
         (
@@ -1153,7 +1142,6 @@ type ClaimAttemptHandle = tokio::task::JoinHandle<
     >,
 >;
 
-#[cfg(unix)]
 fn spawn_claim_attempt(
     socket: std::path::PathBuf,
     daemon_host: String,
@@ -1193,14 +1181,12 @@ fn spawn_claim_attempt(
 /// there is no arrival to lose. A `None` handle (the loop always holds
 /// `Some` between iterations, see [`claim_remote_forward_reverse`]) is
 /// simply a no-op, same as `DrainSplicesOnDrop` on an empty set.
-#[cfg(unix)]
 struct DrainClaimAttemptOnDrop {
     handle: Option<ClaimAttemptHandle>,
     host: String,
     port: u16,
 }
 
-#[cfg(unix)]
 impl DrainClaimAttemptOnDrop {
     fn new(handle: ClaimAttemptHandle, host: String, port: u16) -> Self {
         Self {
@@ -1229,7 +1215,6 @@ impl DrainClaimAttemptOnDrop {
     }
 }
 
-#[cfg(unix)]
 impl Drop for DrainClaimAttemptOnDrop {
     fn drop(&mut self) {
         let Some(handle) = self.handle.take() else {
@@ -1314,7 +1299,6 @@ impl Drop for DrainClaimAttemptOnDrop {
 /// other failure mode gets; only a `Timeout` that actually spent close to
 /// the full budget is the ordinary long-poll outcome and is retried at
 /// once.
-#[cfg(unix)]
 const FAST_TIMEOUT_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// The decision [`FAST_TIMEOUT_THRESHOLD`]'s doc describes, pulled out as
@@ -1324,12 +1308,10 @@ const FAST_TIMEOUT_THRESHOLD: Duration = Duration::from_secs(1);
 /// must be a registration that vanished out from under this loop (the
 /// only way `claim_tcp_accepted` returns before its first `.await`) — get
 /// backed off like every other failure, not retried instantly.
-#[cfg(unix)]
 fn timeout_needs_backoff(elapsed: Duration) -> bool {
     elapsed < FAST_TIMEOUT_THRESHOLD
 }
 
-#[cfg(unix)]
 async fn claim_remote_forward_reverse(
     socket: std::path::PathBuf,
     daemon_host: String,
@@ -1430,7 +1412,6 @@ async fn claim_remote_forward_reverse(
 /// to look up — `host`/`port` arrive already resolved, captured by
 /// [`RemoteForwardAcceptor::register`] at the moment this loop was
 /// spawned.
-#[cfg(unix)]
 async fn handle_reverse_claim(
     send: crate::client::link::DataSend,
     recv: crate::client::link::DataRecv,

@@ -395,6 +395,40 @@ fn a_console_event_with_nobody_attached_restores_and_lets_the_default_run() {
 }
 
 #[test]
+fn a_closing_console_notifies_an_armed_process_and_waits_until_it_has_stopped() {
+    let _serial = serial();
+    let (told, told_rx) = channel();
+    arm_shutdown(move || {
+        let _ = told.send(());
+    });
+    // The handler holds the closing window until the process says it is done,
+    // so the event runs on its own thread, as the system's would.
+    let handler = std::thread::spawn(|| on_console_event(CTRL_CLOSE_EVENT));
+    told_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the armed process is told to stop");
+    assert!(
+        !handler.is_finished(),
+        "the handler keeps the window open while the process is still stopping"
+    );
+    shutdown_finished();
+    assert!(
+        handler.join().unwrap(),
+        "the event is handled, so the system does not run the next handler"
+    );
+    // Nothing is armed any more: the default action is left to run.
+    assert!(!on_console_event(CTRL_CLOSE_EVENT));
+}
+
+#[test]
+fn ctrl_c_is_left_to_the_runtime_even_when_a_process_is_armed() {
+    let _serial = serial();
+    arm_shutdown(|| panic!("Ctrl-C must not reach the close notifier"));
+    assert!(!on_console_event(CTRL_C_EVENT));
+    shutdown_finished();
+}
+
+#[test]
 fn an_interrupt_with_a_session_attached_is_forwarded_not_fatal() {
     let _serial = serial();
     let console = FakeConsole::cooked();

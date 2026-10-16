@@ -8,13 +8,53 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use qsh_proto::ErrorCode;
 use tokio::net::{UnixListener, UnixStream};
+
+use crate::config::{Paths, ensure_private_dir};
+use crate::ops::OpError;
 
 /// A connected localctl conduit. On unix it is the socket itself, so every
 /// readiness-based method the shared code uses (`readable`, `try_write`,
 /// `poll_read_ready`, …) is `UnixStream`'s own.
 pub type LocalStream = UnixStream;
+
+/// The owned read half of a split [`LocalStream`].
+pub(crate) use tokio::net::unix::OwnedReadHalf;
+/// The owned write half of a split [`LocalStream`]. Shutting it down ends
+/// the write direction only (`SHUT_WR`), and the peer's read sees a clean EOF.
+pub(crate) use tokio::net::unix::OwnedWriteHalf;
+
+/// The read side of a conduit's raw byte phase. A socket carries the bytes
+/// as they are, so this is the half itself; Windows wraps it in the chunk
+/// framing (`crate::localctl::chunked`).
+pub(crate) type RawReader<R> = R;
+/// The write side of a conduit's raw byte phase; see [`RawReader`].
+pub(crate) type RawWriter<W> = W;
+
+/// Start the raw phase on the read side. `prefetched` is what the framed
+/// phase already read past its last message; the bytes to deliver first come
+/// back next to the reader.
+pub(crate) fn raw_reader<R>(read: R, prefetched: Vec<u8>) -> (RawReader<R>, Vec<u8>) {
+    (read, prefetched)
+}
+
+/// Start the raw phase on the write side.
+pub(crate) fn raw_writer<W>(write: W) -> RawWriter<W> {
+    write
+}
+
+/// `data` as the raw phase carries it on the wire.
+pub(crate) fn raw_bytes(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    std::borrow::Cow::Borrowed(data)
+}
+
+/// Split a conduit into independently owned halves.
+pub(crate) fn split(stream: LocalStream) -> (OwnedReadHalf, OwnedWriteHalf) {
+    stream.into_split()
+}
 
 /// Open the socket at `endpoint`.
 pub(crate) async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
@@ -24,7 +64,7 @@ pub(crate) async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
 /// Half-close: shut the write direction of `stream` down. Synchronous, no
 /// runtime needed; every clone of an `Arc`-shared stream sees the same
 /// socket, and the peer's read sees a clean EOF.
-pub(crate) fn shutdown_write(stream: &LocalStream) {
+pub(crate) fn shutdown_write(stream: &Arc<LocalStream>) {
     shutdown(stream, libc::SHUT_WR);
 }
 
@@ -181,4 +221,92 @@ fn daemon_euid() -> u32 {
     // SAFETY: `geteuid(2)` takes no arguments, touches no memory, and
     // cannot fail.
     unsafe { libc::geteuid() }
+}
+
+/// Resolves once the peer has closed its end of the conduit entirely (both
+/// directions), as opposed to merely half-closing its write side.
+///
+/// After a half-close the read half is at EOF for good, so reading cannot
+/// tell the two apart, and an idle target writes nothing whose failure
+/// would. The poller reports the write side as closed (`EPOLLHUP` /
+/// kqueue `EV_EOF` on the write filter) only when the peer is gone for
+/// good, never for a bare `shutdown(SHUT_WR)`. That readiness is watched on
+/// a `dup` of the socket with its own registration, so clearing it here
+/// cannot starve the sibling leg's writes on the shared one. If the watch
+/// cannot be set up it resolves at once.
+pub(crate) async fn wait_for_hangup(read: &RawReader<OwnedReadHalf>) {
+    use std::os::fd::AsFd as _;
+    use tokio::io::Interest;
+    use tokio::io::unix::AsyncFd;
+
+    let Ok(fd) = read.as_ref().as_fd().try_clone_to_owned() else {
+        return;
+    };
+    let Ok(watch) = AsyncFd::with_interest(fd, Interest::WRITABLE) else {
+        return;
+    };
+    loop {
+        let Ok(mut guard) = watch.ready(Interest::WRITABLE).await else {
+            return;
+        };
+        if guard.ready().is_write_closed() {
+            return;
+        }
+        guard.clear_ready();
+    }
+}
+
+/// The daemon's bound socket.
+pub(crate) struct Listener(UnixListener);
+
+impl Listener {
+    /// The next connection and the verdict of the peer-credential check on
+    /// it. The check runs here, before the caller can read a frame, and a
+    /// peer that is not this process's own euid (or whose credential cannot
+    /// be read) comes back as `Ok(false)` (or `Err`) for the caller to drop.
+    pub(crate) async fn accept(&mut self) -> io::Result<(LocalStream, io::Result<bool>)> {
+        let (stream, _addr) = self.0.accept().await?;
+        let authorized = authorized_peer(&stream);
+        Ok((stream, authorized))
+    }
+}
+
+/// Bind this daemon's socket `paths.localctl_socket(pid)`:
+///
+/// 1. Create/tighten the runtime directory to 0700 ([`ensure_private_dir`])
+///    — **fails closed** (refuses to bind at all) if that mode cannot be
+///    pinned, rather than binding into a directory whose permissions this
+///    process does not actually control.
+/// 2. Remove any leftover file at the exact socket path first — `bind`
+///    fails with `AddrInUse` on an existing path, and a `<pid>.sock` left
+///    over from a previous process that reused this pid (or that crashed
+///    without unlinking) is garbage, not state to preserve (exactly the
+///    judgment `crate::localctl::client::discover` already makes for a
+///    stale socket it finds `ECONNREFUSED` on).
+/// 3. Create the node at 0600 and tighten it again explicitly, so the final
+///    mode does not depend on the umask trick alone.
+pub(crate) fn bind(paths: &Paths, pid: u32) -> Result<(Listener, PathBuf), OpError> {
+    let runtime_dir = paths.runtime_dir();
+    ensure_private_dir(&runtime_dir)?;
+    let socket_path = paths.localctl_socket(pid);
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+    let listener =
+        bind_with_narrow_umask(&socket_path).map_err(|err| bind_error(&socket_path, &err))?;
+    tighten_socket_mode(&socket_path).map_err(|err| bind_error(&socket_path, &err))?;
+    Ok((Listener(listener), socket_path))
+}
+
+fn bind_error(path: &Path, err: &io::Error) -> OpError {
+    OpError::new(
+        ErrorCode::ConfigError,
+        format!("localctl: cannot bind {}: {err}", path.display()),
+    )
+}
+
+/// Remove the endpoint a daemon bound, once every accept loop tied to it has
+/// stopped. A socket node outlives its process, so it is unlinked.
+pub(crate) fn remove_endpoint(endpoint: &Path) {
+    let _ = std::fs::remove_file(endpoint);
 }

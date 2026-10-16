@@ -412,17 +412,11 @@ pub fn plant_allow_all_acl(sandbox: &Sandbox) {
              \"forward.local\", \"forward.remote\"]\n\n"
         ));
     }
-    std::fs::write(&acl_path, text).expect("write fixture acl.toml");
-    // F8 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): `fs::write` inherits
-    // the process umask (0o664 under the common `022`/`002` umask) — a
-    // group-writable planted `acl.toml` would spuriously trip the F7
-    // group-/world-writable warning on any runner with that umask. Pin it
-    // to owner-only explicitly instead of depending on the ambient umask.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Owner-only whatever the umask or the parent's inherited access: a
+    // group- or world-writable `acl.toml` would trip the loader's warning
+    // (on Windows a DACL that grants other principals does the same).
+    qsh_core::config::write_private_file(&acl_path, text.as_bytes())
+        .expect("write fixture acl.toml");
 }
 
 /// The exit code of a finished child, which on Unix is absent only when it
@@ -885,12 +879,10 @@ pub const AUDIT_KEYS: &[&str] = &[
 /// reasons documented in their own module docs; this `pub` copy is for
 /// `reverse_e2e.rs`, `exit_code_matrix.rs` and `jsonl_purity.rs`, which
 /// have no such reason to duplicate it three more times).
-#[cfg(unix)]
 const LISTEN_LISTENING_PREFIX: &str = "qsh listen: listening on ";
 
 /// How long we wait for `qsh listen` to report its bound address —
 /// mirrors [`ServeGuard`]'s own budget.
-#[cfg(unix)]
 const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Stand-in `launchctl` and `systemctl` for the `qsh service` flag tests
@@ -989,7 +981,6 @@ exit 0
 
 /// A running real `qsh listen` child (the reverse-mode controller),
 /// killed on drop.
-#[cfg(unix)]
 pub struct ListenGuard {
     child: Child,
     addr: String,
@@ -1004,7 +995,6 @@ pub struct ListenGuard {
     stderr: Arc<Mutex<Vec<String>>>,
 }
 
-#[cfg(unix)]
 impl ListenGuard {
     /// Start `qsh listen --bind 127.0.0.1:0` in `sandbox` and wait
     /// (bounded) for it to report the address it actually bound.
@@ -1027,8 +1017,8 @@ impl ListenGuard {
     }
 
     fn spawn(sandbox: &Sandbox, bind: &str) -> Self {
-        let mut child = sandbox
-            .command(&["listen", "--bind", bind])
+        let mut command = sandbox.command(&["listen", "--bind", bind]);
+        let mut child = own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1096,9 +1086,16 @@ impl ListenGuard {
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
+
+    /// A graceful stop, waiting (bounded) for the process to exit: `SIGTERM`
+    /// on unix, `CTRL_BREAK` to its process group on Windows, killing it
+    /// when that runs out. The controller closes its registrations on the way
+    /// out, so targets notice at once instead of at the idle timeout.
+    pub fn shut_down(mut self) {
+        stop_gracefully(&mut self.child);
+    }
 }
 
-#[cfg(unix)]
 impl Drop for ListenGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -1111,12 +1108,10 @@ impl Drop for ListenGuard {
 /// graceful-shutdown path so a caller does not have to wait out QUIC's
 /// idle timeout for a clean disconnect to register (mirrors
 /// `hosts_reverse.rs`'s own private `ReverseGuard`).
-#[cfg(unix)]
 pub struct ReverseGuard {
     child: Child,
 }
 
-#[cfg(unix)]
 impl ReverseGuard {
     /// `qsh reverse <controller>` in `sandbox`. Never blocks waiting for
     /// registration to succeed — the target retries forever on its own
@@ -1154,8 +1149,8 @@ impl ReverseGuard {
     }
 
     fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
-        let mut child = sandbox
-            .command(args)
+        let mut command = sandbox.command(args);
+        let mut child = own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1180,29 +1175,71 @@ impl ReverseGuard {
         self.child.id()
     }
 
-    /// `SIGTERM`, then wait up to 5s for the child to actually exit —
-    /// bounded, never a bare kill-and-hope.
+    /// A graceful stop, then wait up to 5s for the child to actually exit —
+    /// bounded, never a bare kill-and-hope. `SIGTERM` on unix; on Windows
+    /// the console's `CTRL_BREAK`, which the child handles as a closing
+    /// console (`tui::windows::arm_shutdown`), falling back to killing it
+    /// when this process has no console to send the event from.
     pub fn shut_down(mut self) {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.child.id() as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        );
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        stop_gracefully(&mut self.child);
     }
 }
 
+/// [`request_stop`], then wait up to 5s for `child` to exit, killing it when
+/// that runs out.
+pub fn stop_gracefully(child: &mut Child) {
+    request_stop(child);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Ask `child` to stop the way an operator's `Ctrl-C` or a service manager
+/// would, without killing it.
 #[cfg(unix)]
+fn request_stop(child: &mut Child) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+}
+
+/// The Windows twin of the `SIGTERM` above: `CTRL_BREAK` to the child's own
+/// process group ([`own_process_group`] put it there). With no console to send
+/// from, the child is killed instead, so the caller's bounded wait still ends.
+#[cfg(windows)]
+fn request_stop(child: &mut Child) {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    // SAFETY: a plain call with a process-group id and no pointers.
+    let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } != 0;
+    if !sent {
+        let _ = child.kill();
+    }
+}
+
+/// Run the child in its own process group, the only kind of child
+/// `CTRL_BREAK` can be addressed to ([`request_stop`]).
+#[cfg(windows)]
+pub fn own_process_group(command: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP)
+}
+
+#[cfg(unix)]
+pub fn own_process_group(command: &mut Command) -> &mut Command {
+    command
+}
+
 impl Drop for ReverseGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -1379,6 +1416,18 @@ impl Drop for DynamicTunnelGuard {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The argv of `qsh exec <host> --json -- <a command that exits 0>`: `true`
+/// on unix, `cmd /c exit 0` on Windows, where there is no such program.
+pub fn exec_true_args(host: &str) -> Vec<&str> {
+    let mut args = vec!["exec", host, "--json", "--"];
+    if cfg!(windows) {
+        args.extend(["cmd", "/c", "exit 0"]);
+    } else {
+        args.push("true");
+    }
+    args
 }
 
 /// `qsh hosts --json` in `sandbox`, asserted to succeed, returning the

@@ -113,20 +113,9 @@ impl Ops {
                     timeout,
                 ))
             }
-            #[cfg(unix)]
             PeerRoute::Reverse(route) => {
                 runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))
             }
-            // Windows twin of `Ops::connect_reverse` (`ops/session.rs`):
-            // `Ops::resolve_host_route` never actually produces
-            // `HostRoute::Reverse` there (`host::reverse_host_entries_async`
-            // always returns empty), so this is unreachable in practice —
-            // kept only so the match compiles on every platform.
-            #[cfg(not(unix))]
-            PeerRoute::Reverse(_route) => Err(OpError::new(
-                ErrorCode::Unsupported,
-                "reverse routing (localctl) is not available on this platform",
-            )),
         }
     }
 
@@ -331,7 +320,6 @@ async fn exec_async_resolving(
 /// daemon's own EXEC_DATA UDS-EOF→reset rule then resets the target's
 /// stream, and the host kills the command, exactly like the forward
 /// route's `connection.close(0, b"timeout")` does over QUIC.
-#[cfg(unix)]
 async fn exec_async_reverse(
     route: &LocalRoute,
     spec: &ExecSpec,

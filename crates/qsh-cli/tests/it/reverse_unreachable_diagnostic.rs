@@ -6,10 +6,8 @@
 //! `qsh-core` once-only guard `crates/qsh-core/src/reverse/target.rs`'s
 //! own `run_reverse_future_is_send`-adjacent unit tests already cover.
 //!
-//! `#![cfg(unix)]`: `qsh reverse` itself is unix-only
+//! Runs on Windows too: the target dials the same way there
 //! (`docs/CLI.md` §6.13).
-
-#![cfg(unix)]
 
 use crate::common;
 
@@ -55,7 +53,7 @@ const TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Once the diagnostic has appeared at least once, keep watching stderr
 /// for this long before declaring "exactly once" — the "at most once"
-/// half of the guarantee is actually structural (`run_reverse_unix` wraps
+/// half of the guarantee is actually structural (`run_reverse_observed` wraps
 /// the hook in `Option<F>` and takes it, so the closure physically cannot
 /// run twice — `crates/qsh-testkit/tests/it/reverse_unreachable_hook.rs`'s
 /// own module docs cover this), so this window only needs to be long
@@ -158,10 +156,15 @@ fn qsh_reverse_prints_the_controller_unreachable_diagnostic_exactly_once() {
         thread::sleep(Duration::from_millis(10));
     }
 
+    // Nothing is registered, so there is no graceful path to exercise: a
+    // `SIGTERM` on unix, a plain kill where there is no such signal.
+    #[cfg(unix)]
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(child.id() as i32),
         nix::sys::signal::Signal::SIGTERM,
     );
+    #[cfg(not(unix))]
+    let _ = child.kill();
     let _ = child.wait();
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();

@@ -45,7 +45,6 @@ use qsh_core::config::{Config, Paths};
 use qsh_core::handshake::{self, HelloError};
 use qsh_core::identity::{Identity, LoadedIdentity};
 use qsh_core::ops::OpError;
-#[cfg(unix)]
 pub use qsh_core::reverse::listen::ControlHub;
 pub use qsh_core::reverse::listen::Listen;
 use qsh_core::reverse::registry::Registry;
@@ -72,7 +71,6 @@ use crate::pair::HostedPair;
 /// `TIMEOUT` — generous slack for a bug, not a budget this should ever
 /// need in full: the gap it is bridging is a handful of in-process
 /// `.await` points, not a network round trip.
-#[cfg(unix)]
 const CONTROL_HUB_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A `qsh listen` controller bound on `127.0.0.1:0` — see module docs for
@@ -134,7 +132,7 @@ impl ReverseHarness {
     /// L4), rather than treating a live-vs-stale registration as a
     /// same-process-forever detail. Also spawns
     /// [`Listen::run_stale_sweeper`], exactly like production's
-    /// `run_listen_unix` does — without this, a harness registration could
+    /// `run_listen` does — without this, a harness registration could
     /// transition to [`EntryState::Stale`] but nothing would ever sweep it,
     /// no matter how long a test waited (adversarial review finding: the
     /// harness never wired the sweeper at all).
@@ -409,26 +407,20 @@ impl ReverseHarness {
         // full non-always-denied vocabulary the pre-M5 `AllowAllPinned`
         // gave every pinned peer, so every existing scenario built on this
         // harness keeps behaving the way it did before the flip.
-        std::fs::write(
-            paths.acl_file(),
+        // Owner-only, whatever the umask or the parent's inherited access:
+        // a group- or world-writable `acl.toml` would trip the loader's
+        // warning (a DACL granting other principals does the same on
+        // Windows).
+        qsh_core::config::write_private_file(
+            &paths.acl_file(),
             format!(
                 "[[acl]]\nprincipal = \"device:{controller_alias}\"\nallow = [\"exec.run\", \
                  \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
                  \"host.reverse\", \"forward.local\", \"forward.remote\"]\n"
-            ),
+            )
+            .as_bytes(),
         )
         .expect("write target acl.toml");
-        // F8 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): `fs::write`
-        // inherits the process umask — a group-writable planted
-        // `acl.toml` would spuriously trip the F7 group-/world-writable
-        // warning on any runner whose umask leaves the group-write bit
-        // set. Pin it to owner-only explicitly.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(paths.acl_file(), std::fs::Permissions::from_mode(0o600));
-        }
         (dir, paths)
     }
 
@@ -650,7 +642,7 @@ impl ReverseHarness {
     /// Bind and run a localctl UDS admin daemon on top of this harness's
     /// own [`Listen`] — the same [`qsh_core::localctl::daemon::LocalctlListener::bind`] +
     /// [`qsh_core::localctl::daemon::LocalctlDaemon::run`] wiring `reverse/listen.rs`'s
-    /// `run_listen_unix` does, except [`ReverseHarness`] is built by hand
+    /// `run_listen` does, except [`ReverseHarness`] is built by hand
     /// rather than through [`qsh_core::reverse::listen::run_listen`] (module
     /// docs), so nothing attaches a localctl socket unless a caller asks
     /// for one here. M3 plan Step 5 (c) (2473c88)'s owed L3 proof — `qsh
@@ -662,7 +654,6 @@ impl ReverseHarness {
     /// long as the daemon runs, exactly like a real `qsh listen` process),
     /// and a caller's own `Ops` must read from that same directory for the
     /// two to ever meet.
-    #[cfg(unix)]
     pub async fn attach_localctl(&self, paths: &Paths) -> LocalctlHandle {
         self.attach_localctl_as(paths, std::process::id()).await
     }
@@ -672,7 +663,6 @@ impl ReverseHarness {
     /// `<pid>.sock`) next to, or after, the first. `pid` names the socket
     /// file only and must belong to a live process, because discovery
     /// unlinks the socket of a verifiably dead one.
-    #[cfg(unix)]
     pub async fn attach_localctl_as(&self, paths: &Paths, pid: u32) -> LocalctlHandle {
         use qsh_core::localctl::daemon::{LocalctlDaemon, LocalctlListener};
         let bound = LocalctlListener::bind(paths, pid).expect("bind localctl socket");
@@ -713,7 +703,6 @@ impl ReverseHarness {
     /// (`crates/qsh-testkit/tests/it/local_control_reverse.rs`) — a test-side
     /// ordering bug, not a product bug: `registry()` is simply not the
     /// table the daemon itself looks up.
-    #[cfg(unix)]
     pub async fn wait_control_hub(&self, name: &str) -> Arc<ControlHub> {
         wait_for(CONTROL_HUB_WAIT_TIMEOUT, || self.listen.control_hub(name)).await
     }
@@ -731,7 +720,6 @@ impl ReverseHarness {
 /// separate from [`ReverseHarness`] itself so the many
 /// `reverse_loopback.rs`/`reverse_chaos.rs` scenarios that never touch
 /// localctl at all pay nothing for it (no socket, no extra task).
-#[cfg(unix)]
 pub struct LocalctlHandle {
     /// The bound socket's absolute path (`<runtime_dir>/<pid>.sock`) — the
     /// same path a caller's own `Paths::runtime_dir()` must resolve to for
@@ -741,11 +729,10 @@ pub struct LocalctlHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-#[cfg(unix)]
 impl LocalctlHandle {
     /// Stop the daemon's accept loop and wait for it to drain. Does not
     /// unlink the socket file itself — same division of labor
-    /// `run_listen_unix` draws between the daemon task and its caller's own
+    /// `run_listen` draws between the daemon task and its caller's own
     /// cleanup, and a test's tempdir is removed wholesale on drop anyway.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
@@ -755,7 +742,6 @@ impl LocalctlHandle {
     }
 }
 
-#[cfg(unix)]
 impl Drop for LocalctlHandle {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {

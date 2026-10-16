@@ -30,20 +30,19 @@
 //!   it compares the server process's user SID with its own. A different SID
 //!   is an error and nothing was written.
 //!
-//! The one thing a pipe cannot do that a socket can is half-close:
-//! [`shutdown_write`] has nothing to shut. The write direction ends when the
-//! stream is dropped. [`shutdown_both`] is the hard stop and does work: it
-//! cancels the pending I/O and makes every later read end and every later
-//! write fail.
+//! - **Half-close.** The one thing a byte-mode pipe cannot do that a socket
+//!   can is end one direction while the other stays open. The raw byte phase
+//!   of a conduit (after the framed `qsh.local.v1` messages) therefore
+//!   carries its bytes in chunks, a 4-byte big-endian length and that many
+//!   bytes, and a zero length ends the writer's direction
+//!   (`crate::localctl::chunked`; [`raw_reader`], [`raw_writer`],
+//!   [`raw_bytes`], [`shutdown_write`]). The framed phase is not chunked.
+//!   [`shutdown_both`] is the hard stop: it cancels the pending I/O and makes
+//!   every later read end and every later write fail.
 //!
 //! The lookups that need the OS ([`ProcessSids`]) and the DACL source
 //! ([`DaclSource`]) are traits so a test can make the peer a different user
 //! or the DACL fail; production code uses [`Os`] and the process token.
-
-// The listening half (`PipeListener`, the creation options, the DACL and the
-// peer check) is what the daemon runs; the daemon is not built on Windows
-// yet, so only the tests exercise it there.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::ffi::OsString;
 use std::io;
@@ -55,6 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use qsh_proto::ErrorCode;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{
@@ -65,9 +65,12 @@ use windows_sys::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_
 use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 
+use crate::config::Paths;
 use crate::fsutil::dacl::{
     CurrentUser, DaclSource, ObjectKind, equal_sid, process_user_sid, sid_to_string, token_user_sid,
 };
+use crate::localctl::chunked::{self, ChunkedReader, ChunkedWriter};
+use crate::ops::OpError;
 
 /// Where every pipe name starts.
 pub(crate) const PIPE_NAMESPACE: &str = r"\\.\pipe\";
@@ -444,6 +447,8 @@ pub struct LocalStream {
     inner: Inner,
     /// Set by [`shutdown_both`]: the stream reads as ended and refuses writes.
     stopped: AtomicBool,
+    /// Set by [`shutdown_write`]: the end chunk was written (or is on its way).
+    write_ended: AtomicBool,
 }
 
 impl std::fmt::Debug for LocalStream {
@@ -468,6 +473,7 @@ impl LocalStream {
         Self {
             inner,
             stopped: AtomicBool::new(false),
+            write_ended: AtomicBool::new(false),
         }
     }
 
@@ -585,11 +591,61 @@ impl AsyncWrite for LocalStream {
     }
 }
 
-/// A byte-mode pipe has no half-close: ending the write direction alone
-/// would need a message-mode zero-length write, and the pipe is a byte
-/// stream (ADR-0035 decision 14). The write direction ends when the stream is
-/// dropped.
-pub(crate) fn shutdown_write(_stream: &LocalStream) {}
+/// The read side of a conduit's raw byte phase: the half, decoded from the
+/// chunk framing (`crate::localctl::chunked`).
+pub(crate) type RawReader<R> = ChunkedReader<R>;
+/// The write side of a conduit's raw byte phase: the half, encoded as chunks;
+/// shutting it down writes the end chunk.
+pub(crate) type RawWriter<W> = ChunkedWriter<W>;
+
+/// Start the raw phase on the read side. `prefetched` is what the framed
+/// phase already read past its last message, still chunk-encoded; the reader
+/// decodes it first, so no bytes come back to deliver separately.
+pub(crate) fn raw_reader<R>(read: R, prefetched: Vec<u8>) -> (RawReader<R>, Vec<u8>) {
+    (ChunkedReader::new(read, prefetched), Vec::new())
+}
+
+/// Start the raw phase on the write side.
+pub(crate) fn raw_writer<W>(write: W) -> RawWriter<W> {
+    ChunkedWriter::new(write)
+}
+
+/// `data` as the raw phase carries it on the wire.
+pub(crate) fn raw_bytes(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    std::borrow::Cow::Owned(chunked::encode(data))
+}
+
+/// End the write direction of the raw phase by writing the end chunk, for a
+/// stream that several owners share and a caller that cannot await. It is
+/// written once per stream; if the pipe has no room right now the rest goes
+/// out from a spawned task, which holds its own reference to the stream. The
+/// peer's read reports the end while it can still answer.
+pub(crate) fn shutdown_write(stream: &Arc<LocalStream>) {
+    if stream.write_ended.swap(true, Ordering::AcqRel) || stream.is_stopped() {
+        return;
+    }
+    let sent = stream.try_write(&chunked::END_CHUNK).unwrap_or(0);
+    if sent == chunked::END_CHUNK.len() {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let stream = stream.clone();
+    runtime.spawn(async move {
+        let mut rest = &chunked::END_CHUNK[sent..];
+        while !rest.is_empty() {
+            if stream.writable().await.is_err() {
+                return;
+            }
+            match stream.try_write(rest) {
+                Ok(n) => rest = &rest[n..],
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+    });
+}
 
 /// Hard stop from any thread: every pending operation is cancelled, later
 /// reads report the end of the stream and later writes fail.
@@ -602,6 +658,122 @@ pub(crate) fn shutdown_both(stream: &LocalStream) {
         CancelIoEx(raw(stream.handle()), std::ptr::null());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Split halves, the daemon's listener
+// ---------------------------------------------------------------------------
+
+/// The read half of a split [`LocalStream`].
+pub(crate) struct OwnedReadHalf(Arc<LocalStream>);
+
+/// The write half of a split [`LocalStream`]. Shutting it down does nothing
+/// by itself; a conduit's raw phase wraps it in [`RawWriter`], whose shutdown
+/// writes the end chunk.
+pub(crate) struct OwnedWriteHalf(Arc<LocalStream>);
+
+/// Split a conduit into independently owned halves.
+pub(crate) fn split(stream: LocalStream) -> (OwnedReadHalf, OwnedWriteHalf) {
+    let shared = Arc::new(stream);
+    (OwnedReadHalf(shared.clone()), OwnedWriteHalf(shared))
+}
+
+impl AsyncRead for OwnedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            std::task::ready!(self.0.poll_read_ready(cx))?;
+            match self.0.try_read(buf.initialize_unfilled()) {
+                Ok(n) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+        }
+    }
+}
+
+impl AsyncWrite for OwnedWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            std::task::ready!(self.0.poll_write_ready(cx))?;
+            match self.0.try_write(buf) {
+                Ok(n) => return Poll::Ready(Ok(n)),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Resolves once the peer has closed its end of the conduit entirely, as
+/// opposed to having ended only its write direction with the end chunk. After
+/// the end chunk the peer sends nothing, so the next thing the pipe reports
+/// is the peer closing it (or, against the protocol, more bytes; either way
+/// there is nothing left to wait for). The read half is watched directly,
+/// below the chunk decoder.
+pub(crate) async fn wait_for_hangup(read: &RawReader<OwnedReadHalf>) {
+    let stream = &read.get_ref().0;
+    let mut scratch = [0u8; 64];
+    loop {
+        if stream.readable().await.is_err() {
+            return;
+        }
+        match stream.try_read(&mut scratch) {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+            _ => return,
+        }
+    }
+}
+
+/// The daemon's bound pipe name.
+pub(crate) struct Listener(PipeListener);
+
+impl Listener {
+    /// The next connection whose process runs as this user. Another user's
+    /// connection never gets this far ([`PipeListener::accept`] drops it
+    /// before a byte is read), so the verdict is always `Ok(true)`.
+    pub(crate) async fn accept(&mut self) -> io::Result<(LocalStream, io::Result<bool>)> {
+        Ok((self.0.accept().await?, Ok(true)))
+    }
+}
+
+/// Bind this daemon's pipe `\\.\pipe\qsh-<scope>-<pid>`. The runtime
+/// directory only feeds the name, so it is not created. The name already
+/// existing, whoever holds it, is an error.
+pub(crate) fn bind(paths: &Paths, pid: u32) -> Result<(Listener, PathBuf), OpError> {
+    let listener = PipeListener::bind(&paths.runtime_dir(), pid).map_err(|err| {
+        OpError::new(
+            ErrorCode::ConfigError,
+            format!(
+                "localctl: cannot bind the named pipe for pid {pid} under {}: {err}",
+                paths.runtime_dir().display()
+            ),
+        )
+    })?;
+    let name = listener.name().to_path_buf();
+    Ok((Listener(listener), name))
+}
+
+/// A pipe vanishes with its process, so a stopped daemon leaves nothing to
+/// remove.
+pub(crate) fn remove_endpoint(_endpoint: &Path) {}
 
 #[cfg(test)]
 mod tests;

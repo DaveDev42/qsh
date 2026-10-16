@@ -33,7 +33,6 @@ fn offered_name_precedence_flag_then_config_then_device_id() {
 // Nothing here actually runs `never_called` — the whole point is the
 // compile-time check `assert_send` performs on the future value it's
 // handed; a future `!Send` fails to *build*, not to pass an assertion.
-#[cfg(unix)]
 #[test]
 fn run_reverse_future_is_send() {
     fn assert_send<T: Send>(_: T) {}
@@ -135,45 +134,6 @@ async fn dial_and_register_maps_an_unresolvable_controller_to_resolve_cause() {
         "an unresolvable controller address must classify as `resolve`, not `local`"
     );
     assert_eq!(err.code, qsh_proto::ErrorCode::ConnectionFailed);
-}
-
-/// `docs/CLI.md` §6.13's Windows gate, mechanically: `run_reverse`
-/// refuses on every non-unix target before it ever touches its
-/// arguments (module docs on [`super::listen::windows_unsupported`]),
-/// so the identity/paths/config below are throwaway. This is the
-/// positive Windows-leg assertion M9 plan Step 3 (d) (b9a621b) owes ("Windows
-/// leg의 nextest green … 나머지가 컴파일·통과") — a real `#[tokio::test]`
-/// that runs and passes on the Windows CI leg, not just an absence of
-/// a compile error there.
-#[cfg(not(unix))]
-#[tokio::test]
-async fn run_reverse_is_unsupported_on_non_unix() {
-    let identity = LoadedIdentity {
-        identity: crate::identity::Identity {
-            device_id: "device".into(),
-            fingerprint: qsh_transport::Fingerprint::of_spki_der(&[]),
-            key_store: qsh_proto::KeyStoreKind::File,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            cert_der: Vec::new(),
-            issued_by_ca: None,
-        },
-        local: qsh_transport::LocalIdentity {
-            cert_chain: Vec::new(),
-            key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
-        },
-    };
-    let paths = Paths::new("unused-config", "unused-state");
-    let err = run_reverse(
-        &paths,
-        &Config::default(),
-        identity,
-        "controller",
-        None,
-        std::future::pending::<()>(),
-    )
-    .await
-    .expect_err("non-unix must refuse to run");
-    assert_eq!(err.code, qsh_proto::ErrorCode::Unsupported);
 }
 
 // ------------------------------------------------------------------
@@ -599,7 +559,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
     assert!(parsed.get("cause").is_none());
     assert!(parsed.get("since_registered_ms").is_none());
 
-    // `emit()`'s only production callers live inside `run_reverse_unix`,
+    // `emit()`'s only production callers live inside `run_reverse_observed`,
     // which is `#[cfg(unix)]`. Under `cfg(test) && not(unix)` (the
     // windows-latest leg of `cargo clippy --workspace --all-targets`)
     // that leaves the method itself unreferenced unless a test calls it
@@ -611,7 +571,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
 
 /// The `lost`/`retry` pair a connection death emits both carry
 /// `since_registered_ms` and share `cause` — pins the JSON shape the
-/// real emission site in `run_reverse_unix` relies on, independent of
+/// real emission site in `run_reverse_observed` relies on, independent of
 /// driving a real connection death (the end-to-end proof lives in
 /// `qsh-testkit`'s reverse chaos suite).
 #[test]
@@ -1155,7 +1115,6 @@ async fn classify_target_connection_loss_maps_a_task_panic_to_local() {
 /// `run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead`
 /// pins for a real path. Runs only under `QSH_ACCEPTANCE_SLOW`
 /// (`.github/workflows/ci.yml` acceptance job).
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_timeout() {
     use crate::reverse::test_harness as harness;
@@ -1201,7 +1160,6 @@ async fn run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_tim
 /// (generous) 12 s bound can only come from the wake. A wake while registered
 /// leaves the healthy connection alone and only says so on the `wake` line.
 /// The tight bounds live in the paused-clock `target_*` tests above.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
     use crate::reverse::test_harness as harness;
@@ -1254,7 +1212,6 @@ async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
 /// A watch config whose regimes are far apart: probes every 100 ms while the
 /// registration is in use (`P×S+D` = 900 ms) and every 3 s once it has been
 /// quiet for 600 ms (three idle probes plus the judging tick, about 12 s).
-#[cfg(unix)]
 fn two_regime_path_watch() -> crate::client::pathwatch::PathWatchConfig {
     crate::client::pathwatch::PathWatchConfig {
         probe_interval: Duration::from_millis(100),
@@ -1279,7 +1236,6 @@ fn two_regime_path_watch() -> crate::client::pathwatch::PathWatchConfig {
 /// it with the production server path and dials a loopback destination. Both
 /// applications keep writing through the cut, as a busy tunnel does, so each
 /// end's own byte counters are what holds its watch on the fast cadence.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_active_budget() {
     use crate::reverse::test_harness as harness;
@@ -1441,11 +1397,10 @@ async fn a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_ac
 /// controller, 2400 ms on the `serve --to` target) so neither can pass by
 /// reading the other's setting or a default.
 ///
-/// No test override is installed on either end: a `run_listen_unix` or
-/// `run_reverse_unix` that dropped `liveness.reverse_watch` for the
+/// No test override is installed on either end: a `run_listen` or
+/// `run_reverse_observed` that dropped `liveness.reverse_watch` for the
 /// default would put the death at about 4.25 s and fail the upper bounds
 /// below.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_blackhole_dead() {
     use crate::reverse::test_harness as harness;
@@ -1546,7 +1501,6 @@ fn reconnect_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_pres
 /// its output proves nothing about its callers):
 /// `configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_blackhole_dead`
 /// does, over a `config.toml` and a blackholed path.
-#[cfg(unix)]
 #[tokio::test]
 async fn the_cfg_test_path_watch_override_beats_the_configured_value() {
     use crate::client::pathwatch::PathWatchConfig;

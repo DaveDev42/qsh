@@ -31,14 +31,10 @@ use prost::Message;
 use qsh_proto::wire::{ControlMessage, StreamHeader};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
 
-// `crate::localctl` is `#[cfg(unix)]`-only (`lib.rs`) — the `Local`
-// carrier this file adds exists only there; `Direct` (unchanged since M1)
-// stays available on every platform. Windows leg trap (b): an ungated
-// import consumed only by unix-only code trips `unused_imports` under
-// Windows clippy.
-#[cfg(unix)]
+// `crate::localctl` builds on every platform (a Unix socket on unix, a named
+// pipe on Windows), so the `Local` carrier this file adds exists everywhere,
+// next to `Direct` (unchanged since M1).
 use crate::localctl::client::{ControlConduit, DataRecvHalf, DataSendHalf};
-#[cfg(unix)]
 use crate::ops::OpError;
 
 use super::ClientError;
@@ -54,13 +50,9 @@ pub(crate) enum ControlLink {
     /// runs on (forward route). Named for the route, not the transport.
     Direct(FramedStream),
     /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_CONTROL` conduit (reverse route). `#[cfg(unix)]`: localctl
-    /// (UDS) is unix-only (`crate::localctl`'s own gate in `lib.rs`) —
-    /// on Windows this carrier simply does not exist, and
-    /// `Ops::resolve_route` never produces a reverse route there either
-    /// (`ops/host.rs`'s own Windows-leg doc), so nothing ever needs to
-    /// construct this variant on that platform.
-    #[cfg(unix)]
+    /// `LOCAL_CONTROL` conduit (reverse route). Not platform-gated:
+    /// localctl is a Unix socket or a Windows named pipe
+    /// (`crate::localctl::transport`), and the carrier is the same on both.
     Local(ControlConduit),
 }
 
@@ -69,7 +61,6 @@ impl ControlLink {
     pub(crate) async fn send(&mut self, msg: &ControlMessage) -> Result<(), ClientError> {
         match self {
             ControlLink::Direct(stream) => Ok(stream.send.send(msg).await?),
-            #[cfg(unix)]
             ControlLink::Local(conduit) => {
                 conduit.send(msg).await.map_err(op_error_to_client_error)
             }
@@ -85,7 +76,6 @@ impl ControlLink {
     pub(crate) async fn recv(&mut self) -> Result<Option<ControlMessage>, ClientError> {
         match self {
             ControlLink::Direct(stream) => Ok(stream.recv.recv::<ControlMessage>().await?),
-            #[cfg(unix)]
             ControlLink::Local(conduit) => conduit.recv().await.map_err(op_error_to_client_error),
         }
     }
@@ -99,21 +89,10 @@ impl ControlLink {
     /// (this `Session`'s eventual drop) closes the fd, which the daemon
     /// sees as a clean EOF on its own read, the same signal a QUIC FIN
     /// gives it.
-    // Two bodies, not one `if let`: without the `Local` variant (Windows,
-    // no `unix` cfg), `ControlLink` has exactly one variant, so `if let
-    // ControlLink::Direct(stream) = self` becomes an irrefutable pattern —
-    // `-D warnings` under Windows clippy (`irrefutable_let_patterns`).
-    #[cfg(unix)]
     pub(crate) fn finish(&mut self) {
         if let ControlLink::Direct(stream) = self {
             let _ = stream.send.finish();
         }
-    }
-
-    #[cfg(not(unix))]
-    pub(crate) fn finish(&mut self) {
-        let ControlLink::Direct(stream) = self;
-        let _ = stream.send.finish();
     }
 }
 
@@ -122,7 +101,6 @@ impl ControlLink {
 /// the code/message/retryable triple verbatim — the same "nothing to
 /// translate" shape as `crate::localctl::client::remote_error`'s
 /// `LocalError` → `OpError` mapping one layer down.
-#[cfg(unix)]
 pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
     ClientError::Remote {
         code: err.code,
@@ -145,9 +123,9 @@ pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
 /// this one's).
 ///
 /// Always constructible (`Default`, inert — nothing to kill) so callers on
-/// the forward route or on non-unix builds never need an `Option` wrapper
-/// around this type; only `Self::new` (unix-only — the socket it wraps
-/// does not exist elsewhere) produces a live one.
+/// the forward route never needs an `Option` wrapper around this type;
+/// only `Self::new` (the reverse route's `LOCAL_STREAM` conduit) produces a
+/// live one.
 ///
 /// `pub`, not `pub(crate)`: [`crate::client::Session::exec`]'s `kill_tx`
 /// out-parameter (issue #5's reverse route) hands one to callers outside
@@ -156,8 +134,7 @@ pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
 /// `pub(crate)` since only this crate ever constructs a live one.
 #[derive(Clone, Default)]
 pub struct DataKillSwitch {
-    #[cfg(unix)]
-    socket: Option<std::sync::Arc<tokio::net::UnixStream>>,
+    socket: Option<std::sync::Arc<crate::localctl::transport::LocalStream>>,
 }
 
 impl DataKillSwitch {
@@ -167,8 +144,7 @@ impl DataKillSwitch {
     /// why a held clone, never a bare fd, is what makes [`Self::kill`]
     /// safe to call at any time) — this is the third clone, kept only for
     /// this purpose.
-    #[cfg(unix)]
-    pub(crate) fn new(socket: std::sync::Arc<tokio::net::UnixStream>) -> Self {
+    pub(crate) fn new(socket: std::sync::Arc<crate::localctl::transport::LocalStream>) -> Self {
         Self {
             socket: Some(socket),
         }
@@ -181,7 +157,6 @@ impl DataKillSwitch {
     /// [`crate::ops::session::AttachHandle::detach`] regardless of which
     /// route an attach rides.
     pub fn kill(&self) {
-        #[cfg(unix)]
         if let Some(socket) = &self.socket {
             // The transport keeps the descriptor-reuse argument: `socket`
             // is a held clone, so the descriptor stays allocated for as
@@ -201,10 +176,8 @@ pub(crate) enum DataSend {
     /// Dialed straight to the peer (forward route).
     Direct(FramedSend),
     /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_STREAM` conduit (reverse route). `#[cfg(unix)]`: see
-    /// [`ControlLink::Local`]'s own doc — the same reasoning applies
-    /// verbatim.
-    #[cfg(unix)]
+    /// `LOCAL_STREAM` conduit (reverse route); see
+    /// [`ControlLink::Local`]'s own doc.
     Local(DataSendHalf),
 }
 
@@ -213,7 +186,6 @@ impl DataSend {
     pub(crate) async fn send<M: Message>(&mut self, msg: &M) -> Result<(), ClientError> {
         match self {
             DataSend::Direct(send) => Ok(send.send(msg).await?),
-            #[cfg(unix)]
             DataSend::Local(send) => send.send(msg).await.map_err(op_error_to_client_error),
         }
     }
@@ -228,7 +200,6 @@ impl DataSend {
             DataSend::Direct(send) => {
                 let _ = send.finish();
             }
-            #[cfg(unix)]
             DataSend::Local(send) => send.finish(),
         }
     }
@@ -238,6 +209,7 @@ impl DataSend {
     /// per-stream reset, shut the whole conduit down through `kill`
     /// ([`DataRecv::abort`]'s rule). The peer sees a truncated stream, never
     /// a clean end.
+    // Only the file-copy path (unix) aborts a send half this way.
     #[cfg(unix)]
     pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
         match self {
@@ -260,7 +232,6 @@ impl DataSend {
     pub(crate) fn into_raw_direct(self) -> Result<qsh_transport::SendStream, Self> {
         match self {
             DataSend::Direct(send) => Ok(send.into_raw()),
-            #[cfg(unix)]
             other @ DataSend::Local(_) => Err(other),
         }
     }
@@ -270,7 +241,6 @@ impl DataSend {
     /// [`crate::tunnel::splice::splice_tcp_uds`] pumps a tunnel's unframed
     /// payload onto. `Err(self)` for the forward `Direct` carrier, same
     /// reasoning as [`Self::into_raw_direct`]'s own doc, reversed.
-    #[cfg(unix)]
     pub(crate) fn into_raw_local(self) -> Result<crate::localctl::client::RawUdsWrite, Self> {
         match self {
             DataSend::Local(send) => Ok(send.into_raw()),
@@ -284,9 +254,8 @@ pub(crate) enum DataRecv {
     /// Dialed straight to the peer (forward route).
     Direct(FramedRecv),
     /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_STREAM` conduit (reverse route). `#[cfg(unix)]`: see
+    /// `LOCAL_STREAM` conduit (reverse route); see
     /// [`ControlLink::Local`]'s own doc.
-    #[cfg(unix)]
     Local(DataRecvHalf),
 }
 
@@ -296,7 +265,6 @@ impl DataRecv {
     pub(crate) async fn recv<M: Message + Default>(&mut self) -> Result<Option<M>, ClientError> {
         match self {
             DataRecv::Direct(recv) => Ok(recv.recv::<M>().await?),
-            #[cfg(unix)]
             DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
         }
     }
@@ -313,11 +281,8 @@ impl DataRecv {
     /// no-op on the forward route ([`DataKillSwitch::kill`]'s own doc), so
     /// this never double-signals there.
     pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
-        #[cfg(not(unix))]
-        let _ = kill;
         match self {
             DataRecv::Direct(recv) => recv.stop(code),
-            #[cfg(unix)]
             DataRecv::Local(_) => kill.kill(),
         }
     }
@@ -333,14 +298,12 @@ impl DataRecv {
     pub(crate) fn into_raw_direct(self) -> Result<(qsh_transport::RecvStream, Vec<u8>), Self> {
         match self {
             DataRecv::Direct(recv) => Ok(recv.into_raw()),
-            #[cfg(unix)]
             other @ DataRecv::Local(_) => Err(other),
         }
     }
 
     /// [`Self::into_raw_direct`]'s mirror for the reverse `LOCAL_STREAM`
     /// carrier — see [`DataSend::into_raw_local`]'s own doc.
-    #[cfg(unix)]
     pub(crate) fn into_raw_local(
         self,
     ) -> Result<(crate::localctl::client::RawUdsRead, Vec<u8>), Self> {
@@ -373,9 +336,7 @@ pub(crate) enum DataLink<'a> {
     Direct(&'a Connection),
     /// This machine's resident `qsh listen` daemon socket, plus the host
     /// name it should relay the new `LOCAL_STREAM` conduit to (reverse
-    /// route). `#[cfg(unix)]`: see [`ControlLink::Local`]'s own doc — the
-    /// same reasoning applies verbatim.
-    #[cfg(unix)]
+    /// route); see [`ControlLink::Local`]'s own doc.
     Local {
         /// The daemon's UDS socket path.
         socket: &'a std::path::Path,
@@ -420,12 +381,6 @@ impl DataLink<'_> {
     /// (`crate::localctl::client::open_stream_with_wait`'s own doc). On the
     /// forward `Direct` carrier `wait_ms` is accepted uniformly but has
     /// nothing to apply to — a fresh `open_bi()` never waits on anything.
-    // `wait_ms` is read only by the `#[cfg(unix)]` `Local` arm below — the
-    // `Direct` arm never waits on anything (this doc comment's own "nothing
-    // to apply to"), so on Windows (no `Local` variant at all) the
-    // parameter goes unused. Dead, not absent, on that platform — same
-    // idiom as `HUB_WAIT_POLL` (`reverse/listen.rs`).
-    #[cfg_attr(not(unix), allow(unused_variables))]
     pub(crate) async fn open_stream_with_wait(
         &self,
         header: &StreamHeader,
@@ -445,7 +400,6 @@ impl DataLink<'_> {
                     DataKillSwitch::default(),
                 ))
             }
-            #[cfg(unix)]
             DataLink::Local { socket, host } => {
                 let handshake =
                     crate::localctl::client::open_stream_with_wait(socket, host, header, wait_ms)
@@ -462,10 +416,9 @@ impl DataLink<'_> {
     }
 }
 
-// Both tests below exercise the `Local` carrier (`ControlLink::Local`,
-// `OpError`, `op_error_to_client_error`) or `crate::localctl` directly,
-// all `#[cfg(unix)]`-only — so the whole module is, rather than splitting
-// each test individually.
+// Both tests below drive the `Local` carrier against a fake daemon bound
+// to a `UnixListener`, so the whole module is unix-only, rather than
+// gating each test individually.
 #[cfg(all(test, unix))]
 mod tests {
     use qsh_proto::ErrorCode;

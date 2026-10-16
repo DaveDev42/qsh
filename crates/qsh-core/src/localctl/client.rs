@@ -19,11 +19,6 @@
 //! business (`daemon.rs`, a later step), which bridges a `LOCAL_CONTROL`
 //! conduit onto a live reverse QUIC connection.
 
-// The reverse-route entry points below (`open_control`, `open_stream*`, the
-// data halves) are consumed by the reverse role, which is not built on
-// Windows yet; the admin entry points and `discover` are the public surface.
-#![cfg_attr(windows, allow(dead_code))]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -697,6 +692,15 @@ async fn open_stream_over_inner(
     // hard-stop can never race a `Drop` elsewhere into hitting a reused
     // descriptor.
     let socket = Arc::new(stream);
+    // The raw phase starts here: on Windows the daemon's bytes arrive as
+    // chunks (`crate::localctl::chunked`), and `prefetched` is the start of
+    // such a stream, so the reader decodes it and hands nothing back.
+    let (reader, prefetched) = transport::raw_reader(
+        SharedRead {
+            socket: socket.clone(),
+        },
+        prefetched,
+    );
     let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
     dec.push(&prefetched);
     Ok(DataHandshake {
@@ -704,7 +708,7 @@ async fn open_stream_over_inner(
             socket: socket.clone(),
         },
         recv: DataRecvHalf {
-            socket: socket.clone(),
+            reader,
             dec,
             buf: vec![0u8; 16 * 1024],
         },
@@ -766,13 +770,14 @@ impl DataSendHalf {
     pub(crate) async fn send<M: Message>(&mut self, msg: &M) -> Result<(), OpError> {
         let wire =
             wire::encode_framed(msg, DATA_FRAME_MAX).map_err(|err| conduit_error("encode", err))?;
-        write_all(&self.socket, &wire)
+        write_all(&self.socket, &transport::raw_bytes(&wire))
             .await
             .map_err(|err| conduit_error("write", err))
     }
 
-    /// Half-close: shut the write direction of the underlying socket down.
-    /// Synchronous, no runtime needed — the same nature
+    /// Half-close: end the write direction of the underlying conduit
+    /// (`SHUT_WR` on a socket, the end chunk on a pipe,
+    /// `crate::localctl::chunked`). Synchronous, no runtime needed — the same nature
     /// [`qsh_transport::control::FramedSend::finish`] has (queues the FIN,
     /// does not wait for it): the daemon's own read on its end of this
     /// same UDS pair sees a clean EOF and relays it onward as a QUIC
@@ -790,9 +795,9 @@ impl DataSendHalf {
     /// [`qsh_transport::control::FramedSend::into_raw`], which the forward
     /// `Direct` carrier surrenders instead.
     pub(crate) fn into_raw(self) -> RawUdsWrite {
-        RawUdsWrite {
+        transport::raw_writer(SharedWrite {
             socket: self.socket,
-        }
+        })
     }
 }
 
@@ -800,7 +805,7 @@ impl DataSendHalf {
 /// been sent. See [`DataSendHalf`]'s own doc for why this reads through
 /// `&self` rather than an owned, exclusive half.
 pub(crate) struct DataRecvHalf {
-    socket: Arc<LocalStream>,
+    reader: transport::RawReader<SharedRead>,
     dec: FrameDecoder,
     buf: Vec<u8>,
 }
@@ -823,7 +828,7 @@ impl DataRecvHalf {
                     M::decode(payload.as_slice()).map_err(|err| conduit_error("decode", err))?;
                 return Ok(Some(msg));
             }
-            let n = read_some(&self.socket, &mut self.buf)
+            let n = tokio::io::AsyncReadExt::read(&mut self.reader, &mut self.buf)
                 .await
                 .map_err(|err| conduit_error("read", err))?;
             if n == 0 {
@@ -855,9 +860,9 @@ impl DataRecvHalf {
     /// payload, not a frame in progress.
     pub(crate) fn into_raw(self) -> (RawUdsRead, Vec<u8>) {
         let DataRecvHalf {
-            socket, mut dec, ..
+            reader, mut dec, ..
         } = self;
-        (RawUdsRead { socket }, dec.take_remaining())
+        (reader, dec.take_remaining())
     }
 }
 
@@ -869,11 +874,16 @@ impl DataRecvHalf {
 /// still just one of up to three live clones of one socket
 /// ([`open_stream_over_inner`]'s own doc) — dropping this one only drops
 /// this clone's reference, exactly like every other clone.
-pub(crate) struct RawUdsWrite {
+pub(crate) type RawUdsWrite = transport::RawWriter<SharedWrite>;
+
+/// The bytes of a shared `LOCAL_STREAM` socket, written through `&self`
+/// readiness calls. [`RawUdsWrite`] adds the platform's raw-phase framing on
+/// top of it.
+pub(crate) struct SharedWrite {
     socket: Arc<LocalStream>,
 }
 
-impl tokio::io::AsyncWrite for RawUdsWrite {
+impl tokio::io::AsyncWrite for SharedWrite {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -906,7 +916,9 @@ impl tokio::io::AsyncWrite for RawUdsWrite {
     ) -> std::task::Poll<io::Result<()>> {
         // Half-close, synchronous and immediate — [`DataSendHalf::finish`]'s
         // own doc on why `SHUT_WR` on the shared socket is the whole
-        // teardown a tunnel's clean end needs on this carrier.
+        // teardown a tunnel's clean end needs on this carrier. (Where the
+        // conduit is chunked, `RawUdsWrite` ends the direction itself and
+        // never reaches this.)
         transport::shutdown_write(&self.socket);
         std::task::Poll::Ready(Ok(()))
     }
@@ -914,11 +926,15 @@ impl tokio::io::AsyncWrite for RawUdsWrite {
 
 /// Daemon → client raw byte reader — [`DataRecvHalf::into_raw`]'s return
 /// type, the receive-half sibling of [`RawUdsWrite`].
-pub(crate) struct RawUdsRead {
+pub(crate) type RawUdsRead = transport::RawReader<SharedRead>;
+
+/// The bytes of a shared `LOCAL_STREAM` socket, read through `&self`
+/// readiness calls; see [`SharedWrite`].
+pub(crate) struct SharedRead {
     socket: Arc<LocalStream>,
 }
 
-impl tokio::io::AsyncRead for RawUdsRead {
+impl tokio::io::AsyncRead for SharedRead {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -938,6 +954,20 @@ impl tokio::io::AsyncRead for RawUdsRead {
     }
 }
 
+/// The raw halves of a conduit already past its framed phase, for tests that
+/// stand in for the CLI side of a relay.
+#[cfg(test)]
+pub(crate) fn raw_halves_for_test(stream: LocalStream) -> (RawUdsWrite, RawUdsRead) {
+    let socket = Arc::new(stream);
+    let (reader, _) = transport::raw_reader(
+        SharedRead {
+            socket: socket.clone(),
+        },
+        Vec::new(),
+    );
+    (transport::raw_writer(SharedWrite { socket }), reader)
+}
+
 /// Write all of `buf` to `socket`'s send direction, via the readiness-based
 /// `writable`/`try_write` pair rather than [`tokio::io::AsyncWriteExt`] —
 /// the latter needs a `&mut LocalStream`, which an `Arc`-shared socket
@@ -952,20 +982,6 @@ async fn write_all(socket: &LocalStream, mut buf: &[u8]) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Read at least one byte (or report a clean EOF as `Ok(0)`) from
-/// `socket`'s receive direction. See [`write_all`]'s own doc for why this
-/// is readiness-based rather than [`tokio::io::AsyncReadExt`].
-async fn read_some(socket: &LocalStream, buf: &mut [u8]) -> io::Result<usize> {
-    loop {
-        socket.readable().await?;
-        match socket.try_read(buf) {
-            Ok(n) => return Ok(n),
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(err) => return Err(err),
-        }
-    }
 }
 
 /// Wrap a `LOCAL_STREAM` data-conduit I/O failure as

@@ -8,7 +8,7 @@
 //! address, proving the CLI wiring on top of this hook).
 //!
 //! The "at most once" half of the guarantee is structural, not timing-
-//! dependent: `run_reverse_unix` wraps the hook in `Option<F>` and calls
+//! dependent: `run_reverse_observed` wraps the hook in `Option<F>` and calls
 //! it through `Option::take`, so the closure physically cannot run twice
 //! no matter how many further retries follow — Rust's ownership rules
 //! enforce that, not this test. What still needs a real dial to prove is

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -7,8 +8,16 @@ use crate::acl::AllowAllPinned;
 use crate::audit::NullAuditSink;
 use crate::broker::SystemClock;
 use crate::localctl::client;
+use crate::localctl::transport;
+#[cfg(unix)]
+use crate::localctl::transport::{bind_with_narrow_umask, peer_is_authorized};
 use crate::reverse::registry::{AdmittedEntry, Registry};
 use tokio::io::AsyncReadExt as _;
+
+/// Connect to the daemon's endpoint through the platform transport.
+async fn connect_conduit(path: &std::path::Path) -> transport::LocalStream {
+    transport::connect(path).await.unwrap()
+}
 
 /// A `Paths` fully sandboxed inside `dir`, `runtime_dir` included —
 /// `.with_runtime_dir` pins the localctl socket location independent
@@ -40,6 +49,7 @@ fn test_listen() -> Arc<Listen> {
 
 // ---- socket lifetime and permissions (`docs/design/testing.md` L2) ----
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bind_creates_the_runtime_dir_0700_and_the_socket_0600() {
     let dir = tempfile::tempdir().unwrap();
@@ -61,6 +71,7 @@ async fn bind_creates_the_runtime_dir_0700_and_the_socket_0600() {
     assert_eq!(sock_mode, 0o600, "socket file must be 0600");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bind_with_narrow_umask_creates_the_socket_node_at_0600_before_any_explicit_chmod() {
     // Calls `bind_with_narrow_umask` directly — with no subsequent
@@ -80,6 +91,7 @@ async fn bind_with_narrow_umask_creates_the_socket_node_at_0600_before_any_expli
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bind_removes_a_stale_socket_file_at_the_exact_same_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -96,6 +108,7 @@ async fn bind_removes_a_stale_socket_file_at_the_exact_same_path() {
 
 // ---- peer credential check (`docs/design/protocol.md` §11-3) ----
 
+#[cfg(unix)]
 #[test]
 fn peer_is_authorized_only_when_the_uid_matches() {
     assert!(peer_is_authorized(1000, 1000));
@@ -111,6 +124,7 @@ fn peer_is_authorized_only_when_the_uid_matches() {
 /// (M3 plan Step 5 (c) (2473c88): "peer-cred 코드 경로를 단언" — the same-euid
 /// half of that requirement; a genuinely different euid is not
 /// obtainable without a second OS user, which CI does not provide).
+#[cfg(unix)]
 #[tokio::test]
 async fn same_euid_peer_is_authorized_via_the_real_peer_cred_syscall() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,12 +132,13 @@ async fn same_euid_peer_is_authorized_via_the_real_peer_cred_syscall() {
     let bound = LocalctlListener::bind(&paths, 9003).unwrap();
     let socket_path = bound.socket_path.clone();
 
+    let mut bound = bound;
     let accept = tokio::spawn(async move { bound.listener.accept().await.unwrap().0 });
-    let _client = UnixStream::connect(&socket_path).await.unwrap();
+    let _client = connect_conduit(&socket_path).await;
     let server_side = accept.await.unwrap();
 
     assert!(
-        LocalctlDaemon::authorized_peer(&server_side).unwrap(),
+        transport::authorized_peer(&server_side).unwrap(),
         "this process connecting to its own socket must be authorized"
     );
 }
@@ -271,7 +286,7 @@ async fn an_unspecified_kind_answers_invalid_argument_not_a_hang() {
         let _ = shutdown_rx.await;
     }));
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -314,7 +329,7 @@ async fn local_control_for_an_unknown_host_is_host_not_found_not_forwarded_or_hu
         let _ = shutdown_rx.await;
     }));
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -355,7 +370,7 @@ async fn local_stream_for_an_unknown_host_is_host_not_found_not_forwarded_or_hun
         let _ = shutdown_rx.await;
     }));
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -487,9 +502,10 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
 // test green — this drives the negative outcome directly, since a
 // genuinely different euid needs a second OS user CI does not have) ----
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unauthorized_peer_is_closed_before_any_frame_is_read_or_answered() {
-    let (server_side, mut client_side) = UnixStream::pair().unwrap();
+    let (server_side, mut client_side) = tokio::net::UnixStream::pair().unwrap();
     let daemon = LocalctlDaemon::new(test_listen());
 
     // A literal `Ok(false)` stands in for the OS-level check reporting
@@ -532,7 +548,7 @@ async fn a_hello_with_a_version_this_daemon_does_not_speak_is_answered_unsupport
         let _ = shutdown_rx.await;
     }));
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -572,7 +588,7 @@ async fn a_peer_that_never_sends_a_hello_is_closed_after_the_wait_ceiling_not_he
         let _ = shutdown_rx.await;
     }));
 
-    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let mut stream = connect_conduit(&socket_path).await;
     // Never send a `LocalHello`. `start_paused` auto-advances virtual
     // time past `LOCAL_WAIT_MAX` the instant every other task is idle,
     // so this proves the deadline actually closes the peer rather than
@@ -674,7 +690,7 @@ async fn local_admin_at_the_admin_pools_cap_answers_resource_exhausted_not_a_sil
     // send the follow-up `LocalAdminRequest` — `serve_admin` blocks
     // forever on that read, holding the permit for as long as this
     // stream stays open.
-    let holder = UnixStream::connect(&socket_path).await.unwrap();
+    let holder = connect_conduit(&socket_path).await;
     let mut holder = LocalConduit::new(holder);
     holder
         .send(&LocalHello {
@@ -691,7 +707,7 @@ async fn local_admin_at_the_admin_pools_cap_answers_resource_exhausted_not_a_sil
     // permit before this connection races it.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -760,7 +776,7 @@ async fn local_stream_at_the_stream_pools_cap_answers_resource_exhausted_not_a_s
     // exactly as it would with a real held conduit.
     let _held = daemon.stream_permits.clone().try_acquire_owned().unwrap();
 
-    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let stream = connect_conduit(&socket_path).await;
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -834,10 +850,13 @@ async fn a_dead_quic_send_leg_does_not_discard_the_targets_pending_final_frame()
     // The daemon side learns the send half is dead before its pumps run.
     a_send.stopped().await.unwrap();
 
-    let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
-    let (mut cli_read, mut cli_write) = cli.into_split();
+    let dir = tempfile::tempdir().unwrap();
+    let (cli, daemon_uds) = real_conduit_pair(&dir).await;
+    let (mut cli_write, mut cli_read) = client::raw_halves_for_test(cli);
     cli_write.write_all(b"late StdinEof").await.unwrap();
-    let (uds_read, uds_write) = daemon_uds.into_split();
+    let (uds_read, uds_write) = transport::split(daemon_uds);
+    let (uds_read, _) = transport::raw_reader(uds_read, Vec::new());
+    let uds_write = transport::raw_writer(uds_write);
     // Let the reactor mark the UDS readable, so the first poll of
     // `pump_uds_to_quic` reads at once and hits the dead QUIC send leg
     // while `EXITFRAME` is still unread (the CI interleaving).
@@ -891,11 +910,14 @@ async fn a_cli_half_close_does_not_discard_the_targets_trailing_answer() {
         let _ = b_send.stopped().await;
     });
 
-    let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
-    let (mut cli_read, mut cli_write) = cli.into_split();
+    let dir = tempfile::tempdir().unwrap();
+    let (cli, daemon_uds) = real_conduit_pair(&dir).await;
+    let (mut cli_write, mut cli_read) = client::raw_halves_for_test(cli);
     cli_write.write_all(b"in").await.unwrap();
     cli_write.shutdown().await.unwrap();
-    let (uds_read, uds_write) = daemon_uds.into_split();
+    let (uds_read, uds_write) = transport::split(daemon_uds);
+    let (uds_read, _) = transport::raw_reader(uds_read, Vec::new());
+    let uds_write = transport::raw_writer(uds_write);
 
     let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
     let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
@@ -935,10 +957,13 @@ async fn a_cli_that_half_closes_and_then_hangs_up_still_releases_an_idle_target(
     b_recv.read_exact(&mut hdr).await.unwrap();
     // Target stays silent and keeps its send half open.
 
-    let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
-    let (cli_read, mut cli_write) = cli.into_split();
+    let dir = tempfile::tempdir().unwrap();
+    let (cli, daemon_uds) = real_conduit_pair(&dir).await;
+    let (mut cli_write, cli_read) = client::raw_halves_for_test(cli);
     cli_write.shutdown().await.unwrap();
-    let (uds_read, uds_write) = daemon_uds.into_split();
+    let (uds_read, uds_write) = transport::split(daemon_uds);
+    let (uds_read, _) = transport::raw_reader(uds_read, Vec::new());
+    let uds_write = transport::raw_writer(uds_write);
 
     let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
     let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
@@ -968,4 +993,139 @@ async fn a_cli_that_half_closes_and_then_hangs_up_still_releases_an_idle_target(
             RESET_CODE_LOCAL_PEER_GONE
         ))
     );
+}
+
+/// A connected conduit through the platform transport: the CLI's end and the
+/// daemon's end of one real socket or named pipe.
+async fn real_conduit_pair(
+    dir: &tempfile::TempDir,
+) -> (transport::LocalStream, transport::LocalStream) {
+    let paths = tmp_paths(dir);
+    let (mut listener, endpoint) = transport::bind(&paths, std::process::id()).unwrap();
+    let (cli, accepted) = tokio::join!(connect_conduit(&endpoint), listener.accept());
+    let (daemon_end, verdict) = accepted.unwrap();
+    assert!(verdict.unwrap(), "the same user is authorized");
+    (cli, daemon_end)
+}
+
+/// Run the daemon's tunnel relay (`tunnel_splice_uds_quic`) between a real
+/// local conduit and a QUIC stream. Returns the CLI's raw halves, the
+/// target's QUIC halves, the relay task and the two connections (which the
+/// caller keeps open for as long as the target still reads).
+async fn tunnel_relay_fixture(
+    dir: &tempfile::TempDir,
+) -> (
+    client::RawUdsWrite,
+    client::RawUdsRead,
+    qsh_transport::SendStream,
+    qsh_transport::RecvStream,
+    tokio::task::JoinHandle<()>,
+    (qsh_transport::Connection, qsh_transport::Connection),
+) {
+    let (cli, daemon_end) = real_conduit_pair(dir).await;
+    let (cli_write, cli_read) = client::raw_halves_for_test(cli);
+
+    let (daemon_conn, target_conn) = crate::tunnel::testutil::loopback_pair().await;
+    let (mut quic_send, quic_recv) = daemon_conn.open_bi().await.unwrap();
+    // A QUIC stream is only announced to the peer by its first bytes.
+    quic_send.write_all(b"hdr").await.unwrap();
+    let (target_send, mut target_recv) = target_conn.accept_bi().await.unwrap();
+    let mut hdr = [0u8; 3];
+    target_recv.read_exact(&mut hdr).await.unwrap();
+
+    let watch = crate::tunnel::stall::StallWatch::on(&daemon_conn, "test");
+    let conns = (daemon_conn, target_conn);
+    let (uds_read, uds_write) = transport::split(daemon_end);
+    let (uds_read, prefetched) = transport::raw_reader(uds_read, Vec::new());
+    let uds_write = transport::raw_writer(uds_write);
+    let relay = tokio::spawn(async move {
+        tunnel_splice_uds_quic(
+            uds_read,
+            uds_write,
+            quic_send,
+            quic_recv,
+            prefetched,
+            Vec::new(),
+            watch,
+        )
+        .await;
+    });
+    // The relay owns the daemon's QUIC halves; the target keeps its own.
+    (cli_write, cli_read, target_send, target_recv, relay, conns)
+}
+
+/// A reverse-route tunnel conduit delivers the local side's write-close to
+/// the target while the target can still answer, on every platform: the
+/// local application shuts only its write side, the target sees the end of
+/// what was forwarded, replies afterwards, and the local side reads the whole
+/// reply to its end. (On Windows the conduit is a byte-mode pipe and the
+/// close travels as the end chunk, `crate::localctl::chunked`.)
+#[tokio::test]
+async fn a_tunnel_conduit_delivers_the_local_write_close_and_the_target_still_answers() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut cli_write, mut cli_read, mut target_send, mut target_recv, relay, _conns) =
+        tunnel_relay_fixture(&dir).await;
+
+    let target = tokio::spawn(async move {
+        // Returns only on the FIN the local close turned into.
+        let got = target_recv.read_to_end(1 << 20).await.unwrap();
+        assert_eq!(got, b"request body");
+        target_send.write_all(b"the reply").await.unwrap();
+        target_send.finish().unwrap();
+        let _ = target_send.stopped().await;
+    });
+
+    cli_write.write_all(b"request body").await.unwrap();
+    cli_write.shutdown().await.unwrap();
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), cli_read.read_to_end(&mut reply))
+        .await
+        .expect("the reply must reach its end")
+        .unwrap();
+    assert_eq!(reply, b"the reply");
+    drop((cli_write, cli_read));
+    tokio::time::timeout(Duration::from_secs(10), target)
+        .await
+        .expect("the target must finish")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), relay)
+        .await
+        .expect("the relay must end once both directions did")
+        .unwrap();
+}
+
+/// The mirror: the target ends its direction first. The local side reads the
+/// end and can still send, and the target still receives it.
+#[tokio::test]
+async fn a_tunnel_conduit_delivers_the_targets_close_and_the_local_side_can_still_send() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut cli_write, mut cli_read, mut target_send, mut target_recv, relay, _conns) =
+        tunnel_relay_fixture(&dir).await;
+
+    target_send.write_all(b"banner").await.unwrap();
+    target_send.finish().unwrap();
+    let mut banner = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), cli_read.read_to_end(&mut banner))
+        .await
+        .expect("the target's end must reach the local side")
+        .unwrap();
+    assert_eq!(banner, b"banner");
+
+    // The local side's direction is still open.
+    cli_write.write_all(b"after the banner").await.unwrap();
+    cli_write.shutdown().await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(10), target_recv.read_to_end(1 << 20))
+        .await
+        .expect("the local side's bytes and end must reach the target")
+        .unwrap();
+    assert_eq!(got, b"after the banner");
+    drop((cli_write, cli_read));
+    tokio::time::timeout(Duration::from_secs(10), relay)
+        .await
+        .expect("the relay must end once both directions did")
+        .unwrap();
 }

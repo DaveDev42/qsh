@@ -32,8 +32,8 @@
 //! run on the Windows leg too (the M4 plan (2473c88) "전 step 공통 계약 규율" ties the
 //! client-side `-L` bind's platform reach to §4.1 #1's holder decision,
 //! which came out foreground-only, i.e. no daemon and so no unix-only
-//! dependency). Only the reverse `LOCAL_STREAM` carrier below is unix-only,
-//! and it is refused here in any case until Step 5.
+//! dependency). The reverse `LOCAL_STREAM` carrier below is not gated either:
+//! localctl builds on every platform.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -53,7 +53,6 @@ use crate::client::ClientError;
 use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 use crate::tunnel::carrier::{Admit, CarrierView, Ticket};
 use crate::tunnel::dial::DialPolicy;
-#[cfg(unix)]
 use crate::tunnel::splice::splice_tcp_uds;
 use crate::tunnel::splice::{SpliceError, SpliceStats, splice_tcp_quic};
 use crate::tunnel::stall::StallWatch;
@@ -93,7 +92,6 @@ pub(crate) enum ForwardCarrier {
     /// stage (M4 plan Step 5 (a) (2473c88)); wired up by every route-aware
     /// `Ops` entry point (`-L`/`-D`, standalone and interactive) since
     /// ADR-0020.
-    #[cfg(unix)]
     Local {
         /// The daemon's UDS socket path.
         socket: std::path::PathBuf,
@@ -114,7 +112,6 @@ impl ForwardCarrier {
     fn link(&self) -> DataLink<'_> {
         match self {
             ForwardCarrier::Direct(conn) => DataLink::Direct(conn),
-            #[cfg(unix)]
             ForwardCarrier::Local { socket, host, .. } => DataLink::Local {
                 socket: socket.as_path(),
                 host: host.as_str(),
@@ -212,7 +209,6 @@ pub(crate) enum ForwardConnError {
     /// The accept is refused like a disconnected carrier and nothing was
     /// sent toward the new registration's device.
     #[error("the registration behind this host changed")]
-    #[cfg_attr(not(unix), allow(dead_code))]
     PeerChanged,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
@@ -456,7 +452,6 @@ impl LocalForwardHandle {
     /// than re-implementing it, which needs this callable from outside
     /// `qsh-core`. `Ops`'s route-aware entry point (PR 5b) is still the
     /// only *production* caller.
-    #[cfg(unix)]
     pub async fn start_reverse(
         spec: &ForwardSpec,
         socket_path: std::path::PathBuf,
@@ -592,7 +587,6 @@ pub(crate) enum OpenedTunnel {
         watch: StallWatch,
     },
     /// Opened on [`ForwardCarrier::Local`].
-    #[cfg(unix)]
     Local {
         send: crate::localctl::client::RawUdsWrite,
         recv: crate::localctl::client::RawUdsRead,
@@ -684,7 +678,6 @@ pub(crate) async fn open_tunnel(
                 watch: StallWatch::on(conn, format!("{host}:{port}")),
             })
         }
-        #[cfg(unix)]
         ForwardCarrier::Local { .. } => {
             let (Ok(send), Ok((recv, residue))) = (send.into_raw_local(), recv.into_raw_local())
             else {
@@ -708,7 +701,6 @@ async fn open_carrier_stream(
     carrier: &ForwardCarrier,
     header: &StreamHeader,
 ) -> Result<(DataSend, DataRecv, DataKillSwitch), ForwardConnError> {
-    #[cfg(unix)]
     if let ForwardCarrier::Local {
         socket,
         host,
@@ -747,7 +739,6 @@ pub(crate) async fn splice_opened(
             residue,
             watch,
         } => Ok(splice_tcp_quic(tcp, send, recv, residue, watch).await?),
-        #[cfg(unix)]
         OpenedTunnel::Local {
             send,
             recv,

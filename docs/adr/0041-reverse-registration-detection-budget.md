@@ -3,6 +3,8 @@
 날짜: 2026-10-05
 상태: 승인됨 (2026-10-06 사용자 확정, 이슈 #10·#11). 결정 8은 구현 리뷰에서 더했다. 5초 예산이 활성 창 안에서만 성립한다는 사실과 그 보정이다
 
+개정 이력: 2026-10-16에 reverse target의 진입점 이름이 바뀐 것을 적는다. 이 문서가 `run_reverse_unix`로 부르는 함수는 M19가 cfg(unix) 쌍둥이를 없애면서 플랫폼 공통의 `run_reverse_observed`(`crates/qsh-core/src/reverse/target/mod.rs`)가 되었고, 본문의 옛 이름은 그 함수를 가리킨다. 결정 내용은 바뀌지 않는다.
+
 개정 관계: ADR-0021을 개정한다. 대상은 두 자리다. 하나는 결과 절에서 `[recovery]` 세 값의 범위를 세 회귀 테스트(`attach_recovery.rs`·`reverse_blackout.rs`·`reverse_resume_chaos.rs`)의 `detection_budget` 상한 아래로 잡으라고 한 문장이다. 이 상한은 연결 종류별 둘(attach 2000ms, 역방향 등록 5000ms)이 된다. 다른 하나는 결정 4가 못박은 기본값(250ms·1초·3)과 "설정이 없으면 오늘과 바이트 단위로 같은 동작"이다. 이 두 문장은 대화형 attach와 supervised 터널에는 그대로 서고 역방향 등록 연결에는 서지 않는다. 역방향 등록의 기본 감지가 4.25초로 바뀐다. 결정 4의 나머지(세 값만 연다, 검증은 결정 1과 같은 fail-closed 규율)와 결정 7은 건드리지 않는다. `docs/design/protocol.md` §10의 `[recovery]` 서술과 §11-4 항목 4의 "양쪽 role에서 같은 정책을 재사용한다"가 이 ADR로 바뀌는 자리다. ADR-0023 결정 17(wake 뒤 감지)은 attach 기본값 기준 서술이라 그대로 선다. `docs/ROADMAP.md` M13 범위 (k)의 "설정이 없을 때 동작이 오늘과 같다"는 이제 역방향 등록에는 해당하지 않는다. 그 문구와 `PLAN.md` 배치는 메인 세션이 맞춘다.
 
 ## 맥락
