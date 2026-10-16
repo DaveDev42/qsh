@@ -162,6 +162,23 @@ signature on `qsh.exe` and on the `install.ps1` release asset, and no
 published release has been cut that way yet; [RELEASE-NOTES.md](RELEASE-NOTES.md)
 says which tags are.
 
+### Scoop and winget (Windows)
+
+```powershell
+scoop bucket add qsh https://github.com/DaveDev42/scoop-bucket
+scoop install qsh
+winget install DaveDev42.qsh
+```
+
+Both lines work after the first manifest is accepted: the scoop bucket is
+filled by the release workflow once the maintainer has created it, and the
+first winget manifest is submitted by hand and has to be merged by
+`microsoft/winget-pkgs`. Until then use the installer above. Both manifests
+cover x86_64 and aarch64, point at the release zip and are checked against
+its SHA256 by the package manager, so the signing status is whatever that
+zip carries. They link only `qsh.exe`; the man pages stay in the zip, and
+the same text is `qsh help`.
+
 ### Homebrew (macOS)
 
 ```bash
