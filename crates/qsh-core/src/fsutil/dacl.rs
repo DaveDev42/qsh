@@ -14,6 +14,9 @@
 //!   its own is owner-only too.
 //! - Both descriptors are protected (`SE_DACL_PROTECTED`): nothing is
 //!   inherited from the parent.
+//! - A named pipe instance (`localctl`, ADR-0035 decision 14) gets the same
+//!   shape with the pipe rights that decision names: read, write and
+//!   `FILE_CREATE_PIPE_INSTANCE` for the owner SID, nothing inherited.
 //!
 //! Failure is closed (decision 10). A SID that cannot be read, or a volume
 //! that keeps no ACLs (FAT/exFAT, some network shares), is an error returned
@@ -33,31 +36,63 @@ use std::os::windows::io::FromRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, CopySid,
-    GetLengthSid, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
+    EqualSid, GetLengthSid, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
     OBJECT_INHERIT_ACE, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
     SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_ALWAYS, CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS,
-    FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_DATA, GetVolumeInformationW, GetVolumePathNameW, OPEN_ALWAYS,
+    FILE_ATTRIBUTE_NORMAL, FILE_CREATE_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, GetVolumeInformationW,
+    GetVolumePathNameW, OPEN_ALWAYS,
 };
 use windows_sys::Win32::System::SystemServices::{
     FILE_PERSISTENT_ACLS, SECURITY_DESCRIPTOR_REVISION,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use super::PrivateOpen;
 
-/// What a descriptor is for: a file, or a directory that passes its ACE on.
+/// What a descriptor is for: a file, a directory that passes its ACE on, or
+/// one instance of the localctl named pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
     File,
     Dir,
+    Pipe,
+}
+
+/// What the owner's ACE on a pipe instance grants (ADR-0035 decision 14):
+/// read, write, and the right to create further instances of the same name.
+/// `FILE_GENERIC_WRITE` already carries `FILE_APPEND_DATA`, which is the same
+/// bit as `FILE_CREATE_PIPE_INSTANCE`; it is spelled out so the grant reads
+/// as the decision does.
+pub(crate) const PIPE_OWNER_ACCESS: u32 =
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_CREATE_PIPE_INSTANCE;
+
+impl ObjectKind {
+    /// The access mask of the one ACE.
+    pub(crate) fn access(self) -> u32 {
+        match self {
+            Self::File | Self::Dir => FILE_ALL_ACCESS,
+            Self::Pipe => PIPE_OWNER_ACCESS,
+        }
+    }
+
+    /// The ACE inheritance flags of the one ACE.
+    pub(crate) fn inherit_flags(self) -> u8 {
+        match self {
+            Self::File | Self::Pipe => 0,
+            Self::Dir => (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
+        }
+    }
 }
 
 /// The two environmental inputs of an owner-only object: the descriptor and
@@ -120,10 +155,7 @@ impl OwnerOnly {
             .next_multiple_of(4);
         let mut acl = vec![0u32; acl_len / 4];
         let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
-        let flags = match kind {
-            ObjectKind::File => 0,
-            ObjectKind::Dir => OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-        };
+        let flags = u32::from(kind.inherit_flags());
         // SAFETY: `acl` is a zeroed, DWORD-aligned buffer of `acl_len` bytes;
         // the SID is valid; each call reports failure through its return value.
         unsafe {
@@ -132,7 +164,7 @@ impl OwnerOnly {
                 "InitializeAcl",
             )?;
             check(
-                AddAccessAllowedAceEx(acl_ptr, ACL_REVISION, flags, FILE_ALL_ACCESS, sid_ptr),
+                AddAccessAllowedAceEx(acl_ptr, ACL_REVISION, flags, kind.access(), sid_ptr),
                 "AddAccessAllowedAceEx",
             )?;
         }
@@ -166,7 +198,8 @@ impl OwnerOnly {
         })
     }
 
-    fn attributes_ptr(&self) -> *mut c_void {
+    /// The `SECURITY_ATTRIBUTES` for a create call, valid while `self` lives.
+    pub(crate) fn attributes_ptr(&self) -> *mut c_void {
         std::ptr::from_ref(&self.attributes).cast_mut().cast()
     }
 }
@@ -274,19 +307,43 @@ fn require_acls(source: &dyn DaclSource, path: &Path) -> io::Result<()> {
 
 /// The user SID of the process token, in a `u32`-aligned buffer.
 pub(crate) fn token_user_sid() -> io::Result<Vec<u32>> {
+    // SAFETY: the pseudo handle of the current process needs no closing.
+    user_sid_of_process_handle(unsafe { GetCurrentProcess() })
+}
+
+/// The user SID of the token of process `pid`, in a `u32`-aligned buffer.
+///
+/// The process is opened with `PROCESS_QUERY_LIMITED_INFORMATION` only, which
+/// is the least `OpenProcessToken` accepts. Another user's process, a
+/// protected process and a pid that no longer exists all fail here, and the
+/// caller treats a failure as a refusal.
+pub(crate) fn process_user_sid(pid: u32) -> io::Result<Vec<u32>> {
+    // SAFETY: plain value arguments; failure is reported by the return value.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(context(io::Error::last_os_error(), "OpenProcess"));
+    }
+    let process = Handle(process);
+    user_sid_of_process_handle(process.0)
+}
+
+/// A kernel handle closed on drop.
+struct Handle(HANDLE);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful open and is closed once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn user_sid_of_process_handle(process: HANDLE) -> io::Result<Vec<u32>> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: the out-pointer is a local; failure is reported by the return.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return Err(context(io::Error::last_os_error(), "OpenProcessToken"));
     }
-    struct Token(HANDLE);
-    impl Drop for Token {
-        fn drop(&mut self) {
-            // SAFETY: the handle came from `OpenProcessToken` and is closed once.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let token = Token(token);
+    let token = Handle(token);
 
     let mut needed = 0u32;
     // SAFETY: a zero-length query only reports the size needed.
@@ -324,6 +381,32 @@ pub(crate) fn token_user_sid() -> io::Result<Vec<u32>> {
         "CopySid",
     )?;
     Ok(out)
+}
+
+/// The `S-1-5-21-…` text of `sid`.
+pub(crate) fn sid_to_string(sid: &[u32]) -> io::Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sid` is a SID in a `u32`-aligned buffer, as `token_user_sid`
+    // and `process_user_sid` return it; the result is freed below.
+    check(
+        unsafe { ConvertSidToStringSidW(sid.as_ptr() as *mut c_void, &mut text) },
+        "ConvertSidToStringSidW",
+    )?;
+    // SAFETY: `text` is a NUL-terminated wide string from the call above.
+    let out = unsafe {
+        let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+    };
+    // SAFETY: allocated by `ConvertSidToStringSidW` with `LocalAlloc`.
+    unsafe { LocalFree(text.cast()) };
+    Ok(out)
+}
+
+/// Whether two SIDs, each in a `u32`-aligned buffer, name the same principal.
+pub(crate) fn equal_sid(a: &[u32], b: &[u32]) -> bool {
+    // SAFETY: both are SIDs copied out of tokens (or built by a test the
+    // same way) and stay borrowed for the call.
+    unsafe { EqualSid(a.as_ptr() as *mut c_void, b.as_ptr() as *mut c_void) != 0 }
 }
 
 /// `FILE_PERSISTENT_ACLS` of the volume holding `path`, taken from the

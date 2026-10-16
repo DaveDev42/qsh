@@ -183,16 +183,10 @@ impl DataKillSwitch {
     pub fn kill(&self) {
         #[cfg(unix)]
         if let Some(socket) = &self.socket {
-            use std::os::fd::AsRawFd as _;
-            // SAFETY: `socket.as_raw_fd()` names a descriptor this `Arc`
-            // keeps open for as long as `self` (or any clone of it, per
-            // `Self`'s own doc) is alive — `shutdown(2)` only changes that
-            // socket's read/write state, never the process's fd table, so
-            // it cannot race a `close` of the same number happening
-            // elsewhere.
-            unsafe {
-                libc::shutdown(socket.as_raw_fd(), libc::SHUT_RDWR);
-            }
+            // The transport keeps the descriptor-reuse argument: `socket`
+            // is a held clone, so the descriptor stays allocated for as
+            // long as `self` (or any clone of it) is alive.
+            crate::localctl::transport::shutdown_both(socket);
         }
     }
 }

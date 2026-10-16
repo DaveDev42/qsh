@@ -10,7 +10,8 @@
 //! against [`CONTROL_FRAME_MAX`] *before* any payload-sized buffer is
 //! allocated) via [`qsh_proto::local::encode_local`]/[`decode_local`],
 //! running over whatever `AsyncRead + AsyncWrite` the caller hands in. In
-//! production that is always a `tokio::net::UnixStream`, but keeping
+//! production that is always a `transport::LocalStream` (a `UnixStream` or a
+//! named pipe end), but keeping
 //! [`LocalConduit`] generic lets tests drive the exact same code over an
 //! in-memory `tokio::io::duplex` pipe with no real socket at all.
 

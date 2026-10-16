@@ -1,6 +1,7 @@
 //! `localctl` — the IPC a CLI process on this machine speaks to *its own*
 //! resident `qsh listen` daemon over a Unix domain socket
-//! (`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, `docs/design/architecture.md` §7,
+//! (`$XDG_RUNTIME_DIR/qsh/<pid>.sock`) or, on Windows, a named pipe
+//! (`\\.\pipe\qsh-<scope>-<pid>`; [`transport`]; `docs/design/architecture.md` §7,
 //! `docs/design/protocol.md` §11-3, ADR-0003 결과 절 2026-08-18/19 추기).
 //! M3 plan Step 5 (2473c88) introduces this module tree, split into two PRs: 5a
 //! (this transport/security layer) and 5b (`Ops::host_list`/`host_get`,
@@ -34,7 +35,7 @@
 //!
 //! ## Module layout and the arch rule this seam protects
 //!
-//! [`frame`] and [`client`] run in the *CLI process* and are **pure UDS
+//! [`frame`] and [`client`] run in the *CLI process* and are **pure local-stream
 //! and `qsh-proto` framing**: they must never name `qsh_transport`,
 //! `quinn` or `rustls` — mechanically enforced by `xtask/src/arch.rs`'s
 //! file-scoped `ModuleBan` for exactly these two files (M3 plan Step 5 (2473c88)
@@ -52,7 +53,7 @@
 //! enforce them here; do not assume they are covered by this seam. A CLI
 //! process has no business holding a QUIC connection regardless.
 //!
-//! [`daemon`] is the one module allowed to import `qsh_transport` here (only
+//! `daemon` is the one module allowed to import `qsh_transport` here (only
 //! indirectly, through [`crate::reverse::listen::Listen`]/`Registry`, which
 //! this PR does not itself add a fresh `qsh_transport` name to): it is the
 //! bridge that answers this machine's `LOCAL_ADMIN` conduit from the
@@ -65,18 +66,19 @@
 //! already be proven transport-free.
 //!
 //! [`mux`] (M3 plan Step 6 (2473c88), Stage A1) is the pure `request_id`
-//! remapping and event-routing table [`daemon`] drives once it starts
+//! remapping and event-routing table `daemon` drives once it starts
 //! multiplexing several `LOCAL_CONTROL` conduits onto one reverse QUIC
 //! connection — it names no transport type at all (not even indirectly)
 //! and has no async, no lock, no socket; see its own module docs for the
 //! invariant it enforces.
 //!
-//! Every type here lives behind `#[cfg(unix)]` (see the `pub mod
-//! localctl;` declaration in `lib.rs`) — localctl (UDS, peer credentials)
-//! has no meaning on Windows, so this whole module tree compiles out there
-//! (`docs/CLI.md` §6.13: Windows `qsh listen`/`qsh reverse` are
-//! `UNSUPPORTED`, and `qsh hosts` returns forward hosts only — no daemon,
-//! no socket, no localctl call at all).
+//! [`transport`] is where the platform shows. [`frame`] and [`client`] speak
+//! to a [`transport::LocalStream`] (a `UnixStream` on unix, a named pipe end
+//! on Windows) and compile everywhere, so a Windows CLI process can reach a
+//! daemon (`docs/CLI.md` §6.13). `daemon` stays `#[cfg(unix)]`: it is built
+//! on `reverse::listen`, which has no Windows build, and `qsh listen` is
+//! `UNSUPPORTED` there (ADR-0035 decision 14). The Windows server half of the
+//! transport is complete and tested without it.
 //!
 //! ## What must never cross a localctl frame
 //!
@@ -88,6 +90,8 @@
 //! extends here, made mechanical by PR 5b's fixtures).
 
 pub mod client;
+#[cfg(unix)]
 pub mod daemon;
 pub mod frame;
 pub mod mux;
+pub mod transport;

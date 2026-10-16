@@ -18,7 +18,7 @@
 //! This module owns **no I/O**: no socket, no QUIC stream, no async. It is
 //! deliberately a plain, synchronous state machine so it can be driven and
 //! checked by property tests without a runtime (`docs/design/testing.md`
-//! L3) and so [`crate::localctl::daemon`] (the transport bridge, PR
+//! L3) and so `crate::localctl::daemon` (the transport bridge, PR
 //! following this one) can hold it behind a plain `Mutex` or run it
 //! inline on whatever task owns the QUIC connection. Nothing here names
 //! `qsh_transport`, `quinn`, `rustls`, or a UDS type.
