@@ -35,7 +35,6 @@ struct ScriptedPeer {
     /// Streams the client opened after the handshake, across connections.
     requests: Arc<AtomicUsize>,
     /// What the peer says to `RemoteForwardOpen` and `RemoteForwardClose`.
-    #[cfg_attr(not(unix), allow(dead_code))]
     rfwd: Arc<RfwdScript>,
     accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
 }
@@ -298,7 +297,6 @@ fn full_lines() -> &'static std::sync::Mutex<Vec<serde_json::Value>> {
     LINES.get_or_init(Default::default)
 }
 
-#[cfg(unix)]
 fn lines_of(kind: &str) -> Vec<serde_json::Value> {
     full_lines()
         .lock()
@@ -536,8 +534,6 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
     drop(hold);
 }
 
-// The capture helpers it reads the supervise lines with are unix-only.
-#[cfg(unix)]
 mod remote;
 
 // ---- --accept-hold (ADR-0023 decision 19) ------------------------------
@@ -724,12 +720,9 @@ fn accept_hold_a_connect_outlasting_the_window_gets_rep_01_and_no_stream() {
 // the new identity. The per-accept check and the wake line are therefore
 // driven against a daemon that does exactly what the test scripts.
 
-#[cfg(unix)]
 const FP_A: &str = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-#[cfg(unix)]
 const FP_B: &str = "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
 
-#[cfg(unix)]
 /// A localctl daemon that answers `LocalHostList`, `LOCAL_CONTROL` and
 /// `LOCAL_STREAM` from switches the test flips.
 struct ScriptedDaemon {
@@ -749,9 +742,8 @@ struct ScriptedDaemon {
     drop_controls: tokio::sync::watch::Sender<u64>,
 }
 
-#[cfg(unix)]
 impl ScriptedDaemon {
-    fn start(runtime_dir: &std::path::Path) -> Self {
+    fn start(paths: &Paths) -> Self {
         use crate::localctl::frame::LocalConduit;
         use qsh_proto::local::{
             LocalAdminRequest, LocalError, LocalHello, LocalHelloAck, LocalHost,
@@ -759,7 +751,6 @@ impl ScriptedDaemon {
             local_response,
         };
 
-        std::fs::create_dir_all(runtime_dir).unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -771,12 +762,15 @@ impl ScriptedDaemon {
         let stream_opens = Arc::new(AtomicUsize::new(0));
         let stream_headers = Arc::new(AtomicUsize::new(0));
         let (drop_controls, _) = tokio::sync::watch::channel(0u64);
-        let socket = runtime_dir.join(format!("{}.sock", std::process::id()));
-        let listener = {
+        // The platform's own bind (a 0600 socket in a private directory, or
+        // the first instance of the owner-only pipe), the one a real daemon
+        // uses, so the client discovers this stand-in the way it finds a
+        // daemon.
+        let mut listener = {
             let _guard = runtime.enter();
-            let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-            std_listener.set_nonblocking(true).unwrap();
-            tokio::net::UnixListener::from_std(std_listener).unwrap()
+            crate::localctl::transport::bind(paths, std::process::id())
+                .expect("bind the scripted daemon's endpoint")
+                .0
         };
         let daemon = Self {
             runtime,
@@ -788,7 +782,7 @@ impl ScriptedDaemon {
             drop_controls: drop_controls.clone(),
         };
         daemon.runtime.spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
+            while let Ok((stream, _credentials)) = listener.accept().await {
                 let control_fingerprint = Arc::clone(&control_fingerprint);
                 let stream_fingerprint = Arc::clone(&stream_fingerprint);
                 let registered = Arc::clone(&registered);
@@ -882,7 +876,6 @@ impl ScriptedDaemon {
     }
 }
 
-#[cfg(unix)]
 fn reverse_ops(dir: &std::path::Path) -> Ops {
     let ops = Ops::new(
         Paths::new(dir.join("config"), dir.join("state")).with_runtime_dir(dir.join("run")),
@@ -893,7 +886,6 @@ fn reverse_ops(dir: &std::path::Path) -> Ops {
     ops
 }
 
-#[cfg(unix)]
 fn open_reverse_local(ops: &Ops) -> crate::ops::TunnelHold {
     ops.tunnel_open(qsh_proto::TunnelOpenReq {
         host: "phone".to_string(),
@@ -909,7 +901,6 @@ fn open_reverse_local(ops: &Ops) -> crate::ops::TunnelHold {
     .expect("the supervised open over the scripted daemon")
 }
 
-#[cfg(unix)]
 fn capture_supervise_lines() {
     use tracing_subscriber::layer::SubscriberExt as _;
     tracing::subscriber::set_global_default(
@@ -924,7 +915,6 @@ fn capture_supervise_lines() {
     .expect("no other global tracing subscriber in this test process");
 }
 
-#[cfg(unix)]
 /// Decisions 6, 7-2 and 7-5. The registration behind the host name changes
 /// to another device while the tunnel's `LOCAL_CONTROL` conduit is still
 /// open. The next accept's `LocalHelloAck` names the other device, so the
@@ -937,7 +927,7 @@ fn supervised_reverse_local_sends_no_byte_to_a_device_that_reregistered_under_th
     capture_supervise_lines();
     let dir = tempfile::tempdir().unwrap();
     let ops = reverse_ops(dir.path());
-    let daemon = ScriptedDaemon::start(&ops.paths().runtime_dir());
+    let daemon = ScriptedDaemon::start(ops.paths());
     let hold = open_reverse_local(&ops);
     let bind: std::net::SocketAddr = hold.tunnel().bind.parse().unwrap();
     let (ended_tx, ended_rx) = std::sync::mpsc::channel();
@@ -971,7 +961,6 @@ fn supervised_reverse_local_sends_no_byte_to_a_device_that_reregistered_under_th
     assert_eq!(gave_up[0]["host"], "phone");
 }
 
-#[cfg(unix)]
 /// Decision 17 and 12 on the reverse route: a wake during the outage is
 /// logged with the time slept, and the outage the next `reestablished`
 /// reports does not include that time.
@@ -984,7 +973,7 @@ fn supervise_wake_line_reports_slept_ms_and_outage_ms_excludes_it() {
     capture_supervise_lines();
     let dir = tempfile::tempdir().unwrap();
     let ops = reverse_ops(dir.path());
-    let daemon = ScriptedDaemon::start(&ops.paths().runtime_dir());
+    let daemon = ScriptedDaemon::start(ops.paths());
     let hold = open_reverse_local(&ops);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let runner = std::thread::spawn(move || {

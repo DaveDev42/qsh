@@ -25,9 +25,15 @@
 //! task is tied to whichever runtime started it, so a subscriber arriving
 //! after that runtime is gone (test binaries build many) restarts it.
 //!
-//! Windows: whether `Instant` stops during sleep there is unverified
-//! (ROADMAP M19). If it does not, the two clocks never diverge, the detector
-//! never fires, and behaviour is exactly what it was before it existed.
+//! **The monotonic sample is the one platform-specific piece.** On macOS and
+//! Linux it is [`Instant::now`]. On Windows nothing promises that `Instant`
+//! stops during sleep or hibernation, so the sample function (`mono_sample`)
+//! reads `QueryUnbiasedInterruptTime` instead, the counter Windows documents
+//! as leaving suspended time out (ADR-0035 decision 15). Its reading is
+//! re-expressed as an [`Instant`] (a fixed anchor plus the counter's own
+//! advance), so [`WakeSense`], the constants and the tokio timers are the
+//! same code on every platform. The real suspend-and-resume round is a
+//! manual campaign round (ADR-0035 decision 18, item 4), not a unit test.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -41,6 +47,72 @@ pub const WAKE_TICK: Duration = Duration::from_secs(1);
 /// How far the wall clock must outrun the monotonic clock, within one tick,
 /// to count as a wake.
 pub const WAKE_SKEW: Duration = Duration::from_secs(3);
+
+/// Where [`mono_sample`] reads its clock, named so a test can pin that the
+/// source is the one that leaves suspended time out.
+#[cfg(windows)]
+pub(crate) const MONO_SAMPLE_SOURCE: &str = "QueryUnbiasedInterruptTime";
+
+/// Where [`mono_sample`] reads its clock: tokio's `Instant`, which stops
+/// while the machine sleeps on macOS and Linux.
+#[cfg(not(windows))]
+pub(crate) const MONO_SAMPLE_SOURCE: &str = "tokio::time::Instant";
+
+/// The monotonic reading the detector compares the wall clock against, the
+/// only function in this module that differs by platform.
+pub(crate) fn mono_sample() -> Instant {
+    #[cfg(not(windows))]
+    {
+        Instant::now()
+    }
+    #[cfg(windows)]
+    {
+        windows_sample::now()
+    }
+}
+
+/// `QueryUnbiasedInterruptTime` counts in units of 100 ns.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn unbiased_ticks_to_duration(ticks: u64) -> Duration {
+    const NANOS_PER_TICK: u64 = 100;
+    Duration::from_nanos(ticks.saturating_mul(NANOS_PER_TICK))
+}
+
+#[cfg(windows)]
+mod windows_sample {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use tokio::time::Instant;
+    use windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
+
+    /// Time since boot with suspended time left out. `None` only if the call
+    /// fails, which it does for a null pointer and nothing else.
+    fn unbiased() -> Option<Duration> {
+        let mut ticks = 0u64;
+        // SAFETY: `ticks` is a valid, writable u64 for the whole call.
+        let ok = unsafe { QueryUnbiasedInterruptTime(&mut ticks) } != 0;
+        ok.then(|| super::unbiased_ticks_to_duration(ticks))
+    }
+
+    /// The pair read together once: an `Instant` and the counter at that
+    /// moment. Every later sample is the anchor plus how far the counter has
+    /// moved since, so a sleep the counter skipped is skipped here too.
+    fn anchor() -> &'static (Instant, Option<Duration>) {
+        static ANCHOR: OnceLock<(Instant, Option<Duration>)> = OnceLock::new();
+        ANCHOR.get_or_init(|| (Instant::now(), unbiased()))
+    }
+
+    pub(super) fn now() -> Instant {
+        let (base, base_counter) = anchor();
+        match (base_counter, unbiased()) {
+            (Some(base_counter), Some(counter)) => *base + counter.saturating_sub(*base_counter),
+            // The counter could not be read: fall back to `Instant`, which
+            // is what the detector used before this sample existed.
+            _ => Instant::now(),
+        }
+    }
+}
 
 /// The wall-clock source. Injected so tests can move it by hand; product
 /// code uses [`SystemWallClock`].
@@ -106,6 +178,8 @@ impl WakeSense {
 struct Shared {
     tx: watch::Sender<WakeEvent>,
     clock: Arc<dyn WallClock>,
+    /// The monotonic sample; [`mono_sample`] in product code.
+    mono: fn() -> Instant,
     /// The running tick task, if any. The task clears this itself (under the
     /// lock) when it finds no subscriber left, so `subscribe` can never
     /// hand out a receiver to a task that is about to exit.
@@ -128,13 +202,27 @@ impl std::fmt::Debug for WakeDetector {
 impl WakeDetector {
     /// A detector over `clock`. Nothing runs until the first subscription.
     pub fn new(clock: Arc<dyn WallClock>) -> Self {
+        Self::build(clock, mono_sample)
+    }
+
+    fn build(clock: Arc<dyn WallClock>, mono: fn() -> Instant) -> Self {
         Self {
             shared: Arc::new(Shared {
                 tx: watch::Sender::new(WakeEvent::default()),
                 clock,
+                mono,
                 task: Mutex::new(None),
             }),
         }
+    }
+
+    /// A detector over `clock` that reads its monotonic sample from `mono`.
+    /// Tests that run on tokio's paused clock pass `Instant::now`, so the
+    /// sample follows the same virtual time as the fake wall clock on every
+    /// platform; [`new`](Self::new) is the product path.
+    #[cfg(test)]
+    pub(crate) fn with_mono_source(clock: Arc<dyn WallClock>, mono: fn() -> Instant) -> Self {
+        Self::build(clock, mono)
     }
 
     /// Subscribe to wakes, starting the tick task if it is not running. The
@@ -152,7 +240,12 @@ impl WakeDetector {
         if task.as_ref().is_none_or(|h| h.is_finished()) {
             // Baseline synchronously: a jump between `subscribe` returning
             // and the task's first poll must not be swallowed into it.
-            let sense = WakeSense::new(self.shared.clock.now(), Instant::now());
+            tracing::debug!(
+                target: "qsh::wake",
+                source = MONO_SAMPLE_SOURCE,
+                "wake detector started"
+            );
+            let sense = WakeSense::new(self.shared.clock.now(), (self.shared.mono)());
             let shared = Arc::clone(&self.shared);
             *task = Some(tokio::spawn(run(shared, sense)).abort_handle());
         }
@@ -173,7 +266,7 @@ async fn run(shared: Arc<Shared>, mut sense: WakeSense) {
                 return;
             }
         }
-        if let Some(slept) = sense.tick(shared.clock.now(), Instant::now()) {
+        if let Some(slept) = sense.tick(shared.clock.now(), (shared.mono)()) {
             shared.tx.send_modify(|e| {
                 e.seq += 1;
                 e.slept_ms = u64::try_from(slept.as_millis()).unwrap_or(u64::MAX);

@@ -553,7 +553,7 @@ impl ServeGuard {
         if let Some(log) = log {
             command.env("QSH_LOG", log).env("NO_COLOR", "1");
         }
-        let mut child = command
+        let mut child = own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -656,6 +656,27 @@ impl ServeGuard {
     #[cfg(unix)]
     pub fn signal(&self, signal: nix::sys::signal::Signal) {
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.child.id() as i32), signal);
+    }
+
+    /// Ask the child to stop gracefully, without waiting for it: `SIGTERM` on
+    /// unix, `CTRL_BREAK` to its process group on Windows (the child was
+    /// started in its own group). Unlike [`stop_gracefully`] this never
+    /// falls back to a kill: a caller that needs the graceful drain must not
+    /// get a kill in its place, so a `CTRL_BREAK` that cannot be sent fails
+    /// the test. Follow with [`wait_timeout`](Self::wait_timeout).
+    pub fn terminate(&self) {
+        assert!(
+            send_stop(self.child.id()),
+            "the graceful stop could not be sent to the child"
+        );
+    }
+
+    /// Kill the child outright, without waiting for it: `SIGKILL` on unix,
+    /// `TerminateProcess` on Windows. Nothing tells its peers, and no drain
+    /// or cleanup runs. Follow with [`wait_timeout`](Self::wait_timeout) to
+    /// know it is gone.
+    pub fn kill_hard(&mut self) {
+        let _ = self.child.kill();
     }
 
     /// Wait up to `timeout` for the child to exit **on its own** — no kill.
@@ -1204,26 +1225,32 @@ pub fn stop_gracefully(child: &mut Child) {
 }
 
 /// Ask `child` to stop the way an operator's `Ctrl-C` or a service manager
-/// would, without killing it.
-#[cfg(unix)]
+/// would, without killing it. On Windows, with no console to send the event
+/// from, the child is killed instead, so the caller's bounded wait still ends.
 fn request_stop(child: &mut Child) {
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(child.id() as i32),
+    if !send_stop(child.id()) {
+        let _ = child.kill();
+    }
+}
+
+/// `SIGTERM` to `pid`. `false` when it could not be sent.
+#[cfg(unix)]
+pub fn send_stop(pid: u32) -> bool {
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
         nix::sys::signal::Signal::SIGTERM,
-    );
+    )
+    .is_ok()
 }
 
 /// The Windows twin of the `SIGTERM` above: `CTRL_BREAK` to the child's own
-/// process group ([`own_process_group`] put it there). With no console to send
-/// from, the child is killed instead, so the caller's bounded wait still ends.
+/// process group ([`own_process_group`] put it there, so its pid is the group
+/// id). `false` when this process has no console to send the event from.
 #[cfg(windows)]
-fn request_stop(child: &mut Child) {
+pub fn send_stop(pid: u32) -> bool {
     use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
     // SAFETY: a plain call with a process-group id and no pointers.
-    let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) } != 0;
-    if !sent {
-        let _ = child.kill();
-    }
+    unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0 }
 }
 
 /// Run the child in its own process group, the only kind of child

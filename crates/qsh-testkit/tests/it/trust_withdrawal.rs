@@ -1177,7 +1177,6 @@ async fn one_change_closes_many_connections_within_two_seconds() {
 // qsh listen: the registration connection (결정 2, 7)
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 mod listen {
     use super::*;
     use qsh_core::acl::AllowAllPinned;
@@ -1339,7 +1338,6 @@ mod listen {
 // qsh serve --to: the outbound connection (결정 7)
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 mod serve_to {
     use super::*;
     use qsh_core::acl::AllowAllPinned;

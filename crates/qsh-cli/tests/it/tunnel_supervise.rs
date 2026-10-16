@@ -14,8 +14,6 @@
 //! blacklisting the client's source address, and a rebind escapes that by
 //! definition; what these tests own is the re-dial path.
 
-#![cfg(unix)]
-
 use crate::common;
 
 use std::io::{Read as _, Write as _};
@@ -25,7 +23,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{CLIENT_ALIAS, HOST_ALIAS, Sandbox, ServeGuard, poll_until};
-use nix::sys::signal::Signal;
 use qsh_core::{Ops, Paths, RecoveryConfig};
 use qsh_proto::{ErrorCode, TunnelDynamicReq, TunnelOpenReq};
 use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
@@ -190,26 +187,27 @@ impl Rig {
         self.runtime.block_on(self.proxy.blackhole(dur));
     }
 
-    /// SIGKILL the host: nothing tells the client, and the address stops
+    /// Kill the host outright: nothing tells the client, and the address stops
     /// answering.
     fn kill_serve(&mut self) {
         if let Some(mut serve) = self.serve.take() {
-            serve.signal(Signal::SIGKILL);
+            serve.kill_hard();
             serve
                 .wait_timeout(Duration::from_secs(10))
                 .expect("the killed serve exits");
         }
     }
 
-    /// SIGTERM the host and wait for it to exit. A clean exit drops its
-    /// audit sink, and the sink's `Drop` joins the writer thread once it has
-    /// written every record already queued.
+    /// Stop the host gracefully (SIGTERM, or `CTRL_BREAK` on Windows) and
+    /// wait for it to exit. A clean exit drops its audit sink, and the sink's
+    /// `Drop` joins the writer thread once it has written every record
+    /// already queued.
     fn stop_serve(&mut self) {
         if let Some(mut serve) = self.serve.take() {
-            serve.signal(Signal::SIGTERM);
+            serve.terminate();
             serve
                 .wait_timeout(Duration::from_secs(20))
-                .expect("the host exits on SIGTERM");
+                .expect("the host exits on its graceful stop");
         }
     }
 
@@ -570,6 +568,8 @@ fn restart_without_forward_local(rig: &mut Rig) {
         ),
     )
     .expect("write the narrowed acl");
+    // Mode bits are a unix notion; Windows has nothing to set here.
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o600));
@@ -799,6 +799,8 @@ fn restart_without_forward_remote(rig: &mut Rig) {
         ),
     )
     .expect("write the narrowed acl");
+    // Mode bits are a unix notion; Windows has nothing to set here.
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o600));

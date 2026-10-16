@@ -21,6 +21,7 @@ use crate::common;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -235,7 +236,7 @@ fn payload() -> Vec<u8> {
 /// leaves the read waiting until the timeout. The write runs on its own
 /// thread because a payload larger than the socket buffers would otherwise
 /// deadlock against an echo that is itself blocked writing to us.
-fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
+pub fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
     let socket = TcpStream::connect(("127.0.0.1", port))?;
     socket.set_read_timeout(Some(IO_TIMEOUT))?;
     socket.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -275,22 +276,49 @@ pub struct TunnelHolder {
     /// Everything after the envelope line, read on a thread so a full pipe
     /// never blocks the child.
     reader: Option<thread::JoinHandle<String>>,
+    /// The holder's stderr lines so far, collected only by
+    /// [`Self::open_supervised`].
+    stderr: Arc<Mutex<Vec<String>>>,
 }
 
 impl TunnelHolder {
     /// `qsh tunnel open <host> <flag> <spec> --json` in the route's client
     /// sandbox; returns the holder and the envelope it printed.
     pub fn open(route: &impl Route, flag: &str, spec: &str) -> (Self, Value) {
-        let mut command: Command =
-            route
-                .client()
-                .command(&["tunnel", "open", route.host(), flag, spec, "--json"]);
+        Self::spawn(route, flag, spec, &[])
+    }
+
+    /// Like [`Self::open`] with `--supervise <budget_ms>`, collecting the
+    /// supervisor's stderr lines for [`Self::wait_supervise`].
+    pub fn open_supervised(
+        route: &impl Route,
+        flag: &str,
+        spec: &str,
+        budget_ms: u32,
+    ) -> (Self, Value) {
+        Self::spawn(route, flag, spec, &["--supervise", &budget_ms.to_string()])
+    }
+
+    fn spawn(route: &impl Route, flag: &str, spec: &str, extra: &[&str]) -> (Self, Value) {
+        let mut args = vec!["tunnel", "open", route.host(), flag, spec, "--json"];
+        args.extend_from_slice(extra);
+        let mut command: Command = route.client().command(&args);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn qsh tunnel open");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        if !extra.is_empty() {
+            let pipe = child.stderr.take().expect("tunnel open stderr pipe");
+            let sink = Arc::clone(&stderr);
+            thread::spawn(move || {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                    sink.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+                }
+            });
+        }
         let mut stdout = BufReader::new(child.stdout.take().expect("tunnel open stdout pipe"));
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let reader = thread::spawn(move || {
@@ -304,18 +332,19 @@ impl TunnelHolder {
         let mut holder = Self {
             child,
             reader: Some(reader),
+            stderr,
         };
         let line = rx.recv_timeout(READY_DEADLINE).unwrap_or_else(|err| {
             panic!(
                 "qsh tunnel open printed no envelope within {READY_DEADLINE:?} ({err}); \
                  stderr:\n{}",
-                common::drain_stderr(&mut holder.child)
+                holder.stderr_text()
             )
         });
         assert!(
             !line.trim().is_empty(),
             "qsh tunnel open printed no envelope; stderr:\n{}",
-            common::drain_stderr(&mut holder.child)
+            holder.stderr_text()
         );
         let envelope: Value = serde_json::from_str(line.trim())
             .unwrap_or_else(|e| panic!("stdout is not JSON: {e}: {line:?}"));
@@ -325,6 +354,47 @@ impl TunnelHolder {
             "qsh tunnel open did not succeed: {envelope}"
         );
         (holder, envelope)
+    }
+
+    /// The holder's stderr: what a collecting open gathered, else whatever
+    /// the pipe holds now.
+    fn stderr_text(&mut self) -> String {
+        let collected = self.stderr.lock().unwrap_or_else(|e| e.into_inner());
+        if collected.is_empty() {
+            drop(collected);
+            common::drain_stderr(&mut self.child)
+        } else {
+            collected.join("\n")
+        }
+    }
+
+    /// The supervisor's diagnostic lines (`{"supervise":…}`) on stderr so
+    /// far, in order. Only a holder from [`Self::open_supervised`] has any.
+    pub fn supervise_lines(&self) -> Vec<Value> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|line| line.starts_with("{\"supervise\""))
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+            .collect()
+    }
+
+    /// Wait until the supervisor has logged at least `count` lines of `kind`
+    /// (`lost`, `reestablished`, …); returns them.
+    pub fn wait_supervise(&self, kind: &str, count: usize, deadline: Duration) -> Vec<Value> {
+        poll_until(
+            &format!("{count} `{kind}` supervise line(s)"),
+            deadline,
+            || {
+                let seen: Vec<Value> = self
+                    .supervise_lines()
+                    .into_iter()
+                    .filter(|line| line["supervise"] == kind)
+                    .collect();
+                (seen.len() >= count).then_some(seen)
+            },
+        )
     }
 
     /// Whether the holder is still running.

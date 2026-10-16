@@ -78,6 +78,8 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # never exists with an inherited ACL. Only the features those calls need;
 # `Win32_Security_Authorization` is the reader (`GetNamedSecurityInfoW`) the
 # tests use to pin the result and the setter the unreadable-log test uses.
+# `Win32_System_WindowsProgramming` is `QueryUnbiasedInterruptTime`, the
+# suspend-excluding clock the wake detector samples (`client/wake.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -88,6 +90,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Pipes",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
 ] }
 windows-native-keyring-store = { version = "1.1", default-features = false }
 
