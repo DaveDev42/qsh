@@ -5,7 +5,7 @@
 POSIX-sh installer for a prebuilt `qsh` release archive. No Rust toolchain
 needed. Supports macOS (arm64, x86_64) and Linux (x86_64 and aarch64, against
 glibc or musl). On Windows it prints a pointer to the manual `.zip` download
-instead of installing.
+instead of installing; the Windows installer is `install.ps1` below.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
@@ -83,6 +83,75 @@ Archive naming (`qsh-<tag>-<target>.tar.gz`, `.zip` on Windows) and the
 `SHA256SUMS` file are produced by `.github/workflows/release.yml`. That
 naming is a contract between the two files; changing one means changing the
 other.
+
+## install.ps1
+
+PowerShell installer for a prebuilt Windows release zip, the counterpart of
+`install.sh`. It runs under Windows PowerShell 5.1 and PowerShell 7, needs no
+administrator rights and no Rust toolchain, and is plain ASCII so that
+Authenticode signing it does not depend on a byte order mark.
+
+```powershell
+irm https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.ps1 | iex
+```
+
+| Var | Default | Meaning |
+|---|---|---|
+| `QSH_VERSION` | newest release | Release tag to install, e.g. `v0.5.0` |
+| `QSH_INSTALL_DIR` | `%USERPROFILE%\.local\bin` | Where `qsh.exe` is installed (created if missing) |
+| `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from (forks, testing) |
+| `QSH_MAN_DIR` | `%USERPROFILE%\.local\share\man\man1` | Where the zip's man pages are installed (created if missing) |
+| `QSH_NO_MAN` | unset | Exactly `1` skips the man pages |
+| `QSH_NO_MODIFY_PATH` | unset | Exactly `1` leaves the user `PATH` alone. Otherwise the install directory is appended to it when it is not already an entry |
+
+The architecture comes from the Windows installation: `qsh-<tag>-x86_64-pc-windows-msvc.zip`
+on AMD64, `qsh-<tag>-aarch64-pc-windows-msvc.zip` on ARM64, and anything else
+is refused before anything is downloaded. The script downloads the zip and
+that release's `SHA256SUMS`, requires exactly one 64-character hex entry for
+the zip, and compares digests before it opens the zip. There is no path
+around that check: unlike `install.sh`, `install.ps1` ignores
+`QSH_INSECURE_SKIP_VERIFY`. The members are then
+extracted one at a time by exact name (`qsh.exe`, and each `man/<name>.1`),
+so a surprise path inside the zip cannot write elsewhere, and the binary
+lands through a temporary name in the destination followed by a rename. Man
+pages are best effort, as in `install.sh`. The user `PATH` is changed through
+`HKCU\Environment`, keeping an existing `%VAR%` entry unexpanded and the
+value's registry type, and nothing outside the user profile and the user's own
+environment is touched.
+
+The checksum is an integrity check against a bad download, not a signature,
+and unlike `install.sh` this script does not run `gh attestation verify`.
+Whether `qsh.exe` and the `install.ps1` release asset carry an Authenticode
+signature depends on whether the release was cut with the signing secrets
+configured (`docs/deploy/release-secrets.md`); the installer does not check
+either way. For a stricter check, run `Get-AuthenticodeSignature` on the
+extracted `qsh.exe`.
+
+The tests are in `xtask/tests/install_script.rs` (`install_ps1::`), run on
+Windows against a fake release directory with a stand-in `Invoke-WebRequest`.
+
+## release/
+
+Helpers `.github/workflows/release.yml` calls, kept as files so the tests can
+run them.
+
+- `secret-gate.sh` is the all-or-none gate for a set of signing secrets,
+  shared by the macOS (six Apple secrets) and Windows (four SSL.com eSigner
+  secrets) legs. Every secret set writes `has-<platform>=true`; none set writes
+  `false` and warns `Unsigned release` on a tag push; a partial set is an
+  error on a tag push and a warning plus a skip on a branch run. It reads only
+  presence flags, never a secret value. Tests: `secret_gate::` in
+  `xtask/tests/install_script.rs`.
+- `package-windows.ps1` builds the Windows zip (`qsh.exe` plus
+  `man/*.1`, forward-slash entry names) and re-opens it to check that the
+  member list and every member's bytes match the sources, so a zip that lost
+  a man page fails the packaging step.
+- `verify-signature.ps1` is the verdict half of the release workflow's
+  signature check: `Get-AuthenticodeSignature` must report `Valid`, the
+  signer must be the repository variable `WINDOWS_SIGN_EXPECTED_SUBJECT`
+  (full subject or common name), and the signature must carry an RFC 3161
+  timestamp. An empty expected subject is an error. An unsigned file fails
+  with status `NotSigned`. Tests: `signature::` in the same test file.
 
 ## fuzz/
 

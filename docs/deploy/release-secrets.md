@@ -27,6 +27,24 @@ base64 -i DeveloperIDApplication.p12 | tr -d '\n' > cert.p12.b64
 
 서명 identity 자체(개인키·인증서)는 이 여섯 시크릿에 포함되지 않는다 — `release.yml`은 `APPLE_CERT_P12`를 임시 키체인에 import한 뒤 `security find-identity`로 그 키체인에서 SHA-1 해시를 읽어 서명에 쓰고, job이 끝나면 키체인을 지운다(`release.yml`의 `Import the Developer ID certificate`·`Delete the signing keychain` 스텝 참고).
 
+## Windows 서명 시크릿 넷과 변수 하나
+
+`release.yml`의 build job이 Windows 두 leg(`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`)에서 읽는다. 서명은 SSL.com eSigner(클라우드 HSM)로 하고, `qsh.exe`(두 아키텍처)와 release 자산 `install.ps1`에 Authenticode 서명을 건다. 게이트는 Apple과 같은 전부-또는-전무이고 같은 스크립트(`scripts/release/secret-gate.sh`)가 판정한다. 넷이 모두 있으면 서명하고 검증 스텝이 돈다. 하나도 없으면(0개) 서명과 검증을 건너뛰고, 태그 push는 `::warning title=Unsigned release::`를 내고 green을 유지한다. 일부만 있으면 태그 push는 `::error::`로 붉고, 브랜치 `workflow_dispatch`는 `::warning::`을 내고 건너뛴다. 이유는 Apple 절과 같다.
+
+| 이름 | 종류 | 무엇인지 | 어디서 발급 |
+|---|---|---|---|
+| `WINDOWS_SIGN_ESIGNER_USERNAME` | 시크릿 | SSL.com 계정 사용자 이름 | SSL.com 계정 |
+| `WINDOWS_SIGN_ESIGNER_PASSWORD` | 시크릿 | 같은 계정의 암호 | SSL.com 계정 |
+| `WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID` | 시크릿 | 코드 서명 인증서의 eSigner credential ID | SSL.com 대시보드의 인증서 주문 상세, 또는 CodeSignTool의 `get_credential_ids` |
+| `WINDOWS_SIGN_ESIGNER_TOTP_SECRET` | 시크릿 | 무인 서명용 OAuth TOTP 시크릿 | eSigner 자동 서명을 켤 때 SSL.com이 QR 코드와 함께 한 번 보여주는 문자열 |
+| `WINDOWS_SIGN_EXPECTED_SUBJECT` | 변수(Variables 탭) | 서명 검증이 기대하는 인증서 주체. 전체 주체(`CN=…, O=…, C=…`)나 공통 이름 하나 | 서명된 파일에서 읽는다: `(Get-AuthenticodeSignature qsh.exe).SignerCertificate.Subject` |
+
+변수는 비밀이 아니다(서명된 모든 파일에 그대로 들어 있다). 그래서 시크릿이 아니라 저장소 변수에 둔다. 값이 비어 있으면 `scripts/release/verify-signature.ps1`이 검증을 통과시키지 않고 오류로 끝낸다. 시크릿 넷은 있는데 이 변수가 없는 설정이 서명 검증을 빈 껍데기로 만들지 않게 하기 위해서다.
+
+서명 주체가 유지보수자 본인 이름으로 보이도록 SSL.com의 개인 신원 검증(individual validation) 코드 서명 인증서를 쓴다. 개인키는 SSL.com의 클라우드 HSM에 있고 이 저장소나 러너에는 들어오지 않는다. 시크릿 넷은 그 HSM에 서명을 요청하는 자격일 뿐이다. 서명에는 SHA-256 다이제스트와 RFC 3161 타임스탬프(`http://ts.ssl.com`)가 붙고, 타임스탬프가 있어야 인증서가 만료된 뒤에도 서명이 유효하다. 검증 스텝은 `signtool verify /pa /v`로 신뢰 사슬을, `Get-AuthenticodeSignature`로 상태 `Valid`·주체·타임스탬프 존재를 확인한다.
+
+**회전.** 암호를 바꾸면 `WINDOWS_SIGN_ESIGNER_PASSWORD`만 갈아 끼운다. TOTP 시크릿은 SSL.com에서 자동 서명을 다시 켜면 새로 발급되므로 `WINDOWS_SIGN_ESIGNER_TOTP_SECRET`만 갈아 끼운다. 인증서를 재발급하거나 갱신하면 credential ID와 주체가 바뀔 수 있으므로 `WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID`와 `WINDOWS_SIGN_EXPECTED_SUBJECT`를 함께 확인한다. Apple 절과 같이 하나를 회전하면 나머지는 그대로 두어도 되고(전부-또는-전무는 최초 설정에 적용되는 규칙이다), 회전 뒤 첫 dispatch run으로 넷이 여전히 유효한지 확인한다. 값은 이 문서에도 커밋에도 적지 않는다.
+
 ## 그 밖의 릴리스 시크릿
 
 | 이름 | 무엇인지 | 비고 |

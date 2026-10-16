@@ -109,8 +109,9 @@ detect_target() {
             ;;
         MINGW* | MSYS* | CYGWIN*)
             die "Windows detected via a POSIX shell. This installer targets macOS/Linux. \
-Download qsh-<version>-x86_64-pc-windows-msvc.zip manually from \
-https://github.com/${QSH_REPO}/releases and unzip it."
+In PowerShell run: irm https://raw.githubusercontent.com/${QSH_REPO}/main/scripts/install.ps1 | iex \
+(or download qsh-<version>-<arch>-pc-windows-msvc.zip from \
+https://github.com/${QSH_REPO}/releases and unzip it)."
             ;;
         *)
             die "unsupported OS: $os"

@@ -49,9 +49,26 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true
+          # The x86_64 Windows leg also stages, signs and uploads
+          # `scripts/install.ps1` as a release asset (`installer`), so the
+          # script is signed once per release, not once per architecture.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
+            installer: true
+          # Cross build from the x86_64 runner (ADR-0035 결정 16). The binary
+          # cannot run here, so `cross` skips `Binary starts` and the release
+          # smoke below; it is still signed and its signature verified like
+          # the x86_64 one. Whether it works is the campaign's call
+          # (`docs/campaigns/p1-windows.md`). Like the aarch64 musl leg above,
+          # that the MSVC arm64 toolchain on `windows-latest` builds
+          # aws-lc-sys is settled by the first dispatch run, not by reading
+          # the runner image; a source-level `cargo xwin build` of this triple
+          # from Linux is green (M19).
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            ext: .exe
+            cross: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -67,11 +84,13 @@ jobs:
       # install below states: a misconfiguration should fail in seconds,
       # not after a ten-minute release compile.
       #
-      # All six or none. A partial set is a misconfiguration, and the two
-      # refs deserve different answers: on a tag the artifacts ship and
-      # DoD 2 is being judged, so it is an error; on a branch dispatch the
-      # artifacts are thrown away and the operator is mid-way through
-      # adding secrets, so it is a warning and a skip.
+      # All six or none, decided by scripts/release/secret-gate.sh, which the
+      # Windows leg below shares so the three outcomes are pinned once
+      # (`xtask/tests/install_script/secret_gate.rs`). A partial set is a
+      # misconfiguration, and the two refs deserve different answers: on a tag
+      # the artifacts ship and DoD 2 is being judged, so it is an error; on a
+      # branch dispatch the artifacts are thrown away and the operator is
+      # mid-way through adding secrets, so it is a warning and a skip.
       - name: Check for Apple signing secrets
         id: apple
         if: runner.os == 'macOS'
@@ -86,31 +105,37 @@ jobs:
           IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: |
           set -euo pipefail
-          present=0
-          for flag in "$HAS_KEY_ID" "$HAS_ISSUER" "$HAS_P8" \
-                      "$HAS_P12" "$HAS_P12_PASSWORD" "$HAS_TEAM_ID"; do
-            if [ "$flag" = "true" ]; then present=$((present + 1)); fi
-          done
-          if [ "$present" -eq 6 ]; then
-            echo "has-apple=true" >> "$GITHUB_OUTPUT"
-            echo "All six Apple signing secrets are set; signing and notarizing."
-            exit 0
-          fi
-          echo "has-apple=false" >> "$GITHUB_OUTPUT"
-          if [ "$present" -eq 0 ]; then
-            if [ "$IS_TAG" = "true" ]; then
-              echo "::warning title=Unsigned release::No Apple signing secrets are configured; this tag ships an ad-hoc signed macOS binary that Gatekeeper rejects on a quarantined download."
-            else
-              echo "No Apple signing secrets are configured; skipping codesign and notarization."
-            fi
-            exit 0
-          fi
-          msg="Apple signing is partially configured: ${present} of 6 secrets are set."
-          if [ "$IS_TAG" = "true" ]; then
-            echo "::error title=Partial Apple signing config::${msg} Set all six or none."
-            exit 1
-          fi
-          echo "::warning title=Partial Apple signing config::${msg} Skipping codesign and notarization."
+          bash scripts/release/secret-gate.sh has-apple Apple \
+            "signing and notarizing" \
+            "codesign and notarization" \
+            "No Apple signing secrets are configured; this tag ships an ad-hoc signed macOS binary that Gatekeeper rejects on a quarantined download." \
+            "$HAS_KEY_ID" "$HAS_ISSUER" "$HAS_P8" \
+            "$HAS_P12" "$HAS_P12_PASSWORD" "$HAS_TEAM_ID"
+
+      # ── Windows Authenticode signing (ADR-0035 결정 16) ──
+      # The same all-or-none gate for the four SSL.com eSigner secrets. The
+      # expected signer subject is a repository variable, not a secret (it is
+      # printed in every signature dialog); the verification step refuses to
+      # run against an empty one. Names and rotation:
+      # docs/deploy/release-secrets.md.
+      - name: Check for Windows signing secrets
+        id: winsign
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          HAS_USERNAME: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME != '' }}
+          HAS_PASSWORD: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD != '' }}
+          HAS_CREDENTIAL_ID: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID != '' }}
+          HAS_TOTP_SECRET: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET != '' }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          bash scripts/release/secret-gate.sh has-windows Windows \
+            "signing" \
+            "Authenticode signing" \
+            "No Windows signing secrets are configured; this tag ships unsigned Windows binaries that SmartScreen flags on a downloaded copy." \
+            "$HAS_USERNAME" "$HAS_PASSWORD" "$HAS_CREDENTIAL_ID" "$HAS_TOTP_SECRET"
+
       # Honors rust-toolchain.toml (pinned channel). v2 denies warnings via
       # CARGO_BUILD_WARNINGS instead of RUSTFLAGS.
       - uses: actions-rust-lang/setup-rust-toolchain@v2
@@ -286,6 +311,102 @@ jobs:
             exit 1
           fi
 
+      # ── Windows Authenticode signing (ADR-0035 결정 16) ──
+      # Signs in place, before `Binary starts` and `Release smoke
+      # (functional)` below, so the smoke certifies the bytes that ship and
+      # `Package archive (windows)` packs the signed ones. CodeSignTool, which
+      # the action wraps, applies a SHA-256 digest and an RFC 3161 timestamp
+      # from http://ts.ssl.com by default; the timestamp is what keeps the
+      # signature valid after the certificate expires, and the verify step
+      # below does not take the tool's word for either. The action writes the
+      # signed file to `output_path`, and the next step copies it back over
+      # the original, so no input depends on the tool's `override` semantics.
+      # Secrets reach the action through `with:` only; nothing here echoes
+      # them.
+      - name: Stage install.ps1
+        if: runner.os == 'Windows' && matrix.installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'assets'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item scripts/install.ps1 (Join-Path $dir 'install.ps1')
+
+      - name: Sign the binary (windows)
+        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
+        uses: sslcom/esigner-codesign@v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD }}
+          credential_id: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/target/${{ matrix.target }}/release/qsh.exe
+          output_path: ${{ runner.temp }}/signed-exe
+          malware_block: false
+          environment_name: PROD
+
+      - name: Sign install.ps1
+        if: runner.os == 'Windows' && matrix.installer && steps.winsign.outputs.has-windows == 'true'
+        uses: sslcom/esigner-codesign@v1.3.2
+        with:
+          command: sign
+          username: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME }}
+          password: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD }}
+          credential_id: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET }}
+          file_path: ${{ runner.temp }}/assets/install.ps1
+          output_path: ${{ runner.temp }}/signed-ps1
+          malware_block: false
+          environment_name: PROD
+
+      - name: Use the signed files
+        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'signed-exe/qsh.exe') "target/$env:TARGET/release/qsh.exe" -Force
+          if ($env:INSTALLER -eq 'true') {
+            Copy-Item (Join-Path $env:RUNNER_TEMP 'signed-ps1/install.ps1') (Join-Path $env:RUNNER_TEMP 'assets/install.ps1') -Force
+          }
+
+      # Two independent judges. `signtool verify /pa /v` runs the default
+      # authentication policy and prints the chain and timestamp in the log
+      # (it is the evidence DoD 6 asks for); it checks the executables only,
+      # since a script's signature is read through a PowerShell-specific
+      # provider. `verify-signature.ps1` reads `Get-AuthenticodeSignature`
+      # and fails unless the status is `Valid`, the signer is
+      # WINDOWS_SIGN_EXPECTED_SUBJECT and the signature carries a timestamp
+      # (`xtask/tests/install_script/signature.rs` pins the verdicts, an
+      # unsigned binary reports `NotSigned`). An empty subject variable is an
+      # error there, not a pass.
+      - name: Verify the signature (windows)
+        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
+        shell: pwsh
+        env:
+          EXPECTED_SUBJECT: ${{ vars.WINDOWS_SIGN_EXPECTED_SUBJECT }}
+          TARGET: ${{ matrix.target }}
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "target/$env:TARGET/release/qsh.exe"
+          $files = @($exe)
+          if ($env:INSTALLER -eq 'true') {
+            $files += (Join-Path $env:RUNNER_TEMP 'assets/install.ps1')
+          }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Where-Object { $_.Directory.Parent.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if ($null -eq $signtool) { throw 'signtool.exe not found in the Windows SDK' }
+          & $signtool.FullName verify /pa /v $exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $exe" }
+          & scripts/release/verify-signature.ps1 -Path $files -ExpectedSubject $env:EXPECTED_SUBJECT
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verdict failed' }
+
       # crt-static is the target default; the readelf step is the guard.
       # Pins the static-link precondition for the third M10 acceptance
       # sentence (`docs/ROADMAP.md` M10 acceptance criteria); the run on an
@@ -315,6 +436,7 @@ jobs:
       # line stays because it is free and separates "the binary does not
       # run on this runner" from "a session axis broke".
       - name: Binary starts
+        if: ${{ !matrix.cross }}
         shell: bash
         run: ./target/${{ matrix.target }}/release/qsh${{ matrix.ext }} version --json
 
@@ -328,9 +450,11 @@ jobs:
       # nextest-built debug binary.
       #
       # Unix legs run init -> mutual trust -> `exec --json` -> pty shell ->
-      # `~d` detach -> `qsh attach`; the Windows leg compiles the
-      # `#[cfg(not(unix))]` twin, which stops after `exec --json` (no pty
-      # client off unix).
+      # `~d` detach -> `qsh attach`; the Windows leg runs the
+      # `#[cfg(not(unix))]` twin (no pty shell: the Windows host PTY is
+      # M20), on the signed bytes when signing is configured. The
+      # cross-built aarch64 Windows leg skips the smoke, because its binary
+      # cannot run on the x86_64 runner.
       #
       # No `--target`: the harness is a host tool and its dev artifacts
       # land in `target/debug/`, never in the `target/<triple>/release/`
@@ -339,6 +463,7 @@ jobs:
       # this log on a green run (nextest captures a passing test's output
       # otherwise).
       - name: Release smoke (functional)
+        if: ${{ !matrix.cross }}
         run: cargo nextest run -p qsh-cli --test it -E 'test(/^release_smoke::/)' --success-output final
         env:
           QSH_SMOKE_STRICT: 1
@@ -414,7 +539,10 @@ jobs:
       # (docs/ROADMAP.md M10 결정 기록 Q4): the Homebrew formula installs
       # them with `man1.install Dir["man/*.1"]`, and install.sh extracts
       # `qsh` and each `man/<name>.1` by name (best effort for the pages)
-      # and ignores anything else. The windows zip is unchanged.
+      # and ignores anything else. The windows zip holds the same layout
+      # (`qsh.exe` plus `man/*.1`), which scripts/install.ps1 extracts by
+      # name; scripts/release/package-windows.ps1 builds it and then
+      # re-opens it to prove the member list and bytes match `docs/man/`.
       #
       # Must run after `Sign the binary` / `Verify the signature` /
       # `Notarize` above: nothing in this job re-extracts the archive to
@@ -483,8 +611,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $asset = "qsh-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/qsh.exe" -DestinationPath $asset
+          & scripts/release/package-windows.ps1 `
+            -Binary "target/${{ matrix.target }}/release/qsh.exe" `
+            -ManDir docs/man `
+            -Asset $asset
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$asset"
 
       - uses: actions/upload-artifact@v7
@@ -493,6 +625,15 @@ jobs:
           path: ${{ env.ASSET }}
           # Default is a warning, which would ship a release quietly missing
           # a platform. A packaging step that produced nothing is a failure.
+          if-no-files-found: error
+
+      # The installer is a release asset of its own (signed when the secrets
+      # are set, see above). Only the x86_64 Windows leg stages it.
+      - uses: actions/upload-artifact@v7
+        if: matrix.installer
+        with:
+          name: install.ps1
+          path: ${{ runner.temp }}/assets/install.ps1
           if-no-files-found: error
 
       # `security delete-keychain` also drops the entry from the user
@@ -541,7 +682,8 @@ jobs:
       # A build matrix row that is dropped or renamed would publish a
       # release that is quietly missing a platform: every remaining leg
       # stays green. This list is the published asset set and must match the
-      # `build` matrix above; `scripts/install.sh` builds the same names.
+      # `build` matrix above; `scripts/install.sh` and `scripts/install.ps1`
+      # build the same names.
       - name: Check every target is published
         working-directory: dist
         env:
@@ -549,6 +691,16 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
+          check_asset() {
+            if [ ! -f "$1" ]; then
+              echo "::error title=Missing asset::${1} is not in dist/"
+              missing=1
+            fi
+            if ! awk -v f="$1" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
+              echo "::error title=Missing checksum::SHA256SUMS has no line for ${1}"
+              missing=1
+            fi
+          }
           for target in \
             aarch64-apple-darwin \
             x86_64-apple-darwin \
@@ -556,20 +708,16 @@ jobs:
             aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl \
-            x86_64-pc-windows-msvc; do
+            x86_64-pc-windows-msvc \
+            aarch64-pc-windows-msvc; do
             case "$target" in
-              *-windows-*) asset="qsh-${TAG}-${target}.zip" ;;
-              *) asset="qsh-${TAG}-${target}.tar.gz" ;;
+              *-windows-*) check_asset "qsh-${TAG}-${target}.zip" ;;
+              *) check_asset "qsh-${TAG}-${target}.tar.gz" ;;
             esac
-            if [ ! -f "$asset" ]; then
-              echo "::error title=Missing asset::${asset} is not in dist/"
-              missing=1
-            fi
-            if ! awk -v f="$asset" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
-              echo "::error title=Missing checksum::SHA256SUMS has no line for ${asset}"
-              missing=1
-            fi
           done
+          # Not a target archive: the Windows installer, uploaded by the
+          # x86_64 Windows leg of `build`.
+          check_asset install.ps1
           exit "$missing"
 
       # Build provenance for every published asset (`docs/ROADMAP.md` M10
@@ -650,9 +798,9 @@ jobs:
           for f in * .[!.]*; do
             [ -e "$f" ] || continue
             case "$f" in
-              *.tar.gz|*.zip) ;;
+              *.tar.gz|*.zip|install.ps1) ;;
               *)
-                echo "::error title=Unexpected file::${f} in dist/ is not a .tar.gz or .zip asset"
+                echo "::error title=Unexpected file::${f} in dist/ is not a .tar.gz, .zip or install.ps1 asset"
                 bad=1
                 ;;
             esac
@@ -666,7 +814,8 @@ jobs:
       # A build matrix row that is dropped or renamed would publish a
       # release that is quietly missing a platform: every remaining leg
       # stays green. This list is the published asset set and must match the
-      # `build` matrix above; `scripts/install.sh` builds the same names.
+      # `build` matrix above; `scripts/install.sh` and `scripts/install.ps1`
+      # build the same names.
       - name: Check every target is published
         working-directory: dist
         env:
@@ -674,6 +823,16 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
+          check_asset() {
+            if [ ! -f "$1" ]; then
+              echo "::error title=Missing asset::${1} is not in dist/"
+              missing=1
+            fi
+            if ! awk -v f="$1" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
+              echo "::error title=Missing checksum::SHA256SUMS has no line for ${1}"
+              missing=1
+            fi
+          }
           for target in \
             aarch64-apple-darwin \
             x86_64-apple-darwin \
@@ -681,20 +840,16 @@ jobs:
             aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl \
-            x86_64-pc-windows-msvc; do
+            x86_64-pc-windows-msvc \
+            aarch64-pc-windows-msvc; do
             case "$target" in
-              *-windows-*) asset="qsh-${TAG}-${target}.zip" ;;
-              *) asset="qsh-${TAG}-${target}.tar.gz" ;;
+              *-windows-*) check_asset "qsh-${TAG}-${target}.zip" ;;
+              *) check_asset "qsh-${TAG}-${target}.tar.gz" ;;
             esac
-            if [ ! -f "$asset" ]; then
-              echo "::error title=Missing asset::${asset} is not in dist/"
-              missing=1
-            fi
-            if ! awk -v f="$asset" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
-              echo "::error title=Missing checksum::SHA256SUMS has no line for ${asset}"
-              missing=1
-            fi
           done
+          # Not a target archive: the Windows installer, uploaded by the
+          # x86_64 Windows leg of `build`.
+          check_asset install.ps1
           exit "$missing"
 
   homebrew-tap:

@@ -53,10 +53,10 @@ Several campaigns that a person runs by hand are also still open; see
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64
-against glibc, x86_64 and aarch64 against musl) and Windows (x86_64) are
-attached to each [GitHub release](https://github.com/DaveDev42/qsh/releases). The
-one-line installer below covers macOS and Linux; on Windows take the
-`.zip` (see [Manual download](#manual-download)).
+against glibc, x86_64 and aarch64 against musl) and Windows (x86_64 and
+aarch64) are attached to each [GitHub release](https://github.com/DaveDev42/qsh/releases).
+The one-line installer below covers macOS and Linux; Windows has its own
+([Windows](#windows)).
 
 One line installs the latest:
 
@@ -131,9 +131,36 @@ To download by hand, take the asset matching your platform, check it against
 | Linux x86_64, static (musl) | `qsh-<tag>-x86_64-unknown-linux-musl.tar.gz` |
 | Linux aarch64, static (musl) | `qsh-<tag>-aarch64-unknown-linux-musl.tar.gz` |
 | Windows x86_64 | `qsh-<tag>-x86_64-pc-windows-msvc.zip` |
+| Windows aarch64 | `qsh-<tag>-aarch64-pc-windows-msvc.zip` |
 
-The installer has no Windows path; take the `.zip` from the releases page.
+The Windows zip holds `qsh.exe` and the man pages under `man/`. Unpack it and
+put `qsh.exe` on your `PATH`, or use the installer under [Windows](#windows).
 See the Windows caveat under [Known limitations](#known-limitations).
+
+### Windows
+
+In PowerShell, one line installs the latest release for your architecture
+(x86_64 or aarch64):
+
+```powershell
+irm https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.ps1 | iex
+```
+
+`scripts/install.ps1` downloads the zip and that release's `SHA256SUMS`,
+checks the digest before it opens the zip, and puts `qsh.exe` in
+`%USERPROFILE%\.local\bin` and the man pages in
+`%USERPROFILE%\.local\share\man\man1`. It adds the bin directory to your user
+`PATH` when it is not there yet (open a new terminal to pick that up). It
+asks for no administrator rights and touches nothing outside your profile and
+your own `PATH`. It does not run `gh attestation verify`; the provenance
+check above works on the downloaded zip by hand.
+`QSH_VERSION`, `QSH_INSTALL_DIR`, `QSH_REPO`, `QSH_MAN_DIR` and `QSH_NO_MAN`
+mean what they mean for `install.sh`, `QSH_NO_MODIFY_PATH=1` leaves `PATH`
+alone, and there is no way to skip the checksum (`scripts/README.md` has the
+table). Releases cut with Windows signing credentials carry an Authenticode
+signature on `qsh.exe` and on the `install.ps1` release asset, and no
+published release has been cut that way yet; [RELEASE-NOTES.md](RELEASE-NOTES.md)
+says which tags are.
 
 ### Homebrew (macOS)
 
@@ -189,9 +216,12 @@ test that keeps them from drifting). A Homebrew install (tags after
 the archive's `man/` directory to `~/.local/share/man/man1` and prints an
 `export MANPATH=...` line when that directory is not on the search path; a
 failure there is a warning and never undoes the binary install. From a
-manual `.tar.gz` download (the Windows `.zip` has no pages) point `man` at a
-page directly: `man ./man/qsh-trust-add.1` from an unpacked archive, or
-`man ./docs/man/qsh.1` from a clone.
+manual `.tar.gz` download point `man` at a page directly:
+`man ./man/qsh-trust-add.1` from an unpacked archive, or
+`man ./docs/man/qsh.1` from a clone. Windows has no `man`: the zip carries
+the same pages under `man/` for WSL, MSYS2 or Git for Windows
+(`man -l man/qsh.1`) or any roff viewer, and `qsh help <command>` prints the
+same content from the same command tree.
 
 ## First run
 
