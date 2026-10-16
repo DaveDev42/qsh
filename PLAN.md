@@ -406,7 +406,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(d) 결과 (2026-10-16):** `run_reverse_unix`는 플랫폼 공통 `run_reverse_observed`가 됐고 옛 이름을 부르던 ADR-0021·0031·0041에는 날짜 줄을 더했다. byte 모드 pipe에 half-close가 없는 문제는 한계로 두지 않고 Windows conduit의 raw byte 구간을 chunk(4바이트 big-endian 길이, 길이 0이 end chunk, 상한 65536)로 실어 풀었다(`localctl/chunked.rs`, ADR-0035 개정 이력 2026-10-16, `docs/design/protocol.md` localctl 절). unix는 바이트 그대로이고 `qsh.local.v1` proto·`qsh-proto`·fixture·ErrorCode diff는 0이다. Windows 종단은 unix와 같은 단언(쓰기를 닫고 응답을 EOF까지 읽기)을 쓴다. 부하 반복 중 역방향 `local_tunnel_echo`가 100회에 1~4회 잘린 원인은 framing이 아니라 테스트 echo 서버가 copy 뒤 소켓을 그냥 놓아 Windows에서 RST로 끊긴 것이었고, echo 서버가 먼저 `shutdown(Write)`를 보내게 고쳤다. 데몬은 Windows에서 터널 양방향이 깨끗하게 끝난 뒤 상대가 conduit을 닫을 때까지 최대 10초 기다린다. Dave-Windows 부하 아래 `windows_reverse_e2e::` 100/100, `windows_forward_e2e::` 50/50, Linux 부하 아래 바뀐 Linux 타이밍 테스트(`hosts_reverse::`·`identity_move_key::`·`audit_query_reads*`·`exit_code_matrix::qsh_(listen|serve_to|reverse)*`) 50/50. `listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken`은 `reverse/listen/tests.rs`의 cfg(windows) 단위 테스트다. `wintest.sh`로 qsh-core lib을 한 프로세스에서 직렬로 돌리면 이번에 Windows에서 처음 열린 `reverse::` 테스트 넷(`datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is` 등)이 `wait_for_line` 기한을 넘긴다. 단독과 `reverse::` 묶음(157개)에서는 초록이고 nextest는 테스트마다 프로세스를 나누므로 CI에는 해당하지 않는다. supervise의 reverse route `cfg` 제거는 컴파일이 요구해 이 스텝에 들어왔고 supervise 테스트와 §6.14의 supervise 판별 문구는 Step 8이 맡는다.
 
-### Step 8 — supervise와 절전 감지, reverse 쌍둥이 (0.3~0.5ew)
+### Step 8 — supervise와 절전 감지, reverse 쌍둥이 (0.3~0.5ew) ✅ 2026-10-16
 
 근거: ADR-0035 결정 15, ADR-0023의 절전 감지 전제(Windows 확인을 결정 15가 대체), ADR-0031 결정 3과 개정 이력(`listen` 쌍둥이 M19), ADR-0033 결정 13(세션 필터의 reverse fan-out), `docs/CLI.md` §6.2 route 문단·§6.14 절전 감지 문장, `crates/qsh-core/src/client/wake.rs` 모듈 doc, `crates/qsh-cli/tests/it/sessions_filter.rs` 모듈 doc. 선행: Step 7.
 
@@ -428,6 +428,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - 위 셋을 `m19.filter`에 넣는다.
 
 **(c) 완료 판정:** `client/wake.rs`의 Windows 분기가 표본 함수 하나다. 신뢰 철회 `listen` 쌍둥이와 세션 필터 reverse 쌍둥이가 Windows 부하 아래 50회 연속 초록이다. wire diff 0.
+
+**(d) 결과 (2026-10-16):** 플랫폼별로 갈라지는 지점은 `mono_sample` 하나이고, Windows 쪽에 `windows_sample` 모듈(`unbiased`·`anchor`·`now`, 카운터를 못 읽으면 `Instant::now`로 폴백)과 출처 상수 `MONO_SAMPLE_SOURCE`, `unbiased_ticks_to_duration`이 딸린다. 감지 알고리즘과 상수는 그대로다. `with_mono_source`는 `cfg(test)`이고 `subscribe()`에 표본 출처를 남기는 debug 로그가 하나 늘었다. `wake_sample_excludes_suspended_time_by_contract`는 출처 상수 확인이고 실제 절전 복귀는 캠페인 (4)다. SIGTERM으로 멈추던 supervise 테스트 셋(`*_without_forward_*_ends_permission_denied_with_one_audit_deny` 둘, `supervised_sigterm_during_an_outage_releases_the_listener_and_exits_zero`)도 Windows에서 열었다. Windows `qsh tunnel open --supervise`는 Ctrl-C만 받고 있어 `CTRL_BREAK`와 콘솔 닫힘을 `qsh serve`·`qsh listen`과 같은 정지 경로에 붙였고(`docs/CLI.md` §6.14), 테스트는 새 process group의 자식에 `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)`를 보낸다. 세션 필터 Windows 쌍둥이는 세션 0개 위에서 돌고 세션이 있는 판은 M20이다. ADR-0023에 2026-10-16 개정 이력 줄을 더했다(결정 17의 Windows 문장과 알려진 한계의 Windows 미확인 항목을 이 줄이 대체). `windows-sys` feature가 늘었지만 `fuzz/Cargo.lock`은 바뀌지 않았다. Dave-Windows 부하 아래 `trust_withdrawal::` 50/50(1200회), `sessions_filter::` 50/50(200회), `tunnel_supervise(_cli)::` 50/50(750회), 정지 테스트 셋 50/50(150회).
 
 ### Step 9 — client 기능 동등: 대화형 attach, `-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`, doctor, `release_smoke` (0.8~1.3ew)
 
