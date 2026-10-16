@@ -524,7 +524,7 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(c) 완료 판정:** M17 plan §5.1·§5.2의 "M19 밖" 행이 모두 이 스텝의 테스트로 덮였다. `Command::new("schtasks")`가 기본 runner 한 곳에만 있다. `exit_code_matrix.rs`의 Windows 전용 `UNSUPPORTED`가 `session open` 하나다. wire diff 0.
 
-### Step 12 — aarch64 자산, `install.ps1`, zip의 man 페이지와 목록 대조 (0.3~0.5ew)
+### Step 12 — aarch64 자산, `install.ps1`, zip의 man 페이지와 목록 대조 (0.3~0.5ew) ✅ 2026-10-17
 
 근거: ADR-0035 결정 16 자산·man 페이지·설치 스크립트 항목, `docs/design/architecture.md` §8의 `windows-sys` 행. 선행: Step 1.
 
@@ -544,7 +544,9 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(c) 완료 판정:** 두 Windows 자산이 목록 검사에 있고 man 대조 스텝이 있다. `install.ps1`이 체크섬 대조를 건너뛰는 경로가 없다.
 
-### Step 13 — Authenticode 서명·검증과 시크릿 게이트 (0.3~0.5ew)
+**(d) 결과 (2026-10-17):** `c1c860d`(Step 13과 한 커밋, release.yml을 함께 고쳐 나누지 않았다). Step 10과 병렬로 별도 worktree에서 구현했다. 리뷰가 찾은 `install.ps1`의 `QSH_INSECURE_SKIP_VERIFY=1` 우회는 (c)가 금지하므로 지웠고 `install.sh`와 달리 그 변수를 무시한다(`install_ps1_has_no_way_to_skip_the_checksum`). zip 안 `man/` 대조는 `scripts/release/package-windows.ps1`. aarch64 교차 빌드(`aws-lc-sys`)는 첫 dispatch에서야 확인된다. Dave-Windows에서 install_script 17/17.
+
+### Step 13 — Authenticode 서명·검증과 시크릿 게이트 (0.3~0.5ew) ✅ 2026-10-17
 
 근거: ADR-0035 결정 16 코드 서명·서명 검증·시크릿 게이트 항목, 결과 절의 시크릿 게이트 세 경우, 결정 19의 `docs/deploy/release-secrets.md`와 `RELEASE-NOTES.md`. 선행: Step 12.
 
@@ -565,7 +567,9 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(c) 완료 판정:** 시크릿 없는 PR CI와 브랜치 dry-run이 초록이고 경고를 낸다. `release-secrets.md`에 이름만 있다. 에이전트가 시크릿 관련 `gh` 명령을 부른 흔적이 없다.
 
-### Step 14 — 캠페인 문서 `docs/campaigns/p1-windows.md` 사전 고정 (0.3~0.4ew)
+**(d) 결과 (2026-10-17):** `c1c860d`(Step 12와 한 커밋). 게이트 셸 로직은 `scripts/release/secret-gate.sh`, 서명 판정은 `scripts/release/verify-signature.ps1`. 순서는 빌드→서명→검증→`release_smoke`→패키징이고 `release_yml_orders_the_windows_signing_chain_before_packaging`이 고정한다. eSigner `output_path`, `ts.ssl.com` 기본값, 러너의 signtool 경로는 시크릿이 준비된 첫 태그 run에서 확인한다(§9 #8).
+
+### Step 14 — 캠페인 문서 `docs/campaigns/p1-windows.md` 사전 고정 (0.3~0.4ew) ✅ 2026-10-17
 
 근거: ADR-0035 결정 18, ROADMAP M19 DoD 캠페인 줄과 §5.5, `docs/campaigns/p1-ssh-bootstrap.md` R5(요건 4·6의 M19 이월). 선행: Step 3·5·7·9·10·12·13(회차가 가리키는 명령·자산 이름). Step 15(구현 마지막 스텝) 앞.
 
@@ -580,7 +584,9 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 
 **(c) 완료 판정:** 문서가 Step 15 착지 전에 main에 있다. M19 회차와 M20 자리가 구분돼 있다.
 
-### Step 15 — scoop·winget job (0.3~0.5ew)
+**(d) 결과 (2026-10-17):** `ad409e0`. Step 10 착지 뒤 W6·W10의 명령·파일 이름(`service run`, `qsh-serve.task.xml`, `qsh-serve.always-on.xml`, 로그 경로, doctor 코드)을 착지한 트리와 다시 대조했다. 리뷰에 따라 시각 판정을 사람용 `listening on` 줄(시각 없음) 대신 lifecycle `listening` 기록의 `at`과 `LastBootUpTime`으로 바꾸고, 로그온·부팅 작업 회차에 방화벽 허용 규칙 선행 조건을 더했다. CLAUDE.md campaigns 목록에 `p1-windows`, ROADMAP §5.5 사전 고정 해시는 main 세션이 채웠다.
+
+### Step 15 — scoop·winget job (0.3~0.5ew) ✅ 2026-10-17
 
 근거: ADR-0035 결정 16 패키지 관리자 항목. 선행: Step 12, Step 14.
 
@@ -600,6 +606,8 @@ ConPTY probe 테스트는 새 통합 모듈 `crates/qsh-cli/tests/it/console_pro
 - 게이트: `package_jobs_skip_green_without_secrets`(시크릿 없는 dry-run에서 두 job이 건너뜀)
 
 **(c) 완료 판정:** 시크릿 없는 run에서 두 job이 green으로 건너뛴다. 에이전트가 외부 저장소에 쓰지 않았다.
+
+**(d) 결과 (2026-10-17):** `784f93b`. 두 job은 시크릿 존재 플래그를 먼저 계산해 이후 스텝을 모두 그 플래그로 막고, prerelease 태그(`-` 포함)에서는 돌지 않는다(`homebrew-tap`은 prerelease에도 돈다, release-secrets.md에 적음). 매니페스트는 `scripts/release/render-manifests.sh`가 `packaging/` 템플릿과 발행된 SHA256SUMS로 렌더한다. scoop 라이선스 표기는 `MIT|Apache-2.0`. 실제 bucket push와 winget 제출은 시크릿이 준비된 태그 run에서 확인한다. Dave-Windows에서 install_script 18/18.
 
 ### Step 16 — 마감 (0.1~0.2ew)
 
