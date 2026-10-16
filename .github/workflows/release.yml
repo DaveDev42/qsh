@@ -773,8 +773,8 @@ jobs:
 
   # Dispatch-only dry run of the release job's publish path: same download,
   # same SHA256SUMS, same completeness check, but no release, no attestation,
-  # no tap. `github.ref_name` is the branch name here, which is also what the
-  # `build` job used to name the assets.
+  # no tap, no scoop bucket, no winget. `github.ref_name` is the branch name
+  # here, which is also what the `build` job used to name the assets.
   verify-publish-path:
     name: verify-publish-path
     needs: build
@@ -929,3 +929,150 @@ jobs:
           git commit -m "qsh ${version}"
           git push origin HEAD:main
           echo "Pushed qsh ${version} to DaveDev42/homebrew-tap."
+
+  # Windows package managers, the counterparts of `homebrew-tap` above. Both
+  # jobs gate the same way: a tag push only, and not a prerelease (a `-` in
+  # the tag, as in the release job's flag; a winget-pkgs PR for an rc is
+  # unwanted and scoop's `checkver` would offer it as the latest), a presence
+  # flag computed from the secret, every step after the flag conditional on
+  # it, so a repository without the secret ends green with the steps
+  # skipped. Job-level
+  # continue-on-error keeps a failure on the package-manager side (a missing
+  # first manifest, a rejected PR) from redding out a release whose binaries
+  # and GitHub Release already published. Neither manifest lists man/*.1:
+  # scoop and winget portable have no man path convention, and the same text
+  # is `qsh help`. Both are rendered by scripts/release/render-manifests.sh
+  # from packaging/, with digests read from the published SHA256SUMS.
+  # Tests: `package_jobs_skip_green_without_secrets` in
+  # xtask/tests/install_script.rs.
+  scoop-bucket:
+    name: scoop-bucket
+    needs: release
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      # SCOOP_BUCKET_DEPLOY_KEY is the private half of a write-enabled deploy
+      # key registered on DaveDev42/scoop-bucket (title "qsh release.yml
+      # bucket bump"), scoped to that one repository like the tap key.
+      # bucket/qsh.json is written whole from the template, so unlike the
+      # tap the first release needs no hand-pushed file.
+      - name: Check for bucket deploy key
+        id: check
+        env:
+          HAS_KEY: ${{ secrets.SCOOP_BUCKET_DEPLOY_KEY != '' }}
+        run: echo "has-key=$HAS_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the templates
+        if: steps.check.outputs.has-key == 'true'
+        uses: actions/checkout@v7
+        with:
+          path: qsh
+          persist-credentials: false
+
+      - name: Check out the bucket
+        id: bucket
+        if: steps.check.outputs.has-key == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: DaveDev42/scoop-bucket
+          ref: main
+          ssh-key: ${{ secrets.SCOOP_BUCKET_DEPLOY_KEY }}
+          path: bucket
+
+      - name: Bump scoop bucket manifest
+        if: steps.check.outputs.has-key == 'true' && steps.bucket.outcome == 'success'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 \
+            "https://github.com/DaveDev42/qsh/releases/download/${TAG}/SHA256SUMS" \
+            -o SHA256SUMS
+          sh qsh/scripts/release/render-manifests.sh "$TAG" SHA256SUMS rendered
+          cd bucket
+          mkdir -p bucket
+          cp ../rendered/scoop/qsh.json bucket/qsh.json
+          git add bucket/qsh.json
+          if git diff --cached --quiet; then
+            echo "bucket/qsh.json already at ${TAG}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "qsh ${TAG#v}"
+          git push origin HEAD:main
+          echo "Pushed qsh ${TAG#v} to DaveDev42/scoop-bucket."
+
+  winget:
+    name: winget
+    needs: release
+    # wingetcreate is a Windows executable.
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    continue-on-error: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # WINGET_PAT is a token that can open a pull request from a fork of
+      # microsoft/winget-pkgs. `wingetcreate update` needs DaveDev42.qsh to
+      # exist already: the first manifest is submitted by hand (render it
+      # with scripts/release/render-manifests.sh), so until then the update
+      # step fails and continue-on-error keeps the release green.
+      - name: Check for winget token
+        id: check
+        env:
+          HAS_PAT: ${{ secrets.WINGET_PAT != '' }}
+        run: echo "has-pat=$HAS_PAT" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the templates
+        if: steps.check.outputs.has-pat == 'true'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Fails the job early when SHA256SUMS lacks a Windows zip. The
+      # rendered installer manifest is kept as an artifact for review and for
+      # the hand-submitted first manifest.
+      - name: Render the manifests
+        if: steps.check.outputs.has-pat == 'true'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 \
+            "https://github.com/DaveDev42/qsh/releases/download/${TAG}/SHA256SUMS" \
+            -o SHA256SUMS
+          sh scripts/release/render-manifests.sh "$TAG" SHA256SUMS rendered
+
+      - name: Keep the rendered manifests
+        if: steps.check.outputs.has-pat == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: winget-manifests
+          path: rendered/winget
+
+      # wingetcreate downloads both zips, computes their digests, rewrites
+      # the existing manifest to the new version and opens the PR. The token
+      # goes through the environment, not the command line.
+      - name: Submit the winget update
+        if: steps.check.outputs.has-pat == 'true'
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_PAT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TAG.TrimStart('v')
+          $base = "https://github.com/DaveDev42/qsh/releases/download/$($env:TAG)"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update DaveDev42.qsh --version $version `
+            --urls "$base/qsh-$($env:TAG)-x86_64-pc-windows-msvc.zip|x64" `
+                   "$base/qsh-$($env:TAG)-aarch64-pc-windows-msvc.zip|arm64" `
+            --submit
+          if ($LASTEXITCODE -ne 0) { throw "wingetcreate update exited $LASTEXITCODE" }
