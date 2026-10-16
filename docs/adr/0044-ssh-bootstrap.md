@@ -1,11 +1,11 @@
 # ADR-0044: pin이 없는 대상에 `qsh <dest>`를 부르면 시스템 ssh를 한 번 거쳐 양쪽 pin을 등록하고 QUIC로 접속한다. ssh 설정·인증·known_hosts는 ssh가 그대로 처리하고 qsh는 SSH 키를 읽지 않으며, 원격 쪽 pin은 ADR-0045의 role `full`로 쓴다
 
-날짜: 2026-10-12 (개정 2026-10-13, 2026-10-14, 2026-10-15)
+날짜: 2026-10-12 (개정 2026-10-13, 2026-10-14, 2026-10-15, 2026-10-17)
 상태: 승인됨
 
 개정 관계: 새 ADR이다. 다른 ADR의 결정을 개정하지 않는다. ADR-0013 결정 6이 이미 통과시킨 파이프(`qsh identity export | ssh box 'qsh trust add laptop --cert-file -'`)를 양방향으로 자동화한 것이고, ADR-0017 결정 1(`acl.toml`을 쓰지 않는다)과 결정 5(TOFU 없음)를 재확인한다. ADR-0026의 `--import-ssh-key`와 `trust ssh-preview`는 그대로 남지만 그 동기(SSH 쪽 자산으로 qsh 신뢰를 빨리 세운다)는 이 ADR이 대신한다(결정 15). ADR-0015와 ADR-0016은 2026-10-12에 기각됐고 그 기각 사유가 이 ADR을 대체 경로로 가리킨다. ADR-0045(역할 기반 권한)의 pin `role`을 쓰므로 ADR-0045가 먼저 또는 같이 승인돼야 하고, 2026-10-14에 같이 승인됐다. 승인되면 바뀌는 계약 문서는 `docs/CLI.md`(§2.4, §2.5, §6.11, §7), `docs/design/protocol.md`(새 절), `docs/design/threat-model.md`(§3, §4, §7)다.
 
-개정 이력: 2026-10-15에 결정 11에 메시지 구별 방식을 더했다. 세 메시지의 필드만 적고 구별 방식을 적지 않아 구현(`crates/qsh-proto/src/ssh_bootstrap.rs`)이 필드 구성에 기대지 않는 명시 태그를 골랐고, 그 선택을 여기 적어 승인된 결정으로 둔다. 다른 결정은 바뀌지 않는다.
+개정 이력: 2026-10-15에 결정 11에 메시지 구별 방식을 더했다. 세 메시지의 필드만 적고 구별 방식을 적지 않아 구현(`crates/qsh-proto/src/ssh_bootstrap.rs`)이 필드 구성에 기대지 않는 명시 태그를 골랐고, 그 선택을 여기 적어 승인된 결정으로 둔다. 다른 결정은 바뀌지 않는다. 2026-10-17에 M19가 결정 25의 Windows client 분기를 착지시켰다. 자동 부트스트랩의 ssh 자식은 콘솔을 물려받고 그동안 입력 모드는 cooked로 남으며 Ctrl-C는 `CANCELED`다(`auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`). Windows host 쪽 응답자가 필요한 경로는 M20이다. 결정은 바뀌지 않는다.
 
 2026-10-13 사용자 확인: 자동 발동을 기본으로 둔다(결정 2). ssh가 받아들인 host key 신뢰를 그대로 이어받고 `StrictHostKeyChecking`을 덮어쓰지 않는다(결정 20). "qsh는 모든 경우에서 정방향과 역방향에 같은 기능을 준다"(PRD §4)에 따라 역방향 구도의 부트스트랩을 결정 22에 더했다.
 

@@ -18,7 +18,7 @@
 //! locale/`TERM` passthrough, which `exec.run` deliberately does not share:
 //! a scripted remote command gets a small, deterministic environment
 //! instead of whatever locale the `qsh serve` process happens to run under.
-//! Windows (P2, unsupported) has no password-database account to pin these
+//! Windows (host is M20, unsupported) has no password-database account to pin these
 //! to, so none of this applies there: the child inherits the full
 //! `qsh serve` process environment and the caller's `env` is layered on top
 //! unfiltered, `PATH` included — see [`run_exec`]'s `#[cfg(not(unix))]` arm.

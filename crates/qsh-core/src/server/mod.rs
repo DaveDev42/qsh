@@ -2317,7 +2317,7 @@ fn lookup_login_name() -> Option<String> {
 #[cfg(not(unix))]
 fn lookup_login_name() -> Option<String> {
     // No passwd database to compare against: every `user@` hint is a
-    // mismatch (fail closed) until a Windows host lands (P2).
+    // mismatch (fail closed) until a Windows host lands (M20).
     None
 }
 

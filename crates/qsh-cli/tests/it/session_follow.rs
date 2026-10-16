@@ -7,7 +7,7 @@
 //! session's event stream must look the same through either door.
 
 // Sessions are PTY-backed, so this whole file only exists on POSIX hosts
-// (Windows host is P2) — and `sh` is not there to run the script either.
+// (Windows host is M20) — and `sh` is not there to run the script either.
 #![cfg(unix)]
 
 use crate::common;

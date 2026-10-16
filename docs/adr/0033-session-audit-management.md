@@ -1,11 +1,13 @@
 # ADR-0033: 세션 및 audit 관리 개선은 세션 목록 필터와 읽기 전용 로컬 `qsh audit`까지로 하고, audit 삭제 경로와 텔레메트리 계약 승격은 만들지 않는다
 
-날짜: 2026-10-11
+날짜: 2026-10-11 (개정 2026-10-17)
 상태: 승인됨
 
 개정 관계: 새 ADR이다. `docs/PRD.md` §7 P1의 "세션 및 audit 관리 개선"은 항목 이름만 있고 범위가 없었다. `docs/ROADMAP.md` M17 (d)가 범위 ADR을 요구하고, 이 문서가 그것이다. `docs/CLI.md` §2.4(operation 이름 목록), §2.5(인가 불요 행), §6.2(세션 조회)를 개정하고 새 절을 하나 더한다. `crates/qsh-core/src/telemetry.rs` 모듈 doc의 "That promotion is a P1 decision"을 이 ADR의 결정으로 닫는다. 다른 ADR을 개정하지 않는다.
 
 승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. 결정 12까지 범위는 이미 닫혀 있었고, 남아 있던 빈칸인 Windows에서의 audit 조회(읽기 공유 모드, named pipe localctl 비노출)와 reverse route 위 세션 필터의 동등, CLI 새 절의 번호 규칙을 결정 13으로 닫았다.
+
+개정 이력: 2026-10-17에 M19가 결정 13의 Windows client 몫을 착지시켰다. `audit.query`는 audit 파일을 `FILE_SHARE_READ|WRITE|DELETE`로 열어 읽고, named pipe localctl에도 audit 요청 variant가 없음을 `localctl_request_enum_has_no_audit_variant_on_any_platform`과 `audit_query_has_no_wire_message_and_no_localctl_request`의 소스 스캔(`localctl/` 아래 전부, `transport/windows.rs` 포함)이 고정한다. host audit 쓰기 잠금은 M20(ADR-0035)이다. 결정은 바뀌지 않는다.
 
 ## 맥락
 
