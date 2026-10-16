@@ -3,9 +3,9 @@
 //! it from becoming an enumeration oracle or a way to shorten the audit log:
 //!
 //! - nothing a remote peer can send names it: no wire message, and no
-//!   localctl request either (the Windows named-pipe localctl is M19,
-//!   ADR-0035 결정 14; this scan gets a row for it when that transport
-//!   exists, and walks the whole localctl source tree until then);
+//!   localctl request either (the scan walks the whole localctl source tree,
+//!   which includes the Unix socket and the Windows named-pipe transport,
+//!   ADR-0035 결정 14);
 //! - it has no ACL action or `OP_REGISTRY` row of its own;
 //! - under `crates/qsh-core/src/ops/` it is the only op that reads the audit
 //!   log back, and no op can delete, truncate or rewrite it (SC6).
@@ -104,6 +104,40 @@ fn audit_query_has_no_wire_message_and_no_localctl_request() {
             !spec.op.as_str().contains("audit"),
             "OP_REGISTRY row {:?} names audit; `audit.query` is local only",
             spec.op.as_str()
+        );
+    }
+}
+
+/// The localctl request enum is closed over the three admin requests on every
+/// platform. The exhaustive match stops compiling when a variant is added, so
+/// an `audit.query` request cannot arrive without this test being read; the
+/// source scan above then covers both transports, the Windows named pipe
+/// included.
+#[test]
+fn localctl_request_enum_has_no_audit_variant_on_any_platform() {
+    use qsh_proto::local::{LocalAdminRequest, local_admin_request};
+
+    fn name(request: &LocalAdminRequest) -> &'static str {
+        match request.body.as_ref() {
+            Some(local_admin_request::Body::HostList(_)) => "host_list",
+            Some(local_admin_request::Body::TunnelList(_)) => "tunnel_list",
+            Some(local_admin_request::Body::TunnelClose(_)) => "tunnel_close",
+            None => "none",
+        }
+    }
+    let request = LocalAdminRequest {
+        body: Some(local_admin_request::Body::HostList(Default::default())),
+    };
+    assert_eq!(name(&request), "host_list");
+
+    for transport in ["unix.rs", "windows.rs"] {
+        let path = repo_root()
+            .join("crates/qsh-core/src/localctl/transport")
+            .join(transport);
+        assert!(
+            path.is_file(),
+            "{} is part of the scanned localctl tree",
+            path.display()
         );
     }
 }

@@ -1,9 +1,51 @@
 use std::time::Instant;
 
-use qsh_proto::local::LocalHelloAck;
-use tokio::net::UnixListener;
-
 use super::*;
+use qsh_proto::local::LocalHelloAck;
+#[cfg(unix)]
+use transport::process_is_verifiably_dead;
+
+/// A daemon-side listener on either OS: a Unix socket, or a named pipe whose
+/// name is scoped to the test's own directory (so parallel tests never see
+/// each other's pipes).
+struct TestListener {
+    #[cfg(unix)]
+    inner: tokio::net::UnixListener,
+    #[cfg(windows)]
+    inner: tokio::sync::Mutex<transport::windows::PipeListener>,
+}
+
+impl TestListener {
+    async fn accept(&self) -> io::Result<(LocalStream, ())> {
+        #[cfg(unix)]
+        let stream = self.inner.accept().await?.0;
+        #[cfg(windows)]
+        let stream = self.inner.lock().await.accept().await?;
+        Ok((stream, ()))
+    }
+}
+
+/// Where the fake daemon with pid `pid` listens for the runtime dir `dir`.
+fn endpoint(dir: &Path, pid: u32) -> PathBuf {
+    #[cfg(unix)]
+    return dir.join(format!("{pid}.sock"));
+    #[cfg(windows)]
+    return transport::windows::scoped_pipe_name(dir, pid).unwrap();
+}
+
+/// Listen on an endpoint [`endpoint`] returned.
+fn bind_daemon(endpoint: &Path) -> TestListener {
+    #[cfg(unix)]
+    return TestListener {
+        inner: tokio::net::UnixListener::bind(endpoint).unwrap(),
+    };
+    #[cfg(windows)]
+    return TestListener {
+        inner: tokio::sync::Mutex::new(
+            transport::windows::PipeListener::bind_at(endpoint).unwrap(),
+        ),
+    };
+}
 
 fn sample_host(name: &str) -> LocalHost {
     LocalHost {
@@ -27,7 +69,7 @@ fn sample_host(name: &str) -> LocalHost {
 /// this is `docs/design/testing.md` L2 "no real daemon needed" for the
 /// discovery/framing contract, not an L3 harness.
 fn spawn_fake_admin_daemon(
-    listener: UnixListener,
+    listener: TestListener,
     body: local_response::Body,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -46,8 +88,8 @@ fn spawn_fake_admin_daemon(
 #[tokio::test]
 async fn admin_host_list_round_trips_through_a_fake_daemon() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("100.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 100);
+    let listener = bind_daemon(&sock);
     let expected = vec![sample_host("personal-mac")];
     let daemon = spawn_fake_admin_daemon(
         listener,
@@ -64,8 +106,8 @@ async fn admin_host_list_round_trips_through_a_fake_daemon() {
 #[tokio::test]
 async fn admin_host_list_surfaces_a_remote_error_verbatim() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("101.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 101);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_admin_daemon(
         listener,
         local_response::Body::Error(LocalError::from_code(
@@ -87,7 +129,7 @@ async fn admin_host_list_surfaces_a_remote_error_verbatim() {
 /// (`qsh/local/v1.proto`'s own doc on why this envelope exists at
 /// all).
 fn spawn_fake_admin_daemon_asserting(
-    listener: UnixListener,
+    listener: TestListener,
     expect: fn(&local_admin_request::Body) -> bool,
     body: local_response::Body,
 ) -> tokio::task::JoinHandle<()> {
@@ -110,8 +152,8 @@ fn spawn_fake_admin_daemon_asserting(
 #[tokio::test]
 async fn admin_tunnel_list_round_trips_through_a_fake_daemon() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("110.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 110);
+    let listener = bind_daemon(&sock);
     let expected = vec![LocalTunnel {
         tunnel_id: "01ABCDEF".to_string(),
         mode: "remote".to_string(),
@@ -136,8 +178,8 @@ async fn admin_tunnel_list_round_trips_through_a_fake_daemon() {
 #[tokio::test]
 async fn admin_tunnel_close_round_trips_through_a_fake_daemon() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("111.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 111);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_admin_daemon_asserting(
         listener,
         |body| {
@@ -158,8 +200,8 @@ async fn admin_tunnel_close_round_trips_through_a_fake_daemon() {
 #[tokio::test]
 async fn admin_tunnel_close_surfaces_a_remote_error_verbatim() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("112.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 112);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_admin_daemon(
         listener,
         local_response::Body::Error(LocalError::from_code(
@@ -180,10 +222,10 @@ async fn admin_tunnel_close_surfaces_a_remote_error_verbatim() {
 /// whatever `LocalResponse` body the caller supplies — the
 /// `LOCAL_CONTROL` sibling of [`spawn_fake_admin_daemon`].
 fn spawn_fake_control_daemon(
-    listener: UnixListener,
+    listener: TestListener,
     expect_host: &'static str,
     body: local_response::Body,
-) -> tokio::task::JoinHandle<LocalConduit<UnixStream>> {
+) -> tokio::task::JoinHandle<LocalConduit<LocalStream>> {
     tokio::spawn(async move {
         let (stream, _addr) = listener.accept().await.unwrap();
         let mut conduit = LocalConduit::new(stream);
@@ -201,8 +243,8 @@ fn spawn_fake_control_daemon(
 #[tokio::test]
 async fn open_control_ack_happy_path_carries_the_ack_fields_and_the_conduit_relays_after() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("200.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 200);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_control_daemon(
         listener,
         "personal-mac",
@@ -240,8 +282,8 @@ async fn open_control_ack_happy_path_carries_the_ack_fields_and_the_conduit_rela
 #[tokio::test]
 async fn open_control_maps_a_local_error_verbatim() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("201.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 201);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_control_daemon(
         listener,
         "phone",
@@ -268,8 +310,8 @@ async fn open_control_maps_a_version_or_kind_rejection_the_same_way_as_any_local
     // case for these, they are just another remote error to map
     // verbatim (`crate::localctl::client::remote_error`).
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("202.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 202);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_control_daemon(
         listener,
         "phone",
@@ -293,8 +335,8 @@ async fn open_control_treats_an_unexpected_response_body_as_connection_failed() 
     // it maps to `ConnectionFailed` rather than being misread as
     // success.
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("203.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = endpoint(dir.path(), 203);
+    let listener = bind_daemon(&sock);
     let daemon = spawn_fake_control_daemon(
         listener,
         "phone",
@@ -309,7 +351,7 @@ async fn open_control_treats_an_unexpected_response_body_as_connection_failed() 
 #[tokio::test]
 async fn admin_host_list_over_a_socket_nothing_is_listening_on_fails_connection() {
     let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("102.sock");
+    let sock = endpoint(dir.path(), 102);
     // Never bound at all — plain ENOENT, not ECONNREFUSED, but either
     // way `admin_host_list` (unlike `discover`) surfaces the failure
     // rather than silently treating it as "not found".
@@ -317,6 +359,7 @@ async fn admin_host_list_over_a_socket_nothing_is_listening_on_fails_connection(
     assert_eq!(err.code, ErrorCode::ConnectionFailed);
 }
 
+#[cfg(unix)]
 #[test]
 fn candidate_sockets_are_sorted_ascending_by_pid_and_skip_non_matching_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -333,11 +376,12 @@ fn candidate_sockets_are_sorted_ascending_by_pid_and_skip_non_matching_names() {
     let found = candidate_sockets(dir.path()).unwrap();
     let pids: Vec<u32> = found.iter().map(|(pid, _)| *pid).collect();
     assert_eq!(pids, vec![3, 20, 100]);
-    assert_eq!(found[0].1, dir.path().join("3.sock"));
+    assert_eq!(found[0].1, endpoint(dir.path(), 3));
 }
 
 // ---- liveness check backing the `ECONNREFUSED` unlink decision ----
 
+#[cfg(unix)]
 #[test]
 fn process_is_verifiably_dead_distinguishes_a_live_pid_from_a_reaped_one() {
     assert!(
@@ -355,7 +399,7 @@ fn process_is_verifiably_dead_distinguishes_a_live_pid_from_a_reaped_one() {
 
 #[tokio::test(start_paused = true)]
 async fn admin_host_list_over_a_daemon_that_never_answers_times_out_instead_of_hanging() {
-    let (client_end, _daemon_end) = UnixStream::pair().unwrap();
+    let (client_end, _daemon_end) = tokio::io::duplex(4096);
     // `_daemon_end` is held open (accepted the conduit) but never read
     // or written to — the "daemon wedged after accept" shape a
     // deadline must catch, since it is neither a connect failure nor a
@@ -366,13 +410,19 @@ async fn admin_host_list_over_a_daemon_that_never_answers_times_out_instead_of_h
     assert_eq!(err.code, ErrorCode::ConnectionFailed);
 }
 
+// Unix only: with the clock paused, tokio jumps it forward whenever the
+// runtime idles, and a named pipe's overlapped I/O is real, so the jump would
+// expire the healthy daemon's deadline too. The Windows twin below keeps the
+// same "a wedged candidate must not hide the next one" contract with a probe
+// that never answers instead of a daemon that never writes.
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn discover_moves_past_a_silent_daemon_instead_of_hanging_on_it_forever() {
     let dir = tempfile::tempdir().unwrap();
-    let silent = dir.path().join("7.sock");
-    let healthy = dir.path().join("8.sock");
+    let silent = endpoint(dir.path(), 7);
+    let healthy = endpoint(dir.path(), 8);
 
-    let silent_listener = UnixListener::bind(&silent).unwrap();
+    let silent_listener = bind_daemon(&silent);
     let silent_daemon = tokio::spawn(async move {
         let (_stream, _addr) = silent_listener.accept().await.unwrap();
         // Accept the conduit, then never read or write anything —
@@ -382,7 +432,7 @@ async fn discover_moves_past_a_silent_daemon_instead_of_hanging_on_it_forever() 
         std::future::pending::<()>().await
     });
 
-    let healthy_listener = UnixListener::bind(&healthy).unwrap();
+    let healthy_listener = bind_daemon(&healthy);
     let expected = vec![sample_host("found-on-healthy")];
     let healthy_daemon = spawn_fake_admin_daemon(
         healthy_listener,
@@ -402,8 +452,36 @@ async fn discover_moves_past_a_silent_daemon_instead_of_hanging_on_it_forever() 
     healthy_daemon.await.unwrap();
 }
 
+#[cfg(windows)]
+#[tokio::test(start_paused = true)]
+async fn discover_moves_past_a_candidate_that_never_answers_instead_of_hanging_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let silent = endpoint(dir.path(), 7);
+    let healthy = endpoint(dir.path(), 8);
+    // Both pipes accept a connection (an instance is free) and neither
+    // daemon ever reads or writes.
+    let _silent_listener = bind_daemon(&silent);
+    let _healthy_listener = bind_daemon(&healthy);
+
+    let expected = vec![sample_host("found-on-healthy")];
+    let mut calls = 0;
+    let hosts = discover(dir.path(), async |_stream| {
+        calls += 1;
+        if calls == 1 {
+            // pid 7 is probed first and never answers.
+            std::future::pending::<()>().await;
+        }
+        Ok(DiscoverOutcome::Found(expected.clone()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(hosts, vec![sample_host("found-on-healthy")]);
+    assert_eq!(calls, 2);
+}
+
 // ---- `discover` must never unlink a live daemon's socket ----
 
+#[cfg(unix)]
 #[tokio::test]
 async fn discover_does_not_unlink_a_refused_socket_whose_pid_is_still_alive() {
     let dir = tempfile::tempdir().unwrap();
@@ -414,7 +492,7 @@ async fn discover_does_not_unlink_a_refused_socket_whose_pid_is_still_alive() {
     // backlog is full, or that is caught between `bind` and `listen`,
     // answers `ECONNREFUSED` too).
     let live_pid = std::process::id();
-    let refused = dir.path().join(format!("{live_pid}.sock"));
+    let refused = endpoint(dir.path(), live_pid);
     {
         // Bind then immediately drop the listener: the socket file
         // stays on disk, but nothing is listening any more, so a
@@ -423,7 +501,7 @@ async fn discover_does_not_unlink_a_refused_socket_whose_pid_is_still_alive() {
         // would produce, deliberately reused here for a
         // process-inspection-only assertion (this test cannot
         // actually fill an OS accept backlog deterministically).
-        let _listener = UnixListener::bind(&refused).unwrap();
+        let _listener = bind_daemon(&refused);
     }
     assert!(refused.exists());
 
@@ -449,7 +527,7 @@ fn candidate_sockets_on_a_missing_runtime_dir_is_an_empty_list_not_an_error() {
 /// `Found`, the daemon's own `HOST_NOT_FOUND` is `NotFound`, anything
 /// else propagates as an error `discover` will skip past.
 async fn probe_via_admin_host_list(
-    stream: UnixStream,
+    stream: LocalStream,
 ) -> Result<DiscoverOutcome<Vec<LocalHost>>, OpError> {
     match admin_host_list_over(stream).await {
         Ok(hosts) => Ok(DiscoverOutcome::Found(hosts)),
@@ -458,6 +536,7 @@ async fn probe_via_admin_host_list(
     }
 }
 
+#[cfg(unix)]
 /// A pid this test can prove is dead right now (spawn a trivial child,
 /// wait for it to exit) — the one thing `discover`'s liveness check
 /// actually trusts before unlinking an `ECONNREFUSED` candidate. A
@@ -474,25 +553,26 @@ fn a_definitely_dead_pid() -> u32 {
     child.id()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn discover_unlinks_a_refused_stale_socket_and_finds_the_next_candidate() {
     let dir = tempfile::tempdir().unwrap();
     let dead_pid = a_definitely_dead_pid();
-    let stale = dir.path().join(format!("{dead_pid}.sock"));
+    let stale = endpoint(dir.path(), dead_pid);
     // `dead_pid + 1` sorts immediately after it by construction, so
     // pid-ascending discovery is guaranteed to visit the stale
     // candidate first regardless of what `dead_pid` actually is.
-    let live = dir.path().join(format!("{}.sock", dead_pid + 1));
+    let live = endpoint(dir.path(), dead_pid + 1);
 
     // A socket file with no listener behind it: bind, then drop the
     // listener immediately. The special file stays on disk; connecting
     // to it now fails ECONNREFUSED — exactly a crashed daemon's leftover.
     {
-        let _listener = UnixListener::bind(&stale).unwrap();
+        let _listener = bind_daemon(&stale);
     }
     assert!(stale.exists(), "the stale socket file must still exist");
 
-    let listener = UnixListener::bind(&live).unwrap();
+    let listener = bind_daemon(&live);
     let expected = vec![sample_host("phone")];
     let daemon = spawn_fake_admin_daemon(
         listener,
@@ -515,14 +595,14 @@ async fn discover_unlinks_a_refused_stale_socket_and_finds_the_next_candidate() 
 #[tokio::test]
 async fn discover_tries_candidates_in_pid_ascending_order() {
     let dir = tempfile::tempdir().unwrap();
-    let lower = dir.path().join("5.sock");
-    let higher = dir.path().join("50.sock");
+    let lower = endpoint(dir.path(), 5);
+    let higher = endpoint(dir.path(), 50);
 
     let lower_hosts = vec![sample_host("lower-answered")];
     let higher_hosts = vec![sample_host("higher-answered")];
 
-    let lower_listener = UnixListener::bind(&lower).unwrap();
-    let higher_listener = UnixListener::bind(&higher).unwrap();
+    let lower_listener = bind_daemon(&lower);
+    let higher_listener = bind_daemon(&higher);
     let lower_daemon = spawn_fake_admin_daemon(
         lower_listener,
         local_response::Body::HostListResult(LocalHostListResult {
@@ -556,11 +636,11 @@ async fn discover_tries_candidates_in_pid_ascending_order() {
 #[tokio::test]
 async fn discover_moves_past_daemons_that_say_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    let first = dir.path().join("10.sock");
-    let second = dir.path().join("11.sock");
+    let first = endpoint(dir.path(), 10);
+    let second = endpoint(dir.path(), 11);
 
-    let first_listener = UnixListener::bind(&first).unwrap();
-    let second_listener = UnixListener::bind(&second).unwrap();
+    let first_listener = bind_daemon(&first);
+    let second_listener = bind_daemon(&second);
     let first_daemon = spawn_fake_admin_daemon(
         first_listener,
         local_response::Body::Error(LocalError::from_code(
@@ -587,8 +667,8 @@ async fn discover_moves_past_daemons_that_say_not_found() {
 #[tokio::test]
 async fn discover_exhausted_is_host_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    let only = dir.path().join("42.sock");
-    let listener = UnixListener::bind(&only).unwrap();
+    let only = endpoint(dir.path(), 42);
+    let listener = bind_daemon(&only);
     let daemon = spawn_fake_admin_daemon(
         listener,
         local_response::Body::Error(LocalError::from_code(
@@ -620,19 +700,19 @@ async fn discover_with_no_candidates_at_all_is_host_not_found() {
 #[tokio::test]
 async fn admin_host_list_all_unions_across_two_live_daemons() {
     let dir = tempfile::tempdir().unwrap();
-    let low = dir.path().join("10.sock");
-    let high = dir.path().join("20.sock");
+    let low = endpoint(dir.path(), 10);
+    let high = endpoint(dir.path(), 20);
 
     let low_hosts = vec![sample_host("from-low-pid")];
     let high_hosts = vec![sample_host("from-high-pid")];
     let low_daemon = spawn_fake_admin_daemon(
-        UnixListener::bind(&low).unwrap(),
+        bind_daemon(&low),
         local_response::Body::HostListResult(LocalHostListResult {
             hosts: low_hosts.clone(),
         }),
     );
     let high_daemon = spawn_fake_admin_daemon(
-        UnixListener::bind(&high).unwrap(),
+        bind_daemon(&high),
         local_response::Body::HostListResult(LocalHostListResult {
             hosts: high_hosts.clone(),
         }),
@@ -653,11 +733,11 @@ async fn admin_host_list_all_unions_across_two_live_daemons() {
 #[tokio::test]
 async fn admin_host_list_all_skips_a_daemon_that_answers_with_an_error() {
     let dir = tempfile::tempdir().unwrap();
-    let bad = dir.path().join("30.sock");
-    let good = dir.path().join("40.sock");
+    let bad = endpoint(dir.path(), 30);
+    let good = endpoint(dir.path(), 40);
 
     let bad_daemon = spawn_fake_admin_daemon(
-        UnixListener::bind(&bad).unwrap(),
+        bind_daemon(&bad),
         local_response::Body::Error(LocalError::from_code(
             ErrorCode::PermissionDenied,
             "not allowed",
@@ -665,7 +745,7 @@ async fn admin_host_list_all_skips_a_daemon_that_answers_with_an_error() {
     );
     let expected = vec![sample_host("still-listed")];
     let good_daemon = spawn_fake_admin_daemon(
-        UnixListener::bind(&good).unwrap(),
+        bind_daemon(&good),
         local_response::Body::HostListResult(LocalHostListResult {
             hosts: expected.clone(),
         }),
@@ -700,8 +780,8 @@ async fn admin_host_list_all_with_no_candidates_is_an_empty_list() {
 #[tokio::test]
 async fn admin_host_list_all_does_not_stall_on_a_silent_daemon() {
     let dir = tempfile::tempdir().unwrap();
-    let silent = dir.path().join("50.sock");
-    let silent_listener = UnixListener::bind(&silent).unwrap();
+    let silent = endpoint(dir.path(), 50);
+    let silent_listener = bind_daemon(&silent);
     let silent_daemon = tokio::spawn(async move {
         let (_stream, _addr) = silent_listener.accept().await.unwrap();
         // Accept the conduit, then never read or write — exactly the
@@ -733,8 +813,8 @@ async fn admin_host_list_all_probes_multiple_silent_daemons_concurrently() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemons = Vec::new();
     for pid in [60, 61] {
-        let sock = dir.path().join(format!("{pid}.sock"));
-        let listener = UnixListener::bind(&sock).unwrap();
+        let sock = endpoint(dir.path(), pid);
+        let listener = bind_daemon(&sock);
         daemons.push(tokio::spawn(async move {
             let (_stream, _addr) = listener.accept().await.unwrap();
             std::future::pending::<()>().await
@@ -763,10 +843,10 @@ async fn admin_host_list_all_probes_multiple_silent_daemons_concurrently() {
 #[tokio::test]
 async fn admin_host_list_all_returns_the_healthy_daemon_despite_a_silent_one() {
     let dir = tempfile::tempdir().unwrap();
-    let silent = dir.path().join("70.sock");
-    let healthy = dir.path().join("71.sock");
+    let silent = endpoint(dir.path(), 70);
+    let healthy = endpoint(dir.path(), 71);
 
-    let silent_listener = UnixListener::bind(&silent).unwrap();
+    let silent_listener = bind_daemon(&silent);
     let silent_daemon = tokio::spawn(async move {
         let (_stream, _addr) = silent_listener.accept().await.unwrap();
         std::future::pending::<()>().await
@@ -774,7 +854,7 @@ async fn admin_host_list_all_returns_the_healthy_daemon_despite_a_silent_one() {
 
     let expected = vec![sample_host("healthy-answered")];
     let healthy_daemon = spawn_fake_admin_daemon(
-        UnixListener::bind(&healthy).unwrap(),
+        bind_daemon(&healthy),
         local_response::Body::HostListResult(LocalHostListResult {
             hosts: expected.clone(),
         }),

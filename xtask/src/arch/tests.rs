@@ -143,7 +143,7 @@ fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 11, "{violations:?}");
+    assert_eq!(violations.len(), 13, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"
@@ -202,6 +202,87 @@ fn module_ban_flags_transport_in_localctl_frame_and_client_but_daemon_is_exempt(
     assert!(
         daemon_hits.is_empty(),
         "daemon.rs is the transport bridge and must stay exempt: {violations:?}"
+    );
+}
+
+/// The two platform halves of the localctl transport are bound by the same
+/// file-scoped ban as `frame.rs` and `client.rs`: they hold the CLI process's
+/// socket and pipe code and must never name a QUIC type.
+#[test]
+fn localctl_transport_files_are_banned_from_naming_quic() {
+    let root = tempfile::tempdir().unwrap();
+    let transport = root.path().join("crates/qsh-core/src/localctl/transport");
+    fs::create_dir_all(&transport).unwrap();
+    fs::write(
+        transport.join("unix.rs"),
+        "use qsh_transport::Connection;\n",
+    )
+    .unwrap();
+    fs::write(
+        transport.join("windows.rs"),
+        "use rustls::ClientConfig;\nfn f() { let _ = quinn::Endpoint::client; }\n",
+    )
+    .unwrap();
+    // The directory holds other files too (`mod.rs`, test modules); only the
+    // two platform files are file-scoped.
+    fs::write(transport.join("mod.rs"), "use qsh_transport::Connection;\n").unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+
+    let unix_hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("transport/unix.rs:"))
+        .collect();
+    let windows_hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("transport/windows.rs:"))
+        .collect();
+    assert_eq!(unix_hits.len(), 1, "{violations:?}");
+    assert!(unix_hits[0].contains("qsh_transport"));
+    assert_eq!(windows_hits.len(), 2, "{violations:?}");
+    assert!(windows_hits.iter().any(|v| v.contains("rustls")));
+    assert!(windows_hits.iter().any(|v| v.contains("quinn")));
+}
+
+/// `qsh-cli/src` may not open a named pipe either: neither tokio's
+/// `named_pipe` module nor the `\\.\pipe\` namespace prefix, in a raw or an
+/// escaped string. `crates/qsh-cli/tests` stays out of scope.
+#[test]
+fn cli_src_bans_named_pipe_tokens() {
+    let root = tempfile::tempdir().unwrap();
+    let cli_src = root.path().join("crates/qsh-cli/src");
+    fs::create_dir_all(&cli_src).unwrap();
+    fs::write(
+        cli_src.join("main.rs"),
+        "use tokio::net::windows::named_pipe::ClientOptions;\n\
+         const A: &str = r\"\\\\.\\pipe\\qsh\";\n\
+         const B: &str = \"\\\\\\\\.\\\\pipe\\\\qsh\";\n\
+         // a comment about a named_pipe is fine\n",
+    )
+    .unwrap();
+    let cli_tests = root.path().join("crates/qsh-cli/tests");
+    fs::create_dir_all(&cli_tests).unwrap();
+    fs::write(
+        cli_tests.join("pipes.rs"),
+        "use tokio::net::windows::named_pipe::ClientOptions;\n",
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+
+    let src_hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("main.rs:"))
+        .collect();
+    assert_eq!(src_hits.len(), 3, "{violations:?}");
+    assert!(src_hits.iter().any(|v| v.contains("main.rs:1")));
+    assert!(src_hits.iter().any(|v| v.contains("main.rs:2")));
+    assert!(src_hits.iter().any(|v| v.contains("main.rs:3")));
+    assert!(
+        violations.iter().all(|v| !v.contains("pipes.rs")),
+        "crates/qsh-cli/tests is out of scope for this rule: {violations:?}"
     );
 }
 
@@ -603,7 +684,10 @@ fn a_line_reported_under_a_broader_token_is_not_reported_again() {
 
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    let hits: Vec<_> = violations.iter().filter(|v| v.contains("x.rs")).collect();
+    let hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("broker/x.rs:"))
+        .collect();
     assert_eq!(hits.len(), 1, "{violations:?}");
 }
 

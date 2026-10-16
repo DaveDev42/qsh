@@ -194,15 +194,19 @@ const BROKER_TOKEN_SET: [&str; 6] = [
     "crate::client",
 ];
 
-/// `localctl/client.rs` (CLI-process side) is pure UDS + `qsh-proto`
+/// `localctl/client.rs` (CLI-process side) is pure local-stream + `qsh-proto`
 /// framing and must never reach for a transport type; `localctl/frame.rs`
-/// is the shared conduit codec underneath it and is bound by the same rule.
+/// is the shared conduit codec underneath it and is bound by the same rule,
+/// and so are the two platform halves under `localctl/transport/`, which
+/// hold the only socket and named-pipe code of the CLI-process side.
 /// `localctl/daemon.rs` is the bridge to QUIC and is deliberately *not*
 /// listed here — file scope, not the directory, is what lets it stay
 /// exempt (`docs/design/architecture.md` §1).
 const LOCALCTL_FRAME_FILE: &str = "crates/qsh-core/src/localctl/frame.rs";
 const LOCALCTL_CLIENT_FILE: &str = "crates/qsh-core/src/localctl/client.rs";
-const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs are pure UDS + qsh-proto framing on the CLI-process side; \
+const LOCALCTL_TRANSPORT_UNIX_FILE: &str = "crates/qsh-core/src/localctl/transport/unix.rs";
+const LOCALCTL_TRANSPORT_WINDOWS_FILE: &str = "crates/qsh-core/src/localctl/transport/windows.rs";
+const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs and localctl/transport/{unix,windows}.rs are pure local-stream + qsh-proto framing on the CLI-process side; \
      localctl/daemon.rs is the transport bridge and is deliberately exempt (docs/design/architecture.md §1)";
 
 /// `reverse/registry.rs` holds `ReverseEntry` metadata only (already narrowed — the live `client::Session` stays in `reverse/listen.rs`),
@@ -213,13 +217,13 @@ const REGISTRY_FILE: &str = "crates/qsh-core/src/reverse/registry.rs";
 const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only; it must not hold a live client::Session or \
      name a transport type — same token set as BROKER_DIR (docs/design/architecture.md §1)";
 
-/// `qsh-cli/src` never opens a UDS socket directly — it goes through
-/// `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
+/// `qsh-cli/src` never opens a UDS socket or a named pipe directly — it goes
+/// through `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
 /// root: `crates/qsh-cli/tests/it/localctl_perms.rs` pokes UDS permissions
 /// directly and legitimately needs `UnixStream` (`docs/design/architecture.md` §1).
 const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
 const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
-     socket itself (docs/design/architecture.md §1); crates/qsh-cli/tests is out of scope for this rule";
+     socket or a named pipe itself (docs/design/architecture.md §1); crates/qsh-cli/tests is out of scope for this rule";
 
 /// `trust/invite_address/route.rs` (and any future sibling under the same
 /// directory) asks the kernel which source address a route off this host
@@ -331,7 +335,12 @@ fn module_bans() -> Vec<ModuleBan> {
         })
         .collect();
 
-    for file in [LOCALCTL_FRAME_FILE, LOCALCTL_CLIENT_FILE] {
+    for file in [
+        LOCALCTL_FRAME_FILE,
+        LOCALCTL_CLIENT_FILE,
+        LOCALCTL_TRANSPORT_UNIX_FILE,
+        LOCALCTL_TRANSPORT_WINDOWS_FILE,
+    ] {
         for forbidden in ["qsh_transport", "quinn", "rustls"] {
             bans.push(ModuleBan {
                 scope: Scope::File(file),
@@ -349,7 +358,15 @@ fn module_bans() -> Vec<ModuleBan> {
         });
     }
 
-    for forbidden in ["UnixStream", "UnixListener"] {
+    // `named_pipe` is tokio's module path; the two spellings of the pipe
+    // namespace prefix cover a raw string and an escaped one.
+    for forbidden in [
+        "UnixStream",
+        "UnixListener",
+        "named_pipe",
+        r"\\.\pipe",
+        r"\\\\.\\pipe",
+    ] {
         bans.push(ModuleBan {
             scope: Scope::Dir(CLI_SRC_DIR),
             forbidden,

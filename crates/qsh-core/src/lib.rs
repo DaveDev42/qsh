@@ -36,12 +36,10 @@ pub mod handshake;
 pub mod hosts;
 pub mod identity;
 pub mod lifecycle;
-// localctl (UDS IPC to this machine's resident `qsh listen` daemon) has no
-// meaning on Windows — no daemon, no socket, no peer credential concept —
-// so the whole module tree compiles out there rather than growing internal
-// platform splits (`crates/qsh-core/src/localctl/mod.rs` module docs,
-// `docs/CLI.md` §6.13, M3 plan Step 5 (2473c88)).
-#[cfg(unix)]
+// localctl (IPC to this machine's resident `qsh listen` daemon) compiles on
+// every platform: `localctl::transport` picks a Unix domain socket or a named
+// pipe, and only the daemon half is unix-only (`localctl/mod.rs` module docs,
+// `docs/CLI.md` §6.13, ADR-0035 decision 14).
 pub mod localctl;
 pub mod ops;
 pub mod pairing;

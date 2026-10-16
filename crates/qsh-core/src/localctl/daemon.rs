@@ -57,6 +57,9 @@ use crate::reverse::listen::{ConduitInbound, HubSendError, Listen};
 use crate::reverse::registry::{EntryState, ReverseEntry};
 
 use super::frame::LocalConduit;
+#[cfg(test)]
+use super::transport::peer_is_authorized;
+use super::transport::{authorized_peer, bind_with_narrow_umask, tighten_socket_mode};
 
 /// This daemon's bound localctl UDS socket, plus the path it owns —
 /// unlinking it is the caller's job once every accept loop tied to it has
@@ -105,43 +108,6 @@ impl LocalctlListener {
             socket_path,
         })
     }
-}
-
-/// Serializes the brief window [`bind_with_narrow_umask`] narrows this
-/// process's umask for. `umask(2)` is process-global, not per-thread, so
-/// two concurrent binds — this module's own test suite runs several
-/// `LocalctlListener::bind` calls in parallel `#[tokio::test]`s — must not
-/// interleave their save/restore (which could otherwise leave the
-/// process's umask permanently wrong for the rest of its lifetime).
-static UMASK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Bind `path` with this process's umask narrowed to `0o177` (owner
-/// read/write kept, everything else stripped) for the `bind(2)` syscall
-/// alone, restored immediately after regardless of outcome — so the socket
-/// node `bind(2)` creates (which has no mode parameter for `AF_UNIX`,
-/// unlike `open(2)`) is never observable at a mode looser than 0600, not
-/// even for the instant between `bind(2)` and an explicit `chmod`
-/// (adversarial review finding: without this, the node briefly existed at
-/// `0666 & ~umask` — typically 0644/0755-shaped — before
-/// [`tighten_socket_mode`] ran).
-fn bind_with_narrow_umask(path: &Path) -> io::Result<UnixListener> {
-    let _guard = UMASK_GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // SAFETY: `umask(2)` reads and writes only this process's umask; it
-    // touches no memory and cannot fail. The lock above is what makes the
-    // save/restore pair race-free against another thread's call to this
-    // same function — `umask` itself has no thread-local variant to lean
-    // on instead.
-    let previous = unsafe { libc::umask(0o177) };
-    let result = UnixListener::bind(path);
-    unsafe { libc::umask(previous) };
-    result
-}
-
-fn tighten_socket_mode(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 fn bind_error(path: &Path, err: &io::Error) -> OpError {
@@ -1538,8 +1504,7 @@ impl LocalctlDaemon {
     /// only fact localctl ever authorizes on (`crate::localctl` module
     /// docs). Runs before any frame is read.
     fn authorized_peer(stream: &UnixStream) -> io::Result<bool> {
-        let cred = stream.peer_cred()?;
-        Ok(peer_is_authorized(cred.uid(), daemon_euid()))
+        authorized_peer(stream)
     }
 }
 
@@ -2081,23 +2046,6 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
         Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
         Some(wire::StreamKind::Unspecified) | None => None,
     }
-}
-
-/// The pure comparison [`LocalctlDaemon::authorized_peer`] reduces to, once
-/// the OS-level lookup (`SO_PEERCRED`/`getpeereid`, via
-/// [`tokio::net::UnixStream::peer_cred`]) has produced a peer uid — split
-/// out so the "different euid is denied" rule is unit-testable without a
-/// second real OS user (`docs/design/testing.md` L2; M3 plan Step 5 (2473c88)
-/// (c): "다른 euid의 connect 거부... 아니면... peer-cred 코드 경로를 단언").
-fn peer_is_authorized(peer_uid: u32, daemon_euid: u32) -> bool {
-    peer_uid == daemon_euid
-}
-
-/// This process's effective user id.
-fn daemon_euid() -> u32 {
-    // SAFETY: `geteuid(2)` takes no arguments, touches no memory, and
-    // cannot fail.
-    unsafe { libc::geteuid() }
 }
 
 /// The daemon's admin view of one registered host

@@ -1,7 +1,9 @@
 //! CLI-process side of localctl: connect to a resident `qsh listen`
-//! daemon's UDS socket, speak the `LOCAL_ADMIN` conduit, and (for a later
+//! daemon's endpoint (a UDS socket on unix, a named pipe on Windows — the
+//! platform half is [`crate::localctl::transport`], this file only sees a
+//! [`LocalStream`]), speak the `LOCAL_ADMIN` conduit, and (for a later
 //! step's host-specific routing) discover *which* daemon on this machine
-//! knows a given host by trying each of this machine's sockets in turn
+//! knows a given host by trying each of this machine's endpoints in turn
 //! (`docs/design/protocol.md` §11-3, `docs/design/architecture.md` §7
 //! "런타임 소켓 discovery", M3 plan Step 5 (2473c88)).
 //!
@@ -16,6 +18,11 @@
 //! full six-token set and why. Holding any of the six is the daemon side's
 //! business (`daemon.rs`, a later step), which bridges a `LOCAL_CONTROL`
 //! conduit onto a live reverse QUIC connection.
+
+// The reverse-route entry points below (`open_control`, `open_stream*`, the
+// data halves) are consumed by the reverse role, which is not built on
+// Windows yet; the admin entry points and `discover` are the public surface.
+#![cfg_attr(windows, allow(dead_code))]
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,10 +39,11 @@ use qsh_proto::local::{
     local_response,
 };
 use qsh_proto::wire::{self, ControlMessage};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinSet;
 
 use crate::localctl::frame::LocalConduit;
+use crate::localctl::transport::{self, LocalStream};
 use crate::ops::OpError;
 
 /// Open a `LOCAL_ADMIN` conduit to the daemon listening on `socket_path`
@@ -48,7 +56,7 @@ use crate::ops::OpError;
 /// the results" is `Ops::host_list`'s job (PR 5b), built on top of this and
 /// [`candidate_sockets`].
 pub async fn admin_host_list(socket_path: &Path) -> Result<Vec<LocalHost>, OpError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     admin_host_list_over(stream).await
@@ -58,7 +66,10 @@ pub async fn admin_host_list(socket_path: &Path) -> Result<Vec<LocalHost>, OpErr
 /// conduit. Split out so tests — and, later, [`discover`] probes for
 /// PR 5b/Step 6's host-specific routing — can drive the `LOCAL_ADMIN`
 /// exchange without going through a real `connect(2)` first.
-pub async fn admin_host_list_over(stream: UnixStream) -> Result<Vec<LocalHost>, OpError> {
+pub async fn admin_host_list_over<S>(stream: S) -> Result<Vec<LocalHost>, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     match tokio::time::timeout(PROBE_TIMEOUT, admin_host_list_over_inner(stream)).await {
         Ok(result) => result,
         Err(_elapsed) => Err(OpError::new(
@@ -71,7 +82,10 @@ pub async fn admin_host_list_over(stream: UnixStream) -> Result<Vec<LocalHost>, 
     }
 }
 
-async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>, OpError> {
+async fn admin_host_list_over_inner<S>(stream: S) -> Result<Vec<LocalHost>, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut conduit = open_admin_conduit(stream).await?;
     conduit
         .send(&LocalAdminRequest {
@@ -101,7 +115,10 @@ async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>
 /// split out so the three request bodies that follow it
 /// ([`LocalAdminRequest`]'s three oneof arms) are the only thing each
 /// caller still has to write itself.
-async fn open_admin_conduit(stream: UnixStream) -> Result<LocalConduit<UnixStream>, OpError> {
+async fn open_admin_conduit<S>(stream: S) -> Result<LocalConduit<S>, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -124,7 +141,7 @@ async fn open_admin_conduit(stream: UnixStream) -> Result<LocalConduit<UnixStrea
 /// — "try every socket on this machine and merge the results" is
 /// [`admin_tunnel_list_all`]'s job.
 pub async fn admin_tunnel_list(socket_path: &Path) -> Result<Vec<LocalTunnel>, OpError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     admin_tunnel_list_over(stream).await
@@ -132,7 +149,10 @@ pub async fn admin_tunnel_list(socket_path: &Path) -> Result<Vec<LocalTunnel>, O
 
 /// Same exchange as [`admin_tunnel_list`], over an already-connected
 /// conduit — split out for tests, same as [`admin_host_list_over`].
-pub async fn admin_tunnel_list_over(stream: UnixStream) -> Result<Vec<LocalTunnel>, OpError> {
+pub async fn admin_tunnel_list_over<S>(stream: S) -> Result<Vec<LocalTunnel>, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     match tokio::time::timeout(PROBE_TIMEOUT, admin_tunnel_list_over_inner(stream)).await {
         Ok(result) => result,
         Err(_elapsed) => Err(OpError::new(
@@ -145,7 +165,10 @@ pub async fn admin_tunnel_list_over(stream: UnixStream) -> Result<Vec<LocalTunne
     }
 }
 
-async fn admin_tunnel_list_over_inner(stream: UnixStream) -> Result<Vec<LocalTunnel>, OpError> {
+async fn admin_tunnel_list_over_inner<S>(stream: S) -> Result<Vec<LocalTunnel>, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut conduit = open_admin_conduit(stream).await?;
     conduit
         .send(&LocalAdminRequest {
@@ -179,7 +202,7 @@ async fn admin_tunnel_list_over_inner(stream: UnixStream) -> Result<Vec<LocalTun
 /// admin_close_forward`]'s own doc gives, since that is exactly what
 /// answers this on the daemon side.
 pub async fn admin_tunnel_close(socket_path: &Path, tunnel_id: &str) -> Result<bool, OpError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     admin_tunnel_close_over(stream, tunnel_id).await
@@ -187,7 +210,10 @@ pub async fn admin_tunnel_close(socket_path: &Path, tunnel_id: &str) -> Result<b
 
 /// Same exchange as [`admin_tunnel_close`], over an already-connected
 /// conduit — split out for tests, same as [`admin_host_list_over`].
-pub async fn admin_tunnel_close_over(stream: UnixStream, tunnel_id: &str) -> Result<bool, OpError> {
+pub async fn admin_tunnel_close_over<S>(stream: S, tunnel_id: &str) -> Result<bool, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     match tokio::time::timeout(
         PROBE_TIMEOUT,
         admin_tunnel_close_over_inner(stream, tunnel_id),
@@ -205,10 +231,10 @@ pub async fn admin_tunnel_close_over(stream: UnixStream, tunnel_id: &str) -> Res
     }
 }
 
-async fn admin_tunnel_close_over_inner(
-    stream: UnixStream,
-    tunnel_id: &str,
-) -> Result<bool, OpError> {
+async fn admin_tunnel_close_over_inner<S>(stream: S, tunnel_id: &str) -> Result<bool, OpError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut conduit = open_admin_conduit(stream).await?;
     conduit
         .send(&LocalAdminRequest {
@@ -260,7 +286,7 @@ pub(crate) async fn open_control(
     wait_ms: u32,
     known_generation: Option<u64>,
 ) -> Result<ControlHandshake, OpError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     open_control_over(stream, host, wait_ms, known_generation).await
@@ -270,7 +296,7 @@ pub(crate) async fn open_control(
 /// split out for the same reason [`admin_host_list_over`] is: tests drive
 /// the handshake without a real `connect(2)`.
 pub(crate) async fn open_control_over(
-    stream: UnixStream,
+    stream: LocalStream,
     host: &str,
     wait_ms: u32,
     known_generation: Option<u64>,
@@ -293,7 +319,7 @@ pub(crate) async fn open_control_over(
 }
 
 async fn open_control_over_inner(
-    stream: UnixStream,
+    stream: LocalStream,
     host: &str,
     wait_ms: u32,
     known_generation: Option<u64>,
@@ -360,7 +386,7 @@ pub(crate) struct ControlHandshake {
 /// here; this file stays "connect and hand back a channel," matching
 /// [`admin_host_list_over`]'s own shape.
 pub(crate) struct ControlConduit {
-    conduit: LocalConduit<UnixStream>,
+    conduit: LocalConduit<LocalStream>,
 }
 
 impl ControlConduit {
@@ -432,7 +458,7 @@ pub(crate) async fn open_stream_with_wait(
     header: &wire::StreamHeader,
     wait_ms: u32,
 ) -> Result<DataHandshake, OpError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     open_stream_over_with_wait(stream, host, header, wait_ms).await
@@ -447,7 +473,7 @@ pub(crate) async fn open_stream_with_wait(
 /// `SESSION_DATA`/`TCP_CONNECT` handshake tests, a real value for a
 /// `TCP_ACCEPTED` claim test).
 pub(crate) async fn open_stream_over_with_wait(
-    stream: UnixStream,
+    stream: LocalStream,
     host: &str,
     header: &wire::StreamHeader,
     wait_ms: u32,
@@ -508,14 +534,14 @@ pub(crate) async fn open_stream_expecting(
     header: &wire::StreamHeader,
     expect: &ExpectedPeer,
 ) -> Result<DataHandshake, StreamOpenError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = transport::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
     open_stream_over_expecting(stream, host, header, 0, Some(expect)).await
 }
 
 async fn open_stream_over_expecting(
-    stream: UnixStream,
+    stream: LocalStream,
     host: &str,
     header: &wire::StreamHeader,
     wait_ms: u32,
@@ -543,7 +569,7 @@ async fn open_stream_over_expecting(
 }
 
 async fn open_stream_over_inner(
-    stream: UnixStream,
+    stream: LocalStream,
     host: &str,
     header: &wire::StreamHeader,
     wait_ms: u32,
@@ -700,7 +726,7 @@ pub(crate) struct DataHandshake {
     /// transport-free file never has to name that cross-platform type
     /// (`crate::localctl` module docs' dependency direction: this module
     /// is depended on, never the reverse).
-    pub socket: Arc<UnixStream>,
+    pub socket: Arc<LocalStream>,
     /// This `LOCAL_STREAM` conduit's own `LocalHelloAck.peer_fingerprint`
     /// — compared by [`crate::client::mod`]'s `open_local_data_link`
     /// against the fingerprint the session's own `LOCAL_CONTROL` leg
@@ -725,14 +751,14 @@ pub(crate) struct DataHandshake {
 /// exactly a frame the target's own decoder is willing to accept
 /// (`docs/design/protocol.md` §7, §11-3).
 ///
-/// Reads and writes through `&self` — [`UnixStream::writable`]/
-/// [`UnixStream::try_write`] rather than an owned, exclusive
+/// Reads and writes through `&self` — [`LocalStream::writable`]/
+/// [`LocalStream::try_write`] rather than an owned, exclusive
 /// `AsyncWrite` — precisely so this half, [`DataRecvHalf`] and
 /// `DataKillSwitch` can all hold independent clones of the *same* `Arc`
 /// and run concurrently without a mutable-borrow conflict between them
 /// (see [`open_stream_over_inner`]'s own doc on why that matters).
 pub(crate) struct DataSendHalf {
-    socket: Arc<UnixStream>,
+    socket: Arc<LocalStream>,
 }
 
 impl DataSendHalf {
@@ -753,9 +779,7 @@ impl DataSendHalf {
     /// `finish` on the target's data stream (`crate::localctl::daemon`'s
     /// `pump_uds_to_quic`, "UDS EOF -> QUIC finish").
     pub(crate) fn finish(&self) {
-        unsafe {
-            libc::shutdown(as_raw_fd(&self.socket), libc::SHUT_WR);
-        }
+        transport::shutdown_write(&self.socket);
     }
 
     /// Surrender this send half as a raw byte writer, for the one caller
@@ -776,7 +800,7 @@ impl DataSendHalf {
 /// been sent. See [`DataSendHalf`]'s own doc for why this reads through
 /// `&self` rather than an owned, exclusive half.
 pub(crate) struct DataRecvHalf {
-    socket: Arc<UnixStream>,
+    socket: Arc<LocalStream>,
     dec: FrameDecoder,
     buf: Vec<u8>,
 }
@@ -841,12 +865,12 @@ impl DataRecvHalf {
 /// handshake — [`DataSendHalf::into_raw`]'s return type, and the `Local`
 /// carrier's counterpart to a raw `qsh_transport::SendStream`
 /// ([`DataSend::into_raw_direct`](crate::client::link::DataSend::into_raw_direct)).
-/// Backed by the same `Arc<UnixStream>` [`DataSendHalf`] held, so this is
+/// Backed by the same `Arc<LocalStream>` [`DataSendHalf`] held, so this is
 /// still just one of up to three live clones of one socket
 /// ([`open_stream_over_inner`]'s own doc) — dropping this one only drops
 /// this clone's reference, exactly like every other clone.
 pub(crate) struct RawUdsWrite {
-    socket: Arc<UnixStream>,
+    socket: Arc<LocalStream>,
 }
 
 impl tokio::io::AsyncWrite for RawUdsWrite {
@@ -883,9 +907,7 @@ impl tokio::io::AsyncWrite for RawUdsWrite {
         // Half-close, synchronous and immediate — [`DataSendHalf::finish`]'s
         // own doc on why `SHUT_WR` on the shared socket is the whole
         // teardown a tunnel's clean end needs on this carrier.
-        unsafe {
-            libc::shutdown(as_raw_fd(&self.socket), libc::SHUT_WR);
-        }
+        transport::shutdown_write(&self.socket);
         std::task::Poll::Ready(Ok(()))
     }
 }
@@ -893,7 +915,7 @@ impl tokio::io::AsyncWrite for RawUdsWrite {
 /// Daemon → client raw byte reader — [`DataRecvHalf::into_raw`]'s return
 /// type, the receive-half sibling of [`RawUdsWrite`].
 pub(crate) struct RawUdsRead {
-    socket: Arc<UnixStream>,
+    socket: Arc<LocalStream>,
 }
 
 impl tokio::io::AsyncRead for RawUdsRead {
@@ -918,9 +940,9 @@ impl tokio::io::AsyncRead for RawUdsRead {
 
 /// Write all of `buf` to `socket`'s send direction, via the readiness-based
 /// `writable`/`try_write` pair rather than [`tokio::io::AsyncWriteExt`] —
-/// the latter needs a `&mut UnixStream`, which an `Arc`-shared socket
+/// the latter needs a `&mut LocalStream`, which an `Arc`-shared socket
 /// cannot hand out to more than one owner at a time.
-async fn write_all(socket: &UnixStream, mut buf: &[u8]) -> io::Result<()> {
+async fn write_all(socket: &LocalStream, mut buf: &[u8]) -> io::Result<()> {
     while !buf.is_empty() {
         socket.writable().await?;
         match socket.try_write(buf) {
@@ -935,7 +957,7 @@ async fn write_all(socket: &UnixStream, mut buf: &[u8]) -> io::Result<()> {
 /// Read at least one byte (or report a clean EOF as `Ok(0)`) from
 /// `socket`'s receive direction. See [`write_all`]'s own doc for why this
 /// is readiness-based rather than [`tokio::io::AsyncReadExt`].
-async fn read_some(socket: &UnixStream, buf: &mut [u8]) -> io::Result<usize> {
+async fn read_some(socket: &LocalStream, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         socket.readable().await?;
         match socket.try_read(buf) {
@@ -944,14 +966,6 @@ async fn read_some(socket: &UnixStream, buf: &mut [u8]) -> io::Result<usize> {
             Err(err) => return Err(err),
         }
     }
-}
-
-/// The raw fd a `shutdown(2)` targets — `AsRawFd` needs `std::os::fd`,
-/// unix-only, which this whole module already is (`crate::localctl`'s own
-/// `#[cfg(unix)]` gate in `lib.rs`), so no further cfg is needed here.
-fn as_raw_fd(socket: &UnixStream) -> std::os::fd::RawFd {
-    use std::os::fd::AsRawFd as _;
-    socket.as_raw_fd()
 }
 
 /// Wrap a `LOCAL_STREAM` data-conduit I/O failure as
@@ -981,34 +995,14 @@ fn io_error(step: &str, path: &Path, err: &io::Error) -> OpError {
     )
 }
 
-/// This machine's localctl sockets, named `<pid>.sock`
-/// (`docs/design/architecture.md` §7), in pid-ascending order. A missing
-/// runtime directory (no daemon has ever bound a socket here) yields an
-/// empty list, not an error — that is the normal "no `qsh listen` running"
-/// state. Entries that are not `<digits>.sock` are silently skipped: the
-/// runtime directory is not exclusively ours to police.
+/// This machine's localctl endpoints, in pid-ascending order: the
+/// `<pid>.sock` sockets of the runtime directory on unix
+/// (`docs/design/architecture.md` §7), the `qsh-<scope>-<pid>` pipes of this
+/// user and runtime directory on Windows (ADR-0035 decision 14). Nothing
+/// listening is the normal "no `qsh listen` running" state and yields an
+/// empty list, not an error.
 pub fn candidate_sockets(runtime_dir: &Path) -> io::Result<Vec<(u32, PathBuf)>> {
-    let entries = match std::fs::read_dir(runtime_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if let Some(pid) = socket_pid(&path) {
-            out.push((pid, path));
-        }
-    }
-    out.sort_by_key(|(pid, _)| *pid);
-    Ok(out)
-}
-
-fn socket_pid(path: &Path) -> Option<u32> {
-    if path.extension().and_then(|ext| ext.to_str()) != Some("sock") {
-        return None;
-    }
-    path.file_stem()?.to_str()?.parse().ok()
+    transport::candidate_endpoints(runtime_dir)
 }
 
 /// What one candidate daemon said in answer to a [`discover`] probe.
@@ -1045,7 +1039,7 @@ pub enum DiscoverOutcome<T> {
 ///   (`docs/design/architecture.md` §7: "전부 실패하면 `HOST_NOT_FOUND`다").
 pub async fn discover<T>(
     runtime_dir: &Path,
-    mut probe: impl AsyncFnMut(UnixStream) -> Result<DiscoverOutcome<T>, OpError>,
+    mut probe: impl AsyncFnMut(LocalStream) -> Result<DiscoverOutcome<T>, OpError>,
 ) -> Result<T, OpError> {
     let candidates =
         candidate_sockets(runtime_dir).map_err(|err| io_error("list", runtime_dir, &err))?;
@@ -1383,30 +1377,13 @@ pub async fn admin_tunnel_close_all(runtime_dir: &Path, tunnel_id: &str) -> bool
 /// (defensive; UDS connects don't block on the network) or never completes
 /// within [`PROBE_TIMEOUT`] is treated as unreachable rather than allowed
 /// to wedge the caller. `None` means "skip this candidate".
-async fn connect_candidate(pid: u32, sock: &Path) -> Option<UnixStream> {
-    match tokio::time::timeout(PROBE_TIMEOUT, UnixStream::connect(sock)).await {
+async fn connect_candidate(pid: u32, sock: &Path) -> Option<LocalStream> {
+    match tokio::time::timeout(PROBE_TIMEOUT, transport::connect(sock)).await {
         Ok(Ok(stream)) => Some(stream),
         Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
-            // ECONNREFUSED is *not* proof the daemon is dead: on
-            // macOS/BSD a live listener whose accept backlog is full
-            // reports it exactly this way, and even on Linux a
-            // just-`bind`-not-yet-`listen`ing socket can produce it for
-            // an instant. Only unlink when the pid the socket's own
-            // filename names (`<pid>.sock`, `docs/design/architecture.md`
-            // §7) is actually gone — `kill(pid, 0)` returning `ESRCH` is
-            // the one thing that proves that (adversarial review finding:
-            // unconditional unlink here could delete a live, merely-busy
-            // daemon's socket, permanently orphaning it from `qsh hosts`
-            // and Step 6 routing until a manual restart).
-            if process_is_verifiably_dead(pid) {
-                let _ = std::fs::remove_file(sock);
-            } else {
-                tracing::debug!(
-                    pid,
-                    "localctl: connection refused but pid {pid} is still alive; leaving its \
-                     socket in place"
-                );
-            }
+            // Whether this is proof the daemon is gone is the platform's
+            // call (`transport::forget_refused_endpoint`).
+            transport::forget_refused_endpoint(pid, sock);
             None
         }
         Ok(Err(err)) => {
@@ -1448,33 +1425,6 @@ const PROBE_TIMEOUT: Duration = qsh_proto::local::LOCAL_WAIT_MAX;
 /// near long enough to read as "hung" (measured regression before this
 /// existed: 60.015 s per wedged socket, serially).
 const ADMIN_LIST_CANDIDATE_TIMEOUT: Duration = Duration::from_millis(1000);
-
-/// Whether the process named by `pid` — the pid `<pid>.sock`'s own
-/// filename already carries — is provably gone, via `kill(pid, 0)`
-/// (`man 2 kill`: signal `0` performs no signal delivery, only the
-/// existence/permission check). Only `ESRCH` ("no such process") counts as
-/// proof of death; a permission error (`EPERM`, a different uid holding
-/// that pid — impossible for a genuine same-user daemon, but not this
-/// function's job to assume) or success (the process exists) both leave
-/// the socket alone, because unlinking a live daemon's socket is
-/// unrecoverable for that process's lifetime while leaving a truly stale
-/// one costs nothing but a retry on the next discovery pass.
-fn process_is_verifiably_dead(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        // A pid that doesn't fit `pid_t` can't name a live process on this
-        // machine either way; treat it as dead so a garbage filename
-        // doesn't linger forever.
-        return true;
-    };
-    // SAFETY: `kill` with signal `0` sends no signal; it only performs the
-    // existence/permission check documented above, and touches no memory
-    // this function does not own.
-    let rc = unsafe { libc::kill(pid, 0) };
-    if rc == 0 {
-        return false; // the signal would have been delivered: pid exists.
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
 
 #[cfg(test)]
 mod tests;
