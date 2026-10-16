@@ -47,10 +47,10 @@ pub mod probe;
 /// `KeystoreSessionBound` (ADR-0032 결정 15, M17) is the twenty-seventh, 26 → 27.
 /// `LogonTaskSessionScoped` (ADR-0035 결정 27, M19) is the twenty-eighth,
 /// 27 → 28.
-/// The set is the same on every target: Windows builds know all 28 codes, and
-/// [`KEYSTORE_SESSION_BOUND`] is simply never emitted there before M19
-/// (ADR-0032 결정 15, ADR-0035 결정 27), while [`LOGON_TASK_SESSION_SCOPED`] is
-/// emitted on Windows only.
+/// The set is the same on every target: every build knows all 28 codes.
+/// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
+/// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
+/// ADR-0035 결정 27).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -307,9 +307,13 @@ pub const KEYSTORE_UNAVAILABLE: Diagnostic = Diagnostic {
 /// always-on forms are a macOS LaunchDaemon plist and, on Linux, a user unit
 /// together with the systemd linger marker ([`probe::always_on_form_present`]).
 /// Both are found by file existence alone, never by asking the service
-/// manager (ADR-0032 결정 14). The finding is never emitted on Windows before
-/// M19, which measures whether a `Password`-principal task reads Credential
-/// Manager (ADR-0032 결정 15, ADR-0035 결정 27). `warn`, because the service
+/// manager (ADR-0032 결정 14). On Windows the always-on form is the task of
+/// the inferred mode registered with a `Password` principal, which only the
+/// Task Scheduler COM read can tell (ADR-0032 결정 18, ADR-0035 결정 27).
+/// Whether such a task can read Credential Manager could not be measured
+/// without typing the account's password, which no test or qsh code does, so
+/// the finding is emitted on Windows as well rather than assuming it can.
+/// `warn`, because the service
 /// works until the key store is unreachable; `remedy` names the command that
 /// ends the dependency without changing the device id, certificate or
 /// fingerprint.

@@ -10,7 +10,7 @@ Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-d
 .SH OPTIONS
 .TP
 \fB\-\-deactivate\fR
-Release the unit from the service manager first (`launchctl bootout` / `systemctl \-\-user disable \-\-now`), then remove the unit file. The file is kept if the release fails
+Release the unit from the service manager first (`launchctl bootout` / `systemctl \-\-user disable \-\-now` / `schtasks /End` then `/Delete`), then remove the unit file. The file is kept if the release fails
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text

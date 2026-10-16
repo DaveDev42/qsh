@@ -1327,7 +1327,7 @@ pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
         None => writeln!(
             stdout,
             "Activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
-             systemctl --user enable --now on Linux)."
+             systemctl --user enable --now on Linux, schtasks /Create then /Run on Windows)."
         ),
         Some(ServiceActivation::Started) => writeln!(stdout, "{manager} loaded and started it."),
         Some(ServiceActivation::AlreadyActive) => writeln!(

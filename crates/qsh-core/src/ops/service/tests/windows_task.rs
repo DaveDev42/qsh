@@ -10,7 +10,7 @@ use crate::audit::{AuditError, AuditRecord, AuditSink};
 const EXE: &str = DOC_EXAMPLE_EXE_WINDOWS;
 const SID: &str = DOC_EXAMPLE_USER_SID;
 
-fn task_host(runner: &FakeRunner) -> ServiceHost<'_> {
+pub(super) fn task_host(runner: &FakeRunner) -> ServiceHost<'_> {
     host_for(Manager::TaskScheduler, runner, Path::new(""))
 }
 
@@ -24,7 +24,7 @@ fn decode_task_file(bytes: &[u8]) -> String {
 }
 
 /// The task file at `path`, decoded from UTF-16.
-fn read_task_file(path: &Path) -> String {
+pub(super) fn read_task_file(path: &Path) -> String {
     decode_task_file(&std::fs::read(path).unwrap())
 }
 
@@ -231,28 +231,6 @@ fn windows_uninstall_deletes_the_file_only() {
     assert_eq!(removed.deactivation, None);
     assert!(!Path::new(&installed.path).exists());
     assert!(runner.calls().is_empty());
-}
-
-#[test]
-fn windows_flags_are_unsupported_before_anything_is_read_or_written() {
-    let (_dir, ops) = temp_ops();
-    // A config the strict prefix would refuse: the flag check comes first.
-    std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
-    std::fs::write(ops.paths().config_file(), "not valid toml === {{{").unwrap();
-    let runner = FakeRunner::default();
-    let host = task_host(&runner);
-    for err in [
-        ops.service_install_with_home(&host, None, true)
-            .unwrap_err(),
-        ops.service_uninstall_with_home(&host, None, true)
-            .unwrap_err(),
-        ops.service_status_with_home(&host, None, true).unwrap_err(),
-    ] {
-        assert_eq!(err.code, ErrorCode::Unsupported);
-        assert!(!err.retryable);
-    }
-    assert!(runner.calls().is_empty());
-    assert!(!ops.paths().config_dir.join("service").exists());
 }
 
 /// Records, at the moment of each audit record, whether the task file is

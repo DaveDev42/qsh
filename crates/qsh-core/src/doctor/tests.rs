@@ -116,8 +116,7 @@ fn trust_pin_role_unset_has_the_stable_snake_case_code() {
 }
 
 /// ADR-0032 결정 15: the twenty-seventh code. The count is the same on every
-/// target; Windows builds know it too (it is only never emitted there before
-/// M19).
+/// target; Windows builds know it too.
 #[test]
 fn keystore_session_bound_has_the_stable_snake_case_code() {
     assert_eq!(

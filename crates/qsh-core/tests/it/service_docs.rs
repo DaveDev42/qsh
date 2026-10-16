@@ -23,8 +23,10 @@ use qsh_core::{
     DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_EXE_WINDOWS,
     DOC_EXAMPLE_HOME_MACOS, DOC_EXAMPLE_USER_SID, SERVICE_UNSUPPORTED_PLATFORM,
     launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
-    render_launchd_plist, render_systemd_unit, render_windows_task, systemd_daemon_reload_argv,
-    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
+    render_launchd_plist, render_systemd_unit, render_windows_task, schtasks_create_argv,
+    schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv, schtasks_run_argv,
+    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
+    systemd_is_active_argv,
 };
 
 use crate::docs;
@@ -273,6 +275,73 @@ fn service_md_windows_recipes_use_the_task_name_and_file_path_of_the_ops() {
     // ask for it.
     assert!(service_md.contains("/RP *"));
     assert!(!service_md.contains("/RP \""));
+}
+
+/// ADR-0032 decision 11 on the Task Scheduler: the `schtasks` lines in the
+/// Windows recipes are the argv `--activate` and `--deactivate` run, with the
+/// recipe's own placeholder for the definition file path.
+#[test]
+fn service_md_windows_recipes_match_the_schtasks_builders() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let file = r#""$env:USERPROFILE\.config\qsh\service\qsh-serve.task.xml""#;
+    for (what, argv) in [
+        ("query", schtasks_query_argv("serve")),
+        ("create", schtasks_create_argv("serve", file)),
+        ("run", schtasks_run_argv("serve")),
+        ("end", schtasks_end_argv("serve")),
+        ("delete", schtasks_delete_argv("serve")),
+    ] {
+        let line = argv.join(" ");
+        let fenced = service_md.lines().any(|recipe| recipe.trim() == line);
+        // `/Run` appears inline in prose (it is a step of `--activate`, not
+        // a line a person must type), so it may sit in a code span instead.
+        assert!(
+            fenced || (what == "run" && service_md.contains(&format!("`{line}`"))),
+            "docs/deploy/service.md has no `{line}` line ({what})"
+        );
+    }
+    // The lines of the recipe appear in the order the ops run them, as the
+    // launchd and systemd rows of
+    // `service_md_activation_recipes_match_the_argv_builders` require: the
+    // activation, then `/End` before `/Delete`.
+    let position = |argv: Vec<String>| {
+        let line = argv.join(" ");
+        service_md
+            .lines()
+            .position(|recipe| recipe.trim() == line)
+            .unwrap_or_else(|| panic!("docs/deploy/service.md has no `{line}` line"))
+    };
+    let create = position(schtasks_create_argv("serve", file));
+    let end = position(schtasks_end_argv("serve"));
+    let delete = position(schtasks_delete_argv("serve"));
+    assert!(
+        create < end && end < delete,
+        "the schtasks recipe lines are out of order: create {create}, end {end}, delete {delete}"
+    );
+    // Every `schtasks` line in a powershell fence is a builder line or the
+    // human-only always-on registration with `/RP *`.
+    let mut inside = false;
+    for line in service_md.lines() {
+        if line.starts_with("```powershell") {
+            inside = true;
+        } else if line.starts_with("```") {
+            inside = false;
+        } else if inside && line.trim().starts_with("schtasks ") {
+            let trimmed = line.trim();
+            let known = [
+                schtasks_query_argv("serve"),
+                schtasks_create_argv("serve", file),
+                schtasks_end_argv("serve"),
+                schtasks_delete_argv("serve"),
+            ]
+            .iter()
+            .any(|argv| argv.join(" ") == trimmed);
+            assert!(
+                known || trimmed.contains("/RP *"),
+                "docs/deploy/service.md has a schtasks line the builders do not produce: `{trimmed}`"
+            );
+        }
+    }
 }
 
 #[test]
@@ -555,8 +624,8 @@ fn service_md_launchdaemon_install_steps_are_in_order() {
     );
 }
 
-/// ADR-0032 decision 15: both always-on recipes (linger and the LaunchDaemon)
-/// tell a `platform` key store holder to move the key first, and the page
+/// ADR-0032 decision 15: the three always-on recipes (linger, the LaunchDaemon
+/// and the Windows `Password` task) tell a `platform` key store holder to move the key first, and the page
 /// names the command the doctor finding recommends.
 #[test]
 fn service_md_always_on_recipes_point_at_move_key() {
@@ -564,8 +633,8 @@ fn service_md_always_on_recipes_point_at_move_key() {
     let flattened = service_md.replace("\n", " ").replace("  ", " ");
     assert_eq!(
         flattened.matches("qsh identity move-key --to file").count(),
-        2,
-        "the launchd and the linger recipe each carry one move-key line"
+        3,
+        "the launchd, the linger and the Windows always-on recipe each carry one move-key line"
     );
     assert!(
         qsh_core::doctor::KEYSTORE_SESSION_BOUND

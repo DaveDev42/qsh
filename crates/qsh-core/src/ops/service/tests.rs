@@ -82,8 +82,19 @@ fn platform_manager() -> Manager {
     }
 }
 
-/// A host for `manager`, uid 501, with `system_root` standing in for `/`.
+/// A host for `manager`, uid 501, with `system_root` standing in for `/`. Its
+/// Task Scheduler reads find no task: not registered, so not running.
 fn host_for<'a>(manager: Manager, runner: &'a FakeRunner, system_root: &Path) -> ServiceHost<'a> {
+    host_with_scheduler(manager, runner, system_root, &NO_TASK)
+}
+
+/// [`host_for`] with the Task Scheduler reads answered by `scheduler`.
+fn host_with_scheduler<'a>(
+    manager: Manager,
+    runner: &'a FakeRunner,
+    system_root: &Path,
+    scheduler: &'a FakeScheduler,
+) -> ServiceHost<'a> {
     ServiceHost {
         manager,
         runner,
@@ -91,6 +102,81 @@ fn host_for<'a>(manager: Manager, runner: &'a FakeRunner, system_root: &Path) ->
         system_root: system_root.to_path_buf(),
         wsl: false,
         user_sid: Some(DOC_EXAMPLE_USER_SID.to_string()),
+        task_state: scheduler,
+        task_reader: scheduler,
+    }
+}
+
+/// The stand-in for both Task Scheduler COM reads (ADR-0032 decision 3,
+/// ADR-0035 decisions 27 and 28): whether the task is running, under which
+/// principal it is registered (`None` is "not registered"), and whether the
+/// scheduler can be read at all. Every queried task name is recorded.
+struct FakeScheduler {
+    running: bool,
+    logon: Option<TaskLogonType>,
+    unreadable: bool,
+    queried: Mutex<Vec<String>>,
+}
+
+impl FakeScheduler {
+    const fn new(running: bool, logon: Option<TaskLogonType>, unreadable: bool) -> Self {
+        Self {
+            running,
+            logon,
+            unreadable,
+            queried: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A registered task with this principal, running or not.
+    const fn registered(logon: TaskLogonType, running: bool) -> Self {
+        Self::new(running, Some(logon), false)
+    }
+
+    /// A scheduler that cannot be read.
+    const fn broken() -> Self {
+        Self::new(false, None, true)
+    }
+
+    fn queried(&self) -> Vec<String> {
+        self.queried.lock().unwrap().clone()
+    }
+
+    fn read_error(&self, what: &str) -> OpError {
+        OpError::new(
+            ErrorCode::Internal,
+            format!("the Task Scheduler could not be read ({what})"),
+        )
+        .with_retryable(false)
+    }
+}
+
+/// A scheduler with no `\qsh\…` task registered.
+static NO_TASK: FakeScheduler = FakeScheduler::new(false, None, false);
+
+impl TaskStateQuery for FakeScheduler {
+    fn is_running(&self, task_name: &str) -> Result<bool, OpError> {
+        self.queried
+            .lock()
+            .unwrap()
+            .push(format!("state {task_name}"));
+        if self.unreadable {
+            return Err(self.read_error("state"));
+        }
+        Ok(self.running)
+    }
+}
+
+impl TaskDefinitionReader for FakeScheduler {
+    fn logon_type(&self, task_name: &str) -> Result<Option<TaskLogonType>, OpError> {
+        self.queried
+            .lock()
+            .unwrap()
+            .push(format!("principal {task_name}"));
+        if self.unreadable {
+            return Err(self.read_error("principal"));
+        }
+        Ok(self.logon)
     }
 }
 
@@ -114,6 +200,16 @@ const BOTH_MANAGERS: [Manager; 2] = [Manager::Launchd, Manager::Systemd];
 
 fn temp_home() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+/// Writes the Task Scheduler definition file of the inferred mode as a
+/// previous `install` would, with a runner of its own.
+fn windows_manager_seed(ops: &Ops) -> PathBuf {
+    let runner = FakeRunner::default();
+    let host = host_for(Manager::TaskScheduler, &runner, Path::new(""));
+    let data = ops.service_install_with_home(&host, None, false).unwrap();
+    assert!(runner.calls().is_empty());
+    PathBuf::from(data.path)
 }
 
 fn write_config(ops: &Ops, toml: &str) {
@@ -711,6 +807,24 @@ fn install_activate_argv_covers_serve_listen_and_reverse_modes() {
                 "no call restarts a unit: {calls:?}"
             );
         }
+
+        // Task Scheduler row: the same mode rules, one `/Create` and one `/Run`.
+        let (_dir, ops) = ops_with(config);
+        let runner = FakeRunner::default();
+        let host = host_for(Manager::TaskScheduler, &runner, Path::new(""));
+        let data = ops.service_install_with_home(&host, None, true).unwrap();
+        assert_eq!(data.mode, mode);
+        assert_eq!(
+            runner.calls(),
+            vec![
+                format!(
+                    r"schtasks /Create /F /TN \qsh\qsh-{mode} /XML {}",
+                    data.path
+                ),
+                format!(r"schtasks /Run /TN \qsh\qsh-{mode}"),
+            ],
+            "task_scheduler {mode}"
+        );
     }
 }
 
@@ -768,6 +882,37 @@ fn manager_argv_never_contains_user_input() {
                 "{manager:?}: unexpected argv {call:?}"
             );
         }
+    }
+
+    // Task Scheduler row: the literal is in the task file and in no argv.
+    let (_dir, ops) = ops_with(&format!(
+        "[serve]\nto = \"{}\"\n",
+        hostile.replace('\\', "\\\\").replace('"', "\\\"")
+    ));
+    let runner = FakeRunner::default();
+    let host = host_for(Manager::TaskScheduler, &runner, Path::new(""));
+    let data = ops.service_install_with_home(&host, None, true).unwrap();
+    assert_eq!(data.mode, "reverse");
+    let task = windows_task::read_task_file(Path::new(&data.path));
+    assert!(task.contains("--now"), "{task}");
+    let allowed: Vec<String> = [
+        schtasks_query_argv("reverse"),
+        schtasks_create_argv("reverse", &data.path),
+        schtasks_run_argv("reverse"),
+        schtasks_end_argv("reverse"),
+        schtasks_delete_argv("reverse"),
+    ]
+    .iter()
+    .map(|argv| argv.join(" "))
+    .collect();
+    ops.service_status_with_home(&host, None, true).unwrap();
+    ops.service_uninstall_with_home(&host, None, true).unwrap();
+    assert!(!runner.calls().is_empty());
+    for call in runner.calls() {
+        assert!(
+            allowed.contains(&call),
+            "task_scheduler: unexpected argv {call:?}"
+        );
     }
 }
 
@@ -839,6 +984,24 @@ fn deactivate_calls_disable_for_a_registered_but_inactive_unit() {
             "launchctl bootout gui/501/io.qsh.serve",
         ]
     );
+
+    // Task Scheduler: registered (`/Query` exits 0) but not running, so there
+    // is nothing to `/End` and only `/Delete /F` follows.
+    let (_dir, ops) = ops_with("");
+    let path = windows_manager_seed(&ops);
+    let runner = FakeRunner::default();
+    let host = host_for(Manager::TaskScheduler, &runner, root.path());
+    let data = ops.service_uninstall_with_home(&host, None, true).unwrap();
+    assert_eq!(data.deactivation, Some(ServiceDeactivation::Stopped));
+    assert!(data.removed);
+    assert!(!path.exists());
+    assert_eq!(
+        runner.calls(),
+        vec![
+            r"schtasks /Query /TN \qsh\qsh-serve",
+            r"schtasks /Delete /F /TN \qsh\qsh-serve",
+        ]
+    );
 }
 
 #[test]
@@ -864,6 +1027,17 @@ fn deactivate_skips_when_the_unit_is_not_registered() {
     assert_eq!(data.deactivation, Some(ServiceDeactivation::NotActive));
     assert!(data.removed, "the file is still removed");
     assert_eq!(runner.calls(), vec!["launchctl print gui/501/io.qsh.serve"]);
+
+    // Task Scheduler: `/Query` exits non-zero, so only the query ran.
+    let (_dir, ops) = ops_with("");
+    let path = windows_manager_seed(&ops);
+    let runner = FakeRunner::exiting(1);
+    let host = host_for(Manager::TaskScheduler, &runner, root.path());
+    let data = ops.service_uninstall_with_home(&host, None, true).unwrap();
+    assert_eq!(data.deactivation, Some(ServiceDeactivation::NotActive));
+    assert!(data.removed, "the file is still removed");
+    assert!(!path.exists());
+    assert_eq!(runner.calls(), vec![r"schtasks /Query /TN \qsh\qsh-serve"]);
 }
 
 #[test]
@@ -1013,6 +1187,24 @@ fn activate_and_deactivate_leave_a_human_installed_always_on_form_untouched() {
     // No run named the `system` domain, and the always-on plist is never
     // removed.
     assert!(daemon.exists(), "the always-on plist is never removed");
+
+    // Task Scheduler: the always-on form is the task registered with a stored
+    // password. The file is written and removed, the manager is never called.
+    let (_dir, ops) = ops_with("");
+    let runner = FakeRunner::default();
+    let scheduler = FakeScheduler::registered(TaskLogonType::Password, false);
+    let host = host_with_scheduler(Manager::TaskScheduler, &runner, root.path(), &scheduler);
+    let data = ops.service_install_with_home(&host, None, true).unwrap();
+    assert_eq!(data.activation, Some(ServiceActivation::AlwaysOnPresent));
+    assert!(data.created);
+    assert!(Path::new(&data.path).exists());
+    let data = ops.service_uninstall_with_home(&host, None, true).unwrap();
+    assert_eq!(
+        data.deactivation,
+        Some(ServiceDeactivation::AlwaysOnPresent)
+    );
+    assert!(data.removed);
+    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
 }
 
 #[test]
@@ -1040,6 +1232,28 @@ fn status_live_reports_the_always_on_form_when_present() {
         err.message
     );
     assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+
+    // Task Scheduler: the always-on task has the name of the default one, so
+    // the COM state is the answer and no `schtasks` process is started.
+    for running in [true, false] {
+        let (_dir, ops) = ops_with("");
+        windows_manager_seed(&ops);
+        let runner = FakeRunner::default();
+        let scheduler = FakeScheduler::registered(TaskLogonType::Password, running);
+        let host = host_with_scheduler(Manager::TaskScheduler, &runner, root.path(), &scheduler);
+        let data = ops.service_status_with_home(&host, None, true).unwrap();
+        assert_eq!((data.installed, data.active), (true, Some(running)));
+        assert_eq!(scheduler.queried(), [r"state \qsh\qsh-serve"]);
+        assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+    }
+    // No file, no question: the scheduler is not asked.
+    let (_dir, ops) = ops_with("");
+    let runner = FakeRunner::default();
+    let scheduler = FakeScheduler::registered(TaskLogonType::Password, true);
+    let host = host_with_scheduler(Manager::TaskScheduler, &runner, root.path(), &scheduler);
+    let data = ops.service_status_with_home(&host, None, true).unwrap();
+    assert_eq!((data.installed, data.active), (false, Some(false)));
+    assert!(scheduler.queried().is_empty());
 }
 
 #[test]
@@ -1159,6 +1373,35 @@ fn a_missing_manager_binary_is_unsupported_and_a_nonzero_exit_is_internal_with_e
         assert_eq!(err.details["exit_code"], 7);
         assert!(err.message.contains("manager says no"), "{}", err.message);
     }
+
+    // Task Scheduler: `schtasks.exe` is not found, or `/Create` exits 7.
+    let (_dir, ops) = ops_with("");
+    let runner = FakeRunner::with(|_| Err(RunError::NotFound));
+    let host = host_for(Manager::TaskScheduler, &runner, Path::new(""));
+    let err = ops
+        .service_install_with_home(&host, None, true)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert!(
+        err.message.contains("docs/deploy/service.md"),
+        "{}",
+        err.message
+    );
+    let runner = FakeRunner::with(|argv| {
+        if argv.iter().any(|a| a == "/Create") {
+            Ok(exit(7, "manager says no"))
+        } else {
+            Ok(exit(0, ""))
+        }
+    });
+    let host = host_for(Manager::TaskScheduler, &runner, Path::new(""));
+    let err = ops
+        .service_install_with_home(&host, None, true)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert_eq!(err.details["step"], "activate");
+    assert_eq!(err.details["exit_code"], 7);
+    assert!(err.message.contains("manager says no"), "{}", err.message);
 }
 
 #[test]
@@ -1321,56 +1564,5 @@ fn activation_flags_cannot_be_defaulted_by_config_or_env() {
     }
 }
 
-/// The Task Scheduler row's `--activate`, `--deactivate` and `--live` are
-/// later work (ADR-0032 decision 10, ADR-0035 decisions 27 and 28): on
-/// Windows they end in `UNSUPPORTED` before the config is read or anything is
-/// written, and no manager is called.
-#[cfg(windows)]
-#[test]
-fn service_activation_flags_are_unsupported_on_windows_before_m19() {
-    let (_dir, ops) = temp_ops();
-    std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
-    std::fs::write(ops.paths().config_file(), "not valid toml === {{{").unwrap();
-    let runner = FakeRunner::default();
-    assert!(ServiceHost::resolve(&runner).is_ok());
-    for err in [
-        ops.service_install(true).unwrap_err(),
-        ops.service_uninstall(true).unwrap_err(),
-        ops.service_status(true).unwrap_err(),
-    ] {
-        assert_eq!(err.code, ErrorCode::Unsupported);
-    }
-    assert!(runner.calls().is_empty());
-}
-
+mod windows_manager;
 mod windows_task;
-
-/// The stand-in for the Task Scheduler COM state query (ADR-0035 decision
-/// 28): the tasks named at construction are running, every other name is
-/// not, and each queried name is recorded.
-struct FakeTaskState {
-    running: Vec<String>,
-    queried: Mutex<Vec<String>>,
-}
-
-impl TaskStateQuery for FakeTaskState {
-    fn is_running(&self, task_name: &str) -> Result<bool, OpError> {
-        self.queried.lock().unwrap().push(task_name.to_string());
-        Ok(self.running.iter().any(|name| name == task_name))
-    }
-}
-
-#[test]
-fn task_state_query_is_object_safe_and_answers_by_task_name() {
-    let fake = FakeTaskState {
-        running: vec![r"\qsh\qsh-serve".to_string()],
-        queried: Mutex::new(Vec::new()),
-    };
-    let query: &dyn TaskStateQuery = &fake;
-    assert!(query.is_running(r"\qsh\qsh-serve").unwrap());
-    assert!(!query.is_running(r"\qsh\qsh-listen").unwrap());
-    assert_eq!(
-        *fake.queried.lock().unwrap(),
-        [r"\qsh\qsh-serve", r"\qsh\qsh-listen"]
-    );
-}

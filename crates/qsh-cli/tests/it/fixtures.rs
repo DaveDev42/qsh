@@ -1262,7 +1262,8 @@ fn golden_identity_move_key_fixtures() {
 /// tempdir roots, wrapped in the same `qsh.cli/v1` envelope the binary's
 /// `Envelope::success` builds. Both OS shapes are laid down and the one for
 /// the build target is read, so macOS and Linux produce the same bytes. The
-/// Windows build never emits the finding before M19 and skips this test.
+/// Windows build reads its always-on form from the Task Scheduler instead of
+/// from files, so this file-based fixture is skipped there.
 #[test]
 fn golden_doctor_keystore_session_bound_fixture() {
     use qsh_core::{DoctorHostState, Ops, Paths};
@@ -1594,12 +1595,14 @@ fn service_ops_on_windows_use_the_task_definition_file() {
     assert_eq!(value["data"]["removed"], true, "{value}");
     assert!(!task.exists(), "the task definition file was removed");
 
-    // The activation flags stay UNSUPPORTED on this manager, before any file
-    // is touched.
-    let (code, value) = sandbox.json(&["service", "install", "--activate", "--json"]);
-    assert_eq!(code, 255, "{value}");
-    assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
-    assert!(!task.exists(), "a refused install writes nothing");
+    // `status --live` with no task file is `active: false` without a scheduler
+    // read, and `--activate` and `--deactivate` are not run here at all: they
+    // would register and delete a real task of this machine. The recording
+    // runner of `qsh-core` covers their `schtasks` argv.
+    let (code, value) = sandbox.json(&["service", "status", "--live", "--json"]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["installed"], false, "{value}");
+    assert_eq!(value["data"]["active"], false, "{value}");
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

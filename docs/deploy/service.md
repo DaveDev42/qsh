@@ -25,8 +25,12 @@ config key or environment variable turns them on:
 | `qsh service uninstall --deactivate` | Releases the unit from the manager first, then removes the file. If the release fails the file stays. Without the flag a running unit keeps running. |
 | `qsh service status --live` | Reports whether the unit is running, from one exit code of the manager. |
 
-On Windows the three flags answer `UNSUPPORTED` and change nothing: the Task
-Scheduler task is registered with the `schtasks` commands below.
+On Windows the flags drive `schtasks` and the Task Scheduler COM API instead
+of a unit manager: `--activate` runs `schtasks /Create /F` (and `/Run` when
+the task is not already running), `--deactivate` runs `/End` for a running
+task and then `/Delete /F`, and `--live` reads the task state through COM.
+The commands are the ones under "Register, check, stop" below. Without the
+flags `qsh service` registers nothing.
 
 `qsh service` never restarts a unit. A restart ends every detached session
 (Notes for both below), so it stays a decision for a person.
@@ -424,9 +428,10 @@ The unit file is still written, so run the command again once systemd is up.
 `qsh service install` writes one task definition per run mode to
 `%USERPROFILE%\.config\qsh\service\qsh-<mode>.task.xml` (`<config_dir>\service`),
 with an owner-only DACL. `qsh service status` reports whether that file
-exists, and `qsh service uninstall` deletes it. None of the three starts
-`schtasks`, registers anything or reads the scheduler. Registering the task is
-the recipe below, run by you. The task name is `\qsh\qsh-<mode>`.
+exists, and `qsh service uninstall` deletes it. Without a flag none of the
+three starts `schtasks`, registers anything or reads the scheduler. Registering
+the task is either `qsh service install --activate` or the recipe below, run by
+you. The task name is `\qsh\qsh-<mode>`.
 
 The file is UTF-16 little-endian with a byte order mark, and the XML says
 `encoding="UTF-16"`. That is the one encoding `schtasks /Create /XML` accepted
@@ -601,9 +606,16 @@ schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\servic
 schtasks /Query /TN \qsh\qsh-serve
 ```
 
-`/F` replaces an existing task of that name. The task starts at your next
-logon; to start it now, log off and on, or run `schtasks /Run /TN
-\qsh\qsh-serve`. Registering a task with this definition needed no elevation.
+`/F` replaces an existing task of that name. It does not stop an instance that
+is running (Measured below), so a new binary path applies at the next start.
+The task starts at your next logon; to start it now, log off and on, or run
+`schtasks /Run /TN \qsh\qsh-serve`. Registering a task with this definition
+needed no elevation. `qsh service install --activate` runs the `/Create` line
+and then the `/Run` line, and skips `/Run` when the task is already running.
+The task is an `InteractiveToken` task, so it starts only in a logged-on
+interactive session. Over an ssh login with no desktop session, `/Run` ends
+non-zero and `--activate` ends with `INTERNAL`; the definition is registered
+anyway.
 
 Stop and remove it:
 
@@ -614,8 +626,14 @@ schtasks /Delete /F /TN \qsh\qsh-serve
 
 `/End` stops the running process, and the repetition starts it again at the
 next minute. `/Delete /F` is the way to stop it for good. `qsh service
+uninstall --deactivate` runs `/End` (only when the task is running) and then
+`/Delete /F`, and removes the file after both succeed. Plain `qsh service
 uninstall` deletes only the file; it does not touch a registered task, so run
 `/Delete` first.
+
+`qsh service status --live` does not run `schtasks`: `schtasks /Query` exits 0
+for any registered task and puts the state only in localized text. It reads the
+task state from the Task Scheduler COM API, as `qsh doctor` does.
 
 `qsh doctor` reads the file, not the scheduler, for these two: it reports
 `service_not_registered` (info) when the file is absent, and
@@ -701,6 +719,22 @@ change.
 The `qsh doctor` warning `logon_task_session_scoped` is silent for this task,
 because the scheduler reports a `Password` principal.
 
+`qsh service install --activate` leaves a task like this alone. When the
+scheduler reports a `Password` principal for `\qsh\qsh-serve`, the command
+writes the file, runs no `schtasks` command, and answers `activation:
+always_on_present`: `/Create /F` would replace the definition with the default
+one. `qsh service uninstall --deactivate` likewise only removes the file
+(`deactivation: always_on_present`). To remove an always-on task, run the
+`/End` and `/Delete /F` lines above from an elevated prompt. `qsh service
+status --live` reports whether that task is running.
+
+A `platform` key store (Windows Credential Manager) belongs to a logon
+session. A `Password` task may run without one, so `qsh doctor` reports
+`keystore_session_bound` for it. Run `qsh identity move-key --to file` before
+you rely on the always-on task. Whether a `Password` task can read the
+Credential Manager could not be measured without typing a password, so the
+warning assumes it cannot.
+
 The always-on variant was not run during the measurements below: a
 `BootTrigger` cannot be registered without elevation, and the stored password
 is yours to supply. The file is the default task with the two changes above
@@ -718,6 +752,7 @@ afterwards. No password was typed or stored.
 | Does `RestartOnFailure` start the action again after it exits non-zero? | No. A task that exited with code 3 and one that crashed with `FailFast` (exit code `0xE0434352`), each with `RestartOnFailure` `PT1M` and `Count` 3, were started once and never again over 4 minutes. |
 | Does a `Repetition` of `PT1M` with no `Duration`, plus `IgnoreNew`, start a dead task again? | Yes. A 5 second task that exits with 3 started at 22:42:33, 22:43:34, 22:44:34 and 22:45:34. For a 100 second task the tick at 60 seconds was ignored and the next start was at 121 seconds, so there was never a second copy. |
 | Does a `LogonTrigger` with a `Repetition` register, and does the scheduler report it back? | Yes, with no elevation. Read back through the COM API, `Repetition.Interval` was `PT1M`. |
+| Does `/Create /F` on a running task stop or restart it? | No. With a task running a `ping` action, `/Create /F` with a changed description left the same process (same PID, state Running) and the scheduler held the new description. `qsh service install --activate` therefore runs `/Create` only, and answers `already_active`. |
 | Can a standard user register a `BootTrigger` task? | No. With an `InteractiveToken`, a `Password` and an `S4U` principal alike, `schtasks /Create` answered `ERROR: Access is denied.` The always-on variant needs an elevated prompt. |
 | Can a standard user register a `LogonType` of `Password` task? | Not without the password: `ERROR: The user name or password is incorrect.` |
 | Which encodings does `schtasks /Create /XML` accept? | UTF-16 little-endian with a byte order mark and `encoding="UTF-16"`. UTF-8 with the declaration, and UTF-8 with a byte order mark, were both rejected as `task XML is malformed`. |
