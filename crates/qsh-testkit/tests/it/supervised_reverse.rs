@@ -13,8 +13,6 @@
 //! new identity. Its tests script the daemon instead and live next to the
 //! supervisor, in `crates/qsh-core/src/ops/tunnel/supervise/tests.rs`.
 
-#![cfg(unix)]
-
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -483,12 +481,16 @@ async fn supervised_reverse_local_reestablishes_after_a_listen_daemon_restart() 
     result.expect("the first registration ends cleanly");
     first.shutdown().await;
 
-    // A second daemon binds another socket (the pid of a process that is
-    // alive, because discovery unlinks the socket of a dead one) and the
-    // target registers with it.
-    let second_localctl = second
-        .attach_localctl_as(&paths, std::os::unix::process::parent_id())
-        .await;
+    // A second daemon binds another endpoint and the target registers with
+    // it. On unix the name carries the pid of a process that is alive (the
+    // parent), because discovery unlinks the socket of a dead one. A pipe
+    // vanishes with its owner, so on Windows any pid other than this
+    // process's own tells the two endpoints apart.
+    #[cfg(unix)]
+    let second_pid = std::os::unix::process::parent_id();
+    #[cfg(windows)]
+    let second_pid = std::process::id().wrapping_add(1);
+    let second_localctl = second.attach_localctl_as(&paths, second_pid).await;
     let (s2_tx, s2_rx) = oneshot::channel::<()>();
     let stage_two = second.run_target(&target, "device-id", "controller", None, async {
         let _ = s2_rx.await;

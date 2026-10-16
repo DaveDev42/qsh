@@ -36,6 +36,12 @@ fn at(ms: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).expect("positive test time"))
 }
 
+/// A detector whose monotonic sample is tokio's own (paused) clock, like the
+/// fake wall clock, on every platform.
+fn detector(clock: &Arc<FakeWall>) -> WakeDetector {
+    WakeDetector::with_mono_source(clock.clone(), Instant::now)
+}
+
 fn sense() -> (WakeSense, SystemTime, Instant) {
     let wall = at(FakeWall::ORIGIN_MS);
     let mono = Instant::now();
@@ -117,7 +123,7 @@ fn a_wall_clock_behind_the_monotonic_step_is_not_a_wake() {
 #[tokio::test(start_paused = true)]
 async fn wake_detector_task_publishes_a_wake_with_its_slept_time() {
     let clock = FakeWall::new();
-    let det = WakeDetector::new(clock.clone());
+    let det = detector(&clock);
     let mut rx = det.subscribe();
     assert_eq!(*rx.borrow_and_update(), WakeEvent::default());
     // Sixty seconds of sleep land inside the next tick, on top of that
@@ -135,7 +141,7 @@ async fn wake_detector_task_publishes_a_wake_with_its_slept_time() {
 #[tokio::test(start_paused = true)]
 async fn wake_detector_delivers_every_wake_to_a_subscriber_that_was_busy() {
     let clock = FakeWall::new();
-    let det = WakeDetector::new(clock.clone());
+    let det = detector(&clock);
     let mut busy = det.subscribe();
     let mut waiting = det.subscribe();
 
@@ -176,7 +182,7 @@ async fn wake_detector_delivers_every_wake_to_a_subscriber_that_was_busy() {
 #[tokio::test(start_paused = true)]
 async fn wake_detector_stops_with_its_last_subscriber_and_restarts_on_the_next() {
     let clock = FakeWall::new();
-    let det = WakeDetector::new(clock.clone());
+    let det = detector(&clock);
     let rx = det.subscribe();
     drop(rx);
     // Let the task notice there is nobody left and retire itself.
@@ -209,11 +215,61 @@ async fn wake_detector_stops_with_its_last_subscriber_and_restarts_on_the_next()
 #[tokio::test(start_paused = true)]
 async fn wake_detector_ignores_a_backward_step_end_to_end() {
     let clock = FakeWall::new();
-    let det = WakeDetector::new(clock.clone());
+    let det = detector(&clock);
     let mut rx = det.subscribe();
     clock.shift(-3_600_000);
     // Give the detector plenty of ticks: none may publish.
     let quiet = tokio::time::timeout(Duration::from_secs(10), rx.changed()).await;
     assert!(quiet.is_err(), "a backward step must never publish a wake");
     assert_eq!(rx.borrow().seq, 0);
+}
+
+#[test]
+fn unbiased_counter_ticks_are_hundred_nanosecond_units() {
+    assert_eq!(unbiased_ticks_to_duration(0), Duration::ZERO);
+    assert_eq!(
+        unbiased_ticks_to_duration(10_000_000),
+        Duration::from_secs(1)
+    );
+    // A counter at the top of its range saturates instead of wrapping.
+    assert_eq!(
+        unbiased_ticks_to_duration(u64::MAX),
+        Duration::from_nanos(u64::MAX)
+    );
+}
+
+#[test]
+fn wake_sample_excludes_suspended_time_by_contract() {
+    // The Windows sample must come from the counter documented to leave
+    // suspended time out. `QueryInterruptTime` and the performance counter
+    // both include it, and would make the detector deaf (ADR-0035 decision
+    // 15). Everywhere else the sample is tokio's `Instant`, which stops while
+    // the machine sleeps. The real suspend and resume is a campaign round.
+    let expected = if cfg!(windows) {
+        "QueryUnbiasedInterruptTime"
+    } else {
+        "tokio::time::Instant"
+    };
+    assert_eq!(MONO_SAMPLE_SOURCE, expected);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_wake_sample_is_monotonic() {
+    let mut previous = mono_sample();
+    let start = previous;
+    let deadline = std::time::Instant::now() + Duration::from_millis(60);
+    while std::time::Instant::now() < deadline {
+        let next = mono_sample();
+        assert!(next >= previous, "the sample must never step backwards");
+        previous = next;
+        std::thread::yield_now();
+    }
+    // It advances with real time while the machine is awake: a sample stuck
+    // at its anchor would make every awake tick look like a negative skew.
+    assert!(
+        previous.duration_since(start) >= Duration::from_millis(20),
+        "the sample must follow elapsed time, moved only {:?}",
+        previous.duration_since(start)
+    );
 }

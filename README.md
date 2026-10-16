@@ -920,9 +920,10 @@ Some of these are MVP scope decisions, some are unfinished work.
   A TCP connection that was spliced when the connection died lives on only
   if the old connection comes back, which only a forward route can do;
   otherwise it ends, and only new connections ride the re-established one.
-  Sleep detection compares the wall clock with the monotonic clock. Whether
-  the monotonic clock stops during sleep on Windows is unverified, so a lost
-  connection there may be found only by the ordinary dead-path detection.
+  Sleep detection compares the wall clock with a monotonic clock that does
+  not count suspended time: tokio's `Instant` on macOS and Linux, and
+  `QueryUnbiasedInterruptTime` on Windows. A real suspend-and-resume on
+  Windows is checked by hand, not by CI.
 - `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
   unless told otherwise, so a machine taking both roles needs an explicit
   `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The

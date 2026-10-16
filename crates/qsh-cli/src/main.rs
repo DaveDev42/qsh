@@ -1339,7 +1339,9 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
     hold_tunnel(hold, shutdown)
 }
 
-/// SIGINT and SIGTERM, registered on the tunnel's own runtime.
+/// SIGINT and SIGTERM, registered on the tunnel's own runtime. On Windows the
+/// stop is `Ctrl-C` or a closing console (`CTRL_BREAK`, window close, log
+/// off, shutdown), armed the way `qsh serve` arms it.
 ///
 /// Registered *before* the envelope is printed: a caller that reads the
 /// envelope and signals at once must find the handler already in place,
@@ -1350,6 +1352,8 @@ struct TunnelShutdown {
     interrupt: tokio::signal::unix::Signal,
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    stop: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 }
 
 impl TunnelShutdown {
@@ -1365,7 +1369,13 @@ impl TunnelShutdown {
                 terminate,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Some(Self {
+                stop: arm_shutdown_signal_on(handle),
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Some(Self {})
         }
@@ -1383,7 +1393,11 @@ impl TunnelShutdown {
                 _ = terminate.recv() => {}
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.stop.await;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = tokio::signal::ctrl_c().await;
         }
@@ -1410,6 +1424,8 @@ fn hold_tunnel(hold: qsh_core::TunnelHold, shutdown: Option<TunnelShutdown>) -> 
         Some(shutdown) => hold.hold_until(shutdown.wait()),
         None => Some(hold.hold()),
     };
+    // Lets a console close that is waiting on this process go (Windows only).
+    console_shutdown_finished();
     match ended {
         Some(err) => {
             if let Err(io_err) = human::print_error(&err) {
@@ -1808,7 +1824,15 @@ fn arm_shutdown_signal(
 fn arm_shutdown_signal(
     runtime: &tokio::runtime::Runtime,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    let _guard = runtime.enter();
+    arm_shutdown_signal_on(runtime.handle())
+}
+
+/// [`arm_shutdown_signal`] for a runtime that is only reachable by handle.
+#[cfg(windows)]
+fn arm_shutdown_signal_on(
+    handle: &tokio::runtime::Handle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    let _guard = handle.enter();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let tx = std::sync::Mutex::new(Some(tx));
     tui::windows::arm_shutdown(move || {

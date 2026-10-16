@@ -2,24 +2,20 @@
 //! purity and the one-line diagnostics on stderr (ADR-0023 decisions 11 and
 //! 12, `docs/CLI.md` §6.14).
 //!
-//! The host is a real `qsh serve` that a test kills with SIGKILL and, where
-//! the scenario needs the peer back, starts again on the address it had.
-
-#![cfg(unix)]
+//! The host is a real `qsh serve` that a test kills outright (SIGKILL, or
+//! `TerminateProcess` on Windows) and, where the scenario needs the peer
+//! back, starts again on the address it had.
 
 use crate::common;
 
 use qsh_testkit::net_probe::free_port;
 use std::io::{BufRead as _, BufReader};
-use std::net::TcpListener;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use common::{Fleet, HOST_ALIAS, ServeGuard, poll_until};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(90);
@@ -67,9 +63,8 @@ impl Holder {
             "--json",
         ];
         args.extend_from_slice(extra);
-        let mut child = fleet
-            .client
-            .command(&args)
+        let mut command = fleet.client.command(&args);
+        let mut child = common::own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -126,8 +121,14 @@ impl Holder {
         });
     }
 
-    fn signal(&self, signal: Signal) {
-        let _ = kill(Pid::from_raw(self.child.id() as i32), signal);
+    /// The graceful stop: `SIGTERM` on unix, `CTRL_BREAK` to the child's own
+    /// process group on Windows. Never falls back to a kill, so a stop that
+    /// cannot be sent fails the test instead of passing on a dead process.
+    fn stop(&self) {
+        assert!(
+            common::send_stop(self.child.id()),
+            "the graceful stop could not be sent"
+        );
     }
 
     /// Wait for the child to exit on its own and return its exit code.
@@ -172,10 +173,10 @@ fn supervise_lines(lines: &[String]) -> Vec<Value> {
         .collect()
 }
 
-/// SIGKILL the running host and wait until it is gone.
+/// Kill the running host outright and wait until it is gone.
 fn kill_host(fleet: &mut Fleet) -> String {
     let addr = fleet.serve.addr().to_string();
-    fleet.serve.signal(Signal::SIGKILL);
+    fleet.serve.kill_hard();
     fleet
         .serve
         .wait_timeout(Duration::from_secs(10))
@@ -200,10 +201,11 @@ fn supervised_sigterm_during_an_outage_releases_the_listener_and_exits_zero() {
     kill_host(&mut fleet);
     holder.wait_for("lost", 1);
 
-    holder.signal(Signal::SIGTERM);
+    holder.stop();
     assert_eq!(holder.wait_exit(), 0, "stderr: {:?}", holder.stderr_lines());
     // The listener went with the process.
-    TcpListener::bind(("127.0.0.1", holder.port)).expect("the port is free after SIGTERM");
+    std::net::TcpListener::bind(("127.0.0.1", holder.port))
+        .expect("the port is free after the graceful stop");
     assert!(
         holder
             .supervise_lines()

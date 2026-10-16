@@ -19,7 +19,7 @@ use crate::route_cases::{self as cases, ReverseRoute, Route, TunnelHolder};
 
 use std::time::Duration;
 
-use common::{ListenGuard, poll_until, steady_bind};
+use common::{ListenGuard, ReverseGuard, poll_until, steady_bind};
 
 /// A registration made through a controller that was just killed is noticed
 /// at the idle timeout at the latest, so the waits that depend on that get
@@ -175,4 +175,52 @@ fn tunnels_and_tunnel_close_reach_the_daemon() {
         .json(&["tunnel", "close", &tunnel_id, "--json"]);
     assert_eq!(code, 0, "{again}");
     assert_eq!(again["data"]["closed"], false, "{again}");
+}
+
+/// `--supervise -R` on the reverse route, the daemon's reverse connection
+/// being the carrier: the target is killed outright and started again, and the
+/// tunnel is back (one `lost` and one `reestablished` line naming the old id
+/// as `previous_tunnel_id`, one stdout envelope) with its remote port
+/// answering through the new registration (ADR-0035 decision 15,
+/// `docs/CLI.md` §6.14). The operator-close discrimination
+/// (`LocalHostList`/`LocalTunnelList`) is what keeps the supervisor from
+/// reading this loss as a `qsh tunnel close`.
+#[test]
+fn windows_supervised_remote_tunnel_survives_a_target_reconnect() {
+    let mut route = ReverseRoute::start();
+    let echo = cases::start_echo();
+    let remote_port = qsh_testkit::net_probe::free_port();
+    let spec = format!("{remote_port}:127.0.0.1:{}", echo.port());
+
+    let (holder, envelope) = TunnelHolder::open_supervised(&route, "--remote", &spec, 120_000);
+    let tunnel_id = envelope["data"]["tunnel_id"].clone();
+    cases::round_trip(remote_port, b"before".to_vec()).expect("echo before the reconnect");
+
+    // The target goes away with nothing said to the daemon, and comes back.
+    drop(route.reverse);
+    let lost = holder.wait_supervise("lost", 1, NOTICE_DEADLINE);
+    assert_eq!(lost[0]["tunnel_id"], tunnel_id);
+    route.reverse = ReverseGuard::start_serve_to(&route.target, cases::CONTROLLER_ALIAS);
+    let back = holder.wait_supervise("reestablished", 1, NOTICE_DEADLINE);
+    // A `-R` re-issue gets a new forward id; the line names the one it replaces.
+    assert_eq!(back[0]["previous_tunnel_id"], tunnel_id, "{back:?}");
+    assert_eq!(back[0]["route"], "reverse", "{back:?}");
+
+    // The remote port answers again through the new registration. The new
+    // target process binds it just after the line is logged.
+    poll_until(
+        "the remote port to answer again",
+        cases::READY_DEADLINE,
+        || {
+            cases::round_trip(remote_port, b"after".to_vec())
+                .is_ok_and(|got| got == b"after")
+                .then_some(())
+        },
+    );
+
+    let rest = holder.finish();
+    assert!(
+        rest.is_empty(),
+        "stdout carried more than the envelope: {rest:?}"
+    );
 }

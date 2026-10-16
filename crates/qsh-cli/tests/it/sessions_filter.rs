@@ -13,9 +13,13 @@
 //! (ADR-0035 decision 25), so every test that needs a live session seeds it
 //! under `cfg(unix)`; on Windows the same tests run over a host with zero
 //! sessions, which still drives the filter and the forward route on the
-//! Windows client. The reverse twin of the Windows `qsh listen` daemon
-//! fan-out is M19 (ADR-0035 decision 14), so the route-equivalence test is
-//! unix-only.
+//! Windows client. The route-equivalence test has a Windows twin of the same
+//! name that runs both routes (a `qsh serve` host and a `qsh serve --to`
+//! target behind the local `qsh listen` daemon) over zero sessions: the
+//! filters, `data.unreachable` and the host-less fan-out reaching the reverse
+//! target through the daemon's named pipe are all observable without a
+//! session. The same cases over live sessions are M20's, when a Windows host
+//! has a PTY.
 
 use crate::common;
 
@@ -23,8 +27,42 @@ use common::{Fleet, HOST_ALIAS, Sandbox, exit_code, sole_envelope};
 use serde_json::Value;
 
 /// Wall-clock bound for every observable state this file waits for.
-#[cfg(unix)]
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The name the controller gives the reverse target.
+const TARGET: &str = "nat-target";
+
+/// The alias the target uses for the controller it dials.
+const CONTROLLER_ALIAS: &str = "hub";
+
+/// A `qsh listen` daemon on `controller` and a `qsh serve --to` target that
+/// registered with it, once `qsh hosts` shows the registration reachable.
+/// The target's own sandbox is returned to keep it alive.
+fn reverse_target(controller: &Sandbox) -> (Sandbox, common::ListenGuard, common::ReverseGuard) {
+    let target = Sandbox::initialized();
+    let target_fp = target.fingerprint();
+    let controller_fp = controller.fingerprint();
+
+    // The target pin carries an address so the host-less fan-out visits it
+    // (it only asks pins that have one). The address is never dialed: a
+    // live reverse registration wins the route (`docs/CLI.md` §6.1).
+    controller.trust_add(TARGET, Some("127.0.0.1:0"), &target_fp);
+    let listen = common::ListenGuard::start(controller);
+    target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
+    let reverse = common::ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
+
+    common::poll_until("the reverse registration to be reachable", DEADLINE, || {
+        common::hosts_array(controller)
+            .iter()
+            .any(|h| {
+                h["name"] == TARGET
+                    && h["connection_mode"] == "reverse"
+                    && h["state"] == "reachable"
+            })
+            .then_some(())
+    });
+    (target, listen, reverse)
+}
 
 /// A listing in `--json` mode: the whole envelope after asserting success.
 fn list_json(client: &Sandbox, args: &[&str]) -> Value {
@@ -542,38 +580,13 @@ fn sessions_attachable_never_prints_the_resume_token() {
 #[cfg(unix)]
 #[test]
 fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
-    use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
     use std::collections::BTreeSet;
-
-    const TARGET: &str = "nat-target";
-    const CONTROLLER_ALIAS: &str = "hub";
 
     // `fleet.host` is the forward host (`qsh serve`); `fleet.client` is the
     // controller that pins it and also runs `qsh listen`.
     let fleet = Fleet::start();
     let controller = &fleet.client;
-    let target = Sandbox::initialized();
-    let target_fp = target.fingerprint();
-    let controller_fp = controller.fingerprint();
-
-    // The target pin carries an address so the host-less fan-out visits it
-    // (it only asks pins that have one). The address is never dialed: a
-    // live reverse registration wins the route (`docs/CLI.md` §6.1).
-    controller.trust_add(TARGET, Some("127.0.0.1:0"), &target_fp);
-    let listen = ListenGuard::start(controller);
-    target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
-    let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
-
-    poll_until("the reverse registration to be reachable", DEADLINE, || {
-        hosts_array(controller)
-            .iter()
-            .any(|h| {
-                h["name"] == TARGET
-                    && h["connection_mode"] == "reverse"
-                    && h["state"] == "reachable"
-            })
-            .then_some(())
-    });
+    let (_target, listen, reverse) = reverse_target(controller);
 
     // Both hosts' sessions are opened (and `resume.json` rewritten) before
     // either attach starts renewing entries in that file.
@@ -649,5 +662,69 @@ fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
     drop(forward);
     drop(reversed);
     reverse.shut_down();
+    drop(listen);
+}
+
+/// The Windows twin of the test above, over hosts with no sessions (a
+/// Windows host has no PTY until M20). What it pins is the route part: every
+/// filter returns the same empty listing from the forward host and from the
+/// reverse target, and the host-less fan-out reaches the reverse target
+/// through the local daemon's named pipe. The target's pin carries an address
+/// nothing listens on, so a fan-out that came back without `data.unreachable`
+/// did get its answer over the registration, not a forward dial. With the
+/// registration gone the same fan-out reports the target unreachable and
+/// keeps the filter.
+#[cfg(windows)]
+#[test]
+fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
+    let fleet = Fleet::start();
+    let controller = &fleet.client;
+    let (target, listen, reverse) = reverse_target(controller);
+
+    let filters: [&[&str]; 4] = [
+        &[],
+        &["--state", "running"],
+        &["--writer", "none", "--attachable"],
+        &["--state", "no-such-state"],
+    ];
+    for filter in filters {
+        let on = |host: Option<&str>| {
+            let args: Vec<&str> = host.into_iter().chain(filter.iter().copied()).collect();
+            list_json(controller, &args)
+        };
+        for (what, listing) in [
+            ("forward host", on(Some(HOST_ALIAS))),
+            ("reverse host", on(Some(TARGET))),
+            ("fan-out", on(None)),
+        ] {
+            assert_eq!(
+                listing["data"]["sessions"],
+                serde_json::json!([]),
+                "{what}, qsh sessions {filter:?}: {listing}"
+            );
+            assert!(
+                listing["data"].get("unreachable").is_none(),
+                "{what} reached both hosts, qsh sessions {filter:?}: {listing}"
+            );
+        }
+    }
+
+    // Lose the registration: the host-less call now cannot reach the target
+    // (its pinned address is undialable), says so, and a filter does not hide
+    // that.
+    reverse.shut_down();
+    common::poll_until(
+        "the lost target to show as unreachable in the fan-out",
+        DEADLINE,
+        || {
+            let listing = list_json(controller, &["--state", "running"]);
+            let unreachable = listing["data"]["unreachable"].as_array()?;
+            unreachable
+                .iter()
+                .any(|u| u["host"] == TARGET)
+                .then_some(())
+        },
+    );
+    drop(target);
     drop(listen);
 }
