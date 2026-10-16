@@ -870,10 +870,13 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     });
     // The fleet host pins its client with role `none` and its `acl.toml` has
     // no file row: default-deny, the uniform refusal (ADR-0029 decision 8).
+    // The destination is `.`, a directory that exists on every client, so
+    // the client-side destination check cannot answer first (`/tmp` is not
+    // a directory on a Windows runner).
     cases.push(Case {
         name: "cp: get from a host that grants this client no file access",
         sandbox: &fleet.client,
-        args: &["cp", "box:/tmp/qsh-cp-never", "/tmp/qsh-cp-never-out"],
+        args: &["cp", "box:/tmp/qsh-cp-never", "."],
         #[cfg(unix)]
         outcome: Outcome::Fails("PERMISSION_DENIED"),
         #[cfg(not(unix))]
