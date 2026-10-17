@@ -937,6 +937,49 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         check(case);
     }
 
+    // `session close --signal` on a Windows host (ADR-0035 decision 3, 22):
+    // each of the seven accepted values answers `0` and removes a session of
+    // its own. A row cannot name the session it closes, so these are opened
+    // here. The default shell keeps running after `INT`, `QUIT`, `USR1` and
+    // `USR2` reach it, which is the escalation's job to end; what each signal
+    // delivers to a program is pinned in `windows_forward_e2e` and
+    // `windows_reverse_e2e` (`session_close_with_each_signal_ends_the_session`).
+    // Human mode runs for `KILL` alone, which ends the session at once; the
+    // exit code does not depend on the output mode (`docs/CLI.md` §4).
+    #[cfg(windows)]
+    for (signal, human) in [
+        ("HUP", false),
+        ("INT", false),
+        ("QUIT", false),
+        ("TERM", false),
+        ("KILL", true),
+        ("USR1", false),
+        ("USR2", false),
+    ] {
+        let modes: &[bool] = if human { &[false, true] } else { &[false] };
+        for &human_mode in modes {
+            let (code, opened) = fleet
+                .client
+                .json(&["session", "open", HOST_ALIAS, "--json"]);
+            assert_eq!(code, 0, "session open for --signal {signal}: {opened}");
+            let session_ref = opened["data"]["session_ref"]
+                .as_str()
+                .expect("session_ref")
+                .to_string();
+            let mut args = vec!["session", "close", session_ref.as_str(), "--signal", signal];
+            if !human_mode {
+                args.push("--json");
+            }
+            let out = fleet.client.qsh(&args);
+            assert_eq!(
+                exit_code(&out),
+                0,
+                "session close --signal {signal} (human: {human_mode}): {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
     // The generic `Succeeds(0)` check above only asserts `ok:true`; the
     // idempotent-delete shape (`docs/CLI.md` §6.9, this file's own module
     // doc on the plan conflict) needs its own look at `data.closed`.

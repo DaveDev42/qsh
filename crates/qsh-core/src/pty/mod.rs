@@ -49,6 +49,13 @@
 //! seam, so everything above it (sequence tagging, replay, quotas, detach and
 //! resume, the close escalation) is the same code on both platforms.
 //!
+//! Signals on Windows are events, not signals (ADR-0035 decision 22): `Int`
+//! is `CTRL_C_EVENT` and `Quit` is `CTRL_BREAK_EVENT` (sent by the hidden
+//! `qsh internal console-ctrl` helper, [`console_ctrl`]), `Hup` and `Term` close
+//! the pseudo-console, `Usr1` and `Usr2` set the session's named events, and
+//! `Kill` ends the job. The table is in `signal_map`, a plain function that
+//! every platform tests.
+//!
 //! The environment follows the same policy on both (`env_policy`): the
 //! child gets the account's environment, not the `qsh serve` one, and the
 //! client may not override the pinned keys. On Windows the account's
@@ -74,7 +81,9 @@ mod conpty;
 #[cfg(windows)]
 pub use conpty::{ConPtyFactory, ConPtySource, login_name};
 
+pub mod console_ctrl;
 pub(crate) mod env_policy;
+pub(crate) mod signal_map;
 
 #[cfg(unix)]
 pub use posix::{PtyFactory, PtySource, login_name};
@@ -107,7 +116,7 @@ pub fn factory() -> Arc<dyn SourceFactory> {
     }
     #[cfg(windows)]
     {
-        Arc::new(ConPtyFactory)
+        Arc::new(ConPtyFactory::default())
     }
 }
 

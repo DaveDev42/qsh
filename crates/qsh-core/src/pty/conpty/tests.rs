@@ -425,8 +425,13 @@ const VISIBLE_TREE: &str = "ping -n 120 127.0.0.1";
 const PING_REPLY: &str = "127.0.0.1:";
 
 fn start(script: &str) -> ConPtySession {
-    let launch = plan(&cmd(script)).unwrap();
-    ConPtySession::start(&launch, 80, 24).unwrap()
+    start_spec(&cmd(script))
+}
+
+fn start_spec(spec: &SessionSpec) -> ConPtySession {
+    let events = Arc::new(SignalEvents::create().unwrap());
+    let launch = plan(spec, &events).unwrap();
+    ConPtySession::start(&launch, events, 80, 24).unwrap()
 }
 
 /// The unix test checks the child is a session leader on the pty. Here the
@@ -468,10 +473,9 @@ async fn conpty_job_close_ends_the_whole_tree() {
     assert_all_ended(&members, &pids, "the job close");
 }
 
-/// Smoke test: `Kill` as the first signal terminates the job and the session
-/// ends with an exit event, without any grace period. The reported status and
-/// signal are Step 4's contract (a kill always reports signal KILL) and are
-/// not pinned here.
+/// `Kill` as the first signal terminates the job and the session ends with
+/// an exit event, without any grace period. The exit reports the signal the
+/// kill stands for (the job's processes end with status 1).
 #[tokio::test]
 async fn conpty_kill_signal_terminates_the_job() {
     let (broker, clock) = broker(1 << 20);
@@ -486,7 +490,12 @@ async fn conpty_kill_signal_terminates_the_job() {
     let out = within(handle.pull(Cursor::from_offset(0), usize::MAX, FOREVER, &clock))
         .await
         .unwrap();
-    assert!(exit_of(&out.events).is_some(), "{:?}", out.events);
+    assert_eq!(
+        exit_of(&out.events),
+        Some((Some(1), Some("SIGKILL".to_string()))),
+        "{:?}",
+        out.events
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -1065,7 +1074,8 @@ async fn conpty_empty_argv_runs_comspec_in_userprofile() {
     spec.argv.clear();
 
     // The image the root process runs.
-    let launch = plan(&spec).unwrap();
+    let events = Arc::new(SignalEvents::create().unwrap());
+    let launch = plan(&spec, &events).unwrap();
     assert!(
         launch
             .application
@@ -1074,7 +1084,7 @@ async fn conpty_empty_argv_runs_comspec_in_userprofile() {
         "{:?} is not COMSPEC {comspec}",
         launch.application
     );
-    let session = ConPtySession::start(&launch, 80, 24).unwrap();
+    let session = ConPtySession::start(&launch, events, 80, 24).unwrap();
     let mut buf = vec![0u16; 1024];
     let mut len = buf.len() as u32;
     // SAFETY: a live process handle and a writable buffer of `len` units.
@@ -1139,7 +1149,7 @@ fn an_empty_argv_plans_comspec_as_a_full_path_in_the_profile_directory() {
         ("SystemRoot", r"C:\NoSuchWindows"),
         ("Path", dir.path().to_str().unwrap()),
     ]);
-    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows").unwrap();
+    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows", &[]).unwrap();
     assert_eq!(launch.application, comspec);
     // The command line carries the same full path, quoted for the space.
     assert_eq!(
@@ -1156,13 +1166,13 @@ fn without_comspec_the_default_shell_is_cmd_in_the_system_directory() {
         ("USERPROFILE", dir.path().to_str().unwrap()),
         ("SystemRoot", r"C:\SomeWindows"),
     ]);
-    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows").unwrap();
+    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows", &[]).unwrap();
     assert_eq!(
         launch.application,
         Path::new(r"C:\SomeWindows\System32\cmd.exe")
     );
     // No SystemRoot either: the host's Windows directory.
-    let launch = plan_from(&argv(&[]), &[], &[], r"C:\Windows").unwrap();
+    let launch = plan_from(&argv(&[]), &[], &[], r"C:\Windows", &[]).unwrap();
     assert_eq!(
         launch.application,
         Path::new(r"C:\Windows\System32\cmd.exe")
@@ -1190,7 +1200,7 @@ fn locale_and_time_zone_pass_through_from_the_serve_environment_and_nothing_else
     let user_env = pairs(&[("Path", r"C:\Windows\System32"), ("USERPROFILE", r"C:\")]);
     let mut spec = argv(&["cmd.exe"]);
     spec.term = Some("dumb".into());
-    let launch = plan_from(&spec, &user_env, &serve_env, r"C:\Windows").unwrap();
+    let launch = plan_from(&spec, &user_env, &serve_env, r"C:\Windows", &[]).unwrap();
     let block = String::from_utf16_lossy(&launch.environment);
     let entries: Vec<&str> = block.split('\0').filter(|e| !e.is_empty()).collect();
     for want in ["Lang=en_US.UTF-8", "LC_ALL=C", "tz=UTC", "TERM=dumb"] {
@@ -1205,7 +1215,7 @@ fn locale_and_time_zone_pass_through_from_the_serve_environment_and_nothing_else
         "the serve PATH leaked: {entries:?}"
     );
     // Without a hint the default terminal type applies.
-    let launch = plan_from(&argv(&["cmd.exe"]), &user_env, &[], r"C:\Windows").unwrap();
+    let launch = plan_from(&argv(&["cmd.exe"]), &user_env, &[], r"C:\Windows", &[]).unwrap();
     let block = String::from_utf16_lossy(&launch.environment);
     assert!(block.contains("TERM=xterm-256color\0"), "{block:?}");
 }
@@ -1308,3 +1318,5 @@ async fn nul_in_argv_is_rejected_before_anything_is_created() {
     };
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
 }
+
+mod signals;

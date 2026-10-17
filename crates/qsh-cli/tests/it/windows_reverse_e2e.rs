@@ -54,6 +54,11 @@ fn pty_session_close_ends_a_running_session() {
 }
 
 #[test]
+fn session_close_with_each_signal_ends_the_session() {
+    cases::session_close_with_each_signal_ends_the_session(&ReverseRoute::start());
+}
+
+#[test]
 fn local_tunnel_echo() {
     cases::local_tunnel_echo(&ReverseRoute::start());
 }

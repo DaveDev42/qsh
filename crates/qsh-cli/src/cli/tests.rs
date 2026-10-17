@@ -482,6 +482,84 @@ fn service_run_is_hidden_from_help_and_man() {
     assert!(Cli::try_parse_from(["qsh", "service", "run"]).is_err());
 }
 
+/// ADR-0035 decision 22: `qsh internal console-ctrl` is the host's own
+/// helper, hidden from `qsh --help` and so from the generated man pages, but
+/// reachable by name.
+#[test]
+fn console_ctrl_is_hidden_from_help_and_man() {
+    let help = Cli::command().render_help().to_string();
+    assert!(
+        !help.contains("internal") && !help.contains("console-ctrl"),
+        "qsh --help must not list the hidden `internal` subcommand: {help:?}"
+    );
+    let internal = Cli::command()
+        .find_subcommand("internal")
+        .expect("hidden subcommand must still be reachable by name")
+        .clone();
+    assert!(internal.is_hide_set());
+    assert!(
+        internal
+            .find_subcommand("console-ctrl")
+            .expect("the helper entry")
+            .get_name()
+            == "console-ctrl"
+    );
+    // A hidden command has no man page: the generator skips hidden
+    // subcommands, and `docs/man/` carries none for these names.
+    let man_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("docs")
+        .join("man");
+    for page in ["qsh-internal.1", "qsh-internal-console-ctrl.1"] {
+        assert!(!man_dir.join(page).exists(), "{page} must not exist");
+    }
+}
+
+/// The helper takes a process id and `c` or `break`, nothing else; anything
+/// else is a usage error before any console is touched.
+#[test]
+fn console_ctrl_rejects_anything_but_a_pid_and_c_or_break() {
+    use qsh_core::pty::console_ctrl::CtrlKind;
+
+    for (pid, word, kind) in [("4242", "c", CtrlKind::C), ("1", "break", CtrlKind::Break)] {
+        match Cli::try_parse_from(["qsh", "internal", "console-ctrl", pid, word])
+            .unwrap()
+            .command
+            .unwrap()
+        {
+            Command::Internal(InternalCmd::ConsoleCtrl {
+                pid: parsed,
+                kind: k,
+            }) => {
+                assert_eq!(parsed.to_string(), pid);
+                assert_eq!(k, kind);
+            }
+            other => panic!("expected internal console-ctrl, got {other:?}"),
+        }
+    }
+    for bad in [
+        &["0", "c"][..],
+        &["4294967295", "c"],
+        &["-1", "c"],
+        &["abc", "c"],
+        &["5", "C"],
+        &["5", "ctrl-c"],
+        &["5"],
+        &["5", "c", "extra"],
+        &[],
+    ] {
+        let mut argv = vec!["qsh", "internal", "console-ctrl"];
+        argv.extend_from_slice(bad);
+        assert!(
+            Cli::try_parse_from(&argv).is_err(),
+            "{argv:?} must be refused"
+        );
+    }
+    assert!(Cli::try_parse_from(["qsh", "internal"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "internal", "bogus", "5", "c"]).is_err());
+}
+
 #[test]
 fn listen_bind_is_optional() {
     let cli = Cli::try_parse_from(["qsh", "listen"]).unwrap();

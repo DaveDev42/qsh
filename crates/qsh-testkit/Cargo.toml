@@ -38,13 +38,17 @@ libc.workspace = true
 # drives the Win32 console API directly (GetConsoleMode/SetConsoleMode/ReadFile
 # on the console handles, GetConsoleScreenBufferInfo, SetConsoleCtrlHandler);
 # the probe also sends itself a console control event. Windows-only: on other
-# platforms the probe builds as a stub.
+# platforms the probe builds as a stub. `src/bin/qsh-signal-probe.rs` also
+# creates and waits on events (Win32_System_Threading) and reports console
+# control events.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
+    "Win32_System_Threading",
 ] }
 
 # `src/conpty.rs` opens a ConPTY with portable-pty (the crate the POSIX PTY

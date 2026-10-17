@@ -456,6 +456,39 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         offered_name: Option<String>,
     },
+
+    /// Entries the host runs on itself, never typed by a person.
+    ///
+    /// Hidden from `qsh --help` and the man pages, like `qsh service run`:
+    /// the only entry is `console-ctrl` (ADR-0035 decision 22), the
+    /// detached helper through which a Windows host sends `CTRL_C_EVENT` or
+    /// `CTRL_BREAK_EVENT` to a session's console. It runs on every platform
+    /// and fails with a plain message where there is no console to attach to.
+    #[command(hide = true, subcommand)]
+    Internal(InternalCmd),
+}
+
+/// `qsh internal …`: host plumbing, hidden (see [`Command::Internal`]).
+#[derive(Debug, Subcommand)]
+pub enum InternalCmd {
+    /// Attach to the console of process `pid`, send it `CTRL_C_EVENT` (`c`)
+    /// or `CTRL_BREAK_EVENT` (`break`), and detach. Started by the host as a
+    /// detached process; nothing is printed on success and no `Ops` is
+    /// opened, so it touches neither the state directory nor the trust store.
+    #[command(name = "console-ctrl")]
+    ConsoleCtrl {
+        /// The process whose console receives the event. Decimal digits
+        /// only; `0` and `4294967295` are refused.
+        #[arg(value_name = "PID", value_parser = parse_console_pid)]
+        pid: u32,
+        /// `c` for `CTRL_C_EVENT`, `break` for `CTRL_BREAK_EVENT`.
+        #[arg(value_name = "KIND")]
+        kind: qsh_core::pty::console_ctrl::CtrlKind,
+    },
+}
+
+fn parse_console_pid(text: &str) -> Result<u32, String> {
+    qsh_core::pty::console_ctrl::parse_pid(text)
 }
 
 /// `qsh service …` subcommands (`docs/CLI.md` §6.18). The three visible ones

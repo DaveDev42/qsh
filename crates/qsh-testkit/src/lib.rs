@@ -43,6 +43,10 @@
 //! - [`testbin`]: finds a helper executable this crate builds
 //!   (`qsh-fake-ssh`, `qsh-console-probe`) from a test.
 //!
+//! - [`signal_probe`]: the constants and lookup for `qsh-signal-probe`, a
+//!   Windows console program that reports which event a session signal
+//!   turned into through its exit code (ADR-0035 decision 22).
+//!
 //! - `conpty` (Windows only): a ConPTY harness that runs a program in a
 //!   pseudo-console and reads what it printed.
 //!
@@ -67,6 +71,7 @@ pub mod perf;
 pub mod procstat;
 pub mod raw_quic;
 pub mod reverse;
+pub mod signal_probe;
 pub mod testbin;
 pub mod tunnel;
 
