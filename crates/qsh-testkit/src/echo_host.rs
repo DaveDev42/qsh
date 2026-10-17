@@ -1,12 +1,12 @@
 //! A host whose sessions are the broker's headless echo (`EchoPipeFactory`),
-//! for tests that drive the real `qsh` client against a host that has no PTY.
+//! for tests that drive the real `qsh` client against a host whose sessions
+//! are deterministic and need no console.
 //!
-//! A Windows host answers `UNSUPPORTED` to PTY sessions until the Windows host
-//! role lands, so the interactive client cannot be driven against a real
-//! `qsh serve` there. [`EchoHost`] stands in for the host behind a real
-//! client: it runs the same [`Server`] and [`Broker`] a `qsh serve` runs, with
-//! the echo factory as the session source, and reaches the client over either
-//! route.
+//! The interactive client's console tests on Windows want a host whose output
+//! is exactly what it was sent, not a ConPTY's rendering of it. [`EchoHost`]
+//! stands in for the host behind a real client: it runs the same [`Server`]
+//! and [`Broker`] a `qsh serve` runs, with the echo factory as the session
+//! source, and reaches the client over either route.
 //!
 //! - [`EchoHost::serve_forward`]: a QUIC listener on `127.0.0.1:0` that pins
 //!   the client's fingerprint, for a client that dials it.

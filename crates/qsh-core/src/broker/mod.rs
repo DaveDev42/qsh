@@ -117,9 +117,9 @@ pub enum BrokerError {
     #[error("session input queue is full")]
     Backpressure,
     /// The source refuses the request as a matter of policy/platform, not
-    /// failure: no PTY backend on this host, or a `user` hint naming anyone
-    /// but the serve account (`io::ErrorKind::Unsupported`; → `UNSUPPORTED`,
-    /// CLI.md §7). Nothing was spawned.
+    /// failure: a `user` hint naming anyone but the serve account, or a
+    /// platform the factory cannot serve (`io::ErrorKind::Unsupported`;
+    /// → `UNSUPPORTED`, CLI.md §7). Nothing was spawned.
     #[error("{0}")]
     Unsupported(String),
     /// Launching the source failed (→ `INTERNAL`).

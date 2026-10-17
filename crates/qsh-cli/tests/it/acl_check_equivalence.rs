@@ -436,10 +436,9 @@ fn row_auth_path_mismatch() {
 /// store — this is what lets the rival reference a session it never opened
 /// (`docs/CLI.md` §6.2's opaque-handle shape).
 ///
-/// Unix-only: PTY-backed sessions are a unix-host feature today (Windows
-/// host is P2, `session_follow.rs`'s own file doc states the same
-/// constraint for the same reason) — both rows built on this fixture are
-/// `#[cfg(unix)]`.
+/// Unix-only: the sessions it seeds run a POSIX shell script, which Windows
+/// has no `sh` for (`session_follow.rs`'s own file doc states the same
+/// constraint) — both rows built on this fixture are `#[cfg(unix)]`.
 #[cfg(unix)]
 fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, String) {
     let host = Sandbox::new();
@@ -1299,13 +1298,6 @@ fn role_row_agrees(role: &str) {
                 if with_row { "loaded" } else { "missing" },
                 "{label} {action}: {data}"
             );
-
-            // A Windows host has no PTY sessions yet (M20): `session.open`
-            // answers UNSUPPORTED there, so only the `acl check` columns
-            // above apply to it. `exec.run` and `session.list` run for real.
-            if cfg!(windows) && action == "session.open" {
-                continue;
-            }
 
             // The real op agrees.
             if allowed {

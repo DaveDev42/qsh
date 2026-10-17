@@ -465,6 +465,228 @@ pub fn exec_round_trip(route: &impl Route) {
     assert_eq!(data["stdout_b64"], BASE64.encode("hello\r\n"), "{value}");
 }
 
+// ---------------------------------------------------------------------------
+// PTY sessions
+// ---------------------------------------------------------------------------
+
+/// How long a PTY session may take to end or to be closed before the case
+/// fails.
+const SESSION_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Pull `session read --wait` until the session's `session.exit`, feeding
+/// both cursors back, and return the output bytes and the exit event.
+fn read_until_exit(route: &impl Route, session_ref: &str) -> (Vec<u8>, Value) {
+    let mut output = Vec::new();
+    let (mut after, mut ctl_after) = (0u64, 0u64);
+    let deadline = std::time::Instant::now() + SESSION_DEADLINE;
+    loop {
+        let (code, read) = route.client().json(&[
+            "session",
+            "read",
+            session_ref,
+            "--json",
+            "--after",
+            &after.to_string(),
+            "--ctl-after",
+            &ctl_after.to_string(),
+            "--wait",
+            "5000",
+        ]);
+        assert_eq!(code, 0, "{read}");
+        after = read["data"]["next_after"].as_u64().expect("next_after");
+        ctl_after = read["data"]["next_ctl_after"]
+            .as_u64()
+            .expect("next_ctl_after");
+        for event in read["data"]["events"].as_array().expect("events") {
+            match event["type"].as_str() {
+                Some("session.output") => output.extend(
+                    BASE64
+                        .decode(event["data_b64"].as_str().expect("data_b64"))
+                        .expect("data_b64 is Base64"),
+                ),
+                Some("session.exit") => return (output, event.clone()),
+                _ => {}
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session never exited; output so far: {:?}",
+            String::from_utf8_lossy(&output)
+        );
+    }
+}
+
+/// `qsh session open <host> --json [-- argv]`; returns the `session_ref`.
+fn open_session(route: &impl Route, argv: &[&str]) -> String {
+    let mut args = vec!["session", "open", route.host(), "--json"];
+    if !argv.is_empty() {
+        args.push("--");
+        args.extend_from_slice(argv);
+    }
+    let (code, opened) = route.client().json(&args);
+    assert_eq!(code, 0, "{opened}");
+    assert_eq!(opened["command"], "session.open", "{opened}");
+    opened["data"]["session_ref"]
+        .as_str()
+        .expect("session_ref")
+        .to_string()
+}
+
+/// A PTY session running a command: its output and exit code come back
+/// through the route, and `session close` on the exited session removes it
+/// (`docs/CLI.md` §6.3, §6.4).
+pub fn pty_session_runs_a_command(route: &impl Route) {
+    let session_ref = open_session(route, &["cmd", "/c", "echo qsh%OS%pty&exit 5"]);
+    let (output, exit) = read_until_exit(route, &session_ref);
+    let text = String::from_utf8_lossy(&output);
+
+    assert!(
+        text.contains("qshWindows_NTpty"),
+        "the command ran and its output came back through the pseudo-console: {text:?}"
+    );
+    assert_eq!(exit["exit_code"], 5, "{exit}");
+    assert!(exit["signal"].is_null(), "{exit}");
+
+    let (code, got) = route
+        .client()
+        .json(&["session", "get", &session_ref, "--json"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["state"], "exited", "{got}");
+
+    let (code, closed) = route
+        .client()
+        .json(&["session", "close", &session_ref, "--json"]);
+    assert_eq!(code, 0, "{closed}");
+    let (_, gone) = route
+        .client()
+        .json(&["session", "get", &session_ref, "--json"]);
+    assert_eq!(gone["error"]["code"], "SESSION_NOT_FOUND", "{gone}");
+}
+
+/// An empty argv runs the account's command interpreter, which reads what
+/// `session write` sends and ends with the exit code it was told to.
+pub fn pty_session_default_shell_takes_input(route: &impl Route) {
+    let session_ref = open_session(route, &[]);
+
+    let line = "echo qsh%OS%shell&exit 3\r\n";
+    let (code, written) = route.client().json(&[
+        "session",
+        "write",
+        &session_ref,
+        "--json",
+        "--data-b64",
+        &BASE64.encode(line),
+    ]);
+    assert_eq!(code, 0, "{written}");
+
+    let (output, exit) = read_until_exit(route, &session_ref);
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("qshWindows_NTshell"),
+        "the shell executed the line it was sent: {text:?}"
+    );
+    assert_eq!(exit["exit_code"], 3, "{exit}");
+}
+
+/// `out` without CSI (`ESC [ ... final`) and OSC (`ESC ] ... BEL`)
+/// sequences, which ConPTY interleaves with the text.
+fn strip_vt(out: &str) -> String {
+    let mut plain = String::with_capacity(out.len());
+    let mut chars = out.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                for c in chars.by_ref() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    plain
+}
+
+/// `session resize` reaches the host's pseudo-console: `mode con` reads the
+/// console's screen buffer, so the size a client set is the size the child
+/// reports. The child waits on `set /p` until the resize is done and the
+/// `session write` releases it.
+pub fn pty_session_resize_is_applied(route: &impl Route) {
+    let session_ref = open_session(route, &["cmd", "/c", "set /p wait=& mode con"]);
+
+    let (code, resized) = route.client().json(&[
+        "session",
+        "resize",
+        &session_ref,
+        "--cols",
+        "133",
+        "--rows",
+        "47",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{resized}");
+    let (code, written) = route.client().json(&[
+        "session",
+        "write",
+        &session_ref,
+        "--json",
+        "--data-b64",
+        &BASE64.encode("\r\n"),
+    ]);
+    assert_eq!(code, 0, "{written}");
+
+    let (output, _) = read_until_exit(route, &session_ref);
+    let plain = strip_vt(&String::from_utf8_lossy(&output));
+    // The labels are localised and the order is not: `mode con` prints the
+    // buffer's lines, then its columns.
+    let numbers: Vec<u32> = plain
+        .lines()
+        .filter_map(|line| {
+            let (_, rest) = line.rsplit_once([':', '\u{ff1a}'])?;
+            rest.trim().parse().ok()
+        })
+        .collect();
+    assert_eq!(
+        numbers.get(..2),
+        Some(&[47, 133][..]),
+        "the child reports the resized console: {plain:?}"
+    );
+}
+
+/// `session close` ends a session whose shell is still running: the default
+/// escalation (the pseudo-console's close first) and `--signal KILL` (the job
+/// is terminated at once) both remove it, so nothing is left to attach to.
+pub fn pty_session_close_ends_a_running_session(route: &impl Route) {
+    for signal in [None, Some("KILL")] {
+        let session_ref = open_session(route, &[]);
+
+        let mut args = vec!["session", "close", session_ref.as_str(), "--json"];
+        if let Some(signal) = signal {
+            args.extend_from_slice(&["--signal", signal]);
+        }
+        let (code, closed) = route.client().json(&args);
+        assert_eq!(code, 0, "close with signal {signal:?}: {closed}");
+
+        let (code, gone) = route
+            .client()
+            .json(&["session", "get", &session_ref, "--json"]);
+        assert_ne!(code, 0, "{gone}");
+        assert_eq!(gone["error"]["code"], "SESSION_NOT_FOUND", "{gone}");
+    }
+}
+
 /// `qsh tunnel open --local`: a TCP write to the local port reaches the
 /// destination the host dials and comes back.
 pub fn local_tunnel_echo(route: &impl Route) {

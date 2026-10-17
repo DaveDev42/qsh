@@ -32,9 +32,17 @@
 //! output short, so the close is tied to the child's exit and nothing else.
 //! Whatever else still runs on the console at that point ends with it.
 //!
-//! This module does not build the child's environment or pick a shell yet:
-//! the child inherits the host's environment and `argv` must name the
-//! program.
+//! **What the child starts from** (ADR-0035 decision 21). The child does not
+//! inherit the `qsh serve` environment. [`plan`] builds the environment from
+//! the user's environment block (`CreateEnvironmentBlock` for the process
+//! token), `TERM`, a locale and time zone pass-through and the client's `env`,
+//! with the pinned keys applied last (`env_policy`). An empty `argv` runs
+//! `COMSPEC` (else `%SystemRoot%\System32\cmd.exe`), always as a full path.
+//! A program named in `argv` is looked up on the child's own `PATH`, never
+//! in the host's working directory or on the host's `PATH`, which is what
+//! `CreateProcessW` would search without an application name. The working
+//! directory is `USERPROFILE`. A `user` hint that does not name the token's
+//! account fails before anything is created.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
@@ -42,6 +50,7 @@ use std::future::Future as _;
 use std::io;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::io::OwnedHandle;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -52,7 +61,10 @@ use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
 
-use crate::broker::{SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SpawnedSource};
+use super::env_policy::{self, DEFAULT_TERM, WINDOWS};
+use crate::broker::{
+    SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
+};
 use crate::fsutil::dacl::{CurrentUser, DaclSource as _, ObjectKind};
 use crate::winproc::{self, ExitWatch, JobObject, ProcessSpec};
 
@@ -74,15 +86,60 @@ fn normalize_size(cols: u16, rows: u16) -> (u16, u16) {
     }
 }
 
-/// The production-shaped [`SessionSource`] for Windows: runs `argv` in a
-/// pseudo-console inside its own Job Object.
+/// The production [`SourceFactory`] on Windows: one [`ConPtySource`] per
+/// session.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ConPtyFactory;
+
+impl SourceFactory for ConPtyFactory {
+    fn create(&self, _spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+        Ok(Box::new(ConPtySource::new()))
+    }
+}
+
+/// Login name of the account `qsh serve` runs as: the process token's user
+/// name, without the domain. The dispatch edge compares the `user` hint of
+/// `session.open` against the account's names after authorization
+/// (`docs/design/architecture.md` §4).
+pub fn login_name() -> io::Result<String> {
+    winproc::account_names()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::other("the process token has no account name"))
+}
+
+/// The [`SessionSource`] for Windows: runs the session's `argv` (or the
+/// default shell) in a pseudo-console inside its own Job Object.
 #[derive(Debug, Default)]
-pub struct ConPtySource;
+pub struct ConPtySource {
+    /// Test hook: receives a handle to each child, which keeps its pid from
+    /// being reused while a test inspects it.
+    #[cfg(test)]
+    process_observer: Option<Arc<Mutex<Vec<Arc<OwnedHandle>>>>>,
+    /// Test hook: where the control records the steps it takes.
+    #[cfg(test)]
+    stage_observer: Option<StageLog>,
+}
 
 impl ConPtySource {
-    /// A source that spawns the session's `argv`.
+    /// A source that spawns per the [`SessionSpec`] it is given.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Publish a handle to each child into `slot` right after it is spawned
+    /// (tests: process-exit and handle-leak assertions).
+    #[cfg(test)]
+    pub(crate) fn observe_processes(mut self, slot: Arc<Mutex<Vec<Arc<OwnedHandle>>>>) -> Self {
+        self.process_observer = Some(slot);
+        self
+    }
+
+    /// Record the control's close steps into `log` (tests: the close path).
+    #[cfg(test)]
+    pub(crate) fn observe_stages(mut self, log: StageLog) -> Self {
+        self.stage_observer = Some(log);
+        self
     }
 }
 
@@ -92,24 +149,206 @@ impl SessionSource for ConPtySource {
         let _rt = tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::other("ConPtySource::spawn must be called from within a tokio runtime")
         })?;
-        if spec.argv.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ConPtySource needs a program in argv",
-            ));
-        }
-        // An embedded NUL would end the command line there and drop the
-        // arguments after it without a word.
-        if spec.argv.iter().any(|arg| arg.contains('\0')) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ConPtySource argv must not contain NUL",
-            ));
-        }
+        let launch = plan(spec)?;
         let (cols, rows) = normalize_size(spec.cols, spec.rows);
-        let command_line = command_line(&spec.argv);
-        ConPtySession::start(&command_line, cols, rows)?.into_spawned()
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut session = ConPtySession::start(&launch, cols, rows)?;
+        #[cfg(test)]
+        if let Some(log) = &self.stage_observer {
+            session.log = Arc::clone(log);
+        }
+        #[cfg(test)]
+        if let Some(slot) = &self.process_observer {
+            slot.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Arc::clone(&session.process));
+        }
+        session.into_spawned()
     }
+}
+
+// ---------------------------------------------------------------------------
+// What to run, and in which environment
+// ---------------------------------------------------------------------------
+
+/// Everything `CreateProcessW` is given for a session child.
+#[derive(Debug)]
+pub(crate) struct Launch {
+    /// The program, as a full path.
+    application: PathBuf,
+    command_line: OsString,
+    current_dir: PathBuf,
+    /// The UTF-16 environment block.
+    environment: Vec<u16>,
+}
+
+/// Plan the child of `spec` against this host: the account check, the
+/// user's environment block, the Windows directory.
+pub(crate) fn plan(spec: &SessionSpec) -> io::Result<Launch> {
+    // Defence in depth for architecture.md §4: no user switching, and the
+    // dispatch edge has already turned a foreign hint into UNSUPPORTED after
+    // the ACL check. Fail closed, before anything exists, if it did not.
+    if let Some(user) = &spec.user {
+        let names = winproc::account_names()?;
+        if !env_policy::login_name_matches(user, &names, WINDOWS) {
+            return Err(super::user_switching_unsupported());
+        }
+    }
+    // An embedded NUL would end the command line there and drop the
+    // arguments after it without a word.
+    if spec.argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ConPtySource argv must not contain NUL",
+        ));
+    }
+    let user_env = winproc::user_environment()?;
+    let serve_env: Vec<(String, String)> = std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    plan_from(spec, &user_env, &serve_env, &winproc::windows_directory()?)
+}
+
+/// `TERM` is not passed through from the serve process; the locale and the
+/// time zone are, when it has them.
+fn is_locale_key(key: &str) -> bool {
+    env_policy::PASSTHROUGH
+        .iter()
+        .any(|k| WINDOWS.same_key(k, key))
+        || key.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("LC_"))
+}
+
+/// [`plan`] with its host inputs given: the user's environment block, the
+/// serve process's own environment (the pass-through source) and the
+/// Windows directory.
+fn plan_from(
+    spec: &SessionSpec,
+    user_env: &[(String, String)],
+    serve_env: &[(String, String)],
+    windows_dir: &str,
+) -> io::Result<Launch> {
+    let term = spec
+        .term
+        .as_deref()
+        .filter(|t| env_policy::is_valid_entry("TERM", t))
+        .unwrap_or(DEFAULT_TERM);
+    let term = [("TERM".to_string(), term.to_string())];
+    let locale: Vec<(String, String)> = serve_env
+        .iter()
+        .filter(|(k, _)| is_locale_key(k))
+        .cloned()
+        .collect();
+    let pinned = env_policy::windows_pinned_values(user_env);
+    let env = env_policy::windows_overlay_env(user_env, &[&term, &locale, &spec.env], &pinned);
+
+    let system_root = env_policy::windows_lookup(&env, "SystemRoot").unwrap_or(windows_dir);
+    let current_dir = match env_policy::windows_lookup(&env, "USERPROFILE") {
+        Some(profile) if Path::new(profile).is_dir() => PathBuf::from(profile),
+        other => {
+            tracing::warn!(
+                profile = other.unwrap_or(""),
+                fallback = windows_dir,
+                "session starts in the Windows directory: the profile directory is not usable"
+            );
+            PathBuf::from(windows_dir)
+        }
+    };
+    let (application, command_line) = if spec.argv.is_empty() {
+        let shell = match env_policy::windows_lookup(&env, "COMSPEC") {
+            Some(comspec) if !comspec.is_empty() => PathBuf::from(comspec),
+            _ => Path::new(system_root).join("System32").join("cmd.exe"),
+        };
+        let command_line = command_line(&[shell.to_string_lossy().into_owned()]);
+        (shell, command_line)
+    } else {
+        let search = [
+            Path::new(windows_dir).join("System32"),
+            PathBuf::from(windows_dir),
+        ];
+        let application = resolve_program(
+            &spec.argv[0],
+            env_policy::windows_lookup(&env, "PATH"),
+            &current_dir,
+            &search,
+        )?;
+        (application, command_line(&spec.argv))
+    };
+    Ok(Launch {
+        application,
+        command_line,
+        current_dir,
+        environment: env_policy::windows_environment_block(&env),
+    })
+}
+
+/// The program `argv[0]` names, as a full path.
+///
+/// A name with a directory part is that path (relative to the child's working
+/// directory). A bare name is looked up in the directories of the child's
+/// own `PATH`, then the system directories, and never in the host's working
+/// directory or on the host's `PATH`: the client picks the command, the
+/// host's account decides what that name means. Without an extension the
+/// name gets `.exe`, like `CreateProcessW` does. Batch files and `cmd.exe`
+/// built-ins are not run through a shell here: the client has to send
+/// `cmd /c ...` itself.
+fn resolve_program(
+    argv0: &str,
+    path: Option<&str>,
+    cwd: &Path,
+    system_dirs: &[PathBuf],
+) -> io::Result<PathBuf> {
+    let name = Path::new(argv0);
+    let names: Vec<OsString> = if name.extension().is_none() {
+        let mut exe = OsString::from(argv0);
+        exe.push(".exe");
+        vec![exe]
+    } else {
+        let mut exe = OsString::from(argv0);
+        exe.push(".exe");
+        vec![OsString::from(argv0), exe]
+    };
+    let not_found = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{argv0}: program not found"),
+        )
+    };
+    if argv0.is_empty() {
+        return Err(not_found());
+    }
+    if argv0.contains(['\\', '/', ':']) {
+        return names
+            .iter()
+            .map(|n| {
+                let n = Path::new(n);
+                if n.is_absolute() {
+                    n.to_path_buf()
+                } else {
+                    cwd.join(n)
+                }
+            })
+            .find(|p| p.is_file())
+            .ok_or_else(not_found);
+    }
+    let dirs = path
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(OsStr::new(p)))
+        .filter(|dir| dir.is_absolute())
+        .chain(system_dirs.iter().cloned());
+    for dir in dirs {
+        for n in &names {
+            let candidate = dir.join(n);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(not_found())
 }
 
 // ---------------------------------------------------------------------------
@@ -222,17 +461,34 @@ impl PseudoConsole {
         Ok(())
     }
 
+    /// Take the handle out, leaving the console closed as far as this value
+    /// is concerned. `None` if it was already taken. Whoever takes it must
+    /// call [`close_handle`], which may block.
+    fn take(&self) -> Option<HPCON> {
+        self.handle.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
     /// Close the console. Blocks until conhost has flushed its last output
     /// into the output pipe and the reader has taken it (or the reader is
-    /// gone).
-    fn close(&self) {
-        let hpc = self.handle.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(hpc) = hpc {
-            // SAFETY: `hpc` was open and is closed exactly once: it was
-            // taken out of the cell above.
-            unsafe { ClosePseudoConsole(hpc) };
+    /// gone). Returns whether this call did the closing.
+    fn close(&self) -> bool {
+        match self.take() {
+            Some(hpc) => {
+                close_handle(hpc);
+                true
+            }
+            None => false,
         }
     }
+}
+
+/// `ClosePseudoConsole` on a handle taken out of a [`PseudoConsole`]: the
+/// children attached to the console get `CTRL_CLOSE_EVENT`, conhost flushes
+/// and ends the output pipe.
+fn close_handle(hpc: HPCON) {
+    // SAFETY: `hpc` was an open pseudo-console, and it was taken out of its
+    // cell, so nothing else closes it.
+    unsafe { ClosePseudoConsole(hpc) };
 }
 
 impl Drop for PseudoConsole {
@@ -246,8 +502,7 @@ impl Drop for PseudoConsole {
             // A blocking close must not stall whichever task drops us.
             let _ = std::thread::Builder::new()
                 .name("qsh-conpty-close".into())
-                // SAFETY: as in `close`.
-                .spawn(move || unsafe { ClosePseudoConsole(hpc) });
+                .spawn(move || close_handle(hpc));
         }
     }
 }
@@ -337,6 +592,20 @@ impl AsyncRead for HostOutput {
 // Session
 // ---------------------------------------------------------------------------
 
+/// A step the control took to end the session, in the order it took them
+/// (tests read this to pin the close path).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// `ClosePseudoConsole`: `CTRL_CLOSE_EVENT` to everything on the console.
+    CloseConsole,
+    /// `TerminateJobObject`.
+    TerminateJob,
+}
+
+#[cfg(test)]
+pub(crate) type StageLog = Arc<Mutex<Vec<Stage>>>;
+
 /// A started pseudo-console session before it is split into the broker's
 /// I/O trio. Field order is drop order: the job goes first, so the tree ends
 /// before the console and the pipes are torn down.
@@ -348,11 +617,13 @@ pub(crate) struct ConPtySession {
     pid: u32,
     output: NamedPipeServer,
     input: NamedPipeServer,
+    #[cfg(test)]
+    log: StageLog,
 }
 
 impl ConPtySession {
-    /// Start `command_line` in a new pseudo-console of `cols` x `rows`.
-    pub(crate) fn start(command_line: &OsStr, cols: u16, rows: u16) -> io::Result<Self> {
+    /// Start `launch` in a new pseudo-console of `cols` x `rows`.
+    pub(crate) fn start(launch: &Launch, cols: u16, rows: u16) -> io::Result<Self> {
         let output = host_pipe(true)?;
         let input = host_pipe(false)?;
         let console = PseudoConsole::create(cols, rows, &input.conhost, &output.conhost)?;
@@ -361,11 +632,18 @@ impl ConPtySession {
         drop((input.conhost, output.conhost));
         let console = Arc::new(console);
         let job = Arc::new(JobObject::new_kill_on_close()?);
+        // From here a failure drops `job` (and the console) on the way out;
+        // the child is in the job from its first instruction, so there is
+        // no child to clean up separately.
         let process = winproc::spawn_in_job(
             &job,
             &ProcessSpec {
-                command_line,
+                application: Some(launch.application.as_os_str()),
+                command_line: &launch.command_line,
+                creation_flags: 0,
                 pseudo_console: console.raw(),
+                environment: Some(&launch.environment),
+                current_dir: Some(launch.current_dir.as_os_str()),
             },
         )?;
         tracing::debug!(pid = process.pid, "ConPTY session started");
@@ -376,6 +654,8 @@ impl ConPtySession {
             process: Arc::new(process.handle),
             output: output.host,
             input: input.host,
+            #[cfg(test)]
+            log: StageLog::default(),
         })
     }
 
@@ -386,25 +666,42 @@ impl ConPtySession {
 
     /// Split into what the broker drives.
     pub(crate) fn into_spawned(self) -> io::Result<SpawnedSource> {
+        self.into_spawned_with(ExitWatch::new)
+    }
+
+    /// [`Self::into_spawned`] with the exit watch given. If anything after
+    /// the child exists fails, `self` is dropped on the way out and with it
+    /// the job, which ends the child and whatever it started.
+    fn into_spawned_with(
+        self,
+        watch: impl FnOnce(Arc<OwnedHandle>) -> io::Result<ExitWatch>,
+    ) -> io::Result<SpawnedSource> {
+        let watch = watch(Arc::clone(&self.process))?;
         let Self {
             job,
             console,
             process,
             output,
             input,
+            #[cfg(test)]
+            log,
             ..
         } = self;
-        let watch = ExitWatch::new(Arc::clone(&process))?;
         let closer = Arc::clone(&console);
         let wait = Box::pin(async move {
             watch.exited().await;
-            let exit_code = winproc::exit_code(&process).ok().map(|c| c as i32);
+            let exit_code = winproc::exit_code(&process)
+                .ok()
+                .map(env_policy::windows_exit_code);
             // Closing flushes conhost's last frame into the output pipe and
             // returns once the reader has taken it; the pump is reading on
             // its own task meanwhile, so this only has to leave the async
             // threads. The end of the output stream, not this call, is what
-            // the actor waits for.
-            drop(tokio::task::spawn_blocking(move || closer.close()));
+            // the actor waits for. (If a `Hup` already closed the console,
+            // this is a no-op.)
+            drop(tokio::task::spawn_blocking(move || {
+                closer.close();
+            }));
             SourceExit {
                 exit_code,
                 signal: None,
@@ -413,7 +710,12 @@ impl ConPtySession {
         Ok(SpawnedSource {
             output: Box::new(HostOutput(output)),
             input: Box::new(input),
-            control: Box::new(ConPtyControl { job, console }),
+            control: Box::new(ConPtyControl {
+                job,
+                console,
+                #[cfg(test)]
+                log,
+            }),
             wait,
         })
     }
@@ -435,6 +737,30 @@ impl ConPtySession {
 struct ConPtyControl {
     job: Arc<JobObject>,
     console: Arc<PseudoConsole>,
+    #[cfg(test)]
+    log: StageLog,
+}
+
+impl ConPtyControl {
+    #[cfg(test)]
+    fn record(&self, stage: Stage) {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(stage);
+    }
+
+    /// `CTRL_CLOSE_EVENT` for everything on the console, at most once per
+    /// session. `ClosePseudoConsole` can block (see the module doc), so it
+    /// runs on a blocking task and the caller, the session actor, goes on.
+    fn close_console(&self) {
+        let Some(hpc) = self.console.take() else {
+            return;
+        };
+        #[cfg(test)]
+        self.record(Stage::CloseConsole);
+        drop(tokio::task::spawn_blocking(move || close_handle(hpc)));
+    }
 }
 
 impl SourceControl for ConPtyControl {
@@ -443,9 +769,21 @@ impl SourceControl for ConPtyControl {
         self.console.resize(cols, rows)
     }
 
+    /// `Hup` and `Term` are the one event Windows has for "the terminal went
+    /// away, end": both close the pseudo-console, and the escalation's `Term`
+    /// after a `Hup` finds it closed and sends nothing again. `Kill` ends the
+    /// job.
     fn signal(&mut self, signal: Signal) -> io::Result<()> {
         match signal {
-            Signal::Kill => self.job.terminate(1),
+            Signal::Hup | Signal::Term => {
+                self.close_console();
+                Ok(())
+            }
+            Signal::Kill => {
+                #[cfg(test)]
+                self.record(Stage::TerminateJob);
+                self.job.terminate(1)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this signal has no mapping in the ConPTY backend yet",

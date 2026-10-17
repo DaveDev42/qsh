@@ -21,8 +21,7 @@ use crate::broker::{
     SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
 };
 
-/// `TERM` when the client sent no hint.
-pub const DEFAULT_TERM: &str = "xterm-256color";
+use super::env_policy::{DEFAULT_TERM, PASSTHROUGH as PASSTHROUGH_ENV};
 
 /// The baseline `PATH` handed to the child (the client cannot override it,
 /// see [`PINNED_ENV`]). The login shell's own profile extends it (macOS:
@@ -41,11 +40,6 @@ pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 /// Window size used when the spec carries `0` for either dimension.
 const FALLBACK_SIZE: (u16, u16) = (80, 24);
 
-/// Environment keys copied from the `qsh serve` process into the child (in
-/// addition to anything the client sends). Locale and timezone only —
-/// never `PATH`, never secrets.
-const PASSTHROUGH_ENV: &[&str] = &["LANG", "LANGUAGE", "TZ"];
-
 /// Keys the client's `env` may not override: the identity of the login
 /// (fixed by the password database) and `PATH` — `argv[0]` is resolved
 /// against the child's `PATH`, so a client-supplied `PATH` would let the
@@ -53,7 +47,7 @@ const PASSTHROUGH_ENV: &[&str] = &["LANG", "LANGUAGE", "TZ"];
 /// choke point). `PATH` grows only through the login shell's own profile.
 /// `crate::exec` (`exec.run`, no PTY) pins the same five keys the same way
 /// — `pub(crate)` so it can reuse this list instead of duplicating it.
-pub(crate) const PINNED_ENV: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH"];
+pub(crate) const PINNED_ENV: &[&str] = super::env_policy::PINNED_POSIX;
 
 /// The production [`SourceFactory`]: one [`PtySource`] per session.
 #[derive(Debug, Default, Clone, Copy)]

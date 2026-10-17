@@ -9,17 +9,15 @@
 //! filter picks the same sessions whether the host is a forward `qsh serve`
 //! or a reverse target behind the local `qsh listen` daemon.
 //!
-//! Sessions are PTY-backed, and a Windows host has no PTY until M20
-//! (ADR-0035 decision 25), so every test that needs a live session seeds it
-//! under `cfg(unix)`; on Windows the same tests run over a host with zero
-//! sessions, which still drives the filter and the forward route on the
+//! The tests seed live sessions with a POSIX shell script, and Windows has no
+//! `sh`, so every test that needs a live session seeds it under `cfg(unix)`;
+//! on Windows the same tests run over a host with zero sessions, which still drives the filter and the forward route on the
 //! Windows client. The route-equivalence test has a Windows twin of the same
 //! name that runs both routes (a `qsh serve` host and a `qsh serve --to`
 //! target behind the local `qsh listen` daemon) over zero sessions: the
 //! filters, `data.unreachable` and the host-less fan-out reaching the reverse
 //! target through the daemon's named pipe are all observable without a
-//! session. The same cases over live sessions are M20's, when a Windows host
-//! has a PTY.
+//! session.
 
 use crate::common;
 
@@ -665,13 +663,13 @@ fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
     drop(listen);
 }
 
-/// The Windows twin of the test above, over hosts with no sessions (a
-/// Windows host has no PTY until M20). What it pins is the route part: every
-/// filter returns the same empty listing from the forward host and from the
-/// reverse target, and the host-less fan-out reaches the reverse target
-/// through the local daemon's named pipe. The target's pin carries an address
-/// nothing listens on, so a fan-out that came back without `data.unreachable`
-/// did get its answer over the registration, not a forward dial. With the
+/// The Windows twin of the test above, over hosts with no sessions (seeding
+/// is a POSIX shell script). What it pins is the route part: every filter
+/// returns the same empty listing from the forward host and from the reverse
+/// target, and the host-less fan-out reaches the reverse target through the
+/// local daemon's named pipe. The target's pin carries an address nothing
+/// listens on, so a fan-out that came back without `data.unreachable` did get
+/// its answer over the registration, not a forward dial. With the
 /// registration gone the same fan-out reports the target unreachable and
 /// keeps the filter.
 #[cfg(windows)]

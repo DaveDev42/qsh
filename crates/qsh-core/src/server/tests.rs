@@ -2035,25 +2035,36 @@ async fn open_with_a_foreign_user_hint_is_unsupported_after_acl_and_creates_noth
     assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn open_with_the_serve_accounts_login_name_as_hint_succeeds() {
-    let Some(me) = serve_login_name() else {
-        eprintln!("no passwd entry for this uid; skipping");
+    let Some(names) = serve_login_names() else {
+        eprintln!("no account entry for this process; skipping");
         return;
     };
+    // unix: the one login name. Windows: `user` and `DOMAIN\user`, each
+    // also in the other case (the comparison ignores it there).
+    #[cfg_attr(unix, allow(unused_mut))]
+    let mut hints: Vec<String> = names.to_vec();
+    #[cfg(windows)]
+    hints.extend(names.iter().map(|n| n.to_uppercase()));
     let rig = allow_rig();
     let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-    let msg = ControlMessage::new(
-        1,
-        control_message::Body::SessionOpen(wire::SessionOpen {
-            user: Some(me),
-            ..Default::default()
-        }),
-    );
-    let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
-    assert_eq!(error_code(&reply), None, "{reply:?}");
-    assert_eq!(rig.broker.session_count(), 1);
+    for (i, hint) in hints.into_iter().enumerate() {
+        let msg = ControlMessage::new(
+            1 + i as u64,
+            control_message::Body::SessionOpen(wire::SessionOpen {
+                user: Some(hint.clone()),
+                ..Default::default()
+            }),
+        );
+        let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
+        assert_eq!(error_code(&reply), None, "{hint}: {reply:?}");
+        assert_eq!(
+            rig.broker.session_count(),
+            i + 1,
+            "{hint}: the open must have created a session"
+        );
+    }
 }
 
 #[tokio::test]

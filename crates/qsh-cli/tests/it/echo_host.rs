@@ -1,11 +1,10 @@
 //! The echo host behind the real `qsh` client (`qsh_testkit::echo_host`), on
 //! both routes.
 //!
-//! A Windows host answers `UNSUPPORTED` to PTY sessions until the Windows host
-//! role lands, so the interactive client cannot be driven against a real
-//! `qsh serve` there. These routes put an echo-session host behind the real
-//! client instead: the forward route is a QUIC listener that pins the
-//! client's fingerprint, the reverse route is a real `qsh listen` daemon with
+//! The interactive client's console tests on Windows want a host whose output
+//! is exactly what it was sent, not a ConPTY's rendering of it. These routes
+//! put an echo-session host behind the real client instead: the forward route
+//! is a QUIC listener that pins the client's fingerprint, the reverse route is a real `qsh listen` daemon with
 //! the echo host registered on it as a target. Everything but the session
 //! source is production code.
 //!

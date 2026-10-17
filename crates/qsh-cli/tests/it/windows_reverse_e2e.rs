@@ -8,10 +8,11 @@
 //! have: its listing of the registration, the registration surviving the
 //! controller's restart, and its `tunnels` and `tunnel close`.
 //!
-//! No test-only harness stands in for either side. Attaching a pty session
-//! through the route needs a host with PTY sessions, which a Windows host does
-//! not have yet, so those cases stay in `reverse_e2e.rs` and the client side
-//! of the attach is `windows_attach.rs`, against the in-process echo host.
+//! No test-only harness stands in for either side. The session ops (open,
+//! write, read, close) run against the target's own ConPTY sessions. Attaching
+//! through the route needs a unix pseudo-terminal for the `expectrl` client,
+//! so that case stays in `reverse_e2e.rs`, and the client side of the attach
+//! on Windows is `windows_attach.rs`, against the in-process echo host.
 
 #![cfg(windows)]
 
@@ -30,6 +31,26 @@ const NOTICE_DEADLINE: Duration = Duration::from_secs(90);
 #[test]
 fn exec_round_trip() {
     cases::exec_round_trip(&ReverseRoute::start());
+}
+
+#[test]
+fn pty_session_runs_a_command() {
+    cases::pty_session_runs_a_command(&ReverseRoute::start());
+}
+
+#[test]
+fn pty_session_default_shell_takes_input() {
+    cases::pty_session_default_shell_takes_input(&ReverseRoute::start());
+}
+
+#[test]
+fn pty_session_resize_is_applied() {
+    cases::pty_session_resize_is_applied(&ReverseRoute::start());
+}
+
+#[test]
+fn pty_session_close_ends_a_running_session() {
+    cases::pty_session_close_ends_a_running_session(&ReverseRoute::start());
 }
 
 #[test]

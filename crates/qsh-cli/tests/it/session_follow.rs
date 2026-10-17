@@ -6,8 +6,7 @@
 //! loop (`Ops::session_read` is literally a one-pull delegation), so a
 //! session's event stream must look the same through either door.
 
-// Sessions are PTY-backed, so this whole file only exists on POSIX hosts
-// (Windows host is M20) — and `sh` is not there to run the script either.
+// The sessions run a POSIX shell script, and `sh` is not there on Windows.
 #![cfg(unix)]
 
 use crate::common;

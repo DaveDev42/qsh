@@ -1,7 +1,9 @@
 //! Windows process plumbing: a Job Object that ends a whole process tree,
 //! and `CreateProcessW` with an attribute list that puts the child inside
 //! that job from the moment it exists (ADR-0035 decision 20). Both the
-//! ConPTY backend and host `exec` build on it.
+//! ConPTY backend and host `exec` build on it. It also reads what a session
+//! child's environment is built from: the user environment block of the
+//! process token and the account's names.
 //!
 //! Creating the child and assigning it to a job in two steps leaves a window
 //! in which it can already have started a grandchild that is not in the job.
@@ -11,26 +13,32 @@
 //! the tree also ends when this process dies and the last handle to the job
 //! closes with it.
 
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io;
-use std::os::windows::ffi::OsStrExt as _;
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::oneshot;
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
+use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY};
 use windows_sys::Win32::System::Console::HPCON;
+use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_JOB_LIST,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, RegisterWaitForSingleObject,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, UnregisterWaitEx, UpdateProcThreadAttribute,
     WT_EXECUTEONLYONCE,
 };
+use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
 
 /// `io::Error::last_os_error` with the failing call named.
 pub(crate) fn os_error(what: &str) -> io::Error {
@@ -88,12 +96,28 @@ impl JobObject {
 }
 
 /// What to start. The command line is the full, already quoted string
-/// `CreateProcessW` parses. The child inherits this process's environment and
-/// working directory.
+/// `CreateProcessW` parses.
 pub(crate) struct ProcessSpec<'a> {
+    /// The program to run, as a path. With it `CreateProcessW` looks nothing
+    /// up: not in the current directory, not on this process's `PATH`. The
+    /// caller resolves the program (against the child's own `PATH`) and
+    /// passes what it found. `None` lets `CreateProcessW` parse the program
+    /// out of the command line and search for it, which includes this
+    /// process's working directory.
+    pub(crate) application: Option<&'a OsStr>,
     pub(crate) command_line: &'a OsStr,
+    /// `CreateProcessW` creation flags besides the ones this function always
+    /// sets (`EXTENDED_STARTUPINFO_PRESENT`, and `CREATE_UNICODE_ENVIRONMENT`
+    /// when there is an environment block).
+    pub(crate) creation_flags: u32,
     /// The pseudo-console the child is attached to, if any.
     pub(crate) pseudo_console: Option<HPCON>,
+    /// The child's environment block (UTF-16, `NAME=value` entries each
+    /// ended by a NUL and one more NUL at the end). `None` inherits this
+    /// process's environment.
+    pub(crate) environment: Option<&'a [u16]>,
+    /// The child's working directory. `None` inherits this process's.
+    pub(crate) current_dir: Option<&'a OsStr>,
 }
 
 /// A started process: its handle and id. The primary thread's handle is
@@ -107,6 +131,8 @@ pub(crate) struct Process {
 /// Start `spec` inside `job` with one `CreateProcessW` call.
 pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Result<Process> {
     let mut command_line = wide_nul(spec.command_line);
+    let application = spec.application.map(wide_nul);
+    let current_dir = spec.current_dir.map(wide_nul);
     let job_handles = [job.raw()];
 
     let attribute_count = 1 + u32::from(spec.pseudo_console.is_some());
@@ -178,19 +204,30 @@ pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Resul
     }
     startup.lpAttributeList = list;
     let mut info = PROCESS_INFORMATION::default();
-    // SAFETY: the command line is a writable NUL-terminated buffer; `startup`
-    // and `info` are live; the attribute list is initialised and holds the
-    // job and console.
+    let mut flags = EXTENDED_STARTUPINFO_PRESENT | spec.creation_flags;
+    if spec.environment.is_some() {
+        flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
+    // SAFETY: the command line is a writable NUL-terminated buffer; the
+    // application name, working directory and environment block are
+    // NUL-terminated buffers that outlive the call (the block is the caller's
+    // double-NUL-terminated slice); `startup` and `info` are live; the
+    // attribute list is initialised and holds the job and console.
     let ok = unsafe {
         CreateProcessW(
-            std::ptr::null(),
+            application
+                .as_ref()
+                .map_or(std::ptr::null(), |name| name.as_ptr()),
             command_line.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,
-            EXTENDED_STARTUPINFO_PRESENT,
-            std::ptr::null(),
-            std::ptr::null(),
+            flags,
+            spec.environment
+                .map_or(std::ptr::null(), |block| block.as_ptr().cast::<c_void>()),
+            current_dir
+                .as_ref()
+                .map_or(std::ptr::null(), |dir| dir.as_ptr()),
             (&raw const startup).cast(),
             &mut info,
         )
@@ -321,4 +358,152 @@ impl Drop for Registration {
             drop(Box::from_raw(self.cell));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The account and its environment
+// ---------------------------------------------------------------------------
+
+/// The default environment of the process token's user: the system and user
+/// variables from the registry plus `USERPROFILE`, `USERNAME`, `USERDOMAIN`
+/// and the other values Windows derives for a logon
+/// (`CreateEnvironmentBlock`, not inheriting this process's variables).
+/// Entries are `(name, value)` as the block spells them; the few that are not
+/// valid UTF-16 come back with replacement characters.
+pub(crate) fn user_environment() -> io::Result<Vec<(String, String)>> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle of this process and a local out-pointer.
+    let ok = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+            &mut token,
+        )
+    };
+    if ok == 0 {
+        return Err(os_error("OpenProcessToken"));
+    }
+    // SAFETY: a fresh token handle owned here; it closes on drop.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut block: *mut c_void = std::ptr::null_mut();
+    // SAFETY: a live token with the access `CreateEnvironmentBlock` needs and
+    // a local out-pointer; `FALSE` keeps this process's variables out.
+    if unsafe { CreateEnvironmentBlock(&mut block, token.as_raw_handle(), 0) } == 0 {
+        return Err(os_error("CreateEnvironmentBlock"));
+    }
+    let _destroy = DestroyBlock(block);
+    let mut env = Vec::new();
+    let mut at = block.cast::<u16>().cast_const();
+    loop {
+        // SAFETY: the block is a sequence of NUL-terminated strings ended by
+        // an empty one, and `at` always points at the start of one of them.
+        let entry = unsafe {
+            let mut len = 0usize;
+            while *at.add(len) != 0 {
+                len += 1;
+            }
+            let entry = std::slice::from_raw_parts(at, len);
+            at = at.add(len + 1);
+            entry
+        };
+        if entry.is_empty() {
+            break;
+        }
+        let entry = OsString::from_wide(entry).to_string_lossy().into_owned();
+        // `=C:=C:\dir` style entries start with `=`; the name is whatever
+        // follows the first `=` after position zero.
+        if let Some((name, value)) = entry
+            .char_indices()
+            .skip(1)
+            .find(|(_, c)| *c == '=')
+            .map(|(i, _)| (&entry[..i], &entry[i + 1..]))
+            && !name.is_empty()
+            && !name.starts_with('=')
+        {
+            env.push((name.to_string(), value.to_string()));
+        }
+    }
+    Ok(env)
+}
+
+struct DestroyBlock(*mut c_void);
+
+impl Drop for DestroyBlock {
+    fn drop(&mut self) {
+        // SAFETY: the block came from `CreateEnvironmentBlock` and is
+        // destroyed exactly once.
+        unsafe { DestroyEnvironmentBlock(self.0) };
+    }
+}
+
+/// Every name the process token's account is known by, for the `user@`
+/// hint: `user` and, when the system reports it, `DOMAIN\user`. The account
+/// cannot change while the process runs, so the lookup is cached after the
+/// first success.
+pub(crate) fn account_names() -> io::Result<Vec<String>> {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    if let Some(names) = NAMES.get() {
+        return Ok(names.clone());
+    }
+    let names = lookup_account_names()?;
+    Ok(NAMES.get_or_init(|| names).clone())
+}
+
+fn lookup_account_names() -> io::Result<Vec<String>> {
+    let mut len = 0u32;
+    // SAFETY: the sizing call with a null buffer reports the length needed
+    // (including the NUL) in `len` and fails by design.
+    unsafe { GetUserNameW(std::ptr::null_mut(), &mut len) };
+    if len == 0 {
+        return Err(os_error("GetUserNameW (size)"));
+    }
+    let mut buf = vec![0u16; len as usize];
+    // SAFETY: `buf` is writable for `len` units and `len` is its size.
+    if unsafe { GetUserNameW(buf.as_mut_ptr(), &mut len) } == 0 {
+        return Err(os_error("GetUserNameW"));
+    }
+    let mut names = vec![wide_to_string(&buf[..(len as usize).saturating_sub(1)])];
+
+    // `DOMAIN\user`. Failing to get it only loses that spelling.
+    let mut len = 0u32;
+    // SAFETY: as above for the sizing call.
+    unsafe { GetUserNameExW(NameSamCompatible, std::ptr::null_mut(), &mut len) };
+    if len > 0 {
+        let mut buf = vec![0u16; len as usize];
+        // SAFETY: `buf` is writable for `len` units and `len` is its size.
+        if unsafe { GetUserNameExW(NameSamCompatible, buf.as_mut_ptr(), &mut len) } {
+            let sam = wide_to_string(&buf[..len as usize]);
+            if !sam.is_empty() && !names.contains(&sam) {
+                names.push(sam);
+            }
+        }
+    }
+    names.retain(|n| !n.is_empty());
+    if names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the process token has no account name",
+        ));
+    }
+    Ok(names)
+}
+
+fn wide_to_string(wide: &[u16]) -> String {
+    OsString::from_wide(wide).to_string_lossy().into_owned()
+}
+
+/// The Windows directory (`C:\Windows`), the same for every session.
+pub(crate) fn windows_directory() -> io::Result<String> {
+    // SAFETY: the sizing call with a null buffer returns the length needed.
+    let len = unsafe { GetSystemWindowsDirectoryW(std::ptr::null_mut(), 0) };
+    if len == 0 {
+        return Err(os_error("GetSystemWindowsDirectoryW (size)"));
+    }
+    let mut buf = vec![0u16; len as usize];
+    // SAFETY: `buf` is writable for `len` units.
+    let written = unsafe { GetSystemWindowsDirectoryW(buf.as_mut_ptr(), len) };
+    if written == 0 || written >= len {
+        return Err(os_error("GetSystemWindowsDirectoryW"));
+    }
+    Ok(wide_to_string(&buf[..written as usize]))
 }

@@ -1,5 +1,6 @@
-//! POSIX PTY backend for the session broker (`docs/design/architecture.md`
-//! §4, M2 plan Step 4 (2473c88)).
+//! PTY backends for the session broker (`docs/design/architecture.md` §4):
+//! the POSIX one below and the Windows ConPTY one after it. M2 plan Step 4
+//! (2473c88) built the POSIX one.
 //!
 //! `PtySource` is the production [`crate::broker::SessionSource`]: it opens a pty pair
 //! with `portable-pty` 0.9, spawns the child as a **session leader with the
@@ -42,16 +43,22 @@
 //! child could deadlock on the allocator lock and present as a session
 //! that never produces output). See architecture.md §4.
 //!
-//! The POSIX implementation is unix-only. On other targets [`factory`]
-//! returns a factory whose `create` fails with
-//! [`io::ErrorKind::Unsupported`], so the crate builds everywhere and a
-//! non-POSIX host answers `UNSUPPORTED` instead of not compiling
-//! (`docs/ROADMAP.md` §3: no Windows host in P0).
+//! Windows has its own backend, `ConPtySource` (`conpty.rs`, ADR-0035
+//! decision 20): a pseudo-console and a Job Object per session, created by
+//! one `CreateProcessW`. It implements the same [`crate::broker::SessionSource`]
+//! seam, so everything above it (sequence tagging, replay, quotas, detach and
+//! resume, the close escalation) is the same code on both platforms.
 //!
-//! Windows has its own backend, `conpty::ConPtySource` (ADR-0035 decision
-//! 20): a pseudo-console and a Job Object per session. It implements the
-//! same [`crate::broker::SessionSource`] seam, but [`factory`] does not
-//! return it yet, so a Windows host still answers `UNSUPPORTED`.
+//! The environment follows the same policy on both (`env_policy`): the
+//! child gets the account's environment, not the `qsh serve` one, and the
+//! client may not override the pinned keys. On Windows the account's
+//! environment is the user environment block (`CreateEnvironmentBlock` for the
+//! process token), the pinned set adds the Windows identity variables and the
+//! names compare ignoring case, an empty `argv` runs `COMSPEC` (or
+//! `%SystemRoot%\System32\cmd.exe`) from the user's profile directory, and the
+//! `user` hint is compared with the token's account name (`user` or
+//! `DOMAIN\user`) ignoring case. There is no user switching and no
+//! utmp/wtmp-like record on either platform.
 
 use std::io;
 use std::sync::Arc;
@@ -65,7 +72,9 @@ mod posix;
 mod conpty;
 
 #[cfg(windows)]
-pub use conpty::ConPtySource;
+pub use conpty::{ConPtyFactory, ConPtySource, login_name};
+
+pub(crate) mod env_policy;
 
 #[cfg(unix)]
 pub use posix::{PtyFactory, PtySource, login_name};
@@ -80,14 +89,6 @@ pub(crate) use posix::{PINNED_ENV, pinned_identity_env};
 #[cfg(all(test, unix))]
 mod tests;
 
-/// The error a non-POSIX host reports for any PTY request.
-pub fn unsupported() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "PTY sessions are only supported on POSIX hosts",
-    )
-}
-
 /// The error for a `user` hint that names anyone but the serve account
 /// (CLI.md §7: `UNSUPPORTED`, message `user switching is not supported`).
 pub fn user_switching_unsupported() -> io::Error {
@@ -97,38 +98,16 @@ pub fn user_switching_unsupported() -> io::Error {
     )
 }
 
-/// The production [`SourceFactory`] for `Broker::new` — PTY-backed on unix,
-/// always-`Unsupported` elsewhere.
+/// The production [`SourceFactory`] for `Broker::new`: PTY-backed on unix,
+/// ConPTY-backed on Windows.
 pub fn factory() -> Arc<dyn SourceFactory> {
     #[cfg(unix)]
     {
         Arc::new(PtyFactory)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        Arc::new(UnsupportedFactory)
-    }
-}
-
-/// Login name of the account `qsh serve` runs as, on hosts without a PTY
-/// backend. Always [`io::ErrorKind::Unsupported`].
-#[cfg(not(unix))]
-pub fn login_name() -> io::Result<String> {
-    Err(unsupported())
-}
-
-/// [`SourceFactory`] for hosts without a PTY backend.
-#[cfg(not(unix))]
-#[derive(Debug, Default, Clone, Copy)]
-struct UnsupportedFactory;
-
-#[cfg(not(unix))]
-impl SourceFactory for UnsupportedFactory {
-    fn create(
-        &self,
-        _spec: &crate::broker::SessionSpec,
-    ) -> io::Result<Box<dyn crate::broker::SessionSource>> {
-        Err(unsupported())
+        Arc::new(ConPtyFactory)
     }
 }
 
@@ -137,21 +116,9 @@ mod stub_tests {
     use super::*;
 
     #[test]
-    fn unsupported_error_maps_to_the_unsupported_kind() {
-        assert_eq!(unsupported().kind(), io::ErrorKind::Unsupported);
+    fn user_switching_error_maps_to_the_unsupported_kind() {
         let e = user_switching_unsupported();
         assert_eq!(e.kind(), io::ErrorKind::Unsupported);
         assert_eq!(e.to_string(), "user switching is not supported");
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn non_posix_factory_fails_closed_with_unsupported() {
-        let err = factory()
-            .create(&crate::broker::SessionSpec::default())
-            .err()
-            .expect("no PTY on this platform");
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(login_name().unwrap_err().kind(), io::ErrorKind::Unsupported);
     }
 }

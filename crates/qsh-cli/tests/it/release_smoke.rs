@@ -29,7 +29,7 @@
 //!   prevent has a twin: a typo'd path that fails deep inside a spawn.
 //!
 //! The pty half is `#[cfg(unix)]`: `expectrl` is a `cfg(unix)`
-//! dev-dependency, and a Windows host has no PTY sessions yet. The
+//! dev-dependency, so the interactive attach has no Windows twin here. The
 //! `#[cfg(not(unix))]` twin runs init, trust and `exec --json`, then
 //! `doctor --json`, a `tunnel open --local` TCP round trip and, on Windows,
 //! an owner-only check of the files the run created. The Windows client's

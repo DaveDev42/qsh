@@ -2147,7 +2147,7 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
         // this process cannot ever succeed again.
         BrokerError::Draining => (ErrorCode::ResourceExhausted, false),
         // A policy/platform refusal, not a failure — nothing was spawned
-        // (no PTY backend on this host, or a foreign `user` hint; CLI.md §7).
+        // (a foreign `user` hint or an unsupported platform; CLI.md §7).
         BrokerError::Unsupported(_) => (ErrorCode::Unsupported, false),
         BrokerError::Spawn(_) | BrokerError::Io(_) | BrokerError::Gone => {
             (ErrorCode::Internal, false)
@@ -2267,20 +2267,43 @@ fn pairing_audit_category(err: &crate::pairing::PairingError) -> &'static str {
 }
 
 /// Whether the `user@` hint names the account `qsh serve` runs as
-/// (CLI.md §7: exact, case-sensitive match against the login name from
-/// `getpwuid(geteuid())`, never `$USER`/`$LOGNAME`). Anything that cannot
-/// be verified — no passwd entry, or a platform without one — is a
-/// mismatch: fail closed.
+/// (CLI.md §7). On unix it is an exact, case-sensitive match against the
+/// login name from `getpwuid(geteuid())`, never `$USER`/`$LOGNAME`. On
+/// Windows it is a case-insensitive match against the process token's
+/// account, spelled `user` or `DOMAIN\user` (ADR-0035 decision 21). Anything
+/// that cannot be verified, such as no account entry, is a mismatch: fail
+/// closed.
 fn user_hint_matches(hint: &str) -> bool {
-    serve_login_name().is_some_and(|name| name == hint)
+    use crate::pty::env_policy;
+    #[cfg(unix)]
+    let table = env_policy::POSIX;
+    #[cfg(windows)]
+    let table = env_policy::WINDOWS;
+    serve_login_names().is_some_and(|names| env_policy::login_name_matches(hint, names, table))
 }
 
 /// The login name of the account this process runs as, or `None` if it
 /// cannot be determined. Cached: it cannot change for the process
 /// lifetime.
 pub fn serve_login_name() -> Option<String> {
-    static LOGIN_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    LOGIN_NAME.get_or_init(lookup_login_name).clone()
+    serve_login_names().and_then(|names| names.first().cloned())
+}
+
+/// Every name the serve account is known by: one on unix, `user` and
+/// `DOMAIN\user` on Windows. Cached like [`serve_login_name`].
+fn serve_login_names() -> Option<&'static [String]> {
+    static LOGIN_NAMES: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    LOGIN_NAMES.get_or_init(lookup_login_names).as_deref()
+}
+
+#[cfg(unix)]
+fn lookup_login_names() -> Option<Vec<String>> {
+    lookup_login_name().map(|name| vec![name])
+}
+
+#[cfg(windows)]
+fn lookup_login_names() -> Option<Vec<String>> {
+    crate::winproc::account_names().ok()
 }
 
 #[cfg(unix)]
@@ -2312,13 +2335,6 @@ fn lookup_login_name() -> Option<String> {
         let name = unsafe { CStr::from_ptr(pwd.pw_name) };
         return name.to_str().ok().map(str::to_owned);
     }
-}
-
-#[cfg(not(unix))]
-fn lookup_login_name() -> Option<String> {
-    // No passwd database to compare against: every `user@` hint is a
-    // mismatch (fail closed) until a Windows host lands (M20).
-    None
 }
 
 /// Per-connection protocol failures (all end the connection). `pub` because

@@ -2,13 +2,14 @@
 //! attached through both routes to a host whose sessions are the broker's
 //! headless echo (ADR-0035 decisions 1, 2 and 5 to 8, `docs/CLI.md` §7).
 //!
-//! A Windows host answers `UNSUPPORTED` to PTY sessions until the Windows host
-//! role lands, so the host behind the client is `qsh_testkit::echo_host`
-//! (`echo_host.rs`): the forward route is a QUIC listener that pins the
-//! client, the reverse route is a real `qsh listen` daemon with the echo host
-//! registered on it. The client, its console layer, the wire, the daemon and
-//! the broker's detach and resume are the production ones. The same cases
-//! then run against a real `qsh serve` once the host has a PTY.
+//! The host behind the client is `qsh_testkit::echo_host` (`echo_host.rs`),
+//! so the bytes the console shows are exactly the bytes sent, with no ConPTY
+//! rendering of a real shell in between: the forward route is a QUIC listener
+//! that pins the client, the reverse route is a real `qsh listen` daemon with
+//! the echo host registered on it. The client, its console layer, the wire,
+//! the daemon and the broker's detach and resume are the production ones. A
+//! real `qsh serve` host's own ConPTY sessions are driven through the session
+//! ops in `windows_forward_e2e.rs` and `windows_reverse_e2e.rs`.
 //!
 //! Every wait is on observable state with a deadline: the console's text, the
 //! host's session counts, the process's exit.
@@ -182,4 +183,40 @@ fn console_close_detaches_and_keeps_the_session() {
 #[test]
 fn console_close_detaches_and_keeps_the_session_reverse() {
     console_close_detaches(&EchoReverse::start());
+}
+
+/// `user@` is an assertion, not a choice: a name that is not the serve
+/// account's is refused with `UNSUPPORTED` and no session is created
+/// (`docs/CLI.md` §7, fail closed). The user gate lives in the server, so
+/// the echo host enforces it exactly like a real `qsh serve`.
+#[test]
+fn a_foreign_user_hint_is_refused_without_creating_a_session() {
+    let route = EchoForward::start();
+    let target = format!("qsh-no-such-user@{}", route.name());
+    let mut qsh = spawn_qsh(route.client(), &[&target]);
+    qsh.wait_text("user switching is not supported");
+    assert_eq!(
+        qsh.wait_exit(),
+        255,
+        "a refused hint is a qsh runtime failure (`docs/CLI.md` §4)"
+    );
+    let text = qsh.text();
+    assert!(
+        text.contains("UNSUPPORTED"),
+        "the error code must reach the user: {text:?}"
+    );
+    assert_eq!(
+        route.host().live_counts().live,
+        0,
+        "a refused `user@` must not leave a session behind"
+    );
+    let (code, listed) = route.client().json(&["sessions", route.name(), "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    assert!(
+        listed["data"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .is_empty(),
+        "{listed}"
+    );
 }
