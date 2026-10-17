@@ -658,14 +658,10 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         Case {
             name: "session open",
             sandbox: &fleet.client,
-            // Sessions are PTY-backed; a host without a PTY backend
-            // answers UNSUPPORTED without creating anything (Windows host
-            // PTY is M20, ADR-0035 — README "Known limitations", CLI.md §7).
+            // The default shell on both platforms: the login shell on unix,
+            // `COMSPEC` on a ConPTY host (ADR-0035 decision 20).
             args: &["session", "open", HOST_ALIAS],
-            #[cfg(unix)]
             outcome: Outcome::Succeeds(0),
-            #[cfg(not(unix))]
-            outcome: Outcome::Fails("UNSUPPORTED"),
         },
         Case {
             name: "sessions",
@@ -973,18 +969,9 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     let sessions = envelope["data"]["sessions"]
         .as_array()
         .expect("sessions array");
-    // Only a PTY host actually has sessions to report; elsewhere the list
-    // is legitimately empty and what matters is that the dead peer did not
-    // turn the fan-out into a failure.
-    #[cfg(unix)]
     assert!(
         sessions.iter().any(|s| s["host"] == HOST_ALIAS),
         "the reachable host's sessions survive a peer being down: {envelope}"
-    );
-    #[cfg(not(unix))]
-    assert!(
-        sessions.iter().all(|s| s["host"] == HOST_ALIAS),
-        "no foreign hosts in the list: {envelope}"
     );
     let unreachable = envelope["data"]["unreachable"]
         .as_array()

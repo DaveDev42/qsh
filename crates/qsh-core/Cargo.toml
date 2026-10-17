@@ -83,17 +83,24 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # `Win32_System_JobObjects` and the process/console features are the ConPTY
 # backend (`src/pty/conpty.rs`, ADR-0035 decision 20): a pseudo-console, a
 # Job Object the child is created inside, and `CreateProcessW` with a
-# process attribute list (`src/winproc.rs`).
+# process attribute list (`src/winproc.rs`). `Win32_System_Environment` is
+# the user's environment block a session child starts from (decision 21),
+# `Win32_Security_Authentication_Identity` the `DOMAIN\user` account name the
+# `user@` hint is compared with, and `Win32_System_SystemInformation` the
+# Windows directory the default shell falls back to.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authentication_Identity",
     "Win32_Security_Authorization",
     "Win32_System_Console",
+    "Win32_System_Environment",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
@@ -118,9 +125,15 @@ portable-pty.workspace = true
 
 # The Credential Manager tests (`identity/keystore.rs`) read the entry back
 # with `CredReadW` to pin its type, persistence and target; the store crate
-# already links this feature, so it adds nothing to the build.
+# already links this feature, so it adds nothing to the build. The ConPTY tests
+# (`src/pty/conpty/tests.rs`) list a session's processes with a Toolhelp
+# snapshot.
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
 
 [dev-dependencies]
 # `Connection::with_peer_chain_dropped` stands in for a connection the trust

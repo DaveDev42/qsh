@@ -491,9 +491,8 @@ pub struct HostRuntime {
 ///
 /// The broker outlives every connection (`docs/design/architecture.md`
 /// §3); its TTL reaper stops on its own once the returned `Server` (and the
-/// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix;
-/// elsewhere the factory answers `UNSUPPORTED` without spawning anything
-/// (Windows host is M20 — README limitations).
+/// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix and
+/// ConPTY-backed on Windows (`crate::pty::factory`).
 ///
 /// Policy loads exactly once, here, at process start — never hot-reloaded
 /// (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a reverse target

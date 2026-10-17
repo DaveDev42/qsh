@@ -1,1 +1,1 @@
-(test(/^(?:\w+::)*conpty_/))
+(test(/^(?:\w+::)*conpty_/) | test(/^(?:\w+::)*hundred_sequential_conpty_/) | test(/^windows_(forward|reverse)_e2e::pty_session_/))

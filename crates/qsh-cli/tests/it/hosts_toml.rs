@@ -112,10 +112,9 @@ fn hosts_toml_address_actually_wins_a_live_dial_over_a_stale_trust_toml_pin() {
 /// different `UNSUPPORTED` than the one under test. The message assert
 /// stays meaningful on Windows too: a mismatched hint is refused at the
 /// server's user gate (`user switching is not supported…`, before any
-/// session resource), while an absent hint would instead fail later in
-/// PTY creation with `PTY sessions are only supported on POSIX hosts` —
-/// so seeing the user-gate message proves the `hosts.toml` default
-/// genuinely reached the wire.
+/// session resource), while an absent hint would open a session — so
+/// seeing the user-gate message proves the `hosts.toml` default genuinely
+/// reached the wire.
 #[test]
 fn a_hosts_toml_default_user_mismatch_is_refused_the_same_as_an_explicit_one() {
     let fleet = Fleet::start();

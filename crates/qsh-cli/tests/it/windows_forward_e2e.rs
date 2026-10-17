@@ -4,8 +4,9 @@
 //!
 //! The reverse route runs the same cases in `windows_reverse_e2e.rs`, so a
 //! behaviour that differs between the routes shows up as one module failing
-//! where the other passes. The interactive form is `windows_attach.rs`, against
-//! the in-process echo host, since a Windows host has no PTY sessions yet.
+//! where the other passes. The session ops run here against the host's own
+//! ConPTY sessions; the interactive form is `windows_attach.rs`, against the
+//! in-process echo host.
 
 #![cfg(windows)]
 
@@ -14,6 +15,26 @@ use crate::route_cases::{self as cases, ForwardRoute};
 #[test]
 fn exec_round_trip() {
     cases::exec_round_trip(&ForwardRoute::start());
+}
+
+#[test]
+fn pty_session_runs_a_command() {
+    cases::pty_session_runs_a_command(&ForwardRoute::start());
+}
+
+#[test]
+fn pty_session_default_shell_takes_input() {
+    cases::pty_session_default_shell_takes_input(&ForwardRoute::start());
+}
+
+#[test]
+fn pty_session_resize_is_applied() {
+    cases::pty_session_resize_is_applied(&ForwardRoute::start());
+}
+
+#[test]
+fn pty_session_close_ends_a_running_session() {
+    cases::pty_session_close_ends_a_running_session(&ForwardRoute::start());
 }
 
 #[test]
