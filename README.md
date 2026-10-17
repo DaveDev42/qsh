@@ -1262,8 +1262,8 @@ old-glibc check.
 | M16 | SSH bootstrap and trust revocation | Done (2026-10-15); `parse_ssh_bootstrap_line` fuzz hours and the real-OpenSSH campaign open |
 | M17 | Ops surface (service activation, `move-key`, session filters, `qsh audit`) | Done (2026-10-16) |
 | M18 | Session home | Waits on the real-device mobility campaign (M8 DoD 3) |
-| M19 | Windows client | In progress |
-| M20 | Windows host | Design record approved |
+| M19 | Windows client | Done (2026-10-18); Windows campaign rounds and signing secrets open |
+| M20 | Windows host | In progress |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the
