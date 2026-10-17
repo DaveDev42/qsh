@@ -2,11 +2,11 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)와 M16(SSH 부트스트랩과 신뢰 철회)은 2026-10-15, M17(운영 표면)은 2026-10-16 닫혔다. M18은 착수 조건(M8 DoD 3)이 닫히지 않아 건넜고(§5.1 원칙 6), 현재 마일스톤은 M19(Windows client)이며 `PLAN.md`가 그 실행 계획이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)와 M16(SSH 부트스트랩과 신뢰 철회)은 2026-10-15, M17(운영 표면)은 2026-10-16 닫혔다. M18은 착수 조건(M8 DoD 3)이 닫히지 않아 건넜고(§5.1 원칙 6), M19(Windows client)는 2026-10-18 닫혔고, 현재 마일스톤은 M20(Windows host)이며 `PLAN.md`가 그 실행 계획이다. M18은 여전히 착수 조건을 기다려 건넌 상태다(§5.1 원칙 6). P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M20)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
-닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`, M16 `66b6f4d`, M17 `047db25`.
+닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`, M16 `66b6f4d`, M17 `047db25`, M19 `d853388`.
 
 ## P0 MVP 완료 선언의 조건
 
@@ -152,13 +152,13 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | TCP/TLS fallback (철회, ADR-0043) | doctor가 "UDP 차단"을 보고하는 순간 | 만들지 않는다. transport facade는 남지만 TCP 코드는 0줄이고, doctor 메시지와 README는 "예정"이 아니라 범위 밖이라고 적는다. 다시 열려면 ADR-0043을 개정하는 새 ADR |
 | SOCKS `-D` (M9로 승격, 2026-09-19, [ADR-0019](adr/0019-socks-dynamic-forward.md)) | 스펙 예시에 존재 | M9가 구현했다. `-D`는 CONNECT마다 `forward.local`로 인가된다. `forward.socks` action은 어휘에 남고 여전히 항상 deny다. 이 토큰을 적은 기존 `acl.toml`이 파싱 오류로 전부 거부 상태가 되지 않게 하려는 것이다 |
 | File copy (P1) | `file.read/write` action이 §9에 존재 | action만 정의, op 미등록, capabilities에 미광고. → M15 (scp 호환 `qsh cp`, ADR-0029) |
-| Windows (P1 client M19 · host M20) | 외부 기여 PR | PTY 백엔드(`pty/posix.rs`)는 `#[cfg(unix)]`이고 비unix에서 `pty::factory()`가 `UnsupportedFactory`를 돌려준다. CI는 `windows-latest`에서 build/clippy/portable 테스트만 돌려 컴파일 회귀를 막는다. 지원 약속 아님. README Known limitations에 명시. → M19(client·서명·scoop·winget) / M20(host) |
+| Windows (P1 client M19 · host M20) | 외부 기여 PR | PTY 백엔드(`pty/posix.rs`)는 `#[cfg(unix)]`이고 비unix에서 `pty::factory()`가 `UnsupportedFactory`를 돌려준다. CI의 `windows-latest` leg은 clippy·nextest 전체와 정방향·역방향 Windows 종단을 돈다. Windows host의 PTY 세션과 파일 op는 M20까지 `UNSUPPORTED`이고 지원 약속이 아니다. README Known limitations에 명시. → client·서명·scoop·winget은 M19 착지(2026-10-18), host(ConPTY 백엔드, PTY 세션, host 쪽 `cp`, `setup host`·`pair invite`·`pair ssh-respond`)는 M20 |
 | Multi-attach read-only (P2) | broker에서 거의 공짜로 나옴, 그래서 위험 | 관찰자(observer) 개념 자체를 만들지 않는다. writer lease는 P0 필수이고 두 번째 attach 정책은 lease 규칙만 따른다 |
 | Local echo prediction (P2) | mosh 대비 지연 불평 | P0는 실제 PTY 지연을 측정·공개해 데이터로 대화한다(§13의 10ms 예산) |
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). `--relay` flag는 stub조차 없다 |
 | Forward-route live carrier·`-R` 자동 재발행 ([ADR-0018](adr/0018-tunnel-lifetime-bound-to-connection.md)로 종결) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | v1 터널 수명은 connection에 결합되고 live carrier는 구현하지 않는다(M4가 `tunnel_chaos.rs`의 트랩으로 고정, README Known limitations가 고지). ADR-0023(2026-09-30 승인)이 명시적으로 켠 터널(`--supervise`)에 한해 ADR-0018 결정 2·3을 개정하고 결정 1은 유지한다. forward route의 `-L`/`-D`는 M12 첫 단위, reverse route와 `-R`은 둘째 단위로 착지했다 |
 | Cert rotation UX (폐기, 2026-10-12) | 만료 | 만료 30일 전 doctor 경고만 둔다. rotation·revocation 목록은 만들지 않고, `trust remove` 뒤 열린 연결을 닫는 것만 M16 (b)(ADR-0031 축소판)가 한다 |
-| Service 설치 (M9로 승격, 2026-09-07) | 상시 실행 요구 | M9가 `qsh service install`을 구현했고 unit 예시는 `docs/deploy/service.md`. 서비스 매니저 실호출은 M17 (a)가 명시적 플래그(`--activate`·`--deactivate`·`--live`)로 착지했다(ADR-0032). Windows 작업 스케줄러 분기는 M19 |
+| Service 설치 (M9로 승격, 2026-09-07) | 상시 실행 요구 | M9가 `qsh service install`을 구현했고 unit 예시는 `docs/deploy/service.md`. 서비스 매니저 실호출은 M17 (a)가 명시적 플래그(`--activate`·`--deactivate`·`--live`)로 착지했다(ADR-0032). Windows 작업 스케줄러 분기는 M19 착지(`8c5ef13`·`357fd58`) |
 | SSH 키 가져오기 | 기존 키 재사용 요구 | ADR-0026. P1 착수로 M11 (c) 범위가 됐고 구현했다 |
 | **메타 가드레일** | | `qsh capabilities --json` == fixture 테스트: 새 capability는 fixture diff로만 추가 가능(리뷰 가능한 산출물). + ErrorCode 전수 도달성 테스트: 존재하지만 만들 수 없는 코드 금지 |
 
@@ -296,7 +296,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 4.4~8.6ew + 보안 가산 미산정. (a) ADR 0.3~0.5(세 번째 후보 산정과 spool 재검토 포함) / (b) H4 4.2(4.0~4.8) 또는 H5 6.5(5.4~7.6), `docs/design/reexec-estimate.md` §3 표 / (c) 0~0.3 / 마감 0.1~0.2. `reexec-estimate.md` §5는 H4의 4.2ew에 스냅숏 통로 검증·스크럽 비용이 들어 있지 않고 H5에는 소켓 권한 모델을 다시 세우는 비용을 가산해야 한다고 적는다. 이 가산분은 ADR-0034가 채택안을 고른 뒤 매기고 이 절에 적는다. 세 번째 후보를 고르면 (b) 전체를 다시 매긴다.
 
-### M19 — Windows client
+### M19 — Windows client ✅ 완료 (2026-10-18)
 
 - **범위:** PRD P1의 Windows client와 Windows 공통 기반. 연결 방향과 플랫폼에 관계없이 같은 기능을 연다(`docs/PRD.md` §4, §5.1 원칙 7, 2026-10-13 사용자 결정 "정방향, 역방향, 모든 플랫폼에서 평등한 기능 지원", 같은 날 "원칙에 예외는 없다"). client 쪽은 `init`, `trust`/`pair accept`(콘솔 프롬프트 포함)/`pair ssh [--reverse]`, `exec`, 대화형 attach, `-L`/`-R`/`-D`, `qsh cp`, `doctor`, `qsh listen`과 `setup listener`, `hosts`·`tunnels`의 데몬 항목이다. 공통 기반은 콘솔 raw 모드와 VT 입력, resize 폴링, named pipe localctl(소유자 전용 DACL, 이름 선점 거부, 양방향 SID 확인), 키·상태·audit 파일의 소유자 전용 DACL, Credential Manager keystore, `QueryUnbiasedInterruptTime` 기반 절전 감지다. `qsh service`와 `--service`의 작업 스케줄러 로그온 작업 백엔드(숨김 `qsh service run`, linger에 대응하는 상시 기동 레시피, `logon_task_session_scoped`)도 여기서 연다. 출고는 x86_64·aarch64 zip(man 페이지 포함), `install.ps1`, Authenticode 서명(SSL.com eSigner)과 CI 서명 검증, scoop bucket과 winget 매니페스트다. 역방향 CI를 위해 `qsh serve --to`의 Windows 게이트를 먼저 걷는다. PTY 세션은 M20까지 `UNSUPPORTED`이고 지원 약속이 아니다. ADR-0035 결정 1 목록의 `qsh identity move-key`(Credential Manager)와 `qsh audit`, 그리고 M16·M17이 넘긴 Windows 쌍둥이(신뢰 철회 `listen`·`serve --to` 재검증, 세션 필터의 데몬 fan-out, named pipe의 `audit.query` 비노출, Windows client 자동 부트스트랩)도 이 범위다. Windows client의 대화형 attach 종단은 Windows host PTY가 없으므로 Linux 테스트 host를 상대로 돈다.
 - **착수 조건:** ADR-0035 승인(충족 2026-10-14). M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다. `qsh cp`와 `pair ssh` 항목은 ADR-0029·ADR-0044 착지 뒤에 열린다. 서명 스텝의 실서명은 사람 몫(인증서와 시크릿, §5.5)이 준비되어야 돈다. 그 전까지는 게이트가 경고와 함께 건너뛴다.
@@ -317,6 +317,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - 안정성: M19가 더한 타이밍 민감 테스트는 Linux와 Windows 각각에서 부하 아래 50회 연속 초록(`scripts/stress/run.sh`, `scripts/stress/m19.filter`).
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 7.7~12.9ew(ADR-0035 세 번째 개정 2026-10-13). 비교 표본이 없어 신뢰도가 낮다. 첫 스텝은 콘솔 probe·터미널 trait 추출과 `cfg(unix)` 게이트 제거이고, 그 뒤 다시 매긴다.
+- **마감 노트 (2026-10-18):** 전 DoD 충족. 터미널 trait과 콘솔 계층 `e385279`·`bafc604`, 소유자 전용 DACL `e5ee456`, Credential Manager `7faad6c`, named pipe localctl `21dbb48`, Windows reverse와 정방향·역방향 종단 `fd4ac19`, 절전 감지·supervise·신뢰 철회·세션 필터 쌍둥이 `fced1a8`, client 기능 동등(대화형 attach, `-D`, `qsh cp` client, 자동 부트스트랩, `pair ssh --reverse`, doctor, `release_smoke`) `1d413e1`, 작업 스케줄러 서비스 백엔드 `8c5ef13`, ADR-0032 Windows 열 `357fd58`, aarch64 자산·`install.ps1`·Authenticode 서명 검증 `c1c860d`, 캠페인 문서 `ad409e0`, scoop·winget job `784f93b`, 마감 절차 1·2 `04abb92`. 보정은 `2590967`·`f5a75d7`·`d1ff674`(cargo deny의 zbus 5 계열 unmaintained 권고 예외). CI run 38983382108(acceptance 포함) 초록. 부하 아래 `scripts/stress/m19.filter`는 Linux(Dave-Windows-WSL 8 vCPU) 93개 50/50, Windows(Dave-Windows) 130개 중 qsh-cli `it` 62개만 49/50이고 나머지는 50/50이다. 떨어진 한 번(1회차의 `auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`)은 그 테스트만 다시 50회 돌려 50/50이었다. `e385279^..357fd58`의 wire(`crates/qsh-proto/proto`, `wire.rs`, `local.rs`)와 `capabilities.json` diff는 0이고 새 `ErrorCode`도 없다. `exit_code_matrix.rs`의 client 쪽과 서비스 명령에는 Windows 전용 `UNSUPPORTED` 행이 없다. 남은 Windows 행은 host 쪽 `session open`과 `cp` 두 행(Windows host가 `file.v1`을 광고하지 않아 생김)이고 M20 DoD가 받는다. 결정 4 실측으로 실행 중인 작업은 `/Create`만 받는다. `Password` 주체 작업의 Credential Manager 읽기는 잴 수 없어 `keystore_session_bound`를 보수적으로 낸다(ADR-0032 2026-10-17 두 번째 개정). DoD 6의 실서명 run과 scoop·winget 실제 갱신은 §5.5 "Windows 서명·배포 준비"가 준비된 태그에서 기록한다. M19가 만든 §5.5 사람 몫은 `p1-windows` 회차(사전 고정 `ad409e0`)와 서명·배포 준비 두 행이다. 계획 원문은 `d853388`.
 
 ### M20 — Windows host
 
@@ -327,9 +328,10 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
   - `pty/tests.rs`의 Windows 쌍둥이가 spawn·resize·종료 코드·Job Object 트리 종료·신호 일곱의 사상과 escalation·환경 고정을 단언한다.
   - `ci.yml`의 `windows-latest` leg이 같은 러너에서 정방향(`qsh serve` ← `qsh`)과 역방향(`qsh listen` ← `qsh serve --to`)을 같은 케이스 목록으로 돈다: `exec`, 터널 echo, ConPTY 안의 대화형 attach와 detach 뒤 resume, Windows host 상대 `qsh cp`(M19 DoD에서 옮겨 옴).
   - `release_smoke`의 `#[cfg(not(unix))]` 쌍둥이가 PTY 축을 포함해 unix 쪽과 같은 축으로 넓어진다.
-  - `exit_code_matrix.rs`에 Windows 전용 `UNSUPPORTED` 행이 하나도 없다.
+  - `exit_code_matrix.rs`에 Windows 전용 `UNSUPPORTED` 행이 하나도 없고, `session close --signal`의 허용 값 일곱이 Windows host에서 exit `0`인 행이 있다(ADR-0035 결정 3).
   - threat model의 PTY 행에 ConPTY와 Job Object가, E에 `acl.toml` DACL 경고가 오른다.
   - 캠페인 문서에 host 회차(Linux·macOS client → Windows host, Windows target의 역방향, Windows OpenSSH Server 상대 `pair ssh`)가 더해져 다시 고정된다.
+  - 안정성: M20이 더한 타이밍 민감 테스트는 Linux와 Windows 각각에서 부하 아래 50회 연속 초록(`scripts/stress/run.sh`, `scripts/stress/m20.filter`).
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 3.6~6.3ew. ConPTY 백엔드(1.2~2.0)가 가장 불확실하므로 첫 스텝은 ConPTY 시제품이고, 그 뒤 다시 매긴다.
 
@@ -345,8 +347,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M16 SSH 부트스트랩과 신뢰 철회 | 3.6~5.6 | 완료 2026-10-15. 0015·0016·0030은 기각 |
 | M17 운영 표면 | 3.3~4.9 | 완료 2026-10-16 |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인. 2026-10-16 건넘(§5.1 원칙 6) |
-| M19 Windows client | 7.7~12.9 | 진행 중(2026-10-16), ADR-0035 승인됨 2026-10-14 |
-| M20 Windows host | 3.6~6.3 | M19 닫힘 |
+| M19 Windows client | 7.7~12.9 | 완료 2026-10-18 |
+| M20 Windows host | 3.6~6.3 | 진행 중(2026-10-18), M19 닫힘 충족 |
 | 합 | 약 41~67 + 미산정 하나 | |
 
 ### 5.3 P1 밖으로 보낸다
