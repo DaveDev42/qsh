@@ -223,7 +223,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** M19 계획의 마지막 커밋 `d853388`. 줄 수·개수의 기준은 `357fd58`에 그대로 둔다. 그 뒤 M19 커밋 `04abb92`·`d1ff674`는 코드 주석·문서·`deny.toml`만 바꿨다. 그래서 §5.6 목록은 같고, §5.7에는 `04abb92`가 "Windows host is P2" 주석을 M20으로 고치며 생긴 hit 일곱(코드 여섯 파일)을 행 넷으로 더했다. ROADMAP 현재 위치·M19 마감 노트·M20 DoD 안정성 줄과 `--signal` 행·§3 Windows 행·§5.2 상태, README Roadmap 표를 고쳤다. §0·§1의 승계 상태는 M19 마감 노트와 같다. §9 결정은 위 §9 머리말.
 
-### Step 2 — ConPTY 시제품: 의사 콘솔·Job Object 생성, pipe 배치 판정, 출력 배수, 재산정 (0.5~0.8ew)
+### Step 2 — ConPTY 시제품: 의사 콘솔·Job Object 생성, pipe 배치 판정, 출력 배수, 재산정 (0.5~0.8ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 20(ConPTY 구현, `CreateProcessW` 한 번, Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, overlapped named pipe 또는 읽기 스레드, `ResizePseudoConsole`, 출력을 다 읽은 뒤 blocking task에서 `ClosePseudoConsole`), 결과 절 "크기" M20 항목 끝 문장(첫 스텝은 ConPTY 시제품, 그 뒤 재산정), ROADMAP §5.4 리스크 5. 선행: Step 1.
 
@@ -245,6 +245,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - `m20.filter` 초안에 `conpty_` 접두 테스트를 넣는다.
 
 **(c) 완료 판정:** pipe 배치 판정과 재산정이 커밋 본문에 있다. Windows 다리에서 순서 불변식 쌍둥이 셋이 부하 아래 50/50이다. unix `pty::tests` 무변경 초록. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `d538468`. overlapped named pipe 배치가 섰고(Windows 11 26100) 읽기 스레드 대체는 쓰지 않는다. JOB_LIST는 Windows 11에서 자식을 job 안에 만든다. Server 2022 러너는 첫 CI run이 판정하고, 거부되면 `CREATE_SUSPENDED` 대체로 바꾼다(§7.1 #1). `ClosePseudoConsole`은 닫아야 EOF가 오므로 자식 종료 시점에 blocking task에서 부르고 pump는 계속 읽는다. ADR-0035 개정 이력 2026-10-18 줄이 이것과 `STARTF_USESTDHANDLES`, 콘솔 닫힘에 따른 손자 종료를 적는다. 계획 이름과 다른 점: Job Object 생성은 `crate::winproc`(`JobObject`, `spawn_in_job`, `ExitWatch`)에 있고, `conpty_kill_signal_terminates_the_job`은 계획에 없던 smoke 테스트다(종료 status·signal 단언은 Step 4). 쓰이지 않던 `cwd`·환경 블록 경로는 Step 3이 테스트와 함께 들인다. 재산정: Step 2는 크기 안이고 Step 3~11과 M20 3.6~6.3ew는 그대로 둔다. Step 3에는 기본 셸을 `COMSPEC` 전체 경로로 풀어 argv[0]이 host cwd에서 탐색되지 않게 하는 일과 종료 코드 u32→i32 표기(§7.1 #4)가 더해진다. 부하: m20.filter 9개 50/50(Dave-Windows). nextest 3245/3245.
 
 ### Step 3 — ConPTY 백엔드 완성: 환경·셸·`user@`, `UnsupportedFactory` 제거, `pty/tests.rs` 쌍둥이, PTY 세션의 두 route (0.8~1.3ew)
 
