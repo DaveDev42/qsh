@@ -176,8 +176,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
   | 기능 | forward 테스트 | reverse 테스트 | 스텝 |
   |---|---|---|---|
-  | PTY 세션 open·write·read·resize·close(headless) | `windows_forward_e2e::pty_session_round_trip` | `windows_reverse_e2e::pty_session_round_trip` | 3 |
-  | `user@` 힌트 비교 | `windows_forward_e2e::session_with_a_foreign_user_hint_is_unsupported` | `windows_reverse_e2e::session_with_a_foreign_user_hint_is_unsupported` | 3 |
+  | PTY 세션 open·write·read·resize·close(headless) | `windows_forward_e2e::pty_session_{runs_a_command,default_shell_takes_input,resize_is_applied,close_ends_a_running_session}` | `windows_reverse_e2e::` 같은 넷 | 3 |
+  | `user@` 힌트 비교 | `windows_attach::a_foreign_user_hint_is_refused_without_creating_a_session`(interactive 형태) | 해당 없음: reverse route에는 `user@`를 싣는 CLI 표면이 없다(unix도 같다). 서버 경로 `open_with_a_foreign_user_hint_is_unsupported_after_acl_and_creates_nothing`가 지킨다 | 3 |
   | `session close --signal` 일곱 | `windows_forward_e2e::session_close_with_each_signal_ends_the_session` | `windows_reverse_e2e::session_close_with_each_signal_ends_the_session` | 4 |
   | `exec` 타임아웃의 트리 종료 | `windows_forward_e2e::exec_timeout_kills_the_whole_tree` | `windows_reverse_e2e::exec_timeout_kills_the_whole_tree` | 5 |
   | audit 회전 잠금 | `serve`가 쓴 레코드 | `serve --to`가 쓴 레코드(같은 `<state>/audit.log`) | 6 |
@@ -248,7 +248,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `d538468`. overlapped named pipe 배치가 섰고(Windows 11 26100) 읽기 스레드 대체는 쓰지 않는다. JOB_LIST는 Windows 11에서 자식을 job 안에 만든다. Server 2022 러너는 첫 CI run이 판정하고, 거부되면 `CREATE_SUSPENDED` 대체로 바꾼다(§7.1 #1). `ClosePseudoConsole`은 닫아야 EOF가 오므로 자식 종료 시점에 blocking task에서 부르고 pump는 계속 읽는다. ADR-0035 개정 이력 2026-10-18 줄이 이것과 `STARTF_USESTDHANDLES`, 콘솔 닫힘에 따른 손자 종료를 적는다. 계획 이름과 다른 점: Job Object 생성은 `crate::winproc`(`JobObject`, `spawn_in_job`, `ExitWatch`)에 있고, `conpty_kill_signal_terminates_the_job`은 계획에 없던 smoke 테스트다(종료 status·signal 단언은 Step 4). 쓰이지 않던 `cwd`·환경 블록 경로는 Step 3이 테스트와 함께 들인다. 재산정: Step 2는 크기 안이고 Step 3~11과 M20 3.6~6.3ew는 그대로 둔다. Step 3에는 기본 셸을 `COMSPEC` 전체 경로로 풀어 argv[0]이 host cwd에서 탐색되지 않게 하는 일과 종료 코드 u32→i32 표기(§7.1 #4)가 더해진다. 부하: m20.filter 9개 50/50(Dave-Windows). nextest 3245/3245.
 
-### Step 3 — ConPTY 백엔드 완성: 환경·셸·`user@`, `UnsupportedFactory` 제거, `pty/tests.rs` 쌍둥이, PTY 세션의 두 route (0.8~1.3ew)
+### Step 3 — ConPTY 백엔드 완성: 환경·셸·`user@`, `UnsupportedFactory` 제거, `pty/tests.rs` 쌍둥이, PTY 세션의 두 route (0.8~1.3ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 2(`UnsupportedFactory` 제거), 3(`session open` 매트릭스 행, `cfg(unix)` 쌍둥이), 20, 21(환경 블록·고정 키·대소문자 무시·`COMSPEC` 기본 셸·`USERPROFILE` cwd·`user@` 비교·utmp 없음), 22의 `Hup`·`Term`(`ClosePseudoConsole`)과 `Kill`(`TerminateJobObject`), 17 host 테스트 항목, 19의 architecture §4 PTY 절·threat-model PTY 행·`pty/mod.rs` 모듈 doc. ROADMAP M20 범위 첫 문장. 선행: Step 2.
 
@@ -276,6 +276,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - 새 타이밍 민감 테스트를 `m20.filter`에 넣는다.
 
 **(c) 완료 판정:** `pty/mod.rs`에 `UnsupportedFactory`가 없다. Windows host의 `session open`이 두 route에서 성공한다. unix `pty::tests`와 `tui_expect::` 무변경 초록. wire diff 0, `capabilities.json` diff 0(`session`은 이미 광고 중이다).
+
+**(d) 결과 (2026-10-18):** `bd4b272`. `ConPtyFactory`가 `UnsupportedFactory`를 대체했고 환경 합성·고정 키·exit code는 `crates/qsh-core/src/pty/env_policy.rs`의 cfg 없는 순수 함수다. JOB_LIST는 첫 CI run(39060317009, Server 2022)에서 통과해 `CREATE_SUSPENDED` 대체는 쓰지 않는다. ADR-0035 개정 이력 2026-10-18 둘째 줄이 착지 형태(JOB_LIST 판정, application 이름은 자식 `PATH`와 시스템 디렉터리에서만 해석, 사용자 블록에 없는 고정 키는 자식에도 없음, 합성 순서, exit code 부호)를 적는다. 계획 이름과 다른 점: route 케이스 `pty_session_round_trip` 하나 대신 run·input·resize·close 넷이고(§4 표 고침), 외부 `user@` 힌트는 forward interactive 형태의 `windows_attach::a_foreign_user_hint_is_refused_without_creating_a_session`이 맡는다. reverse route에는 힌트를 싣는 CLI 표면이 없다. 부하에서 닫기 테스트 둘이 8회에 한 번꼴로 멈췄다. 원인은 Toolhelp 목록에 보인 손자가 아직 콘솔에 붙지 않아 `ClosePseudoConsole`의 사건을 놓친 것이고, 테스트가 손자가 직접 찍은 출력을 본 뒤 닫도록 고쳤다(제품은 escalation의 `Kill`이 같은 경우를 끝낸다). 부하: qsh-core conpty 17개 50/50, qsh-cli `pty_session_` 8개와 외부 힌트 1개 50/50(Dave-Windows). CI run 39071261522 초록.
 
 ### Step 4 — 세션 신호 일곱의 Windows 사상, `qsh internal console-ctrl`, 세션 이벤트, `--signal` 매트릭스 행 (0.3~0.5ew)
 
