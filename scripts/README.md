@@ -244,6 +244,11 @@ the route-equivalence test
 audit log, read back by one `qsh audit`). The `audit_query_reads_while_the_writer_rotates`
 reader test is part of the same set. M17 adds no p95 budget, so there is no
 `m17-latency.filter`.
+`m20.filter` is the M20 set, for Windows only: the `conpty_` tests of the
+ConPTY backend (output order against the exit event, a slow consumer, the Job
+Object, resize, the owner-only host pipes). They start real `cmd.exe`
+processes and pseudo-consoles, so run it on a Windows host (Git for Windows
+bash) with `run.sh`.
 
 ## test/
 

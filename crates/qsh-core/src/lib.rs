@@ -52,6 +52,8 @@ pub mod ssh_bootstrap;
 pub mod telemetry;
 pub mod trust;
 pub mod tunnel;
+#[cfg(windows)]
+pub(crate) mod winproc;
 
 pub use client::pathwatch::PathWatchConfig;
 pub use config::{Config, Paths, SshBootstrapMode, SshConfig, now_rfc3339};

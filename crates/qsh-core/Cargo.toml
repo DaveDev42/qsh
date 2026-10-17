@@ -80,6 +80,10 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # tests use to pin the result and the setter the unreadable-log test uses.
 # `Win32_System_WindowsProgramming` is `QueryUnbiasedInterruptTime`, the
 # suspend-excluding clock the wake detector samples (`client/wake.rs`).
+# `Win32_System_JobObjects` and the process/console features are the ConPTY
+# backend (`src/pty/conpty.rs`, ADR-0035 decision 20): a pseudo-console, a
+# Job Object the child is created inside, and `CreateProcessW` with a
+# process attribute list (`src/winproc.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -88,6 +92,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_SystemServices",
     "Win32_System_Threading",

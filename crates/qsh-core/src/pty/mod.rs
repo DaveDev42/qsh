@@ -42,11 +42,16 @@
 //! child could deadlock on the allocator lock and present as a session
 //! that never produces output). See architecture.md §4.
 //!
-//! The whole implementation is unix-only. On other targets [`factory`]
+//! The POSIX implementation is unix-only. On other targets [`factory`]
 //! returns a factory whose `create` fails with
 //! [`io::ErrorKind::Unsupported`], so the crate builds everywhere and a
 //! non-POSIX host answers `UNSUPPORTED` instead of not compiling
 //! (`docs/ROADMAP.md` §3: no Windows host in P0).
+//!
+//! Windows has its own backend, `conpty::ConPtySource` (ADR-0035 decision
+//! 20): a pseudo-console and a Job Object per session. It implements the
+//! same [`crate::broker::SessionSource`] seam, but [`factory`] does not
+//! return it yet, so a Windows host still answers `UNSUPPORTED`.
 
 use std::io;
 use std::sync::Arc;
@@ -55,6 +60,12 @@ use crate::broker::SourceFactory;
 
 #[cfg(unix)]
 mod posix;
+
+#[cfg(windows)]
+mod conpty;
+
+#[cfg(windows)]
+pub use conpty::ConPtySource;
 
 #[cfg(unix)]
 pub use posix::{PtyFactory, PtySource, login_name};
