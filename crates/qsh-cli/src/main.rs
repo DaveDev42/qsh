@@ -73,8 +73,9 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, CpArgs, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs,
-    HostCmd, IdentityCmd, PairCmd, PairSshArgs, ServiceCmd, SessionCmd, SessionReadArgs,
-    SessionWriteArgs, SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
+    HostCmd, IdentityCmd, InternalCmd, PairCmd, PairSshArgs, ServiceCmd, SessionCmd,
+    SessionReadArgs, SessionWriteArgs, SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd,
+    TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -341,6 +342,12 @@ impl tracing::field::Visit for MessageOnly<'_> {
 }
 
 fn run(cli: &Cli) -> i32 {
+    // The host's console-event helper opens no `Ops`: it must work from a
+    // detached process with no usable state directory, and it is not an
+    // operation (no envelope, nothing on stdout).
+    if let Some(Command::Internal(InternalCmd::ConsoleCtrl { pid, kind })) = &cli.command {
+        return run_console_ctrl(*pid, *kind);
+    }
     let ops = match Ops::from_env() {
         Ok(ops) => ops,
         Err(err) => {
@@ -680,6 +687,22 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             offered_name.as_deref(),
             cli.quiet,
         ),
+        // Handled in `run` before an `Ops` exists; a caller that builds its
+        // own `Ops` for `dispatch` gets the same behavior.
+        Command::Internal(InternalCmd::ConsoleCtrl { pid, kind }) => run_console_ctrl(*pid, *kind),
+    }
+}
+
+/// `qsh internal console-ctrl <pid> <c|break>` (ADR-0035 decision 22): the
+/// body is [`qsh_core::pty::console_ctrl::run`]. Not an operation: success is
+/// silent, and a failure is one line on stderr and the runtime-failure code.
+fn run_console_ctrl(pid: u32, kind: qsh_core::pty::console_ctrl::CtrlKind) -> i32 {
+    match qsh_core::pty::console_ctrl::run(pid, kind) {
+        Ok(()) => 0,
+        Err(err) => {
+            stderr_note!("qsh internal console-ctrl: {err}");
+            EXIT_RUNTIME_FAILURE
+        }
     }
 }
 
@@ -2661,6 +2684,8 @@ fn command_name(cli: &Cli) -> &'static str {
         // Never reaches an envelope; named for the long-running route.
         Command::Service(ServiceCmd::Run { .. }) => "service.run",
         Command::Reverse { .. } => REVERSE_MODE,
+        // Never reaches an envelope.
+        Command::Internal(InternalCmd::ConsoleCtrl { .. }) => "internal.console-ctrl",
     }
 }
 

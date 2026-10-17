@@ -17,6 +17,9 @@
 //! - A named pipe instance (`localctl`, ADR-0035 decision 14) gets the same
 //!   shape with the pipe rights that decision names: read, write and
 //!   `FILE_CREATE_PIPE_INSTANCE` for the owner SID, nothing inherited.
+//! - A named event (the session signal events, ADR-0035 decision 22) gets
+//!   one `EVENT_ALL_ACCESS` allow ACE for the owner SID, nothing inherited:
+//!   only that user can open it to wait on it or set it.
 //!
 //! Failure is closed (decision 10). A SID that cannot be read, or a volume
 //! that keeps no ACLs (FAT/exFAT, some network shares), is an error returned
@@ -58,18 +61,22 @@ use windows_sys::Win32::System::SystemServices::{
     FILE_PERSISTENT_ACLS, SECURITY_DESCRIPTOR_REVISION,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    EVENT_ALL_ACCESS, GetCurrentProcess, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use super::PrivateOpen;
 
-/// What a descriptor is for: a file, a directory that passes its ACE on, or
-/// one instance of the localctl named pipe.
+/// What a descriptor is for: a file, a directory that passes its ACE on, one
+/// instance of a named pipe, or a named event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
     File,
     Dir,
     Pipe,
+    /// A named event (the session signal events of ADR-0035 decision 22): the
+    /// owner may wait on it, set it and change it, nobody else may open it.
+    Event,
 }
 
 /// What the owner's ACE on a pipe instance grants (ADR-0035 decision 14):
@@ -86,13 +93,14 @@ impl ObjectKind {
         match self {
             Self::File | Self::Dir => FILE_ALL_ACCESS,
             Self::Pipe => PIPE_OWNER_ACCESS,
+            Self::Event => EVENT_ALL_ACCESS,
         }
     }
 
     /// The ACE inheritance flags of the one ACE.
     pub(crate) fn inherit_flags(self) -> u8 {
         match self {
-            Self::File | Self::Pipe => 0,
+            Self::File | Self::Pipe | Self::Event => 0,
             Self::Dir => (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
         }
     }

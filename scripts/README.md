@@ -250,9 +250,13 @@ Object, resize, the owner-only host pipes, the environment and working
 directory of the child, the close escalation), the hundred-session leak test
 (`hundred_sequential_conpty_`) and the `pty_session_` route
 cases (`windows_forward_e2e`, `windows_reverse_e2e`) that run the session ops
-against a real `qsh serve` host. They start real `cmd.exe` processes and
-pseudo-consoles, so run it on a Windows host (Git for Windows bash) with
-`run.sh`.
+against a real `qsh serve` host. The session signals are in it too: the
+`pty::conpty::tests::signals::` tests (each signal as the event a
+`qsh-signal-probe` on the console receives, the escalation, the two named
+events) and the `session_close_with_each_signal_` route cases. They start real
+`cmd.exe` and probe processes and pseudo-consoles, so run it on a Windows host
+(Git for Windows bash) with `run.sh`, after `cargo build -p qsh-testkit --bin
+qsh-signal-probe` so the probe sits next to the test executables.
 
 ## test/
 

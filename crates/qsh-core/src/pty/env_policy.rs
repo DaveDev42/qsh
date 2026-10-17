@@ -46,7 +46,17 @@ pub(crate) const PINNED_WINDOWS: &[&str] = &[
     "HOMEPATH",
     "COMSPEC",
     "SystemRoot",
+    SIGNAL_EVENT_USR1,
+    SIGNAL_EVENT_USR2,
 ];
+
+/// The session environment variable that names the event `Usr1` sets
+/// (ADR-0035 decision 22). The host makes the event and the name per session;
+/// the client cannot set or change either variable.
+pub(crate) const SIGNAL_EVENT_USR1: &str = "QSH_SIGNAL_EVENT_USR1";
+
+/// The session environment variable that names the event `Usr2` sets.
+pub(crate) const SIGNAL_EVENT_USR2: &str = "QSH_SIGNAL_EVENT_USR2";
 
 /// A platform's pinned keys and how it compares environment names.
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +109,23 @@ pub(crate) fn windows_pinned_values(user_env: &[(String, String)]) -> Vec<(Strin
         .filter(|(k, _)| WINDOWS.is_pinned(k))
         .cloned()
         .collect()
+}
+
+/// The pinned entries of a session: those of the user's environment plus the
+/// `session` entries the host makes for this one session (the signal events'
+/// names). A session entry replaces a user-environment entry of the same
+/// name, so a variable of that name in the account's block cannot stand in
+/// for the host's.
+pub(crate) fn windows_session_pinned(
+    user_env: &[(String, String)],
+    session: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut pinned: Vec<(String, String)> = windows_pinned_values(user_env)
+        .into_iter()
+        .filter(|(k, _)| !session.iter().any(|(s, _)| WINDOWS.same_key(s, k)))
+        .collect();
+    pinned.extend(session.iter().cloned());
+    pinned
 }
 
 /// The child's environment on a Windows host: the user's `base`, then each
@@ -282,6 +309,57 @@ mod tests {
                 "{env:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_signal_event_variables_are_pinned_and_the_hosts_value_wins() {
+        for key in [
+            SIGNAL_EVENT_USR1,
+            SIGNAL_EVENT_USR2,
+            "qsh_signal_event_usr1",
+            "Qsh_Signal_Event_Usr2",
+        ] {
+            assert!(WINDOWS.is_pinned(key), "{key}");
+        }
+        // unix has real signals and no such variables.
+        assert!(!POSIX.is_pinned(SIGNAL_EVENT_USR1));
+
+        // The account's block cannot supply them, and the client cannot
+        // change them: only the host's per-session entries survive.
+        let user = pairs(&[
+            ("Path", r"C:\Windows"),
+            (SIGNAL_EVENT_USR1, r"Local\from-the-user-block"),
+        ]);
+        let session = pairs(&[
+            (SIGNAL_EVENT_USR1, r"Local\qsh-sig-1-usr1"),
+            (SIGNAL_EVENT_USR2, r"Local\qsh-sig-1-usr2"),
+        ]);
+        let pinned = windows_session_pinned(&user, &session);
+        let client = pairs(&[
+            ("qsh_signal_event_usr1", r"Local\evil"),
+            ("QSH_SIGNAL_EVENT_USR2", r"Local\evil"),
+            ("QSH_SIGNAL_EVENT_USR3", "not a key of ours"),
+        ]);
+        let env = windows_overlay_env(&user, &[&client], &pinned);
+        assert_eq!(
+            windows_lookup(&env, SIGNAL_EVENT_USR1),
+            Some(r"Local\qsh-sig-1-usr1")
+        );
+        assert_eq!(
+            windows_lookup(&env, SIGNAL_EVENT_USR2),
+            Some(r"Local\qsh-sig-1-usr2")
+        );
+        assert_eq!(
+            env.iter()
+                .filter(|(k, _)| k.to_ascii_uppercase().starts_with("QSH_SIGNAL_EVENT_USR"))
+                .count(),
+            3,
+            "{env:?}"
+        );
+        assert_eq!(
+            windows_lookup(&env, "QSH_SIGNAL_EVENT_USR3"),
+            Some("not a key of ours")
+        );
     }
 
     #[test]

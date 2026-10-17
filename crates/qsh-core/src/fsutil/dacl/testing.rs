@@ -11,7 +11,7 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, GetNamedSecurityInfoW, GetSecurityInfo, SE_FILE_OBJECT,
-    SetNamedSecurityInfoW,
+    SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -88,6 +88,29 @@ pub(crate) fn read_dacl_of_handle(handle: HANDLE) -> DaclReport {
         )
     };
     assert_eq!(rc, 0, "GetSecurityInfo failed: {rc}");
+    report_and_free(dacl, descriptor)
+}
+
+/// [`read_dacl_of_handle`] for a kernel object that is not a file, such as a
+/// named event. The handle needs `READ_CONTROL`.
+pub(crate) fn read_dacl_of_kernel_handle(handle: HANDLE) -> DaclReport {
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `handle` is a live handle with `READ_CONTROL`; the out-pointers
+    // are locals.
+    let rc = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(rc, 0, "GetSecurityInfo (kernel object) failed: {rc}");
     report_and_free(dacl, descriptor)
 }
 
@@ -190,7 +213,7 @@ pub(crate) fn assert_owner_only_report(what: &str, report: DaclReport, kind: Obj
     );
     assert_eq!(ace.mask, kind.access(), "{shown}");
     let inherit = match kind {
-        ObjectKind::File | ObjectKind::Pipe => 0,
+        ObjectKind::File | ObjectKind::Pipe | ObjectKind::Event => 0,
         // OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, and nothing else.
         ObjectKind::Dir => 0x1 | 0x2,
     };

@@ -687,6 +687,117 @@ pub fn pty_session_close_ends_a_running_session(route: &impl Route) {
     }
 }
 
+/// Pull `session read --wait` until the session's output holds `needle`, and
+/// return the output read so far. The session may still be running.
+fn read_until_output(route: &impl Route, session_ref: &str, needle: &str) -> String {
+    let mut output = Vec::new();
+    let (mut after, mut ctl_after) = (0u64, 0u64);
+    let deadline = std::time::Instant::now() + SESSION_DEADLINE;
+    loop {
+        let (code, read) = route.client().json(&[
+            "session",
+            "read",
+            session_ref,
+            "--json",
+            "--after",
+            &after.to_string(),
+            "--ctl-after",
+            &ctl_after.to_string(),
+            "--wait",
+            "5000",
+        ]);
+        assert_eq!(code, 0, "{read}");
+        after = read["data"]["next_after"].as_u64().expect("next_after");
+        ctl_after = read["data"]["next_ctl_after"]
+            .as_u64()
+            .expect("next_ctl_after");
+        for event in read["data"]["events"].as_array().expect("events") {
+            if event["type"].as_str() == Some("session.output") {
+                output.extend(
+                    BASE64
+                        .decode(event["data_b64"].as_str().expect("data_b64"))
+                        .expect("data_b64 is Base64"),
+                );
+            }
+        }
+        let text = String::from_utf8_lossy(&output).into_owned();
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle:?} never appeared; output so far: {text:?}"
+        );
+    }
+}
+
+/// `session close --signal <SIG>` for each of the seven values (and with no
+/// signal, which is `HUP`) reaches a program on the session's console as the
+/// event ADR-0035 decision 22 names, and the session is gone afterwards.
+///
+/// The evidence is what the program received, not the exit code of `qsh`:
+/// `qsh-signal-probe` writes the event it got into a report file before it
+/// ends, and the file is read after the close has removed the session. `KILL`
+/// reaches no program, so its report stays empty.
+pub fn session_close_with_each_signal_ends_the_session(route: &impl Route) {
+    use qsh_testkit::signal_probe::{self, CTRL_BREAK, CTRL_C, CTRL_CLOSE, USR1, USR2};
+
+    let probe = signal_probe::bin();
+    let dir = tempfile::tempdir().expect("a report directory");
+    let rows = [
+        (None, Some(CTRL_CLOSE)),
+        (Some("HUP"), Some(CTRL_CLOSE)),
+        (Some("INT"), Some(CTRL_C)),
+        (Some("QUIT"), Some(CTRL_BREAK)),
+        (Some("TERM"), Some(CTRL_CLOSE)),
+        (Some("USR1"), Some(USR1)),
+        (Some("USR2"), Some(USR2)),
+        (Some("KILL"), None),
+    ];
+    for (n, (signal, event)) in rows.into_iter().enumerate() {
+        let label = signal.unwrap_or("(none)");
+        let report = dir.path().join(format!("report-{n}.txt"));
+        let session_ref = open_session(
+            route,
+            &[
+                probe.to_str().expect("the probe path is UTF-8"),
+                "exit",
+                "--report",
+                report.to_str().expect("the report path is UTF-8"),
+            ],
+        );
+        // The probe prints this once its handlers are installed; a signal
+        // sent earlier could land before it can see it.
+        read_until_output(route, &session_ref, signal_probe::READY);
+
+        let mut args = vec!["session", "close", session_ref.as_str(), "--json"];
+        if let Some(signal) = signal {
+            args.extend_from_slice(&["--signal", signal]);
+        }
+        let (code, closed) = route.client().json(&args);
+        assert_eq!(code, 0, "close with signal {label}: {closed}");
+        let (code, gone) = route
+            .client()
+            .json(&["session", "get", &session_ref, "--json"]);
+        assert_ne!(code, 0, "{label}: {gone}");
+        assert_eq!(
+            gone["error"]["code"], "SESSION_NOT_FOUND",
+            "{label}: {gone}"
+        );
+
+        let received = std::fs::read_to_string(&report).unwrap_or_default();
+        let received: Vec<&str> = received.lines().collect();
+        match event {
+            Some(event) => assert_eq!(received, [event.name], "close with signal {label}"),
+            None => assert!(
+                received.is_empty(),
+                "KILL reached the program: {received:?}"
+            ),
+        }
+        eprintln!("close --signal {label}: the program received {received:?}");
+    }
+}
+
 /// `qsh tunnel open --local`: a TCP write to the local port reaches the
 /// destination the host dials and comes back.
 pub fn local_tunnel_echo(route: &impl Route) {

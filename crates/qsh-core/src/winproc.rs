@@ -19,8 +19,12 @@ use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::sync::{Arc, OnceLock};
 
+use crate::fsutil::dacl::{CurrentUser, DaclSource as _, ObjectKind};
+
 use tokio::sync::oneshot;
-use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
 use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY};
 use windows_sys::Win32::System::Console::HPCON;
@@ -31,11 +35,11 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_JOB_LIST,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, RegisterWaitForSingleObject,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, UnregisterWaitEx, UpdateProcThreadAttribute,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, UnregisterWaitEx, UpdateProcThreadAttribute,
     WT_EXECUTEONLYONCE,
 };
 use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
@@ -90,6 +94,68 @@ impl JobObject {
         Ok(())
     }
 
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.handle.as_raw_handle()
+    }
+}
+
+/// An auto-reset named event with an owner-only DACL: the object behind a
+/// session's `Usr1` and `Usr2` signals (ADR-0035 decision 22). A program in
+/// the session opens it by name (`OpenEventW`) and waits on it; the host sets
+/// it. The name lives in the session-local namespace and carries 128 random
+/// bits, and the DACL lets only the owner open it, so nothing outside the
+/// session's account can wait on it or set it. The event exists while this
+/// value or any handle a program opened is alive.
+#[derive(Debug)]
+pub(crate) struct NamedEvent {
+    handle: OwnedHandle,
+    name: String,
+}
+
+impl NamedEvent {
+    /// Create the event `name` (not signalled). A name that is already taken
+    /// is an error and not a shared event: somebody else made an object
+    /// under the name this session is about to announce.
+    pub(crate) fn create_owner_only(name: String) -> io::Result<Self> {
+        let descriptor = CurrentUser.owner_only(ObjectKind::Event)?;
+        let wide = wide_nul(OsStr::new(&name));
+        // SAFETY: the attributes point at a descriptor owned by `descriptor`,
+        // which outlives the call (the kernel copies it); `wide` is a
+        // NUL-terminated name.
+        let raw = unsafe { CreateEventW(descriptor.attributes_ptr().cast(), 0, 0, wide.as_ptr()) };
+        if raw.is_null() {
+            return Err(os_error("CreateEventW"));
+        }
+        // SAFETY: `raw` is a fresh handle this function owns.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        // `CreateEventW` succeeds for an existing name too, and reports it
+        // only through the last error.
+        // SAFETY: reads the calling thread's last error.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("the event name {name} is already taken"),
+            ));
+        }
+        Ok(Self { handle, name })
+    }
+
+    /// The event's name, as a program opens it.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Signal the event once: one waiter wakes and it resets by itself.
+    pub(crate) fn set(&self) -> io::Result<()> {
+        // SAFETY: the handle is a live event handle owned by `self`.
+        if unsafe { SetEvent(self.handle.as_raw_handle()) } == 0 {
+            return Err(os_error("SetEvent"));
+        }
+        Ok(())
+    }
+
+    /// The handle, for a test that reads the event's DACL.
+    #[cfg(test)]
     pub(crate) fn raw(&self) -> HANDLE {
         self.handle.as_raw_handle()
     }

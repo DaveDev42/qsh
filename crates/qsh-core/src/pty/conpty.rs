@@ -43,6 +43,20 @@
 //! `CreateProcessW` would search without an application name. The working
 //! directory is `USERPROFILE`. A `user` hint that does not name the token's
 //! account fails before anything is created.
+//!
+//! **Signals** (ADR-0035 decision 22, `signal_map`). `Kill` is
+//! `TerminateJobObject`. `Hup` and `Term` are one event, `ClosePseudoConsole`
+//! (`CTRL_CLOSE_EVENT`), sent at most once per session. `Int` and `Quit` are
+//! `CTRL_C_EVENT` and `CTRL_BREAK_EVENT` to every process on the console,
+//! sent by the hidden `qsh internal console-ctrl` helper (`console_ctrl`)
+//! because attaching to a console is process-global. `Usr1` and `Usr2` set
+//! one of two named auto-reset events the host creates for the session
+//! ([`SignalEvents`]) and names in `QSH_SIGNAL_EVENT_USR1` and
+//! `QSH_SIGNAL_EVENT_USR2`. Whichever step comes first, the close escalation
+//! (`Term`, then `Kill`) ends the session. The control remembers the signal
+//! of the last step it actually sent; a session that ends after one reports
+//! that signal's name in `session.exit`, and one that ends on its own
+//! reports none.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
@@ -61,12 +75,14 @@ use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
 
-use super::env_policy::{self, DEFAULT_TERM, WINDOWS};
+use super::console_ctrl::{self, CtrlKind};
+use super::env_policy::{self, DEFAULT_TERM, SIGNAL_EVENT_USR1, SIGNAL_EVENT_USR2, WINDOWS};
+use super::signal_map::{self, Step, UserEvent};
 use crate::broker::{
     SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
 };
 use crate::fsutil::dacl::{CurrentUser, DaclSource as _, ObjectKind};
-use crate::winproc::{self, ExitWatch, JobObject, ProcessSpec};
+use crate::winproc::{self, ExitWatch, JobObject, NamedEvent, ProcessSpec};
 
 #[cfg(test)]
 mod tests;
@@ -88,12 +104,28 @@ fn normalize_size(cols: u16, rows: u16) -> (u16, u16) {
 
 /// The production [`SourceFactory`] on Windows: one [`ConPtySource`] per
 /// session.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ConPtyFactory;
+#[derive(Debug, Default, Clone)]
+pub struct ConPtyFactory {
+    console_ctrl_program: Option<PathBuf>,
+}
+
+impl ConPtyFactory {
+    /// A factory whose sessions send `CTRL_C_EVENT` and `CTRL_BREAK_EVENT`
+    /// through `program internal console-ctrl <pid> <c|break>` instead of
+    /// through this executable (see [`ConPtySource::with_console_ctrl_program`]).
+    pub fn with_console_ctrl_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.console_ctrl_program = Some(program.into());
+        self
+    }
+}
 
 impl SourceFactory for ConPtyFactory {
     fn create(&self, _spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
-        Ok(Box::new(ConPtySource::new()))
+        let mut source = ConPtySource::new();
+        source
+            .console_ctrl_program
+            .clone_from(&self.console_ctrl_program);
+        Ok(Box::new(source))
     }
 }
 
@@ -112,6 +144,8 @@ pub fn login_name() -> io::Result<String> {
 /// default shell) in a pseudo-console inside its own Job Object.
 #[derive(Debug, Default)]
 pub struct ConPtySource {
+    /// The executable that runs `internal console-ctrl`; `None` is this one.
+    console_ctrl_program: Option<PathBuf>,
     /// Test hook: receives a handle to each child, which keeps its pid from
     /// being reused while a test inspects it.
     #[cfg(test)]
@@ -125,6 +159,16 @@ impl ConPtySource {
     /// A source that spawns per the [`SessionSpec`] it is given.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Send `CTRL_C_EVENT` and `CTRL_BREAK_EVENT` through `program internal
+    /// console-ctrl <pid> <c|break>`. The default is this executable, which
+    /// is `qsh` for a host (the entry is `qsh internal console-ctrl`). A
+    /// caller whose executable is something else, such as a test binary,
+    /// names the `qsh`-compatible one here.
+    pub fn with_console_ctrl_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.console_ctrl_program = Some(program.into());
+        self
     }
 
     /// Publish a handle to each child into `slot` right after it is spawned
@@ -149,10 +193,11 @@ impl SessionSource for ConPtySource {
         let _rt = tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::other("ConPtySource::spawn must be called from within a tokio runtime")
         })?;
-        let launch = plan(spec)?;
+        let events = Arc::new(SignalEvents::create()?);
+        let launch = plan(spec, &events)?;
         let (cols, rows) = normalize_size(spec.cols, spec.rows);
-        #[cfg_attr(not(test), allow(unused_mut))]
-        let mut session = ConPtySession::start(&launch, cols, rows)?;
+        let mut session = ConPtySession::start(&launch, events, cols, rows)?;
+        session.console_ctrl_program = self.console_ctrl_program.clone();
         #[cfg(test)]
         if let Some(log) = &self.stage_observer {
             session.log = Arc::clone(log);
@@ -182,9 +227,45 @@ pub(crate) struct Launch {
     environment: Vec<u16>,
 }
 
+/// The two named events of one session, `Usr1` and `Usr2` (ADR-0035
+/// decision 22). They are created before the child so their names can go in
+/// its environment, and live as long as the session's control does.
+#[derive(Debug)]
+pub(crate) struct SignalEvents {
+    usr1: NamedEvent,
+    usr2: NamedEvent,
+}
+
+impl SignalEvents {
+    /// Two fresh events under names that carry 128 random bits.
+    pub(crate) fn create() -> io::Result<Self> {
+        let id = format!("{:032x}", rand::random::<u128>());
+        Ok(Self {
+            usr1: NamedEvent::create_owner_only(format!(r"Local\qsh-sig-{id}-usr1"))?,
+            usr2: NamedEvent::create_owner_only(format!(r"Local\qsh-sig-{id}-usr2"))?,
+        })
+    }
+
+    /// The variables that tell the session's programs the events' names.
+    pub(crate) fn environment(&self) -> Vec<(String, String)> {
+        vec![
+            (SIGNAL_EVENT_USR1.to_string(), self.usr1.name().to_string()),
+            (SIGNAL_EVENT_USR2.to_string(), self.usr2.name().to_string()),
+        ]
+    }
+
+    fn set(&self, which: UserEvent) -> io::Result<()> {
+        match which {
+            UserEvent::Usr1 => self.usr1.set(),
+            UserEvent::Usr2 => self.usr2.set(),
+        }
+    }
+}
+
 /// Plan the child of `spec` against this host: the account check, the
-/// user's environment block, the Windows directory.
-pub(crate) fn plan(spec: &SessionSpec) -> io::Result<Launch> {
+/// user's environment block, the Windows directory, and the names of the
+/// session's signal `events`.
+pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Launch> {
     // Defence in depth for architecture.md §4: no user switching, and the
     // dispatch edge has already turned a foreign hint into UNSUPPORTED after
     // the ACL check. Fail closed, before anything exists, if it did not.
@@ -211,7 +292,13 @@ pub(crate) fn plan(spec: &SessionSpec) -> io::Result<Launch> {
             )
         })
         .collect();
-    plan_from(spec, &user_env, &serve_env, &winproc::windows_directory()?)
+    plan_from(
+        spec,
+        &user_env,
+        &serve_env,
+        &winproc::windows_directory()?,
+        &events.environment(),
+    )
 }
 
 /// `TERM` is not passed through from the serve process; the locale and the
@@ -224,13 +311,15 @@ fn is_locale_key(key: &str) -> bool {
 }
 
 /// [`plan`] with its host inputs given: the user's environment block, the
-/// serve process's own environment (the pass-through source) and the
-/// Windows directory.
+/// serve process's own environment (the pass-through source), the Windows
+/// directory and the variables the host makes for this one session
+/// (`session_env`, pinned like the user's own identity variables).
 fn plan_from(
     spec: &SessionSpec,
     user_env: &[(String, String)],
     serve_env: &[(String, String)],
     windows_dir: &str,
+    session_env: &[(String, String)],
 ) -> io::Result<Launch> {
     let term = spec
         .term
@@ -243,7 +332,7 @@ fn plan_from(
         .filter(|(k, _)| is_locale_key(k))
         .cloned()
         .collect();
-    let pinned = env_policy::windows_pinned_values(user_env);
+    let pinned = env_policy::windows_session_pinned(user_env, session_env);
     let env = env_policy::windows_overlay_env(user_env, &[&term, &locale, &spec.env], &pinned);
 
     let system_root = env_policy::windows_lookup(&env, "SystemRoot").unwrap_or(windows_dir);
@@ -592,19 +681,17 @@ impl AsyncRead for HostOutput {
 // Session
 // ---------------------------------------------------------------------------
 
-/// A step the control took to end the session, in the order it took them
-/// (tests read this to pin the close path).
+/// A step the control took on the session, in the order it took them (tests
+/// read this to pin the close path).
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
-    /// `ClosePseudoConsole`: `CTRL_CLOSE_EVENT` to everything on the console.
-    CloseConsole,
-    /// `TerminateJobObject`.
-    TerminateJob,
-}
+pub(crate) type Stage = Step;
 
 #[cfg(test)]
 pub(crate) type StageLog = Arc<Mutex<Vec<Stage>>>;
+
+/// The signal of the last step the control sent, shared with the exit
+/// watch: a session that ends after a step reports that step's signal.
+type SentSignal = Arc<Mutex<Option<Signal>>>;
 
 /// A started pseudo-console session before it is split into the broker's
 /// I/O trio. Field order is drop order: the job goes first, so the tree ends
@@ -613,8 +700,12 @@ pub(crate) struct ConPtySession {
     job: Arc<JobObject>,
     console: Arc<PseudoConsole>,
     process: Arc<OwnedHandle>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pid: u32,
+    /// The session's `Usr1` and `Usr2` events, whose names `launch` put in
+    /// the child's environment.
+    events: Arc<SignalEvents>,
+    /// The executable that runs `internal console-ctrl`; `None` is this one.
+    console_ctrl_program: Option<PathBuf>,
     output: NamedPipeServer,
     input: NamedPipeServer,
     #[cfg(test)]
@@ -622,8 +713,14 @@ pub(crate) struct ConPtySession {
 }
 
 impl ConPtySession {
-    /// Start `launch` in a new pseudo-console of `cols` x `rows`.
-    pub(crate) fn start(launch: &Launch, cols: u16, rows: u16) -> io::Result<Self> {
+    /// Start `launch` in a new pseudo-console of `cols` x `rows`. `events`
+    /// are the events `launch` was planned against.
+    pub(crate) fn start(
+        launch: &Launch,
+        events: Arc<SignalEvents>,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<Self> {
         let output = host_pipe(true)?;
         let input = host_pipe(false)?;
         let console = PseudoConsole::create(cols, rows, &input.conhost, &output.conhost)?;
@@ -652,6 +749,8 @@ impl ConPtySession {
             console,
             pid: process.pid,
             process: Arc::new(process.handle),
+            events,
+            console_ctrl_program: None,
             output: output.host,
             input: input.host,
             #[cfg(test)]
@@ -681,13 +780,17 @@ impl ConPtySession {
             job,
             console,
             process,
+            pid,
+            events,
+            console_ctrl_program,
             output,
             input,
             #[cfg(test)]
             log,
-            ..
         } = self;
         let closer = Arc::clone(&console);
+        let sent = SentSignal::default();
+        let sent_at_exit = Arc::clone(&sent);
         let wait = Box::pin(async move {
             watch.exited().await;
             let exit_code = winproc::exit_code(&process)
@@ -702,10 +805,13 @@ impl ConPtySession {
             drop(tokio::task::spawn_blocking(move || {
                 closer.close();
             }));
-            SourceExit {
-                exit_code,
-                signal: None,
-            }
+            // A session that ends after a step qsh sent reports that step's
+            // signal; one that ends on its own reports none.
+            let signal = sent_at_exit
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .map(|signal| signal.as_str().to_string());
+            SourceExit { exit_code, signal }
         });
         Ok(SpawnedSource {
             output: Box::new(HostOutput(output)),
@@ -713,6 +819,11 @@ impl ConPtySession {
             control: Box::new(ConPtyControl {
                 job,
                 console,
+                pid,
+                events,
+                console_ctrl_program,
+                sent,
+                taken: Vec::new(),
                 #[cfg(test)]
                 log,
             }),
@@ -737,6 +848,13 @@ impl ConPtySession {
 struct ConPtyControl {
     job: Arc<JobObject>,
     console: Arc<PseudoConsole>,
+    /// The session's root process, whose console the helper attaches to.
+    pid: u32,
+    events: Arc<SignalEvents>,
+    console_ctrl_program: Option<PathBuf>,
+    sent: SentSignal,
+    /// The steps already performed, which `signal_map::next_step` reads.
+    taken: Vec<Step>,
     #[cfg(test)]
     log: StageLog,
 }
@@ -753,13 +871,45 @@ impl ConPtyControl {
     /// `CTRL_CLOSE_EVENT` for everything on the console, at most once per
     /// session. `ClosePseudoConsole` can block (see the module doc), so it
     /// runs on a blocking task and the caller, the session actor, goes on.
-    fn close_console(&self) {
+    /// `false` if the console was already closed and nothing was sent.
+    fn close_console(&self) -> bool {
         let Some(hpc) = self.console.take() else {
-            return;
+            return false;
+        };
+        drop(tokio::task::spawn_blocking(move || close_handle(hpc)));
+        true
+    }
+
+    /// Do `step`. `Ok(false)` is a step that has nothing left to do.
+    fn perform(&self, step: Step) -> io::Result<bool> {
+        let sent = match step {
+            Step::CtrlC => {
+                console_ctrl::send(self.console_ctrl_program.as_deref(), self.pid, CtrlKind::C)?;
+                true
+            }
+            Step::CtrlBreak => {
+                console_ctrl::send(
+                    self.console_ctrl_program.as_deref(),
+                    self.pid,
+                    CtrlKind::Break,
+                )?;
+                true
+            }
+            Step::CloseConsole => self.close_console(),
+            Step::SetEvent(which) => {
+                self.events.set(which)?;
+                true
+            }
+            Step::TerminateJob => {
+                self.job.terminate(1)?;
+                true
+            }
         };
         #[cfg(test)]
-        self.record(Stage::CloseConsole);
-        drop(tokio::task::spawn_blocking(move || close_handle(hpc)));
+        if sent {
+            self.record(step);
+        }
+        Ok(sent)
     }
 }
 
@@ -769,25 +919,41 @@ impl SourceControl for ConPtyControl {
         self.console.resize(cols, rows)
     }
 
-    /// `Hup` and `Term` are the one event Windows has for "the terminal went
-    /// away, end": both close the pseudo-console, and the escalation's `Term`
-    /// after a `Hup` finds it closed and sends nothing again. `Kill` ends the
-    /// job.
+    /// Each signal is the Windows step `signal_map` names. The close
+    /// escalation sends `Hup` or the caller's signal, then `Term`, then
+    /// `Kill`: `signal_map::next_step` decides that `Term` after a `Hup` is
+    /// the same console close and sends nothing again.
+    ///
+    /// The signal is noted before the step runs, because the session may
+    /// end the instant the step lands and the exit watch reads the note; a
+    /// step that sends nothing or fails puts the earlier note back.
+    ///
+    /// For `Int` and `Quit` the step runs the console control helper and
+    /// waits (bounded) for its delivery report, like `kill(2)` returning: a
+    /// helper that could not start, or started and failed to generate the
+    /// event (`AttachConsole` on a console that just went away), is an
+    /// error and leaves no note. Only a delivered event keeps its signal,
+    /// including one whose receivers end the session at once. The note is
+    /// optimistic for the length of the wait, so a session that ends by
+    /// itself inside that window can still report the signal.
     fn signal(&mut self, signal: Signal) -> io::Result<()> {
-        match signal {
-            Signal::Hup | Signal::Term => {
-                self.close_console();
+        let Some(step) = signal_map::next_step(&self.taken, signal) else {
+            return Ok(());
+        };
+        let earlier = self
+            .sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(signal);
+        match self.perform(step) {
+            Ok(true) => {
+                self.taken.push(step);
                 Ok(())
             }
-            Signal::Kill => {
-                #[cfg(test)]
-                self.record(Stage::TerminateJob);
-                self.job.terminate(1)
+            outcome => {
+                *self.sent.lock().unwrap_or_else(|e| e.into_inner()) = earlier;
+                outcome.map(|_| ())
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "this signal has no mapping in the ConPTY backend yet",
-            )),
         }
     }
 }
