@@ -7,6 +7,15 @@ targets = []
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
+# zbus 6 folded these crates into itself, so the standalone 5.x crates are
+# marked unmaintained. Nothing is vulnerable: they reach qsh only through
+# secret-service 5.2 (the Linux keyring store), which has no zbus 6 release
+# yet. Drop these once zbus-secret-service-keyring-store moves to zbus 6.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained standalone crate, merged into zbus 6; pulled by secret-service 5.2" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained standalone crate, merged into zbus 6; pulled by secret-service 5.2" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained standalone crate, merged into zbus 6; pulled by secret-service 5.2" },
+]
 
 [licenses]
 allow = [
