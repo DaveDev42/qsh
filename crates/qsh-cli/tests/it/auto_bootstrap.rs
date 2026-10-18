@@ -3,12 +3,12 @@
 //! resolves nowhere, then carry on with the original command.
 //!
 //! The ssh side is `qsh_testkit::fake_ssh::FakeSsh`, which records every call
-//! and, on Unix, runs the real `qsh pair ssh-respond` against a second
-//! sandbox (`world`). The cases that need no responder (`bare`) run on every
-//! platform; on Windows, where the responder is not registered until the
-//! Windows host role lands, `console` drives the interactive form in a
-//! ConPTY up to the end of the bootstrap. The interactive form under a unix
-//! pty is `tui_expect.rs`
+//! runs the real `qsh pair ssh-respond` against a second sandbox (`world`),
+//! on every platform. The cases that need no responder (`bare`) run on every
+//! platform too. On Windows `console` drives the interactive form in a
+//! ConPTY, up to the end of the bootstrap with no responder and through the
+//! original command with the Windows responder. The interactive form under a
+//! unix pty is `tui_expect.rs`
 //! (`auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits`).
 //! The pure decision (which names start it) is unit-tested in `qsh-core`
 //! (`ops::auto_bootstrap::tests`).
@@ -91,7 +91,6 @@ fn run_cp(client: &Sandbox, payload: &Payload, host: &str, extra: &[&str]) -> st
     client.qsh(&refs)
 }
 
-#[cfg(unix)]
 mod world {
     use super::*;
     use crate::common::{ReverseGuard, exit_code, hosts_array, poll_until};
@@ -333,6 +332,7 @@ mod world {
     /// Ctrl-C while ssh runs (a password prompt, say) ends the call with
     /// `CANCELED`, ends ssh, writes no pin on either side, and never starts
     /// the original command (`docs/CLI.md` §7, decision 16).
+    #[cfg(unix)]
     #[test]
     fn ctrl_c_during_the_bootstrap_ends_canceled_and_does_not_start_the_command() {
         use nix::sys::signal::{Signal, kill};
@@ -394,10 +394,8 @@ mod world {
     }
 }
 
-/// The cases that need no responder on the other end of ssh, so they run on
-/// every platform, Windows included, where `qsh pair ssh-respond` is not
-/// registered until the Windows host role lands: the fake `ssh` reports
-/// nothing, or fails, and the client alone is under test.
+/// The cases that need no responder on the other end of ssh: the fake `ssh`
+/// reports nothing, or fails, and the client alone is under test.
 mod bare {
     use super::*;
     use crate::common::exit_code;
@@ -577,13 +575,15 @@ mod bare {
 }
 
 /// The interactive form on Windows: the real `qsh` in a ConPTY, ssh being the
-/// fake `ssh.exe` (ADR-0044 decision 16, ADR-0035 decision 1). The attach that
-/// follows a successful bootstrap needs the remote responder, which a Windows
-/// host does not run until M20, so these cases end at the bootstrap.
+/// fake `ssh.exe` (ADR-0044 decision 16, ADR-0035 decision 1). The cases with
+/// no responder end at the bootstrap; the ones with the Windows responder
+/// carry on into the original command, a `qsh cp` and an attach to the
+/// host's own ConPTY session.
 #[cfg(windows)]
 mod console {
     use super::bare::{Bare, pinned_box};
     use super::*;
+    use crate::ssh_bootstrap::pair::{World, store};
     use crate::windows_attach::spawn_qsh;
 
     const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
@@ -665,5 +665,62 @@ mod console {
             std::time::Duration::from_secs(10),
             || crate::ssh_bootstrap::process_is_gone(pid).then_some(()),
         );
+    }
+
+    /// With the Windows responder behind ssh, the bootstrap pins both sides
+    /// from a console and the original `qsh cp` then runs as typed
+    /// (decision 2). The console is cooked while ssh runs, so the same
+    /// console reads the client's output afterwards.
+    #[test]
+    fn auto_bootstrap_then_cp_completes_in_a_console_on_windows() {
+        let w = World::new();
+        let payload = Payload::new();
+        let args = payload.args("box");
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+        let mut qsh = spawn_qsh(&w.client, &refs);
+        qsh.wait_text("setting one up over ssh (ssh box)");
+        assert_eq!(qsh.wait_exit(), 0, "{}", qsh.text());
+        assert_eq!(
+            std::fs::read(&payload.dst).unwrap(),
+            std::fs::read(&payload.src).unwrap()
+        );
+        let pinned = store(&w.client);
+        let peer = pinned.find("box").expect("this machine pinned box");
+        assert_eq!(peer.address, w.serve.addr());
+        assert_eq!(w.fake.calls().len(), 2, "{:?}", w.fake.calls());
+    }
+
+    /// The bare `qsh box` form: the bootstrap pins both sides, then the
+    /// client attaches to a ConPTY session of the host and a command typed
+    /// into it runs there. The proof is a file the host's shell writes, not
+    /// the text the test console renders, which a pseudo-console repaints.
+    /// The line is typed again until the file exists: keystrokes sent before
+    /// the attach has the writer lease are dropped, and writing the same
+    /// file twice is harmless.
+    #[test]
+    fn auto_bootstrap_then_interactive_attach_reaches_the_host_shell_on_windows() {
+        let w = World::new();
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("attached.txt");
+        let mut qsh = spawn_qsh(&w.client, &["box"]);
+        qsh.wait_text("setting one up over ssh (ssh box)");
+        // The host's shell prints its banner once the attach is up.
+        qsh.wait_text("Microsoft Windows");
+        let line = format!("echo attached> \"{}\"\r", marker.display());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the host shell never ran the typed line; console: {:?}",
+                qsh.text()
+            );
+            qsh.send(line.as_bytes());
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        qsh.send(b"exit\r");
+        assert_eq!(qsh.wait_exit(), 0, "{}", qsh.text());
+        assert!(store(&w.client).find("box").is_some());
+        assert_eq!(w.fake.calls().len(), 2, "{:?}", w.fake.calls());
     }
 }

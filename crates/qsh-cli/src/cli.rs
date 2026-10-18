@@ -1073,11 +1073,6 @@ pub enum PairCmd {
     /// is run by the ssh command `qsh pair ssh` starts. Hidden from
     /// `qsh pair --help` (ADR-0012 decision 4's hiding), so it has no man
     /// page (`docs/CLI.md` §2.4).
-    ///
-    /// Unix builds only until M20 (ADR-0044 decision 10): a Windows build
-    /// does not know it, clap exits 2, and the client reads that as
-    /// `remote_qsh_too_old`.
-    #[cfg(unix)]
     #[command(hide = true)]
     SshRespond,
 }

@@ -401,8 +401,12 @@ fn resolve_spec(spec: &str) -> Option<SocketAddr> {
 /// like the serve listener's (dual-stack on an IPv6 wildcard), so the two
 /// conflict exactly when `qsh serve` would fail to bind.
 ///
-/// Unix only: the Windows probe needs `SO_EXCLUSIVEADDRUSE`, which comes
-/// with the Windows responder in M20 (ADR-0044 decision 10).
+/// On Windows the probe socket also takes `SO_EXCLUSIVEADDRUSE`, as
+/// ADR-0044 decision 10 says. That is defensive: the probe does not set
+/// `SO_REUSEADDR` itself, so it already fails to bind against a socket that
+/// holds the port, and no test shows the flag changing an outcome. Like
+/// `qsh serve`'s own bind, it does not conflict with a listener on the
+/// wildcard address when the probe names a specific one.
 pub(crate) fn probe_udp_bind(addr: SocketAddr) -> Option<bool> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
@@ -413,11 +417,39 @@ pub(crate) fn probe_udp_bind(addr: SocketAddr) -> Option<bool> {
     if addr.is_ipv6() {
         let _ = socket.set_only_v6(false);
     }
+    #[cfg(windows)]
+    set_exclusive_addr_use(&socket).ok()?;
     match socket.bind(&addr.into()) {
         Ok(()) => Some(false),
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => Some(true),
         Err(_) => None,
     }
+}
+
+/// `setsockopt(SO_EXCLUSIVEADDRUSE, 1)`. `socket2` has no setter for it.
+#[cfg(windows)]
+fn set_exclusive_addr_use(socket: &Socket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket as _;
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOCKET, SOCKET_ERROR, SOL_SOCKET, setsockopt,
+    };
+
+    let on: i32 = 1;
+    // SAFETY: `socket` owns a valid socket for the whole call, and the option
+    // value is a live `i32` whose size is passed alongside it.
+    let rc = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as SOCKET,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            (&raw const on).cast::<u8>(),
+            size_of::<i32>() as i32,
+        )
+    };
+    if rc == SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

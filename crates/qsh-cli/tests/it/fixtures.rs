@@ -2296,7 +2296,6 @@ fn golden_session_conflict_fixture() {
 /// shape of their own: a pin conflict and a missing remote `qsh`. The remote
 /// is a real `qsh pair ssh-respond` run by the fake `ssh`, so these are the
 /// binary's own envelopes.
-#[cfg(unix)]
 #[test]
 fn golden_pair_ssh_fixtures() {
     use crate::ssh_bootstrap::pair::World;
@@ -2338,7 +2337,6 @@ fn golden_pair_ssh_fixtures() {
 /// connection is made (`verified: false`, no `verify_error`) and the result
 /// names the command to run on the remote. The remote is a real
 /// `qsh pair ssh-respond` run by the fake `ssh`.
-#[cfg(unix)]
 #[test]
 fn golden_pair_ssh_reverse() {
     use crate::ssh_bootstrap::pair_reverse::World;

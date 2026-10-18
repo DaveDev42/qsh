@@ -107,7 +107,6 @@ const REVERSE_MODE: &str = "reverse";
 
 /// The name `qsh pair ssh-respond` reports in diagnostics. Not an operation
 /// — it has no envelope (`docs/CLI.md` §2.4, ADR-0044 decision 9).
-#[cfg(unix)]
 const SSH_RESPOND_MODE: &str = "pair ssh-respond";
 
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
@@ -515,7 +514,6 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             role.clone(),
         ),
         Command::Pair(PairCmd::Ssh(args)) => run_pair_ssh(cli, &ops, args),
-        #[cfg(unix)]
         Command::Pair(PairCmd::SshRespond) => run_ssh_respond(&ops),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
         Command::Trust(TrustCmd::SetRole { name, role }) => finish(
@@ -1636,7 +1634,6 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) 
 /// when it wrote nothing because the client never committed. A tokio stdin
 /// read cannot be cancelled, so the runtime is dropped in the background
 /// instead of waited for.
-#[cfg(unix)]
 fn run_ssh_respond(ops: &Ops) -> i32 {
     let result = (|| -> Result<(), OpError> {
         let responder = ops.ssh_responder()?;
@@ -1670,7 +1667,6 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
             "listen" => LISTEN_MODE,
             _ => SERVE_MODE,
         }),
-        #[cfg(unix)]
         Some(Command::Pair(PairCmd::SshRespond)) => Some(SSH_RESPOND_MODE),
         _ => None,
     }
@@ -2650,7 +2646,6 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Pair(PairCmd::Ssh(_)) => PairSshOp::COMMAND,
-        #[cfg(unix)]
         Command::Pair(PairCmd::SshRespond) => SSH_RESPOND_MODE,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
         Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,

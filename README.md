@@ -1156,10 +1156,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   drive (`C:\x`), so a one-letter host name needs `user@` or brackets. The
   ssh bootstrap works the same way: `qsh pair ssh` and the automatic
   bootstrap on `qsh box` and `qsh cp` run the system `ssh.exe` with the
-  console left in cooked mode until ssh exits. The remote responder
-  (`qsh pair ssh-respond`) arrives with the Windows host in M20, so a
-  Windows machine cannot be the remote end of a bootstrap before then; the
-  bootstrap against one ends with an error and pins nothing. A Windows host
+  console left in cooked mode until ssh exits. A Windows machine can be the
+  remote end of a bootstrap too: the hidden responder (`qsh pair ssh-respond`)
+  runs there in the same order as on Linux and macOS, as long as the OpenSSH
+  Server optional feature is on. When the remote default shell is `cmd.exe`
+  and `qsh.exe` is not on its `PATH`, ssh exits 9009 and `qsh` says the
+  remote has no `qsh`; under PowerShell the exit code is 1, which `qsh`
+  reports as a failed remote command with a hint to put `qsh.exe` on the
+  remote `PATH` or pass `--remote-qsh`. A Windows host
   advertises `file.v1`, so `qsh cp` works against it over both routes. Its
   remote paths are drive paths (`C:\x` or `C:/x`) or relative to the
   serving account's profile directory, and UNC and device paths are refused
