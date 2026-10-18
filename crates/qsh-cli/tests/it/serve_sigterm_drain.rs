@@ -23,6 +23,16 @@
 //!    last event on its stream (§6.4) — the drain does not just kill
 //!    children, it says so on the wire first.
 
+// `#![cfg(unix)]`: the stop is `SIGTERM`, a POSIX signal, and the proof that
+// nothing survives the host asks the kernel whether a pid still answers
+// (`kill -0`). A Windows host has neither. Its stop is `CTRL_BREAK` (or the
+// console closing), delivered to the host's own process group by
+// `common::send_stop`, and the orphan check is a marker file that a session's
+// process holds open and that can be deleted only once its whole tree is gone
+// (`qsh_testkit::shell::Runaway`). The same three properties (exit `0` within
+// a bound, no process left behind, `session.closed` as the last event) are
+// pinned there by `windows_drain::serve_stop_drains_sessions_and_leaves_no_orphan_on_windows`
+// and `windows_drain::serve_to_stop_drains_sessions_and_leaves_no_orphan_on_windows`.
 #![cfg(unix)]
 
 use crate::common;

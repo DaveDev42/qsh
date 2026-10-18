@@ -8,8 +8,6 @@
 //! The client side is the production copy engine, [`file_copy_over`], on a
 //! [`Session`] negotiated over a real connection.
 
-#![cfg(unix)]
-
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -151,7 +149,7 @@ fn tree_of(root: &Path) -> Vec<String> {
                 path.strip_prefix(base)
                     .expect("under base")
                     .to_string_lossy()
-                    .into_owned(),
+                    .replace('\\', "/"),
             );
             if path.is_dir() {
                 walk(base, &path, out);

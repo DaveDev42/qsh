@@ -6,8 +6,8 @@
 //! loop (`Ops::session_read` is literally a one-pull delegation), so a
 //! session's event stream must look the same through either door.
 
-// The sessions run a POSIX shell script, and `sh` is not there on Windows.
-#![cfg(unix)]
+// The sessions run a script in the platform's own interpreter: `sh` on unix,
+// `cmd.exe` on a Windows host (whose sessions are ConPTY ones).
 
 use crate::common;
 
@@ -18,17 +18,34 @@ use serde_json::Value;
 
 /// A child that produces a known amount of output and then exits, so both
 /// readers see a finite, terminated stream.
-const SCRIPT: &str = "for i in $(seq 1 60); do echo line$i; done; exit 7";
+#[cfg(unix)]
+fn script_argv() -> [&'static str; 3] {
+    [
+        "sh",
+        "-c",
+        "for i in $(seq 1 60); do echo line$i; done; exit 7",
+    ]
+}
+
+/// See the unix definition.
+#[cfg(windows)]
+fn script_argv() -> [&'static str; 3] {
+    [
+        "cmd",
+        "/c",
+        "(for /l %i in (1,1,60) do @echo line%i)&exit 7",
+    ]
+}
 
 /// Wall-clock bound for the `--wait` polling loop; every iteration is a
 /// real round trip, never a sleep.
 const POLL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Open a session running `SCRIPT` and return its `session_ref`.
+/// Open a session running [`script_argv`] and return its `session_ref`.
 fn open_noisy_session(client: &Sandbox) -> String {
-    let (code, opened) = client.json(&[
-        "session", "open", HOST_ALIAS, "--json", "--", "sh", "-c", SCRIPT,
-    ]);
+    let mut args = vec!["session", "open", HOST_ALIAS, "--json", "--"];
+    args.extend(script_argv());
+    let (code, opened) = client.json(&args);
     assert_eq!(code, 0, "{opened}");
     opened["data"]["session_ref"]
         .as_str()

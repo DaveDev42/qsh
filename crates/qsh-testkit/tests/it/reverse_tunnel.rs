@@ -40,12 +40,6 @@
 //! *same* target never sees a byte of the first's traffic, driven at the
 //! full wire level (the registry-level version of this same claim lives
 //! in `qsh_core::reverse::listen`'s own L2 unit tests).
-//!
-//! `#![cfg(unix)]`: localctl (UDS) and `ReverseHarness::attach_localctl`
-//! are both unix-only, same as every other reverse-conduit L3 suite in
-//! this crate (`local_stream_reverse.rs`, `local_control_reverse.rs`).
-
-#![cfg(unix)]
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -63,10 +57,10 @@ use qsh_proto::local::{
 use qsh_proto::wire::{self, control_message, response};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::net_probe::free_port;
+use qsh_testkit::reverse::{LocalStream, connect_localctl};
 use qsh_testkit::reverse::{ReverseHarness, wait_for};
 use qsh_testkit::tunnel::{EchoServer, RemoteForwardBinding, TunnelHarness, ephemeral_local_spec};
 use qsh_transport::StaticTrust;
-use tokio::net::UnixStream;
 
 /// Bound on every "this must have already happened" wait in this file —
 /// same generosity `local_stream_reverse.rs`'s own `TIMEOUT` uses for the
@@ -91,8 +85,8 @@ fn fresh_paths() -> (tempfile::TempDir, Paths) {
 /// `LocalHelloAck` — identical to `local_stream_reverse.rs`'s own helper
 /// of the same name (each test binary is its own crate; there is no
 /// shared support module for these small wire-level helpers to live in).
-async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -119,7 +113,7 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
 }
 
 async fn send_control(
-    conduit: &mut LocalConduit<UnixStream>,
+    conduit: &mut LocalConduit<LocalStream>,
     request_id: u64,
     body: control_message::Body,
 ) {
@@ -133,7 +127,7 @@ async fn send_control(
 /// `SessionEvent` (`request_id = 0`) — see `local_stream_reverse.rs`'s own
 /// `recv_control_response` for why one can land interleaved with a
 /// request/response even though this file never opens a PTY session.
-async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+async fn recv_control_response(conduit: &mut LocalConduit<LocalStream>) -> wire::ControlMessage {
     loop {
         let msg: wire::ControlMessage = conduit
             .recv()
@@ -285,7 +279,7 @@ impl Binding for RemoteForwardBinding {
 struct ReverseRemoteBinding {
     forward_id: String,
     actual_port: u16,
-    ctl: LocalConduit<UnixStream>,
+    ctl: LocalConduit<LocalStream>,
     acceptor: RemoteForwardAcceptor,
 }
 
@@ -604,8 +598,8 @@ async fn a_target_opened_tcp_accepted_reaches_only_its_own_conduit() {
 /// file's [`connect_control`] (same helper `local_stream_reverse.rs`
 /// carries for the same reason: no shared support module exists across
 /// test binaries).
-async fn connect_stream(socket_path: &Path, host: &str, wait_ms: u32) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_stream(socket_path: &Path, host: &str, wait_ms: u32) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -1188,7 +1182,7 @@ async fn the_parked_claim_share_bounds_one_conduit_without_starving_another() {
 /// target answered with — the three-line preamble every parked-claim case
 /// above repeats.
 async fn open_remote_forward(
-    ctl: &mut LocalConduit<UnixStream>,
+    ctl: &mut LocalConduit<LocalStream>,
     request_id: u64,
     claim_token: &[u8],
 ) -> wire::RemoteForwardOpened {

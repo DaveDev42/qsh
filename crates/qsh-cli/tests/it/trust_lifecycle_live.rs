@@ -21,10 +21,8 @@
 //! address-update path: the M6 mobility-campaign backlog item where a
 //! host's `qsh serve` rebinds to a new address under the same identity.
 //!
-//! Sessions are PTY-backed, so this file only exists on POSIX hosts
-//! (mirrors `attach_recovery.rs`'s own gate and reasoning).
-
-#![cfg(unix)]
+//! Sessions are PTY-backed (ConPTY on a Windows host), so the shell and the
+//! marker lines come from `qsh_testkit::shell`.
 
 use crate::common;
 
@@ -56,7 +54,7 @@ fn client_ops(client: &Sandbox) -> Ops {
 fn open_shell(ops: &Ops) -> String {
     ops.session_open(SessionOpenReq {
         host: HOST_ALIAS.to_string(),
-        argv: vec!["sh".to_string()],
+        argv: qsh_testkit::shell::pty_shell(),
         env: vec![
             EnvVar {
                 name: "LANG".into(),
@@ -126,9 +124,9 @@ fn an_established_connection_is_closed_within_two_seconds_of_trust_remove() {
     let session_ref = open_shell(&ops);
     let mut stream = attach(&ops, &session_ref);
     stream
-        .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+        .write(qsh_testkit::shell::say("BEFORE"))
         .expect("write before remove");
-    read_until(&mut stream, "BEFORE1");
+    read_until(&mut stream, &qsh_testkit::shell::said("BEFORE"));
 
     let (code, removed) = host.json(&["trust", "remove", CLIENT_ALIAS, "--json"]);
     assert_eq!(code, 0, "{removed}");
@@ -174,7 +172,7 @@ fn an_established_connection_is_closed_within_two_seconds_of_trust_remove() {
     // The old connection is gone: the attach stream cannot go on answering.
     // A write may still be accepted into the client's buffer, so the proof
     // is that the reply never comes back.
-    let _ = stream.write(b"printf 'AFTER%s\\n' 1\n".to_vec());
+    let _ = stream.write(qsh_testkit::shell::say("AFTER"));
     let outcome = std::thread::scope(|scope| {
         let reader = scope.spawn(|| {
             let mut seen = String::new();
@@ -185,7 +183,7 @@ fn an_established_connection_is_closed_within_two_seconds_of_trust_remove() {
                             .decode(data_b64.as_bytes())
                             .unwrap_or_default();
                         seen.push_str(&String::from_utf8_lossy(&data));
-                        if seen.contains("AFTER1") {
+                        if seen.contains(&qsh_testkit::shell::said("AFTER")) {
                             return true;
                         }
                     }
@@ -220,7 +218,7 @@ fn trust_remove_on_a_running_daemon_rejects_the_next_handshake_without_a_restart
     ops.exec_run(
         ExecRunReq {
             host: HOST_ALIAS.to_string(),
-            argv: vec!["true".to_string()],
+            argv: qsh_testkit::shell::true_argv(),
             env: vec![],
             timeout_ms: Some(10_000),
         },
@@ -238,7 +236,7 @@ fn trust_remove_on_a_running_daemon_rejects_the_next_handshake_without_a_restart
         .exec_run(
             ExecRunReq {
                 host: HOST_ALIAS.to_string(),
-                argv: vec!["true".to_string()],
+                argv: qsh_testkit::shell::true_argv(),
                 env: vec![],
                 timeout_ms: Some(10_000),
             },
@@ -280,7 +278,7 @@ fn trust_remove_on_a_running_daemon_rejects_the_next_handshake_even_with_the_fil
     ops.exec_run(
         ExecRunReq {
             host: HOST_ALIAS.to_string(),
-            argv: vec!["true".to_string()],
+            argv: qsh_testkit::shell::true_argv(),
             env: vec![],
             timeout_ms: Some(10_000),
         },
@@ -316,7 +314,7 @@ fn trust_remove_on_a_running_daemon_rejects_the_next_handshake_even_with_the_fil
         .exec_run(
             ExecRunReq {
                 host: HOST_ALIAS.to_string(),
-                argv: vec!["true".to_string()],
+                argv: qsh_testkit::shell::true_argv(),
                 env: vec![],
                 timeout_ms: Some(10_000),
             },
@@ -354,7 +352,7 @@ fn trust_add_rebinds_a_known_identity_to_the_hosts_new_address() {
     ops.exec_run(
         ExecRunReq {
             host: HOST_ALIAS.to_string(),
-            argv: vec!["true".to_string()],
+            argv: qsh_testkit::shell::true_argv(),
             env: vec![],
             timeout_ms: Some(10_000),
         },
@@ -393,7 +391,7 @@ fn trust_add_rebinds_a_known_identity_to_the_hosts_new_address() {
     ops.exec_run(
         ExecRunReq {
             host: HOST_ALIAS.to_string(),
-            argv: vec!["true".to_string()],
+            argv: qsh_testkit::shell::true_argv(),
             env: vec![],
             timeout_ms: Some(10_000),
         },
@@ -425,7 +423,7 @@ fn trust_rename_takes_effect_on_the_next_handshake_without_a_restart() {
     ops.exec_run(
         ExecRunReq {
             host: HOST_ALIAS.to_string(),
-            argv: vec!["true".to_string()],
+            argv: qsh_testkit::shell::true_argv(),
             env: vec![],
             timeout_ms: Some(10_000),
         },
@@ -444,7 +442,7 @@ fn trust_rename_takes_effect_on_the_next_handshake_without_a_restart() {
         .exec_run(
             ExecRunReq {
                 host: HOST_ALIAS.to_string(),
-                argv: vec!["true".to_string()],
+                argv: qsh_testkit::shell::true_argv(),
                 env: vec![],
                 timeout_ms: Some(10_000),
             },
@@ -491,7 +489,7 @@ fn renamed_principal_has_no_acl_row_until_restart() {
         .exec_run(
             ExecRunReq {
                 host: HOST_ALIAS.to_string(),
-                argv: vec!["true".to_string()],
+                argv: qsh_testkit::shell::true_argv(),
                 env: vec![],
                 timeout_ms: Some(10_000),
             },
@@ -517,9 +515,9 @@ fn an_established_connection_keeps_its_authority_across_a_rename() {
     let session_ref = open_shell(&ops);
     let mut stream = attach(&ops, &session_ref);
     stream
-        .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+        .write(qsh_testkit::shell::say("BEFORE"))
         .expect("write before rename");
-    read_until(&mut stream, "BEFORE1");
+    read_until(&mut stream, &qsh_testkit::shell::said("BEFORE"));
 
     let (code, renamed) = host.json(&["trust", "rename", CLIENT_ALIAS, "renamed-laptop", "--json"]);
     assert_eq!(code, 0, "{renamed}");
@@ -527,9 +525,9 @@ fn an_established_connection_keeps_its_authority_across_a_rename() {
     // The already-established connection must not notice: same stream,
     // same negotiated principal, no re-handshake.
     stream
-        .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
+        .write(qsh_testkit::shell::say("AFTER"))
         .expect("write after rename");
-    read_until(&mut stream, "AFTER1");
+    read_until(&mut stream, &qsh_testkit::shell::said("AFTER"));
 
     stream.close();
 }

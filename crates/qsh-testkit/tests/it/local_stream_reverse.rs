@@ -48,13 +48,6 @@
 //! here — the target-initiated direction, via a real session exit — is the
 //! honest, hang-free version of "the stream ends and the client's conduit
 //! sees it."
-//!
-//! `#![cfg(unix)]`: localctl (UDS) and `ReverseHarness::attach_localctl`
-//! are both unix-only (`qsh_core::localctl` compiles out on Windows,
-//! `docs/CLI.md` §6.13) — same gating `local_control_reverse.rs` uses for
-//! the same reason.
-
-#![cfg(unix)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -72,8 +65,9 @@ use qsh_proto::local::{
 use qsh_proto::wire::{self, control_message, exec_frame, response, session_frame};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::reverse::{DataStream, LocalStream, connect_localctl, into_data_conduit};
+use qsh_testkit::shell;
 use qsh_transport::StaticTrust;
-use tokio::net::UnixStream;
 
 /// Bound on every "this must have already happened" wait in this file —
 /// generous relative to `local_control_reverse.rs`'s own `TIMEOUT` since a
@@ -98,8 +92,8 @@ fn fresh_paths() -> (tempfile::TempDir, Paths) {
 /// `LocalHelloAck` — identical to `local_control_reverse.rs`'s own helper
 /// of the same name (each test binary is its own crate; there is no shared
 /// support module for these small wire-level helpers to live in).
-async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -129,8 +123,8 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
 /// `LocalHelloAck` — [`connect_control`]'s twin, `kind` is the only
 /// difference (`crate::localctl::daemon`'s module docs: both conduit kinds
 /// answer the identical ack shape).
-async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -157,7 +151,7 @@ async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStre
 }
 
 async fn send_control(
-    conduit: &mut LocalConduit<UnixStream>,
+    conduit: &mut LocalConduit<LocalStream>,
     request_id: u64,
     body: control_message::Body,
 ) {
@@ -175,7 +169,7 @@ async fn send_control(
 /// this host, `ctl` included, regardless of ordering relative to whatever
 /// request `ctl` itself has in flight (`crate::localctl::mux`'s own
 /// `writer_changed_broadcasts_to_every_registered_conduit_including_non_subscribers`).
-async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+async fn recv_control_response(conduit: &mut LocalConduit<LocalStream>) -> wire::ControlMessage {
     loop {
         let msg: wire::ControlMessage = conduit
             .recv()
@@ -194,7 +188,7 @@ async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::
 /// actually echoed back through `Output` the way a real terminal would.
 fn open_sh() -> wire::SessionOpen {
     wire::SessionOpen {
-        argv: vec!["sh".to_string()],
+        argv: shell::pty_shell(),
         term: "xterm-256color".to_string(),
         cols: 80,
         rows: 24,
@@ -202,7 +196,7 @@ fn open_sh() -> wire::SessionOpen {
     }
 }
 
-async fn open_session(ctl: &mut LocalConduit<UnixStream>, request_id: u64) -> wire::SessionOpened {
+async fn open_session(ctl: &mut LocalConduit<LocalStream>, request_id: u64) -> wire::SessionOpened {
     send_control(
         ctl,
         request_id,
@@ -226,7 +220,7 @@ async fn open_session(ctl: &mut LocalConduit<UnixStream>, request_id: u64) -> wi
 /// conduit, `resolve_exec_route` in `crates/qsh-core/src/ops/exec.rs`, is
 /// exercised at the `Ops` layer instead, not here).
 async fn open_exec_argv(
-    ctl: &mut LocalConduit<UnixStream>,
+    ctl: &mut LocalConduit<LocalStream>,
     request_id: u64,
     argv: Vec<String>,
 ) -> wire::ExecStarted {
@@ -252,8 +246,8 @@ async fn open_exec_argv(
 }
 
 /// [`open_exec_argv`] with the harness's default probe command (`cat`).
-async fn open_exec(ctl: &mut LocalConduit<UnixStream>, request_id: u64) -> wire::ExecStarted {
-    open_exec_argv(ctl, request_id, vec!["cat".to_string()]).await
+async fn open_exec(ctl: &mut LocalConduit<LocalStream>, request_id: u64) -> wire::ExecStarted {
+    open_exec_argv(ctl, request_id, shell::cat_argv()).await
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -262,7 +256,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Read `SessionFrame`s off `data` until `marker` has appeared somewhere in
 /// the accumulated `Output` bytes, bounded by [`TIMEOUT`].
-async fn read_until_output_contains(data: &mut LocalConduit<UnixStream>, marker: &[u8]) -> Vec<u8> {
+async fn read_until_output_contains(data: &mut LocalConduit<DataStream>, marker: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     tokio::time::timeout(TIMEOUT, async {
         loop {
@@ -318,9 +312,10 @@ async fn local_stream_splices_session_data_to_a_real_pty_and_relays_exit_cleanly
         data.send(&wire::StreamHeader::session_data(opened.ticket.clone()))
             .await
             .expect("send StreamHeader");
+        let mut data = into_data_conduit(data);
 
         let marker = b"QSHPTYMARK";
-        let input = b"echo QSHPTYMARK\n".to_vec();
+        let input = format!("echo QSHPTYMARK{}", shell::ENTER).into_bytes();
         data.send(&wire::SessionFrame::input(input.len() as u64, input))
             .await
             .expect("send Input");
@@ -454,6 +449,7 @@ async fn a_forged_ticket_on_local_stream_is_rejected_promptly_never_a_hang() {
         data.send(&wire::StreamHeader::session_data(forged_ticket))
             .await
             .expect("send StreamHeader");
+        let mut data = into_data_conduit(data);
 
         let outcome = tokio::time::timeout(TIMEOUT, data.recv::<wire::SessionFrame>())
             .await
@@ -519,6 +515,7 @@ async fn a_file_data_header_on_local_stream_is_relayed_and_a_forged_ticket_is_re
         data.send(&wire::StreamHeader::file_data(vec![0xCCu8; TICKET_LEN]))
             .await
             .expect("send StreamHeader");
+        let mut data = into_data_conduit(data);
 
         let outcome = tokio::time::timeout(TIMEOUT, data.recv::<wire::FileFrame>())
             .await
@@ -667,6 +664,7 @@ async fn an_exec_data_header_on_local_stream_is_acked_and_relayed_to_a_real_chil
             "expected LocalClaimGranted, got {:?}",
             ack.body
         );
+        let mut data = into_data_conduit(data);
 
         let marker = b"QSHEXECMARK";
         data.send(&wire::ExecFrame::stdin(marker.to_vec()))
@@ -758,20 +756,8 @@ async fn exec_client_drop_over_reverse_kills_a_silent_remote_command() {
         harness.wait_control_hub("widget").await;
 
         let mut ctl = connect_control(&localctl.socket_path, "widget").await;
-        // `exec sleep 60` replaces the shell in place, so the pid this
-        // records is the very process that must be gone by the end of
-        // this test.
-        let marker = dir.path().join("execpid");
-        let started = open_exec_argv(
-            &mut ctl,
-            1,
-            vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("echo $$ > {} ; exec sleep 60", marker.display()),
-            ],
-        )
-        .await;
+        let child = shell::Runaway::new(dir.path());
+        let started = open_exec_argv(&mut ctl, 1, child.silent_argv()).await;
 
         let mut data = connect_stream(&localctl.socket_path, "widget").await;
         data.send(&wire::StreamHeader::exec_data(started.ticket))
@@ -791,18 +777,7 @@ async fn exec_client_drop_over_reverse_kills_a_silent_remote_command() {
             ack.body
         );
 
-        let pid = tokio::time::timeout(TIMEOUT, async {
-            loop {
-                if let Ok(contents) = std::fs::read_to_string(&marker)
-                    && let Ok(pid) = contents.trim().parse::<u32>()
-                {
-                    return pid;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the child must record its own pid within the deadline");
+        child.wait_running(TIMEOUT).await;
 
         // Abandon the conduit outright — never `Stdin`, never `StdinEof` —
         // exactly what a dropped or killed CLI process leaves behind. The
@@ -812,22 +787,7 @@ async fn exec_client_drop_over_reverse_kills_a_silent_remote_command() {
         // as the peer going away and kills the child.
         drop(data);
 
-        tokio::time::timeout(TIMEOUT, async {
-            loop {
-                let alive = tokio::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .status()
-                    .await
-                    .expect("run kill -0")
-                    .success();
-                if !alive {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("pid {pid} must be gone within {TIMEOUT:?}"));
+        child.wait_gone(TIMEOUT).await;
 
         let _ = shutdown_tx.send(());
     };

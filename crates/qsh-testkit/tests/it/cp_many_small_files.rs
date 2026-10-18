@@ -31,8 +31,6 @@
 //! Gated like the other acceptance tests: `QSH_ACCEPTANCE_STRICT` or
 //! `QSH_ACCEPTANCE_SLOW` turns it on, a plain run prints SKIP.
 
-#![cfg(unix)]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

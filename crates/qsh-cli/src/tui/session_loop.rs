@@ -22,6 +22,7 @@ use crate::render::human;
 use crate::stderr_note;
 
 use super::terminal::{TermEvent, Terminal};
+use super::vt_filter::ModeFilter;
 use super::{Attach, Escape, attach_request, escape_help, open_request};
 
 /// Read size for the stdin pump. One `read(2)` per keystroke is normal;
@@ -214,7 +215,12 @@ pub(super) fn run(
         )));
     }
 
-    let outcome = pump_events(&mut stream, &detached, is_raw);
+    let outcome = pump_events(
+        &mut stream,
+        &detached,
+        is_raw,
+        terminal.strips_win32_input_mode(),
+    );
 
     // Restore the terminal *before* any diagnostic is printed, so a
     // message about the exit is not typeset in raw mode.
@@ -260,8 +266,14 @@ enum Outcome {
 
 /// Drain the attach's event stream, writing session output to stdout.
 /// Returns as soon as the session ends or the user detaches.
-fn pump_events(stream: &mut SessionAttachStream, detached: &AtomicBool, raw: bool) -> Outcome {
+fn pump_events(
+    stream: &mut SessionAttachStream,
+    detached: &AtomicBool,
+    raw: bool,
+    strip_win32_input_mode: bool,
+) -> Outcome {
     let mut stdout = io::stdout().lock();
+    let mut filter = strip_win32_input_mode.then(ModeFilter::default);
     while let Some(event) = stream.next_event() {
         if detached.load(Ordering::SeqCst) {
             return Outcome::Detached;
@@ -277,6 +289,10 @@ fn pump_events(stream: &mut SessionAttachStream, detached: &AtomicBool, raw: boo
                         ErrorCode::Internal,
                         "session output was not valid Base64",
                     ));
+                };
+                let bytes = match filter.as_mut() {
+                    Some(filter) => filter.feed(&bytes),
+                    None => bytes,
                 };
                 // A write failure here is our own stdout dying (the
                 // terminal went away); treat it as a lost session rather
@@ -310,19 +326,35 @@ fn pump_events(stream: &mut SessionAttachStream, detached: &AtomicBool, raw: boo
             SessionEvent::Exit {
                 exit_code, signal, ..
             } => {
+                release_held(filter.as_mut(), &mut stdout);
                 return Outcome::Exit {
                     code: exit_code,
                     signal,
                 };
             }
-            SessionEvent::Closed { reason, .. } => return Outcome::Closed(reason),
+            SessionEvent::Closed { reason, .. } => {
+                release_held(filter.as_mut(), &mut stdout);
+                return Outcome::Closed(reason);
+            }
             SessionEvent::Unknown(_) => {}
         }
     }
+    release_held(filter.as_mut(), &mut stdout);
     if detached.load(Ordering::SeqCst) {
         Outcome::Detached
     } else {
         Outcome::Lost
+    }
+}
+
+/// Write out a sequence the win32-input-mode filter was still holding when
+/// the output ended. A write failure is ignored: the stream is over anyway.
+fn release_held(filter: Option<&mut ModeFilter>, stdout: &mut impl io::Write) {
+    if let Some(filter) = filter {
+        let rest = filter.finish();
+        if !rest.is_empty() {
+            let _ = stdout.write_all(&rest).and_then(|()| stdout.flush());
+        }
     }
 }
 

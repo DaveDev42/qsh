@@ -1141,11 +1141,22 @@ fn arm_cancel_on_interrupt(cancel: &CancelToken) {
             return;
         };
         runtime.block_on(async {
-            if tokio::signal::ctrl_c().await.is_err() {
+            // One listener for both interrupts. A fresh `ctrl_c()` future per
+            // wait leaves a gap on Windows, where a `Ctrl-C` that finds no
+            // listener falls through to the default handler and ends the
+            // process with `STATUS_CONTROL_C_EXIT` instead of 255.
+            #[cfg(unix)]
+            let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+            #[cfg(windows)]
+            let sigint = tokio::signal::windows::ctrl_c();
+            let Ok(mut sigint) = sigint else {
+                return;
+            };
+            if sigint.recv().await.is_none() {
                 return;
             }
             cancel.cancel();
-            if tokio::signal::ctrl_c().await.is_ok() {
+            if sigint.recv().await.is_some() {
                 std::process::exit(EXIT_RUNTIME_FAILURE);
             }
         });

@@ -19,10 +19,21 @@
 //! listen` child and treats it as this test's own OS process treats any
 //! other socket peer: no shared memory, no cheating.
 //!
-//! `#![cfg(unix)]`: localctl (UDS, peer credentials) has no meaning on
-//! Windows, and `qsh listen` there never binds a socket at all
-//! (`docs/CLI.md` §6.13) — a real listen guard here would just hang
-//! waiting for a "listening on" line that is never printed.
+//! `#![cfg(unix)]`, because the property is the unix one: a Unix domain
+//! socket's file mode, its parent directory's mode and the kernel's peer
+//! credentials (`SO_PEERCRED`) decide who may talk to the daemon. A Windows
+//! daemon listens on a named pipe, where the same promise is kept by an
+//! owner-only protected DACL on every pipe instance, a pipe name scoped by
+//! the user's SID, and a check of the client's and the server's SID before a
+//! frame is read or written. Those are pinned where the pipe is built, in
+//! `qsh-core`'s `localctl::transport::windows::tests`:
+//! `pipe_instance_dacl_is_protected_and_owner_only`,
+//! `pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`,
+//! `pipe_client_writes_nothing_to_a_server_with_another_sid`,
+//! `pipe_bind_without_a_dacl_creates_no_pipe` and
+//! `pipe_create_options_reject_remote_clients_and_claim_the_first_instance`.
+//! A real `qsh listen` and a real second process on a pipe run in
+//! `windows_reverse_e2e.rs` and `windows_attach.rs`.
 
 #![cfg(unix)]
 

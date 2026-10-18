@@ -930,7 +930,6 @@ async fn role_absent_out_of_scope_and_reload_failure_denials_are_uniform() {
 // ---------------------------------------------------------------------------
 
 /// The four file requests for `path`, as `(seam name, body)`.
-#[cfg(unix)]
 fn file_bodies(path: &str) -> [(&'static str, wire::control_message::Body); 4] {
     use wire::control_message::Body;
     [
@@ -972,10 +971,8 @@ fn file_bodies(path: &str) -> [(&'static str, wire::control_message::Body); 4] {
 /// A normalizer that folds `.` and `..` lexically and follows no symlink:
 /// the stand-in for "the path looked fine when it was normalized" that the
 /// opened-handle recheck exists for.
-#[cfg(unix)]
 struct LexicalNormalizer;
 
-#[cfg(unix)]
 impl qsh_core::file::guard::Normalizer for LexicalNormalizer {
     fn normalize(
         &self,
@@ -998,7 +995,6 @@ impl qsh_core::file::guard::Normalizer for LexicalNormalizer {
 /// Start a host that grants `laptop` the file actions with `paths`, wired to
 /// a state tree under `root`, and drive every path in `paths_to_try` through
 /// all four file seams. Returns each reply's `(code, message)`.
-#[cfg(unix)]
 async fn file_denials(
     root: &std::path::Path,
     grant_paths: Option<Vec<String>>,
@@ -1044,16 +1040,64 @@ async fn file_denials(
     out
 }
 
+/// The directory as the host spells it: on Windows without the `\\?\` prefix
+/// the system puts on a final path (the host answers with drive paths only).
+fn host_spelling(path: &std::path::Path) -> std::path::PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => std::path::PathBuf::from(plain),
+        None => path.to_path_buf(),
+    }
+}
+
+/// How a path is written in a request or an `acl.toml` `paths` entry:
+/// Windows entries use `C:/...` (ADR-0029 decision 23).
+fn host_text(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// The `paths` entry that covers the whole volume `path` lives on.
+fn volume_root_text(path: &std::path::Path) -> String {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        "/".to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!("{}/", &host_text(path)[..2])
+    }
+}
+
+/// A directory link: a symlink on unix, a junction on Windows (`mklink /J`
+/// needs no privilege).
+fn dir_link(link: &std::path::Path, target: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link.to_str().unwrap().replace('/', "\\"))
+            .arg(target.to_str().unwrap().replace('/', "\\"))
+            .output()
+            .expect("run cmd");
+        assert!(
+            made.status.success(),
+            "mklink /J: {}",
+            String::from_utf8_lossy(&made.stdout)
+        );
+    }
+}
+
 /// A request outside `paths`, a row without `paths`, a path that cannot be
 /// normalized, a state path, and a symlink swapped in under a lexically
 /// fine path (the recheck) all answer the same `PERMISSION_DENIED` with the
 /// same message, on each of the four file seams: nothing in the reply says
 /// which check refused (ADR-0029 decision 17).
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn file_policy_outcomes_all_answer_the_same_denial() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let root = host_spelling(&std::fs::canonicalize(dir.path()).expect("canonical tempdir"));
     for sub in [
         "share",
         "outside/sub",
@@ -1067,9 +1111,9 @@ async fn file_policy_outcomes_all_answer_the_same_denial() {
     std::fs::write(root.join("outside/secret.txt"), b"s").unwrap();
     std::fs::write(root.join("outside/sub/new.txt"), b"n").unwrap();
     std::fs::write(root.join("host/config/trust.toml"), b"t").unwrap();
-    std::os::unix::fs::symlink(root.join("outside"), root.join("share/swap")).unwrap();
-    let share = root.join("share").display().to_string();
-    let p = |rel: &str| format!("{}/{rel}", root.display());
+    dir_link(&root.join("share/swap"), &root.join("outside"));
+    let share = host_text(&root.join("share"));
+    let p = |rel: &str| format!("{}/{rel}", host_text(&root));
 
     let mut replies: Vec<(&str, Vec<(ErrorCode, String)>)> = Vec::new();
     // Outside `paths`, and a path whose normalization fails (a file used as
@@ -1094,7 +1138,7 @@ async fn file_policy_outcomes_all_answer_the_same_denial() {
         "state path",
         file_denials(
             &root,
-            Some(vec!["/".to_string()]),
+            Some(vec![volume_root_text(&root)]),
             false,
             &[p("host/config/trust.toml"), p("host/state")],
         )

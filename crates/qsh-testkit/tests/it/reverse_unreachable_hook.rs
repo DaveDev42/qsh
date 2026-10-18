@@ -16,11 +16,6 @@
 //! failed attempt actually reaches the hook and the reconnect loop keeps
 //! running (and shuts down cleanly) afterward, instead of the hook being
 //! wired to a dead branch.
-//!
-//! `#![cfg(unix)]`: [`ReverseHarness::run_target_observing_unreachable`]
-//! drives the real `#[cfg(unix)]` reconnect loop.
-
-#![cfg(unix)]
 
 use std::net::UdpSocket;
 use std::sync::Arc;

@@ -7,9 +7,9 @@
 //! plain `Ops`, no pty, no raw mode. `tui_expect.rs` covers the terminal
 //! half.
 //!
-//! Sessions are PTY-backed, so this file only exists on POSIX hosts.
-
-#![cfg(unix)]
+//! Sessions are PTY-backed on every platform (a ConPTY on Windows), so the
+//! scenarios run on both; only the programs the sessions run
+//! (`qsh_testkit::shell`) and the way the host is stopped differ.
 
 use crate::common;
 
@@ -20,6 +20,7 @@ use common::{Fleet, HOST_ALIAS, Sandbox};
 use qsh_core::{OpError, Ops, Paths, SessionAttachStream};
 use qsh_proto::event::SessionEvent;
 use qsh_proto::{EnvVar, SessionAttachReq, SessionGetReq, SessionOpenReq};
+use qsh_testkit::shell::{ENTER, line_echo_loop, read_line_then_exit};
 
 /// Wall-clock bound for one attach scenario. Every wait inside is a real
 /// round trip against `qsh serve`; nothing sleeps.
@@ -67,10 +68,10 @@ fn with_deadline<T: Send + 'static>(
 }
 
 /// Open a session running `argv` on the fleet's host.
-fn open(ops: &Ops, argv: &[&str]) -> String {
+fn open(ops: &Ops, argv: Vec<String>) -> String {
     ops.session_open(SessionOpenReq {
         host: HOST_ALIAS.to_string(),
-        argv: argv.iter().map(|a| (*a).to_string()).collect(),
+        argv,
         env: vec![EnvVar {
             name: "LANG".into(),
             value: "C".into(),
@@ -134,14 +135,7 @@ fn decode(data_b64: &str) -> String {
 fn attach_round_trips_input_and_reports_the_remote_exit_code() {
     let fleet = Fleet::start();
     let ops = ops_for(&fleet.client);
-    let session_ref = open(
-        &ops,
-        &[
-            "sh",
-            "-c",
-            "read line; printf 'GOT:%s\\n' \"$line\"; exit 7",
-        ],
-    );
+    let session_ref = open(&ops, read_line_then_exit("GOT:", 7));
 
     let (code, signal) = with_deadline("attach round trip", move || {
         let mut stream = attach(&ops, &session_ref).expect("session.attach");
@@ -156,7 +150,9 @@ fn attach_round_trips_input_and_reports_the_remote_exit_code() {
             "the resume window has to be dated"
         );
 
-        stream.write(b"hello\n".to_vec()).expect("write");
+        stream
+            .write(format!("hello{ENTER}").into_bytes())
+            .expect("write");
         let seen = read_until(&mut stream, "GOT:hello");
         // The PTY echoes what we typed *and* the shell answers, which is
         // exactly the interactive experience the TUI renders — so the echo
@@ -189,20 +185,15 @@ fn attach_round_trips_input_and_reports_the_remote_exit_code() {
 fn detaching_leaves_the_session_running_and_re_attachable() {
     let fleet = Fleet::start();
     let ops = ops_for(&fleet.client);
-    let session_ref = open(
-        &ops,
-        &[
-            "sh",
-            "-c",
-            "while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done",
-        ],
-    );
+    let session_ref = open(&ops, line_echo_loop("ECHO:"));
 
     let reattached = with_deadline("detach and re-attach", {
         let session_ref = session_ref.clone();
         move || {
             let mut stream = attach(&ops, &session_ref).expect("first attach");
-            stream.write(b"one\n".to_vec()).expect("write");
+            stream
+                .write(format!("one{ENTER}").into_bytes())
+                .expect("write");
             read_until(&mut stream, "ECHO:one");
 
             // Detach from another thread's point of view: the handle is
@@ -254,21 +245,76 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
             // The replay is what happened *before* this attach existed:
             // both the echo of the input and the answer to it.
             let replayed = read_until(&mut stream, "ECHO:one");
+            // The echo of what was typed: a line of its own on a unix PTY;
+            // a pseudo-console redraws it, so there only its text counts.
+            #[cfg(unix)]
+            let echo_marker = "one\r\n";
+            #[cfg(windows)]
+            let echo_marker = "one";
             let echo = replayed
-                .find("one\r\n")
+                .find(echo_marker)
                 .expect("the pre-detach input echo is missing from the replay");
             let answer = replayed.find("ECHO:one").expect("the shell's answer");
             assert!(
                 echo < answer,
                 "the replay starts after the pre-detach input: {replayed:?}"
             );
-            stream.write(b"two\n".to_vec()).expect("write");
+            stream
+                .write(format!("two{ENTER}").into_bytes())
+                .expect("write");
             let seen = read_until(&mut stream, "ECHO:two");
             stream.close();
             seen
         }
     });
     assert!(reattached.contains("ECHO:two"), "{reattached:?}");
+}
+
+/// A host that is stopped but not gone: it holds its sockets and answers
+/// nothing.
+///
+/// unix: `SIGSTOP`, then `waitpid(WUNTRACED)`, because `kill(host, SIGSTOP)`
+/// only queues the signal. For a multi-threaded target, Linux wakes a single
+/// thread to dequeue it, and the rest of the group (here, the tokio workers
+/// still servicing the QUIC socket) keep running in user space until that
+/// thread executes the group stop. On a loaded runner that window can be wide
+/// enough for the host to receive and ack a write before it has actually
+/// stopped, which reports `Applied` instead of `Unconfirmed` (ubuntu-24.04-arm
+/// CI run, 2026-09-02). `waitpid(host, WUNTRACED)` is only satisfied once the
+/// whole thread group has stopped, and it does not reap the child. Windows:
+/// every thread of the process is suspended (`qsh_testkit::freeze`).
+#[cfg(unix)]
+struct StoppedHost(nix::unistd::Pid);
+/// See the unix definition.
+#[cfg(windows)]
+struct StoppedHost(qsh_testkit::freeze::Frozen);
+
+impl StoppedHost {
+    fn stop(pid: u32) -> Self {
+        #[cfg(unix)]
+        {
+            let host = nix::unistd::Pid::from_raw(pid as i32);
+            nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGSTOP).expect("stop the host");
+            match nix::sys::wait::waitpid(host, Some(nix::sys::wait::WaitPidFlag::WUNTRACED))
+                .expect("wait for the host to report itself stopped")
+            {
+                nix::sys::wait::WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGSTOP) => {}
+                other => panic!("expected the host to report SIGSTOP, got {other:?}"),
+            }
+            Self(host)
+        }
+        #[cfg(windows)]
+        {
+            Self(qsh_testkit::freeze::freeze(pid))
+        }
+    }
+
+    fn resume(self) {
+        #[cfg(unix)]
+        nix::sys::signal::kill(self.0, nix::sys::signal::Signal::SIGCONT).expect("resume the host");
+        #[cfg(windows)]
+        drop(self.0);
+    }
 }
 
 /// A teardown must not cut a detach short.
@@ -290,63 +336,37 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
 /// two stamps back inverted.
 ///
 /// A wall-clock threshold does not work here, because the flush is not
-/// guaranteed to be slow. `SIGSTOP` keeps the host from acknowledging,
+/// guaranteed to be slow. Freezing the host keeps it from acknowledging,
 /// but a driver that has already returned never reads the detach marker
 /// at all, and the dropped acknowledgement channel answers `Unconfirmed`
 /// at once (ubuntu-24.04-arm CI, 2026-08-24). Both are correct detaches;
 /// only the ordering separates a teardown that waited from one that cut
 /// a flush short.
 ///
-/// `kill(host, SIGSTOP)` only queues the signal; it does not wait for the
-/// host to actually stop. For a multi-threaded target, Linux wakes a
-/// single thread to dequeue the signal, and the rest of the group — here,
-/// the tokio workers still servicing the QUIC socket — keep running in
-/// user space until that thread executes the group stop and kicks them.
-/// On a loaded runner that window can be wide enough for the host to
-/// receive and ack `"two\n"` before it has actually stopped, which is
-/// indistinguishable from a normal flush and reports `Applied` instead of
-/// `Unconfirmed` (ubuntu-24.04-arm CI run, 2026-09-02). The
-/// scenario below closes that window by waiting on `waitpid(host,
-/// WUNTRACED)` — which the kernel only satisfies once the whole thread
-/// group has stopped, and which does not reap the child — before writing
-/// `"two\n"`.
+/// The host is frozen with [`StoppedHost`] before the write, so the write
+/// cannot be acknowledged.
 #[test]
 fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
     let fleet = Fleet::start();
     let ops = ops_for(&fleet.client);
-    let session_ref = open(
-        &ops,
-        &[
-            "sh",
-            "-c",
-            "while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done",
-        ],
-    );
-    let host = nix::unistd::Pid::from_raw(fleet.serve.pid() as i32);
+    let session_ref = open(&ops, line_echo_loop("ECHO:"));
+    let host_pid = fleet.serve.pid();
 
     let (closed, released, outcome) = with_deadline("teardown vs. detach", move || {
         let mut stream = attach(&ops, &session_ref).expect("attach");
-        stream.write(b"one\n".to_vec()).expect("write");
+        stream
+            .write(format!("one{ENTER}").into_bytes())
+            .expect("write");
         read_until(&mut stream, "ECHO:one");
 
         // From here the host answers nothing at all, so the detach below
-        // cannot finish on its own. `SIGSTOP` only queues the signal — the
-        // host's thread group does not necessarily stop before the next
-        // line runs (see the doc comment above), so wait for the kernel to
-        // report the whole group actually stopped before writing "two\n".
-        // `fleet.serve` is a direct child of this test process
-        // (`ServeGuard::spawn`, `crates/qsh-cli/tests/it/common/mod.rs`) and
-        // nothing else waits on it while this scenario runs, so this
-        // `waitpid` cannot race another reaper for the same pid.
-        nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGSTOP).expect("stop the host");
-        match nix::sys::wait::waitpid(host, Some(nix::sys::wait::WaitPidFlag::WUNTRACED))
-            .expect("wait for the host to report itself stopped")
-        {
-            nix::sys::wait::WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGSTOP) => {}
-            other => panic!("expected the host to report SIGSTOP, got {other:?}"),
-        }
+        // cannot finish on its own. `fleet.serve` is a direct child of this
+        // test process (`ServeGuard::spawn`,
+        // `crates/qsh-cli/tests/it/common/mod.rs`) and nothing else waits on
+        // it while this scenario runs.
+        let stopped = StoppedHost::stop(host_pid);
         stream
-            .write(b"two\n".to_vec())
+            .write(format!("two{ENTER}").into_bytes())
             .expect("write before the detach");
 
         let handle = stream.handle();
@@ -378,7 +398,7 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
         let closed = std::time::Instant::now();
 
         // Let the host run again so the fleet tears down normally.
-        nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGCONT).expect("resume the host");
+        stopped.resume();
         let (outcome, released) = detacher.join().expect("the detaching thread panicked");
         (closed, released, outcome)
     });

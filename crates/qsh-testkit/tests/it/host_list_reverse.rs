@@ -5,18 +5,6 @@
 //! forward+reverse를 한 배열로 반환하고, 연결을 끊으면 그 항목이 `stale`로
 //! 바뀜" + "`qsh hosts`가 네트워크를 건드리지 않음").
 //!
-//! `#![cfg(unix)]`: localctl (UDS) and `ReverseHarness::attach_localctl`
-//! are both unix-only (`qsh_core::localctl` compiles out on Windows,
-//! `docs/CLI.md` §6.13). The Windows-leg guarantee that `qsh hosts` still
-//! returns forward-only there is structural, not a dedicated unit test:
-//! `ops/host.rs`'s `reverse_host_entries` has a `#[cfg(not(unix))]` tail
-//! arm that returns `Vec::new()` unconditionally, so `merge_hosts` (this
-//! file's `hosts_merge_forward_and_live_reverse_then_stale_after_severance`
-//! test exercises its unix-side behavior) only ever sees an empty reverse
-//! source there — verified by a full workspace `cargo clippy --all-targets`
-//! cross-check against a Windows target rather than by a runnable test on
-//! this file's own platform.
-//!
 //! `Ops::host_list`/`host_get`/`resolve_host_route` are plain *sync*
 //! methods that spin up their own single-threaded Tokio runtime internally
 //! (`ops/host.rs`'s `reverse_host_entries`, mirroring `ops/mod.rs`'s
@@ -27,8 +15,6 @@
 //! `tokio::task::spawn_blocking`, which runs on a distinct OS thread that
 //! has never entered any runtime context — the same bridge a real `qsh`
 //! binary never needs only because its `main` isn't async at all.
-
-#![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

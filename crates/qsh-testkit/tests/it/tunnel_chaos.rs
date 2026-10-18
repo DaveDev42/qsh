@@ -21,7 +21,7 @@
 //!   must end cleanly and promptly, and must not block the session's own
 //!   resume.
 //! - [`a_severed_reverse_connection_ends_every_tunnel_conduit_of_that_host`]
-//!   (unix only): the reverse edition of the same conduit-death discipline
+//!   is the reverse edition of the same conduit-death discipline
 //!   `local_control_reverse.rs`'s M3 Step 6 test established for
 //!   `LOCAL_CONTROL` — extended here to `-L`/`-R over reverse`'s data
 //!   conduits.
@@ -581,12 +581,6 @@ async fn a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes
 //     discipline M3 Step 6 established for `LOCAL_CONTROL`.
 // ------------------------------------------------------------------
 
-/// unix only: localctl (UDS) and `ReverseHarness::attach_localctl` are
-/// both unix-only (`qsh_core::localctl` compiles out on Windows,
-/// `docs/CLI.md` §6.13) — same gating every other reverse-conduit L3/L4
-/// suite in this crate uses (`local_control_reverse.rs`,
-/// `reverse_tunnel.rs`, `reverse_chaos.rs`).
-#[cfg(unix)]
 mod reverse_conduit_death {
     use std::path::Path;
     use std::sync::Arc;
@@ -602,11 +596,11 @@ mod reverse_conduit_death {
     use qsh_proto::wire::{self, control_message, response};
     use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
     use qsh_testkit::loopback::{TestIdentity, make_identity};
-    use qsh_testkit::reverse::ReverseHarness;
+    use qsh_testkit::reverse::{LocalStream, ReverseHarness, connect_localctl};
     use qsh_testkit::tunnel::{EchoServer, ephemeral_local_spec};
     use qsh_transport::StaticTrust;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpStream, UnixStream};
+    use tokio::net::TcpStream;
 
     /// Bound on every "this must have already happened" wait — same order
     /// of magnitude as `reverse_tunnel.rs`'s own `TIMEOUT` (a real reverse
@@ -634,8 +628,8 @@ mod reverse_conduit_death {
     /// `local_control_reverse.rs`'s own helper of the same name (each
     /// test binary is its own crate; there is no shared support module
     /// for these to live in).
-    async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-        let stream = UnixStream::connect(socket_path)
+    async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+        let stream = connect_localctl(socket_path)
             .await
             .expect("connect localctl socket");
         let mut conduit = LocalConduit::new(stream);
@@ -662,7 +656,7 @@ mod reverse_conduit_death {
     }
 
     async fn send_control(
-        conduit: &mut LocalConduit<UnixStream>,
+        conduit: &mut LocalConduit<LocalStream>,
         request_id: u64,
         body: control_message::Body,
     ) {
@@ -677,7 +671,9 @@ mod reverse_conduit_death {
     /// `reverse_tunnel.rs`'s own `recv_control_response` for why one can
     /// land interleaved with a request/response even though this file
     /// never opens a PTY session.
-    async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+    async fn recv_control_response(
+        conduit: &mut LocalConduit<LocalStream>,
+    ) -> wire::ControlMessage {
         loop {
             let msg: wire::ControlMessage = conduit
                 .recv()
@@ -707,7 +703,7 @@ mod reverse_conduit_death {
         request_id: u64,
     ) -> (
         std::net::SocketAddr,
-        LocalConduit<UnixStream>,
+        LocalConduit<LocalStream>,
         RemoteForwardAcceptor,
     ) {
         let acceptor =

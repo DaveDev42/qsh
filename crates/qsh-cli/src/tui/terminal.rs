@@ -66,6 +66,15 @@ pub(crate) trait Terminal: Send + Sync + 'static {
         false
     }
 
+    /// Whether the session output must lose its win32-input-mode requests
+    /// (`CSI ? 9001 h/l`) before it reaches this terminal. A console that
+    /// obeys them hands the client key records instead of the bytes typed,
+    /// which the escape machine cannot read. The POSIX terminal forwards
+    /// the output untouched.
+    fn strips_win32_input_mode(&self) -> bool {
+        false
+    }
+
     /// The terminal is gone (hang-up, termination, console closed): put it
     /// back the way it was and leave. The session stays on the host
     /// (`docs/CLI.md` §7). The POSIX terminal dies of the signal and never

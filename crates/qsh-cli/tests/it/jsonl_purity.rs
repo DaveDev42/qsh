@@ -11,24 +11,47 @@ use crate::common;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use common::{Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code};
-#[cfg(unix)]
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use serde_json::Value;
-#[cfg(unix)]
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-#[cfg(unix)]
 use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
 use std::process::Stdio;
-#[cfg(unix)]
 use std::sync::{Arc, Mutex};
-#[cfg(unix)]
 use std::thread;
-#[cfg(unix)]
 use std::time::Duration;
 
-/// A command that writes plenty of interleaved stdout and stderr.
-const NOISY: &str = "for i in $(seq 1 200); do echo line$i; echo e$i >&2; done";
+/// A command that writes plenty of interleaved stdout and stderr: the lines
+/// `line1`..`line200` on stdout and `e1`..`e200` on stderr.
+fn noisy_argv() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        [
+            "sh",
+            "-c",
+            "for i in $(seq 1 200); do echo line$i; echo e$i >&2; done",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+    #[cfg(windows)]
+    {
+        [
+            "cmd",
+            "/c",
+            "for /l %i in (1,1,200) do @(echo line%i& echo e%i 1>&2)",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+}
+
+/// `head` followed by [`noisy_argv`], as the argument list of one call.
+fn with_noisy(head: &[&str]) -> Vec<String> {
+    head.iter()
+        .map(|a| a.to_string())
+        .chain(noisy_argv())
+        .collect()
+}
 
 /// Assert that `stdout` is one or more lines, each a `qsh.cli/v1` object,
 /// and return them.
@@ -58,9 +81,9 @@ fn a_noisy_exec_keeps_stdout_pure_json_at_every_verbosity() {
         ("--jsonl -vv", "--jsonl", "-vv"),
         ("--json -vvv", "--json", "-vvv"),
     ] {
-        let output = fleet
-            .client
-            .qsh(&["exec", HOST_ALIAS, verbosity, mode, "--", "sh", "-c", NOISY]);
+        let args = with_noisy(&["exec", HOST_ALIAS, verbosity, mode, "--"]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = fleet.client.qsh(&args);
 
         assert_eq!(exit_code(&output), 0, "{label}");
         let lines = parse_stdout_lines(&output.stdout, label);
@@ -206,7 +229,6 @@ fn trust_invite_keeps_stdout_pure_json_and_free_of_the_address_block_at_every_ve
 /// `qsh.event/v1` object, and return them. Deliberately a separate parser
 /// from [`parse_stdout_lines`]: a follower streams bare events, so the
 /// envelope schema must *not* appear (`docs/CLI.md` §6.4).
-#[cfg(unix)]
 fn parse_stdout_events(stdout: &[u8], label: &str) -> Vec<Value> {
     let text = std::str::from_utf8(stdout).expect("stdout must be utf-8");
     assert!(!text.is_empty(), "{label}: stdout was empty");
@@ -229,14 +251,12 @@ fn parse_stdout_events(stdout: &[u8], label: &str) -> Vec<Value> {
 /// value *stream*, so "every line is pure JSON" has to hold across many
 /// lines and across chunk boundaries — a partially flushed `session.output`
 /// would fail to parse here. Verbosity still only ever adds stderr.
-// The session runs a POSIX shell script, and `sh` is not there on Windows.
-#[cfg(unix)]
 #[test]
 fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
     let fleet = Fleet::start();
-    let (code, opened) = fleet.client.json(&[
-        "session", "open", HOST_ALIAS, "--json", "--", "sh", "-c", NOISY,
-    ]);
+    let args = with_noisy(&["session", "open", HOST_ALIAS, "--json", "--"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, opened) = fleet.client.json(&args);
     assert_eq!(code, 0, "{opened}");
     let session_ref = opened["data"]["session_ref"].as_str().expect("session_ref");
 
@@ -304,7 +324,6 @@ fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
 /// `SESSION_DATA` stream, never a value op) — that path's own stdout
 /// purity is exercised by `reverse_e2e.rs`'s interactive-attach scenario
 /// instead, which drives a real pty rather than `--jsonl`.
-#[cfg(unix)]
 #[test]
 fn a_noisy_follow_over_a_reverse_route_keeps_every_stdout_line_a_complete_json_event() {
     let controller = Sandbox::initialized();
@@ -333,8 +352,9 @@ fn a_noisy_follow_over_a_reverse_route_keeps_every_stdout_line_a_complete_json_e
         },
     );
 
-    let (code, opened) =
-        controller.json(&["session", "open", NAME, "--json", "--", "sh", "-c", NOISY]);
+    let args = with_noisy(&["session", "open", NAME, "--json", "--"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, opened) = controller.json(&args);
     assert_eq!(code, 0, "{opened}");
     let session_ref = opened["data"]["session_ref"].as_str().expect("session_ref");
 
@@ -452,12 +472,8 @@ fn serve_json_setup_failure_writes_nothing_to_stdout() {
 /// right after printing that envelope), so "every stdout line is pure
 /// JSON" here specifically means "there is never a second line".
 ///
-/// Forward-route only (client-side `-L` bind), like `tunnel_e2e.rs` — the
-/// client-side local listener is the one part of M4's tunnel stack this
-/// file's other tests do not need, so this test alone carries the `unix`
-/// gate (the M4 plan (2473c88) Windows-leg note: the tunnel relay/host path is
-/// `cfg(unix)`).
-#[cfg(unix)]
+/// Forward-route only (client-side `-L` bind), like `tunnel_e2e.rs`; the
+/// reverse route's stdout is the same renderer.
 #[test]
 fn a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr() {
     let fleet = Fleet::start();
@@ -621,10 +637,8 @@ fn a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land
 /// destination is not something a portable test can rely on being
 /// reachable. `qsh::tunnel::dynamic: CONNECT`'s own debug log fires once
 /// the request is parsed, before the dial is attempted, so it is on
-/// stderr regardless of that outcome. Forward-route only, same `unix`
-/// gate as `a_tunnel_in_progress_…` above and for the same reason (this
-/// file's own imports).
-#[cfg(unix)]
+/// stderr regardless of that outcome. Forward-route only, like
+/// `a_tunnel_in_progress_…` above.
 #[test]
 fn a_dynamic_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr()
 {
@@ -939,7 +953,11 @@ fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
 /// --deactivate` (ADR-0032) over a fake `launchctl`/`systemctl`: stdout stays
 /// exactly one `qsh.cli/v1` line at high verbosity, and what the manager
 /// printed or the renderer would say goes to stderr only. Unix only because
-/// the fake manager is a shell script; no real manager is ever called.
+/// the fake manager is a shell script; no real manager is ever called. On
+/// Windows `--activate` and `--deactivate` would register and delete a real
+/// scheduled task, so they run only over a recording runner in `qsh-core`
+/// (`ops::service::tests::windows_manager`), and the one flag that never
+/// reaches the manager is the Windows twin below.
 #[cfg(unix)]
 #[test]
 fn service_activation_flags_keep_stdout_pure_json_at_every_verbosity() {
@@ -973,11 +991,29 @@ fn service_activation_flags_keep_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `service status --live` with no unit file answers `active: false` without
+/// asking the Task Scheduler, so its stdout purity can be checked on Windows.
+#[cfg(windows)]
+#[test]
+fn service_status_live_keeps_stdout_pure_json_at_every_verbosity_on_windows() {
+    let sandbox = Sandbox::new();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = sandbox.qsh(&["service", "status", "--live", verbosity, mode]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        assert_eq!(lines[0]["command"], "service.status", "{label}");
+    }
+}
+
 /// `qsh cp` (ADR-0029 decision 18, `docs/CLI.md` §6.21): at high verbosity
 /// `--json` is one envelope line, and `--jsonl` is `qsh.event/v1`
 /// `file.entry` lines followed by the envelope. No line is anything else,
 /// and nothing of the file's contents reaches stdout or stderr.
-#[cfg(unix)]
 #[test]
 fn cp_keeps_stdout_pure_json_at_every_verbosity() {
     const CANARY: &str = "cp-purity-canary-payload";
@@ -995,11 +1031,14 @@ fn cp_keeps_stdout_pure_json_at_every_verbosity() {
         ("--jsonl -vv", "--jsonl", "-vv", 2),
         ("--json -vvv", "--json", "-vvv", 1),
     ] {
+        // A Windows host takes drive paths with forward slashes.
         let dst = format!(
             "{HOST_ALIAS}:{}",
             work.path()
                 .join(format!("out{lines_expected}.txt"))
                 .display()
+                .to_string()
+                .replace('\\', "/")
         );
         let output = client.qsh(&["cp", verbosity, mode, src, &dst]);
         assert_eq!(exit_code(&output), 0, "{label}");
@@ -1030,7 +1069,6 @@ fn cp_keeps_stdout_pure_json_at_every_verbosity() {
 /// `pair ssh` is a value operation: `--json` and `--jsonl` both print the
 /// one envelope and nothing else on stdout, even at `-vvv`, while the ssh
 /// child's own output and the bootstrap diagnostics stay off it.
-#[cfg(unix)]
 #[test]
 fn pair_ssh_keeps_stdout_pure_json_at_every_verbosity() {
     use crate::ssh_bootstrap::pair::World;

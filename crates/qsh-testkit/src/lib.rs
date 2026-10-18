@@ -40,6 +40,8 @@
 //!   of the `qsh-fake-ssh` executable this crate builds, which records its
 //!   argv and plays the system `ssh` of the SSH bootstrap tests (ADR-0044)
 //!   with no sshd and no OpenSSH configuration.
+//! - [`shell`]: the interactive shell and the stdin-copying program a
+//!   platform-neutral test runs on the host it drives.
 //! - [`testbin`]: finds a helper executable this crate builds
 //!   (`qsh-fake-ssh`, `qsh-console-probe`) from a test.
 //!
@@ -47,6 +49,9 @@
 //!   Windows console program that reports which event a session signal
 //!   turned into through its exit code (ADR-0035 decision 22).
 //!
+//! - `freeze` (Windows only): suspends every thread of a process, the
+//!   counterpart of `SIGSTOP`, so a test can make a peer go silent without
+//!   ending it.
 //! - `conpty` (Windows only): a ConPTY harness that runs a program in a
 //!   pseudo-console and reads what it printed.
 //!
@@ -63,6 +68,8 @@ pub mod echo_host;
 pub mod env_check;
 pub mod fake_ssh;
 pub mod fixtures;
+#[cfg(windows)]
+pub mod freeze;
 pub mod loopback;
 pub mod net_probe;
 pub mod pair;
@@ -71,6 +78,7 @@ pub mod perf;
 pub mod procstat;
 pub mod raw_quic;
 pub mod reverse;
+pub mod shell;
 pub mod signal_probe;
 pub mod testbin;
 pub mod tunnel;

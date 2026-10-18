@@ -9,8 +9,6 @@
 //! daemon that skipped the validation would bind and wait, so the test's own timeout is what
 //! catches it.
 
-#![cfg(unix)]
-
 use std::net::SocketAddr;
 use std::time::Duration;
 

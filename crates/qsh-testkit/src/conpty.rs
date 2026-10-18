@@ -155,6 +155,14 @@ impl ConPtyProbe {
         drop(self.master.take());
     }
 
+    /// End the program the way a crash would: `TerminateProcess`, with no
+    /// chance to restore the console or to say goodbye to a peer. The
+    /// pseudo-console stays open, so [`Self::wait_exit`] still returns the
+    /// status.
+    pub fn kill(&mut self) {
+        self.child.kill().expect("terminate the program");
+    }
+
     /// The next record of `key` that no earlier wait returned, waiting up to
     /// [`WAIT`] for it. Panics with what was seen if it never comes.
     pub fn wait_record(&mut self, key: &str) -> Record {
@@ -205,6 +213,44 @@ impl ConPtyProbe {
                 }
             }
         }
+    }
+
+    /// Wait until the program has printed a whole line that is a JSON
+    /// document (an envelope), up to [`WAIT`], and return the last one seen.
+    /// The pseudo-console wraps a line at its width, so a caller that reads
+    /// one asks for a console wide enough to hold it.
+    pub fn wait_json(&mut self) -> serde_json::Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let text = self.text();
+            if let Some(value) = text
+                .lines()
+                .rev()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+                .find(serde_json::Value::is_object)
+            {
+                return value;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.output.recv_timeout(left) {
+                Ok(chunk) => self.raw.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                    panic!("no JSON line within {WAIT:?}; the console text so far:\n{text:?}")
+                }
+            }
+        }
+    }
+
+    /// The program's status if it has already exited, without waiting. The
+    /// output that has arrived is taken in either way.
+    pub fn try_exit(&mut self) -> Option<u32> {
+        while let Ok(chunk) = self.output.try_recv() {
+            self.raw.extend_from_slice(&chunk);
+        }
+        self.child
+            .try_wait()
+            .expect("poll the program")
+            .map(|status| status.exit_code())
     }
 
     /// Wait for the probe to exit and return its status.

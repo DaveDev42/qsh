@@ -4,71 +4,132 @@
 //! The first SIGINT cancels the copy wherever it is: mid-transfer, or still
 //! dialing. The second ends the process at once. A canceled copy exits 255
 //! with `CANCELED` and leaves no temp file behind.
-
-#![cfg(unix)]
+//!
+//! On Windows the interrupt is a `Ctrl-C` typed into the pseudo-console the
+//! `qsh cp` runs in (see [`Proc`]), the only way to aim `CTRL_C_EVENT` at one
+//! process.
 
 use crate::common::{Sandbox, poll_until};
 use crate::cp_e2e::{Forward, Reverse, assert_no_part_files};
 
 use std::net::UdpSocket;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use serde_json::Value;
 
 /// A sparse file big enough that a loopback transfer takes seconds, so the
 /// signal always lands mid-transfer.
 const BIG: u64 = 1 << 30;
 
-fn spawn(sandbox: &Sandbox, args: &[&str]) -> Child {
-    let mut command: Command = sandbox.command(args);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn qsh cp")
+/// A running `qsh cp` that can be interrupted the way an operator's `Ctrl-C`
+/// does. unix: a child process that gets `SIGINT`. Windows: `Ctrl-C` can be
+/// aimed at one process only through its console, so the child runs in a
+/// pseudo-console and the interrupt is the `0x03` byte typed into it, which
+/// the console turns into `CTRL_C_EVENT`.
+struct Proc {
+    #[cfg(unix)]
+    child: std::process::Child,
+    #[cfg(windows)]
+    console: qsh_testkit::conpty::ConPtyProbe,
 }
 
-fn interrupt(child: &Child) {
-    kill(Pid::from_raw(child.id() as i32), Signal::SIGINT).expect("send SIGINT");
-}
-
-/// Wait for `child` to end within `limit`, killing it (and failing) if not.
-fn finish(mut child: Child, limit: Duration) -> (i32, Value, String) {
-    let until = Instant::now() + limit;
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(_) => break,
-            None if Instant::now() >= until => {
-                let _ = child.kill();
-                let out = child.wait_with_output().expect("reap");
-                panic!(
-                    "qsh cp did not end within {limit:?} of the interrupt; stderr: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            None => std::thread::sleep(Duration::from_millis(10)),
+fn spawn(sandbox: &Sandbox, args: &[&str]) -> Proc {
+    #[cfg(unix)]
+    {
+        use std::process::{Command, Stdio};
+        let mut command: Command = sandbox.command(args);
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qsh cp");
+        Proc { child }
+    }
+    #[cfg(windows)]
+    {
+        // Wide enough that the envelope is one line.
+        Proc {
+            console: crate::windows_attach::spawn_qsh_sized(sandbox, args, 1000, 30),
         }
     }
-    let out = child.wait_with_output().expect("collect output");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let text = String::from_utf8(out.stdout).expect("utf-8 stdout");
-    let line = text
-        .lines()
-        .last()
-        .unwrap_or_else(|| panic!("no envelope on stdout; stderr: {stderr}"));
-    let envelope: Value = serde_json::from_str(line).expect("envelope is JSON");
-    (
-        out.status.code().unwrap_or_else(|| {
-            panic!("qsh cp died of a signal instead of canceling cleanly; stderr: {stderr}")
-        }),
-        envelope,
-        stderr,
-    )
+}
+
+fn interrupt(proc: &mut Proc) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        kill(Pid::from_raw(proc.child.id() as i32), Signal::SIGINT).expect("send SIGINT");
+    }
+    #[cfg(windows)]
+    proc.console.send(&[0x03]);
+}
+
+/// The process's exit code if it has ended.
+fn try_exit(proc: &mut Proc) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        proc.child.try_wait().expect("try_wait").map(|status| {
+            status
+                .code()
+                .unwrap_or_else(|| panic!("qsh cp died of a signal: {status:?}"))
+        })
+    }
+    #[cfg(windows)]
+    {
+        proc.console.try_exit().map(|code| code as i32)
+    }
+}
+
+/// Kill a process that overstayed.
+fn kill_overstayer(proc: &mut Proc) {
+    #[cfg(unix)]
+    {
+        let _ = proc.child.kill();
+    }
+    #[cfg(windows)]
+    proc.console.kill();
+}
+
+/// Wait for `proc` to end within `limit`, killing it (and failing) if not.
+fn finish(mut proc: Proc, limit: Duration) -> (i32, Value, String) {
+    let until = Instant::now() + limit;
+    loop {
+        if try_exit(&mut proc).is_some() {
+            break;
+        }
+        if Instant::now() >= until {
+            kill_overstayer(&mut proc);
+            panic!("qsh cp did not end within {limit:?} of the interrupt");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    #[cfg(unix)]
+    {
+        let out = proc.child.wait_with_output().expect("collect output");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let text = String::from_utf8(out.stdout).expect("utf-8 stdout");
+        let line = text
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("no envelope on stdout; stderr: {stderr}"));
+        let envelope: Value = serde_json::from_str(line).expect("envelope is JSON");
+        (
+            out.status.code().unwrap_or_else(|| {
+                panic!("qsh cp died of a signal instead of canceling cleanly; stderr: {stderr}")
+            }),
+            envelope,
+            stderr,
+        )
+    }
+    #[cfg(windows)]
+    {
+        let envelope = proc.console.wait_json();
+        let code = proc.console.wait_exit() as i32;
+        (code, envelope, proc.console.text())
+    }
 }
 
 /// Whether `dir` holds a `.part` temp file.
@@ -88,13 +149,13 @@ fn sparse_file(path: &Path) {
 /// is under way), interrupt, and check the whole story: exit 255,
 /// `CANCELED`, and every temp file gone from both `dirs`.
 fn cancel_mid_transfer(sandbox: &Sandbox, args: &[&str], watch: &Path, dirs: &[&Path]) {
-    let child = spawn(sandbox, args);
+    let mut child = spawn(sandbox, args);
     poll_until(
         "the transfer to create its temp file",
         Duration::from_secs(30),
         || has_part_file(watch).then_some(()),
     );
-    interrupt(&child);
+    interrupt(&mut child);
     let (code, envelope, stderr) = finish(child, Duration::from_secs(20));
     assert_eq!(code, 255, "{envelope} / {stderr}");
     assert_eq!(envelope["ok"], false, "{envelope}");
@@ -198,7 +259,7 @@ fn cp_canceled_during_the_dial_ends_canceled_promptly() {
     let src = work.path().join("src.txt");
     std::fs::write(&src, b"x").unwrap();
     let dst = format!("{}:/tmp/never", crate::common::HOST_ALIAS);
-    let child = spawn(&client, &["cp", "--json", src.to_str().unwrap(), &dst]);
+    let mut child = spawn(&client, &["cp", "--json", src.to_str().unwrap(), &dst]);
 
     // The first QUIC Initial proves the client is dialing, and that the
     // interrupt handler (armed before the dial) is in place.
@@ -206,7 +267,7 @@ fn cp_canceled_during_the_dial_ends_canceled_promptly() {
     hole.recv_from(&mut buf)
         .expect("the client's first datagram");
     let sent = Instant::now();
-    interrupt(&child);
+    interrupt(&mut child);
     let (code, envelope, stderr) = finish(child, Duration::from_secs(5));
     assert_eq!(code, 255, "{envelope} / {stderr}");
     assert_eq!(envelope["error"]["code"], "CANCELED", "{envelope}");
@@ -233,18 +294,18 @@ fn cp_second_interrupt_exits_255_without_waiting() {
     let mut buf = [0u8; 2048];
     hole.recv_from(&mut buf)
         .expect("the client's first datagram");
-    interrupt(&child);
-    interrupt(&child);
+    interrupt(&mut child);
+    interrupt(&mut child);
     let until = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("try_wait") {
-            break status;
+    let code = loop {
+        if let Some(code) = try_exit(&mut child) {
+            break code;
         }
         if Instant::now() >= until {
-            let _ = child.kill();
+            kill_overstayer(&mut child);
             panic!("two interrupts did not end qsh cp within 5s");
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    assert_eq!(status.code(), Some(255), "{status:?}");
+    assert_eq!(code, 255);
 }

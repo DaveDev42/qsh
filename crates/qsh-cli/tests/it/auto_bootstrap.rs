@@ -332,6 +332,12 @@ mod world {
     /// Ctrl-C while ssh runs (a password prompt, say) ends the call with
     /// `CANCELED`, ends ssh, writes no pin on either side, and never starts
     /// the original command (`docs/CLI.md` §7, decision 16).
+    ///
+    /// Unix only: the interrupt is `SIGINT` sent to a child process. Windows
+    /// has no signal to send to another process, so its meaning is the byte
+    /// `0x03` typed into a ConPTY, which `console::
+    /// ctrl_c_during_the_bootstrap_ends_canceled_on_windows` does with the
+    /// same assertions.
     #[cfg(unix)]
     #[test]
     fn ctrl_c_during_the_bootstrap_ends_canceled_and_does_not_start_the_command() {

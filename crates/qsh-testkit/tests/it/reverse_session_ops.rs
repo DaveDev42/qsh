@@ -29,11 +29,6 @@
 //! daemon owns can do that) — the mechanism the M3 Step 6 invariant text
 //! names — rather than by driving a full attach/steal round trip over
 //! reverse, which has no producer to drive yet.
-//!
-//! `#![cfg(unix)]`: localctl (UDS) is unix-only, same gating as every
-//! other localctl testkit file.
-
-#![cfg(unix)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -25,6 +25,15 @@
 //! genuinely unordered case (a resize and the keystroke after it travel on
 //! different threads — [`Client::expect_size`]).
 
+// `#![cfg(unix)]`: the client under test is driven through `expectrl`, a unix
+// pseudo-terminal crate, and several cases read termios state (`stty`, raw
+// mode) that a Windows console does not have. The interactive client on
+// Windows runs in a ConPTY against a real shell instead, in
+// `windows_attach::pty_attach_round_trip_forward`,
+// `windows_attach::pty_detach_then_attach_resumes_forward`,
+// `windows_attach::pty_resize_propagates_forward` and
+// `windows_attach::console_close_detaches_and_keeps_the_session`, with the
+// console-mode restore pinned by `console_probe.rs`.
 #![cfg(unix)]
 
 use crate::common;

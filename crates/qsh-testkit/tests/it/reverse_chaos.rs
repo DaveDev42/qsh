@@ -28,19 +28,6 @@
 //! [`qsh_testkit::reverse::ReverseHarness::run_target_through_chaos`]'s
 //! `on_runtime` hook — the same runtime (and the same broker inside it)
 //! every reconnect this test forces reuses.
-//!
-//! `#![cfg(unix)]` gates the whole file, unlike `reverse_loopback.rs`'s
-//! per-test gating — that file mixes platform-neutral tests with unix-only
-//! ones, so it gates test-by-test; every helper here (`pin`, `fast_backoff`,
-//! every import) exists only to feed the one unix-only scenario below, with
-//! no platform-neutral content to keep alive, so gating the file is both
-//! simpler and the only way to avoid `unused_imports`/`dead_code` on a
-//! non-unix build (the exact Windows-leg trap `run_reverse` itself invites:
-//! it is gated `cfg(not(unix))` to return `ErrorCode::Unsupported`
-//! immediately, so on Windows a real target here would never dial or
-//! register at all and the scenario's own `wait_for` deadlines would simply
-//! time out — a false failure, not a proof of anything).
-#![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::Duration;

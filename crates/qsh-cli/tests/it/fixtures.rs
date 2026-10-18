@@ -34,9 +34,10 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
 #[cfg(unix)]
-use common::{FakeServiceManager, ListenGuard, ReverseGuard, hosts_array, poll_until};
+use common::FakeServiceManager;
+use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
+use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use qsh_proto::ErrorCode;
 use qsh_testkit::fixtures;
 use serde_json::Value;
@@ -1471,6 +1472,11 @@ fn golden_service_fixtures() {
 /// root, so a developer Mac that has `/Library/LaunchDaemons/io.qsh.serve.plist`
 /// gets `always_on_present` here instead of the golden envelopes. CI runners
 /// carry no such file; remove it (or run on another machine) to reproduce.
+///
+/// Unix only: the fake manager is a shell script that stands in for
+/// `launchctl`/`systemctl`. The Windows Task Scheduler arm of the same
+/// envelopes is pinned in `qsh-core` over a recording runner
+/// (`ops::service::tests::windows_manager`).
 #[cfg(unix)]
 #[test]
 fn golden_service_activation_fixtures() {
@@ -1670,7 +1676,6 @@ fn golden_permission_denied_fixture() {
 /// before `qsh serve` starts): the first `session open` succeeds and is
 /// left running (`ServeGuard` kills the child on drop); the second is
 /// refused before any PTY is spawned for it.
-#[cfg(unix)]
 #[test]
 fn golden_resource_exhausted_fixture() {
     let host = Sandbox::new();
@@ -1686,10 +1691,13 @@ fn golden_resource_exhausted_fixture() {
     let serve = ServeGuard::start(&host);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
-    let (code, opened) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    let shell = qsh_testkit::shell::pty_shell();
+    let mut args = vec!["session", "open", HOST_ALIAS, "--json", "--"];
+    args.extend(shell.iter().map(String::as_str));
+    let (code, opened) = client.json(&args);
     assert_eq!(code, 0, "{opened}");
 
-    let (code, refused) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    let (code, refused) = client.json(&args);
     assert_eq!(code, 255, "{refused}");
     assert_eq!(refused["ok"], false, "{refused}");
     assert_eq!(refused["error"]["code"], "RESOURCE_EXHAUSTED", "{refused}");
@@ -1721,7 +1729,6 @@ fn golden_resource_exhausted_fixture() {
 /// possible or needed; `error.HOST_NOT_FOUND.reverse_stale.json` is the
 /// `host.get` coverage for this branch (issue #4 item 3a, `docs/CLI.md`
 /// §6.1).
-#[cfg(unix)]
 #[test]
 fn golden_reverse_stale_fixtures() {
     const NAME: &str = "stale-only-host";
@@ -1823,7 +1830,6 @@ fn golden_host_not_found_split_fixtures() {
 /// same wording rather than the exec-specific "is not in the trust store"
 /// text kept only for the wholly-unconfigured branch (unchanged,
 /// `error.HOST_NOT_FOUND.json`, `qsh exec nowhere`).
-#[cfg(unix)]
 #[test]
 fn golden_exec_reverse_fixtures() {
     // A client-only pin (`trust add` with no `--address`) and no reverse
@@ -2051,10 +2057,6 @@ fn free_port() -> u16 {
 /// one exited; the filter keeps only the running, writer-less one this
 /// device can attach to. The JSON shape is `session.list.json`'s, with no
 /// field for the filter.
-// Sessions are PTY-backed, so this path only exists on POSIX hosts
-// (Windows host is M20); the fixture is validated everywhere by the
-// whole-directory contract tests below.
-#[cfg(unix)]
 #[test]
 fn golden_session_list_filtered_fixture() {
     let fleet = Fleet::start();
@@ -2070,8 +2072,12 @@ fn golden_session_list_filtered_fixture() {
             .expect("session_ref")
             .to_string()
     };
-    let running = open(&["cat"]);
-    let exited = open(&["sh", "-c", "exit 0"]);
+    let cat = qsh_testkit::shell::cat_argv();
+    let cat: Vec<&str> = cat.iter().map(String::as_str).collect();
+    let quick = qsh_testkit::shell::true_argv();
+    let quick: Vec<&str> = quick.iter().map(String::as_str).collect();
+    let running = open(&cat);
+    let exited = open(&quick);
     poll_until(
         "the short-lived session to exit",
         std::time::Duration::from_secs(60),
@@ -2105,16 +2111,15 @@ fn golden_session_list_filtered_fixture() {
 /// (prompt text differs per shell and platform), so the asserts here pin
 /// invariants — cursor monotonicity and the shape of each envelope — while
 /// the fixtures themselves mask payload and offsets.
-// Sessions are PTY-backed, so this whole path only exists on POSIX hosts
-// (Windows host is M20). The fixtures it writes are checked in and are
-// still validated everywhere by the whole-directory contract tests below.
-#[cfg(unix)]
 #[test]
 fn golden_session_fixtures() {
     let fleet = Fleet::start();
     let client = &fleet.client;
 
-    let (code, opened) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    let shell = qsh_testkit::shell::pty_shell();
+    let mut open_args = vec!["session", "open", HOST_ALIAS, "--json", "--"];
+    open_args.extend(shell.iter().map(String::as_str));
+    let (code, opened) = client.json(&open_args);
     assert_eq!(code, 0, "{opened}");
     let session_ref = opened["data"]["session_ref"]
         .as_str()
@@ -2179,6 +2184,9 @@ fn golden_session_fixtures() {
     // has released its lease, so the snapshots below are stable.
     // Wall-clock bounded rather than iteration-bounded so a loaded box
     // does not fail spuriously.
+    // A Windows console echoes the `hi` and waits: the bare LF is not an
+    // Enter to its line editor, so only two bytes are certain to come back.
+    let echoed = if cfg!(windows) { 2 } else { 3 };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let session = loop {
         let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
@@ -2186,7 +2194,7 @@ fn golden_session_fixtures() {
         let last = session["data"]["last_sequence"]
             .as_u64()
             .expect("last_sequence");
-        if last >= prompt_end + 3 && session["data"]["writer"].is_null() {
+        if last >= prompt_end + echoed && session["data"]["writer"].is_null() {
             break session;
         }
         assert!(
@@ -2223,7 +2231,7 @@ fn golden_session_fixtures() {
         closed["data"]["final_sequence"]
             .as_u64()
             .expect("final_sequence")
-            >= prompt_end + 3,
+            >= prompt_end + echoed,
         "{closed}"
     );
     check("session.close.json", closed);
@@ -2244,15 +2252,15 @@ fn golden_session_fixtures() {
 /// `NotRunning`. The last one needs nothing but a child that returned:
 /// `session.write` checks the session's state before it checks the lease,
 /// so an exited session refuses the write outright (`broker/session.rs`).
-#[cfg(unix)]
 #[test]
 fn golden_session_conflict_fixture() {
     let fleet = Fleet::start();
     let client = &fleet.client;
 
-    let (code, opened) = client.json(&[
-        "session", "open", HOST_ALIAS, "--json", "--", "sh", "-c", "exit 0",
-    ]);
+    let quick = qsh_testkit::shell::true_argv();
+    let mut open_args = vec!["session", "open", HOST_ALIAS, "--json", "--"];
+    open_args.extend(quick.iter().map(String::as_str));
+    let (code, opened) = client.json(&open_args);
     assert_eq!(code, 0, "{opened}");
     let session_ref = opened["data"]["session_ref"]
         .as_str()
@@ -2737,7 +2745,9 @@ fn check_ignoring_file_effective_actions(name: &str, envelope: Value) {
 /// is host-specific. The `acl check --path /` request is covered by no row,
 /// so its `deny` holds before and after the always-deny gate stops covering
 /// `file.read`; the `acl show` golden ignores the file actions in
-/// `effective_actions` for the same reason.
+/// `effective_actions` for the same reason. A Windows host spells the same
+/// rows with drive paths; `acl_check_path.rs` checks those decisions on
+/// Windows.
 #[cfg(unix)]
 #[test]
 fn golden_acl_paths_fixtures() {
@@ -2825,7 +2835,11 @@ fn mask_work_dir(value: &Value, work: &std::path::Path) -> Value {
 
 /// `qsh cp` goldens: a put and a get of one file, the partial-failure
 /// envelope, and the `file.entry` event line of `--jsonl`. The host pins the
-/// client with the `full` role, so no `acl.toml` is involved.
+/// client with the `full` role, so no `acl.toml` is involved. Unix only: the
+/// fixtures hold unix path spelling, mode bits and a symlink in the copied
+/// tree; the same operations on a Windows host are `route_cases::cp_round_trip`
+/// and `cp_refuses_state_paths_and_reparse_points` in `windows_forward_e2e`
+/// and `windows_reverse_e2e`.
 #[cfg(unix)]
 #[test]
 fn golden_cp_fixtures() {

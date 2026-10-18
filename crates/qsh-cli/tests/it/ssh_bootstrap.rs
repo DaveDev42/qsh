@@ -503,6 +503,12 @@ async fn ssh_g_child_is_reaped_when_the_cancel_token_fires() {
 /// A real OpenSSH can outlive the connection's SIGINT and report 255 ("Killed
 /// by signal 2") after closing its stdout. The cancel token is what knows the
 /// user pressed Ctrl-C, so the call is `CANCELED`, not `ssh_failed`.
+///
+/// Unix only: the fake ssh is a `#!/bin/sh` script that closes its stdout and
+/// exits 255. Windows has no such exit code for an interrupted ssh; the
+/// console Ctrl-C there is `STATUS_CONTROL_C_EXIT`, which
+/// `ssh_child_is_reaped_on_cancel` (its Windows twin) maps to `CANCELED`, and
+/// the cancel-token path is `ssh_child_is_reaped_when_the_cancel_token_fires` in this file.
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_child_exit_255_after_a_cancel_is_canceled_not_ssh_failed() {
@@ -547,6 +553,8 @@ async fn ssh_child_exit_255_after_a_cancel_is_canceled_not_ssh_failed() {
 /// A Ctrl-C in the terminal reaches ssh in the same foreground process group.
 /// Here the signal goes to the fake alone, as it would to a real ssh sitting at
 /// a password prompt: the call must end `CANCELED`, with nothing left running.
+/// Unix only because the signal is `SIGINT` sent to one process; the Windows
+/// twin of the same name follows.
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_child_is_reaped_on_cancel() {
@@ -2139,7 +2147,9 @@ pub(crate) mod pair {
     }
 
     /// The bootstrapped pin is an ordinary forward route: exec, a file
-    /// round trip and a session all work through it.
+    /// round trip and a session all work through it. Unix only because the
+    /// commands are `sh -c`; the Windows twin below runs the same three
+    /// operations with `cmd` programs.
     #[cfg(unix)]
     #[test]
     fn bootstrapped_forward_route_passes_the_attach_exec_cp_suite() {
@@ -2225,6 +2235,7 @@ pub(crate) mod pair {
         let route = Bootstrapped(&w);
         crate::route_cases::exec_round_trip(&route);
         crate::route_cases::cp_round_trip(&route);
+        crate::route_cases::pty_session_runs_a_command(&route);
     }
 }
 
@@ -2706,7 +2717,9 @@ pub(crate) mod pair_reverse {
     /// route has: the target registers with `qsh serve --to hub`, and the
     /// existing reverse acceptance suite (a real pty attach, detach and
     /// reattach; `qsh cp` put and get through the controller's relay;
-    /// exec) passes against it unchanged.
+    /// exec) passes against it unchanged. Unix only because the attach leg
+    /// uses `expectrl`; the Windows twin below runs the shared exec, cp and
+    /// PTY session cases, and the console attach is `windows_attach.rs`.
     #[cfg(unix)]
     #[test]
     fn bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite() {
@@ -2806,6 +2819,7 @@ pub(crate) mod pair_reverse {
         let route = Bootstrapped(&w);
         crate::route_cases::exec_round_trip(&route);
         crate::route_cases::cp_round_trip(&route);
+        crate::route_cases::pty_session_runs_a_command(&route);
         reverse.shut_down();
     }
 }

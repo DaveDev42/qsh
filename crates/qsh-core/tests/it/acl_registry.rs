@@ -1152,45 +1152,50 @@ mod dod2_audit {
 
     /// One request per file op, in `DISPATCH_DRIVABLE_OPS` order, each with
     /// the absolute path it carries. Absolute, so the shape check needs no
-    /// passwd home and the result is the same on every unix host.
-    #[cfg(unix)]
-    fn file_op_requests() -> Vec<(&'static str, control_message::Body, &'static str)> {
+    /// passwd home and the result is the same on every host of one OS (a
+    /// Windows host takes drive paths with `/`, ADR-0029 decision 23).
+    fn file_op_requests() -> Vec<(&'static str, control_message::Body, String)> {
+        let share = if cfg!(windows) {
+            "C:/srv/share"
+        } else {
+            "/srv/share"
+        };
         vec![
             (
                 "file.read",
                 control_message::Body::FileReadOpen(wire::FileReadOpen {
-                    path: "/srv/share/a.txt".into(),
+                    path: format!("{share}/a.txt"),
                     user: String::new(),
                 }),
-                "/srv/share/a.txt",
+                format!("{share}/a.txt"),
             ),
             (
                 "file.write",
                 control_message::Body::FileWriteOpen(wire::FileWriteOpen {
-                    path: "/srv/share/b.txt".into(),
+                    path: format!("{share}/b.txt"),
                     size: 3,
                     mode: 0o600,
                     overwrite: true,
                     ..Default::default()
                 }),
-                "/srv/share/b.txt",
+                format!("{share}/b.txt"),
             ),
             (
                 "file.list",
                 control_message::Body::FileListOpen(wire::FileListOpen {
-                    path: "/srv/share/".into(),
+                    path: format!("{share}/"),
                     ..Default::default()
                 }),
-                "/srv/share/",
+                format!("{share}/"),
             ),
             (
                 "file.mkdir",
                 control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
-                    path: "/srv/share/new".into(),
+                    path: format!("{share}/new"),
                     mode: 0o700,
                     ..Default::default()
                 }),
-                "/srv/share/new",
+                format!("{share}/new"),
             ),
         ]
     }
@@ -1198,7 +1203,6 @@ mod dod2_audit {
     /// The file ops' deny leg: under `DenyAll` each op is one deny record on
     /// its registered action and a uniform `PERMISSION_DENIED`, and the audit
     /// `resource` is the request path exactly as sent (ADR-0029 decision 4-7).
-    #[cfg(unix)]
     #[tokio::test]
     async fn file_ops_are_audited_deny_with_the_request_path_as_resource() {
         let rig = rig(Arc::new(DenyAll));
@@ -1226,7 +1230,6 @@ mod dod2_audit {
     /// (`deny`, same action and resource) and the uniform `PERMISSION_DENIED`.
     /// The state-path and recheck stages themselves are driven end to end in
     /// `crates/qsh-testkit/tests/it/file_host.rs`.
-    #[cfg(unix)]
     #[tokio::test]
     async fn file_ops_are_audited_allow_and_then_fail_closed_without_a_state_tree() {
         let rig = rig(Arc::new(AllowAllPinned));

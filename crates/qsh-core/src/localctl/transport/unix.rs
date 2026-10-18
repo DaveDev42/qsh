@@ -56,8 +56,9 @@ pub(crate) fn split(stream: LocalStream) -> (OwnedReadHalf, OwnedWriteHalf) {
     stream.into_split()
 }
 
-/// Open the socket at `endpoint`.
-pub(crate) async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
+/// Open the socket at `endpoint`. Public for `qsh-testkit`, whose wire-level
+/// tests speak to a daemon's endpoint the way a CLI process does.
+pub async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
     UnixStream::connect(endpoint).await
 }
 

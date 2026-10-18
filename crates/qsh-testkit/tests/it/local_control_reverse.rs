@@ -8,13 +8,6 @@
 //! this file only proves the daemon's own multiplex-and-relay state
 //! machine, `crate::reverse::listen::ControlHub` +
 //! `crate::localctl::mux::ControlMux`).
-//!
-//! `#![cfg(unix)]`: localctl (UDS) and `ReverseHarness::attach_localctl`
-//! are both unix-only (`qsh_core::localctl` compiles out on Windows,
-//! `docs/CLI.md` §6.13) — same gating `host_list_reverse.rs` uses for the
-//! same reason.
-
-#![cfg(unix)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -28,9 +21,16 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire::{self, control_message, response};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
+use qsh_testkit::reverse::{LocalStream, connect_localctl};
 use qsh_testkit::reverse::{ReverseHarness, wait_for};
 use qsh_transport::StaticTrust;
-use tokio::net::UnixStream;
+
+/// An absolute path every host accepts at the shape check, so a file op
+/// reaches the ACL choke point and is denied there.
+#[cfg(unix)]
+const SRV: &str = "/srv";
+#[cfg(windows)]
+const SRV: &str = "C:/srv";
 
 /// Bound on every "this must have already happened" wait in this file —
 /// same order of magnitude as `reverse_loopback.rs`'s own `TIMEOUT`.
@@ -52,8 +52,8 @@ fn fresh_paths() -> (tempfile::TempDir, Paths) {
 /// Connect a fresh `LOCAL_CONTROL` conduit for `host` and consume its
 /// `LocalHelloAck` — the raw handshake every real caller (a future `Ops`
 /// link, this file's own tests) performs identically.
-async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -80,7 +80,7 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
 }
 
 async fn send(
-    conduit: &mut LocalConduit<UnixStream>,
+    conduit: &mut LocalConduit<LocalStream>,
     request_id: u64,
     body: control_message::Body,
 ) {
@@ -90,7 +90,7 @@ async fn send(
         .expect("send ControlMessage");
 }
 
-async fn recv(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+async fn recv(conduit: &mut LocalConduit<LocalStream>) -> wire::ControlMessage {
     conduit
         .recv()
         .await
@@ -455,21 +455,21 @@ async fn file_ops_over_a_conduit_reach_the_target_and_are_permission_denied() {
 
         let requests = [
             control_message::Body::FileReadOpen(wire::FileReadOpen {
-                path: "/srv/share/a.txt".into(),
+                path: format!("{SRV}/share/a.txt"),
                 user: String::new(),
             }),
             control_message::Body::FileWriteOpen(wire::FileWriteOpen {
-                path: "/srv/share/b.txt".into(),
+                path: format!("{SRV}/share/b.txt"),
                 size: 1,
                 mode: 0o600,
                 ..Default::default()
             }),
             control_message::Body::FileListOpen(wire::FileListOpen {
-                path: "/srv/share/".into(),
+                path: format!("{SRV}/share/"),
                 ..Default::default()
             }),
             control_message::Body::FileMkdirOpen(wire::FileMkdirOpen {
-                path: "/srv/share/new".into(),
+                path: format!("{SRV}/share/new"),
                 mode: 0o700,
                 ..Default::default()
             }),

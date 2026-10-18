@@ -5,19 +5,43 @@
 //! or a `qsh listen` controller plus a `qsh serve --to` target (reverse),
 //! and `qsh cp` as a subprocess. A hostile host and a lost connection need a
 //! scripted peer, so those live in `qsh-testkit`'s `cp_scripted_host.rs`.
-
-#![cfg(unix)]
+//!
+//! The cases run on every platform. What a platform cannot do has its own
+//! twin: unix permission bits become the read-only attribute on Windows
+//! (ADR-0035 decision 26), a FIFO the walk must refuse becomes a file another
+//! process holds open without sharing, and symbolic links become junctions.
 
 use crate::cp_e2e::{Forward, Reverse, digests, write_random_file};
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use serde_json::Value;
 
+/// The permission part of a snapshot line: the mode bits on unix, the
+/// read-only attribute on Windows (which synthesizes `0o444`/`0o644`).
+fn permission_of(md: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        format!("{:o}", md.mode() & 0o777)
+    }
+    #[cfg(windows)]
+    {
+        if md.permissions().readonly() {
+            "ro"
+        } else {
+            "rw"
+        }
+        .to_string()
+    }
+}
+
 /// What a tree holds, keyed by path relative to its root: `dir`,
-/// `file:<blake3>` or `link:<target>`, each with the permission bits.
+/// `file:<blake3>` or `link:<target>`, each with its permissions.
 fn snapshot(root: &Path) -> BTreeMap<String, String> {
     fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
         let mut names: Vec<_> = std::fs::read_dir(dir)
@@ -27,28 +51,32 @@ fn snapshot(root: &Path) -> BTreeMap<String, String> {
         names.sort();
         for name in names {
             let path = dir.join(&name);
-            let rel = path
+            let mut rel = path
                 .strip_prefix(base)
                 .expect("under base")
                 .to_string_lossy()
                 .into_owned();
+            if cfg!(windows) {
+                // One spelling on every platform, so a key reads the same.
+                rel = rel.replace('\\', "/");
+            }
             let md = std::fs::symlink_metadata(&path).expect("lstat");
-            let mode = md.mode() & 0o777;
+            let mode = permission_of(&md);
             if md.is_dir() {
-                out.insert(rel, format!("dir:{mode:o}"));
+                out.insert(rel, format!("dir:{mode}"));
                 walk(base, &path, out);
             } else if md.file_type().is_symlink() {
                 let target = std::fs::read_link(&path).expect("readlink");
                 out.insert(rel, format!("link:{}", target.display()));
             } else {
-                out.insert(rel, format!("file:{}:{mode:o}", digests(&path).0));
+                out.insert(rel, format!("file:{}:{mode}", digests(&path).0));
             }
         }
     }
     let mut out = BTreeMap::new();
     out.insert(String::new(), {
         let md = std::fs::metadata(root).expect("stat root");
-        format!("dir:{:o}", md.mode() & 0o777)
+        format!("dir:{}", permission_of(&md))
     });
     walk(root, root, &mut out);
     out
@@ -58,8 +86,17 @@ fn count(snap: &BTreeMap<String, String>, prefix: &str) -> u64 {
     snap.values().filter(|v| v.starts_with(prefix)).count() as u64
 }
 
+/// Set the permissions a tree case wants: `chmod` on unix; on Windows only
+/// the owner-write bit means anything, as the read-only attribute.
 fn set_mode(path: &Path, mode: u32) {
+    #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    #[cfg(windows)]
+    {
+        let mut permissions = std::fs::metadata(path).expect("stat").permissions();
+        permissions.set_readonly(mode & 0o200 == 0);
+        std::fs::set_permissions(path, permissions).expect("set the read-only attribute");
+    }
 }
 
 /// A tree with nesting, an empty directory, an empty file, a file larger
@@ -82,6 +119,9 @@ fn build_tree(root: &Path) {
     std::fs::write(root.join("sub/deep/er/three.txt"), b"three").unwrap();
     std::fs::create_dir(root.join("empty-dir")).unwrap();
     set_mode(&root.join("sub/deep"), 0o750);
+    // A read-only file: the one permission Windows carries.
+    std::fs::write(root.join("locked.txt"), b"locked").unwrap();
+    set_mode(&root.join("locked.txt"), 0o444);
 }
 
 /// put a tree to a name that does not exist yet, get it back to a name that
@@ -171,6 +211,10 @@ fn entries_with<'a>(value: &'a Value, status: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+/// unix only: a symbolic link takes no privilege here, and a FIFO or a
+/// dangling link exists. The Windows twin is
+/// `cp_recursive_skips_junctions_inside_trees_on_windows`.
+#[cfg(unix)]
 #[test]
 fn cp_recursive_skips_symlinks_inside_trees_and_follows_an_operand_symlink() {
     let rig = Forward::start();
@@ -237,6 +281,10 @@ fn cp_recursive_skips_symlinks_inside_trees_and_follows_an_operand_symlink() {
     crate::cp_e2e::assert_no_part_files(work);
 }
 
+/// unix only: a FIFO is a special file in the tree. Windows has no file of
+/// that kind; what fails an entry there is a file the walk cannot open, which
+/// `cp_json_truncates_entries_but_not_totals` plants on both platforms.
+#[cfg(unix)]
 #[test]
 fn cp_special_files_fail_their_entry_and_the_walk_continues() {
     let rig = Forward::start();
@@ -275,6 +323,76 @@ fn cp_special_files_fail_their_entry_and_the_walk_continues() {
     assert_eq!(details["failures"][0]["code"], "INVALID_ARGUMENT", "{get}");
     assert_eq!(std::fs::read(got.join("sub/z.txt")).unwrap(), b"z");
     assert!(!got.join("pipe").exists(), "{get}");
+    crate::cp_e2e::assert_no_part_files(work);
+}
+
+/// A directory junction, which needs no privilege (`mklink /J`).
+#[cfg(windows)]
+pub fn junction(link: &Path, target: &Path) {
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link.to_str().unwrap().replace('/', "\\"))
+        .arg(target.to_str().unwrap().replace('/', "\\"))
+        .output()
+        .expect("run cmd");
+    assert!(
+        made.status.success(),
+        "mklink /J: {}",
+        String::from_utf8_lossy(&made.stdout)
+    );
+}
+
+/// The Windows twin of the symbolic-link case: a junction inside a tree is
+/// skipped on both sides and nothing behind it reaches the other end, and a
+/// junction given as the operand itself is followed.
+#[cfg(windows)]
+#[test]
+fn cp_recursive_skips_junctions_inside_trees_on_windows() {
+    let rig = Forward::start();
+    let work = rig.work.path();
+    let tree = work.join("t");
+    std::fs::create_dir_all(tree.join("sub")).unwrap();
+    std::fs::write(tree.join("real.txt"), b"real").unwrap();
+    std::fs::write(tree.join("sub/inner.txt"), b"inner").unwrap();
+    junction(&tree.join("link-dir"), &tree.join("sub"));
+
+    let (code, put) = rig.cp_json(&["-r", tree.to_str().unwrap(), &rig.remote("out")]);
+    assert_eq!(code, 0, "{put}");
+    assert_eq!(put["data"]["files"], 2, "{put}");
+    assert_eq!(put["data"]["skipped"], 1, "{put}");
+    assert!(
+        entries_with(&put, "skipped")
+            .iter()
+            .all(|e| e["reason"] == "symlink"),
+        "{put}"
+    );
+    assert_eq!(
+        snapshot(&work.join("out"))
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["", "real.txt", "sub", "sub/inner.txt"],
+        "no junction may reach the host"
+    );
+
+    let (code, get) = rig.cp_json(&["-r", &rig.remote("t"), work.join("got").to_str().unwrap()]);
+    assert_eq!(code, 0, "{get}");
+    assert_eq!(get["data"]["skipped"], 1, "{get}");
+    assert_eq!(
+        snapshot(&work.join("got"))
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["", "real.txt", "sub", "sub/inner.txt"],
+    );
+
+    // An operand that is itself a junction is followed on the sending side.
+    let operand_link = work.join("operand-link");
+    junction(&operand_link, &tree);
+    let (code, put) = rig.cp_json(&["-r", operand_link.to_str().unwrap(), &rig.remote("out2")]);
+    assert_eq!(code, 0, "{put}");
+    assert_eq!(put["data"]["files"], 2, "{put}");
+    assert!(work.join("out2/sub/inner.txt").is_file());
     crate::cp_e2e::assert_no_part_files(work);
 }
 
@@ -330,8 +448,10 @@ fn cp_dot_source_copies_contents() {
 
 /// Restores owner access under a tree on drop, so the temp dir can go even
 /// when an assertion fails halfway.
+#[cfg(unix)]
 struct Unlock(PathBuf);
 
+#[cfg(unix)]
 impl Unlock {
     fn tree(path: &Path) {
         if let Ok(md) = std::fs::symlink_metadata(path)
@@ -347,12 +467,19 @@ impl Unlock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Unlock {
     fn drop(&mut self) {
         Self::tree(&self.0);
     }
 }
 
+/// unix only: a directory whose mode bars its owner from writing is a unix
+/// notion. A Windows directory attribute does not stop its owner, and the
+/// read-only attribute on a *file* in the copied tree is carried and does not
+/// stop the copy, which `cp_recursive_round_trip_tree_is_identical_forward`
+/// pins through its `locked.txt`.
+#[cfg(unix)]
 #[test]
 fn cp_directories_are_owner_writable_while_filling() {
     let rig = Forward::start();
@@ -397,6 +524,37 @@ fn cp_directories_are_owner_writable_while_filling() {
     crate::cp_e2e::assert_no_part_files(work);
 }
 
+/// `count` entries in `dir` the copy fails on, for as long as the returned
+/// guard lives: FIFOs on unix (special files are refused), files another
+/// handle holds without sharing on Windows (they cannot be opened).
+#[cfg(unix)]
+fn unreadable_entries(dir: &Path, count: usize) -> Vec<std::fs::File> {
+    for i in 0..count {
+        nix::unistd::mkfifo(
+            &dir.join(format!("p{i:02}")),
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .expect("mkfifo");
+    }
+    Vec::new()
+}
+
+/// See the unix definition.
+#[cfg(windows)]
+fn unreadable_entries(dir: &Path, count: usize) -> Vec<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    (0..count)
+        .map(|i| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(dir.join(format!("p{i:02}")))
+                .expect("hold a file exclusively")
+        })
+        .collect()
+}
+
 #[test]
 fn cp_json_truncates_entries_but_not_totals() {
     let rig = Forward::start();
@@ -419,17 +577,12 @@ fn cp_json_truncates_entries_but_not_totals() {
         1100
     );
 
-    // More failures than the error lists: 70 fifos, 64 failures.
+    // More failures than the error lists: 70 entries the walk cannot copy,
+    // 64 failures.
     let bad = work.join("bad");
     std::fs::create_dir(&bad).unwrap();
     std::fs::write(bad.join("ok.txt"), b"ok").unwrap();
-    for i in 0..70 {
-        nix::unistd::mkfifo(
-            &bad.join(format!("p{i:02}")),
-            nix::sys::stat::Mode::from_bits_truncate(0o600),
-        )
-        .expect("mkfifo");
-    }
+    let _held = unreadable_entries(&bad, 70);
     let (code, put) = rig.cp_json(&["-r", bad.to_str().unwrap(), &rig.remote("bad-out")]);
     assert_eq!(code, 255, "{put}");
     let details = &put["error"]["details"];

@@ -436,11 +436,6 @@ fn row_auth_path_mismatch() {
 /// that alias) resolves identically through either client's own trust
 /// store — this is what lets the rival reference a session it never opened
 /// (`docs/CLI.md` §6.2's opaque-handle shape).
-///
-/// Unix-only: the sessions it seeds run a POSIX shell script, which Windows
-/// has no `sh` for (`session_follow.rs`'s own file doc states the same
-/// constraint) — both rows built on this fixture are `#[cfg(unix)]`.
-#[cfg(unix)]
 fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, String) {
     let host = Sandbox::new();
     let owner = Sandbox::new();
@@ -455,9 +450,12 @@ fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, St
     owner.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
     rival.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
-    let (code, opened) = owner.json(&[
-        "session", "open", HOST_ALIAS, "--json", "--", "sh", "-c", "sleep 30",
-    ]);
+    let mut open_args: Vec<String> = ["session", "open", HOST_ALIAS, "--json", "--"]
+        .map(String::from)
+        .to_vec();
+    open_args.extend(qsh_testkit::shell::idle_argv());
+    let open_args: Vec<&str> = open_args.iter().map(String::as_str).collect();
+    let (code, opened) = owner.json(&open_args);
     assert_eq!(code, 0, "{opened}");
     let session_ref = opened["data"]["session_ref"]
         .as_str()
@@ -475,7 +473,6 @@ fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, St
 /// Row: `scope = "owned"` (the default), the requester **is** the
 /// resource's recorded opener — allowed.
 #[test]
-#[cfg(unix)]
 fn row_scope_owned_owner_is_allowed() {
     const OWNER_PRINCIPAL: &str = "device:owner-device";
     let (host, owner, _rival, _serve, session_id, session_ref) = owned_session_fixture();
@@ -543,7 +540,6 @@ fn row_scope_owned_owner_is_allowed() {
 /// `allow = ["session.control"]` rule (`scope` filters *after* the action
 /// pattern matches, `Policy::decide`'s own "④ scope judgment" doc).
 #[test]
-#[cfg(unix)]
 fn row_scope_owned_non_owner_is_denied() {
     const OWNER_PRINCIPAL: &str = "device:owner-device";
     const RIVAL_PRINCIPAL: &str = "device:rival-device";
@@ -858,26 +854,52 @@ fn acl_show_reports_an_empty_set_and_no_policy_for_a_missing_or_invalid_acl_toml
 
 /// A permission-unreadable `acl.toml` folds into the same "no policy" state
 /// (`PolicySource::load_path` maps a read error to `Invalid`) and leaks no
-/// rule content.
+/// rule content. Unix removes every permission bit; Windows holds the file
+/// open without sharing, so the host's read fails the same way.
 #[test]
-#[cfg(unix)]
 fn acl_show_on_an_unreadable_acl_toml_reports_no_policy_and_no_rule_content() {
-    use std::os::unix::fs::PermissionsExt;
-
     let host = Sandbox::new();
     write_acl_toml(
         &host,
         "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"host.reverse\"]\n",
     );
     let acl_path = host.config_dir().join("acl.toml");
-    std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
-    if std::fs::read(&acl_path).is_ok() {
-        // Running as root: permission bits do not apply, nothing to test.
-        return;
-    }
+
+    #[cfg(unix)]
+    let restore = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        if std::fs::read(&acl_path).is_ok() {
+            // Running as root: permission bits do not apply, nothing to test.
+            return;
+        }
+        acl_path.clone()
+    };
+    #[cfg(windows)]
+    let exclusive = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&acl_path)
+            .expect("hold acl.toml exclusively");
+        assert!(
+            std::fs::read(&acl_path).is_err(),
+            "an exclusively held file must not be readable"
+        );
+        held
+    };
+
     let (code, value) = host.json(&["acl", "show", "--principal", CLIENT_PRINCIPAL, "--json"]);
     // Restore before asserting so the sandbox can be cleaned up.
-    let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&restore, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(windows)]
+    drop(exclusive);
     assert_eq!(code, 0, "{value}");
     let data = &value["data"];
     assert_eq!(data["policy"]["loaded"], false, "{value}");
@@ -931,7 +953,6 @@ fn acl_show_never_lists_forward_socks_and_lists_no_file_action_for_a_row_without
 
 /// `acl check --path` against one path, returning the exit code and the
 /// whole envelope (the argument-contract rows are errors, not decisions).
-#[cfg(unix)]
 fn acl_check_path(host: &Sandbox, action: &str, path: Option<&str>) -> (i32, Value) {
     let mut args = vec![
         "acl",
@@ -955,10 +976,9 @@ fn acl_check_path(host: &Sandbox, action: &str, path: Option<&str>) -> (i32, Val
 /// it (a row with `paths`, or the role). Enforcement is the third voice:
 /// `file_host.rs` (`acl_check_path_agrees_with_enforcement_*`) drives the
 /// same rows through a running host, and asserts the same expectations
-/// spelled out here. Rows: inside `paths`, a sibling, a symlink out, a `..`
+/// spelled out here. Rows: inside `paths`, a sibling, a link out (a symlink, on Windows a junction), a `..`
 /// escape, a row without `paths`, role `full` on any path, `--path` missing,
 /// and `--path` on a non-file action.
-#[cfg(unix)]
 #[test]
 fn file_rows_agree_between_acl_check_path_and_acl_show() {
     fn expect_invalid(host: &Sandbox, action: &str, path: Option<&str>) {
@@ -974,16 +994,38 @@ fn file_rows_agree_between_acl_check_path_and_acl_show() {
     std::fs::create_dir_all(&outside).expect("create outside");
     std::fs::write(share.join("a.txt"), b"alpha").expect("write a.txt");
     std::fs::write(outside.join("secret.txt"), b"x").expect("write secret");
+    // The link out of `share`: a symbolic link to the file on unix, a
+    // junction to the directory on Windows (the same kind of escape, and the
+    // only link that needs no privilege).
+    #[cfg(unix)]
     std::os::unix::fs::symlink(outside.join("secret.txt"), share.join("out")).expect("symlink");
-    let share = std::fs::canonicalize(&share).expect("canonical share");
-    let outside = std::fs::canonicalize(&outside).expect("canonical outside");
-    let share_path = |rel: &str| format!("{}/{rel}", share.display());
+    #[cfg(windows)]
+    crate::cp_recursive::junction(&share.join("out"), &outside);
+    let spell = |dir: &std::path::Path| {
+        let text = std::fs::canonicalize(dir)
+            .expect("canonical path")
+            .to_string_lossy()
+            .into_owned();
+        if cfg!(windows) {
+            text.trim_start_matches(r"\\?\").replace('\\', "/")
+        } else {
+            text
+        }
+    };
+    let share_text = spell(&share);
+    let outside_text = spell(&outside);
+    let share_path = |rel: &str| format!("{share_text}/{rel}");
+    let through_link = if cfg!(windows) {
+        "out/secret.txt"
+    } else {
+        "out"
+    };
     let rows: Vec<(String, bool)> = vec![
         (share_path("a.txt"), true),
         (share_path("sub/../a.txt"), true),
         (share_path("new.txt"), true),
-        (outside.join("secret.txt").display().to_string(), false),
-        (share_path("out"), false),
+        (format!("{outside_text}/secret.txt"), false),
+        (share_path(through_link), false),
         (share_path("../outside/secret.txt"), false),
     ];
     let acl = |paths: Option<&str>| {
@@ -994,7 +1036,7 @@ fn file_rows_agree_between_acl_check_path_and_acl_show() {
     };
 
     // A row with `paths`.
-    write_acl_toml(&paths_row, &acl(Some(&share.display().to_string())));
+    write_acl_toml(&paths_row, &acl(Some(&share_text)));
     let shown = effective(&acl_show(&paths_row, CLIENT_PRINCIPAL, None));
     for action in ["file.read", "file.write"] {
         assert!(shown.iter().any(|a| a == action), "{action} in {shown:?}");

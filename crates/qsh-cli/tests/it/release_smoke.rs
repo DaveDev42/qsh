@@ -28,12 +28,15 @@
 //!   naming the path. The silent-fallback failure mode this file exists to
 //!   prevent has a twin: a typo'd path that fails deep inside a spawn.
 //!
-//! The pty half is `#[cfg(unix)]`: `expectrl` is a `cfg(unix)`
-//! dev-dependency, so the interactive attach has no Windows twin here. The
-//! `#[cfg(not(unix))]` twin runs init, trust and `exec --json`, then
-//! `doctor --json`, a `tunnel open --local` TCP round trip and, on Windows,
-//! an owner-only check of the files the run created. The Windows client's
-//! interactive attach is `windows_attach.rs`, against an in-process echo host.
+//! The interactive half drives a pty with `expectrl` on unix, a
+//! `cfg(unix)` dev-dependency. The Windows twin,
+//! `release_smoke_covers_init_trust_exec_doctor_tunnel_and_a_pty_session_on_windows`,
+//! has the same axes: init, trust and `exec --json`, then `doctor --json`, a
+//! `tunnel open --local` TCP round trip, the PTY session ops (open, write,
+//! read, close) against the host's ConPTY, the interactive shell, `~d`
+//! detach and `qsh attach` re-attach in a ConPTY of its own
+//! (`windows_attach::spawn_bin_sized`, which runs the certified binary), and
+//! an owner-only check of the files the run created.
 //!
 //! `Client` here is a trimmed copy of `tui_expect.rs`'s, not a move into
 //! `tests/it/common/mod.rs`: that module is compiled into every test binary
@@ -303,10 +306,10 @@ fn release_smoke_covers_init_trust_exec_pty_detach_and_reattach() {
 
 /// The client's own routes: the shared route cases drive a `Fleet` through
 /// whichever binary the smoke certifies.
-#[cfg(not(unix))]
+#[cfg(windows)]
 struct SmokeRoute<'a>(&'a Fleet);
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl crate::route_cases::Route for SmokeRoute<'_> {
     fn client(&self) -> &common::Sandbox {
         &self.0.client
@@ -326,7 +329,7 @@ impl crate::route_cases::Route for SmokeRoute<'_> {
 /// directory (ADR-0035 decision 6). `icacls` prints the path and the first
 /// entry on one line and each further entry on its own line.
 #[cfg(windows)]
-fn assert_account_only(path: &std::path::Path) {
+pub(crate) fn assert_account_only(path: &std::path::Path) {
     let out = std::process::Command::new("icacls")
         .arg(path)
         .output()
@@ -342,13 +345,14 @@ fn assert_account_only(path: &std::path::Path) {
     assert!(entries[0].contains("(F)"), "{}: {text}", path.display());
 }
 
-/// The Windows scenario: init, trust, `exec --json`, plus what has a Windows
-/// client and no pty host to need yet: `doctor --json`, a `tunnel open
-/// --local` TCP round trip, and the ownership of the files created. The
-/// interactive attach is `windows_attach.rs`.
-#[cfg(not(unix))]
+/// The Windows scenario, the same axes as the unix one: init, trust,
+/// `exec --json`, `doctor --json`, a `tunnel open --local` TCP round trip, the
+/// PTY session ops against the host's ConPTY, an interactive shell with a
+/// `~d` detach and a `qsh attach` re-attach, and the ownership of the files
+/// created.
+#[cfg(windows)]
 #[test]
-fn release_smoke_covers_init_trust_exec_doctor_and_a_tunnel_on_a_platform_without_a_pty_host() {
+fn release_smoke_covers_init_trust_exec_doctor_tunnel_and_a_pty_session_on_windows() {
     let bin = smoke_bin();
     let fleet = Fleet::start_with_bin(&bin, &[]);
     assert_machine_axes(&fleet);
@@ -360,17 +364,63 @@ fn release_smoke_covers_init_trust_exec_doctor_and_a_tunnel_on_a_platform_withou
     assert!(report["data"]["overall"].is_string(), "{report}");
     assert!(report["data"]["findings"].is_array(), "{report}");
 
-    crate::route_cases::local_tunnel_echo(&SmokeRoute(&fleet));
+    let route = SmokeRoute(&fleet);
+    crate::route_cases::local_tunnel_echo(&route);
 
-    #[cfg(windows)]
-    {
-        let config = fleet.client.config_dir();
-        for file in [
-            config.join("trust.toml"),
-            config.join("identity").join("device.key"),
-            config.join("identity").join("identity.toml"),
-        ] {
-            assert_account_only(&file);
-        }
+    // The PTY session ops: open a session that runs a command and read its
+    // output and exit code back, open the default shell and write to it, and
+    // close a shell that is still running.
+    crate::route_cases::pty_session_runs_a_command(&route);
+    crate::route_cases::pty_session_default_shell_takes_input(&route);
+    crate::route_cases::pty_session_close_ends_a_running_session(&route);
+
+    interactive_attach_detach_and_reattach(&bin, &fleet);
+
+    let config = fleet.client.config_dir();
+    for file in [
+        config.join("trust.toml"),
+        config.join("identity").join("device.key"),
+        config.join("identity").join("identity.toml"),
+    ] {
+        assert_account_only(&file);
     }
+}
+
+/// A real interactive shell in a ConPTY: a typed command round-trips, `~d`
+/// detaches and leaves the session `running`, and a second console picks it
+/// up. The marker changes on purpose, as in the unix axis.
+#[cfg(windows)]
+fn interactive_attach_detach_and_reattach(bin: &std::path::Path, fleet: &Fleet) {
+    use crate::windows_attach::{said, say, spawn_bin_sized};
+
+    // The binary under certification runs inside the console. A fallback to
+    // the nextest-built one needs the path that resolves natively.
+    let run = if std::env::var_os("QSH_SMOKE_BIN").is_some() {
+        bin.to_path_buf()
+    } else {
+        crate::console_probe::qsh_bin()
+    };
+    let mut first = spawn_bin_sized(&run, &fleet.client, &[HOST_ALIAS], 120, 30);
+    first.send(say("QSH-SMOKE-").as_bytes());
+    first.wait_text(&said("QSH-SMOKE-"));
+    crate::windows_attach::detach(&mut first);
+
+    let (code, listed) = fleet.client.json(&["sessions", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    let sessions = listed["data"]["sessions"].as_array().expect("sessions");
+    let running: Vec<&Value> = sessions
+        .iter()
+        .filter(|session| session["state"] == "running")
+        .collect();
+    assert_eq!(running.len(), 1, "a detach must keep the shell: {listed}");
+    let session_ref = running[0]["session_ref"]
+        .as_str()
+        .expect("session_ref")
+        .to_string();
+
+    let mut second = spawn_bin_sized(&run, &fleet.client, &["attach", &session_ref], 120, 30);
+    second.send(say("QSH-SMOKE-REATTACH-").as_bytes());
+    second.wait_text(&said("QSH-SMOKE-REATTACH-"));
+    second.send(b"exit 0\r");
+    assert_eq!(second.wait_exit(), 0);
 }

@@ -66,11 +66,6 @@
 //! reverse attaches are told apart for steal/demotion purposes exactly
 //! like two forward ones, and a dead registration still frees whichever
 //! one currently holds the lease.
-//!
-//! `#![cfg(unix)]`: localctl (UDS) is unix-only, same gating as every
-//! other localctl testkit file.
-
-#![cfg(unix)]
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -98,8 +93,8 @@ use qsh_proto::{
 };
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::reverse::{DataStream, LocalStream, connect_localctl, into_data_conduit};
 use qsh_transport::{Dialed, Listener, StaticTrust};
-use tokio::net::UnixStream;
 
 /// Bound on every "this must already have happened" harness wait — same
 /// order of magnitude as every other reverse testkit file's own `TIMEOUT`.
@@ -744,8 +739,8 @@ async fn detaching_leaves_the_session_running_and_a_reattach_replays_the_retaine
 // module for these to live in.
 // ===========================================================================
 
-async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -771,8 +766,8 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
     conduit
 }
 
-async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-    let stream = UnixStream::connect(socket_path)
+async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+    let stream = connect_localctl(socket_path)
         .await
         .expect("connect localctl socket");
     let mut conduit = LocalConduit::new(stream);
@@ -799,7 +794,7 @@ async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStre
 }
 
 async fn send_control(
-    conduit: &mut LocalConduit<UnixStream>,
+    conduit: &mut LocalConduit<LocalStream>,
     request_id: u64,
     body: control_message::Body,
 ) {
@@ -811,7 +806,7 @@ async fn send_control(
 
 /// Read the next `ControlMessage`, skipping any spontaneous `SessionEvent`
 /// interleaved with a reply.
-async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+async fn recv_control_response(conduit: &mut LocalConduit<LocalStream>) -> wire::ControlMessage {
     loop {
         let msg: wire::ControlMessage = conduit
             .recv()
@@ -828,7 +823,7 @@ async fn recv_control_response(conduit: &mut LocalConduit<UnixStream>) -> wire::
 /// Read the next `ControlMessage` and require it to be exactly one
 /// `SessionEvent::WriterChanged` broadcast — used where the broadcast
 /// itself, not a reply, is the thing under test.
-async fn assert_writer_changed(conduit: &mut LocalConduit<UnixStream>) {
+async fn assert_writer_changed(conduit: &mut LocalConduit<LocalStream>) {
     let msg: wire::ControlMessage = tokio::time::timeout(TIMEOUT, conduit.recv())
         .await
         .expect("a writer_changed broadcast arrives within the deadline")
@@ -858,7 +853,7 @@ fn open_sh() -> wire::SessionOpen {
 }
 
 async fn open_session_raw(
-    ctl: &mut LocalConduit<UnixStream>,
+    ctl: &mut LocalConduit<LocalStream>,
     request_id: u64,
 ) -> wire::SessionOpened {
     send_control(
@@ -880,7 +875,7 @@ async fn open_session_raw(
 
 /// Read `SessionFrame`s off `data` until the next `InputAck`, returning its
 /// offset.
-async fn next_ack(data: &mut LocalConduit<UnixStream>) -> u64 {
+async fn next_ack(data: &mut LocalConduit<DataStream>) -> u64 {
     tokio::time::timeout(TIMEOUT, async {
         loop {
             let frame: wire::SessionFrame = data
@@ -938,6 +933,7 @@ async fn resend_of_an_already_acked_input_seq_through_the_local_stream_splice_is
     data.send(&wire::StreamHeader::session_data(opened.ticket.clone()))
         .await
         .expect("send StreamHeader");
+    let mut data = into_data_conduit(data);
 
     data.send(&wire::SessionFrame::input(5, b"hello".to_vec()))
         .await

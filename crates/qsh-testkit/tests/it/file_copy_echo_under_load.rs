@@ -27,8 +27,6 @@
 //! `QSH_ACCEPTANCE_SLOW` turns it on, a plain run prints SKIP. `ci.yml`'s
 //! acceptance job sets `QSH_ACCEPTANCE_STRICT`.
 
-#![cfg(unix)]
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

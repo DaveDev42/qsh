@@ -172,7 +172,6 @@ fn reverse_events_for(fp: &str) -> Vec<serde_json::Value> {
 /// started (`target.rs`'s `ReconnectEvent` doc comment), so there is no
 /// `fingerprint` yet to filter on and the key is omitted entirely, not
 /// carried as a placeholder (issue #4 item 6).
-#[cfg(unix)]
 fn reverse_events_by_host_and_kind(host: &str, event: &str) -> Vec<serde_json::Value> {
     reverse_lines()
         .lock()
@@ -874,19 +873,6 @@ async fn controller_refuses_the_four_file_ops() {
 // above drives the wire by hand through `ReverseHarness::initiate`/
 // `register`; nothing before this point ever calls `run_target` at all
 // (adversarial review finding).
-//
-// `#[cfg(unix)]` on each test below, not on the file: `run_reverse` itself
-// is gated `cfg(not(unix))` to return `ErrorCode::Unsupported` immediately
-// on every non-unix target (`reverse/target.rs`'s Windows gate,
-// `docs/CLI.md` §6.13) — so on Windows these three would still compile but
-// observe the wrong error code/success shape (`Unsupported` instead of the
-// specific outcome each test proves). That is exactly the class of failure
-// M3 plan Step 3 (2473c88)'s Windows CI audit calls out, and per-test gating
-// (not a whole-file `#![cfg(unix)]`) is the file's own established
-// pattern — the rest of this file (registration/deny/conflict/role-
-// discipline tests) drives the wire by hand and is genuinely platform
-// neutral, exactly like `qsh-testkit/tests/it/exec_loopback.rs` gates only
-// its PTY-signal-specific tests rather than the whole file.
 // ---------------------------------------------------------------------------
 
 /// A registration `admit` denies (`DenyAll`) never makes the reconnect
@@ -916,7 +902,6 @@ async fn controller_refuses_the_four_file_ops() {
 /// same-named sibling's own `retry` records would otherwise satisfy the
 /// `>= 2` count below even if this test's own target never retried at all
 /// (adversarial review finding).
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn run_target_retries_forever_on_a_denied_registration_until_shutdown() {
     capture_reverse_events();
@@ -979,7 +964,6 @@ async fn run_target_retries_forever_on_a_denied_registration_until_shutdown() {
 /// — proven here by the registration actually showing up in the
 /// controller's registry — then exits `Ok(())` the moment `shutdown`
 /// resolves, without waiting for the connection to die.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn run_target_registers_then_exits_cleanly_on_shutdown() {
     let target = make_identity();
@@ -1015,7 +999,6 @@ async fn run_target_registers_then_exits_cleanly_on_shutdown() {
 /// replaced *again* in turn — this time by nothing this test does — so a
 /// second, test-uncaused `generation` bump is the proof that `run_target`
 /// really did reconnect and re-register on its own.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn run_target_reconnects_and_re_registers_when_the_controller_replaces_it() {
     let target = make_identity();

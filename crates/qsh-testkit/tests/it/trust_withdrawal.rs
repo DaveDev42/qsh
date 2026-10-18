@@ -959,32 +959,79 @@ async fn unparseable_trust_toml_keeps_connections_but_suspends_role_requests() {
     host.stop().await;
 }
 
-/// Unix permissions can make `trust.toml` unreadable without changing a
-/// byte of it. The suspension that causes ends without a generation change,
-/// so the watch must ask again on the poll cadence instead of waiting for a
-/// notification that never comes. Skipped where a mode does not stop the
-/// reader (root).
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn unreadable_trust_toml_defers_the_comparison_until_it_can_be_read() {
-    use std::os::unix::fs::PermissionsExt;
+/// `trust.toml` made unreadable without changing a byte of it. On unix the
+/// mode does it (`chmod 000`); on Windows an open handle that shares nothing
+/// does (a reader's open fails with a sharing violation). Either way the
+/// suspension ends without a generation change.
+struct Unreadable {
+    path: std::path::PathBuf,
+    #[cfg(windows)]
+    held: Option<std::fs::File>,
+}
 
-    fn set_mode(path: &std::path::Path, mode: u32) {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .expect("chmod trust.toml");
+impl Unreadable {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            #[cfg(windows)]
+            held: None,
+        }
     }
 
+    /// Make the file unreadable.
+    fn on(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod trust.toml");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            self.held = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&self.path)
+                    .expect("hold trust.toml exclusively"),
+            );
+        }
+    }
+
+    /// Make it readable again.
+    fn off(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod trust.toml");
+        }
+        #[cfg(windows)]
+        {
+            self.held = None;
+        }
+    }
+}
+
+/// Unreadable `trust.toml` (see [`Unreadable`]) must not change a grant:
+/// the watch has to ask again on the poll cadence instead of waiting for a
+/// notification that never comes. Skipped where a mode does not stop the
+/// reader (root on unix).
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_trust_toml_defers_the_comparison_until_it_can_be_read() {
     let client = make_identity();
     let good = pin("laptop", &client.fingerprint, Some("full"));
     let env = Env::new(&good);
     let path = env.trust_path();
-    set_mode(&path, 0o000);
+    let mut unreadable = Unreadable::new(path.clone());
+    unreadable.on();
     if std::fs::File::open(&path).is_ok() {
         eprintln!("skipped: file modes do not stop this reader");
-        set_mode(&path, 0o600);
+        unreadable.off();
         return;
     }
-    set_mode(&path, 0o600);
+    unreadable.off();
 
     let host = Host::start(&env).await;
     let mut session = host.session(&client).await;
@@ -992,13 +1039,13 @@ async fn unreadable_trust_toml_defers_the_comparison_until_it_can_be_read() {
     assert!(can_list(&mut session).await);
 
     // Unreadable, identical bytes: roles suspend, nothing closes.
-    set_mode(&path, 0o000);
+    unreadable.on();
     wait_can_list(&mut session, false).await;
     assert_stays_open(&conn).await;
 
     // Readable again with the same bytes: the grants return and the
     // connection was never touched.
-    set_mode(&path, 0o600);
+    unreadable.off();
     wait_can_list(&mut session, true).await;
     assert_stays_open(&conn).await;
     assert!(host.audit.withdrawals().is_empty());
@@ -1007,11 +1054,11 @@ async fn unreadable_trust_toml_defers_the_comparison_until_it_can_be_read() {
     // watch starts without a baseline. The repair is silent (no new
     // generation); the watch adopts the set it then sees, and a later
     // reduction is measured against it.
-    set_mode(&path, 0o000);
+    unreadable.on();
     wait_can_list(&mut session, false).await;
     let second = host.session(&client).await;
     let second_conn = second.connection().clone();
-    set_mode(&path, 0o600);
+    unreadable.off();
     wait_can_list(&mut session, true).await;
     // Two poll ticks: the deferred comparison has adopted `full`.
     assert_stays_open(&second_conn).await;
