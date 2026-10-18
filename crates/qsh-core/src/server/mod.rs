@@ -60,9 +60,7 @@ use crate::tunnel::splice::splice_tcp_quic;
 mod dispatch;
 mod exec;
 mod file;
-#[cfg(unix)]
 mod file_data;
-#[cfg(unix)]
 mod file_host;
 mod reverse;
 mod sessions;
@@ -591,16 +589,13 @@ pub struct Server {
     /// [`Server::set_file_host`]. Unset reads as "cannot tell what is
     /// protected", and an allowed file request is then refused (fail
     /// closed).
-    #[cfg(unix)]
     file_host: OnceLock<FileHostConfig>,
     /// The free-space probe `file.write` consults (ADR-0029 decision 13),
     /// set at most once by [`Server::set_free_space`]. Unset (production)
-    /// reads as the real `fstatvfs` probe.
-    #[cfg(unix)]
+    /// reads as the real probe (`fstatvfs`, `GetDiskFreeSpaceExW`).
     free_space: OnceLock<Arc<dyn crate::file::host::FreeSpace>>,
     /// A seam on the blocking disk writer of a `file.write`, set at most once
     /// by [`Server::set_file_write_gate`]. Production sets none.
-    #[cfg(unix)]
     file_write_gate: OnceLock<Arc<dyn crate::file::host::WriteGate>>,
     /// L2-L3 of the L0-L5 admission ordering (M8 plan Step 2 (52639fc),
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
@@ -633,7 +628,6 @@ pub struct Server {
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
 /// the directories and the audit file whose protected set they resolve per
 /// request.
-#[cfg(unix)]
 struct FileHostConfig {
     paths: crate::config::Paths,
     audit: crate::config::AuditConfig,
@@ -785,11 +779,8 @@ impl Server {
             pinned_principals: OnceLock::new(),
             notice_sink: OnceLock::new(),
             path_normalizer: OnceLock::new(),
-            #[cfg(unix)]
             file_host: OnceLock::new(),
-            #[cfg(unix)]
             free_space: OnceLock::new(),
-            #[cfg(unix)]
             file_write_gate: OnceLock::new(),
             admission,
             quotas,

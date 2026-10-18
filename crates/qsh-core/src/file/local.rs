@@ -153,8 +153,9 @@ pub(crate) enum IoClass {
 ///
 /// Pure, so the rule is tested on every platform. A host's entry name goes
 /// through this on the Windows client before a local path is made from it
-/// (decision 22); the unix client does not apply it.
-#[cfg(any(windows, test))]
+/// (decision 22); the unix client does not apply it. The Windows host applies
+/// it to every component of a remote path and to `name_if_dir`
+/// (`file::guard`), because the name it checked must be the name Win32 opens.
 pub(crate) fn windows_name_is_safe(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;

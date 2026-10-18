@@ -27,7 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 /// Which file a handle or a path names, comparable with `==`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum FileIdentity {
     /// `FileIdInfo`: the volume serial number and the 128-bit file ID.
     Id128 { volume: u64, id: [u8; 16] },

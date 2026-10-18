@@ -1762,16 +1762,25 @@ fn file_constants_match_adr_0029() {
     const { assert!(FILE_CHUNK_MAX + 64 <= DATA_FRAME_MAX) };
 }
 
-/// `file.v1` is advertised exactly where the host serves the file ops: unix
-/// builds (the data plane is unix-only until M20, ADR-0029 decision 23).
+/// `file.v1` is advertised by every build: the host data plane exists on unix
+/// and on Windows (ADR-0029 decision 23, ADR-0035 decision 26), and the set
+/// is the same on both, so a Windows build's `Hello` carries it too.
 #[test]
-fn file_capability_is_advertised_by_unix_builds_only() {
+fn windows_build_advertises_file_v1() {
     assert_eq!(CAP_FILE_V1, "file.v1");
-    assert_eq!(LOCAL_CAPABILITIES.contains(&CAP_FILE_V1), cfg!(unix));
+    assert!(LOCAL_CAPABILITIES.contains(&CAP_FILE_V1));
     // Appended after the four that predate it, so the golden list only grows.
-    if cfg!(unix) {
-        assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_FILE_V1));
-    }
+    assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_FILE_V1));
+    assert_eq!(
+        LOCAL_CAPABILITIES,
+        [
+            CAP_EXEC,
+            CAP_SESSION,
+            CAP_RESUME_V1,
+            CAP_DIAL_FILTER_V1,
+            CAP_FILE_V1
+        ]
+    );
 }
 
 #[test]

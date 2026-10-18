@@ -374,10 +374,6 @@ impl Server {
         }
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
-            // `FILE_DATA` is a unix host's stream: the file ops mint its
-            // tickets only there (a Windows host answers them `UNSUPPORTED`
-            // before any ticket exists, ADR-0029 decision 23).
-            #[cfg(unix)]
             Some(kind @ StreamKind::FileData) => kind,
             _ => {
                 tracing::debug!(principal = %ctx.principal, kind = header.kind, "unsupported stream kind");
@@ -426,15 +422,8 @@ impl Server {
             // The ticket was minted by a file op that already passed the ACL
             // choke point, the state-path check and the quota; this stream
             // only moves bytes (`file_data.rs`).
-            #[cfg(unix)]
             TicketPurpose::File(pending) => {
                 self.run_file_data(&conn, stream, pending).await;
-            }
-            // A ticket is never minted off unix.
-            #[cfg(not(unix))]
-            TicketPurpose::File(_) => {
-                stream.send.reset(RESET_CODE_BAD_HEADER);
-                stream.recv.stop(RESET_CODE_BAD_HEADER);
             }
             TicketPurpose::Session {
                 session_id,

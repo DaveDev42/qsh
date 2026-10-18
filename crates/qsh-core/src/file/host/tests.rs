@@ -1,6 +1,8 @@
 use super::*;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 fn open_dir(path: &Path) -> File {
     crate::file::guard::open_dir_nofollow(path).expect("open dir")

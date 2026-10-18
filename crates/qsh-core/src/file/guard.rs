@@ -17,17 +17,25 @@
 //!   and runtime directories (both the paths this process really uses and the
 //!   `$HOME` defaults), the audit file outside them, the file-mode key. It is
 //!   resolved per request and compares case-insensitively where the volume
-//!   does (macOS; Windows is M20).
+//!   does (macOS and Windows).
 //! - **Open-handle recheck** ([`recheck_handle`], decision 6-4): the path an
-//!   opened fd really points at, from `/proc/self/fd/<n>` (Linux) or
-//!   `fcntl(F_GETPATH)` (macOS). Re-calling the evaluator is injected as a
-//!   closure; the dispatch wires it later.
+//!   opened fd really points at, from `/proc/self/fd/<n>` (Linux),
+//!   `fcntl(F_GETPATH)` (macOS) or `GetFinalPathNameByHandleW` (Windows).
+//!   Re-calling the evaluator is injected as a closure; the dispatch wires
+//!   it later.
 //! - **Inode set and file kind** ([`ProtectedInodes`], [`check_read_target`],
 //!   decisions 6-5 and 6-6): a hard link outside the protected tree is still
-//!   the same `(dev, ino)`, and `file.read` reads regular files only.
+//!   the same `(dev, ino)` (on Windows the same volume serial number and file
+//!   index), and `file.read` reads regular files only.
 //!
-//! Off unix the whole module is a stub that refuses every path; the Windows
-//! implementation is M20 (ADR-0029 decision 23, ADR-0035 decision 26).
+//! Windows reads the same decisions in its own terms
+//! (ADR-0029 decision 23, ADR-0035 decision 26). The string rules (the shape
+//! of a drive path, the refusal of UNC, device and alternate-stream spellings,
+//! the lexical fold before the longest existing prefix is resolved) are pure
+//! functions in `guard/windows_path.rs` that every build compiles and tests;
+//! the operating-system calls (the profile directory, resolving a prefix, the
+//! reparse-point refusal on open, the final path of a handle) are in
+//! `guard/windows.rs`.
 //!
 //! **Deliberate gaps.** A dangling symlink is not followed during
 //! normalization: every later open uses `O_NOFOLLOW` or the parent directory
@@ -49,6 +57,11 @@ use crate::identity::KEY_FILE;
 
 #[cfg(test)]
 mod tests;
+#[cfg(windows)]
+mod windows;
+pub(crate) mod windows_path;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 /// Longest path, in bytes, the shape check and normalization accept
 /// (ADR-0029 decision 6-1).
@@ -122,9 +135,23 @@ pub enum ShapeError {
     /// A `name_if_dir` that is not one plain component.
     #[error("name must be one plain path component of at most 255 bytes")]
     BadName,
-    /// This platform has no path judgement yet (Windows is M20).
-    #[error("remote file paths are not supported on this platform")]
-    Unsupported,
+    /// Windows: a UNC (`\\server\share`) or device (`\\?\`, `\\.\`) path.
+    /// The host would reach a network share or a device on the peer's
+    /// behalf.
+    #[error("UNC and device paths are not supported")]
+    UncOrDevice,
+    /// Windows: a path with no drive (`\x`, `/x`) or a drive-relative one
+    /// (`C:x`, `C:`).
+    #[error("a path must start with a drive letter and a separator, `~`, or be relative")]
+    NoDrive,
+    /// Windows: a `:` outside the drive designator, the NTFS alternate
+    /// data stream spelling.
+    #[error("a path must not name an alternate data stream")]
+    AlternateStream,
+    /// Windows: a component Windows cannot store as written (a reserved
+    /// device name, a trailing dot or space, a reserved character).
+    #[error("a path component is not a valid Windows file name")]
+    BadComponent,
 }
 
 /// A request path after the shape check: absolute, lexical (not
@@ -147,10 +174,11 @@ pub struct ShapedPath {
 /// `~name` is refused. A `..` component is not a shape violation here
 /// (normalization decides whether it escapes), except as the last component
 /// of a creating op.
+///
+/// On Windows both `/` and `\` separate components, the accepted absolute
+/// form is `C:\...`, and UNC, device, drive-relative and alternate-stream
+/// spellings are refused here (`windows_path`).
 pub fn shape_path(raw: &[u8], op: FileOp, home: Option<&Path>) -> Result<ShapedPath, ShapeError> {
-    if !cfg!(unix) {
-        return Err(ShapeError::Unsupported);
-    }
     if raw.is_empty() {
         return Err(ShapeError::Empty);
     }
@@ -161,7 +189,15 @@ pub fn shape_path(raw: &[u8], op: FileOp, home: Option<&Path>) -> Result<ShapedP
         return Err(ShapeError::Nul);
     }
     let text = std::str::from_utf8(raw).map_err(|_| ShapeError::NotUtf8)?;
+    if cfg!(windows) {
+        return windows_path::shape(text, op, home.and_then(Path::to_str));
+    }
+    shape_posix(text, op, home)
+}
 
+/// [`shape_path`] for a path with `/` separators, once the checks every
+/// platform shares have passed.
+fn shape_posix(text: &str, op: FileOp, home: Option<&Path>) -> Result<ShapedPath, ShapeError> {
     if op.creates() {
         let last = text.split('/').rfind(|segment| !segment.is_empty());
         if matches!(last, Some("." | "..")) {
@@ -200,8 +236,8 @@ fn join_relative(home: &Path, rest: &str) -> PathBuf {
 
 /// The `name_if_dir` check of ADR-0029 decision 6-1: one plain component.
 pub fn shape_name_if_dir(name: &[u8]) -> Result<(), ShapeError> {
-    if !cfg!(unix) {
-        return Err(ShapeError::Unsupported);
+    if cfg!(windows) {
+        return windows_path::shape_name_if_dir(name);
     }
     let valid = !name.is_empty()
         && name.len() <= NAME_MAX_BYTES
@@ -220,7 +256,9 @@ pub fn shape_name_if_dir(name: &[u8]) -> Result<(), ShapeError> {
 /// The serve account's home directory, from its passwd entry. `$HOME` is
 /// never consulted (ADR-0029 decision 2): the environment is the caller's,
 /// the passwd entry is the host's. Cached for the process lifetime. `None`
-/// when there is no usable passwd entry (and always off unix).
+/// when there is no usable passwd entry. On Windows the profile directory of
+/// the process token plays that part (`%USERPROFILE%` is the environment's,
+/// not consulted).
 pub fn serve_home_dir() -> Option<PathBuf> {
     static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
     HOME.get_or_init(passwd_home).clone()
@@ -259,9 +297,9 @@ fn passwd_home() -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn passwd_home() -> Option<PathBuf> {
-    None
+    windows::profile_dir()
 }
 
 /// Why a path could not be normalized. Every variant is a refusal: a path
@@ -278,9 +316,6 @@ pub enum NormalizeError {
     /// exist" (permission, symlink loop, a file used as a directory).
     #[error("path cannot be resolved ({0:?})")]
     Io(io::ErrorKind),
-    /// No normalization on this platform yet (Windows is M20).
-    #[error("path normalization is not supported on this platform")]
-    Unsupported,
 }
 
 /// Turns a shaped absolute path into the canonical path the ACL `paths`
@@ -298,10 +333,14 @@ pub struct FsNormalizer;
 
 impl Normalizer for FsNormalizer {
     fn normalize(&self, absolute: &Path) -> Result<PathBuf, NormalizeError> {
-        if !cfg!(unix) {
-            return Err(NormalizeError::Unsupported);
+        #[cfg(windows)]
+        {
+            windows::normalize(absolute)
         }
-        normalize_with(absolute, &|p| fs::canonicalize(p))
+        #[cfg(not(windows))]
+        {
+            normalize_with(absolute, &|p| fs::canonicalize(p))
+        }
     }
 }
 
@@ -431,7 +470,7 @@ fn is_under(path: &Path, root: &Path, fold: bool) -> bool {
 /// [`is_under`] for the ACL evaluator's `paths` match (ADR-0029 결정 4-4): a
 /// canonical request path against a canonical `paths` entry, component by
 /// component. `fold` is true only where the entry and the request may
-/// differ in case yet name the same file (Windows, M20); on macOS the two
+/// differ in case yet name the same file (Windows); on macOS the two
 /// sides are both the on-disk spelling, so `paths` matching stays
 /// case-sensitive there while the protected-set comparison folds
 /// (ADR-0029 결정 23).
@@ -449,8 +488,6 @@ fn same_path(a: &Path, b: &Path, fold: bool) -> bool {
 struct AuditFiles {
     dir: PathBuf,
     name: OsString,
-    // Only the inode scan reads it, and that scan is unix-only.
-    #[cfg_attr(not(unix), expect(dead_code))]
     retain: u32,
 }
 
@@ -480,7 +517,6 @@ impl AuditFiles {
         })
     }
 
-    #[cfg(unix)]
     fn rotated_names(&self) -> Vec<OsString> {
         let mut names = vec![self.name.clone()];
         let mut lock = self.name.clone();
@@ -635,9 +671,6 @@ impl ProtectedSet {
     /// nonexistent path below a protected directory counts, so the error
     /// shape cannot reveal which files exist there.
     pub fn denies(&self, canonical: &Path) -> bool {
-        if !cfg!(unix) {
-            return true;
-        }
         let fold = self.fold_case;
         self.dirs.iter().any(|d| is_under(canonical, d, fold))
             || self.files.iter().any(|f| same_path(canonical, f, fold))
@@ -804,20 +837,25 @@ pub enum InodeScanError {
     /// An entry could not be inspected.
     #[error("the protected tree cannot be scanned ({0:?})")]
     Io(io::ErrorKind),
-    /// No inode identity on this platform yet (Windows is M20).
-    #[error("inode identity is not supported on this platform")]
-    Unsupported,
 }
 
-/// The `(dev, ino)` of every existing protected file (ADR-0029 decision
+/// The identity of a file on this platform: `(st_dev, st_ino)` on unix, the
+/// volume serial number and file index on Windows.
+#[cfg(unix)]
+type InodeKey = (u64, u64);
+#[cfg(windows)]
+type InodeKey = crate::fsutil::file_identity::FileIdentity;
+
+/// The identity of every existing protected file (ADR-0029 decision
 /// 6-5). A hard link made outside the protected tree to `acl.toml` or
-/// `device.key` has the same pair, so comparing the opened file closes that
-/// bypass.
+/// `device.key` has the same identity, so comparing the opened file closes
+/// that bypass.
 ///
 /// Coverage is every non-directory entry below the protected directories
 /// (not just the files decision 5 names), the key, the audit file with its
-/// rotations and lock. Symlink entries are skipped: a link is not an inode
-/// to alias. Collected per request, like the set.
+/// rotations and lock. Symlink entries (and on Windows junctions) are
+/// skipped: a link is not an inode to alias. Collected per request, like the
+/// set.
 ///
 /// This is broader than decision 6-5 asks for, on purpose: an unlisted file
 /// in a protected directory (a keystore file, a future state file) cannot be
@@ -827,7 +865,7 @@ pub enum InodeScanError {
 /// the caller refuses the read, uniformly (see [`InodeScanError`]).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProtectedInodes {
-    ids: HashSet<(u64, u64)>,
+    ids: HashSet<InodeKey>,
 }
 
 impl ProtectedInodes {
@@ -837,8 +875,26 @@ impl ProtectedInodes {
     }
 
     /// Whether `(dev, ino)` belongs to a protected file.
+    #[cfg(unix)]
     pub fn contains(&self, dev: u64, ino: u64) -> bool {
         self.ids.contains(&(dev, ino))
+    }
+
+    /// Whether the open `file` (whose `fstat` is `md`) is a protected file.
+    fn contains_opened(&self, file: &File, md: &fs::Metadata) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let _ = file;
+            Ok(self.ids.contains(&(md.dev(), md.ino())))
+        }
+        #[cfg(windows)]
+        {
+            let _ = md;
+            Ok(self
+                .ids
+                .contains(&crate::fsutil::file_identity::of_file(file)?))
+        }
     }
 
     /// How many protected inodes were found.
@@ -850,17 +906,13 @@ impl ProtectedInodes {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
-}
 
-#[cfg(unix)]
-impl ProtectedInodes {
     /// [`ProtectedInodes::collect`] with explicit limits.
     pub fn collect_with_limits(
         protected: &ProtectedSet,
         max_entries: usize,
         max_depth: usize,
     ) -> Result<Self, InodeScanError> {
-        use std::os::unix::fs::MetadataExt;
         let mut ids = HashSet::new();
         let mut visited = 0usize;
         let scan_err = |e: io::Error| InodeScanError::Io(e.kind());
@@ -897,7 +949,13 @@ impl ProtectedInodes {
                     }
                     stack.push((entry.path(), depth + 1));
                 } else if !md.file_type().is_symlink() {
-                    ids.insert((md.dev(), md.ino()));
+                    match entry_key(&entry.path(), &md) {
+                        Ok(key) => {
+                            ids.insert(key);
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(scan_err(e)),
+                    }
                 }
             }
         }
@@ -919,11 +977,11 @@ impl ProtectedInodes {
             }
         }
         for path in named {
-            match fs::metadata(&path) {
-                Ok(md) if !md.is_dir() => {
-                    ids.insert((md.dev(), md.ino()));
+            match path_key(&path) {
+                Ok(Some(key)) => {
+                    ids.insert(key);
                 }
-                Ok(_) => {}
+                Ok(None) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(scan_err(e)),
             }
@@ -932,17 +990,34 @@ impl ProtectedInodes {
     }
 }
 
-#[cfg(not(unix))]
-impl ProtectedInodes {
-    /// [`ProtectedInodes::collect`] with explicit limits. Off unix this
-    /// always refuses.
-    pub fn collect_with_limits(
-        _protected: &ProtectedSet,
-        _max_entries: usize,
-        _max_depth: usize,
-    ) -> Result<Self, InodeScanError> {
-        Err(InodeScanError::Unsupported)
+/// The identity of a directory entry the scan found (not a directory, not a
+/// link). `md` is the entry's own metadata.
+#[cfg(unix)]
+fn entry_key(_path: &Path, md: &fs::Metadata) -> io::Result<InodeKey> {
+    use std::os::unix::fs::MetadataExt;
+    Ok((md.dev(), md.ino()))
+}
+
+#[cfg(windows)]
+fn entry_key(path: &Path, _md: &fs::Metadata) -> io::Result<InodeKey> {
+    crate::fsutil::file_identity::of_path(path)
+}
+
+/// The identity of a named protected file, `None` when the name is a
+/// directory.
+#[cfg(unix)]
+fn path_key(path: &Path) -> io::Result<Option<InodeKey>> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::metadata(path)?;
+    Ok((!md.is_dir()).then(|| (md.dev(), md.ino())))
+}
+
+#[cfg(windows)]
+fn path_key(path: &Path) -> io::Result<Option<InodeKey>> {
+    if fs::metadata(path)?.is_dir() {
+        return Ok(None);
     }
+    crate::fsutil::file_identity::of_path(path).map(Some)
 }
 
 /// Why [`check_read_target`] refused.
@@ -959,25 +1034,23 @@ pub enum ReadTargetDenied {
     /// `fstat` failed.
     #[error("the opened file cannot be inspected ({0:?})")]
     Stat(io::ErrorKind),
-    /// No inode identity on this platform yet (Windows is M20).
-    #[error("inode identity is not supported on this platform")]
-    Unsupported,
 }
 
 /// The `file.read` checks on an opened fd (ADR-0029 decisions 6-5 and 6-6):
 /// not a protected `(dev, ino)`, and a regular file. The inode check comes
 /// first, so a protected object never answers with a kind error. Returns the
 /// `fstat` result.
-#[cfg(unix)]
 pub fn check_read_target(
     file: &File,
     inodes: &ProtectedInodes,
 ) -> Result<fs::Metadata, ReadTargetDenied> {
-    use std::os::unix::fs::MetadataExt;
     let md = file
         .metadata()
         .map_err(|e| ReadTargetDenied::Stat(e.kind()))?;
-    if inodes.contains(md.dev(), md.ino()) {
+    if inodes
+        .contains_opened(file, &md)
+        .map_err(|e| ReadTargetDenied::Stat(e.kind()))?
+    {
         return Err(ReadTargetDenied::ProtectedInode);
     }
     match file_kind(&md) {
@@ -986,19 +1059,15 @@ pub fn check_read_target(
     }
 }
 
-/// Off unix: always refuses.
-#[cfg(not(unix))]
-pub fn check_read_target(
-    _file: &File,
-    _inodes: &ProtectedInodes,
-) -> Result<fs::Metadata, ReadTargetDenied> {
-    Err(ReadTargetDenied::Unsupported)
-}
-
 /// Open `path` for reading the way `file.read` does (ADR-0029 decision
 /// 6-4): `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`. `O_NOFOLLOW`
 /// guards the last component only; an intermediate component swapped for a
 /// symlink after normalization is what [`recheck_handle`] catches.
+///
+/// On Windows the file is opened as the reparse point itself and a symlink
+/// or junction is refused; the handle's final path must be `path`, so a
+/// swapped intermediate directory is refused here and not only by the
+/// recheck.
 #[cfg(unix)]
 pub fn open_read_nofollow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1009,7 +1078,8 @@ pub fn open_read_nofollow(path: &Path) -> io::Result<File> {
 }
 
 /// Open a directory the way `file.list`, `file.write` and `file.mkdir` do
-/// (ADR-0029 decision 6-4): `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`.
+/// (ADR-0029 decision 6-4): `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`. On
+/// Windows see [`open_read_nofollow`].
 #[cfg(unix)]
 pub fn open_dir_nofollow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1019,20 +1089,40 @@ pub fn open_dir_nofollow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Off unix: always fails.
-#[cfg(not(unix))]
-pub fn open_read_nofollow(_path: &Path) -> io::Result<File> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+/// See the unix variant.
+#[cfg(windows)]
+pub fn open_read_nofollow(path: &Path) -> io::Result<File> {
+    windows::open_nofollow(path, windows::Want::File)
 }
 
-/// Off unix: always fails.
-#[cfg(not(unix))]
-pub fn open_dir_nofollow(_path: &Path) -> io::Result<File> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+/// See the unix variant.
+#[cfg(windows)]
+pub fn open_dir_nofollow(path: &Path) -> io::Result<File> {
+    windows::open_nofollow(path, windows::Want::Directory)
+}
+
+/// Whether a failed [`open_dir_nofollow`] means "this is not a directory (or
+/// is a link)", where `file.list` reports the object itself instead of
+/// failing: `ENOTDIR` or `ELOOP`, `ERROR_DIRECTORY` or the refused-reparse
+/// error on Windows.
+pub fn is_not_a_directory_error(err: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(err.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+    }
+    #[cfg(windows)]
+    {
+        use super::local::{IoClass, classify};
+        matches!(
+            classify(err),
+            IoClass::NotDirectory | IoClass::SymlinkRefused
+        )
+    }
 }
 
 /// The path an open fd really points at (ADR-0029 decision 6-4): Linux
-/// reads `/proc/self/fd/<n>`, macOS asks `fcntl(F_GETPATH)`. A file
+/// reads `/proc/self/fd/<n>`, macOS asks `fcntl(F_GETPATH)`, Windows asks
+/// `GetFinalPathNameByHandleW` and takes the `\\?\` prefix off. A file
 /// unlinked after the open reports its last path (the kernel's
 /// ` (deleted)` suffix is removed), so a replaced protected file is still
 /// recognized. Anywhere the path cannot be had this fails, and
@@ -1073,9 +1163,15 @@ pub fn handle_path(file: &File) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(bytes)))
 }
 
+/// See the Linux variant.
+#[cfg(windows)]
+pub fn handle_path(file: &File) -> io::Result<PathBuf> {
+    windows::handle_path(file)
+}
+
 /// No fd-to-path primitive on this platform: always fails, so the recheck
 /// refuses.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn handle_path(_file: &File) -> io::Result<PathBuf> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
@@ -1088,11 +1184,11 @@ pub fn handle_resolution_available() -> bool {
     {
         Path::new("/proc/self/fd").is_dir()
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         true
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         false
     }

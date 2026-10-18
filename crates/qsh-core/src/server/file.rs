@@ -18,8 +18,10 @@
 //!    audit line on a refusal;
 //! 7. respond.
 //!
-//! Stages 2 to 7 live in `file_host.rs` (unix only; Windows answers
-//! `UNSUPPORTED` at stage 1, ADR-0029 decision 23). Every refusal that is a
+//! Stages 2 to 7 live in `file_host.rs`; they are the same on every
+//! platform, and a Windows host differs only in how a path is read and
+//! opened (`crate::file::guard`, ADR-0029 decision 23, ADR-0035 decision
+//! 26). Every refusal that is a
 //! policy outcome (no ground, outside `paths`, normalization failure, state
 //! path, recheck mismatch, protected inode, an `EACCES` from the OS) is the
 //! same `PERMISSION_DENIED` reply, byte for byte.
@@ -30,7 +32,6 @@
 //! releases what it holds.
 
 use super::*;
-#[cfg(unix)]
 use crate::acl::Op;
 use crate::file::guard::{
     FileOp, FsNormalizer, Normalizer, ShapeError, serve_home_dir, shape_name_if_dir, shape_path,
@@ -49,7 +50,6 @@ pub(super) enum FileRequest<'a> {
 
 impl FileRequest<'_> {
     /// The registry row, which names the action.
-    #[cfg(unix)]
     pub(super) fn op(&self) -> Op {
         match self {
             Self::Read(_) => Op::FileRead,
@@ -91,7 +91,6 @@ impl FileRequest<'_> {
     }
 
     /// The `user@` assertion (empty when absent).
-    #[cfg(unix)]
     pub(super) fn user(&self) -> &str {
         match self {
             Self::Read(r) => &r.user,
@@ -126,49 +125,41 @@ impl Server {
     /// (`crate::serve::host_runtime`) calls this once; without it every
     /// file request that passes the ACL is refused (fail closed: a host that
     /// cannot say what is protected protects everything). No-op past the
-    /// first call and off unix.
+    /// first call.
     pub fn set_file_host(&self, paths: crate::config::Paths, audit: crate::config::AuditConfig) {
+        // The umask is read once, here, while the host is still starting
+        // (ADR-0029 decision 7). Windows has none.
         #[cfg(unix)]
-        {
-            // The umask is read once, here, while the host is still
-            // starting (ADR-0029 decision 7).
-            crate::file::host::init_umask();
-            let _ = self.file_host.set(FileHostConfig { paths, audit });
-        }
-        #[cfg(not(unix))]
-        let _ = (paths, audit);
+        crate::file::host::init_umask();
+        let _ = self.file_host.set(FileHostConfig { paths, audit });
     }
 
     /// Inject the free-space probe `file.write` uses (ADR-0029 decision 13).
-    /// Production never calls this and gets the real `fstatvfs` probe; a test
-    /// injects one that reports a chosen number. No-op past the first call.
-    /// Unix only: the file host has no other platform yet.
-    #[cfg(unix)]
+    /// Production never calls this and gets the real probe (`fstatvfs`,
+    /// `GetDiskFreeSpaceExW`); a test injects one that reports a chosen
+    /// number. No-op past the first call.
     pub fn set_free_space(&self, probe: Arc<dyn crate::file::host::FreeSpace>) {
         let _ = self.free_space.set(probe);
     }
 
-    /// The free-space probe in force: the injected one, else the real
-    /// `fstatvfs`.
-    #[cfg(unix)]
+    /// The free-space probe in force: the injected one, else the real one.
     pub(super) fn free_space(&self) -> Arc<dyn crate::file::host::FreeSpace> {
         self.free_space.get().cloned().unwrap_or_else(|| {
-            Arc::new(crate::file::host::StatvfsFreeSpace) as Arc<dyn crate::file::host::FreeSpace>
+            Arc::new(crate::file::host::SystemFreeSpace::default())
+                as Arc<dyn crate::file::host::FreeSpace>
         })
     }
 
     /// Inject a gate the blocking disk writer of a `file.write` passes before
     /// each chunk (see [`crate::file::host::WriteGate`]). Production never
-    /// calls this. No-op past the first call. Unix only.
-    #[cfg(unix)]
+    /// calls this. No-op past the first call.
     pub fn set_file_write_gate(&self, gate: Arc<dyn crate::file::host::WriteGate>) {
         let _ = self.file_write_gate.set(gate);
     }
 
-    /// One of the four file ops. Stage 1 failures are `INVALID_ARGUMENT` (or
-    /// `UNSUPPORTED` where the platform has no path judgement) before any
-    /// ACL decision, audit line or filesystem access; the rest of the
-    /// pipeline is `file_host.rs`.
+    /// One of the four file ops. Stage 1 failures are `INVALID_ARGUMENT`
+    /// before any ACL decision, audit line or filesystem access; the rest of
+    /// the pipeline is `file_host.rs`.
     pub(super) async fn handle_file_op(
         &self,
         ctx: &ConnCtx,
@@ -191,26 +182,15 @@ impl Server {
             return shape_error(request_id, e);
         }
 
-        #[cfg(unix)]
-        {
-            self.file_op_after_shape(ctx, request_id, &req, shaped)
-                .await
-        }
-        #[cfg(not(unix))]
-        {
-            // `shape_path` already answered `UNSUPPORTED`; this is the same
-            // answer for a compiler that cannot see that.
-            let _ = (ctx, shaped);
-            shape_error(request_id, ShapeError::Unsupported)
-        }
+        self.file_op_after_shape(ctx, request_id, &req, shaped)
+            .await
     }
 }
 
 pub(super) fn shape_error(request_id: u64, err: ShapeError) -> ControlMessage {
-    let code = match err {
-        ShapeError::Unsupported => ErrorCode::Unsupported,
-        _ => ErrorCode::InvalidArgument,
-    };
     // `ShapeError`'s text names the rule, never the path.
-    ControlMessage::error(request_id, wire::Error::new(code, err.to_string(), false))
+    ControlMessage::error(
+        request_id,
+        wire::Error::new(ErrorCode::InvalidArgument, err.to_string(), false),
+    )
 }

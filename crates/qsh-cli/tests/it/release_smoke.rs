@@ -315,6 +315,10 @@ impl crate::route_cases::Route for SmokeRoute<'_> {
     fn host(&self) -> &str {
         HOST_ALIAS
     }
+
+    fn host_sandbox(&self) -> &common::Sandbox {
+        &self.0.host
+    }
 }
 
 /// On Windows the files the run created are the account's alone: one

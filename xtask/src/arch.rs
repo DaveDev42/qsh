@@ -282,21 +282,33 @@ const SETUP_TOKEN_SET: [&str; 8] = [
 ];
 
 /// `file/guard.rs` is the shared path judgement of every remote file op
-/// (ADR-0029 decisions 5, 6, 23). It stays a pure, blocking module: it does
+/// (ADR-0029 decisions 5, 6, 23). Its two Windows siblings (the pure string
+/// rules in `guard/windows_path.rs`, the system calls in `guard/windows.rs`,
+/// ADR-0035 decision 26) are the same module and carry the same ban. It stays a pure, blocking module: it does
 /// not name the transport, the async runtime, or the session and
 /// authorization layers (the evaluator re-call of the open-handle recheck is
 /// an injected closure, and the dispatch that owns the choke point calls the
 /// guard, never the other way round). File-scoped, not directory-scoped: the
 /// op and copy modules that land beside it legitimately drive transport
 /// streams. `file/guard/tests.rs` is deliberately out of scope.
-const FILE_GUARD_FILE: &str = "crates/qsh-core/src/file/guard.rs";
+const FILE_GUARD_FILES: [&str; 3] = [
+    "crates/qsh-core/src/file/guard.rs",
+    "crates/qsh-core/src/file/guard/windows_path.rs",
+    "crates/qsh-core/src/file/guard/windows.rs",
+];
 const FILE_GUARD_REASON: &str = "file/guard.rs is a pure path judgement: no transport, async runtime, or session/ACL layer; \
      the evaluator re-call is an injected closure (ADR-0029 decision 6-4)";
 /// `file/host.rs` holds the host-side filesystem steps (`*at` calls over
 /// directory fds, the directory listing). Same discipline as the guard: it
 /// acts on fds it is handed, and `Server::handle_file_op` owns the decision
-/// order, the audit and the transport. `file/host/tests.rs` is out of scope.
-const FILE_HOST_FILE: &str = "crates/qsh-core/src/file/host.rs";
+/// order, the audit and the transport. The platform files beside it
+/// (`host/posix.rs`, `host/windows.rs`) are the same module and carry the
+/// same ban; the `host/*tests.rs` files are out of scope.
+const FILE_HOST_FILES: [&str; 3] = [
+    "crates/qsh-core/src/file/host.rs",
+    "crates/qsh-core/src/file/host/posix.rs",
+    "crates/qsh-core/src/file/host/windows.rs",
+];
 const FILE_HOST_REASON: &str = "file/host.rs is blocking filesystem code over open fds: no transport, async runtime, or session/ACL layer; \
      the dispatch owns the decision order (ADR-0029 decision 8)";
 const FILE_GUARD_TOKEN_SET: [&str; 7] = [
@@ -404,16 +416,20 @@ fn module_bans() -> Vec<ModuleBan> {
     }
 
     for forbidden in FILE_GUARD_TOKEN_SET {
-        bans.push(ModuleBan {
-            scope: Scope::File(FILE_GUARD_FILE),
-            forbidden,
-            reason: FILE_GUARD_REASON,
-        });
-        bans.push(ModuleBan {
-            scope: Scope::File(FILE_HOST_FILE),
-            forbidden,
-            reason: FILE_HOST_REASON,
-        });
+        for file in FILE_GUARD_FILES {
+            bans.push(ModuleBan {
+                scope: Scope::File(file),
+                forbidden,
+                reason: FILE_GUARD_REASON,
+            });
+        }
+        for file in FILE_HOST_FILES {
+            bans.push(ModuleBan {
+                scope: Scope::File(file),
+                forbidden,
+                reason: FILE_HOST_REASON,
+            });
+        }
     }
 
     for dir in [CORE_SRC_DIR, CLI_SRC_DIR] {

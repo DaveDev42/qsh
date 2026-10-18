@@ -45,7 +45,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
-- `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **unix 빌드만 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_FILE_V1`). Windows host는 M20 전까지 네 op에 `UNSUPPORTED`로 답하므로 광고하지 않는다(ADR-0029 결정 23). client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 unix 빌드의 집합을 기록하고, Windows 빌드의 대조 테스트는 이 항목 하나를 더해 비교한다.
+- `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
 
 ## 5. Frame layer
 

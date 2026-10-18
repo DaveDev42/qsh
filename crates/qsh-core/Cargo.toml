@@ -87,7 +87,12 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # the user's environment block a session child starts from (decision 21),
 # `Win32_Security_Authentication_Identity` the `DOMAIN\user` account name the
 # `user@` hint is compared with, and `Win32_System_SystemInformation` the
-# Windows directory the default shell falls back to.
+# Windows directory the default shell falls back to. `Win32_UI_Shell` is
+# `GetUserProfileDirectoryW`, the profile directory of the serve account's
+# token that a remote file path's `~` and relative forms start from
+# (`src/file/guard/windows.rs`, ADR-0035 decision 26); the file host's
+# other calls (final path, file identity, reparse points, free space,
+# hard links in tests) are in features already listed.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -104,6 +109,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
 ] }
 windows-native-keyring-store = { version = "1.1", default-features = false }
 # The Task Scheduler COM reader (`ops/service/task_com.rs`, ADR-0035

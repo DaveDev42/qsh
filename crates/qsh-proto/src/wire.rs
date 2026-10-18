@@ -60,12 +60,11 @@ pub const CAP_RESUME_V1: &str = "resume.v1";
 pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
 
 /// Capability string for the remote file ops (`file.read`, `file.write`,
-/// `file.list`, `file.mkdir`) and the `FILE_DATA` stream (ADR-0029). It is
-/// advertised by unix builds only ([`LOCAL_CAPABILITIES`]): the host data
-/// plane exists there, while a Windows host answers the four ops
-/// `UNSUPPORTED` until M20 (ADR-0029 decision 23), and a capability string is
-/// a promise about behaviour. A sender never emits a file op to a peer that
-/// has not advertised it.
+/// `file.list`, `file.mkdir`) and the `FILE_DATA` stream (ADR-0029). Every
+/// build advertises it ([`LOCAL_CAPABILITIES`]): the host data plane exists
+/// on unix and on Windows (ADR-0029 decision 23, ADR-0035 decision 26), and a
+/// capability string is a promise about behaviour. A sender never emits a
+/// file op to a peer that has not advertised it.
 pub const CAP_FILE_V1: &str = "file.v1";
 
 /// Capabilities this build advertises in [`Hello`]. Advertised and
@@ -77,9 +76,9 @@ pub const CAP_FILE_V1: &str = "file.v1";
 /// `Gap`), and deduplicates retransmitted input. [`CAP_DIAL_FILTER_V1`]
 /// joined with the host-local dial filter (ADR-0019 decision 3): the
 /// advertisement and the filter land in the same commit. [`CAP_FILE_V1`]
-/// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9), on
-/// unix builds only: the same commit that serves the stream advertises it.
-#[cfg(unix)]
+/// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9): the
+/// same commit that serves the stream advertises it. The set is the same on
+/// every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
     CAP_SESSION,
@@ -87,11 +86,6 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_DIAL_FILTER_V1,
     CAP_FILE_V1,
 ];
-
-/// See the unix definition: a non-unix build serves no file op, so it does
-/// not advertise [`CAP_FILE_V1`].
-#[cfg(not(unix))]
-pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1, CAP_DIAL_FILTER_V1];
 
 /// quinn send priority of the control stream — the top of the
 /// `docs/design/protocol.md` §12 band, so a saturated bulk stream can never

@@ -1159,14 +1159,17 @@ Some of these are MVP scope decisions, some are unfinished work.
   console left in cooked mode until ssh exits. The remote responder
   (`qsh pair ssh-respond`) arrives with the Windows host in M20, so a
   Windows machine cannot be the remote end of a bootstrap before then; the
-  bootstrap against one ends with an error and pins nothing. Until M20 a
-  Windows host does not advertise `file.v1`, so `qsh cp` to it ends with
-  `UNSUPPORTED` before anything is sent, and it answers PTY sessions with
-  `UNSUPPORTED` too. Reverse mode runs on Windows: `qsh listen` keeps
+  bootstrap against one ends with an error and pins nothing. A Windows host
+  advertises `file.v1`, so `qsh cp` works against it over both routes. Its
+  remote paths are drive paths (`C:\x` or `C:/x`) or relative to the
+  serving account's profile directory, and UNC and device paths are refused
+  before any access check. It serves PTY sessions on a ConPTY pseudo-console,
+  each session's processes in one Job Object, and `qsh exec` runs in a Job
+  Object too, so a timeout or a close ends the whole tree. Reverse mode runs on Windows: `qsh listen` keeps
   its local control endpoint on a named pipe, and `qsh exec`, tunnels,
   `qsh hosts`, `qsh tunnels` and `qsh tunnel close` work over a reverse
   connection as they do on unix. A Windows `qsh serve --to` target serves
-  `exec` and tunnels; its PTY sessions and file operations wait for M20.
+  PTY sessions, `exec`, tunnels and file operations.
   On a reverse connection a local program that closes only its write side
   and waits for the answer is seen by the destination, as on unix
   (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` and the interactive `-D`
@@ -1175,8 +1178,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   may ask whether to allow it. Allow it on private networks for peers on
   other machines to connect; connections from the same machine do not need
   it. `qsh serve --to` only dials out and does not trigger the prompt. CI builds, lints and
-  runs the portable test subset on `windows-latest`, but POSIX-only behavior
-  such as signal exits and process-group kill is never exercised there.
+  runs the Windows test suite on `windows-latest`, including the ConPTY
+  session, signal and Job Object tests.
 - Reverse mode needs a directly reachable path from the target to the
   controller:
 
