@@ -1,5 +1,5 @@
 //! Tests for `scripts/release/secret-gate.sh`, the all-or-none gate the
-//! macOS and Windows legs of `release.yml` share. The script is run with fake
+//! macOS leg of `release.yml` uses. The script is run with fake
 //! flags and a scratch `GITHUB_OUTPUT`; it never sees a secret value.
 
 use std::fs;
@@ -35,20 +35,12 @@ const APPLE: Platform = Platform {
     secrets: 6,
 };
 
-const WINDOWS: Platform = Platform {
-    output: "has-windows",
-    label: "Windows",
-    doing: "signing",
-    skipping: "Authenticode signing",
-    unsigned: "No Windows signing secrets are configured; this tag ships unsigned Windows binaries that SmartScreen flags on a downloaded copy.",
-    secrets: 4,
-};
-
 /// The scratch platforms above must be the arguments `release.yml` really
 /// passes, or the three outcomes are pinned against text nobody ships.
 #[test]
 fn secret_gate_platforms_match_the_arguments_release_yml_passes() {
-    for platform in [&APPLE, &WINDOWS] {
+    {
+        let platform = &APPLE;
         let call = format!(
             "bash scripts/release/secret-gate.sh {} {} \\\n            \"{}\" \\\n            \"{}\" \\\n            \"{}\" \\\n",
             platform.output, platform.label, platform.doing, platform.skipping, platform.unsigned
@@ -119,7 +111,8 @@ fn annotations(run: &Run) -> Vec<&str> {
 
 #[test]
 fn secret_gate_signs_when_all_secrets_are_present() {
-    for platform in [&APPLE, &WINDOWS] {
+    {
+        let platform = &APPLE;
         for is_tag in [true, false] {
             let run = gate(platform, platform.secrets, is_tag);
             assert!(
@@ -154,7 +147,8 @@ fn secret_gate_signs_when_all_secrets_are_present() {
 
 #[test]
 fn secret_gate_skips_with_a_warning_when_none_are_present() {
-    for platform in [&APPLE, &WINDOWS] {
+    {
+        let platform = &APPLE;
         // A tag push stays green but says loudly that the release is unsigned.
         let tag = gate(platform, 0, true);
         assert!(
@@ -192,7 +186,8 @@ fn secret_gate_skips_with_a_warning_when_none_are_present() {
 
 #[test]
 fn secret_gate_fails_a_tag_push_when_some_are_present() {
-    for platform in [&APPLE, &WINDOWS] {
+    {
+        let platform = &APPLE;
         for set in 1..platform.secrets {
             // On a tag the artifacts ship, so a half-configured set is an error.
             let tag = gate(platform, set, true);

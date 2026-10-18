@@ -442,14 +442,14 @@ try {
     assert_ok(&out);
 }
 
-/// Authenticode signing a script appends a signature block; the file must be
-/// plain ASCII so that does not depend on a byte order mark.
+/// Windows PowerShell 5.1 reads a BOM-less file as the ANSI code page; plain
+/// ASCII with LF endings reads the same on every checkout.
 #[test]
-fn install_ps1_is_plain_ascii_so_it_can_be_signed() {
+fn install_ps1_is_plain_ascii() {
     assert!(INSTALL_PS1.is_ascii());
     assert!(
         !INSTALL_PS1.contains('\r'),
-        "install.ps1 must use LF endings so its signature is the same on every checkout"
+        "install.ps1 must use LF endings so the file is the same on every checkout"
     );
 }
 

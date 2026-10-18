@@ -163,10 +163,8 @@ check above works on the downloaded zip by hand.
 `QSH_VERSION`, `QSH_INSTALL_DIR`, `QSH_REPO`, `QSH_MAN_DIR` and `QSH_NO_MAN`
 mean what they mean for `install.sh`, `QSH_NO_MODIFY_PATH=1` leaves `PATH`
 alone, and there is no way to skip the checksum (`scripts/README.md` has the
-table). Releases cut with Windows signing credentials carry an Authenticode
-signature on `qsh.exe` and on the `install.ps1` release asset, and no
-published release has been cut that way yet; [RELEASE-NOTES.md](RELEASE-NOTES.md)
-says which tags are.
+table). `qsh.exe` and the `install.ps1` release asset are not Authenticode
+signed; see the Windows entry under [Known limitations](#known-limitations).
 
 ### Scoop and winget (Windows)
 
@@ -181,9 +179,9 @@ filled by the release workflow once the maintainer has created it, and the
 first winget manifest is submitted by hand and has to be merged by
 `microsoft/winget-pkgs`. Until then use the installer above. Both manifests
 cover x86_64 and aarch64, point at the release zip and are checked against
-its SHA256 by the package manager, so the signing status is whatever that
-zip carries. They link only `qsh.exe`; the man pages stay in the zip, and
-the same text is `qsh help`.
+its SHA256 by the package manager. The zip is not Authenticode signed.
+They link only `qsh.exe`; the man pages stay in the zip, and the same text
+is `qsh help`.
 
 ### Homebrew (macOS)
 
@@ -1202,6 +1200,15 @@ Some of these are MVP scope decisions, some are unfinished work.
   the remote has no `qsh`; under PowerShell the exit code is 1, which `qsh`
   reports as a failed remote command with a hint to put `qsh.exe` on the
   remote `PATH` or pass `--remote-qsh`.
+- The Windows binaries and the `install.ps1` release asset are not Authenticode
+  signed. A `qsh.exe` taken from a zip downloaded in a browser and started from
+  Explorer shows a SmartScreen warning for an unknown publisher; "More info",
+  then "Run anyway" starts it. A PC with Smart App Control on can block it with
+  no way around short of turning that feature off. A downloaded `install.ps1`
+  may be refused by the execution policy until `Unblock-File .\install.ps1`.
+  `irm ... | iex`, `scoop install` and `winget install` are not affected, and
+  neither is a `qsh.exe` started from a terminal. The release `SHA256SUMS` and
+  the provenance attestation still cover the zips.
 - The first time `qsh serve` or `qsh listen` binds a fixed UDP port on a
   non-loopback address, Windows Defender Firewall asks whether to allow it,
   once per executable path (a `qsh.exe` at a new path asks again). Allow it
@@ -1298,7 +1305,7 @@ old-glibc check.
 | M16 | SSH bootstrap and trust revocation | Done (2026-10-15); `parse_ssh_bootstrap_line` fuzz hours and the real-OpenSSH campaign open |
 | M17 | Ops surface (service activation, `move-key`, session filters, `qsh audit`) | Done (2026-10-16) |
 | M18 | Session home | Waits on the real-device mobility campaign (M8 DoD 3) |
-| M19 | Windows client | Done (2026-10-18); Windows campaign rounds and signing secrets open |
+| M19 | Windows client | Done (2026-10-18); Windows campaign rounds open |
 | M20 | Windows host | Done (2026-10-18); Windows campaign rounds open |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job

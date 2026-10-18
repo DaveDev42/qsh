@@ -1,14 +1,14 @@
 #!/bin/sh
-# All-or-none gate for a set of release signing secrets. Shared by the macOS
-# (Apple, six secrets) and Windows (SSL.com eSigner, four secrets) legs of
-# .github/workflows/release.yml, so the three outcomes below are pinned in one
-# place (xtask/tests/install_script.rs, `secret_gate_*`).
+# All-or-none gate for a set of release signing secrets. Used by the macOS leg
+# (Apple, six secrets) of .github/workflows/release.yml; Windows assets ship
+# unsigned (ADR-0035 개정 이력, 2026-10-19). The three outcomes below are
+# pinned in one place (xtask/tests/install_script/secret_gate.rs).
 #
 # Usage:
 #   secret-gate.sh <output> <label> <doing> <skipping> <unsigned> <flag>...
 #
 #   output     key written to $GITHUB_OUTPUT, "true" or "false" (has-apple).
-#   label      Name used in messages ("Apple", "Windows").
+#   label      Name used in messages ("Apple").
 #   doing      What runs when every secret is set ("signing and notarizing").
 #   skipping   What is skipped otherwise ("codesign and notarization").
 #   unsigned   Sentence for the `Unsigned release` warning on a tag push.

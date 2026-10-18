@@ -89,7 +89,7 @@ other.
 PowerShell installer for a prebuilt Windows release zip, the counterpart of
 `install.sh`. It runs under Windows PowerShell 5.1 and PowerShell 7, needs no
 administrator rights and no Rust toolchain, and is plain ASCII so that
-Authenticode signing it does not depend on a byte order mark.
+it does not depend on a byte order mark.
 
 ```powershell
 irm https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.ps1 | iex
@@ -121,11 +121,8 @@ environment is touched.
 
 The checksum is an integrity check against a bad download, not a signature,
 and unlike `install.sh` this script does not run `gh attestation verify`.
-Whether `qsh.exe` and the `install.ps1` release asset carry an Authenticode
-signature depends on whether the release was cut with the signing secrets
-configured (`docs/deploy/release-secrets.md`); the installer does not check
-either way. For a stricter check, run `Get-AuthenticodeSignature` on the
-extracted `qsh.exe`.
+`qsh.exe` and the `install.ps1` release asset are not Authenticode signed
+(ADR-0035, revision of 2026-10-19), so the installer has no signature to check.
 
 The tests are in `xtask/tests/install_script.rs` (`install_ps1::`), run on
 Windows against a fake release directory with a stand-in `Invoke-WebRequest`.
@@ -136,8 +133,7 @@ Helpers `.github/workflows/release.yml` calls, kept as files so the tests can
 run them.
 
 - `secret-gate.sh` is the all-or-none gate for a set of signing secrets,
-  shared by the macOS (six Apple secrets) and Windows (four SSL.com eSigner
-  secrets) legs. Every secret set writes `has-<platform>=true`; none set writes
+  used by the macOS leg (six Apple secrets). Every secret set writes `has-<platform>=true`; none set writes
   `false` and warns `Unsigned release` on a tag push; a partial set is an
   error on a tag push and a warning plus a skip on a branch run. It reads only
   presence flags, never a secret value. Tests: `secret_gate::` in
@@ -156,12 +152,6 @@ run them.
   `xtask/tests/install_script.rs`; `release_yml::package_jobs_skip_green_without_secrets`
   pins that both jobs skip green without `SCOOP_BUCKET_DEPLOY_KEY` or
   `WINGET_PAT`.
-- `verify-signature.ps1` is the verdict half of the release workflow's
-  signature check: `Get-AuthenticodeSignature` must report `Valid`, the
-  signer must be the repository variable `WINDOWS_SIGN_EXPECTED_SUBJECT`
-  (full subject or common name), and the signature must carry an RFC 3161
-  timestamp. An empty expected subject is an error. An unsigned file fails
-  with status `NotSigned`. Tests: `signature::` in the same test file.
 
 ## fuzz/
 
