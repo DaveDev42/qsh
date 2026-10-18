@@ -450,7 +450,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `048df57`. §4.12 W2, §4.13 W3b, §4.14 W7을 기존 회차 형식(준비, 확인표, 정리, 비고)으로 더했고 §1 표, §5 판정 회차 목록, 머리 상태 줄을 고쳤다. §1~§4.11 문면은 표의 세 칸 말고 그대로다(`git diff -U0` hunk 18·20·24행). 계획 문구와 다른 점: `qsh host -- pwsh`는 clap 트리에 없는 형태다(`qsh host`는 `host get` 조회). PowerShell 세션은 `qsh session open <host> --json -- pwsh -NoLogo`로 열고 `qsh attach`로 붙는다. 회차의 `signal` 값·`cp -p` 모드·`verify_error` 문안은 실측 전 기대값이라 회차가 확인한다. ROADMAP §5.5 Windows 행에 재고정 해시.
 
-### Step 11 — PTY를 포함한 정방향·역방향 종단, 실제 PTY attach, `release_smoke` PTY 축, `cfg(unix)` 쌍둥이 전수 (0.4~0.7ew)
+### Step 11 — PTY를 포함한 정방향·역방향 종단, 실제 PTY attach, `release_smoke` PTY 축, `cfg(unix)` 쌍둥이 전수 (0.4~0.7ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 3(`cfg(unix)` 테스트의 `cfg(windows)` 쌍둥이 또는 이유 주석과 Windows 수단 테스트), 17(정방향 종단의 ConPTY 안 대화형 `qsh <name>`, 입력 echo, resize 전파, `~d` 뒤 `qsh attach` resume; 역방향 종단의 같은 목록; `release_smoke`의 PTY session open·write·read·close와 DACL 단언), 결과 절 "고정할 테스트"의 종단·`release_smoke` 줄, ROADMAP M20 DoD 둘째·셋째 줄, §5.1 원칙 7. 선행: Step 3·4·5·7·9, Step 10.
 
@@ -475,6 +475,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - 새 종단 테스트를 `m20.filter`에 넣는다.
 
 **(c) 완료 판정:** Windows leg이 정방향과 역방향을 같은 케이스 목록(`exec`, 터널 echo, PTY attach와 resume, `cp`)으로 돈다. `release_smoke` Windows 쌍둥이에 PTY 축이 있다. §5.6 표에 처분 없는 행이 없다. wire diff는 Step 7의 `LOCAL_CAPABILITIES` 통합뿐이다.
+
+**(d) 결과 (2026-10-18):** `e39c15c`. `windows_attach`가 실제 `qsh serve`와 `serve --to`의 ConPTY host를 상대로 정방향·역방향 같은 함수를 돈다(`pty_attach_round_trip_*`, `pty_detach_then_attach_resumes_*`, `pty_resize_propagates_*`, `pty_console_close_detaches_and_keeps_the_session_*`, `killed_client_leaves_the_session_running_*`). drain은 새 모듈 `windows_drain`, `release_smoke`는 이름을 바꾼 Windows 쌍둥이에 PTY 축(attach, 한 줄 왕복, `~d`, `qsh attach` 재부착)과 DACL 단언을 담는다. `socks_curl`은 `curl.exe`와 testkit `freeze`(스레드 정지)로 연다. §5.6 처분은 표의 처분 칸이다. 계획 문구와 다른 점: `reverse_e2e`는 unix 전용으로 남고 `windows_reverse_e2e`와 `windows_attach`의 `*_reverse` 케이스가 대신한다. 제품 변경 둘: client가 Windows host 의사 콘솔이 보내는 win32 input mode 요청(`CSI ? 9001 h`/`l`)을 로컬 콘솔에 쓰기 전에 지우고(`tui/vt_filter.rs`, `docs/CLI.md` v0.56 §7), 인터럽트 처리가 리스너 하나로 두 번 받는다(첫 Ctrl-C 뒤 리스너가 없는 틈에 둘째 Ctrl-C가 오면 Windows 기본 처리기가 `STATUS_CONTROL_C_EXIT`로 끝냈다. `cp_cancel::cp_second_interrupt_exits_255_without_waiting`). testkit이 named pipe localctl에 붙도록 `localctl::transport::connect`가 pub이 됐다(서버 SID 검사는 그대로). 역방향 route에서 콘솔을 닫아도 writer lease가 풀리지 않는 것은 `docs/CLI.md` §6.13 계약(lease는 데몬 연결에 묶임)이고 unix도 같다. ADR-0035 개정 이력 2026-10-18 여덟째 줄이 9001 필터와 unix 전용 다섯 모듈을 적는다. 부하: qsh-cli `windows_attach::(pty_|killed_client_)`·`windows_drain`·`release_smoke` Windows 쌍둥이·`sessions_filter`·`socks_curl`·`tunnel_e2e`·`reverse_blackout`·`cp_cancel` 39개 50/50(1950회, Dave-Windows). nextest 3302/3302. CI run 39118529274 초록(load 39118529239, fuzz-smoke 39118529234).
 
 ### Step 12 — 마감 (0.1~0.2ew)
 
@@ -620,25 +622,25 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 | 모듈 | 빠진 이유(모듈 doc 기준) | 처분 | 스텝 |
 |---|---|---|---|
-| `qsh-cli` `attach_ops` | PTY host | 열기(Windows host PTY) | 11 |
-| `qsh-cli` `attach_recovery` | PTY host, 경로 감시 | 열기 | 11 |
-| `qsh-cli` `cp_e2e`, `cp_recursive`, `cp_cancel` | 파일 host, unix 권한 비트 | 열기(mode 단언은 합성 규칙으로 바꿈) | 7(왕복), 11(나머지) |
-| `qsh-cli` `lifecycle_lines` | 정지 신호 | 열기 또는 unix 고유(정지 신호가 콘솔 사건이라 콘솔 없는 test 프로세스가 보낼 수 없으면 M19 `tunnel_supervise` 선례대로) | 11 |
+| `qsh-cli` `attach_ops` | PTY host | 열었다(두 OS) | 11 |
+| `qsh-cli` `attach_recovery` | PTY host, 경로 감시 | 열었다 | 11 |
+| `qsh-cli` `cp_e2e`, `cp_recursive`, `cp_cancel` | 파일 host, unix 권한 비트 | 열었다(mode 단언은 합성 규칙, `cp_cancel`은 ConPTY의 `0x03`) | 7(왕복), 11(나머지) |
+| `qsh-cli` `lifecycle_lines` | 정지 신호 | 열었다(두 OS) | 11 |
 | `qsh-cli` `localctl_perms` | UDS 권한 | unix 고유. Windows 수단은 M19의 `localctl::transport::windows` pipe DACL·SID 테스트 | 11(주석) |
-| `qsh-cli` `reverse_blackout` | UDS, PTY | 열기(acceptance job은 Linux에 남고 Windows는 nextest 다리) | 11 |
-| `qsh-cli` `reverse_e2e` | 양쪽 PTY | 열기. PTY 없는 케이스는 M19가 `windows_reverse_e2e`로 옮김 | 11 |
-| `qsh-cli` `serve_sigterm_drain` | SIGTERM | unix 고유(POSIX 신호). Windows 수단은 Step 11의 drain 쌍둥이 | 11 |
-| `qsh-cli` `session_follow` | PTY host, `sh` 스크립트 | 열기(`cmd.exe` 스크립트) | 11 |
+| `qsh-cli` `reverse_blackout` | UDS, PTY | 열었다(acceptance job은 Linux에 남고 Windows는 nextest 다리) | 11 |
+| `qsh-cli` `reverse_e2e` | 양쪽 PTY | unix 전용 유지(`expectrl`, 외부 소켓 목록기). Windows 수단은 `windows_reverse_e2e`와 `windows_attach`의 `*_reverse` | 11 |
+| `qsh-cli` `serve_sigterm_drain` | SIGTERM | unix 고유(POSIX 신호). Windows 수단은 `windows_drain::serve_stop_drains_sessions_and_leaves_no_orphan_on_windows`·`serve_to_stop_…` | 11 |
+| `qsh-cli` `session_follow` | PTY host, `sh` 스크립트 | 열었다(`cmd.exe` 스크립트) | 11 |
 | `qsh-cli` `session_kill9` | `expectrl`, SIGKILL | unix 고유. Windows 수단은 `windows_attach::killed_client_leaves_the_session_running_*` | 11 |
-| `qsh-cli` `socks_curl` | 프로세스 정지, unix 권한 | 연다(§9 #7 결정): `curl.exe`(Windows 10 1803+ 기본 탑재), 스레드 정지, DACL 단언 | 11 |
-| `qsh-cli` `trust_lifecycle_live` | 실제 `qsh serve` 정지 | 열기 | 11 |
-| `qsh-cli` `tui_expect` | `expectrl` | unix 고유. Windows 수단은 `windows_attach::` | 11(주석) |
-| `qsh-cli` `tunnel_e2e` | 대화형 form | 열기(ConPTY 하니스) 또는 `windows_*_e2e`로 덮였음을 주석으로 | 11 |
-| `qsh-testkit` `cp_many_small_files`, `cp_scripted_host`, `file_copy_echo_under_load`, `file_host` | 파일 host | 열기(acceptance 예산 단언은 Linux job 유지) | 7(`file_host`), 11(나머지) |
-| `qsh-testkit` `dynamic_reverse`, `host_list_reverse`, `local_control_reverse`, `local_stream_reverse`, `reverse_exec`, `reverse_tunnel` | "localctl (UDS) compiles out on Windows"(M19 뒤 낡은 이유) | 열기(named pipe localctl) | 11 |
-| `qsh-testkit` `reverse_attach`, `reverse_session_ops`, `reverse_resume_chaos`, `reverse_chaos` | UDS, PTY | 열기 | 11 |
-| `qsh-testkit` `reverse_lost_cause_and_since_registered_ms`, `reverse_unreachable_hook`, `liveness_config` | unix 재연결 루프 | 이유 재확인 뒤 열기 | 11 |
-| `qsh-testkit` `supervised_dynamic_blackhole` | acceptance(50초) | 이유 재확인. acceptance job은 Linux | 11 |
+| `qsh-cli` `socks_curl` | 프로세스 정지, unix 권한 | 열었다(§9 #7 결정): `curl.exe`, testkit `freeze` 스레드 정지, DACL 단언 | 11 |
+| `qsh-cli` `trust_lifecycle_live` | 실제 `qsh serve` 정지 | 열었다 | 11 |
+| `qsh-cli` `tui_expect` | `expectrl` | unix 고유. Windows 수단은 `windows_attach::pty_*`·`pty_console_close_*`, 콘솔 모드 복원은 `console_probe` | 11(주석) |
+| `qsh-cli` `tunnel_e2e` | 대화형 form | 열었다(대화형 form 다섯 케이스만 `cfg(unix)`, 같은 축은 `windows_*_e2e`) | 11 |
+| `qsh-testkit` `cp_many_small_files`, `cp_scripted_host`, `file_copy_echo_under_load`, `file_host` | 파일 host | 열었다(acceptance 예산 단언은 Linux job 유지) | 7(`file_host`), 11(나머지) |
+| `qsh-testkit` `dynamic_reverse`, `host_list_reverse`, `local_control_reverse`, `local_stream_reverse`, `reverse_exec`, `reverse_tunnel` | "localctl (UDS) compiles out on Windows"(M19 뒤 낡은 이유) | 열었다(named pipe localctl) | 11 |
+| `qsh-testkit` `reverse_attach`, `reverse_session_ops`, `reverse_resume_chaos`, `reverse_chaos` | UDS, PTY | 열었다 | 11 |
+| `qsh-testkit` `reverse_lost_cause_and_since_registered_ms`, `reverse_unreachable_hook`, `liveness_config` | unix 재연결 루프 | 열었다 | 11 |
+| `qsh-testkit` `supervised_dynamic_blackhole` | acceptance(50초) | 열었다(acceptance job은 Linux) | 11 |
 
 M19 마감이 이 표의 일부를 이미 처분했으면 Step 1이 그 행을 지운다.
 
