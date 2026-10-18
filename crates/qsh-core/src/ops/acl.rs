@@ -37,7 +37,7 @@ use crate::acl::{
     Action, ActionPattern, GrantBasis, Policy, PolicyLoad, PolicySource, ResourceRef, Scope,
     Verdict, opener_key, role_grant,
 };
-use crate::file::guard::{FileOp, FsNormalizer, Normalizer, ShapeError, ShapedPath};
+use crate::file::guard::{FileOp, FsNormalizer, Normalizer, ShapedPath};
 use crate::file::guard::{serve_home_dir, shape_path};
 use crate::ops::{OpError, Operation, Ops};
 use crate::trust::{TrustRole, TrustStore};
@@ -131,10 +131,6 @@ fn shape_path_arg(action: Action, raw: Option<&str>) -> Result<Option<ShapedPath
             };
             match shape_path(raw.as_bytes(), op, serve_home_dir().as_deref()) {
                 Ok(shaped) => Ok(Some(shaped)),
-                // No file op exists off unix, so the question is still
-                // answerable (no row can cover a path nobody normalizes);
-                // the argument just goes unshaped.
-                Err(ShapeError::Unsupported) => Ok(None),
                 Err(other) => Err(invalid(other.to_string())),
             }
         }

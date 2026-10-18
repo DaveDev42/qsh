@@ -1,7 +1,8 @@
 //! Stages 2 to 7 of the remote file ops (`docs/adr/0029-file-copy.md`
-//! decision 8), unix only. `file.rs` documents the order; this file is the
+//! decision 8). `file.rs` documents the order; this file is the
 //! implementation, composed from the pure pieces in `crate::file::guard` and
-//! `crate::file::host`.
+//! `crate::file::host`, on unix and on Windows alike. An OS `EACCES` and its
+//! Windows counterparts answer the same uniform denial.
 //!
 //! What a refusal looks like from outside: the ACL (no ground, outside
 //! `paths`, normalization failure), the state-path check, the opened-handle
@@ -229,7 +230,20 @@ impl Server {
     /// caller's mistake (`INVALID_ARGUMENT`, only reachable past the ACL and
     /// the state-path check); `EACCES`/`EPERM` and the errors a swapped path
     /// component produces are the uniform denial (ADR-0029 decision 17).
+    ///
+    /// On Windows the guard's open compares the handle's final path with the
+    /// requested one, so a component swapped for a junction or symlink fails
+    /// the open itself instead of the recheck after it. That refusal is the
+    /// recheck's deny and is audited as one, which keeps the audit trail of a
+    /// lost race the same on both platforms.
     fn io_reply(&self, st: &Stage<'_>, err: &io::Error) -> ControlMessage {
+        #[cfg(windows)]
+        if matches!(
+            crate::file::local::classify(err),
+            crate::file::local::IoClass::SymlinkRefused
+        ) {
+            return self.deny(st);
+        }
         ControlMessage::error(st.request_id, file_io_error(err))
     }
 
@@ -534,9 +548,7 @@ impl Server {
             }
             // Not a directory (or a dangling link, which normalization does
             // not follow): report the object itself through its parent.
-            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
-                self.file_list_object(st)
-            }
+            Err(e) if guard::is_not_a_directory_error(&e) => self.file_list_object(st),
             Err(e) => self.io_reply(st, &e),
         }
     }
@@ -589,34 +601,67 @@ fn wire_kind(kind: FsKind) -> wire::FileKind {
 
 /// The wire error for an OS error from a file op, shared by the control
 /// plane (`io_reply`) and the `FILE_DATA` data plane (`file_data.rs`) so the
-/// same errno reads the same on both. `ENOENT` is the one thing that is the
-/// caller's mistake (`INVALID_ARGUMENT`, only reachable past the ACL and the
-/// state-path check); `EACCES`/`EPERM` and the errors a swapped path
-/// component produces are the uniform denial (ADR-0029 decision 17); `EEXIST`
-/// is the `--no-clobber` race lost at `linkat` (decision 7); `ENOSPC` and
-/// `EDQUOT` are `RESOURCE_EXHAUSTED` (decision 13).
+/// same errno reads the same on both. A missing path is the one thing that is
+/// the caller's mistake (`INVALID_ARGUMENT`, only reachable past the ACL and
+/// the state-path check); a denied access and the errors a swapped path
+/// component produces (`ELOOP`, `ENOTDIR`; on Windows a refused reparse point
+/// or "not a directory") are the uniform denial (ADR-0029 decision 17); an
+/// existing name is the `--no-clobber` race lost at placement (decision 7);
+/// a full disk or quota is `RESOURCE_EXHAUSTED` (decision 13).
 pub(super) fn file_io_error(err: &io::Error) -> wire::Error {
-    match err.raw_os_error() {
-        Some(libc::ENOENT) => wire::Error::new(
+    match classify_file_error(err) {
+        FileErrorClass::Missing => wire::Error::new(
             ErrorCode::InvalidArgument,
             "no such file or directory",
             false,
         ),
-        Some(libc::EEXIST) => {
+        FileErrorClass::Exists => {
             wire::Error::new(ErrorCode::InvalidArgument, "destination exists", false)
         }
-        Some(libc::EACCES | libc::EPERM | libc::ELOOP | libc::ENOTDIR) => wire::Error::new(
+        FileErrorClass::Denied => wire::Error::new(
             ErrorCode::PermissionDenied,
             crate::acl::PERMISSION_DENIED_MESSAGE,
             false,
         ),
-        Some(libc::ENOSPC | libc::EDQUOT) => {
+        FileErrorClass::NoSpace => {
             wire::Error::new(ErrorCode::ResourceExhausted, "no space left", false)
         }
-        _ => {
+        FileErrorClass::Other => {
             tracing::debug!(kind = ?err.kind(), "file operation failed");
             wire::Error::new(ErrorCode::Internal, "file operation failed", false)
         }
+    }
+}
+
+/// What [`file_io_error`] tells apart.
+enum FileErrorClass {
+    Missing,
+    Exists,
+    Denied,
+    NoSpace,
+    Other,
+}
+
+#[cfg(unix)]
+fn classify_file_error(err: &io::Error) -> FileErrorClass {
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => FileErrorClass::Missing,
+        Some(libc::EEXIST) => FileErrorClass::Exists,
+        Some(libc::EACCES | libc::EPERM | libc::ELOOP | libc::ENOTDIR) => FileErrorClass::Denied,
+        Some(libc::ENOSPC | libc::EDQUOT) => FileErrorClass::NoSpace,
+        _ => FileErrorClass::Other,
+    }
+}
+
+#[cfg(windows)]
+fn classify_file_error(err: &io::Error) -> FileErrorClass {
+    use crate::file::local::{IoClass, classify};
+    match classify(err) {
+        IoClass::NotFound => FileErrorClass::Missing,
+        IoClass::Exists => FileErrorClass::Exists,
+        IoClass::Denied | IoClass::SymlinkRefused | IoClass::NotDirectory => FileErrorClass::Denied,
+        IoClass::NoSpace => FileErrorClass::NoSpace,
+        IoClass::IsDirectory | IoClass::TooManyOpen | IoClass::Other => FileErrorClass::Other,
     }
 }
 

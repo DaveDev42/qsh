@@ -134,7 +134,7 @@ fn module_ban_recurses_into_subdirectories() {
 /// Every configured module-ban target that doesn't exist is flagged
 /// once — not once per token bound to it (the ban targets must exist
 /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
-/// `REGISTRY_FILE`, `FILE_GUARD_FILE`, `FILE_HOST_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
+/// `REGISTRY_FILE`, the three `FILE_GUARD_FILES` and the three `FILE_HOST_FILES`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
 /// `SETUP_DIR` directory, the `CORE_SRC_DIR` directory the `quinn` ban
 /// scopes, and the `INVITE_ADDRESS_DIR` directory that two
 /// separate bans share — a shared target is still one entry in `reported_missing`, not two).
@@ -143,7 +143,7 @@ fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 13, "{violations:?}");
+    assert_eq!(violations.len(), 17, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"

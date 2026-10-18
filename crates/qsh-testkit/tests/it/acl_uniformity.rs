@@ -207,15 +207,10 @@ async fn drive_control_stream_op(s: &mut Session, name: &str) -> Result<(), Clie
 
 /// An absolute path every host accepts at the shape check, so a file op
 /// reaches the ACL choke point and is denied there, not rejected earlier.
+#[cfg(unix)]
 const FILE_PROBE_PATH: &str = "/srv/qsh-uniformity-probe/x";
-
-/// Whether `name` is one of the four ADR-0029 file seams.
-fn is_file_seam(name: &str) -> bool {
-    matches!(
-        name,
-        "file.read" | "file.write" | "file.list" | "file.mkdir"
-    )
-}
+#[cfg(windows)]
+const FILE_PROBE_PATH: &str = "C:/srv/qsh-uniformity-probe/x";
 
 /// Send one raw file-op request on `s`'s control stream and map the reply
 /// the way the typed helpers do: an `Error` response is `ClientError::Remote`,
@@ -559,27 +554,9 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
             let before = h.audit.records().len();
             let mark = probe_mark(probe);
             let result = drive_control_stream_op(&mut s, seam.name).await;
-            if cfg!(not(unix)) && is_file_seam(seam.name) {
-                // Off unix the shape check has no path judgement
-                // (ADR-0029 decision 23): `UNSUPPORTED` before any ACL
-                // decision, so there is no deny record to look for.
-                assert!(
-                    matches!(
-                        result,
-                        Err(ClientError::Remote {
-                            code: ErrorCode::Unsupported,
-                            ..
-                        })
-                    ),
-                    "{}: expected UNSUPPORTED off unix, got {result:?}",
-                    seam.name
-                );
-                assert_eq!(h.audit.records().len(), before, "{}", seam.name);
-            } else {
-                assert_denied(result, seam.name);
-                assert_new_audit_deny_for_seam(&h.audit, before, seam);
-                probe_assert(probe, mark, seam, &h.client.fingerprint);
-            }
+            assert_denied(result, seam.name);
+            assert_new_audit_deny_for_seam(&h.audit, before, seam);
+            probe_assert(probe, mark, seam, &h.client.fingerprint);
             assert!(
                 driven.insert(seam.name),
                 "DENY_SEAMS has a duplicate row name {:?}",
@@ -808,28 +785,6 @@ async fn assert_control_rows_denied(h: &LoopbackHarness, skip: &[&str], situatio
     }) {
         let before = h.audit.records().len();
         let result = drive_control_stream_op(&mut s, seam.name).await;
-        if cfg!(not(unix)) && is_file_seam(seam.name) {
-            // Off unix a file op is `UNSUPPORTED` before any decision
-            // (ADR-0029 decision 23), so there is no deny to compare.
-            assert!(
-                matches!(
-                    result,
-                    Err(ClientError::Remote {
-                        code: ErrorCode::Unsupported,
-                        ..
-                    })
-                ),
-                "{situation}: {}: {result:?}",
-                seam.name
-            );
-            assert_eq!(
-                h.audit.records().len(),
-                before,
-                "{situation}: {}",
-                seam.name
-            );
-            continue;
-        }
         assert_denied(result, &format!("{situation}: {}", seam.name));
         assert_new_audit_deny_for_seam(&h.audit, before, seam);
     }

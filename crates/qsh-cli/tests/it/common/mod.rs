@@ -844,7 +844,14 @@ impl Fleet {
     /// `release_smoke.rs` uses to run the whole init/trust/serve dance
     /// against an arbitrary `qsh` binary.
     pub fn start_with_bin(bin: &Path, extra: &[&str]) -> Self {
-        Self::start_inner(bin, extra, None)
+        Self::start_inner(bin, extra, None, "none")
+    }
+
+    /// Like [`start`](Self::start), with the host pinning the client with
+    /// the `full` role, so the client's file ops (`qsh cp`) are granted by
+    /// the pin and not by an `acl.toml` row (ADR-0045).
+    pub fn start_full() -> Self {
+        Self::start_inner(Path::new(env!("CARGO_BIN_EXE_qsh")), &[], None, "full")
     }
 
     /// Like [`start`](Self::start), but the host binds a port outside every
@@ -857,16 +864,17 @@ impl Fleet {
             Path::new(env!("CARGO_BIN_EXE_qsh")),
             &[],
             Some(steady_bind()),
+            "none",
         )
     }
 
-    fn start_inner(bin: &Path, extra: &[&str], bind: Option<String>) -> Self {
+    fn start_inner(bin: &Path, extra: &[&str], bind: Option<String>, role: &str) -> Self {
         let host = Sandbox::with_bin(bin);
         let client = Sandbox::with_bin(bin);
         let host_fingerprint = host.fingerprint();
         let client_fingerprint = client.fingerprint();
 
-        host.trust_add(CLIENT_ALIAS, None, &client_fingerprint);
+        host.trust_add_with_role(CLIENT_ALIAS, None, &client_fingerprint, role);
         let serve = match bind {
             Some(bind) => ServeGuard::start_at(&host, &bind),
             None => ServeGuard::start_with(&host, extra),

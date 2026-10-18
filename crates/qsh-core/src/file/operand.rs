@@ -286,18 +286,44 @@ pub fn plan_with(req: &FileCopyReq, windows: bool) -> Result<CopyPlan, OperandEr
 /// `~`, an empty path, `/`), which is the "copy the contents" case of
 /// decision 2.
 pub fn source_name(path: &str) -> Option<&str> {
-    let trimmed = path.trim_end_matches('/');
-    let name = trimmed.rsplit('/').next().unwrap_or("");
+    // A remote path that starts with a drive designator and a separator
+    // (`C:\data\a.txt`) is a Windows host's, where both separators split
+    // a path (ADR-0035 decision 26). A unix path never starts that way
+    // unless it is a relative path of a directory literally named `C:`.
+    let separators: &[char] = if is_drive_path(path) {
+        &['/', '\\']
+    } else {
+        &['/']
+    };
+    let trimmed = path.trim_end_matches(separators);
+    let name = trimmed.rsplit(separators).next().unwrap_or("");
     match name {
         "" | "." | ".." | "~" => None,
+        // The drive designator alone (`C:\`) names no item.
+        name if name.len() == 2 && is_drive_path(&format!("{name}/")) => None,
         name => Some(name),
     }
 }
 
+/// Whether `path` starts with a drive designator and a separator
+/// (`C:\...`, `C:/...`).
+fn is_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+}
+
 /// `base` with `name` appended as one more component. A plain string join:
 /// the result is a display path derived from the operand, never a canonical
-/// one.
+/// one. A base that is a Windows drive path spelled with backslashes is
+/// extended with a backslash.
 pub fn join_path(base: &str, name: &str) -> String {
+    if is_drive_path(base) && base.contains('\\') && !base.contains('/') {
+        let trimmed = base.trim_end_matches('\\');
+        return format!("{trimmed}\\{name}");
+    }
     let trimmed = base.trim_end_matches('/');
     if trimmed.is_empty() && base.starts_with('/') {
         format!("/{name}")
@@ -605,5 +631,27 @@ mod tests {
         assert_eq!(join_local_with("out/dir", "x", true), "out/dir/x");
         assert_eq!(join_local_with("", "x", true), "x");
         assert_eq!(join_local_with("dir/", "x", false), "dir/x");
+    }
+
+    #[test]
+    fn remote_drive_paths_split_on_both_separators() {
+        // A remote path that begins with a drive is a Windows host's.
+        for (path, name) in [
+            ("C:\\data\\a.txt", Some("a.txt")),
+            ("C:/data/a.txt", Some("a.txt")),
+            ("C:\\data/sub\\", Some("sub")),
+            ("C:\\", None),
+            ("C:/", None),
+        ] {
+            assert_eq!(source_name(path), name, "{path:?}");
+        }
+        // Anything else keeps the unix rule: a backslash is part of a name.
+        assert_eq!(source_name("dir\\a"), Some("dir\\a"));
+        assert_eq!(source_name("C:a"), Some("C:a"));
+        assert_eq!(join_path("C:\\out", "x"), "C:\\out\\x");
+        assert_eq!(join_path("C:\\out\\", "x"), "C:\\out\\x");
+        assert_eq!(join_path("C:\\", "x"), "C:\\x");
+        assert_eq!(join_path("C:/out", "x"), "C:/out/x");
+        assert_eq!(join_path("C:\\out/sub", "x"), "C:\\out/sub/x");
     }
 }

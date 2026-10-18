@@ -54,6 +54,9 @@ pub trait Route {
     fn client(&self) -> &Sandbox;
     /// The name of the host, as the client knows it.
     fn host(&self) -> &str;
+    /// The host's own sandbox: the one whose config and state directories the
+    /// host protects.
+    fn host_sandbox(&self) -> &Sandbox;
 }
 
 /// Client to a `qsh serve` host over QUIC.
@@ -69,6 +72,16 @@ impl ForwardRoute {
     }
 }
 
+impl ForwardRoute {
+    /// Like [`Self::start`], with the host pinning the client with the
+    /// `full` role: the route `qsh cp` cases need.
+    pub fn start_full() -> Self {
+        Self {
+            fleet: Fleet::start_full(),
+        }
+    }
+}
+
 impl Route for ForwardRoute {
     fn client(&self) -> &Sandbox {
         &self.fleet.client
@@ -76,6 +89,10 @@ impl Route for ForwardRoute {
 
     fn host(&self) -> &str {
         HOST_ALIAS
+    }
+
+    fn host_sandbox(&self) -> &Sandbox {
+        &self.fleet.host
     }
 }
 
@@ -94,7 +111,15 @@ impl ReverseRoute {
     /// Controller, target, and the registration between them, up and
     /// reachable from the controller's `qsh hosts`.
     pub fn start() -> Self {
-        let route = Self::start_unregistered(None);
+        let route = Self::start_unregistered(None, "none");
+        route.wait_registered();
+        route
+    }
+
+    /// Like [`Self::start`], with the target pinning the controller with the
+    /// `full` role: the route `qsh cp` cases need.
+    pub fn start_full() -> Self {
+        let route = Self::start_unregistered(None, "full");
         route.wait_registered();
         route
     }
@@ -103,12 +128,12 @@ impl ReverseRoute {
     /// ephemeral port, so a restarted controller can come back to the address
     /// the target dials. Waits for the registration as well.
     pub fn start_at(bind: &str) -> Self {
-        let route = Self::start_unregistered(Some(bind));
+        let route = Self::start_unregistered(Some(bind), "none");
         route.wait_registered();
         route
     }
 
-    fn start_unregistered(bind: Option<&str>) -> Self {
+    fn start_unregistered(bind: Option<&str>, controller_role: &str) -> Self {
         let controller = Sandbox::initialized();
         let target = Sandbox::initialized();
         let target_fp = target.fingerprint();
@@ -122,7 +147,12 @@ impl ReverseRoute {
             Some(bind) => ListenGuard::start_with(&controller, bind),
             None => ListenGuard::start(&controller),
         };
-        target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
+        target.trust_add_with_role(
+            CONTROLLER_ALIAS,
+            Some(listen.addr()),
+            &controller_fp,
+            controller_role,
+        );
         fast_reconnect(&target);
         let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
         Self {
@@ -147,6 +177,10 @@ impl Route for ReverseRoute {
 
     fn host(&self) -> &str {
         REVERSE_NAME
+    }
+
+    fn host_sandbox(&self) -> &Sandbox {
+        &self.target
     }
 }
 
@@ -1168,32 +1202,334 @@ fn socks_connect(port: u16, target: SocketAddr) -> TcpStream {
     stream
 }
 
-/// `qsh cp` to a Windows host: the host does not advertise `file.v1` until
-/// its file operations land, so the client refuses before it sends anything,
-/// on the forward route and on the reverse one (ADR-0035 decision 2,
-/// `docs/CLI.md` §6.21).
-pub fn cp_to_a_windows_host_is_unsupported_before_m20(route: &impl Route, reverse: bool) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let src = dir.path().join("src.txt");
-    std::fs::write(&src, b"never sent\n").unwrap();
-    let dst = dir.path().join("dst.txt");
+// ---------------------------------------------------------------------------
+// `qsh cp` against a Windows host (ADR-0029, ADR-0035 decision 26)
+// ---------------------------------------------------------------------------
 
-    let (code, value) = route.client().json(&[
+/// A deterministic byte pattern, so a reordered or dropped chunk shows.
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| {
+            (i as u8)
+                .wrapping_mul(31)
+                .wrapping_add(seed)
+                .wrapping_add((i >> 8) as u8)
+        })
+        .collect()
+}
+
+/// `path` as a remote operand for `host`, in the backslash spelling.
+fn remote_back(route: &impl Route, path: &std::path::Path) -> String {
+    format!("{}:{}", route.host(), path.display())
+}
+
+/// The same operand with forward slashes: a Windows host reads both.
+fn remote_slash(route: &impl Route, path: &std::path::Path) -> String {
+    format!(
+        "{}:{}",
+        route.host(),
+        path.display().to_string().replace('\\', "/")
+    )
+}
+
+fn no_part_files(dir: &std::path::Path) {
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let name = entry.expect("entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".part"),
+            "a temp file was left in {dir:?}: {name}"
+        );
+    }
+}
+
+/// `put`, `get`, `-r` and `-p` against a Windows host that pins the client
+/// with the `full` role, on whichever route `route` is. The host's disk is
+/// this machine's, so the bytes at the middle hop are checked too.
+pub fn cp_round_trip(route: &impl Route) {
+    let work = tempfile::tempdir().expect("work dir");
+    let hostdir = work.path().join("host");
+    std::fs::create_dir(&hostdir).unwrap();
+    let client = route.client();
+
+    // put, the backslash spelling of a drive path.
+    let body = pattern(300 * 1024 + 17, 3);
+    let src = work.path().join("src.bin");
+    std::fs::write(&src, &body).unwrap();
+    let stored = hostdir.join("up.bin");
+    let (code, put) = client.json(&[
         "cp",
         "--json",
         src.to_str().unwrap(),
-        &format!("{}:{}", route.host(), dst.display()),
+        &remote_back(route, &stored),
     ]);
-
-    assert_eq!(code, 255, "{value}");
-    assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
-    let message = value["error"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("file.v1"), "{value}");
+    assert_eq!(code, 0, "put failed: {put}");
+    assert_eq!(put["data"]["direction"], "put", "{put}");
+    assert_eq!(put["data"]["files"], 1, "{put}");
+    assert_eq!(put["data"]["bytes"], body.len() as u64, "{put}");
     assert_eq!(
-        message.contains("reverse route"),
-        reverse,
-        "the message names the route it refused on: {value}"
+        std::fs::read(&stored).unwrap(),
+        body,
+        "the host holds the bytes"
     );
-    assert!(message.contains("nothing was sent"), "{value}");
-    assert!(!dst.exists(), "nothing reached the host");
+
+    // get, the forward-slash spelling of the same path.
+    let back = work.path().join("back.bin");
+    let (code, get) = client.json(&[
+        "cp",
+        "--json",
+        &remote_slash(route, &stored),
+        back.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "get failed: {get}");
+    assert_eq!(get["data"]["direction"], "get", "{get}");
+    assert_eq!(
+        get["data"]["entries"][0]["blake3"], put["data"]["entries"][0]["blake3"],
+        "{get}"
+    );
+    assert_eq!(std::fs::read(&back).unwrap(), body);
+
+    // Into an existing directory under the source's name.
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        src.to_str().unwrap(),
+        &remote_back(route, &hostdir),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(std::fs::read(hostdir.join("src.bin")).unwrap(), body);
+
+    // Overwrite replaces; `--no-clobber` skips.
+    let newer = pattern(1000, 9);
+    std::fs::write(&src, &newer).unwrap();
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        "--no-clobber",
+        src.to_str().unwrap(),
+        &remote_back(route, &stored),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(
+        std::fs::read(&stored).unwrap(),
+        body,
+        "--no-clobber kept the old file"
+    );
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        src.to_str().unwrap(),
+        &remote_back(route, &stored),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(std::fs::read(&stored).unwrap(), newer);
+
+    // -r: a tree with a nested directory and an empty one, both ways.
+    let tree = work.path().join("tree");
+    std::fs::create_dir_all(tree.join("sub/deeper")).unwrap();
+    std::fs::create_dir(tree.join("empty")).unwrap();
+    std::fs::write(tree.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(tree.join("sub/b.bin"), pattern(70_000, 5)).unwrap();
+    std::fs::write(tree.join("sub/deeper/c.txt"), b"gamma").unwrap();
+    let up = hostdir.join("tree-up");
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        "-r",
+        tree.to_str().unwrap(),
+        &remote_back(route, &up),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(std::fs::read(up.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(
+        std::fs::read(up.join("sub/b.bin")).unwrap(),
+        pattern(70_000, 5)
+    );
+    assert_eq!(
+        std::fs::read(up.join("sub/deeper/c.txt")).unwrap(),
+        b"gamma"
+    );
+    assert!(up.join("empty").is_dir(), "the empty directory is created");
+    let down = work.path().join("tree-down");
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        "-r",
+        &remote_back(route, &up),
+        down.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(
+        std::fs::read(down.join("sub/b.bin")).unwrap(),
+        pattern(70_000, 5)
+    );
+    assert_eq!(
+        std::fs::read(down.join("sub/deeper/c.txt")).unwrap(),
+        b"gamma"
+    );
+    assert!(down.join("empty").is_dir());
+
+    // -p: the modification time survives both ways.
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let kept = hostdir.join("kept.bin");
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        "-p",
+        src.to_str().unwrap(),
+        &remote_back(route, &kept),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(std::fs::metadata(&kept).unwrap().modified().unwrap(), old);
+    let kept_back = work.path().join("kept-back.bin");
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        "-p",
+        &remote_back(route, &kept),
+        kept_back.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(
+        std::fs::metadata(&kept_back).unwrap().modified().unwrap(),
+        old
+    );
+
+    no_part_files(&hostdir);
+    no_part_files(work.path());
+}
+
+/// The first failure of a `cp --json` run that failed, as its code.
+fn first_failure_code(value: &Value) -> String {
+    value["error"]["details"]["failures"][0]["code"]
+        .as_str()
+        .or_else(|| value["error"]["code"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A Windows host refuses its own state paths whatever the role, in every
+/// spelling of them, and refuses UNC and device paths as malformed
+/// (ADR-0029 decisions 5, 6 and 23, ADR-0035 decision 26).
+pub fn cp_refuses_state_paths_and_reparse_points(route: &impl Route) {
+    let work = tempfile::tempdir().expect("work dir");
+    let client = route.client();
+    let config = route.host_sandbox().config_dir().to_path_buf();
+    let trust = config.join("trust.toml");
+    assert!(trust.exists(), "the host's trust.toml is the target");
+    let trust_before = std::fs::read(&trust).unwrap();
+
+    // get of a state file: refused, and nothing is created locally.
+    let out = work.path().join("stolen.toml");
+    for spelling in [
+        remote_back(route, &trust),
+        remote_slash(route, &trust),
+        format!(
+            "{}:{}",
+            route.host(),
+            trust.display().to_string().to_uppercase()
+        ),
+    ] {
+        let (code, value) = client.json(&["cp", "--json", &spelling, out.to_str().unwrap()]);
+        assert_eq!(code, 255, "{spelling}: {value}");
+        assert_eq!(
+            first_failure_code(&value),
+            "PERMISSION_DENIED",
+            "{spelling}: {value}"
+        );
+        assert!(!out.exists(), "nothing was written for {spelling}");
+    }
+
+    // put into the config directory, existing or new name, and the
+    // directory itself.
+    let src = work.path().join("evil.toml");
+    std::fs::write(&src, b"role = \"full\"\n").unwrap();
+    for target in [
+        trust.clone(),
+        config.join("acl.toml"),
+        config.join("fresh.toml"),
+        config.clone(),
+    ] {
+        let (code, value) = client.json(&[
+            "cp",
+            "--json",
+            src.to_str().unwrap(),
+            &remote_back(route, &target),
+        ]);
+        assert_eq!(code, 255, "{target:?}: {value}");
+        assert_eq!(
+            first_failure_code(&value),
+            "PERMISSION_DENIED",
+            "{target:?}: {value}"
+        );
+    }
+    assert!(!config.join("fresh.toml").exists());
+    assert_eq!(
+        std::fs::read(&trust).unwrap(),
+        trust_before,
+        "trust.toml untouched"
+    );
+
+    // A junction in an ordinary directory that leads into the config
+    // directory is judged by where it lands.
+    let junction = work.path().join("link");
+    let made = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&config)
+        .output()
+        .expect("run cmd");
+    assert!(
+        made.status.success(),
+        "mklink /J: {}",
+        String::from_utf8_lossy(&made.stdout)
+    );
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        &remote_back(route, &junction.join("trust.toml")),
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(first_failure_code(&value), "PERMISSION_DENIED", "{value}");
+    let (code, value) = client.json(&[
+        "cp",
+        "--json",
+        src.to_str().unwrap(),
+        &remote_back(route, &junction.join("planted.toml")),
+    ]);
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(first_failure_code(&value), "PERMISSION_DENIED", "{value}");
+    assert!(!config.join("planted.toml").exists());
+    assert!(!out.exists());
+
+    // UNC and device namespaces are malformed before any decision.
+    for bad in [
+        r"\\server\share\x",
+        r"\\?\C:\Windows\win.ini",
+        r"\\.\pipe\x",
+    ] {
+        let (code, value) = client.json(&[
+            "cp",
+            "--json",
+            &format!("{}:{bad}", route.host()),
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 255, "{bad}: {value}");
+        assert_eq!(
+            first_failure_code(&value),
+            "INVALID_ARGUMENT",
+            "{bad}: {value}"
+        );
+        assert!(!out.exists());
+    }
+    // Remove the junction itself, not what it points to.
+    std::fs::remove_dir(&junction).expect("remove the junction");
+    assert!(trust.exists());
 }

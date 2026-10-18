@@ -19,10 +19,9 @@
 //! that escapes `share/` and a path that lands in the state tree are both a
 //! few components away. Snapshots compare whole trees byte for byte.
 
-#![cfg(unix)]
-
 use std::collections::BTreeMap;
 use std::future::Future;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -98,12 +97,92 @@ struct Env {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create parent");
     }
     std::fs::write(path, bytes).expect("write file");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+}
+
+/// The directory as the host spells it: canonical, and on Windows without
+/// the `\\?\` prefix the system puts on a final path (the host answers
+/// with drive paths only).
+fn canonical(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).expect("canonical path");
+    match canonical.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => canonical,
+    }
+}
+
+/// How a path is written in `acl.toml`: Windows entries use `C:/...`
+/// (ADR-0029 decision 23), and a backslash would be a TOML escape.
+fn acl_text(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// A path that cannot exist, in the host's own syntax.
+#[cfg(unix)]
+const NOWHERE: &str = "/qsh-no-such-root/dir/../file";
+#[cfg(windows)]
+const NOWHERE: &str = "C:/qsh-no-such-root/dir/../file";
+
+/// The root of the volume the sandbox lives on, as an `acl.toml` `paths`
+/// entry that covers everything the tests touch.
+fn fs_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/")
+    }
+    #[cfg(windows)]
+    {
+        let temp = canonical(&std::env::temp_dir());
+        let drive = temp.to_str().expect("utf-8 temp dir")[..2].to_string();
+        PathBuf::from(format!("{drive}/"))
+    }
+}
+
+/// A directory link: a symlink on unix, a junction on Windows (`mklink /J`
+/// needs no privilege).
+fn dir_link(link: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link.to_str().unwrap().replace('/', "\\"))
+            .arg(target.to_str().unwrap().replace('/', "\\"))
+            .output()
+            .expect("run cmd");
+        assert!(
+            made.status.success(),
+            "mklink /J: {}",
+            String::from_utf8_lossy(&made.stdout)
+        );
+    }
+}
+
+/// A file symlink. `false` when this account may not create one (Windows
+/// without the privilege), in which case the scenario skips that part.
+fn file_link(link: &Path, target: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+        true
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(e) if e.raw_os_error() == Some(1314) => false,
+            Err(e) => panic!("symlink_file: {e}"),
+        }
+    }
 }
 
 impl Env {
@@ -111,7 +190,7 @@ impl Env {
     /// carrying `role` (no `role` key when `None`), with no `acl.toml`.
     fn new(role: Option<&str>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+        let root = canonical(dir.path());
         let share = root.join("share");
         let outside = root.join("outside");
         let host = root.join("host");
@@ -183,7 +262,7 @@ impl Env {
         if let Some(paths) = paths {
             let list = paths
                 .iter()
-                .map(|p| format!("\"{}\"", p.display()))
+                .map(|p| format!("\"{}\"", acl_text(p)))
                 .collect::<Vec<_>>()
                 .join(", ");
             text.push_str(&format!("paths = [{list}]\n"));
@@ -605,7 +684,7 @@ async fn no_grant_no_normalize<R: Route>() {
     let mut conn = Conn::open(&h).await;
     // A path that cannot exist, so a lookup would be observable only
     // through the counter.
-    let target = "/qsh-no-such-root/dir/../file".to_string();
+    let target = NOWHERE.to_string();
     assert_denied_everywhere(&h, &mut conn, &[target], 1).await;
     assert_eq!(env.normalizer_calls(), 0);
     h.shutdown().await;
@@ -632,9 +711,17 @@ both_routes!(no_grant_no_normalize =>
 /// does not exist yet below the config directory.
 fn state_targets(env: &Env, files: &[PathBuf]) -> Vec<String> {
     let mut out: Vec<String> = files.iter().map(|p| s(p)).collect();
-    let link = env.share.join("link-to-trust");
-    std::os::unix::fs::symlink(env.paths.trust_file(), &link).unwrap();
-    out.push(s(&link));
+    #[cfg(unix)]
+    {
+        let link = env.share.join("link-to-trust");
+        file_link(&link, &env.paths.trust_file());
+        out.push(s(&link));
+    }
+    // A directory link into the config directory reaches the same files.
+    let dir = env.share.join("link-to-config");
+    dir_link(&dir, &env.paths.config_dir);
+    out.push(s(&dir.join("trust.toml")));
+    out.push(s(&dir.join("not-yet.toml")));
     out.push(env.share_path("../host/config/trust.toml"));
     out.push(env.share_path("sub/../../host/state/audit.log"));
     out.push(s(&env.paths.config_dir.join("not-yet.toml")));
@@ -702,7 +789,7 @@ both_routes!(full_role_cannot_touch_trust_state =>
     role_full_file_ops_still_deny_state_paths_reverse);
 
 async fn root_paths_write_to_state<R: Route>() {
-    let env = Env::new(None).acl_rows(&["file.*"], Some(&[Path::new("/")]));
+    let env = Env::new(None).acl_rows(&["file.*"], Some(&[fs_root().as_path()]));
     let files = env.seed_state();
     let h = R::start(&env).await;
     let mut conn = Conn::open(&h).await;
@@ -735,7 +822,7 @@ both_routes!(root_paths_write_to_state =>
     file_write_to_state_paths_is_denied_even_with_root_paths_reverse);
 
 async fn root_paths_read_state<R: Route>() {
-    let env = Env::new(None).acl_rows(&["file.*"], Some(&[Path::new("/")]));
+    let env = Env::new(None).acl_rows(&["file.*"], Some(&[fs_root().as_path()]));
     let files = env.seed_state();
     // A rotated audit slot is part of the audit family.
     let rotated = env.paths.state_dir.join("audit.log.3");
@@ -828,19 +915,23 @@ async fn symlink_out_of_paths<R: Route>() {
     let env_probe = Env::new(None);
     let share = env_probe.share.clone();
     let env = env_probe.acl_rows(&["file.*"], Some(&[share.as_path()]));
-    std::os::unix::fs::symlink(env.outside.join("secret.txt"), env.share.join("out")).unwrap();
-    std::os::unix::fs::symlink(&env.outside, env.share.join("outdir")).unwrap();
+    // Windows may not create a file symlink without a privilege; the
+    // directory link (a junction there) is always made.
+    let file_made = file_link(&env.share.join("out"), &env.outside.join("secret.txt"));
+    dir_link(&env.share.join("outdir"), &env.outside);
     let h = R::start(&env).await;
     let mut conn = Conn::open(&h).await;
     conn.read(&env.share_path("a.txt")).await.read();
 
     let before = snapshot(&env.outside);
-    let targets = vec![
-        env.share_path("out"),
+    let mut targets = vec![
         env.share_path("outdir/secret.txt"),
         env.share_path("outdir"),
         env.share_path("outdir/new.txt"),
     ];
+    if file_made {
+        targets.push(env.share_path("out"));
+    }
     assert_denied_everywhere(&h, &mut conn, &targets, 1).await;
     assert_eq!(snapshot(&env.outside), before);
     h.shutdown().await;
@@ -887,7 +978,7 @@ async fn recheck_the_opened_handle<R: Route>() {
         .acl_rows(&["file.*"], Some(&[share.as_path()]));
     std::fs::create_dir(env.outside.join("sub")).unwrap();
     std::fs::write(env.outside.join("sub/secret.txt"), b"TOPSECRET").unwrap();
-    std::os::unix::fs::symlink(&env.outside, env.share.join("swap")).unwrap();
+    dir_link(&env.share.join("swap"), &env.outside);
     let h = R::start(&env).await;
     let mut conn = Conn::open(&h).await;
     conn.read(&env.share_path("a.txt")).await.read();
@@ -1007,6 +1098,7 @@ async fn list_pages<R: Route>() {
     }
     // One name that is not UTF-8 cannot be listed, only counted. APFS
     // (macOS) refuses to create such a name at all, so there it counts zero.
+    #[cfg(unix)]
     let unlistable =
         match std::fs::write(dir.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name")), b"") {
             Ok(()) => 1,
@@ -1014,6 +1106,10 @@ async fn list_pages<R: Route>() {
             Err(e) if cfg!(target_os = "macos") && e.raw_os_error() == Some(92) => 0,
             Err(e) => panic!("create non-UTF-8 name: {e}"),
         };
+    // NTFS stores names as UTF-16 and a lone surrogate cannot be created
+    // through a UTF-8 API, so nothing is unlistable here.
+    #[cfg(windows)]
+    let unlistable = 0;
     expected.sort();
 
     let h = R::start(&env).await;
@@ -1294,18 +1390,20 @@ async fn acl_check_agrees_with_enforcement<R: Route>() {
     let probe = Env::new(None);
     let share = probe.share.clone();
     let env = probe.acl_rows(&["file.*"], Some(&[share.as_path()]));
-    std::os::unix::fs::symlink(env.outside.join("secret.txt"), env.share.join("out")).unwrap();
+    let file_made = file_link(&env.share.join("out"), &env.outside.join("secret.txt"));
     std::fs::create_dir(env.share.join("sub")).unwrap();
-    let rows = vec![
+    let mut rows = vec![
         (env.share_path("a.txt"), true),
         (env.share_path("sub/../a.txt"), true),
         (env.share_path("new.txt"), true),
         (env.share_path("sub/deeper/new.txt"), true),
         (s(&env.outside.join("secret.txt")), false),
-        (env.share_path("out"), false),
         (env.share_path("../outside/secret.txt"), false),
         (s(&share.parent().unwrap().join("share-sibling")), false),
     ];
+    if file_made {
+        rows.push((env.share_path("out"), false));
+    }
     let inside = Situation {
         env,
         shown: true,
@@ -1628,11 +1726,13 @@ async fn reset_code_of(data: &mut FramedStream) -> u64 {
 const RESET_BAD_HEADER: u64 = 0x2001;
 const RESET_TUNNEL_STALLED: u64 = 0x200E;
 
+#[cfg(unix)]
 fn mode_of(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
 }
 
+#[cfg(unix)]
 fn ino_of(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).expect("stat").ino()
@@ -1646,15 +1746,15 @@ async fn file_capability<R: Route>() {
     let session = h.session().await;
     assert!(
         session.capabilities.iter().any(|c| c == "file.v1"),
-        "a unix host advertises file.v1: {:?}",
+        "a host advertises file.v1: {:?}",
         session.capabilities
     );
     session.close();
     h.shutdown().await;
 }
 both_routes!(file_capability =>
-    file_v1_is_negotiated_by_a_unix_host_forward,
-    file_v1_is_negotiated_by_a_unix_host_reverse);
+    file_v1_is_negotiated_by_a_host_forward,
+    file_v1_is_negotiated_by_a_host_reverse);
 
 // ---- file.read ---------------------------------------------------------
 
@@ -1718,9 +1818,11 @@ async fn write_overwrites<R: Route>() {
     // A second name for the same inode: replacement puts a new inode in the
     // name, it does not rewrite the old one (ADR-0029 decision 7).
     std::fs::hard_link(env.share.join("a.txt"), env.share.join("a.link")).unwrap();
+    #[cfg(unix)]
     let old_ino = ino_of(&env.share.join("a.txt"));
     let h = R::start(&env).await;
     let mut conn = Conn::open(&h).await;
+    #[cfg(unix)]
     let umask = qsh_core::file::host::process_umask();
 
     // Half-way through, the destination is still the old file whole, and the
@@ -1739,6 +1841,7 @@ async fn write_overwrites<R: Route>() {
     assert_eq!(names.len(), 1, "{names:?}");
     assert!(names[0].starts_with(".a.txt.qsh-"), "{names:?}");
     assert_eq!(names[0].len(), ".a.txt.qsh-".len() + 16 + ".part".len());
+    #[cfg(unix)]
     assert_eq!(mode_of(&env.share.join(&names[0])), 0o600);
     assert_eq!(std::fs::read(env.share.join("a.txt")).unwrap(), old);
 
@@ -1749,8 +1852,10 @@ async fn write_overwrites<R: Route>() {
     assert!(result.ok, "{result:?}");
     assert!(result.overwritten, "{result:?}");
     assert_eq!(std::fs::read(env.share.join("a.txt")).unwrap(), bytes);
+    #[cfg(unix)]
     assert_ne!(ino_of(&env.share.join("a.txt")), old_ino);
     assert_eq!(std::fs::read(env.share.join("a.link")).unwrap(), old);
+    #[cfg(unix)]
     assert_eq!(mode_of(&env.share.join("a.txt")), 0o644 & !umask);
     assert!(temps(&env.share).is_empty());
 
@@ -1772,6 +1877,7 @@ async fn write_overwrites<R: Route>() {
         .await;
     assert!(result.ok, "{result:?}");
     let kept = env.share.join("kept.txt");
+    #[cfg(unix)]
     assert_eq!(mode_of(&kept), 0o751);
     let mtime = std::fs::metadata(&kept).unwrap().modified().unwrap();
     assert_eq!(
@@ -2252,3 +2358,263 @@ async fn write_free_space<R: Route>() {
 both_routes!(write_free_space =>
     file_write_refused_below_the_free_space_reserve_forward,
     file_write_refused_below_the_free_space_reserve_reverse);
+
+// ---------------------------------------------------------------------------
+// Windows host (ADR-0035 decision 26): what differs from the unix scenarios
+// above, which otherwise run unchanged on a Windows host.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod windows_host {
+    use super::*;
+
+    /// `(ACE count, inherited ACE count)` of `path` as `icacls` prints it.
+    fn aces(path: &Path) -> (usize, usize) {
+        let out = std::process::Command::new("icacls")
+            .arg(path)
+            .output()
+            .expect("run icacls");
+        assert!(out.status.success(), "icacls: {out:?}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
+        (
+            lines.len(),
+            lines.iter().filter(|l| l.contains("(I)")).count(),
+        )
+    }
+
+    fn read_only(path: &Path) -> bool {
+        std::fs::metadata(path).unwrap().permissions().readonly()
+    }
+
+    async fn temp_file_is_owner_only_until_rename<R: Route>() {
+        let env = Env::new(Some("full"));
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        let bytes = pattern(300 * 1024, 3);
+        let mut data = conn
+            .begin_put(&env.share_path("held.bin"), &Put::new(bytes.len()))
+            .await;
+        send_data(&mut data, &bytes[..FILE_CHUNK_MAX * 3]).await;
+        let share = env.share.clone();
+        let names = wait_for(STEP, || {
+            let names = temps(&share);
+            (!names.is_empty()).then_some(names)
+        })
+        .await;
+        assert_eq!(names.len(), 1, "{names:?}");
+        // While the bytes arrive: exactly one ACE, not inherited.
+        let (all, inherited) = aces(&env.share.join(&names[0]));
+        assert_eq!((all, inherited), (1, 0), "{names:?}");
+
+        send_data(&mut data, &bytes[FILE_CHUNK_MAX * 3..]).await;
+        send_end(&mut data, bytes.len() as u64, digest(&bytes)).await;
+        data.send.finish().unwrap();
+        let result = result_of(&mut data).await;
+        assert!(result.ok, "{result:?}");
+        assert!(temps(&env.share).is_empty());
+        // The finished file carries what its directory hands down.
+        let (all, inherited) = aces(&env.share.join("held.bin"));
+        assert!(
+            all >= 1 && inherited == all,
+            "{all} ACEs, {inherited} inherited"
+        );
+        h.shutdown().await;
+    }
+    both_routes!(temp_file_is_owner_only_until_rename =>
+        windows_put_temp_file_is_owner_only_until_rename_then_inherits_forward,
+        windows_put_temp_file_is_owner_only_until_rename_then_inherits_reverse);
+
+    async fn read_only_attribute<R: Route>() {
+        let env = Env::new(Some("full"));
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        let body = pattern(64, 5);
+        for (mode, expect) in [(0o644, false), (0o755, false), (0o444, true), (0o400, true)] {
+            let path = env.share.join(format!("m{mode:03o}.bin"));
+            let result = conn
+                .put(&s(&path), &Put::new(body.len()).mode(mode), &body)
+                .await;
+            assert!(result.ok, "{mode:03o}: {result:?}");
+            assert_eq!(read_only(&path), expect, "mode {mode:03o}");
+        }
+        // A read-only file is replaced as a unix rename replaces it.
+        let path = env.share.join("m444.bin");
+        let result = conn
+            .put(&s(&path), &Put::new(body.len()).mode(0o644), &body)
+            .await;
+        assert!(result.ok && result.overwritten, "{result:?}");
+        assert!(!read_only(&path));
+        h.shutdown().await;
+    }
+    both_routes!(read_only_attribute =>
+        windows_put_sets_read_only_only_when_owner_write_is_clear_forward,
+        windows_put_sets_read_only_only_when_owner_write_is_clear_reverse);
+
+    async fn mode_bits_are_synthesized<R: Route>() {
+        let env = Env::new(Some("full"));
+        let ro = env.share.join("ro.txt");
+        std::fs::write(&ro, b"x").unwrap();
+        let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&ro, perms).unwrap();
+        std::fs::create_dir(env.share.join("d")).unwrap();
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        assert_eq!(conn.read(&env.share_path("a.txt")).await.read().mode, 0o644);
+        assert_eq!(conn.read(&s(&ro)).await.read().mode, 0o444);
+        let listed = conn.list(&env.share_path(""), "").await.list();
+        let mode_of = |name: &str| {
+            listed
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))
+                .mode
+        };
+        assert_eq!(mode_of("a.txt"), 0o644);
+        assert_eq!(mode_of("ro.txt"), 0o444);
+        assert_eq!(mode_of("d"), 0o755);
+        h.shutdown().await;
+        let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&ro, perms).unwrap();
+    }
+    both_routes!(mode_bits_are_synthesized =>
+        windows_get_synthesizes_mode_bits_forward,
+        windows_get_synthesizes_mode_bits_reverse);
+
+    async fn put_preserves_mtime<R: Route>() {
+        let env = Env::new(Some("full"));
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        let body = pattern(10, 2);
+        let result = conn
+            .put(
+                &env.share_path("kept.txt"),
+                &Put::new(body.len()).preserving(1_000_000_000),
+                &body,
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        let mtime = std::fs::metadata(env.share.join("kept.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            mtime,
+            std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+        );
+        // Without `-p` the time is the transfer's, not the sender's.
+        let result = conn
+            .put(&env.share_path("fresh.txt"), &Put::new(body.len()), &body)
+            .await;
+        assert!(result.ok, "{result:?}");
+        let mtime = std::fs::metadata(env.share.join("fresh.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(mtime > std::time::UNIX_EPOCH + Duration::from_secs(1_500_000_000));
+        h.shutdown().await;
+    }
+    both_routes!(put_preserves_mtime =>
+        windows_put_preserves_mtime_with_p_forward,
+        windows_put_preserves_mtime_with_p_reverse);
+
+    async fn real_free_space_probe_admits_a_small_write<R: Route>() {
+        // No injected probe: the production `GetDiskFreeSpaceExW` reading is
+        // used, and a small file fits on any disk a test can run on.
+        let env = Env::new(Some("full"));
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        let body = pattern(1000, 4);
+        let result = conn
+            .put(&env.share_path("small.bin"), &Put::new(body.len()), &body)
+            .await;
+        assert!(result.ok, "{result:?}");
+        // And one that cannot fit anywhere is refused before any ticket.
+        let refused = conn
+            .write_with(&env.share_path("huge.bin"), &Put::new(usize::MAX >> 1))
+            .await;
+        assert_eq!(
+            refused.code(),
+            Some(ErrorCode::ResourceExhausted),
+            "{refused:?}"
+        );
+        assert!(!env.share.join("huge.bin").exists());
+        h.shutdown().await;
+    }
+    // The injected-probe refusal below the reserve is the shared
+    // `write_free_space` scenario; it is named here too so the Windows leg
+    // lists it beside the real-probe test.
+    both_routes!(write_free_space =>
+        windows_put_refuses_when_free_space_is_short_forward,
+        windows_put_refuses_when_free_space_is_short_reverse);
+
+    both_routes!(real_free_space_probe_admits_a_small_write =>
+        windows_put_uses_the_disk_free_space_probe_forward,
+        windows_put_uses_the_disk_free_space_probe_reverse);
+
+    async fn unc_and_device_paths_are_malformed_before_the_acl<R: Route>() {
+        // `full` would allow anything; the shape check comes first, so the
+        // answer is INVALID_ARGUMENT, not the uniform denial, and nothing is
+        // audited.
+        let env = Env::new(Some("full"));
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        h.audit().clear();
+        for target in [
+            r"\\server\share\x",
+            "//server/share/x",
+            r"\\?\C:\Windows",
+            r"\\.\pipe\qsh",
+        ] {
+            for op in ALL_OPS {
+                let reply = conn.op(op, target).await;
+                assert_eq!(
+                    reply.code(),
+                    Some(ErrorCode::InvalidArgument),
+                    "{op:?} {target}: {reply:?}"
+                );
+            }
+        }
+        assert!(file_records(&h).is_empty(), "{:?}", file_records(&h));
+        assert_eq!(h.server().pending_tickets(), 0);
+        // A drive-relative or rootless path is malformed too.
+        for target in [r"\x", "C:x", "/x"] {
+            let reply = conn.read(target).await;
+            assert_eq!(reply.code(), Some(ErrorCode::InvalidArgument), "{target}");
+        }
+        h.shutdown().await;
+    }
+    both_routes!(unc_and_device_paths_are_malformed_before_the_acl =>
+        windows_remote_path_unc_is_invalid_argument_with_no_audit_line_forward,
+        windows_remote_path_unc_is_invalid_argument_with_no_audit_line_reverse);
+
+    async fn case_variants_and_streams_of_state_paths<R: Route>() {
+        // The volume ignores case: a differently cased spelling of a state
+        // file is the same file. An alternate data stream of one is
+        // malformed. Neither reaches the file.
+        let env = Env::new(None).acl_rows(&["file.*"], Some(&[fs_root().as_path()]));
+        let files = env.seed_state();
+        let h = R::start(&env).await;
+        let mut conn = Conn::open(&h).await;
+        let before = snapshot(&env.host);
+        for file in &files {
+            let upper = s(file).to_uppercase();
+            let reply = conn.read(&upper).await;
+            assert!(reply.is_denied(), "{upper}: {reply:?}");
+            let reply = conn.write(&upper, true, "").await;
+            assert!(reply.is_denied(), "{upper}: {reply:?}");
+            let stream = format!("{}:evil", s(file));
+            let reply = conn.read(&stream).await;
+            assert_eq!(reply.code(), Some(ErrorCode::InvalidArgument), "{stream}");
+        }
+        assert_eq!(snapshot(&env.host), before);
+        h.shutdown().await;
+    }
+    both_routes!(case_variants_and_streams_of_state_paths =>
+        windows_state_paths_fold_case_and_refuse_streams_forward,
+        windows_state_paths_fold_case_and_refuse_streams_reverse);
+}

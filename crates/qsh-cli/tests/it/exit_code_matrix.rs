@@ -844,9 +844,9 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
 
     // `qsh cp` (ADR-0029, `docs/CLI.md` §6.21). A scp transport flag is a
     // clap-level refusal (exit 2, nothing on stdout, in both modes). The
-    // runtime rows run on every client; a Windows host does not advertise
-    // `file.v1` until its file operations land, so the get row ends in
-    // `UNSUPPORTED` against the Windows fleet host (ADR-0035 decision 2).
+    // runtime rows run on every client against every host: the fleet host
+    // advertises `file.v1` on every platform (ADR-0035 decision 26), so the
+    // same rows end the same way on a Windows fleet.
     cases.push(Case {
         name: "usage: cp with an scp transport flag",
         sandbox: &fleet.client,
@@ -857,26 +857,21 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         name: "cp: put of a local file that does not exist",
         sandbox: &fleet.client,
         args: &["cp", "/nonexistent/qsh-cp-source", "box:/tmp/qsh-cp-never"],
-        // The capability check comes first: a host without `file.v1` ends
-        // the run before any source is looked at.
-        #[cfg(unix)]
         outcome: Outcome::Fails("INVALID_ARGUMENT"),
-        #[cfg(not(unix))]
-        outcome: Outcome::Fails("UNSUPPORTED"),
     });
     // The fleet host pins its client with role `none` and its `acl.toml` has
     // no file row: default-deny, the uniform refusal (ADR-0029 decision 8).
-    // The destination is `.`, a directory that exists on every client, so
-    // the client-side destination check cannot answer first (`/tmp` is not
+    // The remote operand is a home-relative name, the one spelling that is a
+    // well-formed path on every host (a `/tmp/...` path is not one on a
+    // Windows host, where the shape check refuses it before the ACL). The
+    // destination is `.`, a directory that exists on every client, so the
+    // client-side destination check cannot answer first (`/tmp` is not
     // a directory on a Windows runner).
     cases.push(Case {
         name: "cp: get from a host that grants this client no file access",
         sandbox: &fleet.client,
-        args: &["cp", "box:/tmp/qsh-cp-never", "."],
-        #[cfg(unix)]
+        args: &["cp", "box:qsh-cp-never", "."],
         outcome: Outcome::Fails("PERMISSION_DENIED"),
-        #[cfg(not(unix))]
-        outcome: Outcome::Fails("UNSUPPORTED"),
     });
 
     // ADR-0032 decision 1: each flag belongs to exactly one subcommand, and

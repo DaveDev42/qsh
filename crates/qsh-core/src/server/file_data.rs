@@ -1,5 +1,5 @@
 //! The `FILE_DATA` data plane of the remote file ops (`docs/adr/0029-file-copy.md`
-//! decisions 7, 9, 10, 11, 13 and 15), unix only. The control plane
+//! decisions 7, 9, 10, 11, 13 and 15). The control plane
 //! (`file_host.rs`) already authorized the request, opened and rechecked the
 //! handle and issued a ticket; this file runs the stream that redeems it.
 //!
@@ -16,8 +16,8 @@
 //!
 //! **`file.write`.** The requester sends `data` chunks, `end`, and finishes
 //! its send half. The host writes them to a temp file `.<name>.qsh-<16
-//! hex>.part` created through the destination directory fd (never visible
-//! under the final name), hashes what it wrote, and only when the size and
+//! hex>.part` created through the destination directory handle (never
+//! visible under the final name), hashes what it wrote, and only when the size and
 //! the BLAKE3-256 agree with `end` (and with the size announced in
 //! `FileWriteOpen`) does it `fsync`, set the final mode and time, and replace
 //! the destination with `renameat` (or `linkat` + `unlinkat` for
@@ -337,11 +337,12 @@ async fn serve_write(
         Ok(dir) => Arc::new(dir),
         Err(e) => {
             drop(permit);
-            let error = if matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
-                wire::Error::new(ErrorCode::ResourceExhausted, "too many open files", true)
-            } else {
-                file_io_error(&e)
-            };
+            let error =
+                if crate::file::local::classify(&e) == crate::file::local::IoClass::TooManyOpen {
+                    wire::Error::new(ErrorCode::ResourceExhausted, "too many open files", true)
+                } else {
+                    file_io_error(&e)
+                };
             return finish_with(send, failure_frame(&error)).await;
         }
     };

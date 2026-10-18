@@ -99,6 +99,11 @@ fn hosts_lists_the_forward_host_without_a_daemon() {
 }
 
 #[test]
-fn cp_to_a_windows_host_is_unsupported_before_m20() {
-    cases::cp_to_a_windows_host_is_unsupported_before_m20(&ForwardRoute::start(), false);
+fn cp_round_trip() {
+    cases::cp_round_trip(&ForwardRoute::start_full());
+}
+
+#[test]
+fn cp_refuses_state_paths_and_reparse_points() {
+    cases::cp_refuses_state_paths_and_reparse_points(&ForwardRoute::start_full());
 }

@@ -191,8 +191,11 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.host_complete_with_role.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
     // `qsh cp` (`docs/CLI.md` §6.21, ADR-0029 decision 18·21). The golden test
-    // is `cfg(unix)`: the file host is unix-only until M20, so on other
-    // targets this list only proves the files exist.
+    // is `cfg(unix)`: the fixtures hold unix path spelling, a unix host's mode
+    // bits and a symlink inside the copied tree, so on other targets this list
+    // only proves the files exist. A Windows host's `cp` is covered by
+    // `windows_forward_e2e` and `windows_reverse_e2e` (`cp_round_trip`,
+    // `cp_refuses_state_paths_and_reparse_points`).
     "file.copy.get.json",
     "file.copy.put.json",
     "error.file.copy.partial.json",
@@ -434,19 +437,6 @@ fn golden_local_fixtures() {
     // way an ordinary CLI fixture would.
     let (code, capabilities) = sandbox.json(&["capabilities", "--json"]);
     assert_eq!(code, 0, "{capabilities}");
-    // `file.v1` is advertised by unix builds only (ADR-0029 decision 23:
-    // a Windows host answers the file ops `UNSUPPORTED` until M20), so the
-    // golden, which records the unix set, is compared against the Windows
-    // build's set plus that one entry.
-    #[cfg(not(unix))]
-    let capabilities = {
-        let mut capabilities = capabilities;
-        capabilities["data"]["capabilities"]
-            .as_array_mut()
-            .expect("capabilities is an array")
-            .push("file.v1".into());
-        capabilities
-    };
     check("capabilities.json", capabilities);
 
     let (code, created) = sandbox.json(&["init", "--json", "--key-store", "file"]);

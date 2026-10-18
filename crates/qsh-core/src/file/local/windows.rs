@@ -36,9 +36,8 @@ use rand::Rng as _;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_READONLY, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileBasicInfo, GetFinalPathNameByHandleW, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileInformationByHandle,
 };
 
 use super::{FsKind, IoClass, MkdirOutcome, StatInfo};
@@ -116,29 +115,7 @@ pub(crate) fn open_dir(path: &Path) -> io::Result<File> {
 /// ancestor, which is the point of asking the handle and not remembering a
 /// string.
 fn dir_path(dir: &File) -> io::Result<PathBuf> {
-    let handle = dir.as_raw_handle() as HANDLE;
-    let mut buf = vec![0u16; 512];
-    loop {
-        // SAFETY: `handle` is open for the call and `buf` is a live buffer
-        // of the length passed.
-        let len = unsafe {
-            GetFinalPathNameByHandleW(
-                handle,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-            )
-        } as usize;
-        if len == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if len < buf.len() {
-            buf.truncate(len);
-            return Ok(PathBuf::from(OsString::from_wide(&buf)));
-        }
-        // Too small: `len` is the size needed, terminator included.
-        buf.resize(len + 1, 0);
-    }
+    crate::fsutil::final_path::of_file(dir)
 }
 
 /// The path of `name` inside `dir`. One plain component: callers validate

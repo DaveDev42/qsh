@@ -1,29 +1,9 @@
-use super::*;
-
-#[cfg(not(unix))]
-#[test]
-fn file_guard_stub_refuses_every_path_off_unix() {
-    assert_eq!(
-        shape_path(b"/x", FileOp::Read, None),
-        Err(ShapeError::Unsupported)
-    );
-    assert_eq!(shape_name_if_dir(b"x"), Err(ShapeError::Unsupported));
-    assert_eq!(
-        FsNormalizer.normalize(Path::new("/x")),
-        Err(NormalizeError::Unsupported)
-    );
-    let paths = Paths::new("c", "s");
-    let set = ProtectedSet::resolve(&paths, &AuditConfig::default(), &[], &FsNormalizer);
-    assert!(set.denies(Path::new("/anything")));
-    assert!(!handle_resolution_available());
-}
-
 #[cfg(unix)]
 mod unix {
     use std::os::unix::fs::symlink;
     use std::process::Command;
 
-    use super::*;
+    use super::super::*;
 
     const HOME: &str = "/home/serve";
 

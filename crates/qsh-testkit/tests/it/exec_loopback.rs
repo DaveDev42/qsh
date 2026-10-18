@@ -26,11 +26,9 @@ fn spec(argv: &[&str]) -> ExecSpec {
 async fn exec_dod_case_stdout_stderr_and_exit_code() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
-    // `file.v1` is advertised by unix hosts only (ADR-0029 decision 23).
-    let mut expected = vec!["exec", "session", "resume.v1", "dial-filter.v1"];
-    if cfg!(unix) {
-        expected.push("file.v1");
-    }
+    // Every host advertises the same set, `file.v1` included (ADR-0029
+    // decision 23).
+    let expected = vec!["exec", "session", "resume.v1", "dial-filter.v1", "file.v1"];
     assert_eq!(s.capabilities, expected);
 
     let r = s

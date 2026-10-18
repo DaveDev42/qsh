@@ -380,6 +380,11 @@ fn windows_supervised_remote_tunnel_survives_a_target_reconnect() {
 }
 
 #[test]
-fn cp_to_a_windows_host_is_unsupported_before_m20() {
-    cases::cp_to_a_windows_host_is_unsupported_before_m20(&ReverseRoute::start(), true);
+fn cp_round_trip() {
+    cases::cp_round_trip(&ReverseRoute::start_full());
+}
+
+#[test]
+fn cp_refuses_state_paths_and_reparse_points() {
+    cases::cp_refuses_state_paths_and_reparse_points(&ReverseRoute::start_full());
 }

@@ -25,6 +25,11 @@ pub(crate) mod dacl;
 #[cfg(windows)]
 pub(crate) mod file_identity;
 
+// The path an open handle really names on Windows, the counterpart of
+// `/proc/self/fd/<n>` and `fcntl(F_GETPATH)` (ADR-0035 decision 26).
+#[cfg(windows)]
+pub(crate) mod final_path;
+
 /// How [`open_private_file`] opens its file. The variants are the four
 /// shapes this crate's private files are opened in, each the same
 /// `OpenOptions` combination on every platform.
