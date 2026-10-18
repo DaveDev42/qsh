@@ -33,7 +33,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 ### 0.3 M19가 만든 사람 몫
 
 - [ ] **Windows client 확인 회차.** `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`)의 W1, W3a, W4, W5, W6, W8, W9, W10, W11, W12. Windows 자산이 붙은 태그에서 돈다. 소유: 사람.
-- [ ] **Windows 서명·배포 준비(ADR-0035 결정 16, 결과 절 "사람이 할 일").** SSL.com 인증서와 eSigner TOTP, 시크릿 `WINDOWS_SIGN_ESIGNER_*` 넷과 변수 `WINDOWS_SIGN_EXPECTED_SUBJECT`, `DaveDev42/scoop-bucket`과 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출. 소유: 사람.
+- [ ] **Windows 배포 준비(ADR-0035 결정 16, 서명은 2026-10-19 개정 이력으로 철회).** `DaveDev42/scoop-bucket` 저장소(README를 넣어 `main`을 만들어 둔다)와 쓰기 배포 키, 시크릿 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출. 비용이 드는 항목은 없다. 소유: 사람.
 
 ### 0.4 M20이 만든 사람 몫
 
@@ -46,14 +46,14 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 M20 계획 §1에서 열린 채로 넘어온 항목이다.
 
 - [ ] macOS Keychain 왕복(`08a6173` 이후 keyring-core 1). `docs/design/testing.md` L1 수동 단계.
-- [ ] 다음 태그 run에서 `release.yml`의 서명·공증·provenance와 Windows Authenticode 검증 확인.
+- [ ] 다음 태그 run에서 `release.yml`의 Apple 서명·공증과 provenance 확인(Windows 자산은 미서명, ADR-0035 개정 이력 2026-10-19).
 - [ ] `qsh identity move-key` 왕복을 macOS Keychain·Linux Secret Service에서.
 - [ ] `launchctl print system/io.qsh.<mode>`의 root 요구 확인(ADR-0032 결정 18 셋째 항목).
 - [ ] Windows `Password` 주체 작업의 Credential Manager 읽기(ADR-0032 결정 15 첫 항목). M19가 `keystore_session_bound`를 보수적으로 내는 것으로 닫았고, 실측은 열려 있다.
 - [ ] Windows OpenSSH Server 위의 `qsh pair ssh-respond`. Dave-Windows에 OpenSSH Server를 켜는 것은 사람이 한다. 두 장비 회차는 캠페인 W7이다.
 - [ ] Windows 방화벽 첫 허용 프롬프트의 실제 문안과 README·doctor `udp_egress_blocked` 안내의 대응(ADR-0035 결정 25 개정 이력 2026-10-18). Windows Server에서의 같은 판정을 포함해 캠페인 W2가 본다.
 
-- [ ] `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 M20 마감 커밋 `258e0bb`의 CI(run 39135082029, ubuntu-24.04)에서 "the connection was not closed within 8s"로 한 번 실패했고 실패 job 재실행은 초록이었다. 그 커밋은 문서만 바꿨고 테스트 파일은 `e39c15c` 이후 그대로다. Dave-Windows-WSL 부하 아래 `trust_withdrawal::` 50/50으로 재현되지 않았다. 의심 원인은 흐름 제어에 막혀 더 보내지 않는 peer가 host의 CONNECTION_CLOSE를 놓치면 stateless reset을 받을 계기가 없다는 것이고, 다시 나오면 테스트 쪽 peer가 닫힘 대기 중에도 패킷을 보내게 할지 판단한다.
+- [x] `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`의 CI 흔들림(run 39135082029). 원인은 테스트 쪽이다. 흐름에 막힌 peer는 보내는 것이 없어서 host의 CONNECTION_CLOSE 한 장을 놓치면 다음 keep-alive(15초)까지 모르고, 대기 한도는 8초다. `448d69a`가 닫힘 대기 중 probe를 보내게 고쳤고, 같은 커밋이 Windows 부하에서 나온 `unreadable_trust_toml_defers_the_comparison_until_it_can_be_read`의 공유 위반(32) 흔들림과 ConPTY `conpty_last_byte_arrives_before_the_exit_event`의 escape 순서 의존도 고쳤다. 부하 Linux 50/50, Windows 50/50. `session_follow`의 두 세션 바이트 비교는 `e7997f4`가 한 세션 ring 두 번 읽기로 바꿨다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
