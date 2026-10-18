@@ -327,7 +327,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `038f74e`. `exec/{posix,windows}.rs`로 갈랐고 Windows 자식은 생성 순간부터 `KILL_ON_JOB_CLOSE` Job Object 안이다. 계획 문구와 다른 점: 환경에 locale·시간대 전달을 넣지 않는다. unix `exec.run`이 결정적인 환경을 위해 일부러 넣지 않으므로 두 OS를 맞췄다(`exec_locale_and_time_zone_do_not_pass_through_from_the_serve_process`). PTY 세션은 그대로 전달한다. 상속 가능 pipe 끝은 `winproc::spawn_guard()` 잠금 안에서만 열리고, console-ctrl·ssh·서비스 관리자의 `std::process` spawn도 같은 잠금을 잡는다(`the_pipe_ends_are_inheritable_only_inside_spawn_in_job`). ADR-0035 개정 이력 2026-10-18 넷째 줄. `run_exec` 수준의 timeout 트리 테스트는 QUIC stream이 필요해 testkit `exec_loopback::exec_run_timeout_kills_the_whole_tree_on_windows`에 있다. 부하: qsh-core `exec::windows`·winproc 19개, qsh-cli `exec_` 4개, testkit 1개 모두 50/50(Dave-Windows). CI 038f74e 초록.
 
-### Step 6 — host 쪽 상태: audit writer `LockFileEx` 잠금·재검증, `acl.toml` DACL 경고 (0.4~0.7ew)
+### Step 6 — host 쪽 상태: audit writer `LockFileEx` 잠금·재검증, `acl.toml` DACL 경고 (0.4~0.7ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 24(결정 9 모듈이 audit 로그·회전 파일·잠금 파일과 디렉터리·`stateless_reset.key`를 만듦, `LockFileEx`, `GetFileInformationByHandle`의 (볼륨 일련번호, 파일 인덱스)로 재검증, `acl.toml` DACL 경고 조건과 구조적 필드, 거부로 바꾸지 않음), 19의 threat-model §4 E 행, 결과 절 "고정할 테스트"의 audit·`acl.toml` 줄. ADR-0010(회전), ADR-0017 결정 1. ROADMAP M20 DoD threat model 줄. 선행: Step 1.
 
@@ -347,6 +347,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - 잠금 경합 테스트를 `m20.filter`에 넣는다.
 
 **(c) 완료 판정:** `audit/writer.rs`에 `#[cfg(not(unix))]` no-op이 없다. `acl.toml` 경고가 Windows에서 구조적 필드만으로 나온다. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `8598bb9`. 회전 잠금은 활성 로그 옆 소유자 전용 sidecar `<active>.lock`의 `LockFileEx`이고(`audit/writer/windows.rs`), 같은 파일 판정은 `fsutil/file_identity.rs`의 128비트 `FileIdInfo`(지원하지 않으면 64비트 인덱스)다. Step 7의 inode 대조가 이 함수를 쓴다. 계획 문구와 다른 점: `acl.toml` 경고의 신뢰 SID에 serve 프로세스 토큰의 사용자를 더했다(관리자가 만든 파일의 소유자는 `Administrators` 그룹이다). ADR-0035 개정 이력 2026-10-18 다섯째 줄. 리뷰 수정: 차단 잠금이 잠금 없이 돌아오는 경우를 panic이 아닌 io 오류로. 부하: qsh-core audit 3개, qsh-cli `audit_`·`acl_toml_` 5개 50/50(Dave-Windows). CI 8598bb9 초록. 같은 커밋의 load workflow에서 `adversarial_load::linux_only::connection_flood_past_the_cap_leaves_the_listener_rss_and_fd_bounded`가 idle-after RSS 30796 KiB(상한 30720)로 한 번 실패했고 재실행은 25008 KiB로 통과했다. Linux 경로 코드는 바뀌지 않았으므로 흔들림으로 보고 기록만 남긴다.
 
 ### Step 7 — host 쪽 `qsh cp`: 경로 판정, 파일 host, `FILE_DATA`, `file.v1` 광고, `cp` 종단 (0.5~0.9ew)
 
