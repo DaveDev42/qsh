@@ -6,8 +6,13 @@
 use super::*;
 use crate::file::guard;
 
+/// The guard opens canonical paths only (it compares the handle's final path
+/// with the one it was given), and a temp directory can be spelled with an
+/// 8.3 short name (`C:\Users\RUNNER~1\...` on a CI runner).
 fn open_dir(path: &std::path::Path) -> File {
-    guard::open_dir_nofollow(path).expect("open dir")
+    let verbatim = std::fs::canonicalize(path).expect("canonicalize");
+    let canonical = guard::windows_path::strip_verbatim_prefix(verbatim.to_str().unwrap());
+    guard::open_dir_nofollow(std::path::Path::new(&canonical)).expect("open dir")
 }
 
 #[test]
