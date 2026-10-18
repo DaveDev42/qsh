@@ -408,7 +408,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `34bb7ac`. setup host·`--to`·`--service`·pair invite 경로에 Windows 전용 거부가 없어 코드는 doctor `udp_egress_blocked` remedy 한 문장과 테스트(`setup_host_service_writes_the_task_definition_on_windows`, cli `--service` 테스트)뿐이다. §7.1 #12: 방화벽 안내는 새 finding 없이 `udp_egress_blocked` remedy가 맡는다. 방화벽 문장은 실측으로 좁혔다(고정 UDP 포트를 loopback 밖에 여는 `serve`·`listen`만 실행 파일 경로마다 한 번 묻고, 임시 포트의 `serve --to`·client와 loopback은 묻지 않는다). ADR-0035 개정 이력 2026-10-18 일곱째 줄이 결정 25의 해당 문장을 대신한다. Windows Server의 같은 판정은 캠페인 몫이다. 부하 대상 테스트 없음. CI run 39097038254 초록.
 
-### Step 9 — Windows `qsh pair ssh-respond` (0.2~0.4ew)
+### Step 9 — Windows `qsh pair ssh-respond` (0.2~0.4ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 1 host 쪽(`qsh pair ssh-respond`), 25(Windows에서 `unsupported_platform`을 내지 않고 다른 OS와 같은 순서, OpenSSH Server 필요, 원격 기본 셸 `cmd.exe`의 9009와 PowerShell의 1), ADR-0044 결정 9·10·12·14·25, `docs/design/protocol.md` §17 응답자 문단. 선행: Step 1(코드), Step 3(문서 착지).
 
@@ -428,6 +428,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - route 동등: `pair ssh`와 `pair ssh --reverse` 두 응답자 행
 
 **(c) 완료 판정:** Windows 빌드가 `qsh pair ssh-respond`를 안다. `ssh_bootstrap`의 Windows 응답자 행과 `--reverse` 행이 Windows 다리에서 초록이다. `docs/man/` diff 0. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `7fbd9d0`. `cli.rs`·`main.rs`의 `cfg(unix)`를 걷어 Windows 빌드도 숨김 `pair ssh-respond`를 등록한다. 응답자 순서·판정·audit·종료 코드는 다른 OS와 같고, UDP bind 시험 소켓에 방어용 `SO_EXCLUSIVEADDRUSE`를 더했다. ADR-0044 개정 이력 2026-10-18 줄(결정 10 Windows 응답자). 낡은 `pair_ssh_respond_is_unknown_on_windows_before_m20`은 지웠다. 계획 이름과 다른 점: CRLF commit 수용은 `responder_accepts_crlf_commit_lines`가 아니라 이미 있던 `ssh_respond_a_crlf_commit_is_accepted`(qsh-core)와 `ssh_bootstrap_local_responder_survives_rc_output_and_crlf_line_ends`(qsh-cli)가 Windows 다리에서 맡는다. 종료 코드 표의 `127` 행은 Windows에서 건너뛴다. 실제 `cmd.exe /C <없는 프로그램>`의 프로세스 종료 상태는 1이라(9009는 셸 안의 ERRORLEVEL) 진짜 셸로 대신할 수 없고, 9009 사상은 `ssh_bootstrap_a_remote_cmd_exe_9009_is_a_missing_qsh_and_writes_nothing`이 고정한다. Windows 전용으로 더한 것: `bootstrapped_forward_route_passes_the_exec_cp_suite_on_windows`, `bootstrapped_reverse_route_passes_the_exec_cp_suite_on_windows`, `pair_ssh_reverse_local_side_runs_on_windows_and_names_serve_to_as_the_next_command`, `auto_bootstrap_then_cp_completes_in_a_console_on_windows`, `auto_bootstrap_then_interactive_attach_reaches_the_host_shell_on_windows`. 부하: qsh-cli 응답자·자동 부트스트랩 6개 50/50, qsh-core `bind_probe_` 3개 50/50(Dave-Windows). CI 4473c96(7fbd9d0·048df57 포함) 초록.
 
 ### Step 10 — 캠페인 `p1-windows.md` host 회차 추가와 재고정 (0.1~0.2ew) ✅ 2026-10-18
 
