@@ -213,11 +213,17 @@ pub const AUDIT_PATH_UNWRITABLE: Diagnostic = Diagnostic {
 /// Distinguished from [`NO_ROUTE`] by *how* the probe fails
 /// ([`probe::classify_connectivity`]): a silent timeout here, an active
 /// OS-level refusal there.
+///
+/// The silence also has a far-end cause this finding carries a sentence
+/// for: a Windows host's Defender Firewall drops inbound UDP for a `qsh serve`
+/// or `qsh listen` that was never allowed (ADR-0035 decision 25). It is the
+/// one place the doctor can say so, because the probe cannot tell a local
+/// egress drop from a remote ingress drop; no new finding code is needed.
 pub const UDP_EGRESS_BLOCKED: Diagnostic = Diagnostic {
     id: DiagnosticId::UdpEgressBlocked,
     code: "udp_egress_blocked",
     message: "UDP egress for QSH's QUIC transport appears to be silently blocked: a probe packet left this machine but nothing answered before the timeout. QSH has no TCP fallback (ADR-0043) — every QSH connection is QUIC over UDP, so this is a hard stop, not a slow path.",
-    remedy: "Open outbound UDP (default port 4433) on this machine's firewall. Until then, an existing overlay such as WireGuard or Tailscale is the only workaround.",
+    remedy: "Open outbound UDP (default port 4433) on this machine's firewall. If the target is a Windows machine running `qsh serve` or `qsh listen`, its Windows Defender Firewall drops inbound UDP until qsh is allowed there; allowing it on private networks is enough for peers on the same network. Until the path is open, an existing overlay such as WireGuard or Tailscale is the only workaround.",
 };
 
 /// `docs/CLI.md` §6.17: the operating system reported the probed address

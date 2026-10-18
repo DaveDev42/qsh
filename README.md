@@ -1173,11 +1173,19 @@ Some of these are MVP scope decisions, some are unfinished work.
   On a reverse connection a local program that closes only its write side
   and waits for the answer is seen by the destination, as on unix
   (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` and the interactive `-D`
-  spelling work like `--local`/`--remote`. The first time
-  `qsh serve` or `qsh listen` opens its UDP port, Windows Defender Firewall
-  may ask whether to allow it. Allow it on private networks for peers on
-  other machines to connect; connections from the same machine do not need
-  it. `qsh serve --to` only dials out and does not trigger the prompt. CI builds, lints and
+  spelling work like `--local`/`--remote`. `qsh setup host`
+  (with `--to` and `--service`) and `qsh pair invite` run on a Windows host
+  as on the other platforms; `--service` writes the Task Scheduler task
+  definition and registers nothing (`qsh service install --activate` does).
+  The first time `qsh serve` or `qsh listen` binds its fixed UDP port on a
+  non-loopback address, Windows Defender Firewall asks whether to allow it,
+  once per executable path (a `qsh.exe` at a new path asks again). Allow it
+  on private networks for peers on other machines to connect; connections
+  from the same machine do not need it. Until it is allowed, packets from
+  other machines are dropped without an answer, and `qsh doctor <host>` run
+  from a peer can report `udp_egress_blocked`. `qsh serve --to`, other
+  outbound dials and loopback listeners never trigger the prompt, and `qsh`
+  does not add or change firewall rules. CI builds, lints and
   runs the Windows test suite on `windows-latest`, including the ConPTY
   session, signal and Job Object tests.
 - Reverse mode needs a directly reachable path from the target to the
