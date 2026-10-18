@@ -7,31 +7,53 @@
 //! The child is only spawned by [`run_exec`], which the server calls **after**
 //! the ACL check passed and the ticket was redeemed — never earlier.
 //!
-//! Environment hygiene below is **unix-only** (`docs/CLI.md`): the child does
-//! not inherit the `qsh serve` process environment at all — no `TERM`, no
-//! `LANG`/`LC_*`/`TZ` passthrough, unlike an interactive PTY session
-//! (`pty::posix::build_env`) — and `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`
-//! are pinned from the password database, with the caller's `env` layered
-//! under them and unable to override them. "Mirrors `pty::posix`" below
-//! means exactly `pty::pinned_identity_env`, the narrow helper that
-//! computes those five pinned *values* — not `build_env`'s broader
-//! locale/`TERM` passthrough, which `exec.run` deliberately does not share:
-//! a scripted remote command gets a small, deterministic environment
-//! instead of whatever locale the `qsh serve` process happens to run under.
-//! Windows (host is M20, unsupported) has no password-database account to pin these
-//! to, so none of this applies there: the child inherits the full
-//! `qsh serve` process environment and the caller's `env` is layered on top
-//! unfiltered, `PATH` included — see [`run_exec`]'s `#[cfg(not(unix))]` arm.
+//! Environment hygiene (`docs/CLI.md`): the child does not inherit the
+//! `qsh serve` process environment, and the caller's `env` is layered under
+//! the keys the host pins and cannot override them.
+//!
+//! - **unix** (`posix.rs`): no `TERM`, no `LANG`/`LC_*`/`TZ` passthrough,
+//!   unlike an interactive PTY session (`pty::posix::build_env`), and
+//!   `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` pinned from the password
+//!   database. "Mirrors `pty::posix`" there means exactly
+//!   `pty::pinned_identity_env`, the narrow helper that computes those five
+//!   pinned *values* — not `build_env`'s broader locale/`TERM` passthrough,
+//!   which `exec.run` deliberately does not share: a scripted remote command
+//!   gets a small, deterministic environment instead of whatever locale the
+//!   `qsh serve` process happens to run under.
+//! - **Windows** (`windows.rs`, ADR-0035 decisions 21 and 23): the same
+//!   shape as unix. The account's user environment block, the caller's `env`,
+//!   and the pinned keys of a Windows session (the unix five plus the
+//!   Windows identity variables, compared ignoring case) applied last
+//!   (`pty::env_policy::windows_overlay_env`). No `TERM`, and no
+//!   `LANG`/`LANGUAGE`/`LC_*`/`TZ` from the `qsh serve` process, unlike a
+//!   Windows PTY session (`pty::conpty`), which passes the serve process's
+//!   locale and time zone through.
+//!
+//! The child is the root of its own tree on both platforms: a process group
+//! on unix, a Job Object created with the child on Windows. A timeout, a peer
+//! that went away, or a write failure ends the whole tree, not just the
+//! program `argv[0]` named.
+//!
+//! `argv` is run directly, never through a shell. A shell built-in is the
+//! caller's to name (`sh -c ...`, `cmd /c ...`).
 
-use std::process::Stdio;
 use std::time::Duration;
 
 use qsh_proto::wire::{EXEC_CHUNK_MAX, ExecFrame, exec_frame};
 use qsh_transport::{FramedRecv, FramedSend, StreamError};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+#[cfg(unix)]
+mod posix;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use posix::{ExecChild, spawn_child};
+#[cfg(windows)]
+use windows::{ExecChild, spawn_child};
 
 /// What to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +108,27 @@ impl ExecError {
             ExecError::Stream(_) | ExecError::Wait(_) | ExecError::Writer(_) => false,
         }
     }
+}
+
+/// The child's standard input, as the stdin pump writes it.
+type ChildStdin = Box<dyn AsyncWrite + Send + Unpin>;
+/// A child's standard output or error, as a pump reads it.
+type ChildOutput = Box<dyn AsyncRead + Send + Unpin>;
+
+/// A started child and the three pipes to it.
+struct Spawned {
+    child: ExecChild,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildOutput>,
+    stderr: Option<ChildOutput>,
+}
+
+/// Why a child could not be started: the exit code and the stderr line the
+/// client is told, in-band, like a shell would.
+#[derive(Debug)]
+struct SpawnFailure {
+    code: i32,
+    message: String,
 }
 
 /// Bounded queue depth between the pipe readers and the stream writer.
@@ -144,88 +187,26 @@ pub async fn run_exec<G: Send>(
         });
     };
 
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        // Own process group so a timeout kill reaches the whole tree.
-        cmd.process_group(0);
-    }
-
-    // Environment hygiene (`docs/CLI.md`: `exec.run` does not implicitly
-    // inherit the `qsh serve` process environment, and `HOME`/`USER`/
-    // `LOGNAME`/`SHELL`/`PATH` are host-pinned on every path — the *values*
-    // mirror `pty::posix::pinned_identity_env`, not its `build_env`'s
-    // broader `TERM`/`LANG`/`LC_*` passthrough, which this path skips on
-    // purpose, module docs above). Windows has no password-database account
-    // to pin these to, so this is unix-only; `qsh serve`'s own env still
-    // reaches the child there (pre-existing, unchanged behavior for the
-    // sole non-PTY-host platform).
-    #[cfg(unix)]
-    {
-        let pinned = match crate::pty::pinned_identity_env() {
-            Ok(pinned) => pinned,
-            Err(err) => {
-                drop(guard);
-                let msg = format!("qsh: cannot resolve host account: {err}\n");
-                send.send(&ExecFrame::stderr(msg.into_bytes())).await?;
-                send.send(&ExecFrame::exec_exit(126, None)).await?;
-                let _ = send.finish();
-                return Ok(ExecOutcome {
-                    exit_code: 126,
-                    signal: None,
-                    timed_out: false,
-                });
-            }
-        };
-        cmd.env_clear();
-        for (k, v) in &spec.env {
-            // Same entry-shape filter as `pty::posix::build_env`: an `=` in
-            // the key is not rejected by `Command::env` — it is emitted
-            // verbatim into envp as a second `PATH=`/`HOME=`/... entry,
-            // which a shell child resolves as an *override* of the pinned
-            // one below (later envp entry wins). Filtering by exact key
-            // name alone (`PINNED_ENV.contains`) does not catch that; the
-            // key has to be valid first.
-            if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
-                continue; // not a valid environment entry; drop silently
-            }
-            if crate::pty::PINNED_ENV.contains(&k.as_str()) {
-                continue; // the caller cannot override a host-pinned key
-            }
-            cmd.env(k, v);
-        }
-        cmd.envs(pinned);
-    }
-    #[cfg(not(unix))]
-    {
-        cmd.envs(spec.env.iter().map(|(k, v)| (k, v)));
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            let code = spawn_failure_code(&err);
+    let Spawned {
+        mut child,
+        stdin: child_stdin,
+        stdout: child_stdout,
+        stderr: child_stderr,
+    } = match spawn_child(program, args, &spec) {
+        Ok(spawned) => spawned,
+        Err(failure) => {
             drop(guard);
-            let msg = format!("qsh: cannot execute {program:?}: {err}\n");
-            send.send(&ExecFrame::stderr(msg.into_bytes())).await?;
-            send.send(&ExecFrame::exec_exit(code, None)).await?;
+            send.send(&ExecFrame::stderr(failure.message.into_bytes()))
+                .await?;
+            send.send(&ExecFrame::exec_exit(failure.code, None)).await?;
             let _ = send.finish();
             return Ok(ExecOutcome {
-                exit_code: code,
+                exit_code: failure.code,
                 signal: None,
                 timed_out: false,
             });
         }
     };
-
-    let child_stdin = child.stdin.take();
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
 
     // Pipe readers → single writer, so frames never interleave mid-frame.
     let (tx, mut rx) = mpsc::channel::<ExecFrame>(OUTPUT_QUEUE_FRAMES);
@@ -319,11 +300,10 @@ pub async fn run_exec<G: Send>(
     let deadline = spec.timeout.map(|t| tokio::time::Instant::now() + t);
     let mut timed_out = false;
     let mut killed = false;
-    fn kill(child: &mut tokio::process::Child, killed: &mut bool) {
+    fn kill(child: &mut ExecChild, killed: &mut bool) {
         if !*killed {
             *killed = true;
-            kill_group(child);
-            let _ = child.start_kill();
+            child.kill_tree();
         }
     }
     let mut peer_gone_polled = false;
@@ -397,7 +377,7 @@ pub async fn run_exec<G: Send>(
 
     // Reap. Pipes are at EOF, so a well-behaved child has exited or is
     // about to; still honor the deadline in case it lingers.
-    let status = match deadline {
+    let exit = match deadline {
         Some(d) if !timed_out => match tokio::time::timeout_at(d, child.wait()).await {
             Ok(status) => status,
             Err(_) => {
@@ -410,9 +390,7 @@ pub async fn run_exec<G: Send>(
     };
     // The stdin pump must not outlive the exec on any path.
     stdin_task.abort();
-    let status = status.map_err(ExecError::Wait)?;
-
-    let (exit_code, signal) = exit_status_parts(&status);
+    let (exit_code, signal) = exit.map_err(ExecError::Wait)?;
     // The child is reaped: release the reservation before the result can
     // reach the client (see the `guard` doc above).
     drop(guard);
@@ -476,21 +454,6 @@ async fn pump_output<R: AsyncRead + Unpin>(
         }
     }
 }
-
-#[cfg(unix)]
-fn kill_group(child: &tokio::process::Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: killpg is async-signal-safe and only takes plain integers;
-        // the pgid equals the child's pid because we spawned it with
-        // `process_group(0)`.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_child: &tokio::process::Child) {}
 
 /// Split an [`std::process::ExitStatus`] into (exit_code, signal_name).
 pub fn exit_status_parts(status: &std::process::ExitStatus) -> (i32, Option<String>) {

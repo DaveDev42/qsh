@@ -464,14 +464,19 @@ impl SshRunner {
     /// `cancel` ends the child and fails with `CANCELED`.
     pub async fn resolve(&self, dest: &Dest, cancel: &CancelToken) -> Result<SshResolved, OpError> {
         let program = self.program_text();
-        let mut child = Command::new(&self.program)
-            .args(ssh_g_args(dest))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| spawn_error(&program, &err))?;
+        let mut child = {
+            // Not while another spawn has handles inheritable (`winproc`).
+            #[cfg(windows)]
+            let _spawning = crate::winproc::spawn_guard();
+            Command::new(&self.program)
+                .args(ssh_g_args(dest))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|err| spawn_error(&program, &err))?
+        };
         let stdout = child.stdout.take().expect("stdout is piped");
         let read = async {
             let mut out = Vec::new();
@@ -542,14 +547,19 @@ impl SshRunner {
     ) -> Result<SshChild, OpError> {
         let args = responder_args(dest, remote_qsh, options.batch_mode)?;
         let program = self.program_text();
-        let mut child = Command::new(&self.program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| spawn_error(&program, &err))?;
+        let mut child = {
+            // Not while another spawn has handles inheritable (`winproc`).
+            #[cfg(windows)]
+            let _spawning = crate::winproc::spawn_guard();
+            Command::new(&self.program)
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|err| spawn_error(&program, &err))?
+        };
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         tracing::debug!(target: "qsh::ssh_bootstrap", stage = "spawned", batch_mode = options.batch_mode);

@@ -77,9 +77,12 @@ async fn exec_env_is_passed_to_the_remote_command() {
 
 /// `docs/CLI.md`: "클라이언트 프로세스의 환경을 암묵적으로 상속시키지
 /// 않는다" — the child must not see the `qsh serve` process's own
-/// environment, only `--env`/pinned. Unix only: the pinning is a
-/// password-database concept (`pty::pinned_identity_env`); Windows keeps
-/// the pre-existing inherited-env behavior (`crates/qsh-core/src/exec/mod.rs`).
+/// environment, only `--env`/pinned. Unix only here: the pinning is a
+/// password-database concept (`pty::pinned_identity_env`) and the probe is
+/// `sh`. The Windows counterparts, which need `cmd.exe` and the account's
+/// environment block, are in `crates/qsh-core/src/exec/windows/tests.rs`
+/// (`exec_child_environment_is_the_user_block_not_ours_on_windows`,
+/// `exec_pinned_keys_cannot_be_overridden_on_windows`).
 ///
 /// Uses `CARGO_PKG_NAME` as the marker rather than planting one with
 /// `std::env::set_var`: this binary is one process shared by every test in
@@ -204,9 +207,10 @@ async fn exec_not_found_and_timeout() {
     assert_eq!(r.exit_code, 127);
     assert!(String::from_utf8_lossy(&r.stderr).contains("cannot execute"));
 
-    // The command itself must be the thing that sleeps: on Windows there is
-    // no process-group kill, so a shell wrapper's grandchild would keep the
-    // pipes open past the deadline.
+    // The command itself is the thing that sleeps, so the kill has the
+    // fewest processes to reach; the whole-tree kill has its own cases
+    // (`exec_signal_exit_and_timeout_kill_report_sigkill` on unix,
+    // `exec_timeout_kills_the_whole_tree_on_windows` in `qsh-core`, and `exec_run_timeout_kills_the_whole_tree_on_windows` below through `run_exec`).
     let mut sp = spec(&["sleep", "30"]);
     sp.timeout = Some(Duration::from_millis(300));
     let started = std::time::Instant::now();
@@ -219,6 +223,84 @@ async fn exec_not_found_and_timeout() {
     assert_ne!(r.exit_code, 0);
     #[cfg(unix)]
     assert_eq!(r.signal.as_deref(), Some("SIGKILL"));
+}
+
+/// Poll `ready` until it yields, failing after `within`. The condition is
+/// something the target did itself; the short pause only paces the polling.
+#[cfg(windows)]
+async fn poll_until<T>(what: &str, within: Duration, mut ready: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if let Some(value) = ready() {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The Windows twin of the process-group half of
+/// `exec_signal_exit_and_timeout_kill_report_sigkill`, driven through
+/// `run_exec` (the server's entry): a deadline ends the whole tree, not just
+/// `cmd`. `cmd` runs `ping`, whose output goes to a file `ping` itself holds
+/// open without delete sharing. Once the file has content `ping` is running;
+/// after the `timed_out` result the file can be deleted only if no process of
+/// the tree still has it open. The deadline starts with the command, so it
+/// leaves room for `ping` to start on a loaded runner.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_run_timeout_kills_the_whole_tree_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ping.txt");
+    let marker_arg = marker
+        .to_str()
+        .expect("the marker path is UTF-8")
+        .to_string();
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let mut sp = spec(&[
+        "cmd",
+        "/c",
+        "ping",
+        "-n",
+        "120",
+        "127.0.0.1",
+        ">",
+        &marker_arg,
+    ]);
+    sp.timeout = Some(Duration::from_secs(10));
+
+    let started = std::time::Instant::now();
+    let (result, ()) = tokio::join!(s.exec(&sp, None, None), async {
+        poll_until(
+            "ping to write its first line",
+            Duration::from_secs(60),
+            || {
+                std::fs::metadata(&marker)
+                    .is_ok_and(|meta| meta.len() > 0)
+                    .then_some(())
+            },
+        )
+        .await;
+    });
+    let r = result.unwrap();
+    assert!(r.timed_out, "host must flag the kill as a timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the deadline must end the tree, not wait for ping"
+    );
+    assert_eq!(r.signal, None, "Windows has no signal to name");
+    assert_ne!(r.exit_code, 0);
+
+    poll_until(
+        "the killed tree to release the file ping held open",
+        Duration::from_secs(60),
+        || std::fs::remove_file(&marker).ok(),
+    )
+    .await;
 }
 
 /// POSIX signal semantics: a signaled exit is `128 + signo` with the signal

@@ -18,6 +18,11 @@ fn exec_round_trip() {
 }
 
 #[test]
+fn exec_timeout_kills_the_whole_tree() {
+    cases::exec_timeout_kills_the_whole_tree(&ForwardRoute::start());
+}
+
+#[test]
 fn pty_session_runs_a_command() {
     cases::pty_session_runs_a_command(&ForwardRoute::start());
 }
