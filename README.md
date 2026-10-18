@@ -33,10 +33,11 @@ role, closes its open connections on that machine within 2 seconds.
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)).
 
-Linux and macOS run both ends. Windows 10 1809 or later runs the client,
-including interactive sessions, `qsh cp`, port forwards, reverse mode and the
-ssh bootstrap; the Windows host, with PTY sessions and file operations, is
-planned (see [Known limitations](#known-limitations)).
+Linux, macOS and Windows 10 1809 or later run both ends. A Windows machine
+has the same features as the others: interactive sessions on a ConPTY
+pseudo-console, `qsh exec`, `qsh cp`, port forwards, reverse mode, the ssh
+bootstrap and `qsh setup host`. See [Known limitations](#known-limitations)
+for what differs.
 
 **Status.** Version 0.4.3, not for production use. The independent review of
 the protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
@@ -275,9 +276,8 @@ under `[ssh]` in `config.toml` to turn it off, or run the step yourself with
 `qsh pair ssh box`. If the host is not running `qsh serve` when ssh finishes,
 the pins stay and the command ends with `CONNECTION_FAILED`; start `serve`
 and run it again. A Windows client runs the same bootstrap with `ssh.exe`,
-but a Windows host cannot answer it yet (see
-[Known limitations](#known-limitations)): `qsh` ends with an error and pins
-nothing on either side.
+and a Windows machine can be the remote end when the OpenSSH Server optional
+feature is on (see [Known limitations](#known-limitations)).
 
 Without ssh, six commands pin the two machines by hand. This path, not the
 one above, is the literal script that `docs/campaigns/m9-stopwatch.md` and
@@ -909,6 +909,13 @@ not know, which turns that pin into `none` (narrower, never wider);
 Every write that gives a pin a role other than `none` leaves an audit record
 first, and without a durable record it does not happen.
 
+On a Windows host each session's processes live in one Job Object created
+with the child, so closing the session or stopping `qsh serve` ends the whole
+tree, and the pseudo-console's pipes carry an owner-only DACL under a random
+name. The two named events behind `USR1` and `USR2` are created per session
+with an owner-only DACL as well, so another local user cannot open them to
+fake a signal. `acl.toml` still decides which peer may do any of this.
+
 Reading the audit log is a local operation. `qsh audit` has no wire message
 and no ACL action, so no remote peer can list who connected or what was
 refused, and moving the device key with `qsh identity move-key` leaves its own
@@ -1137,11 +1144,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   old file's owner, hard links and extended attributes do not carry over,
   unlike scp, which writes into the existing file. With role `full` or a wide
   `paths`, `file.write` is as strong as `exec.run`.
-- The Windows client ships in M19 and the Windows host is planned for M20
-  (ADR-0035), with the same features as Linux and macOS. The Windows
+- Windows has the same features as Linux and macOS, on the client and on the
+  host (ADR-0035). It needs Windows 10 1809 or later, the first release with
+  the ConPTY pseudo-console API; on an older conhost the client refuses to
+  open a session and says so. The Windows
   console layer (raw VT input and output, UTF-8 code page, resize polling, mode
-  restore on every exit path) and the echo-free invite-code prompt are in; they
-  need Windows 10 1809 or later. The files `qsh` keeps private (the identity
+  restore on every exit path) and the echo-free invite-code prompt are in. The
+  files `qsh` keeps private (the identity
   key, `resume.json`, `trust.toml`, the audit log, the CA files, the stateless
   reset key) are created with an owner-only DACL, the counterpart of mode
   0600 on unix; where that cannot be applied, for example on a FAT/exFAT
@@ -1153,23 +1162,25 @@ Some of these are MVP scope decisions, some are unfinished work.
   and a closed console window detaches the session so another console can
   take it over. `qsh cp` works from a Windows client with scp's syntax, with
   one change: a single letter and a colon at the start of an operand is a
-  drive (`C:\x`), so a one-letter host name needs `user@` or brackets. The
-  ssh bootstrap works the same way: `qsh pair ssh` and the automatic
-  bootstrap on `qsh box` and `qsh cp` run the system `ssh.exe` with the
-  console left in cooked mode until ssh exits. A Windows machine can be the
-  remote end of a bootstrap too: the hidden responder (`qsh pair ssh-respond`)
-  runs there in the same order as on Linux and macOS, as long as the OpenSSH
-  Server optional feature is on. When the remote default shell is `cmd.exe`
-  and `qsh.exe` is not on its `PATH`, ssh exits 9009 and `qsh` says the
-  remote has no `qsh`; under PowerShell the exit code is 1, which `qsh`
-  reports as a failed remote command with a hint to put `qsh.exe` on the
-  remote `PATH` or pass `--remote-qsh`. A Windows host
-  advertises `file.v1`, so `qsh cp` works against it over both routes. Its
-  remote paths are drive paths (`C:\x` or `C:/x`) or relative to the
-  serving account's profile directory, and UNC and device paths are refused
-  before any access check. It serves PTY sessions on a ConPTY pseudo-console,
-  each session's processes in one Job Object, and `qsh exec` runs in a Job
-  Object too, so a timeout or a close ends the whole tree. Reverse mode runs on Windows: `qsh listen` keeps
+  drive (`C:\x`), so a one-letter host name needs `user@` or brackets.
+- A Windows host serves PTY sessions on a ConPTY pseudo-console. The default
+  shell is `cmd.exe` (from `COMSPEC`); for PowerShell, open the session with
+  `qsh session open <host> -- pwsh`. Each session's processes run in one Job
+  Object, and `qsh exec` runs in a Job Object too, so a timeout or a close
+  ends the whole tree. `qsh exec` does not use a shell: `dir`, `echo` and
+  redirections need `qsh exec <host> -- cmd /c "..."`. Windows has no signals,
+  so `qsh session close --signal` maps the seven names to events: `INT` is
+  `CTRL_C_EVENT`, `QUIT` is `CTRL_BREAK_EVENT`, `HUP` and `TERM` close the
+  pseudo-console, `KILL` terminates the Job Object, and `USR1` and `USR2` set
+  a named event whose name is in the session's `QSH_SIGNAL_EVENT_USR1` and
+  `QSH_SIGNAL_EVENT_USR2` environment variables (nothing happens unless the
+  program waits on it). Every value is accepted and exits `0`
+  (`docs/CLI.md` §6.7).
+- A Windows host advertises `file.v1`, so `qsh cp` works against it over both
+  routes. Its remote paths are drive paths (`C:\x` or `C:/x`) or relative to
+  the serving account's profile directory, and UNC and device paths
+  (`\\server\share`, `\\?\`, `\\.\`) are refused before any access
+  check. `acl.toml` writes `paths` as `C:/data`. Reverse mode runs on Windows: `qsh listen` keeps
   its local control endpoint on a named pipe, and `qsh exec`, tunnels,
   `qsh hosts`, `qsh tunnels` and `qsh tunnel close` work over a reverse
   connection as they do on unix. A Windows `qsh serve --to` target serves
@@ -1181,15 +1192,25 @@ Some of these are MVP scope decisions, some are unfinished work.
   (with `--to` and `--service`) and `qsh pair invite` run on a Windows host
   as on the other platforms; `--service` writes the Task Scheduler task
   definition and registers nothing (`qsh service install --activate` does).
-  The first time `qsh serve` or `qsh listen` binds its fixed UDP port on a
+- The ssh bootstrap works the same way on Windows: `qsh pair ssh` and the
+  automatic bootstrap on `qsh box` and `qsh cp` run the system `ssh.exe` with
+  the console left in cooked mode until ssh exits. A Windows machine can be the
+  remote end of a bootstrap too: the hidden responder (`qsh pair ssh-respond`)
+  runs there in the same order as on Linux and macOS, but only when the
+  OpenSSH Server optional feature is on. When the remote default shell is
+  `cmd.exe` and `qsh.exe` is not on its `PATH`, ssh exits 9009 and `qsh` says
+  the remote has no `qsh`; under PowerShell the exit code is 1, which `qsh`
+  reports as a failed remote command with a hint to put `qsh.exe` on the
+  remote `PATH` or pass `--remote-qsh`.
+- The first time `qsh serve` or `qsh listen` binds a fixed UDP port on a
   non-loopback address, Windows Defender Firewall asks whether to allow it,
   once per executable path (a `qsh.exe` at a new path asks again). Allow it
   on private networks for peers on other machines to connect; connections
   from the same machine do not need it. Until it is allowed, packets from
   other machines are dropped without an answer, and `qsh doctor <host>` run
-  from a peer can report `udp_egress_blocked`. `qsh serve --to`, other
-  outbound dials and loopback listeners never trigger the prompt, and `qsh`
-  does not add or change firewall rules. CI builds, lints and
+  from a peer can report `udp_egress_blocked`. `qsh serve --to`, the client,
+  other outbound dials and loopback listeners never trigger the prompt, and
+  `qsh` does not add or change firewall rules. CI builds, lints and
   runs the Windows test suite on `windows-latest`, including the ConPTY
   session, signal and Job Object tests.
 - Reverse mode needs a directly reachable path from the target to the
@@ -1278,7 +1299,7 @@ old-glibc check.
 | M17 | Ops surface (service activation, `move-key`, session filters, `qsh audit`) | Done (2026-10-16) |
 | M18 | Session home | Waits on the real-device mobility campaign (M8 DoD 3) |
 | M19 | Windows client | Done (2026-10-18); Windows campaign rounds and signing secrets open |
-| M20 | Windows host | In progress |
+| M20 | Windows host | Done (2026-10-18); Windows campaign rounds open |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the
