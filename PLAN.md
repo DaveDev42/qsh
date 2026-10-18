@@ -350,7 +350,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `8598bb9`. 회전 잠금은 활성 로그 옆 소유자 전용 sidecar `<active>.lock`의 `LockFileEx`이고(`audit/writer/windows.rs`), 같은 파일 판정은 `fsutil/file_identity.rs`의 128비트 `FileIdInfo`(지원하지 않으면 64비트 인덱스)다. Step 7의 inode 대조가 이 함수를 쓴다. 계획 문구와 다른 점: `acl.toml` 경고의 신뢰 SID에 serve 프로세스 토큰의 사용자를 더했다(관리자가 만든 파일의 소유자는 `Administrators` 그룹이다). ADR-0035 개정 이력 2026-10-18 다섯째 줄. 리뷰 수정: 차단 잠금이 잠금 없이 돌아오는 경우를 panic이 아닌 io 오류로. 부하: qsh-core audit 3개, qsh-cli `audit_`·`acl_toml_` 5개 50/50(Dave-Windows). CI 8598bb9 초록. 같은 커밋의 load workflow에서 `adversarial_load::linux_only::connection_flood_past_the_cap_leaves_the_listener_rss_and_fd_bounded`가 idle-after RSS 30796 KiB(상한 30720)로 한 번 실패했고 재실행은 25008 KiB로 통과했다. Linux 경로 코드는 바뀌지 않았으므로 흔들림으로 보고 기록만 남긴다.
 
-### Step 7 — host 쪽 `qsh cp`: 경로 판정, 파일 host, `FILE_DATA`, `file.v1` 광고, `cp` 종단 (0.5~0.9ew)
+### Step 7 — host 쪽 `qsh cp`: 경로 판정, 파일 host, `FILE_DATA`, `file.v1` 광고, `cp` 종단 (0.5~0.9ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 26 전체(경로: `/`와 `\` 동일시, 드라이브 절대 경로와 `USERPROFILE` 기준 상대 경로, `host:`는 `USERPROFILE`, UNC·장치 이름 공간은 ACL 판정 전 `INVALID_ARGUMENT` / 정규화: `GetFinalPathNameByHandleW`에서 `\\?\` 접두를 뗀 것, 성분 단위 대소문자 무시 비교, `FILE_FLAG_OPEN_REPARSE_POINT`로 열어 재분석 지점 거부, 열린 핸들의 최종 경로 재검증 / mode 합성, 읽기 전용 특성, 임시 파일 소유자 전용 DACL과 rename 직전 보호 해제, `SetFileTime`), ADR-0029 결정 5·6·7·8·13·23(판정 순서, 상태 경로 항상 거부, inode 대조, 원자 교체, 여유 공간, Windows host의 착지와 `file.v1` 광고), ADR-0035 결정 2·3(매트릭스의 `cp` 두 행), 17(`cp` 종단), ROADMAP M20 DoD 둘째 줄의 "Windows host 상대 `qsh cp`(M19 DoD에서 옮겨 옴)". 선행: Step 1(코드), `fsutil` 식별 함수는 Step 6과 조율.
 
@@ -384,7 +384,9 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(c) 완료 판정:** `file/guard.rs`·`file/host.rs`·`server/file.rs`·`server/tunnels.rs`에 파일 op를 거부하는 `#[cfg(not(unix))]` 갈래가 없다. Windows host가 `file.v1`을 광고하고 두 route에서 `cp`가 왕복한다. `exit_code_matrix.rs`의 `cp` 두 행에 `#[cfg(not(unix))]`가 없다. `git diff -- crates/qsh-proto/src/wire.rs`가 `LOCAL_CAPABILITIES` 통합과 doc 주석뿐이고 `capabilities.json` diff 0, `.proto`·`local.rs` diff 0.
 
-### Step 8 — `setup host`(`--to`, `--service` 포함), `pair invite`, 방화벽 안내 (0.1~0.3ew)
+**(d) 결과 (2026-10-18):** `3f2c0d6`, CI 수정 `c7d9b78`. Windows guard는 `file/guard/windows{,_path}.rs`, host는 `file/host/{posix,windows}.rs`로 갈랐고 보호 파일 대조는 `fsutil/file_identity`를 쓴다. 재분석 지점 거부와 최종 경로 비교는 열기 안에서 함께 하므로 `windows_open_handle_revalidation_catches_a_swapped_component`는 열기 단계의 거부를 보고, audit은 unix와 같이 재검증 거부로 남는다(`file_paths_recheck_the_opened_handle_*`). 계획 문구와 다른 점: `file/local.rs` diff가 0이 아니다(`windows_name_is_safe`를 unix host도 부르도록 cfg 해제, 동작 무변경). §7.1 #13의 cp fixture 구조 비교는 `cfg(unix)` 그대로이고 Windows는 `cp_round_trip`·`cp_refuses_state_paths_and_reparse_points`가 방향·파일·바이트·blake3를 본다. 첫 CI의 Windows 다리가 세 가지 낡은 가정으로 빨갰다: `acl_check_equivalence`가 Windows host에 `/`를 물었고, host `windows_tests`가 8.3 짧은 이름(`RUNNER~1`) 임시 디렉터리를 정규화 없이 열었고, Windows file op가 `UNSUPPORTED`라는 server 테스트가 남아 있었다. `c7d9b78`이 셋을 고치고 server 파일 op 테스트 아홉을 두 OS에서 돌린다(Windows UNC·장치·ADS·예약 이름 shape 위반, Windows 오류 코드 표). ADR-0035 개정 이력 2026-10-18 여섯째 줄. 부하: qsh-core guard·host windows_tests 47개, qsh-cli `cp_` 4개, testkit file_host 18개 50/50(Dave-Windows). CI run 39097038254 초록.
+
+### Step 8 — `setup host`(`--to`, `--service` 포함), `pair invite`, 방화벽 안내 (0.1~0.3ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 1 host 쪽(`qsh setup host`(`--to` 형태 포함), `qsh pair invite`), 1 서비스(`qsh setup host --service`), 2(남은 게이트 제거), 25(`setup host`·`pair invite`를 연다, 방화벽 첫 허용 프롬프트를 README와 `qsh doctor`의 기존 finding 문안이 안내), 27 끝 문장(`setup host --service`가 작업 스케줄러 백엔드를 부름). ADR-0024 결정 2·8·10. 선행: Step 1(코드), Step 3(문서 착지).
 
@@ -403,6 +405,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - route 동등: §4 규율 표의 `setup`·`pair invite` 행
 
 **(c) 완료 판정:** Windows host 쪽 `setup host`·`setup host --to`·`--service`·`pair invite`에 Windows 전용 거부가 없다. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `34bb7ac`. setup host·`--to`·`--service`·pair invite 경로에 Windows 전용 거부가 없어 코드는 doctor `udp_egress_blocked` remedy 한 문장과 테스트(`setup_host_service_writes_the_task_definition_on_windows`, cli `--service` 테스트)뿐이다. §7.1 #12: 방화벽 안내는 새 finding 없이 `udp_egress_blocked` remedy가 맡는다. 방화벽 문장은 실측으로 좁혔다(고정 UDP 포트를 loopback 밖에 여는 `serve`·`listen`만 실행 파일 경로마다 한 번 묻고, 임시 포트의 `serve --to`·client와 loopback은 묻지 않는다). ADR-0035 개정 이력 2026-10-18 일곱째 줄이 결정 25의 해당 문장을 대신한다. Windows Server의 같은 판정은 캠페인 몫이다. 부하 대상 테스트 없음. CI run 39097038254 초록.
 
 ### Step 9 — Windows `qsh pair ssh-respond` (0.2~0.4ew)
 
