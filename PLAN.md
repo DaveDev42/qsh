@@ -307,7 +307,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `a475f08`. 신호 이름→첫 단계 사상과 `Hup`·`Term`이 콘솔 닫기 한 번을 나눠 쓰는 규칙은 `pty/signal_map.rs`의 cfg 없는 순수 함수(`first_step`, `next_step`)이고 `hup_and_term_share_one_console_close_step`이 네 다리에서 돈다. testkit `qsh-signal-probe`가 받은 사건을 종료 코드로 알리고, `each_signal_raises_its_windows_event_then_escalates_to_an_ended_session`은 신호마다 곧 끝나는 프로그램(첫 사건 실측)과 살아남는 프로그램(유예·`Term`·`Kill` 뒤 종료) 두 번을 돈다. `console-ctrl`의 전달 판정은 종료 상태가 아니라 성공 직후 표준 출력에 쓰는 한 바이트다(사건을 받은 콘솔이 사라지면 보조 프로세스도 비정상 종료 상태를 받는다). 바이트가 없으면 신호 기록을 지운다(`a_failed_console_ctrl_delivery_leaves_no_signal_note`). ADR-0035 개정 이력 2026-10-18 셋째 줄. 계획 문구와 다른 점: `exit_code_matrix`의 `cfg(windows)` `--signal` 커버리지는 `Case` 행 하나가 아니라 `Case` 루프 뒤의 블록이고, 일곱 값 모두 exit `0`을 단언한다(DoD 4와 Step 12 확인은 이 블록을 본다). 부하: qsh-core conpty·signals 27개 50/50, qsh-cli `pty_session_`·`session_close_with_each_signal_` 10개 50/50(Dave-Windows). 첫 부하 시도는 부하 스크립트가 `qsh-signal-probe.exe`를 복사하지 않아 무효였다. CI a475f08 초록.
 
-### Step 5 — host 쪽 `exec`의 Job Object와 환경 고정 (0.2~0.3ew)
+### Step 5 — host 쪽 `exec`의 Job Object와 환경 고정 (0.2~0.3ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 23(Job Object 안의 자식, 타임아웃 kill의 트리 도달, 결정 21 환경 규칙, `exec/mod.rs`의 `#[cfg(not(unix))]` 분기 제거, std 인용 규칙, `cmd /c`), 17 host 테스트 항목(`exec` 타임아웃 트리 종료), 결과 절 "고정할 테스트"의 `exec` 줄. 선행: Step 3.
 
@@ -324,6 +324,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - 기존 `windows_*_e2e::exec_round_trip`(`cmd /c`, 종료 코드 7) 무변경 초록
 
 **(c) 완료 판정:** `exec/mod.rs`에 `#[cfg(not(unix))]` 환경 분기가 없다. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `038f74e`. `exec/{posix,windows}.rs`로 갈랐고 Windows 자식은 생성 순간부터 `KILL_ON_JOB_CLOSE` Job Object 안이다. 계획 문구와 다른 점: 환경에 locale·시간대 전달을 넣지 않는다. unix `exec.run`이 결정적인 환경을 위해 일부러 넣지 않으므로 두 OS를 맞췄다(`exec_locale_and_time_zone_do_not_pass_through_from_the_serve_process`). PTY 세션은 그대로 전달한다. 상속 가능 pipe 끝은 `winproc::spawn_guard()` 잠금 안에서만 열리고, console-ctrl·ssh·서비스 관리자의 `std::process` spawn도 같은 잠금을 잡는다(`the_pipe_ends_are_inheritable_only_inside_spawn_in_job`). ADR-0035 개정 이력 2026-10-18 넷째 줄. `run_exec` 수준의 timeout 트리 테스트는 QUIC stream이 필요해 testkit `exec_loopback::exec_run_timeout_kills_the_whole_tree_on_windows`에 있다. 부하: qsh-core `exec::windows`·winproc 19개, qsh-cli `exec_` 4개, testkit 1개 모두 50/50(Dave-Windows). CI 038f74e 초록.
 
 ### Step 6 — host 쪽 상태: audit writer `LockFileEx` 잠금·재검증, `acl.toml` DACL 경고 (0.4~0.7ew)
 
