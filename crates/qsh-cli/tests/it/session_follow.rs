@@ -222,9 +222,13 @@ fn wait_and_follow_deliver_the_same_stream() {
 fn json_and_jsonl_follow_emit_the_same_bare_event_stream() {
     let fleet = Fleet::start();
 
+    // Both modes read the *same* session's ring from offset 0. Two separate
+    // sessions would not do: a ConPTY renders the same script with the last
+    // newline and the closing mode resets in either order, so their bytes
+    // can legitimately differ while both doors are correct.
+    let session_ref = open_noisy_session(&fleet.client);
     let mut streams = Vec::new();
     for mode in ["--jsonl", "--json"] {
-        let session_ref = open_noisy_session(&fleet.client);
         let out = fleet.client.qsh(&[
             "session",
             "read",
