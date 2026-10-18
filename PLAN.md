@@ -429,7 +429,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(c) 완료 판정:** Windows 빌드가 `qsh pair ssh-respond`를 안다. `ssh_bootstrap`의 Windows 응답자 행과 `--reverse` 행이 Windows 다리에서 초록이다. `docs/man/` diff 0. wire diff 0.
 
-### Step 10 — 캠페인 `p1-windows.md` host 회차 추가와 재고정 (0.1~0.2ew)
+### Step 10 — 캠페인 `p1-windows.md` host 회차 추가와 재고정 (0.1~0.2ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 18(M20이 host 회차 (2), (3)의 Windows target 쪽, (7)을 더해 M20 마지막 스텝 전에 다시 고정), ROADMAP M20 DoD 캠페인 줄과 §5.5, `docs/campaigns/p1-windows.md` §4.12와 §5. 선행: Step 3·4·7·8·9. Step 11(구현 마지막 스텝) 앞.
 
@@ -445,6 +445,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 **(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록. 회차가 가리키는 명령 이름과 환경변수 이름이 착지한 clap 트리·`docs/CLI.md`와 같은지 손으로 대조한다.
 
 **(c) 완료 판정:** 문서가 Step 11 착지 전에 main에 있다. §1~§4.11의 문면이 바뀌지 않았다(`git diff`로 확인).
+
+**(d) 결과 (2026-10-18):** `048df57`. §4.12 W2, §4.13 W3b, §4.14 W7을 기존 회차 형식(준비, 확인표, 정리, 비고)으로 더했고 §1 표, §5 판정 회차 목록, 머리 상태 줄을 고쳤다. §1~§4.11 문면은 표의 세 칸 말고 그대로다(`git diff -U0` hunk 18·20·24행). 계획 문구와 다른 점: `qsh host -- pwsh`는 clap 트리에 없는 형태다(`qsh host`는 `host get` 조회). PowerShell 세션은 `qsh session open <host> --json -- pwsh -NoLogo`로 열고 `qsh attach`로 붙는다. 회차의 `signal` 값·`cp -p` 모드·`verify_error` 문안은 실측 전 기대값이라 회차가 확인한다. ROADMAP §5.5 Windows 행에 재고정 해시.
 
 ### Step 11 — PTY를 포함한 정방향·역방향 종단, 실제 PTY attach, `release_smoke` PTY 축, `cfg(unix)` 쌍둥이 전수 (0.4~0.7ew)
 
