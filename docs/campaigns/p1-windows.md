@@ -1,6 +1,6 @@
 # P1 Windows 캠페인 — 실제 Windows 장비에서 CI가 못 보는 것을 확인한다 (M19 몫)
 
-상태: 기준 사전 고정(M19 몫). 회차는 아직 돌지 않았다. 대상 태그가 없다. host 회차 W2, W3b, W7은 자리만 있고 M20이 더해 다시 고정한다(§4.12, ADR-0035 결정 18).
+상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). 회차는 아직 돌지 않았다. 대상 태그가 없다.
 
 ## 1. 목적과 지위
 
@@ -15,13 +15,13 @@ CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 �
 | 회차 | 내용 | 몫 |
 |---|---|---|
 | W1 | Windows Terminal과 conhost에서 Linux·macOS host로 attach | M19 |
-| W2 | Linux·macOS client가 Windows host(`qsh serve`)에 attach | M20 자리 |
+| W2 | Linux·macOS client가 Windows host(`qsh serve`)에 attach | M20 |
 | W3a | Windows `qsh listen` ← Linux·macOS `qsh serve --to` (attach, `cp`, 터널) | M19 |
-| W3b | Linux·macOS `qsh listen` ← Windows `qsh serve --to` | M20 자리 |
+| W3b | Linux·macOS `qsh listen` ← Windows `qsh serve --to` | M20 |
 | W4 | 절전 복귀 | M19 |
 | W5 | 둘째 Windows 계정의 pipe 접속 거부와 이름 선점 거부 | M19 |
 | W6 | 로그온 작업의 로그온 기동, 강제 종료 뒤 재기동, 로그오프 정지 | M19 |
-| W7 | `qsh pair ssh`·`--reverse`가 Windows OpenSSH Server를 상대로 pin을 세움 | M20 자리 |
+| W7 | `qsh pair ssh`·`--reverse`가 Windows OpenSSH Server를 상대로 pin을 세움 | M20 |
 | W8 | Credential Manager 왕복 | M19 |
 | W9 | Windows on ARM에서 W1 축약 | M19 |
 | W10 | 상시 기동 변형의 로그오프·재부팅 생존과 `logon_task_session_scoped` 소멸 | M19 |
@@ -417,24 +417,84 @@ W11c와 W11d의 매니페스트는 첫 매니페스트가 수락되기 전에는
 
 Windows host가 필요한 모든 것은 이 문서의 M19 판정에 들지 않는다. 구체적으로는 Windows 장비에 `cmd.exe`·PowerShell·Windows 빌드 `vim`으로 attach하는 것, Windows host를 대상으로 하는 `qsh cp`, Windows host의 응답자(`qsh pair ssh-respond`)를 상대로 하는 `qsh pair ssh`와 `--reverse`, Linux·macOS `qsh listen` ← Windows `qsh serve --to`다. M19에서 Windows host는 PTY 세션과 `file.v1`을 `UNSUPPORTED`로 답한다(README Known limitations).
 
-### 4.12 M20 자리
+### 4.12 W2 — Linux·macOS client가 Windows host(`qsh serve`)에 attach
 
-아래 셋은 M20이 이 문서에 더하고, M20의 마지막 구현 단위보다 앞서 다시 고정한다(ADR-0035 결정 18). M20이 회차를 더해도 이 문서 §1~§4.11의 문면과 §5의 규칙은 바뀌지 않는다. 바뀌는 것은 §1 표의 "M20 자리"가 "M20"으로 바뀌는 것과 새 회차 절, §5의 회차 목록 한 줄이다.
+변형은 둘이다. client {L, M}. Windows host는 WH라 부른다(실제 Windows 11 x86_64 장비, §2.3의 클린). WH와 client는 서로 다른 장비이고 사이의 UDP는 실제 망을 지난다. WH에는 Windows Terminal이 있고, Windows용 `vim.exe`가 `PATH`에 있고, PowerShell 7(`pwsh`)이 있다. WH에서 `qsh init --json`을 마쳐 두고 그 출력의 `fingerprint`를 적어 둔다. client는 대상 태그의 `qsh`가 `PATH`에 있고 `qsh init`이 끝나 있다.
 
-- W2. Linux·macOS client가 Windows host(`qsh serve`)에 붙어 `cmd.exe`·PowerShell·Windows 빌드 `vim` 전체 화면, 한글 입출력, resize, `Ctrl-C`.
-- W3b. Linux·macOS `qsh listen` ← Windows `qsh serve --to`의 attach·`cp`·터널.
-- W7. `qsh pair ssh`와 `--reverse`가 Windows OpenSSH Server를 상대로 pin을 세움(ADR-0035 결정 25).
+방화벽 준비는 이렇다. 이 회차는 WH의 방화벽에 qsh용 허용 규칙이 없는 채로 시작한다(`Get-NetFirewallApplicationFilter -Program <qsh.exe 전체 경로>`가 비어 있다). WH가 Windows Server 2022 이상 장비면 같은 회차를 client L로 한 번 더 돌고 그 행을 "Server"라고 변형 칸에 적는다. 이 행은 참고 행이라 §5의 판정에는 필요하지 않다. 장비가 없으면 돌지 않고 비워 둔다.
+
+pin은 양쪽에서 직접 세운다. 방화벽 확인 a가 허용 전에 닿지 않는 상태를 먼저 봐야 하므로 코드 pairing(UDP로 닿아야 한다)을 쓰지 않는다. client에서 `qsh trust add win --address <WH 주소>:4433 --fingerprint <WH의 fingerprint>`를 친다. 이 명령은 연결하지 않고 pin만 쓴다. 이어 client에서 `qsh identity export --out client.pem`으로 인증서를 받아 WH로 옮기고 WH에서 `qsh trust add client --cert-file client.pem --role full`을 친다.
+
+| 확인 | 합격 기준 |
+|---|---|
+| a. 방화벽 첫 허용 프롬프트 | WH에서 `qsh serve`를 처음 띄우면 Windows Defender 방화벽이 허용 여부를 묻고 창이 가리키는 프로그램이 그 `qsh.exe` 경로다. 허용하기 전에(취소하거나 창을 둔 채로) client에서 `qsh doctor win --json`을 돌리면 `data.findings`에 `udp_egress_blocked`가 있고 그 `remedy`가 상대 Windows 방화벽을 안내한다. 사설 네트워크에서 허용한 뒤 같은 명령에는 그 finding이 없다. `qsh serve`를 끄고 같은 경로에서 다시 띄우면 묻지 않는다. 같은 `qsh.exe`를 다른 경로로 복사해 거기서 띄우면 다시 묻는다. 허용하지 않은 새 경로에서 `qsh serve --to <client 주소>:4433`(연결은 실패해도 된다)과 `qsh serve --bind 127.0.0.1:4434`를 띄우면 묻지 않는다. 마지막으로 이 프롬프트의 시점과 단위, `udp_egress_blocked`와의 관계가 `README.md` Known limitations의 Windows 방화벽 문장과 `docs/CLI.md` §6.13의 방화벽 항목, `qsh doctor`의 `remedy` 문구와 어긋나지 않는다. 어긋남은 비고에 원문으로 적는다 |
+| b. attach와 한글 입출력 | client에서 `qsh win`이 `cmd.exe` 프롬프트까지 간다. `echo 한글 테스트`의 출력이 입력과 같고 한글을 입력하다 Backspace로 지우면 한 글자만 지워진다. `ping -t 127.0.0.1`을 Ctrl-C로 끊으면 `ping`만 끊기고 `cmd.exe`는 남는다. `powershell.exe`(또는 `pwsh`)를 쳐서 들어가 `'한글 테스트 😀'`의 출력이 같고 위쪽 화살표로 직전 명령이 나온다 |
+| c. 전체 화면 | PowerShell 안에서 `vim`을 열어 한글을 입력하고 client 창을 줄였다 늘린다. 창 크기를 바꾼 뒤 vim에서 `:echo &columns &lines`가 새 크기를 내고 vim의 하단 줄이 창의 마지막 행에 있다. `cmd.exe`에서도 `mode con`의 `Columns`·`Lines`가 새 크기를 낸다. `:q!` 뒤 vim을 열기 전의 화면이 복원된다 |
+| d. 새 세션의 셸 | `qsh session open win --json -- pwsh -NoLogo`로 PowerShell 7 세션을 열고 `qsh attach <session-ref>`로 붙는다. 프롬프트에서 `ping -t 127.0.0.1`을 돌려 두고, `$env:QSH_SIGNAL_EVENT_USR1`이 비어 있지 않은지 다른 PowerShell 세션 하나를 열어 본다. `$env:USERPROFILE`은 WH 계정의 프로필 디렉터리다. |
+| e. `~d`와 resume | 행 시작에서 `~d`를 치면 client 셸 프롬프트로 돌아오고 종료 코드는 0이다. `qsh sessions win`에 그 세션이 있고 `qsh attach <session-ref>`로 붙으면 detach 전의 화면 내용이 보이고 d에서 돌려 둔 `ping -t`의 새 출력이 이어진다 |
+| f. 신호 | 터미널 하나에서 `qsh session open win --json -- ping -t 127.0.0.1`을 열고 다른 터미널에서 `qsh session read <session-ref> --follow --jsonl`을 돌려 둔다. `qsh session close <session-ref> --signal INT`를 치면 follow 쪽에 `session.exit`가 오고 `signal`이 `SIGINT`이며 이어서 `session.closed`가 온다. 이어 `qsh session open win --json -- pwsh -NoProfile -Command '[System.Threading.EventWaitHandle]::OpenExisting($env:QSH_SIGNAL_EVENT_USR1).WaitOne() \| Out-Null; Write-Output got-usr1'`로 세션을 열고 같은 방식으로 follow를 돌린 뒤 `qsh session close <session-ref> --signal USR1`을 치면 출력에 `got-usr1`이 오고 `session.exit`의 `exit_code`가 0이며 `signal`이 `SIGUSR1`이다. |
+
+b와 c는 client마다 따로 돌고, 창 크기는 줄이고 늘리기를 각각 두 번 한다. 한글은 client 터미널의 IME로 직접 친다.
+
+정리는 열어 둔 세션을 `qsh session close`로 닫고 `qsh serve`를 끈 뒤 WH에서 이 회차가 만든 방화벽 규칙을 지운다(`Get-NetFirewallApplicationFilter -Program <경로> | Get-NetFirewallRule | Remove-NetFirewallRule`, 복사해 둔 `qsh.exe`마다). 비고에는 프롬프트의 원문과 창이 가리킨 경로, `qsh doctor win --json`의 허용 전후 출력, WH가 Windows 11인지 Server인지를 적는다.
+
+### 4.13 W3b — Linux·macOS `qsh listen` ← Windows `qsh serve --to`
+
+변형은 둘이다. controller {L, M}. WH(실제 Windows 11 x86_64, §2.3의 클린)가 target으로 controller에 dial한다. 두 장비 사이의 실제 UDP 경로를 쓴다. 이 회차는 WH의 방화벽에 qsh용 허용 규칙이 없는 채로 돈다. `qsh serve --to`는 dial만 하므로 규칙이 없어도 동작해야 하고, 그 사실이 이 회차의 확인 a다. WH의 `qsh init`을 마쳐 두고 controller에서 UDP 4433이 WH에서 닿는다.
+
+pin은 W3a의 대체 경로와 같다. WH의 `qsh identity export --out win.pem`을 controller로 옮겨 controller에서 `qsh trust add win --cert-file win.pem --role reverse`를 치고, controller의 `qsh identity export --out ctl.pem`을 WH로 옮겨 WH에서 `qsh trust add ctl --address <controller 주소>:4433 --cert-file ctl.pem --role full`을 친다. controller에서 `qsh listen`을 띄우고 WH에서 `qsh serve --to ctl`을 띄운다. WH에서 `qsh serve --to`를 띄우는 `qsh.exe`는 이 장비에서 `qsh serve`나 `qsh listen`을 띄운 적이 없는 경로의 것이다.
+
+| 확인 | 합격 기준 |
+|---|---|
+| a. 등록과 방화벽 | controller의 `qsh hosts`에 `win`이 `connection_mode: reverse`, `state: reachable`로 오른다. 그동안 WH에 방화벽 허용 프롬프트가 뜨지 않았고 `Get-NetFirewallApplicationFilter -Program <qsh.exe 전체 경로>`가 비어 있다 |
+| b. attach | controller에서 `qsh win`으로 `cmd.exe` 프롬프트가 열리고 `echo 한글 테스트`의 출력이 같다. `~d`로 빠져나온 뒤 `qsh sessions win`에 세션이 보이고 `qsh attach <session-ref>`로 다시 붙는다. W2의 c 확인(vim 전체 화면과 resize)을 이 경로에서 한 번 더 한다 |
+| c. `cp` | 올리기와 내려받기를 모두 본다. controller에서 `qsh cp ./payload.bin win:C:/Users/Public/payload.bin`으로 올리고 `qsh cp win:C:/Users/Public/payload.bin ./back.bin`으로 내려받는다(드라이브 경로는 슬래시로 적는다). 앞뒤 파일의 sha256이 같다. `qsh cp -r`로 작은 디렉터리를 한 번 옮기고 `qsh cp ./payload.bin win:`으로 WH 프로필 디렉터리에 올려도 된다. 소유자 쓰기 비트를 끈 파일(`chmod 444`)을 `qsh cp -p`로 올리면 WH에서 `attrib`에 읽기 전용 특성(`R`)이 보이고, 같은 이름으로 다시 올리면 교체된다. `qsh cp -p win:<그 파일> .`로 내려받은 파일의 모드는 `0444`다. `qsh cp ./payload.bin 'win:\\server\share\x'`는 WH에서 아무것도 만들지 않은 채 `INVALID_ARGUMENT`로 끝난다 |
+| d. 터널 | `-R`: controller에서 `socat TCP-LISTEN:7000,bind=127.0.0.1,fork EXEC:cat` 같은 echo 서버를 띄우고 `qsh tunnel open win --remote 19000:127.0.0.1:7000 --json`(대화형 form의 `-R`과 같은 인자)을 돌린 뒤 WH에서 §3.2의 echo 확인 클라이언트(`<port>`는 19000)가 같은 바이트를 받는다. `-L`: WH에서 §3.2의 echo 서버(7777)를 띄우고 controller에서 `qsh tunnel open win --local 127.0.0.1:18080:127.0.0.1:7777 --json`을 돌려 `printf 'hello-qsh\n' \| nc -w1 127.0.0.1 18080`이 `hello-qsh`를 받는다. `--remote` 터널은 `qsh tunnels`에 나오고 `qsh tunnel close <tunnel-id>`로 닫으면 WH의 19000 포트가 사라진다(`Get-NetTCPConnection -State Listen -LocalPort 19000`). `--local` 터널은 `tunnel open`을 Ctrl-C로 끝내면 사라진다 |
+| e. controller 재시작 | controller의 `qsh listen`을 Ctrl-C로 끄면 WH의 stderr에 `lost`가 나오고, 다시 띄우면 WH가 `registered`를 낸다. 2분 안에 controller의 `qsh hosts`에 `win`이 다시 `reachable`로 오른다 |
+
+정리는 열어 둔 터널과 세션을 닫고 `qsh listen`과 WH의 `qsh serve --to`를 끈다. 비고에는 WH의 방화벽 규칙 조회 출력과 `qsh hosts`의 `win` 행 원문, 터널 확인의 출력을 붙인다.
+
+### 4.14 W7 — `qsh pair ssh`와 `--reverse`가 Windows OpenSSH Server를 상대로 pin을 세움
+
+변형은 둘이다. 원격 기본 셸 {A: `cmd.exe`, B: PowerShell}. 원격 장비는 WR이라 부른다(실제 Windows 11 x86_64 또는 Windows Server 2022 이상, §2.3의 클린). 주도하는 장비는 client {L, M}이고 변형마다 어느 쪽이든 하나를 쓴다. 한 변형 안에서 정방향과 `--reverse`를 모두 본다.
+
+WR 쪽 준비는 이렇다. 관리자 프롬프트에서 선택적 기능 OpenSSH Server를 켠다.
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Set-Service -Name sshd -StartupType Automatic
+Start-Service sshd
+Get-NetFirewallRule -Name '*ssh*' | Select-Object Name, Enabled, Direction
+```
+
+마지막 줄에서 TCP 22 인바운드 규칙이 켜져 있는지 본다. 없으면 만든다(`New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow`). 정방향은 WR의 `qsh serve`가 UDP 4433으로 닿아야 하므로 WR에서 `qsh serve`를 한 번 띄워 방화벽 프롬프트에 사설 네트워크로 허용해 둔다(`docs/CLI.md` §6.13). 역방향은 WR이 client로 dial하므로 이 규칙이 필요 없고, client에서 `qsh listen`이 UDP 4433으로 WR에서 닿는다. WR에서 `qsh init`을 마친다. client의 `~/.ssh/config`에 `Host winbox` / `HostName <WR 주소>` / `User <WR 계정>`을 적고 `ssh winbox`가 비밀번호나 공개 키로 먼저 로그인되는지 본다(관리자 계정의 공개 키는 `C:\ProgramData\ssh\administrators_authorized_keys`에 둔다). `qsh.exe`는 WR의 ssh 로그인 셸에서 `PATH`로 풀려야 한다(`ssh winbox where qsh`가 변형 A에서, `ssh winbox 'Get-Command qsh'`가 변형 B에서 경로를 낸다). 변형 B는 WR에서 기본 셸을 바꾼다.
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -PropertyType String -Force -Value 'C:\Program Files\PowerShell\7\pwsh.exe'
+```
+
+기본 셸을 바꾼 뒤에는 새 ssh 연결을 연다(`ssh winbox '$PSVersionTable.PSVersion.Major'`가 7을 낸다). 변형 A는 이 값이 없는 기본 상태다.
+
+| 확인 | 합격 기준 |
+|---|---|
+| a. 정방향 pin | WR에서 `qsh serve`가 떠 있는 채로 client에서 `qsh pair ssh winbox --json`이 종료 코드 0이다. 봉투의 `data.direction`이 `forward`, `data.verified`가 `true`이고 client의 `qsh trust list`에 `winbox`가 role `none`으로, WR의 `qsh trust list`에 client의 항목이 role `full`에 주소가 비어 있는 채로 있다. 이어 `qsh exec winbox --json -- cmd /c ver`가 성공한다 |
+| b. serve 없이 | a의 pin을 양쪽에서 지우고(`qsh trust remove`, 이름은 `qsh trust list`로 본다) WR의 `qsh serve`를 끈 채로 같은 명령을 다시 친다. 종료 코드 0, `data.verified`가 `false`이고 `verify_error`가 있으며 pin은 양쪽에 서 있다. `verify_error`의 원문은 비고에 적는다. 이 확인은 응답자가 쓰는 UDP bind 시험(`serve_listening`)을 실제 Windows에서 본다 |
+| c. 역방향 pin | b의 pin을 양쪽에서 지운 뒤 client에서 `qsh listen`을 띄우고 다른 터미널에서 `qsh pair ssh winbox --reverse --to <client 주소>:4433 --json`을 친다. 종료 코드 0, `data.direction`이 `reverse`, `data.verified`가 `false`이고 `data.next_command`가 `qsh serve --to <이름>`이다. client의 pin은 role `reverse`에 주소가 비어 있고, WR의 pin은 role `full`에 주소가 `--to` 값이다. `next_command`를 WR에서 그대로 치면 2분 안에 client의 `qsh hosts`에 `winbox`가 `connection_mode: reverse`, `state: reachable`로 오른다. 이 상태에서 `qsh exec winbox --json -- cmd /c ver`가 성공한다 |
+| d. `PATH`에 `qsh`가 없을 때 | c가 끝나면 WR의 `qsh serve --to`를 끄고 양쪽 pin을 지운다. WR에서 `qsh.exe`를 `PATH`에 없는 디렉터리로 옮기고(경로를 적어 둔다) client에서 `qsh pair ssh winbox --json`을 친다. 변형 A는 오류 코드가 `REMOTE_ERROR`이고 `details.reason`이 `remote_qsh_missing`이며 message가 `--remote-qsh`와 `[ssh].remote_qsh`를 안내한다. 변형 B는 `REMOTE_ERROR`에 `details.reason`이 `remote_command_failed`, `details.remote_exit`가 1이고 message가 `qsh.exe`를 원격 `PATH`에 두거나 전체 경로를 주라고 안내한다. 어느 쪽이든 client에 `winbox` pin이 생기지 않는다 |
+| e. 전체 경로 | d의 상태에서 `qsh pair ssh winbox --remote-qsh 'C:\Tools\qsh\qsh.exe' --json`(옮긴 경로를 적는다. 공백이 없는 경로를 쓴다)이 a와 같은 결과로 끝난다 |
+| f. 비밀 | a와 c를 `qsh -vv pair ssh …`로 돌린 출력과 `qsh audit --json` 출력에서, 입력한 passphrase나 암호가 있으면 그 문자열의 검색이 0건이다 |
+
+정리는 WR에서 `qsh serve`와 `qsh serve --to`를 끄고 `qsh trust remove`로 이 회차의 pin을 지우며(client 쪽도 같다), 옮긴 `qsh.exe`를 되돌리고, 변형 B를 끝낸 뒤 `Remove-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell`로 기본 셸을 되돌린다. 이 회차를 위해 켠 OpenSSH Server를 끄려면 `Stop-Service sshd`와 `Set-Service -Name sshd -StartupType Disabled`를 쓴다. 비고에는 `ssh -V`(client)와 WR의 OpenSSH Server 버전(`Get-WindowsCapability -Online -Name OpenSSH.Server*`), 기본 셸 설정, 각 확인의 봉투 원문, d의 거부 문구 원문을 적는다.
 
 ## 5. 판정 규칙
 
-> W1, W3a, W4, W5, W6, W8, W9, W10, W11, W12가 각각 한 번 이상 회차 표에 PASS로 기록되고, W1은 네 변형 모두에, W3a는 두 변형 모두에, W10은 두 변형 모두에, W11은 네 변형 모두에 PASS 행이 있다. 각 PASS 행에 대상 태그, §3.1의 공통 요건, 그 회차의 확인 문자가 모두 채워져 있다.
+> W1, W2, W3a, W3b, W4, W5, W6, W7, W8, W9, W10, W11, W12가 각각 한 번 이상 회차 표에 PASS로 기록되고, W1은 네 변형 모두에, W2는 두 변형 모두에, W3a는 두 변형 모두에, W3b는 두 변형 모두에, W7은 두 변형 모두에, W10은 두 변형 모두에, W11은 네 변형 모두에 PASS 행이 있다. 각 PASS 행에 대상 태그, §3.1의 공통 요건, 그 회차의 확인 문자가 모두 채워져 있다.
 
 풀어 적으면 이렇다.
 
 - PASS인 행은 §4가 그 변형에 적은 확인이 전부 PASS다. "해당 없음"으로 적을 수 있는 확인은 §4가 그렇게 허용한 것(W1의 a, 변형 A의 W10 d)뿐이다.
 - 같은 회차·변형의 FAIL 행은 표에 남는다. 제품 결함을 고쳐 새 태그로 다시 돌린 행이 PASS면 그 변형은 PASS로 센다(최신의 무효 아닌 행이 판정한다). 고치기 전의 태그에서 나온 PASS는 새 태그의 FAIL을 덮지 못한다.
 - "보류"(W11c·W11d의 매니페스트 없음)와 "무효"는 PASS가 아니다. 보류가 남아 있는 동안 캠페인은 열려 있다.
-- W2, W3b, W7은 M20이 더하기 전에는 판정에 들지 않는다.
 
 ## 6. 사후 변경 금지와 실패 시 처분
 
