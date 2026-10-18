@@ -390,8 +390,31 @@ async fn assert_withdrawn(conn: &Connection) {
 /// says a peer cannot rely on the code; the security property is the close
 /// itself, and the caller asserts that the host recorded the withdrawal.
 /// So a reset is accepted here, and any other close must carry the code.
+///
+/// The flooding peer is flow-blocked and sends nothing, and the keep-alive
+/// interval (15 s) is longer than [`CLOSE_BOUND`]. If the one CONNECTION_CLOSE
+/// datagram is missed, the peer would learn nothing until its next keep-alive.
+/// So while waiting, a probe task sends a tiny packet on a fresh stream every
+/// 100 ms: a still-draining host answers it with the close, a host that
+/// finished draining answers with a stateless reset. Either way the peer
+/// observes the close without depending on one packet.
 async fn assert_withdrawn_or_reset(conn: &Connection) {
+    let probe_conn = conn.clone();
+    let probe = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if probe_conn.close_reason().is_some() {
+                break;
+            }
+            let opened =
+                tokio::time::timeout(Duration::from_millis(500), probe_conn.open_bi()).await;
+            if let Ok(Ok((mut send, _recv))) = opened {
+                let _ = send.write_all(b"probe").await;
+            }
+        }
+    });
     wait_closed(conn).await;
+    probe.abort();
     if matches!(conn.close_reason(), Some(ConnectionError::Reset)) {
         return;
     }
@@ -989,13 +1012,29 @@ impl Unreadable {
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
-            self.held = Some(
-                std::fs::OpenOptions::new()
+            // The host's watch may have the file open for a read at this
+            // instant, and an exclusive open fails with a sharing violation
+            // (ERROR_SHARING_VIOLATION, 32) until that read ends. Retry for
+            // a bounded while instead of failing on the race.
+            const ERROR_SHARING_VIOLATION: i32 = 32;
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let file = loop {
+                match std::fs::OpenOptions::new()
                     .read(true)
                     .share_mode(0)
                     .open(&self.path)
-                    .expect("hold trust.toml exclusively"),
-            );
+                {
+                    Ok(file) => break file,
+                    Err(err)
+                        if err.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("hold trust.toml exclusively: {err:?}"),
+                }
+            };
+            self.held = Some(file);
         }
     }
 

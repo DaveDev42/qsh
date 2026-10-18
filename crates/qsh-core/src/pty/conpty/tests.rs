@@ -180,8 +180,11 @@ async fn conpty_last_byte_arrives_before_the_exit_event() {
     let events = pull_until_exit(&handle, &clock).await;
     let idx = exit_index(&events).unwrap();
     let before = text(&events[..idx]);
+    // The line end and the closing mode resets can be rendered in either
+    // order, so the escapes are dropped before the marker and its line end
+    // are matched.
     assert!(
-        before.contains("qsh-last-byte\r\n"),
+        strip_vt(&before).contains("qsh-last-byte\r\n"),
         "marker missing before session.exit: {before:?}"
     );
     assert!(
