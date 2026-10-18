@@ -1480,8 +1480,14 @@ async fn a_claim_granted_after_its_loop_is_torn_down_still_completes_the_splice(
 /// still be parked once the CLI has given up and moved on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_a_second_one() {
-    const REGISTRATION_DELAY: Duration = Duration::from_millis(400);
-    const WAIT_MS: u32 = 700;
+    // Wide enough that a slow runner's dial and registration after the
+    // delay fit inside the budget (a 700 ms budget with a 400 ms delay left
+    // 300 ms for a QUIC handshake, which a loaded Windows runner missed),
+    // while the bug's sum stays well apart from the fixed bound.
+    const REGISTRATION_DELAY: Duration = Duration::from_millis(1500);
+    const WAIT_MS: u32 = 3000;
+    // Fixed: about `WAIT_MS`. Bug: about `REGISTRATION_DELAY + WAIT_MS`.
+    const FIXED_BOUND: Duration = Duration::from_millis(WAIT_MS as u64 + 900);
 
     let target = make_identity();
     let harness =
@@ -1552,7 +1558,7 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
         // Nothing ever arrives for this forward_id — the claim must wait
         // out its (now shared, already-partly-spent) budget and answer
         // `Timeout`, never hang past it.
-        let answer: LocalResponse = tokio::time::timeout(Duration::from_secs(5), claim.recv())
+        let answer: LocalResponse = tokio::time::timeout(Duration::from_secs(10), claim.recv())
             .await
             .expect("the claim must answer within its own declared budget, not hang past it")
             .expect("the daemon must answer on this same framed conduit")
@@ -1570,13 +1576,13 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
 
         // Fixed: total daemon-side time is bounded by `WAIT_MS` alone
         // (plus real-world slack for the reconnect and the registration
-        // round trip), not by `REGISTRATION_DELAY + WAIT_MS` ≈ 1100 ms —
+        // round trip), not by `REGISTRATION_DELAY + WAIT_MS` ≈ 4500 ms —
         // the sum the bug produced by handing `claim_tcp_accepted` a
         // second full `WAIT_MS` after `connection_for_wait` had already
         // spent `REGISTRATION_DELAY` of the one budget the CLI itself is
         // bounded by.
         assert!(
-            elapsed < Duration::from_millis(950),
+            elapsed < FIXED_BOUND,
             "the parked claim must not get a second full wait_ms after connection_for_wait \
              already spent part of the shared {WAIT_MS}ms budget — this total ({elapsed:?}) is \
              only explained by the bug's REGISTRATION_DELAY + WAIT_MS double-spend"
@@ -1585,7 +1591,7 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
         // not resolved instantly — otherwise the assertion above would be
         // vacuous (true regardless of the fix).
         assert!(
-            elapsed >= Duration::from_millis(300),
+            elapsed >= REGISTRATION_DELAY - Duration::from_millis(100),
             "the claim conduit must have actually waited on connection_for_wait, not resolved \
              the hub instantly: {elapsed:?}"
         );
