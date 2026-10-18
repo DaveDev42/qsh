@@ -14,9 +14,9 @@
 //!
 //! The same file runs on Windows, where the fake is a copied `ssh.exe` and
 //! the recorded argv shows what `ssh.exe` receives after the Windows
-//! command-line round trip. The responder tests are Unix-only: the Windows
-//! responder is M20 (ADR-0044 decision 10), and until then the Windows
-//! build does not know the command.
+//! command-line round trip. The responder tests run there too, against the
+//! Windows `qsh pair ssh-respond` (ADR-0044 decision 10): the fake `ssh.exe`
+//! starts the real responder as the remote end of its pipes.
 
 use std::time::Duration;
 
@@ -583,10 +583,8 @@ async fn ssh_child_is_reaped_on_cancel() {
     assert!(!err.retryable);
 }
 
-/// The remote responder as a process (ADR-0044 decisions 9, 10, 12). Unix
-/// only until M20 (decision 10): a Windows build does not register the
-/// command, see `pair_ssh_respond_is_unknown_on_windows_before_m20`.
-#[cfg(unix)]
+/// The remote responder as a process (ADR-0044 decisions 9, 10, 12), on every
+/// platform: the same cases run against the Windows responder.
 mod responder {
     use super::*;
     use crate::common::Sandbox;
@@ -763,6 +761,32 @@ mod responder {
         let remote = Sandbox::initialized();
         let got = respond(&remote, b"", None);
         assert_eq!(got.hello().serve_bind.as_deref(), Some("[::]:4433"));
+    }
+
+    /// One run that does both halves of the responder's job: it reports the
+    /// busy serve port in its hello and then writes the committed pin. Runs on
+    /// every platform, so on Windows it is the Windows responder doing both.
+    #[test]
+    fn windows_responder_pins_and_reports_serve_listening() {
+        let remote = Sandbox::initialized();
+        let client = Sandbox::initialized();
+        let serve = crate::common::ServeGuard::start(&remote);
+        write_config(&remote, &format!("[serve]\nbind = \"{}\"\n", serve.addr()));
+        let got = respond(
+            &remote,
+            &commit_for("laptop", &client.fingerprint(), "exec", None),
+            None,
+        );
+        assert_eq!(got.code, 0, "{}", got.stderr);
+        assert_eq!(got.hello().serve_bind.as_deref(), Some(serve.addr()));
+        assert_eq!(got.hello().serve_listening, Some(true));
+        let result = got.result();
+        assert_eq!(result.status, ResultStatus::Pinned);
+        assert_eq!(result.name, "laptop");
+        let store = qsh_core::TrustStore::load(&trust_file(&remote)).unwrap();
+        let peer = store.find("laptop").expect("the pin exists");
+        assert_eq!(peer.fingerprint, client.fingerprint());
+        assert_eq!(peer.address, "", "an inbound-only pin has no address");
     }
 
     #[test]
@@ -1120,7 +1144,12 @@ mod responder {
     }
 
     /// A path with a space is single-quoted for a POSIX remote shell, and the
-    /// shell hands the responder one program.
+    /// shell hands the responder one program. Unix only: the quoting is for a
+    /// POSIX shell, and a Windows remote whose default shell is `cmd.exe` or
+    /// PowerShell does not read single quotes (ADR-0044 decision 9 fails that
+    /// case with an instruction instead; `quote_remote_program`'s unit tests
+    /// pin the rule on every platform).
+    #[cfg(unix)]
     #[tokio::test]
     async fn ssh_bootstrap_local_responder_runs_a_single_quoted_remote_qsh() {
         let remote = Sandbox::initialized();
@@ -1168,22 +1197,6 @@ mod responder {
     }
 }
 
-/// A Windows build has no `qsh pair ssh-respond` before M20 (ADR-0044
-/// decision 10): clap exits 2, which the client reads as
-/// `remote_qsh_too_old` (`ssh_exit_codes_map_to_the_adr_reasons`).
-#[cfg(windows)]
-#[test]
-fn pair_ssh_respond_is_unknown_on_windows_before_m20() {
-    let sandbox = crate::common::Sandbox::new();
-    let out = sandbox.qsh(&["pair", "ssh-respond"]);
-    assert_eq!(crate::common::exit_code(&out), 2);
-    assert!(
-        out.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
-    );
-}
-
 // ---------------------------------------------------------------------
 // qsh pair ssh, the client half, on every platform
 // ---------------------------------------------------------------------
@@ -1222,8 +1235,8 @@ mod pair_client {
 
     #[test]
     fn ssh_bootstrap_an_old_remote_is_unsupported_and_writes_nothing() {
-        // A remote that does not know `pair ssh-respond` (clap exit 2, which
-        // is also what a Windows host answers until M20).
+        // A remote that does not know `pair ssh-respond` (an older qsh: clap
+        // exits 2).
         let mut fake = FakeSsh::new();
         fake.exit(2);
         let client = client_for(&fake);
@@ -1428,13 +1441,12 @@ mod pair_client {
 }
 
 // ---------------------------------------------------------------------
-// qsh pair ssh end to end (Unix: the remote half is `pair ssh-respond`)
+// qsh pair ssh end to end (the remote half is `pair ssh-respond`)
 // ---------------------------------------------------------------------
 
 /// Two sandboxes, a real `qsh serve` on the remote one, and a fake `ssh`
 /// that runs the remote's `qsh pair ssh-respond` against the remote tree.
 /// This is everything `qsh pair ssh` touches except OpenSSH itself.
-#[cfg(unix)]
 pub(crate) mod pair {
     use super::*;
     use crate::common::{Sandbox, ServeGuard, exit_code};
@@ -1574,11 +1586,16 @@ pub(crate) mod pair {
         assert_eq!(remote_pin.role.as_deref(), Some("full"));
 
         // The pin works: `qsh exec box` reaches the remote serve.
-        let (code, exec) =
-            w.client
-                .json(&["exec", "box", "--json", "--", "sh", "-c", "echo paired"]);
+        let (program, expected) = if cfg!(windows) {
+            (["cmd", "/c", "echo paired"], "cGFpcmVkDQo=")
+        } else {
+            (["sh", "-c", "echo paired"], "cGFpcmVkCg==")
+        };
+        let mut argv = vec!["exec", "box", "--json", "--"];
+        argv.extend(program);
+        let (code, exec) = w.client.json(&argv);
         assert_eq!(code, 0, "{exec}");
-        assert_eq!(exec["data"]["stdout_b64"], "cGFpcmVkCg==", "{exec}");
+        assert_eq!(exec["data"]["stdout_b64"], expected, "{exec}");
     }
 
     #[test]
@@ -1754,6 +1771,14 @@ pub(crate) mod pair {
             ),
         ];
         for (label, setup, extra, code_name, reason) in cases {
+            // The process exit status of `cmd.exe /C <unknown program>` is 1
+            // (the 9009 is the ERRORLEVEL inside the shell), so a real
+            // `cmd.exe` cannot stand in for the remote shell here. The 9009
+            // mapping is pinned by
+            // `ssh_bootstrap_a_remote_cmd_exe_9009_is_a_missing_qsh_and_writes_nothing`.
+            if cfg!(windows) && label == "127" {
+                continue;
+            }
             let mut w = World::new();
             // The 127 row keeps the fake that runs the real responder; the
             // others use one that only prints what the row scripts.
@@ -2115,6 +2140,7 @@ pub(crate) mod pair {
 
     /// The bootstrapped pin is an ordinary forward route: exec, a file
     /// round trip and a session all work through it.
+    #[cfg(unix)]
     #[test]
     fn bootstrapped_forward_route_passes_the_attach_exec_cp_suite() {
         let w = World::new();
@@ -2164,6 +2190,42 @@ pub(crate) mod pair {
         let (code, listed) = w.client.json(&["session", "get", &session, "--json"]);
         assert_eq!(code, 0, "{listed}");
     }
+
+    /// The route the pair command just wrote, as the shared Windows cases see
+    /// it: the client's sandbox, the name it pinned, the remote's own tree.
+    #[cfg(windows)]
+    struct Bootstrapped<'a>(&'a World);
+
+    #[cfg(windows)]
+    impl crate::route_cases::Route for Bootstrapped<'_> {
+        fn client(&self) -> &Sandbox {
+            &self.0.client
+        }
+
+        fn host(&self) -> &str {
+            "box"
+        }
+
+        fn host_sandbox(&self) -> &Sandbox {
+            &self.0.remote
+        }
+    }
+
+    /// The Windows twin of the suite above, with the Windows responder on the
+    /// remote: the pins the explicit command wrote are all the forward route
+    /// needs, and the shared exec and `qsh cp` cases pass through them. The
+    /// interactive attach over a real console is `windows_attach.rs`.
+    #[cfg(windows)]
+    #[test]
+    fn bootstrapped_forward_route_passes_the_exec_cp_suite_on_windows() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+
+        let route = Bootstrapped(&w);
+        crate::route_cases::exec_round_trip(&route);
+        crate::route_cases::cp_round_trip(&route);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -2173,8 +2235,7 @@ pub(crate) mod pair {
 /// The controller's half of the reverse pairing against a scripted remote,
 /// so it runs wherever the client does: the fake `ssh` prints the remote's
 /// `hello` and its `pinned` answer, and records what the client sent. The
-/// remote's own half is `pair_reverse` below, Unix only until the Windows
-/// responder lands.
+/// remote's own half is `pair_reverse` below.
 mod pair_reverse_local {
     use super::*;
     use crate::common::{ListenGuard, Sandbox, exit_code};
@@ -2293,7 +2354,6 @@ mod pair_reverse_local {
 /// The reverse direction: the remote is the target behind NAT, this machine
 /// is the controller whose `qsh listen` it registers with. The fake `ssh`
 /// runs the real responder against the target's tree; nothing is pre-pinned.
-#[cfg(unix)]
 pub(crate) mod pair_reverse {
     use super::pair::{other_fingerprint, store, trust_bytes, trust_file};
     use super::*;
@@ -2647,6 +2707,7 @@ pub(crate) mod pair_reverse {
     /// existing reverse acceptance suite (a real pty attach, detach and
     /// reattach; `qsh cp` put and get through the controller's relay;
     /// exec) passes against it unchanged.
+    #[cfg(unix)]
     #[test]
     fn bootstrapped_reverse_route_passes_the_forward_attach_exec_cp_suite() {
         let w = World::new();
@@ -2688,6 +2749,63 @@ pub(crate) mod pair_reverse {
         });
 
         crate::reverse_e2e::attach_detach_reattach_suite(&w.controller, BOX, &reverse);
+        reverse.shut_down();
+    }
+
+    /// The reverse route the pair command just wrote, as the shared Windows
+    /// cases see it: the controller's sandbox, the name it pinned the target
+    /// under, the target's own tree.
+    #[cfg(windows)]
+    struct Bootstrapped<'a>(&'a World);
+
+    #[cfg(windows)]
+    impl crate::route_cases::Route for Bootstrapped<'_> {
+        fn client(&self) -> &Sandbox {
+            &self.0.controller
+        }
+
+        fn host(&self) -> &str {
+            BOX
+        }
+
+        fn host_sandbox(&self) -> &Sandbox {
+            &self.0.target
+        }
+    }
+
+    /// The Windows twin of the suite above, with the Windows responder on the
+    /// target: `qsh serve --to hub` is the only thing run there after the
+    /// bootstrap, and the shared exec and `qsh cp` cases pass through the
+    /// controller's relay. The interactive attach over a real console is
+    /// `windows_attach.rs`.
+    #[cfg(windows)]
+    #[test]
+    fn bootstrapped_reverse_route_passes_the_exec_cp_suite_on_windows() {
+        let w = World::new();
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 0, "{got}");
+
+        let reverse = ReverseGuard::start_serve_to(&w.target, HUB);
+        let merged = poll_until(
+            "the reverse registration to appear reachable",
+            std::time::Duration::from_secs(30),
+            || {
+                let hosts = hosts_array(&w.controller);
+                hosts
+                    .iter()
+                    .any(|h| {
+                        h["name"] == BOX
+                            && h["connection_mode"] == "reverse"
+                            && h["state"] == "reachable"
+                    })
+                    .then_some(hosts)
+            },
+        );
+        assert_eq!(merged.len(), 1, "reverse-only pin: one entry, {merged:?}");
+
+        let route = Bootstrapped(&w);
+        crate::route_cases::exec_round_trip(&route);
+        crate::route_cases::cp_round_trip(&route);
         reverse.shut_down();
     }
 }

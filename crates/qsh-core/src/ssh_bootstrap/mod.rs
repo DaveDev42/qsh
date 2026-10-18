@@ -8,10 +8,10 @@
 //!   interrupt handling and exit-status mapping (decisions 14, 16, 25), and
 //!   the logging rule that only stages, result codes and counts reach
 //!   `tracing` (decision 19).
-//! - `respond` (Unix only until M20, decision 10): the remote responder
-//!   behind the hidden `qsh pair ssh-respond` (decisions 9, 10, 12):
-//!   identity read, the UDP bind probe, the `hello`, and the locked,
-//!   audited pin write on `commit`.
+//! - `respond` (decisions 9, 10, 12): the remote responder behind the
+//!   hidden `qsh pair ssh-respond`, on every platform: identity read, the
+//!   UDP bind probe, the `hello`, and the locked, audited pin write on
+//!   `commit`.
 //!
 //! The bootstrap messages and their line parser are `qsh-proto`'s
 //! `ssh_bootstrap` module; nothing here parses a line itself. The two-phase
@@ -41,12 +41,10 @@ pub fn auto_bootstrap_notice(host: &str, dest: &str) -> String {
 }
 
 mod dest;
-#[cfg(unix)]
 mod respond;
 mod ssh;
 
 pub use dest::{Dest, split_user_host};
-#[cfg(unix)]
 pub use respond::{AUDIT_ACTION, RespondEnd, Responder};
 pub use ssh::{
     BATCH_HELLO_TIMEOUT, BootstrapTimeouts, MESSAGE_TIMEOUT, ResponderOptions, SSH_G_OUTPUT_MAX,

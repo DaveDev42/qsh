@@ -182,6 +182,47 @@ async fn ssh_respond_a_crlf_commit_is_accepted() {
     assert_eq!(result_of(&lines).status, ResultStatus::Pinned);
 }
 
+/// A `trust.toml` the responder starts is as private as one `qsh trust add`
+/// starts (ADR-0035 decision 9): a protected DACL granting only the account
+/// the responder runs as, on the file and on its directory. The Unix twin is
+/// `responder_trust_toml_is_owner_only_on_unix`.
+#[cfg(windows)]
+#[tokio::test]
+async fn responder_trust_toml_has_an_owner_only_dacl_on_windows() {
+    use crate::fsutil::dacl::ObjectKind;
+    use crate::fsutil::dacl::testing::assert_owner_only;
+
+    let (_dir, ops) = tree(true);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let input = commit_bytes(commit("laptop", &fp(0xB1), "full", None));
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).status, ResultStatus::Pinned);
+
+    let trust = ops.paths().trust_file();
+    assert_owner_only(&trust, ObjectKind::File);
+    assert_owner_only(trust.parent().unwrap(), ObjectKind::Dir);
+}
+
+/// The Unix twin of `responder_trust_toml_has_an_owner_only_dacl_on_windows`:
+/// mode 0600 on the file in a 0700 directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn responder_trust_toml_is_owner_only_on_unix() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_dir, ops) = tree(true);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let input = commit_bytes(commit("laptop", &fp(0xB1), "full", None));
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).status, ResultStatus::Pinned);
+
+    let trust = ops.paths().trust_file();
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&trust), 0o600);
+    assert_eq!(mode(trust.parent().unwrap()), 0o700);
+}
+
 #[tokio::test]
 async fn ssh_respond_returns_exists_and_keeps_the_role_for_a_known_fingerprint() {
     let (_dir, ops) = tree(true);
@@ -570,7 +611,10 @@ fn bind_probe_does_not_keep_the_port() {
 #[test]
 fn bind_probe_sees_a_port_shared_with_reuse_address() {
     // A listener that opened the port with SO_REUSEADDR must still make the
-    // probe answer "listening"; on Unix an ordinary bind already conflicts.
+    // probe answer "listening". The probe does not set SO_REUSEADDR itself,
+    // so its plain bind already conflicts; the Windows probe's
+    // SO_EXCLUSIVEADDRUSE (ADR-0044 decision 10) is defensive on top of that
+    // and this test does not depend on it.
     let first = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
     first.set_reuse_address(true).unwrap();
     first
