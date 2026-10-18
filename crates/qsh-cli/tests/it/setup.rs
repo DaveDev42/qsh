@@ -341,6 +341,60 @@ fn setup_output_never_carries_key_material() {
     }
 }
 
+/// `--service` on both host spellings through the binary, on a Windows host
+/// (ADR-0035 decisions 25 and 27): the `service` step is `done`, not the
+/// `UNSUPPORTED` skip, and the Task Scheduler task definition is the only
+/// thing written. Nothing is registered (no `activation`), so the test leaves
+/// the machine's scheduler alone.
+#[cfg(windows)]
+#[test]
+fn setup_host_and_host_to_service_write_task_definitions_through_the_binary() {
+    let pem = peer_cert_pem();
+
+    let host = configured("");
+    let output = host.qsh(&["setup", "host", "--peer", "laptop", "--service", "--json"]);
+    assert_eq!(exit_code(&output), 0, "{output:?}");
+    let envelope = sole_envelope(&output.stdout, &["setup", "host"]);
+
+    let host_to = configured("[serve]\nto = \"macmini\"\n");
+    let path = write_cert(&host_to, &pem);
+    let output_to = host_to.qsh(&[
+        "setup",
+        "host",
+        "--to",
+        "macmini",
+        "--address",
+        "m.example:4433",
+        "--peer-cert",
+        &path,
+        "--service",
+        "--json",
+    ]);
+    assert_eq!(exit_code(&output_to), 0, "{output_to:?}");
+    let envelope_to = sole_envelope(&output_to.stdout, &["setup", "host"]);
+
+    for (sandbox, envelope, mode) in [
+        (&host, &envelope, "serve"),
+        (&host_to, &envelope_to, "reverse"),
+    ] {
+        let service = step(&envelope["data"], "service");
+        assert_eq!(service["status"], "done", "{mode}: {envelope}");
+        assert_eq!(service["result"]["manager"], "task_scheduler", "{mode}");
+        assert_eq!(service["result"]["mode"], mode, "{mode}");
+        assert!(
+            service["result"]
+                .get("activation")
+                .is_none_or(Value::is_null),
+            "{mode}: setup registers no task: {envelope}"
+        );
+        let definition = sandbox
+            .config_dir()
+            .join("service")
+            .join(format!("qsh-{mode}.task.xml"));
+        assert!(definition.is_file(), "{mode}: {}", definition.display());
+    }
+}
+
 /// The step id, status and role names in `docs/CLI.md` §6.20 are the ones
 /// the types serialize (the vocabulary-locking discipline of
 /// `crates/qsh-core/tests/it/doctor_docs.rs`): a name added to the enum

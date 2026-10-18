@@ -564,6 +564,75 @@ fn setup_service_unsupported_is_skipped() {
     );
 }
 
+/// The Windows twin of the unit-file rows above (ADR-0035 decisions 25 and
+/// 27, ADR-0024 decisions 8 and 10): `--service` on a host role does not
+/// reach the `UNSUPPORTED` skip, because the Task Scheduler is a manager. The
+/// step writes the task definition file under the config directory (the
+/// `serve` mode for `host`, `reverse` for `host --to`) and registers
+/// nothing: `activation` stays absent, and a second run leaves the file as it
+/// is.
+#[cfg(windows)]
+#[test]
+fn setup_host_service_writes_the_task_definition_on_windows() {
+    let pem = peer_pem();
+    for (request, mode) in [
+        (
+            SetupRunReq {
+                service: true,
+                peer_role: None,
+                ..host("laptop")
+            },
+            "serve",
+        ),
+        (
+            SetupRunReq {
+                service: true,
+                peer_role: None,
+                ..host_to("macmini", &pem)
+            },
+            "reverse",
+        ),
+    ] {
+        let sandbox = sandbox_for(&request);
+        let definition = sandbox
+            .config_dir()
+            .join("service")
+            .join(format!("qsh-{mode}.task.xml"));
+
+        let plan = sandbox.ops.setup_plan(&request, &sandbox.env()).unwrap();
+        let pending = step_of(&plan, SetupStepId::Service);
+        assert_eq!(pending.status, SetupStatus::Pending, "{mode}: {pending:?}");
+        assert!(!definition.exists(), "{mode}: a plan writes nothing");
+
+        let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
+        let service = step_of(&data, SetupStepId::Service);
+        assert_eq!(service.status, SetupStatus::Done, "{mode}: {service:?}");
+        let result = service.result.as_ref().expect("service result");
+        assert_eq!(result["manager"], "task_scheduler", "{mode}: {result}");
+        assert_eq!(result["mode"], mode, "{mode}: {result}");
+        assert_eq!(result["created"], true, "{mode}: {result}");
+        assert!(
+            result.get("activation").is_none_or(|a| a.is_null()),
+            "{mode}: setup registers no task: {result}"
+        );
+        assert_eq!(
+            Path::new(result["path"].as_str().expect("path")),
+            definition,
+            "{mode}"
+        );
+        let written = std::fs::read(&definition).expect("task definition file");
+        assert!(!written.is_empty(), "{mode}");
+
+        let again = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
+        assert_eq!(
+            step_of(&again, SetupStepId::Service).status,
+            SetupStatus::Already,
+            "{mode}"
+        );
+        assert_eq!(std::fs::read(&definition).unwrap(), written, "{mode}");
+    }
+}
+
 #[test]
 fn setup_op_failure_keeps_code_and_retryable_and_adds_step_ids_without_results() {
     let sandbox = Sandbox::new();
