@@ -12,12 +12,35 @@
 //! `killpg` on unix. The job carries `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so
 //! the tree also ends when this process dies and the last handle to the job
 //! closes with it.
+//!
+//! **Handle inheritance.** A child's standard handles have to be inheritable
+//! while `CreateProcessW` runs, and anything else that calls `CreateProcessW`
+//! with `bInheritHandles = TRUE` in that window (`std::process::Command`
+//! always does) would inherit them too and keep a pipe open past its owner,
+//! which delays the end of the stream. So the rule is: a handle is inheritable
+//! only inside [`spawn_in_job`], which marks the child's three handles, makes
+//! the call and clears the flag again (also on failure), all under one
+//! process-wide lock ([`spawn_guard`]). Every other spawn this crate does on
+//! Windows (the console control helper, `ssh`, the service manager commands)
+//! is a `std`/`tokio` `Command` that cannot name a handle list; each holds the
+//! same guard for the duration of its `spawn()` call, so it never runs while
+//! the flag is set. A new host-side spawn goes through [`spawn_in_job`] or
+//! takes the guard.
+//!
+//! The submodules hold what both children share: [`launch`] (command line
+//! quoting, program lookup, the environment a child gets) and [`pipe`] (the
+//! owner-only overlapped pipes whose far ends are the child's).
+
+pub(crate) mod launch;
+pub(crate) mod pipe;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::io;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::fsutil::dacl::{CurrentUser, DaclSource as _, ObjectKind};
 
@@ -37,10 +60,10 @@ use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_JOB_LIST,
-    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, RegisterWaitForSingleObject,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, UnregisterWaitEx, UpdateProcThreadAttribute,
-    WT_EXECUTEONLYONCE,
+    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
+    RegisterWaitForSingleObject, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, UnregisterWaitEx,
+    UpdateProcThreadAttribute, WT_EXECUTEONLYONCE,
 };
 use windows_sys::Win32::System::WindowsProgramming::GetUserNameW;
 
@@ -184,6 +207,21 @@ pub(crate) struct ProcessSpec<'a> {
     pub(crate) environment: Option<&'a [u16]>,
     /// The child's working directory. `None` inherits this process's.
     pub(crate) current_dir: Option<&'a OsStr>,
+    /// The three standard handles of a child that is not on a
+    /// pseudo-console. `None` leaves them to the system.
+    pub(crate) stdio: Option<StdioHandles>,
+}
+
+/// The standard handles a child is started with. Each must stay open for the
+/// whole `CreateProcessW` call; [`spawn_in_job`] makes them inheritable for
+/// that call only. Exactly these three are inherited, whatever else in this
+/// process is marked inheritable: they are passed as the attribute list's
+/// handle list.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StdioHandles {
+    pub(crate) stdin: HANDLE,
+    pub(crate) stdout: HANDLE,
+    pub(crate) stderr: HANDLE,
 }
 
 /// A started process: its handle and id. The primary thread's handle is
@@ -194,14 +232,61 @@ pub(crate) struct Process {
     pub(crate) pid: u32,
 }
 
-/// Start `spec` inside `job` with one `CreateProcessW` call.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+/// The process-wide spawn lock: held while any handle of this process is
+/// inheritable, and by every `Command::spawn` in the crate on Windows (see
+/// the module doc). Hold it only across the spawn call, never across an
+/// `.await`.
+pub(crate) fn spawn_guard() -> MutexGuard<'static, ()> {
+    // The lock guards no data, so a panic elsewhere leaves nothing to repair.
+    SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Clears the inheritable flag of the standard handles on drop, so every exit
+/// of [`spawn_in_job`] leaves them private to this process.
+struct Inheritable([HANDLE; 3]);
+
+impl Inheritable {
+    fn set(handles: StdioHandles) -> io::Result<Self> {
+        let all = Self([handles.stdin, handles.stdout, handles.stderr]);
+        for handle in all.0 {
+            // On failure `all` drops and clears the ones already set.
+            pipe::set_inheritable(handle, true)?;
+        }
+        Ok(all)
+    }
+}
+
+impl Drop for Inheritable {
+    fn drop(&mut self) {
+        for handle in self.0 {
+            let _ = pipe::set_inheritable(handle, false);
+        }
+    }
+}
+
+/// Start `spec` inside `job` with one `CreateProcessW` call. The standard
+/// handles of `spec.stdio` are inheritable only for the duration of the call
+/// (see the module doc); the caller closes its copies afterwards.
 pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Result<Process> {
+    let _spawning = spawn_guard();
+    // Declared after the guard, so the flag is cleared before it is released.
+    let _inheritable = spec.stdio.map(Inheritable::set).transpose()?;
     let mut command_line = wide_nul(spec.command_line);
     let application = spec.application.map(wide_nul);
     let current_dir = spec.current_dir.map(wide_nul);
     let job_handles = [job.raw()];
 
-    let attribute_count = 1 + u32::from(spec.pseudo_console.is_some());
+    debug_assert!(
+        spec.pseudo_console.is_none() || spec.stdio.is_none(),
+        "a child on a pseudo-console takes its standard handles from it"
+    );
+    let std_handles = spec.stdio.map(|s| [s.stdin, s.stdout, s.stderr]);
+    let attribute_count =
+        1 + u32::from(spec.pseudo_console.is_some()) + u32::from(std_handles.is_some());
     let mut size = 0usize;
     // SAFETY: the sizing call takes a null list and writes only `size`; it
     // reports failure (`ERROR_INSUFFICIENT_BUFFER`) by design.
@@ -256,6 +341,27 @@ pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Resul
         }
     }
 
+    if let Some(handles) = &std_handles {
+        // Without the list `bInheritHandles` would hand the child every
+        // inheritable handle this process has, including the ends of other
+        // children's pipes.
+        // SAFETY: `handles` outlives the `CreateProcessW` call below.
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr().cast::<c_void>(),
+                size_of_val(handles),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            return Err(os_error("UpdateProcThreadAttribute(HANDLE_LIST)"));
+        }
+    }
+
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     if spec.pseudo_console.is_some() {
@@ -267,6 +373,12 @@ pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Resul
         startup.StartupInfo.hStdInput = INVALID_HANDLE_VALUE;
         startup.StartupInfo.hStdOutput = INVALID_HANDLE_VALUE;
         startup.StartupInfo.hStdError = INVALID_HANDLE_VALUE;
+    }
+    if let Some([stdin, stdout, stderr]) = std_handles {
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = stdin;
+        startup.StartupInfo.hStdOutput = stdout;
+        startup.StartupInfo.hStdError = stderr;
     }
     startup.lpAttributeList = list;
     let mut info = PROCESS_INFORMATION::default();
@@ -287,7 +399,7 @@ pub(crate) fn spawn_in_job(job: &JobObject, spec: &ProcessSpec<'_>) -> io::Resul
             command_line.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
-            0,
+            i32::from(std_handles.is_some()),
             flags,
             spec.environment
                 .map_or(std::ptr::null(), |block| block.as_ptr().cast::<c_void>()),
@@ -345,6 +457,8 @@ pub(crate) fn exit_code(process: &OwnedHandle) -> io::Result<u32> {
 /// thread pool and its callback sends on a channel.
 pub(crate) struct ExitWatch {
     rx: oneshot::Receiver<()>,
+    /// The end was seen by [`Self::wait`]; the receiver is spent.
+    fired: bool,
     registration: Registration,
 }
 
@@ -397,6 +511,7 @@ impl ExitWatch {
         }
         Ok(Self {
             rx,
+            fired: false,
             registration: Registration {
                 wait,
                 cell,
@@ -405,9 +520,28 @@ impl ExitWatch {
         })
     }
 
+    /// Wait for the process to end, without consuming the watch. Safe to
+    /// cancel and to call again; it returns at once after the end was seen.
+    pub(crate) async fn wait(&mut self) {
+        if !self.fired {
+            // The sender is only dropped unsent when the registration is
+            // gone, which cannot happen while `self` is alive.
+            let _ = (&mut self.rx).await;
+            self.fired = true;
+        }
+    }
+
     /// Wait for the process to end.
     pub(crate) async fn exited(self) {
-        let Self { rx, registration } = self;
+        let Self {
+            rx,
+            fired,
+            registration,
+        } = self;
+        if fired {
+            drop(registration);
+            return;
+        }
         // The sender is only dropped unsent when the registration is gone,
         // which cannot happen while `registration` is alive here.
         let _ = rx.await;

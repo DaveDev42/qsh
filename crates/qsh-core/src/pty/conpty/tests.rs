@@ -12,7 +12,7 @@
 //! never on the whole byte stream (a Server 2022 conhost and a Windows 11
 //! one differ in the preamble).
 
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+use std::os::windows::io::{AsRawHandle as _, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
@@ -22,13 +22,10 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
-use windows_sys::Win32::System::JobObjects::{
-    IsProcessInJob, JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList,
-    QueryInformationJobObject,
-};
+use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetCurrentProcess, GetProcessHandleCount, OpenProcess, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, WaitForSingleObject,
+    CREATE_NO_WINDOW, GetCurrentProcess, GetProcessHandleCount, QueryFullProcessImageNameW,
+    WaitForSingleObject,
 };
 
 use super::*;
@@ -37,7 +34,9 @@ use crate::broker::{
     Broker, BrokerConfig, CloseReason, ConnectionId, ControlEvent, Cursor, ReplayEvent,
     SessionHandle, SourceFactory, TestClock,
 };
+use crate::fsutil::dacl::ObjectKind;
 use crate::fsutil::dacl::testing::{assert_owner_only_report, read_dacl_of_handle};
+use crate::winproc::testing::{assert_all_ended, job_pids, open_members};
 
 /// Hard bound: only elapses when the ConPTY backend is broken.
 const HARD_TIMEOUT: Duration = Duration::from_secs(60);
@@ -300,28 +299,6 @@ async fn conpty_exit_code_is_reported() {
 // Job Object
 // --------------------------------------------------------------------------
 
-/// The pids in `job`, as the kernel lists them.
-fn job_pids(job: &JobObject) -> Vec<u32> {
-    // The list header is two u32 counts, then one pointer-sized id each.
-    let mut buf = vec![0usize; 1 + 64];
-    let mut returned = 0u32;
-    // SAFETY: `buf` is a writable buffer of the length passed.
-    let ok = unsafe {
-        QueryInformationJobObject(
-            job.raw(),
-            JobObjectBasicProcessIdList,
-            buf.as_mut_ptr().cast(),
-            (buf.len() * size_of::<usize>()) as u32,
-            &mut returned,
-        )
-    };
-    assert_ne!(ok, 0, "QueryInformationJobObject failed");
-    // SAFETY: the kernel filled the header it is reinterpreted as.
-    let header = unsafe { &*buf.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
-    let n = header.NumberOfProcessIdsInList as usize;
-    buf[1..].iter().take(n).map(|&id| id as u32).collect()
-}
-
 /// Poll `job` until it holds at least `count` processes (a child starts its
 /// own children asynchronously, so this observes state with a deadline).
 async fn job_with_at_least(job: &JobObject, count: usize) -> Vec<u32> {
@@ -336,29 +313,6 @@ async fn job_with_at_least(job: &JobObject, count: usize) -> Vec<u32> {
             "job never reached {count} processes: {pids:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-/// A handle to each of `pids`, so a pid cannot be reused while a test waits
-/// on it.
-fn open_members(pids: &[u32]) -> Vec<OwnedHandle> {
-    pids.iter()
-        .map(|&pid| {
-            // SAFETY: `OpenProcess` returns a fresh handle or null.
-            let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-            assert!(!h.is_null(), "OpenProcess({pid}) failed");
-            // SAFETY: the handle is fresh and owned here.
-            unsafe { OwnedHandle::from_raw_handle(h) }
-        })
-        .collect()
-}
-
-/// Every process in `members` has ended (within the hard bound).
-fn assert_all_ended(members: &[OwnedHandle], pids: &[u32], what: &str) {
-    for (pid, member) in pids.iter().zip(members) {
-        // SAFETY: a live handle.
-        let state = unsafe { WaitForSingleObject(member.as_raw_handle(), 30_000) };
-        assert_eq!(state, WAIT_OBJECT_0, "process {pid} survived {what}");
     }
 }
 
@@ -726,6 +680,7 @@ async fn conpty_close_without_a_signal_starts_with_close_pseudo_console_and_esca
             pseudo_console: None,
             environment: None,
             current_dir: None,
+            stdio: None,
         },
     )
     .unwrap();
@@ -1218,83 +1173,6 @@ fn locale_and_time_zone_pass_through_from_the_serve_environment_and_nothing_else
     let launch = plan_from(&argv(&["cmd.exe"]), &user_env, &[], r"C:\Windows", &[]).unwrap();
     let block = String::from_utf16_lossy(&launch.environment);
     assert!(block.contains("TERM=xterm-256color\0"), "{block:?}");
-}
-
-/// The program `argv[0]` names is found on the child's own `PATH`, then the
-/// system directories, never in the host's working directory.
-#[test]
-fn a_bare_program_name_is_never_searched_in_the_working_directory() {
-    let cwd = tempfile::tempdir().unwrap();
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let system = tempfile::tempdir().unwrap();
-    for (dir, name) in [
-        (&cwd, "evil.exe"),
-        (&first, "tool.exe"),
-        (&second, "tool.exe"),
-        (&second, "only-second.exe"),
-        (&system, "sysonly.exe"),
-        (&cwd, "local.exe"),
-    ] {
-        std::fs::write(dir.path().join(name), b"").unwrap();
-    }
-    let path =
-        std::env::join_paths([Path::new(r"relative\dir"), first.path(), second.path()]).unwrap();
-    let path = path.to_str().unwrap();
-    let system_dirs = [system.path().to_path_buf()];
-    let find = |name: &str| resolve_program(name, Some(path), cwd.path(), &system_dirs);
-
-    // A file in the working directory is not on the search path.
-    assert_eq!(find("evil").unwrap_err().kind(), io::ErrorKind::NotFound);
-    assert_eq!(
-        find("evil.exe").unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
-    // The first `PATH` entry that has it wins; `.exe` is added.
-    assert_eq!(find("tool").unwrap(), first.path().join("tool.exe"));
-    assert_eq!(
-        find("only-second").unwrap(),
-        second.path().join("only-second.exe")
-    );
-    // The system directories come after `PATH`.
-    assert_eq!(find("sysonly").unwrap(), system.path().join("sysonly.exe"));
-    // A name with a directory part is that path, relative to the child's
-    // working directory.
-    assert_eq!(find(r".\local").unwrap(), cwd.path().join(r".\local.exe"));
-    assert_eq!(
-        find(first.path().join("tool").to_str().unwrap()).unwrap(),
-        first.path().join("tool.exe")
-    );
-    assert_eq!(find("").unwrap_err().kind(), io::ErrorKind::NotFound);
-    // No PATH at all still reaches the system directories.
-    assert_eq!(
-        resolve_program("sysonly", None, cwd.path(), &system_dirs).unwrap(),
-        system.path().join("sysonly.exe")
-    );
-}
-
-// --------------------------------------------------------------------------
-// Command line
-// --------------------------------------------------------------------------
-
-fn quoted(args: &[&str]) -> String {
-    let argv: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
-    command_line(&argv).to_string_lossy().into_owned()
-}
-
-/// The quoting rules every MSVCRT `argv` parser undoes.
-#[test]
-fn command_line_quotes_arguments_the_way_the_c_runtime_parses_them() {
-    assert_eq!(
-        quoted(&["cmd.exe", "/c", "echo x"]),
-        r#"cmd.exe /c "echo x""#
-    );
-    assert_eq!(quoted(&["a", ""]), r#"a """#);
-    assert_eq!(quoted(&["a", r#"say "hi""#]), r#"a "say \"hi\"""#);
-    // Backslashes are literal unless a quote follows them.
-    assert_eq!(quoted(&["a", r"C:\dir\"]), r"a C:\dir\");
-    assert_eq!(quoted(&["a", r"C:\my dir\"]), r#"a "C:\my dir\\""#);
-    assert_eq!(quoted(&["a", r#"x\"y"#]), r#"a x\\\"y"#);
 }
 
 /// `0` in either dimension means "unknown": 80x24, so a resize to zero can

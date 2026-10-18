@@ -58,19 +58,16 @@
 //! that signal's name in `session.exit`, and one that ends on its own
 //! reports none.
 
-use std::ffi::{OsStr, OsString};
-use std::fs::OpenOptions;
-use std::future::Future as _;
+use std::ffi::OsString;
 use std::io;
-use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
+use tokio::net::windows::named_pipe::NamedPipeServer;
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -81,7 +78,8 @@ use super::signal_map::{self, Step, UserEvent};
 use crate::broker::{
     SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
 };
-use crate::fsutil::dacl::{CurrentUser, DaclSource as _, ObjectKind};
+use crate::winproc::launch::{self, command_line, resolve_program};
+use crate::winproc::pipe::host_pipe;
 use crate::winproc::{self, ExitWatch, JobObject, NamedEvent, ProcessSpec};
 
 #[cfg(test)]
@@ -90,9 +88,6 @@ mod tests;
 /// The window size used when the client sends `0` in either dimension (the
 /// same fallback as the POSIX backend).
 const FALLBACK_SIZE: (u16, u16) = (80, 24);
-
-/// Pipe buffer size for both host pipes.
-const PIPE_BUFFER: u32 = 64 * 1024;
 
 fn normalize_size(cols: u16, rows: u16) -> (u16, u16) {
     if cols == 0 || rows == 0 {
@@ -284,30 +279,13 @@ pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Laun
         ));
     }
     let user_env = winproc::user_environment()?;
-    let serve_env: Vec<(String, String)> = std::env::vars_os()
-        .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
-        })
-        .collect();
     plan_from(
         spec,
         &user_env,
-        &serve_env,
+        &launch::serve_environment(),
         &winproc::windows_directory()?,
         &events.environment(),
     )
-}
-
-/// `TERM` is not passed through from the serve process; the locale and the
-/// time zone are, when it has them.
-fn is_locale_key(key: &str) -> bool {
-    env_policy::PASSTHROUGH
-        .iter()
-        .any(|k| WINDOWS.same_key(k, key))
-        || key.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("LC_"))
 }
 
 /// [`plan`] with its host inputs given: the user's environment block, the
@@ -327,11 +305,7 @@ fn plan_from(
         .filter(|t| env_policy::is_valid_entry("TERM", t))
         .unwrap_or(DEFAULT_TERM);
     let term = [("TERM".to_string(), term.to_string())];
-    let locale: Vec<(String, String)> = serve_env
-        .iter()
-        .filter(|(k, _)| is_locale_key(k))
-        .cloned()
-        .collect();
+    let locale = launch::locale_entries(serve_env);
     let pinned = env_policy::windows_session_pinned(user_env, session_env);
     let env = env_policy::windows_overlay_env(user_env, &[&term, &locale, &spec.env], &pinned);
 
@@ -355,10 +329,7 @@ fn plan_from(
         let command_line = command_line(&[shell.to_string_lossy().into_owned()]);
         (shell, command_line)
     } else {
-        let search = [
-            Path::new(windows_dir).join("System32"),
-            PathBuf::from(windows_dir),
-        ];
+        let search = launch::system_dirs(windows_dir);
         let application = resolve_program(
             &spec.argv[0],
             env_policy::windows_lookup(&env, "PATH"),
@@ -373,115 +344,6 @@ fn plan_from(
         current_dir,
         environment: env_policy::windows_environment_block(&env),
     })
-}
-
-/// The program `argv[0]` names, as a full path.
-///
-/// A name with a directory part is that path (relative to the child's working
-/// directory). A bare name is looked up in the directories of the child's
-/// own `PATH`, then the system directories, and never in the host's working
-/// directory or on the host's `PATH`: the client picks the command, the
-/// host's account decides what that name means. Without an extension the
-/// name gets `.exe`, like `CreateProcessW` does. Batch files and `cmd.exe`
-/// built-ins are not run through a shell here: the client has to send
-/// `cmd /c ...` itself.
-fn resolve_program(
-    argv0: &str,
-    path: Option<&str>,
-    cwd: &Path,
-    system_dirs: &[PathBuf],
-) -> io::Result<PathBuf> {
-    let name = Path::new(argv0);
-    let names: Vec<OsString> = if name.extension().is_none() {
-        let mut exe = OsString::from(argv0);
-        exe.push(".exe");
-        vec![exe]
-    } else {
-        let mut exe = OsString::from(argv0);
-        exe.push(".exe");
-        vec![OsString::from(argv0), exe]
-    };
-    let not_found = || {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{argv0}: program not found"),
-        )
-    };
-    if argv0.is_empty() {
-        return Err(not_found());
-    }
-    if argv0.contains(['\\', '/', ':']) {
-        return names
-            .iter()
-            .map(|n| {
-                let n = Path::new(n);
-                if n.is_absolute() {
-                    n.to_path_buf()
-                } else {
-                    cwd.join(n)
-                }
-            })
-            .find(|p| p.is_file())
-            .ok_or_else(not_found);
-    }
-    let dirs = path
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(OsStr::new(p)))
-        .filter(|dir| dir.is_absolute())
-        .chain(system_dirs.iter().cloned());
-    for dir in dirs {
-        for n in &names {
-            let candidate = dir.join(n);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(not_found())
-}
-
-// ---------------------------------------------------------------------------
-// Command line
-// ---------------------------------------------------------------------------
-
-/// `argv` as one `CreateProcessW` command line, quoted the way Rust's
-/// `std::process::Command` quotes a Windows command line (the rules every
-/// MSVCRT-style `argv` parser undoes).
-fn command_line(argv: &[String]) -> OsString {
-    let mut wide: Vec<u16> = Vec::new();
-    for (i, arg) in argv.iter().enumerate() {
-        if i > 0 {
-            wide.push(u16::from(b' '));
-        }
-        push_arg(&mut wide, OsStr::new(arg));
-    }
-    OsString::from_wide(&wide)
-}
-
-fn push_arg(out: &mut Vec<u16>, arg: &OsStr) {
-    let units: Vec<u16> = arg.encode_wide().collect();
-    let quote = units.is_empty() || units.iter().any(|&c| c == 0x20 || c == 0x09);
-    if quote {
-        out.push(u16::from(b'"'));
-    }
-    let mut backslashes = 0usize;
-    for &unit in &units {
-        if unit == u16::from(b'\\') {
-            backslashes += 1;
-        } else {
-            if unit == u16::from(b'"') {
-                // n backslashes before a quote become 2n + 1.
-                out.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes + 1));
-            }
-            backslashes = 0;
-        }
-        out.push(unit);
-    }
-    if quote {
-        // n backslashes before the closing quote become 2n.
-        out.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
-        out.push(u16::from(b'"'));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -607,59 +469,6 @@ fn coord(cols: u16, rows: u16) -> COORD {
 // Host pipes
 // ---------------------------------------------------------------------------
 
-/// A pipe between the host and conhost: the host's overlapped end, and the
-/// synchronous end handed to `CreatePseudoConsole`.
-struct HostPipe {
-    host: NamedPipeServer,
-    conhost: OwnedHandle,
-}
-
-/// Create an owner-only pipe under an unguessable name. `host_reads` is the
-/// direction: output (conhost writes, host reads) or input (host writes).
-fn host_pipe(host_reads: bool) -> io::Result<HostPipe> {
-    let name = format!(r"\\.\pipe\qsh-conpty-{:032x}", rand::random::<u128>());
-    let descriptor = CurrentUser.owner_only(ObjectKind::Pipe)?;
-    let mut options = ServerOptions::new();
-    options
-        .first_pipe_instance(true)
-        .reject_remote_clients(true)
-        .pipe_mode(PipeMode::Byte)
-        .max_instances(1)
-        .access_inbound(host_reads)
-        .access_outbound(!host_reads)
-        .in_buffer_size(PIPE_BUFFER)
-        .out_buffer_size(PIPE_BUFFER);
-    // SAFETY: the attributes point at a descriptor owned by `descriptor`,
-    // which outlives the call; the kernel copies it.
-    let host =
-        unsafe { options.create_with_security_attributes_raw(&name, descriptor.attributes_ptr()) }?;
-    // Synchronous open (no overlapped flag): conhost does blocking I/O on it.
-    let conhost = OpenOptions::new()
-        .read(!host_reads)
-        .write(host_reads)
-        .open(&name)?;
-    mark_connected(&host)?;
-    Ok(HostPipe {
-        host,
-        conhost: OwnedHandle::from(conhost),
-    })
-}
-
-/// Tell the reactor the host end is connected, so it starts servicing reads
-/// and writes. The client is already attached (we opened it above), so
-/// `ConnectNamedPipe` completes at once with `ERROR_PIPE_CONNECTED` and
-/// `connect()` is ready on its first poll; polling it once here keeps
-/// [`SessionSource::spawn`] synchronous.
-fn mark_connected(host: &NamedPipeServer) -> io::Result<()> {
-    let mut cx = Context::from_waker(Waker::noop());
-    match std::pin::pin!(host.connect()).poll(&mut cx) {
-        Poll::Ready(result) => result,
-        Poll::Pending => Err(io::Error::other(
-            "the host pipe did not report its client as connected",
-        )),
-    }
-}
-
 /// The output side as an `AsyncRead` that reports a closed pipe as a clean
 /// end of stream, like a pty master at hang-up.
 struct HostOutput(NamedPipeServer);
@@ -723,10 +532,10 @@ impl ConPtySession {
     ) -> io::Result<Self> {
         let output = host_pipe(true)?;
         let input = host_pipe(false)?;
-        let console = PseudoConsole::create(cols, rows, &input.conhost, &output.conhost)?;
+        let console = PseudoConsole::create(cols, rows, &input.child, &output.child)?;
         // conhost holds its own duplicates now. Ours must go, or the output
         // pipe would not end while this process lives.
-        drop((input.conhost, output.conhost));
+        drop((input.child, output.child));
         let console = Arc::new(console);
         let job = Arc::new(JobObject::new_kill_on_close()?);
         // From here a failure drops `job` (and the console) on the way out;
@@ -741,6 +550,7 @@ impl ConPtySession {
                 pseudo_console: console.raw(),
                 environment: Some(&launch.environment),
                 current_dir: Some(launch.current_dir.as_os_str()),
+                stdio: None,
             },
         )?;
         tracing::debug!(pid = process.pid, "ConPTY session started");

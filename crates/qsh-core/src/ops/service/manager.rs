@@ -158,16 +158,21 @@ impl ManagerRunner for CommandRunner {
         let Some((program, args)) = argv.split_first() else {
             return Err(RunError::Io("empty manager argv".to_string()));
         };
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| match err.kind() {
-                std::io::ErrorKind::NotFound => RunError::NotFound,
-                _ => RunError::Io(err.to_string()),
-            })?;
+        let mut child = {
+            // Not while another spawn has handles inheritable (`winproc`).
+            #[cfg(windows)]
+            let _spawning = crate::winproc::spawn_guard();
+            Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => RunError::NotFound,
+                    _ => RunError::Io(err.to_string()),
+                })?
+        };
         let reader = child.stderr.take().map(|mut stderr| {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {

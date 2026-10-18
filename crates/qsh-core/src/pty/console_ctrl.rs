@@ -225,15 +225,21 @@ pub(crate) fn send(program: Option<&std::path::Path>, pid: u32, kind: CtrlKind) 
         None => std::env::current_exe()?,
     };
     let blocking = || -> io::Result<()> {
-        let mut child = std::process::Command::new(program)
-            .args(["internal", "console-ctrl"])
-            .arg(pid.to_string())
-            .arg(kind.as_arg())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(DETACHED_PROCESS)
-            .spawn()?;
+        // `Command` inherits every inheritable handle, so it spawns under the
+        // lock that covers the window in which a child's pipe ends are
+        // inheritable (`winproc` module doc).
+        let mut child = {
+            let _spawning = crate::winproc::spawn_guard();
+            std::process::Command::new(program)
+                .args(["internal", "console-ctrl"])
+                .arg(pid.to_string())
+                .arg(kind.as_arg())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(DETACHED_PROCESS)
+                .spawn()?
+        };
         let mut stdout = child.stdout.take().expect("stdout was piped");
         let (tx, rx) = std::sync::mpsc::channel();
         // The reader ends when the helper writes, ends, or is killed below.

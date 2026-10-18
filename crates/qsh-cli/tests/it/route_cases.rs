@@ -465,6 +465,63 @@ pub fn exec_round_trip(route: &impl Route) {
     assert_eq!(data["stdout_b64"], BASE64.encode("hello\r\n"), "{value}");
 }
 
+/// How long the host may run the tree in [`exec_timeout_kills_the_whole_tree`]
+/// before its deadline ends it. The deadline starts with the command, so it
+/// has to leave room for `ping` to start on a loaded runner.
+const TREE_TIMEOUT_MS: &str = "10000";
+
+/// A timeout ends the whole tree on the host, not just the program `argv[0]`
+/// named (ADR-0035 decision 23; the process group kill on unix). `cmd` runs
+/// `ping`, whose output goes to a file `ping` itself holds open without
+/// delete sharing. Once the file has content `ping` is running; after the
+/// timeout the file can be deleted only if no process of the tree still has
+/// it open.
+pub fn exec_timeout_kills_the_whole_tree(route: &impl Route) {
+    let dir = tempfile::tempdir().expect("a marker directory");
+    let marker = dir.path().join("ping.txt");
+    let marker_arg = marker.to_str().expect("the marker path is UTF-8");
+    let args = [
+        "exec",
+        route.host(),
+        "--json",
+        "--timeout",
+        TREE_TIMEOUT_MS,
+        "--",
+        "cmd",
+        "/c",
+        "ping",
+        "-n",
+        "120",
+        "127.0.0.1",
+        ">",
+        marker_arg,
+    ];
+    let exec = route
+        .client()
+        .command(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qsh exec");
+
+    poll_until("ping to write its first line", READY_DEADLINE, || {
+        std::fs::metadata(&marker)
+            .is_ok_and(|meta| meta.len() > 0)
+            .then_some(())
+    });
+    let output = exec.wait_with_output().expect("wait for qsh exec");
+    let value = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 255, "{value}");
+    assert_eq!(value["error"]["code"], "TIMEOUT", "{value}");
+
+    poll_until(
+        "the killed tree to release the file ping held open",
+        READY_DEADLINE,
+        || std::fs::remove_file(&marker).ok(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PTY sessions
 // ---------------------------------------------------------------------------

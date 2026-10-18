@@ -34,6 +34,11 @@ fn exec_round_trip() {
 }
 
 #[test]
+fn exec_timeout_kills_the_whole_tree() {
+    cases::exec_timeout_kills_the_whole_tree(&ReverseRoute::start());
+}
+
+#[test]
 fn pty_session_runs_a_command() {
     cases::pty_session_runs_a_command(&ReverseRoute::start());
 }
