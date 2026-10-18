@@ -1,14 +1,13 @@
 //! Tests for the release scripts under `scripts/`: the installers
 //! (`install.sh`, `install.ps1`), the all-or-none signing-secret gate, the
-//! Windows zip packager, the Authenticode verdict function and the scoop and
-//! winget manifest renderer, plus a few structural checks of
-//! `.github/workflows/release.yml` that keep it in step with them. None of it
+//! Windows zip packager and the scoop and winget manifest renderer, plus a
+//! few structural checks of `.github/workflows/release.yml` that keep it in step with them. None of it
 //! touches the network.
 //!
 //! One integration binary, as `CLAUDE.md` asks for the crates under
 //! `crates/`: each topic is a module in `install_script/`. The shell scripts
 //! run on unix. The PowerShell scripts run on Windows only, because they
-//! need a real Windows PowerShell (registry, `Get-AuthenticodeSignature`),
+//! need a real Windows PowerShell (registry),
 //! and they are embedded with `include_str!` so the test never depends on
 //! where the checkout lives.
 //!
@@ -34,6 +33,3 @@ mod release_yml;
 #[cfg(unix)]
 #[path = "install_script/secret_gate.rs"]
 mod secret_gate;
-#[cfg(windows)]
-#[path = "install_script/signature.rs"]
-mod signature;

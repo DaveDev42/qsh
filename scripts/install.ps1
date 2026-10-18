@@ -35,12 +35,10 @@
 # compromised release. It is an integrity check, not a signature. The check
 # always runs before the zip is opened. Unlike install.sh this script does not
 # run `gh attestation verify`; to check build provenance, run it yourself on
-# the downloaded zip. Whether qsh.exe carries an Authenticode signature
-# depends on whether the release was cut with signing credentials configured
-# (docs/deploy/release-secrets.md); this script does not check either way.
+# the downloaded zip. Windows assets are unsigned (ADR-0035 revision history,
+# 2026-10-19), so there is no signature for this script to check.
 #
-# The file is plain ASCII so that Authenticode signing it does not depend on
-# a byte order mark.
+# The file is plain ASCII so that it does not depend on a byte order mark.
 #
 # Archive naming is a contract with .github/workflows/release.yml:
 # qsh-<tag>-<target>.zip holding `qsh.exe` and `man/<name>.1`, with a

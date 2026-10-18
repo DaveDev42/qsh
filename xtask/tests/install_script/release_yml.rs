@@ -11,23 +11,22 @@ fn index_of(needle: &str) -> usize {
 }
 
 #[test]
-fn release_yml_gates_both_signing_legs_through_the_shared_script() {
+fn release_yml_gates_apple_signing_through_the_shared_script() {
     assert_eq!(
         RELEASE_YML
             .matches("bash scripts/release/secret-gate.sh")
             .count(),
-        2,
-        "the Apple and the Windows gate must both call the shared script"
+        1,
+        "the Apple gate must call the shared script"
     );
     assert!(
         !RELEASE_YML.contains("present=$((present + 1))"),
         "an inline copy of the gate logic is back in release.yml"
     );
     let apple = index_of("name: Check for Apple signing secrets");
-    let windows = index_of("name: Check for Windows signing secrets");
     let toolchain = index_of("actions-rust-lang/setup-rust-toolchain");
     assert!(
-        apple < toolchain && windows < toolchain,
+        apple < toolchain,
         "a misconfiguration must fail before the release compile"
     );
 }
@@ -63,15 +62,26 @@ fn release_yml_lists_both_windows_targets_everywhere_assets_are_listed() {
     );
 }
 
-/// Signing is judged on the bytes that ship: the gate fails fast, then build,
-/// sign, verify, smoke, package.
+/// Windows assets ship unsigned (ADR-0035 개정 이력, 2026-10-19): the
+/// workflow carries no Authenticode step, and the installer is still staged
+/// and packaging still runs.
 #[test]
-fn release_yml_orders_the_windows_signing_chain_before_packaging() {
+fn release_yml_ships_windows_assets_unsigned() {
+    for gone in [
+        "esigner-codesign",
+        "WINDOWS_SIGN_",
+        "verify-signature.ps1",
+        "signtool",
+        "Check for Windows signing secrets",
+    ] {
+        assert!(
+            !RELEASE_YML.contains(gone),
+            "release.yml still has `{gone}`"
+        );
+    }
     let order = [
-        "name: Check for Windows signing secrets",
         "cargo build --release -p qsh-cli --target",
-        "uses: sslcom/esigner-codesign@",
-        "name: Verify the signature (windows)",
+        "name: Stage install.ps1",
         "name: Release smoke (functional)",
         "name: Package archive (windows)",
     ];
@@ -79,10 +89,6 @@ fn release_yml_orders_the_windows_signing_chain_before_packaging() {
     assert!(
         positions.windows(2).all(|w| w[0] < w[1]),
         "Windows steps are out of order: {positions:?}"
-    );
-    assert!(
-        RELEASE_YML.contains("verify-signature.ps1") && RELEASE_YML.contains("verify /pa /v"),
-        "the verify step must run both signtool and the verdict script"
     );
 }
 

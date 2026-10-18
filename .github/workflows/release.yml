@@ -49,17 +49,16 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true
-          # The x86_64 Windows leg also stages, signs and uploads
+          # The x86_64 Windows leg also stages and uploads
           # `scripts/install.ps1` as a release asset (`installer`), so the
-          # script is signed once per release, not once per architecture.
+          # script is published once per release, not once per architecture.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
             installer: true
           # Cross build from the x86_64 runner (ADR-0035 결정 16). The binary
           # cannot run here, so `cross` skips `Binary starts` and the release
-          # smoke below; it is still signed and its signature verified like
-          # the x86_64 one. Whether it works is the campaign's call
+          # smoke below. Whether it works is the campaign's call
           # (`docs/campaigns/p1-windows.md`). Like the aarch64 musl leg above,
           # that the MSVC arm64 toolchain on `windows-latest` builds
           # aws-lc-sys is settled by the first dispatch run, not by reading
@@ -84,8 +83,8 @@ jobs:
       # install below states: a misconfiguration should fail in seconds,
       # not after a ten-minute release compile.
       #
-      # All six or none, decided by scripts/release/secret-gate.sh, which the
-      # Windows leg below shares so the three outcomes are pinned once
+      # All six or none, decided by scripts/release/secret-gate.sh, so the
+      # three outcomes are pinned once
       # (`xtask/tests/install_script/secret_gate.rs`). A partial set is a
       # misconfiguration, and the two refs deserve different answers: on a tag
       # the artifacts ship and DoD 2 is being judged, so it is an error; on a
@@ -111,30 +110,6 @@ jobs:
             "No Apple signing secrets are configured; this tag ships an ad-hoc signed macOS binary that Gatekeeper rejects on a quarantined download." \
             "$HAS_KEY_ID" "$HAS_ISSUER" "$HAS_P8" \
             "$HAS_P12" "$HAS_P12_PASSWORD" "$HAS_TEAM_ID"
-
-      # ── Windows Authenticode signing (ADR-0035 결정 16) ──
-      # The same all-or-none gate for the four SSL.com eSigner secrets. The
-      # expected signer subject is a repository variable, not a secret (it is
-      # printed in every signature dialog); the verification step refuses to
-      # run against an empty one. Names and rotation:
-      # docs/deploy/release-secrets.md.
-      - name: Check for Windows signing secrets
-        id: winsign
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          HAS_USERNAME: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME != '' }}
-          HAS_PASSWORD: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD != '' }}
-          HAS_CREDENTIAL_ID: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID != '' }}
-          HAS_TOTP_SECRET: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET != '' }}
-          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
-        run: |
-          set -euo pipefail
-          bash scripts/release/secret-gate.sh has-windows Windows \
-            "signing" \
-            "Authenticode signing" \
-            "No Windows signing secrets are configured; this tag ships unsigned Windows binaries that SmartScreen flags on a downloaded copy." \
-            "$HAS_USERNAME" "$HAS_PASSWORD" "$HAS_CREDENTIAL_ID" "$HAS_TOTP_SECRET"
 
       # Honors rust-toolchain.toml (pinned channel). v2 denies warnings via
       # CARGO_BUILD_WARNINGS instead of RUSTFLAGS.
@@ -311,18 +286,8 @@ jobs:
             exit 1
           fi
 
-      # ── Windows Authenticode signing (ADR-0035 결정 16) ──
-      # Signs in place, before `Binary starts` and `Release smoke
-      # (functional)` below, so the smoke certifies the bytes that ship and
-      # `Package archive (windows)` packs the signed ones. CodeSignTool, which
-      # the action wraps, applies a SHA-256 digest and an RFC 3161 timestamp
-      # from http://ts.ssl.com by default; the timestamp is what keeps the
-      # signature valid after the certificate expires, and the verify step
-      # below does not take the tool's word for either. The action writes the
-      # signed file to `output_path`, and the next step copies it back over
-      # the original, so no input depends on the tool's `override` semantics.
-      # Secrets reach the action through `with:` only; nothing here echoes
-      # them.
+      # The installer is staged as is. Windows assets ship unsigned
+      # (ADR-0035 개정 이력, 2026-10-19).
       - name: Stage install.ps1
         if: runner.os == 'Windows' && matrix.installer
         shell: pwsh
@@ -331,81 +296,6 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'assets'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item scripts/install.ps1 (Join-Path $dir 'install.ps1')
-
-      - name: Sign the binary (windows)
-        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
-        uses: sslcom/esigner-codesign@v1.3.2
-        with:
-          command: sign
-          username: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME }}
-          password: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD }}
-          credential_id: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET }}
-          file_path: ${{ github.workspace }}/target/${{ matrix.target }}/release/qsh.exe
-          output_path: ${{ runner.temp }}/signed-exe
-          malware_block: false
-          environment_name: PROD
-
-      - name: Sign install.ps1
-        if: runner.os == 'Windows' && matrix.installer && steps.winsign.outputs.has-windows == 'true'
-        uses: sslcom/esigner-codesign@v1.3.2
-        with:
-          command: sign
-          username: ${{ secrets.WINDOWS_SIGN_ESIGNER_USERNAME }}
-          password: ${{ secrets.WINDOWS_SIGN_ESIGNER_PASSWORD }}
-          credential_id: ${{ secrets.WINDOWS_SIGN_ESIGNER_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.WINDOWS_SIGN_ESIGNER_TOTP_SECRET }}
-          file_path: ${{ runner.temp }}/assets/install.ps1
-          output_path: ${{ runner.temp }}/signed-ps1
-          malware_block: false
-          environment_name: PROD
-
-      - name: Use the signed files
-        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
-        shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-          INSTALLER: ${{ matrix.installer }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Copy-Item (Join-Path $env:RUNNER_TEMP 'signed-exe/qsh.exe') "target/$env:TARGET/release/qsh.exe" -Force
-          if ($env:INSTALLER -eq 'true') {
-            Copy-Item (Join-Path $env:RUNNER_TEMP 'signed-ps1/install.ps1') (Join-Path $env:RUNNER_TEMP 'assets/install.ps1') -Force
-          }
-
-      # Two independent judges. `signtool verify /pa /v` runs the default
-      # authentication policy and prints the chain and timestamp in the log
-      # (it is the evidence DoD 6 asks for); it checks the executables only,
-      # since a script's signature is read through a PowerShell-specific
-      # provider. `verify-signature.ps1` reads `Get-AuthenticodeSignature`
-      # and fails unless the status is `Valid`, the signer is
-      # WINDOWS_SIGN_EXPECTED_SUBJECT and the signature carries a timestamp
-      # (`xtask/tests/install_script/signature.rs` pins the verdicts, an
-      # unsigned binary reports `NotSigned`). An empty subject variable is an
-      # error there, not a pass.
-      - name: Verify the signature (windows)
-        if: runner.os == 'Windows' && steps.winsign.outputs.has-windows == 'true'
-        shell: pwsh
-        env:
-          EXPECTED_SUBJECT: ${{ vars.WINDOWS_SIGN_EXPECTED_SUBJECT }}
-          TARGET: ${{ matrix.target }}
-          INSTALLER: ${{ matrix.installer }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = "target/$env:TARGET/release/qsh.exe"
-          $files = @($exe)
-          if ($env:INSTALLER -eq 'true') {
-            $files += (Join-Path $env:RUNNER_TEMP 'assets/install.ps1')
-          }
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Where-Object { $_.Directory.Parent.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
-            Select-Object -First 1
-          if ($null -eq $signtool) { throw 'signtool.exe not found in the Windows SDK' }
-          & $signtool.FullName verify /pa /v $exe
-          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $exe" }
-          & scripts/release/verify-signature.ps1 -Path $files -ExpectedSubject $env:EXPECTED_SUBJECT
-          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verdict failed' }
 
       # crt-static is the target default; the readelf step is the guard.
       # Pins the static-link precondition for the third M10 acceptance
@@ -452,7 +342,7 @@ jobs:
       # Unix legs run init -> mutual trust -> `exec --json` -> pty shell ->
       # `~d` detach -> `qsh attach`; the Windows leg runs the
       # `#[cfg(not(unix))]` twin (no pty shell: the Windows host PTY is
-      # M20), on the signed bytes when signing is configured. The
+      # M20). The
       # cross-built aarch64 Windows leg skips the smoke, because its binary
       # cannot run on the x86_64 runner.
       #
@@ -544,7 +434,7 @@ jobs:
       # name; scripts/release/package-windows.ps1 builds it and then
       # re-opens it to prove the member list and bytes match `docs/man/`.
       #
-      # Must run after `Sign the binary` / `Verify the signature` /
+      # Must run after the macOS `Sign the binary` / `Verify the signature` /
       # `Notarize` above: nothing in this job re-extracts the archive to
       # confirm the tar holds the signed, notarized bytes, so if this step
       # ever moves earlier the chain above would keep passing while
@@ -627,8 +517,8 @@ jobs:
           # a platform. A packaging step that produced nothing is a failure.
           if-no-files-found: error
 
-      # The installer is a release asset of its own (signed when the secrets
-      # are set, see above). Only the x86_64 Windows leg stages it.
+      # The installer is a release asset of its own (unsigned).
+      # Only the x86_64 Windows leg stages it.
       - uses: actions/upload-artifact@v7
         if: matrix.installer
         with:

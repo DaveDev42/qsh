@@ -1,12 +1,12 @@
 # P1 Windows 캠페인 — 실제 Windows 장비에서 CI가 못 보는 것을 확인한다 (M19 몫)
 
-상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). 회차는 아직 돌지 않았다. 대상 태그가 없다.
+상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). W11은 2026-10-19 ADR-0035 개정 이력(Authenticode 서명 철회)에 따라 서명 확인을 빼고 다시 고정했다(§2.1, §2.4, §4.9). 회차가 돌기 전의 재고정이라 §6의 사후 변경 금지에 걸리지 않는다. 회차는 아직 돌지 않았다. 대상 태그가 없다.
 
 ## 1. 목적과 지위
 
-ADR-0035는 Windows를 Linux·macOS와 같은 기능으로 연다. M19는 client 쪽(콘솔 raw 모드 attach, named pipe localctl과 `qsh listen` 데몬, Credential Manager, 작업 스케줄러 서비스, Authenticode 서명, 설치 경로 셋)을 연다. `windows-latest` 다리의 CI가 같은 러너 안 loopback으로 정방향·역방향 종단을 돌리므로(ADR-0035 결정 17) 이 캠페인은 CI가 볼 수 없는 것만 본다. 예를 들면 실제 터미널의 렌더링과 IME, 노트북 덮개, 둘째 사용자 계정, 로그온·로그오프·재부팅에 걸린 작업의 수명, 두 장비 사이의 UDP, 실제 서명과 SmartScreen, 패키지 관리자다.
+ADR-0035는 Windows를 Linux·macOS와 같은 기능으로 연다. M19는 client 쪽(콘솔 raw 모드 attach, named pipe localctl과 `qsh listen` 데몬, Credential Manager, 작업 스케줄러 서비스, 설치 경로 셋)을 연다. `windows-latest` 다리의 CI가 같은 러너 안 loopback으로 정방향·역방향 종단을 돌리므로(ADR-0035 결정 17) 이 캠페인은 CI가 볼 수 없는 것만 본다. 예를 들면 실제 터미널의 렌더링과 IME, 노트북 덮개, 둘째 사용자 계정, 로그온·로그오프·재부팅에 걸린 작업의 수명, 두 장비 사이의 UDP, 미서명 바이너리에 대한 SmartScreen, 패키지 관리자다.
 
-CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 콘솔 모드 비트와 복원 경로(`windows_attach::`), pipe의 DACL·SID 대조·이름 선점 거부(`pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`, `pipe_bind_fails_when_the_name_already_exists`), 절전 표본의 단조성(`windows_wake_sample_is_monotonic`), Credential Manager의 러너 왕복(`credential_manager_round_trip_on_the_runner`), `install.ps1`의 체크섬 선행(`install_ps1_verifies_the_checksum_before_extracting`), 서명 판정 함수(`windows_signature_check_fails_on_an_unsigned_binary`), 가짜 ssh 위의 Windows 자동 부트스트랩(`auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`)이다. 이 문서의 회차는 그 테스트가 대신 볼 수 없는 실제 환경의 동작이다.
+CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 콘솔 모드 비트와 복원 경로(`windows_attach::`), pipe의 DACL·SID 대조·이름 선점 거부(`pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`, `pipe_bind_fails_when_the_name_already_exists`), 절전 표본의 단조성(`windows_wake_sample_is_monotonic`), Credential Manager의 러너 왕복(`credential_manager_round_trip_on_the_runner`), `install.ps1`의 체크섬 선행(`install_ps1_verifies_the_checksum_before_extracting`), 가짜 ssh 위의 Windows 자동 부트스트랩(`auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`)이다. 이 문서의 회차는 그 테스트가 대신 볼 수 없는 실제 환경의 동작이다.
 
 지위는 `docs/campaigns/p1-ssh-bootstrap.md`와 같다. `docs/ROADMAP.md` §5.1 원칙 6에 따라 M19의 DoD는 이 문서가 사전 고정돼 커밋되는 데까지이고, 회차는 §5.5의 사람 몫이다. 마일스톤을 막지 않고 P1 완료 선언을 막는다. 판정은 합격/불합격이고, PASS가 기록되기 전에는 해당 기능이 실제 Windows에서 동작한다고 적지 않는다. 자동 테스트로 대신하지 않는다. 시간을 재지 않으며 합격은 아래 확인의 충족이다. 형식은 `docs/campaigns/p1-ssh-bootstrap.md`, `docs/campaigns/p1-supervise-wake.md`, `docs/campaigns/m10-clean-vm.md`를 따른다.
 
@@ -25,7 +25,7 @@ CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 �
 | W8 | Credential Manager 왕복 | M19 |
 | W9 | Windows on ARM에서 W1 축약 | M19 |
 | W10 | 상시 기동 변형의 로그오프·재부팅 생존과 `logon_task_session_scoped` 소멸 | M19 |
-| W11 | 서명 주체·SmartScreen, `install.ps1`·`scoop install`·`winget install` | M19 |
+| W11 | 미서명 SmartScreen 경고, `install.ps1`·`scoop install`·`winget install` | M19 |
 | W12 | Windows client 자동 부트스트랩(`qsh box`, `qsh cp`) | M19 |
 
 W12는 ADR-0035 결정 18의 번호가 아니다. `docs/campaigns/p1-ssh-bootstrap.md`의 R5가 요건 4와 6(`qsh box`의 대화형 attach와 `qsh cp`)을 M19로 미뤘고, R5의 문면은 고치지 않는 대신 그 몫을 W12가 받는다.
@@ -38,7 +38,7 @@ W12는 ADR-0035 결정 18의 번호가 아니다. `docs/campaigns/p1-ssh-bootstr
 
 - 그 태그의 release run이 초록이다.
 - 그 태그의 `SHA256SUMS`에 `qsh-<tag>-x86_64-pc-windows-msvc.zip`, `qsh-<tag>-aarch64-pc-windows-msvc.zip` 줄이 있고 release에 `install.ps1` 자산이 있다. `release` job의 `Check every target is published` 스텝이 이 사실을 붉게 만들지만 회차 시작 전에 사람이 한 번 더 본다.
-- W11은 서명된 태그에서만 돈다. 그 태그의 release run에서 `Sign the binary (windows)`, `Sign install.ps1`, `Verify the signature (windows)` 스텝이 건너뛰어지지 않고 초록이다. 서명 시크릿 없이 찍은 태그(run 요약에 `Unsigned release` 경고가 있다)에서는 W11을 돌지 않는다. 그 태그에서 W11을 돌려 나온 기록은 무효다. 다른 회차는 서명 여부와 무관하다.
+- W11은 서명 여부를 따지지 않는다. Windows 자산은 미서명으로 배포한다(ADR-0035 개정 이력, 2026-10-19).
 - W11의 scoop·winget 변형은 해당 패키지 관리자에 그 태그의 매니페스트가 올라 있어야 돈다(§4.9). 올라 있지 않으면 그 변형은 "보류"다.
 
 ### 2.2 장비
@@ -76,8 +76,6 @@ W와 L, W와 M은 서로 다른 장비다. 한 장비 안의 loopback은 회차�
 | `SHA256SUMS`의 x86_64 zip 줄 | |
 | `SHA256SUMS`의 aarch64 zip 줄 | |
 | `SHA256SUMS`의 `install.ps1` 줄 | |
-| 서명 스텝 세 개가 초록인가 (W11 대상 여부) | |
-| `WINDOWS_SIGN_EXPECTED_SUBJECT` 값 (저장소 변수, 시크릿 아님) | |
 
 이 문서를 고정한 커밋의 해시는 `docs/ROADMAP.md` §5.5의 Windows 행에 main 세션이 적는다.
 
@@ -337,64 +335,58 @@ schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\servic
 
 정리는 `schtasks /Delete /F /TN \qsh\qsh-serve`, 복사한 `.always-on.xml` 삭제, `qsh service uninstall`이다. 변형 B를 마친 뒤에는 `qsh identity move-key --to file`로 Credential Manager 항목을 지우고 `%USERPROFILE%\.config\qsh`를 지운다(W8의 정리와 같다).
 
-### 4.9 W11 — 서명, SmartScreen, 설치 경로 셋
+### 4.9 W11 — 미서명 SmartScreen 경고, 설치 경로 셋
 
-서명된 태그(§2.1)에서만 돈다. 변형은 넷이다. 서명 주체는 §2.4에 적은 `WINDOWS_SIGN_EXPECTED_SUBJECT` 값이다.
+Windows 자산은 서명하지 않는다(ADR-0035 개정 이력, 2026-10-19). 이 회차는 미서명이 안내한 대로(README Known limitations) 동작하는지와 설치 경로 셋이 바이너리를 설치하는지를 본다. 변형은 넷이다.
 
 **W11a 브라우저 다운로드.** 클린 W에서 Edge로 release 페이지의 `qsh-<tag>-x86_64-pc-windows-msvc.zip`을 받아 탐색기의 "모두 압축 풀기"로 푼다(웹에서 받았다는 표시가 풀린 파일에 이어진다).
 
 | 확인 | 합격 기준 |
 |---|---|
-| a1. 서명 상태 | `Get-AuthenticodeSignature .\qsh.exe \| Format-List Status, SignerCertificate, TimeStamperCertificate`에서 `Status`가 `Valid`이고 서명자 주체가 기대한 값이며 `TimeStamperCertificate`가 비어 있지 않다 |
-| a2. 속성 창 | 탐색기에서 `qsh.exe` 속성의 "디지털 서명" 탭에 서명자 이름과 타임스탬프가 나온다 |
-| a3. SmartScreen | 탐색기에서 `qsh.exe`를 더블클릭해 실행했을 때 "알 수 없는 게시자"를 내는 SmartScreen 창이 뜨지 않는다. 평판 경고가 게시자 이름과 함께 뜨면 그 사실을 비고에 적되 이 확인은 PASS로 본다 |
-| a4. 해시 | zip의 sha256이 `SHA256SUMS`의 줄과 같다 |
+| a1. SmartScreen | 탐색기에서 `qsh.exe`를 더블클릭하면 게시자가 "알 수 없는 게시자"인 SmartScreen 창이 뜨고, "추가 정보 → 실행"으로 실행할 수 있다. Smart App Control이 켜져 있어 실행이 막히면 그 사실을 비고에 적고 이 확인은 "해당 없음"으로 적는다(막힘은 README가 안내하는 동작이다) |
+| a2. 실행 | 터미널에서 `qsh version`이 대상 태그를 낸다 |
+| a3. 해시 | zip의 sha256이 `SHA256SUMS`의 줄과 같다 |
 
 **W11b `install.ps1`.** W에서 아래를 돈다.
 
 ```powershell
 $env:QSH_VERSION = '<대상 태그>'
 irm https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.ps1 | iex
-Get-AuthenticodeSignature "$env:USERPROFILE\.local\bin\qsh.exe" | Format-List Status, SignerCertificate, TimeStamperCertificate
+qsh version
 ```
 
-`irm ... | iex`는 main 브랜치의 `install.ps1`을 실행한다(README와 같다). 서명된 릴리스 자산은 b2가 따로 확인한다. 별도로 release의 `install.ps1` 자산을 받아 `Get-AuthenticodeSignature .\install.ps1`도 본다.
+`irm ... | iex`는 main 브랜치의 `install.ps1`을 실행한다(README와 같다).
 
 | 확인 | 합격 기준 |
 |---|---|
-| b1. 설치 | 스크립트가 관리자 권한을 요구하지 않고 끝난다. 설치된 `qsh.exe`의 서명이 a1과 같은 기준을 만족한다 |
-| b2. 스크립트 서명 | release 자산 `install.ps1`의 `Status`가 `Valid`이고 서명자 주체가 기대한 값이며 타임스탬프가 있다 |
-| b3. 체크섬 | 설치 출력에서 `verifying checksum` 줄이 `unpacking` 줄보다 앞에 있다 |
+| b1. 설치 | 스크립트가 관리자 권한을 요구하지 않고 끝나고, 새 터미널에서 `qsh version`이 대상 태그를 낸다 |
+| b2. 체크섬 | 설치 출력에서 `verifying checksum` 줄이 `unpacking` 줄보다 앞에 있다 |
 
 **W11c scoop.** 아래를 돈다.
 
 ```powershell
 scoop bucket add qsh https://github.com/DaveDev42/scoop-bucket
 scoop install qsh
-Get-AuthenticodeSignature "$env:USERPROFILE\scoop\apps\qsh\current\qsh.exe" | Format-List Status, SignerCertificate, TimeStamperCertificate
 qsh version
 ```
 
 | 확인 | 합격 기준 |
 |---|---|
 | c1. 설치 | `scoop install`이 해시 검증을 지나 끝나고 `qsh version`이 대상 태그를 낸다 |
-| c2. 서명 | 설치된 `qsh.exe`가 a1과 같은 기준을 만족한다 |
-| c3. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
-| c4. man 없음 | scoop이 `man/*.1`을 링크하거나 PATH에 올리지 않았다(zip 전체가 `apps\qsh\current`에 풀리므로 파일이 있는 것은 허용한다) |
+| c2. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
+| c3. man 없음 | scoop이 `man/*.1`을 링크하거나 PATH에 올리지 않았다(zip 전체가 `apps\qsh\current`에 풀리므로 파일이 있는 것은 허용한다) |
 
 **W11d winget.** 아래를 돈다.
 
 ```powershell
 winget install DaveDev42.qsh
-Get-AuthenticodeSignature (Get-Command qsh).Source | Format-List Status, SignerCertificate, TimeStamperCertificate
 qsh version
 ```
 
 | 확인 | 합격 기준 |
 |---|---|
 | d1. 설치 | `winget install`이 끝나고 새 터미널에서 `qsh version`이 대상 태그를 낸다 |
-| d2. 서명 | 설치된 `qsh.exe`가 a1과 같은 기준을 만족한다 |
-| d3. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
+| d2. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
 
 W11c와 W11d의 매니페스트는 첫 매니페스트가 수락되기 전에는 없다(README의 단서). 없는 변형은 "보류"로 적고 캠페인은 그 변형이 PASS할 때까지 열려 있다. 정리는 `scoop uninstall qsh`, `winget uninstall DaveDev42.qsh`, `install.ps1`이 둔 `%USERPROFILE%\.local\bin\qsh.exe`와 사용자 `PATH` 항목을 지우는 것이다.
 
@@ -502,9 +494,9 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -PropertyType
 
 FAIL이 나오면 원인을 분류한다.
 
-- 제품 결함 (attach 뒤 콘솔 모드가 복원되지 않았다, 창을 닫았는데 세션이 detach되지 않았다, pipe가 다른 계정에 열렸다, 작업이 재기동하지 않았다, 서명 주체가 어긋난다, `Password` 주체 작업이 개인키를 읽지 못하는데 `keystore_session_bound`가 Windows에서 나오지 않는다). 이슈로 올리고 고친 뒤 새 태그로 다시 돈다. 찍은 태그는 옮기지 않는다. W10d가 FAIL이면 고침의 일부는 Windows에서도 `keystore_session_bound`를 내는 것이다(`docs/CLI.md` §6.17, ADR-0035 결정 12).
+- 제품 결함 (attach 뒤 콘솔 모드가 복원되지 않았다, 창을 닫았는데 세션이 detach되지 않았다, pipe가 다른 계정에 열렸다, 작업이 재기동하지 않았다, `Password` 주체 작업이 개인키를 읽지 못하는데 `keystore_session_bound`가 Windows에서 나오지 않는다). 이슈로 올리고 고친 뒤 새 태그로 다시 돈다. 찍은 태그는 옮기지 않는다. W10d가 FAIL이면 고침의 일부는 Windows에서도 `keystore_session_bound`를 내는 것이다(`docs/CLI.md` §6.17, ADR-0035 결정 12).
 - ssh 호환 결함 (W12). `docs/campaigns/p1-ssh-bootstrap.md` §6의 규칙을 따른다. 두 장비의 `ssh -V`와 거부 문구 원문을 이슈에 붙이고, 가짜 `ssh` 하네스에 같은 재현을 더하는 것이 고침의 일부다.
-- 환경 잡음 (§2.3의 클린이 아니었다, 방화벽이 회차 설계 밖이었다, 덮개를 닫아도 절전하지 않고 화면만 꺼졌다, 서명하지 않은 태그에서 W11을 돌았다). 그 행은 PASS도 FAIL도 아닌 무효로 적고 세지 않는다.
+- 환경 잡음 (§2.3의 클린이 아니었다, 방화벽이 회차 설계 밖이었다, 덮개를 닫아도 절전하지 않고 화면만 꺼졌다). 그 행은 PASS도 FAIL도 아닌 무효로 적고 세지 않는다.
 
 ## 7. 회차 표
 
@@ -515,4 +507,4 @@ FAIL이 나오면 원인을 분류한다.
 
 ## 관련 문서
 
-`docs/adr/0035-windows-client.md`(결정 5~8·11·12·14·15·16·17·18·27, 결과 절), `docs/adr/0032-service-manager-activation.md`(결정 12·15), `docs/adr/0044-ssh-bootstrap.md`(결정 2·13·16·22·25), `docs/CLI.md` §6.9·§6.13·§6.14·§6.17·§6.18·§7, `docs/deploy/service.md`(Task Scheduler 절), `docs/deploy/release-secrets.md`(Windows 서명 시크릿), `docs/design/testing.md`(플랫폼 키스토어 릴리스 전 수동 단계, Windows 줄), `docs/campaigns/p1-ssh-bootstrap.md`(R5와 W12, 형식), `docs/campaigns/p1-supervise-wake.md`(W4의 판정과 기록표), `docs/campaigns/m10-clean-vm.md`·`docs/campaigns/p1-aarch64-musl.md`(형식).
+`docs/adr/0035-windows-client.md`(결정 5~8·11·12·14·15·16·17·18·27, 결과 절), `docs/adr/0032-service-manager-activation.md`(결정 12·15), `docs/adr/0044-ssh-bootstrap.md`(결정 2·13·16·22·25), `docs/CLI.md` §6.9·§6.13·§6.14·§6.17·§6.18·§7, `docs/deploy/service.md`(Task Scheduler 절), `docs/deploy/release-secrets.md`(scoop·winget 시크릿), `docs/design/testing.md`(플랫폼 키스토어 릴리스 전 수동 단계, Windows 줄), `docs/campaigns/p1-ssh-bootstrap.md`(R5와 W12, 형식), `docs/campaigns/p1-supervise-wake.md`(W4의 판정과 기록표), `docs/campaigns/m10-clean-vm.md`·`docs/campaigns/p1-aarch64-musl.md`(형식).
