@@ -171,10 +171,11 @@ fn acl_check(
         args.push(oa);
     }
     // A file action is decided per path (ADR-0029 결정 19); these tables
-    // ask about the root, which no table row's `paths` covers.
+    // ask about the root, which no table row's `paths` covers. A Windows
+    // host's paths are drive paths, so its root is `C:/`.
     if action.starts_with("file.") {
         args.push("--path");
-        args.push("/");
+        args.push(if cfg!(windows) { "C:/" } else { "/" });
     }
     args.push("--json");
     let (code, value) = host.json(&args);

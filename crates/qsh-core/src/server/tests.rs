@@ -5705,7 +5705,26 @@ async fn redemption_without_a_durable_audit_record_writes_no_pin_and_keeps_the_i
 // `crates/qsh-testkit/tests/it/file_host.rs`.
 // ---------------------------------------------------------------------
 
-#[cfg(unix)]
+/// A path under a root no test host has, in the spelling the platform's
+/// `paths` grammar uses: `/srv/x` on unix, `C:/srv/x` on Windows.
+fn srv(rest: &str) -> String {
+    let root = if cfg!(windows) { "C:/srv" } else { "/srv" };
+    if rest.is_empty() {
+        root.to_string()
+    } else {
+        format!("{root}/{rest}")
+    }
+}
+
+/// `path` as an `acl.toml` `paths` entry or a request path: `/`-separated,
+/// and on Windows without the verbatim `\\?\` prefix `canonicalize` adds.
+fn acl_spelling(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    #[cfg(windows)]
+    let text = crate::file::guard::windows_path::strip_verbatim_prefix(&text).replace('\\', "/");
+    text
+}
+
 fn error_message(msg: &ControlMessage) -> Option<String> {
     match &msg.body {
         Some(control_message::Body::Response(wire::Response {
@@ -5756,9 +5775,8 @@ fn file_requests(path: &str, name_if_dir: &str) -> Vec<(&'static str, control_me
 }
 
 /// A policy that names both file actions for `laptop`, with `paths` when
-/// `paths` is `Some`. `Some(["/"])` is the broadest grant `acl.toml` can
-/// write.
-#[cfg(unix)]
+/// `paths` is `Some`. `Some(["/"])` (a drive root such as `C:/` on Windows)
+/// is the broadest grant `acl.toml` can write.
 fn file_grant_policy(paths: Option<Vec<String>>) -> Arc<crate::acl::Policy> {
     Arc::new(crate::acl::Policy {
         rules: vec![crate::acl::Rule {
@@ -5780,7 +5798,6 @@ fn file_grant_policy(paths: Option<Vec<String>>) -> Arc<crate::acl::Policy> {
 /// and one audit line whose resource is the path as sent, and the injected
 /// normalizer is never called: the host does not look at the path of a
 /// request it would refuse anyway.
-#[cfg(unix)]
 #[tokio::test]
 async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
     use crate::file::guard::{CountingNormalizer, FsNormalizer, Normalizer};
@@ -5797,7 +5814,11 @@ async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
 
         // A path that cannot exist, so any filesystem lookup would have
         // nothing to find and a normalizer call would be observable.
-        let path = "/qsh-no-such-root/dir/../file";
+        let path = if cfg!(windows) {
+            "C:/qsh-no-such-root/dir/../file"
+        } else {
+            "/qsh-no-such-root/dir/../file"
+        };
         for (i, (op, body)) in file_requests(path, "n").into_iter().enumerate() {
             rig.audit.clear();
             let reply = rig
@@ -5830,14 +5851,13 @@ async fn file_ops_are_denied_without_normalizing_or_touching_the_filesystem() {
 /// protected, so an ACL allow is not enough: the request is refused with the
 /// uniform reply and a second audit line (`deny`, no rule, no role), and
 /// nothing is created. Production always calls `Server::set_file_host`.
-#[cfg(unix)]
 #[tokio::test]
 async fn file_op_without_a_configured_state_tree_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let rig = rig(file_grant_policy(Some(vec![root.display().to_string()])) as Arc<dyn Authorizer>);
+    let rig = rig(file_grant_policy(Some(vec![acl_spelling(&root)])) as Arc<dyn Authorizer>);
     let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-    let path = root.join("x").display().to_string();
+    let path = format!("{}/x", acl_spelling(&root));
     for (i, (op, body)) in file_requests(&path, "").into_iter().enumerate() {
         rig.audit.clear();
         let reply = rig
@@ -5865,12 +5885,11 @@ async fn file_op_without_a_configured_state_tree_fails_closed() {
 /// transfer slot when it expires: the housekeeping sweep drops it, which
 /// closes the fd and releases the permit (ADR-0029 decision 8 step 6). The
 /// ticket is back-dated instead of waiting out `TICKET_TTL`.
-#[cfg(unix)]
 #[test]
 fn an_expired_file_ticket_releases_its_descriptor_and_its_transfer_slot() {
     let rig = rig(Arc::new(DenyAll));
     let permit = rig.quotas.reserve_file_transfer("device:laptop").unwrap();
-    let file = std::fs::File::open("/dev/null").unwrap();
+    let file = std::fs::File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap();
     let key = rig.server.issue_ticket(
         7,
         TicketPurpose::File(PendingFile {
@@ -5897,7 +5916,6 @@ fn an_expired_file_ticket_releases_its_descriptor_and_its_transfer_slot() {
 
 /// The audit action follows ADR-0029 decision 3: `file.list` is `file.read`
 /// and `file.mkdir` is `file.write`.
-#[cfg(unix)]
 #[tokio::test]
 async fn file_ops_are_audited_under_the_mapped_action() {
     let rig = rig(Arc::new(DenyAll));
@@ -5908,7 +5926,7 @@ async fn file_ops_are_audited_under_the_mapped_action() {
         ("file.list", Action::FileRead),
         ("file.mkdir", Action::FileWrite),
     ];
-    for ((op, body), (name, action)) in file_requests("/srv/x", "").into_iter().zip(expected) {
+    for ((op, body), (name, action)) in file_requests(&srv("x"), "").into_iter().zip(expected) {
         assert_eq!(op, name);
         rig.audit.clear();
         rig.server
@@ -5930,7 +5948,6 @@ async fn file_ops_are_audited_under_the_mapped_action() {
 /// ADR-0029 decision 6-1: a shape violation is `INVALID_ARGUMENT` before any
 /// ACL decision, audit line or filesystem access, and the message does not
 /// echo the path.
-#[cfg(unix)]
 #[tokio::test]
 async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
     use crate::file::guard::{CountingNormalizer, FsNormalizer, Normalizer};
@@ -5942,21 +5959,50 @@ async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
         .set_path_normalizer(counter.clone() as Arc<dyn Normalizer>);
     let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
 
-    let too_long = format!("/{}", "a".repeat(4096));
-    let cases: Vec<(&str, String, String)> = vec![
+    let too_long = srv(&"a".repeat(4096));
+    #[allow(unused_mut)]
+    let mut cases: Vec<(&str, String, String)> = vec![
         ("empty path", String::new(), String::new()),
-        ("NUL byte", "/srv/a\0b".into(), String::new()),
+        ("NUL byte", srv("a\0b"), String::new()),
         ("over 4096 bytes", too_long, String::new()),
         ("~user", "~mallory/x".into(), String::new()),
-        ("name_if_dir with a slash", "/srv/x".into(), "a/b".into()),
-        ("name_if_dir `..`", "/srv/x".into(), "..".into()),
-        ("name_if_dir `.`", "/srv/x".into(), ".".into()),
-        (
-            "name_if_dir over 255 bytes",
-            "/srv/x".into(),
-            "n".repeat(256),
-        ),
+        ("name_if_dir with a slash", srv("x"), "a/b".into()),
+        ("name_if_dir `..`", srv("x"), "..".into()),
+        ("name_if_dir `.`", srv("x"), ".".into()),
+        ("name_if_dir over 255 bytes", srv("x"), "n".repeat(256)),
     ];
+    // A Windows host also refuses what Win32 would read as another
+    // namespace or another file: UNC and device paths, drive-relative
+    // spellings, alternate streams, reserved device names.
+    #[cfg(windows)]
+    cases.extend([
+        ("UNC share", r"\\server\share\x".into(), String::new()),
+        (
+            "UNC share with slashes",
+            "//server/share/x".into(),
+            String::new(),
+        ),
+        ("verbatim drive path", r"\\?\C:\srv\x".into(), String::new()),
+        (
+            "verbatim UNC path",
+            r"\\?\UNC\server\share\x".into(),
+            String::new(),
+        ),
+        ("device namespace", r"\\.\NUL".into(), String::new()),
+        (
+            "device namespace with slashes",
+            "//./pipe/x".into(),
+            String::new(),
+        ),
+        ("drive-relative", "C:x".into(), String::new()),
+        ("rooted without a drive", "/srv/x".into(), String::new()),
+        ("alternate data stream", srv("x:stream"), String::new()),
+        ("reserved device name", srv("NUL"), String::new()),
+        ("trailing dot", srv("x."), String::new()),
+        ("name_if_dir with a colon", srv("x"), "a:b".into()),
+        ("name_if_dir reserved device name", srv("x"), "CON".into()),
+        ("name_if_dir with a backslash", srv("x"), r"a\b".into()),
+    ]);
     for (label, path, name) in &cases {
         for (op, body) in file_requests(path, name.as_str()) {
             // A bad `name_if_dir` only exists on the creating ops.
@@ -5987,8 +6033,8 @@ async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
 
     // The creating ops also refuse a `.`/`..` last component; the reading
     // ops leave that to normalization.
-    for tail in ["/srv/x/..", "/srv/x/.", "/srv/x/../"] {
-        for (op, body) in file_requests(tail, "") {
+    for tail in [srv("x/.."), srv("x/."), srv("x/../")] {
+        for (op, body) in file_requests(&tail, "") {
             let reply = rig
                 .server
                 .dispatch(&ctx, &ControlMessage::new(1, body))
@@ -6014,27 +6060,8 @@ async fn file_op_shape_violations_are_invalid_argument_before_any_decision() {
     }
 }
 
-/// Off unix there is no path judgement yet (ADR-0029 decision 23, Windows is
-/// M20): every file op is `UNSUPPORTED` before any decision or audit line.
-#[cfg(not(unix))]
-#[tokio::test]
-async fn file_ops_are_unsupported_off_unix_before_any_decision() {
-    let rig = rig(Arc::new(AllowAllPinned));
-    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-    for (op, body) in file_requests("/srv/x", "") {
-        let reply = rig
-            .server
-            .dispatch(&ctx, &ControlMessage::new(1, body))
-            .await
-            .unwrap();
-        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported), "{op}");
-    }
-    assert!(rig.audit.records().is_empty());
-}
-
 /// A durable audit record is part of the decision: a degraded sink turns
 /// even an allow into the uniform denial, for a file op as for any other.
-#[cfg(unix)]
 #[tokio::test]
 async fn file_op_with_a_degraded_audit_sink_is_the_uniform_denial() {
     let broker = Broker::new(
@@ -6051,7 +6078,7 @@ async fn file_op_with_a_degraded_audit_sink_is_the_uniform_denial() {
     let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), broker, "host");
     audit.fail();
     let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-    for (op, body) in file_requests("/srv/x", "") {
+    for (op, body) in file_requests(&srv("x"), "") {
         let reply = server
             .dispatch(&ctx, &ControlMessage::new(1, body))
             .await
@@ -6072,22 +6099,60 @@ async fn file_op_with_a_degraded_audit_sink_is_the_uniform_denial() {
 /// The errno table both file planes share (`file_io_error`, ADR-0029
 /// decisions 7, 13 and 17): the data plane's `result` frame and the control
 /// plane's error reply must say the same thing for the same OS error.
-#[cfg(unix)]
 #[test]
 fn file_io_errors_map_to_the_documented_codes() {
     use super::file_host::file_io_error;
+
+    /// The OS errors each documented class is made of on this platform.
+    struct Os {
+        missing: &'static [i32],
+        exists: &'static [i32],
+        denied: &'static [i32],
+        full: &'static [i32],
+        other: &'static [i32],
+    }
+    #[cfg(unix)]
+    const OS: Os = Os {
+        missing: &[libc::ENOENT],
+        // `--no-clobber` lost the race at `linkat`.
+        exists: &[libc::EEXIST],
+        denied: &[libc::EACCES, libc::EPERM, libc::ELOOP, libc::ENOTDIR],
+        full: &[libc::ENOSPC, libc::EDQUOT],
+        other: &[libc::EIO],
+    };
+    // Win32 codes: FILE_NOT_FOUND and PATH_NOT_FOUND; FILE_EXISTS and
+    // ALREADY_EXISTS; ACCESS_DENIED, WRITE_PROTECT, DIRECTORY (a component
+    // that is not a directory) and CANT_ACCESS_FILE (a refused reparse
+    // point); DISK_FULL, HANDLE_DISK_FULL and DISK_QUOTA_EXCEEDED;
+    // GEN_FAILURE and TOO_MANY_OPEN_FILES, which stay opaque.
+    #[cfg(windows)]
+    const OS: Os = Os {
+        missing: &[2, 3],
+        exists: &[80, 183],
+        denied: &[5, 19, 267, 1920],
+        full: &[112, 39, 1295],
+        other: &[31, 4],
+    };
+
     let code = |errno: i32| file_io_error(&std::io::Error::from_raw_os_error(errno));
-    assert_eq!(code(libc::ENOENT).error_code(), ErrorCode::InvalidArgument);
-    // `--no-clobber` lost the race at `linkat`.
-    let exists = code(libc::EEXIST);
-    assert_eq!(exists.error_code(), ErrorCode::InvalidArgument);
-    assert_eq!(exists.message, "destination exists");
-    for errno in [libc::EACCES, libc::EPERM, libc::ELOOP, libc::ENOTDIR] {
+    for &errno in OS.missing {
+        assert_eq!(
+            code(errno).error_code(),
+            ErrorCode::InvalidArgument,
+            "{errno}"
+        );
+    }
+    for &errno in OS.exists {
+        let exists = code(errno);
+        assert_eq!(exists.error_code(), ErrorCode::InvalidArgument, "{errno}");
+        assert_eq!(exists.message, "destination exists", "{errno}");
+    }
+    for &errno in OS.denied {
         let denied = code(errno);
         assert_eq!(denied.error_code(), ErrorCode::PermissionDenied, "{errno}");
         assert_eq!(denied.message, crate::acl::PERMISSION_DENIED_MESSAGE);
     }
-    for errno in [libc::ENOSPC, libc::EDQUOT] {
+    for &errno in OS.full {
         assert_eq!(
             code(errno).error_code(),
             ErrorCode::ResourceExhausted,
@@ -6095,7 +6160,9 @@ fn file_io_errors_map_to_the_documented_codes() {
         );
     }
     // Anything else is opaque: no OS text reaches the wire.
-    let other = code(libc::EIO);
-    assert_eq!(other.error_code(), ErrorCode::Internal);
-    assert_eq!(other.message, "file operation failed");
+    for &errno in OS.other {
+        let other = code(errno);
+        assert_eq!(other.error_code(), ErrorCode::Internal, "{errno}");
+        assert_eq!(other.message, "file operation failed", "{errno}");
+    }
 }
