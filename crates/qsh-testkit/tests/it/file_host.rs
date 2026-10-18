@@ -711,10 +711,9 @@ both_routes!(no_grant_no_normalize =>
 /// does not exist yet below the config directory.
 fn state_targets(env: &Env, files: &[PathBuf]) -> Vec<String> {
     let mut out: Vec<String> = files.iter().map(|p| s(p)).collect();
-    #[cfg(unix)]
-    {
-        let link = env.share.join("link-to-trust");
-        file_link(&link, &env.paths.trust_file());
+    // A file link to the trust store, where this account may create one.
+    let link = env.share.join("link-to-trust");
+    if file_link(&link, &env.paths.trust_file()) {
         out.push(s(&link));
     }
     // A directory link into the config directory reaches the same files.

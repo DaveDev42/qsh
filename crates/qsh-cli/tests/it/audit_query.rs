@@ -278,29 +278,75 @@ fn audit_query_follows_the_configured_audit_path_through_the_binary() {
 }
 
 /// A log the account cannot read is `INTERNAL` naming the path and the error
-/// kind, and no line content (ADR-0033 decision 6).
-#[cfg(unix)]
+/// kind, and no line content (ADR-0033 decision 6). Unix clears every mode
+/// bit; Windows adds a deny entry for the account's read access.
 #[test]
 fn audit_query_unreadable_log_is_internal_with_path_and_kind_only_through_the_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
     let sandbox = Sandbox::initialized();
     plant(&sandbox, &series(), Some(&torn_line()));
     let log = log_path(&sandbox);
-    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = make_unreadable(&log);
     if std::fs::File::open(&log).is_ok() {
         // Running as root: a mode-000 file still opens, so there is no
         // unreadable log to observe.
+        unreadable.restore();
         return;
     }
     let (code, envelope) = audit_json(&sandbox, &[]);
+    unreadable.restore();
     assert_eq!(code, 255, "{envelope}");
     assert_eq!(envelope["error"]["code"], "INTERNAL", "{envelope}");
     let message = envelope["error"]["message"].as_str().unwrap();
     assert!(message.contains(&log.display().to_string()), "{message}");
     assert!(message.contains("permission denied"), "{message}");
     assert!(!message.contains(SECRET), "{message}");
-    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Undoes [`make_unreadable`] so the sandbox can be cleaned up.
+struct Unreadable(std::path::PathBuf);
+
+impl Unreadable {
+    fn restore(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("icacls")
+                .arg(&self.0)
+                .args(["/remove:d", &whoami()])
+                .output();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn whoami() -> String {
+    std::env::var("USERNAME").expect("USERNAME")
+}
+
+fn make_unreadable(log: &std::path::Path) -> Unreadable {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let denied = std::process::Command::new("icacls")
+            .arg(log)
+            .args(["/deny", &format!("{}:(R)", whoami())])
+            .output()
+            .expect("run icacls");
+        assert!(
+            denied.status.success(),
+            "icacls /deny: {}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
+    }
+    Unreadable(log.to_path_buf())
 }
 
 /// `qsh audit` is a read: the log bytes and the state directory's file list

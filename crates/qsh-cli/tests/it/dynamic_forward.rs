@@ -36,34 +36,27 @@
 //! second independently re-derived `if`, so those two unit tests already
 //! cover every call site's behavior, standalone and interactive alike.
 //!
-//! `cfg(unix)` is on the reverse-route case
-//! (`dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination`,
-//! which needs the unix daemon socket) and on the interactive tests, which
-//! need a unix pty and a PTY host. Every other test here exercises `qsh
-//! tunnel open --dynamic`, which is cross-platform. On Windows the same
-//! contract is `windows_forward_e2e::dynamic_forward_connect` and
-//! `windows_reverse_e2e::dynamic_forward_connect` (a SOCKS5 CONNECT written
-//! by the test, no curl), and the interactive form's argument checks are the
-//! client's own `tui::run`, which has one code path on every platform.
+//! Every test here runs on both OSes. The interactive tests drive the client
+//! in a pseudo-terminal through `tunnel_e2e::PtyClient` (expectrl on unix, a
+//! ConPTY on Windows), and the reverse-route cases use the daemon's local
+//! control channel, a Unix socket or a named pipe. Windows additionally has
+//! the shorter `windows_forward_e2e::dynamic_forward_connect` and
+//! `windows_reverse_e2e::dynamic_forward_connect`, a SOCKS5 CONNECT written
+//! by the test with no curl.
 
 use crate::common;
 
 use qsh_testkit::net_probe::free_port;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
 use std::process::Stdio;
 use std::time::Duration;
 
 use common::{DynamicTunnelGuard, Fleet, HOST_ALIAS, Sandbox, exit_code};
 use serde_json::Value;
 
-#[cfg(unix)]
+use crate::tunnel_e2e::PtyClient;
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
-#[cfg(unix)]
-use expectrl::session::OsSession;
-#[cfg(unix)]
-use expectrl::{Expect as _, Session};
 
 /// `qsh`'s own runtime-failure exit code (`docs/CLI.md` §4) — a private
 /// copy, same self-containment reasoning `exit_code_matrix.rs`'s own copy
@@ -74,24 +67,16 @@ const EXIT_RUNTIME_FAILURE: i32 = 255;
 /// reasoning as [`EXIT_RUNTIME_FAILURE`].
 const EXIT_USAGE: i32 = 2;
 
-/// How long any single `expect` on a pty waits (mirrors
-/// `tunnel_e2e.rs::IO_TIMEOUT`, `reverse_e2e.rs::EXPECT_TIMEOUT`).
-#[cfg(unix)]
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// How long we wait for a reverse registration to show up reachable on the
 /// controller's `qsh hosts --json` (mirrors `reverse_e2e.rs`'s own copy).
-#[cfg(unix)]
 const REGISTRATION_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The name the controller's own trust store assigns the target (mirrors
 /// `reverse_e2e.rs`'s own copy — each file keeps its own rather than
 /// sharing, `reverse_e2e.rs`'s module doc explains why).
-#[cfg(unix)]
 const TARGET_NAME: &str = "dash-d-target";
 
 /// The alias the target's own trust store uses for the controller.
-#[cfg(unix)]
 const CONTROLLER_ALIAS: &str = "hub";
 
 /// Speak just enough SOCKS5 to prove a listener really is one: the
@@ -128,7 +113,6 @@ fn socks5_greet(stream: &mut TcpStream) {
 /// *actually* round-trip a byte through, not merely dial, so this checks
 /// that directly rather than trusting the address `usable_non_loopback_v4`
 /// already handed back.
-#[cfg(unix)]
 fn live_round_trip_probe(addr: std::net::SocketAddrV4, bound: Duration) -> bool {
     let Ok(mut socket) = TcpStream::connect(addr) else {
         return false;
@@ -152,7 +136,6 @@ fn live_round_trip_probe(addr: std::net::SocketAddrV4, bound: Duration) -> bool 
 /// fooled (this helper's own doc).
 ///
 /// [`usable_non_loopback_v4`]: qsh_testkit::net_probe::usable_non_loopback_v4
-#[cfg(unix)]
 macro_rules! live_round_trip_or_return {
     ($addr:expr, $test_name:expr) => {
         if !live_round_trip_probe($addr, Duration::from_secs(5)) {
@@ -333,7 +316,6 @@ fn non_loopback_bind_is_invalid_argument_and_binds_nothing() {
 /// alone is not enough to trust here. Off CI this skips with a printed
 /// reason when that is not so; on CI the same gap fails the test
 /// ([`live_round_trip_or_return`]'s own doc).
-#[cfg(unix)]
 #[test]
 fn dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination() {
     const TEST_NAME: &str = "dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination";
@@ -440,48 +422,10 @@ fn dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination() {
 // The interactive form
 // ---------------------------------------------------------------------
 
-/// A minimal `qsh` pty client — the subset of `tunnel_e2e.rs::PtyClient`/
-/// `reverse_e2e.rs::Client` this file needs. Each of those files keeps its
-/// own small copy rather than sharing one (their own module docs explain
-/// why: `expectrl` is a `cfg(unix)` dev-dependency, and `common` is
-/// compiled into every test binary in this crate, including the ones that
-/// must build on Windows); this is a fourth copy for the same reason.
-#[cfg(unix)]
-struct PtyClient {
-    session: OsSession,
-}
-
-#[cfg(unix)]
-impl PtyClient {
-    fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
-        let mut command = sandbox.command(args);
-        command.env("TERM", "xterm-256color");
-        let mut session = Session::spawn(command).expect("spawn qsh under a pty");
-        session.set_expect_timeout(Some(IO_TIMEOUT));
-        Self { session }
-    }
-
-    fn expect(&mut self, needle: &str) {
-        if let Err(err) = self.session.expect(needle) {
-            panic!("waiting for {needle:?}: {err}");
-        }
-    }
-
-    fn type_(&mut self, keys: &str) {
-        self.session.send(keys).expect("send to the client's pty");
-    }
-
-    fn round_trip(&mut self, marker: &str) {
-        self.type_(&format!("echo {marker}''-OK\r"));
-        self.expect(&format!("{marker}-OK"));
-    }
-}
-
 /// `qsh [user@]host -D <port>` opens a real SOCKS5 listener beside the
 /// session — announced on stderr (`human::print_dynamic_forward_started`)
 /// before the shell prompt, and still live after a client speaks to it,
 /// exactly like `-L`'s own interactive listener.
-#[cfg(unix)]
 #[test]
 fn interactive_dash_d_opens_listener_beside_session() {
     let fleet = Fleet::start();
@@ -490,14 +434,14 @@ fn interactive_dash_d_opens_listener_beside_session() {
 
     let mut client = PtyClient::spawn(&fleet.client, &[HOST_ALIAS, "-D", &port_str]);
     client.expect("dynamic forward (socks5) listening on");
-    client.round_trip("DASH_D_BESIDE_SESSION");
+    client.shell_round_trip("DASH_D_BESIDE_SESSION");
 
     let mut socket = TcpStream::connect(("127.0.0.1", port)).expect("connect to the -D listener");
     socks5_greet(&mut socket);
     drop(socket);
 
     // The session, and the listener, both survive a client's handshake.
-    client.round_trip("DASH_D_STILL_ALIVE");
+    client.shell_round_trip("DASH_D_STILL_ALIVE");
 
     client.type_("exit\r");
 }
@@ -511,11 +455,9 @@ fn interactive_dash_d_opens_listener_beside_session() {
 /// `session.open` regardless of flag order (`tui::session_loop::run`'s own doc),
 /// so the `-L` spec here never gets a chance to open anything either.
 ///
-/// `#[cfg(unix)]`: the test drives the interactive form with no terminal on
-/// stdin and a PTY host behind it. The refusal itself happens in the client
-/// before any connection, the same on every platform (`tui::run` has no
-/// per-platform branch).
-#[cfg(unix)]
+/// The test drives the interactive form with no terminal on stdin. The
+/// refusal itself happens in the client before any connection, the same on
+/// every platform (`tui::run` has no per-platform branch).
 #[test]
 fn interactive_dash_d_non_loopback_bind_creates_no_session_even_combined_with_local_forward() {
     let fleet = Fleet::start();
@@ -572,7 +514,6 @@ fn interactive_dash_d_non_loopback_bind_creates_no_session_even_combined_with_lo
 /// a byte through, same gap policy as
 /// `dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination`
 /// ([`live_round_trip_probe`]'s own doc).
-#[cfg(unix)]
 #[test]
 fn interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips() {
     const TEST_NAME: &str = "interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips";
@@ -622,7 +563,7 @@ fn interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips() {
     let port_str = port.to_string();
     let mut client = PtyClient::spawn(&controller, &[TARGET_NAME, "-D", &port_str]);
     client.expect("dynamic forward (socks5) listening on");
-    client.round_trip("INTERACTIVE_DASH_D_REVERSE");
+    client.shell_round_trip("INTERACTIVE_DASH_D_REVERSE");
 
     let mut socket = TcpStream::connect(("127.0.0.1", port)).expect("connect to the -D listener");
     socks5_greet(&mut socket);
@@ -660,7 +601,7 @@ fn interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips() {
         "interactive reverse -D must have opened exactly one real session on the target: {listed}"
     );
 
-    client.round_trip("INTERACTIVE_DASH_D_REVERSE_STILL_ALIVE");
+    client.shell_round_trip("INTERACTIVE_DASH_D_REVERSE_STILL_ALIVE");
     client.type_("exit\r");
     drop(rt);
 }

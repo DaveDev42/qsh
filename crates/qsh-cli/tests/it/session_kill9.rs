@@ -85,6 +85,15 @@
 //! `ServeGuard` for the listener. Nothing sleeps for synchronisation —
 //! every wait is a bounded `expect` or a deadline-bounded pull loop.
 
+// `#![cfg(unix)]`: the kill is `SIGKILL` aimed at a client under `expectrl`,
+// and the survivor checks are `kill -0` on a pid the remote shell printed
+// (`$$`) and `setsid` process groups. None of that exists on Windows, where
+// the client is killed with `TerminateProcess` inside a ConPTY and the
+// survivor is the host's session itself. The same SC5 facts (the session
+// stays running, keeps its shell and its retained output, and another
+// console attaches to it) are pinned there by
+// `windows_attach::killed_client_leaves_the_session_running_forward` and
+// `windows_attach::killed_client_leaves_the_session_running_reverse`.
 #![cfg(unix)]
 
 use crate::common;

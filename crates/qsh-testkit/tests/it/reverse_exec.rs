@@ -35,14 +35,8 @@
 //! (`exec_on_a_reverse_session_still_collects_output_sent_after_stdin_eof`,
 //! `client/mod.rs`); every scenario here uses `ExecStdin::Closed` and
 //! still exercises the real `StdinEof` frame it sends.
-//!
-//! `#![cfg(unix)]`: localctl (UDS) is unix-only, same gating every other
-//! localctl testkit file uses.
-
-#![cfg(unix)]
 
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +50,7 @@ use qsh_core::{ExecStdin, Ops, Paths, Principal};
 use qsh_proto::{ErrorCode, ExecRunReq, IdentityInitReq, KeyStoreMode, TrustAddReq};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::shell::Runaway;
 use qsh_transport::{Dialed, StaticTrust};
 
 /// Bound on every "this must have already happened" wait in this file —
@@ -133,38 +128,16 @@ fn exec_req(host: &str, argv: &[&str]) -> ExecRunReq {
     }
 }
 
-async fn wait_for_pid(marker: &Path) -> u32 {
-    tokio::time::timeout(TIMEOUT, async {
-        loop {
-            if let Ok(contents) = std::fs::read_to_string(marker)
-                && let Ok(pid) = contents.trim().parse::<u32>()
-            {
-                return pid;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the child must record its own pid within the deadline")
-}
-
-async fn wait_for_pid_gone(pid: u32) {
-    tokio::time::timeout(TIMEOUT, async {
-        loop {
-            let alive = tokio::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .await
-                .expect("run kill -0")
-                .success();
-            if !alive {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("pid {pid} must be gone within {TIMEOUT:?}"));
+/// The command that exits `0` at once.
+fn exit_zero() -> Vec<&'static str> {
+    #[cfg(unix)]
+    {
+        vec!["true"]
+    }
+    #[cfg(windows)]
+    {
+        vec!["cmd", "/c", "exit 0"]
+    }
 }
 
 /// Poll `ops.host_list()` until `name`'s reverse entry reports `state`
@@ -311,7 +284,7 @@ async fn exec_run_prefers_a_live_reverse_registration_over_a_dead_forward_pin() 
     let out = tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("revhost", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("revhost", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await
@@ -350,7 +323,7 @@ async fn exec_run_reaches_a_reverse_only_host_pinned_without_address() {
     let out = tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("revhost2", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("revhost2", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await
@@ -366,7 +339,9 @@ async fn exec_run_reaches_a_reverse_only_host_pinned_without_address() {
 /// POSIX signal semantics survive the whole `Ops::exec_run` round trip
 /// over reverse, not just `Session::exec` directly (`exec_loopback.rs`'s
 /// own `exec_signal_exit_and_timeout_kill_report_sigkill` proves the
-/// forward-route/client-level version of this).
+/// forward-route/client-level version of this). A POSIX signal number is a
+/// unix idea; the Windows means is `exec_run_over_reverse_reports_exit_code_without_a_signal`.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_run_over_reverse_reports_exit_code_and_signal() {
     let (_ops_dir, ops) = fresh_ops().await;
@@ -404,6 +379,46 @@ async fn exec_run_over_reverse_reports_exit_code_and_signal() {
     rig.shutdown().await;
 }
 
+/// The Windows half of the test above: there is no signal to name, so a
+/// command's exit status travels as the exit code and `signal` stays empty.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_run_over_reverse_reports_exit_code_without_a_signal() {
+    let (_ops_dir, ops) = fresh_ops().await;
+    let mut rig = ExecTargetRig::start(Arc::new(AllowAllPinned)).await;
+    let target_identity = make_identity();
+
+    let harness = ReverseHarness::start_with(
+        Arc::new(AllowAllPinned),
+        false,
+        pin(&target_identity, "sig-host"),
+    )
+    .await;
+    rig.register_reverse(&harness, &target_identity, "laptop")
+        .await;
+    harness.wait_control_hub("sig-host").await;
+    let localctl = harness.attach_localctl(ops.paths()).await;
+
+    let out = tokio::time::timeout(
+        TIMEOUT,
+        blocking(&ops, |ops| {
+            ops.exec_run(
+                exec_req("sig-host", &["cmd", "/c", "exit 137"]),
+                ExecStdin::Closed,
+            )
+        }),
+    )
+    .await
+    .expect("must not hang")
+    .expect("exec.run over reverse");
+    assert_eq!(out.data.remote_exit_code, 137);
+    assert_eq!(out.data.signal, None, "Windows has no signal to name");
+
+    localctl.shutdown().await;
+    harness.shutdown().await;
+    rig.shutdown().await;
+}
+
 /// Pins the end-to-end result of the `--timeout` deadline
 /// `exec_async_reverse` races against `dial_reverse`/`Session::exec` over
 /// reverse: a `TIMEOUT` error plus the remote command actually dying —
@@ -431,9 +446,12 @@ async fn exec_run_over_reverse_timeout_kills_the_remote_command() {
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     let marker_dir = tempfile::tempdir().expect("tempdir");
-    let marker = marker_dir.path().join("pid");
-    let script = format!("echo $$ > {} ; exec sleep 60", marker.display());
-    let mut req = exec_req("timeout-host", &["sh", "-c", &script]);
+    let child = Runaway::new(marker_dir.path());
+    let argv = child.silent_argv();
+    let mut req = exec_req(
+        "timeout-host",
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     req.timeout_ms = Some(300);
 
     let err = tokio::time::timeout(
@@ -445,8 +463,8 @@ async fn exec_run_over_reverse_timeout_kills_the_remote_command() {
     .expect_err("a timeout must surface as an error, not a truncated success");
     assert_eq!(err.code, ErrorCode::Timeout);
 
-    let pid = wait_for_pid(&marker).await;
-    wait_for_pid_gone(pid).await;
+    child.wait_running(TIMEOUT).await;
+    child.wait_gone(TIMEOUT).await;
 
     localctl.shutdown().await;
     harness.shutdown().await;
@@ -481,12 +499,15 @@ async fn exec_run_over_reverse_output_cap_is_resource_exhausted_and_kills_the_co
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     let marker_dir = tempfile::tempdir().expect("tempdir");
-    let marker = marker_dir.path().join("pid");
-    // `yes` writes fast and forever — well past `EXEC_OUTPUT_MAX` long
-    // before this test's own `TIMEOUT` — so the cap, not the child
-    // finishing on its own, is what ends this exec.
-    let script = format!("echo $$ > {} ; exec yes 0123456789abcdef", marker.display());
-    let mut req = exec_req("cap-host", &["sh", "-c", &script]);
+    let child = Runaway::new(marker_dir.path());
+    // The command writes past `EXEC_OUTPUT_MAX` long before this test's own
+    // `TIMEOUT` and keeps running, so the cap, not the child finishing on
+    // its own, is what ends this exec.
+    let argv = child.noisy_argv(EXEC_OUTPUT_MAX);
+    let mut req = exec_req(
+        "cap-host",
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     req.timeout_ms = None;
 
     let err = tokio::time::timeout(
@@ -502,8 +523,8 @@ async fn exec_run_over_reverse_output_cap_is_resource_exhausted_and_kills_the_co
         serde_json::json!(EXEC_OUTPUT_MAX)
     );
 
-    let pid = wait_for_pid(&marker).await;
-    wait_for_pid_gone(pid).await;
+    child.wait_running(TIMEOUT).await;
+    child.wait_gone(TIMEOUT).await;
 
     localctl.shutdown().await;
     harness.shutdown().await;
@@ -536,7 +557,7 @@ async fn exec_run_over_reverse_is_denied_by_the_target_acl_and_creates_nothing()
     let err = tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("denied-host", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("denied-host", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await
@@ -586,7 +607,7 @@ async fn exec_run_over_reverse_allowed_writes_exactly_one_allow_audit_record_wit
     let out = tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("audited-host", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("audited-host", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await
@@ -634,7 +655,7 @@ async fn exec_run_with_only_a_stale_registration_is_retryable_host_not_found() {
     tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("stale-host", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("stale-host", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await
@@ -647,7 +668,7 @@ async fn exec_run_with_only_a_stale_registration_is_retryable_host_not_found() {
     let err = tokio::time::timeout(
         TIMEOUT,
         blocking(&ops, |ops| {
-            ops.exec_run(exec_req("stale-host", &["true"]), ExecStdin::Closed)
+            ops.exec_run(exec_req("stale-host", &exit_zero()), ExecStdin::Closed)
         }),
     )
     .await

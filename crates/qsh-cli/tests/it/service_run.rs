@@ -116,11 +116,11 @@ fn service_run_redirects_stdout_and_stderr_to_the_mode_logs() {
     }
 }
 
-#[cfg(unix)]
+/// The log directory and both log files are the account's alone: mode
+/// `0700` and `0600` on unix, a single non-inherited entry for the account
+/// on Windows (ADR-0035 decision 6).
 #[test]
 fn service_run_log_files_have_an_owner_only_mode() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let sandbox = bound_sandbox("serve");
     let child = RunChild::spawn(&sandbox, &["service", "run", "serve"]);
     poll_until("serve banner", WAIT, || {
@@ -130,20 +130,31 @@ fn service_run_log_files_have_an_owner_only_mode() {
     });
     let _ = child.stop();
     let dir = sandbox.state_dir().join("log");
-    assert_eq!(
-        std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    for name in ["serve.out.log", "serve.err.log"] {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(
-            std::fs::metadata(dir.join(name))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600,
-            "{name}"
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
         );
+        for name in ["serve.out.log", "serve.err.log"] {
+            assert_eq!(
+                std::fs::metadata(dir.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{name}"
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        crate::release_smoke::assert_account_only(&dir);
+        for name in ["serve.out.log", "serve.err.log"] {
+            crate::release_smoke::assert_account_only(&dir.join(name));
+        }
     }
 }
 

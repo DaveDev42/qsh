@@ -54,23 +54,23 @@ mod unix;
 pub(crate) mod windows;
 
 #[cfg(unix)]
-pub use unix::LocalStream;
-#[cfg(unix)]
 pub(crate) use unix::{
     Listener, OwnedReadHalf, OwnedWriteHalf, RawReader, RawWriter, bind, candidate_endpoints,
-    connect, forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint,
-    shutdown_both, shutdown_write, split, wait_for_hangup,
+    forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint, shutdown_both,
+    shutdown_write, split, wait_for_hangup,
 };
+#[cfg(unix)]
+pub use unix::{LocalStream, connect};
 #[cfg(all(unix, test))]
 pub(crate) use unix::{
     authorized_peer, bind_with_narrow_umask, peer_is_authorized, process_is_verifiably_dead,
 };
 
 #[cfg(windows)]
-pub use windows::LocalStream;
-#[cfg(windows)]
 pub(crate) use windows::{
     Listener, OwnedReadHalf, OwnedWriteHalf, RawReader, RawWriter, bind, candidate_endpoints,
-    connect, forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint,
-    shutdown_both, shutdown_write, split, wait_for_hangup,
+    forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint, shutdown_both,
+    shutdown_write, split, wait_for_hangup,
 };
+#[cfg(windows)]
+pub use windows::{LocalStream, connect};

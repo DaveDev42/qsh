@@ -1239,6 +1239,14 @@ impl ReverseGuard {
             .clone()
     }
 
+    /// The live stderr capture, for a caller that keeps reading it after
+    /// the guard is borrowed elsewhere: each lock sees every line the reader
+    /// thread has copied so far, including ones that land after the child
+    /// exited.
+    pub fn stderr_sink(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.stderr)
+    }
+
     /// This process's pid — for an "owns no listening socket" assertion
     /// from outside the process (`lsof`/`/proc`).
     pub fn pid(&self) -> u32 {
@@ -1252,6 +1260,34 @@ impl ReverseGuard {
     /// when this process has no console to send the event from.
     pub fn shut_down(mut self) {
         stop_gracefully(&mut self.child);
+    }
+
+    /// Ask the child to stop gracefully, without waiting for it: `SIGTERM`
+    /// on unix, `CTRL_BREAK` to its process group on Windows. Unlike
+    /// [`shut_down`](Self::shut_down) this never falls back to a kill: a
+    /// caller that needs the graceful drain must not get a kill in its
+    /// place, so an event that cannot be sent fails the test. Follow with
+    /// [`wait_timeout`](Self::wait_timeout).
+    pub fn terminate(&self) {
+        assert!(
+            send_stop(self.child.id()),
+            "the graceful stop could not be sent to the child"
+        );
+    }
+
+    /// Wait up to `timeout` for the child to exit **on its own** — no kill.
+    /// `Some` once it has, `None` if `timeout` passed first.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -1376,7 +1412,7 @@ impl DynamicTunnelGuard {
     pub fn start_against(client: &Sandbox, host: &str, spec: &str) -> (Self, Value) {
         let mut command: Command =
             client.command(&["tunnel", "open", host, "--dynamic", spec, "--json"]);
-        let mut child = command
+        let mut child = own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1439,10 +1475,10 @@ impl DynamicTunnelGuard {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Send `SIGTERM` and wait up to `timeout` for the child to exit on its
-    /// own — unlike [`finish`](Self::finish), this does not force-kill.
-    /// Returns whether it exited before the deadline. Unix only, same
-    /// reasoning as [`ServeGuard::signal`]/[`ReverseGuard::shut_down`].
+    /// Send the stop (`SIGTERM` on unix, `CTRL_BREAK` to the child's own
+    /// process group on Windows) and wait up to `timeout` for the child to
+    /// exit on its own — unlike [`finish`](Self::finish), this does not
+    /// force-kill. Returns whether it exited before the deadline.
     ///
     /// `qsh tunnel open --dynamic` installs no signal handler on this path
     /// (`run_tunnel_open_dynamic` in `crates/qsh-cli/src/main.rs` ends in
@@ -1455,12 +1491,10 @@ impl DynamicTunnelGuard {
     /// process gone, which is enough for the kernel to free the listen
     /// socket; it does not exercise a graceful-shutdown code path, because
     /// there is none on this path yet.
-    #[cfg(unix)]
     pub fn terminate_and_wait(mut self, timeout: Duration) -> bool {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.child.id() as i32),
-            nix::sys::signal::Signal::SIGTERM,
-        );
+        // A child that cannot be sent the event is killed: the caller only
+        // needs the process gone for the listen socket to be released.
+        request_stop(&mut self.child);
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if matches!(self.child.try_wait(), Ok(Some(_))) {

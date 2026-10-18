@@ -378,7 +378,9 @@ fn create_instance(name: &Path, first: bool, dacl: &dyn DaclSource) -> io::Resul
 // ---------------------------------------------------------------------------
 
 /// Open the pipe `endpoint`, then check that its server runs as this user.
-pub(crate) async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
+/// Public for `qsh-testkit`, whose wire-level tests speak to a daemon's
+/// endpoint the way a CLI process does.
+pub async fn connect(endpoint: &Path) -> io::Result<LocalStream> {
     connect_with(endpoint, &Os).await
 }
 

@@ -50,7 +50,7 @@ Apple 시크릿 여섯이 아직 등록되지 않은 태그로는 DoD 2를 판�
 
 **macOS x86_64는 실제 Intel 하드웨어여야 한다.** Apple silicon에서 Rosetta로 돌린 x86_64 바이너리는 Gatekeeper 판정 경로가 달라 이 회차로 세지 않는다.
 
-**Windows는 다섯에 없다.** `x86_64-pc-windows-msvc` 자산은 릴리스에 붙지만 수용 기준 어느 문장도 Windows를 부르지 않고, Windows host 자체가 `docs/ROADMAP.md` §3 가드레일의 유예 항목이다. `release.yml`의 windows leg은 `release_smoke_covers_init_trust_exec_doctor_and_a_tunnel_on_a_platform_without_a_pty_host`로 `exec --json`, `doctor --json`, `tunnel open --local` 왕복과 생성 파일의 소유자 전용 DACL까지만 검증하며 그 커버리지가 Windows 클라이언트에 대해 이 마일스톤이 주장하는 전부다.
+**Windows는 다섯에 없다.** `x86_64-pc-windows-msvc` 자산은 릴리스에 붙지만 수용 기준 어느 문장도 Windows를 부르지 않고, Windows host 자체가 `docs/ROADMAP.md` §3 가드레일의 유예 항목이다. `release.yml`의 windows leg은 `release_smoke_covers_init_trust_exec_doctor_tunnel_and_a_pty_session_on_windows`로 `exec --json`, `doctor --json`, `tunnel open --local` 왕복, host ConPTY 세션의 열기·쓰기·닫기, ConPTY 안의 실제 `qsh`가 `~d`로 떼고 `qsh attach`로 다시 붙는 대화형 축, 생성 파일의 소유자 전용 DACL까지만 검증하며 그 커버리지가 Windows에 대해 이 마일스톤이 주장하는 전부다.
 
 **구형 glibc 이미지의 조건.** x86_64이고 glibc가 2.28 이하여야 한다. Debian 10 (glibc 2.28)을 기본으로 하고 더 낮은 선이 필요하면 CentOS 7 (glibc 2.17)을 쓴다. 어느 쪽을 썼든 회차 표의 "플랫폼/이미지" 열에 배포판 이름과 `ldd --version`의 첫 줄을 그대로 적는다. 대조로 그 이미지에서 gnu 자산을 실행하면 동적 링커가 거부해야 한다. 거부하지 않으면 그 이미지는 "구형 glibc"가 아니므로 회차로 세지 않는다.
 

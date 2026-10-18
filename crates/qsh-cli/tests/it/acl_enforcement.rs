@@ -20,9 +20,7 @@
 use crate::common;
 
 use common::{CLIENT_ALIAS, CLIENT_PRINCIPAL, HOST_ALIAS, Sandbox, ServeGuard};
-#[cfg(unix)]
 use common::{ListenGuard, ReverseGuard};
-#[cfg(unix)]
 use common::{hosts_array, wait_for_audit};
 use serde_json::Value;
 
@@ -263,7 +261,6 @@ fn minimal_allow_policy_grants_exec_run_and_denies_session_open() {
 /// `host.reverse` choke point holds through the policy path, not just the
 /// old hardcoded one).
 #[test]
-#[cfg(unix)]
 fn listen_without_acl_toml_denies_every_reverse_registration() {
     const TARGET_ALIAS: &str = "denied-target";
     let controller = Sandbox::new();
@@ -356,7 +353,6 @@ fn set_role_takes_effect_on_the_next_request_without_restart() {
 /// target's own retry loop registers as soon as `trust set-role <target>
 /// reverse` runs on the controller, with neither process restarted.
 #[test]
-#[cfg(unix)]
 fn set_role_takes_effect_for_a_reverse_registration_without_restart() {
     const TARGET_ALIAS: &str = "late-target";
     let controller = Sandbox::new();

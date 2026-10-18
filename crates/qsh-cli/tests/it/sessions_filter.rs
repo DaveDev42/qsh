@@ -9,19 +9,21 @@
 //! filter picks the same sessions whether the host is a forward `qsh serve`
 //! or a reverse target behind the local `qsh listen` daemon.
 //!
-//! The tests seed live sessions with a POSIX shell script, and Windows has no
-//! `sh`, so every test that needs a live session seeds it under `cfg(unix)`;
-//! on Windows the same tests run over a host with zero sessions, which still drives the filter and the forward route on the
-//! Windows client. The route-equivalence test has a Windows twin of the same
-//! name that runs both routes (a `qsh serve` host and a `qsh serve --to`
-//! target behind the local `qsh listen` daemon) over zero sessions: the
-//! filters, `data.unreachable` and the host-less fan-out reaching the reverse
-//! target through the daemon's named pipe are all observable without a
-//! session.
+//! The sessions are live ones on both platforms. A session is a program in a
+//! pseudo-terminal (`cat` and `true` on unix, `findstr "^"` and `cmd /c exit
+//! 0` on Windows, `qsh_testkit::shell`), and the writer lease of one of them
+//! is held by a real `qsh attach` under a pty: `expectrl` on unix, a ConPTY
+//! (`windows_attach::spawn_qsh`) on Windows. The route-equivalence test runs
+//! both routes (a `qsh serve` host and a `qsh serve --to` target behind the
+//! local `qsh listen` daemon, which on Windows is reached through its named
+//! pipe). A Windows-only test adds the part that needs no session: the
+//! host-less fan-out reaching the reverse target through the daemon, and
+//! reporting it unreachable once the registration is gone.
 
 use crate::common;
 
 use common::{Fleet, HOST_ALIAS, Sandbox, exit_code, sole_envelope};
+use qsh_testkit::shell::{cat_argv, true_argv};
 use serde_json::Value;
 
 /// Wall-clock bound for every observable state this file waits for.
@@ -74,7 +76,6 @@ fn list_json(client: &Sandbox, args: &[&str]) -> Value {
 }
 
 /// The `session_ref`s of a listing envelope, in the order given.
-#[cfg(unix)]
 fn refs(envelope: &Value) -> Vec<String> {
     envelope["data"]["sessions"]
         .as_array()
@@ -84,7 +85,6 @@ fn refs(envelope: &Value) -> Vec<String> {
         .collect()
 }
 
-#[cfg(unix)]
 mod seeded {
     //! One host's worth of sessions in four known shapes, plus the pty
     //! client that holds the writer lease of one of them.
@@ -93,8 +93,37 @@ mod seeded {
     use std::collections::BTreeSet;
 
     use common::poll_until;
-    use expectrl::Session;
-    use expectrl::session::OsSession;
+    use qsh_testkit::shell::{cat_argv, true_argv};
+
+    /// The client that holds a writer lease: a `qsh attach` in a pty.
+    #[cfg(unix)]
+    pub struct Holder {
+        _session: expectrl::session::OsSession,
+    }
+
+    /// See the unix definition.
+    #[cfg(windows)]
+    pub struct Holder {
+        _console: qsh_testkit::conpty::ConPtyProbe,
+    }
+
+    impl Holder {
+        #[cfg(unix)]
+        fn attach(client: &Sandbox, session_ref: &str) -> Self {
+            let mut command = client.command(&["attach", session_ref]);
+            command.env("TERM", "xterm-256color");
+            Self {
+                _session: expectrl::Session::spawn(command).expect("spawn qsh attach under a pty"),
+            }
+        }
+
+        #[cfg(windows)]
+        fn attach(client: &Sandbox, session_ref: &str) -> Self {
+            Self {
+                _console: crate::windows_attach::spawn_qsh(client, &["attach", session_ref]),
+            }
+        }
+    }
 
     /// What a seeded session is, as the filters see it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,7 +148,7 @@ mod seeded {
         pub exited_ref: String,
         /// The principal string the host reports as the writer.
         pub writer_principal: String,
-        _attached: OsSession,
+        _attached: Holder,
     }
 
     impl Seeded {
@@ -142,9 +171,9 @@ mod seeded {
     }
 
     /// `session open <host> -- <argv>`; the new `session_ref`.
-    pub fn open(client: &Sandbox, host: &str, argv: &[&str]) -> String {
+    pub fn open(client: &Sandbox, host: &str, argv: &[String]) -> String {
         let mut args = vec!["session", "open", host, "--json", "--"];
-        args.extend_from_slice(argv);
+        args.extend(argv.iter().map(String::as_str));
         let (code, opened) = client.json(&args);
         assert_eq!(code, 0, "{opened}");
         opened["data"]["session_ref"]
@@ -192,10 +221,10 @@ mod seeded {
     /// every host before any [`hold_writer`] starts an attach that renews
     /// entries in the same file.
     pub fn open_all(client: &Sandbox, host: &str) -> Opened {
-        let writer_ref = open(client, host, &["cat"]);
-        let plain_ref = open(client, host, &["cat"]);
-        let foreign_ref = open(client, host, &["cat"]);
-        let exited_ref = open(client, host, &["sh", "-c", "exit 0"]);
+        let writer_ref = open(client, host, &cat_argv());
+        let plain_ref = open(client, host, &cat_argv());
+        let foreign_ref = open(client, host, &cat_argv());
+        let exited_ref = open(client, host, &true_argv());
         forget_credential(client, &foreign_ref);
         wait_exited(client, &exited_ref);
         Opened {
@@ -210,9 +239,7 @@ mod seeded {
     /// Hold the writer lease of [`Role::Writer`] with a real pty attach and
     /// return once the host reports the writer.
     pub fn hold_writer(client: &Sandbox, opened: Opened) -> Seeded {
-        let mut command = client.command(&["attach", &opened.writer_ref]);
-        command.env("TERM", "xterm-256color");
-        let attached = Session::spawn(command).expect("spawn qsh attach under a pty");
+        let attached = Holder::attach(client, &opened.writer_ref);
 
         let host = opened.host.as_str();
         let writer_ref = opened.writer_ref.as_str();
@@ -283,7 +310,6 @@ mod seeded {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn sessions_filter_state_writer_attachable_and_combined() {
     let fleet = Fleet::start();
@@ -347,12 +373,11 @@ fn sessions_filter_state_writer_attachable_and_combined() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn sessions_filter_does_not_change_the_wire_request() {
     let fleet = Fleet::start();
     let client = &fleet.client;
-    let _open = seeded::open(client, HOST_ALIAS, &["cat"]);
+    let _open = seeded::open(client, HOST_ALIAS, &cat_argv());
 
     // The request type carries a host and nothing else. Were a filter
     // field added, this would be the first place to notice.
@@ -409,8 +434,7 @@ fn sessions_filter_keeps_unreachable_in_fan_out() {
     // A pinned host with an address nothing listens on, as
     // `exit_code_matrix` uses for the unfiltered fan-out.
     client.trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
-    #[cfg(unix)]
-    let _open = seeded::open(client, HOST_ALIAS, &["cat"]);
+    let _open = seeded::open(client, HOST_ALIAS, &cat_argv());
 
     for filter in [
         &["--state", "running"][..],
@@ -442,8 +466,7 @@ fn sessions_filter_keeps_unreachable_in_fan_out() {
 fn sessions_filter_unknown_state_is_empty_not_an_error() {
     let fleet = Fleet::start();
     let client = &fleet.client;
-    #[cfg(unix)]
-    let _open = seeded::open(client, HOST_ALIAS, &["cat"]);
+    let _open = seeded::open(client, HOST_ALIAS, &cat_argv());
 
     for state in ["no-such-state", "Running", "", "run"] {
         let args = ["sessions", HOST_ALIAS, "--state", state, "--json"];
@@ -463,16 +486,10 @@ fn sessions_filter_unknown_state_is_empty_not_an_error() {
 fn sessions_filter_human_count_line_goes_to_stderr_only() {
     let fleet = Fleet::start();
     let client = &fleet.client;
-    #[cfg(unix)]
-    let total = {
-        let _running = seeded::open(client, HOST_ALIAS, &["cat"]);
-        let exited = seeded::open(client, HOST_ALIAS, &["sh", "-c", "exit 0"]);
-        seeded::wait_exited(client, &exited);
-        (2usize, 1usize)
-    };
-    #[cfg(not(unix))]
-    let total = (0usize, 0usize);
-    let (all, running) = total;
+    let _running = seeded::open(client, HOST_ALIAS, &cat_argv());
+    let exited = seeded::open(client, HOST_ALIAS, &true_argv());
+    seeded::wait_exited(client, &exited);
+    let (all, running) = (2usize, 1usize);
 
     let filtered = client.qsh(&["sessions", HOST_ALIAS, "--state", "running"]);
     assert_eq!(exit_code(&filtered), 0, "{filtered:?}");
@@ -514,7 +531,6 @@ fn sessions_filter_human_count_line_goes_to_stderr_only() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn sessions_attachable_never_prints_the_resume_token() {
     use base64::Engine as _;
@@ -522,7 +538,7 @@ fn sessions_attachable_never_prints_the_resume_token() {
 
     let fleet = Fleet::start();
     let client = &fleet.client;
-    let session_ref = seeded::open(client, HOST_ALIAS, &["cat"]);
+    let session_ref = seeded::open(client, HOST_ALIAS, &cat_argv());
 
     // The credential this device stores for the session. The test reads it
     // only to look for it in the outputs below.
@@ -575,7 +591,6 @@ fn sessions_attachable_never_prints_the_resume_token() {
 /// reverse target that dialed it. The same four sessions are seeded on
 /// both, and every filter has to pick the same roles on both, with the
 /// host-less fan-out returning exactly the union of the two.
-#[cfg(unix)]
 #[test]
 fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
     use std::collections::BTreeSet;
@@ -663,18 +678,17 @@ fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
     drop(listen);
 }
 
-/// The Windows twin of the test above, over hosts with no sessions (seeding
-/// is a POSIX shell script). What it pins is the route part: every filter
-/// returns the same empty listing from the forward host and from the reverse
-/// target, and the host-less fan-out reaches the reverse target through the
-/// local daemon's named pipe. The target's pin carries an address nothing
-/// listens on, so a fan-out that came back without `data.unreachable` did get
-/// its answer over the registration, not a forward dial. With the
+/// The part of the route test that needs no session, on Windows: every
+/// filter returns the same empty listing from the forward host and from the
+/// reverse target, and the host-less fan-out reaches the reverse target
+/// through the local daemon's named pipe. The target's pin carries an address
+/// nothing listens on, so a fan-out that came back without `data.unreachable`
+/// did get its answer over the registration, not a forward dial. With the
 /// registration gone the same fan-out reports the target unreachable and
 /// keeps the filter.
 #[cfg(windows)]
 #[test]
-fn sessions_filter_applies_identically_to_forward_and_reverse_hosts() {
+fn sessions_fan_out_reaches_a_reverse_target_through_the_daemons_pipe_and_reports_it_lost() {
     let fleet = Fleet::start();
     let controller = &fleet.client;
     let (target, listen, reverse) = reverse_target(controller);

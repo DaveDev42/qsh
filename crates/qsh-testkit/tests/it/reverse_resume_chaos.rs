@@ -50,10 +50,6 @@
 //! resume ceiling (criterion ⑤ below) — so a regression that made recovery
 //! quietly depend on a slow backoff path, or on idle-timeout luck, still
 //! fails this test even though no line here counts retries.
-//!
-//! `#![cfg(unix)]`: localctl (UDS) and PTY sessions are both unix-only,
-//! same gating as every other localctl/reverse testkit file.
-#![cfg(unix)]
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};

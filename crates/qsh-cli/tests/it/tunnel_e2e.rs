@@ -30,12 +30,10 @@
 //! for one on a command line — the test picks a free one and passes it
 //! concretely.
 //!
-//! Unix only, like every other pty-driven L5 file here: the interactive
-//! form is `cfg(unix)` in the client (`crates/qsh-cli/src/tui/`), and
-//! `expectrl` is a `cfg(unix)` dev-dependency. Windows still compiles this
-//! crate's tests; this file simply contains none there.
-
-#![cfg(unix)]
+//! The interactive form runs under a pty on both platforms: `expectrl` on
+//! unix, a ConPTY (`qsh_testkit::conpty`, the harness `windows_attach.rs`
+//! uses) on Windows. [`PtyClient`] is the one type the two tests drive; the
+//! rest of the file is platform-neutral.
 
 use crate::common;
 
@@ -47,7 +45,9 @@ use std::thread;
 use std::time::Duration;
 
 use common::{CLIENT_PRINCIPAL, Fleet, HOST_ALIAS, Sandbox, exit_code};
+#[cfg(unix)]
 use expectrl::session::OsSession;
+#[cfg(unix)]
 use expectrl::{Expect as _, Session};
 use serde_json::Value;
 
@@ -144,14 +144,15 @@ fn assert_no_payload(result: std::io::Result<Vec<u8>>, what: &str) {
 ///
 /// A deliberate small copy of `tui_expect.rs`'s helper rather than a
 /// shared one in `common`: that module is compiled into every test binary
-/// in this crate, including the ones that must build on Windows, and
-/// `expectrl` is a `cfg(unix)` dev-dependency.
-struct PtyClient {
+/// in this crate, and `expectrl` is a `cfg(unix)` dev-dependency.
+#[cfg(unix)]
+pub(crate) struct PtyClient {
     session: OsSession,
 }
 
+#[cfg(unix)]
 impl PtyClient {
-    fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
+    pub(crate) fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
         let mut command = sandbox.command(args);
         command.env("TERM", "xterm-256color");
         let mut session = Session::spawn(command).expect("spawn qsh under a pty");
@@ -160,7 +161,7 @@ impl PtyClient {
     }
 
     /// Wait for `needle`, or fail naming what never arrived.
-    fn expect(&mut self, needle: &str) {
+    pub(crate) fn expect(&mut self, needle: &str) {
         if let Err(err) = self.session.expect(needle) {
             panic!("waiting for {needle:?}: {err}");
         }
@@ -168,16 +169,60 @@ impl PtyClient {
 
     /// Type bytes at the client verbatim; Enter is CR, what a terminal
     /// actually sends.
-    fn type_(&mut self, keys: &str) {
+    pub(crate) fn type_(&mut self, keys: &str) {
         self.session.send(keys).expect("send to the client's pty");
     }
 
     /// Run `echo` in the attached shell and wait for its output. The
     /// marker is split by an empty quote so the echo of the typed line
     /// cannot satisfy the expectation.
-    fn shell_round_trip(&mut self, marker: &str) {
+    pub(crate) fn shell_round_trip(&mut self, marker: &str) {
         self.type_(&format!("echo {marker}''-OK\r"));
         self.expect(&format!("{marker}-OK"));
+    }
+
+    /// Wait for the client to end.
+    pub(crate) fn wait_end(&mut self) {
+        let _ = self.session.expect(expectrl::Eof);
+    }
+}
+
+/// A `qsh` client in a ConPTY.
+#[cfg(windows)]
+pub(crate) struct PtyClient {
+    console: qsh_testkit::conpty::ConPtyProbe,
+}
+
+#[cfg(windows)]
+impl PtyClient {
+    pub(crate) fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
+        Self {
+            console: crate::windows_attach::spawn_qsh(sandbox, args),
+        }
+    }
+
+    /// Wait for `needle`, or fail naming what never arrived.
+    pub(crate) fn expect(&mut self, needle: &str) {
+        self.console.wait_text(needle);
+    }
+
+    /// Type bytes at the client verbatim; Enter is CR, what a terminal
+    /// actually sends.
+    pub(crate) fn type_(&mut self, keys: &str) {
+        self.console.send(keys.as_bytes());
+    }
+
+    /// Run `echo` in the attached shell and wait for its output. The
+    /// answer is computed by the shell (`%OS%`), so the echo of the typed
+    /// line cannot satisfy the expectation.
+    pub(crate) fn shell_round_trip(&mut self, marker: &str) {
+        self.type_(&format!("echo {marker}-%OS%\r"));
+        self.expect(&format!("{marker}-Windows_NT"));
+    }
+
+    /// Wait for the client to end.
+    pub(crate) fn wait_end(&mut self) {
+        self.console.wait_exit();
     }
 }
 
@@ -355,7 +400,7 @@ fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
     let _ = forward_audit(&fleet.host, "forward.local", &destination, 2);
 
     client.type_("exit\r");
-    let _ = client.session.expect(expectrl::Eof);
+    client.wait_end();
 
     // The forward dies with the client process: nothing holds the port.
     let listener = common::poll_until("the forwarded port to be released", IO_TIMEOUT, || {
@@ -423,7 +468,7 @@ fn the_interactive_form_forwards_a_remote_port_back_to_the_requesters_destinatio
     let _ = forward_audit(&fleet.host, "forward.remote", &resource, 1);
 
     client.type_("exit\r");
-    let _ = client.session.expect(expectrl::Eof);
+    client.wait_end();
 
     // The forward dies with the client process: the host releases the
     // port it bound, the same connection-bound lifecycle

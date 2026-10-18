@@ -12,6 +12,7 @@ use qsh_core::exec::ExecSpec;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{ExecFrame, StreamHeader};
 use qsh_testkit::loopback::{LoopbackHarness, make_ca};
+use qsh_testkit::shell::Runaway;
 use qsh_transport::{FramedStream, Principal, StaticTrust};
 
 fn spec(argv: &[&str]) -> ExecSpec {
@@ -120,7 +121,9 @@ async fn exec_does_not_leak_the_serve_process_environment() {
 
 /// `docs/CLI.md`: "`HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느
 /// 경로에서도 호스트가 고정한다" — a client-supplied `PATH` decides which
-/// binary `argv[0]` resolves to, so it must be ignored, not merged.
+/// binary `argv[0]` resolves to, so it must be ignored, not merged. Unix only
+/// for the same reason as the test above; the Windows means is
+/// `exec_pinned_keys_cannot_be_overridden_on_windows` in `qsh-core`.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_env_cannot_override_the_pinned_path() {
@@ -147,7 +150,9 @@ async fn exec_env_cannot_override_the_pinned_path() {
 /// while still landing in the child's envp as a second `PATH=` entry that a
 /// shell resolves as an override of the pinned one (later entry wins). This
 /// is the same entry-shape rule `pty::posix::build_env` already applies to
-/// the PTY spawn path.
+/// the PTY spawn path. Unix only (a POSIX `envp` entry shape); the Windows
+/// means is `exec_pinned_keys_cannot_be_overridden_on_windows` in `qsh-core`,
+/// which builds the environment block from the account's own values.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_env_key_containing_equals_cannot_smuggle_a_path_override() {
@@ -221,6 +226,8 @@ async fn exec_not_found_and_timeout() {
     assert_ne!(r.exit_code, 0);
     #[cfg(unix)]
     assert_eq!(r.signal.as_deref(), Some("SIGKILL"));
+    #[cfg(windows)]
+    assert_eq!(r.signal, None, "Windows has no signal to name");
 }
 
 /// Poll `ready` until it yields, failing after `within`. The condition is
@@ -418,20 +425,17 @@ async fn file_data_stream_is_reset_without_resource_or_audit() {
 /// must not be able to wedge the host: once the deadline kills the child,
 /// the host waits at most `DRAIN_GRACE` for the tail to drain, then resets
 /// the stream and reaps. The child is gone well before that.
-#[cfg(unix)] // pid files via `$$`, `kill -0`, process-group kill
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_that_stops_reading_is_reset_after_the_drain_grace() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
     let dir = tempfile::tempdir().unwrap();
-    let pid_file = dir.path().join("pid");
-    // Enough output to overrun any flow-control window, then keep going.
-    let script = format!(
-        "echo $$ > {}; yes | head -c 40000000; sleep 30",
-        pid_file.display()
-    );
-    let mut sp = spec(&["sh", "-c", &script]);
-    sp.timeout = Some(Duration::from_millis(500));
+    let child = Runaway::new(dir.path());
+    // Enough output to overrun any flow-control window, and a child that
+    // keeps running afterwards.
+    let argv = child.noisy_argv(40_000_000);
+    let mut sp = spec(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+    sp.timeout = Some(Duration::from_millis(1500));
     let started_msg = s.exec_start(&sp).await.unwrap();
     let (send, recv) = s.connection().open_bi().await.unwrap();
     let mut data = FramedStream::data(send, recv);
@@ -440,32 +444,9 @@ async fn peer_that_stops_reading_is_reset_after_the_drain_grace() {
         .await
         .unwrap();
     // ...and now sit on the stream without reading a byte.
-    let alive = |pid: i32| {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|st| st.success())
-            .unwrap_or(false)
-    };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let pid = loop {
-        if let Ok(text) = std::fs::read_to_string(&pid_file)
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            break pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "child never started");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    child.wait_running(Duration::from_secs(5)).await;
     // The deadline kills the child regardless of the wedged stream.
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while alive(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "child {pid} still alive well past its 500 ms timeout"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    child.wait_gone(Duration::from_secs(5)).await;
     // Keep *not* reading past the drain grace. Reading would open our
     // flow-control window and let the host finish normally — the point is
     // that it must not need us to.
@@ -494,49 +475,29 @@ async fn peer_that_stops_reading_is_reset_after_the_drain_grace() {
 /// When the client vanishes mid-exec (connection dropped, no clean
 /// `StdinEof`/close), the host must not leave the child running as an
 /// orphan: nobody is listening, so it is killed with its process group.
-#[cfg(unix)] // pid files via `$$`, `kill -0`, process-group kill
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_disappearing_mid_exec_kills_the_child() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
     let dir = tempfile::tempdir().unwrap();
-    let pid_file = dir.path().join("pid");
-    let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+    let child = Runaway::new(dir.path());
+    let argv = child.silent_argv();
     // Keep the connection alive only as long as this task runs.
     let conn = s.connection().clone();
-    let exec_task =
-        tokio::spawn(async move { s.exec(&spec(&["sh", "-c", &script]), None, None).await });
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let pid = loop {
-        if let Ok(text) = std::fs::read_to_string(&pid_file)
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            break pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "child never started");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    let alive = |pid: i32| {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|st| st.success())
-            .unwrap_or(false)
-    };
-    assert!(alive(pid), "child should be running before the drop");
+    let exec_task = tokio::spawn(async move {
+        s.exec(
+            &spec(&argv.iter().map(String::as_str).collect::<Vec<_>>()),
+            None,
+            None,
+        )
+        .await
+    });
+    child.wait_running(Duration::from_secs(5)).await;
 
     // Simulate the client dying: abrupt connection close, no protocol goodbye.
     conn.close(0x7777, b"gone");
     exec_task.abort();
     let _ = exec_task.await;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while alive(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "orphaned child {pid} still alive 5s after the peer vanished"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    child.wait_gone(Duration::from_secs(5)).await;
 }

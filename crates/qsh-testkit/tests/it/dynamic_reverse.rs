@@ -60,12 +60,6 @@
 //! chain against a real `ReverseHarness` target — no test-only seam
 //! needed at all, since a real reverse `session.attach` naturally produces
 //! a reverse-route [`SessionAttachStream`].
-//!
-//! `#![cfg(unix)]`: localctl (UDS) and `ReverseHarness::attach_localctl`
-//! are both unix-only, same as every other reverse-conduit L3 suite in
-//! this crate.
-
-#![cfg(unix)]
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::Arc;

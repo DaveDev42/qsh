@@ -263,9 +263,6 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         &ssh_garbage,
     ];
 
-    // `mut` is needed for the `cases.push(..)` calls below, some of which are
-    // compiled out on Windows (the `qsh cp` rows).
-    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut cases = vec![
         Case {
             name: "usage: exec with no command after `--`",

@@ -8,8 +8,11 @@
 //! The host authorizes file actions from the pin's role (ADR-0045), so the
 //! host pins the client with `--role full`; the stock `acl.toml` planted by
 //! `ServeGuard` has no file rows and none are needed.
-
-#![cfg(unix)]
+//!
+//! The rigs run on every platform. What differs is how a file's permissions
+//! travel: unix carries the mode bits and the umask applies, Windows
+//! synthesizes a mode from the read-only attribute (ADR-0035 decision 26),
+//! so those two cases have a twin per platform.
 
 use crate::common;
 
@@ -437,10 +440,15 @@ struct HomeFile {
 
 impl HomeFile {
     fn new(tag: &str) -> Self {
+        #[cfg(unix)]
         let home = nix::unistd::User::from_uid(nix::unistd::geteuid())
             .expect("passwd lookup")
             .expect("a passwd entry for the test account")
             .dir;
+        // The serve account is this account; its profile directory is what
+        // `GetUserProfileDirectoryW` answers for it.
+        #[cfg(windows)]
+        let home = PathBuf::from(std::env::var_os("USERPROFILE").expect("USERPROFILE"));
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -529,6 +537,9 @@ fn cp_user_hint_mismatch_is_unsupported_after_acl() {
     assert!(!rig.path("out.txt").exists());
 }
 
+/// unix only: the mode bits travel with `-p`. Windows has no mode bits; its
+/// means is `cp_preserve_maps_the_readonly_attribute_and_mtime_on_windows`.
+#[cfg(unix)]
 #[test]
 fn cp_preserve_sets_mode_and_mtime() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -563,6 +574,10 @@ fn cp_preserve_sets_mode_and_mtime() {
     assert_eq!(meta.modified().unwrap(), old);
 }
 
+/// unix only: the umask applies to a file created without `-p`. Windows has
+/// no umask; its means is
+/// `cp_without_preserve_applies_the_source_mode_on_windows`.
+#[cfg(unix)]
 #[test]
 fn cp_without_preserve_applies_the_umask() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -595,6 +610,122 @@ fn cp_without_preserve_applies_the_umask() {
     let meta = std::fs::metadata(rig.path("get.sh")).unwrap();
     assert_eq!(meta.permissions().mode() & 0o7777, 0o777 & !mask);
     assert!(meta.modified().unwrap() >= before - Duration::from_secs(2));
+}
+
+/// A file's read-only attribute, and the setting of it.
+#[cfg(windows)]
+fn set_readonly(path: &Path, readonly: bool) {
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_readonly(readonly);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+#[cfg(windows)]
+fn is_readonly(path: &Path) -> bool {
+    std::fs::metadata(path).unwrap().permissions().readonly()
+}
+
+/// The Windows twin of `cp_preserve_sets_mode_and_mtime`: the synthesized
+/// mode is `0o444` for a read-only file, so `-p` carries the read-only
+/// attribute and the modification time both ways (ADR-0035 decision 26).
+#[cfg(windows)]
+#[test]
+fn cp_preserve_maps_the_readonly_attribute_and_mtime_on_windows() {
+    let rig = Forward::start();
+    let src = rig.path("pres.txt");
+    std::fs::write(&src, b"preserved").unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    set_readonly(&src, true);
+
+    // put -p
+    let (code, value) = rig.cp_json(&["-p", src.to_str().unwrap(), &rig.remote("put.txt")]);
+    assert_eq!(code, 0, "{value}");
+    assert!(is_readonly(&rig.path("put.txt")), "{value}");
+    assert_eq!(
+        std::fs::metadata(rig.path("put.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        old
+    );
+
+    // get -p
+    let (code, value) = rig.cp_json(&[
+        "-p",
+        &rig.remote("put.txt"),
+        rig.path("get.txt").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert!(is_readonly(&rig.path("get.txt")), "{value}");
+    assert_eq!(
+        std::fs::metadata(rig.path("get.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        old
+    );
+
+    // A writable source stays writable.
+    set_readonly(&src, false);
+    let (code, value) = rig.cp_json(&["-p", src.to_str().unwrap(), &rig.remote("rw.txt")]);
+    assert_eq!(code, 0, "{value}");
+    assert!(!is_readonly(&rig.path("rw.txt")), "{value}");
+
+    // Tidy up so the work directory can be removed.
+    for name in ["pres.txt", "put.txt", "get.txt"] {
+        let _ = std::fs::remove_file(rig.path(name)).or_else(|_| {
+            set_readonly(&rig.path(name), false);
+            std::fs::remove_file(rig.path(name))
+        });
+    }
+}
+
+/// The Windows twin of `cp_without_preserve_applies_the_umask`: without `-p`
+/// the destination's mode is the source's (`& ~umask`, and a Windows process
+/// has no umask), so a read-only source gives a read-only destination, in both
+/// directions, and the copy is stamped with the time of the copy instead of the
+/// source's.
+#[cfg(windows)]
+#[test]
+fn cp_without_preserve_applies_the_source_mode_on_windows() {
+    let rig = Forward::start();
+    let src = rig.path("plain.txt");
+    std::fs::write(&src, b"x").unwrap();
+    let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    set_readonly(&src, true);
+    let before = std::time::SystemTime::now();
+
+    let (code, value) = rig.cp_json(&[src.to_str().unwrap(), &rig.remote("put.txt")]);
+    assert_eq!(code, 0, "{value}");
+    let meta = std::fs::metadata(rig.path("put.txt")).unwrap();
+    assert!(meta.permissions().readonly(), "{value}");
+    assert!(meta.modified().unwrap() >= before - Duration::from_secs(2));
+
+    let (code, value) = rig.cp_json(&[
+        &rig.remote("put.txt"),
+        rig.path("get.txt").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{value}");
+    let meta = std::fs::metadata(rig.path("get.txt")).unwrap();
+    assert!(meta.permissions().readonly(), "{value}");
+    assert!(meta.modified().unwrap() >= before - Duration::from_secs(2));
+
+    // A read-only file would keep the sandbox from being removed.
+    for name in ["plain.txt", "put.txt", "get.txt"] {
+        set_readonly(&rig.path(name), false);
+    }
 }
 
 #[test]
@@ -742,6 +873,11 @@ fn cp_json_and_jsonl_report_every_entry() {
     );
 }
 
+/// unix only: creating a file symlink takes a privilege a Windows account
+/// may not hold. The Windows means is
+/// `cp_refuses_state_paths_and_reparse_points` (`route_cases.rs`), which
+/// plants junctions, and a junction is refused the same way.
+#[cfg(unix)]
 #[test]
 fn cp_get_refuses_an_existing_symlink_under_the_destination() {
     let rig = Forward::start();

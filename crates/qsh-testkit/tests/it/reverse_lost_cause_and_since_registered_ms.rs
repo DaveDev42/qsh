@@ -17,8 +17,6 @@
 //! own nextest process, so there is nothing to share, and a shared helper
 //! crate would be the only alternative to duplicating this ~40 lines.
 
-#![cfg(unix)]
-
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 

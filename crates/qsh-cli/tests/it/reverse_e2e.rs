@@ -32,11 +32,14 @@
 //!
 //! Every case here attaches a PTY session through the reverse route with an
 //! `expectrl` client, which needs a unix pseudo-terminal on the client's end,
-//! so the module stays unix only. A Windows host takes PTY sessions too
-//! (ADR-0035 decision 20); its session ops (open, write, read, close), exec,
-//! tunnels, `hosts` and re-registration run on Windows in
-//! `windows_reverse_e2e.rs`, and the interactive client's side is
-//! `windows_attach.rs`.
+//! and one of them inspects the target's sockets with an external
+//! socket lister, so the module stays unix only. The Windows route runs the same
+//! case list: a Windows target takes PTY sessions too (ADR-0035 decision 20),
+//! its session ops (open, write, read, close), exec, tunnels, `hosts` and
+//! re-registration run in `windows_reverse_e2e.rs`, and the interactive
+//! client in a ConPTY against the reverse route is `windows_attach.rs`
+//! (`pty_attach_round_trip_reverse`, `pty_detach_then_attach_resumes_reverse`,
+//! `pty_resize_propagates_reverse`, `killed_client_leaves_the_session_running_reverse`).
 
 #![cfg(unix)]
 

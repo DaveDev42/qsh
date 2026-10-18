@@ -24,7 +24,6 @@ use qsh_core::server::RESET_CODE_RESOURCE_EXHAUSTED;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, make_ca, make_identity};
-#[cfg(unix)]
 use qsh_testkit::pair::HostedPair;
 use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::TunnelHarness;
@@ -67,6 +66,14 @@ fn open_req() -> wire::SessionOpen {
 fn exec_spec(argv: &[&str]) -> ExecSpec {
     ExecSpec {
         argv: argv.iter().map(|s| s.to_string()).collect(),
+        env: vec![],
+        timeout: None,
+    }
+}
+
+fn exec_spec_of(argv: Vec<String>) -> ExecSpec {
+    ExecSpec {
+        argv,
         env: vec![],
         timeout: None,
     }
@@ -474,13 +481,11 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
         },
     )
     .await;
-    #[cfg(unix)]
     let (_file_dir, file) = file_ops_sandbox(&h);
 
     let mut s = h.session().await;
     let _opened = s.session_open(open_req()).await.unwrap();
     // The file row: one `file.read` ticket fills the host-wide transfer cap.
-    #[cfg(unix)]
     raw_file_read(&mut s, 1_000, &file)
         .await
         .expect("fills the file transfer cap");
@@ -508,18 +513,15 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
     // The same for the file op: the refused principal sees the uniform
     // denial, never "the host is at its transfer cap", while the pinned
     // principal does see the cap.
-    #[cfg(unix)]
-    {
-        let (code, _, message) = raw_file_read(&mut mallory, 1_001, &file)
-            .await
-            .expect_err("refused");
-        assert_eq!(code, ErrorCode::PermissionDenied);
-        assert_eq!(message, qsh_core::acl::PERMISSION_DENIED_MESSAGE);
-        let (code, _, _) = raw_file_read(&mut s, 1_002, &file)
-            .await
-            .expect_err("the cap is full for the allowed principal");
-        assert_eq!(code, ErrorCode::ResourceExhausted);
-    }
+    let (code, _, message) = raw_file_read(&mut mallory, 1_001, &file)
+        .await
+        .expect_err("refused");
+    assert_eq!(code, ErrorCode::PermissionDenied);
+    assert_eq!(message, qsh_core::acl::PERMISSION_DENIED_MESSAGE);
+    let (code, _, _) = raw_file_read(&mut s, 1_002, &file)
+        .await
+        .expect_err("the cap is full for the allowed principal");
+    assert_eq!(code, ErrorCode::ResourceExhausted);
 
     // Nothing was created for the refused attempt — the one allowed
     // session is still the only one.
@@ -529,13 +531,21 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
     h.shutdown().await;
 }
 
+/// The directory as the host spells it: on Windows without the `\\?\` prefix
+/// the system puts on a final path (the host answers with drive paths only).
+fn host_spelling(path: &std::path::Path) -> std::path::PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => std::path::PathBuf::from(plain),
+        None => path.to_path_buf(),
+    }
+}
+
 /// A host-side state tree for the file ops (they refuse every request on a
 /// host that was never told where it is) and one readable file under a data
 /// directory of its own. Returns the guard and the file's path.
-#[cfg(unix)]
 fn file_ops_sandbox(h: &LoopbackHarness) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+    let root = host_spelling(&std::fs::canonicalize(dir.path()).expect("canonical tempdir"));
     let paths = qsh_core::config::Paths::new(root.join("config"), root.join("state"))
         .with_runtime_dir(root.join("run"));
     std::fs::create_dir_all(&paths.config_dir).unwrap();
@@ -545,12 +555,11 @@ fn file_ops_sandbox(h: &LoopbackHarness) -> (tempfile::TempDir, String) {
     std::fs::write(&file, b"alpha\n").unwrap();
     h.server()
         .set_file_host(paths, qsh_core::config::AuditConfig::default());
-    (dir, file.display().to_string())
+    (dir, file.display().to_string().replace('\\', "/"))
 }
 
 /// One raw `file.read` request; `Ok` is the ticket reply, `Err` the peer's
 /// `(code, retryable, message)`.
-#[cfg(unix)]
 async fn raw_file_read(
     s: &mut Session,
     id: u64,
@@ -589,7 +598,6 @@ async fn raw_file_read(
 /// its slot from issue (the open fd rides on the ticket), so with a cap of 1
 /// the second request is `RESOURCE_EXHAUSTED`/`retryable`, and the slot
 /// comes back when the connection, and with it the ticket, is gone.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn file_read_past_the_transfer_quota_answers_resource_exhausted_end_to_end() {
     let h = LoopbackHarness::start_with_quotas(QuotaLimits {
@@ -717,6 +725,25 @@ async fn exec_permit_is_released_before_the_result_is_observable() {
     h.shutdown().await;
 }
 
+/// The child of the permit test below: it announces `marker` (`cat` once the
+/// test sends it a line; on Windows `cmd` prints it at once) and then lives
+/// until the end of its stdin and then exits `0` (`set /p` fails at the end
+/// of input, so `exit 0` makes the status explicit).
+fn holding_child_argv() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        qsh_testkit::shell::cat_argv()
+    }
+    #[cfg(windows)]
+    {
+        [
+            "cmd", "/c", "echo", "marker&", "set", "/p", "x=&", "exit", "0",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+}
+
 /// The `ExecPermit` must stay alive for as long as the *child* does, not
 /// merely until the exec ticket is redeemed. Both end-to-end exec quota
 /// tests above saturate the cap with either an unredeemed ticket or an
@@ -729,7 +756,6 @@ async fn exec_permit_is_released_before_the_result_is_observable() {
 /// same principal (the budget is per principal, not per connection) must
 /// be refused at `max_exec_per_principal = 1`; only after stdin is closed
 /// and `cat` exits does a third `exec.run` succeed.
-#[cfg(unix)] // real child spawn/exit and `cat` assumed unix-only here
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_child_holds_its_exec_permit_until_it_exits() {
     let h = LoopbackHarness::start_with_quotas(QuotaLimits {
@@ -743,12 +769,11 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
     // Redeem the ticket ourselves (instead of the bundled `Session::exec`)
     // so we control exactly when the child is proven alive, without any
     // sleep-based race.
-    let started = s1.exec_start(&exec_spec(&["cat"])).await.unwrap();
+    let started = s1
+        .exec_start(&exec_spec_of(holding_child_argv()))
+        .await
+        .unwrap();
     let (send, recv) = s1.connection().open_bi().await.unwrap();
-    // Fully qualified rather than imported at the top: this is the only
-    // user and it sits inside a `#[cfg(unix)]` test, so a top-level import
-    // is an unused-import error on Windows (`clippy -D warnings`, CI
-    // 33723264758 on 2e5d581).
     let mut data = qsh_transport::FramedStream::data(send, recv);
     data.send
         .send(&wire::StreamHeader::exec_data(started.ticket))
@@ -756,26 +781,33 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
         .unwrap();
 
     // Prove the child is actually running — not just an in-flight
-    // redemption — by round-tripping a marker through its stdin/stdout;
-    // `cat` cannot echo it back until the host has spawned it and hooked
-    // up its pipes.
+    // redemption — by reading a marker it printed. On unix `cat` cannot
+    // echo the marker back until the host has spawned it and hooked up its
+    // pipes. `findstr` on Windows holds its output back until its input
+    // ends, so the Windows child prints the marker itself and then waits
+    // for a line of stdin; the marker is not sent there, because that line
+    // would end the child before the permit is probed.
+    #[cfg(unix)]
     data.send
-        .send(&wire::ExecFrame::stdin(b"marker".to_vec()))
+        .send(&wire::ExecFrame::stdin(
+            format!("marker{}", qsh_testkit::shell::ENTER).into_bytes(),
+        ))
         .await
         .unwrap();
-    match data.recv.recv::<wire::ExecFrame>().await.unwrap() {
-        Some(wire::ExecFrame {
-            body: Some(wire::exec_frame::Body::Stdout(chunk)),
-        }) => {
-            assert_eq!(chunk.data, b"marker");
+    let mut echoed = Vec::new();
+    while !echoed.starts_with(b"marker") {
+        match data.recv.recv::<wire::ExecFrame>().await.unwrap() {
+            Some(wire::ExecFrame {
+                body: Some(wire::exec_frame::Body::Stdout(chunk)),
+            }) => echoed.extend_from_slice(&chunk.data),
+            other => panic!("expected the child's stdout echo, got {other:?}"),
         }
-        other => panic!("expected the child's stdout echo, got {other:?}"),
     }
 
     // A live child still holds the only permit — the second connection's
     // exec.run must be refused, same principal, cap 1.
     let err = s2
-        .exec_start(&exec_spec(&["true"]))
+        .exec_start(&exec_spec_of(qsh_testkit::shell::true_argv()))
         .await
         .expect_err("a live child must still hold the only permit");
     let (code, retryable) = remote(err);
@@ -802,7 +834,10 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
 
     // The child has exited: the permit is free again, and a third
     // exec.run succeeds.
-    let admitted = s2.exec(&exec_spec(&["true"]), None, None).await.unwrap();
+    let admitted = s2
+        .exec(&exec_spec_of(qsh_testkit::shell::true_argv()), None, None)
+        .await
+        .unwrap();
     assert_eq!(admitted.exit_code, 0);
 
     h.shutdown().await;
@@ -1690,11 +1725,6 @@ async fn the_listen_controller_enforces_the_connection_cap() {
 /// does not need. The registered target is a real `Server`/`Broker`/
 /// `PipeFactory`, wired the same way `reverse_session_ops.rs`'s
 /// `TargetRig::register_reverse` wires one.
-// The controller side of this test drives the registered target through
-// `Listen::control_hub` / `ConduitInbound`, the localctl conduit surface that
-// `qsh-core` only builds on unix (`#[cfg(unix)]` in `reverse/listen.rs`), so
-// the test is unix-only the same way `reverse_target_quota` below is.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_registration_pipe_echo_survives_a_connection_flood() {
     let target_identity = make_identity();
@@ -1877,7 +1907,6 @@ async fn existing_registration_pipe_echo_survives_a_connection_flood() {
 // where the reverse target's production wiring forgets to thread
 // `[serve]`'s quota keys through `host_runtime` at all).
 // ==========================================================================
-#[cfg(unix)]
 mod reverse_target_quota {
     use std::path::Path;
     use std::sync::Arc;
@@ -1895,9 +1924,9 @@ mod reverse_target_quota {
     };
     use qsh_proto::wire::{self, control_message, response};
     use qsh_testkit::loopback::{TestIdentity, make_identity};
-    use qsh_testkit::reverse::{ReverseHarness, wait_for};
+    use qsh_testkit::reverse::{LocalStream, ReverseHarness, connect_localctl, wait_for};
     use qsh_transport::{FramedRecv, FramedSend, StaticTrust};
-    use tokio::net::{TcpListener, UnixStream};
+    use tokio::net::TcpListener;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1916,8 +1945,8 @@ mod reverse_target_quota {
         (dir, paths)
     }
 
-    async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStream> {
-        let stream = UnixStream::connect(socket_path)
+    async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<LocalStream> {
+        let stream = connect_localctl(socket_path)
             .await
             .expect("connect localctl socket");
         let mut conduit = LocalConduit::new(stream);
@@ -1944,7 +1973,7 @@ mod reverse_target_quota {
     }
 
     async fn send(
-        conduit: &mut LocalConduit<UnixStream>,
+        conduit: &mut LocalConduit<LocalStream>,
         request_id: u64,
         body: control_message::Body,
     ) {
@@ -1954,7 +1983,7 @@ mod reverse_target_quota {
             .expect("send ControlMessage");
     }
 
-    async fn recv(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
+    async fn recv(conduit: &mut LocalConduit<LocalStream>) -> wire::ControlMessage {
         conduit
             .recv()
             .await

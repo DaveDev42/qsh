@@ -437,6 +437,10 @@ impl Terminal for WindowsTerminal {
         Ok(Box::new(WindowsEvents { rx }))
     }
 
+    fn strips_win32_input_mode(&self) -> bool {
+        true
+    }
+
     fn detaches_on_hangup(&self) -> bool {
         self.detach_on_hangup
     }

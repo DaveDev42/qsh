@@ -716,6 +716,51 @@ impl ReverseHarness {
     }
 }
 
+/// Open the localctl endpoint `path` (a socket, or a pipe name) the way a CLI
+/// process does, for the wire-level tests that speak `qsh.local.v1` by hand.
+pub use qsh_core::localctl::transport::{LocalStream, connect as connect_localctl};
+
+/// What a `LOCAL_STREAM` conduit carries after its `StreamHeader`.
+///
+/// On unix the raw phase is the socket itself, so a conduit that sent its
+/// header goes on as it is. A Windows pipe cannot half-close, so its raw
+/// phase is chunk framed (`qsh_core::localctl::chunked`) and the conduit is
+/// rebuilt over a chunked reader and writer: the same `send` and `recv` then
+/// carry wire messages in the raw phase on every platform.
+#[cfg(unix)]
+pub type DataStream = LocalStream;
+/// See the unix definition.
+#[cfg(windows)]
+pub type DataStream = tokio::io::Join<
+    qsh_core::localctl::chunked::ChunkedReader<tokio::io::ReadHalf<LocalStream>>,
+    qsh_core::localctl::chunked::ChunkedWriter<tokio::io::WriteHalf<LocalStream>>,
+>;
+
+/// Move a `LOCAL_STREAM` conduit that has sent its `StreamHeader` into the
+/// raw phase (see [`DataStream`]). Nothing may have arrived past the header
+/// yet; the daemon sends nothing until it has read it.
+pub fn into_data_conduit(
+    conduit: qsh_core::localctl::frame::LocalConduit<LocalStream>,
+) -> qsh_core::localctl::frame::LocalConduit<DataStream> {
+    #[cfg(unix)]
+    {
+        conduit
+    }
+    #[cfg(windows)]
+    {
+        let (stream, prefetched) = conduit.into_raw();
+        assert!(
+            prefetched.is_empty(),
+            "bytes arrived past the stream header before the raw phase began"
+        );
+        let (read, write) = tokio::io::split(stream);
+        qsh_core::localctl::frame::LocalConduit::new(tokio::io::join(
+            qsh_core::localctl::chunked::ChunkedReader::new(read, Vec::new()),
+            qsh_core::localctl::chunked::ChunkedWriter::new(write),
+        ))
+    }
+}
+
 /// The localctl daemon [`ReverseHarness::attach_localctl`] binds — kept
 /// separate from [`ReverseHarness`] itself so the many
 /// `reverse_loopback.rs`/`reverse_chaos.rs` scenarios that never touch

@@ -56,6 +56,8 @@ mod version;
 #[cfg(windows)]
 mod windows_attach;
 #[cfg(windows)]
+mod windows_drain;
+#[cfg(windows)]
 mod windows_forward_e2e;
 #[cfg(windows)]
 mod windows_reverse_e2e;

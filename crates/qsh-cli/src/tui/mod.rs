@@ -69,6 +69,8 @@ mod term;
 mod terminal;
 #[cfg(unix)]
 mod unix;
+#[cfg(any(unix, windows, test))]
+mod vt_filter;
 // The Windows console: the terminal behind the trait and the echo-off mode
 // of the invitation-code prompt. Its logic sits behind a fake-able console
 // API, so the unit tests run on every leg; the real console calls are

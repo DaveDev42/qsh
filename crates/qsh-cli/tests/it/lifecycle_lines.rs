@@ -4,8 +4,10 @@
 //! Real `qsh serve`, `qsh listen`, `qsh serve --to` and `qsh tunnel open`
 //! children, read from their stderr. The human lines keep their bytes; the
 //! JSON lines add a timestamp and a process kind and never an address.
-
-#![cfg(unix)]
+//!
+//! The stop that ends a child is `SIGTERM` on unix and `CTRL_BREAK` to its own
+//! process group on Windows (`common::send_stop`); a child that cannot be
+//! stopped that way fails the test instead of being killed in its place.
 
 use crate::common;
 
@@ -17,8 +19,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use common::{Fleet, HOST_ALIAS, ListenGuard, Sandbox, ServeGuard, poll_until};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -134,9 +134,8 @@ impl Holder {
             "--json",
         ];
         args.extend_from_slice(extra);
-        let mut child = fleet
-            .client
-            .command(&args)
+        let mut command = fleet.client.command(&args);
+        let mut child = common::own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -210,11 +209,11 @@ impl Drop for Holder {
 /// End the host politely (SIGTERM closes its connections with a close
 /// frame) and wait for it to be gone.
 fn stop_host(fleet: &mut Fleet) {
-    fleet.serve.signal(Signal::SIGTERM);
+    fleet.serve.terminate();
     fleet
         .serve
         .wait_timeout(Duration::from_secs(20))
-        .expect("the host exits on SIGTERM");
+        .expect("the host exits on the graceful stop");
 }
 
 #[test]
@@ -441,8 +440,8 @@ fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
     let fingerprint = sandbox.fingerprint();
     sandbox.trust_add("nowhere", Some(&format!("127.0.0.1:{port}")), &fingerprint);
 
-    let mut child = sandbox
-        .command(&["serve", "--to", "nowhere"])
+    let mut command = sandbox.command(&["serve", "--to", "nowhere"]);
+    let mut child = common::own_process_group(&mut command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -467,7 +466,10 @@ fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
             .any(|l| l.starts_with("{\"lifecycle\":\"listening\""))
             .then_some(())
     });
-    let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+    assert!(
+        common::send_stop(child.id()),
+        "the graceful stop could not be sent"
+    );
     let code = wait_exit(&mut child, &mut readers, "qsh serve --to");
     assert_eq!(code, 0);
 
@@ -495,8 +497,8 @@ fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
 /// and return the exit code and stderr.
 fn sigterm_after_listening(args: &[&str]) -> (i32, Vec<String>) {
     let sandbox = Sandbox::initialized();
-    let mut child = sandbox
-        .command(args)
+    let mut command = sandbox.command(args);
+    let mut child = common::own_process_group(&mut command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -519,7 +521,10 @@ fn sigterm_after_listening(args: &[&str]) -> (i32, Vec<String>) {
             .any(|l| l.starts_with("{\"lifecycle\":\"listening\""))
             .then_some(())
     });
-    let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+    assert!(
+        common::send_stop(child.id()),
+        "the graceful stop could not be sent"
+    );
     let code = wait_exit(&mut child, &mut readers, "qsh");
     let lines = stderr.lock().unwrap_or_else(|e| e.into_inner()).clone();
     (code, lines)

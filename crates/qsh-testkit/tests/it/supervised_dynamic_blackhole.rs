@@ -18,8 +18,6 @@
 //! it runs only with `QSH_ACCEPTANCE_SLOW` set (the `acceptance` job in
 //! `.github/workflows/ci.yml` sets it) and prints a skip line otherwise.
 
-#![cfg(unix)]
-
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};

@@ -50,9 +50,10 @@
 //! 60초 수용 게이트만 벽시계를 쓰며" wall-clock exception above therefore
 //! covers both rounds in this file, not only the 60-second one.
 //!
-//! `#![cfg(unix)]`: localctl (UDS) and PTY sessions are both unix-only,
-//! same gating as every other localctl/reverse test in the tree.
-#![cfg(unix)]
+//! The shell is the platform's interactive interpreter (`sh`; `cmd` in a
+//! ConPTY on Windows) and every marker is computed by the shell itself
+//! ([`qsh_testkit::shell::say`]), so the echo of a typed line is never read as
+//! its answer.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -524,7 +525,7 @@ async fn fresh_ops() -> (tempfile::TempDir, Ops, Fingerprint) {
 fn open_shell(ops: &Ops) -> String {
     ops.session_open(SessionOpenReq {
         host: HOST_ALIAS.to_string(),
-        argv: vec!["sh".to_string()],
+        argv: qsh_testkit::shell::pty_shell(),
         env: vec![
             EnvVar {
                 name: "LANG".into(),
@@ -675,9 +676,14 @@ async fn a_real_60_second_blackout_survives_and_resumes_the_same_session() {
             let mut seen = Delivered::default();
 
             stream
-                .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+                .write(qsh_testkit::shell::say("BEFORE"))
                 .expect("write");
-            read_until(&mut stream, &mut seen, "BEFORE1", &ctx_thread);
+            read_until(
+                &mut stream,
+                &mut seen,
+                &qsh_testkit::shell::said("BEFORE"),
+                &ctx_thread,
+            );
 
             // ---- signal the async side: start the real 60 s blackout
             // now, the clock starts there.
@@ -691,18 +697,28 @@ async fn a_real_60_second_blackout_survives_and_resumes_the_same_session() {
             // until the target has redialed, re-registered, and resumed
             // on the far side of it.
             stream
-                .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
+                .write(qsh_testkit::shell::say("AFTER"))
                 .expect("write");
-            read_until(&mut stream, &mut seen, "AFTER1", &ctx_thread);
+            read_until(
+                &mut stream,
+                &mut seen,
+                &qsh_testkit::shell::said("AFTER"),
+                &ctx_thread,
+            );
             let elapsed = started.elapsed();
 
             // A second command on the recovered connection: its answer
             // proves any duplicate of the first would already have
             // arrived, because the stream is ordered.
             stream
-                .write(b"printf 'DONE%s\\n' 1\n".to_vec())
+                .write(qsh_testkit::shell::say("DONE"))
                 .expect("write");
-            read_until(&mut stream, &mut seen, "DONE1", &ctx_thread);
+            read_until(
+                &mut stream,
+                &mut seen,
+                &qsh_testkit::shell::said("DONE"),
+                &ctx_thread,
+            );
 
             let records = records_for(&session_ref);
             stream.close();
@@ -1035,9 +1051,14 @@ async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
             let mut seen1 = Delivered::default();
 
             stream1
-                .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+                .write(qsh_testkit::shell::say("BEFORE"))
                 .expect("write");
-            read_until(&mut stream1, &mut seen1, "BEFORE1", &ctx_thread);
+            read_until(
+                &mut stream1,
+                &mut seen1,
+                &qsh_testkit::shell::said("BEFORE"),
+                &ctx_thread,
+            );
 
             // ---- signal the async side: start the real blackout now.
             blackout_tx.send(()).ok();
@@ -1066,11 +1087,21 @@ async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
             let before_bytes = resume_bytes(&ops);
             let mut stream2 = attach(&ops, &session_ref);
             let mut seen2 = Delivered::default();
-            read_until(&mut stream2, &mut seen2, "BEFORE1", &ctx_thread);
+            read_until(
+                &mut stream2,
+                &mut seen2,
+                &qsh_testkit::shell::said("BEFORE"),
+                &ctx_thread,
+            );
             stream2
-                .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
+                .write(qsh_testkit::shell::say("AFTER"))
                 .expect("write");
-            read_until(&mut stream2, &mut seen2, "AFTER1", &ctx_thread);
+            read_until(
+                &mut stream2,
+                &mut seen2,
+                &qsh_testkit::shell::said("AFTER"),
+                &ctx_thread,
+            );
             let elapsed = started.elapsed();
             let after_bytes = resume_bytes(&ops);
 
@@ -1141,7 +1172,7 @@ async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
         // ⑦ the ring survived the outage: BEFORE1 replayed, zero gaps.
         seen.assert_tiles_the_stream(&ctx);
         assert!(
-            seen.text.contains("BEFORE1"),
+            seen.text.contains(&qsh_testkit::shell::said("BEFORE")),
             "the fresh attach's replay never delivered BEFORE1 — saw {:?} — {ctx}",
             seen.text
         );
@@ -1149,7 +1180,7 @@ async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
         // `Closed`/`Exit` before it arrived would already have panicked
         // inside `read_until` above).
         assert!(
-            seen.text.contains("AFTER1"),
+            seen.text.contains(&qsh_testkit::shell::said("AFTER")),
             "the fresh attach never delivered AFTER1 — saw {:?} — {ctx}",
             seen.text
         );
@@ -1220,8 +1251,8 @@ async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
         // field below has already gated an assertion above, so this line
         // reports what was actually observed, not a claim true only by
         // construction.
-        let replayed_before_marker = seen.text.contains("BEFORE1");
-        let after_marker = seen.text.contains("AFTER1");
+        let replayed_before_marker = seen.text.contains(&qsh_testkit::shell::said("BEFORE"));
+        let after_marker = seen.text.contains(&qsh_testkit::shell::said("AFTER"));
         let gaps = seen.gaps.len();
         eprintln!(
             "reverse_blackout_long: blackout={:?} elapsed={elapsed:?} records={} \

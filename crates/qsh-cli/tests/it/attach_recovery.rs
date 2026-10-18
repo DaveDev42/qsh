@@ -33,9 +33,8 @@
 //!   what "byte-identical to a reference stream" means when the cursor is a
 //!   cumulative byte offset.
 //!
-//! Sessions are PTY-backed, so this file only exists on POSIX hosts.
-
-#![cfg(unix)]
+//! Sessions are PTY-backed on every platform, so the scenarios run on both;
+//! only the shell and the command that prints a marker differ.
 
 use crate::common;
 
@@ -383,10 +382,12 @@ fn with_deadline<T: Send + 'static>(
     }
 }
 
+use qsh_testkit::shell::{said, say};
+
 fn open_shell(ops: &Ops) -> String {
     ops.session_open(SessionOpenReq {
         host: HOST_ALIAS.to_string(),
-        argv: vec!["sh".to_string()],
+        argv: qsh_testkit::shell::pty_shell(),
         env: vec![
             EnvVar {
                 name: "LANG".into(),
@@ -457,10 +458,8 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
         with_deadline("severed-path recovery", move || {
             let mut stream = attach(&ops, &session_ref);
             let mut seen = Delivered::default();
-            stream
-                .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "BEFORE1", &ctx);
+            stream.write(say("BEFORE")).expect("write");
+            read_until(&mut stream, &mut seen, &said("BEFORE"), &ctx);
 
             // ---- the path dies here; nothing else is told ----
             let started = Instant::now();
@@ -468,19 +467,15 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
             // Typed into a session whose path is already dead: the bytes
             // are the client's responsibility now, and the resume owes them
             // to the shell exactly once.
-            stream
-                .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "AFTER1", &ctx);
+            stream.write(say("AFTER")).expect("write");
+            read_until(&mut stream, &mut seen, &said("AFTER"), &ctx);
             let elapsed = started.elapsed();
 
             // A second command on the recovered connection: its answer is
             // what proves any duplicate of the first would already have
             // arrived, because the stream is ordered.
-            stream
-                .write(b"printf 'DONE%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "DONE1", &ctx);
+            stream.write(say("DONE")).expect("write");
+            read_until(&mut stream, &mut seen, &said("DONE"), &ctx);
 
             let records = records_for(&session_ref);
             stream.close();
@@ -552,14 +547,14 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
     // The stream the frontend saw has no seam in it.
     seen.assert_tiles_the_stream(&fleet.detail());
     assert_eq!(
-        seen.text.matches("AFTER1").count(),
+        seen.text.matches(&said("AFTER")).count(),
         1,
         "the input typed into the dying path was applied {} times — {}\n{:?}",
-        seen.text.matches("AFTER1").count(),
+        seen.text.matches(&said("AFTER")).count(),
         fleet.detail(),
         seen.text
     );
-    assert!(seen.text.contains("BEFORE1"), "{:?}", seen.text);
+    assert!(seen.text.contains(&said("BEFORE")), "{:?}", seen.text);
 
     // The host agrees it was a resume: a second authorized `session.attach`
     // on a session the client never re-opened.
@@ -623,18 +618,14 @@ fn a_repath_is_survived_by_the_live_attach() {
         with_deadline("repath survival", move || {
             let mut stream = attach(&ops, &session_ref);
             let mut seen = Delivered::default();
-            stream
-                .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "BEFORE1", &ctx);
+            stream.write(say("BEFORE")).expect("write");
+            read_until(&mut stream, &mut seen, &said("BEFORE"), &ctx);
 
             // The host suddenly sees the same connection arriving from a
             // new peer address — a NAT rebind, or Wi-Fi→LTE.
             let moved = repather();
-            stream
-                .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "AFTER1", &ctx);
+            stream.write(say("AFTER")).expect("write");
+            read_until(&mut stream, &mut seen, &said("AFTER"), &ctx);
             let records = records_for(&session_ref);
             stream.close();
             (seen, format!("{moved} {records:?}"))
@@ -643,7 +634,7 @@ fn a_repath_is_survived_by_the_live_attach() {
 
     seen.assert_tiles_the_stream(&fleet.detail());
     assert_eq!(
-        seen.text.matches("AFTER1").count(),
+        seen.text.matches(&said("AFTER")).count(),
         1,
         "the command was applied more than once across the path change — {}",
         fleet.detail()
@@ -677,10 +668,8 @@ fn a_detach_is_not_recovered_from() {
         with_deadline("detach", move || {
             let mut stream = attach(&ops, &session_ref);
             let mut seen = Delivered::default();
-            stream
-                .write(b"printf 'HERE%s\\n' 1\n".to_vec())
-                .expect("write");
-            read_until(&mut stream, &mut seen, "HERE1", &ctx);
+            stream.write(say("HERE")).expect("write");
+            read_until(&mut stream, &mut seen, &said("HERE"), &ctx);
             let handle = stream.handle();
             handle.detach();
             // The event stream ends because the attach ended, not because

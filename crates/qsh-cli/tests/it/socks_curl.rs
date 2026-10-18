@@ -21,19 +21,23 @@
 //! probed; otherwise that is an environmental gap, not a product one, and
 //! it prints a skip line the same way a missing `curl` does.
 //!
-//! `#![cfg(unix)]`: `DynamicTunnelGuard::terminate_and_wait` (the process
-//! teardown [`port_rebinds_after_the_holder_exits_and_the_new_listener_still_works`]
-//! needs) sends a real `SIGTERM` — `qsh tunnel open --dynamic` installs no
-//! signal handler on this path (`run_tunnel_open_dynamic` in
+//! The file runs on both platforms. `DynamicTunnelGuard::terminate_and_wait`
+//! (the process teardown
+//! [`port_rebinds_after_the_holder_exits_and_the_new_listener_still_works`]
+//! needs) sends the platform's stop, `SIGTERM` on unix and `CTRL_BREAK` to the
+//! child's own process group on Windows — `qsh tunnel open --dynamic`
+//! installs no signal handler on this path (`run_tunnel_open_dynamic` in
 //! `crates/qsh-cli/src/main.rs` ends in `Ops::tunnel_dynamic`'s
 //! `TunnelHold::hold()`, whose `wait_for_end` selects only on the forward's
 //! own listener failing or the connection dying — no signal arm; contrast
 //! `run_serve`/`run_listen`/`run_reverse`, which do wire in
 //! `shutdown_signal`), so this is process death by the default
-//! disposition, not a graceful release, that frees the listen port — and
-//! this file's own `locate_curl` checks the executable bit via
-//! `std::os::unix::fs::PermissionsExt` — both unix only, same reasoning
-//! `dynamic_forward.rs`'s own `cfg(unix)` items give.
+//! disposition, not a graceful release, that frees the listen port. On
+//! Windows `curl` is `curl.exe`, which ships with Windows 10 1803 and later,
+//! and `locate_curl` skips the unix executable-bit check there. Nothing in
+//! this file reads a unix permission, so there is no DACL assertion to put in
+//! its place: the account-only protection of the files `qsh` creates is
+//! pinned by `release_smoke.rs`'s `assert_account_only` and `file_host`.
 //!
 //! **Skip/strict convention.** `locate_curl`/`curl_required`/`skip` below
 //! are this file's own copy of `tui_expect.rs`'s `locate`/
@@ -58,8 +62,6 @@
 //! in `tests/it/common/mod.rs` — moved there from `dynamic_forward.rs` once
 //! this file needed the identical shape, rather than copy-pasting it a
 //! second time.
-
-#![cfg(unix)]
 
 use crate::common;
 
@@ -88,15 +90,27 @@ use serde_json::Value;
 /// clean skip into a confusing failure inside `Command::output`) — same
 /// technique as `tui_expect.rs::locate`.
 fn locate_curl() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "curl.exe" } else { "curl" };
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join("curl"))
-        .find(|candidate| {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::metadata(candidate)
-                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        })
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Whether `path` is a regular file the runner may execute: the executable
+/// bit on unix, the `.exe` name [`locate_curl`] asked for on Windows.
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+    }
 }
 
 /// Whether this run promised `curl` via `QSH_ACCEPTANCE_STRICT` — same
@@ -153,9 +167,9 @@ fn require_reachable_lan_ip() -> qsh_testkit::net_probe::Gap<Ipv4Addr> {
 /// (the obvious candidate, the runner's own hostname, usually maps to
 /// `127.0.1.1`, which the host-local filter would then correctly refuse).
 ///
-/// This asks the runner's own hostname (`hostname(1)`, unix-only same as
-/// this whole file) and keeps it only when forward-resolving it — via the
-/// same OS resolver `qsh`'s `TokioResolver` uses — lands on exactly `ip`.
+/// This asks the runner's own hostname (`hostname(1)`, which Windows ships
+/// too) and keeps it only when forward-resolving it — via the same OS
+/// resolver `qsh`'s `TokioResolver` uses — lands on exactly `ip`.
 /// Unlike [`require_reachable_lan_ip`]'s `Gap::Fail` on CI, a mismatch here
 /// is always `Gap::Skip`, never `Gap::Fail`: whether a runner's hostname
 /// happens to resolve to its own LAN address is an accident of how that
@@ -216,7 +230,7 @@ fn curl_get(curl: &Path, socks_bind: &str, url: &str) -> std::process::Output {
 /// `acl_deny_blocks_curl_and_leaves_one_structural_audit_record`, this
 /// helper's two callers.
 ///
-/// Matches curl's own "can't complete socks5 connection" wording rather
+/// Matches curl's own "can't/cannot complete socks5 connection" wording rather
 /// than the bare substring `"socks"`: curl also puts `"SOCKS5"` in its
 /// message for a truncated or absent handshake response (e.g. "Unable to
 /// receive initial SOCKS5 response."), which a bare substring match would
@@ -227,9 +241,14 @@ fn assert_curl_failed_via_socks(output: &std::process::Output) {
         "curl unexpectedly succeeded reaching a destination `-D` must refuse: {output:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    // The spelling differs by curl version ("can't complete" before 8.x,
+    // "cannot complete" after); the reply code in parentheses is the same
+    // and is the `-D` refusal this helper pins.
     assert!(
-        stderr.contains("can't complete socks5 connection"),
-        "expected curl's stderr to report a SOCKS5 refusal, got exit {:?}, stderr: {stderr:?}",
+        (stderr.contains("can't complete socks5 connection")
+            || stderr.contains("cannot complete socks5 connection"))
+            && stderr.contains("(2)"),
+        "expected curl's stderr to report a SOCKS5 refusal (reply 2), got exit {:?}, stderr: {stderr:?}",
         output.status.code()
     );
 }
@@ -626,7 +645,7 @@ fn port_rebinds_after_the_holder_exits_and_the_new_listener_still_works() {
     let exited = guard.terminate_and_wait(Duration::from_secs(5));
     assert!(
         exited,
-        "the tunnel open child did not exit within 5s of SIGTERM"
+        "the tunnel open child did not exit within 5s of the stop"
     );
 
     let (mut guard2, envelope2) = DynamicTunnelGuard::start(&fleet.client, &spec);

@@ -676,7 +676,7 @@ const SESSION_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Pull `session read --wait` until the session's `session.exit`, feeding
 /// both cursors back, and return the output bytes and the exit event.
-fn read_until_exit(route: &impl Route, session_ref: &str) -> (Vec<u8>, Value) {
+pub fn read_until_exit(route: &impl Route, session_ref: &str) -> (Vec<u8>, Value) {
     let mut output = Vec::new();
     let (mut after, mut ctl_after) = (0u64, 0u64);
     let deadline = std::time::Instant::now() + SESSION_DEADLINE;
@@ -718,7 +718,7 @@ fn read_until_exit(route: &impl Route, session_ref: &str) -> (Vec<u8>, Value) {
 }
 
 /// `qsh session open <host> --json [-- argv]`; returns the `session_ref`.
-fn open_session(route: &impl Route, argv: &[&str]) -> String {
+pub fn open_session(route: &impl Route, argv: &[&str]) -> String {
     let mut args = vec!["session", "open", route.host(), "--json"];
     if !argv.is_empty() {
         args.push("--");
@@ -791,7 +791,7 @@ pub fn pty_session_default_shell_takes_input(route: &impl Route) {
 
 /// `out` without CSI (`ESC [ ... final`) and OSC (`ESC ] ... BEL`)
 /// sequences, which ConPTY interleaves with the text.
-fn strip_vt(out: &str) -> String {
+pub fn strip_vt(out: &str) -> String {
     let mut plain = String::with_capacity(out.len());
     let mut chars = out.chars();
     while let Some(c) = chars.next() {
@@ -890,7 +890,7 @@ pub fn pty_session_close_ends_a_running_session(route: &impl Route) {
 
 /// Pull `session read --wait` until the session's output holds `needle`, and
 /// return the output read so far. The session may still be running.
-fn read_until_output(route: &impl Route, session_ref: &str, needle: &str) -> String {
+pub fn read_until_output(route: &impl Route, session_ref: &str, needle: &str) -> String {
     let mut output = Vec::new();
     let (mut after, mut ctl_after) = (0u64, 0u64);
     let deadline = std::time::Instant::now() + SESSION_DEADLINE;
@@ -1532,4 +1532,27 @@ pub fn cp_refuses_state_paths_and_reparse_points(route: &impl Route) {
     // Remove the junction itself, not what it points to.
     std::fs::remove_dir(&junction).expect("remove the junction");
     assert!(trust.exists());
+}
+
+/// `session write` of `text` into the session, asserted to succeed.
+pub fn write_to_session(route: &impl Route, session_ref: &str, text: &str) {
+    let (code, written) = route.client().json(&[
+        "session",
+        "write",
+        session_ref,
+        "--json",
+        "--data-b64",
+        &BASE64.encode(text),
+    ]);
+    assert_eq!(code, 0, "{written}");
+}
+
+/// The sessions `qsh sessions <host> --json` lists through the route.
+pub fn sessions_on(route: &impl Route) -> Vec<Value> {
+    let (code, listed) = route.client().json(&["sessions", route.host(), "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .clone()
 }
