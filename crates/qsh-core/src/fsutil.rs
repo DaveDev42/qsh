@@ -20,6 +20,11 @@ use std::time::{Duration, SystemTime};
 #[cfg(windows)]
 pub(crate) mod dacl;
 
+// Which file a handle or a path names on Windows, the counterpart of unix's
+// (`st_dev`, `st_ino`) (ADR-0035 decision 24).
+#[cfg(windows)]
+pub(crate) mod file_identity;
+
 /// How [`open_private_file`] opens its file. The variants are the four
 /// shapes this crate's private files are opened in, each the same
 /// `OpenOptions` combination on every platform.

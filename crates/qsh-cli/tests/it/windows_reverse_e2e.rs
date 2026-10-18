@@ -21,7 +21,10 @@ use crate::route_cases::{self as cases, ReverseRoute, Route, TunnelHolder};
 
 use std::time::Duration;
 
-use common::{ListenGuard, ReverseGuard, poll_until, steady_bind};
+use common::{
+    CLIENT_ALIAS, HOST_ALIAS, ListenGuard, ReverseGuard, Sandbox, ServeGuard, poll_until,
+    steady_bind,
+};
 
 /// A registration made through a controller that was just killed is noticed
 /// at the idle timeout at the latest, so the waits that depend on that get
@@ -36,6 +39,120 @@ fn exec_round_trip() {
 #[test]
 fn exec_timeout_kills_the_whole_tree() {
     cases::exec_timeout_kills_the_whole_tree(&ReverseRoute::start());
+}
+
+#[test]
+fn audit_record_and_lock_file_land_in_the_hosts_state_directory() {
+    let route = ReverseRoute::start();
+    cases::audit_record_and_lock_file_land_in_the_hosts_state_directory(&route, &route.target);
+}
+
+/// `qsh serve --to` starting on an `acl.toml` that `Everyone` can write to
+/// warns with the same fields as `qsh serve` does
+/// (`windows_forward_e2e::acl_toml_with_an_everyone_write_ace_warns_at_startup`).
+/// The controller it dials is never reachable here: the warning is written
+/// while the host starts, before any registration.
+#[test]
+fn acl_toml_with_an_everyone_write_ace_warns_at_startup() {
+    let target = Sandbox::initialized();
+    let controller = Sandbox::initialized();
+    target.trust_add(
+        cases::CONTROLLER_ALIAS,
+        Some("127.0.0.1:9"),
+        &controller.fingerprint(),
+    );
+    let acl_path = cases::plant_everyone_writable_acl(&target);
+    let reverse = ReverseGuard::start_serve_to(&target, cases::CONTROLLER_ALIAS);
+    cases::assert_acl_dacl_warning(|| reverse.stderr_snapshot(), &acl_path);
+}
+
+/// How many `exec` calls each route makes in
+/// [`audit_rotation_lock_holds_between_serve_and_serve_to_on_windows`].
+const EXECS_PER_ROUTE: usize = 15;
+
+/// One machine, one `<state>/audit.log`, two run modes: `qsh serve` for a
+/// forward client and `qsh serve --to` for a controller's client write to the
+/// same log while it rotates every couple of records. The `LockFileEx` lock
+/// on `audit.log.lock` and the file-identity check keep one process from
+/// renaming the log under the other's open handle, so every decision is on
+/// disk exactly once and no line is torn (ADR-0035 decision 24).
+#[test]
+fn audit_rotation_lock_holds_between_serve_and_serve_to_on_windows() {
+    // The sandbox that is the host on both routes.
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let controller = Sandbox::initialized();
+    let host_fingerprint = host.fingerprint();
+
+    controller.trust_add(cases::REVERSE_NAME, None, &host_fingerprint);
+    let listen = ListenGuard::start(&controller);
+    host.trust_add(CLIENT_ALIAS, None, &client.fingerprint());
+    host.trust_add(
+        cases::CONTROLLER_ALIAS,
+        Some(listen.addr()),
+        &controller.fingerprint(),
+    );
+    // A record is about 250 bytes, so the log rotates every couple of
+    // records; nothing is evicted.
+    std::fs::write(
+        host.config_dir().join("config.toml"),
+        "[audit]\nmax_bytes = 600\nretain = 1000\n\n\
+         [reverse]\nbackoff_initial_ms = 100\nbackoff_max_ms = 400\nbackoff_jitter_pct = 0\n",
+    )
+    .expect("write the host's config.toml");
+
+    let serve = ServeGuard::start(&host);
+    let _reverse = ReverseGuard::start_serve_to(&host, cases::CONTROLLER_ALIAS);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fingerprint);
+    cases::wait_reverse_entry(&controller, "reachable", cases::READY_DEADLINE);
+
+    let run = |sandbox: &Sandbox, name: &str| {
+        for _ in 0..EXECS_PER_ROUTE {
+            let (code, value) =
+                sandbox.json(&["exec", name, "--json", "--", "cmd", "/c", "exit 0"]);
+            assert_eq!(code, 0, "{value}");
+        }
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| run(&client, HOST_ALIAS));
+        scope.spawn(|| run(&controller, cases::REVERSE_NAME));
+    });
+
+    // Every decision reaches the disk exactly once. The writer is
+    // asynchronous, so wait for the count rather than for a time.
+    let expected = 2 * EXECS_PER_ROUTE;
+    poll_until(
+        "every exec.run decision in the host's audit files",
+        cases::READY_DEADLINE,
+        || {
+            let seen = host
+                .audit_records_tolerant()
+                .iter()
+                .filter(|r| r["action"] == "exec.run")
+                .count();
+            (seen == expected).then_some(())
+        },
+    );
+    // Once all of them are down nothing is in flight, so every line of every
+    // file must parse and the log must really have rotated.
+    let mut files = 0;
+    for entry in std::fs::read_dir(host.state_dir()).expect("read the state directory") {
+        let path = entry.expect("a directory entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.starts_with("audit.log") || name.ends_with(".lock") {
+            continue;
+        }
+        files += 1;
+        for line in std::fs::read_to_string(&path)
+            .expect("read an audit file")
+            .lines()
+        {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|e| panic!("a torn audit line in {name}: {e}: {line:?}"));
+        }
+    }
+    assert!(files > 2, "the log never rotated: {files} file(s)");
+    assert!(host.state_dir().join("audit.log.lock").is_file());
 }
 
 #[test]

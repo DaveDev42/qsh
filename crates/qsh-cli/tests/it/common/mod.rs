@@ -323,6 +323,31 @@ impl Sandbox {
             .collect()
     }
 
+    /// Every audit record that parses, from the live log and every rotated
+    /// file, for a caller that polls while the writer is still appending: a
+    /// line that is only half written is skipped instead of failing the read,
+    /// and the next poll sees it whole. File order is not chronological.
+    pub fn audit_records_tolerant(&self) -> Vec<Value> {
+        let mut records = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.state) else {
+            return records;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("audit.log") || name.ends_with(".lock") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            records.extend(
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok()),
+            );
+        }
+        records
+    }
+
     /// Every audit record across the *live* log and every rotated
     /// `audit.log.N` (4c adversarial review A6: [`Sandbox::audit_records`]
     /// above only reads `audit.log`, which silently undercounts once
@@ -1131,6 +1156,9 @@ impl Drop for ListenGuard {
 /// `hosts_reverse.rs`'s own private `ReverseGuard`).
 pub struct ReverseGuard {
     child: Child,
+    /// The child's stderr lines so far, read on a thread so a full pipe never
+    /// blocks it.
+    stderr: Arc<Mutex<Vec<String>>>,
 }
 
 impl ReverseGuard {
@@ -1182,12 +1210,25 @@ impl ReverseGuard {
                 let _ = std::io::copy(&mut out, &mut std::io::sink());
             });
         }
-        if let Some(mut err) = child.stderr.take() {
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        if let Some(err) = child.stderr.take() {
+            let sink = Arc::clone(&stderr);
             thread::spawn(move || {
-                let _ = std::io::copy(&mut err, &mut std::io::sink());
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    sink.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+                }
             });
         }
-        Self { child }
+        Self { child, stderr }
+    }
+
+    /// Everything the child has written to stderr so far, without stopping
+    /// it (the same capture [`ServeGuard::stderr_snapshot`] gives a host).
+    pub fn stderr_snapshot(&self) -> Vec<String> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// This process's pid — for an "owns no listening socket" assertion

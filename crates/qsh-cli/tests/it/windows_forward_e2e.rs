@@ -10,6 +10,7 @@
 
 #![cfg(windows)]
 
+use crate::common::{Sandbox, ServeGuard};
 use crate::route_cases::{self as cases, ForwardRoute};
 
 #[test]
@@ -20,6 +21,24 @@ fn exec_round_trip() {
 #[test]
 fn exec_timeout_kills_the_whole_tree() {
     cases::exec_timeout_kills_the_whole_tree(&ForwardRoute::start());
+}
+
+#[test]
+fn audit_record_and_lock_file_land_in_the_hosts_state_directory() {
+    let route = ForwardRoute::start();
+    cases::audit_record_and_lock_file_land_in_the_hosts_state_directory(&route, &route.fleet.host);
+}
+
+/// `qsh serve` starting on an `acl.toml` that `Everyone` can write to
+/// warns with the DACL's structural fields and goes on to serve
+/// (ADR-0035 decision 24). The reverse route's twin is in
+/// `windows_reverse_e2e.rs`.
+#[test]
+fn acl_toml_with_an_everyone_write_ace_warns_at_startup() {
+    let host = Sandbox::initialized();
+    let acl_path = cases::plant_everyone_writable_acl(&host);
+    let serve = ServeGuard::start(&host);
+    cases::assert_acl_dacl_warning(|| serve.stderr_snapshot(), &acl_path);
 }
 
 #[test]

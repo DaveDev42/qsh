@@ -411,17 +411,20 @@ struct RotatingFile {
     /// F6: sidecar advisory-lock path (`<active>.lock`), held around the
     /// revalidate → maybe-rotate → reopen critical section so two
     /// `RotatingAuditSink`s on the same path never race each other's
-    /// renames. Unix-only — see [`RotatingFile::with_lock`].
-    #[cfg(unix)]
+    /// renames — see [`RotatingFile::with_lock`].
     lock_path: PathBuf,
+    /// Windows: the lock file stays open between records, so a record does
+    /// not pay for opening it (and building its owner-only DACL) each time.
+    #[cfg(windows)]
+    lock_file: Option<windows::LockFile>,
     max_bytes: u64,
     retain: u32,
     file: Option<File>,
     bytes_written: u64,
     /// F6: whether the *previous* rotation attempt failed (rename blocked
-    /// by a co-writer — Windows file-sharing semantics, or losing the unix
-    /// flock race to another rotator). Gates the warning to once per
-    /// failure streak rather than once per record.
+    /// by a file another process holds open without delete sharing, such as
+    /// a scanner or a log shipper). Gates the warning to once per failure
+    /// streak rather than once per record.
     rotation_degraded: bool,
 }
 
@@ -431,13 +434,13 @@ impl RotatingFile {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        #[cfg(unix)]
         let lock_path = lock_path_for(&active_path);
         Self {
             dir,
             active_path,
-            #[cfg(unix)]
             lock_path,
+            #[cfg(windows)]
+            lock_file: None,
             max_bytes,
             retain,
             file: None,
@@ -473,9 +476,11 @@ impl RotatingFile {
     /// `active_path` — a co-writer rotated it out from under us — reopen
     /// and reseed `bytes_written` from the real file's metadata, rather
     /// than keep appending to an orphaned inode that a later `unlink`
-    /// (past `retain`) will silently make unrecoverable. A no-op on
-    /// non-unix, where Windows file-sharing semantics instead make a
-    /// co-writer's rotation attempt fail outright ([`Self::rotate`]).
+    /// (past `retain`) will silently make unrecoverable. On Windows the
+    /// same question is asked of the (volume serial number, file index)
+    /// pair (ADR-0035 decision 24): every handle here is opened with
+    /// `FILE_SHARE_DELETE`, so a co-writer's rename succeeds and leaves
+    /// this handle on the renamed file.
     #[cfg(unix)]
     fn revalidate(&mut self) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
@@ -494,8 +499,15 @@ impl RotatingFile {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     fn revalidate(&mut self) -> io::Result<()> {
+        let Some(file) = self.file.as_ref() else {
+            return Ok(());
+        };
+        if windows::is_stale(file, &self.active_path)? {
+            self.file = None;
+            self.ensure_open()?;
+        }
         Ok(())
     }
 
@@ -509,7 +521,8 @@ impl RotatingFile {
     /// `O_APPEND`, and the OS placing those bytes at the file's true
     /// current end is safe to interleave with a co-writer doing the same —
     /// `revalidate`'s job is only to guarantee this handle is not stale
-    /// when that happens. A no-op on non-unix.
+    /// when that happens. On Windows the lock is a `LockFileEx` byte-range
+    /// lock on the same sidecar file (ADR-0035 decision 24).
     #[cfg(unix)]
     fn with_lock<R>(&mut self, f: impl FnOnce(&mut Self) -> io::Result<R>) -> io::Result<R> {
         use std::os::unix::fs::OpenOptionsExt;
@@ -540,9 +553,24 @@ impl RotatingFile {
         result
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     fn with_lock<R>(&mut self, f: impl FnOnce(&mut Self) -> io::Result<R>) -> io::Result<R> {
-        f(self)
+        // The directory first, as on unix: the lock file cannot be created
+        // in a directory that only `ensure_open` would make.
+        let lock = match self.lock_file.take() {
+            Some(lock) => lock,
+            None => {
+                create_private_dir(&self.dir)?;
+                windows::LockFile::open(&self.lock_path)?
+            }
+        };
+        // A lock that cannot be taken drops the handle with it, so the next
+        // record opens the file again.
+        let guard = lock.lock()?;
+        let result = f(self);
+        drop(guard);
+        self.lock_file = Some(lock);
+        result
     }
 
     fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
@@ -603,18 +631,17 @@ impl RotatingFile {
 
     /// Rotate at a line boundary: close the handle **before** any rename
     /// touches its path — on Windows a rename while the file is open
-    /// fails, and dropping the handle first works on every platform, so
-    /// this is the one code path this needs (M5 plan Step 3 (2473c88)).
+    /// fails unless every opener shared delete, and dropping the handle
+    /// first works on every platform, so this is the one code path this
+    /// needs (M5 plan Step 3 (2473c88)).
     ///
-    /// F6: a rename blocked by a co-writer (Windows file-sharing
-    /// semantics, or losing the unix flock race to another rotator) is
-    /// **non-fatal** — this skips rotation for this round and keeps
-    /// appending to whatever is actually at `active_path` rather than
-    /// treat housekeeping as a precondition for writing. Only a genuine
-    /// inability to open a destination file trips the caller's degraded
-    /// latch; this is also what makes Windows co-writers safe without any
-    /// locking of their own — the blocked rename degrades to append-only
-    /// instead of failing the write.
+    /// F6: a rename that fails — on Windows a file some other program holds
+    /// open without `FILE_SHARE_DELETE` — is **non-fatal**: this skips
+    /// rotation for this round and keeps appending to whatever is actually
+    /// at `active_path` rather than treat housekeeping as a precondition
+    /// for writing. Only a genuine inability to open a destination file
+    /// trips the caller's degraded latch. Two qsh writers never meet this
+    /// way: the sidecar lock serializes their rotations on every platform.
     fn rotate(&mut self) -> io::Result<()> {
         self.file = None;
         if let Err(err) = rotate_files(&self.active_path, self.retain) {
@@ -652,7 +679,6 @@ pub(super) fn rotated_path(active: &Path, n: u32) -> PathBuf {
 /// `<active>.lock` — F6's sidecar advisory-lock path. Never holds audit
 /// content; distinct from every `rotated_path` (`n` is always numeric,
 /// never the literal `lock`).
-#[cfg(unix)]
 fn lock_path_for(active: &Path) -> PathBuf {
     let mut name = active.as_os_str().to_os_string();
     name.push(".lock");
@@ -695,6 +721,9 @@ fn rotate_files(active: &Path, retain: u32) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(windows)]
+mod windows;
 
 #[cfg(test)]
 mod tests;

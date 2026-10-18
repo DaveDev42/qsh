@@ -523,6 +523,116 @@ pub fn exec_timeout_kills_the_whole_tree(route: &impl Route) {
 }
 
 // ---------------------------------------------------------------------------
+// Host state: the audit log and acl.toml (ADR-0035 decision 24)
+// ---------------------------------------------------------------------------
+
+/// What `acl.toml` writes in [`plant_everyone_writable_acl`]. The principal is
+/// a marker no diagnostic may echo.
+const MARKER_ACL: &str =
+    "[[acl]]\nprincipal = \"device:marker-never-logged\"\nallow = [\"exec.run\"]\n";
+
+/// Write an `acl.toml` into `sandbox` that `Everyone` can write to, the way
+/// an operator's slip would: the file is made owner-only like any qsh file,
+/// then `icacls` adds a write ACE for `S-1-1-0`. Returns its path.
+pub fn plant_everyone_writable_acl(sandbox: &Sandbox) -> std::path::PathBuf {
+    let path = sandbox.config_dir().join("acl.toml");
+    qsh_core::config::write_private_file(&path, MARKER_ACL.as_bytes()).expect("write acl.toml");
+    let output = Command::new("icacls")
+        .arg(&path)
+        .args(["/grant", "*S-1-1-0:(W)"])
+        .output()
+        .expect("run icacls");
+    assert!(
+        output.status.success(),
+        "icacls could not grant Everyone write: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    path
+}
+
+/// A stderr line without its ANSI colour codes, which the human formatter
+/// writes even to a pipe.
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip `ESC [ ... <final byte>`.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The `acl.toml` DACL warning must show up in `stderr` (polled, since the
+/// host writes it while starting) with the same structural fields on every
+/// run mode: the path, the offending SID and how many there are, the reason,
+/// and nothing from the file (`docs/design/threat-model.md` §4 E).
+pub fn assert_acl_dacl_warning(stderr: impl Fn() -> Vec<String>, acl_path: &std::path::Path) {
+    let line = poll_until(
+        "the acl.toml DACL warning on stderr",
+        READY_DEADLINE,
+        || {
+            stderr()
+                .iter()
+                .map(|line| plain(line))
+                .find(|line| line.contains("acl.toml's DACL"))
+        },
+    );
+    assert!(line.contains("WARN"), "{line}");
+    assert!(
+        line.contains(&format!("path={}", acl_path.display())),
+        "the warning names the file: {line}"
+    );
+    assert!(line.contains("sid=S-1-1-0"), "{line}");
+    assert!(line.contains("sid_count=1"), "{line}");
+    assert!(line.contains("reason=\"write_ace\""), "{line}");
+    // No unix `mode`, no ACE mask, nothing the file says.
+    assert!(!line.contains("mode="), "{line}");
+    assert!(!line.contains("marker-never-logged"), "{line}");
+    let all: Vec<String> = stderr().iter().map(|line| plain(line)).collect();
+    assert_eq!(
+        all.iter().filter(|l| l.contains("acl.toml's DACL")).count(),
+        1,
+        "one warning per start: {all:?}"
+    );
+}
+
+/// A decision made through the route lands in the host's `<state>/audit.log`,
+/// and the writer's sidecar lock file (`audit.log.lock`) is there next to it
+/// (ADR-0035 decision 24). The host is the machine that decided: the serving
+/// side on the forward route and the target on the reverse one.
+pub fn audit_record_and_lock_file_land_in_the_hosts_state_directory(
+    route: &impl Route,
+    host: &Sandbox,
+) {
+    let (code, value) =
+        route
+            .client()
+            .json(&["exec", route.host(), "--json", "--", "cmd", "/c", "exit 0"]);
+    assert_eq!(code, 0, "{value}");
+
+    let record = poll_until("the host's exec.run audit record", READY_DEADLINE, || {
+        host.audit_records_tolerant()
+            .into_iter()
+            .find(|r| r["action"] == "exec.run")
+    });
+    assert_eq!(record["decision"], "allow", "{record}");
+    assert!(
+        host.state_dir().join("audit.log.lock").is_file(),
+        "the writer's lock file is next to the log in {}",
+        host.state_dir().display()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // PTY sessions
 // ---------------------------------------------------------------------------
 

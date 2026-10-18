@@ -10,13 +10,14 @@ use std::path::Path;
 
 use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, GetNamedSecurityInfoW, GetSecurityInfo, SE_FILE_OBJECT,
-    SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
+    ConvertSidToStringSidW, ConvertStringSidToSidW, GetNamedSecurityInfoW, GetSecurityInfo,
+    SE_FILE_OBJECT, SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
-    InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+    AddAccessAllowedAce, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
+    GetLengthSid, GetSecurityDescriptorControl, InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION,
+    SE_DACL_PROTECTED,
 };
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 
@@ -240,6 +241,79 @@ pub(crate) fn deny_all_access(path: &Path) {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             acl_ptr,
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "SetNamedSecurityInfoW({}) failed: {rc}",
+        path.display()
+    );
+}
+
+/// The token user's SID in `S-1-5-21-…` text.
+pub(crate) fn current_user_sid_string() -> String {
+    super::sid_to_string(&token_user_sid().unwrap()).unwrap()
+}
+
+/// Replace the DACL of `path` with a protected one holding exactly these
+/// allow ACEs, `(SID text, access mask)` in order. For the tests that need a
+/// file other principals can write to, which qsh itself never makes.
+pub(crate) fn set_allow_aces(path: &Path, aces: &[(&str, u32)]) {
+    let mut sids: Vec<*mut c_void> = Vec::new();
+    let mut size = size_of::<ACL>();
+    for (text, _) in aces {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; the SID is freed below.
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) },
+            0,
+            "{text} is not a SID"
+        );
+        // SAFETY: `sid` was just returned as a valid SID.
+        size += size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>()
+            + unsafe { GetLengthSid(sid) } as usize;
+        sids.push(sid);
+    }
+    let mut acl = vec![0u32; size.div_ceil(4)];
+    let acl_ptr = acl.as_mut_ptr().cast::<ACL>();
+    // SAFETY: a zeroed, DWORD-aligned buffer of the computed size.
+    assert_ne!(
+        unsafe { InitializeAcl(acl_ptr, (acl.len() * 4) as u32, ACL_REVISION) },
+        0
+    );
+    for (sid, (_, mask)) in sids.iter().zip(aces) {
+        // SAFETY: `acl_ptr` has room for this ACE and `sid` is a valid SID.
+        assert_ne!(
+            unsafe { AddAccessAllowedAce(acl_ptr, ACL_REVISION, *mask, *sid) },
+            0
+        );
+    }
+    set_dacl(path, acl_ptr);
+    for sid in sids {
+        // SAFETY: allocated by `ConvertStringSidToSidW` with `LocalAlloc`.
+        unsafe { LocalFree(sid) };
+    }
+}
+
+/// Replace the DACL of `path` with none at all (everyone has full access).
+pub(crate) fn set_null_dacl(path: &Path) {
+    set_dacl(path, std::ptr::null_mut());
+}
+
+fn set_dacl(path: &Path, acl: *mut ACL) {
+    let wide = to_wide(path).unwrap();
+    // SAFETY: `wide` is NUL-terminated and `acl` is a valid ACL or null.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            acl,
             std::ptr::null(),
         )
     };

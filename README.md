@@ -889,18 +889,18 @@ block above is the invalid case. It never dumps raw source lines; the only
 echo is a bounded (at most 128 bytes, single-line-escaped) grammar token from
 the offending rule (unknown action pattern, `auth_path` or scope).
 
-On unix, a group- or world-writable `acl.toml` gets a one-time stderr
-warning instead of a refusal to load: an operator locked out of their own
-host by a permissions slip has no way back in. Windows has no such warning
-yet; the equivalent check on the file's DACL arrives with the Windows host
-in M20. Pin only devices you would
-hand a shell to, and choose each one's role on purpose. The default for a
-machine that connects in is `full`, which is the power of the account running
-`qsh serve`: `exec` and `full`
-can run any command as that account, and `full` (or a row with a wide
-`paths`) can write any file that account can, `~/.bashrc` and
-`~/.ssh/authorized_keys` included. Only qsh's own files are protected. A
-`tunnel` peer's `forward.local` reaches any TCP destination the host can
+A group- or world-writable `acl.toml` on unix, and on Windows one whose DACL
+lets an account other than its owner, `SYSTEM` and `Administrators` write to
+it (or has no DACL at all), gets a one-time stderr warning instead of a
+refusal to load: an operator locked out of their own host by a permissions
+slip has no way back in. The warning names the file and, on Windows, the
+first offending SID and how many there are, never the file's contents. Pin
+only devices you would hand a shell to, and choose each one's role on purpose.
+The default for a machine that connects in is `full`, which is the power of
+the account running `qsh serve`: `exec` and `full` can run any command as that
+account, and `full` (or a row with a wide `paths`) can write any file that
+account can, `~/.bashrc` and `~/.ssh/authorized_keys` included. Only qsh's own
+files are protected. A `tunnel` peer's `forward.local` reaches any TCP destination the host can
 reach, and a `read-only` peer sees the screen output of sessions other
 devices opened, secrets included.
 An older `qsh` binary that rewrites `trust.toml` drops the `role` key it does

@@ -133,11 +133,13 @@ impl PolicySource {
         // trusts can grant itself anything the policy is capable of
         // granting. Non-fatal and independent of whether the file goes on
         // to parse — fires whenever the file exists, on every load
-        // outcome. This reads unix rwx bits, which Windows does not have;
-        // the Windows host's DACL-based warning arrives with the Windows
-        // host role in M20 (ADR-0035 decision 24).
+        // outcome. This reads unix rwx bits; Windows has no such bits, so its
+        // check reads the file's DACL instead (`writable_dacl`, ADR-0035
+        // decision 24) and reports the same way.
         #[cfg(unix)]
         warn_if_group_or_world_writable(path, &file);
+        #[cfg(windows)]
+        writable_dacl::warn_if_writable_by_others(path, &file);
         // Cheap early-out on a regular file's reported size. This is NOT
         // the enforcement boundary (F2, M5 Step 2 adversarial review): a
         // FIFO, a symlink to `/dev/zero`, or any other path whose `stat`
@@ -1037,6 +1039,11 @@ fn has_valid_principal_shape(principal: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty())
     })
 }
+
+// The decision is pure and runs in the unit tests of every platform; only the
+// Windows build reads a file's DACL.
+#[cfg(any(windows, test))]
+mod writable_dacl;
 
 #[cfg(test)]
 mod tests;

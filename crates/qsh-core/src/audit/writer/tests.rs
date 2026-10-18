@@ -526,6 +526,21 @@ fn stale_rotated_files_above_retain_are_swept_on_rotation() {
 #[cfg(unix)]
 #[test]
 fn two_sinks_on_one_path_interleave_without_losing_or_corrupting_lines() {
+    two_sinks_on_one_path_lose_and_corrupt_nothing();
+}
+
+/// The same case on Windows, where the lock is `LockFileEx` and the stale
+/// handle check is the (volume serial number, file index) comparison
+/// (ADR-0035 decision 24). Every handle shares delete, so without the lock
+/// one sink's rename would succeed under the other's open handle and the
+/// other would go on appending to the renamed file.
+#[cfg(windows)]
+#[test]
+fn rotating_audit_sinks_on_one_path_never_race_a_rename_on_windows() {
+    two_sinks_on_one_path_lose_and_corrupt_nothing();
+}
+
+fn two_sinks_on_one_path_lose_and_corrupt_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.log");
     let n = 150u64;
@@ -583,4 +598,105 @@ fn two_sinks_on_one_path_interleave_without_losing_or_corrupting_lines() {
         "no record may be lost to a concurrent co-writer"
     );
     assert_eq!(bad, 0, "no interleaved writer may corrupt a line");
+}
+
+/// The handle is not trusted past a replacement: when the file at the path is
+/// no longer the one held open (a co-writer rotated it, or an operator moved
+/// it and something else took its name), the next record goes to the file
+/// that is at the path now.
+#[cfg(windows)]
+#[test]
+fn audit_writer_reopens_after_the_active_file_is_replaced_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.log");
+    let (sink, handle) = RotatingAuditSink::spawn_joinable(&path, 1024 * 1024, 5, 64);
+
+    sink.record(&record_for(0)).unwrap();
+    // Observable state, not a sleep: the first record is on disk.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first record never reached the file"
+        );
+        std::thread::yield_now();
+    }
+
+    // Move the file the writer holds and put a different one in its place.
+    let moved = dir.path().join("audit.log.moved");
+    fs::rename(&path, &moved).unwrap();
+    fs::write(&path, "planted\n").unwrap();
+
+    sink.record(&record_for(1)).unwrap();
+    drop(sink);
+    handle.join().unwrap();
+
+    let moved_lines = read_lines(&moved);
+    assert_eq!(moved_lines.len(), 1, "{moved_lines:?}");
+    let at_path = read_lines(&path);
+    assert_eq!(at_path.len(), 2, "{at_path:?}");
+    assert_eq!(at_path[0], "planted");
+    assert!(at_path[1].contains("\"request_id\""), "{at_path:?}");
+    assert_ne!(moved_lines[0], at_path[1], "the second record is record 1");
+}
+
+#[cfg(windows)]
+fn read_lines(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The sidecar lock file is made like every other file the audit writer
+/// makes: owner-only from the moment it exists (ADR-0035 decisions 9 and 24).
+#[cfg(windows)]
+#[test]
+fn audit_lock_file_has_an_owner_only_dacl() {
+    use crate::fsutil::dacl::ObjectKind;
+    use crate::fsutil::dacl::testing::assert_owner_only;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let path = state.join("audit.log");
+    let (sink, handle) = RotatingAuditSink::spawn_joinable(&path, 1024 * 1024, 5, 64);
+    sink.record(&record_for(0)).unwrap();
+    drop(sink);
+    handle.join().unwrap();
+
+    let lock = lock_path_for(&path);
+    assert!(lock.exists(), "the lock file {lock:?} was not created");
+    assert_owner_only(&lock, ObjectKind::File);
+    assert_owner_only(&path, ObjectKind::File);
+    assert_owner_only(&state, ObjectKind::Dir);
+}
+
+/// The sidecar lock is what keeps two writers' rotations apart, so the check
+/// is on the lock itself: while the writer is inside its critical section a
+/// second handle on the lock file cannot take it, and once the section ends
+/// it can (ADR-0035 decision 24). A race between two live sinks can pass by
+/// luck without the lock; this cannot.
+#[cfg(windows)]
+#[test]
+fn audit_writer_holds_the_sidecar_lock_around_its_critical_section_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.log");
+    let mut file = RotatingFile::new(path.clone(), 1024, 3);
+
+    file.with_lock(|this| {
+        let other = windows::LockFile::open(&this.lock_path)?;
+        assert!(
+            other.try_lock()?.is_none(),
+            "a second handle took the lock while the writer held it"
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    // Released afterwards, and the writer's own handle is reusable.
+    let other = windows::LockFile::open(&lock_path_for(&path)).unwrap();
+    assert!(other.try_lock().unwrap().is_some());
+    drop(other);
+    file.with_lock(|_| Ok(())).unwrap();
 }

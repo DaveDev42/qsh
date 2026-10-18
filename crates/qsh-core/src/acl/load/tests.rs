@@ -22,6 +22,11 @@ fn write_acl(dir: &std::path::Path, text: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
+    // The Windows counterpart: an owner-only DACL, so what the directory
+    // happens to inherit (a runner's temp directory can grant other
+    // accounts write) never adds the DACL warning to a capture.
+    #[cfg(windows)]
+    crate::config::write_private_file(&path, text.as_bytes()).unwrap();
 }
 
 #[test]
@@ -669,6 +674,131 @@ fn owner_only_acl_toml_does_not_warn() {
         .cloned()
         .collect();
     assert!(events.is_empty(), "0600 must stay silent: {events:?}");
+}
+
+// ---------------------------------------------------------------
+// The Windows counterpart (ADR-0035 decision 24): the same warning from the
+// file's DACL. The decision itself is pinned on every platform in
+// `writable_dacl/tests.rs`; these are the reads and the structural record.
+// ---------------------------------------------------------------
+
+#[cfg(windows)]
+mod writable_dacl_windows {
+    use super::*;
+    use crate::fsutil::dacl::testing::{current_user_sid_string, set_allow_aces, set_null_dacl};
+
+    /// `FILE_ALL_ACCESS`.
+    const FULL: u32 = 0x001F_01FF;
+    /// `FILE_GENERIC_WRITE`.
+    const GENERIC_WRITE_MASK: u32 = 0x0012_0116;
+    /// `FILE_GENERIC_READ`.
+    const GENERIC_READ_MASK: u32 = 0x0012_0089;
+    const EVERYONE: &str = "S-1-1-0";
+
+    /// A policy text with a marker no diagnostic may ever echo.
+    const POLICY: &str =
+        "[[acl]]\nprincipal = \"user:marker-never-logged\"\nallow = [\"exec.run\"]\n";
+
+    fn load_with_events(dir: &std::path::Path) -> (PolicyLoad, Vec<(String, String)>) {
+        let sink = std::sync::Arc::new(capture::Sink::default());
+        let sub = capture::Sub(sink.clone());
+        let load = tracing::subscriber::with_default(sub, || PolicySource::load(&paths_with(dir)));
+        let events = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(target, _)| target == "qsh::acl")
+            .cloned()
+            .collect();
+        (load, events)
+    }
+
+    #[test]
+    fn acl_toml_with_an_everyone_write_ace_warns_with_structural_fields_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), POLICY);
+        set_allow_aces(
+            &dir.path().join("acl.toml"),
+            &[
+                (&current_user_sid_string(), FULL),
+                (EVERYONE, GENERIC_WRITE_MASK),
+            ],
+        );
+        let (load, events) = load_with_events(dir.path());
+        assert!(
+            load.as_loaded().is_some(),
+            "a writable file still loads: a warning, not a deny"
+        );
+        assert_eq!(events.len(), 1, "exactly one warning, got {events:?}");
+        let fields = &events[0].1;
+        assert!(fields.contains("path="), "{fields}");
+        assert!(fields.contains("sid=S-1-1-0"), "{fields}");
+        assert!(fields.contains("sid_count=1"), "{fields}");
+        assert!(fields.contains("reason=\"write_ace\""), "{fields}");
+        // Structural only: no unix `mode`, no ACE mask, nothing the file says.
+        assert!(!fields.contains("mode="), "{fields}");
+        assert!(!fields.contains("mask"), "{fields}");
+        assert!(!fields.contains("marker-never-logged"), "{fields}");
+    }
+
+    #[test]
+    fn acl_toml_with_a_null_dacl_warns_and_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), POLICY);
+        set_null_dacl(&dir.path().join("acl.toml"));
+        let (load, events) = load_with_events(dir.path());
+        assert!(load.as_loaded().is_some());
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].1.contains("reason=\"null_dacl\""), "{events:?}");
+        assert!(events[0].1.contains("sid=S-1-1-0"), "{events:?}");
+    }
+
+    #[test]
+    fn an_unparseable_acl_toml_warns_too() {
+        // The warning fires whenever the file exists, whatever the load
+        // outcome, as on unix.
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), "this is not [ valid toml");
+        set_allow_aces(
+            &dir.path().join("acl.toml"),
+            &[
+                (&current_user_sid_string(), FULL),
+                (EVERYONE, GENERIC_WRITE_MASK),
+            ],
+        );
+        let (load, events) = load_with_events(dir.path());
+        assert!(matches!(load, PolicyLoad::Invalid(_)));
+        assert_eq!(events.len(), 1, "{events:?}");
+    }
+
+    #[test]
+    fn an_owner_only_acl_toml_does_not_warn_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), POLICY);
+        let (load, events) = load_with_events(dir.path());
+        assert!(load.as_loaded().is_some());
+        assert!(
+            events.is_empty(),
+            "an owner-only DACL is silent: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_everyone_ace_does_not_warn_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), POLICY);
+        set_allow_aces(
+            &dir.path().join("acl.toml"),
+            &[
+                (&current_user_sid_string(), FULL),
+                (EVERYONE, GENERIC_READ_MASK),
+            ],
+        );
+        let (load, events) = load_with_events(dir.path());
+        assert!(load.as_loaded().is_some());
+        assert!(events.is_empty(), "read access is not exposure: {events:?}");
+    }
 }
 
 // ---------------------------------------------------------------
