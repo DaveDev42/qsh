@@ -441,11 +441,22 @@ fn user_sid_of_process_handle(process: HANDLE) -> io::Result<Vec<u32>> {
 
 /// The `S-1-5-21-…` text of `sid`.
 pub(crate) fn sid_to_string(sid: &[u32]) -> io::Result<String> {
-    let mut text: *mut u16 = std::ptr::null_mut();
     // SAFETY: `sid` is a SID in a `u32`-aligned buffer, as `token_user_sid`
-    // and `process_user_sid` return it; the result is freed below.
+    // and `process_user_sid` return it.
+    unsafe { sid_ptr_to_string(sid.as_ptr() as *mut c_void) }
+}
+
+/// [`sid_to_string`] for a SID that lives inside another structure, such as
+/// the owner or an ACE of a security descriptor.
+///
+/// # Safety
+///
+/// `sid` must point at a valid SID that stays readable for the call.
+pub(crate) unsafe fn sid_ptr_to_string(sid: *mut c_void) -> io::Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the caller vouches for `sid`; the result is freed below.
     check(
-        unsafe { ConvertSidToStringSidW(sid.as_ptr() as *mut c_void, &mut text) },
+        unsafe { ConvertSidToStringSidW(sid, &mut text) },
         "ConvertSidToStringSidW",
     )?;
     // SAFETY: `text` is a NUL-terminated wide string from the call above.
