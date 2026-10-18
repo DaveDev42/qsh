@@ -53,6 +53,8 @@ M20 계획 §1에서 열린 채로 넘어온 항목이다.
 - [ ] Windows OpenSSH Server 위의 `qsh pair ssh-respond`. Dave-Windows에 OpenSSH Server를 켜는 것은 사람이 한다. 두 장비 회차는 캠페인 W7이다.
 - [ ] Windows 방화벽 첫 허용 프롬프트의 실제 문안과 README·doctor `udp_egress_blocked` 안내의 대응(ADR-0035 결정 25 개정 이력 2026-10-18). Windows Server에서의 같은 판정을 포함해 캠페인 W2가 본다.
 
+- [ ] `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 M20 마감 커밋 `258e0bb`의 CI(run 39135082029, ubuntu-24.04)에서 "the connection was not closed within 8s"로 한 번 실패했고 실패 job 재실행은 초록이었다. 그 커밋은 문서만 바꿨고 테스트 파일은 `e39c15c` 이후 그대로다. Dave-Windows-WSL 부하 아래 `trust_withdrawal::` 50/50으로 재현되지 않았다. 의심 원인은 흐름 제어에 막혀 더 보내지 않는 peer가 host의 CONNECTION_CLOSE를 놓치면 stateless reset을 받을 계기가 없다는 것이고, 다시 나오면 테스트 쪽 peer가 닫힘 대기 중에도 패킷을 보내게 할지 판단한다.
+
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
 ## 2. 테스트 환경
