@@ -279,7 +279,7 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 
 **(d) 결과 (2026-10-18):** `bd4b272`. `ConPtyFactory`가 `UnsupportedFactory`를 대체했고 환경 합성·고정 키·exit code는 `crates/qsh-core/src/pty/env_policy.rs`의 cfg 없는 순수 함수다. JOB_LIST는 첫 CI run(39060317009, Server 2022)에서 통과해 `CREATE_SUSPENDED` 대체는 쓰지 않는다. ADR-0035 개정 이력 2026-10-18 둘째 줄이 착지 형태(JOB_LIST 판정, application 이름은 자식 `PATH`와 시스템 디렉터리에서만 해석, 사용자 블록에 없는 고정 키는 자식에도 없음, 합성 순서, exit code 부호)를 적는다. 계획 이름과 다른 점: route 케이스 `pty_session_round_trip` 하나 대신 run·input·resize·close 넷이고(§4 표 고침), 외부 `user@` 힌트는 forward interactive 형태의 `windows_attach::a_foreign_user_hint_is_refused_without_creating_a_session`이 맡는다. reverse route에는 힌트를 싣는 CLI 표면이 없다. 부하에서 닫기 테스트 둘이 8회에 한 번꼴로 멈췄다. 원인은 Toolhelp 목록에 보인 손자가 아직 콘솔에 붙지 않아 `ClosePseudoConsole`의 사건을 놓친 것이고, 테스트가 손자가 직접 찍은 출력을 본 뒤 닫도록 고쳤다(제품은 escalation의 `Kill`이 같은 경우를 끝낸다). 부하: qsh-core conpty 17개 50/50, qsh-cli `pty_session_` 8개와 외부 힌트 1개 50/50(Dave-Windows). CI run 39071261522 초록.
 
-### Step 4 — 세션 신호 일곱의 Windows 사상, `qsh internal console-ctrl`, 세션 이벤트, `--signal` 매트릭스 행 (0.3~0.5ew)
+### Step 4 — 세션 신호 일곱의 Windows 사상, `qsh internal console-ctrl`, 세션 이벤트, `--signal` 매트릭스 행 (0.3~0.5ew) ✅ 2026-10-18
 
 근거: ADR-0035 결정 3(`cfg(windows)` 매트릭스 행), 22 전체(`Int` `CTRL_C_EVENT`, `Quit` `CTRL_BREAK_EVENT`, 숨김 보조 프로세스 `qsh internal console-ctrl <pid> <c|break>`를 `DETACHED_PROCESS`로, `Hup`·`Term` `ClosePseudoConsole`, `Usr1`·`Usr2` 이름 있는 자동 리셋 이벤트와 환경변수, `Kill` `TerminateJobObject`, 종료 상태의 `exit_code`·`signal`), 17 host 테스트 항목(신호 일곱과 escalation), 결과 절 "계약"(세션 환경변수 additive, 숨김 subcommand). `docs/CLI.md` §6.7·§7. 선행: Step 3.
 
@@ -304,6 +304,8 @@ Step 2 뒤 main 세션이 이 표와 ROADMAP M20 크기 줄·§5.2·§5.4 리스
 - 신호 수신·escalation 테스트를 `m20.filter`에 넣는다.
 
 **(c) 완료 판정:** 일곱 신호가 Windows에서 모두 성공으로 답하고 세션이 끝난다. 새 계약은 환경변수 둘뿐이고 CLI.md §7에 있다. `docs/man/` diff 0. wire diff 0.
+
+**(d) 결과 (2026-10-18):** `a475f08`. 신호 이름→첫 단계 사상과 `Hup`·`Term`이 콘솔 닫기 한 번을 나눠 쓰는 규칙은 `pty/signal_map.rs`의 cfg 없는 순수 함수(`first_step`, `next_step`)이고 `hup_and_term_share_one_console_close_step`이 네 다리에서 돈다. testkit `qsh-signal-probe`가 받은 사건을 종료 코드로 알리고, `each_signal_raises_its_windows_event_then_escalates_to_an_ended_session`은 신호마다 곧 끝나는 프로그램(첫 사건 실측)과 살아남는 프로그램(유예·`Term`·`Kill` 뒤 종료) 두 번을 돈다. `console-ctrl`의 전달 판정은 종료 상태가 아니라 성공 직후 표준 출력에 쓰는 한 바이트다(사건을 받은 콘솔이 사라지면 보조 프로세스도 비정상 종료 상태를 받는다). 바이트가 없으면 신호 기록을 지운다(`a_failed_console_ctrl_delivery_leaves_no_signal_note`). ADR-0035 개정 이력 2026-10-18 셋째 줄. 계획 문구와 다른 점: `exit_code_matrix`의 `cfg(windows)` `--signal` 커버리지는 `Case` 행 하나가 아니라 `Case` 루프 뒤의 블록이고, 일곱 값 모두 exit `0`을 단언한다(DoD 4와 Step 12 확인은 이 블록을 본다). 부하: qsh-core conpty·signals 27개 50/50, qsh-cli `pty_session_`·`session_close_with_each_signal_` 10개 50/50(Dave-Windows). 첫 부하 시도는 부하 스크립트가 `qsh-signal-probe.exe`를 복사하지 않아 무효였다. CI a475f08 초록.
 
 ### Step 5 — host 쪽 `exec`의 Job Object와 환경 고정 (0.2~0.3ew)
 
