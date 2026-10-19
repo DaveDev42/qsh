@@ -33,7 +33,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 ### 0.3 M19가 만든 사람 몫
 
 - [ ] **Windows client 확인 회차.** `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`)의 W1, W3a, W4, W5, W6, W8, W9, W10, W11, W12. Windows 자산이 붙은 태그에서 돈다. 소유: 사람.
-- [ ] **Windows 배포 준비(ADR-0035 결정 16, 서명은 2026-10-19 개정 이력으로 철회).** `DaveDev42/scoop-bucket` 저장소(README를 넣어 `main`을 만들어 둔다)와 쓰기 배포 키, 시크릿 `SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`과 첫 winget 매니페스트 수동 제출. 비용이 드는 항목은 없다. 소유: 사람.
+- [x] **Windows 배포 준비.** 2026-10-19 사용자 결정으로 Authenticode 서명과 scoop·winget을 모두 철회해 사람이 준비할 것이 없다(ADR-0035 개정 이력 2026-10-19 두 줄). Windows 설치 경로는 release zip, `install.ps1`, `cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli`다.
 
 ### 0.4 M20이 만든 사람 몫
 
