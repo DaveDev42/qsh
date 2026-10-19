@@ -1,7 +1,7 @@
 //! Tests for the release scripts under `scripts/`: the installers
 //! (`install.sh`, `install.ps1`), the all-or-none signing-secret gate, the
-//! Windows zip packager and the scoop and winget manifest renderer, plus a
-//! few structural checks of `.github/workflows/release.yml` that keep it in step with them. None of it
+//! Windows zip packager, plus a few structural checks of
+//! `.github/workflows/release.yml` that keep it in step with them. None of it
 //! touches the network.
 //!
 //! One integration binary, as `CLAUDE.md` asks for the crates under
@@ -22,9 +22,6 @@ mod install_ps1;
 #[cfg(unix)]
 #[path = "install_script/install_sh.rs"]
 mod install_sh;
-#[cfg(unix)]
-#[path = "install_script/package_manifests.rs"]
-mod package_manifests;
 #[cfg(windows)]
 #[path = "install_script/pwsh.rs"]
 mod pwsh;

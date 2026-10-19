@@ -1,10 +1,10 @@
 # P1 Windows 캠페인 — 실제 Windows 장비에서 CI가 못 보는 것을 확인한다 (M19 몫)
 
-상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). W11은 2026-10-19 ADR-0035 개정 이력(Authenticode 서명 철회)에 따라 서명 확인을 빼고 다시 고정했다(§2.1, §2.4, §4.9). 회차가 돌기 전의 재고정이라 §6의 사후 변경 금지에 걸리지 않는다. 회차는 아직 돌지 않았다. 대상 태그가 없다.
+상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). W11은 2026-10-19 ADR-0035 개정 이력(Authenticode 서명 철회, 이어 scoop·winget 철회)에 따라 서명 확인과 scoop·winget 변형을 빼고 `cargo install` 변형을 더해 다시 고정했다(§2.1, §4.9). 회차가 돌기 전의 재고정이라 §6의 사후 변경 금지에 걸리지 않는다. 회차는 아직 돌지 않았다. 대상 태그가 없다.
 
 ## 1. 목적과 지위
 
-ADR-0035는 Windows를 Linux·macOS와 같은 기능으로 연다. M19는 client 쪽(콘솔 raw 모드 attach, named pipe localctl과 `qsh listen` 데몬, Credential Manager, 작업 스케줄러 서비스, 설치 경로 셋)을 연다. `windows-latest` 다리의 CI가 같은 러너 안 loopback으로 정방향·역방향 종단을 돌리므로(ADR-0035 결정 17) 이 캠페인은 CI가 볼 수 없는 것만 본다. 예를 들면 실제 터미널의 렌더링과 IME, 노트북 덮개, 둘째 사용자 계정, 로그온·로그오프·재부팅에 걸린 작업의 수명, 두 장비 사이의 UDP, 미서명 바이너리에 대한 SmartScreen, 패키지 관리자다.
+ADR-0035는 Windows를 Linux·macOS와 같은 기능으로 연다. M19는 client 쪽(콘솔 raw 모드 attach, named pipe localctl과 `qsh listen` 데몬, Credential Manager, 작업 스케줄러 서비스, 설치 경로)를 연다. `windows-latest` 다리의 CI가 같은 러너 안 loopback으로 정방향·역방향 종단을 돌리므로(ADR-0035 결정 17) 이 캠페인은 CI가 볼 수 없는 것만 본다. 예를 들면 실제 터미널의 렌더링과 IME, 노트북 덮개, 둘째 사용자 계정, 로그온·로그오프·재부팅에 걸린 작업의 수명, 두 장비 사이의 UDP, 미서명 바이너리에 대한 SmartScreen, 패키지 관리자다.
 
 CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 콘솔 모드 비트와 복원 경로(`windows_attach::`), pipe의 DACL·SID 대조·이름 선점 거부(`pipe_server_drops_a_client_with_another_sid_before_reading_a_frame`, `pipe_bind_fails_when_the_name_already_exists`), 절전 표본의 단조성(`windows_wake_sample_is_monotonic`), Credential Manager의 러너 왕복(`credential_manager_round_trip_on_the_runner`), `install.ps1`의 체크섬 선행(`install_ps1_verifies_the_checksum_before_extracting`), 가짜 ssh 위의 Windows 자동 부트스트랩(`auto_bootstrap_keeps_the_console_cooked_until_ssh_exits_on_windows`)이다. 이 문서의 회차는 그 테스트가 대신 볼 수 없는 실제 환경의 동작이다.
 
@@ -25,7 +25,7 @@ CI가 이미 맡는 것은 여기서 다시 하지 않는다. 대표적으로 �
 | W8 | Credential Manager 왕복 | M19 |
 | W9 | Windows on ARM에서 W1 축약 | M19 |
 | W10 | 상시 기동 변형의 로그오프·재부팅 생존과 `logon_task_session_scoped` 소멸 | M19 |
-| W11 | 미서명 SmartScreen 경고, `install.ps1`·`scoop install`·`winget install` | M19 |
+| W11 | 미서명 SmartScreen 경고, `install.ps1`·`cargo install --locked --git` | M19 |
 | W12 | Windows client 자동 부트스트랩(`qsh box`, `qsh cp`) | M19 |
 
 W12는 ADR-0035 결정 18의 번호가 아니다. `docs/campaigns/p1-ssh-bootstrap.md`의 R5가 요건 4와 6(`qsh box`의 대화형 attach와 `qsh cp`)을 M19로 미뤘고, R5의 문면은 고치지 않는 대신 그 몫을 W12가 받는다.
@@ -39,7 +39,7 @@ W12는 ADR-0035 결정 18의 번호가 아니다. `docs/campaigns/p1-ssh-bootstr
 - 그 태그의 release run이 초록이다.
 - 그 태그의 `SHA256SUMS`에 `qsh-<tag>-x86_64-pc-windows-msvc.zip`, `qsh-<tag>-aarch64-pc-windows-msvc.zip` 줄이 있고 release에 `install.ps1` 자산이 있다. `release` job의 `Check every target is published` 스텝이 이 사실을 붉게 만들지만 회차 시작 전에 사람이 한 번 더 본다.
 - W11은 서명 여부를 따지지 않는다. Windows 자산은 미서명으로 배포한다(ADR-0035 개정 이력, 2026-10-19).
-- W11의 scoop·winget 변형은 해당 패키지 관리자에 그 태그의 매니페스트가 올라 있어야 돈다(§4.9). 올라 있지 않으면 그 변형은 "보류"다.
+- W11의 `cargo install` 변형은 그 태그가 `DaveDev42/qsh` 저장소에 푸시돼 있어야 돈다(`--tag`로 고른다). scoop·winget 배포는 철회했다(ADR-0035 개정 이력, 2026-10-19).
 
 ### 2.2 장비
 
@@ -335,9 +335,9 @@ schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\servic
 
 정리는 `schtasks /Delete /F /TN \qsh\qsh-serve`, 복사한 `.always-on.xml` 삭제, `qsh service uninstall`이다. 변형 B를 마친 뒤에는 `qsh identity move-key --to file`로 Credential Manager 항목을 지우고 `%USERPROFILE%\.config\qsh`를 지운다(W8의 정리와 같다).
 
-### 4.9 W11 — 미서명 SmartScreen 경고, 설치 경로 셋
+### 4.9 W11 — 미서명 SmartScreen 경고, 설치 경로
 
-Windows 자산은 서명하지 않는다(ADR-0035 개정 이력, 2026-10-19). 이 회차는 미서명이 안내한 대로(README Known limitations) 동작하는지와 설치 경로 셋이 바이너리를 설치하는지를 본다. 변형은 넷이다.
+Windows 자산은 서명하지 않는다(ADR-0035 개정 이력, 2026-10-19). 이 회차는 미서명이 안내한 대로(README Known limitations) 동작하는지와 설치 경로(`install.ps1`, `cargo install`)가 바이너리를 설치하는지를 본다. 변형은 셋이다. scoop·winget은 ADR-0035 개정 이력(2026-10-19)으로 철회했다.
 
 **W11a 브라우저 다운로드.** 클린 W에서 Edge로 release 페이지의 `qsh-<tag>-x86_64-pc-windows-msvc.zip`을 받아 탐색기의 "모두 압축 풀기"로 푼다(웹에서 받았다는 표시가 풀린 파일에 이어진다).
 
@@ -362,33 +362,19 @@ qsh version
 | b1. 설치 | 스크립트가 관리자 권한을 요구하지 않고 끝나고, 새 터미널에서 `qsh version`이 대상 태그를 낸다 |
 | b2. 체크섬 | 설치 출력에서 `verifying checksum` 줄이 `unpacking` 줄보다 앞에 있다 |
 
-**W11c scoop.** 아래를 돈다.
+**W11c `cargo install`.** 클린 W에서 rustup(MSVC 툴체인)과 Visual Studio Build Tools의 "Desktop development with C++" 워크로드가 갖춰져 있고 `qsh`가 `PATH`에 없는 상태에서 일반(비관리자) PowerShell로 아래를 돈다. README의 줄은 기본 브랜치를 설치하므로 대상 태그를 `--tag`로 고정한다.
 
 ```powershell
-scoop bucket add qsh https://github.com/DaveDev42/scoop-bucket
-scoop install qsh
+cargo install --locked --git https://github.com/DaveDev42/qsh --tag <대상 태그> qsh-cli
 qsh version
 ```
 
 | 확인 | 합격 기준 |
 |---|---|
-| c1. 설치 | `scoop install`이 해시 검증을 지나 끝나고 `qsh version`이 대상 태그를 낸다 |
-| c2. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
-| c3. man 없음 | scoop이 `man/*.1`을 링크하거나 PATH에 올리지 않았다(zip 전체가 `apps\qsh\current`에 풀리므로 파일이 있는 것은 허용한다) |
+| c1. 설치 | 관리자 권한 없이 빌드와 설치가 끝나고(비고에 소요 시간과 추가로 설치해야 했던 도구를 적는다), 새 터미널에서 `qsh version`이 대상 태그와 태그의 커밋 SHA(§2.4)를 낸다 |
+| c2. 위치 | `Get-Command qsh`가 `%USERPROFILE%\.cargo\bin\qsh.exe`를 가리킨다 |
 
-**W11d winget.** 아래를 돈다.
-
-```powershell
-winget install DaveDev42.qsh
-qsh version
-```
-
-| 확인 | 합격 기준 |
-|---|---|
-| d1. 설치 | `winget install`이 끝나고 새 터미널에서 `qsh version`이 대상 태그를 낸다 |
-| d2. 같은 바이트 | 설치된 `qsh.exe`의 sha256이 W11a의 zip 안 `qsh.exe`와 같다 |
-
-W11c와 W11d의 매니페스트는 첫 매니페스트가 수락되기 전에는 없다(README의 단서). 없는 변형은 "보류"로 적고 캠페인은 그 변형이 PASS할 때까지 열려 있다. 정리는 `scoop uninstall qsh`, `winget uninstall DaveDev42.qsh`, `install.ps1`이 둔 `%USERPROFILE%\.local\bin\qsh.exe`와 사용자 `PATH` 항목을 지우는 것이다.
+정리는 `cargo uninstall qsh-cli`와 `install.ps1`이 둔 `%USERPROFILE%\.local\bin\qsh.exe`, 사용자 `PATH` 항목을 지우는 것이다.
 
 ### 4.10 W12 — Windows client 자동 부트스트랩
 
@@ -480,13 +466,13 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -PropertyType
 
 ## 5. 판정 규칙
 
-> W1, W2, W3a, W3b, W4, W5, W6, W7, W8, W9, W10, W11, W12가 각각 한 번 이상 회차 표에 PASS로 기록되고, W1은 네 변형 모두에, W2는 두 변형 모두에, W3a는 두 변형 모두에, W3b는 두 변형 모두에, W7은 두 변형 모두에, W10은 두 변형 모두에, W11은 네 변형 모두에 PASS 행이 있다. 각 PASS 행에 대상 태그, §3.1의 공통 요건, 그 회차의 확인 문자가 모두 채워져 있다.
+> W1, W2, W3a, W3b, W4, W5, W6, W7, W8, W9, W10, W11, W12가 각각 한 번 이상 회차 표에 PASS로 기록되고, W1은 네 변형 모두에, W2는 두 변형 모두에, W3a는 두 변형 모두에, W3b는 두 변형 모두에, W7은 두 변형 모두에, W10은 두 변형 모두에, W11은 세 변형 모두에 PASS 행이 있다. 각 PASS 행에 대상 태그, §3.1의 공통 요건, 그 회차의 확인 문자가 모두 채워져 있다.
 
 풀어 적으면 이렇다.
 
 - PASS인 행은 §4가 그 변형에 적은 확인이 전부 PASS다. "해당 없음"으로 적을 수 있는 확인은 §4가 그렇게 허용한 것(W1의 a, 변형 A의 W10 d)뿐이다.
 - 같은 회차·변형의 FAIL 행은 표에 남는다. 제품 결함을 고쳐 새 태그로 다시 돌린 행이 PASS면 그 변형은 PASS로 센다(최신의 무효 아닌 행이 판정한다). 고치기 전의 태그에서 나온 PASS는 새 태그의 FAIL을 덮지 못한다.
-- "보류"(W11c·W11d의 매니페스트 없음)와 "무효"는 PASS가 아니다. 보류가 남아 있는 동안 캠페인은 열려 있다.
+- "보류"와 "무효"는 PASS가 아니다. 보류가 남아 있는 동안 캠페인은 열려 있다.
 
 ## 6. 사후 변경 금지와 실패 시 처분
 

@@ -166,22 +166,23 @@ alone, and there is no way to skip the checksum (`scripts/README.md` has the
 table). `qsh.exe` and the `install.ps1` release asset are not Authenticode
 signed; see the Windows entry under [Known limitations](#known-limitations).
 
-### Scoop and winget (Windows)
+### cargo install (Windows)
+
+The zip and `install.ps1` are the prebuilt Windows routes. To build from
+source instead:
 
 ```powershell
-scoop bucket add qsh https://github.com/DaveDev42/scoop-bucket
-scoop install qsh
-winget install DaveDev42.qsh
+cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli
 ```
 
-Both lines work after the first manifest is accepted: the scoop bucket is
-filled by the release workflow once the maintainer has created it, and the
-first winget manifest is submitted by hand and has to be merged by
-`microsoft/winget-pkgs`. Until then use the installer above. Both manifests
-cover x86_64 and aarch64, point at the release zip and are checked against
-its SHA256 by the package manager. The zip is not Authenticode signed.
-They link only `qsh.exe`; the man pages stay in the zip, and the same text
-is `qsh help`.
+This needs rustup with the default `x86_64-pc-windows-msvc` toolchain and the
+Visual Studio Build Tools with the "Desktop development with C++" workload,
+which brings the MSVC compiler and the Windows SDK. It installs `qsh.exe`
+into `%USERPROFILE%\.cargo\bin`, which rustup puts on `PATH`, and asks for no
+administrator rights. Without `--tag <release tag>` it builds the default
+branch. The man pages are not installed this way. CI builds the workspace
+natively on Windows with `--locked`. See
+[From source](#from-source) for the toolchain pin and the crates.io status.
 
 ### Homebrew (macOS)
 
@@ -1206,8 +1207,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   then "Run anyway" starts it. A PC with Smart App Control on can block it with
   no way around short of turning that feature off. A downloaded `install.ps1`
   may be refused by the execution policy until `Unblock-File .\install.ps1`.
-  `irm ... | iex`, `scoop install` and `winget install` are not affected, and
-  neither is a `qsh.exe` started from a terminal. The release `SHA256SUMS` and
+  `irm ... | iex` is not affected, and neither is a `qsh.exe` started from a
+  terminal or one built by `cargo install`. The release `SHA256SUMS` and
   the provenance attestation still cover the zips.
 - The first time `qsh serve` or `qsh listen` binds a fixed UDP port on a
   non-loopback address, Windows Defender Firewall asks whether to allow it,

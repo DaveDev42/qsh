@@ -31,21 +31,9 @@ base64 -i DeveloperIDApplication.p12 | tr -d '\n' > cert.p12.b64
 
 Windows 자산(`qsh.exe`와 `install.ps1`)은 결정에 따라 서명하지 않으므로(ADR-0035 개정 이력, 2026-10-19) 필요한 시크릿이 없다.
 
-## 패키지 관리자 시크릿 둘 (scoop, winget)
+## 패키지 관리자
 
-`release.yml`의 `scoop-bucket`·`winget` job이 읽는다. 둘 다 `homebrew-tap`과 같은 모양이다. 태그 push에서만 돌고 prerelease 태그(`v0.3.1-rc.2`처럼 `-`가 든 태그)에서는 job 자체를 건너뛴다. rc 버전으로 `microsoft/winget-pkgs`에 PR이 열리거나 scoop `checkver`가 rc를 최신으로 잡는 일을 막기 위해서다(`homebrew-tap`은 이 규칙이 없다). 시크릿 게이트는 그 뒤 단계다. 시크릿이 없으면 존재 여부 플래그(`has-key`, `has-pat`)가 `false`가 되어 뒤 스텝이 전부 건너뛰어지며 job은 green이다. job 수준 `continue-on-error`라서 패키지 관리자 쪽 실패(첫 매니페스트가 아직 없음, PR 거절)가 이미 출고된 GitHub Release를 붉히지 않는다. 두 매니페스트는 같은 템플릿(`packaging/scoop/qsh.json.in`, `packaging/winget/*.yaml.in`)을 `scripts/release/render-manifests.sh`로 채워 만든다. 해시는 발행된 릴리스의 `SHA256SUMS`에서 읽고, 두 Windows zip 중 하나라도 줄이 없거나 해시가 64자리 hex가 아니면 렌더가 실패한다. 매니페스트는 `man/*.1`을 설치하지 않는다. scoop과 winget portable에는 man 경로 규약이 없고, 같은 내용은 `qsh help`가 준다.
-
-| 이름 | 무엇인지 | 비고 |
-|---|---|---|
-| `SCOOP_BUCKET_DEPLOY_KEY` | `DaveDev42/scoop-bucket`에 쓰기 권한으로 등록한 배포 키의 개인키 절반(키 제목 예: "qsh release.yml bucket bump"). `scoop-bucket` job이 태그마다 `bucket/qsh.json`을 새 버전·URL·해시로 다시 써서 `main`에 push한다. | 그 저장소 하나로만 범위가 좁고 만료가 없다. `bucket/qsh.json`은 템플릿에서 통째로 쓰므로 tap과 달리 첫 릴리스에 손으로 올릴 파일이 없다. 없으면 job은 green인 채 건너뛴다. |
-| `WINGET_PAT` | `microsoft/winget-pkgs` 포크에서 PR을 열 수 있는 GitHub 토큰. `winget` job이 `wingetcreate update DaveDev42.qsh --submit`으로 갱신 PR을 연다. 환경변수 `WINGET_CREATE_GITHUB_TOKEN`으로만 넘기고 명령행에는 싣지 않는다. | 포크 쓰기와 PR 생성에만 범위를 좁힌다. 병합은 winget 쪽 검증이 정한다. 없으면 job은 green인 채 건너뛴다. |
-
-사람이 하는 일은 이 둘이 전부가 아니다.
-
-- 저장소 `DaveDev42/scoop-bucket` 생성, 배포 키 등록, 개인키 절반을 `SCOOP_BUCKET_DEPLOY_KEY`로 설정. 에이전트는 이 저장소에 쓰지 않는다.
-- `DaveDev42.qsh`의 첫 winget 매니페스트 제출. `wingetcreate update`는 이미 있는 패키지를 갱신하므로 첫 제출 전에는 `winget` job의 update 스텝이 실패하고(`continue-on-error`로 green), 첫 제출은 사람이 한다. 첫 태그의 `SHA256SUMS`로 `sh scripts/release/render-manifests.sh <tag> SHA256SUMS <출력 디렉터리>`를 돌리면 `<출력 디렉터리>/winget/`에 job이 쓰는 것과 같은 세 파일이 나오고(`winget` job도 같은 파일을 `winget-manifests` artifact로 남긴다), 이를 `wingetcreate submit`으로 올린다. 병합되기 전까지 README의 `scoop install`·`winget install` 줄은 "after the first manifest is accepted" 단서를 달고 있다.
-
-**회전.** 배포 키는 저장소의 배포 키를 지우고 새 키를 등록한 뒤 `SCOOP_BUCKET_DEPLOY_KEY`만 갈아 끼운다. PAT는 만료되면 새로 발급해 `WINGET_PAT`만 갈아 끼운다. 회전 뒤 다음 태그(또는 같은 태그의 job 재실행)로 push·PR이 성공하는지 본다. 값은 이 문서에도 커밋에도 적지 않는다.
+scoop·winget 배포는 사용자 결정으로 철회했으므로(ADR-0035 개정 이력, 2026-10-19) 해당 시크릿(`SCOOP_BUCKET_DEPLOY_KEY`, `WINGET_PAT`)은 필요 없다. 이미 등록했다면 저장소 설정에서 지워도 된다.
 
 ## 그 밖의 릴리스 시크릿
 

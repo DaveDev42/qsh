@@ -142,16 +142,6 @@ run them.
   `man/*.1`, forward-slash entry names) and re-opens it to check that the
   member list and every member's bytes match the sources, so a zip that lost
   a man page fails the packaging step.
-- `render-manifests.sh <tag> <SHA256SUMS> <out-dir>` fills the scoop and
-  winget templates under `packaging/` with the tag and the two Windows zips'
-  digests from the release's `SHA256SUMS`. The `scoop-bucket` and `winget`
-  jobs call it, and so does the maintainer who submits the first winget
-  manifest by hand. A missing zip line, a digest that is not 64 hex digits or
-  a tag that is not `v<semver>` fails before anything is written. Neither
-  manifest installs the man pages. Tests: `package_manifests::` in
-  `xtask/tests/install_script.rs`; `release_yml::package_jobs_skip_green_without_secrets`
-  pins that both jobs skip green without `SCOOP_BUCKET_DEPLOY_KEY` or
-  `WINGET_PAT`.
 
 ## fuzz/
 
