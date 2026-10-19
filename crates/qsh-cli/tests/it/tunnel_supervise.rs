@@ -428,6 +428,12 @@ fn supervised_forward_initial_open_failure_is_not_retried() {
     let mut rig = Rig::start();
     let echo = start_echo();
     rig.kill_serve();
+    // Hold the freed port with a socket that never answers. Left free, a
+    // host another test starts in parallel can bind it, and the dial then
+    // reaches a stranger that fails mutual TLS (`AUTH_FAILED`) instead of
+    // finding a dead peer. The handshake now times out inside one dial
+    // deadline.
+    let _hold_port = std::net::UdpSocket::bind(&rig.addr).expect("hold the dead host's port");
     let started = Instant::now();
     let err = match rig.ops().tunnel_open(local_req(echo, BUDGET_MS)) {
         Ok(_) => panic!("opening against a dead peer must fail"),
