@@ -76,6 +76,22 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The release builds static musl binaries, and some libc items are
+  # deprecated only on musl (`libc::time_t`), so a glibc-only gate let the
+  # v0.5.0 tag fail at its musl build. Clippy over the shipped binary's
+  # crates on the x86_64 musl triple catches that class before a tag;
+  # aarch64 musl shares the same libc definitions.
+  clippy-musl:
+    name: clippy (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo clippy -p qsh-cli --target x86_64-unknown-linux-musl -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -290,7 +306,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fmt, clippy, test, acceptance, arch, deny, publish-dry-run]
+    needs: [fmt, clippy, clippy-musl, test, acceptance, arch, deny, publish-dry-run]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all jobs succeeded

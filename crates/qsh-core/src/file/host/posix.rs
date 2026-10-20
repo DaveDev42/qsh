@@ -364,7 +364,9 @@ fn set_mtime(file: &File, mtime: i64) -> io::Result<()> {
             tv_nsec: libc::UTIME_OMIT,
         },
         libc::timespec {
-            tv_sec: mtime as libc::time_t,
+            // `as _` takes the field's type: naming `libc::time_t` is deprecated
+            // on musl targets, which the release build denies.
+            tv_sec: mtime as _,
             tv_nsec: 0,
         },
     ];
