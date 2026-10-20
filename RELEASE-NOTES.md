@@ -9,6 +9,247 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.0`
+
+This release closes milestones M15 to M17, M19 and M20: trust roles,
+`qsh cp`, the ssh bootstrap, trust revocation that closes open
+connections, the operations surface, and Windows as a full client and
+host. M14 (TCP/TLS fallback) was withdrawn (ADR-0043) and M18
+(session home) has not started. `docs/CLI.md` moves from v0.25 to v0.56;
+its status header lists each delta.
+
+### Compatibility with `v0.4.x`
+
+The wire format changes only by addition, and `v0.4.x` peers interoperate
+with this build in both directions. They do not get the new file
+operations.
+
+- `wire/v1.proto` adds `FileReadOpen`, `FileWriteOpen`, `FileListOpen` and
+  `FileMkdirOpen` (control message numbers 80 to 83), their four
+  responses (11 to 14), `StreamKind.FILE_DATA = 5` and the `FileFrame`
+  messages. No existing field, number or message changed. `local/v1.proto`
+  changed in a comment only.
+- Hello advertises a new capability string, `file.v1`, on every platform.
+  Capabilities are negotiated as the intersection of both sides, so a
+  `v0.4.x` peer ignores the string. This build never sends a file
+  operation to a peer that did not advertise `file.v1`.
+- This build as client, `v0.4.x` host: `qsh cp` fails with `UNSUPPORTED`
+  and says the peer does not advertise `file.v1`. Nothing is sent.
+  Everything else works as before.
+- `v0.4.x` client, this build as host: it never sends a file operation, so
+  nothing changes for it. Its requests are authorized the same way.
+- Reverse route: `qsh cp` needs `file.v1` on the target and on the
+  controller's `qsh listen` daemon. A `qsh listen` process that started
+  before the upgrade keeps relaying its old capability set, so restart it
+  after upgrading. The error text says so.
+- `qsh.cli/v1` and `qsh.event/v1` stay additive. New fields and commands
+  only; the golden `capabilities.json` gains `file.v1` and the other
+  fixtures are append-only. No new schema major.
+- `trust.toml` gains an optional `role` key per `[[peer]]`. A `v0.4.x`
+  binary reading a file written by this build ignores the key, so after a
+  downgrade those pins fall back to `acl.toml` alone.
+
+### Trust roles replace the need for an `acl.toml`
+
+A trust pin now carries one role: `full`, `exec`, `tunnel`, `read-only`,
+`reverse` or `none` (ADR-0045). A role grants a fixed set of actions, and
+registering a peer now grants authority by default. This changes what
+happens after pairing.
+
+- `qsh pair invite` and `qsh trust add` without `--address` give the new
+  pin role `full`. `qsh trust add --address` and `qsh pair accept` give
+  `none`, because the pin only names a machine you dial. `--role`
+  overrides any default. `qsh trust set-role <name> <role>` changes one
+  later. `pair invite --role` fixes the role the host will give the
+  redeeming peer; the redeemer cannot choose it.
+- Existing pins have no `role` key and are judged as `none`. Upgrading does
+  not widen anyone's access, and `acl.toml` keeps working for them as
+  before. To move such a peer onto a role, run `qsh trust set-role`.
+- A role and an `acl.toml` row are combined by union. `acl.toml` is now
+  optional: with no file, roles still work. A file that does not parse
+  still denies every request, role grants included. `forward.socks` is in
+  no role, and the always-deny gate runs before roles.
+- Roles are read on every request, so `trust set-role` and `trust remove`
+  apply without a restart. `acl.toml` still has no hot reload. If
+  `trust.toml` cannot be parsed, pin authentication keeps using the last
+  good snapshot and role grants stop until the file parses again.
+- `qsh acl show`, `qsh acl check` and `qsh doctor` report roles
+  (`docs/CLI.md` §6.15, §6.17, §6.19).
+- `full` lets the serve account reach any path through `qsh cp`, which is
+  as strong as `exec.run`. Grant it deliberately.
+
+### Closing connections when trust is withdrawn
+
+`qsh trust remove`, lowering a role with `qsh trust set-role`, and renaming
+a pin that has a role now close that peer's open connections on this device
+within 2 seconds, in a running `qsh serve`, `qsh listen` or `qsh serve
+--to` (ADR-0031). Before, an established connection kept its authority
+until it dropped. Sessions are not ended; a closed connection detaches
+them. The change applies to this device only. For up to 2 seconds a request
+on the old connection can still pass on an `acl.toml` row.
+
+### `qsh cp`
+
+`qsh cp [-r] [-p] [-q] [--no-clobber] SRC... DST` copies between this
+machine and a qsh host with scp's operand syntax, `[user@]host:path`
+(ADR-0029, `docs/CLI.md` §6.21). It works over forward and reverse routes.
+Transfers are checked with BLAKE3 and written to a temporary file that is
+renamed into place, so an overwrite replaces the destination file rather
+than writing into it. Remote paths under qsh's own config, state and
+runtime directories are always refused, whatever the role or `paths` row,
+and every such denial is the same `PERMISSION_DENIED`.
+
+What it is not: scp's transport options are refused, remote-to-remote
+copy is refused, there is no resume, a tree copy is not atomic and exits
+`255` on a partial failure, and symlinks found inside a tree are skipped
+and reported. `acl.toml` rows can carry a `paths` list to limit file
+actions.
+
+### SSH bootstrap
+
+If you can already `ssh` to a machine, `qsh pair ssh <dest>` pins both
+machines to each other over that connection (ADR-0044). The remote pin
+gets role `full` unless you pass `--role`; the pin on this machine gets
+`none`. `qsh pair ssh <dest> --reverse --to <address>` sets up a reverse
+target the same way (remote pin `full`, this machine's pin `reverse`). In
+human mode, `qsh <host>` and `qsh cp` on a name with no pin run the same
+bootstrap on their own and print a line to stderr first. `--json`,
+`--jsonl` and `[ssh].bootstrap = "off"` never start it. It uses the
+system `ssh`, so `~/.ssh/config`, ssh-agent and known_hosts apply. It
+does not install qsh on the remote or start `qsh serve`. The remote end
+is the hidden `qsh pair ssh-respond`.
+
+### Operations surface
+
+- `qsh service install --activate`, `--deactivate` and `--live` call
+  `launchctl`, `systemctl --user` or `schtasks`, and only when you pass the
+  flag. Always-on recipes (Linux linger, a macOS LaunchDaemon, a Windows
+  boot task) are documented in `docs/deploy/service.md` and qsh does not
+  set them up. `qsh doctor` has new findings: `keystore_session_bound`,
+  `launchagent_session_scoped` and `logon_task_session_scoped`.
+- `qsh identity move-key --to file|platform` moves the device key between
+  stores without changing the fingerprint.
+- `qsh sessions` takes `--state`, `--writer` and `--attachable`.
+- `qsh audit` queries this machine's audit log. It is local only and has no
+  wire message. Nothing deletes or shortens the log.
+- `README.md` was rewritten around the first-run flow.
+
+### Windows
+
+Windows 10 1809 or later runs both ends with the same features as Linux
+and macOS (ADR-0035).
+
+- Client: interactive attach on the console (raw VT input, resize
+  polling), `exec`, `-L`/`-R`/`-D`, `qsh cp`, `qsh listen` and `serve --to`
+  over a named pipe, the ssh bootstrap, `qsh service` on Task Scheduler,
+  and sleep detection.
+- Host: PTY sessions on ConPTY with each session in a Job Object, `exec` in
+  a Job Object, the seven session signals mapped to console events,
+  `qsh cp` (drive paths; UNC and device paths are refused), `setup host`,
+  `pair invite` and `pair ssh-respond`.
+- Files that qsh keeps private get an owner-only DACL, the device key can
+  live in Credential Manager, and the audit log is locked with `LockFileEx`.
+  Where an owner-only DACL cannot be applied (FAT/exFAT, a share without
+  ACLs), qsh creates nothing and fails with `CONFIG_ERROR`.
+- The first inbound bind triggers a Windows Defender Firewall prompt per
+  executable path. See Known limitations in the README.
+
+### Fixes and internal changes
+
+- Several flaky tests were fixed on the test side (supervised tunnels,
+  reverse registration budgets, trust withdrawal on `listen`), with no
+  product behavior change.
+- A Windows client attached to a Windows host session no longer lets the
+  host's win32 input mode request reach the local console, which had made
+  `~d` at the start of a line stop working.
+- `qsh-core` and `qsh-cli` no longer depend on `quinn`. They use the neutral
+  types in `qsh-transport`, and `cargo xtask arch` enforces it.
+  Behavior is unchanged.
+- Rust toolchain 1.99.0 (was 1.98.1). `rustls` 0.23.46, which fixes a
+  certificate decompression advisory. The keychain code moved from
+  `keyring` 3.6 to `keyring-core` 1 with per-platform store crates; the
+  stored format (service `qsh`, account `device_id`, base64 PKCS#8) is
+  unchanged. A Linux Secret Service round trip between the old and new
+  binaries passed in both directions. A real macOS Keychain round trip
+  has not been run on this build.
+- Integration tests in each crate are now a single `tests/it` binary.
+
+### Assets and signing
+
+Nine assets plus `SHA256SUMS`. Windows aarch64 and the Windows installer
+are new.
+
+| Platform | Asset |
+|---|---|
+| macOS, Apple silicon | `qsh-v0.5.0-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `qsh-v0.5.0-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `qsh-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 (glibc) | `qsh-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 (static, musl) | `qsh-v0.5.0-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64 (static, musl) | `qsh-v0.5.0-aarch64-unknown-linux-musl.tar.gz` |
+| Windows x86_64 | `qsh-v0.5.0-x86_64-pc-windows-msvc.zip` |
+| Windows aarch64 | `qsh-v0.5.0-aarch64-pc-windows-msvc.zip` |
+| Windows installer | `install.ps1` |
+
+Each archive holds the binary and the generated man pages under `man/`.
+Every asset, `SHA256SUMS` included, has a build provenance attestation;
+`gh attestation verify qsh-v0.5.0-x86_64-unknown-linux-gnu.tar.gz --repo
+DaveDev42/qsh` checks one, and it establishes which workflow and commit
+built the file, not that the code is correct.
+
+Installing on macOS and Linux is unchanged from `v0.4.0` (Homebrew on
+Apple silicon, `scripts/install.sh`, or by hand), with `v0.5.0` in place of
+`v0.4.0` in the asset names. On Windows there are three routes: the
+release zip, `install.ps1`, and `cargo install --locked --git
+https://github.com/DaveDev42/qsh qsh-cli` (which builds the default branch
+unless you add `--tag v0.5.0`, and installs no man pages). `install.ps1`
+checks the zip against `SHA256SUMS` before it opens it and does not run
+`gh attestation verify`; run that by hand on the zip.
+
+What is signed and what is not:
+
+- Both macOS binaries are Developer ID signed and notarized, as in
+  `v0.4.0`. Nothing is stapled.
+- Linux assets are not code-signed.
+- The Windows assets and `install.ps1` are not Authenticode signed.
+  Authenticode signing was planned and withdrawn on 2026-10-19 because of
+  cost, and Scoop and winget distribution was withdrawn the same day
+  (ADR-0035 revision history). Expect a SmartScreen warning for a `qsh.exe`
+  taken from a browser-downloaded zip and started from Explorer, and a
+  block on a PC with Smart App Control on. A downloaded `install.ps1` may
+  need `Unblock-File`. `irm ... | iex`, a `qsh.exe` started from a
+  terminal, and a `cargo install` build are not affected. Integrity rests
+  on `SHA256SUMS` and the provenance attestation.
+
+### What is still unproven
+
+- Windows has CI coverage on `windows-latest` (ConPTY sessions, signals,
+  Job Objects, both routes) but no hands-on round: `docs/campaigns/p1-windows.md`
+  has not been run. Real suspend and resume on Windows and the
+  `cargo install` check are in that campaign.
+- `docs/campaigns/p1-ssh-bootstrap.md` has had no round. The bootstrap is
+  tested against a fake `ssh`, not against real OpenSSH with ProxyJump,
+  ssh-agent or an encrypted key.
+- `decode_file_frame` and `parse_ssh_bootstrap_line` have had CI smoke
+  fuzz runs only, not the cumulative 72 hours the project asks for before a
+  public beta.
+- The `qsh setup` stopwatch round (`p1-setup-stopwatch`), the supervised
+  tunnel sleep and network-switch rounds (`p1-supervise-wake`), and the
+  P0 campaigns (clean-VM install on macOS, the SC1 stopwatch, the
+  real-device mobility round) are open. M18 waits on the mobility round.
+- The `v0.4.3` aarch64 musl old-glibc check passed, but an agent ran it in a
+  container, and a person should repeat it.
+- The macOS Keychain round trip and `qsh identity move-key` on a real
+  Keychain have not been run.
+
+### Not for production use
+
+Unchanged from `v0.3.0` and `v0.4.0`: the independent protocol and
+key-lifecycle review is not contracted, the wire format is not frozen, and
+the campaigns a person runs by hand are still open. This release widens
+what a new pin is allowed to do by default; read the roles section before
+you pair machines you do not control.
+
 ## `v0.4.3`
 
 A maintenance release. It updates dependencies and closes milestone M13.
