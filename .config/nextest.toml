@@ -127,3 +127,17 @@ command = 'scripts/test/short-tmpdir.sh'
 platform = 'cfg(unix)'
 filter = 'all()'
 setup = 'short-tmpdir'
+
+# The Windows Credential Manager is one per-user vault shared by every test
+# process, and concurrent writers from different processes lose updates: a
+# `CredWrite` that returned success can read back as absent, and a deleted
+# entry can reappear. Each test uses its own unique target name, so this is the
+# OS store racing, not a name collision. Tests that touch the real store
+# therefore run one at a time. Harmless on macOS/Linux, where they are ignored
+# or take no part.
+[test-groups.os-credential-store]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(qsh-core) & test(/^identity::keystore::tests::(credential_manager_|platform_store_round_trips)/)'
+test-group = 'os-credential-store'
