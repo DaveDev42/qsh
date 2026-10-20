@@ -8,6 +8,8 @@ M20(Windows host)이 2026-10-18 닫혔다(`docs/ROADMAP.md` M20 마감 노트). 
 
 여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다.
 
+회차의 대상 태그는 `v0.5.0`이다(2026-10-20, 태그 커밋 `1c653e0`, release run 39354944687 초록, 자산 9개와 `SHA256SUMS`). M15~M20 착지와 Windows 자산이 모두 담겨 있어 `p1-windows`·`p1-ssh-bootstrap`·`p1-setup-stopwatch`·`p1-supervise-wake`와 P0 회차가 이 태그에서 돈다. 첫 태그 push(`02d4c32`)는 musl 빌드가 `libc::time_t` deprecation 경고로 실패해 아무것도 게시되지 않았고, `1c653e0`이 고친 뒤 같은 이름으로 다시 찍었다.
+
 ### 0.1 P0에서 열린 일곱
 
 M20 계획 §0.1의 일곱 항목을 문면 그대로 승계한다. M8 DoD 3은 M18의 착수 조건이고, 이것이 닫히면 M18을 연다.
@@ -27,7 +29,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M11. 소유: 사람.
 - [ ] **`p1-supervise-wake` 회차 넷.** 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 출처 M12(ADR-0024 결정 12). 소유: 사람.
-- [ ] **`decode_file_frame`·`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M15·M16. 공개 beta 전(`docs/design/protocol.md` §13). 소유: 사람.
+- [ ] **`decode_file_frame`·`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M15·M16. 공개 beta 전(`docs/design/protocol.md` §13). 에이전트가 Dave-Windows-WSL에서 `parse_openssh_key`와 함께 돌리는 중이다(run-id `m8-fuzz-20261020-0931`, 커밋 `60e54fa`, 타깃당 프로세스 하나 `-max_total_time=259200`, 2026-10-20 09:3x 시작). 끝나면 `docs/campaigns/m8-fuzz.md`에 배치로 기록하고 이 항목과 위 `parse_openssh_key` 항목을 판정한다. 소유: 에이전트(실행 중).
 - [ ] **실제 OpenSSH 위의 SSH 부트스트랩 회차.** `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`). Windows 원격이 응답자가 되는 회차는 이 문서가 아니라 `p1-windows.md` W7이 맡는다(Step 10). 소유: 사람.
 
 ### 0.3 M19가 만든 사람 몫
@@ -46,7 +48,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 M20 계획 §1에서 열린 채로 넘어온 항목이다.
 
 - [ ] macOS Keychain 왕복(`08a6173` 이후 keyring-core 1). `docs/design/testing.md` L1 수동 단계.
-- [ ] 다음 태그 run에서 `release.yml`의 Apple 서명·공증과 provenance 확인(Windows 자산은 미서명, ADR-0035 개정 이력 2026-10-19).
+- [x] 다음 태그 run에서 `release.yml`의 Apple 서명·공증과 provenance 확인(Windows 자산은 미서명, ADR-0035 개정 이력 2026-10-19). `v0.5.0`(run 39354944687)에서 macOS 두 job의 `codesign` Authority가 Developer ID Application이고 notarytool이 둘 다 `Accepted`다. 받은 자산 다섯과 `SHA256SUMS`가 `sha256sum -c`를 통과하고, 각 digest에 `refs/tags/v0.5.0`·`1c653e0`을 가리키는 provenance attestation이 하나씩 있다(attestations API로 확인, 이 머신의 gh 2.45에는 `gh attestation verify`가 없어 서명 검증 자체는 하지 않았다). x86_64 musl 바이너리는 static-pie이고 `qsh 0.5.0`을 낸다.
 - [ ] `qsh identity move-key` 왕복을 macOS Keychain·Linux Secret Service에서.
 - [ ] `launchctl print system/io.qsh.<mode>`의 root 요구 확인(ADR-0032 결정 18 셋째 항목).
 - [ ] Windows `Password` 주체 작업의 Credential Manager 읽기(ADR-0032 결정 15 첫 항목). M19가 `keystore_session_bound`를 보수적으로 내는 것으로 닫았고, 실측은 열려 있다.
@@ -56,6 +58,8 @@ M20 계획 §1에서 열린 채로 넘어온 항목이다.
 - [x] `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`의 CI 흔들림(run 39135082029). 원인은 테스트 쪽이다. 흐름에 막힌 peer는 보내는 것이 없어서 host의 CONNECTION_CLOSE 한 장을 놓치면 다음 keep-alive(15초)까지 모르고, 대기 한도는 8초다. `448d69a`가 닫힘 대기 중 probe를 보내게 고쳤고, 같은 커밋이 Windows 부하에서 나온 `unreadable_trust_toml_defers_the_comparison_until_it_can_be_read`의 공유 위반(32) 흔들림과 ConPTY `conpty_last_byte_arrives_before_the_exit_event`의 escape 순서 의존도 고쳤다. 부하 Linux 50/50, Windows 50/50. `session_follow`의 두 세션 바이트 비교는 `e7997f4`가 한 세션 ring 두 번 읽기로 바꿨다.
 
 - [x] `tunnel_supervise::supervised_forward_initial_open_failure_is_not_retried`의 windows-latest 흔들림(job 117519179651, `AUTH_FAILED`). `kill_serve` 뒤 빈 UDP 포트를 병렬 테스트의 host가 다시 잡아 dial이 모르는 peer에 닿은 것으로 보고, `c9e5367`이 응답 없는 소켓으로 포트를 붙잡는다. 부하 Linux 50/50, Windows 50/50.
+- [x] `identity::keystore::tests::credential_manager_round_trip_on_the_runner`의 windows-latest 흔들림(run 39352939458, 삭제한 항목이 다시 읽힘). 실제 Credential Manager를 쓰는 테스트 둘이 nextest의 병렬 프로세스로 같은 사용자 vault에 동시에 쓰다 갱신을 잃는다. 대상 이름은 ULID라 겹치지 않고 store crate에 캐시는 없다. Dave-Windows에서 동시 실행 300회 중 4회 재현했다. `b7ed672`가 nextest test group으로 직렬화했다. 서로 다른 대상 이름의 동시 쓰기가 갱신을 잃는 OS 동작이라 제품 경로에서도 qsh와 다른 프로그램이 같은 순간 vault에 쓰면 같은 일이 날 수 있다. qsh는 키를 init·move-key 때만 쓰고 쓴 직후 다시 읽어 확인하지 않으므로, 회차 W8(Credential Manager 왕복)에서 이 가능성을 함께 본다.
+- [x] musl release 빌드의 deprecation 경고(`v0.5.0` 첫 push, run 39351214931). PR 게이트에 musl 타깃이 없어 놓쳤다. `1c653e0`이 고치고 `ci.yml`에 `clippy-musl` 잡을 더해 `ci-ok`가 요구한다.
 - [ ] 공유 runner 위 PTY echo p95 게이트의 경계 근접. 10-18 야간 perf의 `tunnel_echo_under_load`가 p95 10.959ms, 같은 날 acceptance의 `file_copy_echo_under_load`가 10.176ms로 10ms를 넘었고, 최근 야간 값이 9.6ms대에 자주 머문다. 기준은 `docs/design/protocol.md` §12의 수용 기준이라 낮추지 않는다. 붉음이 잦아지면 원인(runner 편차인지 회귀인지)을 perf 추세로 가르고, 재시도나 측정 방식 변경은 `docs/design/testing.md` CI 규율에 결정을 적은 뒤에 한다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
