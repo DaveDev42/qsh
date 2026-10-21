@@ -680,7 +680,7 @@ host 없이 호출한 결과에는 `host` field가 없다 — omitted, `null`이
 
 `file.v1`(ADR-0029)은 host가 원격 파일 op와 `FILE_DATA` 스트림을 처리한다는 뜻이다. unix host와 Windows host가 모두 광고하므로 광고 집합은 빌드에 따라 갈리지 않고 `capabilities.json` golden이 두 빌드에 같은 값이다. 광고하지 않는 peer에게 `qsh cp`(§6.21)는 요청을 보내기 전에 `UNSUPPORTED`로 끝난다.
 
-`version`의 `data.build.commit`은 이 binary가 컴파일될 때 `QSH_BUILD_COMMIT` 환경변수가 있었을 때만 채워지는 additive optional field다(`docs/ROADMAP.md` M7 감사 개정 ③): CI는 commit sha를 주입하고, 그런 변수 없이 만든 local build는 `build` field 자체가 통째로 생략된다 — 조작된 값이나 빈 문자열이 아니라 부재다.
+`version`의 `data.build.commit`은 이 binary가 컴파일될 때 commit sha를 알 수 있었을 때만 채워지는 additive optional field다(`docs/ROADMAP.md` M7 감사 개정 ③): CI는 `QSH_BUILD_COMMIT`으로 sha를 주입하고, `cargo install --git`이 받은 git checkout에서 만든 build는 `qsh-core`의 `build.rs`가 그 checkout의 `HEAD`에서 sha를 구한다. 둘 다 없는 local build는 `build` field 자체가 통째로 생략된다 — 조작된 값이나 빈 문자열이 아니라 부재다.
 
 ### 6.11 Identity와 trust
 
