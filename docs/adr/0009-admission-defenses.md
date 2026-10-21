@@ -3,6 +3,8 @@
 날짜: 2026-09-02
 상태: 승인됨
 
+개정 이력: 2026-10-21 결정 3의 키에서 IPv4-mapped IPv6 주소(`::ffff:a.b.c.d`)를 먼저 IPv4로 정규화해 그 IPv4 주소의 /32 키를 쓴다. dual-stack `[::]` listener는 IPv4 peer를 이 모양으로 본다. Linux 기본값이 이미 그렇고, ADR-0046 이후에는 모든 OS가 그렇다. 정규화가 없으면 모든 IPv4 peer가 `::/64` 버킷 하나를 나눠 써서, IPv4 client 하나가 다른 IPv4 client 전부의 source별 한도를 소진시킬 수 있었다. `SourceKey::from_addr`(`crates/qsh-core/src/admission.rs`)와 `an_ipv4_mapped_peer_is_keyed_like_its_plain_ipv4_form`이 이 줄의 구현이다.
+
 ## 맥락
 
 QSH 데몬(`qsh serve`, `qsh listen`)은 인터넷에 직접 노출되는 QUIC 리스너다. M1 이후 `Listener::accept`(`crates/qsh-transport/src/endpoint.rs`)는 `quinn::Incoming`을 그대로 `accept().await`했다 — `retry`/`refuse`/`ignore`/`remote_address_validated` 호출이 0건이었고 `bind_inner`는 `max_incoming`·`incoming_buffer_size(_total)`을 quinn 기본값(65536 / 10 MiB / 100 MiB)에 그대로 뒀다. `Server::run`과 `Listen::run`(둘 다 인터넷 노출 accept 루프)은 각 `Incoming`마다 무상한으로 task를 spawn했다.

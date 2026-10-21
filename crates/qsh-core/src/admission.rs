@@ -234,8 +234,11 @@ impl SketchRow {
 /// extensions rotate the low 64 bits for one legitimate host, so keying
 /// any narrower lets a single host looking like many hosts evade the
 /// limiter, and any wider lets one attacker holding a /64 look like
-/// unboundedly many). IPv4 and IPv6 never collide with each other: the
-/// discriminant is part of what gets hashed.
+/// unboundedly many). An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`, how a
+/// dual-stack `[::]` listener sees an IPv4 peer, ADR-0046) is canonicalized
+/// first and keyed exactly like the plain IPv4 address; otherwise every IPv4
+/// peer would share the single `::/64` bucket. IPv4 and IPv6 never collide
+/// with each other: the discriminant is part of what gets hashed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SourceKey {
     V4(u32),
@@ -244,7 +247,7 @@ enum SourceKey {
 
 impl SourceKey {
     fn from_addr(addr: IpAddr) -> Self {
-        match addr {
+        match addr.to_canonical() {
             IpAddr::V4(v4) => SourceKey::V4(u32::from(v4)),
             IpAddr::V6(v6) => {
                 let seg = v6.segments();
