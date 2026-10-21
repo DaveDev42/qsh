@@ -152,8 +152,8 @@ fn doctor_fail_on_does_not_change_the_255_of_a_doctor_that_cannot_start() {
 /// platform (ADR-0035 decision 17, `docs/CLI.md` §6.17): only the ones that
 /// read the machine differ. `qsh_path_shadowed` depends on `$PATH`;
 /// `service_not_registered` needs a service backend, which Windows gets with
-/// the Windows service; `bindv6only_blocks_ipv4` fires where the OS defaults
-/// a dual-stack bind to IPv6-only, Windows among them. Everything else is
+/// the Windows service; `bindv6only_blocks_ipv4` fires only where the OS cannot
+/// open a dual-stack IPv6 socket (ADR-0046). Everything else is
 /// what the client's own state says, and every code is one of the shared
 /// vocabulary.
 #[test]

@@ -519,9 +519,12 @@ fn tune_socket_buffer(
 /// `quinn::Endpoint::client`/`::server`'s own internal bind (which offers
 /// no way to ask for a bigger buffer). `dual_stack_v6` mirrors
 /// `quinn::Endpoint::client`'s own best-effort `IPV6_V6ONLY` handling for
-/// a wildcard v6 bind — `Listener::bind` never asked for this (its
-/// `Endpoint::server` precedent didn't either), so only
-/// [`Dialer::dial`]'s replacement passes `true`. Also used by
+/// a wildcard v6 bind. [`Dialer::dial`]'s replacement and the listener
+/// (`bind_listener_socket`, `docs/adr/0046-dual-stack-wildcard-listener.md`)
+/// both pass `true`, so a `[::]` listener accepts IPv4 peers on every OS
+/// instead of leaving that to the OS default (Windows opens new IPv6
+/// sockets `IPV6_V6ONLY`). Failing to clear the option never fails the
+/// bind. Also used by
 /// `qsh_core::client::reconnect`'s migration rebind (`PathBinder`), so a
 /// post-migration socket keeps the same tuning and dual-stack behavior
 /// the original dial got.
@@ -536,6 +539,16 @@ pub fn bind_tuned_udp_socket(
     addr: SocketAddr,
     dual_stack_v6: bool,
 ) -> io::Result<std::net::UdpSocket> {
+    let socket = prepare_udp_socket(addr, dual_stack_v6)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
+}
+
+/// Everything [`bind_tuned_udp_socket`] does before `bind(2)`. Split out
+/// because Linux forces `IPV6_V6ONLY` on once a socket binds a specific
+/// (non-wildcard) IPv6 address, so only the pre-bind state can show the
+/// option was cleared on a loopback address.
+fn prepare_udp_socket(addr: SocketAddr, dual_stack_v6: bool) -> io::Result<Socket> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {
@@ -556,9 +569,19 @@ pub fn bind_tuned_udp_socket(
         Socket::set_send_buffer_size,
     );
     socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    Ok(socket.into())
+    Ok(socket)
 }
+
+/// The server-side UDP bind: [`bind_tuned_udp_socket`] with
+/// `dual_stack_v6=true` (`docs/adr/0046-dual-stack-wildcard-listener.md`
+/// decision 1). Kept as one helper so a test can pin the flag the
+/// [`Listener`] actually uses ([`LISTENER_DUAL_STACK_V6`]).
+pub(crate) fn bind_listener_socket(bind: SocketAddr) -> io::Result<std::net::UdpSocket> {
+    bind_tuned_udp_socket(bind, LISTENER_DUAL_STACK_V6)
+}
+
+/// The `dual_stack_v6` argument the listener binds with.
+pub(crate) const LISTENER_DUAL_STACK_V6: bool = true;
 
 fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::aws_lc_rs::default_provider())
@@ -1370,8 +1393,8 @@ impl Listener {
     ) -> Result<Self, SetupError> {
         let verifier = Arc::new(QshPeerVerifier::new(evaluator));
         let server_config = server_config(&identity, verifier.clone(), transport)?;
-        let socket = bind_tuned_udp_socket(bind, false)
-            .map_err(|source| SetupError::Bind { addr: bind, source })?;
+        let socket =
+            bind_listener_socket(bind).map_err(|source| SetupError::Bind { addr: bind, source })?;
         let endpoint = quinn::Endpoint::new(
             server_endpoint_config(reset_key),
             Some(server_config),

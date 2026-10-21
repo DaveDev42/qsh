@@ -48,8 +48,9 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0043](0043-no-tcp-fallback.md) | TCP/TLS fallback을 만들지 않는다. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다. M14를 철회로 닫고 (a)의 transport facade는 유지한다 | 승인됨 |
 | [0044](0044-ssh-bootstrap.md) | SSH 부트스트랩. pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 ssh를 한 번 거쳐(`ssh -G`로 HostName 해석, ssh 설정·agent·known_hosts는 ssh가 처리) 원격 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. 원격 pin은 0045 role `full`(`--role`), 이 장비 쪽 pin은 role `none`이고, 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다 | 승인됨 (2026-10-14) |
 | [0045](0045-trust-roles.md) | trust pin에 role 하나(`full`·`exec`·`tunnel`·`read-only`·`reverse`·`none`)를 두어 장비를 신뢰 등록하면 그대로 권한이 주어지게 한다. `acl.toml`은 세밀한 제어용 선택 사항이 되고, role 키가 없는 기존 pin은 `acl.toml`만 따르며, 파싱할 수 없는 `acl.toml`은 role grant까지 모두 거부한다(ADR-0017·0024·0025·0029·0038 관련 결정 개정) | 승인됨 (2026-10-14) |
+| [0046](0046-dual-stack-wildcard-listener.md) | IPv6 주소에 bind하는 listener(`qsh serve`·`qsh listen`·`pair ssh-respond`의 bind 시험)는 client처럼 `IPV6_V6ONLY`를 best-effort로 꺼서, 기본 `[::]:4433`이 Windows에서도 Linux처럼 IPv4 peer를 받는다. doctor `bindv6only_blocks_ipv4`는 OS가 끄기를 거부할 때만 나온다 | 승인됨 (2026-10-21) |
 
-P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회), 0044(SSH 부트스트랩), 0045(역할 기반 권한)가 받았으므로 다음 새 번호는 0046이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회), 0044(SSH 부트스트랩), 0045(역할 기반 권한), 0046(dual-stack listener)이 받았으므로 다음 새 번호는 0047이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0034 세션 거처(M18). 착수 조건(M8 DoD 3 기록)이 닫히면 쓴다
 

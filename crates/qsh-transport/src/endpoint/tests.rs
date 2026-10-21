@@ -848,3 +848,35 @@ async fn a_connection_with_its_chain_dropped_cannot_be_reverified() {
     blind.close_trust_withdrawn();
     assert!(conn.closed_by_trust_withdrawal(), "one shared close record");
 }
+
+/// `docs/adr/0046-dual-stack-wildcard-listener.md` decision 5: the bind
+/// helper clears `IPV6_V6ONLY` when asked for dual-stack. Reads the
+/// pre-bind socket on an IPv6 loopback address (Linux forces the option on
+/// at bind to a non-wildcard address) and never binds a wildcard. Skips
+/// when the host has no IPv6.
+fn dual_stack_pre_bind_only_v6(dual_stack_v6: bool) -> Option<bool> {
+    match prepare_udp_socket("[::1]:0".parse().unwrap(), dual_stack_v6) {
+        Ok(sock) => Some(sock.only_v6().unwrap()),
+        Err(err) => {
+            eprintln!("skipping: no IPv6 sockets on this host ({err})");
+            None
+        }
+    }
+}
+
+#[test]
+fn bind_tuned_udp_socket_dual_stack_clears_ipv6_v6only() {
+    if let Some(only_v6) = dual_stack_pre_bind_only_v6(true) {
+        assert!(!only_v6);
+    }
+}
+
+/// The listener binds with `dual_stack_v6=true` (ADR-0046 decision 1), and
+/// that flag clears the option.
+#[test]
+fn listener_binds_dual_stack() {
+    const { assert!(LISTENER_DUAL_STACK_V6) };
+    if let Some(only_v6) = dual_stack_pre_bind_only_v6(LISTENER_DUAL_STACK_V6) {
+        assert!(!only_v6);
+    }
+}
