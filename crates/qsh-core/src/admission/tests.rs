@@ -1043,3 +1043,35 @@ async fn validated_rate_limited_rejections_aggregate_into_first_row_then_summary
         "the summary row never carries an observed address"
     );
 }
+
+fn v6(s: &str) -> IpAddr {
+    s.parse().expect("test address parses")
+}
+
+#[test]
+fn ipv4_mapped_peers_get_distinct_keys_per_ipv4_address() {
+    assert_ne!(
+        SourceKey::from_addr(v6("::ffff:192.0.2.1")),
+        SourceKey::from_addr(v6("::ffff:192.0.2.2"))
+    );
+}
+
+#[test]
+fn an_ipv4_mapped_peer_is_keyed_like_its_plain_ipv4_form() {
+    assert_eq!(
+        SourceKey::from_addr(v6("::ffff:192.0.2.1")),
+        SourceKey::from_addr(v4(192, 0, 2, 1))
+    );
+}
+
+#[test]
+fn ipv6_peers_are_still_keyed_by_their_64_bit_prefix() {
+    assert_eq!(
+        SourceKey::from_addr(v6("2001:db8:1:2::1")),
+        SourceKey::from_addr(v6("2001:db8:1:2:ffff::9"))
+    );
+    assert_ne!(
+        SourceKey::from_addr(v6("2001:db8:1:2::1")),
+        SourceKey::from_addr(v6("2001:db8:1:3::1"))
+    );
+}

@@ -1271,7 +1271,7 @@ qsh serve --to <listener|host:port> [--name <name>]
   속도 상한이고 `[serve].validated_rate_per_source`(기본 10/초)는 **검증된**(Retry
   토큰 왕복을 마친) Initial에 적용되는 별개의 source당 속도 상한이다. 검증을 통과해도 시도 속도
   자체는 통과 전과 같은 자릿수로 계속 제한된다(`docs/adr/0009-admission-defenses.md`의 한계
-  절). 두 속도 상한 모두 키는 동일하다(IPv4 /32, IPv6 /64). 2초 window에서
+  절). 두 속도 상한 모두 키는 동일하다(IPv4 /32, IPv6 /64. IPv4-mapped IPv6 주소는 IPv4로 정규화해 센다). 2초 window에서
   지속 10/초까지는 항상 통과하고 window 하나 안에 몰린 순간 burst는 최대 20건까지 받아준 뒤 그
   이상을 거부한다. 두 축의 기본값이 같다는 것은 검증 축이 미검증 축을 통과한 것보다 많은 시도를
   볼 수 없다는 뜻이고, 그래서 기본 설정에서 `validated_rate_limited` 거부는 거의 나오지 않는다.
