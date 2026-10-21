@@ -1,6 +1,6 @@
 # P1 Windows 캠페인 — 실제 Windows 장비에서 CI가 못 보는 것을 확인한다 (M19 몫)
 
-상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). W11은 2026-10-19 ADR-0035 개정 이력(Authenticode 서명 철회, 이어 scoop·winget 철회)에 따라 서명 확인과 scoop·winget 변형을 빼고 `cargo install` 변형을 더해 다시 고정했다(§2.1, §4.9). 회차가 돌기 전의 재고정이라 §6의 사후 변경 금지에 걸리지 않는다. 회차는 아직 돌지 않았다. 대상 태그가 없다.
+상태: 기준 사전 고정(M19 몫). host 회차 W2, W3b, W7은 M20이 더해 다시 고정했다(§4.12~§4.14, ADR-0035 결정 18). W11은 2026-10-19 ADR-0035 개정 이력(Authenticode 서명 철회, 이어 scoop·winget 철회)에 따라 서명 확인과 scoop·winget 변형을 빼고 `cargo install` 변형을 더해 다시 고정했다(§2.1, §4.9). 회차가 돌기 전의 재고정이라 §6의 사후 변경 금지에 걸리지 않는다. 대상 태그는 `v0.5.0`이다(§2.4). 2026-10-21 에이전트가 W8과 W11 b·c를 돌렸다(§7).
 
 ## 1. 목적과 지위
 
@@ -70,12 +70,12 @@ W와 L, W와 M은 서로 다른 장비다. 한 장비 안의 loopback은 회차�
 
 | 항목 | 값 |
 |---|---|
-| 대상 태그 | |
-| 태그의 커밋 SHA | |
-| release run | |
-| `SHA256SUMS`의 x86_64 zip 줄 | |
-| `SHA256SUMS`의 aarch64 zip 줄 | |
-| `SHA256SUMS`의 `install.ps1` 줄 | |
+| 대상 태그 | `v0.5.0` |
+| 태그의 커밋 SHA | `1c653e0b6046fcdfb15ffa1781c4e9d69fa44d8b` |
+| release run | 39354944687 |
+| `SHA256SUMS`의 x86_64 zip 줄 | `7b9653a6e3899581664ec615508af72f16267367f613457a5c42c94c9609bc5d  qsh-v0.5.0-x86_64-pc-windows-msvc.zip` |
+| `SHA256SUMS`의 aarch64 zip 줄 | `0beef1310347d76552395f0e384666a7ccc6b150f25a647543a414e4a8ffaa42  qsh-v0.5.0-aarch64-pc-windows-msvc.zip` |
+| `SHA256SUMS`의 `install.ps1` 줄 | `eef4c2dd497798c0ee4d8f4d0cfd6e8f076f14d886ab6cab664c449c0824db05  install.ps1` |
 
 이 문서를 고정한 커밋의 해시는 `docs/ROADMAP.md` §5.5의 Windows 행에 main 세션이 적는다.
 
@@ -488,8 +488,25 @@ FAIL이 나오면 원인을 분류한다.
 
 | 회차 | 변형 | 날짜(UTC) | 대상 태그 | 장비 (W / host, OS 빌드, 터미널) | 확인 | 결과 | 기록자 |
 |---|---|---|---|---|---|---|---|
+| W8 | - | 2026-10-21 | `v0.5.0` | Dave-Windows / 없음, Windows 11 Pro 25H2 빌드 26200.9457, 대화형 로그온 세션의 비관리자 예약 작업(pwsh 7) | a=PASS b=PASS c=PASS d=미실행 | 무효 | Claude(에이전트) |
+| W8 | - | 2026-10-21 | `v0.5.0` | Dave-Windows / 없음, Windows 11 Pro 25H2 빌드 26200.9457, 대화형 로그온 세션의 비관리자 예약 작업(pwsh 7) | a=PASS b=PASS c=PASS d=미실행 | 보류 | Claude(에이전트) |
+| W11 | b | 2026-10-21 | `v0.5.0` | Dave-Windows / 없음, Windows 11 Pro 25H2 빌드 26200.9457, 대화형 로그온 세션의 비관리자 예약 작업(pwsh 7) | b1=PASS b2=PASS | PASS | Claude(에이전트) |
+| W11 | c | 2026-10-21 | `v0.5.0` | Dave-Windows / 없음, Windows 11 Pro 25H2 빌드 26200.9457, 대화형 로그온 세션의 비관리자 예약 작업(pwsh 7) | c1=FAIL c2=FAIL | 무효 | Claude(에이전트) |
+| W11 | c | 2026-10-21 | `v0.5.0` | Dave-Windows / 없음, Windows 11 Pro 25H2 빌드 26200.9457, 대화형 로그온 세션의 비관리자 예약 작업(pwsh 7) | c1=FAIL c2=PASS | FAIL | Claude(에이전트) |
 
 열 채우는 법: `확인`에는 §4가 그 변형에 적은 문자를 모두 `a=PASS b=FAIL` 꼴로 적는다. `결과`는 그 문자가 모두 PASS(허용된 "해당 없음" 제외)일 때만 `PASS`다. 변형이 없는 회차는 `변형` 칸에 `-`를 적는다. 행마다 비고 문단을 표 아래에 회차·변형을 머리에 달아 잇는다. 비고에는 `qsh version`, `winver`, 터미널 종류, 호스트의 `qsh version`, 명령과 출력 원문, 막힌 지점의 원문 에러, 정리를 했는지를 적는다. W4는 반복 기록표(`docs/campaigns/p1-supervise-wake.md` §7)를, W5는 pipe 시도의 출력 원문을, W6은 `Get-CimInstance`와 `Get-NetUDPEndpoint` 출력을, W10은 부팅 시각과 `serve.err.log` 줄을 붙인다.
+
+회차 공통 비고. 이 다섯 행은 에이전트(Claude)가 돌렸다. W 자체만 쓰는 회차라 host가 없다. 에이전트는 Dave-Windows에 OpenSSH로 들어갔다. ssh 세션의 토큰은 관리자 권한이고, 그 세션은 Credential Manager를 쓰지 못한다(`qsh init --key-store platform`이 `Windows ERROR_NO_SUCH_LOGON_SESSION`, `auto`는 같은 경고를 내고 파일 저장소로 내려간다). 그래서 판정에 쓴 명령은 모두 dave의 활성 대화형 로그온 세션에 `New-ScheduledTaskPrincipal -LogonType Interactive -RunLevel Limited`로 등록한 일회용 예약 작업 안에서 돌렸다. 작업 출력의 첫 줄에 `IsInRole('Administrators')`가 `False`로 찍혔고, 작업은 끝나고 지웠다. `-LogonType S4U -RunLevel Limited`는 이 장비에서 관리자 토큰(`True`)을 받아 회차에 쓰지 않았다. 터미널 렌더링을 보는 확인은 이 행들에 없다. zip `qsh-v0.5.0-x86_64-pc-windows-msvc.zip`의 sha256 `7b9653a6e3899581664ec615508af72f16267367f613457a5c42c94c9609bc5d`이 §2.4의 줄과 같고, 안의 `qsh.exe`의 sha256은 `322650C9152DFA5A924A0A7B3A938E9B06A67AC623261E674B36689B12C19980`이다. `qsh version`은 `qsh 0.5.0 (1c653e0b6046fcdfb15ffa1781c4e9d69fa44d8b)`.
+
+**W8 첫 행(무효).** 시작 전 클린 확인을 ssh 세션에서 했는데, 그 세션의 Credential Manager 보기는 대화형 세션과 달라 비어 보였다. 대화형 세션에는 `.qsh` 대상 항목이 25개 남아 있었다. `device_test_<ulid>` 18개는 2026-10-20의 Credential Manager 동시 실행 재현(`b7ed672`)이 남긴 것이고, `device_<ulid>` 7개는 2026-10-18 에이전트 확인이 남긴 것이다. §2.3이 깨진 시작이라 §6의 환경 잡음으로 무효다. 확인 문자는 그 시도의 결과를 적었고 d는 돌지 않았다. 항목 25개는 지웠다.
+
+**W8 둘째 행(보류).** 클린 확인을 같은 대화형 작업 안에서 했다. config·state 디렉터리 없음, `cmdkey` `.qsh` 0개, `\qsh\` 작업 0개, `Get-Command qsh -All` 0개. a: `qsh init --key-store platform --json`의 `data.key_store`가 `platform`, `device_id` `device_01M5EQ26JXSPBSRJGNJBPRH9ZE`, fingerprint `sha256:eXQQpJOZlll3COSCiHmJtFfhRVoi8VPj+XXGUizi71U=`. `cmdkey`에 `Target: LegacyGeneric:target=device_01M5EQ26JXSPBSRJGNJBPRH9ZE.qsh`이 보이고 `device.key`는 없다. b: `qsh identity move-key --to file` 뒤 `cmdkey` 항목이 없고 `device.key`가 있으며 `icacls`가 `Dave-Windows\dave:(F)` 한 줄이다. 다시 돌린 `qsh init --json`은 `"created":false`, `"key_store":"file"`, 같은 `device_id`와 fingerprint다. c: `--to platform` 뒤 항목이 다시 보이고 `device.key`가 없으며 `key_store`가 `platform`, `device_id`와 fingerprint가 그대로다. `qsh identity export`의 출력은 a·b·c에서 바이트가 같다. d는 재부팅이 필요한데 이 장비의 재부팅은 같은 박스의 WSL 세션과 진행 중인 fuzz 실행을 끊어 돌지 않았다. `qsh doctor --json`의 코드는 `acl_policy_missing`, `service_not_registered`, `bindv6only_blocks_ipv4`이고 `keystore_unavailable`이 없다. 마지막 `bindv6only_blocks_ipv4`가 ADR-0046의 출발점이다. 정리: `move-key --to file`, config·state 디렉터리 삭제, `cmdkey` `.qsh` 0개.
+
+**W11 b.** 작업 안에서 `$env:QSH_VERSION='v0.5.0'; irm https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.ps1 | iex`. 출력 순서는 `downloading …`, `verifying checksum`, `unpacking`이고 끝 줄은 `installed qsh v0.5.0 to C:\Users\dave\.local\bin\qsh.exe`. 관리자 권한을 묻지 않았다. 새 ssh 세션에서 `qsh version`이 `qsh 0.5.0 (1c653e0b6046fcdfb15ffa1781c4e9d69fa44d8b)`를 냈고, 설치된 exe의 sha256이 zip 안 `qsh.exe`와 같다. `%USERPROFILE%\.local\bin`은 이미 사용자 `PATH`에 있어서 HKCU `Path`가 전후로 같았다. 정리: `.local\bin\qsh.exe`와 man 디렉터리 삭제.
+
+**W11 c 첫 행(무효).** `cargo install --locked --git https://github.com/DaveDev42/qsh --tag v0.5.0 qsh-cli`가 14.7초 만에 `LINK : fatal error LNK1181: cannot open input file 'kernel32.lib'`로 끝났다. 이 장비의 Windows SDK 10.0.26100.0에서 `Lib\10.0.26100.0\um\x64`에 `kernel32.lib`가 빠져 있었다(477개 파일, arm64·x86에는 있음). §4.9의 전제(MSVC 툴체인과 Build Tools가 갖춰져 있다)가 깨진 시작이라 무효다. 에이전트가 SDK 번들 `winsdksetup.exe /repair`(10.0.26100.7705)로 고쳤고 그 뒤 481개가 됐다.
+
+**W11 c 둘째 행(FAIL).** 같은 명령이 비관리자 토큰으로 139초에 끝났다(cargo 1.98.1, rustc 1.98.1, Build Tools 17.14.41, `RUSTC_WRAPPER=sccache`). 끝 줄은 `Installed package `qsh-cli v0.5.0 (https://github.com/DaveDev42/qsh?tag=v0.5.0#1c653e0b)` (executable `qsh.exe`)`. 새 ssh 세션에서 `Get-Command qsh`가 `C:\Users\dave\.cargo\bin\qsh.exe`를 가리켜 c2는 PASS다. `qsh version`은 `qsh 0.5.0`만 내고 커밋을 내지 않아 c1이 FAIL이다. `build.commit`이 CI가 넣는 `QSH_BUILD_COMMIT`에서만 오기 때문이다. §6의 제품 결함으로 분류한다. 고친 뒤 새 태그에서 다시 돈다. 정리: `cargo uninstall qsh-cli`, `Get-Command qsh` 0개.
 
 ## 관련 문서
 
