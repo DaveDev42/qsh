@@ -773,9 +773,10 @@ impl Ops {
     ///
     /// `build.commit` (`docs/ROADMAP.md` M7 감사 개정 ③) is whatever
     /// `option_env!("QSH_BUILD_COMMIT")` captured when this binary was
-    /// *compiled* — not read from the environment at call time — so a
-    /// local build with no such variable set reports no `build` field at
-    /// all rather than a fabricated or empty one (M7 plan §4.1 #1 (69dd788)).
+    /// *compiled* — not read from the environment at call time. CI sets it;
+    /// for a `cargo install --git` build `crates/qsh-core/build.rs` derives
+    /// it from the cargo git checkout. A local build with neither reports
+    /// no `build` field at all rather than a fabricated or empty one (M7 plan §4.1 #1 (69dd788)).
     pub fn version(&self) -> Result<VersionData, OpError> {
         Ok(VersionData {
             version: env!("CARGO_PKG_VERSION").to_string(),
