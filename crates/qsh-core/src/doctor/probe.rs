@@ -343,43 +343,39 @@ pub fn keystore_finding(
 // ---------------------------------------------------------------------------
 
 /// Whether `addr` is the IPv6 wildcard (`[::]:port`) — the one shape
-/// [`probe_bindv6only`] is even worth running against; `dual_stack_v6=false`
-/// binds fine at any other address, wildcard or not, with no IPv4-blocking
-/// consequence (`crate::doctor::BINDV6ONLY_BLOCKS_IPV4`'s own doc).
+/// [`probe_bindv6only`] is even worth running against; an IPv4 or
+/// specific-IPv6 bind has no IPv4-blocking consequence (`crate::doctor::BINDV6ONLY_BLOCKS_IPV4`'s own doc).
 pub fn is_ipv6_wildcard(addr: SocketAddr) -> bool {
     matches!(addr, SocketAddr::V6(v6) if v6.ip().is_unspecified())
 }
 
 /// Bind a throwaway UDP socket at `addr`'s IP but an **ephemeral port**
 /// (`SocketAddr::new(addr.ip(), 0)`, same wildcard IP as the configured
-/// listen address) via `qsh_transport::bind_tuned_udp_socket(_, false)` —
-/// `dual_stack_v6=false`, `crates/qsh-transport/src/endpoint.rs` — and
-/// read back whether the OS defaulted it to `IPV6_V6ONLY`. `IPV6_V6ONLY`'s
-/// default is a per-socket/system default (Linux `net.ipv6.bindv6only`,
-/// BSD/macOS `net.inet6.ip6.v6only`, Windows fixed to 1), never
-/// port-specific, so an ephemeral-port bind answers exactly the same
-/// question a bind of the configured port would — without colliding with,
-/// or racing, a real listener already bound there (`qsh serve`/`qsh
-/// listen` running on this machine binds the configured port for the
-/// whole time doctor is probing it, which would otherwise turn every
-/// `Err` here into a false "could not tell"). A real socket, real OS
-/// default — this is the one probe in this module that is not a
-/// synthetic classifier input, because "what does this OS default a fresh
-/// dual-stack bind to" has no portable answer any other way.
+/// listen address) via `qsh_transport::bind_tuned_udp_socket(_, true)` —
+/// the same `dual_stack_v6=true` call the listener makes
+/// (`docs/adr/0046-dual-stack-wildcard-listener.md`) — and read back
+/// whether `IPV6_V6ONLY` is *still* set after that best-effort clear. So
+/// `true` means the listener could not be made dual-stack on this OS (the
+/// clear call failed or did not stick); the OS default no longer matters.
+/// The ephemeral port avoids colliding with, or racing, a real listener
+/// already bound at the configured port (`qsh serve`/`qsh listen` running
+/// on this machine would otherwise turn every `Err` here into a false
+/// "could not tell"). A real socket, because "can this OS open a
+/// dual-stack socket" has no portable answer any other way.
 ///
 /// `Err` (bind failure — no permission, unsupported family) means "could
 /// not tell", not "blocked"; [`crate::ops::Ops::doctor`]'s own caller
 /// treats that the same as "no finding" rather than guessing.
 pub fn probe_bindv6only(addr: SocketAddr) -> io::Result<bool> {
     let ephemeral = SocketAddr::new(addr.ip(), 0);
-    let std_socket = qsh_transport::bind_tuned_udp_socket(ephemeral, false)?;
+    let std_socket = qsh_transport::bind_tuned_udp_socket(ephemeral, true)?;
     let socket: socket2::Socket = std_socket.into();
     socket.only_v6()
 }
 
 /// Turn an already-observed [`probe_bindv6only`] result into at most one
 /// [`DoctorFinding`] — pure over `only_v6`, so the classification itself
-/// (fire iff the OS actually defaulted to v6-only) is unit-testable with a
+/// (fire iff the socket is still v6-only after the dual-stack clear) is unit-testable with a
 /// synthetic bool, no real socket, the same "detect vs. classify" split
 /// [`classify_connectivity`] already establishes in this module.
 pub fn bindv6only_finding(bind_display: &str, only_v6: bool) -> Option<DoctorFinding> {

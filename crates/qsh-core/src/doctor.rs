@@ -519,22 +519,18 @@ pub const LAUNCHAGENT_SESSION_SCOPED: Diagnostic = Diagnostic {
 
 /// `docs/ROADMAP.md` M9 (h) (ROADMAP's own shorthand is the bare
 /// term "bindv6only"; this repo's naming convention spells out the fuller code),
-/// `docs/CLI.md` §6.17: the effective `serve`/`listen` bind address is
-/// the IPv6 wildcard, and a live probe
-/// ([`probe::probe_bindv6only`]) shows this OS defaults a fresh
-/// dual-stack bind there to `IPV6_V6ONLY`. A real gap, not a
-/// hypothetical: `Listener::bind` calls
-/// [`qsh_transport::bind_tuned_udp_socket`] with `dual_stack_v6=false`,
-/// so the server side never explicitly clears `IPV6_V6ONLY` the way the
-/// client dialer does — on a v6-only-by-default OS (the canonical case
-/// is Windows, though this is a genuine per-OS/per-sysctl variable, not
-/// only a Windows one), a `[::]:4433` listener silently rejects IPv4
-/// peers with no signal anywhere in this build.
+/// `docs/CLI.md` §6.17, `docs/adr/0046-dual-stack-wildcard-listener.md`:
+/// the effective `serve`/`listen` bind address is the IPv6 wildcard, and a
+/// live probe ([`probe::probe_bindv6only`]) shows a fresh IPv6 UDP socket
+/// still reads `IPV6_V6ONLY` after the same best-effort clear
+/// `Listener::bind` performs (`dual_stack_v6=true`). The OS default no
+/// longer matters; only an OS that cannot open a dual-stack socket leaves
+/// a `[::]:4433` listener rejecting IPv4 peers with no other signal.
 pub const BINDV6ONLY_BLOCKS_IPV4: Diagnostic = Diagnostic {
     id: DiagnosticId::Bindv6onlyBlocksIpv4,
     code: "bindv6only_blocks_ipv4",
-    message: "The configured listen address is the IPv6 wildcard, and this OS defaults new dual-stack sockets there to IPv6-only; qsh never asks for dual-stack explicitly on the listener side. An IPv4-only peer cannot reach this listener; the dial just times out on the caller's side with no signal here.",
-    remedy: "Bind an explicit IPv4 address for IPv4 reachability (--bind 0.0.0.0:4433), or run separate listeners, or confirm this OS's IPv6 dual-stack default matches intent.",
+    message: "The configured listen address is the IPv6 wildcard, and this OS keeps IPv6 sockets IPv6-only even after qsh asks for dual-stack. An IPv4-only peer cannot reach this listener; the dial just times out on the caller's side with no signal here.",
+    remedy: "Bind an explicit IPv4 address for IPv4 reachability (--bind 0.0.0.0:4433), or run separate listeners.",
 };
 
 /// `docs/adr/0017-acl-toml-not-written.md` 결정 2: the code string
