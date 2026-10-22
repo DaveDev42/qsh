@@ -39,7 +39,7 @@ pseudo-console, `qsh exec`, `qsh cp`, port forwards, reverse mode, the ssh
 bootstrap and `qsh setup host`. See [Known limitations](#known-limitations)
 for what differs.
 
-**Status.** Version 0.5.0, not for production use. The independent review of
+**Status.** Version 0.5.1, not for production use. The independent review of
 the protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
 has not been contracted, and the wire-format freeze waits on that decision.
 Several campaigns that a person runs by hand are also still open; see
