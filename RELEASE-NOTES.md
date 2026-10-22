@@ -9,6 +9,75 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.1`
+
+A patch release on top of `v0.5.0`. It fixes a Windows host that did not
+accept IPv4 peers on the default bind, a shared admission bucket for IPv4
+peers, and a missing commit in `qsh version` for `cargo install` builds.
+The wire format, `qsh.cli/v1`, `qsh.event/v1` and the doctor code set are
+unchanged, so `v0.5.0` and `v0.4.x` peers interoperate with this build as
+they did with `v0.5.0`.
+
+### Fixes
+
+- Windows: `qsh serve` and `qsh listen` on the default `[::]:4433` now
+  accept IPv4 peers. Windows opens new IPv6 sockets IPv6-only, so on
+  `v0.5.0` those listeners silently refused every IPv4 peer, including
+  Tailscale and most LAN addresses. The listener now clears
+  `IPV6_V6ONLY` the way the client already did, which matches the Linux
+  default (ADR-0046). If you worked around this with
+  `--bind 0.0.0.0:4433`, that still works; you can drop it to accept IPv6
+  peers too.
+- `qsh doctor`'s `bindv6only_blocks_ipv4` now fires only when the OS
+  refuses to clear `IPV6_V6ONLY`. On `v0.5.0` it fired on every Windows
+  machine with an IPv6 wildcard bind.
+- On a dual-stack listener an IPv4 peer shows up as an IPv4-mapped IPv6
+  address. The per-source handshake rate limit keyed all such peers into
+  one `::/64` bucket, so one IPv4 client could use up the limit for every
+  other IPv4 client. Mapped addresses are now keyed as the plain IPv4
+  address (ADR-0009 revision history). Linux hosts on the default bind
+  have had this since the limiter landed. On Windows it appears only with
+  the IPv4 fix above.
+- `qsh version` in a build from `cargo install --locked --git
+  https://github.com/DaveDev42/qsh --tag v0.5.1 qsh-cli` now prints the
+  commit, read from the git checkout cargo made. Release assets carry
+  the commit as before. A build from a working tree without
+  `QSH_BUILD_COMMIT` still prints none.
+- `rustls-webpki` goes to 0.103.16 for RUSTSEC-2026-0382. qsh uses webpki
+  path validation only for CA-authenticated peers, whose anchors are
+  your own CA, so the distrusted public intermediates in the advisory do
+  not apply.
+
+### Assets and signing
+
+The same nine assets plus `SHA256SUMS` as `v0.5.0`, with `v0.5.1` in the
+names. Signing is unchanged: both macOS binaries are Developer ID signed
+and notarized, nothing is stapled, Linux assets are not code-signed, and
+the Windows assets and `install.ps1` are not Authenticode signed. Every
+asset has a build provenance attestation.
+
+### What is still unproven
+
+Everything `v0.5.0` lists below, with these changes from the first
+Windows rounds (`docs/campaigns/p1-windows.md` section 7, run by an
+agent on `v0.5.0`):
+
+- The Credential Manager round trip (W8) passed except the check after a
+  reboot, which has not been run.
+- `install.ps1` without admin rights (W11b) passed.
+- The `cargo install` route (W11c) built and installed without admin
+  rights, but failed its check that `qsh version` prints the commit. This
+  release fixes that, and the round runs again on this tag.
+- The Windows host rounds (W2, W3b, W7) and the Windows `qsh listen`
+  round (W3a) have not been run. They run on this tag because of the
+  IPv4 fix above.
+- The Linux Secret Service `qsh identity move-key` round trip passed in a
+  container. The macOS Keychain round trip has not been run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.0`
 
 This release closes milestones M15 to M17, M19 and M20: trust roles,
