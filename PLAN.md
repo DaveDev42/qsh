@@ -8,7 +8,7 @@ M20(Windows host)이 2026-10-18 닫혔다(`docs/ROADMAP.md` M20 마감 노트). 
 
 여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다.
 
-회차의 대상 태그는 `v0.5.0`이다(2026-10-20, 태그 커밋 `1c653e0`, release run 39354944687 초록, 자산 9개와 `SHA256SUMS`). M15~M20 착지와 Windows 자산이 모두 담겨 있어 `p1-windows`·`p1-ssh-bootstrap`·`p1-setup-stopwatch`·`p1-supervise-wake`와 P0 회차가 이 태그에서 돈다. 첫 태그 push(`02d4c32`)는 musl 빌드가 `libc::time_t` deprecation 경고로 실패해 아무것도 게시되지 않았고, `1c653e0`이 고친 뒤 같은 이름으로 다시 찍었다.
+회차의 대상 태그는 `v0.5.0`이다(2026-10-20, 태그 커밋 `1c653e0`, release run 39354944687 초록, 자산 9개와 `SHA256SUMS`). M15~M20 착지와 Windows 자산이 모두 담겨 있어 `p1-windows`·`p1-ssh-bootstrap`·`p1-setup-stopwatch`·`p1-supervise-wake`와 P0 회차가 이 태그에서 돈다. 첫 태그 push(`02d4c32`)는 musl 빌드가 `libc::time_t` deprecation 경고로 실패해 아무것도 게시되지 않았고, `1c653e0`이 고친 뒤 같은 이름으로 다시 찍었다. 패치 태그 `v0.5.1`(2026-10-22, 태그 커밋 `b4639a8`, release run 39723802624 초록)이 ADR-0046 `79e6d6f`, admission `14d802b`, `cargo install --git` 커밋 `314bbbd`, webpki `698b4bc`를 더했다. Windows host 회차(W2·W3b·W7)와 Windows `qsh listen` 회차(W3a)는 이 태그에서 돈다. 다른 회차는 `v0.5.0`에서 돌아도 된다. 두 태그의 wire와 계약은 같다.
 
 ### 0.1 P0에서 열린 일곱
 
@@ -34,12 +34,12 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 
 ### 0.3 M19가 만든 사람 몫
 
-- [ ] **Windows client 확인 회차.** `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`)의 W1, W3a, W4, W5, W6, W8, W9, W10, W11, W12. Windows 자산이 붙은 태그에서 돈다. 2026-10-21 에이전트가 `v0.5.0`에서 단일 장비 회차를 돌렸다(캠페인 §7, `87e3c1d`). W8 a~c는 PASS이고 d(재부팅 뒤)가 남아 보류다. W11b는 PASS다. W11c는 `cargo install --git` 빌드가 커밋을 내지 않아 c1 FAIL이었고 `314bbbd`가 고쳤으므로 다음 태그에서 다시 돈다. W11a(Edge 다운로드와 SmartScreen 창)는 사람이 한다. 소유: 사람.
+- [ ] **Windows client 확인 회차.** `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`)의 W1, W3a, W4, W5, W6, W8, W9, W10, W11, W12. Windows 자산이 붙은 태그에서 돈다. 2026-10-21 에이전트가 `v0.5.0`에서 단일 장비 회차를 돌렸다(캠페인 §7, `87e3c1d`). W8 a~c는 PASS이고 d(재부팅 뒤)가 남아 보류다. W11b는 PASS다. W11c는 `cargo install --git` 빌드가 커밋을 내지 않아 c1 FAIL이었고 `314bbbd`가 고쳤다. 2026-10-22 `v0.5.1`에서 다시 돌려 PASS다(캠페인 §7 셋째 W11c 행). W11a(Edge 다운로드와 SmartScreen 창)는 사람이 한다. 소유: 사람.
 - [x] **Windows 배포 준비.** 2026-10-19 사용자 결정으로 Authenticode 서명과 scoop·winget을 모두 철회해 사람이 준비할 것이 없다(ADR-0035 개정 이력 2026-10-19 두 줄). Windows 설치 경로는 release zip, `install.ps1`, `cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli`다.
 
 ### 0.4 M20이 만든 사람 몫
 
-- [ ] **Windows host 확인 회차.** `docs/campaigns/p1-windows.md`의 W2, W3b, W7(M20 재고정 `048df57`, ADR-0035 결정 18). W2는 Linux·macOS client가 Windows host(`qsh serve`)에 붙어 `cmd.exe`·PowerShell·Windows 빌드 `vim` 전체 화면, 한글 입출력, resize, `Ctrl-C`, 방화벽 첫 허용 프롬프트를 본다. W3b는 Linux·macOS `qsh listen` ← Windows `qsh serve --to`의 attach·`cp`·터널이다. W7은 `qsh pair ssh`와 `--reverse`가 Windows OpenSSH Server를 상대로 pin을 세우는 것이다. M20 착지가 담긴 Windows 자산 태그에서 돈다. 기본 `[::]:4433` bind의 Windows host와 Windows `qsh listen`이 IPv4 peer를 받지 못하던 결함을 `79e6d6f`(ADR-0046)가 고쳤다. 그래서 W2·W3a·W3b·W7은 이 커밋이 담긴 다음 태그에서 돈다. `v0.5.0`에서 IPv4 경로로 돌면 실패할 수 있다. P1 완료 선언을 막는다(ROADMAP §5.1 원칙 6, §5.5). 소유: 사람.
+- [ ] **Windows host 확인 회차.** `docs/campaigns/p1-windows.md`의 W2, W3b, W7(M20 재고정 `048df57`, ADR-0035 결정 18). W2는 Linux·macOS client가 Windows host(`qsh serve`)에 붙어 `cmd.exe`·PowerShell·Windows 빌드 `vim` 전체 화면, 한글 입출력, resize, `Ctrl-C`, 방화벽 첫 허용 프롬프트를 본다. W3b는 Linux·macOS `qsh listen` ← Windows `qsh serve --to`의 attach·`cp`·터널이다. W7은 `qsh pair ssh`와 `--reverse`가 Windows OpenSSH Server를 상대로 pin을 세우는 것이다. M20 착지가 담긴 Windows 자산 태그에서 돈다. 기본 `[::]:4433` bind의 Windows host와 Windows `qsh listen`이 IPv4 peer를 받지 못하던 결함을 `79e6d6f`(ADR-0046)가 고쳤다. 그래서 W2·W3a·W3b·W7은 이 커밋이 담긴 `v0.5.1`에서 돈다. `v0.5.0`에서 IPv4 경로로 돌면 실패할 수 있다. P1 완료 선언을 막는다(ROADMAP §5.1 원칙 6, §5.5). 소유: 사람.
 
 에이전트는 `gh secret set`, `gh variable set`, `gh workflow run`, 태그 push, 저장소 설정 변경, 외부 저장소 쓰기를 하지 않는다. Dave-Windows에서 방화벽 규칙을 더하는 일도 사람 몫이다. Dave-Windows의 OpenSSH Server는 2026-10-21 이미 켜져 돌고 있다(`sshd` Running, Automatic).
 
@@ -48,7 +48,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 M20 계획 §1에서 열린 채로 넘어온 항목이다.
 
 - [ ] macOS Keychain 왕복(`08a6173` 이후 keyring-core 1). `docs/design/testing.md` L1 수동 단계.
-- [x] 다음 태그 run에서 `release.yml`의 Apple 서명·공증과 provenance 확인(Windows 자산은 미서명, ADR-0035 개정 이력 2026-10-19). `v0.5.0`(run 39354944687)에서 macOS 두 job의 `codesign` Authority가 Developer ID Application이고 notarytool이 둘 다 `Accepted`다. 받은 자산 다섯과 `SHA256SUMS`가 `sha256sum -c`를 통과하고, 각 digest에 `refs/tags/v0.5.0`·`1c653e0`을 가리키는 provenance attestation이 하나씩 있다(attestations API로 확인, 이 머신의 gh 2.45에는 `gh attestation verify`가 없어 서명 검증 자체는 하지 않았다). x86_64 musl 바이너리는 static-pie이고 `qsh 0.5.0`을 낸다.
+- [x] 다음 태그 run에서 `release.yml`의 Apple 서명·공증과 provenance 확인(Windows 자산은 미서명, ADR-0035 개정 이력 2026-10-19). `v0.5.0`(run 39354944687)에서 macOS 두 job의 `codesign` Authority가 Developer ID Application이고 notarytool이 둘 다 `Accepted`다. 받은 자산 다섯과 `SHA256SUMS`가 `sha256sum -c`를 통과하고, 각 digest에 `refs/tags/v0.5.0`·`1c653e0`을 가리키는 provenance attestation이 하나씩 있다(attestations API로 확인, 이 머신의 gh 2.45에는 `gh attestation verify`가 없어 서명 검증 자체는 하지 않았다). x86_64 musl 바이너리는 static-pie이고 `qsh 0.5.0`을 낸다. `v0.5.1`(run 39723802624)도 같다. macOS 두 job이 Developer ID Application과 notarytool `Accepted`이고, 자산 아홉과 `install.ps1`이 `sha256sum -c`를 통과하며 각 digest에 attestation이 있다. musl 두 바이너리는 static이고 x86_64 쪽 `qsh version --json`의 `build.commit`이 `b4639a896a6e4728d3e8787c522cab3ae4466a74`다.
 - [ ] `qsh identity move-key` 왕복을 macOS Keychain·Linux Secret Service에서. Linux 쪽은 2026-10-21 `v0.5.0` gnu 자산(sha256 `9bb38ba4…`)으로 `ubuntu:24.04` 컨테이너의 gnome-keyring 세션에서 돌려 `docs/design/testing.md`의 기준을 모두 충족했다. `--to file` 뒤 `device.key` 0600과 Secret Service 항목 0개, `--to platform` 뒤 파일 없음과 항목 1개, fingerprint·`device_id` 불변이다. Secret Service가 없는 세션에서 `auto`는 파일로 내려가고 `platform` 명시는 `INTERNAL`("platform key store unavailable …")로 실패한다. Windows 줄은 캠페인 W8 a~c가 봤다. macOS 쪽이 남았다.
 - [ ] `launchctl print system/io.qsh.<mode>`의 root 요구 확인(ADR-0032 결정 18 셋째 항목).
 - [ ] Windows `Password` 주체 작업의 Credential Manager 읽기(ADR-0032 결정 15 첫 항목). M19가 `keystore_session_bound`를 보수적으로 내는 것으로 닫았고, 실측은 열려 있다.
@@ -63,7 +63,7 @@ M20 계획 §1에서 열린 채로 넘어온 항목이다.
 - [x] Windows 기본 bind의 IPv4 peer 거부(2026-10-21 Dave-Windows `v0.5.0` doctor의 `bindv6only_blocks_ipv4`). Windows는 새 IPv6 소켓을 `IPV6_V6ONLY`로 열어 기본 `[::]:4433` `qsh serve`·`qsh listen`이 IPv4 peer를 조용히 거부했다. `79e6d6f`(ADR-0046)가 listener도 client처럼 그 옵션을 best-effort로 끄게 했다. doctor 진단은 OS가 끄기를 거부할 때만 나온다. 같은 작업에서 dual-stack listener의 IPv4-mapped peer가 모두 `::/64` admission 버킷 하나에 몰리는 결함(Linux 기본값에서 이미)을 찾았고 `14d802b`가 IPv4로 정규화했다(ADR-0009 개정 이력).
 - [x] `cargo deny`의 RUSTSEC-2026-0382(rustls-webpki 0.103.15). `698b4bc`가 0.103.16으로 올렸다.
 - [x] `cargo install --git` 빌드의 `qsh version`에 커밋이 없음(캠페인 W11c c1 FAIL). `314bbbd`가 `qsh-core` `build.rs`로 cargo git checkout에서만 `HEAD`를 박는다.
-- [ ] 다음 태그. `79e6d6f`·`14d802b`·`314bbbd`가 담긴 패치 태그가 있어야 Windows host 회차(W2·W3b·W7), Windows `qsh listen` 회차(W3a), W11c 재실행이 그 태그에서 돈다. 태그 push는 사용자 승인 뒤에 한다.
+- [x] 다음 태그. `79e6d6f`·`14d802b`·`314bbbd`가 담긴 패치 태그 `v0.5.1`을 2026-10-22 사용자 승인 뒤 push했다(`b4639a8`, release run 39723802624 초록). W11c는 그 태그에서 PASS다. W2·W3a·W3b·W7은 사람 몫으로 남는다.
 - [ ] 공유 runner 위 `adversarial_load` 시나리오 2 RSS의 경계 근접. `6d4fa37`의 load run 39569439731에서 `connection_flood_past_the_cap_leaves_the_listener_rss_and_fd_bounded`가 peak 30972 KiB로 30720 KiB 상한(`docs/campaigns/m8-adversarial-load.md` §3, PRD §13 idle 30MB)을 넘었고, 재실행은 peak 28704 KiB로 초록이었다. 최근 열두 run의 peak는 22.9~29.8 MiB이고, baseline이 18 MiB대와 24 MiB대 두 무리로 갈린다. 이 run의 변경(dual-stack bind, admission 키 정규화, `build.rs`)은 메모리 경로에 닿지 않는다. 상한은 PRD 수치라 낮추거나 늘리지 않는다. 붉음이 잦아지면 baseline이 갈리는 원인(runner 종류, allocator arena)부터 가른다. 같은 날 야간 perf(run 39571078325)의 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`도 p95 10.525ms로 붉었다. perf-judge 추세 판정은 GREEN(median 대비 109.2%)이었다. 아래 항목의 관찰에 더한다.
 - [ ] 공유 runner 위 PTY echo p95 게이트의 경계 근접. 10-18 야간 perf의 `tunnel_echo_under_load`가 p95 10.959ms, 같은 날 acceptance의 `file_copy_echo_under_load`가 10.176ms로 10ms를 넘었고, 최근 야간 값이 9.6ms대에 자주 머문다. 기준은 `docs/design/protocol.md` §12의 수용 기준이라 낮추지 않는다. 붉음이 잦아지면 원인(runner 편차인지 회귀인지)을 perf 추세로 가르고, 재시도나 측정 방식 변경은 `docs/design/testing.md` CI 규율에 결정을 적은 뒤에 한다.
 
