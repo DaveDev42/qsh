@@ -1,6 +1,6 @@
 # ADR-0032: `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다
 
-날짜: 2026-10-11 (개정 2026-10-13, 2026-10-17, 같은 날 두 번째 개정)
+날짜: 2026-10-11 (개정 2026-10-13, 2026-10-17, 같은 날 두 번째 개정, 2026-10-23)
 상태: 승인됨
 
 개정 관계: 새 ADR이다. ADR-0024 결정 11이 "활성화까지 맡기려면 §6.18을 개정하는 별도 결정이 필요하다"고 남겨 둔 자리를 채운다. `docs/CLI.md` §6.18의 "`status`는 존재 여부만 본다" 문단과 "유닛 파일만 쓴다"는 계약을 플래그가 있을 때에 한해 개정하고, `docs/design/threat-model.md` §3의 `qsh service` 행(`launchctl`/`systemctl`을 호출하지 않는다는 서술)을 같은 범위로 고친다. `docs/ROADMAP.md` M17 (a)가 이 ADR을 요구한다. ADR-0017 결정 1(`acl.toml`을 쓰지 않는다)과 ADR-0024 결정 11의 나머지(`qsh setup`은 유닛을 활성화하지 않는다)는 그대로다.
@@ -10,6 +10,8 @@
 2026-10-17 개정: ADR-0035 결정 27의 첫 서비스 스텝 실측에 맞춰 결정 12와 16의 Windows 문장을 적는다. 결정 12의 "Windows에서 상시 기동 작업을 등록하지 않는다"는 그대로이고, 그 레시피(ADR-0035 결정 27의 상시 기동 작업)가 일반 사용자 권한으로는 등록되지 않는다는 사실이 더해졌다. `BootTrigger` 작업은 주체가 `InteractiveToken`·`Password`·`S4U` 어느 것이든 일반 사용자의 `schtasks /Create`가 `Access is denied`로 거부했고 `LogonType=Password`는 사용자 암호가 있어야 등록된다. 그래서 Windows 레시피는 관리자 프롬프트에서 사람이 암호를 넣어 치는 한 번의 명령이다. 결정 16의 "qsh가 root나 관리자 권한을 요구하거나 `sudo`를 부르는 경로는 없다"는 이 레시피에도 그대로 걸린다. qsh는 관리자 프롬프트를 열지도 암호를 받지도 않고, `doctor`의 `logon_task_session_scoped`(ADR-0035 결정 27)는 레시피를 가리킬 뿐 실행하지 않는다. 결정 15의 Credential Manager 읽기 실측은 이 개정이 닫지 않는다. 결정의 나머지는 바뀌지 않는다.
 
 2026-10-17 두 번째 개정: Windows 작업 스케줄러 열이 착지한 형태와 실측을 기록한다. 결정 3의 Windows argv는 `schtasks /Query /TN \qsh\qsh-<mode>`, `/Create /F /TN \qsh\qsh-<mode> /XML <작업 정의 파일>`, `/Run /TN`, `/End /TN`, `/Delete /F /TN` 다섯뿐이고 `/RU`·`/RP`는 argv에 없으며 이름은 닫힌 `<mode>` 집합에서만 나온다. 결정 4는 실측(Windows 11 26100, 별도 폴더의 임시 작업)에서 `/Create /F`가 실행 중인 인스턴스를 멈추지 않았으므로(같은 PID, 상태 Running 유지, 정의만 갱신) 실행 중이면 `/Create`만 부르고 `/Run`을 건너뛰어 `already_active`로 답한다. 결정 6의 Windows `--live`는 `schtasks` 출력을 파싱하지 않고 COM `TaskStateQuery`가 `TASK_STATE_RUNNING`인지 하나만 본다. 결정 8에 더해 COM 읽기 실패는 해당 `step`의 `INTERNAL`이고 읽지 못한 채로는 `/Create`·`/End`·`/Delete`를 부르지 않으며, `InteractiveToken` 작업이 대화형 세션 없이 시작하지 못한 `/Run` 실패도 다른 주체로 우회하지 않는 `INTERNAL`이다. 결정 18의 Windows 갈래는 COM으로 읽은 주체가 `Password`인 작업을 사람이 설치한 상시 기동 형태로 알아보고 `--activate`·`--deactivate`가 `/Create`·`/Run`·`/End`·`/Delete`를 부르지 않은 채 `always_on_present`로 답한다. 결정 15의 Windows 판정은 `Password` 주체 작업이 Credential Manager를 읽는지를 암호 없이 측정할 수 없어 보수 쪽을 택한다. `platform` key store와 `Password` 주체 작업이 함께면 `keystore_session_bound`를 같은 remedy(`qsh identity move-key --to file`)로 낸다. 측정되면 이 판정만 다시 정한다. 결정의 나머지는 바뀌지 않는다.
+
+2026-10-23 개정: 결정 18 셋째 항목의 확인 결과를 적는다. macOS 27.0.1(빌드 26A434)에서 root 없이(uid 501, ssh) `launchctl print system/<label>`을 실측했다. 적재된 system 서비스는 실행 중이든 아니든 종료 코드 0이고, 적재되지 않은 label은 113과 `Could not find service ... in domain for system`이다. 그래서 LaunchDaemon 파일이 있을 때 `status --live`는 0이면 `active: true`, 113이면 `active: false`로 답하고, 그 밖의 종료 코드는 결정 8의 `INTERNAL`(`step: "live"`, `sudo launchctl print system/io.qsh.<mode>` 안내)로 남는다. 모호한 답이 "실행 중 아님"으로 읽히지 않게 하려는 fail-closed 규칙이다. 결정의 나머지는 바뀌지 않는다.
 
 승인 2026-10-14: 사용자 위임 결정("전부 다 알아서 진행해")으로 승인했다. 결정 3의 매니저 호출 표가 Windows 열을 갖지 않아 "원칙에 예외 없음"과 어긋나던 점을 Windows 열 추가(결정 3·4·5·6·8·10)로 닫았고, 비활성화가 실행 여부만 보고 등록은 보지 않아 멈춘 채 등록된 유닛이 파일 삭제 뒤 고아로 남던 틈을 닫았으며(결정 5), Windows 상시 기동 작업이 Credential Manager를 읽는다는 가정에 실측 뒤 대체 경로를 정했다(결정 15) 사람이 설치한 상시 기동 형태(macOS LaunchDaemon, Windows `Password` 주체 작업)를 `--activate`의 재등록이 덮거나 `--deactivate`가 해제하던 틈은 결정 18로 닫았다.
 

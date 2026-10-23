@@ -29,6 +29,10 @@ use crate::ops::OpError;
 /// Deadline of one manager call (ADR-0032 decision 8).
 pub const MANAGER_CALL_DEADLINE: Duration = Duration::from_secs(30);
 
+/// `launchctl print` exit status for a label that is not loaded in the queried
+/// domain (verified on macOS 27.0.1, ADR-0032 decision 18).
+pub const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
+
 /// Bytes of the manager's stderr kept in an error message (ADR-0032
 /// decision 8: the first line, cut at 512 bytes).
 pub const MANAGER_STDERR_CAP: usize = 512;
@@ -293,9 +297,9 @@ pub fn launchd_bootout_argv(uid: &str, mode: &str) -> Vec<String> {
 }
 
 /// The query for the human-installed LaunchDaemon form (ADR-0032 decision
-/// 18). Never run by qsh: whether `launchctl print system/…` answers
-/// without root is unverified, so `status --live` names this command in its
-/// error instead of calling it.
+/// 18). `status --live` runs it without root: exit 0 is a loaded service
+/// (running or not) and exit 113 is a label that is not loaded; any other
+/// status is an `INTERNAL` error naming `sudo` and this command.
 pub fn launchd_print_system_argv(mode: &str) -> Vec<String> {
     let target = format!("system/{}", launchd_label(mode));
     argv(&["launchctl", "print", &target])

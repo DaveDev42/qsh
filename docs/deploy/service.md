@@ -293,8 +293,10 @@ sudo chmod 644 /Library/LaunchDaemons/io.qsh.serve.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.qsh.serve.plist
 ```
 
-Check that it is loaded. `qsh service status --live` does not read the
-`system` domain without root and says so, so ask `launchctl` yourself:
+Check that it is loaded. `qsh service status --live` runs the same query
+without root: exit 0 reads as active, exit 113 (not loaded) as not active,
+and any other exit status is an error that names this command. To ask
+`launchctl` yourself:
 
 ```bash
 sudo launchctl print system/io.qsh.serve
