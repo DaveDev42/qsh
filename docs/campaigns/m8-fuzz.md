@@ -200,6 +200,36 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 
 **DoD 1 판정(2026-09-11): 16 타깃 전부 누적 ≥72 fuzz-hours, crash 0.**
 
+### 배치 3 — P1 새 파서 3종
+
+DoD 1의 16 타깃 밖이다. P1이 더한 파서 타깃 셋을 같은 형식으로 72h
+돌린다(`docs/design/protocol.md` §13의 공개 beta 전 조건, ROADMAP §5.5).
+대상 `parse_openssh_key`(M11)·`decode_file_frame`(M15)·
+`parse_ssh_bootstrap_line`(M16), 커밋 `60e54fa`, 호스트
+Dave-Windows-WSL, run-id `m8-fuzz-20261020-0931`. 런처
+`~/fuzz/run72.sh`가 타깃 이름을 인자로 받아 타깃마다 프로세스 하나를
+`-max_total_time=259200 -rss_limit_mb=1536`으로 띄운다. 시작
+2026-10-20T09:31:46+09:00. `build.log`의 `Permission denied`는 배치 1
+보충과 같은 cargo 전역 캐시 auto-clean 경고다.
+
+**종료 2026-10-23T09:35:26+09:00.** `exits.txt` 3행 전부 `exit=0`.
+엄격 grep(`Test unit written`/`deadly signal`/`SUMMARY: libFuzzer`/
+`out-of-memory`)은 3 로그 전부 0건이고 `fuzz/artifacts/`의 파일은
+0개다. 로그 끝은 타깃마다 `Done N runs in 259201 second(s)`다. 중간에
+호스트 재시작은 없었다.
+
+| 타깃 | runs | exec/s 평균 | cov | corp | 끝 RSS |
+|---|---|---|---|---|---|
+| decode_file_frame | 40,513,427,518 | 156,301 | 432 | 410 | 730 MB |
+| parse_openssh_key | 9,442,395,024 | 36,429 | 796 | 1325 | 559 MB |
+| parse_ssh_bootstrap_line | 1,325,073,761 | 5,112 | 2438 | 4978 | 774 MB |
+
+RSS는 DONE 행의 값이고 `-rss_limit_mb=1536` 아래다. grown corpus 파일
+수(`~/fuzz/grown/<t>`): decode_file_frame 401, parse_openssh_key 1319,
+parse_ssh_bootstrap_line 4960.
+
+**배치 3 판정: 3 타깃 72h 충족, crash 0.**
+
 ## 6. 남은 것
 
 - 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — 09-11 완료. `exits.txt`
