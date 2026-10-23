@@ -69,12 +69,12 @@ pub use task::{
 pub use task_com::ComTaskScheduler;
 
 pub use manager::{
-    CommandRunner, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock, ManagerOutput,
-    ManagerRunner, RunError, SystemManagerClock, TaskStateQuery, launchd_bootout_argv,
-    launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv, schtasks_create_argv,
-    schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv, schtasks_run_argv,
-    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
-    systemd_is_active_argv,
+    CommandRunner, LAUNCHD_SERVICE_NOT_FOUND, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP,
+    ManagerClock, ManagerOutput, ManagerRunner, RunError, SystemManagerClock, TaskStateQuery,
+    launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
+    schtasks_create_argv, schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv,
+    schtasks_run_argv, systemd_daemon_reload_argv, systemd_disable_now_argv,
+    systemd_enable_now_argv, systemd_is_active_argv,
 };
 
 use std::io;
@@ -687,21 +687,38 @@ impl<'a> ServiceHost<'a> {
         match self.manager {
             Manager::Launchd => {
                 if self.launchdaemon_present(mode) {
-                    // Whether `launchctl print system/…` answers without root
-                    // is not verified (ADR-0032 decision 18, third item), and
-                    // an exit code from a refused query would read as "not
-                    // running". Until that is checked on a Mac, the run state
-                    // of the always-on form is the person's to read.
-                    let command = launchd_print_system_argv(mode).join(" ");
-                    return Err(OpError::new(
-                        ErrorCode::Internal,
-                        format!(
-                            "the always-on LaunchDaemon form of the {mode} unit is installed, and \
-                             its run state is not read without root; run `sudo {command}` to check it"
-                        ),
-                    )
-                    .with_retryable(false)
-                    .with_details(serde_json::json!({ "step": "live" })));
+                    // `launchctl print system/…` answers without root
+                    // (ADR-0032 decision 18, third item, verified on macOS
+                    // 27.0.1): exit 0 is a loaded service, running or not,
+                    // so the answer is "loaded", and exit 113 is "not
+                    // loaded". Any other status is ambiguous and never reads
+                    // as not running.
+                    let argv = launchd_print_system_argv(mode);
+                    let output = self.call("live", &argv)?;
+                    return match output.exit_code {
+                        Some(0) => Ok(true),
+                        Some(LAUNCHD_SERVICE_NOT_FOUND) => Ok(false),
+                        _ => {
+                            let command = argv.join(" ");
+                            let exit = output.exit_code.map_or_else(
+                                || "ended by a signal".to_string(),
+                                |code| format!("exit {code}"),
+                            );
+                            Err(OpError::new(
+                                ErrorCode::Internal,
+                                format!(
+                                    "the always-on LaunchDaemon form of the {mode} unit is \
+                                     installed, and `{command}` gave no clear answer ({exit}); \
+                                     run `sudo {command}` to check its run state"
+                                ),
+                            )
+                            .with_retryable(false)
+                            .with_details(serde_json::json!({
+                                "step": "live",
+                                "exit_code": output.exit_code
+                            })))
+                        }
+                    };
                 }
                 if !installed {
                     return Ok(false);

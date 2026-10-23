@@ -1214,24 +1214,40 @@ fn status_live_reports_the_always_on_form_when_present() {
     std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
     std::fs::write(&daemon, "<plist/>").unwrap();
 
+    // `launchctl print system/…` answers without root (ADR-0032 decision 18,
+    // third item): 0 is a loaded service, 113 is not loaded, and any other
+    // status is INTERNAL with the command to run by hand.
+    for (code, expected) in [(0, Some(true)), (113, Some(false))] {
+        let (_dir, ops) = ops_with("");
+        let runner = FakeRunner::exiting(code);
+        let host = host_for(Manager::Launchd, &runner, root.path());
+        let home = temp_home();
+        seed_unit(Manager::Launchd, &home, "serve");
+        let data = status(&ops, &host, &home, true).unwrap();
+        assert_eq!((data.installed, data.active), (true, expected), "{code}");
+        assert_eq!(
+            runner.calls(),
+            ["launchctl print system/io.qsh.serve"],
+            "{code}"
+        );
+    }
     let (_dir, ops) = ops_with("");
-    let runner = FakeRunner::default();
+    let runner = FakeRunner::exiting(5);
     let host = host_for(Manager::Launchd, &runner, root.path());
     let home = temp_home();
     seed_unit(Manager::Launchd, &home, "serve");
-    // `launchctl print system/…` is not known to answer without root, so
-    // the run state of the always-on form is not read: INTERNAL with the
-    // command to run by hand (ADR-0032 decision 18, third item).
     let err = status(&ops, &host, &home, true).unwrap_err();
     assert_eq!(err.code, ErrorCode::Internal);
     assert_eq!(err.details["step"], "live");
+    assert_eq!(err.details["exit_code"], 5);
+    assert!(!err.retryable);
     assert!(
         err.message
             .contains("sudo launchctl print system/io.qsh.serve"),
         "{}",
         err.message
     );
-    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+    assert_eq!(runner.calls(), ["launchctl print system/io.qsh.serve"]);
 
     // Task Scheduler: the always-on task has the name of the default one, so
     // the COM state is the answer and no `schtasks` process is started.

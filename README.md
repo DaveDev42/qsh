@@ -1077,8 +1077,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   --activate` does not restart a unit that is already running, so a new
   binary path applies at the next restart, and a restart ends every detached
   session. If a LaunchDaemon form is installed, `--activate` and
-  `--deactivate` leave it alone and `status --live` does not read its run
-  state without root.
+  `--deactivate` leave it alone and `status --live` reads its loaded state
+  with `launchctl print system/io.qsh.<mode>`, which needs no root.
 - `qsh audit` reads only this machine's log. To see another host's records,
   run it there. There is no command that deletes or shortens the log, so how
   far back it reaches depends on `[audit].max_bytes` and `[audit].retain`;
