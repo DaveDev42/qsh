@@ -26,10 +26,10 @@ M20 계획 §0.1의 일곱 항목을 문면 그대로 승계한다. M8 DoD 3은 
 
 M20 계획 §0.2의 다섯 항목을 승계한다.
 
-- [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M11. 소유: 사람.
+- [x] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M11. 2026-10-23 배치 3에서 72h, crash 0(`docs/campaigns/m8-fuzz.md` §5 배치 3).
 - [ ] **`p1-supervise-wake` 회차 넷.** 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 출처 M12(ADR-0024 결정 12). 소유: 사람.
-- [ ] **`decode_file_frame`·`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M15·M16. 공개 beta 전(`docs/design/protocol.md` §13). 에이전트가 Dave-Windows-WSL에서 `parse_openssh_key`와 함께 돌리는 중이다(run-id `m8-fuzz-20261020-0931`, 커밋 `60e54fa`, 타깃당 프로세스 하나 `-max_total_time=259200`, 2026-10-20 09:3x 시작). 끝나면 `docs/campaigns/m8-fuzz.md`에 배치로 기록하고 이 항목과 위 `parse_openssh_key` 항목을 판정한다. 소유: 에이전트(실행 중).
+- [x] **`decode_file_frame`·`parse_ssh_bootstrap_line` fuzz 타깃의 누적 72 fuzz-hours.** 출처 M15·M16. 공개 beta 전(`docs/design/protocol.md` §13). 에이전트가 Dave-Windows-WSL에서 `parse_openssh_key`와 함께 돌렸다(run-id `m8-fuzz-20261020-0931`, 커밋 `60e54fa`). 2026-10-23 09:35+09:00 세 타깃 모두 259201초, `exit=0`, crash·artifact 0이다(`docs/campaigns/m8-fuzz.md` §5 배치 3).
 - [ ] **실제 OpenSSH 위의 SSH 부트스트랩 회차.** `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`). Windows 원격이 응답자가 되는 회차는 이 문서가 아니라 `p1-windows.md` W7이 맡는다(Step 10). 소유: 사람.
 
 ### 0.3 M19가 만든 사람 몫

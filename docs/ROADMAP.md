@@ -397,7 +397,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`) | M12 (a) | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절). 회차 미실행 |
 | `cause` 분포 관측 기록 | 이슈 #10 본문과 2026-10-04T14:48Z 코멘트 | M11 (a) 빌드 | 기록됨, M13 (k) 착지 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md` | M13 (c) | PASS (2026-10-09 회차 1, v0.4.3, Debian 10 arm64 glibc 2.28, 에이전트가 네이티브 arm64 컨테이너에서 실행). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목 |
-| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line`(`aba7bd6`, smoke 20,000 runs만) | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
+| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 `decode_file_frame`, M16 (a) `parse_ssh_bootstrap_line`(`aba7bd6`) | 공개 beta 전(`docs/design/protocol.md` §13). 닫힘: 2026-10-23 세 타깃 72h, crash 0(`docs/campaigns/m8-fuzz.md` §5 배치 3, run-id `m8-fuzz-20261020-0931`, 커밋 `60e54fa`) |
 | SSH 부트스트랩 실제 OpenSSH 회차(ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회) | `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`) | M16 (a) | M16 (a)가 담긴 태그(`7c43332` 이후). 열림, 회차 0 |
 | Windows client·host 확인 | `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`, M20이 host 회차 W2·W3b·W7을 더해 다시 고정 `048df57`, 서명 철회로 W11을 회차 전 재고정 `b25b843`, scoop·winget 철회로 W11을 cargo 변형으로 재고정 `e35f7c7`) | M19·M20 | Windows 자산이 붙은 태그 |
 | Windows 배포 준비 | ADR-0035 결정 16 | M19 | 2026-10-19 사용자 결정으로 서명·scoop·winget을 철회해 닫힘. 설치 경로는 release zip, `install.ps1`, `cargo install --locked --git` |
