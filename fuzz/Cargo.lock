@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "apple-native-keyring-store",
  "base64",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-proto"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "prost",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-transport"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aws-lc-rs",
  "base64",
