@@ -9,6 +9,59 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.2`
+
+A patch release on top of `v0.5.1`. It picks up dependency fixes for
+RUSTSEC-2026-0385 and RUSTSEC-2026-0386, and `qsh service status --live`
+now reads the state of a macOS LaunchDaemon install. The wire format, `qsh.cli/v1`,
+`qsh.event/v1` and the doctor code set are unchanged, so `v0.5.1`,
+`v0.5.0` and `v0.4.x` peers interoperate with this build as before.
+
+### Fixes
+
+- `ctutils` goes to 0.4.4 for RUSTSEC-2026-0385: its `const fn` mask
+  generation and its `u128` comparison on 32-bit targets were not
+  constant time. It comes in through `digest` and `sha2`, and through
+  `hmac` and `hkdf` on the Linux Secret Service path. The `v0.5.1` assets
+  were built with 0.4.3.
+- `tokio` goes to 1.53.3 for RUSTSEC-2026-0386: the safe `AsyncFd`
+  constructors accepted any raw file descriptor, which breaks I/O safety.
+  qsh registers two descriptors this way, the PTY master and a `dup` of
+  a local control socket. Each is an `OwnedFd` that the `AsyncFd` owns
+  until it drops it, so neither could be closed or replaced underneath
+  it. Both now go through the `unsafe` `AsyncFd::register` constructors
+  that 1.53.3 adds, and the minimum `tokio` version is now 1.53.3.
+- macOS: when the always-on LaunchDaemon form of a unit is installed,
+  `qsh service status --live` now runs `launchctl print
+  system/io.qsh.<mode>`, which needs no root. Exit 0 reports
+  `active: true` and exit 113 (not loaded) reports `active: false`. Any
+  other exit status is still `INTERNAL` with `details.step: "live"` and
+  names the `sudo` command to run. On `v0.5.1` this case always ended in
+  that error. Exit 0 means loaded, so a daemon that is loaded but not
+  running also reads as `active: true` (ADR-0032 revision history).
+
+### Assets and signing
+
+Unchanged from `v0.5.1`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.2` in the names.
+
+### What is still unproven
+
+Everything `v0.5.1` lists, with these changes from the rounds run on
+`v0.5.1` (`docs/campaigns/p1-windows.md`):
+
+- The Credential Manager round trip (W8) passed in full, including the
+  check after a reboot.
+- The `cargo install` route (W11c) passed, including the check that
+  `qsh version` prints the commit.
+- The Windows host rounds (W2, W3b, W7), the Windows `qsh listen` round
+  (W3a) and the macOS Keychain `qsh identity move-key` round trip have
+  still not been run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.1`
 
 A patch release on top of `v0.5.0`. It fixes a Windows host that did not
