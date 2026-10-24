@@ -313,12 +313,9 @@ pub const KEYSTORE_UNAVAILABLE: Diagnostic = Diagnostic {
 /// always-on forms are a macOS LaunchDaemon plist and, on Linux, a user unit
 /// together with the systemd linger marker ([`probe::always_on_form_present`]).
 /// Both are found by file existence alone, never by asking the service
-/// manager (ADR-0032 결정 14). On Windows the always-on form is the task of
-/// the inferred mode registered with a `Password` principal, which only the
-/// Task Scheduler COM read can tell (ADR-0032 결정 18, ADR-0035 결정 27).
-/// Whether such a task can read Credential Manager could not be measured
-/// without typing the account's password, which no test or qsh code does, so
-/// the finding is emitted on Windows as well rather than assuming it can.
+/// manager (ADR-0032 결정 14). Windows never reports it: a task registered
+/// with a `Password` principal was measured to read Credential Manager
+/// without an interactive session (ADR-0032 결정 15, 2026-10-24 개정).
 /// `warn`, because the service
 /// works until the key store is unreachable; `remedy` names the command that
 /// ends the dependency without changing the device id, certificate or

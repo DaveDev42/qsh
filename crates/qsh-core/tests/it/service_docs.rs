@@ -624,9 +624,11 @@ fn service_md_launchdaemon_install_steps_are_in_order() {
     );
 }
 
-/// ADR-0032 decision 15: the three always-on recipes (linger, the LaunchDaemon
-/// and the Windows `Password` task) tell a `platform` key store holder to move the key first, and the page
-/// names the command the doctor finding recommends.
+/// ADR-0032 decision 15: the linger and LaunchDaemon recipes tell a `platform`
+/// key store holder to move the key first. The Windows `Password` task recipe
+/// names the same command only as an option, because a `Password` task was
+/// measured to read Credential Manager. The page names the command the doctor
+/// finding recommends.
 #[test]
 fn service_md_always_on_recipes_point_at_move_key() {
     let service_md = read_doc("docs/deploy/service.md");
@@ -634,8 +636,11 @@ fn service_md_always_on_recipes_point_at_move_key() {
     assert_eq!(
         flattened.matches("qsh identity move-key --to file").count(),
         3,
-        "the launchd, the linger and the Windows always-on recipe each carry one move-key line"
+        "the launchd and linger recipes and the Windows option each carry one move-key line"
     );
+    // The Windows page states the measured result and the batch-logon right.
+    assert!(flattened.contains("`qsh doctor` does not report `keystore_session_bound` on Windows"));
+    assert!(flattened.contains("SeBatchLogonRight") && flattened.contains("0x80070569"));
     assert!(
         qsh_core::doctor::KEYSTORE_SESSION_BOUND
             .remedy

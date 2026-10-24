@@ -732,12 +732,21 @@ one. `qsh service uninstall --deactivate` likewise only removes the file
 `/End` and `/Delete /F` lines above from an elevated prompt. `qsh service
 status --live` reports whether that task is running.
 
-A `platform` key store (Windows Credential Manager) belongs to a logon
-session. A `Password` task may run without one, so `qsh doctor` reports
-`keystore_session_bound` for it. Run `qsh identity move-key --to file` before
-you rely on the always-on task. Whether a `Password` task can read the
-Credential Manager could not be measured without typing a password, so the
-warning assumes it cannot.
+A `Password` task reads the `platform` key store (Windows Credential Manager)
+without an interactive session. This was measured on Windows 11 25H2 (build
+26200) with a local standard user whose identity was created in an interactive
+logon: a task registered for that user with a `Password` principal, started
+while the user had no session, ran `qsh serve`, loaded the key and printed the
+same fingerprint, and `qsh doctor` and `qsh identity export` agreed. So `qsh
+doctor` does not report `keystore_session_bound` on Windows, and moving the key
+is not required. `qsh identity move-key --to file` remains available if you
+prefer the key in the owner-only key file.
+
+The account needs the "Log on as a batch job" right (`SeBatchLogonRight`) for a
+`Password` task. Administrators have it. A standard local user does not, and
+without it the task fails with `0x80070569` before qsh runs, so no qsh
+message or `qsh doctor` finding explains it. Grant the right in Local Security
+Policy (Local Policies, User Rights Assignment) before registering the task.
 
 The always-on variant was not run during the measurements below: a
 `BootTrigger` cannot be registered without elevation, and the stored password
