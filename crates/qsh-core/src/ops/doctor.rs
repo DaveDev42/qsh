@@ -143,8 +143,7 @@ struct DoctorEnvironment<'a> {
     /// their own probes.
     bindv6only_probe: fn(SocketAddr) -> std::io::Result<bool>,
     /// The Task Scheduler read behind `logon_task_session_scoped`
-    /// (ADR-0035 결정 27) and the Windows half of `keystore_session_bound`
-    /// (ADR-0032 결정 15): the COM reader in production on Windows, a fake in
+    /// (ADR-0035 결정 27): the COM reader in production on Windows, a fake in
     /// a test, and a reader that reads nothing everywhere else. Only
     /// consulted when `os` is [`probe::HostOs::Windows`].
     task_reader: &'a dyn TaskDefinitionReader,
@@ -863,16 +862,12 @@ impl Ops {
             None => {}
         }
         if env.os == probe::HostOs::Windows {
-            // One scheduler read answers both Windows findings. The task is
-            // what is registered, not the file qsh wrote, so neither depends
-            // on the file being there.
+            // The task is what is registered, not the file qsh wrote, so the
+            // finding does not depend on the file being there. A `Password`
+            // principal reads Credential Manager (measured, ADR-0032 결정 15),
+            // so there is no `keystore_session_bound` on Windows.
             let logon = env.task_reader.logon_type(&probe::windows_task_name(mode));
             out.extend(Self::logon_task_session_scoped(mode, &logon));
-            if env.key_store == KeyStoreKind::Platform
-                && matches!(logon, Ok(Some(TaskLogonType::Password)))
-            {
-                out.push(probe::keystore_session_bound_finding(mode));
-            }
         }
         out
     }

@@ -1,8 +1,8 @@
 //! The Windows rows of the doctor (ADR-0035 decision 27, ADR-0032 decision
 //! 15): the task definition file behind `service_not_registered` and the
 //! `service_restart_drops_sessions` notice, and the COM-read principal behind
-//! `logon_task_session_scoped` and the Windows half of
-//! `keystore_session_bound`. Every test injects `HostOs::Windows` and a
+//! `logon_task_session_scoped`, and the absence of `keystore_session_bound`
+//! on Windows. Every test injects `HostOs::Windows` and a
 //! fake [`TaskDefinitionReader`], so they run on every build target and
 //! start no process.
 
@@ -227,97 +227,56 @@ fn logon_task_session_scoped_is_never_reported_off_windows() {
 }
 
 /// The Windows always-on form is a task registered under a stored-password
-/// principal. Whether such a task can read Credential Manager could not be
-/// measured without typing the account's password, so a `platform` key store
-/// under that task is reported (ADR-0032 decision 15), with the same remedy
-/// as on the other platforms.
+/// principal. Such a task was measured to read Credential Manager without an
+/// interactive session (ADR-0032 decision 15, 2026-10-24), so a `platform` key
+/// store under it is not reported, whatever the principal.
 #[test]
-fn keystore_session_bound_fires_for_platform_store_under_a_password_boot_task() {
+fn keystore_session_bound_is_silent_on_windows_for_a_platform_store() {
     let keystore = crate::identity::MemoryKeyStore::new();
     let (_guard, ops) = healthy_ops();
     for mode in MODES {
         seed_task_file(&ops, mode);
         let name = format!("\\qsh\\qsh-{mode}");
-        let reader = FakeReader::answering(&name, Ok(Some(TaskLogonType::Password)));
-        let env = DoctorEnvironment {
-            key_store: KeyStoreKind::Platform,
-            ..windows_env(&keystore, &reader)
-        };
-        let findings = ops.doctor_service_registration_findings(mode, &env);
-        let finding = findings
-            .iter()
-            .find(|f| f.code == "keystore_session_bound")
-            .unwrap_or_else(|| panic!("{mode}: keystore_session_bound missing: {findings:?}"));
-        assert_eq!(finding.status, "warn");
-        assert!(finding.detail.contains(mode), "{finding:?}");
-        assert!(
-            finding
-                .remedy
-                .as_deref()
-                .is_some_and(|remedy| remedy.contains("qsh identity move-key --to file")),
-            "{finding:?}"
-        );
-        // The same read answers the other Windows finding: a stored-password
-        // principal is not logon-scoped.
-        assert!(
-            !codes(&findings).contains(&"logon_task_session_scoped"),
-            "{findings:?}"
-        );
-        assert_eq!(reader.queried(), [name], "{mode}: one read per run");
+        let answers = [
+            Ok(Some(TaskLogonType::Password)),
+            Ok(Some(TaskLogonType::InteractiveToken)),
+            Ok(Some(TaskLogonType::Other)),
+            Ok(None),
+            Err(()),
+        ];
+        for answer in answers {
+            let reader = FakeReader::answering(&name, answer);
+            let env = DoctorEnvironment {
+                key_store: KeyStoreKind::Platform,
+                ..windows_env(&keystore, &reader)
+            };
+            let findings = ops.doctor_service_registration_findings(mode, &env);
+            assert!(
+                !codes(&findings).contains(&"keystore_session_bound"),
+                "{mode} {answer:?}: {findings:?}"
+            );
+        }
     }
-    assert!(crate::doctor::EXPECTED_DOCTOR_CODES.contains(&"keystore_session_bound"));
-}
-
-/// The finding needs all three: a `platform` key store, a registered task and
-/// a stored-password principal.
-#[test]
-fn keystore_session_bound_is_silent_without_a_password_task_on_a_platform_store() {
-    let keystore = crate::identity::MemoryKeyStore::new();
-    let (_guard, ops) = healthy_ops();
-    seed_task_file(&ops, "serve");
-    let name = r"\qsh\qsh-serve";
-    let answers = [
-        Ok(Some(TaskLogonType::InteractiveToken)),
-        Ok(Some(TaskLogonType::Other)),
-        Ok(None),
-        Err(()),
-    ];
-    for answer in answers {
-        let reader = FakeReader::answering(name, answer);
-        let env = DoctorEnvironment {
-            key_store: KeyStoreKind::Platform,
-            ..windows_env(&keystore, &reader)
-        };
-        let findings = ops.doctor_service_registration_findings("serve", &env);
-        assert!(
-            !codes(&findings).contains(&"keystore_session_bound"),
-            "{answer:?}: {findings:?}"
-        );
-    }
-    // A file key store has no session-bound dependency, whatever the task.
-    let reader = FakeReader::answering(name, Ok(Some(TaskLogonType::Password)));
+    // The Password task also stays quiet about the logon scope.
+    let reader = FakeReader::answering(r"\qsh\qsh-serve", Ok(Some(TaskLogonType::Password)));
     let env = DoctorEnvironment {
-        key_store: KeyStoreKind::File,
+        key_store: KeyStoreKind::Platform,
         ..windows_env(&keystore, &reader)
     };
     let findings = ops.doctor_service_registration_findings("serve", &env);
     assert!(
-        !codes(&findings).contains(&"keystore_session_bound"),
+        !codes(&findings).contains(&"logon_task_session_scoped"),
         "{findings:?}"
     );
-    // And a host that reads nothing reports nothing.
-    let env = DoctorEnvironment {
-        key_store: KeyStoreKind::Platform,
-        ..windows_env(&keystore, &UnreadableTaskScheduler)
-    };
-    let findings = ops.doctor_service_registration_findings("serve", &env);
-    assert!(!codes(&findings).contains(&"keystore_session_bound"));
+    // The code stays in the vocabulary: macOS and Linux still emit it.
+    assert!(crate::doctor::EXPECTED_DOCTOR_CODES.contains(&"keystore_session_bound"));
 }
 
-/// The Windows half reads the scheduler, so it never fires on another OS even
-/// when the reader would say "stored password".
+/// Off Windows the scheduler is never read, even when the reader would say
+/// "stored password". The macOS and Linux emissions are pinned in
+/// `ops/doctor/tests.rs` (`keystore_session_bound_fires_for_platform_store_*`).
 #[test]
-fn keystore_session_bound_does_not_read_the_task_scheduler_off_windows() {
+fn the_task_scheduler_is_not_read_off_windows() {
     let keystore = crate::identity::MemoryKeyStore::new();
     let (_guard, ops) = healthy_ops();
     let reader = FakeReader::answering(r"\qsh\qsh-serve", Ok(Some(TaskLogonType::Password)));
