@@ -371,6 +371,11 @@ enum ForwardResource {
     Remote {
         acceptor: RemoteForwardAcceptor,
         forward_id: String,
+        /// Reverse route only: the claim loop reports here when its
+        /// `forward_id` no longer admits claims (a `qsh tunnel close`
+        /// removed the registration out from under this holder). `None`
+        /// on the forward route, which has no such loop.
+        vanished: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     },
     /// `-D`'s own SOCKS5 listener (ADR-0019 decision 11). Symmetric with
     /// `Local` for teardown purposes (dropping it aborts its accept task —
@@ -479,6 +484,29 @@ async fn wait_for_end(
                     ErrorCode::ConnectionFailed,
                     format!("the local forward's listener failed: {err}"),
                 ), None),
+                ended = carrier_end => ended,
+            }
+        }
+        ForwardResource::Remote {
+            vanished: Some(vanished),
+            ..
+        } => {
+            // An unsupervised reverse `-R` whose registration an operator
+            // closed (`qsh tunnel close`): its claim loop would otherwise
+            // retry a forward_id the daemon no longer knows forever.
+            // Either that or a registration swap ends the holder; the
+            // `LOCAL_CONTROL` conduit ending says the same through
+            // `carrier_end`, so whichever is seen first wins.
+            tokio::select! {
+                forward_id = vanished.recv() => match forward_id {
+                    Some(_) => Ending::Failed(OpError::new(
+                        ErrorCode::ConnectionFailed,
+                        "the tunnel was closed: its registration is gone from the daemon \
+                         (qsh tunnel close, or the host re-registered)",
+                    ), None),
+                    // The loop's sender is gone; only the carrier can end this.
+                    None => std::future::pending().await,
+                },
                 ended = carrier_end => ended,
             }
         }
@@ -708,6 +736,7 @@ impl TunnelHold {
         if let ForwardResource::Remote {
             acceptor,
             forward_id,
+            ..
         } = &self.forward
         {
             acceptor.unregister(forward_id);
@@ -923,6 +952,7 @@ impl Ops {
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
+                        vanished: None,
                     },
                     tunnel: TunnelDto::Forward(tunnel),
                 })
@@ -984,9 +1014,14 @@ impl Ops {
                 })
             }
             ForwardDirection::Remote => {
-                let acceptor = conn
-                    .runtime()
-                    .block_on(RemoteForwardAcceptor::spawn_reverse(socket, route_host));
+                let (vanished_tx, vanished_rx) = tokio::sync::mpsc::unbounded_channel();
+                let acceptor =
+                    conn.runtime()
+                        .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
+                            socket,
+                            route_host,
+                            Some(vanished_tx),
+                        ));
                 let claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
                 let mut open_req = remote_forward_open_from_spec(spec);
                 open_req.claim_token = claim_token;
@@ -1020,6 +1055,7 @@ impl Ops {
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
+                        vanished: Some(vanished_rx),
                     },
                     tunnel: TunnelDto::Forward(tunnel),
                 })

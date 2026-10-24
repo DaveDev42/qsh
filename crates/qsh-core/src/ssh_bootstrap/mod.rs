@@ -48,8 +48,8 @@ pub use dest::{Dest, split_user_host};
 pub use respond::{AUDIT_ACTION, RespondEnd, Responder};
 pub use ssh::{
     BATCH_HELLO_TIMEOUT, BootstrapTimeouts, MESSAGE_TIMEOUT, ResponderOptions, SSH_G_OUTPUT_MAX,
-    SshChild, SshExit, SshResolved, SshRunner, batch_mode, map_ssh_exit, parse_ssh_g,
-    quote_remote_program, responder_args, ssh_g_args, ssh_not_found,
+    SshChild, SshExit, SshResolved, SshRunner, batch_mode, map_ssh_exit, map_ssh_exit_with_stderr,
+    parse_ssh_g, quote_remote_program, responder_args, ssh_g_args, ssh_not_found,
 };
 
 #[cfg(test)]
