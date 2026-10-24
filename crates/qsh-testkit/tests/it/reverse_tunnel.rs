@@ -1888,6 +1888,87 @@ async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio
     harness.shutdown().await;
 }
 
+/// Regression for a campaign finding (qsh v0.5.2): a non-supervised
+/// `qsh tunnel open --remote` holder on the reverse route kept running
+/// after another process ran `qsh tunnel close`, retrying a `TCP_ACCEPTED`
+/// claim for the removed `forward_id` every 200 ms forever. The holder
+/// must now end (`CONNECTION_FAILED`, the unsupervised end), which also
+/// drops the claim loop, within a bounded time of the close.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsupervised_reverse_remote_holder_ends_when_another_client_closes_the_tunnel() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+
+        let ops_hold = ops.clone();
+        let echo_port = echo.port();
+        let (tunnel_tx, tunnel_rx) = tokio::sync::oneshot::channel();
+        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel();
+        // A plain thread, like `qsh tunnel open`'s synchronous `main`.
+        let hold_thread = std::thread::spawn(move || {
+            let hold = ops_hold
+                .tunnel_open(qsh_proto::TunnelOpenReq {
+                    host: "widget".to_string(),
+                    mode: "remote".to_string(),
+                    bind: None,
+                    listen_port: u32::from(free_port()),
+                    forward_host: "127.0.0.1".to_string(),
+                    forward_port: u32::from(echo_port),
+                    wait_ms: None,
+                    supervise_ms: None,
+                    accept_hold_ms: None,
+                })
+                .expect("tunnel_open --remote over reverse");
+            let _ = tunnel_tx.send(hold.tunnel().clone());
+            let err = hold.hold();
+            let _ = ended_tx.send(err);
+        });
+        let opened = tunnel_rx.await.expect("tunnel_open reported its Tunnel");
+        let bind_addr: SocketAddr = opened.bind.parse().expect("bind is a socket address");
+        let payload = b"before the close".to_vec();
+        let got = TunnelHarness::round_trip(bind_addr, payload.clone())
+            .await
+            .expect("round trip before the close");
+        assert_eq!(got, payload);
+
+        let closed = tunnel_close(&ops, &opened.tunnel_id)
+            .await
+            .expect("tunnel_close");
+        assert!(closed.closed, "the daemon-held forward must really close");
+
+        let err = tokio::time::timeout(Duration::from_secs(10), ended_rx)
+            .await
+            .expect("the holder must end after another client closed its tunnel, not retry forever")
+            .expect("holder reported its end");
+        assert_eq!(err.code, qsh_proto::ErrorCode::ConnectionFailed);
+        hold_thread.join().expect("holder thread must not panic");
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
 // ------------------------------------------------------------------
 // issue #4 item 5a — `-L` over reverse survives a registration drop, and
 // `qsh tunnel open --wait <ms>` (`docs/CLI.md` §6.9/§6.14).

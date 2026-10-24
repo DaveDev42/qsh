@@ -1264,6 +1264,54 @@ mod pair_client {
         assert_eq!(calls[0], ["-G", "--", "box"]);
     }
 
+    /// `cmd.exe /c` exits 1 (not 9009) for a program it cannot find; the
+    /// words ssh relays on stderr tell it from PowerShell's exit 1. The text
+    /// still reaches qsh's own stderr unchanged.
+    #[test]
+    fn ssh_bootstrap_a_remote_cmd_exe_exit_1_with_its_text_is_a_missing_qsh_and_writes_nothing() {
+        let text = "'qsh' is not recognized as an internal or external command,";
+        let mut fake = FakeSsh::new();
+        fake.exit(1).stderr(text);
+        let client = client_for(&fake);
+        let out = client.qsh(&["pair", "ssh", "box", "--json"]);
+        assert_eq!(exit_code(&out), 255);
+        let got: Value = serde_json::from_slice(out.stdout.trim_ascii()).expect("one envelope");
+        assert_eq!(got["error"]["code"], "REMOTE_ERROR", "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_qsh_missing",
+            "{got}"
+        );
+        assert_eq!(got["error"]["details"]["remote_exit"], 1, "{got}");
+        let message = got["error"]["message"].as_str().unwrap();
+        assert!(message.contains("--remote-qsh"), "{message}");
+        assert!(message.contains("[ssh].remote_qsh"), "{message}");
+        assert!(!trust_file_exists(&client));
+        // ssh's words were forwarded, not swallowed, and are not in the envelope.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("is not recognized as an internal"),
+            "{stderr}"
+        );
+        assert!(!got.to_string().contains("is not recognized"), "{got}");
+    }
+
+    /// The same exit 1 with PowerShell's words stays `remote_command_failed`.
+    #[test]
+    fn ssh_bootstrap_a_remote_powershell_exit_1_stays_a_failed_command() {
+        let mut fake = FakeSsh::new();
+        fake.exit(1)
+            .stderr("qsh: The term 'qsh' is not recognized as a name of a cmdlet");
+        let client = client_for(&fake);
+        let (code, got) = pair_json(&client, &["box"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_command_failed",
+            "{got}"
+        );
+        assert_eq!(got["error"]["details"]["remote_exit"], 1, "{got}");
+        assert!(!trust_file_exists(&client));
+    }
+
     /// cmd.exe answers 9009 for a program it cannot find; only a Windows
     /// process can exit with that value (a Unix status is one byte).
     #[cfg(windows)]

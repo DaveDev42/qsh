@@ -6,21 +6,24 @@
 //! ssh configuration locally (no network) and qsh reads four keys of it.
 //! Then `ssh ... <dest> <remote_qsh> pair ssh-respond` carries the bootstrap
 //! stream over the child's stdin and stdout. Authentication, host key
-//! checks and every prompt stay inside ssh: its stderr and controlling
-//! terminal are inherited, and qsh never reads a key, a passphrase or an
-//! agent socket.
+//! checks and every prompt stay inside ssh: its controlling terminal is
+//! inherited, its stderr is forwarded to qsh's own stderr as it arrives (a
+//! small bounded tail is kept in memory to classify an early exit), and qsh
+//! never reads a key, a passphrase or an agent socket.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::ssh_bootstrap::{BootstrapLine, BootstrapLineError, BootstrapReader};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::task::JoinHandle;
 
 use super::dest::Dest;
 use crate::config::SshConfig;
@@ -266,19 +269,97 @@ impl SshExit {
     }
 }
 
+/// Largest tail of ssh's stderr kept in memory for classifying an early
+/// exit (ADR-0044 decision 14). It is never logged, never put into an
+/// envelope or the audit trail, and dropped after classification.
+pub const STDERR_TAIL_MAX: usize = 4096;
+
+/// [`map_ssh_exit_with_stderr`] without any stderr text.
+pub fn map_ssh_exit(exit: SshExit, hello_seen: bool) -> OpError {
+    map_ssh_exit_with_stderr(exit, hello_seen, "qsh", b"")
+}
+
+/// Whether `tail` (ssh's stderr) has a line that names `remote_qsh` (or its
+/// basename) in single quotes at its start, once ANSI escapes and leading
+/// whitespace are removed. That is how `cmd.exe` reports a command it cannot
+/// find (`'qsh' is not recognized ...`, and the localized variants); the
+/// PowerShell text starts with `qsh:` and does not match.
+pub fn stderr_names_missing_qsh(tail: &[u8], remote_qsh: &str) -> bool {
+    let text = String::from_utf8_lossy(&strip_ansi(tail)).into_owned();
+    let base = remote_qsh.rsplit(['/', '\\']).next().unwrap_or(remote_qsh);
+    let mut names = vec![remote_qsh];
+    if !base.is_empty() && base != remote_qsh {
+        names.push(base);
+    }
+    text.split('\n').any(|line| {
+        let line = line.trim_start();
+        names.iter().any(|name| {
+            line.strip_prefix('\'')
+                .and_then(|rest| rest.strip_prefix(name))
+                .is_some_and(|rest| rest.starts_with('\''))
+        })
+    })
+}
+
+/// Remove ANSI escape sequences (CSI and OSC) from `input`.
+fn strip_ansi(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] != 0x1b {
+            out.push(input[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        match input.get(i) {
+            Some(b'[') => {
+                i += 1;
+                while i < input.len() && !(0x40..=0x7e).contains(&input[i]) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            Some(b']') => {
+                i += 1;
+                while i < input.len() && input[i] != 0x07 {
+                    if input[i] == 0x1b && input.get(i + 1) == Some(&b'\\') {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            Some(_) => i += 1,
+            None => {}
+        }
+    }
+    out
+}
+
 /// The error for an ssh child that ended without delivering the result
 /// (ADR-0044 decision 14). `hello_seen` tells whether the responder had
-/// already spoken.
+/// already spoken. `remote_qsh` is the program as put on the remote command
+/// line and `stderr_tail` the last bytes ssh wrote to stderr (already shown
+/// to the user).
 ///
 /// Before the `hello` the exit status says what the remote shell did:
-/// 127 (and 9009 from `cmd.exe`) means no `qsh` on the remote `PATH`, 2 an
-/// older `qsh` that does not know `pair ssh-respond`, 1 a failure that
-/// PowerShell also uses for a missing command, 255 ssh itself failing. The
-/// stderr text ssh wrote was already shown to the user and is not read
-/// again. After the `hello`, 255 is still ssh failing; any other early end
-/// is a protocol error. An interrupt is `CANCELED` at every point. All
-/// `details.reason` values are additive.
-pub fn map_ssh_exit(exit: SshExit, hello_seen: bool) -> OpError {
+/// 127 (and 9009 from a `cmd.exe` batch) means no `qsh` on the remote `PATH`,
+/// 2 an older `qsh` that does not know `pair ssh-respond`, 1 a failure that
+/// PowerShell uses for a missing command and `cmd.exe /c` uses too, 255 ssh
+/// itself failing. Exit 1 is told apart by the stderr tail: a line starting
+/// with `'<remote_qsh>'` is `cmd.exe` not finding the command, so it maps to
+/// `remote_qsh_missing` like 127 (see `stderr_names_missing_qsh`). After the
+/// `hello`, 255 is still ssh failing; any other early end is a protocol
+/// error. An interrupt is `CANCELED` at every point. All `details.reason`
+/// values are additive.
+pub fn map_ssh_exit_with_stderr(
+    exit: SshExit,
+    hello_seen: bool,
+    remote_qsh: &str,
+    stderr_tail: &[u8],
+) -> OpError {
     let reason = |code: ErrorCode, reason: &str, message: &str, extra: serde_json::Value| {
         let mut details = json!({ "reason": reason });
         if let (Some(map), Some(extra)) = (details.as_object_mut(), extra.as_object()) {
@@ -309,14 +390,20 @@ pub fn map_ssh_exit(exit: SshExit, hello_seen: bool) -> OpError {
             "the remote command ended before it delivered a result",
             none,
         ),
-        SshExit::Code(code @ (127 | 9009)) => reason(
-            ErrorCode::RemoteError,
-            "remote_qsh_missing",
-            "the remote shell did not find `qsh`, so nothing was written on either side; pass \
-             --remote-qsh <path> or set [ssh].remote_qsh in config.toml (a non-interactive ssh \
-             shell often lacks ~/.cargo/bin or /usr/local/bin in its PATH) and run this again",
-            json!({ "remote_exit": code }),
-        ),
+        SshExit::Code(code)
+            if matches!(code, 127 | 9009)
+                || (code == 1 && stderr_names_missing_qsh(stderr_tail, remote_qsh)) =>
+        {
+            reason(
+                ErrorCode::RemoteError,
+                "remote_qsh_missing",
+                "the remote shell did not find `qsh`, so nothing was written on either side; \
+                 pass --remote-qsh <path> or set [ssh].remote_qsh in config.toml (a \
+                 non-interactive ssh shell often lacks ~/.cargo/bin or /usr/local/bin in its \
+                 PATH) and run this again",
+                json!({ "remote_exit": code }),
+            )
+        }
         SshExit::Code(2) => reason(
             ErrorCode::Unsupported,
             "remote_qsh_too_old",
@@ -536,9 +623,11 @@ impl SshRunner {
     }
 
     /// Start the responder call (ADR-0044 decisions 9 and 16). stdin and
-    /// stdout are pipes for the bootstrap stream; stderr and the controlling
-    /// terminal are inherited, so ssh asks its own questions (passwords,
-    /// passphrases, host key confirmation) directly on the terminal.
+    /// stdout are pipes for the bootstrap stream. stderr is a pipe too, forwarded
+    /// byte for byte to qsh's stderr as it arrives (with a bounded tail kept
+    /// for classification); the controlling terminal is inherited, so ssh asks
+    /// its own questions (passwords, passphrases, host key confirmation)
+    /// directly on the terminal, not on stderr.
     pub fn spawn_responder(
         &self,
         dest: &Dest,
@@ -555,16 +644,22 @@ impl SshRunner {
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .map_err(|err| spawn_error(&program, &err))?
         };
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let stderr_pump = tokio::spawn(pump_stderr(stderr, Arc::clone(&stderr_tail)));
         tracing::debug!(target: "qsh::ssh_bootstrap", stage = "spawned", batch_mode = options.batch_mode);
         Ok(SshChild {
             child,
+            remote_qsh: remote_qsh.to_owned(),
+            stderr_tail,
+            stderr_pump: Some(stderr_pump),
             stdin: Some(stdin),
             stream: MessageStream::new(stdout),
             timeouts: options.timeouts,
@@ -686,6 +781,34 @@ pub struct SshChild {
     stream: MessageStream<ChildStdout>,
     timeouts: BootstrapTimeouts,
     cancel: CancelToken,
+    remote_qsh: String,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    stderr_pump: Option<JoinHandle<()>>,
+}
+
+/// Forward ssh's stderr to qsh's stderr unchanged, keeping the last
+/// [`STDERR_TAIL_MAX`] bytes in `tail`. Ends at end of stream.
+async fn pump_stderr(mut src: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
+    use std::io::Write;
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = match src.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        {
+            let mut err = io::stderr().lock();
+            let _ = err.write_all(&buf[..n]);
+            let _ = err.flush();
+        }
+        if let Ok(mut tail) = tail.lock() {
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > STDERR_TAIL_MAX {
+                let cut = tail.len() - STDERR_TAIL_MAX;
+                tail.drain(..cut);
+            }
+        }
+    }
 }
 
 impl SshChild {
@@ -807,7 +930,17 @@ impl SshChild {
         if canceled {
             return canceled_error();
         }
-        map_ssh_exit(exit, self.stream.hello_seen())
+        // The pump ends at the pipe's end of file. A grandchild that kept the
+        // pipe open must not hold the error back, so the wait is short.
+        if let Some(pump) = self.stderr_pump.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+        }
+        let tail = self
+            .stderr_tail
+            .lock()
+            .map(|mut tail| std::mem::take(&mut *tail))
+            .unwrap_or_default();
+        map_ssh_exit_with_stderr(exit, self.stream.hello_seen(), &self.remote_qsh, &tail)
     }
 
     async fn reap_after_close_exit(&mut self) -> SshExit {

@@ -346,6 +346,75 @@ fn ssh_exit_codes_map_to_the_adr_reasons_before_the_hello() {
     assert_eq!(reason(&silent), "bootstrap_protocol");
 }
 
+const CMD_EN: &[u8] = b"'qsh' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n";
+const CMD_KO: &str = "'qsh'\u{c740}(\u{b294}) \u{b0b4}\u{bd80} \u{b610}\u{b294} \u{c678}\u{bd80} \u{bc84}\u{ba85}\u{b839}, \u{c2e4}\u{d589}\u{d560} \u{c218} \u{c788}\u{b294} \u{d504}\u{b85c}\u{adf8}\u{b7a8}, \u{b610}\u{b294} \u{bc30}\u{ce58} \u{d30c}\u{c77c}\u{c774} \u{c544}\u{b2d9}\u{b2c8}\u{b2e4}.\r\n";
+const POWERSHELL: &[u8] = b"qsh: The term 'qsh' is not recognized as a name of a cmdlet, function, script file, or executable program.\n";
+
+#[test]
+fn exit_1_with_the_cmd_exe_text_is_a_missing_qsh() {
+    for tail in [CMD_EN, CMD_KO.as_bytes()] {
+        let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, "qsh", tail);
+        assert_eq!(err.code, ErrorCode::RemoteError);
+        assert_eq!(reason(&err), "remote_qsh_missing");
+        assert_eq!(err.details["remote_exit"], 1);
+        assert!(err.message.contains("--remote-qsh"));
+        assert!(err.message.contains("[ssh].remote_qsh"));
+    }
+    // Other lines before it, an ANSI-colored line and leading blanks do not hide it.
+    let tail = b"Warning: noise\r\n  \x1b[31m'qsh' is not recognized as an internal\x1b[0m\r\n";
+    let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, "qsh", tail);
+    assert_eq!(reason(&err), "remote_qsh_missing");
+}
+
+#[test]
+fn a_custom_remote_qsh_is_matched_by_its_value_or_basename() {
+    let path = r"C:\Tools\qsh\qsh.exe";
+    let full = format!("'{path}' is not recognized as an internal or external command,\r\n");
+    let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, path, full.as_bytes());
+    assert_eq!(reason(&err), "remote_qsh_missing");
+    let base = b"'qsh.exe' is not recognized as an internal or external command,\r\n";
+    let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, path, base);
+    assert_eq!(reason(&err), "remote_qsh_missing");
+    // The default name does not match a different custom program.
+    let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, path, CMD_EN);
+    assert_eq!(reason(&err), "remote_command_failed");
+}
+
+#[test]
+fn exit_1_with_powershell_or_unrelated_text_stays_a_failed_command() {
+    let colored = b"\x1b[31;1mqsh: \x1b[0m\x1b[31;1mThe term 'qsh' is not recognized as a name of a cmdlet\x1b[0m\n";
+    for tail in [
+        POWERSHELL,
+        &colored[..],
+        b"bash: qsh: command not found\n",
+        b"",
+        b"it's 'qsh' time\n",
+    ] {
+        let err = map_ssh_exit_with_stderr(SshExit::Code(1), false, "qsh", tail);
+        assert_eq!(reason(&err), "remote_command_failed", "{tail:?}");
+        assert_eq!(err.details["remote_exit"], 1);
+        assert!(err.message.contains("PowerShell"));
+    }
+}
+
+#[test]
+fn the_cmd_exe_text_changes_only_exit_1_and_only_before_the_hello() {
+    for (code, expected) in [
+        (127, "remote_qsh_missing"),
+        (9009, "remote_qsh_missing"),
+        (2, "remote_qsh_too_old"),
+        (77, "remote_command_failed"),
+        (0, "bootstrap_protocol"),
+    ] {
+        let err = map_ssh_exit_with_stderr(SshExit::Code(code), false, "qsh", CMD_EN);
+        assert_eq!(reason(&err), expected, "{code}");
+    }
+    let err = map_ssh_exit_with_stderr(SshExit::Code(1), true, "qsh", CMD_EN);
+    assert_eq!(reason(&err), "bootstrap_protocol");
+    let err = map_ssh_exit_with_stderr(SshExit::Code(255), false, "qsh", CMD_EN);
+    assert_eq!(reason(&err), "ssh_failed");
+}
+
 #[test]
 fn ssh_exit_after_the_hello_is_ssh_failed_or_a_protocol_error() {
     let dropped = map_ssh_exit(SshExit::Code(255), true);
