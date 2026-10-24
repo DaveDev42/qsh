@@ -95,7 +95,7 @@ impl PtySource {
 impl SessionSource for PtySource {
     fn spawn(self: Box<Self>, spec: &SessionSpec) -> io::Result<SpawnedSource> {
         // Must be inside a runtime: the master fd is registered with the
-        // reactor here (`AsyncFd::new`).
+        // reactor here (`AsyncFd::register`).
         let _rt = tokio::runtime::Handle::try_current().map_err(|_| {
             io::Error::other("PtySource::spawn must be called from within a tokio runtime")
         })?;
@@ -188,7 +188,10 @@ impl SessionSource for PtySource {
             .ok_or_else(|| io::Error::other("pty master has no fd"))?;
         let master = dup_cloexec_nonblocking(master_raw)?;
         drop(pair.master);
-        let fd = Arc::new(AsyncFd::new(master)?);
+        // SAFETY: `master` is an `OwnedFd` moved into the `AsyncFd`, so the
+        // descriptor stays open and refers to the same file description until
+        // the `AsyncFd` drops it, and nothing here closes or replaces it.
+        let fd = Arc::new(unsafe { AsyncFd::register(master) }?);
 
         // Success: the actor now owns the child's lifetime (`wait_for_exit`
         // + `ReapGuard`).

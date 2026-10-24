@@ -243,7 +243,10 @@ pub(crate) async fn wait_for_hangup(read: &RawReader<OwnedReadHalf>) {
     let Ok(fd) = read.as_ref().as_fd().try_clone_to_owned() else {
         return;
     };
-    let Ok(watch) = AsyncFd::with_interest(fd, Interest::WRITABLE) else {
+    // SAFETY: `fd` is an `OwnedFd` (a `dup`) moved into the `AsyncFd`, so
+    // the descriptor stays open and refers to the same file description until
+    // the `AsyncFd` drops it at the end of this function.
+    let Ok(watch) = (unsafe { AsyncFd::register_with_interest(fd, Interest::WRITABLE) }) else {
         return;
     };
     loop {
