@@ -9,6 +9,61 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.3`
+
+A patch release on top of `v0.5.2` with three fixes found while running
+the Windows host rounds W3b and W7 on real machines
+(`docs/campaigns/p1-windows.md`). The wire format, `qsh.cli/v1`,
+`qsh.event/v1` and the doctor code set are unchanged, so `v0.5.2` and
+earlier `v0.5.x` and `v0.4.x` peers interoperate with this build as before.
+
+### Fixes
+
+- Reverse route: a `qsh tunnel open --remote` started without
+  `--supervise` now ends when another process closes its tunnel with
+  `qsh tunnel close`. It exits 255 with `CONNECTION_FAILED` and a
+  `tunnel_ended` line. On `v0.5.2` it stayed running after the close and
+  logged a failed `TCP_ACCEPTED` claim every 200 ms until it got a signal
+  (ADR-0023 revision history).
+- `qsh pair ssh` against a Windows OpenSSH Server whose default shell is
+  `cmd.exe` now reports a missing remote `qsh` as `REMOTE_ERROR` with
+  `details.reason: "remote_qsh_missing"`. A missing command makes
+  `cmd.exe /c` exit 1, not 9009 as ADR-0044 assumed, so `v0.5.2` reported
+  `remote_command_failed`. ssh's stderr is now relayed through qsh as it
+  arrives instead of being inherited. qsh keeps the last 4 KiB in memory
+  to classify an early exit and never writes it anywhere. Password,
+  passphrase and host key prompts use the terminal and are unaffected
+  (ADR-0044 revision history).
+- Windows: `qsh doctor` no longer reports `keystore_session_bound` for a
+  task registered with a `Password` principal. A measurement on
+  Windows 11 25H2 showed such a task reads the Credential Manager key
+  without an interactive session. `docs/deploy/service.md` now also says
+  the account needs the "Log on as a batch job" right
+  (`SeBatchLogonRight`), without which the task fails with `0x80070569`
+  before qsh runs (ADR-0032 revision history).
+
+### Assets and signing
+
+Unchanged from `v0.5.2`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.3` in the names.
+
+### What is still unproven
+
+Everything `v0.5.2` lists, with these changes from the rounds run on
+`v0.5.2`:
+
+- W3b passed with a macOS controller. The Linux controller variant has
+  not been run.
+- W7 ran with a macOS client. Variant A (`cmd.exe`) failed on the
+  missing-`qsh` check, which this release fixes, and is to be rerun on
+  this tag. The checks that need inbound UDP to the Windows `qsh serve`
+  through its firewall are still open in both variants.
+- W2 and W3a have still not been run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.2`
 
 A patch release on top of `v0.5.1`. It picks up dependency fixes for
