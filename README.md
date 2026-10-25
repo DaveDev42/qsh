@@ -1212,9 +1212,16 @@ Some of these are MVP scope decisions, some are unfinished work.
   the provenance attestation still cover the zips.
 - The first time `qsh serve` or `qsh listen` binds a fixed UDP port on a
   non-loopback address, Windows Defender Firewall asks whether to allow it,
-  once per executable path (a `qsh.exe` at a new path asks again). Allow it
-  on private networks for peers on other machines to connect; connections
-  from the same machine do not need it. Until it is allowed, packets from
+  once per executable path (a `qsh.exe` at a new path asks again). Peers on
+  other machines need it allowed; connections from the same machine do not.
+  Older dialogs have Private and Public checkboxes, and Private is enough
+  for a LAN. On Windows 11 25H2 (build 26200) the dialog reads "Do you want
+  to allow public and private networks to access this app?" with only
+  Allow and Cancel, and Allow adds inbound TCP and UDP rules for that path
+  on both the Private and Public profiles. To keep it off public networks,
+  turn off the Public profile on those rules afterwards (`wf.msc` or
+  `Set-NetFirewallRule`), or have an administrator create a Private-only
+  rule instead. Until it is allowed, packets from
   other machines are dropped without an answer, and `qsh doctor <host>` run
   from a peer can report `udp_egress_blocked`. `qsh serve --to`, the client,
   other outbound dials and loopback listeners never trigger the prompt, and
