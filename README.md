@@ -1222,7 +1222,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   turn off the Public profile on those rules afterwards (`wf.msc` or
   `Set-NetFirewallRule`), or have an administrator create a Private-only
   rule instead. Until it is allowed, packets from
-  other machines are dropped without an answer, and `qsh doctor <host>` run
+  other machines are dropped without an answer, even over an overlay such
+  as Tailscale, and `qsh doctor <host>` run
   from a peer can report `udp_egress_blocked`. `qsh serve --to`, the client,
   other outbound dials and loopback listeners never trigger the prompt, and
   `qsh` does not add or change firewall rules. CI builds, lints and

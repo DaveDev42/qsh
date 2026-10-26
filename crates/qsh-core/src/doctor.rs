@@ -219,11 +219,15 @@ pub const AUDIT_PATH_UNWRITABLE: Diagnostic = Diagnostic {
 /// or `qsh listen` that was never allowed (ADR-0035 decision 25). It is the
 /// one place the doctor can say so, because the probe cannot tell a local
 /// egress drop from a remote ingress drop; no new finding code is needed.
+/// That firewall filters overlay interfaces too, so the overlay workaround
+/// is offered for this machine's own egress only (campaign
+/// `docs/campaigns/p1-windows.md` §4.12 a, 2026-10-26: a client reaching a
+/// Windows host over Tailscale still got this finding until Allow).
 pub const UDP_EGRESS_BLOCKED: Diagnostic = Diagnostic {
     id: DiagnosticId::UdpEgressBlocked,
     code: "udp_egress_blocked",
     message: "UDP egress for QSH's QUIC transport appears to be silently blocked: a probe packet left this machine but nothing answered before the timeout. QSH has no TCP fallback (ADR-0043) — every QSH connection is QUIC over UDP, so this is a hard stop, not a slow path.",
-    remedy: "Open outbound UDP (default port 4433) on this machine's firewall. If the target is a Windows machine running `qsh serve` or `qsh listen`, its Windows Defender Firewall drops inbound UDP until qsh is allowed there; allowing it on private networks is enough for peers on the same network. Until the path is open, an existing overlay such as WireGuard or Tailscale is the only workaround.",
+    remedy: "Open outbound UDP (default port 4433) on this machine's firewall; until that path is open, an existing overlay such as WireGuard or Tailscale is the only workaround. If the target is a Windows machine running `qsh serve` or `qsh listen`, its Windows Defender Firewall drops inbound UDP, overlay traffic included, until that qsh.exe path is allowed there. Older allow dialogs offer a Private-only choice; on Windows 11 25H2 Allow opens both the Private and Public profiles (docs/CLI.md §6.13).",
 };
 
 /// `docs/CLI.md` §6.17: the operating system reported the probed address
