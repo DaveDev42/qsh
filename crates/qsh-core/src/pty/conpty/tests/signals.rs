@@ -511,12 +511,15 @@ async fn an_unwaited_usr_signal_ends_the_session_by_escalation() {
     assert_eq!(reported(&report)[0], "usr1");
 }
 
-/// The exit a session reports carries the signal of the last step qsh sent.
+/// The exit a session reports carries the signal of the last step qsh sent,
+/// unless that step was an event the program handled itself (ADR-0047).
 /// A step that failed to send is not that step: the signal falls back to the
 /// earlier one (here none) instead of claiming an event nobody received.
 #[tokio::test]
 async fn exit_after_a_qsh_sent_event_reports_the_stage_signal() {
-    // Sent: `Usr2` is delivered and the session ends with it.
+    // Sent: `Usr2` is delivered and is the last step, but an event cannot
+    // end a program, so the exit carries the program's own status and no
+    // signal (ADR-0047).
     {
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("events.txt");
@@ -524,6 +527,7 @@ async fn exit_after_a_qsh_sent_event_reports_the_stage_signal() {
         let events = Arc::new(SignalEvents::create().unwrap());
         let launch = plan(&spec, &events).unwrap();
         let session = ConPtySession::start(&launch, events, 200, 24).unwrap();
+        let log = Arc::clone(&session.log);
         let mut spawned = session.into_spawned().unwrap();
         let mut output = spawned.output;
         read_until(&mut output, READY).await;
@@ -531,7 +535,9 @@ async fn exit_after_a_qsh_sent_event_reports_the_stage_signal() {
         spawned.control.signal(Signal::Usr2).unwrap();
         let exit = within(spawned.wait).await;
         assert_eq!(exit.exit_code, Some(22), "{exit:?}");
-        assert_eq!(exit.signal.as_deref(), Some("SIGUSR2"), "{exit:?}");
+        assert_eq!(exit.signal, None, "{exit:?}");
+        let stages = log.lock().unwrap().clone();
+        assert_eq!(stages, [Step::SetEvent(UserEvent::Usr2)], "{stages:?}");
         drain.abort();
     }
 
