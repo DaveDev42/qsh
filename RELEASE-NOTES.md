@@ -9,6 +9,59 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.6`
+
+A patch release on top of `v0.5.5` with two Windows client fixes and one
+wording fix, found while running round W3a (a Windows `qsh listen` with
+Linux and macOS targets, `docs/campaigns/p1-windows.md`). The wire format,
+the shape of `qsh.cli/v1` and `qsh.event/v1`, and the doctor code set are
+unchanged, so `v0.5.5` and earlier `v0.5.x` and `v0.4.x` peers
+interoperate with this build as before.
+
+### Fixes
+
+- Windows client: characters outside the Basic Multilingual Plane, such
+  as emoji, typed into an attached session reached the remote shell as
+  U+FFFD. The console input was read with `ReadFile` under code page
+  65001, which converts each UTF-16 unit separately and breaks a surrogate
+  pair. A console stdin is now read with `ReadConsoleW` and converted to
+  UTF-8 by qsh, with a pair split across two reads kept whole. Korean and
+  other BMP text was not affected, and a piped stdin is read as before
+  (ADR-0035).
+- Windows client: `qsh pair ssh` started from a Windows OpenSSH session
+  without a pty (`ssh winbox 'qsh pair ssh …'`) timed out with
+  `bootstrap_timeout` at the `hello` stage. `sshd` puts a
+  `<guid>_POSIX_FD_STATE` variable in that session, and the `ssh.exe`
+  child qsh started took it as the description of its own pipes and hung.
+  qsh now removes that variable from the environment of every `ssh` it
+  starts on Windows (ADR-0044).
+- `qsh cp`: the human-readable line for an upload now reads
+  `local -> remote`. It printed `remote -> local` for both directions,
+  which was right only for a download. JSON output is unchanged.
+
+### Assets and signing
+
+Unchanged from `v0.5.5`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.6` in the names.
+
+### What is still unproven
+
+Everything `v0.5.5` lists, with these changes from the rounds run on
+`v0.5.5`:
+
+- W2 passed with a Linux client (WSL2 on the Windows machine) and a macOS
+  client.
+- W3a ran once with a Linux target (WSL2) and a macOS target at the same
+  time. Registration, `qsh cp`, both tunnel directions and the daemon
+  restart passed; attach failed only on emoji input, fixed above. W3a's
+  attach check is rerun on this tag. The console in that round was the
+  ConPTY of an `ssh -tt` session, not Windows Terminal or a conhost
+  window, so W1 has still not been run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.5`
 
 A patch release on top of `v0.5.4` with two fixes found while running the
