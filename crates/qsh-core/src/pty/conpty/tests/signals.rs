@@ -155,9 +155,12 @@ async fn first_event_ends_an_exiting_program(signal: Signal) {
         .unwrap();
 
     let (exit_code, exit_signal) = exit_of(&out.events).expect("the session ended");
+    // A program that handles `Usr1`/`Usr2` and exits ended on its own: its
+    // status and no signal (ADR-0047).
+    let expected_signal = signal_map::reported_at_exit(signal).then(|| signal.as_str());
     assert_eq!(
         exit_signal.as_deref(),
-        Some(signal.as_str()),
+        expected_signal,
         "{signal}: {:?}",
         out.events
     );
@@ -435,6 +438,30 @@ async fn usr_signal_event_variables_cannot_be_overridden_by_the_client() {
         "{}",
         seen.out
     );
+}
+
+/// A program that handles `Usr1` or `Usr2` and exits on its own reports its
+/// exit code and no signal, like a unix child that handled `SIGUSR1`.
+#[tokio::test]
+async fn usr1_handled_by_the_program_reports_its_exit_code_and_no_signal() {
+    for (signal, code) in [(Signal::Usr1, 21), (Signal::Usr2, 22)] {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("events.txt");
+        let (broker, clock) = broker(1 << 20);
+        let handle = broker
+            .open_with(&probe_spec("exit", &report, &[]), Box::new(source()))
+            .unwrap();
+        pull_until(&handle, &clock, usize::MAX, |ev| text(ev).contains(READY)).await;
+        within(broker.close(&handle_id(&handle), CloseReason::Closed, Some(signal)))
+            .await
+            .unwrap();
+        let out = within(handle.pull(Cursor::from_offset(0), usize::MAX, FOREVER, &clock))
+            .await
+            .unwrap();
+        let (exit_code, exit_signal) = exit_of(&out.events).expect("the session ended");
+        assert_eq!(exit_code, Some(code), "{signal}: the probe's exit code");
+        assert_eq!(exit_signal, None, "{signal}: {:?}", out.events);
+    }
 }
 
 /// A program that never waits on `Usr1` does not end by it. The close that
