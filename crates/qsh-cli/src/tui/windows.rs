@@ -5,9 +5,11 @@
 //! Keys are never parsed. Raw mode switches the console input to VT bytes
 //! (`ENABLE_VIRTUAL_TERMINAL_INPUT`, the line editor, echo and the system
 //! Ctrl-C handling off), the output to VT processing, and both code pages
-//! to UTF-8; what the console then hands back from `ReadFile` goes to the
-//! remote PTY unchanged, and `Ctrl-C` is the byte `0x03`. The mode
-//! arithmetic is [`super::console_mode`].
+//! to UTF-8; what the console then hands back goes to the remote PTY
+//! unchanged, and `Ctrl-C` is the byte `0x03`. A console stdin is read with
+//! `ReadConsoleW` and transcoded by [`super::utf16_input`], because
+//! `ReadFile` under code page 65001 turns each half of a surrogate pair into
+//! U+FFFD. The mode arithmetic is [`super::console_mode`].
 //!
 //! # Restoring
 //!
@@ -560,22 +562,28 @@ impl Drop for EchoSuppressed {
 #[cfg(windows)]
 pub mod system {
     use std::io;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, GetLastError, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::Console::{
         CONSOLE_SCREEN_BUFFER_INFO, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP,
-        GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
         STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleCtrlHandler, SetConsoleMode, SetConsoleOutputCP,
     };
 
+    use super::super::utf16_input::Utf16Reader;
     use super::{ConsoleApi, Sleep, WindowsTerminal, on_console_event};
 
     /// The process's standard handles as a console.
-    pub struct Win32Console;
+    #[derive(Default)]
+    pub struct Win32Console {
+        /// UTF-16 decoding state of a console stdin: a held high surrogate
+        /// and the bytes that did not fit the caller's buffer.
+        reader: Mutex<Utf16Reader>,
+    }
 
     /// A real pause.
     pub struct ThreadSleep;
@@ -588,12 +596,12 @@ pub mod system {
 
     /// The terminal of this process.
     pub fn terminal() -> WindowsTerminal {
-        WindowsTerminal::new(Arc::new(Win32Console), Arc::new(ThreadSleep))
+        WindowsTerminal::new(Arc::new(Win32Console::default()), Arc::new(ThreadSleep))
     }
 
     /// This process's console, as the trait the prompt takes.
     pub fn console() -> Arc<dyn ConsoleApi> {
-        Arc::new(Win32Console)
+        Arc::new(Win32Console::default())
     }
 
     fn get_mode(which: u32) -> Option<u32> {
@@ -672,13 +680,42 @@ pub mod system {
         }
 
         fn read_stdin(&self, buf: &mut [u8]) -> io::Result<usize> {
+            // SAFETY: standard handle query.
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+            let mut mode = 0u32;
+            // SAFETY: `mode` is live for the call.
+            if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+                // A console: `ReadFile` under code page 65001 converts per
+                // UTF-16 unit and replaces each half of a surrogate pair, so
+                // read UTF-16 and transcode with the pair carried across reads.
+                let mut reader = self.reader.lock().unwrap_or_else(|e| e.into_inner());
+                return reader.read(buf, |units| {
+                    let mut read = 0u32;
+                    let len = u32::try_from(units.len()).unwrap_or(u32::MAX);
+                    // SAFETY: `units` is live for the call and `len` does not
+                    // exceed it; no input control is passed.
+                    let ok = unsafe {
+                        ReadConsoleW(
+                            handle,
+                            units.as_mut_ptr().cast(),
+                            len,
+                            &mut read,
+                            std::ptr::null(),
+                        )
+                    };
+                    if ok == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(read as usize)
+                });
+            }
             let mut read = 0u32;
             let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
             // SAFETY: `buf` is live for the call and `len` does not exceed
             // it; a console or pipe handle takes no OVERLAPPED.
             let ok = unsafe {
                 ReadFile(
-                    GetStdHandle(STD_INPUT_HANDLE),
+                    handle,
                     buf.as_mut_ptr().cast(),
                     len,
                     &mut read,

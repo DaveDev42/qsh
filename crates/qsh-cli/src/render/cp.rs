@@ -27,6 +27,8 @@ pub enum CpMode {
 /// The [`FileCopyObserver`] `qsh cp` hands to the copy.
 pub struct CpObserver {
     mode: CpMode,
+    /// The copy is an upload: the local side is the source of every item.
+    upload: bool,
     /// When the progress line was last drawn.
     drawn: Mutex<Option<Instant>>,
 }
@@ -38,8 +40,16 @@ impl CpObserver {
     pub fn new(mode: CpMode) -> Self {
         Self {
             mode,
+            upload: false,
             drawn: Mutex::new(None),
         }
+    }
+
+    /// Name the direction of the copy, so an item reads source -> destination
+    /// for an upload as well as for a download.
+    pub fn uploading(mut self, upload: bool) -> Self {
+        self.upload = upload;
+        self
     }
 
     fn clear_line(&self) {
@@ -95,13 +105,13 @@ impl FileCopyObserver for CpObserver {
                 let note = match entry.status.as_str() {
                     "failed" => Some(format!(
                         "qsh: {}: {} ({})",
-                        sanitize(&item_path(entry)),
+                        sanitize(&item_path(entry, self.upload)),
                         sanitize(entry.message.as_deref().unwrap_or("failed")),
                         entry.code.as_ref().map_or("INTERNAL", |c| c.as_str())
                     )),
                     "skipped" if !quiet => Some(format!(
                         "qsh: {}: skipped ({})",
-                        sanitize(&item_path(entry)),
+                        sanitize(&item_path(entry, self.upload)),
                         sanitize(entry.reason.as_deref().unwrap_or("skipped"))
                     )),
                     _ => None,
@@ -143,9 +153,13 @@ pub fn summary_line(err: &OpError) -> Option<String> {
     Some(line)
 }
 
-fn item_path(entry: &FileCopyEntry) -> String {
+/// `source -> destination` of an item: remote to local for a download,
+/// local to remote for an upload.
+fn item_path(entry: &FileCopyEntry, upload: bool) -> String {
     if entry.remote_path.is_empty() {
         entry.local_path.clone()
+    } else if upload {
+        format!("{} -> {}", entry.local_path, entry.remote_path)
     } else {
         format!("{} -> {}", entry.remote_path, entry.local_path)
     }
@@ -171,6 +185,31 @@ pub fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use qsh_proto::ErrorCode;
+
+    fn entry_with_paths(remote: &str, local: &str) -> FileCopyEntry {
+        serde_json::from_value(serde_json::json!({
+            "status": "failed",
+            "kind": "file",
+            "remote_path": remote,
+            "local_path": local,
+        }))
+        .expect("entry")
+    }
+
+    #[test]
+    fn item_path_reads_source_to_destination_in_both_directions() {
+        let entry = entry_with_paths("/tmp/w3a-L/x", "C:payload-nonexist");
+        assert_eq!(
+            item_path(&entry, true),
+            "C:payload-nonexist -> /tmp/w3a-L/x"
+        );
+        assert_eq!(
+            item_path(&entry, false),
+            "/tmp/w3a-L/x -> C:payload-nonexist"
+        );
+        let local_only = entry_with_paths("", "a");
+        assert_eq!(item_path(&local_only, true), "a");
+    }
 
     fn failed_copy(code: ErrorCode, message: &str, counts: (u64, u64, u64, u64, u64)) -> OpError {
         let (copied, created, skipped, failed, not_attempted) = counts;

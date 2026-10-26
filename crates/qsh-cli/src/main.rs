@@ -1078,7 +1078,9 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
         Ok(None) => {}
         Err(err) => return report_cp_error(cli, &err),
     }
-    let observer = std::sync::Arc::new(render::cp::CpObserver::new(mode));
+    let upload = qsh_core::file::operand::plan(&request)
+        .is_ok_and(|plan| plan.direction == qsh_core::file::operand::Direction::Put);
+    let observer = std::sync::Arc::new(render::cp::CpObserver::new(mode).uploading(upload));
     let mut data = match ops.file_copy(request, observer, &cancel) {
         Ok(data) => data,
         Err(err) if err.usage => return cp_usage_error(cli, &err.error.message, false),

@@ -128,6 +128,25 @@ fn conpty_raw_mode_reads_input_bytes_unprocessed() {
     assert_eq!(probe.wait_exit(), 0);
 }
 
+/// A non-BMP character typed into a raw console reaches the reader as its
+/// UTF-8 bytes (campaign W3a: `ReadFile` under code page 65001 turned each
+/// half of the surrogate pair into U+FFFD).
+#[test]
+fn conpty_raw_mode_reads_non_bmp_text_as_utf8() {
+    let mut probe = spawn_raw(&[], &[]);
+    probe.wait_record("ready");
+
+    probe.send("한글 😀\x04".as_bytes());
+    let expected: String = "한글 😀\x04".bytes().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        expected.contains("f09f9880"),
+        "the expectation holds the emoji bytes"
+    );
+    assert_eq!(read_until_eot(&mut probe), expected);
+    probe.wait_record("done");
+    assert_eq!(probe.wait_exit(), 0);
+}
+
 #[test]
 fn conpty_resize_poll_fires_once_per_size_change() {
     let mut probe = spawn_raw(&[], &[]);
