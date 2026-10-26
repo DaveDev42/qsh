@@ -20,7 +20,7 @@ use qsh_core::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE,
     ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, KEYSTORE_SESSION_BOUND,
     LAUNCHAGENT_SESSION_SCOPED, LOGON_TASK_SESSION_SCOPED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
-    TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
+    TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE, UDP_EGRESS_BLOCKED,
 };
 
 use crate::docs;
@@ -256,6 +256,26 @@ fn logon_task_session_scoped_remedy_names_a_recipe_that_exists() {
         "docs/deploy/service.md must keep the always-on task recipe the remedy names"
     );
     assert!(service_md.contains("BootTrigger") && service_md.contains("**elevated** prompt"));
+}
+
+/// The egress remedy's Windows sentence keeps what the W2 campaign observed
+/// (`docs/campaigns/p1-windows.md` §4.12 a): an overlay does not get past
+/// the host's firewall, and the 25H2 dialog has no Private-only choice. The
+/// section it names still carries that dialog's wording.
+#[test]
+fn udp_egress_blocked_remedy_matches_the_windows_firewall_section() {
+    let remedy = UDP_EGRESS_BLOCKED.remedy;
+    assert!(remedy.contains("overlay traffic included"), "{remedy}");
+    assert!(
+        remedy.contains("Allow opens both the Private and Public profiles"),
+        "{remedy}"
+    );
+    assert!(!remedy.contains("enough for peers"), "{remedy}");
+    assert!(remedy.contains("docs/CLI.md §6.13"), "{remedy}");
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains("Do you want to allow public and private networks to access this app?")
+    );
 }
 
 /// The stable half of a diagnostic is its `code`, not its prose: `code` is
