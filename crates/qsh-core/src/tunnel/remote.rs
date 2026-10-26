@@ -1205,6 +1205,16 @@ impl DrainClaimAttemptOnDrop {
         self.handle = Some(handle);
     }
 
+    /// Forget the handle that just resolved. Every arm that consumed it
+    /// calls this first: an arm may `.await` (the retry backoff) before it
+    /// reaches [`Self::replace`], and if the loop is aborted during that
+    /// await, [`Drop`] must not find the already-completed handle and
+    /// poll it again (tokio panics with "`JoinHandle` polled after
+    /// completion").
+    fn resolved(&mut self) {
+        self.handle = None;
+    }
+
     /// The live handle to poll in `select!` — always `Some` between loop
     /// iterations ([`Self::new`] seeds it, every arm that consumes it
     /// calls [`Self::replace`] before the next poll).
@@ -1338,6 +1348,7 @@ async fn claim_remote_forward_reverse(
     loop {
         tokio::select! {
             joined = claim_handle.poll_handle() => {
+                claim_handle.resolved();
                 let next = match joined {
                     Ok(Ok((send, recv, kill))) => {
                         tasks
