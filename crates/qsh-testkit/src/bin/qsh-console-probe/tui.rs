@@ -11,5 +11,8 @@ pub mod console_mode;
 #[path = "../../../../qsh-cli/src/tui/terminal.rs"]
 pub mod terminal;
 #[allow(dead_code)]
+#[path = "../../../../qsh-cli/src/tui/utf16_input.rs"]
+pub mod utf16_input;
+#[allow(dead_code)]
 #[path = "../../../../qsh-cli/src/tui/windows.rs"]
 pub mod windows;

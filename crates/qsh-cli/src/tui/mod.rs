@@ -69,6 +69,8 @@ mod term;
 mod terminal;
 #[cfg(unix)]
 mod unix;
+#[cfg(any(windows, test))]
+mod utf16_input;
 #[cfg(any(unix, windows, test))]
 mod vt_filter;
 // The Windows console: the terminal behind the trait and the echo-off mode
