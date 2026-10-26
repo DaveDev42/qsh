@@ -9,6 +9,53 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.5`
+
+A patch release on top of `v0.5.4` with two fixes found while running the
+Windows host round W2 with a Linux client
+(`docs/campaigns/p1-windows.md`). The wire format, the shape of
+`qsh.cli/v1` and `qsh.event/v1`, and the doctor code set are unchanged, so
+`v0.5.4` and earlier `v0.5.x` and `v0.4.x` peers interoperate with this
+build as before.
+
+### Fixes
+
+- Windows host: `qsh session close --signal USR1` (or `USR2`) sets the
+  session's named event. When the program waits on that event and then
+  exits by itself, `session.exit` now carries the program's exit code and
+  `"signal": null`, as a unix host reports for a program that handles
+  `SIGUSR1` and exits. `v0.5.4` reported `"exit_code": null` with
+  `"signal": "SIGUSR1"` in that case. A program that ignores the event is
+  still ended by the close escalation and reports that step's signal
+  (ADR-0047).
+- `qsh doctor`: the `udp_egress_blocked` remedy no longer says an overlay
+  such as Tailscale works around a Windows target's firewall. Windows
+  Defender Firewall drops a peer's packets for a `qsh.exe` that was never
+  allowed, over an overlay too. The remedy also stopped promising that a
+  Private-only choice exists: on Windows 11 25H2 the dialog's Allow opens
+  both the Private and Public profiles. The README and `docs/CLI.md`
+  §6.13 say the same.
+
+### Assets and signing
+
+Unchanged from `v0.5.4`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.5` in the names.
+
+### What is still unproven
+
+Everything `v0.5.4` lists, with this change from the round run on
+`v0.5.4`:
+
+- W2 ran once with a Linux client (a WSL2 distribution on the Windows
+  machine) and failed on the two points fixed above. Attach, Korean input,
+  full-screen vim with resizing, new PowerShell sessions, detach and
+  resume all passed. W2 is rerun on this tag, and W3a has still not been
+  run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.4`
 
 A patch release on top of `v0.5.3` with one fix found while running the
