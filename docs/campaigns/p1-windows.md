@@ -100,6 +100,12 @@ W와 L, W와 M은 서로 다른 장비다. 한 장비 안의 loopback은 회차�
 | `SHA256SUMS`의 x86_64 zip 줄 | `0551a71dd59a005dde14b75674488a711cf7240aa47b1b71ea70e0b45dfa3ae6  qsh-v0.5.4-x86_64-pc-windows-msvc.zip` |
 | `SHA256SUMS`의 aarch64 zip 줄 | `02e772d78568c8a364ec3e66413d3ec733445bd88c26b10c21cb48e14cdf5fd3  qsh-v0.5.4-aarch64-pc-windows-msvc.zip` |
 | `SHA256SUMS`의 `install.ps1` 줄 | `eef4c2dd497798c0ee4d8f4d0cfd6e8f076f14d886ab6cab664c449c0824db05  install.ps1` |
+| 대상 태그 | `v0.5.5` |
+| 태그의 커밋 SHA | `297398663304b7ba6a65d70f206f9af40690375d` |
+| release run | 40292583227 |
+| `SHA256SUMS`의 x86_64 zip 줄 | `11208080c347a28c152f7b4b09d29bfefa58449e801a958ac41aaf4533374283  qsh-v0.5.5-x86_64-pc-windows-msvc.zip` |
+| `SHA256SUMS`의 aarch64 zip 줄 | `9a860fb45826c6b9c9ad2cf9392acf1c13ef1a5d1691d1c152e586dca5042f3c  qsh-v0.5.5-aarch64-pc-windows-msvc.zip` |
+| `SHA256SUMS`의 `install.ps1` 줄 | `eef4c2dd497798c0ee4d8f4d0cfd6e8f076f14d886ab6cab664c449c0824db05  install.ps1` |
 
 이 문서를 고정한 커밋의 해시는 `docs/ROADMAP.md` §5.5의 Windows 행에 main 세션이 적는다.
 
