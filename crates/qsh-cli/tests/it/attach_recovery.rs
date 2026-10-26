@@ -382,7 +382,7 @@ fn with_deadline<T: Send + 'static>(
     }
 }
 
-use qsh_testkit::shell::{said, say};
+use qsh_testkit::shell::{said, said_count, say};
 
 fn open_shell(ops: &Ops) -> String {
     ops.session_open(SessionOpenReq {
@@ -547,10 +547,10 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
     // The stream the frontend saw has no seam in it.
     seen.assert_tiles_the_stream(&fleet.detail());
     assert_eq!(
-        seen.text.matches(&said("AFTER")).count(),
+        said_count(&seen.text, "AFTER"),
         1,
         "the input typed into the dying path was applied {} times — {}\n{:?}",
-        seen.text.matches(&said("AFTER")).count(),
+        said_count(&seen.text, "AFTER"),
         fleet.detail(),
         seen.text
     );
@@ -634,7 +634,7 @@ fn a_repath_is_survived_by_the_live_attach() {
 
     seen.assert_tiles_the_stream(&fleet.detail());
     assert_eq!(
-        seen.text.matches(&said("AFTER")).count(),
+        said_count(&seen.text, "AFTER"),
         1,
         "the command was applied more than once across the path change — {}",
         fleet.detail()
