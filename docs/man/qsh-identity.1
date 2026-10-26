@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-identity 1  "identity 0.5.4" 
+.TH qsh-identity 1  "identity 0.5.5" 
 .SH NAME
 qsh\-identity \- Manage this device\*(Aqs own identity (`docs/CLI.md` §6.11)
 .SH SYNOPSIS
@@ -34,4 +34,4 @@ Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md`
 qsh\-identity\-move\-key(1)
 Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
 .SH VERSION
-v0.5.4
+v0.5.5

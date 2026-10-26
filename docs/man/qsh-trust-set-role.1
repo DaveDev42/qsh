@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-trust-set-role 1  "set-role 0.5.4" 
+.TH qsh-trust-set-role 1  "set-role 0.5.5" 
 .SH NAME
 qsh\-trust\-set\-role \- Change the trust role of a pinned peer (`docs/CLI.md` §6.11, ADR\-0045). The only command that changes the role of a pin that already exists. Takes effect from the peer\*(Aqs next request with no restart: roles are read on every decision, unlike `acl.toml` rows. The role is one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none`
 .SH SYNOPSIS
@@ -33,4 +33,4 @@ The pinned peer\*(Aqs name
 <\fIROLE\fR>
 The new role
 .SH VERSION
-v0.5.4
+v0.5.5
