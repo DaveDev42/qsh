@@ -60,6 +60,16 @@ pub(crate) const fn first_step(signal: Signal) -> Step {
     }
 }
 
+/// Whether a session that ends right after `signal` was the last step sent
+/// carries that signal's name in its exit. `Usr1` and `Usr2` only `SetEvent`
+/// and cannot end a process by themselves, so a program that exits after one
+/// exited on its own and reports its own status, as a unix child that handled
+/// `SIGUSR1` does (ADR-0047, ADR-0035 decision 22). The other steps end the
+/// program themselves and keep their signal.
+pub(crate) const fn reported_at_exit(signal: Signal) -> bool {
+    !matches!(first_step(signal), Step::SetEvent(_))
+}
+
 /// What to do for `signal` when the steps in `taken` were already done in
 /// this session: the step to perform, or `None` when there is nothing left
 /// to send. `Hup` and `Term` stand for one `ClosePseudoConsole`, so once
@@ -104,6 +114,14 @@ mod tests {
             first_step(Signal::Usr2),
             "the two user events are different events"
         );
+    }
+
+    #[test]
+    fn only_steps_that_end_a_program_are_reported_at_exit() {
+        for signal in Signal::ALL {
+            let user_event = matches!(signal, Signal::Usr1 | Signal::Usr2);
+            assert_eq!(reported_at_exit(signal), !user_event, "{signal}");
+        }
     }
 
     #[test]

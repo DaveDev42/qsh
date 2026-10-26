@@ -56,7 +56,9 @@
 //! (`Term`, then `Kill`) ends the session. The control remembers the signal
 //! of the last step it actually sent; a session that ends after one reports
 //! that signal's name in `session.exit`, and one that ends on its own
-//! reports none.
+//! reports none. `Usr1` and `Usr2` are the exception: they cannot end a
+//! program, so an exit right after one reports the program's own status and
+//! no signal (ADR-0047).
 
 use std::ffi::OsString;
 use std::io;
@@ -616,10 +618,15 @@ impl ConPtySession {
                 closer.close();
             }));
             // A session that ends after a step qsh sent reports that step's
-            // signal; one that ends on its own reports none.
+            // signal; one that ends on its own reports none. `Usr1` and
+            // `Usr2` only set an event and cannot end a program, so an exit
+            // right after one is the program's own and reports its status
+            // with no signal (ADR-0047, ADR-0035 decision 22). A later
+            // `Hup`, `Term` or `Kill` replaced the record and is reported.
             let signal = sent_at_exit
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                .filter(|signal| signal_map::reported_at_exit(*signal))
                 .map(|signal| signal.as_str().to_string());
             SourceExit { exit_code, signal }
         });
