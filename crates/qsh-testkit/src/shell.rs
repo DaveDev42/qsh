@@ -47,6 +47,27 @@ pub fn said(tag: &str) -> String {
     }
 }
 
+/// How many times the shell answered [`say`] in `text`, a terminal stream.
+/// Operating system commands (`ESC ]` … `BEL` or `ESC \`) are skipped: cmd
+/// sets the window title to the running command with `%OS%` already
+/// expanded, so the title alone would hold one more [`said`].
+pub fn said_count(text: &str, tag: &str) -> usize {
+    let mut visible = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1b}]") {
+        visible.push_str(&rest[..start]);
+        let osc = &rest[start + 2..];
+        rest = match (osc.find('\u{7}'), osc.find("\u{1b}\\")) {
+            (Some(bel), Some(st)) if st < bel => &osc[st + 2..],
+            (Some(bel), _) => &osc[bel + 1..],
+            (None, Some(st)) => &osc[st + 2..],
+            (None, None) => "",
+        };
+    }
+    visible.push_str(rest);
+    visible.matches(&said(tag)).count()
+}
+
 /// A program that copies its stdin to its stdout and exits `0` at the end of
 /// stdin (`cat`; `findstr "^"` matches every line).
 pub fn cat_argv() -> Vec<String> {
@@ -275,5 +296,35 @@ impl Runaway {
         })
         .await
         .unwrap_or_else(|_| panic!("the child must be gone within {within:?}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{said, said_count};
+
+    #[test]
+    fn said_count_skips_a_window_title_that_repeats_the_answer() {
+        let answer = said("AFTER");
+        let text = format!(
+            "\u{1b}]0;cmd.exe - echo  {answer}\u{7}{answer}\r\n\u{1b}]2;{answer}\u{1b}\\prompt>"
+        );
+        assert_eq!(said_count(&text, "AFTER"), 1);
+    }
+
+    #[test]
+    fn said_count_counts_every_visible_answer() {
+        let answer = said("AFTER");
+        assert_eq!(said_count(&format!("{answer}\r\n{answer}\r\n"), "AFTER"), 2);
+        assert_eq!(said_count("nothing here", "AFTER"), 0);
+    }
+
+    #[test]
+    fn an_unterminated_title_hides_the_rest() {
+        let answer = said("AFTER");
+        assert_eq!(
+            said_count(&format!("{answer}\u{1b}]0;{answer}"), "AFTER"),
+            1
+        );
     }
 }
