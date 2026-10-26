@@ -1101,3 +1101,45 @@ async fn remote_forward_accept_past_the_per_principal_stream_cap_is_refused_on_t
     serve_task.abort();
     accept_task.abort();
 }
+
+/// A claim loop aborted while it sleeps out the retry backoff (the holder
+/// dropping its acceptor right after `vanished` fired) must not make
+/// [`DrainClaimAttemptOnDrop`]'s reaper poll the already-resolved
+/// `JoinHandle` again — tokio panics with "JoinHandle polled after
+/// completion" on a worker thread, which no test outcome would otherwise
+/// show. A panic hook counts it; nextest gives this test its own process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborting_a_claim_loop_during_its_retry_backoff_does_not_repoll_a_resolved_handle() {
+    let panics = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let previous = std::panic::take_hook();
+    let seen = Arc::clone(&panics);
+    std::panic::set_hook(Box::new(move |_| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // No daemon behind this path: every attempt fails fast with a
+    // non-Timeout error, so the loop goes straight into its backoff sleep.
+    let task = tokio::spawn(claim_remote_forward_reverse(
+        dir.path().join("missing.sock"),
+        "daemon".to_string(),
+        "fwd".to_string(),
+        vec![1, 2, 3],
+        "127.0.0.1".to_string(),
+        1,
+        None,
+    ));
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!task.is_finished(), "the loop only ends by abort");
+    task.abort();
+    let _ = task.await;
+    // Let the Drop reaper run to completion.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    std::panic::set_hook(previous);
+    assert_eq!(
+        panics.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the drop reaper polled a JoinHandle that had already completed"
+    );
+}
