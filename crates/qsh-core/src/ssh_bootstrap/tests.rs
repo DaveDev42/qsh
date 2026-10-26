@@ -561,3 +561,55 @@ async fn message_stream_ends_at_eof_and_after_the_result() {
     assert!(empty.next().await.unwrap().is_none());
     assert!(!empty.hello_seen());
 }
+
+// ---------------------------------------------------------------------
+// `*_POSIX_FD_STATE` is not passed to the ssh child (Windows OpenSSH Server)
+// ---------------------------------------------------------------------
+
+#[test]
+fn posix_fd_state_names_picks_only_names_ending_in_the_suffix_ignoring_case() {
+    use super::ssh::posix_fd_state_names;
+    let guid = "c28fc6f98a2c44abbbd89d6a3037d0d9_POSIX_FD_STATE";
+    let picked = posix_fd_state_names([
+        guid,
+        "c28fc6f98a2c44abbbd89d6a3037d0d9_posix_fd_state",
+        "OTHER_Posix_Fd_State",
+        "PATH",
+        "SSH_TTY",
+        "POSIX_FD_STATE",
+        "X_POSIX_FD_STATE_EXTRA",
+        "MY_POSIX_FD_STATE_DIR",
+        "é_POSIX_FD_STATE",
+        "",
+    ]);
+    let picked: Vec<_> = picked.iter().map(|n| n.to_string_lossy()).collect();
+    assert_eq!(
+        picked,
+        [
+            guid,
+            "c28fc6f98a2c44abbbd89d6a3037d0d9_posix_fd_state",
+            "OTHER_Posix_Fd_State",
+            "é_POSIX_FD_STATE",
+        ]
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn the_ssh_spawn_path_strips_the_posix_fd_state_variable_on_windows() {
+    use super::ssh::strip_posix_fd_state;
+    // The stub exits 1 when the variable is defined. The variable is set on
+    // the command (no process-wide `set_var`), which `env_remove` also clears.
+    let name = "0123456789abcdef0123456789abcdef_POSIX_FD_STATE";
+    let run = |strip: bool| async move {
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/c", &format!("if defined {name} (exit 1) else (exit 0)")])
+            .env(name, "AAAAAAICAgA=");
+        if strip {
+            strip_posix_fd_state(&mut cmd, [name]);
+        }
+        cmd.status().await.unwrap().code()
+    };
+    assert_eq!(run(false).await, Some(1), "the stub sees the variable");
+    assert_eq!(run(true).await, Some(0), "the stripped child does not");
+}

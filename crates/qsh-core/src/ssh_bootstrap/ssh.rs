@@ -555,7 +555,7 @@ impl SshRunner {
             // Not while another spawn has handles inheritable (`winproc`).
             #[cfg(windows)]
             let _spawning = crate::winproc::spawn_guard();
-            Command::new(&self.program)
+            ssh_command(&self.program)
                 .args(ssh_g_args(dest))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -640,7 +640,7 @@ impl SshRunner {
             // Not while another spawn has handles inheritable (`winproc`).
             #[cfg(windows)]
             let _spawning = crate::winproc::spawn_guard();
-            Command::new(&self.program)
+            ssh_command(&self.program)
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -666,6 +666,59 @@ impl SshRunner {
             cancel: options.cancel,
         })
     }
+}
+
+/// Suffix of the environment variable Win32-OpenSSH's `sshd` uses to hand a
+/// child its fd 0/1/2 description (`<guid>_POSIX_FD_STATE`). Compared
+/// case-insensitively, as Windows environment names are.
+const POSIX_FD_STATE_SUFFIX: &str = "_POSIX_FD_STATE";
+
+/// Which of `names` must be removed from an `ssh` child's environment: the
+/// ones ending in `_POSIX_FD_STATE`, case-insensitively. In a Windows
+/// OpenSSH Server session without a pty, `sshd` puts such a variable in the
+/// environment; the `ssh.exe` child reads it as the description of its own
+/// standard handles, which is wrong for the anonymous pipes qsh gives it, and
+/// it then hangs at shutdown. Pure and cfg-free so every CI leg tests it.
+pub(crate) fn posix_fd_state_names<I, S>(names: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    names
+        .into_iter()
+        .filter(|name| {
+            let name = name.as_ref().to_string_lossy();
+            name.len() >= POSIX_FD_STATE_SUFFIX.len()
+                && name
+                    .get(name.len() - POSIX_FD_STATE_SUFFIX.len()..)
+                    .is_some_and(|tail| tail.eq_ignore_ascii_case(POSIX_FD_STATE_SUFFIX))
+        })
+        .map(|name| name.as_ref().to_os_string())
+        .collect()
+}
+
+/// Remove every variable [`posix_fd_state_names`] picks from `names` out of
+/// the child's environment.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn strip_posix_fd_state<I, S>(command: &mut Command, names: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    for name in posix_fd_state_names(names) {
+        command.env_remove(name);
+    }
+}
+
+/// The one way qsh builds an `ssh` child (`ssh -G` and the responder call).
+/// On Windows it drops `*_POSIX_FD_STATE` from the inherited environment (see
+/// [`posix_fd_state_names`]); elsewhere it is `Command::new`.
+fn ssh_command(program: &OsString) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    strip_posix_fd_state(&mut command, std::env::vars_os().map(|(name, _)| name));
+    command
 }
 
 /// End a child that must not outlive the call and reap it. On Unix it is
