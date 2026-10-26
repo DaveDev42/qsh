@@ -9,6 +9,48 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.4`
+
+A patch release on top of `v0.5.3` with one fix found while running the
+Windows host round W3b with a Linux controller
+(`docs/campaigns/p1-windows.md`). The wire format, `qsh.cli/v1`,
+`qsh.event/v1` and the doctor code set are unchanged, so `v0.5.3` and
+earlier `v0.5.x` and `v0.4.x` peers interoperate with this build as before.
+
+### Fixes
+
+- Reverse route: when another process closes a tunnel with
+  `qsh tunnel close`, a `qsh tunnel open --remote` started without
+  `--supervise` still ends with `CONNECTION_FAILED` and a `tunnel_ended`
+  line, as on `v0.5.3`. On `v0.5.3` it could also print a tokio panic
+  (`JoinHandle polled after completion`) on stderr as it exited, if the
+  close landed while it was waiting 200 ms to retry its `TCP_ACCEPTED`
+  claim. The tunnel and its port were already gone, so only the message
+  was wrong. The cleanup path no longer polls the finished claim attempt
+  a second time.
+
+### Assets and signing
+
+Unchanged from `v0.5.3`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.4` in the names.
+
+### What is still unproven
+
+Everything `v0.5.3` lists, with these changes from the rounds run on
+`v0.5.3`:
+
+- W3b passed with a Linux controller. The controller was a WSL2
+  distribution on the Windows machine itself, dialed at its own Tailscale
+  address, which the campaign now allows. The path between two physical
+  machines was covered by the macOS controller run on `v0.5.2`.
+- W7 passed in both variants after the Windows `qsh serve` was allowed
+  through the firewall.
+- W2 and W3a have still not been run.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.3`
 
 A patch release on top of `v0.5.2` with three fixes found while running

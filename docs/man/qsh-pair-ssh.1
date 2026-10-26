@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-pair-ssh 1  "ssh 0.5.3" 
+.TH qsh-pair-ssh 1  "ssh 0.5.4" 
 .SH NAME
 qsh\-pair\-ssh \- Pin this machine and a remote one to each other over ssh, then check the pair with a QUIC handshake (ADR\-0044, `docs/CLI.md` §6.11)
 .SH SYNOPSIS
@@ -53,4 +53,4 @@ Print version
 <\fI[USER@]HOST\fR>
 `[user@]host`, exactly as `ssh` takes it: a `Host` alias from `~/.ssh/config` works. The host part is also the default name this machine pins the remote under; it must not start with `\-`
 .SH VERSION
-v0.5.3
+v0.5.4
