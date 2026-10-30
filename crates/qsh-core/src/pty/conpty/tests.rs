@@ -12,11 +12,11 @@
 //! never on the whole byte stream (a Server 2022 conhost and a Windows 11
 //! one differ in the preamble).
 
-use std::os::windows::io::{AsRawHandle as _, OwnedHandle};
+use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, FILETIME, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -24,8 +24,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetCurrentProcess, GetProcessHandleCount, QueryFullProcessImageNameW,
-    WaitForSingleObject,
+    CREATE_NO_WINDOW, GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
 use super::*;
@@ -319,9 +319,40 @@ async fn job_with_at_least(job: &JobObject, count: usize) -> Vec<u32> {
     }
 }
 
+/// When `pid` was created (a `FILETIME` as one number), or `None` if it
+/// cannot be opened, for example because it has already exited.
+fn creation_time(pid: u32) -> Option<u64> {
+    // SAFETY: `OpenProcess` returns a fresh handle or null.
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: the handle is fresh and owned here.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let [mut created, mut exited, mut kernel, mut user] = [zero; 4];
+    // SAFETY: a live handle and four writable `FILETIME`s.
+    let ok = unsafe {
+        GetProcessTimes(
+            process.as_raw_handle(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    (ok != 0).then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
 /// The processes started, directly or not, by `root`, as a Toolhelp snapshot
-/// lists them (parent links outlive a dead parent, so a pid that was reused
-/// could be listed; the callers hold a live handle to `root`).
+/// lists them. A parent link outlives a dead parent, so when `root` (or one
+/// of its descendants) got a reused pid, an unrelated older process can name
+/// it as parent; a process counts only if it was created after the parent it
+/// names (the callers hold a live handle to `root`, so its own pid is not
+/// reused while they wait).
 fn descendants(root: u32) -> Vec<u32> {
     // SAFETY: a snapshot handle, closed below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -341,12 +372,15 @@ fn descendants(root: u32) -> Vec<u32> {
     // SAFETY: `snapshot` is open and closed once.
     unsafe { CloseHandle(snapshot) };
     let mut found: Vec<u32> = Vec::new();
-    let mut frontier = vec![root];
-    while let Some(parent) = frontier.pop() {
+    let mut frontier = vec![(root, creation_time(root))];
+    while let Some((parent, parent_born)) = frontier.pop() {
         for &(pid, ppid) in &all {
             if ppid == parent && pid != root && !found.contains(&pid) {
-                found.push(pid);
-                frontier.push(pid);
+                let born = creation_time(pid);
+                if matches!((parent_born, born), (Some(p), Some(c)) if c >= p) {
+                    found.push(pid);
+                    frontier.push((pid, born));
+                }
             }
         }
     }
