@@ -53,8 +53,9 @@ use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUE
 use windows_sys::Win32::System::Console::HPCON;
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::Threading::{
@@ -113,6 +114,16 @@ impl JobObject {
         // SAFETY: the handle is a live job handle owned by `self`.
         if unsafe { TerminateJobObject(self.handle.as_raw_handle(), exit_code) } == 0 {
             return Err(os_error("TerminateJobObject"));
+        }
+        Ok(())
+    }
+
+    /// Put an already running process in the job. Its descendants started
+    /// afterwards join it; ones it started before do not.
+    pub(crate) fn assign(&self, process: HANDLE) -> io::Result<()> {
+        // SAFETY: both handles are live; `process` is only read by the call.
+        if unsafe { AssignProcessToJobObject(self.handle.as_raw_handle(), process) } == 0 {
+            return Err(os_error("AssignProcessToJobObject"));
         }
         Ok(())
     }

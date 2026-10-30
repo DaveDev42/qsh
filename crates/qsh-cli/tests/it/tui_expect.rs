@@ -926,7 +926,7 @@ fn auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits()
     let mut world = World::new();
     let gate_dir = tempfile::tempdir().expect("gate dir");
     let gate = gate_dir.path().join("release-ssh");
-    world.fake.gate_file(&gate);
+    world.fake.record_terminal().gate_file(&gate);
 
     let mut client = Client::spawn(&world.client, &["box"]);
     // The notice is on the terminal before ssh does anything.
@@ -939,6 +939,16 @@ fn auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits()
         "the client must not hold the terminal raw while ssh runs"
     );
     assert!(store(&world.client).find("box").is_none());
+    // In human mode ssh keeps the terminal, so it can ask its questions on it
+    // (ADR-0044 decision 16); a BatchMode run takes it away.
+    let report = common::poll_until("ssh to report its terminal", EXPECT_TIMEOUT, || {
+        world.fake.terminal_report()
+    });
+    assert!(report.has_terminal, "ssh lost the controlling terminal");
+    assert_eq!(
+        report.askpass_require,
+        std::env::var("SSH_ASKPASS_REQUIRE").ok()
+    );
 
     std::fs::write(&gate, b"").expect("release ssh");
     // ssh finished, the pins stand, the original command attached.
@@ -952,4 +962,29 @@ fn auto_bootstrap_then_interactive_attach_enters_raw_mode_only_after_ssh_exits()
     client.type_("exit\r");
     client.expect_exit(0);
     assert!(client.is_cooked());
+}
+
+/// A `BatchMode` run keeps the ssh child away from the terminal even when
+/// qsh itself runs on one: `ssh -o BatchMode=yes` is not passed on to a
+/// `ProxyJump` hop, which would otherwise ask its host-key question on the
+/// terminal (ADR-0044 decision 16). The child has no controlling terminal and
+/// is told not to start a GUI askpass in its place.
+#[test]
+fn pair_ssh_json_under_a_pty_runs_ssh_without_the_terminal() {
+    use crate::ssh_bootstrap::pair::World;
+
+    let mut world = World::new();
+    let gate_dir = tempfile::tempdir().expect("gate dir");
+    let gate = gate_dir.path().join("release-ssh");
+    world.fake.record_terminal().gate_file(&gate);
+
+    let mut client = Client::spawn(&world.client, &["pair", "ssh", "box", "--json"]);
+    let report = common::poll_until("ssh to report its terminal", EXPECT_TIMEOUT, || {
+        world.fake.terminal_report()
+    });
+    assert!(!report.has_terminal, "ssh kept the controlling terminal");
+    assert_eq!(report.askpass_require.as_deref(), Some("never"));
+
+    std::fs::write(&gate, b"").expect("release ssh");
+    let _ = client.wait();
 }

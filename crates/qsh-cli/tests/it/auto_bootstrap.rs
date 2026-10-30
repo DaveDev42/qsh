@@ -607,7 +607,10 @@ mod console {
         let mut w = Bare::new();
         let gate_dir = tempfile::tempdir().expect("gate dir");
         let gate = gate_dir.path().join("release-ssh");
-        w.fake.record_console_mode().gate_file(&gate);
+        w.fake
+            .record_console_mode()
+            .record_terminal()
+            .gate_file(&gate);
 
         let mut qsh = spawn_qsh(&w.client, &["box"]);
         qsh.wait_text("setting one up over ssh (ssh box)");
@@ -628,6 +631,14 @@ mod console {
             0,
             "console mode {mode:#x} is in VT input mode"
         );
+        // The console is the one qsh runs in, shared with ssh, not a hidden
+        // one of ssh's own (ADR-0044 decision 16).
+        let report = crate::common::poll_until(
+            "ssh to report its console",
+            std::time::Duration::from_secs(30),
+            || w.fake.terminal_report(),
+        );
+        assert!(report.has_terminal, "ssh runs on a console of its own");
         assert!(!pinned_box(&w.client));
 
         // ssh ends without an answer; the bootstrap ends the command.

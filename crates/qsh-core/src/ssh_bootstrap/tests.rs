@@ -613,3 +613,16 @@ async fn the_ssh_spawn_path_strips_the_posix_fd_state_variable_on_windows() {
     assert_eq!(run(false).await, Some(1), "the stub sees the variable");
     assert_eq!(run(true).await, Some(0), "the stripped child does not");
 }
+
+/// Only a `BatchMode` responder call gets `SSH_ASKPASS_REQUIRE=never`; in
+/// human mode the person's own environment stands (ADR-0044 decision 16).
+#[test]
+fn batch_child_env_sets_askpass_never_only_in_batch_mode() {
+    use super::ssh::batch_child_env;
+
+    assert_eq!(
+        batch_child_env(true),
+        &[("SSH_ASKPASS_REQUIRE", "never")][..]
+    );
+    assert!(batch_child_env(false).is_empty());
+}
