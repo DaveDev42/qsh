@@ -104,6 +104,31 @@ impl FakeSsh {
         Some(text.trim().parse().ok())
     }
 
+    /// Make the responder call record, before it waits at [`Self::gate_file`],
+    /// whether it has a terminal to ask questions on and the value of
+    /// `SSH_ASKPASS_REQUIRE` it sees. Read the result with
+    /// [`Self::terminal_report`].
+    pub fn record_terminal(&mut self) -> &mut Self {
+        let path = self.dir().join("terminal.report");
+        self.set("terminal_report_file", path.display().to_string())
+    }
+
+    /// What the responder call recorded, or `None` while it has not recorded
+    /// anything.
+    pub fn terminal_report(&self) -> Option<TerminalReport> {
+        let text = std::fs::read_to_string(self.dir().join("terminal.report")).ok()?;
+        let field = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+                .map(str::to_owned)
+        };
+        let askpass = field("askpass_require")?;
+        Some(TerminalReport {
+            has_terminal: field("terminal")? == "yes",
+            askpass_require: (askpass != "unset").then_some(askpass),
+        })
+    }
+
     /// Make the responder call print `bytes` to stdout first: the remote
     /// shell's rc output, the `hello`, tampered lines.
     pub fn script(&mut self, bytes: &[u8]) -> &mut Self {
@@ -215,6 +240,17 @@ impl FakeSsh {
         std::fs::write(self.dir().join("fake-ssh.cfg"), text).expect("write fake-ssh.cfg");
         self
     }
+}
+
+/// What the responder call found out about its terminal
+/// ([`FakeSsh::record_terminal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalReport {
+    /// A controlling terminal (Unix) or a console shared with its caller
+    /// (Windows) was there to ask a question on.
+    pub has_terminal: bool,
+    /// `SSH_ASKPASS_REQUIRE` in its environment, `None` when unset.
+    pub askpass_require: Option<String>,
 }
 
 impl Default for FakeSsh {

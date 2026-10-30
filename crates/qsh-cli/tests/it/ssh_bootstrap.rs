@@ -150,6 +150,40 @@ async fn ssh_bootstrap_ssh_argv_is_fixed() {
     }
 }
 
+/// A `BatchMode` run takes the terminal away from the ssh child, so that no
+/// descendant (the `ssh -W` of a `ProxyJump`, which does not inherit
+/// `BatchMode`) can ask a question on it, and keeps a GUI askpass from taking
+/// its place (ADR-0044 decision 16). The user's ssh options stay untouched.
+#[tokio::test]
+async fn ssh_bootstrap_batch_mode_runs_ssh_without_a_terminal_and_with_askpass_never() {
+    let mut fake = FakeSsh::new();
+    fake.record_terminal();
+    let _ = responder_error_with(&fake, "qsh", true).await;
+    let report = fake.terminal_report().expect("the fake recorded a report");
+    assert!(
+        !report.has_terminal,
+        "a BatchMode ssh child still has a terminal"
+    );
+    assert_eq!(report.askpass_require.as_deref(), Some("never"));
+    let flat = fake.calls().concat().join(" ");
+    assert!(!flat.contains("StrictHostKeyChecking"), "{flat}");
+    assert!(!flat.contains("ProxyCommand"), "{flat}");
+}
+
+/// Human mode leaves the environment ssh inherits alone: the person answers
+/// its questions, and a GUI askpass they configured stays theirs.
+#[tokio::test]
+async fn ssh_bootstrap_human_mode_leaves_the_askpass_environment_alone() {
+    let mut fake = FakeSsh::new();
+    fake.record_terminal();
+    let _ = responder_error_with(&fake, "qsh", false).await;
+    let report = fake.terminal_report().expect("the fake recorded a report");
+    assert_eq!(
+        report.askpass_require,
+        std::env::var("SSH_ASKPASS_REQUIRE").ok()
+    );
+}
+
 #[tokio::test]
 async fn ssh_bootstrap_rejects_a_dest_that_looks_like_an_option() {
     let fake = FakeSsh::new();

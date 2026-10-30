@@ -19,6 +19,8 @@
 //!   writes the input mode of its console (`CONIN$`) to the file named by
 //!   `console_mode_file` when that is set (Windows; `none` when there is no
 //!   console to ask), like an ssh about to read a password from it, then
+//!   writes what terminal it shares with its caller to the file named by
+//!   `terminal_report_file` when that is set (below), then
 //!   waits until the file named by `gate_file` exists when that is set, then
 //!   writes the file named by `script` to stdout, then, in this order:
 //!   - blocks forever when `hang` is set;
@@ -26,6 +28,13 @@
 //!     with its status;
 //!   - copies stdin to the file named by `stdin_log` when that is set, and
 //!     exits with `exit` (0).
+//!
+//! The terminal report is two `key=value` lines: `terminal=yes|no` and
+//! `askpass_require=<value>|unset` (`SSH_ASKPASS_REQUIRE` in the environment).
+//! `terminal=yes` means the process has a terminal it could ask a question
+//! on: on Unix a controlling terminal (`/dev/tty` opens); on Windows a console
+//! it shares with another process (its caller), where a private hidden console
+//! reads as `no`.
 //!
 //! The local responder mode stands in for the remote `qsh pair ssh-respond`.
 //! `respond_bin` is the `qsh` to run, `respond_config_dir` and
@@ -97,6 +106,9 @@ fn main() {
     if let Some(path) = cfg.get("console_mode_file") {
         let _ = fs::write(path, console_input_mode());
     }
+    if let Some(path) = cfg.get("terminal_report_file") {
+        let _ = fs::write(path, terminal_report());
+    }
     if let Some(gate) = cfg.get("gate_file") {
         wait_for_file(Path::new(gate));
     }
@@ -159,6 +171,35 @@ fn console_input_mode() -> String {
 #[cfg(not(windows))]
 fn console_input_mode() -> String {
     "none".to_string()
+}
+
+fn terminal_report() -> String {
+    let askpass = std::env::var("SSH_ASKPASS_REQUIRE").unwrap_or_else(|_| "unset".into());
+    let terminal = if has_terminal() { "yes" } else { "no" };
+    format!("terminal={terminal}\naskpass_require={askpass}\n")
+}
+
+/// Whether `/dev/tty` opens: the process has a controlling terminal.
+#[cfg(unix)]
+fn has_terminal() -> bool {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_ok()
+}
+
+/// Whether the console this process is attached to is shared with another
+/// process. A console of its own (`CREATE_NO_WINDOW`, hidden) holds only this
+/// process; none at all counts as no.
+#[cfg(windows)]
+fn has_terminal() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut list = [0u32; 8];
+    // SAFETY: `list` is a live buffer of the length passed.
+    let attached = unsafe { GetConsoleProcessList(list.as_mut_ptr(), list.len() as u32) };
+    attached > 1
 }
 
 /// Block until `path` exists: a test holds the ssh child open, like a

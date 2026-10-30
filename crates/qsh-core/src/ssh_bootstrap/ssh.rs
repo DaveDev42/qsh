@@ -7,9 +7,10 @@
 //! Then `ssh ... <dest> <remote_qsh> pair ssh-respond` carries the bootstrap
 //! stream over the child's stdin and stdout. Authentication, host key
 //! checks and every prompt stay inside ssh: its controlling terminal is
-//! inherited, its stderr is forwarded to qsh's own stderr as it arrives (a
-//! small bounded tail is kept in memory to classify an early exit), and qsh
-//! never reads a key, a passphrase or an agent socket.
+//! inherited in human mode (a `BatchMode` run detaches the child from it, see
+//! `detach_from_terminal`), its stderr is forwarded to qsh's own stderr as
+//! it arrives (a small bounded tail is kept in memory to classify an early
+//! exit), and qsh never reads a key, a passphrase or an agent socket.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -70,6 +71,71 @@ const RESPONDER_OPTIONS: &[&str] = &[
 /// terminal ssh keeps its prompts (ADR-0044 decision 16).
 pub fn batch_mode(machine_mode: bool, stdin_is_terminal: bool) -> bool {
     machine_mode || !stdin_is_terminal
+}
+
+/// Environment variables a `BatchMode` responder call gets on top of the
+/// inherited environment, and none in human mode. `SSH_ASKPASS_REQUIRE=never`
+/// keeps a GUI askpass program from popping up in place of the terminal
+/// prompt the detached child can no longer reach (ADR-0044 decision 16). Pure
+/// and cfg-free so every CI leg tests it.
+pub(crate) fn batch_child_env(batch_mode: bool) -> &'static [(&'static str, &'static str)] {
+    if batch_mode {
+        &[("SSH_ASKPASS_REQUIRE", "never")]
+    } else {
+        &[]
+    }
+}
+
+/// Windows `CREATE_NO_WINDOW`: the child gets a console that has no window
+/// and that nobody can type into.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Cut a `BatchMode` responder child off from qsh's terminal, so that no
+/// process below it can ask a question there (ADR-0044 decision 16).
+/// `-o BatchMode=yes` reaches only the ssh process itself: OpenSSH runs a
+/// `ProxyJump` hop as its own `ssh -W` child, which does not inherit it and
+/// would ask the jump host's host-key question on the inherited terminal.
+/// The user's ssh options are not touched (decision 20); the terminal is
+/// taken away instead.
+///
+/// - Unix: `setsid()` in the child, so it and its descendants have no
+///   controlling terminal; opening `/dev/tty` fails and a prompt fails fast
+///   ("Host key verification failed"). Because the child is no longer in the
+///   terminal's foreground process group, a terminal Ctrl-C does not reach
+///   it; the interrupt goes through the cancel token and `end_child`.
+/// - Windows: `CREATE_NO_WINDOW`, a hidden console of its own. `DETACHED_PROCESS`
+///   is worse: ssh then starts the `ssh -W` hop with no console to inherit, so
+///   the system gives it a new visible one. A hidden console cannot be answered
+///   either, so a hop that would prompt blocks instead of failing; the hello
+///   deadline (60 s) bounds that and the job object ([`SshChild`]) ends the
+///   hop with its parent.
+///
+/// Human mode (`batch_mode` false) keeps the inherited terminal.
+fn detach_from_terminal(command: &mut Command, batch_mode: bool) {
+    if !batch_mode {
+        return;
+    }
+    for (name, value) in batch_child_env(batch_mode) {
+        command.env(name, value);
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: the closure runs in the forked child before exec and calls
+        // only `setsid(2)`, which is async-signal-safe and touches no memory.
+        unsafe {
+            command.pre_exec(|| {
+                // Fails with EPERM only for a process group leader, which a
+                // freshly forked child is not.
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 /// The arguments of `ssh -G` (ADR-0044 decision 4).
@@ -625,9 +691,10 @@ impl SshRunner {
     /// Start the responder call (ADR-0044 decisions 9 and 16). stdin and
     /// stdout are pipes for the bootstrap stream. stderr is a pipe too, forwarded
     /// byte for byte to qsh's stderr as it arrives (with a bounded tail kept
-    /// for classification); the controlling terminal is inherited, so ssh asks
-    /// its own questions (passwords, passphrases, host key confirmation)
-    /// directly on the terminal, not on stderr.
+    /// for classification). In human mode the controlling terminal is
+    /// inherited, so ssh asks its own questions (passwords, passphrases, host
+    /// key confirmation) directly on the terminal, not on stderr. In a
+    /// `BatchMode` run the child is detached from it (the child gets no controlling terminal).
     pub fn spawn_responder(
         &self,
         dest: &Dest,
@@ -640,15 +707,18 @@ impl SshRunner {
             // Not while another spawn has handles inheritable (`winproc`).
             #[cfg(windows)]
             let _spawning = crate::winproc::spawn_guard();
-            ssh_command(&self.program)
+            let mut command = ssh_command(&self.program);
+            command
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|err| spawn_error(&program, &err))?
+                .kill_on_drop(true);
+            detach_from_terminal(&mut command, options.batch_mode);
+            command.spawn().map_err(|err| spawn_error(&program, &err))?
         };
+        #[cfg(windows)]
+        let job = options.batch_mode.then(|| contain_in_job(&child)).flatten();
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -664,8 +734,21 @@ impl SshRunner {
             stream: MessageStream::new(stdout),
             timeouts: options.timeouts,
             cancel: options.cancel,
+            #[cfg(windows)]
+            _job: job,
         })
     }
+}
+
+/// Put a `BatchMode` ssh child in a kill-on-close job, so the `ssh -W` hop it
+/// started (hidden console, nobody to answer a prompt) cannot outlive it.
+/// Best effort: without the job a stuck hop is only a leftover process.
+#[cfg(windows)]
+fn contain_in_job(child: &Child) -> Option<crate::winproc::JobObject> {
+    let handle = child.raw_handle()?;
+    let job = crate::winproc::JobObject::new_kill_on_close().ok()?;
+    job.assign(handle).ok()?;
+    Some(job)
 }
 
 /// Suffix of the environment variable Win32-OpenSSH's `sshd` uses to hand a
@@ -837,6 +920,10 @@ pub struct SshChild {
     remote_qsh: String,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_pump: Option<JoinHandle<()>>,
+    /// Ends the whole ssh process tree when this is dropped (Windows,
+    /// `BatchMode` only; see [`contain_in_job`]).
+    #[cfg(windows)]
+    _job: Option<crate::winproc::JobObject>,
 }
 
 /// Forward ssh's stderr to qsh's stderr unchanged, keeping the last
