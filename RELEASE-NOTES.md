@@ -9,6 +9,49 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.7`
+
+A patch release on top of `v0.5.6` with one SSH bootstrap fix, found
+while running round R1 of `docs/campaigns/p1-ssh-bootstrap.md`. The wire
+format, the shape of `qsh.cli/v1` and `qsh.event/v1`, and the doctor code
+set are unchanged, so `v0.5.6` and earlier `v0.5.x` and `v0.4.x` peers
+interoperate with this build as before.
+
+### Fixes
+
+- `qsh pair ssh` and the automatic bootstrap in machine mode (`--json`,
+  or a stdin that is not a terminal) could still ask a question on the
+  terminal when the target is reached through `ProxyJump`. OpenSSH does
+  not pass `-o BatchMode=yes` to the `ssh -W` child it starts for the
+  jump hop, so that child asked about the jump host's host key on the
+  inherited terminal. qsh now starts the responder `ssh` without a
+  controlling terminal and with `SSH_ASKPASS_REQUIRE=never`. On Linux and
+  macOS the hop fails at once instead of prompting. On Windows the hop
+  runs on a hidden console, the bootstrap ends at the 60-second `hello`
+  limit, and a kill-on-close job object ends the hop together with its
+  parent. Human mode and the user's own ssh options are unchanged
+  (ADR-0044).
+
+### Assets and signing
+
+Unchanged from `v0.5.6`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.7` in the names.
+
+### What is still unproven
+
+Everything `v0.5.6` lists, with these changes from the rounds run on
+`v0.5.6`:
+
+- The SSH bootstrap campaign passed (R1 to R5). R1 to R4 ran in
+  containers on one physical machine, each with its own network namespace
+  and `sshd`, and R5 used a Windows client. Passphrases and host key
+  answers were typed by a script, not by hand.
+- W12 passed with a Windows client and a Linux remote in a container.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.6`
 
 A patch release on top of `v0.5.5` with two Windows client fixes and one
