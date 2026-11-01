@@ -264,7 +264,7 @@ Corpus는 checked-in하고, 그중 `broker_ops`는 일반 유닛 테스트로 �
 `.github/workflows/ci.yml`이 push(main)/PR마다 돌고 단일 required check `ci-ok`로 합쳐진다.
 
 - 통합 테스트는 crate마다 바이너리 하나(`tests/it/main.rs`)다. 옛 `tests/<name>.rs`는 모듈 `tests/it/<name>.rs`가 됐고, nextest 이름은 `<name>::<test>`다(`-E 'test(/^<name>::/)'`로 파일 단위 선택, `--test <name>`은 없다). 파일마다 바이너리를 따로 링크하면 디버그 정보까지 합쳐 파일당 200MB 안팎이 `target/`에 쌓여 수백 GB가 됐다. 새 통합 테스트는 `tests/it/`에 파일을 만들고 `main.rs`에 `mod`를 더한다. `xtask/tests/install_script.rs`는 파일이 하나뿐이라 그대로 둔다.
-- fmt, arch-lint, cargo-deny, doc-test와 `RUSTDOCFLAGS=-D warnings` doc을 돈다. test(nextest)는 ubuntu-24.04, ubuntu-24.04-arm, macos-14, windows-latest 네 runner에서, clippy는 ubuntu-24.04와 windows-latest에서 돈다. macos-15-intel 레그는 커버리지가 macos-14와 겹쳐 매트릭스에서 뺐다(`ci.yml` 매트릭스 상단 주석).
+- fmt, arch-lint, cargo-deny, doc-test와 `RUSTDOCFLAGS=-D warnings` doc을 돈다. test(nextest)는 ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-latest 네 runner에서, clippy는 ubuntu-24.04와 windows-latest에서 돈다. macos-15-intel 레그는 커버리지가 macos-15와 겹쳐 매트릭스에서 뺐다(`ci.yml` 매트릭스 상단 주석).
 - Windows에서는 POSIX 시그널·process-group·`$$` 의존 테스트가 `cfg(unix)`로 빠지고(이름 붙은 Windows 대응은 L5의 「Windows PTY 종단과 `cfg(unix)` 쌍둥이 전수」), 나머지(`sh -c` 기반 DoD 테스트 포함)는 runner의 Git for Windows `sh`에 의존해 그대로 돈다.
 - `acceptance` job이 인수 게이트를 strict로 돈다(아래 환경변수 표). `publish-dry-run` job은 위 publish gate다. `clippy-musl` job은 `qsh-cli`를 x86_64 musl 타깃으로 clippy해 musl에서만 deprecated인 libc 항목(`libc::time_t`) 같은 경고를 태그 전에 잡는다. v0.5.0 태그의 musl release 빌드가 이 경고로 실패한 뒤 더했다.
 - `fuzz-smoke.yml`은 짧은 결정적 fuzz 스모크를 돌리고, 같은 job에서 `cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories`도 돈다. `fuzz/Cargo.lock`이 워크스페이스 락과 별개라 `ci.yml`의 `deny` job이 보지 못하기 때문이다(licenses·bans는 켜지 않는다).

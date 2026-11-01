@@ -4,7 +4,7 @@
 
 ## Apple 서명·공증 시크릿 여섯
 
-`release.yml`의 build job이 darwin 두 leg(`macos-14`/`macos-15-intel`)에서 읽는다. 전부-또는-전무 — 여섯 중 몇 개만 설정되면 태그 push는 `::error::`로 붉고, 브랜치 `workflow_dispatch`는 `::warning::`을 내고 서명·공증을 건너뛴다. 붉히지 않으면 그 run의 자산이 서명 없이 GitHub Release에 그대로 올라가기 때문이고(`homebrew-tap` job이 같은 자산으로 tap formula를 bump한다), 브랜치 dispatch가 경고로 그치는 이유는 그 결과물이 버려지고 사람이 시크릿을 하나씩 넣는 도중일 수 있기 때문이다. 여섯 다 없으면(0개) 태그는 `::warning title=Unsigned release::`를 내고 green을 유지한다 — Apple 자격이 오기 전에도 태그 릴리스가 막히지 않아야 한다는 계획의 불변이다.
+`release.yml`의 build job이 darwin 두 leg(`macos-15`/`macos-15-intel`)에서 읽는다. 전부-또는-전무 — 여섯 중 몇 개만 설정되면 태그 push는 `::error::`로 붉고, 브랜치 `workflow_dispatch`는 `::warning::`을 내고 서명·공증을 건너뛴다. 붉히지 않으면 그 run의 자산이 서명 없이 GitHub Release에 그대로 올라가기 때문이고(`homebrew-tap` job이 같은 자산으로 tap formula를 bump한다), 브랜치 dispatch가 경고로 그치는 이유는 그 결과물이 버려지고 사람이 시크릿을 하나씩 넣는 도중일 수 있기 때문이다. 여섯 다 없으면(0개) 태그는 `::warning title=Unsigned release::`를 내고 green을 유지한다 — Apple 자격이 오기 전에도 태그 릴리스가 막히지 않아야 한다는 계획의 불변이다.
 
 | 이름 | 무엇인지 | 어디서 발급 |
 |---|---|---|
