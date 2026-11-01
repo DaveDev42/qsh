@@ -120,6 +120,8 @@ FAIL이 나오면 원인을 분류한다.
 
 **판정(2026-10-30).** R1~R4가 각각 PASS 행을 하나씩 가지고, Windows 자산이 있는 `v0.5.6`의 R5도 PASS다. FAIL 행이 없어 §5에 따라 캠페인은 PASS다. 무효 두 행은 세지 않는다. 장비가 모두 한 물리 박스 위의 컨테이너인 점은 §2.2가 허용하는 구성이지만, 두 물리 장비 사이의 실제 네트워크와 사람의 손 입력은 이 회차들이 보지 않았다.
 
+**사람 확인(2026-11-01).** Dave가 세 가지를 받아들였다. 한 물리 박스 위의 컨테이너(별도 netns와 `sshd`)를 별도 장비로 센 것, passphrase와 host key 응답을 에이전트가 expect로 입력한 것, R5에서 원격 serve를 UDP 4433 대신 4436으로 띄운 것이다. 판정은 PASS 그대로다.
+
 ## 관련 문서
 
 `docs/adr/0044-ssh-bootstrap.md`(결정 2, 6, 11, 16, 18~22, 결과 절), `docs/CLI.md` §6.11·§7, `docs/design/testing.md`(가짜 `ssh` 하네스), `docs/design/threat-model.md` §4 A16·B30~B32·D15·E15·E16, `docs/campaigns/m10-clean-vm.md`·`docs/campaigns/p1-aarch64-musl.md`(형식).
