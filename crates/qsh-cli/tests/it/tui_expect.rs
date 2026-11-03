@@ -122,6 +122,15 @@ impl Client {
         }
     }
 
+    /// Wait for `needle` and return everything the client wrote to the
+    /// terminal since the previous match, up to (not including) `needle`.
+    fn expect_preceded_by(&mut self, needle: &str) -> Vec<u8> {
+        match self.session.expect(needle) {
+            Ok(found) => found.before().to_vec(),
+            Err(err) => panic!("waiting for {needle:?}: {err}"),
+        }
+    }
+
     /// Type bytes at the client verbatim. Enter is CR, exactly what a
     /// terminal sends and what the escape machine treats as a line end.
     fn type_(&mut self, keys: &str) {
@@ -698,6 +707,50 @@ fn a_closed_session_ends_the_attach_cleanly() {
         client.is_cooked(),
         "the terminal must be restored on the error path"
     );
+}
+
+/// A terminal query in replayed output is not handed to the local terminal
+/// (`docs/CLI.md` §7): the terminal would answer it, and the answer would be
+/// typed into the remote PTY. A query the program sends after the attach is
+/// live and still arrives.
+///
+/// The pty master stands in for the terminal, so "not delivered" is read off
+/// the bytes the client writes to it: `ESC [ 6 n` must be absent from the
+/// replay and present in the live output.
+#[test]
+fn a_reattach_does_not_forward_replayed_terminal_queries() {
+    let fleet = Fleet::start();
+    let session_ref = open_session(
+        &fleet.client,
+        &[
+            "sh",
+            "-c",
+            r"printf '\033[6nREPLAYED\n'; read x; printf '\033[6nLIVE\n'; sleep 600",
+        ],
+    );
+    // The first attach makes sure the query is in the ring (it may be live
+    // or replay here; this attach is not what is under test).
+    let mut first = Client::spawn(&fleet.client, &["attach", &session_ref]);
+    first.expect("REPLAYED");
+    first.type_("~d");
+    first.expect("detached");
+    first.expect_exit(0);
+
+    let mut back = Client::spawn(&fleet.client, &["attach", &session_ref]);
+    let replayed = back.expect_preceded_by("REPLAYED");
+    assert!(
+        !replayed.windows(4).any(|w| w == b"\x1b[6n"),
+        "the replayed CPR request reached the local terminal: {replayed:?}"
+    );
+    // Release `read`: the program now asks again, live.
+    back.type_("\r");
+    let live = back.expect_preceded_by("LIVE");
+    assert!(
+        live.windows(4).any(|w| w == b"\x1b[6n"),
+        "a live query must still reach the local terminal: {live:?}"
+    );
+    back.type_("~.");
+    back.expect_exit(0);
 }
 
 /// A line typed immediately before `~d` still reaches the shell.

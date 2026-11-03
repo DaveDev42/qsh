@@ -81,6 +81,7 @@ async fn open_attach_stream_on_a_reverse_session_reaches_the_same_daemon_socket_
             writer_lease: true,
             expires_at: String::new(),
             input_seq: 0,
+            output_end: 0,
         })
         .await
         .unwrap();
@@ -658,6 +659,7 @@ async fn killing_a_reverse_attachs_data_conduit_ends_the_reader_cleanly() {
             writer_lease: true,
             expires_at: String::new(),
             input_seq: 0,
+            output_end: 0,
         })
         .await
         .unwrap();

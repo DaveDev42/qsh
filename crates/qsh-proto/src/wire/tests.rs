@@ -197,6 +197,7 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
                     writer_lease,
                     expires_at,
                     input_seq,
+                    output_end: 0,
                 }
             },
         )

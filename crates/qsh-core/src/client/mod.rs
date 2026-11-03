@@ -771,6 +771,7 @@ impl Session {
             expires_at: attached.expires_at,
             new_resume_token: attached.new_resume_token,
             input_from: attached.input_seq,
+            output_end: attached.output_end,
             kill,
             writer: AttachWriter {
                 send,
@@ -1017,6 +1018,11 @@ pub struct Attached {
     /// the host applied on the stream it left, so its un-acked tail can be
     /// retransmitted without the child seeing a byte twice.
     pub input_from: u64,
+    /// Cumulative output offset of the session's end when the host
+    /// authorized this attach (`SessionAttached.output_end`): output below it
+    /// is replay, output at or above it is live. `0` from a host that
+    /// predates the field.
+    pub output_end: u64,
     /// A synchronous, any-thread hard-stop for this attach's data link —
     /// live only on the reverse route, a no-op otherwise
     /// (`link::DataKillSwitch`'s own doc). `crate::ops::session`'s

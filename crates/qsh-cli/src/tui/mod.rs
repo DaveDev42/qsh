@@ -66,6 +66,8 @@ mod session_loop;
 mod term;
 // The terminal trait, shared by the POSIX terminal and the Windows console.
 #[cfg(any(unix, windows, test))]
+mod replay_filter;
+#[cfg(any(unix, windows, test))]
 mod terminal;
 #[cfg(unix)]
 mod unix;

@@ -842,6 +842,7 @@ impl Ops {
             return Err(err);
         }
         let replay_from = attached.replay_from;
+        let output_end = attached.output_end;
         let writer_lease = attached.writer_lease;
         let expires_at = attached.expires_at.clone();
         // How long the host says the credential lives. The stored
@@ -989,6 +990,7 @@ impl Ops {
             commands,
             session_ref,
             replay_from,
+            output_end,
             writer_lease,
             renewal: resume_ttl.map(|ttl| RenewalSchedule::new(ttl, std::time::Instant::now())),
             expires_at,

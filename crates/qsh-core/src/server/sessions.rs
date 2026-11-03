@@ -959,6 +959,7 @@ impl Server {
                 writer_lease: true,
                 expires_at,
                 input_seq: input_from,
+                output_end: info.last_sequence,
             }),
         )
     }
