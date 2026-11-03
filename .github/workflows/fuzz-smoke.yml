@@ -52,12 +52,15 @@ jobs:
       # 1.99.0, CLAUDE.md's "toolchain constraint") -- cargo-fuzz needs
       # nightly's -Z sanitizer flags, which is the whole reason fuzz/ is
       # kept out of the workspace in the first place (fuzz/README.md).
-      # Pinned to a dated nightly: nightly-2026-11-01 (f9ceb4a4d) fails to
-      # compile zbus 5.19.0 with E0391 (an async-drop query cycle in
-      # zvariant_utils). Move the date forward once a newer nightly builds.
+      # Pinned to a dated nightly so a nightly regression cannot break the
+      # gate on its own: nightly-2026-11-01 (f9ceb4a4d) failed to compile
+      # zbus 5.19.0 with E0391 (an async-drop query cycle in
+      # zvariant_utils); nightly-2026-11-03 (1c3a65069) builds every target
+      # again. Move the date forward deliberately, after a local
+      # `cargo fuzz build` on the new nightly.
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          toolchain: nightly-2026-10-31
+          toolchain: nightly-2026-11-03
           cache-directories: fuzz/target
       # `fuzz/Cargo.lock` is its own lock; the workspace-root `deny` job
       # (`ci.yml`) never points at it, so advisories in this graph went

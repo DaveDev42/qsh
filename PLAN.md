@@ -61,7 +61,7 @@ M20 계획 §1에서 열린 채로 넘어온 항목이다.
 
 - [x] BatchMode(`--json`, 비터미널 stdin) 부트스트랩에서 ProxyJump 홉이 점프 호스트의 host key를 터미널에 물음. `-o BatchMode=yes`가 `ssh -W` 자식에 넘어가지 않아서다(캠페인 `p1-ssh-bootstrap` §7 R1 둘째 행, Windows ssh.exe 9.5p2에서도 재현). `e1f8378`이 응답자 ssh를 터미널에서 떼어 Unix는 곧바로 실패하고, Windows는 숨은 콘솔에서 60초 hello 한도로 끝난다(ADR-0044 개정 이력 2026-10-30). `v0.5.7`(2026-11-02, 태그 커밋 `a4987dc`, release run 41336192312 초록, `homebrew-tap` 초록)에 담겼다.
 - [x] `macos-14` 이미지 은퇴(2026-11-02) 대응. 11-01 brownout으로 `v0.5.7` Release의 `aarch64-apple-darwin` leg가 취소됐고 brownout이 끝난 00:05 UTC에 재실행해 초록이 됐다. `c84c20b`이 CI와 Release를 `macos-15`로 옮겼다. 첫 `macos-15` Release 빌드인 `v0.5.8`(run 41584853176)의 `aarch64-apple-darwin` leg가 초록이라 확인을 마쳤다(CI run 41339342164도 초록).
-- [x] nightly-2026-11-01이 `zbus` 5.19.0을 E0391로 컴파일하지 못해 `fuzz-smoke`가 깨짐. `978dc73`이 `nightly-2026-10-31`로 고정했고 초록이다. 새 nightly가 빌드되면 날짜를 올린다.
+- [x] nightly-2026-11-01이 `zbus` 5.19.0을 E0391로 컴파일하지 못해 `fuzz-smoke`가 깨짐. `978dc73`이 `nightly-2026-10-31`로 고정했고 초록이다. 2026-11-03 `nightly-2026-11-03`(1c3a65069)이 로컬 `cargo fuzz build`로 스물한 target을 모두 빌드해 고정 날짜를 올렸다.
 - [x] perf run 41298163174의 RED(`d6a60c1`, 처리량 39.1 MB/s)는 같은 커밋이 전날 초록이고 raw quinn 기준선도 함께 낮아 runner 잡음으로 보고 관찰만 한다.
 
 - [x] `conpty_close_terminates_the_whole_job_including_grandchildren`의 windows-latest 흔들림(run 41055751594, `process 740 survived the session close`). 원인은 테스트 쪽이다. Toolhelp의 부모 pid가 죽은 부모를 그대로 가리켜, 세션 root가 재사용한 pid를 부모로 둔 무관한 프로세스가 손자로 잡혔다. `6c243cc`가 부모보다 늦게 생긴 프로세스만 센다. 같은 날 `file_copy_echo_under_load`가 p95 10.017ms(한도 10ms)로 한 번 붉었고(run 41061609829) 재실행에서 초록이다. 최근 실패 25회 가운데 이 한 번뿐이라 지켜보기만 한다.
