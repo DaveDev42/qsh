@@ -9,6 +9,55 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.5.8`
+
+A patch release on top of `v0.5.7` with one interactive client fix,
+found while running round W1 of `docs/campaigns/p1-windows.md`. The wire
+format gains one optional field (see below). The shape of `qsh.cli/v1`
+and `qsh.event/v1` and the doctor code set are unchanged. `v0.5.7` and
+earlier `v0.5.x` and `v0.4.x` peers interoperate with this build.
+
+### Fixes
+
+- Reattaching to a session with `qsh attach` (or the interactive form)
+  could type stray bytes such as `^[[23;1R` or `^[[>0;10;1c` into the
+  remote shell. The replayed history still held the terminal queries a
+  program had sent earlier (cursor position, device attributes, mode and
+  colour queries). The local terminal answered them again, and the client
+  forwarded those answers to the remote PTY as input. The host now reports
+  where the replay ends (`SessionAttached.output_end`, a new optional wire
+  field 7). The interactive renderer drops terminal queries from the
+  replayed bytes only. Live output is written unchanged, so a running
+  program still gets its answers. The wire, the ring, `--json`/`--jsonl`
+  output and `qsh session read` stay byte-exact (ADR-0048).
+  A `v0.5.8` client attached to an older host does not get the boundary
+  and behaves as `v0.5.7` did. Upgrade the host to get the fix.
+
+### Assets and signing
+
+Unchanged from `v0.5.7`: the same nine assets plus `SHA256SUMS`, with
+`v0.5.8` in the names. The `aarch64-apple-darwin` asset is now built on
+the `macos-15` runner instead of `macos-14`, which GitHub retired on
+2026-11-02.
+
+### What is still unproven
+
+Everything `v0.5.7` lists, with these changes from the rounds run on
+`v0.5.7`:
+
+- W1 (interactive Windows client in conhost and Windows Terminal, with
+  Linux and macOS remotes), W6 (logon task form), W10 variant A
+  (always-on form without a stored password) and W11a (a downloaded
+  release asset run past SmartScreen) passed. The input was sent by a
+  driver script running in the logged-on desktop session, and the screen
+  was captured to judge the result. No person typed the keys.
+- The reattach fix above has unit tests and an end-to-end PTY test. It
+  has not yet been re-run in the W1 setup on Windows.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.7`
 
 A patch release on top of `v0.5.6` with one SSH bootstrap fix, found
