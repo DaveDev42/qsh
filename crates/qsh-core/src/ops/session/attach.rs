@@ -111,6 +111,8 @@ pub struct SessionAttachStream {
     pub(super) commands: tokio::sync::mpsc::Sender<AttachCommand>,
     pub(super) session_ref: String,
     pub(super) replay_from: u64,
+    /// See [`Self::replay_end`].
+    pub(super) output_end: u64,
     pub(super) writer_lease: bool,
     /// When to push the stored entry's expiry forward; `None` when the
     /// host's window did not parse and there is nothing to schedule from.
@@ -431,6 +433,15 @@ impl SessionAttachStream {
     /// Cumulative output offset replay started from.
     pub fn replay_from(&self) -> u64 {
         self.replay_from
+    }
+
+    /// Cumulative output offset of the session's end when the host
+    /// authorized this attach. [`SessionEvent::Output`] chunks whose
+    /// `sequence` (the offset of the chunk's *end*) is at or below it are
+    /// replay; a chunk that straddles it carries both. `0` when the host
+    /// does not report it, which a renderer must treat as "no replay known".
+    pub fn replay_end(&self) -> u64 {
+        self.output_end
     }
 
     /// Whether this attach holds the writer lease.

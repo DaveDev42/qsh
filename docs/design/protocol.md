@@ -163,7 +163,9 @@ message ControlMessage {
                                             //   않는다. RO=2는 번호만 확보(관찰자 모드는 없다,
                                             //   ROADMAP §3) — 호스트는 INVALID_ARGUMENT로 답한다
                                             // -> SessionAttached{ticket, new_resume_token,
-                                            //      replay_from, writer_lease, expires_at}
+                                            //      replay_from, writer_lease, expires_at, input_seq, output_end}
+                                            //    (output_end: attach 승인 시점의 출력 끝 offset, additive 필드 7 —
+                                            //     [replay_from, output_end)가 재생분이고 TUI 렌더러만 쓴다)
     SessionList         session_list = 22;  // -> SessionInfo[] — wire SessionInfo는
                                             //    session_id/state/writer(optional)/created_at/last_sequence만
                                             //    담는다. CLI.md §5 Session의 session_ref·host는 클라이언트

@@ -324,6 +324,7 @@ async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_ty
             writer_lease: true,
             expires_at: String::new(),
             input_seq: 0,
+            output_end: 0,
         })
         .await
         .unwrap();
@@ -464,6 +465,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
             writer_lease: true,
             expires_at: String::new(),
             input_seq: 0,
+            output_end: 0,
         })
         .await
         .unwrap();

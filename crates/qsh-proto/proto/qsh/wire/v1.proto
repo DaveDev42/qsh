@@ -406,6 +406,11 @@ message SessionAttached {
   // input stream it left, so its retransmitted tail is deduplicated; any
   // other attach gets 0 and counts from scratch. Additive field 6.
   uint64 input_seq = 6;
+  // Cumulative output offset of the session's end when this attach was
+  // authorized: replay covers `[replay_from, output_end)`, everything after
+  // is live. 0 from a host that predates the field (a client then treats
+  // the whole stream as live). Additive field 7.
+  uint64 output_end = 7;
 }
 
 // Request: list this host's sessions (op `session.list`, ACL `session.list`).

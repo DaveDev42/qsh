@@ -21,6 +21,7 @@ use qsh_proto::{ErrorCode, SessionOpenReq};
 use crate::render::human;
 use crate::stderr_note;
 
+use super::replay_filter::ReplayFilter;
 use super::terminal::{TermEvent, Terminal};
 use super::vt_filter::ModeFilter;
 use super::{Attach, Escape, attach_request, escape_help, open_request};
@@ -274,6 +275,10 @@ fn pump_events(
 ) -> Outcome {
     let mut stdout = io::stdout().lock();
     let mut filter = strip_win32_input_mode.then(ModeFilter::default);
+    // Replayed history must not re-ask the local terminal what a program once
+    // asked it: the answers would be typed into the remote PTY. Live output
+    // is left alone (`replay_filter` module docs).
+    let mut replay_filter = ReplayFilter::new(stream.replay_end());
     while let Some(event) = stream.next_event() {
         if detached.load(Ordering::SeqCst) {
             return Outcome::Detached;
@@ -283,13 +288,16 @@ fn pump_events(
             Err(err) => return Outcome::Failed(err),
         };
         match event {
-            SessionEvent::Output { data_b64, .. } => {
+            SessionEvent::Output {
+                data_b64, sequence, ..
+            } => {
                 let Ok(bytes) = BASE64.decode(data_b64.as_bytes()) else {
                     return Outcome::Failed(OpError::new(
                         ErrorCode::Internal,
                         "session output was not valid Base64",
                     ));
                 };
+                let bytes = replay_filter.feed(&bytes, sequence);
                 let bytes = match filter.as_mut() {
                     Some(filter) => filter.feed(&bytes),
                     None => bytes,
@@ -326,20 +334,20 @@ fn pump_events(
             SessionEvent::Exit {
                 exit_code, signal, ..
             } => {
-                release_held(filter.as_mut(), &mut stdout);
+                release_held(&mut replay_filter, filter.as_mut(), &mut stdout);
                 return Outcome::Exit {
                     code: exit_code,
                     signal,
                 };
             }
             SessionEvent::Closed { reason, .. } => {
-                release_held(filter.as_mut(), &mut stdout);
+                release_held(&mut replay_filter, filter.as_mut(), &mut stdout);
                 return Outcome::Closed(reason);
             }
             SessionEvent::Unknown(_) => {}
         }
     }
-    release_held(filter.as_mut(), &mut stdout);
+    release_held(&mut replay_filter, filter.as_mut(), &mut stdout);
     if detached.load(Ordering::SeqCst) {
         Outcome::Detached
     } else {
@@ -347,14 +355,20 @@ fn pump_events(
     }
 }
 
-/// Write out a sequence the win32-input-mode filter was still holding when
-/// the output ended. A write failure is ignored: the stream is over anyway.
-fn release_held(filter: Option<&mut ModeFilter>, stdout: &mut impl io::Write) {
+/// Write out what the output filters were still holding when the output
+/// ended. A write failure is ignored: the stream is over anyway.
+fn release_held(
+    replay: &mut ReplayFilter,
+    filter: Option<&mut ModeFilter>,
+    stdout: &mut impl io::Write,
+) {
+    let mut rest = replay.finish();
     if let Some(filter) = filter {
-        let rest = filter.finish();
-        if !rest.is_empty() {
-            let _ = stdout.write_all(&rest).and_then(|()| stdout.flush());
-        }
+        rest = filter.feed(&rest);
+        rest.extend(filter.finish());
+    }
+    if !rest.is_empty() {
+        let _ = stdout.write_all(&rest).and_then(|()| stdout.flush());
     }
 }
 
