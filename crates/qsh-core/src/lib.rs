@@ -50,6 +50,7 @@ pub mod serve;
 pub mod server;
 pub mod session_stream;
 pub mod setup;
+pub mod shell;
 pub mod ssh_bootstrap;
 pub mod telemetry;
 pub mod trust;

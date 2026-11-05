@@ -19,7 +19,13 @@ impl Server {
                 ),
             );
         }
-        if req.argv.is_empty() {
+        // Shape checks only: nothing here depends on who is asking, so they
+        // can precede the ACL choke point like the `argv` check always did.
+        let shell = match shell_request(ctx, req) {
+            Ok(shell) => shell,
+            Err(error) => return ControlMessage::error(request_id, error),
+        };
+        if shell.is_none() && req.argv.is_empty() {
             return ControlMessage::error(
                 request_id,
                 wire::Error::new(ErrorCode::InvalidArgument, "argv must not be empty", false),
@@ -92,6 +98,7 @@ impl Server {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             timeout: (req.timeout_ms > 0).then(|| Duration::from_millis(req.timeout_ms)),
+            shell,
         };
         let exec_id = ulid::Ulid::generate().to_string();
         let ticket = self.issue_ticket(
@@ -115,5 +122,38 @@ impl Server {
                 ticket: ticket.to_vec(),
             }),
         )
+    }
+}
+
+/// The shell request of an `ExecStart` (`shell_command`/`login_shell`,
+/// ADR-0051 decision 6), or `None` for a plain argv exec.
+///
+/// The fields are skipped as unknown by a host that predates
+/// `shell-command.v1`, so this host answers `UNSUPPORTED` when the peer sets
+/// one without having negotiated the capability (it cannot have learned the
+/// semantics from this host). The shape rules live in
+/// [`ExecStart::target`]. The text of an error never includes the command.
+fn shell_request(
+    ctx: &ConnCtx,
+    req: &ExecStart,
+) -> Result<Option<crate::shell::ShellRequest>, wire::Error> {
+    use crate::shell::ShellRequest;
+    use wire::ExecTarget;
+    if req.uses_shell_fields() && !ctx.has_capability(wire::CAP_SHELL_COMMAND_V1) {
+        return Err(wire::Error::new(
+            ErrorCode::Unsupported,
+            "peer did not negotiate the shell-command.v1 capability",
+            false,
+        ));
+    }
+    match req
+        .target()
+        .map_err(|e| wire::Error::new(ErrorCode::InvalidArgument, e.0, false))?
+    {
+        None | Some(ExecTarget::Argv) => Ok(None),
+        Some(ExecTarget::ShellCommand(command)) => {
+            Ok(Some(ShellRequest::Command(command.to_string())))
+        }
+        Some(ExecTarget::LoginShell) => Ok(Some(ShellRequest::Login)),
     }
 }

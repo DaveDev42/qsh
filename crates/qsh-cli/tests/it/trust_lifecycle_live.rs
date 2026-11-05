@@ -69,6 +69,7 @@ fn open_shell(ops: &Ops) -> String {
         cols: Some(80),
         rows: Some(24),
         user: None,
+        shell_command: None,
     })
     .expect("session.open")
     .session_ref

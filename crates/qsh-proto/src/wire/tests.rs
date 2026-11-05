@@ -49,12 +49,18 @@ fn arb_exec_start() -> impl Strategy<Value = ExecStart> {
         proptest::collection::vec(".{0,16}", 0..5),
         proptest::collection::hash_map("[A-Z_]{1,8}", ".{0,16}", 0..4),
         any::<u64>(),
+        proptest::option::of(".{0,32}"),
+        any::<bool>(),
     )
-        .prop_map(|(argv, env, timeout_ms)| ExecStart {
-            argv,
-            env,
-            timeout_ms,
-        })
+        .prop_map(
+            |(argv, env, timeout_ms, shell_command, login_shell)| ExecStart {
+                argv,
+                env,
+                timeout_ms,
+                shell_command,
+                login_shell,
+            },
+        )
 }
 
 fn arb_exec_started() -> impl Strategy<Value = ExecStarted> {
@@ -128,15 +134,19 @@ fn arb_session_open() -> impl Strategy<Value = SessionOpen> {
         any::<u32>(),
         any::<u32>(),
         proptest::option::of("[a-z]{1,8}"),
+        proptest::option::of(".{0,32}"),
     )
-        .prop_map(|(argv, env, term, cols, rows, user)| SessionOpen {
-            argv,
-            env,
-            term,
-            cols,
-            rows,
-            user,
-        })
+        .prop_map(
+            |(argv, env, term, cols, rows, user, shell_command)| SessionOpen {
+                argv,
+                env,
+                term,
+                cols,
+                rows,
+                user,
+                shell_command,
+            },
+        )
 }
 
 fn arb_session_opened() -> impl Strategy<Value = SessionOpened> {
@@ -1019,6 +1029,89 @@ fn stream_header_without_field_5_decodes_as_false() {
     assert!(!decoded.deny_host_local);
 }
 
+/// The shell-command fields (ADR-0051 decision 6, `docs/design/protocol.md`
+/// §7.1) are the numbers the `.proto` gives them, and the empty string stays
+/// distinct from "no shell command" (`ssh host ''`).
+#[test]
+fn shell_command_fields_use_their_numbers_and_keep_the_empty_string() {
+    // ExecStart.shell_command = 4 (length-delimited): tag 0x22.
+    let empty = ExecStart {
+        shell_command: Some(String::new()),
+        ..ExecStart::default()
+    };
+    assert_eq!(empty.encode_to_vec(), [0x22, 0x00]);
+    assert_eq!(
+        ExecStart::decode(&[0x22, 0x00][..]).unwrap().shell_command,
+        Some(String::new())
+    );
+    assert_eq!(ExecStart::default().encode_to_vec(), Vec::<u8>::new());
+    // ExecStart.login_shell = 5 (varint): tag 0x28.
+    let login = ExecStart {
+        login_shell: true,
+        ..ExecStart::default()
+    };
+    assert_eq!(login.encode_to_vec(), [0x28, 0x01]);
+    // SessionOpen.shell_command = 7 (length-delimited): tag 0x3A.
+    let open = SessionOpen {
+        shell_command: Some("ls".into()),
+        ..SessionOpen::default()
+    };
+    assert_eq!(open.encode_to_vec(), [0x3A, 0x02, b'l', b's']);
+}
+
+/// A peer that predates field 4/5 of `ExecStart` (and field 7 of
+/// `SessionOpen`) skips them as unknown and sees an empty `argv`: that is
+/// why a sender must check `shell-command.v1` before setting them, and why
+/// the host rejects them from a peer that did not negotiate it
+/// (`docs/design/protocol.md` §16.4, ADR-0019 decision 4). `OldExecStart` is
+/// the message as the previous release declared it.
+#[test]
+fn an_old_peer_skips_the_shell_fields_and_sees_an_empty_argv() {
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldExecStart {
+        #[prost(string, repeated, tag = "1")]
+        argv: Vec<String>,
+        #[prost(uint64, tag = "3")]
+        timeout_ms: u64,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldSessionOpen {
+        #[prost(string, repeated, tag = "1")]
+        argv: Vec<String>,
+        #[prost(string, tag = "3")]
+        term: String,
+    }
+
+    let new = ExecStart {
+        shell_command: Some("rm -rf build && make".into()),
+        login_shell: true,
+        ..ExecStart::default()
+    };
+    let old = OldExecStart::decode(new.encode_to_vec().as_slice())
+        .expect("unknown fields 4 and 5 must not fail the decode");
+    assert!(old.argv.is_empty(), "the old host sees no program at all");
+
+    let new = SessionOpen {
+        term: "xterm".into(),
+        shell_command: Some("top".into()),
+        ..SessionOpen::default()
+    };
+    let old = OldSessionOpen::decode(new.encode_to_vec().as_slice()).unwrap();
+    assert!(old.argv.is_empty(), "the old host opens the login shell");
+    assert_eq!(old.term, "xterm");
+
+    // The other direction: bytes an old client sends decode with the new
+    // fields at their defaults.
+    let from_old = OldExecStart {
+        argv: vec!["true".into()],
+        timeout_ms: 5,
+    }
+    .encode_to_vec();
+    let decoded = ExecStart::decode(from_old.as_slice()).unwrap();
+    assert_eq!(decoded.argv, ["true"]);
+    assert_eq!((decoded.shell_command, decoded.login_shell), (None, false));
+}
+
 #[test]
 fn send_priority_band_matches_protocol_md_12() {
     // control 200 > session data 100 > exec 50 > tunnel 0.
@@ -1552,6 +1645,7 @@ fn golden_session_open_frame() {
             cols: 120,
             rows: 40,
             user: Some("dave".into()),
+            shell_command: None,
         }),
     );
     let wire = encode_control(&msg).unwrap();
@@ -1623,6 +1717,8 @@ fn exec_start_env_map_roundtrips() {
             argv: vec!["sh".into(), "-c".into(), "true".into()],
             env,
             timeout_ms: 1500,
+            login_shell: false,
+            shell_command: None,
         }),
     );
     roundtrip_via_frame(&msg, CONTROL_FRAME_MAX);
@@ -1771,7 +1867,8 @@ fn windows_build_advertises_file_v1() {
     assert_eq!(CAP_FILE_V1, "file.v1");
     assert!(LOCAL_CAPABILITIES.contains(&CAP_FILE_V1));
     // Appended after the four that predate it, so the golden list only grows.
-    assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_FILE_V1));
+    assert_eq!(LOCAL_CAPABILITIES[4], CAP_FILE_V1);
+    // `shell-command.v1` joined after it (ADR-0051 decision 6).
     assert_eq!(
         LOCAL_CAPABILITIES,
         [
@@ -1779,7 +1876,8 @@ fn windows_build_advertises_file_v1() {
             CAP_SESSION,
             CAP_RESUME_V1,
             CAP_DIAL_FILTER_V1,
-            CAP_FILE_V1
+            CAP_FILE_V1,
+            CAP_SHELL_COMMAND_V1,
         ]
     );
 }

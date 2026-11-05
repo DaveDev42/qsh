@@ -111,6 +111,7 @@ async fn drive_control_stream_op(s: &mut Session, name: &str) -> Result<(), Clie
                 argv: vec!["true".into()],
                 env: vec![],
                 timeout: None,
+                shell: None,
             })
             .await
             .map(|_| ()),
@@ -265,6 +266,7 @@ async fn drive_session_attach(h: &LoopbackHarness) -> Result<(), ClientError> {
             cols: 80,
             rows: 24,
             user: None,
+            shell: None,
         })
         .expect("plant a session directly at the broker (bypasses the ACL-gated session.open)");
     let id = SessionId(handle.id().to_string());

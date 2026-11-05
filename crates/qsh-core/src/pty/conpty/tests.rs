@@ -77,6 +77,7 @@ fn cmd(script: &str) -> SessionSpec {
         cols: 80,
         rows: 24,
         user: None,
+        shell: None,
     }
 }
 
@@ -1141,7 +1142,15 @@ fn an_empty_argv_plans_comspec_as_a_full_path_in_the_profile_directory() {
         ("SystemRoot", r"C:\NoSuchWindows"),
         ("Path", dir.path().to_str().unwrap()),
     ]);
-    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows", &[]).unwrap();
+    let launch = plan_from(
+        &argv(&[]),
+        &user_env,
+        &[],
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
     assert_eq!(launch.application, comspec);
     // The command line carries the same full path, quoted for the space.
     assert_eq!(
@@ -1158,13 +1167,29 @@ fn without_comspec_the_default_shell_is_cmd_in_the_system_directory() {
         ("USERPROFILE", dir.path().to_str().unwrap()),
         ("SystemRoot", r"C:\SomeWindows"),
     ]);
-    let launch = plan_from(&argv(&[]), &user_env, &[], r"C:\Windows", &[]).unwrap();
+    let launch = plan_from(
+        &argv(&[]),
+        &user_env,
+        &[],
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
     assert_eq!(
         launch.application,
         Path::new(r"C:\SomeWindows\System32\cmd.exe")
     );
     // No SystemRoot either: the host's Windows directory.
-    let launch = plan_from(&argv(&[]), &[], &[], r"C:\Windows", &[]).unwrap();
+    let launch = plan_from(
+        &argv(&[]),
+        &[],
+        &[],
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
     assert_eq!(
         launch.application,
         Path::new(r"C:\Windows\System32\cmd.exe")
@@ -1172,6 +1197,37 @@ fn without_comspec_the_default_shell_is_cmd_in_the_system_directory() {
     // No usable profile directory: the Windows directory, not the host's
     // working directory.
     assert_eq!(launch.current_dir, Path::new(r"C:\Windows"));
+}
+
+/// `qsh -t host command` on a Windows host (ADR-0051 decision 6): the
+/// default shell with its switch, then the string verbatim; `COMSPEC` and
+/// `cmd.exe` are never searched for.
+#[test]
+fn a_shell_command_plans_the_default_shell_with_the_string_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    let user_env = pairs(&[
+        ("USERPROFILE", dir.path().to_str().unwrap()),
+        ("ComSpec", r"C:\SomeWindows\System32\cmd.exe"),
+    ]);
+    let mut spec = argv(&[]);
+    spec.shell = Some(ShellRequest::Command(r#"dir "a b" | find "x""#.into()));
+    let launch = plan_from(
+        &spec,
+        &user_env,
+        &[],
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        launch.application,
+        Path::new(r"C:\SomeWindows\System32\cmd.exe")
+    );
+    assert_eq!(
+        launch.command_line.to_string_lossy(),
+        r#""C:\SomeWindows\System32\cmd.exe" /c dir "a b" | find "x""#
+    );
 }
 
 #[test]
@@ -1192,7 +1248,15 @@ fn locale_and_time_zone_pass_through_from_the_serve_environment_and_nothing_else
     let user_env = pairs(&[("Path", r"C:\Windows\System32"), ("USERPROFILE", r"C:\")]);
     let mut spec = argv(&["cmd.exe"]);
     spec.term = Some("dumb".into());
-    let launch = plan_from(&spec, &user_env, &serve_env, r"C:\Windows", &[]).unwrap();
+    let launch = plan_from(
+        &spec,
+        &user_env,
+        &serve_env,
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
     let block = String::from_utf16_lossy(&launch.environment);
     let entries: Vec<&str> = block.split('\0').filter(|e| !e.is_empty()).collect();
     for want in ["Lang=en_US.UTF-8", "LC_ALL=C", "tz=UTC", "TERM=dumb"] {
@@ -1207,7 +1271,15 @@ fn locale_and_time_zone_pass_through_from_the_serve_environment_and_nothing_else
         "the serve PATH leaked: {entries:?}"
     );
     // Without a hint the default terminal type applies.
-    let launch = plan_from(&argv(&["cmd.exe"]), &user_env, &[], r"C:\Windows", &[]).unwrap();
+    let launch = plan_from(
+        &argv(&["cmd.exe"]),
+        &user_env,
+        &[],
+        r"C:\Windows",
+        &[],
+        &DefaultShellConfig::default(),
+    )
+    .unwrap();
     let block = String::from_utf16_lossy(&launch.environment);
     assert!(block.contains("TERM=xterm-256color\0"), "{block:?}");
 }

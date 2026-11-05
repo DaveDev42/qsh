@@ -27,6 +27,7 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use super::{ExecSpec, SpawnFailure, Spawned, spawn_failure_code};
 use crate::pty::env_policy;
+use crate::shell::{DefaultShellConfig, ShellRequest};
 use crate::winproc::launch::{self, command_line, resolve_program};
 use crate::winproc::pipe::host_pipe;
 use crate::winproc::{self, ExitWatch, JobObject, ProcessSpec, StdioHandles};
@@ -73,13 +74,10 @@ impl ExecChild {
     }
 }
 
-/// Start `program` with `args`; `spec` carries `argv` whole and the caller's
-/// `env`.
-pub(super) fn spawn_child(
-    program: &str,
-    _args: &[String],
-    spec: &ExecSpec,
-) -> Result<Spawned, SpawnFailure> {
+/// Start `spec`: `argv` whole, or its shell request through the Win32-OpenSSH
+/// default shell.
+pub(super) fn spawn_child(spec: &ExecSpec) -> Result<Spawned, SpawnFailure> {
+    let program = spec.argv.first().map_or("shell", String::as_str);
     let failure = |err: io::Error| SpawnFailure {
         code: spawn_failure_code(&err),
         message: format!("qsh: cannot execute {program:?}: {err}\n"),
@@ -91,7 +89,18 @@ pub(super) fn spawn_child(
     let user_env = winproc::user_environment().map_err(account)?;
     let windows_dir = winproc::windows_directory().map_err(account)?;
     let cwd = std::env::current_dir().map_err(failure)?;
-    let launch = plan(&spec.argv, &spec.env, &user_env, &windows_dir, &cwd).map_err(failure)?;
+    let launch = match &spec.shell {
+        Some(request) => plan_shell(
+            request,
+            &winproc::default_shell_config(),
+            &spec.env,
+            &user_env,
+            &windows_dir,
+            &cwd,
+        ),
+        None => plan(&spec.argv, &spec.env, &user_env, &windows_dir, &cwd),
+    }
+    .map_err(failure)?;
     start(&launch).map_err(failure)
 }
 
@@ -147,6 +156,47 @@ pub(super) fn plan(
     Ok(Launch {
         application,
         command_line: command_line(argv),
+        environment: env_policy::windows_environment_block(&env),
+    })
+}
+
+/// [`plan`] for a shell request (ADR-0051 decision 6): the shell is
+/// `DefaultShell` from `config` or `cmd.exe`, found as a full path like any
+/// other program, and the command line is the shell, its switch and the
+/// command string verbatim (`crate::shell`). The environment is the one
+/// [`plan`] composes.
+pub(super) fn plan_shell(
+    request: &ShellRequest,
+    config: &DefaultShellConfig,
+    client_env: &[(String, String)],
+    user_env: &[(String, String)],
+    windows_dir: &str,
+    cwd: &Path,
+) -> io::Result<Launch> {
+    if let ShellRequest::Command(command) = request {
+        crate::shell::validate_command(command)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
+    }
+    let pinned = env_policy::windows_pinned_values(user_env);
+    let env = env_policy::windows_overlay_env(user_env, &[client_env], &pinned);
+    let system_root = env_policy::windows_lookup(&env, "SystemRoot").unwrap_or(windows_dir);
+    let cmd_exe = env_policy::windows_cmd_exe(&env, system_root);
+    let shell = config.windows_shell(&cmd_exe.to_string_lossy());
+    // `cmd.exe` is already a full path; like an empty-argv session it is not
+    // searched for. A configured `DefaultShell` is found like any program.
+    let application = if Path::new(&shell.program) == cmd_exe {
+        cmd_exe
+    } else {
+        resolve_program(
+            &shell.program,
+            env_policy::windows_lookup(&env, "PATH"),
+            cwd,
+            &launch::system_dirs(windows_dir),
+        )?
+    };
+    Ok(Launch {
+        application,
+        command_line: OsString::from(shell.command_line(request)),
         environment: env_policy::windows_environment_block(&env),
     })
 }

@@ -80,6 +80,7 @@ use super::signal_map::{self, Step, UserEvent};
 use crate::broker::{
     SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
 };
+use crate::shell::{DefaultShellConfig, ShellRequest};
 use crate::winproc::launch::{self, command_line, resolve_program};
 use crate::winproc::pipe::host_pipe;
 use crate::winproc::{self, ExitWatch, JobObject, NamedEvent, ProcessSpec};
@@ -280,6 +281,10 @@ pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Laun
             "ConPtySource argv must not contain NUL",
         ));
     }
+    if let Some(ShellRequest::Command(command)) = &spec.shell {
+        crate::shell::validate_command(command)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
+    }
     let user_env = winproc::user_environment()?;
     plan_from(
         spec,
@@ -287,6 +292,7 @@ pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Laun
         &launch::serve_environment(),
         &winproc::windows_directory()?,
         &events.environment(),
+        &winproc::default_shell_config(),
     )
 }
 
@@ -294,12 +300,15 @@ pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Laun
 /// serve process's own environment (the pass-through source), the Windows
 /// directory and the variables the host makes for this one session
 /// (`session_env`, pinned like the user's own identity variables).
+/// `shell_config` is the Win32-OpenSSH default shell a `shell` request runs
+/// through (ADR-0051 decision 6).
 fn plan_from(
     spec: &SessionSpec,
     user_env: &[(String, String)],
     serve_env: &[(String, String)],
     windows_dir: &str,
     session_env: &[(String, String)],
+    shell_config: &DefaultShellConfig,
 ) -> io::Result<Launch> {
     let term = spec
         .term
@@ -323,11 +332,29 @@ fn plan_from(
             PathBuf::from(windows_dir)
         }
     };
-    let (application, command_line) = if spec.argv.is_empty() {
-        let shell = match env_policy::windows_lookup(&env, "COMSPEC") {
-            Some(comspec) if !comspec.is_empty() => PathBuf::from(comspec),
-            _ => Path::new(system_root).join("System32").join("cmd.exe"),
+    let (application, command_line) = if let Some(request) = &spec.shell {
+        // `qsh -t host command`: the default shell with its switch and the
+        // string verbatim, found as a full path like any other program.
+        let cmd_exe = env_policy::windows_cmd_exe(&env, system_root);
+        let shell = shell_config.windows_shell(&cmd_exe.to_string_lossy());
+        // `cmd.exe` is already a full path and is not searched for (like an
+        // empty `argv`); a configured `DefaultShell` is found like any program.
+        let application = if Path::new(&shell.program) == cmd_exe {
+            cmd_exe
+        } else {
+            resolve_program(
+                &shell.program,
+                env_policy::windows_lookup(&env, "PATH"),
+                &current_dir,
+                &launch::system_dirs(windows_dir),
+            )?
         };
+        (
+            application,
+            std::ffi::OsString::from(shell.command_line(request)),
+        )
+    } else if spec.argv.is_empty() {
+        let shell = env_policy::windows_cmd_exe(&env, system_root);
         let command_line = command_line(&[shell.to_string_lossy().into_owned()]);
         (shell, command_line)
     } else {

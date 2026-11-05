@@ -64,6 +64,11 @@ pub struct SessionSpec {
     pub rows: u16,
     /// `user@` hint (validated by the host, not here — CLI.md §7).
     pub user: Option<String>,
+    /// `qsh -t host command`: a string for the account's shell, run inside
+    /// the PTY (`shell_command`, ADR-0051 decision 6). When set, `argv` is
+    /// empty. Only `ShellRequest::Command` occurs here; the login shell is
+    /// an empty `argv`.
+    pub shell: Option<crate::shell::ShellRequest>,
 }
 
 /// How a source's child ended.

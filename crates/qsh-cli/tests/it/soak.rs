@@ -805,6 +805,7 @@ fn open_session(ops: &Ops) -> Result<String, qsh_core::OpError> {
             cols: Some(80),
             rows: Some(24),
             user: None,
+            shell_command: None,
         })?
         .session_ref)
 }

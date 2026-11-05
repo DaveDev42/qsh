@@ -799,6 +799,8 @@ mod dod2_audit {
                 argv: vec!["true".into()],
                 env: Default::default(),
                 timeout_ms: 0,
+                login_shell: false,
+                shell_command: None,
             }),
             "exec.run",
             "allow",
@@ -923,6 +925,7 @@ mod dod2_audit {
                 cols: 80,
                 rows: 24,
                 user: None,
+                shell: None,
             })
             .expect("plant a session directly at the broker");
         let id = SessionId(handle.id().to_string());
@@ -981,6 +984,8 @@ mod dod2_audit {
                 argv: vec!["true".into()],
                 env: Default::default(),
                 timeout_ms: 0,
+                login_shell: false,
+                shell_command: None,
             }),
             "exec.run",
             "deny",

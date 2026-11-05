@@ -345,6 +345,7 @@ fn open_req(host: &str) -> SessionOpenReq {
         cols: Some(80),
         rows: Some(24),
         user: None,
+        shell_command: None,
     }
 }
 

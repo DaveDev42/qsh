@@ -35,7 +35,10 @@
 //! program `argv[0]` named.
 //!
 //! `argv` is run directly, never through a shell. A shell built-in is the
-//! caller's to name (`sh -c ...`, `cmd /c ...`).
+//! caller's to name (`sh -c ...`, `cmd /c ...`). The one way a string reaches
+//! a shell is [`ExecSpec::shell`] (ADR-0051 decision 6): the account's login
+//! shell with `-c` on unix, the Win32-OpenSSH default shell on Windows
+//! (`crate::shell`).
 
 use std::time::Duration;
 
@@ -44,6 +47,8 @@ use qsh_transport::{FramedRecv, FramedSend, StreamError};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+use crate::shell::ShellRequest;
 
 #[cfg(unix)]
 mod posix;
@@ -64,6 +69,11 @@ pub struct ExecSpec {
     pub env: Vec<(String, String)>,
     /// Kill the child after this long. `None` = no limit.
     pub timeout: Option<Duration>,
+    /// A string for the host account's shell, or the login shell itself
+    /// (`shell_command`/`login_shell`, ADR-0051 decision 6). Each platform
+    /// half turns it into a program at spawn time (`crate::shell`); when it
+    /// is set, `argv` is empty.
+    pub shell: Option<ShellRequest>,
 }
 
 /// How an exec ended, as reported to the client in `ExecExit`.
@@ -174,7 +184,8 @@ pub async fn run_exec<G: Send>(
     mut recv: FramedRecv,
     guard: G,
 ) -> Result<ExecOutcome, ExecError> {
-    let Some((program, args)) = spec.argv.split_first() else {
+    // A shell request has no argv: the platform half picks the program.
+    if spec.argv.is_empty() && spec.shell.is_none() {
         drop(guard);
         send.send(&ExecFrame::stderr(b"qsh: empty argv\n".to_vec()))
             .await?;
@@ -185,14 +196,14 @@ pub async fn run_exec<G: Send>(
             signal: None,
             timed_out: false,
         });
-    };
+    }
 
     let Spawned {
         mut child,
         stdin: child_stdin,
         stdout: child_stdout,
         stderr: child_stderr,
-    } = match spawn_child(program, args, &spec) {
+    } = match spawn_child(&spec) {
         Ok(spawned) => spawned,
         Err(failure) => {
             drop(guard);

@@ -45,7 +45,8 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
-- `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
+- `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 다섯째 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
+- `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
 
 ## 5. Frame layer
 
@@ -125,6 +126,26 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 
 **연결 CLOSE 코드.** 연결 전체를 닫는 `APPLICATION_CLOSE` 코드는 `0x100x` 대역이고 위 RESET 코드(`0x200x`)와 달리 스트림이 아니라 연결에 붙는다. peer는 이 값에 따라 분기하지 않는다(진단·audit 상관관계용이다). 가장 새 값 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 그 연결을 보증하지 않아 닫을 때 쓰고(ADR-0031 결정 7), reason은 주체나 사유를 싣지 않는 고정 문자열 `trust withdrawn`이다. 값 목록과 동결 지위는 §16.3·§16.5다.
 
+### 7.1 셸 명령: `shell_command`와 `login_shell` (ADR-0051 결정 6)
+
+`qsh host command...`는 ssh처럼 인자를 공백 하나로 이어 한 문자열로 만들고, 그 문자열을 원격 계정의 셸이 실행하게 한다. argv 의미(`qsh exec host -- argv`, 셸 없음)는 그대로이고, 문자열은 별도 필드로 간다.
+
+| 메시지 | 필드 | 뜻 |
+|---|---|---|
+| `ExecStart` | `optional string shell_command = 4` | 이 문자열을 host 계정의 셸에 넘긴다. 빈 문자열도 명령이다(`ssh host ''`는 `-c ''`). 그래서 `optional`이다 |
+| `ExecStart` | `bool login_shell = 5` | 계정의 로그인 셸 자체를 PTY 없이, `-c` 없이 띄운다(`qsh -T host`). 명령은 stdin에서 읽는다 |
+| `SessionOpen` | `optional string shell_command = 7` | `qsh -t host command`. PTY 안에서 같은 셸 규칙으로 실행한다. 로그인 셸은 이미 빈 `argv`다 |
+
+**배타성.** `ExecStart`의 `argv`(비어 있지 않음)·`shell_command`·`login_shell`은 정확히 하나만 올 수 있고, `SessionOpen`은 비어 있지 않은 `argv`와 `shell_command`를 같이 보낼 수 없다. 어긴 요청과 NUL을 품은 문자열은 `INVALID_ARGUMENT`이고, 판정은 `ExecStart::target`·`SessionOpen::shell_command_checked`(`crates/qsh-proto/src/wire.rs`, `decode_control` fuzz 타깃이 연쇄 호출한다)가 한다. 이 검사는 호출자에 의존하지 않으므로 ACL 결정 앞에 있어도 존재 오라클이 되지 않는다. 오류 문면은 명령을 되풀이하지 않는다.
+
+**host의 셸 선택.**
+- unix: 계정의 비밀번호 DB 셸에 `-c <문자열>`. 비어 있거나 실행할 수 없으면 `/bin/sh`다(`sshd`와 같은 폴백, `pty::posix`의 `Account::login_shell`). 로그인 셸은 `-c` 없이 그 셸만 띄운다. `exec`의 환경은 기존 규칙(`pinned_identity_env`)을 따르고 PTY 세션의 환경은 기존 세션 규칙을 따른다. PTY 안의 명령은 `sshd`처럼 로그인 셸 접두(`-zsh` 같은 argv[0])를 쓰지 않는다.
+- Windows: Win32-OpenSSH 규칙이다. `HKLM\SOFTWARE\OpenSSH\DefaultShell`이 있으면 그 셸에 `DefaultShellCommandOption`(없으면 `/c`)을 붙이고, 없으면 `cmd.exe /c`다(`cmd.exe`는 자식 환경의 `COMSPEC`, 없으면 `<SystemRoot>\System32\cmd.exe`의 전체 경로). 빈 값은 없는 값으로 본다. 문자열은 명령줄 끝에 **그대로** 붙는다. C 런타임식 인용으로 한 인자에 감싸지 않는다(`cmd.exe`는 그 인용을 풀지 않는다). 선택 규칙은 `crates/qsh-core/src/shell.rs`의 순수 함수라 모든 OS에서 단위 테스트된다. 레지스트리를 읽는 곳은 Windows 전용 `winproc::default_shell_config`뿐이다.
+
+**권한과 순서.** 셸 요청도 `exec.run`(PTY는 `session.open`) ACL 한 번을 거치고, 그 앞에서는 아무것도 spawn되지 않으며 ticket도 나가지 않는다. audit 기록은 action·decision·principal 같은 구조 필드뿐이라 문자열을 싣지 않는다. host의 `ExecSpec`·`SessionSpec`에서 문자열은 `Debug`가 길이만 찍는 `ShellRequest`에 담긴다.
+
+**옛 host를 알아보는 방법.** 필드 4·5(`ExecStart`)와 7(`SessionOpen`)을 모르는 host는 건너뛰고 빈 `argv`를 받는다. 조용히 틀린 동작(로그인 셸을 연다)이 되므로 §16.4의 ADR-0019 결정 4 규칙대로 sender가 `Hello`로 협상된 `shell-command.v1`을 확인한 뒤에만 필드를 세팅한다. 없으면 client는 아무것도 보내지 않고 `UNSUPPORTED`로 끝난다(host에 audit도 ticket도 생기지 않는다. 문면은 `crates/qsh-core/src/ops/exec.rs`의 `SHELL_COMMAND_UNSUPPORTED_MESSAGE`이고 `docs/CLI.md` §6.8이 그대로 싣는다). 반대로 이 host는 capability를 협상하지 않은 peer가 필드를 보내면 `UNSUPPORTED`로 답한다. 새 peer가 보낸 요청을 옛 host가 받는 경우는 sender의 확인으로 일어나지 않고, 옛 client가 보낸 요청에는 새 필드가 없어 기본값(`None`/`false`)으로 읽힌다(`an_old_peer_skips_the_shell_fields_and_sees_an_empty_argv`).
+
 ## 8. Sequence 시맨틱 (wire 관점)
 
 사용자 노출 계약은 [CLI.md §2.3, §6.4] 참조. wire에서도 동일 모델을 쓴다:
@@ -146,7 +167,7 @@ message ControlMessage {
     Hello               hello = 10;
     Response            response = 11;      // 성공 payload 또는 Error — 상세는 아래 Response 참고
 
-    SessionOpen         session_open = 20;  // argv, env, term, cols, rows,
+    SessionOpen         session_open = 20;  // argv, env, term, cols, rows, optional shell_command(7, §7.1),
                                             //   optional user(hint; `qsh user@host`의 user — 검사 순서는
                                             //   ACL session.open → hint → spawn; serve 계정 login name과
                                             //   다르면 세션 생성 없이 UNSUPPORTED, 미인가 peer는 항상
@@ -195,7 +216,8 @@ message ControlMessage {
     SessionWrite        session_write = 28; // session_id, data(≤ 16 KiB, 초과 시 INVALID_ARGUMENT)
                                             // -> SessionWritten{bytes_written} ; ACL session.control
 
-    ExecStart           exec_start = 30;    // argv, env, timeout_ms -> ExecStarted{exec_id, ticket}
+    ExecStart           exec_start = 30;    // argv, env, timeout_ms, optional shell_command(4), login_shell(5) (§7.1)
+                                            //   -> ExecStarted{exec_id, ticket}
 
     RemoteForwardOpen   rfwd_open = 40;     // bind_host, bind_port, forward_host, forward_port,
                                             //   claim_token(§11-3 forward_id→conduit 등록표 —

@@ -374,6 +374,19 @@ impl Session {
                 "peer does not support exec".into(),
             ));
         }
+        // A host that predates `shell-command.v1` skips the shell fields as
+        // unknown and would see an empty argv, so the request is refused
+        // here, before anything is sent (`docs/design/protocol.md` §7.1).
+        let (shell_command, login_shell) = match &spec.shell {
+            None => (None, false),
+            Some(_) if !self.has_capability(wire::CAP_SHELL_COMMAND_V1) => {
+                return Err(ClientError::Unsupported(
+                    crate::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE.into(),
+                ));
+            }
+            Some(crate::shell::ShellRequest::Command(command)) => (Some(command.clone()), false),
+            Some(crate::shell::ShellRequest::Login) => (None, true),
+        };
         let resp = self
             .request(control_message::Body::ExecStart(ExecStart {
                 argv: spec.argv.clone(),
@@ -381,6 +394,8 @@ impl Session {
                 timeout_ms: spec
                     .timeout
                     .map_or(0, |t| t.as_millis().min(u64::MAX as u128) as u64),
+                shell_command,
+                login_shell,
             }))
             .await?;
         match resp.body {

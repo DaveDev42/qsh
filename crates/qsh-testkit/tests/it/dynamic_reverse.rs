@@ -427,6 +427,7 @@ async fn interactive_dash_l_over_reverse_round_trips_at_the_ops_level() {
                     cols: None,
                     rows: None,
                     user: None,
+                    shell_command: None,
                 })
             }
         })

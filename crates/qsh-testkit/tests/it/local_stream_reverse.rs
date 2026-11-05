@@ -231,6 +231,8 @@ async fn open_exec_argv(
             argv,
             env: Default::default(),
             timeout_ms: 0,
+            login_shell: false,
+            shell_command: None,
         }),
     )
     .await;

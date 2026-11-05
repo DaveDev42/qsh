@@ -823,7 +823,7 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
     let host = target.host.clone();
     let user = args.user();
     match mode {
-        FormMode::Interactive { argv } => run_interactive(
+        FormMode::Interactive { shell_command } => run_interactive(
             cli,
             ops,
             tui::Attach::Open {
@@ -832,7 +832,7 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
                 forwards: args.local_forward.clone(),
                 remote_forwards: args.remote_forward.clone(),
                 dynamic_forwards: args.dynamic_forward.clone(),
-                argv,
+                shell_command,
             },
             args.escape_char,
             &ssh,
@@ -1075,6 +1075,7 @@ fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
                 cols: args.cols.map(u32::from),
                 rows: args.rows.map(u32::from),
                 user: None,
+                shell_command: None,
             }),
             human::print_session_open,
         ),
