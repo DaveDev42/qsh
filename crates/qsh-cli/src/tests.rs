@@ -143,6 +143,7 @@ fn ops_from_env_failure_routes_serve_listen_and_reverse_off_the_envelope_path() 
             bind: None,
             to: None,
             name: None,
+            on_demand: false,
         })),
         Some(SERVE_MODE)
     );
@@ -192,6 +193,7 @@ fn long_running_setup_mode_routes_serve_to_as_a_long_running_mode() {
             bind: None,
             to: Some("widget".to_string()),
             name: Some("laptop".to_string()),
+            on_demand: false,
         })),
         Some(SERVE_MODE)
     );

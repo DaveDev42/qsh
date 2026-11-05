@@ -660,11 +660,17 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.tunnel_list(TunnelListReq {}),
             human::print_tunnels,
         ),
-        Command::Serve { bind, to, name } => run_serve(
+        Command::Serve {
+            bind,
+            to,
+            name,
+            on_demand,
+        } => run_serve(
             &ops,
             bind.as_deref(),
             to.as_deref(),
             name.as_deref(),
+            *on_demand,
             cli.quiet,
         ),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
@@ -745,7 +751,7 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
     }
     match (mode, controller) {
         ("listen", _) => run_listen(ops, None),
-        (_, controller) => run_serve(ops, None, controller, None, cli.quiet),
+        (_, controller) => run_serve(ops, None, controller, None, false, cli.quiet),
     }
 }
 
@@ -1780,6 +1786,7 @@ fn run_serve(
     bind: Option<&str>,
     to: Option<&str>,
     name: Option<&str>,
+    on_demand: bool,
     quiet: bool,
 ) -> i32 {
     let config = match ops.config() {
@@ -1791,7 +1798,17 @@ fn run_serve(
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
     };
     match mode {
-        qsh_core::serve::ServeMode::Inbound(addr) => run_serve_inbound(ops, &config, addr, quiet),
+        qsh_core::serve::ServeMode::Inbound(addr) => {
+            run_serve_inbound(ops, &config, addr, on_demand, quiet)
+        }
+        qsh_core::serve::ServeMode::Outbound { .. } if on_demand => {
+            let err = OpError::new(
+                ErrorCode::InvalidArgument,
+                "--on-demand only applies to an inbound serve; it cannot be combined with --to \
+                 or a configured [serve].to.",
+            );
+            report_long_running_setup_error(SERVE_MODE, &err)
+        }
         qsh_core::serve::ServeMode::Outbound {
             target,
             offered_name,
@@ -1827,7 +1844,13 @@ fn run_serve(
 /// re-resolve it, so a bad `[serve].bind` name is reported once, by the
 /// mode decision, not by the accept loop's own `resolve_bind` call
 /// disagreeing with it on a multi-address name.
-fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) -> i32 {
+fn run_serve_inbound(
+    ops: &Ops,
+    config: &Config,
+    bind: SocketAddr,
+    on_demand: bool,
+    quiet: bool,
+) -> i32 {
     let result = (|| -> Result<(), OpError> {
         // Identity is loaded synchronously, before any runtime exists: the
         // credential store may block (and prompt) — keep that off the
@@ -1844,13 +1867,19 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) 
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
         let device_id = identity.identity.device_id.clone();
         let fingerprint = identity.identity.fingerprint.to_string();
+        let on_demand = if on_demand {
+            Some(qsh_core::serve::OnDemandOptions::from_config(config)?)
+        } else {
+            None
+        };
         // Registered before the `listening` line can be written.
         let shutdown = arm_shutdown_signal(&runtime);
-        runtime.block_on(qsh_core::serve::run_serve(
+        runtime.block_on(qsh_core::serve::run_serve_with(
             ops.paths(),
             config,
             identity,
             bind,
+            on_demand,
             |addr| {
                 stderr_note!("qsh serve: listening on {addr}");
                 qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Serve);
