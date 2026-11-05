@@ -53,9 +53,11 @@ pub use error::ErrorCode;
 pub use event::{FileEntryEvent, SessionEvent};
 pub use types::{
     AclCheckData, AclCheckReq, AclMatchingRule, AclPolicyRef, AclShowData, AclShowReq,
-    AuditQueryData, AuditQueryReq, AuditRecordView, BuildInfo, CLI_SCHEMA_V1, CaRegistration,
-    CapabilitiesData, CapabilitiesReq, CertInitData, CertInitReq, CertIssueData, CertIssueReq,
-    CliEnvelope, CliError, DoctorData, DoctorFinding, DoctorReq, DynamicTunnel, EnvVar,
+    AuditQueryData, AuditQueryReq, AuditRecordView, BuildInfo, CLI_SCHEMA_V1,
+    CONFIG_APPLIES_FROM_NEXT_START, CaRegistration, CapabilitiesData, CapabilitiesReq,
+    CertInitData, CertInitReq, CertIssueData, CertIssueReq, CliEnvelope, CliError, ConfigEntry,
+    ConfigGetData, ConfigGetReq, ConfigListData, ConfigListReq, ConfigSetData, ConfigSetReq,
+    ConfigUnsetData, ConfigUnsetReq, DoctorData, DoctorFinding, DoctorReq, DynamicTunnel, EnvVar,
     ExecRunData, ExecRunReq, FileCopyData, FileCopyEntry, FileCopyErrorDetails, FileCopyFailure,
     FileCopyReq, Host, HostGetReq, HostListData, HostListReq, IdentityExportData,
     IdentityExportReq, IdentityInitData, IdentityInitReq, IdentityMoveKeyData, IdentityMoveKeyReq,

@@ -27,6 +27,7 @@ pub mod acl;
 pub mod audit;
 pub mod auto_bootstrap;
 pub mod cert;
+mod config_cmd;
 pub mod doctor;
 pub mod exec;
 pub mod file;
@@ -427,6 +428,34 @@ pub fn resolve_invite_code_source(
 /// [`parse_dynamic_forwards`] centralizes its own single-site policy.
 pub fn normalize_invite_code(raw: &str) -> &str {
     raw.trim()
+}
+
+/// The `config.get` operation (`docs/CLI.md` §6.23, ADR-0051 결정 10).
+pub struct ConfigGetOp;
+
+impl Operation for ConfigGetOp {
+    const COMMAND: &'static str = "config.get";
+}
+
+/// The `config.set` operation (`docs/CLI.md` §6.23).
+pub struct ConfigSetOp;
+
+impl Operation for ConfigSetOp {
+    const COMMAND: &'static str = "config.set";
+}
+
+/// The `config.unset` operation (`docs/CLI.md` §6.23).
+pub struct ConfigUnsetOp;
+
+impl Operation for ConfigUnsetOp {
+    const COMMAND: &'static str = "config.unset";
+}
+
+/// The `config.list` operation (`docs/CLI.md` §6.23).
+pub struct ConfigListOp;
+
+impl Operation for ConfigListOp {
+    const COMMAND: &'static str = "config.list";
 }
 
 /// The `trust.list` operation.

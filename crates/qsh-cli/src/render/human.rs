@@ -10,8 +10,9 @@ use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, AclShowData, AuditQueryData, AuditRecordView, CapabilitiesData, CertInitData,
-    CertIssueData, DoctorData, DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData,
-    IdentityInitData, IdentityMoveKeyData, KeyStoreKind, PairSshData, PairSshDirection, SchemaData,
+    CertIssueData, ConfigGetData, ConfigListData, ConfigSetData, ConfigUnsetData, DoctorData,
+    DynamicTunnel, FileCopyData, Host, HostListData, IdentityExportData, IdentityInitData,
+    IdentityMoveKeyData, KeyStoreKind, PairSshData, PairSshDirection, SchemaData,
     ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
@@ -455,6 +456,83 @@ pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
     )?;
     if data.peer.role.is_some() {
         writeln!(stdout, "{}", qsh_core::doctor::TRUST_NARROWING_SCOPE)?;
+    }
+    Ok(())
+}
+
+/// A `config.toml` scalar as text: strings bare, numbers and booleans as
+/// written.
+fn config_scalar(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => sanitize(s),
+        other => other.to_string(),
+    }
+}
+
+/// The one-line reminder for a key a running process does not re-read.
+const CONFIG_NEXT_START_NOTE: &str =
+    "applies from the next start; a running qsh keeps the old value until it is restarted";
+
+/// Print `qsh config get <key>` (`docs/CLI.md` §6.23): the bare value, or
+/// `(unset)` when `config.toml` does not set the key.
+pub fn print_config_get(data: &ConfigGetData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    match &data.value {
+        Some(value) => writeln!(stdout, "{}", config_scalar(value)),
+        None => writeln!(stdout, "(unset)"),
+    }
+}
+
+/// Print `qsh config set <key> <value>` (`docs/CLI.md` §6.23).
+pub fn print_config_set(data: &ConfigSetData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let key = sanitize(&data.key);
+    let value = config_scalar(&data.value);
+    if !data.changed {
+        return writeln!(stdout, "{key} already {value} (nothing to do)");
+    }
+    match &data.previous {
+        Some(previous) => writeln!(stdout, "{key}: {} -> {value}", config_scalar(previous))?,
+        None => writeln!(stdout, "{key}: (unset) -> {value}")?,
+    }
+    if data.applies_from.is_some() {
+        writeln!(stdout, "{CONFIG_NEXT_START_NOTE}")?;
+    }
+    Ok(())
+}
+
+/// Print `qsh config unset <key>` (`docs/CLI.md` §6.23).
+pub fn print_config_unset(data: &ConfigUnsetData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let key = sanitize(&data.key);
+    if !data.changed {
+        return writeln!(stdout, "{key} is not set (nothing to do)");
+    }
+    let previous = data
+        .previous
+        .as_ref()
+        .map(config_scalar)
+        .unwrap_or_default();
+    writeln!(stdout, "{key}: {previous} -> (unset)")?;
+    if data.applies_from.is_some() {
+        writeln!(stdout, "{CONFIG_NEXT_START_NOTE}")?;
+    }
+    Ok(())
+}
+
+/// Print `qsh config list [--all]` (`docs/CLI.md` §6.23): one `key = value`
+/// line per set key, `key (unset)` for the rest under `--all`.
+pub fn print_config_list(data: &ConfigListData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.entries.is_empty() {
+        return writeln!(stdout, "config.toml sets no keys");
+    }
+    for entry in &data.entries {
+        let key = sanitize(&entry.key);
+        match &entry.value {
+            Some(value) => writeln!(stdout, "{key} = {}", config_scalar(value))?,
+            None => writeln!(stdout, "{key} (unset)")?,
+        }
     }
     Ok(())
 }

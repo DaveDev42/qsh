@@ -1,0 +1,12 @@
+{
+  "command": "config.set",
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "details": null,
+    "message": "unknown config key \"serve.bnid\"; keys are written <section>.<key>, run `qsh config list --all` for the full set",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

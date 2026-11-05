@@ -1,0 +1,12 @@
+{
+  "command": "config.set",
+  "error": {
+    "code": "CONFIG_ERROR",
+    "details": null,
+    "message": "[transport].keep_alive_ms (5) must be within 1000..=20000; config.toml was not changed",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -119,6 +119,13 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.accept.with_role.json",
     "trust.set_role.json",
     "trust.set_role.unchanged.json",
+    "config.get.json",
+    "config.get.unset.json",
+    "config.set.json",
+    "config.unset.json",
+    "config.list.json",
+    "error.INVALID_ARGUMENT.config_unknown_key.json",
+    "error.CONFIG_ERROR.config_set_range.json",
     "trust.remove.json",
     "trust.remove.absent.json",
     "trust.invite.json",
@@ -1048,6 +1055,67 @@ fn golden_trust_list_with_role_fixture() {
         "a pin with no `role` key must omit the field, not emit null: {listed}"
     );
     check("trust.list.with_role.json", listed);
+}
+
+/// `qsh config get|set|unset|list` (ADR-0051 결정 10, `docs/CLI.md` §6.23):
+/// a startup-only key (carries `applies_from`), a per-command key (does
+/// not), an unset read, and the two refusals. Own sandbox, so the legacy
+/// goldens' `config.toml` stays untouched.
+#[test]
+fn golden_config_fixtures() {
+    let sandbox = Sandbox::new();
+    let (code, set) = sandbox.json(&[
+        "config",
+        "set",
+        "transport.keep_alive_ms",
+        "10000",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(set["data"]["applies_from"], "next_start", "{set}");
+    check("config.set.json", set);
+
+    let (code, per_command) = sandbox.json(&["config", "set", "ssh.bootstrap", "off", "--json"]);
+    assert_eq!(code, 0, "{per_command}");
+    assert!(
+        per_command["data"].get("applies_from").is_none(),
+        "{per_command}"
+    );
+
+    let (code, got) = sandbox.json(&["config", "get", "transport.keep_alive_ms", "--json"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["value"], 10000, "{got}");
+    check("config.get.json", got);
+
+    let (code, absent) = sandbox.json(&["config", "get", "serve.bind", "--json"]);
+    assert_eq!(code, 0, "{absent}");
+    assert_eq!(absent["data"]["set"], false, "{absent}");
+    assert!(absent["data"].get("value").is_none(), "{absent}");
+    check("config.get.unset.json", absent);
+
+    let (code, listed) = sandbox.json(&["config", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    assert_eq!(
+        listed["data"]["entries"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
+    check("config.list.json", listed);
+
+    let (code, removed) = sandbox.json(&["config", "unset", "transport.keep_alive_ms", "--json"]);
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(removed["data"]["previous"], 10000, "{removed}");
+    check("config.unset.json", removed);
+
+    let (code, unknown) = sandbox.json(&["config", "set", "serve.bnid", "x", "--json"]);
+    assert_eq!(code, 255, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "INVALID_ARGUMENT", "{unknown}");
+    check("error.INVALID_ARGUMENT.config_unknown_key.json", unknown);
+
+    let (code, range) = sandbox.json(&["config", "set", "transport.keep_alive_ms", "5", "--json"]);
+    assert_eq!(code, 255, "{range}");
+    assert_eq!(range["error"]["code"], "CONFIG_ERROR", "{range}");
+    check("error.CONFIG_ERROR.config_set_range.json", range);
 }
 
 /// The role-writing commands (ADR-0045 결정 8, `docs/CLI.md` §6.11): an

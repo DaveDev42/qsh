@@ -1,0 +1,43 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-config 1  "config 0.5.8" 
+.SH NAME
+qsh\-config \- Read and edit this machine\*(Aqs `config.toml` by dotted key (`docs/CLI.md` §6.23, ADR\-0051 decision 10)
+.SH SYNOPSIS
+\fBqsh config\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Read and edit this machine\*(Aqs `config.toml` by dotted key (`docs/CLI.md` §6.23, ADR\-0051 decision 10)
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+qsh\-config\-get(1)
+Print the value of one key. An unset key prints `(unset)` and exits 0; an unknown key is a usage error (`INVALID_ARGUMENT`)
+.TP
+qsh\-config\-set(1)
+Write one key. The edited file must pass the same validation the daemons apply at startup, or nothing is written. Comments and key order in `config.toml` are kept
+.TP
+qsh\-config\-unset(1)
+Remove one key so its built\-in default applies again
+.TP
+qsh\-config\-list(1)
+List the keys `config.toml` sets
+.SH VERSION
+v0.5.8
