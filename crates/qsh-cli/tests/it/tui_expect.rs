@@ -365,6 +365,100 @@ fn the_bare_form_round_trips_and_survives_a_detach() {
     assert!(client.is_cooked());
 }
 
+/// `~.` ends the session like ssh (ADR-0051 decision 9): the shell is
+/// closed on the host, the client exits `255` with the terminal restored,
+/// and `~d` is the only sequence that leaves the session running.
+#[test]
+fn tilde_dot_closes_the_session_and_exits_255() {
+    let fleet = Fleet::start();
+    let mut client = Client::spawn(&fleet.client, &[HOST_ALIAS]);
+
+    client.round_trip("QSH-BEFORE-CLOSE");
+    client.type_("~.");
+    client.expect("the session was closed");
+    client.expect_exit(255);
+    assert!(
+        client.is_cooked(),
+        "the terminal must be restored on the `~.` path"
+    );
+
+    let (code, listed) = fleet.client.json(&["sessions", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    let running = listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter(|session| session["state"] == "running")
+        .count();
+    assert_eq!(running, 0, "`~.` must end the session: {listed}");
+}
+
+/// The local-only escapes: `~#` lists this client's forwards, `~C` and `~R`
+/// are refused, `~&` says it is unsupported, and none of them reaches the
+/// shell or detaches (`docs/CLI.md` §7).
+#[test]
+fn local_escapes_answer_on_stderr_and_keep_the_attach() {
+    let fleet = Fleet::start();
+    let session_ref = open_session(&fleet.client, &["sh"]);
+    let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
+    client.round_trip("QSH-LOCAL-ESC");
+
+    client.type_("~#");
+    client.expect("no forwards are active");
+    client.type_("~C");
+    client.expect("~C: the escape command line is not supported");
+    client.type_("~R");
+    client.expect("~R: rekeying is not supported");
+    client.type_("~&");
+    client.expect("~& is not supported");
+    // Still attached and still at a line start: the shell saw none of it.
+    client.round_trip("QSH-STILL-ATTACHED");
+    client.type_("~d");
+    client.expect_exit(0);
+    assert_eq!(session_get(&fleet.client, &session_ref)["state"], "running");
+}
+
+/// `~^Z` hands the terminal back and stops the client; on resume it is in
+/// raw mode again and the attach carries on (`docs/CLI.md` §7).
+#[test]
+fn tilde_ctrl_z_suspends_and_continues() {
+    let fleet = Fleet::start();
+    let session_ref = open_session(&fleet.client, &["sh"]);
+    let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
+    client.round_trip("QSH-PRE-SUSPEND");
+
+    client.type_("~\x1a");
+    client.expect("suspending");
+    // The test's client leads its own session, so its process group is
+    // orphaned and the kernel discards `SIGTSTP` instead of stopping it:
+    // the client resumes at once. That still walks the whole path
+    // (restore, `SIGTSTP`, re-read, raw again, redraw), and the stop itself
+    // is the kernel's.
+    client.expect("continued");
+    assert!(!client.is_cooked(), "raw mode must be back after a suspend");
+    client.round_trip("QSH-POST-SUSPEND");
+    client.type_("~d");
+    client.expect_exit(0);
+}
+
+/// `~#` lists the forwards the interactive form opened.
+#[test]
+fn tilde_hash_lists_the_clients_forwards() {
+    let fleet = Fleet::start();
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        probe.local_addr().expect("addr").port()
+    };
+    let spec = format!("{port}:127.0.0.1:9");
+    let mut client = Client::spawn(&fleet.client, &[HOST_ALIAS, "-L", &spec]);
+    client.round_trip("QSH-FWD");
+    client.type_("~#");
+    client.expect("Active forwards");
+    client.expect(&format!("127.0.0.1:{port}"));
+    client.type_("~d");
+    client.expect_exit(0);
+}
+
 /// `--escape-char none` turns the sequences off, so `~d` is just input
 /// (`docs/CLI.md` §7).
 #[test]
@@ -749,7 +843,7 @@ fn a_reattach_does_not_forward_replayed_terminal_queries() {
         live.windows(4).any(|w| w == b"\x1b[6n"),
         "a live query must still reach the local terminal: {live:?}"
     );
-    back.type_("~.");
+    back.type_("~d");
     back.expect_exit(0);
 }
 

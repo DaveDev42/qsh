@@ -45,6 +45,14 @@ impl Terminal for UnixTerminal {
         }
     }
 
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    fn suspend(&self) -> io::Result<()> {
+        term::suspend()
+    }
+
     fn leave_on_hangup(&self, cause: HangupCause) {
         match nix::sys::signal::Signal::try_from(cause.0) {
             Ok(signal) => term::restore_and_die(signal),

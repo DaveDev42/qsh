@@ -107,6 +107,35 @@ pub fn restore() {
     }
 }
 
+/// `~^Z`: put the terminal back, stop this process with `SIGTSTP`, and on
+/// `SIGCONT` re-read the terminal settings (the shell that resumed us may
+/// have changed them) and go raw again.
+///
+/// `SIGTSTP` is not one of the signals the signal thread catches, so its
+/// default action (stop) applies to the whole process.
+pub fn suspend() -> io::Result<()> {
+    let stdin = io::stdin();
+    if SAVED.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the terminal is not in raw mode",
+        ));
+    }
+    restore();
+    let stopped = nix::sys::signal::raise(nix::sys::signal::Signal::SIGTSTP);
+    // Execution resumes here after SIGCONT. Always try to go raw again,
+    // also when the stop itself failed.
+    let saved = termios::tcgetattr(stdin.as_fd()).map_err(io::Error::from)?;
+    let mut raw = saved.clone();
+    termios::cfmakeraw(&mut raw);
+    *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(saved);
+    termios::tcsetattr(stdin.as_fd(), SetArg::TCSADRAIN, &raw).map_err(|err| {
+        restore();
+        io::Error::from(err)
+    })?;
+    stopped.map_err(io::Error::from)
+}
+
 /// Restore the terminal before the default panic message is printed —
 /// a panic on the input or signal thread would otherwise leave the
 /// operator with a raw terminal and a stair-stepped backtrace.

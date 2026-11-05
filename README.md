@@ -586,10 +586,11 @@ this device holds a resume credential for. They are applied on your machine
 after the host answers, so the host sees the same request either way
 (`docs/CLI.md` §6.2).
 
-`~.` also detaches. It does not kill the session, which is the one place
-QSH deliberately breaks SSH muscle memory. `~~` sends a literal tilde, `~?`
-prints the escape help to stderr, and `--escape-char` changes or disables
-the escape character. Escape handling is only active when stdin is a TTY.
+`~.` ends the session and exits 255, as in ssh; `~d` is the one that leaves
+it running. `~^Z` suspends the client (not on Windows), `~#` lists this
+client's forwards, `~C` and `~R` are refused, `~~` sends a literal tilde,
+`~?` prints the escape help to stderr, and `--escape-char` changes or
+disables the escape character. Escape handling is only active when stdin is a TTY.
 
 The `user@` prefix asserts which account you expect; it never selects one.
 The remote shell always runs as the account that runs `qsh serve`, and

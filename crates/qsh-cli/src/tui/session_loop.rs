@@ -16,7 +16,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use qsh_core::{AttachHandle, DetachFlush, OpError, Ops, SessionAttachStream};
 use qsh_proto::event::SessionEvent;
-use qsh_proto::{ErrorCode, SessionOpenReq};
+use qsh_proto::{ErrorCode, SessionCloseReq, SessionOpenReq};
 
 use crate::render::human;
 use crate::stderr_note;
@@ -122,17 +122,22 @@ pub(super) fn run(
     // touched. They are owned by `stream`, so they die with this attach
     // and with this process — no daemon, nothing to close (`docs/CLI.md`
     // §6.14).
+    //
+    // The announcement lines are kept for `~#`, which lists them again.
+    let mut forward_lines: Vec<String> = Vec::new();
     for tunnel in stream.open_local_forwards(&forward_specs).map_err(orphan)? {
         // A renderer call, not an `eprintln!`: the announcement goes
         // through the same sanitizing path every other human line does,
         // because `forward_to` is operator-supplied text.
         let _ = human::print_forward_started(&tunnel);
+        forward_lines.push(human::forward_started_line(&tunnel));
     }
     // `-R` remote forwards: already opened above (all-or-nothing, same as
     // `-L`'s bind above, M4 plan Step 4 (2473c88)) — this just collects the
     // DTOs to render.
     for tunnel in stream.take_remote_forward_tunnels() {
         let _ = human::print_forward_started(&tunnel);
+        forward_lines.push(human::forward_started_line(&tunnel));
     }
     // `-D` dynamic (SOCKS5) forwards: same all-or-nothing bind-after-attach
     // shape as `-L` above (ADR-0019 decision 11), rendered through the
@@ -143,6 +148,7 @@ pub(super) fn run(
         .map_err(orphan)?
     {
         let _ = human::print_dynamic_forward_started(&tunnel);
+        forward_lines.push(human::dynamic_forward_started_line(&tunnel));
     }
 
     // Adopt this terminal's size before the shell draws anything. On the
@@ -163,6 +169,9 @@ pub(super) fn run(
     // session was created but leave the operator with no idea it was still
     // running).
     let detached = Arc::new(AtomicBool::new(false));
+    // Set by `~.` together with `detached`: the attach ends like a detach,
+    // then this thread closes the session (`terminate_session`).
+    let close_requested = Arc::new(AtomicBool::new(false));
     spawn_signal_pump(
         stream.handle(),
         Arc::clone(&terminal),
@@ -205,7 +214,11 @@ pub(super) fn run(
     if let Err(err) = spawn_input_pump(
         stream.handle(),
         escape,
-        Arc::clone(&detached),
+        InputState {
+            detached: Arc::clone(&detached),
+            close_requested: Arc::clone(&close_requested),
+            forward_lines,
+        },
         is_raw,
         Arc::clone(&terminal),
         &RealThreadSpawn,
@@ -228,7 +241,48 @@ pub(super) fn run(
     // message about the exit is not typeset in raw mode.
     drop(raw);
     stream.close();
+    if matches!(outcome, Outcome::Detached) && close_requested.load(Ordering::SeqCst) {
+        return Ok(terminate_session(ops, &session_ref));
+    }
     finish(outcome)
+}
+
+/// `~.`: end the remote session, then leave like ssh does when its
+/// connection is terminated (exit `255`, `docs/CLI.md` §4). The close is the
+/// one `qsh session close` makes (§6.7: SIGHUP, then TERM, then KILL), run
+/// after the attach is gone so a refusal can still end as a plain detach.
+fn terminate_session(ops: &Ops, session_ref: &str) -> i32 {
+    let closed = ops.session_close(SessionCloseReq {
+        session_ref: session_ref.to_string(),
+        signal: None,
+    });
+    match closed {
+        Ok(_) => {
+            stderr_note!("qsh: the session was closed (~.)");
+            crate::EXIT_RUNTIME_FAILURE
+        }
+        // Already gone: the goal of `~.` holds.
+        Err(err) if err.code == ErrorCode::SessionNotFound => {
+            stderr_note!("qsh: the session was already gone (~.)");
+            crate::EXIT_RUNTIME_FAILURE
+        }
+        // Not allowed to close it: leave it running, the way `~d` would.
+        Err(err) if err.code == ErrorCode::PermissionDenied => {
+            stderr_note!(
+                "qsh: not allowed to close the session; detached instead, \
+                 it keeps running as {session_ref}"
+            );
+            0
+        }
+        Err(err) => {
+            let _ = human::print_error(&err);
+            stderr_note!(
+                "qsh: the session may still be running as {session_ref}; \
+                 end it with `qsh session close {session_ref}`"
+            );
+            crate::EXIT_RUNTIME_FAILURE
+        }
+    }
 }
 
 /// `session.open` for the interactive `qsh [user@]host` form.
@@ -248,7 +302,7 @@ fn open_session(ops: &Ops, req: SessionOpenReq, requires_dynamic: bool) -> Resul
 
 /// How the interactive session ended.
 enum Outcome {
-    /// The user detached (`~d` / `~.`): the session keeps running and this
+    /// The user detached (`~d`, or `~.` before the close runs): the session keeps running and this
     /// process exits `0` (`docs/CLI.md` §4).
     Detached,
     /// The remote process exited with this status.
@@ -479,7 +533,7 @@ fn note(raw: bool, message: &str) {
 fn spawn_input_pump<H: PumpHandle>(
     handle: H,
     escape: Option<u8>,
-    detached: Arc<AtomicBool>,
+    state: InputState,
     raw: bool,
     terminal: Arc<dyn Terminal>,
     spawner: &dyn ThreadSpawn,
@@ -487,6 +541,11 @@ fn spawn_input_pump<H: PumpHandle>(
     spawner.spawn(
         "qsh-tui-input",
         Box::new(move || {
+            let InputState {
+                detached,
+                close_requested,
+                forward_lines,
+            } = state;
             let mut machine = Escape::new(escape);
             let mut buf = vec![0u8; INPUT_CHUNK];
             loop {
@@ -502,8 +561,11 @@ fn spawn_input_pump<H: PumpHandle>(
                     let _ = stderr.write_all(escape_help(escape).as_bytes());
                     let _ = stderr.flush();
                 }
-                if processed.detach {
-                    // `~d` must work *especially* when the session is
+                if let Some(escape) = escape {
+                    local_escapes(&processed, escape, &*terminal, &forward_lines, &handle, raw);
+                }
+                if processed.detach || processed.close {
+                    // `~d` and `~.` must work *especially* when the session is
                     // wedged, so the bytes ahead of it get a non-blocking
                     // attempt rather than the usual backpressure: a full
                     // queue means the host stopped reading and they were
@@ -519,6 +581,9 @@ fn spawn_input_pump<H: PumpHandle>(
                     // event pump reports a detach rather than a lost
                     // connection.
                     detached.store(true, Ordering::SeqCst);
+                    if processed.close {
+                        close_requested.store(true, Ordering::SeqCst);
+                    }
                     if handle.detach() == DetachFlush::Unconfirmed {
                         note(
                             raw,
@@ -533,6 +598,95 @@ fn spawn_input_pump<H: PumpHandle>(
             }
         }),
     )
+}
+
+/// What the input thread shares with the driver and the session's setup.
+struct InputState {
+    /// Set before the attach is ended by the user, so the event pump
+    /// reports a detach rather than a lost connection.
+    detached: Arc<AtomicBool>,
+    /// Set by `~.`: after the detach, the driver closes the session.
+    close_requested: Arc<AtomicBool>,
+    /// The announcement lines of this client's forwards, for `~#`.
+    forward_lines: Vec<String>,
+}
+
+/// The escapes that act on this client only: `~^Z`, `~#`, `~&` and the
+/// refusals. They run before the rest of the same read is forwarded.
+fn local_escapes<H: PumpHandle>(
+    processed: &super::Processed,
+    escape: u8,
+    terminal: &dyn Terminal,
+    forward_lines: &[String],
+    handle: &H,
+    raw: bool,
+) {
+    if processed.suspend {
+        suspend(terminal, handle, raw);
+    }
+    if processed.forwards {
+        if forward_lines.is_empty() {
+            note(raw, "no forwards are active");
+        } else {
+            let mut text = String::from("\r\nActive forwards:\r\n");
+            for line in forward_lines {
+                // Reuse the announcement text without its `qsh: ` prefix.
+                text.push(' ');
+                text.push_str(line.strip_prefix("qsh: ").unwrap_or(line));
+                text.push_str("\r\n");
+            }
+            let mut stderr = io::stderr().lock();
+            let _ = stderr.write_all(text.as_bytes());
+            let _ = stderr.flush();
+        }
+    }
+    if processed.background {
+        note(
+            raw,
+            &format!(
+                "{escape}& is not supported: qsh does not wait for forwarded \
+                 connections after the session ends, so there is nothing to \
+                 background",
+                escape = escape as char
+            ),
+        );
+    }
+    for refused in &processed.refused {
+        let what = match refused {
+            b'C' => {
+                "the escape command line is not supported; give -L, -R or -D on the command line"
+            }
+            _ => "rekeying is not supported; the QUIC connection renews its keys by itself",
+        };
+        note(
+            raw,
+            &format!("{}{}: {what}", escape as char, *refused as char),
+        );
+    }
+}
+
+/// `~^Z`: leave the terminal to the shell until the process is continued,
+/// then redraw by sending the current size so the remote program repaints.
+fn suspend<H: PumpHandle>(terminal: &dyn Terminal, handle: &H, raw: bool) {
+    if !terminal.supports_suspend() {
+        let platform = if cfg!(windows) {
+            "Windows"
+        } else {
+            "this terminal"
+        };
+        note(raw, &format!("~^Z is not supported on {platform}"));
+        return;
+    }
+    note(raw, "suspending (continue with `fg`)");
+    match terminal.suspend() {
+        Ok(()) => {
+            if let Some((cols, rows)) = terminal.window_size() {
+                let _ = handle.try_resize(cols, rows);
+            }
+            note(raw, "continued");
+        }
+        Err(err) => note(raw, &format!("cannot suspend: {err}")),
+    }
 }
 
 /// The terminal's events → the session: a size change becomes

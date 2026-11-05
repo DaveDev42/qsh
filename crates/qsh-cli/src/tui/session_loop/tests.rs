@@ -35,6 +35,10 @@ struct FakeTerminal {
     hangups: Mutex<Vec<HangupCause>>,
     /// What [`Terminal::detaches_on_hangup`] answers.
     detaches: bool,
+    /// What [`Terminal::supports_suspend`] answers.
+    suspendable: bool,
+    /// How many times the driver asked to suspend.
+    suspends: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeTerminal {
@@ -105,6 +109,15 @@ impl Terminal for FakeTerminal {
         self.detaches
     }
 
+    fn supports_suspend(&self) -> bool {
+        self.suspendable
+    }
+
+    fn suspend(&self) -> io::Result<()> {
+        self.suspends.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn leave_on_hangup(&self, cause: HangupCause) {
         self.hangups.lock().unwrap().push(cause);
     }
@@ -165,18 +178,34 @@ impl PumpHandle for RecordingHandle {
 /// Run the input pump over `chunks` and return what the session saw and
 /// whether the pump announced a detach.
 fn run_input(escape: Option<u8>, chunks: &[&[u8]]) -> (RecordingHandle, bool) {
+    let (handle, detached, _close) = run_input_on(escape, FakeTerminal::with_input(chunks));
+    (handle, detached)
+}
+
+/// [`run_input`] on a prepared terminal; also reports whether `~.` asked
+/// for the session to be closed.
+fn run_input_on(escape: Option<u8>, terminal: Arc<FakeTerminal>) -> (RecordingHandle, bool, bool) {
     let handle = RecordingHandle::default();
     let detached = Arc::new(AtomicBool::new(false));
+    let close = Arc::new(AtomicBool::new(false));
     spawn_input_pump(
         handle.clone(),
         escape,
-        Arc::clone(&detached),
+        InputState {
+            detached: Arc::clone(&detached),
+            close_requested: Arc::clone(&close),
+            forward_lines: vec!["qsh: forwarding 127.0.0.1:1 -> h:2 on box".into()],
+        },
         true,
-        FakeTerminal::with_input(chunks),
+        terminal,
         &InlineSpawn,
     )
     .expect("the inline spawner cannot fail");
-    (handle, detached.load(Ordering::SeqCst))
+    (
+        handle,
+        detached.load(Ordering::SeqCst),
+        close.load(Ordering::SeqCst),
+    )
 }
 
 /// Run the signal pump over `events` and return the session's calls and the
@@ -211,12 +240,57 @@ fn session_loop_forwards_stdin_bytes_verbatim() {
     }
 }
 
-/// `~.` right after a newline detaches: what was typed before it is
-/// delivered, the detach is announced before it is sent, and nothing after
-/// it is read.
+/// `~.` right after a newline ends the session: the attach is detached
+/// (what was typed before it is delivered, nothing after it is read) and the
+/// driver is told to close the session.
 #[test]
-fn session_loop_tilde_dot_at_line_start_detaches() {
-    let (handle, detached) = run_input(Some(b'~'), &[b"ls\r", b"~.", b"never read\r"]);
+fn session_loop_tilde_dot_at_line_start_requests_a_close() {
+    let (handle, detached, close) = run_input_on(
+        Some(b'~'),
+        FakeTerminal::with_input(&[b"ls\r", b"~.", b"never read\r"]),
+    );
+    assert_eq!(
+        handle.calls(),
+        vec![Call::Write(b"ls\r".to_vec()), Call::Detach]
+    );
+    assert!(detached && close);
+
+    // Mid-line it is ordinary input and closes nothing.
+    let (handle, detached, close) =
+        run_input_on(Some(b'~'), FakeTerminal::with_input(&[b"echo a ~.", b"\r"]));
+    assert_eq!(handle.written(), b"echo a ~.\r");
+    assert!(!detached && !close);
+}
+
+/// The local-only escapes consume their bytes, close nothing, and `~^Z`
+/// reaches the terminal only when it can suspend.
+#[test]
+fn session_loop_local_escapes_forward_nothing_and_keep_the_session() {
+    let terminal = FakeTerminal::with_input(&[b"~\x1a", b"~#", b"~&", b"~C", b"~R"]);
+    let (handle, detached, close) = run_input_on(Some(b'~'), terminal.clone());
+    assert!(handle.calls().is_empty(), "{:?}", handle.calls());
+    assert!(!detached && !close);
+    // The fake cannot suspend, so the driver must not have asked.
+    assert_eq!(terminal.suspends.load(Ordering::SeqCst), 0);
+
+    let suspendable = FakeTerminal {
+        suspendable: true,
+        ..FakeTerminal::default()
+    };
+    *suspendable.input.lock().unwrap() = [b"~\x1a".to_vec()].into();
+    let terminal = Arc::new(suspendable);
+    let (handle, detached, close) = run_input_on(Some(b'~'), terminal.clone());
+    assert_eq!(terminal.suspends.load(Ordering::SeqCst), 1);
+    assert!(handle.calls().is_empty());
+    assert!(!detached && !close);
+}
+
+/// `~d` right after a newline detaches: what was typed before it is
+/// delivered, the detach is announced before it is sent, and nothing after
+/// it is read. It does not ask for a close.
+#[test]
+fn session_loop_tilde_d_at_line_start_detaches() {
+    let (handle, detached) = run_input(Some(b'~'), &[b"ls\r", b"~d", b"never read\r"]);
     assert_eq!(
         handle.calls(),
         vec![Call::Write(b"ls\r".to_vec()), Call::Detach]
@@ -228,7 +302,7 @@ fn session_loop_tilde_dot_at_line_start_detaches() {
 
     // The same at the very start of the input, where nothing has been
     // forwarded yet.
-    let (handle, detached) = run_input(Some(b'~'), &[b"~."]);
+    let (handle, detached) = run_input(Some(b'~'), &[b"~d"]);
     assert_eq!(handle.calls(), vec![Call::Detach]);
     assert!(detached);
 }
@@ -394,7 +468,11 @@ fn spawn_failure_is_returned_not_panicked() {
     spawn_input_pump(
         StubHandle,
         None,
-        Arc::new(AtomicBool::new(false)),
+        InputState {
+            detached: Arc::new(AtomicBool::new(false)),
+            close_requested: Arc::new(AtomicBool::new(false)),
+            forward_lines: Vec::new(),
+        },
         false,
         FakeTerminal::arc(),
         &FailingThreadSpawn,
