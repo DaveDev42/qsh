@@ -362,11 +362,15 @@ mod tests {
             Err(PinGrantsError::FileGrantNeedsPaths)
         );
         assert_eq!(
-            PinGrants::parse(Some(&s(&["exec.run"])), Some(&s(&["/srv"])), None),
+            PinGrants::parse(
+                Some(&s(&["exec.run"])),
+                Some(&s(&[abs_path!("/srv")])),
+                None
+            ),
             Err(PinGrantsError::PathsWithoutFileGrant)
         );
         assert_eq!(
-            PinGrants::parse(None, Some(&s(&["/srv"])), None),
+            PinGrants::parse(None, Some(&s(&[abs_path!("/srv")])), None),
             Err(PinGrantsError::OrphanKeys)
         );
         assert_eq!(PinGrants::parse(None, None, None), Ok(None));
@@ -374,11 +378,15 @@ mod tests {
             PinGrants::parse(Some(&s(&["exec.run"])), None, Some("sideways")),
             Err(PinGrantsError::BadScope)
         );
-        let ok = PinGrants::parse(Some(&s(&["file.read"])), Some(&s(&["/srv"])), Some("any"))
-            .unwrap()
-            .unwrap();
+        let ok = PinGrants::parse(
+            Some(&s(&["file.read"])),
+            Some(&s(&[abs_path!("/srv")])),
+            Some("any"),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(ok.scope(), Scope::Any);
-        assert_eq!(ok.paths(), Some(&s(&["/srv"])[..]));
+        assert_eq!(ok.paths(), Some(&s(&[abs_path!("/srv")])[..]));
         assert!(
             PinGrants::parse(Some(&s(&["file.read"])), Some(&s(&["relative/dir"])), None).is_err()
         );
@@ -389,9 +397,15 @@ mod tests {
         let none = PinGrantKeys::default();
         let a = apply_allow(&none, &s(&["exec.run"]), &[], None).unwrap();
         assert_eq!(a.grants, Some(s(&["exec.run"])));
-        let b = apply_allow(&a, &s(&["file.read"]), &s(&["/srv"]), Some("any")).unwrap();
+        let b = apply_allow(
+            &a,
+            &s(&["file.read"]),
+            &s(&[abs_path!("/srv")]),
+            Some("any"),
+        )
+        .unwrap();
         assert_eq!(b.grants, Some(s(&["exec.run", "file.read"])));
-        assert_eq!(b.paths, Some(s(&["/srv"])));
+        assert_eq!(b.paths, Some(s(&[abs_path!("/srv")])));
         assert_eq!(b.scope.as_deref(), Some("any"));
         let c = apply_deny(&b, &s(&["file.*"])).unwrap();
         assert_eq!(c.grants, Some(s(&["exec.run"])));
@@ -432,13 +446,17 @@ mod tests {
         assert!(narrows(None, &any, &owned), "any became owned");
         assert!(!narrows(None, &owned, &any));
 
-        let wide = keys(&["file.read"], &["/srv"], None);
-        let deep = keys(&["file.read"], &["/srv/share"], None);
-        let other = keys(&["file.read"], &["/var"], None);
+        let wide = keys(&["file.read"], &[abs_path!("/srv")], None);
+        let deep = keys(&["file.read"], &[abs_path!("/srv/share")], None);
+        let other = keys(&["file.read"], &[abs_path!("/var")], None);
         assert!(narrows(None, &wide, &deep), "paths narrowed");
         assert!(!narrows(None, &deep, &wide), "paths widened");
         assert!(narrows(None, &wide, &other), "paths replaced");
-        let both = keys(&["file.read"], &["/srv", "/var"], None);
+        let both = keys(
+            &["file.read"],
+            &[abs_path!("/srv"), abs_path!("/var")],
+            None,
+        );
         assert!(narrows(None, &both, &wide), "a path entry dropped");
 
         // The role keeps granting `exec.run`, so dropping the pin's copy

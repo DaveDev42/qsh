@@ -21,6 +21,21 @@
 //!   `qsh pair ssh` (`docs/adr/0044-ssh-bootstrap.md`).
 //! - [`ops`]: the typed operation façade.
 
+/// A host-absolute test path: `C:`-prefixed on Windows, where a bare `/srv`
+/// is not absolute and pin-grant `paths` are validated against the host style.
+#[cfg(all(test, windows))]
+macro_rules! abs_path {
+    ($p:literal) => {
+        concat!("C:", $p)
+    };
+}
+#[cfg(all(test, not(windows)))]
+macro_rules! abs_path {
+    ($p:literal) => {
+        $p
+    };
+}
+
 pub mod acl;
 pub mod admission;
 pub mod audit;

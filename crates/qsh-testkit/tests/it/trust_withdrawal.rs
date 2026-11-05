@@ -1638,23 +1638,36 @@ async fn trust_deny_that_takes_nothing_away_does_not_close() {
 async fn narrowing_the_paths_of_a_file_grant_closes_and_widening_does_not() {
     let client = make_identity();
     let fp = &client.fingerprint;
-    let with_paths = |paths: &str| {
+    // Pin-grant paths are validated against the host style: `C:/...` on Windows.
+    let abs = |p: &str| {
+        if cfg!(windows) {
+            format!("C:{p}")
+        } else {
+            p.to_string()
+        }
+    };
+    let with_paths = |paths: &[&str]| {
+        let paths = paths
+            .iter()
+            .map(|p| format!("\"{}\"", abs(p)))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
             "[[peer]]\nname = \"laptop\"\nfingerprint = \"{fp}\"\naddress = \"\"\n\
              added_at = \"2026-11-05T00:00:00Z\"\nrole = \"none\"\n\
              grants = [\"file.read\"]\npaths = [{paths}]\n\n"
         )
     };
-    let env = Env::new(&with_paths("\"/srv/share\""));
+    let env = Env::new(&with_paths(&["/srv/share"]));
     let host = Host::start(&env).await;
     let session = host.session(&client).await;
     let conn = session.connection().clone();
 
-    env.rewrite(&with_paths("\"/srv\""));
+    env.rewrite(&with_paths(&["/srv"]));
     assert_stays_open(&conn).await;
-    env.rewrite(&with_paths("\"/srv\", \"/var/log\""));
+    env.rewrite(&with_paths(&["/srv", "/var/log"]));
     assert_stays_open(&conn).await;
-    env.rewrite(&with_paths("\"/srv/share\""));
+    env.rewrite(&with_paths(&["/srv/share"]));
     assert_withdrawn(&conn).await;
     withdrawal_record(&host.audit, "grants_reduced").await;
     host.stop().await;

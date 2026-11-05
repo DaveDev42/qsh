@@ -3112,9 +3112,9 @@ fn trust_allow_file_grants_need_paths_and_paths_need_file_grants() {
     for (actions, paths) in [
         (&["file.read"][..], &[][..]),
         (&["file.*"], &[]),
-        (&["exec.run"], &["/srv"]),
+        (&["exec.run"], &[abs_path!("/srv")]),
         (&["file.read"], &["relative/dir"]),
-        (&["file.read"], &["/srv/../etc"]),
+        (&["file.read"], &[abs_path!("/srv/../etc")]),
     ] {
         let err = ops
             .trust_allow(allow_req("phone", actions, paths, None))
@@ -3143,13 +3143,16 @@ fn trust_allow_file_grants_need_paths_and_paths_need_file_grants() {
         .trust_allow(allow_req(
             "phone",
             &["file.read"],
-            &["/srv/share"],
+            &[abs_path!("/srv/share")],
             Some("any"),
         ))
         .unwrap();
     assert!(data.changed);
     assert_eq!(data.narrowed, Some(false));
-    assert_eq!(data.peer.paths, Some(vec!["/srv/share".to_string()]));
+    assert_eq!(
+        data.peer.paths,
+        Some(vec![abs_path!("/srv/share").to_string()])
+    );
     assert_eq!(data.peer.scope.as_deref(), Some("any"));
     // Adding another file action reuses the paths already on the pin.
     let data = ops
