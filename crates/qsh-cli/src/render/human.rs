@@ -1396,9 +1396,9 @@ pub fn print_notice(line: &str) -> io::Result<()> {
 
 /// Print the outcome of `qsh service install` (`docs/CLI.md` §6.18). Zero
 /// logic — `manager`/`mode`/`path` plus `created` in words, then one line
-/// for what `activation` says (ADR-0032 decisions 4 and 18), or, without
-/// `--activate`, the flagless pointer at the activation recipe, byte for
-/// byte (ADR-0032 decision 1; `install` alone never starts anything).
+/// for what `activation` says (ADR-0032 decisions 4 and 18; ADR-0051 decision
+/// 11), or, with `--no-activate`, the pointer at the activation recipe, and
+/// one line for what `always_on` says.
 pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let manager = sanitize(&data.manager);
@@ -1413,7 +1413,8 @@ pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
     match data.activation {
         None => writeln!(
             stdout,
-            "Activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
+            "Not activated (--no-activate). Run `qsh service install` to load and start it, or \
+             activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
              systemctl --user enable --now on Linux, schtasks /Create then /Run on Windows)."
         ),
         Some(ServiceActivation::Started) => writeln!(stdout, "{manager} loaded and started it."),
@@ -1428,6 +1429,48 @@ pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
             "An always-on form of this unit is installed, so {manager} was not called. If the \
              binary path changed, repeat the always-on recipe in docs/deploy/service.md."
         ),
+    }?;
+    if let Some(always_on) = &data.always_on {
+        write_always_on(&mut stdout, always_on, true)?;
+    }
+    Ok(())
+}
+
+/// One line for what `--always-on` did (ADR-0051 decision 11).
+fn write_always_on(
+    stdout: &mut impl Write,
+    always_on: &qsh_proto::ServiceAlwaysOn,
+    install: bool,
+) -> io::Result<()> {
+    use qsh_proto::ServiceAlwaysOnState as State;
+    if always_on.key_moved {
+        writeln!(stdout, "The device key was moved to the key file first.")?;
+    }
+    match always_on.state {
+        State::Enabled if install => writeln!(
+            stdout,
+            "Always-on is set up: the unit now starts with nobody logged in{}.",
+            if always_on.firewall_rule {
+                ", and the inbound UDP firewall rule is in place"
+            } else {
+                ""
+            }
+        ),
+        State::AlreadyEnabled => writeln!(
+            stdout,
+            "The always-on daemon was already installed and was left as it is."
+        ),
+        State::Disabled => writeln!(
+            stdout,
+            "Always-on is reversed{}.",
+            if always_on.firewall_rule {
+                " and the firewall rule is removed"
+            } else {
+                ""
+            }
+        ),
+        State::NotEnabled => writeln!(stdout, "There was no always-on form to reverse."),
+        State::Enabled => Ok(()),
     }
 }
 
@@ -1472,9 +1515,13 @@ pub fn print_service_uninstall(data: &ServiceUninstallData) -> io::Result<()> {
         Some(ServiceDeactivation::AlwaysOnPresent) => writeln!(
             stdout,
             "An always-on form of this unit is installed and was left as it is; release it with \
-             the always-on recipe in docs/deploy/service.md."
+             `qsh service uninstall --always-on`."
         ),
+    }?;
+    if let Some(always_on) = &data.always_on {
+        write_always_on(&mut stdout, always_on, false)?;
     }
+    Ok(())
 }
 
 /// Print the outcome of `qsh service status` (`docs/CLI.md` §6.18).

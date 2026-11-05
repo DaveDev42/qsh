@@ -43,6 +43,41 @@ pub enum ServiceDeactivation {
     AlwaysOnPresent,
 }
 
+/// What `--always-on` (install) or `--always-on` (uninstall) did
+/// (ADR-0051 decision 11). Closed list; additions only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAlwaysOnState {
+    /// The OS procedure ran: `loginctl enable-linger`, the LaunchDaemon
+    /// recipe under `sudo`, or the `Password` task registration.
+    Enabled,
+    /// A LaunchDaemon of the same mode was already installed, so nothing
+    /// ran (macOS only).
+    AlreadyEnabled,
+    /// `uninstall --always-on` reversed the procedure.
+    Disabled,
+    /// `uninstall --always-on` found no always-on form to reverse.
+    NotEnabled,
+}
+
+/// The `always_on` field of `service.install` and `service.uninstall`
+/// (ADR-0051 decision 11, `docs/CLI.md` §6.18). Absent unless the flag was
+/// given. Additive (`docs/CLI.md` §10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceAlwaysOn {
+    /// What the flag did.
+    pub state: ServiceAlwaysOnState,
+    /// `true` when `install --always-on` first moved the device key from the
+    /// `platform` store to the key file (`--move-key` or the answer to the
+    /// question).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_moved: bool,
+    /// `true` when the inbound UDP firewall rule of the qsh executable was
+    /// created (install) or removed (uninstall). Windows only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub firewall_rule: bool,
+}
+
 /// Data payload of `service.install`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceInstallData {
@@ -59,11 +94,15 @@ pub struct ServiceInstallData {
     /// already existed and was rewritten in place (idempotent — the
     /// bytes are the same either way).
     pub created: bool,
-    /// What `--activate` did with the service manager (ADR-0032 decisions
-    /// 2, 4, 18). Absent unless the flag was given. Additive (`docs/CLI.md`
-    /// §10).
+    /// What the activation did with the service manager (ADR-0032 decisions
+    /// 2, 4, 18). Present by default since ADR-0051 decision 11; absent only
+    /// with `--no-activate`. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<ServiceActivation>,
+    /// What `--always-on` did (ADR-0051 decision 11). Absent unless the flag
+    /// was given. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on: Option<ServiceAlwaysOn>,
 }
 
 /// Data payload of `service.uninstall`.
@@ -84,6 +123,10 @@ pub struct ServiceUninstallData {
     /// §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deactivation: Option<ServiceDeactivation>,
+    /// What `--always-on` reversed (ADR-0051 decision 11). Absent unless the
+    /// flag was given. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on: Option<ServiceAlwaysOn>,
 }
 
 /// Data payload of `service.status`.

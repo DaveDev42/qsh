@@ -940,7 +940,7 @@ fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
         ("--jsonl -vv", "--jsonl", "-vv"),
         ("--json -vvv", "--json", "-vvv"),
     ] {
-        let output = sandbox.qsh(&["service", "install", verbosity, mode]);
+        let output = sandbox.qsh(&["service", "install", "--no-activate", verbosity, mode]);
         assert_eq!(exit_code(&output), 0, "{label}");
         let lines = parse_stdout_lines(&output.stdout, label);
         assert_eq!(lines.len(), 1, "{label}");
@@ -971,7 +971,9 @@ fn service_activation_flags_keep_stdout_pure_json_at_every_verbosity() {
         ("--json -vvv", "--json", "-vvv"),
     ] {
         for (args, command) in [
-            (["service", "install", "--activate"], "service.install"),
+            (["service", "install", "--always-on"], "service.install"),
+            (["service", "uninstall", "--always-on"], "service.uninstall"),
+            (["service", "install", "--no-activate"], "service.install"),
             (["service", "status", "--live"], "service.status"),
             (
                 ["service", "uninstall", "--deactivate"],

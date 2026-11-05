@@ -5,32 +5,41 @@
 qsh does not daemonize itself. Keeping one of them running across logout,
 reboot, or a crash is the OS service manager's job. `qsh service
 install|uninstall|status` (`docs/CLI.md` §6.18) generates a unit for this
-machine's inferred run mode, and on macOS and Linux, with `--activate`,
-`--deactivate` and `--live`, also loads, releases and checks it through the
-service manager. On Windows the unit is a Task Scheduler task definition file
-that you register yourself (see Task Scheduler below). The `xml` and `ini`
-fences on this page are exactly what it writes, byte for byte, not merely
-illustrative examples, and the launchd and systemd commands in the recipes
-below are exactly the ones the flags run. The `plist` fences (the LaunchDaemon
-and the supervised tunnel) and the always-on Task Scheduler variant are
-recipes you install yourself; `qsh` does not write them.
+machine's inferred run mode and, by default, loads and starts it through the
+service manager (launchd on macOS, systemd on Linux, the Task Scheduler on
+Windows). `--no-activate` writes only the file. `--always-on` runs the recipe
+for starting at boot with nobody logged in, described per OS below. The `xml`
+and `ini` fences on this page are exactly what it writes, byte for byte, not
+merely illustrative examples, and the commands in the recipes below are
+exactly the ones the flags run. `crates/qsh-core/tests/it/service_docs.rs`
+compares them. The supervised tunnel `plist` fence is a recipe you install
+yourself; `qsh` does not write it.
 
-Without a flag, `qsh service` writes and removes the unit file and never
-calls `launchctl` or `systemctl`. The flags are the only way it does, and no
-config key or environment variable turns them on:
+`qsh service install` activates by default. The flags that change what the
+manager is asked are on the command line or nowhere: no config key or
+environment variable turns activation on or off.
 
-| Command | What it adds to the unit file operation |
+| Command | What it does to the service manager |
 |---|---|
-| `qsh service install --activate` | Loads and starts the unit as the last step. A unit that is already running is **not** restarted, so a new binary path applies at the next restart. |
-| `qsh service uninstall --deactivate` | Releases the unit from the manager first, then removes the file. If the release fails the file stays. Without the flag a running unit keeps running. |
+| `qsh service install` | Writes the unit file, then loads and starts the unit as the last step. A unit that is already running is **not** restarted, so a new binary path applies at the next restart. |
+| `qsh service install --no-activate` | Writes the unit file and nothing else. (`--activate` is a hidden alias of the default.) |
+| `qsh service install --always-on` | Also makes the unit start with nobody logged in, with the OS's own consent step (sections below). |
+| `qsh service uninstall` | Removes the unit file. A running unit keeps running. |
+| `qsh service uninstall --deactivate` | Releases the unit from the manager first, then removes the file. If the release fails the file stays. |
+| `qsh service uninstall --always-on` | Reverses each `--always-on` step. |
 | `qsh service status --live` | Reports whether the unit is running, from one exit code of the manager. |
 
-On Windows the flags drive `schtasks` and the Task Scheduler COM API instead
-of a unit manager: `--activate` runs `schtasks /Create /F` (and `/Run` when
-the task is not already running), `--deactivate` runs `/End` for a running
-task and then `/Delete /F`, and `--live` reads the task state through COM.
-The commands are the ones under "Register, check, stop" below. Without the
-flags `qsh service` registers nothing.
+`qsh service install --to <listener> --bind <ip:port> --name <name>` writes
+`[serve].to`, `[serve].bind` and `[reverse].offered_name` of `config.toml`
+the way `qsh config set` does (locked, validated, comments kept) before the
+run mode is inferred. The values never reach the unit's arguments, which stay
+fixed.
+
+On Windows the manager calls are `schtasks` and the Task Scheduler COM API:
+the default activation runs `schtasks /Create /F` (and `/Run` when the task is
+not already running), `--deactivate` runs `/End` for a running task and then
+`/Delete /F`, and `--live` reads the task state through COM. The commands are
+the ones under "Register, check, stop" below.
 
 `qsh service` never restarts a unit. A restart ends every detached session
 (Notes for both below), so it stays a decision for a person.
@@ -173,7 +182,7 @@ the hidden `qsh reverse` alias (`docs/CLI.md` §6.13, §6.18):
 pass to `qsh serve --to <controller>` by hand (`docs/CLI.md` §6.13), not a
 literal string to copy.
 
-Load and check one, which is what `qsh service install --activate` and
+Load and check one, which is what `qsh service install` and
 `qsh service status --live` run (`install` has already made the log
 directory):
 
@@ -183,11 +192,11 @@ launchctl print gui/$UID/io.qsh.serve
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/io.qsh.serve.plist
 ```
 
-`launchctl print` exits 0 when the label is loaded. `--activate` runs it
+`launchctl print` exits 0 when the label is loaded. `install` runs it
 first and skips `bootstrap` when it is, because `launchctl bootstrap` fails
 on a label that is already loaded and a reload would end detached sessions.
 The `gui/$UID` domain exists only inside a logged-in GUI session: over SSH
-alone `bootstrap` fails, and `qsh service install --activate` reports that
+alone `bootstrap` fails, and `qsh service install` reports that
 failure instead of falling back to the `user/$UID` domain.
 
 Release one, which is what `qsh service uninstall --deactivate` runs when
@@ -212,13 +221,15 @@ is the recipe for it.
 ### Always-on: a LaunchDaemon you install as root
 
 A LaunchDaemon lives in `/Library/LaunchDaemons`, is owned by root and is
-loaded into the `system` domain. `qsh` never writes that directory, never
-loads the file and never runs `sudo`. You install it by hand, once, with the
-commands below. After that `qsh` only looks for the file: `qsh service
-install --activate` and `qsh service uninstall --deactivate` leave the
-daemon alone and report `always_on_present`, and `qsh doctor` counts the
-file as a registered unit (it checks that the file exists and does not call
-`launchctl`).
+loaded into the `system` domain. `qsh service install --always-on` runs the
+steps below for you, each privileged one under `sudo` with your terminal
+inherited, so `sudo` asks for the password itself and `qsh` never reads it.
+The commands are the ones listed here, in this order. You can also run them by
+hand. Once the file exists `qsh` leaves the daemon alone: `qsh service install`
+and `qsh service uninstall --deactivate` report `always_on_present`, and `qsh
+doctor` counts the file as a registered unit (it checks that the file exists
+and does not call `launchctl`). `qsh service uninstall --always-on` runs the
+removal commands at the end of this section.
 
 The daemon uses the same label as the LaunchAgent, `io.qsh.<mode>`. Never
 load both at once, because both would try to bind the same port. The steps
@@ -282,8 +293,16 @@ move-key --to file` first. The Keychain belongs to a login session, so a
 daemon started at boot cannot be sure to read the key from it. `qsh doctor`
 reports this as `keystore_session_bound`. The move keeps the device id,
 certificate and fingerprint, so peers' pins and ACL rows stay valid.
+`qsh service install --always-on` asks "키를 파일 저장소로 옮길까? [Y/n]"
+first, on a terminal only; `--move-key` gives the same answer without the
+question. Without a terminal, or with `--json`/`--jsonl`, and without
+`--move-key`, it stops before changing anything with `details.reason`
+`keystore_session_bound`.
 
-Install it:
+Install it. `qsh service install --always-on` does the first line by booting
+the LaunchAgent out of the `gui/$UID` domain (it keeps the unit file), writes
+the plist to `~/.config/qsh/service/io.qsh.serve.plist` for the `cp` and
+deletes that copy afterwards:
 
 ```bash
 qsh service uninstall --deactivate
@@ -308,6 +327,9 @@ Remove it:
 sudo launchctl bootout system/io.qsh.serve
 sudo rm /Library/LaunchDaemons/io.qsh.serve.plist
 ```
+
+`qsh service uninstall --always-on` runs the `bootout` line (skipped when the
+daemon is not loaded) and the `rm` line.
 
 If you move the `qsh` binary, edit the path in `ProgramArguments`, then run
 `bootout` and `bootstrap` again. The daemon does not pick up a new binary any
@@ -366,7 +388,7 @@ RestartSec=2
 WantedBy=default.target
 ```
 
-Enable and check one, which is what `qsh service install --activate` and
+Enable and check one, which is what `qsh service install` and
 `qsh service status --live` run:
 
 ```bash
@@ -378,7 +400,7 @@ journalctl --user -u qsh-serve -f
 ```
 
 `is-active` exits 0 for a running unit. `enable --now` leaves a running unit
-alone, so `--activate` on one reports `already_active` and the new binary path
+alone, so `install` on one reports `already_active` and the new binary path
 applies at the next restart.
 
 Release one, which is what `qsh service uninstall --deactivate` runs whenever
@@ -392,10 +414,18 @@ rm ~/.config/systemd/user/qsh-serve.service
 A user unit stops when your last session ends unless you enable linger,
 which lets systemd start and keep your user units running without any
 session open (from boot, if `WantedBy=default.target` and the unit is
-enabled):
+enabled). `qsh service install --always-on` activates the unit as usual and
+then runs this line with your terminal inherited (polkit may ask for a
+password):
 
 ```bash
 loginctl enable-linger $USER
+```
+
+`qsh service uninstall --always-on` runs the reverse:
+
+```bash
+loginctl disable-linger $USER
 ```
 
 If `qsh identity` keeps the device key in the OS credential store
@@ -404,7 +434,8 @@ move-key --to file` before you rely on linger. The Secret Service belongs to
 a login session, so a unit started at boot cannot be sure to read the key
 from it. `qsh doctor` reports this as `keystore_session_bound` once linger is
 on and the unit is registered. The move keeps the device id, certificate and
-fingerprint, so peers' pins and ACL rows stay valid.
+fingerprint, so peers' pins and ACL rows stay valid. `qsh service install
+--always-on` asks for the move first, as in the macOS section.
 
 ### WSL
 
@@ -420,7 +451,7 @@ then restart the distro (`wsl --shutdown` from Windows, then reopen it).
 Without this, `systemctl` fails with a socket-connect error and the unit
 above never starts.
 
-`qsh service install --activate` hits the same wall. If `systemctl` is not
+`qsh service install` hits the same wall. If `systemctl` is not
 found it ends with `UNSUPPORTED`, and if it is found but cannot reach the
 manager it ends with `INTERNAL`. Both messages name `/etc/wsl.conf` under WSL.
 The unit file is still written, so run the command again once systemd is up.
@@ -430,10 +461,10 @@ The unit file is still written, so run the command again once systemd is up.
 `qsh service install` writes one task definition per run mode to
 `%USERPROFILE%\.config\qsh\service\qsh-<mode>.task.xml` (`<config_dir>\service`),
 with an owner-only DACL. `qsh service status` reports whether that file
-exists, and `qsh service uninstall` deletes it. Without a flag none of the
-three starts `schtasks`, registers anything or reads the scheduler. Registering
-the task is either `qsh service install --activate` or the recipe below, run by
-you. The task name is `\qsh\qsh-<mode>`.
+exists, and `qsh service uninstall` deletes it. `qsh service install` also
+registers the task (the recipe below); with `--no-activate` it only writes the
+file, and `status` and `uninstall` start no `schtasks` without their flags.
+The task name is `\qsh\qsh-<mode>`.
 
 The file is UTF-16 little-endian with a byte order mark, and the XML says
 `encoding="UTF-16"`. That is the one encoding `schtasks /Create /XML` accepted
@@ -600,8 +631,8 @@ What each setting is for:
 
 ### Register, check, stop
 
-`qsh service install` stops after writing the file. Register it as the user
-the file names, from a normal (not elevated) prompt:
+`qsh service install --no-activate` stops after writing the file. Register it
+as the user the file names, from a normal (not elevated) prompt:
 
 ```powershell
 schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\service\qsh-serve.task.xml"
@@ -612,11 +643,11 @@ schtasks /Query /TN \qsh\qsh-serve
 is running (Measured below), so a new binary path applies at the next start.
 The task starts at your next logon; to start it now, log off and on, or run
 `schtasks /Run /TN \qsh\qsh-serve`. Registering a task with this definition
-needed no elevation. `qsh service install --activate` runs the `/Create` line
+needed no elevation. `qsh service install` runs the `/Create` line
 and then the `/Run` line, and skips `/Run` when the task is already running.
 The task is an `InteractiveToken` task, so it starts only in a logged-on
 interactive session. Over an ssh login with no desktop session, `/Run` ends
-non-zero and `--activate` ends with `INTERNAL`; the definition is registered
+non-zero and the install ends with `INTERNAL`; the definition is registered
 anyway.
 
 Stop and remove it:
@@ -652,11 +683,15 @@ The default task is an `InteractiveToken` task: it exists only while you are
 logged on. It starts at logon and ends at logoff, like a macOS LaunchAgent
 (`qsh doctor` says so as `logon_task_session_scoped`, a warning, once the
 scheduler reports the task registered with that principal). To keep a host
-running at boot with nobody logged on, register a variant yourself. `qsh` does
-not register it for you and has no flag that does.
+running at boot with nobody logged on, register the variant below.
+`qsh service install --always-on` does it from an elevated console; without
+one it stops with a message that says so and the command to run again, before
+anything is written. The check is the exit code of `fltmc`, which succeeds only
+in an elevated console.
 
-Copy `qsh-serve.task.xml` to `qsh-serve.always-on.xml` next to it and make two
-changes: replace the `LogonTrigger` element with a `BootTrigger`, which has no
+`qsh service install --always-on` writes this file as `qsh-<mode>.always-on.xml`
+next to the default one. To do it by hand, copy `qsh-serve.task.xml` to
+`qsh-serve.always-on.xml` next to it and make two changes: replace the `LogonTrigger` element with a `BootTrigger`, which has no
 `UserId`, and set the principal's `LogonType` to `Password`. Save the copy as
 UTF-16 with a byte order mark, as the original is (in Windows PowerShell,
 `Get-Content` the original and pipe it to `Set-Content -Encoding Unicode`
@@ -711,7 +746,8 @@ history or in this file:
 schtasks /Create /F /TN \qsh\qsh-serve /XML "$env:USERPROFILE\.config\qsh\service\qsh-serve.always-on.xml" /RU DOMAIN\you /RP *
 ```
 
-Replace `DOMAIN\you` with the account (`COMPUTER\you` for a local account).
+Replace `DOMAIN\you` with the account (`COMPUTER\you` for a local account);
+`qsh service install --always-on` names `%USERDOMAIN%\%USERNAME%`.
 Without the password the registration fails: a `LogonType` of `Password` with
 no password gave `ERROR: The user name or password is incorrect.` The
 Task Scheduler keeps the password it was registered with. When the account's
@@ -723,14 +759,36 @@ change.
 The `qsh doctor` warning `logon_task_session_scoped` is silent for this task,
 because the scheduler reports a `Password` principal.
 
-`qsh service install --activate` leaves a task like this alone. When the
+A plain `qsh service install` leaves a task like this alone. When the
 scheduler reports a `Password` principal for `\qsh\qsh-serve`, the command
 writes the file, runs no `schtasks` command, and answers `activation:
 always_on_present`: `/Create /F` would replace the definition with the default
 one. `qsh service uninstall --deactivate` likewise only removes the file
-(`deactivation: always_on_present`). To remove an always-on task, run the
-`/End` and `/Delete /F` lines above from an elevated prompt. `qsh service
-status --live` reports whether that task is running.
+(`deactivation: always_on_present`). To remove an always-on task, run
+`qsh service uninstall --always-on` from an elevated console, or the `/End` and
+`/Delete /F` lines above yourself. It also removes the firewall rule below and
+the `.always-on.xml` file. `qsh service status --live` reports whether that
+task is running.
+
+The first `qsh serve` on Windows may need an inbound UDP allow rule, and a
+session without a desktop has nobody to answer the Defender prompt.
+`qsh service install --always-on` creates the rule for the qsh executable
+(elevated console only; it replaces a rule of the same name first):
+
+```powershell
+netsh advfirewall firewall add rule name=qsh-serve dir=in action=allow protocol=UDP program=C:\Users\YOU\.local\bin\qsh.exe
+```
+
+Quote the `program=` value when the path has spaces. The rule is named
+`qsh-<mode>` and allows UDP for that executable on any port. Remove it with:
+
+```powershell
+netsh advfirewall firewall delete rule name=qsh-serve
+```
+
+After the registration `qsh` runs `schtasks /Run /TN \qsh\qsh-serve` unless the
+task is already running. A running instance of the former logon-scoped task
+keeps its old definition until it ends.
 
 A `Password` task reads the `platform` key store (Windows Credential Manager)
 without an interactive session. This was measured on Windows 11 25H2 (build
@@ -765,7 +823,7 @@ afterwards. No password was typed or stored.
 | Does `RestartOnFailure` start the action again after it exits non-zero? | No. A task that exited with code 3 and one that crashed with `FailFast` (exit code `0xE0434352`), each with `RestartOnFailure` `PT1M` and `Count` 3, were started once and never again over 4 minutes. |
 | Does a `Repetition` of `PT1M` with no `Duration`, plus `IgnoreNew`, start a dead task again? | Yes. A 5 second task that exits with 3 started at 22:42:33, 22:43:34, 22:44:34 and 22:45:34. For a 100 second task the tick at 60 seconds was ignored and the next start was at 121 seconds, so there was never a second copy. |
 | Does a `LogonTrigger` with a `Repetition` register, and does the scheduler report it back? | Yes, with no elevation. Read back through the COM API, `Repetition.Interval` was `PT1M`. |
-| Does `/Create /F` on a running task stop or restart it? | No. With a task running a `ping` action, `/Create /F` with a changed description left the same process (same PID, state Running) and the scheduler held the new description. `qsh service install --activate` therefore runs `/Create` only, and answers `already_active`. |
+| Does `/Create /F` on a running task stop or restart it? | No. With a task running a `ping` action, `/Create /F` with a changed description left the same process (same PID, state Running) and the scheduler held the new description. `qsh service install` therefore runs `/Create` only, and answers `already_active`. |
 | Can a standard user register a `BootTrigger` task? | No. With an `InteractiveToken`, a `Password` and an `S4U` principal alike, `schtasks /Create` answered `ERROR: Access is denied.` The always-on variant needs an elevated prompt. |
 | Can a standard user register a `LogonType` of `Password` task? | Not without the password: `ERROR: The user name or password is incorrect.` |
 | Which encodings does `schtasks /Create /XML` accept? | UTF-16 little-endian with a byte order mark and `encoding="UTF-16"`. UTF-8 with the declaration, and UTF-8 with a byte order mark, were both rejected as `task XML is malformed`. |
@@ -911,7 +969,9 @@ foreground for as long as the process lives, and the service manager owns
 restart, logging redirection, and stop signals from outside.
 
 `qsh service install|uninstall|status` (`docs/CLI.md` §6.18) generates and
-registers, removes, and reports on the units above. `service install` never
+registers, removes, and reports on the units above. The calls it makes to
+`sudo`, `loginctl`, `schtasks` and `netsh` for `--always-on` are in the
+threat model (`docs/design/threat-model.md`). `service install` never
 writes `acl.toml` (`docs/adr/0017-acl-toml-not-written.md` 결정 1), so you
 still grant the peers you expect their actions there. Hand-writing a unit
 from the fences above is a working fallback: `qsh service install` manages

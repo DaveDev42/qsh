@@ -1,0 +1,16 @@
+{
+  "command": "service.install",
+  "data": {
+    "activation": "started",
+    "always_on": {
+      "state": "enabled"
+    },
+    "created": true,
+    "manager": "<manager>",
+    "mode": "serve",
+    "path": "<path>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

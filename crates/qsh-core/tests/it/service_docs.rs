@@ -23,10 +23,13 @@ use qsh_core::{
     DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS, DOC_EXAMPLE_EXE_WINDOWS,
     DOC_EXAMPLE_HOME_MACOS, DOC_EXAMPLE_USER_SID, SERVICE_UNSUPPORTED_PLATFORM,
     launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
-    render_launchd_plist, render_systemd_unit, render_windows_task, schtasks_create_argv,
-    schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv, schtasks_run_argv,
-    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
-    systemd_is_active_argv,
+    launchdaemon_install_argvs, launchdaemon_remove_argvs, loginctl_disable_linger_argv,
+    loginctl_enable_linger_argv, netsh_firewall_add_argv, netsh_firewall_delete_argv,
+    render_launchd_plist, render_launchdaemon_plist, render_systemd_unit,
+    render_windows_always_on_task, render_windows_task, schtasks_create_always_on_argv,
+    schtasks_create_argv, schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv,
+    schtasks_run_argv, systemd_daemon_reload_argv, systemd_disable_now_argv,
+    systemd_enable_now_argv, systemd_is_active_argv, windows_elevation_probe_argv,
 };
 
 use crate::docs;
@@ -645,5 +648,125 @@ fn service_md_always_on_recipes_point_at_move_key() {
         qsh_core::doctor::KEYSTORE_SESSION_BOUND
             .remedy
             .contains("qsh identity move-key --to file")
+    );
+}
+
+/// ADR-0051 decision 11: `qsh service install --always-on` writes the
+/// LaunchDaemon plist of the recipe. The fence is rendered by
+/// [`render_launchdaemon_plist`], byte for byte, for the example account.
+#[test]
+fn service_md_launchdaemon_fence_is_what_always_on_writes() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let fence = fence_after(
+        &service_md,
+        "`/Library/LaunchDaemons/io.qsh.serve.plist`:",
+        "plist",
+    );
+    let user = DOC_EXAMPLE_HOME_MACOS.rsplit('/').next().unwrap();
+    assert_eq!(
+        fence,
+        render_launchdaemon_plist(
+            "serve",
+            DOC_EXAMPLE_EXE_MACOS,
+            DOC_EXAMPLE_HOME_MACOS,
+            DOC_EXAMPLE_CONTROLLER,
+            user,
+        ),
+        "the LaunchDaemon fence must equal render_launchdaemon_plist byte for byte"
+    );
+}
+
+/// ADR-0051 decision 11: the install and removal commands `--always-on` runs
+/// are the recipe's lines, in the recipe's order, for the example paths.
+#[test]
+fn service_md_always_on_commands_match_the_argv_builders() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let recipes = bash_fence_lines(&service_md);
+    let position = |argv: &[String]| {
+        let line = argv.join(" ");
+        recipes
+            .iter()
+            .position(|recipe| *recipe == line)
+            .unwrap_or_else(|| panic!("docs/deploy/service.md has no `{line}` bash line"))
+    };
+
+    // macOS: the steps after the LaunchAgent is released, then the removal.
+    let daemon = "/Library/LaunchDaemons/io.qsh.serve.plist";
+    let install = launchdaemon_install_argvs("io.qsh.serve.plist", daemon);
+    assert_eq!(install.len(), 4);
+    let positions: Vec<usize> = install.iter().map(|argv| position(argv)).collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    let remove = launchdaemon_remove_argvs("serve", daemon);
+    assert_eq!(remove.len(), 2);
+    let positions: Vec<usize> = remove.iter().map(|argv| position(argv)).collect();
+    assert!(positions[0] < positions[1]);
+
+    // Linux: linger on and off.
+    position(&loginctl_enable_linger_argv("$USER"));
+    position(&loginctl_disable_linger_argv("$USER"));
+
+    // Every `sudo` and `loginctl` line of the page is one of those builders.
+    let mut known: Vec<String> = install
+        .iter()
+        .chain(remove.iter())
+        .map(|argv| argv.join(" "))
+        .collect();
+    known.push(loginctl_enable_linger_argv("$USER").join(" "));
+    known.push(loginctl_disable_linger_argv("$USER").join(" "));
+    for line in &recipes {
+        if line.starts_with("sudo ") || line.starts_with("loginctl ") {
+            // The one read-only check line of the LaunchDaemon section.
+            assert!(
+                known.contains(line) || line == "sudo launchctl print system/io.qsh.serve",
+                "docs/deploy/service.md has a privileged line the builders do not produce: `{line}`"
+            );
+        }
+    }
+}
+
+/// ADR-0051 decision 11, Windows: the registration line, the firewall rule
+/// and its removal are the argv `--always-on` and `uninstall --always-on` run.
+#[test]
+fn service_md_windows_always_on_commands_match_the_argv_builders() {
+    let service_md = read_doc("docs/deploy/service.md");
+    let file = r#""$env:USERPROFILE\.config\qsh\service\qsh-serve.always-on.xml""#;
+    let register = schtasks_create_always_on_argv("serve", file, r"DOMAIN\you").join(" ");
+    let add = netsh_firewall_add_argv("serve", DOC_EXAMPLE_EXE_WINDOWS).join(" ");
+    let delete = netsh_firewall_delete_argv("serve").join(" ");
+    let lines: Vec<&str> = service_md.lines().map(str::trim).collect();
+    for line in [&register, &add, &delete] {
+        assert!(
+            lines.contains(&line.as_str()),
+            "docs/deploy/service.md has no `{line}` line"
+        );
+    }
+    // Every `netsh` line in a powershell fence is one of the two builders.
+    let mut inside = false;
+    for line in service_md.lines() {
+        if line.starts_with("```powershell") {
+            inside = true;
+        } else if line.starts_with("```") {
+            inside = false;
+        } else if inside && line.trim().starts_with("netsh ") {
+            assert!(
+                line.trim() == add || line.trim() == delete,
+                "docs/deploy/service.md has a netsh line the builders do not produce: `{line}`"
+            );
+        }
+    }
+    // The registration is the default recipe's line plus the account and
+    // `/RP *`, and the file it names is the one the doc tells you to write.
+    assert!(register.ends_with(r"/RU DOMAIN\you /RP *"));
+    assert!(service_md.contains(&windows_elevation_probe_argv().join(" ")));
+    let always_on = render_windows_always_on_task(
+        "serve",
+        DOC_EXAMPLE_EXE_WINDOWS,
+        DOC_EXAMPLE_CONTROLLER,
+        DOC_EXAMPLE_USER_SID,
+    );
+    assert_eq!(
+        fence_after(&service_md, "The result:", "xml"),
+        always_on,
+        "the always-on fence must equal render_windows_always_on_task byte for byte"
     );
 }

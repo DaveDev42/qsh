@@ -252,6 +252,60 @@ fn command_name_reports_the_dotted_op_name_for_all_three_service_subcommands() {
     assert_eq!(command_name(&cli), ServiceStatusOp::COMMAND);
 }
 
+/// ADR-0051 decision 11: `install` activates unless `--no-activate`, the
+/// hidden `--activate` still parses, and the flags that cannot go together are
+/// usage errors.
+#[test]
+fn service_install_flags_parse_and_conflict_as_the_adr_says() {
+    let parse = |args: &[&str]| {
+        let mut full = vec!["qsh", "service", "install"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full)
+    };
+    assert!(parse(&[]).is_ok());
+    assert!(parse(&["--activate"]).is_ok());
+    assert!(parse(&["--no-activate"]).is_ok());
+    assert!(parse(&["--to", "ctrl", "--bind", "0.0.0.0:4433", "--name", "n"]).is_ok());
+    assert!(parse(&["--always-on", "--move-key"]).is_ok());
+    // `--move-key` answers a question `--always-on` asks.
+    assert!(parse(&["--move-key"]).is_err());
+    // `--no-activate` contradicts both activating flags.
+    assert!(parse(&["--no-activate", "--activate"]).is_err());
+    assert!(parse(&["--no-activate", "--always-on"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "service", "uninstall", "--always-on"]).is_ok());
+    assert!(Cli::try_parse_from(["qsh", "service", "status", "--always-on"]).is_err());
+}
+
+/// ADR-0051 decision 13: every question in the prompt registry names a flag
+/// that exists on some command, so a person (or a script) can always give the
+/// answer without a terminal.
+#[test]
+fn every_registered_prompt_flag_exists_on_the_command_line() {
+    use clap::CommandFactory as _;
+    fn long_flags(command: &clap::Command, out: &mut Vec<String>) {
+        out.extend(
+            command
+                .get_arguments()
+                .filter_map(|a| a.get_long())
+                .map(|l| format!("--{l}")),
+        );
+        for sub in command.get_subcommands() {
+            long_flags(sub, out);
+        }
+    }
+    let mut known = Vec::new();
+    long_flags(&Cli::command(), &mut known);
+    for prompt in qsh_core::prompts::REGISTRY {
+        for flag in prompt.flags {
+            assert!(
+                known.iter().any(|k| k == flag),
+                "{}: no command takes {flag}",
+                prompt.id
+            );
+        }
+    }
+}
+
 #[test]
 fn remote_exit_code_passes_through_except_255() {
     assert_eq!(remote_exit_code_to_process_exit(0), 0);

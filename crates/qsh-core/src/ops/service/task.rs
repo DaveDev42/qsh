@@ -140,6 +140,36 @@ pub fn render_windows_task(mode: &str, exe: &str, controller: &str, user_sid: &s
     )
 }
 
+/// The always-on variant of [`render_windows_task`] (ADR-0051 decision 11,
+/// `docs/deploy/service.md`): the default task with the `LogonTrigger` replaced
+/// by a `BootTrigger`, which has no `UserId`, and the principal's `LogonType`
+/// set to `Password`, so it runs with nobody logged on. Registered from an
+/// elevated console with the account's password (`schtasks ... /RP *`).
+pub fn render_windows_always_on_task(
+    mode: &str,
+    exe: &str,
+    controller: &str,
+    user_sid: &str,
+) -> String {
+    let default = render_windows_task(mode, exe, controller, user_sid);
+    let logon = format!(
+        "    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <UserId>{}</UserId>\n",
+        xml_escape(user_sid)
+    );
+    default
+        .replacen(
+            &logon,
+            "    <BootTrigger>\n      <Enabled>true</Enabled>\n",
+            1,
+        )
+        .replacen("    </LogonTrigger>\n", "    </BootTrigger>\n", 1)
+        .replacen(
+            "<LogonType>InteractiveToken</LogonType>",
+            "<LogonType>Password</LogonType>",
+            1,
+        )
+}
+
 /// The bytes of the task definition file: UTF-16 little-endian with a byte
 /// order mark, the encoding the text declares and `schtasks /Create /XML`
 /// accepts. Line endings stay `\n`, as the renderer produced them.
