@@ -415,6 +415,7 @@ fn session_reqs_omit_empty_optionals() {
         cols: None,
         rows: None,
         user: None,
+        shell_command: None,
     };
     assert_eq!(
         serde_json::to_value(&open).unwrap(),

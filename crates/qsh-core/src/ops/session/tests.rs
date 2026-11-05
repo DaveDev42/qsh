@@ -728,6 +728,7 @@ fn fake_session_open_msg() -> wire::SessionOpen {
         cols: 0,
         rows: 0,
         user: None,
+        shell_command: None,
     }
 }
 

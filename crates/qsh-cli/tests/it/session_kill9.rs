@@ -629,6 +629,7 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
             cols: Some(80),
             rows: Some(24),
             user: None,
+            shell_command: None,
         })
         .expect("session.open")
         .session_ref;

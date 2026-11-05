@@ -243,6 +243,19 @@ message ExecStart {
   map<string, string> env = 2;
   // 0 = no timeout. When exceeded the executor kills the child.
   uint64 timeout_ms = 3;
+  // ADR-0051 decision 6 (capability `shell-command.v1`, protocol.md §7.1):
+  // one string for the host account's shell to run (`$SHELL -c <string>` on
+  // unix, the Win32-OpenSSH default shell on Windows), the way `ssh host
+  // command` does. Mutually exclusive with a non-empty `argv` and with
+  // `login_shell`. `optional` because the empty string is a valid command
+  // (`ssh host ''`) that differs from "no shell command". A host that
+  // predates the capability skips this field as unknown, so a sender checks
+  // the capability first and never sends it otherwise.
+  optional string shell_command = 4;
+  // ADR-0051 decision 6 (capability `shell-command.v1`): run the account's
+  // login shell itself, with no PTY and no `-c` (`qsh -T host`). Mutually
+  // exclusive with a non-empty `argv` and with `shell_command`.
+  bool login_shell = 5;
 }
 
 // Success payload for ExecStart. `ticket` authorizes exactly one EXEC_DATA
@@ -349,6 +362,13 @@ message SessionOpen {
   // from the serve account's login name the request fails UNSUPPORTED
   // without creating a session (CLI.md §7).
   optional string user = 6;
+  // ADR-0051 decision 6 (capability `shell-command.v1`, protocol.md §7.1):
+  // `qsh -t host command`. One string for the account's shell to run with
+  // `-c` inside the PTY (same shell rule as `ExecStart.shell_command`).
+  // Mutually exclusive with a non-empty `argv`. A host that predates the
+  // capability skips this field as unknown and would open the login shell
+  // instead, so a sender checks the capability first.
+  optional string shell_command = 7;
 }
 
 // Success payload for SessionOpen. `ticket` authorizes exactly one

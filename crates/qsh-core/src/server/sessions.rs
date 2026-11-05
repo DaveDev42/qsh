@@ -150,6 +150,30 @@ impl Server {
         let Some((cols, rows)) = window_size(req.cols, req.rows) else {
             return invalid_argument(request_id, "cols/rows must fit in 16 bits");
         };
+        // `qsh -t host command` (ADR-0051 decision 6). A shape check that
+        // depends on nothing about the caller, so it may precede the ACL
+        // decision like the window check above. A host that predates
+        // `shell-command.v1` would skip the field and open the login shell,
+        // which is why this host demands the capability from the sender.
+        let shell = match req.shell_command.as_deref() {
+            None => None,
+            Some(command) => {
+                if !ctx.has_capability(wire::CAP_SHELL_COMMAND_V1) {
+                    return ControlMessage::error(
+                        request_id,
+                        wire::Error::new(
+                            ErrorCode::Unsupported,
+                            "peer did not negotiate the shell-command.v1 capability",
+                            false,
+                        ),
+                    );
+                }
+                match req.shell_command_checked() {
+                    Ok(_) => Some(crate::shell::ShellRequest::Command(command.to_string())),
+                    Err(err) => return invalid_argument(request_id, err.0),
+                }
+            }
+        };
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) = self.authorize(
@@ -225,6 +249,7 @@ impl Server {
             cols,
             rows,
             user: req.user.clone(),
+            shell,
         };
         // The opener is recorded as this session's owner (the M3 plan (2473c88) Step
         // 3.5 PR②) — `session.write`/`session.resize` bind to it from here

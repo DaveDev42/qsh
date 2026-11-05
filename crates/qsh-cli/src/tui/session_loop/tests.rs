@@ -606,7 +606,7 @@ fn vt_unavailable_is_unsupported_before_session_open() {
             forwards: Vec::new(),
             remote_forwards: Vec::new(),
             dynamic_forwards: Vec::new(),
-            argv: Vec::new(),
+            shell_command: None,
         },
         Some(b'~'),
         terminal,

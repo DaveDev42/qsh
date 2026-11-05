@@ -9,8 +9,9 @@ use std::time::Duration;
 use qsh_core::acl::{AllowAllPinned, DenyAll};
 use qsh_core::client::ClientError;
 use qsh_core::exec::ExecSpec;
+use qsh_core::shell::ShellRequest;
 use qsh_proto::ErrorCode;
-use qsh_proto::wire::{ExecFrame, StreamHeader};
+use qsh_proto::wire::{self, ExecFrame, StreamHeader};
 use qsh_testkit::loopback::{LoopbackHarness, make_ca};
 use qsh_testkit::shell::Runaway;
 use qsh_transport::{FramedStream, Principal, StaticTrust};
@@ -20,6 +21,7 @@ fn spec(argv: &[&str]) -> ExecSpec {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         env: vec![],
         timeout: None,
+        shell: None,
     }
 }
 
@@ -28,8 +30,15 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
     // Every host advertises the same set, `file.v1` included (ADR-0029
-    // decision 23).
-    let expected = vec!["exec", "session", "resume.v1", "dial-filter.v1", "file.v1"];
+    // decision 23), `shell-command.v1` last (ADR-0051 decision 6).
+    let expected = vec![
+        "exec",
+        "session",
+        "resume.v1",
+        "dial-filter.v1",
+        "file.v1",
+        "shell-command.v1",
+    ];
     assert_eq!(s.capabilities, expected);
 
     let r = s
@@ -500,4 +509,171 @@ async fn peer_disappearing_mid_exec_kills_the_child() {
     let _ = exec_task.await;
 
     child.wait_gone(Duration::from_secs(5)).await;
+}
+
+// ---- shell_command (ADR-0051 decision 6) ----------------------------------
+
+fn shell_spec(command: &str) -> ExecSpec {
+    ExecSpec {
+        argv: vec![],
+        env: vec![],
+        timeout: None,
+        shell: Some(ShellRequest::Command(command.into())),
+    }
+}
+
+/// `qsh host command...` hands one string to the account's shell, so quoting,
+/// `$VAR`, pipes, `&&`/`||` and the exit code are the shell's, as with `ssh`.
+/// Unix only here: the probe commands are POSIX shell and the Windows rule is
+/// covered in `crates/qsh-core/src/exec/windows/tests.rs`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_command_round_trips_quoting_variables_pipes_and_lists() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+
+    let run = |command: &'static str, env: &[(&str, &str)]| {
+        let mut sp = shell_spec(command);
+        sp.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        sp
+    };
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str, i32);
+    let cases: &[Case] = &[
+        // Quoting: the shell, not qsh, splits the words.
+        (r#"printf '%s|' "a b" 'c  d' e\ f"#, &[], "a b|c  d|e f|", 0),
+        // `$VAR` expands on the host from the exec's own environment.
+        (
+            r#"printf '%s' "$QSH_SC_VAR""#,
+            &[("QSH_SC_VAR", "from env")],
+            "from env",
+            0,
+        ),
+        // A pipe.
+        (r"printf 'one\ntwo\nthree\n' | grep -c t", &[], "2\n", 0),
+        // `&&`, `||` and the exit code of the last command.
+        (
+            r"true && printf yes; false || printf ' no'; exit 3",
+            &[],
+            "yes no",
+            3,
+        ),
+        // A single quote inside double quotes survives untouched.
+        (r#"printf "%s" "it's \"fine\"""#, &[], r#"it's "fine""#, 0),
+        // `ssh host ''` is an empty command, not a missing one.
+        ("", &[], "", 0),
+    ];
+    for (command, env, stdout, exit) in cases {
+        let r = s.exec(&run(command, env), None, None).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&r.stdout),
+            *stdout,
+            "stdout of {command:?}"
+        );
+        assert_eq!(r.exit_code, *exit, "exit code of {command:?}");
+    }
+    s.close();
+
+    // One authorization per command, all `exec.run`, none carrying the
+    // command: the audit record has no field for it.
+    let records = h.audit.records();
+    assert_eq!(records.len(), cases.len());
+    assert!(records.iter().all(|r| r.action == "exec.run"));
+    h.shutdown().await;
+}
+
+/// `qsh -T host`: the login shell with no PTY and no `-c`, commands on stdin.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn login_shell_without_a_command_reads_its_commands_from_stdin() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let sp = ExecSpec {
+        argv: vec![],
+        env: vec![],
+        timeout: None,
+        shell: Some(ShellRequest::Login),
+    };
+    let stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(std::io::Cursor::new(
+        b"printf 'hi %s' there\nexit 5\n".to_vec(),
+    ));
+    let r = s.exec(&sp, Some(stdin), None).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "hi there");
+    assert_eq!(r.exit_code, 5);
+    h.shutdown().await;
+}
+
+/// An old host skips the new fields as unknown and would see an empty argv.
+/// The client therefore decides from the negotiated capabilities, before it
+/// sends anything: `UNSUPPORTED`, the upgrade text, no request on the wire
+/// (so no audit record and no ticket), and a plain argv exec still works on
+/// the same connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_without_shell_command_v1_is_unsupported_before_anything_is_sent() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    assert!(
+        s.capabilities
+            .iter()
+            .any(|c| c == wire::CAP_SHELL_COMMAND_V1)
+    );
+    // The negotiated set of a host that predates the capability.
+    s.capabilities.retain(|c| c != wire::CAP_SHELL_COMMAND_V1);
+
+    for sp in [
+        shell_spec("echo never-runs"),
+        ExecSpec {
+            argv: vec![],
+            env: vec![],
+            timeout: None,
+            shell: Some(ShellRequest::Login),
+        },
+    ] {
+        match s.exec(&sp, None, None).await.unwrap_err() {
+            ClientError::Unsupported(message) => {
+                assert_eq!(message, qsh_core::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE);
+                assert!(message.contains("too old") && message.contains("Upgrade"));
+                assert!(!message.contains("never-runs"));
+            }
+            other => panic!("expected UNSUPPORTED, got {other:?}"),
+        }
+    }
+    assert!(h.audit.records().is_empty(), "nothing reached the host");
+    assert_eq!(h.server.pending_tickets(), 0);
+
+    let r = s.exec(&spec(&["true"]), None, None).await.unwrap();
+    assert_eq!(r.exit_code, 0);
+    h.shutdown().await;
+}
+
+/// The ACL decision precedes the spawn for a shell command exactly as for an
+/// argv: a denied peer gets `PERMISSION_DENIED`, an audit record and no
+/// ticket, and the command never runs (its side effect never appears).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn denied_shell_command_never_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
+    let mut s = h.session().await;
+    let err = s
+        .exec(
+            &shell_spec(&format!("touch '{}'", marker.display())),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    match err {
+        ClientError::Remote { code, .. } => assert_eq!(code, ErrorCode::PermissionDenied),
+        other => panic!("expected remote PERMISSION_DENIED, got {other:?}"),
+    }
+    let records = h.audit.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].decision, "deny");
+    assert_eq!(h.server.pending_tickets(), 0);
+    assert!(!marker.exists(), "a denied command must not run");
+    h.shutdown().await;
 }

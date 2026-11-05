@@ -74,6 +74,13 @@ pub struct SessionOpenReq {
     /// identity (the principal always comes from the certificate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// `qsh -t host command` (ADR-0051 decision 6): one string for the
+    /// remote account's shell to run inside the PTY, the way ssh sends a
+    /// command. Not a `session open` flag; the root ssh form sets it.
+    /// Exclusive with `argv`. A remote qsh that lacks `shell-command.v1`
+    /// answers `UNSUPPORTED` before any session exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_command: Option<String>,
 }
 
 /// Data payload of a successful `session.open` (`docs/CLI.md` §6.3).

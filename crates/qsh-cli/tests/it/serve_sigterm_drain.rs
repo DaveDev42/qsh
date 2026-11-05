@@ -181,6 +181,7 @@ fn sigterm_drains_the_session_and_leaves_no_orphan() {
                 cols: Some(80),
                 rows: Some(24),
                 user: None,
+                shell_command: None,
             })
             .expect("session.open")
             .session_ref;
@@ -281,6 +282,7 @@ fn drain_two_sessions() -> DrainRun {
                 cols: Some(80),
                 rows: Some(24),
                 user: None,
+                shell_command: None,
             })
             .expect("session.open")
             .session_ref

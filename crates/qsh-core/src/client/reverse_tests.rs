@@ -98,6 +98,7 @@ fn exec_spec() -> ExecSpec {
         argv: vec!["true".to_string()],
         env: Vec::new(),
         timeout: None,
+        shell: None,
     }
 }
 

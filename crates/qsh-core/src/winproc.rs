@@ -57,6 +57,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+};
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
@@ -717,4 +720,64 @@ pub(crate) fn windows_directory() -> io::Result<String> {
         return Err(os_error("GetSystemWindowsDirectoryW"));
     }
     Ok(wide_to_string(&buf[..written as usize]))
+}
+
+/// The Win32-OpenSSH default-shell values (`HKLM\SOFTWARE\OpenSSH`,
+/// ADR-0051 decision 6). A missing key or value is `None`, as is anything
+/// unreadable: the host then falls back to `cmd.exe /c`, which is also what
+/// OpenSSH does without the value.
+pub(crate) fn default_shell_config() -> crate::shell::DefaultShellConfig {
+    crate::shell::DefaultShellConfig {
+        default_shell: read_openssh_value("DefaultShell"),
+        command_option: read_openssh_value("DefaultShellCommandOption"),
+    }
+}
+
+fn read_openssh_value(name: &str) -> Option<String> {
+    let subkey: Vec<u16> = OsStr::new(r"SOFTWARE\OpenSSH")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let value: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    // `RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ` without `RRF_NOEXPAND`:
+    // environment references in an expandable value are expanded.
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    let mut bytes: u32 = 0;
+    // SAFETY: the sizing call passes a null data pointer and a valid length
+    // out parameter; both strings are NUL-terminated.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            flags,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if status != 0 || bytes == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+    let mut capacity = (buf.len() * 2) as u32;
+    // SAFETY: `buf` is writable for `capacity` bytes.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            flags,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast::<c_void>(),
+            &mut capacity,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let units = (capacity as usize / 2).min(buf.len());
+    let end = buf[..units].iter().position(|&c| c == 0).unwrap_or(units);
+    let text = wide_to_string(&buf[..end]);
+    (!text.trim().is_empty()).then_some(text)
 }

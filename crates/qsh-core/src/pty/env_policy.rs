@@ -192,6 +192,18 @@ pub(crate) fn windows_lookup<'a>(env: &'a [(String, String)], key: &str) -> Opti
         .map(|(_, v)| v.as_str())
 }
 
+/// The full path of `cmd.exe` for a child with environment `env`: its
+/// `COMSPEC`, else `<system_root>\System32\cmd.exe`. Always a full path, so
+/// the lookup never searches the host's working directory.
+pub(crate) fn windows_cmd_exe(env: &[(String, String)], system_root: &str) -> std::path::PathBuf {
+    match windows_lookup(env, "COMSPEC") {
+        Some(comspec) if !comspec.is_empty() => std::path::PathBuf::from(comspec),
+        _ => std::path::Path::new(system_root)
+            .join("System32")
+            .join("cmd.exe"),
+    }
+}
+
 /// Whether the `user@` hint names the account, given every name the account
 /// is known by. unix compares exactly (one name, from the password
 /// database); a Windows account is known as `user` and as `DOMAIN\user`, and

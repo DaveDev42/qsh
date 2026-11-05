@@ -56,6 +56,7 @@ fn sh(script: &str) -> SessionSpec {
         cols: 80,
         rows: 24,
         user: None,
+        shell: None,
     }
 }
 
@@ -510,6 +511,33 @@ async fn child_environment_is_the_login_environment_not_ours() {
         .unwrap();
 }
 
+/// `qsh -t host command` (ADR-0051 decision 6): the string runs through the
+/// account's shell with `-c` inside the PTY, so quoting, `$VAR`, pipes and
+/// `&&` are the shell's, and the child has the controlling tty.
+#[tokio::test]
+async fn a_shell_command_runs_through_the_login_shell_with_dash_c_under_a_tty() {
+    let (broker, clock) = broker(1 << 20);
+    let spec = SessionSpec {
+        argv: vec![],
+        env: vec![("QSH_T".into(), "pty value".into())],
+        term: Some("dumb".into()),
+        cols: 80,
+        rows: 24,
+        user: None,
+        shell: Some(crate::shell::ShellRequest::Command(
+            "printf '[%s]' \"$QSH_T\" | tr a-z A-Z && test -t 0 && echo ' TTY_OK'".into(),
+        )),
+    };
+    let source = PtySource::new().with_login_shell("/bin/sh");
+    let handle = broker.open_with(&spec, Box::new(source)).unwrap();
+    let events = pull_until_exit(&handle, &clock).await;
+    let out = text(&events);
+    assert!(
+        out.contains("[PTY VALUE] TTY_OK"),
+        "unexpected output: {out}"
+    );
+}
+
 /// Empty `argv` ⇒ login shell with `argv[0] = "-<basename>"`, interactive
 /// on a controlling tty (`test -t 0` succeeds; bash would otherwise print
 /// "job control turned off"). Uses `/bin/sh` as the login shell so the
@@ -525,6 +553,7 @@ async fn empty_argv_runs_a_login_shell_with_dash_argv0() {
         cols: 80,
         rows: 24,
         user: None,
+        shell: None,
     };
     let source = PtySource::new().with_login_shell("/bin/sh");
     let handle = broker.open_with(&spec, Box::new(source)).unwrap();

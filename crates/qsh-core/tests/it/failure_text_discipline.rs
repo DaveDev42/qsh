@@ -984,6 +984,35 @@ fn audit_query_wordings_have_observation_impact_and_next_command() {
     }
 }
 
+/// ADR-0051 decision 6: the `UNSUPPORTED` a host without `shell-command.v1`
+/// earns says what was seen, that nothing ran, and what to do next.
+#[test]
+fn shell_command_unsupported_wording_has_observation_impact_and_next_command() {
+    let message = qsh_core::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE;
+    let row = ThreePartRow {
+        label: "shell_command unsupported",
+        observation: ThreePartSlot::new(
+            message,
+            "the remote qsh is too old to run a shell command",
+        ),
+        impact: ThreePartSlot::new(message, "nothing was run"),
+        next_command: ThreePartSlot::new(message, "run `qsh exec <host> -- <program> [args...]`"),
+    };
+    row.observation.assert_holds(row.label, "observation");
+    row.impact.assert_holds(row.label, "impact");
+    row.next_command.assert_holds(row.label, "next-command");
+}
+
+#[test]
+fn cli_md_section_6_8_quotes_the_shell_command_unsupported_wording_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    let section = heading_section_slice(&cli_md, "### 6.8 비대화형 실행");
+    assert!(
+        section.contains(qsh_core::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE),
+        "docs/CLI.md §6.8 itself must quote SHELL_COMMAND_UNSUPPORTED_MESSAGE verbatim"
+    );
+}
+
 #[test]
 fn pair_ssh_wordings_have_observation_impact_and_next_command() {
     let rows = pair_ssh_rows();

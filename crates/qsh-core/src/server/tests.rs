@@ -119,6 +119,8 @@ fn exec_start(request_id: u64, argv: &[&str]) -> ControlMessage {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             env: Default::default(),
             timeout_ms: 0,
+            login_shell: false,
+            shell_command: None,
         }),
     )
 }
@@ -385,6 +387,234 @@ async fn exec_without_capability_is_unsupported_and_not_audited() {
     assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
     assert!(rig.audit.records().is_empty());
     assert_eq!(rig.server.pending_tickets(), 0);
+}
+
+// ---- shell_command / login_shell (ADR-0051 decision 6) ----------------
+
+const SHELL_CAPS: &[&str] = &["exec", "session", wire::CAP_SHELL_COMMAND_V1];
+
+fn shell_exec_start(
+    request_id: u64,
+    argv: &[&str],
+    command: Option<&str>,
+    login: bool,
+) -> ControlMessage {
+    ControlMessage::new(
+        request_id,
+        control_message::Body::ExecStart(ExecStart {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            env: Default::default(),
+            timeout_ms: 0,
+            shell_command: command.map(str::to_string),
+            login_shell: login,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn shell_exec_issues_a_ticket_carrying_the_command_and_audits_no_command() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let command = "echo \"$HOME\" | wc -c && true # sekrit-marker";
+    let reply = rig
+        .server
+        .dispatch(&ctx, &shell_exec_start(5, &[], Some(command), false))
+        .await
+        .unwrap();
+    let ticket = match response_body(&reply) {
+        response::Body::ExecStarted(started) => started.ticket.clone(),
+        other => panic!("expected ExecStarted, got {other:?}"),
+    };
+    let pending = rig
+        .server
+        .redeem_ticket(42, StreamKind::ExecData, &ticket)
+        .expect("redeem once");
+    match pending.purpose {
+        TicketPurpose::Exec(exec) => {
+            assert!(exec.spec.argv.is_empty());
+            assert_eq!(
+                exec.spec.shell,
+                Some(crate::shell::ShellRequest::Command(command.to_string()))
+            );
+            // The spec's `Debug` is what a stray `{:?}` would log.
+            assert!(!format!("{:?}", exec.spec).contains("sekrit-marker"));
+        }
+        other => panic!("expected an exec ticket, got {other:?}"),
+    }
+    // The audit record is structural: action and decision, nothing of the
+    // command (`AuditRecord` has no field that could hold it).
+    let recs = rig.audit.records();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].action, "exec.run");
+    assert_eq!(recs[0].decision, "allow");
+    assert!(!format!("{:?}", recs[0]).contains("sekrit-marker"));
+}
+
+#[tokio::test]
+async fn login_shell_exec_issues_a_login_shell_request() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let reply = rig
+        .server
+        .dispatch(&ctx, &shell_exec_start(5, &[], None, true))
+        .await
+        .unwrap();
+    let ticket = match response_body(&reply) {
+        response::Body::ExecStarted(started) => started.ticket.clone(),
+        other => panic!("expected ExecStarted, got {other:?}"),
+    };
+    let pending = rig
+        .server
+        .redeem_ticket(42, StreamKind::ExecData, &ticket)
+        .unwrap();
+    match pending.purpose {
+        TicketPurpose::Exec(exec) => {
+            assert_eq!(exec.spec.shell, Some(crate::shell::ShellRequest::Login))
+        }
+        other => panic!("expected an exec ticket, got {other:?}"),
+    }
+}
+
+/// `ssh host ''` runs an empty command; `Some("")` is a command, not "none".
+#[tokio::test]
+async fn an_empty_shell_command_is_a_command() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let reply = rig
+        .server
+        .dispatch(&ctx, &shell_exec_start(5, &[], Some(""), false))
+        .await
+        .unwrap();
+    assert!(matches!(
+        response_body(&reply),
+        response::Body::ExecStarted(_)
+    ));
+}
+
+#[tokio::test]
+async fn shell_exec_denied_issues_no_ticket_and_audits_deny() {
+    let rig = rig(Arc::new(DenyAll));
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    for body in [
+        shell_exec_start(6, &[], Some("touch /tmp/never"), false),
+        shell_exec_start(7, &[], None, true),
+    ] {
+        let reply = rig.server.dispatch(&ctx, &body).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+    }
+    // The ACL decision is the same choke point as an argv exec: no ticket,
+    // so nothing can ever be spawned for either shape.
+    assert_eq!(rig.server.pending_tickets(), 0);
+    let recs = rig.audit.records();
+    assert_eq!(recs.len(), 2);
+    assert!(
+        recs.iter()
+            .all(|r| r.decision == "deny" && r.action == "exec.run")
+    );
+}
+
+#[tokio::test]
+async fn shell_exec_without_the_capability_is_unsupported_and_not_audited() {
+    let rig = allow_rig();
+    // `exec` negotiated, `shell-command.v1` not: a peer that did not learn
+    // the fields from this host must not set them.
+    let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+    for body in [
+        shell_exec_start(1, &[], Some("true"), false),
+        shell_exec_start(2, &[], None, true),
+    ] {
+        let reply = rig.server.dispatch(&ctx, &body).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+    }
+    assert!(rig.audit.records().is_empty());
+    assert_eq!(rig.server.pending_tickets(), 0);
+}
+
+#[tokio::test]
+async fn the_three_ways_to_say_what_to_run_are_mutually_exclusive() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    for body in [
+        shell_exec_start(1, &["true"], Some("true"), false),
+        shell_exec_start(2, &["true"], None, true),
+        shell_exec_start(3, &[], Some("true"), true),
+        shell_exec_start(4, &["true"], Some("true"), true),
+        shell_exec_start(5, &[], Some("a\0b"), false),
+    ] {
+        let reply = rig.server.dispatch(&ctx, &body).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::InvalidArgument));
+    }
+    assert!(rig.audit.records().is_empty());
+    assert_eq!(rig.server.pending_tickets(), 0);
+}
+
+fn shell_session_open(request_id: u64, argv: &[&str], command: Option<&str>) -> ControlMessage {
+    ControlMessage::new(
+        request_id,
+        control_message::Body::SessionOpen(wire::SessionOpen {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            cols: 80,
+            rows: 24,
+            shell_command: command.map(str::to_string),
+            ..Default::default()
+        }),
+    )
+}
+
+#[tokio::test]
+async fn session_open_with_a_shell_command_reaches_the_source_as_a_shell_request() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let reply = rig
+        .server
+        .dispatch(&ctx, &shell_session_open(1, &[], Some("top -b | head")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        response_body(&reply),
+        response::Body::SessionOpened(_)
+    ));
+    let (spec, _pipe) = rig.pipes.take_with_spec().expect("a session was created");
+    assert!(spec.argv.is_empty());
+    assert_eq!(
+        spec.shell,
+        Some(crate::shell::ShellRequest::Command("top -b | head".into()))
+    );
+}
+
+#[tokio::test]
+async fn session_open_with_a_shell_command_needs_the_capability_and_no_argv() {
+    let rig = allow_rig();
+    let old = ctx(Principal::Device("laptop".into()), &["session"]);
+    let reply = rig
+        .server
+        .dispatch(&old, &shell_session_open(1, &[], Some("true")))
+        .await
+        .unwrap();
+    assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+
+    let new = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let reply = rig
+        .server
+        .dispatch(&new, &shell_session_open(2, &["sh"], Some("true")))
+        .await
+        .unwrap();
+    assert_eq!(error_code(&reply), Some(ErrorCode::InvalidArgument));
+    assert!(rig.audit.records().is_empty());
+    assert!(rig.pipes.take().is_none(), "no session was created");
+}
+
+#[tokio::test]
+async fn session_open_with_a_shell_command_is_denied_before_a_session_exists() {
+    let rig = rig(Arc::new(DenyAll));
+    let ctx = ctx(Principal::Device("laptop".into()), SHELL_CAPS);
+    let reply = rig
+        .server
+        .dispatch(&ctx, &shell_session_open(1, &[], Some("true")))
+        .await
+        .unwrap();
+    assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+    assert!(rig.pipes.take().is_none(), "no session was created");
 }
 
 // ---- exec.run concurrency quota (M8 plan Step 3 (52639fc), `docs/adr/
@@ -807,6 +1037,7 @@ async fn ticket_sweep_sites_never_drop_an_exec_permit_while_the_tickets_lock_is_
                     argv: vec!["true".to_string()],
                     env: Vec::new(),
                     timeout: None,
+                    shell: None,
                 },
                 permit,
             }),
@@ -836,6 +1067,7 @@ async fn ticket_sweep_sites_never_drop_an_exec_permit_while_the_tickets_lock_is_
                 argv: vec!["true".to_string()],
                 env: Vec::new(),
                 timeout: None,
+                shell: None,
             },
             permit: fresh_permit,
         }),

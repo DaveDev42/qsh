@@ -113,10 +113,10 @@ pub enum Attach {
         /// ADR-0019 decision 1). Same scope as `forwards`/
         /// `remote_forwards` — only this form carries them.
         dynamic_forwards: Vec<String>,
-        /// The program of `qsh -t host command`: a PTY session that runs it
-        /// instead of the login shell (ADR-0051 decision 6). Empty = the
-        /// login shell.
-        argv: Vec<String>,
+        /// The string of `qsh -t host command`: a PTY session whose shell
+        /// runs it instead of opening the login shell (ADR-0051 decision 6).
+        /// `None` = the login shell.
+        shell_command: Option<String>,
     },
     /// `qsh attach <session-ref>` — attach to a session already running.
     Existing {
@@ -219,11 +219,12 @@ fn open_request(
     user: Option<String>,
     size: Option<(u16, u16)>,
     fallback_term: Option<&str>,
-    argv: Vec<String>,
+    shell_command: Option<String>,
 ) -> SessionOpenReq {
     SessionOpenReq {
         host,
-        argv,
+        argv: Vec::new(),
+        shell_command,
         env: locale_env(),
         term: session_term(std::env::var("TERM").ok(), fallback_term),
         cols: size.map(|(cols, _)| u32::from(cols)),

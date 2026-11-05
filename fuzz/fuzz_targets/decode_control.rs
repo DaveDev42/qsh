@@ -16,6 +16,9 @@
 //!   through `AttachMode::try_from`)
 //! - `Error::error_code()` (arbitrary `code: String` through
 //!   `ErrorCode::from_str`, documented infallible)
+//! - `ExecStart::target()` / `uses_shell_fields()` and
+//!   `SessionOpen::shell_command_checked()` (ADR-0051 decision 6: the three
+//!   mutually exclusive ways to say what to run, arbitrary strings with NULs)
 //!
 //! None of these may panic on any decoded value.
 
@@ -32,6 +35,13 @@ fuzz_target!(|data: &[u8]| {
     match &msg.body {
         Some(control_message::Body::SessionWrite(w)) => {
             let _ = w.validate();
+        }
+        Some(control_message::Body::ExecStart(e)) => {
+            let _ = e.target();
+            let _ = e.uses_shell_fields();
+        }
+        Some(control_message::Body::SessionOpen(o)) => {
+            let _ = o.shell_command_checked();
         }
         Some(control_message::Body::SessionAttach(a)) => {
             let _ = a.attach_mode();

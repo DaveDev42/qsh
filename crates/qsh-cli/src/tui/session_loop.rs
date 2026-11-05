@@ -72,7 +72,7 @@ pub(super) fn run(
             forwards,
             remote_forwards,
             dynamic_forwards,
-            argv,
+            shell_command,
         } => {
             let specs = qsh_core::parse_local_forwards(&forwards)?;
             let remote_specs = qsh_core::parse_remote_forwards(&remote_forwards)?;
@@ -81,7 +81,7 @@ pub(super) fn run(
             (
                 open_session(
                     ops,
-                    open_request(host, user, size, terminal.fallback_term(), argv),
+                    open_request(host, user, size, terminal.fallback_term(), shell_command),
                     requires_dynamic,
                 )?,
                 true,

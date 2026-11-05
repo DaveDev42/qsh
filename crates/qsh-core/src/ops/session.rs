@@ -421,6 +421,7 @@ impl Ops {
             cols: req.cols.unwrap_or(0),
             rows: req.rows.unwrap_or(0),
             user,
+            shell_command: req.shell_command,
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
@@ -444,6 +445,18 @@ impl Ops {
         host: &str,
         require_dial_filter: bool,
     ) -> Result<SessionOpenData, OpError> {
+        // `qsh -t host command`: an old host would skip the field and open
+        // the login shell instead of running the command, so the capability
+        // gate comes before the one request that creates the session.
+        if msg.shell_command.is_some()
+            && !conn
+                .capabilities()
+                .iter()
+                .any(|cap| cap == wire::CAP_SHELL_COMMAND_V1)
+        {
+            conn.close();
+            return Err(crate::ops::shell_command_unsupported());
+        }
         if require_dial_filter {
             let is_reverse = conn.connection().is_none();
             if let Err(err) =

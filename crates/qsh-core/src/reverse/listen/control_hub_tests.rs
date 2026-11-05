@@ -284,6 +284,7 @@ async fn a_late_response_for_a_dead_conduit_is_dropped_and_sends_nothing() {
             cols: 0,
             rows: 0,
             user: None,
+            shell_command: None,
         }),
     )
     .unwrap();

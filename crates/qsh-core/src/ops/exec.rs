@@ -16,6 +16,7 @@ use crate::exec::ExecSpec;
 use crate::identity::LoadedIdentity;
 use crate::ops::host::{self, HostRoute};
 use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget, server_name_for};
+use crate::shell::ShellRequest;
 
 /// The `exec.run` operation.
 pub struct ExecRunOp;
@@ -66,23 +67,32 @@ impl ExecCommand {
         Self::ShellCommand(args.join(" "))
     }
 
-    /// The argv that goes on the wire today.
-    ///
-    /// TODO(ADR-0051 decision 6 `shell_command`): the exec open message has
-    /// no `shell_command` field yet, so the remote login shell cannot be
-    /// asked to run the string. Until the wire step lands, a string is run
-    /// as `sh -c <string>` and the login shell as `sh`, which is right on
-    /// unix hosts and fails on a Windows host (no `sh`). The wire step
-    /// replaces this one function: [`ShellCommand`](Self::ShellCommand) and
-    /// [`LoginShell`](Self::LoginShell) then travel as `shell_command` and
-    /// an old host answers `UNSUPPORTED`.
-    pub fn wire_argv(self) -> Vec<String> {
+    /// Split into the two things an `ExecStart` carries: the argv for a
+    /// direct exec, or the shell request (`shell_command`/`login_shell`).
+    /// Exactly one is non-empty. The host picks the shell (its account's
+    /// login shell on unix, the Win32-OpenSSH default shell on Windows), so
+    /// this side never names `sh`.
+    pub fn into_parts(self) -> (Vec<String>, Option<ShellRequest>) {
         match self {
-            Self::Argv(argv) => argv,
-            Self::ShellCommand(line) => vec!["sh".into(), "-c".into(), line],
-            Self::LoginShell => vec!["sh".into()],
+            Self::Argv(argv) => (argv, None),
+            Self::ShellCommand(line) => (Vec::new(), Some(ShellRequest::Command(line))),
+            Self::LoginShell => (Vec::new(), Some(ShellRequest::Login)),
         }
     }
+}
+
+/// `UNSUPPORTED` text when the remote qsh does not advertise
+/// `shell-command.v1` (ADR-0051 decision 6). Observation, impact, next step;
+/// it never repeats the command. `--install-remote` is named in text only:
+/// the flag arrives in a later M21 step.
+pub const SHELL_COMMAND_UNSUPPORTED_MESSAGE: &str = "the remote qsh is too old to run a shell command (it does not advertise \
+     shell-command.v1); nothing was run. Upgrade qsh on the remote (a later release adds \
+     `--install-remote` to do that from here), or run `qsh exec <host> -- <program> [args...]`, \
+     which needs no shell.";
+
+/// The `UNSUPPORTED` error for [`SHELL_COMMAND_UNSUPPORTED_MESSAGE`].
+pub(crate) fn shell_command_unsupported() -> OpError {
+    OpError::new(ErrorCode::Unsupported, SHELL_COMMAND_UNSUPPORTED_MESSAGE).with_retryable(false)
 }
 
 impl Ops {
@@ -96,12 +106,17 @@ impl Ops {
         timeout_ms: Option<u64>,
         stdin: ExecStdin,
     ) -> Result<ExecRunOutput, OpError> {
-        self.exec_run(
-            ExecRunReq {
-                host,
-                argv: command.wire_argv(),
-                env,
-                timeout_ms,
+        let (argv, shell) = command.into_parts();
+        self.exec_spec(
+            &host,
+            ExecSpec {
+                argv,
+                env: env
+                    .iter()
+                    .map(|e| (e.name.clone(), e.value.clone()))
+                    .collect(),
+                timeout: timeout_ms.map(Duration::from_millis),
+                shell,
             },
             stdin,
         )
@@ -132,13 +147,6 @@ impl Ops {
                 "exec requires a command after `--`",
             ));
         }
-        let identity = self.load_identity()?.ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConfigError,
-                "no device identity; run `qsh init` first",
-            )
-        })?;
-
         let spec = ExecSpec {
             argv: req.argv.clone(),
             env: req
@@ -147,8 +155,28 @@ impl Ops {
                 .map(|e| (e.name.clone(), e.value.clone()))
                 .collect(),
             timeout: req.timeout_ms.map(Duration::from_millis),
+            shell: None,
         };
-        let timeout = req.timeout_ms.map(Duration::from_millis);
+        self.exec_spec(&req.host, spec, stdin)
+    }
+
+    /// The body of [`Self::exec_run`] and [`Self::exec_command`]: `spec`
+    /// is already built (argv or a shell request), so this resolves the
+    /// route, runs it and assembles the payload.
+    fn exec_spec(
+        &self,
+        host: &str,
+        spec: ExecSpec,
+        stdin: ExecStdin,
+    ) -> Result<ExecRunOutput, OpError> {
+        let identity = self.load_identity()?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+        })?;
+
+        let timeout = spec.timeout;
 
         // Shared with every other dial op (`ops/mod.rs::connect_runtime`,
         // M7 plan Step 7-2 (69dd788) carryover (ii)) instead of a fresh
@@ -156,7 +184,7 @@ impl Ops {
         // (or an exec alongside a live pull) no longer pays for a second
         // multi-thread runtime it never needed.
         let runtime = self.connect_runtime()?;
-        match self.resolve_exec_route(&req.host, identity)? {
+        match self.resolve_exec_route(host, identity)? {
             PeerRoute::Forward(target) => {
                 let device_name = target.identity.identity.device_id.clone();
                 let dialer = Dialer::new(

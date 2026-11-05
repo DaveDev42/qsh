@@ -42,13 +42,13 @@ fn spec(argv: &[&str], env: &[(&str, &str)]) -> ExecSpec {
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect(),
         timeout: None,
+        shell: None,
     }
 }
 
 fn start(argv: &[&str], env: &[(&str, &str)]) -> Spawned {
     let spec = spec(argv, env);
-    spawn_child(&spec.argv[0], &spec.argv[1..], &spec)
-        .unwrap_or_else(|f| panic!("spawn failed ({}): {}", f.code, f.message))
+    spawn_child(&spec).unwrap_or_else(|f| panic!("spawn failed ({}): {}", f.code, f.message))
 }
 
 /// What a finished command wrote and how it ended.
@@ -631,10 +631,119 @@ fn the_plan_refuses_an_empty_argv_and_a_nul_before_creating_anything() {
 #[test]
 fn a_missing_program_is_a_not_found_failure_with_exit_127() {
     let spec = spec(&["qsh-no-such-program-anywhere"], &[]);
-    let failure = match spawn_child(&spec.argv[0], &spec.argv[1..], &spec) {
+    let failure = match spawn_child(&spec) {
         Ok(_) => panic!("the program must not exist"),
         Err(failure) => failure,
     };
     assert_eq!(failure.code, 127);
     assert!(failure.message.contains("cannot execute"), "{failure:?}");
+}
+
+// --------------------------------------------------------------------------
+// shell requests (ADR-0051 decision 6)
+// --------------------------------------------------------------------------
+
+fn is_cmd_exe(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe"))
+}
+
+/// With no `DefaultShell` the string runs as `cmd.exe /c <string>`, and the
+/// string is the raw tail of the command line: `cmd.exe` does not undo the
+/// C runtime's quoting, so the quotes in it must reach it untouched.
+#[test]
+fn a_shell_command_plans_cmd_exe_slash_c_with_the_string_verbatim() {
+    let cwd = tempfile::tempdir().unwrap();
+    let user_env = winproc::user_environment().unwrap();
+    let windows_dir = winproc::windows_directory().unwrap();
+    let command = r#"echo "a b" & echo %QSH_X%"#;
+    let launch = plan_shell(
+        &ShellRequest::Command(command.into()),
+        &DefaultShellConfig::default(),
+        &[],
+        &user_env,
+        &windows_dir,
+        cwd.path(),
+    )
+    .unwrap();
+    assert!(is_cmd_exe(&launch.application), "{:?}", launch.application);
+    let line = launch.command_line.to_string_lossy().into_owned();
+    assert!(line.ends_with(&format!(" /c {command}")), "{line}");
+    assert!(line.starts_with('"'), "the program is quoted: {line}");
+}
+
+/// `DefaultShell` and `DefaultShellCommandOption` decide the program and its
+/// switch; the login shell is the program alone.
+#[test]
+fn the_openssh_default_shell_values_pick_the_program_and_switch() {
+    let cwd = tempfile::tempdir().unwrap();
+    let user_env = winproc::user_environment().unwrap();
+    let windows_dir = winproc::windows_directory().unwrap();
+    let cmd = Path::new(&windows_dir).join("System32").join("cmd.exe");
+    let config = DefaultShellConfig {
+        default_shell: Some(cmd.to_string_lossy().into_owned()),
+        command_option: Some("/d /c".into()),
+    };
+    let plan_for = |request: &ShellRequest| {
+        plan_shell(request, &config, &[], &user_env, &windows_dir, cwd.path()).unwrap()
+    };
+    let launch = plan_for(&ShellRequest::Command("exit 0".into()));
+    assert_eq!(launch.application, cmd);
+    assert!(
+        launch
+            .command_line
+            .to_string_lossy()
+            .ends_with(" /d /c exit 0")
+    );
+    let login = plan_for(&ShellRequest::Login);
+    assert_eq!(login.application, cmd);
+    assert_eq!(
+        login.command_line.to_string_lossy(),
+        format!("\"{}\"", cmd.display())
+    );
+}
+
+#[test]
+fn a_shell_command_with_a_nul_is_refused_before_anything_is_created() {
+    let cwd = tempfile::tempdir().unwrap();
+    let err = plan_shell(
+        &ShellRequest::Command("echo a\0b".into()),
+        &DefaultShellConfig::default(),
+        &[],
+        &winproc::user_environment().unwrap(),
+        &winproc::windows_directory().unwrap(),
+        cwd.path(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+}
+
+/// End to end through `spawn_child`: the string with `&&`, a pipe, quotes
+/// and an exit code runs under the account's `cmd.exe`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_command_runs_under_cmd_exe_and_reports_its_exit_code() {
+    let spec = ExecSpec {
+        argv: Vec::new(),
+        env: vec![("QSH_SHELL_X".into(), "from env".into())],
+        timeout: None,
+        shell: Some(ShellRequest::Command(
+            r#"echo "q u o t e" && echo %QSH_SHELL_X% | findstr /r "env" && exit 7"#.into(),
+        )),
+    };
+    let Spawned {
+        mut child,
+        stdin,
+        stdout,
+        ..
+    } = spawn_child(&spec).unwrap_or_else(|f| panic!("spawn failed ({}): {}", f.code, f.message));
+    drop(stdin);
+    let mut out = Vec::new();
+    within(stdout.expect("stdout pipe").read_to_end(&mut out))
+        .await
+        .unwrap();
+    let (exit, _) = within(child.wait()).await.unwrap();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("\"q u o t e\""), "{text}");
+    assert!(text.contains("from env"), "{text}");
+    assert_eq!(exit, 7);
 }

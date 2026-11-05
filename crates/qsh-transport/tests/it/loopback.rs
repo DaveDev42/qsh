@@ -218,6 +218,8 @@ async fn data_stream_framed_roundtrip_many_messages_and_clean_eof() {
                 argv: vec!["sh".into(), "-c".into(), "true".into()],
                 env: Default::default(),
                 timeout_ms: 1000,
+                login_shell: false,
+                shell_command: None,
             }),
         ),
         ControlMessage::new(
@@ -375,6 +377,8 @@ async fn oversize_control_frame_rejected_and_encode_refuses_to_send_over_cap() {
             argv: vec!["x".repeat(CONTROL_FRAME_MAX + 1024)],
             env: Default::default(),
             timeout_ms: 0,
+            login_shell: false,
+            shell_command: None,
         }),
     );
     match framed_send.send(&huge).await {

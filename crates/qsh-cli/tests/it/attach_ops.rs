@@ -80,6 +80,7 @@ fn open(ops: &Ops, argv: Vec<String>) -> String {
         cols: Some(80),
         rows: Some(24),
         user: None,
+        shell_command: None,
     })
     .expect("session.open")
     .session_ref

@@ -75,6 +75,7 @@ fn probe_spec(mode: &str, report: &Path, env: &[(&str, &str)]) -> SessionSpec {
         cols: 200,
         rows: 24,
         user: None,
+        shell: None,
     }
 }
 

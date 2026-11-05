@@ -67,6 +67,14 @@ pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
 /// file op to a peer that has not advertised it.
 pub const CAP_FILE_V1: &str = "file.v1";
 
+/// Capability string for [`ExecStart::shell_command`], [`ExecStart::login_shell`]
+/// and [`SessionOpen::shell_command`] (ADR-0051 decision 6): the host runs a
+/// command string through the account's shell. A host that predates it skips
+/// the fields as unknown (proto3), so `exec` would see an empty `argv`. A
+/// sender confirms the capability before setting any of the three and fails
+/// `UNSUPPORTED` locally without it (`docs/design/protocol.md` §7.1).
+pub const CAP_SHELL_COMMAND_V1: &str = "shell-command.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -77,14 +85,16 @@ pub const CAP_FILE_V1: &str = "file.v1";
 /// joined with the host-local dial filter (ADR-0019 decision 3): the
 /// advertisement and the filter land in the same commit. [`CAP_FILE_V1`]
 /// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9): the
-/// same commit that serves the stream advertises it. The set is the same on
-/// every platform.
+/// same commit that serves the stream advertises it. [`CAP_SHELL_COMMAND_V1`]
+/// joined with the host's shell resolution (ADR-0051 decision 6). The set is
+/// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
     CAP_SESSION,
     CAP_RESUME_V1,
     CAP_DIAL_FILTER_V1,
     CAP_FILE_V1,
+    CAP_SHELL_COMMAND_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the
@@ -185,6 +195,83 @@ fn check_chunk_max(len: usize, max: usize) -> Result<(), ChunkTooLarge> {
         return Err(ChunkTooLarge { len, max });
     }
     Ok(())
+}
+
+/// What an [`ExecStart`] asks the host to run (ADR-0051 decision 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecTarget<'a> {
+    /// `argv`, executed directly with no shell.
+    Argv,
+    /// This string through the host account's shell (`shell_command`).
+    ShellCommand(&'a str),
+    /// The account's login shell itself (`login_shell`).
+    LoginShell,
+}
+
+/// Why a shell-command request is malformed. The text never repeats the
+/// command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellCommandError(pub &'static str);
+
+impl std::fmt::Display for ShellCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ShellCommandError {}
+
+const SHELL_COMMAND_NUL: ShellCommandError =
+    ShellCommandError("shell_command must not contain NUL");
+
+impl ExecStart {
+    /// Receiver-side shape check of the three ways to say what to run:
+    /// exactly one of a non-empty `argv`, `shell_command` (the empty string
+    /// is a command) and `login_shell` may be given, and a command must not
+    /// contain NUL. Hosts call this before the ACL decision (it depends on
+    /// nothing about the caller) and answer `INVALID_ARGUMENT` on error. A
+    /// request with none of the three is an empty `argv`, which the caller
+    /// reports as before. A host that predates `shell-command.v1` never
+    /// reaches this: it skips the fields as unknown (§16.4).
+    pub fn target(&self) -> Result<Option<ExecTarget<'_>>, ShellCommandError> {
+        let given = usize::from(!self.argv.is_empty())
+            + usize::from(self.shell_command.is_some())
+            + usize::from(self.login_shell);
+        if given == 0 {
+            return Ok(None);
+        }
+        if given > 1 {
+            return Err(ShellCommandError(
+                "exactly one of argv, shell_command and login_shell may be set",
+            ));
+        }
+        Ok(Some(match &self.shell_command {
+            Some(command) if command.contains('\0') => return Err(SHELL_COMMAND_NUL),
+            Some(command) => ExecTarget::ShellCommand(command),
+            None if self.login_shell => ExecTarget::LoginShell,
+            None => ExecTarget::Argv,
+        }))
+    }
+
+    /// Whether the request uses a field only `shell-command.v1` peers know.
+    pub fn uses_shell_fields(&self) -> bool {
+        self.shell_command.is_some() || self.login_shell
+    }
+}
+
+impl SessionOpen {
+    /// Receiver-side shape check of `shell_command`: it excludes a
+    /// non-empty `argv` and must not contain NUL. `Ok(None)` when absent.
+    pub fn shell_command_checked(&self) -> Result<Option<&str>, ShellCommandError> {
+        match self.shell_command.as_deref() {
+            None => Ok(None),
+            Some(_) if !self.argv.is_empty() => Err(ShellCommandError(
+                "argv and shell_command are mutually exclusive",
+            )),
+            Some(command) if command.contains('\0') => Err(SHELL_COMMAND_NUL),
+            Some(command) => Ok(Some(command)),
+        }
+    }
 }
 
 impl SessionWrite {

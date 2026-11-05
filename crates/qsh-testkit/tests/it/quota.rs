@@ -68,6 +68,7 @@ fn exec_spec(argv: &[&str]) -> ExecSpec {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         env: vec![],
         timeout: None,
+        shell: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn exec_spec_of(argv: Vec<String>) -> ExecSpec {
         argv,
         env: vec![],
         timeout: None,
+        shell: None,
     }
 }
 
@@ -1999,6 +2001,7 @@ mod reverse_target_quota {
             cols: 0,
             rows: 0,
             user: None,
+            shell_command: None,
         }
     }
 
@@ -2128,6 +2131,8 @@ mod reverse_target_quota {
                     argv: vec!["cat".to_string()],
                     env: Default::default(),
                     timeout_ms: 0,
+                    login_shell: false,
+                    shell_command: None,
                 }),
             )
             .await;
@@ -2151,6 +2156,8 @@ mod reverse_target_quota {
                     argv: vec!["true".to_string()],
                     env: Default::default(),
                     timeout_ms: 0,
+                    login_shell: false,
+                    shell_command: None,
                 }),
             )
             .await;

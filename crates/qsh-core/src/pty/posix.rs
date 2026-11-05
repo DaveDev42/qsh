@@ -125,7 +125,16 @@ impl SessionSource for PtySource {
             })
             .map_err(|e| io::Error::other(format!("openpty: {e:#}")))?;
 
-        let mut cmd = if spec.argv.is_empty() {
+        let mut cmd = if let Some(request) = &spec.shell {
+            // `qsh -t host command` (ADR-0051 decision 6): the account's
+            // shell with `-c`, as `sshd` runs a command under a PTY.
+            CommandBuilder::from_argv(
+                crate::shell::unix_argv(&shell, request)
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            )
+        } else if spec.argv.is_empty() {
             CommandBuilder::new_default_prog()
         } else {
             CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect())

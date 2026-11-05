@@ -29,11 +29,12 @@ pub struct FormInput {
 /// What the form runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormMode {
-    /// A PTY session. `argv` is empty for the login shell, otherwise the
-    /// program of `-t host command`.
+    /// A PTY session. `shell_command` is `None` for the login shell,
+    /// otherwise the string of `-t host command` for the remote account's
+    /// shell to run inside the PTY (ADR-0051 decision 6).
     Interactive {
-        /// The session program; empty = login shell.
-        argv: Vec<String>,
+        /// The command string; `None` = login shell.
+        shell_command: Option<String>,
     },
     /// A command without a PTY, through the `exec` path.
     Exec(ExecCommand),
@@ -81,13 +82,18 @@ pub fn plan_form(input: &FormInput) -> Result<FormMode, OpError> {
             }
             FormMode::Exec(ExecCommand::LoginShell)
         } else {
-            FormMode::Interactive { argv: Vec::new() }
+            FormMode::Interactive {
+                shell_command: None,
+            }
         });
     }
     let command = ExecCommand::shell_command(&input.command);
     if input.force_tty > 0 {
+        let ExecCommand::ShellCommand(line) = command else {
+            unreachable!("shell_command builds a ShellCommand");
+        };
         return Ok(FormMode::Interactive {
-            argv: command.wire_argv(),
+            shell_command: Some(line),
         });
     }
     if input.has_forwards {
@@ -125,7 +131,9 @@ mod tests {
     fn modes() {
         assert_eq!(
             plan_form(&input()).unwrap(),
-            FormMode::Interactive { argv: vec![] }
+            FormMode::Interactive {
+                shell_command: None
+            }
         );
         assert_eq!(
             plan_form(&FormInput {
@@ -143,7 +151,7 @@ mod tests {
             .unwrap(),
             FormMode::Exec(ExecCommand::ShellCommand("ls -l /tmp".into()))
         );
-        let FormMode::Interactive { argv } = plan_form(&FormInput {
+        let FormMode::Interactive { shell_command } = plan_form(&FormInput {
             command: cmd(&["top"]),
             force_tty: 2,
             ..input()
@@ -151,7 +159,7 @@ mod tests {
         .unwrap() else {
             panic!("-tt with a command is a PTY session");
         };
-        assert!(!argv.is_empty());
+        assert_eq!(shell_command.as_deref(), Some("top"));
         assert_eq!(
             plan_form(&FormInput {
                 no_command: true,

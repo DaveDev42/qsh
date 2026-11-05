@@ -25,21 +25,9 @@ impl ExecChild {
     }
 }
 
-/// Start `program` with `args`; `spec` carries the caller's `env`.
-pub(super) fn spawn_child(
-    program: &str,
-    args: &[String],
-    spec: &ExecSpec,
-) -> Result<Spawned, SpawnFailure> {
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // Own process group so a timeout kill reaches the whole tree.
-    cmd.process_group(0);
-
+/// Start `spec`: its argv run directly, or its shell request through the
+/// account's login shell (`/bin/sh` when the password entry names none).
+pub(super) fn spawn_child(spec: &ExecSpec) -> Result<Spawned, SpawnFailure> {
     // Environment hygiene (`docs/CLI.md`: `exec.run` does not implicitly
     // inherit the `qsh serve` process environment, and `HOME`/`USER`/
     // `LOGNAME`/`SHELL`/`PATH` are host-pinned on every path — the *values*
@@ -50,6 +38,31 @@ pub(super) fn spawn_child(
         code: 126,
         message: format!("qsh: cannot resolve host account: {err}\n"),
     })?;
+    let argv = match &spec.shell {
+        // `SHELL` is the account's login shell, already fallen back to
+        // `/bin/sh` when the password entry is empty or not executable.
+        Some(request) => {
+            let shell = pinned
+                .iter()
+                .find(|(k, _)| k == "SHELL")
+                .map_or("/bin/sh", |(_, v)| v.as_str());
+            crate::shell::unix_argv(shell, request)
+        }
+        None => spec.argv.clone(),
+    };
+    let (program, args) = argv.split_first().ok_or_else(|| SpawnFailure {
+        code: 126,
+        message: "qsh: empty argv\n".to_string(),
+    })?;
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Own process group so a timeout kill reaches the whole tree.
+    cmd.process_group(0);
+
     cmd.env_clear();
     for (k, v) in &spec.env {
         // Same entry-shape filter as `pty::posix::build_env`: an `=` in
