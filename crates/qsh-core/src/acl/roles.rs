@@ -7,7 +7,8 @@
 
 use crate::trust::TrustRole;
 
-use super::Action;
+use super::pin_grants::{PinGrants, entry_within};
+use super::{Action, Scope};
 
 /// Which resources a role's grant reaches (ADR-0045 결정 2, "소유 축").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,28 @@ pub fn role_grant(role: TrustRole) -> &'static RoleGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RoleGrants {
     entries: Vec<(Action, RoleScope)>,
+    /// For a file action granted only within `paths` (a pin grant, ADR-0051
+    /// 결정 12), those entries. An action listed in `entries` and absent here
+    /// is unrestricted, which is what a role's file grant is.
+    file_paths: Vec<(Action, Vec<String>)>,
+}
+
+/// What a connection's identity stands on right now: the trust role of its
+/// pin and the pin's own grants (ADR-0051 결정 12). One value, resolved once
+/// per decision by [`crate::trust::SharedTrustStore::resolve_standing`], so
+/// the role stage and the pin grant stage read the same pin.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Standing {
+    /// The pin's `role`, or `None` for "no role".
+    pub role: Option<TrustRole>,
+    /// The pin's validated `grants`, or `None` when it has none.
+    pub pin: Option<PinGrants>,
+}
+
+impl From<Option<TrustRole>> for Standing {
+    fn from(role: Option<TrustRole>) -> Self {
+        Self { role, pin: None }
+    }
 }
 
 impl RoleGrants {
@@ -136,7 +159,47 @@ impl RoleGrants {
         let row = role_grant(role);
         Self {
             entries: row.actions.iter().map(|&a| (a, row.scope)).collect(),
+            file_paths: Vec::new(),
         }
+    }
+
+    /// What `standing` grants: its role's row plus its pin grants, merged per
+    /// action. Where both name an action the wider axis wins and an
+    /// unrestricted file grant (a role's) stays unrestricted.
+    pub fn of_standing(standing: &Standing) -> Self {
+        let mut grants = Self::of_role(standing.role);
+        let Some(pin) = &standing.pin else {
+            return grants;
+        };
+        let axis = match pin.scope() {
+            Scope::Owned => RoleScope::Owned,
+            Scope::Any => RoleScope::Any,
+        };
+        for &action in pin.actions() {
+            match grants.entries.iter_mut().find(|(a, _)| *a == action) {
+                Some((_, held)) => {
+                    if !scope_covers(*held, axis) {
+                        *held = axis;
+                    }
+                }
+                None => {
+                    grants.entries.push((action, axis));
+                    if action.is_file() {
+                        let paths = pin.paths().map(<[String]>::to_vec).unwrap_or_default();
+                        grants.file_paths.push((action, paths));
+                    }
+                }
+            }
+        }
+        grants
+    }
+
+    /// The `paths` a file action is limited to, or `None` when it is not.
+    fn paths_of(&self, action: Action) -> Option<&[String]> {
+        self.file_paths
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, paths)| paths.as_slice())
     }
 
     /// Whether the set grants nothing.
@@ -172,6 +235,12 @@ impl RoleGrants {
                 .filter(|(action, _)| actions.contains(action))
                 .map(|&(action, _)| (action, RoleScope::NotApplicable))
                 .collect(),
+            file_paths: self
+                .file_paths
+                .iter()
+                .filter(|(action, _)| actions.contains(action))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -181,13 +250,16 @@ impl RoleGrants {
     /// axis is not narrower. `any` covers `owned`, so the set `full` grants
     /// covers the one `tunnel` grants, while the reverse does not; an
     /// action present in `recorded` and absent here, or an `any` that
-    /// became `owned`, is a reduction. The empty set is covered by every
-    /// set.
+    /// became `owned`, is a reduction. A file action limited to `paths`
+    /// (a pin grant) is covered when it is unrestricted here or when every
+    /// recorded path lies within one of the new paths, compared as text.
+    /// The empty set is covered by every set.
     pub fn covers(&self, recorded: &RoleGrants) -> bool {
         recorded.entries.iter().all(|&(action, old)| {
             self.entries
                 .iter()
                 .any(|&(a, new)| a == action && scope_covers(new, old))
+                && paths_cover(self.paths_of(action), recorded.paths_of(action))
         })
     }
 }
@@ -202,6 +274,45 @@ pub fn role_change_narrows(previous: Option<&str>, new: Option<&str>) -> bool {
     let grants =
         |word: Option<&str>| RoleGrants::of_role(word.and_then(|w| w.parse::<TrustRole>().ok()));
     !grants(new).covers(&grants(previous))
+}
+
+/// Whether changing a pin's grant keys from `previous` to `new`, under the
+/// pin's role word, takes access away: the same covering relation the
+/// connection watch closes on (ADR-0031 결정 5, ADR-0051 결정 12). A closed
+/// connection is therefore exactly one whose principal can no longer do
+/// something it could do before: an action dropped, an `any` scope that
+/// became `owned`, or a file grant whose paths no longer contain a recorded
+/// path. The role is unchanged by a grant write, so its part cancels out;
+/// it is passed only so an action both give is not counted as lost.
+pub fn pin_grants_change_narrows(
+    role: Option<&str>,
+    previous: &super::PinGrantKeys,
+    new: &super::PinGrantKeys,
+) -> bool {
+    let role = role.and_then(|word| word.parse::<TrustRole>().ok());
+    let standing = |keys: &super::PinGrantKeys| Standing {
+        role,
+        pin: PinGrants::parse(
+            keys.grants.as_deref(),
+            keys.paths.as_deref(),
+            keys.scope.as_deref(),
+        )
+        .ok()
+        .flatten(),
+    };
+    !RoleGrants::of_standing(&standing(new)).covers(&RoleGrants::of_standing(&standing(previous)))
+}
+
+/// `new` reaches every path `old` reached: no limit, or each old entry lies
+/// within a new one.
+fn paths_cover(new: Option<&[String]>, old: Option<&[String]>) -> bool {
+    match (new, old) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(new), Some(old)) => old
+            .iter()
+            .all(|entry| new.iter().any(|parent| entry_within(parent, entry))),
+    }
 }
 
 /// `new` reaches everything `old` reached: the same axis, or `any`.
@@ -290,9 +401,11 @@ mod tests {
         // because their axis narrows from `any` to `owned`.
         let local_full = RoleGrants {
             entries: vec![(Action::ForwardLocal, RoleScope::Any)],
+            file_paths: Vec::new(),
         };
         let local_tunnel = RoleGrants {
             entries: vec![(Action::ForwardLocal, RoleScope::Owned)],
+            file_paths: Vec::new(),
         };
         assert!(!local_tunnel.covers(&local_full));
         assert!(local_full.covers(&local_tunnel));

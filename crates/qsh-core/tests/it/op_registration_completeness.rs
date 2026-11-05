@@ -441,6 +441,20 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-trust-add-ca.1",
     },
     OpFace {
+        op: "trust.allow",
+        marker: "TrustAllowOp",
+        renderer: "print_trust_allow",
+        cli_spelling: "qsh trust allow",
+        man_file: "qsh-trust-allow.1",
+    },
+    OpFace {
+        op: "trust.deny",
+        marker: "TrustDenyOp",
+        renderer: "print_trust_deny",
+        cli_spelling: "qsh trust deny",
+        man_file: "qsh-trust-deny.1",
+    },
+    OpFace {
         op: "trust.invite",
         marker: "TrustInviteOp",
         renderer: "print_trust_invite",

@@ -217,6 +217,19 @@ pub struct AclShowData {
     /// Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_actions: Option<Vec<String>>,
+    /// The `grants` written on the principal's pin (`qsh trust allow`,
+    /// ADR-0051 결정 12), exact action names. [`Self::effective_actions`]
+    /// includes them. Omitted when the pin has none. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_grants: Option<Vec<String>>,
+    /// The `paths` the pin's file grants are limited to. Omitted when the
+    /// pin has no file grant. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_grant_paths: Option<Vec<String>>,
+    /// The ownership scope of the pin's grants, `owned` or `any`. Present
+    /// exactly when [`Self::pin_grants`] is. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_grant_scope: Option<String>,
 }
 
 /// Request for `capabilities.get` (`docs/CLI.md` §6.10, `qsh capabilities

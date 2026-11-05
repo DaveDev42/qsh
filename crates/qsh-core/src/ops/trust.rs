@@ -330,6 +330,118 @@ impl Ops {
         })
     }
 
+    /// `trust.allow` (`qsh trust allow`, `docs/CLI.md` §6.11, ADR-0051
+    /// 결정 12): add actions to the pin's `grants`, with `paths` and `scope`.
+    ///
+    /// A local operation with no authorization (B13): it writes optional keys
+    /// on the pin entry and nothing else. The whole cycle is lock, load,
+    /// mutate, audit, save, like [`Self::trust_set_role`]. Every write can
+    /// widen access, so a `trust.allow` record (the exact action names in
+    /// `grant`) is written before the save; a failed append is `INTERNAL`
+    /// (`retryable: true`) and leaves `trust.toml` untouched. A name that is
+    /// no pin is `HOST_NOT_FOUND`; `forward.socks`, an unknown action, a file
+    /// grant with no `--path`, `--path` with no file grant and a bad `--scope`
+    /// are `INVALID_ARGUMENT`. The grants apply from the peer's next request.
+    pub fn trust_allow(&self, req: TrustAllowReq) -> Result<TrustGrantData, OpError> {
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let current = pin_grant_keys(&store, &req.name)?;
+        let keys =
+            crate::acl::apply_allow(&current, &req.actions, &req.paths, req.scope.as_deref())
+                .map_err(grant_arg_error)?;
+        self.write_grants(&mut store, &path, "trust.allow", &req.name, keys, true)
+    }
+
+    /// `trust.deny` (`qsh trust deny`, `docs/CLI.md` §6.11, ADR-0051
+    /// 결정 12): remove actions from the pin's `grants`. When no file grant is
+    /// left the pin's `paths` go too; when nothing is left every grant key
+    /// goes. Naming an action the pin holds no grant for is not an error and
+    /// changes nothing. `forward.socks` is `INVALID_ARGUMENT` (it is never
+    /// grantable, so there is nothing to withdraw).
+    ///
+    /// The change narrows access, so an audit failure must not stop it: the
+    /// record is attempted before the save and a failure is a log line, not a
+    /// refusal. The running serve notices the new file within a poll tick and
+    /// closes the pin's established connections that lost an action
+    /// (ADR-0031 결정 5).
+    pub fn trust_deny(&self, req: TrustDenyReq) -> Result<TrustGrantData, OpError> {
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let current = pin_grant_keys(&store, &req.name)?;
+        let keys = crate::acl::apply_deny(&current, &req.actions).map_err(grant_arg_error)?;
+        self.write_grants(&mut store, &path, "trust.deny", &req.name, keys, false)
+    }
+
+    fn write_grants(
+        &self,
+        store: &mut TrustStore,
+        path: &std::path::Path,
+        action: &'static str,
+        name: &str,
+        keys: crate::acl::PinGrantKeys,
+        fail_closed: bool,
+    ) -> Result<TrustGrantData, OpError> {
+        let (peer, previous, changed) =
+            store
+                .set_grants(name, keys.clone())
+                .map_err(|err| match err {
+                    crate::trust::SetRoleError::NotFound => not_a_pin(name),
+                })?;
+        if !changed {
+            return Ok(TrustGrantData {
+                peer,
+                changed,
+                narrowed: None,
+            });
+        }
+        let narrowed =
+            crate::acl::pin_grants_change_narrows(peer.role.as_deref(), &previous, &keys);
+        // The record names the actions the write moved: for an allow the ones
+        // now held that were not, for a deny the ones no longer held.
+        let held = |k: &crate::acl::PinGrantKeys| k.grants.clone().unwrap_or_default();
+        let (before, after) = (held(&previous), held(&keys));
+        let moved: Vec<String> = if fail_closed {
+            after
+                .iter()
+                .filter(|a| !before.contains(a))
+                .cloned()
+                .collect()
+        } else {
+            before
+                .iter()
+                .filter(|a| !after.contains(a))
+                .cloned()
+                .collect()
+        };
+        let mut record = AuditRecord::local_op(
+            action,
+            Principal::Device(peer.name.clone()).to_string(),
+            peer.name.clone(),
+        );
+        record.grant = Some(moved.join(","));
+        match self.audit_sink().and_then(|sink| {
+            sink.record(&record).map_err(|err| {
+                OpError::new(
+                    ErrorCode::Internal,
+                    format!("audit record could not be written; trust.toml left unchanged: {err}"),
+                )
+                .with_retryable(true)
+            })
+        }) {
+            Ok(()) => {}
+            Err(err) if fail_closed => return Err(err),
+            Err(err) => tracing::warn!(%err, "trust.deny could not be audited; narrowing anyway"),
+        }
+        store.save(path)?;
+        Ok(TrustGrantData {
+            peer,
+            changed,
+            narrowed: Some(narrowed),
+        })
+    }
+
     /// The audit sink a fail-closed local write records to: the injected
     /// one ([`Self::with_audit_sink`]), otherwise a [`FileAuditSink`] on the
     /// configured `audit.log` path, built now.
@@ -645,6 +757,29 @@ impl Ops {
 /// `role`) against the six fixed names (ADR-0045 결정 2), mapping a failure
 /// to `INVALID_ARGUMENT`. The text in the message is the operator's own
 /// argument, never peer-controlled.
+/// The grant keys a pin holds now, or `HOST_NOT_FOUND` for a name that is no
+/// pin (a `[[ca]]` name included).
+fn pin_grant_keys(store: &TrustStore, name: &str) -> Result<crate::acl::PinGrantKeys, OpError> {
+    let peer = store.find(name).ok_or_else(|| not_a_pin(name))?;
+    Ok(crate::acl::PinGrantKeys {
+        grants: peer.grants.clone(),
+        paths: peer.paths.clone(),
+        scope: peer.scope.clone(),
+    })
+}
+
+fn not_a_pin(name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!("{name:?} is not a pinned peer"),
+    )
+    .with_retryable(false)
+}
+
+fn grant_arg_error(err: crate::acl::PinGrantsError) -> OpError {
+    OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+}
+
 pub(crate) fn parse_role_arg(role: &str) -> Result<TrustRole, OpError> {
     role.parse::<TrustRole>().map_err(|err| {
         OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)

@@ -298,6 +298,8 @@ mod section_2_5 {
                 "trust.remove",
                 "trust.rename",
                 "trust.set_role",
+                "trust.allow",
+                "trust.deny",
                 "trust.ssh_preview",
                 "trust.invite",
                 "trust.accept",
@@ -1463,13 +1465,13 @@ mod source_scan {
             .join("\n")
     }
 
-    /// ADR-0045 결정 7 / M15 plan Step 6 (1a4af3b): `Policy::decide` has exactly three
-    /// production call sites, all inside `qsh-core` — `Policy::check_with_role`
+    /// ADR-0045 결정 7 / M15 plan Step 6 (1a4af3b): `Policy::decide_standing` (the evaluator, once `Policy::decide`) has exactly three
+    /// production call sites, all inside `qsh-core` — `Policy::check_with_standing`
     /// (enforcement), `Policy::effective_actions` (`acl show`) and
     /// `Ops::acl_check` (`acl check`). The role stage ⓡ lives inside `decide`,
     /// so a fourth caller would be a second evaluator that could disagree
     /// with enforcement about roles. This is the mechanical form of the
-    /// `grep -rn 'policy\.decide(\|self\.decide(' crates/qsh-core/src/acl
+    /// `grep -rn 'policy\.decide_standing(\|self\.decide_standing(' crates/qsh-core/src/acl
     /// crates/qsh-core/src/ops --exclude=tests.rs` check
     /// `Policy::decide`'s doc names.
     #[test]
@@ -1481,13 +1483,15 @@ mod source_scan {
         );
         let call_sites: Vec<&str> = non_comment_lines(&source)
             .into_iter()
-            .filter(|line| line.contains("policy.decide(") || line.contains("self.decide("))
+            .filter(|line| {
+                line.contains("policy.decide_standing(") || line.contains("self.decide_standing(")
+            })
             .collect();
         assert_eq!(
             call_sites.len(),
             3,
             "Policy::decide must have exactly three production call sites \
-             (check_with_role, effective_actions, Ops::acl_check): {call_sites:?}"
+             (check_with_standing, effective_actions, Ops::acl_check): {call_sites:?}"
         );
     }
 }

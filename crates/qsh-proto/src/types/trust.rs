@@ -27,6 +27,20 @@ pub struct TrustPeer {
     /// from an explicit `none`. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Fine-grained actions granted to this pin on top of its role
+    /// (ADR-0051 결정 12): exact action names from the ACL vocabulary, never
+    /// `forward.socks`. Omitted when `trust.toml` has no `grants` key.
+    /// Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants: Option<Vec<String>>,
+    /// Absolute path prefixes the pin's `file.read`/`file.write` grants are
+    /// limited to. Omitted when `trust.toml` has no `paths` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// Ownership scope of the pin's grants, `owned` or `any`. Omitted when
+    /// `trust.toml` has no `scope` key (the default is `owned`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Request for `trust.add`.
@@ -206,6 +220,53 @@ pub struct TrustSetRoleData {
     /// `false` when the pin already had exactly this role: nothing was
     /// written and no audit record was made.
     pub changed: bool,
+}
+
+/// Request for `trust.allow` (`qsh trust allow <name> <action>...`,
+/// ADR-0051 결정 12): adds actions to the pin's `grants`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustAllowReq {
+    /// The pinned peer's name. A `[[ca]]` name is not a pin and is
+    /// `HOST_NOT_FOUND`.
+    pub name: String,
+    /// Actions to grant: names from the ACL vocabulary or a trailing `.*`
+    /// family (`forward.*`; it never reaches `forward.socks`). An explicit
+    /// `forward.socks` is `INVALID_ARGUMENT`.
+    pub actions: Vec<String>,
+    /// Absolute path prefixes for `file.read`/`file.write`. Required when the
+    /// pin ends up with a file grant and has no paths yet; refused when it
+    /// would end up with no file grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// `owned` (the default) or `any`: which resources the grants reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// Request for `trust.deny` (`qsh trust deny <name> <action>...`,
+/// ADR-0051 결정 12): removes actions from the pin's `grants`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustDenyReq {
+    /// The pinned peer's name.
+    pub name: String,
+    /// Actions to remove (names or trailing `.*` families). Actions the pin
+    /// holds no grant for are ignored.
+    pub actions: Vec<String>,
+}
+
+/// Data payload of `trust.allow` and `trust.deny`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustGrantData {
+    /// The pin after the call.
+    pub peer: TrustPeer,
+    /// `false` when the pin already stood exactly as requested: nothing was
+    /// written.
+    pub changed: bool,
+    /// `true` when the call took access away, so the pin's established
+    /// connections that lost an action are closed within 2 seconds
+    /// (ADR-0031). Omitted when the call did not change the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowed: Option<bool>,
 }
 
 /// Request for `trust.rename`.

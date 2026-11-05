@@ -1,0 +1,20 @@
+{
+  "command": "acl.check",
+  "data": {
+    "action": "forward.local",
+    "auth_path": "pin",
+    "decision": "allow",
+    "granted_by": "grant",
+    "policy": {
+      "loaded": false,
+      "path": "<path>",
+      "rules": 0,
+      "state": "missing"
+    },
+    "principal": "device:phone",
+    "role": "none"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

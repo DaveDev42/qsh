@@ -33,6 +33,7 @@ fn record(n: u32, principal: &str, action: &str, resource: &str, decision: &str)
         peer_addr: "100.64.0.7:51234".to_string(),
         count: None,
         role: None,
+        grant: None,
     }
 }
 

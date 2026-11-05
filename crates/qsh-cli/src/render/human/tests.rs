@@ -46,6 +46,9 @@ fn format_trust_pin_line_sanitizes_the_name_and_keeps_the_fingerprint_intact() {
         address: String::new(),
         added_at: "2026-08-31T00:00:00Z".to_string(),
         role: None,
+        grants: None,
+        paths: None,
+        scope: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -71,6 +74,9 @@ fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
         address: "198.51.100.7:4433".to_string(),
         added_at: "2026-08-31T00:00:00Z".to_string(),
         role: None,
+        grants: None,
+        paths: None,
+        scope: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -123,6 +129,9 @@ fn role_cell_shows_the_role_or_none_legacy() {
         address: String::new(),
         added_at: "2026-10-12T00:00:00Z".to_string(),
         role: None,
+        grants: None,
+        paths: None,
+        scope: None,
     };
     assert_eq!(role_cell(&peer), "(none, legacy)");
     peer.role = Some("read-only".to_string());

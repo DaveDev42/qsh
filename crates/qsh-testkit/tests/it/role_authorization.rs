@@ -954,3 +954,195 @@ async fn role_tunnel_cannot_close_another_principals_remote_forward_reverse() {
     laptop.close();
     h.shutdown().await;
 }
+
+// --- pin grants (ADR-0051 결정 12) ---------------------------------------
+
+/// A pin block like [`peer_block`] with extra TOML keys (`grants`, `paths`,
+/// `scope`) in the same table.
+fn granted_block(
+    name: &str,
+    fingerprint: &qsh_transport::Fingerprint,
+    role: Option<&str>,
+    extra_keys: &str,
+) -> String {
+    let role = role.map_or(String::new(), |r| format!("role = \"{r}\"\n"));
+    format!(
+        "[[peer]]\nname = \"{name}\"\nfingerprint = \"{fingerprint}\"\naddress = \"\"\n\
+         added_at = \"2026-11-05T00:00:00Z\"\n{role}{extra_keys}\n\n"
+    )
+}
+
+/// A grant written to `trust.toml` applies from the very next request on the
+/// same connection, with no restart, and withdrawing it ends the next
+/// request the same way. The allow's audit record names the pin grant as its
+/// basis (no rule, no role).
+async fn pin_grant_applies_on_the_next_request_scenario<R: Route>() {
+    let client = make_identity();
+    let none = granted_block("laptop", &client.fingerprint, Some("none"), "");
+    let env = Env::with_trust_text(client.clone(), &none, AclFile::Missing);
+    let h = R::start(&env).await;
+    let mut s = h.session().await;
+
+    assert!(!authorized(s.session_list().await), "no grant yet");
+
+    env.rewrite_trust(&granted_block(
+        "laptop",
+        &client.fingerprint,
+        Some("none"),
+        "grants = [\"session.list\"]",
+    ));
+    assert!(authorized(s.session_list().await), "the next request");
+    assert!(
+        !authorized(s.session_open(open_req()).await),
+        "only the granted action"
+    );
+    let records = h.audit().records();
+    let allow = records
+        .iter()
+        .find(|r| r.action == "session.list" && r.decision == "allow")
+        .expect("session.list allow record");
+    assert_eq!(allow.rule, None);
+    assert_eq!(allow.role, None);
+    assert_eq!(allow.grant.as_deref(), Some("pin"));
+    assert!(
+        records
+            .iter()
+            .filter(|r| r.decision == "deny")
+            .all(|r| r.grant.is_none()),
+        "a deny never names a grant"
+    );
+
+    env.rewrite_trust(&none);
+    assert!(!authorized(s.session_list().await), "withdrawn");
+    s.close();
+    h.shutdown().await;
+}
+
+both_routes!(pin_grant_applies_on_the_next_request_scenario =>
+    pin_grant_applies_on_the_next_request_without_restart_forward,
+    pin_grant_applies_on_the_next_request_without_restart_reverse);
+
+/// B18 for grants: a `trust.toml` that stops parsing suspends the pin's
+/// grants like its role, and a good file brings them back.
+async fn broken_trust_toml_suspends_pin_grants_scenario<R: Route>() {
+    let client = make_identity();
+    let good = granted_block(
+        "laptop",
+        &client.fingerprint,
+        Some("none"),
+        "grants = [\"session.list\"]",
+    );
+    let env = Env::with_trust_text(client.clone(), &good, AclFile::Missing);
+    let h = R::start(&env).await;
+    let mut s = h.session().await;
+    assert!(authorized(s.session_list().await));
+
+    env.rewrite_trust("[[peer]]\nname = ");
+    assert!(
+        !authorized(s.session_list().await),
+        "a broken trust.toml suspends grants"
+    );
+    // A grant whose keys break the rules is a broken file too.
+    env.rewrite_trust(&granted_block(
+        "laptop",
+        &client.fingerprint,
+        Some("none"),
+        "grants = [\"session.list\", \"forward.socks\"]",
+    ));
+    assert!(!authorized(s.session_list().await));
+
+    env.rewrite_trust(&good);
+    assert!(authorized(s.session_list().await), "restored");
+    s.close();
+    h.shutdown().await;
+}
+
+both_routes!(broken_trust_toml_suspends_pin_grants_scenario =>
+    trust_store_reload_failure_suspends_pin_grants_forward,
+    trust_store_reload_failure_suspends_pin_grants_reverse);
+
+/// B16 and B17 for grants, and the gate in front of them: a CA-authenticated
+/// peer that names the pinned device, a connection whose fingerprint is not
+/// the pin's current one (the name was re-pinned to a new key), a `user:`
+/// principal and a connection with no fingerprint all get nothing from the
+/// pin's grants, and no grant reaches `forward.socks`.
+#[test]
+fn pin_grant_does_not_reach_a_ca_leaf_or_a_repinned_name() {
+    let client = make_identity();
+    let granted = granted_block(
+        "laptop",
+        &client.fingerprint,
+        Some("none"),
+        "grants = [\"exec.run\", \"forward.local\"]\nscope = \"any\"",
+    );
+    let env = Env::with_trust_text(client.clone(), &granted, AclFile::Missing);
+    let authorizer = env.authorizer(Role::Serve);
+    let device = Principal::Device("laptop".to_string());
+    let matching = Some(PeerFingerprint::new(*client.fingerprint.as_bytes()));
+    let check = |principal: &Principal,
+                 auth_path: AuthPath,
+                 fingerprint: Option<PeerFingerprint>,
+                 action: Action| {
+        authorizer
+            .check(
+                &Requester::new(principal, auth_path, fingerprint),
+                action,
+                ResourceRef::unowned("r"),
+            )
+            .decision
+    };
+
+    assert_eq!(
+        check(&device, AuthPath::Pin, matching, Action::ExecRun),
+        Decision::Allow
+    );
+    assert_eq!(
+        check(&device, AuthPath::Pin, matching, Action::SessionOpen),
+        Decision::Deny,
+        "only the granted actions"
+    );
+    // CA path: the same name, the right fingerprint, no grants.
+    assert_eq!(
+        check(&device, AuthPath::Ca, matching, Action::ExecRun),
+        Decision::Deny
+    );
+    // The name re-pinned to another key: the old connection's fingerprint no
+    // longer matches the pin.
+    let newer = make_identity();
+    env.rewrite_trust(&granted_block(
+        "laptop",
+        &newer.fingerprint,
+        Some("none"),
+        "grants = [\"exec.run\"]",
+    ));
+    assert_eq!(
+        check(&device, AuthPath::Pin, matching, Action::ExecRun),
+        Decision::Deny
+    );
+    let new_fp = Some(PeerFingerprint::new(*newer.fingerprint.as_bytes()));
+    assert_eq!(
+        check(&device, AuthPath::Pin, new_fp, Action::ExecRun),
+        Decision::Allow,
+        "the pin's own key keeps its grants"
+    );
+    // Not a device principal, or no fingerprint.
+    env.rewrite_trust(&granted);
+    assert_eq!(
+        check(
+            &Principal::User("laptop".to_string()),
+            AuthPath::Pin,
+            matching,
+            Action::ExecRun
+        ),
+        Decision::Deny
+    );
+    assert_eq!(
+        check(&device, AuthPath::Pin, None, Action::ExecRun),
+        Decision::Deny
+    );
+    // `forward.socks` stays behind the always-deny gate whatever is granted.
+    assert_eq!(
+        check(&device, AuthPath::Pin, matching, Action::ForwardSocks),
+        Decision::Deny
+    );
+}

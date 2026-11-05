@@ -56,9 +56,9 @@ use qsh_core::{
     ServiceInstallOp, ServiceInstallOptions, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
     SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
-    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
+    TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp,
+    TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp,
+    VersionOp, cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
     read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
@@ -68,8 +68,9 @@ use qsh_proto::{
     HostGetReq, IdentityExportReq, IdentityInitReq, IdentityMoveKeyReq, PairSshReq,
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
     SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
-    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
-    TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustAllowReq, TrustDenyReq, TrustInviteReq,
+    TrustRenameReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq,
+    TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -511,6 +512,31 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 role: role.clone(),
             }),
             human::print_trust_set_role,
+        ),
+        Command::Trust(TrustCmd::Allow {
+            name,
+            actions,
+            paths,
+            scope,
+        }) => finish(
+            cli,
+            TrustAllowOp::COMMAND,
+            ops.trust_allow(TrustAllowReq {
+                name: name.clone(),
+                actions: actions.clone(),
+                paths: paths.clone(),
+                scope: scope.clone(),
+            }),
+            human::print_trust_allow,
+        ),
+        Command::Trust(TrustCmd::Deny { name, actions }) => finish(
+            cli,
+            TrustDenyOp::COMMAND,
+            ops.trust_deny(TrustDenyReq {
+                name: name.clone(),
+                actions: actions.clone(),
+            }),
+            human::print_trust_deny,
         ),
         Command::Trust(TrustCmd::SshPreview { path }) => finish(
             cli,
@@ -2963,6 +2989,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
         Command::Trust(TrustCmd::SetRole { .. }) => TrustSetRoleOp::COMMAND,
+        Command::Trust(TrustCmd::Allow { .. }) => TrustAllowOp::COMMAND,
+        Command::Trust(TrustCmd::Deny { .. }) => TrustDenyOp::COMMAND,
         Command::Trust(TrustCmd::SshPreview { .. }) => TrustSshPreviewOp::COMMAND,
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,

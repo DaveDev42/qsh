@@ -638,6 +638,7 @@ impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
             },
             rule: None,
             role: None,
+            pin_grant: false,
         }
     }
 }

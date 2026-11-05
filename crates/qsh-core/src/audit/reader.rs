@@ -65,6 +65,7 @@ pub fn record_view(record: AuditRecord) -> AuditRecordView {
         peer_addr,
         count,
         role,
+        grant,
     } = record;
     AuditRecordView {
         ts,
@@ -78,6 +79,7 @@ pub fn record_view(record: AuditRecord) -> AuditRecordView {
         peer_addr,
         count,
         role,
+        grant,
     }
 }
 

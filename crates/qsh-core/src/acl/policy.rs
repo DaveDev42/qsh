@@ -30,6 +30,16 @@
 //! the union of role and rows, and when both would allow, the basis is
 //! the role.
 //!
+//! Between ⓡ and ② sits the pin grant stage ⓖ (ADR-0051 결정 12): the
+//! `grants` (with `paths` and `scope`) that `qsh trust allow` wrote on the
+//! same pin, resolved with the role as one [`Standing`]. It applies under the
+//! role's preconditions, re-checked here, to the actions the pin lists; its
+//! `scope` is judged like a row's and a file action also needs a `paths`
+//! entry covering the request's canonical path. An allow here has
+//! [`Verdict::pin_grant`] set, `rule` and `role` empty, and the basis order
+//! is role, pin grant, row. [`Policy::decide_standing`] is the only
+//! evaluator.
+//!
 //! 2. Principal exact match (`Rule::principal` against the connection's
 //!    `Principal::to_string()`) **and** `auth_path` match. A rule that
 //!    omits `auth_path` defaults to [`AuthPath::Pin`] and so never matches
@@ -61,7 +71,8 @@ use crate::trust::TrustRole;
 
 use super::paths::entries_cover;
 use super::{
-    Action, Authorizer, Decision, Requester, ResourceRef, RoleScope, opener_key, role_grant,
+    Action, Authorizer, Decision, PinGrants, Requester, ResourceRef, RoleScope, Standing,
+    opener_key, role_grant,
 };
 
 /// A validated action-family prefix — dot included, non-empty stem —
@@ -231,6 +242,9 @@ pub struct Verdict {
     /// stage wins when role and rows would both allow). `None` for every
     /// deny and for an allow granted by a row.
     pub role: Option<TrustRole>,
+    /// Whether the allow rests on the pin's own grants (`trust allow`,
+    /// ADR-0051 결정 12). Never set together with `role` or `rule`.
+    pub pin_grant: bool,
 }
 
 /// What an allow rests on ([`Verdict::granted_by`]).
@@ -240,6 +254,8 @@ pub enum GrantBasis {
     Rule(u32),
     /// The requester's trust role.
     Role(TrustRole),
+    /// The grants written on the requester's pin.
+    PinGrant,
 }
 
 impl Verdict {
@@ -248,6 +264,7 @@ impl Verdict {
         decision: Decision::Deny,
         rule: None,
         role: None,
+        pin_grant: false,
     };
 
     /// An allow with no basis to report (the interim allow-all-pinned
@@ -256,6 +273,7 @@ impl Verdict {
         decision: Decision::Allow,
         rule: None,
         role: None,
+        pin_grant: false,
     };
 
     /// Shorthand for `self.decision.is_allow()`.
@@ -269,10 +287,11 @@ impl Verdict {
         if !self.is_allow() {
             return None;
         }
-        match (self.role, self.rule) {
-            (Some(role), _) => Some(GrantBasis::Role(role)),
-            (None, Some(index)) => Some(GrantBasis::Rule(index)),
-            (None, None) => None,
+        match (self.role, self.pin_grant, self.rule) {
+            (Some(role), _, _) => Some(GrantBasis::Role(role)),
+            (None, true, _) => Some(GrantBasis::PinGrant),
+            (None, false, Some(index)) => Some(GrantBasis::Rule(index)),
+            (None, false, None) => None,
         }
     }
 }
@@ -324,11 +343,11 @@ impl Policy {
     /// crates/qsh-core/src/ops --exclude=tests.rs`, which prints exactly
     /// three lines. (A workspace-wide `grep '\.decide('` would also count
     /// the two unrelated `Admission::decide` calls, so it is scoped.)
-    pub(crate) fn decide(
+    pub(crate) fn decide_standing(
         &self,
         principal: &Principal,
         auth_path: AuthPath,
-        role: Option<TrustRole>,
+        standing: &Standing,
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
@@ -342,7 +361,7 @@ impl Policy {
         // the current pin; the preconditions that make a role count at all
         // are re-checked here so a mis-resolved role can never reach an
         // `auth_path = Ca`, `user:` or `fp:` principal.
-        if let Some(role) = role
+        if let Some(role) = standing.role
             && role_covers(principal, auth_path, role, action)
         {
             let scope_ok = match (role_grant(role).scope, resource.owner) {
@@ -356,6 +375,30 @@ impl Policy {
                     decision: Decision::Allow,
                     rule: None,
                     role: Some(role),
+                    pin_grant: false,
+                };
+            }
+        }
+        // ⓖ Pin grant stage (ADR-0051 결정 12), right after the role and
+        // before the rows. The grants come from the same pin the role did,
+        // already matched on the connection's fingerprint; the same
+        // preconditions are re-checked here. The pin's `scope` is judged like
+        // a row's, and a file action also needs one of the pin's `paths` to
+        // cover the request's canonical path.
+        if let Some(pin) = &standing.pin
+            && pin_covers(principal, auth_path, pin, action)
+        {
+            let scope_ok = match (pin.scope(), resource.owner) {
+                (Scope::Any, _) | (Scope::Owned, None) => true,
+                (Scope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
+            };
+            let path_ok = !action.is_file() || pin_covers_path(pin, &resource);
+            if scope_ok && path_ok {
+                return Verdict {
+                    decision: Decision::Allow,
+                    rule: None,
+                    role: None,
+                    pin_grant: true,
                 };
             }
         }
@@ -392,6 +435,7 @@ impl Policy {
                 decision: Decision::Allow,
                 rule: Some(index),
                 role: None,
+                pin_grant: false,
             };
         }
         Verdict::DENY
@@ -411,12 +455,17 @@ impl Policy {
         &self,
         principal: &Principal,
         auth_path: AuthPath,
-        role: Option<TrustRole>,
+        standing: &Standing,
         action: Action,
     ) -> bool {
         debug_assert!(action.is_file(), "file_grant_basis is for file actions");
-        if let Some(role) = role
+        if let Some(role) = standing.role
             && role_covers(principal, auth_path, role, action)
+        {
+            return true;
+        }
+        if let Some(pin) = &standing.pin
+            && pin_covers(principal, auth_path, pin, action)
         {
             return true;
         }
@@ -428,23 +477,23 @@ impl Policy {
         })
     }
 
-    /// [`Authorizer::check`]'s body with the requester's resolved trust
-    /// role as an explicit input: the one place the production
-    /// [`crate::acl::RoleResolvingAuthorizer`] reaches [`Policy::decide`]
-    /// from. `role` is `None` for "no role" (which is also what an
-    /// unresolvable role, a suspended trust store and a mismatched
-    /// fingerprint all resolve to).
-    pub(crate) fn check_with_role(
+    /// [`Authorizer::check`]'s body with the requester's resolved standing
+    /// (trust role and pin grants) as an explicit input: the one place the
+    /// production [`crate::acl::RoleResolvingAuthorizer`] reaches
+    /// [`Policy::decide_standing`] from. The standing is empty for "no role,
+    /// no grants" (which is also what an unresolvable pin, a suspended trust
+    /// store and a mismatched fingerprint all resolve to).
+    pub(crate) fn check_with_standing(
         &self,
         requester: &Requester<'_>,
-        role: Option<TrustRole>,
+        standing: &Standing,
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
-        self.decide(
+        self.decide_standing(
             requester.principal,
             requester.auth_path,
-            role,
+            standing,
             action,
             resource,
         )
@@ -469,7 +518,7 @@ impl Policy {
         &self,
         principal: &Principal,
         auth_path: AuthPath,
-        role: Option<TrustRole>,
+        standing: &Standing,
     ) -> Vec<Action> {
         Action::ALL
             .into_iter()
@@ -480,10 +529,16 @@ impl Policy {
                     // The answer is the ground helper enforcement shares
                     // (ADR-0029 결정 4-6 (a), 19): the set is a ceiling, and
                     // `acl check --path` says which paths open.
-                    return self.file_grant_basis(principal, auth_path, role, action);
+                    return self.file_grant_basis(principal, auth_path, standing, action);
                 }
-                self.decide(principal, auth_path, role, action, ResourceRef::unowned(""))
-                    .is_allow()
+                self.decide_standing(
+                    principal,
+                    auth_path,
+                    standing,
+                    action,
+                    ResourceRef::unowned(""),
+                )
+                .is_allow()
             })
             .collect()
     }
@@ -554,10 +609,35 @@ fn role_covers(
         && role_grant(role).actions.contains(&action)
 }
 
+/// The pin grant stage's precondition and set lookup, shared by
+/// [`Policy::decide_standing`] and [`Policy::file_grant_basis`]: only a
+/// `device:` principal over the pin path carries pin grants, and the action
+/// must be one of them.
+fn pin_covers(principal: &Principal, auth_path: AuthPath, pin: &PinGrants, action: Action) -> bool {
+    auth_path == AuthPath::Pin
+        && matches!(principal, Principal::Device(_))
+        && !action.is_always_denied()
+        && pin.contains(action)
+}
+
+/// A pin's file grant covers the request: the request carries a canonical
+/// path and one of the pin's `paths` covers it.
+fn pin_covers_path(pin: &PinGrants, resource: &ResourceRef<'_>) -> bool {
+    match (pin.paths(), &resource.canonical_path) {
+        (Some(entries), Some(request)) => entries_cover(entries, request),
+        _ => false,
+    }
+}
+
 impl Authorizer for Policy {
     fn has_file_grant(&self, requester: &Requester<'_>, action: Action) -> bool {
         // Rows only, same as `check` below.
-        self.file_grant_basis(requester.principal, requester.auth_path, None, action)
+        self.file_grant_basis(
+            requester.principal,
+            requester.auth_path,
+            &Standing::default(),
+            action,
+        )
     }
 
     fn check(
@@ -570,7 +650,7 @@ impl Authorizer for Policy {
         // rows-only judgment (no role). Production wraps the policy in
         // `RoleResolvingAuthorizer`, which resolves the requester's role
         // and goes through `Policy::check_with_role` instead.
-        self.check_with_role(requester, None, action, resource)
+        self.check_with_standing(requester, &Standing::default(), action, resource)
     }
 }
 

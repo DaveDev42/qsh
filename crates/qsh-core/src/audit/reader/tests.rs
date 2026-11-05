@@ -36,6 +36,7 @@ fn record(n: i64, principal: &str, action: &str, resource: &str, decision: &str)
         peer_addr: "127.0.0.1:4433".to_string(),
         count: None,
         role: None,
+        grant: None,
     }
 }
 

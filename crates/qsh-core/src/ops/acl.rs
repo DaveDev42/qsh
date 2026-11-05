@@ -35,12 +35,12 @@ use qsh_transport::{AuthPath, Principal};
 
 use crate::acl::{
     Action, ActionPattern, GrantBasis, Policy, PolicyLoad, PolicySource, ResourceRef, Scope,
-    Verdict, opener_key, role_grant,
+    Standing, Verdict, opener_key, role_grant,
 };
 use crate::file::guard::{FileOp, FsNormalizer, Normalizer, ShapedPath};
 use crate::file::guard::{serve_home_dir, shape_path};
 use crate::ops::{OpError, Operation, Ops};
-use crate::trust::{TrustRole, TrustStore};
+use crate::trust::TrustStore;
 
 /// The `acl.check` operation (`qsh acl check`).
 pub struct AclCheckOp;
@@ -138,13 +138,16 @@ fn shape_path_arg(action: Action, raw: Option<&str>) -> Result<Option<ShapedPath
 }
 
 impl Ops {
-    /// The role a local query evaluates for `principal` over `auth_path`
-    /// (ADR-0045 결정 10·11): see the module doc. `None` means "no role in
-    /// the question"; a pin with no `role` key is `Some(TrustRole::None)`.
-    fn query_role(&self, principal: &Principal, auth_path: AuthPath) -> Option<TrustRole> {
+    /// The role and the pin grants a local query evaluates for `principal`
+    /// over `auth_path` (ADR-0045 결정 10·11, ADR-0051 결정 12): see the
+    /// module doc. An empty role means "no role in the question"; a pin with
+    /// no `role` key is `Some(TrustRole::None)`. A `trust.toml` that does not
+    /// load yields neither, the answer a running serve gives while the store
+    /// is suspended.
+    fn query_standing(&self, principal: &Principal, auth_path: AuthPath) -> Standing {
         match TrustStore::load(&self.paths.trust_file()) {
-            Ok(store) => store.query_role(principal, auth_path),
-            Err(_) => None,
+            Ok(store) => store.query_standing(principal, auth_path),
+            Err(_) => Standing::default(),
         }
     }
 
@@ -228,7 +231,8 @@ impl Ops {
             None => ResourceRef::unowned(resource_id),
         };
 
-        let role = self.query_role(&principal, auth_path);
+        let standing = self.query_standing(&principal, auth_path);
+        let role = standing.role;
         let path = self.paths.acl_file().display().to_string();
         let (rows, state) = self.load_rows();
         // The same three steps as enforcement (ADR-0029 결정 4-6): (a) the
@@ -239,7 +243,7 @@ impl Ops {
         let normalizer = FsNormalizer;
         let canonical: Option<PathBuf> = match (&shaped, &rows) {
             (Some(shaped), Some(policy))
-                if policy.file_grant_basis(&principal, auth_path, role, action) =>
+                if policy.file_grant_basis(&principal, auth_path, &standing, action) =>
             {
                 normalizer.normalize(&shaped.absolute).ok()
             }
@@ -252,7 +256,9 @@ impl Ops {
         // One `decide` call for every state: an unusable file yields no
         // `Policy` and refuses everything, role grants included.
         let verdict = match &rows {
-            Some(policy) => policy.decide(&principal, auth_path, role, action, resource),
+            Some(policy) => {
+                policy.decide_standing(&principal, auth_path, &standing, action, resource)
+            }
             None => Verdict::DENY,
         };
         let rule_count = rows.as_ref().map_or(0, |policy| policy.rules.len());
@@ -263,6 +269,7 @@ impl Ops {
             match basis {
                 GrantBasis::Role(_) => "role",
                 GrantBasis::Rule(_) => "acl",
+                GrantBasis::PinGrant => "grant",
             }
             .to_string()
         });
@@ -310,7 +317,8 @@ impl Ops {
             None => (AuthPath::Pin, true),
         };
 
-        let role = self.query_role(&principal, auth_path);
+        let standing = self.query_standing(&principal, auth_path);
+        let role = standing.role;
         let path = self.paths.acl_file().display().to_string();
         let (rows, state) = self.load_rows();
         let (matching_rules, effective_actions, rule_count) = match &rows {
@@ -332,7 +340,7 @@ impl Ops {
                     })
                     .collect();
                 let effective = policy
-                    .effective_actions(&principal, auth_path, role)
+                    .effective_actions(&principal, auth_path, &standing)
                     .into_iter()
                     .map(|a| a.as_str().to_string())
                     .collect();
@@ -352,6 +360,20 @@ impl Ops {
                 .collect()
         });
 
+        // An unusable `acl.toml` refuses pin grants too, like roles.
+        let pin_keys = standing
+            .pin
+            .as_ref()
+            .filter(|_| rows.is_some())
+            .map(crate::acl::PinGrants::keys);
+        let pin_scope = standing.pin.as_ref().filter(|_| rows.is_some()).map(|pin| {
+            match pin.scope() {
+                Scope::Owned => "owned",
+                Scope::Any => "any",
+            }
+            .to_string()
+        });
+
         Ok(AclShowData {
             principal: principal.to_string(),
             auth_path: auth_path_str(auth_path).to_string(),
@@ -361,6 +383,9 @@ impl Ops {
             effective_actions,
             role: role.map(|role| role.as_str().to_string()),
             role_actions,
+            pin_grants: pin_keys.as_ref().and_then(|k| k.grants.clone()),
+            pin_grant_paths: pin_keys.and_then(|k| k.paths),
+            pin_grant_scope: pin_scope,
         })
     }
 }

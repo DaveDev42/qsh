@@ -14,9 +14,9 @@ use crate::types::{
     IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData, ServiceInstallData,
     ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionListData,
     SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, SetupRunData,
-    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData,
-    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData, TunnelListData,
-    TunnelOpenData, VersionData,
+    TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData, TrustListData,
+    TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData,
+    TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -59,6 +59,8 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "trust.accept",
     "trust.add",
     "trust.add_ca",
+    "trust.allow",
+    "trust.deny",
     "trust.invite",
     "trust.list",
     "trust.remove",
@@ -118,6 +120,8 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "trust.accept" => schema_for!(TrustAcceptData),
         "trust.add" => schema_for!(TrustAddData),
         "trust.add_ca" => schema_for!(TrustAddCaData),
+        "trust.allow" => schema_for!(TrustGrantData),
+        "trust.deny" => schema_for!(TrustGrantData),
         "trust.invite" => schema_for!(TrustInviteData),
         "trust.list" => schema_for!(TrustListData),
         "trust.remove" => schema_for!(TrustRemoveData),

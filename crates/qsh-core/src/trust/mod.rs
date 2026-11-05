@@ -37,7 +37,7 @@ use qsh_transport::{AuthPath, CertificateDer, Fingerprint, Principal, TrustEvalu
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::acl::RoleGrants;
+use crate::acl::{PinGrants, RoleGrants, Standing};
 use crate::broker::PeerFingerprint;
 use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
@@ -347,6 +347,28 @@ impl TrustStore {
                 .with_retryable(false));
             }
         }
+        // ADR-0051 결정 12: `grants`, `paths` and `scope` that do not form a
+        // valid set of pin grants (an unknown action, `forward.socks`, a file
+        // grant with no `paths`, a relative path, ...) make the whole file a
+        // `CONFIG_ERROR`, like a bad `role`: pin authentication keeps the last
+        // good snapshot and role and pin grants are suspended.
+        for peer in &file.peers {
+            if let Err(err) = PinGrants::parse(
+                peer.grants.as_deref(),
+                peer.paths.as_deref(),
+                peer.scope.as_deref(),
+            ) {
+                return Err(OpError::new(
+                    ErrorCode::ConfigError,
+                    format!(
+                        "invalid trust store {}: peer {:?}: {err}",
+                        path.display(),
+                        peer.name
+                    ),
+                )
+                .with_retryable(false));
+            }
+        }
         Ok(Self {
             peers: file.peers,
             cas: file.cas,
@@ -561,6 +583,9 @@ impl TrustStore {
             address: address.unwrap_or_default(),
             added_at: now,
             role: role.map(|role| role.as_str().to_string()),
+            grants: None,
+            paths: None,
+            scope: None,
         };
         self.peers.push(peer.clone());
         (peer, true, false)
@@ -716,6 +741,36 @@ impl TrustStore {
         Ok((self.peers[index].clone(), previous, changed))
     }
 
+    /// Replace the `grants`, `paths` and `scope` keys of the pin named
+    /// `name` (`qsh trust allow` / `deny`, ADR-0051 결정 12). Pure, like
+    /// [`Self::set_role`]: `Ops::trust_allow` / `trust_deny` own the lock, the
+    /// audit record and the save. Returns the pin as it now stands, the
+    /// keys it had before and whether anything changed.
+    pub fn set_grants(
+        &mut self,
+        name: &str,
+        keys: crate::acl::PinGrantKeys,
+    ) -> Result<(TrustPeer, crate::acl::PinGrantKeys, bool), SetRoleError> {
+        let index = self
+            .peers
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or(SetRoleError::NotFound)?;
+        let peer = &mut self.peers[index];
+        let previous = crate::acl::PinGrantKeys {
+            grants: peer.grants.clone(),
+            paths: peer.paths.clone(),
+            scope: peer.scope.clone(),
+        };
+        let changed = previous != keys;
+        if changed {
+            peer.grants = keys.grants;
+            peer.paths = keys.paths;
+            peer.scope = keys.scope;
+        }
+        Ok((self.peers[index].clone(), previous, changed))
+    }
+
     /// Pins as `(fingerprint, principal)` pairs. Entries whose fingerprint
     /// string does not parse are skipped with a `WARN` — a corrupt line
     /// must never widen trust, and must not disable the rest of the store.
@@ -745,6 +800,15 @@ impl TrustStore {
                     name: peer.name.clone(),
                     fingerprint: peer.fingerprint.parse::<Fingerprint>().ok()?,
                     role: peer.role.as_deref().and_then(|r| r.parse().ok()),
+                    // Validated by `TrustStore::parse`; a value that still
+                    // does not parse is read as "no grants".
+                    grants: PinGrants::parse(
+                        peer.grants.as_deref(),
+                        peer.paths.as_deref(),
+                        peer.scope.as_deref(),
+                    )
+                    .ok()
+                    .flatten(),
                 })
             })
             .collect()
@@ -780,6 +844,38 @@ impl TrustStore {
             Some(PeerFingerprint::new(*fingerprint.as_bytes())),
         );
         Some(granted.unwrap_or(TrustRole::None))
+    }
+
+    /// [`Self::query_role`] with the pin's grants (ADR-0051 결정 12): what a
+    /// local query (`acl check`, `acl show`) evaluates for `principal`. The
+    /// grants come through the same [`standing_of_pin`] enforcement uses.
+    pub(crate) fn query_standing(&self, principal: &Principal, auth_path: AuthPath) -> Standing {
+        let Some(role) = self.query_role(principal, auth_path) else {
+            return Standing::default();
+        };
+        let Principal::Device(name) = principal else {
+            return Standing::default();
+        };
+        let Some(peer) = self.find(name) else {
+            return Standing::default();
+        };
+        let Ok(fingerprint) = peer.fingerprint.parse::<Fingerprint>() else {
+            return Standing {
+                role: Some(role),
+                pin: None,
+            };
+        };
+        let standing = standing_of_pin(
+            &self.parsed_pin_roles(),
+            false,
+            principal,
+            auth_path,
+            Some(PeerFingerprint::new(*fingerprint.as_bytes())),
+        );
+        Standing {
+            role: Some(role),
+            pin: standing.pin,
+        }
     }
 
     /// CA roots as DER. Unparsable PEM is skipped with a `WARN`.
@@ -842,6 +938,8 @@ pub(crate) struct PinRole {
     pub(crate) name: String,
     pub(crate) fingerprint: Fingerprint,
     pub(crate) role: Option<TrustRole>,
+    /// The pin's own grants (ADR-0051 결정 12).
+    pub(crate) grants: Option<PinGrants>,
 }
 
 impl Cached {
@@ -889,6 +987,36 @@ pub(crate) fn role_of_pin(
     pins.iter()
         .find(|pin| pin.name == *name && pin.fingerprint.as_bytes() == fingerprint.as_bytes())
         .and_then(|pin| pin.role)
+}
+
+/// [`role_of_pin`] and the pin's grants together: the same preconditions
+/// (a plain `device:<name>` pin connection whose leaf fingerprint equals the
+/// pin's current fingerprint, store not suspended), the same single lookup.
+/// Both parts come from one pin, so they cannot disagree about which pin the
+/// connection is.
+pub(crate) fn standing_of_pin(
+    pins: &[PinRole],
+    suspended: bool,
+    principal: &Principal,
+    auth_path: AuthPath,
+    fingerprint: Option<PeerFingerprint>,
+) -> Standing {
+    if suspended || auth_path != AuthPath::Pin {
+        return Standing::default();
+    }
+    let Principal::Device(name) = principal else {
+        return Standing::default();
+    };
+    let Some(fingerprint) = fingerprint else {
+        return Standing::default();
+    };
+    pins.iter()
+        .find(|pin| pin.name == *name && pin.fingerprint.as_bytes() == fingerprint.as_bytes())
+        .map(|pin| Standing {
+            role: pin.role,
+            pin: pin.grants.clone(),
+        })
+        .unwrap_or_default()
 }
 
 /// How often the one poll task of a process re-reads `trust.toml`
@@ -1068,8 +1196,35 @@ impl SharedTrustStore {
         )
     }
 
-    /// The `(action, ownership axis)` set the role of the pin a connection
-    /// authenticated with grants right now (ADR-0031 결정 4).
+    /// [`resolve_role`](Self::resolve_role) together with the pin's own
+    /// grants (ADR-0051 결정 12), from the same pin and the same
+    /// preconditions. The authorizer decides on this.
+    pub fn resolve_standing(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        fingerprint: Option<PeerFingerprint>,
+    ) -> Standing {
+        if auth_path != AuthPath::Pin
+            || !matches!(principal, Principal::Device(_))
+            || fingerprint.is_none()
+        {
+            return Standing::default();
+        }
+        self.refresh();
+        let cache = self.read();
+        standing_of_pin(
+            &cache.pin_roles,
+            cache.roles_suspended(),
+            principal,
+            auth_path,
+            fingerprint,
+        )
+    }
+
+    /// The `(action, ownership axis)` set the role and the pin grants of the
+    /// pin a connection authenticated with give right now (ADR-0031 결정 4,
+    /// ADR-0051 결정 12).
     ///
     /// This is [`resolve_role`](Self::resolve_role)'s answer run through the
     /// role table ([`RoleGrants::of_role`]), and nothing else: the
@@ -1086,7 +1241,7 @@ impl SharedTrustStore {
         auth_path: AuthPath,
         fingerprint: Option<PeerFingerprint>,
     ) -> RoleGrants {
-        RoleGrants::of_role(self.resolve_role(principal, auth_path, fingerprint))
+        RoleGrants::of_standing(&self.resolve_standing(principal, auth_path, fingerprint))
     }
 
     /// The store as the connection watch judges against it: the snapshot of
@@ -1258,7 +1413,7 @@ impl SnapshotView {
         if cache.roles_suspended() {
             return None;
         }
-        Some(RoleGrants::of_role(role_of_pin(
+        Some(RoleGrants::of_standing(&standing_of_pin(
             &cache.pin_roles,
             false,
             principal,

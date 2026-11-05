@@ -1,0 +1,42 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-trust-allow 1  "allow 0.5.8" 
+.SH NAME
+qsh\-trust\-allow \- Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
+.SH SYNOPSIS
+\fBqsh trust allow\fR [\fB\-\-json\fR] [\fB\-\-path\fR] [\fB\-\-jsonl\fR] [\fB\-\-scope\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
+.SH DESCRIPTION
+Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-path\fR \fI<PATH>\fR
+Absolute path the file grants are limited to. Repeatable. The path and everything under it, compared component by component
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-scope\fR \fI<SCOPE>\fR
+Which resources the grants reach: `owned` (the default) or `any`
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fINAME\fR>
+The pinned peer\*(Aqs name
+.TP
+<\fIACTION\fR>
+Actions to grant
+.SH VERSION
+v0.5.8

@@ -53,13 +53,13 @@ impl Authorizer for RoleResolvingAuthorizer {
     fn has_file_grant(&self, requester: &Requester<'_>, action: Action) -> bool {
         // The same role resolution `check` does, so the pre-filter and the
         // decision cannot see different roles. No role means the rows alone.
-        let role = self.trust.resolve_role(
+        let standing = self.trust.resolve_standing(
             requester.principal,
             requester.auth_path,
             requester.fingerprint,
         );
         self.policy
-            .file_grant_basis(requester.principal, requester.auth_path, role, action)
+            .file_grant_basis(requester.principal, requester.auth_path, &standing, action)
     }
 
     fn check(
@@ -68,17 +68,18 @@ impl Authorizer for RoleResolvingAuthorizer {
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
-        // `None` covers every "no role" case: not a pinned `device:`
-        // principal, no connection fingerprint, no such pin, a pin
-        // re-registered under another fingerprint, a pin with no `role`
-        // key, and a trust store whose last reload failed.
-        let role = self.trust.resolve_role(
+        // An empty standing covers every "no role, no grants" case: not a
+        // pinned `device:` principal, no connection fingerprint, no such
+        // pin, a pin re-registered under another fingerprint, a pin with
+        // neither a `role` nor `grants` key, and a trust store whose last
+        // reload failed.
+        let standing = self.trust.resolve_standing(
             requester.principal,
             requester.auth_path,
             requester.fingerprint,
         );
         self.policy
-            .check_with_role(requester, role, action, resource)
+            .check_with_standing(requester, &standing, action, resource)
     }
 }
 

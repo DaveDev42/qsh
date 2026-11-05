@@ -1373,6 +1373,7 @@ fn role_of_pin_is_none_when_suspended_whatever_the_pin_says() {
         name: "phone".into(),
         fingerprint: fp(b"phone"),
         role: Some(TrustRole::Full),
+        grants: None,
     }];
     let phone = Principal::Device("phone".into());
     assert_eq!(
@@ -1533,4 +1534,167 @@ async fn trust_store_poll_ends_when_the_store_is_dropped() {
         weak.upgrade().is_none(),
         "the poll task must not own the store"
     );
+}
+
+// ---------------------------------------------------------------------
+// pin grants (ADR-0051 결정 12)
+// ---------------------------------------------------------------------
+
+fn granted_entry(name: &str, seed: &[u8], role: Option<&str>, grants: &str) -> String {
+    let mut text = peer_entry(name, seed, role);
+    // `peer_entry` ends with a blank line after the last key; the extra keys
+    // belong to the same table.
+    text.truncate(text.trim_end().len());
+    format!("{text}\n{grants}\n\n")
+}
+
+/// Pin grants resolve under the role's preconditions and no others: the
+/// pin of the requester's own name whose fingerprint equals the connection's
+/// (B17), over the pin path (B16), for a `device:` principal.
+#[test]
+fn resolve_standing_gives_pin_grants_only_to_the_current_pin_over_the_pin_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(
+        &path,
+        granted_entry("phone", b"phone", None, "grants = [\"exec.run\"]"),
+    )
+    .unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+
+    // A pin with grants and no role: the grants stand alone.
+    let standing = shared.resolve_standing(&phone, AuthPath::Pin, peer_fp(b"phone"));
+    assert_eq!(standing.role, None);
+    assert!(
+        standing
+            .pin
+            .as_ref()
+            .unwrap()
+            .contains(crate::acl::Action::ExecRun)
+    );
+
+    // Another device's fingerprint (a name re-pinned to a new key, B17), no
+    // fingerprint at all, a CA leaf naming the device (B16), and non-device
+    // principals: none of them reach the grants.
+    let nothing = Standing::default();
+    assert_eq!(
+        shared.resolve_standing(&phone, AuthPath::Pin, peer_fp(b"other")),
+        nothing
+    );
+    assert_eq!(
+        shared.resolve_standing(&phone, AuthPath::Pin, None),
+        nothing
+    );
+    assert_eq!(
+        shared.resolve_standing(&phone, AuthPath::Ca, peer_fp(b"phone")),
+        nothing
+    );
+    assert_eq!(
+        shared.resolve_standing(
+            &Principal::User("phone".into()),
+            AuthPath::Pin,
+            peer_fp(b"phone")
+        ),
+        nothing
+    );
+
+    // The connection watch compares the same resolution.
+    let grants = shared.role_grants_for(&phone, AuthPath::Pin, peer_fp(b"phone"));
+    assert!(grants.contains(crate::acl::Action::ExecRun));
+    assert!(!grants.contains(crate::acl::Action::SessionOpen));
+    assert!(
+        shared
+            .role_grants_for(&phone, AuthPath::Ca, peer_fp(b"phone"))
+            .is_empty()
+    );
+
+    // Re-pinning the name to another key: the old connection loses them.
+    std::fs::write(
+        &path,
+        granted_entry("phone", b"new-key", None, "grants = [\"exec.run\"]"),
+    )
+    .unwrap();
+    assert_eq!(
+        shared.resolve_standing(&phone, AuthPath::Pin, peer_fp(b"phone")),
+        nothing,
+        "the old key no longer matches the pin"
+    );
+    assert!(
+        shared
+            .resolve_standing(&phone, AuthPath::Pin, peer_fp(b"new-key"))
+            .pin
+            .is_some()
+    );
+}
+
+/// B18: a reload that fails suspends pin grants exactly like roles, and
+/// putting back a good file ends the suspension. Grants follow the file
+/// without a restart.
+#[test]
+fn trust_store_reload_failure_suspends_pin_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let good = granted_entry("phone", b"phone", Some("none"), "grants = [\"exec.run\"]");
+    std::fs::write(&path, &good).unwrap();
+    let shared = SharedTrustStore::open(&path).unwrap();
+    let phone = Principal::Device("phone".into());
+    let has_grant = || {
+        shared
+            .resolve_standing(&phone, AuthPath::Pin, peer_fp(b"phone"))
+            .pin
+            .is_some()
+    };
+    assert!(has_grant());
+
+    std::fs::write(&path, "[[peer]]\nname = ").unwrap();
+    assert!(!has_grant(), "a parse failure suspends the grants");
+    assert!(shared.roles_suspended());
+    assert!(
+        shared
+            .role_grants_for(&phone, AuthPath::Pin, peer_fp(b"phone"))
+            .is_empty()
+    );
+
+    std::fs::write(&path, &good).unwrap();
+    assert!(has_grant());
+
+    // Grants withdrawn on disk are gone on the next call.
+    std::fs::write(&path, peer_entry("phone", b"phone", Some("none"))).unwrap();
+    assert!(!has_grant());
+}
+
+/// A `trust.toml` whose grant keys break the rules is a `CONFIG_ERROR` as a
+/// whole, like an unknown role: `forward.socks`, an unknown action, a file
+/// grant with no `paths`, `paths` or `scope` with no grants, a relative path.
+#[test]
+fn invalid_pin_grants_make_trust_toml_a_config_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    for bad in [
+        "grants = [\"forward.socks\"]",
+        "grants = [\"nope\"]",
+        "grants = [\"file.read\"]",
+        "grants = [\"exec.run\"]\npaths = [\"/srv\"]",
+        "paths = [\"/srv\"]",
+        "scope = \"any\"",
+        "grants = [\"file.read\"]\npaths = [\"relative\"]",
+        "grants = [\"exec.run\"]\nscope = \"everyone\"",
+    ] {
+        std::fs::write(&path, granted_entry("phone", b"phone", Some("none"), bad)).unwrap();
+        let err = TrustStore::load(&path).expect_err(bad);
+        assert_eq!(err.code, ErrorCode::ConfigError, "{bad}");
+    }
+    // The good shapes parse, patterns included.
+    std::fs::write(
+        &path,
+        granted_entry(
+            "phone",
+            b"phone",
+            None,
+            "grants = [\"forward.*\", \"file.read\"]\npaths = [\"/srv\"]\nscope = \"any\"",
+        ),
+    )
+    .unwrap();
+    TrustStore::load(&path).unwrap();
 }

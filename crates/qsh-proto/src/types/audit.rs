@@ -71,6 +71,12 @@ pub struct AuditRecordView {
     /// when the stored record carries the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The pin-grant basis (ADR-0051 결정 12): `pin` on a remote allow that
+    /// rested on the grants written on the peer's pin, or the exact action
+    /// names a local `trust.allow` / `trust.deny` record moved. Omitted when
+    /// the stored record carries no `grant` key. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
 }
 
 /// Data payload of `audit.query` (ADR-0033 결정 9).

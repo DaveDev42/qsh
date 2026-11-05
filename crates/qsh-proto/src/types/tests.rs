@@ -111,6 +111,9 @@ fn trust_types_match_documented_shape() {
         address: "personal-mac.example.com:4433".into(),
         added_at: "2026-08-17T00:00:00Z".into(),
         role: None,
+        grants: None,
+        paths: None,
+        scope: None,
     };
     let add = TrustAddData {
         peer: peer.clone(),
@@ -143,6 +146,9 @@ fn trust_types_match_documented_shape() {
     );
     let with_role = TrustPeer {
         role: Some("full".into()),
+        grants: None,
+        paths: None,
+        scope: None,
         ..peer.clone()
     };
     assert_eq!(serde_json::to_value(&with_role).unwrap()["role"], "full");

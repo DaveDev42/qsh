@@ -91,9 +91,9 @@ pub use ops::{
     ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
     SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput,
     SessionReader, SessionResizeOp, SessionWriteOp, SetupRunOp, SilentObserver, TrustAcceptOp,
-    TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp,
-    TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp,
-    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, meets_threshold,
+    TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold,
+    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, meets_threshold,
     normalize_invite_code, parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards,
     read_cert_file_arg, resolve_invite_code_source, unconfigured_host_name,
 };

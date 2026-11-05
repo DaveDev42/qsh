@@ -155,6 +155,14 @@ pub struct AuditRecord {
     /// payload.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub role: Option<String>,
+    /// The pin grants behind the record (ADR-0051 결정 12): on a remote
+    /// decision, `"pin"` when the allow rested on the grants written on the
+    /// peer's pin (`decision = "allow"`, `rule = null`, no `role`); on a local
+    /// `trust.allow` / `trust.deny` write, the comma-joined exact action
+    /// names the call named. Closed vocabulary, so structural. `None` (and
+    /// omitted from the JSONL line) on every other record.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub grant: Option<String>,
 }
 
 impl AuditRecord {
@@ -193,6 +201,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 }
@@ -204,6 +213,16 @@ impl AuditRecord {
     pub fn with_verdict_role(mut self, role: Option<crate::trust::TrustRole>) -> Self {
         if role.is_some() {
             self.role = role.map(|r| r.as_str().to_string());
+        }
+        self
+    }
+
+    /// Attach the pin-grant basis of a verdict (ADR-0051 결정 12): `grant =
+    /// "pin"` when the allow rested on the grants written on the peer's pin.
+    /// `false` leaves the record untouched.
+    pub fn with_verdict_pin_grant(mut self, pin_grant: bool) -> Self {
+        if pin_grant {
+            self.grant = Some("pin".to_string());
         }
         self
     }
@@ -235,6 +254,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 
@@ -256,6 +276,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 
@@ -286,6 +307,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 
@@ -312,6 +334,7 @@ impl AuditRecord {
             peer_addr: "-".to_string(),
             count: Some(count),
             role: None,
+            grant: None,
         }
     }
 
@@ -361,6 +384,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 
@@ -392,6 +416,7 @@ impl AuditRecord {
             peer_addr: "-".to_string(),
             count: Some(count),
             role: None,
+            grant: None,
         }
     }
 
@@ -418,6 +443,7 @@ impl AuditRecord {
             peer_addr: peer_addr.to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 
@@ -452,6 +478,7 @@ impl AuditRecord {
             peer_addr: "-".to_string(),
             count: None,
             role: None,
+            grant: None,
         }
     }
 }
