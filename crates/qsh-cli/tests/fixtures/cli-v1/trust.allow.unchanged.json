@@ -1,0 +1,24 @@
+{
+  "command": "trust.allow",
+  "data": {
+    "changed": false,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "grants": [
+        "forward.local",
+        "file.read"
+      ],
+      "name": "phone",
+      "paths": [
+        "/srv/share"
+      ],
+      "role": "none",
+      "scope": "any"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

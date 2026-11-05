@@ -1,0 +1,36 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-trust-deny 1  "deny 0.5.8" 
+.SH NAME
+qsh\-trust\-deny \- Withdraw actions granted with `qsh trust allow` (`docs/CLI.md` §6.11, ADR\-0051 결정 12). A running serve notices within a poll tick and closes the pin\*(Aqs established connections that lost an action (ADR\-0031). Does not touch the role: use `qsh trust set\-role` for it
+.SH SYNOPSIS
+\fBqsh trust deny\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
+.SH DESCRIPTION
+Withdraw actions granted with `qsh trust allow` (`docs/CLI.md` §6.11, ADR\-0051 결정 12). A running serve notices within a poll tick and closes the pin\*(Aqs established connections that lost an action (ADR\-0031). Does not touch the role: use `qsh trust set\-role` for it
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fINAME\fR>
+The pinned peer\*(Aqs name
+.TP
+<\fIACTION\fR>
+Actions to withdraw
+.SH VERSION
+v0.5.8

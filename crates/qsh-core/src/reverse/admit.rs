@@ -153,7 +153,8 @@ pub fn admit(
             verdict.rule,
             req.address,
         )
-        .with_verdict_role(verdict.role),
+        .with_verdict_role(verdict.role)
+        .with_verdict_pin_grant(verdict.pin_grant),
     );
     // Fail-closed: an allow verdict that failed to make it into the audit
     // log is denied — never register the reverse listener without a
@@ -399,6 +400,7 @@ mod tests {
                 decision: Decision::Allow,
                 rule: None,
                 role: None,
+                pin_grant: false,
             }
         }
     }

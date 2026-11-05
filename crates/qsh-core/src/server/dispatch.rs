@@ -172,7 +172,8 @@ impl Server {
                 verdict.rule,
                 ctx.peer_addr,
             )
-            .with_verdict_role(verdict.role),
+            .with_verdict_role(verdict.role)
+            .with_verdict_pin_grant(verdict.pin_grant),
         );
         // Fail-closed (`CLAUDE.md` "never create a resource before
         // authorization succeeds"): an unrecorded allow is treated as a
@@ -201,7 +202,8 @@ impl Server {
                 verdict.rule,
                 ctx.peer_addr,
             )
-            .with_verdict_role(verdict.role),
+            .with_verdict_role(verdict.role)
+            .with_verdict_pin_grant(verdict.pin_grant),
         );
         // Fail-closed: an allow verdict that failed to make it into the
         // audit log is denied — never create the resource this authorizes
@@ -287,7 +289,8 @@ impl Server {
                 verdict.rule,
                 ctx.peer_addr,
             )
-            .with_verdict_role(verdict.role),
+            .with_verdict_role(verdict.role)
+            .with_verdict_pin_grant(verdict.pin_grant),
         );
         // Fail-closed: this is the terminal record for the combined
         // policy + ownership decision — an allow that failed to land in

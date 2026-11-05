@@ -1542,3 +1542,120 @@ mod serve_to {
         harness.shutdown().await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// pin grants (ADR-0051 결정 12): `trust allow` / `trust deny` through the real
+// ops against a running serve
+// ---------------------------------------------------------------------------
+
+fn grant_ops(env: &Env) -> qsh_core::ops::Ops {
+    qsh_core::ops::Ops::new(env.paths.clone())
+        .with_audit_sink(Arc::new(qsh_core::audit::MemoryAuditSink::new()))
+}
+
+fn allow(actions: &[&str], paths: &[&str]) -> qsh_proto::TrustAllowReq {
+    qsh_proto::TrustAllowReq {
+        name: "laptop".into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+        paths: paths.iter().map(|p| p.to_string()).collect(),
+        scope: None,
+    }
+}
+
+fn deny(actions: &[&str]) -> qsh_proto::TrustDenyReq {
+    qsh_proto::TrustDenyReq {
+        name: "laptop".into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+    }
+}
+
+/// The role is `none`, so the grants are the pin's own. A grant written
+/// while the connection is open applies without a restart and a widening
+/// never closes it. Withdrawing an action the connection could use takes
+/// something away (its principal can no longer do what it could before), so
+/// the watch closes it with `grants_reduced`.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_deny_closes_a_connection_that_lost_a_granted_action() {
+    let client = make_identity();
+    let env = Env::new(&pin("laptop", &client.fingerprint, Some("none")));
+    let host = Host::start(&env).await;
+    let mut session = host.session(&client).await;
+    let conn = session.connection().clone();
+    let ops = grant_ops(&env);
+
+    assert!(!can_list(&mut session).await);
+    ops.trust_allow(allow(&["session.list", "exec.run"], &[]))
+        .unwrap();
+    wait_can_list(&mut session, true).await;
+    assert_stays_open(&conn).await;
+
+    // A widening is never a reason to close.
+    ops.trust_allow(allow(&["session.open"], &[])).unwrap();
+    assert_stays_open(&conn).await;
+
+    let data = ops.trust_deny(deny(&["exec.run"])).unwrap();
+    assert_eq!(data.narrowed, Some(true));
+    assert_withdrawn(&conn).await;
+    let record = withdrawal_record(&host.audit, "grants_reduced").await;
+    assert_connection_deny(&record, "device:laptop", "pin");
+    host.stop().await;
+}
+
+/// Nothing is lost, nothing closes: denying an action the pin never held
+/// writes nothing, and denying a grant the role also gives leaves the
+/// connection's set intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_deny_that_takes_nothing_away_does_not_close() {
+    let client = make_identity();
+    let env = Env::new(&pin("laptop", &client.fingerprint, Some("exec")));
+    let host = Host::start(&env).await;
+    let session = host.session(&client).await;
+    let conn = session.connection().clone();
+    let ops = grant_ops(&env);
+
+    // `exec.run` is in the pin's grants and in the `exec` role.
+    ops.trust_allow(allow(&["exec.run", "forward.local"], &[]))
+        .unwrap();
+    assert_stays_open(&conn).await;
+    assert!(!ops.trust_deny(deny(&["host.reverse"])).unwrap().changed);
+    let data = ops.trust_deny(deny(&["exec.run"])).unwrap();
+    assert_eq!(data.narrowed, Some(false), "the role still gives exec.run");
+    assert_stays_open(&conn).await;
+    assert!(host.audit.withdrawals().is_empty());
+
+    // `forward.local` was the pin's alone: now the connection loses it.
+    ops.trust_deny(deny(&["forward.local"])).unwrap();
+    assert_withdrawn(&conn).await;
+    withdrawal_record(&host.audit, "grants_reduced").await;
+    host.stop().await;
+}
+
+/// A file grant's `paths` are part of the compared set: a list that no
+/// longer contains a recorded path closes the connection, a wider one does
+/// not. (`trust allow` only adds paths; narrowing is a hand edit, which the
+/// same watch judges.)
+#[tokio::test(flavor = "multi_thread")]
+async fn narrowing_the_paths_of_a_file_grant_closes_and_widening_does_not() {
+    let client = make_identity();
+    let fp = &client.fingerprint;
+    let with_paths = |paths: &str| {
+        format!(
+            "[[peer]]\nname = \"laptop\"\nfingerprint = \"{fp}\"\naddress = \"\"\n\
+             added_at = \"2026-11-05T00:00:00Z\"\nrole = \"none\"\n\
+             grants = [\"file.read\"]\npaths = [{paths}]\n\n"
+        )
+    };
+    let env = Env::new(&with_paths("\"/srv/share\""));
+    let host = Host::start(&env).await;
+    let session = host.session(&client).await;
+    let conn = session.connection().clone();
+
+    env.rewrite(&with_paths("\"/srv\""));
+    assert_stays_open(&conn).await;
+    env.rewrite(&with_paths("\"/srv\", \"/var/log\""));
+    assert_stays_open(&conn).await;
+    env.rewrite(&with_paths("\"/srv/share\""));
+    assert_withdrawn(&conn).await;
+    withdrawal_record(&host.audit, "grants_reduced").await;
+    host.stop().await;
+}

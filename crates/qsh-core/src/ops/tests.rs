@@ -3037,3 +3037,265 @@ fn set_role_none_on_a_pin_without_a_role_key_is_unchanged() {
     assert!(data.changed);
     assert_eq!(data.previous_role, None);
 }
+
+// ---------------------------------------------------------------------
+// trust.allow / trust.deny (ADR-0051 결정 12)
+// ---------------------------------------------------------------------
+
+fn allow_req(name: &str, actions: &[&str], paths: &[&str], scope: Option<&str>) -> TrustAllowReq {
+    TrustAllowReq {
+        name: name.into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+        paths: paths.iter().map(|p| p.to_string()).collect(),
+        scope: scope.map(str::to_string),
+    }
+}
+
+fn deny_req(name: &str, actions: &[&str]) -> TrustDenyReq {
+    TrustDenyReq {
+        name: name.into(),
+        actions: actions.iter().map(|a| a.to_string()).collect(),
+    }
+}
+
+/// `forward.socks` can neither be granted nor withdrawn by name, an unknown
+/// action is refused, and nothing is written for any of them.
+#[test]
+fn trust_allow_rejects_forward_socks_and_unknown_actions() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("none"))).unwrap();
+    let before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    for actions in [
+        &["forward.socks"][..],
+        &["exec.run", "forward.socks"],
+        &["nope"],
+        &["x.*"],
+    ] {
+        let err = ops
+            .trust_allow(allow_req("phone", actions, &[], None))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{actions:?}");
+    }
+    let err = ops
+        .trust_deny(deny_req("phone", &["forward.socks"]))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before,
+        "a refused call writes nothing"
+    );
+    // The family never reaches `forward.socks`: it grants the other two.
+    let data = ops
+        .trust_allow(allow_req("phone", &["forward.*"], &[], None))
+        .unwrap();
+    assert_eq!(
+        data.peer.grants,
+        Some(vec![
+            "forward.local".to_string(),
+            "forward.remote".to_string()
+        ])
+    );
+    let after = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+    assert!(!after.contains("forward.socks"));
+}
+
+/// A file grant needs `--path` (B25), `--path` needs a file grant, and a
+/// name that is no pin is `HOST_NOT_FOUND`.
+#[test]
+fn trust_allow_file_grants_need_paths_and_paths_need_file_grants() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("none"))).unwrap();
+    let before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    for (actions, paths) in [
+        (&["file.read"][..], &[][..]),
+        (&["file.*"], &[]),
+        (&["exec.run"], &["/srv"]),
+        (&["file.read"], &["relative/dir"]),
+        (&["file.read"], &["/srv/../etc"]),
+    ] {
+        let err = ops
+            .trust_allow(allow_req("phone", actions, paths, None))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidArgument,
+            "{actions:?} {paths:?}"
+        );
+    }
+    let err = ops
+        .trust_allow(allow_req("phone", &["exec.run"], &[], Some("sideways")))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let err = ops
+        .trust_allow(allow_req("ghost", &["exec.run"], &[], None))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before,
+        "a refused call writes nothing"
+    );
+
+    let data = ops
+        .trust_allow(allow_req(
+            "phone",
+            &["file.read"],
+            &["/srv/share"],
+            Some("any"),
+        ))
+        .unwrap();
+    assert!(data.changed);
+    assert_eq!(data.narrowed, Some(false));
+    assert_eq!(data.peer.paths, Some(vec!["/srv/share".to_string()]));
+    assert_eq!(data.peer.scope.as_deref(), Some("any"));
+    // Adding another file action reuses the paths already on the pin.
+    let data = ops
+        .trust_allow(allow_req("phone", &["file.write"], &[], None))
+        .unwrap();
+    assert_eq!(
+        data.peer.grants,
+        Some(vec!["file.read".to_string(), "file.write".to_string()])
+    );
+}
+
+/// B21: a widening write leaves one record before the save; when the record
+/// cannot be written the call is `INTERNAL` (`retryable`) and the file is
+/// byte-identical.
+#[test]
+fn trust_allow_without_a_durable_audit_record_leaves_trust_toml_untouched() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("none"))).unwrap();
+    let sink = Arc::new(crate::audit::FailingAuditSink::new());
+    sink.fail();
+    let ops = ops.with_audit_sink(sink.clone());
+    let before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    let err = ops
+        .trust_allow(allow_req("phone", &["exec.run"], &[], None))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.retryable);
+    assert!(sink.records().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(ops.paths().trust_file()).unwrap(),
+        before
+    );
+}
+
+/// An allow leaves one structural `trust.allow` record naming the actions it
+/// added; a repeat changes nothing and records nothing; `deny` records the
+/// actions it withdrew, reports `narrowed`, and a failing audit sink does
+/// not stop it.
+#[test]
+fn trust_allow_and_deny_write_structural_audit_records_and_deny_survives_a_failing_sink() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("none"))).unwrap();
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+
+    let data = ops
+        .trust_allow(allow_req("phone", &["exec.run", "session.list"], &[], None))
+        .unwrap();
+    assert!(data.changed);
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].action, "trust.allow");
+    assert_eq!(records[0].principal, "device:phone");
+    assert_eq!(records[0].resource, "phone");
+    assert_eq!(records[0].auth_path, "local");
+    assert_eq!(records[0].grant.as_deref(), Some("exec.run,session.list"));
+    assert_eq!(records[0].role, None);
+
+    let again = ops
+        .trust_allow(allow_req("phone", &["exec.run"], &[], None))
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(again.narrowed, None);
+    assert_eq!(sink.records().len(), 1, "an unchanged call records nothing");
+
+    let denied = ops.trust_deny(deny_req("phone", &["session.*"])).unwrap();
+    assert!(denied.changed);
+    assert_eq!(denied.narrowed, Some(true));
+    assert_eq!(denied.peer.grants, Some(vec!["exec.run".to_string()]));
+    let records = sink.records();
+    assert_eq!(records[1].action, "trust.deny");
+    assert_eq!(records[1].grant.as_deref(), Some("session.list"));
+
+    // Withdrawing is never blocked by the audit writer.
+    let failing = Arc::new(crate::audit::FailingAuditSink::new());
+    failing.fail();
+    let ops = ops.with_audit_sink(failing);
+    let denied = ops.trust_deny(deny_req("phone", &["exec.run"])).unwrap();
+    assert!(denied.changed);
+    assert_eq!(
+        denied.peer.grants, None,
+        "nothing left: every grant key goes"
+    );
+    let text = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+    assert!(!text.contains("grants"), "{text}");
+    // Denying what is not held is a no-op.
+    assert!(
+        !ops.trust_deny(deny_req("phone", &["exec.run"]))
+            .unwrap()
+            .changed
+    );
+}
+
+/// `trust list` reads the grant keys back, and `acl check` / `acl show`
+/// account for them: the check names `granted_by: "grant"`, the show lists
+/// the grants and the effective set includes them.
+#[test]
+fn acl_check_and_show_account_for_pin_grants() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add(pin_req("phone", None, Some("none"))).unwrap();
+    ops.trust_allow(allow_req("phone", &["forward.local"], &[], Some("any")))
+        .unwrap();
+    let listed = ops.trust_list().unwrap();
+    assert_eq!(
+        listed.peers[0].grants,
+        Some(vec!["forward.local".to_string()])
+    );
+
+    let check = |action: &str| {
+        ops.acl_check(qsh_proto::AclCheckReq {
+            principal: "device:phone".into(),
+            action: action.into(),
+            resource: None,
+            auth_path: None,
+            owner: None,
+            owner_auth_path: None,
+            path: None,
+        })
+        .unwrap()
+    };
+    let allowed = check("forward.local");
+    assert_eq!(allowed.decision, "allow");
+    assert_eq!(allowed.granted_by.as_deref(), Some("grant"));
+    assert_eq!(allowed.rule, None);
+    assert_eq!(check("exec.run").decision, "deny");
+    assert_eq!(check("forward.socks").decision, "deny");
+
+    let show = ops
+        .acl_show(qsh_proto::AclShowReq {
+            principal: "device:phone".into(),
+            auth_path: None,
+        })
+        .unwrap();
+    assert_eq!(show.effective_actions, vec!["forward.local".to_string()]);
+    assert_eq!(show.pin_grants, Some(vec!["forward.local".to_string()]));
+    assert_eq!(show.pin_grant_scope.as_deref(), Some("any"));
+    assert_eq!(show.pin_grant_paths, None);
+
+    // The CA path never reads the pin's grants.
+    let show_ca = ops
+        .acl_show(qsh_proto::AclShowReq {
+            principal: "device:phone".into(),
+            auth_path: Some("ca".into()),
+        })
+        .unwrap();
+    assert!(show_ca.effective_actions.is_empty());
+    assert_eq!(show_ca.pin_grants, None);
+}

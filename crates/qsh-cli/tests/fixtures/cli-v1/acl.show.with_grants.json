@@ -1,0 +1,31 @@
+{
+  "command": "acl.show",
+  "data": {
+    "auth_path": "pin",
+    "auth_path_defaulted": true,
+    "effective_actions": [
+      "forward.local"
+    ],
+    "matching_rules": [],
+    "pin_grant_paths": [
+      "/srv/share"
+    ],
+    "pin_grant_scope": "any",
+    "pin_grants": [
+      "forward.local",
+      "file.read"
+    ],
+    "policy": {
+      "loaded": false,
+      "path": "<path>",
+      "rules": 0,
+      "state": "missing"
+    },
+    "principal": "device:phone",
+    "role": "none",
+    "role_actions": []
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

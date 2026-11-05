@@ -32,6 +32,7 @@ use crate::file::guard::Normalizer;
 
 mod load;
 mod paths;
+mod pin_grants;
 mod policy;
 mod registry;
 mod resolving;
@@ -72,9 +73,15 @@ pub(crate) use load::{
     ca_policy_example_row, example_allow_actions, load_policy_or_deny, policy_example_rows,
     policy_example_rows_with,
 };
+pub use pin_grants::{
+    MAX_PIN_PATHS, PinGrantKeys, PinGrants, PinGrantsError, apply_allow, apply_deny, expand_actions,
+};
 pub use policy::{ActionPattern, GrantBasis, Policy, Rule, Scope, Verdict};
 pub use resolving::RoleResolvingAuthorizer;
-pub use roles::{ROLE_GRANTS, RoleGrant, RoleGrants, RoleScope, role_change_narrows, role_grant};
+pub use roles::{
+    ROLE_GRANTS, RoleGrant, RoleGrants, RoleScope, Standing, pin_grants_change_narrows,
+    role_change_narrows, role_grant,
+};
 
 // Expands to the literal restart-notice string below. A `macro_rules!`
 // rather than a plain `&str` fn/const alias so `crate::doctor`'s two

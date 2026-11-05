@@ -1,0 +1,21 @@
+{
+  "command": "trust.deny",
+  "data": {
+    "changed": true,
+    "narrowed": true,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "grants": [
+        "forward.local"
+      ],
+      "name": "phone",
+      "role": "none",
+      "scope": "any"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

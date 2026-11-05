@@ -11,9 +11,10 @@ use std::time::Duration;
 use qsh_proto::{
     BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
     IdentityMoveKeyData, IdentityMoveKeyReq, KeyStoreMode, SchemaData, TrustAcceptData,
-    TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustInviteData,
-    TrustInviteReq, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustRenameReq,
-    TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData, TrustSshPreviewReq, VersionData,
+    TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustAllowReq,
+    TrustDenyReq, TrustGrantData, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq,
+    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -487,6 +488,20 @@ pub struct TrustSetRoleOp;
 
 impl Operation for TrustSetRoleOp {
     const COMMAND: &'static str = "trust.set_role";
+}
+
+/// The `trust.allow` operation (`docs/CLI.md` §6.11, ADR-0051 결정 12).
+pub struct TrustAllowOp;
+
+impl Operation for TrustAllowOp {
+    const COMMAND: &'static str = "trust.allow";
+}
+
+/// The `trust.deny` operation (`docs/CLI.md` §6.11, ADR-0051 결정 12).
+pub struct TrustDenyOp;
+
+impl Operation for TrustDenyOp {
+    const COMMAND: &'static str = "trust.deny";
 }
 
 /// The `trust.ssh_preview` operation (`docs/CLI.md` §6.11, ADR-0026 결정 4).

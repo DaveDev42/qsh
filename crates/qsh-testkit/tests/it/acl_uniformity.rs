@@ -414,6 +414,7 @@ impl Authorizer for OpenOnlyDenyAttach {
             decision,
             rule: None,
             role: None,
+            pin_grant: false,
         }
     }
 }

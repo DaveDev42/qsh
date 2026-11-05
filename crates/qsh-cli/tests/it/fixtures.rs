@@ -119,6 +119,13 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.accept.with_role.json",
     "trust.set_role.json",
     "trust.set_role.unchanged.json",
+    "trust.allow.json",
+    "trust.allow.unchanged.json",
+    "trust.deny.json",
+    "error.INVALID_ARGUMENT.grant_forward_socks.json",
+    "trust.list.with_grants.json",
+    "acl.check.allow_by_grant.json",
+    "acl.show.with_grants.json",
     "config.get.json",
     "config.get.unset.json",
     "config.set.json",
@@ -1158,6 +1165,92 @@ fn golden_trust_role_write_fixtures() {
     assert_eq!(code, 0, "{invited}");
     assert_eq!(invited["data"]["assigned_role"], "tunnel", "{invited}");
     check("trust.invite.with_role.json", invited);
+}
+
+/// Unix-only: the `--path` notation is host-specific (Windows spells drive
+/// paths, ADR-0029 결정 23).
+/// The pin grant commands (ADR-0051 결정 12, `docs/CLI.md` §6.11): `trust
+/// allow` writing and finding nothing to write, `trust deny`, the grant keys in
+/// `trust list`, and `acl check` / `acl show` accounting for them. Own sandbox
+/// so the legacy goldens' stores stay untouched.
+#[cfg(unix)]
+#[test]
+fn golden_trust_grant_fixtures() {
+    let sandbox = Sandbox::new();
+    let (code, added) = sandbox.json(&[
+        "trust",
+        "add",
+        "phone",
+        "--fingerprint",
+        SAMPLE_FINGERPRINT,
+        "--role",
+        "none",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{added}");
+
+    let (code, allowed) = sandbox.json(&[
+        "trust",
+        "allow",
+        "phone",
+        "forward.local",
+        "file.read",
+        "--path",
+        "/srv/share",
+        "--scope",
+        "any",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{allowed}");
+    assert_eq!(allowed["data"]["changed"], true, "{allowed}");
+    assert_eq!(
+        allowed["data"]["peer"]["grants"],
+        serde_json::json!(["forward.local", "file.read"]),
+        "{allowed}"
+    );
+    check("trust.allow.json", allowed);
+
+    let (code, unchanged) = sandbox.json(&["trust", "allow", "phone", "forward.local", "--json"]);
+    assert_eq!(code, 0, "{unchanged}");
+    assert_eq!(unchanged["data"]["changed"], false, "{unchanged}");
+    check("trust.allow.unchanged.json", unchanged);
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    check("trust.list.with_grants.json", listed);
+
+    let (code, checked) = sandbox.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:phone",
+        "--action",
+        "forward.local",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["data"]["granted_by"], "grant", "{checked}");
+    check("acl.check.allow_by_grant.json", checked);
+
+    let (code, shown) = sandbox.json(&["acl", "show", "--principal", "device:phone", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(shown["data"]["pin_grant_scope"], "any", "{shown}");
+    check_ignoring_file_effective_actions("acl.show.with_grants.json", shown);
+
+    let (code, denied) = sandbox.json(&["trust", "deny", "phone", "file.*", "--json"]);
+    assert_eq!(code, 0, "{denied}");
+    assert_eq!(denied["data"]["narrowed"], true, "{denied}");
+    assert_eq!(
+        denied["data"]["peer"]["grants"],
+        serde_json::json!(["forward.local"]),
+        "{denied}"
+    );
+    check("trust.deny.json", denied);
+
+    let (code, refused) = sandbox.json(&["trust", "allow", "phone", "forward.socks", "--json"]);
+    assert_ne!(code, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "INVALID_ARGUMENT", "{refused}");
+    check("error.INVALID_ARGUMENT.grant_forward_socks.json", refused);
 }
 
 /// `trust accept` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11): a

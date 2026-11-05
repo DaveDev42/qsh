@@ -3,7 +3,28 @@ use qsh_transport::Fingerprint;
 
 use super::*;
 use crate::broker::PeerFingerprint;
-use crate::trust::{PinRole, role_of_pin};
+use crate::trust::{PinRole, role_of_pin, standing_of_pin};
+
+impl Policy {
+    /// [`Policy::decide_standing`] for a standing that is a bare role, the
+    /// shape every pre-ADR-0051 test uses.
+    pub(crate) fn decide(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+        role: Option<TrustRole>,
+        action: Action,
+        resource: ResourceRef<'_>,
+    ) -> Verdict {
+        self.decide_standing(
+            principal,
+            auth_path,
+            &Standing::from(role),
+            action,
+            resource,
+        )
+    }
+}
 
 fn rule(principal: &str, auth_path: AuthPath, allow: Vec<ActionPattern>) -> Rule {
     Rule {
@@ -562,6 +583,53 @@ fn oracle_role_allows(
     }
 }
 
+/// The pin's grants as the oracle generates them: a non-empty set of
+/// non-socks actions and whether the scope is `any` (else `owned`), or none.
+/// `forward.socks` is left out because `PinGrants` can never hold it; the
+/// always-deny branch of the property covers that action.
+type PinGrantKeys = Option<(Vec<Action>, bool)>;
+
+fn arb_pin_grant_keys() -> impl Strategy<Value = PinGrantKeys> {
+    let grantable: Vec<Action> = Action::ALL
+        .into_iter()
+        .filter(|a| !matches!(a, Action::ForwardSocks))
+        .collect();
+    prop_oneof![
+        Just(None),
+        (
+            proptest::sample::subsequence(grantable, 1..6),
+            any::<bool>()
+        )
+            .prop_map(Some),
+    ]
+}
+
+/// Whether the pin grants cover `(action, resource)`, spelled out again:
+/// the action is in the set, the scope admits the resource's owner, and a
+/// file action never passes because this property's resources carry no
+/// canonical path for the pin's `paths` to cover.
+fn oracle_pin_allows(
+    keys: &PinGrantKeys,
+    action: Action,
+    principal: &Principal,
+    auth_path: AuthPath,
+    resource: ResourceRef<'_>,
+) -> bool {
+    let Some((actions, scope_any)) = keys else {
+        return false;
+    };
+    if !actions.contains(&action) || matches!(action, Action::FileRead | Action::FileWrite) {
+        return false;
+    }
+    if *scope_any {
+        return true;
+    }
+    match resource.owner {
+        None => true,
+        Some(owner) => owner == opener_key(principal, auth_path),
+    }
+}
+
 fn arb_role() -> impl Strategy<Value = Option<TrustRole>> {
     let mut roles: Vec<Option<TrustRole>> = vec![None];
     roles.extend(TrustRole::ALL.into_iter().map(Some));
@@ -598,6 +666,7 @@ proptest! {
         fingerprint_matches in any::<bool>(),
         pin_name_matches in any::<bool>(),
         reload_failed in any::<bool>(),
+        pin_grant_keys in arb_pin_grant_keys(),
     ) {
         let foreign_owner = format!("{auth_path:?}:{foreign_owner_name}");
         let owner: Option<String> = match owner_kind {
@@ -623,10 +692,24 @@ proptest! {
             (Principal::Device(name), true) => name.clone(),
             _ => "someone-else".to_string(),
         };
+        let pin_grants = pin_grant_keys
+            .as_ref()
+            .and_then(|(actions, scope_any)| {
+                let names: Vec<String> = actions.iter().map(|a| a.as_str().to_string()).collect();
+                let has_file = actions.iter().any(|a| matches!(a, Action::FileRead | Action::FileWrite));
+                let paths = vec!["/srv/share".to_string()];
+                PinGrants::parse(
+                    Some(&names),
+                    has_file.then_some(paths.as_slice()),
+                    Some(if *scope_any { "any" } else { "owned" }),
+                )
+                .expect("generated pin grants are valid")
+            });
         let pins = vec![PinRole {
             name: pin_name,
             fingerprint: pin_fingerprint,
             role: pin_role,
+            grants: pin_grants.clone(),
         }];
         let role = role_of_pin(
             &pins,
@@ -643,7 +726,22 @@ proptest! {
             && auth_path == AuthPath::Pin
             && matches!(principal, Principal::Device(_));
         prop_assert_eq!(role, if role_in_effect { pin_role } else { None });
-        let verdict = policy.decide(&principal, auth_path, role, action, resource);
+        // The pin grant stage (ADR-0051 결정 12) shares every precondition of
+        // the role; the standing is the one resolver production uses.
+        let standing = standing_of_pin(
+            &pins,
+            reload_failed,
+            &principal,
+            auth_path,
+            Some(connection_fingerprint),
+        );
+        prop_assert_eq!(standing.role, role);
+        prop_assert_eq!(
+            standing.pin.is_some(),
+            role_in_effect && pin_grants.is_some(),
+            "grants follow the role's preconditions"
+        );
+        let verdict = policy.decide_standing(&principal, auth_path, &standing, action, resource);
         // F4 (M5 Step 2 adversarial review): the literal always-denied
         // action (`forward.socks`, undrivable by design, ADR-0019 결정
         // 6), spelled out again here rather than calling
@@ -660,21 +758,30 @@ proptest! {
         } else {
             let covered = oracle_covers(&policy, &principal, auth_path, action, resource);
             let by_role = oracle_role_allows(role, action, &principal, auth_path, resource);
+            let by_pin = role_in_effect
+                && oracle_pin_allows(&pin_grant_keys, action, &principal, auth_path, resource);
             prop_assert_eq!(
                 verdict.is_allow(),
-                covered || by_role,
-                "evaluator/oracle disagreement for {} over {:?} on {} (owner {:?}, role {:?})",
+                covered || by_role || by_pin,
+                "evaluator/oracle disagreement for {} over {:?} on {} (owner {:?}, role {:?}, pin grants {:?})",
                 principal,
                 auth_path,
                 action,
                 resource.owner,
                 role,
+                pin_grant_keys,
             );
             if by_role {
                 // The union's basis is the role when both would allow.
                 prop_assert_eq!(verdict.granted_by(), role.map(GrantBasis::Role));
                 prop_assert_eq!(verdict.rule, None);
                 prop_assert_eq!(verdict.role, role);
+                prop_assert!(!verdict.pin_grant);
+            } else if by_pin {
+                // Role stage first, then the pin grant stage, then the rows.
+                prop_assert_eq!(verdict.granted_by(), Some(GrantBasis::PinGrant));
+                prop_assert_eq!(verdict.rule, None);
+                prop_assert_eq!(verdict.role, None);
             } else if covered {
                 prop_assert!(matches!(verdict.granted_by(), Some(GrantBasis::Rule(_))));
                 prop_assert_eq!(verdict.role, None);
@@ -783,7 +890,7 @@ proptest! {
                 by_row || by_role
             })
             .collect();
-        prop_assert_eq!(policy.effective_actions(&principal, auth_path, role), model);
+        prop_assert_eq!(policy.effective_actions(&principal, auth_path, &Standing::from(role)), model);
     }
 }
 
@@ -838,7 +945,7 @@ fn effective_actions_every_allowed_action_names_a_rule_index_in_matching_rules()
                 .into_iter()
                 .map(|(index, _)| index)
                 .collect();
-            for action in policy.effective_actions(&principal, auth_path, None) {
+            for action in policy.effective_actions(&principal, auth_path, &Standing::default()) {
                 let verdict = policy.decide(
                     &principal,
                     auth_path,
@@ -984,7 +1091,12 @@ mod file_paths {
         };
         assert!(!decide_for(&policy, Action::FileRead, "/srv/share/a", &Identity).is_allow());
         let principal = Principal::User("dave".into());
-        assert!(!policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
+        assert!(!policy.file_grant_basis(
+            &principal,
+            AuthPath::Pin,
+            &Standing::default(),
+            Action::FileRead
+        ));
     }
 
     #[test]
@@ -1040,13 +1152,28 @@ mod file_paths {
         let with = Policy {
             rules: vec![file_rule(Some(&["/srv"]))],
         };
-        assert!(with.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
-        assert!(with.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileWrite));
-        assert!(!with.file_grant_basis(&principal, AuthPath::Ca, None, Action::FileRead));
+        assert!(with.file_grant_basis(
+            &principal,
+            AuthPath::Pin,
+            &Standing::default(),
+            Action::FileRead
+        ));
+        assert!(with.file_grant_basis(
+            &principal,
+            AuthPath::Pin,
+            &Standing::default(),
+            Action::FileWrite
+        ));
+        assert!(!with.file_grant_basis(
+            &principal,
+            AuthPath::Ca,
+            &Standing::default(),
+            Action::FileRead
+        ));
         assert!(!with.file_grant_basis(
             &Principal::User("other".into()),
             AuthPath::Pin,
-            None,
+            &Standing::default(),
             Action::FileRead
         ));
         let mut read_only = file_rule(Some(&["/srv"]));
@@ -1054,8 +1181,18 @@ mod file_paths {
         let policy = Policy {
             rules: vec![read_only],
         };
-        assert!(policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileRead));
-        assert!(!policy.file_grant_basis(&principal, AuthPath::Pin, None, Action::FileWrite));
+        assert!(policy.file_grant_basis(
+            &principal,
+            AuthPath::Pin,
+            &Standing::default(),
+            Action::FileRead
+        ));
+        assert!(!policy.file_grant_basis(
+            &principal,
+            AuthPath::Pin,
+            &Standing::default(),
+            Action::FileWrite
+        ));
     }
 
     #[test]
@@ -1078,20 +1215,20 @@ mod file_paths {
         assert!(policy.file_grant_basis(
             &device,
             AuthPath::Pin,
-            Some(TrustRole::Full),
+            &Standing::from(Some(TrustRole::Full)),
             Action::FileRead
         ));
         // `exec` grants no file action and `auth_path = ca` never carries a role.
         assert!(!policy.file_grant_basis(
             &device,
             AuthPath::Pin,
-            Some(TrustRole::Exec),
+            &Standing::from(Some(TrustRole::Exec)),
             Action::FileRead
         ));
         assert!(!policy.file_grant_basis(
             &device,
             AuthPath::Ca,
-            Some(TrustRole::Full),
+            &Standing::from(Some(TrustRole::Full)),
             Action::FileRead
         ));
     }
@@ -1102,15 +1239,126 @@ mod file_paths {
         let with = Policy {
             rules: vec![file_rule(Some(&["/srv"]))],
         };
-        let actions = with.effective_actions(&principal, AuthPath::Pin, None);
+        let actions = with.effective_actions(&principal, AuthPath::Pin, &Standing::default());
         assert!(actions.contains(&Action::FileRead));
         assert!(actions.contains(&Action::FileWrite));
         // A row with no `paths` grants no file access (ADR-0029 결정 4).
         let without = Policy {
             rules: vec![file_rule(None)],
         };
-        let actions = without.effective_actions(&principal, AuthPath::Pin, None);
+        let actions = without.effective_actions(&principal, AuthPath::Pin, &Standing::default());
         assert!(!actions.contains(&Action::FileRead));
         assert!(!actions.contains(&Action::FileWrite));
+    }
+
+    fn pin_grants(actions: &[&str], paths: &[&str], scope: Option<&str>) -> Standing {
+        let actions: Vec<String> = actions.iter().map(|a| a.to_string()).collect();
+        let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        Standing {
+            role: None,
+            pin: PinGrants::parse(
+                Some(&actions),
+                (!paths.is_empty()).then_some(paths.as_slice()),
+                scope,
+            )
+            .unwrap(),
+        }
+    }
+
+    /// ADR-0051 결정 12: a pin's file grant is limited to its `paths`,
+    /// component by component, through the request's own normalizer; a request
+    /// with no canonical path, or outside them, gets nothing. The role's file
+    /// grant, unlike it, ignores paths.
+    #[test]
+    fn pin_file_grant_needs_a_covering_path() {
+        let policy = Policy::default();
+        let device = Principal::Device("laptop".into());
+        let standing = pin_grants(&["file.read"], &["/srv/share"], None);
+        let decide = |path: Option<&str>, action: Action, auth_path: AuthPath| {
+            let path = path.map(PathBuf::from);
+            let resource = match &path {
+                Some(path) => ResourceRef::unowned("x").with_canonical_path(path, &Identity),
+                None => ResourceRef::unowned("x"),
+            };
+            policy.decide_standing(&device, auth_path, &standing, action, resource)
+        };
+        let inside = decide(Some("/srv/share/a.txt"), Action::FileRead, AuthPath::Pin);
+        assert!(inside.is_allow());
+        assert_eq!(inside.granted_by(), Some(GrantBasis::PinGrant));
+        assert!(decide(Some("/srv/share"), Action::FileRead, AuthPath::Pin).is_allow());
+        assert!(!decide(Some("/srv/shared/a.txt"), Action::FileRead, AuthPath::Pin).is_allow());
+        assert!(!decide(Some("/etc/passwd"), Action::FileRead, AuthPath::Pin).is_allow());
+        assert!(!decide(None, Action::FileRead, AuthPath::Pin).is_allow());
+        assert!(
+            !decide(Some("/srv/share/a.txt"), Action::FileWrite, AuthPath::Pin).is_allow(),
+            "only the granted action"
+        );
+        assert!(
+            !decide(Some("/srv/share/a.txt"), Action::FileRead, AuthPath::Ca).is_allow(),
+            "a CA-authenticated peer never reaches a pin's grants"
+        );
+        // The ground check the host asks before it normalizes a path.
+        assert!(policy.file_grant_basis(&device, AuthPath::Pin, &standing, Action::FileRead));
+        assert!(!policy.file_grant_basis(&device, AuthPath::Pin, &standing, Action::FileWrite));
+        assert!(!policy.file_grant_basis(&device, AuthPath::Ca, &standing, Action::FileRead));
+        assert!(
+            !policy.file_grant_basis(
+                &Principal::User("laptop".into()),
+                AuthPath::Pin,
+                &standing,
+                Action::FileRead
+            ),
+            "only a device principal carries pin grants"
+        );
+        // `acl show`'s ceiling lists the granted file action.
+        assert_eq!(
+            policy.effective_actions(&device, AuthPath::Pin, &standing),
+            vec![Action::FileRead]
+        );
+    }
+
+    /// The pin's `scope` is judged like a row's: `owned` (the default) lets a
+    /// resource through only when it is ownerless or the requester's own, `any`
+    /// lets every owner through. The grants never reach `forward.socks`.
+    #[test]
+    fn pin_grant_scope_filters_owned_resources_and_socks_stays_behind_the_gate() {
+        let policy = Policy::default();
+        let device = Principal::Device("laptop".into());
+        let own = opener_key(&device, AuthPath::Pin);
+        let foreign = "Pin:device:someone".to_string();
+        let owned = pin_grants(&["session.control"], &[], None);
+        let any = pin_grants(&["session.control"], &[], Some("any"));
+        let on = |standing: &Standing, owner: Option<&str>| {
+            let resource = ResourceRef {
+                id: "s",
+                owner,
+                canonical_path: None,
+            };
+            policy
+                .decide_standing(
+                    &device,
+                    AuthPath::Pin,
+                    standing,
+                    Action::SessionControl,
+                    resource,
+                )
+                .is_allow()
+        };
+        assert!(on(&owned, None));
+        assert!(on(&owned, Some(&own)));
+        assert!(!on(&owned, Some(&foreign)));
+        assert!(on(&any, Some(&foreign)));
+        // An explicit socks grant cannot even be built, and the gate would
+        // refuse a standing that somehow held one.
+        assert!(PinGrants::parse(Some(&["forward.socks".to_string()]), None, None).is_err());
+        let all = pin_grants(&["forward.*"], &[], Some("any"));
+        let socks = policy.decide_standing(
+            &device,
+            AuthPath::Pin,
+            &all,
+            Action::ForwardSocks,
+            ResourceRef::unowned("h:1"),
+        );
+        assert_eq!(socks, Verdict::DENY);
     }
 }

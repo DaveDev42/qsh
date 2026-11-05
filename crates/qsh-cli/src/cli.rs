@@ -1318,6 +1318,40 @@ pub enum TrustCmd {
         /// The new role.
         role: String,
     },
+    /// Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11,
+    /// ADR-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin
+    /// in `trust.toml`; takes effect from the peer's next request with no
+    /// restart. The decision order is the always-deny gate, the role, these
+    /// grants, then `acl.toml` rows. Actions are names from the ACL
+    /// vocabulary or a trailing `.*` family (`forward.*`); `forward.socks`
+    /// can never be granted. `file.read` and `file.write` need `--path`.
+    /// A grant only counts for the pin path and for the fingerprint the pin
+    /// holds now: CA-authenticated peers and a re-pinned name do not use it.
+    Allow {
+        /// The pinned peer's name.
+        name: String,
+        /// Actions to grant.
+        #[arg(required = true, num_args = 1.., value_name = "ACTION")]
+        actions: Vec<String>,
+        /// Absolute path the file grants are limited to. Repeatable. The
+        /// path and everything under it, compared component by component.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+        /// Which resources the grants reach: `owned` (the default) or `any`.
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
+    },
+    /// Withdraw actions granted with `qsh trust allow` (`docs/CLI.md`
+    /// §6.11, ADR-0051 결정 12). A running serve notices within a poll tick
+    /// and closes the pin's established connections that lost an action
+    /// (ADR-0031). Does not touch the role: use `qsh trust set-role` for it.
+    Deny {
+        /// The pinned peer's name.
+        name: String,
+        /// Actions to withdraw.
+        #[arg(required = true, num_args = 1.., value_name = "ACTION")]
+        actions: Vec<String>,
+    },
     /// Preview the pins and `[[acl]]` rows an OpenSSH `authorized_keys`
     /// file would need (`docs/CLI.md` §6.11, ADR-0026). Read-only: nothing
     /// is pinned and neither `trust.toml` nor `acl.toml` is written.

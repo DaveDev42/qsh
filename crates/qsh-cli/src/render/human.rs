@@ -16,9 +16,9 @@ use qsh_proto::{
     ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
-    SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
-    TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, Tunnel,
-    TunnelCloseData, TunnelListData, VersionData,
+    SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData,
+    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
+    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -569,6 +569,71 @@ pub fn print_trust_set_role(data: &TrustSetRoleData) -> io::Result<()> {
     }
 }
 
+/// One pin's grant keys as `trust list` / `trust allow` show them:
+/// `exec.run, forward.local` plus the scope and paths when they are set.
+fn grants_summary(peer: &TrustPeer) -> String {
+    let grants = peer
+        .grants
+        .as_deref()
+        .map(|g| g.iter().map(|a| sanitize(a)).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    if grants.is_empty() {
+        return "(none)".to_string();
+    }
+    let mut out = grants;
+    out.push_str(&format!(
+        " (scope {})",
+        sanitize(peer.scope.as_deref().unwrap_or("owned"))
+    ));
+    if let Some(paths) = peer.paths.as_deref() {
+        let paths: Vec<String> = paths.iter().map(|p| sanitize(p)).collect();
+        out.push_str(&format!(" within {}", paths.join(", ")));
+    }
+    out
+}
+
+/// Print the outcome of `qsh trust allow <name> <action>...` (`docs/CLI.md`
+/// §6.11, ADR-0051 결정 12). A grant applies from the peer's next request,
+/// so there is no restart reminder.
+pub fn print_trust_allow(data: &TrustGrantData) -> io::Result<()> {
+    if !data.changed {
+        let mut stdout = io::stdout().lock();
+        let name = sanitize(&data.peer.name);
+        return writeln!(stdout, "{name} already has these grants (nothing to do)");
+    }
+    print_grant_change(data)
+}
+
+/// Print the outcome of `qsh trust deny <name> <action>...` (`docs/CLI.md`
+/// §6.11, ADR-0051 결정 12).
+pub fn print_trust_deny(data: &TrustGrantData) -> io::Result<()> {
+    if !data.changed {
+        let mut stdout = io::stdout().lock();
+        let name = sanitize(&data.peer.name);
+        return writeln!(stdout, "{name} holds none of these grants (nothing to do)");
+    }
+    print_grant_change(data)
+}
+
+/// The changed case of both: the pin's grants now, then when it applies. A
+/// write that took access away also closes the peer's established
+/// connections that lost an action within 2 seconds (ADR-0031 결정 5), with
+/// the same scope statement `trust set-role` gives.
+fn print_grant_change(data: &TrustGrantData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let name = sanitize(&data.peer.name);
+    writeln!(stdout, "{name}: grants {}", grants_summary(&data.peer))?;
+    if data.narrowed == Some(true) {
+        writeln!(
+            stdout,
+            "takes effect from its next request; connections that lost an action are closed"
+        )?;
+        writeln!(stdout, "{}", qsh_core::doctor::TRUST_NARROWING_SCOPE)
+    } else {
+        writeln!(stdout, "takes effect from its next request")
+    }
+}
+
 /// The one line `qsh trust add` adds when it is run again for a name that
 /// is already pinned (ADR-0045 결정 8): a repeated `trust add` never changes
 /// a role, whatever `--role` said. On stdout beside `print_trust_add`'s verb, human mode only.
@@ -889,6 +954,8 @@ pub fn print_acl_check(data: &AclCheckData) -> io::Result<()> {
         && let Some(role) = &data.role
     {
         format!("{decision} (role {})", sanitize(role))
+    } else if data.granted_by.as_deref() == Some("grant") {
+        format!("{decision} (pin grant)")
     } else if let Some(rule) = data.rule {
         format!("{decision} (rule {rule})")
     } else if !data.policy.loaded {
@@ -932,6 +999,20 @@ pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
             stdout,
             "role: - (none applies: no pin of this name, or not a pin path)"
         )?,
+    }
+    if let Some(grants) = &data.pin_grants {
+        let grants: Vec<String> = grants.iter().map(|a| sanitize(a)).collect();
+        let scope = data.pin_grant_scope.as_deref().unwrap_or("owned");
+        writeln!(
+            stdout,
+            "pin grants: {} (scope: {})",
+            grants.join(", "),
+            sanitize(scope)
+        )?;
+        if let Some(paths) = &data.pin_grant_paths {
+            let paths: Vec<String> = paths.iter().map(|p| sanitize(p)).collect();
+            writeln!(stdout, "      paths: {}", paths.join(", "))?;
+        }
     }
     if data.policy.state.as_deref() == Some("invalid") {
         writeln!(
