@@ -380,6 +380,9 @@ fn json_on_the_root_form_is_refused_before_option_checks() {
     assert!(fake.calls().is_empty());
 }
 
+// Every test here needs a unix host shell (`sh -c` until the
+// `shell_command` step lands), so the module is unix-only.
+#[cfg(unix)]
 mod world {
     use super::*;
     use crate::ssh_bootstrap::pair::World;
