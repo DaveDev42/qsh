@@ -32,7 +32,7 @@ tokio.workspace = true
 # Raw-mode terminal for the interactive TUI (`docs/design/architecture.md`
 # §8). unix-only: the Windows console has its own layer below.
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["term", "ioctl", "signal"] }
+nix = { workspace = true, features = ["term", "ioctl", "signal", "fs", "process"] }
 
 # The Windows console layer of the interactive client and of the invitation-code
 # prompt (`src/tui/windows.rs`, ADR-0035 decisions 4-8 and 11): console modes

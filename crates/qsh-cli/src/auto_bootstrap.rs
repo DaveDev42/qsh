@@ -18,6 +18,7 @@
 
 use std::io::{self, IsTerminal};
 
+use qsh_core::ssh_bootstrap::SshOptions;
 use qsh_core::{AutoBootstrap, CancelToken, OpError, Ops, PairSshEnv};
 
 use crate::render::human;
@@ -31,6 +32,7 @@ pub(crate) fn run(
     plan: &AutoBootstrap,
     cancel: CancelToken,
     quiet: bool,
+    ssh: SshOptions,
 ) -> Result<(), OpError> {
     // Always printed, `--quiet` included: a person must learn that ssh is
     // about to run, and how to switch that off, before it asks for anything.
@@ -41,6 +43,7 @@ pub(crate) fn run(
             machine_mode: false,
             stdin_is_terminal: io::stdin().is_terminal(),
             cancel,
+            ssh,
         },
     );
     if !quiet {

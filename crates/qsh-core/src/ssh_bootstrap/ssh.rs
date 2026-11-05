@@ -27,6 +27,7 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
 use super::dest::Dest;
+use super::options::SshOptions;
 use crate::config::SshConfig;
 use crate::ops::{CancelToken, OpError};
 
@@ -140,7 +141,18 @@ fn detach_from_terminal(command: &mut Command, batch_mode: bool) {
 
 /// The arguments of `ssh -G` (ADR-0044 decision 4).
 pub fn ssh_g_args(dest: &Dest) -> Vec<String> {
-    vec!["-G".into(), "--".into(), dest.as_ssh_arg().into()]
+    ssh_g_args_with(dest, &SshOptions::default())
+}
+
+/// [`ssh_g_args`] with the root form's ssh options (ADR-0051 decision 7)
+/// between `-G` and the `--`, so `-F`, `-p`, `-J` and `-o` shape what
+/// `ssh -G` evaluates.
+pub fn ssh_g_args_with(dest: &Dest, options: &SshOptions) -> Vec<String> {
+    let mut args = vec!["-G".to_string()];
+    args.extend(options.forwarded_args().iter().cloned());
+    args.push("--".into());
+    args.push(dest.as_ssh_arg().into());
+    args
 }
 
 /// The arguments of the responder call (ADR-0044 decision 9):
@@ -158,12 +170,26 @@ pub fn responder_args(
     remote_qsh: &str,
     batch_mode: bool,
 ) -> Result<Vec<String>, OpError> {
+    responder_args_with(dest, remote_qsh, batch_mode, &SshOptions::default())
+}
+
+/// [`responder_args`] with the root form's ssh options (ADR-0051 decision
+/// 7). They come after the fixed options and `BatchMode`: ssh keeps the
+/// first value of an `-o` key, so a user `-o RemoteCommand=...` cannot undo
+/// the fixed set.
+pub fn responder_args_with(
+    dest: &Dest,
+    remote_qsh: &str,
+    batch_mode: bool,
+    options: &SshOptions,
+) -> Result<Vec<String>, OpError> {
     let remote = quote_remote_program(remote_qsh)?;
     let mut args: Vec<String> = RESPONDER_OPTIONS.iter().map(|s| (*s).to_string()).collect();
     if batch_mode {
         args.push("-o".into());
         args.push("BatchMode=yes".into());
     }
+    args.extend(options.forwarded_args().iter().cloned());
     args.push("--".into());
     args.push(dest.as_ssh_arg().into());
     args.push(remote);
@@ -575,6 +601,8 @@ pub struct ResponderOptions {
     /// Fires when the user interrupts qsh. The ssh child is then ended and
     /// reaped and the call fails with `CANCELED`.
     pub cancel: CancelToken,
+    /// The root form's ssh options (ADR-0051 decision 7); empty otherwise.
+    pub ssh: SshOptions,
 }
 
 impl ResponderOptions {
@@ -584,6 +612,7 @@ impl ResponderOptions {
             batch_mode,
             timeouts: BootstrapTimeouts::for_batch_mode(batch_mode),
             cancel,
+            ssh: SshOptions::default(),
         }
     }
 }
@@ -616,13 +645,25 @@ impl SshRunner {
     /// the four keys qsh uses (ADR-0044 decision 4). No network is touched.
     /// `cancel` ends the child and fails with `CANCELED`.
     pub async fn resolve(&self, dest: &Dest, cancel: &CancelToken) -> Result<SshResolved, OpError> {
+        self.resolve_with(dest, &SshOptions::default(), cancel)
+            .await
+    }
+
+    /// [`Self::resolve`] with the root form's ssh options (ADR-0051
+    /// decision 7).
+    pub async fn resolve_with(
+        &self,
+        dest: &Dest,
+        options: &SshOptions,
+        cancel: &CancelToken,
+    ) -> Result<SshResolved, OpError> {
         let program = self.program_text();
         let mut child = {
             // Not while another spawn has handles inheritable (`winproc`).
             #[cfg(windows)]
             let _spawning = crate::winproc::spawn_guard();
             ssh_command(&self.program)
-                .args(ssh_g_args(dest))
+                .args(ssh_g_args_with(dest, options))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -701,7 +742,7 @@ impl SshRunner {
         remote_qsh: &str,
         options: ResponderOptions,
     ) -> Result<SshChild, OpError> {
-        let args = responder_args(dest, remote_qsh, options.batch_mode)?;
+        let args = responder_args_with(dest, remote_qsh, options.batch_mode, &options.ssh)?;
         let program = self.program_text();
         let mut child = {
             // Not while another spawn has handles inheritable (`winproc`).

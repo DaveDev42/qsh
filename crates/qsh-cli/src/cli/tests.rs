@@ -1086,3 +1086,134 @@ fn role_flags_and_trust_set_role_parse() {
     }
     assert!(Cli::try_parse_from(["qsh", "trust", "set-role", "phone"]).is_err());
 }
+
+fn os(args: &[&str]) -> Vec<std::ffi::OsString> {
+    args.iter().map(std::ffi::OsString::from).collect()
+}
+
+/// The top-level subcommand names. A new one changes what `qsh <word>`
+/// means for anyone with a host of that name, so adding one is a decision:
+/// edit this list in the same change and pick a name no common host uses
+/// (ADR-0051 decision 6).
+#[test]
+fn top_level_subcommand_names_are_deliberate() {
+    let mut names = subcommand_names();
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names,
+        [
+            "acl",
+            "attach",
+            "audit",
+            "capabilities",
+            "cert",
+            "config",
+            "cp",
+            "doctor",
+            "exec",
+            "help",
+            "host",
+            "hosts",
+            "identity",
+            "init",
+            "internal",
+            "listen",
+            "pair",
+            "reverse",
+            "schema",
+            "serve",
+            "service",
+            "session",
+            "sessions",
+            "setup",
+            "trust",
+            "tunnel",
+            "tunnels",
+            "version",
+        ]
+    );
+}
+
+#[test]
+fn first_operand_skips_options_and_their_values() {
+    let operand = |args: &[&str]| first_operand(&os(args));
+    assert_eq!(operand(&["qsh", "box"]), Some(("box".into(), false)));
+    assert_eq!(
+        operand(&["qsh", "-p", "22", "box"]),
+        Some(("box".into(), false))
+    );
+    assert_eq!(
+        operand(&["qsh", "-p22", "box"]),
+        Some(("box".into(), false))
+    );
+    assert_eq!(
+        operand(&["qsh", "-tN", "-l", "u", "box"]),
+        Some(("box".into(), false))
+    );
+    assert_eq!(
+        operand(&["qsh", "--escape-char", "x", "box"]),
+        Some(("box".into(), false))
+    );
+    assert_eq!(
+        operand(&["qsh", "--json", "version"]),
+        Some(("version".into(), false))
+    );
+    assert_eq!(
+        operand(&["qsh", "--", "version"]),
+        Some(("version".into(), true))
+    );
+    assert_eq!(operand(&["qsh", "--json"]), None);
+}
+
+#[test]
+fn only_the_first_operand_can_be_a_subcommand() {
+    let norm = |args: &[&str]| -> Vec<String> {
+        normalize_args(os(args))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    // A host: the words after it become the command, subcommand names too.
+    assert_eq!(
+        norm(&["qsh", "box", "version"]),
+        ["qsh", "box", "--", "version"]
+    );
+    assert_eq!(
+        norm(&["qsh", "box", "-p", "22", "ls", "-l"]),
+        ["qsh", "box", "-p", "22", "--", "ls", "-l"]
+    );
+    // A subcommand, an explicit `--`, or no command: untouched.
+    assert_eq!(
+        norm(&["qsh", "exec", "box", "--", "id"]),
+        ["qsh", "exec", "box", "--", "id"]
+    );
+    assert_eq!(
+        norm(&["qsh", "--", "box", "version"]),
+        ["qsh", "--", "box", "version"]
+    );
+    assert_eq!(norm(&["qsh", "box"]), ["qsh", "box"]);
+
+    let parse = |args: &[&str]| Cli::try_parse_from(normalize_args(os(args))).unwrap();
+    let cli = parse(&["qsh", "box", "version"]);
+    assert!(cli.command.is_none());
+    assert_eq!(cli.interactive.command, ["version"]);
+    let cli = parse(&["qsh", "version"]);
+    assert!(matches!(cli.command, Some(Command::Version)));
+    let cli = parse(&["qsh", "--", "version"]);
+    assert_eq!(cli.interactive.target.unwrap().host, "version");
+    let cli = parse(&["qsh", "-tt", "-l", "bob", "-p", "2222", "box", "top", "-b"]);
+    assert_eq!(cli.interactive.force_tty, 2);
+    assert_eq!(cli.interactive.user().as_deref(), Some("bob"));
+    assert_eq!(cli.interactive.ssh_port.as_deref(), Some("2222"));
+    assert_eq!(cli.interactive.command, ["top", "-b"]);
+}
+
+#[test]
+fn root_form_usage_errors_are_told_from_subcommand_ones() {
+    assert!(is_root_form_usage_error(&os(&["qsh", "--bogus"])));
+    assert!(is_root_form_usage_error(&os(&["qsh", "-Z", "box"])));
+    assert!(is_root_form_usage_error(&os(&["qsh", "--", "exec"])));
+    assert!(!is_root_form_usage_error(&os(&["qsh", "exec"])));
+    assert!(!is_root_form_usage_error(&os(&["qsh", "--json", "exec"])));
+}

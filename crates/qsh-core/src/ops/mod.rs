@@ -47,7 +47,7 @@ pub use audit::AuditQueryOp;
 pub use auto_bootstrap::{AutoBootstrap, AutoBootstrapReport};
 pub use cert::{CertInitOp, CertIssueOp};
 pub use doctor::{DoctorHostState, DoctorOp, DoctorThreshold, meets_threshold};
-pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
+pub use exec::{ExecCommand, ExecRunOp, ExecRunOutput, ExecStdin};
 pub use file::file_copy_over;
 pub use file::{
     CancelToken, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp, FileProgress,
@@ -777,7 +777,9 @@ impl Ops {
     /// applied half-way (ADR-0021 decision 1: no clamping). One-shot ops
     /// ([`Self::connect`]) keep the compiled default and never read it.
     pub(crate) fn liveness(&self) -> Result<crate::config::Liveness, OpError> {
-        self.config()?.liveness()
+        let mut liveness = self.config()?.liveness()?;
+        crate::client_path::apply_liveness(&mut liveness);
+        Ok(liveness)
     }
 
     /// The recovery settings an attach or supervised tunnel runs with: the
@@ -1047,6 +1049,18 @@ async fn lookup_all(address: &str) -> Result<Vec<SocketAddr>, OpError> {
         return Err(OpError::new(
             ErrorCode::ConnectionFailed,
             format!("{address} resolved to no addresses"),
+        ));
+    }
+    // `-4` / `-6` of the root ssh form (ADR-0051 decision 7).
+    let found = addrs.len();
+    let addrs = crate::client_path::filter_addresses(addrs);
+    if addrs.is_empty() {
+        return Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "{address} resolved to {found} address(es), none in the requested family ({:?})",
+                crate::client_path::family()
+            ),
         ));
     }
     Ok(addrs)

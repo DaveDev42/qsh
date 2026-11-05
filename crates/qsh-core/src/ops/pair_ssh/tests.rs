@@ -171,6 +171,7 @@ fn plan(role: TrustRole) -> Plan {
         remote_qsh: "qsh".into(),
         runner: SshRunner::new("ssh"),
         batch: true,
+        ssh: SshOptions::default(),
     }
 }
 

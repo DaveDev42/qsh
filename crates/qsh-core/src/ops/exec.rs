@@ -46,7 +46,67 @@ pub enum ExecStdin {
     Inherit,
 }
 
+/// What the root form `qsh [ssh options] host [command...]` asks the remote
+/// to run (ADR-0051 decision 6). `qsh exec host -- argv` stays
+/// [`ExecCommand::Argv`]: no shell, argv verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecCommand {
+    /// A program and its arguments, run without a shell.
+    Argv(Vec<String>),
+    /// The arguments joined with spaces, the way ssh sends them, for the
+    /// remote account's shell to run with `-c`.
+    ShellCommand(String),
+    /// `-T` with no command: the remote account's login shell, no PTY.
+    LoginShell,
+}
+
+impl ExecCommand {
+    /// The ssh rule: join `args` with single spaces into one string.
+    pub fn shell_command(args: &[String]) -> Self {
+        Self::ShellCommand(args.join(" "))
+    }
+
+    /// The argv that goes on the wire today.
+    ///
+    /// TODO(ADR-0051 decision 6 `shell_command`): the exec open message has
+    /// no `shell_command` field yet, so the remote login shell cannot be
+    /// asked to run the string. Until the wire step lands, a string is run
+    /// as `sh -c <string>` and the login shell as `sh`, which is right on
+    /// unix hosts and fails on a Windows host (no `sh`). The wire step
+    /// replaces this one function: [`ShellCommand`](Self::ShellCommand) and
+    /// [`LoginShell`](Self::LoginShell) then travel as `shell_command` and
+    /// an old host answers `UNSUPPORTED`.
+    pub fn wire_argv(self) -> Vec<String> {
+        match self {
+            Self::Argv(argv) => argv,
+            Self::ShellCommand(line) => vec!["sh".into(), "-c".into(), line],
+            Self::LoginShell => vec!["sh".into()],
+        }
+    }
+}
+
 impl Ops {
+    /// [`Self::exec_run`] for the root ssh form: the command is an
+    /// [`ExecCommand`] instead of a ready argv.
+    pub fn exec_command(
+        &self,
+        host: String,
+        command: ExecCommand,
+        env: Vec<qsh_proto::EnvVar>,
+        timeout_ms: Option<u64>,
+        stdin: ExecStdin,
+    ) -> Result<ExecRunOutput, OpError> {
+        self.exec_run(
+            ExecRunReq {
+                host,
+                argv: command.wire_argv(),
+                env,
+                timeout_ms,
+            },
+            stdin,
+        )
+    }
+
     /// Run a command on `req.host` and collect its output — route-aware
     /// since issue #5: a live reverse registration held by this machine's
     /// `qsh listen` daemon wins over a forward (`hosts.toml`/trust-store)

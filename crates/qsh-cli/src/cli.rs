@@ -68,9 +68,122 @@ pub struct InteractiveArgs {
 
     /// Escape character for the line-start detach sequences (`~d`, `~.`,
     /// `~~`, `~?`), or `none` to disable them. Default `~`; only active
-    /// when stdin is a terminal.
-    #[arg(long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
+    /// when stdin is a terminal. `-e` is the ssh spelling.
+    #[arg(short = 'e', long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
     pub escape_char: Option<EscapeChar>,
+
+    /// The command to run on the host, `ssh host command [arg...]`: the
+    /// arguments are joined with spaces and run by the remote account's
+    /// shell (`docs/CLI.md` §7.2, ADR-0051 decision 6). Everything after
+    /// the host is the command, options included. Without a command the
+    /// form opens an interactive session.
+    #[arg(
+        value_name = "REMOTE_COMMAND",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        requires = "target"
+    )]
+    pub command: Vec<String>,
+
+    /// Remote account, `ssh -l`. Same as `user@` on the host.
+    #[arg(short = 'l', value_name = "USER", requires = "target")]
+    pub login: Option<String>,
+
+    /// ssh port, `ssh -p`. It is sshd's port for the bootstrap, never the
+    /// UDP port qsh dials (ADR-0051 decision 7).
+    #[arg(short = 'p', value_name = "PORT", requires = "target")]
+    pub ssh_port: Option<String>,
+
+    /// ssh identity file, `ssh -i`, repeatable. Passed to the bootstrap ssh.
+    #[arg(short = 'i', value_name = "FILE", action = ArgAction::Append, requires = "target")]
+    pub ssh_identity: Vec<String>,
+
+    /// ssh config file, `ssh -F`. Passed to the bootstrap ssh.
+    #[arg(short = 'F', value_name = "FILE", requires = "target")]
+    pub ssh_config_file: Option<String>,
+
+    /// ssh option `Key=Value`, `ssh -o`, repeatable. Passed to the
+    /// bootstrap ssh; `ConnectTimeout`, `BatchMode`, `ServerAliveInterval`
+    /// and `ServerAliveCountMax` also apply to the QUIC connection.
+    #[arg(short = 'o', value_name = "KEY=VALUE", action = ArgAction::Append, requires = "target")]
+    pub ssh_option: Vec<String>,
+
+    /// Compression for the bootstrap ssh, `ssh -C`.
+    #[arg(short = 'C', requires = "target")]
+    pub ssh_compression: bool,
+
+    /// IPv4 only: the bootstrap ssh and the QUIC dial.
+    #[arg(short = '4', requires = "target")]
+    pub ipv4: bool,
+
+    /// IPv6 only: the bootstrap ssh and the QUIC dial.
+    #[arg(short = '6', requires = "target")]
+    pub ipv6: bool,
+
+    /// Jump host list, `ssh -J`. Reaches the bootstrap ssh only; a jump on
+    /// the QUIC path is `UNSUPPORTED` until M26.
+    #[arg(short = 'J', value_name = "DEST", requires = "target")]
+    pub jump: Option<String>,
+
+    /// Agent forwarding, `ssh -A`. `UNSUPPORTED` until M25.
+    #[arg(short = 'A', requires = "target")]
+    pub agent_forwarding: bool,
+
+    /// Force a PTY (`-t`); twice (`-tt`) force it even when stdin is not a
+    /// terminal. With a command, `-t` runs it in a PTY session that can be
+    /// detached.
+    #[arg(short = 't', action = ArgAction::Count, requires = "target")]
+    pub force_tty: u8,
+
+    /// No PTY. With no command, opens the login shell without one.
+    #[arg(short = 'T', requires = "target")]
+    pub no_tty: bool,
+
+    /// Run no command and no shell: hold only the `-L`/`-R`/`-D` forwards,
+    /// like `qsh tunnel open`.
+    #[arg(short = 'N', requires = "target")]
+    pub no_command: bool,
+
+    /// Go to the background once authentication and the forwards are up
+    /// (with `-N`).
+    #[arg(short = 'f', requires = "target")]
+    pub background: bool,
+
+    /// Write diagnostics to this file instead of stderr, `ssh -E`.
+    #[arg(short = 'E', value_name = "FILE", requires = "target")]
+    pub log_file: Option<String>,
+
+    /// ssh options qsh refuses by name (`UNSUPPORTED`, exit 255). Parsed so
+    /// the refusal can name the option; hidden from help.
+    #[arg(short = 'X', hide = true, requires = "target")]
+    pub reject_x11: bool,
+    #[arg(short = 'Y', hide = true, requires = "target")]
+    pub reject_x11_trusted: bool,
+    #[arg(short = 'M', hide = true, requires = "target")]
+    pub reject_master: bool,
+    #[arg(
+        short = 'W',
+        value_name = "HOST:PORT",
+        hide = true,
+        requires = "target"
+    )]
+    pub reject_stdio_forward: Option<String>,
+    #[arg(short = 'S', value_name = "PATH", hide = true, requires = "target")]
+    pub reject_control_path: Option<String>,
+    #[arg(short = 'O', value_name = "CMD", hide = true, requires = "target")]
+    pub reject_control_command: Option<String>,
+    #[arg(short = 'w', value_name = "TUN", hide = true, requires = "target")]
+    pub reject_tun: Option<String>,
+    #[arg(short = 'b', value_name = "ADDR", hide = true, requires = "target")]
+    pub reject_bind_address: Option<String>,
+    #[arg(short = 'B', value_name = "IF", hide = true, requires = "target")]
+    pub reject_bind_interface: Option<String>,
+    #[arg(short = 'c', value_name = "CIPHER", hide = true, requires = "target")]
+    pub reject_cipher: Option<String>,
+    #[arg(short = 'm', value_name = "MAC", hide = true, requires = "target")]
+    pub reject_mac: Option<String>,
+    #[arg(short = 'Q', value_name = "QUERY", hide = true, requires = "target")]
+    pub reject_query: Option<String>,
 
     /// Local forward `[bind:]listen_port:host:host_port`, repeatable:
     /// open `listen_port` on this machine and forward each connection to
@@ -153,6 +266,150 @@ pub struct InteractiveArgs {
         requires = "target"
     )]
     pub dynamic_forward: Vec<String>,
+}
+
+impl InteractiveArgs {
+    /// The ssh options as typed, for `qsh_core`'s validation.
+    pub fn ssh_flags(&self) -> qsh_core::ssh_bootstrap::SshFlags {
+        let mut rejected = Vec::new();
+        let mut reject = |name: &str, present: bool| {
+            if present {
+                rejected.push(name.to_string());
+            }
+        };
+        reject("-X", self.reject_x11);
+        reject("-Y", self.reject_x11_trusted);
+        reject("-W", self.reject_stdio_forward.is_some());
+        reject("-M", self.reject_master);
+        reject("-S", self.reject_control_path.is_some());
+        reject("-O", self.reject_control_command.is_some());
+        reject("-w", self.reject_tun.is_some());
+        reject("-b", self.reject_bind_address.is_some());
+        reject("-B", self.reject_bind_interface.is_some());
+        reject("-c", self.reject_cipher.is_some());
+        reject("-m", self.reject_mac.is_some());
+        reject("-Q", self.reject_query.is_some());
+        qsh_core::ssh_bootstrap::SshFlags {
+            port: self.ssh_port.clone(),
+            identity: self.ssh_identity.clone(),
+            config_file: self.ssh_config_file.clone(),
+            options: self.ssh_option.clone(),
+            compression: self.ssh_compression,
+            ipv4: self.ipv4,
+            ipv6: self.ipv6,
+            jump: self.jump.clone(),
+            agent_forwarding: self.agent_forwarding,
+            rejected,
+        }
+    }
+
+    /// The remote account the person named: `user@host` wins over `-l`, as
+    /// in ssh (ADR-0051 decision 7: both select the account).
+    pub fn user(&self) -> Option<String> {
+        self.target
+            .as_ref()
+            .and_then(|target| target.user.clone())
+            .or_else(|| self.login.clone())
+    }
+}
+
+/// Root options that take a value, for [`first_operand`]. Long forms are
+/// matched with their `=` or the next argument.
+const ROOT_VALUE_SHORTS: &str = "LRDlpiFoJEeSOwbBcmQW";
+const ROOT_VALUE_LONGS: &[&str] = &["--escape-char"];
+
+/// The first operand at or after `from` (index into `args`), skipping root
+/// options and their values. The flag is `true` when a `--` forced it.
+fn operand_from(args: &[std::ffi::OsString], from: usize) -> Option<(usize, bool)> {
+    let mut at = from;
+    while at < args.len() {
+        let arg = args[at].to_string_lossy();
+        at += 1;
+        if arg == "--" {
+            return (at < args.len()).then_some((at, true));
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let name = format!("--{}", long.split('=').next().unwrap_or(long));
+            if ROOT_VALUE_LONGS.contains(&name.as_str()) && !long.contains('=') {
+                at += 1;
+            }
+            continue;
+        }
+        if let Some(cluster) = arg.strip_prefix('-')
+            && !cluster.is_empty()
+        {
+            let chars: Vec<char> = cluster.chars().collect();
+            for (n, c) in chars.iter().enumerate() {
+                if ROOT_VALUE_SHORTS.contains(*c) {
+                    if n + 1 == chars.len() {
+                        at += 1;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        return Some((at - 1, false));
+    }
+    None
+}
+
+/// The first operand of a command line (the word that is the subcommand or
+/// the host), skipping the root options and their values. `None` when there
+/// is none. `--` makes the next word the operand, which is how `qsh -- host`
+/// forces the host reading.
+pub fn first_operand(args: &[std::ffi::OsString]) -> Option<(String, bool)> {
+    operand_from(args, 1).map(|(at, forced)| (args[at].to_string_lossy().into_owned(), forced))
+}
+
+/// Make the words after a host plain positionals. clap would otherwise read
+/// `qsh host version` as the subcommand `version` after a positional; only
+/// the first operand may name a subcommand (ADR-0051 decision 6). When the
+/// first operand is a host, a `--` goes in front of the first word after it
+/// that is not an option, so the rest is the command whatever it is called.
+/// Options between the host and the command stay options, like ssh.
+pub fn normalize_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let Some((host_at, forced)) = operand_from(&args, 1) else {
+        return args;
+    };
+    if forced || subcommand_names().contains(&args[host_at].to_string_lossy().into_owned()) {
+        return args;
+    }
+    match operand_from(&args, host_at + 1) {
+        Some((command_at, false)) => {
+            let mut out = args;
+            out.insert(command_at, "--".into());
+            out
+        }
+        _ => args,
+    }
+}
+
+/// The names (and aliases) of the top-level subcommands.
+pub fn subcommand_names() -> Vec<String> {
+    use clap::CommandFactory as _;
+    let command = Cli::command();
+    let mut names = Vec::new();
+    for sub in command.get_subcommands() {
+        names.push(sub.get_name().to_string());
+        names.extend(sub.get_all_aliases().map(str::to_string));
+    }
+    // clap adds `help` only when it builds the command.
+    names.push("help".to_string());
+    names
+}
+
+/// Whether a command line that clap rejected is a mistake in the root ssh
+/// form (`qsh [ssh options] [user@]host [command]`), which exits `255` like
+/// ssh, rather than in a subcommand, which exits `2` (`docs/CLI.md` §4).
+/// The first operand decides: a subcommand name there means subcommand,
+/// unless `--` forced it to be a host.
+pub fn is_root_form_usage_error(args: &[std::ffi::OsString]) -> bool {
+    match first_operand(args) {
+        None => true,
+        Some((_, true)) => true,
+        Some((word, false)) => !subcommand_names().contains(&word),
+    }
 }
 
 /// A parsed `[user@]host` target (`docs/CLI.md` §7).
