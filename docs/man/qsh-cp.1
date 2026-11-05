@@ -32,6 +32,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
 .TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
+.TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP

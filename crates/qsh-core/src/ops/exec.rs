@@ -4,6 +4,7 @@
 //! negotiate, run, and assemble the `ExecRunData` payload.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -187,19 +188,38 @@ impl Ops {
         match self.resolve_exec_route(host, identity)? {
             PeerRoute::Forward(target) => {
                 let device_name = target.identity.identity.device_id.clone();
-                let dialer = Dialer::new(
-                    target.identity.local,
-                    target.trust as Arc<dyn qsh_transport::TrustEvaluator>,
-                );
-                runtime.block_on(exec_async(
-                    &dialer,
-                    &target.address,
-                    &target.server_name,
-                    &device_name,
-                    &spec,
-                    stdin,
-                    timeout,
-                ))
+                let run = |target: &PeerTarget, stdin: ExecStdin, dialed: &AtomicBool| {
+                    let dialer = Dialer::new(
+                        target.identity.local.clone(),
+                        target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
+                    );
+                    runtime.block_on(exec_async(
+                        &dialer,
+                        &target.address,
+                        &target.server_name,
+                        &device_name,
+                        &spec,
+                        stdin,
+                        timeout,
+                        dialed,
+                    ))
+                };
+                let dialed = AtomicBool::new(false);
+                // Only the dial may be retried (ADR-0051 decision 4): once
+                // the connection stood, the command may have run, and
+                // running it twice is not a recovery. Stdin is read only after
+                // the dial, so a failed dial has not consumed any of it.
+                match run(&target, stdin, &dialed) {
+                    Err(err)
+                        if !dialed.load(Ordering::SeqCst) && err.code != ErrorCode::Timeout =>
+                    {
+                        match self.revive_target(&target, &err) {
+                            Some(revived) => run(&revived, stdin, &AtomicBool::new(false)),
+                            None => Err(err),
+                        }
+                    }
+                    other => other,
+                }
             }
             PeerRoute::Reverse(route) => {
                 runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))
@@ -268,6 +288,7 @@ async fn until<T>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exec_async(
     dialer: &Dialer,
     address: &str,
@@ -276,8 +297,9 @@ async fn exec_async(
     spec: &ExecSpec,
     stdin: ExecStdin,
     timeout: Option<Duration>,
+    dialed: &AtomicBool,
 ) -> Result<ExecRunOutput, OpError> {
-    exec_async_resolving(
+    exec_async_tracked(
         dialer,
         address,
         server_name,
@@ -286,6 +308,7 @@ async fn exec_async(
         stdin,
         timeout,
         &crate::ops::SystemResolver,
+        dialed,
     )
     .await
 }
@@ -300,6 +323,7 @@ async fn exec_async(
 /// [`crate::ops::dial_first_reachable`] — tries every resolved address,
 /// not only the first
 /// (`exec_async_tries_every_resolved_address_not_only_the_first`).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn exec_async_resolving(
     dialer: &Dialer,
@@ -310,6 +334,35 @@ async fn exec_async_resolving(
     stdin: ExecStdin,
     timeout: Option<Duration>,
     resolver: &dyn crate::ops::AddressResolver,
+) -> Result<ExecRunOutput, OpError> {
+    exec_async_tracked(
+        dialer,
+        address,
+        server_name,
+        device_name,
+        spec,
+        stdin,
+        timeout,
+        resolver,
+        &AtomicBool::new(false),
+    )
+    .await
+}
+
+/// [`exec_async_resolving`] that also sets `dialed` once the connection
+/// stands, so the caller can tell a failure to connect (which a revived serve
+/// can mend) from one after the command may have started.
+#[allow(clippy::too_many_arguments)]
+async fn exec_async_tracked(
+    dialer: &Dialer,
+    address: &str,
+    server_name: &str,
+    device_name: &str,
+    spec: &ExecSpec,
+    stdin: ExecStdin,
+    timeout: Option<Duration>,
+    resolver: &dyn crate::ops::AddressResolver,
+    dialed_flag: &AtomicBool,
 ) -> Result<ExecRunOutput, OpError> {
     // One budget for everything the user is waiting on: resolve, dial,
     // negotiate, run. The connection teardown afterwards is *not* under it —
@@ -328,6 +381,7 @@ async fn exec_async_resolving(
     .await
     .ok_or_else(timed_out)?
     .map_err(|(err, attempted)| map_dial_error(err, address, attempted))?;
+    dialed_flag.store(true, Ordering::SeqCst);
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
 

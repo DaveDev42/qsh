@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-set\-role \- Change the trust role of a pinned peer (`docs/CLI.md` §6.11, ADR\-0045). The only command that changes the role of a pin that already exists. Takes effect from the peer\*(Aqs next request with no restart: roles are read on every decision, unlike `acl.toml` rows. The role is one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none`
 .SH SYNOPSIS
-\fBqsh trust set\-role\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIROLE\fR> 
+\fBqsh trust set\-role\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIROLE\fR> 
 .SH DESCRIPTION
 Change the trust role of a pinned peer (`docs/CLI.md` §6.11, ADR\-0045). The only command that changes the role of a pin that already exists. Takes effect from the peer\*(Aqs next request with no restart: roles are read on every decision, unlike `acl.toml` rows. The role is one of `full`, `exec`, `tunnel`, `read\-only`, `reverse`, `none`
 .SH OPTIONS
@@ -20,6 +20,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

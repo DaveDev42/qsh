@@ -1706,3 +1706,60 @@ fn invalid_pin_grants_make_trust_toml_a_config_error() {
     .unwrap();
     TrustStore::load(&path).unwrap();
 }
+
+// ADR-0051 decision 4: the `source` mark of a pin the SSH bootstrap wrote.
+
+#[test]
+fn a_source_mark_is_written_to_trust_toml_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let mut store = TrustStore::default();
+    store.add_peer("box", Some("box:4433".into()), fp(b"box"), "now".into());
+    store.add_peer("hand", Some("hand:4433".into()), fp(b"hand"), "now".into());
+    assert!(store.mark_source("box", PIN_SOURCE_SSH_BOOTSTRAP));
+    assert!(!store.mark_source("nobody", PIN_SOURCE_SSH_BOOTSTRAP));
+    store.save(&path).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        text.matches("source").count(),
+        1,
+        "only the marked pin has the key: {text}"
+    );
+    let loaded = TrustStore::load(&path).unwrap();
+    assert_eq!(
+        loaded.find("box").unwrap().source.as_deref(),
+        Some("ssh_bootstrap")
+    );
+    assert_eq!(loaded.find("hand").unwrap().source, None);
+}
+
+#[test]
+fn a_trust_toml_without_source_keys_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[[peer]]\nname = \"old\"\nfingerprint = \"{}\"\naddress = \"old:4433\"\nadded_at = \"then\"\n",
+            fp(b"old")
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        TrustStore::load(&path).unwrap().find("old").unwrap().source,
+        None
+    );
+}
+
+#[test]
+fn re_adding_a_marked_pin_keeps_its_mark() {
+    let mut store = TrustStore::default();
+    store.add_peer("box", Some("box:4433".into()), fp(b"box"), "now".into());
+    store.mark_source("box", PIN_SOURCE_SSH_BOOTSTRAP);
+    let (peer, created, updated) =
+        store.add_peer("box", Some("box:60001".into()), fp(b"box"), "later".into());
+    assert!(!created && updated);
+    assert_eq!(peer.address, "box:60001");
+    assert_eq!(peer.source.as_deref(), Some("ssh_bootstrap"));
+}

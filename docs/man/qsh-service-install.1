@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-service\-install \- Write (or rewrite) the unit for this machine\*(Aqs inferred run mode, create its parent directories, and load and start it through the service manager (ADR\-0051 decision 11). A unit that is already running is not restarted. `\-\-no\-activate` writes the file only
 .SH SYNOPSIS
-\fBqsh service install\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-no\-activate\fR] [\fB\-\-to\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-bind\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-name\fR] [\fB\-\-always\-on\fR] [\fB\-\-move\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service install\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-no\-activate\fR] [\fB\-\-to\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-bind\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-name\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-always\-on\fR] [\fB\-\-move\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Write (or rewrite) the unit for this machine\*(Aqs inferred run mode, create its parent directories, and load and start it through the service manager (ADR\-0051 decision 11). A unit that is already running is not restarted. `\-\-no\-activate` writes the file only
 .SH OPTIONS
@@ -32,6 +32,9 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-name\fR \fI<NAME>\fR
 Name to register under with `\-\-to`: written to `[reverse].offered_name` in `config.toml`
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-\-always\-on\fR
 Also run with nobody logged in, with the OS\*(Aqs own consent step: `loginctl enable\-linger` (Linux), the LaunchDaemon recipe under `sudo` (macOS), or a `Password` task from an elevated console plus the inbound UDP firewall rule (Windows). `sudo`, polkit and `schtasks` ask for the password themselves; qsh never reads it

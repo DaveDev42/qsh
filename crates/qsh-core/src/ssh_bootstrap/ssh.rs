@@ -784,10 +784,13 @@ impl SshRunner {
 /// Put a `BatchMode` ssh child in a kill-on-close job, so the `ssh -W` hop it
 /// started (hidden console, nobody to answer a prompt) cannot outlive it.
 /// Best effort: without the job a stuck hop is only a leftover process.
+/// The job allows breakaway, so an on-demand serve that ssh started on this
+/// same machine (`qsh localhost`, the testkit's fake ssh) is not killed with
+/// the ssh child; nothing else in the tree asks to leave.
 #[cfg(windows)]
 fn contain_in_job(child: &Child) -> Option<crate::winproc::JobObject> {
     let handle = child.raw_handle()?;
-    let job = crate::winproc::JobObject::new_kill_on_close().ok()?;
+    let job = crate::winproc::JobObject::new_kill_on_close_breakaway_ok().ok()?;
     job.assign(handle).ok()?;
     Some(job)
 }

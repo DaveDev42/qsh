@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup\-listener \- This machine runs `qsh listen` for a reverse peer
 .SH SYNOPSIS
-\fBqsh setup listener\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-\-service\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-role\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh setup listener\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-peer\-cert\fR] [\fB\-\-service\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-role\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 This machine runs `qsh listen` for a reverse peer
 .SH OPTIONS
@@ -32,6 +32,9 @@ Trust role of the target pin: one of `full`, `exec`, `tunnel`, `read\-only`, `re
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

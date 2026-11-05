@@ -19,6 +19,9 @@
 //! 4. Under the `trust.toml` lock: load, check, mutate, audit, save, in that
 //!    order (decision 12). A pin is never written unless its audit record
 //!    was.
+//! 5. When the `commit` asked for it (`ensure_serve`, ADR-0051 decisions 1
+//!    and 4) and the pin stands, find or start this account's on-demand
+//!    serve and put its address in the `result`.
 //!
 //! The streams carry public values only (fingerprints, pin names, roles).
 //! Nothing read from the peer is logged: `tracing` gets stages and result
@@ -26,6 +29,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,11 +42,18 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use super::MESSAGE_TIMEOUT;
+mod serve;
+
 use crate::audit::{AuditRecord, AuditSink};
 use crate::config::{Config, Paths, now_rfc3339};
 use crate::ops::{OpError, Ops};
 use crate::trust::{TrustRole, TrustStore, normalize_peer_address, validate_peer_label};
 use crate::{Fingerprint, Principal};
+
+/// How long the responder waits for a serve it started to publish
+/// `serve.json` (the `ensure_serve` request). Well inside the client's 30 s
+/// wait for each message after the `hello`.
+const ENSURE_SERVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The audit `action` of a pin the responder wrote (ADR-0044 decision 9).
 /// It names no operation: `qsh pair ssh-respond` is not one.
@@ -70,6 +81,16 @@ pub struct Responder {
     config: Config,
     audit: Arc<dyn AuditSink>,
     commit_timeout: Duration,
+    /// The executable `ensure_serve` starts as `serve --on-demand`; `None`
+    /// is this process's own executable.
+    serve_program: Option<PathBuf>,
+    /// How long `ensure_serve` waits for a started serve to publish
+    /// `serve.json`.
+    ensure_timeout: Duration,
+    /// Whether the `hello` advertises `on_demand` and `ensure_serve` is
+    /// honoured. Always on in production; a test turns it off to stand in for
+    /// a responder from before ADR-0051.
+    on_demand: bool,
 }
 
 impl Responder {
@@ -80,7 +101,30 @@ impl Responder {
             config,
             audit,
             commit_timeout: MESSAGE_TIMEOUT,
+            serve_program: None,
+            ensure_timeout: ENSURE_SERVE_TIMEOUT,
+            on_demand: true,
         }
+    }
+
+    /// Start `program serve --on-demand` for `ensure_serve` instead of this
+    /// process's own executable (tests run inside a test binary).
+    pub fn with_serve_program(mut self, program: PathBuf) -> Self {
+        self.serve_program = Some(program);
+        self
+    }
+
+    /// Replace the 15 s wait for a started serve to publish `serve.json`.
+    pub fn with_ensure_serve_timeout(mut self, timeout: Duration) -> Self {
+        self.ensure_timeout = timeout;
+        self
+    }
+
+    /// Behave like a responder that predates `ensure_serve`: no `on_demand`
+    /// in the `hello`, and the request is ignored.
+    pub fn without_on_demand(mut self) -> Self {
+        self.on_demand = false;
+        self
     }
 
     /// Replace the 30 s wait for the `commit` (ADR-0044 decision 16). The
@@ -118,6 +162,7 @@ impl Responder {
                 fingerprint: None,
                 serve_bind: None,
                 serve_listening: None,
+                on_demand: None,
             },
             Some(identity) => Hello {
                 versions: BOOTSTRAP_VERSIONS.to_vec(),
@@ -126,6 +171,7 @@ impl Responder {
                 fingerprint: Some(identity.fingerprint.to_string()),
                 serve_listening: serve_listening(&serve_spec),
                 serve_bind: Some(serve_spec),
+                on_demand: self.on_demand.then_some(true),
             },
         };
         send(&mut output, &BootstrapLine::Hello(hello)).await?;
@@ -152,7 +198,16 @@ impl Responder {
                 "the commit line is too long",
             ),
             Line::Complete(bytes) => match parse_ssh_bootstrap_line(&bytes) {
-                Ok(BootstrapLine::Commit(commit)) => self.apply(&commit),
+                Ok(BootstrapLine::Commit(commit)) => {
+                    let mut result = self.apply(&commit);
+                    if self.on_demand
+                        && commit.ensure_serve == Some(true)
+                        && matches!(result.status, ResultStatus::Pinned | ResultStatus::Exists)
+                    {
+                        self.ensure_serve(&mut result).await;
+                    }
+                    result
+                }
                 Ok(_) => reject("", ErrorCode::InvalidArgument, "expected a commit message"),
                 Err(_) => reject("", ErrorCode::InvalidArgument, "the commit is not valid"),
             },
@@ -161,6 +216,50 @@ impl Responder {
         tracing::info!(stage = "result", status = status.as_str(), "ssh-respond");
         send(&mut output, &BootstrapLine::Result(result)).await?;
         Ok(RespondEnd::Answered(status))
+    }
+
+    /// Fill in the serve answer of `result` (`ensure_serve`). The pin
+    /// already stands, so a serve that cannot be started leaves the status as
+    /// it is and says why in `message`; the client then falls back to what the
+    /// `hello` reported.
+    async fn ensure_serve(&self, result: &mut BootstrapResult) {
+        let paths = self.paths.clone();
+        let program = match self.serve_program.clone() {
+            Some(program) => program,
+            None => match std::env::current_exe() {
+                Ok(program) => program,
+                Err(err) => {
+                    result.serve_started = Some(false);
+                    result.message = Some(format!("cannot find the qsh executable: {err}"));
+                    return;
+                }
+            },
+        };
+        let timeout = self.ensure_timeout;
+        let outcome =
+            tokio::task::spawn_blocking(move || serve::ensure(&paths, &program, timeout)).await;
+        match outcome {
+            Ok(Ok(answer)) => {
+                tracing::info!(
+                    stage = "ensure_serve",
+                    started = answer.started,
+                    session_scoped = answer.session_scoped,
+                    "ssh-respond"
+                );
+                result.serve_bind = Some(answer.bind);
+                result.serve_started = Some(answer.started);
+                result.serve_session_scoped = Some(answer.session_scoped);
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(stage = "ensure_serve", code = ?err.code, "ssh-respond");
+                result.serve_started = Some(false);
+                result.message = Some(err.message);
+            }
+            Err(_) => {
+                result.serve_started = Some(false);
+                result.message = Some("starting the serve was interrupted".to_string());
+            }
+        }
     }
 
     /// Validate a `commit` and, if it is new, write the pin. Every failure
@@ -262,6 +361,9 @@ impl Responder {
                 created: false,
                 code: None,
                 message: None,
+                serve_bind: None,
+                serve_started: None,
+                serve_session_scoped: None,
             });
         }
         if let Some(existing) = store.find(name) {
@@ -275,6 +377,9 @@ impl Responder {
                     "the name {name} is already pinned on this host with fingerprint {}",
                     existing.fingerprint
                 )),
+                serve_bind: None,
+                serve_started: None,
+                serve_session_scoped: None,
             });
         }
 
@@ -302,6 +407,9 @@ impl Responder {
             created: true,
             code: None,
             message: None,
+            serve_bind: None,
+            serve_started: None,
+            serve_session_scoped: None,
         })
     }
 }
@@ -329,6 +437,9 @@ fn reject(name: &str, code: ErrorCode, message: &str) -> BootstrapResult {
         created: false,
         code: Some(code),
         message: Some(message.to_string()),
+        serve_bind: None,
+        serve_started: None,
+        serve_session_scoped: None,
     }
 }
 

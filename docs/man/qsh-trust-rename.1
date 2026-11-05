@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-rename \- Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
 .SH SYNOPSIS
-\fBqsh trust rename\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIOLD\fR> <\fINEW\fR> 
+\fBqsh trust rename\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIOLD\fR> <\fINEW\fR> 
 .SH DESCRIPTION
 Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
 .SH OPTIONS
@@ -20,6 +20,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

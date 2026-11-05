@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-acl\-check \- Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
 .SH SYNOPSIS
-\fBqsh acl check\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-resource\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-auth\-path\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-owner\fR] [\fB\-\-owner\-auth\-path\fR] [\fB\-\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> <\fB\-\-action\fR> 
+\fBqsh acl check\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-resource\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-auth\-path\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-owner\fR] [\fB\-\-owner\-auth\-path\fR] [\fB\-\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> <\fB\-\-action\fR> 
 .SH DESCRIPTION
 Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
 .SH OPTIONS
@@ -32,6 +32,9 @@ Auth path the principal is assumed to have authenticated over. Omit to use `acl.
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-\-owner\fR \fI<PRINCIPAL>\fR
 Principal that owns `\-\-resource`, so `scope = "owned"` rows can be evaluated too (`docs/CLI.md` §6.15). Omit to evaluate `\-\-resource` as unowned

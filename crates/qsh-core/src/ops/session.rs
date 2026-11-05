@@ -1232,13 +1232,22 @@ impl Ops {
         let runtime = self.connect_runtime()?;
         let connected = match route {
             PeerRoute::Forward(target) => {
-                let dialed = runtime.block_on(async {
-                    tokio::select! {
-                        biased;
-                        () = cancel.canceled() => Err(canceled()),
-                        dialed = dial_peer(&target, TransportTuning::default()) => dialed,
-                    }
-                });
+                let dial = |target: &PeerTarget| {
+                    runtime.block_on(async {
+                        tokio::select! {
+                            biased;
+                            () = cancel.canceled() => Err(canceled()),
+                            dialed = dial_peer(target, TransportTuning::default()) => dialed,
+                        }
+                    })
+                };
+                let dialed = match dial(&target) {
+                    Err(err) if !cancel.is_canceled() => match self.revive_target(&target, &err) {
+                        Some(revived) => dial(&revived),
+                        None => Err(err),
+                    },
+                    other => other,
+                };
                 let (endpoint, connection, session) = dialed?;
                 Connected {
                     runtime: Some(runtime),
@@ -1306,7 +1315,13 @@ impl Ops {
         tuning: TransportTuning,
     ) -> Result<Connected, OpError> {
         let runtime = self.connect_runtime()?;
-        let (endpoint, connection, session) = runtime.block_on(dial_peer(target, tuning))?;
+        let (endpoint, connection, session) = match runtime.block_on(dial_peer(target, tuning)) {
+            Ok(dialed) => dialed,
+            Err(err) => match self.revive_target(target, &err) {
+                Some(revived) => runtime.block_on(dial_peer(&revived, tuning))?,
+                None => return Err(err),
+            },
+        };
         Ok(Connected {
             runtime: Some(runtime),
             link: ConnectedLink::Forward(Link::new(endpoint, connection)),

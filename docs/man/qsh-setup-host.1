@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup\-host \- This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
 .SH SYNOPSIS
-\fBqsh setup host\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-to\fR] [\fB\-\-address\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-cert\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-forward\fR] [\fB\-\-service\fR] [\fB\-\-peer\-role\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh setup host\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-to\fR] [\fB\-\-address\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-cert\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-forward\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-service\fR] [\fB\-\-peer\-role\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
 .SH OPTIONS
@@ -35,6 +35,9 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-forward\fR
 Also require `forward.local` in the printed `[[acl]]` rows
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-\-service\fR
 Also write the service unit file

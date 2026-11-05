@@ -53,6 +53,9 @@
 //! - With `respond_crlf=1` the responder's stdout is passed on with every
 //!   `\n` turned into `\r\n`, as a Windows remote with a translating
 //!   console would deliver it.
+//! - With `respond_old=1` the responder's stdout is passed on with the
+//!   `"on_demand":true` field of its `hello` removed, so the client sees a
+//!   responder from before ADR-0051 (and never sends `ensure_serve`).
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -249,10 +252,11 @@ fn run_local_responder(cfg: &HashMap<String, String>, args: &[String]) -> i32 {
         .env_remove("RUST_LOG")
         .stdin(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if !flag("respond_crlf") {
+    if !flag("respond_crlf") && !flag("respond_old") {
         let status = command.status().expect("start the local responder");
         return status.code().unwrap_or(255);
     }
+    let (crlf, old) = (flag("respond_crlf"), flag("respond_old"));
     let mut child = command
         .stdout(Stdio::piped())
         .spawn()
@@ -260,19 +264,36 @@ fn run_local_responder(cfg: &HashMap<String, String>, args: &[String]) -> i32 {
     let mut pipe = child.stdout.take().expect("responder stdout");
     let mut out = std::io::stdout().lock();
     let mut chunk = [0u8; 4096];
+    // Lines are rewritten whole, so a field cannot be split across reads.
+    let mut pending: Vec<u8> = Vec::new();
+    let emit = |line: &[u8], out: &mut std::io::StdoutLock<'_>| {
+        let mut line = line.to_vec();
+        if old {
+            const FIELD: &[u8] = b",\"on_demand\":true";
+            while let Some(at) = line.windows(FIELD.len()).position(|w| w == FIELD) {
+                line.drain(at..at + FIELD.len());
+            }
+        }
+        let _ = out.write_all(&line);
+        if crlf {
+            let _ = out.write_all(b"\r");
+        }
+        let _ = out.write_all(b"\n");
+        let _ = out.flush();
+    };
     loop {
         let n = match pipe.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        let mut translated = Vec::with_capacity(n + 8);
-        for &b in &chunk[..n] {
-            if b == b'\n' {
-                translated.push(b'\r');
-            }
-            translated.push(b);
+        pending.extend_from_slice(&chunk[..n]);
+        while let Some(at) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=at).take(at).collect();
+            emit(&line, &mut out);
         }
-        let _ = out.write_all(&translated);
+    }
+    if !pending.is_empty() {
+        let _ = out.write_all(&pending);
         let _ = out.flush();
     }
     child

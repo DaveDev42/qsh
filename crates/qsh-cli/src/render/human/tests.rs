@@ -49,6 +49,7 @@ fn format_trust_pin_line_sanitizes_the_name_and_keeps_the_fingerprint_intact() {
         grants: None,
         paths: None,
         scope: None,
+        source: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -77,6 +78,7 @@ fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
         grants: None,
         paths: None,
         scope: None,
+        source: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -132,6 +134,7 @@ fn role_cell_shows_the_role_or_none_legacy() {
         grants: None,
         paths: None,
         scope: None,
+        source: None,
     };
     assert_eq!(role_cell(&peer), "(none, legacy)");
     peer.role = Some("read-only".to_string());

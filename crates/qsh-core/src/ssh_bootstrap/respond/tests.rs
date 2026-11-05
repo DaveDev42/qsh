@@ -43,6 +43,7 @@ fn commit(name: &str, fingerprint: &str, role: &str, address: Option<&str>) -> C
         name: name.into(),
         role: role.into(),
         address: address.map(str::to_string),
+        ensure_serve: None,
     }
 }
 
@@ -515,6 +516,7 @@ async fn ssh_respond_rejects_a_bad_commit_without_writing() {
         fingerprint: None,
         serve_bind: None,
         serve_listening: None,
+        on_demand: None,
     })
     .encode_line()
     .unwrap()
@@ -635,4 +637,123 @@ fn serve_listening_resolves_the_configured_spec() {
     let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let spec = taken.local_addr().unwrap().to_string();
     assert_eq!(serve_listening(&spec), Some(true));
+}
+
+// ---------------------------------------------------------------------
+// ensure_serve (ADR-0051 decisions 1 and 4)
+// ---------------------------------------------------------------------
+
+fn ensure_commit(name: &str, fingerprint: &str) -> Vec<u8> {
+    commit_bytes(Commit {
+        ensure_serve: Some(true),
+        ..commit(name, fingerprint, "full", None)
+    })
+}
+
+/// A serve record naming this very test process, which is alive.
+fn live_record(ops: &Ops, mode: crate::serve::record::ServeRecordMode) {
+    let addr = "192.0.2.7:60123".parse().unwrap();
+    crate::serve::record::write(
+        ops.paths(),
+        &crate::serve::record::ServeRecord::for_current_process(addr, mode),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ssh_respond_hello_advertises_on_demand_unless_it_plays_an_old_responder() {
+    let (_dir, ops) = tree(true);
+    let current = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let (_end, lines) = converse(&current, b"").await;
+    let [BootstrapLine::Hello(hello)] = lines.as_slice() else {
+        panic!("{lines:?}");
+    };
+    assert_eq!(hello.on_demand, Some(true));
+
+    let old = responder(&ops, Arc::new(MemoryAuditSink::new())).without_on_demand();
+    let (_end, lines) = converse(&old, b"").await;
+    let [BootstrapLine::Hello(hello)] = lines.as_slice() else {
+        panic!("{lines:?}");
+    };
+    assert_eq!(hello.on_demand, None);
+}
+
+#[tokio::test]
+async fn ssh_respond_ensure_serve_reports_the_running_serve_without_starting_one() {
+    let (_dir, ops) = tree(true);
+    live_record(&ops, crate::serve::record::ServeRecordMode::Persistent);
+    // A program that cannot run proves nothing was spawned.
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()))
+        .with_serve_program(PathBuf::from("/nonexistent/qsh"));
+    let (end, lines) = converse(&responder, &ensure_commit("laptop", &fp(0xB1))).await;
+    assert_eq!(end, RespondEnd::Answered(ResultStatus::Pinned));
+    let result = result_of(&lines);
+    assert_eq!(result.serve_bind.as_deref(), Some("192.0.2.7:60123"));
+    assert_eq!(result.serve_started, Some(false));
+    assert_eq!(
+        result.serve_session_scoped,
+        Some(false),
+        "a persistent serve does not end with the ssh session"
+    );
+}
+
+#[tokio::test]
+async fn ssh_respond_ensure_serve_also_answers_for_a_pin_that_already_exists() {
+    let (_dir, ops) = tree(true);
+    pin(&ops, "laptop", &fp(0xB1), Some("full"));
+    live_record(&ops, crate::serve::record::ServeRecordMode::Persistent);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    let (end, lines) = converse(&responder, &ensure_commit("laptop", &fp(0xB1))).await;
+    assert_eq!(end, RespondEnd::Answered(ResultStatus::Exists));
+    assert_eq!(
+        result_of(&lines).serve_bind.as_deref(),
+        Some("192.0.2.7:60123")
+    );
+}
+
+#[tokio::test]
+async fn ssh_respond_ensure_serve_that_cannot_start_keeps_the_pin_and_says_why() {
+    let (_dir, ops) = tree(true);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()))
+        .with_serve_program(PathBuf::from("/nonexistent/qsh"))
+        .with_ensure_serve_timeout(Duration::from_millis(300));
+    let (end, lines) = converse(&responder, &ensure_commit("laptop", &fp(0xB1))).await;
+    assert_eq!(end, RespondEnd::Answered(ResultStatus::Pinned));
+    let result = result_of(&lines);
+    assert_eq!(result.serve_bind, None);
+    assert_eq!(result.serve_started, Some(false));
+    assert!(
+        result
+            .message
+            .as_deref()
+            // unix gets as far as the wait; Windows fails at CreateProcessW.
+            .is_some_and(|m| m.contains("did not publish") || m.contains("cannot start")),
+        "{result:?}"
+    );
+    let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+    assert!(store.find("laptop").is_some(), "the pin stands");
+}
+
+#[tokio::test]
+async fn ssh_respond_an_old_responder_ignores_ensure_serve() {
+    let (_dir, ops) = tree(true);
+    live_record(&ops, crate::serve::record::ServeRecordMode::Persistent);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new())).without_on_demand();
+    let (_end, lines) = converse(&responder, &ensure_commit("laptop", &fp(0xB1))).await;
+    let result = result_of(&lines);
+    assert_eq!(result.serve_bind, None);
+    assert_eq!(result.serve_started, None);
+}
+
+#[tokio::test]
+async fn ssh_respond_ensure_serve_is_not_answered_for_a_refused_commit() {
+    let (_dir, ops) = tree(true);
+    pin(&ops, "laptop", &fp(0xB1), Some("full"));
+    live_record(&ops, crate::serve::record::ServeRecordMode::Persistent);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new()));
+    // The same name under another identity: a conflict, so no serve talk.
+    let (_end, lines) = converse(&responder, &ensure_commit("laptop", &fp(0xB2))).await;
+    let result = result_of(&lines);
+    assert_eq!(result.status, ResultStatus::Conflict);
+    assert_eq!(result.serve_bind, None);
 }

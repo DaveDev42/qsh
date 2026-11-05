@@ -175,6 +175,11 @@ pub struct Hello {
     /// (ADR-0044 decision 10). Absent or `null` means unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve_listening: Option<bool>,
+    /// The responder can start a serve of its own on request (`commit`'s
+    /// `ensure_serve`, ADR-0051 decision 1). Absent from a responder that
+    /// predates it; a client sends `ensure_serve` only when this is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_demand: Option<bool>,
 }
 
 /// Client to responder, sent after a version was agreed.
@@ -192,6 +197,12 @@ pub struct Commit {
     /// Reverse direction only: where the responder dials the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// Ask the responder to make sure a serve is running for its account,
+    /// starting an on-demand one when there is none, and to report where it
+    /// listens in the `result` (ADR-0051 decisions 1 and 4). Sent only to a
+    /// responder whose `hello` has `on_demand: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_serve: Option<bool>,
 }
 
 /// Responder to client, last message.
@@ -213,6 +224,22 @@ pub struct BootstrapResult {
     /// On failure, a human-readable reason (peer-authored: sanitize it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Answer to `ensure_serve`: the address the account's serve actually
+    /// listens on (`[::]:4433`, `192.0.2.7:60001`), taken from its
+    /// `serve.json`. Not the `hello`'s `serve_bind`, which is the configured
+    /// spelling. Absent when `ensure_serve` was not asked or the serve could
+    /// not be started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_bind: Option<String>,
+    /// Answer to `ensure_serve`: this call started the serve (`false`: one
+    /// was already running).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_started: Option<bool>,
+    /// Answer to `ensure_serve`: the serve is an on-demand one that ends
+    /// with the ssh session (logind `KillUserProcesses=yes` without linger,
+    /// or a Windows job that refused breakaway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve_session_scoped: Option<bool>,
 }
 
 /// One parsed bootstrap line.

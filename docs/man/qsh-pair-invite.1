@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-pair\-invite \- Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). Human mode also lists the source addresses this host\*(Aqs own routing table picks, as candidates for the `<address>` placeholder in the printed `qsh pair accept` line — a routing observation, never a reachability check, and the operator still relays the chosen one out of band. `\-\-json`/`\-\-jsonl` makes no such observation and the envelope carries no address
 .SH SYNOPSIS
-\fBqsh pair invite\fR [\fB\-\-as\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-role\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh pair invite\fR [\fB\-\-as\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-role\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). Human mode also lists the source addresses this host\*(Aqs own routing table picks, as candidates for the `<address>` placeholder in the printed `qsh pair accept` line — a routing observation, never a reachability check, and the operator still relays the chosen one out of band. `\-\-json`/`\-\-jsonl` makes no such observation and the envelope carries no address
 .SH OPTIONS
@@ -26,6 +26,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

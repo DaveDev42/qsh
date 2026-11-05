@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-session\-open \- Create a session on a pinned host. Without a command after `\-\-` the remote login shell is started
 .SH SYNOPSIS
-\fBqsh session open\fR [\fB\-\-env\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-term\fR] [\fB\-\-cols\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-rows\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> [\fICOMMAND\fR] 
+\fBqsh session open\fR [\fB\-\-env\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-term\fR] [\fB\-\-cols\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-rows\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> [\fICOMMAND\fR] 
 .SH DESCRIPTION
 Create a session on a pinned host. Without a command after `\-\-` the remote login shell is started
 .SH OPTIONS
@@ -32,6 +32,9 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-rows\fR \fI<N>\fR
 Initial terminal height; defaults to the remote\*(Aqs choice
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -10,6 +10,7 @@ fn hello() -> Hello {
         fingerprint: Some("sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
         serve_bind: Some("[::]:4433".to_string()),
         serve_listening: Some(false),
+        on_demand: None,
     }
 }
 
@@ -20,6 +21,7 @@ fn commit() -> Commit {
         name: "laptop".to_string(),
         role: "full".to_string(),
         address: None,
+        ensure_serve: None,
     }
 }
 
@@ -31,6 +33,9 @@ fn result() -> BootstrapResult {
         created: true,
         code: None,
         message: None,
+        serve_bind: None,
+        serve_started: None,
+        serve_session_scoped: None,
     }
 }
 
@@ -44,9 +49,11 @@ fn every_message() -> Vec<BootstrapLine> {
             fingerprint: None,
             serve_bind: None,
             serve_listening: None,
+            on_demand: None,
         }),
         BootstrapLine::Hello(Hello {
             serve_listening: None,
+            on_demand: None,
             ..hello()
         }),
         BootstrapLine::Commit(commit()),
@@ -539,4 +546,87 @@ proptest! {
             msg
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// ADR-0051 additions (docs/design/protocol.md §17.2, §17.3)
+// ---------------------------------------------------------------------
+
+#[test]
+fn unset_adr_0051_fields_are_not_on_the_wire() {
+    // An older peer, and the append-only fixtures, see the bytes they
+    // always saw.
+    let hello = BootstrapLine::Hello(hello()).encode_line().unwrap();
+    let commit = BootstrapLine::Commit(commit()).encode_line().unwrap();
+    let result = BootstrapLine::Result(result()).encode_line().unwrap();
+    for (line, absent) in [
+        (&hello, &["on_demand"][..]),
+        (&commit, &["ensure_serve"][..]),
+        (
+            &result,
+            &["serve_bind", "serve_started", "serve_session_scoped"][..],
+        ),
+    ] {
+        for field in absent {
+            assert!(!line.contains(field), "{field} in {line}");
+        }
+    }
+}
+
+#[test]
+fn lines_from_before_adr_0051_parse_with_the_new_fields_absent() {
+    let hello = br#"qsh-bootstrap {"type":"hello","versions":[1],"qsh_version":"0.5.8","status":"ready","fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","serve_bind":"[::]:4433","serve_listening":false}"#;
+    let BootstrapLine::Hello(hello) = parse_ssh_bootstrap_line(hello).unwrap() else {
+        panic!("a hello");
+    };
+    assert_eq!(hello.on_demand, None);
+
+    let result = br#"qsh-bootstrap {"type":"result","status":"pinned","name":"laptop","role":"full","created":true}"#;
+    let BootstrapLine::Result(result) = parse_ssh_bootstrap_line(result).unwrap() else {
+        panic!("a result");
+    };
+    assert_eq!(
+        (
+            result.serve_bind,
+            result.serve_started,
+            result.serve_session_scoped
+        ),
+        (None, None, None)
+    );
+}
+
+#[test]
+fn the_adr_0051_fields_round_trip() {
+    let lines = [
+        BootstrapLine::Hello(Hello {
+            on_demand: Some(true),
+            ..hello()
+        }),
+        BootstrapLine::Commit(Commit {
+            ensure_serve: Some(true),
+            ..commit()
+        }),
+        BootstrapLine::Result(BootstrapResult {
+            serve_bind: Some("192.0.2.7:60001".into()),
+            serve_started: Some(true),
+            serve_session_scoped: Some(false),
+            ..result()
+        }),
+    ];
+    for line in lines {
+        let text = line.encode_line().unwrap();
+        assert_eq!(
+            parse_ssh_bootstrap_line(text.trim_end().as_bytes()).unwrap(),
+            line
+        );
+    }
+}
+
+#[test]
+fn a_line_with_unknown_future_fields_still_parses() {
+    let line = br#"qsh-bootstrap {"type":"result","status":"exists","name":"x","role":null,"created":false,"serve_bind":"[::]:4433","serve_started":false,"serve_session_scoped":true,"some_future_field":1}"#;
+    assert!(matches!(
+        parse_ssh_bootstrap_line(line),
+        Ok(BootstrapLine::Result(_))
+    ));
 }

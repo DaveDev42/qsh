@@ -191,6 +191,13 @@ impl FakeSsh {
         self.set("respond_crlf", "1".to_string())
     }
 
+    /// With [`Self::run_local_responder`]: deliver the responder's `hello`
+    /// without its `on_demand` field, like a qsh from before ADR-0051. The
+    /// client then never sends `ensure_serve`.
+    pub fn respond_as_old_qsh(&mut self) -> &mut Self {
+        self.set("respond_old", "1".to_string())
+    }
+
     /// What the responder call received on stdin; empty before it ended.
     pub fn stdin_log(&self) -> Vec<u8> {
         std::fs::read(self.dir().join("stdin.log")).unwrap_or_default()

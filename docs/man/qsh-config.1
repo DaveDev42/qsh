@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-config \- Read and edit this machine\*(Aqs `config.toml` by dotted key (`docs/CLI.md` §6.23, ADR\-0051 decision 10)
 .SH SYNOPSIS
-\fBqsh config\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+\fBqsh config\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 Read and edit this machine\*(Aqs `config.toml` by dotted key (`docs/CLI.md` §6.23, ADR\-0051 decision 10)
 .SH OPTIONS
@@ -20,6 +20,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

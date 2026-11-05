@@ -53,9 +53,9 @@ use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUE
 use windows_sys::Win32::System::Console::HPCON;
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
@@ -87,6 +87,18 @@ pub(crate) struct JobObject {
 impl JobObject {
     /// A new anonymous job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
     pub(crate) fn new_kill_on_close() -> io::Result<Self> {
+        Self::with_limits(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+    }
+
+    /// Like [`Self::new_kill_on_close`], plus `JOB_OBJECT_LIMIT_BREAKAWAY_OK`:
+    /// a process that asks for `CREATE_BREAKAWAY_FROM_JOB` (the on-demand
+    /// serve, ADR-0051 결정 2) may leave, every other one still dies with the
+    /// job. Win32-OpenSSH's session job carries the same pair of flags.
+    pub(crate) fn new_kill_on_close_breakaway_ok() -> io::Result<Self> {
+        Self::with_limits(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+    }
+
+    fn with_limits(limits: u32) -> io::Result<Self> {
         // SAFETY: both arguments are null (default security, no name).
         let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if raw.is_null() {
@@ -95,7 +107,7 @@ impl JobObject {
         // SAFETY: `raw` is a fresh handle this function owns.
         let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags = limits;
         // SAFETY: `info` is a live struct of the size the class expects.
         let ok = unsafe {
             SetInformationJobObject(
