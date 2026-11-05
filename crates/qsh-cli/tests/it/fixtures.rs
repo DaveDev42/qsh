@@ -2550,8 +2550,10 @@ fn golden_pair_ssh_fixtures() {
     assert_eq!(got["data"]["verified"], true, "{got}");
     check("pair.ssh.json", got);
 
-    // Nothing listens where the remote says its serve binds.
-    let w = World::new();
+    // Nothing listens where the remote says its serve binds, and the remote
+    // is a qsh from before ADR-0051, which cannot start one itself.
+    let mut w = World::new();
+    w.fake.respond_as_old_qsh();
     let free = std::net::UdpSocket::bind("127.0.0.1:0").expect("free port");
     let spec = free.local_addr().expect("local addr").to_string();
     drop(free);

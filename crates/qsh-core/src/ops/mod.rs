@@ -58,7 +58,7 @@ pub use file::{
     SilentObserver,
 };
 pub use host::{HostGetOp, HostListOp, HostRoute, unconfigured_host_name};
-pub use pair_ssh::{PairSshEnv, PairSshOutput};
+pub use pair_ssh::{PairSshEnv, PairSshOutput, SshRevival};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,
     SessionAttachStream, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
@@ -603,6 +603,10 @@ pub struct Ops {
     /// [`crate::audit::MemoryAuditSink`] here the same way
     /// [`Self::with_recovery`] lets them override [`session::RecoveryConfig`].
     audit: Option<Arc<dyn crate::audit::AuditSink>>,
+    /// How a dial to an SSH-bootstrapped pin revives its serve over ssh
+    /// ([`Self::with_ssh_revival`], ADR-0051 decision 4). `None` (every
+    /// `Ops::new`) never runs ssh on its own.
+    revival: Option<Arc<SshRevival>>,
 }
 
 impl std::fmt::Debug for Ops {
@@ -616,6 +620,7 @@ impl std::fmt::Debug for Ops {
             .field("tunnel_holds", &self.tunnel_holds)
             .field("connect_runtime", &self.connect_runtime)
             .field("audit", &self.audit.is_some())
+            .field("revival", &self.revival)
             .finish()
     }
 }
@@ -712,6 +717,7 @@ impl Ops {
             tunnel_holds: tunnel::new_tunnel_hold_registry(),
             connect_runtime: Arc::new(OnceLock::new()),
             audit: None,
+            revival: None,
         }
     }
 

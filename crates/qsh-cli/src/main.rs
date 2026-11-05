@@ -386,6 +386,24 @@ fn run(cli: &Cli) -> i32 {
     dispatch(cli, ops)
 }
 
+/// How a failed dial to an SSH-bootstrapped pin is revived for this
+/// invocation: ssh's mode follows `--json`/`--jsonl`, the one-line notices go
+/// to stderr (`--quiet` drops them), and the root form hands over the `user@`
+/// and ssh options it was given.
+fn ssh_revival(cli: &Cli, user: Option<String>, ssh: SshOptions) -> qsh_core::SshRevival {
+    let quiet = cli.quiet;
+    qsh_core::SshRevival {
+        machine_mode: cli.wants_json(),
+        user,
+        ssh,
+        notice: std::sync::Arc::new(move |line| {
+            if !quiet {
+                let _ = human::print_notice(line);
+            }
+        }),
+    }
+}
+
 /// The command dispatch table, split out of [`run`] so a test can drive it
 /// against an [`Ops`] built from a temporary, test-controlled
 /// `qsh_core::Paths` instead of the real [`Ops::from_env`] — same match arms, same code, the
@@ -394,6 +412,14 @@ fn run(cli: &Cli) -> i32 {
 /// (below) exercise the real `Command::Trust(TrustCmd::Invite)` arm rather
 /// than a hand-built stand-in for it.
 fn dispatch(cli: &Cli, ops: Ops) -> i32 {
+    // A dial to a pin the SSH bootstrap wrote may restart that host's serve
+    // over ssh once (ADR-0051 decision 4); `--no-ssh` and the `Ops` default
+    // leave ssh alone.
+    let ops = if cli.no_ssh {
+        ops
+    } else {
+        ops.with_ssh_revival(ssh_revival(cli, None, SshOptions::default()))
+    };
     let Some(command) = &cli.command else {
         return run_ssh_form(cli, &ops);
     };
@@ -870,6 +896,15 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
     qsh_core::client_path::install(&ssh);
     let host = target.host.clone();
     let user = args.user();
+    let revival_ops;
+    let ops = if cli.no_ssh {
+        ops
+    } else {
+        revival_ops = ops
+            .clone()
+            .with_ssh_revival(ssh_revival(cli, user.clone(), ssh.clone()));
+        &revival_ops
+    };
     match mode {
         FormMode::Interactive { shell_command } => run_interactive(
             cli,
@@ -1087,6 +1122,12 @@ fn auto_bootstrap_before_open(
         || parse_dynamic_forwards(dial.dynamic_forwards).is_err()
     {
         return None;
+    }
+    if cli.no_ssh {
+        return ssh
+            .refuse_quic_jump()
+            .err()
+            .map(|err| report_error(cli, command, &err));
     }
     let plan = match ops.should_auto_bootstrap(dial.host, dial.user, cli.wants_json()) {
         Ok(Some(plan)) => plan,
@@ -1377,7 +1418,12 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     // An unregistered host sets itself up over ssh first and the copy then
     // runs unchanged (ADR-0044 decision 2). The Ctrl-C handling above covers
     // the ssh child too.
-    match ops.should_auto_bootstrap_cp(&request, cli.wants_json()) {
+    let auto_plan = if cli.no_ssh {
+        Ok(None)
+    } else {
+        ops.should_auto_bootstrap_cp(&request, cli.wants_json())
+    };
+    match auto_plan {
         Ok(Some(plan)) => {
             if let Err(err) =
                 auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet, SshOptions::default())

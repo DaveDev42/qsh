@@ -208,12 +208,16 @@ impl Ops {
         }
 
         // Phase two: the commit, the remote pin, this machine's pin.
+        // Only a responder that said `on_demand` knows `ensure_serve`
+        // (protocol §17.3); an older one gets the commit it always got.
+        let ensure_serve = hello.on_demand && !plan.is_reverse();
         let commit = Commit {
             version: hello.version,
             fingerprint: our_fingerprint.to_string(),
             name: remote_name.clone(),
             role: plan.role.as_str().to_string(),
             address: plan.to.clone(),
+            ensure_serve: ensure_serve.then_some(true),
         };
         let result = runtime.block_on(async {
             child.send(&BootstrapLine::Commit(commit)).await?;
@@ -236,6 +240,16 @@ impl Ops {
         if env.cancel.is_canceled() {
             return Err(canceled());
         }
+        // The serve the responder reported (ADR-0051 decision 1): its actual
+        // address replaces the guess from the `hello`, unless the person gave
+        // `--address`.
+        let serve = ensure_serve
+            .then(|| ServeInfo::from_result(&result))
+            .flatten();
+        let address = match (&serve, &plan.address) {
+            (Some(serve), None) => pin_address(&resolved.hostname, &serve.bind).unwrap_or(address),
+            _ => address,
+        };
 
         let written = if plan.is_reverse() {
             self.write_local_reverse_pin(&plan, &hello.fingerprint)
@@ -259,8 +273,17 @@ impl Ops {
         // anything yet, and that is the expected state.
         let (verified, verify_error) = if plan.is_reverse() {
             (false, None)
-        } else if hello.listening == Some(false) {
-            (false, Some(cli_error(serve_not_listening(&peer.name))))
+        } else if serve.is_none() && hello.listening == Some(false) {
+            let mut err = serve_not_listening(&peer.name);
+            if let Some(why) = ensure_serve.then_some(result.message.as_deref()).flatten() {
+                // The responder tried to start one and could not.
+                err.message = format!(
+                    "{}; the remote could not start one: {}",
+                    err.message,
+                    sanitize_remote_text(why, 200)
+                );
+            }
+            (false, Some(cli_error(err)))
         } else if confirmation == Confirmation::Deferred {
             (false, None)
         } else {
@@ -299,7 +322,7 @@ impl Ops {
             verified,
             verify_error,
         };
-        let notices = notices(&data, &plan, &resolved, &address);
+        let notices = notices(&data, &plan, &resolved, &address, serve.as_ref());
         Ok(PairSshOutput { data, notices })
     }
 
@@ -410,6 +433,15 @@ impl Ops {
             now_rfc3339(),
             TrustRole::None,
         );
+        // A pin made under the host name ssh was given is one the automatic
+        // bootstrap can revive later (ADR-0051 decision 4): `--as` may have
+        // renamed it away from any ssh destination, and a pin that already
+        // existed was not made by this call.
+        // `pair.ssh`'s `peer` (an append-only fixture) does not carry the
+        // mark; `trust.list` does.
+        if created && plan.pin_name == plan.dest.host() {
+            store.mark_source(&peer.name, crate::trust::PIN_SOURCE_SSH_BOOTSTRAP);
+        }
         if created || updated {
             store.save(&path)?;
         }
@@ -524,6 +556,8 @@ struct CheckedHello {
     version: u32,
     port: u16,
     listening: Option<bool>,
+    /// The responder can start a serve (`hello.on_demand`).
+    on_demand: bool,
 }
 
 /// `ssh -G`, the responder call and the `hello` (ADR-0044 decisions 4, 9).
@@ -576,6 +610,7 @@ fn check_hello(hello: &Hello, dest: &Dest) -> Result<CheckedHello, OpError> {
         version,
         port,
         listening: hello.serve_listening,
+        on_demand: hello.on_demand == Some(true),
     })
 }
 
@@ -664,6 +699,67 @@ fn is_invisible_format(c: char) -> bool {
             | '\u{FEFF}'
             | '\u{FFF9}'..='\u{FFFB}'
     )
+}
+
+// ---------------------------------------------------------------------
+// the serve the responder reported (ADR-0051 decisions 1, 2, 4)
+// ---------------------------------------------------------------------
+
+/// What the `result` of an `ensure_serve` commit says about the serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServeInfo {
+    /// Where the serve listens (`result.serve_bind`), peer-authored.
+    pub bind: String,
+    /// The serve ends with the ssh session (`result.serve_session_scoped`).
+    pub session_scoped: bool,
+}
+
+impl ServeInfo {
+    /// `None` when the responder reported no usable address: it did not
+    /// honour the request, could not start a serve, or sent text that is no
+    /// socket address.
+    pub(crate) fn from_result(result: &BootstrapResult) -> Option<Self> {
+        let bind = result.serve_bind.as_deref()?;
+        bind.parse::<std::net::SocketAddr>().ok()?;
+        Some(Self {
+            bind: bind.to_string(),
+            session_scoped: result.serve_session_scoped == Some(true),
+        })
+    }
+}
+
+/// The one stderr warning of ADR-0051 decision 2: the serve that was started
+/// ends when the ssh session does.
+pub(crate) fn serve_session_scoped_warning(dest: &str) -> String {
+    format!(
+        "the serve on {dest} ends with the ssh session; to keep sessions alive, run \
+         `qsh service install --always-on` there"
+    )
+}
+
+/// The address this machine records for a remote whose serve reported
+/// `serve_bind` (ADR-0051 decision 1).
+///
+/// The serve's port is always taken from `serve_bind`: it is the port that
+/// was actually bound, which differs from `[serve].bind` when the configured
+/// one was taken. The host stays the one ssh resolved, because that is a
+/// name or address this machine already reaches the remote by. Only a
+/// specific, non-loopback bound IP replaces it: a serve bound to one
+/// interface answers nowhere else, and the ssh host may resolve to another.
+/// A wildcard (`[::]`, `0.0.0.0`) says nothing about reachability, and a
+/// loopback bind is reachable only through a tunnel, so both keep the ssh
+/// host.
+///
+/// `None` when `serve_bind` is not a socket address.
+pub(crate) fn pin_address(ssh_hostname: &str, serve_bind: &str) -> Option<String> {
+    let bound: std::net::SocketAddr = serve_bind.parse().ok()?;
+    let host_kept = bound.ip().is_unspecified() || bound.ip().is_loopback();
+    let address = if host_kept {
+        qsh_proto::wire::format_host_port(ssh_hostname, bound.port())
+    } else {
+        bound.to_string()
+    };
+    Some(normalize_peer_address(&address).address)
 }
 
 // ---------------------------------------------------------------------
@@ -1018,7 +1114,13 @@ fn cli_error(err: OpError) -> CliError {
 
 /// The stderr lines a human run adds to the result (ADR-0044 decisions 6,
 /// 12, 18, 22, ADR-0045 decision 13).
-fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &str) -> Vec<String> {
+fn notices(
+    data: &PairSshData,
+    plan: &Plan,
+    resolved: &SshResolved,
+    address: &str,
+    serve: Option<&ServeInfo>,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if data.identity_created {
         lines.push(
@@ -1092,6 +1194,9 @@ fn notices(data: &PairSshData, plan: &Plan, resolved: &SshResolved, address: &st
     if let Some(line) = role_mismatch_notice(data, plan) {
         lines.push(line);
     }
+    if serve.is_some_and(|serve| serve.session_scoped) {
+        lines.push(serve_session_scoped_warning(plan.dest.as_ssh_arg()));
+    }
     if let Some(command) = &data.next_command {
         lines.push(format!(
             "nothing was started on {}; there, run `{command}` (or `qsh service install` to keep \
@@ -1150,6 +1255,9 @@ fn role_mismatch_notice(data: &PairSshData, plan: &Plan) -> Option<String> {
         shell_word(&data.remote.name),
     ))
 }
+
+mod revive;
+pub use revive::SshRevival;
 
 #[cfg(test)]
 mod tests;

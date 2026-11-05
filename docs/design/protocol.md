@@ -783,16 +783,16 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 
 | 방향 | `type` | 필드 |
 |---|---|---|
-| 응답자 → client | `hello` | `versions`(지원하는 부트스트랩 버전, 이 절은 `[1]`), `qsh_version`, `status`(`ready`·`not_initialized`), `status`가 `ready`일 때 `fingerprint`(`sha256:BASE64`)·`serve_bind`·`serve_listening`(`true`·`false`, 모르면 `null` 또는 생략) |
-| client → 응답자 | `commit` | `version`(고른 버전), `fingerprint`(client의 것), `name`, `role`, 역방향일 때만 `address` |
-| 응답자 → client | `result` | `status`(`pinned`·`exists`·`conflict`·`error`), `name`, `role`(없으면 `null`), `created`, 실패면 `code`(`ErrorCode` 어휘)와 `message` |
+| 응답자 → client | `hello` | `versions`(지원하는 부트스트랩 버전, 이 절은 `[1]`), `qsh_version`, `status`(`ready`·`not_initialized`), `status`가 `ready`일 때 `fingerprint`(`sha256:BASE64`)·`serve_bind`·`serve_listening`(`true`·`false`, 모르면 `null` 또는 생략), 선택 `on_demand`(`true`면 이 응답자가 `commit.ensure_serve`를 안다, §17.6) |
+| client → 응답자 | `commit` | `version`(고른 버전), `fingerprint`(client의 것), `name`, `role`, 역방향일 때만 `address`, 선택 `ensure_serve`(`true`, §17.6) |
+| 응답자 → client | `result` | `status`(`pinned`·`exists`·`conflict`·`error`), `name`, `role`(없으면 `null`), `created`, 실패면 `code`(`ErrorCode` 어휘)와 `message`, `ensure_serve`에 답할 때만 `serve_bind`·`serve_started`·`serve_session_scoped`(§17.6) |
 
 순서는 hello, (client가 commit을 보냄), result 하나씩이다. client 쪽 수신 상태 기계는 첫 접두 줄이 hello가 아니거나, hello가 둘이거나, result 앞의 다른 메시지이거나, result 뒤에 줄이 있으면 순서 위반으로 끝낸다.
 
 ### 17.3 버전과 호환
 
 - 버전은 정수 목록이다. client가 `hello.versions`와 자기 목록의 교집합에서 가장 큰 값을 `commit.version`으로 고른다(`negotiate_version`). 교집합이 비면 commit을 보내지 않고 `UNSUPPORTED`로 끝난다.
-- 알 수 없는 필드는 무시한다. 필수 필드가 없거나 타입이 어긋나면 형식 오류다. 필수 여부는 위 표의 필드 목록이 그대로 기준이고, 선택 필드(`fingerprint`·`serve_bind`·`serve_listening`·`address`·`code`·`message`)는 없어도 된다. 파서를 느슨하게 푸는 변경은 호환되지만 조이는 변경은 아니므로 필수로 두는 쪽을 보수적으로 골랐다.
+- 알 수 없는 필드는 무시한다. 필수 필드가 없거나 타입이 어긋나면 형식 오류다. 필수 여부는 위 표의 필드 목록이 그대로 기준이고, 선택 필드(`fingerprint`·`serve_bind`·`serve_listening`·`on_demand`·`address`·`ensure_serve`·`code`·`message`·`serve_started`·`serve_session_scoped`, result의 `serve_bind`)는 없어도 된다. 파서를 느슨하게 푸는 변경은 호환되지만 조이는 변경은 아니므로 필수로 두는 쪽을 보수적으로 골랐다.
 - `status`는 열린 문자열이다. 이 빌드가 모르는 값은 별도 변종(`Unknown`)으로 보존해 호출자가 `REMOTE_ERROR`(`details.reason: "bootstrap_protocol"`)로 끝내게 한다. 파서가 추측하지 않는다. 그 문자열은 peer가 쓴 것이므로 화면에 내기 전에 `sanitize_peer_text`를 거친다.
 - 허용되는 변경은 §16.4와 같다. 새 선택 필드와 새 `status` 값을 더하는 것은 부트스트랩 버전을 올리지 않는다. 기존 필드의 제거, 의미 변경, 타입 변경, 그리고 새 `type`(모르는 쪽이 형식 오류로 끝낸다)은 새 부트스트랩 버전이 필요하다.
 
@@ -803,3 +803,21 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 ### 17.5 응답자 쪽 순서
 
 `qsh pair ssh-respond`(ADR-0044 결정 9·10·12)는 이 절의 응답자 쪽이다. Linux·macOS·Windows 빌드 모두에 등록돼 있고 같은 순서로 동작한다(ADR-0044 결정 10, ADR-0035 결정 25. 이 하위 명령을 모르는 옛 qsh는 client가 `remote_qsh_too_old`로 받는다). 신원 파일만 읽어 fingerprint를 얻고(키 저장소는 열지 않는다), 그 `serve` 주소로 UDP bind를 시험해(Windows는 probe 소켓에 `SO_EXCLUSIVEADDRUSE`를 방어용으로 더 건다. ADR-0044 결정 10을 따른 것이고, probe가 `SO_REUSEADDR`를 걸지 않아 이 옵션 없이도 포트를 쥔 소켓과는 bind가 충돌하므로 이 옵션이 결과를 바꾼다고 보인 테스트는 없다) `serve_listening`을 채운 뒤 hello 한 줄을 내보낸다. 이어서 commit을 30초까지 기다린다. 잠금 안에서 `trust.toml`을 읽고 판정하고, audit(`pair.ssh_respond`)을 쓴 다음 저장하는 순서이며 audit이 실패하면 저장하지 않는다. 판정은 `pinned`(새로 씀), `exists`(같은 fingerprint가 이미 어떤 이름으로든 있음. role은 바꾸지 않고, commit에 `address`가 있으면 그 pin의 주소만 `trust add`와 같은 규칙으로 갱신하며 이때 audit은 남기지 않는다), `conflict`(같은 이름에 다른 fingerprint, 메시지에 기존 fingerprint를 싣는다), `error`다. result를 낸 뒤에는 stdin을 더 읽지 않는다. 줄 끝은 `\n`으로 내보내고 commit 줄 끝의 `\r\n`은 받아서 처리한다.
+
+### 17.6 serve 띄우기와 되살리기 (ADR-0051 결정 1·2·4, additive)
+
+부트스트랩 버전은 1 그대로다. 아래는 모두 새 선택 필드라서 §17.3의 규칙대로 모르는 쪽은 무시한다.
+
+| 메시지 | 필드 | 뜻 |
+|---|---|---|
+| `hello` | `on_demand: true` | 이 응답자는 `commit.ensure_serve`를 이해한다. 모르는 응답자는 이 필드를 보내지 않는다. |
+| `commit` | `ensure_serve: true` | 판정이 `pinned`나 `exists`이면 이 계정의 on-demand serve를 찾거나 띄우라는 요청. |
+| `result` | `serve_bind` | 응답자가 쓰는 `serve.json`의 실제 바인드 주소(`host:port`). hello의 `serve_bind`(설정값)와 다른 필드이고 hello 쪽 값은 그대로 설정값이다. |
+| `result` | `serve_started` | 이번 요청이 serve를 새로 띄웠으면 `true`, 이미 떠 있었으면 `false`. 띄우지 못하면 `false`이고 `message`에 이유를 싣는다. |
+| `result` | `serve_session_scoped` | on-demand serve가 이 ssh 세션이 끝날 때 함께 끝날 수 있으면 `true`. Linux는 `loginctl show-user $USER -p KillUserProcesses -p Linger`가 `KillUserProcesses=yes`와 linger 꺼짐을 말할 때(`loginctl`이 없으면 `false`), Windows는 Job Object의 breakaway가 거부됐을 때다. |
+
+호환 규칙: client는 `hello.on_demand == true`인 응답자에게만 `commit.ensure_serve`를 보낸다. 그래서 옛 응답자는 옛 바이트 그대로의 commit을 받고, 옛 client는 이 필드들을 무시한다. `ensure_serve`가 없는 commit에는 응답자가 serve를 건드리지 않으며 result에도 위 세 필드를 싣지 않는다.
+
+client는 pin 주소를 ssh 호스트 이름과 `result.serve_bind`의 포트로 만든다. 바인드 주소가 와일드카드나 loopback이 아닌 특정 IP이면 그 IP가 호스트를 대신한다. `--address`가 있으면 그것이 이긴다. `serve_bind`가 소켓 주소로 읽히지 않으면 hello 기반 주소로 돌아간다.
+
+되살리기(ADR-0051 결정 4)는 같은 대화를 다시 쓴다. pin 대상으로 QUIC 다이얼이 `CONNECTION_FAILED`나 `TIMEOUT`(`udp_egress_blocked` 제외)으로 실패하고 그 pin이 ssh 부트스트랩이 만든 것(`trust.toml`의 `[[peer]]`에 `source = "ssh_bootstrap"`)이면, client가 같은 대상으로 ssh를 다시 열어 `ensure_serve`를 보낸다. 이때 hello의 fingerprint가 pin의 것과 같아야 하고 다르면 `SESSION_CONFLICT`로 멈춘다. 새 pin을 쓰지 않고(verify-only) 주소가 바뀌었으면 그 pin의 주소만 갱신한 뒤 한 번 더 다이얼한다. `hello.on_demand`가 없는 응답자는 `UNSUPPORTED`다.

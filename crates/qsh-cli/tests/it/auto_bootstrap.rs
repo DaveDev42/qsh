@@ -199,7 +199,9 @@ mod world {
     /// (`remote_serve_not_listening`) without dialing (decision 13).
     #[test]
     fn auto_bootstrap_ends_with_connection_failed_when_the_remote_serve_is_not_listening() {
-        let w = World::new();
+        // A responder from before ADR-0051 cannot start the serve itself.
+        let mut w = World::new();
+        w.fake.respond_as_old_qsh();
         let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let spec = free.local_addr().unwrap().to_string();
         drop(free);

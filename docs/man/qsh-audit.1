@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-audit \- Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22)
 .SH SYNOPSIS
-\fBqsh audit\fR [\fB\-\-json\fR] [\fB\-\-since\fR] [\fB\-\-jsonl\fR] [\fB\-\-until\fR] [\fB\-\-principal\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-action\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-resource\fR] [\fB\-\-decision\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh audit\fR [\fB\-\-json\fR] [\fB\-\-since\fR] [\fB\-\-jsonl\fR] [\fB\-\-until\fR] [\fB\-\-principal\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-action\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-resource\fR] [\fB\-\-decision\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22).
 .PP
@@ -34,6 +34,9 @@ Only records of this action (`session.open`, `file.read`, or `connect` for a con
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-\-resource\fR \fI<RESOURCE>\fR
 Only records of this resource identifier, exactly as stored

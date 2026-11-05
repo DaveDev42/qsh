@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-identity\-move\-key \- Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
 .SH SYNOPSIS
-\fBqsh identity move\-key\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-to\fR> 
+\fBqsh identity move\-key\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-to\fR> 
 .SH DESCRIPTION
 Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
 .SH OPTIONS
@@ -23,6 +23,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

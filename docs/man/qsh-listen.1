@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-listen \- Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH SYNOPSIS
-\fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH OPTIONS
@@ -23,6 +23,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

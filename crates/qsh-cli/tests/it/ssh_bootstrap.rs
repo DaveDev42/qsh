@@ -46,6 +46,7 @@ fn hello_line(status: HelloStatus) -> Vec<u8> {
         fingerprint: None,
         serve_bind: None,
         serve_listening: None,
+        on_demand: None,
     })
     .encode_line()
     .unwrap()
@@ -59,6 +60,7 @@ fn commit() -> BootstrapLine {
         name: "laptop".into(),
         role: "full".into(),
         address: None,
+        ensure_serve: None,
     })
 }
 
@@ -649,6 +651,7 @@ mod responder {
             name: name.into(),
             role: role.into(),
             address: address.map(str::to_string),
+            ensure_serve: None,
         })
         .encode_line()
         .unwrap()
@@ -1077,6 +1080,7 @@ mod responder {
                 name: name.into(),
                 role: "full".into(),
                 address: None,
+                ensure_serve: None,
             }))
             .await
             .unwrap();
@@ -1824,6 +1828,7 @@ pub(crate) mod pair {
                 fingerprint: Some(other_fingerprint(3)),
                 serve_bind: Some("127.0.0.1:4433".into()),
                 serve_listening: Some(true),
+                on_demand: None,
             })
             .encode_line()
             .unwrap()
@@ -1924,6 +1929,7 @@ pub(crate) mod pair {
             fingerprint: Some(other_fingerprint(3)),
             serve_bind: Some("127.0.0.1:4433".into()),
             serve_listening: Some(true),
+            on_demand: None,
         })
         .encode_line()
         .unwrap()
@@ -2071,6 +2077,9 @@ pub(crate) mod pair {
         .unwrap();
         w.fake
             .run_local_responder(Path::new(QSH), account.config_dir(), account.state_dir());
+        // Without this the responder would start a serve of its own in the
+        // account's tree, which does know the device.
+        w.fake.respond_as_old_qsh();
         let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
         assert_eq!(code, 0, "the pins stand: {got}");
         assert_eq!(got["data"]["verified"], false, "{got}");
@@ -2084,7 +2093,9 @@ pub(crate) mod pair {
 
     #[test]
     fn ssh_bootstrap_unverified_when_remote_serve_is_not_listening() {
-        let w = World::new();
+        // A responder from before ADR-0051 cannot start the serve itself.
+        let mut w = World::new();
+        w.fake.respond_as_old_qsh();
         let free = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let spec = free.local_addr().unwrap().to_string();
         drop(free);
@@ -2355,6 +2366,7 @@ mod pair_reverse_local {
             fingerprint: Some(remote_fingerprint()),
             serve_bind: None,
             serve_listening: None,
+            on_demand: None,
         })
         .encode_line()
         .unwrap()
@@ -2367,6 +2379,9 @@ mod pair_reverse_local {
                 created: true,
                 code: None,
                 message: None,
+                serve_bind: None,
+                serve_started: None,
+                serve_session_scoped: None,
             })
             .encode_line()
             .unwrap()

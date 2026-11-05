@@ -270,6 +270,10 @@ pub struct CaEntry {
     pub cert_pem: String,
 }
 
+/// The `source` of a pin the automatic SSH bootstrap wrote for `qsh
+/// [user@]host` (ADR-0051 결정 4). Only such a pin is revived over ssh.
+pub const PIN_SOURCE_SSH_BOOTSTRAP: &str = "ssh_bootstrap";
+
 /// `trust.toml` as serialized.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TrustFile {
@@ -586,9 +590,24 @@ impl TrustStore {
             grants: None,
             paths: None,
             scope: None,
+            source: None,
         };
         self.peers.push(peer.clone());
         (peer, true, false)
+    }
+
+    /// Record how the pin `name` came to be ([`PIN_SOURCE_SSH_BOOTSTRAP`]).
+    /// Returns `false` when `name` is no pin. The caller marks only a pin it
+    /// has just created: marking an older pin would claim an origin it does
+    /// not have.
+    pub fn mark_source(&mut self, name: &str, source: &str) -> bool {
+        match self.peers.iter_mut().find(|p| p.name == name) {
+            Some(peer) => {
+                peer.source = Some(source.to_string());
+                true
+            }
+            None => false,
+        }
     }
 
     /// Register a private CA root, idempotently (`qsh cert issue`,
@@ -707,6 +726,9 @@ impl TrustStore {
             .position(|p| p.name == old)
             .ok_or(RenameError::OldMissing)?;
         self.peers[index].name = new.to_string();
+        // The name was the ssh destination the revival uses (ADR-0051
+        // decision 4); a new name is no longer one.
+        self.peers[index].source = None;
         Ok(self.peers[index].clone())
     }
 

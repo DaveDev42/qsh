@@ -36,6 +36,13 @@ pub struct Cli {
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
+    /// Never run ssh on this command's behalf: no automatic bootstrap of an
+    /// unknown name, and no restarting of a pinned host's serve over ssh
+    /// when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not
+    /// affected; it is ssh by definition.
+    #[arg(long, global = true)]
+    pub no_ssh: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 

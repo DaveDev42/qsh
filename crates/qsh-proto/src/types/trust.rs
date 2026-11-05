@@ -41,6 +41,13 @@ pub struct TrustPeer {
     /// `trust.toml` has no `scope` key (the default is `owned`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// How the pin came to be, when it matters. `"ssh_bootstrap"` marks a
+    /// pin the automatic SSH bootstrap wrote for `qsh [user@]host` (ADR-0051
+    /// 결정 4): only such a pin is revived over ssh when the connection
+    /// fails. Omitted for every other pin, including those written before
+    /// this key existed. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Request for `trust.add`.

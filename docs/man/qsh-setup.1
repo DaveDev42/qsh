@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-setup \- Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
 .SH SYNOPSIS
-\fBqsh setup\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBqsh setup\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
 .SH OPTIONS
@@ -20,6 +20,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

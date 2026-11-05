@@ -187,6 +187,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
             grants: None,
             paths: None,
             scope: None,
+            source: None,
         },
         created: true,
         remote,
@@ -218,6 +219,7 @@ fn notices_say_what_was_pinned_and_with_which_role() {
         &plan(TrustRole::Full),
         &resolved(false),
         "10.0.0.1:4433",
+        None,
     );
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].starts_with("pinned \"box\" on this machine at 10.0.0.1:4433"));
@@ -237,6 +239,7 @@ fn notices_name_a_first_time_identity_and_a_proxied_route() {
         &plan(TrustRole::Full),
         &resolved(true),
         "10.0.0.1:4433",
+        None,
     );
     assert!(
         lines[0].contains("created this machine's qsh identity"),
@@ -305,6 +308,7 @@ fn reverse_notices_say_no_address_and_name_the_command_to_run_there() {
         // machine.
         &resolved(true),
         "hub.example:4433",
+        None,
     );
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert!(
@@ -336,6 +340,7 @@ fn reverse_notice_names_the_address_an_existing_local_pin_still_holds() {
         &reverse_plan(TrustRole::Full),
         &resolved(false),
         "hub.example:4433",
+        None,
     );
     assert!(
         lines[0].starts_with("already pinned \"box\" on this machine at box.example:4433."),
@@ -375,4 +380,141 @@ fn an_existing_local_pin_with_another_role_gets_the_set_role_command() {
     assert!(line.contains("`qsh trust set-role box reverse`"), "{line}");
     data.peer.role = None;
     assert!(local_role_notice(&data).unwrap().contains("no role"));
+}
+
+// ---------------------------------------------------------------------
+// the reported serve (ADR-0051 decisions 1 and 2)
+// ---------------------------------------------------------------------
+
+#[test]
+fn pin_address_keeps_the_ssh_host_and_takes_the_bound_port() {
+    // A wildcard bind says nothing about reachability; so does loopback.
+    for bound in [
+        "[::]:60001",
+        "0.0.0.0:60001",
+        "127.0.0.1:60001",
+        "[::1]:60001",
+    ] {
+        assert_eq!(
+            pin_address("box.example", bound).as_deref(),
+            Some("box.example:60001"),
+            "{bound}"
+        );
+    }
+    assert_eq!(
+        pin_address("2001:db8::9", "[::]:4433").as_deref(),
+        Some("[2001:db8::9]:4433")
+    );
+}
+
+#[test]
+fn pin_address_takes_a_specific_bound_ip_over_the_ssh_host() {
+    assert_eq!(
+        pin_address("box.example", "192.0.2.7:4433").as_deref(),
+        Some("192.0.2.7:4433")
+    );
+    assert_eq!(
+        pin_address("box.example", "[2001:db8::7]:60002").as_deref(),
+        Some("[2001:db8::7]:60002")
+    );
+}
+
+#[test]
+fn pin_address_refuses_text_that_is_no_socket_address() {
+    for bound in ["", "box:4433", "4433", "[::]", "garbage"] {
+        assert_eq!(pin_address("box", bound), None, "{bound:?}");
+    }
+}
+
+#[test]
+fn serve_info_needs_a_socket_address_and_reads_the_scoped_flag() {
+    let result = |bind: Option<&str>, scoped: Option<bool>| BootstrapResult {
+        status: ResultStatus::Pinned,
+        name: "box".into(),
+        role: None,
+        created: true,
+        code: None,
+        message: None,
+        serve_bind: bind.map(str::to_string),
+        serve_started: Some(true),
+        serve_session_scoped: scoped,
+    };
+    assert_eq!(ServeInfo::from_result(&result(None, None)), None);
+    assert_eq!(
+        ServeInfo::from_result(&result(Some("nonsense"), None)),
+        None
+    );
+    let info = ServeInfo::from_result(&result(Some("[::]:4433"), Some(true))).unwrap();
+    assert!(info.session_scoped);
+    let info = ServeInfo::from_result(&result(Some("[::]:4433"), None)).unwrap();
+    assert!(!info.session_scoped);
+}
+
+#[test]
+fn a_session_scoped_serve_adds_one_notice() {
+    let data = data(PairSshRemote {
+        name: "laptop".into(),
+        role: Some("full".into()),
+        created: true,
+    });
+    let scoped = ServeInfo {
+        bind: "[::]:4433".into(),
+        session_scoped: true,
+    };
+    let lines = notices(
+        &data,
+        &plan(TrustRole::Full),
+        &resolved(false),
+        "10.0.0.1:4433",
+        Some(&scoped),
+    );
+    let warnings: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains("ends with the ssh session"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{lines:?}");
+    assert!(
+        warnings[0].contains("qsh service install --always-on"),
+        "{warnings:?}"
+    );
+    let calm = ServeInfo {
+        session_scoped: false,
+        ..scoped
+    };
+    let lines = notices(
+        &data,
+        &plan(TrustRole::Full),
+        &resolved(false),
+        "10.0.0.1:4433",
+        Some(&calm),
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("ends with the ssh session"))
+    );
+}
+
+#[test]
+fn only_a_dial_failure_can_be_a_missing_serve() {
+    use super::revive::failure_may_be_a_missing_serve;
+    let err = |code| OpError::new(code, "x");
+    assert!(failure_may_be_a_missing_serve(&err(
+        ErrorCode::ConnectionFailed
+    )));
+    assert!(failure_may_be_a_missing_serve(&err(ErrorCode::Timeout)));
+    for code in [
+        ErrorCode::AuthFailed,
+        ErrorCode::Canceled,
+        ErrorCode::PermissionDenied,
+        ErrorCode::HostNotFound,
+    ] {
+        assert!(
+            !failure_may_be_a_missing_serve(&err(code.clone())),
+            "{code:?}"
+        );
+    }
+    let blocked = err(ErrorCode::ConnectionFailed)
+        .with_details(serde_json::json!({ "reason": "udp_egress_blocked" }));
+    assert!(!failure_may_be_a_missing_serve(&blocked));
 }
