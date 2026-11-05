@@ -110,6 +110,7 @@ pub const KEYS: &[ConfigKey] = &[
     key("serve", "max_connections", Int, true),
     key("serve", "max_file_transfers_per_principal", Int, true),
     key("serve", "max_file_transfers", Int, true),
+    key("serve", "on_demand_idle_ms", Int, true),
     ConfigKey {
         choices: &["auto", "platform", "file"],
         ..key("identity", "key_store", Str, false)

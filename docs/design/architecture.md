@@ -162,7 +162,7 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 
 `config.toml`의 키(기본값은 `config.rs`의 `DEFAULT_*` 상수가 정본):
 
-- `[serve]` 기본: `bind`, `replay_bytes`, `resume_ttl`, `close_grace_ms`.
+- `[serve]` 기본: `bind`, `replay_bytes`, `resume_ttl`, `close_grace_ms`, `on_demand_idle_ms`(숨김 `--on-demand` 전용, `docs/CLI.md` §6.12).
 - `[serve]` admission: `max_concurrent_handshakes`(기본 64), `handshake_rate_per_source`(기본 10/s), `validated_rate_per_source`(기본 10/s).
 - `[serve]` quota ([ADR-0010](../adr/0010-resource-quotas.md)): `max_sessions`(기본 256), `max_sessions_per_principal`(기본 32), `max_exec_per_principal`(기본 32), `max_exec`(기본 256), `max_tunnel_streams_per_principal`(기본 256), `max_tunnel_streams_per_forward`(기본 64), `max_remote_forwards_per_principal`(기본 16), `max_connections_per_principal`(기본 32), `max_connections`(기본 512), `max_file_transfers_per_principal`(기본 4), `max_file_transfers`(기본 64). `max_connections`는 `qsh serve`/`qsh listen` 각자 독립된 accept arm 단위 상한이고 프로세스 전역이 아니다.
 - `[serve].to`: `qsh serve --to`의 config 경로(ADR-0012 결정 4/5). CLI의 `--to`가 이 키보다, 이 키가 legacy `[reverse].controller`보다 우선한다. 두 키가 서로 다른 값으로 동시에 설정되면 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail-closed하고 `qsh doctor`는 `config_serve_to_conflict` finding으로 보고하되 `doctor.run`은 exit 0이다. `crate::serve::resolve_serve_mode`/`config_serve_to_conflict`가 단일 진실 공급원이다.

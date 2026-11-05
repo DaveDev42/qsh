@@ -319,17 +319,46 @@ fn serve_bind_is_optional() {
             bind: None,
             to: None,
             name: None,
+            on_demand: false,
         }
     ));
     let cli = Cli::try_parse_from(["qsh", "serve", "--bind", "127.0.0.1:0"]).unwrap();
     match cli.command.unwrap() {
-        Command::Serve { bind, to, name } => {
+        Command::Serve { bind, to, name, .. } => {
             assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
             assert_eq!(to, None);
             assert_eq!(name, None);
         }
         other => panic!("expected serve, got {other:?}"),
     }
+}
+
+/// ADR-0051 결정 2: `--on-demand` is accepted, hidden from `--help`, and off
+/// by default.
+#[test]
+fn serve_on_demand_is_a_hidden_flag_that_defaults_off() {
+    let cli = Cli::try_parse_from(["qsh", "serve", "--on-demand"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Serve {
+            on_demand: true,
+            ..
+        }
+    ));
+    let cli = Cli::try_parse_from(["qsh", "serve"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Serve {
+            on_demand: false,
+            ..
+        }
+    ));
+    let help = <Cli as clap::CommandFactory>::command()
+        .find_subcommand_mut("serve")
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    assert!(!help.contains("on-demand"));
 }
 
 /// ROADMAP M9 (b) (ADR-0012 결정 2/4): `qsh serve --to <controller>` and `qsh
@@ -343,7 +372,7 @@ fn serve_to_and_reverse_converge_on_the_same_controller_and_offered_name() {
     let via_serve =
         Cli::try_parse_from(["qsh", "serve", "--to", "box", "--name", "laptop"]).unwrap();
     let (serve_to_target, serve_to_name) = match via_serve.command.unwrap() {
-        Command::Serve { to, name, bind } => {
+        Command::Serve { to, name, bind, .. } => {
             assert_eq!(bind, None);
             (to.unwrap(), name)
         }
@@ -374,7 +403,7 @@ fn serve_to_and_bind_together_still_parse_at_the_clap_layer() {
     let cli =
         Cli::try_parse_from(["qsh", "serve", "--to", "box", "--bind", "127.0.0.1:0"]).unwrap();
     match cli.command.unwrap() {
-        Command::Serve { to, bind, name } => {
+        Command::Serve { to, bind, name, .. } => {
             assert_eq!(to.as_deref(), Some("box"));
             assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
             assert_eq!(name, None);

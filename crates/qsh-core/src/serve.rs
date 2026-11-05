@@ -5,7 +5,9 @@
 //! yet armed — and runs until `shutdown` resolves.
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{SetupError, TrustEvaluator};
@@ -18,6 +20,9 @@ use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
 use crate::server::Server;
 use crate::trust::{SharedInviteStore, SharedTrustStore};
+
+pub mod detach;
+pub mod record;
 
 /// Default listen address when neither `--bind` nor `[serve].bind` is set.
 pub const DEFAULT_BIND: &str = "[::]:4433";
@@ -320,7 +325,92 @@ pub fn resolve_serve_mode(
     }
 }
 
-/// Run the host until `shutdown` resolves.
+/// The ports `qsh serve --on-demand` falls back to when the configured port
+/// is taken (ADR-0051 decision 2): the range mosh uses, so one firewall rule
+/// serves both.
+pub const ON_DEMAND_FALLBACK_PORTS: RangeInclusive<u16> = 60001..=60999;
+
+/// How `qsh serve --on-demand` differs from a plain serve.
+#[derive(Debug, Clone)]
+pub struct OnDemandOptions {
+    /// Exit through the shutdown drain once there has been no session and no
+    /// connection for this long (`[serve].on_demand_idle_ms`).
+    pub idle: Duration,
+    /// Ports to try, in order, when the configured port is already in use.
+    /// [`ON_DEMAND_FALLBACK_PORTS`] outside tests.
+    pub fallback_ports: RangeInclusive<u16>,
+}
+
+impl OnDemandOptions {
+    /// The options `config` asks for, with the standard port range.
+    pub fn from_config(config: &Config) -> Result<Self, OpError> {
+        Ok(Self {
+            idle: config.serve.on_demand_idle()?,
+            fallback_ports: ON_DEMAND_FALLBACK_PORTS,
+        })
+    }
+}
+
+/// Run the host until `shutdown` resolves. See [`run_serve_with`]; this is
+/// the plain (not on-demand) form.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_serve(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind: SocketAddr,
+    on_bound: impl FnOnce(SocketAddr),
+    on_runtime: impl FnOnce(&HostRuntime),
+    on_notice: impl Fn(&str) + Send + Sync + 'static,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
+    run_serve_with(
+        paths, config, identity, bind, None, on_bound, on_runtime, on_notice, shutdown,
+    )
+    .await
+}
+
+/// Whether `err` says the address cannot be had because someone else holds
+/// it, the only bind failure the on-demand port fallback answers.
+fn is_address_taken(err: &SetupError) -> bool {
+    matches!(
+        err,
+        SetupError::Bind { source, .. }
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+            )
+    )
+}
+
+/// Resolves when the host has been idle for `idle`: no session, detached or
+/// not, and no connection. Starting up with nobody connecting counts the
+/// same, so the clock starts when this future is first polled.
+async fn wait_until_idle(server: Arc<Server>, idle: Duration) {
+    let poll = (idle / 4).clamp(Duration::from_millis(10), Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(poll);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut idle_since = tokio::time::Instant::now();
+    loop {
+        ticker.tick().await;
+        let activity = server.activity();
+        if activity.sessions > 0 || activity.connections > 0 {
+            idle_since = tokio::time::Instant::now();
+        } else if idle_since.elapsed() >= idle {
+            return;
+        }
+    }
+}
+
+/// Run the host until `shutdown` resolves, or, with `on_demand`, until it
+/// has been idle for [`OnDemandOptions::idle`].
+///
+/// `on_demand` is `Some` for `qsh serve --on-demand` (ADR-0051 decision 2):
+/// the idle exit follows the same path as `shutdown` (the SIGTERM drain),
+/// and a taken port is replaced by the first free one in
+/// [`OnDemandOptions::fallback_ports`] unless `serve.json` shows a live serve
+/// of this user. Either way, the serve publishes `state_dir/serve.json` once
+/// it holds its socket and removes it on exit.
 ///
 /// `bind` is the already-resolved address — the caller runs
 /// [`resolve_serve_mode`]/[`resolve_bind`] itself and passes
@@ -346,11 +436,12 @@ pub fn resolve_serve_mode(
 /// architecture.md` §1) — `qsh-cli`'s `run_serve` wrapper passes a closure
 /// that prints `qsh serve: {notice}` to stderr.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_serve(
+pub async fn run_serve_with(
     paths: &Paths,
     config: &Config,
     identity: LoadedIdentity,
     bind: SocketAddr,
+    on_demand: Option<OnDemandOptions>,
     on_bound: impl FnOnce(SocketAddr),
     on_runtime: impl FnOnce(&HostRuntime),
     on_notice: impl Fn(&str) + Send + Sync + 'static,
@@ -383,14 +474,44 @@ pub async fn run_serve(
     // diagnostic. `on_notice` is shared so the same sink also serves the
     // pairing notices below.
     let on_notice = Arc::new(on_notice);
-    let (listener, reset_key_diagnostic) = crate::reset_key::bind_listener(
-        paths,
-        bind,
-        identity.local,
-        Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
-        liveness.tuning(),
-    )
-    .map_err(|err| bind_setup_error(&bind, err))?;
+    let bind_at = |at: SocketAddr| {
+        crate::reset_key::bind_listener(
+            paths,
+            at,
+            identity.local.clone(),
+            Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
+            liveness.tuning(),
+        )
+    };
+    let (listener, reset_key_diagnostic) = match bind_at(bind) {
+        Ok(bound) => bound,
+        Err(err) => {
+            let fallback = on_demand
+                .as_ref()
+                .filter(|_| is_address_taken(&err))
+                // A live serve of this user holds the port: report the
+                // conflict rather than start a second one beside it.
+                .filter(|_| record::live_serve(paths).is_none());
+            let Some(options) = fallback else {
+                return Err(bind_setup_error(&bind, err));
+            };
+            let mut found = None;
+            for port in options.fallback_ports.clone() {
+                match bind_at(SocketAddr::new(bind.ip(), port)) {
+                    Ok(bound) => {
+                        found = Some(bound);
+                        break;
+                    }
+                    Err(next) if is_address_taken(&next) => continue,
+                    Err(next) => return Err(bind_setup_error(&bind, next)),
+                }
+            }
+            match found {
+                Some(bound) => bound,
+                None => return Err(bind_setup_error(&bind, err)),
+            }
+        }
+    };
     if let Some(diagnostic) = &reset_key_diagnostic {
         on_notice(diagnostic);
     }
@@ -416,6 +537,26 @@ pub async fn run_serve(
     // through `trust`'s path and redeems through `invites`.
     runtime.server.set_pairing(trust, invites);
     on_runtime(&runtime);
+    // The runtime record is published once the socket is held and before the
+    // address is announced, so a caller that reads the `listening on` line
+    // finds it. A write failure is a notice, not a startup failure: the serve
+    // works, it just cannot be found by the next bootstrap.
+    let own_pid = std::process::id();
+    let mode = if on_demand.is_some() {
+        record::ServeRecordMode::OnDemand
+    } else {
+        record::ServeRecordMode::Persistent
+    };
+    let _record_guard = match record::write(
+        paths,
+        &record::ServeRecord::for_current_process(actual, mode),
+    ) {
+        Ok(()) => Some(record::RecordGuard::new(paths, own_pid)),
+        Err(err) => {
+            tracing::warn!(error = %err.message, "cannot write serve.json");
+            None
+        }
+    };
     tracing::info!(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
@@ -436,7 +577,25 @@ pub async fn run_serve(
     // consumes and (once the accept loop exits) drops `runtime.server`
     // internally, so nothing of this function's own is keeping `Server`
     // alive once `.await` resolves; only `runtime.audit` survives.
-    runtime.server.run(listener, shutdown).await;
+    let idle_server = Arc::clone(&runtime.server);
+    match on_demand {
+        None => runtime.server.run(listener, shutdown).await,
+        Some(options) => {
+            let idle = options.idle;
+            let until = async move {
+                tokio::select! {
+                    () = shutdown => {}
+                    () = wait_until_idle(idle_server, idle) => {
+                        tracing::info!(
+                            idle_secs = idle.as_secs_f64(),
+                            "qsh serve --on-demand idle: shutting down"
+                        );
+                    }
+                }
+            };
+            runtime.server.run(listener, until).await;
+        }
+    }
     // F2 (M5 plan Step 3 (2473c88)): `Server::run`'s accept loop detaches each
     // connection's task (`tokio::spawn`, no `JoinSet`) and `drain()` only
     // waits for the broker's own sessions, not those tasks themselves — so

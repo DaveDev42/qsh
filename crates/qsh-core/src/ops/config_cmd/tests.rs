@@ -386,6 +386,7 @@ fn every_field_populated() -> Config {
             max_connections: Some(1),
             max_file_transfers_per_principal: Some(1),
             max_file_transfers: Some(1),
+            on_demand_idle_ms: Some(1),
         },
         identity: IdentityConfig {
             key_store: Some(qsh_proto::KeyStoreMode::Auto),

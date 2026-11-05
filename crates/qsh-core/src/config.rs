@@ -198,6 +198,12 @@ impl Paths {
         self.state_dir.join("resume.json.lock")
     }
 
+    /// The runtime record of the `qsh serve` that is running for this user
+    /// (`crate::serve::record`, ADR-0051 decision 2).
+    pub fn serve_record_file(&self) -> PathBuf {
+        self.state_dir.join("serve.json")
+    }
+
     /// Runtime directory for this machine's localctl UDS sockets:
     /// `$XDG_RUNTIME_DIR/qsh` when that variable is set (and non-empty),
     /// else `<state_dir>/run` (`docs/design/architecture.md` §7).
@@ -605,9 +611,23 @@ pub struct ServeConfig {
     /// [`ServeConfig::DEFAULT_MAX_FILE_TRANSFERS`] (64). Same no-off-switch
     /// discipline.
     pub max_file_transfers: Option<usize>,
+    /// How long a `qsh serve --on-demand` process may have no session
+    /// (detached ones included) and no connection before it exits through
+    /// the SIGTERM drain path, in milliseconds (ADR-0051 decision 2). Unset
+    /// ⇒ [`ServeConfig::DEFAULT_ON_DEMAND_IDLE_MS`] (10 min). Outside
+    /// `1..=`[`ServeConfig::MAX_ON_DEMAND_IDLE_MS`] is a `CONFIG_ERROR`,
+    /// never clamped (see [`ServeConfig::on_demand_idle`]). A serve that was
+    /// not started with `--on-demand` does not read it.
+    pub on_demand_idle_ms: Option<u64>,
 }
 
 impl ServeConfig {
+    /// Default on-demand idle limit: 10 minutes (ADR-0051 decision 2).
+    pub const DEFAULT_ON_DEMAND_IDLE_MS: u64 = 10 * 60 * 1000;
+    /// Upper bound of `on_demand_idle_ms`: 24 hours, the same ceiling
+    /// `[reverse].backoff_max_ms` has.
+    pub const MAX_ON_DEMAND_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
+
     /// Default per-session replay budget: 8 MiB (`docs/PRD.md` §13).
     pub const DEFAULT_REPLAY_BYTES: usize = 8 * 1024 * 1024;
     /// Default resume TTL: 24 hours (`docs/PRD.md` §13).
@@ -680,6 +700,26 @@ impl ServeConfig {
     /// Effective resume TTL.
     pub fn resume_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.resume_ttl.unwrap_or(Self::DEFAULT_RESUME_TTL_SECS))
+    }
+
+    /// Defaulted and validated `on_demand_idle_ms`. Fails closed
+    /// (`CONFIG_ERROR`, non-retryable) on `0` or a value above
+    /// [`ServeConfig::MAX_ON_DEMAND_IDLE_MS`], never clamping it.
+    pub fn on_demand_idle(&self) -> Result<std::time::Duration, OpError> {
+        let ms = self
+            .on_demand_idle_ms
+            .unwrap_or(Self::DEFAULT_ON_DEMAND_IDLE_MS);
+        if ms == 0 || ms > Self::MAX_ON_DEMAND_IDLE_MS {
+            return Err(OpError::new(
+                ErrorCode::ConfigError,
+                format!(
+                    "[serve].on_demand_idle_ms ({ms}) must be within 1..={}",
+                    Self::MAX_ON_DEMAND_IDLE_MS
+                ),
+            )
+            .with_retryable(false));
+        }
+        Ok(std::time::Duration::from_millis(ms))
     }
 
     /// Effective close escalation grace.
@@ -1466,6 +1506,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), OpError> {
         self.liveness()?;
         self.stale_retention()?;
+        self.serve.on_demand_idle()?;
         self.ssh.program()?;
         self.ssh.remote_qsh()?;
         Ok(())

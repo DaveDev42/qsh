@@ -15,6 +15,7 @@ mod op_registration_completeness;
 mod quota_docs;
 mod quota_registry;
 mod schema_commands_registry;
+mod serve_on_demand;
 mod service_docs;
 mod setup;
 mod tunnel_docs;

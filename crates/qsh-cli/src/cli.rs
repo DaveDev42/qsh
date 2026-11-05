@@ -660,6 +660,14 @@ pub enum Command {
         /// it.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+
+        /// Started by the SSH bootstrap, not by a person (ADR-0051 decision
+        /// 2): exit after `[serve].on_demand_idle_ms` without a session or a
+        /// connection, and take a free port in 60001..=60999 when the
+        /// configured one is taken. Inbound only; given with `--to` is
+        /// `INVALID_ARGUMENT`.
+        #[arg(long, hide = true)]
+        on_demand: bool,
     },
 
     /// Run the reverse-mode controller: accept dial-in registrations from

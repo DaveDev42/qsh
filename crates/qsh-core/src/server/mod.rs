@@ -270,6 +270,15 @@ impl ConnCtx {
     }
 }
 
+/// A snapshot of what keeps a host busy ([`Server::activity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostActivity {
+    /// Live sessions, detached ones included.
+    pub sessions: usize,
+    /// Open connections.
+    pub connections: usize,
+}
+
 /// An authorized exec waiting for its data stream.
 ///
 /// Not [`Clone`] (as of M8 plan Step 3 (52639fc)): [`Self::permit`] is an RAII
@@ -859,6 +868,16 @@ impl Server {
                 .map(|s| s.to_string())
                 .collect(),
             reverse,
+        }
+    }
+
+    /// What keeps this host busy right now: live sessions (detached ones
+    /// included) and open connections. `qsh serve --on-demand` exits once
+    /// both are zero for its idle limit (`crate::serve`).
+    pub fn activity(&self) -> HostActivity {
+        HostActivity {
+            sessions: self.sessions.live_counts().live,
+            connections: self.quotas.total_connections_in_use(),
         }
     }
 
