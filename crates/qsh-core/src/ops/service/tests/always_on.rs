@@ -282,13 +282,16 @@ fn always_on_on_launchd_runs_the_launchdaemon_recipe_under_sudo() {
 
     let daemon = root
         .path()
-        .join("Library/LaunchDaemons/io.qsh.serve.plist")
+        .join("Library")
+        .join("LaunchDaemons")
+        .join("io.qsh.serve.plist")
         .display()
         .to_string();
     let source = ops
         .paths()
         .config_dir
-        .join("service/io.qsh.serve.plist")
+        .join("service")
+        .join("io.qsh.serve.plist")
         .display()
         .to_string();
     assert_eq!(
@@ -328,7 +331,11 @@ fn always_on_on_launchd_leaves_an_installed_daemon_alone() {
     let (_dir, ops) = ops_with("");
     let root = temp_home();
     let home = temp_home();
-    let daemon = root.path().join("Library/LaunchDaemons/io.qsh.serve.plist");
+    let daemon = root
+        .path()
+        .join("Library")
+        .join("LaunchDaemons")
+        .join("io.qsh.serve.plist");
     std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
     std::fs::write(&daemon, "daemon").unwrap();
     let runner = FakeRunner::default();
@@ -574,7 +581,11 @@ fn uninstall_always_on_removes_the_launchdaemon() {
     let (_dir, ops) = ops_with("");
     let root = temp_home();
     let home = temp_home();
-    let daemon = root.path().join("Library/LaunchDaemons/io.qsh.serve.plist");
+    let daemon = root
+        .path()
+        .join("Library")
+        .join("LaunchDaemons")
+        .join("io.qsh.serve.plist");
     std::fs::create_dir_all(daemon.parent().unwrap()).unwrap();
     std::fs::write(&daemon, "daemon").unwrap();
     let runner = FakeRunner::default();
@@ -682,7 +693,8 @@ fn a_failed_sudo_step_names_the_step_and_keeps_the_unit_file() {
     assert!(
         !ops.paths()
             .config_dir
-            .join("service/io.qsh.serve.plist")
+            .join("service")
+            .join("io.qsh.serve.plist")
             .exists()
     );
     // No later step ran.
