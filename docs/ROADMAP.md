@@ -2,9 +2,9 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)와 M16(SSH 부트스트랩과 신뢰 철회)은 2026-10-15, M17(운영 표면)은 2026-10-16 닫혔다. M18은 착수 조건(M8 DoD 3)이 닫히지 않아 건넜고(§5.1 원칙 6), M19(Windows client)와 M20(Windows host)은 2026-10-18 닫혔다. 이로써 P1 마일스톤 가운데 에이전트가 열 수 있는 것은 모두 닫혔고 지금 열린 마일스톤은 없다. M18은 여전히 착수 조건(M8 DoD 3)을 기다려 건넌 상태이고(§5.1 원칙 6), 그 회차가 기록되면 M18 계획이 `PLAN.md` 자리표시자를 대체한다. 그때까지 `PLAN.md` §0이 남은 사람 몫이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다. M15~M20을 담은 태그 `v0.5.0`이 2026-10-20 나왔고(`1c653e0`, Windows 자산 포함, Windows는 미서명), 남은 회차는 이 태그에서 돈다. 패치 태그 `v0.5.1`(2026-10-22, `b4639a8`)이 Windows 기본 bind의 IPv4 수용(ADR-0046)을 더해, Windows host 회차와 Windows `qsh listen` 회차는 이 태그에서 돈다. 패치 태그 `v0.5.2`(2026-10-24, `4240767`)는 RUSTSEC-2026-0385·0386 의존성 수정과 macOS `status --live`의 LaunchDaemon 읽기를 더했고, Windows 쪽 동작은 바뀌지 않아 회차 대상 태그는 그대로다. `v0.5.3`(2026-10-25, `061bec3`)은 W3b·W7 실장비 회차가 찾은 결함(reverse `-R` holder 종료, `cmd.exe` 원격의 `remote_qsh_missing`, Windows `Password` 주체 doctor finding)을 고쳐, W7은 이 태그에서 다시 돈다. `v0.5.4`(2026-10-26, `2385c7d`)는 W3b L 회차에서 본 `-R` holder 종료 때의 tokio panic을 고쳤다. `v0.5.5`(2026-10-26, `2973986`)는 W2 L 회차(v0.5.4, FAIL)가 찾은 Windows host의 USR1·USR2 종료 상태(ADR-0047)와 `udp_egress_blocked` remedy 문안을 고쳤고, W2·W3a는 이 태그에서 돈다. `v0.5.6`(2026-10-26, `184fce2`)은 W3a 회차(v0.5.5, b FAIL)가 찾은 Windows 콘솔의 이모지 입력과 pty 없는 Windows ssh 세션에서 멈추던 `qsh pair ssh`를 고쳤고, W3a b는 이 태그에서 다시 돌아 PASS다.
+**현재 위치:** P2를 열었다(2026-11-05, ADR-0050). 첫 마일스톤은 M21(설정 없는 첫 접속과 SSH 명령 호환)이고 범위 ADR을 쓰는 중이다. P1을 열었다(2026-09-26 사용자 결정). M11~M13은 닫혔고 M14(TCP/TLS fallback)는 2026-10-11 철회했다(ADR-0043, (a) transport facade만 남김). 2026-10-12 사용자 결정으로 P1을 다시 짰다. pin 방향(ADR-0030), listener pairing(ADR-0015), CSR(ADR-0016)은 기각했고 QR pairing과 P2 mobile client SDK는 폐기했다. 대신 역할 기반 권한(ADR-0045)과 SSH 부트스트랩(ADR-0044)을 새로 두고, 파일 복사를 scp 호환 `qsh cp`로(ADR-0029 개정), rotation·revocation을 "trust를 거두면 열린 연결도 닫는다"로(ADR-0031 축소) 바꿨다. 남은 마일스톤의 착수 ADR(M15 ADR-0045·0029, M16 ADR-0044·0031, M17 ADR-0032·0033, M19·M20 ADR-0035)은 2026-10-14 사용자 위임 결정("전부 다 알아서 진행해")으로 모두 `승인됨`이다. ADR이 필요 없는 M17 (b) README 재작성은 착지했다(`2fc879b`). M18은 M8 DoD 3이 기록돼야 열린다(§5.1 원칙 6). M15(역할 기반 권한과 scp 호환 파일 복사)와 M16(SSH 부트스트랩과 신뢰 철회)은 2026-10-15, M17(운영 표면)은 2026-10-16 닫혔다. M18은 착수 조건(M8 DoD 3)이 닫히지 않아 건넜고(§5.1 원칙 6), M19(Windows client)와 M20(Windows host)은 2026-10-18 닫혔다. 이로써 P1 마일스톤 가운데 에이전트가 열 수 있는 것은 모두 닫혔고 지금 열린 마일스톤은 없다. M18은 여전히 착수 조건(M8 DoD 3)을 기다려 건넌 상태이고(§5.1 원칙 6), 그 회차가 기록되면 M18 계획이 `PLAN.md` 자리표시자를 대체한다. 그때까지 `PLAN.md` §0이 남은 사람 몫이다. P0 MVP 완료 선언은 아직이다. 에이전트 몫은 전부 착지했고 사람 회차 여섯이 닫힐 때(ADR-0049) 선언한다(아래 "P0 MVP 완료 선언의 조건"). P1이 만든 사람 몫은 §5.5에 있다. M15~M20을 담은 태그 `v0.5.0`이 2026-10-20 나왔고(`1c653e0`, Windows 자산 포함, Windows는 미서명), 남은 회차는 이 태그에서 돈다. 패치 태그 `v0.5.1`(2026-10-22, `b4639a8`)이 Windows 기본 bind의 IPv4 수용(ADR-0046)을 더해, Windows host 회차와 Windows `qsh listen` 회차는 이 태그에서 돈다. 패치 태그 `v0.5.2`(2026-10-24, `4240767`)는 RUSTSEC-2026-0385·0386 의존성 수정과 macOS `status --live`의 LaunchDaemon 읽기를 더했고, Windows 쪽 동작은 바뀌지 않아 회차 대상 태그는 그대로다. `v0.5.3`(2026-10-25, `061bec3`)은 W3b·W7 실장비 회차가 찾은 결함(reverse `-R` holder 종료, `cmd.exe` 원격의 `remote_qsh_missing`, Windows `Password` 주체 doctor finding)을 고쳐, W7은 이 태그에서 다시 돈다. `v0.5.4`(2026-10-26, `2385c7d`)는 W3b L 회차에서 본 `-R` holder 종료 때의 tokio panic을 고쳤다. `v0.5.5`(2026-10-26, `2973986`)는 W2 L 회차(v0.5.4, FAIL)가 찾은 Windows host의 USR1·USR2 종료 상태(ADR-0047)와 `udp_egress_blocked` remedy 문안을 고쳤고, W2·W3a는 이 태그에서 돈다. `v0.5.6`(2026-10-26, `184fce2`)은 W3a 회차(v0.5.5, b FAIL)가 찾은 Windows 콘솔의 이모지 입력과 pty 없는 Windows ssh 세션에서 멈추던 `qsh pair ssh`를 고쳤고, W3a b는 이 태그에서 다시 돌아 PASS다.
 
-이 문서는 P0 MVP(M0~M10)와 P1(M11~M20)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
+이 문서는 P0 MVP(M0~M10), P1(M11~M20), P2(M21~M26, ADR-0050)의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
 닫힌 마일스톤의 절은 범위, 결과, 열린 DoD, 코드·문서가 인용하는 번호(DoD 번호, 범위 글자, 결정 기록 Q)만 남겼다. 단계별 서술과 감사 경위는 git 이력에 있다. 지운 M2~M13판 계획의 원문은 커밋 해시로 인용한다(`docs/history/m<N>-plan.md`): M2~M6 `2473c88`, M7 `69dd788`, M8 `52639fc`, M9 `b9a621b`, M10 `98d62fe`, M11 `6ee63c3`, M12 `3acdb1a`, M13 `b70be6b`, M15 `7cbeced`, M16 `66b6f4d`, M17 `047db25`, M19 `d853388`, M20 `addffb5`.
 
@@ -373,9 +373,9 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | TCP/TLS fallback | ADR-0043이 철회했다(2026-10-11). M14 (a)의 transport facade만 남았다 |
 | DNS-over-HTTPS 강제 모드(이슈 #8) | ADR-0039가 P2 후보로 두었다. PRD §4·§12와 `docs/design/threat-model.md` §9의 web PKI 비목표를 먼저 고쳐야 연다. 그때까지는 IP 리터럴 주소가 DNS를 거치지 않는 우회다 |
 | ECH(이슈 #9) | ADR-0040 결정 3이 착수 조건을 정했다. rustls 정식 릴리스에 서버 쪽 ECH가 들어오고 quinn 0.11이 그 설정을 막지 않음을 테스트로 확인해야 연다. 2026-10-01 기준 rustls 0.23.45와 0.24.0-dev.1 모두 클라이언트 쪽만 있다. hostname SNI를 보내지 않는 결정 2는 M13에서 구현했다 |
-| P2 전부 | local echo prediction, read-only multi-attach, jump chaining, agent forwarding(`docs/PRD.md` §7 P2) |
+| P2 전부 | 2026-11-05 ADR-0050으로 열었다. M21~M26은 §6에 있다. read-only multi-attach와 sftp 호환은 P2 후보로 남는다 |
 | pin 방향 축, listener 초대 pairing, CSR 다대 CA 서명, QR pairing, revocation 목록·rotation 문서·`trust rotate`, mobile client SDK | 2026-10-12 사용자 결정으로 폐기했다(ADR-0030·0015·0016 기각, ADR-0031 축소). 1인·소수 장비 사용에 가치가 낮고, 장비 신뢰 부트스트랩은 SSH 부트스트랩(ADR-0044)이 맡는다. mobile은 Rust client cross-compile로 충분하다 |
-| P0 사람 회차 일곱 | P0 완료 선언의 조건이고 `PLAN.md`가 사람 몫으로 추적한다. P1 마일스톤이 아니다. M8 DoD 3은 M18의 착수 조건으로, M9 DoD 1은 `qsh setup` 캠페인의 비교 기준으로만 인용한다 |
+| P0 사람 회차 여섯 | P0 완료 선언의 조건이고 `PLAN.md`가 사람 몫으로 추적한다. P1 마일스톤이 아니다. M8 DoD 3은 M18의 착수 조건으로, M9 DoD 1은 `qsh setup` 캠페인의 비교 기준으로만 인용한다 |
 
 ### 5.4 P1 일정 리스크
 
@@ -400,3 +400,46 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | SSH 부트스트랩 실제 OpenSSH 회차(ProxyJump, ssh-agent, 암호 걸린 키, `--reverse` 한 회) | `docs/campaigns/p1-ssh-bootstrap.md`(사전 고정 `e8cd7a3`) | M16 (a) | M16 (a)가 담긴 태그(`7c43332` 이후). PASS(2026-10-30, `v0.5.6`, R1~R5, 에이전트가 WSL 위 컨테이너와 Dave-Windows에서 실행, 무효 두 행 포함). 컨테이너를 장비로 센 것, expect 입력, 원격 serve UDP 4436은 2026-11-01 Dave가 확인 |
 | Windows client·host 확인 | `docs/campaigns/p1-windows.md`(M19 사전 고정 `ad409e0`, M20이 host 회차 W2·W3b·W7을 더해 다시 고정 `048df57`, 서명 철회로 W11을 회차 전 재고정 `b25b843`, scoop·winget 철회로 W11을 cargo 변형으로 재고정 `e35f7c7`) | M19·M20 | Windows 자산이 붙은 태그 |
 | Windows 배포 준비 | ADR-0035 결정 16 | M19 | 2026-10-19 사용자 결정으로 서명·scoop·winget을 철회해 닫힘. 설치 경로는 release zip, `install.ps1`, `cargo install --locked --git` |
+
+## 6. P2 마일스톤
+
+P2는 2026-11-05 사용자 결정으로 열었다(ADR-0050). 목표는 SSH의 주요 기능 대부분, 연결 시작 때 한 번의 홀펀칭, mosh 수준의 사용성이다. 크기는 전부 추정이고 1인 기준 ew다.
+
+### 6.1 P2 원칙
+
+1. 모든 마일스톤이 ADR-0050 결정 2의 세 원칙을 수용 기준으로 진다. 흔한 경로는 설정 파일 손편집 없이 끝나고, TTY에서는 대화형으로 묻고 같은 답을 플래그로 줄 수 있으며, `alias ssh=qsh`의 흔한 쓰임새가 같은 뜻으로 동작한다.
+2. §5.1의 P1 시퀀싱 원칙 2·3·6·7을 그대로 적용한다. 계약·wire 스텝은 그 ADR 승인 전에 열지 않고, 측정 도구를 기능보다 먼저 세우며, 사람 회차는 DoD에 넣지 않고, 정방향·역방향과 세 OS는 같은 기능을 갖는다.
+3. wire 변경은 발효된 freeze(`docs/design/protocol.md` §16.4)의 additive 규율을, JSON은 `qsh.cli/v1` additive 규율을 따른다.
+4. 각 마일스톤의 첫 스텝은 범위를 정하는 ADR이다.
+
+### M21 — 설정 없는 첫 접속과 SSH 명령 호환
+
+- **범위:** mosh식 부트스트랩(`qsh host` 한 줄이 SSH로 한 번 들어가 원격 qsh를 찾거나 동의를 받아 설치하고, 필요할 때 뜨는 사용자 권한의 serve를 띄워 pin을 맞춘 뒤 QUIC으로 붙는다), `ssh` 문법·옵션·종료 상태·`~/.ssh/config` 호환, 기본으로 켜지는 `service install`과 OS별 로그인 밖 기동, `--to`·`--bind`를 유닛에 기록, 역할보다 세밀한 권한의 CLI 경로와 다시 읽기, 재페어링 때 pin 교체.
+- **DoD:** 범위 ADR이 정한다.
+- **크기:** 4ew
+
+### M22 — 화면 상태 동기화
+
+- **범위:** 대화형 form에서 host가 터미널 상태를 들고 client에 현재 화면과의 차이만 보낸다. 재부착은 현재 화면 한 장, 출력이 밀리면 중간 화면을 건너뛴다. `--json`/`--jsonl`의 바이트 계약은 그대로다.
+- **크기:** 4ew
+
+### M23 — 로컬 에코 예측과 연결 상태 줄
+
+- **범위:** M22의 화면 모델 위의 예측 표시(확인 전 글자 밑줄, echo-off·전체 화면 앱·연속 오예측에서 끔), 응답이 끊기면 "마지막 응답 N초 전" 줄.
+- **크기:** 3ew
+
+### M24 — 홀펀칭
+
+- **범위:** 둘 다 닿는 사용자의 qsh peer를 중개자로 쓴 후보 교환, 동시 송신, 첫 handshake 채택, 실패 시 포기. relay·TURN·공용 STUN은 없다.
+- **크기:** 3ew
+
+### M25 — agent forwarding
+
+- **범위:** `-A`. 원격에서 로컬 ssh-agent를 쓰게 하는 스트림. 기본 꺼짐, 역할로 허용.
+- **크기:** 2ew
+
+### M26 — jump chaining
+
+- **범위:** `-J`와 `ProxyJump`. 중간 peer가 다음 peer로의 QUIC를 터널로 잇고, 끝단 인증은 끝단 pin으로 한다.
+- **크기:** 2ew
+
