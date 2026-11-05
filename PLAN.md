@@ -61,7 +61,7 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 
 각 스텝은 PR 하나 크기이고, 끝나면 CLAUDE.md의 게이트 일곱이 초록이어야 한다. 계약·wire를 건드리는 스텝은 같은 커밋에서 `docs/CLI.md`·`docs/design/protocol.md`·fixture·man을 맞춘다.
 
-- [ ] **측정: 세션에서 떼어 낸 serve가 ssh 세션 끝을 견디는가.** Dave-Windows OpenSSH(세션 자식의 Job Object, `CREATE_BREAKAWAY_FROM_JOB` 허용 여부), Dave-Windows-WSL의 logind(`KillUserProcesses`), Dave-MBP16 macOS sshd에서 `setsid`/떼어 낸 자식이 ssh 종료 뒤 남는지 잰다. 결과를 ADR-0051 개정 이력에 적고 결정 2의 Windows 경로를 고정한다. 완료: 세 OS 결과 기록.
+- [x] **측정: 세션에서 떼어 낸 serve가 ssh 세션 끝을 견디는가.** 2026-11-05 세 OS를 쟀다(ADR-0051 개정 이력). macOS는 `setsid()` 자식이 남고, Windows OpenSSH는 Job(`0x2800`) 안이라 일반 자식은 죽지만 `CREATE_BREAKAWAY_FROM_JOB` 자식은 남으며, Ubuntu는 `KillUserProcesses=no`가 기본이다. 결정 2의 Windows 경로를 breakaway로 고정했다.
 - [ ] **`qsh config get|set|unset|list`(결정 10).** `toml_edit`, `config.toml.lock`, 저장 전 검증, 시작 시에만 읽는 키 안내. 새 op 넷의 fixture·schema·§2.5 행·man. 테스트: 주석 보존, 잘못된 값 거부 뒤 파일 불변, 동시 쓰기 직렬화, 모든 `Config` 키가 쓰기 가능함을 열거하는 테스트.
 - [ ] **SSH 문법과 옵션 표(결정 6·7·8·9의 CLI 부분).** 루트 명령의 `[command...]`, `-l -p -i -F -o -C -4 -6 -t -T -tt -N -f -E -e`, 거부 목록, 하위 명령 이름 충돌 규칙, 루트 사용법 오류 255, ssh 쪽 옵션을 부트스트랩 명령줄로 넘김. 테스트: `ssh_golden` 대조 표를 한 줄씩, `exit_code_matrix`에 루트 255 행.
 - [ ] **`shell_command`(결정 6, wire additive).** exec 열기의 선택 필드, host가 로그인 셸로 `-c` 실행(Windows는 OpenSSH와 같은 기본 셸 규칙), 옛 host의 `UNSUPPORTED` 안내. 테스트: 따옴표·`$VAR`·파이프 왕복, 옛 host 대조, fuzz 타깃 갱신.

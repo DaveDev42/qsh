@@ -37,7 +37,7 @@ ADR-0050은 P2의 세 원칙을 정했다. 설정 파일 손편집 없는 기본
    - 이 serve는 세션(떼어 둔 세션 포함)이나 연결이 하나라도 있는 동안 산다. 마지막 세션이 끝나고 연결이 없는 채로 `on_demand_idle`(기본 10분)이 지나면 SIGTERM drain과 같은 절차로 끝난다. 떠서 아무도 붙지 않은 경우도 같다. 상시 유닛으로 뜬 serve는 이 규칙을 따르지 않는다.
    - 같은 사용자의 serve가 이미 떠 있으면 새로 띄우지 않는다. 판정은 `state_dir/serve.json`(pid, 묶은 주소, 모드, 시작 시각. 0600, `FileLock`)으로 하고, UDP bind 시험(ADR-0044 결정 10)은 이 파일이 없을 때의 보조다.
    - 포트는 `[serve].bind`의 포트(기본 4433)를 먼저 쓴다. 다른 계정이 쥐고 있으면 60001~60999 가운데 빈 포트를 쓴다. mosh와 같은 범위라 방화벽 규칙을 같이 쓸 수 있다. 실제 주소는 `result` 줄에 싣고 이 장비의 pin 주소가 된다.
-   - **로그아웃에서 살아남기.** macOS는 세션에서 떼어 낸 자식을 sshd가 거두지 않는다. Linux는 logind `KillUserProcesses=yes`이고 linger가 꺼진 계정이면 ssh 세션이 끝날 때 serve도 죽는다. 이 경우 응답자가 알아채 `result`에 `serve_session_scoped: true`를 싣고, 이 장비는 "원격 serve가 ssh 세션과 함께 끝난다. 세션을 남기려면 원격에서 `qsh service install --always-on`" 한 줄을 stderr에 낸다. 연결 자체는 그대로 진행한다. Windows OpenSSH가 세션 자식을 kill-on-close Job Object에 넣는지는 저장소에 기록이 없다. M21 첫 스텝이 Dave-Windows의 sshd에서 잰다. 넣는다면 `CREATE_BREAKAWAY_FROM_JOB`, 그게 막히면 응답자가 그 계정의 대화형 로그온 작업(`InteractiveToken`, 1회 실행)을 등록해 띄운다. 둘 다 안 되면 Linux와 같은 경고를 낸다. 세 OS가 같은 결과(ssh 세션이 끝나도 serve가 남음)를 내는 것이 DoD이고, 측정 결과는 ADR 개정으로 남긴다.
+   - **로그아웃에서 살아남기.** macOS는 세션에서 떼어 낸 자식을 sshd가 거두지 않는다. Linux는 logind `KillUserProcesses=yes`이고 linger가 꺼진 계정이면 ssh 세션이 끝날 때 serve도 죽는다. 이 경우 응답자가 알아채 `result`에 `serve_session_scoped: true`를 싣고, 이 장비는 "원격 serve가 ssh 세션과 함께 끝난다. 세션을 남기려면 원격에서 `qsh service install --always-on`" 한 줄을 stderr에 낸다. 연결 자체는 그대로 진행한다. Windows OpenSSH는 세션 자식을 kill-on-close Job Object에 넣고 그 Job은 breakaway를 허용하므로(개정 이력 2026-11-05 측정), 응답자는 `CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`으로 serve를 띄운다. breakaway가 거부되는 sshd(Job에 `BREAKAWAY_OK`가 없음)면 Linux와 같은 경고를 낸다. 세 OS가 같은 결과(ssh 세션이 끝나도 serve가 남음)를 내는 것이 DoD이고, 측정 결과는 ADR 개정으로 남긴다.
 
 3. **원격 qsh 설치(동의 필요).**
    - 원격 qsh가 없으면(`remote_qsh_missing`) TTY에서 묻는다. "host에 qsh가 없다. qsh vX.Y.Z를 `~/.local/bin`에 설치할까? [Y/n]". 같은 답을 주는 플래그는 `--install-remote`, `--no-install-remote`다. TTY가 아니거나 `--json`/`--jsonl`이면 묻지 않고 지금처럼 `remote_qsh_missing`으로 끝난다(플래그를 주면 설치).
@@ -152,3 +152,10 @@ ADR-0050은 P2의 세 원칙을 정했다. 설정 파일 손편집 없는 기본
   - `config set`: 로컬 op, 권한 검사 대상 아님(B13). 원격 파일 쓰기는 여전히 qsh 설정 경로에 닿지 않는다(B22).
 - 남는 위험: logind가 사용자 프로세스를 죽이는 Linux에서 always-on 없이 쓰면 ssh 세션과 함께 serve가 끝난다(경고로 알림). Windows의 첫 on-demand serve는 Defender 방화벽 허용 질문을 볼 데스크톱 세션이 없을 수 있다. 이때 `udp_egress_blocked`의 remedy가 `qsh service install --always-on`(관리자 콘솔에서 방화벽 규칙도 만든다)을 가리킨다.
 - 크기: ADR-0050의 4ew보다 크다. 추정 5ew로 고친다. 스텝 순서는 측정(Windows sshd Job Object, logind) → `config` 명령 → SSH 문법과 옵션 표 → `shell_command` → on-demand serve와 `serve.json` → 부트스트랩의 serve 띄우기·되살리기 → 원격 설치 → pin 교체 → `service install` 기본 활성화와 `--always-on` → `trust allow` → 문서·man·threat model 순이다.
+
+## 개정 이력
+
+- 2026-11-05 (결정 2 측정, 에이전트). 세션에서 떼어 낸 자식이 ssh 세션 끝을 견디는지 쟀다.
+  - macOS 27.2(Dave-MBP16, sshd): fork 뒤 `setsid()`한 자식이 ssh 종료 뒤에도 부모 1로 남았다. macOS에는 `setsid` 명령이 없으므로 qsh는 libc 호출로 한다.
+  - Windows 11 Pro 25H2(Dave-Windows, Win32-OpenSSH): ssh 세션의 프로세스는 Job 안에 있고 제한 플래그가 `0x2800`(`KILL_ON_JOB_CLOSE`와 `BREAKAWAY_OK`)이다. `Start-Process`로 띄운 자식과 `Win32_Process.Create`로 띄운 자식은 ssh가 끝나자 사라졌다. `CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`으로 띄운 자식은 ssh 종료 뒤 1분 넘게 세션 0(Services)에 남았다. 결정 2의 Windows 경로를 breakaway로 고정하고 작업 스케줄러 대안을 뺐다.
+  - Linux(Dave-Windows-WSL, Ubuntu 24.04, systemd 255): `KillUserProcesses`가 배포판 기본값 `no`이고, 이 계정은 linger가 켜져 있다. `KillUserProcesses=yes` 배포판의 판정(`loginctl show-user -p KillUserProcesses -p Linger`)과 경고는 결정 2대로 두고, CI는 기본값 경로를 본다.
