@@ -22,7 +22,7 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 Suppress diagnostic output on stderr
 .TP
 \fB\-e\fR, \fB\-\-escape\-char\fR \fI<CHAR>\fR
-Escape character for the line\-start detach sequences (`~d`, `~.`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal. `\-e` is the ssh spelling
+Escape character for the line\-start sequences (`~.` ends the session, `~d` detaches, `~^Z`, `~#`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal. `\-e` is the ssh spelling
 .TP
 \fB\-l\fR \fI<USER>\fR
 Remote account, `ssh \-l`. Same as `user@` on the host

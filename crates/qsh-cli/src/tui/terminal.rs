@@ -75,6 +75,20 @@ pub(crate) trait Terminal: Send + Sync + 'static {
         false
     }
 
+    /// Whether [`suspend`](Terminal::suspend) works on this terminal.
+    fn supports_suspend(&self) -> bool {
+        false
+    }
+
+    /// Suspend this client for `~^Z`: put the terminal back, stop the
+    /// process, and return once it has been continued with the terminal in
+    /// raw mode again. Called on the input thread, only when
+    /// [`supports_suspend`](Terminal::supports_suspend) (the Windows console
+    /// has no job control).
+    fn suspend(&self) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
     /// The terminal is gone (hang-up, termination, console closed): put it
     /// back the way it was and leave. The session stays on the host
     /// (`docs/CLI.md` §7). The POSIX terminal dies of the signal and never

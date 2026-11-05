@@ -23,10 +23,10 @@
 //!
 //! ## Deliberate gaps
 //!
-//! - `~^Z` and job control: `docs/CLI.md` §7's escape table is exhaustive
-//!   and has no suspend, so SIGTSTP/SIGCONT are not handled. A `kill
-//!   -TSTP` therefore resumes into a terminal the client last configured;
-//!   that is backlog, not M2.
+//! - Job control other than `~^Z`: a `kill -TSTP` from outside is not
+//!   handled, so it resumes into a terminal the client last configured.
+//!   `~^Z` itself restores the terminal, stops the process and re-enters
+//!   raw mode on `SIGCONT` (POSIX only; Windows has no suspend).
 //! - A lone escape character held at EOF is dropped when stdin closes,
 //!   which is what ssh does and what §7 leaves unspecified.
 //!
@@ -243,6 +243,10 @@ fn attach_request(session_ref: String) -> SessionAttachReq {
     }
 }
 
+/// The `^Z` byte, the second half of `~^Z`.
+#[cfg(any(unix, windows, test))]
+const SUSPEND: u8 = 0x1a;
+
 /// The line-start escape state machine (`docs/CLI.md` §7).
 ///
 /// ssh's rule, restated for a client with no line discipline: the escape
@@ -272,11 +276,24 @@ pub struct Escape {
 pub struct Processed {
     /// Bytes to forward to the remote PTY, in order.
     pub forward: Vec<u8>,
-    /// The user asked to detach (`~d` / `~.`). Bytes after it are dropped:
-    /// this client is leaving.
+    /// The user asked to detach (`~d`). Bytes after it are dropped: this
+    /// client is leaving and the session keeps running.
     pub detach: bool,
+    /// The user asked to end the session and leave (`~.`, as in ssh).
+    /// Bytes after it are dropped: this client is leaving.
+    pub close: bool,
     /// The user asked for the escape help (`~?`), which goes to stderr.
     pub help: bool,
+    /// The user asked to suspend this client (`~` then `^Z`).
+    pub suspend: bool,
+    /// The user asked for the list of active forwards (`~#`), which goes to
+    /// stderr.
+    pub forwards: bool,
+    /// The user asked to background the client (`~&`).
+    pub background: bool,
+    /// The user typed an escape that qsh refuses (`~C`, `~R`); the byte
+    /// after the escape character.
+    pub refused: Vec<u8>,
 }
 
 #[cfg(any(unix, windows, test))]
@@ -302,11 +319,19 @@ impl Escape {
             if self.pending {
                 self.pending = false;
                 match byte {
-                    b'd' | b'.' => {
+                    b'd' => {
                         out.detach = true;
                         return out;
                     }
+                    b'.' => {
+                        out.close = true;
+                        return out;
+                    }
                     b'?' => out.help = true,
+                    SUSPEND => out.suspend = true,
+                    b'#' => out.forwards = true,
+                    b'&' => out.background = true,
+                    refused @ (b'C' | b'R') => out.refused.push(refused),
                     b if b == escape => self.push(&mut out, escape),
                     other => {
                         // Unknown sequence: ssh forwards both bytes rather
@@ -340,10 +365,14 @@ fn escape_help(escape: u8) -> String {
     let e = escape as char;
     format!(
         "\r\nSupported escape sequences:\r\n \
-         {e}d - detach (the session keeps running)\r\n \
-         {e}. - detach (the session keeps running)\r\n \
-         {e}{e} - send the escape character by typing it twice\r\n \
-         {e}? - this message\r\n\
+         {e}.  - end the session and disconnect (like ssh)\r\n \
+         {e}d  - detach (the session keeps running)\r\n \
+         {e}^Z - suspend qsh (not on Windows)\r\n \
+         {e}#  - list the forwards of this client\r\n \
+         {e}&  - background qsh (not supported)\r\n \
+         {e}{e}  - send the escape character by typing it twice\r\n \
+         {e}?  - this message\r\n \
+         {e}C, {e}R - refused (no command line, no rekey)\r\n\
          (Escapes are only recognised immediately after a newline.)\r\n"
     )
 }
@@ -446,6 +475,34 @@ mod tests {
     }
 
     #[test]
+    fn tilde_dot_closes_and_tilde_d_only_detaches() {
+        let out = feed(Some(b'~'), &[b"~.", b"~d"]);
+        assert!(out[0].close && !out[0].detach);
+        assert!(out[1].detach && !out[1].close);
+        // Both end the chunk: nothing after them is forwarded.
+        let out = feed(Some(b'~'), &[b"~.rm -rf /\r"]);
+        assert!(out[0].forward.is_empty());
+    }
+
+    #[test]
+    fn local_only_escapes_are_consumed_and_keep_the_line_start() {
+        let out = feed(Some(b'~'), &[b"~\x1a", b"~#", b"~&", b"~C", b"~R"]);
+        assert!(out[0].suspend && out[0].forward.is_empty());
+        assert!(out[1].forwards && out[1].forward.is_empty());
+        assert!(out[2].background && out[2].forward.is_empty());
+        assert_eq!(out[3].refused, b"C");
+        assert_eq!(out[4].refused, b"R");
+        // Still at a line start after all of them.
+        assert!(feed(Some(b'~'), &[b"~#~#~.", b""])[0].close);
+    }
+
+    #[test]
+    fn local_only_escapes_are_ordinary_input_mid_line_or_when_disabled() {
+        assert_eq!(forwarded(Some(b'~'), &[b"x~#~&~C~R\x1a"]), b"x~#~&~C~R\x1a");
+        assert_eq!(forwarded(None, &[b"~#~&~C~R~\x1a"]), b"~#~&~C~R~\x1a");
+    }
+
+    #[test]
     fn detach_drops_the_rest_of_the_chunk() {
         let out = feed(Some(b'~'), &[b"~drm -rf /\r"]);
         assert!(out[0].detach);
@@ -470,7 +527,7 @@ mod tests {
     #[test]
     fn help_text_names_every_documented_sequence() {
         let help = escape_help(b'~');
-        for seq in ["~d", "~.", "~~", "~?"] {
+        for seq in ["~.", "~d", "~^Z", "~#", "~&", "~~", "~?", "~C", "~R"] {
             assert!(help.contains(seq), "{seq} missing from {help:?}");
         }
         // Raw mode has no output post-processing: every line must carry

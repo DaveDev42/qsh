@@ -1332,8 +1332,13 @@ pub fn print_tunnel_close(data: &TunnelCloseData) -> io::Result<()> {
 /// bound address, never a byte of what the tunnel carries.
 pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    writeln!(
-        stderr,
+    writeln!(stderr, "{}", forward_started_line(tunnel))
+}
+
+/// The line [`print_forward_started`] prints, without the newline. The `~#`
+/// escape lists the forwards of the running client with the same lines.
+pub fn forward_started_line(tunnel: &Tunnel) -> String {
+    format!(
         "qsh: forwarding {} -> {} on {}",
         sanitize(&tunnel.bind),
         sanitize(&tunnel.forward_to),
@@ -1345,8 +1350,12 @@ pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
 /// (`qsh [user@]host -D …`). Same reasoning on stdout vs stderr.
 pub fn print_dynamic_forward_started(tunnel: &DynamicTunnel) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    writeln!(
-        stderr,
+    writeln!(stderr, "{}", dynamic_forward_started_line(tunnel))
+}
+
+/// The line [`print_dynamic_forward_started`] prints, without the newline.
+pub fn dynamic_forward_started_line(tunnel: &DynamicTunnel) -> String {
+    format!(
         "qsh: dynamic forward ({}) listening on {} via {}",
         sanitize(&tunnel.protocol),
         sanitize(&tunnel.bind),

@@ -66,8 +66,9 @@ pub struct InteractiveArgs {
     #[arg(value_name = "[USER@]HOST", value_parser = parse_target)]
     pub target: Option<Target>,
 
-    /// Escape character for the line-start detach sequences (`~d`, `~.`,
-    /// `~~`, `~?`), or `none` to disable them. Default `~`; only active
+    /// Escape character for the line-start sequences (`~.` ends the
+    /// session, `~d` detaches, `~^Z`, `~#`, `~~`, `~?`), or `none` to
+    /// disable them. Default `~`; only active
     /// when stdin is a terminal. `-e` is the ssh spelling.
     #[arg(short = 'e', long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
     pub escape_char: Option<EscapeChar>,
