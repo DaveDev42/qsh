@@ -58,7 +58,13 @@ impl ServeRecord {
 
 /// Replace `serve.json` with `record`, under the file lock.
 pub fn write(paths: &Paths, record: &ServeRecord) -> Result<(), OpError> {
-    ensure_private_dir(&paths.state_dir)?;
+    // Create the state dir when it is missing, but never re-mode an existing
+    // one: the record is advisory, and a serve starting up must not undo a
+    // mode the operator set (a read-only state dir is how the audit writer's
+    // fail-closed latch is exercised, `adversarial_load` D12).
+    if !paths.state_dir.exists() {
+        ensure_private_dir(&paths.state_dir)?;
+    }
     let file = paths.serve_record_file();
     let _lock = FileLock::acquire(&lock_path_for(&file))?;
     let body = serde_json::to_vec_pretty(record).map_err(|err| {
