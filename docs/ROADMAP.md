@@ -14,8 +14,8 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 
 | 열린 DoD | 내용 | 기록 자리 | 비고 |
 |---|---|---|---|
-| M10 DoD 1 | 클린 네 플랫폼 설치와 기능 스모크 | `docs/campaigns/m10-clean-vm.md` 회차 표 | Linux 회차는 PASS, macOS 두 회차가 남았다 |
-| M10 DoD 2 | Gatekeeper가 notarized 바이너리를 차단하지 않음 | 같은 문서 | 서명·공증 태그는 `v0.4.0`부터 있다 |
+| M10 DoD 1 | 클린 네 플랫폼 설치와 기능 스모크 | `docs/campaigns/m10-clean-vm.md` 회차 표 | Linux 회차와 macOS arm64 회차(6·7, `v0.5.8`)는 PASS, macOS x86_64 회차(실제 Intel Mac)가 남았다 |
+| M10 DoD 2 | Gatekeeper가 notarized 바이너리를 차단하지 않음 | 같은 문서 | 서명·공증 태그는 `v0.4.0`부터 있다. arm64는 회차 6(`v0.5.8`)에서 PASS, x86_64 회차가 남았다 |
 | M10 DoD 3 | musl static 바이너리가 구형 glibc 배포판에서 실행 | 같은 문서 | 근거 회차는 있고 캠페인 §9 판정과 함께 닫힌다 |
 | M7 DoD 1 | SC1 스톱워치 baseline 3회 | `docs/campaigns/m7-stopwatch.md` | 예행 1회만 끝났다 |
 | M8 DoD 3 | 실기기 mobility ≥60회 | `docs/campaigns/m2-mobility.md` | M18의 착수 조건 |
