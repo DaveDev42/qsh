@@ -1675,8 +1675,12 @@ fn invalid_pin_grants_make_trust_toml_a_config_error() {
         "grants = [\"forward.socks\"]",
         "grants = [\"nope\"]",
         "grants = [\"file.read\"]",
-        "grants = [\"exec.run\"]\npaths = [\"/srv\"]",
-        "paths = [\"/srv\"]",
+        concat!(
+            "grants = [\"exec.run\"]\npaths = [\"",
+            abs_path!("/srv"),
+            "\"]"
+        ),
+        concat!("paths = [\"", abs_path!("/srv"), "\"]"),
         "scope = \"any\"",
         "grants = [\"file.read\"]\npaths = [\"relative\"]",
         "grants = [\"exec.run\"]\nscope = \"everyone\"",
@@ -1692,7 +1696,11 @@ fn invalid_pin_grants_make_trust_toml_a_config_error() {
             "phone",
             b"phone",
             None,
-            "grants = [\"forward.*\", \"file.read\"]\npaths = [\"/srv\"]\nscope = \"any\"",
+            concat!(
+                "grants = [\"forward.*\", \"file.read\"]\npaths = [\"",
+                abs_path!("/srv"),
+                "\"]\nscope = \"any\""
+            ),
         ),
     )
     .unwrap();

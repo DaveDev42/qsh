@@ -697,7 +697,7 @@ proptest! {
             .and_then(|(actions, scope_any)| {
                 let names: Vec<String> = actions.iter().map(|a| a.as_str().to_string()).collect();
                 let has_file = actions.iter().any(|a| matches!(a, Action::FileRead | Action::FileWrite));
-                let paths = vec!["/srv/share".to_string()];
+                let paths = vec![abs_path!("/srv/share").to_string()];
                 PinGrants::parse(
                     Some(&names),
                     has_file.then_some(paths.as_slice()),
@@ -1273,7 +1273,7 @@ mod file_paths {
     fn pin_file_grant_needs_a_covering_path() {
         let policy = Policy::default();
         let device = Principal::Device("laptop".into());
-        let standing = pin_grants(&["file.read"], &["/srv/share"], None);
+        let standing = pin_grants(&["file.read"], &[abs_path!("/srv/share")], None);
         let decide = |path: Option<&str>, action: Action, auth_path: AuthPath| {
             let path = path.map(PathBuf::from);
             let resource = match &path {
@@ -1282,19 +1282,54 @@ mod file_paths {
             };
             policy.decide_standing(&device, auth_path, &standing, action, resource)
         };
-        let inside = decide(Some("/srv/share/a.txt"), Action::FileRead, AuthPath::Pin);
+        let inside = decide(
+            Some(abs_path!("/srv/share/a.txt")),
+            Action::FileRead,
+            AuthPath::Pin,
+        );
         assert!(inside.is_allow());
         assert_eq!(inside.granted_by(), Some(GrantBasis::PinGrant));
-        assert!(decide(Some("/srv/share"), Action::FileRead, AuthPath::Pin).is_allow());
-        assert!(!decide(Some("/srv/shared/a.txt"), Action::FileRead, AuthPath::Pin).is_allow());
-        assert!(!decide(Some("/etc/passwd"), Action::FileRead, AuthPath::Pin).is_allow());
+        assert!(
+            decide(
+                Some(abs_path!("/srv/share")),
+                Action::FileRead,
+                AuthPath::Pin
+            )
+            .is_allow()
+        );
+        assert!(
+            !decide(
+                Some(abs_path!("/srv/shared/a.txt")),
+                Action::FileRead,
+                AuthPath::Pin
+            )
+            .is_allow()
+        );
+        assert!(
+            !decide(
+                Some(abs_path!("/etc/passwd")),
+                Action::FileRead,
+                AuthPath::Pin
+            )
+            .is_allow()
+        );
         assert!(!decide(None, Action::FileRead, AuthPath::Pin).is_allow());
         assert!(
-            !decide(Some("/srv/share/a.txt"), Action::FileWrite, AuthPath::Pin).is_allow(),
+            !decide(
+                Some(abs_path!("/srv/share/a.txt")),
+                Action::FileWrite,
+                AuthPath::Pin
+            )
+            .is_allow(),
             "only the granted action"
         );
         assert!(
-            !decide(Some("/srv/share/a.txt"), Action::FileRead, AuthPath::Ca).is_allow(),
+            !decide(
+                Some(abs_path!("/srv/share/a.txt")),
+                Action::FileRead,
+                AuthPath::Ca
+            )
+            .is_allow(),
             "a CA-authenticated peer never reaches a pin's grants"
         );
         // The ground check the host asks before it normalizes a path.
