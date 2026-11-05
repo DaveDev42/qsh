@@ -38,7 +38,11 @@ QSH는 이를 해결하는 작은 원격 세션 primitive를 제공한다.
 
 ### Direct first
 
-두 endpoint 사이에 IP 경로가 있으면 제3자 서비스 없이 작동한다. NAT traversal과 relay는 코어에 포함하지 않는다.
+두 endpoint 사이에 IP 경로가 있거나, 둘 다 닿는 사용자의 qsh peer를 중개자로 써서 홀펀칭으로 경로를 열 수 있으면 제3자 서비스 없이 작동한다. 홀펀칭은 연결을 시작할 때 한 번 시도하고 실패하면 포기한다. relay는 코어에 포함하지 않는다(§14, ADR-0050).
+
+### Configuration-free, interactive, SSH-compatible
+
+흔한 경로는 설정 파일을 손으로 열지 않고 끝난다. 설정 파일은 qsh가 쓰는 저장소이고, 새 설정 키에는 같은 값을 정하는 CLI 경로가 함께 있다. TTY에서는 qsh가 빠진 것을 물어보고 답을 저장하며, 묻는 것마다 같은 답을 주는 플래그가 있다. `--json`/`--jsonl`이나 TTY가 아닐 때는 묻지 않는다. `alias ssh=qsh`를 걸어도 흔한 `ssh` 쓰임새(`[user@]host [command...]`, 흔한 옵션, 종료 상태, escape, `~/.ssh/config`의 `Host` 별칭)가 같은 뜻으로 동작한다(ADR-0050 결정 2).
 
 ### Provider agnostic
 
@@ -179,12 +183,15 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 
 처음 P1에 있었으나 철회한 항목: UDP가 차단된 환경을 위한 TCP/TLS fallback. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다(ADR-0043, 2026-10-11).
 
-### P2 — 선택 기능
+### P2 — SSH 주요 기능, 홀펀칭, mosh 수준 사용성 (ADR-0050)
 
-- 안전한 local echo prediction
-- read-only multi-attach
-- jump chaining
+- 설정 없는 첫 접속(mosh식 SSH 부트스트랩, 필요할 때 뜨는 serve)과 SSH 명령 호환
+- 화면 상태 동기화(대화형 form의 재부착과 느린 링크)
+- 안전한 local echo prediction과 연결 상태 줄
+- 연결 시작 때 한 번의 홀펀칭(실패하면 포기)
 - agent forwarding
+- jump chaining
+- 후보: read-only multi-attach, sftp 하위 시스템 호환. X11 forwarding은 넣지 않는다
 
 mobile client SDK는 P2에서 뺐다(2026-10-12 사용자 결정). 모바일은 Rust client cross-compile로 충분하다.
 
@@ -329,7 +336,7 @@ QSH 밖에서 해결하는 것:
 - hostname과 IP reachability
 - VPN과 사설 overlay network
 - DNS와 service discovery
-- NAT traversal
+- 홀펀칭으로 열리지 않는 NAT(양쪽 모두 목적지마다 매핑이 바뀌는 NAT 등)의 통과
 - 조직 계정과 중앙 관리
 
 QSH는 `qsh user@host`에 주어진 주소로 연결할 뿐이다.
