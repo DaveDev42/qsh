@@ -9,13 +9,14 @@ use schemars::{Schema, schema_for};
 
 use crate::types::{
     AclCheckData, AclShowData, AuditQueryData, CapabilitiesData, CertInitData, CertIssueData,
-    CliEnvelope, DoctorData, DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData,
-    IdentityExportData, IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData,
-    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
-    SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
-    SetupRunData, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData,
-    TrustRemoveData, TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData,
-    TunnelListData, TunnelOpenData, VersionData,
+    CliEnvelope, ConfigGetData, ConfigListData, ConfigSetData, ConfigUnsetData, DoctorData,
+    DynamicTunnel, ExecRunData, FileCopyData, Host, HostListData, IdentityExportData,
+    IdentityInitData, IdentityMoveKeyData, PairSshData, SchemaData, ServiceInstallData,
+    ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionListData,
+    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, SetupRunData,
+    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData,
+    TrustRenameData, TrustSetRoleData, TrustSshPreviewData, TunnelCloseData, TunnelListData,
+    TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -30,6 +31,10 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "capabilities.get",
     "cert.init",
     "cert.issue",
+    "config.get",
+    "config.list",
+    "config.set",
+    "config.unset",
     "doctor.run",
     "exec.run",
     "file.copy",
@@ -85,6 +90,10 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "capabilities.get" => schema_for!(CapabilitiesData),
         "cert.init" => schema_for!(CertInitData),
         "cert.issue" => schema_for!(CertIssueData),
+        "config.get" => schema_for!(ConfigGetData),
+        "config.list" => schema_for!(ConfigListData),
+        "config.set" => schema_for!(ConfigSetData),
+        "config.unset" => schema_for!(ConfigUnsetData),
         "doctor.run" => schema_for!(DoctorData),
         "exec.run" => schema_for!(ExecRunData),
         "file.copy" => schema_for!(FileCopyData),

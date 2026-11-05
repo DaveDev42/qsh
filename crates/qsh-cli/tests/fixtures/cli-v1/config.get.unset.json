@@ -1,0 +1,11 @@
+{
+  "command": "config.get",
+  "data": {
+    "applies_from": "next_start",
+    "key": "serve.bind",
+    "set": false
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

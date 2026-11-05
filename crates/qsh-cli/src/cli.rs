@@ -271,6 +271,11 @@ pub enum Command {
     #[command(subcommand)]
     Pair(PairCmd),
 
+    /// Read and edit this machine's `config.toml` by dotted key
+    /// (`docs/CLI.md` §6.23, ADR-0051 decision 10).
+    #[command(subcommand)]
+    Config(ConfigCmd),
+
     /// Manage the private CA (`docs/adr/0008-private-ca-cert-issuance.md`).
     #[command(subcommand)]
     Cert(CertCmd),
@@ -812,6 +817,40 @@ fn parse_env_var(value: &str) -> Result<EnvVar, String> {
         }
         _ => Err(format!("expected NAME=VALUE, got {value:?}")),
     }
+}
+
+/// `qsh config …` subcommands (`docs/CLI.md` §6.23, ADR-0051 decision 10).
+/// All four are local-only: they read or edit this machine's `config.toml`
+/// and never dial. A key is `<section>.<key>`, for example `serve.bind`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCmd {
+    /// Print the value of one key. An unset key prints `(unset)` and exits
+    /// 0; an unknown key is a usage error (`INVALID_ARGUMENT`).
+    Get {
+        /// Dotted key path, e.g. `transport.keep_alive_ms`.
+        key: String,
+    },
+    /// Write one key. The edited file must pass the same validation the
+    /// daemons apply at startup, or nothing is written. Comments and key
+    /// order in `config.toml` are kept.
+    Set {
+        /// Dotted key path, e.g. `serve.bind`.
+        key: String,
+        /// The new value. A string key keeps it verbatim, an integer key
+        /// takes decimal digits, a boolean key takes `true` or `false`.
+        value: String,
+    },
+    /// Remove one key so its built-in default applies again.
+    Unset {
+        /// Dotted key path.
+        key: String,
+    },
+    /// List the keys `config.toml` sets.
+    List {
+        /// Also list the known keys that are not set.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// `qsh cert …` subcommands (`docs/adr/0008-private-ca-cert-issuance.md`).

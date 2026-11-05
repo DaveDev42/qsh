@@ -1,0 +1,12 @@
+{
+  "command": "config.set",
+  "data": {
+    "applies_from": "next_start",
+    "changed": true,
+    "key": "transport.keep_alive_ms",
+    "value": 10000
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

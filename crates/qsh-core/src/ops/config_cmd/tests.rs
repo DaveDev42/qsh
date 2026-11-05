@@ -1,0 +1,494 @@
+use std::collections::BTreeSet;
+
+use qsh_proto::{ConfigGetReq, ConfigListReq, ConfigSetReq, ConfigUnsetReq};
+
+use super::*;
+use crate::config::{
+    AuditConfig, IdentityConfig, ListenConfig, RecoverySection, ReverseConfig, ServeConfig,
+    SshBootstrapMode, SshConfig, TransportConfig,
+};
+use crate::config_edit::{KEYS, KeyType};
+use crate::ops::test_support::temp_ops;
+
+fn set(ops: &Ops, key: &str, value: &str) -> Result<qsh_proto::ConfigSetData, OpError> {
+    ops.config_set(ConfigSetReq {
+        key: key.into(),
+        value: value.into(),
+    })
+}
+
+fn write_config(ops: &Ops, text: &str) {
+    let path = ops.paths.config_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn read_config(ops: &Ops) -> String {
+    std::fs::read_to_string(ops.paths.config_file()).unwrap()
+}
+
+const COMMENTED: &str = "\
+# my qsh config
+[serve]
+# where to listen
+bind = \"[::]:4433\" # default port
+max_sessions = 10
+
+[transport]
+keep_alive_ms = 15000
+
+# trailing note
+";
+
+#[test]
+fn set_keeps_comments_and_order() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+
+    let data = set(&ops, "serve.bind", "[::]:60001").unwrap();
+    assert!(data.changed);
+    assert_eq!(data.previous, Some("[::]:4433".into()));
+    assert_eq!(data.applies_from.as_deref(), Some("next_start"));
+    set(&ops, "ssh.program", "/usr/bin/ssh").unwrap();
+    set(&ops, "serve.close_grace_ms", "2000").unwrap();
+
+    let text = read_config(&ops);
+    assert!(
+        text.starts_with("# my qsh config\n[serve]\n# where to listen\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("bind = \"[::]:60001\" # default port\n"),
+        "{text}"
+    );
+    assert!(text.contains("# trailing note"), "{text}");
+    let order: Vec<usize> = [
+        "bind =",
+        "max_sessions =",
+        "close_grace_ms =",
+        "[transport]",
+        "[ssh]",
+    ]
+    .iter()
+    .map(|needle| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {text}"))
+    })
+    .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
+    let config = Config::load(&ops.paths).unwrap();
+    assert_eq!(config.serve.bind.as_deref(), Some("[::]:60001"));
+    assert_eq!(config.serve.max_sessions, Some(10));
+}
+
+#[test]
+fn setting_the_same_value_writes_nothing() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+    let before = std::fs::metadata(ops.paths.config_file())
+        .unwrap()
+        .modified()
+        .unwrap();
+    let data = set(&ops, "serve.max_sessions", "10").unwrap();
+    assert!(!data.changed);
+    assert_eq!(data.applies_from, None);
+    assert_eq!(read_config(&ops), COMMENTED);
+    assert_eq!(
+        std::fs::metadata(ops.paths.config_file())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn invalid_values_are_rejected_and_the_file_is_unchanged() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+    let cases = [
+        ("transport.keep_alive_ms", "50", ErrorCode::ConfigError),
+        ("transport.keep_alive_ms", "99999", ErrorCode::ConfigError),
+        ("recovery.strikes", "1", ErrorCode::ConfigError),
+        ("recovery.probe_interval_ms", "900", ErrorCode::ConfigError),
+        ("listen.stale_retention", "10", ErrorCode::ConfigError),
+        ("ssh.program", "  ", ErrorCode::ConfigError),
+        (
+            "transport.keep_alive_ms",
+            "soon",
+            ErrorCode::InvalidArgument,
+        ),
+        ("transport.keep_alive_ms", "-5", ErrorCode::InvalidArgument),
+        (
+            "listen.allow_advertised_names",
+            "yes",
+            ErrorCode::InvalidArgument,
+        ),
+        ("ssh.bootstrap", "sometimes", ErrorCode::InvalidArgument),
+        ("identity.key_store", "vault", ErrorCode::InvalidArgument),
+        (
+            "reverse.backoff_jitter_pct",
+            "300",
+            ErrorCode::InvalidArgument,
+        ),
+    ];
+    for (key, value, code) in cases {
+        let err = set(&ops, key, value).unwrap_err();
+        assert_eq!(err.code, code, "{key}={value}: {}", err.message);
+        assert!(!err.retryable, "{key}={value}");
+        assert_eq!(
+            read_config(&ops),
+            COMMENTED,
+            "{key}={value} changed the file"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_set_does_not_create_the_file() {
+    let (_g, ops) = temp_ops();
+    set(&ops, "transport.keep_alive_ms", "5").unwrap_err();
+    assert!(!ops.paths.config_file().exists());
+}
+
+#[test]
+fn unknown_keys_are_rejected_everywhere() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+    for key in [
+        "serve.bnid",
+        "serve",
+        "bind",
+        "nosuch.key",
+        "serve.bind.x",
+        "Serve.bind",
+    ] {
+        assert_eq!(
+            set(&ops, key, "1").unwrap_err().code,
+            ErrorCode::InvalidArgument,
+            "{key}"
+        );
+        assert_eq!(
+            ops.config_get(ConfigGetReq { key: key.into() })
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument,
+            "{key}"
+        );
+        assert_eq!(
+            ops.config_unset(ConfigUnsetReq { key: key.into() })
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument,
+            "{key}"
+        );
+    }
+    assert_eq!(read_config(&ops), COMMENTED);
+}
+
+#[test]
+fn get_list_and_unset() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+
+    let got = ops
+        .config_get(ConfigGetReq {
+            key: "serve.max_sessions".into(),
+        })
+        .unwrap();
+    assert!(got.set);
+    assert_eq!(got.value, Some(10.into()));
+    let unset = ops
+        .config_get(ConfigGetReq {
+            key: "serve.max_exec".into(),
+        })
+        .unwrap();
+    assert!(!unset.set);
+    assert_eq!(unset.value, None);
+    let ssh = ops
+        .config_get(ConfigGetReq {
+            key: "ssh.program".into(),
+        })
+        .unwrap();
+    assert_eq!(ssh.applies_from, None, "ssh.* is read per command");
+
+    let listed = ops.config_list(ConfigListReq::default()).unwrap();
+    let keys: Vec<_> = listed.entries.iter().map(|e| e.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "serve.bind",
+            "serve.max_sessions",
+            "transport.keep_alive_ms"
+        ]
+    );
+    let all = ops.config_list(ConfigListReq { all: true }).unwrap();
+    assert_eq!(all.entries.len(), KEYS.len());
+
+    let removed = ops
+        .config_unset(ConfigUnsetReq {
+            key: "transport.keep_alive_ms".into(),
+        })
+        .unwrap();
+    assert!(removed.changed);
+    assert_eq!(removed.previous, Some(15000.into()));
+    assert_eq!(removed.applies_from.as_deref(), Some("next_start"));
+    let text = read_config(&ops);
+    assert!(
+        !text.contains("keep_alive_ms") && !text.contains("[transport]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("# trailing note") && text.contains("# default port"),
+        "{text}"
+    );
+
+    let again = ops
+        .config_unset(ConfigUnsetReq {
+            key: "transport.keep_alive_ms".into(),
+        })
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(again.previous, None);
+}
+
+#[test]
+fn unset_can_repair_an_invalid_file_but_set_cannot_hide_it() {
+    let (_g, ops) = temp_ops();
+    write_config(
+        &ops,
+        "[transport]\nkeep_alive_ms = 5\n[serve]\nmax_sessions = 3\n",
+    );
+    // The file already violates the range; setting another key keeps it invalid.
+    assert_eq!(
+        set(&ops, "serve.max_sessions", "4").unwrap_err().code,
+        ErrorCode::ConfigError
+    );
+    // Removing the offending key makes the result valid.
+    ops.config_unset(ConfigUnsetReq {
+        key: "transport.keep_alive_ms".into(),
+    })
+    .unwrap();
+    Config::load(&ops.paths).unwrap().validate().unwrap();
+}
+
+#[test]
+fn an_unparseable_file_is_a_config_error_and_stays_put() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, "[serve\nbind = ");
+    assert_eq!(
+        set(&ops, "serve.bind", "x").unwrap_err().code,
+        ErrorCode::ConfigError
+    );
+    assert_eq!(
+        ops.config_get(ConfigGetReq {
+            key: "serve.bind".into()
+        })
+        .unwrap_err()
+        .code,
+        ErrorCode::ConfigError
+    );
+    assert_eq!(read_config(&ops), "[serve\nbind = ");
+}
+
+#[test]
+fn the_legacy_alias_is_read_and_replaced() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, "[serve]\nresume_ttl_secs = 60\n");
+    let got = ops
+        .config_get(ConfigGetReq {
+            key: "serve.resume_ttl".into(),
+        })
+        .unwrap();
+    assert_eq!(got.value, Some(60.into()));
+    let data = set(&ops, "serve.resume_ttl", "120").unwrap();
+    assert_eq!(data.previous, Some(60.into()));
+    let text = read_config(&ops);
+    assert!(
+        text.contains("resume_ttl = 120") && !text.contains("resume_ttl_secs"),
+        "{text}"
+    );
+}
+
+#[test]
+fn concurrent_writers_serialize() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+    let paths = ops.paths.clone();
+    let keys: Vec<&str> = KEYS
+        .iter()
+        .filter(|k| k.section == "serve" && k.ty == KeyType::Int)
+        .map(|k| k.key)
+        .collect();
+    assert!(keys.len() >= 12);
+    std::thread::scope(|scope| {
+        for (n, key) in keys.iter().enumerate() {
+            let paths = paths.clone();
+            scope.spawn(move || {
+                let ops = Ops::new(paths);
+                set(&ops, &format!("serve.{key}"), &(100 + n).to_string()).unwrap();
+            });
+        }
+    });
+    let text = read_config(&ops);
+    for (n, key) in keys.iter().enumerate() {
+        let expected = format!("{key} = {}", 100 + n);
+        // `max_sessions` started as 10 and is rewritten like the rest.
+        assert!(text.contains(&expected), "lost write {expected}:\n{text}");
+    }
+    assert!(
+        text.contains("# my qsh config") && text.contains("# trailing note"),
+        "{text}"
+    );
+}
+
+fn leaf_paths(prefix: &str, value: &toml::Value, out: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (name, inner) in table {
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}.{name}")
+                };
+                leaf_paths(&path, inner, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string());
+        }
+    }
+}
+
+/// A `Config` with every field spelled out. The literals deliberately omit
+/// `..Default::default()`: a new `Config` field stops this test compiling
+/// until it is added here and, through the assertion below, to
+/// [`KEYS`], so `qsh config set` can write it (ADR-0051 결정 10).
+fn every_field_populated() -> Config {
+    Config {
+        serve: ServeConfig {
+            bind: Some(String::new()),
+            to: Some(String::new()),
+            replay_bytes: Some(1),
+            resume_ttl: Some(1),
+            close_grace_ms: Some(1),
+            max_concurrent_handshakes: Some(1),
+            handshake_rate_per_source: Some(1),
+            max_sessions: Some(1),
+            max_sessions_per_principal: Some(1),
+            max_exec_per_principal: Some(1),
+            validated_rate_per_source: Some(1),
+            max_exec: Some(1),
+            max_tunnel_streams_per_principal: Some(1),
+            max_tunnel_streams_per_forward: Some(1),
+            max_remote_forwards_per_principal: Some(1),
+            max_connections_per_principal: Some(1),
+            max_connections: Some(1),
+            max_file_transfers_per_principal: Some(1),
+            max_file_transfers: Some(1),
+        },
+        identity: IdentityConfig {
+            key_store: Some(qsh_proto::KeyStoreMode::Auto),
+        },
+        listen: ListenConfig {
+            bind: Some(String::new()),
+            allow_advertised_names: true,
+            stale_retention: Some(1),
+        },
+        reverse: ReverseConfig {
+            controller: Some(String::new()),
+            offered_name: Some(String::new()),
+            backoff_initial_ms: Some(1),
+            backoff_max_ms: Some(1),
+            backoff_jitter_pct: Some(1),
+        },
+        audit: AuditConfig {
+            path: Some(String::new()),
+            max_bytes: Some(1),
+            retain: Some(1),
+            queue_depth: Some(1),
+        },
+        transport: TransportConfig {
+            keep_alive_ms: Some(1),
+        },
+        recovery: RecoverySection {
+            probe_interval_ms: Some(1),
+            min_dead_after_ms: Some(1),
+            strikes: Some(1),
+            reverse_min_dead_after_ms: Some(1),
+            reverse_strikes: Some(1),
+        },
+        ssh: SshConfig {
+            bootstrap: Some(SshBootstrapMode::Auto),
+            program: Some(String::new()),
+            remote_qsh: Some(String::new()),
+        },
+    }
+}
+
+/// A value that is valid for `path` together with every other sample.
+fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
+    match path {
+        "transport.keep_alive_ms" => "15000".into(),
+        "recovery.probe_interval_ms" => "250".into(),
+        "recovery.min_dead_after_ms" => "1000".into(),
+        "recovery.strikes" => "3".into(),
+        "recovery.reverse_min_dead_after_ms" => "4250".into(),
+        "recovery.reverse_strikes" => "3".into(),
+        "listen.stale_retention" => "300".into(),
+        "reverse.backoff_initial_ms" => "500".into(),
+        "reverse.backoff_max_ms" => "30000".into(),
+        "reverse.backoff_jitter_pct" => "20".into(),
+        _ => match key.ty {
+            KeyType::Str if !key.choices.is_empty() => key.choices[0].into(),
+            KeyType::Str => "value".into(),
+            KeyType::Int => "100".into(),
+            KeyType::Bool => "true".into(),
+        },
+    }
+}
+
+#[test]
+fn every_config_key_is_settable() {
+    // Config -> registry: the fields `Config` has are exactly the keys the
+    // registry lists.
+    let full = toml::Value::try_from(every_field_populated()).unwrap();
+    let mut config_keys = BTreeSet::new();
+    leaf_paths("", &full, &mut config_keys);
+    let registry: BTreeSet<String> = KEYS.iter().map(|k| k.path()).collect();
+    assert_eq!(
+        config_keys, registry,
+        "a `Config` field has no `config_edit::KEYS` row (or the reverse): every key must be \
+         settable with `qsh config set`"
+    );
+
+    // Registry -> Config: every row sets through the op and lands in the
+    // field of the same name.
+    let (_g, ops) = temp_ops();
+    for key in KEYS {
+        let path = key.path();
+        let data = set(&ops, &path, &sample(&path, key))
+            .unwrap_or_else(|err| panic!("{path}: {}", err.message));
+        assert!(data.changed, "{path}");
+        assert_eq!(data.applies_from.is_some(), key.startup_only, "{path}");
+    }
+    let loaded = Config::load(&ops.paths).unwrap();
+    loaded.validate().unwrap();
+    let mut loaded_keys = BTreeSet::new();
+    leaf_paths(
+        "",
+        &toml::Value::try_from(loaded).unwrap(),
+        &mut loaded_keys,
+    );
+    assert_eq!(loaded_keys, registry);
+    let listed = ops.config_list(ConfigListReq::default()).unwrap();
+    assert_eq!(listed.entries.len(), KEYS.len());
+    assert!(listed.entries.iter().all(|e| e.set));
+
+    // And every row unsets again.
+    for key in KEYS {
+        ops.config_unset(ConfigUnsetReq { key: key.path() })
+            .unwrap();
+    }
+    assert_eq!(Config::load(&ops.paths).unwrap(), Config::default());
+}

@@ -48,32 +48,32 @@ use std::time::SystemTime;
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, AclShowOp, AuditQueryOp, CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp,
-    Config, DoctorOp, ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp,
-    IdentityInitOp, IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops, PairSshEnv,
-    PairSshOp, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
-    SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
-    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
-    read_cert_file_arg, resolve_invite_code_source,
+    Config, ConfigGetOp, ConfigListOp, ConfigSetOp, ConfigUnsetOp, DoctorOp, ExecRunOp, ExecStdin,
+    FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp,
+    InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp, ServiceInstallOp,
+    ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp, SessionFilter,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
+    SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
+    TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
+    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
+    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
-    AclCheckReq, AclShowReq, AuditQueryReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq,
-    ErrorCode, ExecRunReq, FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq,
-    IdentityMoveKeyReq, PairSshReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
-    SessionReadReq, SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus,
-    SetupStepId, TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq,
-    TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq,
-    TunnelOpenReq,
+    AclCheckReq, AclShowReq, AuditQueryReq, CapabilitiesReq, CertInitReq, CertIssueReq,
+    ConfigGetReq, ConfigListReq, ConfigSetReq, ConfigUnsetReq, DoctorReq, ErrorCode, ExecRunReq,
+    FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq, IdentityMoveKeyReq, PairSshReq,
+    SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
+    SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
+    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
+    TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    AclCmd, AttachArgs, CertCmd, Cli, Command, CpArgs, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs,
-    HostCmd, IdentityCmd, InternalCmd, PairCmd, PairSshArgs, ServiceCmd, SessionCmd,
+    AclCmd, AttachArgs, CertCmd, Cli, Command, ConfigCmd, CpArgs, DEFAULT_ESCAPE_CHAR, EscapeChar,
+    ExecArgs, HostCmd, IdentityCmd, InternalCmd, PairCmd, PairSshArgs, ServiceCmd, SessionCmd,
     SessionReadArgs, SessionWriteArgs, SetupCmd, TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd,
     TunnelOpenArgs,
 };
@@ -530,6 +530,33 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             TrustSshPreviewOp::COMMAND,
             ops.trust_ssh_preview(TrustSshPreviewReq { path: path.clone() }),
             human::print_trust_ssh_preview,
+        ),
+        Command::Config(ConfigCmd::Get { key }) => finish(
+            cli,
+            ConfigGetOp::COMMAND,
+            ops.config_get(ConfigGetReq { key: key.clone() }),
+            human::print_config_get,
+        ),
+        Command::Config(ConfigCmd::Set { key, value }) => finish(
+            cli,
+            ConfigSetOp::COMMAND,
+            ops.config_set(ConfigSetReq {
+                key: key.clone(),
+                value: value.clone(),
+            }),
+            human::print_config_set,
+        ),
+        Command::Config(ConfigCmd::Unset { key }) => finish(
+            cli,
+            ConfigUnsetOp::COMMAND,
+            ops.config_unset(ConfigUnsetReq { key: key.clone() }),
+            human::print_config_unset,
+        ),
+        Command::Config(ConfigCmd::List { all }) => finish(
+            cli,
+            ConfigListOp::COMMAND,
+            ops.config_list(ConfigListReq { all: *all }),
+            human::print_config_list,
         ),
         Command::Cert(CertCmd::Init) => finish(
             cli,
@@ -2660,6 +2687,10 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Pair(PairCmd::Ssh(_)) => PairSshOp::COMMAND,
         Command::Pair(PairCmd::SshRespond) => SSH_RESPOND_MODE,
+        Command::Config(ConfigCmd::Get { .. }) => ConfigGetOp::COMMAND,
+        Command::Config(ConfigCmd::Set { .. }) => ConfigSetOp::COMMAND,
+        Command::Config(ConfigCmd::Unset { .. }) => ConfigUnsetOp::COMMAND,
+        Command::Config(ConfigCmd::List { .. }) => ConfigListOp::COMMAND,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
         Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,
         Command::Setup { .. } => SetupRunOp::COMMAND,

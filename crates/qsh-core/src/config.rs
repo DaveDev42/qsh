@@ -1458,6 +1458,19 @@ impl Config {
         self.listen.stale_retention(backoff.max)
     }
 
+    /// Every semantic check the startup paths apply on top of parsing:
+    /// [`Self::liveness`] (`[transport]`, `[recovery]`), [`Self::stale_retention`]
+    /// (`[listen]` against `[reverse]`) and the non-blank `[ssh]` programs.
+    /// `qsh config set` runs it on the edited document before saving, so a
+    /// value a daemon would refuse at startup is refused at the command.
+    pub fn validate(&self) -> Result<(), OpError> {
+        self.liveness()?;
+        self.stale_retention()?;
+        self.ssh.program()?;
+        self.ssh.remote_qsh()?;
+        Ok(())
+    }
+
     /// Load `<config_dir>/config.toml`. A missing file is not an error —
     /// it yields [`Config::default`]. A malformed file is a hard
     /// `CONFIG_ERROR` (fail closed on ambiguous configuration).
