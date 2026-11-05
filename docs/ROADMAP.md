@@ -10,7 +10,7 @@
 
 ## P0 MVP 완료 선언의 조건
 
-M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 몫은 전부 착지했다. 남은 계약 편집 셋은 M8 DoD 4의 wire freeze 발효 소커밋에 묶여 있다. P0 MVP는 사람이 돌려야 닫히는 회차 일곱이 전부 PASS로 기록될 때 완료로 선언하고, 그 선언은 "현재 위치"와 이 절에 같이 적는다. 선언 전에는 "beta"나 그에 준하는 어휘를 쓰지 않는다. PRD §15가 공개 beta 전 독립 보안 리뷰를 요구하고 그것이 아래 일곱 중 하나다. 일곱이 다 닫히는 날 이 절 아래에 `**P0 MVP 완료 (날짜).**`로 시작하는 문단을 더해 각 캠페인 문서와 회차 번호를 적고 P0 범위(`docs/PRD.md` §7 P0 표)를 닫는다. P1은 이 선언과 독립적으로 진행한다(§5).
+M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 몫은 전부 착지했다. wire freeze는 2026-11-05 ADR-0049로 발효했다. P0 MVP는 사람이 돌려야 닫히는 회차 여섯이 전부 PASS로 기록될 때 완료로 선언하고, 그 선언은 "현재 위치"와 이 절에 같이 적는다. 선언 전에는 "beta"나 그에 준하는 어휘를 쓰지 않는다. 독립 보안 리뷰(SC7)는 ADR-0049로 마감 조건에서 빠졌다. 여섯이 다 닫히는 날 이 절 아래에 `**P0 MVP 완료 (날짜).**`로 시작하는 문단을 더해 각 캠페인 문서와 회차 번호를 적고 P0 범위(`docs/PRD.md` §7 P0 표)를 닫는다. P1은 이 선언과 독립적으로 진행한다(§5).
 
 | 열린 DoD | 내용 | 기록 자리 | 비고 |
 |---|---|---|---|
@@ -19,7 +19,6 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 | M10 DoD 3 | musl static 바이너리가 구형 glibc 배포판에서 실행 | 같은 문서 | 근거 회차는 있고 캠페인 §9 판정과 함께 닫힌다 |
 | M7 DoD 1 | SC1 스톱워치 baseline 3회 | `docs/campaigns/m7-stopwatch.md` | 예행 1회만 끝났다 |
 | M8 DoD 3 | 실기기 mobility ≥60회 | `docs/campaigns/m2-mobility.md` | M18의 착수 조건 |
-| M8 DoD 4 | wire freeze 발효와 독립 검증 계약(SC7) | 저장소 밖 조직 액션이라 캠페인 문서가 없다 | 소유: 운영자 |
 | M9 DoD 1 | SC1 재측정 3회 | `docs/campaigns/m9-stopwatch.md` | M7 DoD 1에 종속. `qsh setup` 캠페인의 비교 기준 |
 
 총 크기: P0는 약 31.5~32 engineer-weeks(1인 기준). P1은 약 41~67ew(추정, 2026-10-12·13 재기획 반영, M17 (d) 구현은 ADR-0033이 1.2~1.8ew로 산정)에, ADR이 서야 산정할 수 있는 M18의 보안 가산분이 더해진다. 내역은 §5.2.
@@ -99,10 +98,10 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 - **DoD:** 1 스톱워치 테스트(한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회. SC1·SC2). **열림, 위 표.** 2 doctor가 UDP 차단·경로 없음·비신뢰 peer·만료 cert·keystore 부재·clock skew를 안정된 JSON code로 진단(달성). 3 `qsh capabilities --json` == checked-in fixture(달성). 4 `trust remove` 후 기존 연결·신규 handshake 동작이 테스트로 고정되고 문서·doctor 고지와 일치(달성, `trust_lifecycle_live.rs`).
 - **크기:** 2.5ew
 
-### M8 — Hardening 🔄 진행 중 (DoD 1·2·5 완료 · DoD 3·4 열림)
+### M8 — Hardening 🔄 진행 중 (DoD 1·2·5 완료 · DoD 4 ADR-0049로 닫힘 · DoD 3 열림)
 
 - **범위:** cargo-fuzz 타깃과 corpus, stateful broker fuzzer, 24h soak, 누수 게이트, 실기기 mobility 캠페인, perf 게이트 재확인, threat model, wire format freeze, 외부 보안 리뷰 착수. 감사 개정 적대적 부하 게이트: ① `Incoming::retry()` 주소 검증, ② accept 동시성 상한과 source rate limit, ③ `[serve].max_sessions`와 principal별 세션 쿼터, 터널 전용 할당량(초과는 `RESOURCE_EXHAUSTED`. `docs/design/protocol.md` §7의 무상한 갭 인수), ④ audit 수명주기의 부하 하 검증. 그 외 handshake matrix에 ALPN 불일치 케이스, 개인키 `Zeroizing`, TUI 펌프 스레드 panic 제거.
-- **DoD:** 1 parser 타깃당 누적 ≥72 fuzz-hours 무crash(달성, `docs/campaigns/m8-fuzz.md`). 2 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가(달성, `docs/campaigns/m8-soak.md` run #6 PASS). 3 실기기 Wi-Fi↔테더링 ≥60회(macOS+Linux)에서 자동 유지+resume ≥95%, migrated/resumed 분해 보고(SC3. 통과 기준은 idle timeout에 기대지 않는 2초 내 재dial). **열림, 위 표.** 4 프로토콜 스펙 freeze 후 독립 리뷰 계약(SC7. 리드타임이 있어 wire freeze ~6주 전 예약). **열림, 위 표.** 5 적대적 부하 하네스: 스푸핑 Initial flood, 대량 연결, principal당 세션 폭주에서 선언된 상한이 강제되고 idle RSS/fd가 soak bound를 지키며 기존 세션의 echo가 산다(달성, `docs/campaigns/m8-adversarial-load.md`).
+- **DoD:** 1 parser 타깃당 누적 ≥72 fuzz-hours 무crash(달성, `docs/campaigns/m8-fuzz.md`). 2 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가(달성, `docs/campaigns/m8-soak.md` run #6 PASS). 3 실기기 Wi-Fi↔테더링 ≥60회(macOS+Linux)에서 자동 유지+resume ≥95%, migrated/resumed 분해 보고(SC3. 통과 기준은 idle timeout에 기대지 않는 2초 내 재dial). **열림, 위 표.** 4 프로토콜 스펙 freeze 후 독립 리뷰 계약(SC7). **닫힘(2026-11-05, ADR-0049):** 리뷰는 하지 않고 freeze만 발효했다(`docs/design/protocol.md` §16). 5 적대적 부하 하네스: 스푸핑 Initial flood, 대량 연결, principal당 세션 폭주에서 선언된 상한이 강제되고 idle RSS/fd가 soak bound를 지키며 기존 세션의 echo가 산다(달성, `docs/campaigns/m8-adversarial-load.md`).
 - **크기:** 3ew
 
 ### M9 — 사람용 표면 🔄 기능 완료 (2026-09-24) · DoD 1 잔여
@@ -168,7 +167,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 2. **PTY/터미널 정확성은 추정을 거부하는 long tail.** 대응: M2b를 명명된 수용 세트(bash/zsh+vim+tmux+claude)로 timebox, "terminal quirks" 백로그를 마일스톤 밖에 유지, expect 하네스를 초기에 구축.
 3. **Identity·keystore·pairing이 SC1(간판 숫자)의 critical path.** headless Linux에 Secret Service가 없어 file fallback과 doctor 보고가 필요하고, macOS 미서명 바이너리의 Keychain 재프롬프트가 dev loop을 괴롭힌다. 대응: keystore fallback을 M1의 명명된 task로, 스톱워치 테스트를 M7 한 번이 아니라 조기·반복 실행.
 4. **In-listener 세션과 listener 재시작/업그레이드의 충돌은 구조적.** 대응: ADR-0003의 `SessionBackend` seam을 순수하게 유지하고 graceful re-exec 비용을 산정했다(`docs/design/reexec-estimate.md`, H0~H5). H1·H1b는 M13에서 착지했고 H2·H4·H5와 세션 거처 결정은 M18이 가진다.
-5. **SC7 보안 리뷰와 notarization은 리드타임 함정.** 대응: 리뷰는 M5 시점에 예약하고 wire format을 리뷰 ~6주 전에 freeze한다. notarization은 M10에서 마쳤다(`v0.4.0`부터). 리뷰 예약은 M8 DoD 4로 아직 열려 있다.
+5. **SC7 보안 리뷰와 notarization은 리드타임 함정.** 대응: 리뷰는 M5 시점에 예약하고 wire format을 리뷰 ~6주 전에 freeze한다. notarization은 M10에서 마쳤다(`v0.4.0`부터). 리뷰는 ADR-0049(2026-11-05)로 하지 않기로 했고 freeze는 그날 발효했다.
 
 ## 5. P1 마일스톤
 
@@ -381,7 +380,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 ### 5.4 P1 일정 리스크
 
 1. **사용자 승인.** 착수 ADR 여섯(0029, 0031~0033, 0035, 0044, 0045)은 2026-10-14 모두 승인됐다. 남은 것은 조건부 하나(0034, M18)다. 대응: 마일스톤마다 ADR 초안을 첫 스텝으로 두고, 승인을 기다리는 동안 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
-2. **SC7 범위가 P1 표면만큼 넓어진다.** M8 DoD 4의 독립 검증 계약이 아직 없는데 P1은 wire 필드(H2), 새 op(M15)를 더한다. 대응: freeze 발효 전에는 `docs/design/protocol.md` §16.1 목록을, 발효 뒤에는 §16.4 규칙을 같은 커밋에서 지키고, threat model 행을 각 마일스톤 DoD에 넣었다.
+2. **SC7 범위가 P1 표면만큼 넓어진다.** 독립 리뷰는 하지 않는다(ADR-0049). P1은 wire 필드(H2), 새 op(M15)를 더한다. 대응: freeze 발효 전에는 `docs/design/protocol.md` §16.1 목록을, 발효 뒤에는 §16.4 규칙을 같은 커밋에서 지키고, threat model 행을 각 마일스톤 DoD에 넣었다.
 3. (해소) TCP 경로의 PTY 우선순위. ADR-0043이 TCP fallback을 철회해 위험이 사라졌다. 번호는 인용 때문에 남긴다.
 4. **M18의 echo 회귀와 IPC 보안.** H5는 대화형 echo가 로컬 IPC를 한 번 더 지나고 resume token custody(ADR-0007)와 부딪힐 수 있다. 대응: ADR-0034가 세 후보를 같은 표로 비교하고, 기존 echo 예산을 고치지 않는 것과 소켓 권한 모델을 DoD로 둔다.
 5. **Windows 산정 신뢰도.** 비교 표본이 없다. 대응: M19(client)와 M20(host)으로 나누고, 각 첫 스텝(M19 콘솔 probe·게이트 제거, M20 ConPTY 시제품) 뒤 다시 매겨 이 절에 적는다. M20 ConPTY 시제품(`d538468`, 2026-10-18)은 overlapped named pipe 배치가 첫 시도에 서서 읽기 스레드 대체 비용이 들지 않았고, M20 크기 3.6~6.3ew를 그대로 둔다. 남은 불확실성은 Server 2022 러너의 `JOB_LIST`와 신호 사건 실측(ADR-0035 결정 22)이다.

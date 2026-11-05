@@ -39,11 +39,14 @@ pseudo-console, `qsh exec`, `qsh cp`, port forwards, reverse mode, the ssh
 bootstrap and `qsh setup host`. See [Known limitations](#known-limitations)
 for what differs.
 
-**Status.** Version 0.5.2, not for production use. The independent review of
-the protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
-has not been contracted, and the wire-format freeze waits on that decision.
-Several campaigns that a person runs by hand are also still open; see
-[Project status](#project-status).
+**Status.** Version 0.5.8, not for production use while several campaigns
+that a person runs by hand are still open; see
+[Project status](#project-status). There is no external security review: the
+protocol and key lifecycle are checked by the project's own threat model,
+fuzzing, soak and adversarial-load campaigns
+([ADR-0049](docs/adr/0049-skip-independent-security-review.md)). The wire
+format `qsh/1` has been frozen since 2026-11-05; changes follow
+[docs/design/protocol.md](docs/design/protocol.md) §16.
 
 ## Contents
 
@@ -938,6 +941,10 @@ covers (`docs/design/threat-model.md` §7, ADR-0035 decision 14).
 
 Some of these are MVP scope decisions, some are unfinished work.
 
+- No external security review. The protocol and key lifecycle were checked
+  only inside the project (threat model, fuzzing, soak, adversarial load), not
+  by an independent reviewer
+  ([ADR-0049](docs/adr/0049-skip-independent-security-review.md)).
 - No TCP fallback. QSH runs only over QUIC, which is UDP, so a network that
   blocks or drops UDP (some corporate and hotel networks) cannot connect.
   `qsh doctor` reports a blocked UDP egress. This is a scope decision, not
@@ -1303,7 +1310,7 @@ old-glibc check.
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done, then retired (ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
-| M8 | Hardening (fuzz, soak, mobility) | Code done; mobility campaign, wire freeze and security review open |
+| M8 | Hardening (fuzz, soak, mobility) | Code done; wire format frozen, external review dropped (ADR-0049); mobility campaign open |
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch re-measurement open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
 | M11 | Issue follow-ups and ACL visibility | Features done; field observation open |
