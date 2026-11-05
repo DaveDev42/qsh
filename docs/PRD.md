@@ -363,7 +363,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - Resume 가능한 단절에서 output loss가 없다.
 - Client crash가 remote PTY를 종료하지 않는다.
 - 모든 privileged operation이 ACL decision으로 추적 가능하다.
-- 공개 beta 전에 protocol과 key lifecycle의 독립 보안 review를 완료한다.
+- 공개 beta 전에 protocol과 key lifecycle을 threat model, fuzz, soak, 적대적 부하 캠페인으로 검토한다. 외부 독립 리뷰는 요구하지 않는다(ADR-0049).
 
 ## 16. 주요 위험
 

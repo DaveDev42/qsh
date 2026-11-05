@@ -4,7 +4,7 @@
 
 ## 0. 지위와 범위
 
-이 문서는 wire freeze 문면([protocol.md](protocol.md) §16)과 짝을 이루는 산출물이고, `docs/PRD.md` §15가 요구하는 "공개 beta 전 protocol과 key lifecycle의 독립 보안 review"(SC7)에 넘길 리뷰어 입력이다. 코드 인용은 파일 경로와 심볼·테스트 이름으로 적는다. 줄 번호는 리팩터에 밀리므로 쓰지 않는다.
+이 문서는 wire freeze 문면([protocol.md](protocol.md) §16)과 짝을 이루는 산출물이고, `docs/PRD.md` §15의 공개 beta 전 검토(SC7)가 기대는 기록이다. 외부 독립 리뷰는 ADR-0049로 하지 않기로 했다. 코드 인용은 파일 경로와 심볼·테스트 이름으로 적는다. 줄 번호는 리팩터에 밀리므로 쓰지 않는다.
 
 **이 문서가 canonical인 것은 §4의 위협 → 통제 → 근거 → 핀 테스트 대응표 하나다.** 통제 자체의 설계 근거는 여전히 ADR과 protocol.md·architecture.md에 있고, 어느 테스트가 어느 계층을 갚는지는 testing.md에 있다. 그 셋을 가로질러 "이 위협을 무엇이 막고, 그것이 깨지면 무슨 테스트가 빨개지는가"를 한 곳에 모은 표가 여기 말고는 없다.
 
@@ -367,6 +367,7 @@ g1~g5는 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지 않�
 | h45 | 사람이 깐 macOS LaunchDaemon 상시 형태의 `status --live`는 `launchctl print system/…` 종료 코드 하나로 답한다. root 없이 되는 것이 macOS 27.0.1에서 확인됐다(0 적재됨, 113 적재 안 됨). 그 밖의 종료 코드가 "실행 중 아님"으로 읽히는 오판은 `INTERNAL`로 막는다 | `status --live`는 0과 113만 답으로 읽고 다른 종료 코드는 `INTERNAL`(`details.step: "live"`)과 `sudo launchctl print system/io.qsh.<mode>` 안내로 끝난다. `install --activate`·`uninstall --deactivate`는 상시 형태가 있으면 매니저를 부르지 않거나 per-user 형태만 다룬다 | ADR-0032 결정 18; 핀 테스트는 `status_live_reports_the_always_on_form_when_present`, `activate_and_deactivate_leave_a_human_installed_always_on_form_untouched` | 0은 "적재됨"이라 적재됐으나 실행 중이 아닌 서비스도 `active: true`로 읽힌다 |
 | h46 | `qsh audit`은 `audit.log`의 레코드 전부를 이 머신의 사용자에게 구조화해 준다. 시간 기반 retention도 삭제 명령도 없으므로 보존 기간은 `[audit].max_bytes`와 `retain`이 정하는 개수 상한이고, 그 지평은 `oldest_ts`로만 보인다 | ADR-0033 결정 10·11. `audit.log`를 읽을 수 있는 계정은 이미 손으로 `jq`를 돌릴 수 있어 새로 열리는 것이 없고, 계정이 읽지 못하면 이 명령도 `INTERNAL`로 막힌다. 삭제 경로를 만들지 않는 것이 SC6 추적성의 대가이며, 더 긴 보존이 필요한 운영자는 회전분을 복사해 둔다 |
 | h47 | Windows localctl pipe의 자격 확인은 `GetNamedPipeClientProcessId`가 준 pid로 프로세스를 다시 열어 토큰을 읽는 두 단계라, 그 사이에 클라이언트가 끝나고 pid가 다른 프로세스에 재사용되면 다른 프로세스의 SID를 읽을 틈이 하나 있다. 이 대조는 소유자 전용 DACL 뒤의 두 번째 겹이다. 다른 사용자는 DACL 때문에 연결 자체를 못 하므로, 틈이 약하게 만드는 것은 DACL이 틀렸을 때를 대비한 그 두 번째 겹뿐이다. 같은 사용자 SID 모델이라는 점은 unix의 same-euid 모델과 같고 인가 계층이 아니다. 데몬이 뜨기 전에 같은 사용자의 다른 프로세스가 pipe 이름을 선점하는 것은 첫 인스턴스 플래그로 데몬 쪽 bind가 실패해 드러나지만, 그 가짜 서버에 먼저 붙은 클라이언트는 SID가 같으므로 가려내지 못한다 | ADR-0035 결정 14, ADR-0033 결정 4·13 |
+| h48 | 외부 독립 보안 리뷰를 받지 않았다. protocol과 key lifecycle의 설계 가정은 이 문서와 fuzz·soak·적대적 부하 캠페인으로만 검토됐고, 같은 팀 밖의 시각이 놓친 것을 찾을 기회가 없다 | ADR-0049 |
 
 h4와 h5는 함께 읽어야 한다. 손상된 peer는 그 장비에서 `trust remove`를 실행하면 2초 안에 끊긴다. 개별 인증서 revocation이 없으므로 CA가 서명한 인증서는 CA 전체를 거두어야 하고, 신뢰는 장비마다 따로 거두어야 한다. 그 peer의 세션은 연결이 닫혀도 남으므로 끝내려면 `qsh session close`를 쓴다.
 
