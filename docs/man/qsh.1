@@ -4,7 +4,7 @@
 .SH NAME
 qsh \- QSH: a QUIC\-based direct\-connect remote shell
 .SH SYNOPSIS
-\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-escape\-char\fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIsubcommands\fR]
+\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-e\fR|\fB\-\-escape\-char\fR] [\fB\-l \fR] [\fB\-p \fR] [\fB\-i \fR] [\fB\-F \fR] [\fB\-o \fR] [\fB\-C \fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-J \fR] [\fB\-A \fR] [\fB\-t \fR]... [\fB\-T \fR] [\fB\-N \fR] [\fB\-f \fR] [\fB\-E \fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIREMOTE_COMMAND\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 QSH: a QUIC\-based direct\-connect remote shell
 .SH OPTIONS
@@ -21,8 +21,53 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
 .TP
-\fB\-\-escape\-char\fR \fI<CHAR>\fR
-Escape character for the line\-start detach sequences (`~d`, `~.`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal
+\fB\-e\fR, \fB\-\-escape\-char\fR \fI<CHAR>\fR
+Escape character for the line\-start detach sequences (`~d`, `~.`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal. `\-e` is the ssh spelling
+.TP
+\fB\-l\fR \fI<USER>\fR
+Remote account, `ssh \-l`. Same as `user@` on the host
+.TP
+\fB\-p\fR \fI<PORT>\fR
+ssh port, `ssh \-p`. It is sshd\*(Aqs port for the bootstrap, never the UDP port qsh dials (ADR\-0051 decision 7)
+.TP
+\fB\-i\fR \fI<FILE>\fR
+ssh identity file, `ssh \-i`, repeatable. Passed to the bootstrap ssh
+.TP
+\fB\-F\fR \fI<FILE>\fR
+ssh config file, `ssh \-F`. Passed to the bootstrap ssh
+.TP
+\fB\-o\fR \fI<KEY=VALUE>\fR
+ssh option `Key=Value`, `ssh \-o`, repeatable. Passed to the bootstrap ssh; `ConnectTimeout`, `BatchMode`, `ServerAliveInterval` and `ServerAliveCountMax` also apply to the QUIC connection
+.TP
+\fB\-C\fR
+Compression for the bootstrap ssh, `ssh \-C`
+.TP
+\fB\-4\fR
+IPv4 only: the bootstrap ssh and the QUIC dial
+.TP
+\fB\-6\fR
+IPv6 only: the bootstrap ssh and the QUIC dial
+.TP
+\fB\-J\fR \fI<DEST>\fR
+Jump host list, `ssh \-J`. Reaches the bootstrap ssh only; a jump on the QUIC path is `UNSUPPORTED` until M26
+.TP
+\fB\-A\fR
+Agent forwarding, `ssh \-A`. `UNSUPPORTED` until M25
+.TP
+\fB\-t\fR
+Force a PTY (`\-t`); twice (`\-tt`) force it even when stdin is not a terminal. With a command, `\-t` runs it in a PTY session that can be detached
+.TP
+\fB\-T\fR
+No PTY. With no command, opens the login shell without one
+.TP
+\fB\-N\fR
+Run no command and no shell: hold only the `\-L`/`\-R`/`\-D` forwards, like `qsh tunnel open`
+.TP
+\fB\-f\fR
+Go to the background once authentication and the forwards are up (with `\-N`)
+.TP
+\fB\-E\fR \fI<FILE>\fR
+Write diagnostics to this file instead of stderr, `ssh \-E`
 .TP
 \fB\-L\fR \fI<SPEC>\fR
 Local forward `[bind:]listen_port:host:host_port`, repeatable: open `listen_port` on this machine and forward each connection to `host:host_port` as seen from the peer. `bind` defaults to (and is restricted to) loopback.
@@ -55,6 +100,9 @@ Print version
 .TP
 [\fI[USER@]HOST\fR]
 Pinned host to open an interactive session on, optionally prefixed with the expected remote login name (`dave@personal\-mac`)
+.TP
+[\fIREMOTE_COMMAND\fR]
+The command to run on the host, `ssh host command [arg...]`: the arguments are joined with spaces and run by the remote account\*(Aqs shell (`docs/CLI.md` §7.2, ADR\-0051 decision 6). Everything after the host is the command, options included. Without a command the form opens an interactive session
 .SH SUBCOMMANDS
 .TP
 qsh\-version(1)

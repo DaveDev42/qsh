@@ -41,6 +41,29 @@ pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// gets no response should fail fast).
 pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Process-wide replacement for [`DEFAULT_DIAL_TIMEOUT`] in milliseconds
+/// (`0` = none set). The ssh-form client sets it once from `-o
+/// ConnectTimeout` (ADR-0051 decision 7), so every [`Dialer`] the process
+/// builds afterwards uses it without each call site carrying the value.
+static DIAL_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Replace the dial timeout every later [`Dialer::new`] starts with.
+/// Meant to be called once, at process start, by a client frontend.
+pub fn set_default_dial_timeout(timeout: Duration) {
+    let ms = u64::try_from(timeout.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    DIAL_TIMEOUT_OVERRIDE_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn default_dial_timeout() -> Duration {
+    match DIAL_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => DEFAULT_DIAL_TIMEOUT,
+        ms => Duration::from_millis(ms),
+    }
+}
+
 /// Peer-advertised cap on concurrently open bidirectional streams per
 /// connection, set explicitly rather than left at quinn's own default
 /// (100 as of quinn-proto 0.11) — one registration connection
@@ -1118,7 +1141,7 @@ impl Dialer {
         Self {
             identity,
             evaluator,
-            timeout: DEFAULT_DIAL_TIMEOUT,
+            timeout: default_dial_timeout(),
             tuning: TransportTuning::default(),
         }
     }

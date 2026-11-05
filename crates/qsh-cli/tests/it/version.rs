@@ -40,11 +40,19 @@ fn version_json_envelope() {
 
 #[test]
 fn bad_flag_exits_with_usage_error() {
+    // An unknown flag with no subcommand is a mistake in the root ssh form,
+    // which exits 255 like ssh (`docs/CLI.md` §4, ADR-0051 decision 9); the
+    // same flag after a subcommand name stays a clap usage error, 2.
     let output = qsh()
         .args(["--not-a-real-flag"])
         .output()
         .expect("failed to run qsh binary");
+    assert_eq!(output.status.code(), Some(255));
 
+    let output = qsh()
+        .args(["version", "--not-a-real-flag"])
+        .output()
+        .expect("failed to run qsh binary");
     assert_eq!(output.status.code(), Some(2));
 }
 

@@ -39,6 +39,7 @@ pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
     AcceptError, ConnStats, Connection, DialError, Dialed, Dialer, Endpoint, Incoming, Listener,
     LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
+    set_default_dial_timeout,
 };
 pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, ExportError, ReadError,

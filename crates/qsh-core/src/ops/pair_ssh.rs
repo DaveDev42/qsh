@@ -45,7 +45,8 @@ use super::trust::parse_role_arg;
 use super::*;
 use crate::pairing::{pairing_role_clause, shell_single_quoted};
 use crate::ssh_bootstrap::{
-    Dest, ResponderOptions, SshChild, SshResolved, SshRunner, batch_mode, quote_remote_program,
+    Dest, ResponderOptions, SshChild, SshOptions, SshResolved, SshRunner, batch_mode,
+    quote_remote_program,
 };
 use crate::trust::validate_peer_label;
 
@@ -86,6 +87,9 @@ pub struct PairSshEnv {
     /// Fires when the user interrupts. The ssh child is ended and the call
     /// fails with `CANCELED`; nothing is written after that point.
     pub cancel: CancelToken,
+    /// The ssh options of the root form (ADR-0051 decision 7), forwarded to
+    /// `ssh -G` and the responder call. [`SshOptions::default`] elsewhere.
+    pub ssh: SshOptions,
 }
 
 /// The result of `pair.ssh`: the envelope data and the notices a human
@@ -111,6 +115,7 @@ struct Plan {
     remote_qsh: String,
     runner: SshRunner,
     batch: bool,
+    ssh: SshOptions,
 }
 
 impl Plan {
@@ -367,7 +372,8 @@ impl Ops {
             to,
             remote_qsh,
             runner,
-            batch: batch_mode(env.machine_mode, env.stdin_is_terminal),
+            batch: batch_mode(env.machine_mode, env.stdin_is_terminal) || env.ssh.batch_mode(),
+            ssh: env.ssh.clone(),
         })
     }
 
@@ -525,12 +531,15 @@ async fn exchange_hello(
     plan: &Plan,
     cancel: &CancelToken,
 ) -> Result<(SshChild, Hello, SshResolved), OpError> {
-    let resolved = plan.runner.resolve(&plan.dest, cancel).await?;
-    let mut child = plan.runner.spawn_responder(
-        &plan.dest,
-        &plan.remote_qsh,
-        ResponderOptions::new(plan.batch, cancel.clone()),
-    )?;
+    let resolved = plan
+        .runner
+        .resolve_with(&plan.dest, &plan.ssh, cancel)
+        .await?;
+    let mut child = plan.runner.spawn_responder(&plan.dest, &plan.remote_qsh, {
+        let mut options = ResponderOptions::new(plan.batch, cancel.clone());
+        options.ssh = plan.ssh.clone();
+        options
+    })?;
     match child.recv().await? {
         BootstrapLine::Hello(hello) => Ok((child, hello, resolved)),
         _ => {

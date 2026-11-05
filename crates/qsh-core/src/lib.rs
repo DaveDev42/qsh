@@ -27,6 +27,7 @@ pub mod audit;
 pub mod broker;
 pub mod ca;
 pub mod client;
+pub mod client_path;
 pub mod config;
 pub mod config_edit;
 pub mod doctor;
@@ -75,7 +76,7 @@ pub use ops::service::{
 pub use ops::{
     AclCheckOp, AclShowOp, AttachHandle, AuditQueryOp, AutoBootstrap, AutoBootstrapReport,
     CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp, ConfigGetOp, ConfigListOp, ConfigSetOp,
-    ConfigUnsetOp, DetachFlush, DoctorHostState, DoctorOp, DoctorThreshold, ExecRunOp,
+    ConfigUnsetOp, DetachFlush, DoctorHostState, DoctorOp, DoctorThreshold, ExecCommand, ExecRunOp,
     ExecRunOutput, ExecStdin, FILE_COPY_PARALLEL, FileCopyError, FileCopyObserver, FileCopyOp,
     FileProgress, HostGetOp, HostListOp, HostRoute, INVITE_CODE_PROMPT, INVITE_CODE_STDIN_MAX,
     IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops,

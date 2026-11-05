@@ -3,6 +3,7 @@
 //! result (`docs/CLI.md` §11).
 
 mod auto_bootstrap;
+mod background;
 mod render;
 mod tui;
 
@@ -46,23 +47,24 @@ use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
+use qsh_core::ssh_bootstrap::{FormInput, FormMode, SshOptions, plan_form};
 use qsh_core::{
     AclCheckOp, AclShowOp, AuditQueryOp, CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp,
-    Config, ConfigGetOp, ConfigListOp, ConfigSetOp, ConfigUnsetOp, DoctorOp, ExecRunOp, ExecStdin,
-    FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, IdentityMoveKeyOp,
-    InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp, ServiceInstallOp,
-    ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp, SessionFilter,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
-    SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
+    Config, ConfigGetOp, ConfigListOp, ConfigSetOp, ConfigUnsetOp, DoctorOp, ExecCommand,
+    ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
+    IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp,
+    ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp,
+    SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp,
+    SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
+    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
     TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
     normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
     AclCheckReq, AclShowReq, AuditQueryReq, CapabilitiesReq, CertInitReq, CertIssueReq,
-    ConfigGetReq, ConfigListReq, ConfigSetReq, ConfigUnsetReq, DoctorReq, ErrorCode, ExecRunReq,
-    FileCopyReq, HostGetReq, IdentityExportReq, IdentityInitReq, IdentityMoveKeyReq, PairSshReq,
+    ConfigGetReq, ConfigListReq, ConfigSetReq, ConfigUnsetReq, DoctorReq, ErrorCode, FileCopyReq,
+    HostGetReq, IdentityExportReq, IdentityInitReq, IdentityMoveKeyReq, PairSshReq,
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
     SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
     TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSetRoleReq,
@@ -156,7 +158,19 @@ impl Write for LossyStderr {
 fn main() {
     // `Cli::parse()` exits with code 2 on usage errors and 0 on
     // `--help`/`--version`, per clap's default behavior.
-    let cli = Cli::parse();
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(cli::normalize_args(raw_args.clone())) {
+        Ok(cli) => cli,
+        Err(err) => {
+            // A mistake in the root ssh form exits 255 like ssh; a mistake
+            // in a subcommand stays 2 (`docs/CLI.md` §4, ADR-0051 decision 9).
+            if err.use_stderr() && cli::is_root_form_usage_error(&raw_args) {
+                let _ = err.print();
+                std::process::exit(EXIT_RUNTIME_FAILURE);
+            }
+            err.exit()
+        }
+    };
     init_tracing(&cli);
     let exit_code = run(&cli);
     std::process::exit(exit_code);
@@ -379,35 +393,7 @@ fn run(cli: &Cli) -> i32 {
 /// than a hand-built stand-in for it.
 fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     let Some(command) = &cli.command else {
-        // No subcommand: the bare interactive form, `qsh [user@]host`.
-        let Some(target) = &cli.interactive.target else {
-            // Reachable with global flags and nothing else:
-            // `arg_required_else_help` only fires on a *completely* empty
-            // command line, so `qsh --json` lands here. clap prints an
-            // error to stderr, which is what keeps stdout pure JSON in
-            // machine mode (`docs/CLI.md` §2.2, §4: usage errors write
-            // nothing to stdout in either mode).
-            let _ = Cli::command()
-                .error(
-                    clap::error::ErrorKind::MissingRequiredArgument,
-                    "no target and no subcommand: expected `qsh [user@]host` \
-                     or one of the subcommands below",
-                )
-                .print();
-            return EXIT_USAGE;
-        };
-        return run_interactive(
-            cli,
-            &ops,
-            tui::Attach::Open {
-                host: target.host.clone(),
-                user: target.user.clone(),
-                forwards: cli.interactive.local_forward.clone(),
-                remote_forwards: cli.interactive.remote_forward.clone(),
-                dynamic_forwards: cli.interactive.dynamic_forward.clone(),
-            },
-            cli.interactive.escape_char,
-        );
+        return run_ssh_form(cli, &ops);
     };
 
     match command {
@@ -632,6 +618,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 session_ref: session_ref.clone(),
             },
             *escape_char,
+            &SshOptions::default(),
         ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
         Command::Sessions {
@@ -762,6 +749,195 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
     }
 }
 
+/// Environment variable-free marker for the log: the name this form reports
+/// in a failure before a session exists.
+const SSH_FORM_COMMAND: &str = "session.open";
+
+/// The root ssh form, `qsh [ssh options] [user@]host [command [arg...]]`
+/// (`docs/CLI.md` §7, ADR-0051 decisions 6 to 9). No subcommand was given.
+///
+/// All of the deciding is `qsh-core`'s (`SshOptions::from_flags`,
+/// `plan_form`); this function opens the mode they chose: a PTY session
+/// (`-t`, or no command), `exec` for a command, or only the forwards (`-N`).
+fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
+    let args = &cli.interactive;
+    let Some(target) = &args.target else {
+        // Reachable with global flags and nothing else: `arg_required_else_help`
+        // only fires on a completely empty command line, so `qsh --json`
+        // lands here. clap prints to stderr, which keeps stdout pure JSON in
+        // machine mode. A root-form usage error exits 255 like ssh.
+        let _ = Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "no target and no subcommand: expected `qsh [user@]host` \
+                 or one of the subcommands below",
+            )
+            .print();
+        return EXIT_RUNTIME_FAILURE;
+    };
+    // `docs/CLI.md` §7 wins over every other refusal: the form has no machine mode.
+    if cli.wants_json() {
+        return report_error(cli, SSH_FORM_COMMAND, &tui::json_mode_unsupported());
+    }
+    let ssh = match SshOptions::from_flags(&args.ssh_flags()) {
+        Ok(ssh) => ssh,
+        Err(err) => return report_error(cli, SSH_FORM_COMMAND, &err),
+    };
+    let has_forwards = !args.local_forward.is_empty()
+        || !args.remote_forward.is_empty()
+        || !args.dynamic_forward.is_empty();
+    let mode = match plan_form(&FormInput {
+        command: args.command.clone(),
+        force_tty: args.force_tty,
+        no_tty: args.no_tty,
+        no_command: args.no_command,
+        background: args.background,
+        has_forwards,
+    }) {
+        Ok(mode) => mode,
+        Err(err) => return report_error(cli, SSH_FORM_COMMAND, &err),
+    };
+    // `-f`: the foreground process only waits for the re-executed child.
+    if matches!(mode, FormMode::Forwards { background: true }) && !background::is_child() {
+        return background::run_foreground();
+    }
+    if let Some(file) = &args.log_file
+        && let Err(err) = background::redirect_stderr_to_file(file)
+    {
+        return report_error(
+            cli,
+            SSH_FORM_COMMAND,
+            &OpError::new(
+                ErrorCode::InvalidArgument,
+                format!("-E: cannot open the log file: {err}"),
+            ),
+        );
+    }
+    qsh_core::client_path::install(&ssh);
+    let host = target.host.clone();
+    let user = args.user();
+    match mode {
+        FormMode::Interactive { argv } => run_interactive(
+            cli,
+            ops,
+            tui::Attach::Open {
+                host,
+                user,
+                forwards: args.local_forward.clone(),
+                remote_forwards: args.remote_forward.clone(),
+                dynamic_forwards: args.dynamic_forward.clone(),
+                argv,
+            },
+            args.escape_char,
+            &ssh,
+        ),
+        FormMode::Exec(command) => {
+            if let Some(code) = auto_bootstrap_before_open(
+                cli,
+                ops,
+                ExecRunOp::COMMAND,
+                &Dial {
+                    host: &host,
+                    user: user.as_deref(),
+                    forwards: &[],
+                    remote_forwards: &[],
+                    dynamic_forwards: &[],
+                },
+                &ssh,
+            ) {
+                return code;
+            }
+            run_exec_command(cli, ops, &host, command, Vec::new(), None)
+        }
+        FormMode::Forwards { .. } => run_ssh_forwards(cli, ops, &host, user.as_deref(), &ssh),
+    }
+}
+
+/// `-N`: open every `-L`/`-R`/`-D` as a tunnel and hold them until the first
+/// one ends (the same holder rule as `qsh tunnel open`, `docs/CLI.md`
+/// §6.14). With `-f` this is the re-executed child: it says so once the
+/// forwards stand.
+fn run_ssh_forwards(cli: &Cli, ops: &Ops, host: &str, user: Option<&str>, ssh: &SshOptions) -> i32 {
+    let args = &cli.interactive;
+    if let Some(code) = auto_bootstrap_before_open(
+        cli,
+        ops,
+        TunnelOpenOp::COMMAND,
+        &Dial {
+            host,
+            user,
+            forwards: &args.local_forward,
+            remote_forwards: &args.remote_forward,
+            dynamic_forwards: &args.dynamic_forward,
+        },
+        ssh,
+    ) {
+        return code;
+    }
+    let mut holds = Vec::new();
+    let opened = (|| -> Result<(), OpError> {
+        for (mode, specs) in [
+            (
+                "local",
+                qsh_core::parse_local_forwards(&args.local_forward)?,
+            ),
+            (
+                "remote",
+                qsh_core::parse_remote_forwards(&args.remote_forward)?,
+            ),
+        ] {
+            for spec in specs {
+                holds.push(ops.tunnel_open(TunnelOpenReq {
+                    host: host.to_string(),
+                    mode: mode.to_string(),
+                    bind: spec.bind.clone(),
+                    listen_port: u32::from(spec.listen_port),
+                    forward_host: spec.host.clone(),
+                    forward_port: u32::from(spec.host_port),
+                    wait_ms: None,
+                    supervise_ms: None,
+                    accept_hold_ms: None,
+                })?);
+            }
+        }
+        for spec in parse_dynamic_forwards(&args.dynamic_forward)? {
+            holds.push(ops.tunnel_dynamic(TunnelDynamicReq {
+                host: host.to_string(),
+                bind: spec.bind.clone(),
+                listen_port: u32::from(spec.listen_port),
+                supervise_ms: None,
+                accept_hold_ms: None,
+            })?);
+        }
+        Ok(())
+    })();
+    if let Err(err) = opened {
+        return report_error(cli, TunnelOpenOp::COMMAND, &err);
+    }
+    for hold in &holds {
+        hold.announce_opened();
+    }
+    background::announce_ready(args.log_file.is_some());
+    let (ended_tx, ended) = std::sync::mpsc::channel();
+    for hold in holds {
+        let ended_tx = ended_tx.clone();
+        std::thread::spawn(move || {
+            let _ = ended_tx.send(hold.hold());
+        });
+    }
+    drop(ended_tx);
+    console_shutdown_finished();
+    match ended.recv() {
+        Ok(err) => {
+            if let Err(io_err) = human::print_error(&err) {
+                stderr_note!("qsh: failed to write output: {io_err}");
+            }
+            EXIT_RUNTIME_FAILURE
+        }
+        Err(_) => EXIT_RUNTIME_FAILURE,
+    }
+}
+
 /// `qsh [user@]host` and `qsh attach <session-ref>` — the interactive
 /// forms (`docs/CLI.md` §7).
 ///
@@ -770,7 +946,13 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
 /// §2.2) and the exit code is the remote shell's (§4). Failures before the
 /// terminal is touched still report through the shared [`report_error`]
 /// path, which is what keeps `--json` honest about *why* it refuses.
-fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<EscapeChar>) -> i32 {
+fn run_interactive(
+    cli: &Cli,
+    ops: &Ops,
+    what: tui::Attach,
+    escape: Option<EscapeChar>,
+    ssh: &SshOptions,
+) -> i32 {
     let command = what.command();
     if cli.wants_json() {
         return report_error(cli, command, &tui::json_mode_unsupported());
@@ -787,7 +969,28 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     // decision 2). This is before `tui::run`, so ssh has the cooked terminal
     // to prompt on and raw mode starts only after the ssh child is gone
     // (decision 16).
-    if let Some(code) = auto_bootstrap_before_open(cli, ops, command, &what) {
+    if let tui::Attach::Open {
+        host,
+        user,
+        forwards,
+        remote_forwards,
+        dynamic_forwards,
+        ..
+    } = &what
+        && let Some(code) = auto_bootstrap_before_open(
+            cli,
+            ops,
+            command,
+            &Dial {
+                host,
+                user: user.as_deref(),
+                forwards,
+                remote_forwards,
+                dynamic_forwards,
+            },
+            ssh,
+        )
+    {
         return code;
     }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
@@ -797,45 +1000,54 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     }
 }
 
+/// What the root form is about to connect to, for [`auto_bootstrap_before_open`].
+struct Dial<'a> {
+    host: &'a str,
+    user: Option<&'a str>,
+    forwards: &'a [String],
+    remote_forwards: &'a [String],
+    dynamic_forwards: &'a [String],
+}
+
 /// The automatic bootstrap in front of `qsh [user@]host` (ADR-0044 decision
-/// 2). `None` means go on to the attach: the name is registered, the
-/// bootstrap is off, or it ran and the pins stand. `Some(code)` is the exit
-/// code of a bootstrap that failed, already reported.
+/// 2). `None` means go on: the name is registered, the bootstrap is off, or
+/// it ran and the pins stand. `Some(code)` is the exit code of a bootstrap
+/// that failed, already reported.
 ///
 /// Malformed `-L`/`-R`/`-D` specs skip the bootstrap: the attach reports them
 /// before it opens anything, and ssh should not run for a command line that
 /// cannot start.
+///
+/// `ssh` is the root form's ssh options (ADR-0051 decision 7). When no
+/// bootstrap runs, a `-J` has nothing to apply to and is `UNSUPPORTED`: the
+/// QUIC connection cannot take a jump before M26.
 fn auto_bootstrap_before_open(
     cli: &Cli,
     ops: &Ops,
     command: &'static str,
-    what: &tui::Attach,
+    dial: &Dial<'_>,
+    ssh: &SshOptions,
 ) -> Option<i32> {
-    let tui::Attach::Open {
-        host,
-        user,
-        forwards,
-        remote_forwards,
-        dynamic_forwards,
-    } = what
-    else {
-        return None;
-    };
-    if qsh_core::parse_local_forwards(forwards).is_err()
-        || qsh_core::parse_remote_forwards(remote_forwards).is_err()
-        || parse_dynamic_forwards(dynamic_forwards).is_err()
+    if qsh_core::parse_local_forwards(dial.forwards).is_err()
+        || qsh_core::parse_remote_forwards(dial.remote_forwards).is_err()
+        || parse_dynamic_forwards(dial.dynamic_forwards).is_err()
     {
         return None;
     }
-    let plan = match ops.should_auto_bootstrap(host, user.as_deref(), cli.wants_json()) {
+    let plan = match ops.should_auto_bootstrap(dial.host, dial.user, cli.wants_json()) {
         Ok(Some(plan)) => plan,
-        Ok(None) => return None,
+        Ok(None) => {
+            return ssh
+                .refuse_quic_jump()
+                .err()
+                .map(|err| report_error(cli, command, &err));
+        }
         Err(err) => return Some(report_error(cli, command, &err)),
     };
     let cancel = CancelToken::new();
     // Scoped: the attach's own signal handling takes over afterwards.
     let _interrupts = auto_bootstrap::InterruptScope::new(&cancel);
-    match auto_bootstrap::run(ops, &plan, cancel, cli.quiet) {
+    match auto_bootstrap::run(ops, &plan, cancel, cli.quiet, ssh.clone()) {
         Ok(()) => None,
         Err(err) => Some(report_error(cli, command, &err)),
     }
@@ -1020,18 +1232,32 @@ fn run_session_write(cli: &Cli, ops: &Ops, args: &SessionWriteArgs) -> i32 {
 /// forwarded to the remote command only when it is not a terminal, so an
 /// interactive `qsh exec host -- cat` does not sit waiting on the keyboard.
 fn run_exec(cli: &Cli, ops: &Ops, args: &ExecArgs) -> i32 {
+    run_exec_command(
+        cli,
+        ops,
+        &args.host,
+        ExecCommand::Argv(args.argv.clone()),
+        args.env.clone(),
+        args.timeout,
+    )
+}
+
+/// [`run_exec`]'s body, shared with the root ssh form's trailing command
+/// (`qsh host command...`, ADR-0051 decision 6).
+fn run_exec_command(
+    cli: &Cli,
+    ops: &Ops,
+    host: &str,
+    command: ExecCommand,
+    env: Vec<qsh_proto::EnvVar>,
+    timeout_ms: Option<u64>,
+) -> i32 {
     let stdin = if io::stdin().is_terminal() {
         ExecStdin::Closed
     } else {
         ExecStdin::Inherit
     };
-    let request = ExecRunReq {
-        host: args.host.clone(),
-        argv: args.argv.clone(),
-        env: args.env.clone(),
-        timeout_ms: args.timeout,
-    };
-    let output = match ops.exec_run(request, stdin) {
+    let output = match ops.exec_command(host.to_string(), command, env, timeout_ms, stdin) {
         Ok(output) => output,
         Err(err) => return report_error(cli, ExecRunOp::COMMAND, &err),
     };
@@ -1098,7 +1324,9 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     // the ssh child too.
     match ops.should_auto_bootstrap_cp(&request, cli.wants_json()) {
         Ok(Some(plan)) => {
-            if let Err(err) = auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet) {
+            if let Err(err) =
+                auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet, SshOptions::default())
+            {
                 return report_cp_error(cli, &err);
             }
         }
@@ -2228,6 +2456,7 @@ fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
         machine_mode: cli.wants_json(),
         stdin_is_terminal: io::stdin().is_terminal(),
         cancel,
+        ssh: SshOptions::default(),
     };
     let result = ops.pair_ssh(
         PairSshReq {

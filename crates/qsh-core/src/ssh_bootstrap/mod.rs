@@ -41,15 +41,20 @@ pub fn auto_bootstrap_notice(host: &str, dest: &str) -> String {
 }
 
 mod dest;
+mod form;
+mod options;
 mod respond;
 mod ssh;
 
 pub use dest::{Dest, split_user_host};
+pub use form::{FormInput, FormMode, plan_form};
+pub use options::{AddressFamily, SshFlags, SshOptions};
 pub use respond::{AUDIT_ACTION, RespondEnd, Responder};
 pub use ssh::{
     BATCH_HELLO_TIMEOUT, BootstrapTimeouts, MESSAGE_TIMEOUT, ResponderOptions, SSH_G_OUTPUT_MAX,
     SshChild, SshExit, SshResolved, SshRunner, batch_mode, map_ssh_exit, map_ssh_exit_with_stderr,
-    parse_ssh_g, quote_remote_program, responder_args, ssh_g_args, ssh_not_found,
+    parse_ssh_g, quote_remote_program, responder_args, responder_args_with, ssh_g_args,
+    ssh_g_args_with, ssh_not_found,
 };
 
 #[cfg(test)]
