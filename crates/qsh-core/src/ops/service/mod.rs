@@ -54,26 +54,32 @@
 //! `install`/`uninstall`/`status` besides "what is `$HOME`" is actually
 //! untestable.
 
+mod always_on;
 mod manager;
 mod run;
 mod task;
 #[cfg(windows)]
 mod task_com;
 
+pub use always_on::{
+    launchdaemon_install_argvs, launchdaemon_remove_argvs, loginctl_disable_linger_argv,
+    loginctl_enable_linger_argv, netsh_firewall_add_argv, netsh_firewall_delete_argv,
+    render_launchdaemon_plist, schtasks_create_always_on_argv, windows_elevation_probe_argv,
+};
 pub use run::SERVICE_RUN_MODES;
 pub use task::{
     DOC_EXAMPLE_EXE_WINDOWS, DOC_EXAMPLE_USER_SID, TaskDefinitionReader, TaskLogonType,
-    UnreadableTaskScheduler, encode_task_file, render_windows_task,
+    UnreadableTaskScheduler, encode_task_file, render_windows_always_on_task, render_windows_task,
 };
 #[cfg(windows)]
 pub use task_com::ComTaskScheduler;
 
 pub use manager::{
-    CommandRunner, LAUNCHD_SERVICE_NOT_FOUND, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP,
-    ManagerClock, ManagerOutput, ManagerRunner, RunError, SystemManagerClock, TaskStateQuery,
-    launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv,
-    schtasks_create_argv, schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv,
-    schtasks_run_argv, systemd_daemon_reload_argv, systemd_disable_now_argv,
+    CommandRunner, INTERACTIVE_CALL_DEADLINE, LAUNCHD_SERVICE_NOT_FOUND, MANAGER_CALL_DEADLINE,
+    MANAGER_STDERR_CAP, ManagerClock, ManagerOutput, ManagerRunner, RunError, SystemManagerClock,
+    TaskStateQuery, launchd_bootout_argv, launchd_bootstrap_argv, launchd_print_argv,
+    launchd_print_system_argv, schtasks_create_argv, schtasks_delete_argv, schtasks_end_argv,
+    schtasks_query_argv, schtasks_run_argv, systemd_daemon_reload_argv, systemd_disable_now_argv,
     systemd_enable_now_argv, systemd_is_active_argv,
 };
 
@@ -82,12 +88,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use qsh_proto::{
-    ErrorCode, ServiceActivation, ServiceDeactivation, ServiceInstallData, ServiceStatusData,
-    ServiceUninstallData,
+    ErrorCode, ServiceActivation, ServiceAlwaysOn, ServiceDeactivation, ServiceInstallData,
+    ServiceStatusData, ServiceUninstallData,
 };
 
 use crate::audit::{AuditRecord, AuditSink, FileAuditSink};
 use crate::config::Config;
+
+use qsh_proto::ConfigSetReq;
+
+use crate::prompts::{NoPrompter, Prompter};
 
 use super::{OpError, Operation, Ops, ServiceInstallOp, ServiceUninstallOp};
 
@@ -422,6 +432,45 @@ pub(crate) struct ServiceHost<'a> {
     /// Under which principal a task is registered (the Task Scheduler row
     /// only).
     pub(crate) task_reader: &'a dyn TaskDefinitionReader,
+    /// The name the always-on recipes address: `$USER` on Linux and macOS
+    /// (`loginctl enable-linger`, the daemon's `UserName`), `DOMAIN\user` on
+    /// Windows (`schtasks /RU`). `None` when it could not be read.
+    pub(crate) account: Option<String>,
+    /// The platform key store standing in for the OS credential store when
+    /// `--always-on` moves the key (the seam of
+    /// [`Ops::identity_move_key_with_platform_store`]); `None` in production.
+    pub(crate) platform_store: Option<&'a dyn crate::identity::KeyStore>,
+}
+
+/// The flags of `qsh service install` (`docs/CLI.md` §6.18). `Default` is the
+/// flagless command: activate, change nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceInstallOptions {
+    /// Load and start the unit (the default; `--no-activate` clears it).
+    pub activate: bool,
+    /// `--to`: written to `[serve].to` before the mode is inferred.
+    pub to: Option<String>,
+    /// `--bind`: written to `[serve].bind`.
+    pub bind: Option<String>,
+    /// `--name`: written to `[reverse].offered_name`.
+    pub name: Option<String>,
+    /// `--always-on` (ADR-0051 decision 11).
+    pub always_on: bool,
+    /// `--move-key`: answers the key-store question with yes.
+    pub move_key: bool,
+}
+
+impl Default for ServiceInstallOptions {
+    fn default() -> Self {
+        Self {
+            activate: true,
+            to: None,
+            bind: None,
+            name: None,
+            always_on: false,
+            move_key: false,
+        }
+    }
 }
 
 impl<'a> ServiceHost<'a> {
@@ -437,6 +486,8 @@ impl<'a> ServiceHost<'a> {
             user_sid: current_user_sid(),
             task_state: &PLATFORM_TASK_SCHEDULER,
             task_reader: &PLATFORM_TASK_SCHEDULER,
+            account: current_account(),
+            platform_store: None,
         })
     }
 
@@ -760,7 +811,12 @@ fn step_effect(step: &str) -> &'static str {
     match step {
         "deactivate" => "the unit file was kept; run `qsh service uninstall --deactivate` again",
         "live" => "the unit's run state was not read",
-        _ => "the unit file is written; run `qsh service install --activate` again",
+        "always_on" => {
+            "the unit file is written; run `qsh service install --always-on` again \
+             (on macOS the per-user unit may be released already)"
+        }
+        "always_off" => "the unit file was kept; run `qsh service uninstall --always-on` again",
+        _ => "the unit file is written; run `qsh service install` again",
     }
 }
 
@@ -769,6 +825,8 @@ fn step_past(step: &str) -> &'static str {
     match step {
         "deactivate" => "released",
         "live" => "queried",
+        "always_on" => "made always-on",
+        "always_off" => "made on-demand again",
         _ => "activated",
     }
 }
@@ -803,6 +861,25 @@ fn current_user_sid() -> Option<String> {
     }
 }
 
+/// The account the always-on recipes name (`ServiceHost::account`).
+fn current_account() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").ok().filter(|v| !v.is_empty())?;
+        match std::env::var("USERDOMAIN").ok().filter(|v| !v.is_empty()) {
+            Some(domain) => Some(format!("{domain}\\{user}")),
+            None => Some(user),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
+            .filter(|v| !v.is_empty())
+    }
+}
+
 /// Whether this is a WSL distro: only the wording of a `systemctl` failure
 /// depends on it (ADR-0032 decision 8).
 fn running_under_wsl() -> bool {
@@ -826,14 +903,26 @@ impl Ops {
     /// *before* this call, so a repeated `install` is a repair path for a
     /// hand-edited unit rather than a no-op.
     ///
-    /// `activate` (`--activate`, ADR-0032 decisions 2 and 4) additionally
-    /// asks the service manager to load and start the unit, as the last
-    /// step. A unit that is already up is not restarted, and a human-
-    /// installed always-on form is left alone (decision 18).
-    pub fn service_install(&self, activate: bool) -> Result<ServiceInstallData, OpError> {
+    /// `activate` (the default since ADR-0051 decision 11; `--no-activate`
+    /// clears it) additionally asks the service manager to load and start the
+    /// unit, as the last step. A unit that is already up is not restarted
+    /// (ADR-0032 decision 4), and a human-installed always-on form is left
+    /// alone (decision 18).
+    ///
+    /// `to`, `bind` and `name` are written to `config.toml` through
+    /// [`Ops::config_set`] (lock and validation included) before the mode is
+    /// inferred; they never reach the unit's argv. `always_on` runs the
+    /// recipe of `docs/deploy/service.md` for this OS and, when the key is in
+    /// a `platform` store that does not open outside a login session, first
+    /// asks `prompter` (or takes `move_key`) whether to move it.
+    pub fn service_install(
+        &self,
+        options: &ServiceInstallOptions,
+        prompter: &dyn Prompter,
+    ) -> Result<ServiceInstallData, OpError> {
         let runner = CommandRunner::system();
         let host = ServiceHost::resolve(&runner)?;
-        self.service_install_with_home(&host, crate::config::home_dir(), activate)
+        self.service_install_with_options(&host, crate::config::home_dir(), options, prompter)
     }
 
     /// `service.uninstall` — remove the unit for this machine's inferred
@@ -844,10 +933,16 @@ impl Ops {
     /// `deactivate` (`--deactivate`, ADR-0032 decision 5) first releases the
     /// unit from the service manager when it is registered there, and keeps
     /// the unit file if that fails. Without it a running unit stays up.
-    pub fn service_uninstall(&self, deactivate: bool) -> Result<ServiceUninstallData, OpError> {
+    /// `always_on` (`--always-on`, ADR-0051 decision 11) reverses what
+    /// `install --always-on` did, before anything else.
+    pub fn service_uninstall(
+        &self,
+        deactivate: bool,
+        always_on: bool,
+    ) -> Result<ServiceUninstallData, OpError> {
         let runner = CommandRunner::system();
         let host = ServiceHost::resolve(&runner)?;
-        self.service_uninstall_with_home(&host, crate::config::home_dir(), deactivate)
+        self.service_uninstall_with_options(&host, crate::config::home_dir(), deactivate, always_on)
     }
 
     /// `service.status` — whether the unit for this machine's inferred run
@@ -928,6 +1023,43 @@ impl Ops {
         home: Option<PathBuf>,
         activate: bool,
     ) -> Result<ServiceInstallData, OpError> {
+        let options = ServiceInstallOptions {
+            activate,
+            ..ServiceInstallOptions::default()
+        };
+        self.service_install_with_options(host, home, &options, &NoPrompter)
+    }
+
+    /// [`Self::service_install_with_home`] with every flag of
+    /// `qsh service install`.
+    pub(crate) fn service_install_with_options(
+        &self,
+        host: &ServiceHost<'_>,
+        home: Option<PathBuf>,
+        options: &ServiceInstallOptions,
+        prompter: &dyn Prompter,
+    ) -> Result<ServiceInstallData, OpError> {
+        let manager = host.manager;
+        // Everything that can refuse comes before anything is written: a
+        // non-elevated Windows console, and a key-store question nobody can
+        // answer.
+        let mut move_key = false;
+        if options.always_on {
+            host.require_elevated("install")?;
+            move_key = self.decide_key_move(manager, options.move_key, prompter)?;
+        }
+        for (key, value) in [
+            ("serve.to", &options.to),
+            ("serve.bind", &options.bind),
+            ("reverse.offered_name", &options.name),
+        ] {
+            if let Some(value) = value {
+                self.config_set(ConfigSetReq {
+                    key: key.to_string(),
+                    value: value.clone(),
+                })?;
+            }
+        }
         let manager = host.manager;
         let config = Config::load(&self.paths)?;
         let controller = crate::serve::config_outbound_target(&config)?;
@@ -984,11 +1116,34 @@ impl Ops {
         // The last step, and only on request: a failed write above has
         // already returned, so the manager is never asked to load a unit
         // that was not written (ADR-0032 decision 2).
-        let activation = if activate {
-            Some(host.activate(mode, &path)?)
-        } else {
-            None
-        };
+        let mut activation = None;
+        let mut always_on = None;
+        if options.always_on {
+            // The key moves last before the recipe, so a failure above it
+            // leaves the key where it was.
+            let key_moved = if move_key {
+                self.move_key_to_file(host)?
+            } else {
+                false
+            };
+            let plan = always_on::AlwaysOnPlan {
+                mode,
+                exe: &exe,
+                home: &home,
+                config_dir: &self.paths.config_dir,
+                controller,
+                unit_path: &path,
+            };
+            let outcome = host.enable_always_on(&plan)?;
+            activation = Some(outcome.activation);
+            always_on = Some(ServiceAlwaysOn {
+                state: outcome.state,
+                key_moved,
+                firewall_rule: outcome.firewall_rule,
+            });
+        } else if options.activate {
+            activation = Some(host.activate(mode, &path)?);
+        }
 
         Ok(ServiceInstallData {
             manager: manager.as_str().to_string(),
@@ -996,18 +1151,34 @@ impl Ops {
             path: path.display().to_string(),
             created,
             activation,
+            always_on,
         })
     }
 
     /// Steps 2-10 of `service_uninstall` — see
     /// [`Self::service_install_with_home`]'s doc for why `home` and `host`
     /// are parameters here.
+    #[cfg(test)]
     pub(crate) fn service_uninstall_with_home(
         &self,
         host: &ServiceHost<'_>,
         home: Option<PathBuf>,
         deactivate: bool,
     ) -> Result<ServiceUninstallData, OpError> {
+        self.service_uninstall_with_options(host, home, deactivate, false)
+    }
+
+    /// [`Self::service_uninstall_with_home`] with `--always-on` as well.
+    pub(crate) fn service_uninstall_with_options(
+        &self,
+        host: &ServiceHost<'_>,
+        home: Option<PathBuf>,
+        deactivate: bool,
+        always_on: bool,
+    ) -> Result<ServiceUninstallData, OpError> {
+        if always_on {
+            host.require_elevated("uninstall")?;
+        }
         let manager = host.manager;
         let config = Config::load(&self.paths)?;
         let _controller = crate::serve::config_outbound_target(&config)?;
@@ -1021,6 +1192,19 @@ impl Ops {
         // manager still has it registered would leave an orphan that comes
         // back at the next login with the old path (ADR-0032 decision 5). A
         // failed release returns here and keeps the file.
+        // The always-on form goes first: on macOS and Windows the per-user
+        // release below then sees what is left, not the form it would leave
+        // alone.
+        let always_off = if always_on {
+            let (state, firewall_rule) = host.disable_always_on(mode, &path)?;
+            Some(ServiceAlwaysOn {
+                state,
+                key_moved: false,
+                firewall_rule,
+            })
+        } else {
+            None
+        };
         let deactivation = if deactivate {
             Some(host.deactivate(mode, &path)?)
         } else {
@@ -1039,6 +1223,7 @@ impl Ops {
             path: path.display().to_string(),
             removed,
             deactivation,
+            always_on: always_off,
         })
     }
 

@@ -187,9 +187,12 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.show.with_paths.json",
     "error.RESOURCE_EXHAUSTED.json",
     "service.install.activated.json",
+    "service.install.always_on.json",
+    "service.install.default_activated.json",
     "service.install.json",
     "service.status.json",
     "service.status.live.json",
+    "service.uninstall.always_off.json",
     "service.uninstall.deactivated.json",
     "service.uninstall.json",
     "setup.run.host_pending_acl.json",
@@ -1495,7 +1498,7 @@ fn golden_service_fixtures() {
     // *before* `normalize` masks `data.path`, and it is the one check that
     // would catch a regression removing `HOME` from the sandbox harness
     // (guards `Sandbox::command_with_bin`'s `.env("HOME", …)` injection).
-    let (code, installed) = sandbox.json(&["service", "install", "--json"]);
+    let (code, installed) = sandbox.json(&["service", "install", "--no-activate", "--json"]);
     assert_eq!(code, 0, "{installed}");
     let path = installed["data"]["path"].as_str().expect("data.path");
     assert!(
@@ -1512,7 +1515,7 @@ fn golden_service_fixtures() {
     check("service.status.json", status_after);
 
     // 4. `install` again — idempotent, `created: false`. Not a fixture.
-    let (code, reinstalled) = sandbox.json(&["service", "install", "--json"]);
+    let (code, reinstalled) = sandbox.json(&["service", "install", "--no-activate", "--json"]);
     assert_eq!(code, 0, "{reinstalled}");
     assert_eq!(reinstalled["data"]["created"], false, "{reinstalled}");
 
@@ -1597,10 +1600,27 @@ fn golden_service_activation_fixtures() {
     assert!(!manager.loaded(), "the fake unit must be released");
     check("service.uninstall.deactivated.json", uninstalled);
 
-    // 5. Without a flag the manager is never called: the whole scenario
-    // above is the only source of calls.
+    // 5. ADR-0051 decision 11: a flagless `install` activates, the same
+    // envelope the hidden `--activate` alias gave in step 1 (a new fixture
+    // pins the new default), and still never restarts.
+    let (code, default) = manager.json(&sandbox, &["service", "install", "--json"]);
+    assert_eq!(code, 0, "{default}");
+    assert_eq!(default["data"]["activation"], "started", "{default}");
+    assert!(manager.loaded(), "the default install must load the unit");
+    check("service.install.default_activated.json", default);
+    let (code, again) = manager.json(&sandbox, &["service", "install", "--json"]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["activation"], "already_active", "{again}");
+    let (code, _) = manager.json(
+        &sandbox,
+        &["service", "uninstall", "--deactivate", "--json"],
+    );
+    assert_eq!(code, 0);
+
+    // 6. `--no-activate` is the old file-only form: the manager is never
+    // called, and neither are `status` and `uninstall` without their flags.
     let before = manager.calls().len();
-    let (code, plain) = manager.json(&sandbox, &["service", "install", "--json"]);
+    let (code, plain) = manager.json(&sandbox, &["service", "install", "--no-activate", "--json"]);
     assert_eq!(code, 0, "{plain}");
     assert!(plain["data"].get("activation").is_none(), "{plain}");
     let (code, plain) = manager.json(&sandbox, &["service", "status", "--json"]);
@@ -1614,6 +1634,61 @@ fn golden_service_activation_fixtures() {
         before,
         "flagless runs must not call the manager"
     );
+}
+
+/// `qsh service install --always-on` and `uninstall --always-on` on Linux
+/// (ADR-0051 decision 11) over a fake `loginctl` and `systemctl` on `PATH`:
+/// the envelopes, and the exact commands the binary asked for. The macOS
+/// recipe needs `sudo`, so it and the Windows one are covered over a recording
+/// runner in `qsh-core` (`ops::service::tests::always_on`).
+#[cfg(unix)]
+#[test]
+fn golden_service_always_on_fixtures() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let manager = FakeServiceManager::new();
+
+    let (code, installed) =
+        manager.json(&sandbox, &["service", "install", "--always-on", "--json"]);
+    assert_eq!(code, 0, "{installed}");
+    assert_eq!(installed["data"]["activation"], "started", "{installed}");
+    assert_eq!(
+        installed["data"]["always_on"]["state"], "enabled",
+        "{installed}"
+    );
+    assert!(
+        manager
+            .calls()
+            .iter()
+            .any(|call| call == "loginctl enable-linger qsh-test"),
+        "{:?}",
+        manager.calls()
+    );
+    check("service.install.always_on.json", installed);
+
+    let (code, removed) =
+        manager.json(&sandbox, &["service", "uninstall", "--always-on", "--json"]);
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(
+        removed["data"]["always_on"]["state"], "disabled",
+        "{removed}"
+    );
+    assert!(
+        manager
+            .calls()
+            .iter()
+            .any(|call| call == "loginctl disable-linger qsh-test"),
+        "{:?}",
+        manager.calls()
+    );
+    check("service.uninstall.always_off.json", removed);
+
+    // Without a terminal and without `--move-key` the question is never
+    // asked, and a key that needs no move does not trigger it.
+    let (code, second) = manager.json(&sandbox, &["service", "install", "--always-on", "--json"]);
+    assert_eq!(code, 0, "{second}");
 }
 
 /// The Windows twin of [`golden_service_fixtures`]: `service.*` there is the
@@ -1638,7 +1713,7 @@ fn service_ops_on_windows_use_the_task_definition_file() {
     assert_eq!(value["data"]["manager"], "task_scheduler", "{value}");
     assert_eq!(value["data"]["installed"], false, "{value}");
 
-    let (code, value) = sandbox.json(&["service", "install", "--json"]);
+    let (code, value) = sandbox.json(&["service", "install", "--no-activate", "--json"]);
     assert_eq!(code, 0, "{value}");
     assert_eq!(value["command"], "service.install", "{value}");
     assert_eq!(value["data"]["manager"], "task_scheduler", "{value}");

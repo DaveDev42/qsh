@@ -29,7 +29,7 @@ Print version
 .SH SUBCOMMANDS
 .TP
 qsh\-service\-install(1)
-Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
+Write (or rewrite) the unit for this machine\*(Aqs inferred run mode, create its parent directories, and load and start it through the service manager (ADR\-0051 decision 11). A unit that is already running is not restarted. `\-\-no\-activate` writes the file only
 .TP
 qsh\-service\-uninstall(1)
 Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running

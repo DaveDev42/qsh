@@ -225,13 +225,12 @@ name `qsh` belongs to an unrelated project, which is why the crate is
 
 `scripts/README.md` covers the installer in more detail. To keep a listener
 running, see [docs/deploy/service.md](docs/deploy/service.md).
-`qsh service install` writes the unit file and stops there. Add `--activate`
-to also load and start it through launchd or systemd, `qsh service uninstall
---deactivate` to release it before the file is removed, and `qsh service
-status --live` to ask the manager whether it is running. Without a flag qsh
-never calls `launchctl` or `systemctl`. On Windows it writes a Task Scheduler
-task definition file; the same three flags register it with `schtasks`,
-unregister it, and read its state (see the service page).
+`qsh service install` writes the unit file and loads and starts it through
+launchd, systemd or, on Windows, the Task Scheduler. `--no-activate` writes the
+file only. `qsh service uninstall --deactivate` releases it before the file is
+removed, and `qsh service status --live` asks the manager whether it is
+running. `qsh service install --always-on` also makes it start with nobody
+logged in, using the OS's own consent step (see the service page).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
@@ -1078,33 +1077,37 @@ Some of these are MVP scope decisions, some are unfinished work.
   `launchagent_session_scoped` until it exists. If the device key is in the
   OS credential store, `qsh doctor` also reports `keystore_session_bound`
   for an always-on service; `qsh identity move-key --to file` fixes it.
-- qsh does not set up always-on running for you. It does not run `loginctl
-  enable-linger`, install a LaunchDaemon or create a Windows task that runs
-  without a login; those are recipes you run yourself
-  ([docs/deploy/service.md](docs/deploy/service.md)). `qsh service install
-  --activate` does not restart a unit that is already running, so a new
-  binary path applies at the next restart, and a restart ends every detached
-  session. If a LaunchDaemon form is installed, `--activate` and
-  `--deactivate` leave it alone and `status --live` reads its loaded state
-  with `launchctl print system/io.qsh.<mode>`, which needs no root.
+- Always-on running is opt-in: `qsh service install --always-on` runs
+  `loginctl enable-linger` (Linux), the LaunchDaemon recipe under `sudo`
+  (macOS) or registers a `Password` task and the inbound UDP firewall rule from
+  an elevated console (Windows). `sudo`, polkit and `schtasks` ask for the
+  password themselves and qsh never reads it; `qsh service uninstall
+  --always-on` reverses it
+  ([docs/deploy/service.md](docs/deploy/service.md)). `qsh service install`
+  does not restart a unit that is already running, so a new binary path
+  applies at the next restart, and a restart ends every detached session. If a
+  LaunchDaemon form is installed, `install` and `--deactivate` leave it alone
+  and `status --live` reads its loaded state with `launchctl print
+  system/io.qsh.<mode>`, which needs no root.
 - `qsh audit` reads only this machine's log. To see another host's records,
   run it there. There is no command that deletes or shortens the log, so how
   far back it reaches depends on `[audit].max_bytes` and `[audit].retain`;
   copy the files elsewhere before rotation pushes them out if you need
   longer. `oldest_ts` in the result shows what is still kept.
 - On Windows, `qsh service install` writes a Task Scheduler task definition
-  file under `%USERPROFILE%\.config\qsh\service`. Without a flag it stops
-  there and does not call `schtasks`; `--activate` registers the task and
-  starts it, `--deactivate` ends and deletes it, and `--live` reads its state.
+  file under `%USERPROFILE%\.config\qsh\service` and registers and starts the
+  task with `schtasks`; `--no-activate` stops at the file, `--deactivate` ends
+  and deletes the task, and `--live` reads its state.
   You can also register the task by hand with the `schtasks` recipe in
   [docs/deploy/service.md](docs/deploy/service.md#task-scheduler-windows). The
   task starts at your logon and ends at logoff, and `qsh doctor` reports
   `logon_task_session_scoped` while it is registered that way. A task that
-  runs at boot with nobody logged on needs an elevated prompt and a stored
-  password; the same page has that variant, and qsh does not register it.
-  `--activate` and `--deactivate` leave such a task alone. Over an ssh login
-  with no desktop session the task cannot start, and `--activate` ends with
-  `INTERNAL` after registering it.
+  runs at boot with nobody logged on needs an elevated console and a stored
+  password: `qsh service install --always-on` registers it (schtasks asks for
+  the password itself) and adds the firewall rule. A plain `install` and
+  `--deactivate` leave such a task alone. Over an ssh login with no desktop
+  session the default task cannot start, and `install` ends with `INTERNAL`
+  after registering it.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin and the invite's consumption happen first, in
   the wire exchange; the client's local pin happens after. If the client then
@@ -1198,7 +1201,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   spelling work like `--local`/`--remote`. `qsh setup host`
   (with `--to` and `--service`) and `qsh pair invite` run on a Windows host
   as on the other platforms; `--service` writes the Task Scheduler task
-  definition and registers nothing (`qsh service install --activate` does).
+  definition and registers nothing (`qsh service install` does).
 - The ssh bootstrap works the same way on Windows: `qsh pair ssh` and the
   automatic bootstrap on `qsh box` and `qsh cp` run the system `ssh.exe` with
   the console left in cooked mode until ssh exits. A Windows machine can be the

@@ -53,12 +53,13 @@ use qsh_core::{
     Config, ConfigGetOp, ConfigListOp, ConfigSetOp, ConfigUnsetOp, DoctorOp, ExecCommand,
     ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
     IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp,
-    ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp, SessionCloseOp,
-    SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp,
-    SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
-    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
-    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
-    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    ServiceInstallOp, ServiceInstallOptions, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
+    SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp,
+    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
+    read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -674,16 +675,37 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             cli.quiet,
         ),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
-        Command::Service(ServiceCmd::Install { activate }) => finish(
+        Command::Service(ServiceCmd::Install {
+            activate: _,
+            no_activate,
+            to,
+            bind,
+            name,
+            always_on,
+            move_key,
+        }) => finish(
             cli,
             ServiceInstallOp::COMMAND,
-            ops.service_install(*activate),
+            ops.service_install(
+                &ServiceInstallOptions {
+                    activate: !*no_activate,
+                    to: to.clone(),
+                    bind: bind.clone(),
+                    name: name.clone(),
+                    always_on: *always_on,
+                    move_key: *move_key,
+                },
+                &qsh_core::prompts::StdioPrompter::new(cli.json || cli.jsonl),
+            ),
             human::print_service_install,
         ),
-        Command::Service(ServiceCmd::Uninstall { deactivate }) => finish(
+        Command::Service(ServiceCmd::Uninstall {
+            deactivate,
+            always_on,
+        }) => finish(
             cli,
             ServiceUninstallOp::COMMAND,
-            ops.service_uninstall(*deactivate),
+            ops.service_uninstall(*deactivate, *always_on),
             human::print_service_uninstall,
         ),
         Command::Service(ServiceCmd::Status { live }) => finish(

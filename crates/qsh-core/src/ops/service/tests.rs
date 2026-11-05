@@ -16,6 +16,8 @@ type Reply = Box<dyn Fn(&[String]) -> Result<ManagerOutput, RunError> + Send + S
 
 struct FakeRunner {
     calls: Mutex<Vec<Vec<String>>>,
+    /// The calls made through `run_interactive`, a subset of `calls`.
+    interactive: Mutex<Vec<String>>,
     deadlines: Mutex<Vec<Duration>>,
     reply: Reply,
 }
@@ -33,6 +35,7 @@ impl FakeRunner {
     ) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            interactive: Mutex::new(Vec::new()),
             deadlines: Mutex::new(Vec::new()),
             reply: Box::new(reply),
         }
@@ -64,6 +67,15 @@ impl ManagerRunner for FakeRunner {
         self.calls.lock().unwrap().push(argv.to_vec());
         self.deadlines.lock().unwrap().push(deadline);
         (self.reply)(argv)
+    }
+
+    fn run_interactive(
+        &self,
+        argv: &[String],
+        deadline: Duration,
+    ) -> Result<ManagerOutput, RunError> {
+        self.interactive.lock().unwrap().push(argv.join(" "));
+        self.run(argv, deadline)
     }
 }
 
@@ -104,6 +116,8 @@ fn host_with_scheduler<'a>(
         user_sid: Some(DOC_EXAMPLE_USER_SID.to_string()),
         task_state: scheduler,
         task_reader: scheduler,
+        account: Some("you".to_string()),
+        platform_store: None,
     }
 }
 
@@ -579,7 +593,15 @@ fn unsupported_platform_is_reported_before_the_home_directory_is_even_read() {
     std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
     std::fs::write(ops.paths().config_file(), "not valid toml === {{{").unwrap();
 
-    let err = ops.service_install(false).unwrap_err();
+    let err = ops
+        .service_install(
+            &ServiceInstallOptions {
+                activate: false,
+                ..Default::default()
+            },
+            &NoPrompter,
+        )
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::Unsupported);
     assert!(err.message.contains("P1"));
 }
@@ -1531,20 +1553,41 @@ fn wsl_without_systemd_unsupported_message_names_wsl_conf() {
     );
 }
 
-/// ADR-0032 decision 1: the flags are on the command line or nowhere.
-/// Neither a `[service]` table in `config.toml` nor the environment turns
-/// a flagless call into a manager call.
+/// ADR-0051 decision 11 (which revises ADR-0032 decision 1): `install`
+/// activates by default and `--no-activate` is the file-only form, and the
+/// choice is the command line's alone. Neither a `[service]` table in
+/// `config.toml` nor the environment moves it in either direction, and
+/// `uninstall` and `status` stay manager-free without their flags.
 #[test]
 fn activation_flags_cannot_be_defaulted_by_config_or_env() {
     for manager in BOTH_MANAGERS {
-        let (_dir, ops) = ops_with("[service]\nactivate = true\ndeactivate = true\nlive = true\n");
-        let runner = FakeRunner::default();
+        let (_dir, ops) = ops_with(
+            "[service]\nactivate = false\nno_activate = true\ndeactivate = true\nlive = true\n\
+             always_on = true\n",
+        );
         let root = temp_home();
-        let host = host_for(manager, &runner, root.path());
         let home = temp_home();
-        // Whether `Config` ignores or rejects the unknown table, no manager
-        // call follows from it.
-        let _ = install(&ops, &host, &home, false);
+
+        // Flagless `install` loads the unit whatever the table says.
+        let runner = FakeRunner::default();
+        let host = host_for(manager, &runner, root.path());
+        let data = ops
+            .service_install_with_options(
+                &host,
+                Some(home.path().to_path_buf()),
+                &ServiceInstallOptions::default(),
+                &NoPrompter,
+            )
+            .unwrap();
+        assert!(data.activation.is_some(), "{manager:?}");
+        assert_eq!(data.always_on, None);
+        assert!(!runner.calls().is_empty(), "{manager:?}");
+
+        // `--no-activate` writes the file and calls nothing.
+        let runner = FakeRunner::default();
+        let host = host_for(manager, &runner, root.path());
+        let data = install(&ops, &host, &home, false).unwrap();
+        assert_eq!(data.activation, None);
         let _ = status(&ops, &host, &home, false);
         let _ = uninstall(&ops, &host, &home, false);
         assert!(
@@ -1573,12 +1616,22 @@ fn activation_flags_cannot_be_defaulted_by_config_or_env() {
                 .iter()
                 .any(|needle| line.contains(needle));
             assert!(
-                !reads_env || line.contains("WSL_DISTRO_NAME"),
+                !reads_env
+                    || [
+                        "WSL_DISTRO_NAME",
+                        "\"USER\"",
+                        "\"LOGNAME\"",
+                        "\"USERNAME\"",
+                        "\"USERDOMAIN\""
+                    ]
+                    .iter()
+                    .any(|name| line.contains(name)),
                 "service code must not read flag defaults from the environment: `{line}`"
             );
         }
     }
 }
 
+mod always_on;
 mod windows_manager;
 mod windows_task;

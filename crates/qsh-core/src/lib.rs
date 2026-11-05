@@ -41,6 +41,7 @@ pub mod lifecycle;
 pub mod localctl;
 pub mod ops;
 pub mod pairing;
+pub mod prompts;
 pub mod pty;
 pub mod quota;
 pub mod reset_key;
@@ -65,14 +66,19 @@ pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::service::{
     CommandRunner, DOC_EXAMPLE_CONTROLLER, DOC_EXAMPLE_EXE_LINUX, DOC_EXAMPLE_EXE_MACOS,
-    DOC_EXAMPLE_EXE_WINDOWS, DOC_EXAMPLE_HOME_MACOS, DOC_EXAMPLE_USER_SID, MANAGER_CALL_DEADLINE,
-    MANAGER_STDERR_CAP, ManagerClock, ManagerOutput, ManagerRunner, RunError, SERVICE_RUN_MODES,
-    SERVICE_UNSUPPORTED_PLATFORM, SystemManagerClock, TaskDefinitionReader, TaskLogonType,
-    TaskStateQuery, UnreadableTaskScheduler, encode_task_file, launchd_bootout_argv,
-    launchd_bootstrap_argv, launchd_print_argv, launchd_print_system_argv, render_launchd_plist,
-    render_systemd_unit, render_windows_task, schtasks_create_argv, schtasks_delete_argv,
-    schtasks_end_argv, schtasks_query_argv, schtasks_run_argv, systemd_daemon_reload_argv,
-    systemd_disable_now_argv, systemd_enable_now_argv, systemd_is_active_argv,
+    DOC_EXAMPLE_EXE_WINDOWS, DOC_EXAMPLE_HOME_MACOS, DOC_EXAMPLE_USER_SID,
+    INTERACTIVE_CALL_DEADLINE, MANAGER_CALL_DEADLINE, MANAGER_STDERR_CAP, ManagerClock,
+    ManagerOutput, ManagerRunner, RunError, SERVICE_RUN_MODES, SERVICE_UNSUPPORTED_PLATFORM,
+    ServiceInstallOptions, SystemManagerClock, TaskDefinitionReader, TaskLogonType, TaskStateQuery,
+    UnreadableTaskScheduler, encode_task_file, launchd_bootout_argv, launchd_bootstrap_argv,
+    launchd_print_argv, launchd_print_system_argv, launchdaemon_install_argvs,
+    launchdaemon_remove_argvs, loginctl_disable_linger_argv, loginctl_enable_linger_argv,
+    netsh_firewall_add_argv, netsh_firewall_delete_argv, render_launchd_plist,
+    render_launchdaemon_plist, render_systemd_unit, render_windows_always_on_task,
+    render_windows_task, schtasks_create_always_on_argv, schtasks_create_argv,
+    schtasks_delete_argv, schtasks_end_argv, schtasks_query_argv, schtasks_run_argv,
+    systemd_daemon_reload_argv, systemd_disable_now_argv, systemd_enable_now_argv,
+    systemd_is_active_argv, windows_elevation_probe_argv,
 };
 pub use ops::{
     AclCheckOp, AclShowOp, AttachHandle, AuditQueryOp, AutoBootstrap, AutoBootstrapReport,

@@ -769,17 +769,53 @@ fn parse_console_pid(text: &str) -> Result<u32, String> {
 /// names a mode, because the Windows task definition has to.
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
-    /// Write (or rewrite) the unit for this machine's inferred run mode
-    /// and create its parent directories. Without `--activate` nothing is
-    /// started.
+    /// Write (or rewrite) the unit for this machine's inferred run mode,
+    /// create its parent directories, and load and start it through the
+    /// service manager (ADR-0051 decision 11). A unit that is already
+    /// running is not restarted. `--no-activate` writes the file only.
     Install {
-        /// Also load and start the unit through the service manager
+        /// Hidden alias of the default: load and start the unit
         /// (`launchctl bootstrap` / `systemctl --user enable --now` /
-        /// `schtasks /Create` then `/Run`) once the unit file is written. A
-        /// unit that is already running is not restarted, so a new binary
-        /// path applies at the next restart.
-        #[arg(long)]
+        /// `schtasks /Create` then `/Run`). Kept so old scripts keep working.
+        #[arg(long, hide = true, conflicts_with = "no_activate")]
         activate: bool,
+
+        /// Write the unit file and stop: the manager is not called. The
+        /// former default.
+        #[arg(long, conflicts_with_all = ["activate", "always_on"])]
+        no_activate: bool,
+
+        /// Dial this controller and register as a reverse target: written to
+        /// `[serve].to` in `config.toml` (the `qsh config set` path), not to
+        /// the unit's arguments, before the run mode is inferred.
+        #[arg(long, value_name = "LISTENER|HOST:PORT")]
+        to: Option<String>,
+
+        /// Listen address (`ip:port`): written to `[serve].bind` in
+        /// `config.toml`, not to the unit's arguments.
+        #[arg(long, value_name = "IP:PORT")]
+        bind: Option<String>,
+
+        /// Name to register under with `--to`: written to
+        /// `[reverse].offered_name` in `config.toml`.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+
+        /// Also run with nobody logged in, with the OS's own consent step:
+        /// `loginctl enable-linger` (Linux), the LaunchDaemon recipe under
+        /// `sudo` (macOS), or a `Password` task from an elevated console plus
+        /// the inbound UDP firewall rule (Windows). `sudo`, polkit and
+        /// `schtasks` ask for the password themselves; qsh never reads it.
+        #[arg(long)]
+        always_on: bool,
+
+        /// With `--always-on` and a key in the OS credential store (macOS,
+        /// Linux): move it to the key file first, without asking. Without
+        /// this flag a terminal is asked "키를 파일 저장소로 옮길까? [Y/n]";
+        /// without a terminal the install fails with
+        /// `details.reason` `keystore_session_bound`.
+        #[arg(long, requires = "always_on")]
+        move_key: bool,
     },
 
     /// Remove the unit for this machine's inferred run mode, if any.
@@ -791,6 +827,13 @@ pub enum ServiceCmd {
         /// file is kept if the release fails.
         #[arg(long)]
         deactivate: bool,
+
+        /// Reverse `install --always-on`: `loginctl disable-linger` (Linux),
+        /// the LaunchDaemon removed under `sudo` (macOS), or the `Password`
+        /// task and the firewall rule deleted from an elevated console
+        /// (Windows).
+        #[arg(long)]
+        always_on: bool,
     },
 
     /// Report whether the unit for this machine's inferred run mode

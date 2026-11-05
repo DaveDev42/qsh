@@ -978,7 +978,7 @@ exit 0
         let dir = tempfile::tempdir().expect("fake manager dir");
         std::fs::create_dir_all(dir.path().join("bin")).expect("fake manager bin dir");
         std::fs::create_dir_all(dir.path().join("state")).expect("fake manager state dir");
-        for name in ["launchctl", "systemctl"] {
+        for name in ["launchctl", "systemctl", "loginctl", "sudo"] {
             let path = dir.path().join("bin").join(name);
             std::fs::write(&path, Self::SCRIPT).expect("write fake manager script");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -998,6 +998,9 @@ exit 0
         command
             .env("PATH", path)
             .env("QSH_FAKE_MANAGER_STATE", self.dir.path().join("state"))
+            // The account the always-on recipes name; the real one is not
+            // the point of a golden envelope.
+            .env("USER", "qsh-test")
             .stdin(Stdio::null());
         command
     }

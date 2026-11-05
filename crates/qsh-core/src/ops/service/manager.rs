@@ -77,7 +77,25 @@ pub enum RunError {
 pub trait ManagerRunner: Send + Sync {
     /// Run `argv` (program first, no shell) and wait at most `deadline`.
     fn run(&self, argv: &[String], deadline: Duration) -> Result<ManagerOutput, RunError>;
+
+    /// Like [`Self::run`], for a call that asks the person something itself
+    /// (`sudo`'s password, `loginctl`'s polkit prompt, `schtasks /RP *`,
+    /// ADR-0051 decision 11): the child inherits stdin and stderr, so the
+    /// terminal reaches it, and its stdout goes to stderr so a `--json` run
+    /// keeps stdout pure. qsh never reads what the person types. The default
+    /// is [`Self::run`], which is what a recording test runner wants.
+    fn run_interactive(
+        &self,
+        argv: &[String],
+        deadline: Duration,
+    ) -> Result<ManagerOutput, RunError> {
+        self.run(argv, deadline)
+    }
 }
+
+/// Deadline of one [`ManagerRunner::run_interactive`] call: long enough for a
+/// person to type a password.
+pub const INTERACTIVE_CALL_DEADLINE: Duration = Duration::from_secs(300);
 
 /// The run-state query of the Task Scheduler backend (ADR-0032 decision 3
 /// table, ADR-0035 decision 28): a task name in, whether it is running out.
@@ -159,6 +177,46 @@ impl CommandRunner {
 
 impl ManagerRunner for CommandRunner {
     fn run(&self, argv: &[String], deadline: Duration) -> Result<ManagerOutput, RunError> {
+        self.run_with(argv, deadline, false)
+    }
+
+    fn run_interactive(
+        &self,
+        argv: &[String],
+        deadline: Duration,
+    ) -> Result<ManagerOutput, RunError> {
+        self.run_with(argv, deadline, true)
+    }
+}
+
+/// The child's stdout for an interactive call: a duplicate of this process's
+/// stderr, so nothing it prints can reach a machine-mode stdout. Falls back
+/// to the null device when stderr cannot be duplicated.
+fn stdout_to_stderr() -> Stdio {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd as _;
+        if let Ok(fd) = std::io::stderr().as_fd().try_clone_to_owned() {
+            return Stdio::from(fd);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle as _;
+        if let Ok(handle) = std::io::stderr().as_handle().try_clone_to_owned() {
+            return Stdio::from(handle);
+        }
+    }
+    Stdio::null()
+}
+
+impl CommandRunner {
+    fn run_with(
+        &self,
+        argv: &[String],
+        deadline: Duration,
+        interactive: bool,
+    ) -> Result<ManagerOutput, RunError> {
         let Some((program, args)) = argv.split_first() else {
             return Err(RunError::Io("empty manager argv".to_string()));
         };
@@ -166,16 +224,23 @@ impl ManagerRunner for CommandRunner {
             // Not while another spawn has handles inheritable (`winproc`).
             #[cfg(windows)]
             let _spawning = crate::winproc::spawn_guard();
-            Command::new(program)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|err| match err.kind() {
-                    std::io::ErrorKind::NotFound => RunError::NotFound,
-                    _ => RunError::Io(err.to_string()),
-                })?
+            let mut command = Command::new(program);
+            command.args(args);
+            if interactive {
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(stdout_to_stderr())
+                    .stderr(Stdio::inherit());
+            } else {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+            }
+            command.spawn().map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => RunError::NotFound,
+                _ => RunError::Io(err.to_string()),
+            })?
         };
         let reader = child.stderr.take().map(|mut stderr| {
             let (tx, rx) = std::sync::mpsc::channel();

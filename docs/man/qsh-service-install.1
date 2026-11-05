@@ -2,15 +2,12 @@
 .el .ds Aq '
 .TH qsh-service-install 1  "install 0.5.8" 
 .SH NAME
-qsh\-service\-install \- Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
+qsh\-service\-install \- Write (or rewrite) the unit for this machine\*(Aqs inferred run mode, create its parent directories, and load and start it through the service manager (ADR\-0051 decision 11). A unit that is already running is not restarted. `\-\-no\-activate` writes the file only
 .SH SYNOPSIS
-\fBqsh service install\fR [\fB\-\-activate\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service install\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-no\-activate\fR] [\fB\-\-to\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-bind\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-name\fR] [\fB\-\-always\-on\fR] [\fB\-\-move\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Write (or rewrite) the unit for this machine\*(Aqs inferred run mode and create its parent directories. Without `\-\-activate` nothing is started
+Write (or rewrite) the unit for this machine\*(Aqs inferred run mode, create its parent directories, and load and start it through the service manager (ADR\-0051 decision 11). A unit that is already running is not restarted. `\-\-no\-activate` writes the file only
 .SH OPTIONS
-.TP
-\fB\-\-activate\fR
-Also load and start the unit through the service manager (`launchctl bootstrap` / `systemctl \-\-user enable \-\-now` / `schtasks /Create` then `/Run`) once the unit file is written. A unit that is already running is not restarted, so a new binary path applies at the next restart
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
@@ -18,11 +15,29 @@ Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable te
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
 .TP
+\fB\-\-no\-activate\fR
+Write the unit file and stop: the manager is not called. The former default
+.TP
+\fB\-\-to\fR \fI<LISTENER|HOST:PORT>\fR
+Dial this controller and register as a reverse target: written to `[serve].to` in `config.toml` (the `qsh config set` path), not to the unit\*(Aqs arguments, before the run mode is inferred
+.TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
 .TP
+\fB\-\-bind\fR \fI<IP:PORT>\fR
+Listen address (`ip:port`): written to `[serve].bind` in `config.toml`, not to the unit\*(Aqs arguments
+.TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-name\fR \fI<NAME>\fR
+Name to register under with `\-\-to`: written to `[reverse].offered_name` in `config.toml`
+.TP
+\fB\-\-always\-on\fR
+Also run with nobody logged in, with the OS\*(Aqs own consent step: `loginctl enable\-linger` (Linux), the LaunchDaemon recipe under `sudo` (macOS), or a `Password` task from an elevated console plus the inbound UDP firewall rule (Windows). `sudo`, polkit and `schtasks` ask for the password themselves; qsh never reads it
+.TP
+\fB\-\-move\-key\fR
+With `\-\-always\-on` and a key in the OS credential store (macOS, Linux): move it to the key file first, without asking. Without this flag a terminal is asked "키를 파일 저장소로 옮길까? [Y/n]"; without a terminal the install fails with `details.reason` `keystore_session_bound`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

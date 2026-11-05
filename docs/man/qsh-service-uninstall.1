@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-service\-uninstall \- Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running
 .SH SYNOPSIS
-\fBqsh service uninstall\fR [\fB\-\-deactivate\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh service uninstall\fR [\fB\-\-deactivate\fR] [\fB\-\-json\fR] [\fB\-\-always\-on\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Remove the unit for this machine\*(Aqs inferred run mode, if any. Without `\-\-deactivate` a running unit stays running
 .SH OPTIONS
@@ -14,6 +14,9 @@ Release the unit from the service manager first (`launchctl bootout` / `systemct
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-always\-on\fR
+Reverse `install \-\-always\-on`: `loginctl disable\-linger` (Linux), the LaunchDaemon removed under `sudo` (macOS), or the `Password` task and the firewall rule deleted from an elevated console (Windows)
 .TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
