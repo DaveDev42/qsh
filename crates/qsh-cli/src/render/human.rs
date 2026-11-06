@@ -379,6 +379,23 @@ fn role_cell(peer: &TrustPeer) -> &str {
     peer.role.as_deref().unwrap_or(LEGACY_ROLE_CELL)
 }
 
+/// The trailing `grants=… paths=… scope=…` summary of a pin that `trust
+/// allow` extended (ADR-0051 decision 12), or `None` when the pin carries
+/// none of the three keys. Unsanitized; the caller sanitizes.
+fn grant_summary(peer: &TrustPeer) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(grants) = &peer.grants {
+        parts.push(format!("grants={}", grants.join(",")));
+    }
+    if let Some(paths) = &peer.paths {
+        parts.push(format!("paths={}", paths.join(",")));
+    }
+    if let Some(scope) = &peer.scope {
+        parts.push(format!("scope={scope}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 /// Print the pinned-peer table.
 pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
@@ -420,6 +437,9 @@ pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
             sanitize(role_cell(peer)),
             peer.added_at
         )?;
+        if let Some(summary) = grant_summary(peer) {
+            writeln!(stdout, "  {}", sanitize(&summary))?;
+        }
     }
     Ok(())
 }
