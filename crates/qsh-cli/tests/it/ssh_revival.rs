@@ -21,21 +21,33 @@ const QSH: &str = env!("CARGO_BIN_EXE_qsh");
 /// How long the on-demand serve may sit idle before it drains.
 const IDLE_MS: u64 = 1500;
 
+/// The idle limit for a test that counts the ssh calls of one command. The
+/// serve's idle clock starts when it starts, so on a loaded runner a limit of
+/// a second or two can end it before the first dial lands; the command then
+/// revives it (a second `ssh -G` and responder call) and the count is off.
+const LONG_IDLE_MS: u64 = 8000;
+
 /// A client and a remote account with nothing running on the remote.
 struct Cold {
     client: Sandbox,
     remote: Sandbox,
     fake: FakeSsh,
+    idle_ms: u64,
 }
 
 impl Cold {
     fn new() -> Self {
+        Self::with_idle(IDLE_MS)
+    }
+
+    fn with_idle(idle_ms: u64) -> Self {
         let client = Sandbox::initialized();
         let remote = Sandbox::initialized();
         let mut cold = Self {
             client,
             remote,
             fake: FakeSsh::new(),
+            idle_ms,
         };
         cold.set_remote_bind(&steady_bind());
         cold.fake.run_local_responder(
@@ -51,7 +63,10 @@ impl Cold {
     fn set_remote_bind(&self, bind: &str) {
         std::fs::write(
             self.remote.config_dir().join("config.toml"),
-            format!("[serve]\nbind = \"{bind}\"\non_demand_idle_ms = {IDLE_MS}\n"),
+            format!(
+                "[serve]\nbind = \"{bind}\"\non_demand_idle_ms = {}\n",
+                self.idle_ms
+            ),
         )
         .unwrap();
     }
@@ -140,7 +155,7 @@ fn first_connection(cold: &Cold) -> std::process::Output {
 /// bootstrap.
 #[test]
 fn first_connection_starts_an_on_demand_serve_and_connects() {
-    let cold = Cold::new();
+    let cold = Cold::with_idle(LONG_IDLE_MS);
     assert!(cold.serve_record().is_none());
 
     let out = first_connection(&cold);
@@ -165,6 +180,10 @@ fn first_connection_starts_an_on_demand_serve_and_connects() {
         list["data"]["peers"][0]["source"], "ssh_bootstrap",
         "{list}"
     );
+
+    // Let the serve drain by itself so no detached process outlives the
+    // sandbox (there is no stop signal to send on Windows).
+    cold.wait_for_serve_to_idle_out();
 }
 
 /// Once the on-demand serve has drained, the next command to the name fails
