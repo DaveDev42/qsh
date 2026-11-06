@@ -1763,3 +1763,51 @@ fn re_adding_a_marked_pin_keeps_its_mark() {
     assert_eq!(peer.address, "box:60001");
     assert_eq!(peer.source.as_deref(), Some("ssh_bootstrap"));
 }
+
+#[test]
+fn replace_peer_drops_grants_and_the_origin_mark_but_keeps_the_place() {
+    let fp = |byte: u8| -> Fingerprint {
+        use base64::Engine as _;
+        format!(
+            "sha256:{}",
+            base64::engine::general_purpose::STANDARD.encode([byte; 32])
+        )
+        .parse()
+        .unwrap()
+    };
+    let mut store = TrustStore::default();
+    store.add_peer("a", None, fp(1), "t0".into());
+    store.add_peer_with_role("b", Some("h:1".into()), fp(2), "t0".into(), TrustRole::Full);
+    store.add_peer("c", None, fp(3), "t0".into());
+    store
+        .set_grants(
+            "b",
+            crate::acl::PinGrantKeys {
+                grants: Some(vec!["forward.local".into()]),
+                paths: None,
+                scope: Some("any".into()),
+            },
+        )
+        .unwrap();
+    store.mark_source("b", PIN_SOURCE_SSH_BOOTSTRAP);
+    let (new, old) = store
+        .replace_peer("b", Some("h:2".into()), fp(9), "t1".into(), TrustRole::None)
+        .unwrap();
+    assert_eq!(old.fingerprint, fp(2).to_string());
+    assert_eq!(new.fingerprint, fp(9).to_string());
+    let names: Vec<_> = store.peers().iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"]);
+    let pin = store.find("b").unwrap();
+    assert_eq!(pin.address, "h:2");
+    assert_eq!(pin.role.as_deref(), Some("none"));
+    assert_eq!(pin.added_at, "t1");
+    assert_eq!(
+        (&pin.grants, &pin.paths, &pin.scope, &pin.source),
+        (&None, &None, &None, &None)
+    );
+    assert!(
+        store
+            .replace_peer("zz", None, fp(9), "t1".into(), TrustRole::None)
+            .is_none()
+    );
+}

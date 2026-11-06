@@ -46,6 +46,12 @@ pub struct PairSshReq {
     /// means `[ssh].remote_qsh`, then `qsh`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_qsh: Option<String>,
+    /// `--replace-pin`: when the pin for the remote (here) or for this
+    /// machine (there) holds another fingerprint than the one now reported,
+    /// replace it instead of failing with `pin_conflict` (ADR-0051 결정 5).
+    /// The trust is the ssh login and its host key check.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace_pin: bool,
 }
 
 /// Which way the new pins point (ADR-0044 결정 22).
@@ -73,6 +79,20 @@ pub struct PairSshRemote {
     /// `true` if the remote wrote a new pin; `false` if this machine was
     /// already pinned there.
     pub created: bool,
+}
+
+/// The pins a `pair.ssh --replace-pin` call replaced (ADR-0051 결정 5), as
+/// the fingerprints they held before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PairSshReplaced {
+    /// The fingerprint of the pin this machine held for the remote.
+    /// Omitted when this machine's pin was not replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    /// The fingerprint of the pin the remote held for this machine, as the
+    /// remote reported it. Omitted when the remote's pin was not replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 /// Data payload of `pair.ssh` (ADR-0044 결정 17).
@@ -104,4 +124,8 @@ pub struct PairSshData {
     /// passed, and absent in the reverse direction (nothing was skipped). The pins stand either way, so the call still succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_error: Option<CliError>,
+    /// The pins this call replaced (ADR-0051 결정 5). Absent when none was.
+    /// Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<PairSshReplaced>,
 }

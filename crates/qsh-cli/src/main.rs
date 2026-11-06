@@ -2581,6 +2581,7 @@ fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
         stdin_is_terminal: io::stdin().is_terminal(),
         cancel,
         ssh: SshOptions::default(),
+        prompter: std::sync::Arc::new(qsh_core::prompts::StdioPrompter::new(cli.wants_json())),
     };
     let result = ops.pair_ssh(
         PairSshReq {
@@ -2592,6 +2593,7 @@ fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
             reverse: args.reverse,
             to: args.to.clone(),
             remote_qsh: args.remote_qsh.clone(),
+            replace_pin: args.replace_pin,
         },
         env,
     );

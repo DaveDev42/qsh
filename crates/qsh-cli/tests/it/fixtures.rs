@@ -173,6 +173,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.REMOTE_ERROR.remote_qsh_missing.json",
     "pair.ssh.json",
     "pair.ssh.unverified.json",
+    "pair.ssh.replaced.json",
     "pair.ssh.reverse.json",
     "error.UNSUPPORTED.json",
     "tunnel.open.json",
@@ -2614,6 +2615,22 @@ fn golden_pair_ssh_fixtures() {
     assert_eq!(code, 255, "{got}");
     assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
     check("error.SESSION_CONFLICT.pin_conflict.json", got);
+}
+
+/// `pair ssh --replace-pin` (ADR-0051 decision 5): both stale pins are
+/// replaced and `data.replaced` names the fingerprints they held.
+#[test]
+fn golden_pair_ssh_replaced_fixture() {
+    use crate::ssh_bootstrap::pair::{World, other_fingerprint};
+
+    let w = World::new();
+    w.client
+        .trust_add("box", Some("203.0.113.9:4433"), &other_fingerprint(7));
+    w.remote.trust_add("laptop", None, &other_fingerprint(9));
+    let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["verified"], true, "{got}");
+    check("pair.ssh.replaced.json", got);
 }
 
 /// `pair ssh --reverse --to` (ADR-0044 decision 22): the remote dials this

@@ -37,7 +37,8 @@ use qsh_proto::ssh_bootstrap::{
     negotiate_version,
 };
 use qsh_proto::{
-    CliError, IdentityInitReq, PairSshData, PairSshDirection, PairSshRemote, PairSshReq,
+    CliError, IdentityInitReq, PairSshData, PairSshDirection, PairSshRemote, PairSshReplaced,
+    PairSshReq,
 };
 use serde_json::json;
 
@@ -90,6 +91,10 @@ pub struct PairSshEnv {
     /// The ssh options of the root form (ADR-0051 decision 7), forwarded to
     /// `ssh -G` and the responder call. [`SshOptions::default`] elsewhere.
     pub ssh: SshOptions,
+    /// Asks the replace-the-pin question (ADR-0051 decision 5) and shows the
+    /// two fingerprints first. [`crate::prompts::NoPrompter`] where nothing
+    /// can be asked: the call then fails with `pin_conflict`.
+    pub prompter: std::sync::Arc<dyn crate::prompts::Prompter>,
 }
 
 /// The result of `pair.ssh`: the envelope data and the notices a human
@@ -116,6 +121,8 @@ struct Plan {
     runner: SshRunner,
     batch: bool,
     ssh: SshOptions,
+    /// `--replace-pin` (ADR-0051 decision 5).
+    replace_pin: bool,
 }
 
 impl Plan {
@@ -171,7 +178,7 @@ impl Ops {
         let end_child = |child: SshChild| {
             runtime.block_on(child.finish());
         };
-        let hello = match check_hello(&hello, &plan.dest) {
+        let mut hello = match check_hello(&hello, &plan.dest) {
             Ok(hello) => hello,
             Err(err) => {
                 end_child(child);
@@ -198,9 +205,26 @@ impl Ops {
             }
         };
 
-        if let Err(err) = self.local_pin_check(&plan, &hello.fingerprint) {
-            end_child(child);
-            return Err(err);
+        let mut replaced = PairSshReplaced {
+            local: None,
+            remote: None,
+        };
+        let mut local_replace = None;
+        match self.local_replace_decision(&plan, &env, &hello.fingerprint) {
+            Err(err) => {
+                end_child(child);
+                return Err(err);
+            }
+            Ok(replace::LocalDecision::Proceed) => {}
+            Ok(replace::LocalDecision::Replace { old, asked }) => {
+                local_replace = Some(old);
+                if asked {
+                    // The answer took longer than the responder waits for a
+                    // commit.
+                    end_child(child);
+                    (child, hello) = self.reconnect(&runtime, &plan, &env, &hello.fingerprint)?;
+                }
+            }
         }
         if env.cancel.is_canceled() {
             end_child(child);
@@ -211,26 +235,51 @@ impl Ops {
         // Only a responder that said `on_demand` knows `ensure_serve`
         // (protocol §17.3); an older one gets the commit it always got.
         let ensure_serve = hello.on_demand && !plan.is_reverse();
-        let commit = Commit {
+        // `replace` goes only to a responder that said `replace_pin`, and
+        // only when the person already said yes with `--replace-pin`
+        // (ADR-0051 decision 5). The question for the remote's pin comes
+        // after its `conflict`, since only the remote knows about it.
+        let mut commit = Commit {
             version: hello.version,
             fingerprint: our_fingerprint.to_string(),
             name: remote_name.clone(),
             role: plan.role.as_str().to_string(),
             address: plan.to.clone(),
             ensure_serve: ensure_serve.then_some(true),
+            replace: (plan.replace_pin && hello.replace_pin).then_some(true),
         };
-        let result = runtime.block_on(async {
-            child.send(&BootstrapLine::Commit(commit)).await?;
-            let line = child.recv().await?;
-            let BootstrapLine::Result(result) = line else {
-                let _ = child.finish().await;
-                return Err(protocol_violation(
-                    "the remote answered with the wrong message",
-                ));
-            };
-            let _ = child.finish().await;
-            Ok(result)
-        })?;
+        let mut result = runtime.block_on(exchange_commit(
+            child,
+            BootstrapLine::Commit(commit.clone()),
+        ))?;
+        if result.status == ResultStatus::Conflict {
+            let old = replace::pinned_fingerprint_in(result.message.as_deref());
+            if !hello.replace_pin {
+                if plan.replace_pin {
+                    return Err(replace::remote_replace_unsupported(
+                        &remote_name,
+                        plan.dest.as_ssh_arg(),
+                    ));
+                }
+            } else if commit.replace.is_none()
+                && self.ask_replace_remote(
+                    &env,
+                    &plan,
+                    &remote_name,
+                    old.as_ref(),
+                    &our_fingerprint,
+                )
+            {
+                (child, hello) = self.reconnect(&runtime, &plan, &env, &hello.fingerprint)?;
+                commit.replace = Some(true);
+                result = runtime.block_on(exchange_commit(child, BootstrapLine::Commit(commit)))?;
+            }
+        }
+        replaced.remote = result
+            .replaced_fingerprint
+            .as_deref()
+            .and_then(|text| text.parse::<Fingerprint>().ok())
+            .map(|fp| fp.to_string());
         let remote = remote_from_result(
             &result,
             &remote_name,
@@ -251,7 +300,11 @@ impl Ops {
             _ => address,
         };
 
-        let written = if plan.is_reverse() {
+        let written = if let Some(old) = &local_replace {
+            replaced.local = Some(old.fingerprint.clone());
+            self.replace_local_pin(&plan, &address, &hello.fingerprint, &old.fingerprint)
+                .map(|peer| (peer, true))
+        } else if plan.is_reverse() {
             self.write_local_reverse_pin(&plan, &hello.fingerprint)
         } else {
             self.write_local_pin(&plan, &address, &hello.fingerprint)
@@ -321,8 +374,24 @@ impl Ops {
             ssh_proxied: resolved.proxied,
             verified,
             verify_error,
+            replaced: (replaced.local.is_some() || replaced.remote.is_some()).then_some(replaced),
         };
-        let notices = notices(&data, &plan, &resolved, &address, serve.as_ref());
+        let mut notices = notices(&data, &plan, &resolved, &address, serve.as_ref());
+        if let Some(replaced) = &data.replaced {
+            // Both stand in the audit log; say it once on the terminal too.
+            if let Some(old) = &replaced.local {
+                notices.push(format!(
+                    "replaced the pin \"{}\" on this machine (was {old}); its grants are gone",
+                    data.peer.name
+                ));
+            }
+            if let Some(old) = &replaced.remote {
+                notices.push(format!(
+                    "replaced the pin \"{}\" on the remote (was {old}); its grants are gone",
+                    data.remote.name
+                ));
+            }
+        }
         Ok(PairSshOutput { data, notices })
     }
 
@@ -397,6 +466,7 @@ impl Ops {
             runner,
             batch: batch_mode(env.machine_mode, env.stdin_is_terminal) || env.ssh.batch_mode(),
             ssh: env.ssh.clone(),
+            replace_pin: req.replace_pin,
         })
     }
 
@@ -558,6 +628,25 @@ struct CheckedHello {
     listening: Option<bool>,
     /// The responder can start a serve (`hello.on_demand`).
     on_demand: bool,
+    /// The responder can replace a pin (`hello.replace_pin`).
+    replace_pin: bool,
+}
+
+/// Send the `commit` and read the `result`, ending the child either way.
+async fn exchange_commit(
+    mut child: SshChild,
+    commit: BootstrapLine,
+) -> Result<BootstrapResult, OpError> {
+    child.send(&commit).await?;
+    let line = child.recv().await?;
+    let BootstrapLine::Result(result) = line else {
+        let _ = child.finish().await;
+        return Err(protocol_violation(
+            "the remote answered with the wrong message",
+        ));
+    };
+    let _ = child.finish().await;
+    Ok(result)
 }
 
 /// `ssh -G`, the responder call and the `hello` (ADR-0044 decisions 4, 9).
@@ -611,6 +700,7 @@ fn check_hello(hello: &Hello, dest: &Dest) -> Result<CheckedHello, OpError> {
         port,
         listening: hello.serve_listening,
         on_demand: hello.on_demand == Some(true),
+        replace_pin: hello.replace_pin == Some(true),
     })
 }
 
@@ -1256,6 +1346,8 @@ fn role_mismatch_notice(data: &PairSshData, plan: &Plan) -> Option<String> {
     ))
 }
 
+mod replace;
+pub use replace::{AUDIT_ACTION_REPLACE, remote_replace_unsupported};
 mod revive;
 pub use revive::SshRevival;
 

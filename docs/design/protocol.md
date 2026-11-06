@@ -783,16 +783,16 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 
 | 방향 | `type` | 필드 |
 |---|---|---|
-| 응답자 → client | `hello` | `versions`(지원하는 부트스트랩 버전, 이 절은 `[1]`), `qsh_version`, `status`(`ready`·`not_initialized`), `status`가 `ready`일 때 `fingerprint`(`sha256:BASE64`)·`serve_bind`·`serve_listening`(`true`·`false`, 모르면 `null` 또는 생략), 선택 `on_demand`(`true`면 이 응답자가 `commit.ensure_serve`를 안다, §17.6) |
-| client → 응답자 | `commit` | `version`(고른 버전), `fingerprint`(client의 것), `name`, `role`, 역방향일 때만 `address`, 선택 `ensure_serve`(`true`, §17.6) |
-| 응답자 → client | `result` | `status`(`pinned`·`exists`·`conflict`·`error`), `name`, `role`(없으면 `null`), `created`, 실패면 `code`(`ErrorCode` 어휘)와 `message`, `ensure_serve`에 답할 때만 `serve_bind`·`serve_started`·`serve_session_scoped`(§17.6) |
+| 응답자 → client | `hello` | `versions`(지원하는 부트스트랩 버전, 이 절은 `[1]`), `qsh_version`, `status`(`ready`·`not_initialized`), `status`가 `ready`일 때 `fingerprint`(`sha256:BASE64`)·`serve_bind`·`serve_listening`(`true`·`false`, 모르면 `null` 또는 생략), 선택 `on_demand`(`true`면 이 응답자가 `commit.ensure_serve`를 안다, §17.6), 선택 `replace_pin`(`true`면 `commit.replace`를 안다, §17.7) |
+| client → 응답자 | `commit` | `version`(고른 버전), `fingerprint`(client의 것), `name`, `role`, 역방향일 때만 `address`, 선택 `ensure_serve`(`true`, §17.6), 선택 `replace`(`true`, §17.7) |
+| 응답자 → client | `result` | `status`(`pinned`·`exists`·`conflict`·`error`), `name`, `role`(없으면 `null`), `created`, 실패면 `code`(`ErrorCode` 어휘)와 `message`, `ensure_serve`에 답할 때만 `serve_bind`·`serve_started`·`serve_session_scoped`(§17.6), `replace`에 답할 때만 `replaced_fingerprint`(§17.7) |
 
 순서는 hello, (client가 commit을 보냄), result 하나씩이다. client 쪽 수신 상태 기계는 첫 접두 줄이 hello가 아니거나, hello가 둘이거나, result 앞의 다른 메시지이거나, result 뒤에 줄이 있으면 순서 위반으로 끝낸다.
 
 ### 17.3 버전과 호환
 
 - 버전은 정수 목록이다. client가 `hello.versions`와 자기 목록의 교집합에서 가장 큰 값을 `commit.version`으로 고른다(`negotiate_version`). 교집합이 비면 commit을 보내지 않고 `UNSUPPORTED`로 끝난다.
-- 알 수 없는 필드는 무시한다. 필수 필드가 없거나 타입이 어긋나면 형식 오류다. 필수 여부는 위 표의 필드 목록이 그대로 기준이고, 선택 필드(`fingerprint`·`serve_bind`·`serve_listening`·`on_demand`·`address`·`ensure_serve`·`code`·`message`·`serve_started`·`serve_session_scoped`, result의 `serve_bind`)는 없어도 된다. 파서를 느슨하게 푸는 변경은 호환되지만 조이는 변경은 아니므로 필수로 두는 쪽을 보수적으로 골랐다.
+- 알 수 없는 필드는 무시한다. 필수 필드가 없거나 타입이 어긋나면 형식 오류다. 필수 여부는 위 표의 필드 목록이 그대로 기준이고, 선택 필드(`fingerprint`·`serve_bind`·`serve_listening`·`on_demand`·`address`·`ensure_serve`·`code`·`message`·`serve_started`·`serve_session_scoped`, result의 `serve_bind`, `replace_pin`·`replace`·`replaced_fingerprint`)는 없어도 된다. 파서를 느슨하게 푸는 변경은 호환되지만 조이는 변경은 아니므로 필수로 두는 쪽을 보수적으로 골랐다.
 - `status`는 열린 문자열이다. 이 빌드가 모르는 값은 별도 변종(`Unknown`)으로 보존해 호출자가 `REMOTE_ERROR`(`details.reason: "bootstrap_protocol"`)로 끝내게 한다. 파서가 추측하지 않는다. 그 문자열은 peer가 쓴 것이므로 화면에 내기 전에 `sanitize_peer_text`를 거친다.
 - 허용되는 변경은 §16.4와 같다. 새 선택 필드와 새 `status` 값을 더하는 것은 부트스트랩 버전을 올리지 않는다. 기존 필드의 제거, 의미 변경, 타입 변경, 그리고 새 `type`(모르는 쪽이 형식 오류로 끝낸다)은 새 부트스트랩 버전이 필요하다.
 
@@ -821,3 +821,17 @@ wire 쪽에는 JSON 쪽의 "두 minor release 유지"와 `qsh schema --json` 조
 client는 pin 주소를 ssh 호스트 이름과 `result.serve_bind`의 포트로 만든다. 바인드 주소가 와일드카드나 loopback이 아닌 특정 IP이면 그 IP가 호스트를 대신한다. `--address`가 있으면 그것이 이긴다. `serve_bind`가 소켓 주소로 읽히지 않으면 hello 기반 주소로 돌아간다.
 
 되살리기(ADR-0051 결정 4)는 같은 대화를 다시 쓴다. pin 대상으로 QUIC 다이얼이 `CONNECTION_FAILED`나 `TIMEOUT`(`udp_egress_blocked` 제외)으로 실패하고 그 pin이 ssh 부트스트랩이 만든 것(`trust.toml`의 `[[peer]]`에 `source = "ssh_bootstrap"`)이면, client가 같은 대상으로 ssh를 다시 열어 `ensure_serve`를 보낸다. 이때 hello의 fingerprint가 pin의 것과 같아야 하고 다르면 `SESSION_CONFLICT`로 멈춘다. 새 pin을 쓰지 않고(verify-only) 주소가 바뀌었으면 그 pin의 주소만 갱신한 뒤 한 번 더 다이얼한다. `hello.on_demand`가 없는 응답자는 `UNSUPPORTED`다.
+
+### 17.7 pin 교체 (ADR-0051 결정 5, additive)
+
+부트스트랩 버전은 1 그대로이고 아래는 모두 새 선택 필드다(§17.3).
+
+| 메시지 | 필드 | 뜻 |
+|---|---|---|
+| `hello` | `replace_pin: true` | 이 응답자는 `commit.replace`를 이해한다. 모르는 응답자는 보내지 않는다. |
+| `commit` | `replace: true` | 사람이 `--replace-pin`이나 TTY 질문으로 "예"라고 했다. 같은 이름의 pin이 다른 fingerprint이면 응답자가 그 pin을 지우고 이 commit의 것을 쓴다. |
+| `result` | `replaced_fingerprint` | 지운 pin의 fingerprint. 교체했을 때만 있고 이때 `status`는 `pinned`, `created`는 `true`다. peer가 쓴 값이므로 client는 fingerprint로 파싱될 때만 쓴다. |
+
+호환 규칙: client는 `hello.replace_pin == true`인 응답자에게만 `replace`를 보낸다. 모르는 응답자는 옛 바이트 그대로의 commit을 받고 `conflict`로 답하며, `--replace-pin`을 준 client는 그 `conflict`를 `UNSUPPORTED`로 끝낸다. `replace`가 없는 commit의 이름 충돌은 여전히 `conflict`이고 아무것도 쓰지 않는다. fingerprint가 같은 pin이 다른 이름으로 이미 있으면(`exists`) `replace`는 아무 일도 하지 않는다.
+
+응답자는 새 pin을 처음부터 쓴 것처럼 쓴다. `role`은 commit의 것이고 `grants`·`paths`·`scope`는 없다. audit(`pair.ssh_respond.replace_pin`)을 저장 전에 남기고 실패하면 `trust.toml`은 그대로이며 `error`(`INTERNAL`)로 답한다. 응답자는 `commit`을 한 번 받고 `result`로 끝나므로, client가 `conflict`를 본 뒤 사람에게 묻고 "예"이면 ssh를 새로 열어 같은 fingerprint의 응답자인지 확인한 뒤 `replace: true`인 commit을 보낸다.

@@ -373,6 +373,7 @@ fn a_session_scoped_serve_prints_the_warning_once_and_still_connects() {
         serve_bind: Some("[::]:4433".into()),
         serve_listening: Some(false),
         on_demand: Some(true),
+        replace_pin: None,
     })
     .encode_line()
     .unwrap()
@@ -388,6 +389,7 @@ fn a_session_scoped_serve_prints_the_warning_once_and_still_connects() {
             serve_bind: Some(bound.clone()),
             serve_started: Some(true),
             serve_session_scoped: Some(true),
+            replaced_fingerprint: None,
         })
         .encode_line()
         .unwrap()

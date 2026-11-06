@@ -44,6 +44,7 @@ fn commit(name: &str, fingerprint: &str, role: &str, address: Option<&str>) -> C
         role: role.into(),
         address: address.map(str::to_string),
         ensure_serve: None,
+        replace: None,
     }
 }
 
@@ -517,6 +518,7 @@ async fn ssh_respond_rejects_a_bad_commit_without_writing() {
         serve_bind: None,
         serve_listening: None,
         on_demand: None,
+        replace_pin: None,
     })
     .encode_line()
     .unwrap()
@@ -646,6 +648,7 @@ fn serve_listening_resolves_the_configured_spec() {
 fn ensure_commit(name: &str, fingerprint: &str) -> Vec<u8> {
     commit_bytes(Commit {
         ensure_serve: Some(true),
+        replace: None,
         ..commit(name, fingerprint, "full", None)
     })
 }
@@ -756,4 +759,110 @@ async fn ssh_respond_ensure_serve_is_not_answered_for_a_refused_commit() {
     let result = result_of(&lines);
     assert_eq!(result.status, ResultStatus::Conflict);
     assert_eq!(result.serve_bind, None);
+}
+
+// ---------------------------------------------------------------------
+// replace (ADR-0051 decision 5)
+// ---------------------------------------------------------------------
+
+fn granted_pin(ops: &Ops, name: &str, fingerprint: &str) {
+    pin(ops, name, fingerprint, Some("read-only"));
+    let path = ops.paths().trust_file();
+    let _lock = TrustStore::lock(&path).unwrap();
+    let mut store = TrustStore::load(&path).unwrap();
+    store
+        .set_grants(
+            name,
+            crate::acl::PinGrantKeys {
+                grants: Some(vec!["forward.local".into()]),
+                paths: None,
+                scope: None,
+            },
+        )
+        .unwrap();
+    store.save(&path).unwrap();
+}
+
+fn replace_commit(name: &str, fingerprint: &str) -> Vec<u8> {
+    let mut commit = commit(name, fingerprint, "full", None);
+    commit.replace = Some(true);
+    commit_bytes(commit)
+}
+
+#[tokio::test]
+async fn ssh_respond_advertises_replace_pin_and_replaces_with_grants_cleared() {
+    let (_dir, ops) = tree(true);
+    granted_pin(&ops, "laptop", &fp(0xA1));
+    let audit = Arc::new(MemoryAuditSink::new());
+    let responder = responder(&ops, audit.clone());
+    let (end, lines) = converse(&responder, &replace_commit("laptop", &fp(0xB1))).await;
+    assert_eq!(end, RespondEnd::Answered(ResultStatus::Pinned));
+    let BootstrapLine::Hello(hello) = &lines[0] else {
+        panic!("{lines:?}");
+    };
+    assert_eq!(hello.replace_pin, Some(true));
+    let result = result_of(&lines);
+    assert!(result.created);
+    assert_eq!(
+        result.replaced_fingerprint.as_deref(),
+        Some(fp(0xA1).as_str())
+    );
+    assert_eq!(result.role.as_deref(), Some("full"));
+
+    let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+    assert_eq!(store.peers().len(), 1);
+    let pin = store.find("laptop").unwrap();
+    assert_eq!(pin.fingerprint, fp(0xB1));
+    assert_eq!(pin.role.as_deref(), Some("full"));
+    assert_eq!((&pin.grants, &pin.paths, &pin.scope), (&None, &None, &None));
+    let records = audit.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].action, AUDIT_ACTION_REPLACE);
+    assert_eq!(records[0].action, "pair.ssh_respond.replace_pin");
+    assert_eq!(records[0].role.as_deref(), Some("full"));
+}
+
+#[tokio::test]
+async fn ssh_respond_without_replace_a_name_conflict_changes_nothing() {
+    let (_dir, ops) = tree(true);
+    granted_pin(&ops, "laptop", &fp(0xA1));
+    let before = trust_bytes(&ops);
+    let audit = Arc::new(MemoryAuditSink::new());
+    let responder = responder(&ops, audit.clone());
+    let input = commit_bytes(commit("laptop", &fp(0xB1), "full", None));
+    let (_end, lines) = converse(&responder, &input).await;
+    assert_eq!(result_of(&lines).status, ResultStatus::Conflict);
+    assert_eq!(trust_bytes(&ops), before);
+    assert!(audit.records().is_empty());
+}
+
+#[tokio::test]
+async fn ssh_respond_replace_without_a_durable_audit_record_leaves_trust_untouched() {
+    let (_dir, ops) = tree(true);
+    granted_pin(&ops, "laptop", &fp(0xA1));
+    let before = trust_bytes(&ops);
+    let audit = Arc::new(FailingAuditSink::new());
+    audit.fail();
+    let responder = responder(&ops, audit.clone());
+    let (_end, lines) = converse(&responder, &replace_commit("laptop", &fp(0xB1))).await;
+    let result = result_of(&lines);
+    assert_eq!(result.status, ResultStatus::Error);
+    assert_eq!(result.code, Some(ErrorCode::Internal));
+    assert_eq!(result.replaced_fingerprint, None);
+    assert_eq!(trust_bytes(&ops), before, "no audit record, no replacement");
+}
+
+#[tokio::test]
+async fn ssh_respond_from_before_replace_ignores_the_request_and_does_not_advertise_it() {
+    let (_dir, ops) = tree(true);
+    granted_pin(&ops, "laptop", &fp(0xA1));
+    let before = trust_bytes(&ops);
+    let responder = responder(&ops, Arc::new(MemoryAuditSink::new())).without_replace_pin();
+    let (_end, lines) = converse(&responder, &replace_commit("laptop", &fp(0xB1))).await;
+    let BootstrapLine::Hello(hello) = &lines[0] else {
+        panic!("{lines:?}");
+    };
+    assert_eq!(hello.replace_pin, None);
+    assert_eq!(result_of(&lines).status, ResultStatus::Conflict);
+    assert_eq!(trust_bytes(&ops), before);
 }

@@ -508,6 +508,7 @@ fn hello_line() -> String {
         serve_bind: None,
         serve_listening: None,
         on_demand: None,
+        replace_pin: None,
     })
     .encode_line()
     .unwrap()

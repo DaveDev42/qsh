@@ -54,8 +54,9 @@
 //!   `\n` turned into `\r\n`, as a Windows remote with a translating
 //!   console would deliver it.
 //! - With `respond_old=1` the responder's stdout is passed on with the
-//!   `"on_demand":true` field of its `hello` removed, so the client sees a
-//!   responder from before ADR-0051 (and never sends `ensure_serve`).
+//!   `"on_demand":true` and `"replace_pin":true` fields of its `hello`
+//!   removed, so the client sees a responder from before ADR-0051 (and never
+//!   sends `ensure_serve` or `replace`).
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -269,9 +270,10 @@ fn run_local_responder(cfg: &HashMap<String, String>, args: &[String]) -> i32 {
     let emit = |line: &[u8], out: &mut std::io::StdoutLock<'_>| {
         let mut line = line.to_vec();
         if old {
-            const FIELD: &[u8] = b",\"on_demand\":true";
-            while let Some(at) = line.windows(FIELD.len()).position(|w| w == FIELD) {
-                line.drain(at..at + FIELD.len());
+            for field in [&b",\"on_demand\":true"[..], &b",\"replace_pin\":true"[..]] {
+                while let Some(at) = line.windows(field.len()).position(|w| w == field) {
+                    line.drain(at..at + field.len());
+                }
             }
         }
         let _ = out.write_all(&line);

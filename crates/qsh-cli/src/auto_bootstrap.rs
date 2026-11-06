@@ -44,6 +44,7 @@ pub(crate) fn run(
             stdin_is_terminal: io::stdin().is_terminal(),
             cancel,
             ssh,
+            prompter: std::sync::Arc::new(qsh_core::prompts::StdioPrompter::new(false)),
         },
     );
     if !quiet {
