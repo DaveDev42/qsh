@@ -614,6 +614,29 @@ client's forwards, `~C` and `~R` are refused, `~~` sends a literal tilde,
 `~?` prints the escape help to stderr, and `--escape-char` changes or
 disables the escape character. Escape handling is only active when stdin is a TTY.
 
+On an interactive terminal, qsh by default draws the screen the host
+computes instead of replaying the host's output bytes. The host keeps a model
+of the terminal and sends only the cells that changed. After a flood of
+output, packet loss or a reattach, the screen catches up to the current state
+without redrawing what scrolled by, and Ctrl-C reaches a program that is
+printing without waiting behind the backlog. Lines that scroll off the top are
+sent to your local scrollback when the connection is idle. Updates travel as
+QUIC datagrams when the path allows it and on the session stream otherwise.
+`--screen-sync=auto|on|off` (or `[interactive].screen_sync` in `config.toml`)
+chooses the mode: `off` is the plain byte path, and `auto` falls back to it
+when the host is older or stdin or stdout is not a terminal. Image protocols
+such as sixel and kitty graphics are not drawn on the screen path, so use
+`--screen-sync=off` for those. `qsh exec`, `--json`, `--jsonl`, port forwards
+and `qsh cp` always use the byte path. The session's retained output buffer
+is still available as bytes from `qsh session read`.
+
+The transport also adapts to the path. `qsh doctor box` reports the measured
+round trip, loss and datagram size and the settings the policy chose from
+them. Bulk transfers such as tunnels and `qsh cp` slow down while someone is
+typing on a congested link, and keep-alive timing follows the path.
+`[transport].adaptive = "off"` pins all of this to fixed values
+(`docs/CLI.md` §6.23).
+
 Over an existing pin, the `user@` prefix asserts which account you expect; it
 does not pick one. The remote shell runs as the account that runs `qsh serve`,
 and naming a different login gets you `UNSUPPORTED` instead of a session.

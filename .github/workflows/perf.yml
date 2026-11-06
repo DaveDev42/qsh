@@ -1,7 +1,7 @@
 name: perf
 
 # Nightly perf trend (`docs/design/testing.md` CI 규율).
-# Runs the two acceptance perf tests with `QSH_PERF_OUT` so each appends one
+# Runs the two acceptance perf tests (plus the screen sync 100 MB `cat` ratio) with `QSH_PERF_OUT` so each appends one
 # JSON line, merges those into one data point, lets `cargo xtask perf-judge`
 # compare the point with the median of the last seven non-injected points, and
 # appends the point to `perf.jsonl` on the orphan branch `perf-data`. The point
@@ -90,6 +90,15 @@ jobs:
           QSH_ACCEPTANCE_STRICT: 1
           QSH_PERF_OUT: ${{ env.PERF_OUT }}
           QSH_PERF_INJECT_DELAY_MS: ${{ env.INJECT_DELAY_MS }}
+      # ADR-0052 decision 18 item 11: 100 MB `cat` through a PTY session, host
+      # emulator on over off, at least 0.5. The test asserts the floor and
+      # appends its line before asserting, so a red ratio is still recorded.
+      - name: Measure screen sync cat throughput
+        if: ${{ !cancelled() }}
+        run: |
+          cargo nextest run -p qsh-core --release --run-ignored only -E 'test(screen_throughput_through_a_pty_cat_of_100mb)' --no-fail-fast --success-output final
+        env:
+          QSH_PERF_OUT: ${{ env.PERF_OUT }}
       - name: Judge
         if: ${{ !cancelled() }}
         shell: bash
@@ -101,9 +110,11 @@ jobs:
             --argjson delay "$INJECT_DELAY_MS" '
             (map(select(.test == "tunnel_throughput")) | last) as $t
             | (map(select(.test == "tunnel_echo_under_load")) | last) as $e
+            | (map(select(.test == "screen_throughput")) | last) as $s
             | {at: $at, sha: $sha, runner: $runner,
                throughput_mbps: $t.throughput_mbps, raw_quinn_mbps: $t.raw_quinn_mbps,
                echo_p95_ms: $e.echo_p95_ms, rtt_ms: $e.rtt_ms,
+               screen_cat_ratio: $s.screen_cat_ratio,
                injected: ($delay > 0), inject_delay_ms: $delay}
             | select(.throughput_mbps != null and .echo_p95_ms != null)
           ' "$PERF_OUT" > "$PERF_POINT"

@@ -765,9 +765,32 @@ async fn screen_throughput_through_a_pty_cat_of_100mb() {
     let (off_b, _) = run(false).await;
     let (on_b, _) = run(true).await;
     let (off, on) = (off_a.max(off_b), on_a.max(on_b));
+    let ratio = on / off;
     println!(
-        "screen_throughput_pty: {} MiB through a PTY; emulator off {off:.0} MiB/s; on {on:.0} MiB/s; ratio {:.3}",
+        "screen_throughput_pty: {} MiB through a PTY; emulator off {off:.0} MiB/s; on {on:.0} MiB/s; ratio {ratio:.3}",
         bytes >> 20,
-        on / off
+    );
+    // `QSH_PERF_OUT`: one line for the nightly trend, written before the
+    // assertion so a red ratio is still recorded (`.github/workflows/perf.yml`).
+    if let Some(out) = std::env::var_os("QSH_PERF_OUT").filter(|p| !p.is_empty()) {
+        let line = format!(
+            "{{\"test\":\"screen_throughput\",\"screen_cat_ratio\":{ratio:.4},\"emulator_off_mibps\":{off:.1},\"emulator_on_mibps\":{on:.1}}}\n"
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(out)
+            .unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+    }
+    // ADR-0052 decision 18 item 11: at least half of the emulator-off rate.
+    assert!(
+        ratio >= SCREEN_CAT_RATIO_FLOOR,
+        "emulator on {on:.0} MiB/s is {ratio:.3} of off {off:.0} MiB/s (floor {SCREEN_CAT_RATIO_FLOOR})"
     );
 }
+
+/// ADR-0052 decision 18 item 11; `xtask/src/perf.rs` holds the same floor for
+/// the nightly judge.
+#[cfg(unix)]
+const SCREEN_CAT_RATIO_FLOOR: f64 = 0.5;
