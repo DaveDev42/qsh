@@ -493,3 +493,44 @@ fn every_config_key_is_settable() {
     }
     assert_eq!(Config::load(&ops.paths).unwrap(), Config::default());
 }
+
+/// ADR-0051 DoD 4: what `config set` writes is what `doctor` reads. Every
+/// key written through the op is a known key, so `doctor` reports no
+/// `config_unknown_key`, while a typo added by hand to the same file still is.
+#[test]
+fn doctor_reports_no_config_unknown_key_for_anything_config_set_wrote() {
+    let (_g, ops) = temp_ops();
+    ops.identity_init(qsh_proto::IdentityInitReq {
+        key_store: Some(qsh_proto::KeyStoreMode::File),
+        ..Default::default()
+    })
+    .unwrap();
+    for key in KEYS {
+        let path = key.path();
+        set(&ops, &path, &sample(&path, key))
+            .unwrap_or_else(|err| panic!("{path}: {}", err.message));
+    }
+    // `doctor` opens the audit path to see that it is writable; the sample
+    // `value` is relative and would land in the working directory.
+    let audit = _g.path().join("audit-probe.log");
+    set(&ops, "audit.path", &audit.display().to_string()).unwrap();
+    let unknown = |ops: &Ops| {
+        ops.doctor(
+            qsh_proto::DoctorReq { host: None },
+            std::time::SystemTime::now(),
+        )
+        .unwrap()
+        .findings
+        .into_iter()
+        .filter(|f| f.code == "config_unknown_key")
+        .collect::<Vec<_>>()
+    };
+    assert!(unknown(&ops).is_empty(), "{:?}", unknown(&ops));
+
+    let mut text = read_config(&ops);
+    text.push_str("\n[servr]\nbind = \"x\"\n");
+    write_config(&ops, &text);
+    let found = unknown(&ops);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].detail.contains("servr.bind"), "{found:?}");
+}

@@ -497,3 +497,16 @@ mod remote_script {
         assert!(!home.path().join(".local/bin/qsh").exists());
     }
 }
+
+/// Threat model A19: the install question tells the user that connecting also
+/// starts a serve (a UDP listener) on the remote, and the upgrade question
+/// that a running serve is left alone.
+#[test]
+fn the_install_question_names_the_serve_it_will_start() {
+    let missing = question(InstallReason::Missing, "box", "v1.2.3");
+    assert!(missing.contains("box has no qsh"), "{missing}");
+    assert!(missing.contains("v1.2.3"), "{missing}");
+    assert!(missing.contains("start a serve"), "{missing}");
+    let old = question(InstallReason::TooOld, "box", "v1.2.3");
+    assert!(old.contains("running serve is left alone"), "{old}");
+}
