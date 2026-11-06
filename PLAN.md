@@ -73,4 +73,12 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 
 ## 3. M23 스텝
 
-- [ ] **범위 ADR(ADR-0053).** ADR-0050의 M23 행과 ADR-0052 결정 12의 예측 손잡이(켜기 30 ms·끄기 20 ms, 밑줄 80/50 ms)를 출발점으로, 예측 엔진의 위치(qsh-core client 화면 모델 위), 예측 대상과 끄는 조건(echo-off 감지, 대체 화면, 연속 오예측 수), 확인·철회 규칙(입력 offset과 화면 상태 번호의 대응), 상태 줄의 내용·위치·`qsh::adapt`·M22 `adapt_report()`와의 관계, 설정 키(`[interactive].predict` 같은 것)와 플래그, wire 변경 유무, 수용 기준(고지연·손실 프로필의 체감 지연, 오예측 철회의 화면 정확성, 세 OS)을 정한다. Dave 승인 전에는 아래 스텝을 채우지 않는다.
+- [x] **범위 ADR(ADR-0053).** 2026-11-07 승인(Dave 결정, 네 항목 모두 추천대로: `predict` 기본 `auto`, 상태 줄 맨 윗줄, 한글 예측, 옛 host는 예측 끔). 수용 기준은 ADR-0053의 마지막 결정(DoD 열세 항목)이다.
+- [ ] **`Predictor`와 표 테스트, proptest.** `qsh-core/src/client/predict.rs`, 시계 없는 상태 기계, epoch 규칙, 예측 대상·끄는 조건, 연속 오예측 3회 정지·확인 4회 재개, 상한 256. wire 없이 가짜 `ScreenEcho`로 "모든 예측이 정리되면 로컬 화면 = host 화면" proptest.
+- [ ] **렌더러 합성과 로컬 터미널 모델 시험.** `ScreenRenderer`가 host 화면 위에 예측 겹을 그리고, 철회는 바뀐 셀만 다시 그린다(화면 지우기 없음). 밑줄 규칙(ADR-0052 결정 12 손잡이, 250 ms 늦은 확인).
+- [ ] **`screen-echo.v1`과 `ScreenEcho`, host 입력 시각 표, tty 판정, fuzz.** `SessionFrame` 10, `DatagramFrame` 13, `ECHO_GRACE` 50 ms, Unix `tcgetattr`(KERNEL/APP/SECRET), Windows `UNKNOWN`, `capabilities.json` 재생성, protocol §18, fuzz 타깃.
+- [ ] **attach driver 연결과 정책 값, 늦은 확인.** 입력 송신 지점에서 예측, `ScreenEcho`로 확인·철회, 역방향 route의 RTT 표본(`InputAck` 간격).
+- [ ] **`LinkStatus`와 상태 줄, 역방향.** `PathWatch`+복구 루프, `max(2 s, 4×srtt)`, 맨 윗줄 반전, 1초 갱신, 첫 인증 응답에서 지움.
+- [ ] **플래그·설정 키·doctor·`qsh::predict`.** `--predict=auto|always|never`, `[interactive].predict`, `--status-line=on|off`, `[interactive].status_line`, info 코드 `screen_echo_unsupported`, man.
+- [ ] **수용 시험.** chaos(RTT 300 ms 예측 표시 p95 ≤ 20 ms 등), 암호 입력 비표시, 세 OS, Windows host(cmd.exe/pwsh).
+- [ ] **문서와 마감.** `docs/CLI.md`·man·README, threat model 행과 고정 테스트, ROADMAP M23 마감 노트.
