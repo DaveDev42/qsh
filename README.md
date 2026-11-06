@@ -25,9 +25,9 @@ scp-style file copy (`qsh cp`), port forwards (`-L`, `-R`, and a SOCKS5 proxy
 with `-D`), reverse connections for hosts behind NAT, and a JSON CLI contract
 (`qsh.cli/v1`) for scripts and agents.
 
-If you can already `ssh` to a machine, `qsh pair ssh` uses that ssh connection
-to pin both machines to each other, and the first `qsh box` does the same
-without being asked. Taking a peer out of the trust store, or lowering its
+If you can already `ssh` to a machine, `qsh box` is the whole setup. The first
+run uses that ssh connection once to install qsh on the remote (with your
+consent), start a serve there, and pin both machines to each other. Taking a peer out of the trust store, or lowering its
 role, closes its open connections on that machine within 2 seconds.
 
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
@@ -249,36 +249,53 @@ same content from the same command tree.
 
 ## First run
 
-If you can already `ssh` to the host and `qsh` is installed there, start with
-three commands and let `qsh` do the pinning:
+If you can already `ssh` to the host, one line is enough:
 
 ```bash
-# Host, the machine that will run the shell:
-qsh init
-qsh serve                                    # leave this running, listens on [::]:4433
-
-# Client:
-qsh init
 qsh box                                      # "box" is whatever you type after `ssh`
 ```
 
 `box` is not pinned yet, so `qsh` says so on stderr and runs `ssh box` for
 you. ssh asks its own questions (password, passphrase, host key) on your
-terminal. Over that ssh connection the two machines exchange fingerprints and
-pin each other, and then the shell you asked for opens as usual. The host
-pins the client with role `full`, the client pins the host with role `none`.
-The next `qsh box` does not touch ssh. Once the pins exist, nothing about
-the connection depends on ssh any more.
+terminal. Over that one ssh connection qsh:
 
-This only happens for the interactive `qsh [user@]host` and `qsh cp`, never
-with `--json`/`--jsonl`, and never for a name that is already in
-`hosts.toml`, `trust.toml` or a reverse registration. Put `bootstrap = "off"`
-under `[ssh]` in `config.toml` to turn it off, or run the step yourself with
-`qsh pair ssh box`. If the host is not running `qsh serve` when ssh finishes,
-the pins stay and the command ends with `CONNECTION_FAILED`; start `serve`
-and run it again. A Windows client runs the same bootstrap with `ssh.exe`,
-and a Windows machine can be the remote end when the OpenSSH Server optional
-feature is on (see [Known limitations](#known-limitations)).
+- creates this machine's identity if it has none;
+- looks for `qsh` on the host. If it is missing, or older than yours, it asks
+  once whether to install the same release into `~/.local/bin` there
+  (`--install-remote` answers yes ahead of time, `--no-install-remote` no;
+  without a terminal and without a flag it installs nothing and stops with
+  `remote_qsh_missing`);
+- starts a `qsh serve` for that account if none is running. This serve exits
+  after ten minutes with no sessions and no connections (`[serve]
+  on_demand_idle_ms`), and a detached session keeps it alive;
+- pins the two machines to each other. The host pins the client with role
+  `full`, which is no more than the ssh login already allows. The client pins
+  the host with role `none`.
+
+Then ssh is closed and the shell opens over QUIC. The next `qsh box` does not
+touch ssh. If the connection fails because the on-demand serve has idled out,
+`qsh` goes back through ssh once, starts only the serve, and connects, without
+asking anything. On Linux with `KillUserProcesses=yes` and no linger, the serve
+ends with the ssh session and `qsh` prints a one-line warning. For a serve that
+is there with nobody logged in, run `qsh service install --always-on` on the
+host.
+
+This happens for the interactive `qsh [user@]host`, for `qsh host command` and
+for `qsh cp`, never with `--json`/`--jsonl`, and never for a name that is
+already in `hosts.toml`, `trust.toml` or a reverse registration. Put
+`bootstrap = "off"` under `[ssh]` in `config.toml`, or pass `--no-ssh`, to turn
+it off, or run the pinning step yourself with `qsh pair ssh box`. A pin
+that no longer matches the key the ssh login reaches (the host was reinstalled,
+or this machine's key changed) is never replaced silently:
+`qsh pair ssh box --replace-pin`, or a `y` at the replace-pin question on a
+terminal (the default is no), does it. A Windows client runs
+the same bootstrap with `ssh.exe`, and a Windows machine can be the remote end
+when the OpenSSH Server optional feature is on (see [Known
+limitations](#known-limitations)).
+
+The other ways to pin are for machines that cannot use ssh: direct QUIC with
+fingerprints you copy, a one-time pairing code, a certificate file, and
+reverse connections for a host behind NAT. All of them are described below.
 
 Without ssh, six commands pin the two machines by hand. This path, not the
 one above, is the literal script that `docs/campaigns/m9-stopwatch.md` and
@@ -316,11 +333,13 @@ covers narrower roles.
 Swap `host.example.com:4433` for wherever the host actually listens, and
 the two `sha256:…` fingerprints for what `qsh init --json` printed on each
 side. `box` and `laptop` are names picked for this walkthrough. Call the
-two machines whatever you want. `dave` has to be the account actually
-running `qsh serve` on the host, or the host answers `UNSUPPORTED`; drop
-the `dave@` prefix entirely (`qsh box`) and it always works, since the
-shell runs as that account either way (`user@` only ever asserts, it never
-selects; see [`user@`'s meaning](docs/CLI.md#7-human-interactive-mode)).
+two machines whatever you want. Over an existing pin, `dave` has to be the
+account actually running `qsh serve` on the host, or the host answers
+`UNSUPPORTED`; drop the `dave@` prefix (`qsh box`) and it always works, since
+the shell runs as that account either way. On a first ssh connection `user@`
+(or `-l user`) is the ssh login, so it does choose the account whose serve is
+started; after that the QUIC side only checks it (see [`user@`'s
+meaning](docs/CLI.md#7-human-interactive-mode)).
 
 Typing the fingerprint by hand is the part most likely to cost time. Drop
 `--fingerprint` from the client's `trust add` and it dials instead, prints
@@ -445,7 +464,11 @@ paths = ["/srv/share"]
 ```
 
 Rows can only add to a role, never take away. To give a peer less than a
-role, pick a smaller role and add rows for the rest. `qsh acl check` and
+role, pick a smaller role and add rows for the rest. For one or two extra
+actions you do not need `acl.toml` at all: `qsh trust allow phone forward.local`
+writes them onto the pin (`--path` for file actions, `--scope` to set which
+resources they cover), `qsh trust deny` takes them off, and neither needs a
+restart. `forward.socks` cannot be granted this way or any other. `qsh acl check` and
 `qsh acl show` report the role, the rows, and which one allowed a request;
 `qsh acl check --path` does the same for a file path.
 
@@ -591,9 +614,37 @@ client's forwards, `~C` and `~R` are refused, `~~` sends a literal tilde,
 `~?` prints the escape help to stderr, and `--escape-char` changes or
 disables the escape character. Escape handling is only active when stdin is a TTY.
 
-The `user@` prefix asserts which account you expect; it never selects one.
-The remote shell always runs as the account that runs `qsh serve`, and
-naming a different login gets you `UNSUPPORTED` instead of a session.
+Over an existing pin, the `user@` prefix asserts which account you expect; it
+does not pick one. The remote shell runs as the account that runs `qsh serve`,
+and naming a different login gets you `UNSUPPORTED` instead of a session.
+
+### Using qsh where you would use ssh
+
+The root command takes ssh's grammar, `qsh [ssh options] [user@]host
+[command [arg...]]`, so `alias ssh=qsh` covers the usual cases. Options that
+describe the ssh path go to ssh, not to QUIC: `-p 2222` is sshd's port and `-i`,
+`-F`, `-o`, `-C`, `-l`, `-J` shape the ssh command line used for the first
+connection and the serve revival. `qsh` finds its own UDP address during the
+bootstrap and keeps it in the pin.
+
+```bash
+qsh box uname -a                         # a command: runs under the account's shell, no PTY
+qsh -t box top                           # the command on a PTY; a session you can detach
+qsh -T box                               # login shell without a PTY
+qsh -N -L 8080:localhost:80 box          # forwards only, no shell
+qsh -fN -D 1080 box                      # go to the background once the forward is up
+qsh -o ConnectTimeout=5 -4 box
+```
+
+The words after the host are the command, joined with spaces and handed to the
+remote shell with `-c`, as ssh does, so `$VAR`, pipes and `&&` are interpreted
+on the host. Exit status is the remote command's (0 to 254); `qsh`'s own
+failures, including a usage error in this form, exit 255. A host whose name is
+also a subcommand (`qsh version`) is reached as `user@host`, `-l user host` or
+`qsh -- host`. `-f` is only accepted together with `-N`. `-A` and a QUIC-side
+`-J` are refused as `UNSUPPORTED` for now, and so are `-X -Y -W -M -S -O -w -b
+-B -c -m -Q`. `--json` and `--jsonl` are refused on this form, because its
+stdout is the remote terminal; scripts use `qsh exec`.
 
 ### Port forwards
 
@@ -1270,7 +1321,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
 - The ssh bootstrap (`qsh pair ssh` and the automatic one on `qsh box` and
-  `qsh cp`) trusts the remote fingerprint exactly as far as it trusts that ssh
+  `qsh cp`) trusts the remote fingerprint, and any `qsh` it installs there,
+  exactly as far as it trusts that ssh
   connection's host authentication, and no further
   ([ADR-0044](docs/adr/0044-ssh-bootstrap.md)). qsh never overrides your ssh
   settings. If they accept a host key you have not seen before
@@ -1327,6 +1379,7 @@ old-glibc check.
 | M18 | Session home | Waits on the real-device mobility campaign (M8 DoD 3) |
 | M19 | Windows client | Done (2026-10-18); Windows campaign rounds open |
 | M20 | Windows host | Done (2026-10-18); Windows campaign rounds open |
+| M21 | Config-free first connection and ssh-compatible commands | Features done; the hand-run always-on recipe round is open |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
 have run on every tag since `v0.2.0`. The first crates.io push waits on the

@@ -223,6 +223,38 @@ mod tests {
         }
     }
 
+    /// ADR-0051 decision 13's table is the whole registry: the four questions
+    /// M21 adds, each with the flag that answers it. Adding a question means
+    /// changing this list and the ADR together.
+    #[test]
+    fn the_registry_is_exactly_the_four_questions_of_decision_13() {
+        let rows: Vec<(&str, &[&str])> = REGISTRY.iter().map(|p| (p.id, p.flags)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("service.always_on.move_key", &["--move-key"][..]),
+                ("pair.ssh.replace_pin", &["--replace-pin"][..]),
+                (
+                    "ssh.install_remote",
+                    &["--install-remote", "--no-install-remote"][..]
+                ),
+                ("ssh.upgrade_remote", &["--install-remote"][..]),
+            ]
+        );
+        // Their non-interactive fallbacks are the reasons the table names.
+        let fallback = |id: &str| {
+            REGISTRY
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .non_interactive
+        };
+        assert!(fallback("service.always_on.move_key").contains("keystore_session_bound"));
+        assert!(fallback("pair.ssh.replace_pin").contains("pin_conflict"));
+        assert!(fallback("ssh.install_remote").contains("remote_qsh_missing"));
+        assert!(fallback("ssh.upgrade_remote").contains("remote_qsh_too_old"));
+    }
+
     /// ADR-0051 decision 13: the remote install and upgrade rows and their
     /// flags.
     #[test]

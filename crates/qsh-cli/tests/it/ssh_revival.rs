@@ -458,3 +458,53 @@ fn cp_and_the_root_form_revive_the_serve_as_well() {
         );
     }
 }
+
+/// ADR-0051 DoD 1, the whole path in one command: a remote with no `qsh`, a
+/// client that has never seen it, and `qsh box <command>` with the install
+/// consent given by flag (a terminal would be asked the same question). The
+/// fake ssh answers the OS probe and the scripted install; the responder and
+/// the on-demand serve behind it are the real ones. Nothing writes a config
+/// file for either side beyond the fake ssh path the harness needs.
+#[test]
+fn a_clean_remote_gets_qsh_installed_and_the_first_command_runs() {
+    let mut cold = Cold::new();
+    let exe = if cfg!(windows) { "qsh.exe" } else { "qsh" };
+    let installed = cold.remote.home_dir().join(".local").join("bin").join(exe);
+    if cfg!(windows) {
+        cold.fake.probe_windows("AMD64");
+    } else {
+        cold.fake.probe_unix("Linux x86_64");
+    }
+    cold.fake
+        .missing_until(&installed, 127)
+        .install_plan("0")
+        .install_report(&installed)
+        .install_touch(&installed);
+    assert!(cold.serve_record().is_none());
+    assert!(!installed.exists());
+
+    let mut command = cold
+        .client
+        .command(&["--install-remote", "box", "echo", "first-line"]);
+    command
+        .stdin(std::process::Stdio::null())
+        .env("QSH_GH", cold.client.home_dir().join("no-such-gh"));
+    let out = command.output().expect("run qsh");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(exit_code(&out), 0, "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "first-line",
+        "{stderr}"
+    );
+
+    // The install happened, the serve is the on-demand one, and the pin
+    // remembers both the address and the installed binary.
+    assert!(installed.exists());
+    let record = cold.wait_for_serve();
+    assert_eq!(record["mode"], "on_demand", "{record}");
+    let pin = cold.pin();
+    assert_eq!(pin.address, record["addr"].as_str().unwrap());
+    assert_eq!(pin.remote_qsh.as_deref(), installed.to_str());
+    assert_eq!(pin.source.as_deref(), Some("ssh_bootstrap"));
+}
