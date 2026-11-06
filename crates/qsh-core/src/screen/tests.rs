@@ -579,7 +579,8 @@ fn a_large_chunk_is_fed_in_bounded_slices_and_stays_cheap() {
 /// The history must not cost the pump a flood: with the default history the
 /// emulator keeps within 70% of the speed it has with history off (formatting
 /// every scrolled-off row used to cut it to about 40%). Best of three on a
-/// few MiB, so a loaded CI host moves both sides alike.
+/// few MiB once the history is full, so a loaded CI host moves both sides
+/// alike.
 #[test]
 fn history_costs_a_flood_almost_nothing() {
     let line = b"0001 the quick brown fox jumps over the lazy dog 0123456789 abcdefghijklmnopqrstuvwxyz\r\n";
@@ -591,8 +592,15 @@ fn history_costs_a_flood_almost_nothing() {
                     history_rows,
                     ..ScreenOptions::default()
                 });
+                // Fill the history first: the claim is about a flood that
+                // has already filled it, not the one-off formatting of the
+                // first history_rows rows.
+                let warm = (history_rows / 180 + 2) as u64;
+                for i in 0..warm {
+                    s.feed(&chunk, i);
+                }
                 let t = Instant::now();
-                for i in 0..60u64 {
+                for i in warm..warm + 60 {
                     s.feed(&chunk, i);
                 }
                 std::hint::black_box(&s);
