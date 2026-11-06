@@ -6,16 +6,20 @@
 //! connection: the caller passes `now` and the snapshot, so a test drives it
 //! with made-up time.
 //!
-//! Only knob (c) is consumed so far; the others are decided and ignored.
+//! Knob (c) and knob (e) are consumed so far; the others are decided and
+//! ignored. Knob (e) is applied by the control-stream `Ping` (ADR-0052
+//! decision 13): [`CarrierRunner::next_ping_at`] says when the next one is
+//! due and the caller writes it.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use qsh_transport::ConnStats;
 
 use super::{
-    Carrier, DATAGRAM_RETEST_PERIOD, DATAGRAM_UNACKED_RTTS, Knobs, Observed, RttVar, StreamWhy,
-    User, decide,
+    Carrier, DATAGRAM_RETEST_PERIOD, DATAGRAM_UNACKED_RTTS, KEEP_ALIVE_DEFAULT, KEEP_ALIVE_MIN,
+    Knobs, Observed, RttVar, StreamWhy, User, decide,
 };
 
 /// How often [`decide`] runs.
@@ -30,6 +34,11 @@ pub const RTT_FLOOR: Duration = Duration::from_millis(50);
 /// authenticated frame arrived this recently. Longer than the 15 s
 /// keep-alive, so an idle but healthy connection still counts.
 pub const ALIVE_WINDOW: Duration = Duration::from_secs(20);
+/// A peer address change only counts as a NAT rebind (decision 12 (e)) when
+/// the connection had been quiet at least this long before it. Below it the
+/// change is a path switch under traffic, not a lapsed binding, and
+/// `clamp(g / 2, 1 s, 15 s)` would pin the floor on a one-second gap.
+pub const NAT_REBIND_MIN_IDLE: Duration = Duration::from_secs(2);
 
 /// Per-connection state for the carrier knob.
 #[derive(Debug)]
@@ -43,6 +52,13 @@ pub struct CarrierRunner {
     last_rx: u64,
     last_rx_moved: Instant,
     user: User,
+    /// Where the peer was last seen, whether it moved since the last
+    /// receive, and the idle time of a rebind not yet fed to [`decide`].
+    peer: Option<SocketAddr>,
+    rebind_pending: bool,
+    rebind_idle: Option<Duration>,
+    /// When the last keep-alive `Ping` went out.
+    last_ping: Option<Instant>,
 }
 
 /// What a [`CarrierRunner::tick`] did.
@@ -71,7 +87,57 @@ impl CarrierRunner {
             last_rx: 0,
             last_rx_moved: now,
             user,
+            peer: None,
+            rebind_pending: false,
+            rebind_idle: None,
+            last_ping: None,
         }
+    }
+
+    /// Report where the peer's packets come from. A change since the last
+    /// report is a NAT rebind when the connection had been idle: the idle
+    /// time `g` is measured to the next [`Self::tick`] that sees the
+    /// connection receive again.
+    pub fn observe_peer(&mut self, addr: SocketAddr) {
+        if self.peer.is_some_and(|p| p != addr) {
+            self.rebind_pending = true;
+        }
+        self.peer = Some(addr);
+    }
+
+    /// Record a rebind after `idle` of quiet without a real address change
+    /// (test hook: `Server::inject_nat_rebind`).
+    pub fn inject_nat_rebind(&mut self, idle: Duration) {
+        self.rebind_idle = Some(idle);
+    }
+
+    /// When the next keep-alive `Ping` is due, or `None` when quinn's own
+    /// keep-alive is the whole story: the user pinned the interval, or the
+    /// policy has not shortened it below the 15 s the transport already
+    /// uses. Quinn's timer keeps running underneath, so this only ever adds
+    /// pings, never replaces them (ADR-0052 decision 13: the interval can
+    /// only get shorter).
+    pub fn next_ping_at(&self) -> Option<Instant> {
+        if self.user.keep_alive.is_some() {
+            return None;
+        }
+        let every = self.knobs.keep_alive;
+        if every >= KEEP_ALIVE_DEFAULT {
+            return None;
+        }
+        // Defence in depth: never faster than ADR-0021's floor.
+        let every = every.max(KEEP_ALIVE_MIN);
+        Some(self.last_ping.unwrap_or(self.last_rx_moved) + every)
+    }
+
+    /// Whether a keep-alive `Ping` is due at `now`.
+    pub fn ping_due(&self, now: Instant) -> bool {
+        self.next_ping_at().is_some_and(|at| at <= now)
+    }
+
+    /// The caller wrote a keep-alive `Ping`.
+    pub fn ping_sent(&mut self, now: Instant) {
+        self.last_ping = Some(now);
     }
 
     /// The current knobs.
@@ -96,6 +162,11 @@ impl CarrierRunner {
         unacked_for: Option<Duration>,
     ) -> Tick {
         if stats.rx_frames != self.last_rx {
+            let quiet = now.duration_since(self.last_rx_moved);
+            if self.rebind_pending && quiet >= NAT_REBIND_MIN_IDLE {
+                self.rebind_idle = Some(quiet);
+            }
+            self.rebind_pending = false;
             self.last_rx = stats.rx_frames;
             self.last_rx_moved = now;
         }
@@ -133,6 +204,7 @@ impl CarrierRunner {
                 .stuck_since
                 .is_some_and(|t| now.duration_since(t) >= DATAGRAM_RETEST_PERIOD),
             user: self.user,
+            nat_rebind_after_idle: self.rebind_idle.take(),
             ..Observed::default()
         }
         .with_path_stats(&stats, &start, rtt_var);
@@ -259,5 +331,78 @@ mod tests {
             r.carrier_for_update(20),
             Carrier::Stream(StreamWhy::FragmentsLossy)
         );
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([192, 0, 2, 1], port))
+    }
+
+    /// Drive a rebind after `quiet` of silence and return the runner.
+    fn after_rebind(user: User, quiet: Duration) -> (CarrierRunner, Instant) {
+        let t0 = Instant::now();
+        let mut r = CarrierRunner::new(t0, user);
+        r.observe_peer(addr(1000));
+        r.tick(t0, stats(20, 1), false, None);
+        // Silence, then traffic from a new address.
+        r.observe_peer(addr(2000));
+        let t1 = t0 + quiet;
+        r.tick(t1, stats(20, 2), false, None);
+        (r, t1)
+    }
+
+    #[test]
+    fn no_ping_is_scheduled_until_the_policy_shortens_the_interval() {
+        let t0 = Instant::now();
+        let mut r = CarrierRunner::new(t0, User::default());
+        r.tick(t0, stats(20, 1), false, None);
+        assert_eq!(r.next_ping_at(), None);
+        assert!(!r.ping_due(t0 + secs(60)));
+    }
+
+    #[test]
+    fn a_rebind_after_a_quiet_spell_schedules_pings_at_half_the_gap() {
+        let (mut r, t1) = after_rebind(User::default(), secs(10));
+        assert_eq!(r.knobs().keep_alive, secs(5));
+        assert!(r.knobs().reasons.contains(&super::super::Reason::NatRebind));
+        // Anchored on the last frame received, then on the last ping.
+        assert_eq!(r.next_ping_at(), Some(t1 + secs(5)));
+        assert!(!r.ping_due(t1 + Duration::from_millis(4999)));
+        assert!(r.ping_due(t1 + secs(5)));
+        r.ping_sent(t1 + secs(5));
+        assert_eq!(r.next_ping_at(), Some(t1 + secs(10)));
+    }
+
+    #[test]
+    fn a_pinned_interval_never_gets_a_policy_ping() {
+        let user = User {
+            keep_alive: Some(secs(8)),
+            ..User::default()
+        };
+        let (r, t1) = after_rebind(user, secs(10));
+        assert_eq!(r.knobs().keep_alive, secs(8));
+        assert_eq!(r.next_ping_at(), None);
+        assert!(!r.ping_due(t1 + secs(600)));
+    }
+
+    #[test]
+    fn a_change_under_traffic_or_in_the_same_second_is_not_a_rebind() {
+        let (r, _) = after_rebind(User::default(), Duration::from_millis(1500));
+        assert_eq!(r.knobs().keep_alive, KEEP_ALIVE_DEFAULT);
+        assert_eq!(r.next_ping_at(), None);
+        // Exactly at the idle floor it counts, and the interval is clamped
+        // up to ADR-0021's 1 s.
+        let (r, _) = after_rebind(User::default(), NAT_REBIND_MIN_IDLE);
+        assert_eq!(r.knobs().keep_alive, KEEP_ALIVE_MIN);
+    }
+
+    #[test]
+    fn the_same_address_is_not_a_rebind() {
+        let t0 = Instant::now();
+        let mut r = CarrierRunner::new(t0, User::default());
+        r.observe_peer(addr(1000));
+        r.tick(t0, stats(20, 1), false, None);
+        r.observe_peer(addr(1000));
+        r.tick(t0 + secs(30), stats(20, 2), false, None);
+        assert_eq!(r.knobs().keep_alive, KEEP_ALIVE_DEFAULT);
     }
 }

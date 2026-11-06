@@ -161,6 +161,24 @@ pub struct SessionStream {
     /// connection. The carrier stays unused until the client has sent a
     /// datagram on the channel, which tells the host it reads them.
     pub datagram: Option<DatagramParams>,
+    /// What the keep-alive policy needs from the host (ADR-0052 decision
+    /// 13).
+    pub keep_alive: KeepAliveParams,
+}
+
+/// What the dispatch edge hands a screen-sync attach for knob (e), the
+/// keep-alive interval (ADR-0052 decisions 12 (e) and 13).
+#[derive(Clone, Default)]
+pub struct KeepAliveParams {
+    /// `[transport].keep_alive_ms` when the operator wrote the key: the
+    /// interval is pinned and the policy sends no `Ping`.
+    pub pinned: Option<Duration>,
+    /// Test hook ([`crate::server::Server::inject_nat_rebind`]): idle
+    /// milliseconds of a NAT rebind to report once, `0` for none.
+    pub rebind_hook: Arc<AtomicU64>,
+    /// Policy `Ping`s written, for tests and `qsh::adapt` debugging
+    /// ([`crate::server::Server::keep_alive_pings`]).
+    pub pings: Arc<AtomicU64>,
 }
 
 /// What the dispatch edge hands a screen-sync attach for its datagram
@@ -265,6 +283,7 @@ impl SessionStream {
             events,
             screen,
             datagram,
+            keep_alive,
         } = self;
 
         // While this token lives the session counts as attached and its
@@ -335,6 +354,7 @@ impl SessionStream {
                 depth,
                 connection.clone(),
                 dg_tx,
+                keep_alive,
             )),
             None => tokio::spawn(output_pump(
                 Arc::clone(&sessions),
@@ -661,6 +681,44 @@ impl ScreenSender {
         }
     }
 
+    /// Feed the policy what knob (e) reads: where the peer's packets come
+    /// from (a change after an idle spell is a NAT rebind).
+    fn observe_path(&mut self, params: &KeepAliveParams) {
+        self.runner.observe_peer(self.conn.remote_address());
+        let injected = params.rebind_hook.swap(0, Ordering::AcqRel);
+        if injected != 0 {
+            self.runner
+                .inject_nat_rebind(Duration::from_millis(injected));
+        }
+    }
+
+    /// Apply knob (e), the keep-alive interval (ADR-0052 decision 13): when
+    /// the policy has shortened the interval below quinn's own 15 s and the
+    /// user left the key unset, write a control-stream `Ping` whenever one
+    /// is due. The write never waits: a full control queue skips the ping,
+    /// and the next wake-up tries again.
+    fn send_keep_alive(
+        &mut self,
+        now: Instant,
+        events: &Option<mpsc::Sender<ControlMessage>>,
+        params: &KeepAliveParams,
+    ) {
+        let Some(tx) = events else { return };
+        if !self.runner.ping_due(now) {
+            return;
+        }
+        let ping = ControlMessage::new(0, control_message::Body::Ping(wire::Ping {}));
+        if tx.try_send(ping).is_ok() {
+            self.runner.ping_sent(now);
+            params.pings.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                target: "qsh::adapt",
+                interval_ms = self.runner.knobs().keep_alive.as_millis() as u64,
+                "keep-alive ping"
+            );
+        }
+    }
+
     /// When the pump must look again even if nothing arrives: the resend of
     /// a datagram update that is still unacked.
     fn resend_deadline(&self) -> Option<Instant> {
@@ -796,6 +854,7 @@ async fn screen_pump(
     depth: Arc<SendDepth>,
     conn: Connection,
     dg: Option<DatagramTx>,
+    keep_alive: KeepAliveParams,
 ) -> Result<(), SessionStreamError> {
     let mut sender = ScreenSender {
         sessions: Arc::clone(&sessions),
@@ -805,7 +864,13 @@ async fn screen_pump(
         sync: Arc::clone(&sync),
         conn,
         dg,
-        runner: CarrierRunner::new(Instant::now(), User::default()),
+        runner: CarrierRunner::new(
+            Instant::now(),
+            User {
+                keep_alive: keep_alive.pinned,
+                ..User::default()
+            },
+        ),
         last_sent_stream: 0,
         force_full: false,
         inflight: VecDeque::new(),
@@ -820,8 +885,10 @@ async fn screen_pump(
             sender.last_sent_stream = 0;
             dirty = true;
         }
+        sender.observe_path(&keep_alive);
         sender.tick(now);
-        let mut wake = None::<Instant>;
+        sender.send_keep_alive(now, &events, &keep_alive);
+        let mut wake = sender.runner.next_ping_at().filter(|at| *at > now);
         if let Some(at) = sender.resend_deadline() {
             if at <= now {
                 dirty = true;
@@ -839,7 +906,9 @@ async fn screen_pump(
         let mut wait = if exit_grace_used {
             EXIT_CLOSED_GRACE
         } else {
-            SESSION_STREAM_PULL_WAIT
+            // The policy looks at the connection about once a second: the
+            // idle time before a NAT rebind is measured at these wake-ups.
+            SESSION_STREAM_PULL_WAIT.min(crate::adapt::TICK)
         };
         if let Some(at) = wake {
             wait = wait.min(at.saturating_duration_since(Instant::now()));

@@ -302,6 +302,9 @@ fn keep_alive_table() {
         (user(None, true), Some(30_000), 15_000, 15_000), // 15 s: not shorter
         (user(None, true), Some(40_000), 15_000, 15_000), // clamp to 15 s, never longer
         (user(None, true), Some(1_000), 15_000, 1_000),   // clamp at the 1 s floor
+        (user(None, true), Some(29_998), 15_000, 14_999), // just under the ceiling
+        (user(None, true), Some(2_000), 15_000, 1_000),   // g/2 lands on the floor
+        (user(None, true), Some(2_002), 15_000, 1_001),
         (user(None, true), Some(0), 15_000, 1_000),
         // only shorter: a later, larger observation does not lengthen
         (user(None, true), Some(30_000), 10_000, 10_000),
