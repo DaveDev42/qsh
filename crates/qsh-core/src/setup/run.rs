@@ -1035,7 +1035,7 @@ pub(super) fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData
         match req.role {
             SetupRole::Host => {
                 next.push(if req.service {
-                    "qsh service install --activate (or start the unit as in docs/deploy/service.md)"
+                    "qsh service install (or start the unit as in docs/deploy/service.md)"
                         .to_string()
                 } else {
                     "qsh serve".to_string()

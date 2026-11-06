@@ -1,4 +1,6 @@
-use super::{error_line, format_trust_pin_line, render_doctor_lines, role_cell, sanitize};
+use super::{
+    error_line, format_trust_pin_line, grant_summary, render_doctor_lines, role_cell, sanitize,
+};
 use qsh_proto::{DoctorData, DoctorFinding, TrustPeer};
 
 #[test]
@@ -141,6 +143,35 @@ fn role_cell_shows_the_role_or_none_legacy() {
     assert_eq!(role_cell(&peer), "read-only");
     peer.role = Some("none".to_string());
     assert_eq!(role_cell(&peer), "none");
+}
+
+/// ADR-0051 decision 12: a pin extended by `trust allow` shows its grants,
+/// paths and scope under its row; a pin without them shows nothing extra.
+#[test]
+fn grant_summary_lists_present_keys_and_is_empty_otherwise() {
+    let mut peer = TrustPeer {
+        name: "phone".to_string(),
+        fingerprint: "sha256:REALFINGERPRINT".to_string(),
+        address: String::new(),
+        added_at: "2026-10-12T00:00:00Z".to_string(),
+        role: Some("none".to_string()),
+        grants: None,
+        paths: None,
+        scope: None,
+        source: None,
+    };
+    assert_eq!(grant_summary(&peer), None);
+    peer.grants = Some(vec!["file.read".to_string(), "exec.run".to_string()]);
+    assert_eq!(
+        grant_summary(&peer).as_deref(),
+        Some("grants=file.read,exec.run")
+    );
+    peer.paths = Some(vec!["/srv/a".to_string(), "/srv/b".to_string()]);
+    peer.scope = Some("any".to_string());
+    assert_eq!(
+        grant_summary(&peer).as_deref(),
+        Some("grants=file.read,exec.run paths=/srv/a,/srv/b scope=any")
+    );
 }
 
 #[test]

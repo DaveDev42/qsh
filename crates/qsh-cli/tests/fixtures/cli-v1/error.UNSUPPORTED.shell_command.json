@@ -1,0 +1,12 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "UNSUPPORTED",
+    "details": null,
+    "message": "the remote qsh is too old to run a shell command (it does not advertise shell-command.v1); nothing was run. Upgrade qsh on the remote (a later release adds `--install-remote` to do that from here), or run `qsh exec <host> -- <program> [args...]`, which needs no shell.",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

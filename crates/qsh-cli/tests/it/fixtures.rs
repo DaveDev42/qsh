@@ -104,6 +104,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
+    "error.UNSUPPORTED.shell_command.json",
     "error.INVALID_ARGUMENT.ssh_key_malformed.json",
     "error.INVALID_ARGUMENT.ssh_key_identity_exists.json",
     "cert.init.json",
@@ -1403,6 +1404,43 @@ fn golden_identity_move_key_fixtures() {
     };
     check(
         "identity.move_key.moved.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `exec.run` against a host that predates `shell-command.v1` (ADR-0051
+/// decision 6). The root ssh form (`qsh host command...`) refuses `--json`
+/// (`docs/CLI.md` §7.2), so no spawned binary prints this envelope today;
+/// the fixture pins the `qsh.cli/v1` failure the `exec.run` path maps the
+/// client's refusal to. It is produced in-process: the client's own error,
+/// mapped by the same `map_client_error` the binary uses, in the envelope
+/// the binary's `Envelope::failure` builds.
+#[test]
+fn golden_shell_command_unsupported_fixture() {
+    use qsh_core::client::ClientError;
+    use qsh_core::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE;
+    use qsh_core::ops::exec::map_client_error;
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, CliError};
+
+    let err = map_client_error(ClientError::Unsupported(
+        SHELL_COMMAND_UNSUPPORTED_MESSAGE.to_string(),
+    ));
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "exec.run".to_string(),
+        ok: false,
+        data: None,
+        error: Some(CliError {
+            code: err.code.clone(),
+            message: err.message.clone(),
+            retryable: err.retryable,
+            details: err.details.clone(),
+        }),
+    };
+    check(
+        "error.UNSUPPORTED.shell_command.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
 }
