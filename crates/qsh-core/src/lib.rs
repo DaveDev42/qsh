@@ -37,6 +37,7 @@ macro_rules! abs_path {
 }
 
 pub mod acl;
+pub mod adapt;
 pub mod admission;
 pub mod audit;
 pub mod broker;
