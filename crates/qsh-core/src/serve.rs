@@ -716,6 +716,12 @@ pub fn host_runtime(
         quotas,
     );
     server.set_pinned_principals(pinned_principals);
+    // A written `[transport].keep_alive_ms` pins the interval; with no key
+    // the adaptive policy may shorten it (ADR-0052 decision 13). The value
+    // was validated by `Config::liveness` at startup.
+    if let Some(ms) = config.transport.keep_alive_ms {
+        server.pin_keep_alive(std::time::Duration::from_millis(ms));
+    }
     // The same store the transport verifier reads, for both the inbound
     // connections of `qsh serve` and the outbound one of `qsh serve --to`
     // (ADR-0031 결정 2~3): `trust_watch` is how this host's connections hear

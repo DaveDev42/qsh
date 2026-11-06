@@ -560,6 +560,11 @@ impl Server {
                         channel,
                         blackhole: Arc::clone(&self.datagram_blackhole),
                     }),
+                    keep_alive: crate::session_stream::KeepAliveParams {
+                        pinned: self.keep_alive_pin.get().copied(),
+                        rebind_hook: Arc::clone(&self.rebind_hook),
+                        pings: Arc::clone(&self.keep_alive_pings),
+                    },
                 };
                 match pump.run(stream, &conn).await {
                     Ok(()) => tracing::info!(

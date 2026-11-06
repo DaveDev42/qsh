@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -599,6 +599,15 @@ pub struct Server {
     /// Test hook ([`Server::blackhole_datagrams`]): screen datagrams are
     /// accepted and dropped. Off in production.
     datagram_blackhole: Arc<AtomicBool>,
+    /// `[transport].keep_alive_ms` when the operator wrote the key
+    /// ([`Server::pin_keep_alive`]): the keep-alive policy then leaves the
+    /// interval alone (ADR-0052 decision 13).
+    keep_alive_pin: OnceLock<std::time::Duration>,
+    /// Idle milliseconds of a NAT rebind to report to the next policy run
+    /// ([`Server::inject_nat_rebind`]); `0` for none. Test hook.
+    rebind_hook: Arc<AtomicU64>,
+    /// Keep-alive `Ping`s the policy wrote ([`Server::keep_alive_pings`]).
+    keep_alive_pings: Arc<AtomicU64>,
     /// The path normalizer the remote file ops call, set at most once by
     /// [`Server::set_path_normalizer`]. Unset (production) reads as the real
     /// filesystem normalizer; a test injects a counting one
@@ -800,6 +809,9 @@ impl Server {
             notice_sink: OnceLock::new(),
             hidden_capabilities: OnceLock::new(),
             datagram_blackhole: Arc::new(AtomicBool::new(false)),
+            keep_alive_pin: OnceLock::new(),
+            rebind_hook: Arc::new(AtomicU64::new(0)),
+            keep_alive_pings: Arc::new(AtomicU64::new(0)),
             path_normalizer: OnceLock::new(),
             file_host: OnceLock::new(),
             free_space: OnceLock::new(),
@@ -886,6 +898,32 @@ impl Server {
     pub fn blackhole_datagrams(&self, on: bool) {
         self.datagram_blackhole
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The operator wrote `[transport].keep_alive_ms`: that interval is
+    /// final, and the adaptive policy never adds `Ping`s of its own beside
+    /// it (ADR-0052 decision 13). `crate::serve` calls this with the key's
+    /// value when the key is present; with no key the policy may shorten
+    /// the interval. First call wins.
+    pub fn pin_keep_alive(&self, interval: std::time::Duration) {
+        let _ = self.keep_alive_pin.set(interval);
+    }
+
+    /// Make the keep-alive policy see a NAT rebind after `idle` of quiet on
+    /// the next run of every running screen-sync attach, as if the peer's
+    /// address had changed. For the keep-alive integration test; production
+    /// never calls it.
+    pub fn inject_nat_rebind(&self, idle: std::time::Duration) {
+        let ms = u64::try_from(idle.as_millis()).unwrap_or(u64::MAX).max(1);
+        self.rebind_hook
+            .store(ms, std::sync::atomic::Ordering::Release);
+    }
+
+    /// How many keep-alive `Ping`s the adaptive policy has written on this
+    /// host (quinn's own keep-alive PINGs are not counted).
+    pub fn keep_alive_pings(&self) -> u64 {
+        self.keep_alive_pings
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn capability_hidden(&self, cap: &str) -> bool {
