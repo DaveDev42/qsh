@@ -8,9 +8,8 @@
 //! non-interactive behavior. `prompts::tests` pins both rules: every row
 //! names at least one flag, and no row is shown without a terminal.
 //!
-//! Other questions belong here too (the remote install, the pin replacement):
-//! add a row to [`REGISTRY`], and a flag to the command line that gives the
-//! same answer.
+//! Other questions belong here too (the pin replacement): add a row to
+//! [`REGISTRY`], and a flag to the command line that gives the same answer.
 
 use std::io::{self, BufRead, IsTerminal as _, Write};
 
@@ -50,8 +49,28 @@ pub const REPLACE_PIN: Prompt = Prompt {
     non_interactive: "fails with SESSION_CONFLICT and details.reason pin_conflict",
 };
 
+/// The remote host has no `qsh` (ADR-0051 decision 3). The text shown names
+/// the host and the version ([`ask_text`]); `question` is the fixed part.
+pub const INSTALL_REMOTE: Prompt = Prompt {
+    id: "ssh.install_remote",
+    question: "Install qsh on the remote host?",
+    default_yes: true,
+    flags: &["--install-remote", "--no-install-remote"],
+    non_interactive: "does not install; ends with details.reason remote_qsh_missing",
+};
+
+/// The remote host's `qsh` is too old for the bootstrap (ADR-0051 decision
+/// 3). A running serve is not touched.
+pub const UPGRADE_REMOTE: Prompt = Prompt {
+    id: "ssh.upgrade_remote",
+    question: "Upgrade qsh on the remote host?",
+    default_yes: true,
+    flags: &["--install-remote"],
+    non_interactive: "does not upgrade; ends with details.reason remote_qsh_too_old",
+};
+
 /// Every registered question.
-pub const REGISTRY: &[&Prompt] = &[&MOVE_KEY, &REPLACE_PIN];
+pub const REGISTRY: &[&Prompt] = &[&MOVE_KEY, &REPLACE_PIN, &INSTALL_REMOTE, &UPGRADE_REMOTE];
 
 /// Where a question may be asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,12 +107,25 @@ pub fn ask(
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
 ) -> io::Result<Option<bool>> {
+    ask_text(prompt, prompt.question, env, reader, writer)
+}
+
+/// [`ask`] with `question` shown instead of `prompt.question`, for a
+/// question that names a host or a version. The registry row still decides
+/// the default and the flags, and whether it may be asked at all.
+pub fn ask_text(
+    prompt: &Prompt,
+    question: &str,
+    env: &PromptEnv,
+    reader: &mut dyn BufRead,
+    writer: &mut dyn Write,
+) -> io::Result<Option<bool>> {
     if !env.can_ask() {
         return Ok(None);
     }
     let suffix = if prompt.default_yes { "[Y/n]" } else { "[y/N]" };
     for _ in 0..2 {
-        write!(writer, "{} {suffix} ", prompt.question)?;
+        write!(writer, "{question} {suffix} ")?;
         writer.flush()?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -118,6 +150,14 @@ pub trait Prompter: Send + Sync {
     /// [`REPLACE_PIN`] compares) right before it is asked. Written only where
     /// a question could be asked; the default shows nothing.
     fn note(&self, _text: &str) {}
+
+    /// Ask `prompt` with `question` as the text shown ([`ask_text`]), for a
+    /// question that names a host or a version. A prompter that cannot show
+    /// custom text answers as [`Self::ask`] does.
+    fn ask_text(&self, prompt: &Prompt, question: &str) -> Option<bool> {
+        let _ = question;
+        self.ask(prompt)
+    }
 }
 
 /// The prompter of every run that asks nothing.
@@ -151,10 +191,14 @@ impl Prompter for StdioPrompter {
     }
 
     fn ask(&self, prompt: &Prompt) -> Option<bool> {
+        self.ask_text(prompt, prompt.question)
+    }
+
+    fn ask_text(&self, prompt: &Prompt, question: &str) -> Option<bool> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         let mut stderr = io::stderr().lock();
-        ask(prompt, &self.env, &mut reader, &mut stderr)
+        ask_text(prompt, question, &self.env, &mut reader, &mut stderr)
             .ok()
             .flatten()
     }
@@ -177,6 +221,58 @@ mod tests {
             assert!(!prompt.non_interactive.is_empty(), "{}", prompt.id);
             assert!(ids.insert(prompt.id), "duplicate id {}", prompt.id);
         }
+    }
+
+    /// ADR-0051 decision 13: the remote install and upgrade rows and their
+    /// flags.
+    #[test]
+    fn the_remote_install_rows_are_registered_with_their_flags() {
+        let row = |id: &str| REGISTRY.iter().find(|p| p.id == id).copied().unwrap();
+        assert_eq!(
+            row("ssh.install_remote").flags,
+            ["--install-remote", "--no-install-remote"]
+        );
+        assert_eq!(row("ssh.upgrade_remote").flags, ["--install-remote"]);
+        for id in ["ssh.install_remote", "ssh.upgrade_remote"] {
+            assert!(row(id).default_yes, "{id}");
+            assert!(row(id).non_interactive.contains("remote_qsh_"), "{id}");
+        }
+    }
+
+    /// A question with its own text still follows the registry's rule.
+    #[test]
+    fn a_custom_question_text_is_shown_only_where_the_row_may_be_asked() {
+        let terminal = PromptEnv {
+            stdin_is_terminal: true,
+            machine_mode: false,
+        };
+        let mut out = Vec::new();
+        let mut input = io::Cursor::new(b"n\n".to_vec());
+        let answer = ask_text(
+            &INSTALL_REMOTE,
+            "box has no qsh. Install?",
+            &terminal,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(answer, Some(false));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "box has no qsh. Install? [Y/n] "
+        );
+
+        let machine = PromptEnv {
+            stdin_is_terminal: true,
+            machine_mode: true,
+        };
+        let mut out = Vec::new();
+        let mut input = io::Cursor::new(b"y\n".to_vec());
+        assert_eq!(
+            ask_text(&INSTALL_REMOTE, "x", &machine, &mut input, &mut out).unwrap(),
+            None
+        );
+        assert!(out.is_empty());
     }
 
     #[test]

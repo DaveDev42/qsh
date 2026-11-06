@@ -45,11 +45,14 @@ use serde_json::json;
 use super::trust::parse_role_arg;
 use super::*;
 use crate::pairing::{pairing_role_clause, shell_single_quoted};
+use crate::prompts::{NoPrompter, Prompter};
+use crate::ssh_bootstrap::install::InstallRemote;
 use crate::ssh_bootstrap::{
     Dest, ResponderOptions, SshChild, SshOptions, SshResolved, SshRunner, batch_mode,
     quote_remote_program,
 };
 use crate::trust::validate_peer_label;
+use std::sync::Arc;
 
 /// How long the confirming dial waits for the handshake (ADR-0044 decision
 /// 13). Shorter than the transport default: the remote was just reached by
@@ -91,10 +94,46 @@ pub struct PairSshEnv {
     /// The ssh options of the root form (ADR-0051 decision 7), forwarded to
     /// `ssh -G` and the responder call. [`SshOptions::default`] elsewhere.
     pub ssh: SshOptions,
-    /// Asks the replace-the-pin question (ADR-0051 decision 5) and shows the
-    /// two fingerprints first. [`crate::prompts::NoPrompter`] where nothing
-    /// can be asked: the call then fails with `pin_conflict`.
-    pub prompter: std::sync::Arc<dyn crate::prompts::Prompter>,
+    /// `--install-remote` / `--no-install-remote` (ADR-0051 decision 3):
+    /// whether a remote without `qsh` (or with one too old) gets this
+    /// machine's release. [`InstallRemote::Ask`] elsewhere.
+    pub install_remote: InstallRemote,
+    /// Where the install question (ADR-0051 decision 3) and the
+    /// replace-the-pin question (decision 5, which shows the two fingerprints
+    /// first) are asked. [`NoPrompter`] in machine modes and for callers that
+    /// never ask; a pin conflict then fails with `pin_conflict`.
+    pub prompter: Arc<dyn Prompter>,
+}
+
+impl PairSshEnv {
+    /// An environment that installs nothing and asks nothing: the shape of
+    /// every call before ADR-0051 decision 3.
+    pub fn new(
+        machine_mode: bool,
+        stdin_is_terminal: bool,
+        cancel: CancelToken,
+        ssh: SshOptions,
+    ) -> Self {
+        Self {
+            machine_mode,
+            stdin_is_terminal,
+            cancel,
+            ssh,
+            install_remote: InstallRemote::Ask,
+            prompter: Arc::new(NoPrompter),
+        }
+    }
+
+    /// With the install flag and the prompter of a frontend.
+    pub fn with_install(
+        mut self,
+        install_remote: InstallRemote,
+        prompter: Arc<dyn Prompter>,
+    ) -> Self {
+        self.install_remote = install_remote;
+        self.prompter = prompter;
+        self
+    }
 }
 
 /// The result of `pair.ssh`: the envelope data and the notices a human
@@ -123,6 +162,9 @@ struct Plan {
     ssh: SshOptions,
     /// `--replace-pin` (ADR-0051 decision 5).
     replace_pin: bool,
+    /// Set once an install put `qsh` at this absolute path on the remote;
+    /// the pin keeps it as `remote_qsh`.
+    installed_qsh: Option<String>,
 }
 
 impl Plan {
@@ -158,7 +200,7 @@ impl Ops {
         env: PairSshEnv,
         confirmation: Confirmation,
     ) -> Result<PairSshOutput, OpError> {
-        let plan = self.pair_ssh_plan(&req, &env)?;
+        let mut plan = self.pair_ssh_plan(&req, &env)?;
 
         let init = self.identity_init(IdentityInitReq {
             key_store: None,
@@ -174,7 +216,27 @@ impl Ops {
         let runtime = self.connect_runtime()?;
 
         // Phase one: nothing is written anywhere.
-        let (mut child, hello, resolved) = runtime.block_on(exchange_hello(&plan, &env.cancel))?;
+        let resolved =
+            runtime.block_on(plan.runner.resolve_with(&plan.dest, &plan.ssh, &env.cancel))?;
+        let mut install_notices = Vec::new();
+        let mut installed = None;
+        let (mut child, hello) = match runtime.block_on(spawn_hello(&plan, &env.cancel)) {
+            Ok(opened) => opened,
+            Err(err) => {
+                // No `qsh` there, or one too old: with consent, install this
+                // machine's own and run the responder by the path it lands
+                // at (ADR-0051 decision 3).
+                let Some(done) = runtime.block_on(install::offer_install(&plan, &env, &err))?
+                else {
+                    return Err(err);
+                };
+                plan.remote_qsh = done.installed.path.clone();
+                plan.installed_qsh = Some(done.installed.path.clone());
+                install_notices = done.notices;
+                installed = Some(done.installed);
+                runtime.block_on(spawn_hello(&plan, &env.cancel))?
+            }
+        };
         let end_child = |child: SshChild| {
             runtime.block_on(child.finish());
         };
@@ -375,8 +437,16 @@ impl Ops {
             verified,
             verify_error,
             replaced: (replaced.local.is_some() || replaced.remote.is_some()).then_some(replaced),
+            installed,
         };
-        let mut notices = notices(&data, &plan, &resolved, &address, serve.as_ref());
+        let mut notices = install_notices;
+        notices.extend(self::notices(
+            &data,
+            &plan,
+            &resolved,
+            &address,
+            serve.as_ref(),
+        ));
         if let Some(replaced) = &data.replaced {
             // Both stand in the audit log; say it once on the terminal too.
             if let Some(old) = &replaced.local {
@@ -447,9 +517,15 @@ impl Ops {
             Some(address) => Some(normalize_peer_address(address).address),
         };
         let config = self.config()?;
+        // The flag, then `[ssh].remote_qsh`, then the absolute path an earlier
+        // install recorded on this name's pin (ADR-0051 decision 3), then
+        // `qsh`.
         let remote_qsh = match req.remote_qsh.as_deref() {
             Some(word) => word.to_string(),
-            None => config.ssh.remote_qsh()?.to_string(),
+            None => match (&config.ssh.remote_qsh, self.pinned_remote_qsh(&pin_name)) {
+                (None, Some(recorded)) => recorded,
+                _ => config.ssh.remote_qsh()?.to_string(),
+            },
         };
         // The quoting rule refuses a word that would split the remote
         // command; do it here so it fails before any side effect.
@@ -467,7 +543,18 @@ impl Ops {
             batch: batch_mode(env.machine_mode, env.stdin_is_terminal) || env.ssh.batch_mode(),
             ssh: env.ssh.clone(),
             replace_pin: req.replace_pin,
+            installed_qsh: None,
         })
+    }
+
+    /// The `qsh` path an earlier install recorded on the pin `name`. A
+    /// trust file that does not load is not this lookup's to report.
+    fn pinned_remote_qsh(&self, name: &str) -> Option<String> {
+        TrustStore::load(&self.paths.trust_file())
+            .ok()?
+            .find(name)?
+            .remote_qsh
+            .clone()
     }
 
     /// Refuse, before anything is written, a remote fingerprint that
@@ -512,9 +599,19 @@ impl Ops {
         if created && plan.pin_name == plan.dest.host() {
             store.mark_source(&peer.name, crate::trust::PIN_SOURCE_SSH_BOOTSTRAP);
         }
-        if created || updated {
+        // The `qsh` this call installed: the next bootstrap of this pin runs
+        // the responder by it (ADR-0051 decision 3).
+        let recorded = plan
+            .installed_qsh
+            .as_deref()
+            .is_some_and(|installed| store.set_remote_qsh(&peer.name, installed));
+        if created || updated || recorded {
             store.save(&path)?;
         }
+        // `peer` is the pin as `pair.ssh` reports it: it carries
+        // `remote_qsh` but not `source` (see above).
+        let mut peer = peer;
+        peer.remote_qsh = store.find(&peer.name).and_then(|p| p.remote_qsh.clone());
         Ok((peer, created))
     }
 
@@ -658,13 +755,21 @@ async fn exchange_hello(
         .runner
         .resolve_with(&plan.dest, &plan.ssh, cancel)
         .await?;
+    let (child, hello) = spawn_hello(plan, cancel).await?;
+    Ok((child, hello, resolved))
+}
+
+/// The responder call and its `hello`, after `ssh -G` has been read. The
+/// install step runs this twice: once to find out the remote has no usable
+/// `qsh`, once by the path the install returned.
+async fn spawn_hello(plan: &Plan, cancel: &CancelToken) -> Result<(SshChild, Hello), OpError> {
     let mut child = plan.runner.spawn_responder(&plan.dest, &plan.remote_qsh, {
         let mut options = ResponderOptions::new(plan.batch, cancel.clone());
         options.ssh = plan.ssh.clone();
         options
     })?;
     match child.recv().await? {
-        BootstrapLine::Hello(hello) => Ok((child, hello, resolved)),
+        BootstrapLine::Hello(hello) => Ok((child, hello)),
         _ => {
             let _ = child.finish().await;
             Err(protocol_violation(
@@ -1348,6 +1453,7 @@ fn role_mismatch_notice(data: &PairSshData, plan: &Plan) -> Option<String> {
 
 mod replace;
 pub use replace::{AUDIT_ACTION_REPLACE, remote_replace_unsupported};
+mod install;
 mod revive;
 pub use revive::SshRevival;
 

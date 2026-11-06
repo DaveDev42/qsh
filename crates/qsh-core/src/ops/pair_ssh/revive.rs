@@ -127,13 +127,13 @@ impl Ops {
         pin: &TrustPeer,
         dest: &str,
     ) -> Result<String, OpError> {
-        let env = PairSshEnv {
-            machine_mode: revival.machine_mode,
-            stdin_is_terminal: std::io::stdin().is_terminal(),
-            cancel: CancelToken::new(),
-            ssh: revival.ssh.clone(),
-            prompter: Arc::new(crate::prompts::NoPrompter),
-        };
+        // The revival never installs: it asks nothing (ADR-0051 decision 4).
+        let env = PairSshEnv::new(
+            revival.machine_mode,
+            std::io::stdin().is_terminal(),
+            CancelToken::new(),
+            revival.ssh.clone(),
+        );
         let plan = self.pair_ssh_plan(
             &PairSshReq {
                 dest: dest.to_string(),

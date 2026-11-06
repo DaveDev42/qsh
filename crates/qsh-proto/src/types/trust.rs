@@ -48,6 +48,12 @@ pub struct TrustPeer {
     /// this key existed. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The `qsh` to run on this peer over ssh, when the SSH bootstrap
+    /// installed one at an absolute path (ADR-0051 결정 3): the next
+    /// bootstrap of this pin uses it instead of a `PATH` lookup. Omitted for
+    /// every other pin. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_qsh: Option<String>,
 }
 
 /// Request for `trust.add`.

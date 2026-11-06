@@ -115,6 +115,7 @@ fn trust_types_match_documented_shape() {
         paths: None,
         scope: None,
         source: None,
+        remote_qsh: None,
     };
     let add = TrustAddData {
         peer: peer.clone(),

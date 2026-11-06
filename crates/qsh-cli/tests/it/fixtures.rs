@@ -175,6 +175,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "pair.ssh.unverified.json",
     "pair.ssh.replaced.json",
     "pair.ssh.reverse.json",
+    "pair.ssh.installed.json",
     "error.UNSUPPORTED.json",
     "tunnel.open.json",
     "tunnel.dynamic.json",
@@ -2631,6 +2632,27 @@ fn golden_pair_ssh_replaced_fixture() {
     assert_eq!(code, 0, "{got}");
     assert_eq!(got["data"]["verified"], true, "{got}");
     check("pair.ssh.replaced.json", got);
+}
+
+/// `pair ssh --install-remote` (ADR-0051 decision 3, 14): the remote had no
+/// `qsh`, so the call installed one and the envelope carries `installed`.
+/// The remote is a real `qsh pair ssh-respond` run by the fake `ssh`, and
+/// the install call is scripted.
+#[test]
+fn golden_pair_ssh_installed_fixture() {
+    use crate::remote_install::{envelope, pair, remote};
+    use crate::ssh_bootstrap::pair::World;
+
+    let mut w = World::new();
+    let r = remote(&mut w, 127, "0");
+    let out = pair(&w, Some(&r), &["--install-remote"]);
+    let got = envelope(&out);
+    assert_eq!(got["ok"], true, "{got}");
+    assert_eq!(
+        got["data"]["installed"]["method"], "remote_installer",
+        "{got}"
+    );
+    check("pair.ssh.installed.json", got);
 }
 
 /// `pair ssh --reverse --to` (ADR-0044 decision 22): the remote dials this

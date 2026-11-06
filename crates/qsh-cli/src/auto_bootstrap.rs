@@ -18,7 +18,11 @@
 
 use std::io::{self, IsTerminal};
 
+use std::sync::Arc;
+
+use qsh_core::prompts::StdioPrompter;
 use qsh_core::ssh_bootstrap::SshOptions;
+use qsh_core::ssh_bootstrap::install::InstallRemote;
 use qsh_core::{AutoBootstrap, CancelToken, OpError, Ops, PairSshEnv};
 
 use crate::render::human;
@@ -33,19 +37,15 @@ pub(crate) fn run(
     cancel: CancelToken,
     quiet: bool,
     ssh: SshOptions,
+    install_remote: InstallRemote,
 ) -> Result<(), OpError> {
     // Always printed, `--quiet` included: a person must learn that ssh is
     // about to run, and how to switch that off, before it asks for anything.
     let _ = human::print_notice(&plan.notice());
     let report = ops.auto_bootstrap(
         plan,
-        PairSshEnv {
-            machine_mode: false,
-            stdin_is_terminal: io::stdin().is_terminal(),
-            cancel,
-            ssh,
-            prompter: std::sync::Arc::new(qsh_core::prompts::StdioPrompter::new(false)),
-        },
+        PairSshEnv::new(false, io::stdin().is_terminal(), cancel, ssh)
+            .with_install(install_remote, Arc::new(StdioPrompter::new(false))),
     );
     if !quiet {
         for line in &report.notices {

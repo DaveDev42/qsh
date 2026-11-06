@@ -199,6 +199,63 @@ impl FakeSsh {
         self.set("respond_old", "1".to_string())
     }
 
+    /// Make the OS probe of the remote install (`uname -sm`) answer `text`
+    /// (`Linux x86_64`).
+    pub fn probe_unix(&mut self, text: &str) -> &mut Self {
+        self.set("uname_out", text.to_string())
+    }
+
+    /// Make the OS probe answer like a Windows remote: `uname` fails and the
+    /// `cmd /c` line prints a `ver` banner, then `PROCESSOR_ARCHITECTURE`,
+    /// then `PROCESSOR_ARCHITEW6432`.
+    pub fn probe_windows(&mut self, arch: &str) -> &mut Self {
+        self.set("uname_exit", "1".to_string());
+        self.set(
+            "win_out",
+            format!("Microsoft Windows [Version 10.0.26100.1]|{arch}|%PROCESSOR_ARCHITEW6432%"),
+        )
+    }
+
+    /// Script the install calls (`sh -c ...` or `powershell ...`), one
+    /// comma-separated entry per call in order, the last repeating: a number
+    /// is the exit status to report (`0` also prints [`Self::install_report`]
+    /// and creates [`Self::install_touch`]), `run` runs the script for real
+    /// (Unix) under [`Self::install_home`].
+    pub fn install_plan(&mut self, plan: &str) -> &mut Self {
+        self.set("install_plan", plan.to_string())
+    }
+
+    /// The `QSH_INSTALLED=<path>` line a successful scripted install prints.
+    pub fn install_report(&mut self, path: &Path) -> &mut Self {
+        self.set(
+            "install_stdout",
+            format!("QSH_INSTALLED={}", path.display()),
+        )
+    }
+
+    /// A file a successful scripted install creates (see
+    /// [`Self::missing_until`]).
+    pub fn install_touch(&mut self, path: &Path) -> &mut Self {
+        self.set("install_touch", path.display().to_string())
+    }
+
+    /// `HOME` and `USERPROFILE` of a `run` install.
+    pub fn install_home(&mut self, home: &Path) -> &mut Self {
+        self.set("install_home", home.display().to_string())
+    }
+
+    /// Make the responder call exit `exit` (127 is a missing `qsh`, 2 a
+    /// `qsh` too old) until `path` exists.
+    pub fn missing_until(&mut self, path: &Path, exit: i32) -> &mut Self {
+        self.set("missing_until", path.display().to_string());
+        self.set("missing_exit", exit.to_string())
+    }
+
+    /// What install call number `n` (from 0) received on stdin.
+    pub fn install_stdin(&self, n: usize) -> Vec<u8> {
+        std::fs::read(self.dir().join(format!("install.stdin.{n}"))).unwrap_or_default()
+    }
+
     /// What the responder call received on stdin; empty before it ended.
     pub fn stdin_log(&self) -> Vec<u8> {
         std::fs::read(self.dir().join("stdin.log")).unwrap_or_default()
