@@ -47,6 +47,8 @@ use super::ring::{
     {CloseReason, ControlEvent},
 };
 use super::signal::Signal;
+use crate::screen::{HistoryBatch, HostScreen, ScreenOptions};
+use qsh_proto::screen::ScreenUpdate;
 
 /// What to launch. For [`PipeSource`] this is metadata only; the PTY source
 /// (Step 4) consumes it fully.
@@ -248,6 +250,11 @@ pub struct SessionShared {
     opener: String,
     clock: Arc<dyn Clock>,
     ring: Mutex<Box<dyn ReplayStore>>,
+    /// Host terminal emulator (ADR-0052 decision 2). `None` unless
+    /// [`SessionConfig::screen`] is set. Locked only for one
+    /// [`crate::screen::FEED_SLICE`]-bounded feed by the output pump, or a
+    /// short read by a screen consumer.
+    screen: Option<Mutex<HostScreen>>,
     /// Bumped on every ring append so `pull(..., wait)` can sleep until
     /// there is something new.
     notify: Notify,
@@ -410,6 +417,34 @@ pub enum WriteError {
 }
 
 impl SessionHandle {
+    /// Whether this session runs a host terminal emulator
+    /// ([`SessionConfig::screen`]).
+    pub fn screen_enabled(&self) -> bool {
+        self.shared.screen.is_some()
+    }
+
+    /// The screen update that takes a client at state `base_num` to the
+    /// current screen (`HostScreen::update_since`); `None` if the session has
+    /// no emulator or the client is current.
+    pub fn screen_update_since(&self, base_num: u64) -> Option<ScreenUpdate> {
+        let screen = self.shared.screen.as_ref()?;
+        screen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .update_since(base_num)
+    }
+
+    /// Lines scrolled off the top since the last call (`HostScreen::take_history`).
+    pub fn screen_take_history(&self) -> Option<HistoryBatch> {
+        let screen = self.shared.screen.as_ref()?;
+        Some(
+            screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_history(),
+        )
+    }
+
     /// The opaque session id.
     pub fn id(&self) -> &str {
         &self.shared.id
@@ -835,6 +870,10 @@ pub struct SessionConfig {
     pub input_queue: usize,
     /// Per-step grace of the close escalation (`[serve].close_grace_ms`).
     pub close_grace: Duration,
+    /// Run a host terminal emulator beside the ring (ADR-0052 decision 2).
+    /// Off by default and set by nothing yet: the carrier that sends screen
+    /// updates is a later step, so existing sessions are unchanged.
+    pub screen: bool,
 }
 
 impl Default for SessionConfig {
@@ -844,6 +883,7 @@ impl Default for SessionConfig {
             inbox_capacity: 256,
             input_queue: 64,
             close_grace: Duration::from_millis(5000),
+            screen: false,
         }
     }
 }
@@ -873,6 +913,13 @@ impl SessionActor {
             opener,
             clock,
             ring: Mutex::new(ring),
+            screen: config.screen.then(|| {
+                Mutex::new(HostScreen::new(ScreenOptions {
+                    rows: spec.rows,
+                    cols: spec.cols,
+                    ..ScreenOptions::default()
+                }))
+            }),
             notify: Notify::new(),
             meta: Mutex::new(Meta {
                 state: SessionState::Running,
@@ -917,7 +964,16 @@ impl SessionActor {
 
         // Output pump: source → ring. Its own task, so it is never behind a
         // blocked input write or a slow command.
+        //
+        // With the host emulator on, the same task feeds it each chunk right
+        // after the ring append (ADR-0052 decision 2). Feeding is bounded
+        // CPU work with no await, so the pump is still never behind a
+        // consumer. The emulator's answers to terminal queries go to the
+        // input queue with `try_send` (a full queue drops the answer), and
+        // through a weak sender so the pump does not keep the writer alive.
         let (eof_tx, eof_rx) = oneshot::channel::<()>();
+        let (in_tx, mut in_rx) = mpsc::channel::<InputChunk>(config.input_queue.max(1));
+        let answer_tx = shared.screen.is_some().then(|| in_tx.downgrade());
         let pump = {
             let shared = Arc::clone(&shared);
             tokio::spawn(async move {
@@ -925,7 +981,16 @@ impl SessionActor {
                 loop {
                     match output.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => shared.push_output(&buf[..n]),
+                        Ok(n) => {
+                            shared.push_output(&buf[..n]);
+                            let answers = shared.feed_screen(&buf[..n]);
+                            if !answers.is_empty()
+                                && let Some(tx) = answer_tx.as_ref().and_then(|t| t.upgrade())
+                            {
+                                let (resp, _) = oneshot::channel();
+                                let _ = tx.try_send((answers, 0, resp));
+                            }
+                        }
                     }
                 }
                 let _ = eof_tx.send(());
@@ -936,7 +1001,6 @@ impl SessionActor {
         // Input writer: bounded queue → source. A child that stops reading
         // stalls only this task; the queue bound turns into
         // `WriteError::Backpressure` for callers.
-        let (in_tx, mut in_rx) = mpsc::channel::<InputChunk>(config.input_queue.max(1));
         let writer = tokio::spawn(async move {
             while let Some((data, applied, resp)) = in_rx.recv().await {
                 let result = async {
@@ -1085,7 +1149,11 @@ impl ActorState {
                 self.enqueue_write(conn, data, input_seq, resp);
             }
             Command::Resize { cols, rows, resp } => {
-                let _ = resp.send(self.control.resize(cols, rows));
+                let result = self.control.resize(cols, rows);
+                if result.is_ok() {
+                    self.shared.resize_screen(cols, rows);
+                }
+                let _ = resp.send(result);
             }
             Command::ResizeAt {
                 conn,
@@ -1098,6 +1166,7 @@ impl ActorState {
                 } else {
                     self.control
                         .resize(cols, rows)
+                        .map(|()| self.shared.resize_screen(cols, rows))
                         .map_err(|e| WriteError::Io(e.to_string()))
                 };
                 let _ = resp.send(result);
@@ -1339,6 +1408,27 @@ impl SessionShared {
     fn push_output(&self, data: &[u8]) {
         self.ring().push(data);
         self.note_append();
+    }
+
+    /// Feed the host emulator (if any) and return its answers to terminal
+    /// queries.
+    fn feed_screen(&self, data: &[u8]) -> Vec<u8> {
+        let Some(screen) = &self.screen else {
+            return Vec::new();
+        };
+        let end = self.ring().end();
+        let mut screen = screen.lock().unwrap_or_else(|e| e.into_inner());
+        screen.feed(data, end);
+        screen.take_answers()
+    }
+
+    fn resize_screen(&self, cols: u16, rows: u16) {
+        if let Some(screen) = &self.screen {
+            screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .resize(rows, cols);
+        }
     }
 
     fn push_control(&self, event: ControlEvent) {

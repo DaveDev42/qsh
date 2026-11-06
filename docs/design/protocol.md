@@ -836,3 +836,66 @@ client는 pin 주소를 ssh 호스트 이름과 `result.serve_bind`의 포트로
 호환 규칙: client는 `hello.replace_pin == true`인 응답자에게만 `replace`를 보낸다. 모르는 응답자는 옛 바이트 그대로의 commit을 받고 `conflict`로 답하며, `--replace-pin`을 준 client는 그 `conflict`를 `UNSUPPORTED`로 끝낸다. `replace`가 없는 commit의 이름 충돌은 여전히 `conflict`이고 아무것도 쓰지 않는다. fingerprint가 같은 pin이 다른 이름으로 이미 있으면(`exists`) `replace`는 아무 일도 하지 않는다.
 
 응답자는 새 pin을 처음부터 쓴 것처럼 쓴다. `role`은 commit의 것이고 `grants`·`paths`·`scope`는 없다. audit(`pair.ssh_respond.replace_pin`)을 저장 전에 남기고 실패하면 `trust.toml`은 그대로이며 `error`(`INTERNAL`)로 답한다. 응답자는 `commit`을 한 번 받고 `result`로 끝나므로, client가 `conflict`를 본 뒤 사람에게 묻고 "예"이면 ssh를 새로 열어 같은 fingerprint의 응답자인지 확인한 뒤 `replace: true`인 commit을 보낸다.
+
+## 18. 화면 상태 동기화의 diff·hash 부호화 (ADR-0052 결정 4·5·7, 초안)
+
+**상태: 초안이고 아직 협상되지 않는다.** capability `screen.v1`과 `datagram.v1`은 아직 광고하지 않고, 이 절의 어떤 바이트도 연결 위로 오르지 않는다. 부호화와 검증 규칙은 `crates/qsh-proto/src/screen/`와 `crates/qsh-proto/src/datagram.rs`가 코드로 고정해 두었고 fuzz 표면이다(`decode_screen_diff`, `decode_datagram_frame`). `SessionFrame`·`DatagramFrame`의 protobuf 항목(ADR-0052 결정 9)과 capability는 운반체를 잇는 스텝에서 §16.4의 additive 규칙으로 더한다. 그때 아래 `ScreenUpdate` 바이트열이 `bytes` 필드 하나로 실릴지, 필드로 풀릴지 정하고 이 절을 고친다. 그 전에는 이 절의 부호화를 바꿔도 호환 문제가 없다.
+
+### 18.1 화면 상태
+
+host 에뮬레이터(`crates/qsh-core/src/screen/`)는 VT 바이트열이 아니라 아래의 정규화된 화면을 낸다. 에뮬레이터 구현이 달라도 같은 화면이면 같은 상태이고, 그래서 qsh 버전이 달라도 hash를 비교할 수 있다.
+
+| 항목 | 뜻 |
+|---|---|
+| 크기 | 행 수, 열 수. 각각 `1..=2048`, 곱은 `1 048 576` 이하. |
+| 커서 | 행, 열(0부터). 화면 안이다. 줄 끝에서 다음 글자를 기다리는 상태는 마지막 열로 정규화한다. |
+| 모드 | 비트 다섯(대체 화면, 커서 숨김, 앱 커서 키, 앱 키패드, bracketed paste)과 마우스 모드(0 없음, 1 press, 2 press+release, 3 button motion, 4 any motion), 마우스 인코딩(0 기본, 1 UTF-8, 2 SGR). |
+| 행 | 열 수만큼의 셀과 wrap 플래그(다음 행으로 이어짐). |
+| 셀 | 글자(비어 있거나 한 글자 또는 결합 문자까지 최대 32바이트, 제어 문자 없음), 전경색, 배경색, 속성 비트. |
+
+색은 기본, 팔레트 번호(0..=255), RGB 중 하나다. 속성 비트는 굵게(1), 흐리게(2), 기울임(4), 밑줄(8), 반전(16), 넓은 글자의 왼쪽 반(32), 넓은 글자의 오른쪽 반(64)이다. 오른쪽 반 셀은 글자가 비어 있고, 32와 64는 함께 서지 않는다.
+
+### 18.2 정규 바이트와 `state_hash`
+
+`state_hash`는 정규 바이트의 BLAKE3 앞 8바이트다. 정규 바이트는 `rows`, `cols`, 커서 행, 커서 열(각 u16 little endian), 모드 세 바이트, 그리고 행마다 wrap 플래그 한 바이트와 `cols`개의 셀(18.3의 셀 부호화)이다. 이 바이트가 바뀌면 모든 client의 대조가 어긋나므로 값을 테스트로 고정한다(`the_state_hash_pins_the_canonical_encoding`). 부호화를 바꾸려면 hash 버전을 새로 두어야 한다.
+
+### 18.3 `ScreenDiff`
+
+정수는 모두 LEB128 varint이고 가장 짧은 형태만 받는다(그래야 부호화가 유일하다). 순서는 다음과 같다.
+
+1. `rows`, `cols`, 커서 행, 커서 열(varint)과 모드 세 바이트.
+2. 바뀐 행의 수(varint)와 행마다 `row`(varint, 엄격히 증가), wrap 플래그(0 또는 1), run의 수(varint).
+3. run마다 `col`(varint), 셀 수(varint, 1 이상), 그 수만큼의 셀. run은 열 순서이고 겹치지 않으며 행 안에 든다.
+
+셀은 두 바이트 머리로 시작한다. 첫 바이트는 속성 비트(하위 7비트)와 "글자 있음"(상위 비트), 둘째는 전경색 종류(하위 2비트)와 배경색 종류(그 위 2비트)이고 종류는 0 기본, 1 팔레트(뒤따르는 한 바이트), 2 RGB(세 바이트)다. 둘째 바이트의 나머지 비트는 0이다. 색 바이트들이 오고, 글자가 있으면 길이(varint, 1..=32)와 UTF-8 바이트가 온다.
+
+크기, 커서, 모드는 언제나 통째로 보낸다. 새 크기가 base의 크기와 다르면 base를 새 크기의 빈 화면으로 보고 diff를 적용한다. 그래서 크기가 바뀌면 전체를 다시 그리는 비용이 들지만 옛 격자를 새 격자에 대응시킬 필요가 없다. 가까운(4칸 이내) 바뀐 셀은 한 run으로 묶는다.
+
+decode는 임의의 바이트에 대해 전함수다. 모든 개수는 남은 바이트 수로 먼저 검사해서 짧은 입력으로 큰 할당을 일으킬 수 없다. 받아들인 입력은 다시 부호화하면 같은 바이트가 된다.
+
+### 18.4 `ScreenUpdate`와 효과
+
+`ScreenUpdate`는 `base_num`, `new_num`, `output_seq`(각 varint, `new_num > base_num`), `state_hash` 8바이트, 효과의 수(varint, 최대 64)와 효과들, 이어서 diff다. 전체 크기는 1 MiB 이하다.
+
+`base_num == 0`은 빈 화면이고 그 갱신이 전체 화면이다. client는 적용한 결과의 hash를 `state_hash`와 대조하고, 다르면 base 0을 요청한다.
+
+| 효과 | 부호화 | 규칙 |
+|---|---|---|
+| 창 제목 (OSC 0·2) | 1, 문자열 | 1024바이트 이하, 제어 문자 없음. host가 제어 문자를 지우고 자른다. |
+| 종 (BEL) | 2 | 연달은 종은 하나로 합친다. |
+| 클립보드 쓰기 (OSC 52) | 3, 선택 문자열, 데이터 문자열 | 선택은 `cpqs01234567` 8자 이하, 데이터는 base64 문자만 64 KiB 이하. 조회(`?`)와 상한을 넘는 쓰기는 전하지 않는다. |
+| 하이퍼링크 (OSC 8) | 4, 파라미터 문자열, URI 문자열 | 256바이트·2048바이트 이하, 제어 문자 없음. URI가 비면 링크를 닫는다. |
+
+문자열은 길이(varint)와 UTF-8 바이트다. 효과는 그것이 일어난 상태 번호에 묶이고, 상태 `base_num`에서 `new_num`까지의 갱신은 그 사이의 효과를 순서대로 싣는다. base 0인 갱신은 마지막 창 제목만 싣는다. 놓친 종이나 클립보드 쓰기를 새로 붙는 client에 되풀이하지 않기 위해서다.
+
+### 18.5 상태 번호
+
+host는 화면이나 효과가 바뀔 때만 다음 `state_num`(1부터)을 낸다. 같은 화면이 다시 만들어지면 번호는 그대로이고 `output_seq`만 앞으로 간다. diff의 base로 쓸 수 있는 상태는 최근 8개이고, 그보다 오래된 base를 가진 client에는 base 0의 전체 화면을 보낸다.
+
+### 18.6 `DatagramFrame` 머리
+
+datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). 조각 나눔(`part`/`parts`)은 운반체 스텝에서 payload 안에 정한다.
+
+### 18.7 fuzz와 시험
+
+`decode_screen_diff`는 `ScreenDiff`와 `ScreenUpdate`의 decode, 재부호화 동일성, 적용을 본다. `decode_datagram_frame`은 머리 decode와 재부호화 동일성을 본다. `host_emulator_input`은 임의의 PTY 출력을 host 에뮬레이터에 먹이고 가상 client가 갱신을 받아 hash를 대조한다. 같은 속성은 `crates/qsh-proto/src/screen/tests.rs`와 `crates/qsh-core/src/screen/tests.rs`의 proptest가 `cargo nextest`에서 매번 확인한다.

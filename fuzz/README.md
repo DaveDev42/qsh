@@ -3,15 +3,19 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds twenty-one `cargo-fuzz` targets.
-Twenty are parser harnesses over that surface; one of them,
+anything else touches it. This crate holds twenty-four `cargo-fuzz` targets.
+Twenty-two are parser harnesses over that surface; one of them,
 `fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
-paths (trust store files, ACL principal text). The twenty-first, stateful
-target, `broker_ops`, drives `qsh-core`'s session broker state machine
+paths (trust store files, ACL principal text). Two more are stateful:
+`broker_ops` drives `qsh-core`'s session broker state machine
 (append/read/lease/resume/attach/tick/reap) against a model oracle instead
 of decoding a single message; see "The `broker_ops` state machine target"
-below.
+below. `host_emulator_input` feeds arbitrary program output to the host
+terminal emulator of `qsh-core` (`crates/qsh-core/src/screen/`, ADR-0052
+decision 2) and checks the state/diff layer on top of it against a
+simulated client. Both are outside the "parser target" count of the
+72-hour accumulation.
 
 ## Why this lives outside the workspace
 
@@ -93,6 +97,9 @@ Run from `fuzz/`. `cargo fuzz list` prints the same set.
 | `parse_ssh_bootstrap_line` | `crates/qsh-proto/src/ssh_bootstrap.rs` | `parse_ssh_bootstrap_line` and the incremental `BootstrapReader` — the line-oriented stream `qsh pair ssh` reads from its `ssh` child's stdout (ADR-0044 decision 11): remote rc output, then `hello`/`result`. The first input byte picks how the rest is chunked when fed to the reader. Checks no panic, that an accepted line re-encodes to one line that parses back equal, and that the reader's messages, skipped counts and error do not depend on chunking. Not a QUIC wire message, but an interoperability contract (`docs/design/protocol.md` §17). |
 | `fingerprint_principal` | `crates/qsh-transport/src/identity.rs` | `Fingerprint::from_str` and `Principal::from_str`, selected by a leading byte. Fingerprint text is reached from `trust.toml` on disk and `qsh trust add`; Principal text from `qsh acl check --principal` (and composes `Fingerprint::from_str` for its `fp:` branch). |
 | `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into 12 of the `qsh_proto::types` request types an agent hands in as `--json` payload on qsh's JSON CLI surface (ADR-0011), selected by a leading byte. |
+| `decode_screen_diff` | `crates/qsh-proto/src/screen/` | `ScreenDiff::decode` or `ScreenUpdate::decode`, selected by the first byte (ADR-0052 decision 5, `docs/design/protocol.md` §18 draft). Checks no panic, that an accepted message re-encodes to the same bytes, that it applies to the blank screen of its size (also to a base of another size) into a valid state, and that `between(blank, state)` applies back to the same state. Every count is checked against the bytes left before anything is allocated. |
+| `decode_datagram_frame` | `crates/qsh-proto/src/datagram.rs` | `DatagramFrame::decode` (ADR-0052 decision 7): 16-byte channel id, kind byte, payload. Checks no panic, byte-identical re-encode, a known kind, the payload length, and a total `ScreenUpdate::decode` on a screen-update payload. Not wired to any carrier yet. |
+| `host_emulator_input` | `crates/qsh-core/src/screen/` | **Stateful**: arbitrary PTY output fed in data-chosen chunks to `HostScreen` (ADR-0052 decision 2), with a simulated client that asks for an update after each chunk, decodes the wire form, applies it and compares hashes. Checks no panic, bounded answers, effects and history, a valid client state, and client hash equal to the host snapshot hash. |
 | `broker_ops` | `crates/qsh-core/src/broker/` | **Stateful**, not a single-message decode: a fixed byte-format op sequence (append/read/lease/resume/attach/detach/tick/reap, 19 opcodes) driven against `qsh-core`'s public broker API and checked against a `ModelSession` oracle every op — sequence/gap/byte-identity, writer lease `Acquired`/`Conflict`/steal semantics, resume issue/verify/rotate, and TTL/reap. See "The `broker_ops` state machine target" below. |
 
 Each target's doc comment (top of its `fuzz_targets/*.rs` file) has the
