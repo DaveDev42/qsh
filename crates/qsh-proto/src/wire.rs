@@ -323,8 +323,58 @@ impl SessionFrame {
             Some(session_frame::Body::Output(o)) => check_chunk(o.data.len()),
             Some(session_frame::Body::Input(i)) => check_chunk(i.data.len()),
             Some(session_frame::Body::ScreenUpdate(u)) => u.validate(),
+            Some(session_frame::Body::ScreenHistory(h)) => h.validate(),
             _ => Ok(()),
         }
+    }
+}
+
+impl ScreenHistory {
+    /// Receiver-side check: the encoded message is within
+    /// [`SESSION_CHUNK_MAX`], the cap [`Self::batches`] cuts to.
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        check_chunk(prost::Message::encoded_len(self))
+    }
+
+    /// Encoded size of one entry of `lines` (tag, length, bytes).
+    fn entry_len(line: &str) -> usize {
+        1 + prost::encoding::encoded_len_varint(line.len() as u64) + line.len()
+    }
+
+    /// Room a `skipped` field takes at most (tag plus a 10-byte varint).
+    const SKIPPED_ROOM: usize = 11;
+
+    /// Cut `lines` (oldest first) and the `skipped` count into messages that
+    /// each fit [`SESSION_CHUNK_MAX`]; `skipped` rides on the last one, after
+    /// its lines. A line too large for any message is counted into `skipped`
+    /// rather than dropped silently; the second value is how many.
+    pub fn batches(lines: &[String], skipped: u64) -> (Vec<Self>, u64) {
+        let cap = SESSION_CHUNK_MAX - Self::SKIPPED_ROOM;
+        let mut out: Vec<Self> = Vec::new();
+        let mut cur = Self::default();
+        let mut size = 0usize;
+        let mut oversize = 0u64;
+        for line in lines {
+            let n = Self::entry_len(line);
+            if n > cap {
+                // Everything after this line scrolled off later, so the
+                // count it adds would be out of order if it were folded into
+                // the earlier `skipped`; it is reported at the end instead.
+                oversize += 1;
+                continue;
+            }
+            if size + n > cap {
+                out.push(std::mem::take(&mut cur));
+                size = 0;
+            }
+            cur.lines.push(line.clone().into_bytes());
+            size += n;
+        }
+        cur.skipped = skipped.saturating_add(oversize);
+        if !cur.lines.is_empty() || cur.skipped > 0 {
+            out.push(cur);
+        }
+        (out, oversize)
     }
 }
 
@@ -1097,6 +1147,11 @@ impl SessionFrame {
     /// `ScreenUpdate` frame (one part).
     pub fn screen_update(part: ScreenUpdate) -> Self {
         Self::from_body(session_frame::Body::ScreenUpdate(part))
+    }
+
+    /// `ScreenHistory` frame.
+    pub fn screen_history(history: ScreenHistory) -> Self {
+        Self::from_body(session_frame::Body::ScreenHistory(history))
     }
 
     /// `ScreenAck` frame; `state_num` 0 asks for the full screen.

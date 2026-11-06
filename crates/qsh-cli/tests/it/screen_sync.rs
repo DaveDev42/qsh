@@ -202,6 +202,100 @@ fn auto_draws_the_remote_screen_on_the_local_terminal() {
     });
 }
 
+/// A command that prints `HL1` .. `HL<n>`, one per line.
+fn count_lines(n: u32) -> String {
+    #[cfg(unix)]
+    let cmd = format!("i=1; while [ $i -le {n} ]; do echo HL$i; i=$((i+1)); done{ENTER}");
+    #[cfg(windows)]
+    let cmd = format!("for /l %i in (1,1,{n}) do @echo HL%i{ENTER}");
+    cmd
+}
+
+/// The numbers `HL<n>` found as whole rows in `rows`, in order.
+fn hl_numbers<'a>(rows: impl IntoIterator<Item = &'a str>) -> Vec<u32> {
+    rows.into_iter()
+        .filter_map(|r| r.trim().strip_prefix("HL")?.parse().ok())
+        .collect()
+}
+
+/// Drop SGR sequences from a scrollback line.
+fn plain_line(line: &str) -> String {
+    let mut out = String::new();
+    let mut it = line.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            for d in it.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn rows_that_scroll_off_reach_the_local_scrollback_in_order() {
+    let fleet = Fleet::start();
+    let ops = ops_for(&fleet.client);
+    with_deadline("history reaches the scrollback", move || {
+        const N: u32 = 120;
+        let (_ref, mut stream) = open_and_attach(&ops, ScreenSync::Auto).expect("open and attach");
+        assert!(stream.screen_sync());
+        let mut term = LocalTerminal::new();
+        pump_until(&mut stream, &mut term, "the first prompt", |t| {
+            t.shows_bare_prompt()
+        });
+        stream.write(count_lines(N).into_bytes()).unwrap();
+        // The last line is on the screen once the loop is done and the
+        // history that went with it has been drawn above it.
+        let mut history: Vec<String> = Vec::new();
+        pump_until(&mut stream, &mut term, "the last line", |t| {
+            t.shows(&format!("HL{N}")) && t.shows_bare_prompt()
+        });
+        // History follows the screen on the stream; let it finish.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            history.extend(
+                term.screen
+                    .take_history()
+                    .lines
+                    .iter()
+                    .map(|l| plain_line(l)),
+            );
+            let on_screen = hl_numbers(term.rows().iter().map(String::as_str));
+            let mut all = hl_numbers(history.iter().map(String::as_str));
+            all.extend(on_screen);
+            if all.len() as u32 >= N || Instant::now() > deadline {
+                break;
+            }
+            let Some(event) = stream.next_event() else {
+                break;
+            };
+            if let Some(end) = term.feed(event.expect("attach")) {
+                panic!("session ended: {end:?}");
+            }
+        }
+        let mut all = hl_numbers(history.iter().map(String::as_str));
+        let in_scrollback = all.len();
+        all.extend(hl_numbers(term.rows().iter().map(String::as_str)));
+        assert_eq!(
+            all,
+            (1..=N).collect::<Vec<_>>(),
+            "every line, once, in order (scrollback then screen)"
+        );
+        assert!(in_scrollback > 0, "some lines scrolled into the scrollback");
+        assert!(
+            !history.iter().any(|l| l.contains("lines skipped")),
+            "nothing was behind: {history:?}"
+        );
+        stream.write(format!("exit{ENTER}").into_bytes()).unwrap();
+        stream.close();
+    });
+}
+
 #[test]
 fn off_keeps_the_byte_path() {
     let fleet = Fleet::start();

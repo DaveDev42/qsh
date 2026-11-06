@@ -1009,6 +1009,13 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// Lines that scrolled off the top of the primary screen since the last
+    /// call (ADR-0052 decision 10), or `None` without an emulator. Takes
+    /// them: each line is handed out once.
+    fn screen_take_history(&self, _id: &SessionId) -> Option<crate::screen::HistoryBatch> {
+        None
+    }
+
     /// Snapshot one live session.
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError>;
 
@@ -1227,6 +1234,10 @@ impl SessionBackend for Broker {
         Broker::get_for_read(self, id)
             .ok()?
             .screen_update_since(base_num)
+    }
+
+    fn screen_take_history(&self, id: &SessionId) -> Option<crate::screen::HistoryBatch> {
+        Broker::get_for_read(self, id).ok()?.screen_take_history()
     }
 
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError> {

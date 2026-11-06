@@ -369,3 +369,134 @@ proptest! {
         }
     }
 }
+
+fn lines(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("hist {i:03}")).collect()
+}
+
+fn plain(line: &str) -> String {
+    line.trim_end().to_owned()
+}
+
+#[test]
+fn history_lands_in_the_local_scrollback_above_an_intact_screen() {
+    let (_h, state) = host(4, 20, b"one\r\ntwo\r\nthree");
+    let mut r = ScreenRenderer::new();
+    let mut local = term(4, 20);
+    feed(&mut local, &r.draw(&state, &[], (20, 4)));
+    let before = local.take_history();
+    let hist = lines(9);
+    feed(&mut local, &r.history(&hist, 0, (20, 4)));
+    feed(&mut local, &r.draw(&state, &[], (20, 4)));
+    assert_same(&local.snapshot(), &state);
+    let got = local.take_history();
+    let texts: Vec<String> = got.lines.iter().map(|l| plain(&strip_sgr(l))).collect();
+    // Exactly the history, in order; no row of the window leaked in.
+    assert_eq!(texts, hist, "scrollback after the first frame: {before:?}");
+}
+
+fn strip_sgr(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            for d in it.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_skipped_count_becomes_one_line_after_the_history() {
+    let (_h, state) = host(3, 30, b"x");
+    let mut r = ScreenRenderer::new();
+    let mut local = term(3, 30);
+    feed(&mut local, &r.draw(&state, &[], (30, 3)));
+    local.take_history();
+    feed(&mut local, &r.history(&lines(2), 1234, (30, 3)));
+    feed(&mut local, &r.draw(&state, &[], (30, 3)));
+    let got = local.take_history();
+    let texts: Vec<String> = got.lines.iter().map(|l| plain(&strip_sgr(l))).collect();
+    assert_eq!(
+        texts,
+        ["hist 000", "hist 001", "--- 1234 lines skipped ---"]
+    );
+    assert_same(&local.snapshot(), &state);
+}
+
+#[test]
+fn history_before_the_first_frame_is_plain_output() {
+    let (_h, state) = host(3, 30, b"x");
+    let mut r = ScreenRenderer::new();
+    let mut local = term(3, 30);
+    feed(&mut local, &r.history(&lines(5), 0, (30, 3)));
+    feed(&mut local, &r.draw(&state, &[], (30, 3)));
+    assert_same(&local.snapshot(), &state);
+    let texts: Vec<String> = local
+        .take_history()
+        .lines
+        .iter()
+        .map(|l| plain(&strip_sgr(l)))
+        .collect();
+    assert_eq!(texts[..5], lines(5)[..]);
+}
+
+#[test]
+fn history_in_the_alternate_screen_still_reaches_the_scrollback() {
+    let (mut h, primary) = host(3, 20, b"prompt$ vim");
+    let mut r = ScreenRenderer::new();
+    let mut local = term(3, 20);
+    feed(&mut local, &r.draw(&primary, &[], (20, 3)));
+    feed(&mut h, b"\x1b[?1049h\x1b[2J\x1b[1;1Hvim");
+    let alt = h.snapshot();
+    feed(&mut local, &r.draw(&alt, &[], (20, 3)));
+    local.take_history();
+    feed(&mut local, &r.history(&lines(4), 0, (20, 3)));
+    feed(&mut local, &r.draw(&alt, &[], (20, 3)));
+    assert_same(&local.snapshot(), &alt);
+    let texts: Vec<String> = local
+        .take_history()
+        .lines
+        .iter()
+        .map(|l| plain(&strip_sgr(l)))
+        .collect();
+    assert_eq!(texts, lines(4));
+    feed(&mut h, b"\x1b[?1049l");
+    let back = h.snapshot();
+    feed(&mut local, &r.draw(&back, &[], (20, 3)));
+    assert_same(&local.snapshot(), &back);
+}
+
+#[test]
+fn a_history_line_cannot_carry_anything_but_text_and_sgr() {
+    let evil = "a\x1b]52;c;AAAA\x07b\x1b[2Jc\x1b[1;31md\x1b[0m\re\x1b[?1049hf";
+    assert_eq!(sanitize_history_line(evil), "abc\x1b[1;31md\x1b[0mef");
+}
+
+#[test]
+fn a_history_line_wider_than_the_window_is_cut_not_wrapped() {
+    let (_h, state) = host(3, 10, b"x");
+    let mut r = ScreenRenderer::new();
+    let mut local = term(3, 10);
+    feed(&mut local, &r.draw(&state, &[], (10, 3)));
+    local.take_history();
+    feed(
+        &mut local,
+        &r.history(&["0123456789ABCDEF".to_string()], 0, (10, 3)),
+    );
+    feed(&mut local, &r.draw(&state, &[], (10, 3)));
+    let texts: Vec<String> = local
+        .take_history()
+        .lines
+        .iter()
+        .map(|l| plain(&strip_sgr(l)))
+        .collect();
+    assert_eq!(texts, ["0123456789"]);
+    assert_same(&local.snapshot(), &state);
+}

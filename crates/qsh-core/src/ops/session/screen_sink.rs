@@ -146,6 +146,23 @@ impl ScreenSink {
         (bytes, inner.seq)
     }
 
+    /// Put scrolled-off lines into the local scrollback and repaint the
+    /// last state under them (ADR-0052 decision 10); returns the bytes and
+    /// the offset to stamp them with. `skipped` is the host's count of lines
+    /// it did not keep.
+    pub(super) fn history(&self, lines: &[String], skipped: u64) -> (Vec<u8>, u64) {
+        let mut inner = self.lock();
+        let local = inner.local;
+        let mut bytes = inner.renderer.history(lines, skipped, local);
+        if !bytes.is_empty()
+            && let Some(state) = inner.last.take()
+        {
+            bytes.extend(inner.renderer.draw(&state, &[], local));
+            inner.last = Some(state);
+        }
+        (bytes, inner.seq)
+    }
+
     /// The local window changed: repaint the last state at the new size.
     pub(super) fn set_local(&self, cols: u16, rows: u16) -> (Vec<u8>, u64) {
         let mut inner = self.lock();

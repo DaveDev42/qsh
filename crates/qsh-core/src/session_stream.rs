@@ -808,6 +808,28 @@ impl ScreenSender {
         Ok(Sent::Done)
     }
 
+    /// Send the lines that scrolled off since the last call (ADR-0052
+    /// decision 10) as `ScreenHistory` frames on the stream, oldest first,
+    /// the `skipped` count last. History only goes out when the update queue
+    /// has room (`force` is for the flush before `Exit`); when the sender is
+    /// behind, the host emulator keeps collecting up to its row and byte cap
+    /// and counts the rest, so the client gets one `skipped` line instead of
+    /// a late flood. Never on a datagram, never logged: the lines are PTY
+    /// content.
+    async fn send_history(&mut self, force: bool) -> Result<(), SessionStreamError> {
+        if !force && !self.depth.has_room() {
+            return Ok(());
+        }
+        let Some(batch) = self.sessions.screen_take_history(&self.id) else {
+            return Ok(());
+        };
+        let (frames, _) = wire::ScreenHistory::batches(&batch.lines, batch.skipped);
+        for h in frames {
+            send_frame(&self.frames, SessionFrame::screen_history(h)).await?;
+        }
+        Ok(())
+    }
+
     /// Send every part as a datagram. `Ok(false)` means the transport
     /// cannot carry it and the caller uses the stream.
     fn send_datagram_parts(
@@ -907,6 +929,9 @@ async fn screen_pump(
                 Sent::Paced(at) => wake = Some(wake.map_or(at, |w| w.min(at))),
             }
         }
+        if !dirty {
+            sender.send_history(false).await?;
+        }
         let mut wait = if exit_grace_used {
             EXIT_CLOSED_GRACE
         } else {
@@ -945,6 +970,7 @@ async fn screen_pump(
                     // The client must see the final screen before the event
                     // that ends the session, whatever the queue holds.
                     sender.try_send(Instant::now(), true).await?;
+                    sender.send_history(true).await?;
                     dirty = false;
                     notify(&events, &id, sequence, &event).await?;
                     match event {

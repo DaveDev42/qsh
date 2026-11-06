@@ -320,6 +320,31 @@ async fn read_leg(
         // A screen-sync leg: parts of a state go to the leg's screen, the
         // state number it now holds goes back to the host, and an applied
         // state is drawn on the frontend's terminal as `Output` bytes.
+        if screen.is_some()
+            && let AttachEvent::ScreenHistory(h) = &event
+        {
+            if let Some(sink) = &ctx.screen {
+                // Lossy: the lines are untrusted text, and the renderer
+                // sanitises what is left.
+                let lines: Vec<String> = h
+                    .lines
+                    .iter()
+                    .map(|l| String::from_utf8_lossy(l).into_owned())
+                    .collect();
+                let (bytes, sequence) = sink.history(&lines, h.skipped);
+                if !bytes.is_empty() {
+                    let _stalled = watch.stalled();
+                    if events
+                        .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                        .await
+                        .is_err()
+                    {
+                        return LegEnd::Gone;
+                    }
+                }
+            }
+            continue;
+        }
         if let Some(leg) = screen.as_mut() {
             let outcome = match &event {
                 AttachEvent::Screen(part) => match leg.client.on_part(part) {
