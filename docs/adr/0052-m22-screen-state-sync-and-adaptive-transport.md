@@ -198,3 +198,4 @@ BBR(`BbrConfig::default()`), `send_fairness(true)`, 스트림 수신 창 2 MiB, 
 
 - 2026-11-06 초안(에이전트). 측정 수치는 맥락 절에 있고 하네스는 남아 있지 않다. 결정 18의 8이 벤치를 다시 세운다.
 - 2026-11-06 승인(Dave). 결과 절의 세 질문은 모두 추천대로 정했다: 스크롤백을 보낸다, 기본값 `auto`, 터미널 질의는 host가 답한다.
+- 2026-11-06 datagram 파사드 스텝의 확인(quinn 0.11.12, quinn-proto 0.11.18). 결정 13의 수단은 control `Ping`이다: quinn은 `keep_alive_interval`을 연결 생성 때의 `TransportConfig`에서만 받고 연결 도중 바꾸는 API가 없다. 결정 12의 입력 가운데 rttvar는 quinn이 공개하지 않아 qsh-core가 1초 `rtt` 표본으로 계산하고, bytes in flight와 버퍼 초과로 버린 datagram 수는 공개되지 않아 비워 둔다. datagram은 quinn 기본으로 이미 켜져 있었고, 수신·송신 버퍼를 각 64 KiB 상수로 고정했다(수신 값이 광고하는 `max_datagram_frame_size`다).
