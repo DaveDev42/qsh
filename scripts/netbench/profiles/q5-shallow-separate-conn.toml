@@ -1,0 +1,12 @@
+name = "q5-shallow-separate-conn"
+question = "q5"
+description = "Saturating bulk plus key echo, separate-conn, 20 Mbit link RTT 50 ms, 20 ms queue"
+
+[link]
+rtt_ms = 50
+rate_mbit = 20
+queue_ms = 20
+
+[workload]
+kind = "bulk_echo"
+isolation = "separate_conn"

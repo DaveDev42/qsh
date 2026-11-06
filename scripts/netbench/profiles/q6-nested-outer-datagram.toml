@@ -1,0 +1,13 @@
+name = "q6-nested-outer-datagram"
+question = "q6"
+description = "Inner connection (bulk plus echo) carried on the outer connection's datagram, RTT 80 ms, 1% loss, 20 Mbit link with 100 ms queue"
+
+[link]
+rtt_ms = 80
+loss_pct = 1
+rate_mbit = 20
+queue_ms = 100
+
+[workload]
+kind = "bulk_echo"
+path = "nested_datagram"

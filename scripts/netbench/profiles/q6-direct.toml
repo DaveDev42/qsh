@@ -1,0 +1,12 @@
+name = "q6-direct"
+question = "q6"
+description = "Reference without nesting: bulk plus echo on one connection, RTT 80 ms, 1% loss, 20 Mbit link with 100 ms queue"
+
+[link]
+rtt_ms = 80
+loss_pct = 1
+rate_mbit = 20
+queue_ms = 100
+
+[workload]
+kind = "bulk_echo"

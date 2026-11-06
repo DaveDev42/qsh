@@ -1,0 +1,12 @@
+name = "q3-mtu1500"
+question = "q3"
+description = "Largest datagram quinn settles on across a 1500-byte link (RTT 20 ms, no loss)"
+
+[link]
+rtt_ms = 20
+
+[workload]
+kind = "screen"
+carrier = "datagram"
+duration_s = 8
+warmup_s = 2
