@@ -911,7 +911,7 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 **host의 순서.** attach마다 첫 갱신은 base 0의 현재 화면이다(`SessionAttached.replay_from == output_end`, 재생 없음). 이후 ring이 움직이면 마지막으로 **보낸** 상태를 base로 최신 상태까지의 갱신을 만든다. 스트림이 순서와 도달을 보장하므로 ack를 기다리지 않는다. 쓰이지 않은 화면 조각이 128 KiB(`SEND_DEPTH_CAP_BYTES`)를 넘는 동안은 새 갱신을 만들지 않고, 줄면 그때의 최신 상태까지 한 번에 보내므로 중간 화면은 건너뛴다. `ScreenAck{0}`를 받으면 base를 0으로 되돌려 전체 화면을 보낸다. `Resize`는 출력이 없어도 갱신을 만든다. 세션의 `Exit`·`Closed` 같은 제어 항목은 마지막 갱신을 먼저 내보낸 뒤 바이트 경로와 같은 순서로 나간다. 에뮬레이터는 ring에 쓰기 전에 먹이므로(`pty_reader`), ring이 움직여 깬 쪽은 항상 새 바이트가 반영된 화면을 본다.
 
-**client의 순서.** `qsh_core::client::screen::ClientScreen`이 조각을 모아 갱신을 적용하고 `state_hash`를 대조한다. 대조가 틀렸거나, base가 가진 상태가 아니거나, diff가 적용되지 않으면 가진 화면을 버리고 `ScreenAck{0}`를 보낸다. 전체 화면이 올 때까지 base가 0이 아닌 갱신은 무시한다. 적용에 성공하면 `ScreenAck{new_num}`를 보낸다. client는 최근 적용한 상태 8개(`RETAINED_STATES`)를 가지고 있어서, base가 그중 하나인 갱신은 어느 운반체로 왔든 적용한다. 이미 가진 것보다 새롭지 않은 갱신(다른 운반체의 더 새 갱신과 엇갈렸다)은 버리고 가진 상태 번호를 다시 ack한다. 전체 화면(base 0)은 가진 상태와 같은 번호여도 적용한다. 요청한 쪽이 받아야 하는 것이기 때문이다. `qsh` CLI는 아직 `screen`을 요청하지 않는다(렌더러는 뒤 스텝).
+**client의 순서.** `qsh_core::client::screen::ClientScreen`이 조각을 모아 갱신을 적용하고 `state_hash`를 대조한다. 대조가 틀렸거나, base가 가진 상태가 아니거나, diff가 적용되지 않으면 가진 화면을 버리고 `ScreenAck{0}`를 보낸다. 전체 화면이 올 때까지 base가 0이 아닌 갱신은 무시한다. 적용에 성공하면 `ScreenAck{new_num}`를 보낸다. client는 최근 적용한 상태 8개(`RETAINED_STATES`)를 가지고 있어서, base가 그중 하나인 갱신은 어느 운반체로 왔든 적용한다. 이미 가진 것보다 새롭지 않은 갱신(다른 운반체의 더 새 갱신과 엇갈렸다)은 버리고 가진 상태 번호를 다시 ack한다. 전체 화면(base 0)은 가진 상태와 같은 번호여도 적용한다. 요청한 쪽이 받아야 하는 것이기 때문이다. 대화형 CLI는 `--screen-sync`(§18.10)로 `screen`을 요청한다.
 
 **재부착.** 재부착과 resume의 절차(§10)는 그대로다. 같은 세션에 바이트 경로로 다시 붙으면 `last_output_seq`부터 재생한다. 화면 경로의 첫 갱신은 한 화면이라서 떼어 둔 동안 10 MB가 쌓였어도 크기가 화면 크기에 비례한다(`reattach_sends_one_screen_not_the_backlog`). 지나간 출력 안의 터미널 질의는 로컬 터미널에 닿지 않고 host 에뮬레이터가 답한다(ADR-0052 결정 3).
 
@@ -932,3 +932,24 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 **입력 사본.** 키 입력은 세션 data 스트림의 `Input{input_seq, data}`가 정본이고, datagram 운반체를 쓸 수 있으면 같은 `Input`을 datagram(종류 12)으로 한 번 더 보낸다. 사본은 스트림 프레임보다 먼저 나가며 한 datagram에 들어가는 조각만 보낸다. host는 사본의 시작 offset(`input_seq - len(data)`)이 그 attach 축의 적용 offset과 **정확히 같을 때만** 적용하고 아니면 버린다. 더 앞에서 시작하는 사본은 이미 적용한 바이트의 중복이고, 더 뒤에서 시작하면 스트림 사본이 아직 오지 않은 바이트를 건너뛰게 된다. 스트림 프레임과 사본은 같은 잠금 아래에서 offset을 읽고 쓰므로 섞이지 않고, 늦게 온 스트림 프레임은 기존 중복 제거(§10-5)가 버린다. 그래서 무손실·무중복(PRD §8)은 스트림이 지키고 사본은 손실 아래의 입력 지연만 줄인다. 사본을 적용하면 `InputAck`를 스트림으로 보낸다.
 
 **시험.** `crates/qsh-testkit/tests/it/datagram_carrier.rs`가 고정한다. 손실·순서 뒤바뀜·중복 아래의 입력 무손실·무중복(`input_copies_are_lossless_and_duplicate_free_under_loss_and_reordering`), 틀린 offset의 사본 폐기(`a_datagram_input_copy_at_the_wrong_offset_is_dropped`), 모르는 channel(`a_datagram_for_an_unknown_channel_is_dropped_and_counted`), 경로가 datagram만 버릴 때의 스트림 전환(`a_path_that_eats_datagrams_falls_back_to_the_stream_and_converges`), 옛 peer 조합(`a_peer_without_datagram_v1_gets_the_stream_carrier`, `a_host_without_datagram_v1_gets_the_stream_carrier_from_a_new_client`), 그리고 `QSH_ACCEPTANCE_SLOW`에서 도는 `screen_sync_staleness_under_loss`(단방향 75 ms 지연과 5% 손실에서 datagram의 staleness p95 ≤ 50 ms, 스트림 운반체는 중간 상태를 건너뛰고 출력이 멈춘 뒤 2×RTO 안에 맞는다)다.
+
+
+### 18.10 client가 화면을 그리는 방법 (ADR-0052 결정 4·11·15)
+
+**누가 그리나.** `qsh_core::client::render::ScreenRenderer`가 상태를 로컬 터미널 바이트로 바꾼다. I/O와 시계가 없고, 호출마다 로컬 창 크기를 받는다. attach driver(`crates/qsh-core/src/ops/session/`)가 한 attach의 `ScreenSink`(렌더러, 로컬 창 크기, 마지막으로 그린 상태)를 쥐고, 연결(leg)마다 `ClientScreen`을 새로 만든다. 적용된 상태는 `qsh.event/v1`의 `Output` 이벤트(`data_b64` = 터미널 바이트)로 frontend에 나가므로 `qsh-cli`는 바이트 경로와 같은 쓰기 경로를 쓴다. 화면 경로의 `Output`은 세션의 출력 스트림이 아니다. `sequence`는 적용한 상태의 `output_seq`다.
+
+**ack.** reader가 `ClientScreen`의 결과(`ScreenOutcome::ack`)를 input pump에 넘기고, pump가 `ScreenAck`를 보낸다(datagram이 되면 양쪽 운반체). 밀린 ack 중 0(전체 화면 요청)은 뒤 번호에 접히지 않는다.
+
+**프레임 맞춤.** 상태를 로컬 창 크기에 맞춘 프레임으로 바꾼 뒤 그린다. 열은 왼쪽부터 자르고 모자라면 빈 셀이다. 행이 많으면 커서 행이 창의 맨 아래가 되게 윗행을 버린다. 자르는 경계에 걸린 이중 폭 문자는 빈칸이다. 보이지 않는 차이(쓴 공백과 지운 셀, 빈 셀의 전경색)는 같은 셀로 본다.
+
+**차이.** 직전에 그린 프레임과 같은 크기이면 행마다 다른 셀 구간을 찾아 6칸 미만의 같은 틈은 이어 쓰고, 구간마다 절대 커서 이동(`CSI r;c H`) 하나와 SGR(항상 `0;`으로 시작하는 절대 형태)을 쓴다. 구간이 행 끝까지 빈 셀이면 4칸 이상은 `CSI K`로 지운다. 이중 폭 문자는 왼쪽 반 셀에서 시작하도록 구간을 넓힌다. 여러 구간이면 그리는 동안 커서를 숨긴다. 크기 변경, 대체 화면 전환, 첫 프레임, `invalidate`(새 연결, 로컬 창 크기 변경)는 모든 셀을 쓴다. 화면을 지우는 `CSI 2J`는 쓰지 않으므로 로컬 스크롤백이 오염되지 않는다.
+
+**모드.** 대체 화면(`?1049`), 커서 숨김(`?25`), 응용 커서 키(`?1`), 응용 키패드(`ESC =`/`ESC >`), 괄호 붙여넣기(`?2004`), 마우스 모드(`?9`·`?1000`·`?1002`·`?1003`)와 인코딩(`?1005`·`?1006`)을 바뀔 때만 쓴다. 렌더러가 한 번이라도 기본이 아닌 모드를 썼으면 `reset`이 기본으로 되돌리는 바이트를 낸다(`SessionAttachStream::screen_reset`). frontend는 세션이 끝나거나 떼어질 때 그 바이트를 터미널에 쓴다.
+
+**효과.** 한 갱신의 효과는 그 갱신을 그린 호출에서 한 번만 나간다(제목은 OSC 2, 종, OSC 52 쓰기, OSC 8). 다시 그리기는 효과를 싣지 않는다. 클립보드 데이터가 `?`이면 쓰지 않는다(읽기 요청). 갱신이 끝날 때 열린 하이퍼링크는 닫는다. 셀에는 링크 속성이 없기 때문이다. datagram 운반체에서 ack가 늦어 client가 이미 적용한 상태 사이의 효과를 다음 갱신이 다시 실을 수 있고, 그때는 같은 효과가 두 번 나갈 수 있다(종과 클립보드 쓰기는 멱등에 가깝다).
+
+**첫 프레임.** 처음 그리기 전에 커서를 맨 아래 행으로 옮기고 창 높이만큼 줄바꿈해 attach 전에 터미널에 있던 출력(client의 안내 등)을 위로 밀어 올린 뒤 그린다. 셀 단위 갱신이 그 출력을 덮어쓰지 않게 하려는 것이다.
+
+**복구.** 연결이 새로 서면(재연결) driver는 같은 `ScreenSink`에 새 `ClientScreen`을 붙이고 `screen`을 다시 요청한다. 첫 갱신은 base 0의 전체 화면이고 렌더러는 모든 셀을 다시 쓴다. 로컬 창 크기가 바뀌면(`AttachCommand::Resize`) 마지막 상태를 새 크기로 다시 그리고 `Resize`를 host에 보낸다.
+
+**시험.** `crates/qsh-core/src/client/render/tests.rs`가 로컬 터미널 모델(두 번째 `HostScreen`)로 고정한다: 첫 프레임, 변화 없음은 0바이트, 한 셀의 변경은 한 셀의 비용(`a_one_cell_change_costs_one_cell`), 바뀐 행만, 빈 꼬리 지우기, 자르기·채우기, 이중 폭·결합 문자, 모드와 reset, 효과 한 번, 클립보드 읽기 거부, 임의의 입력열 뒤에도 로컬 터미널이 host 화면을 따른다(`local_terminal_follows_the_host`). `crates/qsh-cli/tests/it/screen_sync.rs`가 실제 `qsh serve` 위에서 `Ops`로 attach를 건다(`auto_draws_the_remote_screen_on_the_local_terminal`, `off_keeps_the_byte_path`, `a_session_opened_without_screen_sync_attaches_on_the_byte_path_under_auto`).

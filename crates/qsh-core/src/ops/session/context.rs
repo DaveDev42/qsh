@@ -19,6 +19,9 @@ impl Drop for AbortOnDrop {
 /// loads the device key, which platform key stores refuse to hand over from
 /// inside a runtime, and a recovery re-dials from inside one.
 pub(super) struct AttachContext {
+    /// Drawing state when the host granted screen sync for this attach
+    /// (ADR-0052); a recovery asks for it again.
+    pub(super) screen: Option<Arc<ScreenSink>>,
     /// `Some` only on the forward route — `session_attach`'s own doc on
     /// why the reverse route never resolves one of these at all.
     /// [`reattach`] (the only reader) is reachable only when

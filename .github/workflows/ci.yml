@@ -198,6 +198,14 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^datagram_carrier::screen_sync_staleness_under_loss$/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0052 decision 18 item 2: `ctrl_c_reaches_a_flooding_session_within_budget`.
+      # Behind a chaos proxy with 150 ms round trip and 3% loss, a `yes`
+      # flood is interrupted with Ctrl-C and the prompt must be on the
+      # client's screen within one second. The same scenario on the byte
+      # path is measured and printed beside it.
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^screen_sync::ctrl_c_reaches_a_flooding_session_within_budget$/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.

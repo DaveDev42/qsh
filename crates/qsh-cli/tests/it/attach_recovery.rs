@@ -192,9 +192,9 @@ fn records_for(session_ref: &str) -> Vec<RecoveryRecord> {
 /// A host, a client that pins it, and a chaos proxy the client dials
 /// instead of the host — so the path between them can be destroyed while
 /// both ends stay perfectly healthy.
-struct ProxiedFleet {
+pub(super) struct ProxiedFleet {
     host: Sandbox,
-    client: Sandbox,
+    pub(super) client: Sandbox,
     /// Held for the fleet's life: dropping it kills the host.
     _serve: ServeGuard,
     proxy: Arc<ChaosProxy>,
@@ -204,7 +204,7 @@ struct ProxiedFleet {
 }
 
 impl ProxiedFleet {
-    fn start(policy: ChaosPolicy) -> Self {
+    pub(super) fn start(policy: ChaosPolicy) -> Self {
         let host = Sandbox::new();
         let client = Sandbox::new();
         let host_fingerprint = host.fingerprint();
@@ -241,7 +241,7 @@ impl ProxiedFleet {
 
     /// The one-line context every chaos assertion carries — it prints the
     /// seed (`docs/design/testing.md`, CI 규율).
-    fn context(&self) -> String {
+    pub(super) fn context(&self) -> String {
         self.proxy.context()
     }
 
@@ -249,7 +249,7 @@ impl ProxiedFleet {
         self.proxy.detail()
     }
 
-    fn ops(&self, recovery: RecoveryConfig) -> Ops {
+    pub(super) fn ops(&self, recovery: RecoveryConfig) -> Ops {
         Ops::new(Paths::new(
             self.client.config_dir().to_path_buf(),
             self.client.state_dir().to_path_buf(),
@@ -359,7 +359,7 @@ fn read_until(stream: &mut SessionAttachStream, seen: &mut Delivered, needle: &s
 /// finished within [`DEADLINE`]. The blocking `Ops` API has no timeout of
 /// its own, so this is what turns a wedged attach into a failure instead of
 /// a hung suite.
-fn with_deadline<T: Send + 'static>(
+pub(super) fn with_deadline<T: Send + 'static>(
     what: &'static str,
     scenario: impl FnOnce() -> T + Send + 'static,
 ) -> T {

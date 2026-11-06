@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// What tells one leg's input pump something other than input: the stop
+/// request and, on a screen-sync leg, the state numbers to acknowledge.
+pub(super) struct InputSignals {
+    pub(super) stop: tokio::sync::oneshot::Receiver<()>,
+    pub(super) acks: tokio::sync::mpsc::UnboundedReceiver<u64>,
+}
+
 /// Sole owner of one leg's send half: queued input and resizes, in order. A
 /// write that fails does not end the attach — a stolen writer lease demotes
 /// this peer to read-only (protocol.md §10) and it is still owed its
@@ -17,14 +24,38 @@ pub(super) async fn pump_attach_input(
     watch: PathWatch,
     ctx: Arc<AttachContext>,
     events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
-    mut stop: tokio::sync::oneshot::Receiver<()>,
+    signals: InputSignals,
 ) {
+    let InputSignals { mut stop, mut acks } = signals;
     let finished = &ctx.finished;
     let mut commands = commands.lock().await;
+    let mut acks_open = true;
     loop {
         let command = tokio::select! {
             biased;
             _ = &mut stop => return,
+            // Screen sync: the state number the reader now holds. Only the
+            // newest matters, except that a request for the full screen
+            // (0) must not be folded into a later number: the host sends
+            // the full screen only for a 0 it sees.
+            ack = acks.recv(), if acks_open => {
+                let Some(mut ack) = ack else {
+                    acks_open = false;
+                    continue;
+                };
+                let mut resync = ack == 0;
+                while let Ok(next) = acks.try_recv() {
+                    resync |= next == 0;
+                    ack = next;
+                }
+                if resync && ack != 0 && writer.send_screen_ack(0).await.is_err() {
+                    return;
+                }
+                if writer.send_screen_ack(ack).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             // Cancel-safe, and the only await that can lose the race: the
             // handling below runs to completion once a command is taken.
             command = commands.recv() => match command {
@@ -68,6 +99,16 @@ pub(super) async fn pump_attach_input(
                 // input axis, so a resume has nothing to retransmit it
                 // from unless the last size was kept somewhere.
                 *lock(&ctx.window) = Some((cols, rows));
+                // Screen sync: the local window is what the screen is
+                // drawn into, so repaint it at the new size right away.
+                if let Some(sink) = &ctx.screen {
+                    let (bytes, sequence) = sink.set_local(cols, rows);
+                    if !bytes.is_empty() {
+                        let _ = events
+                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                            .await;
+                    }
+                }
                 writer.resize(cols, rows).await
             }
             AttachCommand::Detach(ack) => {
@@ -199,6 +240,17 @@ pub(super) async fn pump_attach_control(
                 }
             }
         }
+    }
+}
+
+/// The bytes a screen-sync attach draws on the local terminal, as the
+/// `Output` event the frontend writes to it.
+pub(super) fn screen_output(session_ref: &str, sequence: u64, bytes: &[u8]) -> SessionEvent {
+    SessionEvent::Output {
+        schema: EVENT_SCHEMA.to_string(),
+        session_ref: session_ref.to_string(),
+        sequence,
+        data_b64: BASE64.encode(bytes),
     }
 }
 

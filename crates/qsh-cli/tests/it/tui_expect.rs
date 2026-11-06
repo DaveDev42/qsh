@@ -1135,3 +1135,127 @@ fn pair_ssh_json_under_a_pty_runs_ssh_without_the_terminal() {
     std::fs::write(&gate, b"").expect("release ssh");
     let _ = client.wait();
 }
+
+// ---------------------------------------------------------------------
+// Screen state sync (ADR-0052 decisions 1, 9, 11, 15): the screen-path rows
+// ---------------------------------------------------------------------
+
+/// A program that sets a colour, prints a marker, and leaves two terminal
+/// modes on, then waits. Quoted for the remote shell.
+const MODES_PROGRAM: &str = r"printf '\033[?2004h\033[?1000h\033[31mRED\033[0m-DRAWN\n'; sleep 600";
+
+/// The default (`auto`) draws the remote screen on the local terminal with
+/// cursor addressing instead of forwarding the host's bytes, and a detach
+/// puts back the modes the program left on.
+#[test]
+fn screen_sync_draws_the_remote_screen_and_restores_modes_on_detach() {
+    let fleet = Fleet::start();
+    let mut client = Client::spawn(&fleet.client, &["-t", HOST_ALIAS, MODES_PROGRAM]);
+    let drawn = client.expect_preceded_by("-DRAWN");
+    let text = String::from_utf8_lossy(&drawn).into_owned();
+    assert!(
+        text.contains("\x1b[1;1H"),
+        "the screen path addresses the cursor: {text:?}"
+    );
+    assert!(
+        !text.contains("\x1b[31mRED\x1b[0m"),
+        "the host's own bytes must not be forwarded: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[?2004h") && text.contains("\x1b[?1000h"),
+        "{text:?}"
+    );
+
+    client.type_("~d");
+    let leaving = client.expect_preceded_by("detached");
+    let leaving = String::from_utf8_lossy(&leaving).into_owned();
+    assert!(
+        leaving.contains("\x1b[?2004l") && leaving.contains("\x1b[?1000l"),
+        "a detach must restore the modes the program set: {leaving:?}"
+    );
+    client.expect_exit(0);
+    assert!(client.is_cooked());
+}
+
+/// `--screen-sync=off` is today's byte path: the host's bytes reach the
+/// terminal untouched.
+#[test]
+fn screen_sync_off_forwards_the_hosts_bytes_unchanged() {
+    let fleet = Fleet::start();
+    let mut client = Client::spawn(
+        &fleet.client,
+        &["--screen-sync=off", "-t", HOST_ALIAS, MODES_PROGRAM],
+    );
+    let bytes = client.expect_preceded_by("-DRAWN");
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(
+        text.contains("\x1b[?2004h\x1b[?1000h\x1b[31mRED\x1b[0m"),
+        "the byte path must pass the host's bytes through: {text:?}"
+    );
+    client.type_("~d");
+    client.expect_exit(0);
+}
+
+/// The input and the escape machine behave the same on the screen path: a
+/// line typed reaches the shell, its answer is drawn, and `exit` ends the
+/// attach with the shell's code.
+#[test]
+fn screen_sync_round_trips_a_shell_and_returns_its_exit_code() {
+    let fleet = Fleet::start();
+    let mut client = Client::spawn(&fleet.client, &[HOST_ALIAS]);
+    client.round_trip("SCREEN-LOGIN");
+    client.type_("exit 7\r");
+    client.expect_exit(7);
+    assert!(client.is_cooked());
+}
+
+/// A local resize reaches the remote PTY and the screen is repainted at the
+/// new size.
+#[test]
+fn screen_sync_follows_a_local_resize() {
+    let fleet = Fleet::start();
+    let mut client = Client::spawn(&fleet.client, &[HOST_ALIAS]);
+    client.round_trip("BEFORE");
+    client.resize(NEW_SIZE);
+    client.expect_size(SIZE_PROBE, NEW_SIZE);
+    client.round_trip("AFTER");
+    client.type_("exit\r");
+    client.expect_exit(0);
+}
+
+/// `--screen-sync=on` needs a terminal on stdin and stdout; without one it
+/// is refused before a session exists, and `auto` quietly stays on the byte
+/// path.
+#[test]
+fn screen_sync_on_without_a_terminal_is_refused_and_auto_is_not() {
+    let fleet = Fleet::start();
+    let output = fleet
+        .client
+        .qsh_with_stdin(&["--screen-sync=on", HOST_ALIAS], b"exit 0\n");
+    assert_ne!(common::exit_code(&output), 0);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--screen-sync=on needs a terminal"),
+        "{stderr}"
+    );
+    assert_eq!(session_count(&fleet.client), 0, "no session may be created");
+
+    let output = fleet.client.qsh_with_stdin(
+        &["--screen-sync=auto", HOST_ALIAS],
+        b"echo AUTO''-PIPED\nexit 3\n",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AUTO-PIPED"), "{stdout:?}");
+    assert_eq!(common::exit_code(&output), 3, "{stdout:?}");
+
+    // A value that is not auto, on or off is a usage error.
+    let output = fleet
+        .client
+        .qsh_with_stdin(&["--screen-sync=sometimes", HOST_ALIAS], b"");
+    assert_ne!(common::exit_code(&output), 0);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not one of auto, on, off"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

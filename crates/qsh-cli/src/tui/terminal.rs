@@ -42,6 +42,14 @@ pub(crate) trait Terminal: Send + Sync + 'static {
     /// 80x24, `docs/design/architecture.md` §4).
     fn window_size(&self) -> Option<(u16, u16)>;
 
+    /// Whether stdout is a terminal. Screen state sync draws the remote
+    /// screen with cursor addressing, which only makes sense on one
+    /// (ADR-0052 decision 1: a redirected stdout stays on the byte path).
+    fn stdout_is_terminal(&self) -> bool {
+        use std::io::IsTerminal as _;
+        io::stdout().is_terminal()
+    }
+
     /// Put the terminal in raw mode for as long as the returned guard
     /// lives, and restore it when the guard drops. When stdin is not a
     /// terminal the guard is a no-op and reports `is_raw() == false`.

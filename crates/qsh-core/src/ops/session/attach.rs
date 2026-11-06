@@ -125,6 +125,8 @@ pub struct SessionAttachStream {
     /// `open_attach_stream` returns (`crate::ops::session::RecoveryLink`'s
     /// own doc).
     pub(super) link: RecoveryLink,
+    /// Drawing state when the host granted screen sync for this attach.
+    pub(super) screen: Option<Arc<ScreenSink>>,
 }
 
 /// Ends an attach the same way whether it was closed or merely dropped:
@@ -442,6 +444,23 @@ impl SessionAttachStream {
     /// does not report it, which a renderer must treat as "no replay known".
     pub fn replay_end(&self) -> u64 {
         self.output_end
+    }
+
+    /// Whether this attach runs screen state sync (ADR-0052): its `Output`
+    /// events are bytes for the local terminal, drawn against what that
+    /// terminal shows, not the session's own output stream. The replay
+    /// filter of the byte path does not apply to them.
+    pub fn screen_sync(&self) -> bool {
+        self.screen.is_some()
+    }
+
+    /// The bytes that put the local terminal's modes back (alternate
+    /// screen, mouse reporting, bracketed paste, hidden cursor...) after a
+    /// screen-sync attach, which mirrored the remote program's modes onto
+    /// it. Empty on the byte path and when no mode was ever changed. Write
+    /// them once, after the last event.
+    pub fn screen_reset(&self) -> Vec<u8> {
+        self.screen.as_ref().map(|s| s.reset()).unwrap_or_default()
     }
 
     /// Whether this attach holds the writer lease.

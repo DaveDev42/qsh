@@ -47,12 +47,14 @@ mod pump;
 mod reader;
 mod reconnect;
 mod recovery;
+mod screen_sink;
 
 pub use attach::{AttachHandle, DetachFlush, SessionAttachOp, SessionAttachStream};
 pub use filter::{SessionFilter, WRITER_NONE};
 pub(crate) use link::{Connected, Link};
 pub use reader::SessionReader;
 pub(crate) use recovery::probe_alive;
+pub use screen_sink::{ScreenAttach, ScreenSync};
 
 use attach::{AttachCommand, AttachStop, RenewalSchedule};
 use context::{
@@ -60,7 +62,9 @@ use context::{
 };
 use drive::drive_attach;
 use link::ConnectedLink;
-use pump::{attach_event_json, pump_attach_control, pump_attach_input};
+use pump::{
+    InputSignals, attach_event_json, pump_attach_control, pump_attach_input, screen_output,
+};
 use reader::dial_reverse_wait;
 use reader::{dial_peer, forget_if_closed};
 // Wider than `session`'s own use of it needs (`pub(super)` would do for
@@ -71,6 +75,7 @@ pub(in crate::ops) use reader::dial_reverse;
 use reconnect::{DialReconnect, LocalReconnect};
 use recovery::abandoned;
 use recovery::{ReattachTask, Recovery, lock, map_resume_error, recover_attach, spawn_reattach};
+use screen_sink::{ScreenSink, screen_sync_unsupported};
 
 /// Upper bound on the input one `session.write` accepts (`--stdin` or
 /// `--data-b64`), 16 MiB. Keeps a single value op — and its stdin buffer —
@@ -378,7 +383,25 @@ impl Ops {
     /// §6.3). Value op: no attach, no PTY on this side; the returned
     /// `session_ref` is the handle for every later call.
     pub fn session_open(&self, req: SessionOpenReq) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, false)
+        self.session_open_gated(req, false, None)
+    }
+
+    /// [`Self::session_open`] for an interactive frontend that will draw
+    /// the session on its terminal (`qsh [user@]host`, ADR-0052 decision 9):
+    /// `screen` asks the host to run an emulator for the session so the
+    /// attach that follows can use screen sync. `requires_dynamic` is
+    /// [`Self::session_open_for_dynamic`]'s gate.
+    ///
+    /// With [`ScreenSync::On`] a host without `screen.v1` is `UNSUPPORTED`
+    /// before any session exists; with [`ScreenSync::Auto`] the session is
+    /// a plain byte-path session.
+    pub fn session_open_interactive(
+        &self,
+        req: SessionOpenReq,
+        requires_dynamic: bool,
+        screen: Option<ScreenAttach>,
+    ) -> Result<SessionOpenData, OpError> {
+        self.session_open_gated(req, requires_dynamic, screen)
     }
 
     /// [`Self::session_open`]'s twin for the interactive `qsh [user@]host
@@ -397,7 +420,7 @@ impl Ops {
         &self,
         req: SessionOpenReq,
     ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, true)
+        self.session_open_gated(req, true, None)
     }
 
     /// The shared body of [`Self::session_open`]/
@@ -411,8 +434,10 @@ impl Ops {
         &self,
         req: SessionOpenReq,
         require_dial_filter: bool,
+        screen: Option<ScreenAttach>,
     ) -> Result<SessionOpenData, OpError> {
         let host = req.host.clone();
+        let screen = screen.filter(ScreenAttach::wanted);
         let user = self.resolve_user_hint(&host, req.user)?;
         let msg = wire::SessionOpen {
             argv: req.argv,
@@ -422,14 +447,25 @@ impl Ops {
             rows: req.rows.unwrap_or(0),
             user,
             shell_command: req.shell_command,
-            // The CLI does not ask for screen sync yet (ADR-0052: the
-            // renderer is a later step), so every session is a byte path.
-            screen: None,
+            // `Session::session_open` drops the field again for a host
+            // that did not negotiate `screen.v1`.
+            screen: screen.map(|s| s.request()),
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
         // connection has to be read before the connection is torn down.
         let conn = self.connect(&host)?;
+        if screen.is_some_and(|s| s.mode == ScreenSync::On)
+            && !conn
+                .capabilities()
+                .iter()
+                .any(|cap| cap == wire::CAP_SCREEN_V1)
+        {
+            conn.close();
+            return Err(screen_sync_unsupported(
+                "the host does not offer screen sync (no screen.v1)",
+            ));
+        }
         self.session_open_gated_with_connected(conn, msg, &host, require_dial_filter)
     }
 
@@ -763,6 +799,24 @@ impl Ops {
         req: SessionAttachReq,
         remote_forward_specs: &[wire::ForwardSpec],
     ) -> Result<SessionAttachStream, OpError> {
+        self.session_attach_screen(req, remote_forward_specs, None)
+    }
+
+    /// [`Self::session_attach`] for an interactive frontend that draws on a
+    /// terminal (ADR-0052 decisions 9, 11 and 15). With `screen` set the
+    /// attach asks for screen sync; when the host grants it the events are
+    /// the frontend's local terminal bytes (`Output`), already drawn
+    /// against what the terminal shows, and
+    /// [`SessionAttachStream::screen_sync`] is true. Without it, or when the
+    /// host does not grant it under [`ScreenSync::Auto`], the stream is the
+    /// byte path of today.
+    pub fn session_attach_screen(
+        &self,
+        req: SessionAttachReq,
+        remote_forward_specs: &[wire::ForwardSpec],
+        screen: Option<ScreenAttach>,
+    ) -> Result<SessionAttachStream, OpError> {
+        let screen = screen.filter(ScreenAttach::wanted);
         let r = parse_session_ref(&req.session_ref)?;
         // `[transport]` is read here, before any route is resolved or a
         // socket exists: a bad value is a `CONFIG_ERROR`, never clamped
@@ -819,8 +873,21 @@ impl Ops {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: req.no_steal,
-            screen: None,
+            // `Session::attach_request` drops it for a host without
+            // `screen.v1`.
+            screen: screen.map(|s| s.request()),
         };
+        if screen.is_some_and(|s| s.mode == ScreenSync::On)
+            && !conn
+                .capabilities()
+                .iter()
+                .any(|cap| cap == wire::CAP_SCREEN_V1)
+        {
+            conn.close();
+            return Err(screen_sync_unsupported(
+                "the host does not offer screen sync (no screen.v1)",
+            ));
+        }
         let attached = match conn.run(move |s| Box::pin(s.attach_request(msg))) {
             Ok(attached) => attached,
             Err(err) => {
@@ -857,6 +924,13 @@ impl Ops {
             let _ = store.forget(&req.session_ref);
             conn.close();
             return Err(err);
+        }
+        let screen_granted = !attached.screen_channel.is_empty();
+        if screen.is_some_and(|s| s.mode == ScreenSync::On) && !screen_granted {
+            conn.close();
+            return Err(screen_sync_unsupported(
+                "the host runs no screen emulator for this session (it was opened without screen sync)",
+            ));
         }
         let replay_from = attached.replay_from;
         let output_end = attached.output_end;
@@ -972,7 +1046,13 @@ impl Ops {
                 RecoveryLink::Reverse(ReverseKill::new(attached.kill.clone()))
             }
         };
+        // The drawing state of a screen-sync attach, kept across the
+        // connections the attach runs on.
+        let screen_sink = screen
+            .filter(|_| screen_granted)
+            .map(|s| Arc::new(ScreenSink::new(s.cols, s.rows)));
         let ctx = Arc::new(AttachContext {
+            screen: screen_sink.clone(),
             target,
             host: r.host.clone(),
             session_id: r.session_id.clone(),
@@ -1012,6 +1092,7 @@ impl Ops {
             renewal: resume_ttl.map(|ttl| RenewalSchedule::new(ttl, std::time::Instant::now())),
             expires_at,
             link,
+            screen: screen_sink,
         })
     }
 

@@ -36,6 +36,7 @@ mod reverse_e2e;
 mod reverse_unreachable_diagnostic;
 #[cfg(windows)]
 mod route_cases;
+mod screen_sync;
 mod serve_sigterm_drain;
 mod service_run;
 mod session_follow;

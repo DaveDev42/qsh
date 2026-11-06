@@ -45,6 +45,30 @@ const BANNER: &str = "headless echo session";
 /// How long the host may take to show a session as detached or attached.
 const SETTLE: Duration = Duration::from_secs(30);
 
+/// [`spawn_qsh`] on the byte path (`--screen-sync=off`). These tests read the
+/// console's text stream with the escape sequences stripped, which only
+/// reproduces what the host wrote when the client forwards the host's bytes;
+/// a screen-sync client writes changed cells at cursor positions instead.
+/// Screen sync on Windows is covered by `screen_sync::` and by the
+/// interactive forward tests, whose assertions are on lines the client
+/// itself prints.
+fn spawn_byte_qsh(sandbox: &Sandbox, args: &[&str]) -> ConPtyProbe {
+    spawn_byte_qsh_sized(sandbox, args, 120, 30)
+}
+
+/// [`spawn_byte_qsh`] in a console of `cols` x `rows`.
+fn spawn_byte_qsh_sized(sandbox: &Sandbox, args: &[&str], cols: u16, rows: u16) -> ConPtyProbe {
+    let mut full: Vec<&str> = Vec::new();
+    if args.first() == Some(&"attach") {
+        full.extend_from_slice(&["attach", "--screen-sync=off"]);
+        full.extend_from_slice(&args[1..]);
+    } else {
+        full.push("--screen-sync=off");
+        full.extend_from_slice(args);
+    }
+    spawn_qsh_sized(sandbox, &full, cols, rows)
+}
+
 /// `qsh` with `args` in a ConPTY, in `sandbox`'s environment.
 pub(crate) fn spawn_qsh(sandbox: &Sandbox, args: &[&str]) -> ConPtyProbe {
     spawn_qsh_sized(sandbox, args, 120, 30)
@@ -98,7 +122,7 @@ fn wait_counts(route: &impl EchoRoute, live: usize, detached: usize) {
 /// Attach a fresh session through `route`, send `marker`, and see the host
 /// echo it back.
 fn open_and_echo(route: &impl EchoRoute, marker: &str) -> ConPtyProbe {
-    let mut qsh = spawn_qsh(route.client(), &[route.name()]);
+    let mut qsh = spawn_byte_qsh(route.client(), &[route.name()]);
     qsh.wait_text(BANNER);
     wait_counts(route, 1, 0);
     qsh.send(format!("{marker}\r").as_bytes());
@@ -147,7 +171,7 @@ fn detach_then_attach_resumes(route: &impl EchoRoute) {
     wait_counts(route, 1, 1);
 
     let session_ref = the_session_ref(route);
-    let mut second = spawn_qsh(route.client(), &["attach", &session_ref]);
+    let mut second = spawn_byte_qsh(route.client(), &["attach", &session_ref]);
     // Continuity, not just a session that answers: what was typed before
     // the detach comes back from the session's retained output before
     // anything new is typed.
@@ -182,7 +206,7 @@ fn console_close_detaches(route: &impl EchoRoute) {
     qsh.wait_exit();
 
     let session_ref = the_session_ref(route);
-    let mut again = spawn_qsh(route.client(), &["attach", &session_ref]);
+    let mut again = spawn_byte_qsh(route.client(), &["attach", &session_ref]);
     again.wait_text("QSH-CLOSE-BEFORE");
     again.send(b"QSH-CLOSE-AFTER\r");
     again.wait_text("QSH-CLOSE-AFTER");
@@ -229,7 +253,7 @@ fn console_close_detaches_and_keeps_the_session_reverse() {
 fn a_foreign_user_hint_is_refused_without_creating_a_session() {
     let route = EchoForward::start();
     let target = format!("qsh-no-such-user@{}", route.name());
-    let mut qsh = spawn_qsh(route.client(), &[&target]);
+    let mut qsh = spawn_byte_qsh(route.client(), &[&target]);
     qsh.wait_text("user switching is not supported");
     assert_eq!(
         qsh.wait_exit(),
@@ -306,7 +330,7 @@ pub(crate) fn said(tag: &str) -> String {
 
 /// `qsh <host>` in a ConPTY of `cols` x `rows`, with the host's shell running.
 fn attach_new_shell(route: &impl Route, cols: u16, rows: u16) -> ConPtyProbe {
-    let qsh = spawn_qsh_sized(route.client(), &[route.host()], cols, rows);
+    let qsh = spawn_byte_qsh_sized(route.client(), &[route.host()], cols, rows);
     wait_running(route, 1);
     qsh
 }
@@ -355,7 +379,7 @@ fn pty_detach_then_attach_resumes(route: &impl Route) {
     // Detached, not ended: the shell is still running on the host.
     let session_ref = the_running_session(route);
 
-    let mut second = spawn_qsh(route.client(), &["attach", &session_ref]);
+    let mut second = spawn_byte_qsh(route.client(), &["attach", &session_ref]);
     // Continuity, not just a shell that answers: what the first console saw
     // comes back from the session's retained output.
     second.wait_text(&said("QSHBEFORE"));
@@ -414,7 +438,7 @@ fn pty_console_close_detaches(route: &impl Route, lease_released: bool) {
     }
     assert_eq!(the_running_session(route), session_ref);
 
-    let mut again = spawn_qsh(route.client(), &["attach", &session_ref]);
+    let mut again = spawn_byte_qsh(route.client(), &["attach", &session_ref]);
     again.wait_text(&said("QSHCLOSEBEFORE"));
     again.send(say("QSHCLOSEAFTER").as_bytes());
     again.wait_text(&said("QSHCLOSEAFTER"));
@@ -488,7 +512,7 @@ fn killed_client_leaves_the_session_running(route: &impl Route) {
     );
 
     // Another console takes the session over, replay included.
-    let mut again = spawn_qsh(route.client(), &["attach", &session_ref]);
+    let mut again = spawn_byte_qsh(route.client(), &["attach", &session_ref]);
     again.wait_text(&said("QSHALIVE"));
     again.send(say("QSHAGAIN").as_bytes());
     again.wait_text(&said("QSHAGAIN"));

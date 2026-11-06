@@ -156,8 +156,19 @@ const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COL
 /// code (`docs/CLI.md` §4: the remote shell's code, `255` clamped to
 /// `254`; a detach is `0`).
 #[cfg(unix)]
-pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> {
-    session_loop::run(ops, what, escape, std::sync::Arc::new(unix::UnixTerminal))
+pub fn run(
+    ops: &Ops,
+    what: Attach,
+    escape: Option<u8>,
+    screen_sync: qsh_core::ScreenSync,
+) -> Result<i32, OpError> {
+    session_loop::run(
+        ops,
+        what,
+        escape,
+        std::sync::Arc::new(unix::UnixTerminal),
+        screen_sync,
+    )
 }
 
 /// Run an interactive session to completion on the Windows console and
@@ -165,12 +176,18 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
 /// when it cannot, the driver refuses with `UNSUPPORTED` before a session
 /// exists (`docs/CLI.md` §7).
 #[cfg(windows)]
-pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> {
+pub fn run(
+    ops: &Ops,
+    what: Attach,
+    escape: Option<u8>,
+    screen_sync: qsh_core::ScreenSync,
+) -> Result<i32, OpError> {
     session_loop::run(
         ops,
         what,
         escape,
         std::sync::Arc::new(windows::system::terminal().detaching_on_hangup()),
+        screen_sync,
     )
 }
 
