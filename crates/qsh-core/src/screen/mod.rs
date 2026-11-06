@@ -76,8 +76,10 @@ impl Default for ScreenOptions {
 /// Lines scrolled off the top since the last [`HostScreen::take_history`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HistoryBatch {
-    /// Lines evicted before they could be taken. The history transport
-    /// reports them as `--- N lines skipped ---`.
+    /// Lines that scrolled off after `lines` and were counted instead of
+    /// kept, because the history was full (row or byte cap) before it was
+    /// taken: the newest rows of a flood. They come after `lines` in time.
+    /// The history transport reports them as `--- N lines skipped ---`.
     pub skipped: u64,
     /// The lines, oldest first, as SGR-formatted text without a newline.
     pub lines: Vec<String>,
@@ -201,6 +203,7 @@ impl HostScreen {
     pub fn take_history(&mut self) -> HistoryBatch {
         let c = self.parser.callbacks_mut();
         c.history_bytes = 0;
+        c.history_full = false;
         HistoryBatch {
             skipped: std::mem::take(&mut c.history_skipped),
             lines: c.history.drain(..).collect(),

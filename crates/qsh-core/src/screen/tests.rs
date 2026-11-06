@@ -440,8 +440,9 @@ fn history_is_capped_and_reports_what_it_dropped() {
     let h = s.take_history();
     assert_eq!(h.lines.len(), 5);
     assert_eq!(h.skipped, 14);
-    assert!(h.lines[0].starts_with("n14"), "{:?}", h.lines);
-    assert!(h.lines[4].starts_with("n18"));
+    // The first rows are kept in order; the rest of the flood is counted.
+    assert!(h.lines[0].starts_with("n0"), "{:?}", h.lines);
+    assert!(h.lines[4].starts_with("n4"));
     // The byte cap bounds it too.
     let mut s = HostScreen::new(ScreenOptions {
         rows: 2,
@@ -455,6 +456,47 @@ fn history_is_capped_and_reports_what_it_dropped() {
     let h = s.take_history();
     assert!(h.lines.iter().map(String::len).sum::<usize>() <= 64);
     assert!(h.skipped > 0);
+}
+
+#[test]
+fn a_flood_is_counted_not_formatted_and_reported_once_taken() {
+    let mut s = HostScreen::new(ScreenOptions {
+        rows: 4,
+        cols: 20,
+        history_rows: 100,
+        history_bytes: 1 << 20,
+    });
+    // 10_000 lines across many feeds with no take in between.
+    for i in 0..10_000 {
+        feed(&mut s, format!("flood {i}\r\n").as_bytes());
+    }
+    let h = s.take_history();
+    // 10_000 newlines on a 4 row screen: rows 0..=9_996 scrolled off.
+    assert_eq!(h.lines.len(), 100);
+    assert_eq!(h.skipped, 9_997 - 100);
+    assert!(h.lines[0].starts_with("flood 0"), "{:?}", h.lines[0]);
+    assert!(h.lines[99].starts_with("flood 99"));
+    // Taken once: the counters start over and rows are kept again.
+    feed(&mut s, b"x\r\ny\r\nz\r\nw\r\n");
+    let h = s.take_history();
+    assert_eq!(h.skipped, 0);
+    assert!(h.lines.len() >= 3);
+}
+
+#[test]
+fn history_off_counts_every_row() {
+    let mut s = HostScreen::new(ScreenOptions {
+        rows: 2,
+        cols: 10,
+        history_rows: 0,
+        history_bytes: 1 << 20,
+    });
+    for _ in 0..10 {
+        feed(&mut s, b"x\r\n");
+    }
+    let h = s.take_history();
+    assert!(h.lines.is_empty());
+    assert_eq!(h.skipped, 9);
 }
 
 // ---- ConPTY-style output ----
@@ -534,6 +576,39 @@ fn a_large_chunk_is_fed_in_bounded_slices_and_stays_cheap() {
     assert_eq!(a.snapshot().hash(), b.snapshot().hash());
 }
 
+/// The history must not cost the pump a flood: with the default history the
+/// emulator keeps within 70% of the speed it has with history off (formatting
+/// every scrolled-off row used to cut it to about 40%). Best of three on a
+/// few MiB, so a loaded CI host moves both sides alike.
+#[test]
+fn history_costs_a_flood_almost_nothing() {
+    let line = b"0001 the quick brown fox jumps over the lazy dog 0123456789 abcdefghijklmnopqrstuvwxyz\r\n";
+    let chunk: Vec<u8> = line.repeat(180);
+    let run = |history_rows: usize| {
+        (0..3)
+            .map(|_| {
+                let mut s = HostScreen::new(ScreenOptions {
+                    history_rows,
+                    ..ScreenOptions::default()
+                });
+                let t = Instant::now();
+                for i in 0..60u64 {
+                    s.feed(&chunk, i);
+                }
+                std::hint::black_box(&s);
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let off = run(0);
+    let on = run(DEFAULT_HISTORY_ROWS);
+    assert!(
+        on.as_secs_f64() < off.as_secs_f64() / 0.7,
+        "history on {on:?} vs off {off:?}"
+    );
+}
+
 use std::time::Duration;
 
 /// DoD 11 groundwork: emulator throughput on 100 MB of `cat`-like output
@@ -570,9 +645,12 @@ fn screen_throughput_on_100mb_of_cat_output() {
     let rounds = (100 * 1024 * 1024) / (chunks.len() * RING_CHUNK_MAX) + 1;
     let bytes = (rounds * chunks.len() * RING_CHUNK_MAX) as f64;
 
-    let run = |feed_screen: bool| {
+    let run = |feed_screen: bool, history_rows: usize| {
         let mut ring = ReplayRing::new(8 * 1024 * 1024);
-        let mut s = screen(24, 80);
+        let mut s = HostScreen::new(ScreenOptions {
+            history_rows,
+            ..ScreenOptions::default()
+        });
         let t = Instant::now();
         for _ in 0..rounds {
             for c in &chunks {
@@ -588,10 +666,15 @@ fn screen_throughput_on_100mb_of_cat_output() {
         t.elapsed()
     };
     // Warm up, then take the best of three of each.
-    run(true);
-    let best = |f: bool| (0..3).map(|_| run(f)).min().unwrap();
-    let without = best(false);
-    let with = best(true);
+    run(true, DEFAULT_HISTORY_ROWS);
+    let best = |f: bool, h: usize| (0..3).map(|_| run(f, h)).min().unwrap();
+    let without = best(false, 0);
+    let no_history = best(true, 0);
+    println!(
+        "screen_throughput: emulator without history {:.0} MiB/s",
+        bytes / (1024.0 * 1024.0) / no_history.as_secs_f64()
+    );
+    let with = best(true, DEFAULT_HISTORY_ROWS);
     let mb = bytes / (1024.0 * 1024.0);
     println!(
         "screen_throughput: {mb:.0} MiB; ring only {:.0} MiB/s; ring + emulator {:.0} MiB/s; ratio {:.3}",

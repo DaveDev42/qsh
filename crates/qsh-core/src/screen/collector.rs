@@ -29,9 +29,14 @@ pub(super) struct Collector {
     pub(super) history_bytes: usize,
     pub(super) history_max_rows: usize,
     pub(super) history_max_bytes: usize,
-    /// Lines evicted from `history` before anyone took them, since the last
-    /// drain.
+    /// Lines that scrolled off while `history` was full and were counted,
+    /// not formatted, since the last drain.
     pub(super) history_skipped: u64,
+    /// `history` has hit its row or byte cap: later rows are only counted
+    /// until the next drain. Formatting a row costs more than the emulator
+    /// spends on the bytes that produced it, so under a flood a full history
+    /// must not format rows it would throw away.
+    pub(super) history_full: bool,
     pub(super) fg: Option<Rgb>,
     pub(super) bg: Option<Rgb>,
 }
@@ -47,6 +52,7 @@ impl Collector {
             history_max_rows,
             history_max_bytes,
             history_skipped: 0,
+            history_full: false,
             fg: None,
             bg: None,
         }
@@ -71,22 +77,15 @@ impl Collector {
     }
 
     fn push_history(&mut self, line: String) {
-        if self.history_max_rows == 0 {
+        if self.history_bytes + line.len() > self.history_max_bytes {
+            self.history_full = true;
             self.history_skipped += 1;
             return;
         }
         self.history_bytes += line.len();
         self.history.push_back(line);
-        while self.history.len() > self.history_max_rows
-            || self.history_bytes > self.history_max_bytes
-        {
-            match self.history.pop_front() {
-                Some(old) => {
-                    self.history_bytes -= old.len();
-                    self.history_skipped += 1;
-                }
-                None => break,
-            }
+        if self.history.len() >= self.history_max_rows {
+            self.history_full = true;
         }
     }
 
@@ -231,7 +230,13 @@ impl vt100::Callbacks for Collector {
     }
 
     fn on_scroll(&mut self, contents: RowContents<'_>, alternate_screen: bool) {
-        if alternate_screen || self.history_max_rows == 0 {
+        if alternate_screen {
+            return;
+        }
+        if self.history_full || self.history_max_rows == 0 {
+            // Counted, not formatted: this is the flood path and it must
+            // stay a few instructions.
+            self.history_skipped += 1;
             return;
         }
         let mut line = String::new();
