@@ -382,6 +382,10 @@ impl SessionStream {
                 recv,
                 frames_tx,
                 sync.clone(),
+                // Keys are the interactive traffic bulk yields to
+                // (ADR-0052 decision 12 (a)); the governor lives as long as
+                // this attach does.
+                crate::adapt::BulkGovernor::for_connection(&connection),
             );
             tokio::pin!(input);
             tokio::select! {
@@ -1063,6 +1067,7 @@ async fn input_pump(
     mut recv: FramedRecv,
     frames: mpsc::Sender<SessionFrame>,
     sync: Option<Arc<ScreenSync>>,
+    governor: Arc<crate::adapt::BulkGovernor>,
 ) -> Result<(), SessionStreamError> {
     // The dedup cursor lives in the **session** (protocol.md §10-5), not
     // here: `SessionBackend::write_at` trims whatever the child already ran
@@ -1082,6 +1087,7 @@ async fn input_pump(
             .map_err(|e| SessionStreamError::Protocol(e.to_string()))?;
         match frame.body {
             Some(session_frame::Body::Input(input)) => {
+                governor.note_interactive();
                 let len = input.data.len() as u64;
                 let mut applied_guard = axis.lock().await;
                 let mut applied = *applied_guard;

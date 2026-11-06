@@ -1,0 +1,12 @@
+name = "q5-shallow-yield"
+question = "q5"
+description = "Saturating bulk plus key echo, same connection, echo priority, bulk yields (qsh governor port), 20 Mbit link RTT 50 ms, 20 ms queue"
+
+[link]
+rtt_ms = 50
+rate_mbit = 20
+queue_ms = 20
+
+[workload]
+kind = "bulk_echo"
+isolation = "yield"

@@ -9,8 +9,24 @@ use super::BulkYield;
 /// Open number: the rate may grow by this share of the estimated bandwidth
 /// per RTT while the queue is below target.
 const GROW_PERCENT_PER_RTT: u64 = 2;
+/// Open number: a loss counts as congestion only while the standing queue
+/// is at least this share of the target (one over this number). On a queue
+/// shorter than the target, drop-tail loss is the only sign that the pipe is
+/// full; loss on a path with an empty queue is the path's own and says
+/// nothing about the bulk.
+const LOSS_QUEUE_DIVISOR: u32 = 2;
 /// Open number: the bucket holds this much time worth of tokens.
-const BURST_WINDOW: Duration = Duration::from_millis(50);
+const BURST_WINDOW: Duration = Duration::from_millis(10);
+/// Open number: after a sender went short of tokens, the bucket may hold this
+/// much more than its burst, in time at the current rate. A sleeping sender
+/// wakes late (Windows timers tick every 15.6 ms, so a 1 ms sleep is 15 ms);
+/// without the extra room the tokens that piled up during the oversleep are
+/// thrown away and the rate tops out at burst / tick, 1.6 MB/s for a 25 KB
+/// burst, whatever the budget says.
+const CATCH_UP: Duration = Duration::from_millis(20);
+/// Open number: the extra room applies only to a refill after at most this
+/// long. Past it the sender was idle, not late.
+const CATCH_UP_WINDOW: Duration = Duration::from_millis(100);
 /// Open number: smallest bucket, so a low rate can still send a few packets.
 const BURST_MIN_BYTES: u64 = 16 * 1024;
 
@@ -23,6 +39,8 @@ pub struct BulkBudget {
     tokens: u64,
     last_refill: Duration,
     last_adjust: Duration,
+    loss_pending: bool,
+    starved: bool,
 }
 
 impl BulkBudget {
@@ -35,7 +53,15 @@ impl BulkBudget {
             tokens: 0,
             last_refill: now,
             last_adjust: now,
+            loss_pending: false,
+            starved: false,
         }
+    }
+
+    /// A packet was lost since the last steering step. Counts at the next
+    /// step if the queue is then standing at a quarter of the target or more.
+    pub fn note_loss(&mut self) {
+        self.loss_pending = true;
     }
 
     /// Current rate in bytes per second, `None` while not limiting.
@@ -72,7 +98,7 @@ impl BulkBudget {
     }
 
     /// One steering step, at most once per `srtt`: queue delay above the
-    /// target halves the rate, otherwise it grows a little. Never below the
+    /// target (or a loss with a standing queue, [`Self::note_loss`]) halves the rate, otherwise it grows a little. Never below the
     /// floor, never above the bandwidth estimate.
     pub fn steer(&mut self, now: Duration, queue_delay: Duration, srtt: Duration) {
         let BulkYield::Yield {
@@ -86,7 +112,9 @@ impl BulkBudget {
             return;
         }
         self.last_adjust = now;
-        self.rate = if queue_delay > target {
+        let lossy =
+            std::mem::take(&mut self.loss_pending) && queue_delay >= target / LOSS_QUEUE_DIVISOR;
+        self.rate = if queue_delay > target || lossy {
             self.rate / 2
         } else {
             let step = (self.ceiling / 100).saturating_mul(GROW_PERCENT_PER_RTT);
@@ -103,6 +131,7 @@ impl BulkBudget {
         self.refill(now);
         let n = want.min(self.tokens);
         self.tokens -= n;
+        self.starved = n < want;
         n
     }
 
@@ -127,7 +156,16 @@ impl BulkBudget {
         self.last_refill = now.max(self.last_refill);
         let add =
             (u128::from(self.rate) * dt.as_micros() / 1_000_000).min(u128::from(u64::MAX)) as u64;
-        self.tokens = self.tokens.saturating_add(add).min(self.burst());
+        let room = if self.starved && dt <= CATCH_UP_WINDOW {
+            (u128::from(self.rate) * CATCH_UP.as_micros() / 1_000_000).min(u128::from(u64::MAX))
+                as u64
+        } else {
+            0
+        };
+        self.tokens = self
+            .tokens
+            .saturating_add(add)
+            .min(self.burst().saturating_add(room));
     }
 }
 

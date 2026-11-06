@@ -4,6 +4,7 @@
 use crate::net::now_ns;
 use crate::profile::{Carrier, Isolation, Kind, Profile};
 use crate::result::{Metrics, percentiles, round3};
+use crate::yielder::Yielder;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
@@ -203,13 +204,22 @@ pub async fn screen_client(conn: &quinn::Connection, p: &Profile, m: &mut Metric
 
 // -------------------------------------------------------------------- echo
 
-pub async fn echo_server(conn: &quinn::Connection, p: &Profile) -> Result<()> {
+pub async fn echo_server(
+    conn: &quinn::Connection,
+    p: &Profile,
+    yielder: Option<&Yielder>,
+) -> Result<()> {
     let (mut tx, mut rx) = conn.accept_bi().await?;
-    if p.workload.kind == Kind::BulkEcho && p.workload.isolation == Isolation::Priority {
+    if p.workload.kind == Kind::BulkEcho
+        && matches!(p.workload.isolation, Isolation::Priority | Isolation::Yield)
+    {
         tx.set_priority(ECHO_PRIORITY)?;
     }
     let mut rec = [0u8; KEY_RECORD];
     while rx.read_exact(&mut rec).await.is_ok() {
+        if let Some(y) = yielder {
+            y.note_interactive();
+        }
         tx.write_all(&rec).await?;
     }
     let _ = tx.finish();
@@ -266,15 +276,36 @@ pub async fn echo_client(conn: &quinn::Connection, p: &Profile, m: &mut Metrics)
 
 // -------------------------------------------------------------------- bulk
 
-pub async fn bulk_server(conn: &quinn::Connection, p: &Profile) -> Result<()> {
+pub async fn bulk_server(
+    conn: &quinn::Connection,
+    p: &Profile,
+    yielder: Option<&Yielder>,
+) -> Result<()> {
     let mut tx = conn.open_uni().await?;
     tx.set_priority(0)?;
     let deadline = Instant::now() + Duration::from_secs(u64::from(p.workload.duration_s));
     let chunk = vec![0xA5u8; BULK_CHUNK];
     while Instant::now() < deadline {
-        match timeout_at(deadline, tx.write_all(&chunk)).await {
-            Ok(r) => r?,
-            Err(_) => break,
+        let mut rest = &chunk[..];
+        while !rest.is_empty() {
+            let take = yielder.map_or(rest.len(), |y| y.granule(rest.len()));
+            if let Some(y) = yielder {
+                match timeout_at(deadline, y.pace(take)).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        let _ = tx.finish();
+                        return Ok(());
+                    }
+                }
+            }
+            match timeout_at(deadline, tx.write_all(&rest[..take])).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    let _ = tx.finish();
+                    return Ok(());
+                }
+            }
+            rest = &rest[take..];
         }
     }
     let _ = tx.finish();

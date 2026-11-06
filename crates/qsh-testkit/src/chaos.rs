@@ -19,7 +19,8 @@
 //! [`ChaosPolicy::delay`], [`ChaosPolicy::reorder`],
 //! [`ChaosPolicy::duplicate`], [`ChaosPolicy::corrupt`] (the AEAD positive
 //! control — a corrupted packet must be *rejected* by QUIC, never handed to
-//! the application). Live, out-of-band: [`ChaosProxy::blackhole`] +
+//! the application), and [`ChaosPolicy::rate`], a bottleneck link (token
+//! bucket with a bounded drop-tail queue, ADR-0052 decision 18 item 6). Live, out-of-band: [`ChaosProxy::blackhole`] +
 //! [`ChaosProxy::recover`], [`ChaosProxy::repath`] (rebind the upstream
 //! socket so the host sees a new peer address — what NAT rebinding and a
 //! Wi-Fi→LTE switch look like from the host's side) and
@@ -209,6 +210,41 @@ pub struct ChaosPolicy {
     duplicate_p: f64,
     reorder_p: f64,
     delay: DelayDist,
+    rate: Option<Rate>,
+}
+
+/// A bottleneck link: serialisation rate plus a bounded queue
+/// ([`ChaosPolicy::rate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rate {
+    /// Link speed in bits per second.
+    pub bits_per_sec: u64,
+    /// Queue depth in bytes. A datagram that would push the bytes waiting
+    /// past this is dropped (drop-tail).
+    pub queue_bytes: u64,
+}
+
+impl Rate {
+    /// A queue that holds `queue` of drain time at `bits_per_sec`.
+    pub fn with_queue_delay(bits_per_sec: u64, queue: Duration) -> Self {
+        let queue_bytes = (u128::from(bits_per_sec) * queue.as_nanos() / 8_000_000_000) as u64;
+        Self {
+            bits_per_sec,
+            queue_bytes,
+        }
+    }
+
+    /// Time the link needs to put `len` bytes on the wire.
+    fn service(&self, len: usize) -> Duration {
+        let ns = (len as u128 * 8_000_000_000) / u128::from(self.bits_per_sec.max(1));
+        Duration::from_nanos(ns.min(u128::from(u64::MAX)) as u64)
+    }
+
+    /// Bytes the link drains in `d`.
+    fn drained(&self, d: Duration) -> u64 {
+        (d.as_nanos() * u128::from(self.bits_per_sec) / 8_000_000_000).min(u128::from(u64::MAX))
+            as u64
+    }
 }
 
 impl ChaosPolicy {
@@ -223,6 +259,7 @@ impl ChaosPolicy {
             duplicate_p: 0.0,
             reorder_p: 0.0,
             delay: DelayDist::None,
+            rate: None,
         }
     }
 
@@ -242,6 +279,30 @@ impl ChaosPolicy {
     #[must_use]
     pub fn delay(mut self, dist: DelayDist) -> Self {
         self.delay = dist;
+        self
+    }
+
+    /// Make the path a bottleneck: each direction is a link of
+    /// `bits_per_sec` that serialises datagrams one after another, behind a
+    /// queue of at most `queue_bytes` waiting bytes, drop-tail (counted in
+    /// [`ChaosStats::queue_dropped`]). A token bucket with a burst of zero,
+    /// so a queued datagram waits for exactly the bytes ahead of it. The
+    /// queue sits in front of the [`delay`](Self::delay) stage, as a
+    /// bottleneck sits in front of propagation delay. A datagram that a
+    /// [`reorder`](Self::reorder) swap releases skips the link.
+    #[must_use]
+    pub fn rate(mut self, bits_per_sec: u64, queue_bytes: u64) -> Self {
+        self.rate = Some(Rate {
+            bits_per_sec,
+            queue_bytes,
+        });
+        self
+    }
+
+    /// [`rate`](Self::rate) with the queue given as drain time.
+    #[must_use]
+    pub fn rate_with_queue_delay(mut self, bits_per_sec: u64, queue: Duration) -> Self {
+        self.rate = Some(Rate::with_queue_delay(bits_per_sec, queue));
         self
     }
 
@@ -292,6 +353,8 @@ pub struct ChaosStats {
     pub to_client: u64,
     /// Datagrams discarded by [`ChaosPolicy::drop`].
     pub dropped: u64,
+    /// Datagrams discarded because the [`ChaosPolicy::rate`] queue was full.
+    pub queue_dropped: u64,
     /// Datagrams refused before they were ever accepted, because their flow
     /// had been [`ChaosProxy::sever`]ed (either direction).
     pub refused: u64,
@@ -333,6 +396,7 @@ impl ChaosStats {
             + i128::from(self.inflight);
         let expected = i128::from(self.from_client) + i128::from(self.from_server)
             - i128::from(self.dropped)
+            - i128::from(self.queue_dropped)
             - i128::from(self.blackholed)
             + i128::from(self.duplicated);
         sent == expected
@@ -369,6 +433,48 @@ pub struct ChaosProxy {
     stats: Arc<Mutex<ChaosStats>>,
     cmd: mpsc::UnboundedSender<Command>,
     task: tokio::task::JoinHandle<()>,
+    _timer: TimerResolution,
+}
+
+/// Holds the OS timer at 1 ms while a proxy lives. The proxy's delay and
+/// link stages are only as accurate as the timer that wakes it: Windows
+/// ticks every 15.6 ms by default, which delivers the link's output in bursts
+/// up to 16 ms late. That inflates the RTT and bunches the acks enough that
+/// BBR on a shallow queue carried 58% of a 20 Mbit/s link instead of 96%
+/// (`bulk_yield`). Nothing to do elsewhere.
+#[derive(Debug)]
+struct TimerResolution;
+
+#[cfg(windows)]
+impl TimerResolution {
+    fn raise() -> Self {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn timeBeginPeriod(ms: u32) -> u32;
+        }
+        // SAFETY: plain FFI call with a valid period; paired in `drop`.
+        unsafe { timeBeginPeriod(1) };
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn timeEndPeriod(ms: u32) -> u32;
+        }
+        // SAFETY: matches the `timeBeginPeriod(1)` in `raise`.
+        unsafe { timeEndPeriod(1) };
+    }
+}
+
+#[cfg(not(windows))]
+impl TimerResolution {
+    fn raise() -> Self {
+        Self
+    }
 }
 
 impl Drop for ChaosProxy {
@@ -381,6 +487,7 @@ impl ChaosProxy {
     /// Bind a front socket on loopback (port 0) and start relaying to
     /// `server` under `policy`.
     pub async fn start(server: SocketAddr, policy: ChaosPolicy) -> io::Result<Self> {
+        let timer = TimerResolution::raise();
         let front = Arc::new(UdpSocket::bind(loopback_wildcard(server)).await?);
         let addr = local_addr(&front, server)?;
         let stats = Arc::new(Mutex::new(ChaosStats::default()));
@@ -400,6 +507,7 @@ impl ChaosProxy {
             held: HashMap::new(),
             blackhole_until: None,
             seq: 0,
+            link_free: [None, None],
         };
         let task = tokio::spawn(runner.run(rx, up_rx));
         Ok(Self {
@@ -409,6 +517,7 @@ impl ChaosProxy {
             stats,
             cmd: tx,
             task,
+            _timer: timer,
         })
     }
 
@@ -694,6 +803,8 @@ struct Runner {
     held: HashMap<(SocketAddr, Dir), Held>,
     blackhole_until: Option<Instant>,
     seq: u64,
+    /// When each direction's link finishes the datagrams already queued.
+    link_free: [Option<Instant>; 2],
 }
 
 impl Runner {
@@ -954,9 +1065,34 @@ impl Runner {
         self.schedule(client, dir, data).await;
     }
 
+    /// The bottleneck stage: when `data` finishes crossing the link, or
+    /// `None` when the queue is full and it is dropped.
+    fn cross_link(&mut self, dir: Dir, len: usize) -> Option<Instant> {
+        let Some(rate) = self.policy.rate else {
+            return Some(Instant::now());
+        };
+        let now = Instant::now();
+        let slot = match dir {
+            Dir::ToServer => 0,
+            Dir::ToClient => 1,
+        };
+        let free = self.link_free[slot].filter(|t| *t > now).unwrap_or(now);
+        let waiting = rate.drained(free - now);
+        if waiting.saturating_add(len as u64) > rate.queue_bytes {
+            self.stats.queue_dropped += 1;
+            return None;
+        }
+        let done = free + rate.service(len);
+        self.link_free[slot] = Some(done);
+        Some(done)
+    }
+
     async fn schedule(&mut self, client: SocketAddr, dir: Dir, data: Vec<u8>) {
-        let delay = self.policy.delay.draw(&mut self.rng);
-        if delay.is_zero() {
+        let Some(crossed) = self.cross_link(dir, data.len()) else {
+            return;
+        };
+        let at = crossed + self.policy.delay.draw(&mut self.rng);
+        if at <= Instant::now() {
             self.send(client, dir, &data).await;
             return;
         }
@@ -967,7 +1103,7 @@ impl Runner {
         self.stats.delayed += 1;
         self.seq += 1;
         self.pending.push(Reverse(Scheduled {
-            at: Instant::now() + delay,
+            at,
             seq: self.seq,
             client,
             dir,

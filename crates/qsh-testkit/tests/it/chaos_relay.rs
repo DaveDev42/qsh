@@ -223,6 +223,57 @@ async fn delay_holds_the_datagram_back_for_the_drawn_time() {
     assert!(stats.is_balanced(), "{stats:?}");
 }
 
+/// `rate` serialises datagrams one after another at the link speed: ten
+/// 1000-byte datagrams at 800 kbit/s (100 kB/s) leave the link over 100 ms,
+/// not at once, and arrive in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn rate_spreads_a_burst_over_the_link_speed() {
+    let w = Wire::start(ChaosPolicy::seeded(7).rate(800_000, 1_000_000)).await;
+    let c = client().await;
+    let sent = tokio::time::Instant::now();
+    for i in 0..10u8 {
+        c.send_to(&[i; 1000], w.front()).await.expect("send");
+    }
+    for i in 0..10u8 {
+        let got = recv(&w.host, ARRIVE).await.expect("never arrived").0;
+        assert_eq!(got[0], i, "link order — {}", w.ctx());
+    }
+    assert!(
+        sent.elapsed() >= Duration::from_millis(95),
+        "ten datagrams crossed in {:?}, faster than the link — {}",
+        sent.elapsed(),
+        w.proxy.detail()
+    );
+    let stats = until_stats(&w.proxy, |s| s.to_server >= 10).await;
+    assert_eq!(stats.queue_dropped, 0, "{stats:?}");
+    assert!(stats.is_balanced(), "{stats:?}");
+}
+
+/// A full queue drops the tail: with room for 3000 waiting bytes, a burst of
+/// ten 1000-byte datagrams delivers the first three and drops the other
+/// seven, and the accounting identity still holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn rate_drops_the_tail_when_the_queue_is_full() {
+    let w = Wire::start(ChaosPolicy::seeded(8).rate(80_000, 3_000)).await;
+    let c = client().await;
+    for i in 0..10u8 {
+        c.send_to(&[i; 1000], w.front()).await.expect("send");
+    }
+    let stats = until_stats(&w.proxy, |s| s.from_client >= 10).await;
+    assert_eq!(stats.queue_dropped, 7, "{stats:?}");
+    for i in 0..3u8 {
+        let got = recv(&w.host, ARRIVE).await.expect("never arrived").0;
+        assert_eq!(got[0], i, "the head of the burst survives — {}", w.ctx());
+    }
+    assert!(
+        recv(&w.host, NEVER).await.is_none(),
+        "a tail-dropped datagram reached the host — {}",
+        w.proxy.detail()
+    );
+    let stats = until_stats(&w.proxy, |s| s.to_server >= 3 && s.inflight == 0).await;
+    assert!(stats.is_balanced(), "{stats:?}");
+}
+
 /// A blackhole swallows what is already staged, not only what arrives during
 /// the window. The gate is at egress precisely so that a policy which also
 /// delays or reorders cannot leak a staged datagram through a dead path.

@@ -172,6 +172,9 @@ pub(crate) struct StreamTrack {
     notify: Notify,
     /// The connection's [`report_traffic`] hook as of this stream's start.
     traffic: Option<TrafficHook>,
+    /// The connection's bulk governor (ADR-0052 decision 12 (a)): what the
+    /// send-direction pump asks before it writes.
+    governor: Arc<crate::adapt::BulkGovernor>,
 }
 
 impl StreamTrack {
@@ -199,6 +202,19 @@ impl StreamTrack {
         self.write_entered.store(0, Ordering::Relaxed);
         self.received.fetch_add(n as u64, Ordering::Relaxed);
         self.note_traffic(n);
+    }
+
+    /// Wait until the connection's bulk budget lets `n` more bytes out
+    /// (ADR-0052 decision 12 (a)). Returns at once unless interactive
+    /// traffic is sharing the connection with bulk and the queue is above
+    /// target.
+    pub(crate) async fn pace(&self, n: usize) {
+        self.governor.pace(n).await;
+    }
+
+    /// How much of an `n`-byte write to put on the stream next.
+    pub(crate) fn granule(&self, n: usize) -> usize {
+        self.governor.granule(n)
     }
 
     /// The send-direction pump moved `n` bytes (counted for the diagnostic
@@ -371,6 +387,7 @@ impl StallLedger {
             evicted: AtomicBool::new(false),
             notify: Notify::new(),
             traffic: traffic_hook_for(&self.conn),
+            governor: crate::adapt::BulkGovernor::for_connection(&self.conn),
         });
         state.tracks.insert(id, Arc::clone(&track));
         StallWatch {

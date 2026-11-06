@@ -77,7 +77,7 @@ kind = "bulk_echo"               # screen | echo | bulk_echo
 carrier = "stream"               # screen only: datagram | stream
 path = "direct"                  # direct | nested_datagram | nested_stream
 cc = "bbr"                       # bbr | cubic
-isolation = "priority"           # bulk_echo only: same_conn | priority | separate_conn
+isolation = "priority"           # bulk_echo only: same_conn | priority | separate_conn | yield
 duration_s = 20
 warmup_s = 2
 frame_interval_ms = 20           # screen state cadence
@@ -92,7 +92,7 @@ datagram_send_buffer_kib = 64    # optional; outer quinn datagram send buffer (d
 | q2 BBR vs Cubic | `q2-{bbr,cubic}-{stream,datagram}`: RTT 150 ms, 3% loss |
 | q3 MTU and max datagram | `q3-mtu1500`, `q3-mtu1280` |
 | q4 key echo tail under loss | `q4-echo-loss{0,3,5}`: RTT 150 ms |
-| q5 bulk with interactive on a shared bottleneck | `q5-{deep,shallow}-{echo-alone,same-conn,priority,separate-conn}`: 20 Mbit, RTT 50 ms, queue 600 ms (deep) or 20 ms (shallow) |
+| q5 bulk with interactive on a shared bottleneck | `q5-{deep,shallow}-{echo-alone,same-conn,priority,separate-conn,yield}`: 20 Mbit, RTT 50 ms, queue 600 ms (deep) or 20 ms (shallow) |
 | q6 nested transport | `q6-direct`, `q6-nested-outer-{datagram,stream}`, `q6-nested-outer-datagram-buf64`: RTT 80 ms, 1% loss |
 
 The ADR's original numbers came from a lost harness, so the q-numbers here are
@@ -155,7 +155,12 @@ stream; the host echoes it. `echo_ms` is send-to-echo time on the client, raw.
 For `bulk_echo` the host also writes a saturating unidirectional stream to the
 client (the direction in which echoes share the queue). `isolation` picks
 whether echo and bulk share one connection at equal priority, share one with
-the echo stream at higher quinn priority, or use two connections.
+the echo stream at higher quinn priority, use two connections, or (`yield`)
+share one with the echo stream at higher priority while the bulk writer yields
+to it. `yield` runs `src/yielder.rs`, a port of qsh's bulk governor
+(`crates/qsh-core/src/adapt/`, ADR-0052 decision 12 (a)) on quinn's own
+statistics: it is the only profile family here that exercises qsh's rule, and
+it has to be edited with that rule or it stops measuring what ships.
 
 ## Nested
 

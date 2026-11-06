@@ -86,6 +86,10 @@ pub enum Isolation {
     Priority,
     /// Bulk runs on a second connection.
     SeparateConn,
+    /// Echo and bulk share one connection, the echo stream has higher
+    /// priority, and the bulk writer yields to it with a port of qsh's bulk
+    /// governor (`yielder.rs`, ADR-0052 decision 12 (a)).
+    Yield,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
