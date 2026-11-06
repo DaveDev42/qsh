@@ -36,6 +36,16 @@
 //!   effect is closed again before the draw returns, because cells carry no
 //!   link attribute.
 //!
+//! - **History.** [`ScreenRenderer::history`] puts the lines that scrolled
+//!   off the host screen into the local scrollback, above the window
+//!   (ADR-0052 decision 10). Each line is written over the window's top row
+//!   and the window is scrolled up by one, which pushes exactly that line
+//!   into the scrollback; the window's own rows are overwritten, never
+//!   scrolled out, so no stale screen row reaches the scrollback. The
+//!   renderer then forgets what it drew, and the caller draws the current
+//!   state again. A line wider than the window is cut at the right edge, as
+//!   the screen is.
+//!
 //! [`ScreenRenderer::reset`] gives the bytes that put the local terminal's
 //! modes back when the attach ends.
 
@@ -274,6 +284,57 @@ impl ScreenRenderer {
         out
     }
 
+    /// The bytes that put `lines` (oldest first) and, when `skipped` is not
+    /// zero, one `--- N lines skipped ---` line into the local scrollback,
+    /// above the window (see the module docs). The renderer's picture of the
+    /// window is forgotten: draw the current state again afterwards. Lines
+    /// are the host's SGR-formatted text; everything but SGR is dropped
+    /// from them, since the peer's text is not trusted with the terminal.
+    pub fn history(&mut self, lines: &[String], skipped: u64, local: (u16, u16)) -> Vec<u8> {
+        let rows = local.1.max(1);
+        let mut texts: Vec<String> = lines.iter().map(|l| sanitize_history_line(l)).collect();
+        if skipped > 0 {
+            texts.push(skipped_line(skipped));
+        }
+        let mut out = Vec::new();
+        if texts.is_empty() {
+            return out;
+        }
+        if !self.started {
+            // Nothing of ours is on the terminal yet; plain lines scroll
+            // into the scrollback by themselves, and the first frame then
+            // scrolls the window clear of them.
+            for t in &texts {
+                out.extend_from_slice(b"\x1b[0m");
+                out.extend_from_slice(t.as_bytes());
+                out.extend_from_slice(b"\x1b[0m\r\n");
+            }
+            return out;
+        }
+        let alt = self.modes.flags & Modes::ALT_SCREEN != 0;
+        if alt {
+            // The alternate screen has no scrollback. The primary buffer is
+            // overwritten here and repainted when the host leaves the
+            // alternate screen (that switch repaints everything).
+            out.extend_from_slice(b"\x1b[?1049l");
+        }
+        out.extend_from_slice(b"\x1b[?25l\x1b[?7l");
+        for t in &texts {
+            out.extend_from_slice(b"\x1b[1;1H\x1b[0m\x1b[2K");
+            out.extend_from_slice(t.as_bytes());
+            out.extend_from_slice(format!("\x1b[0m\x1b[{rows};1H\n").as_bytes());
+        }
+        out.extend_from_slice(b"\x1b[?7h");
+        if alt {
+            out.extend_from_slice(b"\x1b[?1049h");
+        }
+        if self.modes.flags & Modes::CURSOR_HIDDEN == 0 {
+            out.extend_from_slice(b"\x1b[?25h");
+        }
+        self.drawn = None;
+        out
+    }
+
     /// The bytes that put the local terminal's modes back to their
     /// defaults. Empty when the renderer never changed one.
     pub fn reset(&mut self) -> Vec<u8> {
@@ -357,6 +418,58 @@ impl ScreenRenderer {
         }
         runs
     }
+}
+
+/// The line shown for history the host could not keep or send.
+pub fn skipped_line(n: u64) -> String {
+    format!("--- {n} lines skipped ---")
+}
+
+/// Keep the text and the SGR sequences (`CSI ... m`) of a history line and
+/// drop every other control character and escape sequence, with its body.
+fn sanitize_history_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut seq = String::from("\x1b[");
+                    // Parameters and intermediates, then one final byte.
+                    for d in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&d) {
+                            if d == 'm'
+                                && seq[2..]
+                                    .chars()
+                                    .all(|p| p.is_ascii_digit() || p == ';' || p == ':')
+                            {
+                                seq.push('m');
+                                out.push_str(&seq);
+                            }
+                            break;
+                        }
+                        seq.push(d);
+                    }
+                }
+                // A string sequence runs to BEL or ST.
+                Some(']' | 'P' | '^' | '_' | 'X') => {
+                    while let Some(d) = chars.next() {
+                        if d == '\x07' {
+                            break;
+                        }
+                        if d == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn mouse_param(mode: u8) -> Option<u16> {

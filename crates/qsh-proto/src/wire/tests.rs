@@ -451,6 +451,9 @@ fn arb_session_frame() -> impl Strategy<Value = SessionFrame> {
             }
         ),
         any::<u64>().prop_map(SessionFrame::screen_ack),
+        (proptest::collection::vec(arb_bytes(32), 0..4), any::<u64>()).prop_map(
+            |(lines, skipped)| SessionFrame::screen_history(ScreenHistory { lines, skipped })
+        ),
         Just(SessionFrame { body: None }),
     ]
 }
@@ -2063,4 +2066,51 @@ fn file_write_open_survives_a_frame_roundtrip_field_by_field() {
     let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
     assert_eq!(back.request_id, 9);
     assert_eq!(back.body, Some(control_message::Body::FileWriteOpen(open)));
+}
+
+#[test]
+fn screen_history_batches_keep_order_fit_the_cap_and_carry_skipped_last() {
+    let lines: Vec<String> = (0..2000)
+        .map(|i| format!("line {i:05} {}", "x".repeat(60)))
+        .collect();
+    let (batches, oversize) = ScreenHistory::batches(&lines, 7);
+    assert_eq!(oversize, 0);
+    assert!(batches.len() > 1);
+    let mut seen = Vec::new();
+    for (i, b) in batches.iter().enumerate() {
+        b.validate().unwrap();
+        SessionFrame::screen_history(b.clone()).validate().unwrap();
+        assert_eq!(b.skipped != 0, i + 1 == batches.len());
+        seen.extend(
+            b.lines
+                .iter()
+                .map(|l| String::from_utf8(l.clone()).unwrap()),
+        );
+    }
+    assert_eq!(seen, lines);
+    assert_eq!(batches.last().unwrap().skipped, 7);
+}
+
+#[test]
+fn screen_history_batches_count_a_line_too_big_for_a_frame() {
+    let lines = vec![
+        "a".to_string(),
+        "b".repeat(SESSION_CHUNK_MAX),
+        "c".to_string(),
+    ];
+    let (batches, oversize) = ScreenHistory::batches(&lines, 2);
+    assert_eq!(oversize, 1);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].lines, vec![b"a".to_vec(), b"c".to_vec()]);
+    assert_eq!(batches[0].skipped, 3);
+    assert!(ScreenHistory::batches(&[], 0).0.is_empty());
+}
+
+#[test]
+fn a_screen_history_frame_over_the_chunk_cap_is_rejected() {
+    let h = ScreenHistory {
+        lines: vec![vec![b'x'; SESSION_CHUNK_MAX + 1]],
+        skipped: 0,
+    };
+    assert!(SessionFrame::screen_history(h).validate().is_err());
 }

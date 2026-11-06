@@ -47,7 +47,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
 - `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 다섯째 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
 - `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
-- `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`가 여기 딸린 항목이고 세부는 §18.8이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
+- `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`·`screen_history`가 여기 딸린 항목이고 세부는 §18.8과 §18.11이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
 
 ## 5. Frame layer
 
@@ -323,6 +323,7 @@ message SessionFrame {
                             //   SessionEvent.exited / SessionReadEvent.exit도 같은 Exit 메시지를 쓴다
     ScreenUpdate screen_update = 7; // { uint64 new_num; uint32 part; uint32 parts; bytes data; }  screen.v1, §18.8
     ScreenAck    screen_ack = 8;    // { uint64 state_num; }  0 = 전체 화면 요청, screen.v1, §18.8
+    ScreenHistory screen_history = 9; // { repeated bytes lines; uint64 skipped; }  host→client, 스트림 전용, screen.v1, §18.11
   }
 }
 
@@ -951,6 +952,20 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 **첫 프레임.** 처음 그리기 전에 커서를 맨 아래 행으로 옮기고 창 높이만큼 줄바꿈해 attach 전에 터미널에 있던 출력(client의 안내 등)을 위로 밀어 올린 뒤 그린다. 셀 단위 갱신이 그 출력을 덮어쓰지 않게 하려는 것이다.
 
+**history.** `ScreenRenderer::history`는 밀려난 행을 로컬 스크롤백에 넣는다(§18.11). 행마다 창의 맨 윗행을 지우고 그 위에 쓴 뒤 맨 아랫행에서 줄바꿈해 창을 한 줄 올린다. 그러면 정확히 그 행이 스크롤백으로 들어가고 창의 행은 덮어써질 뿐 밀려 나가지 않으므로 낡은 화면 행이 스크롤백에 섞이지 않는다. 쓰는 동안 자동 줄바꿈(`?7`)과 커서를 끄고, 창보다 넓은 행은 오른쪽을 자른다(화면과 같다). 끝나면 렌더러가 그린 것을 잊고(`invalidate`) driver가 마지막 상태를 다시 그린다. 대체 화면에 있을 때는 `?1049l`로 기본 화면으로 나가 쓰고 `?1049h`로 돌아온다(대체 화면에는 스크롤백이 없다. 기본 화면의 내용은 host가 대체 화면을 떠날 때 전부 다시 그려진다). 첫 프레임 전에는 일반 줄로 출력한다.
+
 **복구.** 연결이 새로 서면(재연결) driver는 같은 `ScreenSink`에 새 `ClientScreen`을 붙이고 `screen`을 다시 요청한다. 첫 갱신은 base 0의 전체 화면이고 렌더러는 모든 셀을 다시 쓴다. 로컬 창 크기가 바뀌면(`AttachCommand::Resize`) 마지막 상태를 새 크기로 다시 그리고 `Resize`를 host에 보낸다.
 
 **시험.** `crates/qsh-core/src/client/render/tests.rs`가 로컬 터미널 모델(두 번째 `HostScreen`)로 고정한다: 첫 프레임, 변화 없음은 0바이트, 한 셀의 변경은 한 셀의 비용(`a_one_cell_change_costs_one_cell`), 바뀐 행만, 빈 꼬리 지우기, 자르기·채우기, 이중 폭·결합 문자, 모드와 reset, 효과 한 번, 클립보드 읽기 거부, 임의의 입력열 뒤에도 로컬 터미널이 host 화면을 따른다(`local_terminal_follows_the_host`). `crates/qsh-cli/tests/it/screen_sync.rs`가 실제 `qsh serve` 위에서 `Ops`로 attach를 건다(`auto_draws_the_remote_screen_on_the_local_terminal`, `off_keeps_the_byte_path`, `a_session_opened_without_screen_sync_attaches_on_the_byte_path_under_auto`).
+
+### 18.11 history: 밀려난 행 (ADR-0052 결정 10)
+
+**프레임.** `SessionFrame.screen_history = 9`, `ScreenHistory{repeated bytes lines = 1; uint64 skipped = 2}`. host에서 client로만 가고 스트림으로만 간다(datagram에 싣지 않는다). 새 capability는 없고 `screen.v1`을 협상한 화면 동기화 attach에서만 보낸다. 부호화된 메시지는 16 KiB(`SESSION_CHUNK_MAX`) 이하이고 받는 쪽이 `SessionFrame::validate`로 검사한다. `lines`는 기본 화면(대체 화면이 아닌)의 맨 위에서 밀려난 행을 오래된 것부터 담은, 개행 없는 SGR 서식 텍스트(UTF-8)다. `skipped`는 `lines` 뒤에 밀려났지만 보관하지 못해 세기만 한 행의 수이고, 한 프레임 안에서 `lines`가 먼저고 `skipped`가 나중이다. 행이 많으면 여러 프레임으로 나누고 `skipped`는 마지막 프레임에 싣는다(`ScreenHistory::batches`). 16 KiB에 한 줄도 못 들어가는 행은 조용히 버리지 않고 `skipped`에 더한다.
+
+**host.** 에뮬레이터의 수집기(`HostScreen::take_history`)가 세션당 5000행·4 MiB까지 모은다. 상한을 넘으면 행은 포맷하지 않고 `skipped`로 센다. 화면 갱신을 막 보냈고(더 보낼 갱신이 없고) 쓰이지 않은 화면 조각이 `SEND_DEPTH_CAP_BYTES` 아래일 때만 수집된 행을 가져가 보낸다. 밀리는 동안에는 가져가지 않으므로 수집기가 상한까지 쌓고 넘치는 만큼을 센다. 그래서 밀린 뒤에 오는 것은 건너뛴 수 한 번이다. `Exit`·`Closed` 앞에서는 마지막 화면 다음에 남은 행을 모두 내보낸다. 같은 행은 한 번만 가져가므로 재전송이 없고, 한 세션에 attach가 둘이면 행은 먼저 가져간 쪽에 간다.
+
+**재부착.** 새 attach(`session.attach`에 `screen`이 있을 때)는 ACL을 통과한 시점에 쌓여 있던 행을 버린다. 재부착은 현재 화면 한 장만 받고 history를 되풀이하지 않는다. 지나간 출력 전체는 `qsh session read`가 바이트로 준다. 옛 peer(`screen.v1` 없음)에는 이 프레임이 가지 않는다.
+
+**client.** 이벤트 `AttachEvent::ScreenHistory`는 화면 경로에서만 오고 attach driver가 `ScreenSink::history`로 넘긴다. 렌더러(`ScreenRenderer::history`, §18.10)가 행을 로컬 터미널의 스크롤백에 넣고 마지막 상태를 다시 그린다. 행은 peer의 입력이므로 SGR(`CSI ... m`)과 글자만 남기고 다른 제어 문자·이스케이프 시퀀스는 버린다. `skipped`가 0이 아니면 `--- N lines skipped ---` 한 줄이 `lines` 뒤에 붙는다.
+
+**로그.** history는 PTY 내용이다. 로그, doctor, 감사 기록에 싣지 않는다. 감사 기록에 새 필드는 없다.

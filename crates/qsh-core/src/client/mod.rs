@@ -1163,6 +1163,11 @@ pub enum AttachEvent {
     /// reply carried a `screen_channel` and whose connection negotiated
     /// `datagram.v1`.
     ScreenDatagram(wire::ScreenUpdate),
+    /// Lines that scrolled off the host screen (ADR-0052 decision 10), on
+    /// the stream only. Only on an attach whose reply carried a
+    /// `screen_channel`; the attach driver draws them into the local
+    /// scrollback. They are PTY content: never log them.
+    ScreenHistory(wire::ScreenHistory),
     /// The child exited; the last frame of the stream.
     Exit {
         /// Final cumulative output offset.
@@ -1368,6 +1373,7 @@ impl AttachReader {
                     acked_input_seq: a.acked_input_seq,
                 },
                 Some(session_frame::Body::ScreenUpdate(u)) => AttachEvent::Screen(u),
+                Some(session_frame::Body::ScreenHistory(h)) => AttachEvent::ScreenHistory(h),
                 Some(session_frame::Body::Exit(x)) => AttachEvent::Exit {
                     final_seq: x.final_seq,
                     exit_code: x.exit_code,

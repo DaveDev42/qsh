@@ -1012,6 +1012,11 @@ impl Server {
         );
         if let Some(params) = screen {
             self.sessions.set_screen_colors(&id, params);
+            // A reattach gets the current screen only: rows that scrolled
+            // off before it, whether nobody was attached or an earlier
+            // attach had not been sent them yet, are not replayed
+            // (ADR-0052 decision 10; `qsh session read` has them).
+            let _ = self.sessions.screen_take_history(&id);
         }
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
         tracing::info!(

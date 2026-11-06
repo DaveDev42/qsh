@@ -1,5 +1,5 @@
 //! Fuzzes `decode_msg::<SessionFrame>` — every frame on a SESSION_DATA
-//! stream (Output/Input/InputAck/Gap/Resize/Exit oneof), which the module
+//! stream (Output/Input/InputAck/Gap/Resize/Exit/ScreenUpdate/ScreenAck/ScreenHistory oneof), which the module
 //! docs say the SESSION_DATA pump calls on every decoded frame. Chains
 //! `SessionFrame::validate()` right after decode, since a successful decode
 //! with a hostile Output/Input chunk over `SESSION_CHUNK_MAX` is exactly

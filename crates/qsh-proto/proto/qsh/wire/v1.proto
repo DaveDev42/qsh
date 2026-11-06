@@ -674,6 +674,9 @@ message SessionFrame {
     // whose reply carried a non-empty `screen_channel`.
     ScreenUpdate screen_update = 7;
     ScreenAck    screen_ack    = 8;
+    // ADR-0052 decision 10: rows that scrolled off the top, host -> client,
+    // stream only (never a datagram), same gating as `screen_update`.
+    ScreenHistory screen_history = 9;
   }
 }
 
@@ -695,6 +698,16 @@ message ScreenUpdate {
 // update the client cannot apply.
 message ScreenAck {
   uint64 state_num = 1;
+}
+
+// Host -> client: lines that scrolled off the top of the primary screen
+// (protocol.md §18.10), oldest first, SGR-formatted text without a newline.
+// The encoded message is at most SESSION_CHUNK_MAX. `skipped` counts lines
+// that scrolled off after `lines` and were not kept; the client shows them
+// as one `--- N lines skipped ---` line after `lines`.
+message ScreenHistory {
+  repeated bytes lines = 1;
+  uint64 skipped = 2;
 }
 
 // Host → client output chunk, ≤ SESSION_CHUNK_MAX (16 KiB). `sequence` is

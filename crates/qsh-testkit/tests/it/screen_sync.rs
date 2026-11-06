@@ -321,6 +321,9 @@ async fn reattach_sends_one_screen_not_the_backlog() {
                 AttachEvent::Output { .. } => {
                     panic!("Output (the backlog or a replayed query) reached the client")
                 }
+                AttachEvent::ScreenHistory(_) => {
+                    panic!("history that scrolled off while detached was replayed")
+                }
                 _ => {}
             }
         }
@@ -459,6 +462,203 @@ async fn a_full_screen_request_gets_a_base_zero_update() {
     .await
     .unwrap();
     assert!(screen.applied_updates() > applied_before);
+    s.close();
+    h.shutdown().await;
+}
+
+// ---------------------------------------------------------------------
+// History (ADR-0052 decision 10, protocol.md §18.10)
+// ---------------------------------------------------------------------
+
+/// What `ScreenHistory` frames delivered so far.
+#[derive(Default)]
+struct Collected {
+    lines: Vec<String>,
+    /// The `skipped` count of every frame, in arrival order, with the
+    /// number of lines already collected when it arrived.
+    skipped: Vec<(usize, u64)>,
+}
+
+impl Collected {
+    fn skipped_total(&self) -> u64 {
+        self.skipped.iter().map(|(_, n)| *n).sum()
+    }
+}
+
+/// Read events (acking screen updates) until `done` holds for what the
+/// stream delivered.
+async fn collect_history(
+    att: &mut Attached,
+    screen: &mut ClientScreen,
+    done: impl Fn(&Collected) -> bool,
+) -> Collected {
+    let mut got = Collected::default();
+    tokio::time::timeout(DEADLINE, async {
+        while !done(&got) {
+            match att.next().await.expect("event").expect("stream open") {
+                AttachEvent::Screen(part) => {
+                    if let Some(n) = screen.on_part(&part).expect("part").ack() {
+                        att.send_screen_ack(n).await.expect("ack");
+                    }
+                }
+                AttachEvent::ScreenHistory(h) => {
+                    for l in &h.lines {
+                        got.lines
+                            .push(String::from_utf8(l.clone()).expect("utf-8 line"));
+                    }
+                    if h.skipped > 0 {
+                        got.skipped.push((got.lines.len(), h.skipped));
+                    }
+                }
+                AttachEvent::Output { .. } => panic!("a screen-sync attach carries no Output"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("history arrives");
+    got
+}
+
+/// `n` numbered lines, each ended by CR LF.
+fn numbered(prefix: &str, n: usize) -> Vec<u8> {
+    (0..n)
+        .flat_map(|i| format!("{prefix}{i:04}\r\n").into_bytes())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_that_scroll_off_arrive_once_and_in_order() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (_opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    let mut screen = ClientScreen::new();
+    // 80 lines through a 24-row screen: the cursor ends on row 23 after
+    // 23 of them fit, so 80 - 23 = 57 rows scrolled off, the first being
+    // line 0.
+    pipe.write_output(&numbered("H", 80)).await.unwrap();
+    let got = collect_history(&mut att, &mut screen, |g| g.lines.len() >= 57).await;
+    let want: Vec<String> = (0..57).map(|i| format!("H{i:04}")).collect();
+    assert_eq!(
+        got.lines
+            .iter()
+            .map(|l| l.trim_end().to_string())
+            .collect::<Vec<_>>(),
+        want
+    );
+    assert!(got.skipped.is_empty(), "nothing was behind");
+
+    // Nothing more arrives while the screen only changes in place.
+    pipe.write_output(b"\x1b[Hno scroll").await.unwrap();
+    let more = tokio::time::timeout(
+        Duration::from_millis(300),
+        collect_history(&mut att, &mut screen, |g| !g.lines.is_empty()),
+    )
+    .await;
+    assert!(more.is_err(), "rows are sent once");
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_alternate_screen_adds_no_history() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (_opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    let mut screen = ClientScreen::new();
+    let mut out = b"\x1b[?1049h".to_vec();
+    out.extend(numbered("ALT", 100));
+    out.extend_from_slice(b"\x1b[?1049l\x1b[2J\x1b[H");
+    out.extend(numbered("P", 30));
+    pipe.write_output(&out).await.unwrap();
+    // 30 lines on the restored screen: 30 - 23 = 7 rows scrolled off.
+    let got = collect_history(&mut att, &mut screen, |g| g.lines.len() >= 7).await;
+    let texts: Vec<_> = got.lines.iter().map(|l| l.trim_end().to_string()).collect();
+    assert_eq!(
+        texts,
+        (0..7).map(|i| format!("P{i:04}")).collect::<Vec<_>>()
+    );
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_is_reported_as_a_skipped_count_not_dropped_silently() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (_opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    let mut screen = ClientScreen::new();
+    // Far more rows than the history keeps (5000) in a few big writes.
+    const ROWS: usize = 40_000;
+    let chunk = vec![b'\n'; 16 * 1024];
+    let mut written = 0;
+    while written < ROWS {
+        pipe.write_output(&chunk).await.unwrap();
+        written += chunk.len();
+    }
+    // The cursor is on the last row after 23 line feeds; every one after
+    // that scrolls a row off.
+    let scrolled = (written - 23) as u64;
+    let got = collect_history(&mut att, &mut screen, |g| {
+        g.lines.len() as u64 + g.skipped_total() >= scrolled
+    })
+    .await;
+    assert_eq!(
+        got.lines.len() as u64 + got.skipped_total(),
+        scrolled,
+        "every row is either delivered or counted"
+    );
+    assert!(got.skipped_total() > 0, "a flood is reported as skipped");
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reattach_does_not_replay_history_that_was_already_sent() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    let mut screen = ClientScreen::new();
+    pipe.write_output(&numbered("H", 40)).await.unwrap();
+    let first = collect_history(&mut att, &mut screen, |g| g.lines.len() >= 17).await;
+    assert_eq!(first.lines.len(), 17);
+    drop(att);
+
+    // Rows that scroll off while nobody is attached are not queued for the
+    // next attach either; only the screen is.
+    pipe.write_output(&numbered("D", 40)).await.unwrap();
+    wait_ring_end(&h, &opened.session_id, 40 * 7 * 2).await;
+    let attached = s
+        .attach_request(wire::SessionAttach {
+            session_id: opened.session_id.clone(),
+            resume_token: opened.resume_token.clone(),
+            last_output_seq: 0,
+            mode: wire::AttachMode::Rw as i32,
+            no_steal: false,
+            screen: s.screen_request(80, 24, None, None),
+        })
+        .await
+        .expect("session.attach");
+    let mut att = s.open_attach_stream(attached).await.expect("data stream");
+    let mut screen = ClientScreen::new();
+    let replayed = tokio::time::timeout(
+        Duration::from_millis(500),
+        collect_history(&mut att, &mut screen, |g| {
+            !g.lines.is_empty() || !g.skipped.is_empty()
+        }),
+    )
+    .await;
+    assert!(replayed.is_err(), "reattach sent history");
+    assert!(screen.state().is_some(), "the screen did arrive");
+
+    // New rows after the attach flow again.
+    pipe.write_output(&numbered("N", 30)).await.unwrap();
+    let got = collect_history(&mut att, &mut screen, |g| g.lines.len() >= 7).await;
+    assert!(got.lines[0].starts_with('N') || got.lines[0].starts_with('D'));
     s.close();
     h.shutdown().await;
 }
