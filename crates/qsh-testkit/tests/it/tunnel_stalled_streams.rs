@@ -272,6 +272,7 @@ async fn run_progress(n: usize) -> Progress {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
+            screen: None,
         })
         .await
         .expect("attach the numbered-lines session");
@@ -447,6 +448,7 @@ async fn pty_echo_p95_stays_within_measured_rtt_plus_10ms_while_four_unread_tunn
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
+            screen: None,
         })
         .await
         .expect("attach the echo session");

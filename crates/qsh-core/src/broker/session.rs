@@ -434,6 +434,17 @@ impl SessionHandle {
             .update_since(base_num)
     }
 
+    /// Remember the colours the client reported for OSC 10/11 queries
+    /// (`ScreenRequest.fg`/`bg`). No-op without an emulator.
+    pub fn set_screen_colors(&self, colors: ScreenParams) {
+        if let Some(screen) = &self.shared.screen {
+            screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_client_colors(colors.fg, colors.bg);
+        }
+    }
+
     /// Lines scrolled off the top since the last call (`HostScreen::take_history`).
     pub fn screen_take_history(&self) -> Option<HistoryBatch> {
         let screen = self.shared.screen.as_ref()?;
@@ -858,6 +869,17 @@ pub struct SessionActor {
     config: SessionConfig,
 }
 
+/// What a client told the host about its terminal when it asked for screen
+/// sync (`ScreenRequest`, ADR-0052 decision 9). Opening a session with this
+/// makes the session run a host emulator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScreenParams {
+    /// Foreground colour for OSC 10 queries.
+    pub fg: Option<[u8; 3]>,
+    /// Background colour for OSC 11 queries.
+    pub bg: Option<[u8; 3]>,
+}
+
 /// Configuration a session is created with.
 #[derive(Debug, Clone, Copy)]
 pub struct SessionConfig {
@@ -871,8 +893,9 @@ pub struct SessionConfig {
     /// Per-step grace of the close escalation (`[serve].close_grace_ms`).
     pub close_grace: Duration,
     /// Run a host terminal emulator beside the ring (ADR-0052 decision 2).
-    /// Off by default and set by nothing yet: the carrier that sends screen
-    /// updates is a later step, so existing sessions are unchanged.
+    /// Off by default; the broker turns it on for a session opened with
+    /// [`ScreenParams`] (`SessionOpen.screen`), so every other session is
+    /// unchanged.
     pub screen: bool,
 }
 
@@ -982,8 +1005,15 @@ impl SessionActor {
                     match output.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            shared.push_output(&buf[..n]);
+                            // Emulator first, then the ring, then wake the
+                            // pullers. A screen pump that sees the new ring
+                            // bytes (it may pull without waiting for the
+                            // wake) must find the screen already fed, or it
+                            // would send a state without them and sleep
+                            // until the next output.
                             let answers = shared.feed_screen(&buf[..n]);
+                            shared.ring().push(&buf[..n]);
+                            shared.note_append();
                             if !answers.is_empty()
                                 && let Some(tx) = answer_tx.as_ref().and_then(|t| t.upgrade())
                             {
@@ -1405,18 +1435,15 @@ impl ActorState {
 }
 
 impl SessionShared {
-    fn push_output(&self, data: &[u8]) {
-        self.ring().push(data);
-        self.note_append();
-    }
-
     /// Feed the host emulator (if any) and return its answers to terminal
     /// queries.
     fn feed_screen(&self, data: &[u8]) -> Vec<u8> {
         let Some(screen) = &self.screen else {
             return Vec::new();
         };
-        let end = self.ring().end();
+        // The offset the ring reaches once it holds `data`: nothing but this
+        // pump appends output bytes.
+        let end = self.ring().end() + data.len() as u64;
         let mut screen = screen.lock().unwrap_or_else(|e| e.into_inner());
         screen.feed(data, end);
         screen.take_answers()

@@ -107,6 +107,7 @@ fn open_session() -> wire::SessionOpen {
         rows: 0,
         user: None,
         shell_command: None,
+        screen: None,
     }
 }
 

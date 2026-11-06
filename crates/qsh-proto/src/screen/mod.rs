@@ -12,11 +12,13 @@
 //!
 //! Every decoder here is total over arbitrary bytes (it is a fuzz surface)
 //! and canonical: bytes that decode re-encode to the same bytes, which the
-//! `decode_screen_diff` fuzz target asserts. Nothing in this module is
-//! negotiated yet; no capability enables it on the wire.
+//! `decode_screen_diff` fuzz target asserts. The `screen.v1` capability
+//! carries the encoded [`ScreenUpdate`] on the session data stream in parts
+//! ([`split_parts`], [`Reassembler`]).
 
 mod codec;
 mod diff;
+mod parts;
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +27,7 @@ pub use diff::{
     ApplyError, Effect, MAX_CLIPBOARD_BYTES, MAX_EFFECTS, MAX_HYPERLINK_PARAMS, MAX_HYPERLINK_URI,
     MAX_TITLE_BYTES, MAX_UPDATE_BYTES, RowChange, Run, ScreenDiff, ScreenUpdate,
 };
+pub use parts::{MAX_PARTS, PART_MAX, PartError, Reassembler, split as split_parts};
 
 /// Largest accepted number of rows or columns.
 pub const MAX_DIM: u16 = 2048;

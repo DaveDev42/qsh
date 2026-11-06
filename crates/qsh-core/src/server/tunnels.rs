@@ -432,6 +432,7 @@ impl Server {
                 attach_authorized,
                 input_stream,
                 input_from,
+                screen_channel,
             } => {
                 // Opening the session's data stream *is* the attach, and an
                 // attach is RW (protocol.md §9), so it holds the writer
@@ -547,6 +548,7 @@ impl Server {
                     input_stream,
                     input_from,
                     events: Some(events),
+                    screen: !screen_channel.is_empty(),
                 };
                 match pump.run(stream, &conn).await {
                     Ok(()) => tracing::info!(

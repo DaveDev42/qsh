@@ -369,6 +369,23 @@ message SessionOpen {
   // capability skips this field as unknown and would open the login shell
   // instead, so a sender checks the capability first.
   optional string shell_command = 7;
+  // ADR-0052 decision 9 (capability `screen.v1`, protocol.md §18): ask the
+  // host to keep a terminal emulator for this session and to send screen
+  // updates on the data stream instead of `Output`. Set only when the
+  // negotiated capability set has `screen.v1`; a host that did not
+  // advertise it skips the field as unknown and the byte path runs.
+  optional ScreenRequest screen = 8;
+}
+
+// What the client tells the host about its terminal when it asks for screen
+// sync (ADR-0052 decision 9). `fg`/`bg` are 0xRRGGBB and let the host answer
+// OSC 10/11 colour queries for the app (decision 3); absent means the host
+// does not answer them.
+message ScreenRequest {
+  uint32 cols = 1;
+  uint32 rows = 2;
+  optional uint32 fg = 3;
+  optional uint32 bg = 4;
 }
 
 // Success payload for SessionOpen. `ticket` authorizes exactly one
@@ -383,6 +400,10 @@ message SessionOpened {
   uint64 initial_seq = 4;
   // RFC 3339: when the session/token TTL lapses (client-side cleanup).
   string expires_at = 5;
+  // ADR-0052 decision 9: the 128-bit channel id the host issued because it
+  // accepted `SessionOpen.screen`. Empty = no screen sync; the data stream
+  // carries `Output` as it always did. Additive field 6.
+  bytes screen_channel = 6;
 }
 
 // Whether an attach wants to write. Only an explicit ATTACH_MODE_RW asks
@@ -408,6 +429,9 @@ message SessionAttach {
   AttachMode mode = 4;
   // RW only: fail with SESSION_CONFLICT instead of stealing a live lease.
   bool no_steal = 5;
+  // ADR-0052 decision 9: ask for screen sync on this attach (only with
+  // `screen.v1` negotiated). Additive field 6.
+  optional ScreenRequest screen = 6;
 }
 
 // Success payload for SessionAttach. The presented token is dead; the
@@ -431,6 +455,10 @@ message SessionAttached {
   // is live. 0 from a host that predates the field (a client then treats
   // the whole stream as live). Additive field 7.
   uint64 output_end = 7;
+  // ADR-0052 decision 9: non-empty when the host accepted `screen` for this
+  // attach; the data stream then carries `ScreenUpdate` and no `Output`,
+  // and `replay_from` equals `output_end` (no replay). Additive field 8.
+  bytes screen_channel = 8;
 }
 
 // Request: list this host's sessions (op `session.list`, ACL `session.list`).
@@ -642,7 +670,31 @@ message SessionFrame {
     Gap      gap       = 4;
     Resize   resize    = 5;
     Exit     exit      = 6;
+    // ADR-0052 decision 9 (capability `screen.v1`). Sent only on an attach
+    // whose reply carried a non-empty `screen_channel`.
+    ScreenUpdate screen_update = 7;
+    ScreenAck    screen_ack    = 8;
   }
+}
+
+// Host -> client: one part of an encoded screen update (protocol.md §18.4).
+// `data` is a slice of the canonical `ScreenUpdate` bytes; the whole update
+// is the parts `0..parts` of one `new_num`, concatenated, at most 1 MiB.
+// Each part is at most SESSION_CHUNK_MAX. On the stream carrier parts of one
+// update are consecutive.
+message ScreenUpdate {
+  // `new_num` of the update the part belongs to.
+  uint64 new_num = 1;
+  uint32 part = 2;
+  uint32 parts = 3;
+  bytes data = 4;
+}
+
+// Client -> host: the newest state number the client has applied. 0 asks the
+// host for the full screen (base 0): sent after a `state_hash` mismatch or an
+// update the client cannot apply.
+message ScreenAck {
+  uint64 state_num = 1;
 }
 
 // Host → client output chunk, ≤ SESSION_CHUNK_MAX (16 KiB). `sequence` is

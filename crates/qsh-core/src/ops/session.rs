@@ -422,6 +422,9 @@ impl Ops {
             rows: req.rows.unwrap_or(0),
             user,
             shell_command: req.shell_command,
+            // The CLI does not ask for screen sync yet (ADR-0052: the
+            // renderer is a later step), so every session is a byte path.
+            screen: None,
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
@@ -816,6 +819,7 @@ impl Ops {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: req.no_steal,
+            screen: None,
         };
         let attached = match conn.run(move |s| Box::pin(s.attach_request(msg))) {
             Ok(attached) => attached,

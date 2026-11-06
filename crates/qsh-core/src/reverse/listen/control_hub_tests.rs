@@ -88,6 +88,7 @@ fn opened_response(session_id: &str) -> wire::Response {
             ticket: Vec::new(),
             initial_seq: 0,
             expires_at: String::new(),
+            screen_channel: Vec::new(),
         })),
     }
 }
@@ -285,6 +286,7 @@ async fn a_late_response_for_a_dead_conduit_is_dropped_and_sends_nothing() {
             rows: 0,
             user: None,
             shell_command: None,
+            screen: None,
         }),
     )
     .unwrap();

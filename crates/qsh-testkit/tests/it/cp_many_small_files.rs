@@ -323,6 +323,7 @@ async fn cp_many_small_files_stays_within_the_echo_budget() {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
+            screen: None,
         })
         .await
         .expect("attach the PTY-echo session");

@@ -333,6 +333,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
+            screen: None,
         })
         .await
         .expect("attach the PTY-echo session");

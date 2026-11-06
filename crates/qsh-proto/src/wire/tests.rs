@@ -126,6 +126,18 @@ fn arb_principal() -> impl Strategy<Value = String> {
     "(device|user|fp):[a-z0-9]{1,12}"
 }
 
+fn arb_screen_request() -> impl Strategy<Value = Option<ScreenRequest>> {
+    proptest::option::of(
+        (
+            any::<u32>(),
+            any::<u32>(),
+            proptest::option::of(any::<u32>()),
+            proptest::option::of(any::<u32>()),
+        )
+            .prop_map(|(cols, rows, fg, bg)| ScreenRequest { cols, rows, fg, bg }),
+    )
+}
+
 fn arb_session_open() -> impl Strategy<Value = SessionOpen> {
     (
         proptest::collection::vec(".{0,16}", 0..5),
@@ -135,9 +147,10 @@ fn arb_session_open() -> impl Strategy<Value = SessionOpen> {
         any::<u32>(),
         proptest::option::of("[a-z]{1,8}"),
         proptest::option::of(".{0,32}"),
+        arb_screen_request(),
     )
         .prop_map(
-            |(argv, env, term, cols, rows, user, shell_command)| SessionOpen {
+            |(argv, env, term, cols, rows, user, shell_command, screen)| SessionOpen {
                 argv,
                 env,
                 term,
@@ -145,6 +158,7 @@ fn arb_session_open() -> impl Strategy<Value = SessionOpen> {
                 rows,
                 user,
                 shell_command,
+                screen,
             },
         )
 }
@@ -156,14 +170,18 @@ fn arb_session_opened() -> impl Strategy<Value = SessionOpened> {
         arb_bytes(16),
         any::<u64>(),
         arb_rfc3339(),
+        arb_bytes(16),
     )
         .prop_map(
-            |(session_id, resume_token, ticket, initial_seq, expires_at)| SessionOpened {
-                session_id,
-                resume_token,
-                ticket,
-                initial_seq,
-                expires_at,
+            |(session_id, resume_token, ticket, initial_seq, expires_at, screen_channel)| {
+                SessionOpened {
+                    session_id,
+                    resume_token,
+                    ticket,
+                    initial_seq,
+                    expires_at,
+                    screen_channel,
+                }
             },
         )
 }
@@ -177,14 +195,16 @@ fn arb_session_attach() -> impl Strategy<Value = SessionAttach> {
         // out-of-range modes must round-trip too.
         any::<i32>(),
         any::<bool>(),
+        arb_screen_request(),
     )
         .prop_map(
-            |(session_id, resume_token, last_output_seq, mode, no_steal)| SessionAttach {
+            |(session_id, resume_token, last_output_seq, mode, no_steal, screen)| SessionAttach {
                 session_id,
                 resume_token,
                 last_output_seq,
                 mode,
                 no_steal,
+                screen,
             },
         )
 }
@@ -197,9 +217,18 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
         any::<bool>(),
         arb_rfc3339(),
         any::<u64>(),
+        arb_bytes(16),
     )
         .prop_map(
-            |(ticket, new_resume_token, replay_from, writer_lease, expires_at, input_seq)| {
+            |(
+                ticket,
+                new_resume_token,
+                replay_from,
+                writer_lease,
+                expires_at,
+                input_seq,
+                screen_channel,
+            )| {
                 SessionAttached {
                     ticket,
                     new_resume_token,
@@ -208,6 +237,7 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
                     expires_at,
                     input_seq,
                     output_end: 0,
+                    screen_channel,
                 }
             },
         )
@@ -410,6 +440,17 @@ fn arb_session_frame() -> impl Strategy<Value = SessionFrame> {
             proptest::option::of("SIG[A-Z]{3,4}")
         )
             .prop_map(|(seq, code, sig)| SessionFrame::exit(seq, code, sig)),
+        (any::<u64>(), any::<u32>(), any::<u32>(), arb_bytes(64)).prop_map(
+            |(new_num, part, parts, data)| {
+                SessionFrame::screen_update(ScreenUpdate {
+                    new_num,
+                    part,
+                    parts,
+                    data,
+                })
+            }
+        ),
+        any::<u64>().prop_map(SessionFrame::screen_ack),
         Just(SessionFrame { body: None }),
     ]
 }
@@ -987,6 +1028,10 @@ fn local_capabilities_advertise_exactly_what_is_implemented() {
     // The host-local dial filter is implemented (ADR-0019 decision 3):
     // `authorize_and_dial_tunnel` honors `StreamHeader.deny_host_local`.
     assert!(LOCAL_CAPABILITIES.contains(&CAP_DIAL_FILTER_V1));
+    // The host emulator and its stream carrier exist (ADR-0052 decision 9).
+    assert!(LOCAL_CAPABILITIES.contains(&CAP_SCREEN_V1));
+    // `datagram.v1` is not implemented in this build, so it is not claimed.
+    assert!(!LOCAL_CAPABILITIES.contains(&"datagram.v1"));
 }
 
 /// A `StreamHeader` encoded by a peer that predates field 5 (no bytes
@@ -1646,6 +1691,7 @@ fn golden_session_open_frame() {
             rows: 40,
             user: Some("dave".into()),
             shell_command: None,
+            screen: None,
         }),
     );
     let wire = encode_control(&msg).unwrap();
@@ -1878,6 +1924,7 @@ fn windows_build_advertises_file_v1() {
             CAP_DIAL_FILTER_V1,
             CAP_FILE_V1,
             CAP_SHELL_COMMAND_V1,
+            CAP_SCREEN_V1,
         ]
     );
 }

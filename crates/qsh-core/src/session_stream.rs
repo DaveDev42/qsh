@@ -26,6 +26,18 @@
 //! - the **frame writer**: sole owner of the send half, fed by both of the
 //!   above through a bounded queue.
 //!
+//! **Screen sync** (ADR-0052, `docs/design/protocol.md` §18). When the ticket
+//! says the attach runs screen sync, the output pump is replaced by the
+//! `screen_pump`: it never sends `Output`, it sends `ScreenUpdate` parts
+//! built from the session's host emulator. The ring is still pulled, but only
+//! as the wake-up and for the control entries (`Exit`, `Closed`, ...), which
+//! stay in order behind the last screen. The stream carrier's base is the
+//! last state *sent* (ordered, reliable stream), new updates wait while more
+//! than `SEND_DEPTH_CAP_BYTES` of screen data sit unwritten, and then one
+//! update to the newest state replaces everything skipped meanwhile. The
+//! input pump learns the client's `ScreenAck`s: state 0 is a request for the
+//! full screen.
+//!
 //! Everything is torn down when the QUIC connection dies, so a wedged child
 //! (a session write parked on a full PTY input buffer) can never keep the
 //! stream — or its [`AttachToken`], which suspends the session's resume TTL
@@ -38,15 +50,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
 use qsh_proto::wire::{self, ControlMessage, SessionFrame, control_message, session_frame};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamError};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::broker::{
     AttachToken, BrokerError, ConnectionId, ControlEvent, Cursor, InputStreamId, ReplayEvent,
     SessionBackend, SessionId,
 };
+use crate::tunnel::splice::SEND_DEPTH_CAP_BYTES;
 
 /// Payload budget of one output pull: four wire chunks. Enough to keep the
 /// stream busy without building a reply the writer cannot drain.
@@ -130,6 +145,45 @@ pub struct SessionStream {
     /// never lose silently). The queue is drained by the connection loop,
     /// which never parks on a session.
     pub events: Option<mpsc::Sender<ControlMessage>>,
+    /// Run screen sync on this stream (the ticket carried a non-empty
+    /// `screen_channel`, ADR-0052 decision 9): the host sends
+    /// `ScreenUpdate` and no `Output`. `false` is the byte path.
+    pub screen: bool,
+}
+
+/// What the input side of a screen-sync stream tells the screen pump.
+#[derive(Default)]
+struct ScreenSync {
+    /// The client asked for the full screen (`ScreenAck{0}`).
+    resync: AtomicBool,
+    /// Newest state number the client acked.
+    acked: AtomicU64,
+    /// Wakes the pump for a resync request or a window-size change, neither
+    /// of which moves the ring.
+    poke: Notify,
+}
+
+/// Screen bytes queued for the writer and not written yet: the stream
+/// carrier's "send queue" (ADR-0052 decision 6).
+#[derive(Default)]
+struct SendDepth {
+    bytes: AtomicUsize,
+    drained: Notify,
+}
+
+impl SendDepth {
+    fn has_room(&self) -> bool {
+        (self.bytes.load(Ordering::Acquire) as u64) <= SEND_DEPTH_CAP_BYTES
+    }
+
+    fn add(&self, n: usize) {
+        self.bytes.fetch_add(n, Ordering::AcqRel);
+    }
+
+    fn sub(&self, n: usize) {
+        self.bytes.fetch_sub(n, Ordering::AcqRel);
+        self.drained.notify_one();
+    }
 }
 
 impl SessionStream {
@@ -159,6 +213,7 @@ impl SessionStream {
             input_stream,
             input_from,
             events,
+            screen,
         } = self;
 
         // While this token lives the session counts as attached and its
@@ -171,19 +226,35 @@ impl SessionStream {
         send.set_priority(wire::PRIORITY_SESSION_DATA);
 
         let (frames_tx, frames_rx) = mpsc::channel::<SessionFrame>(SESSION_STREAM_QUEUE);
-        let mut writer = AbortOnDrop(tokio::spawn(async move {
-            let result = write_frames(&mut send, frames_rx).await;
-            let _ = send.finish();
-            result
+        let depth = Arc::new(SendDepth::default());
+        let sync = screen.then(|| Arc::new(ScreenSync::default()));
+        let mut writer = AbortOnDrop(tokio::spawn({
+            let depth = Arc::clone(&depth);
+            async move {
+                let result = write_frames(&mut send, frames_rx, &depth).await;
+                let _ = send.finish();
+                result
+            }
         }));
 
-        let mut output = AbortOnDrop(tokio::spawn(output_pump(
-            Arc::clone(&sessions),
-            session_id.clone(),
-            cursor,
-            frames_tx.clone(),
-            events,
-        )));
+        let mut output = AbortOnDrop(match &sync {
+            Some(sync) => tokio::spawn(screen_pump(
+                Arc::clone(&sessions),
+                session_id.clone(),
+                cursor,
+                frames_tx.clone(),
+                events,
+                Arc::clone(sync),
+                depth,
+            )),
+            None => tokio::spawn(output_pump(
+                Arc::clone(&sessions),
+                session_id.clone(),
+                cursor,
+                frames_tx.clone(),
+                events,
+            )),
+        });
 
         // Set once `writer` ends on its own — the peer sent `STOP_SENDING`
         // (`write_frames`'s own `send.stopped()` race) or a write failed —
@@ -201,6 +272,7 @@ impl SessionStream {
                 input_from,
                 recv,
                 frames_tx,
+                sync.clone(),
             );
             tokio::pin!(input);
             tokio::select! {
@@ -249,6 +321,12 @@ impl SessionStream {
             let _ = (&mut writer.0).await;
         }
         drop(attached);
+        if let Some(sync) = &sync {
+            tracing::debug!(
+                acked = sync.acked.load(Ordering::Acquire),
+                "screen-sync data stream ended"
+            );
+        }
         result
     }
 }
@@ -284,12 +362,26 @@ impl<T> Drop for AbortOnDrop<T> {
 async fn write_frames(
     send: &mut FramedSend,
     mut frames: mpsc::Receiver<SessionFrame>,
+    depth: &SendDepth,
 ) -> Result<(), StreamError> {
     loop {
         tokio::select! {
             frame = frames.recv() => {
                 match frame {
-                    Some(frame) => send.send(&frame).await?,
+                    Some(frame) => {
+                        // Screen parts count toward the stream carrier's
+                        // depth from the moment they are queued until the
+                        // transport has taken them.
+                        let screen_len = match &frame.body {
+                            Some(session_frame::Body::ScreenUpdate(u)) => Some(u.data.len()),
+                            _ => None,
+                        };
+                        let result = send.send(&frame).await;
+                        if let Some(n) = screen_len {
+                            depth.sub(n);
+                        }
+                        result?;
+                    }
                     None => return Ok(()),
                 }
             }
@@ -403,6 +495,119 @@ async fn output_pump(
     }
 }
 
+/// Screen-sync counterpart of [`output_pump`] (ADR-0052 decisions 6 and 11).
+///
+/// The first thing sent is the full screen (`base_num` 0). After that an
+/// update is built whenever the ring moved, provided the send queue has room;
+/// it is the difference from the last state sent to the newest state, so
+/// every screen in between is skipped. Control entries are forwarded as the
+/// byte path does, after a last update so the client's screen is current
+/// when it sees `Exit`.
+async fn screen_pump(
+    sessions: Arc<dyn SessionBackend>,
+    id: SessionId,
+    mut cursor: Cursor,
+    frames: mpsc::Sender<SessionFrame>,
+    events: Option<mpsc::Sender<ControlMessage>>,
+    sync: Arc<ScreenSync>,
+    depth: Arc<SendDepth>,
+) -> Result<(), SessionStreamError> {
+    let mut last_sent = 0u64;
+    let mut dirty = true;
+    let mut exit_grace_used = false;
+    loop {
+        if sync.resync.swap(false, Ordering::AcqRel) {
+            last_sent = 0;
+            dirty = true;
+        }
+        if dirty && depth.has_room() {
+            dirty = false;
+            send_screen(&sessions, &id, &mut last_sent, &frames, &depth).await?;
+        }
+        let wait = if exit_grace_used {
+            EXIT_CLOSED_GRACE
+        } else {
+            SESSION_STREAM_PULL_WAIT
+        };
+        let out = tokio::select! {
+            r = sessions.pull(&id, cursor, SESSION_STREAM_PULL_BYTES, wait) => match r {
+                Ok(out) => out,
+                Err(BrokerError::NotFound) => return Ok(()),
+                Err(err) => return Err(err.into()),
+            },
+            // A resync request or a resize: nothing new in the ring, but the
+            // screen has to be looked at again.
+            () = sync.poke.notified() => {
+                dirty = true;
+                continue;
+            }
+            // The writer took screen data: a gated update may go now.
+            () = depth.drained.notified(), if dirty => continue,
+        };
+        cursor = out.next;
+        let mut exited_this_batch = false;
+        for event in out.events {
+            match event {
+                // The bytes are the byte path's business; here they only
+                // mean the screen may have changed.
+                ReplayEvent::Output { .. } | ReplayEvent::Gap { .. } => dirty = true,
+                ReplayEvent::Control {
+                    sequence, event, ..
+                } => {
+                    // The client must see the final screen before the event
+                    // that ends the session, whatever the queue holds.
+                    send_screen(&sessions, &id, &mut last_sent, &frames, &depth).await?;
+                    dirty = false;
+                    notify(&events, &id, sequence, &event).await?;
+                    match event {
+                        ControlEvent::Exit { exit_code, signal } => {
+                            send_frame(
+                                &frames,
+                                SessionFrame::exit(sequence, exit_code.unwrap_or(-1), signal),
+                            )
+                            .await?;
+                            exited_this_batch = true;
+                        }
+                        ControlEvent::Closed { .. } => return Ok(()),
+                        ControlEvent::WriterChanged { .. } => {}
+                    }
+                }
+            }
+        }
+        if exited_this_batch {
+            exit_grace_used = true;
+        } else if exit_grace_used {
+            return Ok(());
+        }
+    }
+}
+
+/// Queue the update that takes the client from `last_sent` to the newest
+/// state, if there is one.
+async fn send_screen(
+    sessions: &Arc<dyn SessionBackend>,
+    id: &SessionId,
+    last_sent: &mut u64,
+    frames: &mpsc::Sender<SessionFrame>,
+    depth: &SendDepth,
+) -> Result<(), SessionStreamError> {
+    let Some(update) = sessions.screen_update_since(id, *last_sent) else {
+        return Ok(());
+    };
+    let encoded = update.encode();
+    if encoded.len() > qsh_proto::screen::MAX_UPDATE_BYTES {
+        return Err(SessionStreamError::Protocol(
+            "screen update is larger than the update cap".into(),
+        ));
+    }
+    for part in wire::ScreenUpdate::parts_of(update.new_num, &encoded) {
+        depth.add(part.data.len());
+        send_frame(frames, SessionFrame::screen_update(part)).await?;
+    }
+    *last_sent = update.new_num;
+    Ok(())
+}
+
 /// `Input`/`Resize` from the peer, with the input dedup + ack of
 /// protocol.md §10-5.
 #[allow(clippy::too_many_arguments)]
@@ -414,6 +619,7 @@ async fn input_pump(
     input_from: u64,
     mut recv: FramedRecv,
     frames: mpsc::Sender<SessionFrame>,
+    sync: Option<Arc<ScreenSync>>,
 ) -> Result<(), SessionStreamError> {
     // The dedup cursor lives in the **session** (protocol.md §10-5), not
     // here: `SessionBackend::write_at` trims whatever the child already ran
@@ -492,6 +698,23 @@ async fn input_pump(
                         BrokerError::NotRunning | BrokerError::NotFound | BrokerError::NotWriter,
                     ) => {}
                     Err(err) => return Err(err.into()),
+                }
+                // The new size changes the screen without any output.
+                if let Some(sync) = &sync {
+                    sync.poke.notify_one();
+                }
+            }
+            // The client's report of the newest state it applied. Only a
+            // screen-sync stream takes one; on a byte path stream it is a
+            // slip like any other host-to-client frame.
+            Some(session_frame::Body::ScreenAck(ack)) => {
+                if let Some(sync) = &sync {
+                    if ack.state_num == 0 {
+                        sync.resync.store(true, Ordering::Release);
+                        sync.poke.notify_one();
+                    } else {
+                        sync.acked.fetch_max(ack.state_num, Ordering::AcqRel);
+                    }
                 }
             }
             // Host → client frames coming back from a client are a slip,

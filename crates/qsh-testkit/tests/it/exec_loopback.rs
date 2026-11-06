@@ -38,6 +38,7 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
         "dial-filter.v1",
         "file.v1",
         "shell-command.v1",
+        "screen.v1",
     ];
     assert_eq!(s.capabilities, expected);
 

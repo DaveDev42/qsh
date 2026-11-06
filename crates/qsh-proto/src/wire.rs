@@ -75,6 +75,15 @@ pub const CAP_FILE_V1: &str = "file.v1";
 /// `UNSUPPORTED` locally without it (`docs/design/protocol.md` §7.1).
 pub const CAP_SHELL_COMMAND_V1: &str = "shell-command.v1";
 
+/// Capability string for screen state sync (ADR-0052 decisions 2 to 6, 9;
+/// `docs/design/protocol.md` §18): the host can run a terminal emulator for a
+/// session and send `ScreenUpdate` on the `SESSION_DATA` stream instead of
+/// `Output`, and takes `ScreenAck`. A sender sets `SessionOpen.screen` /
+/// `SessionAttach.screen` and emits `ScreenAck` only when this is in the
+/// negotiated set; a host never sends `ScreenUpdate` to a peer that did not
+/// advertise it. `datagram.v1` is not advertised yet.
+pub const CAP_SCREEN_V1: &str = "screen.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -86,7 +95,8 @@ pub const CAP_SHELL_COMMAND_V1: &str = "shell-command.v1";
 /// advertisement and the filter land in the same commit. [`CAP_FILE_V1`]
 /// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9): the
 /// same commit that serves the stream advertises it. [`CAP_SHELL_COMMAND_V1`]
-/// joined with the host's shell resolution (ADR-0051 decision 6). The set is
+/// joined with the host's shell resolution (ADR-0051 decision 6). [`CAP_SCREEN_V1`]
+/// joined with the host emulator's stream carrier (ADR-0052 decision 9). The set is
 /// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
@@ -95,6 +105,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_DIAL_FILTER_V1,
     CAP_FILE_V1,
     CAP_SHELL_COMMAND_V1,
+    CAP_SCREEN_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the
@@ -301,8 +312,33 @@ impl SessionFrame {
         match &self.body {
             Some(session_frame::Body::Output(o)) => check_chunk(o.data.len()),
             Some(session_frame::Body::Input(i)) => check_chunk(i.data.len()),
+            Some(session_frame::Body::ScreenUpdate(u)) => u.validate(),
             _ => Ok(()),
         }
+    }
+}
+
+impl ScreenUpdate {
+    /// Receiver-side check: the part is within [`crate::screen::PART_MAX`].
+    /// The numbering is checked by [`crate::screen::Reassembler::push`].
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        check_chunk_max(self.data.len(), crate::screen::PART_MAX)
+    }
+
+    /// The parts of one encoded [`crate::screen::ScreenUpdate`], in order.
+    pub fn parts_of(new_num: u64, encoded: &[u8]) -> Vec<Self> {
+        let slices = crate::screen::split_parts(encoded);
+        let parts = slices.len() as u32;
+        slices
+            .into_iter()
+            .enumerate()
+            .map(|(i, data)| Self {
+                new_num,
+                part: i as u32,
+                parts,
+                data: data.to_vec(),
+            })
+            .collect()
     }
 }
 
@@ -1029,6 +1065,16 @@ impl SessionFrame {
     /// `Resize` frame.
     pub fn resize(cols: u32, rows: u32) -> Self {
         Self::from_body(session_frame::Body::Resize(Resize { cols, rows }))
+    }
+
+    /// `ScreenUpdate` frame (one part).
+    pub fn screen_update(part: ScreenUpdate) -> Self {
+        Self::from_body(session_frame::Body::ScreenUpdate(part))
+    }
+
+    /// `ScreenAck` frame; `state_num` 0 asks for the full screen.
+    pub fn screen_ack(state_num: u64) -> Self {
+        Self::from_body(session_frame::Body::ScreenAck(ScreenAck { state_num }))
     }
 
     /// `Exit` frame.

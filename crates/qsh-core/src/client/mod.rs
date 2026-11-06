@@ -26,6 +26,7 @@ pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;
 pub mod reconnect;
+pub mod screen;
 pub mod wake;
 
 use link::{ControlLink, DataKillSwitch, DataRecv, DataSend};
@@ -172,11 +173,24 @@ pub struct Session {
 impl Session {
     /// Open the control stream and exchange `Hello` on a fresh connection.
     pub async fn negotiate(conn: Connection, device_name: &str) -> Result<Self, ClientError> {
+        Self::negotiate_hiding(conn, device_name, &[]).await
+    }
+
+    /// [`Session::negotiate`] as a client that predates the capabilities in
+    /// `hide`: they are left out of its `Hello` and out of the negotiated
+    /// set. For the old-peer combination tests (ADR-0052 decision 18-4);
+    /// production passes none.
+    pub async fn negotiate_hiding(
+        conn: Connection,
+        device_name: &str,
+        hide: &[&str],
+    ) -> Result<Self, ClientError> {
         let local_hello = Hello {
             versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
             device_name: device_name.to_string(),
             capabilities: wire::LOCAL_CAPABILITIES
                 .iter()
+                .filter(|c| !hide.contains(c))
                 .map(|s| s.to_string())
                 .collect(),
             reverse: None,
@@ -184,7 +198,33 @@ impl Session {
         let (ctl, peer_hello) = crate::handshake::initiate(&conn, local_hello)
             .await
             .map_err(map_hello_error)?;
-        Ok(Self::from_control(conn, ctl, peer_hello))
+        let mut session = Self::from_control(conn, ctl, peer_hello);
+        session.capabilities.retain(|c| !hide.contains(&c.as_str()));
+        Ok(session)
+    }
+
+    /// Whether both sides negotiated screen state sync (`screen.v1`). A
+    /// `screen` request is sent only when this is true.
+    pub fn screen_supported(&self) -> bool {
+        self.has_capability(wire::CAP_SCREEN_V1)
+    }
+
+    /// The `ScreenRequest` to put in `SessionOpen`/`SessionAttach`, or
+    /// `None` when the peer did not negotiate `screen.v1` (the sender then
+    /// takes the byte path). `fg`/`bg` are 0xRRGGBB.
+    pub fn screen_request(
+        &self,
+        cols: u16,
+        rows: u16,
+        fg: Option<u32>,
+        bg: Option<u32>,
+    ) -> Option<wire::ScreenRequest> {
+        self.screen_supported().then(|| wire::ScreenRequest {
+            cols: u32::from(cols),
+            rows: u32::from(rows),
+            fg,
+            bg,
+        })
     }
 
     /// Build a [`Session`] from an already-negotiated control stream (the
@@ -540,8 +580,13 @@ impl Session {
     /// authorizes one `SESSION_DATA` stream (attach pump — M2 Step 5).
     pub async fn session_open(
         &mut self,
-        req: wire::SessionOpen,
+        mut req: wire::SessionOpen,
     ) -> Result<wire::SessionOpened, ClientError> {
+        // Never send screen fields to a peer that did not advertise
+        // `screen.v1` (ADR-0052 decision 9).
+        if !self.screen_supported() {
+            req.screen = None;
+        }
         match self
             .session_request(control_message::Body::SessionOpen(req))
             .await?
@@ -755,8 +800,11 @@ impl Session {
     /// is a session nobody can ever attach to again.
     pub async fn attach_request(
         &mut self,
-        req: wire::SessionAttach,
+        mut req: wire::SessionAttach,
     ) -> Result<wire::SessionAttached, ClientError> {
+        if !self.screen_supported() {
+            req.screen = None;
+        }
         match self
             .session_request(control_message::Body::SessionAttach(req))
             .await?
@@ -787,6 +835,7 @@ impl Session {
             new_resume_token: attached.new_resume_token,
             input_from: attached.input_seq,
             output_end: attached.output_end,
+            screen_channel: attached.screen_channel,
             kill,
             writer: AttachWriter {
                 send,
@@ -1038,6 +1087,10 @@ pub struct Attached {
     /// is replay, output at or above it is live. `0` from a host that
     /// predates the field.
     pub output_end: u64,
+    /// The channel id the host issued when it accepted screen sync for this
+    /// attach (`screen_channel` of the reply). Non-empty means the stream
+    /// carries `ScreenUpdate` and no `Output`; empty is the byte path.
+    pub screen_channel: Vec<u8>,
     /// A synchronous, any-thread hard-stop for this attach's data link —
     /// live only on the reverse route, a no-op otherwise
     /// (`link::DataKillSwitch`'s own doc). `crate::ops::session`'s
@@ -1072,6 +1125,10 @@ pub enum AttachEvent {
         /// Cumulative input offset the host has applied.
         acked_input_seq: u64,
     },
+    /// One part of a screen update (ADR-0052). Only on an attach whose
+    /// reply carried a `screen_channel`. Feed it to
+    /// [`screen::ClientScreen::on_part`].
+    Screen(wire::ScreenUpdate),
     /// The child exited; the last frame of the stream.
     Exit {
         /// Final cumulative output offset.
@@ -1104,6 +1161,12 @@ impl Attached {
     /// Tell the host the terminal window changed.
     pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<(), ClientError> {
         self.writer.resize(cols, rows).await
+    }
+
+    /// Acknowledge screen state `state_num`; 0 asks the host for the full
+    /// screen. Only on a screen-sync attach.
+    pub async fn send_screen_ack(&mut self, state_num: u64) -> Result<(), ClientError> {
+        self.writer.send_screen_ack(state_num).await
     }
 
     /// Split into halves so input and output can be driven concurrently
@@ -1141,6 +1204,12 @@ impl AttachWriter {
         self.send
             .send(&SessionFrame::resize(u32::from(cols), u32::from(rows)))
             .await?;
+        Ok(())
+    }
+
+    /// See [`Attached::send_screen_ack`].
+    pub async fn send_screen_ack(&mut self, state_num: u64) -> Result<(), ClientError> {
+        self.send.send(&SessionFrame::screen_ack(state_num)).await?;
         Ok(())
     }
 
@@ -1189,6 +1258,7 @@ impl AttachReader {
                 Some(session_frame::Body::InputAck(a)) => AttachEvent::InputAck {
                     acked_input_seq: a.acked_input_seq,
                 },
+                Some(session_frame::Body::ScreenUpdate(u)) => AttachEvent::Screen(u),
                 Some(session_frame::Body::Exit(x)) => AttachEvent::Exit {
                     final_seq: x.final_seq,
                     exit_code: x.exit_code,
