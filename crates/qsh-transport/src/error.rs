@@ -520,3 +520,37 @@ impl From<quinn::crypto::ExportKeyingMaterialError> for ExportError {
 
 #[cfg(test)]
 mod tests;
+
+/// A failed datagram send (`Connection::send_datagram`).
+///
+/// Datagrams are an optional carrier (`docs/adr/0052-m22-screen-state-sync-and-adaptive-transport.md`
+/// decision 7): every caller must have a stream path for the same message, so
+/// the first three variants are "use the stream instead", not failures of the
+/// session.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum DatagramError {
+    /// The peer did not advertise datagram support.
+    #[error("datagrams not supported by peer")]
+    UnsupportedByPeer,
+    /// Datagram support is disabled on this side.
+    #[error("datagram support disabled")]
+    Disabled,
+    /// The payload exceeds `Connection::max_datagram_size` (path MTU minus
+    /// overhead, or the peer's advertised limit).
+    #[error("datagram too large")]
+    TooLarge,
+    /// The connection was lost.
+    #[error("connection lost")]
+    ConnectionLost(#[from] ConnectionError),
+}
+
+impl From<quinn::SendDatagramError> for DatagramError {
+    fn from(err: quinn::SendDatagramError) -> Self {
+        match err {
+            quinn::SendDatagramError::UnsupportedByPeer => Self::UnsupportedByPeer,
+            quinn::SendDatagramError::Disabled => Self::Disabled,
+            quinn::SendDatagramError::TooLarge => Self::TooLarge,
+            quinn::SendDatagramError::ConnectionLost(e) => Self::ConnectionLost(e.into()),
+        }
+    }
+}

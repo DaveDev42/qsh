@@ -880,3 +880,42 @@ fn listener_binds_dual_stack() {
         assert!(!only_v6);
     }
 }
+
+/// ADR-0052 decision 7 and decision 18 item 9: the BBR congestion controller
+/// and the explicit datagram buffer sizes reach quinn's `TransportConfig`.
+/// `TransportConfig` has no getters, so this reads its `Debug` rendering the
+/// way `server_config_sets_admission_bounds` does. The constants are also
+/// pinned by value so a change is a reviewed edit, not a drive-by.
+#[test]
+fn transport_config_pins_bbr_and_datagram_buffers() {
+    assert_eq!(DATAGRAM_RECEIVE_BUFFER_SIZE, 64 * 1024);
+    assert_eq!(DATAGRAM_SEND_BUFFER_SIZE, 64 * 1024);
+    // One MTU-sized datagram must fit in each buffer many times over.
+    const { assert!(DATAGRAM_RECEIVE_BUFFER_SIZE >= 32 * 1500) };
+    const { assert!(DATAGRAM_SEND_BUFFER_SIZE >= 32 * 1500) };
+
+    let debug = transport_config_debug(TransportTuning::default());
+    assert!(
+        debug.contains(&format!(
+            "datagram_receive_buffer_size: Some({DATAGRAM_RECEIVE_BUFFER_SIZE})"
+        )),
+        "datagram receive buffer missing from {debug:?}"
+    );
+    assert!(
+        debug.contains(&format!(
+            "datagram_send_buffer_size: {DATAGRAM_SEND_BUFFER_SIZE}"
+        )),
+        "datagram send buffer missing from {debug:?}"
+    );
+    // `Debug` omits the congestion factory, so build a controller from the
+    // one `transport_config` installs and check its concrete type.
+    use quinn::congestion::ControllerFactory;
+    let controller = congestion_controller_factory().build(std::time::Instant::now(), 1200);
+    assert!(
+        controller
+            .into_any()
+            .downcast::<quinn::congestion::Bbr>()
+            .is_ok(),
+        "congestion controller is not BBR"
+    );
+}

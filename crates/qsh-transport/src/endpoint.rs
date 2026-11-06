@@ -14,13 +14,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use crate::error::{ConnectError, ConnectionError, ExportError};
+use crate::error::{ConnectError, ConnectionError, DatagramError, ExportError};
 use crate::identity::{Fingerprint, Principal};
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
 use crate::quic::QuicConn;
@@ -167,6 +168,26 @@ pub const CONNECTION_RECEIVE_WINDOW: u64 = const_min(
 const fn const_min(a: u64, b: u64) -> u64 {
     if a < b { a } else { b }
 }
+
+/// `quinn::TransportConfig::datagram_receive_buffer_size`: how many bytes of
+/// received QUIC DATAGRAM payload may sit unread before quinn drops the
+/// oldest. Also the `max_datagram_frame_size` transport parameter we
+/// advertise, so it caps the largest datagram a peer may send us.
+///
+/// Datagrams are an optional carrier for screen diffs and input copies
+/// (ADR-0052 decision 7), each at most one path MTU (about 1.2 KB), and a
+/// stale diff is worth less than the newest one. 64 KiB holds about fifty
+/// MTU-sized datagrams, several full-screen diffs, while a reader that stalls
+/// costs at most 64 KiB per connection. Quinn's own default is 1.25 MB, which
+/// is a per-connection memory cost with no use here (M8 DoD 2: session buffer
+/// <= 8 MB).
+pub const DATAGRAM_RECEIVE_BUFFER_SIZE: usize = 64 * 1024;
+
+/// `quinn::TransportConfig::datagram_send_buffer_size`: bytes of outgoing
+/// datagram payload queued before quinn drops the oldest to make room. Same
+/// reasoning as [`DATAGRAM_RECEIVE_BUFFER_SIZE`]; for a sender, dropping the
+/// oldest is the right policy because the next diff supersedes it.
+pub const DATAGRAM_SEND_BUFFER_SIZE: usize = 64 * 1024;
 
 /// QUIC application close code sent when the peer's principal cannot be
 /// re-derived after the handshake (should be unreachable — the verifier
@@ -321,6 +342,14 @@ impl Default for TransportTuning {
     }
 }
 
+/// The congestion controller factory every qsh connection uses: BBR
+/// (`docs/design/protocol.md` §12). Its own function so a unit test can build
+/// a controller from it, because `quinn::TransportConfig` does not print the
+/// factory in `Debug`.
+fn congestion_controller_factory() -> Arc<quinn::congestion::BbrConfig> {
+    Arc::new(quinn::congestion::BbrConfig::default())
+}
+
 fn transport_config(tuning: TransportTuning) -> quinn::TransportConfig {
     let mut tc = quinn::TransportConfig::default();
     tc.keep_alive_interval(Some(tuning.keep_alive));
@@ -336,8 +365,13 @@ fn transport_config(tuning: TransportTuning) -> quinn::TransportConfig {
     // `qsh_proto::wire::PRIORITY_TUNNEL`) plus these three connection-level
     // knobs (queue depth), so a saturated tunnel cannot starve PTY chunks
     // buffered behind it:
-    tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    tc.congestion_controller_factory(congestion_controller_factory());
     tc.send_fairness(true);
+    // QUIC DATAGRAM, enabled as an optional carrier (ADR-0052 decision 7).
+    // Quinn's defaults (1.25 MB receive, 1 MiB send) are pinned down here so
+    // the memory bound is ours; a unit test reads these constants.
+    tc.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_SIZE));
+    tc.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_SIZE);
     tc.stream_receive_window(quinn::VarInt::from_u32(TUNNEL_STREAM_RECEIVE_WINDOW));
     // `docs/ROADMAP.md` M8 DoD 2 ("세션당 buffer ≤ 8 MB") — see
     // `CONNECTION_RECEIVE_WINDOW`'s own doc for the derivation. Never set
@@ -923,6 +957,37 @@ impl Connection {
         }
     }
 
+    /// The largest payload [`send_datagram`](Self::send_datagram) accepts at
+    /// this moment (path MTU minus overhead, bounded by the peer's advertised
+    /// limit). `None` when datagrams cannot be used on this connection. The
+    /// value can change when path MTU discovery or a migration moves the MTU,
+    /// so read it per send, not once.
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        match &self.inner {
+            ConnBackend::Quic(c) => c.max_datagram_size(),
+        }
+    }
+
+    /// Send one unreliable, unordered datagram. Never waits: when the send
+    /// buffer ([`DATAGRAM_SEND_BUFFER_SIZE`]) is full the oldest queued
+    /// datagram is dropped. Delivery is not confirmed. Datagrams are an
+    /// optional carrier (ADR-0052 decision 7): a message sent this way also
+    /// has a stream path, so a caller falls back to the stream on
+    /// [`DatagramError::UnsupportedByPeer`] or [`DatagramError::TooLarge`].
+    pub fn send_datagram(&self, data: Bytes) -> Result<(), DatagramError> {
+        match &self.inner {
+            ConnBackend::Quic(c) => c.send_datagram(data),
+        }
+    }
+
+    /// Receive the next datagram. Cancel-safe. Resolves with the connection
+    /// error once the connection closes.
+    pub async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {
+        match &self.inner {
+            ConnBackend::Quic(c) => c.read_datagram().await,
+        }
+    }
+
     /// Close with an application error code and reason. Idempotent.
     ///
     /// Local closes go through one lock, and the first one records what the
@@ -1117,6 +1182,23 @@ pub struct ConnStats {
     /// Packets this side detected as lost; `None` for a backend that does
     /// not track it.
     pub lost_packets: Option<u64>,
+    /// Smallest RTT seen on the path, ignoring ack delay. Zero before the
+    /// first sample.
+    pub min_rtt: Duration,
+    /// Current congestion window in bytes (BBR's, as quinn reports it).
+    pub cwnd: u64,
+    /// Congestion events the controller has handled.
+    pub congestion_events: u64,
+    /// Bytes this side detected as lost.
+    pub lost_bytes: u64,
+    /// Packets sent on the path.
+    pub sent_packets: u64,
+    /// Largest UDP payload the path currently supports (path MTU).
+    pub path_mtu: u16,
+    /// QUIC DATAGRAM frames sent (ADR-0052 decision 7).
+    pub tx_datagram_frames: u64,
+    /// QUIC DATAGRAM frames received **and authenticated**.
+    pub rx_datagram_frames: u64,
 }
 
 fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer<'static>> {

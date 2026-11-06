@@ -577,7 +577,8 @@ corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 
 ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지한 제약이다. QSH의 transport는 QUIC 하나지만 wire와 프로토콜 코드는 QUIC 고유 개념에 기대지 않는다:
 
 - 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/it/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
-- wire 구조는 QUIC 고유 개념(stream ID, datagram, transport parameter)에 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
+- **datagram은 선택 운반체다**(ADR-0052 결정 7. ADR-0043 결정 4의 "wire가 datagram에 기대지 않는다"를 이렇게 바꾼다). datagram으로 나르는 모든 메시지는 스트림에 같은 뜻의 짝이 있고, 스트림만으로 프로토콜이 완결된다. datagram 안의 메시지는 QUIC stream ID나 transport parameter가 아니라 자기 머리의 channel id로 식별한다. `qsh-transport`는 QUIC DATAGRAM을 켜고 파사드에 `Connection::max_datagram_size() -> Option<usize>`, `send_datagram(Bytes) -> Result<(), DatagramError>`, `read_datagram()`을 둔다. `DatagramError`는 상대 미지원, 로컬 비활성, 너무 큼, 연결 끊김 넷이고 앞의 셋은 호출자가 스트림 짝으로 되돌아가라는 뜻이다. 송신은 기다리지 않고, 송신 버퍼가 차면 가장 오래된 datagram부터 버린다. 버퍼는 `DATAGRAM_RECEIVE_BUFFER_SIZE`·`DATAGRAM_SEND_BUFFER_SIZE`(각 64 KiB)로 고정하고 단위 테스트가 값을 묶는다. 이 상수는 로컬 메모리 한도라 peer가 관측하는 wire 값은 아니지만, 수신 버퍼 크기가 곧 우리가 광고하는 `max_datagram_frame_size`(상대가 보낼 수 있는 datagram의 상한)이다. 이 단계에서는 어떤 wire 메시지도 datagram을 쓰지 않는다. 파사드만 있다.
+- 그 밖의 QUIC 고유 개념(stream ID, transport parameter)에도 wire는 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
 
 ## 15. 페어링 프로토콜 — invite code (ADR-0002)
