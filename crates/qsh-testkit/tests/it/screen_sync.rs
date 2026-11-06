@@ -662,3 +662,99 @@ async fn reattach_does_not_replay_history_that_was_already_sent() {
     s.close();
     h.shutdown().await;
 }
+
+/// Follow-up to the stream carrier step (ADR-0052 decision 6): the host
+/// holds updates back while more than 128 KiB of screen data sit unwritten.
+///
+/// Host flow-control simulation: the client attaches and then reads nothing,
+/// so QUIC flow control (the 2 MiB stream window) stops the host's writer
+/// and the send queue behind it fills. A producer paints hundreds of
+/// distinct, large screens meanwhile. With the gate the host stops queueing
+/// at its 128 KiB cap, so what reaches the client in the end is the window
+/// plus about the cap plus the catch-up screen (measured: 23 updates, 2.37
+/// MB). With `has_room` forced true the same run sends 125 updates and 3.14
+/// MB, because the pump then queues behind the writer up to the frame
+/// queue's 64 parts of 16 KiB.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_send_depth_gate_defers_updates_while_the_client_does_not_read() {
+    /// The stream's receive window (`TUNNEL_STREAM_RECEIVE_WINDOW`).
+    const STREAM_WINDOW: usize = 2 * 1024 * 1024;
+    const SEND_DEPTH_CAP: usize = 128 * 1024;
+    const FRAMES: usize = 300;
+    const COLS: usize = 300;
+    const ROWS: usize = 100;
+
+    let h = LoopbackHarness::start().await;
+    h.server.hide_capabilities(&[wire::CAP_DATAGRAM_V1]);
+    let mut s = h.session().await;
+    // A large screen makes each full-screen update about 100 KiB, so the
+    // window fills after a couple of dozen of them.
+    let mut req = open_req(&s);
+    req.cols = COLS as u32;
+    req.rows = ROWS as u32;
+    req.screen = s.screen_request(COLS as u16, ROWS as u16, Some(0xdddddd), Some(0x101010));
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+
+    // Every cell of a screen differs from the same cell of the previous
+    // screen, in colour and in character, so each diff is a full screen.
+    let screens: Vec<Vec<u8>> = (0..FRAMES)
+        .map(|k| {
+            let mut out = b"\x1b[H".to_vec();
+            for row in 0..ROWS {
+                for col in 0..COLS {
+                    let colour = 16 + (k * 7 + row * 3 + col) % 200;
+                    let ch = char::from(b'!' + ((k + row + col) % 90) as u8);
+                    out.extend_from_slice(format!("\x1b[38;5;{colour}m{ch}").as_bytes());
+                }
+            }
+            out
+        })
+        .collect();
+    let total_output: usize = screens.iter().map(Vec::len).sum();
+    for screen in &screens {
+        pipe.write_output(screen).await.unwrap();
+    }
+    wait_ring_end(&h, &opened.session_id, total_output as u64).await;
+
+    // Now read everything the host sends until the client holds its state.
+    let mut screen = ClientScreen::new();
+    let mut part_bytes = 0usize;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if let Some((hash, num)) = host_state(&h, &opened.session_id)
+                && screen.num() == num
+                && screen.hash() == Some(hash)
+            {
+                return;
+            }
+            if let AttachEvent::Screen(part) = att.next().await.unwrap().unwrap() {
+                part_bytes += part.data.len();
+                if let Some(n) = screen.on_part(&part).unwrap().ack() {
+                    att.send_screen_ack(n).await.unwrap();
+                }
+            }
+        }
+    })
+    .await
+    .expect("client converges on the host's state");
+
+    // One full-screen update is about 100 KiB; allow the initial screen, the
+    // catch-up and the one that was being queued when the gate shut.
+    let bound = STREAM_WINDOW + SEND_DEPTH_CAP + 4 * 128 * 1024;
+    eprintln!(
+        "send-depth gate: {part_bytes} bytes in {} updates for {FRAMES} screens",
+        screen.applied_updates()
+    );
+    assert!(
+        part_bytes <= bound,
+        "{part_bytes} screen bytes reached the client, more than window + gate ({bound}): \
+         the host kept queueing while the writer was blocked"
+    );
+    assert!(
+        (screen.applied_updates() as usize) < FRAMES / 4,
+        "applied {} updates for {FRAMES} screens produced",
+        screen.applied_updates()
+    );
+    s.close();
+    h.shutdown().await;
+}

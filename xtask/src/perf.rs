@@ -27,6 +27,11 @@ pub const THROUGHPUT_FLOOR: f64 = 0.80;
 /// Echo p95 at or above this multiple of the median is red.
 pub const ECHO_CEILING: f64 = 1.50;
 
+/// The session 100 MB `cat` throughput with the host emulator on must be at
+/// least this fraction of the emulator-off rate (ADR-0052 decision 18 item 11).
+/// An absolute floor, not a trend: the ratio is measured within one run.
+pub const SCREEN_CAT_RATIO_FLOOR: f64 = 0.50;
+
 /// One run's data point, one line of `perf.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -42,6 +47,10 @@ pub struct Point {
     pub injected: bool,
     #[serde(default)]
     pub inject_delay_ms: u64,
+    /// Emulator-on over emulator-off rate of a 100 MB `cat` through a PTY
+    /// session; absent on older points and when the measurement did not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_cat_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +112,28 @@ fn median(mut values: Vec<f64>) -> f64 {
 
 /// Judge `point` against `history` (which must not yet contain it).
 pub fn judge(history: &[Point], point: &Point) -> Verdict {
+    let screen_reason = point
+        .screen_cat_ratio
+        .filter(|r| *r < SCREEN_CAT_RATIO_FLOOR)
+        .map(|r| {
+            format!(
+                "screen sync 100 MB cat ratio {r:.3} is below {SCREEN_CAT_RATIO_FLOOR} of the emulator-off rate"
+            )
+        });
+    let verdict = judge_trend(history, point);
+    match (screen_reason, verdict) {
+        (None, v) => v,
+        (Some(reason), Verdict::Red { mut reasons }) => {
+            reasons.push(reason);
+            Verdict::Red { reasons }
+        }
+        (Some(reason), _) => Verdict::Red {
+            reasons: vec![reason],
+        },
+    }
+}
+
+fn judge_trend(history: &[Point], point: &Point) -> Verdict {
     let baseline: Vec<&Point> = history
         .iter()
         .rev()
@@ -229,6 +260,7 @@ mod tests {
             rtt_ms: 0.2,
             injected,
             inject_delay_ms: if injected { 50 } else { 0 },
+            screen_cat_ratio: None,
         }
     }
 
@@ -286,6 +318,26 @@ mod tests {
             judge(&only_injected, &point(1.0, 1.0, false)),
             Verdict::Recorded { baseline_points: 0 }
         );
+    }
+
+    #[test]
+    fn perf_judge_is_red_when_the_screen_cat_ratio_is_below_half() {
+        // The floor is absolute: it applies with a short baseline too.
+        let mut p = point(100.0, 2.0, false);
+        p.screen_cat_ratio = Some(0.49);
+        let v = judge(&[], &p);
+        assert!(v.is_red(), "{v}");
+        assert!(v.to_string().contains("100 MB cat"));
+        // A trend failure and a ratio failure are both reported.
+        let mut p = point(10.0, 2.0, false);
+        p.screen_cat_ratio = Some(0.3);
+        let v = judge(&seven(), &p);
+        assert!(v.to_string().contains("throughput") && v.to_string().contains("100 MB cat"));
+        // At the floor, and absent, are fine.
+        p = point(100.0, 2.0, false);
+        p.screen_cat_ratio = Some(0.5);
+        assert!(!judge(&seven(), &p).is_red());
+        assert!(!judge(&seven(), &point(100.0, 2.0, false)).is_red());
     }
 
     #[test]
