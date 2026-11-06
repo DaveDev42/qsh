@@ -32,11 +32,17 @@
 //!   types, the sans-IO line parser and reader, version negotiation. Not a
 //!   QUIC wire; `docs/design/protocol.md` §17 documents it and §16.2 holds
 //!   it to the same additive-only rule.
+//! - [`screen`]: the normalised screen state, its cell-level diff and the
+//!   `ScreenUpdate` message (ADR-0052 decisions 4 and 5). Draft, not
+//!   negotiated yet (`docs/design/protocol.md` §18).
+//! - [`datagram`]: the QUIC DATAGRAM frame header (ADR-0052 decision 7).
+//!   Draft and unwired.
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
 //! §13) and depends on no other workspace crate.
 
+pub mod datagram;
 pub mod error;
 pub mod event;
 pub mod frame;
@@ -44,6 +50,7 @@ pub mod local;
 pub mod openssh;
 pub mod pairing;
 pub mod schema;
+pub mod screen;
 pub mod socks5;
 pub mod ssh_bootstrap;
 pub mod types;

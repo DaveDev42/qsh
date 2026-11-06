@@ -172,3 +172,24 @@ path = "fuzz_targets/parse_ssh_bootstrap_line.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_screen_diff"
+path = "fuzz_targets/decode_screen_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_datagram_frame"
+path = "fuzz_targets/decode_datagram_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "host_emulator_input"
+path = "fuzz_targets/host_emulator_input.rs"
+test = false
+doc = false
+bench = false

@@ -91,6 +91,10 @@ portable-pty = "0.9"
 # TIOCGWINSZ; crossterm is deliberately not used.
 nix = { version = "0.31", default-features = false }
 
+# Host terminal emulator for screen state sync (ADR-0052 decision 2,
+# `crates/qsh-core/src/screen/`). Pure Rust, no I/O; MIT.
+vt100 = "0.18"
+
 # diagnostics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

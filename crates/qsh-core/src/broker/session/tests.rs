@@ -837,3 +837,94 @@ fn ttl_window_closing_suppresses_reap_and_deadline_anchors_to_ttl_base() {
     // unattached session.
     assert_eq!(window.deadline(now, ttl), epoch + ttl);
 }
+
+// ---- host terminal emulator (ADR-0052 decision 2) ----
+
+fn spawn_screen_session(rows: u16, cols: u16) -> (SessionHandle, PipeHandle, TestClock) {
+    let clock = TestClock::new();
+    let (source, pipe) = PipeSource::new(64 * 1024);
+    let (handle, actor) = SessionActor::create(
+        "01TESTSESSION".to_string(),
+        "2026-01-01T00:00:00Z".to_string(),
+        "device:test-opener".to_string(),
+        Arc::new(clock.clone()),
+        &SessionSpec {
+            rows,
+            cols,
+            ..SessionSpec::default()
+        },
+        Box::new(source),
+        SessionConfig {
+            screen: true,
+            ..SessionConfig::default()
+        },
+    )
+    .unwrap();
+    tokio::spawn(actor.run());
+    (handle, pipe, clock)
+}
+
+#[tokio::test]
+async fn the_emulator_is_off_unless_the_session_asks_for_it() {
+    let (handle, mut pipe, _clock) = spawn_session();
+    pipe.write_output(b"\x1b[c hello").await.unwrap();
+    assert!(!handle.screen_enabled());
+    assert!(handle.screen_update_since(0).is_none());
+    assert!(handle.screen_take_history().is_none());
+    // No answer reaches the child: the byte path alone handles queries.
+    handle.take_lease("device:a", A, false).await.unwrap();
+    within(handle.write(A, b"x".to_vec())).await.unwrap();
+    assert_eq!(within(pipe.read_input(16)).await.unwrap(), b"x");
+}
+
+#[tokio::test]
+async fn output_reaches_the_ring_and_the_emulator_and_queries_are_answered() {
+    let (handle, mut pipe, clock) = spawn_screen_session(5, 30);
+    assert!(handle.screen_enabled());
+    pipe.write_output(b"\x1b[2Jhello\r\n\x1b[c").await.unwrap();
+    // The answer to DA1 arrives on the child's input.
+    assert_eq!(within(pipe.read_input(64)).await.unwrap(), b"\x1b[?62;22c");
+    // The byte path is unchanged.
+    let out = within(handle.pull(
+        Cursor::from_offset(0),
+        1024,
+        Duration::from_secs(30),
+        &clock,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(collect_output(&out), b"\x1b[2Jhello\r\n\x1b[c");
+    // The screen update is tied to the ring offset and applies cleanly.
+    let u = handle.screen_update_since(0).unwrap();
+    assert_eq!(u.output_seq, out.next.after);
+    let state = u
+        .apply(&qsh_proto::screen::ScreenState::blank(5, 30).unwrap())
+        .unwrap();
+    assert_eq!(&*state.grid[0].cells[0].text, "h");
+    // A resize through the handle reaches the emulator as well.
+    handle.resize(40, 10).await.unwrap();
+    assert_eq!(handle.screen_update_since(u.new_num).unwrap().diff.cols, 40);
+}
+
+/// `pty_reader` is never blocked (architecture.md §3) with the emulator in
+/// its loop: megabytes of output go through with nobody reading the ring
+/// and nobody consuming screen updates, and every byte is in the ring.
+#[tokio::test]
+async fn the_output_pump_with_an_emulator_is_never_blocked_by_missing_consumers() {
+    let (handle, mut pipe, _clock) = spawn_screen_session(24, 80);
+    let line = "\x1b[32mpump\x1b[0m the quick brown fox jumps over the lazy dog\r\n";
+    let mut sent = 0u64;
+    while sent < 4 * 1024 * 1024 {
+        within(pipe.write_output(line.as_bytes())).await.unwrap();
+        sent += line.len() as u64;
+    }
+    within(async {
+        while handle.info().last_sequence < sent {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(handle.info().last_sequence, sent);
+    let h = handle.screen_take_history().unwrap();
+    assert!(h.skipped > 0 && h.lines.len() <= crate::screen::DEFAULT_HISTORY_ROWS);
+}

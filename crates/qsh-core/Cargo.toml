@@ -40,6 +40,7 @@ time.workspace = true
 ulid.workspace = true
 rand.workspace = true
 blake3.workspace = true
+vt100.workspace = true
 subtle.workspace = true
 libc.workspace = true
 # `doctor.run`'s `bindv6only_blocks_ipv4` probe (`crate::doctor::probe`)
