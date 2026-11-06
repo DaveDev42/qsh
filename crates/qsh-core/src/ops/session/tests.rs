@@ -325,6 +325,7 @@ async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_ty
             expires_at: String::new(),
             input_seq: 0,
             output_end: 0,
+            screen_channel: Vec::new(),
         })
         .await
         .unwrap();
@@ -466,6 +467,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
             expires_at: String::new(),
             input_seq: 0,
             output_end: 0,
+            screen_channel: Vec::new(),
         })
         .await
         .unwrap();
@@ -729,6 +731,7 @@ fn fake_session_open_msg() -> wire::SessionOpen {
         rows: 0,
         user: None,
         shell_command: None,
+        screen: None,
     }
 }
 

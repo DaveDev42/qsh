@@ -2002,6 +2002,7 @@ mod reverse_target_quota {
             rows: 0,
             user: None,
             shell_command: None,
+            screen: None,
         }
     }
 

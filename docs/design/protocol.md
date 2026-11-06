@@ -46,7 +46,8 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
 - `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 다섯째 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
-- `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
+- `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
+- `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`가 여기 딸린 항목이고 세부는 §18.8이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`은 아직 광고하지 않는다(datagram 운반체가 붙는 스텝에서 더한다).
 
 ## 5. Frame layer
 
@@ -320,6 +321,8 @@ message SessionFrame {
     Resize   resize = 5;    // { uint32 cols; uint32 rows; }
     Exit     exit = 6;      // { uint64 final_seq; int32 exit_code; optional string signal; }
                             //   SessionEvent.exited / SessionReadEvent.exit도 같은 Exit 메시지를 쓴다
+    ScreenUpdate screen_update = 7; // { uint64 new_num; uint32 part; uint32 parts; bytes data; }  screen.v1, §18.8
+    ScreenAck    screen_ack = 8;    // { uint64 state_num; }  0 = 전체 화면 요청, screen.v1, §18.8
   }
 }
 
@@ -837,9 +840,9 @@ client는 pin 주소를 ssh 호스트 이름과 `result.serve_bind`의 포트로
 
 응답자는 새 pin을 처음부터 쓴 것처럼 쓴다. `role`은 commit의 것이고 `grants`·`paths`·`scope`는 없다. audit(`pair.ssh_respond.replace_pin`)을 저장 전에 남기고 실패하면 `trust.toml`은 그대로이며 `error`(`INTERNAL`)로 답한다. 응답자는 `commit`을 한 번 받고 `result`로 끝나므로, client가 `conflict`를 본 뒤 사람에게 묻고 "예"이면 ssh를 새로 열어 같은 fingerprint의 응답자인지 확인한 뒤 `replace: true`인 commit을 보낸다.
 
-## 18. 화면 상태 동기화의 diff·hash 부호화 (ADR-0052 결정 4·5·7, 초안)
+## 18. 화면 상태 동기화 (ADR-0052 결정 1~11)
 
-**상태: 초안이고 아직 협상되지 않는다.** capability `screen.v1`과 `datagram.v1`은 아직 광고하지 않고, 이 절의 어떤 바이트도 연결 위로 오르지 않는다. 부호화와 검증 규칙은 `crates/qsh-proto/src/screen/`와 `crates/qsh-proto/src/datagram.rs`가 코드로 고정해 두었고 fuzz 표면이다(`decode_screen_diff`, `decode_datagram_frame`). `SessionFrame`·`DatagramFrame`의 protobuf 항목(ADR-0052 결정 9)과 capability는 운반체를 잇는 스텝에서 §16.4의 additive 규칙으로 더한다. 그때 아래 `ScreenUpdate` 바이트열이 `bytes` 필드 하나로 실릴지, 필드로 풀릴지 정하고 이 절을 고친다. 그 전에는 이 절의 부호화를 바꿔도 호환 문제가 없다.
+**상태: 스트림 운반체까지 협상된다.** capability `screen.v1`(§4)을 광고하고, `SESSION_DATA` 스트림에서 화면 갱신을 나른다(§18.8). `datagram.v1`과 `DatagramFrame`(§18.6)은 아직 광고하지도 보내지도 않는다. 부호화와 검증 규칙은 `crates/qsh-proto/src/screen/`가 코드로 고정하고 fuzz 표면이다(`decode_screen_diff`, `decode_datagram_frame`). `ScreenUpdate`의 정규 바이트열(§18.4)은 protobuf 필드로 풀지 않고 `bytes data`에 조각(`part`/`parts`)으로 싣는다. 그래서 diff·hash 부호화를 바꾸면 `state_hash`처럼 모든 client의 대조가 어긋나므로, 바꾸려면 새 capability가 필요하다.
 
 ### 18.1 화면 상태
 
@@ -894,8 +897,20 @@ host는 화면이나 효과가 바뀔 때만 다음 `state_num`(1부터)을 낸�
 
 ### 18.6 `DatagramFrame` 머리
 
-datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). 조각 나눔(`part`/`parts`)은 운반체 스텝에서 payload 안에 정한다.
+datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). 조각 나눔(`part`/`parts`)은 datagram 운반체 스텝에서 payload 안에 정한다. 스트림 운반체의 조각은 §18.8의 `ScreenUpdate` 메시지가 가진다.
 
 ### 18.7 fuzz와 시험
 
 `decode_screen_diff`는 `ScreenDiff`와 `ScreenUpdate`의 decode, 재부호화 동일성, 적용을 본다. `decode_datagram_frame`은 머리 decode와 재부호화 동일성을 본다. `host_emulator_input`은 임의의 PTY 출력을 host 에뮬레이터에 먹이고 가상 client가 갱신을 받아 hash를 대조한다. 같은 속성은 `crates/qsh-proto/src/screen/tests.rs`와 `crates/qsh-core/src/screen/tests.rs`의 proptest가 `cargo nextest`에서 매번 확인한다.
+
+### 18.8 스트림 운반체와 협상 (ADR-0052 결정 1·6·9·11)
+
+**요청과 응답.** client는 협상된 교집합에 `screen.v1`이 있을 때만 `SessionOpen.screen`(`optional ScreenRequest{cols, rows, optional fg, optional bg}`, 색은 0xRRGGBB)이나 `SessionAttach.screen`을 세팅한다. 24비트를 넘는 색은 `INVALID_ARGUMENT`다. host는 `screen.v1`을 협상하지 않은 peer가 보낸 필드를 오류 없이 무시하고(바이트 경로), 협상했고 세션이 에뮬레이터를 돌릴 때(`session.open`이 `screen`과 함께 만든 세션)만 응답의 `screen_channel`에 ACL 통과 뒤 발급한 16바이트 난수를 싣는다. 비어 있으면 바이트 경로다. `session.open` 없이 만들어진 세션에 `screen`을 붙여 attach하면 에뮬레이터가 지나간 출력을 못 봤으므로 `screen_channel`이 비고 바이트 경로로 간다. 경로를 정하는 것은 요청이 아니라 ticket이다. 스트림을 여는 쪽이 운반체를 바꿀 수 없다. channel id는 datagram 운반체가 쓰며 스트림 운반체에서는 "host가 받아들였다"는 표시다.
+
+**프레임.** 화면 동기화 attach에서 host는 `Output`과 `Gap`을 보내지 않는다. `ScreenUpdate{new_num, part, parts, data}`는 §18.4의 `ScreenUpdate` 바이트열 한 개를 `part` 0부터 `parts - 1`까지 순서대로 나눈 조각이다. 조각의 `data`는 16 KiB 이하(`SESSION_CHUNK_MAX`), 한 갱신은 1 MiB 이하(최대 64조각)이고, 한 갱신의 조각은 연달아 온다. 받는 쪽은 `part`가 이어지지 않거나 `parts`가 바뀌거나 상한을 넘으면 프로토콜 위반으로 보고, `part` 0이 오면 만들던 갱신을 버린다. `ScreenAck{state_num}`는 client가 적용한 최신 상태 번호이고 0은 전체 화면(base 0) 요청이다. `Exit`, `Resize`, `Input`, `InputAck`는 그대로 쓴다.
+
+**host의 순서.** attach마다 첫 갱신은 base 0의 현재 화면이다(`SessionAttached.replay_from == output_end`, 재생 없음). 이후 ring이 움직이면 마지막으로 **보낸** 상태를 base로 최신 상태까지의 갱신을 만든다. 스트림이 순서와 도달을 보장하므로 ack를 기다리지 않는다. 쓰이지 않은 화면 조각이 128 KiB(`SEND_DEPTH_CAP_BYTES`)를 넘는 동안은 새 갱신을 만들지 않고, 줄면 그때의 최신 상태까지 한 번에 보내므로 중간 화면은 건너뛴다. `ScreenAck{0}`를 받으면 base를 0으로 되돌려 전체 화면을 보낸다. `Resize`는 출력이 없어도 갱신을 만든다. 세션의 `Exit`·`Closed` 같은 제어 항목은 마지막 갱신을 먼저 내보낸 뒤 바이트 경로와 같은 순서로 나간다. 에뮬레이터는 ring에 쓰기 전에 먹이므로(`pty_reader`), ring이 움직여 깬 쪽은 항상 새 바이트가 반영된 화면을 본다.
+
+**client의 순서.** `qsh_core::client::screen::ClientScreen`이 조각을 모아 갱신을 적용하고 `state_hash`를 대조한다. 대조가 틀렸거나, base가 가진 상태가 아니거나, diff가 적용되지 않으면 가진 화면을 버리고 `ScreenAck{0}`를 보낸다. 전체 화면이 올 때까지 base가 0이 아닌 갱신은 무시한다. 적용에 성공하면 `ScreenAck{new_num}`를 보낸다. `qsh` CLI는 아직 `screen`을 요청하지 않는다(렌더러는 뒤 스텝).
+
+**재부착.** 재부착과 resume의 절차(§10)는 그대로다. 같은 세션에 바이트 경로로 다시 붙으면 `last_output_seq`부터 재생한다. 화면 경로의 첫 갱신은 한 화면이라서 떼어 둔 동안 10 MB가 쌓였어도 크기가 화면 크기에 비례한다(`reattach_sends_one_screen_not_the_backlog`). 지나간 출력 안의 터미널 질의는 로컬 터미널에 닿지 않고 host 에뮬레이터가 답한다(ADR-0052 결정 3).

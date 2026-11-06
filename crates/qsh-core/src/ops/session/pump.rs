@@ -242,7 +242,9 @@ pub(super) fn attach_event_json(
             },
             signal,
         },
-        crate::client::AttachEvent::InputAck { .. } => return None,
+        crate::client::AttachEvent::InputAck { .. } | crate::client::AttachEvent::Screen(_) => {
+            return None;
+        }
     })
 }
 

@@ -47,8 +47,8 @@ pub use ring::{
 };
 pub use session::{
     AttachGuard, AttachToken, FIRST_INPUT_STREAM, InputStreamId, PipeHandle, PipeSource,
-    SessionActor, SessionConfig, SessionHandle, SessionInfo, SessionSource, SessionSpec,
-    SessionState, SourceControl, SourceExit, SpawnedSource, TtlWindow, WriteError,
+    ScreenParams, SessionActor, SessionConfig, SessionHandle, SessionInfo, SessionSource,
+    SessionSpec, SessionState, SourceControl, SourceExit, SpawnedSource, TtlWindow, WriteError,
 };
 pub use signal::Signal;
 
@@ -635,7 +635,7 @@ impl Broker {
     pub fn open(&self, spec: &SessionSpec) -> Result<SessionHandle, BrokerError> {
         let slot = self.reserve_slot("").map_err(BrokerError::QuotaExceeded)?;
         let source = self.factory.create(spec).map_err(spawn_error)?;
-        self.open_with_opener_reserved(spec, source, String::new(), slot)
+        self.open_with_opener_reserved(spec, source, String::new(), slot, None)
     }
 
     /// [`Broker::open`], recording `opener` as the session's owner
@@ -653,12 +653,24 @@ impl Broker {
         spec: &SessionSpec,
         opener: impl Into<String>,
     ) -> Result<SessionHandle, BrokerError> {
+        self.open_as_screen(spec, opener, None)
+    }
+
+    /// [`Broker::open_as`] that also runs a host terminal emulator for the
+    /// session when `screen` is `Some` (ADR-0052 decision 2). The caller has
+    /// checked that the peer negotiated `screen.v1`.
+    pub fn open_as_screen(
+        &self,
+        spec: &SessionSpec,
+        opener: impl Into<String>,
+        screen: Option<ScreenParams>,
+    ) -> Result<SessionHandle, BrokerError> {
         let opener = opener.into();
         let slot = self
             .reserve_slot(&opener)
             .map_err(BrokerError::QuotaExceeded)?;
         let source = self.factory.create(spec).map_err(spawn_error)?;
-        self.open_with_opener_reserved(spec, source, opener, slot)
+        self.open_with_opener_reserved(spec, source, opener, slot, screen)
     }
 
     /// [`Broker::open`] with an explicit source (tests; Step 4 PTY wiring
@@ -686,7 +698,7 @@ impl Broker {
         let slot = self
             .reserve_slot(&opener)
             .map_err(BrokerError::QuotaExceeded)?;
-        self.open_with_opener_reserved(spec, source, opener, slot)
+        self.open_with_opener_reserved(spec, source, opener, slot, None)
     }
 
     /// The shared tail of [`Broker::open`]/[`Broker::open_as`]/[`Broker::
@@ -702,6 +714,7 @@ impl Broker {
         source: Box<dyn SessionSource>,
         opener: String,
         slot: SessionSlot,
+        screen: Option<ScreenParams>,
     ) -> Result<SessionHandle, BrokerError> {
         // Held from the draining check through the registry insert below,
         // spanning `SessionActor::create` (which spawns the real child —
@@ -741,10 +754,14 @@ impl Broker {
             SessionConfig {
                 replay_bytes: self.config.replay_bytes,
                 close_grace: self.config.close_grace,
+                screen: screen.is_some(),
                 ..SessionConfig::default()
             },
         )
         .map_err(spawn_error)?;
+        if let Some(params) = screen {
+            handle.set_screen_colors(params);
+        }
         tokio::spawn(actor.run());
         registry.insert(id, handle.clone());
         // The reservation is now represented by the registry entry just
@@ -957,6 +974,41 @@ pub trait SessionBackend: Send + Sync {
     /// key (M3 plan Step 3 (2473c88).5 PR②, PRD §6).
     fn open(&self, spec: &SessionSpec, opener: &str) -> Result<SessionId, BrokerError>;
 
+    /// [`open`](Self::open) for a client that asked for screen sync: the
+    /// session also runs a host emulator (ADR-0052 decision 2). The default
+    /// opens a plain session, which is what a backend without an emulator
+    /// is; [`screen_enabled`](Self::screen_enabled) then says so.
+    fn open_screen(
+        &self,
+        spec: &SessionSpec,
+        opener: &str,
+        screen: ScreenParams,
+    ) -> Result<SessionId, BrokerError> {
+        let _ = screen;
+        self.open(spec, opener)
+    }
+
+    /// Whether the session runs a host emulator, i.e. can be attached with
+    /// screen sync. A session opened without `screen` cannot be, because an
+    /// emulator that missed the earlier output would show a wrong screen.
+    fn screen_enabled(&self, _id: &SessionId) -> bool {
+        false
+    }
+
+    /// Record the client's colours for OSC 10/11 queries (ADR-0052 decision
+    /// 3). No-op without an emulator.
+    fn set_screen_colors(&self, _id: &SessionId, _colors: ScreenParams) {}
+
+    /// The update that takes a client at state `base_num` to the current
+    /// screen, or `None` if it already has it or there is no emulator.
+    fn screen_update_since(
+        &self,
+        _id: &SessionId,
+        _base_num: u64,
+    ) -> Option<qsh_proto::screen::ScreenUpdate> {
+        None
+    }
+
     /// Snapshot one live session.
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError>;
 
@@ -1142,6 +1194,39 @@ impl SessionBackend for Broker {
         Ok(SessionId(
             Broker::open_as(self, spec, opener)?.id().to_string(),
         ))
+    }
+
+    fn open_screen(
+        &self,
+        spec: &SessionSpec,
+        opener: &str,
+        screen: ScreenParams,
+    ) -> Result<SessionId, BrokerError> {
+        Ok(SessionId(
+            Broker::open_as_screen(self, spec, opener, Some(screen))?
+                .id()
+                .to_string(),
+        ))
+    }
+
+    fn screen_enabled(&self, id: &SessionId) -> bool {
+        Broker::get(self, id).is_ok_and(|h| h.screen_enabled())
+    }
+
+    fn set_screen_colors(&self, id: &SessionId, colors: ScreenParams) {
+        if let Ok(h) = Broker::get(self, id) {
+            h.set_screen_colors(colors);
+        }
+    }
+
+    fn screen_update_since(
+        &self,
+        id: &SessionId,
+        base_num: u64,
+    ) -> Option<qsh_proto::screen::ScreenUpdate> {
+        Broker::get_for_read(self, id)
+            .ok()?
+            .screen_update_since(base_num)
     }
 
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError> {

@@ -1,0 +1,450 @@
+//! L3 loopback tests for screen state sync on the stream carrier (ADR-0052
+//! decisions 1, 6, 9 and 11; M22 DoD 18-3, 18-4, 18-9, 18-12). Pipe-backed
+//! sessions, so the same tests run on Linux, macOS and Windows (the host
+//! emulator is fed from the pipe exactly as it is fed from a PTY or ConPTY).
+//!
+//! The real `qsh` CLI does not request screen sync yet; these tests drive
+//! the client plumbing (`Session::screen_request`, `ClientScreen`,
+//! `Attached::send_screen_ack`) directly.
+
+use std::time::Duration;
+
+use qsh_core::broker::{PipeHandle, SessionBackend, SessionId};
+use qsh_core::client::screen::{ClientScreen, ScreenOutcome};
+use qsh_core::client::{AttachEvent, Attached, Session};
+use qsh_proto::wire::{self, ControlMessage, control_message, response};
+use qsh_testkit::loopback::LoopbackHarness;
+
+const DEADLINE: Duration = Duration::from_secs(60);
+
+fn open_req(session: &Session) -> wire::SessionOpen {
+    wire::SessionOpen {
+        argv: vec!["sh".into()],
+        cols: 80,
+        rows: 24,
+        term: "xterm-256color".into(),
+        screen: session.screen_request(80, 24, Some(0xdddddd), Some(0x101010)),
+        ..Default::default()
+    }
+}
+
+/// Open a session (asking for screen sync when the peer allows it) and
+/// redeem its first data stream.
+async fn open_attached(
+    h: &LoopbackHarness,
+    s: &mut Session,
+    req: wire::SessionOpen,
+) -> (wire::SessionOpened, PipeHandle, Attached) {
+    let opened = s.session_open(req).await.expect("session.open");
+    let pipe = h.pipes.take().expect("pipe handle");
+    let attached = s
+        .open_attach_stream(wire::SessionAttached {
+            ticket: opened.ticket.clone(),
+            screen_channel: opened.screen_channel.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect("data stream");
+    (opened, pipe, attached)
+}
+
+/// The host emulator's current state hash and number (`None` without one).
+fn host_state(h: &LoopbackHarness, id: &str) -> Option<([u8; 8], u64)> {
+    let u = SessionBackend::screen_update_since(&*h.broker, &SessionId(id.to_string()), 0)?;
+    Some((u.state_hash, u.new_num))
+}
+
+async fn wait_ring_end(h: &LoopbackHarness, id: &str, end: u64) {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let info = SessionBackend::get(&*h.broker, &SessionId(id.to_string())).unwrap();
+            if info.last_sequence >= end {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("host consumed the output");
+}
+
+/// Read events, applying screen updates and acking them, until the client
+/// holds the host's current state. Returns the count of `Output` events seen.
+async fn converge(
+    h: &LoopbackHarness,
+    id: &str,
+    att: &mut Attached,
+    screen: &mut ClientScreen,
+) -> usize {
+    let mut outputs = 0;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if let Some((hash, num)) = host_state(h, id)
+                && screen.num() == num
+                && screen.hash() == Some(hash)
+            {
+                return;
+            }
+            match att.next().await.expect("event").expect("stream open") {
+                AttachEvent::Screen(part) => {
+                    let outcome = screen.on_part(&part).expect("part");
+                    if let Some(n) = outcome.ack() {
+                        att.send_screen_ack(n).await.expect("ack");
+                    }
+                }
+                AttachEvent::Output { .. } => outputs += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("client converges on the host's state");
+    outputs
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_sync_on_stream_carrier_converges_without_datagram() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    assert!(s.screen_supported());
+    assert!(
+        !s.capabilities.iter().any(|c| c == "datagram.v1"),
+        "datagram.v1 is not advertised in this step"
+    );
+    let req = open_req(&s);
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    assert_eq!(opened.screen_channel.len(), 16, "host accepted screen sync");
+
+    let text = b"\x1b[2J\x1b[Hhello \x1b[1;31mworld\x1b[0m\r\nline two";
+    pipe.write_output(text).await.unwrap();
+    wait_ring_end(&h, &opened.session_id, text.len() as u64).await;
+    let mut screen = ClientScreen::new();
+    let outputs = converge(&h, &opened.session_id, &mut att, &mut screen).await;
+    assert_eq!(outputs, 0, "a screen-sync attach carries no Output");
+    let state = screen.state().unwrap();
+    assert_eq!(&*state.grid[0].cells[0].text, "h");
+    assert_eq!(&*state.grid[1].cells[0].text, "l");
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_client_with_old_host_stays_on_the_byte_path() {
+    let h = LoopbackHarness::start().await;
+    h.server.hide_capabilities(&[wire::CAP_SCREEN_V1]);
+    let mut s = h.session().await;
+    assert!(!s.screen_supported());
+    assert!(s.screen_request(80, 24, None, None).is_none());
+    // Even a caller that builds the field itself cannot send it.
+    let mut req = open_req(&s);
+    req.screen = Some(wire::ScreenRequest {
+        cols: 80,
+        rows: 24,
+        fg: None,
+        bg: None,
+    });
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    assert!(opened.screen_channel.is_empty());
+
+    let payload: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
+    pipe.write_output(&payload).await.unwrap();
+    let mut got = Vec::new();
+    tokio::time::timeout(DEADLINE, async {
+        while got.len() < payload.len() {
+            match att.next().await.unwrap().unwrap() {
+                AttachEvent::Output { data, .. } => got.extend_from_slice(&data),
+                AttachEvent::Screen(_) => panic!("old host sent a ScreenUpdate"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(got, payload, "Output bytes are the bytes written");
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn old_client_with_new_host_never_gets_a_screen_update() {
+    let h = LoopbackHarness::start().await;
+    let dialed = h.dialer.dial(h.addr, "127.0.0.1").await.expect("dial");
+    let mut s = Session::negotiate_hiding(dialed.connection, "laptop", &[wire::CAP_SCREEN_V1])
+        .await
+        .expect("negotiate");
+    assert!(!s.screen_supported());
+    let req = open_req(&s);
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    assert!(opened.screen_channel.is_empty());
+    pipe.write_output(b"plain bytes").await.unwrap();
+    let mut got = Vec::new();
+    tokio::time::timeout(DEADLINE, async {
+        while got.len() < 11 {
+            match att.next().await.unwrap().unwrap() {
+                AttachEvent::Output { data, .. } => got.extend_from_slice(&data),
+                AttachEvent::Screen(_) => panic!("host sent a ScreenUpdate to an old client"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(got, b"plain bytes");
+    s.close();
+    h.shutdown().await;
+}
+
+/// A peer that did not advertise `screen.v1` but sends the request field
+/// anyway is ignored: the session is a plain one and the reply says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_ignores_a_screen_request_from_a_peer_without_the_capability() {
+    let h = LoopbackHarness::start().await;
+    let dialed = h.dialer.dial(h.addr, "127.0.0.1").await.expect("dial");
+    let hello = wire::Hello {
+        versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+        device_name: "laptop".into(),
+        capabilities: wire::LOCAL_CAPABILITIES
+            .iter()
+            .filter(|c| **c != wire::CAP_SCREEN_V1)
+            .map(|c| c.to_string())
+            .collect(),
+        reverse: None,
+    };
+    let (_ctl_conn, mut ctl) = {
+        let (ctl, _peer) = qsh_core::handshake::initiate(&dialed.connection, hello)
+            .await
+            .expect("hello");
+        (dialed.connection.clone(), ctl)
+    };
+    let req = wire::SessionOpen {
+        argv: vec!["sh".into()],
+        cols: 80,
+        rows: 24,
+        screen: Some(wire::ScreenRequest {
+            cols: 80,
+            rows: 24,
+            fg: None,
+            bg: None,
+        }),
+        ..Default::default()
+    };
+    ctl.send
+        .send(&ControlMessage::new(
+            1,
+            control_message::Body::SessionOpen(req),
+        ))
+        .await
+        .unwrap();
+    let reply = ctl.recv.recv::<ControlMessage>().await.unwrap().unwrap();
+    let Some(control_message::Body::Response(resp)) = reply.body else {
+        panic!("expected a response");
+    };
+    let Some(response::Body::SessionOpened(opened)) = resp.body else {
+        panic!("expected SessionOpened, got {resp:?}");
+    };
+    assert!(opened.screen_channel.is_empty());
+    let _pipe = h.pipes.take().unwrap();
+    assert!(
+        host_state(&h, &opened.session_id).is_none(),
+        "no emulator was started for the session"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reattach_sends_one_screen_not_the_backlog() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (opened, mut pipe, att) = open_attached(&h, &mut s, req).await;
+    // Detach.
+    drop(att);
+
+    // 10 MB of scrolling output while nobody is attached, ending with a
+    // distinctive screen. Queries inside it must never reach the client
+    // (ADR-0048): the host emulator answers them, the client never sees
+    // the bytes.
+    let mut chunk = Vec::new();
+    for i in 0..200 {
+        chunk.extend_from_slice(format!("backlog line {i:04} 0123456789abcdef\r\n").as_bytes());
+    }
+    let total: usize = 10 * 1024 * 1024;
+    let mut written = 0usize;
+    while written < total {
+        pipe.write_output(&chunk).await.unwrap();
+        written += chunk.len();
+    }
+    let tail = b"\x1b[c\x1b[6n\x1b]11;?\x07\x1b[2J\x1b[Hfinal screen";
+    pipe.write_output(tail).await.unwrap();
+    written += tail.len();
+    wait_ring_end(&h, &opened.session_id, written as u64).await;
+
+    let attached = s
+        .attach_request(wire::SessionAttach {
+            session_id: opened.session_id.clone(),
+            resume_token: opened.resume_token.clone(),
+            last_output_seq: 0,
+            mode: wire::AttachMode::Rw as i32,
+            no_steal: false,
+            screen: s.screen_request(80, 24, None, None),
+        })
+        .await
+        .expect("session.attach");
+    assert_eq!(attached.screen_channel.len(), 16);
+    assert_eq!(
+        attached.replay_from, attached.output_end,
+        "a screen attach replays nothing"
+    );
+    let mut att = s.open_attach_stream(attached).await.expect("data stream");
+
+    // Bytes up to the first applied update: every frame is a screen part,
+    // never Output.
+    let mut screen = ClientScreen::new();
+    let mut first_update_bytes = 0usize;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            match att.next().await.unwrap().unwrap() {
+                AttachEvent::Screen(part) => {
+                    first_update_bytes += part.data.len();
+                    let outcome = screen.on_part(&part).unwrap();
+                    if matches!(outcome, ScreenOutcome::Applied { .. }) {
+                        return;
+                    }
+                }
+                AttachEvent::Output { .. } => {
+                    panic!("Output (the backlog or a replayed query) reached the client")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // One screen of 24x80 is far below this bound; the backlog is 10 MB.
+    let one_screen_bound = 24 * 80 * 40;
+    assert!(
+        first_update_bytes <= one_screen_bound,
+        "{first_update_bytes} bytes to the first update"
+    );
+    // The screen the client holds is the host's state, with the final text.
+    let (hash, num) = host_state(&h, &opened.session_id).unwrap();
+    assert_eq!(screen.hash(), Some(hash));
+    assert_eq!(screen.num(), num);
+    let first_row: String = screen.state().unwrap().grid[0]
+        .cells
+        .iter()
+        .map(|c| if c.text.is_empty() { " " } else { &*c.text })
+        .collect();
+    assert!(first_row.starts_with("final screen"), "{first_row:?}");
+
+    // The host emulator answered the replayed queries into the PTY input.
+    let answers = tokio::time::timeout(DEADLINE, pipe.read_input(64))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        answers.starts_with(b"\x1b["),
+        "the host answered the terminal queries: {answers:?}"
+    );
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_carrier_skips_intermediate_states_under_a_slow_reader() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+
+    // Each write is one complete, distinct screen.
+    const FRAMES: usize = 2000;
+    let producer = tokio::spawn(async move {
+        for k in 0..FRAMES {
+            let frame = format!("\x1b[H\x1b[2Jframe {k:05} {}", "x".repeat(200));
+            pipe.write_output(frame.as_bytes()).await.unwrap();
+        }
+        pipe
+    });
+    let mut screen = ClientScreen::new();
+    // A slow reader: it applies and acks, but lags behind the producer.
+    let mut seen = 0usize;
+    tokio::time::timeout(DEADLINE, async {
+        while seen < 3 || !producer.is_finished() {
+            if let AttachEvent::Screen(part) = att.next().await.unwrap().unwrap()
+                && let Some(n) = screen.on_part(&part).unwrap().ack()
+            {
+                seen += 1;
+                att.send_screen_ack(n).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let _pipe = producer.await.unwrap();
+    converge(&h, &opened.session_id, &mut att, &mut screen).await;
+    assert!(
+        (screen.applied_updates() as usize) < FRAMES,
+        "applied {} updates for {FRAMES} screens produced",
+        screen.applied_updates()
+    );
+    let first_row: String = screen.state().unwrap().grid[0]
+        .cells
+        .iter()
+        .map(|c| if c.text.is_empty() { " " } else { &*c.text })
+        .collect();
+    assert!(
+        first_row.starts_with(&format!("frame {:05}", FRAMES - 1)),
+        "the final screen is the last one produced: {first_row:?}"
+    );
+    s.close();
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_screen_request_gets_a_base_zero_update() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let req = open_req(&s);
+    let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
+    pipe.write_output(b"first").await.unwrap();
+    wait_ring_end(&h, &opened.session_id, 5).await;
+    let mut screen = ClientScreen::new();
+    converge(&h, &opened.session_id, &mut att, &mut screen).await;
+    let applied_before = screen.applied_updates();
+
+    // The client lost faith in its copy: it asks for the full screen, then
+    // output continues.
+    att.send_screen_ack(0).await.unwrap();
+    pipe.write_output(b" second").await.unwrap();
+    wait_ring_end(&h, &opened.session_id, 12).await;
+    let mut saw_base_zero = false;
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let AttachEvent::Screen(part) = att.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            // `base_num` is the first varint of the encoded update; 0 is a
+            // single zero byte.
+            let is_base_zero = part.part == 0 && part.data.first() == Some(&0);
+            let outcome = screen.on_part(&part).unwrap();
+            if let Some(n) = outcome.ack() {
+                att.send_screen_ack(n).await.unwrap();
+            }
+            // A full screen applies even though the client was far ahead of 0.
+            if matches!(outcome, ScreenOutcome::Applied { .. }) && is_base_zero {
+                saw_base_zero = true;
+            }
+            let (hash, num) = host_state(&h, &opened.session_id).unwrap();
+            if screen.num() == num && screen.hash() == Some(hash) && saw_base_zero {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(screen.applied_updates() > applied_before);
+    s.close();
+    h.shutdown().await;
+}

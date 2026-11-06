@@ -175,6 +175,16 @@ impl Server {
             }
         };
 
+        // Screen sync (ADR-0052 decision 9). A request field from a peer
+        // that did not negotiate `screen.v1` is ignored, not an error: the
+        // session is a plain byte-path session and the reply says so by
+        // leaving `screen_channel` empty. A shape check like the window one
+        // above, so it may precede the ACL decision.
+        let screen = match screen_params(ctx, req.screen.as_ref()) {
+            Ok(screen) => screen,
+            Err(why) => return invalid_argument(request_id, why),
+        };
+
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) = self.authorize(
             ctx,
@@ -256,7 +266,11 @@ impl Server {
         // on. `opener_key`, not `ctx.principal.to_string()` alone: see its
         // doc comment.
         let opener = opener_key(&ctx.principal, ctx.auth_path);
-        let session_id = match self.sessions.open(&spec, &opener) {
+        let opened = match screen {
+            Some(params) => self.sessions.open_screen(&spec, &opener, params),
+            None => self.sessions.open(&spec, &opener),
+        };
+        let session_id = match opened {
             Ok(id) => id,
             // A session-count quota (`[serve].max_sessions`/
             // `max_sessions_per_principal`, M8 plan Step 3 (52639fc)) was
@@ -281,6 +295,13 @@ impl Server {
             }
             Err(err) => return broker_error(request_id, err),
         };
+        // The host agreed to screen sync only if the session really runs an
+        // emulator; the reply and the ticket say the same thing.
+        let screen_channel = if screen.is_some() && self.sessions.screen_enabled(&session_id) {
+            new_screen_channel()
+        } else {
+            Vec::new()
+        };
         let ticket = self.issue_ticket(
             ctx.conn_id,
             TicketPurpose::Session {
@@ -297,6 +318,7 @@ impl Server {
                 // lineage on the same axis.
                 input_stream: FIRST_INPUT_STREAM,
                 input_from: 0,
+                screen_channel: screen_channel.clone(),
             },
         );
         // The resume credential (protocol.md §10). Bound to the peer's SPKI:
@@ -335,6 +357,7 @@ impl Server {
                 ticket: ticket.to_vec(),
                 initial_seq: 0,
                 expires_at,
+                screen_channel,
             }),
         )
     }
@@ -800,6 +823,10 @@ impl Server {
         if req.attach_mode() != Some(wire::AttachMode::Rw) {
             return invalid_argument(request_id, "attach mode must be RW");
         }
+        let screen = match screen_params(ctx, req.screen.as_ref()) {
+            Ok(screen) => screen,
+            Err(why) => return invalid_argument(request_id, why),
+        };
         let id = SessionId(req.session_id.clone());
         // ---- Step 1: credential + bound identity, before anything else
         // touches the registry. ----
@@ -913,6 +940,21 @@ impl Server {
         // ring; clamp instead, so a client that over-reports simply gets
         // everything from the current end.
         let replay_from = req.last_output_seq.min(info.last_sequence);
+        // Screen sync on this attach (ADR-0052 decision 11): only when the
+        // session runs an emulator (it was opened with `screen`). The first
+        // update is the current screen, so there is no replay: the data
+        // stream starts at the end of the ring.
+        let screen = screen.filter(|_| self.sessions.screen_enabled(&id));
+        let replay_from = if screen.is_some() {
+            info.last_sequence
+        } else {
+            replay_from
+        };
+        let screen_channel = if screen.is_some() {
+            new_screen_channel()
+        } else {
+            Vec::new()
+        };
         // The id of this attach's own input axis — reserved, not yet
         // created. The credential rotation below has to name the axis it
         // hands to the next generation, and the rotation is the point where
@@ -965,8 +1007,12 @@ impl Server {
                 attach_authorized: true,
                 input_stream,
                 input_from,
+                screen_channel: screen_channel.clone(),
             },
         );
+        if let Some(params) = screen {
+            self.sessions.set_screen_colors(&id, params);
+        }
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
         tracing::info!(
             principal = %ctx.principal,
@@ -985,7 +1031,39 @@ impl Server {
                 expires_at,
                 input_seq: input_from,
                 output_end: info.last_sequence,
+                screen_channel,
             }),
         )
     }
+}
+
+/// The `ScreenRequest` of a peer that negotiated `screen.v1`, as broker
+/// parameters. A request from a peer that did not negotiate it is ignored
+/// (`None`); a colour wider than 24 bits is `INVALID_ARGUMENT`.
+fn screen_params(
+    ctx: &ConnCtx,
+    req: Option<&wire::ScreenRequest>,
+) -> Result<Option<crate::broker::ScreenParams>, &'static str> {
+    let Some(req) = req.filter(|_| ctx.has_capability(wire::CAP_SCREEN_V1)) else {
+        return Ok(None);
+    };
+    let rgb = |v: Option<u32>| match v {
+        None => Ok(None),
+        Some(v) if v <= 0x00ff_ffff => Ok(Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])),
+        Some(_) => Err("ScreenRequest colours must fit in 24 bits"),
+    };
+    Ok(Some(crate::broker::ScreenParams {
+        fg: rgb(req.fg)?,
+        bg: rgb(req.bg)?,
+    }))
+}
+
+/// A fresh 128-bit channel id (ADR-0052 decision 7). Issued only after the
+/// ACL admitted the request. The stream carrier does not use it; its being
+/// non-empty is how the reply says the host accepted screen sync.
+fn new_screen_channel() -> Vec<u8> {
+    use rand::Rng;
+    let mut id = vec![0u8; 16];
+    rand::rng().fill_bytes(&mut id);
+    id
 }

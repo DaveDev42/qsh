@@ -408,6 +408,7 @@ async fn a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes
                     last_output_seq: 8,
                     mode: wire::AttachMode::Rw as i32,
                     no_steal: false,
+                    screen: None,
                 })
                 .await?;
             let stream = redeem(&fresh, attached.ticket.clone()).await;

@@ -409,6 +409,11 @@ pub enum TicketPurpose {
         /// Cumulative input offset already promised to the peer in
         /// `SessionAttached.input_seq`.
         input_from: u64,
+        /// The channel id promised in `screen_channel` when this attach
+        /// runs screen sync (ADR-0052 decision 9); empty for the byte path.
+        /// The ticket, not the stream, decides which path runs, so a peer
+        /// cannot switch carriers by how it opens the stream.
+        screen_channel: Vec<u8>,
     },
 }
 
@@ -588,6 +593,9 @@ pub struct Server {
     /// dropped — best-effort, like every other operator diagnostic this
     /// crate emits.
     notice_sink: OnceLock<NoticeSink>,
+    /// Capabilities this host pretends not to have ([`Server::hide_capabilities`]).
+    /// Empty in production.
+    hidden_capabilities: OnceLock<Vec<String>>,
     /// The path normalizer the remote file ops call, set at most once by
     /// [`Server::set_path_normalizer`]. Unset (production) reads as the real
     /// filesystem normalizer; a test injects a counting one
@@ -787,6 +795,7 @@ impl Server {
             pairing: OnceLock::new(),
             pinned_principals: OnceLock::new(),
             notice_sink: OnceLock::new(),
+            hidden_capabilities: OnceLock::new(),
             path_normalizer: OnceLock::new(),
             file_host: OnceLock::new(),
             free_space: OnceLock::new(),
@@ -854,6 +863,23 @@ impl Server {
         }
     }
 
+    /// Make this host behave as a build that predates `caps`: they are left
+    /// out of its `Hello` and out of every negotiated set, so the host gates
+    /// on them exactly as it would against a peer that never had them. For
+    /// the old-peer combination tests (ADR-0052 decision 18-4); production
+    /// never calls it. First call wins.
+    pub fn hide_capabilities(&self, caps: &[&str]) {
+        let _ = self
+            .hidden_capabilities
+            .set(caps.iter().map(|c| c.to_string()).collect());
+    }
+
+    fn capability_hidden(&self, cap: &str) -> bool {
+        self.hidden_capabilities
+            .get()
+            .is_some_and(|h| h.iter().any(|c| c == cap))
+    }
+
     /// The `Hello` this host sends. `reverse` is `Some` only when this
     /// `Hello` is a reverse target's self-registration on an initiator+host
     /// connection (M3 Step 3's `qsh reverse` fills this in via
@@ -865,6 +891,7 @@ impl Server {
             device_name: self.device_name.clone(),
             capabilities: wire::LOCAL_CAPABILITIES
                 .iter()
+                .filter(|c| !self.capability_hidden(c))
                 .map(|s| s.to_string())
                 .collect(),
             reverse,
@@ -1517,7 +1544,10 @@ impl Server {
                 .map(|fp| PeerFingerprint::new(*fp.as_bytes())),
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
-            capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
+            capabilities: crate::handshake::negotiated_capabilities(&peer_hello)
+                .into_iter()
+                .filter(|c| !self.capability_hidden(c))
+                .collect(),
             // A forward `qsh serve` connection: `Hello.reverse` was
             // refused above, so this is never a shared registration
             // (`ConnCtx::is_reverse_registration`'s own doc).

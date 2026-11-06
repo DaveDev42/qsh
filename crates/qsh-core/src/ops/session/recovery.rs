@@ -249,6 +249,7 @@ async fn reattach(
             last_output_seq,
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
+            screen: None,
         })
         .await
         .inspect_err(|err| {

@@ -227,6 +227,7 @@ async fn file_copy_echo_under_load() {
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
+            screen: None,
         })
         .await
         .expect("attach the PTY-echo session");
