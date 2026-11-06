@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-audit \- Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22)
 .SH SYNOPSIS
-\fBqsh audit\fR [\fB\-\-json\fR] [\fB\-\-since\fR] [\fB\-\-jsonl\fR] [\fB\-\-until\fR] [\fB\-\-principal\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-action\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-resource\fR] [\fB\-\-decision\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh audit\fR [\fB\-\-json\fR] [\fB\-\-since\fR] [\fB\-\-jsonl\fR] [\fB\-\-until\fR] [\fB\-\-principal\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-action\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-resource\fR] [\fB\-\-decision\fR] [\fB\-\-install\-remote\fR] [\fB\-\-limit\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Read this machine\*(Aqs own audit log: the authorization decisions `qsh serve`, `qsh listen` and `qsh serve \-\-to` recorded, newest first, filtered on this machine (`docs/CLI.md` §6.22).
 .PP
@@ -44,8 +44,14 @@ Only records of this resource identifier, exactly as stored
 \fB\-\-decision\fR \fI<allow|deny>\fR
 Only records with this decision
 .TP
+\fB\-\-install\-remote\fR
+When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
+.TP
 \fB\-\-limit\fR \fI<N>\fR
 Most records to return, newest first: 1 to 1000, default 100
+.TP
+\fB\-\-no\-install\-remote\fR
+Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

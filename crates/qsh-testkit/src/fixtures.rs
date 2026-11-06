@@ -103,6 +103,9 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         // Unambiguous: no other JSON field in the contract
                         // is literally named `"path"`.
                         "path" => *child = serde_json::Value::String("<path>".into()),
+                        // A pin's `remote_qsh` is the absolute path an
+                        // install chose under the remote's (temp) home.
+                        "remote_qsh" => *child = serde_json::Value::String("<path>".into()),
                         // `service.install`/`service.status`/
                         // `service.uninstall`'s `manager` is a fact about
                         // the host OS (`"launchd"` on macOS, `"systemd"` on

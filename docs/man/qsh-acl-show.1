@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-acl\-show \- Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH SYNOPSIS
-\fBqsh acl show\fR [\fB\-\-json\fR] [\fB\-\-auth\-path\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> 
+\fBqsh acl show\fR [\fB\-\-json\fR] [\fB\-\-auth\-path\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> 
 .SH DESCRIPTION
 Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH OPTIONS
@@ -29,6 +29,12 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-no\-ssh\fR
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
+.TP
+\fB\-\-install\-remote\fR
+When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
+.TP
+\fB\-\-no\-install\-remote\fR
+Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -95,6 +95,35 @@ pub struct PairSshReplaced {
     pub remote: Option<String>,
 }
 
+/// How `qsh` got onto the remote (`PairSshInstalled::method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairSshInstallMethod {
+    /// The remote ran the release's own installer (`install.sh` or
+    /// `install.ps1`, pinned to this machine's tag).
+    RemoteInstaller,
+    /// The remote could not reach GitHub; this machine fetched the archive,
+    /// checked it against `SHA256SUMS`, and streamed it over ssh.
+    Streamed,
+}
+
+/// A `qsh` this call put on the remote with the person's consent (ADR-0051
+/// 결정 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PairSshInstalled {
+    /// The release tag installed: this machine's own, e.g. `v0.5.0`.
+    pub version: String,
+    /// Absolute path of the installed executable on the remote, as the
+    /// remote reported it. The responder is run by this path afterwards, and
+    /// the pin keeps it as `remote_qsh`.
+    pub path: String,
+    /// How it got there.
+    pub method: PairSshInstallMethod,
+    /// `true` when a `qsh` too old for the bootstrap was replaced; `false`
+    /// for a first install.
+    pub upgraded: bool,
+}
+
 /// Data payload of `pair.ssh` (ADR-0044 결정 17).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PairSshData {
@@ -128,4 +157,9 @@ pub struct PairSshData {
     /// Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced: Option<PairSshReplaced>,
+    /// The `qsh` this call installed or upgraded on the remote before the
+    /// bootstrap (ADR-0051 결정 3, 14). Absent when nothing was installed.
+    /// Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<PairSshInstalled>,
 }

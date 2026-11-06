@@ -1142,7 +1142,14 @@ fn auto_bootstrap_before_open(
     let cancel = CancelToken::new();
     // Scoped: the attach's own signal handling takes over afterwards.
     let _interrupts = auto_bootstrap::InterruptScope::new(&cancel);
-    match auto_bootstrap::run(ops, &plan, cancel, cli.quiet, ssh.clone()) {
+    match auto_bootstrap::run(
+        ops,
+        &plan,
+        cancel,
+        cli.quiet,
+        ssh.clone(),
+        cli.install_remote(),
+    ) {
         Ok(()) => None,
         Err(err) => Some(report_error(cli, command, &err)),
     }
@@ -1425,9 +1432,14 @@ fn run_cp(cli: &Cli, ops: &Ops, args: &CpArgs) -> i32 {
     };
     match auto_plan {
         Ok(Some(plan)) => {
-            if let Err(err) =
-                auto_bootstrap::run(ops, &plan, cancel.clone(), cli.quiet, SshOptions::default())
-            {
+            if let Err(err) = auto_bootstrap::run(
+                ops,
+                &plan,
+                cancel.clone(),
+                cli.quiet,
+                SshOptions::default(),
+                cli.install_remote(),
+            ) {
                 return report_cp_error(cli, &err);
             }
         }
@@ -2576,13 +2588,16 @@ fn run_pair_ssh(cli: &Cli, ops: &Ops, args: &PairSshArgs) -> i32 {
     }
     let cancel = CancelToken::new();
     arm_cancel_on_interrupt(&cancel);
-    let env = PairSshEnv {
-        machine_mode: cli.wants_json(),
-        stdin_is_terminal: io::stdin().is_terminal(),
+    let env = PairSshEnv::new(
+        cli.wants_json(),
+        io::stdin().is_terminal(),
         cancel,
-        ssh: SshOptions::default(),
-        prompter: std::sync::Arc::new(qsh_core::prompts::StdioPrompter::new(cli.wants_json())),
-    };
+        SshOptions::default(),
+    )
+    .with_install(
+        cli.install_remote(),
+        std::sync::Arc::new(qsh_core::prompts::StdioPrompter::new(cli.wants_json())),
+    );
     let result = ops.pair_ssh(
         PairSshReq {
             dest: args.dest.clone(),

@@ -43,6 +43,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_ssh: bool,
 
+    /// When the ssh bootstrap finds no `qsh` on the remote host (or one too
+    /// old to answer it), install this machine's release into `~/.local/bin`
+    /// there without asking (`docs/CLI.md` §7). Works with `--json`.
+    #[arg(long, global = true, conflicts_with = "no_install_remote")]
+    pub install_remote: bool,
+
+    /// Never install or upgrade `qsh` on the remote host, and do not ask;
+    /// a missing `qsh` ends as `remote_qsh_missing`.
+    #[arg(long, global = true, conflicts_with = "install_remote")]
+    pub no_install_remote: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -56,6 +67,16 @@ impl Cli {
     /// Whether either JSON output mode was requested.
     pub fn wants_json(&self) -> bool {
         self.json || self.jsonl
+    }
+
+    /// What `--install-remote` / `--no-install-remote` say.
+    pub fn install_remote(&self) -> qsh_core::ssh_bootstrap::install::InstallRemote {
+        use qsh_core::ssh_bootstrap::install::InstallRemote;
+        match (self.install_remote, self.no_install_remote) {
+            (true, _) => InstallRemote::Yes,
+            (_, true) => InstallRemote::No,
+            _ => InstallRemote::Ask,
+        }
     }
 }
 

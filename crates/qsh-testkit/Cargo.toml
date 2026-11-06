@@ -15,6 +15,7 @@ quinn.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 # `raw_quic`: a raw client `quinn::Endpoint` bound to a caller-chosen
 # loopback source address, for `crates/qsh-cli/tests/it/adversarial_load.rs`

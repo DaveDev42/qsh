@@ -591,9 +591,24 @@ impl TrustStore {
             paths: None,
             scope: None,
             source: None,
+            remote_qsh: None,
         };
         self.peers.push(peer.clone());
         (peer, true, false)
+    }
+
+    /// Record the `qsh` the SSH bootstrap installed on the peer `name`
+    /// (ADR-0051 decision 3), so the next bootstrap runs the responder by
+    /// that absolute path. Returns `true` when the stored value changed;
+    /// `false` when `name` is no pin or already holds `path`.
+    pub fn set_remote_qsh(&mut self, name: &str, path: &str) -> bool {
+        match self.peers.iter_mut().find(|p| p.name == name) {
+            Some(peer) if peer.remote_qsh.as_deref() != Some(path) => {
+                peer.remote_qsh = Some(path.to_string());
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Record how the pin `name` came to be ([`PIN_SOURCE_SSH_BOOTSTRAP`]).
@@ -826,6 +841,9 @@ impl TrustStore {
             paths: None,
             scope: None,
             source: None,
+            // Where the remote's `qsh` lives is not a trust fact; a bootstrap
+            // that finds it gone offers the install again.
+            remote_qsh: old.remote_qsh.clone(),
         };
         Some((self.peers[index].clone(), old))
     }

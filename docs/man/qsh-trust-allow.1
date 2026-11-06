@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-allow \- Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
 .SH SYNOPSIS
-\fBqsh trust allow\fR [\fB\-\-json\fR] [\fB\-\-path\fR] [\fB\-\-jsonl\fR] [\fB\-\-scope\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
+\fBqsh trust allow\fR [\fB\-\-json\fR] [\fB\-\-path\fR] [\fB\-\-jsonl\fR] [\fB\-\-scope\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
 .SH DESCRIPTION
 Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
 .SH OPTIONS
@@ -29,6 +29,12 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-no\-ssh\fR
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
+.TP
+\fB\-\-install\-remote\fR
+When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
+.TP
+\fB\-\-no\-install\-remote\fR
+Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

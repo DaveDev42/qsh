@@ -30,6 +30,7 @@ mod jsonl_purity;
 mod lifecycle_lines;
 mod localctl_perms;
 mod release_smoke;
+mod remote_install;
 mod reverse_blackout;
 mod reverse_e2e;
 mod reverse_unreachable_diagnostic;

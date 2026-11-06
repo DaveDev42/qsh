@@ -184,6 +184,25 @@ pub fn responder_args_with(
     options: &SshOptions,
 ) -> Result<Vec<String>, OpError> {
     let remote = quote_remote_program(remote_qsh)?;
+    Ok(command_args_with(
+        dest,
+        &[remote, "pair".into(), "ssh-respond".into()],
+        batch_mode,
+        options,
+    ))
+}
+
+/// The arguments of any one-shot remote command run over the same ssh
+/// shape as the responder call (ADR-0051 decision 3: the install steps use
+/// it): the fixed options, `BatchMode` when asked, the root form's ssh
+/// options, then `-- <dest> <words...>`. The words are already quoted for
+/// the remote shell by the caller.
+pub(crate) fn command_args_with(
+    dest: &Dest,
+    words: &[String],
+    batch_mode: bool,
+    options: &SshOptions,
+) -> Vec<String> {
     let mut args: Vec<String> = RESPONDER_OPTIONS.iter().map(|s| (*s).to_string()).collect();
     if batch_mode {
         args.push("-o".into());
@@ -192,10 +211,8 @@ pub fn responder_args_with(
     args.extend(options.forwarded_args().iter().cloned());
     args.push("--".into());
     args.push(dest.as_ssh_arg().into());
-    args.push(remote);
-    args.push("pair".into());
-    args.push("ssh-respond".into());
-    Ok(args)
+    args.extend(words.iter().cloned());
+    args
 }
 
 /// Longest `<remote_qsh>` accepted, in bytes.
@@ -781,6 +798,147 @@ impl SshRunner {
     }
 }
 
+/// One remote command to run to completion (ADR-0051 decision 3).
+pub struct RemoteRun<'a> {
+    /// The ssh destination.
+    pub dest: &'a Dest,
+    /// The remote command words, already quoted for the remote shell.
+    pub words: &'a [String],
+    /// `-o BatchMode=yes` (see [`batch_mode`]).
+    pub batch_mode: bool,
+    /// The root form's ssh options.
+    pub ssh: &'a SshOptions,
+    /// A local file streamed to the command's standard input; none means an
+    /// empty input.
+    pub stdin: Option<&'a std::path::Path>,
+    /// Whether ssh's stderr is shown on qsh's stderr (the installer's
+    /// progress) or kept to classify the exit.
+    pub forward_stderr: bool,
+    /// Longest the command may run.
+    pub timeout: Duration,
+    /// Fires when the user interrupts.
+    pub cancel: &'a CancelToken,
+}
+
+/// What a [`RemoteRun`] left behind.
+#[derive(Debug)]
+pub struct RemoteOutput {
+    /// How ssh ended.
+    pub exit: SshExit,
+    /// The command's standard output, at most [`REMOTE_OUTPUT_MAX`] bytes.
+    pub stdout: Vec<u8>,
+    /// The last bytes of ssh's stderr.
+    pub stderr_tail: Vec<u8>,
+}
+
+/// Most standard output [`SshRunner::run_remote`] keeps.
+pub const REMOTE_OUTPUT_MAX: usize = 64 * 1024;
+
+impl SshRunner {
+    /// Run one remote command over ssh and collect its exit and output.
+    ///
+    /// Same ssh shape as the responder call (`command_args_with`): no tty, no
+    /// agent or X11 forwarding, `BatchMode` in machine runs, the terminal
+    /// inherited in human runs so ssh asks its own questions. The call ends
+    /// `CANCELED` on the cancel token and `TIMEOUT` (`bootstrap_timeout`) at
+    /// `timeout`; the ssh child is ended and reaped either way.
+    pub async fn run_remote(&self, run: RemoteRun<'_>) -> Result<RemoteOutput, OpError> {
+        let args = command_args_with(run.dest, run.words, run.batch_mode, run.ssh);
+        let program = self.program_text();
+        let mut child = {
+            // Not while another spawn has handles inheritable (`winproc`).
+            #[cfg(windows)]
+            let _spawning = crate::winproc::spawn_guard();
+            let mut command = ssh_command(&self.program);
+            command
+                .args(args)
+                .stdin(if run.stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            detach_from_terminal(&mut command, run.batch_mode);
+            command.spawn().map_err(|err| spawn_error(&program, &err))?
+        };
+        #[cfg(windows)]
+        let _job = run.batch_mode.then(|| contain_in_job(&child)).flatten();
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let mut stdin = child.stdin.take();
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let pump = tokio::spawn(pump_stderr_with(
+            stderr,
+            Arc::clone(&stderr_tail),
+            run.forward_stderr,
+        ));
+        let feed = async {
+            let (Some(path), Some(mut stdin)) = (run.stdin, stdin.take()) else {
+                return;
+            };
+            if let Ok(mut file) = std::fs::File::open(path) {
+                use std::io::Read as _;
+                let mut buf = vec![0u8; 64 * 1024];
+                // A broken pipe means the remote command ended early; its
+                // exit status says why. The local read is a few KiB of page
+                // cache at a time.
+                while let Ok(n) = file.read(&mut buf) {
+                    if n == 0 || stdin.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = stdin.shutdown().await;
+        };
+        let read = async {
+            let mut out = Vec::new();
+            let _ = stdout
+                .take(REMOTE_OUTPUT_MAX as u64)
+                .read_to_end(&mut out)
+                .await;
+            out
+        };
+        let finished = tokio::select! {
+            biased;
+            () = run.cancel.canceled() => Err(canceled_error()),
+            outcome = tokio::time::timeout(run.timeout, async {
+                let (_, out) = tokio::join!(feed, read);
+                out
+            }) => outcome.map_err(|_| timeout_error("install")),
+        };
+        let stdout = match finished {
+            Ok(out) => out,
+            Err(err) => {
+                end_child(&mut child).await;
+                pump.abort();
+                return Err(err);
+            }
+        };
+        let exit = match tokio::time::timeout(EXIT_GRACE, child.wait()).await {
+            Ok(Ok(status)) => SshExit::from_status(status),
+            _ => {
+                end_child(&mut child).await;
+                SshExit::Signal(0)
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+        let tail = stderr_tail
+            .lock()
+            .map(|mut tail| std::mem::take(&mut *tail))
+            .unwrap_or_default();
+        if run.cancel.is_canceled() || exit == SshExit::Interrupted {
+            return Err(canceled_error());
+        }
+        Ok(RemoteOutput {
+            exit,
+            stdout,
+            stderr_tail: tail,
+        })
+    }
+}
+
 /// Put a `BatchMode` ssh child in a kill-on-close job, so the `ssh -W` hop it
 /// started (hidden console, nobody to answer a prompt) cannot outlive it.
 /// Best effort: without the job a stuck hop is only a leftover process.
@@ -972,7 +1130,14 @@ pub struct SshChild {
 
 /// Forward ssh's stderr to qsh's stderr unchanged, keeping the last
 /// [`STDERR_TAIL_MAX`] bytes in `tail`. Ends at end of stream.
-async fn pump_stderr(mut src: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
+async fn pump_stderr(src: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
+    pump_stderr_with(src, tail, true).await;
+}
+
+/// [`pump_stderr`] that only forwards when `forward` is set: a probe whose
+/// failure is an expected answer (`uname` on a Windows host) keeps its text
+/// to itself.
+async fn pump_stderr_with(mut src: ChildStderr, tail: Arc<Mutex<Vec<u8>>>, forward: bool) {
     use std::io::Write;
     let mut buf = [0u8; 1024];
     loop {
@@ -980,7 +1145,7 @@ async fn pump_stderr(mut src: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
-        {
+        if forward {
             let mut err = io::stderr().lock();
             let _ = err.write_all(&buf[..n]);
             let _ = err.flush();

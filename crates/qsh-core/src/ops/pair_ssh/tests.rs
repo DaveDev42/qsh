@@ -173,6 +173,7 @@ fn plan(role: TrustRole) -> Plan {
         batch: true,
         ssh: SshOptions::default(),
         replace_pin: false,
+        installed_qsh: None,
     }
 }
 
@@ -189,6 +190,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
             paths: None,
             scope: None,
             source: None,
+            remote_qsh: None,
         },
         created: true,
         remote,
@@ -198,6 +200,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
         verified: true,
         verify_error: None,
         replaced: None,
+        installed: None,
     }
 }
 
@@ -570,13 +573,8 @@ mod replace_pin {
     }
 
     fn env(prompter: Arc<dyn Prompter>) -> PairSshEnv {
-        PairSshEnv {
-            machine_mode: false,
-            stdin_is_terminal: true,
-            cancel: CancelToken::new(),
-            ssh: SshOptions::default(),
-            prompter,
-        }
+        PairSshEnv::new(false, true, CancelToken::new(), SshOptions::default())
+            .with_install(crate::ssh_bootstrap::install::InstallRemote::Ask, prompter)
     }
 
     /// A tree whose trust store holds `box` pinned to `FP_A`, with a grant.

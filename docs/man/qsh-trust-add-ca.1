@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-add\-ca \- Register a foreign CA root supplied as a certificate file (`docs/CLI.md` §6.11, ADR\-0013). Append\-only: an existing name under a different certificate is refused rather than overwritten
 .SH SYNOPSIS
-\fBqsh trust add\-ca\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-cert\-file\fR> <\fINAME\fR> 
+\fBqsh trust add\-ca\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-cert\-file\fR> <\fINAME\fR> 
 .SH DESCRIPTION
 Register a foreign CA root supplied as a certificate file (`docs/CLI.md` §6.11, ADR\-0013). Append\-only: an existing name under a different certificate is refused rather than overwritten
 .SH OPTIONS
@@ -26,6 +26,12 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-no\-ssh\fR
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
+.TP
+\fB\-\-install\-remote\fR
+When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
+.TP
+\fB\-\-no\-install\-remote\fR
+Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

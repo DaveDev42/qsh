@@ -107,6 +107,10 @@ fn main() {
     if let Some(text) = cfg.get("stderr") {
         eprintln!("{text}");
     }
+    let words = remote_words(&args);
+    if let Some(code) = remote_install_call(dir, &cfg, &words) {
+        std::process::exit(code);
+    }
     if let Some(path) = cfg.get("console_mode_file") {
         let _ = fs::write(path, console_input_mode());
     }
@@ -136,6 +140,91 @@ fn main() {
         let _ = fs::write(path, input);
     }
     std::process::exit(int(&cfg, "exit"));
+}
+
+/// The calls of the remote install (ADR-0051 decision 3): the OS probe and
+/// the install scripts. `Some(exit)` when this call was one of them and has
+/// been answered; `None` for the responder call and everything else, which
+/// also covers a `missing_until` remote that has no `qsh` yet.
+///
+/// - `uname_out` / `uname_exit`: the answer to `uname -sm`.
+/// - `win_out` (lines joined by `|`) / `win_exit`: the answer to `cmd /c ...`.
+/// - `install_plan`: comma-separated, one entry per `sh -c` or `powershell`
+///   call in order (the last repeats). A number is the exit status to report
+///   (`0` prints `install_stdout` and creates `install_touch`); `run` runs
+///   the script for real under `sh -c` with `HOME=install_home`. The stdin of
+///   every install call is saved to `install.stdin.<n>`.
+/// - `missing_until`: the responder call exits `missing_exit` (127) while
+///   this file does not exist.
+fn remote_install_call(dir: &Path, cfg: &HashMap<String, String>, words: &[String]) -> Option<i32> {
+    let first = words.first().map(String::as_str);
+    match first {
+        Some("uname") if cfg.contains_key("uname_out") || cfg.contains_key("uname_exit") => {
+            if let Some(text) = cfg.get("uname_out") {
+                println!("{text}");
+            }
+            return Some(int(cfg, "uname_exit"));
+        }
+        Some("cmd") if cfg.contains_key("win_out") || cfg.contains_key("win_exit") => {
+            if let Some(text) = cfg.get("win_out") {
+                println!("{}", text.replace('|', "\n"));
+            }
+            return Some(int(cfg, "win_exit"));
+        }
+        _ => {}
+    }
+    let is_install = (first == Some("sh") && words.get(1).map(String::as_str) == Some("-c"))
+        || first == Some("powershell");
+    if is_install && let Some(plan) = cfg.get("install_plan") {
+        let entries: Vec<&str> = plan.split(',').collect();
+        let count_file = dir.join("install.count");
+        let n: usize = fs::read_to_string(&count_file)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0);
+        let _ = fs::write(&count_file, (n + 1).to_string());
+        let mut input = Vec::new();
+        let _ = std::io::stdin().lock().read_to_end(&mut input);
+        let _ = fs::write(dir.join(format!("install.stdin.{n}")), &input);
+        let entry = entries[n.min(entries.len() - 1)];
+        if entry == "run" {
+            let mut command = shell_command(&words.join(" "));
+            if let Some(home) = cfg.get("install_home") {
+                command.env("HOME", home).env("USERPROFILE", home);
+            }
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("start the install script");
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&input);
+            }
+            return Some(child.wait().ok().and_then(|s| s.code()).unwrap_or(255));
+        }
+        let code: i32 = entry.parse().unwrap_or(1);
+        if code == 0 {
+            if let Some(text) = cfg.get("install_stdout") {
+                println!("{text}");
+            }
+            if let Some(path) = cfg.get("install_touch") {
+                if let Some(parent) = Path::new(path).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(path, b"installed");
+            }
+        }
+        return Some(code);
+    }
+    if let Some(path) = cfg.get("missing_until")
+        && !Path::new(path).exists()
+    {
+        return Some(match cfg.get("missing_exit") {
+            Some(_) => int(cfg, "missing_exit"),
+            None => 127,
+        });
+    }
+    None
 }
 
 /// The input mode of the console this process is attached to, as decimal
