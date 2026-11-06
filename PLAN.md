@@ -43,6 +43,11 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 
 에이전트는 `gh secret set`, `gh variable set`, `gh workflow run`, 태그 push, 저장소 설정 변경, 외부 저장소 쓰기를 하지 않는다. Dave-Windows에서 방화벽 규칙을 더하는 일도 사람 몫이다. Dave-Windows의 OpenSSH Server는 2026-10-21 이미 켜져 돌고 있다(`sshd` Running, Automatic).
 
+### 0.5 M21이 만든 사람 몫
+
+- [ ] **`--always-on` 레시피 실행 회차.** ADR-0051 결정 15의 4. 테스트는 세 OS에서 `service install --always-on`이 `docs/deploy/service.md` 레시피와 같은 바이트를 내는 것까지만 고정한다. linger·LaunchDaemon·Windows `Password` 작업을 실제로 켜고 로그아웃 뒤 serve가 남는지를 사람이 한 번 기록한다. 소유: 사람.
+- [ ] **Windows 원격 설치 대본 실장비 실행.** ADR-0051 결정 3. Windows 원격용 PowerShell 설치·스트림 대본은 문자열 테스트로만 고정돼 있다. qsh가 없는 Windows host(OpenSSH Server)에 `qsh --install-remote <host>`를 한 번 돌려 (가)·(나) 경로를 기록한다. 소유: 사람.
+
 ## 1. 유지보수에서 남은 확인
 
 자리표시자 계획 §1에서 열린 채로 넘어온 항목이다.
@@ -72,4 +77,4 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - [x] **pin 교체(결정 5).** 2026-11-06 착지(`docs/CLI.md` v0.71, protocol §17.7, threat model h7·B41·B21, load 11개 통과, Dave-Windows 3555개 통과). `--replace-pin`은 `qsh pair ssh`에만 있고, 루트 형식의 자동 부트스트랩은 TTY에서 같은 질문을 한다. 되살리기 중 fingerprint가 바뀌면 지금처럼 `SESSION_CONFLICT`이고 문구가 `qsh pair ssh <dest> --replace-pin`을 가리킨다. 원격 쪽 충돌에 TTY로 '예'라 하면 ssh를 한 번 더 연다(응답자는 한 번 답하고 끝난다). 양쪽 fingerprint 표시, `--replace-pin`, `commit.replace`, 감사 후 저장. threat model h7 갱신. 테스트: 원격 재설치 시나리오, 비TTY 거부, 감사 실패 시 파일 불변.
 - [x] **`service install` 기본 활성화와 `--always-on`(결정 11).** 2026-11-05 착지(`docs/CLI.md` v0.68, 질문 레지스트리 `prompts.rs`, threat model G9·G10·h49). Dave-Windows clippy 깨끗, 테스트 통과(부하 흔들림 둘은 단독 재실행 통과). 실제 sudo·loginctl·schtasks 실행은 사람 회차. 후속: Windows에서 데스크톱 세션 없는 ssh로 기본 `install`이 등록 뒤 `INTERNAL`로 끝나는 것을 경고로 바꿀지, `--to`·`--bind`·`--name` 중간 실패 시 앞 값이 남는 것, doctor·setup 문안의 `--activate`(해결). `--no-activate`, `--activate` 숨김 alias, `--to`/`--bind`/`--name`을 `config set` 경로로, 세 OS 레시피 실행과 `--move-key` 질문, `uninstall --always-on`. 새 fixture. 테스트: 기존 서비스 테스트의 기본값 갱신(옛 fixture는 그대로), 레시피 argv가 `docs/deploy/service.md` fence와 같은 바이트.
 - [x] **`trust allow`/`trust deny`(결정 12).** 2026-11-05 착지(`docs/CLI.md` v0.69, threat model B41, load 11개 통과, Dave-Windows grant 테스트 68개 통과). 후속: pin 교체 스텝이 grant를 지워야 한다(B41, 해결), `trust list` 사람 출력에 grant 없음(해결), `set-role` 축소 판정이 grant를 보지 않음. pin의 `grants`·`paths`·`scope`, role 뒤의 grant 단계, 감사 후 저장, 권한 축소 때 연결 닫기. 테스트: B7 대조 오라클에 grant 단계, 재시작 없이 다음 요청에 적용, CA peer와 재pin 이름의 grant 무효.
-- [ ] **문서와 마감.** README(빠른 시작을 `qsh host` 한 줄로), `docs/CLI.md` 버전 올림, man 재생성, threat model 새 행(ADR-0051 결과 절), ROADMAP M21 마감 노트.
+- [x] **문서와 마감.** 2026-11-06 착지(81ead5c, `docs/CLI.md` v0.73, threat model A19·A20·B42, DoD 감사 일곱 항목 모두 충족, 빈 곳 넷에 테스트 추가). README(빠른 시작을 `qsh host` 한 줄로), `docs/CLI.md` 버전 올림, man 재생성, threat model 새 행(ADR-0051 결과 절), ROADMAP M21 마감 노트.
