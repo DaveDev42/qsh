@@ -132,13 +132,38 @@ proptest! {
 
     #[test]
     fn canonical_hash_is_independent_of_how_the_state_was_reached(a in arb_state(), b in arb_state()) {
-        let via_blank = ScreenDiff::between(&ScreenState::blank(b.rows, b.cols).unwrap(), &b)
-            .unwrap()
-            .apply(&a)
-            .unwrap();
+        // Base 0 means the blank screen (protocol §18.4), so the full-screen
+        // diff is applied to a blank grid. It is not applied to `a`: a diff
+        // carries only the cells that differ from its base, so cells of a
+        // same-size `a` that `b` leaves blank would survive.
+        let blank = ScreenState::blank(b.rows, b.cols).unwrap();
+        let via_blank = ScreenDiff::between(&blank, &b).unwrap().apply(&blank).unwrap();
         let direct = ScreenDiff::between(&a, &b).unwrap().apply(&a).unwrap();
         prop_assert_eq!(via_blank.hash(), direct.hash());
+        prop_assert_eq!(via_blank, direct);
     }
+}
+
+/// Regression for CI run 42305024031: the property used to apply the
+/// full-screen diff to a same-size, non-blank `a`, which keeps `a`'s cells
+/// wherever `b` is blank. The diff is right: a full screen is defined against
+/// the blank screen (base 0), and only a differently sized base counts as blank.
+#[test]
+fn a_full_screen_diff_is_relative_to_blank_not_to_a_same_size_base() {
+    let mut a = ScreenState::blank(10, 3).unwrap();
+    a.grid[1].cells[0] = cell("e\u{301}", Color::Default, 0);
+    let mut b = ScreenState::blank(10, 3).unwrap();
+    b.grid[3].cells[2] = cell("x", Color::Default, 0);
+
+    let blank = ScreenState::blank(10, 3).unwrap();
+    let full = ScreenDiff::between(&blank, &b).unwrap();
+    assert_eq!(full.apply(&blank).unwrap(), b);
+    // Against a same-size non-blank base, a's cell that b leaves blank stays.
+    assert_ne!(full.apply(&a).unwrap().hash(), b.hash());
+    // The diff from a carries a to b, and a resized base counts as blank.
+    assert_eq!(ScreenDiff::between(&a, &b).unwrap().apply(&a).unwrap(), b);
+    let other = ScreenState::blank(11, 3).unwrap();
+    assert_eq!(full.apply(&other).unwrap(), b);
 }
 
 #[test]
