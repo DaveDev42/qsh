@@ -1030,8 +1030,9 @@ fn local_capabilities_advertise_exactly_what_is_implemented() {
     assert!(LOCAL_CAPABILITIES.contains(&CAP_DIAL_FILTER_V1));
     // The host emulator and its stream carrier exist (ADR-0052 decision 9).
     assert!(LOCAL_CAPABILITIES.contains(&CAP_SCREEN_V1));
-    // `datagram.v1` is not implemented in this build, so it is not claimed.
-    assert!(!LOCAL_CAPABILITIES.contains(&"datagram.v1"));
+    // The datagram carrier and the input copy exist (ADR-0052 decisions 6
+    // to 9).
+    assert!(LOCAL_CAPABILITIES.contains(&CAP_DATAGRAM_V1));
 }
 
 /// A `StreamHeader` encoded by a peer that predates field 5 (no bytes
@@ -1925,6 +1926,7 @@ fn windows_build_advertises_file_v1() {
             CAP_FILE_V1,
             CAP_SHELL_COMMAND_V1,
             CAP_SCREEN_V1,
+            CAP_DATAGRAM_V1,
         ]
     );
 }

@@ -47,7 +47,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
 - `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 다섯째 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
 - `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
-- `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`가 여기 딸린 항목이고 세부는 §18.8이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`은 아직 광고하지 않는다(datagram 운반체가 붙는 스텝에서 더한다).
+- `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`가 여기 딸린 항목이고 세부는 §18.8이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
 
 ## 5. Frame layer
 
@@ -580,7 +580,7 @@ corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 
 ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지한 제약이다. QSH의 transport는 QUIC 하나지만 wire와 프로토콜 코드는 QUIC 고유 개념에 기대지 않는다:
 
 - 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/it/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
-- **datagram은 선택 운반체다**(ADR-0052 결정 7. ADR-0043 결정 4의 "wire가 datagram에 기대지 않는다"를 이렇게 바꾼다). datagram으로 나르는 모든 메시지는 스트림에 같은 뜻의 짝이 있고, 스트림만으로 프로토콜이 완결된다. datagram 안의 메시지는 QUIC stream ID나 transport parameter가 아니라 자기 머리의 channel id로 식별한다. `qsh-transport`는 QUIC DATAGRAM을 켜고 파사드에 `Connection::max_datagram_size() -> Option<usize>`, `send_datagram(Bytes) -> Result<(), DatagramError>`, `read_datagram()`을 둔다. `DatagramError`는 상대 미지원, 로컬 비활성, 너무 큼, 연결 끊김 넷이고 앞의 셋은 호출자가 스트림 짝으로 되돌아가라는 뜻이다. 송신은 기다리지 않고, 송신 버퍼가 차면 가장 오래된 datagram부터 버린다. 버퍼는 `DATAGRAM_RECEIVE_BUFFER_SIZE`·`DATAGRAM_SEND_BUFFER_SIZE`(각 64 KiB)로 고정하고 단위 테스트가 값을 묶는다. 이 상수는 로컬 메모리 한도라 peer가 관측하는 wire 값은 아니지만, 수신 버퍼 크기가 곧 우리가 광고하는 `max_datagram_frame_size`(상대가 보낼 수 있는 datagram의 상한)이다. 이 단계에서는 어떤 wire 메시지도 datagram을 쓰지 않는다. 파사드만 있다.
+- **datagram은 선택 운반체다**(ADR-0052 결정 7. ADR-0043 결정 4의 "wire가 datagram에 기대지 않는다"를 이렇게 바꾼다). datagram으로 나르는 모든 메시지는 스트림에 같은 뜻의 짝이 있고, 스트림만으로 프로토콜이 완결된다. datagram 안의 메시지는 QUIC stream ID나 transport parameter가 아니라 자기 머리의 channel id로 식별한다. `qsh-transport`는 QUIC DATAGRAM을 켜고 파사드에 `Connection::max_datagram_size() -> Option<usize>`, `send_datagram(Bytes) -> Result<(), DatagramError>`, `read_datagram()`을 둔다. `DatagramError`는 상대 미지원, 로컬 비활성, 너무 큼, 연결 끊김 넷이고 앞의 셋은 호출자가 스트림 짝으로 되돌아가라는 뜻이다. 송신은 기다리지 않고, 송신 버퍼가 차면 가장 오래된 datagram부터 버린다. 버퍼는 `DATAGRAM_RECEIVE_BUFFER_SIZE`·`DATAGRAM_SEND_BUFFER_SIZE`(각 64 KiB)로 고정하고 단위 테스트가 값을 묶는다. 이 상수는 로컬 메모리 한도라 peer가 관측하는 wire 값은 아니지만, 수신 버퍼 크기가 곧 우리가 광고하는 `max_datagram_frame_size`(상대가 보낼 수 있는 datagram의 상한)이다. 화면 갱신·`ScreenAck`·`Input` 사본이 `datagram.v1`로 이것을 쓴다(§18.9). 그 밖의 메시지는 datagram을 쓰지 않는다.
 - 그 밖의 QUIC 고유 개념(stream ID, transport parameter)에도 wire는 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
 
@@ -842,7 +842,7 @@ client는 pin 주소를 ssh 호스트 이름과 `result.serve_bind`의 포트로
 
 ## 18. 화면 상태 동기화 (ADR-0052 결정 1~11)
 
-**상태: 스트림 운반체까지 협상된다.** capability `screen.v1`(§4)을 광고하고, `SESSION_DATA` 스트림에서 화면 갱신을 나른다(§18.8). `datagram.v1`과 `DatagramFrame`(§18.6)은 아직 광고하지도 보내지도 않는다. 부호화와 검증 규칙은 `crates/qsh-proto/src/screen/`가 코드로 고정하고 fuzz 표면이다(`decode_screen_diff`, `decode_datagram_frame`). `ScreenUpdate`의 정규 바이트열(§18.4)은 protobuf 필드로 풀지 않고 `bytes data`에 조각(`part`/`parts`)으로 싣는다. 그래서 diff·hash 부호화를 바꾸면 `state_hash`처럼 모든 client의 대조가 어긋나므로, 바꾸려면 새 capability가 필요하다.
+**상태: 스트림 운반체와 datagram 운반체가 협상된다.** capability `screen.v1`(§4)을 광고하고, `SESSION_DATA` 스트림에서 화면 갱신을 나른다(§18.8). `datagram.v1`(§4)을 광고하고, 조건이 맞으면 같은 갱신과 `ScreenAck`를 `DatagramFrame`(§18.6)으로도 나르며 키 입력의 사본을 보낸다(§18.9). 부호화와 검증 규칙은 `crates/qsh-proto/src/screen/`가 코드로 고정하고 fuzz 표면이다(`decode_screen_diff`, `decode_datagram_frame`). `ScreenUpdate`의 정규 바이트열(§18.4)은 protobuf 필드로 풀지 않고 `bytes data`에 조각(`part`/`parts`)으로 싣는다. 그래서 diff·hash 부호화를 바꾸면 `state_hash`처럼 모든 client의 대조가 어긋나므로, 바꾸려면 새 capability가 필요하다.
 
 ### 18.1 화면 상태
 
@@ -897,7 +897,7 @@ host는 화면이나 효과가 바뀔 때만 다음 `state_num`(1부터)을 낸�
 
 ### 18.6 `DatagramFrame` 머리
 
-datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). 조각 나눔(`part`/`parts`)은 datagram 운반체 스텝에서 payload 안에 정한다. 스트림 운반체의 조각은 §18.8의 `ScreenUpdate` 메시지가 가진다.
+datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). payload는 종류에 따라 §18.8의 protobuf 메시지 하나다(10은 `ScreenUpdate` 조각, 11은 `ScreenAck`, 12는 `Input`). 조각 나눔(`part`/`parts`)은 `ScreenUpdate` 메시지가 가지고, datagram의 조각 규칙은 §18.9에 있다.
 
 ### 18.7 fuzz와 시험
 
@@ -911,6 +911,24 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 **host의 순서.** attach마다 첫 갱신은 base 0의 현재 화면이다(`SessionAttached.replay_from == output_end`, 재생 없음). 이후 ring이 움직이면 마지막으로 **보낸** 상태를 base로 최신 상태까지의 갱신을 만든다. 스트림이 순서와 도달을 보장하므로 ack를 기다리지 않는다. 쓰이지 않은 화면 조각이 128 KiB(`SEND_DEPTH_CAP_BYTES`)를 넘는 동안은 새 갱신을 만들지 않고, 줄면 그때의 최신 상태까지 한 번에 보내므로 중간 화면은 건너뛴다. `ScreenAck{0}`를 받으면 base를 0으로 되돌려 전체 화면을 보낸다. `Resize`는 출력이 없어도 갱신을 만든다. 세션의 `Exit`·`Closed` 같은 제어 항목은 마지막 갱신을 먼저 내보낸 뒤 바이트 경로와 같은 순서로 나간다. 에뮬레이터는 ring에 쓰기 전에 먹이므로(`pty_reader`), ring이 움직여 깬 쪽은 항상 새 바이트가 반영된 화면을 본다.
 
-**client의 순서.** `qsh_core::client::screen::ClientScreen`이 조각을 모아 갱신을 적용하고 `state_hash`를 대조한다. 대조가 틀렸거나, base가 가진 상태가 아니거나, diff가 적용되지 않으면 가진 화면을 버리고 `ScreenAck{0}`를 보낸다. 전체 화면이 올 때까지 base가 0이 아닌 갱신은 무시한다. 적용에 성공하면 `ScreenAck{new_num}`를 보낸다. `qsh` CLI는 아직 `screen`을 요청하지 않는다(렌더러는 뒤 스텝).
+**client의 순서.** `qsh_core::client::screen::ClientScreen`이 조각을 모아 갱신을 적용하고 `state_hash`를 대조한다. 대조가 틀렸거나, base가 가진 상태가 아니거나, diff가 적용되지 않으면 가진 화면을 버리고 `ScreenAck{0}`를 보낸다. 전체 화면이 올 때까지 base가 0이 아닌 갱신은 무시한다. 적용에 성공하면 `ScreenAck{new_num}`를 보낸다. client는 최근 적용한 상태 8개(`RETAINED_STATES`)를 가지고 있어서, base가 그중 하나인 갱신은 어느 운반체로 왔든 적용한다. 이미 가진 것보다 새롭지 않은 갱신(다른 운반체의 더 새 갱신과 엇갈렸다)은 버리고 가진 상태 번호를 다시 ack한다. 전체 화면(base 0)은 가진 상태와 같은 번호여도 적용한다. 요청한 쪽이 받아야 하는 것이기 때문이다. `qsh` CLI는 아직 `screen`을 요청하지 않는다(렌더러는 뒤 스텝).
 
 **재부착.** 재부착과 resume의 절차(§10)는 그대로다. 같은 세션에 바이트 경로로 다시 붙으면 `last_output_seq`부터 재생한다. 화면 경로의 첫 갱신은 한 화면이라서 떼어 둔 동안 10 MB가 쌓였어도 크기가 화면 크기에 비례한다(`reattach_sends_one_screen_not_the_backlog`). 지나간 출력 안의 터미널 질의는 로컬 터미널에 닿지 않고 host 에뮬레이터가 답한다(ADR-0052 결정 3).
+
+### 18.9 datagram 운반체와 입력 사본 (ADR-0052 결정 6·7·8·9·12 (c))
+
+**조건.** 아래가 모두 맞을 때만 쓴다. (1) 협상된 교집합에 `datagram.v1`이 있다. (2) 화면 동기화 attach이고 `screen_channel`이 16바이트다. (3) forward 연결이다. `qsh listen` 데몬을 거치는 reverse 등록은 client가 로컬 conduit 뒤에 있어 datagram을 읽지 못하므로 host가 쓰지 않는다. (4) transport의 `max_datagram_size()`가 `Some`이다. 모든 datagram 메시지는 스트림에 같은 뜻의 짝이 있으므로, 조건이 하나라도 깨지거나 송신이 `UnsupportedByPeer`·`Disabled`·`TooLarge`로 실패하면 그 메시지는 스트림으로 간다.
+
+**channel id.** `screen_channel`이 곧 datagram의 channel id다. ACL을 통과한 attach에만 host가 난수로 발급하고 그 연결에서만 유효하다. 연결마다 datagram reader가 하나(`qsh_core::datagram::DatagramHub`)이고, host는 data 스트림을 시작할 때, client는 스트림을 열 때 자기 attach의 channel을 등록한다. 등록되지 않은 channel의 datagram은 버리고 `unknown_channel`로 센다. 디코드되지 않으면 `malformed`, channel 큐(256개)가 차면 `overflow`로 센다. datagram은 어떤 자원도 만들지 못한다.
+
+**payload와 조각.** `ScreenUpdate` datagram의 payload는 §18.8과 같은 protobuf `ScreenUpdate{new_num, part, parts, data}`다. 조각의 `data` 예산은 `max_datagram_size() - 17(머리) - 24(protobuf 머리 여유)`이다. 다른 곳에서 잰 QUIC 프레임 머리(약 38바이트)는 `max_datagram_size()`가 이미 뺀 값이므로 더 빼지 않는다. 한 갱신은 64조각까지이고(`MAX_DATAGRAM_PARTS`), 그보다 크면 스트림으로 보낸다. 받는 쪽(`DatagramReassembler`)은 조각이 어떤 순서로 와도, 두 번 와도 받고 한 상태의 조각이 모두 모여야 적용한다. 더 새 상태의 조각이 오면 만들던 것을 버리고, 이미 끝낸 것보다 오래된 상태의 조각은 버린다. 버퍼는 1 MiB 이하다. 이 규칙의 오류는 연결을 끊지 않고 센다(`datagram_dropped`).
+
+**host.** attach마다 첫 갱신(전체 화면)은 스트림으로 간다. 그 화면을 적용한 client가 같은 channel로 datagram을 보내면(첫 `ScreenAck`가 그렇다) host는 그 client가 datagram을 읽는다고 보고 운반체를 `adapt`에 맡긴다. 그 전에는 스트림이므로 datagram을 모르는 client도 같은 시험을 통과한다. datagram 갱신의 base는 client가 마지막으로 ack한 상태이고(ack가 없으면 0), 각 갱신은 base만 있으면 독립으로 적용된다. 갱신은 `FIXED_FRAME_INTERVAL`(20 ms)마다 최대 하나이고, ack가 `2 × max(RTT, 50 ms) + 20 ms` 안에 오지 않으면 최신 상태를 다시 보낸다. 잃은 갱신을 다시 보내지는 않지만 출력이 멈춘 뒤에도 client가 따라오게 하기 위해서다. 스트림 갱신의 base는 마지막 ack와 스트림으로 마지막에 보낸 상태 중 큰 쪽이다. `Exit`·`Closed` 앞의 마지막 갱신은 언제나 스트림이다.
+
+**운반체 선택.** `qsh_core::adapt::CarrierRunner`가 연결마다 `ConnStats`를 1초에 한 번(그리고 datagram 가용 여부가 바뀔 때, 미ack 문턱을 넘을 때) `adapt::decide`에 넣는다. 갱신마다 `Knobs::carrier_for_update(parts)`가 고른다. 조각이 k개이고 손실률이 p일 때 `(1 - p)^k < 0.5`이면 그 갱신만 스트림이다. 가장 오래된 미ack datagram 갱신의 나이가 `4 × max(srtt, 50 ms)`를 넘는데 연결이 살아 있으면(인증된 frame이 최근 20초 안에 왔다) `Stream(datagram_unacked)`가 되고, `DATAGRAM_RETEST_PERIOD`(30초)마다 datagram을 다시 시험한다. 50 ms 하한은 loopback의 0.1 ms RTT가 정상 경로를 스트림으로 보내는 것을 막는다. 이 단계의 runner는 attach마다 host 쪽에서 돈다. 손잡이 (c) 밖의 값은 계산만 하고 쓰지 않는다.
+
+**ack.** client는 `ScreenAck`를 두 길로 보낸다. datagram이 가능하면 datagram을 먼저 보내고 스트림에도 보낸다. host는 어느 쪽이든 `fetch_max`로 받고, 0(전체 화면 요청)은 ack 상태를 0으로 되돌린다.
+
+**입력 사본.** 키 입력은 세션 data 스트림의 `Input{input_seq, data}`가 정본이고, datagram 운반체를 쓸 수 있으면 같은 `Input`을 datagram(종류 12)으로 한 번 더 보낸다. 사본은 스트림 프레임보다 먼저 나가며 한 datagram에 들어가는 조각만 보낸다. host는 사본의 시작 offset(`input_seq - len(data)`)이 그 attach 축의 적용 offset과 **정확히 같을 때만** 적용하고 아니면 버린다. 더 앞에서 시작하는 사본은 이미 적용한 바이트의 중복이고, 더 뒤에서 시작하면 스트림 사본이 아직 오지 않은 바이트를 건너뛰게 된다. 스트림 프레임과 사본은 같은 잠금 아래에서 offset을 읽고 쓰므로 섞이지 않고, 늦게 온 스트림 프레임은 기존 중복 제거(§10-5)가 버린다. 그래서 무손실·무중복(PRD §8)은 스트림이 지키고 사본은 손실 아래의 입력 지연만 줄인다. 사본을 적용하면 `InputAck`를 스트림으로 보낸다.
+
+**시험.** `crates/qsh-testkit/tests/it/datagram_carrier.rs`가 고정한다. 손실·순서 뒤바뀜·중복 아래의 입력 무손실·무중복(`input_copies_are_lossless_and_duplicate_free_under_loss_and_reordering`), 틀린 offset의 사본 폐기(`a_datagram_input_copy_at_the_wrong_offset_is_dropped`), 모르는 channel(`a_datagram_for_an_unknown_channel_is_dropped_and_counted`), 경로가 datagram만 버릴 때의 스트림 전환(`a_path_that_eats_datagrams_falls_back_to_the_stream_and_converges`), 옛 peer 조합(`a_peer_without_datagram_v1_gets_the_stream_carrier`, `a_host_without_datagram_v1_gets_the_stream_carrier_from_a_new_client`), 그리고 `QSH_ACCEPTANCE_SLOW`에서 도는 `screen_sync_staleness_under_loss`(단방향 75 ms 지연과 5% 손실에서 datagram의 staleness p95 ≤ 50 ms, 스트림 운반체는 중간 상태를 건너뛰고 출력이 멈춘 뒤 2×RTO 안에 맞는다)다.

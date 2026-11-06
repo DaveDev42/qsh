@@ -81,8 +81,16 @@ pub const CAP_SHELL_COMMAND_V1: &str = "shell-command.v1";
 /// `Output`, and takes `ScreenAck`. A sender sets `SessionOpen.screen` /
 /// `SessionAttach.screen` and emits `ScreenAck` only when this is in the
 /// negotiated set; a host never sends `ScreenUpdate` to a peer that did not
-/// advertise it. `datagram.v1` is not advertised yet.
+/// advertise it.
 pub const CAP_SCREEN_V1: &str = "screen.v1";
+
+/// Capability string for the QUIC DATAGRAM carrier (ADR-0052 decisions 6 to
+/// 9, `docs/design/protocol.md` §18.9): this peer handles `DatagramFrame`s
+/// of `ScreenUpdate`, `ScreenAck` and `Input` on the channel id of a screen
+/// sync attach. Datagrams are used only when both sides advertise it and the
+/// transport reports `max_datagram_size()`; every datagram message has a
+/// stream twin.
+pub const CAP_DATAGRAM_V1: &str = "datagram.v1";
 
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
@@ -96,7 +104,8 @@ pub const CAP_SCREEN_V1: &str = "screen.v1";
 /// joined with the `FILE_DATA` data plane (ADR-0029 decisions 1 and 9): the
 /// same commit that serves the stream advertises it. [`CAP_SHELL_COMMAND_V1`]
 /// joined with the host's shell resolution (ADR-0051 decision 6). [`CAP_SCREEN_V1`]
-/// joined with the host emulator's stream carrier (ADR-0052 decision 9). The set is
+/// joined with the host emulator's stream carrier (ADR-0052 decision 9),
+/// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy. The set is
 /// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
@@ -106,6 +115,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_FILE_V1,
     CAP_SHELL_COMMAND_V1,
     CAP_SCREEN_V1,
+    CAP_DATAGRAM_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the
@@ -323,6 +333,23 @@ impl ScreenUpdate {
     /// The numbering is checked by [`crate::screen::Reassembler::push`].
     pub fn validate(&self) -> Result<(), ChunkTooLarge> {
         check_chunk_max(self.data.len(), crate::screen::PART_MAX)
+    }
+
+    /// The parts of one encoded [`crate::screen::ScreenUpdate`] cut into
+    /// slices of at most `max_part` bytes (a datagram carrier part).
+    pub fn parts_sized(new_num: u64, encoded: &[u8], max_part: usize) -> Vec<Self> {
+        let slices = crate::screen::split_parts_sized(encoded, max_part);
+        let parts = slices.len() as u32;
+        slices
+            .into_iter()
+            .enumerate()
+            .map(|(i, data)| Self {
+                new_num,
+                part: i as u32,
+                parts,
+                data: data.to_vec(),
+            })
+            .collect()
     }
 
     /// The parts of one encoded [`crate::screen::ScreenUpdate`], in order.

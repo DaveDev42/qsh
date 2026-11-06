@@ -8,7 +8,8 @@
       "dial-filter.v1",
       "file.v1",
       "shell-command.v1",
-      "screen.v1"
+      "screen.v1",
+      "datagram.v1"
     ]
   },
   "ok": true,
