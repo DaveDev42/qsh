@@ -125,3 +125,25 @@ fn the_accounting_identity_catches_a_fault_that_only_bumps_its_counter() {
     };
     assert!(staged.is_balanced(), "{staged:?}");
 }
+
+#[test]
+fn rate_converts_between_bytes_and_time() {
+    // 20 Mbit/s with a 600 ms queue holds 1.5 MB; 1250 bytes take 0.5 ms.
+    let r = Rate::with_queue_delay(20_000_000, Duration::from_millis(600));
+    assert_eq!(r.queue_bytes, 1_500_000);
+    assert_eq!(r.service(1250), Duration::from_micros(500));
+    assert_eq!(r.drained(Duration::from_millis(1)), 2_500);
+}
+
+#[test]
+fn the_accounting_identity_counts_queue_drops() {
+    let s = ChaosStats {
+        from_client: 10,
+        to_server: 6,
+        queue_dropped: 4,
+        ..Default::default()
+    };
+    assert!(s.is_balanced(), "{s:?}");
+    let liar = ChaosStats { to_server: 10, ..s };
+    assert!(!liar.is_balanced(), "{liar:?}");
+}

@@ -637,6 +637,7 @@ async fn run_upload(
     kill: &DataKillSwitch,
     source: UploadSource,
     progress: &(dyn Fn(u64) + Send + Sync),
+    watch: &Option<StallWatch>,
 ) -> Result<Uploaded, XferFailure> {
     let size = source.size;
     let (tx, mut rx) = mpsc::channel(DISK_QUEUE_CHUNKS);
@@ -655,6 +656,11 @@ async fn run_upload(
             })?;
             let n = chunk.len() as u64;
             total += n;
+            // Bulk yields to the connection's interactive traffic
+            // (ADR-0052 decision 12 (a)).
+            if let Some(watch) = watch {
+                watch.track().pace(chunk.len()).await;
+            }
             send.send(&FileFrame::data(chunk))
                 .await
                 .map_err(XferFailure::Link)?;
@@ -726,10 +732,10 @@ pub(crate) async fn upload(
         mut send,
         mut recv,
         kill,
-        watch: _,
+        watch,
     } = conduit;
     let outcome = tokio::select! {
-        result = run_upload(&mut send, &mut recv, &kill, source, progress) => Some(result),
+        result = run_upload(&mut send, &mut recv, &kill, source, progress, &watch) => Some(result),
         () = canceled(&mut cancel) => None,
     };
     match outcome {

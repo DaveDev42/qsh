@@ -105,11 +105,13 @@ async fn serve(p: &Profile, bind: std::net::IpAddr, ready: &str, cert_path: &str
     };
     match w.kind {
         Kind::Screen => scenario::screen_server(&conn, p).await?,
-        Kind::Echo => scenario::echo_server(&conn, p).await?,
+        Kind::Echo => scenario::echo_server(&conn, p, None).await?,
         Kind::BulkEcho => {
+            let yielder = (w.isolation == Isolation::Yield)
+                .then(|| qsh_netbench::yielder::Yielder::new(bulk_conn.clone()));
             let (a, b) = tokio::join!(
-                scenario::echo_server(&conn, p),
-                scenario::bulk_server(&bulk_conn, p)
+                scenario::echo_server(&conn, p, yielder.as_ref()),
+                scenario::bulk_server(&bulk_conn, p, yielder.as_ref())
             );
             a?;
             b?;

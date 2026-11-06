@@ -11,6 +11,7 @@
 //! choice is a constant below marked "Open number", with the reason beside it.
 
 mod budget;
+mod governor;
 mod rtt;
 mod runner;
 #[cfg(test)]
@@ -21,6 +22,10 @@ use std::time::Duration;
 use qsh_transport::ConnStats;
 
 pub use budget::BulkBudget;
+pub use governor::{
+    BULK_WINDOW, BulkGovernor, EVALUATE_PERIOD, GovernorCore, INTERACTIVE_WINDOW, MAX_PARK,
+    PACE_GRANULE, Pace, process_adaptive, set_process_adaptive,
+};
 pub use rtt::RttVar;
 pub use runner::{ALIVE_WINDOW, CarrierRunner, LOSS_WINDOW, RTT_FLOOR, TICK, Tick};
 

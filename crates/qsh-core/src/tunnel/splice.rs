@@ -179,7 +179,15 @@ where
     match probe {
         Probe::Off => to.write_all(bytes).await,
         Probe::Sent(track) => {
-            to.write_all(bytes).await?;
+            // Bulk yields to the connection's interactive traffic
+            // (ADR-0052 decision 12 (a)): a no-op unless a budget is on.
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                let take = track.granule(rest.len());
+                track.pace(take).await;
+                to.write_all(&rest[..take]).await?;
+                rest = &rest[take..];
+            }
             track.count_sent(bytes.len());
             Ok(())
         }

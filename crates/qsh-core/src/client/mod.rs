@@ -864,6 +864,10 @@ impl Session {
                 // session's dedup cursor (protocol.md §10-5).
                 input_seq: attached.input_seq,
                 datagram: dg_tx,
+                governor: self
+                    .conn
+                    .as_ref()
+                    .map(crate::adapt::BulkGovernor::for_connection),
             },
             reader: AttachReader {
                 recv: Some(recv),
@@ -1218,6 +1222,10 @@ pub struct AttachWriter {
     send: DataSend,
     input_seq: u64,
     datagram: Option<ClientDatagram>,
+    /// Reports keys to the connection's bulk governor (ADR-0052 decision 12
+    /// (a)), so this side's own bulk senders yield while the user types.
+    /// `None` on a route with no QUIC connection of ours (reverse).
+    governor: Option<std::sync::Arc<crate::adapt::BulkGovernor>>,
 }
 
 /// The sending side of the datagram carrier on the client.
@@ -1252,6 +1260,9 @@ impl ClientDatagram {
 impl AttachWriter {
     /// See [`Attached::send_input`].
     pub async fn send_input(&mut self, data: &[u8]) -> Result<u64, ClientError> {
+        if let Some(governor) = &self.governor {
+            governor.note_interactive();
+        }
         for chunk in data.chunks(wire::SESSION_CHUNK_MAX) {
             self.input_seq += chunk.len() as u64;
             // The datagram copy (ADR-0052 decision 8) goes first: it is the

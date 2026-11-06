@@ -247,6 +247,15 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^cp_many_small_files::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
+      # ADR-0052 decision 18 item 6: bulk yields to the PTY on a shared
+      # bottleneck. The chaos proxy makes the path a 20 Mbit/s link at RTT
+      # 50 ms with a deep (600 ms) or shallow (20 ms) drop-tail queue; a
+      # saturating tunnel must leave the echo p95 at or under min_rtt + 50 ms
+      # and, with nobody typing, still carry 80% of the link.
+      # `adaptive = "off"` must leave the bulk alone.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^bulk_yield::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
 
   arch:
     name: arch-lint

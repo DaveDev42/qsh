@@ -7,6 +7,7 @@ mod acl_uniformity;
 mod admission;
 mod admission_retry_sever;
 mod attach_loopback;
+mod bulk_yield;
 mod chaos_proxy;
 mod chaos_relay;
 mod console_probe;

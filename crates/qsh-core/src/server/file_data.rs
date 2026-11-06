@@ -173,6 +173,7 @@ async fn serve_read(
             let n = chunk.len() as u64;
             hasher.update(&chunk);
             total += n;
+            watch.track().pace(chunk.len()).await;
             send.send(&FileFrame::data(chunk))
                 .await
                 .map_err(|_| ReadStop::Stream)?;

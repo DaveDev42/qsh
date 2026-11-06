@@ -575,14 +575,17 @@ fn budget_never_goes_below_the_floor_or_above_the_estimate() {
 fn budget_grants_tokens_at_the_rate_and_caps_the_burst() {
     let mut b = budget_at_2_5_mb_per_s();
     b.steer(ms(50), ms(100), ms(50)); // 1_250_000 B/s
-    // The bucket started full at the old rate's burst (125 000 B) and is
-    // capped at the new rate's burst (62 500 B).
-    assert_eq!(b.grant(ms(50), 1_000_000), 62_500);
+    // The burst is 10 ms of the rate (12 500 B) but never under the 16 KiB
+    // minimum, so it is the minimum here; the bucket started full.
+    assert_eq!(b.grant(ms(50), 1_000_000), 16_384);
     assert_eq!(b.grant(ms(50), 1_000), 0);
     // 10 ms refills 12 500 B.
     assert_eq!(b.grant(ms(60), 1_000_000), 12_500);
     // An idle second refills only up to one burst.
-    assert_eq!(b.grant(ms(1_060), 1_000_000), 62_500);
+    assert_eq!(b.grant(ms(1_060), 1_000_000), 16_384);
+    // A rate whose 10 ms is over the minimum bursts 10 ms.
+    let mut fast = budget_at_2_5_mb_per_s();
+    assert_eq!(fast.grant(ms(0), 1_000_000), 25_000);
 }
 
 #[test]
@@ -619,4 +622,159 @@ fn budget_follows_a_shrinking_bandwidth_estimate() {
     let mut b = budget_at_2_5_mb_per_s();
     b.set_mode(ms(10), YIELD, Some(1_000_000));
     assert_eq!(b.rate(), Some(1_000_000));
+}
+
+#[test]
+fn a_loss_with_a_standing_queue_halves_like_a_queue_over_target() {
+    let mut b = budget_at_2_5_mb_per_s();
+    // 20 ms is under the 25 ms target but over half of it: loss counts.
+    b.note_loss();
+    b.steer(ms(50), ms(20), ms(50));
+    assert_eq!(b.rate(), Some(1_250_000));
+    // The loss was consumed: the next step at the same queue grows.
+    b.steer(ms(100), ms(20), ms(50));
+    assert_eq!(b.rate(), Some(1_300_000));
+}
+
+#[test]
+fn a_loss_on_an_empty_queue_is_the_paths_own_and_changes_nothing() {
+    let mut b = budget_at_2_5_mb_per_s();
+    b.note_loss();
+    b.steer(ms(50), ms(5), ms(50));
+    // Still at the ceiling: grew (and was clamped), did not halve.
+    assert_eq!(b.rate(), Some(2_500_000));
+}
+
+fn lan_stats(rtt_ms: u64, min_ms: u64) -> qsh_transport::ConnStats {
+    qsh_transport::ConnStats {
+        rtt: ms(rtt_ms),
+        min_rtt: ms(min_ms),
+        cwnd: 100_000,
+        lost_packets: Some(0),
+        ..qsh_transport::ConnStats::default()
+    }
+}
+
+/// A core with bulk that has been moving at `rate` bytes per second for
+/// `secs` seconds, one 250 ms bucket at a time.
+fn core_with_bulk(user: User, rate: u64, secs: u64) -> GovernorCore {
+    let mut core = GovernorCore::new(Duration::ZERO, user);
+    for i in 0..secs * 4 {
+        let mut want = rate / 4;
+        core.pace(ms(i * 250), &mut want);
+    }
+    core
+}
+
+#[test]
+fn the_governor_yields_only_while_keys_and_bulk_are_both_recent() {
+    let mut core = core_with_bulk(User::default(), 2_500_000, 3);
+    // Bulk alone: nothing to yield to.
+    core.evaluate(ms(3_000), &lan_stats(60, 50));
+    assert_eq!(core.rate(), None);
+    // A key: yield, starting at the delivery-rate ceiling (125% of the
+    // 2.5 MB/s the senders achieved).
+    core.note_interactive(ms(3_010));
+    core.evaluate(ms(3_020), &lan_stats(60, 50));
+    assert_eq!(core.rate(), Some(3_125_000));
+    // Over target: halve once per srtt.
+    core.evaluate(ms(3_150), &lan_stats(100, 50));
+    assert_eq!(core.rate(), Some(1_562_500));
+    // Two seconds after the last key the knob goes back to Off, bulk or not.
+    let mut more = 1_000;
+    core.pace(ms(5_050), &mut more);
+    core.evaluate(ms(5_100), &lan_stats(100, 50));
+    assert_eq!(core.rate(), None);
+}
+
+#[test]
+fn adaptive_off_never_yields() {
+    let user = User {
+        adaptive: false,
+        ..User::default()
+    };
+    let mut core = core_with_bulk(user, 2_500_000, 3);
+    core.note_interactive(ms(3_010));
+    core.evaluate(ms(3_020), &lan_stats(600, 50));
+    assert_eq!(core.rate(), None);
+    let mut want = 10_000_000;
+    assert_eq!(core.pace(ms(3_030), &mut want), Pace::Go);
+    assert_eq!(want, 0);
+}
+
+#[test]
+fn a_sender_waits_for_tokens_and_the_wait_is_bounded() {
+    let mut core = core_with_bulk(User::default(), 100_000, 3);
+    core.note_interactive(ms(3_010));
+    core.evaluate(ms(3_020), &lan_stats(60, 50));
+    let mut want = 1_000_000;
+    // The first burst is paid for at once, the rest has to wait.
+    let Pace::Wait(wait) = core.pace(ms(3_020), &mut want) else {
+        panic!("a megabyte cannot be paid for at once");
+    };
+    assert!(want < 1_000_000);
+    assert!(wait >= ms(1) && wait <= MAX_PARK, "{wait:?}");
+    // And a sender whose sleeps overshoot to 15.6 ms (Windows) is not capped
+    // at one burst per tick. Kept in this test, not a test of its own: an
+    // extra test in this binary shifts the nextest schedule enough to expose
+    // a race in `pty::conpty::tests::signals::quit_is_ctrl_break_not_ctrl_c`
+    // on Windows (it reads the report file before the probe has written it).
+    assert_an_oversleeping_sender_gets_the_full_rate();
+}
+
+#[test]
+fn the_ceiling_is_the_delivery_rate_not_a_collapsed_window() {
+    let mut core = core_with_bulk(User::default(), 2_500_000, 3);
+    core.note_interactive(ms(3_010));
+    // BBR in loss recovery reports a window of a few packets: cwnd / srtt
+    // would say 290 KB/s. The rate must not follow it down.
+    let mut stats = lan_stats(60, 50);
+    stats.cwnd = 17_500;
+    core.evaluate(ms(3_020), &stats);
+    assert_eq!(core.rate(), Some(3_125_000));
+    core.note_interactive(ms(3_100));
+    core.evaluate(ms(3_200), &stats);
+    assert!(core.rate().unwrap() >= 3_000_000, "{:?}", core.rate());
+}
+
+#[test]
+fn a_loss_burst_during_yield_halves_through_the_governor() {
+    let mut core = core_with_bulk(User::default(), 2_500_000, 3);
+    core.note_interactive(ms(3_010));
+    core.evaluate(ms(3_020), &lan_stats(65, 50));
+    assert_eq!(core.rate(), Some(3_125_000));
+    // 15 ms of queue (over half the target) and new losses.
+    let mut stats = lan_stats(65, 50);
+    stats.lost_packets = Some(40);
+    core.note_interactive(ms(3_200));
+    core.evaluate(ms(3_200), &stats);
+    assert_eq!(core.rate(), Some(1_562_500));
+}
+
+/// Windows wakes a 1 ms sleep every 15.6 ms; see `a_sender_waits_for_tokens_and_the_wait_is_bounded`.
+fn assert_an_oversleeping_sender_gets_the_full_rate() {
+    // Windows wakes a 1 ms sleep every 15.6 ms. The budget must hand out
+    // what accrued over the whole tick, not just one burst.
+    let mut core = core_with_bulk(User::default(), 2_500_000, 3);
+    core.note_interactive(ms(3_010));
+    let mut stats = lan_stats(60, 50);
+    stats.rtt = ms(50); // no queue: the rate stays at its ceiling
+    core.evaluate(ms(3_020), &stats);
+    let rate = core.rate().expect("yielding");
+    let tick = Duration::from_micros(15_600);
+    let (mut now, mut sent) = (ms(3_020), 0u64);
+    for _ in 0..128 {
+        now += tick;
+        core.note_interactive(now);
+        loop {
+            let mut want = 16 * 1024;
+            let Pace::Go = core.pace(now, &mut want) else {
+                sent += 16 * 1024 - want;
+                break;
+            };
+            sent += 16 * 1024;
+        }
+    }
+    let got = sent as f64 / (now - ms(3_020)).as_secs_f64();
+    assert!(got >= 0.9 * rate as f64, "{got} B/s of {rate}");
 }
