@@ -344,15 +344,6 @@ fn ctrl_c_latency(mode: ScreenSync, cap: Duration) -> Option<Duration> {
 /// second. The byte path's value in the same scenario is recorded beside it.
 #[test]
 fn ctrl_c_reaches_a_flooding_session_within_budget() {
-    // A `0x03` written into a Windows host session does not interrupt a
-    // running program on either path (a `ping -t` keeps going too), because
-    // the host delivers `CTRL_C_EVENT` through `console_ctrl`, not through
-    // the input byte. The byte path fails the same way, so this scenario has
-    // nothing to compare on Windows.
-    if cfg!(windows) {
-        eprintln!("SKIP: a 0x03 byte does not interrupt a Windows host session");
-        return;
-    }
     if !slow_enabled() {
         eprintln!(
             "SKIP: the ctrl_c_reaches_a_flooding_session_within_budget gate requires QSH_ACCEPTANCE_SLOW=1"
