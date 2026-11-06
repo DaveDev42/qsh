@@ -632,3 +632,39 @@ async fn a_delivered_quit_is_still_reported_as_sigquit() {
     assert_eq!(reported(&report), ["ctrl-break"]);
     drain.abort();
 }
+
+/// A host that ignores `CTRL_C_EVENT` (started with `CREATE_NEW_PROCESS_GROUP`
+/// as the on-demand serve is, or under a parent that set the flag) must not
+/// hand that to its sessions: `0x03` typed into the console still stops a
+/// running program. Before `accept_ctrl_c_for_children` the session's
+/// programs inherited the ignore flag and `ping -t` ran on. (The probe is no
+/// witness here: it clears the flag itself.)
+#[tokio::test]
+async fn a_host_that_ignores_ctrl_c_still_lets_a_typed_ctrl_c_stop_a_program() {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    // SAFETY: a null routine with `TRUE` makes this process ignore
+    // `CTRL_C_EVENT`; nextest gives the test its own process.
+    unsafe { SetConsoleCtrlHandler(None, 1) };
+
+    let (broker, clock) = broker(1 << 20);
+    let spec = SessionSpec {
+        argv: ["ping", "-t", "127.0.0.1"].map(String::from).to_vec(),
+        env: Vec::new(),
+        term: Some("xterm-qshtest".into()),
+        cols: 200,
+        rows: 24,
+        user: None,
+        shell: None,
+    };
+    let handle = broker.open_with(&spec, Box::new(source())).unwrap();
+    pull_until(&handle, &clock, usize::MAX, |ev| {
+        text(ev).contains("Reply from")
+    })
+    .await;
+    within(handle.take_lease("tester", CONN, false))
+        .await
+        .unwrap();
+    within(handle.write(CONN, vec![0x03])).await.unwrap();
+    let events = within(pull_until_exit(&handle, &clock)).await;
+    assert!(exit_of(&events).is_some(), "ping survived a typed Ctrl-C");
+}

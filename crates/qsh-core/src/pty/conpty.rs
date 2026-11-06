@@ -550,6 +550,28 @@ pub(crate) struct ConPtySession {
     log: StageLog,
 }
 
+/// Make the processes this host starts take `CTRL_C_EVENT`, once.
+///
+/// Whether a process ignores `CTRL_C_EVENT` is inherited by what it starts.
+/// A host started with `CREATE_NEW_PROCESS_GROUP` (the on-demand serve
+/// `spawn_detached` starts, or a service launcher that wants `CTRL_BREAK`
+/// for its stop) or by a parent that called `SetConsoleCtrlHandler(NULL,
+/// TRUE)` would hand that to every session's shell, and neither the helper's
+/// event nor a `0x03` typed into the pseudo-console could then interrupt
+/// anything in it. Clearing the flag here is what makes the session's root,
+/// which `console_ctrl` documents as taking `CTRL_C_EVENT`, actually take it.
+/// A host with no console is unaffected by the flag itself.
+fn accept_ctrl_c_for_children() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: a null routine with `FALSE` restores normal handling of
+        // `CTRL_C_EVENT` for this process; no pointers are kept.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
+        }
+    });
+}
+
 impl ConPtySession {
     /// Start `launch` in a new pseudo-console of `cols` x `rows`. `events`
     /// are the events `launch` was planned against.
@@ -559,6 +581,7 @@ impl ConPtySession {
         cols: u16,
         rows: u16,
     ) -> io::Result<Self> {
+        accept_ctrl_c_for_children();
         let output = host_pipe(true)?;
         let input = host_pipe(false)?;
         let console = PseudoConsole::create(cols, rows, &input.child, &output.child)?;
