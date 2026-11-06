@@ -53,13 +53,13 @@ use qsh_core::{
     Config, ConfigGetOp, ConfigListOp, ConfigSetOp, ConfigUnsetOp, DoctorOp, ExecCommand,
     ExecRunOp, ExecStdin, FileCopyOp, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp,
     IdentityMoveKeyOp, InviteCodeSource, OpError, Operation, Ops, PairSshEnv, PairSshOp, SchemaOp,
-    ServiceInstallOp, ServiceInstallOptions, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
-    SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp,
-    TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp,
-    VersionOp, cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
-    read_cert_file_arg, resolve_invite_code_source,
+    ScreenSync, ServiceInstallOp, ServiceInstallOptions, ServiceStatusOp, ServiceUninstallOp,
+    SessionAttachOp, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
+    SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp,
+    TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
+    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -664,6 +664,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         Command::Attach(AttachArgs {
             session_ref,
             escape_char,
+            screen_sync,
         }) => run_interactive(
             cli,
             &ops,
@@ -671,6 +672,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 session_ref: session_ref.clone(),
             },
             *escape_char,
+            screen_sync.unwrap_or_default(),
             &SshOptions::default(),
         ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
@@ -918,6 +920,7 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
                 shell_command,
             },
             args.escape_char,
+            args.screen_sync.unwrap_or_default(),
             &ssh,
         ),
         FormMode::Exec(command) => {
@@ -1040,6 +1043,7 @@ fn run_interactive(
     ops: &Ops,
     what: tui::Attach,
     escape: Option<EscapeChar>,
+    screen_sync: ScreenSync,
     ssh: &SshOptions,
 ) -> i32 {
     let command = what.command();
@@ -1083,7 +1087,7 @@ fn run_interactive(
         return code;
     }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
-    match tui::run(ops, what, escape) {
+    match tui::run(ops, what, escape, screen_sync) {
         Ok(code) => code,
         Err(err) => report_error(cli, command, &err),
     }

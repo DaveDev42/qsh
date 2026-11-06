@@ -76,6 +76,21 @@ pub(super) async fn drive_attach(
     'leg: loop {
         let watch = PathWatch::new(ctx.recovery.watch);
         let probes = Arc::new(tokio::sync::Notify::new());
+        // Screen sync (ADR-0052): this leg's screen, and the channel the
+        // reader tells the input pump which state to acknowledge on. A new
+        // leg starts from nothing (the host sends a full screen first) and
+        // from a terminal nobody can vouch for.
+        let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let mut leg_screen = match &ctx.screen {
+            Some(sink) if !attached.screen_channel.is_empty() => {
+                sink.new_leg();
+                Some(LegScreen {
+                    client: crate::client::screen::ClientScreen::new(),
+                    acks: ack_tx,
+                })
+            }
+            _ => None,
+        };
         let (writer, mut reader) = attached.split();
 
         let (input_stop, input_stop_rx) = tokio::sync::oneshot::channel();
@@ -90,7 +105,10 @@ pub(super) async fn drive_attach(
                     watch.clone(),
                     ctx.clone(),
                     events.clone(),
-                    input_stop_rx,
+                    InputSignals {
+                        stop: input_stop_rx,
+                        acks: ack_rx,
+                    },
                 )),
             }),
             control: Some(Pump {
@@ -109,7 +127,16 @@ pub(super) async fn drive_attach(
         let mut watchdog = spawn_watchdog(&ctx.link, watch.clone(), probes.clone());
 
         loop {
-            let end = read_leg(&mut reader, &cursor, &pending, &watch, &ctx, &events).await;
+            let end = read_leg(
+                &mut reader,
+                &cursor,
+                &pending,
+                &watch,
+                &ctx,
+                &events,
+                &mut leg_screen,
+            )
+            .await;
             // Decided here, before `end` is consumed: a recovery may only
             // be answered with "keep reading the same leg" if the leg
             // itself survived. See [`LegEnd::leg_survived`].
@@ -240,6 +267,13 @@ pub(super) async fn drive_attach(
     }
 }
 
+/// One leg's side of screen sync: the screen the host described so far and
+/// the way to acknowledge states (ADR-0052 decisions 5 and 6).
+pub(super) struct LegScreen {
+    client: crate::client::screen::ClientScreen,
+    acks: tokio::sync::mpsc::UnboundedSender<u64>,
+}
+
 /// Read one leg's data stream until it ends, breaks, or the path dies.
 async fn read_leg(
     reader: &mut crate::client::AttachReader,
@@ -248,6 +282,7 @@ async fn read_leg(
     watch: &PathWatch,
     ctx: &AttachContext,
     events: &tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+    screen: &mut Option<LegScreen>,
 ) -> LegEnd {
     loop {
         let next = tokio::select! {
@@ -281,6 +316,45 @@ async fn read_leg(
                 }
                 ahead
             });
+        }
+        // A screen-sync leg: parts of a state go to the leg's screen, the
+        // state number it now holds goes back to the host, and an applied
+        // state is drawn on the frontend's terminal as `Output` bytes.
+        if let Some(leg) = screen.as_mut() {
+            let outcome = match &event {
+                AttachEvent::Screen(part) => match leg.client.on_part(part) {
+                    Ok(outcome) => Some(outcome),
+                    Err(err) => return LegEnd::Broken(err),
+                },
+                AttachEvent::ScreenDatagram(part) => Some(leg.client.on_datagram_part(part)),
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
+                if let Some(state_num) = outcome.ack() {
+                    // The input pump sends it; it is gone when the leg is.
+                    let _ = leg.acks.send(state_num);
+                }
+                if let crate::client::screen::ScreenOutcome::Applied {
+                    effects,
+                    output_seq,
+                    ..
+                } = outcome
+                    && let (Some(sink), Some(state)) = (&ctx.screen, leg.client.state())
+                {
+                    let (bytes, sequence) = sink.draw(state, &effects, output_seq);
+                    if !bytes.is_empty() {
+                        let _stalled = watch.stalled();
+                        if events
+                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                            .await
+                            .is_err()
+                        {
+                            return LegEnd::Gone;
+                        }
+                    }
+                }
+                continue;
+            }
         }
         // Defence in depth against a doubled terminal (protocol.md §10-3):
         // the host is asked to replay from exactly where we stopped, but a

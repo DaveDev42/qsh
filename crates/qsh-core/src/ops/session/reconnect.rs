@@ -305,7 +305,7 @@ async fn local_reattach(
             last_output_seq,
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
-            screen: None,
+            screen: ctx.screen.as_ref().map(|s| s.request()),
         })
         .await
         .inspect_err(|err| {

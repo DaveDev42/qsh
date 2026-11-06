@@ -29,6 +29,7 @@ pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;
 pub mod reconnect;
+pub mod render;
 pub mod screen;
 pub mod wake;
 

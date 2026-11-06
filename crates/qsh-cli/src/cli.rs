@@ -3,7 +3,7 @@
 //! dispatch on `qsh_core::Ops`.
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use qsh_core::DoctorThreshold;
+use qsh_core::{DoctorThreshold, ScreenSync};
 use qsh_proto::{EnvVar, KeyStoreKind, KeyStoreMode};
 
 /// QSH: a QUIC-based direct-connect remote shell.
@@ -100,6 +100,13 @@ pub struct InteractiveArgs {
     /// when stdin is a terminal. `-e` is the ssh spelling.
     #[arg(short = 'e', long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
     pub escape_char: Option<EscapeChar>,
+
+    /// Screen state sync for the interactive session (ADR-0052): `auto`
+    /// (default) uses it when the host offers it and the terminal is a
+    /// terminal on both ends, `on` requires it (`UNSUPPORTED` otherwise),
+    /// `off` keeps the plain byte stream. Interactive sessions only.
+    #[arg(long, value_name = "MODE", value_parser = parse_screen_sync, requires = "target")]
+    pub screen_sync: Option<ScreenSync>,
 
     /// The command to run on the host, `ssh host command [arg...]`: the
     /// arguments are joined with spaces and run by the remote account's
@@ -345,7 +352,7 @@ impl InteractiveArgs {
 /// Root options that take a value, for [`first_operand`]. Long forms are
 /// matched with their `=` or the next argument.
 const ROOT_VALUE_SHORTS: &str = "LRDlpiFoJEeSOwbBcmQW";
-const ROOT_VALUE_LONGS: &[&str] = &["--escape-char"];
+const ROOT_VALUE_LONGS: &[&str] = &["--escape-char", "--screen-sync"];
 
 /// The first operand at or after `from` (index into `args`), skipping root
 /// options and their values. The flag is `true` when a `--` forced it.
@@ -472,6 +479,11 @@ pub struct EscapeChar(pub Option<u8>);
 
 /// The default escape character (`~`), matching ssh.
 pub const DEFAULT_ESCAPE_CHAR: EscapeChar = EscapeChar(Some(b'~'));
+
+/// clap value parser for `--screen-sync auto|on|off`.
+fn parse_screen_sync(value: &str) -> Result<ScreenSync, String> {
+    ScreenSync::parse(value).ok_or_else(|| format!("`{value}` is not one of auto, on, off"))
+}
 
 /// clap value parser for `--escape-char <c>|none`: a single printable
 /// ASCII character, or `none`. Anything else is a usage error (exit `2`,
@@ -1141,6 +1153,11 @@ pub struct AttachArgs {
     /// Default `~`; only active when stdin is a terminal.
     #[arg(long, value_name = "CHAR", value_parser = parse_escape_char)]
     pub escape_char: Option<EscapeChar>,
+
+    /// Screen state sync: `auto` (default), `on` (require it) or `off`
+    /// (plain byte stream). See `qsh --help`.
+    #[arg(long, value_name = "MODE", value_parser = parse_screen_sync)]
+    pub screen_sync: Option<ScreenSync>,
 }
 
 /// clap value parser for `--env NAME=VALUE`.

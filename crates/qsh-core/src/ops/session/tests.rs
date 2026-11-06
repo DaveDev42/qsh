@@ -334,6 +334,7 @@ async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_ty
     let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
     let (applied_input, _) = tokio::sync::watch::channel(0u64);
     let ctx = Arc::new(AttachContext {
+        screen: None,
         target: None,
         host: "phone".to_string(),
         session_id: "01REVERSEDEATH".to_string(),
@@ -476,6 +477,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
     let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
     let (applied_input, _) = tokio::sync::watch::channel(0u64);
     let ctx = Arc::new(AttachContext {
+        screen: None,
         target: None,
         host: "phone".to_string(),
         session_id: "01REVERSERECOVERY".to_string(),

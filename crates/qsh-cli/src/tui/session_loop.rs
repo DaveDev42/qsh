@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use qsh_core::{AttachHandle, DetachFlush, OpError, Ops, SessionAttachStream};
+use qsh_core::{
+    AttachHandle, DetachFlush, OpError, Ops, ScreenAttach, ScreenSync, SessionAttachStream,
+};
 use qsh_proto::event::SessionEvent;
 use qsh_proto::{ErrorCode, SessionCloseReq, SessionOpenReq};
 
@@ -42,11 +44,13 @@ pub(super) fn run(
     what: Attach,
     escape: Option<u8>,
     terminal: Arc<dyn Terminal>,
+    screen_sync: ScreenSync,
 ) -> Result<i32, OpError> {
     // Before anything exists on the host: a terminal that cannot be driven
     // must not cost the operator a session to find out.
     terminal.preflight()?;
     let size = terminal.window_size();
+    let screen = screen_attach(screen_sync, size, terminal.stdout_is_terminal())?;
 
     // Authorization, session creation and the attach all happen here, in
     // `Ops`, before a single byte of terminal state is touched: a refused
@@ -83,6 +87,7 @@ pub(super) fn run(
                     ops,
                     open_request(host, user, size, terminal.fallback_term(), shell_command),
                     requires_dynamic,
+                    screen,
                 )?,
                 true,
                 specs,
@@ -114,7 +119,11 @@ pub(super) fn run(
     // stream (`Ops::session_attach`'s own doc) — so the specs go in here,
     // not as a later call on `stream`.
     let mut stream = ops
-        .session_attach(attach_request(session_ref.clone()), &remote_forward_specs)
+        .session_attach_screen(
+            attach_request(session_ref.clone()),
+            &remote_forward_specs,
+            screen,
+        )
         .map_err(orphan)?;
 
     // The `-L` listeners: bound before the terminal goes raw, so a bind
@@ -237,6 +246,15 @@ pub(super) fn run(
         terminal.strips_win32_input_mode(),
     );
 
+    // Screen sync mirrored the remote program's modes (alternate screen,
+    // mouse reporting, bracketed paste...) onto this terminal; put them back
+    // while the terminal is still ours.
+    let reset = stream.screen_reset();
+    if !reset.is_empty() {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(&reset).and_then(|()| stdout.flush());
+    }
+
     // Restore the terminal *before* any diagnostic is printed, so a
     // message about the exit is not typeset in raw mode.
     drop(raw);
@@ -291,13 +309,39 @@ fn terminate_session(ops: &Ops, session_ref: &str) -> i32 {
 /// [`Ops::session_open`] so the `dial-filter.v1` capability gate runs
 /// before `SessionOpen` is ever sent (ADR-0020 decisions 2–3, this module's
 /// own doc on `run`).
-fn open_session(ops: &Ops, req: SessionOpenReq, requires_dynamic: bool) -> Result<String, OpError> {
-    let opened = if requires_dynamic {
-        ops.session_open_for_dynamic(req)?
-    } else {
-        ops.session_open(req)?
-    };
+fn open_session(
+    ops: &Ops,
+    req: SessionOpenReq,
+    requires_dynamic: bool,
+    screen: Option<ScreenAttach>,
+) -> Result<String, OpError> {
+    let opened = ops.session_open_interactive(req, requires_dynamic, screen)?;
     Ok(opened.session_ref)
+}
+
+/// What to ask of `Ops` for `--screen-sync` (ADR-0052 decisions 1 and 15).
+///
+/// Screen sync draws with cursor addressing, so it needs a terminal on both
+/// stdin (a size) and stdout. `auto` falls back to the byte path without
+/// one; `on` cannot be honoured and says so before anything exists on the
+/// host; `off` asks for nothing.
+fn screen_attach(
+    mode: ScreenSync,
+    size: Option<(u16, u16)>,
+    stdout_is_terminal: bool,
+) -> Result<Option<ScreenAttach>, OpError> {
+    match (mode, size) {
+        (ScreenSync::Off, _) => Ok(None),
+        (mode, Some((cols, rows))) if stdout_is_terminal => {
+            Ok(Some(ScreenAttach { mode, cols, rows }))
+        }
+        (ScreenSync::On, _) => Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "--screen-sync=on needs a terminal on both stdin and stdout; \
+             use --screen-sync=auto or off",
+        )),
+        (ScreenSync::Auto, _) => Ok(None),
+    }
 }
 
 /// How the interactive session ended.
@@ -333,7 +377,13 @@ fn pump_events(
     // Replayed history must not re-ask the local terminal what a program once
     // asked it: the answers would be typed into the remote PTY. Live output
     // is left alone (`replay_filter` module docs).
-    let mut replay_filter = ReplayFilter::new(stream.replay_end());
+    // A screen-sync attach has no replay: its bytes are drawn by the client
+    // and carry no queries.
+    let mut replay_filter = ReplayFilter::new(if stream.screen_sync() {
+        0
+    } else {
+        stream.replay_end()
+    });
     while let Some(event) = stream.next_event() {
         if detached.load(Ordering::SeqCst) {
             return Outcome::Detached;

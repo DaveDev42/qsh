@@ -610,6 +610,7 @@ fn vt_unavailable_is_unsupported_before_session_open() {
         },
         Some(b'~'),
         terminal,
+        ScreenSync::Auto,
     )
     .expect_err("a console without VT cannot run an interactive session");
 
