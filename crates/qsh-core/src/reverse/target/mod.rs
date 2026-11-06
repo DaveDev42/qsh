@@ -163,6 +163,7 @@ pub async fn run_reverse_observed(
     // (`ReverseConfig::backoff`'s own doc comment).
     let backoff_limits = config.reverse.backoff()?;
     let liveness = config.liveness()?;
+    liveness.pin_process();
 
     // Identity (the caller's job, module docs) and the trust store are
     // both established exactly once, ahead of the loop below — never

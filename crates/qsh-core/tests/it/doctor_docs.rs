@@ -18,9 +18,10 @@
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_POLICY_INVALID_ROLE_CLAUSE,
-    ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, KEYSTORE_SESSION_BOUND,
-    LAUNCHAGENT_SESSION_SCOPED, LOGON_TASK_SESSION_SCOPED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE,
-    TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE, UDP_EGRESS_BLOCKED,
+    ACL_POLICY_MISSING_SET_ROLE_HINT, CERT_EXPIRING_SOON, DATAGRAM_UNAVAILABLE,
+    KEYSTORE_SESSION_BOUND, LAUNCHAGENT_SESSION_SCOPED, LOGON_TASK_SESSION_SCOPED,
+    SCREEN_SYNC_UNSUPPORTED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE, UDP_EGRESS_BLOCKED,
 };
 
 use crate::docs;
@@ -212,6 +213,30 @@ fn cli_md_quotes_the_always_on_doctor_wording_verbatim() {
             "LOGON_TASK_SESSION_SCOPED.remedy",
             LOGON_TASK_SESSION_SCOPED.remedy,
         ),
+    ] {
+        assert!(
+            cli_md.contains(text),
+            "docs/CLI.md §6.17 must quote {what} verbatim"
+        );
+    }
+}
+
+/// ADR-0052 decision 14 (M22): the two transport findings of `qsh doctor
+/// <host>` are quoted from the constants, like the always-on wording above.
+#[test]
+fn cli_md_quotes_the_transport_doctor_wording_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    for (what, text) in [
+        (
+            "SCREEN_SYNC_UNSUPPORTED.message",
+            SCREEN_SYNC_UNSUPPORTED.message,
+        ),
+        (
+            "SCREEN_SYNC_UNSUPPORTED.remedy",
+            SCREEN_SYNC_UNSUPPORTED.remedy,
+        ),
+        ("DATAGRAM_UNAVAILABLE.message", DATAGRAM_UNAVAILABLE.message),
+        ("DATAGRAM_UNAVAILABLE.remedy", DATAGRAM_UNAVAILABLE.remedy),
     ] {
         assert!(
             cli_md.contains(text),

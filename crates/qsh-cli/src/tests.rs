@@ -474,3 +474,41 @@ fn build_tunnel_open_request_wires_supervise_and_accept_hold() {
     assert_eq!(request.supervise_ms, None);
     assert_eq!(request.accept_hold_ms, None);
 }
+
+/// ADR-0052 decision 14: the `qsh::adapt` line is pure JSON like the
+/// recovery record, but it is opt-in (`-v` or an explicit `QSH_LOG`) because
+/// it is written into the terminal an interactive session draws on.
+#[test]
+fn the_adapt_line_is_pure_json_and_opt_in() {
+    let target = qsh_core::adapt::TARGET;
+    // Mirrors `init_tracing`: `off` unless `-v`, `-q` silences it.
+    let capture_adapt = |spec: Option<&str>, default: &str, quiet: bool| {
+        let sink = Captured::default();
+        let layer = RecoveryLayer(sink.clone())
+            .with_filter(env_filter(spec, default))
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                !quiet && meta.target() == target
+            }));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let line = r#"{"adapt":"policy","rtt_ms":18.6,"screen_sync":"stream","reasons":[]}"#;
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: qsh_core::adapt::TARGET, "{}", line);
+        });
+        let lines = sink.0.lock().expect("not poisoned");
+        lines.clone()
+    };
+    assert!(
+        capture_adapt(None, "off", false).is_empty(),
+        "default verbosity"
+    );
+    let lines = capture_adapt(None, "info", false);
+    assert_eq!(lines.len(), 1, "-v");
+    let parsed: serde_json::Value = serde_json::from_str(&lines[0]).expect("pure JSON");
+    assert_eq!(parsed["adapt"], "policy");
+    assert_eq!(
+        capture_adapt(Some("qsh::adapt=info"), "off", false).len(),
+        1,
+        "an explicit QSH_LOG turns it on"
+    );
+    assert!(capture_adapt(None, "info", true).is_empty(), "-q");
+}

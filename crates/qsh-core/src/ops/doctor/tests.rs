@@ -3362,6 +3362,7 @@ fn doctor_threshold_matches_the_overall_severity_order() {
         DoctorData {
             overall: overall_status(&findings),
             findings,
+            transport: None,
         }
     };
     for (statuses, warn, error) in [
@@ -3425,5 +3426,129 @@ fn doctor_config_unknown_key_accepts_transport_and_recovery_and_flags_rtt_multip
             findings.iter().any(|f| f.detail.contains(key)),
             "{key}: {findings:?}"
         );
+    }
+}
+
+// -----------------------------------------------------------------
+// `transport` (ADR-0052 decision 14, decision 18 item 7)
+// -----------------------------------------------------------------
+
+/// No host named: no measurement, so the field is absent from the JSON
+/// (never `null`).
+#[test]
+fn doctor_without_a_host_has_no_transport_object() {
+    let (_guard, ops) = healthy_ops();
+    let data = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .unwrap();
+    assert!(data.transport.is_none());
+    let json = serde_json::to_value(&data).unwrap();
+    assert!(json.get("transport").is_none(), "{json}");
+}
+
+/// A connection that does not come up leaves `transport` out: a pinned host
+/// whose listener refuses the handshake (the pinned fingerprint is not the
+/// listener's) is not measured, and the doctor still answers with data.
+#[test]
+fn doctor_leaves_transport_out_when_the_measurement_connection_fails() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (server_identity, _fp) = crate::tunnel::testutil::self_signed();
+    let listener = rt.block_on(async {
+        qsh_transport::Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            server_identity,
+            std::sync::Arc::new(qsh_transport::StaticTrust::empty()),
+        )
+        .unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+    let (_guard, ops) = healthy_ops();
+    ops.trust_add(TrustAddReq {
+        name: "refuses".into(),
+        address: Some(addr.to_string()),
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"refuses").to_string()),
+        cert_pem: None,
+        role: None,
+    })
+    .unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: Some("refuses".to_string()),
+            },
+            SystemTime::now(),
+        )
+        .unwrap();
+    assert!(data.transport.is_none(), "{:?}", data.transport);
+    let json = serde_json::to_value(&data).unwrap();
+    assert!(json.get("transport").is_none(), "{json}");
+    // No measurement, so neither transport finding was raised.
+    assert!(
+        data.findings
+            .iter()
+            .all(|f| f.code != "screen_sync_unsupported" && f.code != "datagram_unavailable"),
+        "{:?}",
+        data.findings
+    );
+    drop(listener);
+}
+
+/// A host the UDP probe already called unreachable is not dialed again.
+#[test]
+fn doctor_does_not_measure_a_host_the_probe_found_unreachable() {
+    let (_guard, ops) = healthy_ops();
+    let black_hole = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "quiet2".into(),
+        address: Some(black_hole.local_addr().unwrap().to_string()),
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"quiet2").to_string()),
+        cert_pem: None,
+        role: None,
+    })
+    .unwrap();
+    let started = std::time::Instant::now();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: Some("quiet2".to_string()),
+            },
+            SystemTime::now(),
+        )
+        .unwrap();
+    assert!(data.findings.iter().any(|f| f.code == "udp_egress_blocked"));
+    assert!(data.transport.is_none());
+    assert!(
+        started.elapsed() < TRANSPORT_PROBE_DIAL_BUDGET + Duration::from_secs(4),
+        "the probe alone takes about a second; a measurement dial would add its whole budget"
+    );
+    drop(black_hole);
+}
+
+/// The two `info` findings follow the capabilities and the DATAGRAM size.
+#[test]
+fn transport_findings_follow_the_capabilities_and_the_datagram_size() {
+    let codes = |screen, datagram, size| -> Vec<String> {
+        transport_findings("peer", screen, datagram, size)
+            .into_iter()
+            .map(|f| f.code)
+            .collect()
+    };
+    assert!(codes(true, true, Some(1200)).is_empty());
+    assert_eq!(codes(false, true, Some(1200)), ["screen_sync_unsupported"]);
+    assert_eq!(codes(true, false, Some(1200)), ["datagram_unavailable"]);
+    // The capability is there but the path carries no DATAGRAM.
+    assert_eq!(codes(true, true, None), ["datagram_unavailable"]);
+    assert_eq!(
+        codes(false, false, None),
+        ["screen_sync_unsupported", "datagram_unavailable"]
+    );
+    for f in transport_findings("peer", false, false, None) {
+        assert_eq!(f.status, "info", "{}", f.code);
+        assert!(f.detail.contains("(peer: peer)"), "{}", f.detail);
+        assert!(f.remedy.is_some(), "{}", f.code);
     }
 }

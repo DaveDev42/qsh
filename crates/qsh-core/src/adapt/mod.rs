@@ -12,6 +12,7 @@
 
 mod budget;
 mod governor;
+mod monitor;
 mod rtt;
 mod runner;
 #[cfg(test)]
@@ -25,6 +26,9 @@ pub use budget::BulkBudget;
 pub use governor::{
     BULK_WINDOW, BulkGovernor, EVALUATE_PERIOD, GovernorCore, INTERACTIVE_WINDOW, MAX_PARK,
     PACE_GRANULE, Pace, process_adaptive, set_process_adaptive,
+};
+pub use monitor::{
+    PolicyMonitor, PolicySampler, Sample, TARGET, screen_sync_label, to_json_line, transport_report,
 };
 pub use rtt::RttVar;
 pub use runner::{ALIVE_WINDOW, CarrierRunner, LOSS_WINDOW, RTT_FLOOR, TICK, Tick};
@@ -90,6 +94,18 @@ pub struct User {
     pub adaptive: bool,
     /// `[transport].keep_alive_ms`, when set.
     pub keep_alive: Option<Duration>,
+}
+
+impl User {
+    /// The pins of this process: `[transport].adaptive` as
+    /// [`set_process_adaptive`] last set it, and no keep-alive pin. Callers
+    /// that know the keep-alive pin override it with struct update syntax.
+    pub fn from_process() -> Self {
+        Self {
+            adaptive: process_adaptive(),
+            keep_alive: None,
+        }
+    }
 }
 
 impl Default for User {

@@ -100,9 +100,9 @@ fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
     let mut lines = vec![format!("overall: {}", sanitize(&data.overall))];
     if data.findings.is_empty() {
         lines.push("no findings".to_string());
-        return lines;
+    } else {
+        lines.push(format!("{} finding(s):", data.findings.len()));
     }
-    lines.push(format!("{} finding(s):", data.findings.len()));
     for finding in &data.findings {
         let mut detail_lines = finding.detail.lines();
         let first_line = detail_lines.next().unwrap_or("");
@@ -119,6 +119,46 @@ fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
             lines.push(format!("    remedy: {}", sanitize(remedy)));
         }
     }
+    if let Some(transport) = &data.transport {
+        lines.extend(render_doctor_transport(transport));
+    }
+    lines
+}
+
+/// The `transport` block of `qsh doctor <host>` (`docs/CLI.md` §6.17).
+fn render_doctor_transport(t: &qsh_proto::DoctorTransport) -> Vec<String> {
+    let datagram = t
+        .max_datagram_bytes
+        .map_or_else(|| "none".to_string(), |n| format!("{n} B"));
+    let mut lines = vec![
+        "transport:".to_string(),
+        format!(
+            "  rtt {:.1} ms (var {:.1}, min {:.1}), loss {:.1}%, max datagram {datagram}",
+            t.rtt_ms, t.rtt_var_ms, t.min_rtt_ms, t.loss_pct
+        ),
+        format!(
+            "  screen sync: {}, frame interval {} ms, keep-alive {} ms",
+            sanitize(&t.screen_sync),
+            t.frame_interval_ms,
+            t.keep_alive_ms
+        ),
+        format!(
+            "  bulk yield: {}, prediction: {}, nested: {}",
+            sanitize(&t.bulk_yield),
+            sanitize(&t.prediction),
+            t.nested
+        ),
+    ];
+    if !t.reasons.is_empty() {
+        let reasons: Vec<String> = t.reasons.iter().map(|r| sanitize(r)).collect();
+        lines.push(format!("  reasons: {}", reasons.join(", ")));
+    }
+    // The probe connection carries no keys and no bulk, so knob (a) and the
+    // interactive rules cannot show what they would do in a session.
+    lines.push(
+        "  note: this probe carries no interactive traffic, so bulk yield reads off here"
+            .to_string(),
+    );
     lines
 }
 

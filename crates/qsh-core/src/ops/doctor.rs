@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode, KeyStoreKind};
+use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, DoctorTransport, ErrorCode, KeyStoreKind};
 use qsh_transport::AuthPath;
 
 use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_example_rows};
@@ -37,8 +37,9 @@ use crate::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE,
     ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED,
     CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY,
-    PEER_UNTRUSTED, QSH_PATH_SHADOWED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
-    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, QSH_PATH_SHADOWED, SCREEN_SYNC_UNSUPPORTED,
+    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
+    probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -318,11 +319,84 @@ impl Ops {
         findings.extend(self.doctor_connectivity_findings(config, req.host.as_deref())?);
         findings.extend(self.doctor_service_registration_findings(mode, env));
         findings.extend(self.doctor_bindv6only_finding(config, mode, env));
+        let transport = match req.host.as_deref() {
+            Some(host) if !reachability_failed(&findings) => {
+                self.doctor_transport(config, host, &mut findings)
+            }
+            _ => None,
+        };
 
         Ok(DoctorData {
             overall: overall_status(&findings),
             findings,
+            transport,
         })
+    }
+
+    /// The `transport` object and its two `info` findings (ADR-0052 decision
+    /// 14): a 3 s measurement connection to `host`, sampled twice a second,
+    /// with the adaptive policy run over the samples under this device's
+    /// own `config.toml` pins. `None` when the connection does not come up
+    /// (the reachability findings say why) or the host is only reachable
+    /// through a reverse registration. The connection carries no interactive
+    /// traffic, so knob (a) reads `off` here whatever the path.
+    fn doctor_transport(
+        &self,
+        config: &Config,
+        host: &str,
+        findings: &mut Vec<DoctorFinding>,
+    ) -> Option<DoctorTransport> {
+        use crate::adapt::{PolicySampler, User};
+        use qsh_proto::wire::{CAP_DATAGRAM_V1, CAP_SCREEN_V1};
+
+        const SAMPLES: u32 = 6;
+        const PERIOD: Duration = Duration::from_millis(500);
+
+        let mut connected = self
+            .connect_probe(host, TRANSPORT_PROBE_DIAL_BUDGET)
+            .ok()??;
+        let connection = connected.connection()?;
+        let capabilities = connected.capabilities().to_vec();
+        let has = |cap: &str| capabilities.iter().any(|c| c == cap);
+        let screen_offered = has(CAP_SCREEN_V1);
+        let datagram_offered = has(CAP_DATAGRAM_V1);
+        let screen_wanted =
+            config.interactive.screen_sync.unwrap_or_default() != crate::ops::ScreenSync::Off;
+        let user = User {
+            adaptive: config.transport.adaptive_mode().enabled(),
+            keep_alive: config.transport.keep_alive_ms.map(Duration::from_millis),
+        };
+        let mut sampler =
+            PolicySampler::new(user, screen_offered && screen_wanted, datagram_offered);
+        let mut last = None;
+        let mut max_datagram = None;
+        for _ in 0..SAMPLES {
+            // A control `Ping` makes the peer answer, so the RTT estimate
+            // moves even though nothing else is on the connection.
+            let _ = connected.run(|s| Box::pin(async move { s.send_ping().await }));
+            max_datagram = connection.max_datagram_size();
+            last = Some(sampler.step(
+                std::time::Instant::now(),
+                connection.stats(),
+                max_datagram,
+                false,
+                false,
+            ));
+            // The timer is built inside the runtime: `sleep()` outside one panics.
+            connected
+                .runtime()
+                .block_on(async { tokio::time::sleep(PERIOD).await });
+        }
+        connected.close();
+        let sample = last?;
+
+        findings.extend(transport_findings(
+            host,
+            screen_offered,
+            datagram_offered,
+            max_datagram,
+        ));
+        Some(sample.report)
     }
 
     /// `audit_path_unwritable` (design brief row #9) — reuses
@@ -1406,3 +1480,49 @@ pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// How long `qsh doctor <host>` waits for the measurement connection to come
+/// up before it reports no `transport` (ADR-0052 decision 14).
+const TRANSPORT_PROBE_DIAL_BUDGET: Duration = Duration::from_secs(3);
+
+/// Whether the UDP probes already found `host` unreachable. The measurement
+/// connection would only wait out its dial budget on a path they just called
+/// dead, so it is skipped.
+fn reachability_failed(findings: &[DoctorFinding]) -> bool {
+    findings.iter().any(|f| {
+        matches!(
+            f.code.as_str(),
+            "controller_unreachable" | "udp_egress_blocked" | "no_route"
+        )
+    })
+}
+
+/// The two `info` findings a measurement connection can raise (ADR-0052
+/// decision 14): the peer does not advertise `screen.v1`, and there is no
+/// DATAGRAM path (`datagram.v1` missing on either end, or the path reports no
+/// payload size).
+fn transport_findings(
+    host: &str,
+    screen_offered: bool,
+    datagram_offered: bool,
+    max_datagram: Option<usize>,
+) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+    for (raised, diag) in [
+        (!screen_offered, &SCREEN_SYNC_UNSUPPORTED),
+        (
+            !datagram_offered || max_datagram.is_none(),
+            &DATAGRAM_UNAVAILABLE,
+        ),
+    ] {
+        if raised {
+            out.push(DoctorFinding {
+                code: diag.code.to_string(),
+                status: "info".to_string(),
+                detail: format!("{} (peer: {host})", diag.message),
+                remedy: Some(diag.remedy.to_string()),
+            });
+        }
+    }
+    out
+}

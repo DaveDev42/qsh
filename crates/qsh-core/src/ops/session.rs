@@ -1070,6 +1070,37 @@ impl Ops {
         let driver = conn
             .runtime()
             .spawn(drive_attach(ctx, session, attached, command_rx, events_tx));
+        // An interactive client (one that asked for screen sync, whether or
+        // not the host granted it) watches what the transport policy would
+        // decide for its connection and says so on `qsh::adapt` (ADR-0052
+        // decision 14). A reverse route has no QUIC connection of ours to
+        // watch.
+        let adapt = match (&link, screen.is_some()) {
+            (RecoveryLink::Forward(live), true) => {
+                let pinned_keep_alive = self
+                    .config()
+                    .ok()
+                    .and_then(|c| c.transport.keep_alive_ms)
+                    .map(Duration::from_millis);
+                let user = crate::adapt::User {
+                    keep_alive: pinned_keep_alive,
+                    ..crate::adapt::User::from_process()
+                };
+                let sampler = crate::adapt::PolicySampler::new(
+                    user,
+                    screen_granted,
+                    capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
+                );
+                let live = live.clone();
+                Some(crate::adapt::PolicyMonitor::spawn(
+                    conn.runtime().handle(),
+                    move || live.connection(),
+                    sampler,
+                    crate::adapt::PolicyMonitor::emit_line,
+                ))
+            }
+            _ => None,
+        };
         Ok(SessionAttachStream {
             stop: AttachStop {
                 finished,
@@ -1078,6 +1109,7 @@ impl Ops {
             },
             forwards: Vec::new(),
             dynamic_forwards: Vec::new(),
+            adapt,
             remote_acceptor,
             remote_tunnels,
             capabilities,
@@ -1294,6 +1326,34 @@ impl Ops {
                 self.connect_reverse(&route).map(|(conn, _generation)| conn)
             }
         }
+    }
+
+    /// A forward connection for `qsh doctor <host>`'s measurement
+    /// (ADR-0052 decision 14): the dial and handshake get `budget`, and a
+    /// host that cannot be reached that way, or one only reachable through a
+    /// reverse registration (no QUIC connection of ours to measure), is
+    /// `Ok(None)` rather than an error. The reachability findings already say
+    /// why a host does not answer.
+    pub(crate) fn connect_probe(
+        &self,
+        host: &str,
+        budget: Duration,
+    ) -> Result<Option<Connected>, OpError> {
+        let PeerRoute::Forward(target) = self.resolve_route(host)? else {
+            return Ok(None);
+        };
+        let runtime = self.connect_runtime()?;
+        let dialed = runtime.block_on(async {
+            tokio::time::timeout(budget, dial_peer(&target, TransportTuning::default())).await
+        });
+        let Ok(Ok((endpoint, connection, session))) = dialed else {
+            return Ok(None);
+        };
+        Ok(Some(Connected {
+            runtime: Some(runtime),
+            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+            session: Some(session),
+        }))
     }
 
     /// [`connect`](Self::connect) for a route the caller already resolved

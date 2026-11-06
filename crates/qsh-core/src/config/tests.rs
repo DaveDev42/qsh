@@ -397,6 +397,7 @@ fn transport_keep_alive_ms_outside_1000_to_20000_is_config_error_without_clampin
     for bad in [0, 999, 20_001, u64::MAX] {
         let transport = TransportConfig {
             keep_alive_ms: Some(bad),
+            adaptive: None,
         };
         let err = transport.keep_alive().unwrap_err();
         assert_eq!(err.code, ErrorCode::ConfigError, "{bad}");
@@ -419,6 +420,7 @@ fn transport_keep_alive_ms_outside_1000_to_20000_is_config_error_without_clampin
     for ok in [1_000, 5_000, 20_000] {
         let transport = TransportConfig {
             keep_alive_ms: Some(ok),
+            adaptive: None,
         };
         assert_eq!(
             transport.keep_alive().unwrap(),

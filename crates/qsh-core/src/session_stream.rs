@@ -894,7 +894,7 @@ async fn screen_pump(
             Instant::now(),
             User {
                 keep_alive: keep_alive.pinned,
-                ..User::default()
+                ..User::from_process()
             },
         ),
         last_sent_stream: 0,

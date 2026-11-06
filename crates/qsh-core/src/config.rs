@@ -484,6 +484,21 @@ pub struct Config {
     /// `[ssh]` — the system `ssh` that `qsh pair ssh` runs once to pin both
     /// sides (`docs/adr/0044-ssh-bootstrap.md` decisions 2, 4, 9).
     pub ssh: SshConfig,
+    /// `[interactive]` — the defaults of the interactive form's flags
+    /// (`--screen-sync`, ADR-0052 decision 15).
+    pub interactive: InteractiveConfig,
+}
+
+/// `[interactive]` section (ADR-0052 decision 15).
+///
+/// Read by each interactive command when it starts, so a change applies to
+/// the next command. A flag on the command line wins over the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InteractiveConfig {
+    /// Default of `--screen-sync`: `"auto"`, `"on"` or `"off"`. Unset is
+    /// `"auto"`. An unknown value is a `CONFIG_ERROR` at load.
+    pub screen_sync: Option<crate::ops::ScreenSync>,
 }
 
 /// `[serve]` section.
@@ -1239,6 +1254,28 @@ pub struct TransportConfig {
     /// [`MAX_KEEP_ALIVE_MS`](TransportConfig::MAX_KEEP_ALIVE_MS) is a
     /// `CONFIG_ERROR`, never clamped.
     pub keep_alive_ms: Option<u64>,
+    /// `"on"` (the default) or `"off"`: whether the adaptive transport
+    /// policy may change its knobs (ADR-0052 decision 15). Off pins every
+    /// knob to the value the transport had before the policy existed.
+    pub adaptive: Option<AdaptiveMode>,
+}
+
+/// Value of `[transport].adaptive`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdaptiveMode {
+    /// The default: the policy decides.
+    #[default]
+    On,
+    /// Every knob is pinned (`adapt::decide` with `User::adaptive = false`).
+    Off,
+}
+
+impl AdaptiveMode {
+    /// Whether the policy is allowed to adapt.
+    pub fn enabled(self) -> bool {
+        self == Self::On
+    }
 }
 
 impl TransportConfig {
@@ -1252,6 +1289,11 @@ impl TransportConfig {
     /// expire first and have the keep-alive setting kill the connection it
     /// exists to keep (ADR-0021 decision 1).
     pub const MAX_KEEP_ALIVE_MS: u64 = 20_000;
+
+    /// Effective `[transport].adaptive`.
+    pub fn adaptive_mode(&self) -> AdaptiveMode {
+        self.adaptive.unwrap_or_default()
+    }
 
     /// Defaulted and validated keep-alive. Fails closed (`CONFIG_ERROR`,
     /// non-retryable) on a value outside the bounds, never clamping it.
@@ -1462,9 +1504,21 @@ pub struct Liveness {
     /// `serve --to` and the controller's `listen` build their registration
     /// watch from it.
     pub reverse_watch: PathWatchConfig,
+    /// `[transport].adaptive` when the operator wrote it. `None` leaves the
+    /// process pin where it is (`crate::adapt::set_process_adaptive`).
+    pub adaptive: Option<AdaptiveMode>,
 }
 
 impl Liveness {
+    /// Pin what `[transport].adaptive` says for this process, at startup and
+    /// before any connection exists (ADR-0052 decision 15). Does nothing when
+    /// the key is not written.
+    pub fn pin_process(&self) {
+        if let Some(mode) = self.adaptive {
+            crate::adapt::set_process_adaptive(mode.enabled());
+        }
+    }
+
     /// The transport tuning these settings describe.
     pub fn tuning(&self) -> qsh_transport::TransportTuning {
         qsh_transport::TransportTuning {
@@ -1483,6 +1537,7 @@ impl Config {
             keep_alive: self.transport.keep_alive()?,
             watch: self.recovery.path_watch()?,
             reverse_watch: self.recovery.reverse_path_watch()?,
+            adaptive: self.transport.adaptive,
         })
     }
 

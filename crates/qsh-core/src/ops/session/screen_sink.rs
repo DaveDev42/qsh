@@ -20,7 +20,8 @@ use qsh_proto::wire;
 use crate::client::render::ScreenRenderer;
 
 /// `--screen-sync` (ADR-0052 decision 15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScreenSync {
     /// Use screen sync when the host offers it for this session, otherwise
     /// the byte path, silently. The default.

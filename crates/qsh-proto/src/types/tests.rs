@@ -1271,9 +1271,11 @@ fn doctor_data_round_trips_with_findings_and_omits_remedy_when_absent() {
                 remedy: None,
             },
         ],
+        transport: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["overall"], "warn");
+    assert!(json.get("transport").is_none(), "absent, never null");
     assert!(json["findings"][0].get("remedy").is_some());
     assert!(json["findings"][1].get("remedy").is_none());
     let back: DoctorData = serde_json::from_value(json).unwrap();
@@ -1289,6 +1291,7 @@ fn doctor_data_empty_findings_is_overall_ok() {
     let data = DoctorData {
         overall: "ok".to_string(),
         findings: vec![],
+        transport: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["findings"], serde_json::json!([]));

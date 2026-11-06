@@ -8,6 +8,7 @@ use crate::config::{
     SshBootstrapMode, SshConfig, TransportConfig,
 };
 use crate::config_edit::{KEYS, KeyType};
+use crate::ops::ScreenSync;
 use crate::ops::test_support::temp_ops;
 
 fn set(ops: &Ops, key: &str, value: &str) -> Result<qsh_proto::ConfigSetData, OpError> {
@@ -411,6 +412,7 @@ fn every_field_populated() -> Config {
         },
         transport: TransportConfig {
             keep_alive_ms: Some(1),
+            adaptive: Some(crate::config::AdaptiveMode::On),
         },
         recovery: RecoverySection {
             probe_interval_ms: Some(1),
@@ -424,6 +426,9 @@ fn every_field_populated() -> Config {
             program: Some(String::new()),
             remote_qsh: Some(String::new()),
         },
+        interactive: crate::config::InteractiveConfig {
+            screen_sync: Some(crate::ops::ScreenSync::Auto),
+        },
     }
 }
 
@@ -431,6 +436,8 @@ fn every_field_populated() -> Config {
 fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
     match path {
         "transport.keep_alive_ms" => "15000".into(),
+        "transport.adaptive" => "off".into(),
+        "interactive.screen_sync" => "on".into(),
         "recovery.probe_interval_ms" => "250".into(),
         "recovery.min_dead_after_ms" => "1000".into(),
         "recovery.strikes" => "3".into(),
@@ -533,4 +540,78 @@ fn doctor_reports_no_config_unknown_key_for_anything_config_set_wrote() {
     let found = unknown(&ops);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].detail.contains("servr.bind"), "{found:?}");
+}
+
+/// ADR-0052 decision 15: `--screen-sync` beats `[interactive].screen_sync`,
+/// which beats `auto`; a `config.toml` that does not parse fails closed.
+#[test]
+fn screen_sync_mode_is_flag_then_key_then_auto() {
+    let (_g, ops) = temp_ops();
+    assert_eq!(ops.screen_sync_mode(None).unwrap(), ScreenSync::Auto);
+    assert_eq!(
+        ops.screen_sync_mode(Some(ScreenSync::On)).unwrap(),
+        ScreenSync::On
+    );
+
+    set(&ops, "interactive.screen_sync", "off").unwrap();
+    assert_eq!(ops.screen_sync_mode(None).unwrap(), ScreenSync::Off);
+    assert_eq!(
+        ops.screen_sync_mode(Some(ScreenSync::On)).unwrap(),
+        ScreenSync::On,
+        "the flag wins over the key"
+    );
+    assert_eq!(
+        ops.screen_sync_mode(Some(ScreenSync::Auto)).unwrap(),
+        ScreenSync::Auto,
+        "an explicit auto is still the flag"
+    );
+
+    set(&ops, "interactive.screen_sync", "on").unwrap();
+    assert_eq!(ops.screen_sync_mode(None).unwrap(), ScreenSync::On);
+
+    // A value the enum does not know is a load error, never a silent auto.
+    std::fs::write(
+        ops.paths().config_file(),
+        "[interactive]\nscreen_sync = \"sometimes\"\n",
+    )
+    .unwrap();
+    let err = ops.screen_sync_mode(None).unwrap_err();
+    assert_eq!(err.code, qsh_proto::ErrorCode::ConfigError);
+    assert_eq!(
+        ops.screen_sync_mode(Some(ScreenSync::Off)).unwrap(),
+        ScreenSync::Off,
+        "a flag needs no config at all"
+    );
+}
+
+/// ADR-0052 decision 15: `[transport].adaptive = "off"` reaches the process
+/// pin the bulk governor and the carrier policy read, and a key that is not
+/// written leaves the pin alone. (nextest runs each test in its own process,
+/// so the process-wide pin does not leak into other tests.)
+#[test]
+fn transport_adaptive_pins_the_process() {
+    use crate::adapt::{User, process_adaptive};
+
+    let (_g, ops) = temp_ops();
+    assert!(process_adaptive(), "adaptive is on by default");
+    ops.pin_process_transport();
+    assert!(process_adaptive(), "no key, no change");
+
+    set(&ops, "transport.adaptive", "on").unwrap();
+    ops.pin_process_transport();
+    assert!(process_adaptive());
+    assert!(User::from_process().adaptive);
+
+    set(&ops, "transport.adaptive", "off").unwrap();
+    ops.pin_process_transport();
+    assert!(!process_adaptive());
+    let user = User::from_process();
+    assert!(!user.adaptive, "the carrier runner's pin follows the key");
+    assert_eq!(user.keep_alive, None);
+
+    // The liveness read every daemon and attach does pins it the same way.
+    crate::adapt::set_process_adaptive(true);
+    ops.config().unwrap().liveness().unwrap().pin_process();
+    assert!(!process_adaptive());
+    crate::adapt::set_process_adaptive(true);
 }
