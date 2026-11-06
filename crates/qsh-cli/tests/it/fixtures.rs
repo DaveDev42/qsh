@@ -101,6 +101,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "audit.query.json",
     "audit.query.truncated.json",
     "doctor.run.keystore_session_bound.json",
+    "doctor_transport.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -1532,6 +1533,68 @@ fn golden_doctor_keystore_session_bound_fixture() {
     };
     check(
         "doctor.run.keystore_session_bound.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `doctor.run` with the `transport` object and both transport `info`
+/// findings (`docs/CLI.md` §6.17, ADR-0052 decision 14, decision 18 item 7).
+///
+/// A measurement connection's RTT is not reproducible, so the object is
+/// built here with the values an old peer on a quiet 18 ms path would give:
+/// no `screen.v1`, no DATAGRAM, the policy at rest. The findings are the
+/// production ones (`qsh_core::doctor` constants) and the envelope is the one
+/// the binary builds; a drift in either is a contract change.
+#[test]
+fn golden_doctor_transport_fixture() {
+    use qsh_core::doctor::{DATAGRAM_UNAVAILABLE, SCREEN_SYNC_UNSUPPORTED};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding, DoctorTransport};
+
+    let finding = |diag: &qsh_core::doctor::Diagnostic| DoctorFinding {
+        code: diag.code.to_string(),
+        status: "info".to_string(),
+        detail: format!("{} (peer: host)", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    };
+    let data = DoctorData {
+        overall: "ok".to_string(),
+        findings: vec![
+            finding(&SCREEN_SYNC_UNSUPPORTED),
+            finding(&DATAGRAM_UNAVAILABLE),
+        ],
+        transport: Some(DoctorTransport {
+            rtt_ms: 18.6,
+            rtt_var_ms: 3.2,
+            min_rtt_ms: 17.9,
+            loss_pct: 0.0,
+            max_datagram_bytes: None,
+            screen_sync: "off".to_string(),
+            frame_interval_ms: 20,
+            bulk_yield: "off".to_string(),
+            prediction: "off".to_string(),
+            keep_alive_ms: 15_000,
+            nested: false,
+            reasons: vec!["datagram_unavailable".to_string(), "rtt_low".to_string()],
+        }),
+    };
+    // Every code the fixture names is a frozen doctor code.
+    for f in &data.findings {
+        assert!(
+            qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&f.code.as_str()),
+            "{}",
+            f.code
+        );
+    }
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor_transport.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
 }

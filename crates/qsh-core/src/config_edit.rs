@@ -85,8 +85,8 @@ use KeyType::{Bool, Int, Str};
 ///
 /// `serve.*`, `listen.*`, `reverse.*`, `audit.*`, `transport.*` and
 /// `recovery.*` are read once when a daemon or a connecting command starts.
-/// `identity.key_store` and `ssh.*` are read by each command that uses
-/// them, so they apply to the next command.
+/// `identity.key_store`, `ssh.*` and `interactive.*` are read by each command
+/// that uses them, so they apply to the next command.
 pub const KEYS: &[ConfigKey] = &[
     key("serve", "bind", Str, true),
     key("serve", "to", Str, true),
@@ -128,6 +128,10 @@ pub const KEYS: &[ConfigKey] = &[
     key("audit", "retain", Int, true),
     key("audit", "queue_depth", Int, true),
     key("transport", "keep_alive_ms", Int, true),
+    ConfigKey {
+        choices: &["on", "off"],
+        ..key("transport", "adaptive", Str, true)
+    },
     key("recovery", "probe_interval_ms", Int, true),
     key("recovery", "min_dead_after_ms", Int, true),
     key("recovery", "strikes", Int, true),
@@ -139,6 +143,10 @@ pub const KEYS: &[ConfigKey] = &[
     },
     key("ssh", "program", Str, false),
     key("ssh", "remote_qsh", Str, false),
+    ConfigKey {
+        choices: &["auto", "on", "off"],
+        ..key("interactive", "screen_sync", Str, false)
+    },
 ];
 
 fn invalid(message: String) -> OpError {

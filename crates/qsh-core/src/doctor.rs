@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 28 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 30 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -47,7 +47,10 @@ pub mod probe;
 /// `KeystoreSessionBound` (ADR-0032 결정 15, M17) is the twenty-seventh, 26 → 27.
 /// `LogonTaskSessionScoped` (ADR-0035 결정 27, M19) is the twenty-eighth,
 /// 27 → 28.
-/// The set is the same on every target: every build knows all 28 codes.
+/// `ScreenSyncUnsupported` and `DatagramUnavailable` (ADR-0052 decision 14,
+/// M22) are the twenty-ninth and thirtieth, 28 -> 30: both are `info`
+/// findings of `qsh doctor <host>`'s measurement connection.
+/// The set is the same on every target: every build knows all 30 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -81,6 +84,8 @@ pub enum DiagnosticId {
     AclFilePathsMissing,
     KeystoreSessionBound,
     LogonTaskSessionScoped,
+    ScreenSyncUnsupported,
+    DatagramUnavailable,
 }
 
 impl DiagnosticId {
@@ -123,6 +128,8 @@ impl DiagnosticId {
             DiagnosticId::AclFilePathsMissing => ACL_FILE_PATHS_MISSING.code,
             DiagnosticId::KeystoreSessionBound => KEYSTORE_SESSION_BOUND.code,
             DiagnosticId::LogonTaskSessionScoped => LOGON_TASK_SESSION_SCOPED.code,
+            DiagnosticId::ScreenSyncUnsupported => SCREEN_SYNC_UNSUPPORTED.code,
+            DiagnosticId::DatagramUnavailable => DATAGRAM_UNAVAILABLE.code,
         }
     }
 }
@@ -148,6 +155,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "config_serve_to_conflict",
     "config_unknown_key",
     "controller_unreachable",
+    "datagram_unavailable",
     "host_pinned_without_address",
     "keystore_session_bound",
     "keystore_unavailable",
@@ -156,6 +164,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "no_route",
     "peer_untrusted",
     "qsh_path_shadowed",
+    "screen_sync_unsupported",
     "service_not_registered",
     "service_restart_drops_sessions",
     "systemd_linger_disabled",
@@ -205,6 +214,28 @@ pub const AUDIT_PATH_UNWRITABLE: Diagnostic = Diagnostic {
     code: "audit_path_unwritable",
     message: "The configured audit log path could not be opened for append. Privileged operations (session.open, exec.run, host.reverse) are denied while the audit log is unwritable — that is fail-closed by design, not a bug.",
     remedy: "Check the audit log directory's permissions and available disk space, then retry. There is no override: recording the decision is a precondition for granting it, and the writer clears this on its own once writing succeeds again.",
+};
+
+/// ADR-0052 decision 14, `docs/CLI.md` §6.17: the measurement connection of
+/// `qsh doctor <host>` found that the peer does not advertise `screen.v1`.
+/// `info`: an interactive session to this peer works on the byte path, which
+/// is also what `--screen-sync=auto` does; only `--screen-sync=on` refuses.
+pub const SCREEN_SYNC_UNSUPPORTED: Diagnostic = Diagnostic {
+    id: DiagnosticId::ScreenSyncUnsupported,
+    code: "screen_sync_unsupported",
+    message: "The peer does not advertise screen.v1, so interactive sessions to it use the byte path: the host's output bytes reach this terminal as they are, with no screen state, no prediction and no scrollback from the host's screen model.",
+    remedy: "Upgrade qsh on the peer to a build that advertises screen.v1. Until then `--screen-sync=auto` falls back to the byte path without a message, and `--screen-sync=on` fails with UNSUPPORTED.",
+};
+
+/// ADR-0052 decision 14, `docs/CLI.md` §6.17: the measurement connection of
+/// `qsh doctor <host>` has no DATAGRAM path: either one end does not
+/// advertise `datagram.v1`, or the path reports no DATAGRAM payload size.
+/// `info`: screen updates and input copies ride the stream carrier.
+pub const DATAGRAM_UNAVAILABLE: Diagnostic = Diagnostic {
+    id: DiagnosticId::DatagramUnavailable,
+    code: "datagram_unavailable",
+    message: "This connection carries no QUIC DATAGRAM: either the peer or this build does not advertise datagram.v1, or the path reports no DATAGRAM payload size. Screen updates and input copies use the ordered stream.",
+    remedy: "Nothing to fix for correctness; the stream carrier is complete. Loss on the path shows up as extra delay instead of skipped updates. If the peer is older, upgrade qsh there.",
 };
 
 /// `docs/CLI.md` §6.17: this machine's UDP egress for QSH's QUIC transport

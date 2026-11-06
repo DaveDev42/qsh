@@ -1,0 +1,40 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "screen_sync_unsupported",
+        "detail": "The peer does not advertise screen.v1, so interactive sessions to it use the byte path: the host's output bytes reach this terminal as they are, with no screen state, no prediction and no scrollback from the host's screen model. (peer: host)",
+        "remedy": "Upgrade qsh on the peer to a build that advertises screen.v1. Until then `--screen-sync=auto` falls back to the byte path without a message, and `--screen-sync=on` fails with UNSUPPORTED.",
+        "status": "info"
+      },
+      {
+        "code": "datagram_unavailable",
+        "detail": "This connection carries no QUIC DATAGRAM: either the peer or this build does not advertise datagram.v1, or the path reports no DATAGRAM payload size. Screen updates and input copies use the ordered stream. (peer: host)",
+        "remedy": "Nothing to fix for correctness; the stream carrier is complete. Loss on the path shows up as extra delay instead of skipped updates. If the peer is older, upgrade qsh there.",
+        "status": "info"
+      }
+    ],
+    "overall": "ok",
+    "transport": {
+      "bulk_yield": "off",
+      "frame_interval_ms": 20,
+      "keep_alive_ms": 15000,
+      "loss_pct": 0.0,
+      "max_datagram_bytes": null,
+      "min_rtt_ms": 17.9,
+      "nested": false,
+      "prediction": "off",
+      "reasons": [
+        "datagram_unavailable",
+        "rtt_low"
+      ],
+      "rtt_ms": 18.6,
+      "rtt_var_ms": 3.2,
+      "screen_sync": "off"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

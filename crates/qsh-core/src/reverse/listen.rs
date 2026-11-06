@@ -183,6 +183,7 @@ pub async fn run_listen(
     // half-initialized controller.
     let stale_retention = config.stale_retention()?;
     let liveness = config.liveness()?;
+    liveness.pin_process();
 
     // localctl (M3 plan Step 5 (a) (2473c88)): bind this process's admin
     // endpoint before the QUIC listener, so a runtime directory whose

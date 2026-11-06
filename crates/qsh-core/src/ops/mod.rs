@@ -803,7 +803,29 @@ impl Ops {
     pub(crate) fn liveness(&self) -> Result<crate::config::Liveness, OpError> {
         let mut liveness = self.config()?.liveness()?;
         crate::client_path::apply_liveness(&mut liveness);
+        liveness.pin_process();
         Ok(liveness)
+    }
+
+    /// Pin `[transport].adaptive` for this process (ADR-0052 decision 15).
+    /// A frontend calls it once at startup, before any connection exists, so
+    /// that one-shot ops (`exec`, `cp`) and tunnels honour the key the way an
+    /// attach does. A `config.toml` that does not load is left to the op that
+    /// needs it to report; the default (`on`) stays in force here.
+    pub fn pin_process_transport(&self) {
+        if let Some(mode) = self.config().ok().and_then(|c| c.transport.adaptive) {
+            crate::adapt::set_process_adaptive(mode.enabled());
+        }
+    }
+
+    /// The `--screen-sync` mode of an interactive command: the flag when
+    /// given, else `[interactive].screen_sync`, else `auto` (ADR-0052
+    /// decision 15). A `config.toml` that does not parse is `CONFIG_ERROR`.
+    pub fn screen_sync_mode(&self, flag: Option<ScreenSync>) -> Result<ScreenSync, OpError> {
+        match flag {
+            Some(mode) => Ok(mode),
+            None => Ok(self.config()?.interactive.screen_sync.unwrap_or_default()),
+        }
     }
 
     /// The recovery settings an attach or supervised tunnel runs with: the

@@ -109,6 +109,7 @@ fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independe
             detail: "line one\nline two\u{1b}[31mred\u{1b}[0m\nline three".to_string(),
             remedy: Some("do the thing".to_string()),
         }],
+        transport: None,
     };
 
     let lines = render_doctor_lines(&data);

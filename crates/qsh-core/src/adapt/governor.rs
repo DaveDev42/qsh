@@ -221,6 +221,17 @@ impl GovernorCore {
         )
     }
 
+    /// `(interactive, bulk)` as of `now`.
+    pub fn activity(&self, now: Duration) -> (bool, bool) {
+        let within = |last: Option<Duration>, window: Duration| {
+            last.is_some_and(|t| now.saturating_sub(t) <= window)
+        };
+        (
+            within(self.last_interactive, INTERACTIVE_WINDOW),
+            within(self.last_bulk, BULK_WINDOW),
+        )
+    }
+
     /// The knob (a) the last [`Self::evaluate`] decided.
     pub fn bulk_yield(&self) -> BulkYield {
         self.knobs.bulk_yield
@@ -315,6 +326,12 @@ impl BulkGovernor {
         } else {
             len
         }
+    }
+
+    /// Whether key input moved within [`INTERACTIVE_WINDOW`] and bulk bytes
+    /// within [`BULK_WINDOW`]: the two traffic inputs of the policy.
+    pub fn activity(&self) -> (bool, bool) {
+        lock(&self.core).activity(self.epoch.elapsed())
     }
 
     /// Current budget rate, for tests and diagnostics.

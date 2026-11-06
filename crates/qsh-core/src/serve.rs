@@ -451,6 +451,9 @@ pub async fn run_serve_with(
     // nonsensical value is a `CONFIG_ERROR` at startup, never clamped
     // (ADR-0021).
     let liveness = config.liveness()?;
+    // `[transport].adaptive` pins the bulk governor and the carrier policy
+    // of every connection this process serves (ADR-0052 decision 15).
+    liveness.pin_process();
     let trust = SharedTrustStore::open(paths.trust_file())?;
     // ADR-0002 / M7 Step 4 (report §B12: forward-host, `qsh serve`, only —
     // deliberately wired here in `run_serve`, not in the `host_runtime`

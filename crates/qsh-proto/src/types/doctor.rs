@@ -20,7 +20,7 @@ pub struct DoctorReq {
 }
 
 /// Data payload of `doctor.run` (`docs/CLI.md` §6.17).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DoctorData {
     /// `"ok"` when every finding is informational or absent; `"warn"` when
     /// the worst finding is `"warn"`; `"error"` when at least one finding
@@ -30,6 +30,46 @@ pub struct DoctorData {
     pub overall: String,
     /// One entry per diagnostic that fired. Empty when nothing did.
     pub findings: Vec<DoctorFinding>,
+    /// What a short measurement connection to `DoctorReq.host` saw and what
+    /// the adaptive policy would do with it (ADR-0052 decision 14). Absent
+    /// when no host was named or the measurement connection did not come up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<DoctorTransport>,
+}
+
+/// The `transport` object of [`DoctorData`] (`docs/CLI.md` §6.17, ADR-0052
+/// decision 14). Statistics and knob values only: nothing in it can carry
+/// PTY content or key material.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorTransport {
+    /// Smoothed round-trip time of the measurement connection, in
+    /// milliseconds.
+    pub rtt_ms: f64,
+    /// Round-trip time variation, in milliseconds.
+    pub rtt_var_ms: f64,
+    /// Smallest round-trip time seen, in milliseconds.
+    pub min_rtt_ms: f64,
+    /// Packet loss over the measurement, in percent.
+    pub loss_pct: f64,
+    /// Largest DATAGRAM payload the path carries, in bytes; `null` when the
+    /// path carries none.
+    pub max_datagram_bytes: Option<u64>,
+    /// Screen-update carrier: `"datagram"`, `"stream"` or `"off"`.
+    pub screen_sync: String,
+    /// Minimum time between screen updates, in milliseconds.
+    pub frame_interval_ms: u64,
+    /// Knob (a): `"off"` or `"yield"`. A measurement connection carries no
+    /// interactive traffic, so this reads `"off"` there.
+    pub bulk_yield: String,
+    /// Knob (d): `"off"`, `"display"` or `"underline"`.
+    pub prediction: String,
+    /// Keep-alive interval, in milliseconds.
+    pub keep_alive_ms: u64,
+    /// The connection rides inside a jump or proxy.
+    pub nested: bool,
+    /// Why the knobs have these values. An open vocabulary; the starting set
+    /// is in `docs/CLI.md` §6.17.
+    pub reasons: Vec<String>,
 }
 
 /// One diagnostic result within `doctor.run`'s [`DoctorData::findings`]

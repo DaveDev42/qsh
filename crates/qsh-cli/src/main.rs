@@ -239,15 +239,24 @@ fn init_tracing(cli: &Cli) {
     // `--quiet`, next to human lines whose bytes stay as they were.
     let lifecycle_target = qsh_core::lifecycle::TARGET;
     let lifecycle_default = format!("{default},{lifecycle_target}=info");
+    // Target `qsh::adapt` (ADR-0052 decision 14): the interactive client's
+    // transport policy line, one JSON object per change of a discrete knob.
+    // Unlike the records above it is not on at default verbosity: it is
+    // written into the terminal the session draws on, and a policy that
+    // moves with the network would scribble on the screen unasked. `-v` or
+    // `QSH_LOG=qsh::adapt=info` turns it on; `-q` still silences it.
+    let adapt_target = qsh_core::adapt::TARGET;
+    let adapt_default = if cli.verbose >= 1 { "info" } else { "off" };
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
         .with_filter(env_filter(spec, default))
-        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             meta.target() != qsh_core::telemetry::TARGET
                 && meta.target() != qsh_core::reverse::listen::TARGET
                 && meta.target() != qsh_core::tunnel::supervise::TARGET
                 && meta.target() != qsh_core::lifecycle::TARGET
+                && meta.target() != adapt_target
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -273,8 +282,15 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             lifecycle_enabled && meta.target() == lifecycle_target
         }));
+    let adapt_enabled = !cli.quiet;
+    let adapt = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec, adapt_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            adapt_enabled && meta.target() == adapt_target
+        }));
     tracing_subscriber::registry()
         .with(human)
+        .with(adapt)
         .with(recovery)
         .with(reverse)
         .with(supervise)
@@ -420,6 +436,9 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     } else {
         ops.with_ssh_revival(ssh_revival(cli, None, SshOptions::default()))
     };
+    // `[transport].adaptive` pins the bulk governor of every connection this
+    // process dials, one-shot ops included (ADR-0052 decision 15).
+    ops.pin_process_transport();
     let Some(command) = &cli.command else {
         return run_ssh_form(cli, &ops);
     };
@@ -672,7 +691,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 session_ref: session_ref.clone(),
             },
             *escape_char,
-            screen_sync.unwrap_or_default(),
+            *screen_sync,
             &SshOptions::default(),
         ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
@@ -920,7 +939,7 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
                 shell_command,
             },
             args.escape_char,
-            args.screen_sync.unwrap_or_default(),
+            args.screen_sync,
             &ssh,
         ),
         FormMode::Exec(command) => {
@@ -1043,7 +1062,7 @@ fn run_interactive(
     ops: &Ops,
     what: tui::Attach,
     escape: Option<EscapeChar>,
-    screen_sync: ScreenSync,
+    screen_sync: Option<ScreenSync>,
     ssh: &SshOptions,
 ) -> i32 {
     let command = what.command();
@@ -1087,6 +1106,11 @@ fn run_interactive(
         return code;
     }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
+    // The flag wins over `[interactive].screen_sync` (ADR-0052 decision 15).
+    let screen_sync = match ops.screen_sync_mode(screen_sync) {
+        Ok(mode) => mode,
+        Err(err) => return report_error(cli, command, &err),
+    };
     match tui::run(ops, what, escape, screen_sync) {
         Ok(code) => code,
         Err(err) => report_error(cli, command, &err),

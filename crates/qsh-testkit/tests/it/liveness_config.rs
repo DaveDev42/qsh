@@ -39,6 +39,7 @@ fn bad_configs() -> Vec<(&'static str, Config)> {
             Config {
                 transport: TransportConfig {
                     keep_alive_ms: Some(999),
+                    adaptive: None,
                 },
                 ..Config::default()
             },

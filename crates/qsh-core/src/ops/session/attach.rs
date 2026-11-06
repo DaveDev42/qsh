@@ -67,6 +67,12 @@ pub struct SessionAttachStream {
     /// **before** `conn` for the same reason `forwards` is: each handle's
     /// drop aborts its accept loop on `conn`'s runtime.
     pub(super) dynamic_forwards: Vec<crate::tunnel::DynamicForwardHandle>,
+    /// What the transport policy decides for this attach's connection
+    /// (ADR-0052 decision 14). Declared **before** `conn` for the same
+    /// reason the forwards are: its sampling task runs on `conn`'s runtime
+    /// and is aborted by its drop. `None` for a stream that is not an
+    /// interactive screen attach and on the reverse route.
+    pub(super) adapt: Option<crate::adapt::PolicyMonitor>,
     /// The `-R` remote forwards opened on this attach, if any — one shared
     /// [`crate::tunnel::remote::RemoteForwardAcceptor`] for every `-R` spec
     /// on this attach (M4 plan Step 4 (2473c88)): a single `TCP_ACCEPTED`
@@ -215,6 +221,16 @@ impl RenewalSchedule {
 }
 
 impl SessionAttachStream {
+    /// The latest transport policy report for this attach (RTT, loss, the
+    /// knobs and why), the same values `qsh::adapt` prints. `None` until the
+    /// first once-a-second sample, and for streams that run no policy
+    /// monitor. M23's status line reads it here.
+    pub fn adapt_report(&self) -> Option<qsh_proto::DoctorTransport> {
+        self.adapt
+            .as_ref()
+            .and_then(crate::adapt::PolicyMonitor::current)
+    }
+
     /// Bind and start this attach's `-L` local forwards (the M4 plan (2473c88)
     /// Step 3; `docs/CLI.md` §7 "`-L`/`-R`은 이 대화형 form의 companion
     /// flag이지 별도 명령이 아니다").
