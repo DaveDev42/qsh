@@ -1,0 +1,12 @@
+name = "q5-deep-priority"
+question = "q5"
+description = "Saturating bulk plus key echo, priority, 20 Mbit link RTT 50 ms, 600 ms queue"
+
+[link]
+rtt_ms = 50
+rate_mbit = 20
+queue_ms = 600
+
+[workload]
+kind = "bulk_echo"
+isolation = "priority"

@@ -1,0 +1,13 @@
+name = "q1-stream-loss3"
+question = "q1"
+description = "Screen states over stream at RTT 150 ms, 3% loss per direction, 20 Mbit link with 100 ms queue"
+
+[link]
+rtt_ms = 150
+loss_pct = 3
+rate_mbit = 20
+queue_ms = 100
+
+[workload]
+kind = "screen"
+carrier = "stream"

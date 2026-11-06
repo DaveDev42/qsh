@@ -1,0 +1,14 @@
+name = "q6-nested-outer-datagram-buf64"
+question = "q6"
+description = "As q6-nested-outer-datagram with the outer datagram send buffer cut to 64 KiB (about 25 ms at 20 Mbit)"
+
+[link]
+rtt_ms = 80
+loss_pct = 1
+rate_mbit = 20
+queue_ms = 100
+
+[workload]
+kind = "bulk_echo"
+path = "nested_datagram"
+datagram_send_buffer_kib = 64

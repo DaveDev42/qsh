@@ -150,6 +150,24 @@ would and produces the seed-corpus zips, so a submission can be checked
 without cloning the OSS-Fuzz repo. Target inventory and campaign procedure
 are in [fuzz/README.md](../fuzz/README.md).
 
+## netbench/
+
+`run.sh [--out FILE] [PROFILE|qN ...]` re-measures the six questions of the
+ADR-0052 context section (DATAGRAM vs stream staleness, BBR vs Cubic, MTU,
+key echo tail, bulk with interactive traffic on a shared bottleneck, nested
+transport) and prints one `qsh.netbench/v1` JSON line per profile. It is
+rootless: each run happens in `unshare -rn`, a second network namespace
+holds the client, and veth plus `tc` netem and tbf shape the link from the
+TOML files in `profiles/`. Traffic comes from `netbench`, a standalone
+quinn/tokio crate outside the workspace (the way `fuzz/` is), so the
+shipped crates, `cargo xtask arch` and `cargo deny check` never see it.
+Only ephemeral UDP ports are used; UDP 4433 is never touched. An agent runs
+it on a host that allows user namespaces and has `sch_netem` and `sch_tbf`
+(Dave-Windows-WSL does); it is not part of CI. Its unit tests run with
+`cargo test --release --manifest-path scripts/netbench/Cargo.toml`. The
+staleness definition and the result fields are in
+[netbench/README.md](netbench/README.md).
+
 ## mobility/
 
 Manual Wi-Fi to tethering mobility campaign: `switch-linux.sh` and

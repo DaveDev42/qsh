@@ -1,0 +1,13 @@
+name = "q4-echo-loss5"
+question = "q4"
+description = "Key echo round trip at RTT 150 ms, 5% loss per direction, 20 Mbit link with 100 ms queue, nothing else on the link"
+
+[link]
+rtt_ms = 150
+loss_pct = 5
+rate_mbit = 20
+queue_ms = 100
+
+[workload]
+kind = "echo"
+duration_s = 30
