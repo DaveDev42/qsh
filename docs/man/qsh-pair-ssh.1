@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-pair\-ssh \- Pin this machine and a remote one to each other over ssh, then check the pair with a QUIC handshake (ADR\-0044, `docs/CLI.md` §6.11)
 .SH SYNOPSIS
-\fBqsh pair ssh\fR [\fB\-\-as\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-remote\-as\fR] [\fB\-\-role\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-address\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-reverse\fR] [\fB\-\-to\fR] [\fB\-\-remote\-qsh\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fI[USER@]HOST\fR> 
+\fBqsh pair ssh\fR [\fB\-\-as\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-remote\-as\fR] [\fB\-\-role\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-address\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-reverse\fR] [\fB\-\-to\fR] [\fB\-\-remote\-qsh\fR] [\fB\-\-replace\-pin\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fI[USER@]HOST\fR> 
 .SH DESCRIPTION
 Pin this machine and a remote one to each other over ssh, then check the pair with a QUIC handshake (ADR\-0044, `docs/CLI.md` §6.11).
 .PP
@@ -46,6 +46,9 @@ With `\-\-reverse`: the `host[:port]` the remote dials to reach this machine\*(A
 .TP
 \fB\-\-remote\-qsh\fR \fI<PATH>\fR
 The `qsh` to run on the remote (default: `[ssh].remote_qsh` in `config.toml`, then `qsh`)
+.TP
+\fB\-\-replace\-pin\fR
+Replace a pin that holds another fingerprint than the one the ssh login now reaches, on this machine or on the remote (a reinstalled remote, a new key here), instead of failing with `pin_conflict`. The replaced pin loses its `grants`. On a terminal, without this flag, both fingerprints are shown and the replacement is asked (`[y/N]`, default no). The trust is the ssh login and its host key check; an invite\-code pairing is not affected
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

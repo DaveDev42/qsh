@@ -154,6 +154,7 @@ impl Ops {
             reverse: false,
             to: None,
             remote_qsh: None,
+            replace_pin: false,
         };
         match self.pair_ssh_with(req, env, Confirmation::Deferred) {
             Err(err) => AutoBootstrapReport {

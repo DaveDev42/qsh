@@ -172,6 +172,7 @@ fn plan(role: TrustRole) -> Plan {
         runner: SshRunner::new("ssh"),
         batch: true,
         ssh: SshOptions::default(),
+        replace_pin: false,
     }
 }
 
@@ -196,6 +197,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
         ssh_proxied: false,
         verified: true,
         verify_error: None,
+        replaced: None,
     }
 }
 
@@ -438,6 +440,7 @@ fn serve_info_needs_a_socket_address_and_reads_the_scoped_flag() {
         serve_bind: bind.map(str::to_string),
         serve_started: Some(true),
         serve_session_scoped: scoped,
+        replaced_fingerprint: None,
     };
     assert_eq!(ServeInfo::from_result(&result(None, None)), None);
     assert_eq!(
@@ -517,4 +520,261 @@ fn only_a_dial_failure_can_be_a_missing_serve() {
     let blocked = err(ErrorCode::ConnectionFailed)
         .with_details(serde_json::json!({ "reason": "udp_egress_blocked" }));
     assert!(!failure_may_be_a_missing_serve(&blocked));
+}
+
+// ---------------------------------------------------------------------
+// pin replacement (ADR-0051 decision 5)
+// ---------------------------------------------------------------------
+
+mod replace_pin {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::audit::{FailingAuditSink, MemoryAuditSink};
+    use crate::ops::test_support::temp_ops;
+    use crate::prompts::{Prompt, Prompter, REPLACE_PIN};
+
+    /// Answers the replace-the-pin question with a fixed value and keeps
+    /// what it was shown.
+    struct Script {
+        answer: Option<bool>,
+        asked: Mutex<u32>,
+        notes: Mutex<Vec<String>>,
+    }
+
+    impl Script {
+        fn new(answer: Option<bool>) -> Arc<Self> {
+            Arc::new(Self {
+                answer,
+                asked: Mutex::new(0),
+                notes: Mutex::new(Vec::new()),
+            })
+        }
+        fn asked(&self) -> u32 {
+            *self.asked.lock().unwrap()
+        }
+        fn notes(&self) -> String {
+            self.notes.lock().unwrap().join("\n")
+        }
+    }
+
+    impl Prompter for Script {
+        fn ask(&self, prompt: &Prompt) -> Option<bool> {
+            assert_eq!(prompt, &REPLACE_PIN);
+            *self.asked.lock().unwrap() += 1;
+            self.answer
+        }
+        fn note(&self, text: &str) {
+            self.notes.lock().unwrap().push(text.to_string());
+        }
+    }
+
+    fn env(prompter: Arc<dyn Prompter>) -> PairSshEnv {
+        PairSshEnv {
+            machine_mode: false,
+            stdin_is_terminal: true,
+            cancel: CancelToken::new(),
+            ssh: SshOptions::default(),
+            prompter,
+        }
+    }
+
+    /// A tree whose trust store holds `box` pinned to `FP_A`, with a grant.
+    fn tree_with_granted_pin() -> (tempfile::TempDir, Ops) {
+        let (dir, ops) = temp_ops();
+        let path = ops.paths().trust_file();
+        let mut store = TrustStore::default();
+        store.add_peer_with_role(
+            "box",
+            Some("10.0.0.1:4433".into()),
+            fp(FP_A),
+            "2026-01-01T00:00:00Z".into(),
+            TrustRole::None,
+        );
+        store
+            .set_grants(
+                "box",
+                crate::acl::PinGrantKeys {
+                    grants: Some(vec!["forward.local".into()]),
+                    paths: None,
+                    scope: None,
+                },
+            )
+            .unwrap();
+        store.mark_source("box", crate::trust::PIN_SOURCE_SSH_BOOTSTRAP);
+        store.save(&path).unwrap();
+        (dir, ops)
+    }
+
+    fn bytes(ops: &Ops) -> Vec<u8> {
+        std::fs::read(ops.paths().trust_file()).unwrap()
+    }
+
+    #[test]
+    fn the_question_shows_both_fingerprints_and_anything_but_yes_refuses() {
+        let (_dir, ops) = tree_with_granted_pin();
+        for answer in [None, Some(false)] {
+            let script = Script::new(answer);
+            let err = match ops.local_replace_decision(
+                &plan(TrustRole::Full),
+                &env(script.clone()),
+                &fp(FP_B),
+            ) {
+                Err(err) => err,
+                Ok(_) => panic!("{answer:?} must refuse"),
+            };
+            assert_eq!(err.code, ErrorCode::SessionConflict);
+            assert_eq!(err.details["reason"], "pin_conflict");
+            assert_eq!(script.asked(), 1);
+            let notes = script.notes();
+            assert!(notes.contains(FP_A) && notes.contains(FP_B), "{notes}");
+        }
+        let script = Script::new(Some(true));
+        let decision = ops
+            .local_replace_decision(&plan(TrustRole::Full), &env(script.clone()), &fp(FP_B))
+            .unwrap();
+        assert!(matches!(
+            decision,
+            replace::LocalDecision::Replace { asked: true, .. }
+        ));
+        // Deciding writes nothing.
+        assert!(
+            TrustStore::load(&ops.paths().trust_file())
+                .unwrap()
+                .find("box")
+                .unwrap()
+                .fingerprint
+                == FP_A
+        );
+    }
+
+    #[test]
+    fn the_flag_replaces_without_asking_and_no_conflict_asks_nothing() {
+        let (_dir, ops) = tree_with_granted_pin();
+        let script = Script::new(None);
+        let mut flagged = plan(TrustRole::Full);
+        flagged.replace_pin = true;
+        let decision = ops
+            .local_replace_decision(&flagged, &env(script.clone()), &fp(FP_B))
+            .unwrap();
+        assert!(matches!(
+            decision,
+            replace::LocalDecision::Replace { asked: false, .. }
+        ));
+        assert_eq!(script.asked(), 0);
+
+        // The same identity again, or a name nobody holds: nothing to ask.
+        let decision = ops
+            .local_replace_decision(&plan(TrustRole::Full), &env(script.clone()), &fp(FP_A))
+            .unwrap();
+        assert!(matches!(decision, replace::LocalDecision::Proceed));
+        let (_dir2, empty) = temp_ops();
+        let decision = empty
+            .local_replace_decision(&plan(TrustRole::Full), &env(script.clone()), &fp(FP_B))
+            .unwrap();
+        assert!(matches!(decision, replace::LocalDecision::Proceed));
+        assert_eq!(script.asked(), 0);
+    }
+
+    #[test]
+    fn a_fingerprint_pinned_under_another_name_is_never_replaced_over() {
+        let (_dir, ops) = tree_with_granted_pin();
+        let path = ops.paths().trust_file();
+        let mut store = TrustStore::load(&path).unwrap();
+        store.add_peer("other", None, fp(FP_B), "2026-01-01T00:00:00Z".into());
+        store.save(&path).unwrap();
+        let mut flagged = plan(TrustRole::Full);
+        flagged.replace_pin = true;
+        let err =
+            match ops.local_replace_decision(&flagged, &env(Script::new(Some(true))), &fp(FP_B)) {
+                Err(err) => err,
+                Ok(_) => panic!("a second pin of one identity is refused"),
+            };
+        assert_eq!(err.details["reason"], "pin_conflict");
+    }
+
+    #[test]
+    fn replacing_the_local_pin_clears_grants_and_audits_before_saving() {
+        let (_dir, ops) = tree_with_granted_pin();
+        let sink = Arc::new(MemoryAuditSink::new());
+        let ops = ops.with_audit_sink(sink.clone());
+        let peer = ops
+            .replace_local_pin(&plan(TrustRole::Full), "10.0.0.2:4433", &fp(FP_B), FP_A)
+            .unwrap();
+        assert_eq!(peer.fingerprint, FP_B);
+        let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+        let pin = store.find("box").unwrap();
+        assert_eq!(pin.fingerprint, FP_B);
+        assert_eq!(pin.address, "10.0.0.2:4433");
+        assert_eq!(pin.role.as_deref(), Some("none"));
+        assert_eq!((&pin.grants, &pin.paths, &pin.scope), (&None, &None, &None));
+        // A new pin made under the ssh host name is one the bootstrap made.
+        assert_eq!(pin.source.as_deref(), Some("ssh_bootstrap"));
+        assert_eq!(store.peers().len(), 1);
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].action, "pair.ssh.replace_pin");
+        assert_eq!(records[0].principal, "device:box");
+    }
+
+    #[test]
+    fn replacing_the_local_pin_without_a_durable_audit_record_changes_nothing() {
+        let (_dir, ops) = tree_with_granted_pin();
+        let sink = Arc::new(FailingAuditSink::new());
+        sink.fail();
+        let ops = ops.with_audit_sink(sink.clone());
+        let before = bytes(&ops);
+        let err = ops
+            .replace_local_pin(&plan(TrustRole::Full), "10.0.0.2:4433", &fp(FP_B), FP_A)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.retryable);
+        assert_eq!(bytes(&ops), before);
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn a_pin_that_changed_while_ssh_ran_is_not_replaced() {
+        let (_dir, ops) = tree_with_granted_pin();
+        let sink = Arc::new(MemoryAuditSink::new());
+        let ops = ops.with_audit_sink(sink.clone());
+        let before = bytes(&ops);
+        let err = ops
+            .replace_local_pin(&plan(TrustRole::Full), "10.0.0.2:4433", &fp(FP_B), FP_B)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::SessionConflict);
+        assert_eq!(bytes(&ops), before);
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn the_remote_question_defaults_to_no_and_shows_both_fingerprints() {
+        let (_dir, ops) = temp_ops();
+        let p = plan(TrustRole::Full);
+        for (answer, expected) in [(None, false), (Some(false), false), (Some(true), true)] {
+            let script = Script::new(answer);
+            let got = ops.ask_replace_remote(
+                &env(script.clone()),
+                &p,
+                "laptop",
+                Some(&fp(FP_A)),
+                &fp(FP_B),
+            );
+            assert_eq!(got, expected, "{answer:?}");
+            let notes = script.notes();
+            assert!(notes.contains(FP_A) && notes.contains(FP_B), "{notes}");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_remote_error_names_the_manual_way() {
+        let err = remote_replace_unsupported("laptop", "dave@box");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(err.details["reason"], "remote_replace_unsupported");
+        assert!(
+            err.message.contains("ssh dave@box qsh trust remove laptop"),
+            "{}",
+            err.message
+        );
+    }
 }

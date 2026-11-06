@@ -59,6 +59,11 @@ const ENSURE_SERVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// It names no operation: `qsh pair ssh-respond` is not one.
 pub const AUDIT_ACTION: &str = "pair.ssh_respond";
 
+/// The audit `action` of a pin the responder replaced on a `commit` with
+/// `replace` (ADR-0051 decision 5). A separate action so a replacement is
+/// never mistaken for a new pin.
+pub const AUDIT_ACTION_REPLACE: &str = "pair.ssh_respond.replace_pin";
+
 /// How a responder run ended. The process exits 0 for every variant; only
 /// an I/O failure on the streams is an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +96,10 @@ pub struct Responder {
     /// honoured. Always on in production; a test turns it off to stand in for
     /// a responder from before ADR-0051.
     on_demand: bool,
+    /// Whether the `hello` advertises `replace_pin` and a `commit` with
+    /// `replace` is honoured. Always on in production; a test turns it off to
+    /// stand in for a responder from before ADR-0051 decision 5.
+    replace_pin: bool,
 }
 
 impl Responder {
@@ -104,6 +113,7 @@ impl Responder {
             serve_program: None,
             ensure_timeout: ENSURE_SERVE_TIMEOUT,
             on_demand: true,
+            replace_pin: true,
         }
     }
 
@@ -124,6 +134,13 @@ impl Responder {
     /// in the `hello`, and the request is ignored.
     pub fn without_on_demand(mut self) -> Self {
         self.on_demand = false;
+        self
+    }
+
+    /// Behave like a responder that predates `replace`: no `replace_pin` in
+    /// the `hello`, and the request is ignored.
+    pub fn without_replace_pin(mut self) -> Self {
+        self.replace_pin = false;
         self
     }
 
@@ -163,6 +180,7 @@ impl Responder {
                 serve_bind: None,
                 serve_listening: None,
                 on_demand: None,
+                replace_pin: None,
             },
             Some(identity) => Hello {
                 versions: BOOTSTRAP_VERSIONS.to_vec(),
@@ -172,6 +190,7 @@ impl Responder {
                 serve_listening: serve_listening(&serve_spec),
                 serve_bind: Some(serve_spec),
                 on_demand: self.on_demand.then_some(true),
+                replace_pin: self.replace_pin.then_some(true),
             },
         };
         send(&mut output, &BootstrapLine::Hello(hello)).await?;
@@ -307,7 +326,8 @@ impl Responder {
             Some(address) => Some(normalize_peer_address(address).address),
         };
 
-        match self.write_pin(name, address, fingerprint, role) {
+        let replace = self.replace_pin && commit.replace == Some(true);
+        match self.write_pin(name, address, fingerprint, role, replace) {
             Ok(result) => result,
             Err(err) => {
                 tracing::warn!(stage = "write", code = ?err.code, "ssh-respond");
@@ -325,6 +345,7 @@ impl Responder {
         address: Option<String>,
         fingerprint: Fingerprint,
         role: TrustRole,
+        replace: bool,
     ) -> Result<BootstrapResult, OpError> {
         let path = self.paths.trust_file();
         let _lock = TrustStore::lock(&path)?;
@@ -364,9 +385,13 @@ impl Responder {
                 serve_bind: None,
                 serve_started: None,
                 serve_session_scoped: None,
+                replaced_fingerprint: None,
             });
         }
-        if let Some(existing) = store.find(name) {
+        if let Some(existing) = store.find(name).cloned() {
+            if replace {
+                return self.replace_pin_of(&path, store, name, address, fingerprint, role);
+            }
             return Ok(BootstrapResult {
                 status: ResultStatus::Conflict,
                 name: name.to_string(),
@@ -380,6 +405,7 @@ impl Responder {
                 serve_bind: None,
                 serve_started: None,
                 serve_session_scoped: None,
+                replaced_fingerprint: None,
             });
         }
 
@@ -410,6 +436,55 @@ impl Responder {
             serve_bind: None,
             serve_started: None,
             serve_session_scoped: None,
+            replaced_fingerprint: None,
+        })
+    }
+}
+
+impl Responder {
+    /// The `replace` half of [`Self::write_pin`] (ADR-0051 decision 5): the
+    /// pin named `name` holds another fingerprint and the client was told by
+    /// its person (or `--replace-pin`) to replace it. The caller holds the
+    /// `trust.toml` lock and has loaded `store`. The old pin goes, the new
+    /// one comes with no grants, the audit record is written, then the file
+    /// is saved; a failed audit leaves `trust.toml` as it was.
+    fn replace_pin_of(
+        &self,
+        path: &std::path::Path,
+        mut store: TrustStore,
+        name: &str,
+        address: Option<String>,
+        fingerprint: Fingerprint,
+        role: TrustRole,
+    ) -> Result<BootstrapResult, OpError> {
+        let (peer, old) = store
+            .replace_peer(name, address, fingerprint, now_rfc3339(), role)
+            .ok_or_else(|| OpError::new(ErrorCode::Internal, "the pin to replace vanished"))?;
+        let mut record = AuditRecord::local_op(
+            AUDIT_ACTION_REPLACE,
+            Principal::Device(peer.name.clone()).to_string(),
+            peer.name.clone(),
+        );
+        record.role = Some(role.as_str().to_string());
+        self.audit.record(&record).map_err(|err| {
+            OpError::new(
+                ErrorCode::Internal,
+                format!("audit record could not be written; trust.toml left unchanged: {err}"),
+            )
+            .with_retryable(true)
+        })?;
+        store.save(path)?;
+        Ok(BootstrapResult {
+            status: ResultStatus::Pinned,
+            name: peer.name,
+            role: Some(role.as_str().to_string()),
+            created: true,
+            code: None,
+            message: None,
+            serve_bind: None,
+            serve_started: None,
+            serve_session_scoped: None,
+            replaced_fingerprint: Some(old.fingerprint),
         })
     }
 }
@@ -440,6 +515,7 @@ fn reject(name: &str, code: ErrorCode, message: &str) -> BootstrapResult {
         serve_bind: None,
         serve_started: None,
         serve_session_scoped: None,
+        replaced_fingerprint: None,
     }
 }
 

@@ -1513,6 +1513,15 @@ pub struct PairSshArgs {
     /// `config.toml`, then `qsh`).
     #[arg(long, value_name = "PATH")]
     pub remote_qsh: Option<String>,
+    /// Replace a pin that holds another fingerprint than the one the ssh
+    /// login now reaches, on this machine or on the remote (a reinstalled
+    /// remote, a new key here), instead of failing with `pin_conflict`. The
+    /// replaced pin loses its `grants`. On a terminal, without this flag,
+    /// both fingerprints are shown and the replacement is asked
+    /// (`[y/N]`, default no). The trust is the ssh login and its host key
+    /// check; an invite-code pairing is not affected.
+    #[arg(long)]
+    pub replace_pin: bool,
 }
 
 /// `qsh setup <role>` (`docs/CLI.md` §6.20, ADR-0024 decision 2). Each role

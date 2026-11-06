@@ -180,6 +180,12 @@ pub struct Hello {
     /// predates it; a client sends `ensure_serve` only when this is `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_demand: Option<bool>,
+    /// The responder can replace a pin whose name is taken by another
+    /// fingerprint (`commit`'s `replace`, ADR-0051 decision 5). Absent from
+    /// a responder that predates it; a client sends `replace` only when this
+    /// is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_pin: Option<bool>,
 }
 
 /// Client to responder, sent after a version was agreed.
@@ -203,6 +209,13 @@ pub struct Commit {
     /// responder whose `hello` has `on_demand: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure_serve: Option<bool>,
+    /// The person approved replacing the pin that holds `name` with a
+    /// different fingerprint (ADR-0051 decision 5): the responder deletes
+    /// that pin and writes this one. Without it a name conflict is a
+    /// `conflict` result. Sent only to a responder whose `hello` has
+    /// `replace_pin: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
 }
 
 /// Responder to client, last message.
@@ -240,6 +253,11 @@ pub struct BootstrapResult {
     /// or a Windows job that refused breakaway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serve_session_scoped: Option<bool>,
+    /// Answer to `replace`: the fingerprint of the pin that was deleted.
+    /// Present only on a `pinned` result that replaced one (peer-authored:
+    /// parse it as a fingerprint before use).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_fingerprint: Option<String>,
 }
 
 /// One parsed bootstrap line.

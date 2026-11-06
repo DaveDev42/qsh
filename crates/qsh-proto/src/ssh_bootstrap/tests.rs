@@ -11,6 +11,7 @@ fn hello() -> Hello {
         serve_bind: Some("[::]:4433".to_string()),
         serve_listening: Some(false),
         on_demand: None,
+        replace_pin: None,
     }
 }
 
@@ -22,6 +23,7 @@ fn commit() -> Commit {
         role: "full".to_string(),
         address: None,
         ensure_serve: None,
+        replace: None,
     }
 }
 
@@ -36,6 +38,7 @@ fn result() -> BootstrapResult {
         serve_bind: None,
         serve_started: None,
         serve_session_scoped: None,
+        replaced_fingerprint: None,
     }
 }
 
@@ -50,10 +53,12 @@ fn every_message() -> Vec<BootstrapLine> {
             serve_bind: None,
             serve_listening: None,
             on_demand: None,
+            replace_pin: None,
         }),
         BootstrapLine::Hello(Hello {
             serve_listening: None,
             on_demand: None,
+            replace_pin: None,
             ..hello()
         }),
         BootstrapLine::Commit(commit()),
@@ -600,16 +605,19 @@ fn the_adr_0051_fields_round_trip() {
     let lines = [
         BootstrapLine::Hello(Hello {
             on_demand: Some(true),
+            replace_pin: None,
             ..hello()
         }),
         BootstrapLine::Commit(Commit {
             ensure_serve: Some(true),
+            replace: None,
             ..commit()
         }),
         BootstrapLine::Result(BootstrapResult {
             serve_bind: Some("192.0.2.7:60001".into()),
             serve_started: Some(true),
             serve_session_scoped: Some(false),
+            replaced_fingerprint: None,
             ..result()
         }),
     ];
@@ -629,4 +637,23 @@ fn a_line_with_unknown_future_fields_still_parses() {
         parse_ssh_bootstrap_line(line),
         Ok(BootstrapLine::Result(_))
     ));
+}
+
+#[test]
+fn replace_fields_are_additive_and_omitted_when_absent() {
+    let text = r#"qsh-bootstrap {"type":"hello","versions":[1],"qsh_version":"1","status":"ready","replace_pin":true}"#;
+    let line = parse_ssh_bootstrap_line(text.as_bytes()).unwrap();
+    let BootstrapLine::Hello(hello) = line else {
+        panic!("hello expected");
+    };
+    assert_eq!(hello.replace_pin, Some(true));
+    // A line from before the field parses, and encodes without it.
+    let old =
+        r#"qsh-bootstrap {"type":"commit","version":1,"fingerprint":"x","name":"n","role":"full"}"#;
+    let BootstrapLine::Commit(commit) = parse_ssh_bootstrap_line(old.as_bytes()).unwrap() else {
+        panic!("commit expected");
+    };
+    assert_eq!(commit.replace, None);
+    let encoded = BootstrapLine::Commit(commit).encode_line().unwrap();
+    assert!(!encoded.contains("replace"), "{encoded}");
 }

@@ -132,6 +132,7 @@ impl Ops {
             stdin_is_terminal: std::io::stdin().is_terminal(),
             cancel: CancelToken::new(),
             ssh: revival.ssh.clone(),
+            prompter: Arc::new(crate::prompts::NoPrompter),
         };
         let plan = self.pair_ssh_plan(
             &PairSshReq {
@@ -143,6 +144,7 @@ impl Ops {
                 reverse: false,
                 to: None,
                 remote_qsh: None,
+                replace_pin: false,
             },
             &env,
         )?;
@@ -167,7 +169,8 @@ impl Ops {
                 ErrorCode::SessionConflict,
                 format!(
                     "ssh {dest} reached a qsh with another identity than the pin {:?}; the pin \
-                     was left as it is",
+                     was left as it is (if the remote was reinstalled, `qsh pair ssh {dest} \
+                     --replace-pin` replaces it)",
                     pin.name
                 ),
             )
@@ -189,6 +192,7 @@ impl Ops {
             role: plan.role.as_str().to_string(),
             address: None,
             ensure_serve: Some(true),
+            replace: None,
         };
         let result = runtime.block_on(async {
             child.send(&BootstrapLine::Commit(commit)).await?;

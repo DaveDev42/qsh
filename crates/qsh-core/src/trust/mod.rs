@@ -793,6 +793,43 @@ impl TrustStore {
         Ok((self.peers[index].clone(), previous, changed))
     }
 
+    /// Replace the pin named `name` with a new one for `fingerprint`
+    /// (`qsh pair ssh --replace-pin`, ADR-0051 decision 5). Pure, shaped like
+    /// [`Self::set_role`]: the caller owns the lock, the audit record and the
+    /// save.
+    ///
+    /// The new pin is exactly what [`Self::add_peer_with_role`] would write
+    /// for a name that did not exist: `role` as given, a fresh `added_at`,
+    /// and no `grants`, `paths`, `scope` or `source`. A grant was given to the
+    /// old key, so it must not follow the name onto a key nobody has vouched
+    /// for (threat model B41); the caller marks `source` again when the new
+    /// pin is one the bootstrap made. The pin keeps its place in the file.
+    /// Returns the new pin and the old one, or `None` when `name` is no pin
+    /// (a `[[ca]]` of that name is left alone).
+    pub fn replace_peer(
+        &mut self,
+        name: &str,
+        address: Option<String>,
+        fingerprint: Fingerprint,
+        now: String,
+        role: TrustRole,
+    ) -> Option<(TrustPeer, TrustPeer)> {
+        let index = self.peers.iter().position(|p| p.name == name)?;
+        let old = self.peers[index].clone();
+        self.peers[index] = TrustPeer {
+            name: name.to_string(),
+            fingerprint: fingerprint.to_string(),
+            address: address.unwrap_or_default(),
+            added_at: now,
+            role: Some(role.as_str().to_string()),
+            grants: None,
+            paths: None,
+            scope: None,
+            source: None,
+        };
+        Some((self.peers[index].clone(), old))
+    }
+
     /// Pins as `(fingerprint, principal)` pairs. Entries whose fingerprint
     /// string does not parse are skipped with a `WARN` — a corrupt line
     /// must never widen trust, and must not disable the rest of the store.

@@ -47,6 +47,7 @@ fn hello_line(status: HelloStatus) -> Vec<u8> {
         serve_bind: None,
         serve_listening: None,
         on_demand: None,
+        replace_pin: None,
     })
     .encode_line()
     .unwrap()
@@ -61,6 +62,7 @@ fn commit() -> BootstrapLine {
         role: "full".into(),
         address: None,
         ensure_serve: None,
+        replace: None,
     })
 }
 
@@ -652,6 +654,7 @@ mod responder {
             role: role.into(),
             address: address.map(str::to_string),
             ensure_serve: None,
+            replace: None,
         })
         .encode_line()
         .unwrap()
@@ -1081,6 +1084,7 @@ mod responder {
                 role: "full".into(),
                 address: None,
                 ensure_serve: None,
+                replace: None,
             }))
             .await
             .unwrap();
@@ -1829,6 +1833,7 @@ pub(crate) mod pair {
                 serve_bind: Some("127.0.0.1:4433".into()),
                 serve_listening: Some(true),
                 on_demand: None,
+                replace_pin: None,
             })
             .encode_line()
             .unwrap()
@@ -1930,6 +1935,7 @@ pub(crate) mod pair {
             serve_bind: Some("127.0.0.1:4433".into()),
             serve_listening: Some(true),
             on_demand: None,
+            replace_pin: None,
         })
         .encode_line()
         .unwrap()
@@ -2367,6 +2373,7 @@ mod pair_reverse_local {
             serve_bind: None,
             serve_listening: None,
             on_demand: None,
+            replace_pin: None,
         })
         .encode_line()
         .unwrap()
@@ -2382,6 +2389,7 @@ mod pair_reverse_local {
                 serve_bind: None,
                 serve_started: None,
                 serve_session_scoped: None,
+                replaced_fingerprint: None,
             })
             .encode_line()
             .unwrap()
@@ -2918,5 +2926,163 @@ pub(crate) mod pair_reverse {
         crate::route_cases::cp_round_trip(&route);
         crate::route_cases::pty_session_runs_a_command(&route);
         reverse.shut_down();
+    }
+}
+
+/// `qsh pair ssh --replace-pin` (ADR-0051 decision 5): a stale pin on either
+/// side is replaced when the person says so, and refused (`pin_conflict`)
+/// when nobody did. These runs have no terminal and use `--json`, so the
+/// question cannot be asked and the flag is the only way to a "yes".
+mod pair_replace {
+    use super::pair::{World, other_fingerprint, store, trust_bytes, trust_file};
+
+    /// Give `name` a grant, the way `qsh trust allow` does, so a replacement
+    /// has something to clear.
+    fn allow(sandbox: &crate::common::Sandbox, name: &str) {
+        let (code, got) = sandbox.json(&["trust", "allow", name, "forward.local", "--json"]);
+        assert_eq!(code, 0, "{got}");
+        let pin = store(sandbox).find(name).cloned().expect("the pin");
+        assert!(pin.grants.is_some(), "{pin:?}");
+    }
+
+    fn replace_records(sandbox: &crate::common::Sandbox, action: &str) -> Vec<serde_json::Value> {
+        sandbox
+            .audit_records()
+            .into_iter()
+            .filter(|record| record["action"] == action)
+            .collect()
+    }
+
+    #[test]
+    fn replace_pin_replaces_this_machines_stale_pin_when_the_remote_was_reinstalled() {
+        let w = World::new();
+        w.client
+            .trust_add("box", Some("10.0.0.9:4433"), &other_fingerprint(7));
+        allow(&w.client, "box");
+
+        // No flag and no terminal: refused, nothing written anywhere.
+        let before = trust_bytes(&w.client);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "SESSION_CONFLICT", "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "pin_conflict", "{got}");
+        assert_eq!(got["error"]["details"]["side"], "local", "{got}");
+        assert_eq!(trust_bytes(&w.client), before);
+        assert!(!trust_file(&w.remote).exists());
+
+        // With the flag the pin is replaced, its grants are gone, and the
+        // pair is confirmed by a real handshake.
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["verified"], true, "{got}");
+        assert_eq!(
+            got["data"]["replaced"]["local"],
+            other_fingerprint(7),
+            "{got}"
+        );
+        assert!(got["data"]["replaced"].get("remote").is_none(), "{got}");
+        let pin = store(&w.client).find("box").cloned().expect("the new pin");
+        assert_eq!(pin.fingerprint, w.remote.fingerprint());
+        assert_eq!(pin.role.as_deref(), Some("none"));
+        assert_eq!((pin.grants, pin.paths, pin.scope), (None, None, None));
+        assert_eq!(pin.source.as_deref(), Some("ssh_bootstrap"));
+        assert_eq!(store(&w.client).peers().len(), 1);
+        let records = replace_records(&w.client, "pair.ssh.replace_pin");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["principal"], "device:box");
+    }
+
+    #[test]
+    fn replace_pin_replaces_the_remotes_stale_pin_when_this_machines_key_changed() {
+        let w = World::new();
+        w.remote.trust_add("laptop", None, &other_fingerprint(9));
+        allow(&w.remote, "laptop");
+
+        let before = trust_bytes(&w.remote);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "pin_conflict", "{got}");
+        assert_eq!(got["error"]["details"]["side"], "remote", "{got}");
+        assert_eq!(trust_bytes(&w.remote), before);
+        assert!(!trust_file(&w.client).exists());
+
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["verified"], true, "{got}");
+        assert_eq!(got["data"]["remote"]["created"], true, "{got}");
+        assert_eq!(
+            got["data"]["replaced"]["remote"],
+            other_fingerprint(9),
+            "{got}"
+        );
+        assert!(got["data"]["replaced"].get("local").is_none(), "{got}");
+        let pin = store(&w.remote).find("laptop").cloned().expect("the pin");
+        assert_eq!(pin.fingerprint, w.client.fingerprint());
+        assert_eq!(pin.role.as_deref(), Some("full"));
+        assert_eq!((pin.grants, pin.paths, pin.scope), (None, None, None));
+        assert_eq!(store(&w.remote).peers().len(), 1);
+        let records = replace_records(&w.remote, "pair.ssh_respond.replace_pin");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["principal"], "device:laptop");
+    }
+
+    #[test]
+    fn replace_pin_replaces_both_sides_in_one_call() {
+        let w = World::new();
+        w.client
+            .trust_add("box", Some("10.0.0.9:4433"), &other_fingerprint(7));
+        w.remote.trust_add("laptop", None, &other_fingerprint(9));
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["verified"], true, "{got}");
+        assert_eq!(got["data"]["replaced"]["local"], other_fingerprint(7));
+        assert_eq!(got["data"]["replaced"]["remote"], other_fingerprint(9));
+    }
+
+    #[test]
+    fn replace_pin_is_a_no_op_when_nothing_conflicts() {
+        let w = World::new();
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+        assert_eq!(code, 0, "{got}");
+        assert!(got["data"].get("replaced").is_none(), "{got}");
+        assert!(replace_records(&w.client, "pair.ssh.replace_pin").is_empty());
+        assert!(replace_records(&w.remote, "pair.ssh_respond.replace_pin").is_empty());
+    }
+
+    #[test]
+    fn replace_pin_never_sends_replace_to_a_remote_that_cannot_honour_it() {
+        let mut w = World::new();
+        // The real responder behind the filter would honour a `replace`, so an
+        // untouched remote pin proves none was sent.
+        w.fake.respond_as_old_qsh();
+        w.remote.trust_add("laptop", None, &other_fingerprint(9));
+        let before = trust_bytes(&w.remote);
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop", "--replace-pin"]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["code"], "UNSUPPORTED", "{got}");
+        assert_eq!(
+            got["error"]["details"]["reason"], "remote_replace_unsupported",
+            "{got}"
+        );
+        assert_eq!(trust_bytes(&w.remote), before);
+        assert!(!trust_file(&w.client).exists());
+    }
+
+    #[test]
+    fn replace_pin_replaces_the_reverse_pin_and_keeps_its_role() {
+        use super::pair_reverse::World as ReverseWorld;
+        let w = ReverseWorld::new();
+        w.controller.trust_add("box", None, &other_fingerprint(5));
+        let (code, got) = w.pair(&[]);
+        assert_eq!(code, 255, "{got}");
+        assert_eq!(got["error"]["details"]["reason"], "pin_conflict", "{got}");
+        let (code, got) = w.pair(&["--replace-pin"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["replaced"]["local"], other_fingerprint(5));
+        assert_eq!(got["data"]["peer"]["role"], "reverse", "{got}");
+        assert_eq!(got["data"]["peer"]["address"], "", "{got}");
+        let pin = store(&w.controller).find("box").cloned().unwrap();
+        assert_eq!(pin.fingerprint, w.target.fingerprint());
+        assert_eq!(pin.role.as_deref(), Some("reverse"));
     }
 }

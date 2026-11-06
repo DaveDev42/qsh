@@ -49,7 +49,7 @@ mod ssh;
 pub use dest::{Dest, split_user_host};
 pub use form::{FormInput, FormMode, plan_form};
 pub use options::{AddressFamily, SshFlags, SshOptions};
-pub use respond::{AUDIT_ACTION, RespondEnd, Responder};
+pub use respond::{AUDIT_ACTION, AUDIT_ACTION_REPLACE, RespondEnd, Responder};
 pub use ssh::{
     BATCH_HELLO_TIMEOUT, BootstrapTimeouts, MESSAGE_TIMEOUT, ResponderOptions, SSH_G_OUTPUT_MAX,
     SshChild, SshExit, SshResolved, SshRunner, batch_mode, map_ssh_exit, map_ssh_exit_with_stderr,

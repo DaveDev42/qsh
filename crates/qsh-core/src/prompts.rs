@@ -39,8 +39,19 @@ pub const MOVE_KEY: Prompt = Prompt {
     non_interactive: "fails with details.reason keystore_session_bound",
 };
 
+/// During `pair ssh` (and the automatic bootstrap), when a pin holds another
+/// fingerprint than the one the ssh login now reaches (ADR-0051 decision 5).
+/// The old and new fingerprints are shown first ([`Prompter::note`]).
+pub const REPLACE_PIN: Prompt = Prompt {
+    id: "pair.ssh.replace_pin",
+    question: "pin을 바꿀까?",
+    default_yes: false,
+    flags: &["--replace-pin"],
+    non_interactive: "fails with SESSION_CONFLICT and details.reason pin_conflict",
+};
+
 /// Every registered question.
-pub const REGISTRY: &[&Prompt] = &[&MOVE_KEY];
+pub const REGISTRY: &[&Prompt] = &[&MOVE_KEY, &REPLACE_PIN];
 
 /// Where a question may be asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +113,11 @@ pub fn ask(
 pub trait Prompter: Send + Sync {
     /// Ask `prompt`, or return `None` when it cannot be asked here.
     fn ask(&self, prompt: &Prompt) -> Option<bool>;
+
+    /// Show context a question needs (for example the two fingerprints
+    /// [`REPLACE_PIN`] compares) right before it is asked. Written only where
+    /// a question could be asked; the default shows nothing.
+    fn note(&self, _text: &str) {}
 }
 
 /// The prompter of every run that asks nothing.
@@ -128,6 +144,12 @@ impl StdioPrompter {
 }
 
 impl Prompter for StdioPrompter {
+    fn note(&self, text: &str) {
+        if self.env.can_ask() {
+            let _ = writeln!(io::stderr().lock(), "{text}");
+        }
+    }
+
     fn ask(&self, prompt: &Prompt) -> Option<bool> {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -196,5 +218,24 @@ mod tests {
             assert_eq!(answer, expected, "{input:?}");
             assert!(String::from_utf8(out).unwrap().contains("[Y/n]"));
         }
+    }
+
+    #[test]
+    fn the_replace_pin_row_defaults_to_no_and_names_its_flag() {
+        assert!(REGISTRY.contains(&&REPLACE_PIN));
+        assert!(!std::hint::black_box(REPLACE_PIN.default_yes));
+        assert_eq!(REPLACE_PIN.flags, &["--replace-pin"]);
+        assert!(REPLACE_PIN.non_interactive.contains("pin_conflict"));
+        let env = PromptEnv {
+            stdin_is_terminal: true,
+            machine_mode: false,
+        };
+        let mut out = Vec::new();
+        let mut reader = io::Cursor::new(b"\n".to_vec());
+        assert_eq!(
+            ask(&REPLACE_PIN, &env, &mut reader, &mut out).unwrap(),
+            Some(false)
+        );
+        assert!(String::from_utf8(out).unwrap().contains("[y/N]"));
     }
 }

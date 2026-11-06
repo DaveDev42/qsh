@@ -192,8 +192,9 @@ impl FakeSsh {
     }
 
     /// With [`Self::run_local_responder`]: deliver the responder's `hello`
-    /// without its `on_demand` field, like a qsh from before ADR-0051. The
-    /// client then never sends `ensure_serve`.
+    /// without its `on_demand` and `replace_pin` fields, like a qsh from
+    /// before ADR-0051. The client then never sends `ensure_serve` or
+    /// `replace`.
     pub fn respond_as_old_qsh(&mut self) -> &mut Self {
         self.set("respond_old", "1".to_string())
     }
