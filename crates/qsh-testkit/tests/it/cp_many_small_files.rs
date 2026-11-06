@@ -31,7 +31,7 @@
 //! Gated like the other acceptance tests: `QSH_ACCEPTANCE_STRICT` or
 //! `QSH_ACCEPTANCE_SLOW` turns it on, a plain run prints SKIP.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -173,6 +173,17 @@ impl FileCopyObserver for Counter {
     }
 }
 
+/// The directory as the host spells it: canonical, and on Windows without
+/// the `\\?\` prefix the system puts on a final path (the host refuses
+/// verbatim paths in a request as malformed and answers with drive paths only).
+fn canonical_host_path(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).expect("canonical tempdir");
+    match canonical.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => canonical,
+    }
+}
+
 struct HostTree {
     _dir: tempfile::TempDir,
     paths: Paths,
@@ -195,7 +206,7 @@ fn small_file_bytes(dir: usize, file: usize) -> Vec<u8> {
 impl HostTree {
     fn new(client_fingerprint: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
+        let root = canonical_host_path(dir.path());
         let host = root.join("host");
         let tree = root.join("tree");
         let out = root.join("out");
