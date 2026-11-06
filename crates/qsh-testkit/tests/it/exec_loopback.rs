@@ -39,6 +39,7 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
         "file.v1",
         "shell-command.v1",
         "screen.v1",
+        "datagram.v1",
     ];
     assert_eq!(s.capabilities, expected);
 

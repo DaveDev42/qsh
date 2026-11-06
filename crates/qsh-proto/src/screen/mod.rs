@@ -27,7 +27,10 @@ pub use diff::{
     ApplyError, Effect, MAX_CLIPBOARD_BYTES, MAX_EFFECTS, MAX_HYPERLINK_PARAMS, MAX_HYPERLINK_URI,
     MAX_TITLE_BYTES, MAX_UPDATE_BYTES, RowChange, Run, ScreenDiff, ScreenUpdate,
 };
-pub use parts::{MAX_PARTS, PART_MAX, PartError, Reassembler, split as split_parts};
+pub use parts::{
+    DatagramReassembler, MAX_DATAGRAM_PARTS, MAX_PARTS, PART_MAX, PartError, Reassembler,
+    split as split_parts, split_sized as split_parts_sized,
+};
 
 /// Largest accepted number of rows or columns.
 pub const MAX_DIM: u16 = 2048;

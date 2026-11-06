@@ -7,7 +7,9 @@
 
 use std::time::{Duration, Instant};
 
+use prost::Message as _;
 use qsh_proto::ErrorCode;
+use qsh_proto::datagram::{ChannelId, DatagramFrame, DatagramKind};
 use qsh_proto::wire::{
     self, ControlMessage, ExecFrame, ExecStart, ExecStarted, Hello, SessionFrame, StreamHeader,
     control_message, exec_frame, response, session_frame,
@@ -16,6 +18,7 @@ use qsh_transport::{Connection, FramedStream, StreamError};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::datagram::{DatagramHub, DatagramRx, channel_from};
 use crate::exec::ExecSpec;
 // `crate::localctl` builds on every platform, so the reverse
 // (`LOCAL_CONTROL`) leg does too.
@@ -828,6 +831,22 @@ impl Session {
                 wire::PRIORITY_SESSION_DATA,
             )
             .await?;
+        // The datagram carrier (ADR-0052 decisions 6 to 9): a forward
+        // connection, `datagram.v1` negotiated, and a channel id from the
+        // host. The channel is registered before the first byte of the
+        // stream is read, so nothing the host sends is counted unknown.
+        let datagram = match (&self.conn, channel_from(&attached.screen_channel)) {
+            (Some(conn), Some(channel)) if self.has_capability(wire::CAP_DATAGRAM_V1) => {
+                let hub = DatagramHub::of(conn);
+                let rx = hub.register(channel);
+                Some((ClientDatagram { hub, channel }, rx))
+            }
+            _ => None,
+        };
+        let (dg_tx, dg_rx) = match datagram {
+            Some((tx, rx)) => (Some(tx), Some(rx)),
+            None => (None, None),
+        };
         Ok(Attached {
             replay_from: attached.replay_from,
             writer_lease: attached.writer_lease,
@@ -843,8 +862,13 @@ impl Session {
                 // makes a reattach's retransmission line up with the
                 // session's dedup cursor (protocol.md §10-5).
                 input_seq: attached.input_seq,
+                datagram: dg_tx,
             },
-            reader: AttachReader { recv },
+            reader: AttachReader {
+                recv: Some(recv),
+                pending: None,
+                datagram: dg_rx,
+            },
         })
     }
 
@@ -1129,6 +1153,11 @@ pub enum AttachEvent {
     /// reply carried a `screen_channel`. Feed it to
     /// [`screen::ClientScreen::on_part`].
     Screen(wire::ScreenUpdate),
+    /// One part of a screen update that came as a datagram. Feed it to
+    /// [`screen::ClientScreen::on_datagram_part`]. Only on an attach whose
+    /// reply carried a `screen_channel` and whose connection negotiated
+    /// `datagram.v1`.
+    ScreenDatagram(wire::ScreenUpdate),
     /// The child exited; the last frame of the stream.
     Exit {
         /// Final cumulative output offset.
@@ -1164,7 +1193,9 @@ impl Attached {
     }
 
     /// Acknowledge screen state `state_num`; 0 asks the host for the full
-    /// screen. Only on a screen-sync attach.
+    /// screen. Only on a screen-sync attach. With the datagram carrier
+    /// available the ack goes out on both carriers: the datagram is quick
+    /// and the stream one is certain.
     pub async fn send_screen_ack(&mut self, state_num: u64) -> Result<(), ClientError> {
         self.writer.send_screen_ack(state_num).await
     }
@@ -1185,6 +1216,36 @@ impl Attached {
 pub struct AttachWriter {
     send: DataSend,
     input_seq: u64,
+    datagram: Option<ClientDatagram>,
+}
+
+/// The sending side of the datagram carrier on the client.
+#[derive(Clone)]
+struct ClientDatagram {
+    hub: std::sync::Arc<DatagramHub>,
+    channel: ChannelId,
+}
+
+impl ClientDatagram {
+    /// Best effort: a datagram that does not go out changes nothing, its
+    /// stream twin carries the message.
+    fn send(&self, kind: DatagramKind, payload: Vec<u8>) {
+        if self.hub.max_datagram_size().is_none() {
+            return;
+        }
+        let _ = self.hub.send(&DatagramFrame {
+            channel: self.channel,
+            kind,
+            payload,
+        });
+    }
+
+    /// Whether `payload` fits one datagram now.
+    fn fits(&self, payload_len: usize) -> bool {
+        self.hub
+            .max_datagram_size()
+            .is_some_and(|max| DatagramFrame::HEADER_LEN + payload_len <= max)
+    }
 }
 
 impl AttachWriter {
@@ -1192,6 +1253,18 @@ impl AttachWriter {
     pub async fn send_input(&mut self, data: &[u8]) -> Result<u64, ClientError> {
         for chunk in data.chunks(wire::SESSION_CHUNK_MAX) {
             self.input_seq += chunk.len() as u64;
+            // The datagram copy (ADR-0052 decision 8) goes first: it is the
+            // one that can beat a stream retransmission. The stream copy is
+            // the authoritative one and always follows.
+            if let Some(dg) = &self.datagram {
+                let copy = wire::Input {
+                    input_seq: self.input_seq,
+                    data: chunk.to_vec(),
+                };
+                if dg.fits(copy.encoded_len()) {
+                    dg.send(DatagramKind::Input, copy.encode_to_vec());
+                }
+            }
             self.send
                 .send(&SessionFrame::input(self.input_seq, chunk.to_vec()))
                 .await?;
@@ -1209,6 +1282,12 @@ impl AttachWriter {
 
     /// See [`Attached::send_screen_ack`].
     pub async fn send_screen_ack(&mut self, state_num: u64) -> Result<(), ClientError> {
+        if let Some(dg) = &self.datagram {
+            dg.send(
+                DatagramKind::ScreenAck,
+                wire::ScreenAck { state_num }.encode_to_vec(),
+            );
+        }
         self.send.send(&SessionFrame::screen_ack(state_num)).await?;
         Ok(())
     }
@@ -1229,17 +1308,35 @@ impl AttachWriter {
     }
 }
 
+/// A stream read in flight. Kept across calls so that racing it against the
+/// datagram channel never drops a half-read frame.
+type PendingFrame = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = (DataRecv, Result<Option<SessionFrame>, ClientError>)>
+            + Send,
+    >,
+>;
+
 /// Host → client half of an attach stream.
 pub struct AttachReader {
-    recv: DataRecv,
+    /// The receive half; `None` only while `pending` owns it.
+    recv: Option<DataRecv>,
+    pending: Option<PendingFrame>,
+    datagram: Option<DatagramRx>,
 }
 
 impl AttachReader {
     /// See [`Attached::next`].
     pub async fn next(&mut self) -> Result<Option<AttachEvent>, ClientError> {
         loop {
-            let Some(frame) = self.recv.recv::<SessionFrame>().await? else {
+            let Some(frame) = self.next_frame().await? else {
                 return Ok(None);
+            };
+            let frame = match frame {
+                Source::Stream(Some(frame)) => frame,
+                Source::Stream(None) => return Ok(None),
+                Source::Datagram(event) => return Ok(Some(event)),
+                Source::Skip => continue,
             };
             // Receiver-side chunk check (protocol.md §9): a host not
             // running our encoder is bounded only by the frame cap.
@@ -1270,6 +1367,72 @@ impl AttachReader {
             }));
         }
     }
+
+    /// The next thing to happen on either carrier. Without a datagram
+    /// channel this is a plain stream read.
+    async fn next_frame(&mut self) -> Result<Option<Source>, ClientError> {
+        if self.datagram.is_none() && self.pending.is_none() {
+            let Some(recv) = self.recv.as_mut() else {
+                return Ok(None);
+            };
+            return Ok(Some(Source::Stream(recv.recv::<SessionFrame>().await?)));
+        }
+        if self.pending.is_none() {
+            let Some(mut recv) = self.recv.take() else {
+                return Ok(None);
+            };
+            self.pending = Some(Box::pin(async move {
+                let frame = recv.recv::<SessionFrame>().await;
+                (recv, frame)
+            }));
+        }
+        let pending = self.pending.as_mut().expect("set above");
+        tokio::select! {
+            biased;
+            datagram = recv_datagram(&mut self.datagram) => {
+                Ok(Some(match datagram {
+                    Some(frame) => datagram_event(frame).map_or(Source::Skip, Source::Datagram),
+                    None => {
+                        // The hub is gone with the connection; the stream
+                        // read in flight reports it.
+                        self.datagram = None;
+                        Source::Skip
+                    }
+                }))
+            }
+            (recv, frame) = pending => {
+                self.pending = None;
+                self.recv = Some(recv);
+                Ok(Some(Source::Stream(frame?)))
+            }
+        }
+    }
+}
+
+/// What [`AttachReader::next_frame`] saw.
+enum Source {
+    Stream(Option<SessionFrame>),
+    Datagram(AttachEvent),
+    Skip,
+}
+
+async fn recv_datagram(rx: &mut Option<DatagramRx>) -> Option<DatagramFrame> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// A datagram from the host as an attach event. Anything that is not a
+/// well-formed `ScreenUpdate` part is dropped: it is untrusted input to a
+/// carrier that is allowed to lose.
+fn datagram_event(frame: DatagramFrame) -> Option<AttachEvent> {
+    if frame.kind != DatagramKind::ScreenUpdate {
+        return None;
+    }
+    let part = wire::ScreenUpdate::decode(frame.payload.as_slice()).ok()?;
+    part.validate().ok()?;
+    Some(AttachEvent::ScreenDatagram(part))
 }
 
 fn unexpected(request: &str, body: &response::Body) -> ClientError {

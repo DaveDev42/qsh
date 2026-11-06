@@ -549,6 +549,17 @@ impl Server {
                     input_from,
                     events: Some(events),
                     screen: !screen_channel.is_empty(),
+                    // Datagrams only on a forward connection that negotiated
+                    // `datagram.v1`: on a reverse registration the client
+                    // is behind a local conduit and reads no datagrams.
+                    datagram: (!ctx.is_reverse_registration
+                        && ctx.capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1))
+                    .then(|| crate::datagram::channel_from(&screen_channel))
+                    .flatten()
+                    .map(|channel| crate::session_stream::DatagramParams {
+                        channel,
+                        blackhole: Arc::clone(&self.datagram_blackhole),
+                    }),
                 };
                 match pump.run(stream, &conn).await {
                     Ok(()) => tracing::info!(

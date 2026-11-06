@@ -47,15 +47,22 @@
 //! the session path that names `qsh-transport` types, and `xtask arch`
 //! bans those under `crates/qsh-core/src/broker/`.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use prost::Message as _;
+use qsh_proto::datagram::{ChannelId, DatagramFrame, DatagramKind};
+use qsh_proto::screen::MAX_DATAGRAM_PARTS;
 use qsh_proto::wire::{self, ControlMessage, SessionFrame, control_message, session_frame};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamError};
 use thiserror::Error;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
+
+use crate::adapt::{Carrier, CarrierRunner, FIXED_FRAME_INTERVAL, User};
+use crate::datagram::{DatagramHub, DatagramRx, SendFailure, part_budget};
 
 use crate::broker::{
     AttachToken, BrokerError, ConnectionId, ControlEvent, Cursor, InputStreamId, ReplayEvent,
@@ -149,6 +156,23 @@ pub struct SessionStream {
     /// `screen_channel`, ADR-0052 decision 9): the host sends
     /// `ScreenUpdate` and no `Output`. `false` is the byte path.
     pub screen: bool,
+    /// The datagram carrier for this screen-sync attach (ADR-0052 decisions
+    /// 6 to 9): set when `datagram.v1` was negotiated on a forward
+    /// connection. The carrier stays unused until the client has sent a
+    /// datagram on the channel, which tells the host it reads them.
+    pub datagram: Option<DatagramParams>,
+}
+
+/// What the dispatch edge hands a screen-sync attach for its datagram
+/// carrier.
+#[derive(Clone)]
+pub struct DatagramParams {
+    /// The channel id issued as `screen_channel` for this attach.
+    pub channel: ChannelId,
+    /// Test hook ([`crate::server::Server::blackhole_datagrams`]): datagram
+    /// sends are accepted and silently dropped, as a path that eats
+    /// datagrams would.
+    pub blackhole: Arc<AtomicBool>,
 }
 
 /// What the input side of a screen-sync stream tells the screen pump.
@@ -156,12 +180,34 @@ pub struct SessionStream {
 struct ScreenSync {
     /// The client asked for the full screen (`ScreenAck{0}`).
     resync: AtomicBool,
-    /// Newest state number the client acked.
+    /// Newest state number the client acked, on either carrier. A request
+    /// for the full screen resets it to 0.
     acked: AtomicU64,
+    /// The client has sent a datagram on this attach's channel: it reads
+    /// them, and the path carries them at least towards the host.
+    datagram_seen: AtomicBool,
     /// Wakes the pump for a resync request or a window-size change, neither
     /// of which moves the ring.
     poke: Notify,
 }
+
+impl ScreenSync {
+    /// A `ScreenAck` from either carrier.
+    fn on_ack(&self, state_num: u64) {
+        if state_num == 0 {
+            self.acked.store(0, Ordering::Release);
+            self.resync.store(true, Ordering::Release);
+            self.poke.notify_one();
+        } else {
+            self.acked.fetch_max(state_num, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Input offset the host has applied on one attach's axis, shared by the
+/// stream loop and the datagram copy path. The lock is held across the
+/// session write so a copy and its stream twin never interleave.
+type InputAxis = Arc<Mutex<u64>>;
 
 /// Screen bytes queued for the writer and not written yet: the stream
 /// carrier's "send queue" (ADR-0052 decision 6).
@@ -195,7 +241,7 @@ impl SessionStream {
         connection: &Connection,
     ) -> Result<(), SessionStreamError> {
         tokio::select! {
-            result = self.run_inner(stream) => result,
+            result = self.run_inner(stream, connection.clone()) => result,
             // A parked `sessions.write` (child not draining its PTY input)
             // must never outlive the connection: the attach token below
             // suspends the session's resume TTL, so a stuck pump would keep
@@ -204,7 +250,11 @@ impl SessionStream {
         }
     }
 
-    async fn run_inner(self, stream: FramedStream) -> Result<(), SessionStreamError> {
+    async fn run_inner(
+        self,
+        stream: FramedStream,
+        connection: Connection,
+    ) -> Result<(), SessionStreamError> {
         let SessionStream {
             sessions,
             session_id,
@@ -214,6 +264,7 @@ impl SessionStream {
             input_from,
             events,
             screen,
+            datagram,
         } = self;
 
         // While this token lives the session counts as attached and its
@@ -237,6 +288,42 @@ impl SessionStream {
             }
         }));
 
+        let axis: InputAxis = Arc::new(Mutex::new(input_from));
+        // The datagram channel is registered before the pumps start, so a
+        // datagram that races the stream open is not counted as unknown.
+        let carrier = match (&sync, datagram) {
+            (Some(_), Some(params)) => {
+                let hub = DatagramHub::of(&connection);
+                let rx = hub.register(params.channel);
+                Some((hub, rx, params))
+            }
+            _ => None,
+        };
+        let (dg_tx, dg_task) = match carrier {
+            Some((hub, rx, params)) => {
+                let sync = sync.clone().expect("carrier implies screen sync");
+                let task = AbortOnDrop(tokio::spawn(datagram_pump(
+                    rx,
+                    Arc::clone(&sync),
+                    Arc::clone(&sessions),
+                    session_id.clone(),
+                    conn,
+                    input_stream,
+                    Arc::clone(&axis),
+                    frames_tx.clone(),
+                )));
+                (
+                    Some(DatagramTx {
+                        hub,
+                        channel: params.channel,
+                        blackhole: params.blackhole,
+                    }),
+                    Some(task),
+                )
+            }
+            None => (None, None),
+        };
+
         let mut output = AbortOnDrop(match &sync {
             Some(sync) => tokio::spawn(screen_pump(
                 Arc::clone(&sessions),
@@ -246,6 +333,8 @@ impl SessionStream {
                 events,
                 Arc::clone(sync),
                 depth,
+                connection.clone(),
+                dg_tx,
             )),
             None => tokio::spawn(output_pump(
                 Arc::clone(&sessions),
@@ -269,7 +358,7 @@ impl SessionStream {
                 session_id,
                 conn,
                 input_stream,
-                input_from,
+                Arc::clone(&axis),
                 recv,
                 frames_tx,
                 sync.clone(),
@@ -317,6 +406,7 @@ impl SessionStream {
         // own above, in which case awaiting it again would poll an
         // already-completed `JoinHandle`.
         drop(output);
+        drop(dg_task);
         if !writer_done {
             let _ = (&mut writer.0).await;
         }
@@ -495,14 +585,207 @@ async fn output_pump(
     }
 }
 
+/// How long after a datagram update goes out, unacked, the pump sends the
+/// newest state again: a lost datagram is never retransmitted, but the
+/// client must still converge when output stops.
+const DATAGRAM_RESEND_RTTS: u32 = 2;
+
+/// The send half of the datagram carrier on the host.
+struct DatagramTx {
+    hub: Arc<DatagramHub>,
+    channel: ChannelId,
+    blackhole: Arc<AtomicBool>,
+}
+
+/// Where a `try_send` left things.
+enum Sent {
+    /// Nothing more to send now.
+    Done,
+    /// The stream's send queue is full; wait for it to drain.
+    Blocked,
+    /// A datagram update went out too recently; try again at this time.
+    Paced(Instant),
+}
+
+/// Everything the screen pump knows about how updates reach the client
+/// (ADR-0052 decision 6): which base each carrier diffs from, which datagram
+/// updates are still unacked, and what `adapt` currently says.
+struct ScreenSender {
+    sessions: Arc<dyn SessionBackend>,
+    id: SessionId,
+    frames: mpsc::Sender<SessionFrame>,
+    depth: Arc<SendDepth>,
+    sync: Arc<ScreenSync>,
+    conn: Connection,
+    dg: Option<DatagramTx>,
+    runner: CarrierRunner,
+    /// Newest state sent on the stream. The stream is ordered and reliable,
+    /// so the next stream update diffs from it.
+    last_sent_stream: u64,
+    /// The client asked for the full screen and has not got one yet.
+    force_full: bool,
+    /// Datagram updates not yet covered by an ack: state number and send time.
+    inflight: VecDeque<(u64, Instant)>,
+    last_dg_at: Option<Instant>,
+}
+
+impl ScreenSender {
+    fn datagram_usable(&self) -> bool {
+        self.dg.is_some()
+            && self.sync.datagram_seen.load(Ordering::Acquire)
+            && self.conn.max_datagram_size().is_some()
+    }
+
+    /// Drop what the client has acknowledged and run the policy.
+    fn tick(&mut self, now: Instant) {
+        let acked = self.sync.acked.load(Ordering::Acquire);
+        if acked == 0 {
+            self.inflight.clear();
+        }
+        while self.inflight.front().is_some_and(|(n, _)| *n <= acked) {
+            self.inflight.pop_front();
+        }
+        let usable = self.datagram_usable();
+        let unacked = self.inflight.front().map(|(_, t)| now.duration_since(*t));
+        let tick = self.runner.tick(now, self.conn.stats(), usable, unacked);
+        if tick.retest_started {
+            // The re-test starts a fresh unacked clock.
+            self.inflight.clear();
+        }
+        if tick.carrier_changed {
+            tracing::debug!(
+                target: "qsh::adapt",
+                carrier = ?self.runner.knobs().carrier,
+                "screen carrier changed"
+            );
+        }
+    }
+
+    /// When the pump must look again even if nothing arrives: the resend of
+    /// a datagram update that is still unacked.
+    fn resend_deadline(&self) -> Option<Instant> {
+        let (_, sent) = self.inflight.back()?;
+        let rtt = self.conn.stats().rtt.max(crate::adapt::RTT_FLOOR);
+        Some(*sent + rtt * DATAGRAM_RESEND_RTTS + FIXED_FRAME_INTERVAL)
+    }
+
+    /// Send the update that takes the client to the newest state, on the
+    /// carrier the policy picks. `force_stream` is for the final screen
+    /// before `Exit`: it must be on the ordered stream, ahead of the event,
+    /// whatever the queue holds.
+    async fn try_send(
+        &mut self,
+        now: Instant,
+        force_stream: bool,
+    ) -> Result<Sent, SessionStreamError> {
+        let acked = self.sync.acked.load(Ordering::Acquire);
+        if !force_stream
+            && self.datagram_usable()
+            && self.runner.knobs().carrier == Carrier::Datagram
+        {
+            if let Some(at) = self.last_dg_at {
+                let next = at + FIXED_FRAME_INTERVAL;
+                if now < next {
+                    return Ok(Sent::Paced(next));
+                }
+            }
+            let base = if self.force_full { 0 } else { acked };
+            let Some(update) = self.sessions.screen_update_since(&self.id, base) else {
+                return Ok(Sent::Done);
+            };
+            let encoded = update.encode();
+            if encoded.len() > qsh_proto::screen::MAX_UPDATE_BYTES {
+                return Err(SessionStreamError::Protocol(
+                    "screen update is larger than the update cap".into(),
+                ));
+            }
+            let budget = self.conn.max_datagram_size().and_then(part_budget);
+            if let Some(budget) = budget {
+                let parts = wire::ScreenUpdate::parts_sized(update.new_num, &encoded, budget);
+                let count = parts.len() as u32;
+                if count <= MAX_DATAGRAM_PARTS
+                    && self.runner.carrier_for_update(count) == Carrier::Datagram
+                    && self.send_datagram_parts(&parts)?
+                {
+                    self.inflight.push_back((update.new_num, now));
+                    self.last_dg_at = Some(now);
+                    if update.base_num == 0 {
+                        self.force_full = false;
+                    }
+                    return Ok(Sent::Done);
+                }
+            }
+            // Too big for datagrams, or the transport refused: the stream
+            // twin carries this update.
+        }
+        if !force_stream && !self.depth.has_room() {
+            return Ok(Sent::Blocked);
+        }
+        let base = if self.force_full {
+            0
+        } else {
+            acked.max(self.last_sent_stream)
+        };
+        let Some(update) = self.sessions.screen_update_since(&self.id, base) else {
+            return Ok(Sent::Done);
+        };
+        let encoded = update.encode();
+        if encoded.len() > qsh_proto::screen::MAX_UPDATE_BYTES {
+            return Err(SessionStreamError::Protocol(
+                "screen update is larger than the update cap".into(),
+            ));
+        }
+        for part in wire::ScreenUpdate::parts_of(update.new_num, &encoded) {
+            self.depth.add(part.data.len());
+            send_frame(&self.frames, SessionFrame::screen_update(part)).await?;
+        }
+        self.last_sent_stream = update.new_num;
+        if update.base_num == 0 {
+            self.force_full = false;
+        }
+        Ok(Sent::Done)
+    }
+
+    /// Send every part as a datagram. `Ok(false)` means the transport
+    /// cannot carry it and the caller uses the stream.
+    fn send_datagram_parts(
+        &self,
+        parts: &[wire::ScreenUpdate],
+    ) -> Result<bool, SessionStreamError> {
+        let Some(dg) = &self.dg else {
+            return Ok(false);
+        };
+        for part in parts {
+            let frame = DatagramFrame {
+                channel: dg.channel,
+                kind: DatagramKind::ScreenUpdate,
+                payload: part.encode_to_vec(),
+            };
+            if dg.blackhole.load(Ordering::Relaxed) {
+                continue;
+            }
+            match dg.hub.send(&frame) {
+                Ok(()) => {}
+                Err(SendFailure::Unavailable) => return Ok(false),
+                Err(SendFailure::Closed) => return Err(SessionStreamError::PeerGone),
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// Screen-sync counterpart of [`output_pump`] (ADR-0052 decisions 6 and 11).
 ///
-/// The first thing sent is the full screen (`base_num` 0). After that an
-/// update is built whenever the ring moved, provided the send queue has room;
-/// it is the difference from the last state sent to the newest state, so
-/// every screen in between is skipped. Control entries are forwarded as the
-/// byte path does, after a last update so the client's screen is current
-/// when it sees `Exit`.
+/// The first thing sent is the full screen (`base_num` 0) on the stream.
+/// After that an update is built whenever the ring moved. On the stream it
+/// is the difference from the last state sent, held back while the send
+/// queue is deep; on the datagram carrier, once the client has shown it
+/// reads datagrams and `adapt` allows it, it is the difference from the last
+/// state the client acked, at most one per frame interval, and resent when no
+/// ack comes. Either way every screen in between is skipped. Control entries
+/// are forwarded as the byte path does, after a last update on the stream so
+/// the client's screen is current when it sees `Exit`.
+#[allow(clippy::too_many_arguments)]
 async fn screen_pump(
     sessions: Arc<dyn SessionBackend>,
     id: SessionId,
@@ -511,24 +794,56 @@ async fn screen_pump(
     events: Option<mpsc::Sender<ControlMessage>>,
     sync: Arc<ScreenSync>,
     depth: Arc<SendDepth>,
+    conn: Connection,
+    dg: Option<DatagramTx>,
 ) -> Result<(), SessionStreamError> {
-    let mut last_sent = 0u64;
+    let mut sender = ScreenSender {
+        sessions: Arc::clone(&sessions),
+        id: id.clone(),
+        frames: frames.clone(),
+        depth: Arc::clone(&depth),
+        sync: Arc::clone(&sync),
+        conn,
+        dg,
+        runner: CarrierRunner::new(Instant::now(), User::default()),
+        last_sent_stream: 0,
+        force_full: false,
+        inflight: VecDeque::new(),
+        last_dg_at: None,
+    };
     let mut dirty = true;
     let mut exit_grace_used = false;
     loop {
+        let now = Instant::now();
         if sync.resync.swap(false, Ordering::AcqRel) {
-            last_sent = 0;
+            sender.force_full = true;
+            sender.last_sent_stream = 0;
             dirty = true;
         }
-        if dirty && depth.has_room() {
-            dirty = false;
-            send_screen(&sessions, &id, &mut last_sent, &frames, &depth).await?;
+        sender.tick(now);
+        let mut wake = None::<Instant>;
+        if let Some(at) = sender.resend_deadline() {
+            if at <= now {
+                dirty = true;
+            } else {
+                wake = Some(at);
+            }
         }
-        let wait = if exit_grace_used {
+        if dirty {
+            match sender.try_send(now, false).await? {
+                Sent::Done => dirty = false,
+                Sent::Blocked => {}
+                Sent::Paced(at) => wake = Some(wake.map_or(at, |w| w.min(at))),
+            }
+        }
+        let mut wait = if exit_grace_used {
             EXIT_CLOSED_GRACE
         } else {
             SESSION_STREAM_PULL_WAIT
         };
+        if let Some(at) = wake {
+            wait = wait.min(at.saturating_duration_since(Instant::now()));
+        }
         let out = tokio::select! {
             r = sessions.pull(&id, cursor, SESSION_STREAM_PULL_BYTES, wait) => match r {
                 Ok(out) => out,
@@ -556,7 +871,7 @@ async fn screen_pump(
                 } => {
                     // The client must see the final screen before the event
                     // that ends the session, whatever the queue holds.
-                    send_screen(&sessions, &id, &mut last_sent, &frames, &depth).await?;
+                    sender.try_send(Instant::now(), true).await?;
                     dirty = false;
                     notify(&events, &id, sequence, &event).await?;
                     match event {
@@ -582,30 +897,89 @@ async fn screen_pump(
     }
 }
 
-/// Queue the update that takes the client from `last_sent` to the newest
-/// state, if there is one.
-async fn send_screen(
+/// What the client sends by datagram on a screen-sync attach (ADR-0052
+/// decisions 6 and 8): acks of the state it holds, and a copy of each
+/// `Input` chunk. The channel is created by the host and registered before
+/// the stream runs, so everything arriving here belongs to this attach.
+#[allow(clippy::too_many_arguments)]
+async fn datagram_pump(
+    mut rx: DatagramRx,
+    sync: Arc<ScreenSync>,
+    sessions: Arc<dyn SessionBackend>,
+    id: SessionId,
+    conn: ConnectionId,
+    stream: InputStreamId,
+    axis: InputAxis,
+    frames: mpsc::Sender<SessionFrame>,
+) {
+    while let Some(frame) = rx.recv().await {
+        // The first datagram tells the pump the carrier may be used.
+        if !sync.datagram_seen.swap(true, Ordering::AcqRel) {
+            sync.poke.notify_one();
+        }
+        match frame.kind {
+            DatagramKind::ScreenAck => {
+                if let Ok(ack) = wire::ScreenAck::decode(frame.payload.as_slice()) {
+                    sync.on_ack(ack.state_num);
+                }
+            }
+            DatagramKind::Input => {
+                let Ok(input) = wire::Input::decode(frame.payload.as_slice()) else {
+                    continue;
+                };
+                if SessionFrame::input(input.input_seq, input.data.clone())
+                    .validate()
+                    .is_err()
+                {
+                    continue;
+                }
+                let applied = apply_input_copy(&sessions, &id, conn, stream, &axis, input).await;
+                if let Some(now) = applied
+                    && send_frame(&frames, SessionFrame::input_ack(now))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            // The host sends updates; a client sending one is a slip.
+            DatagramKind::ScreenUpdate => {}
+        }
+    }
+}
+
+/// Apply a datagram copy of an `Input` chunk, and only if its first byte is
+/// exactly the next one this attach's axis expects (protocol.md §10-5, §18.9).
+/// A copy that starts earlier is a duplicate of bytes already applied; one
+/// that starts later would skip bytes whose stream copy has not arrived. Both
+/// are dropped, and the stream copy, which is authoritative, does the work
+/// (and is de-duplicated by the same axis). Returns the new offset when the
+/// copy was applied.
+async fn apply_input_copy(
     sessions: &Arc<dyn SessionBackend>,
     id: &SessionId,
-    last_sent: &mut u64,
-    frames: &mpsc::Sender<SessionFrame>,
-    depth: &SendDepth,
-) -> Result<(), SessionStreamError> {
-    let Some(update) = sessions.screen_update_since(id, *last_sent) else {
-        return Ok(());
-    };
-    let encoded = update.encode();
-    if encoded.len() > qsh_proto::screen::MAX_UPDATE_BYTES {
-        return Err(SessionStreamError::Protocol(
-            "screen update is larger than the update cap".into(),
-        ));
+    conn: ConnectionId,
+    stream: InputStreamId,
+    axis: &InputAxis,
+    input: wire::Input,
+) -> Option<u64> {
+    let start = input.input_seq.checked_sub(input.data.len() as u64)?;
+    let mut applied = axis.lock().await;
+    if start != *applied || input.data.is_empty() {
+        return None;
     }
-    for part in wire::ScreenUpdate::parts_of(update.new_num, &encoded) {
-        depth.add(part.data.len());
-        send_frame(frames, SessionFrame::screen_update(part)).await?;
+    match sessions
+        .write_at(id, conn, stream, input.data, input.input_seq)
+        .await
+    {
+        Ok(now) => {
+            *applied = now;
+            Some(now)
+        }
+        // Not the writer, session gone, or anything else: the stream copy
+        // decides what to do about it.
+        Err(_) => None,
     }
-    *last_sent = update.new_num;
-    Ok(())
 }
 
 /// `Input`/`Resize` from the peer, with the input dedup + ack of
@@ -616,7 +990,7 @@ async fn input_pump(
     id: SessionId,
     conn: ConnectionId,
     stream: InputStreamId,
-    input_from: u64,
+    axis: InputAxis,
     mut recv: FramedRecv,
     frames: mpsc::Sender<SessionFrame>,
     sync: Option<Arc<ScreenSync>>,
@@ -627,8 +1001,8 @@ async fn input_pump(
     // un-acked tail therefore cannot make the child see a byte twice, and a
     // stealing peer — told where the axis stands in
     // `SessionAttached.input_seq` — cannot have its input mistaken for a
-    // replay. This local value is only the last ack we sent.
-    let mut applied: u64 = input_from;
+    // replay. The shared value is only the last ack we sent; the datagram
+    // copy path (`apply_input_copy`) reads and moves it under the same lock.
     loop {
         let Some(frame) = recv.recv::<SessionFrame>().await? else {
             return Ok(()); // peer finished its half cleanly
@@ -640,6 +1014,8 @@ async fn input_pump(
         match frame.body {
             Some(session_frame::Body::Input(input)) => {
                 let len = input.data.len() as u64;
+                let mut applied_guard = axis.lock().await;
+                let mut applied = *applied_guard;
                 let Some(start) = input.input_seq.checked_sub(len) else {
                     return Err(SessionStreamError::Protocol(format!(
                         "Input.input_seq {} is smaller than its own chunk",
@@ -677,6 +1053,8 @@ async fn input_pump(
                     ) => applied = applied.max(input.input_seq),
                     Err(err) => return Err(err.into()),
                 }
+                *applied_guard = applied;
+                drop(applied_guard);
                 // Re-ack a duplicate too: the peer is waiting for it.
                 send_frame(&frames, SessionFrame::input_ack(applied)).await?;
             }
@@ -709,12 +1087,7 @@ async fn input_pump(
             // slip like any other host-to-client frame.
             Some(session_frame::Body::ScreenAck(ack)) => {
                 if let Some(sync) = &sync {
-                    if ack.state_num == 0 {
-                        sync.resync.store(true, Ordering::Release);
-                        sync.poke.notify_one();
-                    } else {
-                        sync.acked.fetch_max(ack.state_num, Ordering::AcqRel);
-                    }
+                    sync.on_ack(ack.state_num);
                 }
             }
             // Host → client frames coming back from a client are a slip,

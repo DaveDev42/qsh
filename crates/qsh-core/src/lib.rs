@@ -46,6 +46,7 @@ pub mod client;
 pub mod client_path;
 pub mod config;
 pub mod config_edit;
+pub mod datagram;
 pub mod doctor;
 pub mod exec;
 pub mod file;

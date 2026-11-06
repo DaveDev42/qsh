@@ -1,13 +1,14 @@
-//! The QUIC DATAGRAM frame header (ADR-0052 decision 7, draft).
+//! The QUIC DATAGRAM frame header (ADR-0052 decision 7).
 //!
 //! A datagram is its own boundary, so the frame has no length prefix: a
 //! 16-byte channel id, a one-byte body kind, then the body. The channel id
 //! is the 128-bit random value the host issues after the ACL admits an
 //! attach; a datagram naming an unknown channel is dropped and counted by
 //! the receiver. The kind numbers are the `DatagramFrame.body` field numbers
-//! of decision 9. Nothing sends or receives this yet and no capability
-//! enables it; the decoder exists so the fuzz surface is in place before the
-//! carrier is wired.
+//! of decision 9. The payload of each kind is the protobuf message of the
+//! same name from [`crate::wire`]. The `datagram.v1` capability carries
+//! these frames (`docs/design/protocol.md` §18.9); the decoder is a fuzz
+//! surface.
 
 use thiserror::Error;
 

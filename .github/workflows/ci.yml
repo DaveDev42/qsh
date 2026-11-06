@@ -190,6 +190,14 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^supervised_dynamic_blackhole::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0052 decision 18 item 1: `screen_sync_staleness_under_loss`.
+      # The chaos proxy adds 75 ms one way and drops 5%; the datagram
+      # carrier's staleness p95 must stay at or under 50 ms, and the stream
+      # carrier must skip intermediate states and settle within 2 x RTO after
+      # the output stops. Pipe-backed sessions, so it runs on any runner.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^datagram_carrier::screen_sync_staleness_under_loss$/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.

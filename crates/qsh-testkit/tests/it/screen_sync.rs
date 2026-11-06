@@ -15,9 +15,9 @@ use qsh_core::client::{AttachEvent, Attached, Session};
 use qsh_proto::wire::{self, ControlMessage, control_message, response};
 use qsh_testkit::loopback::LoopbackHarness;
 
-const DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(60);
 
-fn open_req(session: &Session) -> wire::SessionOpen {
+pub(crate) fn open_req(session: &Session) -> wire::SessionOpen {
     wire::SessionOpen {
         argv: vec!["sh".into()],
         cols: 80,
@@ -30,7 +30,7 @@ fn open_req(session: &Session) -> wire::SessionOpen {
 
 /// Open a session (asking for screen sync when the peer allows it) and
 /// redeem its first data stream.
-async fn open_attached(
+pub(crate) async fn open_attached(
     h: &LoopbackHarness,
     s: &mut Session,
     req: wire::SessionOpen,
@@ -49,12 +49,12 @@ async fn open_attached(
 }
 
 /// The host emulator's current state hash and number (`None` without one).
-fn host_state(h: &LoopbackHarness, id: &str) -> Option<([u8; 8], u64)> {
+pub(crate) fn host_state(h: &LoopbackHarness, id: &str) -> Option<([u8; 8], u64)> {
     let u = SessionBackend::screen_update_since(&*h.broker, &SessionId(id.to_string()), 0)?;
     Some((u.state_hash, u.new_num))
 }
 
-async fn wait_ring_end(h: &LoopbackHarness, id: &str, end: u64) {
+pub(crate) async fn wait_ring_end(h: &LoopbackHarness, id: &str, end: u64) {
     tokio::time::timeout(DEADLINE, async {
         loop {
             let info = SessionBackend::get(&*h.broker, &SessionId(id.to_string())).unwrap();
@@ -70,7 +70,7 @@ async fn wait_ring_end(h: &LoopbackHarness, id: &str, end: u64) {
 
 /// Read events, applying screen updates and acking them, until the client
 /// holds the host's current state. Returns the count of `Output` events seen.
-async fn converge(
+pub(crate) async fn converge(
     h: &LoopbackHarness,
     id: &str,
     att: &mut Attached,
@@ -92,6 +92,12 @@ async fn converge(
                         att.send_screen_ack(n).await.expect("ack");
                     }
                 }
+                AttachEvent::ScreenDatagram(part) => {
+                    let outcome = screen.on_datagram_part(&part);
+                    if let Some(n) = outcome.ack() {
+                        att.send_screen_ack(n).await.expect("ack");
+                    }
+                }
                 AttachEvent::Output { .. } => outputs += 1,
                 _ => {}
             }
@@ -105,11 +111,12 @@ async fn converge(
 #[tokio::test(flavor = "multi_thread")]
 async fn screen_sync_on_stream_carrier_converges_without_datagram() {
     let h = LoopbackHarness::start().await;
+    h.server.hide_capabilities(&[wire::CAP_DATAGRAM_V1]);
     let mut s = h.session().await;
     assert!(s.screen_supported());
     assert!(
         !s.capabilities.iter().any(|c| c == "datagram.v1"),
-        "datagram.v1 is not advertised in this step"
+        "a host without datagram.v1 negotiates none"
     );
     let req = open_req(&s);
     let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
@@ -353,6 +360,7 @@ async fn reattach_sends_one_screen_not_the_backlog() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_carrier_skips_intermediate_states_under_a_slow_reader() {
     let h = LoopbackHarness::start().await;
+    h.server.hide_capabilities(&[wire::CAP_DATAGRAM_V1]);
     let mut s = h.session().await;
     let req = open_req(&s);
     let (opened, mut pipe, mut att) = open_attached(&h, &mut s, req).await;
@@ -422,13 +430,19 @@ async fn a_full_screen_request_gets_a_base_zero_update() {
     let mut saw_base_zero = false;
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let AttachEvent::Screen(part) = att.next().await.unwrap().unwrap() else {
-                continue;
+            let (part, datagram) = match att.next().await.unwrap().unwrap() {
+                AttachEvent::Screen(part) => (part, false),
+                AttachEvent::ScreenDatagram(part) => (part, true),
+                _ => continue,
             };
             // `base_num` is the first varint of the encoded update; 0 is a
             // single zero byte.
             let is_base_zero = part.part == 0 && part.data.first() == Some(&0);
-            let outcome = screen.on_part(&part).unwrap();
+            let outcome = if datagram {
+                screen.on_datagram_part(&part)
+            } else {
+                screen.on_part(&part).unwrap()
+            };
             if let Some(n) = outcome.ack() {
                 att.send_screen_ack(n).await.unwrap();
             }

@@ -123,6 +123,104 @@ impl Reassembler {
     }
 }
 
+/// Most parts a datagram update may have. A datagram part is about one
+/// path MTU, so this bounds an update at roughly 76 KB; a bigger one goes
+/// over the stream (ADR-0052 decision 6, `docs/design/protocol.md` §18.9).
+pub const MAX_DATAGRAM_PARTS: u32 = 64;
+
+/// Cut `encoded` into slices of at most `max_part` bytes (at least one).
+pub fn split_sized(encoded: &[u8], max_part: usize) -> Vec<&[u8]> {
+    if encoded.is_empty() {
+        return vec![encoded];
+    }
+    encoded.chunks(max_part.max(1)).collect()
+}
+
+/// Rebuilds one datagram update from parts that may arrive in any order,
+/// twice or not at all (ADR-0052 decision 6): the state with the highest
+/// `new_num` seen wins, and an update completes only when every part of it
+/// is present. Memory is bounded by [`MAX_UPDATE_BYTES`] and
+/// [`MAX_DATAGRAM_PARTS`].
+#[derive(Debug, Default)]
+pub struct DatagramReassembler {
+    new_num: u64,
+    /// Highest state completed; older states are dropped. The same state is
+    /// not: the host sends it again as a full screen when the client asks.
+    done: u64,
+    parts: u32,
+    got: u32,
+    slots: Vec<Option<Vec<u8>>>,
+    bytes: usize,
+}
+
+impl DatagramReassembler {
+    /// An empty reassembler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bytes buffered for an unfinished update.
+    pub fn buffered(&self) -> usize {
+        self.bytes
+    }
+
+    /// Offer one part. `Ok(Some(bytes))` is a complete update. A part of a
+    /// state older than the one being built is dropped (`Ok(None)`); a newer
+    /// state replaces the half-built one.
+    pub fn push(
+        &mut self,
+        new_num: u64,
+        part: u32,
+        parts: u32,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8>>, PartError> {
+        if parts == 0 || parts > MAX_DATAGRAM_PARTS || part >= parts {
+            return Err(PartError::Numbering);
+        }
+        if data.len() > PART_MAX {
+            return Err(PartError::TooLarge);
+        }
+        if new_num < self.done || (self.parts != 0 && new_num < self.new_num) {
+            return Ok(None);
+        }
+        if self.parts == 0 || new_num > self.new_num {
+            self.reset();
+            self.new_num = new_num;
+            self.parts = parts;
+            self.slots = vec![None; parts as usize];
+        } else if parts != self.parts {
+            self.reset();
+            return Err(PartError::OutOfOrder);
+        }
+        let slot = &mut self.slots[part as usize];
+        if slot.is_some() {
+            return Ok(None);
+        }
+        if self.bytes + data.len() > MAX_UPDATE_BYTES {
+            self.reset();
+            return Err(PartError::TooLarge);
+        }
+        self.bytes += data.len();
+        *slot = Some(data.to_vec());
+        self.got += 1;
+        if self.got == self.parts {
+            let done: Vec<u8> = self.slots.drain(..).flatten().flatten().collect();
+            self.reset();
+            self.done = new_num;
+            Ok(Some(done))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn reset(&mut self) {
+        self.parts = 0;
+        self.got = 0;
+        self.slots.clear();
+        self.bytes = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +258,52 @@ mod tests {
         let mut r = Reassembler::new();
         assert_eq!(r.push(1, 0, 2, &[1]), Ok(None));
         assert_eq!(r.push(2, 0, 1, &[9]), Ok(Some(vec![9])));
+    }
+
+    #[test]
+    fn datagram_parts_complete_in_any_order_and_survive_duplicates() {
+        let data: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let slices = split_sized(&data, 1000);
+        assert_eq!(slices.len(), 3);
+        let mut r = DatagramReassembler::new();
+        assert_eq!(r.push(4, 2, 3, slices[2]), Ok(None));
+        assert_eq!(r.push(4, 0, 3, slices[0]), Ok(None));
+        assert_eq!(r.push(4, 0, 3, slices[0]), Ok(None));
+        assert_eq!(r.push(4, 1, 3, slices[1]), Ok(Some(data)));
+        assert_eq!(r.buffered(), 0);
+    }
+
+    #[test]
+    fn a_newer_datagram_state_drops_the_older_one_and_late_parts() {
+        let mut r = DatagramReassembler::new();
+        assert_eq!(r.push(1, 0, 2, &[1]), Ok(None));
+        assert_eq!(r.push(2, 0, 2, &[2]), Ok(None));
+        // A late part of state 1 changes nothing.
+        assert_eq!(r.push(1, 1, 2, &[1]), Ok(None));
+        assert_eq!(r.push(2, 1, 2, &[3]), Ok(Some(vec![2, 3])));
+        assert_eq!(
+            r.push(1, 0, 1, &[9]),
+            Ok(None),
+            "an older state is not rebuilt"
+        );
+        assert_eq!(
+            r.push(2, 0, 1, &[9]),
+            Ok(Some(vec![9])),
+            "the same state again is a full screen the client asked for"
+        );
+        assert_eq!(r.push(3, 0, 1, &[9]), Ok(Some(vec![9])));
+    }
+
+    #[test]
+    fn datagram_part_numbering_is_bounded() {
+        let mut r = DatagramReassembler::new();
+        assert_eq!(r.push(1, 0, 0, &[]), Err(PartError::Numbering));
+        assert_eq!(
+            r.push(1, 0, MAX_DATAGRAM_PARTS + 1, &[]),
+            Err(PartError::Numbering)
+        );
+        assert_eq!(r.push(1, 3, 3, &[]), Err(PartError::Numbering));
+        assert_eq!(r.push(1, 0, 2, &[1]), Ok(None));
+        assert_eq!(r.push(1, 1, 3, &[1]), Err(PartError::OutOfOrder));
     }
 }

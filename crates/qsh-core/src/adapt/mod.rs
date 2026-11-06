@@ -1,8 +1,9 @@
 //! Adaptive transport policy (ADR-0052 decisions 12, 13 and 15).
 //!
 //! [`decide`] is a pure function: it reads no clock and does no I/O, so one
-//! table (`tests.rs`) pins every threshold. The runner that calls it once a
-//! second per connection, and on threshold crossings, is not in this module.
+//! table (`tests.rs`) pins every threshold. [`CarrierRunner`] calls it once a
+//! second, and on threshold crossings, for knob (c) only; the runner for the
+//! other knobs is not in this module.
 //! `previous` is the last [`Knobs`] and is used only for hysteresis and for
 //! the "shorten, never lengthen" keep-alive memory.
 //!
@@ -11,6 +12,7 @@
 
 mod budget;
 mod rtt;
+mod runner;
 #[cfg(test)]
 mod tests;
 
@@ -20,6 +22,7 @@ use qsh_transport::ConnStats;
 
 pub use budget::BulkBudget;
 pub use rtt::RttVar;
+pub use runner::{ALIVE_WINDOW, CarrierRunner, LOSS_WINDOW, RTT_FLOOR, TICK, Tick};
 
 /// Decision 12 (a): LEDBAT-like queue delay target.
 pub const YIELD_TARGET: Duration = Duration::from_millis(25);

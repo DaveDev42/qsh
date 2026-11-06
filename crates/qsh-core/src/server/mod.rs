@@ -596,6 +596,9 @@ pub struct Server {
     /// Capabilities this host pretends not to have ([`Server::hide_capabilities`]).
     /// Empty in production.
     hidden_capabilities: OnceLock<Vec<String>>,
+    /// Test hook ([`Server::blackhole_datagrams`]): screen datagrams are
+    /// accepted and dropped. Off in production.
+    datagram_blackhole: Arc<AtomicBool>,
     /// The path normalizer the remote file ops call, set at most once by
     /// [`Server::set_path_normalizer`]. Unset (production) reads as the real
     /// filesystem normalizer; a test injects a counting one
@@ -796,6 +799,7 @@ impl Server {
             pinned_principals: OnceLock::new(),
             notice_sink: OnceLock::new(),
             hidden_capabilities: OnceLock::new(),
+            datagram_blackhole: Arc::new(AtomicBool::new(false)),
             path_normalizer: OnceLock::new(),
             file_host: OnceLock::new(),
             free_space: OnceLock::new(),
@@ -872,6 +876,16 @@ impl Server {
         let _ = self
             .hidden_capabilities
             .set(caps.iter().map(|c| c.to_string()).collect());
+    }
+
+    /// Make the path eat this host's screen datagrams: they are accepted
+    /// and silently dropped, as a middlebox that discards UDP payloads with
+    /// the DATAGRAM frame would, while the streams keep working. For the
+    /// carrier-fallback test (ADR-0052 decision 18-4); production never
+    /// calls it. Takes effect for every attach, including running ones.
+    pub fn blackhole_datagrams(&self, on: bool) {
+        self.datagram_blackhole
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn capability_hidden(&self, cap: &str) -> bool {
