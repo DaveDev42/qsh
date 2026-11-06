@@ -591,3 +591,128 @@ async fn client_hello_carries_no_sni_for_a_hostname_address() {
     let sni = server.await.unwrap();
     assert_eq!(sni, None, "hostname must not appear as SNI");
 }
+
+/// Handshake a loopback pair on port 0. Returns (server side, client side).
+async fn connected_pair() -> (Connection, Connection) {
+    let (server_id, server_fp) = make_identity();
+    let (client_id, client_fp) = make_identity();
+    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+    let listener = Listener::bind(loopback(), server_id, Arc::new(server_trust)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let incoming = listener.accept().await.expect("one connection");
+        incoming.accept().await.expect("handshake")
+    });
+    let dialed = Dialer::new(client_id, Arc::new(client_trust))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("dial");
+    let server_conn = server.await.unwrap();
+    (server_conn, dialed.connection)
+}
+
+/// ADR-0052 decision 7: datagrams ride the neutral facade in both
+/// directions, `max_datagram_size` is `Some` on loopback, and an oversize
+/// send is rejected without touching the connection.
+#[tokio::test]
+async fn datagrams_round_trip_and_oversize_is_rejected() {
+    let (server, client) = connected_pair().await;
+
+    let max = client.max_datagram_size().expect("datagrams on loopback");
+    assert!(max >= 1000, "loopback max_datagram_size {max} is too small");
+    assert!(server.max_datagram_size().is_some());
+
+    // The largest allowed datagram goes through, both ways.
+    let big = bytes::Bytes::from(vec![0xAB; max]);
+    client.send_datagram(big.clone()).expect("send at max");
+    let got = tokio::time::timeout(Duration::from_secs(5), server.read_datagram())
+        .await
+        .expect("datagram arrives")
+        .expect("read");
+    assert_eq!(got, big);
+    server
+        .send_datagram(bytes::Bytes::from_static(b"pong"))
+        .expect("server send");
+    let got = tokio::time::timeout(Duration::from_secs(5), client.read_datagram())
+        .await
+        .expect("datagram arrives")
+        .expect("read");
+    assert_eq!(&got[..], b"pong");
+
+    // Over the peer's advertised limit (our 64 KiB receive buffer) is
+    // rejected whatever PMTUD has done meanwhile, and the connection keeps
+    // working. (`max + 1` would race with the MTU growing.)
+    let over = bytes::Bytes::from(vec![
+        0u8;
+        qsh_transport::endpoint::DATAGRAM_RECEIVE_BUFFER_SIZE
+            + 1
+    ]);
+    assert_eq!(
+        client.send_datagram(over),
+        Err(qsh_transport::DatagramError::TooLarge)
+    );
+    client
+        .send_datagram(bytes::Bytes::from_static(b"still ok"))
+        .expect("send after rejection");
+    let got = tokio::time::timeout(Duration::from_secs(5), server.read_datagram())
+        .await
+        .expect("datagram arrives")
+        .expect("read");
+    assert_eq!(&got[..], b"still ok");
+
+    // A closed connection ends the read and fails the send.
+    client.close(0, b"done");
+    assert!(server.read_datagram().await.is_err());
+    assert!(matches!(
+        client.send_datagram(bytes::Bytes::from_static(b"x")),
+        Err(qsh_transport::DatagramError::ConnectionLost(_))
+    ));
+}
+
+/// `ConnStats` carries the congestion and path fields after real traffic.
+#[tokio::test]
+async fn conn_stats_are_populated_after_traffic() {
+    let (server, client) = connected_pair().await;
+
+    // Stream traffic so cwnd/rtt/packet counters move, plus a datagram each way.
+    let echo = tokio::spawn(async move {
+        let (mut send, mut recv) = server.accept_bi().await.unwrap();
+        let data = recv.read_to_end(1 << 20).await.unwrap();
+        send.write_all(&data).await.unwrap();
+        send.finish().unwrap();
+        let _ = server.send_datagram(bytes::Bytes::from_static(b"d"));
+        let _ = tokio::time::timeout(Duration::from_secs(5), server.read_datagram()).await;
+        server
+    });
+    client
+        .send_datagram(bytes::Bytes::from_static(b"d"))
+        .unwrap();
+    let (mut send, mut recv) = client.open_bi().await.unwrap();
+    send.write_all(&vec![7u8; 200_000]).await.unwrap();
+    send.finish().unwrap();
+    let back = recv.read_to_end(1 << 20).await.unwrap();
+    assert_eq!(back.len(), 200_000);
+    let d = tokio::time::timeout(Duration::from_secs(5), client.read_datagram())
+        .await
+        .expect("datagram arrives")
+        .expect("read");
+    assert_eq!(&d[..], b"d");
+
+    let s = client.stats();
+    assert!(s.rtt > Duration::ZERO, "rtt {:?}", s.rtt);
+    assert!(s.min_rtt > Duration::ZERO && s.min_rtt <= s.rtt.max(s.min_rtt));
+    assert!(s.cwnd > 0, "cwnd {}", s.cwnd);
+    assert!(s.sent_packets > 0);
+    assert!(s.path_mtu >= 1200, "path_mtu {}", s.path_mtu);
+    assert!(s.tx_datagram_frames >= 1);
+    assert!(s.rx_datagram_frames >= 1);
+    assert!(s.rx_frames > 0);
+    assert!(s.lost_packets.is_some());
+    // Loopback: nothing should be lost, but the counters must exist.
+    let _ = (s.lost_bytes, s.congestion_events);
+
+    let server = echo.await.unwrap();
+    client.close(0, b"done");
+    server.close(0, b"done");
+}

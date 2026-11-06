@@ -19,7 +19,9 @@
 //!
 //! Wire structure never depends on QUIC-specific concepts (stream IDs,
 //! datagrams): stream identity is always the in-band `StreamHeader`
-//! (`docs/design/protocol.md` §7, §14). The public surface names no quinn
+//! (`docs/design/protocol.md` §7, §14). QUIC DATAGRAM is enabled as an
+//! optional carrier only (`Connection::send_datagram`, ADR-0052 decision 7):
+//! every datagram message has a stream twin. The public surface names no quinn
 //! type but the hidden `Connection::quinn` test escape hatch
 //! (`docs/adr/0043-no-tcp-fallback.md` decision 3): [`Connection`],
 //! [`Endpoint`], [`SendStream`] and [`RecvStream`] are closed enums over the
@@ -42,8 +44,8 @@ pub use endpoint::{
     set_default_dial_timeout,
 };
 pub use error::{
-    ApplicationClose, ClosedStream, ConnectError, ConnectionError, ExportError, ReadError,
-    ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
+    ApplicationClose, ClosedStream, ConnectError, ConnectionError, DatagramError, ExportError,
+    ReadError, ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
 pub use mux::{TransportCaps, TransportKind};

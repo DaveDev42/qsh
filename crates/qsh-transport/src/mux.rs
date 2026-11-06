@@ -18,9 +18,11 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::endpoint::ConnStats;
+use bytes::Bytes;
+
 use crate::error::{
-    ClosedStream, ConnectionError, ExportError, ReadError, ReadExactError, ReadToEndError,
-    StoppedError, StreamCode, WriteError,
+    ClosedStream, ConnectionError, DatagramError, ExportError, ReadError, ReadExactError,
+    ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 
 /// Which transport a connection runs over.
@@ -85,6 +87,14 @@ pub(crate) trait MuxConn: Clone + Send + Sync + 'static {
     fn close_reason(&self) -> Option<ConnectionError>;
 
     fn remote_address(&self) -> SocketAddr;
+
+    /// Largest datagram payload `send_datagram` accepts right now; `None`
+    /// when the peer (or this side) does not do datagrams.
+    fn max_datagram_size(&self) -> Option<usize>;
+    /// Unreliable, unordered, best effort. Never waits.
+    fn send_datagram(&self, data: Bytes) -> Result<(), DatagramError>;
+    /// Cancel-safe.
+    fn read_datagram(&self) -> impl Future<Output = Result<Bytes, ConnectionError>> + Send;
     fn stats(&self) -> ConnStats;
     /// RFC 5705 exporter over the connection's TLS session
     /// (`docs/design/protocol.md` §15).

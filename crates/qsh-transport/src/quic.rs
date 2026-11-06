@@ -9,9 +9,11 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::endpoint::ConnStats;
+use bytes::Bytes;
+
 use crate::error::{
-    ClosedStream, ConnectionError, ExportError, ReadError, ReadExactError, ReadToEndError,
-    StoppedError, StreamCode, WriteError,
+    ClosedStream, ConnectionError, DatagramError, ExportError, ReadError, ReadExactError,
+    ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 use crate::mux::{MuxConn, RecvHalf, SendHalf, TransportCaps, TransportKind};
 
@@ -68,10 +70,30 @@ impl MuxConn for QuicConn {
         self.0.remote_address()
     }
 
+    fn max_datagram_size(&self) -> Option<usize> {
+        self.0.max_datagram_size()
+    }
+
+    fn send_datagram(&self, data: Bytes) -> Result<(), DatagramError> {
+        Ok(self.0.send_datagram(data)?)
+    }
+
+    async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {
+        Ok(self.0.read_datagram().await?)
+    }
+
     fn stats(&self) -> ConnStats {
         let stats = self.0.stats();
         ConnStats {
             rtt: stats.path.rtt,
+            min_rtt: stats.path.min_rtt,
+            cwnd: stats.path.cwnd,
+            congestion_events: stats.path.congestion_events,
+            lost_bytes: stats.path.lost_bytes,
+            sent_packets: stats.path.sent_packets,
+            path_mtu: stats.path.current_mtu,
+            tx_datagram_frames: stats.frame_tx.datagram,
+            rx_datagram_frames: stats.frame_rx.datagram,
             rx_frames: fold_frames_rx(&stats.frame_rx),
             peer_blocked_events: stats.frame_rx.data_blocked,
             peer_stream_blocked_events: stats.frame_rx.stream_data_blocked,
