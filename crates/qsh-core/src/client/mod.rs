@@ -28,6 +28,7 @@ use crate::ops::OpError;
 pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;
+pub mod predict;
 pub mod reconnect;
 pub mod render;
 pub mod screen;

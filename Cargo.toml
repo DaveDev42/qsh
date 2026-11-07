@@ -95,6 +95,10 @@ nix = { version = "0.31", default-features = false }
 # `crates/qsh-core/src/screen/`). Pure Rust, no I/O; MIT.
 vt100 = "0.18"
 
+# Character widths for the client `Predictor` (ADR-0053 decision 4). Must be the
+# version `vt100` resolves to so predicted widths match the host emulator.
+unicode-width = "0.2"
+
 # diagnostics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
