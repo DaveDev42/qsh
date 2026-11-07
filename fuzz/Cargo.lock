@@ -1435,6 +1435,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "ulid",
+ "unicode-width 0.2.3",
  "vt100",
  "windows",
  "windows-native-keyring-store",
