@@ -31,7 +31,7 @@
 //! (staleness after an unpredicted key, the 256 cap meaning pending
 //! predictions, superseded predictions).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use qsh_proto::screen::{Cell, Modes, ScreenState, cell_flags};
@@ -430,7 +430,9 @@ impl Predictor {
             return Overlay::default();
         }
         let underline = mode == Prediction::Underline;
-        let mut cells: BTreeMap<(u16, u16), Cell> = BTreeMap::new();
+        let n = usize::from(self.cols);
+        let mut cells = vec![Cell::default(); n];
+        let mut written = vec![false; n];
         let mut cursor = None;
         for p in &self.pending {
             if !self.confirmed_epochs.contains(&p.epoch) {
@@ -444,14 +446,21 @@ impl Predictor {
                 if underline && *fresh {
                     cell.flags |= cell_flags::UNDERLINE;
                 }
-                cells.insert((self.row, *col), cell);
+                put_atomic(&mut cells, &mut written, usize::from(*col), cell);
             }
             cursor = Some((self.row, p.cursor_after));
         }
         Overlay {
             cells: cells
                 .into_iter()
-                .map(|((row, col), cell)| OverlayCell { row, col, cell })
+                .zip(written)
+                .enumerate()
+                .filter(|(_, (_, w))| *w)
+                .map(|(col, (cell, _))| OverlayCell {
+                    row: self.row,
+                    col: col as u16,
+                    cell,
+                })
                 .collect(),
             cursor,
         }
@@ -584,10 +593,11 @@ impl Predictor {
             .map(<[Cell]>::to_vec)
             .unwrap_or_default();
         view.resize(cols, Cell::default());
+        let mut written = vec![false; cols];
         for p in &self.pending {
             for (col, cell, _) in &p.cells {
-                if let Some(slot) = view.get_mut(usize::from(*col)) {
-                    *slot = cell.clone();
+                if usize::from(*col) < cols {
+                    put_atomic(&mut view, &mut written, usize::from(*col), cell.clone());
                 }
             }
         }
@@ -710,6 +720,28 @@ impl Predictor {
                 },
                 None => self.verdict_own(i),
             };
+        }
+        // The host applies input in order, so a cell that shows a later
+        // key's character shows the effect of every earlier key too. The
+        // earlier predictions that wait for a report only because their own
+        // result cannot be seen (a typed blank, a Backspace) are settled
+        // with it: left pending, their cell snapshots, shifted tails of
+        // wide characters among them, would be drawn over what the host
+        // now shows.
+        if let Some(last) = verdicts
+            .iter()
+            .rposition(|v| matches!(v, Verdict::Match { evidence: true }))
+        {
+            for (v, p) in verdicts.iter_mut().zip(&self.pending).take(last) {
+                let unseen = is_blank(&p.expect) || p.kind == Kind::Backspace;
+                if *v == Verdict::Pending
+                    && matches!(p.kind, Kind::Insert | Kind::Backspace)
+                    && unseen
+                    && p.input_end > self.covered
+                {
+                    *v = Verdict::Match { evidence: false };
+                }
+            }
         }
         let mut keep = VecDeque::with_capacity(n);
         let mut changed = false;
@@ -896,10 +928,14 @@ impl Predictor {
         true
     }
 
-    fn last_nonempty_from(&self, c: usize) -> Option<usize> {
-        (c..self.view.len())
-            .rev()
-            .find(|k| !self.view[*k].text.is_empty())
+    /// The last occupied column at or after `c`. The right half of a wide
+    /// character has no text but is occupied: a shift that stopped at the
+    /// lead would leave the half behind and move the lead alone.
+    fn last_occupied_from(&self, c: usize) -> Option<usize> {
+        (c..self.view.len()).rev().find(|k| {
+            let cell = &self.view[*k];
+            !cell.text.is_empty() || cell.flags & cell_flags::WIDE_CONT != 0
+        })
     }
 
     fn base(kind: Kind, cursor_before: usize, cursor_after: usize, now: Instant) -> Pred {
@@ -936,7 +972,7 @@ impl Predictor {
             Default::default()
         };
         let mut out = self.view.clone();
-        let last = self.last_nonempty_from(c);
+        let last = self.last_occupied_from(c);
         if let Some(e) = last {
             for k in (c..=e).rev() {
                 if k + w < cols {
@@ -992,7 +1028,7 @@ impl Predictor {
         };
         let s = c - w;
         let mut out = self.view.clone();
-        let hi = match self.last_nonempty_from(c) {
+        let hi = match self.last_occupied_from(c) {
             Some(e) => {
                 out[c - w..=e - w].clone_from_slice(&self.view[c..=e]);
                 for cell in &mut out[e + 1 - w..=e] {
@@ -1041,6 +1077,35 @@ impl Predictor {
         };
         (t < self.view.len()).then(|| Self::base(Kind::Right, c, t, now))
     }
+}
+
+/// Write one predicted cell into a row of composed cells. Predictions are
+/// absolute snapshots, so after one in the middle resolves, a later write can
+/// land on one half of a wide character an earlier prediction wrote; the
+/// other half is then blanked instead of left as a lone lead or a lone right
+/// half (a terminal overwriting one half does the same).
+fn put_atomic(cells: &mut [Cell], written: &mut [bool], col: usize, cell: Cell) {
+    let old = cells[col].flags;
+    if written[col] {
+        if old & cell_flags::WIDE != 0
+            && cell.flags & cell_flags::WIDE == 0
+            && col + 1 < cells.len()
+            && written[col + 1]
+            && cells[col + 1].flags & cell_flags::WIDE_CONT != 0
+        {
+            cells[col + 1] = Cell::default();
+        }
+        if old & cell_flags::WIDE_CONT != 0
+            && cell.flags & cell_flags::WIDE_CONT == 0
+            && col > 0
+            && written[col - 1]
+            && cells[col - 1].flags & cell_flags::WIDE != 0
+        {
+            cells[col - 1] = Cell::default();
+        }
+    }
+    cells[col] = cell;
+    written[col] = true;
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

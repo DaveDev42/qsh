@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc af9dc90207c144101244c339ab85e4e48bb5092dc4c19eb2703ddbe4bd8a84f9 # shrinks to mode = Echo, ops = [Key(Char('가')), Key(Char('a')), Key(Backspace), Key(Left), Key(Char(' ')), Deliver(2), Key(Char('é')), Key(Char('a')), Key(Char('a')), Key(Char('a')), Key(Char('a')), Deliver(2), Key(Char('a')), Key(Char('a')), Key(Char('a')), StateOnly(2), Key(Char('a'))]
+cc fb7d5ef9099cecd85fa8f01181de738a596f0a9bf0fd4d2ca7ddaf803890f28e # shrinks to mode = Echo, ops = [Key(Char('가')), Key(Char('가')), Key(Left), Key(Backspace), Key(Left), Key(Char('é')), Key(Char('가')), Key(Right), Key(Backspace), Key(Char('a')), Deliver(1)]

@@ -953,26 +953,17 @@ mod overlay {
         Ok(())
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        #[test]
-        fn local_terminal_matches_the_host_once_predictions_resolve(
-            mode in prop::sample::select(vec![
-                Mode::Echo, Mode::Star, Mode::Other, Mode::Silent, Mode::Secret,
-            ]),
-            ops in prop::collection::vec(
-                prop_oneof![
-                    6 => key_strategy().prop_map(Op::Key),
-                    3 => (0usize..4).prop_map(Op::Deliver),
-                    1 => (0usize..3).prop_map(Op::StateOnly),
-                    1 => (0usize..8).prop_map(Op::HostMove),
-                    1 => Just(Op::Alt),
-                ],
-                0..70,
-            ),
-        ) {
-            let mut host = Host { mode, line: Vec::new(), pos: 0, above: Vec::new(), alt: false };
+    /// Run `ops` against a host in `mode` and the predictor, checking the
+    /// local terminal after every step and at the end.
+    fn run(mode: Mode, ops: Vec<Op>) -> Result<(), TestCaseError> {
+        {
+            let mut host = Host {
+                mode,
+                line: Vec::new(),
+                pos: 0,
+                above: Vec::new(),
+                alt: false,
+            };
             let mut p = Predictor::new(true);
             p.on_policy(Prediction::Underline);
             let mut renderer = ScreenRenderer::new();
@@ -1005,7 +996,11 @@ mod overlay {
                         p.on_state(&host.screen(), n, t);
                         if matches!(op, Op::Deliver(_)) {
                             p.on_echo(
-                                EchoReport { state_num: n, input_seq: done, tty: host.tty() },
+                                EchoReport {
+                                    state_num: n,
+                                    input_seq: done,
+                                    tty: host.tty(),
+                                },
                                 t,
                             );
                         }
@@ -1034,11 +1029,96 @@ mod overlay {
             }
             n += 1;
             p.on_state(&host.screen(), n, t);
-            p.on_echo(EchoReport { state_num: n, input_seq: done, tty: host.tty() }, t);
+            p.on_echo(
+                EchoReport {
+                    state_num: n,
+                    input_seq: done,
+                    tty: host.tty(),
+                },
+                t,
+            );
             prop_assert_eq!(p.pending_len(), 0);
             prop_assert!(p.overlay().is_empty());
             show(&p, &host, &mut renderer, &mut local)?;
             assert_same(&local.snapshot(), &host.screen());
         }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn local_terminal_matches_the_host_once_predictions_resolve(
+            mode in prop::sample::select(vec![
+                Mode::Echo, Mode::Star, Mode::Other, Mode::Silent, Mode::Secret,
+            ]),
+            ops in prop::collection::vec(
+                prop_oneof![
+                    6 => key_strategy().prop_map(Op::Key),
+                    3 => (0usize..4).prop_map(Op::Deliver),
+                    1 => (0usize..3).prop_map(Op::StateOnly),
+                    1 => (0usize..8).prop_map(Op::HostMove),
+                    1 => Just(Op::Alt),
+                ],
+                0..70,
+            ),
+        ) {
+            run(mode, ops)?;
+        }
+    }
+
+    /// The shrunk case of seed fb7d5ef9: the host's first echo makes a
+    /// later prediction match by coincidence and removes predictions in the
+    /// middle of the queue. The earlier ones keep snapshots of a wide
+    /// character that a later one overwrote half of; the overlay must not
+    /// carry the lead without its right half.
+    #[test]
+    fn a_prediction_resolved_in_the_middle_leaves_no_torn_wide_pair() {
+        let k = |c: char| Op::Key(Key::Char(c));
+        let ops = vec![
+            k('가'),
+            k('가'),
+            Op::Key(Key::Left),
+            Op::Key(Key::Backspace),
+            Op::Key(Key::Left),
+            k('é'),
+            k('가'),
+            Op::Key(Key::Right),
+            Op::Key(Key::Backspace),
+            k('a'),
+            Op::Deliver(1),
+        ];
+        run(Mode::Echo, ops).unwrap();
+    }
+
+    /// The shrunk case of seed af9dc902: a wide character at the end of the
+    /// line, shifted right by one typed character after another. The
+    /// predictor used to move the lead without its right half, so the next
+    /// character's cell sat where the half belonged and the renderer blanked
+    /// it.
+    #[test]
+    fn typing_before_a_wide_character_keeps_every_typed_cell() {
+        let k = |c: char| Op::Key(Key::Char(c));
+        let ops = vec![
+            k('가'),
+            k('a'),
+            Op::Key(Key::Backspace),
+            Op::Key(Key::Left),
+            k(' '),
+            Op::Deliver(2),
+            k('é'),
+            k('a'),
+            k('a'),
+            k('a'),
+            k('a'),
+            Op::Deliver(2),
+            k('a'),
+            k('a'),
+            k('a'),
+            Op::StateOnly(2),
+            k('a'),
+        ];
+        run(Mode::Echo, ops).unwrap();
     }
 }

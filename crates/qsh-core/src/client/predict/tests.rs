@@ -156,6 +156,75 @@ fn wide_characters_take_two_cells_and_move_the_cursor_two_columns() {
     assert!(r.p.overlay().is_empty());
 }
 
+type Shape = Vec<(u16, bool, bool)>;
+
+/// (column, wide lead, wide right half) of every overlay cell.
+fn shape(o: &Overlay) -> Shape {
+    o.cells
+        .iter()
+        .map(|c| {
+            (
+                c.col,
+                c.cell.flags & cell_flags::WIDE != 0,
+                c.cell.flags & cell_flags::WIDE_CONT != 0,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_shift_carries_the_right_half_of_a_wide_character_with_its_lead() {
+    // (host row, cursor column, key, overlay shape). The wide character
+    // that ends the line moves with both halves.
+    let table: [(&str, u16, &[u8], Shape); 2] = [
+        (
+            "$ 가",
+            2,
+            b"a",
+            vec![(2, false, false), (3, true, false), (4, false, true)],
+        ),
+        (
+            "$ a가",
+            3,
+            &[0x7f],
+            vec![(2, true, false), (3, false, true), (4, false, false)],
+        ),
+    ];
+    for (row, col, key, want) in table {
+        let mut r = Rig::confirmed(Prediction::Display);
+        r.state(&screen(3, 40, row, (0, col)));
+        r.key(key);
+        assert_eq!(shape(&r.p.overlay()), want, "{row} {key:?}");
+    }
+}
+
+#[test]
+fn a_write_over_half_of_a_predicted_wide_character_blanks_the_other_half() {
+    let wide = |flags: u8, text: &str| Cell {
+        text: text.into(),
+        flags,
+        ..Cell::default()
+    };
+    let narrow = || wide(0, "a");
+    // (column the narrow cell lands on, columns blank afterwards)
+    let table: [(usize, [bool; 2]); 2] = [(1, [true, false]), (0, [false, true])];
+    for (col, blank) in table {
+        let mut cells = vec![Cell::default(); 4];
+        let mut written = vec![false; 4];
+        put_atomic(&mut cells, &mut written, 0, wide(cell_flags::WIDE, "가"));
+        put_atomic(&mut cells, &mut written, 1, wide(cell_flags::WIDE_CONT, ""));
+        put_atomic(&mut cells, &mut written, col, narrow());
+        let flags: Vec<u8> = cells.iter().map(|c| c.flags).collect();
+        assert_eq!(cells[col].text.as_ref(), "a", "{flags:?}");
+        for (k, b) in blank.iter().enumerate() {
+            if *b {
+                assert!(cells[k].text.is_empty() && cells[k].flags == 0, "{col} {k}");
+            }
+        }
+        assert!(written[..2].iter().all(|w| *w));
+    }
+}
+
 #[test]
 fn the_row_edge_decides_which_characters_fit() {
     // 10 columns, prompt takes two. (cursor column, input, predicted)
