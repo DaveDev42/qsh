@@ -37,6 +37,8 @@
 //!   negotiated yet (`docs/design/protocol.md` §18).
 //! - [`datagram`]: the QUIC DATAGRAM frame header (ADR-0052 decision 7).
 //!   Draft and unwired.
+//! - [`punch`]: the 16-byte hole-punch datagram and its BLAKE3 tag
+//!   (ADR-0054 decision 13). Unnegotiated until `punch.v1` lands.
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -49,6 +51,7 @@ pub mod frame;
 pub mod local;
 pub mod openssh;
 pub mod pairing;
+pub mod punch;
 pub mod schema;
 pub mod screen;
 pub mod socks5;

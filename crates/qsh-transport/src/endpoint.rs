@@ -206,6 +206,15 @@ pub const CLOSE_CODE_TRUST_WITHDRAWN: u32 = 0x1005;
 /// no principal and no cause; the audit record carries the coarse category.
 pub const TRUST_WITHDRAWN_REASON: &[u8] = b"trust withdrawn";
 
+/// Application close code of a connection that finished its handshake in a
+/// hole-punching attempt but lost the race to another one
+/// (`docs/adr/0054-m24-hole-punching.md` decision 15). Internal until the
+/// `punch.v1` step documents it in `docs/design/protocol.md` §16.3.
+pub const CLOSE_CODE_NOT_ADOPTED: u32 = 0x1006;
+
+/// The close reason that goes with [`CLOSE_CODE_NOT_ADOPTED`].
+pub const NOT_ADOPTED_REASON: &[u8] = b"not adopted";
+
 /// The local device's cert chain and private key (PKCS#8 DER).
 #[derive(Clone)]
 pub struct LocalIdentity {
@@ -1312,25 +1321,40 @@ impl Dialer {
             Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
         };
 
-        let chain = peer_chain(&conn);
-        let verified = match verifier.verify_peer(&chain, PeerRole::Server) {
-            Ok(v) => v,
-            Err(reason) => {
-                conn.close(
-                    quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
-                    b"unverified peer",
-                );
-                return Err(DialError::LocalRejected {
-                    reason,
-                    observed: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
-                });
-            }
-        };
+        let connection = finish_dial(conn, &verifier)?;
         Ok(Dialed {
-            connection: Connection::from_quic(conn, &chain, PeerRole::Server, verified),
+            connection,
             endpoint: Endpoint::from_quic(endpoint),
             verifier,
         })
+    }
+}
+
+/// The part of a dial after the handshake: run the pin/CA check on the
+/// server's chain and wrap the connection. Shared by [`Dialer`] and
+/// [`PunchEndpoint::dial`].
+fn finish_dial(
+    conn: quinn::Connection,
+    verifier: &QshPeerVerifier,
+) -> Result<Connection, DialError> {
+    let chain = peer_chain(&conn);
+    match verifier.verify_peer(&chain, PeerRole::Server) {
+        Ok(verified) => Ok(Connection::from_quic(
+            conn,
+            &chain,
+            PeerRole::Server,
+            verified,
+        )),
+        Err(reason) => {
+            conn.close(
+                quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
+                b"unverified peer",
+            );
+            Err(DialError::LocalRejected {
+                reason,
+                observed: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
+            })
+        }
     }
 }
 
@@ -1647,6 +1671,12 @@ impl Incoming {
         }
     }
 }
+
+mod punch;
+pub use punch::{
+    MAX_PUNCH_WINDOWS, PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow,
+    SocketSource,
+};
 
 #[cfg(test)]
 mod tests;

@@ -44,8 +44,10 @@
 //!
 //! # Limits
 //!
-//! Sockets bind one concrete address; there is no `0.0.0.0` / `[::]`
-//! wildcard and no dual-stack socket, so one socket speaks one family. There
+//! Sockets bind one concrete address, so one socket speaks one family.
+//! [`Site::bind_wildcard`] only changes how the socket looks to quinn (a
+//! `[::]` dual-stack address with IPv4-mapped peers); it does not listen on
+//! several of a host's addresses. There
 //! is no ICMP (a datagram to a closed port or a filtered path vanishes
 //! silently), no ECN and no GSO/GRO (one datagram per `try_send`). Packets
 //! larger than [`NetConfig::mtu`] are dropped (no fragmentation). NAT
@@ -381,6 +383,17 @@ impl Site {
     /// Binds a socket at the site's host address.
     pub fn bind(&self, port: u16) -> io::Result<NetSocket> {
         self.realm.bind(SocketAddr::new(self.ip, port))
+    }
+
+    /// Binds a socket at the site's host address that presents itself to
+    /// quinn as a dual-stack wildcard socket (`[::]:port`), the way the
+    /// punching endpoint binds on a real OS. A datagram to or from an IPv4
+    /// peer carries the IPv4-mapped IPv6 form on the quinn side and the
+    /// plain IPv4 form on the network side. The socket still lives at this
+    /// site's one address, so a site with an IPv6 address gets IPv6 traffic
+    /// only and an IPv4 site IPv4 only; [`NetSocket::local`] is that address.
+    pub fn bind_wildcard(&self, port: u16) -> io::Result<NetSocket> {
+        Ok(self.bind(port)?.wildcard())
     }
 
     /// Another host behind the same box. Only translating boxes can hand out

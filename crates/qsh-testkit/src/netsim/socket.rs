@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, IoSliceMut};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -71,6 +71,7 @@ pub struct NetSocket {
     shared: Arc<Shared>,
     realm: RealmId,
     queue: Arc<SockQueue>,
+    wildcard: bool,
 }
 
 impl fmt::Debug for NetSocket {
@@ -87,7 +88,16 @@ impl NetSocket {
             shared,
             realm,
             queue,
+            wildcard: false,
         }
+    }
+
+    /// Makes the socket present itself as a dual-stack wildcard socket to
+    /// quinn (`[::]:port`): IPv4 peers are addressed and reported in their
+    /// IPv4-mapped form, as an OS dual-stack socket does.
+    pub(crate) fn wildcard(mut self) -> Self {
+        self.wildcard = true;
+        self
     }
 
     /// The address this socket is bound to, as the host itself sees it (the
@@ -151,7 +161,11 @@ impl AsyncUdpSocket for NetSocket {
 
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
         // `max_transmit_segments` is 1, so `contents` is one datagram.
-        self.send_to(transmit.destination, transmit.contents);
+        let mut dst = transmit.destination;
+        if self.wildcard {
+            dst = SocketAddr::new(dst.ip().to_canonical(), dst.port());
+        }
+        self.send_to(dst, transmit.contents);
         Ok(())
     }
 
@@ -169,6 +183,10 @@ impl AsyncUdpSocket for NetSocket {
             };
             let len = data.len().min(bufs[n].len());
             bufs[n][..len].copy_from_slice(&data[..len]);
+            let src = match (self.wildcard, src.ip()) {
+                (true, IpAddr::V4(v4)) => SocketAddr::new(v4.to_ipv6_mapped().into(), src.port()),
+                _ => src,
+            };
             meta[n] = RecvMeta {
                 addr: src,
                 len,
@@ -186,6 +204,12 @@ impl AsyncUdpSocket for NetSocket {
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
+        if self.wildcard {
+            return Ok(SocketAddr::new(
+                Ipv6Addr::UNSPECIFIED.into(),
+                self.queue.local.port(),
+            ));
+        }
         Ok(self.queue.local)
     }
 }

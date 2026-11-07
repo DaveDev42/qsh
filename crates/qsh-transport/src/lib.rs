@@ -8,6 +8,8 @@
 //! - [`endpoint`]: [`Dialer`]/[`Listener`] producing verified
 //!   [`Connection`]s; ALPN `qsh/1`, keep-alive 15 s / idle 45 s, no 0-RTT,
 //!   no session tickets.
+//!   [`PunchEndpoint`] is the hole-punching variant: one endpoint on one
+//!   punch-aware UDP socket (ADR-0054 decisions 3, 7, 13).
 //! - [`control`]: framed prost message I/O over transport streams.
 //! - [`stream`]: transport-neutral [`SendStream`]/[`RecvStream`].
 //! - `mux` and `quic` (private): the contract every backend implements
@@ -39,9 +41,10 @@ pub mod tls;
 
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
-    AcceptError, ConnStats, Connection, DialError, Dialed, Dialer, Endpoint, Incoming, Listener,
-    LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
-    set_default_dial_timeout,
+    AcceptError, CLOSE_CODE_NOT_ADOPTED, ConnStats, Connection, DialError, Dialed, Dialer,
+    Endpoint, Incoming, Listener, LocalIdentity, MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON,
+    PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow, RESET_KEY_LEN, SetupError,
+    SocketSource, TransportTuning, bind_tuned_udp_socket, set_default_dial_timeout,
 };
 pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, DatagramError, ExportError,
