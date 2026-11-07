@@ -22,7 +22,7 @@ QUIC 스택은 `qsh-transport` 안에만 있다. `qsh-core`와 `qsh-cli`는 매�
 | `qsh-transport` | quinn/rustls glue: endpoint 구성, ALPN, `QshPeerVerifier`, keep-alive/rebind. 공개 표면은 백엔드 중립 파사드(`Connection`·`SendStream`·`RecvStream`·`Endpoint`와 오류·코드 타입)이고 닫힌 enum이라 generic·`dyn`이 qsh-core로 새지 않는다. 백엔드가 구현할 계약은 비공개 트레이트(`MuxConn`/`SendHalf`/`RecvHalf`)와 `tests/it/conformance.rs`의 행동 목록이 고정한다(ADR-0028 결정 0). QUIC DATAGRAM은 선택 운반체로 켜 두고(`Connection::max_datagram_size`·`send_datagram`·`read_datagram`, 버퍼 상수 `DATAGRAM_*_BUFFER_SIZE` 각 64 KiB, ADR-0052 결정 7), `Connection::stats()`의 `ConnStats`가 `rtt`·`min_rtt`·`cwnd`·`sent_packets`·`lost_packets`·`lost_bytes`·`path_mtu`·datagram frame 수를 중립 값으로 준다(적응 정책의 입력, 결정 12) | 세션·ACL·비즈니스 로직, 상위 crate에 quinn 타입 노출 |
 | `qsh-core` | 모든 비즈니스 로직: typed `Ops` façade, `server::dispatch`(ACL choke point), session broker, PTY, exec/tunnel(`tunnel/` 모듈, §3), identity/trust/pairing, ssh 부트스트랩(`ssh_bootstrap/`, `ops/pair_ssh.rs`, `ops/auto_bootstrap.rs`, §5), ACL/audit, config, doctor, localctl | 렌더링, 프로토콜 프레임 파싱(qsh-proto 위임) |
 | `qsh-cli` | 패키지 `qsh-cli`, 바이너리 `qsh`. 얇은 frontend만: clap, human/JSON/JSONL 렌더러, interactive TUI (내장 MCP adapter는 ADR-0011로 철회됐다) | 인증·ACL·세션 로직 일체 (CLI.md §11) |
-| `qsh-testkit` | 통합 하네스, chaos proxy, fixture 도구 ([testing.md](testing.md)) | — |
+| `qsh-testkit` | 통합 하네스, chaos proxy, 가상 UDP 망과 NAT 상자 `netsim`(ADR-0054), fixture 도구 ([testing.md](testing.md)) | — |
 
 **확장 기준 패턴:** 새 operation은 `crates/qsh-core/src/ops/mod.rs`의 기존 패턴을 따른다 — `Operation` trait(`COMMAND: &'static str` = dotted 이름, envelope·audit·ACL의 join key), `OpError { code: ErrorCode, message, retryable, details }`, `Ops` façade의 메서드 하나. `version.get`(`VersionOp`)이 살아 있는 예시다.
 

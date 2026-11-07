@@ -32,6 +32,9 @@
 //!   that needs a real off-loopback destination (`-D`'s
 //!   `crates/qsh-testkit/tests/it/dynamic_loopback.rs` and its reverse-route
 //!   twin).
+//! - [`netsim`]: a virtual UDP network for real quinn endpoints with RFC 4787
+//!   NAT boxes, on tokio's (pausable) clock, for the hole-punching tests
+//!   (ADR-0054 decision 22).
 //!
 //! - [`echo_host`]: [`echo_host::EchoHost`], a host whose sessions are the
 //!   broker's headless echo, reachable forward or as a reverse target, for
@@ -75,6 +78,7 @@ pub mod fixtures;
 pub mod freeze;
 pub mod loopback;
 pub mod net_probe;
+pub mod netsim;
 pub mod pair;
 pub mod pairing;
 pub mod perf;
