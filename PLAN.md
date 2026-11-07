@@ -1,6 +1,6 @@
-# PLAN.md — M23: 로컬 에코 예측과 연결 상태 줄
+# PLAN.md — M24: 홀펀칭
 
-M22(화면 상태 동기화와 적응 전송)는 2026-11-07 닫혔다. 직전 M22 계획의 마지막 커밋은 `1a07d99`다. M23의 범위는 ADR-0050의 M23 행(M22 화면 모델 위의 mosh식 예측, 확인 전 글자 밑줄, echo-off·전체 화면 앱·연속 오예측에서 끔, 응답이 끊기면 "마지막 응답 N초 전" 줄)이고, 첫 스텝인 범위 ADR이 승인되기 전에는 계약·wire 스텝을 열지 않는다(ROADMAP §6.1 원칙 2·4).
+M23(로컬 에코 예측과 연결 상태 줄)은 2026-11-07 닫혔다. 직전 M23 계획의 마지막 커밋은 `d50f003`이다. M24의 범위는 ROADMAP §6 M24 행(둘 다 닿는 사용자의 qsh peer를 중개자로 쓴 후보 교환, 동시 송신, 첫 handshake 채택, 실패 시 포기, relay·TURN·공용 STUN 없음)이고, 첫 스텝인 범위 ADR이 승인되기 전에는 계약·wire 스텝을 열지 않는다(ROADMAP §6.1 원칙 2·4).
 
 이 파일과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
@@ -48,6 +48,11 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 - [ ] **`--always-on` 레시피 실행 회차.** ADR-0051 결정 15의 4. 테스트는 세 OS에서 `service install --always-on`이 `docs/deploy/service.md` 레시피와 같은 바이트를 내는 것까지만 고정한다. linger·LaunchDaemon·Windows `Password` 작업을 실제로 켜고 로그아웃 뒤 serve가 남는지를 사람이 한 번 기록한다. 소유: 사람.
 - [ ] **Windows 원격 설치 대본 실장비 실행.** ADR-0051 결정 3. Windows 원격용 PowerShell 설치·스트림 대본은 문자열 테스트로만 고정돼 있다. qsh가 없는 Windows host(OpenSSH Server)에 `qsh --install-remote <host>`를 한 번 돌려 (가)·(나) 경로를 기록한다. 소유: 사람.
 
+### 0.6 M23이 만든 사람 몫
+
+- [ ] **ADR-0053 결정 7의 커서 숨김 차단을 좁힌 것의 확인.** 수용 시험에서 Windows pwsh(PSReadLine)가 키마다 커서를 숨겼다 보여 예측이 꺼졌다. 코드는 적용된 상태 둘이 연달아 커서를 숨길 때만 차단한다(`HIDDEN_CURSOR_STATES = 2`, `3da871a`). 결정 본문은 고치지 않고 ADR-0053 개정 이력에만 적었다. Dave가 받아들이면 개정 이력에 승인을 적고, 받아들이지 않으면 pwsh에서 예측이 꺼지는 것을 감수하고 되돌린다. 소유: Dave.
+- [ ] **vt100 upstream 보고.** `vt100` 0.18.1의 `Screen::text_cleanup`이 U+FE0F가 앞 셀을 넓힐 때 `unwrap()`에서 panic한다(재현: `Parser::new(2, 1, 0).process("0\u{fe0f}".as_bytes())`). qsh는 host 입구에서 막았다(`d548c10`). 외부 저장소 쓰기라 사람 몫이다. 소유: Dave.
+
 ## 1. 유지보수에서 남은 확인
 
 자리표시자 계획 §1에서 열린 채로 넘어온 항목이다.
@@ -64,6 +69,16 @@ M22가 남긴 후속이다(ADR-0052 개정 이력, M22 계획 `1a07d99`).
 - [ ] 중첩 바깥 운반체(결정 12 (f))의 netbench q6은 run 편차가 커서 M26 전에 반복 측정한다.
 - [ ] 흔들리는 테스트. 2026-11-07 셋을 고쳤다: `the_send_depth_gate_defers_updates_while_the_client_does_not_read`(개수 단언 제거, `2e8cc42`), `quit_is_ctrl_break_not_ctrl_c`(probe의 파일·콘솔 쓰기 순서, `bdf2300`), `concurrent_saves_to_the_same_path_never_corrupt_the_file`(Windows rename 재시도, `e1f3d0d`, 원인 미재현). 여러 에이전트가 Dave-Windows를 함께 쓰는 부하에서 전체 run이 다른 시간 의존 시험으로 흔들린다: `attach_recovery::a_repath_is_survived_by_the_live_attach`, `sessions_filter::sessions_filter_does_not_change_the_wire_request`, `ssh_revival::a_changed_port_updates_the_pin`, `ssh_revival::a_command_revives_the_serve_after_it_idled_out`, `supervised_reverse::supervised_with_wait_still_caps_the_initial_wait_to_stale_retention`, `reverse_resume_chaos::a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach`, `chaos_relay::reorder_lets_the_successor_arrive_first`. CI에서 붉어지면 하나씩 가른다.
 
+M23이 남긴 후속이다(ADR-0053 개정 이력, M23 계획 `d50f003`).
+
+- [ ] host 출력 pump가 에뮬레이터 panic으로 죽으면 그 세션의 출력이 알림 없이 멎는다(client는 오류를 받지 않는다). 알려진 trigger는 `d548c10`이 막았고, `catch_unwind`로 에뮬레이터를 다시 세우는 backstop은 두지 않았다.
+- [ ] `Vs16Filter` 탓에 U+FE0F가 필요한 이모지(하트·키캡)가 host 화면 모델에서 한 칸을 차지한다.
+- [ ] 서로 다른 task(입력 pump, reader, recovery ticker)의 화면 바이트를 직렬화하지 않는다. 수용 시험에서는 어긋나지 않았다.
+- [ ] 역방향 attach는 watchdog이 없어 입력이 있어야 상태 줄 시계가 돈다. 완전히 쉬는 역방향 attach는 conduit이 끊길 때까지 줄을 띄우지 않는다.
+- [ ] client가 자기 principal을 몰라 첫 `writer_changed`로 배운다. 같은 principal의 둘째 attach와 첫 알림으로 온 steal을 구분하지 못한다(효과는 철회되는 예측 하나 또는 보류된 예측).
+- [ ] 느린 예측 수용 셋(`predict_accept::`)은 ubuntu acceptance job에서만 돈다. macOS는 test job의 unix 셋만 돈다.
+- [ ] Windows pwsh에서 키 서른 개 중 하나가 105~142 ms를 쓸 때가 있다(p95는 2.0 ms).
+
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
 ## 2. 테스트 환경
@@ -71,14 +86,6 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - CI의 `windows-latest` leg은 clippy, `cargo nextest run --workspace`, `cargo doc -D warnings`를 돌고, Windows host의 PTY·`exec`·파일 op·응답자를 정방향과 역방향으로 덮는다. 로컬 Windows 검사는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 하고 CI를 대신하지 않는다.
 - 부하 반복은 Linux·공통 테스트를 Dave-Windows-WSL(8 vCPU)에서, Windows 전용 타이밍 민감 테스트를 Dave-Windows에서 `scripts/stress/run.sh`로 돈다. 마일스톤별 필터는 `scripts/stress/m<N>.filter`다.
 
-## 3. M23 스텝
+## 3. M24 스텝
 
-- [x] **범위 ADR(ADR-0053).** 2026-11-07 승인(Dave 결정, 네 항목 모두 추천대로: `predict` 기본 `auto`, 상태 줄 맨 윗줄, 한글 예측, 옛 host는 예측 끔). 수용 기준은 ADR-0053의 마지막 결정(DoD 열세 항목)이다.
-- [x] **`Predictor`와 표 테스트, proptest.** 2026-11-07 착지(`015d8e4`, 표 테스트 26개와 proptest 512 case). 256 상한은 동시에 판정을 기다리는 예측 수로 읽었다. 커서 위치를 모르는 동안(Enter·제어 키·오예측 뒤, 그 offset을 덮는 리포트가 올 때까지)은 새 예측을 만들지 않는다. 빈 셀과 공백을 같은 글자로 보되 공백·Backspace·좌우 같은 약한 증거는 epoch 확정에 넣지 않아 암호 입력에서 가짜 확인이 생기지 않는다. `qsh-core/src/client/predict.rs`, 시계 없는 상태 기계, epoch 규칙, 예측 대상·끄는 조건, 연속 오예측 3회 정지·확인 4회 재개, 상한 256. wire 없이 가짜 `ScreenEcho`로 "모든 예측이 정리되면 로컬 화면 = host 화면" proptest.
-- [x] **렌더러 합성과 로컬 터미널 모델 시험.** 2026-11-07 착지(`7d1fb4c`, 단위 시험 11개와 proptest `local_terminal_matches_the_host_once_predictions_resolve`, WSL 전체 3821개 통과). `draw_with_overlay`가 렌더러 자체 프레임에서 합성하고 합성 프레임끼리 비교한다. 대체 화면에서는 겹침을 버리고, 넓은 글자의 남은 반쪽은 비운다. 로컬 터미널 모델이 soft-wrap을 표현하지 못해 `state_hash` 대신 셀·커서·모드를 비교한다. `ScreenRenderer`가 host 화면 위에 예측 겹을 그리고, 철회는 바뀐 셀만 다시 그린다(화면 지우기 없음). 밑줄 규칙(ADR-0052 결정 12 손잡이, 250 ms 늦은 확인).
-- [x] **`screen-echo.v1`과 `ScreenEcho`, host 입력 시각 표, tty 판정, fuzz.** 2026-11-07 착지(`docs/CLI.md` v0.80, protocol §18.12, threat model C22·D22·E22, `capabilities.json`에 `screen-echo.v1`, load 11개 통과, Dave-Windows 3792개 통과, WSL 전체 3809개 통과). 타이머 경우의 `state_num`은 갱신이 미뤄지지 않았을 때의 에뮬레이터 현재 상태다. datagram 사본은 운반체가 쓸 수 있으면 늘 먼저 간다. 같은 `(state_num, input_seq)` 사본은 `tty`가 바뀌었을 때만 넘긴다. client가 상태 적용 전까지 `ScreenEcho`를 붙들어 두는 상한은 driver 스텝 몫이다. `SessionFrame` 10, `DatagramFrame` 13, `ECHO_GRACE` 50 ms, Unix `tcgetattr`(KERNEL/APP/SECRET), Windows `UNKNOWN`, `capabilities.json` 재생성, protocol §18, fuzz 타깃.
-- [x] **attach driver 연결과 정책 값, 늦은 확인.** 2026-11-07 착지(WSL 전체 3852개, Dave-Windows 3862개, load 11개 통과). `PredictDriver`(`client/predict_drive.rs`)가 `Input`을 쓰기 직전에 예측하고, `ScreenSink`가 `draw_with_overlay`로 그린다. `ScreenEcho` 보류는 하나로 두고 새것이 이전 것을 바꾼다(결정 3·15). 역방향 srtt는 `Input`→덮는 `InputAck` 간격의 EWMA 1/8이고 첫 표본 전에는 `Off`다. `auto`는 `Off`로, `always`는 `Display`로 시작한다. `adapt::User.prediction` 고정으로 `always`가 `[transport].adaptive = "off"`를 이기고 `user_override`를 남긴다. `--predict=always`가 효과 없으면 raw 모드 전에 stderr 한 줄을 쓰고, `qsh::predict` 줄을 낸다. 새 leg는 상태 번호 기억을 버린다. 남은 것: 도중의 `writer_changed`를 `on_writer`에 잇지 않았고, doctor의 `User.prediction`이 `[interactive].predict`를 읽지 않는다. 같은 날 렌더러 proptest가 찾은 예측기 결함 셋(넓은 글자 오른쪽 반 이동, 보이지 않는 앞 예측의 판정 순서, 중간 제거 뒤 반쪽 넓은 글자)을 고쳤다. 입력 송신 지점에서 예측, `ScreenEcho`로 확인·철회, 역방향 route의 RTT 표본(`InputAck` 간격). 입력 송신 지점에서 예측, `ScreenEcho`로 확인·철회, 역방향 route의 RTT 표본(`InputAck` 간격).
-- [x] **`LinkStatus`와 상태 줄, 역방향.** 2026-11-07 착지(`df26909`, `docs/CLI.md` v0.82, WSL 전체 3893개, Dave-Windows `QSH_ACCEPTANCE_SLOW` 포함 3903개, load 11개 통과). `client/linkstatus.rs`의 `LinkTracker`가 `PathWatch`의 인증된 inbound, 입력·probe 송신, recovery 시도 번호를 모은다. recovery가 돌면 문턱 전이라도 줄을 띄운다. 커서가 맨 윗줄이면 맨 아랫줄에 그린다. 역방향은 watchdog이 없어 입력이 있어야 시계가 돈다. 바이트 경로에는 줄이 없다(ADR). `writer_changed`를 `on_writer`에 이었다. client가 자기 principal을 몰라 첫 알림으로 배우므로, 같은 principal의 둘째 attach는 구분하지 못한다(효과는 철회되는 예측 하나). doctor가 `[interactive].predict` 핀을 읽는다. CI 수용 단계에 `status_line::` 셋을 더했다. 남은 위험: 서로 다른 task의 화면 바이트 순서를 직렬화하지 않는다. `PathWatch`+복구 루프, `max(2 s, 4×srtt)`, 맨 윗줄 반전, 1초 갱신, 첫 인증 응답에서 지움.
-- [x] **플래그·설정 키·doctor·`qsh::predict`.** 남은 넷 중 셋(`qsh::predict` 줄, `--predict=always` stderr 줄, `adapt::User.prediction` 고정)은 driver 스텝(`3996b1e`)이, README는 문서 스텝(`b848301`)이 닫았다. 2026-11-07 파싱·설정·doctor 착지(`docs/CLI.md` v0.81, doctor 코드 31개, fixture `doctor_screen_echo.json`, WSL 전체 3824개 통과). 플래그가 키보다, 키가 기본(`auto`·`on`)보다 앞서고, `Ops::interactive_options`가 `InteractiveOptions`로 풀어 `ScreenAttach`에 싣는다. doctor는 측정 연결이 `screen.v1`은 있고 `screen-echo.v1`이 없으며 `[interactive].predict`가 `never`가 아닐 때 `screen_echo_unsupported`를 낸다. 남은 것: `qsh::predict` 줄 방출, `--predict=always`가 효과 없을 때의 stderr 줄, `adapt::User.prediction` 고정(결정 11의 `user_override`), README. `--predict=auto|always|never`, `[interactive].predict`, `--status-line=on|off`, `[interactive].status_line`, info 코드 `screen_echo_unsupported`, man.
-- [x] **수용 시험.** DoD 10의 fuzz 타깃 `client_predictor`는 `9bbbee3`로 착지했고, 그 타깃이 찾은 vt100 0.18.1의 U+FE0F panic(프로그램 출력 하나로 그 세션의 출력 pump가 죽어 출력이 멎음)을 `d548c10`이 host 입구의 `Vs16Filter`로 고쳤다(threat model C23). 2026-11-07 시험 착지(`0deb7a5`, `predict_accept.rs`, WSL 전체 3900개, `QSH_ACCEPTANCE_SLOW` 3회 연속, Dave-Windows `predict_accept::` 3회 연속). RTT 300 ms 키 50개 표시 p95 2.1 ms(손실 3%·reorder 5%에서 2.2 ms), 예측 끈 대조군 p50 306 ms, Windows cmd p95 1.8 ms·pwsh p95 2.0 ms. pwsh에서 결함 둘(한 상태만의 커서 숨김을 전체 화면 앱으로 읽음, ConPTY의 한 칸 늦은 커서를 host 커서 이동으로 읽음)을 고쳤다. 결정 7의 커서 숨김 차단을 "연이은 두 상태"로 좁힌 것은 ADR 개정 이력에만 적었고 Dave 확인이 남았다. 화면 바이트 task 간 순서 어긋남은 드러나지 않았다. 남은 것: DoD 10의 fuzz 타깃 `client_predictor`, macOS는 CI test job의 unix 셋만 돈다(느린 셋은 ubuntu acceptance job). chaos(RTT 300 ms 예측 표시 p95 ≤ 20 ms 등), 암호 입력 비표시, 세 OS, Windows host(cmd.exe/pwsh).
-- [x] **문서와 마감.** 2026-11-07 README 절, CLI.md 능력 절의 옛 문장 둘, 도움말·man(`b848301`). DoD 열세 항목 감사: 1·3·4·7·12는 `predict_accept::`, 2는 `local_terminal_matches_the_host_once_predictions_resolve`, 5는 `prediction_gates`, 6은 `status_line::`, 8·9는 ScreenEcho wire·계약 시험(`616e724`), 10은 `client_predictor`, 11은 기존 성능 게이트, 13은 threat model C22·D22·E22로 모두 충족이다. `docs/CLI.md`·man·README, threat model 행과 고정 테스트, ROADMAP M23 마감 노트.
+- [ ] **범위 ADR(ADR-0054).** 후보 수집(로컬 주소·중개 peer가 본 주소), 중개자 선택과 신뢰(pin을 가진 사용자 자신의 peer만), 신호 wire와 능력 이름, 동시 송신 일정과 첫 handshake 채택, 포기 조건과 시간 상한, 정방향·역방향·세 OS, 측정 도구(NAT 유형별 chaos), 수용 기준. 나머지 스텝은 승인 뒤 채운다.
