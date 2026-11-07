@@ -671,10 +671,11 @@ async fn reattach_does_not_replay_history_that_was_already_sent() {
 /// and the send queue behind it fills. A producer paints hundreds of
 /// distinct, large screens meanwhile. With the gate the host stops queueing
 /// at its 128 KiB cap, so what reaches the client in the end is the window
-/// plus about the cap plus the catch-up screen (measured: 23 updates, 2.37
-/// MB). With `has_room` forced true the same run sends 125 updates and 3.14
-/// MB, because the pump then queues behind the writer up to the frame
-/// queue's 64 parts of 16 KiB.
+/// plus about the cap plus the catch-up screen (measured: 2.37 to 2.49 MB,
+/// also with every core busy). With `has_room` forced true the same run sends
+/// 3.07 to 3.21 MB, because the pump then queues behind the writer up to the
+/// frame queue's 64 parts of 16 KiB. The update count is not asserted: it
+/// varies from 17 to 82 with scheduling while the byte total does not.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_send_depth_gate_defers_updates_while_the_client_does_not_read() {
     /// The stream's receive window (`TUNNEL_STREAM_RECEIVE_WINDOW`).
@@ -711,8 +712,14 @@ async fn the_send_depth_gate_defers_updates_while_the_client_does_not_read() {
         })
         .collect();
     let total_output: usize = screens.iter().map(Vec::len).sum();
+    // Paced, so the host pump sees each screen on its own and queues one
+    // update per screen until the gate or the window stops it. Written in a
+    // burst, a pump that is slow to be scheduled would coalesce the screens
+    // and queue fewer updates than the window holds, and a gate that did
+    // nothing would pass.
     for screen in &screens {
         pipe.write_output(screen).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     wait_ring_end(&h, &opened.session_id, total_output as u64).await;
 
@@ -749,11 +756,6 @@ async fn the_send_depth_gate_defers_updates_while_the_client_does_not_read() {
         part_bytes <= bound,
         "{part_bytes} screen bytes reached the client, more than window + gate ({bound}): \
          the host kept queueing while the writer was blocked"
-    );
-    assert!(
-        (screen.applied_updates() as usize) < FRAMES / 4,
-        "applied {} updates for {FRAMES} screens produced",
-        screen.applied_updates()
     );
     s.close();
     h.shutdown().await;
