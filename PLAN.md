@@ -50,7 +50,7 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 
 ### 0.6 M23이 만든 사람 몫
 
-- [ ] **ADR-0053 결정 7의 커서 숨김 차단을 좁힌 것의 확인.** 수용 시험에서 Windows pwsh(PSReadLine)가 키마다 커서를 숨겼다 보여 예측이 꺼졌다. 코드는 적용된 상태 둘이 연달아 커서를 숨길 때만 차단한다(`HIDDEN_CURSOR_STATES = 2`, `3da871a`). 결정 본문은 고치지 않고 ADR-0053 개정 이력에만 적었다. Dave가 받아들이면 개정 이력에 승인을 적고, 받아들이지 않으면 pwsh에서 예측이 꺼지는 것을 감수하고 되돌린다. 소유: Dave.
+- [x] **ADR-0053 결정 7의 커서 숨김 차단을 좁힌 것의 확인.** 2026-11-07 Dave가 받아들였다(ADR-0053 개정 이력). 수용 시험에서 Windows pwsh(PSReadLine)가 키마다 커서를 숨겼다 보여 예측이 꺼졌다. 코드는 적용된 상태 둘이 연달아 커서를 숨길 때만 차단한다(`HIDDEN_CURSOR_STATES = 2`, `3da871a`). 결정 본문은 고치지 않고 ADR-0053 개정 이력에만 적었다. Dave가 받아들이면 개정 이력에 승인을 적고, 받아들이지 않으면 pwsh에서 예측이 꺼지는 것을 감수하고 되돌린다. 소유: Dave.
 - [ ] **vt100 upstream 보고.** `vt100` 0.18.1의 `Screen::text_cleanup`이 U+FE0F가 앞 셀을 넓힐 때 `unwrap()`에서 panic한다(재현: `Parser::new(2, 1, 0).process("0\u{fe0f}".as_bytes())`). qsh는 host 입구에서 막았다(`d548c10`). 외부 저장소 쓰기라 사람 몫이다. 소유: Dave.
 
 ## 1. 유지보수에서 남은 확인
@@ -88,4 +88,15 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 
 ## 3. M24 스텝
 
-- [ ] **범위 ADR(ADR-0054).** 후보 수집(로컬 주소·중개 peer가 본 주소), 중개자 선택과 신뢰(pin을 가진 사용자 자신의 peer만), 신호 wire와 능력 이름, 동시 송신 일정과 첫 handshake 채택, 포기 조건과 시간 상한, 정방향·역방향·세 OS, 측정 도구(NAT 유형별 chaos), 수용 기준. 나머지 스텝은 승인 뒤 채운다.
+- [x] **범위 ADR(ADR-0054).** 2026-11-07 승인(Dave 결정, 다섯 항목 모두 추천 (가), 펀칭 대상은 `serve --to` host로 한정). 수용 기준은 ADR-0054의 마지막 결정(DoD 열여섯 항목)이다.
+- [ ] **netsim과 NAT 상자 표 테스트.** `qsh-testkit`의 가상 UDP 위 실제 quinn, RFC 4787 NAT 상자(full-cone·restricted·port-restricted·symmetric 등), 세 OS. wire 없음.
+- [ ] **`PunchEndpoint`와 손으로 넣은 후보의 NAT 쌍 측정.** 감싼 소켓, 펀치 datagram 송수신, 서버 창, dual-stack. 수치는 ADR 개정 이력에. wire 없음.
+- [ ] **`punch.v1`, message, 후보 검사, tag, fuzz.**
+- [ ] **`host.punch`와 role 표, 감사.**
+- [ ] **R의 중개 서비스와 B의 offer 처리.**
+- [ ] **client route, 경주, 채택, 포기 사유.**
+- [ ] **recovery의 route 재해석과 `--supervise`.**
+- [ ] **힌트 배우기, `trust rendezvous`, 플래그와 키.**
+- [ ] **doctor, `qsh::punch`, JSON과 fixture.**
+- [ ] **수용 시험.** netsim 세 OS, `punch-netns`.
+- [ ] **문서와 마감.** man, threat model, ROADMAP M24 마감 노트.
