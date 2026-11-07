@@ -390,9 +390,29 @@ impl Predictor {
 
     /// A new leg's first full screen is about to be applied: break the
     /// epoch, keep the predictions (they are judged by the new leg's
-    /// reports).
+    /// reports). State numbers are per attach and start again at 1, so what
+    /// was remembered about the old leg's numbering (applied state, the
+    /// report held for a state not yet applied, the newest report key) is
+    /// dropped; leaving it would judge the new leg's first reports against
+    /// states it has not applied yet.
     pub fn on_leg_change(&mut self) {
         self.epoch += 1;
+        self.applied_state = 0;
+        self.held = None;
+        self.last_report_key = None;
+    }
+
+    /// When [`Self::on_tick`] will next change something: the instant the
+    /// oldest waiting prediction passes [`GLITCH_AFTER`] and forces
+    /// underlining. `None` when nothing waits or underlining is already
+    /// forced. The attach driver sleeps until it instead of polling.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        if self.glitch {
+            return None;
+        }
+        self.pending
+            .front()
+            .map(|p| p.made_at + GLITCH_AFTER + Duration::from_millis(1))
     }
 
     /// Advance the clock without another event (the glitch rule looks at
@@ -452,6 +472,12 @@ impl Predictor {
         }
     }
 
+    /// Whether predictions are being drawn at all right now: not blocked,
+    /// not suspended and the policy (or a late confirmation) wants them.
+    pub fn drawing(&self) -> bool {
+        self.blocked().is_none() && !self.suspended && self.effective_mode() != Prediction::Off
+    }
+
     /// Whether the three-wrong-in-a-row rule has stopped drawing.
     pub fn is_suspended(&self) -> bool {
         self.suspended
@@ -460,6 +486,12 @@ impl Predictor {
     /// Whether late confirmations force underlining.
     pub fn is_glitching(&self) -> bool {
         self.glitch
+    }
+
+    /// The report held until the state it names is applied. At most one:
+    /// a newer report replaces it.
+    pub fn held_echo(&self) -> Option<EchoReport> {
+        self.held
     }
 
     /// Predictions waiting for a verdict.

@@ -31,6 +31,7 @@ pub(crate) mod file;
 pub mod link;
 pub mod pathwatch;
 pub mod predict;
+pub mod predict_drive;
 pub mod reconnect;
 pub mod render;
 pub mod screen;

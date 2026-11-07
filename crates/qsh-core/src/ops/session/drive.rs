@@ -274,6 +274,14 @@ pub(super) struct LegScreen {
     acks: tokio::sync::mpsc::UnboundedSender<u64>,
 }
 
+/// [`ScreenSink::tick_due`], or never for an attach without a screen.
+async fn screen_tick_due(sink: Option<&ScreenSink>) {
+    match sink {
+        Some(sink) => sink.tick_due().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Read one leg's data stream until it ends, breaks, or the path dies.
 async fn read_leg(
     reader: &mut crate::client::AttachReader,
@@ -291,6 +299,24 @@ async fn read_leg(
             // arriving are from a connection that cannot answer, and every
             // millisecond spent on them comes out of the recovery budget.
             () = watch.dead() => return LegEnd::PathDead,
+            // A prediction turned late, or the policy changed: redraw the
+            // overlay (ADR-0053 decision 8). Pends forever without one.
+            () = screen_tick_due(ctx.screen.as_deref()) => {
+                if let Some(sink) = &ctx.screen {
+                    let (bytes, sequence) = sink.tick(std::time::Instant::now());
+                    if !bytes.is_empty() {
+                        let _stalled = watch.stalled();
+                        if events
+                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                            .await
+                            .is_err()
+                        {
+                            return LegEnd::Gone;
+                        }
+                    }
+                }
+                continue;
+            }
             // Cancel-safe: `FramedRecv` keeps its partial frame in the
             // decoder, so losing this race loses nothing.
             next = reader.next() => next,
@@ -316,6 +342,47 @@ async fn read_leg(
                 }
                 ahead
             });
+        }
+        // Screen sync, reverse route: the spacing between an `Input` and the
+        // `InputAck` that covers it is the round-trip sample the prediction
+        // policy runs on (ADR-0053 decision 8). A policy change shows up as a
+        // different overlay, drawn right here.
+        if screen.is_some()
+            && let AttachEvent::InputAck { acked_input_seq } = &event
+            && let Some(sink) = &ctx.screen
+        {
+            let (bytes, sequence) = sink.input_ack(*acked_input_seq, std::time::Instant::now());
+            if !bytes.is_empty() {
+                let _stalled = watch.stalled();
+                if events
+                    .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                    .await
+                    .is_err()
+                {
+                    return LegEnd::Gone;
+                }
+            }
+        }
+        // The host's input reflection point: judge the predictions it
+        // covers. A report for a state not applied yet is held by the
+        // predictor (one, the newest) until that state is drawn below.
+        if screen.is_some()
+            && let AttachEvent::ScreenEcho(echo) = &event
+        {
+            if let Some(sink) = &ctx.screen {
+                let (bytes, sequence) = sink.echo(echo, std::time::Instant::now());
+                if !bytes.is_empty() {
+                    let _stalled = watch.stalled();
+                    if events
+                        .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                        .await
+                        .is_err()
+                    {
+                        return LegEnd::Gone;
+                    }
+                }
+            }
+            continue;
         }
         // A screen-sync leg: parts of a state go to the leg's screen, the
         // state number it now holds goes back to the host, and an applied
@@ -362,11 +429,17 @@ async fn read_leg(
                 if let crate::client::screen::ScreenOutcome::Applied {
                     effects,
                     output_seq,
-                    ..
+                    new_num,
                 } = outcome
                     && let (Some(sink), Some(state)) = (&ctx.screen, leg.client.state())
                 {
-                    let (bytes, sequence) = sink.draw(state, &effects, output_seq);
+                    let (bytes, sequence) = sink.draw(
+                        state,
+                        &effects,
+                        output_seq,
+                        new_num,
+                        std::time::Instant::now(),
+                    );
                     if !bytes.is_empty() {
                         let _stalled = watch.stalled();
                         if events

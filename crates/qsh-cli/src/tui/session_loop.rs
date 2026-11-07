@@ -127,6 +127,12 @@ pub(super) fn run(
         )
         .map_err(orphan)?;
 
+    // `--predict=always` that cannot act says so once, before raw mode
+    // (ADR-0053 decision 11).
+    if let Some(reason) = stream.predict_unavailable() {
+        stderr_note!("qsh: --predict=always has no effect: {reason}");
+    }
+
     // The `-L` listeners: bound before the terminal goes raw, so a bind
     // failure is an ordinary error report on a terminal that was never
     // touched. They are owned by `stream`, so they die with this attach

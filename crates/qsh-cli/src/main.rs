@@ -247,6 +247,10 @@ fn init_tracing(cli: &Cli) {
     // `QSH_LOG=qsh::adapt=info` turns it on; `-q` still silences it.
     let adapt_target = qsh_core::adapt::TARGET;
     let adapt_default = if cli.verbose >= 1 { "info" } else { "off" };
+    // Target `qsh::predict` (ADR-0053 decision 12): the prediction engine's
+    // state changes, counts and reasons only. Off by default like
+    // `qsh::adapt`, for the same reason.
+    let predict_target = qsh_core::client::predict_drive::TARGET;
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
@@ -257,6 +261,7 @@ fn init_tracing(cli: &Cli) {
                 && meta.target() != qsh_core::tunnel::supervise::TARGET
                 && meta.target() != qsh_core::lifecycle::TARGET
                 && meta.target() != adapt_target
+                && meta.target() != predict_target
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -288,9 +293,16 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             adapt_enabled && meta.target() == adapt_target
         }));
+    let predict_enabled = !cli.quiet;
+    let predict = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec, adapt_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            predict_enabled && meta.target() == predict_target
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(adapt)
+        .with(predict)
         .with(recovery)
         .with(reverse)
         .with(supervise)

@@ -87,6 +87,17 @@ pub const KEEP_ALIVE_MAX: Duration = Duration::from_millis(20_000);
 /// [`Knobs::reasons`]. Diagnostic only; no rule reads it.
 pub const LOSS_HIGH_REASON: f64 = 0.02;
 
+/// `--predict` as a pin on knob (d) (ADR-0053 decision 11). `auto` pins
+/// nothing and is `None` in [`User::prediction`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PredictPin {
+    /// At least [`Prediction::Display`], whatever the RTT and
+    /// `[transport].adaptive` say.
+    Always,
+    /// [`Prediction::Off`].
+    Never,
+}
+
 /// What the user pinned (decision 15).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct User {
@@ -94,6 +105,8 @@ pub struct User {
     pub adaptive: bool,
     /// `[transport].keep_alive_ms`, when set.
     pub keep_alive: Option<Duration>,
+    /// `--predict`, when not `auto` (ADR-0053 decision 11).
+    pub prediction: Option<PredictPin>,
 }
 
 impl User {
@@ -104,6 +117,7 @@ impl User {
         Self {
             adaptive: process_adaptive(),
             keep_alive: None,
+            prediction: None,
         }
     }
 }
@@ -113,6 +127,7 @@ impl Default for User {
         Self {
             adaptive: true,
             keep_alive: None,
+            prediction: None,
         }
     }
 }
@@ -439,9 +454,7 @@ pub fn decide(observed: &Observed, previous: &Knobs) -> Knobs {
     let loss_permille = (observed.loss.clamp(0.0, 1.0) * 1000.0).round() as u16;
 
     // (d) prediction, with hysteresis through `previous`
-    let prediction = if !adaptive {
-        Prediction::Off
-    } else if srtt > UNDERLINE_ON_ABOVE {
+    let by_rtt = if srtt > UNDERLINE_ON_ABOVE {
         Prediction::Underline
     } else if srtt > PREDICT_ON_ABOVE {
         if previous.prediction == Prediction::Underline && srtt >= UNDERLINE_OFF_BELOW {
@@ -455,7 +468,16 @@ pub fn decide(observed: &Observed, previous: &Knobs) -> Knobs {
         // 20..=30 ms: keep the previous state, but never underline this low.
         previous.prediction.min(Prediction::Display)
     };
-    if adaptive {
+    // `--predict` beats `[transport].adaptive` (ADR-0053 decision 11).
+    let prediction = match observed.user.prediction {
+        Some(PredictPin::Always) => by_rtt.max(Prediction::Display),
+        Some(PredictPin::Never) => Prediction::Off,
+        None if adaptive => by_rtt,
+        None => Prediction::Off,
+    };
+    if observed.user.prediction.is_some() {
+        reasons.push(Reason::UserOverride);
+    } else if adaptive {
         if prediction != Prediction::Off {
             reasons.push(Reason::RttHigh);
         } else if srtt < PREDICT_OFF_BELOW {
