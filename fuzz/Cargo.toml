@@ -200,3 +200,10 @@ path = "fuzz_targets/client_predictor.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "punch_candidates"
+path = "fuzz_targets/punch_candidates.rs"
+test = false
+doc = false
+bench = false

@@ -1530,6 +1530,9 @@ fn response_kind(body: &response::Body) -> &'static str {
         response::Body::FileWriteOpened(_) => "FileWriteOpened",
         response::Body::FileListed(_) => "FileListed",
         response::Body::FileMkdirDone(_) => "FileMkdirDone",
+        response::Body::PunchReply(_) => "PunchReply",
+        response::Body::PunchAnswer(_) => "PunchAnswer",
+        response::Body::RendezvousList(_) => "RendezvousList",
     }
 }
 

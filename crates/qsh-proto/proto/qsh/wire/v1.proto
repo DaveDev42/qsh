@@ -90,6 +90,14 @@ message ControlMessage {
     FileWriteOpen    file_write_open   = 81;
     FileListOpen     file_list_open    = 82;
     FileMkdirOpen    file_mkdir_open   = 83;
+
+    // Hole punching (ADR-0054, M24; the `punch.v1` capability,
+    // docs/design/protocol.md §19). Sent only to a peer that advertised
+    // `punch.v1`. Each is authorized against `host.punch` before any
+    // resource exists. Every one is at most PUNCH_MESSAGE_MAX bytes encoded.
+    PunchRequest     punch_request     = 90;  // A -> R
+    PunchOffer       punch_offer       = 91;  // R -> B (registered connection)
+    RendezvousQuery  rendezvous_query  = 92;  // A -> B (any connection)
   }
 }
 
@@ -159,6 +167,9 @@ message Response {
     FileListed        file_listed         = 13; // file_list_open
     FileMkdirDone     file_mkdir_done     = 14; // file_mkdir_open
     Error             error               = 15;
+    PunchReply        punch_reply         = 16; // punch_request
+    PunchAnswer       punch_answer        = 17; // punch_offer
+    RendezvousList    rendezvous_list     = 18; // rendezvous_query
   }
 }
 
@@ -862,6 +873,46 @@ message FileListed {
 
 message FileMkdirOpen   { string path = 1; uint32 mode = 2; string name_if_dir = 3; bool preserve = 4; string user = 5; }
 message FileMkdirDone   { bool created = 1; bool into_dir = 2; }
+
+// ---------------------------------------------------------------------------
+// Hole punching (ADR-0054 decision 9, protocol.md §19). Additive: a peer that
+// has not advertised `punch.v1` is never sent these. `attempt_id` is exactly
+// 16 bytes, a fingerprint exactly 32, a message carries at most 8 candidates
+// and encodes to at most 1 KiB; receivers check this (qsh-proto `punch`).
+// ---------------------------------------------------------------------------
+enum PunchCandidateKind {
+  PUNCH_CANDIDATE_KIND_UNSPECIFIED = 0;
+  PUNCH_CANDIDATE_KIND_HOST        = 1;
+  PUNCH_CANDIDATE_KIND_REFLEXIVE   = 2;
+}
+
+// `ip` is 4 or 16 bytes (network order), `port` is 1..=65535.
+message PunchCandidate {
+  bytes ip = 1;
+  uint32 port = 2;
+  PunchCandidateKind kind = 3;
+}
+
+enum PunchRefusal {
+  PUNCH_REFUSAL_NONE                = 0;
+  PUNCH_REFUSAL_TARGET_NOT_REGISTERED = 1;
+  PUNCH_REFUSAL_TARGET_UNSUPPORTED  = 2;
+  PUNCH_REFUSAL_TARGET_DENIED       = 3;
+  PUNCH_REFUSAL_TARGET_BUSY         = 4;
+  PUNCH_REFUSAL_TARGET_TIMEOUT      = 5;
+}
+
+message PunchRequest { bytes attempt_id = 1; bytes target_fingerprint = 2; repeated PunchCandidate candidates = 3; }
+message PunchOffer   { bytes attempt_id = 1; bytes initiator_fingerprint = 2; repeated PunchCandidate candidates = 3; }
+message PunchAnswer  { repeated PunchCandidate candidates = 1; }
+message PunchReply {
+  repeated PunchCandidate candidates = 1;
+  PunchCandidate initiator_reflexive = 2;
+  bool target_reflexive_private = 3;
+  PunchRefusal refusal = 4;
+}
+message RendezvousQuery {}
+message RendezvousList { repeated bytes fingerprints = 1; }
 
 // ---------------------------------------------------------------------------
 // FILE_DATA stream. Framed like every other data stream (§5), each `data`

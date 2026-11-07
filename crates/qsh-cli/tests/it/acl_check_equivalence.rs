@@ -770,6 +770,9 @@ fn assert_every_variant_is_accounted_for(body: qsh_proto::wire::control_message:
         Body::SessionEvent(_) => {}
         Body::PairingProof(_) => {}
         Body::PairingAccepted(_) => {}
+        Body::PunchRequest(_) => {}
+        Body::PunchOffer(_) => {}
+        Body::RendezvousQuery(_) => {}
     }
 }
 

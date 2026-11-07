@@ -155,7 +155,7 @@ CLI 경계는 `crates/qsh-cli/tests/it/setup.rs`의 테스트 일곱(`setup_mach
 
 ## L8 — Fuzzing (`cargo-fuzz`)
 
-cargo-fuzz 타깃 **25종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`·`host_emulator_input`·`client_predictor`(ADR-0053 결정 16의 10), ADR-0052가 더한 `decode_screen_diff`·`decode_datagram_frame`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`, ADR-0029가 더한 `decode_file_frame`, ADR-0044가 더한 `parse_ssh_bootstrap_line`이다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
+cargo-fuzz 타깃 **26종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`·`host_emulator_input`·`client_predictor`(ADR-0053 결정 16의 10), ADR-0052가 더한 `decode_screen_diff`·`decode_datagram_frame`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`, ADR-0029가 더한 `decode_file_frame`, ADR-0044가 더한 `parse_ssh_bootstrap_line`, ADR-0054가 더한 `punch_candidates`(후보 검사·message 모양 검사·펀치 datagram tag)이다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
 
 | 타깃 | 내용 | 비고 |
 |---|---|---|
@@ -171,6 +171,7 @@ cargo-fuzz 타깃 **25종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`�
 | `decode_local_admin_request` | `decode_local::<LocalAdminRequest>` — localctl 두 번째 프레임 |  |
 | `valid_host_name` | `Hello.reverse.offered_name` 모양 검사 |  |
 | `valid_forward_id` | `forward_id`/`ticket` 모양 검사 |  |
+| `punch_candidates` | 후보 검사 `valid_punch_candidate`·`check_candidates`, 펀칭 message 모양 검사, 펀치 datagram tag 대조 |  |
 | `parse_invite_code` | Crockford Base32 invite code 디코드 |  |
 | `parse_forward_spec` | `-L`/`-R` grammar (`[bind:]listen_port:host:host_port`) | 구 "문자열 파서류" |
 | `sanitize_peer_text` | 화면에 뿌릴 peer 문자열의 제어문자 제거 |  |

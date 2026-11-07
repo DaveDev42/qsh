@@ -99,6 +99,14 @@ pub const CAP_DATAGRAM_V1: &str = "datagram.v1";
 /// datagram kind 13.
 pub const CAP_SCREEN_ECHO_V1: &str = "screen-echo.v1";
 
+/// Capability string for hole punching (ADR-0054 decision 9,
+/// `docs/design/protocol.md` §19): this peer understands `PunchRequest`,
+/// `PunchOffer`, `PunchReply`, `PunchAnswer`, `RendezvousQuery` and
+/// `RendezvousList` and handles them in its own role. `[punch].mode = "off"`
+/// still advertises it and answers a request `UNSUPPORTED`. A peer without it
+/// is never sent those messages (`protocol.md` §16.4).
+pub const CAP_PUNCH_V1: &str = "punch.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -113,7 +121,8 @@ pub const CAP_SCREEN_ECHO_V1: &str = "screen-echo.v1";
 /// joined with the host's shell resolution (ADR-0051 decision 6). [`CAP_SCREEN_V1`]
 /// joined with the host emulator's stream carrier (ADR-0052 decision 9),
 /// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy.
-/// [`CAP_SCREEN_ECHO_V1`] joined with `ScreenEcho` (ADR-0053 decision 3). The set is
+/// [`CAP_SCREEN_ECHO_V1`] joined with `ScreenEcho` (ADR-0053 decision 3), and
+/// [`CAP_PUNCH_V1`] with the hole-punching messages (ADR-0054 decision 9). The set is
 /// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
@@ -125,6 +134,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_SCREEN_V1,
     CAP_DATAGRAM_V1,
     CAP_SCREEN_ECHO_V1,
+    CAP_PUNCH_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the
@@ -210,6 +220,9 @@ pub enum WireEncodeError {
     /// ([`SESSION_CHUNK_MAX`]), even though the whole frame would fit.
     #[error(transparent)]
     ChunkTooLarge(#[from] ChunkTooLarge),
+    /// A hole-punching message breaks its shape rules (ADR-0054 decision 11).
+    #[error(transparent)]
+    Punch(#[from] crate::punch::PunchMessageError),
     /// Frame-layer failure (unreachable in practice: `TooLarge` triggers
     /// first, but kept so callers see one error type).
     #[error(transparent)]
@@ -541,6 +554,17 @@ pub fn encode_control(msg: &ControlMessage) -> Result<Vec<u8>, WireEncodeError> 
         Some(control_message::Body::Response(Response {
             body: Some(response::Body::SessionReadResult(r)),
         })) => r.validate()?,
+        Some(control_message::Body::PunchRequest(m)) => m.validate()?,
+        Some(control_message::Body::PunchOffer(m)) => m.validate()?,
+        Some(control_message::Body::Response(Response {
+            body: Some(response::Body::PunchReply(m)),
+        })) => m.validate()?,
+        Some(control_message::Body::Response(Response {
+            body: Some(response::Body::PunchAnswer(m)),
+        })) => m.validate()?,
+        Some(control_message::Body::Response(Response {
+            body: Some(response::Body::RendezvousList(m)),
+        })) => m.validate()?,
         _ => {}
     }
     encode_framed(msg, CONTROL_FRAME_MAX)

@@ -28,11 +28,9 @@ pub use target::{TargetParams, TargetReport, run_target};
 /// (ADR-0054 decision 14).
 pub const PUNCH_OFFSETS_MS: [u64; 8] = [0, 50, 100, 200, 400, 800, 1600, 3200];
 
-/// Candidates one side sends over the wire (decision 8).
-pub const MAX_PUNCH_CANDIDATES: usize = 8;
-
-/// Peer-reflexive candidates A adds on its own (decision 8).
-pub const MAX_PEER_REFLEXIVE: usize = 4;
+/// Candidates one side sends over the wire, and peer-reflexive candidates A
+/// adds on its own (decision 8). Defined with the wire messages.
+pub use qsh_proto::punch::{MAX_PEER_REFLEXIVE, MAX_PUNCH_CANDIDATES};
 
 /// Punch datagrams one end sends in one attempt: eight candidates, eight
 /// offsets (decision 14).
