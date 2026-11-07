@@ -3,7 +3,7 @@
 //! dispatch on `qsh_core::Ops`.
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use qsh_core::{DoctorThreshold, ScreenSync};
+use qsh_core::{DoctorThreshold, Predict, ScreenSync, StatusLine};
 use qsh_proto::{EnvVar, KeyStoreKind, KeyStoreMode};
 
 /// QSH: a QUIC-based direct-connect remote shell.
@@ -107,6 +107,17 @@ pub struct InteractiveArgs {
     /// `off` keeps the plain byte stream. Interactive sessions only.
     #[arg(long, value_name = "MODE", value_parser = parse_screen_sync, requires = "target")]
     pub screen_sync: Option<ScreenSync>,
+
+    /// Local echo prediction (ADR-0053): `auto` (default) follows the
+    /// adaptive policy, `always` draws regardless of RTT, `never` turns it
+    /// off. Interactive sessions only.
+    #[arg(long, value_name = "MODE", value_parser = parse_predict, requires = "target")]
+    pub predict: Option<Predict>,
+
+    /// Link-status line (ADR-0053): `on` (default) or `off`. Interactive
+    /// sessions only.
+    #[arg(long, value_name = "MODE", value_parser = parse_status_line, requires = "target")]
+    pub status_line: Option<StatusLine>,
 
     /// The command to run on the host, `ssh host command [arg...]`: the
     /// arguments are joined with spaces and run by the remote account's
@@ -352,7 +363,12 @@ impl InteractiveArgs {
 /// Root options that take a value, for [`first_operand`]. Long forms are
 /// matched with their `=` or the next argument.
 const ROOT_VALUE_SHORTS: &str = "LRDlpiFoJEeSOwbBcmQW";
-const ROOT_VALUE_LONGS: &[&str] = &["--escape-char", "--screen-sync"];
+const ROOT_VALUE_LONGS: &[&str] = &[
+    "--escape-char",
+    "--screen-sync",
+    "--predict",
+    "--status-line",
+];
 
 /// The first operand at or after `from` (index into `args`), skipping root
 /// options and their values. The flag is `true` when a `--` forced it.
@@ -483,6 +499,16 @@ pub const DEFAULT_ESCAPE_CHAR: EscapeChar = EscapeChar(Some(b'~'));
 /// clap value parser for `--screen-sync auto|on|off`.
 fn parse_screen_sync(value: &str) -> Result<ScreenSync, String> {
     ScreenSync::parse(value).ok_or_else(|| format!("`{value}` is not one of auto, on, off"))
+}
+
+/// clap value parser for `--predict auto|always|never`.
+fn parse_predict(value: &str) -> Result<Predict, String> {
+    Predict::parse(value).ok_or_else(|| format!("`{value}` is not one of auto, always, never"))
+}
+
+/// clap value parser for `--status-line on|off`.
+fn parse_status_line(value: &str) -> Result<StatusLine, String> {
+    StatusLine::parse(value).ok_or_else(|| format!("`{value}` is not one of on, off"))
 }
 
 /// clap value parser for `--escape-char <c>|none`: a single printable
@@ -1158,6 +1184,15 @@ pub struct AttachArgs {
     /// (plain byte stream). See `qsh --help`.
     #[arg(long, value_name = "MODE", value_parser = parse_screen_sync)]
     pub screen_sync: Option<ScreenSync>,
+
+    /// Local echo prediction: `auto` (default), `always` or `never`. See
+    /// `qsh --help`.
+    #[arg(long, value_name = "MODE", value_parser = parse_predict)]
+    pub predict: Option<Predict>,
+
+    /// Link-status line: `on` (default) or `off`. See `qsh --help`.
+    #[arg(long, value_name = "MODE", value_parser = parse_status_line)]
+    pub status_line: Option<StatusLine>,
 }
 
 /// clap value parser for `--env NAME=VALUE`.

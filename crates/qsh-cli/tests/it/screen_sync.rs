@@ -42,6 +42,8 @@ fn screen_attach(mode: ScreenSync) -> Option<ScreenAttach> {
         mode,
         cols: COLS,
         rows: ROWS,
+        predict: Default::default(),
+        status_line: Default::default(),
     })
 }
 

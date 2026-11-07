@@ -102,6 +102,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "audit.query.truncated.json",
     "doctor.run.keystore_session_bound.json",
     "doctor_transport.json",
+    "doctor_screen_echo.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -3339,4 +3340,54 @@ fn file_entry_event_fixture_round_trips_through_the_proto_type() {
     assert_eq!(event.event_type, qsh_proto::event::FILE_ENTRY_EVENT_TYPE);
     let again = serde_json::to_value(&event).expect("encode");
     assert_eq!(pretty(&again), pretty(&fixture), "event.file.entry.json");
+}
+
+/// `qsh doctor <host>` against a peer that has `screen.v1` and the DATAGRAM
+/// path but not `screen-echo.v1` (ADR-0053 decision 11): the one new `info`
+/// finding, with the production constant's wording.
+#[test]
+fn golden_doctor_screen_echo_fixture() {
+    use qsh_core::doctor::SCREEN_ECHO_UNSUPPORTED;
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding, DoctorTransport};
+
+    let data = DoctorData {
+        overall: "ok".to_string(),
+        findings: vec![DoctorFinding {
+            code: SCREEN_ECHO_UNSUPPORTED.code.to_string(),
+            status: "info".to_string(),
+            detail: format!("{} (peer: host)", SCREEN_ECHO_UNSUPPORTED.message),
+            remedy: Some(SCREEN_ECHO_UNSUPPORTED.remedy.to_string()),
+        }],
+        transport: Some(DoctorTransport {
+            rtt_ms: 92.4,
+            rtt_var_ms: 6.1,
+            min_rtt_ms: 88.0,
+            loss_pct: 0.0,
+            max_datagram_bytes: Some(1200),
+            screen_sync: "datagram".to_string(),
+            frame_interval_ms: 20,
+            bulk_yield: "off".to_string(),
+            prediction: "display".to_string(),
+            keep_alive_ms: 15_000,
+            nested: false,
+            reasons: vec!["rtt_high".to_string()],
+        }),
+    };
+    assert!(
+        qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&data.findings[0].code.as_str()),
+        "{}",
+        data.findings[0].code
+    );
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor_screen_echo.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
 }

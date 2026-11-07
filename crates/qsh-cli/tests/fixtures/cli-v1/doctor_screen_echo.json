@@ -1,0 +1,33 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "screen_echo_unsupported",
+        "detail": "The peer advertises screen.v1 but not screen-echo.v1, so interactive sessions to it draw no local echo prediction: typed characters appear only after the host's echo arrives. The status line still works. (peer: host)",
+        "remedy": "Upgrade qsh on the peer to a build that advertises screen-echo.v1. Until then `--predict=auto` and `--predict=always` predict nothing; `--predict=always` prints one line to stderr saying so, and `--predict=never` is the same without the line.",
+        "status": "info"
+      }
+    ],
+    "overall": "ok",
+    "transport": {
+      "bulk_yield": "off",
+      "frame_interval_ms": 20,
+      "keep_alive_ms": 15000,
+      "loss_pct": 0.0,
+      "max_datagram_bytes": 1200,
+      "min_rtt_ms": 88.0,
+      "nested": false,
+      "prediction": "display",
+      "reasons": [
+        "rtt_high"
+      ],
+      "rtt_ms": 92.4,
+      "rtt_var_ms": 6.1,
+      "screen_sync": "datagram"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

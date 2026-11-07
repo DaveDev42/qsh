@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use qsh_core::{
-    AttachHandle, DetachFlush, OpError, Ops, ScreenAttach, ScreenSync, SessionAttachStream,
+    AttachHandle, DetachFlush, InteractiveOptions, OpError, Ops, ScreenAttach, ScreenSync,
+    SessionAttachStream,
 };
 use qsh_proto::event::SessionEvent;
 use qsh_proto::{ErrorCode, SessionCloseReq, SessionOpenReq};
@@ -44,13 +45,13 @@ pub(super) fn run(
     what: Attach,
     escape: Option<u8>,
     terminal: Arc<dyn Terminal>,
-    screen_sync: ScreenSync,
+    options: InteractiveOptions,
 ) -> Result<i32, OpError> {
     // Before anything exists on the host: a terminal that cannot be driven
     // must not cost the operator a session to find out.
     terminal.preflight()?;
     let size = terminal.window_size();
-    let screen = screen_attach(screen_sync, size, terminal.stdout_is_terminal())?;
+    let screen = screen_attach(options, size, terminal.stdout_is_terminal())?;
 
     // Authorization, session creation and the attach all happen here, in
     // `Ops`, before a single byte of terminal state is touched: a refused
@@ -326,15 +327,19 @@ fn open_session(
 /// one; `on` cannot be honoured and says so before anything exists on the
 /// host; `off` asks for nothing.
 fn screen_attach(
-    mode: ScreenSync,
+    options: InteractiveOptions,
     size: Option<(u16, u16)>,
     stdout_is_terminal: bool,
 ) -> Result<Option<ScreenAttach>, OpError> {
-    match (mode, size) {
+    match (options.screen_sync, size) {
         (ScreenSync::Off, _) => Ok(None),
-        (mode, Some((cols, rows))) if stdout_is_terminal => {
-            Ok(Some(ScreenAttach { mode, cols, rows }))
-        }
+        (mode, Some((cols, rows))) if stdout_is_terminal => Ok(Some(ScreenAttach {
+            mode,
+            cols,
+            rows,
+            predict: options.predict,
+            status_line: options.status_line,
+        })),
         (ScreenSync::On, _) => Err(OpError::new(
             ErrorCode::InvalidArgument,
             "--screen-sync=on needs a terminal on both stdin and stdout; \

@@ -485,7 +485,8 @@ pub struct Config {
     /// sides (`docs/adr/0044-ssh-bootstrap.md` decisions 2, 4, 9).
     pub ssh: SshConfig,
     /// `[interactive]` — the defaults of the interactive form's flags
-    /// (`--screen-sync`, ADR-0052 decision 15).
+    /// (`--screen-sync`, `--predict`, `--status-line`; ADR-0052
+    /// decision 15, ADR-0053 decisions 10 and 11).
     pub interactive: InteractiveConfig,
 }
 
@@ -499,6 +500,12 @@ pub struct InteractiveConfig {
     /// Default of `--screen-sync`: `"auto"`, `"on"` or `"off"`. Unset is
     /// `"auto"`. An unknown value is a `CONFIG_ERROR` at load.
     pub screen_sync: Option<crate::ops::ScreenSync>,
+    /// Default of `--predict`: `"auto"`, `"always"` or `"never"`. Unset is
+    /// `"auto"` (ADR-0053 decision 11).
+    pub predict: Option<crate::ops::Predict>,
+    /// Default of `--status-line`: `"on"` or `"off"`. Unset is `"on"`
+    /// (ADR-0053 decision 10).
+    pub status_line: Option<crate::ops::StatusLine>,
 }
 
 /// `[serve]` section.

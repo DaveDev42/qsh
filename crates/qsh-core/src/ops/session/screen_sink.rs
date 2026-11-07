@@ -46,6 +46,85 @@ impl ScreenSync {
     }
 }
 
+/// `--predict` (ADR-0053 decision 11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Predict {
+    /// Follow the adaptive policy's prediction knob (ADR-0052 decision 12
+    /// (d)): draw above the RTT threshold, not on a fast link. The default.
+    #[default]
+    Auto,
+    /// Draw at least `Display` whatever the RTT and `[transport].adaptive`
+    /// say; the late-confirmation underline and the decision 7 gates still
+    /// apply.
+    Always,
+    /// Never create a `Predictor`.
+    Never,
+}
+
+impl Predict {
+    /// Parse the `--predict` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    /// The spelling the flag and the config key use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// `--status-line` (ADR-0053 decision 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusLine {
+    /// Draw the link-status line when the link is silent. The default.
+    #[default]
+    On,
+    /// Never draw it. Link tracking and recovery are unaffected.
+    Off,
+}
+
+impl StatusLine {
+    /// Parse the `--status-line` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Whether the line may be drawn.
+    pub fn enabled(self) -> bool {
+        self == Self::On
+    }
+}
+
+/// The resolved defaults of the interactive form's flags: each is the flag
+/// when given, else its `[interactive]` key, else the built-in default.
+/// Built by [`crate::Ops::interactive_options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InteractiveOptions {
+    /// `--screen-sync`.
+    pub screen_sync: ScreenSync,
+    /// `--predict`. Consumed by the attach driver step; nothing acts on it
+    /// yet.
+    pub predict: Predict,
+    /// `--status-line`. Consumed by the status-line step; nothing acts on it
+    /// yet.
+    pub status_line: StatusLine,
+}
+
 /// What an interactive frontend tells `Ops` about the screen it will draw
 /// on. Only built for an attach whose stdin and stdout are a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +135,10 @@ pub struct ScreenAttach {
     pub cols: u16,
     /// Local window height.
     pub rows: u16,
+    /// The resolved `--predict` (hook for the attach driver step).
+    pub predict: Predict,
+    /// The resolved `--status-line` (hook for the status-line step).
+    pub status_line: StatusLine,
 }
 
 impl ScreenAttach {
@@ -127,6 +210,8 @@ impl ScreenSink {
             mode: ScreenSync::On,
             cols,
             rows,
+            predict: Predict::Never,
+            status_line: StatusLine::Off,
         }
         .request()
     }

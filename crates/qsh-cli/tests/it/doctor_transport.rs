@@ -173,6 +173,10 @@ fn the_new_keys_take_only_their_documented_values() {
         ("transport.adaptive", "auto"),
         ("transport.adaptive", "true"),
         ("interactive.screen_sync", "sometimes"),
+        ("interactive.predict", "sometimes"),
+        ("interactive.predict", "on"),
+        ("interactive.status_line", "auto"),
+        ("interactive.status_line", "true"),
     ] {
         let (code, env) = sandbox.json(&["config", "set", key, bad, "--json"]);
         assert_eq!(code, 255, "{key}={bad}: {env}");
@@ -184,6 +188,16 @@ fn the_new_keys_take_only_their_documented_values() {
     let (code, env) = sandbox.json(&["config", "get", "interactive.screen_sync", "--json"]);
     assert_eq!(code, 0, "{env}");
     assert_eq!(env["data"]["set"], false);
+    for (key, value) in [
+        ("interactive.predict", "always"),
+        ("interactive.status_line", "off"),
+    ] {
+        let (code, env) = sandbox.json(&["config", "set", key, value, "--json"]);
+        assert_eq!(code, 0, "{key}: {env}");
+        let (code, env) = sandbox.json(&["config", "get", key, "--json"]);
+        assert_eq!(code, 0, "{env}");
+        assert_eq!(env["data"]["value"], value, "{env}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +269,8 @@ fn an_interactive_attach_publishes_the_policy_report_and_the_adapt_line() {
             mode: ScreenSync::Auto,
             cols: 80,
             rows: 24,
+            predict: Default::default(),
+            status_line: Default::default(),
         });
         let opened = ops
             .session_open_interactive(attach_open_req(), false, screen)

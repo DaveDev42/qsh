@@ -3552,3 +3552,21 @@ fn transport_findings_follow_the_capabilities_and_the_datagram_size() {
         assert!(f.remedy.is_some(), "{}", f.code);
     }
 }
+
+/// ADR-0053 decision 11: `screen_echo_unsupported` needs `screen.v1` without
+/// `screen-echo.v1`, and `[interactive].predict` other than `never`.
+#[test]
+fn echo_finding_needs_screen_without_echo_and_prediction_wanted() {
+    let raised = |screen, echo, predict| echo_finding("peer", screen, echo, predict);
+    let f = raised(true, false, true).expect("raised");
+    assert_eq!(f.code, "screen_echo_unsupported");
+    assert_eq!(f.status, "info");
+    assert!(f.detail.contains("(peer: peer)"), "{}", f.detail);
+    assert!(f.remedy.is_some());
+    assert!(raised(true, true, true).is_none());
+    assert!(raised(true, false, false).is_none(), "predict = never");
+    assert!(
+        raised(false, false, true).is_none(),
+        "screen_sync_unsupported covers it"
+    );
+}

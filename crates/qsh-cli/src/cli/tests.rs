@@ -1246,3 +1246,60 @@ fn root_form_usage_errors_are_told_from_subcommand_ones() {
     assert!(!is_root_form_usage_error(&os(&["qsh", "exec"])));
     assert!(!is_root_form_usage_error(&os(&["qsh", "--json", "exec"])));
 }
+
+/// `--predict` and `--status-line` (ADR-0053 decisions 10 and 11): on both
+/// interactive forms only, with closed value sets and no default at the
+/// parser (the config key and the built-in default sit behind `Ops`).
+#[test]
+fn predict_and_status_line_flags_parse_on_both_interactive_forms() {
+    let cli = Cli::try_parse_from(["qsh", "box"]).unwrap();
+    assert_eq!(cli.interactive.predict, None);
+    assert_eq!(cli.interactive.status_line, None);
+
+    for (value, want) in [
+        ("auto", Predict::Auto),
+        ("always", Predict::Always),
+        ("never", Predict::Never),
+    ] {
+        let cli = Cli::try_parse_from(["qsh", "box", "--predict", value]).unwrap();
+        assert_eq!(cli.interactive.predict, Some(want));
+        let cli = Cli::try_parse_from(["qsh", &format!("--predict={value}"), "box"]).unwrap();
+        assert_eq!(cli.interactive.predict, Some(want));
+    }
+    for (value, want) in [("on", StatusLine::On), ("off", StatusLine::Off)] {
+        let cli = Cli::try_parse_from(["qsh", "box", "--status-line", value]).unwrap();
+        assert_eq!(cli.interactive.status_line, Some(want));
+    }
+    for bad in ["sometimes", "ON", "", "off"] {
+        assert!(
+            Cli::try_parse_from(["qsh", "box", "--predict", bad]).is_err(),
+            "--predict {bad:?}"
+        );
+    }
+    for bad in ["auto", "never", "", "yes"] {
+        assert!(
+            Cli::try_parse_from(["qsh", "box", "--status-line", bad]).is_err(),
+            "--status-line {bad:?}"
+        );
+    }
+
+    // Not subcommand flags: they need the interactive target.
+    assert!(Cli::try_parse_from(["qsh", "--predict", "never", "sessions"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "--status-line", "off"]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "qsh",
+        "attach",
+        "box/01K0",
+        "--predict=always",
+        "--status-line=off",
+    ])
+    .unwrap();
+    match cli.command {
+        Some(Command::Attach(args)) => {
+            assert_eq!(args.predict, Some(Predict::Always));
+            assert_eq!(args.status_line, Some(StatusLine::Off));
+        }
+        other => panic!("expected attach, got {other:?}"),
+    }
+}
