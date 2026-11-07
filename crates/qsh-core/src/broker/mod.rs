@@ -48,7 +48,8 @@ pub use ring::{
 pub use session::{
     AttachGuard, AttachToken, FIRST_INPUT_STREAM, InputStreamId, PipeHandle, PipeSource,
     ScreenParams, SessionActor, SessionConfig, SessionHandle, SessionInfo, SessionSource,
-    SessionSpec, SessionState, SourceControl, SourceExit, SpawnedSource, TtlWindow, WriteError,
+    SessionSpec, SessionState, SourceControl, SourceExit, SpawnedSource, TtlWindow, TtyProbe,
+    WriteError,
 };
 pub use signal::Signal;
 
@@ -1016,6 +1017,18 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// The newest screen state number of the session's emulator, or `None`
+    /// without one (ADR-0053 decision 3, `ScreenEcho` timer case).
+    fn screen_state_num(&self, _id: &SessionId) -> Option<u64> {
+        None
+    }
+
+    /// The PTY's echo state (ADR-0053 decision 3, `docs/design/protocol.md`
+    /// §18.12). `Unknown` when the backend cannot read it. Never PTY content.
+    fn tty_echo(&self, _id: &SessionId) -> qsh_proto::wire::TtyEcho {
+        qsh_proto::wire::TtyEcho::Unknown
+    }
+
     /// Snapshot one live session.
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError>;
 
@@ -1238,6 +1251,14 @@ impl SessionBackend for Broker {
 
     fn screen_take_history(&self, id: &SessionId) -> Option<crate::screen::HistoryBatch> {
         Broker::get_for_read(self, id).ok()?.screen_take_history()
+    }
+
+    fn screen_state_num(&self, id: &SessionId) -> Option<u64> {
+        Broker::get_for_read(self, id).ok()?.screen_state_num()
+    }
+
+    fn tty_echo(&self, id: &SessionId) -> qsh_proto::wire::TtyEcho {
+        Broker::get_for_read(self, id).map_or(qsh_proto::wire::TtyEcho::Unknown, |h| h.tty_echo())
     }
 
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError> {

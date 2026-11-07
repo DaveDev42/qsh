@@ -560,6 +560,13 @@ impl Server {
                         channel,
                         blackhole: Arc::clone(&self.datagram_blackhole),
                     }),
+                    // Only when both sides advertised `screen-echo.v1`; a
+                    // peer without it never sees the frame (ADR-0053
+                    // decision 3).
+                    screen_echo: ctx
+                        .capabilities
+                        .iter()
+                        .any(|c| c == wire::CAP_SCREEN_ECHO_V1),
                     keep_alive: crate::session_stream::KeepAliveParams {
                         pinned: self.keep_alive_pin.get().copied(),
                         rebind_hook: Arc::clone(&self.rebind_hook),

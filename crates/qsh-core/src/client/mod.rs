@@ -5,6 +5,8 @@
 //! This module speaks in wire terms and typed errors; the `Ops` façade maps
 //! [`ClientError`] to `OpError`/`ErrorCode` for the CLI.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
@@ -34,6 +36,8 @@ pub mod render;
 pub mod screen;
 pub mod wake;
 
+mod echo;
+use echo::EchoFilter;
 use link::{ControlLink, DataKillSwitch, DataRecv, DataSend};
 
 /// How long to wait for the peer's `Hello`. Single definition now lives in
@@ -845,6 +849,13 @@ impl Session {
             }
             _ => None,
         };
+        // Input bytes this attach has sent: the bound a `ScreenEcho` is
+        // checked against (ADR-0053 decision 3). Shared with the writer.
+        let sent = Arc::new(AtomicU64::new(attached.input_seq));
+        let echo = EchoFilter::new(
+            self.has_capability(wire::CAP_SCREEN_ECHO_V1) && !attached.screen_channel.is_empty(),
+            Arc::clone(&sent),
+        );
         let (dg_tx, dg_rx) = match datagram {
             Some((tx, rx)) => (Some(tx), Some(rx)),
             None => (None, None),
@@ -864,6 +875,7 @@ impl Session {
                 // makes a reattach's retransmission line up with the
                 // session's dedup cursor (protocol.md §10-5).
                 input_seq: attached.input_seq,
+                sent,
                 datagram: dg_tx,
                 governor: self
                     .conn
@@ -874,6 +886,7 @@ impl Session {
                 recv: Some(recv),
                 pending: None,
                 datagram: dg_rx,
+                echo,
             },
         })
     }
@@ -1169,6 +1182,13 @@ pub enum AttachEvent {
     /// `screen_channel`; the attach driver draws them into the local
     /// scrollback. They are PTY content: never log them.
     ScreenHistory(wire::ScreenHistory),
+    /// The host's input reflection point and tty echo state (ADR-0053
+    /// decision 3). Only on a screen-sync attach whose connection negotiated
+    /// `screen-echo.v1`. Already checked: `input_seq` never exceeds what this
+    /// attach sent, and a signal older than one already delivered is gone, so
+    /// the consumer sees `(state_num, input_seq)` move forward. Offsets and a
+    /// flag, no PTY content.
+    ScreenEcho(wire::ScreenEcho),
     /// The child exited; the last frame of the stream.
     Exit {
         /// Final cumulative output offset.
@@ -1196,6 +1216,12 @@ impl Attached {
     /// Cumulative input offset sent so far.
     pub fn input_seq(&self) -> u64 {
         self.writer.input_seq()
+    }
+
+    /// How many `ScreenEcho`s were dropped for naming an input offset this
+    /// attach never sent.
+    pub fn echo_rejected(&self) -> u64 {
+        self.reader.echo_rejected()
     }
 
     /// Tell the host the terminal window changed.
@@ -1227,6 +1253,8 @@ impl Attached {
 pub struct AttachWriter {
     send: DataSend,
     input_seq: u64,
+    /// `input_seq` as the reader sees it, moved before the bytes go out.
+    sent: Arc<AtomicU64>,
     datagram: Option<ClientDatagram>,
     /// Reports keys to the connection's bulk governor (ADR-0052 decision 12
     /// (a)), so this side's own bulk senders yield while the user types.
@@ -1271,6 +1299,7 @@ impl AttachWriter {
         }
         for chunk in data.chunks(wire::SESSION_CHUNK_MAX) {
             self.input_seq += chunk.len() as u64;
+            self.sent.store(self.input_seq, Ordering::Release);
             // The datagram copy (ADR-0052 decision 8) goes first: it is the
             // one that can beat a stream retransmission. The stream copy is
             // the authoritative one and always follows.
@@ -1341,9 +1370,15 @@ pub struct AttachReader {
     recv: Option<DataRecv>,
     pending: Option<PendingFrame>,
     datagram: Option<DatagramRx>,
+    echo: EchoFilter,
 }
 
 impl AttachReader {
+    /// See [`Attached::echo_rejected`].
+    pub fn echo_rejected(&self) -> u64 {
+        self.echo.rejected.load(Ordering::Relaxed)
+    }
+
     /// See [`Attached::next`].
     pub async fn next(&mut self) -> Result<Option<AttachEvent>, ClientError> {
         loop {
@@ -1353,6 +1388,10 @@ impl AttachReader {
             let frame = match frame {
                 Source::Stream(Some(frame)) => frame,
                 Source::Stream(None) => return Ok(None),
+                Source::Datagram(AttachEvent::ScreenEcho(echo)) => match self.echo.accept(echo) {
+                    Some(echo) => return Ok(Some(AttachEvent::ScreenEcho(echo))),
+                    None => continue,
+                },
                 Source::Datagram(event) => return Ok(Some(event)),
                 Source::Skip => continue,
             };
@@ -1375,6 +1414,10 @@ impl AttachReader {
                 },
                 Some(session_frame::Body::ScreenUpdate(u)) => AttachEvent::Screen(u),
                 Some(session_frame::Body::ScreenHistory(h)) => AttachEvent::ScreenHistory(h),
+                Some(session_frame::Body::ScreenEcho(e)) => match self.echo.accept(e) {
+                    Some(e) => AttachEvent::ScreenEcho(e),
+                    None => continue,
+                },
                 Some(session_frame::Body::Exit(x)) => AttachEvent::Exit {
                     final_seq: x.final_seq,
                     exit_code: x.exit_code,
@@ -1446,6 +1489,12 @@ async fn recv_datagram(rx: &mut Option<DatagramRx>) -> Option<DatagramFrame> {
 /// well-formed `ScreenUpdate` part is dropped: it is untrusted input to a
 /// carrier that is allowed to lose.
 fn datagram_event(frame: DatagramFrame) -> Option<AttachEvent> {
+    if frame.kind == DatagramKind::ScreenEcho {
+        // Checked against the sent offset by the reader's `EchoFilter`.
+        return wire::ScreenEcho::decode(frame.payload.as_slice())
+            .ok()
+            .map(AttachEvent::ScreenEcho);
+    }
     if frame.kind != DatagramKind::ScreenUpdate {
         return None;
     }

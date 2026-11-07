@@ -13,12 +13,14 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use qsh_proto::wire::TtyEcho;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::broker::{
     SessionSource, SessionSpec, Signal, SourceControl, SourceExit, SourceFactory, SpawnedSource,
+    TtyProbe,
 };
 
 use super::env_policy::{DEFAULT_TERM, PASSTHROUGH as PASSTHROUGH_ENV};
@@ -610,6 +612,39 @@ impl SourceControl for PtyControl {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    fn tty_probe(&self) -> Option<TtyProbe> {
+        // A weak reference: the probe must not hold the master open once the
+        // session is done.
+        let fd = Arc::downgrade(&self.fd);
+        Some(Arc::new(move || {
+            fd.upgrade()
+                .map_or(TtyEcho::Unknown, |fd| tty_echo_of(fd.as_raw_fd()))
+        }))
+    }
+}
+
+/// Read `ECHO` and `ICANON` from the line discipline behind a PTY master
+/// (ADR-0053 decision 3): `ECHO` on is the kernel echoing, both off is the
+/// application echoing, `ECHO` off with `ICANON` on is a password prompt.
+/// A failed read is `Unknown`. Only flags are read, never PTY content.
+pub(crate) fn tty_echo_of(fd: std::os::fd::RawFd) -> TtyEcho {
+    // SAFETY: `tcgetattr` fills the zeroed `termios` for the duration of the
+    // call; `fd` is a PTY master the caller keeps alive.
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
+        return TtyEcho::Unknown;
+    }
+    classify_tty(t.c_lflag & libc::ECHO != 0, t.c_lflag & libc::ICANON != 0)
+}
+
+/// The decision table of [`tty_echo_of`].
+pub(crate) fn classify_tty(echo: bool, icanon: bool) -> TtyEcho {
+    match (echo, icanon) {
+        (true, _) => TtyEcho::Kernel,
+        (false, false) => TtyEcho::App,
+        (false, true) => TtyEcho::Secret,
     }
 }
 

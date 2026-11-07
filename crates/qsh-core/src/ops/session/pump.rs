@@ -297,6 +297,7 @@ pub(super) fn attach_event_json(
         crate::client::AttachEvent::InputAck { .. }
         | crate::client::AttachEvent::Screen(_)
         | crate::client::AttachEvent::ScreenHistory(_)
+        | crate::client::AttachEvent::ScreenEcho(_)
         | crate::client::AttachEvent::ScreenDatagram(_) => {
             return None;
         }

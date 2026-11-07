@@ -92,6 +92,13 @@ pub const CAP_SCREEN_V1: &str = "screen.v1";
 /// stream twin.
 pub const CAP_DATAGRAM_V1: &str = "datagram.v1";
 
+/// Capability string for the input-reflection signal (ADR-0053 decision 3,
+/// `docs/design/protocol.md` §18.12): the host sends [`ScreenEcho`] on a screen
+/// sync attach and the client decodes it. A host sends it only when both
+/// sides advertise this; a peer without it never sees `SessionFrame` 10 or
+/// datagram kind 13.
+pub const CAP_SCREEN_ECHO_V1: &str = "screen-echo.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -105,7 +112,8 @@ pub const CAP_DATAGRAM_V1: &str = "datagram.v1";
 /// same commit that serves the stream advertises it. [`CAP_SHELL_COMMAND_V1`]
 /// joined with the host's shell resolution (ADR-0051 decision 6). [`CAP_SCREEN_V1`]
 /// joined with the host emulator's stream carrier (ADR-0052 decision 9),
-/// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy. The set is
+/// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy.
+/// [`CAP_SCREEN_ECHO_V1`] joined with `ScreenEcho` (ADR-0053 decision 3). The set is
 /// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
@@ -116,6 +124,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_SHELL_COMMAND_V1,
     CAP_SCREEN_V1,
     CAP_DATAGRAM_V1,
+    CAP_SCREEN_ECHO_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the
@@ -326,6 +335,44 @@ impl SessionFrame {
             Some(session_frame::Body::ScreenHistory(h)) => h.validate(),
             _ => Ok(()),
         }
+    }
+}
+
+/// A `ScreenEcho` named an input offset the receiver never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("screen echo names input offset {input_seq}, but only {sent} bytes were sent")]
+pub struct EchoBeyondSent {
+    /// The offset in the message.
+    pub input_seq: u64,
+    /// Input bytes the receiver has sent.
+    pub sent: u64,
+}
+
+impl ScreenEcho {
+    /// The tty state; a value this build does not know reads as
+    /// [`TtyEcho::Unknown`] so a later additive variant never fails a decode.
+    pub fn tty_echo(&self) -> TtyEcho {
+        TtyEcho::try_from(self.tty).unwrap_or(TtyEcho::Unknown)
+    }
+
+    /// Receiver-side check (ADR-0053 decision 3): `input_seq` must not exceed
+    /// the cumulative input offset the receiver has sent. The caller drops
+    /// and counts a signal that fails, and does not close the connection.
+    pub fn validate_against_sent(&self, sent: u64) -> Result<(), EchoBeyondSent> {
+        if self.input_seq > sent {
+            Err(EchoBeyondSent {
+                input_seq: self.input_seq,
+                sent,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether `self` is strictly ahead of `other` in `(state_num,
+    /// input_seq)` order, the order a client keeps the newer of two carriers.
+    pub fn is_newer_than(&self, other: &Self) -> bool {
+        (self.state_num, self.input_seq) > (other.state_num, other.input_seq)
     }
 }
 
@@ -1152,6 +1199,11 @@ impl SessionFrame {
     /// `ScreenHistory` frame.
     pub fn screen_history(history: ScreenHistory) -> Self {
         Self::from_body(session_frame::Body::ScreenHistory(history))
+    }
+
+    /// `ScreenEcho` frame (ADR-0053 decision 3).
+    pub fn screen_echo(echo: ScreenEcho) -> Self {
+        Self::from_body(session_frame::Body::ScreenEcho(echo))
     }
 
     /// `ScreenAck` frame; `state_num` 0 asks for the full screen.

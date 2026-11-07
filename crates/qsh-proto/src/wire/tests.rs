@@ -1930,6 +1930,7 @@ fn windows_build_advertises_file_v1() {
             CAP_SHELL_COMMAND_V1,
             CAP_SCREEN_V1,
             CAP_DATAGRAM_V1,
+            CAP_SCREEN_ECHO_V1,
         ]
     );
 }
@@ -2113,4 +2114,72 @@ fn a_screen_history_frame_over_the_chunk_cap_is_rejected() {
         skipped: 0,
     };
     assert!(SessionFrame::screen_history(h).validate().is_err());
+}
+
+#[test]
+fn screen_echo_round_trips_on_session_frame_10_and_datagram_kind_13() {
+    use prost::Message;
+    for tty in [
+        TtyEcho::Unknown,
+        TtyEcho::Kernel,
+        TtyEcho::App,
+        TtyEcho::Secret,
+    ] {
+        let echo = ScreenEcho {
+            state_num: 7,
+            input_seq: 1 << 40,
+            tty: tty as i32,
+        };
+        let frame = SessionFrame::screen_echo(echo);
+        assert_eq!(frame.validate(), Ok(()));
+        let bytes = frame.encode_to_vec();
+        // field 10, length-delimited: tag 0x52.
+        assert_eq!(bytes[0], 0x52);
+        let back = SessionFrame::decode(bytes.as_slice()).unwrap();
+        assert_eq!(back, frame);
+        assert_eq!(echo.tty_echo(), tty);
+    }
+    assert_eq!(TtyEcho::Unknown as i32, 0);
+    assert_eq!(TtyEcho::Kernel as i32, 1);
+    assert_eq!(TtyEcho::App as i32, 2);
+    assert_eq!(TtyEcho::Secret as i32, 3);
+    let dg = crate::datagram::DatagramFrame {
+        channel: crate::datagram::ChannelId([3; 16]),
+        kind: crate::datagram::DatagramKind::ScreenEcho,
+        payload: ScreenEcho::default().encode_to_vec(),
+    };
+    assert_eq!(dg.encode()[crate::datagram::CHANNEL_ID_LEN], 13);
+    assert_eq!(crate::datagram::DatagramFrame::decode(&dg.encode()), Ok(dg));
+}
+
+#[test]
+fn screen_echo_validation_and_order() {
+    let e = |state_num, input_seq| ScreenEcho {
+        state_num,
+        input_seq,
+        tty: 0,
+    };
+    assert_eq!(e(1, 10).validate_against_sent(10), Ok(()));
+    assert_eq!(
+        e(1, 11).validate_against_sent(10),
+        Err(EchoBeyondSent {
+            input_seq: 11,
+            sent: 10
+        })
+    );
+    // An unknown tty value reads as UNKNOWN rather than failing the decode.
+    assert_eq!(
+        ScreenEcho { tty: 99, ..e(0, 0) }.tty_echo(),
+        TtyEcho::Unknown
+    );
+    assert!(e(2, 0).is_newer_than(&e(1, 99)));
+    assert!(e(2, 5).is_newer_than(&e(2, 4)));
+    assert!(!e(2, 5).is_newer_than(&e(2, 5)));
+    assert!(!e(1, 9).is_newer_than(&e(2, 0)));
+}
+
+#[test]
+fn screen_echo_is_advertised_by_every_build() {
+    assert!(LOCAL_CAPABILITIES.contains(&CAP_SCREEN_ECHO_V1));
+    assert_eq!(CAP_SCREEN_ECHO_V1, "screen-echo.v1");
 }

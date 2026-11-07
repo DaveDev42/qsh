@@ -32,6 +32,8 @@ pub enum DatagramKind {
     ScreenAck = 11,
     /// A copy of a session `Input`.
     Input = 12,
+    /// A `ScreenEcho` (ADR-0053 decision 3, capability `screen-echo.v1`).
+    ScreenEcho = 13,
 }
 
 impl DatagramKind {
@@ -41,6 +43,7 @@ impl DatagramKind {
             10 => Some(Self::ScreenUpdate),
             11 => Some(Self::ScreenAck),
             12 => Some(Self::Input),
+            13 => Some(Self::ScreenEcho),
             _ => None,
         }
     }

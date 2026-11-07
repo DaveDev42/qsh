@@ -56,13 +56,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use prost::Message as _;
 use qsh_proto::datagram::{ChannelId, DatagramFrame, DatagramKind};
 use qsh_proto::screen::MAX_DATAGRAM_PARTS;
-use qsh_proto::wire::{self, ControlMessage, SessionFrame, control_message, session_frame};
+use qsh_proto::wire::{
+    self, ControlMessage, ScreenEcho, SessionFrame, TtyEcho, control_message, session_frame,
+};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamError};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::adapt::{Carrier, CarrierRunner, FIXED_FRAME_INTERVAL, User};
 use crate::datagram::{DatagramHub, DatagramRx, SendFailure, part_budget};
+use crate::input_times::InputTimes;
 
 use crate::broker::{
     AttachToken, BrokerError, ConnectionId, ControlEvent, Cursor, InputStreamId, ReplayEvent,
@@ -164,6 +167,9 @@ pub struct SessionStream {
     /// What the keep-alive policy needs from the host (ADR-0052 decision
     /// 13).
     pub keep_alive: KeepAliveParams,
+    /// Send `ScreenEcho` on this screen-sync attach: both sides advertised
+    /// `screen-echo.v1` (ADR-0053 decision 3).
+    pub screen_echo: bool,
 }
 
 /// What the dispatch edge hands a screen-sync attach for knob (e), the
@@ -194,7 +200,6 @@ pub struct DatagramParams {
 }
 
 /// What the input side of a screen-sync stream tells the screen pump.
-#[derive(Default)]
 struct ScreenSync {
     /// The client asked for the full screen (`ScreenAck{0}`).
     resync: AtomicBool,
@@ -204,12 +209,36 @@ struct ScreenSync {
     /// The client has sent a datagram on this attach's channel: it reads
     /// them, and the path carries them at least towards the host.
     datagram_seen: AtomicBool,
+    /// When the host wrote the input of this attach (ADR-0053 decision 3).
+    times: std::sync::Mutex<InputTimes>,
+    /// Wakes the pump for a new input write: the `ScreenEcho` timer moved.
+    input_poke: Notify,
     /// Wakes the pump for a resync request or a window-size change, neither
     /// of which moves the ring.
     poke: Notify,
 }
 
 impl ScreenSync {
+    fn new(input_from: u64) -> Self {
+        Self {
+            resync: AtomicBool::new(false),
+            acked: AtomicU64::new(0),
+            datagram_seen: AtomicBool::new(false),
+            times: std::sync::Mutex::new(InputTimes::new(input_from)),
+            input_poke: Notify::new(),
+            poke: Notify::new(),
+        }
+    }
+
+    /// The session accepted input up to cumulative offset `end`.
+    fn note_input(&self, end: u64, now: Instant) {
+        self.times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(end, now);
+        self.input_poke.notify_one();
+    }
+
     /// A `ScreenAck` from either carrier.
     fn on_ack(&self, state_num: u64) {
         if state_num == 0 {
@@ -284,6 +313,7 @@ impl SessionStream {
             screen,
             datagram,
             keep_alive,
+            screen_echo,
         } = self;
 
         // While this token lives the session counts as attached and its
@@ -297,7 +327,7 @@ impl SessionStream {
 
         let (frames_tx, frames_rx) = mpsc::channel::<SessionFrame>(SESSION_STREAM_QUEUE);
         let depth = Arc::new(SendDepth::default());
-        let sync = screen.then(|| Arc::new(ScreenSync::default()));
+        let sync = screen.then(|| Arc::new(ScreenSync::new(input_from)));
         let mut writer = AbortOnDrop(tokio::spawn({
             let depth = Arc::clone(&depth);
             async move {
@@ -355,6 +385,7 @@ impl SessionStream {
                 connection.clone(),
                 dg_tx,
                 keep_alive,
+                screen_echo,
             )),
             None => tokio::spawn(output_pump(
                 Arc::clone(&sessions),
@@ -651,6 +682,12 @@ struct ScreenSender {
     /// Datagram updates not yet covered by an ack: state number and send time.
     inflight: VecDeque<(u64, Instant)>,
     last_dg_at: Option<Instant>,
+    /// Send `ScreenEcho` (both sides advertised `screen-echo.v1`).
+    echo_on: bool,
+    /// The last `ScreenEcho` sent, to skip repeats.
+    last_echo: Option<(u64, u64, TtyEcho)>,
+    /// State number of the update `try_send` just put on a carrier.
+    just_sent: Option<u64>,
 }
 
 impl ScreenSender {
@@ -771,6 +808,7 @@ impl ScreenSender {
                 {
                     self.inflight.push_back((update.new_num, now));
                     self.last_dg_at = Some(now);
+                    self.just_sent = Some(update.new_num);
                     if update.base_num == 0 {
                         self.force_full = false;
                     }
@@ -802,10 +840,73 @@ impl ScreenSender {
             send_frame(&self.frames, SessionFrame::screen_update(part)).await?;
         }
         self.last_sent_stream = update.new_num;
+        self.just_sent = Some(update.new_num);
         if update.base_num == 0 {
             self.force_full = false;
         }
         Ok(Sent::Done)
+    }
+
+    /// Send a `ScreenEcho` (ADR-0053 decision 3) when it says something new.
+    /// `after_update` is the state number of the update just sent (case a);
+    /// `None` is the timer case (b), which reads the current state and sends
+    /// only if the input offset or the tty state moved. The stream always
+    /// carries it; a live datagram carrier gets it first. Values equal to the
+    /// last one sent are skipped. The frame holds offsets and a tty flag
+    /// only, never PTY content.
+    async fn send_echo(
+        &mut self,
+        now: Instant,
+        after_update: Option<u64>,
+    ) -> Result<(), SessionStreamError> {
+        if !self.echo_on {
+            return Ok(());
+        }
+        let input_seq = self
+            .sync
+            .times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .settle(now);
+        let tty = self.sessions.tty_echo(&self.id);
+        let state_num = match after_update {
+            Some(n) => n,
+            None => {
+                let unchanged = match self.last_echo {
+                    Some((_, seq, t)) => seq == input_seq && t == tty,
+                    None => input_seq == 0 && tty == TtyEcho::Unknown,
+                };
+                if unchanged {
+                    return Ok(());
+                }
+                match self.sessions.screen_state_num(&self.id) {
+                    Some(n) => n,
+                    None => return Ok(()),
+                }
+            }
+        };
+        let value = (state_num, input_seq, tty);
+        if self.last_echo == Some(value) {
+            return Ok(());
+        }
+        self.last_echo = Some(value);
+        let echo = ScreenEcho {
+            state_num,
+            input_seq,
+            tty: tty as i32,
+        };
+        if self.datagram_usable()
+            && let Some(dg) = &self.dg
+            && !dg.blackhole.load(Ordering::Relaxed)
+        {
+            // Best effort: the stream copy below is the certain one.
+            let _ = dg.hub.send(&DatagramFrame {
+                channel: dg.channel,
+                kind: DatagramKind::ScreenEcho,
+                payload: echo.encode_to_vec(),
+            });
+        }
+        send_frame(&self.frames, SessionFrame::screen_echo(echo)).await
     }
 
     /// Send the lines that scrolled off since the last call (ADR-0052
@@ -881,6 +982,7 @@ async fn screen_pump(
     conn: Connection,
     dg: Option<DatagramTx>,
     keep_alive: KeepAliveParams,
+    screen_echo: bool,
 ) -> Result<(), SessionStreamError> {
     let mut sender = ScreenSender {
         sessions: Arc::clone(&sessions),
@@ -901,6 +1003,9 @@ async fn screen_pump(
         force_full: false,
         inflight: VecDeque::new(),
         last_dg_at: None,
+        echo_on: screen_echo,
+        last_echo: None,
+        just_sent: None,
     };
     let mut dirty = true;
     let mut exit_grace_used = false;
@@ -929,8 +1034,25 @@ async fn screen_pump(
                 Sent::Paced(at) => wake = Some(wake.map_or(at, |w| w.min(at))),
             }
         }
+        if let Some(n) = sender.just_sent.take() {
+            sender.send_echo(now, Some(n)).await?;
+        } else if !dirty {
+            sender.send_echo(now, None).await?;
+        }
         if !dirty {
             sender.send_history(false).await?;
+        }
+        if sender.echo_on {
+            let due = sync
+                .times
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .next_due();
+            if let Some(at) = due {
+                // Already due means the next pass settles it; look again soon.
+                let at = at.max(now + Duration::from_millis(1));
+                wake = Some(wake.map_or(at, |w| w.min(at)));
+            }
         }
         let mut wait = if exit_grace_used {
             EXIT_CLOSED_GRACE
@@ -954,6 +1076,8 @@ async fn screen_pump(
                 dirty = true;
                 continue;
             }
+            // New input was written: the echo timer moved.
+            () = sync.input_poke.notified() => continue,
             // The writer took screen data: a gated update may go now.
             () = depth.drained.notified(), if dirty => continue,
         };
@@ -970,6 +1094,9 @@ async fn screen_pump(
                     // The client must see the final screen before the event
                     // that ends the session, whatever the queue holds.
                     sender.try_send(Instant::now(), true).await?;
+                    if let Some(n) = sender.just_sent.take() {
+                        sender.send_echo(Instant::now(), Some(n)).await?;
+                    }
                     sender.send_history(true).await?;
                     dirty = false;
                     notify(&events, &id, sequence, &event).await?;
@@ -1033,6 +1160,9 @@ async fn datagram_pump(
                     continue;
                 }
                 let applied = apply_input_copy(&sessions, &id, conn, stream, &axis, input).await;
+                if let Some(now) = applied {
+                    sync.note_input(now, Instant::now());
+                }
                 if let Some(now) = applied
                     && send_frame(&frames, SessionFrame::input_ack(now))
                         .await
@@ -1042,7 +1172,7 @@ async fn datagram_pump(
                 }
             }
             // The host sends updates; a client sending one is a slip.
-            DatagramKind::ScreenUpdate => {}
+            DatagramKind::ScreenUpdate | DatagramKind::ScreenEcho => {}
         }
     }
 }
@@ -1153,6 +1283,11 @@ async fn input_pump(
                         BrokerError::NotRunning | BrokerError::NotWriter | BrokerError::NotFound,
                     ) => applied = applied.max(input.input_seq),
                     Err(err) => return Err(err.into()),
+                }
+                if applied > *applied_guard
+                    && let Some(sync) = &sync
+                {
+                    sync.note_input(applied, Instant::now());
                 }
                 *applied_guard = applied;
                 drop(applied_guard);

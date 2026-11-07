@@ -677,7 +677,31 @@ message SessionFrame {
     // ADR-0052 decision 10: rows that scrolled off the top, host -> client,
     // stream only (never a datagram), same gating as `screen_update`.
     ScreenHistory screen_history = 9;
+    // ADR-0053 decision 3 (capability `screen-echo.v1`): host -> client, sent
+    // after every `ScreenUpdate` and when the input offset or tty state moves.
+    ScreenEcho screen_echo = 10;
   }
+}
+
+// Host -> client (ADR-0053 decision 3, protocol.md §18.12): at the moment the
+// host built this frame the attach saw screen state `state_num`, every input
+// byte below the cumulative offset `input_seq` (the same offset as
+// `Input.input_seq`) had been written to the PTY at least ECHO_GRACE earlier,
+// and `tty` is the PTY echo state read at that moment. Sent only when both
+// sides advertise `screen-echo.v1`. Also carried as `DatagramFrame` kind 13.
+message ScreenEcho {
+  uint64 state_num = 1;
+  uint64 input_seq = 2;
+  TtyEcho tty = 3;
+}
+
+// PTY echo state (protocol.md §18.12). Metadata about the line discipline,
+// never PTY content.
+enum TtyEcho {
+  TTY_ECHO_UNKNOWN = 0;  // not readable (Windows host, read failure)
+  TTY_ECHO_KERNEL = 1;   // ECHO on: the kernel echoes
+  TTY_ECHO_APP = 2;      // ECHO off, ICANON off: the application echoes
+  TTY_ECHO_SECRET = 3;   // ECHO off, ICANON on: password-style input
 }
 
 // Host -> client: one part of an encoded screen update (protocol.md §18.4).

@@ -54,6 +54,7 @@ pub(crate) mod fsutil;
 pub mod handshake;
 pub mod hosts;
 pub mod identity;
+pub mod input_times;
 pub mod lifecycle;
 pub mod localctl;
 pub mod ops;
