@@ -24,6 +24,7 @@ mod keep_alive_policy;
 mod liveness_config;
 mod local_control_reverse;
 mod local_stream_reverse;
+mod netsim;
 mod pairing_loopback;
 mod pairing_quota;
 mod perf_out;
