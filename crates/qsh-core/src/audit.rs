@@ -207,6 +207,37 @@ impl AuditRecord {
 }
 
 impl AuditRecord {
+    /// A hole-punch signaling decision (`host.punch`, ADR-0054 결정 6): the
+    /// rendezvous deciding on a `PunchRequest` or the target on a
+    /// `PunchOffer` / `RendezvousQuery`. `resource` is the op name
+    /// (`punch.request`, `punch.offer`, `punch.rendezvous`), the way
+    /// `exec.run` records `"exec"`. Carries no address of any kind: `peer_addr`
+    /// is the same `"-"` the windowed summary records use, so a netsim or
+    /// real candidate address can never reach the audit file through this
+    /// constructor (ADR-0054 결정 20).
+    pub fn punch_signal(
+        principal: &qsh_transport::Principal,
+        auth_path: AuthPath,
+        resource: &str,
+        decision: Decision,
+        rule: Option<u32>,
+    ) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: principal.to_string(),
+            action: Action::HostPunch.as_str().to_string(),
+            resource: resource.to_string(),
+            decision: decision.as_str().to_string(),
+            rule,
+            auth_path: auth_path_str(auth_path).to_string(),
+            peer_addr: "-".to_string(),
+            count: None,
+            role: None,
+            grant: None,
+        }
+    }
+
     /// Attach the trust role a verdict rested on (ADR-0045 결정 16). `None`
     /// leaves the record untouched, so every row-based or denied decision
     /// stays byte-identical to what it was before roles existed.

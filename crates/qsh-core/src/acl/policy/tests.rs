@@ -541,6 +541,7 @@ fn oracle_role_row(role: TrustRole) -> (&'static [Action], bool) {
                 Action::FileRead,
                 Action::FileWrite,
                 Action::HostReverse,
+                Action::HostPunch,
             ],
             false,
         ),
@@ -551,12 +552,27 @@ fn oracle_role_row(role: TrustRole) -> (&'static [Action], bool) {
                 Action::SessionList,
                 Action::SessionAttach,
                 Action::SessionControl,
+                Action::HostPunch,
             ],
             false,
         ),
-        TrustRole::Tunnel => (&[Action::ForwardLocal, Action::ForwardRemote], true),
-        TrustRole::ReadOnly => (&[Action::SessionList, Action::SessionAttach], false),
-        TrustRole::Reverse => (&[Action::HostReverse], false),
+        TrustRole::Tunnel => (
+            &[
+                Action::ForwardLocal,
+                Action::ForwardRemote,
+                Action::HostPunch,
+            ],
+            true,
+        ),
+        TrustRole::ReadOnly => (
+            &[
+                Action::SessionList,
+                Action::SessionAttach,
+                Action::HostPunch,
+            ],
+            false,
+        ),
+        TrustRole::Reverse => (&[Action::HostReverse, Action::HostPunch], false),
         TrustRole::None => (&[], false),
     }
 }

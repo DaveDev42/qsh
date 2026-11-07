@@ -62,6 +62,7 @@ pub const ROLE_GRANTS: [RoleGrant; 6] = [
             Action::FileRead,
             Action::FileWrite,
             Action::HostReverse,
+            Action::HostPunch,
         ],
         scope: RoleScope::Any,
     },
@@ -73,22 +74,31 @@ pub const ROLE_GRANTS: [RoleGrant; 6] = [
             Action::SessionList,
             Action::SessionAttach,
             Action::SessionControl,
+            Action::HostPunch,
         ],
         scope: RoleScope::Any,
     },
     RoleGrant {
         role: TrustRole::Tunnel,
-        actions: &[Action::ForwardLocal, Action::ForwardRemote],
+        actions: &[
+            Action::ForwardLocal,
+            Action::ForwardRemote,
+            Action::HostPunch,
+        ],
         scope: RoleScope::Owned,
     },
     RoleGrant {
         role: TrustRole::ReadOnly,
-        actions: &[Action::SessionList, Action::SessionAttach],
+        actions: &[
+            Action::SessionList,
+            Action::SessionAttach,
+            Action::HostPunch,
+        ],
         scope: RoleScope::Any,
     },
     RoleGrant {
         role: TrustRole::Reverse,
-        actions: &[Action::HostReverse],
+        actions: &[Action::HostReverse, Action::HostPunch],
         scope: RoleScope::NotApplicable,
     },
     RoleGrant {

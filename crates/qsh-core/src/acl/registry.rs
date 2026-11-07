@@ -506,8 +506,14 @@ mod tests {
     /// reason.
     #[test]
     fn deny_seams_cover_every_action_except_forward_socks() {
-        let covered: std::collections::HashSet<Action> =
-            DENY_SEAMS.iter().map(|s| s.action).collect();
+        // The punch seams (`host.punch`, ADR-0054) are not DENY_SEAMS rows yet:
+        // their services land in later M24 steps. `PUNCH_OPS` is where they
+        // are listed meanwhile, and its driver is `acl::punch`'s own tests.
+        let covered: std::collections::HashSet<Action> = DENY_SEAMS
+            .iter()
+            .map(|s| s.action)
+            .chain(crate::acl::PUNCH_OPS.iter().map(|op| op.action()))
+            .collect();
         let excluded: std::collections::HashSet<Action> =
             ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
         assert!(

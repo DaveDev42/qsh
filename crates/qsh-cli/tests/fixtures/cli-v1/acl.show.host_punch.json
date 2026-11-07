@@ -1,0 +1,32 @@
+{
+  "command": "acl.show",
+  "data": {
+    "auth_path": "pin",
+    "auth_path_defaulted": true,
+    "effective_actions": [
+      "host.punch"
+    ],
+    "matching_rules": [
+      {
+        "allow": [
+          "host.punch"
+        ],
+        "auth_path": "pin",
+        "index": 0,
+        "scope": "owned"
+      }
+    ],
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 1,
+      "state": "loaded"
+    },
+    "principal": "device:laptop",
+    "role": "none",
+    "role_actions": []
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
