@@ -46,10 +46,26 @@
 //!   state again. A line wider than the window is cut at the right edge, as
 //!   the screen is.
 //!
+//! - **Prediction overlay.** [`ScreenRenderer::draw_with_overlay`] draws the
+//!   predictor's [`Overlay`] (ADR-0053 decision 8) on top of the host
+//!   screen. The composition happens in the renderer's own frame, after the
+//!   host state is fitted to the window, so the synced `ClientScreen` and
+//!   its hash check never see it. The diff runs on the composed frame:
+//!   a prediction costs its cells, and a rollback costs exactly the cells
+//!   whose appearance changed, with no clear and no repaint. Overlay cells
+//!   are host-screen coordinates; the same row crop and column cut as the
+//!   host screen apply (a cell the window does not show is not drawn). The
+//!   overlay's cursor replaces the host's. The underline is whatever flag
+//!   the overlay cell carries. An overlay is ignored while the host is on
+//!   the alternate screen, whatever the caller passes. After
+//!   [`ScreenRenderer::history`] the next draw repaints and composes again.
+//!
 //! [`ScreenRenderer::reset`] gives the bytes that put the local terminal's
 //! modes back when the attach ends.
 
 use qsh_proto::screen::{Cell, Color, Effect, Modes, ScreenState, cell_flags};
+
+use super::predict::Overlay;
 
 #[cfg(test)]
 mod tests;
@@ -147,7 +163,7 @@ impl Frame {
 
     /// Fit `state` to a `cols` x `rows` window: crop what does not fit,
     /// blank what is missing.
-    fn fit(state: &ScreenState, cols: u16, rows: u16) -> Self {
+    fn fit(state: &ScreenState, overlay: Option<&Overlay>, cols: u16, rows: u16) -> Self {
         // Crop rows so the cursor row stays on screen.
         let row_offset = if state.rows > rows {
             usize::from(state.cursor_row + 1)
@@ -174,16 +190,72 @@ impl Frame {
                 cells.push(visible(cell));
             }
         }
-        let cursor_row = state
+        let mut cursor_row = state
             .cursor_row
             .saturating_sub(row_offset as u16)
             .min(rows - 1);
+        let mut cursor_col = state.cursor_col.min(cols - 1);
+        if let Some(o) = overlay.filter(|_| state.modes.flags & Modes::ALT_SCREEN == 0) {
+            let mut touched = false;
+            for oc in &o.cells {
+                let Some(r) = usize::from(oc.row).checked_sub(row_offset) else {
+                    continue;
+                };
+                if r >= usize::from(rows) || oc.col >= cols {
+                    continue;
+                }
+                cells[r * usize::from(cols) + usize::from(oc.col)] = visible(oc.cell.clone());
+                touched = true;
+            }
+            // A wide lead cell owns the column after it: the predictor may
+            // send a shifted character's lead alone, or leave a blank
+            // there, and a terminal draws the right half either way.
+            for oc in &o.cells {
+                let Some(r) = usize::from(oc.row).checked_sub(row_offset) else {
+                    continue;
+                };
+                let wide_lead = oc.cell.flags & cell_flags::WIDE != 0;
+                if wide_lead && r < usize::from(rows) && oc.col + 1 < cols {
+                    cells[r * usize::from(cols) + usize::from(oc.col) + 1] = Cell {
+                        flags: cell_flags::WIDE_CONT,
+                        ..Cell::default()
+                    };
+                }
+            }
+            if touched {
+                fix_wide_halves(&mut cells, usize::from(cols));
+            }
+            if let Some((r, c)) = o.cursor
+                && let Some(r) = usize::from(r).checked_sub(row_offset)
+                && r < usize::from(rows)
+            {
+                cursor_row = r as u16;
+                cursor_col = c.min(cols - 1);
+            }
+        }
         Self {
             cols,
             rows,
             cells,
             cursor_row,
-            cursor_col: state.cursor_col.min(cols - 1),
+            cursor_col,
+        }
+    }
+}
+
+/// Blank the halves of double-width characters the overlay cut apart (a
+/// narrow prediction over one half of a host character, a wide prediction on
+/// the last column), as a terminal overwriting them would.
+fn fix_wide_halves(cells: &mut [Cell], cols: usize) {
+    for row in cells.chunks_mut(cols) {
+        for c in 0..cols {
+            let wide = row[c].flags & cell_flags::WIDE != 0;
+            let cont = row[c].flags & cell_flags::WIDE_CONT != 0;
+            let prev_wide = c > 0 && row[c - 1].flags & cell_flags::WIDE != 0;
+            let next_cont = c + 1 < cols && row[c + 1].flags & cell_flags::WIDE_CONT != 0;
+            if (wide && !next_cont) || (cont && !prev_wide) {
+                row[c] = Cell::default();
+            }
         }
     }
 }
@@ -234,8 +306,31 @@ impl ScreenRenderer {
     /// by `effects` (written once, here and never again). An empty result
     /// means nothing changed.
     pub fn draw(&mut self, state: &ScreenState, effects: &[Effect], local: (u16, u16)) -> Vec<u8> {
+        self.compose(state, None, effects, local)
+    }
+
+    /// [`Self::draw`] with the predictor's `overlay` composed over the host
+    /// screen (see the module docs). An empty overlay gives the same bytes
+    /// as [`Self::draw`].
+    pub fn draw_with_overlay(
+        &mut self,
+        state: &ScreenState,
+        overlay: &Overlay,
+        effects: &[Effect],
+        local: (u16, u16),
+    ) -> Vec<u8> {
+        self.compose(state, Some(overlay), effects, local)
+    }
+
+    fn compose(
+        &mut self,
+        state: &ScreenState,
+        overlay: Option<&Overlay>,
+        effects: &[Effect],
+        local: (u16, u16),
+    ) -> Vec<u8> {
         let (cols, rows) = (local.0.max(1), local.1.max(1));
-        let frame = Frame::fit(state, cols, rows);
+        let frame = Frame::fit(state, overlay, cols, rows);
         let mut out = Vec::new();
 
         // The first frame lands on a terminal that already shows something:

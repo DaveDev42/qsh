@@ -500,3 +500,545 @@ fn a_history_line_wider_than_the_window_is_cut_not_wrapped() {
     assert_eq!(texts, ["0123456789"]);
     assert_same(&local.snapshot(), &state);
 }
+
+// ---- prediction overlay (ADR-0053 decision 8) ----
+
+mod overlay {
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    use qsh_proto::screen::Cell;
+    use unicode_width::UnicodeWidthChar as _;
+
+    use super::*;
+    use crate::adapt::Prediction;
+    use crate::client::predict::{
+        EchoReport, MAX_PENDING, Overlay, OverlayCell, Predictor, TtyEcho,
+    };
+
+    fn ocell(row: u16, col: u16, text: &str, flags: u8) -> OverlayCell {
+        OverlayCell {
+            row,
+            col,
+            cell: Cell {
+                text: text.into(),
+                flags,
+                ..Cell::default()
+            },
+        }
+    }
+
+    fn wide(row: u16, col: u16, text: &str, flags: u8) -> [OverlayCell; 2] {
+        let mut cont = ocell(row, col + 1, "", cell_flags::WIDE_CONT);
+        cont.cell.flags |= flags & cell_flags::UNDERLINE;
+        [ocell(row, col, text, flags | cell_flags::WIDE), cont]
+    }
+
+    fn overlay(cells: Vec<OverlayCell>, cursor: Option<(u16, u16)>) -> Overlay {
+        Overlay { cells, cursor }
+    }
+
+    /// A drawn host screen and a local terminal model that has seen it.
+    fn drawn(rows: u16, cols: u16, bytes: &[u8]) -> (ScreenRenderer, HostScreen, ScreenState) {
+        let (_h, state) = host(rows, cols, bytes);
+        let mut r = ScreenRenderer::new();
+        let mut local = term(rows, cols);
+        feed(&mut local, &r.draw(&state, &[], (cols, rows)));
+        (r, local, state)
+    }
+
+    #[test]
+    fn an_overlay_is_drawn_over_the_host_screen_and_moves_the_cursor() {
+        let (mut r, mut local, state) = drawn(3, 20, b"$ ");
+        let o = overlay(vec![ocell(0, 2, "a", 0)], Some((0, 3)));
+        let bytes = r.draw_with_overlay(&state, &o, &[], (20, 3));
+        feed(&mut local, &bytes);
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), "$ a");
+        assert_eq!((l.cursor_row, l.cursor_col), (0, 3));
+        // The synced state is untouched: only the local model has the glyph.
+        assert_eq!(text_of(&state, 0), "$");
+    }
+
+    #[test]
+    fn an_empty_overlay_gives_the_bytes_of_a_plain_draw() {
+        let (_h, state) = host(4, 20, b"abc\x1b[1;31mred\x1b[0m");
+        let mut plain_r = ScreenRenderer::new();
+        let mut over_r = ScreenRenderer::new();
+        let empty = Overlay::default();
+        assert_eq!(
+            plain_r.draw(&state, &[], (20, 4)),
+            over_r.draw_with_overlay(&state, &empty, &[], (20, 4))
+        );
+        assert!(
+            over_r
+                .draw_with_overlay(&state, &empty, &[], (20, 4))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nothing_changed_writes_zero_bytes() {
+        let (mut r, _local, state) = drawn(3, 20, b"$ ");
+        let o = overlay(vec![ocell(0, 2, "a", 0)], Some((0, 3)));
+        assert!(!r.draw_with_overlay(&state, &o, &[], (20, 3)).is_empty());
+        assert!(r.draw_with_overlay(&state, &o, &[], (20, 3)).is_empty());
+        // The host catching up with exactly what was predicted changes
+        // nothing on the terminal either.
+        let (_h, caught_up) = host(3, 20, b"$ a");
+        assert!(
+            r.draw_with_overlay(&caught_up, &Overlay::default(), &[], (20, 3))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_rollback_rewrites_only_the_changed_cells_and_never_clears() {
+        let (mut r, mut local, state) = drawn(4, 30, b"$ ls\r\nout1\r\nout2\x1b[1;5H");
+        let o = overlay(vec![ocell(0, 4, "x", 0), ocell(0, 5, "y", 0)], Some((0, 6)));
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (30, 4)));
+        assert_eq!(text_of(&local.snapshot(), 0), "$ lsxy");
+        // The host disagrees: the prediction goes away.
+        let bytes = r.draw_with_overlay(&state, &Overlay::default(), &[], (30, 4));
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        for clear in ["\x1b[2J", "\x1b[J", "\x1b[3J", "\x1b[0J"] {
+            assert!(!text.contains(clear), "{text:?}");
+        }
+        assert!(!text.contains("out") && !text.contains("ls"), "{text:?}");
+        assert!(bytes.len() < 30, "{} bytes: {text:?}", bytes.len());
+        feed(&mut local, &bytes);
+        assert_same(&local.snapshot(), &state);
+    }
+
+    #[test]
+    fn a_changed_prediction_touches_only_the_cell_that_differs() {
+        let (mut r, _local, state) = drawn(3, 20, b"$ ");
+        let a = overlay(vec![ocell(0, 2, "a", 0), ocell(0, 3, "b", 0)], Some((0, 4)));
+        let b = overlay(vec![ocell(0, 2, "a", 0), ocell(0, 3, "c", 0)], Some((0, 4)));
+        r.draw_with_overlay(&state, &a, &[], (20, 3));
+        let bytes = r.draw_with_overlay(&state, &b, &[], (20, 3));
+        // One move, the pen, the cell; the cursor did not move.
+        assert_eq!(bytes, b"\x1b[1;4Hc\x1b[1;5H");
+    }
+
+    #[test]
+    fn the_underline_follows_the_overlay_cell_flag() {
+        let (mut r, mut local, state) = drawn(3, 20, b"$ ");
+        let o = overlay(
+            vec![ocell(0, 2, "a", cell_flags::UNDERLINE), ocell(0, 3, "b", 0)],
+            Some((0, 4)),
+        );
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (20, 3)));
+        let l = local.snapshot();
+        let flags = |c: usize| l.grid[0].cells[c].flags & cell_flags::UNDERLINE;
+        assert_ne!(flags(2), 0);
+        assert_eq!(flags(3), 0);
+        // Confirmed by the host: the underline goes, the glyph stays.
+        let (_h, caught_up) = host(3, 20, b"$ ab");
+        feed(
+            &mut local,
+            &r.draw_with_overlay(&caught_up, &Overlay::default(), &[], (20, 3)),
+        );
+        let l = local.snapshot();
+        assert_eq!(l.grid[0].cells[2].flags & cell_flags::UNDERLINE, 0);
+        assert_same(&l, &caught_up);
+    }
+
+    #[test]
+    fn a_wide_prediction_fits_or_is_cut_at_the_window_edge() {
+        let (mut r, mut local, state) = drawn(2, 6, b"$ ");
+        // Fits in columns 4 and 5.
+        let o = overlay(wide(0, 4, "가", 0).to_vec(), Some((0, 5)));
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (6, 2)));
+        assert_eq!(text_of(&local.snapshot(), 0), "$   가");
+        // Starting in the last column the right half does not fit: blank.
+        let o = overlay(wide(0, 5, "가", 0).to_vec(), Some((0, 5)));
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (6, 2)));
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), "$");
+        assert!(l.grid[0].cells[5].text.trim().is_empty());
+    }
+
+    #[test]
+    fn a_narrow_prediction_over_half_a_wide_host_cell_blanks_the_other_half() {
+        let (_h, state) = host(2, 10, "가나".as_bytes());
+        let mut r = ScreenRenderer::new();
+        let mut local = term(2, 10);
+        feed(&mut local, &r.draw(&state, &[], (10, 2)));
+        let o = overlay(vec![ocell(0, 0, "x", 0)], None);
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (10, 2)));
+        assert_eq!(text_of(&local.snapshot(), 0), "x 나");
+        feed(
+            &mut local,
+            &r.draw_with_overlay(&state, &Overlay::default(), &[], (10, 2)),
+        );
+        assert_same(&local.snapshot(), &state);
+    }
+
+    #[test]
+    fn overlay_cells_outside_the_cropped_window_are_not_drawn() {
+        // Host is 6x20, window 3x10: the cursor row 5 keeps rows 3..6.
+        let (_h, state) = host(6, 20, b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        let mut r = ScreenRenderer::new();
+        let o = overlay(
+            vec![
+                ocell(0, 1, "x", 0),
+                ocell(5, 12, "y", 0),
+                ocell(5, 1, "z", 0),
+            ],
+            Some((5, 2)),
+        );
+        let mut local = term(3, 10);
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (10, 3)));
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 2), "fz");
+        assert_eq!(text_of(&l, 0), "d");
+        assert_eq!((l.cursor_row, l.cursor_col), (2, 2));
+    }
+
+    #[test]
+    fn history_is_emitted_first_and_the_overlay_is_composed_again_after_it() {
+        let (mut r, mut local, state) = drawn(3, 20, b"$ ");
+        let o = overlay(vec![ocell(0, 2, "a", cell_flags::UNDERLINE)], Some((0, 3)));
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (20, 3)));
+        local.take_history();
+        let hist = lines(2);
+        let h_bytes = r.history(&hist, 0, (20, 3));
+        let d_bytes = r.draw_with_overlay(&state, &o, &[], (20, 3));
+        // The repaint after history writes the predicted cell again.
+        assert!(d_bytes.contains(&b'a'));
+        feed(&mut local, &h_bytes);
+        feed(&mut local, &d_bytes);
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), "$ a");
+        assert_eq!((l.cursor_row, l.cursor_col), (0, 3));
+        let got: Vec<String> = local
+            .take_history()
+            .lines
+            .iter()
+            .map(|l| plain(&strip_sgr(l)))
+            .collect();
+        assert_eq!(got, hist);
+    }
+
+    #[test]
+    fn the_overlay_is_dropped_when_the_host_switches_to_the_alternate_screen() {
+        let (mut r, mut local, state) = drawn(3, 20, b"$ ");
+        let o = overlay(vec![ocell(0, 2, "a", 0)], Some((0, 3)));
+        feed(&mut local, &r.draw_with_overlay(&state, &o, &[], (20, 3)));
+        let (_h, alt) = host(3, 20, b"\x1b[?1049h\x1b[2J\x1b[1;1Hvim");
+        // A stale overlay passed with the alternate screen is not drawn.
+        feed(&mut local, &r.draw_with_overlay(&alt, &o, &[], (20, 3)));
+        assert_same(&local.snapshot(), &alt);
+        assert_eq!(text_of(&local.snapshot(), 0), "vim");
+        // Back on the primary screen the host's own content is repainted.
+        feed(
+            &mut local,
+            &r.draw_with_overlay(&state, &Overlay::default(), &[], (20, 3)),
+        );
+        assert_same(&local.snapshot(), &state);
+    }
+
+    // ---- property: the local terminal ends up equal to the host ----
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Mode {
+        Echo,
+        Star,
+        Other,
+        Silent,
+        Secret,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Key {
+        Char(char),
+        Backspace,
+        Left,
+        Right,
+        Enter,
+    }
+
+    impl Key {
+        fn bytes(&self) -> Vec<u8> {
+            match self {
+                Key::Char(c) => c.to_string().into_bytes(),
+                Key::Backspace => vec![0x7f],
+                Key::Left => b"\x1b[D".to_vec(),
+                Key::Right => b"\x1b[C".to_vec(),
+                Key::Enter => vec![b'\r'],
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Key(Key),
+        /// The host applies this many pending keys, then reports the state
+        /// and the echo.
+        Deliver(usize),
+        /// The host applies keys and sends the state; the echo report comes
+        /// with a later delivery.
+        StateOnly(usize),
+        /// The application moves the cursor on its own.
+        HostMove(usize),
+        /// A full-screen application starts or exits.
+        Alt,
+    }
+
+    struct Host {
+        mode: Mode,
+        line: Vec<char>,
+        pos: usize,
+        above: Vec<String>,
+        alt: bool,
+    }
+
+    const ROWS: u16 = 4;
+    const COLS: u16 = 30;
+
+    fn width_of(chars: &[char]) -> u16 {
+        chars.iter().map(|c| c.width().unwrap_or(1) as u16).sum()
+    }
+
+    impl Host {
+        fn insert(&mut self, c: char) {
+            let c = match self.mode {
+                Mode::Star => '*',
+                Mode::Other => 'Q',
+                _ => c,
+            };
+            if width_of(&self.line) + c.width().unwrap_or(1) as u16 <= 20 {
+                self.line.insert(self.pos, c);
+                self.pos += 1;
+            }
+        }
+        fn apply(&mut self, k: &Key) {
+            if matches!(self.mode, Mode::Silent | Mode::Secret) || self.alt {
+                return;
+            }
+            match k {
+                Key::Char(c) => self.insert(*c),
+                Key::Backspace => {
+                    if self.pos > 0 {
+                        self.pos -= 1;
+                        self.line.remove(self.pos);
+                    }
+                }
+                Key::Left => self.pos = self.pos.saturating_sub(1),
+                Key::Right => self.pos = (self.pos + 1).min(self.line.len()),
+                Key::Enter => {
+                    let text: String = self.line.iter().collect();
+                    self.above.push(format!("$ {text}"));
+                    // The screen scrolls: the oldest line leaves.
+                    if self.above.len() > usize::from(ROWS) - 1 {
+                        self.above.remove(0);
+                    }
+                    self.line.clear();
+                    self.pos = 0;
+                }
+            }
+        }
+        fn screen(&self) -> ScreenState {
+            let mut s = ScreenState::blank(ROWS, COLS).unwrap();
+            if self.alt {
+                s.modes.flags |= Modes::ALT_SCREEN;
+                put(&mut s, 0, "vim");
+                return s;
+            }
+            for (i, l) in self.above.iter().enumerate() {
+                put(&mut s, i as u16, l);
+            }
+            let row = self.above.len() as u16;
+            let text: String = self.line.iter().collect();
+            put(&mut s, row, &format!("$ {text}"));
+            s.cursor_row = row;
+            s.cursor_col = 2 + width_of(&self.line[..self.pos]);
+            s
+        }
+        fn tty(&self) -> TtyEcho {
+            match self.mode {
+                Mode::Echo | Mode::Star | Mode::Other => TtyEcho::App,
+                Mode::Silent => TtyEcho::Unknown,
+                Mode::Secret => TtyEcho::Secret,
+            }
+        }
+    }
+
+    fn put(s: &mut ScreenState, row: u16, text: &str) {
+        let mut c = 0usize;
+        for ch in text.chars() {
+            let w = ch.width().unwrap_or(1);
+            let cell = &mut s.grid[usize::from(row)].cells[c];
+            cell.text = ch.to_string().into();
+            if w == 2 {
+                cell.flags |= cell_flags::WIDE;
+                s.grid[usize::from(row)].cells[c + 1].flags |= cell_flags::WIDE_CONT;
+            }
+            c += w;
+        }
+    }
+
+    fn key_strategy() -> impl Strategy<Value = Key> {
+        prop_oneof![
+            6 => prop::sample::select(vec!['a', 'b', 'Z', ' ', '가', '나', 'é']).prop_map(Key::Char),
+            2 => Just(Key::Backspace),
+            2 => Just(Key::Left),
+            2 => Just(Key::Right),
+            1 => Just(Key::Enter),
+        ]
+    }
+
+    /// The cell at (row, col) as the renderer draws it.
+    fn shown(s: &ScreenState, row: u16, col: u16) -> Cell {
+        visible(s.grid[usize::from(row)].cells[usize::from(col)].clone())
+    }
+
+    /// Draw `state` with the predictor's overlay into the local model and
+    /// check what the local terminal shows against the two.
+    fn show(
+        p: &Predictor,
+        host: &Host,
+        renderer: &mut ScreenRenderer,
+        local: &mut HostScreen,
+    ) -> Result<(), TestCaseError> {
+        let state = host.screen();
+        let o = p.overlay();
+        prop_assert!(p.pending_len() <= MAX_PENDING);
+        let bytes = renderer.draw_with_overlay(&state, &o, &[], (COLS, ROWS));
+        feed(local, &bytes);
+        let l = local.snapshot();
+        // The overlay is the only difference from the host screen (a wide
+        // half it cuts is blanked, so the neighbours of its cells are
+        // exempt).
+        let touched = |r: u16, c: u16| {
+            o.cells
+                .iter()
+                .any(|oc| oc.row == r && oc.col.abs_diff(c) <= 1)
+        };
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                if let Some(oc) = o.cells.iter().find(|oc| oc.row == r && oc.col == c) {
+                    let want = visible(oc.cell.clone());
+                    let got = shown(&l, r, c);
+                    prop_assert_eq!(got.text, want.text, "overlay text ({}, {})", r, c);
+                    // A terminal keeps the pen on the left half of a wide
+                    // character only.
+                    if want.flags & cell_flags::WIDE_CONT == 0 {
+                        prop_assert_eq!(
+                            got.flags & cell_flags::UNDERLINE,
+                            want.flags & cell_flags::UNDERLINE,
+                            "overlay underline ({}, {})",
+                            r,
+                            c
+                        );
+                    }
+                } else if !touched(r, c) {
+                    prop_assert_eq!(
+                        shown(&l, r, c),
+                        shown(&state, r, c),
+                        "host cell ({}, {})",
+                        r,
+                        c
+                    );
+                }
+            }
+        }
+        let want_cursor = o.cursor.unwrap_or((state.cursor_row, state.cursor_col));
+        prop_assert_eq!((l.cursor_row, l.cursor_col), want_cursor);
+        prop_assert_eq!(l.modes, state.modes);
+        if matches!(host.mode, Mode::Silent | Mode::Secret) {
+            prop_assert!(o.is_empty());
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn local_terminal_matches_the_host_once_predictions_resolve(
+            mode in prop::sample::select(vec![
+                Mode::Echo, Mode::Star, Mode::Other, Mode::Silent, Mode::Secret,
+            ]),
+            ops in prop::collection::vec(
+                prop_oneof![
+                    6 => key_strategy().prop_map(Op::Key),
+                    3 => (0usize..4).prop_map(Op::Deliver),
+                    1 => (0usize..3).prop_map(Op::StateOnly),
+                    1 => (0usize..8).prop_map(Op::HostMove),
+                    1 => Just(Op::Alt),
+                ],
+                0..70,
+            ),
+        ) {
+            let mut host = Host { mode, line: Vec::new(), pos: 0, above: Vec::new(), alt: false };
+            let mut p = Predictor::new(true);
+            p.on_policy(Prediction::Underline);
+            let mut renderer = ScreenRenderer::new();
+            let mut local = term(ROWS, COLS);
+            let mut t = Instant::now();
+            let mut n = 1u64;
+            let (mut sent, mut done) = (0u64, 0u64);
+            let mut queue: VecDeque<(Key, u64)> = VecDeque::new();
+
+            p.on_state(&host.screen(), n, t);
+            show(&p, &host, &mut renderer, &mut local)?;
+
+            for op in ops {
+                t += Duration::from_millis(3);
+                match op {
+                    Op::Key(k) => {
+                        let b = k.bytes();
+                        sent += b.len() as u64;
+                        p.on_input(&b, sent, t);
+                        queue.push_back((k, sent));
+                    }
+                    Op::Deliver(c) | Op::StateOnly(c) => {
+                        for _ in 0..c {
+                            if let Some((k, end)) = queue.pop_front() {
+                                host.apply(&k);
+                                done = end;
+                            }
+                        }
+                        n += 1;
+                        p.on_state(&host.screen(), n, t);
+                        if matches!(op, Op::Deliver(_)) {
+                            p.on_echo(
+                                EchoReport { state_num: n, input_seq: done, tty: host.tty() },
+                                t,
+                            );
+                        }
+                    }
+                    Op::HostMove(m) => {
+                        if !host.alt && !matches!(host.mode, Mode::Silent | Mode::Secret) {
+                            host.pos = m % (host.line.len() + 1);
+                            n += 1;
+                            p.on_state(&host.screen(), n, t);
+                        }
+                    }
+                    Op::Alt => {
+                        host.alt = !host.alt;
+                        n += 1;
+                        p.on_state(&host.screen(), n, t);
+                    }
+                }
+                show(&p, &host, &mut renderer, &mut local)?;
+            }
+
+            // Everything still queued is applied and judged.
+            t += Duration::from_millis(3);
+            for (k, end) in queue.drain(..) {
+                host.apply(&k);
+                done = end;
+            }
+            n += 1;
+            p.on_state(&host.screen(), n, t);
+            p.on_echo(EchoReport { state_num: n, input_seq: done, tty: host.tty() }, t);
+            prop_assert_eq!(p.pending_len(), 0);
+            prop_assert!(p.overlay().is_empty());
+            show(&p, &host, &mut renderer, &mut local)?;
+            assert_same(&local.snapshot(), &host.screen());
+        }
+    }
+}
