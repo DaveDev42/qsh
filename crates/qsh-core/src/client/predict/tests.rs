@@ -457,6 +457,79 @@ fn a_cursor_hidden_for_one_state_does_not_block_prediction() {
     assert_eq!(r.p.stats().mispredicted, 0);
 }
 
+/// A loaded Windows host spreads PSReadLine's redraw over several states:
+/// the cursor is hidden with the old line, still hidden with the new line and
+/// the cursor moved, then shown. That is two hidden states in a row, but a
+/// few hundred milliseconds from first to last: still a shell, not an app
+/// that draws its own cursor (ADR-0053 decision 14). Measured on a
+/// CPU-starved Windows box, where every key cost this pattern and the
+/// stretch ran 60 to 450 ms.
+#[test]
+fn a_cursor_hidden_for_two_states_in_one_redraw_does_not_block_prediction() {
+    for gap_ms in [1, 50, 150, 300] {
+        let mut r = Rig::confirmed(Prediction::Display);
+        let mut typed = String::from("a");
+        for key in ["b", "c", "d"] {
+            r.key(key.as_bytes());
+            assert_eq!(r.p.overlay().cells.len(), 1, "{gap_ms} ms {key}: drawn");
+            let mut old = line(40, &typed);
+            old.modes.flags |= Modes::CURSOR_HIDDEN;
+            r.adv(gap_ms);
+            r.state(&old);
+            typed.push_str(key);
+            let mut new = line(40, &typed);
+            new.modes.flags |= Modes::CURSOR_HIDDEN;
+            r.adv(gap_ms);
+            r.state(&new);
+            assert!(
+                r.p.blocked().is_none(),
+                "{gap_ms} ms {key}: blocked by a redraw"
+            );
+            r.adv(gap_ms);
+            r.state(&line(40, &typed));
+            r.echo();
+            assert_eq!(r.p.pending_len(), 0, "{gap_ms} ms {key}: judged");
+        }
+        assert_eq!(r.p.stats().mispredicted, 0);
+        // The next key is still drawn at once.
+        r.key(b"e");
+        assert_eq!(r.p.overlay().cells.len(), 1, "{gap_ms} ms: next key drawn");
+    }
+}
+
+/// The host's report for a key can name a state taken in the middle of
+/// PSReadLine's redraw (cursor hidden, line not repainted yet) when the shell
+/// is slower than the report's grace. That state is no verdict: judging it
+/// would call a right prediction wrong. The verdict comes with the next state
+/// that shows the cursor.
+#[test]
+fn a_report_naming_a_mid_redraw_state_waits_for_a_state_with_the_cursor_shown() {
+    let mut mid = line(40, "a");
+    mid.modes.flags |= Modes::CURSOR_HIDDEN;
+
+    // The shell then paints the key: right, and not counted.
+    let mut r = Rig::confirmed(Prediction::Display);
+    r.key(b"b");
+    r.state(&mid);
+    r.echo();
+    assert_eq!(r.p.pending_len(), 1, "no verdict on a hidden-cursor state");
+    assert_eq!(r.p.stats().mispredicted, 0);
+    assert_eq!(r.p.overlay().cells.len(), 1, "still drawn");
+    r.state(&line(40, "ab"));
+    assert_eq!(r.p.pending_len(), 0);
+    assert_eq!(r.p.stats().mispredicted, 0);
+
+    // The shell then shows the cursor without the key: wrong, as before.
+    let mut r = Rig::confirmed(Prediction::Display);
+    r.key(b"b");
+    r.state(&mid);
+    r.echo();
+    assert_eq!(r.p.pending_len(), 1);
+    r.state(&line(40, "a"));
+    assert_eq!(r.p.pending_len(), 0);
+    assert_eq!(r.p.stats().mispredicted, 1);
+}
+
 /// ConPTY paints cells and moves the cursor in separate frames: a state can
 /// show the character just typed with the cursor still a column short. The
 /// predictions behind it stay (ADR-0053 decision 14, PSReadLine); a cursor
@@ -593,10 +666,11 @@ fn prediction_gates() {
             s.modes.flags |= Modes::ALT_SCREEN;
             r.state(&s);
         }),
-        ("hidden cursor in two states", |r| {
+        ("hidden cursor in two states, held", |r| {
             let mut s = line(40, "a");
             s.modes.flags |= Modes::CURSOR_HIDDEN;
             r.state(&s);
+            r.adv(HIDDEN_CURSOR_HOLD.as_millis() as u64);
             r.state(&s);
         }),
         ("mouse mode", |r| {

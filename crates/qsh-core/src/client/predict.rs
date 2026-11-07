@@ -51,8 +51,16 @@ pub const GLITCH_REPAIR: u32 = 10;
 /// Most predictions waiting for a verdict at once.
 pub const MAX_PENDING: usize = 256;
 /// Applied host states in a row with the cursor hidden after which the
-/// screen counts as a full-screen app (see [`Predictor::on_state`]).
+/// screen counts as a full-screen app, provided the cursor has also stayed
+/// hidden for [`HIDDEN_CURSOR_HOLD`] (see [`Predictor::on_state`]).
 pub const HIDDEN_CURSOR_STATES: u8 = 2;
+/// How long the cursor must have stayed hidden before
+/// [`HIDDEN_CURSOR_STATES`] hidden states count as an app. A shell
+/// that hides the cursor around a redraw gives a loaded host two or three
+/// hidden states in a row (cleared line, redrawn line, cursor moved), but
+/// shows it again within a few hundred milliseconds; an app that draws its
+/// own cursor keeps it hidden.
+pub const HIDDEN_CURSOR_HOLD: Duration = Duration::from_millis(1000);
 /// More characters than this in one read are a paste.
 pub const PASTE_CHARS: usize = 4;
 
@@ -222,6 +230,8 @@ pub struct Predictor {
     mode_blocked: bool,
     /// Applied states in a row that showed the cursor hidden.
     hidden_streak: u8,
+    /// When the current run of hidden-cursor states began.
+    hidden_since: Option<Instant>,
     applied_state: u64,
     snap: Snapshot,
 
@@ -272,6 +282,7 @@ impl Predictor {
             host_cursor: (0, 0),
             mode_blocked: false,
             hidden_streak: 0,
+            hidden_since: None,
             applied_state: 0,
             snap: Snapshot::default(),
             row: 0,
@@ -331,16 +342,22 @@ impl Predictor {
         let m: Modes = state.modes;
         // A hidden cursor is a full-screen app only when it stays hidden:
         // PSReadLine hides it around every redraw of the line and shows it
-        // again, so a state taken in between sees it hidden for one state.
-        // Two states in a row are an app that draws its own cursor.
-        self.hidden_streak = if m.flags & Modes::CURSOR_HIDDEN != 0 {
-            self.hidden_streak.saturating_add(1)
+        // again, so a state taken in between sees it hidden. On a loaded host
+        // the redraw spans two or three states (old line, new line, cursor
+        // moved), so a count alone cannot tell it from an app that draws its
+        // own cursor: that one keeps it hidden for a second or more.
+        if m.flags & Modes::CURSOR_HIDDEN != 0 {
+            self.hidden_streak = self.hidden_streak.saturating_add(1);
+            self.hidden_since.get_or_insert(now);
         } else {
-            0
-        };
-        self.mode_blocked = m.flags & Modes::ALT_SCREEN != 0
-            || m.mouse_mode != 0
-            || self.hidden_streak >= HIDDEN_CURSOR_STATES;
+            self.hidden_streak = 0;
+            self.hidden_since = None;
+        }
+        let hidden_long = self.hidden_streak >= HIDDEN_CURSOR_STATES
+            && self
+                .hidden_since
+                .is_some_and(|t| now.saturating_duration_since(t) >= HIDDEN_CURSOR_HOLD);
+        self.mode_blocked = m.flags & Modes::ALT_SCREEN != 0 || m.mouse_mode != 0 || hidden_long;
 
         let row_cells = |r: u16| -> Option<Vec<Cell>> {
             state.grid.get(usize::from(r)).map(|row| row.cells.clone())
@@ -704,7 +721,12 @@ impl Predictor {
                     Verdict::Match {
                         evidence: !blank && p.kind == Kind::Insert,
                     }
-                } else if covered {
+                } else if covered && self.hidden_streak == 0 {
+                    // A state taken while the cursor is hidden is a shell
+                    // in the middle of redrawing its line (PSReadLine on a
+                    // host slower than the report's grace): the key's
+                    // result may simply not be painted yet, so no verdict
+                    // until a state with the cursor shown.
                     Verdict::Wrong
                 } else {
                     Verdict::Pending
