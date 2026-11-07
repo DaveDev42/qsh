@@ -808,3 +808,51 @@ fn open_fd_count() -> usize {
         .map(|d| d.count())
         .expect("/dev/fd readable")
 }
+
+// --------------------------------------------------------------------------
+// tty echo state (ADR-0053 decision 3)
+// --------------------------------------------------------------------------
+
+/// The PTY master's `ECHO` and `ICANON` flags map to `KERNEL` (default),
+/// `SECRET` (`stty -echo`, still canonical) and `APP` (`stty -echo -icanon`),
+/// read from outside the session with `tcgetattr` on the master. The shell
+/// changes the mode, then prints a marker, so a marker seen means the mode is
+/// already in force.
+#[tokio::test]
+async fn tty_echo_reads_echo_and_icanon_from_the_pty() {
+    use qsh_proto::wire::TtyEcho;
+
+    let (broker, clock) = broker(1 << 20);
+    let handle = broker
+        .open(&sh(
+            "echo R0; read a; stty -echo; echo R1; read a; stty -echo -icanon; echo R2; read a; echo END",
+        ))
+        .unwrap();
+    within(handle.take_lease("tester", CONN, false))
+        .await
+        .unwrap();
+    pull_until(&handle, &clock, 4096, |all| text(all).contains("R0")).await;
+    assert_eq!(handle.tty_echo(), TtyEcho::Kernel);
+    within(handle.write(CONN, b"go\n".to_vec())).await.unwrap();
+    pull_until(&handle, &clock, 4096, |all| text(all).contains("R1")).await;
+    assert_eq!(handle.tty_echo(), TtyEcho::Secret);
+    within(handle.write(CONN, b"go\n".to_vec())).await.unwrap();
+    pull_until(&handle, &clock, 4096, |all| text(all).contains("R2")).await;
+    assert_eq!(handle.tty_echo(), TtyEcho::App);
+    within(handle.write(CONN, b"\n".to_vec())).await.unwrap();
+    pull_until_exit(&handle, &clock).await;
+    within(broker.close(&handle_id(&handle), CloseReason::Closed, None))
+        .await
+        .unwrap();
+}
+
+/// The decision table behind the read.
+#[test]
+fn tty_classification_table() {
+    use super::posix::classify_tty;
+    use qsh_proto::wire::TtyEcho;
+    assert_eq!(classify_tty(true, true), TtyEcho::Kernel);
+    assert_eq!(classify_tty(true, false), TtyEcho::Kernel);
+    assert_eq!(classify_tty(false, false), TtyEcho::App);
+    assert_eq!(classify_tty(false, true), TtyEcho::Secret);
+}

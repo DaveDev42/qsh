@@ -42,6 +42,7 @@ mod reverse_tunnel;
 mod reverse_unreachable_hook;
 mod role_authorization;
 mod role_resolution_cost;
+mod screen_echo;
 mod screen_sync;
 mod serve_restart_reset;
 mod session_loopback;

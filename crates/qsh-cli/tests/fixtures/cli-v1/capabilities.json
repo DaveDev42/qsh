@@ -9,7 +9,8 @@
       "file.v1",
       "shell-command.v1",
       "screen.v1",
-      "datagram.v1"
+      "datagram.v1",
+      "screen-echo.v1"
     ]
   },
   "ok": true,

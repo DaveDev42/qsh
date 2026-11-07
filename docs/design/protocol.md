@@ -48,6 +48,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `file.v1`(ADR-0029)은 파일 op와 `FILE_DATA` 데이터 평면을 host가 처리한다는 뜻이고, **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 다섯째 항목, 상수 `CAP_FILE_V1`). Windows host도 네 op와 `FILE_DATA`를 처리하므로(ADR-0029 결정 23, ADR-0035 결정 26) 광고 집합은 빌드마다 갈리지 않는다. client는 협상된 교집합에 `file.v1`이 있을 때만 파일 op를 보낸다. `capabilities.json` golden은 모든 빌드에 같은 값이고, Windows 빌드의 대조 테스트(`windows_build_advertises_file_v1`)는 이 항목이 광고되는지만 확인한다.
 - `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
 - `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`·`screen_history`가 여기 딸린 항목이고 세부는 §18.8과 §18.11이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
+- `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
 
 ## 5. Frame layer
 
@@ -324,6 +325,7 @@ message SessionFrame {
     ScreenUpdate screen_update = 7; // { uint64 new_num; uint32 part; uint32 parts; bytes data; }  screen.v1, §18.8
     ScreenAck    screen_ack = 8;    // { uint64 state_num; }  0 = 전체 화면 요청, screen.v1, §18.8
     ScreenHistory screen_history = 9; // { repeated bytes lines; uint64 skipped; }  host→client, 스트림 전용, screen.v1, §18.11
+    ScreenEcho screen_echo = 10; // { uint64 state_num; uint64 input_seq; TtyEcho tty; }  host→client, screen-echo.v1, §18.12
   }
 }
 
@@ -899,7 +901,7 @@ host는 화면이나 효과가 바뀔 때만 다음 `state_num`(1부터)을 낸�
 
 ### 18.6 `DatagramFrame` 머리
 
-datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). payload는 종류에 따라 §18.8의 protobuf 메시지 하나다(10은 `ScreenUpdate` 조각, 11은 `ScreenAck`, 12는 `Input`). 조각 나눔(`part`/`parts`)은 `ScreenUpdate` 메시지가 가지고, datagram의 조각 규칙은 §18.9에 있다.
+datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, 13 `ScreenEcho`(ADR-0053 결정 3, §18.12), ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). payload는 종류에 따라 §18.8의 protobuf 메시지 하나다(10은 `ScreenUpdate` 조각, 11은 `ScreenAck`, 12는 `Input`, 13은 `ScreenEcho`). 조각 나눔(`part`/`parts`)은 `ScreenUpdate` 메시지가 가지고, datagram의 조각 규칙은 §18.9에 있다.
 
 ### 18.7 fuzz와 시험
 
@@ -969,3 +971,19 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 **client.** 이벤트 `AttachEvent::ScreenHistory`는 화면 경로에서만 오고 attach driver가 `ScreenSink::history`로 넘긴다. 렌더러(`ScreenRenderer::history`, §18.10)가 행을 로컬 터미널의 스크롤백에 넣고 마지막 상태를 다시 그린다. 행은 peer의 입력이므로 SGR(`CSI ... m`)과 글자만 남기고 다른 제어 문자·이스케이프 시퀀스는 버린다. `skipped`가 0이 아니면 `--- N lines skipped ---` 한 줄이 `lines` 뒤에 붙는다.
 
 **로그.** history는 PTY 내용이다. 로그, doctor, 감사 기록에 싣지 않는다. 감사 기록에 새 필드는 없다.
+
+### 18.12 입력 반영 지점: `ScreenEcho` (ADR-0053 결정 3)
+
+**프레임.** `message ScreenEcho { uint64 state_num = 1; uint64 input_seq = 2; TtyEcho tty = 3; }`, `enum TtyEcho { TTY_ECHO_UNKNOWN = 0; TTY_ECHO_KERNEL = 1; TTY_ECHO_APP = 2; TTY_ECHO_SECRET = 3; }`. 늘 스트림(`SessionFrame.screen_echo = 10`)으로 가고, datagram 운반체가 살아 있으면 `DatagramFrame` 종류 13으로도 먼저 한 번 간다. host에서 client로만 가고 capability는 `screen-echo.v1`이다. 모르는 `tty` 값은 `UNKNOWN`으로 읽어 decode를 실패시키지 않는다.
+
+**뜻.** host가 이 frame을 만든 시각 t에 이 attach가 보는 화면은 상태 `state_num`이었고, 이 attach 축의 누적 입력 offset `input_seq`(`Input.input_seq`와 같은 offset, §10-5) 앞의 바이트는 모두 `t - ECHO_GRACE` 전에 PTY에 쓰였다. `tty`는 t에 읽은 PTY의 에코 상태다. `ECHO_GRACE`는 상수이고 50 ms에서 시작한다(세 OS 확정은 ADR-0053 결정 16의 시험).
+
+**입력 시각 표.** host는 attach마다 PTY에 쓴 입력의 (끝 offset, 쓴 시각)을 64개까지 들고(`InputTimes`), 넘치면 가장 오래된 둘을 합친다(시각은 늦은 쪽, 그래서 주장은 늘 보수적이다). `input_seq`는 쓴 시각이 `ECHO_GRACE` 이상 지난 가장 큰 끝 offset이고 뒤로 가지 않는다. 시작값은 attach가 이어받은 입력 offset이다. 표에는 offset과 시각만 있고 바이트는 없다. 스트림 정본과 datagram 사본은 같은 축을 쓰므로 어느 쪽으로 적용됐든 같다.
+
+**보내는 때.** (a) `ScreenUpdate`를 보낼 때마다 같은 운반체로 그 뒤에 하나(그 갱신의 `new_num`), (b) 화면이 바뀌지 않았어도 `input_seq`나 `tty`가 앞으로 가면 하나(입력을 쓴 시각 + `ECHO_GRACE`에 타이머로 깨고 현재 화면 상태 번호를 쓴다). 직전과 같은 값은 보내지 않는다. 최종 화면 뒤 `Exit` 앞에도 (a)가 따른다.
+
+**tty 읽기.** Unix host는 PTY master에서 `tcgetattr`로 `ECHO`와 `ICANON`을 읽는다. `ECHO` 켜짐은 `KERNEL`, `ECHO`와 `ICANON` 꺼짐은 `APP`, `ECHO` 꺼짐과 `ICANON` 켜짐은 `SECRET`이다. Windows host(ConPTY)와 pipe 세션, 읽기 실패는 `UNKNOWN`이다. 플래그만 읽고 PTY 내용은 읽지 않는다.
+
+**client의 검사.** `input_seq`가 client가 보낸 offset보다 크면 거짓 신호로 보고 버리고 센다(`echo_rejected`, `Attached::echo_rejected`). 연결을 끊지 않는다. 두 운반체의 사본은 `(state_num, input_seq)`가 더 앞선 것만 넘기고 같은 점에서는 `tty`가 바뀐 것만 넘긴다. 협상되지 않은 attach에서 온 것은 버린다. 통과한 신호는 `AttachEvent::ScreenEcho`로 나온다.
+
+**시험.** `crates/qsh-testkit/tests/it/screen_echo.rs`(`screen_echo_is_sent_after_input_even_when_the_screen_does_not_change`, `screen_echo_follows_each_screen_update_on_the_same_carrier`, `a_client_without_screen_echo_gets_no_screen_echo_frames`, `a_host_without_screen_echo_gets_no_screen_echo_frames`), `crates/qsh-core/src/client/echo.rs`(`a_screen_echo_beyond_the_sent_input_is_rejected_and_counted`), `crates/qsh-core/src/input_times.rs`(표와 `ECHO_GRACE` 규칙, 주입한 시계), `crates/qsh-core/src/pty/tests.rs`(`tty_echo_reads_echo_and_icanon_from_the_pty`). fuzz는 `decode_session_frame`과 `decode_datagram_frame`이 덮는다.

@@ -49,6 +49,7 @@ use super::ring::{
 use super::signal::Signal;
 use crate::screen::{HistoryBatch, HostScreen, ScreenOptions};
 use qsh_proto::screen::ScreenUpdate;
+use qsh_proto::wire::TtyEcho;
 
 /// What to launch. For [`PipeSource`] this is metadata only; the PTY source
 /// (Step 4) consumes it fully.
@@ -103,7 +104,18 @@ pub trait SourceControl: Send {
     /// recorded for a pipe). Only ever called with a [`Signal`] from the
     /// documented set, and never on an `exited` session.
     fn signal(&mut self, signal: Signal) -> io::Result<()>;
+
+    /// A probe that reads the source's echo state from any thread (ADR-0053
+    /// decision 3). `None` when the source cannot tell (pipes, ConPTY); the
+    /// session then reports [`TtyEcho::Unknown`]. The probe must not keep
+    /// the PTY open after the session ends.
+    fn tty_probe(&self) -> Option<TtyProbe> {
+        None
+    }
 }
+
+/// Reads a PTY's echo state ([`SourceControl::tty_probe`]).
+pub type TtyProbe = Arc<dyn Fn() -> TtyEcho + Send + Sync>;
 
 /// The byte producer behind a session. In-process only in P0.
 pub trait SessionSource: Send + 'static {
@@ -255,6 +267,9 @@ pub struct SessionShared {
     /// [`crate::screen::FEED_SLICE`]-bounded feed by the output pump, or a
     /// short read by a screen consumer.
     screen: Option<Mutex<HostScreen>>,
+    /// Reads the PTY's echo state (ADR-0053 decision 3); `None` when the
+    /// source cannot tell.
+    tty_probe: Option<TtyProbe>,
     /// Bumped on every ring append so `pull(..., wait)` can sleep until
     /// there is something new.
     notify: Notify,
@@ -432,6 +447,22 @@ impl SessionHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .update_since(base_num)
+    }
+
+    /// The emulator's newest state number (cutting a state if the screen
+    /// moved); `None` without an emulator.
+    pub fn screen_state_num(&self) -> Option<u64> {
+        let screen = self.shared.screen.as_ref()?;
+        Some(screen.lock().unwrap_or_else(|e| e.into_inner()).cut().num)
+    }
+
+    /// The PTY's echo state right now (ADR-0053 decision 3): metadata about
+    /// the line discipline, never PTY content. `Unknown` when unreadable.
+    pub fn tty_echo(&self) -> TtyEcho {
+        self.shared
+            .tty_probe
+            .as_ref()
+            .map_or(TtyEcho::Unknown, |probe| probe())
     }
 
     /// Remember the colours the client reported for OSC 10/11 queries
@@ -928,6 +959,7 @@ impl SessionActor {
         config: SessionConfig,
     ) -> io::Result<(SessionHandle, SessionActor)> {
         let spawned = source.spawn(spec)?;
+        let tty_probe = spawned.control.tty_probe();
         let ring: Box<dyn ReplayStore> = Box::new(ReplayRing::new(config.replay_bytes));
         let ttl_base = clock.now();
         let shared = Arc::new(SessionShared {
@@ -943,6 +975,7 @@ impl SessionActor {
                     ..ScreenOptions::default()
                 }))
             }),
+            tty_probe,
             notify: Notify::new(),
             meta: Mutex::new(Meta {
                 state: SessionState::Running,
