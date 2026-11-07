@@ -34,6 +34,7 @@ mod load;
 mod paths;
 mod pin_grants;
 mod policy;
+mod punch;
 mod registry;
 mod resolving;
 mod roles;
@@ -113,6 +114,7 @@ pub(crate) use acl_restart_notice;
 /// constant rather than retyping the wording, so the surfaces can never
 /// drift apart.
 pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
+pub use punch::{PUNCH_OPS, PunchOp, check_punch};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
 };
@@ -176,13 +178,22 @@ pub enum Action {
     /// (`file.write`, `file.mkdir`; ADR-0029 decision 3). Same standing as
     /// [`Action::FileRead`].
     FileWrite,
+    /// Take part in a hole punch as the rendezvous or the target
+    /// (`host.punch`; ADR-0054 decision 6). Not an operation either: it is
+    /// the check R puts a `PunchRequest` sender through and B puts a
+    /// `PunchOffer` initiator through, **before** any signaling state or
+    /// server window exists (see [`punch::check_punch`]). Every role but
+    /// `none` grants it (ADR-0054 decision 6, amending ADR-0045 decision 2);
+    /// it grants only the path to the target, what the target then allows is
+    /// decided there by that peer's own role and rows.
+    HostPunch,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order — the full
     /// PRD §9 vocabulary (`crates/qsh-core/tests/it/acl_docs.rs` fails CI if
     /// this ever drifts from that list).
-    pub const ALL: [Action; 11] = [
+    pub const ALL: [Action; 12] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
@@ -194,6 +205,7 @@ impl Action {
         Action::ForwardSocks,
         Action::FileRead,
         Action::FileWrite,
+        Action::HostPunch,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -211,6 +223,7 @@ impl Action {
             Action::ForwardSocks => "forward.socks",
             Action::FileRead => "file.read",
             Action::FileWrite => "file.write",
+            Action::HostPunch => "host.punch",
         }
     }
 

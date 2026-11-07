@@ -232,7 +232,7 @@ fn reject_control_chars_allows_hangul_and_emoji_names() {
 fn the_pin_notice_lists_the_actions_a_role_grants() {
     let notice = pairing_pin_notice("phone", TrustRole::ReadOnly, false, true);
     let expected = format!(
-        "{PAIRING_PINNED_INVITE_ASSIGNED} \"phone\". {PAIRING_ROLE_LEAD} `read-only`, which grants: session.list, session.attach. {PAIRING_ACL_ROW_ABSENT} {PAIRING_CHECK_LEAD} qsh acl check --principal 'device:phone' --action session.open"
+        "{PAIRING_PINNED_INVITE_ASSIGNED} \"phone\". {PAIRING_ROLE_LEAD} `read-only`, which grants: session.list, session.attach, host.punch. {PAIRING_ACL_ROW_ABSENT} {PAIRING_CHECK_LEAD} qsh acl check --principal 'device:phone' --action session.open"
     );
     assert_eq!(notice, expected);
 }
@@ -264,7 +264,7 @@ fn the_pin_notice_says_an_existing_acl_row_adds_to_the_role() {
     assert!(!notice.contains(PAIRING_ACL_ROW_ABSENT), "{notice}");
     assert!(
         notice.contains(
-            "`exec`, which grants: exec.run, session.open, session.list, session.attach, session.control."
+            "`exec`, which grants: exec.run, session.open, session.list, session.attach, session.control, host.punch."
         ),
         "{notice}"
     );

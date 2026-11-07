@@ -218,7 +218,9 @@ ACL principal은 certificate fingerprint 또는 CA가 발급한 user/device iden
 - `exec.run`
 - `forward.local`, `forward.remote`, `forward.socks`
 - `file.read`, `file.write`
-- `host.reverse`
+- `host.reverse`, `host.punch`
+
+`host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
 
 ACL action은 인가 어휘로 operation 이름과 별개 차원이며, 하나의 action이 여러 operation을 커버할 수 있다(`session.control`은 write/resize/close를 커버). Operation과 action의 매핑은 CLI.md §2.5에서 정의한다.
 
@@ -245,11 +247,11 @@ ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 �
 
 | role | 주는 action | 소유 축 |
 |---|---|---|
-| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse` | any |
-| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control` | any |
-| `tunnel` | `forward.local`, `forward.remote` | owned |
-| `read-only` | `session.list`, `session.attach` | any |
-| `reverse` | `host.reverse` | 해당 없음 |
+| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse`, `host.punch` | any |
+| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `host.punch` | any |
+| `tunnel` | `forward.local`, `forward.remote`, `host.punch` | owned |
+| `read-only` | `session.list`, `session.attach`, `host.punch` | any |
+| `reverse` | `host.reverse`, `host.punch` | 해당 없음 |
 | `none` | 없음 | 해당 없음 |
 
 role 하나로 장비를 들이는 예는 다음과 같다. 세밀한 제어가 필요할 때만 ACL 정책 파일을 쓴다.

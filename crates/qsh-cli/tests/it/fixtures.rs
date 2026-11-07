@@ -192,6 +192,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.check.allow_by_role.json",
     "acl.check.missing_policy_role.json",
     "acl.show.with_role.json",
+    "acl.show.with_role_punch.json",
+    "acl.show.host_punch.json",
     // The golden test that exercises these two is `cfg(unix)` (path shaping
     // and the `paths` notation are host-specific), so on other targets this
     // list only proves the files exist.
@@ -212,6 +214,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.client_complete_without_acl.json",
     "setup.run.listener_pending_acl.json",
     "setup.run.host_complete_with_role.json",
+    "setup.run.host_complete_with_role_punch.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
     // `qsh cp` (`docs/CLI.md` §6.21, ADR-0029 decision 18·21). The golden test
     // is `cfg(unix)`: the fixtures hold unix path spelling, a unix host's mode
@@ -309,6 +312,48 @@ fn check_without_roles(name: &str, envelope: Value) {
         pretty(&actual),
         pretty(&expected),
         "fixture {name} no longer matches the binary's output (role keys ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
+    );
+}
+
+/// Drop `host.punch` (ADR-0054 decision 6) from every action list, at any
+/// depth: an array entry (`effective_actions`, `role_actions`) or the
+/// `, host.punch` token inside a grants sentence (`setup.run`'s `acl` step
+/// detail). Every role but `none` now grants it, so the role-bearing
+/// fixtures recorded before ADR-0054 (`acl.show.with_role.json`,
+/// `setup.run.host_complete_with_role.json`) stay byte-for-byte untouched
+/// (decision 21: existing fixtures are not edited) and are compared with the
+/// action removed from both sides. The post-ADR-0054 shapes have their own
+/// fixtures (`acl.show.with_role_punch.json`,
+/// `setup.run.host_complete_with_role_punch.json`) that compare in full.
+fn strip_host_punch(value: &mut Value) {
+    match value {
+        Value::Object(map) => map.values_mut().for_each(strip_host_punch),
+        Value::Array(items) => {
+            items.retain(|item| item.as_str() != Some("host.punch"));
+            items.iter_mut().for_each(strip_host_punch);
+        }
+        Value::String(text) if text.contains(", host.punch") => {
+            *text = text.replace(", host.punch", "");
+        }
+        _ => {}
+    }
+}
+
+/// [`check`] for a fixture recorded before `host.punch` existed: never
+/// writes, and compares with [`strip_host_punch`] applied to both sides.
+fn check_without_host_punch(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_host_punch(&mut actual);
+    strip_host_punch(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (host.punch ignored).\n\
          Fixtures are append-only (docs/CLI.md §10)."
     );
 }
@@ -742,11 +787,31 @@ fn golden_acl_role_fixtures() {
             "session.attach",
             "session.control",
             "forward.local",
-            "forward.remote"
+            "forward.remote",
+            "host.punch"
         ]),
         "{shown}"
     );
-    check("acl.show.with_role.json", shown);
+    check_without_host_punch("acl.show.with_role.json", shown.clone());
+    check("acl.show.with_role_punch.json", shown);
+
+    // `host.punch` (ADR-0054 decision 6): a `none` pin gets it from a row
+    // alone, and `acl check` names the row as the basis.
+    let punch = Sandbox::new();
+    write_trust(&punch, "none");
+    std::fs::write(
+        punch.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"host.punch\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+    let (code, shown) = punch.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(
+        shown["data"]["effective_actions"],
+        serde_json::json!(["host.punch"]),
+        "{shown}"
+    );
+    check("acl.show.host_punch.json", shown);
 }
 
 /// `setup run` (`docs/CLI.md` §6.20, ADR-0024): three roles and the input
@@ -807,7 +872,8 @@ fn golden_setup_run_fixtures() {
             step["result"] = serde_json::json!({ "overall": "<overall>" });
         }
     }
-    check("setup.run.host_complete_with_role.json", role_run);
+    check_without_host_punch("setup.run.host_complete_with_role.json", role_run.clone());
+    check("setup.run.host_complete_with_role_punch.json", role_run);
 
     let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
     let cert_path = listener.home_dir().join("peer.pem");

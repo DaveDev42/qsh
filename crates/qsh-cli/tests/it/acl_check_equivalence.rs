@@ -804,7 +804,7 @@ fn effective(data: &Value) -> Vec<String> {
 
 /// Three-way discipline (ADR-0025 decision 3): for every shared table row,
 /// principal and auth path, membership in `acl show`'s effective set equals
-/// `acl check`'s verdict for each of the 11 actions on an unowned resource.
+/// `acl check`'s verdict for each of the 12 actions on an unowned resource.
 #[test]
 fn acl_show_effective_set_agrees_with_acl_check_for_every_action_in_every_table_row() {
     for row in POLICY_TABLE {
@@ -1256,6 +1256,7 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "host.reverse",
             "file.read",
             "file.write",
+            "host.punch",
         ],
         "exec" => &[
             "exec.run",
@@ -1263,10 +1264,11 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "session.list",
             "session.attach",
             "session.control",
+            "host.punch",
         ],
-        "tunnel" => &["forward.local", "forward.remote"],
-        "read-only" => &["session.list", "session.attach"],
-        "reverse" => &["host.reverse"],
+        "tunnel" => &["forward.local", "forward.remote", "host.punch"],
+        "read-only" => &["session.list", "session.attach", "host.punch"],
+        "reverse" => &["host.reverse", "host.punch"],
         "none" | "legacy" => &[],
         other => panic!("unknown role row {other}"),
     };
@@ -1382,7 +1384,7 @@ fn role_row_agrees(role: &str) {
             }
         }
 
-        // `acl show` against `acl check` for all eleven actions, and against
+        // `acl show` against `acl check` for all twelve actions, and against
         // the role table.
         let shown = acl_show(&host, CLIENT_PRINCIPAL, Some("pin"));
         assert_eq!(shown["role"], expected_role, "{label}: {shown}");
@@ -1606,4 +1608,103 @@ fn human_output_names_the_role_and_the_role_versus_row_asymmetry() {
         .position(|line| *line == ACL_RESTART_NOTICE)
         .unwrap_or_else(|| panic!("no restart notice line: {stdout}"));
     assert!(role_note < row_note, "{stdout}");
+}
+
+/// `host.punch` through the CLI (ADR-0054 decision 6): a `none` pin has no
+/// grant, `trust allow` gives it, `trust deny` takes it back; a role's grant
+/// is not a pin grant, so `trust deny` leaves it alone; a broken `acl.toml`
+/// refuses it for a role too.
+#[test]
+fn trust_allow_and_deny_round_trip_host_punch() {
+    let host = Sandbox::new();
+    pin_with_role(&host, &Sandbox::new().fingerprint(), "none");
+
+    let before = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "host.punch",
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(before["decision"], "deny", "{before}");
+
+    let (code, allowed) = host.json(&["trust", "allow", CLIENT_ALIAS, "host.punch", "--json"]);
+    assert_eq!(code, 0, "{allowed}");
+    assert_eq!(allowed["data"]["changed"], true, "{allowed}");
+    assert_eq!(
+        allowed["data"]["peer"]["grants"],
+        serde_json::json!(["host.punch"]),
+        "{allowed}"
+    );
+    let granted = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "host.punch",
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(granted["decision"], "allow", "{granted}");
+    assert_eq!(granted["granted_by"], "grant", "{granted}");
+    let shown = acl_show(&host, CLIENT_PRINCIPAL, None);
+    assert_eq!(effective(&shown), ["host.punch"], "{shown}");
+
+    let (code, denied) = host.json(&["trust", "deny", CLIENT_ALIAS, "host.punch", "--json"]);
+    assert_eq!(code, 0, "{denied}");
+    assert_eq!(denied["data"]["changed"], true, "{denied}");
+    let after = acl_check(
+        &host,
+        CLIENT_PRINCIPAL,
+        "host.punch",
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(after["decision"], "deny", "{after}");
+
+    // A role's host.punch is not a pin grant: `trust deny` has nothing to take.
+    let full = Sandbox::new();
+    pin_with_role(&full, &Sandbox::new().fingerprint(), "full");
+    let (code, denied) = full.json(&["trust", "deny", CLIENT_ALIAS, "host.punch", "--json"]);
+    assert_eq!(code, 0, "{denied}");
+    assert_eq!(denied["data"]["changed"], false, "{denied}");
+    let still = acl_check(
+        &full,
+        CLIENT_PRINCIPAL,
+        "host.punch",
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(still["decision"], "allow", "{still}");
+    assert_eq!(still["granted_by"], "role", "{still}");
+
+    // An acl.toml row alone grants it to a `none` pin, `host.*` included.
+    let row = Sandbox::new();
+    pin_with_role(&row, &Sandbox::new().fingerprint(), "none");
+    write_acl_toml(
+        &row,
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"host.*\"]\n",
+    );
+    let by_row = acl_check(&row, CLIENT_PRINCIPAL, "host.punch", None, None, None, None);
+    assert_eq!(by_row["decision"], "allow", "{by_row}");
+    assert_eq!(by_row["granted_by"], "acl", "{by_row}");
+
+    // An acl.toml that does not parse refuses the role's grant too.
+    write_acl_toml(&full, "not toml {{{");
+    let broken = acl_check(
+        &full,
+        CLIENT_PRINCIPAL,
+        "host.punch",
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(broken["decision"], "deny", "{broken}");
 }
