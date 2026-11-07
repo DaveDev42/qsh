@@ -51,7 +51,7 @@ pub(super) fn run(
     // must not cost the operator a session to find out.
     terminal.preflight()?;
     let size = terminal.window_size();
-    let screen = screen_attach(options, size, terminal.stdout_is_terminal())?;
+    let screen = screen_attach(options, size, terminal.stdout_is_terminal(), escape)?;
 
     // Authorization, session creation and the attach all happen here, in
     // `Ops`, before a single byte of terminal state is touched: a refused
@@ -336,6 +336,7 @@ fn screen_attach(
     options: InteractiveOptions,
     size: Option<(u16, u16)>,
     stdout_is_terminal: bool,
+    escape: Option<u8>,
 ) -> Result<Option<ScreenAttach>, OpError> {
     match (options.screen_sync, size) {
         (ScreenSync::Off, _) => Ok(None),
@@ -345,6 +346,8 @@ fn screen_attach(
             rows,
             predict: options.predict,
             status_line: options.status_line,
+            // The status line's guidance names the escape the user can use.
+            escape,
         })),
         (ScreenSync::On, _) => Err(OpError::new(
             ErrorCode::InvalidArgument,

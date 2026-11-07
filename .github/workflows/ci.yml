@@ -206,6 +206,12 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test it -E 'test(/^screen_sync::ctrl_c_reaches_a_flooding_session_within_budget$/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0053 결정 16 item 6: the connection status line behind a real chaos
+      # blackhole on the forward and the reverse route, and none on an idle
+      # attach. Same `QSH_ACCEPTANCE_SLOW` gate as the other wall-clock chaos tests.
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^status_line::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.

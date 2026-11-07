@@ -29,6 +29,7 @@ use crate::ops::OpError;
 
 pub(crate) mod file;
 pub mod link;
+pub mod linkstatus;
 pub mod pathwatch;
 pub mod predict;
 pub mod predict_drive;

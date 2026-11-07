@@ -39,7 +39,7 @@ struct Rig {
 impl Rig {
     fn new(mode: Predict, capable: bool) -> Self {
         let mut r = Self {
-            sink: ScreenSink::new(COLS, ROWS, PredictDriver::new(mode, capable, false)),
+            sink: ScreenSink::new(COLS, ROWS, PredictDriver::new(mode, capable, false), None),
             host: term(),
             local: term(),
             t: Instant::now(),
@@ -281,7 +281,12 @@ fn an_empty_overlay_leaves_the_bytes_of_a_plain_draw() {
 
 #[tokio::test]
 async fn the_sink_wakes_for_the_late_confirmation_deadline() {
-    let sink = ScreenSink::new(COLS, ROWS, PredictDriver::new(Predict::Always, true, false));
+    let sink = ScreenSink::new(
+        COLS,
+        ROWS,
+        PredictDriver::new(Predict::Always, true, false),
+        None,
+    );
     let mut host = term();
     host.feed(b"$ ", 0);
     let now = Instant::now();

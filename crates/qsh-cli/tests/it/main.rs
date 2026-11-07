@@ -49,6 +49,7 @@ mod socks_curl;
 mod ssh_bootstrap;
 mod ssh_form;
 mod ssh_revival;
+mod status_line;
 mod trust_alias_order;
 mod trust_lifecycle_live;
 mod trust_pairing_live;

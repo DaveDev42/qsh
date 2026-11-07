@@ -29,9 +29,9 @@ use qsh_testkit::shell::{ENTER, pty_shell, said, say};
 
 use super::attach_recovery::{ProxiedFleet, with_deadline};
 
-const COLS: u16 = 80;
-const ROWS: u16 = 24;
-const PROMPT: &str = "PRM>";
+pub(super) const COLS: u16 = 80;
+pub(super) const ROWS: u16 = 24;
+pub(super) const PROMPT: &str = "PRM>";
 
 fn ops_for(sandbox: &Sandbox) -> Ops {
     Ops::new(Paths::new(sandbox.config_dir(), sandbox.state_dir()))
@@ -44,12 +44,13 @@ fn screen_attach(mode: ScreenSync) -> Option<ScreenAttach> {
         rows: ROWS,
         predict: Default::default(),
         status_line: Default::default(),
+        escape: None,
     })
 }
 
 /// A shell whose prompt is exactly `PRM> `, so a prompt on the screen is a
 /// row that reads `PRM>` and nothing else.
-fn open_req() -> SessionOpenReq {
+pub(super) fn open_req() -> SessionOpenReq {
     SessionOpenReq {
         host: HOST_ALIAS.to_string(),
         argv: pty_shell(),
@@ -76,13 +77,13 @@ fn open_req() -> SessionOpenReq {
 }
 
 /// The local terminal: whatever the attach writes to it lands here.
-struct LocalTerminal {
-    screen: HostScreen,
+pub(super) struct LocalTerminal {
+    pub(super) screen: HostScreen,
     bytes: u64,
 }
 
 impl LocalTerminal {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             screen: HostScreen::new(ScreenOptions {
                 rows: ROWS,
@@ -94,7 +95,7 @@ impl LocalTerminal {
     }
 
     /// Write one event to the terminal; `Some` when the session ended.
-    fn feed(&mut self, event: SessionEvent) -> Option<SessionEvent> {
+    pub(super) fn feed(&mut self, event: SessionEvent) -> Option<SessionEvent> {
         match event {
             SessionEvent::Output { data_b64, .. } => {
                 let data = base64::engine::general_purpose::STANDARD
@@ -109,7 +110,7 @@ impl LocalTerminal {
         }
     }
 
-    fn rows(&self) -> Vec<String> {
+    pub(super) fn rows(&self) -> Vec<String> {
         let state = self.screen.snapshot();
         state
             .grid
@@ -125,18 +126,18 @@ impl LocalTerminal {
             .collect()
     }
 
-    fn shows(&self, needle: &str) -> bool {
+    pub(super) fn shows(&self, needle: &str) -> bool {
         self.rows().iter().any(|row| row.contains(needle))
     }
 
     /// A row that is only the prompt.
-    fn shows_bare_prompt(&self) -> bool {
+    pub(super) fn shows_bare_prompt(&self) -> bool {
         self.rows().iter().any(|row| row == PROMPT)
     }
 }
 
 /// Feed events until `done` holds for the terminal, or the stream ends.
-fn pump_until(
+pub(super) fn pump_until(
     stream: &mut SessionAttachStream,
     term: &mut LocalTerminal,
     what: &str,
@@ -480,6 +481,7 @@ fn second_key_latency(predict: Predict) -> Duration {
             rows: ROWS,
             predict,
             status_line: Default::default(),
+            escape: None,
         });
         let opened = ops
             .session_open_interactive(open_req(), false, screen)

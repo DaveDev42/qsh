@@ -249,6 +249,12 @@ impl ProxiedFleet {
         self.proxy.detail()
     }
 
+    /// Swallow every datagram, both ways, for `dur` starting now. Returns
+    /// at once; the path comes back by itself.
+    pub(super) fn blackhole(&self, dur: Duration) {
+        self.runtime.block_on(self.proxy.blackhole(dur));
+    }
+
     pub(super) fn ops(&self, recovery: RecoveryConfig) -> Ops {
         Ops::new(Paths::new(
             self.client.config_dir().to_path_buf(),

@@ -96,6 +96,9 @@ pub(super) async fn pump_attach_input(
                 // now, ahead of the host (ADR-0053 decision 2). The offset
                 // after these bytes is what the host's `ScreenEcho` will be
                 // compared with.
+                // Typed input is a send the host should answer: the status
+                // line's wait starts here (ADR-0053 decision 9).
+                ctx.link_status.sent(std::time::Instant::now());
                 if let Some(sink) = &ctx.screen {
                     let end = writer.input_seq() + data.len() as u64;
                     let (bytes, sequence) = sink.input(&data, end, std::time::Instant::now());
@@ -174,18 +177,21 @@ async fn await_applied(applied: &tokio::sync::watch::Sender<u64>, target: u64) -
 /// ever cancelled.
 pub(super) async fn pump_attach_control(
     mut session: Session,
-    session_id: String,
-    session_ref: String,
+    ctx: Arc<AttachContext>,
     events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
     watch: PathWatch,
     probes: Arc<tokio::sync::Notify>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let (session_id, session_ref) = (&ctx.session_id, &ctx.session_ref);
+    let (screen, link) = (&ctx.screen, &ctx.link_status);
     loop {
         tokio::select! {
             biased;
             _ = &mut stop => return,
             () = probes.notified() => {
+                // A liveness probe is a send the host should answer.
+                link.sent(std::time::Instant::now());
                 if session.send_ping().await.is_err() {
                     return;
                 }
@@ -240,10 +246,28 @@ pub(super) async fn pump_attach_control(
                         // *this* session's `session_ref` and emitted as a
                         // fabricated `qsh.event/v1` line (adversarial
                         // review finding).
-                        if event.session_id != session_id {
+                        if event.session_id != *session_id {
                             continue;
                         }
-                        if let Some(json) = control_event_json(&session_ref, event) {
+                        // The lease moved: a read-only attach predicts
+                        // nothing (ADR-0053 decision 7).
+                        if let (Some(sink), Some(wire::session_event::Body::WriterChanged(w))) =
+                            (screen, &event.body)
+                        {
+                            let (bytes, sequence) =
+                                sink.writer_changed(w.new_writer.as_deref(), std::time::Instant::now());
+                            if !bytes.is_empty() {
+                                let _stalled = watch.stalled();
+                                if events
+                                    .send(Ok(screen_output(session_ref, sequence, &bytes)))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        if let Some(json) = control_event_json(session_ref, event) {
                             let _stalled = watch.stalled();
                             if events.send(Ok(json)).await.is_err() {
                                 return;

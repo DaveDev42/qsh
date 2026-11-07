@@ -12,13 +12,14 @@
 //! know which path produced them, except that the replay filter of the byte
 //! path has nothing to do (the renderer writes no queries).
 
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use qsh_proto::screen::{Effect, ScreenState};
 use qsh_proto::wire;
 
 use crate::adapt::{PredictPin, Prediction};
+use crate::client::linkstatus::{LinkLine, LinkTracker};
 use crate::client::predict_drive::PredictDriver;
 use crate::client::render::ScreenRenderer;
 
@@ -130,11 +131,9 @@ impl StatusLine {
 pub struct InteractiveOptions {
     /// `--screen-sync`.
     pub screen_sync: ScreenSync,
-    /// `--predict`. Consumed by the attach driver step; nothing acts on it
-    /// yet.
+    /// `--predict`.
     pub predict: Predict,
-    /// `--status-line`. Consumed by the status-line step; nothing acts on it
-    /// yet.
+    /// `--status-line`.
     pub status_line: StatusLine,
 }
 
@@ -148,10 +147,13 @@ pub struct ScreenAttach {
     pub cols: u16,
     /// Local window height.
     pub rows: u16,
-    /// The resolved `--predict` (hook for the attach driver step).
+    /// The resolved `--predict`.
     pub predict: Predict,
-    /// The resolved `--status-line` (hook for the status-line step).
+    /// The resolved `--status-line`.
     pub status_line: StatusLine,
+    /// The escape character the status line's guidance names
+    /// (`--escape-char`); `None` when escapes are off.
+    pub escape: Option<u8>,
 }
 
 impl ScreenAttach {
@@ -182,12 +184,73 @@ pub(crate) fn screen_sync_unsupported(why: &str) -> crate::ops::OpError {
     .with_details(serde_json::json!({ "reason": "screen_sync_unsupported" }))
 }
 
+/// The connection status line's inputs (ADR-0053 decisions 9 and 10).
+pub(super) struct StatusInit {
+    /// The attach's link record.
+    pub(super) link: Arc<LinkTracker>,
+    /// The escape character the guidance names.
+    pub(super) escape: Option<u8>,
+}
+
 /// Drawing state of one screen-sync attach.
 pub(super) struct ScreenSink {
     inner: Mutex<Inner>,
     /// Rung when something outside the reader (the policy monitor) changed
     /// what the next frame should look like.
     wake: tokio::sync::Notify,
+    /// Rung when the link changed in a way that can alter the status line.
+    /// `None` when the line is off.
+    link: Option<Arc<LinkTracker>>,
+}
+
+/// The status line and what it reads.
+struct Status {
+    line: LinkLine,
+    link: Arc<LinkTracker>,
+    /// The forward route's smoothed round trip, from the policy monitor.
+    /// The reverse route has none and falls back to the `Input` to
+    /// `InputAck` estimate the predictor keeps.
+    srtt: Option<Duration>,
+}
+
+/// Whether this attach holds the writer lease, followed through the
+/// `writer_changed` events of its control stream. The events name a
+/// principal, not a connection, and the client does not know the name the
+/// host gave it, so it is learned: an attach that holds the lease (the host
+/// always grants it at attach) is announced by the first event, which names
+/// it. From then on the lease is ours exactly when an event names that
+/// principal. A second attach under the same principal cannot be told
+/// apart from this one, and a first event that is a steal rather than our
+/// own announcement is mistaken for it; the effect is a prediction drawn
+/// that the host's echo check then withdraws, or one withheld, never a
+/// wrong screen.
+#[derive(Default)]
+pub(super) struct WriterTrack {
+    held: bool,
+    me: Option<String>,
+}
+
+impl WriterTrack {
+    /// A (new) leg was attached with `held` as its lease answer.
+    pub(super) fn attached(&mut self, held: bool) {
+        self.held = held;
+    }
+
+    /// A `writer_changed` event: the new holder, `None` when released.
+    pub(super) fn changed(&mut self, new: Option<&str>) -> bool {
+        match new {
+            None => self.held = false,
+            Some(p) => {
+                if self.me.is_none() && self.held {
+                    self.me = Some(p.to_owned());
+                }
+                if let Some(me) = &self.me {
+                    self.held = p == me;
+                }
+            }
+        }
+        self.held
+    }
 }
 
 struct Inner {
@@ -200,37 +263,86 @@ struct Inner {
     seq: u64,
     /// Local echo prediction; `None` for `--predict=never`.
     predict: Option<PredictDriver>,
+    /// The connection status line; `None` for `--status-line=off`.
+    status: Option<Status>,
+    writer: WriterTrack,
 }
 
 impl Inner {
-    /// Draw `state` with the predictor's overlay composed over it.
-    fn paint(&mut self, state: &ScreenState, effects: &[Effect]) -> Vec<u8> {
+    /// The round trip the status line's threshold scales with.
+    fn srtt(&self) -> Option<Duration> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.srtt)
+            .or_else(|| self.predict.as_ref().and_then(PredictDriver::input_srtt))
+    }
+
+    /// Re-evaluate the status line at `now` and tell the predictor when it
+    /// came up or went (while it shows, every prediction is underlined).
+    fn refresh_status(&mut self, now: Instant) {
+        let srtt = self.srtt();
         let Self {
-            renderer,
-            local,
-            predict,
-            ..
+            status, predict, ..
         } = self;
-        match predict {
-            Some(p) => renderer.draw_with_overlay(state, &p.overlay(), effects, *local),
-            None => renderer.draw(state, effects, *local),
+        let Some(st) = status else {
+            return;
+        };
+        let was = st.line.visible();
+        let visible = st.line.update(&st.link.snapshot(), srtt, now);
+        if was != visible
+            && let Some(p) = predict
+        {
+            p.on_status_line(visible);
         }
     }
 
-    /// Draw the last state again with whatever the overlay is now: only the
-    /// cells that differ from what the terminal shows are written.
-    fn repaint(&mut self) -> (Vec<u8>, u64) {
+    /// Draw `state` with the predictor's overlay and the status line
+    /// composed over it.
+    fn paint(&mut self, state: &ScreenState, effects: &[Effect], now: Instant) -> Vec<u8> {
+        self.refresh_status(now);
+        let overlay = self.predict.as_ref().map(PredictDriver::overlay);
+        let status = self.status.as_ref().and_then(|s| s.line.text());
+        self.renderer
+            .draw_composed(state, overlay.as_ref(), status, effects, self.local)
+    }
+
+    /// Draw the last state again with whatever the overlay and the line are
+    /// now: only the cells that differ from what the terminal shows are
+    /// written.
+    fn repaint(&mut self, now: Instant) -> (Vec<u8>, u64) {
+        if self.predict.is_none() && self.status.is_none() {
+            return (Vec::new(), self.seq);
+        }
         let Some(state) = self.last.take() else {
             return (Vec::new(), self.seq);
         };
-        let bytes = self.paint(&state, &[]);
+        let bytes = self.paint(&state, &[], now);
         self.last = Some(state);
         (bytes, self.seq)
+    }
+
+    /// When [`ScreenSink::tick`] next has something to draw.
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        let predict = self.predict.as_ref().and_then(PredictDriver::next_deadline);
+        let status = self
+            .status
+            .as_ref()
+            .and_then(|st| st.line.next_deadline(&st.link.snapshot(), self.srtt(), now));
+        match (predict, status) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 }
 
 impl ScreenSink {
-    pub(super) fn new(cols: u16, rows: u16, predict: Option<PredictDriver>) -> Self {
+    pub(super) fn new(
+        cols: u16,
+        rows: u16,
+        predict: Option<PredictDriver>,
+        status: Option<StatusInit>,
+    ) -> Self {
+        let link = status.as_ref().map(|s| s.link.clone());
         Self {
             inner: Mutex::new(Inner {
                 renderer: ScreenRenderer::new(),
@@ -238,8 +350,15 @@ impl ScreenSink {
                 last: None,
                 seq: 0,
                 predict,
+                status: status.map(|s| Status {
+                    line: LinkLine::new(s.escape),
+                    link: s.link,
+                    srtt: None,
+                }),
+                writer: WriterTrack::default(),
             }),
             wake: tokio::sync::Notify::new(),
+            link,
         }
     }
 
@@ -259,6 +378,7 @@ impl ScreenSink {
             rows,
             predict: Predict::Never,
             status_line: StatusLine::Off,
+            escape: None,
         }
         .request()
     }
@@ -277,7 +397,7 @@ impl ScreenSink {
         if let Some(p) = &mut inner.predict {
             p.on_state(state, state_num, now);
         }
-        let bytes = inner.paint(state, effects);
+        let bytes = inner.paint(state, effects, now);
         inner.last = Some(state.clone());
         inner.seq = inner.seq.max(output_seq);
         (bytes, inner.seq)
@@ -292,7 +412,14 @@ impl ScreenSink {
         let local = inner.local;
         let mut bytes = inner.renderer.history(lines, skipped, local);
         if !bytes.is_empty() {
-            bytes.extend(inner.repaint().0);
+            // `repaint` skips an attach with neither predictor nor line, but
+            // the scrollback write cleared the renderer's picture, so the
+            // screen must be drawn again either way.
+            let Some(state) = inner.last.take() else {
+                return (bytes, inner.seq);
+            };
+            bytes.extend(inner.paint(&state, &[], Instant::now()));
+            inner.last = Some(state);
         }
         (bytes, inner.seq)
     }
@@ -307,29 +434,59 @@ impl ScreenSink {
         inner.local = local;
         // The terminal reflows or clears on a resize; trust nothing drawn.
         inner.renderer.invalidate();
-        inner.repaint()
+        let Some(state) = inner.last.take() else {
+            return (Vec::new(), inner.seq);
+        };
+        let bytes = inner.paint(&state, &[], Instant::now());
+        inner.last = Some(state);
+        (bytes, inner.seq)
     }
 
-    /// A new connection took over: the first update on it is a full screen,
-    /// and diagnostics may have been written meanwhile, so repaint it all.
-    pub(super) fn new_leg(&self) {
+    /// A new connection took over (`writer` is its lease answer): the first
+    /// update on it is a full screen, and diagnostics may have been written
+    /// meanwhile, so repaint it all.
+    pub(super) fn new_leg(&self, writer: bool) {
         let mut inner = self.lock();
         inner.renderer.invalidate();
+        inner.writer.attached(writer);
         if let Some(p) = &mut inner.predict {
             p.on_leg_change();
+            p.on_writer(writer);
         }
     }
 
-    /// Whether this attach holds the writer lease.
+    /// Whether this attach holds the writer lease at the start.
     pub(super) fn set_writer(&self, writer: bool) {
-        if let Some(p) = &mut self.lock().predict {
+        let mut inner = self.lock();
+        inner.writer.attached(writer);
+        if let Some(p) = &mut inner.predict {
             p.on_writer(writer);
         }
+    }
+
+    /// A `writer_changed` event: the lease moved to `new_writer` (`None`:
+    /// released). Predictions are blocked while this attach is read-only.
+    pub(super) fn writer_changed(&self, new_writer: Option<&str>, now: Instant) -> (Vec<u8>, u64) {
+        let mut inner = self.lock();
+        let held = inner.writer.changed(new_writer);
+        if let Some(p) = &mut inner.predict {
+            p.on_writer(held);
+        }
+        inner.repaint(now)
     }
 
     /// Bytes that restore the local terminal's modes.
     pub(super) fn reset(&self) -> Vec<u8> {
         self.lock().renderer.reset()
+    }
+
+    /// The status line's text while it shows (for the tests).
+    #[cfg(test)]
+    pub(super) fn status_text(&self) -> Option<String> {
+        self.lock()
+            .status
+            .as_ref()
+            .and_then(|s| s.line.text().map(str::to_owned))
     }
 
     // ---- local echo prediction (ADR-0053) ----
@@ -342,7 +499,7 @@ impl ScreenSink {
             return (Vec::new(), inner.seq);
         };
         p.on_input(data, end, now);
-        inner.repaint()
+        inner.repaint(now)
     }
 
     /// The host's input reflection point arrived; a verdict removes or keeps
@@ -353,7 +510,7 @@ impl ScreenSink {
             return (Vec::new(), inner.seq);
         };
         p.on_echo(echo, now);
-        inner.repaint()
+        inner.repaint(now)
     }
 
     /// The host applied input up to `acked`: a round-trip sample on the
@@ -364,7 +521,7 @@ impl ScreenSink {
             return (Vec::new(), inner.seq);
         };
         p.on_input_ack(acked, now);
-        inner.repaint()
+        inner.repaint(now)
     }
 
     /// The transport policy's prediction knob (forward route, called from
@@ -376,36 +533,57 @@ impl ScreenSink {
         }
     }
 
-    /// Advance the prediction clock and draw whatever changed (late
-    /// confirmation underlines, a new policy).
+    /// The forward route's smoothed round trip (the policy monitor's, once a
+    /// second): what the status line's `4 x srtt` threshold scales with.
+    pub(super) fn set_srtt(&self, srtt: Option<Duration>) {
+        if let Some(st) = &mut self.lock().status {
+            st.srtt = srtt;
+            self.wake.notify_one();
+        }
+    }
+
+    /// Advance the clock and draw whatever changed: late-confirmation
+    /// underlines, a new policy, the status line coming, going or counting.
     pub(super) fn tick(&self, now: Instant) -> (Vec<u8>, u64) {
         let mut inner = self.lock();
-        let Some(p) = &mut inner.predict else {
-            return (Vec::new(), inner.seq);
-        };
-        p.on_tick(now);
-        inner.repaint()
+        if let Some(p) = &mut inner.predict {
+            p.on_tick(now);
+        }
+        inner.repaint(now)
     }
 
     /// Completes when [`Self::tick`] has something to do: the instant a
-    /// waiting prediction turns late, or a policy change from outside.
-    /// Pends forever without a predictor.
+    /// waiting prediction turns late, the status line is due to appear or
+    /// count, or a change from outside. Pends forever with neither a
+    /// predictor nor a status line.
     pub(super) async fn tick_due(&self) {
         // Registered before the deadline is read, so a policy change in
         // between is not lost.
         let woken = self.wake.notified();
         tokio::pin!(woken);
         woken.as_mut().enable();
-        let deadline = self.lock().predict.as_ref().and_then(|p| p.next_deadline());
+        let link_changed = async {
+            match &self.link {
+                Some(link) => link.changed().await,
+                None => std::future::pending().await,
+            }
+        };
+        let deadline = self.lock().next_deadline(Instant::now());
         match deadline {
             Some(at) => {
                 let at = tokio::time::Instant::from_std(at);
                 tokio::select! {
                     () = &mut woken => {}
+                    () = link_changed => {}
                     () = tokio::time::sleep_until(at) => {}
                 }
             }
-            None => woken.await,
+            None => {
+                tokio::select! {
+                    () = &mut woken => {}
+                    () = link_changed => {}
+                }
+            }
         }
     }
 }
