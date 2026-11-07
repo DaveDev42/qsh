@@ -193,3 +193,10 @@ path = "fuzz_targets/host_emulator_input.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "client_predictor"
+path = "fuzz_targets/client_predictor.rs"
+test = false
+doc = false
+bench = false
