@@ -111,6 +111,76 @@ pub struct HostScreen {
     next_num: u64,
     fed_seq: u64,
     dirty: bool,
+    /// Leading bytes of a U+FE0F that a feed ended in the middle of.
+    vs16: Vs16Filter,
+}
+
+/// Replaces U+FE0F (VARIATION SELECTOR-16, `EF B8 8F`) in the byte stream with
+/// a NUL before it reaches the emulator, across feed boundaries.
+///
+/// `vt100` 0.18.1 widens the previous cell when U+FE0F follows a character
+/// that has an emoji presentation (`0`, `#`, `(c)`, hearts), and the code
+/// that repairs the neighbouring cells afterwards unwraps cells that do not
+/// exist when the widened cell sits at the end of a row (`text_cleanup` in
+/// `screen.rs`, lines 985, 1000 and 1013). A one-column screen with `0`
+/// then U+FE0F panics; so do 3x2 and 2x3 screens fed a short wrapped
+/// sequence. A program's output is untrusted, and the panic would kill the
+/// session's output pump, so the selector never gets there. This is the only
+/// path by which `vt100` widens a cell that is already drawn, so without it
+/// the emulator only draws characters at their own width. The cost: an
+/// emoji that needs the selector (a heart, a keycap) takes the one cell its
+/// text form has instead of two. `docs/design/threat-model.md` C23 pins it.
+///
+/// The selector becomes a NUL, which the emulator ignores, and is not simply
+/// removed: removing it would join the bytes on either side of it, and
+/// `EF` + `EF B8 8F` + `B8 8F` would then hold a selector that was not in the
+/// input. A replacement shares no byte with the sequence, so a single pass
+/// leaves none behind.
+#[derive(Debug, Default)]
+struct Vs16Filter {
+    held: [u8; 2],
+    held_len: u8,
+}
+
+impl Vs16Filter {
+    const SEQ: [u8; 3] = [0xEF, 0xB8, 0x8F];
+
+    /// `data` with every U+FE0F turned into a NUL, preceded by the bytes held
+    /// over from the last call. A trailing `EF` or `EF B8` is held until the next call
+    /// decides whether it began one; it is an incomplete character the
+    /// emulator would not have drawn yet anyway.
+    fn filter<'a>(&mut self, data: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        if self.held_len == 0 && !data.contains(&Self::SEQ[0]) {
+            return std::borrow::Cow::Borrowed(data);
+        }
+        let mut out = Vec::with_capacity(data.len() + 2);
+        let mut have = usize::from(self.held_len);
+        let mut pending = self.held;
+        for &b in data {
+            if b == Self::SEQ[have] {
+                if have == 2 {
+                    have = 0; // a whole U+FE0F
+                    out.push(0);
+                } else {
+                    pending[have] = b;
+                    have += 1;
+                }
+                continue;
+            }
+            // Not the next byte of the sequence: release what was held.
+            out.extend_from_slice(&pending[..have]);
+            have = 0;
+            if b == Self::SEQ[0] {
+                pending[0] = b;
+                have = 1;
+            } else {
+                out.push(b);
+            }
+        }
+        self.held = pending;
+        self.held_len = have as u8;
+        std::borrow::Cow::Owned(out)
+    }
 }
 
 impl std::fmt::Debug for HostScreen {
@@ -149,6 +219,7 @@ impl HostScreen {
             next_num: 1,
             fed_seq: 0,
             dirty: true,
+            vs16: Vs16Filter::default(),
         }
     }
 
@@ -162,6 +233,7 @@ impl HostScreen {
     /// cumulative output offset after `data`. Work is done in slices of
     /// [`FEED_SLICE`]; nothing here blocks or waits.
     pub fn feed(&mut self, data: &[u8], end_seq: u64) {
+        let data = self.vs16.filter(data);
         for slice in data.chunks(FEED_SLICE) {
             self.parser.process(slice);
         }

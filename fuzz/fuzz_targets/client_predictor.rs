@@ -37,9 +37,6 @@ use qsh_core::client::render::ScreenRenderer;
 use qsh_core::screen::{HostScreen, ScreenOptions};
 use qsh_proto::screen::{Modes, ScreenState, cell_flags};
 
-/// U+FE0F (variation selector 16) in UTF-8.
-const VS16: [u8; 3] = [0xef, 0xb8, 0x8f];
-
 /// Typed text: ASCII, wide, ambiguous width, combining, zero width, emoji,
 /// control characters.
 const TEXT: &[&str] = &[
@@ -200,22 +197,12 @@ impl Run {
         let _ = self.r.draw_with_overlay(&s, overlay, &[], w);
     }
 
-    /// Feed the host emulator, without U+FE0F: `vt100` 0.18.1 panics in
-    /// `text_cleanup` (`screen.rs`, lines 1000 and 1013) when a variation
-    /// selector widens the previous cell on a narrow screen (a one-column
-    /// screen and "0" then U+FE0F is enough; two columns and a few cells
-    /// scrolled past are another). That is the host emulator's fault and not
-    /// the predictor's, so this target keeps out of it. The typed text still
-    /// carries U+FE0F to the predictor.
+    /// Feed the host emulator. U+FE0F reaches `HostScreen::feed` like any
+    /// other byte: `vt100` 0.18.1 panics in `text_cleanup` when a variation
+    /// selector widens the previous cell, and `HostScreen` turns the selector
+    /// into a NUL before the emulator sees it (threat model C23).
     fn feed(&mut self, bytes: &[u8], end: u64) {
-        let mut clean = Vec::with_capacity(bytes.len());
-        let mut rest = bytes;
-        while let Some(at) = rest.windows(3).position(|w| w == VS16) {
-            clean.extend_from_slice(&rest[..at]);
-            rest = &rest[at + 3..];
-        }
-        clean.extend_from_slice(rest);
-        self.host.feed(&clean, end);
+        self.host.feed(bytes, end);
     }
 
     fn apply_state(&mut self, num: u64) {
