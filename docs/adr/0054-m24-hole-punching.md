@@ -1,7 +1,7 @@
 # ADR-0054: M24의 범위. 연결을 시작할 때 세 장비가 서로 pin한 사용자의 상시 `qsh listen`을 중개자로 써서 후보 주소를 바꾸고, 양 끝이 QUIC endpoint와 같은 UDP 소켓에서 동시에 보내 NAT에 구멍을 뚫는다. 끝단 pin으로 확인된 첫 handshake를 쓰고, 정해진 시간 안에 서지 않으면 포기하고 지금의 route 순서로 돌아간다
 
 날짜: 2026-11-07
-상태: 제안됨
+상태: 승인됨
 
 개정 관계: ADR-0050 결정 3과 결정 5의 M24를 구체화한다. 다음을 개정한다.
 - ADR-0045 결정 2의 role 표와 PRD §9의 action 어휘. 새 action `host.punch`를 더해 `Action::ALL`이 12종이 되고, `none`을 뺀 role이 이 action을 준다(결정 6, Dave가 정할 것 2).
@@ -285,3 +285,4 @@ ICE는 후보(로컬 인터페이스의 host, STUN 서버가 본 server-reflexiv
 ## 개정 이력
 
 - 2026-11-07 초안(에이전트). Dave가 정할 것 다섯 항목은 추천만 적었다.
+- 2026-11-07 승인(Dave 결정). Dave가 정할 것 다섯 항목은 모두 추천 (가)로 정했다: 중개자는 B에게 배운 힌트와 직접 준 것만, `host.punch`는 `none`을 뺀 모든 role, 중개자가 B와 같은 NAT 뒤일 때 추정 후보 하나, 직접 dial 1초 뒤 경주, 역방향 등록 자체의 펀칭은 미룸. 펀칭 대상을 `serve --to`의 역방향 등록이 있는 host로 한정하는 것(일반 `qsh serve`와 on-demand serve는 미룸)도 같은 결정에서 받아들였다.
