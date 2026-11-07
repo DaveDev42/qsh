@@ -162,6 +162,37 @@ pub(crate) fn write_atomically_with(
     })
 }
 
+/// `rename(from, to)`, replacing `to`. On Windows a replace can fail with
+/// `ERROR_ACCESS_DENIED` or `ERROR_SHARING_VIOLATION` for a moment when
+/// another writer is replacing the same target at that instant, or a scanner
+/// or indexer has the file open without delete sharing. The same call
+/// succeeds a few milliseconds later, so a short bounded retry keeps a
+/// private-file save from being lost to that window; a denial that persists
+/// is returned as it was.
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let mut delay = Duration::from_millis(2);
+        for _ in 0..8 {
+            match std::fs::rename(from, to) {
+                Err(err)
+                    if matches!(
+                        err.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+                    ) =>
+                {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                other => return other,
+            }
+        }
+    }
+    std::fs::rename(from, to)
+}
+
 fn write_atomically_via(
     path: &Path,
     contents: &[u8],
@@ -194,7 +225,7 @@ fn write_atomically_via(
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, path)?;
+        rename_over(&tmp, path)?;
         #[cfg(unix)]
         if durable {
             // Durability of the rename itself: fsync the directory entry,
