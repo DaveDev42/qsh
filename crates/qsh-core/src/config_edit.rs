@@ -147,6 +147,14 @@ pub const KEYS: &[ConfigKey] = &[
         choices: &["auto", "on", "off"],
         ..key("interactive", "screen_sync", Str, false)
     },
+    ConfigKey {
+        choices: &["auto", "always", "never"],
+        ..key("interactive", "predict", Str, false)
+    },
+    ConfigKey {
+        choices: &["on", "off"],
+        ..key("interactive", "status_line", Str, false)
+    },
 ];
 
 fn invalid(message: String) -> OpError {

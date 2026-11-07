@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 30 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 31 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -50,7 +50,9 @@ pub mod probe;
 /// `ScreenSyncUnsupported` and `DatagramUnavailable` (ADR-0052 decision 14,
 /// M22) are the twenty-ninth and thirtieth, 28 -> 30: both are `info`
 /// findings of `qsh doctor <host>`'s measurement connection.
-/// The set is the same on every target: every build knows all 30 codes.
+/// `ScreenEchoUnsupported` (ADR-0053 decision 11, M23) is the thirty-first,
+/// 30 -> 31.
+/// The set is the same on every target: every build knows all 31 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -86,6 +88,7 @@ pub enum DiagnosticId {
     LogonTaskSessionScoped,
     ScreenSyncUnsupported,
     DatagramUnavailable,
+    ScreenEchoUnsupported,
 }
 
 impl DiagnosticId {
@@ -130,6 +133,7 @@ impl DiagnosticId {
             DiagnosticId::LogonTaskSessionScoped => LOGON_TASK_SESSION_SCOPED.code,
             DiagnosticId::ScreenSyncUnsupported => SCREEN_SYNC_UNSUPPORTED.code,
             DiagnosticId::DatagramUnavailable => DATAGRAM_UNAVAILABLE.code,
+            DiagnosticId::ScreenEchoUnsupported => SCREEN_ECHO_UNSUPPORTED.code,
         }
     }
 }
@@ -164,6 +168,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "no_route",
     "peer_untrusted",
     "qsh_path_shadowed",
+    "screen_echo_unsupported",
     "screen_sync_unsupported",
     "service_not_registered",
     "service_restart_drops_sessions",
@@ -225,6 +230,18 @@ pub const SCREEN_SYNC_UNSUPPORTED: Diagnostic = Diagnostic {
     code: "screen_sync_unsupported",
     message: "The peer does not advertise screen.v1, so interactive sessions to it use the byte path: the host's output bytes reach this terminal as they are, with no screen state, no prediction and no scrollback from the host's screen model.",
     remedy: "Upgrade qsh on the peer to a build that advertises screen.v1. Until then `--screen-sync=auto` falls back to the byte path without a message, and `--screen-sync=on` fails with UNSUPPORTED.",
+};
+
+/// ADR-0053 decision 11, `docs/CLI.md` §6.17: the measurement connection of
+/// `qsh doctor <host>` found that the peer advertises `screen.v1` but not
+/// `screen-echo.v1`, while `[interactive].predict` is not `never`. `info`:
+/// the session works, it just draws no local echo prediction (the status line
+/// still works).
+pub const SCREEN_ECHO_UNSUPPORTED: Diagnostic = Diagnostic {
+    id: DiagnosticId::ScreenEchoUnsupported,
+    code: "screen_echo_unsupported",
+    message: "The peer advertises screen.v1 but not screen-echo.v1, so interactive sessions to it draw no local echo prediction: typed characters appear only after the host's echo arrives. The status line still works.",
+    remedy: "Upgrade qsh on the peer to a build that advertises screen-echo.v1. Until then `--predict=auto` and `--predict=always` predict nothing; `--predict=always` prints one line to stderr saying so, and `--predict=never` is the same without the line.",
 };
 
 /// ADR-0052 decision 14, `docs/CLI.md` §6.17: the measurement connection of

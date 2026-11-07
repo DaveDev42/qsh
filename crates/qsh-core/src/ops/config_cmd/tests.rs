@@ -428,6 +428,8 @@ fn every_field_populated() -> Config {
         },
         interactive: crate::config::InteractiveConfig {
             screen_sync: Some(crate::ops::ScreenSync::Auto),
+            predict: Some(crate::ops::Predict::Auto),
+            status_line: Some(crate::ops::StatusLine::On),
         },
     }
 }
@@ -438,6 +440,8 @@ fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
         "transport.keep_alive_ms" => "15000".into(),
         "transport.adaptive" => "off".into(),
         "interactive.screen_sync" => "on".into(),
+        "interactive.predict" => "always".into(),
+        "interactive.status_line" => "off".into(),
         "recovery.probe_interval_ms" => "250".into(),
         "recovery.min_dead_after_ms" => "1000".into(),
         "recovery.strikes" => "3".into(),
@@ -614,4 +618,77 @@ fn transport_adaptive_pins_the_process() {
     ops.config().unwrap().liveness().unwrap().pin_process();
     assert!(!process_adaptive());
     crate::adapt::set_process_adaptive(true);
+}
+
+/// ADR-0053 decisions 10 and 11: `--predict` and `--status-line` beat their
+/// `[interactive]` keys, which beat `auto` and `on`; an unreadable value
+/// fails closed, and `interactive_options` agrees with the single-flag
+/// resolvers.
+#[test]
+fn predict_and_status_line_are_flag_then_key_then_default() {
+    use crate::ops::{InteractiveOptions, Predict, StatusLine};
+
+    let (_g, ops) = temp_ops();
+    assert_eq!(ops.predict_mode(None).unwrap(), Predict::Auto);
+    assert_eq!(ops.status_line_mode(None).unwrap(), StatusLine::On);
+    assert_eq!(
+        ops.interactive_options(None, None, None).unwrap(),
+        InteractiveOptions::default()
+    );
+
+    set(&ops, "interactive.predict", "never").unwrap();
+    set(&ops, "interactive.status_line", "off").unwrap();
+    assert_eq!(ops.predict_mode(None).unwrap(), Predict::Never);
+    assert_eq!(ops.status_line_mode(None).unwrap(), StatusLine::Off);
+    assert_eq!(
+        ops.predict_mode(Some(Predict::Always)).unwrap(),
+        Predict::Always,
+        "the flag wins over the key"
+    );
+    assert_eq!(
+        ops.predict_mode(Some(Predict::Auto)).unwrap(),
+        Predict::Auto,
+        "an explicit auto is still the flag"
+    );
+    assert_eq!(
+        ops.status_line_mode(Some(StatusLine::On)).unwrap(),
+        StatusLine::On
+    );
+
+    let merged = ops
+        .interactive_options(Some(ScreenSync::On), None, Some(StatusLine::On))
+        .unwrap();
+    assert_eq!(
+        merged,
+        InteractiveOptions {
+            screen_sync: ScreenSync::On,
+            predict: Predict::Never,
+            status_line: StatusLine::On,
+        }
+    );
+
+    // Values outside the closed sets are refused by `config set`.
+    assert!(set(&ops, "interactive.predict", "sometimes").is_err());
+    assert!(set(&ops, "interactive.predict", "on").is_err());
+    assert!(set(&ops, "interactive.status_line", "auto").is_err());
+
+    // A hand-written bad value is a load error, never a silent default.
+    std::fs::write(
+        ops.paths().config_file(),
+        "[interactive]\npredict = \"sometimes\"\nstatus_line = \"on\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ops.predict_mode(None).unwrap_err().code,
+        qsh_proto::ErrorCode::ConfigError
+    );
+    assert_eq!(
+        ops.interactive_options(None, None, None).unwrap_err().code,
+        qsh_proto::ErrorCode::ConfigError
+    );
+    assert_eq!(
+        ops.predict_mode(Some(Predict::Never)).unwrap(),
+        Predict::Never,
+        "a flag needs no config at all"
+    );
 }

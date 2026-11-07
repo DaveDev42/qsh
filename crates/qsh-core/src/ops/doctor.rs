@@ -37,9 +37,9 @@ use crate::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE,
     ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED,
     CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY,
-    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, QSH_PATH_SHADOWED, SCREEN_SYNC_UNSUPPORTED,
-    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
-    probe_audit_path_writable,
+    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, QSH_PATH_SHADOWED, SCREEN_ECHO_UNSUPPORTED,
+    SCREEN_SYNC_UNSUPPORTED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -347,7 +347,7 @@ impl Ops {
         findings: &mut Vec<DoctorFinding>,
     ) -> Option<DoctorTransport> {
         use crate::adapt::{PolicySampler, User};
-        use qsh_proto::wire::{CAP_DATAGRAM_V1, CAP_SCREEN_V1};
+        use qsh_proto::wire::{CAP_DATAGRAM_V1, CAP_SCREEN_ECHO_V1, CAP_SCREEN_V1};
 
         const SAMPLES: u32 = 6;
         const PERIOD: Duration = Duration::from_millis(500);
@@ -360,6 +360,9 @@ impl Ops {
         let has = |cap: &str| capabilities.iter().any(|c| c == cap);
         let screen_offered = has(CAP_SCREEN_V1);
         let datagram_offered = has(CAP_DATAGRAM_V1);
+        let echo_offered = has(CAP_SCREEN_ECHO_V1);
+        let predict_wanted =
+            config.interactive.predict.unwrap_or_default() != crate::ops::Predict::Never;
         let screen_wanted =
             config.interactive.screen_sync.unwrap_or_default() != crate::ops::ScreenSync::Off;
         let user = User {
@@ -395,6 +398,12 @@ impl Ops {
             screen_offered,
             datagram_offered,
             max_datagram,
+        ));
+        findings.extend(echo_finding(
+            host,
+            screen_offered,
+            echo_offered,
+            predict_wanted,
         ));
         Some(sample.report)
     }
@@ -1494,6 +1503,28 @@ fn reachability_failed(findings: &[DoctorFinding]) -> bool {
             f.code.as_str(),
             "controller_unreachable" | "udp_egress_blocked" | "no_route"
         )
+    })
+}
+
+/// `screen_echo_unsupported` (ADR-0053 decision 11): the peer offers
+/// `screen.v1` but not `screen-echo.v1` and prediction is not switched off by
+/// `[interactive].predict = "never"`. A peer without `screen.v1` already gets
+/// `screen_sync_unsupported`, which covers it.
+fn echo_finding(
+    host: &str,
+    screen_offered: bool,
+    echo_offered: bool,
+    predict_wanted: bool,
+) -> Option<DoctorFinding> {
+    if !(screen_offered && !echo_offered && predict_wanted) {
+        return None;
+    }
+    let diag = &SCREEN_ECHO_UNSUPPORTED;
+    Some(DoctorFinding {
+        code: diag.code.to_string(),
+        status: "info".to_string(),
+        detail: format!("{} (peer: {host})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
     })
 }
 

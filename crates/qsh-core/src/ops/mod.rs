@@ -60,10 +60,11 @@ pub use file::{
 pub use host::{HostGetOp, HostListOp, HostRoute, unconfigured_host_name};
 pub use pair_ssh::{PairSshEnv, PairSshOutput, SshRevival};
 pub use session::{
-    AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, ScreenAttach, ScreenSync,
-    SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionFilter, SessionGetOp,
-    SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionRef,
-    SessionResizeOp, SessionWriteOp, WRITER_NONE, make_session_ref, parse_session_ref,
+    AttachHandle, DetachFlush, InteractiveOptions, Predict, RecoveryConfig, SESSION_WRITE_MAX,
+    ScreenAttach, ScreenSync, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionFilter,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
+    SessionRef, SessionResizeOp, SessionWriteOp, StatusLine, WRITER_NONE, make_session_ref,
+    parse_session_ref,
 };
 pub use trust::{cert_file_fingerprint_conflict, read_cert_file_arg};
 pub(crate) use trust::{cert_pem_op_error, check_cert_pem_size, validate_peer_label_arg};
@@ -826,6 +827,42 @@ impl Ops {
             Some(mode) => Ok(mode),
             None => Ok(self.config()?.interactive.screen_sync.unwrap_or_default()),
         }
+    }
+
+    /// The resolved `--predict` of an interactive command: the flag when
+    /// given, else `[interactive].predict`, else `auto` (ADR-0053 decision
+    /// 11). A `config.toml` that does not parse is `CONFIG_ERROR`.
+    pub fn predict_mode(&self, flag: Option<Predict>) -> Result<Predict, OpError> {
+        match flag {
+            Some(mode) => Ok(mode),
+            None => Ok(self.config()?.interactive.predict.unwrap_or_default()),
+        }
+    }
+
+    /// The resolved `--status-line` of an interactive command: the flag
+    /// when given, else `[interactive].status_line`, else `on` (ADR-0053
+    /// decision 10).
+    pub fn status_line_mode(&self, flag: Option<StatusLine>) -> Result<StatusLine, OpError> {
+        match flag {
+            Some(mode) => Ok(mode),
+            None => Ok(self.config()?.interactive.status_line.unwrap_or_default()),
+        }
+    }
+
+    /// All three interactive defaults at once, each flag over its key over
+    /// the built-in default. The config is read once.
+    pub fn interactive_options(
+        &self,
+        screen_sync: Option<ScreenSync>,
+        predict: Option<Predict>,
+        status_line: Option<StatusLine>,
+    ) -> Result<InteractiveOptions, OpError> {
+        let interactive = self.config()?.interactive;
+        Ok(InteractiveOptions {
+            screen_sync: screen_sync.or(interactive.screen_sync).unwrap_or_default(),
+            predict: predict.or(interactive.predict).unwrap_or_default(),
+            status_line: status_line.or(interactive.status_line).unwrap_or_default(),
+        })
     }
 
     /// The recovery settings an attach or supervised tunnel runs with: the

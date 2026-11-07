@@ -160,14 +160,14 @@ pub fn run(
     ops: &Ops,
     what: Attach,
     escape: Option<u8>,
-    screen_sync: qsh_core::ScreenSync,
+    options: qsh_core::InteractiveOptions,
 ) -> Result<i32, OpError> {
     session_loop::run(
         ops,
         what,
         escape,
         std::sync::Arc::new(unix::UnixTerminal),
-        screen_sync,
+        options,
     )
 }
 
@@ -180,14 +180,14 @@ pub fn run(
     ops: &Ops,
     what: Attach,
     escape: Option<u8>,
-    screen_sync: qsh_core::ScreenSync,
+    options: qsh_core::InteractiveOptions,
 ) -> Result<i32, OpError> {
     session_loop::run(
         ops,
         what,
         escape,
         std::sync::Arc::new(windows::system::terminal().detaching_on_hangup()),
-        screen_sync,
+        options,
     )
 }
 

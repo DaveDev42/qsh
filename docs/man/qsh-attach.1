@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-attach \- Re\-attach this terminal to a session that is already running
 .SH SYNOPSIS
-\fBqsh attach\fR [\fB\-\-escape\-char\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-screen\-sync\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
+\fBqsh attach\fR [\fB\-\-escape\-char\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-status\-line\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
 .SH DESCRIPTION
 Re\-attach this terminal to a session that is already running.
 .PP
@@ -23,11 +23,17 @@ Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-st
 \fB\-\-screen\-sync\fR \fI<MODE>\fR
 Screen state sync: `auto` (default), `on` (require it) or `off` (plain byte stream). See `qsh \-\-help`
 .TP
+\fB\-\-predict\fR \fI<MODE>\fR
+Local echo prediction: `auto` (default), `always` or `never`. See `qsh \-\-help`
+.TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-status\-line\fR \fI<MODE>\fR
+Link\-status line: `on` (default) or `off`. See `qsh \-\-help`
 .TP
 \fB\-\-no\-ssh\fR
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition

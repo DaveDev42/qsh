@@ -54,7 +54,7 @@ pub use filter::{SessionFilter, WRITER_NONE};
 pub(crate) use link::{Connected, Link};
 pub use reader::SessionReader;
 pub(crate) use recovery::probe_alive;
-pub use screen_sink::{ScreenAttach, ScreenSync};
+pub use screen_sink::{InteractiveOptions, Predict, ScreenAttach, ScreenSync, StatusLine};
 
 use attach::{AttachCommand, AttachStop, RenewalSchedule};
 use context::{

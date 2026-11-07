@@ -684,6 +684,8 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             session_ref,
             escape_char,
             screen_sync,
+            predict,
+            status_line,
         }) => run_interactive(
             cli,
             &ops,
@@ -691,7 +693,11 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 session_ref: session_ref.clone(),
             },
             *escape_char,
-            *screen_sync,
+            InteractiveFlags {
+                screen_sync: *screen_sync,
+                predict: *predict,
+                status_line: *status_line,
+            },
             &SshOptions::default(),
         ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
@@ -939,7 +945,11 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
                 shell_command,
             },
             args.escape_char,
-            args.screen_sync,
+            InteractiveFlags {
+                screen_sync: args.screen_sync,
+                predict: args.predict,
+                status_line: args.status_line,
+            },
             &ssh,
         ),
         FormMode::Exec(command) => {
@@ -1062,7 +1072,7 @@ fn run_interactive(
     ops: &Ops,
     what: tui::Attach,
     escape: Option<EscapeChar>,
-    screen_sync: Option<ScreenSync>,
+    flags: InteractiveFlags,
     ssh: &SshOptions,
 ) -> i32 {
     let command = what.command();
@@ -1106,15 +1116,26 @@ fn run_interactive(
         return code;
     }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
-    // The flag wins over `[interactive].screen_sync` (ADR-0052 decision 15).
-    let screen_sync = match ops.screen_sync_mode(screen_sync) {
-        Ok(mode) => mode,
+    // Each flag wins over its `[interactive]` key (ADR-0052 decision 15,
+    // ADR-0053 decisions 10 and 11).
+    let options = match ops.interactive_options(flags.screen_sync, flags.predict, flags.status_line)
+    {
+        Ok(options) => options,
         Err(err) => return report_error(cli, command, &err),
     };
-    match tui::run(ops, what, escape, screen_sync) {
+    match tui::run(ops, what, escape, options) {
         Ok(code) => code,
         Err(err) => report_error(cli, command, &err),
     }
+}
+
+/// The interactive flags as given on the command line; `None` falls back to
+/// the `[interactive]` key and then the built-in default.
+#[derive(Clone, Copy)]
+struct InteractiveFlags {
+    screen_sync: Option<ScreenSync>,
+    predict: Option<qsh_core::Predict>,
+    status_line: Option<qsh_core::StatusLine>,
 }
 
 /// What the root form is about to connect to, for [`auto_bootstrap_before_open`].
