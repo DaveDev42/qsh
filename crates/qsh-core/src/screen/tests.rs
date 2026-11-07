@@ -794,3 +794,155 @@ async fn screen_throughput_through_a_pty_cat_of_100mb() {
 /// the nightly judge.
 #[cfg(unix)]
 const SCREEN_CAT_RATIO_FLOOR: f64 = 0.5;
+
+// ---- U+FE0F (threat-model C22) ----
+
+const VS16: &str = "\u{fe0f}";
+
+/// Short inputs `vt100` 0.18.1 panics on without [`Vs16Filter`].
+fn vs16_repros() -> Vec<Vec<u8>> {
+    let mut wrapped = b"RRRTRRRRR\x1b[C0".to_vec();
+    wrapped.extend_from_slice("\u{fe0f}0\x1b[H0\u{fe0f}0é".as_bytes());
+    vec![
+        format!("0{VS16}").into_bytes(),
+        format!("a0{VS16}{VS16}b#{VS16}\r\n\u{2764}{VS16}").into_bytes(),
+        wrapped,
+    ]
+}
+
+#[test]
+fn u_fe0f_never_panics_the_emulator_at_any_small_size() {
+    for input in vs16_repros() {
+        for rows in 1..=6 {
+            for cols in 1..=7 {
+                let mut s = screen(rows, cols);
+                feed(&mut s, &input);
+                // The state layer reads the screen back without trouble.
+                let state = s.snapshot();
+                assert!(state.is_valid());
+                assert!(
+                    state
+                        .grid
+                        .iter()
+                        .flat_map(|r| &r.cells)
+                        .all(|c| !c.text.contains('\u{fe0f}')),
+                    "{rows}x{cols}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn u_fe0f_is_ignored_and_its_base_character_stays_narrow() {
+    let mut s = screen(2, 10);
+    feed(&mut s, format!("0{VS16}x\u{2764}{VS16}y").as_bytes());
+    assert_eq!(row_text(&s.snapshot(), 0), "0x\u{2764}y");
+}
+
+#[test]
+fn u_fe0f_split_at_every_byte_boundary_gives_the_unsplit_screen() {
+    let input = format!("a{VS16}b0{VS16}{VS16}\u{ac00}{VS16}\r\nc").into_bytes();
+    let mut whole = screen(3, 3);
+    feed(&mut whole, &input);
+    for a in 0..=input.len() {
+        for b in a..=input.len() {
+            let mut split = screen(3, 3);
+            for part in [&input[..a], &input[a..b], &input[b..]] {
+                feed(&mut split, part);
+            }
+            assert_eq!(split.snapshot().hash(), whole.snapshot().hash(), "{a} {b}");
+        }
+    }
+}
+
+/// Found by `host_emulator_input`: removing a selector would have joined the
+/// bytes around it into a new one (`EF` + `EF B8 8F` + `B8 8F`).
+#[test]
+fn u_fe0f_cannot_be_rebuilt_from_the_bytes_around_one() {
+    let mut f = Vs16Filter::default();
+    let out = f.filter(&[b'0', 0xEF, 0xEF, 0xB8, 0x8F, 0xB8, 0x8F, b'0']);
+    assert!(!out.windows(3).any(|w| w == Vs16Filter::SEQ), "{out:02x?}");
+    // The reported fuzz input, on its 3x1 screen and split anywhere.
+    let input = [
+        b'R', b'0', 0xEF, 0xEF, 0xB8, 0x8F, 0xB8, 0x8F, b'0', 0x1b, b'[', 0x19, 0x19, b'{', b'T',
+        b'R', b'R', 0x1c, b'R', b'R', b'0', b'[', b'{', 0, b'H',
+    ];
+    for rows in 1..=4 {
+        for cols in 1..=4 {
+            for at in 0..=input.len() {
+                let mut s = screen(rows, cols);
+                feed(&mut s, &input[..at]);
+                feed(&mut s, &input[at..]);
+                assert!(s.snapshot().is_valid());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_cut_off_prefix_of_u_fe0f_is_released_when_the_next_byte_is_not_the_rest() {
+    let mut f = Vs16Filter::default();
+    assert_eq!(&*f.filter(&[b'a', 0xEF, 0xB8]), b"a");
+    assert_eq!(&*f.filter(b"x"), &[0xEF, 0xB8, b'x']);
+    assert_eq!(&*f.filter(&[0xEF]), b"");
+    assert_eq!(&*f.filter(&[0xEF, 0xB8, 0x8F, b'z']), &[0xEF, 0, b'z']);
+}
+
+proptest! {
+    /// The filter equals a left-to-right replacement of every `EF B8 8F` in
+    /// the whole stream, whatever the chunking, once the held bytes are
+    /// released by a byte that cannot continue them.
+    #[test]
+    fn the_filter_replaces_exactly_the_u_fe0f_sequences(
+        stream in proptest::collection::vec(
+            proptest::sample::select(vec![0xEFu8, 0xB8, 0x8F, b'0', b'A']), 0..64),
+        cuts in proptest::collection::vec(0usize..8, 0..12),
+    ) {
+        let mut expected = Vec::new();
+        let mut i = 0;
+        while i < stream.len() {
+            if stream[i..].starts_with(&Vs16Filter::SEQ) {
+                expected.push(0);
+                i += 3;
+            } else {
+                expected.push(stream[i]);
+                i += 1;
+            }
+        }
+        let mut f = Vs16Filter::default();
+        let mut got = Vec::new();
+        let mut rest = &stream[..];
+        for c in cuts {
+            let (head, tail) = rest.split_at(c.min(rest.len()));
+            got.extend_from_slice(&f.filter(head));
+            rest = tail;
+        }
+        got.extend_from_slice(&f.filter(rest));
+        got.extend_from_slice(&f.filter(b"!"));
+        got.pop();
+        prop_assert!(!got.windows(3).any(|w| w == Vs16Filter::SEQ));
+        prop_assert_eq!(got, expected);
+    }
+
+    /// No mix of the characters that matter for cell widening panics the
+    /// emulator, on any small screen and any chunking.
+    #[test]
+    fn widening_sequences_never_panic_the_emulator(
+        rows in 1u16..6,
+        cols in 1u16..8,
+        parts in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "0", "#", "a", "\u{2764}", "\u{fe0f}", "\u{ac00}", "\u{301}", "é",
+                "\r\n", "\x1b[C", "\x1b[H", "\x1b[D", "\x1b[2J", "R",
+            ]), 0..48),
+        cut in 1usize..9,
+    ) {
+        let mut s = screen(rows, cols);
+        let bytes = parts.concat().into_bytes();
+        for chunk in bytes.chunks(cut) {
+            feed(&mut s, chunk);
+        }
+        prop_assert!(s.snapshot().is_valid());
+    }
+}
