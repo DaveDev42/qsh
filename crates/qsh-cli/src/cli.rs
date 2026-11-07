@@ -110,12 +110,13 @@ pub struct InteractiveArgs {
 
     /// Local echo prediction (ADR-0053): `auto` (default) follows the
     /// adaptive policy, `always` draws regardless of RTT, `never` turns it
-    /// off. Interactive sessions only.
+    /// off. Interactive sessions on the screen path only (host must
+    /// advertise `screen-echo.v1`).
     #[arg(long, value_name = "MODE", value_parser = parse_predict, requires = "target")]
     pub predict: Option<Predict>,
 
     /// Link-status line (ADR-0053): `on` (default) or `off`. Interactive
-    /// sessions only.
+    /// sessions on the screen path only.
     #[arg(long, value_name = "MODE", value_parser = parse_status_line, requires = "target")]
     pub status_line: Option<StatusLine>,
 

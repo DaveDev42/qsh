@@ -637,6 +637,30 @@ typing on a congested link, and keep-alive timing follows the path.
 `[transport].adaptive = "off"` pins all of this to fixed values
 (`docs/CLI.md` §6.23).
 
+On the screen path, qsh also predicts your typing. When the round trip is
+long, the characters you type (and Backspace and the left and right arrows
+inside a line) appear at the cursor right away instead of after the host
+echoes them. With the default `--predict=auto` this turns on when the round
+trip is above 30 ms. A prediction that the host's screen later confirms
+disappears into the real text; a wrong one is redrawn from the host's cells.
+Predictions are underlined while the link is slow to confirm or the status
+line below is showing. Nothing is predicted in full-screen programs, with
+the mouse mode on, in a read-only attach, or while the host reports that
+the terminal is not echoing, so a password prompt never shows what you
+type. A host without the `screen-echo.v1` capability gets no prediction;
+`qsh doctor` reports that as `screen_echo_unsupported`.
+`--predict=never` (or `[interactive].predict = "never"`) turns it off, and
+`--predict=always` draws it whatever the round trip.
+
+When the host stops answering, qsh draws a status line in reverse video on
+the top row of the window, for example `qsh: last reply 3s ago; ~. to quit,
+~d to detach`. It appears once the oldest unanswered input or probe has
+waited `max(2 s, 4 x srtt)`, or while qsh is reconnecting, and disappears
+when the host answers again. The `~.` and `~d` hint is shown while the
+escape character is on. `--status-line=off` (or `[interactive].status_line
+= "off"`) hides the line; reconnecting works the same either way. The
+prediction log target is `qsh::predict` (`-v` or `QSH_LOG=qsh::predict=info`).
+
 Over an existing pin, the `user@` prefix asserts which account you expect; it
 does not pick one. The remote shell runs as the account that runs `qsh serve`,
 and naming a different login gets you `UNSUPPORTED` instead of a session.

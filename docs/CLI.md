@@ -694,7 +694,7 @@ host 없이 호출한 결과에는 `host` field가 없다 — omitted, `null`이
 
 `file.v1`(ADR-0029)은 host가 원격 파일 op와 `FILE_DATA` 스트림을 처리한다는 뜻이다. unix host와 Windows host가 모두 광고하므로 광고 집합은 빌드에 따라 갈리지 않고 `capabilities.json` golden이 두 빌드에 같은 값이다. 광고하지 않는 peer에게 `qsh cp`(§6.21)는 요청을 보내기 전에 `UNSUPPORTED`로 끝난다.
 
-`screen.v1`(ADR-0052 결정 9)은 host가 화면 상태 동기화의 스트림 운반체를 처리한다는 뜻이다: 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 화면 갱신을 싣는다. 모든 빌드가 광고하고 목록의 끝에 붙는다. 이 버전의 `qsh` 명령은 화면 동기화를 요청하지 않으므로 어떤 명령의 동작도 바뀌지 않는다(`design/protocol.md` §18.8). `datagram.v1`은 아직 광고하지 않는다.
+`screen.v1`(ADR-0052 결정 9)은 host가 화면 상태 동기화의 스트림 운반체를 처리한다는 뜻이다: 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 화면 갱신을 싣는다. 모든 빌드가 광고하고 목록의 끝에 붙는다. 대화형 form(`qsh [user@]host`, `qsh attach`)은 §7의 `--screen-sync`에 따라 이를 요청하고, 다른 명령은 요청하지 않아 동작이 바뀌지 않는다(`design/protocol.md` §18.8). `datagram.v1`(ADR-0052)은 화면 갱신의 DATAGRAM 운반체로, 모든 빌드가 광고한다(`design/protocol.md` §18.9).
 
 `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 입력 반영 지점 `ScreenEcho`를 보내고 client가 해석한다는 뜻이다. 모든 빌드가 광고하고 광고 집합의 끝에 붙으며 `capabilities.json` golden에 한 줄이 늘었다. 양쪽이 광고할 때만 쓰이고 CLI 출력에는 나타나지 않는다.
 
