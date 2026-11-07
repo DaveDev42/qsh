@@ -62,7 +62,7 @@ M22가 남긴 후속이다(ADR-0052 개정 이력, M22 계획 `1a07d99`).
 - [ ] client가 로컬 fg/bg 색을 알리지 않아 host 에뮬레이터가 OSC 10/11에 답하지 않는다.
 - [ ] 결정 18의 11 처리량 비율이 로컬 0.61~0.64배로 하한 0.5배에 가깝다. 야간 perf의 `screen_cat_ratio`가 붉어지면 같은 task 직렬 경로(ADR-0052 개정 이력)부터 본다.
 - [ ] 중첩 바깥 운반체(결정 12 (f))의 netbench q6은 run 편차가 커서 M26 전에 반복 측정한다.
-- [ ] 흔들리는 테스트: Windows `quit_is_ctrl_break_not_ctrl_c`(전체 run에서 여러 번, 단독 15/15), Windows `concurrent_saves_to_the_same_path_never_corrupt_the_file`(Access denied 한 번), Linux `the_send_depth_gate_defers_updates_while_the_client_does_not_read`(전체 run에서 한 번). 2026-11-07 조사 중.
+- [ ] 흔들리는 테스트. 2026-11-07 셋을 고쳤다: `the_send_depth_gate_defers_updates_while_the_client_does_not_read`(개수 단언 제거, `2e8cc42`), `quit_is_ctrl_break_not_ctrl_c`(probe의 파일·콘솔 쓰기 순서, `bdf2300`), `concurrent_saves_to_the_same_path_never_corrupt_the_file`(Windows rename 재시도, `e1f3d0d`, 원인 미재현). 여러 에이전트가 Dave-Windows를 함께 쓰는 부하에서 전체 run이 다른 시간 의존 시험으로 흔들린다: `attach_recovery::a_repath_is_survived_by_the_live_attach`, `sessions_filter::sessions_filter_does_not_change_the_wire_request`, `ssh_revival::a_changed_port_updates_the_pin`, `ssh_revival::a_command_revives_the_serve_after_it_idled_out`, `supervised_reverse::supervised_with_wait_still_caps_the_initial_wait_to_stale_retention`, `reverse_resume_chaos::a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach`, `chaos_relay::reorder_lets_the_successor_arrive_first`. CI에서 붉어지면 하나씩 가른다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
