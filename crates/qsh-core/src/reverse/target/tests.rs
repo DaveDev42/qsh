@@ -7,6 +7,21 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokio::sync::watch;
 
+/// The registration endpoint these dial tests use: a real OS socket, as in
+/// production.
+fn punch_endpoint(
+    local: qsh_transport::LocalIdentity,
+    trust: &Arc<SharedTrustStore>,
+) -> PunchEndpoint {
+    PunchEndpoint::new(
+        SocketSource::Os,
+        local,
+        trust.clone() as Arc<dyn TrustEvaluator>,
+        qsh_transport::TransportTuning::default(),
+    )
+    .expect("open a punch endpoint")
+}
+
 #[test]
 fn offered_name_precedence_flag_then_config_then_device_id() {
     let mut config = Config::default();
@@ -117,11 +132,11 @@ async fn dial_and_register_maps_an_unresolvable_controller_to_resolve_cause() {
         capabilities: Vec::new(),
     }));
 
-    let local = qsh_transport::LocalIdentity {
-        cert_chain: Vec::new(),
-        key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
-    };
-    let dialer = Dialer::new(local, trust.clone() as Arc<dyn TrustEvaluator>);
+    // A punch endpoint builds its server configuration up front, so the
+    // identity has to be a real one.
+    crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+    let local = crate::identity::load(&paths).unwrap().unwrap().local;
+    let dialer = punch_endpoint(local, &trust);
 
     let (err, cause) =
         match dial_and_register(&dialer, &trust, &paths, "widget", &local_hello).await {
@@ -817,8 +832,8 @@ async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
     // on.
     crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
     let local = crate::identity::load(&paths).unwrap().unwrap().local;
-    let dialer = Dialer::new(local, trust.clone() as Arc<dyn TrustEvaluator>)
-        .with_timeout(std::time::Duration::from_millis(300));
+    let dialer = punch_endpoint(local, &trust);
+    dialer.set_dial_timeout(std::time::Duration::from_millis(300));
 
     // Two real, unreachable loopback UDP ports: bind each to claim a
     // real, otherwise unused port, then drop the socket immediately so
@@ -890,11 +905,11 @@ async fn dial_and_register_bounds_a_resolver_that_never_answers() {
         offered_name: "hermes".into(),
         capabilities: Vec::new(),
     }));
-    let local = qsh_transport::LocalIdentity {
-        cert_chain: Vec::new(),
-        key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
-    };
-    let dialer = Dialer::new(local, trust.clone() as Arc<dyn TrustEvaluator>);
+    // A punch endpoint builds its server configuration up front, so the
+    // identity has to be a real one.
+    crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+    let local = crate::identity::load(&paths).unwrap().unwrap().local;
+    let dialer = punch_endpoint(local, &trust);
 
     struct SilentResolver;
     impl crate::ops::AddressResolver for SilentResolver {

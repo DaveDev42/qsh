@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use qsh_proto::punch::{AttemptId, PunchDirection, punch_tag};
-use qsh_transport::{Connection, PunchEndpoint};
+use qsh_transport::{Connection, PunchEndpoint, PunchWindow};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
 
@@ -54,16 +54,35 @@ pub struct TargetReport {
 pub async fn run_target<F>(
     ep: &PunchEndpoint,
     params: &TargetParams,
+    on_connection: F,
+) -> TargetReport
+where
+    F: FnMut(Connection),
+{
+    let Some(window) = ep.open_window() else {
+        return TargetReport::default();
+    };
+    run_target_in(ep, window, params, on_connection).await
+}
+
+/// [`run_target`] on a window the caller already opened. The target service
+/// opens it first so a full endpoint (too many windows) can be refused with
+/// `TARGET_BUSY` before the answer goes out; the window closes when this
+/// returns.
+pub async fn run_target_in<F>(
+    ep: &PunchEndpoint,
+    window: PunchWindow,
+    params: &TargetParams,
     mut on_connection: F,
 ) -> TargetReport
 where
     F: FnMut(Connection),
 {
-    let mut report = TargetReport::default();
-    let Some(_window) = ep.open_window() else {
-        return report;
+    let _window = window;
+    let mut report = TargetReport {
+        window_opened: true,
+        ..TargetReport::default()
     };
-    report.window_opened = true;
 
     let mut candidates = params.candidates.clone();
     candidates.dedup();

@@ -79,6 +79,14 @@ pub enum SeamKind {
     /// shape (a QUIC stream reset), so its obligation is reset code +
     /// audit record, not text.
     StreamReset,
+    /// The `host.punch` signalling checks (`PunchRequest` at the rendezvous,
+    /// `PunchOffer` and `RendezvousQuery` at the target, ADR-0054 decision 6):
+    /// connection-level messages checked by [`super::check_punch`], which
+    /// audits and answers the uniform denial. Driven by `acl::punch`'s tests
+    /// and `qsh-testkit`'s `punch_signal`, not by the control-stream
+    /// uniformity sweep, since the three need a rendezvous or a registration
+    /// to exist.
+    PunchSignal,
 }
 
 /// One row: a named seam, the [`Action`] it authorizes, and its
@@ -219,6 +227,23 @@ pub const DENY_SEAMS: &[DenySeam] = &[
         action: Action::SessionAttach,
         kind: SeamKind::StreamReset,
     },
+    // The three `host.punch` signalling checks (ADR-0054 decision 6). One
+    // action, three wire messages, so each needs its own row name.
+    DenySeam {
+        name: "punch.request",
+        action: Action::HostPunch,
+        kind: SeamKind::PunchSignal,
+    },
+    DenySeam {
+        name: "punch.offer",
+        action: Action::HostPunch,
+        kind: SeamKind::PunchSignal,
+    },
+    DenySeam {
+        name: "punch.rendezvous",
+        action: Action::HostPunch,
+        kind: SeamKind::PunchSignal,
+    },
 ];
 
 // ---------------------------------------------------------------------
@@ -254,6 +279,10 @@ pub enum ResourceKind {
     /// `file.write`, `file.list`, `file.mkdir`; ADR-0029 decision 4-7). The
     /// canonical path travels separately, in `ResourceRef`.
     FilePath,
+    /// The literal signalling-message name (`punch.request`, `punch.offer`,
+    /// `punch.rendezvous`): no address or fingerprint is part of the
+    /// resource (ADR-0054 decision 21).
+    PunchSignal,
 }
 
 /// Derives [`Op`], [`Op::ALL`], [`Op::as_str`], [`Op::spec`], and
@@ -367,6 +396,11 @@ declare_ops! {
     FileWrite => ("file.write", Action::FileWrite, ResourceKind::FilePath, false),
     FileList => ("file.list", Action::FileRead, ResourceKind::FilePath, false),
     FileMkdir => ("file.mkdir", Action::FileWrite, ResourceKind::FilePath, false),
+    // Hole-punching signalling (ADR-0054 decision 6): all three authorize as
+    // `host.punch` and have no owner to narrow to.
+    PunchRequest => ("punch.request", Action::HostPunch, ResourceKind::PunchSignal, false),
+    PunchOffer => ("punch.offer", Action::HostPunch, ResourceKind::PunchSignal, false),
+    PunchRendezvous => ("punch.rendezvous", Action::HostPunch, ResourceKind::PunchSignal, false),
 }
 
 impl Op {
@@ -487,12 +521,15 @@ mod tests {
                 "file.list",
                 "file.mkdir",
                 "session.attach@data-stream",
+                "punch.request",
+                "punch.offer",
+                "punch.rendezvous",
             ],
             "DENY_SEAMS row list drifted from this pin — if the drift is a \
              deliberate seam addition/removal, update this list as part of \
              that change; otherwise a row silently changed shape"
         );
-        assert_eq!(DENY_SEAMS.len(), 18, "DENY_SEAMS row count drifted");
+        assert_eq!(DENY_SEAMS.len(), 21, "DENY_SEAMS row count drifted");
     }
 
     /// F1(a) (M5 Step 4 adversarial review) -- the registry's coverage
@@ -506,14 +543,8 @@ mod tests {
     /// reason.
     #[test]
     fn deny_seams_cover_every_action_except_forward_socks() {
-        // The punch seams (`host.punch`, ADR-0054) are not DENY_SEAMS rows yet:
-        // their services land in later M24 steps. `PUNCH_OPS` is where they
-        // are listed meanwhile, and its driver is `acl::punch`'s own tests.
-        let covered: std::collections::HashSet<Action> = DENY_SEAMS
-            .iter()
-            .map(|s| s.action)
-            .chain(crate::acl::PUNCH_OPS.iter().map(|op| op.action()))
-            .collect();
+        let covered: std::collections::HashSet<Action> =
+            DENY_SEAMS.iter().map(|s| s.action).collect();
         let excluded: std::collections::HashSet<Action> =
             ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
         assert!(
@@ -546,7 +577,7 @@ mod tests {
     fn every_control_message_body_variant_is_classified_and_seam_names_match_the_registry() {
         let control_stream_row_names: std::collections::BTreeSet<&'static str> = DENY_SEAMS
             .iter()
-            .filter(|s| s.kind == SeamKind::ControlStreamOp)
+            .filter(|s| matches!(s.kind, SeamKind::ControlStreamOp | SeamKind::PunchSignal))
             .map(|s| s.name)
             .collect();
         let mut mapped: std::collections::BTreeSet<&'static str> =
@@ -645,13 +676,9 @@ mod tests {
                  connection is refused before this classifier even matters \
                  (Server::dispatch's own arm, ADR-0002)",
             ),
-            Body::PunchRequest(_) | Body::PunchOffer(_) | Body::RendezvousQuery(_) => {
-                BodyClassification::NoAuthorizationSurface(
-                    "punch.v1 signalling (ADR-0054): no role serves it yet and dispatch \
-                 answers UNSUPPORTED before any resource exists; host.punch authorizes \
-                 it when the rendezvous and target roles land",
-                )
-            }
+            Body::PunchRequest(_) => BodyClassification::Seam("punch.request"),
+            Body::PunchOffer(_) => BodyClassification::Seam("punch.offer"),
+            Body::RendezvousQuery(_) => BodyClassification::Seam("punch.rendezvous"),
             Body::PairingAccepted(_) => BodyClassification::NoAuthorizationSurface(
                 "a reply, produced only by the pairing responder itself; never a \
                  request a peer sends to be authorized",

@@ -289,8 +289,12 @@ async fn listen_rejects_a_peer_without_hello_reverse() {
     let harness =
         ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
 
+    // A peer that advertises `punch.v1` is a punching connection instead
+    // (ADR-0054 decision 10); this one predates it.
+    let mut hello = forward_hello();
+    hello.capabilities.retain(|c| c != wire::CAP_PUNCH_V1);
     let err = expect_hello_err(
-        harness.initiate(&target, forward_hello()).await,
+        harness.initiate(&target, hello).await,
         "qsh listen must refuse a peer with no Hello.reverse",
     );
     let (code, message, _retryable) = remote(err);

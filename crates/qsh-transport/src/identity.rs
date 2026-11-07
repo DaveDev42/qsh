@@ -47,6 +47,12 @@ impl Fingerprint {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// A fingerprint from its raw digest, e.g. one carried in a signalling
+    /// message. It names a key; nothing here says the key is pinned.
+    pub const fn from_bytes(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
 }
 
 impl fmt::Display for Fingerprint {

@@ -29,6 +29,7 @@ mod pairing_loopback;
 mod pairing_quota;
 mod perf_out;
 mod punch;
+mod punch_signal;
 mod quota;
 mod resume_chaos;
 mod resume_loopback;

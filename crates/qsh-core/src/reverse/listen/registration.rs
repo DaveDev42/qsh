@@ -104,7 +104,18 @@ impl Listen {
         // catching exactly that). Never actually contended: the closure
         // runs synchronously, once, before `respond` returns.
         let outcome_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        // Set instead of `outcome_cell` when the peer is a punching initiator
+        // rather than a registering target (ADR-0054 decision 10).
+        let punch_cell: Mutex<Option<OwnedSemaphorePermit>> = Mutex::new(None);
         let result = crate::handshake::respond(&conn, |peer_hello| {
+            // A peer that registers nothing but speaks `punch.v1` is a
+            // punching initiator (ADR-0054 decision 10); everything else
+            // is a registration decision, with its old refusals.
+            if peer_hello.reverse.is_none()
+                && let Some(verdict) = self.admit_punch_peer(peer_hello, &punch_cell, refused)
+            {
+                return verdict;
+            }
             self.decide_registration(&conn, peer_hello, &outcome_cell, refused)
         })
         .await;
@@ -139,6 +150,11 @@ impl Listen {
                 return;
             }
         };
+        if let Some(permit) = punch_cell.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            self.serve_punch_connection(conn, ctl, permit).await;
+            drop(quota_permit);
+            return;
+        }
         let Some(outcome) = outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner()) else {
             // Defensive: `decide_registration` always populates this on
             // every `Ok` it returns.
