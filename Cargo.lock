@@ -1891,6 +1891,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "unicode-width 0.2.3",
  "vt100",
  "windows 0.62.2",
  "windows-native-keyring-store",
