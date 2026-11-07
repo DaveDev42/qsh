@@ -254,8 +254,10 @@ mod probe {
     }
 
     /// One record for a received event, and its line in the report file.
+    ///
+    /// The file line goes first: a test that waits for the record on the
+    /// console and then reads the file must find the line already there.
     fn report(event: ProbeEvent) {
-        print_line(&event_record(event.name));
         if let Some(Some(path)) = REPORT.get()
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -265,6 +267,7 @@ mod probe {
             // One write, so two processes reporting at once do not interleave.
             let _ = file.write_all(format!("{}\n", event.name).as_bytes());
         }
+        print_line(&event_record(event.name));
     }
 
     fn open_event(variable: &str, label: &str) -> Option<HANDLE> {
