@@ -114,7 +114,7 @@ pub(crate) use acl_restart_notice;
 /// constant rather than retyping the wording, so the surfaces can never
 /// drift apart.
 pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
-pub use punch::{PUNCH_OPS, PunchOp, check_punch};
+pub use punch::{PUNCH_OPS, PunchOp, check_punch, refuse_unpinned_punch};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
 };

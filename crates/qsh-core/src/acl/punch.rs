@@ -93,6 +93,28 @@ pub fn check_punch(
     }
 }
 
+/// The refusal for an initiator the deciding end has no pin for: the same
+/// uniform `PERMISSION_DENIED`, and the same audit record a denied
+/// [`check_punch`] writes, under the principal `fp:<fingerprint>`. No
+/// authorizer is asked: an unpinned key has no principal for a policy to name,
+/// so it cannot be allowed by accident (a permissive test authorizer, or a
+/// role lookup that finds nothing).
+pub fn refuse_unpinned_punch(
+    audit: &dyn AuditSink,
+    op: PunchOp,
+    fingerprint: qsh_transport::Fingerprint,
+) -> OpError {
+    let principal = qsh_transport::Principal::Fingerprint(fingerprint);
+    let _ = audit.record(&AuditRecord::punch_signal(
+        &principal,
+        qsh_transport::AuthPath::Pin,
+        op.as_str(),
+        Decision::Deny,
+        None,
+    ));
+    punch_denied()
+}
+
 /// The uniform refusal: `PERMISSION_DENIED`, not retryable, the fixed message.
 fn punch_denied() -> OpError {
     OpError::new(ErrorCode::PermissionDenied, PERMISSION_DENIED_MESSAGE).with_retryable(false)

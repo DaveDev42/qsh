@@ -62,6 +62,7 @@ mod exec;
 mod file;
 mod file_data;
 mod file_host;
+mod punch;
 mod reverse;
 mod sessions;
 mod tunnels;
@@ -652,6 +653,9 @@ pub struct Server {
     /// every embedding that never wires one (the unit-test harnesses) serves
     /// connections exactly as before.
     trust_watch: OnceLock<Arc<crate::trust::SharedTrustStore>>,
+    /// The hole-punching target service of a `qsh serve --to` host
+    /// ([`Server::set_punch_target`]); unset everywhere else.
+    punch: Mutex<Option<Arc<crate::punch::PunchTarget>>>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -819,6 +823,7 @@ impl Server {
             admission,
             quotas,
             trust_watch: OnceLock::new(),
+            punch: Mutex::new(None),
         })
     }
 
@@ -1997,6 +2002,15 @@ impl Server {
                                 let reply = self
                                     .handle_rfwd_open(&ctx, conn, msg.request_id, req)
                                     .await;
+                                ctl.send.send(&reply).await?;
+                                continue;
+                            }
+                            // `PunchOffer` opens a server window whose
+                            // connections are served by this `Server`, so it
+                            // needs the `Arc` `dispatch` does not have. The
+                            // handler only decides and spawns; it never waits.
+                            if let Some(control_message::Body::PunchOffer(offer)) = &msg.body {
+                                let reply = self.handle_punch_offer(&ctx, msg.request_id, offer);
                                 ctl.send.send(&reply).await?;
                                 continue;
                             }

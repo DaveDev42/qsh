@@ -37,7 +37,7 @@ use quinn::{AsyncUdpSocket, Runtime, UdpPoller};
 use tokio::sync::mpsc;
 
 use super::{
-    Connection, DialError, Endpoint, Fingerprint, Incoming, LocalIdentity, SetupError,
+    Connection, DialError, Dialed, Endpoint, Fingerprint, Incoming, LocalIdentity, SetupError,
     TransportTuning, bind_tuned_udp_socket, classify_dial_failure, client_tls_config, finish_dial,
     server_config, transport_config,
 };
@@ -285,6 +285,8 @@ struct Shared {
     server_config: quinn::ServerConfig,
     server_verifier: Arc<QshPeerVerifier>,
     windows: Mutex<usize>,
+    /// [`PunchEndpoint::dial_trusted`]'s handshake time limit, in ms.
+    dial_timeout_ms: AtomicU64,
 }
 
 /// A QUIC endpoint on a punch-aware socket. Cheap to clone; clones share the
@@ -361,6 +363,9 @@ impl PunchEndpoint {
                 server_config,
                 server_verifier,
                 windows: Mutex::new(0),
+                dial_timeout_ms: AtomicU64::new(
+                    u64::try_from(super::default_dial_timeout().as_millis()).unwrap_or(u64::MAX),
+                ),
             }),
         })
     }
@@ -455,6 +460,50 @@ impl PunchEndpoint {
             });
         }
         Ok(connection)
+    }
+
+    /// Sets the time limit of [`Self::dial_trusted`] (the default dial
+    /// timeout until then).
+    pub fn set_dial_timeout(&self, timeout: Duration) {
+        self.shared.dial_timeout_ms.store(
+            u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Dials `addr` from the endpoint's socket the way `Dialer::dial` does:
+    /// any peer the evaluator trusts is accepted, the handshake uses the
+    /// dial timeout, and the result carries the endpoint that keeps
+    /// the connection alive. This is the registration dial of
+    /// `qsh serve --to`, which leaves the socket a hole-punch window later
+    /// opens on (ADR-0054 decision 7).
+    pub async fn dial_trusted(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Dialed, DialError> {
+        let s = &self.shared;
+        let verifier = Arc::new(QshPeerVerifier::new(s.evaluator.clone()));
+        let tls = client_tls_config(&s.identity, verifier.clone())?;
+        let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
+        client_config.transport_config(Arc::new(transport_config(s.tuning)));
+        let connecting = s
+            .endpoint
+            .connect_with(client_config, addr, server_name)
+            .map_err(ConnectError::from)?;
+        let timeout = Duration::from_millis(self.shared.dial_timeout_ms.load(Ordering::Relaxed));
+        let conn = match tokio::time::timeout(timeout, connecting).await {
+            Err(_) => return Err(DialError::Timeout(timeout)),
+            Ok(Ok(conn)) => conn,
+            Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
+        };
+        let connection = finish_dial(conn, &verifier)?;
+        Ok(Dialed {
+            connection,
+            endpoint: self.endpoint(),
+            verifier,
+        })
     }
 
     /// Turns the server side on until the returned guard, and every other

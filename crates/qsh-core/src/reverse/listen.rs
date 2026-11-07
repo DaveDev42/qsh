@@ -74,6 +74,7 @@ use super::registry::{self, RegisterOutcome, Registry};
 
 mod conn_table;
 mod hub;
+mod punch;
 mod registration;
 
 use conn_table::{ConnTable, Published, rollback_target};
@@ -439,6 +440,10 @@ pub struct Listen {
     /// reads nor writes its control stream (see [`Self::control_stalled`]).
     #[cfg(test)]
     test_control_stall: tokio::sync::watch::Sender<bool>,
+    /// The rendezvous role (ADR-0054): the punching-connection cap, the
+    /// attempt table and the `[punch].mode` switch. The relay itself is in
+    /// `listen/punch.rs`.
+    rendezvous: crate::punch::RendezvousState,
 }
 
 impl std::fmt::Debug for Listen {
@@ -605,7 +610,19 @@ impl Listen {
             test_path_watch: std::sync::Mutex::new(None),
             #[cfg(test)]
             test_control_stall: tokio::sync::watch::Sender::new(false),
+            rendezvous: crate::punch::RendezvousState::default(),
         })
+    }
+
+    /// `[punch].mode = "off"`: this listener stops relaying punch requests
+    /// and answers them `UNSUPPORTED` (ADR-0054 decision 19). On by default.
+    pub fn set_punch_enabled(&self, enabled: bool) {
+        self.rendezvous.set_enabled(enabled);
+    }
+
+    /// Punching connections open now (tests and diagnostics).
+    pub fn punch_connections(&self) -> usize {
+        self.rendezvous.clients()
     }
 
     /// The [`PathWatchConfig`] each registered connection's liveness watch

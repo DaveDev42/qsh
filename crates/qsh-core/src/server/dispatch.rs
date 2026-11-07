@@ -74,13 +74,18 @@ impl Server {
                     false,
                 ),
             )),
-            // Hole-punching signals (ADR-0054, `punch.v1`). The rendezvous and
-            // target roles land in later steps; until then no role serves
-            // them and a sender draws `UNSUPPORTED`, the answer a peer with
+            // Hole-punching signals (ADR-0054, `punch.v1`). Only the target
+            // role of a `qsh serve --to` host serves them. `RendezvousQuery`
+            // is answerable here; `PunchOffer` needs the `Arc<Server>` and is
+            // intercepted in `serve_control` before it gets here, so a direct
+            // dispatch of one (and a `PunchRequest`, which only a
+            // rendezvous relays) draws `UNSUPPORTED`, the answer a peer with
             // `[punch].mode = "off"` gives (decision 9).
+            Some(control_message::Body::RendezvousQuery(_)) => {
+                Some(self.handle_rendezvous_query(ctx, request_id))
+            }
             Some(control_message::Body::PunchRequest(_))
-            | Some(control_message::Body::PunchOffer(_))
-            | Some(control_message::Body::RendezvousQuery(_)) => Some(ControlMessage::error(
+            | Some(control_message::Body::PunchOffer(_)) => Some(ControlMessage::error(
                 request_id,
                 wire::Error::new(
                     ErrorCode::Unsupported,

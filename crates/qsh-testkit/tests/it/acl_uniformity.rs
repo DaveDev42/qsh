@@ -716,6 +716,118 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
         h.shutdown().await;
     }
 
+    // (f) SeamKind::PunchSignal: the three `host.punch` checks (ADR-0054
+    // decision 6). `punch.request` is driven through a real rendezvous on
+    // the simulated network; `punch.offer` and `punch.rendezvous` call the
+    // target's handlers with a registration connection's context.
+    {
+        let find = |name: &str| {
+            let seam = DENY_SEAMS
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("DENY_SEAMS must have a {name} row"));
+            assert_eq!(
+                seam.kind,
+                SeamKind::PunchSignal,
+                "{name}: this block only knows how to drive a PunchSignal seam"
+            );
+            seam
+        };
+
+        let seam = find("punch.request");
+        let mark = probe_mark(probe);
+        let (audit, err, a_fp) =
+            crate::punch_signal::drive_punch_request(wrap(Arc::new(DenyAll))).await;
+        assert_eq!(
+            err.error_code(),
+            ErrorCode::PermissionDenied,
+            "punch.request"
+        );
+        assert_eq!(err.message, PERMISSION_DENIED_MESSAGE, "punch.request");
+        assert_new_audit_deny_for_seam(&audit, 0, seam);
+        probe_assert(probe, mark, seam, &a_fp);
+        assert!(driven.insert(seam.name), "duplicate punch.request drive");
+
+        // The target side.
+        let initiator = make_identity();
+        let net = qsh_testkit::netsim::Net::new(qsh_testkit::netsim::NetConfig::default());
+        let site = net.internet().site(
+            qsh_testkit::netsim::NatKind::None,
+            "b",
+            "198.51.100.2".parse().unwrap(),
+        );
+        let endpoint = qsh_transport::PunchEndpoint::new(
+            qsh_transport::SocketSource::Virtual(Arc::new(site.bind_wildcard(6000).unwrap())),
+            make_identity().local,
+            Arc::new(StaticTrust::empty()),
+            qsh_transport::TransportTuning::default(),
+        )
+        .expect("punch endpoint");
+        let target = Arc::new(qsh_core::punch::PunchTarget::new(
+            endpoint,
+            Arc::new(pin(&initiator, "laptop")),
+            Arc::new(qsh_core::punch::FixedAddrs(vec![site.ip()])),
+        ));
+        let audit = Arc::new(MemoryAuditSink::new());
+        let broker = qsh_core::broker::Broker::new(
+            Arc::new(qsh_core::broker::SystemClock),
+            qsh_core::broker::BrokerConfig {
+                replay_bytes: 1024,
+                resume_ttl: std::time::Duration::from_secs(1),
+                close_grace: std::time::Duration::from_millis(10),
+                quota_limits: qsh_core::quota::QuotaLimits::default(),
+            },
+            Arc::new(qsh_core::broker::PipeFactory::new(1024)),
+        );
+        let server =
+            qsh_core::server::Server::new(wrap(Arc::new(DenyAll)), audit.clone(), broker, "b");
+        server.set_punch_target(target.clone());
+        let ctx = qsh_core::server::ConnCtx {
+            principal: Principal::Device("laptop".into()),
+            auth_path: qsh_transport::AuthPath::Pin,
+            peer_fingerprint: Some(peer(&initiator.fingerprint)),
+            peer_addr: "203.0.113.1:9000".parse().unwrap(),
+            conn_id: 1,
+            capabilities: vec![wire::CAP_PUNCH_V1.to_string()],
+            is_reverse_registration: true,
+        };
+
+        let denied = |msg: wire::ControlMessage, name: &str| match msg.body {
+            Some(wire::control_message::Body::Response(wire::Response {
+                body: Some(wire::response::Body::Error(e)),
+            })) => {
+                assert_eq!(e.error_code(), ErrorCode::PermissionDenied, "{name}");
+                assert_eq!(e.message, PERMISSION_DENIED_MESSAGE, "{name}");
+            }
+            other => panic!("{name}: expected the uniform denial, got {other:?}"),
+        };
+
+        let seam = find("punch.offer");
+        let (before, mark) = (audit.records().len(), probe_mark(probe));
+        let offer = wire::PunchOffer {
+            attempt_id: vec![9; 16],
+            initiator_fingerprint: initiator.fingerprint.as_bytes().to_vec(),
+            candidates: vec![wire::PunchCandidate {
+                ip: vec![198, 51, 100, 1],
+                port: 5000,
+                kind: wire::PunchCandidateKind::Host as i32,
+            }],
+        };
+        denied(server.handle_punch_offer(&ctx, 1, &offer), seam.name);
+        assert_new_audit_deny_for_seam(&audit, before, seam);
+        probe_assert(probe, mark, seam, &initiator.fingerprint);
+        assert_eq!(target.open_windows(), 0, "a denied offer opens no window");
+        assert_eq!(target.endpoint().stats().punch_sent, 0);
+        assert!(driven.insert(seam.name), "duplicate punch.offer drive");
+
+        let seam = find("punch.rendezvous");
+        let (before, mark) = (audit.records().len(), probe_mark(probe));
+        denied(server.handle_rendezvous_query(&ctx, 2), seam.name);
+        assert_new_audit_deny_for_seam(&audit, before, seam);
+        probe_assert(probe, mark, seam, &initiator.fingerprint);
+        assert!(driven.insert(seam.name), "duplicate punch.rendezvous drive");
+    }
+
     // Coverage: the set of rows this test actually drove must equal
     // DENY_SEAMS exactly — no row left undriven, nothing driven that
     // is not (any longer) a registry row. This is the "exemption list is

@@ -264,6 +264,21 @@ mod section_2_5 {
         );
         expected.insert(("host.reverse".to_string(), "host.reverse".to_string()));
 
+        // The three `host.punch` signalling checks (ADR-0054 decision 6) are
+        // the paragraph after it, for the same reason: a message checked at
+        // the connection, not an operation.
+        let punch_start = section
+            .find("홀펀칭 신호도 operation이 아니다")
+            .expect("§2.5 must carry the host.punch signalling paragraph");
+        let punch_paragraph = section[punch_start..].lines().next().unwrap_or_default();
+        for resource in ["punch.request", "punch.offer", "punch.rendezvous"] {
+            assert!(
+                punch_paragraph.contains(resource) && punch_paragraph.contains("host.punch"),
+                "the host.punch paragraph must name {resource}: {punch_paragraph:?}"
+            );
+            expected.insert((resource.to_string(), "host.punch".to_string()));
+        }
+
         let registry: HashSet<(String, String)> = OP_REGISTRY
             .iter()
             .map(|spec| {
@@ -403,13 +418,9 @@ mod dispatch_surface {
                  Principal::Pairing, routed to a dedicated pairing responder before \
                  dispatch/ACL ever run",
             ),
-            Body::PunchRequest(_) | Body::PunchOffer(_) | Body::RendezvousQuery(_) => {
-                Classification::NoAuthorizationSurface(
-                    "punch.v1 signalling (ADR-0054): no role serves it yet and dispatch \
-                 answers UNSUPPORTED before any resource exists; host.punch authorizes \
-                 it when the rendezvous and target roles land",
-                )
-            }
+            Body::PunchRequest(_) => Classification::NeedsOp("punch.request"),
+            Body::PunchOffer(_) => Classification::NeedsOp("punch.offer"),
+            Body::RendezvousQuery(_) => Classification::NeedsOp("punch.rendezvous"),
             Body::PairingAccepted(_) => Classification::NoAuthorizationSurface(
                 "a reply, produced only by the pairing responder itself; never a request \
                  a peer sends to be authorized",
@@ -455,8 +466,9 @@ mod dispatch_surface {
     /// unsolicited keepalive echo, never a peer request), and M7 Step 4
     /// added two more (`PairingProof`/`PairingAccepted`, ADR-0002) — so the
     /// real, code-verified list is seven variants, not three. The three `punch.v1`
-    /// signalling requests (ADR-0054) join until `host.punch` authorizes them.
-    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 10;
+    /// signalling requests (ADR-0054) authorize as `host.punch` and are
+    /// registry rows (`punch.request`, `punch.offer`, `punch.rendezvous`).
+    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 7;
 
     #[test]
     fn every_control_message_body_variant_needs_authorization_or_is_explicitly_exempt() {
@@ -633,6 +645,7 @@ mod dod2_audit {
             | ResourceKind::ForwardBinding
             | ResourceKind::ForwardDestination
             | ResourceKind::ReverseHost
+            | ResourceKind::PunchSignal
             | ResourceKind::FilePath => !is_exec_sentinel && !is_session_sentinel,
         };
         assert!(
@@ -1308,10 +1321,17 @@ mod single_source {
     /// row neither this list nor `dod2_audit::DISPATCH_DRIVABLE_OPS` names.
     const TESTKIT_ONLY_OPS: &[&str] = &["forward.local", "forward.remote", "host.reverse"];
 
+    /// The three `host.punch` rows: connection-level messages checked by
+    /// `check_punch`, driven by `acl::punch`'s unit tests (decision, audit
+    /// shape, fail-closed, uniform denial) and by `qsh-testkit`'s
+    /// `punch_signal` (the real rendezvous and target).
+    const PUNCH_SIGNAL_OPS: &[&str] = &["punch.request", "punch.offer", "punch.rendezvous"];
+
     #[test]
     fn every_op_registry_row_is_driven_somewhere() {
         let mut all: HashSet<&str> = dod2_audit::DISPATCH_DRIVABLE_OPS.iter().copied().collect();
         all.extend(TESTKIT_ONLY_OPS.iter().copied());
+        all.extend(PUNCH_SIGNAL_OPS.iter().copied());
         let registry: HashSet<&str> = OP_REGISTRY.iter().map(|spec| spec.op.as_str()).collect();
         assert_eq!(
             all, registry,

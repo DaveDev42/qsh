@@ -1534,6 +1534,33 @@ impl Listener {
         Ok(Self { endpoint, verifier })
     }
 
+    /// A listener on a caller-supplied (simulated) UDP socket, with the
+    /// same server configuration [`Self::bind_with_reset_key`] builds. For
+    /// `qsh_testkit::netsim`, where the rendezvous of a hole-punch test runs
+    /// on a virtual network. Not part of the stable surface, the same
+    /// escape-hatch status as [`SocketSource::Virtual`].
+    #[doc(hidden)]
+    pub fn bind_virtual(
+        socket: Arc<dyn quinn::AsyncUdpSocket>,
+        identity: LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+        tuning: TransportTuning,
+    ) -> Result<Self, SetupError> {
+        let verifier = Arc::new(QshPeerVerifier::new(evaluator));
+        let server_config = server_config(&identity, verifier.clone(), transport_config(tuning))?;
+        let addr = socket
+            .local_addr()
+            .unwrap_or_else(|_| SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)));
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            server_endpoint_config(None),
+            Some(server_config),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|source| SetupError::Bind { addr, source })?;
+        Ok(Self { endpoint, verifier })
+    }
+
     /// The actual bound address (useful with port 0).
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.endpoint.local_addr()

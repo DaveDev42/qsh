@@ -1013,7 +1013,7 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 ## 19. 홀펀칭 (ADR-0054)
 
-NAT 뒤 장비 B에 밖의 장비 A가 닿도록, 둘 다 닿는 사용자의 `qsh listen` R이 후보 주소를 중개하고 양 끝이 같은 UDP 소켓에서 동시에 보내 구멍을 뚫는다. 이 절은 wire 계약(capability `punch.v1`, message, 상한, 검사, 펀치 datagram, close 코드)만 적는다. 흐름의 역할 분담은 ADR-0054 결정 10이 정본이고, R의 중개 서비스·B의 offer 처리·client 경주는 뒤 스텝이 이 절에 더한다.
+NAT 뒤 장비 B에 밖의 장비 A가 닿도록, 둘 다 닿는 사용자의 `qsh listen` R이 후보 주소를 중개하고 양 끝이 같은 UDP 소켓에서 동시에 보내 구멍을 뚫는다. 이 절은 wire 계약(capability `punch.v1`, message, 상한, 검사, 펀치 datagram, close 코드)만 적는다. 흐름의 역할 분담은 ADR-0054 결정 10이 정본이고, R의 중개 서비스와 B의 offer 처리는 §19.9가 적는다. client 경주는 뒤 스텝이 이 절에 더한다.
 
 ### 19.1 message
 
@@ -1030,7 +1030,7 @@ message RendezvousList { repeated bytes fingerprints = 1; }                     
 enum PunchRefusal { NONE = 0; TARGET_NOT_REGISTERED = 1; TARGET_UNSUPPORTED = 2; TARGET_DENIED = 3; TARGET_BUSY = 4; TARGET_TIMEOUT = 5; } // PUNCH_REFUSAL_ 접두
 ```
 
-R 자신의 거부(인가, 속도 상한, 꺼짐, 크기)는 기존 `Error`(`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `UNSUPPORTED`, `INVALID_ARGUMENT`)로 답하고, B 쪽에서 난 일은 `PunchReply.refusal`로 알린다. wire `Error`에는 details가 없어서 A가 "R이 거부"와 "B가 거부"를 가르려면 이 enum이 필요하다. 모르는 `kind`·`refusal` 값은 decode를 실패시키지 않고 각각 `UNSPECIFIED`·`NONE`으로 읽는다. `qsh listen`은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer의 연결을 펀칭 연결로 받는다(ADR-0054 결정 10. §11의 갱신은 R의 중개 서비스 스텝이 한다).
+R 자신의 거부(인가, 속도 상한, 꺼짐, 크기)는 기존 `Error`(`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `UNSUPPORTED`, `INVALID_ARGUMENT`)로 답하고, B 쪽에서 난 일은 `PunchReply.refusal`로 알린다. wire `Error`에는 details가 없어서 A가 "R이 거부"와 "B가 거부"를 가르려면 이 enum이 필요하다. 모르는 `kind`·`refusal` 값은 decode를 실패시키지 않고 각각 `UNSPECIFIED`·`NONE`으로 읽는다. `qsh listen`은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer의 연결을 펀칭 연결로 받는다(ADR-0054 결정 10, §19.9).
 
 ### 19.2 상한과 모양 검사
 
@@ -1073,4 +1073,33 @@ R은 후보를 중개할 뿐 신원을 보증하지 않는다. A는 펀칭한 �
 
 ### 19.8 fuzz와 시험
 
-`decode_control` 타깃이 새 message를 덮고 `validate()`·`check_candidates`를 부른다. 새 타깃 `punch_candidates`가 후보 검사, 모양 검사, 펀치 datagram tag 대조를 먹인다(§13). 단위 시험: `crates/qsh-proto/src/punch.rs`의 `punch_candidate_validation_table`, `message_shape_rules_are_enforced`, `the_punch_messages_keep_their_pinned_numbers`, `the_encoder_refuses_a_malformed_punch_message`, `the_capability_is_advertised`.
+`decode_control` 타깃이 새 message를 덮고 `validate()`·`check_candidates`를 부른다. 새 타깃 `punch_candidates`가 후보 검사, 모양 검사, 펀치 datagram tag 대조를 먹인다(§13). 신호 경로의 시험은 `crates/qsh-testkit/tests/it/punch_signal.rs`가 가상 NAT 망에서 A·R·B를 모두 띄워 본다(§19.9). 단위 시험: `crates/qsh-proto/src/punch.rs`의 `punch_candidate_validation_table`, `message_shape_rules_are_enforced`, `the_punch_messages_keep_their_pinned_numbers`, `the_encoder_refuses_a_malformed_punch_message`, `the_capability_is_advertised`.
+
+### 19.9 R의 중개와 B의 offer 처리
+
+**펀칭 연결.** `qsh listen`(R)은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer를 등록 대신 펀칭 연결로 받는다. `[punch].mode = "off"`이면 이 분기는 없고 기존 `host.reverse` 누락 거절이 그대로 나간다. 펀칭 연결은 동시에 16개(`RENDEZVOUS_MAX_CLIENTS`)이고 넘으면 `Hello`에 `RESOURCE_EXHAUSTED`로 답한다. 이 연결이 받는 것은 `Ping`(`Pong`으로 답한다)과 `PunchRequest` 한 번이고, 그 밖의 message는 `UNSUPPORTED`다. 요청 없이 3초(`RENDEZVOUS_IDLE`), 답을 보낸 뒤 3초가 지나면 R이 연결을 닫는다. 거부나 오류로 끝난 요청은 오류 frame을 보낸 뒤 바로 닫는다.
+
+**R이 요청을 처리하는 순서.** 인가 전에는 자원을 만들지 않는다.
+
+1. `host.punch`(`punch.request`)를 연결의 principal로 판정하고 감사한다. 거부는 균일한 `PERMISSION_DENIED`이고 어떤 등록이 있는지 알리지 않는다.
+2. 모양 검사(§19.2)와 후보 검사(§19.3). 후보가 여덟을 넘거나 모양이 틀리면 `INVALID_ARGUMENT`이고 연결을 닫는다. 검사에 걸린 후보는 버리고 개수만 센다.
+3. 속도 표. A 하나(fingerprint)에 진행 중인 시도 하나, 60초에 여섯. 넘으면 `RESOURCE_EXHAUSTED`(재시도 가능)이고 연결은 열려 있다. 거부된 시도는 횟수에 넣지 않는다.
+4. `target_fingerprint`의 등록 연결을 찾는다. 없거나 `punch.v1`을 광고하지 않았으면 `PunchReply`의 `refusal`이 `TARGET_NOT_REGISTERED`·`TARGET_UNSUPPORTED`다.
+5. A의 후보에 R이 본 A의 주소(이 연결의 원격 주소)를 `REFLEXIVE`로 더해(후보는 여덟 이하로 맞춘다) `PunchOffer`를 B의 등록 연결로 보낸다. 후보 값은 바꾸지 않는다.
+6. B의 `PunchAnswer`를 1.5초(`PUNCH_ANSWER_TIMEOUT`) 기다린다. B의 오류는 `UNSUPPORTED`가 `TARGET_UNSUPPORTED`, `RESOURCE_EXHAUSTED`가 `TARGET_BUSY`, 나머지(`PERMISSION_DENIED` 포함)가 `TARGET_DENIED`로 바뀌고, 시간이 지나면 `TARGET_TIMEOUT`이다.
+7. `PunchReply`에 B의 후보와 R이 본 B의 주소(등록 연결의 원격 주소, `REFLEXIVE`)를 담고, `initiator_reflexive`에 A의 주소를 담는다. B의 주소가 공인 주소가 아니면(R과 B가 NAT 하나를 나눈다) `target_reflexive_private`가 참이고 A가 후보를 유도한다(ADR-0054 결정 8).
+
+R이 B에게 보내는 `PunchOffer`는 등록 연결의 요청 채널을 쓴다. B가 보기에는 controller가 보낸 요청이고 응답은 같은 `request_id`로 돌아온다.
+
+**B의 처리.** B(`qsh serve --to`)는 등록 연결로 받은 `PunchOffer`만 받는다(그 밖의 연결에서는 `UNSUPPORTED`). 순서는 다음과 같다.
+
+1. 모양 검사. 틀리면 `INVALID_ARGUMENT`.
+2. offer의 `initiator_fingerprint`를 B의 `trust.toml` pin으로 찾아 그 principal로 `host.punch`(`punch.offer`)를 판정하고 감사한다. pin이 없으면 감사에 거부를 남기고 균일한 `PERMISSION_DENIED`로 답한다. 권한 평가기가 허용하더라도 pin이 없는 initiator는 받지 않는다.
+3. 후보 검사. 쓸 수 있는 후보가 없으면 `INVALID_ARGUMENT`.
+4. 속도 표(initiator당 60초에 여섯)와 창 수(동시 `MAX_PUNCH_WINDOWS` = 4). 넘으면 `RESOURCE_EXHAUSTED`이고 창도 소켓 전송도 없다.
+5. 서버 창을 6초 연다. 호스트 후보(`invite_address` 경로 조회로 얻은 IPv4 하나, 전역·ULA IPv6 하나)와 이 창의 소켓 포트를 `PunchAnswer`로 답하고, offer의 후보로 펀치 datagram을 보낸다(ADR-0054 결정 14, 일정은 `run_target`).
+6. 창이 받은 연결은 검증된 fingerprint가 열려 있는 창의 initiator일 때만 일반 serve 경로로 넘긴다. 여러 창이 동시에 열려 있으면 Initial은 어느 창의 loop에든 닿으므로 "이 창의 initiator"가 아니라 "그 fingerprint의 창이 열려 있다"를 본다. 아니면 `0x1001`로 닫는다.
+
+`RendezvousQuery`는 B에 이미 선 어떤 연결에서든 보낼 수 있다. `host.punch`(`punch.rendezvous`)를 연결의 principal로 판정하고, 통과하면 B가 지금 등록해 있는 controller의 fingerprint(살아 있는 등록이 먼저, 그다음 `[serve].to`의 pin, 중복 없이 넷까지)를 `RendezvousList`로 답한다.
+
+**기록.** `qsh::punch` 로그는 `relayed`(결과 이름과 후보 개수)와 `window_opened`·`window_closed`(개수)만 낸다. 주소, fingerprint, `attempt_id`는 로그에도 감사에도 없다.

@@ -58,8 +58,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use qsh_proto::ErrorCode;
 use qsh_proto::wire;
-use qsh_transport::{Dialed, Dialer, FramedStream, TrustEvaluator};
+use qsh_transport::{Dialed, FramedStream, PunchEndpoint, SocketSource, TrustEvaluator};
 // Consumed by `run_reverse_observed`'s `StdRng::try_from_rng(&mut SysRng)` (below) —
 // production's replacement for `rand::rng()`'s `!Send` `ThreadRng`
 // (adversarial review finding: it made `run_reverse`'s returned future
@@ -157,6 +158,60 @@ pub async fn run_reverse_observed(
     on_unreachable: impl FnOnce(),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
+    run_reverse_on(
+        paths,
+        config,
+        identity,
+        controller,
+        offered_name_flag,
+        ReverseOptions::default(),
+        on_runtime,
+        on_unreachable,
+        shutdown,
+    )
+    .await
+}
+
+/// What [`run_reverse_on`] varies beyond [`run_reverse_observed`]: the socket
+/// the registration connection and the hole-punching window share, how the
+/// host learns its own addresses, and the window length. Production uses
+/// the default; a test on a simulated network supplies a virtual socket and
+/// fixed addresses (ADR-0054 decisions 7 and 22).
+pub struct ReverseOptions {
+    /// Where the UDP socket comes from.
+    pub socket: SocketSource,
+    /// How this host learns the addresses it offers as host candidates.
+    pub local_addrs: Arc<dyn crate::punch::LocalAddrs>,
+    /// `false` is `[punch].mode = "off"`: offers and queries get `UNSUPPORTED`.
+    pub punch_enabled: bool,
+    /// The server window's length; `None` is ADR-0054's six seconds.
+    pub punch_window: Option<Duration>,
+}
+
+impl Default for ReverseOptions {
+    fn default() -> Self {
+        Self {
+            socket: SocketSource::Os,
+            local_addrs: Arc::new(crate::punch::RouteAddrs),
+            punch_enabled: true,
+            punch_window: None,
+        }
+    }
+}
+
+/// [`run_reverse_observed`] with a caller-chosen [`ReverseOptions`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_reverse_on(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    controller: &str,
+    offered_name_flag: Option<&str>,
+    options: ReverseOptions,
+    on_runtime: impl FnOnce(&crate::serve::HostRuntime),
+    on_unreachable: impl FnOnce(),
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
     let device_id = identity.identity.device_id.clone();
     let offered_name = resolve_offered_name(offered_name_flag, config, &device_id);
     // Fail closed on nonsense config before touching the network at all
@@ -174,14 +229,50 @@ pub async fn run_reverse_observed(
     // long-lived handle still picks up an operator's `qsh trust add`
     // without needing to be reopened.
     let trust = SharedTrustStore::open(paths.trust_file())?;
-    let dialer = Dialer::new(identity.local, trust.clone() as Arc<dyn TrustEvaluator>)
-        .with_tuning(liveness.tuning());
+    // The registration connection leaves from a punch-aware endpoint, so the
+    // NAT mapping the rendezvous sees is the one a later hole-punching window
+    // uses (ADR-0054 decision 7). The server side stays off until an offer
+    // opens a window.
+    let evaluator = trust.clone() as Arc<dyn TrustEvaluator>;
+    let local_identity = identity.local.clone();
+    let tuning = liveness.tuning();
+    // An OS socket is replaced after a lost connection (a fresh source port,
+    // like the fresh endpoint every redial used to have); a simulated one
+    // cannot be, so it is reused.
+    let rebind_on_loss = matches!(options.socket, SocketSource::Os);
+    let open_socket_error = |err: qsh_transport::SetupError| {
+        OpError::new(
+            ErrorCode::Internal,
+            format!("cannot open the registration socket: {err}"),
+        )
+    };
+    let mut endpoint =
+        PunchEndpoint::new(options.socket, identity.local, evaluator.clone(), tuning)
+            .map_err(open_socket_error)?;
 
     // The broker — and every session it ever opens — outlives every
     // connection this loop dials (`docs/design/architecture.md` §3): built
     // once, reused across every attempt below, never rebuilt on a
     // reconnect. This is what makes "sessions survive reconnection" true.
     let runtime = crate::serve::host_runtime(paths, config, device_id.clone(), Arc::clone(&trust));
+    let build_target = |endpoint: &PunchEndpoint| {
+        let mut target = crate::punch::PunchTarget::new(
+            endpoint.clone(),
+            evaluator.clone(),
+            options.local_addrs.clone(),
+        );
+        if !options.punch_enabled {
+            target = target.disabled();
+        }
+        if let Some(window) = options.punch_window {
+            target = target.with_window(window);
+        }
+        let target = Arc::new(target);
+        target.set_configured(configured_controller(&trust, controller));
+        target
+    };
+    let mut punch_target = build_target(&endpoint);
+    runtime.server.set_punch_target(punch_target.clone());
     on_runtime(&runtime);
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: offered_name.clone(),
@@ -233,7 +324,7 @@ pub async fn run_reverse_observed(
                 runtime.server.drain_as(crate::lifecycle::Process::ServeTo).await;
                 return Ok(());
             }
-            result = dial_and_register(&dialer, &trust, paths, controller, &local_hello) => result,
+            result = dial_and_register(&endpoint, &trust, paths, controller, &local_hello) => result,
         };
 
         let (dialed, ctl, peer_hello) = match attempt {
@@ -327,6 +418,10 @@ pub async fn run_reverse_observed(
         // Must outlive the connection (`Dialer::dial`'s own docs).
         let _endpoint = dialed.endpoint;
         let conn = dialed.connection;
+        let controller_fp = conn.peer_fingerprint().map(|fp| *fp.as_bytes());
+        if let Some(fp) = controller_fp {
+            punch_target.note_registered(fp);
+        }
         let peer_fp = conn
             .peer_fingerprint()
             .map(|fp| fp.to_string())
@@ -567,6 +662,25 @@ pub async fn run_reverse_observed(
                  ordinary backoff"
             );
         }
+        if let Some(fp) = &controller_fp {
+            punch_target.note_lost(fp);
+        }
+        if rebind_on_loss {
+            match PunchEndpoint::new(
+                SocketSource::Os,
+                local_identity.clone(),
+                evaluator.clone(),
+                tuning,
+            ) {
+                Ok(fresh) => {
+                    endpoint = fresh;
+                    punch_target = build_target(&endpoint);
+                    runtime.server.set_punch_target(punch_target.clone());
+                }
+                // Keep the old socket; the next dial still works from it.
+                Err(err) => tracing::warn!(error = %err, "cannot open a fresh registration socket"),
+            }
+        }
         let lost_at = crate::config::now_rfc3339();
         ReconnectEvent {
             event: "lost",
@@ -669,14 +783,14 @@ fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: Wa
 /// unit test (`dial_and_register_maps_an_unresolvable_controller_to_resolve_cause`)
 /// is the only place [`ReconnectCause::Resolve`] is constructed on its own.
 async fn dial_and_register(
-    dialer: &Dialer,
+    endpoint: &PunchEndpoint,
     trust: &SharedTrustStore,
     paths: &Paths,
     controller: &str,
     local_hello: &wire::Hello,
 ) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
     dial_and_register_resolving(
-        dialer,
+        endpoint,
         trust,
         paths,
         controller,
@@ -697,7 +811,7 @@ async fn dial_and_register(
 /// not only the first
 /// (`dial_and_register_tries_every_resolved_address_not_only_the_first`).
 async fn dial_and_register_resolving(
-    dialer: &Dialer,
+    endpoint: &PunchEndpoint,
     trust: &SharedTrustStore,
     paths: &Paths,
     controller: &str,
@@ -715,19 +829,20 @@ async fn dial_and_register_resolving(
     let addrs = crate::ops::resolve_all_with(resolver, &address)
         .await
         .map_err(|err| (err, ReconnectCause::Resolve))?;
-    let dialed = crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &server_name))
-        .await
-        .map_err(|(err, attempted)| {
-            // Issue #4 item 2: `cause` classifies the LAST address's
-            // failure — the same one `map_dial_error` below turns into
-            // the human message, so the two never disagree about which
-            // attempt is "the" failure.
-            let cause = classify_dial_error(&err);
-            (
-                crate::ops::exec::map_dial_error(err, &address, attempted),
-                cause,
-            )
-        })?;
+    let dialed =
+        crate::ops::dial_first_reachable(&addrs, |addr| endpoint.dial_trusted(addr, &server_name))
+            .await
+            .map_err(|(err, attempted)| {
+                // Issue #4 item 2: `cause` classifies the LAST address's
+                // failure — the same one `map_dial_error` below turns into
+                // the human message, so the two never disagree about which
+                // attempt is "the" failure.
+                let cause = classify_dial_error(&err);
+                (
+                    crate::ops::exec::map_dial_error(err, &address, attempted),
+                    cause,
+                )
+            })?;
     let (ctl, peer_hello) = crate::handshake::initiate(&dialed.connection, local_hello.clone())
         .await
         .map_err(|err| {
@@ -738,6 +853,20 @@ async fn dial_and_register_resolving(
             )
         })?;
     Ok((dialed, ctl, peer_hello))
+}
+
+/// The fingerprint of the controller `qsh serve --to <controller>` names, when
+/// this host's trust store pins it, for the `RendezvousList` a
+/// `RendezvousQuery` is answered with (ADR-0054 decision 5).
+fn configured_controller(trust: &SharedTrustStore, controller: &str) -> Vec<[u8; 32]> {
+    let store = trust.snapshot();
+    let Some(peer) = store.resolve_host(controller) else {
+        return Vec::new();
+    };
+    peer.fingerprint
+        .parse::<qsh_transport::Fingerprint>()
+        .map(|fp| vec![*fp.as_bytes()])
+        .unwrap_or_default()
 }
 
 /// Classify a [`qsh_transport::DialError`] into [`ReconnectCause`]'s
