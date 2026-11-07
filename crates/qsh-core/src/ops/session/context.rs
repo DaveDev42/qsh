@@ -22,6 +22,10 @@ pub(super) struct AttachContext {
     /// Drawing state when the host granted screen sync for this attach
     /// (ADR-0052); a recovery asks for it again.
     pub(super) screen: Option<Arc<ScreenSink>>,
+    /// What this attach knows about its host answering (ADR-0053 decision
+    /// 9): the pumps report sends, the path watch of every leg reports
+    /// replies, the recovery loop its attempt.
+    pub(super) link_status: Arc<crate::client::linkstatus::LinkTracker>,
     /// `Some` only on the forward route — `session_attach`'s own doc on
     /// why the reverse route never resolves one of these at all.
     /// [`reattach`] (the only reader) is reachable only when

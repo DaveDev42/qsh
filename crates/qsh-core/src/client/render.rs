@@ -60,6 +60,18 @@
 //!   the alternate screen, whatever the caller passes. After
 //!   [`ScreenRenderer::history`] the next draw repaints and composes again.
 //!
+//! - **Status line.** [`ScreenRenderer::draw_composed`] also takes the
+//!   connection status line (ADR-0053 decision 9) and puts it, reverse
+//!   video across the whole width, on the window's top row, or the bottom
+//!   row when the cursor is on the top one. It is composed like the
+//!   overlay, after the host state is fitted, so the synced state is never
+//!   touched, and it is drawn on the alternate screen too. The text is cut
+//!   at the right edge; a window narrower than
+//!   [`crate::client::linkstatus::MIN_COLS`] gets no line. When the line
+//!   goes, the next frame is a cell diff that writes the host cells of that
+//!   row back: nothing is cleared. The text is drawn one `char` per cell,
+//!   so it must be narrow (the caller composes it from ASCII).
+//!
 //! [`ScreenRenderer::reset`] gives the bytes that put the local terminal's
 //! modes back when the attach ends.
 
@@ -163,7 +175,13 @@ impl Frame {
 
     /// Fit `state` to a `cols` x `rows` window: crop what does not fit,
     /// blank what is missing.
-    fn fit(state: &ScreenState, overlay: Option<&Overlay>, cols: u16, rows: u16) -> Self {
+    fn fit(
+        state: &ScreenState,
+        overlay: Option<&Overlay>,
+        status: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Self {
         // Crop rows so the cursor row stays on screen.
         let row_offset = if state.rows > rows {
             usize::from(state.cursor_row + 1)
@@ -231,6 +249,20 @@ impl Frame {
             {
                 cursor_row = r as u16;
                 cursor_col = c.min(cols - 1);
+            }
+        }
+        if let Some(text) = status.filter(|_| cols >= crate::client::linkstatus::MIN_COLS) {
+            // The top row, unless the cursor is there: then the bottom one.
+            let row = if cursor_row == 0 { rows - 1 } else { 0 };
+            let start = usize::from(row) * usize::from(cols);
+            let mut chars = text.chars();
+            for cell in &mut cells[start..start + usize::from(cols)] {
+                let ch = chars.next();
+                *cell = Cell {
+                    text: ch.map_or_else(|| " ".into(), |ch| ch.to_string().into()),
+                    flags: cell_flags::INVERSE,
+                    ..Cell::default()
+                };
             }
         }
         Self {
@@ -306,7 +338,7 @@ impl ScreenRenderer {
     /// by `effects` (written once, here and never again). An empty result
     /// means nothing changed.
     pub fn draw(&mut self, state: &ScreenState, effects: &[Effect], local: (u16, u16)) -> Vec<u8> {
-        self.compose(state, None, effects, local)
+        self.compose(state, None, None, effects, local)
     }
 
     /// [`Self::draw`] with the predictor's `overlay` composed over the host
@@ -319,18 +351,33 @@ impl ScreenRenderer {
         effects: &[Effect],
         local: (u16, u16),
     ) -> Vec<u8> {
-        self.compose(state, Some(overlay), effects, local)
+        self.compose(state, Some(overlay), None, effects, local)
+    }
+
+    /// [`Self::draw_with_overlay`] with the connection status line `status`
+    /// composed on top as well (module docs, "Status line"). `overlay` is
+    /// optional so an attach without a predictor can show the line too.
+    pub fn draw_composed(
+        &mut self,
+        state: &ScreenState,
+        overlay: Option<&Overlay>,
+        status: Option<&str>,
+        effects: &[Effect],
+        local: (u16, u16),
+    ) -> Vec<u8> {
+        self.compose(state, overlay, status, effects, local)
     }
 
     fn compose(
         &mut self,
         state: &ScreenState,
         overlay: Option<&Overlay>,
+        status: Option<&str>,
         effects: &[Effect],
         local: (u16, u16),
     ) -> Vec<u8> {
         let (cols, rows) = (local.0.max(1), local.1.max(1));
-        let frame = Frame::fit(state, overlay, cols, rows);
+        let frame = Frame::fit(state, overlay, status, cols, rows);
         let mut out = Vec::new();
 
         // The first frame lands on a terminal that already shows something:

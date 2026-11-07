@@ -70,6 +70,9 @@ pub(super) async fn recover_attach(
         if ctx.finished() {
             return Recovery::Abandoned;
         }
+        // The status line names the attempt (1-based) from the moment it
+        // starts, backoff included (ADR-0053 decision 9).
+        ctx.link_status.set_recovering(Some(attempt + 1));
         let backoff = RecoveryConfig::backoff(attempt);
         if !backoff.is_zero() {
             tokio::time::sleep(backoff).await;

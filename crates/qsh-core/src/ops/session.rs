@@ -75,7 +75,7 @@ pub(in crate::ops) use reader::dial_reverse;
 use reconnect::{DialReconnect, LocalReconnect};
 use recovery::abandoned;
 use recovery::{ReattachTask, Recovery, lock, map_resume_error, recover_attach, spawn_reattach};
-use screen_sink::{ScreenSink, screen_sync_unsupported};
+use screen_sink::{ScreenSink, StatusInit, screen_sync_unsupported};
 
 /// Upper bound on the input one `session.write` accepts (`--stdin` or
 /// `--data-b64`), 16 MiB. Keeps a single value op — and its stdin buffer —
@@ -1066,15 +1066,25 @@ impl Ops {
             }
             _ => None,
         };
+        // The attach's link record (ADR-0053 decision 9), kept whether or
+        // not the status line draws it.
+        let link_status = Arc::new(crate::client::linkstatus::LinkTracker::new(
+            std::time::Instant::now(),
+        ));
         let screen_sink = screen.filter(|_| screen_granted).map(|s| {
             let predict =
                 crate::client::predict_drive::PredictDriver::new(s.predict, screen_echo, reverse);
-            let sink = Arc::new(ScreenSink::new(s.cols, s.rows, predict));
+            let status = s.status_line.enabled().then(|| StatusInit {
+                link: link_status.clone(),
+                escape: s.escape,
+            });
+            let sink = Arc::new(ScreenSink::new(s.cols, s.rows, predict, status));
             sink.set_writer(writer_lease);
             sink
         });
         let ctx = Arc::new(AttachContext {
             screen: screen_sink.clone(),
+            link_status: link_status.clone(),
             target,
             host: r.host.clone(),
             session_id: r.session_id.clone(),
@@ -1097,41 +1107,46 @@ impl Ops {
         // decide for its connection and says so on `qsh::adapt` (ADR-0052
         // decision 14). A reverse route has no QUIC connection of ours to
         // watch.
-        let adapt = match (&link, screen.is_some()) {
-            (RecoveryLink::Forward(live), true) => {
-                let pinned_keep_alive = self
-                    .config()
-                    .ok()
-                    .and_then(|c| c.transport.keep_alive_ms)
-                    .map(Duration::from_millis);
-                let user = crate::adapt::User {
-                    keep_alive: pinned_keep_alive,
-                    prediction: screen.and_then(|s| s.predict.pin()),
-                    ..crate::adapt::User::from_process()
-                };
-                let sampler = crate::adapt::PolicySampler::new(
-                    user,
-                    screen_granted,
-                    capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
-                );
-                let live = live.clone();
-                // The prediction knob of each step goes to the attach's
-                // predictor (ADR-0053 decision 8).
-                let sink = screen_sink.clone();
-                Some(crate::adapt::PolicyMonitor::spawn_observed(
-                    conn.runtime().handle(),
-                    move || live.connection(),
-                    sampler,
-                    crate::adapt::PolicyMonitor::emit_line,
-                    move |sample| {
-                        if let Some(sink) = &sink {
-                            sink.set_policy(sample.prediction);
-                        }
-                    },
-                ))
-            }
-            _ => None,
-        };
+        let adapt =
+            match (&link, screen.is_some()) {
+                (RecoveryLink::Forward(live), true) => {
+                    let pinned_keep_alive = self
+                        .config()
+                        .ok()
+                        .and_then(|c| c.transport.keep_alive_ms)
+                        .map(Duration::from_millis);
+                    let user = crate::adapt::User {
+                        keep_alive: pinned_keep_alive,
+                        prediction: screen.and_then(|s| s.predict.pin()),
+                        ..crate::adapt::User::from_process()
+                    };
+                    let sampler = crate::adapt::PolicySampler::new(
+                        user,
+                        screen_granted,
+                        capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
+                    );
+                    let live = live.clone();
+                    // The prediction knob of each step goes to the attach's
+                    // predictor (ADR-0053 decision 8).
+                    let sink = screen_sink.clone();
+                    Some(crate::adapt::PolicyMonitor::spawn_observed(
+                        conn.runtime().handle(),
+                        move || live.connection(),
+                        sampler,
+                        crate::adapt::PolicyMonitor::emit_line,
+                        move |sample| {
+                            if let Some(sink) = &sink {
+                                sink.set_policy(sample.prediction);
+                                // The status line's `4 x srtt` threshold.
+                                sink.set_srtt((sample.report.rtt_ms > 0.0).then(|| {
+                                    Duration::from_secs_f64(sample.report.rtt_ms / 1000.0)
+                                }));
+                            }
+                        },
+                    ))
+                }
+                _ => None,
+            };
         Ok(SessionAttachStream {
             stop: AttachStop {
                 finished,
@@ -1155,6 +1170,7 @@ impl Ops {
             renewal: resume_ttl.map(|ttl| RenewalSchedule::new(ttl, std::time::Instant::now())),
             expires_at,
             link,
+            link_status,
             screen: screen_sink,
             predict_unavailable,
         })
@@ -1555,3 +1571,6 @@ mod tests;
 
 #[cfg(test)]
 mod predict_tests;
+
+#[cfg(test)]
+mod status_tests;

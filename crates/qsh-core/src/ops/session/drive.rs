@@ -74,7 +74,7 @@ pub(super) async fn drive_attach(
     let mut attached = attached;
 
     'leg: loop {
-        let watch = PathWatch::new(ctx.recovery.watch);
+        let watch = PathWatch::linked(ctx.recovery.watch, ctx.link_status.clone());
         let probes = Arc::new(tokio::sync::Notify::new());
         // Screen sync (ADR-0052): this leg's screen, and the channel the
         // reader tells the input pump which state to acknowledge on. A new
@@ -83,7 +83,7 @@ pub(super) async fn drive_attach(
         let (ack_tx, ack_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
         let mut leg_screen = match &ctx.screen {
             Some(sink) if !attached.screen_channel.is_empty() => {
-                sink.new_leg();
+                sink.new_leg(attached.writer_lease);
                 Some(LegScreen {
                     client: crate::client::screen::ClientScreen::new(),
                     acks: ack_tx,
@@ -115,8 +115,7 @@ pub(super) async fn drive_attach(
                 stop: Some(ctl_stop),
                 handle: tokio::spawn(pump_attach_control(
                     session,
-                    ctx.session_id.clone(),
-                    ctx.session_ref.clone(),
+                    ctx.clone(),
                     events.clone(),
                     watch.clone(),
                     probes.clone(),
@@ -174,15 +173,19 @@ pub(super) async fn drive_attach(
                 drop(watchdog);
                 let reconnector =
                     DialReconnect::new(ctx.clone(), forward_link.clone(), pending.clone());
-                let recovery = recover_attach(
+                let recovery = with_status_ticks(
                     &ctx,
-                    Some(&forward_link),
-                    leg_survived,
-                    &watch,
-                    &probes,
-                    &cursor,
-                    &mut pumps,
-                    &reconnector,
+                    &events,
+                    recover_attach(
+                        &ctx,
+                        Some(&forward_link),
+                        leg_survived,
+                        &watch,
+                        &probes,
+                        &cursor,
+                        &mut pumps,
+                        &reconnector,
+                    ),
                 )
                 .await;
                 if matches!(recovery, Recovery::SameLeg) {
@@ -207,15 +210,19 @@ pub(super) async fn drive_attach(
             {
                 drop(watchdog);
                 let reconnector = LocalReconnect::new(ctx.clone(), pending.clone());
-                recover_attach(
+                with_status_ticks(
                     &ctx,
-                    None,
-                    leg_survived,
-                    &watch,
-                    &probes,
-                    &cursor,
-                    &mut pumps,
-                    &reconnector,
+                    &events,
+                    recover_attach(
+                        &ctx,
+                        None,
+                        leg_survived,
+                        &watch,
+                        &probes,
+                        &cursor,
+                        &mut pumps,
+                        &reconnector,
+                    ),
                 )
                 .await
             } else {
@@ -265,6 +272,39 @@ pub(super) async fn drive_attach(
             }
         }
     }
+}
+
+/// Run a recovery while keeping the status line alive: no leg is being read
+/// then, so nothing else would draw the seconds counting or the attempt
+/// number (ADR-0053 decision 9). The line is drawn from the arm's body, which
+/// is never cancelled, so a frame is either handed to the frontend or not
+/// computed at all. The recovery's attempt marker ends with it.
+async fn with_status_ticks<T>(
+    ctx: &AttachContext,
+    events: &tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+    recovery: impl std::future::Future<Output = T>,
+) -> T {
+    tokio::pin!(recovery);
+    let out = loop {
+        tokio::select! {
+            biased;
+            out = &mut recovery => break out,
+            () = screen_tick_due(ctx.screen.as_deref()) => {
+                if let Some(sink) = &ctx.screen {
+                    let (bytes, sequence) = sink.tick(std::time::Instant::now());
+                    if !bytes.is_empty() {
+                        // A frontend that went away ends the recovery by
+                        // its own `finished` flag; nothing to do here.
+                        let _ = events
+                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                            .await;
+                    }
+                }
+            }
+        }
+    };
+    ctx.link_status.set_recovering(None);
+    out
 }
 
 /// One leg's side of screen sync: the screen the host described so far and

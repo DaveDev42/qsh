@@ -361,14 +361,16 @@ impl Ops {
         let screen_offered = has(CAP_SCREEN_V1);
         let datagram_offered = has(CAP_DATAGRAM_V1);
         let echo_offered = has(CAP_SCREEN_ECHO_V1);
-        let predict_wanted =
-            config.interactive.predict.unwrap_or_default() != crate::ops::Predict::Never;
+        let predict_mode = config.interactive.predict.unwrap_or_default();
+        let predict_wanted = predict_mode != crate::ops::Predict::Never;
         let screen_wanted =
             config.interactive.screen_sync.unwrap_or_default() != crate::ops::ScreenSync::Off;
         let user = User {
             adaptive: config.transport.adaptive_mode().enabled(),
             keep_alive: config.transport.keep_alive_ms.map(Duration::from_millis),
-            prediction: None,
+            // The same pin an attach puts on the policy, so the reasons
+            // (`user_override`) match what an attach would report.
+            prediction: predict_mode.pin(),
         };
         let mut sampler =
             PolicySampler::new(user, screen_offered && screen_wanted, datagram_offered);

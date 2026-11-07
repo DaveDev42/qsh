@@ -131,6 +131,8 @@ pub struct SessionAttachStream {
     /// `open_attach_stream` returns (`crate::ops::session::RecoveryLink`'s
     /// own doc).
     pub(super) link: RecoveryLink,
+    /// See [`Self::link_status`].
+    pub(super) link_status: Arc<crate::client::linkstatus::LinkTracker>,
     /// Drawing state when the host granted screen sync for this attach.
     pub(super) screen: Option<Arc<ScreenSink>>,
     /// Why `--predict=always` cannot act on this attach, if it asked and
@@ -232,6 +234,15 @@ impl SessionAttachStream {
         self.adapt
             .as_ref()
             .and_then(crate::adapt::PolicyMonitor::current)
+    }
+
+    /// What this attach knows about its host answering (ADR-0053 decision
+    /// 9): when the last authenticated inbound was seen, when the oldest
+    /// unanswered send was made, and the recovery attempt in progress. The
+    /// connection status line draws from the same record; this is the
+    /// value, whether or not the line is on.
+    pub fn link_status(&self) -> crate::client::linkstatus::LinkStatus {
+        self.link_status.snapshot()
     }
 
     /// Bind and start this attach's `-L` local forwards (the M4 plan (2473c88)

@@ -496,13 +496,28 @@ struct Inner {
     /// "somebody came back to their terminal" is measured fast rather than
     /// after the rest of an idle-length beat.
     wake: tokio::sync::Notify,
+    /// The attach's link record (ADR-0053 decision 9): every authenticated
+    /// inbound this watch is told about is also a reply there.
+    link: Option<Arc<super::linkstatus::LinkTracker>>,
 }
 
 impl PathWatch {
     /// Start watching, with the path assumed live as of now.
     pub fn new(cfg: PathWatchConfig) -> Self {
+        Self::build(cfg, None)
+    }
+
+    /// [`Self::new`] that also reports every authenticated inbound to
+    /// `link`: the status line's `last_reply` is what this watch last saw
+    /// (ADR-0053 decision 9).
+    pub fn linked(cfg: PathWatchConfig, link: Arc<super::linkstatus::LinkTracker>) -> Self {
+        Self::build(cfg, Some(link))
+    }
+
+    fn build(cfg: PathWatchConfig, link: Option<Arc<super::linkstatus::LinkTracker>>) -> Self {
         Self {
             inner: Arc::new(Inner {
+                link,
                 cfg,
                 state: std::sync::Mutex::new(PathState::new(Instant::now())),
                 dead: AtomicBool::new(false),
@@ -532,6 +547,7 @@ impl PathWatch {
     /// waiting, so it does not move the cadence.
     pub fn inbound(&self) {
         self.state().observe_inbound(Instant::now());
+        self.link_reply(Instant::now());
         self.bump_inbound();
     }
 
@@ -545,12 +561,21 @@ impl PathWatch {
     /// ACKs must not read as one.
     pub(crate) fn transport_inbound(&self, at: Instant) {
         self.state().observe_inbound_since(at);
+        self.link_reply(at);
+    }
+
+    /// Tell the attach's link record an authenticated inbound arrived.
+    fn link_reply(&self, at: Instant) {
+        if let Some(link) = &self.inner.link {
+            link.reply(at.into_std());
+        }
     }
 
     /// Report session traffic from the host: output, an event, a host
     /// `Ping`. Liveness *and* activity.
     pub fn traffic(&self) {
         self.observe(|state, now| state.observe_traffic(now));
+        self.link_reply(Instant::now());
         self.bump_inbound();
     }
 

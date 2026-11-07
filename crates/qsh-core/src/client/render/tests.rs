@@ -1122,3 +1122,134 @@ mod overlay {
         run(Mode::Echo, ops).unwrap();
     }
 }
+
+/// The connection status line composed over the host screen (ADR-0053
+/// decision 9): the same local terminal model as above.
+mod status {
+    use super::*;
+
+    const LINE: &str = "qsh: last reply 3s ago; ~. to quit, ~d to detach";
+
+    fn drawn(rows: u16, cols: u16, bytes: &[u8]) -> (ScreenRenderer, HostScreen, ScreenState) {
+        let (_h, state) = host(rows, cols, bytes);
+        let mut r = ScreenRenderer::new();
+        let mut local = term(rows, cols);
+        feed(&mut local, &r.draw(&state, &[], (cols, rows)));
+        (r, local, state)
+    }
+
+    fn inverse_row(s: &ScreenState, row: usize) -> bool {
+        s.grid[row]
+            .cells
+            .iter()
+            .all(|c| c.flags & cell_flags::INVERSE != 0)
+    }
+
+    #[test]
+    fn the_line_fills_the_top_row_in_reverse_video() {
+        let (mut r, mut local, state) = drawn(4, 60, b"$ ls\r\nout\r\nmore\r\n$ ");
+        let bytes = r.draw_composed(&state, None, Some(LINE), &[], (60, 4));
+        feed(&mut local, &bytes);
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), LINE);
+        assert!(inverse_row(&l, 0), "reverse video across the whole width");
+        assert_eq!(text_of(&l, 1), "out");
+        // The host's cursor is where it was.
+        assert_eq!((l.cursor_row, l.cursor_col), (3, 2));
+        // The synced state is untouched.
+        assert_eq!(text_of(&state, 0), "$ ls");
+    }
+
+    #[test]
+    fn removing_the_line_writes_the_host_row_back_and_never_clears() {
+        let (mut r, mut local, state) = drawn(4, 60, b"$ ls\r\nout\r\nmore\r\n$ ");
+        feed(
+            &mut local,
+            &r.draw_composed(&state, None, Some(LINE), &[], (60, 4)),
+        );
+        let bytes = r.draw_composed(&state, None, None, &[], (60, 4));
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(!s.contains("\x1b[2J") && !s.contains("\x1b[J"), "{s:?}");
+        feed(&mut local, &bytes);
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), "$ ls");
+        assert!(
+            l.grid[0]
+                .cells
+                .iter()
+                .all(|c| c.flags & cell_flags::INVERSE == 0)
+        );
+        assert_same(&l, &state);
+    }
+
+    #[test]
+    fn only_the_top_row_is_written_when_the_line_changes() {
+        let (mut r, _local, state) = drawn(4, 60, b"$ ls\r\nout\r\nmore\r\n$ ");
+        r.draw_composed(&state, None, Some(LINE), &[], (60, 4));
+        let next = LINE.replace("3s", "4s");
+        let bytes = r.draw_composed(&state, None, Some(&next), &[], (60, 4));
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(s.contains("\x1b[1;17H") && s.contains('4'), "{s:?}");
+        assert!(!s.contains("out") && !s.contains("more"), "{s:?}");
+        // Same text again: nothing.
+        assert!(
+            r.draw_composed(&state, None, Some(&next), &[], (60, 4))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_line_goes_to_the_bottom_row_when_the_cursor_is_on_the_top_one() {
+        let (mut r, mut local, state) = drawn(4, 60, b"$ ");
+        feed(
+            &mut local,
+            &r.draw_composed(&state, None, Some(LINE), &[], (60, 4)),
+        );
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), "$");
+        assert_eq!(text_of(&l, 3), LINE);
+        assert!(inverse_row(&l, 3));
+    }
+
+    #[test]
+    fn a_predicted_cursor_on_the_top_row_moves_the_line_down_too() {
+        // The host cursor is on row 2, the overlay's is on row 0.
+        let (mut r, mut local, state) = drawn(4, 60, b"a\r\nb\r\n$ ");
+        let o = Overlay {
+            cells: Vec::new(),
+            cursor: Some((0, 3)),
+        };
+        feed(
+            &mut local,
+            &r.draw_composed(&state, Some(&o), Some(LINE), &[], (60, 4)),
+        );
+        assert_eq!(text_of(&local.snapshot(), 3), LINE);
+    }
+
+    #[test]
+    fn the_text_is_cut_at_the_right_edge_and_a_narrow_window_gets_none() {
+        let (mut r, mut local, state) = drawn(4, 30, b"x\r\ny\r\n$ ");
+        feed(
+            &mut local,
+            &r.draw_composed(&state, None, Some(LINE), &[], (30, 4)),
+        );
+        assert_eq!(text_of(&local.snapshot(), 0), LINE[..30].trim_end());
+
+        let (mut r, mut local, state) = drawn(4, 19, b"x\r\ny\r\n$ ");
+        let bytes = r.draw_composed(&state, None, Some(LINE), &[], (19, 4));
+        feed(&mut local, &bytes);
+        assert_eq!(text_of(&local.snapshot(), 0), "x");
+    }
+
+    #[test]
+    fn the_line_is_drawn_on_the_alternate_screen_too() {
+        let (mut r, mut local, state) = drawn(4, 60, b"\x1b[?1049h\x1b[3;1Hvim");
+        feed(
+            &mut local,
+            &r.draw_composed(&state, None, Some(LINE), &[], (60, 4)),
+        );
+        let l = local.snapshot();
+        assert_eq!(text_of(&l, 0), LINE);
+        assert_eq!(text_of(&l, 2), "vim");
+    }
+}

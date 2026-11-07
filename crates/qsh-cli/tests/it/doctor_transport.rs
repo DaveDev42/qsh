@@ -271,6 +271,7 @@ fn an_interactive_attach_publishes_the_policy_report_and_the_adapt_line() {
             rows: 24,
             predict: Default::default(),
             status_line: Default::default(),
+            escape: None,
         });
         let opened = ops
             .session_open_interactive(attach_open_req(), false, screen)
@@ -309,4 +310,48 @@ fn an_interactive_attach_publishes_the_policy_report_and_the_adapt_line() {
         assert!(line.get("reasons").is_some());
         stream.close();
     });
+}
+
+/// `[interactive].predict` pins the prediction knob in the measurement the
+/// same way an attach pins it (`--predict`, ADR-0053 decision 11): `always`
+/// reads at least `display` on a loopback path where the policy alone says
+/// `off`, `never` reads `off`, both with the `user_override` reason, and
+/// `auto` leaves the reasons alone.
+#[test]
+fn doctor_reads_the_predict_pin_from_the_interactive_key() {
+    let fleet = Fleet::start();
+    let reasons_of = |t: &Value| -> Vec<String> {
+        t["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (transport, _) = doctor_transport(&fleet);
+    assert!(
+        !reasons_of(&transport).contains(&"user_override".to_string()),
+        "{transport}"
+    );
+    let set = |value: &str| {
+        let (code, env) =
+            fleet
+                .client
+                .json(&["config", "set", "interactive.predict", value, "--json"]);
+        assert_eq!(code, 0, "{env}");
+    };
+    set("always");
+    let (transport, _) = doctor_transport(&fleet);
+    assert_ne!(transport["prediction"], "off", "{transport}");
+    assert!(
+        reasons_of(&transport).contains(&"user_override".to_string()),
+        "{transport}"
+    );
+    set("never");
+    let (transport, _) = doctor_transport(&fleet);
+    assert_eq!(transport["prediction"], "off", "{transport}");
+    assert!(
+        reasons_of(&transport).contains(&"user_override".to_string()),
+        "{transport}"
+    );
 }
