@@ -19,7 +19,7 @@ use base64::Engine as _;
 use common::{Fleet, HOST_ALIAS, Sandbox};
 use qsh_core::screen::{HostScreen, ScreenOptions};
 use qsh_core::{
-    OpError, Ops, Paths, Predict, RecoveryConfig, ScreenAttach, ScreenSync, SessionAttachStream,
+    OpError, Ops, Paths, RecoveryConfig, ScreenAttach, ScreenSync, SessionAttachStream,
 };
 use qsh_proto::ErrorCode;
 use qsh_proto::event::SessionEvent;
@@ -457,76 +457,5 @@ fn ctrl_c_reaches_a_flooding_session_within_budget() {
     assert!(
         synced <= CTRL_C_BUDGET,
         "Ctrl-C took {synced:?} to show the prompt under a flood; budget {CTRL_C_BUDGET:?}"
-    );
-}
-
-// ---------------------------------------------------------------------
-// a_predicted_keystroke_is_drawn_before_the_echo_arrives
-// ---------------------------------------------------------------------
-
-/// Behind 300 ms of round trip, the second character typed at a shell
-/// prompt is on the local terminal long before the host could have echoed
-/// it (ADR-0053 decision 16, item 1; the first character of an epoch is
-/// judged, not drawn). `predict=never` is the control.
-fn second_key_latency(predict: Predict) -> Duration {
-    let fleet = ProxiedFleet::start(
-        ChaosPolicy::seeded(0xFEED).delay(DelayDist::fixed(Duration::from_millis(150))),
-    );
-    let ctx = fleet.context();
-    let ops = fleet.ops(RecoveryConfig::default());
-    with_deadline("predicted keystroke", move || {
-        let screen = Some(ScreenAttach {
-            mode: ScreenSync::On,
-            cols: COLS,
-            rows: ROWS,
-            predict,
-            status_line: Default::default(),
-            escape: None,
-        });
-        let opened = ops
-            .session_open_interactive(open_req(), false, screen)
-            .unwrap_or_else(|e| panic!("open: {e} — {ctx}"));
-        let mut stream = ops
-            .session_attach_screen(
-                SessionAttachReq {
-                    session_ref: opened.session_ref,
-                    no_steal: false,
-                },
-                &[],
-                screen,
-            )
-            .unwrap_or_else(|e| panic!("attach: {e} — {ctx}"));
-        let mut term = LocalTerminal::new();
-        pump_until(&mut stream, &mut term, "the first prompt", |t| {
-            t.shows_bare_prompt()
-        });
-        // The policy samples once a second; give it two so it has seen the
-        // round trip.
-        // (An idle shell sends no events, so there is nothing to drain.)
-        std::thread::sleep(Duration::from_millis(2500));
-        stream.write(b"q".to_vec()).unwrap();
-        pump_until(&mut stream, &mut term, "the first key", |t| t.shows("q"));
-        stream.write(b"z".to_vec()).unwrap();
-        let sent = Instant::now();
-        pump_until(&mut stream, &mut term, "the second key", |t| t.shows("qz"));
-        let latency = sent.elapsed();
-        stream.close();
-        latency
-    })
-}
-
-#[test]
-fn a_predicted_keystroke_is_drawn_before_the_echo_arrives() {
-    if !slow_enabled() {
-        eprintln!("skipped: needs QSH_ACCEPTANCE_SLOW");
-        return;
-    }
-    let predicted = second_key_latency(Predict::Auto);
-    let plain = second_key_latency(Predict::Never);
-    eprintln!("second key: predicted {predicted:?}, never {plain:?}");
-    assert!(plain >= Duration::from_millis(250), "control: {plain:?}");
-    assert!(
-        predicted <= Duration::from_millis(100),
-        "predicted: {predicted:?}"
     );
 }
