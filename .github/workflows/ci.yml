@@ -212,6 +212,17 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test it -E 'test(/^status_line::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0053 결정 16 items 1, 3, 4, 7 and 12: local echo prediction behind
+      # a chaos proxy at RTT 300 ms. Fifty keys of a confirmed epoch reach the
+      # local terminal model within 20 ms at p95 (also with 3% loss and 5%
+      # reorder) and the screen ends as the host's; a wrong prediction is
+      # taken back; a secret and a tentative epoch are never drawn; an old
+      # host without `screen-echo.v1` is not predicted against. The slow ones
+      # need `QSH_ACCEPTANCE_SLOW`; the functional ones also run on every OS
+      # in the `test` job (macOS and Windows included).
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^predict_accept::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.

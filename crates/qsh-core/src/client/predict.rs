@@ -22,8 +22,8 @@
 //!   and wrong when a report covering its input offset has been applied and
 //!   the cell still differs. A wrong prediction and every later one are
 //!   dropped.
-//! - **Stays quiet** under a secret tty, the alternate screen, a hidden
-//!   cursor, mouse reporting, a read-only attach and a host without
+//! - **Stays quiet** under a secret tty, the alternate screen, a cursor
+//!   hidden in two states in a row, mouse reporting, a read-only attach and a host without
 //!   `screen-echo.v1`; after three wrong predictions in a row it stops
 //!   drawing until four undrawn predictions have been confirmed.
 //!
@@ -50,6 +50,9 @@ pub const GLITCH_AFTER: Duration = Duration::from_millis(250);
 pub const GLITCH_REPAIR: u32 = 10;
 /// Most predictions waiting for a verdict at once.
 pub const MAX_PENDING: usize = 256;
+/// Applied host states in a row with the cursor hidden after which the
+/// screen counts as a full-screen app (see [`Predictor::on_state`]).
+pub const HIDDEN_CURSOR_STATES: u8 = 2;
 /// More characters than this in one read are a paste.
 pub const PASTE_CHARS: usize = 4;
 
@@ -217,6 +220,8 @@ pub struct Predictor {
     cols: u16,
     host_cursor: (u16, u16),
     mode_blocked: bool,
+    /// Applied states in a row that showed the cursor hidden.
+    hidden_streak: u8,
     applied_state: u64,
     snap: Snapshot,
 
@@ -266,6 +271,7 @@ impl Predictor {
             cols: 0,
             host_cursor: (0, 0),
             mode_blocked: false,
+            hidden_streak: 0,
             applied_state: 0,
             snap: Snapshot::default(),
             row: 0,
@@ -323,8 +329,18 @@ impl Predictor {
         self.host_cursor = (state.cursor_row, state.cursor_col);
         self.applied_state = self.applied_state.max(state_num);
         let m: Modes = state.modes;
-        self.mode_blocked =
-            m.flags & (Modes::ALT_SCREEN | Modes::CURSOR_HIDDEN) != 0 || m.mouse_mode != 0;
+        // A hidden cursor is a full-screen app only when it stays hidden:
+        // PSReadLine hides it around every redraw of the line and shows it
+        // again, so a state taken in between sees it hidden for one state.
+        // Two states in a row are an app that draws its own cursor.
+        self.hidden_streak = if m.flags & Modes::CURSOR_HIDDEN != 0 {
+            self.hidden_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.mode_blocked = m.flags & Modes::ALT_SCREEN != 0
+            || m.mouse_mode != 0
+            || self.hidden_streak >= HIDDEN_CURSOR_STATES;
 
         let row_cells = |r: u16| -> Option<Vec<Cell>> {
             state.grid.get(usize::from(r)).map(|row| row.cells.clone())
@@ -623,8 +639,16 @@ impl Predictor {
         if !self.pending.is_empty() {
             let first_before = self.pending[0].cursor_before;
             let (hr, hc) = self.host_cursor;
+            // ConPTY paints cells and moves the cursor in separate frames,
+            // so a state can show the character the last confirmed key
+            // typed with the cursor still one column short of where the
+            // next prediction starts (PSReadLine, every key). That is the
+            // host a step behind, not the host having moved the cursor.
+            let lagging = first_before.checked_sub(1) == Some(hc);
             let consistent = hr == self.row
-                && (hc == first_before || self.pending.iter().any(|p| p.cursor_after == hc));
+                && (hc == first_before
+                    || lagging
+                    || self.pending.iter().any(|p| p.cursor_after == hc));
             if !consistent {
                 // The host moved the cursor somewhere we did not predict: a
                 // new prompt, scrolled output. Not a misprediction.

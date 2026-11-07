@@ -284,7 +284,7 @@ fn a_character_split_across_reads_is_predicted_once_complete() {
 fn typing_in_the_middle_of_a_line_pushes_the_rest_right() {
     let mut r = Rig::new();
     r.p.on_policy(Prediction::Display);
-    r.state(&line(40, "bc"));
+    r.state(&screen(3, 40, "$ bc", (0, 2)));
     r.key(b"a");
     r.state(&screen(3, 40, "$ abc", (0, 3)));
     // confirmed at col 2; cursor follows the host.
@@ -430,6 +430,60 @@ fn a_misprediction_is_rolled_back_within_one_echo() {
     );
 }
 
+/// PSReadLine hides the cursor around the redraw of the line and shows it
+/// again, so a state taken in between sees it hidden for that one state. That
+/// is not a full-screen app (ADR-0053 decision 14): the predictions stay, and
+/// the next typed key is predicted and drawn as before.
+#[test]
+fn a_cursor_hidden_for_one_state_does_not_block_prediction() {
+    let mut r = Rig::confirmed(Prediction::Display);
+    let mut typed = String::from("a");
+    for key in ["b", "c", "d", "e"] {
+        r.key(key.as_bytes());
+        assert_eq!(r.p.overlay().cells.len(), 1, "{key}: drawn at once");
+        typed.push_str(key);
+        // The mid-redraw state, then the finished one.
+        let mut mid = line(40, &typed);
+        mid.modes.flags |= Modes::CURSOR_HIDDEN;
+        r.state(&mid);
+        assert!(
+            r.p.blocked().is_none(),
+            "{key}: blocked by one hidden state"
+        );
+        r.state(&line(40, &typed));
+        r.echo();
+        assert_eq!(r.p.pending_len(), 0, "{key}: judged");
+    }
+    assert_eq!(r.p.stats().mispredicted, 0);
+}
+
+/// ConPTY paints cells and moves the cursor in separate frames: a state can
+/// show the character just typed with the cursor still a column short. The
+/// predictions behind it stay (ADR-0053 decision 14, PSReadLine); a cursor
+/// that is two columns off, or on another row, is the host having moved on.
+#[test]
+fn a_cursor_one_column_behind_a_written_cell_is_the_host_a_step_behind() {
+    let mut r = Rig::confirmed(Prediction::Display);
+    r.key(b"b");
+    r.key(b"c");
+    assert_eq!(r.p.pending_len(), 2);
+    // `b` is on the screen; the cursor has not moved past it yet.
+    r.state(&screen(3, 40, "$ ab", (0, 3)));
+    assert_eq!(r.p.pending_len(), 1, "b confirmed, c kept");
+    assert_eq!(r.p.overlay().cells.len(), 1);
+    // The next frame has both and the cursor after them.
+    r.state(&screen(3, 40, "$ abc", (0, 5)));
+    assert_eq!(r.p.pending_len(), 0);
+    assert_eq!(r.p.stats().mispredicted, 0);
+
+    // Two columns off is not a lag.
+    let mut r = Rig::confirmed(Prediction::Display);
+    r.key(b"b");
+    r.key(b"c");
+    r.state(&screen(3, 40, "$ ab", (0, 2)));
+    assert_eq!(r.p.pending_len(), 0, "a cursor two columns behind");
+}
+
 #[test]
 fn a_report_that_does_not_cover_the_key_gives_no_verdict() {
     let mut r = Rig::confirmed(Prediction::Display);
@@ -539,9 +593,10 @@ fn prediction_gates() {
             s.modes.flags |= Modes::ALT_SCREEN;
             r.state(&s);
         }),
-        ("hidden cursor", |r| {
+        ("hidden cursor in two states", |r| {
             let mut s = line(40, "a");
             s.modes.flags |= Modes::CURSOR_HIDDEN;
+            r.state(&s);
             r.state(&s);
         }),
         ("mouse mode", |r| {

@@ -30,6 +30,7 @@ mod init_trust;
 mod jsonl_purity;
 mod lifecycle_lines;
 mod localctl_perms;
+mod predict_accept;
 mod release_smoke;
 mod remote_install;
 mod reverse_blackout;

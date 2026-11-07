@@ -97,6 +97,12 @@ impl EchoHost {
         self.identity.fingerprint.to_string()
     }
 
+    /// Make this host behave as a build that predates `caps`
+    /// ([`Server::hide_capabilities`]); call before the first client dials.
+    pub fn hide_capabilities(&self, caps: &[&str]) {
+        self.server.hide_capabilities(caps);
+    }
+
     /// Sessions the host holds right now, and how many have no attached
     /// client.
     pub fn live_counts(&self) -> LiveCounts {
