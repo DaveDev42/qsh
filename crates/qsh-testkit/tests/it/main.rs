@@ -28,6 +28,7 @@ mod netsim;
 mod pairing_loopback;
 mod pairing_quota;
 mod perf_out;
+mod punch;
 mod quota;
 mod resume_chaos;
 mod resume_loopback;

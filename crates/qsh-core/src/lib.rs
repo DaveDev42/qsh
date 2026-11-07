@@ -61,6 +61,7 @@ pub mod ops;
 pub mod pairing;
 pub mod prompts;
 pub mod pty;
+pub mod punch;
 pub mod quota;
 pub mod reset_key;
 pub mod resume;
