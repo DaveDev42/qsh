@@ -33,7 +33,12 @@ enum Via {
 
 /// Apply one attach event to `screen`, ack what needs acking, and say which
 /// carrier a screen update used (`None` for any other event).
-async fn feed(att: &mut Attached, screen: &mut ClientScreen, event: AttachEvent) -> Option<Via> {
+async fn feed(
+    att: &mut Attached,
+    screen: &mut ClientScreen,
+    event: AttachEvent,
+    spoke: &mut bool,
+) -> Option<Via> {
     let (outcome, via) = match event {
         AttachEvent::Screen(part) => (screen.on_part(&part).expect("part"), Via::Stream),
         AttachEvent::ScreenDatagram(part) => (screen.on_datagram_part(&part), Via::Datagram),
@@ -41,6 +46,7 @@ async fn feed(att: &mut Attached, screen: &mut ClientScreen, event: AttachEvent)
     };
     if let Some(n) = outcome.ack() {
         att.send_screen_ack(n).await.expect("ack");
+        *spoke = true;
     }
     Some(via)
 }
@@ -58,13 +64,20 @@ async fn run_until_converged(
     screen: &mut ClientScreen,
 ) -> (usize, usize) {
     let (mut stream, mut datagram) = (0, 0);
+    // Datagram updates count only while the client has sent nothing yet. After
+    // its first ack the host may legitimately send a further state as a
+    // datagram (the output can land in more than one state, and when the host
+    // gets there depends on timing), so counting those would make the
+    // take-over check race the host (ADR-0052 decision 6, protocol §18.9).
+    let mut spoke = false;
     tokio::time::timeout(DEADLINE, async {
         while !converged(h, id, screen) {
             let event = att.next().await.expect("event").expect("stream open");
-            match feed(att, screen, event).await {
+            let before = spoke;
+            match feed(att, screen, event, &mut spoke).await {
                 Some(Via::Stream) => stream += 1,
-                Some(Via::Datagram) => datagram += 1,
-                None => {}
+                Some(Via::Datagram) if !before => datagram += 1,
+                Some(Via::Datagram) | None => {}
             }
         }
     })
@@ -368,7 +381,7 @@ async fn a_path_that_eats_datagrams_falls_back_to_the_stream_and_converges() {
     tokio::time::timeout(DEADLINE, async {
         loop {
             let event = att.next().await.expect("event").expect("open");
-            let Some(via) = feed(&mut att, &mut screen, event).await else {
+            let Some(via) = feed(&mut att, &mut screen, event, &mut false).await else {
                 continue;
             };
             match (black_at, via) {
@@ -488,7 +501,7 @@ async fn measure(h: &LoopbackHarness, frames: usize, gap: Duration) -> Measured 
     let settle_at = tokio::time::timeout(DEADLINE, async {
         loop {
             let event = att.next().await.expect("event").expect("open");
-            feed(&mut att, &mut screen, event).await;
+            feed(&mut att, &mut screen, event, &mut false).await;
             let now = Instant::now();
             if let Some(n) = frame_number(&screen)
                 && n > highest
