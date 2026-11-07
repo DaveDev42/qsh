@@ -49,6 +49,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
 - `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`·`screen_history`가 여기 딸린 항목이고 세부는 §18.8과 §18.11이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
 - `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
+- `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). `[punch].mode = "off"`여도 광고하고 요청에는 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다.
 
 ## 5. Frame layer
 
@@ -126,7 +127,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 
 이 principal 축은 §11-3의 localctl 쪽 conduit 소유권(`ControlHub`의 `owner: ConduitId`, 같은 머신 위 두 CLI 프로세스를 구별하는 문제)과 별개 계층이다. 이쪽은 원격 QUIC peer가 누구인지, 저쪽은 그 peer를 대신해 로컬에서 요청한 프로세스가 어느 것인지를 답한다.
 
-**연결 CLOSE 코드.** 연결 전체를 닫는 `APPLICATION_CLOSE` 코드는 `0x100x` 대역이고 위 RESET 코드(`0x200x`)와 달리 스트림이 아니라 연결에 붙는다. peer는 이 값에 따라 분기하지 않는다(진단·audit 상관관계용이다). 가장 새 값 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 그 연결을 보증하지 않아 닫을 때 쓰고(ADR-0031 결정 7), reason은 주체나 사유를 싣지 않는 고정 문자열 `trust withdrawn`이다. 값 목록과 동결 지위는 §16.3·§16.5다.
+**연결 CLOSE 코드.** 연결 전체를 닫는 `APPLICATION_CLOSE` 코드는 `0x100x` 대역이고 위 RESET 코드(`0x200x`)와 달리 스트림이 아니라 연결에 붙는다. peer는 이 값에 따라 분기하지 않는다(진단·audit 상관관계용이다). 가장 새 값 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 그 연결을 보증하지 않아 닫을 때 쓰고(ADR-0031 결정 7), reason은 주체나 사유를 싣지 않는 고정 문자열 `trust withdrawn`이다. `0x1006`(`CLOSE_CODE_NOT_ADOPTED`)은 펀칭 경주에서 채택되지 않은 연결을 닫을 때 쓰고 reason은 고정 문자열 `not adopted`다(ADR-0054 결정 15, §19.6). 값 목록과 동결 지위는 §16.3·§16.5다.
 
 ### 7.1 셸 명령: `shell_command`와 `login_shell` (ADR-0051 결정 6)
 
@@ -257,6 +258,11 @@ message ControlMessage {
                                                //   entries[](≤ FILE_LIST_PAGE_MAX), more, unlistable}; ACL file.read
     FileMkdirOpen       file_mkdir_open = 83;  // path, mode, name_if_dir, preserve, user
                                                //   -> FileMkdirDone{created, into_dir}; ACL file.write
+    PunchRequest        punch_request = 90;    // A -> R, punch.v1, §19: attempt_id, target_fingerprint, candidates
+                                               //   -> PunchReply
+    PunchOffer          punch_offer = 91;      // R -> B (등록 연결 위), punch.v1: attempt_id, initiator_fingerprint,
+                                               //   candidates -> PunchAnswer
+    RendezvousQuery     rendezvous_query = 92; // A -> B (어느 연결이든), punch.v1 -> RendezvousList
   }
 }
 
@@ -279,6 +285,9 @@ message Response {
     FileListed          file_listed = 13;        // file_list_open 성공
     FileMkdirDone       file_mkdir_done = 14;    // file_mkdir_open 성공
     Error               error = 15;          // { code, message, retryable } — code는 CLI.md §3.3 어휘
+    PunchReply          punch_reply = 16;    // punch_request 성공 (§19)
+    PunchAnswer         punch_answer = 17;   // punch_offer 성공
+    RendezvousList      rendezvous_list = 18; // rendezvous_query 성공
   }
 }
 
@@ -577,6 +586,8 @@ unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적
 
 **10. `parse_ssh_bootstrap_line`(ADR-0044 결정 11).** `crates/qsh-proto/src/ssh_bootstrap.rs`의 줄 파서 `parse_ssh_bootstrap_line`과 수신 상태 기계 `BootstrapReader`를 흔다. `qsh pair ssh`가 ssh 자식의 stdout에서 읽는 바이트는 원격 계정이 찍는 출력이라(rc 파일 출력, 그다음 응답자의 메시지) 신뢰할 수 없는 입력이다. QUIC wire는 아니지만 서로 다른 버전의 qsh 둘이 말하는 상호운용 계약이어서(§17) 이 표면에 둔다. 첫 입력 바이트가 나머지를 reader에 몇 바이트씩 나눠 먹일지 고른다(0이면 통째로). 불변식: panic 없음, 받아들인 줄은 다시 인코딩해 파싱해도 같고 한 줄이다, reader의 결과(메시지, 건너뛴 줄·바이트 수, 오류)는 청크 경계와 무관하다, 건너뛴 바이트는 `BOOTSTRAP_PREAMBLE_MAX`를 넘지 않는다. 항목 7~9와 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. 타깃당 누적 72 fuzz-hours는 아직 쌓지 않았다(`docs/campaigns/m8-fuzz.md` 형식으로 사람이 기록한다).
 
+**11. `punch_candidates`(ADR-0054 결정 8·11·13, §19).** 첫 입력 바이트로 후보(`PunchCandidate`, `valid_punch_candidate`), 펀칭 message 다섯의 모양 검사와 `check_candidates`, 16바이트 펀치 datagram과 tag 대조 중 하나를 고른다. 검사가 panic하지 않고, 받아들인 후보 목록이 여덟 이하의 서로 다른 허용 주소이며 `accepted + dropped <= len`이고, 유효한 주소가 같은 ip·port로 다시 부호화되며, tag로 만든 datagram이 제 방향에서만 맞는 것을 단언한다. 새 message는 `decode_control` corpus에도 들어 있다.
+
 corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
@@ -688,9 +699,11 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 | 항목 | 정의 위치 | 값 |
 |---|---|---|
-| `ControlMessage` oneof 태그(22 branch) | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `message ControlMessage` | `hello=10`, `response=11`, `session_open=20`…`session_write=28`(`25`는 결번), `exec_start=30`, `rfwd_open=40`, `rfwd_close=41`, `ping=50`, `pong=51`, `session_event=60`, `pairing_proof=70`, `pairing_accepted=71`, `file_read_open=80`…`file_mkdir_open=83` |
-| `Response` oneof 태그(14 branch + `error`) | 같은 파일의 `message Response` | `session_opened=1`…`session_closed=10`, `file_read_opened=11`…`file_mkdir_done=14`, `error=15` |
-| top-level `message` 선언 61종의 필드 번호 전체 | 같은 파일 | `grep -c '^message '` = 61 (ADR-0029의 파일 op message 12종 포함) |
+| `ControlMessage` oneof 태그(25 branch) | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `message ControlMessage` | `hello=10`, `response=11`, `session_open=20`…`session_write=28`(`25`는 결번), `exec_start=30`, `rfwd_open=40`, `rfwd_close=41`, `ping=50`, `pong=51`, `session_event=60`, `pairing_proof=70`, `pairing_accepted=71`, `file_read_open=80`…`file_mkdir_open=83`, `punch_request=90`, `punch_offer=91`, `rendezvous_query=92` |
+| `Response` oneof 태그(17 branch + `error`) | 같은 파일의 `message Response` | `session_opened=1`…`session_closed=10`, `file_read_opened=11`…`file_mkdir_done=14`, `error=15`, `punch_reply=16`, `punch_answer=17`, `rendezvous_list=18` |
+| top-level `message` 선언 73종의 필드 번호 전체 | 같은 파일 | `grep -c '^message '` = 73 (ADR-0029의 파일 op message 12종, ADR-0054의 펀칭 message 7종 포함) |
+| `enum PunchCandidateKind` / `enum PunchRefusal` | 같은 파일 | `UNSPECIFIED=0`/`HOST=1`/`REFLEXIVE=2`; `NONE=0`/`TARGET_NOT_REGISTERED=1`/`TARGET_UNSUPPORTED=2`/`TARGET_DENIED=3`/`TARGET_BUSY=4`/`TARGET_TIMEOUT=5`. 모르는 값은 decode를 실패시키지 않는다 |
+| `ATTEMPT_ID_LEN` / `PUNCH_FINGERPRINT_LEN` / `MAX_PUNCH_CANDIDATES` / `MAX_RENDEZVOUS_FINGERPRINTS` / `PUNCH_MESSAGE_MAX` | `crates/qsh-proto/src/punch.rs` | 16 / 32 / 8 / 4 / 1024 바이트(§19.2) |
 | `reserved 25` | 같은 파일의 `ControlMessage` 안 | 구 `SessionSignal`, 번호만 예약(P1). prost는 unknown field를 버리므로 25는 body 없는 `ControlMessage`로 디코드되고, 호스트는 `UNSUPPORTED`로 답한다(§9) |
 | `AttachMode.ATTACH_MODE_RO = 2` | 같은 파일의 `enum AttachMode` | `UNSPECIFIED=0`/`RW=1`/`RO=2`. 오늘 hosts는 RO 요청에 `INVALID_ARGUMENT`로 답한다 — `reserved 25`와 같은 성격의 예약 번호다 |
 | `ErrorCode` 어휘 16종 + `Unknown(raw)` passthrough | `crates/qsh-proto/src/error.rs`의 `ErrorCode::KNOWN`과 모듈 머리의 passthrough 정책 | `InvalidArgument`…`Internal` 16종. 미지 문자열은 `Unknown(raw)`로 무손실 왕복 |
@@ -724,7 +737,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 - **`qsh.local.v1`**(localctl UDS). `crates/qsh-proto/proto/qsh/local/v1.proto` 머리말이 이유를 직접 적고 있다. wire freeze가 얼리는 것은 네트워크를 건너 두 peer 사이를 오가는 원격 계약 `qsh.wire.v1`뿐이고, 이 파일의 메시지는 전부 한 머신 안, same-uid만 열 수 있는 소켓 위에서만 오간다. 별도 버전 축(`LOCAL_HELLO_VERSION = 2`, `crates/qsh-proto/src/local.rs`)을 쓴다.
 - **`qsh.event/v1` JSON 봉투**(`crates/qsh-proto/src/event.rs`의 `EVENT_SCHEMA`, `KNOWN_EVENT_TYPES` 5종). wire의 `SessionEvent`(태그 60)와는 다른 표면이고, `docs/CLI.md` §10이 이미 자기 additive-only 규율을 갖는다 — 대조는 §16.6.
 - **`ForwardSpec`/`ForwardDirection`**(`crates/qsh-proto/src/wire.rs`의 `ForwardSpec`·`ForwardDirection`). `-L`/`-R` CLI 인자를 로컬에서 파싱한 결과 타입이지 wire에 실리는 값이 아니다 — `.proto` 전체에 이 이름의 message도 field도 없다. `parse_forward_spec`이 §13의 fuzz 타깃인 것은 신뢰 불가 **로컬** 입력 파서이기 때문이지, wire 표면이기 때문이 아니다.
-- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200E`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs`(`CLOSE_CODE_UNVERIFIED_PEER`·`CLOSE_CODE_PROTOCOL`·`CLOSE_CODE_TRUST_WITHDRAWN`)·`crates/qsh-core/src/server/mod.rs`(`CLOSE_CODE_RESOURCE_EXHAUSTED`)·`crates/qsh-core/src/reverse/listen.rs`(`CLOSE_CODE_REPLACED`·`CLOSE_CODE_PATH_DEAD`)·`crates/qsh-core/src/reverse/target/mod.rs`이고, RESET 대역(`0x200x`)의 근거는 §7이다. `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 연결을 보증하지 않아 닫을 때 쓰는 값이다(ADR-0031 결정 7). 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
+- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200E`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs`(`CLOSE_CODE_UNVERIFIED_PEER`·`CLOSE_CODE_PROTOCOL`·`CLOSE_CODE_TRUST_WITHDRAWN`·`CLOSE_CODE_NOT_ADOPTED`)·`crates/qsh-core/src/server/mod.rs`(`CLOSE_CODE_RESOURCE_EXHAUSTED`)·`crates/qsh-core/src/reverse/listen.rs`(`CLOSE_CODE_REPLACED`·`CLOSE_CODE_PATH_DEAD`)·`crates/qsh-core/src/reverse/target/mod.rs`이고, RESET 대역(`0x200x`)의 근거는 §7이다. `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 연결을 보증하지 않아 닫을 때 쓰는 값이다(ADR-0031 결정 7). `0x1006`(`CLOSE_CODE_NOT_ADOPTED`, `crates/qsh-transport/src/endpoint.rs`)은 펀칭 경주에서 채택되지 않고 이미 선 연결을 닫을 때 쓰는 값이고 reason은 고정 문자열 `not adopted`다(ADR-0054 결정 15, §19.6). 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
 - **우선순위 band 값**. 로컬 송신 큐 힌트일 뿐 peer가 관측하는 wire 필드가 아니다(값 자체는 §16.2에 명문화돼 있다).
 - **SOCKS5 로컬 codec**(`crates/qsh-proto/src/socks5.rs`, ADR-0019). `-D`가 로컬 loopback listener에서 받는 클라이언트 프로토콜이지 두 `qsh` peer 사이의 wire 계약이 아니다 — `.proto`에 이 이름의 message가 없다. `parse_socks5`가 §13의 fuzz 타깃인 것도 `parse_forward_spec`과 같은 이유(신뢰 불가 로컬 입력)이지 wire 표면이기 때문이 아니다.
 
@@ -732,7 +745,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 - 새 `message`, 또는 기존 oneof에 새 필드 번호 추가. 기존 번호의 재사용·재번호는 §16.5의 금지 사항이다.
 - **예약된 번호를 그 예약 대상으로 채우는 것.** 오늘 예약된 번호는 둘이다 — `reserved 25`(구 SessionSignal, P1)와 `AttachMode.ATTACH_MODE_RO = 2`(오늘은 `INVALID_ARGUMENT`). 둘 다 나란히 적어 둔다 — 나중에 "이 번호는 예약이었나 폐기였나"라는 분기가 생기지 않도록.
-- 새 capability 문자열과 그 capability에 딸린 새 optional message.
+- 새 capability 문자열과 그 capability에 딸린 새 optional message. `punch.v1`(ADR-0054)이 가장 새 사례다: `ControlMessage`의 새 블록 90번대(90~92)와 `Response`의 16~18, 새 message 7종과 enum 2종은 모두 이 규칙으로 들어왔고, sender는 협상된 교집합에 `punch.v1`이 있을 때만 보낸다. 기존 번호는 건드리지 않았다.
 - 새 `ErrorCode` 문자열. 구버전 peer는 `Unknown(raw)`로 무손실 왕복한다(`crates/qsh-proto/src/error.rs`; JSON 쪽 대응 규율은 `docs/CLI.md` §10).
 - **ADR-0018 결정 3.** `RemoteForwardOpen`의 `forward_id` 재수락(`-R` 자동 재발행)은 v1에 넣지 않는다. 필요해지면 P1 이후 `reclaim: bool` 같은 additive 필드로 넣을 수 있고, 이 freeze는 그 경로를 막지 않는다(`docs/adr/0018-tunnel-lifetime-bound-to-connection.md`). ADR-0023은 이 길을 쓰지 않았다. `-R` 재발행은 새 connection 위에서 옛 `forward_id`를 `RemoteForwardClose`로 닫고 `RemoteForwardOpen`을 다시 보내는 기존 두 op의 조합이다.
 - **ADR-0019 결정 4.** 기존 message에 새 필드 번호를 더하는 것 — 단, 기본값의 의미가 오늘 동작과 같고, 송신자가 그 필드를 이해하는 peer임을 capability로 먼저 확인한 경우에 한한다. `StreamHeader.deny_host_local = 5`(§9, `dial-filter.v1` capability로 보호, 기본값 `false` = 무필터)가 이 경로로 들어온 첫 사례다. ADR-0018 결정 3의 `reclaim` 항목과 같은 성격 — 새 번호이지 새 `oneof` branch나 재번호가 아니다.
@@ -997,3 +1010,67 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 **시험.** `crates/qsh-testkit/tests/it/screen_echo.rs`(`screen_echo_is_sent_after_input_even_when_the_screen_does_not_change`, `screen_echo_follows_each_screen_update_on_the_same_carrier`, `a_client_without_screen_echo_gets_no_screen_echo_frames`, `a_host_without_screen_echo_gets_no_screen_echo_frames`), `crates/qsh-core/src/client/echo.rs`(`a_screen_echo_beyond_the_sent_input_is_rejected_and_counted`), `crates/qsh-core/src/input_times.rs`(표와 `ECHO_GRACE` 규칙, 주입한 시계), `crates/qsh-core/src/pty/tests.rs`(`tty_echo_reads_echo_and_icanon_from_the_pty`). fuzz는 `decode_session_frame`과 `decode_datagram_frame`이 덮는다.
 
 **client의 사용(attach driver).** `ScreenSink`가 `PredictDriver`(`crates/qsh-core/src/client/predict_drive.rs`)를 쥔다. input pump는 `Input`을 쓰기 직전에 `on_input(bytes, 쓰고 난 뒤의 누적 offset)`을 부르고 곧바로 예측을 겹쳐 다시 그린다. reader는 적용한 상태마다 `on_state`를, 받은 `ScreenEcho`마다 `on_echo`를 부른다. 이름 붙은 상태가 아직 적용되지 않았으면 `Predictor`가 그 리포트를 하나만 들고 있다가(더 새것이 오면 바꾼다. 상한 하나, ADR-0053 결정 3·15) 그 상태를 적용할 때 판정한다. 상태 번호는 attach(leg)마다 1부터라서 새 leg에서는 적용한 상태 번호와 들고 있던 리포트를 버린다. 늦은 확인의 250 ms는 `Predictor::next_deadline`까지 reader가 잠들었다가 `tick`으로 밑줄을 그린다(시간으로 걷어 내지는 않는다). 정책 값은 정방향에서는 `PolicyMonitor`가 1초마다 내는 `prediction`이고, 역방향 route에서는 `Input`을 쓴 시각과 그 offset을 덮는 `InputAck`이 온 시각의 차이를 EWMA(1/8)로 낸 srtt를 `adapt::decide`에 넣어 1초에 한 번 결정한다. 첫 표본 전에는 `Off`다. `--predict=always`는 `adapt::User.prediction`의 `Always` 핀으로 `[transport].adaptive = "off"`보다 이기고 `reasons`에 `user_override`를 남긴다. 양쪽이 `screen-echo.v1`을 광고하지 않으면 예측은 하지 않는다. 상태 변화는 tracing target `qsh::predict`에 한 줄 JSON으로 남는다(개수와 사유만). 시험: `crates/qsh-core/src/client/predict_drive/tests.rs`, `crates/qsh-core/src/ops/session/predict_tests.rs`, `crates/qsh-cli/tests/it/screen_sync.rs`의 `a_predicted_keystroke_is_drawn_before_the_echo_arrives`.
+
+## 19. 홀펀칭 (ADR-0054)
+
+NAT 뒤 장비 B에 밖의 장비 A가 닿도록, 둘 다 닿는 사용자의 `qsh listen` R이 후보 주소를 중개하고 양 끝이 같은 UDP 소켓에서 동시에 보내 구멍을 뚫는다. 이 절은 wire 계약(capability `punch.v1`, message, 상한, 검사, 펀치 datagram, close 코드)만 적는다. 흐름의 역할 분담은 ADR-0054 결정 10이 정본이고, R의 중개 서비스·B의 offer 처리·client 경주는 뒤 스텝이 이 절에 더한다.
+
+### 19.1 message
+
+```proto
+message PunchCandidate { bytes ip = 1; uint32 port = 2; PunchCandidateKind kind = 3; }
+enum PunchCandidateKind { PUNCH_CANDIDATE_KIND_UNSPECIFIED = 0; ..._HOST = 1; ..._REFLEXIVE = 2; }
+message PunchRequest  { bytes attempt_id = 1; bytes target_fingerprint = 2;    repeated PunchCandidate candidates = 3; } // ControlMessage 90, A -> R
+message PunchOffer    { bytes attempt_id = 1; bytes initiator_fingerprint = 2; repeated PunchCandidate candidates = 3; } // ControlMessage 91, R -> B
+message RendezvousQuery {}                                                                                              // ControlMessage 92, A -> B
+message PunchReply    { repeated PunchCandidate candidates = 1; PunchCandidate initiator_reflexive = 2;
+                        bool target_reflexive_private = 3; PunchRefusal refusal = 4; }                                  // Response 16, R -> A
+message PunchAnswer   { repeated PunchCandidate candidates = 1; }                                                       // Response 17, B -> R
+message RendezvousList { repeated bytes fingerprints = 1; }                                                             // Response 18, B -> A
+enum PunchRefusal { NONE = 0; TARGET_NOT_REGISTERED = 1; TARGET_UNSUPPORTED = 2; TARGET_DENIED = 3; TARGET_BUSY = 4; TARGET_TIMEOUT = 5; } // PUNCH_REFUSAL_ 접두
+```
+
+R 자신의 거부(인가, 속도 상한, 꺼짐, 크기)는 기존 `Error`(`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `UNSUPPORTED`, `INVALID_ARGUMENT`)로 답하고, B 쪽에서 난 일은 `PunchReply.refusal`로 알린다. wire `Error`에는 details가 없어서 A가 "R이 거부"와 "B가 거부"를 가르려면 이 enum이 필요하다. 모르는 `kind`·`refusal` 값은 decode를 실패시키지 않고 각각 `UNSPECIFIED`·`NONE`으로 읽는다. `qsh listen`은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer의 연결을 펀칭 연결로 받는다(ADR-0054 결정 10. §11의 갱신은 R의 중개 서비스 스텝이 한다).
+
+### 19.2 상한과 모양 검사
+
+받는 쪽은 인가보다 먼저, 어떤 자원도 만들기 전에 아래를 본다. 어기면 `INVALID_ARGUMENT`이고 R은 그 펀칭 연결을 닫는다. 보내는 쪽 encoder(`encode_control`)도 같은 검사로 거부한다. 기존 `CONTROL_FRAME_MAX`는 그대로 먼저 걸린다.
+
+| 항목 | 값 | 상수(`qsh-proto::punch`) |
+|---|---|---|
+| `attempt_id` | 정확히 16바이트(A가 CSPRNG로 만든다) | `ATTEMPT_ID_LEN` |
+| fingerprint(`target_fingerprint`, `initiator_fingerprint`, `RendezvousList` 항목) | 정확히 32바이트 | `PUNCH_FINGERPRINT_LEN` |
+| 한 message의 후보 | 여덟 이하 | `MAX_PUNCH_CANDIDATES` |
+| `RendezvousList` | fingerprint 넷 이하. 넘으면 A가 앞의 넷만 쓴다 | `MAX_RENDEZVOUS_FINGERPRINTS` |
+| 한 message의 부호화 길이 | 1 KiB 이하 | `PUNCH_MESSAGE_MAX` |
+| peer-reflexive(A가 스스로 배우는 후보) | 넷까지 | `MAX_PEER_REFLEXIVE` |
+| R의 동시 펀칭 연결 | 16 | `RENDEZVOUS_MAX_CLIENTS` |
+| A 하나의 시도 | R: 진행 중 하나, 60초에 여섯 | `PUNCH_RATE`, `PUNCH_RATE_WINDOW_SECS` |
+
+B의 동시 창 넷(`MAX_PUNCH_WINDOWS`)은 `qsh-transport`가 정의한다. 모양 검사는 `PunchRequest::validate`·`PunchOffer::validate`·`PunchAnswer::validate`·`PunchReply::validate`·`RendezvousList::validate`이고 오류는 어긴 규칙의 이름만 담는다(값을 되풀이하지 않는다).
+
+### 19.3 후보 검사
+
+`valid_punch_candidate(ip, port)`는 `ip`가 4바이트나 16바이트(네트워크 순서)이고 `port`가 1..=65535일 때만 주소를 돌려준다. 거부하는 주소: unspecified, loopback, link-local(`169.254.0.0/16`, `fe80::/10`), multicast(`224.0.0.0/4`, `ff00::/8`), `255.255.255.255`, `0.0.0.0/8`, `240.0.0.0/4`, IPv4-mapped IPv6(`::ffff:0:0/96`). 사설(`10/8`, `172.16/12`, `192.168/16`, ULA)과 CGNAT(`100.64.0.0/10`) 주소는 받는다. 같은 LAN과 CGNAT 안쪽 경로가 실제 경로이기 때문이다.
+
+받는 쪽은 `check_candidates`로 같은 검사를 다시 한다. 후보가 여덟을 넘으면 message 오류(`INVALID_ARGUMENT`)이고, 그 안에서 검사에 걸린 후보는 버리고 개수를 센다. 같은 주소는 하나로 합친다. 후보 쌍은 같은 family 안에서만 맺는다(ADR-0054 결정 8).
+
+### 19.4 인증
+
+R은 후보를 중개할 뿐 신원을 보증하지 않는다. A는 펀칭한 연결에서 상대가 내민 fingerprint가 B의 pin과 정확히 같을 때만 받고, B는 창에서 받은 연결의 검증된 fingerprint가 offer의 `initiator_fingerprint`와 같을 때만 serve한다. 다르면 그 연결을 `0x1001`로 닫는다(ADR-0054 결정 12). TLS 검증 경로(§3)는 바뀌지 않는다.
+
+### 19.5 펀치 datagram
+
+16바이트(`PUNCH_DATAGRAM_LEN`)다. 머리 4바이트 `00 71 70 01`(`PUNCH_HEAD`)과 tag 12바이트다. tag는 `attempt_id`에서 `blake3::derive_key("qsh punch attempt key v1", attempt_id)`로 뽑은 key의 BLAKE3 keyed hash를 방향 표지(`"qsh punch a->b"`, `"qsh punch b->a"`)에 적용한 값의 앞 12바이트다. 첫 바이트의 fixed bit가 0이라 QUIC 패킷이 아니고, 길이가 21바이트 이하라서 quinn에 닿아도 답을 부르지 않는다. 이 datagram은 `qsh/1`의 message가 아니라 펀칭 소켓 옆을 오가는 고정 형식이며 `punch.v1`로 협상된 신호의 결과로만 보낸다. 대조는 `verify_punch_datagram`이 모든 바이트를 훑는다.
+
+### 19.6 close 코드 `0x1006`
+
+경주에서 채택되지 않고 이미 선 연결은 `APPLICATION_CLOSE` 코드 `0x1006`(`CLOSE_CODE_NOT_ADOPTED`)과 reason `not adopted`로 닫는다. 진행 중인 handshake는 버리고 quinn이 정리한다. 동결 밖 값이고(§16.3) peer는 이 값에 의존해 분기하지 않는다. `0x1001`은 §19.4의 fingerprint 불일치에 쓴다.
+
+### 19.7 closed-window endpoint의 stateless reset
+
+창이 닫힌 `PunchEndpoint`는 서버 설정이 없어도 quinn의 기본 동작대로 모르는 Initial에 stateless reset 하나로 답한다. 이것은 걸러 내지 않는다. 답은 부른 datagram보다 늘 작고(quinn은 최소 1바이트 작게 맞춘다) `min_reset_interval`로 속도가 제한되어, 제3자에게 향하는 증폭이 없고 ADR-0054 결정 26의 반사 상한(요청 한 번이 낳는 것은 1 KiB 이하)이 입력 크기로 이미 묶인다. 걸러 내면 같은 소켓의 살아 있는 연결이 죽은 상태를 알리는 reset도 함께 잃는다. 근거는 ADR-0054 개정 이력이다.
+
+### 19.8 fuzz와 시험
+
+`decode_control` 타깃이 새 message를 덮고 `validate()`·`check_candidates`를 부른다. 새 타깃 `punch_candidates`가 후보 검사, 모양 검사, 펀치 datagram tag 대조를 먹인다(§13). 단위 시험: `crates/qsh-proto/src/punch.rs`의 `punch_candidate_validation_table`, `message_shape_rules_are_enforced`, `the_punch_messages_keep_their_pinned_numbers`, `the_encoder_refuses_a_malformed_punch_message`, `the_capability_is_advertised`.

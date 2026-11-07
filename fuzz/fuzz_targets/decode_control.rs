@@ -20,11 +20,16 @@
 //!   `SessionOpen::shell_command_checked()` (ADR-0051 decision 6: the three
 //!   mutually exclusive ways to say what to run, arbitrary strings with NULs)
 //!
+//! - `PunchRequest`/`PunchOffer`/`PunchAnswer`/`PunchReply`/`RendezvousList`
+//!   `validate()` and `check_candidates` (ADR-0054 decision 11: id and
+//!   fingerprint lengths, candidate and fingerprint counts, 1 KiB cap)
+//!
 //! None of these may panic on any decoded value.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use qsh_proto::punch::check_candidates;
 use qsh_proto::wire::{ControlMessage, Response, control_message, decode_msg, response};
 
 fuzz_target!(|data: &[u8]| {
@@ -47,7 +52,26 @@ fuzz_target!(|data: &[u8]| {
             let _ = a.attach_mode();
             let _ = a.wants_write();
         }
+        Some(control_message::Body::PunchRequest(m)) => {
+            let _ = m.validate();
+            let _ = check_candidates(&m.candidates);
+        }
+        Some(control_message::Body::PunchOffer(m)) => {
+            let _ = m.validate();
+            let _ = check_candidates(&m.candidates);
+        }
         Some(control_message::Body::Response(Response { body })) => match body {
+            Some(response::Body::PunchReply(m)) => {
+                let _ = m.validate();
+                let _ = check_candidates(&m.candidates);
+            }
+            Some(response::Body::PunchAnswer(m)) => {
+                let _ = m.validate();
+                let _ = check_candidates(&m.candidates);
+            }
+            Some(response::Body::RendezvousList(m)) => {
+                let _ = m.validate();
+            }
             Some(response::Body::SessionReadResult(r)) => {
                 let _ = r.validate();
             }

@@ -1931,6 +1931,7 @@ fn windows_build_advertises_file_v1() {
             CAP_SCREEN_V1,
             CAP_DATAGRAM_V1,
             CAP_SCREEN_ECHO_V1,
+            CAP_PUNCH_V1,
         ]
     );
 }

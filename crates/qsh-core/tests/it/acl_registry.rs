@@ -347,9 +347,9 @@ mod dispatch_surface {
     use qsh_proto::wire::control_message::Body;
     use qsh_proto::wire::{
         ExecStart, FileListOpen, FileMkdirOpen, FileReadOpen, FileWriteOpen, Hello,
-        PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose, RemoteForwardOpen, Response,
-        SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList, SessionOpen,
-        SessionRead, SessionResize, SessionWrite,
+        PairingAccepted, PairingProof, Ping, Pong, PunchOffer, PunchRequest, RemoteForwardClose,
+        RemoteForwardOpen, RendezvousQuery, Response, SessionAttach, SessionClose, SessionEvent,
+        SessionGet, SessionList, SessionOpen, SessionRead, SessionResize, SessionWrite,
     };
 
     enum Classification {
@@ -403,6 +403,13 @@ mod dispatch_surface {
                  Principal::Pairing, routed to a dedicated pairing responder before \
                  dispatch/ACL ever run",
             ),
+            Body::PunchRequest(_) | Body::PunchOffer(_) | Body::RendezvousQuery(_) => {
+                Classification::NoAuthorizationSurface(
+                    "punch.v1 signalling (ADR-0054): no role serves it yet and dispatch \
+                 answers UNSUPPORTED before any resource exists; host.punch authorizes \
+                 it when the rendezvous and target roles land",
+                )
+            }
             Body::PairingAccepted(_) => Classification::NoAuthorizationSurface(
                 "a reply, produced only by the pairing responder itself; never a request \
                  a peer sends to be authorized",
@@ -434,6 +441,9 @@ mod dispatch_surface {
             Body::SessionEvent(SessionEvent::default()),
             Body::PairingProof(PairingProof::default()),
             Body::PairingAccepted(PairingAccepted::default()),
+            Body::PunchRequest(PunchRequest::default()),
+            Body::PunchOffer(PunchOffer::default()),
+            Body::RendezvousQuery(RendezvousQuery::default()),
         ]
     }
 
@@ -444,13 +454,14 @@ mod dispatch_surface {
     /// are equally never-authorized wire shapes (a reply and an
     /// unsolicited keepalive echo, never a peer request), and M7 Step 4
     /// added two more (`PairingProof`/`PairingAccepted`, ADR-0002) — so the
-    /// real, code-verified list is seven variants, not three.
-    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 7;
+    /// real, code-verified list is seven variants, not three. The three `punch.v1`
+    /// signalling requests (ADR-0054) join until `host.punch` authorizes them.
+    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 10;
 
     #[test]
     fn every_control_message_body_variant_needs_authorization_or_is_explicitly_exempt() {
         let samples = all_body_samples();
-        assert_eq!(samples.len(), 22, "Body sample count drifted");
+        assert_eq!(samples.len(), 25, "Body sample count drifted");
 
         let mut needs_op: HashSet<&'static str> = HashSet::new();
         let mut no_auth_count = 0usize;

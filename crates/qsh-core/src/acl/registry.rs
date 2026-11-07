@@ -639,6 +639,13 @@ mod tests {
                  connection is refused before this classifier even matters \
                  (Server::dispatch's own arm, ADR-0002)",
             ),
+            Body::PunchRequest(_) | Body::PunchOffer(_) | Body::RendezvousQuery(_) => {
+                BodyClassification::NoAuthorizationSurface(
+                    "punch.v1 signalling (ADR-0054): no role serves it yet and dispatch \
+                 answers UNSUPPORTED before any resource exists; host.punch authorizes \
+                 it when the rendezvous and target roles land",
+                )
+            }
             Body::PairingAccepted(_) => BodyClassification::NoAuthorizationSurface(
                 "a reply, produced only by the pairing responder itself; never a \
                  request a peer sends to be authorized",
@@ -656,9 +663,10 @@ mod tests {
         use qsh_proto::wire::control_message::Body;
         use qsh_proto::wire::{
             ExecStart, FileListOpen, FileMkdirOpen, FileReadOpen, FileWriteOpen, Hello,
-            PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose, RemoteForwardOpen,
-            Response, SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList,
-            SessionOpen, SessionRead, SessionResize, SessionWrite,
+            PairingAccepted, PairingProof, Ping, Pong, PunchOffer, PunchRequest,
+            RemoteForwardClose, RemoteForwardOpen, RendezvousQuery, Response, SessionAttach,
+            SessionClose, SessionEvent, SessionGet, SessionList, SessionOpen, SessionRead,
+            SessionResize, SessionWrite,
         };
         vec![
             Body::Hello(Hello::default()),
@@ -683,6 +691,9 @@ mod tests {
             Body::SessionEvent(SessionEvent::default()),
             Body::PairingProof(PairingProof::default()),
             Body::PairingAccepted(PairingAccepted::default()),
+            Body::PunchRequest(PunchRequest::default()),
+            Body::PunchOffer(PunchOffer::default()),
+            Body::RendezvousQuery(RendezvousQuery::default()),
         ]
     }
 

@@ -145,7 +145,13 @@ pub fn classify(body: &control_message::Body) -> MessageKind {
         // sending either is never legitimate, same as the other handshake/
         // reply/event shapes just above.
         | control_message::Body::PairingProof(_)
-        | control_message::Body::PairingAccepted(_) => MessageKind::Invalid,
+        | control_message::Body::PairingAccepted(_)
+        // Hole-punching signals (ADR-0054, `punch.v1`) go from the dialing
+        // end straight to the rendezvous or the target over their own QUIC
+        // connection; a conduit never relays them.
+        | control_message::Body::PunchRequest(_)
+        | control_message::Body::PunchOffer(_)
+        | control_message::Body::RendezvousQuery(_) => MessageKind::Invalid,
         control_message::Body::SessionOpen(_)
         | control_message::Body::SessionGet(_)
         | control_message::Body::SessionList(_)
