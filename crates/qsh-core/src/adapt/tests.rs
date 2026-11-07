@@ -289,6 +289,7 @@ fn keep_alive_table() {
     let user = |ka: Option<u64>, adaptive: bool| User {
         adaptive,
         keep_alive: ka.map(ms),
+        prediction: None,
     };
     let prev = |ka: u64| Knobs {
         keep_alive: ms(ka),
@@ -777,4 +778,51 @@ fn assert_an_oversleeping_sender_gets_the_full_rate() {
     }
     let got = sent as f64 / (now - ms(3_020)).as_secs_f64();
     assert!(got >= 0.9 * rate as f64, "{got} B/s of {rate}");
+}
+
+// (d) with `--predict` pinned (ADR-0053 decision 11) ----------------------
+
+#[test]
+fn predict_pin_table() {
+    // (pin, adaptive, srtt ms, expected, user_override listed)
+    let rows = [
+        (Some(PredictPin::Always), true, 5, Prediction::Display, true),
+        (
+            Some(PredictPin::Always),
+            false,
+            5,
+            Prediction::Display,
+            true,
+        ),
+        (
+            Some(PredictPin::Always),
+            false,
+            200,
+            Prediction::Underline,
+            true,
+        ),
+        (Some(PredictPin::Never), true, 200, Prediction::Off, true),
+        (None, false, 200, Prediction::Off, true), // adaptive = "off" alone
+        (None, true, 200, Prediction::Underline, false),
+    ];
+    for (pin, adaptive, srtt, expect, overridden) in rows {
+        let o = obs(|o| {
+            o.srtt = ms(srtt);
+            o.user = User {
+                adaptive,
+                prediction: pin,
+                ..User::default()
+            };
+        });
+        let k = decide(&o, &Knobs::default());
+        assert_eq!(
+            k.prediction, expect,
+            "{pin:?} adaptive={adaptive} srtt={srtt}"
+        );
+        assert_eq!(
+            k.reasons.contains(&Reason::UserOverride),
+            overridden,
+            "{pin:?} adaptive={adaptive}"
+        );
+    }
 }

@@ -133,6 +133,9 @@ pub struct SessionAttachStream {
     pub(super) link: RecoveryLink,
     /// Drawing state when the host granted screen sync for this attach.
     pub(super) screen: Option<Arc<ScreenSink>>,
+    /// Why `--predict=always` cannot act on this attach, if it asked and
+    /// cannot (ADR-0053 decision 11).
+    pub(super) predict_unavailable: Option<&'static str>,
 }
 
 /// Ends an attach the same way whether it was closed or merely dropped:
@@ -468,6 +471,14 @@ impl SessionAttachStream {
     /// filter of the byte path does not apply to them.
     pub fn screen_sync(&self) -> bool {
         self.screen.is_some()
+    }
+
+    /// Set when the frontend asked for `--predict=always` and this attach
+    /// cannot predict: the reason, for the one stderr line the frontend
+    /// writes before it goes raw (ADR-0053 decision 11). `None` otherwise,
+    /// and always for `auto` and `never`.
+    pub fn predict_unavailable(&self) -> Option<&'static str> {
+        self.predict_unavailable
     }
 
     /// The bytes that put the local terminal's modes back (alternate

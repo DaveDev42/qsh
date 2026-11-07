@@ -95,6 +95,9 @@ pub fn to_json_line(report: &DoctorTransport) -> String {
 pub struct Sample {
     /// The report for this step.
     pub report: DoctorTransport,
+    /// Knob (d) of this step, as the value the attach driver's predictor
+    /// takes (the report carries it as a string).
+    pub prediction: Prediction,
     /// A discrete knob (screen carrier, bulk yield, prediction, keep-alive,
     /// datagram availability) differs from the step before, or this is the
     /// first step. The continuously varying values (RTT, frame interval)
@@ -181,7 +184,11 @@ impl PolicySampler {
         };
         let changed = self.last.as_ref() != Some(&discrete);
         self.last = Some(discrete);
-        Sample { report, changed }
+        Sample {
+            report,
+            prediction: self.knobs.prediction,
+            changed,
+        }
     }
 
     /// Loss over the snapshots held, for a caller that wants it without a
@@ -214,8 +221,20 @@ impl PolicyMonitor {
     pub fn spawn(
         runtime: &tokio::runtime::Handle,
         connection: impl Fn() -> Connection + Send + 'static,
+        sampler: PolicySampler,
+        emit: impl Fn(&str) + Send + 'static,
+    ) -> Self {
+        Self::spawn_observed(runtime, connection, sampler, emit, |_| {})
+    }
+
+    /// [`Self::spawn`] that also hands every step's [`Sample`] to `observe`
+    /// (M23: the prediction knob reaches the attach driver's predictor).
+    pub fn spawn_observed(
+        runtime: &tokio::runtime::Handle,
+        connection: impl Fn() -> Connection + Send + 'static,
         mut sampler: PolicySampler,
         emit: impl Fn(&str) + Send + 'static,
+        observe: impl Fn(&Sample) + Send + 'static,
     ) -> Self {
         let shared: Shared = Arc::new(Mutex::new(None));
         let published = Arc::clone(&shared);
@@ -237,6 +256,7 @@ impl PolicyMonitor {
                 if sample.changed {
                     emit(&to_json_line(&sample.report));
                 }
+                observe(&sample);
                 *published.lock().unwrap_or_else(PoisonError::into_inner) = Some(sample.report);
             }
         });

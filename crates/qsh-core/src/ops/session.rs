@@ -1048,9 +1048,31 @@ impl Ops {
         };
         // The drawing state of a screen-sync attach, kept across the
         // connections the attach runs on.
-        let screen_sink = screen
-            .filter(|_| screen_granted)
-            .map(|s| Arc::new(ScreenSink::new(s.cols, s.rows)));
+        // Local echo prediction needs both peers to speak `screen-echo.v1`
+        // (ADR-0053 decision 7); the reverse route has no QUIC connection to
+        // read `srtt` from and samples it from `InputAck` spacing instead
+        // (decision 8).
+        let reverse = matches!(link, RecoveryLink::Reverse(_));
+        let screen_echo = capabilities.iter().any(|c| c == wire::CAP_SCREEN_ECHO_V1);
+        let predict_unavailable = match screen {
+            Some(s) if s.predict == Predict::Always => {
+                if !screen_granted {
+                    Some("the byte path has no screen to predict on")
+                } else if !screen_echo {
+                    Some("the host does not offer screen-echo.v1")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let screen_sink = screen.filter(|_| screen_granted).map(|s| {
+            let predict =
+                crate::client::predict_drive::PredictDriver::new(s.predict, screen_echo, reverse);
+            let sink = Arc::new(ScreenSink::new(s.cols, s.rows, predict));
+            sink.set_writer(writer_lease);
+            sink
+        });
         let ctx = Arc::new(AttachContext {
             screen: screen_sink.clone(),
             target,
@@ -1084,6 +1106,7 @@ impl Ops {
                     .map(Duration::from_millis);
                 let user = crate::adapt::User {
                     keep_alive: pinned_keep_alive,
+                    prediction: screen.and_then(|s| s.predict.pin()),
                     ..crate::adapt::User::from_process()
                 };
                 let sampler = crate::adapt::PolicySampler::new(
@@ -1092,11 +1115,19 @@ impl Ops {
                     capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
                 );
                 let live = live.clone();
-                Some(crate::adapt::PolicyMonitor::spawn(
+                // The prediction knob of each step goes to the attach's
+                // predictor (ADR-0053 decision 8).
+                let sink = screen_sink.clone();
+                Some(crate::adapt::PolicyMonitor::spawn_observed(
                     conn.runtime().handle(),
                     move || live.connection(),
                     sampler,
                     crate::adapt::PolicyMonitor::emit_line,
+                    move |sample| {
+                        if let Some(sink) = &sink {
+                            sink.set_policy(sample.prediction);
+                        }
+                    },
                 ))
             }
             _ => None,
@@ -1125,6 +1156,7 @@ impl Ops {
             expires_at,
             link,
             screen: screen_sink,
+            predict_unavailable,
         })
     }
 
@@ -1520,3 +1552,6 @@ pub(crate) enum RouteSeed {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod predict_tests;

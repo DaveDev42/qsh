@@ -92,6 +92,19 @@ pub(super) async fn pump_attach_input(
                     let _ = events.send(Err(map_resume_error(err))).await;
                     return;
                 }
+                // Screen sync with prediction: draw the typed characters
+                // now, ahead of the host (ADR-0053 decision 2). The offset
+                // after these bytes is what the host's `ScreenEcho` will be
+                // compared with.
+                if let Some(sink) = &ctx.screen {
+                    let end = writer.input_seq() + data.len() as u64;
+                    let (bytes, sequence) = sink.input(&data, end, std::time::Instant::now());
+                    if !bytes.is_empty() {
+                        let _ = events
+                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
+                            .await;
+                    }
+                }
                 writer.send_input(&data).await.map(|_| ())
             }
             AttachCommand::Resize { cols, rows } => {

@@ -368,6 +368,7 @@ impl Ops {
         let user = User {
             adaptive: config.transport.adaptive_mode().enabled(),
             keep_alive: config.transport.keep_alive_ms.map(Duration::from_millis),
+            prediction: None,
         };
         let mut sampler =
             PolicySampler::new(user, screen_offered && screen_wanted, datagram_offered);
