@@ -89,7 +89,7 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 ## 3. M24 스텝
 
 - [x] **범위 ADR(ADR-0054).** 2026-11-07 승인(Dave 결정, 다섯 항목 모두 추천 (가), 펀칭 대상은 `serve --to` host로 한정). 수용 기준은 ADR-0054의 마지막 결정(DoD 열여섯 항목)이다.
-- [ ] **netsim과 NAT 상자 표 테스트.** `qsh-testkit`의 가상 UDP 위 실제 quinn, RFC 4787 NAT 상자(full-cone·restricted·port-restricted·symmetric 등), 세 OS. wire 없음.
+- [x] **netsim과 NAT 상자 표 테스트.** 2026-11-07 착지(`112f442`, netsim 시험 20개, WSL 전체 통과, Dave-Windows 20/20). `qsh_testkit::netsim`의 `Net`·`Realm`·`Site`·`NatHandle`·`NetSocket`(quinn `AsyncUdpSocket`), tokio 일시정지 시계와 seed 하나. 프리셋은 hairpin 꺼짐, 포트 보존 상자는 같은 소켓의 매핑마다 안쪽 포트를 다시 쓴다. wildcard·dual-stack bind는 아직 없어 `PunchEndpoint` 스텝이 더한다. `qsh-testkit`의 가상 UDP 위 실제 quinn, RFC 4787 NAT 상자(full-cone·restricted·port-restricted·symmetric 등), 세 OS. wire 없음.
 - [ ] **`PunchEndpoint`와 손으로 넣은 후보의 NAT 쌍 측정.** 감싼 소켓, 펀치 datagram 송수신, 서버 창, dual-stack. 수치는 ADR 개정 이력에. wire 없음.
 - [ ] **`punch.v1`, message, 후보 검사, tag, fuzz.**
 - [ ] **`host.punch`와 role 표, 감사.**
