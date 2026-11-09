@@ -90,6 +90,7 @@ M23이 남긴 후속이다(ADR-0053 개정 이력, M23 계획 `d50f003`).
 
 M24가 남긴 후속이다(ADR-0054 개정 이력, M24 계획 `569e859`).
 
+- [ ] `jump_chain::jump_mtu_budget_on_a_four_hop_chain`이 CPU 버너 16개의 극단 부하에서 한 번, 한 층이 4×srtt 침묵 규칙으로 스트림으로 바뀌어 실패했다.
 - [ ] 펀칭한 `exec`는 채택된 연결의 closing drain도 200 ms에서 끊는다. 마지막 CONNECTION_CLOSE가 잃히면 host는 idle timeout에서야 끝을 안다. 진 후보만 따로 닫는 방법(다른 endpoint 또는 quinn의 연결별 drain 상태)은 transport 재설계가 필요해 미뤘다.
 - [ ] derived 후보(결정 23 (d))는 IPv4만 만든다. IPv6에서 중개자가 B와 같은 방화벽 뒤인 장면은 시험이 없다.
 - [ ] 커널 대조는 masquerade(port-restricted)와 fully-random(symmetric)만 덮는다. full cone·restricted는 conntrack에 그대로 대응하는 것이 없어 netsim에서만 본다.
@@ -100,8 +101,8 @@ M25가 남긴 후속이다(ADR-0055 개정 이력, M25 계획 `3604a16`).
 
 - [ ] Windows에서 exec 소켓 제거를 기다리는 단언은 세션 소켓만 보아 거의 공으로 통과한다. exec pipe의 수명을 직접 보는 시험이 없다.
 - [ ] Windows CI 러너의 `ssh-agent` 서비스는 기계 하나에 하나라서 그 서비스를 쓰는 시험은 시험 그룹 `shared-ssh-agent`로 한 번에 하나씩 돈다(`38d30ec`). 그 서비스를 쓰는 시험을 더하면 같은 그룹에 넣는다.
-- [x] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`의 Windows 10060(CI run 42594749119, 42612491760)은 시험 결함이었다. 부하 아래 `try_clone`(WSADuplicateSocket) 복제본이 미연결로 돌아와 `shutdown(Write)`가 WSAENOTCONN으로 실패해 half-close가 나가지 않았다(Dave-Windows 부하 아래 63/64 재현). 한 소켓으로 쓰고 읽게 고쳤다. 같은 모양(복제본에서 `shutdown(Write)`)이 `tunnel_e2e.rs`와 `route_cases.rs`의 echo 도우미에 남아 있다. 붉어지면 같은 방식으로 고친다.
-- [ ] `agent_reverse::end_to_end::a_reverse_reattach_registers_its_channel_again`이 전체 실행 한 번에서 `session.attach`의 `PermissionDenied`로 실패했고 혼자 돌리면 통과한다.
+- [x] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`의 Windows 10060(CI run 42594749119, 42612491760)은 시험 결함이었다. 부하 아래 `try_clone`(WSADuplicateSocket) 복제본이 미연결로 돌아와 `shutdown(Write)`가 WSAENOTCONN으로 실패해 half-close가 나가지 않았다(Dave-Windows 부하 아래 63/64 재현). 한 소켓으로 쓰고 읽게 고쳤다. 도우미는 `qsh_testkit::tunnel::echo_round_trip`으로 모았고 `jump_chain`·`jump_reverse`도 쓴다(`2f68b24`). 같은 모양(복제본에서 `shutdown(Write)`)이 `qsh-cli`의 `tunnel_e2e.rs`와 `route_cases.rs` echo 도우미에 남아 있다. 붉어지면 같은 방식으로 고친다.
+- [x] `agent_reverse::end_to_end::a_reverse_reattach_registers_its_channel_again`의 간헐 실패는 제품 결함이었다. localctl 소켓 bind가 프로세스 전역 umask를 0o177로 좁히는 동안 다른 스레드가 만든 0700 디렉터리가 0600이 되어 audit 쓰기가 EACCES로 실패하고 허용이 fail-closed로 거부가 됐다. 0o077로 고치고 회귀 시험을 더했다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
@@ -124,8 +125,8 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - [x] **중간 peer.** 2026-11-09 착지(`40843c9`, `docs/CLI.md` v0.96, protocol §21.3·§21.4, threat model B50·B51·C27·C28·D26, WSL·Dave-Windows 4241개, CI run 42614796814 초록). `jump.v1`을 광고하고 `capabilities.json`을 다시 만들었다. `jump_host::` 스무 개. T→C 운반체는 연결 때 한 번 정하는 정적 선택이고 침묵 전환은 운반체 스텝에 남았다. hub당 32 상한은 일반 serve에 해당하지 않아 시험이 없다.
 - [x] **client 체인과 실패 보고.** 2026-11-09 착지(`ce40d60`, `docs/CLI.md` v0.97, protocol §21.5, WSL·Dave-Windows 4265개, CI run 42620484401 초록). `Ops::with_jump`, `jump::{JumpPlan, dial_chain}`, 첫 hop에도 정확한 fingerprint 사후 확인. `details.jump.hop`은 세우던 단의 자리이고 stage가 앞 단이 한 일을 말한다(앞 단이 둘째 hop 열기를 거절하면 hop 2). `jump_chain::` 열여섯, fixture 셋.
 - [x] **운반체 고르기와 적응.** client 체인(`ce40d60`)에 함께 착지했다. 250 ms마다 다시 고르고 `set_packet_limit`이 바깥 자리 − 17을 따른다. 4×srtt 침묵 전환·30초 재시도는 `SilenceFallback`으로 client와 중간 peer가 같이 쓴다. 1280 링크에서 둘째 hop부터 datagram이 될 수 있는 것은 ADR-0057 개정 이력에 적었다. datagram만 막는 장면의 실시험과 PLPMTUD 뒤 datagram 전환 시험은 수용 시험 몫이다.
-- [ ] **역방향 데몬.** 이 장비의 `qsh listen` 데몬으로만 닿는 첫 hop. 로컬 구간은 스트림, 등록 연결 구간은 datagram으로 바꿔 잇는다.
-- [ ] **recovery와 `--supervise`.** 체인을 한 단위로 다시 세우고 resume한다. migration은 첫 hop 연결에서 끝난다.
-- [ ] **표면.** `-J`, `--jump`, `-o ProxyJump`, pin 필드 `jump`와 `qsh trust jump`, `-J none`, 부트스트랩의 `ProxyJump` 기록(ADR-0044 결정 6 개정), `qsh cp -J`·`qsh exec -J`, doctor 코드 둘, JSON과 fixture, man.
+- [x] **역방향 데몬.** 2026-11-10 착지(protocol §21.7, threat model C27). 첫 hop이 이 장비의 `qsh listen`에 등록한 host면 CLI는 `LOCAL_STREAM`으로 JUMP 채널을 열고, 데몬이 등록 연결 위에 같은 header로 JUMP를 열어 운반체를 번역한다(CLI 구간 스트림, 등록 연결 구간 datagram|스트림). 헤더 전에 `LocalHelloAck` 지문을 pin과 맞춘다. 인가는 등록한 host가 한다. `jump_reverse::` 여덟과 netsim `jump_first_hop_over_a_punched_connection`. 주소 없는 펀칭 전용 첫 hop에 jump를 거는 경우는 아직 `jump_plan`의 주소 검사가 막는다.
+- [x] **recovery와 `--supervise`.** 2026-11-10 착지(`b9c8c07`, protocol §21.6). 체인을 처음부터 다시 세우고 resume한다. 안쪽 endpoint의 rebind는 `Endpoint::rebinding_via`로 첫 hop의 소켓을 옮긴다. 파이프 위 endpoint의 `wait_idle`이 끝나지 않던 결함을 `NESTED_IDLE_CAP` 3초와 `END_DRAIN` 2초로 묶었다(CI의 `jump_chain` 60초 멈춤의 원인). `jump_recovery::` 일곱. 같은 포트로 J를 다시 띄우는 시험은 하네스가 못 해서 C–J·J–T 5초 차단으로 대신했다.
+- [x] **표면.** 2026-11-10 착지(`0c230d6`, `ebf3120`, `docs/CLI.md` v0.98, man, README). `-J`(명령마다)·`--jump`(전역)·`-o ProxyJump`·`-J none`, pin 필드 `jump`와 `qsh trust jump`, 부트스트랩의 `ProxyJump` 기록, pin jump의 재귀 펼침과 순환 거부, doctor `jump_stream_carrier`·`jump_hop_missing`. 명령줄 `-J`는 부트스트랩 때만 pin에 남는다. `trust remove`는 다른 pin의 jump 참조를 지우지 않고 doctor가 알린다.
 - [ ] **수용 시험.** netsim 체인, 평문 없음, pin 불일치, 성능(`jump_echo_overhead_per_hop`, `jump_tunnel_throughput`), 펀칭·역방향 첫 hop, Windows.
 - [ ] **문서와 마감.** README, `docs/CLI.md`, protocol §21, architecture, testing, threat model 결정 24의 행, 개정 ADR들의 개정 이력 줄, ROADMAP M26 마감 노트.
