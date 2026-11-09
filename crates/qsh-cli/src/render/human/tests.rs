@@ -110,6 +110,7 @@ fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independe
             remedy: Some("do the thing".to_string()),
         }],
         transport: None,
+        punch: None,
     };
 
     let lines = render_doctor_lines(&data);

@@ -27,8 +27,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, DoctorTransport, ErrorCode, KeyStoreKind};
-use qsh_transport::AuthPath;
+use qsh_proto::{
+    DoctorData, DoctorFinding, DoctorPunch, DoctorReq, DoctorTransport, ErrorCode, KeyStoreKind,
+};
+use qsh_transport::{AuthPath, TransportTuning};
 
 use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_example_rows};
 use crate::config::Config;
@@ -37,14 +39,16 @@ use crate::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE,
     ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED,
     CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY,
-    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, QSH_PATH_SHADOWED, SCREEN_ECHO_UNSUPPORTED,
-    SCREEN_SYNC_UNSUPPORTED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
-    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, PUNCH_FAILED, PUNCH_NO_RENDEZVOUS, PUNCH_SUCCEEDED,
+    QSH_PATH_SHADOWED, SCREEN_ECHO_UNSUPPORTED, SCREEN_SYNC_UNSUPPORTED,
+    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
+    probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
     CERT_BACKDATE_MINUTES, FileKeyStore, Identity, KEY_FILE, KeyStore, PlatformKeyStore,
 };
+use crate::ops::PeerRoute;
 #[cfg(windows)]
 use crate::ops::service::ComTaskScheduler;
 use crate::ops::service::{TaskDefinitionReader, TaskLogonType, UnreadableTaskScheduler};
@@ -316,13 +320,21 @@ impl Ops {
         );
         findings.extend(self.doctor_trust_findings()?);
         findings.extend(self.doctor_pinned_no_address_findings()?);
-        findings.extend(self.doctor_connectivity_findings(config, req.host.as_deref())?);
+        let (connectivity, direct_missing) =
+            self.doctor_connectivity_findings(config, req.host.as_deref())?;
+        findings.extend(connectivity);
         findings.extend(self.doctor_service_registration_findings(mode, env));
         findings.extend(self.doctor_bindv6only_finding(config, mode, env));
         let transport = match req.host.as_deref() {
-            Some(host) if !reachability_failed(&findings) => {
+            Some(host) if !direct_missing && !reachability_failed(&findings) => {
                 self.doctor_transport(config, host, &mut findings)
             }
+            _ => None,
+        };
+        // A host with no direct path gets one hole punch (ADR-0054 decision
+        // 20); a host with one does not.
+        let punch = match req.host.as_deref() {
+            Some(host) if direct_missing => self.doctor_punch(host, &mut findings),
             _ => None,
         };
 
@@ -330,6 +342,7 @@ impl Ops {
             overall: overall_status(&findings),
             findings,
             transport,
+            punch,
         })
     }
 
@@ -820,14 +833,20 @@ impl Ops {
     /// [`probe::classify_connectivity`]'s alone (design brief risk #6):
     /// this method never constructs a `DoctorFinding` itself, only feeds
     /// it a `(outcome, is_controller_target)` pair.
+    ///
+    /// The flag is whether `extra_host` has no direct path: its UDP probe
+    /// failed (`no_route`, `udp_egress_blocked`, or `controller_unreachable`
+    /// when the host is the controller), or it is a pin with no address.
+    /// That is when `qsh doctor <host>` punches (ADR-0054 decision 20).
     fn doctor_connectivity_findings(
         &self,
         config: &Config,
         extra_host: Option<&str>,
-    ) -> Result<Vec<DoctorFinding>, OpError> {
+    ) -> Result<(Vec<DoctorFinding>, bool), OpError> {
         let trust = TrustStore::load(&self.paths.trust_file())?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let mut out = Vec::new();
+        let mut direct_missing = false;
 
         let controller = config
             .serve
@@ -846,7 +865,17 @@ impl Ops {
             // `host::not_in_trust_store_host_not_found`) — the caller named
             // a specific peer, so a typo fails loudly rather than
             // silently turning into an "unreachable" finding.
-            let (address, _server_name) = resolve_peer_address(&trust, &hosts, host)?;
+            let (address, _server_name) = match resolve_peer_address(&trust, &hosts, host) {
+                Ok(resolved) => resolved,
+                // A pin with no address has no direct path to probe; only a
+                // punch can reach it. Anything else stays the hard error.
+                Err(err)
+                    if err.code == ErrorCode::HostNotFound && pin_has_no_address(&trust, host) =>
+                {
+                    return Ok((out, true));
+                }
+                Err(err) => return Err(err),
+            };
             // P3-4 (verify round): when `host` resolves to the very peer
             // `[reverse].controller` already names, the branch above
             // already probed it once as `controller_unreachable` — probing
@@ -863,12 +892,110 @@ impl Ops {
                     || resolve_peer_address(&trust, &hosts, controller)
                         .is_ok_and(|(controller_address, _)| controller_address == address)
             });
-            if !same_as_controller {
-                out.extend(probe_address(&address, host, false));
+            if same_as_controller {
+                direct_missing = out.iter().any(|f| f.code == "controller_unreachable");
+            } else {
+                let finding = probe_address(&address, host, false);
+                direct_missing = finding
+                    .as_ref()
+                    .is_some_and(|f| matches!(f.code.as_str(), "no_route" | "udp_egress_blocked"));
+                out.extend(finding);
             }
         }
 
-        Ok(out)
+        Ok((out, direct_missing))
+    }
+
+    /// The `punch` object and its finding (ADR-0054 decision 20): one punch
+    /// through the host's rendezvous peer, on the 8 s budget a command's
+    /// punch has, with the connection closed again once it stands. `None`
+    /// when punching is off or the host is reached through a reverse
+    /// registration. No address or port reaches the object, the finding, or
+    /// the `qsh::punch` lines the attempt writes.
+    ///
+    /// The rendezvous candidates are what [`Ops::with_punch`] was given.
+    /// The key `[punch].mode` and the pin's own `rendezvous` list belong to
+    /// the hint step; until they are read here a device that did not inject
+    /// a rendezvous reports `punch_no_rendezvous`.
+    fn doctor_punch(&self, host: &str, findings: &mut Vec<DoctorFinding>) -> Option<DoctorPunch> {
+        use crate::punch::{PUNCH_BUDGET, PunchMode};
+
+        if self.punch.mode == PunchMode::Off {
+            return None;
+        }
+        let plan = match self.resolve_route(host) {
+            Ok(PeerRoute::Forward(target)) => target.punch.filter(|plan| plan.has_rendezvous()),
+            Ok(PeerRoute::Reverse(_)) => return None,
+            // An address-less pin with no usable rendezvous is `HOST_NOT_FOUND`.
+            Err(err) if err.code == ErrorCode::HostNotFound => None,
+            Err(_) => return None,
+        };
+        let Some(plan) = plan else {
+            findings.push(punch_finding(&PUNCH_NO_RENDEZVOUS, "info", host, ""));
+            return Some(DoctorPunch {
+                rendezvous: None,
+                outcome: "no_rendezvous".to_string(),
+                reason: Some(
+                    crate::punch::GiveUpReason::NoRendezvous
+                        .as_str()
+                        .to_string(),
+                ),
+                candidate_kind: None,
+                family: None,
+                elapsed_ms: None,
+            });
+        };
+        let runtime = self.connect_runtime().ok()?;
+        let started = std::time::Instant::now();
+        let result = runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + PUNCH_BUDGET;
+            crate::punch::attempt(&plan, TransportTuning::default(), deadline).await
+        });
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Some(match result {
+            Ok(win) => {
+                let info = win.info.clone();
+                // The point was that it stands; nothing runs over it.
+                win.connection.close(0, b"done");
+                win.endpoint.close(0, b"done");
+                findings.push(punch_finding(
+                    &PUNCH_SUCCEEDED,
+                    "info",
+                    host,
+                    &format!(
+                        ", rendezvous: {}, candidate: {}, family: {}",
+                        info.rendezvous, info.kind, info.family
+                    ),
+                ));
+                DoctorPunch {
+                    rendezvous: Some(info.rendezvous),
+                    outcome: "succeeded".to_string(),
+                    reason: None,
+                    candidate_kind: Some(info.kind.to_string()),
+                    family: Some(info.family.to_string()),
+                    elapsed_ms: Some(info.elapsed_ms),
+                }
+            }
+            Err(failure) => {
+                findings.push(punch_finding(
+                    &PUNCH_FAILED,
+                    "warn",
+                    host,
+                    &format!(
+                        ", rendezvous: {}, reason: {}",
+                        failure.rendezvous, failure.reason
+                    ),
+                ));
+                DoctorPunch {
+                    rendezvous: Some(failure.rendezvous),
+                    outcome: "failed".to_string(),
+                    reason: Some(failure.reason.as_str().to_string()),
+                    candidate_kind: None,
+                    family: None,
+                    elapsed_ms: Some(elapsed_ms),
+                }
+            }
+        })
     }
 
     /// `service_restart_drops_sessions` (M13 H1) joins the registered-unit
@@ -1492,6 +1619,30 @@ pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// One of the three punch findings: the diagnostic's text, then the host
+/// and `extra` (words from closed vocabularies and pin names, never an
+/// address).
+fn punch_finding(
+    diag: &crate::doctor::Diagnostic,
+    status: &str,
+    host: &str,
+    extra: &str,
+) -> DoctorFinding {
+    DoctorFinding {
+        code: diag.code.to_string(),
+        status: status.to_string(),
+        detail: format!("{} (host: {host}{extra})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    }
+}
+
+/// Whether `host` names a pin that records no address.
+fn pin_has_no_address(trust: &TrustStore, host: &str) -> bool {
+    trust
+        .find(crate::ops::host::lookup_name(host))
+        .is_some_and(|pin| pin.address.is_empty())
+}
 
 /// How long `qsh doctor <host>` waits for the measurement connection to come
 /// up before it reports no `transport` (ADR-0052 decision 14).

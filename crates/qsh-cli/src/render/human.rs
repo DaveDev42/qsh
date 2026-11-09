@@ -122,6 +122,33 @@ fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
     if let Some(transport) = &data.transport {
         lines.extend(render_doctor_transport(transport));
     }
+    if let Some(punch) = &data.punch {
+        lines.extend(render_doctor_punch(punch));
+    }
+    lines
+}
+
+/// The `punch` block of `qsh doctor <host>` (`docs/CLI.md` §6.17).
+fn render_doctor_punch(p: &qsh_proto::DoctorPunch) -> Vec<String> {
+    let mut lines = vec!["punch:".to_string()];
+    let mut line = format!("  outcome: {}", sanitize(&p.outcome));
+    if let Some(name) = &p.rendezvous {
+        line.push_str(&format!(", via {}", sanitize(name)));
+    }
+    if let Some(reason) = &p.reason {
+        line.push_str(&format!(", reason: {}", sanitize(reason)));
+    }
+    if let (Some(kind), Some(family)) = (&p.candidate_kind, &p.family) {
+        line.push_str(&format!(
+            ", {} candidate over {}",
+            sanitize(kind),
+            sanitize(family)
+        ));
+    }
+    if let Some(ms) = p.elapsed_ms {
+        line.push_str(&format!(", {ms} ms"));
+    }
+    lines.push(line);
     lines
 }
 

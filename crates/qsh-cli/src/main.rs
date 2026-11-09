@@ -251,6 +251,13 @@ fn init_tracing(cli: &Cli) {
     // state changes, counts and reasons only. Off by default like
     // `qsh::adapt`, for the same reason.
     let predict_target = qsh_core::client::predict_drive::TARGET;
+    // Target `qsh::punch` (ADR-0054 decision 20): `attempt`, `signaled`,
+    // `adopted` and `gave_up` of a hole punch, `relayed`, `window_opened`
+    // and `window_closed` on a rendezvous or target. One JSON object per
+    // line, counts and words only, never an address or a port. Off by
+    // default like `qsh::adapt`: a successful punch is silent. `-v` or
+    // `QSH_LOG=qsh::punch=info` turns it on; `-q` still silences it.
+    let punch_target = qsh_core::punch::TARGET;
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
@@ -262,6 +269,7 @@ fn init_tracing(cli: &Cli) {
                 && meta.target() != qsh_core::lifecycle::TARGET
                 && meta.target() != adapt_target
                 && meta.target() != predict_target
+                && meta.target() != punch_target
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -299,10 +307,17 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             predict_enabled && meta.target() == predict_target
         }));
+    let punch_enabled = !cli.quiet;
+    let punch = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec, adapt_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            punch_enabled && meta.target() == punch_target
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(adapt)
         .with(predict)
+        .with(punch)
         .with(recovery)
         .with(reverse)
         .with(supervise)

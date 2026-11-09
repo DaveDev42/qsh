@@ -202,11 +202,9 @@ impl PunchTarget {
             let report = run_target_in(&this.endpoint, window, &params, on_connection).await;
             log_window_closed(&report);
         });
-        tracing::info!(
-            target: "qsh::punch",
-            event = "window_opened",
-            answer_candidates = answer.len(),
-            "punch window opened"
+        super::log::emit(
+            "window_opened",
+            serde_json::json!({ "answer_candidates": answer.len() }),
         );
         Ok(answer)
     }
@@ -224,15 +222,15 @@ impl Drop for OpenGuard<'_> {
 }
 
 fn log_window_closed(report: &TargetReport) {
-    tracing::info!(
-        target: "qsh::punch",
-        event = "window_closed",
-        punches_sent = report.punches_sent,
-        punches_heard = report.punches_heard,
-        handshakes = report.handshakes,
-        connections = report.connections,
-        refused = report.refused,
-        failed = report.failed,
-        "punch window closed"
+    super::log::emit(
+        "window_closed",
+        serde_json::json!({
+            "punches_sent": report.punches_sent,
+            "punches_heard": report.punches_heard,
+            "handshakes": report.handshakes,
+            "connections": report.connections,
+            "refused": report.refused,
+            "failed": report.failed,
+        }),
     );
 }

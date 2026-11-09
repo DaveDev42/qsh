@@ -318,13 +318,25 @@ pub(crate) async fn dial_routed(
     };
     let punch_error = match punch_failed {
         Some(fail) => Some(fail),
-        None if punch_started && expired => Some(PunchFailure {
-            rendezvous: plan
-                .rendezvous
-                .first()
-                .map_or_else(String::new, |r| r.name.clone()),
-            reason: crate::punch::GiveUpReason::Timeout,
-        }),
+        None if punch_started && expired => {
+            // The route's deadline cut the attempt off before it could say so.
+            let failure = PunchFailure {
+                rendezvous: plan
+                    .rendezvous
+                    .first()
+                    .map_or_else(String::new, |r| r.name.clone()),
+                reason: crate::punch::GiveUpReason::Timeout,
+            };
+            crate::punch::log::emit(
+                "gave_up",
+                serde_json::json!({
+                    "rendezvous": failure.rendezvous,
+                    "reason": failure.reason.as_str(),
+                    "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                }),
+            );
+            Some(failure)
+        }
         None => None,
     };
     drop(direct);

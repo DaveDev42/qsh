@@ -1060,8 +1060,12 @@ impl Ops {
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let reverse = self.reverse_host_entries();
         let diag = &crate::doctor::HOST_PINNED_WITHOUT_ADDRESS;
+        // A pin with a rendezvous candidate can be reached by punching, so
+        // it is not "pinned without a way to reach it" (ADR-0054 decision 20).
+        let punchable = self.punchable_names();
         Ok(host_pinned_without_address(&reverse, &store, &hosts)
             .into_iter()
+            .filter(|name| !punchable.contains(name))
             .map(|name| DoctorFinding {
                 code: diag.code.to_string(),
                 status: "warn".to_string(),
@@ -1069,6 +1073,32 @@ impl Ops {
                 remedy: Some(diag.remedy.replace("{name}", &name)),
             })
             .collect())
+    }
+
+    /// Pin names that have a usable rendezvous candidate, which makes an
+    /// address-less pin reachable by a punch (ADR-0054 decisions 4 and 16).
+    /// Empty when punching is off or the identity or trust store cannot be
+    /// read.
+    fn punchable_names(&self) -> std::collections::HashSet<String> {
+        let Ok(Some(identity)) = self.load_identity() else {
+            return std::collections::HashSet::new();
+        };
+        let Ok(trust) = self.open_trust() else {
+            return std::collections::HashSet::new();
+        };
+        let names: Vec<String> = trust
+            .snapshot()
+            .peers()
+            .iter()
+            .map(|peer| peer.name.clone())
+            .collect();
+        names
+            .into_iter()
+            .filter(|name| {
+                self.punch_plan(name, &identity, &trust)
+                    .is_some_and(|plan| plan.has_rendezvous())
+            })
+            .collect()
     }
 
     /// Whether `name` is in the first `HOST_NOT_FOUND` branch of

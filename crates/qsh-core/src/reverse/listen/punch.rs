@@ -274,7 +274,10 @@ impl Listen {
                     LimitHit::InFlight => "a punch attempt is already in flight",
                     LimitHit::Rate => "too many punch attempts",
                 };
-                tracing::info!(target: "qsh::punch", event = "relayed", outcome = "rate_limited");
+                crate::punch::log::emit(
+                    "relayed",
+                    serde_json::json!({ "outcome": "rate_limited" }),
+                );
                 return (
                     error_reply(request_id, ErrorCode::ResourceExhausted, message, true),
                     false,
@@ -307,7 +310,7 @@ impl Listen {
         dropped: usize,
     ) -> wire::ControlMessage {
         let refuse = |refusal: PunchRefusal, outcome: &str| {
-            tracing::info!(target: "qsh::punch", event = "relayed", outcome);
+            crate::punch::log::emit("relayed", serde_json::json!({ "outcome": outcome }));
             refusal_reply(request_id, refusal)
         };
         let Some((target_conn, hub)) = self.registration_for(&req.target_fingerprint) else {
@@ -392,13 +395,14 @@ impl Listen {
                 PunchCandidateKind::Reflexive,
             ));
         }
-        tracing::info!(
-            target: "qsh::punch",
-            event = "relayed",
-            outcome = "answered",
-            offered_candidates = initiator_candidates.len() + usize::from(reflexive_ok),
-            answered_candidates = candidates.len(),
-            dropped_candidates = dropped + answered.dropped,
+        crate::punch::log::emit(
+            "relayed",
+            serde_json::json!({
+                "outcome": "answered",
+                "offered_candidates": initiator_candidates.len() + usize::from(reflexive_ok),
+                "answered_candidates": candidates.len(),
+                "dropped_candidates": dropped + answered.dropped,
+            }),
         );
         wire::ControlMessage::response(
             request_id,
