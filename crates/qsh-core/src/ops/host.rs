@@ -1095,8 +1095,7 @@ impl Ops {
         names
             .into_iter()
             .filter(|name| {
-                self.punch_plan(name, &identity, &trust)
-                    .is_some_and(|plan| plan.has_rendezvous())
+                matches!(self.punch_plan(name, &identity, &trust), Ok(Some(plan)) if plan.has_rendezvous())
             })
             .collect()
     }
