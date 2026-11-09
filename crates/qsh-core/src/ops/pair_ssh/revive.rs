@@ -78,6 +78,11 @@ impl Ops {
     /// ordinary thread, not from inside a tokio runtime.
     pub(crate) fn revive_target(&self, target: &PeerTarget, cause: &OpError) -> Option<PeerTarget> {
         let revival = self.revival.as_ref()?;
+        // A host behind a jump chain is reached at the address the chain
+        // was built with, which a revival would not change.
+        if target.jump.is_some() {
+            return None;
+        }
         if !failure_may_be_a_missing_serve(cause) {
             return None;
         }
@@ -110,6 +115,7 @@ impl Ops {
                 // dial can reach it (ADR-0054 decision 16.4).
                 punch: None,
                 learn: None,
+                jump: None,
             }),
             Err(err) => {
                 (revival.notice)(&format!(

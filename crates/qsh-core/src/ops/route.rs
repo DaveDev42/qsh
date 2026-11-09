@@ -34,6 +34,7 @@ use qsh_transport::{
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::client::reconnect::REDIAL_DEADLINE;
+use crate::jump::{JumpFailure, JumpPlan, Stage};
 use crate::ops::exec::map_dial_error;
 use crate::ops::{AddressResolver, OpError};
 use crate::punch::{PUNCH_BUDGET, PunchFailure, PunchPlan, attempt};
@@ -97,6 +98,8 @@ pub(crate) enum DirectFail {
     Dial { err: DialError, attempted: usize },
     /// The host has no address; only a punch could have reached it.
     NoAddress,
+    /// A jump chain to the host failed; the error carries `details.jump`.
+    Chain(Box<OpError>),
 }
 
 /// A failed route: the direct failure, plus the punch's when one ran.
@@ -124,6 +127,7 @@ impl RouteError {
                 ErrorCode::ConnectionFailed,
                 "no address is recorded for this host and it could not be reached by hole punching",
             ),
+            DirectFail::Chain(op) => *op,
         };
         match &self.punch {
             Some(punch) => punch.attach_to(op),
@@ -202,9 +206,112 @@ async fn within<T>(slot: &mut Option<BoxFut<'_, T>>) -> T {
     }
 }
 
+/// Dials a host the forward way: through its jump chain when it has one
+/// (ADR-0056 decision 13: then the chain is the whole route), otherwise
+/// [`dial_routed_plain`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dial_routed(
+    dialer: &Dialer,
+    address: &str,
+    server_name: &str,
+    plan: Option<&Arc<PunchPlan>>,
+    jump: Option<&Arc<JumpPlan>>,
+    tuning: TransportTuning,
+    resolver: &dyn AddressResolver,
+    kind: Dial,
+) -> Result<Routed, RouteError> {
+    match jump {
+        Some(jump) => dial_jump(dialer, jump, tuning, resolver, kind).await,
+        None => dial_routed_plain(dialer, address, server_name, plan, tuning, resolver, kind).await,
+    }
+}
+
+/// The first peer of a chain is reached the ordinary way, punching
+/// included (decision 13); the rest of the chain goes over it.
+async fn dial_jump(
+    dialer: &Dialer,
+    jump: &Arc<JumpPlan>,
+    tuning: TransportTuning,
+    resolver: &dyn AddressResolver,
+    kind: Dial,
+) -> Result<Routed, RouteError> {
+    let budget = match kind {
+        Dial::Command => default_dial_timeout(),
+        Dial::Redial => (redial_deadline(jump.first_punch.as_ref(), true)
+            + Duration::from_secs(jump.hops.len() as u64))
+        .min(default_dial_timeout()),
+    };
+    let deadline = Instant::now() + budget;
+    let first = jump.step(0);
+    let fail = |failure: JumpFailure, route: Option<OpError>| {
+        let message = route
+            .as_ref()
+            .map_or_else(String::new, |op| op.message.clone());
+        RouteError::plain(DirectFail::Chain(Box::new(failure.into_op(message, route))))
+    };
+    let server_name = crate::ops::server_name_for(&first.address);
+    let first_hop = tokio::time::timeout_at(
+        deadline,
+        dial_routed_plain(
+            dialer,
+            &first.address,
+            &server_name,
+            jump.first_punch.as_ref(),
+            tuning,
+            resolver,
+            kind,
+        ),
+    )
+    .await;
+    let routed = match first_hop {
+        Ok(Ok(routed)) => routed,
+        Ok(Err(err)) => {
+            let op = err.into_op(&first.address);
+            let stage = if op.code == ErrorCode::AuthFailed {
+                Stage::Auth
+            } else {
+                Stage::Dial
+            };
+            return Err(fail(
+                JumpFailure {
+                    hop: 1,
+                    hops: jump.hop_count(),
+                    name: first.name.clone(),
+                    stage,
+                },
+                Some(op),
+            ));
+        }
+        Err(_) => {
+            return Err(fail(
+                JumpFailure {
+                    hop: 1,
+                    hops: jump.hop_count(),
+                    name: first.name.clone(),
+                    stage: Stage::Dial,
+                },
+                Some(map_dial_error(
+                    DialError::Timeout(budget),
+                    &first.address,
+                    1,
+                )),
+            ));
+        }
+    };
+    let chained =
+        crate::jump::dial_chain(jump, dialer, (routed.connection, routed.endpoint), deadline)
+            .await
+            .map_err(|op| RouteError::plain(DirectFail::Chain(Box::new(op))))?;
+    Ok(Routed {
+        connection: chained.connection,
+        endpoint: chained.endpoint,
+        punched: false,
+    })
+}
+
 /// Dials a host the forward way. With no `plan` this is the direct dial
 /// alone, exactly as before the punch existed.
-pub(crate) async fn dial_routed(
+async fn dial_routed_plain(
     dialer: &Dialer,
     address: &str,
     server_name: &str,

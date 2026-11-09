@@ -763,6 +763,7 @@ async fn dial(
         &address,
         &target.server_name,
         target.punch.as_ref(),
+        target.jump.as_ref(),
         tuning,
         &crate::ops::SystemResolver,
         crate::ops::route::Dial::Redial,
@@ -773,6 +774,11 @@ async fn dial(
             crate::ops::route::DirectFail::Resolve(_) => ReconnectCause::Resolve,
             crate::ops::route::DirectFail::Dial { err, .. } => cause_of_dial_error(err),
             crate::ops::route::DirectFail::NoAddress => ReconnectCause::DialTimeout,
+            crate::ops::route::DirectFail::Chain(op) => match op.code {
+                ErrorCode::AuthFailed => ReconnectCause::TlsRejected,
+                ErrorCode::Timeout => ReconnectCause::DialTimeout,
+                _ => ReconnectCause::Refused,
+            },
         };
         AttemptError::dial(route.into_op(&address), cause)
     })?;

@@ -1,0 +1,19 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "details": {
+      "jump": {
+        "hop": 2,
+        "hops": 3,
+        "name": "b",
+        "stage": "denied"
+      }
+    },
+    "message": "jump 2/3 (b): the previous peer refused to open this connection",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

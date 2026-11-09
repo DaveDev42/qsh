@@ -94,6 +94,10 @@ pub(crate) struct PeerTarget {
     /// Asks the host for rendezvous hints once its session is up; `None`
     /// when learning is off (ADR-0054 decision 5).
     pub learn: Option<Arc<crate::punch::HintLearner>>,
+    /// The jump chain to this host, when the route is one (ADR-0056
+    /// decision 13: such a host is reached through its chain alone, never
+    /// raced against a direct dial or a punch).
+    pub jump: Option<Arc<crate::jump::JumpPlan>>,
 }
 
 impl PeerTarget {
@@ -101,7 +105,16 @@ impl PeerTarget {
     /// (ADR-0054 decision 18): `REDIAL_DEADLINE`, or the punch budget when
     /// this host can be punched to.
     pub(crate) fn redial_deadline(&self) -> std::time::Duration {
-        route::redial_deadline(self.punch.as_ref(), !self.address.is_empty())
+        match &self.jump {
+            // The first peer's route, then a second per further step
+            // (ADR-0056 decision 16), never over the command's own limit.
+            Some(plan) => {
+                let first = route::redial_deadline(plan.first_punch.as_ref(), true);
+                (first + std::time::Duration::from_secs(plan.hops.len() as u64))
+                    .min(qsh_transport::default_dial_timeout())
+            }
+            None => route::redial_deadline(self.punch.as_ref(), !self.address.is_empty()),
+        }
     }
 }
 
@@ -641,6 +654,10 @@ pub struct Ops {
     /// ([`Self::with_agent_forward`], ADR-0055 decision 18). `None` leaves
     /// every request byte-identical to one from before agent forwarding.
     agent: Option<Arc<crate::agent::ClientAgent>>,
+    /// The pin names of the jump hops every host this process dials is
+    /// reached through, in order ([`Self::with_jump`], ADR-0056). `None`
+    /// leaves every route as it was.
+    jump: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for Ops {
@@ -754,7 +771,24 @@ impl Ops {
             revival: None,
             punch: crate::punch::ClientPunch::default(),
             agent: None,
+            jump: None,
         }
+    }
+
+    /// Reach every host this process dials through `hops`, the pin names of
+    /// the intermediate peers in order (ADR-0056 decisions 6 and 11). An
+    /// empty list is no jump. The chain is checked when a host is resolved,
+    /// before anything is dialed: more than four hops, a pin twice, or the
+    /// target among the hops is `INVALID_ARGUMENT`, and a hop without a pin
+    /// or an address is `HOST_NOT_FOUND` with `details.jump`.
+    ///
+    /// A host reached this way is reached only through the chain: a live
+    /// reverse registration, a direct dial and a punch to the target are
+    /// not tried (decision 13). The first hop is dialed the ordinary way.
+    #[must_use]
+    pub fn with_jump(mut self, hops: Vec<String>) -> Self {
+        self.jump = (!hops.is_empty()).then_some(hops);
+        self
     }
 
     /// Decide agent forwarding for this process (ADR-0055 decision 18).
@@ -1039,6 +1073,9 @@ impl Ops {
             )
         })?;
         let trust = self.open_trust()?;
+        if self.jump.is_some() {
+            return self.jump_target(host, identity, trust);
+        }
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
             Ok(resolved) => resolved,
@@ -1058,7 +1095,105 @@ impl Ops {
             server_name,
             punch,
             learn,
+            jump: None,
         })
+    }
+
+    /// [`Self::resolve_peer`] for a process that jumps ([`Self::with_jump`]):
+    /// the target and every hop are resolved to their pins before anything
+    /// is dialed, so a malformed chain or a missing pin fails here.
+    pub(crate) fn jump_target(
+        &self,
+        host: &str,
+        identity: LoadedIdentity,
+        trust: Arc<SharedTrustStore>,
+    ) -> Result<PeerTarget, OpError> {
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        let hop_names = self.jump.clone().unwrap_or_default();
+        let names: Vec<&str> = hop_names.iter().map(|n| host::lookup_name(n)).collect();
+        let end_name = host::lookup_name(host);
+        crate::jump::chain::check_shape(&names, end_name)?;
+        let hops_total = names.len() + 1;
+        let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
+            Ok(resolved) => resolved,
+            Err(err) if err.code == ErrorCode::HostNotFound => {
+                return Err(crate::jump::JumpFailure {
+                    hop: hops_total,
+                    hops: hops_total,
+                    name: end_name.to_string(),
+                    stage: crate::jump::Stage::Address,
+                }
+                .into_op("no pin with an address is recorded for the target", None));
+            }
+            Err(err) => return Err(err),
+        };
+        let plan = self.jump_plan(&names, end_name, &address, &identity, &trust)?;
+        let learn = self.hint_learner(&trust);
+        Ok(PeerTarget {
+            identity,
+            trust,
+            address,
+            server_name,
+            punch: None,
+            learn,
+            jump: Some(plan),
+        })
+    }
+
+    /// Builds the validated chain from pin names. Every step must be a pin
+    /// with an address and a fingerprint (`address` stage otherwise); the
+    /// target's address is the resolved one.
+    fn jump_plan(
+        &self,
+        hops: &[&str],
+        end: &str,
+        end_address: &str,
+        identity: &LoadedIdentity,
+        trust: &Arc<SharedTrustStore>,
+    ) -> Result<Arc<crate::jump::JumpPlan>, OpError> {
+        use crate::jump::{HopPin, JumpFailure, Stage};
+        let store = trust.snapshot();
+        let total = hops.len() + 1;
+        let pin_of = |name: &str, index: usize, address: Option<&str>| {
+            let missing = |why: &str| {
+                JumpFailure {
+                    hop: index + 1,
+                    hops: total,
+                    name: name.to_string(),
+                    stage: Stage::Address,
+                }
+                .into_op(why.to_string(), None)
+            };
+            let pin = store
+                .find(name)
+                .ok_or_else(|| missing("no pin with this name is recorded"))?;
+            let address = address.unwrap_or(&pin.address);
+            if address.is_empty() {
+                return Err(missing("the pin has no address to jump to"));
+            }
+            let fingerprint = pin
+                .fingerprint
+                .parse::<Fingerprint>()
+                .map_err(|_| missing("the pin has no usable fingerprint"))?;
+            Ok(HopPin {
+                name: name.to_string(),
+                address: address.to_string(),
+                fingerprint,
+            })
+        };
+        let mut pins = Vec::with_capacity(hops.len());
+        for (index, name) in hops.iter().enumerate() {
+            pins.push(pin_of(name, index, None)?);
+        }
+        let end_pin = pin_of(end, hops.len(), Some(end_address))?;
+        let first_punch = self.punch_plan(hops[0], identity, trust)?;
+        let plan = crate::jump::JumpPlan::new(
+            pins,
+            end_pin,
+            first_punch,
+            identity.identity.device_id.clone(),
+        )?;
+        Ok(Arc::new(plan))
     }
 
     /// The effective `[punch].mode`: `--no-punch` wins, then the key, then
@@ -1216,6 +1351,7 @@ impl Ops {
             server_name: "qsh".to_string(),
             punch: Some(plan),
             learn: self.hint_learner(trust),
+            jump: None,
         })
     }
 
@@ -1235,6 +1371,10 @@ impl Ops {
     /// probe runtime is built and torn down here, before the dial's own
     /// multi-thread runtime exists.
     pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerRoute, OpError> {
+        // A jump is the whole route (ADR-0056 decision 13).
+        if self.jump.is_some() {
+            return Ok(PeerRoute::Forward(self.resolve_peer(host)?));
+        }
         let route = match self.resolve_host_route(host) {
             Ok(route) => route,
             Err(err) => return self.punch_only_route(host, err),
@@ -1632,7 +1772,7 @@ pub(crate) fn resolve_peer_address(
 /// wire: the client disables SNI (`docs/adr/0040-ech-policy.md` decision 2,
 /// `docs/design/protocol.md` §3) and the verifier ignores the name anyway.
 /// It only needs to be a name rustls will accept.
-fn server_name_for(address: &str) -> String {
+pub(crate) fn server_name_for(address: &str) -> String {
     let host = crate::trust::split_port(address).map_or(address, |(host, _)| host);
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host.is_empty() {

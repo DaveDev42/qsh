@@ -134,6 +134,11 @@ impl DatagramHub {
         self.conn.max_datagram_size()
     }
 
+    /// The connection's smoothed round-trip estimate.
+    pub fn rtt(&self) -> std::time::Duration {
+        self.conn.rtt()
+    }
+
     /// Send one frame. Never waits.
     pub fn send(&self, frame: &DatagramFrame) -> Result<(), SendFailure> {
         match self.conn.send_datagram(Bytes::from(frame.encode())) {
