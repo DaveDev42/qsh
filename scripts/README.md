@@ -256,6 +256,47 @@ events) and the `session_close_with_each_signal_` route cases. They start real
 (Git for Windows bash) with `run.sh`, after `cargo build -p qsh-testkit --bin
 qsh-signal-probe` so the probe sits next to the test executables.
 
+## netns/
+
+`punch.sh` checks hole punching against the Linux kernel's own NAT
+(ADR-0054 decision 24, DoD 13). For each of nine A/B pairs it builds fresh
+network namespaces (`qn-*`): A and B each sit behind a NAT box namespace or
+directly on the public segment, one router namespace joins them, and R
+(`qsh listen`, `192.0.2.2:9000`) sits on the public side. Every wan link
+carries 12.5 ms of `netem` delay per direction, so A-R, B-R and A-B are 25 ms
+one way. The NAT kinds are `none`, `masq` (nftables `masquerade`: endpoint
+independent mapping, port preserved, address and port dependent filtering,
+the netsim `port_restricted`) and `rand` (`masquerade fully-random`, the
+netsim `symmetric`). Pairs (masq, rand), (rand, masq) and (rand, rand) must
+give up with `details.punch.reason = "timeout"` inside the punch budget; the
+other six must run `qsh exec` over the punched connection with the `adopted`
+line's `elapsed_ms` (route start, signalling included, to the adopted
+connection) at or under 1000 ms. That is the same table netsim produces for
+the same presets. The full_cone and restricted presets have no stock
+conntrack equivalent and are not covered.
+
+```bash
+cargo build --release -p qsh-cli
+sudo -E env QSH_ACCEPTANCE_NETNS=1 QSH_BIN=target/release/qsh scripts/netns/punch.sh
+```
+
+Needs Linux, root, `ip` and `nft`; `tc` with the `sch_netem` module adds the
+delay (without it the script says so and runs the links undelayed). Each
+party gets its own `QSH_CONFIG_DIR`, `QSH_STATE_DIR`, `XDG_RUNTIME_DIR` and
+`HOME` under a fresh `mktemp -d`, so the caller's `~/.config/qsh` is never
+read, and R listens on 9000, never 4433. Namespaces and the temp tree are
+removed on exit. Without `QSH_ACCEPTANCE_NETNS=1` the script prints `SKIP`
+and exits 0.
+
+A is told the rendezvous with `qsh exec --rendezvous r` (ADR-0054 decision
+19); a build without that flag makes the script exit 3.
+`PUNCH_NETNS_SMOKE=1` skips the punch and only checks the topology (B
+registers at R through its NAT), which needs no flag. Other knobs:
+`PUNCH_NETNS_PAIRS="masq:masq none:rand"` picks pairs, `ADOPT_BOUND_MS` and
+`GIVE_UP_BOUND_MS` move the bounds. Exit 0 means every pair matched, 1 means
+a pair differed, 3 means a prerequisite is missing. CI runs it as the
+`punch-netns` job.
+
 ## test/
 
 `nextest-ns.sh [nextest args]` runs the suite (default `--workspace`) inside
