@@ -157,7 +157,8 @@ async fn cp_copies_a_file_over_a_punched_connection() {
     std::fs::write(&source, &bytes).expect("write the source");
     let req = FileCopyReq {
         sources: vec![source.to_string_lossy().into_owned()],
-        destination: format!("b:{}", target.display()),
+        // Bracketed, because on a Windows client a bare `b:` is a drive.
+        destination: format!("[b]:{}", target.display()),
         recursive: false,
         preserve: false,
         no_clobber: false,
