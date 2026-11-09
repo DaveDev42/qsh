@@ -4,5 +4,6 @@
 
 mod conformance;
 mod handshake_matrix;
+mod jump_pipe;
 mod loopback;
 mod reset_key;

@@ -1305,17 +1305,83 @@ impl Dialer {
             .await
     }
 
+    /// Dial over a [`PacketPipe`] instead of a UDP socket: the inner
+    /// connection of a jump hop (ADR-0056 decisions 2, 5 and 6). Same TLS,
+    /// pin verification, dial timeout and transport config as [`Self::dial`],
+    /// except that the endpoint is client-only, `initial_mtu` and `min_mtu`
+    /// are [`JUMP_PACKET_MIN`] and PLPMTUD stops at [`JUMP_PACKET_MAX`].
+    /// The connection's remote address is [`PIPE_REMOTE_ADDR`].
+    pub async fn dial_over_pipe(
+        &self,
+        pipe: PacketPipe,
+        server_name: &str,
+    ) -> Result<Dialed, DialError> {
+        let mut transport = transport_config(self.tuning);
+        transport.initial_mtu(JUMP_PACKET_MIN);
+        transport.min_mtu(JUMP_PACKET_MIN);
+        let mut mtud = quinn::MtuDiscoveryConfig::default();
+        mtud.upper_bound(JUMP_PACKET_MAX);
+        transport.mtu_discovery_config(Some(mtud));
+        let (client_config, verifier) = self.client_config(transport)?;
+        let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            pipe.into_socket(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|source| SetupError::Bind {
+            addr: PIPE_LOCAL_ADDR,
+            source,
+        })?;
+        endpoint.set_default_client_config(client_config);
+        self.connect_on(endpoint, PIPE_REMOTE_ADDR, server_name, verifier)
+            .await
+    }
+
+    fn client_config(
+        &self,
+        transport: quinn::TransportConfig,
+    ) -> Result<(quinn::ClientConfig, Arc<QshPeerVerifier>), DialError> {
+        let verifier = Arc::new(QshPeerVerifier::new(self.evaluator.clone()));
+        let tls = client_tls_config(&self.identity, verifier.clone())?;
+        let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
+        client_config.transport_config(Arc::new(transport));
+        Ok((client_config, verifier))
+    }
+
+    async fn connect_on(
+        &self,
+        endpoint: quinn::Endpoint,
+        addr: SocketAddr,
+        server_name: &str,
+        verifier: Arc<QshPeerVerifier>,
+    ) -> Result<Dialed, DialError> {
+        let connecting = endpoint
+            .connect(addr, server_name)
+            .map_err(ConnectError::from)?;
+        let result = tokio::time::timeout(self.timeout, connecting).await;
+        let conn = match result {
+            Err(_) => return Err(DialError::Timeout(self.timeout)),
+            Ok(Ok(conn)) => conn,
+            Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
+        };
+
+        let connection = finish_dial(conn, &verifier)?;
+        Ok(Dialed {
+            connection,
+            endpoint: Endpoint::from_quic(endpoint),
+            verifier,
+        })
+    }
+
     async fn dial_inner(
         &self,
         addr: SocketAddr,
         server_name: &str,
         transport: quinn::TransportConfig,
     ) -> Result<Dialed, DialError> {
-        let verifier = Arc::new(QshPeerVerifier::new(self.evaluator.clone()));
-        let tls = client_tls_config(&self.identity, verifier.clone())?;
-        let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
-        let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
-        client_config.transport_config(Arc::new(transport));
+        let (client_config, verifier) = self.client_config(transport)?;
 
         // Bind in the remote's address family so we never rely on
         // dual-stack sockets.
@@ -1333,23 +1399,7 @@ impl Dialer {
         )
         .map_err(|source| SetupError::Bind { addr: bind, source })?;
         endpoint.set_default_client_config(client_config);
-
-        let connecting = endpoint
-            .connect(addr, server_name)
-            .map_err(ConnectError::from)?;
-        let result = tokio::time::timeout(self.timeout, connecting).await;
-        let conn = match result {
-            Err(_) => return Err(DialError::Timeout(self.timeout)),
-            Ok(Ok(conn)) => conn,
-            Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
-        };
-
-        let connection = finish_dial(conn, &verifier)?;
-        Ok(Dialed {
-            connection,
-            endpoint: Endpoint::from_quic(endpoint),
-            verifier,
-        })
+        self.connect_on(endpoint, addr, server_name, verifier).await
     }
 }
 
@@ -1722,6 +1772,11 @@ impl Incoming {
     }
 }
 
+mod pipe;
+pub use pipe::{
+    JUMP_PACKET_MAX, JUMP_PACKET_MIN, PIPE_LOCAL_ADDR, PIPE_REMOTE_ADDR, PacketPipe, PipePeer,
+    PipeStats,
+};
 mod punch;
 pub use punch::{
     MAX_PUNCH_WINDOWS, PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow,

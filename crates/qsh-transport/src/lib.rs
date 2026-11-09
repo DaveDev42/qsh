@@ -8,6 +8,8 @@
 //! - [`endpoint`]: [`Dialer`]/[`Listener`] producing verified
 //!   [`Connection`]s; ALPN `qsh/1`, keep-alive 15 s / idle 45 s, no 0-RTT,
 //!   no session tickets.
+//!   [`PacketPipe`] with [`Dialer::dial_over_pipe`] is the jump hop's inner
+//!   connection on an in-memory socket (ADR-0056 decisions 2, 5, 6).
 //!   [`PunchEndpoint`] is the hole-punching variant: one endpoint on one
 //!   punch-aware UDP socket (ADR-0054 decisions 3, 7, 13).
 //! - [`control`]: framed prost message I/O over transport streams.
@@ -42,9 +44,10 @@ pub mod tls;
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
     AcceptError, CLOSE_CODE_NOT_ADOPTED, CLOSE_DRAIN_CAP, ConnStats, Connection, DialError, Dialed,
-    Dialer, Endpoint, Incoming, Listener, LocalIdentity, MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON,
-    PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow, RESET_KEY_LEN, SetupError,
-    SocketSource, TransportTuning, bind_tuned_udp_socket, default_dial_timeout,
+    Dialer, Endpoint, Incoming, JUMP_PACKET_MAX, JUMP_PACKET_MIN, Listener, LocalIdentity,
+    MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON, PIPE_LOCAL_ADDR, PIPE_REMOTE_ADDR, PacketPipe, PipePeer,
+    PipeStats, PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow, RESET_KEY_LEN,
+    SetupError, SocketSource, TransportTuning, bind_tuned_udp_socket, default_dial_timeout,
     set_default_dial_timeout,
 };
 pub use error::{
