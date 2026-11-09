@@ -209,16 +209,17 @@ pub struct Diagnostic {
 }
 
 /// `docs/ROADMAP.md` M3 DoD 4 / `docs/PRD.md` §6: reverse attach needs a
-/// direct UDP path from target to controller, and QSH provides no relay,
-/// NAT traversal, or discovery in P0 (M3's explicit out-of-scope list).
+/// direct UDP path from target to controller. QSH has no relay; hole
+/// punching (ADR-0054 decision 20) uses the controller as the rendezvous, so
+/// a controller the target cannot reach leaves nothing to punch through.
 /// Rendered on `qsh reverse`'s connection-failure path and `qsh listen`'s
 /// startup banner (`crates/qsh-cli/src/main.rs`); the same text is quoted
 /// verbatim in `README.md`, `docs/CLI.md` §6.13, and `docs/PRD.md` §6.
 pub const CONTROLLER_UNREACHABLE: Diagnostic = Diagnostic {
     id: DiagnosticId::ControllerUnreachable,
     code: "controller_unreachable",
-    message: "Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.",
-    remedy: "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.",
+    message: "Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.",
+    remedy: "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.",
 };
 
 /// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently

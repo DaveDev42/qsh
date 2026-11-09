@@ -33,6 +33,14 @@ role, closes its open connections on that machine within 2 seconds.
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)).
 
+When a host registered with `qsh serve --to` sits behind NAT and the direct
+dial does not connect, the client can try UDP hole punching. There is no relay
+server: the two devices exchange addresses through a `qsh listen` that both
+can reach and that you have pinned, then connect to each other directly. It is
+one attempt of up to 8 seconds, and it fails when both NATs choose a new port
+for every destination, or when one does and the other filters by port. See
+[Known limitations](#known-limitations).
+
 Linux, macOS and Windows 10 1809 or later run both ends. A Windows machine
 has the same features as the others: interactive sessions on a ConPTY
 pseudo-console, `qsh exec`, `qsh cp`, port forwards, reverse mode, the ssh
@@ -1049,6 +1057,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   pending work ([ADR-0043](docs/adr/0043-no-tcp-fallback.md)): on such a
   network use SSH, or run QSH inside an overlay such as WireGuard or
   Tailscale that can carry UDP.
+- Hole punching does not open every NAT pair, and it needs a rendezvous. It
+  works only for hosts registered with `qsh serve --to`, and only when a
+  pinned `qsh listen` that both devices can reach carries the signalling
+  (`qsh trust rendezvous`). Symmetric NAT against port-restricted NAT, and
+  symmetric against symmetric, never open: the attempt gives up after at most
+  8 seconds and the other routes and SSH remain. A firewall that drops replies
+  to flows the host started also blocks it. There is no relay to fall back on
+  ([ADR-0054](docs/adr/0054-m24-hole-punching.md)).
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so a restart
   ends every detached session on it; it is not a resume point. A client that
@@ -1341,9 +1357,9 @@ Some of these are MVP scope decisions, some are unfinished work.
 - Reverse mode needs a directly reachable path from the target to the
   controller:
 
-  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
+  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
   >
-  > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
+  > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
 - macOS asks "Do you want the application “qsh” to accept incoming network
   connections?" the first time a given build dials out (`-L` and `-D`
   listeners are loopback-only and do not trigger it). The cause is qsh's QUIC
