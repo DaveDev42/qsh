@@ -585,32 +585,34 @@ fn a_large_chunk_is_fed_in_bounded_slices_and_stays_cheap() {
 fn history_costs_a_flood_almost_nothing() {
     let line = b"0001 the quick brown fox jumps over the lazy dog 0123456789 abcdefghijklmnopqrstuvwxyz\r\n";
     let chunk: Vec<u8> = line.repeat(180);
-    let run = |history_rows: usize| {
-        (0..3)
-            .map(|_| {
-                let mut s = HostScreen::new(ScreenOptions {
-                    history_rows,
-                    ..ScreenOptions::default()
-                });
-                // Fill the history first: the claim is about a flood that
-                // has already filled it, not the one-off formatting of the
-                // first history_rows rows.
-                let warm = (history_rows / 180 + 2) as u64;
-                for i in 0..warm {
-                    s.feed(&chunk, i);
-                }
-                let t = Instant::now();
-                for i in warm..warm + 60 {
-                    s.feed(&chunk, i);
-                }
-                std::hint::black_box(&s);
-                t.elapsed()
-            })
-            .min()
-            .unwrap()
+    // One timed flood. The two settings are measured in alternation and each
+    // keeps its fastest of seven, so a burst of load on a shared CI runner
+    // (macOS run 42603485317 saw 320 ms against 212 ms with three
+    // back-to-back samples per side) lands on both sides alike.
+    let once = |history_rows: usize| {
+        let mut s = HostScreen::new(ScreenOptions {
+            history_rows,
+            ..ScreenOptions::default()
+        });
+        // Fill the history first: the claim is about a flood that
+        // has already filled it, not the one-off formatting of the
+        // first history_rows rows.
+        let warm = (history_rows / 180 + 2) as u64;
+        for i in 0..warm {
+            s.feed(&chunk, i);
+        }
+        let t = Instant::now();
+        for i in warm..warm + 60 {
+            s.feed(&chunk, i);
+        }
+        std::hint::black_box(&s);
+        t.elapsed()
     };
-    let off = run(0);
-    let on = run(DEFAULT_HISTORY_ROWS);
+    let (mut off, mut on) = (Duration::MAX, Duration::MAX);
+    for _ in 0..7 {
+        off = off.min(once(0));
+        on = on.min(once(DEFAULT_HISTORY_ROWS));
+    }
     assert!(
         on.as_secs_f64() < off.as_secs_f64() / 0.7,
         "history on {on:?} vs off {off:?}"
