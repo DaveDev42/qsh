@@ -152,13 +152,14 @@ fn action_and_decision_strings() {
     assert_eq!(Action::FileWrite.as_str(), "file.write");
     assert_eq!(Action::HostPunch.as_str(), "host.punch");
     assert_eq!(Action::ForwardAgent.as_str(), "forward.agent");
+    assert_eq!(Action::ForwardJump.as_str(), "forward.jump");
     let strings: std::collections::BTreeSet<&str> =
         Action::ALL.iter().map(|a| a.as_str()).collect();
     assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");
-    // PRD §9 lists exactly 13 actions; pin the count directly rather
+    // PRD §9 lists exactly 14 actions; pin the count directly rather
     // than only the distinctness above, so a future removal (as
     // opposed to a duplicate) is caught here too.
-    assert_eq!(Action::ALL.len(), 13, "PRD §9 defines 13 actions");
+    assert_eq!(Action::ALL.len(), 14, "PRD §9 defines 14 actions");
     // `ALL` is what an M5 policy file will be validated against, so a
     // new action that never made it into the array is a silent hole:
     // name the newcomer explicitly rather than trusting the count.

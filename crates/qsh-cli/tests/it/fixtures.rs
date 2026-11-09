@@ -203,6 +203,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.show.with_role_punch.json",
     "acl.show.host_punch.json",
     "acl.show.with_role_agent.json",
+    "acl.show.with_role_jump.json",
     "acl.show.forward_agent.json",
     // The golden test that exercises these two is `cfg(unix)` (path shaping
     // and the `paths` notation are host-specific), so on other targets this
@@ -226,6 +227,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.host_complete_with_role.json",
     "setup.run.host_complete_with_role_punch.json",
     "setup.run.host_complete_with_role_agent.json",
+    "setup.run.host_complete_with_role_jump.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
     // `qsh cp` (`docs/CLI.md` §6.21, ADR-0029 decision 18·21). The golden test
     // is `cfg(unix)`: the fixtures hold unix path spelling, a unix host's mode
@@ -342,6 +344,7 @@ fn check_without_roles(name: &str, envelope: Value) {
 fn strip_host_punch(value: &mut Value) {
     strip_action(value, "host.punch");
     strip_action(value, "forward.agent");
+    strip_action(value, "forward.jump");
 }
 
 /// Drop `forward.agent` (ADR-0055 decision 16) the same way: `full` and
@@ -350,6 +353,15 @@ fn strip_host_punch(value: &mut Value) {
 /// post-M25 shapes have their own `*_agent` fixtures that compare in full.
 fn strip_forward_agent(value: &mut Value) {
     strip_action(value, "forward.agent");
+    strip_action(value, "forward.jump");
+}
+
+/// Drop `forward.jump` (ADR-0056 decision 18) the same way: `full` and
+/// `tunnel` grant it and a `forward.*` row covers it, so fixtures recorded
+/// before M26 are compared with it removed from both sides, and the post-M26
+/// shapes have their own `*_jump` fixtures that compare in full.
+fn strip_forward_jump(value: &mut Value) {
+    strip_action(value, "forward.jump");
 }
 
 fn strip_action(value: &mut Value, action: &str) {
@@ -379,6 +391,23 @@ fn check_without_forward_agent(name: &str, envelope: Value) {
         pretty(&actual),
         pretty(&expected),
         "fixture {name} no longer matches the binary's output (forward.agent ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
+    );
+}
+
+/// [`check`] for a fixture recorded before `forward.jump` existed.
+fn check_without_forward_jump(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_forward_jump(&mut actual);
+    strip_forward_jump(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (forward.jump ignored).\n\
          Fixtures are append-only (docs/CLI.md §10)."
     );
 }
@@ -732,7 +761,8 @@ fn golden_acl_show_fixtures() {
             "session.open",
             "forward.local",
             "forward.remote",
-            "forward.agent"
+            "forward.agent",
+            "forward.jump"
         ]),
         "{show}"
     );
@@ -833,13 +863,15 @@ fn golden_acl_role_fixtures() {
             "forward.local",
             "forward.remote",
             "host.punch",
-            "forward.agent"
+            "forward.agent",
+            "forward.jump"
         ]),
         "{shown}"
     );
     check_without_host_punch("acl.show.with_role.json", shown.clone());
     check_without_forward_agent("acl.show.with_role_punch.json", shown.clone());
-    check("acl.show.with_role_agent.json", shown);
+    check_without_forward_jump("acl.show.with_role_agent.json", shown.clone());
+    check("acl.show.with_role_jump.json", shown);
 
     // `host.punch` (ADR-0054 decision 6): a `none` pin gets it from a row
     // alone, and `acl check` names the row as the basis.
@@ -941,7 +973,11 @@ fn golden_setup_run_fixtures() {
         "setup.run.host_complete_with_role_punch.json",
         role_run.clone(),
     );
-    check("setup.run.host_complete_with_role_agent.json", role_run);
+    check_without_forward_jump(
+        "setup.run.host_complete_with_role_agent.json",
+        role_run.clone(),
+    );
+    check("setup.run.host_complete_with_role_jump.json", role_run);
 
     let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
     let cert_path = listener.home_dir().join("peer.pem");
