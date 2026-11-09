@@ -23,9 +23,25 @@ pub const DATAGRAM_HEADER: usize = DatagramFrame::HEADER_LEN;
 /// How long after a switch to the stream the datagram path is tried again.
 pub const DATAGRAM_RETRY: Duration = Duration::from_secs(30);
 
-/// Datagrams unanswered for this many smoothed round trips make the channel
-/// leave the datagram carrier.
+/// Datagrams unanswered for this many round trips make the channel leave
+/// the datagram carrier.
 pub const SILENCE_RTTS: u32 = 4;
+
+/// The floor under the round trip the window is measured in, the same 50 ms
+/// ADR-0052's rule has (`adapt::runner::RTT_FLOOR`).
+pub const RTT_FLOOR: Duration = Duration::from_millis(50);
+
+/// What the peer's delayed ack may add before an answer is overdue (QUIC's
+/// default `max_ack_delay`).
+pub const ACK_DELAY_ALLOWANCE: Duration = Duration::from_millis(25);
+
+/// How long datagrams may go unanswered before the channel falls back to the
+/// stream: `4 x max(rtt, RTT_FLOOR) + 25 ms` (ADR-0058 decision 1). `rtt` is
+/// the client's inner connection's srtt (the outer one until it has
+/// handshaken), or the outer srtt on the middle peer and the daemon.
+pub fn silence_window(rtt: Duration) -> Duration {
+    rtt.max(RTT_FLOOR) * SILENCE_RTTS + ACK_DELAY_ALLOWANCE
+}
 
 /// The carrier packets are sent on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +126,7 @@ impl SilenceFallback {
             return Carrier::Datagram;
         }
         if let Some(since) = self.unanswered_since
-            && now.saturating_duration_since(since) > srtt * SILENCE_RTTS
+            && now.saturating_duration_since(since) > silence_window(srtt)
         {
             self.fell_back_at = Some(now);
             self.unanswered_since = None;
@@ -176,6 +192,42 @@ mod tests {
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Stream);
         f.received_datagram();
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Datagram);
+    }
+
+    #[test]
+    fn jump_silence_window_table() {
+        let ms = Duration::from_millis;
+        // Below the floor the floor rules, above it 4 x rtt, and the ack
+        // allowance is always added.
+        for (rtt, window) in [
+            (ms(0), ms(225)),
+            (ms(1), ms(225)),
+            (ms(50), ms(225)),
+            (ms(51), ms(229)),
+            (ms(100), ms(425)),
+            (ms(300), ms(1225)),
+        ] {
+            assert_eq!(silence_window(rtt), window, "rtt {rtt:?}");
+        }
+        // Unanswered for exactly the window is not yet silence; a
+        // millisecond more is.
+        let t0 = Instant::now();
+        let mut f = SilenceFallback::new();
+        f.sent_datagram(t0);
+        let at = t0 + silence_window(ms(1));
+        assert_eq!(f.choose(Carrier::Datagram, at, ms(1)), Carrier::Datagram);
+        assert_eq!(
+            f.choose(Carrier::Datagram, at + ms(1), ms(1)),
+            Carrier::Stream
+        );
+        // A long end-to-end round trip keeps a healthy path whose answer
+        // takes 200 ms.
+        let mut f = SilenceFallback::new();
+        f.sent_datagram(t0);
+        assert_eq!(
+            f.choose(Carrier::Datagram, t0 + ms(400), ms(200)),
+            Carrier::Datagram
+        );
     }
 
     #[test]

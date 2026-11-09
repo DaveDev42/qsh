@@ -211,6 +211,13 @@ leaves out the three p95/throughput measurements, which are gated by
 saturation. `m15-latency.filter` selects exactly those three
 (`role_resolution_per_decision_costs_*`, `file_copy_echo_under_load`,
 `cp_many_small_files`); run them 50 times with no competing load at `-j 1`.
+`m26.filter` is the M26 set: the jump chain tests (`jump_chain`, `jump_host`,
+`jump_punch`, `jump_recovery`, `jump_reverse` in `qsh-testkit`, `jump_surface` in
+`qsh-cli`). It leaves out `jump_perf` and `jump_loss`, which measure p95 and
+throughput and fail by design under CPU saturation; `m26-latency.filter`
+selects those two, to be run with no competing load under
+`QSH_ACCEPTANCE_SLOW=1`. The four-hop MTU test is the one that showed a layer
+leaving the datagram carrier through the silence rule under 16 burners.
 `m16.filter` is the M16 set: the trust-withdrawal tests (per-connection
 watch, close code `0x1005`, the three processes `serve`, `serve --to` and
 `listen`, the trust-store poll) and the SSH bootstrap tests (`ssh_bootstrap`,
@@ -296,6 +303,28 @@ registers at R through its NAT), which needs no flag. Other knobs:
 `GIVE_UP_BOUND_MS` move the bounds. Exit 0 means every pair matched, 1 means
 a pair differed, 3 means a prerequisite is missing. CI runs it as the
 `punch-netns` job.
+
+## jumpbench/
+
+`run.sh` measures what a jump costs where bandwidth is the bottleneck
+(ADR-0056 decision 25, DoD 13). Three namespaces (`qj-c`, `qj-j`, `qj-t`) joined
+by three links of 20 Mbit/s (`tc netem rate`, 5 ms each way, a 100-packet
+queue). `qsh cp` copies a 12 MiB file from C to T straight over the C-T link
+and again with `-J j` over C-J and J-T; the script prints one
+`qsh.jumpbench/v1` JSON line with both medians and their ratio, the goal being
+0.80 of the direct rate (the figure ADR-0052's measurement uses). The CPU-bound
+loopback bar, 50%, is `jump_tunnel_throughput`.
+
+```bash
+cargo build --release -p qsh-cli
+unshare -rmn sh -c 'mount -t tmpfs none /run && mkdir -p /run/netns && QSH_ACCEPTANCE_NETNS=1 QSH_BIN=target/release/qsh exec scripts/jumpbench/run.sh'
+```
+
+Root works too (`sudo -E env QSH_ACCEPTANCE_NETNS=1 ...`); the `unshare` line needs
+neither. Report-only unless `JUMPBENCH_ENFORCE=1`. Knobs: `RATE`, `DELAY_MS`,
+`QUEUE_PACKETS`, `FILE_MIB`, `RUNS`, `JUMPBENCH_TARGET`. Each party has its own
+config tree under a fresh `mktemp -d`, J and T serve on 7000, never 4433. Not
+part of CI; the number goes into the ADR-0056 revision history.
 
 ## test/
 

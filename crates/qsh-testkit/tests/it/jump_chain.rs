@@ -314,7 +314,7 @@ fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
 /// The features of DoD 25.1 and 25.2 on the end connection of `ops`: an
 /// exec, a PTY session (the host's side is the test's pipe), a `-L` tunnel
 /// to an echo server and a `qsh cp`. Returns after each has finished.
-async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
+pub(super) async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
     // exec
     let said = format!("exec-{tag}");
     let out = exec(ops, target, echo_argv(&said))
@@ -485,6 +485,36 @@ async fn jump_two_hops_runs_session_exec_and_cp() {
     let b = net.host("b").h.server.jump_stats();
     assert!(a.opened.load(std::sync::atomic::Ordering::Relaxed) >= 1);
     assert!(b.opened.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+    net.shutdown().await;
+}
+
+/// DoD 25.2: pins whose own `jump` is set unfold into the same chain without
+/// `-J`: `t` goes through `b`, and `b` goes through `a`, so a command to `t`
+/// runs `c -> a -> b -> t`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_two_hops_and_recursive_pins() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let net = Net::start(&["a", "b", "t"]).await;
+    for (name, via) in [("b", "a"), ("t", "b")] {
+        let ops = net.ops.clone();
+        let req = qsh_proto::TrustSetJumpReq {
+            name: name.into(),
+            jump: vec![via.into()],
+            clear: false,
+        };
+        blocking(move || ops.trust_set_jump(req))
+            .await
+            .expect("trust.set_jump");
+    }
+    let out = exec(&net.ops, "t", echo_argv("recursive"))
+        .await
+        .expect("exec through the pins' own chain");
+    assert_eq!(out.data.remote_exit_code, 0);
+    assert!(stdout_of(&out).contains("recursive"));
+    assert!(net.host("a").h.server.jump_stats().opened.load(Relaxed) >= 1);
+    assert!(net.host("b").h.server.jump_stats().opened.load(Relaxed) >= 1);
+    // `b` is reached through `a` alone, one channel on `a` and none on `t`.
+    assert_eq!(net.host("t").h.server.jump_stats().opened.load(Relaxed), 0);
     net.shutdown().await;
 }
 
@@ -779,6 +809,28 @@ impl Direct {
         .await
     }
 
+    /// A plain connection to `name`, with no chain: the baseline a perf test
+    /// compares a chain with.
+    pub(super) async fn dial_direct(
+        &self,
+        name: &str,
+        within: Duration,
+    ) -> (qsh_transport::Connection, qsh_transport::Endpoint) {
+        let mut trust = StaticTrust::empty();
+        for host in &self.hosts {
+            trust = trust.with_pin(
+                host.h.server_identity.fingerprint,
+                Principal::Device(host.name.clone()),
+            );
+        }
+        let dialer = Dialer::new(self.client.local.clone(), Arc::new(trust)).with_timeout(within);
+        let dialed = dialer
+            .dial(self.host(name).h.addr, "qsh")
+            .await
+            .expect("a direct connection");
+        (dialed.connection, dialed.endpoint)
+    }
+
     pub(super) async fn shutdown(self) {
         shutdown(self.hosts).await;
     }
@@ -898,6 +950,123 @@ async fn the_carrier_follows_the_outer_room_and_datagram_v1() {
     assert!(used, "nothing went out: {info:?}");
     assert_eq!(info.datagrams_out.load(Relaxed), 0);
     assert_eq!(info.carrier(), Carrier::Stream);
+    drop(session);
+    close(chain).await;
+    d.shutdown().await;
+}
+
+/// DoD 25.4: the carrier follows the room PLPMTUD has opened. A path that
+/// holds 1200 bytes (the proxy drops longer packets, so the outer
+/// connection's room stays under 1217) carries the channel on the stream
+/// and no datagram is ever sent; the same chain on a path that grows to 1452
+/// carries it on datagrams. A switch in the middle of a channel's life
+/// cannot be driven from a test: quinn probes the path size once after the
+/// handshake and again only every 600 s, so a limit lifted afterwards is
+/// never noticed, and on loopback the probes finish before the inner
+/// handshake's first packet. The step itself (`note_carrier`,
+/// `switches`) is the same code both halves run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_carrier_switches_to_datagram_after_pmtud() {
+    use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
+    use std::sync::atomic::Ordering::Relaxed;
+    let d = Direct::start(&["j", "t"]).await;
+    let proxy = ChaosProxy::start(d.host("j").h.addr, ChaosPolicy::seeded(0x26_0401))
+        .await
+        .expect("chaos proxy");
+    proxy.set_max_packet(Some(1200));
+    let mut j = d.host("j").pin();
+    j.address = proxy.addr().to_string();
+    let plan = JumpPlan::new(vec![j], d.host("t").pin(), None, "laptop".into()).expect("a plan");
+    let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
+    let mut session = Session::negotiate(chain.connection.clone(), "laptop")
+        .await
+        .expect("hello with the end");
+    let info = Arc::clone(&chain.info.channels[0]);
+    // The path stays at 1200 for as long as the session runs here.
+    drive_until(&mut session, Duration::from_secs(3), || false).await;
+    assert_eq!(info.carrier(), Carrier::Stream, "{info:?}");
+    assert_eq!(info.datagrams_out.load(Relaxed), 0, "{info:?}");
+    assert!(info.stream_out.load(Relaxed) > 0, "{info:?}");
+    drop(session);
+    close(chain).await;
+
+    // The same chain with the limit lifted before the dial: the room opens
+    // and the channel carries datagrams.
+    proxy.set_max_packet(None);
+    let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
+    let mut session = Session::negotiate(chain.connection.clone(), "laptop")
+        .await
+        .expect("hello with the end");
+    let info = Arc::clone(&chain.info.channels[0]);
+    let moved = drive_until(&mut session, Duration::from_secs(15), || {
+        info.carrier() == Carrier::Datagram && info.datagrams_out.load(Relaxed) > 0
+    })
+    .await;
+    assert!(moved, "the channel never used datagrams: {info:?}");
+    // A healthy path never trips the silence rule (ADR-0058), loaded or not.
+    assert_eq!(info.silence_fallbacks.load(Relaxed), 0, "{info:?}");
+    assert_eq!(info.switches.load(Relaxed), 0, "{info:?}");
+    assert!(info.packet_limit() <= 1397, "{info:?}");
+    drop(session);
+    close(chain).await;
+    d.shutdown().await;
+}
+
+/// DoD 25.4: a datagram path that goes silent while the stream lives moves
+/// the channel to the stream (decision 4: 4 x srtt without a datagram
+/// back). The proxy in front of J eats everything for a moment; the outer
+/// connection survives it, the datagrams in flight are gone, and the next
+/// packet leaves on the stream. Nothing here is kind-specific: the proxy sees
+/// only encrypted outer packets, so a middlebox that drops DATAGRAM frames
+/// alone cannot be built outside the product. The 30 s retry is covered by
+/// `silence_moves_to_the_stream_and_retries_after_thirty_seconds`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_silence_on_the_datagram_path_falls_back_to_the_stream() {
+    use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
+    use std::sync::atomic::Ordering::Relaxed;
+    let d = Direct::start(&["j", "t"]).await;
+    let proxy = Arc::new(
+        ChaosProxy::start(d.host("j").h.addr, ChaosPolicy::seeded(0x26_0400))
+            .await
+            .expect("chaos proxy"),
+    );
+    let mut j = d.host("j").pin();
+    j.address = proxy.addr().to_string();
+    let plan = JumpPlan::new(vec![j], d.host("t").pin(), None, "laptop".into()).expect("a plan");
+    let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
+    let mut session = Session::negotiate(chain.connection.clone(), "laptop")
+        .await
+        .expect("hello with the end");
+    let info = Arc::clone(&chain.info.channels[0]);
+    let up = drive_until(&mut session, Duration::from_secs(15), || {
+        info.carrier() == Carrier::Datagram && info.datagrams_out.load(Relaxed) > 0
+    })
+    .await;
+    assert!(up, "the channel never reached datagrams: {info:?}");
+
+    let cut = tokio::spawn({
+        let proxy = Arc::clone(&proxy);
+        async move { proxy.blackhole(Duration::from_millis(1500)).await }
+    });
+    let fell = drive_until(&mut session, Duration::from_secs(30), || {
+        info.silence_fallbacks.load(Relaxed) > 0 && info.carrier() == Carrier::Stream
+    })
+    .await;
+    cut.await.expect("cut");
+    assert!(fell, "the silence rule never moved the channel: {info:?}");
+
+    // The session works over the stream, and the datagram path is left alone
+    // until the retry.
+    let (datagrams, streamed) = (
+        info.datagrams_out.load(Relaxed),
+        info.stream_out.load(Relaxed),
+    );
+    tokio::time::timeout(Duration::from_secs(15), session.session_list())
+        .await
+        .expect("a reply over the stream")
+        .expect("session.list");
+    assert_eq!(info.datagrams_out.load(Relaxed), datagrams, "{info:?}");
+    assert!(info.stream_out.load(Relaxed) > streamed, "{info:?}");
     drop(session);
     close(chain).await;
     d.shutdown().await;

@@ -51,6 +51,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -432,6 +433,7 @@ pub struct ChaosProxy {
     seed: u64,
     stats: Arc<Mutex<ChaosStats>>,
     cmd: mpsc::UnboundedSender<Command>,
+    max_packet: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
     _timer: TimerResolution,
 }
@@ -493,7 +495,9 @@ impl ChaosProxy {
         let stats = Arc::new(Mutex::new(ChaosStats::default()));
         let (tx, rx) = mpsc::unbounded_channel();
         let (up_tx, up_rx) = mpsc::unbounded_channel();
+        let max_packet = Arc::new(AtomicUsize::new(0));
         let runner = Runner {
+            max_packet: Arc::clone(&max_packet),
             front,
             server,
             flows: HashMap::new(),
@@ -516,6 +520,7 @@ impl ChaosProxy {
             seed: policy.seed,
             stats,
             cmd: tx,
+            max_packet,
             task,
             _timer: timer,
         })
@@ -659,6 +664,14 @@ impl ChaosProxy {
         }
     }
 
+    /// Drop every datagram longer than `bytes` (counted in
+    /// [`ChaosStats::dropped`]), in both directions; `None` lifts the limit.
+    /// A path MTU for a test that wants PLPMTUD held at a size, then let go.
+    pub fn set_max_packet(&self, bytes: Option<usize>) {
+        self.max_packet
+            .store(bytes.unwrap_or(0), AtomicOrdering::Relaxed);
+    }
+
     /// End a [`blackhole`](Self::blackhole) early.
     pub async fn recover(&self) {
         let (tx, rx) = oneshot::channel();
@@ -790,6 +803,8 @@ fn spawn_flow(
 }
 
 struct Runner {
+    /// See [`ChaosProxy::set_max_packet`]; 0 is no limit.
+    max_packet: Arc<AtomicUsize>,
     front: Arc<UdpSocket>,
     server: SocketAddr,
     flows: HashMap<SocketAddr, Flow>,
@@ -1023,6 +1038,11 @@ impl Runner {
     /// (Blackholing is at egress, in [`Runner::send`], so datagrams already
     /// staged when the blackhole opens are swallowed too.)
     async fn inject(&mut self, client: SocketAddr, dir: Dir, data: &[u8]) {
+        let cap = self.max_packet.load(AtomicOrdering::Relaxed);
+        if cap > 0 && data.len() > cap {
+            self.stats.dropped += 1;
+            return;
+        }
         if self.rng.chance(self.policy.drop_p) {
             self.stats.dropped += 1;
             return;
