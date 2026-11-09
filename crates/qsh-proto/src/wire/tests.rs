@@ -1959,6 +1959,7 @@ fn windows_build_advertises_file_v1() {
             CAP_SCREEN_ECHO_V1,
             CAP_PUNCH_V1,
             CAP_AGENT_V1,
+            CAP_JUMP_V1,
         ]
     );
 }
@@ -2217,7 +2218,7 @@ fn screen_echo_is_advertised_by_every_build() {
 #[test]
 fn agent_v1_numbers_are_the_adr_numbers() {
     assert_eq!(CAP_AGENT_V1, "agent.v1");
-    assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_AGENT_V1));
+    assert!(LOCAL_CAPABILITIES.contains(&CAP_AGENT_V1));
     assert_eq!(AGENT_CHANNEL_LEN, 16);
     assert_eq!(StreamKind::Agent as i32, 6);
     assert_eq!(AgentGrant::Unspecified as i32, 0);
@@ -2505,12 +2506,18 @@ fn jump_fuzz_seeds_decode_to_what_their_names_say() {
     );
 }
 
-/// `jump.v1` is defined but not yet advertised: no build can relay, and a
-/// capability string is a promise (ADR-0056 decision 3 says every build
-/// advertises it once the feature exists). The intermediate-peer step flips
-/// this assertion together with the `capabilities.json` golden.
+/// `jump.v1` is advertised by every build, as the last entry (ADR-0056
+/// decision 3): the intermediate peer exists, and a capability string is a
+/// promise about behaviour.
 #[test]
-fn jump_v1_is_defined_but_not_advertised_before_the_relay_exists() {
+fn jump_v1_is_advertised_last() {
     assert_eq!(CAP_JUMP_V1, "jump.v1");
-    assert!(!LOCAL_CAPABILITIES.contains(&CAP_JUMP_V1));
+    assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_JUMP_V1));
+    assert_eq!(
+        LOCAL_CAPABILITIES
+            .iter()
+            .filter(|c| **c == CAP_JUMP_V1)
+            .count(),
+        1
+    );
 }

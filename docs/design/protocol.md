@@ -51,7 +51,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
 - `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). `[punch].mode = "off"`여도 광고하고 요청에는 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다.
 - `agent.v1`(ADR-0055 결정 3)은 이 peer가 host로서 `SessionOpen`·`SessionAttach`·`ExecStart`의 `agent_channel`을 처리해 `AGENT` 스트림을 열고, client로서 `AGENT` 스트림을 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_AGENT_V1`). 광고하지 않은 peer에게는 `agent_channel`을 세팅하지 않는다. 옛 host는 모르는 필드를 버리므로 확인 없이 보내면 client가 forwarding이 켜졌다고 착각한다(§16.4, ADR-0019 결정 4와 같은 규칙). 세부는 §20이다.
-- `jump.v1`(ADR-0056 결정 3)은 이 peer가 중간 peer로서 `JUMP` 스트림과 종류 14 datagram을 처리한다는 뜻이다. 상수 `CAP_JUMP_V1`은 정의돼 있지만 **아직 `LOCAL_CAPABILITIES`에 없다**. 어느 빌드도 아직 relay하지 못하므로 광고하면 client가 relay를 믿게 된다. 중간 peer 스텝이 `LOCAL_CAPABILITIES`의 마지막 항목으로 더하고, 그때부터 모든 빌드가 광고한다. client는 협상된 교집합에 이 문자열이 있는 hop에만 `JUMP`를 연다. 세부는 §21이다.
+- `jump.v1`(ADR-0056 결정 3)은 이 peer가 중간 peer로서 `JUMP` 스트림과 종류 14 datagram을 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_JUMP_V1`). client는 협상된 교집합에 이 문자열이 있는 hop에만 `JUMP`를 연다. 교집합에 없는 연결의 `JUMP` 스트림은 host가 모르는 종류로 거절한다(`BAD_HEADER` reset, 판정도 소켓도 없다). 세부는 §21이다.
 
 ## 5. Frame layer
 
@@ -1182,7 +1182,7 @@ target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬�
 
 ## 21. jump chaining (ADR-0056)
 
-이 절은 ADR-0056의 wire 계약(§21.0)과 `qsh_proto::jump`가 구현한 부분(§21.1, §21.2)을 적는다. 중간 peer의 동작과 `forward.jump`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응, 역방향 데몬은 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
 
 ### 21.0 capability와 wire (ADR-0056 결정 3·4)
 
@@ -1193,7 +1193,7 @@ enum StreamKind { ...; JUMP = 7; }   // client -> 중간 peer
 // DatagramFrame 종류 14 JumpPacket: channel = jump_channel, 몸통은 패킷 바이트 그대로
 ```
 
-- capability 문자열은 `jump.v1`(`CAP_JUMP_V1`)이다. 상수와 wire 값만 이 스텝에 들어왔고 `LOCAL_CAPABILITIES`에는 아직 없다(§4). 이 빌드의 host는 `JUMP` 스트림을 모르는 종류처럼 `BAD_HEADER` reset으로 답하고, 종류 14 datagram은 모르는 channel로 버린다.
+- capability 문자열은 `jump.v1`(`CAP_JUMP_V1`)이고 `LOCAL_CAPABILITIES`의 마지막 항목이다(§4). 협상된 교집합에 이 문자열이 없는 연결의 `JUMP` 스트림은 host가 모르는 종류처럼 `BAD_HEADER` reset으로 답한다. 종류 14 datagram은 jump 채널 표에 없는 channel이면 버리고 센다.
 - `jump_channel`은 client가 CSPRNG로 만든 정확히 16바이트(`JUMP_CHANNEL_LEN`)다. `StreamHeader::jump`가 header를 만들고 `StreamHeader::jump_channel`이 16바이트가 아닌 ticket과 `JUMP`가 아닌 header에 `None`을 돌려준다. 길이가 다르거나 쓰고 있는 값이면 중간 peer는 ACL 앞에서 `INVALID_ARGUMENT`로 답한다(audit 없음).
 - `host`와 `port`는 `TCP_CONNECT`와 같은 필드이고 모양 검사(255바이트, 제어문자 거부, ADR-0019 결정 5)와 `port`의 1..=65535 검사는 `TCP_CONNECT`처럼 받는 쪽(`qsh-core`)이 한다. `deny_host_local`은 읽지 않는다.
 - 종류 14 datagram의 몸통은 protobuf로 다시 싸지 않는다. 알 수 없는 channel은 받는 쪽이 버리고 센다.
@@ -1214,6 +1214,39 @@ enum StreamKind { ...; JUMP = 7; }   // client -> 중간 peer
 - `is_v1_initial_shaped`: long header(첫 바이트 상위 두 비트 `11`), version 1, 패킷 종류 Initial(첫 바이트의 `0x30` 비트가 0), 두 connection ID가 20바이트 이하, datagram 길이가 1200 이상 1452 이하. ADR-0056 결정 8은 종류 비트를 말하지 않고 "long header, version 1, 길이 1200 이상"만 적는다. 이 판정은 거기에 Initial 종류와 상한 1452를 더한 더 좁은 쪽이다. 문이 열리기 전에 client가 보낼 수 있는 것은 Initial뿐이고, 운반체가 1452를 넘는 패킷을 나르지 않기 때문이다.
 - `answers_gate(packet, client_scid)`: 대상에서 온 패킷이 long header(종류와 version 무관: Retry, Initial, Version Negotiation)이고 DCID가 client가 문을 통과시킨 패킷의 SCID와 같으면 참이다. short header는 문을 열지 않는다(`is_short_header`로 가려낸다). 문 앞 패킷 수·바이트·10초 시한은 `qsh-core`의 몫이다.
 
-### 21.3 시험
+### 21.3 중간 peer의 처리 순서 (ADR-0056 결정 7~9)
+
+구현은 `crates/qsh-core/src/server/jump.rs`(admission)와 `crates/qsh-core/src/jump/middle.rs`(relay)다. `JUMP`는 `TCP_CONNECT`처럼 ticket이 없고 스트림을 여는 그 자리에서 `forward.jump`를 판정한다(§7). 앞 단계가 실패하면 뒤 단계는 돌지 않고, 인가 전에는 소켓도 채널도 없다.
+
+1. 모양 검사. `jump_channel`이 정확히 16바이트이고 이 연결에서 쓰고 있는 값이 아니어야 하고, `host`·`port`는 `TCP_CONNECT`와 같은 검사(255바이트, 제어문자·공백·비ASCII 거부, 포트 1..=65535)를 받는다. 실패는 `INVALID_ARGUMENT`이고 ACL도 감사도 없다. 값의 점유는 인가 전에 잡히고 스트림이 끝나면 풀린다.
+2. `forward.jump` 판정과 감사(`acl::check_jump`). resource는 요청한 `host:port` 문자열이다. 거부와 감사 쓰기 실패는 같은 균일한 `PERMISSION_DENIED`다. 스트림은 control 요청이 아니므로 감사의 `request_id`는 `"-"`다.
+3. 상한. 연결당 16 채널(`MAX_JUMP_CHANNELS_PER_CONN`)과 터널 스트림 quota(`max_tunnel_streams_per_principal`·`max_tunnel_streams_per_forward`). 초과는 `RESOURCE_EXHAUSTED`다.
+4. 해석 한 번, 시한 5초(`JUMP_RESOLVE_TIMEOUT`). 실패는 `CONNECTION_FAILED`다.
+5. host-local 거부. 해석된 주소에서 ADR-0019 결정 3의 범주를 거르고 남은 주소가 없으면 `PERMISSION_DENIED`와 감사 한 줄(`rule` 없음)이다. 해석된 IP는 감사·로그·응답에 남지 않는다. 남은 주소의 첫 번째를 쓴다.
+6. 그 family의 unspecified 주소, 포트 0에 UDP 소켓을 bind하고 고른 주소에 `connect`한다. `connect`된 소켓이라 그 주소에서 온 datagram만 받는다.
+7. `ConnectResult{ok}`를 쓰고 relay를 시작한다. 거부는 `TCP_CONNECT`와 같이 `ConnectResult`, 송신 `finish()`, 수신 `stop()`(사유별 코드)이다. `JUMP` 스트림의 우선순위는 session band(100)다.
+
+relay는 채널마다 한 task다. client에서 온 패킷(스트림 운반체의 `u16` 길이 frame과 종류 14 datagram)은 QUIC 문(§21.2)을 지나 소켓으로 나간다. 문이 닫혀 있는 동안은 Initial 모양만, `JUMP_PREGATE_PACKETS`(8)개·`JUMP_PREGATE_BYTES`(16 KiB)까지 통과하고, 그 SCID를 기억한다. target에서 온 패킷은 long header이고 DCID가 기억한 SCID 가운데 하나일 때 문을 열고(그 패킷도 통과), 그 전의 것은 버리고 센다. 문은 `JUMP_GATE_TIMEOUT`(10초) 안에 열려야 한다.
+
+target에서 client로 가는 운반체는 J가 자기 눈으로 패킷마다 고른다(ADR-0056 결정 4). 양쪽이 `datagram.v1`을 협상했고 바깥 연결의 `max_datagram_size()`가 `JUMP_PACKET_MIN + 17`(1217) 이상이면 종류 14 datagram이고 아니면 `JUMP` 스트림이다. datagram 모드에서 자리를 넘는 패킷은 스트림으로 돌리지 않고 버리고 센다(안쪽 PLPMTUD가 자리를 배운다). 스트림 모드에서는 아직 쓰지 못한 바이트가 `JUMP_STREAM_QUEUE`(64 KiB)를 넘으면 새 패킷을 버리고 센다. 이 스텝의 구현은 정적 선택이다. datagram이 돌아오지 않을 때 스트림으로 물러서고 30초마다 다시 시험하는 적응은 운반체 스텝이 더한다.
+
+채널은 다음 가운데 하나로 끝나고 소켓과 점유가 함께 풀린다. 끝날 때 스트림을 어떻게 닫는지는 사유가 정한다.
+
+| 사유 | 닫는 방식 |
+|---|---|
+| `stream_end`(client의 FIN·reset, 스트림 오류) | 송신 `finish()` |
+| `connection_closed`(바깥 연결 종료) | 연결과 함께 task가 끝남 |
+| `idle`(전달된 패킷이 양방향 모두 60초 동안 없음, `JUMP_IDLE`) | `0x2007`로 reset·stop |
+| `gate_timeout`(문이 10초 안에 안 열림) | `0x2007`로 reset·stop |
+| `unreachable`(소켓의 거부: Linux `ECONNREFUSED`, Windows `WSAECONNRESET`, 수신과 송신 모두) | `0x2007`로 reset·stop |
+| `bad_frame`(길이 0이거나 1452 초과) | `0x2001`(`BAD_HEADER`)로 reset·stop |
+
+`unreachable`은 첫 Initial을 보낸 뒤 ICMP 거부가 오는 즉시(loopback에서 수 ms) 스트림을 reset하므로 client는 handshake 시한을 기다리지 않는다. Windows의 `SIO_UDP_CONNRESET`은 끄지 않는다. client는 reset 값으로 분기하지 않고 "정상 종료가 아니다"만 읽는다(§16.5).
+
+on-demand `qsh serve`의 idle 종료(ADR-0051 결정 2)는 살아 있는 jump 채널도 센다(`HostActivity::jump_channels`). 로그는 target `qsh::jump`(`channel_opened`, `gate_opened`, `channel_closed`)이고 기본에서 꺼져 있다. 해석된 IP, 패킷 내용, connection ID, channel 값은 싣지 않는다.
+
+### 21.4 시험
 
 단위 시험은 `crates/qsh-proto/src/jump.rs`의 `decoder_table`, `a_split_read_gives_the_same_packets`, `many_packets_in_one_chunk`, `the_declared_length_is_not_allocated_up_front`, `an_error_is_sticky_and_leaves_nothing_buffered`, `long_header_reader_table`, `initial_gate_table`, `answer_gate_table`와 proptest(`round_trip_under_any_chunking`, `readers_never_panic`)다. fuzz 타깃은 `jump_frames`(§13-13)다.
+
+중간 peer의 시험은 `crates/qsh-testkit/tests/it/jump_host.rs`(진짜 QUIC 연결 위의 `JUMP` 스트림과 UDP 소켓: `a_real_inner_dial_through_j_reaches_t_over_the_stream_carrier`, `a_real_inner_dial_through_j_reaches_t_over_the_datagram_carrier`, `jump_without_forward_jump_opens_no_socket`, `jump_refuses_host_local_targets`, `a_jump_forwards_only_quic_until_the_target_answers_like_quic`, `the_pregate_caps_hold_on_a_real_channel`, `a_jump_socket_drops_datagrams_from_other_sources`, `a_jump_never_sends_more_than_it_received`, `jump_target_refusal_is_reported_fast`, `jump_bounds`, `jump_idle_closes_the_channel_and_the_socket`, `a_duplicate_jump_channel_is_invalid_argument_without_audit`, `on_demand_serve_stays_up_while_a_jump_channel_lives` 등)과 `crates/qsh-core/src/jump/middle/tests.rs`(문, 운반체 고르기 표, 큐, 점유 표)다.

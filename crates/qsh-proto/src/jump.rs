@@ -24,6 +24,11 @@ pub const JUMP_PACKET_MAX: usize = 1452;
 pub const JUMP_STREAM_QUEUE: usize = 64 * 1024;
 /// Length of `jump_channel`.
 pub const JUMP_CHANNEL_LEN: usize = 16;
+/// Packets from the client the gate lets through before the target has
+/// answered like QUIC (ADR-0056 decision 8).
+pub const JUMP_PREGATE_PACKETS: usize = 8;
+/// Bytes the gate lets through before the target has answered (decision 8).
+pub const JUMP_PREGATE_BYTES: usize = 16 * 1024;
 
 /// Length of the stream carrier's length prefix.
 const PREFIX_LEN: usize = 2;
@@ -233,6 +238,8 @@ mod tests {
         assert_eq!(JUMP_PACKET_MAX, 1452);
         assert_eq!(JUMP_STREAM_QUEUE, 65_536);
         assert_eq!(JUMP_CHANNEL_LEN, 16);
+        assert_eq!(JUMP_PREGATE_PACKETS, 8);
+        assert_eq!(JUMP_PREGATE_BYTES, 16_384);
     }
 
     #[test]

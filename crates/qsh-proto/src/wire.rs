@@ -124,9 +124,8 @@ pub const AGENT_CHANNEL_LEN: usize = 16;
 /// peer, handles the `JUMP` stream and datagram kind 14. A client opens
 /// `JUMP` only toward a hop whose negotiated set has it.
 ///
-/// Deliberately **not** in [`LOCAL_CAPABILITIES`] yet: a capability string is
-/// a promise about behaviour, and no build can relay until the
-/// intermediate-peer step lands. That step appends it as the last entry.
+/// Every build advertises it, as the last entry of [`LOCAL_CAPABILITIES`]:
+/// the intermediate-peer step (`qsh_core::jump::middle`) landed with it.
 pub const CAP_JUMP_V1: &str = "jump.v1";
 
 /// Capabilities this build advertises in [`Hello`]. Advertised and
@@ -145,8 +144,9 @@ pub const CAP_JUMP_V1: &str = "jump.v1";
 /// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy.
 /// [`CAP_SCREEN_ECHO_V1`] joined with `ScreenEcho` (ADR-0053 decision 3), and
 /// [`CAP_PUNCH_V1`] with the hole-punching messages (ADR-0054 decision 9), and
-/// [`CAP_AGENT_V1`] with agent forwarding (ADR-0055 decision 3). The set is
-/// the same on every platform.
+/// [`CAP_AGENT_V1`] with agent forwarding (ADR-0055 decision 3), and
+/// [`CAP_JUMP_V1`] with the intermediate peer (ADR-0056 decision 3). The set
+/// is the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
     CAP_SESSION,
@@ -159,6 +159,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_SCREEN_ECHO_V1,
     CAP_PUNCH_V1,
     CAP_AGENT_V1,
+    CAP_JUMP_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the

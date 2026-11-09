@@ -26,6 +26,7 @@ mod exec_loopback;
 mod file_copy_echo_under_load;
 mod file_host;
 mod host_list_reverse;
+mod jump_host;
 mod keep_alive_policy;
 mod liveness_config;
 mod local_control_reverse;

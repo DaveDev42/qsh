@@ -58,26 +58,7 @@ impl Server {
 
         let (upstream, _permit) = match dialed {
             Err(rejection) => {
-                // §7 requires the requester learn *why*, so the refusal is
-                // a `ConnectResult` frame and a clean FIN — `reset()` here
-                // would discard the frame we just wrote and leave the peer
-                // guessing. The refusal is still terminal: the receive half
-                // is stopped, nothing was dialed, nothing is spliced.
-                // The teardown signal alongside it is picked to match the
-                // reason, so a peer reading only the QUIC code is not
-                // misinformed: a policy refusal is `FORBIDDEN`, a
-                // malformed destination is `BAD_HEADER`, and a destination
-                // that simply would not accept is nobody's protocol error
-                // — code 0, "we are just done reading".
-                let stop_code = match rejection.code.parse::<ErrorCode>() {
-                    Ok(ErrorCode::PermissionDenied) => RESET_CODE_FORBIDDEN,
-                    Ok(ErrorCode::InvalidArgument) => RESET_CODE_BAD_HEADER,
-                    Ok(ErrorCode::ResourceExhausted) => RESET_CODE_RESOURCE_EXHAUSTED,
-                    _ => 0,
-                };
-                let _ = stream.send.send(&rejection).await;
-                let _ = stream.send.finish();
-                stream.recv.stop(stop_code);
+                refuse_connect(stream, &rejection).await;
                 return;
             }
             Ok((upstream, permit)) => {
@@ -189,59 +170,7 @@ impl Server {
         // (there is nothing to decide *about*) and never becomes a socket
         // — same discipline as `docs/design/protocol.md` §9's "check the
         // shape of a session id before the choke point".
-        let Ok(port) = u16::try_from(header.port) else {
-            return Err(connect_rejected(
-                ErrorCode::InvalidArgument,
-                "destination port out of range",
-            ));
-        };
-        if header.host.is_empty() || port == 0 {
-            return Err(connect_rejected(
-                ErrorCode::InvalidArgument,
-                "destination host and port are required",
-            ));
-        }
-        // A host this long is never a real DNS name (255-octet wire
-        // limit, RFC 1035 §3.1) or a literal IP — nothing legitimate is
-        // refused here, but an unbounded host string is an unbounded ACL
-        // resource / audit field / quota map key (M8 Step 3b ruling: this
-        // shape check belongs beside the others, before the ACL choke
-        // point, same "nothing to decide about" reasoning).
-        if header.host.len() > 255 {
-            return Err(connect_rejected(
-                ErrorCode::InvalidArgument,
-                "destination host is too long",
-            ));
-        }
-        // ADR-0019 decision 5: an ASCII control byte, space, DEL, or any
-        // non-ASCII byte never appears in a real DNS name or IP literal
-        // (`parse_forward_spec` never produces one from a well-formed
-        // `-L`/`-D` spec), so this is "nothing to decide about" exactly
-        // like the length check above — before the ACL choke point, no
-        // audit line, no dial. A malicious client bypasses its own
-        // encoder's checks trivially, so the host needs this defense
-        // whether or not the peer is honest, and it applies to every
-        // `TCP_CONNECT`, `-L`'s included.
-        if header
-            .host
-            .bytes()
-            // `is_ascii_control` already covers DEL (0x7F) alongside the
-            // C0 control range; `!is_ascii` catches every byte >= 0x80.
-            .any(|b| b.is_ascii_control() || b == b' ' || !b.is_ascii())
-        {
-            return Err(connect_rejected(
-                ErrorCode::InvalidArgument,
-                "destination host contains a disallowed byte",
-            ));
-        }
-        // Canonical `host:port` — bracketed for an IPv6 literal, which
-        // `parse_forward_spec` delivers bracket-stripped, so a plain
-        // `format!` would build the unsplittable `::1:5432`. This string
-        // is the ACL resource *and* the audit field, and M5's policy
-        // engine will pattern-match rules against it, so the canonical
-        // form is pinned in the contract crate rather than improvised
-        // here (`qsh_proto::wire::format_host_port`).
-        let resource = wire::format_host_port(&header.host, port);
+        let (port, resource) = destination_shape(header)?;
 
         // (2) THE gate. Nothing exists yet: no socket, no resolver call, no
         // file descriptor of any kind. `authorize_stream` is the same
@@ -372,13 +301,20 @@ impl Server {
             self.handle_tcp_connect(&ctx, stream, &header, &conn).await;
             return;
         }
+        // `JUMP` (ADR-0056 decision 3) is the second inline-decision kind:
+        // `forward.jump` is decided here, in `handle_jump`, before the socket
+        // exists. Only on a connection that negotiated `jump.v1`.
+        if header.stream_kind() == Some(StreamKind::Jump) && ctx.has_capability(wire::CAP_JUMP_V1) {
+            self.handle_jump(&ctx, stream, &header, &conn).await;
+            return;
+        }
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
             Some(kind @ StreamKind::FileData) => kind,
-            // `JUMP` (ADR-0056 decision 3) lands here too: this build has no
-            // intermediate-peer behaviour yet and does not advertise
-            // `jump.v1`, so it answers as for any kind it does not serve.
-            // The middle-peer step replaces this arm with the handler.
+            // A `JUMP` stream lands here too when the connection did not
+            // negotiate `jump.v1` (a peer that never saw the capability, or a
+            // test host that hides it): it answers as for any kind it does
+            // not serve and nothing is created.
             _ => {
                 tracing::debug!(principal = %ctx.principal, kind = header.kind, "unsupported stream kind");
                 stream.send.reset(RESET_CODE_BAD_HEADER);
@@ -603,4 +539,92 @@ impl Server {
             }
         }
     }
+}
+
+/// The shape of a `TCP_CONNECT` or `JUMP` destination: a port in 1..=65535,
+/// a non-empty host of at most 255 plain-ASCII bytes. Returns the port and
+/// the canonical `host:port` string that is the ACL resource and the audit
+/// field. `Err` is the [`wire::ConnectResult`] to hand back, before any ACL
+/// decision (there is nothing to decide about).
+pub(super) fn destination_shape(
+    header: &StreamHeader,
+) -> Result<(u16, String), wire::ConnectResult> {
+    let Ok(port) = u16::try_from(header.port) else {
+        return Err(connect_rejected(
+            ErrorCode::InvalidArgument,
+            "destination port out of range",
+        ));
+    };
+    if header.host.is_empty() || port == 0 {
+        return Err(connect_rejected(
+            ErrorCode::InvalidArgument,
+            "destination host and port are required",
+        ));
+    }
+    // A host this long is never a real DNS name (255-octet wire
+    // limit, RFC 1035 §3.1) or a literal IP — nothing legitimate is
+    // refused here, but an unbounded host string is an unbounded ACL
+    // resource / audit field / quota map key (M8 Step 3b ruling: this
+    // shape check belongs beside the others, before the ACL choke
+    // point, same "nothing to decide about" reasoning).
+    if header.host.len() > 255 {
+        return Err(connect_rejected(
+            ErrorCode::InvalidArgument,
+            "destination host is too long",
+        ));
+    }
+    // ADR-0019 decision 5: an ASCII control byte, space, DEL, or any
+    // non-ASCII byte never appears in a real DNS name or IP literal
+    // (`parse_forward_spec` never produces one from a well-formed
+    // `-L`/`-D` spec), so this is "nothing to decide about" exactly
+    // like the length check above — before the ACL choke point, no
+    // audit line, no dial. A malicious client bypasses its own
+    // encoder's checks trivially, so the host needs this defense
+    // whether or not the peer is honest, and it applies to every
+    // `TCP_CONNECT`, `-L`'s included.
+    if header
+        .host
+        .bytes()
+        // `is_ascii_control` already covers DEL (0x7F) alongside the
+        // C0 control range; `!is_ascii` catches every byte >= 0x80.
+        .any(|b| b.is_ascii_control() || b == b' ' || !b.is_ascii())
+    {
+        return Err(connect_rejected(
+            ErrorCode::InvalidArgument,
+            "destination host contains a disallowed byte",
+        ));
+    }
+    // Canonical `host:port` — bracketed for an IPv6 literal, which
+    // `parse_forward_spec` delivers bracket-stripped, so a plain
+    // `format!` would build the unsplittable `::1:5432`. This string
+    // is the ACL resource *and* the audit field, and M5's policy
+    // engine will pattern-match rules against it, so the canonical
+    // form is pinned in the contract crate rather than improvised
+    // here (`qsh_proto::wire::format_host_port`).
+    let resource = wire::format_host_port(&header.host, port);
+    Ok((port, resource))
+}
+
+/// Refuse a destination stream: `ConnectResult` first, then a clean `finish`
+/// of the send half and a `stop` of the receive half whose code matches the
+/// reason.
+///
+/// §7 requires the requester to learn *why*, so the refusal is a
+/// `ConnectResult` frame and a clean FIN; `reset()` would discard the frame
+/// just written. The refusal is still terminal: nothing was dialed, nothing
+/// is spliced. The `stop` code matches the reason, so a peer reading only
+/// the QUIC code is not misinformed: a policy refusal is `FORBIDDEN`, a
+/// malformed destination is `BAD_HEADER`, an exhausted bound is
+/// `RESOURCE_EXHAUSTED`, and a destination that simply would not accept is
+/// nobody's protocol error: code 0, "we are just done reading".
+pub(super) async fn refuse_connect(mut stream: FramedStream, rejection: &wire::ConnectResult) {
+    let stop_code = match rejection.code.parse::<ErrorCode>() {
+        Ok(ErrorCode::PermissionDenied) => RESET_CODE_FORBIDDEN,
+        Ok(ErrorCode::InvalidArgument) => RESET_CODE_BAD_HEADER,
+        Ok(ErrorCode::ResourceExhausted) => RESET_CODE_RESOURCE_EXHAUSTED,
+        _ => 0,
+    };
+    let _ = stream.send.send(rejection).await;
+    let _ = stream.send.finish();
+    stream.recv.stop(stop_code);
 }

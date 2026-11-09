@@ -117,7 +117,7 @@ pub(crate) use acl_restart_notice;
 /// drift apart.
 pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
 pub use agent::{AGENT_OPS, AgentOp, AgentVerdict, check_agent};
-pub use jump::{JumpVerdict, check_jump};
+pub use jump::{JumpVerdict, check_jump, record_host_local_deny};
 pub use punch::{PUNCH_OPS, PunchOp, check_punch, refuse_unpinned_punch};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
