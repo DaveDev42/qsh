@@ -548,6 +548,9 @@ fn rto_of(h: &LoopbackHarness) -> Duration {
     rtt + rtt * 2 + Duration::from_millis(25)
 }
 
+/// Independently seeded runs of the stream half of `screen_sync_staleness_under_loss`.
+const STREAM_ATTEMPTS: u64 = 3;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn screen_sync_staleness_under_loss() {
     if !slow_enabled() {
@@ -602,33 +605,59 @@ async fn screen_sync_staleness_under_loss() {
     // Stream carrier under the same conditions: a burst of frames, far
     // faster than the path delivers. Intermediate states are skipped and the
     // last one arrives within 2 x RTO of the burst ending.
-    let h = LoopbackHarness::start_chaotic(policy()).await;
-    h.server.hide_capabilities(&[wire::CAP_DATAGRAM_V1]);
-    let stream = measure(&h, 600, Duration::ZERO).await;
-    let rto = rto_of(&h);
-    let mut sorted = stream.staleness.clone();
-    sorted.sort();
-    eprintln!(
-        "stream carrier: {} updates applied for {} frames produced, staleness p95 {:?}, \
-         settle {:?}, rto {rto:?} — {}",
-        stream.applied,
-        stream.produced,
-        percentile(&sorted, 0.95),
-        stream.settle,
-        h.context()
-    );
-    assert!(
-        (stream.applied as usize) < stream.produced,
-        "the stream carrier skipped intermediate states: {} applied for {} produced",
-        stream.applied,
-        stream.produced
-    );
-    assert!(
-        stream.settle <= ONE_WAY + rto * 2,
-        "stream settle {:?} > 2 x RTO {:?} — {}",
-        stream.settle,
-        rto,
-        h.context()
-    );
-    h.shutdown().await;
+    //
+    // The bound is the cost of one lost tail packet: a PTO, then the resend's
+    // one-way delay. The chaos proxy drops 5% of packets whatever they carry,
+    // so now and then a run also loses that first resend (or two tail
+    // packets), which costs a second, doubled PTO and settles after 3 x RTO
+    // or more (CI run 42586332511: 1.34 s against a 1.05 s bound). The drop
+    // sequence follows the seed, but which packet draws which number follows
+    // the timing, so the same seed does not repeat the run. A product that
+    // really settles late does so on every attempt, so the bound has to hold
+    // in one of up to STREAM_ATTEMPTS independently seeded runs, the first of
+    // which uses the seed above.
+    let mut last_failure = String::new();
+    for attempt in 0..STREAM_ATTEMPTS {
+        let h = LoopbackHarness::start_chaotic(
+            ChaosPolicy::seeded(0x57A1E + attempt)
+                .drop(0.05)
+                .delay(DelayDist::fixed(ONE_WAY)),
+        )
+        .await;
+        h.server.hide_capabilities(&[wire::CAP_DATAGRAM_V1]);
+        let stream = measure(&h, 600, Duration::ZERO).await;
+        let rto = rto_of(&h);
+        let mut sorted = stream.staleness.clone();
+        sorted.sort();
+        eprintln!(
+            "stream carrier (attempt {}): {} updates applied for {} frames produced, \
+             staleness p95 {:?}, settle {:?}, rto {rto:?} — {}",
+            attempt + 1,
+            stream.applied,
+            stream.produced,
+            percentile(&sorted, 0.95),
+            stream.settle,
+            h.context()
+        );
+        assert!(
+            (stream.applied as usize) < stream.produced,
+            "the stream carrier skipped intermediate states: {} applied for {} produced",
+            stream.applied,
+            stream.produced
+        );
+        let settled = stream.settle <= ONE_WAY + rto * 2;
+        if !settled {
+            last_failure = format!(
+                "stream settle {:?} > 2 x RTO {:?} — {}",
+                stream.settle,
+                rto,
+                h.context()
+            );
+        }
+        h.shutdown().await;
+        if settled {
+            return;
+        }
+    }
+    panic!("{STREAM_ATTEMPTS} attempts in a row missed the bound; last: {last_failure}");
 }

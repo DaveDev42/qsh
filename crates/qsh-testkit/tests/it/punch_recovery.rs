@@ -23,7 +23,7 @@ use qsh_proto::event::SessionEvent;
 use qsh_proto::{EnvVar, SessionAttachReq, SessionOpenReq, TunnelDynamicReq};
 use qsh_testkit::net_probe::{self, Gap, LanEcho, free_port};
 use qsh_testkit::netsim::{NatKind, PathConfig};
-use qsh_testkit::shell::{said, said_count, say};
+use qsh_testkit::shell::{said_count, say};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -157,8 +157,11 @@ fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
     .expect("session.attach")
 }
 
-/// Drains events until the output holds `needle`.
-fn read_until(stream: &mut SessionAttachStream, seen: &mut String, needle: &str) {
+/// Drains events until the shell has answered `say(tag)`. Counted with
+/// `said_count`, not by searching the raw stream: cmd sets the window title
+/// to the running command with `%OS%` already expanded, so on Windows the
+/// title can hold the answer before the shell has printed it.
+fn read_until(stream: &mut SessionAttachStream, seen: &mut String, tag: &str) {
     while let Some(event) = stream.next_event() {
         match event.unwrap_or_else(|err| panic!("the attach failed: {err}")) {
             SessionEvent::Output { data_b64, .. } => {
@@ -167,17 +170,17 @@ fn read_until(stream: &mut SessionAttachStream, seen: &mut String, needle: &str)
                     .decode(data_b64.as_bytes())
                     .expect("session output is Base64");
                 seen.push_str(&String::from_utf8_lossy(&data));
-                if seen.contains(needle) {
+                if said_count(seen, tag) > 0 {
                     return;
                 }
             }
             SessionEvent::Exit { .. } | SessionEvent::Closed { .. } => {
-                panic!("the session ended before {needle:?} arrived; saw {seen:?}")
+                panic!("the session ended before {tag:?} arrived; saw {seen:?}")
             }
             _ => {}
         }
     }
-    panic!("the attach stream ended before {needle:?} arrived; saw {seen:?}");
+    panic!("the attach stream ended before {tag:?} arrived; saw {seen:?}");
 }
 
 /// Samples the recovery attempt the status line would name, from a thread
@@ -275,16 +278,16 @@ async fn a_punched_session_recovers_by_a_new_punch_and_the_pty_continues() {
         let sampler = Sampler::start(stream.handle(), |_| {});
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
 
         // ---- A's mapping is flushed; nothing else is told ----
         let started = Instant::now();
         a_nat.flush();
         stream.write(say("AFTER")).expect("write");
-        read_until(&mut stream, &mut seen, &said("AFTER"));
+        read_until(&mut stream, &mut seen, "AFTER");
         let elapsed = started.elapsed();
         stream.write(say("DONE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("DONE"));
+        read_until(&mut stream, &mut seen, "DONE");
         let attempts = sampler.finish();
         stream.close();
         (session_ref, attempts, elapsed, seen)
@@ -341,14 +344,14 @@ async fn a_recovery_whose_direct_path_came_back_uses_it_without_punching() {
         let mut stream = attach(&ops, &session_ref);
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
 
         // The direct port opens, and the punched path dies.
         b_nat.forward(B_DIRECT_PORT, b_inside);
         let started = Instant::now();
         a_nat.flush();
         stream.write(say("AFTER")).expect("write");
-        read_until(&mut stream, &mut seen, &said("AFTER"));
+        read_until(&mut stream, &mut seen, "AFTER");
         let elapsed = started.elapsed();
         stream.close();
         (session_ref, elapsed, seen)
@@ -390,7 +393,7 @@ async fn a_recovery_attempt_that_cannot_punch_falls_back_to_the_next_attempt() {
         let mut stream = attach(&ops, &session_ref);
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
 
         // The rendezvous cannot be reached, and A's mapping is gone. The
         // first attempt fails; the rendezvous returns when the second starts.
@@ -407,7 +410,7 @@ async fn a_recovery_attempt_that_cannot_punch_falls_back_to_the_next_attempt() {
         );
         a_nat.flush();
         stream.write(say("AFTER")).expect("write");
-        read_until(&mut stream, &mut seen, &said("AFTER"));
+        read_until(&mut stream, &mut seen, "AFTER");
         let attempts = sampler.finish();
         stream.close();
         (session_ref, attempts, seen)
@@ -458,7 +461,7 @@ async fn recovery_attempts_that_cannot_punch_each_stay_inside_the_budget_and_the
         let mut stream = attach(&ops, &session_ref);
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
         let sampler = Sampler::start(stream.handle(), |_| {});
         net.set_path(
             a_ip,
@@ -638,16 +641,16 @@ async fn mobility_run(seed: u64) -> Mobility {
         let mut stream = attach(&ops, &session_ref);
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
 
         // A's external address changes; the line is typed into the gap.
         let started = Instant::now();
         a_nat.flush();
         stream.write(say("AFTER")).expect("write");
-        read_until(&mut stream, &mut seen, &said("AFTER"));
+        read_until(&mut stream, &mut seen, "AFTER");
         let to_shell = started.elapsed();
         stream.write(say("DONE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("DONE"));
+        read_until(&mut stream, &mut seen, "DONE");
         stream.close();
         (session_ref, to_shell, seen)
     })
@@ -689,29 +692,68 @@ async fn a_punched_session_resumes_within_four_seconds_of_an_address_change_ten_
             run.seed, run.to_shell, run.records
         );
     }
+    // Ten worlds run five at a time, so a starved CI runner can push a whole
+    // chunk past the bound at once (CI run 42586332511: five Windows seeds at
+    // 4.0-6.6 s, all of them healthy at 2.1 s when alone). A seed that misses
+    // only the time bound gets one more run on its own, in a fresh world with
+    // nothing else of this test running, and that run must meet the same
+    // bound and every other assertion. A real delay repeats alone; at most
+    // MOBILITY_RERUNS seeds may need it, so a regression that slows many
+    // seeds still fails.
+    let mut missed = Vec::new();
     for run in &runs {
-        let who = format!("seed {}", run.seed);
-        assert_eq!(
-            run.records.len(),
-            1,
-            "{who}: one attempt: {:?}",
-            run.records
+        if let Err(why) = mobility_problem(run, true) {
+            panic!("{why}");
+        }
+        if run.to_shell > MOBILITY_BOUND {
+            missed.push(run.seed);
+        }
+    }
+    assert!(
+        missed.len() <= MOBILITY_RERUNS,
+        "{} seeds missed {MOBILITY_BOUND:?} (limit {MOBILITY_RERUNS} re-runs): {missed:?}",
+        missed.len()
+    );
+    for seed in missed {
+        let again = mobility_run(seed).await;
+        eprintln!(
+            "seed {seed} alone again: flush to shell {:?}, {:?}",
+            again.to_shell, again.records
         );
-        assert_eq!(run.records[0].0, "resumed", "{who}: {:?}", run.records);
-        assert!(
-            run.to_shell <= MOBILITY_BOUND,
+        if let Err(why) = mobility_problem(&again, false) {
+            panic!("{why} (the re-run alone, after missing the bound among others)");
+        }
+    }
+}
+
+/// Seeds of the mobility test that may be re-run alone after missing the bound.
+const MOBILITY_RERUNS: usize = 2;
+
+/// What is wrong with one repetition, `Ok` when nothing is. With
+/// `allow_slow` the time bound is not checked (the caller re-runs the seed).
+fn mobility_problem(run: &Mobility, allow_slow: bool) -> Result<(), String> {
+    let who = format!("seed {}", run.seed);
+    if run.records.len() != 1 {
+        return Err(format!("{who}: one attempt: {:?}", run.records));
+    }
+    if run.records[0].0 != "resumed" {
+        return Err(format!("{who}: {:?}", run.records));
+    }
+    if !allow_slow && run.to_shell > MOBILITY_BOUND {
+        return Err(format!(
             "{who}: the shell answered {:?} after the address changed",
             run.to_shell
-        );
-        assert_eq!(said_count(&run.seen, "BEFORE"), 1, "{who}: {:?}", run.seen);
-        assert_eq!(said_count(&run.seen, "AFTER"), 1, "{who}: {:?}", run.seen);
-        assert_eq!(said_count(&run.seen, "DONE"), 1, "{who}: {:?}", run.seen);
-        assert_eq!(
-            run.punch_requests,
-            FIRST_DIALS + 1,
-            "{who}: the re-dial punched again"
-        );
+        ));
     }
+    for tag in ["BEFORE", "AFTER", "DONE"] {
+        if said_count(&run.seen, tag) != 1 {
+            return Err(format!("{who}: {tag} not answered once: {:?}", run.seen));
+        }
+    }
+    if run.punch_requests != FIRST_DIALS + 1 {
+        return Err(format!("{who}: the re-dial punched again"));
+    }
+    Ok(())
 }
 
 /// DoD 8: B's registration with R is replaced (R drops it, B registers again
@@ -741,17 +783,17 @@ async fn a_punched_session_resumes_after_the_target_re_registers() {
         let mut stream = attach(&ops, &session_ref);
         let mut seen = String::new();
         stream.write(say("BEFORE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        read_until(&mut stream, &mut seen, "BEFORE");
         ready_tx.send(()).unwrap();
         go_rx.recv().unwrap();
 
         let started = Instant::now();
         a_nat.flush();
         stream.write(say("AFTER")).expect("write");
-        read_until(&mut stream, &mut seen, &said("AFTER"));
+        read_until(&mut stream, &mut seen, "AFTER");
         let elapsed = started.elapsed();
         stream.write(say("DONE")).expect("write");
-        read_until(&mut stream, &mut seen, &said("DONE"));
+        read_until(&mut stream, &mut seen, "DONE");
         stream.close();
         (session_ref, elapsed, seen)
     });
