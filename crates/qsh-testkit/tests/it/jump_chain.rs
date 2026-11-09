@@ -49,14 +49,14 @@ use tokio::net::UdpSocket;
 
 const LIMIT: Duration = Duration::from_secs(60);
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+pub(super) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     match tokio::time::timeout(LIMIT, tokio::task::spawn_blocking(f)).await {
         Ok(joined) => joined.expect("blocking task"),
         Err(_) => panic!("a blocking step did not finish within {LIMIT:?}"),
     }
 }
 
-fn loopback_options() -> JumpOptions {
+pub(super) fn loopback_options() -> JumpOptions {
     JumpOptions {
         allow_host_local: true,
         ..JumpOptions::default()
@@ -103,14 +103,14 @@ fn roles(client: Fingerprint, role: &str) -> Roles {
 // the hosts
 // ----------------------------------------------------------------------
 
-struct Host {
-    name: String,
-    h: LoopbackHarness,
+pub(super) struct Host {
+    pub(super) name: String,
+    pub(super) h: LoopbackHarness,
     _roles: Roles,
 }
 
 impl Host {
-    fn pin(&self) -> HopPin {
+    pub(super) fn pin(&self) -> HopPin {
         HopPin {
             name: self.name.clone(),
             address: self.h.addr.to_string(),
@@ -120,7 +120,7 @@ impl Host {
 }
 
 /// One host per name, each pinning `client` as `laptop` with `role_of(name)`.
-async fn start_hosts(
+pub(super) async fn start_hosts(
     names: &[&str],
     client: Fingerprint,
     role_of: impl Fn(&str) -> &'static str,
@@ -149,7 +149,7 @@ async fn start_hosts(
     hosts
 }
 
-async fn shutdown(hosts: Vec<Host>) {
+pub(super) async fn shutdown(hosts: Vec<Host>) {
     for host in hosts {
         host.h.shutdown().await;
     }
@@ -159,22 +159,41 @@ async fn shutdown(hosts: Vec<Host>) {
 // rig 1: the product Ops
 // ----------------------------------------------------------------------
 
-struct Net {
+pub(super) struct Net {
     _dir: tempfile::TempDir,
-    ops: Ops,
+    pub(super) ops: Ops,
     /// The client's fingerprint, which the hosts pin.
-    fp: Fingerprint,
-    hosts: Vec<Host>,
+    pub(super) fp: Fingerprint,
+    pub(super) hosts: Vec<Host>,
 }
 
 impl Net {
     /// A client `Ops` that pins every host in `names` (the last is the
     /// target) and hosts that pin the client with `full`.
-    async fn start(names: &[&str]) -> Self {
+    pub(super) async fn start(names: &[&str]) -> Self {
         Self::start_with(names, |_| "*", loopback_options()).await
     }
 
     async fn start_with(
+        names: &[&str],
+        role_of: impl Fn(&str) -> &'static str,
+        options: JumpOptions,
+    ) -> Self {
+        let net = Self::start_unpinned(names, role_of, options).await;
+        for host in &net.hosts {
+            net.pin(
+                &host.name,
+                Some(host.h.addr.to_string()),
+                host.h.server_identity.fingerprint,
+            )
+            .await;
+        }
+        net
+    }
+
+    /// [`Self::start_with`] without the client's pins, for a test that pins
+    /// some hosts at an address of its own (a chaos proxy in front).
+    pub(super) async fn start_unpinned(
         names: &[&str],
         role_of: impl Fn(&str) -> &'static str,
         options: JumpOptions,
@@ -198,24 +217,15 @@ impl Net {
         .expect("identity.init");
         let fp: Fingerprint = init.fingerprint.parse().expect("fingerprint");
         let hosts = start_hosts(names, fp, role_of, options).await;
-        let net = Self {
+        Self {
             _dir: dir,
             ops,
             fp,
             hosts,
-        };
-        for host in &net.hosts {
-            net.pin(
-                &host.name,
-                Some(host.h.addr.to_string()),
-                host.h.server_identity.fingerprint,
-            )
-            .await;
         }
-        net
     }
 
-    async fn pin(&self, name: &str, address: Option<String>, fingerprint: Fingerprint) {
+    pub(super) async fn pin(&self, name: &str, address: Option<String>, fingerprint: Fingerprint) {
         let ops = self.ops.clone();
         let name = name.to_string();
         blocking(move || {
@@ -231,7 +241,7 @@ impl Net {
         .expect("trust.add");
     }
 
-    fn host(&self, name: &str) -> &Host {
+    pub(super) fn host(&self, name: &str) -> &Host {
         self.hosts
             .iter()
             .find(|h| h.name == name)
@@ -239,13 +249,13 @@ impl Net {
     }
 
     /// The client reaching everything through `hops`.
-    fn via(&self, hops: &[&str]) -> Ops {
+    pub(super) fn via(&self, hops: &[&str]) -> Ops {
         self.ops
             .clone()
             .with_jump(hops.iter().map(|h| (*h).to_string()).collect())
     }
 
-    async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         shutdown(self.hosts).await;
     }
 }
@@ -705,13 +715,13 @@ async fn a_jump_redirect_to_another_pinned_peer_fails_with_auth_failed() {
 // rig 2: dial_chain by hand
 // ----------------------------------------------------------------------
 
-struct Direct {
+pub(super) struct Direct {
     client: TestIdentity,
     hosts: Vec<Host>,
 }
 
 impl Direct {
-    async fn start(names: &[&str]) -> Self {
+    pub(super) async fn start(names: &[&str]) -> Self {
         Self::start_with(names, |_| "*", loopback_options()).await
     }
 
@@ -725,11 +735,11 @@ impl Direct {
         Self { client, hosts }
     }
 
-    fn host(&self, name: &str) -> &Host {
+    pub(super) fn host(&self, name: &str) -> &Host {
         self.hosts.iter().find(|h| h.name == name).expect("a host")
     }
 
-    fn plan(&self, order: &[&str]) -> JumpPlan {
+    pub(super) fn plan(&self, order: &[&str]) -> JumpPlan {
         let (end, hops) = order.split_last().expect("an end");
         JumpPlan::new(
             hops.iter().map(|n| self.host(n).pin()).collect(),
@@ -742,7 +752,11 @@ impl Direct {
 
     /// Dials the plan: the first hop with the ordinary trust of every host,
     /// the rest with the chain's exact pins.
-    async fn dial(&self, plan: &JumpPlan, within: Duration) -> Result<ChainConn, OpError> {
+    pub(super) async fn dial(
+        &self,
+        plan: &JumpPlan,
+        within: Duration,
+    ) -> Result<ChainConn, OpError> {
         let mut trust = StaticTrust::empty();
         for host in &self.hosts {
             trust = trust.with_pin(
@@ -765,12 +779,12 @@ impl Direct {
         .await
     }
 
-    async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         shutdown(self.hosts).await;
     }
 }
 
-async fn close(chain: ChainConn) {
+pub(super) async fn close(chain: ChainConn) {
     chain.connection.close(0, b"done");
     chain
         .endpoint
