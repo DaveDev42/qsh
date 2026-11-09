@@ -90,7 +90,7 @@ M24가 남긴 후속이다(ADR-0054 개정 이력, M24 계획 `569e859`).
 - [ ] derived 후보(결정 23 (d))는 IPv4만 만든다. IPv6에서 중개자가 B와 같은 방화벽 뒤인 장면은 시험이 없다.
 - [ ] 커널 대조는 masquerade(port-restricted)와 fully-random(symmetric)만 덮는다. full cone·restricted는 conntrack에 그대로 대응하는 것이 없어 netsim에서만 본다.
 - [ ] 역방향 등록 자체의 펀칭과 일반 `qsh serve`·on-demand serve의 펀칭은 ADR-0054에서 미뤘다.
-- [ ] 흔들림 후보: `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 전체 실행에서 한 번 실패하고 단독 다섯 번과 재실행에서 통과했다.
+- [ ] 흔들림: `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 전체 실행 한 번과 CI run 42573815011에서 8초 안에 닫힘을 보지 못했다. `1acd3d6`이 고정 2.5초 sleep 대신 host가 막혔다는 보고(`peer_stream_blocked_events`)를 기다리고 flood를 60000건으로 줄여 양보하게 했다(제품 코드는 응답 스트림을 기다리지 않는다). 원래 실패는 로컬에서 재현되지 않아 원인은 가설이다. 부하 아래 30/30. 짝인 `serve_closes_a_withdrawn_peer…`는 아직 고정 1.5초 sleep이다. 같은 부하에서 `chaos_relay::reorder_lets_the_successor_arrive_first`가 전체 여섯 번 중 두 번 실패했다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
