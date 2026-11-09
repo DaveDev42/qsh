@@ -9,6 +9,8 @@
 개정 이력: 2026-11-07에 M24가 [ADR-0054](0054-m24-hole-punching.md) 결정 6을 착지시켜, action 어휘가 `host.punch`를 더해 12종이 되고 결정 2의 role 표에서 `none`을 뺀 다섯 role이 이 action을 준다. 이 문서의 결정 본문은 고치지 않았다. 표의 현재 값은 `docs/CLI.md` §6.11과 `docs/PRD.md` §9에 있다.
 
 개정 이력: 2026-11-09에 M25가 [ADR-0055](0055-m25-agent-forwarding.md) 결정 16을 착지시켜, action 어휘가 `forward.agent`를 더해 13종이 되고 결정 2의 role 표에서 `full`과 `exec`가 이 action을 준다. 결정 본문은 고치지 않았다.
+
+개정 이력: 2026-11-09에 M26이 [ADR-0056](0056-m26-jump-chaining.md) 결정 18을 착지시켜, action 어휘가 `forward.jump`를 더해 14종이 되고 결정 2의 role 표에서 `full`과 `tunnel`이 이 action을 준다. 결정 본문은 고치지 않았다.
 개정 관계: 새 ADR이다. 2026-10-12 사용자 결정("권한 설정을 보다 간소화… 파일 단위로 복잡하게 관리하는게 귀찮아")을 받아 P1을 다시 짠 결과 M15에 이 ADR과 ADR-0029(개정판, `qsh cp`)가 함께 놓인다. 다음 결정들을 개정한다.
 
 - ADR-0017: 결정 1(어떤 명령도 `acl.toml`을 쓰지 않는다)은 그대로 재확인한다. role은 `trust.toml`에 산다. 맥락 절의 전제 "페어링이 상대를 pin해도 그 상대는 `acl.toml` 행이 생길 때까지 아무 action도 얻지 못한다"는 새 pin에 대해 더는 참이 아니다. 결정 2의 `acl_principal_unmatched`와 `acl_ca_auth_path_missing`은 나오는 조건이 바뀌고(결정 12), 결정 3의 페어링 직후 고지는 문면이 바뀐다(결정 13). 결정 5(TOFU 없음)는 그대로다.

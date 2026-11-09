@@ -3095,7 +3095,8 @@ fn trust_allow_rejects_forward_socks_and_unknown_actions() {
         Some(vec![
             "forward.local".to_string(),
             "forward.remote".to_string(),
-            "forward.agent".to_string()
+            "forward.agent".to_string(),
+            "forward.jump".to_string()
         ])
     );
     let after = std::fs::read_to_string(ops.paths().trust_file()).unwrap();

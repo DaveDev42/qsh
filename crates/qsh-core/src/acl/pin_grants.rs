@@ -339,7 +339,8 @@ mod tests {
             vec![
                 Action::ForwardLocal,
                 Action::ForwardRemote,
-                Action::ForwardAgent
+                Action::ForwardAgent,
+                Action::ForwardJump
             ]
         );
         assert_eq!(

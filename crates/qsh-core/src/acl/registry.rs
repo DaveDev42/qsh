@@ -551,6 +551,12 @@ mod tests {
             // that opens anyway. Its three requests are listed in
             // `AGENT_OPS` and driven by `acl::agent`'s tests.
             .chain(crate::acl::AGENT_OPS.iter().map(|op| op.action()))
+            // `forward.jump` (ADR-0056 decision 18) is decided inline by
+            // `acl::check_jump` for each JUMP stream. The stream handler
+            // that turns a denial into a `ConnectResult` lands with the
+            // middle-peer step and brings its own seam row then; the
+            // choke-point tests live in `acl::jump`.
+            .chain(std::iter::once(Action::ForwardJump))
             .collect();
         let excluded: std::collections::HashSet<Action> =
             ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();

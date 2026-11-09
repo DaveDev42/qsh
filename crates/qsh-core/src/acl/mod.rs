@@ -31,6 +31,7 @@ use crate::broker::PeerFingerprint;
 use crate::file::guard::Normalizer;
 
 mod agent;
+mod jump;
 mod load;
 mod paths;
 mod pin_grants;
@@ -116,6 +117,7 @@ pub(crate) use acl_restart_notice;
 /// drift apart.
 pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
 pub use agent::{AGENT_OPS, AgentOp, AgentVerdict, check_agent};
+pub use jump::{JumpVerdict, check_jump};
 pub use punch::{PUNCH_OPS, PunchOp, check_punch, refuse_unpinned_punch};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
@@ -197,13 +199,22 @@ pub enum Action {
     /// or exec still opens and the reply says `AGENT_GRANT_DENIED`. `full`
     /// and `exec` grant it. The resource is the request's op name.
     ForwardAgent,
+    /// Let a peer use this host as a middle hop of a `-J` chain
+    /// (`forward.jump`; ADR-0056 decision 18). Decided inline for every JUMP
+    /// stream through [`check_jump`], before any UDP socket or channel
+    /// exists, against the requested `host:port` as the resource. `full` and
+    /// `tunnel` grant it, and a `forward.*` row covers it. It widens what a
+    /// peer can reach (a QUIC answer from a UDP service where
+    /// `forward.local` reaches TCP), unlike `forward.agent`. Not behind the
+    /// always-deny gate.
+    ForwardJump,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order — the full
     /// PRD §9 vocabulary (`crates/qsh-core/tests/it/acl_docs.rs` fails CI if
     /// this ever drifts from that list).
-    pub const ALL: [Action; 13] = [
+    pub const ALL: [Action; 14] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
@@ -217,6 +228,7 @@ impl Action {
         Action::FileWrite,
         Action::HostPunch,
         Action::ForwardAgent,
+        Action::ForwardJump,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -236,6 +248,7 @@ impl Action {
             Action::FileWrite => "file.write",
             Action::HostPunch => "host.punch",
             Action::ForwardAgent => "forward.agent",
+            Action::ForwardJump => "forward.jump",
         }
     }
 

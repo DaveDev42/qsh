@@ -933,7 +933,12 @@ fn acl_show_never_lists_forward_socks_and_lists_no_file_action_for_a_row_without
     let set = effective(&data);
     assert_eq!(
         set,
-        ["forward.local", "forward.remote", "forward.agent"],
+        [
+            "forward.local",
+            "forward.remote",
+            "forward.agent",
+            "forward.jump"
+        ],
         "{data}"
     );
     // `forward.socks` is refused by the always-deny gate whatever the row
@@ -1262,6 +1267,7 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "file.write",
             "host.punch",
             "forward.agent",
+            "forward.jump",
         ],
         "exec" => &[
             "exec.run",
@@ -1272,7 +1278,12 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "host.punch",
             "forward.agent",
         ],
-        "tunnel" => &["forward.local", "forward.remote", "host.punch"],
+        "tunnel" => &[
+            "forward.local",
+            "forward.remote",
+            "host.punch",
+            "forward.jump",
+        ],
         "read-only" => &["session.list", "session.attach", "host.punch"],
         "reverse" => &["host.reverse", "host.punch"],
         "none" | "legacy" => &[],
