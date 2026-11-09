@@ -61,10 +61,10 @@ pub(crate) use unix::{
 };
 #[cfg(unix)]
 pub use unix::{LocalStream, connect};
+#[cfg(unix)]
+pub(crate) use unix::{authorized_peer, bind_with_narrow_umask};
 #[cfg(all(unix, test))]
-pub(crate) use unix::{
-    authorized_peer, bind_with_narrow_umask, peer_is_authorized, process_is_verifiably_dead,
-};
+pub(crate) use unix::{peer_is_authorized, process_is_verifiably_dead};
 
 #[cfg(windows)]
 pub(crate) use windows::{
