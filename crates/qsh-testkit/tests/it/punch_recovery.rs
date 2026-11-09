@@ -780,12 +780,25 @@ async fn a_punched_session_resumes_after_the_target_re_registers() {
 
     let records = records_for(&session_ref);
     eprintln!("re-registered: recovery {records:?}, flush to shell {elapsed:?}");
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(records[0].0, "resumed", "{records:?}");
-    assert!(records[0].1 <= attempt_budget_ms(), "{records:?}");
-    assert_eq!(
-        w.punch_requests(),
-        FIRST_DIALS + 1,
+    // A slow runner may lose the first attempt to the re-registration still
+    // settling at R (seen on macOS CI: `failed` after 2.5 s, then `resumed`).
+    // What this scene pins is that recovery ends in a resume through the new
+    // registration, each attempt within its budget, and the input applies
+    // once.
+    let (last, earlier) = records.split_last().expect("a recovery record");
+    assert_eq!(last.0, "resumed", "{records:?}");
+    assert!(
+        earlier
+            .iter()
+            .all(|(outcome, _)| outcome.as_str() == "failed"),
+        "{records:?}"
+    );
+    assert!(
+        records.iter().all(|(_, ms)| *ms <= attempt_budget_ms()),
+        "{records:?}"
+    );
+    assert!(
+        w.punch_requests() > FIRST_DIALS,
         "the re-dial punched through the new registration"
     );
     assert_eq!(said_count(&seen, "BEFORE"), 1, "{seen:?}");
