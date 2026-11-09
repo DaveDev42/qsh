@@ -105,8 +105,35 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      # ADR-0055 DoD 23.2 and 23.9: the real-agent tests (`agent_accept::`)
+      # need the system OpenSSH tools. Ubuntu and macOS runners ship them and
+      # the test starts a private `ssh-agent -a <tmp>`. Win32-OpenSSH's
+      # `ssh-agent.exe` ignores `-a` and serves only
+      # `\\.\pipe\openssh-ssh-agent`, so the Windows leg starts the runner's
+      # service (disabled by default) and the tests use that default pipe.
+      # Hosted runners only: a developer machine keeps the service off, and
+      # without `QSH_REQUIRE_SSH_AGENT` the tests skip there.
+      - name: Start the Win32-OpenSSH agent service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-Service ssh-agent -StartupType Manual
+          Start-Service ssh-agent
+          Get-Service ssh-agent
+      - name: Add a throwaway Ed25519 key to the agent service
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          ssh-keygen -q -t ed25519 -N "" -C qsh-ci -f "%RUNNER_TEMP%\qsh-ci-key"
+          ssh-add "%RUNNER_TEMP%\qsh-ci-key"
+          ssh-add -l
       # nextest: one process per test — required for the PTY/process tests.
+      # `QSH_REQUIRE_SSH_AGENT=1` turns a missing `ssh-agent`/`ssh-add`/
+      # `ssh-keygen` (or a dead Windows service) into a failure instead of a
+      # skip.
       - run: cargo nextest run --workspace --no-fail-fast
+        env:
+          QSH_REQUIRE_SSH_AGENT: 1
       # Doc tests are not run by nextest. Platform-independent, so once
       # on Linux is enough (header comment).
       - if: matrix.os == 'ubuntu-24.04'

@@ -54,6 +54,13 @@ impl AgentListener {
         self.pipe.name()
     }
 
+    /// The raw handle of the instance waiting for the next client, for the
+    /// test that reads its security descriptor.
+    #[cfg(test)]
+    pub(crate) fn waiting_handle(&self) -> std::os::windows::io::RawHandle {
+        self.pipe.waiting_handle()
+    }
+
     /// Always false: there is no path-length fallback for a pipe.
     pub fn uses_fallback_dir(&self) -> bool {
         false

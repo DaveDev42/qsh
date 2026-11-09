@@ -269,3 +269,52 @@ async fn without_a_local_agent_the_host_sees_the_stream_close() {
     let (mut send, mut recv) = open_agent_stream(&rig.host, &channel.bytes()).await;
     assert_eq!(exchange(&mut send, &mut recv, &list_request()).await, None);
 }
+
+/// ADR-0055 DoD 23.9: on Windows the discovery takes a `SSH_AUTH_SOCK`-style
+/// named pipe path, refuses anything that is not a pipe, and the dispatcher
+/// then reaches a fake agent listening on that pipe.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_client_reaches_an_agent_on_a_named_pipe() {
+    let fake = FakeAgent::start(vec![key()]).await.unwrap();
+    let pipe = fake.endpoint().to_string();
+    assert!(pipe.starts_with(r"\\.\pipe\"), "{pipe}");
+
+    // Discovery: the same pipe whether it comes from the environment value,
+    // from `-o ForwardAgent=<path>` or from `-o ForwardAgent=$VAR`.
+    let from_env = |name: &str| (name == "SSH_AUTH_SOCK").then(|| pipe.clone());
+    let by_env = AgentEndpoint::resolve(None, &from_env).expect("env value");
+    let by_path = AgentEndpoint::resolve(Some(&pipe), &|_| None).expect("path");
+    let by_var = AgentEndpoint::resolve(Some("$SSH_AUTH_SOCK"), &from_env).expect("var");
+    assert_eq!(by_env, by_path);
+    assert_eq!(by_path, by_var);
+    assert_eq!(by_path.shown(), pipe);
+    // A unix-style path cannot be connected to on Windows.
+    assert!(AgentEndpoint::resolve(Some(r"C:\tmp\agent.sock"), &|_| None).is_err());
+    assert!(AgentEndpoint::resolve(None, &|_| Some("/tmp/agent.sock".into())).is_err());
+
+    // The dispatcher, given only that value, lists and signs, and a request
+    // outside the allow list still stops at the client.
+    let rig = rig(Some(&pipe)).await;
+    let channel = rig.agent.register();
+    let (mut send, mut recv) = open_agent_stream(&rig.host, &channel.bytes()).await;
+    assert_eq!(
+        exchange(&mut send, &mut recv, &list_request()).await,
+        Some(identities_answer(&[key()]))
+    );
+    let body = sign_request_body(&key().blob, b"challenge", 0);
+    let request = encode_message(SSH2_AGENTC_SIGN_REQUEST, &body).unwrap();
+    assert_eq!(
+        exchange(&mut send, &mut recv, &request).await,
+        Some(sign_response(&key().blob, b"challenge"))
+    );
+    let remove_all = encode_message(19, &[]).unwrap();
+    assert_eq!(
+        exchange(&mut send, &mut recv, &remove_all).await.as_deref(),
+        Some(&FAILURE_REPLY[..])
+    );
+    assert_eq!(
+        fake.received_kinds(),
+        vec![SSH2_AGENTC_REQUEST_IDENTITIES, SSH2_AGENTC_SIGN_REQUEST]
+    );
+}

@@ -6,6 +6,7 @@ mod acl_registry_audit;
 mod acl_uniformity;
 mod admission;
 mod admission_retry_sever;
+mod agent_accept;
 mod agent_client;
 mod agent_forward;
 mod agent_host;
