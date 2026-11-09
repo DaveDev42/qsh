@@ -46,11 +46,12 @@ use tokio::sync::mpsc;
 
 /// Smallest packet a QUIC endpoint may send: the QUIC floor (ADR-0056
 /// decision 5). The inner connection's `initial_mtu` and `min_mtu`.
-pub const JUMP_PACKET_MIN: u16 = 1200;
+pub const JUMP_PACKET_MIN: u16 = qsh_proto::jump::JUMP_PACKET_MIN as u16;
 
 /// Largest packet the pipe carries: the PLPMTUD upper bound of the inner
 /// connection (ADR-0056 decision 5) and the default packet limit.
-pub const JUMP_PACKET_MAX: u16 = 1452;
+/// Both constants are `qsh_proto::jump`'s, narrowed to quinn's `u16`.
+pub const JUMP_PACKET_MAX: u16 = qsh_proto::jump::JUMP_PACKET_MAX as u16;
 
 /// The remote address quinn sees for the pipe (RFC 5737 TEST-NET-1).
 pub const PIPE_REMOTE_ADDR: SocketAddr =
