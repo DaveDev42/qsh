@@ -601,3 +601,195 @@ async fn a_supervised_tunnel_punches_again_and_the_listener_stays_bound() {
     eprintln!("first CONNECT after the loss succeeded after {recovered_after:?}");
     w.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// mobility (DoD 8)
+// ---------------------------------------------------------------------------
+
+/// How long after A's address changed the same session must be back
+/// (ADR-0054 DoD 8).
+const MOBILITY_BOUND: Duration = Duration::from_secs(4);
+
+/// What one repetition of the mobility scenario measured.
+struct Mobility {
+    seed: u64,
+    /// A's NAT flush to the first byte the shell wrote after it.
+    to_shell: Duration,
+    records: Vec<(String, u64)>,
+    seen: String,
+    punch_requests: usize,
+}
+
+/// One world, one punched attach: A's NAT external port changes and a line
+/// typed into the gap has to reach the shell once. The pin carries no
+/// address, so a re-dial punches at once.
+async fn mobility_run(seed: u64) -> Mobility {
+    let w = world(WorldOptions {
+        seed,
+        pin_b_address: false,
+        direct_listener: false,
+        ..moving_a()
+    })
+    .await;
+    let ops = w.a.ops.clone();
+    let a_nat = w.a_site.nat().expect("A is behind a box").clone();
+    let (session_ref, to_shell, seen) = scenario("mobility", move || {
+        let session_ref = open_shell(&ops);
+        let mut stream = attach(&ops, &session_ref);
+        let mut seen = String::new();
+        stream.write(say("BEFORE")).expect("write");
+        read_until(&mut stream, &mut seen, &said("BEFORE"));
+
+        // A's external address changes; the line is typed into the gap.
+        let started = Instant::now();
+        a_nat.flush();
+        stream.write(say("AFTER")).expect("write");
+        read_until(&mut stream, &mut seen, &said("AFTER"));
+        let to_shell = started.elapsed();
+        stream.write(say("DONE")).expect("write");
+        read_until(&mut stream, &mut seen, &said("DONE"));
+        stream.close();
+        (session_ref, to_shell, seen)
+    })
+    .await;
+    let records = records_for(&session_ref);
+    let punch_requests = w.punch_requests();
+    w.shutdown().await;
+    Mobility {
+        seed,
+        to_shell,
+        records,
+        seen,
+        punch_requests,
+    }
+}
+
+/// DoD 8: over a punched path, A's NAT address changes in an interactive
+/// attach; the same session resumes within 4 s and the input typed during
+/// the gap applies once, in all ten repetitions (ten worlds: the rendezvous
+/// allows six attempts a minute to one initiator, so repetitions cannot
+/// share one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_punched_session_resumes_within_four_seconds_of_an_address_change_ten_times() {
+    capture_recovery_records();
+    let mut runs = Vec::new();
+    for chunk in (1..=10u64).collect::<Vec<_>>().chunks(5) {
+        let (a, b, c, d, e) = tokio::join!(
+            mobility_run(chunk[0]),
+            mobility_run(chunk[1]),
+            mobility_run(chunk[2]),
+            mobility_run(chunk[3]),
+            mobility_run(chunk[4]),
+        );
+        runs.extend([a, b, c, d, e]);
+    }
+    for run in &runs {
+        eprintln!(
+            "seed {}: flush to shell {:?}, {:?}",
+            run.seed, run.to_shell, run.records
+        );
+    }
+    for run in &runs {
+        let who = format!("seed {}", run.seed);
+        assert_eq!(
+            run.records.len(),
+            1,
+            "{who}: one attempt: {:?}",
+            run.records
+        );
+        assert_eq!(run.records[0].0, "resumed", "{who}: {:?}", run.records);
+        assert!(
+            run.to_shell <= MOBILITY_BOUND,
+            "{who}: the shell answered {:?} after the address changed",
+            run.to_shell
+        );
+        assert_eq!(said_count(&run.seen, "BEFORE"), 1, "{who}: {:?}", run.seen);
+        assert_eq!(said_count(&run.seen, "AFTER"), 1, "{who}: {:?}", run.seen);
+        assert_eq!(said_count(&run.seen, "DONE"), 1, "{who}: {:?}", run.seen);
+        assert_eq!(
+            run.punch_requests,
+            FIRST_DIALS + 1,
+            "{who}: the re-dial punched again"
+        );
+    }
+}
+
+/// DoD 8: B's registration with R is replaced (R drops it, B registers again
+/// under a new generation) and then A's path dies. The re-dial punches through
+/// the new registration, the same PTY session resumes and the line typed
+/// into the gap applies once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_punched_session_resumes_after_the_target_re_registers() {
+    capture_recovery_records();
+    let w = world(moving_a()).await;
+    let ops = w.a.ops.clone();
+    let a_nat = w.a_site.nat().expect("A is behind a box").clone();
+    let generation = |w: &World| {
+        w.r_listen
+            .hubs_snapshot()
+            .iter()
+            .map(|(_, hub)| hub.ack_fields().2)
+            .max()
+    };
+    let first_generation = generation(&w).expect("B is registered");
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let client = tokio::task::spawn_blocking(move || {
+        // The punched session is up before the registration changes.
+        let session_ref = open_shell(&ops);
+        let mut stream = attach(&ops, &session_ref);
+        let mut seen = String::new();
+        stream.write(say("BEFORE")).expect("write");
+        read_until(&mut stream, &mut seen, &said("BEFORE"));
+        ready_tx.send(()).unwrap();
+        go_rx.recv().unwrap();
+
+        let started = Instant::now();
+        a_nat.flush();
+        stream.write(say("AFTER")).expect("write");
+        read_until(&mut stream, &mut seen, &said("AFTER"));
+        let elapsed = started.elapsed();
+        stream.write(say("DONE")).expect("write");
+        read_until(&mut stream, &mut seen, &said("DONE"));
+        stream.close();
+        (session_ref, elapsed, seen)
+    });
+
+    tokio::task::spawn_blocking(move || ready_rx.recv().unwrap())
+        .await
+        .unwrap();
+    // R closes B's registration; B's reconnect loop registers again.
+    let (registration, _hub) = w.r_listen.connection_for("b").expect("B's registration");
+    registration.close(0, b"re-register");
+    qsh_testkit::reverse::wait_for(Duration::from_secs(30), || {
+        generation(&w).filter(|g| *g > first_generation)
+    })
+    .await;
+    let target = w.b_server.as_ref().unwrap().punch_target().unwrap().clone();
+    qsh_testkit::reverse::wait_for(Duration::from_secs(30), || {
+        (target.rendezvous_fingerprints().len() == 1).then_some(())
+    })
+    .await;
+
+    go_tx.send(()).unwrap();
+    let (session_ref, elapsed, seen) = tokio::time::timeout(SCENARIO_LIMIT, client)
+        .await
+        .expect("the client finished")
+        .expect("client thread");
+
+    let records = records_for(&session_ref);
+    eprintln!("re-registered: recovery {records:?}, flush to shell {elapsed:?}");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].0, "resumed", "{records:?}");
+    assert!(records[0].1 <= attempt_budget_ms(), "{records:?}");
+    assert_eq!(
+        w.punch_requests(),
+        FIRST_DIALS + 1,
+        "the re-dial punched through the new registration"
+    );
+    assert_eq!(said_count(&seen, "BEFORE"), 1, "{seen:?}");
+    assert_eq!(said_count(&seen, "AFTER"), 1, "{seen:?}");
+    assert_eq!(said_count(&seen, "DONE"), 1, "{seen:?}");
+    w.shutdown().await;
+}

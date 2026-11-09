@@ -73,6 +73,9 @@ pub(crate) struct Routed {
     pub connection: Connection,
     /// Kept for the connection's life.
     pub endpoint: Endpoint,
+    /// The connection came from a punch race, so the endpoint also holds the
+    /// closed candidates that lost it.
+    pub punched: bool,
 }
 
 impl From<Dialed> for Routed {
@@ -80,6 +83,7 @@ impl From<Dialed> for Routed {
         Self {
             connection: d.connection,
             endpoint: d.endpoint,
+            punched: false,
         }
     }
 }
@@ -282,6 +286,7 @@ pub(crate) async fn dial_routed(
                 return Ok(Routed {
                     connection: win.connection,
                     endpoint: win.endpoint,
+                    punched: true,
                 });
             }
             Event::Punch(Err(fail)) => {

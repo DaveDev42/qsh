@@ -31,6 +31,12 @@ use crate::tls::{
     reverify_chain,
 };
 
+/// How long a command waits for its endpoint to drain after it closed its
+/// connection when a hole-punching race left closed candidates on it
+/// ([`Endpoint::wait_idle_for`]). A direct dial keeps the full
+/// [`Endpoint::wait_idle`].
+pub const CLOSE_DRAIN_CAP: Duration = Duration::from_millis(200);
+
 /// Application-level keep-alive interval (`protocol.md` §2). The default
 /// of [`TransportTuning`]; `[transport].keep_alive_ms` in `config.toml`
 /// replaces it (`docs/adr/0021-transport-liveness-knobs.md` decision 1).
@@ -1118,6 +1124,20 @@ impl Endpoint {
         match &self.inner {
             EndpointBackend::Quic(e) => e.wait_idle().await,
         }
+    }
+
+    /// [`Self::wait_idle`] for at most `cap`: the wait that ends a command.
+    ///
+    /// `CONNECTION_CLOSE` leaves as soon as a connection is closed; what
+    /// `wait_idle` keeps waiting for is the closing period (three PTOs) of
+    /// every connection the endpoint ever closed. A connection that never
+    /// finished its handshake (a hole-punching candidate that lost the race)
+    /// has no RTT sample and counts that period from its initial guess, which
+    /// is about 0.9 s at `PUNCH_INITIAL_RTT`; waiting for it made a punched
+    /// `exec` return 0.5 to 0.9 s after its output. Only a punched command
+    /// uses this; a direct dial waits out its connection's full drain.
+    pub async fn wait_idle_for(&self, cap: Duration) {
+        let _ = tokio::time::timeout(cap, self.wait_idle()).await;
     }
 
     /// Close every connection on the endpoint with an application code and

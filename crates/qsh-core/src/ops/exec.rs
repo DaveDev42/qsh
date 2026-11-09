@@ -414,6 +414,7 @@ async fn exec_async_tracked(
     .map_err(|err| err.into_op(address))?;
     dialed_flag.store(true, Ordering::SeqCst);
     let endpoint = dialed.endpoint.clone();
+    let punched = dialed.punched;
     let connection = dialed.connection.clone();
 
     let stdin_reader: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>> = match stdin {
@@ -454,7 +455,14 @@ async fn exec_async_tracked(
     // and drops our own handle so `wait_idle` cannot wait on us.
     connection.close(0, b"done");
     drop(connection);
-    endpoint.wait_idle().await;
+    if punched {
+        // The losers of the punch race are closing too, and each counts its
+        // closing period from the initial RTT guess (about 0.9 s); the
+        // adopted connection's own close frame is already out.
+        endpoint.wait_idle_for(qsh_transport::CLOSE_DRAIN_CAP).await;
+    } else {
+        endpoint.wait_idle().await;
+    }
     let result = result?;
     if result.timed_out {
         // The host enforced the same deadline first and told us so.
