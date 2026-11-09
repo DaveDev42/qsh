@@ -420,6 +420,7 @@ g1~g5는 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지 않�
 | h53 | Windows client는 named pipe agent만 쓴다. AF_UNIX와 msys 소켓 agent(Windows용 Git에 든 `ssh-agent`)는 닿지 않는다. Windows 기본 상태에서는 agent 서비스가 꺼져 있어 agent가 없는 경로가 흔하다 | ADR-0055 결정 11, 개정 이력의 전제 확인 1 |
 | h54 | 역방향 route에서 channel 값을 CLI보다 먼저 안 같은 uid의 프로세스가 첫 claim을 하면 그 channel의 seat에 앉는다. 이후 그 CLI의 claim은 거부된다. channel은 CLI와 host만 아는 128비트 비밀이고 어느 출력에도 없다 | B47, ADR-0055 결정 14 |
 | h55 | 경로가 조용히 끊긴 뒤 첫 로컬 agent 연결은 100 ms가 아니라 probe 대기(`clamp(4×RTT, 300 ms, 2 s)`) 안에 닫힌다. 둘째 연결부터 곧바로 닫힌다. 하한을 낮추면 부하 아래에서 건강한 연결을 잘못 닫을 수 있다 | ADR-0055 개정 이력(받치는 연결 착지), G12 |
+| h56 | `-A` 없이 연 세션·exec의 프로그램에는 `SSH_AUTH_SOCK`이 없다. 그러나 Windows host에서 Win32-OpenSSH의 `ssh-add`·`ssh`는 그 변수가 없으면 기본 pipe `\\.\pipe\openssh-ssh-agent`로 가므로, 같은 계정의 agent 서비스가 켜져 있으면 프로그램이 qsh를 거치지 않고 host 자신의 agent에 닿는다. 기본 pipe는 널리 알려진 이름이라 qsh가 막을 수 없고, 같은 계정이 직접 쓸 수 있는 것에 새 권한을 더하지도 않는다. qsh의 거르기(결정 12)가 지키는 것은 client 쪽 agent다. loopback 시험에서는 host와 client가 한 장비라 이 둘이 같은 agent이고, 시험이 키 목록을 비교할 때는 다른 시험이 같은 서비스에 넣은 키도 보인다 | ADR-0055 결정 6·7·12 |
 
 h4와 h5는 함께 읽어야 한다. 손상된 peer는 그 장비에서 `trust remove`를 실행하면 2초 안에 끊긴다. 개별 인증서 revocation이 없으므로 CA가 서명한 인증서는 CA 전체를 거두어야 하고, 신뢰는 장비마다 따로 거두어야 한다. 그 peer의 세션은 연결이 닫혀도 남으므로 끝내려면 `qsh session close`를 쓴다.
 
@@ -433,7 +434,7 @@ h42는 M16이 연결만 닫는다는 결정 7을 잔여로 적은 것이다. h43
 
 h45는 M17이 `qsh service`에 서비스 매니저 호출을 열면서 ADR-0032 결정 18의 확인되지 않은 항목을 잔여로 적은 것이다.
 
-h50~h55는 M25가 agent forwarding을 열면서 ADR-0055 결과 절의 잔여 위험 넷과 착지 중 드러난 둘을 적은 것이다.
+h50~h55는 M25가 agent forwarding을 열면서 ADR-0055 결과 절의 잔여 위험 넷과 착지 중 드러난 둘을 적은 것이고, h56은 Windows CI에서 키 목록 시험이 깨진 일을 조사하며 더했다.
 
 h46은 M17이 `qsh audit`을 열면서 ADR-0033 결정 10·11을 잔여로 적은 것이다. 삭제 경로가 없다는 것은 F6이 핀으로 고정하고, 보존 기간이 개수 상한이라는 것은 이 행이 인정한다.
 

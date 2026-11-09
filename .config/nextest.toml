@@ -141,3 +141,16 @@ max-threads = 1
 [[profile.default.overrides]]
 filter = 'package(qsh-core) & test(/^identity::keystore::tests::(credential_manager_|platform_store_round_trips)/)'
 test-group = 'os-credential-store'
+
+# The Windows `ssh-agent` service is one agent per machine, and the tests that
+# use it add a throwaway key to it and list it. Two of them running at once see
+# each other's key: `ssh_add_and_ssh_keygen_sign_through_a_forwarded_real_agent`
+# compares the key list before and after, and failed on a CI runner when
+# `windows_host_pipe_serves_win32_openssh_ssh_add` added its own key in between.
+# On unix each test starts a private agent, so the group costs nothing there.
+[test-groups.shared-ssh-agent]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(qsh-testkit) & test(/^agent_accept::(ssh_add_and_ssh_keygen_sign_through_a_forwarded_real_agent|windows_host_pipe_serves_win32_openssh_ssh_add)$/)'
+test-group = 'shared-ssh-agent'
