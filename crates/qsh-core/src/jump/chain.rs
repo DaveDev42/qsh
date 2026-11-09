@@ -264,9 +264,39 @@ pub struct ChannelInfo {
     pub switches: AtomicU64,
     /// Times the silence rule moved the channel to the stream.
     pub silence_fallbacks: AtomicU64,
+    /// The connection dialed over this channel, once its handshake is done;
+    /// its srtt is the end-to-end round trip the silence window is measured
+    /// in (ADR-0058 decision 2).
+    inner: InnerConn,
+}
+
+/// The inner connection, held for its srtt; its `Debug` says only whether
+/// it is set.
+#[derive(Default)]
+struct InnerConn(std::sync::Mutex<Option<qsh_transport::Connection>>);
+
+impl std::fmt::Debug for InnerConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        write!(f, "InnerConn(set: {set})")
+    }
 }
 
 impl ChannelInfo {
+    fn set_inner(&self, connection: qsh_transport::Connection) {
+        *self.inner.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(connection);
+    }
+
+    /// The inner connection's srtt, `None` before it has handshaken.
+    fn inner_rtt(&self) -> Option<Duration> {
+        self.inner
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(qsh_transport::Connection::rtt)
+    }
+
     /// The carrier of the last packet sent.
     pub fn carrier(&self) -> Carrier {
         if self.carrier.load(Ordering::Relaxed) == 1 {
@@ -415,7 +445,12 @@ async fn pump(
                 let Some(packet) = packet else { break PumpEnd::Stopped };
                 let room = hub.as_ref().and_then(|h| h.max_datagram_size());
                 let rule = choose_carrier(both_datagram, room);
-                let rtt = hub.as_ref().map_or(Duration::ZERO, |h| h.rtt());
+                // End to end once the inner connection is up, the outer
+                // round trip until then (ADR-0058).
+                let rtt = info
+                    .inner_rtt()
+                    .or_else(|| hub.as_ref().map(|h| h.rtt()))
+                    .unwrap_or(Duration::ZERO);
                 let carrier = silence.choose(rule, std::time::Instant::now(), rtt);
                 if silence.fell_back() && last == Some(Carrier::Datagram) {
                     info.silence_fallbacks.fetch_add(1, Ordering::Relaxed);
@@ -838,6 +873,7 @@ async fn walk(
         let (pipe, peer) = PacketPipe::new(PIPE_DEPTH);
         let info = Arc::new(ChannelInfo::default());
         infos.push(Arc::clone(&info));
+        let channel_info = Arc::clone(&info);
         let mut pump = spawn_pump(PumpArgs {
             outer,
             id,
@@ -891,7 +927,10 @@ async fn walk(
             failure(plan, index, Stage::Unreachable).into_op(reason, None)
         };
         let dialed = match outcome {
-            Ok(Ok(dialed)) => dialed,
+            Ok(Ok(dialed)) => {
+                channel_info.set_inner(dialed.connection.clone());
+                dialed
+            }
             Ok(Err(err)) => {
                 return Err(match closed_under_us(layers) {
                     Some(end) => unreachable(end),

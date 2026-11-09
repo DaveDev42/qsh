@@ -311,6 +311,22 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^punch_accept::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0056 decision 25 DoD 13: what a jump chain costs over real
+      # loopback UDP. `jump_echo_overhead_per_hop` keeps the PTY echo p95
+      # within 2 ms per hop of the direct connection (one hop and two);
+      # `jump_tunnel_throughput` keeps a `-L` transfer through one hop at 50%
+      # or more of the direct one. Both append a line to `QSH_PERF_OUT` when
+      # it is set (nightly perf does not collect them yet).
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^jump_perf::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0056 decision 25 DoD 3: a PTY session, exec, `-L` echo and
+      # `qsh cp` through C-J-T and C-a-b-T with 25 ms and 3% loss on every
+      # link (chaos proxies in front of each hop), then the echo p95 on the
+      # datagram carrier next to the stream's. About two minutes.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^jump_loss::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
 
   # ADR-0054 decision 24 (DoD 13): hole punching against the Linux kernel's
   # own NAT. `scripts/netns/punch.sh` builds network namespaces with nftables

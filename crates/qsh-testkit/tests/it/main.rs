@@ -28,6 +28,8 @@ mod file_host;
 mod host_list_reverse;
 mod jump_chain;
 mod jump_host;
+mod jump_loss;
+mod jump_perf;
 mod jump_punch;
 mod jump_recovery;
 mod jump_reverse;
