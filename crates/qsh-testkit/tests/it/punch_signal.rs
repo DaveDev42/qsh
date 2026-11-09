@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use qsh_core::acl::{Action, AllowAllPinned, Authorizer, Requester, ResourceRef, Verdict};
-use qsh_core::audit::{AuditRecord, MemoryAuditSink};
+use qsh_core::audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink};
 use qsh_core::broker::SystemClock;
 use qsh_core::client::Session;
 use qsh_core::config::{Config, Paths};
@@ -70,10 +70,28 @@ impl Authorizer for RAuth {
     }
 }
 
+/// R's audit sink: a [`MemoryAuditSink`] that refuses every record while
+/// `fail` is set, the way a full disk does.
+struct GateAudit {
+    inner: Arc<MemoryAuditSink>,
+    fail: AtomicBool,
+}
+
+impl AuditSink for GateAudit {
+    fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AuditError::Degraded);
+        }
+        self.inner.record(record)
+    }
+}
+
 struct Rig {
     c: PunchEndpoint,
     r_listen: Arc<Listen>,
     r_audit: Arc<MemoryAuditSink>,
+    /// Makes R's audit writes fail from now on.
+    r_audit_gate: Arc<GateAudit>,
     r_fp: Fingerprint,
     deny_punch: Arc<AtomicBool>,
     a: PunchEndpoint,
@@ -99,6 +117,9 @@ struct RigOptions {
     r_authorizer: Option<Arc<dyn Authorizer>>,
     /// B's NAT. An unfiltered B lets a third party reach the open window.
     b_nat: NatKind,
+    /// B's audit file cannot be written (its path lies under a regular
+    /// file), so its sink degrades after the first record.
+    b_audit_broken: bool,
 }
 
 impl Default for RigOptions {
@@ -108,6 +129,7 @@ impl Default for RigOptions {
             register_b: true,
             r_authorizer: None,
             b_nat: NatKind::PortRestricted,
+            b_audit_broken: false,
         }
     }
 }
@@ -148,6 +170,10 @@ async fn rig(opts: RigOptions) -> Rig {
     )
     .unwrap();
     let r_audit = Arc::new(MemoryAuditSink::new());
+    let r_audit_gate = Arc::new(GateAudit {
+        inner: r_audit.clone(),
+        fail: AtomicBool::new(false),
+    });
     let deny_punch = Arc::new(AtomicBool::new(false));
     let clock: Arc<dyn qsh_core::broker::Clock> = Arc::new(SystemClock);
     let r_listen = Listen::new(
@@ -157,7 +183,7 @@ async fn rig(opts: RigOptions) -> Rig {
                 deny_punch: deny_punch.clone(),
             })
         }),
-        r_audit.clone(),
+        r_audit_gate.clone(),
         "controller-device",
         clock,
         Duration::from_secs(120),
@@ -199,6 +225,12 @@ async fn rig(opts: RigOptions) -> Rig {
     )
     .unwrap();
 
+    let mut b_config = Config::default();
+    if opts.b_audit_broken {
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        b_config.audit.path = Some(blocker.join("audit.log").to_string_lossy().into_owned());
+    }
     let (server_tx, server_rx) = std::sync::mpsc::channel();
     let (b_tx, b_rx) = oneshot::channel::<()>();
     let b_socket = b_site.bind_wildcard(B_PORT).unwrap();
@@ -214,14 +246,17 @@ async fn rig(opts: RigOptions) -> Rig {
             };
             let _ = run_reverse_on(
                 &paths,
-                &Config::default(),
+                &b_config,
                 b_identity,
                 "r",
                 None,
                 options,
                 move |runtime| {
-                    let _ = server_tx
-                        .send((runtime.server.clone(), runtime.audit.path().to_path_buf()));
+                    let _ = server_tx.send((
+                        runtime.server.clone(),
+                        runtime.audit.path().to_path_buf(),
+                        runtime.audit.clone(),
+                    ));
                 },
                 || {},
                 async move {
@@ -233,7 +268,14 @@ async fn rig(opts: RigOptions) -> Rig {
     });
 
     let (b_server, b_audit_path) = if opts.register_b {
-        let (server, path) = wait_for(TIMEOUT, || server_rx.try_recv().ok()).await;
+        let (server, path, audit) = wait_for(TIMEOUT, || server_rx.try_recv().ok()).await;
+        if opts.b_audit_broken {
+            // The first record is queued and fails in the writer thread;
+            // from then on the sink refuses every record.
+            let probe =
+                AuditRecord::handshake_rejected(SocketAddr::new(ip("192.0.2.1"), 1), "probe");
+            wait_for(TIMEOUT, || audit.record(&probe).is_err().then_some(())).await;
+        }
         // Registered: R holds a live hub for B, and B knows its controller.
         let target = server.punch_target().expect("punch target").clone();
         let r_fp = r_id.fingerprint;
@@ -295,6 +337,7 @@ async fn rig(opts: RigOptions) -> Rig {
         c,
         r_listen,
         r_audit,
+        r_audit_gate,
         r_fp: r_id.fingerprint,
         deny_punch,
         a,
@@ -612,6 +655,87 @@ async fn a_punch_offer_for_an_unauthorized_initiator_opens_no_window() {
             .then_some(())
     })
     .await;
+
+    rig.shutdown().await;
+}
+
+/// DoD 5: R cannot write its audit record, so the request is refused with
+/// the uniform denial and B never hears of it (no offer, no window, no
+/// datagram). The same request goes through once R's audit works again.
+#[tokio::test(flavor = "multi_thread")]
+async fn when_rs_audit_write_fails_no_offer_goes_out() {
+    let rig = rig(RigOptions::default()).await;
+    rig.r_audit_gate.fail.store(true, Ordering::SeqCst);
+    let (_conn, mut ctl) = rig.dial_r().await;
+
+    let msg = ask(
+        &mut ctl,
+        1,
+        control_message::Body::PunchRequest(rig.request(attempt(5), &rig.b_fp)),
+    )
+    .await;
+    assert_eq!(error_code(msg), "PERMISSION_DENIED");
+
+    // Nothing was recorded, and B was not asked: no offer record, no
+    // window, no datagram.
+    assert!(punch_records(&rig.r_audit.records()).is_empty());
+    let target = rig.b_server.punch_target().unwrap();
+    assert_eq!(target.open_windows(), 0);
+    assert_eq!(target.endpoint().stats().punch_sent, 0);
+    // A late offer would have left its record by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(b_punch_lines(&rig.b_audit_path).is_empty());
+
+    // The refusal was the audit's: with it back the same request relays.
+    rig.r_audit_gate.fail.store(false, Ordering::SeqCst);
+    let (_conn2, mut ctl2) = rig.dial_r().await;
+    let msg = ask(
+        &mut ctl2,
+        1,
+        control_message::Body::PunchRequest(rig.request(attempt(6), &rig.b_fp)),
+    )
+    .await;
+    match reply_body(msg) {
+        response::Body::PunchReply(r) => assert_eq!(r.refusal, 0, "the relay went through"),
+        other => panic!("expected a PunchReply, got {other:?}"),
+    }
+    rig.shutdown().await;
+}
+
+/// DoD 5: B cannot write its audit record, so it refuses the offer before
+/// opening a window and answers nothing usable: A gets `TARGET_DENIED` and no
+/// datagram leaves B.
+#[tokio::test(flavor = "multi_thread")]
+async fn when_bs_audit_write_fails_no_window_opens_and_no_answer_goes_out() {
+    let rig = rig(RigOptions {
+        b_audit_broken: true,
+        ..RigOptions::default()
+    })
+    .await;
+    let (_conn, mut ctl) = rig.dial_r().await;
+
+    let msg = ask(
+        &mut ctl,
+        1,
+        control_message::Body::PunchRequest(rig.request(attempt(7), &rig.b_fp)),
+    )
+    .await;
+    match reply_body(msg) {
+        response::Body::PunchReply(r) => {
+            assert_eq!(r.refusal, PunchRefusal::TargetDenied as i32);
+            assert!(r.candidates.is_empty(), "no answer carried candidates");
+        }
+        other => panic!("expected a refusing PunchReply, got {other:?}"),
+    }
+
+    // R did its part (it relayed); B opened nothing.
+    let records = rig.r_audit.records();
+    let punch = punch_records(&records);
+    assert_eq!(punch.len(), 1, "{records:?}");
+    assert_eq!(punch[0].decision, "allow");
+    let target = rig.b_server.punch_target().unwrap();
+    assert_eq!(target.open_windows(), 0);
+    assert_eq!(target.endpoint().stats().punch_sent, 0);
 
     rig.shutdown().await;
 }
