@@ -1,0 +1,45 @@
+{
+  "command": "pair.ssh",
+  "data": {
+    "created": true,
+    "direction": "forward",
+    "identity_created": false,
+    "jump": [
+      "hop"
+    ],
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "jump": [
+        "hop"
+      ],
+      "name": "box",
+      "role": "none",
+      "source": "ssh_bootstrap"
+    },
+    "remote": {
+      "created": true,
+      "name": "laptop",
+      "role": "full"
+    },
+    "ssh_proxied": false,
+    "verified": false,
+    "verify_error": {
+      "code": "CONNECTION_FAILED",
+      "details": {
+        "jump": {
+          "hop": 1,
+          "hops": 2,
+          "name": "hop",
+          "stage": "dial"
+        }
+      },
+      "message": "jump 1/2 (hop): no response from 127.0.0.1:<port> within 10s",
+      "retryable": true
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

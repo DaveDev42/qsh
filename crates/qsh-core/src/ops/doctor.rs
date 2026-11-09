@@ -352,6 +352,14 @@ impl Ops {
             Some(host) if direct_missing => self.doctor_punch(host, &mut findings),
             _ => None,
         };
+        // A host behind a jump chain: which steps run on the stream carrier
+        // (ADR-0056 decision 22). Only when the host is reachable at all.
+        if let Some(host) = req.host.as_deref()
+            && !direct_missing
+            && !reachability_failed(&findings)
+        {
+            findings.extend(self.doctor_jump_carrier_finding(host));
+        }
 
         Ok(DoctorData {
             overall: overall_status(&findings),
@@ -835,6 +843,25 @@ impl Ops {
             });
         }
 
+        // `jump_hop_missing` (ADR-0056 decision 22): a pin whose `jump` names
+        // a pin this store does not have. One finding per missing name.
+        let missing_diag = &crate::doctor::JUMP_HOP_MISSING;
+        for peer in trust.peers() {
+            for hop in &peer.jump {
+                if trust.find(hop).is_none() {
+                    out.push(DoctorFinding {
+                        code: missing_diag.code.to_string(),
+                        status: "warn".to_string(),
+                        detail: format!(
+                            "{} (peer: {}, missing hop: {})",
+                            missing_diag.message, peer.name, hop
+                        ),
+                        remedy: Some(missing_diag.remedy.to_string()),
+                    });
+                }
+            }
+        }
+
         if !trust.peers().is_empty() {
             let scope_diag = &TRUST_REMOVE_SCOPE;
             out.push(DoctorFinding {
@@ -897,10 +924,25 @@ impl Ops {
                 Err(err)
                     if err.code == ErrorCode::HostNotFound && pin_has_no_address(&trust, host) =>
                 {
+                    // Behind a jump chain the address is not dialed from here
+                    // at all, so it is not a missing path (ADR-0056).
+                    if matches!(self.jump_hops_for(host), Ok(Some(_))) {
+                        return Ok((out, false));
+                    }
                     return Ok((out, true));
                 }
                 Err(err) => return Err(err),
             };
+            // A host reached through a jump chain is dialed only at the first
+            // hop; that is the address whose UDP path matters from here
+            // (ADR-0056 decision 13). `jump_hop_missing` reports a hop that
+            // is gone, so an unresolved first hop is left to it.
+            if let Ok(Some(hops)) = self.jump_hops_for(host) {
+                if let Some(first) = hops.first() {
+                    out.extend(probe_named_target(&trust, &hosts, first, false));
+                }
+                return Ok((out, false));
+            }
             // P3-4 (verify round): when `host` resolves to the very peer
             // `[reverse].controller` already names, the branch above
             // already probed it once as `controller_unreachable` — probing
@@ -1641,6 +1683,8 @@ pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
         DoctorThreshold::Error => f.status == "error",
     })
 }
+
+mod jump;
 
 #[cfg(test)]
 mod tests;

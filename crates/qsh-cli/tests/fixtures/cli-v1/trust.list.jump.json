@@ -1,0 +1,27 @@
+{
+  "command": "trust.list",
+  "data": {
+    "peers": [
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "jump": [
+          "relay"
+        ],
+        "name": "lab-box",
+        "role": "full"
+      },
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "name": "relay",
+        "role": "full"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

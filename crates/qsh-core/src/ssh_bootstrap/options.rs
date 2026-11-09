@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 
+use super::jump_spec::{JumpHop, JumpSpec};
+
 use crate::ops::OpError;
 
 /// Address family filter of `-4` / `-6` / `-o AddressFamily` (applied to the
@@ -77,6 +79,7 @@ pub struct SshOptions {
     forwarded: Vec<String>,
     family: AddressFamily,
     jump: Option<String>,
+    jump_spec: Option<JumpSpec>,
     connect_timeout: Option<Duration>,
     batch_mode: bool,
     server_alive_interval: Option<Duration>,
@@ -135,7 +138,8 @@ impl SshOptions {
         if let Some(jump) = &flags.jump {
             out.forwarded.push("-J".into());
             out.forwarded.push(checked_word("-J", jump)?);
-            out.jump = Some(jump.clone());
+            out.jump_spec = Some(JumpSpec::parse(jump)?);
+            out.jump = (out.jump_spec != Some(JumpSpec::Off)).then(|| jump.clone());
         }
         if flags.compression {
             out.forwarded.push("-C".into());
@@ -204,8 +208,9 @@ impl SshOptions {
                         out.family = family;
                     }
                 }
-                "proxyjump" if !value.eq_ignore_ascii_case("none") && out.jump.is_none() => {
-                    out.jump = Some(value.clone());
+                "proxyjump" if out.jump_spec.is_none() => {
+                    out.jump_spec = Some(JumpSpec::parse(&value)?);
+                    out.jump = (out.jump_spec != Some(JumpSpec::Off)).then(|| value.clone());
                 }
                 _ => {}
             }
@@ -263,18 +268,69 @@ impl SshOptions {
         self.server_alive_count_max
     }
 
-    /// The refusal for a jump the QUIC path would have to take: `-J` and `-o
-    /// ProxyJump` reach the ssh bootstrap only, and a name that needs no
-    /// bootstrap connects over QUIC directly (ADR-0051 decision 7: a
-    /// QUIC-path jump is `UNSUPPORTED` until M26).
-    pub fn refuse_quic_jump(&self) -> Result<(), OpError> {
-        match &self.jump {
-            None => Ok(()),
-            Some(_) => Err(unsupported(
-                "-J / ProxyJump applies to the ssh bootstrap only; a jump on the QUIC path is \
-                 not supported before M26",
-            )),
+    /// What `-J` or the first `-o ProxyJump=` says about the QUIC path
+    /// (ADR-0056 decision 20): `Hops` to go through them, `Off` for `none`,
+    /// `None` when neither was given and the pin's own `jump` decides.
+    /// `-J` wins over the option, like ssh.
+    pub fn jump_spec(&self) -> Option<&JumpSpec> {
+        self.jump_spec.as_ref()
+    }
+
+    /// These options for the bootstrap of one jump hop (ADR-0056 decision
+    /// 21): what describes the end target's own ssh path (`-p`, `-J`, `-o
+    /// ProxyJump`) is replaced by the hop's: `before` are the hops in front
+    /// of it, passed as ssh's `-J`, and `port` is its sshd port. Everything
+    /// else (`-F`, `-i`, `-o`, `-4`, ...) carries over.
+    #[must_use]
+    pub fn for_jump_hop(&self, before: &[JumpHop], port: Option<u16>) -> SshOptions {
+        let mut out = self.clone();
+        let mut kept = Vec::with_capacity(self.forwarded.len());
+        let mut words = self.forwarded.iter();
+        while let Some(word) = words.next() {
+            match word.as_str() {
+                "-p" | "-J" => {
+                    words.next();
+                }
+                "-o" => {
+                    let Some(text) = words.next() else { break };
+                    let key = text
+                        .split(['=', ' ', '\t'])
+                        .next()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if key != "proxyjump" {
+                        kept.push(word.clone());
+                        kept.push(text.clone());
+                    }
+                }
+                "-F" | "-i" => {
+                    kept.push(word.clone());
+                    if let Some(value) = words.next() {
+                        kept.push(value.clone());
+                    }
+                }
+                _ => kept.push(word.clone()),
+            }
         }
+        if let Some(port) = port {
+            kept.push("-p".into());
+            kept.push(port.to_string());
+        }
+        out.jump = None;
+        out.jump_spec = None;
+        if !before.is_empty() {
+            let list = before
+                .iter()
+                .map(|hop| hop.dest.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            kept.push("-J".into());
+            kept.push(list.clone());
+            out.jump = Some(list);
+            out.jump_spec = Some(JumpSpec::Hops(before.to_vec()));
+        }
+        out.forwarded = kept;
+        out
     }
 
     /// Whether anything was given at all.

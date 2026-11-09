@@ -117,18 +117,6 @@ fn ssh_option_table_argv_to_ssh_command_lines() {
             dest: "box",
         },
         SshRow {
-            name: "-J reaches the bootstrap ssh",
-            args: &["-J", "hop", "box"],
-            forwarded: &["-J", "hop"],
-            dest: "box",
-        },
-        SshRow {
-            name: "-o ProxyJump reaches the bootstrap ssh",
-            args: &["-o", "ProxyJump=hop", "box"],
-            forwarded: &["-o", "ProxyJump=hop"],
-            dest: "box",
-        },
-        SshRow {
             name: "the four QUIC-side -o keys are forwarded too",
             args: &[
                 "-o",
@@ -285,10 +273,69 @@ fn rejected_ssh_options_name_themselves_and_run_nothing() {
     }
 }
 
-/// `-J` with a name that needs no bootstrap would have to jump on the QUIC
-/// path: `UNSUPPORTED` until M26, and no ssh.
+/// `-J` and `-o ProxyJump` (ADR-0056 decisions 20 and 21): a hop with no pin
+/// is bootstrapped before the target, with the hops in front of it as its own
+/// `-J` and its `:port` as sshd's port. The target's `ssh -G` and responder
+/// call carry the list as typed. The responder here exits 255, so the hop
+/// stays without a pin, nothing is recorded, and the target's bootstrap goes
+/// on and ends with the usual `CONNECTION_FAILED`.
 #[test]
-fn jump_on_a_pinned_host_is_unsupported_without_running_ssh() {
+fn a_hop_without_a_pin_is_bootstrapped_before_the_target() {
+    let rows: &[(&[&str], &[&str], &[&str])] = &[
+        (
+            &["-p", "2222", "-J", "dave@hop:2200", "box"],
+            &["-p", "2222", "-J", "dave@hop:2200"],
+            &["-p", "2200"],
+        ),
+        (
+            &["-o", "ProxyJump=hop", "box"],
+            &["-o", "ProxyJump=hop"],
+            &[],
+        ),
+    ];
+    for (args, forwarded, hop_forwarded) in rows {
+        let (client, fake) = client_with_failing_ssh();
+        let out = client.qsh(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(exit_code(&out), 255, "{args:?}: {stderr}");
+        assert!(stderr.contains("(CONNECTION_FAILED)"), "{args:?}: {stderr}");
+        assert!(
+            stderr.is_empty() || !stderr.contains("(UNSUPPORTED)"),
+            "{stderr}"
+        );
+
+        let words =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|w| (*w).to_string()).collect() };
+        let hop_dest = if args.contains(&"dave@hop:2200") {
+            "dave@hop"
+        } else {
+            "hop"
+        };
+        let mut g_box = vec!["-G".to_string()];
+        g_box.extend(words(forwarded));
+        g_box.extend(words(&["--", "box"]));
+        let mut g_hop = vec!["-G".to_string()];
+        g_hop.extend(words(hop_forwarded));
+        g_hop.extend(words(&["--", hop_dest]));
+        let mut responder_hop = words(RESPONDER_HEAD);
+        responder_hop.extend(words(hop_forwarded));
+        responder_hop.extend(words(&["--", hop_dest, "qsh", "pair", "ssh-respond"]));
+        let mut responder_box = words(RESPONDER_HEAD);
+        responder_box.extend(words(forwarded));
+        responder_box.extend(words(&["--", "box", "qsh", "pair", "ssh-respond"]));
+        assert_eq!(
+            fake.calls(),
+            vec![g_box, g_hop, responder_hop, responder_box],
+            "{args:?}"
+        );
+    }
+}
+
+/// A pinned target is not bootstrapped, so `-J` and `-o ProxyJump` only
+/// reach the QUIC chain, and ssh is never run. A hop that is not a pin ends
+/// the command before anything is dialed, with the step named.
+#[test]
+fn jump_on_a_pinned_host_checks_the_chain_and_runs_no_ssh() {
     let (client, fake) = client_with_failing_ssh();
     client.trust_add(
         "pinned",
@@ -298,12 +345,13 @@ fn jump_on_a_pinned_host_is_unsupported_without_running_ssh() {
     for args in [
         &["-J", "hop", "pinned", "true"][..],
         &["-o", "ProxyJump=hop", "pinned", "true"][..],
+        &["--jump", "hop", "pinned", "true"][..],
     ] {
         let out = client.qsh(args);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(exit_code(&out), 255, "{args:?}: {stderr}");
-        assert!(stderr.contains("(UNSUPPORTED)"), "{args:?}: {stderr}");
-        assert!(stderr.contains("M26"), "{args:?}: {stderr}");
+        assert!(stderr.contains("(HOST_NOT_FOUND)"), "{args:?}: {stderr}");
+        assert!(stderr.contains("jump 1/2 (hop)"), "{args:?}: {stderr}");
     }
     assert!(fake.calls().is_empty());
 }

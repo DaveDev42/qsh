@@ -57,9 +57,10 @@ use qsh_core::{
     SessionAttachOp, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
     SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp,
     TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TrustRenameOp, TrustSetRendezvousOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
-    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
-    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    TrustRenameOp, TrustSetJumpOp, TrustSetRendezvousOp, TrustSetRoleOp, TrustSshPreviewOp,
+    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
+    read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -69,8 +70,8 @@ use qsh_proto::{
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
     SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
     TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustAllowReq, TrustDenyReq, TrustInviteReq,
-    TrustRenameReq, TrustSetRendezvousReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq,
-    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    TrustRenameReq, TrustSetJumpReq, TrustSetRendezvousReq, TrustSetRoleReq, TrustSshPreviewReq,
+    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -466,6 +467,46 @@ fn with_agent_forward(
     Ok(ops)
 }
 
+/// Which jump a command asks for, in the order of ADR-0056 decision 20:
+/// `-J` / `--jump`, then `-o ProxyJump`. `None` leaves the pin's own `jump`
+/// to decide.
+///
+/// `flag` is the text of `-J` or `--jump`, `option` the spec the ssh options
+/// carry for `-o ProxyJump`.
+pub fn jump_choice(
+    flag: Option<&str>,
+    option: Option<&qsh_core::ssh_bootstrap::JumpSpec>,
+) -> Result<Option<qsh_core::ssh_bootstrap::JumpSpec>, OpError> {
+    use qsh_core::ssh_bootstrap::JumpSpec;
+    match flag {
+        Some(text) => Ok(Some(JumpSpec::parse(text)?)),
+        None => Ok(option.cloned()),
+    }
+}
+
+/// Put the chosen jump on `ops`: hops for `-J a,b`, "no jump at all" for
+/// `none`, and nothing for no choice (the pin decides).
+pub fn with_jump_choice(ops: Ops, choice: Option<qsh_core::ssh_bootstrap::JumpSpec>) -> Ops {
+    use qsh_core::ssh_bootstrap::JumpSpec;
+    match choice {
+        Some(JumpSpec::Off) => ops.without_jump(),
+        Some(spec @ JumpSpec::Hops(_)) => ops.with_jump(spec.names()),
+        None => ops,
+    }
+}
+
+/// The short `-J` of the command, for the commands that take it.
+fn command_jump_flag(command: &Command) -> Option<&str> {
+    match command {
+        Command::Exec(args) => args.jump.jump_short.as_deref(),
+        Command::Cp(args) => args.jump.jump_short.as_deref(),
+        Command::Attach(args) => args.jump.jump_short.as_deref(),
+        Command::Session(SessionCmd::Open(args)) => args.jump.jump_short.as_deref(),
+        Command::Tunnel(TunnelCmd::Open(args)) => args.jump.jump_short.as_deref(),
+        _ => None,
+    }
+}
+
 /// The command dispatch table, split out of [`run`] so a test can drive it
 /// against an [`Ops`] built from a temporary, test-controlled
 /// `qsh_core::Paths` instead of the real [`Ops::from_env`] — same match arms, same code, the
@@ -500,6 +541,13 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     ops.pin_process_transport();
     let Some(command) = &cli.command else {
         return run_ssh_form(cli, &ops);
+    };
+    // `-J` / `--jump` (ADR-0056 decision 20). The root form also reads `-o
+    // ProxyJump`, so it decides for itself above.
+    let flag = command_jump_flag(command).or(cli.jump_global.as_deref());
+    let ops = match jump_choice(flag, None) {
+        Ok(choice) => with_jump_choice(ops, choice),
+        Err(err) => return report_error(cli, command_name(cli), &err),
     };
 
     match command {
@@ -608,6 +656,16 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         Command::Pair(PairCmd::Ssh(args)) => run_pair_ssh(cli, &ops, args),
         Command::Pair(PairCmd::SshRespond) => run_ssh_respond(&ops),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
+        Command::Trust(TrustCmd::Jump { name, hops, clear }) => finish(
+            cli,
+            TrustSetJumpOp::COMMAND,
+            ops.trust_set_jump(TrustSetJumpReq {
+                name: name.clone(),
+                jump: hops.clone(),
+                clear: *clear,
+            }),
+            human::print_trust_set_jump,
+        ),
         Command::Trust(TrustCmd::Rendezvous { name, peers, clear }) => finish(
             cli,
             TrustSetRendezvousOp::COMMAND,
@@ -756,6 +814,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             predict,
             status_line,
             agent,
+            jump: _,
         }) => {
             let ops = match with_agent_forward(cli, &ops, agent.flag(), None) {
                 Ok(ops) => ops,
@@ -962,7 +1021,13 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
     if cli.wants_json() {
         return report_error(cli, SSH_FORM_COMMAND, &tui::json_mode_unsupported());
     }
-    let ssh = match SshOptions::from_flags(&args.ssh_flags()) {
+    // The global `--jump` is `-J` spelled long: the bootstrap ssh takes it
+    // too, as it takes `-J` (ADR-0056 decision 21).
+    let mut flags = args.ssh_flags();
+    if flags.jump.is_none() {
+        flags.jump = cli.jump_global.clone();
+    }
+    let ssh = match SshOptions::from_flags(&flags) {
         Ok(ssh) => ssh,
         Err(err) => return report_error(cli, SSH_FORM_COMMAND, &err),
     };
@@ -999,6 +1064,17 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
     qsh_core::client_path::install(&ssh);
     let host = target.host.clone();
     let user = args.user();
+    // `-J` / `--jump`, then `-o ProxyJump`, then the pin's `jump` (ADR-0056
+    // decision 20). `-J` and `--jump` are in `ssh` already, ahead of `-o
+    // ProxyJump`.
+    let jump_ops;
+    let ops = match jump_choice(None, ssh.jump_spec()) {
+        Ok(choice) => {
+            jump_ops = with_jump_choice(ops.clone(), choice);
+            &jump_ops
+        }
+        Err(err) => return report_error(cli, SSH_FORM_COMMAND, &err),
+    };
     let revival_ops;
     let ops = if cli.no_ssh {
         ops
@@ -1250,9 +1326,9 @@ struct Dial<'a> {
 /// before it opens anything, and ssh should not run for a command line that
 /// cannot start.
 ///
-/// `ssh` is the root form's ssh options (ADR-0051 decision 7). When no
-/// bootstrap runs, a `-J` has nothing to apply to and is `UNSUPPORTED`: the
-/// QUIC connection cannot take a jump before M26.
+/// `ssh` is the root form's ssh options (ADR-0051 decision 7). A `-J` also
+/// reaches the QUIC connection through `ops` (ADR-0056 decision 20), so it is
+/// not refused when no bootstrap runs.
 fn auto_bootstrap_before_open(
     cli: &Cli,
     ops: &Ops,
@@ -1267,19 +1343,11 @@ fn auto_bootstrap_before_open(
         return None;
     }
     if cli.no_ssh {
-        return ssh
-            .refuse_quic_jump()
-            .err()
-            .map(|err| report_error(cli, command, &err));
+        return None;
     }
     let plan = match ops.should_auto_bootstrap(dial.host, dial.user, cli.wants_json()) {
         Ok(Some(plan)) => plan,
-        Ok(None) => {
-            return ssh
-                .refuse_quic_jump()
-                .err()
-                .map(|err| report_error(cli, command, &err));
-        }
+        Ok(None) => return None,
         Err(err) => return Some(report_error(cli, command, &err)),
     };
     let cancel = CancelToken::new();
@@ -3213,6 +3281,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Trust(TrustCmd::Jump { .. }) => TrustSetJumpOp::COMMAND,
         Command::Trust(TrustCmd::Rendezvous { .. }) => TrustSetRendezvousOp::COMMAND,
         Command::Trust(TrustCmd::SetRole { .. }) => TrustSetRoleOp::COMMAND,
         Command::Trust(TrustCmd::Allow { .. }) => TrustAllowOp::COMMAND,

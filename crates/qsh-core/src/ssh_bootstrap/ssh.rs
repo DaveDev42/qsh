@@ -264,6 +264,10 @@ pub struct SshResolved {
     /// relay the QUIC dial will not use (decision 6). The relay's text is
     /// not kept.
     pub proxied: bool,
+    /// The `proxyjump` value when it is set and not `none`: the text ssh
+    /// would pass to its own `-J`. Read for the pin's `jump` (ADR-0056
+    /// decision 21); `proxycommand` has no such text.
+    pub proxy_jump: Option<String>,
 }
 
 /// Read the four keys qsh uses from `ssh -G` output: `hostname`, `user`,
@@ -318,13 +322,18 @@ pub fn parse_ssh_g(output: &[u8]) -> Result<SshResolved, OpError> {
     let is_set = |value: Option<&[u8]>| {
         value.is_some_and(|v| !v.is_empty() && !v.eq_ignore_ascii_case(b"none"))
     };
+    let proxy_jump = proxy_jump
+        .filter(|v| is_set(Some(*v)))
+        .and_then(|raw| std::str::from_utf8(raw).ok())
+        .map(str::to_string);
     Ok(SshResolved {
         hostname,
         user: user
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .filter(|u| !u.is_empty())
             .map(str::to_string),
-        proxied: is_set(proxy_jump) || is_set(proxy_command),
+        proxied: proxy_jump.is_some() || is_set(proxy_command),
+        proxy_jump,
     })
 }
 

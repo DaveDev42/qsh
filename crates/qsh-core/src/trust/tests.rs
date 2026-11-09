@@ -1811,3 +1811,69 @@ fn replace_peer_drops_grants_and_the_origin_mark_but_keeps_the_place() {
             .is_none()
     );
 }
+
+fn store_with(names: &[&str]) -> TrustStore {
+    let mut store = TrustStore::default();
+    for name in names {
+        store.add_peer(
+            *name,
+            Some(format!("{name}.example:4433")),
+            fp(name.as_bytes()),
+            "2026-11-09T00:00:00Z".into(),
+        );
+    }
+    store
+}
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// `set_jump` replaces the chain, reports whether it changed, and an
+/// unknown pin is `NotFound` (ADR-0056 decision 20).
+#[test]
+fn set_jump_replaces_reports_change_and_needs_the_pin() {
+    let mut store = store_with(&["a", "c"]);
+    let (peer, changed) = store.set_jump("c", names(&["a"])).unwrap();
+    assert!(changed);
+    assert_eq!(peer.jump, ["a"]);
+    let (_, changed) = store.set_jump("c", names(&["a"])).unwrap();
+    assert!(!changed);
+    let (peer, changed) = store.set_jump("c", Vec::new()).unwrap();
+    assert!(changed);
+    assert!(peer.jump.is_empty());
+    assert!(matches!(
+        store.set_jump("nope", names(&["a"])),
+        Err(SetRoleError::NotFound)
+    ));
+}
+
+/// Decision 11: a hop's own `jump` goes in front of it, recursively; a hop
+/// already in front is not repeated; a loop gives `None`.
+#[test]
+fn expand_jump_folds_pin_chains_in_front_and_catches_loops() {
+    let mut store = store_with(&["a", "b", "c"]);
+    store.set_jump("c", names(&["b"])).unwrap();
+    store.set_jump("b", names(&["a"])).unwrap();
+    assert_eq!(
+        store.expand_jump(&names(&["c"]), 8),
+        Some(names(&["a", "b", "c"]))
+    );
+    assert_eq!(
+        store.expand_jump(&names(&["a", "b"]), 8),
+        Some(names(&["a", "b"]))
+    );
+    assert_eq!(store.expand_jump(&[], 8), Some(Vec::new()));
+
+    store.set_jump("a", names(&["c"])).unwrap();
+    assert_eq!(store.expand_jump(&names(&["c"]), 8), None);
+}
+
+/// Renaming a pin rewrites the other pins' `jump` that name it.
+#[test]
+fn rename_follows_jump_references() {
+    let mut store = store_with(&["a", "c"]);
+    store.set_jump("c", names(&["a"])).unwrap();
+    store.rename("a", "bastion").unwrap();
+    assert_eq!(store.find("c").unwrap().jump, ["bastion"]);
+}

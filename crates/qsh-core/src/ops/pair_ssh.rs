@@ -103,6 +103,10 @@ pub struct PairSshEnv {
     /// first) are asked. [`NoPrompter`] in machine modes and for callers that
     /// never ask; a pin conflict then fails with `pin_conflict`.
     pub prompter: Arc<dyn Prompter>,
+    /// How many jump hops deep this call is: `0` for the command's own
+    /// remote, one more for each hop bootstrapped on its behalf (ADR-0056
+    /// decision 21).
+    pub(crate) jump_depth: u8,
 }
 
 impl PairSshEnv {
@@ -121,6 +125,7 @@ impl PairSshEnv {
             ssh,
             install_remote: InstallRemote::Ask,
             prompter: Arc::new(NoPrompter),
+            jump_depth: 0,
         }
     }
 
@@ -218,6 +223,14 @@ impl Ops {
         // Phase one: nothing is written anywhere.
         let resolved =
             runtime.block_on(plan.runner.resolve_with(&plan.dest, &plan.ssh, &env.cancel))?;
+        // A ProxyJump whose hops are all qsh pins is written as the remote's
+        // `jump` (ADR-0056 decision 21). Each hop without a pin is
+        // bootstrapped first, before the remote's own responder is started.
+        let jumped = self.bootstrap_jump(&plan, &env, &resolved)?;
+        let resolved = SshResolved {
+            proxied: resolved.proxied && jumped.names.is_empty(),
+            ..resolved
+        };
         let mut install_notices = Vec::new();
         let mut installed = None;
         let (mut child, hello) = match runtime.block_on(spawn_hello(&plan, &env.cancel)) {
@@ -371,6 +384,15 @@ impl Ops {
         } else {
             self.write_local_pin(&plan, &address, &hello.fingerprint)
         };
+        let written = written.and_then(|(peer, created)| {
+            if jumped.names.is_empty() {
+                return Ok((peer, created));
+            }
+            // The remote's pin and the hops' pins stand either way; only the
+            // way to reach it is recorded here.
+            self.write_pin_jump(&peer.name, &jumped.names)
+                .map(|peer| (peer, created))
+        });
         let (peer, created) = written.map_err(|err| {
             OpError::new(
                 err.code,
@@ -401,6 +423,12 @@ impl Ops {
             (false, Some(cli_error(err)))
         } else if confirmation == Confirmation::Deferred {
             (false, None)
+        } else if !jumped.names.is_empty() {
+            match self.confirm_dial_chain(&runtime, &peer.name, &env.cancel) {
+                Ok(()) => (true, None),
+                Err(err) if err.code == ErrorCode::Canceled => return Err(err),
+                Err(err) => (false, Some(cli_error(err))),
+            }
         } else {
             match self.confirm_dial(
                 &runtime,
@@ -438,8 +466,17 @@ impl Ops {
             verify_error,
             replaced: (replaced.local.is_some() || replaced.remote.is_some()).then_some(replaced),
             installed,
+            jump: jumped.names.clone(),
         };
         let mut notices = install_notices;
+        notices.extend(jumped.notices.iter().cloned());
+        if !jumped.names.is_empty() {
+            notices.push(format!(
+                "{} is reached through {}; change it with qsh trust jump",
+                data.peer.name,
+                jumped.names.join(", ")
+            ));
+        }
         notices.extend(self::notices(
             &data,
             &plan,
@@ -1454,6 +1491,7 @@ fn role_mismatch_notice(data: &PairSshData, plan: &Plan) -> Option<String> {
 mod replace;
 pub use replace::{AUDIT_ACTION_REPLACE, remote_replace_unsupported};
 mod install;
+mod jump;
 mod revive;
 pub use revive::SshRevival;
 

@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-attach \- Re\-attach this terminal to a session that is already running
 .SH SYNOPSIS
-\fBqsh attach\fR [\fB\-\-escape\-char\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-status\-line\fR] [\fB\-A \fR] [\fB\-\-no\-ssh\fR] [\fB\-a \fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
+\fBqsh attach\fR [\fB\-\-escape\-char\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-status\-line\fR] [\fB\-A \fR] [\fB\-\-no\-ssh\fR] [\fB\-a \fR] [\fB\-\-install\-remote\fR] [\fB\-J \fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
 .SH DESCRIPTION
 Re\-attach this terminal to a session that is already running.
 .PP
@@ -47,6 +47,9 @@ Do not forward the agent for this command, even when `[agent].forward = "yes"`
 \fB\-\-install\-remote\fR
 When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
 .TP
+\fB\-J\fR \fI<HOPS>\fR
+Reach the host through these pinned peers for this command, `ssh \-J` spelled: `a` or `a,b`, or `none` to go the ordinary way (ADR\-0056). Same as `\-\-jump`
+.TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
 .TP
@@ -55,6 +58,9 @@ Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
+.TP
+\fB\-\-jump\fR \fI<HOPS>\fR
+Reach the host through these pinned peers, first hop first, for this command: `a` or `a,b` (`docs/CLI.md` §7, ADR\-0056 decision 20). Each hop is the name of a pin; a `user@` or `:port` on it is ignored by the QUIC path. `none` goes the ordinary way even when the host\*(Aqs pin has a `jump`. Wins over `\-o ProxyJump` and over the pin\*(Aqs own `jump`. Not stored. The short `\-J` is the same flag on the commands that take it
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

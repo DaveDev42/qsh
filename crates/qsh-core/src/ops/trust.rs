@@ -417,6 +417,81 @@ impl Ops {
         Ok(TrustSetRendezvousData { peer })
     }
 
+    /// `trust.set_jump` — replace the chain of pinned peers a host is reached
+    /// through (`qsh trust jump <name> [<hop>...] [--clear]`, `docs/CLI.md`
+    /// §6.11, ADR-0056 decision 20).
+    ///
+    /// A local op with no authorization, locked like
+    /// [`Self::trust_set_rendezvous`]. It leaves no audit record: the list
+    /// grants nothing (the middle peer's `forward.jump` decides), it only
+    /// says where to go through. The chain is stored as pin names.
+    ///
+    /// Errors: a name that is no pin (`[[ca]]` included), or a hop that is
+    /// not pinned with an address, is `HOST_NOT_FOUND`; the host as its own
+    /// hop, a name twice, a chain that is longer than four hops once the
+    /// hops' own chains are folded in, a loop, no hop without `--clear`, or
+    /// both, is `INVALID_ARGUMENT`; an unreadable `trust.toml` is
+    /// `CONFIG_ERROR`. Setting what is already stored writes nothing.
+    pub fn trust_set_jump(&self, req: TrustSetJumpReq) -> Result<TrustSetJumpData, OpError> {
+        let invalid = |message: String| {
+            OpError::new(ErrorCode::InvalidArgument, message).with_retryable(false)
+        };
+        if req.clear && !req.jump.is_empty() {
+            return Err(invalid(
+                "--clear and a list of hops cannot be given together".into(),
+            ));
+        }
+        if !req.clear && req.jump.is_empty() {
+            return Err(invalid("name at least one hop, or pass --clear".into()));
+        }
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let not_found = |name: &str| {
+            OpError::new(
+                ErrorCode::HostNotFound,
+                format!("{name:?} is not a pinned peer"),
+            )
+            .with_retryable(false)
+        };
+        if store.find(&req.name).is_none() {
+            return Err(not_found(&req.name));
+        }
+        for name in &req.jump {
+            let hop = store.find(name).ok_or_else(|| not_found(name))?;
+            if hop.address.is_empty() {
+                return Err(OpError::new(
+                    ErrorCode::HostNotFound,
+                    format!(
+                        "{name:?} is pinned without an address, so a chain cannot go through it; \
+                         pin it with an address first"
+                    ),
+                )
+                .with_retryable(false));
+            }
+        }
+        if !req.jump.is_empty() {
+            // The chain as a dial would build it: the new hops, each behind
+            // its own, in front of the host.
+            let mut trial = store.clone();
+            trial
+                .set_jump(&req.name, req.jump.clone())
+                .map_err(|_| not_found(&req.name))?;
+            let expanded = trial
+                .expand_jump(&req.jump, crate::jump::MAX_JUMP_HOPS + 1)
+                .ok_or_else(|| invalid("the jump chain loops back on itself".into()))?;
+            let names: Vec<&str> = expanded.iter().map(String::as_str).collect();
+            crate::jump::chain::check_shape(&names, &req.name)?;
+        }
+        let (peer, changed) = store
+            .set_jump(&req.name, req.jump.clone())
+            .map_err(|_| not_found(&req.name))?;
+        if changed {
+            store.save(&path)?;
+        }
+        Ok(TrustSetJumpData { peer, changed })
+    }
+
     /// `trust.allow` (`qsh trust allow`, `docs/CLI.md` §6.11, ADR-0051
     /// 결정 12): add actions to the pin's `grants`, with `paths` and `scope`.
     ///

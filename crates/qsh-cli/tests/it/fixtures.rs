@@ -129,6 +129,10 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.set_role.unchanged.json",
     "trust.set_rendezvous.json",
     "trust.list.rendezvous.json",
+    "trust.set_jump.json",
+    "trust.list.jump.json",
+    "doctor_jump_stream_carrier.json",
+    "pair.ssh.jump.json",
     "trust.allow.json",
     "trust.allow.unchanged.json",
     "trust.deny.json",
@@ -1305,6 +1309,129 @@ fn golden_trust_rendezvous_fixtures() {
         cleared["data"]["peer"].get("rendezvous").is_none(),
         "--clear leaves no key: {cleared}"
     );
+}
+
+/// `trust jump` (ADR-0056 decision 20, `docs/CLI.md` §6.11) and a pin that
+/// carries `jump`. The key is omitted when the list is empty, so the older
+/// `trust.*` goldens are untouched.
+#[test]
+fn golden_trust_jump_fixtures() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
+    std::fs::write(
+        sandbox.config_dir().join("trust.toml"),
+        format!(
+            "[[peer]]\n\
+             name = \"lab-box\"\n\
+             fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+             address = \"10.0.0.7:4433\"\n\
+             added_at = \"2026-11-09T00:00:00Z\"\n\
+             role = \"full\"\n\
+             \n\
+             [[peer]]\n\
+             name = \"relay\"\n\
+             fingerprint = \"{OTHER_FINGERPRINT}\"\n\
+             address = \"relay.example.com:4433\"\n\
+             added_at = \"2026-11-09T00:00:00Z\"\n\
+             role = \"full\"\n"
+        ),
+    )
+    .expect("write trust.toml fixture");
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    for peer in listed["data"]["peers"].as_array().expect("data.peers") {
+        assert!(
+            peer.get("jump").is_none(),
+            "a pin with no jump omits the key: {listed}"
+        );
+    }
+
+    let (code, set) = sandbox.json(&["trust", "jump", "lab-box", "relay", "--json"]);
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(
+        set["data"]["peer"]["jump"],
+        serde_json::json!(["relay"]),
+        "{set}"
+    );
+    assert_eq!(set["data"]["changed"], true, "{set}");
+    check("trust.set_jump.json", set);
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    check("trust.list.jump.json", listed);
+
+    let (code, again) = sandbox.json(&["trust", "jump", "lab-box", "relay", "--json"]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["changed"], false, "{again}");
+
+    let (code, cleared) = sandbox.json(&["trust", "jump", "lab-box", "--clear", "--json"]);
+    assert_eq!(code, 0, "{cleared}");
+    assert!(cleared["data"]["peer"].get("jump").is_none(), "{cleared}");
+}
+
+/// `doctor.run` with `jump_stream_carrier` (ADR-0056 decision 22). The
+/// code and the leading text are the production ones.
+#[test]
+fn golden_doctor_jump_stream_carrier_fixture() {
+    use qsh_core::doctor::JUMP_STREAM_CARRIER;
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding};
+
+    let data = DoctorData {
+        overall: "ok".to_string(),
+        findings: vec![DoctorFinding {
+            code: JUMP_STREAM_CARRIER.code.to_string(),
+            status: "info".to_string(),
+            detail: format!(
+                "{} step 2 (lab): datagram too small",
+                JUMP_STREAM_CARRIER.message
+            ),
+            remedy: None,
+        }],
+        transport: None,
+        punch: None,
+    };
+    assert!(qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&data.findings[0].code.as_str()));
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor_jump_stream_carrier.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `pair ssh` when `ssh -G` reports a `ProxyJump` whose hop is already a qsh
+/// pin with an address (ADR-0056 decision 21): the target's pin stores the
+/// chain and `data.jump` names it. The hop here points at a closed port, so
+/// the confirming dial does not succeed (`verified: false`) while the pins
+/// stand.
+#[test]
+fn golden_pair_ssh_jump_fixture() {
+    use crate::ssh_bootstrap::pair::{World, other_fingerprint, store};
+
+    let mut w = World::new();
+    w.fake.g_output(b"hostname box\nproxyjump hop\n");
+    w.client
+        .trust_add("hop", Some("127.0.0.1:1"), &other_fingerprint(5));
+    let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+    assert_eq!(code, 0, "{got}");
+    assert_eq!(got["data"]["jump"], serde_json::json!(["hop"]), "{got}");
+    assert_eq!(got["data"]["ssh_proxied"], false, "{got}");
+    assert_eq!(
+        got["data"]["peer"]["jump"],
+        serde_json::json!(["hop"]),
+        "{got}"
+    );
+    let store = store(&w.client);
+    let pin = store.find("box").expect("box pin");
+    assert_eq!(pin.jump, ["hop"]);
+    check("pair.ssh.jump.json", got);
 }
 
 /// `qsh config get|set|unset|list` (ADR-0051 결정 10, `docs/CLI.md` §6.23):

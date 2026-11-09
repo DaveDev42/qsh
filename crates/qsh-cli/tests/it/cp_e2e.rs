@@ -308,7 +308,6 @@ fn cp_rejects_unsupported_scp_flags_with_exit_2() {
         &["-i", "key"],
         &["-o", "StrictHostKeyChecking=no"],
         &["-F", "cfg"],
-        &["-J", "jump"],
         &["-S", "ssh"],
         &["-c", "aes"],
         &["-l", "100"],

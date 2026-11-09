@@ -678,8 +678,9 @@ and naming a different login gets you `UNSUPPORTED` instead of a session.
 The root command takes ssh's grammar, `qsh [ssh options] [user@]host
 [command [arg...]]`, so `alias ssh=qsh` covers the usual cases. Options that
 describe the ssh path go to ssh, not to QUIC: `-p 2222` is sshd's port and `-i`,
-`-F`, `-o`, `-C`, `-l`, `-J` shape the ssh command line used for the first
-connection and the serve revival. `qsh` finds its own UDP address during the
+`-F`, `-o`, `-C`, `-l` shape the ssh command line used for the first
+connection and the serve revival. `-J` goes to both; see
+[Going through another host](#going-through-another-host--j). `qsh` finds its own UDP address during the
 bootstrap and keeps it in the pin.
 
 ```bash
@@ -696,8 +697,7 @@ remote shell with `-c`, as ssh does, so `$VAR`, pipes and `&&` are interpreted
 on the host. Exit status is the remote command's (0 to 254); `qsh`'s own
 failures, including a usage error in this form, exit 255. A host whose name is
 also a subcommand (`qsh version`) is reached as `user@host`, `-l user host` or
-`qsh -- host`. `-f` is only accepted together with `-N`. A QUIC-side `-J` is
-refused as `UNSUPPORTED` for now, and so are `-X -Y -W -M -S -O -w -b -B -c -m
+`qsh -- host`. `-f` is only accepted together with `-N`. `-X -Y -W -M -S -O -w -b -B -c -m
 -Q`. `-A` is accepted; see [Agent forwarding](#agent-forwarding--a). `--json` and `--jsonl` are refused on this form, because its
 stdout is the remote terminal; scripts use `qsh exec`.
 
@@ -754,6 +754,43 @@ then `Start-Service ssh-agent`). An agent that listens on an AF_UNIX or msys soc
 such as the one bundled with Git for Windows, is not reachable. A Windows host
 works too: its socket is a named pipe, and the Win32-OpenSSH tools in the
 session read it from `SSH_AUTH_SOCK`.
+
+### Going through another host (`-J`)
+
+`-J` reaches a host that your machine cannot dial directly, such as a machine
+on a private network behind a bastion that runs `qsh serve`. The client
+connects to the first host as usual, asks it to open a UDP socket toward the
+next one, and runs a second QUIC connection to the target over that path. The
+middle host carries encrypted packets and cannot read them. Every hop is
+checked against its own pin, and the target against its own.
+
+```bash
+qsh -J bastion nas                       # the usual form; also qsh exec, cp, attach, tunnel open
+qsh -J bastion,lab nas uname -a          # two hops
+qsh --jump bastion doctor nas            # --jump is accepted by every command
+qsh trust jump nas bastion               # make it the default for nas
+qsh -J none nas                          # ignore the saved chain once
+```
+
+- Each hop is the name of a pin that has an address. `user@` and `:port` on a
+  hop are ignored by the QUIC path and only matter to the bootstrap ssh. At
+  most four hops, each name once.
+- A middle host needs the `forward.jump` action for your device. Roles `full`
+  and `tunnel` carry it; `qsh trust allow <peer> forward.jump` grants it
+  alone. It cannot reach loopback, link-local or multicast addresses.
+- The order is `-J` or `--jump`, then `-o ProxyJump`, then the `jump` saved on
+  the target's pin, then the ordinary route. A hop's own saved `jump` is
+  placed in front of it. A host reached this way is not tried directly or by
+  hole punching.
+- When the bootstrap finds a `ProxyJump` in your ssh config, or you pass `-J`,
+  and every hop is (or can be made) a qsh pin, the target's pin stores the
+  chain, so the next `qsh nas` needs no flag. If a hop cannot become a pin,
+  nothing is stored and QUIC dials the target directly, as before.
+- A failure names the step: `jump 2/3 (lab): ...`, with `error.details.jump`
+  in `--json` mode. `qsh doctor nas` reports `jump_stream_carrier` when a step
+  runs on the slower stream carrier, and `jump_hop_missing` for a saved chain
+  that names a pin you no longer have.
+- `-W` is still refused.
 
 ### Port forwards
 
@@ -1111,6 +1148,10 @@ Some of these are MVP scope decisions, some are unfinished work.
   pending work ([ADR-0043](docs/adr/0043-no-tcp-fallback.md)): on such a
   network use SSH, or run QSH inside an overlay such as WireGuard or
   Tailscale that can carry UDP.
+- A jump chain costs latency per hop and a bit more under packet loss when a
+  step has to use the stream carrier. It has at most four hops, and `-W`
+  (stdio forwarding) is not supported
+  ([ADR-0056](docs/adr/0056-m26-jump-chaining.md)).
 - Hole punching does not open every NAT pair, and it needs a rendezvous. It
   works only for hosts registered with `qsh serve --to`, and only when a
   pinned `qsh listen` that both devices can reach carries the signalling
