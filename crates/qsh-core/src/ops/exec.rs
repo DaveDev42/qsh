@@ -197,6 +197,7 @@ impl Ops {
                         &dialer,
                         &target.address,
                         &target.server_name,
+                        target.punch.as_ref(),
                         &device_name,
                         &spec,
                         stdin,
@@ -242,15 +243,29 @@ impl Ops {
         host: &str,
         identity: LoadedIdentity,
     ) -> Result<PeerRoute, OpError> {
-        match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found)? {
+        let route =
+            match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found) {
+                Ok(route) => route,
+                Err(err) if err.code == ErrorCode::HostNotFound => {
+                    let trust = self.open_trust()?;
+                    return match self.punch_only_target(host, &identity, &trust) {
+                        Some(target) => Ok(PeerRoute::Forward(target)),
+                        None => Err(err),
+                    };
+                }
+                Err(err) => return Err(err),
+            };
+        match route {
             HostRoute::Forward { address, .. } => {
                 let trust = self.open_trust()?;
                 let server_name = server_name_for(&address);
+                let punch = self.punch_plan(host, &identity, &trust);
                 Ok(PeerRoute::Forward(PeerTarget {
                     identity,
                     trust,
                     address,
                     server_name,
+                    punch,
                 }))
             }
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
@@ -293,6 +308,7 @@ async fn exec_async(
     dialer: &Dialer,
     address: &str,
     server_name: &str,
+    punch: Option<&Arc<crate::punch::PunchPlan>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -303,6 +319,7 @@ async fn exec_async(
         dialer,
         address,
         server_name,
+        punch,
         device_name,
         spec,
         stdin,
@@ -339,6 +356,7 @@ async fn exec_async_resolving(
         dialer,
         address,
         server_name,
+        None,
         device_name,
         spec,
         stdin,
@@ -357,6 +375,7 @@ async fn exec_async_tracked(
     dialer: &Dialer,
     address: &str,
     server_name: &str,
+    punch: Option<&Arc<crate::punch::PunchPlan>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -371,16 +390,20 @@ async fn exec_async_tracked(
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || timeout_error(timeout.unwrap_or_default());
 
-    let addrs = until(deadline, crate::ops::resolve_all_with(resolver, address))
-        .await
-        .ok_or_else(timed_out)??;
     let dialed = until(
         deadline,
-        crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, server_name)),
+        crate::ops::route::dial_routed(
+            dialer,
+            address,
+            server_name,
+            punch,
+            qsh_transport::TransportTuning::default(),
+            resolver,
+        ),
     )
     .await
     .ok_or_else(timed_out)?
-    .map_err(|(err, attempted)| map_dial_error(err, address, attempted))?;
+    .map_err(|err| err.into_op(address))?;
     dialed_flag.store(true, Ordering::SeqCst);
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();

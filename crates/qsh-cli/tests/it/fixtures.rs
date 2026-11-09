@@ -158,6 +158,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.CONFIG_ERROR.json",
     "error.HOST_NOT_FOUND.json",
     "error.CONNECTION_FAILED.json",
+    "error.CONNECTION_FAILED.punch.json",
     "error.AUTH_FAILED.json",
     "error.TRUST_REQUIRED.json",
     "error.TIMEOUT.json",
@@ -2020,6 +2021,50 @@ fn golden_connection_failed_fixture() {
     assert_eq!(code, 255, "{value}");
     assert_eq!(value["error"]["code"], "CONNECTION_FAILED");
     check("error.CONNECTION_FAILED.json", value);
+}
+
+/// `CONNECTION_FAILED` that names a hole punch (ADR-0054 decision 17):
+/// `details.punch{rendezvous, reason}` and the clause on the message. The
+/// binary cannot produce it yet (the `--rendezvous` flag and the pin's
+/// `rendezvous` key land in a later step), so the envelope is built the way
+/// the route builds the error: the direct dial's `CONNECTION_FAILED`, with
+/// the punch attached by `PunchFailure::attach_to`. The route test
+/// `punch_route::punch_give_up_reasons` produces the same shape from a real
+/// failed route for every reason.
+#[test]
+fn golden_connection_failed_punch_fixture() {
+    use qsh_core::OpError;
+    use qsh_core::punch::{GiveUpReason, PunchFailure};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, CliError};
+
+    let direct = OpError::new(
+        ErrorCode::ConnectionFailed,
+        "no response from 127.0.0.1:<port> within 10s",
+    );
+    let err = PunchFailure {
+        rendezvous: "home".into(),
+        reason: GiveUpReason::Timeout,
+    }
+    .attach_to(direct);
+    assert_eq!(err.details["punch"]["rendezvous"], "home");
+    assert_eq!(err.details["punch"]["reason"], "timeout");
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01JTESTTESTTESTTESTTESTTES".to_string(),
+        command: "exec.run".to_string(),
+        ok: false,
+        data: None,
+        error: Some(CliError {
+            code: err.code.clone(),
+            message: err.message.clone(),
+            retryable: err.retryable,
+            details: err.details.clone(),
+        }),
+    };
+    check(
+        "error.CONNECTION_FAILED.punch.json",
+        serde_json::to_value(envelope).expect("envelope"),
+    );
 }
 
 /// `PERMISSION_DENIED`'s first CLI-binary envelope producer (the M5 plan (2473c88)

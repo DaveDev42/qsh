@@ -34,7 +34,7 @@ use crate::client::reconnect::{
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
 use crate::hosts::HostsFile;
-use crate::ops::exec::{map_client_error, map_dial_error};
+use crate::ops::exec::map_client_error;
 use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget};
 use crate::resume::{NoToken, ResumeStore, StoredToken};
 

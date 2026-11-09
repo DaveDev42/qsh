@@ -44,7 +44,8 @@ pub use endpoint::{
     AcceptError, CLOSE_CODE_NOT_ADOPTED, ConnStats, Connection, DialError, Dialed, Dialer,
     Endpoint, Incoming, Listener, LocalIdentity, MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON,
     PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow, RESET_KEY_LEN, SetupError,
-    SocketSource, TransportTuning, bind_tuned_udp_socket, set_default_dial_timeout,
+    SocketSource, TransportTuning, bind_tuned_udp_socket, default_dial_timeout,
+    set_default_dial_timeout,
 };
 pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, DatagramError, ExportError,

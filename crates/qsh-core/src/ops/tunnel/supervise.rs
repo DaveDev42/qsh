@@ -40,7 +40,7 @@ use crate::client::pathwatch::{PathWatch, watch_path_with_wake};
 use crate::client::reconnect::{PathBinder, REDIAL_DEADLINE};
 use crate::client::wake::{self, WakeEvent};
 use crate::client::{ControlIn, Session};
-use crate::ops::exec::{map_client_error, map_dial_error};
+use crate::ops::exec::map_client_error;
 use crate::ops::session::{Link, RecoveryConfig, probe_alive};
 use crate::ops::{OpError, PeerTarget};
 use crate::reverse::{ReconnectCause, classify_connection_error};
@@ -752,16 +752,23 @@ async fn dial(
     )
     .with_tuning(tuning);
     let address = target.address.clone();
-    let addrs = crate::ops::resolve_all(&address)
-        .await
-        .map_err(|op| AttemptError::dial(op, ReconnectCause::Resolve))?;
-    let dialed =
-        crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &target.server_name))
-            .await
-            .map_err(|(err, attempted)| {
-                let cause = cause_of_dial_error(&err);
-                AttemptError::dial(map_dial_error(err, &address, attempted), cause)
-            })?;
+    let dialed = crate::ops::route::dial_routed(
+        &dialer,
+        &address,
+        &target.server_name,
+        target.punch.as_ref(),
+        tuning,
+        &crate::ops::SystemResolver,
+    )
+    .await
+    .map_err(|route| {
+        let cause = match &route.direct {
+            crate::ops::route::DirectFail::Resolve(_) => ReconnectCause::Resolve,
+            crate::ops::route::DirectFail::Dial { err, .. } => cause_of_dial_error(err),
+            crate::ops::route::DirectFail::NoAddress => ReconnectCause::DialTimeout,
+        };
+        AttemptError::dial(route.into_op(&address), cause)
+    })?;
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {
