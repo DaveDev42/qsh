@@ -100,7 +100,7 @@ M25가 남긴 후속이다(ADR-0055 개정 이력, M25 계획 `3604a16`).
 
 - [ ] Windows에서 exec 소켓 제거를 기다리는 단언은 세션 소켓만 보아 거의 공으로 통과한다. exec pipe의 수명을 직접 보는 시험이 없다.
 - [ ] Windows CI 러너의 `ssh-agent` 서비스는 기계 하나에 하나라서 그 서비스를 쓰는 시험은 시험 그룹 `shared-ssh-agent`로 한 번에 하나씩 돈다(`38d30ec`). 그 서비스를 쓰는 시험을 더하면 같은 그룹에 넣는다.
-- [ ] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`이 CI run 42594749119의 Windows에서 20 s 읽기 시한(10060)을 한 번 넘겼다. Dave-Windows에서 30/30 통과로 재현되지 않았다.
+- [x] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`의 Windows 10060(CI run 42594749119, 42612491760)은 시험 결함이었다. 부하 아래 `try_clone`(WSADuplicateSocket) 복제본이 미연결로 돌아와 `shutdown(Write)`가 WSAENOTCONN으로 실패해 half-close가 나가지 않았다(Dave-Windows 부하 아래 63/64 재현). 한 소켓으로 쓰고 읽게 고쳤다. 같은 모양(복제본에서 `shutdown(Write)`)이 `tunnel_e2e.rs`와 `route_cases.rs`의 echo 도우미에 남아 있다. 붉어지면 같은 방식으로 고친다.
 - [ ] `agent_reverse::end_to_end::a_reverse_reattach_registers_its_channel_again`이 전체 실행 한 번에서 `session.attach`의 `PermissionDenied`로 실패했고 혼자 돌리면 통과한다.
 
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
