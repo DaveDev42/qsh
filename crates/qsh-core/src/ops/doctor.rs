@@ -913,14 +913,14 @@ impl Ops {
     /// registration. No address or port reaches the object, the finding, or
     /// the `qsh::punch` lines the attempt writes.
     ///
-    /// The rendezvous candidates are what [`Ops::with_punch`] was given.
-    /// The key `[punch].mode` and the pin's own `rendezvous` list belong to
-    /// the hint step; until they are read here a device that did not inject
-    /// a rendezvous reports `punch_no_rendezvous`.
+    /// The rendezvous candidates are the route's own: `--rendezvous` when
+    /// given, else the pin's `rendezvous` hints. `--no-punch` or
+    /// `[punch].mode = "off"` turns the check off; an unreadable
+    /// `config.toml` does too, since the config findings already report it.
     fn doctor_punch(&self, host: &str, findings: &mut Vec<DoctorFinding>) -> Option<DoctorPunch> {
         use crate::punch::{PUNCH_BUDGET, PunchMode};
 
-        if self.punch.mode == PunchMode::Off {
+        if !matches!(self.punch_mode(), Ok(PunchMode::Auto)) {
             return None;
         }
         let plan = match self.resolve_route(host) {
