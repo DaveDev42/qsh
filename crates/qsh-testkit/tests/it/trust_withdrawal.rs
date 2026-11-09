@@ -1329,6 +1329,63 @@ mod listen {
         harness.shutdown().await;
     }
 
+    /// How many request-shaped messages the stopped-reading peer sends. Each
+    /// is answered with an `UNSUPPORTED` error of about 75 bytes that the
+    /// peer never reads, so about 28 000 fill the reply stream's 2 MiB
+    /// window; this is twice that. The old 200 000 was nearly ten times what
+    /// blocking the host needs, and as a debug-build loop its length scaled
+    /// with runner load.
+    const FLOOD_REQUESTS: u64 = 60_000;
+
+    /// Send [`FLOOD_REQUESTS`] request-shaped messages into the control
+    /// stream without ever reading it, then keep the stream open.
+    ///
+    /// The loop yields every few hundred messages. Quinn's writes complete
+    /// without suspending, so without it the task would hold a runtime worker
+    /// for the whole flood and starve the connection driver, the trust poll
+    /// and the clock of the close budget on a runner with few cores.
+    fn flood_requests(mut ctl: qsh_transport::FramedStream) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for id in 1..=FLOOD_REQUESTS {
+                let msg = qsh_proto::wire::ControlMessage::new(
+                    id,
+                    qsh_proto::wire::control_message::Body::SessionList(
+                        qsh_proto::wire::SessionList {},
+                    ),
+                );
+                if ctl.send.send(&msg).await.is_err() {
+                    return;
+                }
+                if id % 256 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            // Keep the stream alive so it is not reset.
+            std::future::pending::<()>().await;
+            drop(ctl);
+        })
+    }
+
+    /// Wait until the controller has reported that it is blocked sending on a
+    /// stream (a `STREAM_DATA_BLOCKED` frame, counted in
+    /// `ConnStats::peer_stream_blocked_events`): the reply stream's window is
+    /// full because this side never reads it, so the controller's loop is
+    /// parked in an awaited send. That is the state the test needs the
+    /// withdrawal to land in. The wait is a precondition, not the contract
+    /// under test, so its bound is generous and independent of
+    /// [`CLOSE_BOUND`].
+    async fn wait_host_blocked(conn: &Connection) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while conn.stats().peer_stream_blocked_events == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the controller never reported a blocked reply stream: {:?}",
+                conn.stats()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// ADR-0031 결정 3: the registration's watch runs in its own task. The
     /// target stops reading the control stream while flooding request-shaped
     /// messages, each answered with an `UNSUPPORTED` error the controller's
@@ -1338,24 +1395,10 @@ mod listen {
     async fn listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream() {
         let target = make_identity();
         let env = Env::new(&pin("widget", &target.fingerprint, Some("reverse")));
-        let (harness, dialed, mut ctl) = registered(&env, &target).await;
+        let (harness, dialed, ctl) = registered(&env, &target).await;
 
-        let flood = tokio::spawn(async move {
-            for id in 1..=200_000u64 {
-                let msg = qsh_proto::wire::ControlMessage::new(
-                    id,
-                    qsh_proto::wire::control_message::Body::SessionList(
-                        qsh_proto::wire::SessionList {},
-                    ),
-                );
-                if ctl.send.send(&msg).await.is_err() {
-                    break;
-                }
-            }
-            std::future::pending::<()>().await;
-            drop(ctl);
-        });
-        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let flood = flood_requests(ctl);
+        wait_host_blocked(&dialed.connection).await;
         assert!(dialed.connection.close_reason().is_none());
 
         env.rewrite("");
