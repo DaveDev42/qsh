@@ -1,0 +1,19 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "TIMEOUT",
+    "details": {
+      "jump": {
+        "hop": 2,
+        "hops": 2,
+        "name": "target",
+        "stage": "handshake"
+      }
+    },
+    "message": "jump 2/2 (target): no response within 10s",
+    "retryable": true
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

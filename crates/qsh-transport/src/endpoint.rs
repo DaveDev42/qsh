@@ -1260,6 +1260,20 @@ impl Dialer {
         }
     }
 
+    /// A dialer with this one's identity, timeout and tuning that verifies
+    /// peers through `evaluator` instead. A jump chain uses it to accept
+    /// exactly one fingerprint for the hop it is dialing (ADR-0056 decision
+    /// 10) while the first hop keeps the ordinary trust store.
+    #[must_use]
+    pub fn with_evaluator(&self, evaluator: Arc<dyn TrustEvaluator>) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            evaluator,
+            timeout: self.timeout,
+            tuning: self.tuning,
+        }
+    }
+
     /// Apply a [`TransportTuning`] to every connection this dialer makes.
     /// [`Self::new`] keeps the compiled default.
     #[must_use]

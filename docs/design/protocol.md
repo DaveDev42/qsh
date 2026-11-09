@@ -1250,3 +1250,33 @@ on-demand `qsh serve`의 idle 종료(ADR-0051 결정 2)는 살아 있는 jump �
 단위 시험은 `crates/qsh-proto/src/jump.rs`의 `decoder_table`, `a_split_read_gives_the_same_packets`, `many_packets_in_one_chunk`, `the_declared_length_is_not_allocated_up_front`, `an_error_is_sticky_and_leaves_nothing_buffered`, `long_header_reader_table`, `initial_gate_table`, `answer_gate_table`와 proptest(`round_trip_under_any_chunking`, `readers_never_panic`)다. fuzz 타깃은 `jump_frames`(§13-13)다.
 
 중간 peer의 시험은 `crates/qsh-testkit/tests/it/jump_host.rs`(진짜 QUIC 연결 위의 `JUMP` 스트림과 UDP 소켓: `a_real_inner_dial_through_j_reaches_t_over_the_stream_carrier`, `a_real_inner_dial_through_j_reaches_t_over_the_datagram_carrier`, `jump_without_forward_jump_opens_no_socket`, `jump_refuses_host_local_targets`, `a_jump_forwards_only_quic_until_the_target_answers_like_quic`, `the_pregate_caps_hold_on_a_real_channel`, `a_jump_socket_drops_datagrams_from_other_sources`, `a_jump_never_sends_more_than_it_received`, `jump_target_refusal_is_reported_fast`, `jump_bounds`, `jump_idle_closes_the_channel_and_the_socket`, `a_duplicate_jump_channel_is_invalid_argument_without_audit`, `on_demand_serve_stays_up_while_a_jump_channel_lives` 등)과 `crates/qsh-core/src/jump/middle/tests.rs`(문, 운반체 고르기 표, 큐, 점유 표)다.
+
+### 21.5 client 체인 (ADR-0056 결정 4·6·10~13·15·16, ADR-0057)
+
+client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자는 `Ops::with_jump(hops)`로 hop 핀 이름 목록을 주고, 표면(`-J`, 핀 필드, `trust jump`)은 아직 없다.
+
+**검증.** dial 전에 `JumpPlan::new`가 모양을 본다. hop이 4개를 넘거나, 같은 지문이 두 번 나오거나, 끝 target이 hop 목록에 있으면 `INVALID_ARGUMENT`이고 아무것도 dial하지 않는다. hop의 핀이 없거나 주소·지문이 비어 있으면 `HOST_NOT_FOUND`(stage `address`)다. client는 이름을 풀지 않고 핀의 주소를 그대로 다음 hop의 `StreamHeader{host, port}`에 싣는다.
+
+**걷기.** 첫 hop은 보통 경로(펀칭 포함)로 잇고 지문이 핀과 같은지 한 번 더 본다. 다음 단계마다 (1) 앞 연결의 협상 결과에 `jump.v1`이 있는지 보고, (2) CSPRNG 16바이트 channel을 뽑아 `DatagramHub`에 등록한 뒤 `JUMP` 스트림을 열고, (3) `ConnectResult`를 기다리고, (4) `PacketPipe`의 `PipePeer`를 스트림·datagram 운반체에 이어 펌프를 띄우고, (5) `Dialer::with_evaluator`로 그 hop의 정확한 지문만 믿는 평가기를 만들어 `dial_over_pipe`로 안쪽 연결을 맺는다. 마지막 연결이 끝 연결이고 일반 연결처럼 돌려준다(결정 15). 직접 dial과 경주하지 않고 자동 폴백도 없다(결정 13).
+
+**운반체.** client→J 방향은 `choose_carrier`가 정한다. 양쪽이 `datagram.v1`을 광고하고 바깥 연결의 `max_datagram_size()`가 1217 이상이면 datagram, 아니면 스트림이다. 250 ms마다 방을 다시 읽어 바꾼다. 안쪽 packet 상한은 `PipePeer::set_packet_limit`로 (바깥 방 - 17)에 맞춘다(ADR-0057: 한 겹 55바이트). 상한보다 큰 안쪽 packet은 버리고 센다. 침묵 규칙(`SilenceFallback`)은 datagram으로 보낸 뒤 4×srtt 동안 되돌아오는 datagram이 없으면 스트림으로 내리고, 30초마다 datagram을 다시 시도한다. 같은 헬퍼를 중간 peer의 J→client 방향도 쓴다.
+
+**감독.** 층마다 펌프가 하나다. 한 층이 죽으면 끝 연결을 닫고, 끝 연결이 닫히면 안쪽 층부터 정리한다(결정 16). 비정상 종료는 스트림을 `0x2007`로 reset한다. `ChainInfo`가 채널별 계수(보낸·받은 datagram과 스트림 packet 수, 버린 수, 전환 수, 침묵 폴백 수)를 낸다.
+
+**실패 보고.** `JumpFailure{hop, hops, name, stage}`가 `details.jump`와 사람용 접두사 `jump 2/3 (b): `를 만든다. `hop`은 세우던 연결의 1-기준 순번(끝 target은 `hops`)이고 `name`은 그 단계의 핀 이름이다. 그래서 첫 hop이 두 번째 hop을 열어 주지 않으면 hop 2로 보고한다. stage와 코드:
+
+| stage | 코드 |
+|---|---|
+| `address` | `HOST_NOT_FOUND` |
+| `dial` | 보통 경로가 낸 코드 그대로 |
+| `unsupported` | `UNSUPPORTED` |
+| `denied` | `PERMISSION_DENIED` |
+| `resolve` | `CONNECTION_FAILED` |
+| `limit` | `RESOURCE_EXHAUSTED` |
+| `unreachable` | `CONNECTION_FAILED` |
+| `handshake` | `TIMEOUT` |
+| `auth` | `AUTH_FAILED` |
+
+안쪽 dial에서 핀 불일치로 거절되면 `auth`다. 시한 초과와 그 밖의 안쪽 dial 실패는 `handshake`로 묶고, 펌프가 먼저 끝났으면 `unreachable`이다. 끝 target이 거부해도 접속 중간에 새 세션이나 exec는 만들어지지 않는다. Ops의 jump는 정방향 route만 쓰고 ssh 되살리기는 끈다.
+
+**시험.** `crates/qsh-testkit/tests/it/jump_chain.rs`: `jump_one_hop_runs_every_feature`, `jump_two_hops_runs_session_exec_and_cp`, `a_malformed_chain_is_invalid_argument_and_dials_nothing`, `a_hop_without_a_pin_or_an_address_is_host_not_found_naming_it`, `jump_pin_mismatch_at_the_first_hop`, `jump_pin_mismatch_at_a_hop_and_at_the_end`, `a_jump_redirect_to_another_pinned_peer_fails_with_auth_failed`, `jump_carrier_selection_table`, `jump_mtu_budget_table`, `the_carrier_follows_the_outer_room_and_datagram_v1`, `jump_mtu_budget_on_a_four_hop_chain`, `jump_failure_stage_table`, `jump_failure_dial_stage_keeps_the_routes_code`, `jump_target_refusal_is_reported_fast`, `a_jump_never_sees_inner_plaintext`, `a_plan_refuses_the_shapes_decision_11_names`. 단위 시험은 `jump/carrier.rs`(침묵 규칙), `jump/report.rs`(stage 표)다. 침묵 폴백의 live 시험(kind 14 blackhole)과 netsim 손실 시험은 수용 시험 스텝이 맡는다.

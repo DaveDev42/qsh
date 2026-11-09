@@ -1,0 +1,19 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "AUTH_FAILED",
+    "details": {
+      "jump": {
+        "hop": 3,
+        "hops": 3,
+        "name": "target",
+        "stage": "auth"
+      }
+    },
+    "message": "jump 3/3 (target): the peer's fingerprint is not the pinned one",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -166,6 +166,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.HOST_NOT_FOUND.json",
     "error.CONNECTION_FAILED.json",
     "error.CONNECTION_FAILED.punch.json",
+    "error.AUTH_FAILED.jump_target_pin.json",
+    "error.PERMISSION_DENIED.jump_denied.json",
+    "error.TIMEOUT.jump_handshake.json",
     "error.AUTH_FAILED.json",
     "error.TRUST_REQUIRED.json",
     "error.TIMEOUT.json",
@@ -2312,6 +2315,68 @@ fn golden_connection_failed_punch_fixture() {
         "error.CONNECTION_FAILED.punch.json",
         serde_json::to_value(envelope).expect("envelope"),
     );
+}
+
+/// The jump chain's failure report (ADR-0056 decision 12, `docs/CLI.md`
+/// §3.2): `details.jump = {hop, hops, name, stage}` and the human prefix
+/// `jump H/N (name): ` on the message. One fixture per code family a stage
+/// fixes; `jump_failure_stage_table` in the testkit produces every stage
+/// from a real chain.
+#[test]
+fn golden_jump_failure_fixtures() {
+    use qsh_core::jump::{JumpFailure, Stage};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, CliError};
+
+    let cases = [
+        (
+            "error.AUTH_FAILED.jump_target_pin.json",
+            JumpFailure {
+                hop: 3,
+                hops: 3,
+                name: "target".into(),
+                stage: Stage::Auth,
+            },
+            "the peer's fingerprint is not the pinned one",
+        ),
+        (
+            "error.PERMISSION_DENIED.jump_denied.json",
+            JumpFailure {
+                hop: 2,
+                hops: 3,
+                name: "b".into(),
+                stage: Stage::Denied,
+            },
+            "the previous peer refused to open this connection",
+        ),
+        (
+            "error.TIMEOUT.jump_handshake.json",
+            JumpFailure {
+                hop: 2,
+                hops: 2,
+                name: "target".into(),
+                stage: Stage::Handshake,
+            },
+            "no response within 10s",
+        ),
+    ];
+    for (name, failure, message) in cases {
+        let err = failure.into_op(message, None);
+        assert!(err.message.starts_with("jump "));
+        let envelope = CliEnvelope {
+            schema: CLI_SCHEMA_V1.to_string(),
+            request_id: "01JTESTTESTTESTTESTTESTTES".to_string(),
+            command: "exec.run".to_string(),
+            ok: false,
+            data: None,
+            error: Some(CliError {
+                code: err.code.clone(),
+                message: err.message.clone(),
+                retryable: err.retryable,
+                details: err.details.clone(),
+            }),
+        };
+        check(name, serde_json::to_value(envelope).expect("envelope"));
+    }
 }
 
 /// `PERMISSION_DENIED`'s first CLI-binary envelope producer (the M5 plan (2473c88)

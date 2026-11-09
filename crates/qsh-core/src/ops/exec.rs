@@ -201,6 +201,7 @@ impl Ops {
                         &target.address,
                         &target.server_name,
                         target.punch.as_ref(),
+                        target.jump.as_ref(),
                         target.learn.as_ref(),
                         &device_name,
                         &spec,
@@ -259,6 +260,11 @@ impl Ops {
         host: &str,
         identity: LoadedIdentity,
     ) -> Result<PeerRoute, OpError> {
+        // A jump is the whole route (ADR-0056 decision 13).
+        if self.jump.is_some() {
+            let trust = self.open_trust()?;
+            return Ok(PeerRoute::Forward(self.jump_target(host, identity, trust)?));
+        }
         let route =
             match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found) {
                 Ok(route) => route,
@@ -284,6 +290,7 @@ impl Ops {
                     server_name,
                     punch,
                     learn,
+                    jump: None,
                 }))
             }
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
@@ -327,6 +334,7 @@ async fn exec_async(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    jump: Option<&Arc<crate::jump::JumpPlan>>,
     learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
@@ -340,6 +348,7 @@ async fn exec_async(
         address,
         server_name,
         punch,
+        jump,
         learn,
         device_name,
         spec,
@@ -380,6 +389,7 @@ async fn exec_async_resolving(
         server_name,
         None,
         None,
+        None,
         device_name,
         spec,
         stdin,
@@ -400,6 +410,7 @@ async fn exec_async_tracked(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    jump: Option<&Arc<crate::jump::JumpPlan>>,
     learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
@@ -423,6 +434,7 @@ async fn exec_async_tracked(
             address,
             server_name,
             punch,
+            jump,
             qsh_transport::TransportTuning::default(),
             resolver,
             crate::ops::route::Dial::Command,

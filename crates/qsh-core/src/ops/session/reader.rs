@@ -40,6 +40,7 @@ async fn dial_peer_as(
         &address,
         &target.server_name,
         target.punch.as_ref(),
+        target.jump.as_ref(),
         tuning,
         &crate::ops::SystemResolver,
         kind,

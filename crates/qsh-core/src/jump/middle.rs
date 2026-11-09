@@ -19,7 +19,9 @@
 //!   After that the carrier is chosen per packet from this peer's own view
 //!   ([`choose_carrier`]): a datagram when both sides advertise `datagram.v1`
 //!   and the outer connection has room for a minimum-size inner packet,
-//!   otherwise the stream, whose queue is bounded by [`JUMP_STREAM_QUEUE`].
+//!   otherwise the stream, whose queue is bounded by [`JUMP_STREAM_QUEUE`]. Datagrams
+//!   that go unanswered for 4 x srtt move the channel to the stream until a
+//!   retry 30 s later ([`SilenceFallback`]).
 //!   A packet that does not fit a datagram is dropped and counted, never
 //!   sent on the stream instead (decision 4).
 //! * **end.** A channel ends when the stream ends or resets, the outer
@@ -42,9 +44,8 @@ use std::time::Duration;
 
 use qsh_proto::datagram::{ChannelId, DatagramFrame, DatagramKind};
 use qsh_proto::jump::{
-    JUMP_CHANNEL_LEN, JUMP_PACKET_MAX, JUMP_PACKET_MIN, JUMP_PREGATE_BYTES, JUMP_PREGATE_PACKETS,
-    JUMP_STREAM_QUEUE, JumpStreamDecoder, answers_gate, encode_packet, is_v1_initial_shaped,
-    read_long_header,
+    JUMP_CHANNEL_LEN, JUMP_PACKET_MAX, JUMP_PREGATE_BYTES, JUMP_PREGATE_PACKETS, JUMP_STREAM_QUEUE,
+    JumpStreamDecoder, answers_gate, encode_packet, is_v1_initial_shaped, read_long_header,
 };
 use qsh_transport::{RecvStream, SendStream, StreamCode};
 use tokio::net::UdpSocket;
@@ -71,8 +72,7 @@ pub const JUMP_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const RESET_CODE_ABORT: u32 = 0x2007;
 /// Stream reset code for a framing violation (`BAD_HEADER`).
 const RESET_CODE_BAD_FRAME: u32 = 0x2001;
-/// Bytes of the jump datagram header (channel and kind).
-const DATAGRAM_HEADER: usize = DatagramFrame::HEADER_LEN;
+use super::carrier::{DATAGRAM_HEADER, SilenceFallback};
 
 /// The knobs of an intermediate peer. Production uses [`Default`]; the
 /// fields exist so a test can shorten a timer or turn off the host-local
@@ -411,28 +411,7 @@ impl Gate {
 // carrier choice
 // ----------------------------------------------------------------------
 
-/// The carrier J sends target-to-client packets on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Carrier {
-    /// One kind 14 datagram per packet.
-    Datagram,
-    /// Length-prefixed frames on the `JUMP` stream.
-    Stream,
-}
-
-/// Decision 4's static rule: a datagram when both sides advertise
-/// `datagram.v1` and the outer connection's `max_datagram_size()` holds a
-/// minimum-size inner packet and the 17-byte jump header; the stream
-/// otherwise. This peer's silence fallback (4 x srtt without a datagram
-/// back, retried every 30 s) is a later step.
-pub fn choose_carrier(both_datagram: bool, max_datagram_size: Option<usize>) -> Carrier {
-    match max_datagram_size {
-        Some(room) if both_datagram && room >= JUMP_PACKET_MIN + DATAGRAM_HEADER => {
-            Carrier::Datagram
-        }
-        _ => Carrier::Stream,
-    }
-}
+pub use super::carrier::{Carrier, choose_carrier};
 
 // ----------------------------------------------------------------------
 // the stream queue and its writer
@@ -499,14 +478,14 @@ impl QueueRx {
     }
 }
 
-fn code(raw: u32) -> StreamCode {
+pub(super) fn code(raw: u32) -> StreamCode {
     StreamCode::from_u32(raw)
 }
 
 /// Writes queued frames to the stream. `close` tells it how to end: `Some`
 /// resets with that code at once (queued bytes are discarded), anything else
 /// finishes.
-async fn write_loop(
+pub(super) async fn write_loop(
     mut send: SendStream,
     mut queue: QueueRx,
     mut close: oneshot::Receiver<Option<u32>>,
@@ -542,7 +521,7 @@ async fn write_loop(
     }
 }
 
-fn end_send(send: &mut SendStream, how: Option<u32>) {
+pub(super) fn end_send(send: &mut SendStream, how: Option<u32>) {
     match how {
         Some(raw) => {
             let _ = send.reset(code(raw));
@@ -600,6 +579,8 @@ struct State {
     datagrams: DatagramRx,
     channel: ChannelId,
     both_datagram: bool,
+    /// Decision 4's silence rule for the target-to-client direction.
+    silence: SilenceFallback,
     stats: Arc<JumpStats>,
     last_forward: Instant,
     packets: u64,
@@ -616,6 +597,9 @@ impl State {
         if !self.gate.admit_client(packet) {
             self.stats.gate_dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
+        }
+        if via_datagram {
+            self.silence.received_datagram();
         }
         match self.socket.send(packet).await {
             Ok(_) => {
@@ -656,7 +640,11 @@ impl State {
             tracing::debug!(target: TARGET, event = "gate_opened");
         }
         let room = self.datagrams.hub().max_datagram_size();
-        let sent = match choose_carrier(self.both_datagram, room) {
+        let rule = choose_carrier(self.both_datagram, room);
+        let carrier =
+            self.silence
+                .choose(rule, std::time::Instant::now(), self.datagrams.hub().rtt());
+        let sent = match carrier {
             Carrier::Datagram => {
                 let room = room.unwrap_or(0);
                 if DATAGRAM_HEADER + packet.len() > room {
@@ -672,6 +660,7 @@ impl State {
                 };
                 match self.datagrams.hub().send(&frame) {
                     Ok(()) => {
+                        self.silence.sent_datagram(std::time::Instant::now());
                         self.stats
                             .to_client_datagrams
                             .fetch_add(1, Ordering::Relaxed);
@@ -739,6 +728,7 @@ pub async fn run(relay: Relay) -> CloseReason {
         datagrams,
         channel,
         both_datagram,
+        silence: SilenceFallback::new(),
         stats: Arc::clone(&stats),
         last_forward: started,
         packets: 0,
