@@ -250,12 +250,25 @@ pub fn grant_label(requested: bool, host_supports: bool, grant: i32) -> Option<&
 pub struct AgentChannel {
     id: [u8; AGENT_CHANNEL_LEN],
     agent: Arc<ClientAgent>,
+    /// The claim loop of the reverse route, stopped with the channel.
+    claims: Mutex<Option<ReverseClaims>>,
 }
 
 impl AgentChannel {
     /// The 16 bytes to put in the request.
     pub fn bytes(&self) -> Vec<u8> {
         self.id.to_vec()
+    }
+
+    /// On the reverse route, start claiming this channel's `AGENT` streams
+    /// from the `qsh listen` daemon at `socket` (ADR-0055 decision 14). It
+    /// can start before the request carrying the channel has left: a claim
+    /// the daemon does not recognize yet comes back at once and is retried.
+    /// The loop stops when the channel is dropped. Must run inside a Tokio
+    /// runtime.
+    pub fn serve_over_daemon(&self, socket: std::path::PathBuf, host: String) {
+        let task = tokio::spawn(claim_loop(Arc::clone(&self.agent), self.id, socket, host));
+        *self.claims.lock().unwrap_or_else(|e| e.into_inner()) = Some(ReverseClaims(task));
     }
 }
 
@@ -306,6 +319,7 @@ impl ClientAgent {
         AgentChannel {
             id,
             agent: Arc::clone(self),
+            claims: Mutex::new(None),
         }
     }
 
@@ -416,31 +430,57 @@ pub(crate) async fn serve_agent_stream(
         reset(&mut send, &mut recv, RESET_EXHAUSTED);
         return;
     };
-    let local = match dispatch.agent.connect_local().await {
+    match run_against_local(&mut send, &mut recv, residue, &dispatch.agent).await {
+        Served::NoLocalAgent => {
+            let _ = send.finish();
+            let _ = recv.stop(qsh_transport::StreamCode::from_u32(0));
+        }
+        Served::Done(Outcome::HostClosed | Outcome::LocalClosed) => {
+            let _ = send.finish();
+        }
+        Served::Done(Outcome::BadFrame) => reset(&mut send, &mut recv, RESET_BAD_HEADER),
+        Served::Done(Outcome::Abort) => reset(&mut send, &mut recv, RESET_ABORT),
+    }
+}
+
+/// How one stream ended against the local agent.
+enum Served {
+    /// No connection to the local agent could be made. The host sees an
+    /// agent failure; the session itself is fine.
+    NoLocalAgent,
+    Done(Outcome),
+}
+
+/// Connect to the local agent and run the filter loop between it and the
+/// stream halves `send`/`recv`, whatever carries them (a QUIC stream on the
+/// forward route, the daemon's conduit on the reverse route). Logs the
+/// `qsh::agent` lines; the caller turns the outcome into the carrier's own
+/// way of ending a stream.
+async fn run_against_local<R, W>(
+    send: &mut W,
+    recv: &mut R,
+    residue: Vec<u8>,
+    agent: &ClientAgent,
+) -> Served
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let local = match agent.connect_local().await {
         Ok(local) => local,
         Err(_) => {
-            // The host sees an agent failure; the session itself is fine.
             tracing::info!(
                 target: "qsh::agent",
                 event = "refused",
                 reason = "no_local_agent",
             );
-            let _ = send.finish();
-            let _ = recv.stop(qsh_transport::StreamCode::from_u32(0));
-            return;
+            return Served::NoLocalAgent;
         }
     };
     tracing::info!(target: "qsh::agent", event = "opened");
     let started = Instant::now();
     let mut stats = FilterStats::default();
-    let outcome = filter_loop(&mut send, &mut recv, residue, local, &mut stats).await;
-    match outcome {
-        Outcome::HostClosed | Outcome::LocalClosed => {
-            let _ = send.finish();
-        }
-        Outcome::BadFrame => reset(&mut send, &mut recv, RESET_BAD_HEADER),
-        Outcome::Abort => reset(&mut send, &mut recv, RESET_ABORT),
-    }
+    let outcome = filter_loop(send, recv, residue, local, &mut stats).await;
     tracing::info!(
         target: "qsh::agent",
         event = "closed",
@@ -448,6 +488,129 @@ pub(crate) async fn serve_agent_stream(
         filtered = stats.filtered,
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     );
+    Served::Done(outcome)
+}
+
+// ---- the reverse route (ADR-0055 decision 14) ----------------------------
+
+/// How long one claim long-polls the daemon, the most the daemon honors.
+const CLAIM_WAIT_MS: u32 = qsh_proto::local::LOCAL_WAIT_MAX.as_millis() as u32;
+/// Shortest and longest pause before the next claim after one that failed
+/// or came back at once (a channel the daemon has not seen yet, a daemon
+/// restarting). It doubles from the first to the second.
+const CLAIM_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(25);
+const CLAIM_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_millis(400);
+/// A `Timeout` faster than this did not wait out the budget: the channel is
+/// not registered (yet) or the seat is someone else's.
+const FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The claim loop of one channel on the reverse route. Dropping it stops
+/// new claims; a stream already claimed runs to its own end.
+pub(crate) struct ReverseClaims(tokio::task::JoinHandle<()>);
+
+impl Drop for ReverseClaims {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl std::fmt::Debug for ReverseClaims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReverseClaims")
+    }
+}
+
+/// Claim `AGENT` streams for `channel` from the `qsh listen` daemon at
+/// `socket` for `host`, one long poll at a time, and serve each through the
+/// local agent exactly as the forward route's dispatcher does: this
+/// process, not the daemon, connects to the agent and filters.
+///
+/// Must run inside a Tokio runtime.
+async fn claim_loop(
+    agent: Arc<ClientAgent>,
+    channel: [u8; AGENT_CHANNEL_LEN],
+    socket: std::path::PathBuf,
+    host: String,
+) {
+    use qsh_proto::wire::{StreamHeader, StreamKind};
+    // The claim token. The first claim seats it, so a later claim from any
+    // other process (which cannot know it) is refused by the daemon.
+    let mut token = [0u8; AGENT_CHANNEL_LEN];
+    rand::rng().fill_bytes(&mut token);
+    let mut ticket = channel.to_vec();
+    ticket.extend_from_slice(&token);
+    let header = StreamHeader {
+        kind: StreamKind::Agent as i32,
+        ticket,
+        host: String::new(),
+        port: 0,
+        deny_host_local: false,
+    };
+    let dispatch = agent.dispatcher();
+    let mut backoff = CLAIM_BACKOFF_MIN;
+    loop {
+        let started = Instant::now();
+        let link = crate::client::link::DataLink::Local {
+            socket: &socket,
+            host: &host,
+        };
+        match crate::tunnel::open_stream_with_wait(&link, &header, CLAIM_WAIT_MS).await {
+            Ok((send, recv, kill)) => {
+                backoff = CLAIM_BACKOFF_MIN;
+                tokio::spawn(serve_relayed(send, recv, kill, channel, dispatch.clone()));
+            }
+            Err(crate::client::ClientError::Remote {
+                code: ErrorCode::Timeout,
+                ..
+            }) if started.elapsed() >= FAST_TIMEOUT => {
+                // Nothing arrived for the whole budget: claim again.
+                backoff = CLAIM_BACKOFF_MIN;
+            }
+            Err(_) => {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(CLAIM_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+/// Serve one claimed `AGENT` stream: the daemon already matched it to this
+/// channel and this process, so only the budget and the filter remain.
+async fn serve_relayed(
+    send: crate::client::link::DataSend,
+    recv: crate::client::link::DataRecv,
+    kill: crate::client::link::DataKillSwitch,
+    channel: [u8; AGENT_CHANNEL_LEN],
+    dispatch: AgentDispatch,
+) {
+    let (Ok(mut raw_send), Ok((mut raw_recv, residue))) =
+        (send.into_raw_local(), recv.into_raw_local())
+    else {
+        kill.kill();
+        return;
+    };
+    if !dispatch.agent.is_registered(&channel) {
+        tracing::warn!(
+            target: "qsh::agent",
+            event = "refused",
+            reason = "unregistered_channel",
+        );
+        kill.kill();
+        return;
+    }
+    let Some(_permit) = dispatch.budget.try_acquire() else {
+        tracing::warn!(target: "qsh::agent", event = "refused", reason = "cap");
+        kill.kill();
+        return;
+    };
+    match run_against_local(&mut raw_send, &mut raw_recv, residue, &dispatch.agent).await {
+        Served::NoLocalAgent | Served::Done(Outcome::HostClosed | Outcome::LocalClosed) => {
+            let _ = raw_send.shutdown().await;
+        }
+        // The conduit has no per-stream reset. Closing it whole makes the
+        // daemon end the QUIC stream, and the host sees an agent failure.
+        Served::Done(Outcome::BadFrame | Outcome::Abort) => kill.kill(),
+    }
 }
 
 #[derive(Default)]

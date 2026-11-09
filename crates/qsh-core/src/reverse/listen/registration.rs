@@ -839,6 +839,10 @@ impl Listen {
                 return;
             }
         };
+        if header.stream_kind() == Some(wire::StreamKind::Agent) {
+            Listen::admit_agent_stream(stream, &header, &hub);
+            return;
+        }
         if header.stream_kind() != Some(wire::StreamKind::TcpAccepted) {
             tracing::debug!(
                 kind = header.kind,
@@ -901,6 +905,58 @@ impl Listen {
         // `Ok(())`: queued in `hub`'s `tunnel_queue`, owning its permit,
         // for `ControlHub::claim_tcp_accepted` to hand to a `LOCAL_STREAM`
         // conduit — nothing further to do on this task.
+    }
+}
+
+impl Listen {
+    /// An `AGENT` stream the target opened on this registered connection
+    /// (ADR-0055 decision 14), its header already read. The channel must be
+    /// exactly 16 bytes and registered by a conduit of this hub, and the hub
+    /// must be under its agent cap; otherwise the stream is reset and
+    /// nothing is queued. A queued stream waits for the CLI that holds the
+    /// channel's claim seat ([`ControlHub::claim_agent`]). The daemon never
+    /// reads agent bytes and never opens a local agent connection.
+    ///
+    /// Logs carry no ticket bytes, only that a stream was refused and why.
+    fn admit_agent_stream(
+        mut stream: FramedStream,
+        header: &wire::StreamHeader,
+        hub: &Arc<ControlHub>,
+    ) {
+        if header.ticket.len() != wire::AGENT_CHANNEL_LEN {
+            tracing::warn!(
+                target: "qsh::agent",
+                event = "refused",
+                reason = "bad_channel_length",
+                ticket_len = header.ticket.len(),
+            );
+            stream.send.reset(RESET_CODE_AGENT_UNKNOWN_CHANNEL);
+            stream.recv.stop(RESET_CODE_AGENT_UNKNOWN_CHANNEL);
+            return;
+        }
+        let Some(permit) = hub.try_acquire_agent_permit() else {
+            tracing::warn!(
+                target: "qsh::agent",
+                event = "refused",
+                reason = "hub_cap",
+            );
+            stream.send.reset(RESET_CODE_AGENT_HUB_EXHAUSTED);
+            stream.recv.stop(RESET_CODE_AGENT_HUB_EXHAUSTED);
+            return;
+        };
+        let (send_half, recv_half) = stream.split();
+        let raw_send = send_half.into_raw();
+        let (raw_recv, residue) = recv_half.into_raw();
+        if let Err(rejected) =
+            hub.deliver_agent(&header.ticket, raw_send, raw_recv, residue, permit)
+        {
+            tracing::warn!(
+                target: "qsh::agent",
+                event = "refused",
+                reason = "unregistered_channel",
+            );
+            rejected.reset(RESET_CODE_AGENT_UNKNOWN_CHANNEL);
+        }
     }
 }
 

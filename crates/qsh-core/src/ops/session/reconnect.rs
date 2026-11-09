@@ -318,9 +318,14 @@ async fn local_reattach(
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
             screen: ctx.screen.as_ref().map(|s| s.request()),
-            // The reverse route has no QUIC connection of ours to host the
-            // `AGENT` dispatcher; its agent forwarding is a later step.
-            agent_channel: Vec::new(),
+            // The same channel again (ADR-0055 decisions 9 and 14): the new
+            // registration's hub enters it as this request leaves, and the
+            // attach's claim loop, which outlives the old leg, claims the
+            // host's `AGENT` streams from the daemon.
+            agent_channel: match &ctx.agent {
+                Some(attach) if session.agent_supported() => attach.channel.bytes(),
+                _ => Vec::new(),
+            },
         })
         .await
         .inspect_err(|err| {

@@ -79,12 +79,13 @@ mod registration;
 
 use conn_table::{ConnTable, Published, rollback_target};
 use hub::{
+    RESET_CODE_AGENT_HUB_EXHAUSTED, RESET_CODE_AGENT_UNKNOWN_CHANNEL,
     RESET_CODE_TUNNEL_HUB_EXHAUSTED, RESET_CODE_TUNNEL_UNKNOWN_FORWARD,
     TUNNEL_ARRIVAL_SWEEP_INTERVAL,
 };
 
 pub use hub::{ConduitInbound, ControlHub, HubSendError};
-pub(crate) use hub::{TunnelCloseTarget, tunnel_close_target};
+pub(crate) use hub::{MAX_AGENT_CLAIM_TOKEN_LEN, TunnelCloseTarget, tunnel_close_target};
 
 /// How often [`Listen::run_stale_sweeper`] checks the registry for stale
 /// entries whose `[listen].stale_retention` has elapsed
@@ -360,6 +361,9 @@ pub async fn run_listen(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod agent_hub_tests;
 
 #[cfg(test)]
 mod control_hub_tests;

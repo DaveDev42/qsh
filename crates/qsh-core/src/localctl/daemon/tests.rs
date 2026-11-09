@@ -457,6 +457,18 @@ fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
         }),
         Some(LocalStreamRelay::ClaimTcpAccepted),
     );
+    // `AGENT` (ADR-0055 decision 14) is claimed from the hub's queue like
+    // `TCP_ACCEPTED`; the daemon opens nothing toward the target for it.
+    assert_eq!(
+        local_stream_relay_kind(&wire::StreamHeader {
+            kind: wire::StreamKind::Agent as i32,
+            ticket: Vec::new(),
+            host: String::new(),
+            port: 0,
+            deny_host_local: false,
+        }),
+        Some(LocalStreamRelay::ClaimAgent),
+    );
     assert_eq!(
         local_stream_relay_kind(&wire::StreamHeader {
             kind: wire::StreamKind::Unspecified as i32,
