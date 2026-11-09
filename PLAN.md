@@ -58,6 +58,10 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 - [ ] **실제 망 펀칭 회차.** `docs/campaigns/m24-punch.md`. 휴대폰 테더링의 CGNAT, 집 공유기, 회사 망, IPv6 전용 망에서 A–B 쌍을 기록한다. DoD 밖이다.
 - [ ] **`punch-netns`를 필수 검사로 올릴지.** 저장소 설정이라 사람 몫이다. 지금은 `ci-ok`의 `needs`에 없다.
 
+### 0.8 M25가 만든 사람 몫
+
+- [ ] **ADR-0055 DoD 23.5의 첫 연결 시간 확인.** 경로가 끊긴 뒤 첫 로컬 agent 연결은 probe 대기(`clamp(4×RTT, 300 ms, 2 s)`) 안에 닫히고 100 ms 기준은 둘째 연결부터 맞는다(ADR-0055 개정 이력). 받아들일지 Dave가 정한다.
+
 ## 1. 유지보수에서 남은 확인
 
 자리표시자 계획 §1에서 열린 채로 넘어온 항목이다.
@@ -111,8 +115,8 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - [x] **`forward.agent`와 감사.** 2026-11-09 착지(`a13b68d`, `docs/CLI.md` v0.91, PRD §9 어휘 13종, ADR-0045 개정 이력, threat model B46·D24·E25·G12). `check_agent`가 소켓 생성 전에 choke point와 감사를 거친다. 거부는 `DENIED`, 감사 실패는 `UNAVAILABLE`이고 둘 다 소켓 없이 세션과 exec는 연다. role 없는 pin과 `tunnel`·`read-only`·`reverse`·`none`이 각각 시험된다. fixture `acl.show.forward_agent.json`·`acl.show.with_role_agent.json`·`setup.run.host_complete_with_role_agent.json`.
 - [x] **host 쪽(unix).** runtime `agent/`(0700)의 0600 소켓, peer uid 검사, 긴 경로의 `mkdtemp` 대체, `SSH_AUTH_SOCK` 고정 키, 세션·exec 끝의 정리와 시작 때 죽은 소켓 쓸기(결정 6·8). 시험: `agent_socket_is_removed_when_the_session_ends`, `stale_agent_sockets_are_swept_at_start`. 1차 2026-11-09(`18b255f`): 독립 모듈 `qsh_core::agent`의 `AgentListener`(unix 0700 `agent/`의 0600 소켓, 긴 경로의 `/tmp` mkdtemp 대체, localctl의 peer uid 검사, 소켓당 16 상한과 `StreamBudget`, drop 때 제거, 5초보다 오래된 죽은 소켓만 지우는 `sweep_stale`)와 Windows의 localctl `PipeListener` 재사용(소유자 전용 DACL, `FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`). WSL 전체 4099개, Dave-Windows agent·localctl 99개. 배선 `a13b68d`: 세션·exec마다 소켓과 `AGENT` 스트림 브리지(연결당 64), `SSH_AUTH_SOCK`을 `PINNED_POSIX`·`PINNED_WINDOWS`에 넣고 agent가 없으면 client 값도 지운다, 종료·close·TTL·exec 끝의 제거와 serve 시작의 sweep. 시험 `agent_host`(python3로 `$SSH_AUTH_SOCK`에 목록 조회).
 - [x] **client 쪽과 플래그.** 2026-11-09 착지(`d47599c`, `docs/CLI.md` v0.92, man 넷 재생성). 로컬 agent 탐색(unix `SSH_AUTH_SOCK`, Windows는 그 pipe 또는 `\\.\pipe\openssh-ssh-agent`, `ERROR_PIPE_BUSY` 재시도), 연결당 dispatcher(등록 안 된 channel reset, 11·13만 로컬 agent로, 나머지는 client가 `FAILURE`, 길이 0·상한 초과 reset, 연결당 64), `-A`·`-a`·`-o ForwardAgent`·`agent.forward`의 우선순위(`forward_agent_precedence_table`), doctor `agent_unreachable`·`agent_dir_unusable`, fixture `doctor_agent_unreachable.json`·`session.open.agent.json`·`exec.run.agent_denied.json`. `qsh cp -A`는 다른 scp 플래그처럼 종료 2다(ADR-0055 개정 이력). 진짜 host와 잇는 `agent_forward_loopback_lists_and_signs`는 아직 없다. WSL 전체 4148개, Dave-Windows 4133개(SSH 세션 일곱 제외).
-- [ ] **받치는 연결과 `attach -A`.** writer lease를 쥔 `-A` attach가 소켓을 받친다(결정 9). 시험: `agent_backing_follows_the_writer_attach`, 끊긴 동안 로컬 연결이 100 ms 안에 닫히는 chaos 시험.
-- [ ] **역방향 route.** `qsh listen` 데몬의 `agent_channel → conduit` 표와 claim seat(결정 14). 시험: `agent_forward_over_the_reverse_route`, 결정 22 B47.
+- [x] **받치는 연결과 `attach -A`.** 2026-11-09 착지(`40d7968`, WSL 전체 4164개, Dave-Windows 4142개). 진짜 `Ops`와 host를 잇는 `agent_forward` 다섯: `agent_forward_loopback_lists_and_signs`(받은 종류가 정확히 11·13, remove-all은 client가 막음), `agent_forward_over_a_punched_connection`, `agent_backing_follows_the_writer_attach`, 절단 뒤 resume, `a_healthy_path_adds_no_round_trip_to_an_agent_request`. 조용히 죽은 경로의 backing 연결에 로컬 연결이 매달리던 결함을 실제 스트림과 동시에 도는 probe로 고쳤다(ADR-0055 개정 이력). 끊긴 뒤 첫 로컬 연결은 `probe_wait`(loopback 300 ms) 안에, 둘째부터 100 ms 안에 닫힌다. 이 차이는 §0.8의 Dave 확인 항목이다.
+- [x] **역방향 route.** 2026-11-09 착지(`bd7fb6e`, protocol §20.2.1, threat model B47, Dave-Windows 4142개). `ControlHub`가 요청이 나가는 순간 `agent_channel`을 그 conduit에 묶고, 등록된 16바이트 channel의 `AGENT` 스트림만 hub당 32 상한 안에서 큐에 넣는다. CLI는 `LOCAL_STREAM`으로 channel과 claim token을 내밀고 처음 claim한 토큰이 seat에 앉는다. 데몬은 바이트만 옮긴다. 역방향 attach·exec·재attach가 같은 channel을 싣는다. hub당 등록 channel 256 상한을 더했다(ADR에 없는 방어 상한). 남은 위험: 같은 uid 프로세스가 주인보다 먼저 channel 값을 알아 claim하면 seat을 차지할 수 있다(B47 잔여 위험).
 - [ ] **Windows host와 client.** `\\.\pipe\qsh-agent-<hex>`, 소유자 전용 DACL, `FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`, 로컬 `\\.\pipe\openssh-ssh-agent`(결정 7·11·21). 시험: `windows_client_reaches_an_agent_on_a_named_pipe`, Windows CI의 Win32-OpenSSH `ssh-add -l`.
 - [ ] **수용 시험.** 진짜 `ssh-agent` 시험(`QSH_REQUIRE_SSH_AGENT=1`, 세 OS CI), 펀칭 연결 위의 netsim 시험, DoD 열네 항목 대응표.
 - [ ] **문서와 마감.** man, README, `docs/CLI.md` §7.2의 `ssh-add -c` 권고, threat model 결정 22의 행, ROADMAP M25 마감 노트.
