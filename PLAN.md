@@ -104,7 +104,7 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 각 스텝은 PR 하나 크기다. 스텝마다 그 스텝의 시험과 일곱 게이트가 초록이어야 닫힌다. 순서는 위에서 아래다.
 
 - [x] **범위 ADR(ADR-0055).** 2026-11-09 승인(Dave 결정, 다섯 항목 모두 추천 (가)).
-- [ ] **전제 확인 둘.** ADR-0055가 기대는 두 가정을 먼저 잰다. Win32-OpenSSH의 `ssh-add`가 `SSH_AUTH_SOCK`에 준 named pipe 경로를 쓰는지(Windows host 설계 전체, 결정 7), OpenSSH 9.x `ssh-agent`가 `session-bind`를 받지 않은 연결에서 목적지 제한 키의 서명을 거절하는지(결정 20의 "안전한 쪽의 실패"). 결과는 ADR-0055 개정 이력에 적고, 가정이 틀리면 이 계획을 멈추고 Dave에게 묻는다.
+- [x] **전제 확인 둘.** 2026-11-09 둘 다 성립(ADR-0055 개정 이력). Win32-OpenSSH 9.5p2의 `ssh-add`·`ssh`·`ssh-keygen -Y sign`이 사용자 지정 named pipe(소유자 전용 DACL, `PIPE_REJECT_REMOTE_CLIENTS`, `FIRST_PIPE_INSTANCE`)를 쓴다. `ssh-agent.exe`는 `-a`를 무시하고 서비스가 꺼져 있으면 기본 pipe가 없다. OpenSSH 9.6p1 `ssh-agent`는 `session-bind` 없는 연결에서 목적지 제한 키의 서명을 `FAILURE`로 거부하고 목록에는 보인다. Windows CI 시험의 가짜 agent는 P/Invoke `CreateNamedPipeW` 서버로 대신할 수 있다.
 - [ ] **가짜 agent와 `qsh_proto::agent`.** `qsh-testkit`의 가짜 agent(unix socket, Windows named pipe), 길이와 종류만 읽는 sans-IO decoder, 결정 12의 허용 표와 상한(결정 4·10), fuzz 타깃 `agent_frames`(27종). 시험: `agent_filter_table`, `an_oversized_agent_frame_resets_the_stream`.
 - [ ] **`agent.v1` wire.** `CAP_AGENT_V1`, `StreamKind::AGENT = 6`, `SessionOpen`·`SessionAttach`·`ExecStart`의 `agent_channel`, 응답의 `AgentGrant`(결정 3). protocol 새 절, `capabilities.json` golden, `docs/CLI.md` 판 올림. 시험: `no_agent_field_without_dash_a`.
 - [ ] **`forward.agent`와 감사.** 어휘 13종, role 표의 `full`·`exec`, `acl.toml`·`trust allow`, 감사와 `qsh::agent` 로그(결정 16·17). 거부되면 세션은 열고 agent만 빠진다. fixture는 append-only로 더한다.
