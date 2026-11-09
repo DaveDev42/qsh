@@ -36,8 +36,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use qsh_proto::wire::AGENT_CHANNEL_LEN;
 use qsh_proto::wire::{self, StreamHeader, StreamKind};
-use qsh_transport::{Connection, RecvStream, SendStream, StreamCode};
+use qsh_transport::{Connection, FramedSend, RecvStream, SendStream, StreamCode};
+use rand::Rng as _;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -51,6 +53,69 @@ use crate::tunnel::splice::{RESET_CODE_TUNNEL_ABORT, pump};
 /// How often a session socket asks whether its session is still running.
 const SESSION_POLL: Duration = Duration::from_millis(200);
 
+/// How long a local connection waits for the backing connection to prove the
+/// path carries packets, at least ([`probe_wait`] scales it with the RTT).
+const PROBE_FLOOR: Duration = Duration::from_millis(300);
+
+/// The longest a probe waits, however slow the path.
+const PROBE_CEIL: Duration = Duration::from_secs(2);
+
+/// What the host knows about whether a backing connection's path works, kept
+/// per connection and shared by every socket it backs.
+///
+/// A path that died without a close leaves the QUIC connection looking
+/// healthy for the whole idle timeout, and a stream opened on it just waits.
+/// The first local connection after that finds out with a probe
+/// ([`probe_path`]); this remembers the verdict so the connections after it
+/// close at once, until the peer's authenticated frames move again.
+#[derive(Default)]
+struct PathHealth {
+    /// `rx_frames` of the backing connection when a probe went unanswered.
+    suspect_at: Mutex<Option<u64>>,
+    /// The last `rx_frames` a local connection saw and when it saw that
+    /// value change.
+    heard: Mutex<Option<(u64, std::time::Instant)>>,
+}
+
+impl PathHealth {
+    /// Whether the connection is still known to be silent: a probe failed
+    /// and nothing authenticated has arrived since.
+    fn still_silent(&self, rx_frames: u64) -> bool {
+        let mut suspect = self.suspect_at.lock().unwrap_or_else(|e| e.into_inner());
+        match *suspect {
+            Some(at) if at == rx_frames => true,
+            Some(_) => {
+                *suspect = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the peer's authenticated frames moved within `wait` of the
+    /// last time this was asked, which makes a probe needless. Records
+    /// `rx_frames` for the next call.
+    fn heard_recently(&self, rx_frames: u64, wait: Duration) -> bool {
+        let now = std::time::Instant::now();
+        let mut heard = self.heard.lock().unwrap_or_else(|e| e.into_inner());
+        match *heard {
+            Some((at, since)) if at != rx_frames => {
+                *heard = Some((rx_frames, now));
+                now.duration_since(since) <= wait
+            }
+            Some(_) => false,
+            None => {
+                *heard = Some((rx_frames, now));
+                false
+            }
+        }
+    }
+
+    fn mark_silent(&self, rx_frames: u64) {
+        *self.suspect_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx_frames);
+    }
+}
+
 /// The connection and channel that stand behind a socket right now.
 #[derive(Clone)]
 struct Backing {
@@ -60,6 +125,7 @@ struct Backing {
     /// The `AGENT` streams of `conn` (decision 10), shared by every socket
     /// that connection backs.
     budget: StreamBudget,
+    health: Arc<PathHealth>,
 }
 
 /// A running accept loop, stopped (and its socket removed) when this is
@@ -92,6 +158,7 @@ pub(super) struct AgentTable {
     runtime_dir: OnceLock<PathBuf>,
     sockets: Mutex<HashMap<String, SessionSocket>>,
     budgets: Mutex<HashMap<usize, StreamBudget>>,
+    health: Mutex<HashMap<usize, Arc<PathHealth>>>,
 }
 
 impl AgentTable {
@@ -100,7 +167,18 @@ impl AgentTable {
             runtime_dir: OnceLock::new(),
             sockets: Mutex::new(HashMap::new()),
             budgets: Mutex::new(HashMap::new()),
+            health: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn health(&self, conn_id: usize) -> Arc<PathHealth> {
+        Arc::clone(
+            self.health
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(conn_id)
+                .or_default(),
+        )
     }
 
     fn budget(&self, conn_id: usize) -> StreamBudget {
@@ -151,6 +229,10 @@ impl AgentTable {
         }
         drop(sockets);
         self.budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&conn_id);
+        self.health
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&conn_id);
@@ -258,6 +340,7 @@ impl Server {
                     conn_id: ctx.conn_id,
                     channel: channel.to_vec(),
                     budget: self.agents.budget(ctx.conn_id),
+                    health: self.agents.health(ctx.conn_id),
                 }),
             },
             Err(err) => {
@@ -370,6 +453,7 @@ impl Server {
                     conn_id: ctx.conn_id,
                     channel: channel.to_vec(),
                     budget: self.agents.budget(ctx.conn_id),
+                    health: self.agents.health(ctx.conn_id),
                 };
                 if self.agents.set_backing(&session.0, Some(backing)) {
                     wire::AgentGrant::Forwarded
@@ -460,8 +544,23 @@ impl Drop for StreamGuard {
 
 /// Open an `AGENT` stream on the backing connection and copy bytes between
 /// it and the local connection, each direction half-closed as it ends.
+///
+/// The copy starts at once. Unless the connection was heard from a moment ago,
+/// a liveness probe ([`probe_path`]) runs beside it, so a healthy path costs
+/// no extra round trip. A path that died silently must not leave the program
+/// waiting (decision 9): when the probe finds no sign of life the local
+/// connection is closed and tries again once the attach has resumed. The
+/// real stream's own silence proves nothing, since the local agent may take
+/// long to answer (`ssh-add -c`).
 async fn bridge(conn: AgentConn, backing: Backing) {
     let (local, _slots) = conn.into_parts();
+    let frames = backing.conn.rx_frames();
+    let wait = probe_wait(backing.conn.rtt());
+    if backing.health.still_silent(frames) {
+        tracing::info!(target: "qsh::agent", event = "accept_closed", reason = "path_silent");
+        return;
+    }
+    let probing = !backing.health.heard_recently(frames, wait);
     let header = StreamHeader {
         kind: StreamKind::Agent as i32,
         ticket: backing.channel.clone(),
@@ -477,19 +576,97 @@ async fn bridge(conn: AgentConn, backing: Backing) {
         kill.kill();
         return;
     };
-    let mut guard = StreamGuard {
-        send: Some(send),
-        recv: Some(recv),
+    let copy = async move {
+        let mut guard = StreamGuard {
+            send: Some(send),
+            recv: Some(recv),
+        };
+        let (mut local_read, mut local_write) = tokio::io::split(local);
+        let (Some(send), Some(recv)) = (guard.send.as_mut(), guard.recv.as_mut()) else {
+            return;
+        };
+        let up = pump(&mut local_read, send, &[]);
+        let down = pump(recv, &mut local_write, &residue);
+        if tokio::try_join!(up, down).is_ok() {
+            // Both directions ended cleanly: each already said so to its peer.
+            guard.send.take();
+            guard.recv.take();
+        }
     };
-    let (mut local_read, mut local_write) = tokio::io::split(local);
-    let (Some(send), Some(recv)) = (guard.send.as_mut(), guard.recv.as_mut()) else {
-        return;
+    tokio::pin!(copy);
+    // A connection heard from within `wait` gets its probe only if the copy
+    // is still going after another `wait` with nothing heard since: the path
+    // may have died right after that traffic, and a connection that is
+    // answered in time never starts a probe stream.
+    let grace = if probing { Duration::ZERO } else { wait };
+    let probe = async {
+        tokio::time::sleep(grace).await;
+        probe_path(&backing.conn, frames, wait).await
     };
-    let up = pump(&mut local_read, send, &[]);
-    let down = pump(recv, &mut local_write, &residue);
-    if tokio::try_join!(up, down).is_ok() {
-        // Both directions ended cleanly: each already said so to its peer.
-        guard.send.take();
-        guard.recv.take();
+    tokio::pin!(probe);
+    tokio::select! {
+        () = &mut copy => {}
+        alive = &mut probe => {
+            if alive {
+                copy.await;
+            } else {
+                // Dropping `copy` closes the local connection and resets the
+                // stream.
+                backing.health.mark_silent(frames);
+                tracing::info!(
+                    target: "qsh::agent",
+                    event = "accept_closed",
+                    reason = "path_silent"
+                );
+            }
+        }
     }
+}
+
+/// How long a probe waits for a connection with this RTT estimate.
+fn probe_wait(rtt: Duration) -> Duration {
+    rtt.saturating_mul(4).clamp(PROBE_FLOOR, PROBE_CEIL)
+}
+
+/// Whether the backing connection's peer answers within `wait`. Two things
+/// count: the peer's authenticated frames moving past `frames` (the real
+/// stream's first packets get acknowledged), or the reset of an `AGENT`
+/// stream whose channel no client has registered (a client resets it at once,
+/// ADR-0055 decision 13, which is a round trip on the path). Nothing reaches
+/// a local agent, and the channel is random, so it never collides with a
+/// real one.
+async fn probe_path(conn: &Connection, frames: u64, wait: Duration) -> bool {
+    let stream = async {
+        let (send, mut recv) = conn.open_bi().await.ok()?;
+        let mut channel = [0u8; AGENT_CHANNEL_LEN];
+        rand::rng().fill_bytes(&mut channel);
+        let mut framed = FramedSend::data(send);
+        framed
+            .send(&StreamHeader {
+                kind: StreamKind::Agent as i32,
+                ticket: channel.to_vec(),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        let mut send = framed.into_raw();
+        let mut byte = [0u8; 1];
+        // Any answer proves the path: a reset, a stop or an end.
+        let _ = recv.read(&mut byte).await;
+        let _ = send.reset(StreamCode::from_u32(RESET_CODE_TUNNEL_ABORT));
+        Some(())
+    };
+    let moved = async {
+        while conn.rx_frames() == frames {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let answered = tokio::time::timeout(wait, async {
+        tokio::select! {
+            r = stream => r.is_some(),
+            () = moved => true,
+        }
+    })
+    .await;
+    matches!(answered, Ok(true)) && conn.close_reason().is_none()
 }
