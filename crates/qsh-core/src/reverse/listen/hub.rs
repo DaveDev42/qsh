@@ -994,6 +994,39 @@ pub struct ControlHub {
     /// Rung when an `AGENT` stream is queued and when a conduit's channels
     /// are swept, like [`Self::tunnel_notify`] for `-R` claims.
     agent_notify: Notify,
+    /// Slots for jump channels, and the channel values in use
+    /// (ADR-0056 decision 14).
+    jump_budget: crate::agent::StreamBudget,
+    jump_channels: Mutex<HashSet<[u8; qsh_proto::jump::JUMP_CHANNEL_LEN]>>,
+    /// What this host's jump channels have carried.
+    jump_stats: Arc<crate::jump::RelayStats>,
+}
+
+/// Why [`ControlHub::claim_jump`] refused a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JumpClaimError {
+    /// This host already carries a channel with this value.
+    InUse,
+    /// This host carries [`crate::jump::MAX_JUMP_CHANNELS_PER_HUB`] channels.
+    Full,
+}
+
+/// A claimed jump channel: its value and one of the hub's slots, held until
+/// the relay ends.
+pub(crate) struct JumpSlot {
+    hub: Arc<ControlHub>,
+    channel: [u8; qsh_proto::jump::JUMP_CHANNEL_LEN],
+    _permit: crate::agent::Permit,
+}
+
+impl Drop for JumpSlot {
+    fn drop(&mut self) {
+        self.hub
+            .jump_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.channel);
+    }
 }
 
 impl ControlHub {
@@ -1029,6 +1062,9 @@ impl ControlHub {
             tunnel_notify: Notify::new(),
             agent_budget: crate::agent::StreamBudget::new(MAX_AGENT_STREAMS_PER_HUB),
             agent_notify: Notify::new(),
+            jump_budget: crate::agent::StreamBudget::new(crate::jump::MAX_JUMP_CHANNELS_PER_HUB),
+            jump_channels: Mutex::new(HashSet::new()),
+            jump_stats: Arc::new(crate::jump::RelayStats::default()),
         })
     }
 
@@ -2091,6 +2127,38 @@ impl ControlHub {
     // the request carrying the channel claims it through a `LOCAL_STREAM`
     // conduit (`claim_agent`). The daemon never touches a local agent.
     // ----------------------------------------------------------------
+
+    /// Claim `channel` for a jump relay and one of the hub's
+    /// [`crate::jump::MAX_JUMP_CHANNELS_PER_HUB`] slots. Nothing is opened
+    /// toward the host before this succeeds. A value already in use is
+    /// refused before the cap is looked at, like the host's own shape check
+    /// (ADR-0056 decision 7).
+    pub(crate) fn claim_jump(
+        self: &Arc<Self>,
+        channel: [u8; qsh_proto::jump::JUMP_CHANNEL_LEN],
+    ) -> Result<JumpSlot, JumpClaimError> {
+        let mut channels = self.jump_channels.lock().unwrap_or_else(|e| e.into_inner());
+        if channels.contains(&channel) {
+            return Err(JumpClaimError::InUse);
+        }
+        let permit = self.jump_budget.try_acquire().ok_or(JumpClaimError::Full)?;
+        channels.insert(channel);
+        Ok(JumpSlot {
+            hub: Arc::clone(self),
+            channel,
+            _permit: permit,
+        })
+    }
+
+    /// Jump channels this host carries now.
+    pub fn jump_channels_in_use(&self) -> usize {
+        self.jump_budget.in_use()
+    }
+
+    /// What this host's jump channels have carried.
+    pub fn jump_stats(&self) -> &Arc<crate::jump::RelayStats> {
+        &self.jump_stats
+    }
 
     /// Take one of this hub's [`MAX_AGENT_STREAMS_PER_HUB`] slots, or `None`
     /// at the cap. Never waits: the next stream is refused at once.

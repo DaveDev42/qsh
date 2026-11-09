@@ -484,8 +484,10 @@ pub(crate) async fn open_stream_over_with_wait(
 pub(crate) struct ExpectedPeer {
     /// `LocalHelloAck.peer_fingerprint` the control leg recorded.
     pub fingerprint: String,
-    /// `LocalHelloAck.generation` the control leg recorded.
-    pub generation: u64,
+    /// `LocalHelloAck.generation` the control leg recorded; `None` when only
+    /// the peer's identity matters (a jump chain's first hop, ADR-0056
+    /// decision 14).
+    pub generation: Option<u64>,
 }
 
 /// Why a [`open_stream_expecting`] handshake did not produce a conduit.
@@ -609,7 +611,8 @@ async fn open_stream_over_inner(
     // target before it has the header, so a mismatch here costs the new
     // registration's device no byte.
     if let Some(expect) = expect
-        && (ack.peer_fingerprint != expect.fingerprint || ack.generation != expect.generation)
+        && (ack.peer_fingerprint != expect.fingerprint
+            || expect.generation.is_some_and(|g| g != ack.generation))
     {
         return Err(StreamOpenError::PeerChanged);
     }

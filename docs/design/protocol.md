@@ -458,6 +458,8 @@ message FileFrame {
 
 **`exec` conduit(issue #5).** `StreamHeader{EXEC_DATA, ticket}`도 새 `LocalStreamKind` 없이 같은 `LOCAL_STREAM` conduit을 탄다. `ExecStart`(control, `LOCAL_CONTROL`)가 발급한 ticket을 `LOCAL_STREAM` conduit이 `StreamHeader{EXEC_DATA, ticket}`으로 상환하는 흐름은 `session.open`의 `SESSION_DATA` 상환과 같다.
 
+**`JUMP` conduit (ADR-0056 결정 14).** `StreamHeader{JUMP, channel, host, port}`도 새 `LocalStreamKind` 없이 같은 `LOCAL_STREAM` conduit을 탄다. 데몬은 `ConnectResult` 정확히 하나를 먼저 쓰고(등록한 host의 것이거나 자신의 거절), 이어서 `u16` 길이 frame으로 안쪽 QUIC 패킷을 옮기며 등록 연결 쪽 운반체를 datagram과 스트림 가운데 고른다. 자세한 규칙은 §21.7.
+
 **raw 구간의 chunk framing (Windows).** conduit은 `LocalHello`·`LocalHelloAck`·`StreamHeader`·ack 같은 framed `qsh.local.v1` 메시지를 마친 뒤 raw byte 중계로 바뀐다(`SESSION_DATA`·`TCP_CONNECT`·`TCP_ACCEPTED`·`EXEC_DATA`·`FILE_DATA`). unix 소켓은 이 구간에서 쓰기 방향만 닫을 수 있어 바이트를 그대로 나르지만, Windows byte 모드 named pipe는 그럴 수 없다(ADR-0035 결정 14). 그래서 Windows는 raw 구간의 두 방향을 모두 chunk로 나른다.
 
 ```
@@ -1182,7 +1184,7 @@ target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬�
 
 ## 21. jump chaining (ADR-0056)
 
-이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응, 역방향 데몬은 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응(§21.5), recovery(§21.6), 역방향 데몬(§21.7)을 차례로 적는다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
 
 ### 21.0 capability와 wire (ADR-0056 결정 3·4)
 
@@ -1296,3 +1298,37 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 **ssh 되살리기는 jump 대상에 하지 않는다.** `Ops::revive_target`은 `jump`가 있는 대상에 `None`을 낸다. 되살린 serve의 주소는 체인이 쓰던 주소를 바꾸지 못하고, 체인 없는 `PeerTarget`을 내면 jump host가 바깥에서 직접 닿는 길로 새기 때문이다.
 
 **시험.** `crates/qsh-testkit/tests/it/jump_recovery.rs`: `a_session_through_a_jump_resumes_after_the_hop_link_dies`(C-J를 chaos proxy로 5초 끊음), `a_session_through_a_jump_resumes_after_the_target_link_dies`(J-T를 끊음), `outer_migration_is_invisible_to_the_inner_connection`, `a_nested_endpoint_never_binds_a_socket_of_its_own`, `a_supervised_tunnel_through_a_chain_survives_a_cut`, `a_supervised_tunnel_through_a_chain_survives_a_cut_behind_the_hop`, `a_supervised_tunnel_migrates_at_the_first_hop_and_keeps_its_chain`.
+
+### 21.7 역방향 첫 hop: 데몬의 운반체 번역 (ADR-0056 결정 14)
+
+첫 hop이 이 장비의 `qsh listen` 데몬에 live 역방향 등록(`qsh serve --to`)을 들고 있으면 CLI는 그 hop에 QUIC 연결이 없다. 연결은 데몬이 쥐고 있다. 그래서 첫 `JUMP` 채널만 `LOCAL_STREAM` conduit으로 열고, 둘째 hop부터는 §21.5의 걷기가 그대로다. 새 `LocalStreamKind`는 없다(§11-3).
+
+```
+CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 스트림)== 첫 hop(J) --UDP-- 다음 hop
+```
+
+**CLI가 하는 일.** `Ops::resolve_route`가 첫 hop의 이름으로 live 역방향 등록을 찾으면(`Ops::reverse_first_hop`, 평소 라우팅과 같은 규칙) 계획의 `first_reverse`에 데몬 소켓과 이름을 적는다. 그 hop의 pin은 주소가 없어도 되고 펀칭 계획은 세우지 않는다. `dial_chain_via_daemon`이 (1) `LocalHello` 뒤의 `LocalHelloAck.peer_fingerprint`가 첫 hop pin의 지문과 같은지 **헤더를 보내기 전에** 본다(`open_stream_expecting`, `generation`은 보지 않는다). 다르면 stage `auth`이고 데몬도 J도 아무것도 열지 않는다. (2) `StreamHeader{JUMP, channel, host, port}`를 보낸다. `host:port`는 둘째 hop(없으면 끝단)의 pin 주소다. (3) 데몬의 `ConnectResult`를 읽고(아래), (4) 이 conduit을 채널의 스트림 운반체로 삼아 §21.5와 같은 펌프를 띄운다. CLI 구간에는 datagram이 없다(`both_datagram = false`). 안쪽 endpoint는 바깥 소켓이 없으므로 첫 hop의 migration(Tier 1)은 해당이 없고 `rebinding_via`를 걸지 않는다. recovery(Tier 2)와 `--supervise`는 같은 `dial_jump`가 데몬 길을 다시 걷는다.
+
+**데몬이 하는 일.** `serve_jump`(`localctl/daemon.rs`)는 raw 단계로 넘어가 `ConnectResult` 정확히 하나를 먼저 쓴다. 순서는 이렇다. 앞 단계가 실패하면 뒤 단계는 돌지 않고, 등록 연결에는 아무것도 열리지 않는다.
+
+1. `jump_channel`이 정확히 16바이트이고 header가 `DATA_FRAME_MAX` 이하인지 본다. 아니면 `INVALID_ARGUMENT`.
+2. 등록한 host의 capability에 `jump.v1`이 있는지 본다. 없으면 `UNSUPPORTED`.
+3. hub마다 `JumpSlot`을 잡는다(`ControlHub::claim_jump`). 이미 이 hub에 있는 channel 값이면 `INVALID_ARGUMENT`, hub가 `MAX_JUMP_CHANNELS_PER_HUB`(32)개를 쥐고 있으면 `RESOURCE_EXHAUSTED`. 값 점유가 먼저고 상한이 나중이다(J의 모양 검사와 같은 순서). 슬롯은 relay가 끝날 때 풀린다.
+4. 등록 연결의 `DatagramHub`에 channel을 등록한 뒤 `open_bi`(`OPEN_DATA_STREAM_TIMEOUT` 10초)로 `JUMP` 스트림을 연다(session band). 열리지 않으면 `CONNECTION_FAILED`.
+5. header를 **받은 바이트 그대로** 보내고 J의 `ConnectResult`를 `JUMP_OPEN_TIMEOUT`(12초) 안에 기다린다. 그동안 CLI가 끊으면 스트림을 `0x2007`로 reset하고 끝낸다. 시한이 지나거나 J가 답 없이 닫으면 `CONNECTION_FAILED`.
+6. `ConnectResult`를 CLI에 그대로 건넨다. `ok`가 아니면(J의 `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `CONNECTION_FAILED`) 송신을 `finish()`하고 CLI conduit을 닫는다. CLI는 §21.5의 `refusal`로 stage를 정한다. 데몬 자신의 거절도 같은 모양(`ok = false`와 `code`)이라 CLI는 둘을 가르지 않는다.
+7. `ok`면 `jump::relay::run`이 패킷을 옮긴다.
+
+**인가는 데몬의 일이 아니다.** `forward.jump`는 등록한 host(J)가 스트림을 받는 자리에서 판정한다(§21.3, 결정 7). 주체는 데몬의 신원(listen 쪽 신원)이다. 데몬은 가시성과 자원만 쥔다: "등록은 도달 가능성을 주지, 권한을 주지 않는다"(§11-3).
+
+**번역.** `run`은 채널마다 한 task다.
+
+- CLI → host: CLI 구간의 `u16` 길이 frame을 `JumpStreamDecoder`로 읽는다. 패킷마다 `choose_carrier(both_datagram, 등록 연결의 max_datagram_size())`와 `SilenceFallback`(데몬 쪽 눈, srtt는 등록 연결의 것)이 고른다. datagram이면 종류 14 frame이고, 자리를 넘으면 스트림으로 돌리지 않고 버리고 센다. 스트림이면 `encode_packet`으로 `JUMP` 스트림의 큐(`JUMP_STREAM_QUEUE` 64 KiB)에 넣고 넘치면 버리고 센다. `both_datagram`은 등록한 host의 capability에 `datagram.v1`이 있는지다(데몬은 늘 광고한다).
+- host → CLI: 종류 14 datagram과 `JUMP` 스트림의 frame을 모두 받는다. 둘 다 CLI 구간에 `u16` 길이 frame으로 쓴다. CLI 구간의 쓰기 큐도 64 KiB이고 넘으면 버리고 센다.
+- 데몬이 읽는 것은 길이 머리뿐이다. 패킷은 해석하지도 복호화하지도 않는다. 길이 0이나 1452 초과는 어느 쪽에서 오든 `BAD_HEADER`(`0x2001`)다: 등록 연결 쪽 스트림은 그 코드로 reset하고, CLI conduit은 닫는다.
+
+**끝.** CLI conduit이 닫히면(프로세스 종료 포함) 송신을 `finish()`하고 수신을 `stop`한다. J는 스트림 종료로 채널과 소켓을 닫고(`stream_end`) 데몬은 슬롯과 datagram 등록을 푼다. host 쪽 스트림이 끝나거나 reset되면 CLI conduit을 half-close하고 CLI의 펌프는 `StreamEnded`로 끝난다. 등록 연결이 닫히면 같은 길이다. 데몬에는 자기 idle 시한이 없다. 60초 idle은 J가 닫고(`JUMP_IDLE`) 그 reset이 데몬을 끝낸다.
+
+**관측.** `ControlHub::jump_stats()`(`RelayStats`)는 개수만 쥔다: `opened`, `closed`, `to_host_datagrams`, `to_host_stream`, `from_host_datagrams`, `from_host_stream`, `to_cli`, `oversize_dropped`, `queue_dropped`, `datagram_unavailable`, `silence_fallbacks`. `ControlHub::jump_channels_in_use()`는 지금 쥔 슬롯이다. 로그는 target `qsh::jump`의 `channel_opened`·`channel_closed`(`side = "daemon"`, 사유 `cli_gone`·`host_ended`·`connection_closed`·`bad_frame_cli`·`bad_frame_host`)이고 기본에서 꺼져 있다. channel 값과 패킷은 싣지 않는다.
+
+**시험.** `crates/qsh-testkit/tests/it/jump_reverse.rs`: `jump_first_hop_over_the_reverse_route`(진짜 daemon·`serve --to`·loopback T에서 exec, 세션, `-L`이 끝나고 등록 연결 구간이 양방향 datagram 운반체를 쓴 것을 데몬과 J의 카운터로 확인), `a_reverse_first_hop_with_another_fingerprint_opens_nothing`, `the_daemon_claims_a_jump_channel_once_and_refuses_a_malformed_one`, `the_daemon_carries_at_most_32_jump_channels_per_registered_host`, `a_bad_frame_from_the_cli_ends_the_channel_and_frees_its_slot`, `the_daemon_cleans_up_when_the_cli_goes_away`, `a_refusal_of_the_host_reaches_the_cli_verbatim_and_frees_the_slot`, `a_registered_host_without_jump_v1_gets_no_jump_stream`. 펀칭한 첫 hop은 `crates/qsh-testkit/tests/it/jump_punch.rs`의 `jump_first_hop_over_a_punched_connection`(netsim)이다.

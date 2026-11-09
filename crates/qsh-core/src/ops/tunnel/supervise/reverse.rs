@@ -250,7 +250,7 @@ impl Supervisor {
             host,
             expect: Some(ExpectedPeer {
                 fingerprint: self.params.fingerprint.clone(),
-                generation,
+                generation: Some(generation),
             }),
         };
         (carrier, session)

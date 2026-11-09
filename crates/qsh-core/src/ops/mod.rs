@@ -1186,7 +1186,8 @@ impl Ops {
             }
             Err(err) => return Err(err),
         };
-        let plan = self.jump_plan(&names, end_name, &address, &identity, &trust)?;
+        let reverse_first = self.reverse_first_hop(hop_names[0].as_str());
+        let plan = self.jump_plan(&names, end_name, &address, &identity, &trust, reverse_first)?;
         let learn = self.hint_learner(&trust);
         Ok(PeerTarget {
             identity,
@@ -1209,6 +1210,7 @@ impl Ops {
         end_address: &str,
         identity: &LoadedIdentity,
         trust: &Arc<SharedTrustStore>,
+        reverse_first: Option<crate::jump::ReverseHop>,
     ) -> Result<Arc<crate::jump::JumpPlan>, OpError> {
         use crate::jump::{HopPin, JumpFailure, Stage};
         let store = trust.snapshot();
@@ -1227,7 +1229,10 @@ impl Ops {
                 .find(name)
                 .ok_or_else(|| missing("no pin with this name is recorded"))?;
             let address = address.unwrap_or(&pin.address);
-            if address.is_empty() {
+            // A first hop that registered reverse is reached through the
+            // daemon and is never dialed or named in a header, so it needs
+            // no address (decision 14).
+            if address.is_empty() && !(index == 0 && reverse_first.is_some()) {
                 return Err(missing("the pin has no address to jump to"));
             }
             let fingerprint = pin
@@ -1245,14 +1250,38 @@ impl Ops {
             pins.push(pin_of(name, index, None)?);
         }
         let end_pin = pin_of(end, hops.len(), Some(end_address))?;
-        let first_punch = self.punch_plan(hops[0], identity, trust)?;
+        // A registered first hop is not punched to: the daemon already holds
+        // its connection.
+        let first_punch = match reverse_first {
+            Some(_) => None,
+            None => self.punch_plan(hops[0], identity, trust)?,
+        };
         let plan = crate::jump::JumpPlan::new(
             pins,
             end_pin,
             first_punch,
             identity.identity.device_id.clone(),
         )?;
+        let plan = match reverse_first {
+            Some(route) => plan.with_reverse_first(route),
+            None => plan,
+        };
         Ok(Arc::new(plan))
+    }
+
+    /// The first hop of a chain as the local `qsh listen` daemon holds it,
+    /// when its registration is live (ADR-0056 decision 14; the same rule
+    /// that routes a plain command to a registered host,
+    /// [`Self::resolve_host_route`]). `None` for a host the daemon does not
+    /// hold, which is dialed the ordinary way.
+    fn reverse_first_hop(&self, name: &str) -> Option<crate::jump::ReverseHop> {
+        match self.resolve_host_route(name) {
+            Ok(HostRoute::Reverse { socket, .. }) => Some(crate::jump::ReverseHop {
+                host: host::lookup_name(name).to_string(),
+                socket,
+            }),
+            _ => None,
+        }
     }
 
     /// The effective `[punch].mode`: `--no-punch` wins, then the key, then

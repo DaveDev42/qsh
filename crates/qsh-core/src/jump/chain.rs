@@ -39,7 +39,7 @@ use qsh_proto::wire::{
 };
 use qsh_transport::{
     Connection, DialError, Dialer, Endpoint, Fingerprint, FramedRecv, FramedSend, PacketPipe,
-    PipePeer, Principal, RecvStream, StaticTrust,
+    PipePeer, Principal, StaticTrust,
 };
 use rand::Rng as _;
 use tokio::sync::{oneshot, watch};
@@ -48,7 +48,7 @@ use tokio::time::Instant;
 
 use super::TARGET;
 use super::carrier::{Carrier, DATAGRAM_HEADER, SilenceFallback, choose_carrier};
-use super::middle::{StreamQueue, write_loop};
+use super::middle::{ChanRx, ChanTx, StreamQueue, write_loop};
 use super::report::{JumpFailure, Stage};
 use crate::client::Session;
 use crate::datagram::{DatagramHub, DatagramRx, SendFailure};
@@ -103,6 +103,18 @@ pub struct JumpPlan {
     pub first_punch: Option<Arc<PunchPlan>>,
     /// The device name the client presents in `Hello` to every peer.
     pub device_name: String,
+    /// Set when the first hop is a registered host reached only through the
+    /// local `qsh listen` daemon (ADR-0056 decision 14).
+    pub first_reverse: Option<ReverseHop>,
+}
+
+/// The first hop of a chain when it registered reverse on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseHop {
+    /// The host alias to ask the daemon for (`LocalHello.host`).
+    pub host: String,
+    /// The daemon's localctl socket.
+    pub socket: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for JumpPlan {
@@ -138,7 +150,16 @@ impl JumpPlan {
             end,
             first_punch,
             device_name,
+            first_reverse: None,
         })
+    }
+
+    /// The first hop is reached through the local daemon's registration
+    /// instead of by a dial of its own (decision 14).
+    #[must_use]
+    pub fn with_reverse_first(mut self, route: ReverseHop) -> Self {
+        self.first_reverse = Some(route);
+        self
     }
 
     /// Intermediate peers plus the end target.
@@ -312,12 +333,15 @@ impl PumpHandle {
 }
 
 struct PumpArgs {
-    outer: Connection,
+    /// The connection that carries the channel; `None` when the first hop
+    /// is reached through the local daemon (a stream-only conduit,
+    /// ADR-0056 decision 14).
+    outer: Option<Connection>,
     id: [u8; JUMP_CHANNEL_LEN],
-    send: qsh_transport::SendStream,
-    recv: RecvStream,
+    send: ChanTx,
+    recv: ChanRx,
     residue: Vec<u8>,
-    datagrams: DatagramRx,
+    datagrams: Option<DatagramRx>,
     peer: PipePeer,
     both_datagram: bool,
     info: Arc<ChannelInfo>,
@@ -354,7 +378,7 @@ async fn pump(
         both_datagram,
         info,
     } = args;
-    let hub = Arc::clone(datagrams.hub());
+    let hub = datagrams.as_ref().map(|d| Arc::clone(d.hub()));
     let channel = ChannelId(id);
     let (queue, queue_rx) = StreamQueue::new(JUMP_STREAM_QUEUE);
     let (close_tx, close_rx) = oneshot::channel();
@@ -370,7 +394,7 @@ async fn pump(
 
     // The first limit is the room's until a packet or the refresh reads it
     // again, so a packet is never held to a stale datagram budget.
-    let room = hub.max_datagram_size();
+    let room = hub.as_ref().and_then(|h| h.max_datagram_size());
     apply_limit(&peer, &info, choose_carrier(both_datagram, room), room);
 
     let end = 'pump: loop {
@@ -389,9 +413,10 @@ async fn pump(
             _ = &mut stop => break PumpEnd::Stopped,
             packet = peer.recv() => {
                 let Some(packet) = packet else { break PumpEnd::Stopped };
-                let room = hub.max_datagram_size();
+                let room = hub.as_ref().and_then(|h| h.max_datagram_size());
                 let rule = choose_carrier(both_datagram, room);
-                let carrier = silence.choose(rule, std::time::Instant::now(), hub.rtt());
+                let rtt = hub.as_ref().map_or(Duration::ZERO, |h| h.rtt());
+                let carrier = silence.choose(rule, std::time::Instant::now(), rtt);
                 if silence.fell_back() && last == Some(Carrier::Datagram) {
                     info.silence_fallbacks.fetch_add(1, Ordering::Relaxed);
                 }
@@ -410,7 +435,11 @@ async fn pump(
                             kind: DatagramKind::JumpPacket,
                             payload: packet,
                         };
-                        match hub.send(&frame) {
+                        let sent = match &hub {
+                            Some(hub) => hub.send(&frame),
+                            None => Err(SendFailure::Unavailable),
+                        };
+                        match sent {
                             Ok(()) => {
                                 silence.sent_datagram(std::time::Instant::now());
                                 info.datagrams_out.fetch_add(1, Ordering::Relaxed);
@@ -434,7 +463,7 @@ async fn pump(
                     }
                 }
             }
-            frame = datagrams.recv() => match frame {
+            frame = next_datagram(&mut datagrams) => match frame {
                 Some(frame) if frame.kind == DatagramKind::JumpPacket => {
                     silence.received_datagram();
                     info.datagrams_in.fetch_add(1, Ordering::Relaxed);
@@ -452,12 +481,12 @@ async fn pump(
                 break PumpEnd::StreamEnded;
             }
             _ = refresh.tick() => {
-                let room = hub.max_datagram_size();
+                let room = hub.as_ref().and_then(|h| h.max_datagram_size());
                 let rule = choose_carrier(both_datagram, room);
                 let carrier = if silence.fell_back() { Carrier::Stream } else { rule };
                 apply_limit(&peer, &info, carrier, room);
             }
-            _ = outer.closed() => break PumpEnd::ConnectionClosed,
+            () = outer_closed(&outer) => break PumpEnd::ConnectionClosed,
         }
     };
 
@@ -473,7 +502,7 @@ async fn pump(
     };
     let _ = close_tx.send(how);
     if how.is_some() {
-        let _ = recv.stop(super::middle::code(0x2007));
+        recv.stop(0x2007);
     }
     if !writer_done {
         let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
@@ -486,6 +515,25 @@ async fn pump(
         datagrams_out = info.datagrams_out.load(Ordering::Relaxed),
         stream_out = info.stream_out.load(Ordering::Relaxed),
     );
+}
+
+/// The next datagram of a channel; never, for a channel with no datagram
+/// carrier.
+async fn next_datagram(datagrams: &mut Option<DatagramRx>) -> Option<DatagramFrame> {
+    match datagrams {
+        Some(d) => d.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves when the outer connection closes; never, without one.
+async fn outer_closed(outer: &Option<Connection>) {
+    match outer {
+        Some(conn) => {
+            let _ = conn.closed().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// Holds the pipe to the packet size of the carrier in use.
@@ -542,8 +590,10 @@ impl std::fmt::Debug for ChainConn {
 
 /// One connection of the chain below the end, with what keeps it useful.
 struct Layer {
-    connection: Connection,
-    endpoint: Endpoint,
+    /// `None` for the first hop of a chain reached through the local
+    /// daemon: that hop has no connection of this process.
+    connection: Option<Connection>,
+    endpoint: Option<Endpoint>,
     /// The negotiated control stream. Dropped last.
     session: Option<Session>,
     /// The pump of the channel this connection carries toward the next
@@ -596,6 +646,34 @@ pub async fn dial_chain(
     plan: &JumpPlan,
     dialer: &Dialer,
     first: (Connection, Endpoint),
+    deadline: Instant,
+) -> Result<ChainConn, OpError> {
+    dial_chain_from(plan, dialer, FirstHop::Direct(first.0, first.1), deadline).await
+}
+
+/// [`dial_chain`] for a plan whose first hop is reached through the local
+/// daemon's registration ([`JumpPlan::first_reverse`], decision 14): the
+/// daemon opens the first `JUMP` channel on the registered connection and
+/// there is no connection of this process to the first hop at all.
+pub async fn dial_chain_via_daemon(
+    plan: &JumpPlan,
+    dialer: &Dialer,
+    deadline: Instant,
+) -> Result<ChainConn, OpError> {
+    dial_chain_from(plan, dialer, FirstHop::Daemon, deadline).await
+}
+
+/// How the first peer of a chain is reached.
+#[allow(clippy::large_enum_variant)]
+enum FirstHop {
+    Direct(Connection, Endpoint),
+    Daemon,
+}
+
+async fn dial_chain_from(
+    plan: &JumpPlan,
+    dialer: &Dialer,
+    first: FirstHop,
     deadline: Instant,
 ) -> Result<ChainConn, OpError> {
     let mut layers = LayerGuard(Vec::with_capacity(plan.hop_count()));
@@ -652,47 +730,64 @@ impl Drop for LayerGuard {
 async fn walk(
     plan: &JumpPlan,
     dialer: &Dialer,
-    first: (Connection, Endpoint),
+    first: FirstHop,
     deadline: Instant,
     layers: &mut Vec<Layer>,
     infos: &mut Vec<Arc<ChannelInfo>>,
 ) -> Result<(Connection, Endpoint), OpError> {
     let hops = plan.hop_count();
-    let (conn, endpoint) = first;
 
     // Step 1: the first peer. The ordinary route accepts any pinned peer,
-    // so the pin of this step is checked here.
-    if conn.peer_fingerprint() != Some(plan.step(0).fingerprint) {
-        conn.close(0, b"pin mismatch");
-        return Err(failure(plan, 0, Stage::Auth)
-            .into_op("the peer's certificate is not the one pinned for it", None));
-    }
-    let session = negotiate(plan, 0, &conn, deadline, Stage::Dial).await;
-    let session = match session {
-        Ok(s) => s,
-        Err(op) => {
-            conn.close(0, b"hello failed");
-            return Err(op);
+    // so the pin of this step is checked here. Through the daemon there is
+    // no connection of this process: the pin is checked against the
+    // registration before the first channel is asked for.
+    if let FirstHop::Direct(conn, endpoint) = first {
+        if conn.peer_fingerprint() != Some(plan.step(0).fingerprint) {
+            conn.close(0, b"pin mismatch");
+            return Err(failure(plan, 0, Stage::Auth)
+                .into_op("the peer's certificate is not the one pinned for it", None));
         }
-    };
-    layers.push(Layer {
-        connection: conn,
-        endpoint,
-        session: Some(session),
-        pump: None,
-    });
+        let session = negotiate(plan, 0, &conn, deadline, Stage::Dial).await;
+        let session = match session {
+            Ok(s) => s,
+            Err(op) => {
+                conn.close(0, b"hello failed");
+                return Err(op);
+            }
+        };
+        layers.push(Layer {
+            connection: Some(conn),
+            endpoint: Some(endpoint),
+            session: Some(session),
+            pump: None,
+        });
+    }
 
     for index in 1..hops {
         let step = plan.step(index);
-        let parent = layers.last().expect("a layer");
-        let outer = parent.connection.clone();
-        let caps = parent.session.as_ref().map(|s| s.capabilities.clone());
-        let caps = caps.unwrap_or_default();
-        if !caps.iter().any(|c| c == CAP_JUMP_V1) {
-            return Err(failure(plan, index, Stage::Unsupported)
-                .into_op("the previous hop does not support jumping", None));
-        }
-        let both_datagram = caps.iter().any(|c| c == CAP_DATAGRAM_V1);
+        // What carries this step's channel: the previous peer's connection,
+        // or the local daemon for a first hop that registered reverse.
+        let (outer, both_datagram) = match layers.last() {
+            Some(Layer {
+                connection: Some(conn),
+                session,
+                ..
+            }) => {
+                let caps = session
+                    .as_ref()
+                    .map(|s| s.capabilities.clone())
+                    .unwrap_or_default();
+                if !caps.iter().any(|c| c == CAP_JUMP_V1) {
+                    return Err(failure(plan, index, Stage::Unsupported)
+                        .into_op("the previous hop does not support jumping", None));
+                }
+                (
+                    Some(conn.clone()),
+                    caps.iter().any(|c| c == CAP_DATAGRAM_V1),
+                )
+            }
+            _ => (None, false),
+        };
         let Some((host, port)) = split_target(&step.address) else {
             return Err(failure(plan, index, Stage::Address)
                 .into_op("the pinned address is not host:port", None));
@@ -701,8 +796,6 @@ async fn walk(
         // The channel: client-chosen, from the CSPRNG.
         let mut id = [0u8; JUMP_CHANNEL_LEN];
         rand::rng().fill_bytes(&mut id);
-        let hub = DatagramHub::of(&outer);
-        let datagrams = hub.register(ChannelId(id));
         let header = StreamHeader {
             kind: StreamKind::Jump as i32,
             ticket: id.to_vec(),
@@ -710,7 +803,19 @@ async fn walk(
             port: u32::from(port),
             deny_host_local: false,
         };
-        let opened = tokio::time::timeout_at(deadline, open_channel(&outer, &header)).await;
+        let (datagrams, opened) = match &outer {
+            Some(outer) => {
+                let hub = DatagramHub::of(outer);
+                let datagrams = hub.register(ChannelId(id));
+                let opened = tokio::time::timeout_at(deadline, open_channel(outer, &header)).await;
+                (Some(datagrams), opened)
+            }
+            None => {
+                let opened =
+                    tokio::time::timeout_at(deadline, open_channel_via_daemon(plan, &header)).await;
+                (None, opened)
+            }
+        };
         let (send, recv, residue) = match opened {
             Err(_) => {
                 return Err(failure(plan, index, Stage::Handshake)
@@ -722,6 +827,9 @@ async fn walk(
             }
             Ok(Err(OpenError::Transport(message))) => {
                 return Err(failure(plan, index, Stage::Unreachable).into_op(message, None));
+            }
+            Ok(Err(OpenError::FirstHop(stage, message, route))) => {
+                return Err(failure(plan, 0, stage).into_op(message, route));
             }
             Ok(Ok(opened)) => opened,
         };
@@ -753,7 +861,17 @@ async fn walk(
             dialed = pinned.dial_over_pipe(pipe, "qsh") => Ok(dialed),
             end = pump.ended() => Err(end),
         };
-        layers.last_mut().expect("a layer").pump = Some(pump);
+        match layers.last_mut() {
+            Some(layer) if layer.connection.is_some() => layer.pump = Some(pump),
+            // The first hop is the daemon's: the pump has no layer of a
+            // connection to hang on, so it gets one of its own.
+            _ => layers.push(Layer {
+                connection: None,
+                endpoint: None,
+                session: None,
+                pump: Some(pump),
+            }),
+        }
         // A channel the previous peer closed under the handshake is the
         // report, whatever error the inner endpoint gave when its pipe
         // closed: nothing answered at the target (ICMP refusal, the gate's
@@ -784,9 +902,14 @@ async fn walk(
         };
         let inner = dialed.connection;
         // Migration happens at the first hop only (decision 16): this
-        // endpoint's rebind moves the socket of the layer under it.
-        let parent_endpoint = layers.last().expect("a layer").endpoint.clone();
-        let inner_endpoint = dialed.endpoint.rebinding_via(parent_endpoint);
+        // endpoint's rebind moves the socket of the layer under it. A first
+        // hop reached through the daemon has no socket of this process, so
+        // there is nothing to move.
+        let parent_endpoint = layers.last().and_then(|l| l.endpoint.clone());
+        let inner_endpoint = match parent_endpoint {
+            Some(parent) => dialed.endpoint.rebinding_via(parent),
+            None => dialed.endpoint,
+        };
 
         if index + 1 == hops {
             return Ok((inner, inner_endpoint));
@@ -797,8 +920,8 @@ async fn walk(
             Err(op) => {
                 inner.close(0, b"hello failed");
                 layers.push(Layer {
-                    connection: inner,
-                    endpoint: inner_endpoint,
+                    connection: Some(inner),
+                    endpoint: Some(inner_endpoint),
                     session: None,
                     pump: None,
                 });
@@ -806,8 +929,8 @@ async fn walk(
             }
         };
         layers.push(Layer {
-            connection: inner,
-            endpoint: inner_endpoint,
+            connection: Some(inner),
+            endpoint: Some(inner_endpoint),
             session: Some(session),
             pump: None,
         });
@@ -864,6 +987,10 @@ async fn negotiate(
 enum OpenError {
     Refused(ConnectResult),
     Transport(String),
+    /// The first hop, reached through the local daemon, failed before any
+    /// channel: its stage, the words, and the route's own error when there
+    /// is one.
+    FirstHop(Stage, String, Option<OpError>),
 }
 
 /// Opens the `JUMP` stream and reads `ConnectResult`. The stream comes back
@@ -871,7 +998,7 @@ enum OpenError {
 async fn open_channel(
     outer: &Connection,
     header: &StreamHeader,
-) -> Result<(qsh_transport::SendStream, RecvStream, Vec<u8>), OpenError> {
+) -> Result<(ChanTx, ChanRx, Vec<u8>), OpenError> {
     let transport =
         |what: &str, e: &dyn std::fmt::Display| OpenError::Transport(format!("{what}: {e}"));
     let (send, recv) = outer
@@ -893,7 +1020,70 @@ async fn open_channel(
         return Err(OpenError::Refused(result));
     }
     let (recv, residue) = recv.into_raw();
-    Ok((send.into_raw(), recv, residue))
+    Ok((send.into_raw().into(), recv.into(), residue))
+}
+
+/// The same exchange as [`open_channel`] for a first hop that registered
+/// reverse on this machine: the `LOCAL_STREAM` conduit to the daemon stands
+/// in for the connection, and the daemon opens the `JUMP` stream on the
+/// registered connection (decision 14). The registration is checked against
+/// the first hop's pin before the header leaves, and the answer is the
+/// host's `ConnectResult`, verbatim, or the daemon's own refusal.
+async fn open_channel_via_daemon(
+    plan: &JumpPlan,
+    header: &StreamHeader,
+) -> Result<(ChanTx, ChanRx, Vec<u8>), OpenError> {
+    use crate::localctl::client::{ExpectedPeer, StreamOpenError, open_stream_expecting};
+    let route = plan
+        .first_reverse
+        .as_ref()
+        .expect("a chain through the daemon has its route");
+    let expect = ExpectedPeer {
+        fingerprint: plan.step(0).fingerprint.to_string(),
+        generation: None,
+    };
+    let mut handshake =
+        match open_stream_expecting(&route.socket, &route.host, header, &expect).await {
+            Ok(handshake) => handshake,
+            Err(StreamOpenError::PeerChanged) => {
+                return Err(OpenError::FirstHop(
+                    Stage::Auth,
+                    "the registered peer is not the one pinned for it".to_string(),
+                    None,
+                ));
+            }
+            Err(StreamOpenError::Op(op)) => {
+                return Err(OpenError::FirstHop(
+                    Stage::Dial,
+                    op.message.clone(),
+                    Some(op),
+                ));
+            }
+        };
+    let result: ConnectResult = match handshake.recv.recv().await {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            return Err(OpenError::Transport(
+                "the local daemon closed the jump channel without an answer".to_string(),
+            ));
+        }
+        Err(op) => {
+            return Err(OpenError::Transport(format!(
+                "cannot read the jump answer: {}",
+                op.message
+            )));
+        }
+    };
+    if !result.ok {
+        return Err(OpenError::Refused(result));
+    }
+    let (recv, residue) = handshake.recv.into_raw();
+    let send = handshake.send.into_raw();
+    Ok((
+        ChanTx::Raw(Box::new(send)),
+        ChanRx::Raw(Box::new(recv)),
+        residue,
+    ))
 }
 
 // ----------------------------------------------------------------------
@@ -906,7 +1096,9 @@ fn supervise(mut layers: Vec<Layer>, end: Connection, end_endpoint: Endpoint) {
     tokio::spawn(async move {
         let mut watch = JoinSet::new();
         for (index, layer) in layers.iter().enumerate() {
-            let conn = layer.connection.clone();
+            let Some(conn) = layer.connection.clone() else {
+                continue;
+            };
             watch.spawn(async move {
                 let reason = conn.closed().await;
                 format!("connection {index} closed: {reason}")
@@ -957,8 +1149,12 @@ fn supervise(mut layers: Vec<Layer>, end: Connection, end_endpoint: Endpoint) {
 /// connection it carried has said goodbye.
 async fn teardown(mut layers: Vec<Layer>) {
     while let Some(mut layer) = layers.pop() {
-        layer.connection.close(0, b"jump chain done");
-        layer.endpoint.wait_idle_for(CLOSE_GRACE).await;
+        if let Some(connection) = &layer.connection {
+            connection.close(0, b"jump chain done");
+        }
+        if let Some(endpoint) = &layer.endpoint {
+            endpoint.wait_idle_for(CLOSE_GRACE).await;
+        }
         // The pump of the channel this layer carried has nothing left to
         // move.
         if let Some(pump) = &mut layer.pump {
