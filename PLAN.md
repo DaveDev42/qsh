@@ -53,6 +53,11 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 - [x] **ADR-0053 결정 7의 커서 숨김 차단을 좁힌 것의 확인.** 2026-11-07 Dave가 받아들였다(ADR-0053 개정 이력). 수용 시험에서 Windows pwsh(PSReadLine)가 키마다 커서를 숨겼다 보여 예측이 꺼졌다. 코드는 적용된 상태 둘이 연달아 커서를 숨길 때만 차단한다(`HIDDEN_CURSOR_STATES = 2`, `3da871a`). 결정 본문은 고치지 않고 ADR-0053 개정 이력에만 적었다. Dave가 받아들이면 개정 이력에 승인을 적고, 받아들이지 않으면 pwsh에서 예측이 꺼지는 것을 감수하고 되돌린다. 소유: Dave.
 - [ ] **vt100 upstream 보고.** `vt100` 0.18.1의 `Screen::text_cleanup`이 U+FE0F가 앞 셀을 넓힐 때 `unwrap()`에서 panic한다(재현: `Parser::new(2, 1, 0).process("0\u{fe0f}".as_bytes())`). qsh는 host 입구에서 막았다(`d548c10`). 외부 저장소 쓰기라 사람 몫이다. 소유: Dave.
 
+### 0.7 M24가 만든 사람 몫
+
+- [ ] **실제 망 펀칭 회차.** `docs/campaigns/m24-punch.md`. 휴대폰 테더링의 CGNAT, 집 공유기, 회사 망, IPv6 전용 망에서 A–B 쌍을 기록한다. DoD 밖이다.
+- [ ] **`punch-netns`를 필수 검사로 올릴지.** 저장소 설정이라 사람 몫이다. 지금은 `ci-ok`의 `needs`에 없다.
+
 ## 1. 유지보수에서 남은 확인
 
 자리표시자 계획 §1에서 열린 채로 넘어온 항목이다.
@@ -79,6 +84,14 @@ M23이 남긴 후속이다(ADR-0053 개정 이력, M23 계획 `d50f003`).
 - [ ] 느린 예측 수용 셋(`predict_accept::`)은 ubuntu acceptance job에서만 돈다. macOS는 test job의 unix 셋만 돈다.
 - [ ] Windows pwsh에서 키 서른 개 중 하나가 105~142 ms를 쓸 때가 있다(p95는 2.0 ms).
 
+M24가 남긴 후속이다(ADR-0054 개정 이력, M24 계획은 ROADMAP 마감 노트의 커밋).
+
+- [ ] 펀칭한 `exec`는 채택된 연결의 closing drain도 200 ms에서 끊는다. 마지막 CONNECTION_CLOSE가 잃히면 host는 idle timeout에서야 끝을 안다. 진 후보만 따로 닫는 방법(다른 endpoint 또는 quinn의 연결별 drain 상태)은 transport 재설계가 필요해 미뤘다.
+- [ ] derived 후보(결정 23 (d))는 IPv4만 만든다. IPv6에서 중개자가 B와 같은 방화벽 뒤인 장면은 시험이 없다.
+- [ ] 커널 대조는 masquerade(port-restricted)와 fully-random(symmetric)만 덮는다. full cone·restricted는 conntrack에 그대로 대응하는 것이 없어 netsim에서만 본다.
+- [ ] 역방향 등록 자체의 펀칭과 일반 `qsh serve`·on-demand serve의 펀칭은 ADR-0054에서 미뤘다.
+- [ ] 흔들림 후보: `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 전체 실행에서 한 번 실패하고 단독 다섯 번과 재실행에서 통과했다.
+
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
 ## 2. 테스트 환경
@@ -98,5 +111,5 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - [x] **recovery의 route 재해석과 `--supervise`.** 2026-11-09 착지(`7e99880`, `docs/CLI.md` v0.86, protocol §19.10, WSL 전체 4015개, 느린 수용 셋 9개, Dave-Windows punch·recover·supervise 175개). 재dial이 시도마다 route를 다시 돈다. 펀칭할 수 있는 host의 시도 시한은 head start 1초를 더한 9초(주소 없는 pin은 8초)이고, 펀칭이 먼저 실패하면 직접 dial에 시작부터 2초까지만 더 준다(ADR이 열어 둔 것, 기존 backoff를 늦추지 않으려고). recovery 시한은 기존처럼 `-o ConnectTimeout`을 따르지 않는다. netsim 시험은 중개자·target이 std 시간을 써서 실제 시계로 돈다.
 - [x] **힌트 배우기, `trust rendezvous`, 플래그와 키.** 2026-11-09 착지(`b00a424`, doctor 연결 `86c7fc0`, `docs/CLI.md` v0.88, fixture `trust.set_rendezvous`·`trust.list.rendezvous`, WSL 전체 4048개, Dave-Windows punch·rendezvous·doctor 328개). 정방향 route의 중개자 후보는 `--rendezvous`(주면 이것만), 그다음 pin의 `rendezvous` 목록(fingerprint 최대 넷, 주소 있는 pin만, 쓰는 것은 둘)에서 온다. 연결이 선 뒤 `punch.v1`이 협상됐으면 host마다 `RendezvousQuery`를 한 번 쓰고 답을 기다리지 않으며, 이미 주소와 함께 pin한 fingerprint만 `trust.toml.lock` 아래에서 합친다. `qsh trust rendezvous <name> <peer>...|--clear`(op `trust.set_rendezvous`)가 목록을 직접 정한다. `--no-punch`와 `[punch].mode = "off"`는 요청·학습을 끄고, `qsh listen`·`qsh serve --to`는 중개와 offer를 `UNSUPPORTED`로 거절한다. doctor는 `Ops::punch_mode()`와 route의 `punch_plan`을 읽는다. netsim 시험 `punch_hints` 다섯.
 - [x] **doctor, `qsh::punch`, JSON과 fixture.** 2026-11-09 착지(`7f04d1f`, `docs/CLI.md` v0.87, doctor 코드 34종, fixture `doctor_punch.json`·`doctor_punch_failed.json`, 위협 모델 D23 핀 테스트, WSL 전체 4026개). doctor는 직접 경로가 없을 때만 펀칭을 한 번 돌리고 선 연결은 곧바로 닫는다. 주소 없는 pin에서 doctor가 `HOST_NOT_FOUND`로 멈추던 것이 펀칭 시도로 바뀌었다. 중개자 후보와 mode는 아직 주입값이고 힌트 스텝이 잇는다. 직접 경로가 있는 host에서 `data.punch`가 없음은 실제 네트워크 probe라 시험하지 않았다.
-- [ ] **수용 시험.** netsim 세 OS, `punch-netns`. 1차 2026-11-09 착지(`ff928f9`): `punch_accept::punch_route_nat_matrix`(진짜 route, 25쌍, seed 다섯, 채택 p95 약 400 ms)와 `scripts/netns/punch.sh`·ci.yml `punch-netns`(CI run 42559582248에서 아홉 쌍 모두 기대대로, 채택 최대 438 ms, netem 켜짐). 남은 것: DoD 1의 A–B 손실 5% route 표, 2의 장면 넷, 5의 감사 실패, 6의 `punch_bounds`, 8의 10회 resume과 재등록, 9의 예측·`-L`·`cp`, 15의 이름 붙은 회귀 시험, 채택 뒤 첫 `exec`까지 0.5~0.9 s 더 걸리는 원인.
-- [ ] **문서와 마감.** man, threat model, ROADMAP M24 마감 노트.
+- [x] **수용 시험.** 2026-11-09 착지. 1차 `ff928f9`: `punch_accept::punch_route_nat_matrix`(진짜 route, 25쌍, seed 다섯, 채택 p95 약 400 ms)와 `scripts/netns/punch.sh`·ci.yml `punch-netns`(CI run 42559582248에서 아홉 쌍 모두 기대대로, 채택 최대 438 ms). 보강 `bcace4c`: 장면 넷(`punch_scenes`), A–B 손실 5% route 표(채택 p95 397 ms), `punch_bounds` 아홉 행, `a_host_without_rendezvous_dials_exactly_as_before`. 이동·기능 `912bf6b`: 주소가 바뀐 뒤 resume 10회 모두 2 s 안, B 재등록 뒤 resume, 펀칭 연결 위의 화면 동기화+예측·`exec`·`-L`·`cp`, R·B 감사 실패 때 offer 없음, 실패한 펀칭 뒤 ssh 되살리기. 채택 뒤 `exec` 끝까지 0.9 s 걸리던 것은 경주에서 진 후보의 closing 기간을 기다린 탓이라 펀칭한 `exec`만 drain 대기를 200 ms로 끊었다(0.36 s). Windows client의 `b:` 드라이브 해석에 걸린 cp 시험 수정 `ed95325`. WSL 전체 4069개, Dave-Windows punch 138개.
+- [x] **문서와 마감.** 2026-11-09 착지(`14c7c9d`, `docs/CLI.md` v0.89). architecture §1·§7, `CONTROLLER_UNREACHABLE` 문안(relay 없음, controller가 중개자), README의 NAT 한계, `docs/campaigns/m24-punch.md`, threat model A21·E23의 고정 테스트 이름. man은 생성기와 diff 0이다. ADR-0054 결정 26의 테스트 이름 넷은 개정 이력에서 구현 이름에 이었다. DoD 열여섯 항목의 대응은 아래와 같다: 1 `punch_accept`, 2 `punch_scenes`, 3 `punch_route`·`punch_hints`, 4 `punch_give_up_reasons`·`punch_doctor`·`punch_revival`, 5 `punch_signal`(감사 실패 둘 포함), 6 `punch_bounds`, 7 채택·창 시험, 8 `punch_recovery`, 9 `punch_features`, 10 `punch_hints`, 11 fixture·man·role 표, 12 fuzz 26종, 13 `punch-netns`, 14 세 OS CI, 15 `a_host_without_rendezvous_dials_exactly_as_before`, 16 threat model 행.
