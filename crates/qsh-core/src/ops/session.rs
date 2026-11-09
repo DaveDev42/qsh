@@ -66,7 +66,7 @@ use pump::{
     InputSignals, attach_event_json, pump_attach_control, pump_attach_input, screen_output,
 };
 use reader::dial_reverse_wait;
-use reader::{dial_peer, forget_if_closed};
+use reader::{dial_peer, forget_if_closed, redial_peer};
 // Wider than `session`'s own use of it needs (`pub(super)` would do for
 // every call site in this module): `crate::ops::exec::exec_async_reverse`
 // (issue #5) is the one caller outside this module, so this re-export is

@@ -602,6 +602,7 @@ impl SessionAttachStream {
             link: self.link.clone(),
             finished: self.stop.finished.clone(),
             detaching: self.stop.detaching.clone(),
+            link_status: self.link_status.clone(),
         }
     }
 
@@ -629,6 +630,7 @@ pub struct AttachHandle {
     /// the stream cannot tear the driver down mid-flush. See
     /// [`AttachStop::drop`].
     detaching: Arc<std::sync::Mutex<()>>,
+    link_status: Arc<crate::client::linkstatus::LinkTracker>,
 }
 
 impl std::fmt::Debug for AttachHandle {
@@ -638,6 +640,13 @@ impl std::fmt::Debug for AttachHandle {
 }
 
 impl AttachHandle {
+    /// [`SessionAttachStream::link_status`] for a thread that does not own
+    /// the stream: a recovery in progress shows as `recovering: Some(k)`
+    /// while the owner is blocked waiting for an event.
+    pub fn link_status(&self) -> crate::client::linkstatus::LinkStatus {
+        self.link_status.snapshot()
+    }
+
     /// Queue session input; the driver writes it in order. Blocks only
     /// while the driver's bounded queue is full.
     ///

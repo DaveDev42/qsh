@@ -44,6 +44,18 @@ impl DialReconnect {
 }
 
 impl Reconnect for DialReconnect {
+    /// [`REDIAL_DEADLINE`], or, for a host that can be punched to, the punch
+    /// budget behind the direct dial's head start (ADR-0054 decision 18).
+    /// A redial that outlives the deadline keeps running on its task and the
+    /// next attempt adopts it (`Self::in_flight`), so the figure bounds the
+    /// wait, not the dial.
+    fn attempt_deadline(&self) -> Duration {
+        self.ctx
+            .target
+            .as_ref()
+            .map_or(REDIAL_DEADLINE, |target| target.redial_deadline())
+    }
+
     fn has_pending(&self) -> bool {
         // Never contended at the point `recover_attach` calls this: it
         // asks at the top of a loop iteration, after any previous

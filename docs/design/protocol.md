@@ -400,7 +400,7 @@ message FileFrame {
 
 **서버 재시작은 이 probe를 기다리지 않는다.** 서버 프로세스가 재시작하면 새 프로세스는 옛 연결을 모른다. 서버 endpoint가 재시작 너머로 유지되는 stateless reset key를 쓰면(ADR-0036, `config_dir/stateless_reset.key`) 새 프로세스가 옛 connection ID로 온 클라이언트의 첫 패킷에 RFC 9000 §10.3의 stateless reset을 돌려주고, 클라이언트의 quinn이 연결을 `ConnectionError::Reset`으로 닫는다. 다음 패킷에 1 RTT면 감지된다. 그 뒤 흐름은 사망 선언 뒤와 같다. 재dial하고 reattach하지만 새 서버에 세션이 없으므로 위 "Reattach 절차"의 non-distinguishing `AUTH_FAILED`로 끝난다. 세션은 살아나지 않고 바뀌는 것은 감지 지연뿐이며 recovery의 분류 어휘도 그대로다. 키 파일이 없거나 쓸 수 없던 기동, 파일을 지우고 한 재시작, 재시작 사이에 다른 프로세스가 같은 UDP 포트를 잡은 경우에는 reset이 오지 않고 감지는 위 probe나 `max_idle_timeout`에 맡겨진다. wire는 바뀌지 않는다.
 
-사망이 선언되면 클라이언트는 (인터페이스가 바뀐 경우) `Endpoint::rebind()`를 먼저 시도하고, 그것이 연결을 살리지 못하면 재dial → 위 4단계 reattach를 수행한다. migration probe의 대기 예산은 상수가 아니라 관측 RTT × 2(100–300 ms clamp)다 — 그 시간은 재dial이 쓸 2초 예산에서 나오고, LAN에서 고정 300 ms는 아무것도 배우지 못한 채 예산의 30%를 태운다.
+사망이 선언되면 클라이언트는 (인터페이스가 바뀐 경우) `Endpoint::rebind()`를 먼저 시도하고, 그것이 연결을 살리지 못하면 재dial → 위 4단계 reattach를 수행한다. migration probe의 대기 예산은 상수가 아니라 관측 RTT × 2(100–300 ms clamp)다 — 그 시간은 재dial이 쓸 2초 예산에서 나오고, LAN에서 고정 300 ms는 아무것도 배우지 못한 채 예산의 30%를 태운다. 이 재dial은 route를 다시 돈다. 펀칭한 연결이 죽었으면 새 주소로 다시 펀칭하고, 그 시도의 시한은 2초 대신 펀칭 예산이다(§19.10, ADR-0054 결정 18).
 
 > **자격증명 임계 구역은 취소 불가다.** 호스트는 successor를 발행하는 순간 제시된 토큰을 죽인다(아래 "Rotation"). 따라서 "요청이 wire에 올라간 시점 ~ successor가 디스크에 안착한 시점" 구간에서 클라이언트를 취소하면 이 기기는 죽은 자격증명만 남고, attach는 기기 바인딩(CLI.md §6.2)이므로 **살아 있는 세션에 아무도 다시 붙을 수 없다.** 그래서 재dial+redemption은 별도 task에서 돌고 2초 deadline은 그 task를 *기다리는 것*만 중단한다 — task 자체는 `store.put`까지 반드시 완주하며, 다음 시도는 새 redemption을 시작하지 않고 그 task를 이어받는다(단회성 토큰을 두 번 제시하는 경주를 만들지 않기 위해). **migration은 지연 최적화일 뿐이며 correctness는 resume이 보장한다.** 전 과정은 frontend에게 보이지 않는다 — 같은 attach 스트림이 계속 살아 있고, 재전송 중복은 `sequence ≤ L` 폐기가, 미-ack input은 위 5번이 처리한다. 결과는 `recovery ∈ {migrated, resumed, failed}` + `time_to_recovery_ms`로 stderr에 기록된다(CLI.md §6.4).
 
@@ -1103,3 +1103,13 @@ R이 B에게 보내는 `PunchOffer`는 등록 연결의 요청 채널을 쓴다.
 `RendezvousQuery`는 B에 이미 선 어떤 연결에서든 보낼 수 있다. `host.punch`(`punch.rendezvous`)를 연결의 principal로 판정하고, 통과하면 B가 지금 등록해 있는 controller의 fingerprint(살아 있는 등록이 먼저, 그다음 `[serve].to`의 pin, 중복 없이 넷까지)를 `RendezvousList`로 답한다.
 
 **기록.** `qsh::punch` 로그는 `relayed`(결과 이름과 후보 개수)와 `window_opened`·`window_closed`(개수)만 낸다. 주소, fingerprint, `attempt_id`는 로그에도 감사에도 없다.
+
+### 19.10 recovery와 `--supervise`의 route 재해석 (ADR-0054 결정 18)
+
+§10의 recovery는 연결이 죽으면 재dial하는데, 이 재dial은 처음 해석한 주소를 다시 쓰지 않고 **route를 다시 돈다**. 직접 dial과 펀칭의 경주(결정 16)를 그 순간의 소켓·로컬 후보·중개자로 새로 한다. 그래서 A의 바깥 주소가 바뀌면(NAT 매핑이 사라지거나 다른 망으로 옮기면) 새 주소로 다시 펀칭하고, 직접 길이 돌아와 있으면 직접 dial이 1초 head start 안에 서서 중개자에게 아무것도 보내지 않는다. 이 규칙은 forward 연결의 attach recovery(`recover_attach`의 재dial)와 `--supervise` 터널의 재dial이 같이 쓴다. 역방향 등록 연결의 recovery(§11-4)는 지금 그대로다.
+
+- **시한.** 펀칭할 수 있는 host(중개자 후보가 있고 `[punch].mode`가 `auto`)의 재dial 시도 하나는 `REDIAL_DEADLINE`(2초) 대신 펀칭 예산을 쓴다. 신호 3초와 창 5초를 합한 8초이고(`PUNCH_BUDGET`), 직접 dial이 먼저 도는 host는 그 앞에 head start 1초가 붙어 9초다. 주소가 없는 pin은 곧바로 펀칭하므로 8초다. 명령의 첫 dial 시한(10초)을 넘지 않는다. 펀칭할 수 없는 host는 2초 그대로다. recovery 루프가 시도 하나를 기다리는 시한(`Reconnect::attempt_deadline`)도 같은 값이다. 시한을 넘긴 재dial은 task로 계속 돌고 다음 시도가 이어받으므로(`spawn_reattach`), 시한은 기다림의 한도이지 재dial을 자르는 칼이 아니다.
+- **펀칭이 끝난 시도.** 펀칭이 먼저 실패하면(중개자에 닿지 않음, `target_not_registered` 등) 직접 dial은 시도가 시작된 뒤 2초까지만 더 기다린다. 직접 dial만 있던 재dial이 쓰던 시간이다. 이미 2초가 지났으면 곧바로 실패하고, 시도 횟수·backoff(0, 200 ms, 800 ms)·상태 줄의 `reconnecting (attempt k)`는 §10 그대로 다음 시도로 넘어간다. 시도마다 `qsh::recovery` 기록이 남고 모든 시도가 실패하면 attach의 오류는 `CONNECTION_FAILED`다.
+- **resume은 그대로다.** 재dial로 선 연결(직접이든 펀칭이든)에서 §10의 reattach 4단계를 그대로 하고, resume token은 route가 아니라 peer 신원에 묶여 있으므로 같은 세션을 이어 붙인다. 입력의 무손실·무중복(§10-5)도 같다. 새 session은 만들어지지 않는다.
+- **B의 주소가 바뀌면.** B의 등록 recovery(ADR-0041)가 먼저 R에 다시 등록하고 A의 시도가 그 뒤에 펀칭한다. 등록이 아직 없으면 `target_not_registered`로 그 시도가 실패하고 다음 시도로 넘어간다.
+- **`--supervise`.** 터널의 재dial 시도 하나도 같은 시한으로 route를 다시 돌고, 포기하지 않는 동안 listener는 묶여 있다(ADR-0023). `-L`·`-D`·`-R` 어느 쪽이든 carrier를 다시 세우는 길이 같다.

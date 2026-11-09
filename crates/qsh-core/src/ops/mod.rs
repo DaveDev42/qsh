@@ -92,6 +92,15 @@ pub(crate) struct PeerTarget {
     pub punch: Option<Arc<crate::punch::PunchPlan>>,
 }
 
+impl PeerTarget {
+    /// How long one recovery or supervised re-dial attempt may take
+    /// (ADR-0054 decision 18): `REDIAL_DEADLINE`, or the punch budget when
+    /// this host can be punched to.
+    pub(crate) fn redial_deadline(&self) -> std::time::Duration {
+        route::redial_deadline(self.punch.as_ref(), !self.address.is_empty())
+    }
+}
+
 /// [`Ops::resolve_serve_target`]'s result: the controller key
 /// `run_reverse`/`run_reverse_observed` take, plus whether resolving it
 /// filled in the default port (ADR-0014 결정 5/7, ROADMAP M9 (b)) — the one

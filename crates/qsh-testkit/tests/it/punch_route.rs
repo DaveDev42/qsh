@@ -39,10 +39,10 @@ use tokio::sync::oneshot;
 
 const R_ADDR: &str = "203.0.113.1:9000";
 const B_PORT: u16 = 6000;
-const B_DIRECT_PORT: u16 = 4433;
+pub(super) const B_DIRECT_PORT: u16 = 4433;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-fn ip(s: &str) -> IpAddr {
+pub(super) fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
 
@@ -66,10 +66,10 @@ fn echo_argv() -> Vec<String> {
 }
 
 /// A: the client's `Ops` with its own identity and punch settings.
-struct Client {
-    _dir: tempfile::TempDir,
-    ops: Ops,
-    fp: Fingerprint,
+pub(super) struct Client {
+    pub(super) _dir: tempfile::TempDir,
+    pub(super) ops: Ops,
+    pub(super) fp: Fingerprint,
 }
 
 /// Builds the client on `site`. `rendezvous` are the pin names to punch
@@ -153,18 +153,22 @@ impl Authorizer for AllowAll {
     }
 }
 
-struct WorldOptions {
-    b_nat: NatKind,
+pub(super) struct WorldOptions {
+    pub(super) b_nat: NatKind,
     /// A listener on B's site for the direct dial.
-    direct_listener: bool,
+    pub(super) direct_listener: bool,
     /// Whether B registers with R.
-    register_b: bool,
+    pub(super) register_b: bool,
     /// Whether A's pin of B carries B's address (`B_DIRECT_PORT`).
-    pin_b_address: bool,
+    pub(super) pin_b_address: bool,
     /// One-way delay between A's and B's outside addresses.
-    a_b_delay: Duration,
+    pub(super) a_b_delay: Duration,
     /// How long the direct dial runs alone.
-    head_start: Duration,
+    pub(super) head_start: Duration,
+    /// A's NAT. A random-port box gives a flushed mapping a new outside port.
+    pub(super) a_nat: NatKind,
+    /// A's recovery settings; the defaults when unset.
+    pub(super) recovery: Option<qsh_core::RecoveryConfig>,
 }
 
 impl Default for WorldOptions {
@@ -176,35 +180,38 @@ impl Default for WorldOptions {
             pin_b_address: true,
             a_b_delay: Duration::from_millis(25),
             head_start: PUNCH_HEAD_START,
+            a_nat: NatKind::PortRestricted,
+            recovery: None,
         }
     }
 }
 
 /// A behind a NAT, R on the public network running a real `Listen`, B behind
 /// `b_nat` registered with R and, when asked, also listening for direct dials.
-struct World {
-    a: Client,
-    r_listen: Arc<Listen>,
-    r_audit: Arc<MemoryAuditSink>,
-    b_server: Option<Arc<qsh_core::server::Server>>,
-    b_shutdown: Option<oneshot::Sender<()>>,
-    b_task: Option<tokio::task::JoinHandle<()>>,
-    direct_shutdown: Option<oneshot::Sender<()>>,
-    r_shutdown: Option<oneshot::Sender<()>>,
-    r_task: tokio::task::JoinHandle<()>,
-    _net: Net,
-    _dir: tempfile::TempDir,
+pub(super) struct World {
+    pub(super) a: Client,
+    pub(super) r_listen: Arc<Listen>,
+    pub(super) r_audit: Arc<MemoryAuditSink>,
+    pub(super) b_server: Option<Arc<qsh_core::server::Server>>,
+    pub(super) b_shutdown: Option<oneshot::Sender<()>>,
+    pub(super) b_task: Option<tokio::task::JoinHandle<()>>,
+    pub(super) direct_shutdown: Option<oneshot::Sender<()>>,
+    pub(super) r_shutdown: Option<oneshot::Sender<()>>,
+    pub(super) r_task: tokio::task::JoinHandle<()>,
+    pub(super) net: Net,
+    pub(super) a_site: Site,
+    pub(super) b_site: Site,
+    pub(super) r_site: Site,
+    pub(super) _dir: tempfile::TempDir,
 }
 
-async fn world(opts: WorldOptions) -> World {
+pub(super) async fn world(opts: WorldOptions) -> World {
     let net = Net::new(NetConfig {
         seed: 7,
         ..NetConfig::default()
     });
     let r_site = net.internet().site(NatKind::None, "r", ip("203.0.113.1"));
-    let a_site = net
-        .internet()
-        .site(NatKind::PortRestricted, "a", ip("198.51.100.1"));
+    let a_site = net.internet().site(opts.a_nat, "a", ip("198.51.100.1"));
     let b_site = net.internet().site(opts.b_nat, "b", ip("198.51.100.2"));
     net.set_path(
         a_site.external_ip(),
@@ -212,7 +219,10 @@ async fn world(opts: WorldOptions) -> World {
         PathConfig::delay(opts.a_b_delay),
     );
 
-    let a = client_with(&a_site, &["r"], opts.head_start).await;
+    let mut a = client_with(&a_site, &["r"], opts.head_start).await;
+    if let Some(recovery) = opts.recovery {
+        a.ops = a.ops.with_recovery(recovery);
+    }
     let (r_id, b_id) = (make_identity(), make_identity());
 
     // R: a real `qsh listen` on the virtual network.
@@ -345,13 +355,16 @@ async fn world(opts: WorldOptions) -> World {
         direct_shutdown,
         r_shutdown: Some(r_tx),
         r_task,
-        _net: net,
+        net,
+        a_site,
+        b_site,
+        r_site,
         _dir: dir,
     }
 }
 
 impl World {
-    fn punch_requests(&self) -> usize {
+    pub(super) fn punch_requests(&self) -> usize {
         self.r_audit
             .records()
             .iter()
@@ -359,7 +372,7 @@ impl World {
             .count()
     }
 
-    async fn shutdown(mut self) {
+    pub(super) async fn shutdown(mut self) {
         if let Some(tx) = self.direct_shutdown.take() {
             let _ = tx.send(());
         }

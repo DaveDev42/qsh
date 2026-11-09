@@ -10,6 +10,24 @@ pub(super) async fn dial_peer(
     target: &PeerTarget,
     tuning: TransportTuning,
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
+    dial_peer_as(target, tuning, crate::ops::route::Dial::Command).await
+}
+
+/// [`dial_peer`] for a recovery: the route is run again from scratch (a new
+/// socket, the local addresses read now), and a host that can be punched to
+/// gets the punch budget instead of `REDIAL_DEADLINE` (ADR-0054 decision 18).
+pub(super) async fn redial_peer(
+    target: &PeerTarget,
+    tuning: TransportTuning,
+) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
+    dial_peer_as(target, tuning, crate::ops::route::Dial::Redial).await
+}
+
+async fn dial_peer_as(
+    target: &PeerTarget,
+    tuning: TransportTuning,
+    kind: crate::ops::route::Dial,
+) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
     let device_name = target.identity.identity.device_id.clone();
     let dialer = Dialer::new(
         target.identity.local.clone(),
@@ -24,6 +42,7 @@ pub(super) async fn dial_peer(
         target.punch.as_ref(),
         tuning,
         &crate::ops::SystemResolver,
+        kind,
     )
     .await
     .map_err(|err| err.into_op(&address))?;
