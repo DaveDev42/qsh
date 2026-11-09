@@ -1,7 +1,7 @@
 # ADR-0055: M25의 범위. `-A`를 주면 host가 세션이나 exec마다 소유자 전용 agent 소켓(Windows는 named pipe)을 만들어 `SSH_AUTH_SOCK`으로 알리고, 그 소켓에 들어온 연결마다 capability `agent.v1`의 새 스트림 `AGENT`를 client 쪽으로 연다. 스트림은 ssh-agent 프로토콜 바이트를 그대로 싣고, client는 목록 조회와 서명만 로컬 agent에 넘긴다. host 쪽 인가는 새 action `forward.agent`다
 
 날짜: 2026-11-09
-상태: 제안됨
+상태: 승인됨
 
 개정 관계: ADR-0050 결정 5의 M25를 구체화한다. 다음을 개정한다.
 - ADR-0045 결정 2의 role 표와 PRD §9의 action 어휘. 새 action `forward.agent`를 더해 `Action::ALL`이 13종이 되고, `full`과 `exec`가 이 action을 준다(결정 16, Dave가 정할 것 2).
@@ -259,3 +259,4 @@ ADR-0050 결정 5는 M25를 "`-A`. 원격에서 로컬 ssh-agent(unix socket, Wi
 ## 개정 이력
 
 - 2026-11-09 초안(에이전트). Dave가 정할 것 다섯 항목은 추천만 적었다.
+- 2026-11-09 승인(Dave 결정). Dave가 정할 것 다섯 항목은 모두 추천 (가)로 정했다: 세션마다 고정 경로이고 writer lease를 쥔 `-A` attach가 받침, `forward.agent`는 `full`·`exec`가 줌, 목록(11)과 서명(13)만 넘기고 나머지는 `FAILURE`, qsh 자체의 서명 확인 없이 `ssh-add -c`에 맡김, `~/.ssh/config`의 `ForwardAgent`는 읽지 않음(ADR-0051 결정 8 유지). 크기는 2.5ew다.
