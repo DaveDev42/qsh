@@ -50,9 +50,18 @@ use tokio::net::UdpSocket;
 const LIMIT: Duration = Duration::from_secs(60);
 
 pub(super) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    blocking_named("a blocking step", f).await
+}
+
+/// `blocking` that names the step, so a hang says which one.
+pub(super) async fn blocking_named<T: Send + 'static>(
+    step: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    eprintln!("step: {step}");
     match tokio::time::timeout(LIMIT, tokio::task::spawn_blocking(f)).await {
         Ok(joined) => joined.expect("blocking task"),
-        Err(_) => panic!("a blocking step did not finish within {LIMIT:?}"),
+        Err(_) => panic!("{step} did not finish within {LIMIT:?}"),
     }
 }
 
@@ -150,9 +159,12 @@ pub(super) async fn start_hosts(
 }
 
 pub(super) async fn shutdown(hosts: Vec<Host>) {
+    // Each host waits out its own drain grace; wait for them together.
+    let mut set = tokio::task::JoinSet::new();
     for host in hosts {
-        host.h.shutdown().await;
+        set.spawn(host.h.shutdown());
     }
+    while set.join_next().await.is_some() {}
 }
 
 // ----------------------------------------------------------------------
@@ -331,7 +343,7 @@ async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
     let opened = {
         let ops = ops.clone();
         let host = target.to_string();
-        blocking(move || {
+        blocking_named("session.open", move || {
             ops.session_open(SessionOpenReq {
                 host,
                 argv: vec!["sh".into()],
@@ -357,7 +369,7 @@ async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
     let read = {
         let ops = ops.clone();
         let session_ref = opened.session_ref.clone();
-        blocking(move || {
+        blocking_named("session.read", move || {
             ops.session_read(SessionReadReq {
                 session_ref,
                 after_sequence: 0,
@@ -376,7 +388,7 @@ async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
         let session_ref = opened.session_ref.clone();
         let data = format!("typed-{tag}");
         let b64 = base64::engine::general_purpose::STANDARD.encode(data.as_bytes());
-        blocking(move || {
+        blocking_named("session.write", move || {
             ops.session_write(SessionWriteReq {
                 session_ref,
                 data_b64: b64,
@@ -397,7 +409,7 @@ async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
     let got = {
         let ops = ops.clone();
         let host = target.to_string();
-        blocking(move || {
+        blocking_named("-L tunnel and echo", move || {
             let hold = ops
                 .tunnel_open(TunnelOpenReq {
                     host,
@@ -435,7 +447,10 @@ async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
     };
     let data = {
         let ops = ops.clone();
-        blocking(move || ops.file_copy(req, Arc::new(SilentObserver), &CancelToken::new())).await
+        blocking_named("cp", move || {
+            ops.file_copy(req, Arc::new(SilentObserver), &CancelToken::new())
+        })
+        .await
     }
     .unwrap_or_else(|err| panic!("cp through the chain: {err:?}"));
     assert_eq!(data.files, 1, "{data:?}");
@@ -952,7 +967,7 @@ fn expect_failure(
     stage: Stage,
     code: ErrorCode,
 ) {
-    assert_eq!(err.code, code, "{err:?}");
+    assert_eq!(err.code, code, "expected stage {}: {err:?}", stage.as_str());
     assert_eq!(
         failure_json(err),
         json!({"hop": hop, "hops": hops, "name": name, "stage": stage.as_str()}),
@@ -989,7 +1004,7 @@ async fn jump_failure_stage_table() {
 
     // unsupported: the previous hop does not advertise jump.v1; no JUMP
     // stream is opened.
-    {
+    let unsupported_0 = async {
         let d = Direct::start(&["j", "t"]).await;
         d.host("j").h.server.hide_capabilities(&[CAP_JUMP_V1]);
         let err = d
@@ -1001,10 +1016,10 @@ async fn jump_failure_stage_table() {
         assert_eq!(stats.opened.load(std::sync::atomic::Ordering::Relaxed), 0);
         nothing_ran_on(d.host("t"));
         d.shutdown().await;
-    }
+    };
 
     // denied: a role without forward.jump.
-    {
+    let denied_1 = async {
         let d = Direct::start_with(
             &["j", "t"],
             |name| if name == "j" { "exec" } else { "*" },
@@ -1017,10 +1032,10 @@ async fn jump_failure_stage_table() {
             .expect_err("denied");
         expect_failure(&err, 2, 2, "t", Stage::Denied, ErrorCode::PermissionDenied);
         d.shutdown().await;
-    }
+    };
 
     // denied: a host-local target is refused whatever the role.
-    {
+    let denied_2 = async {
         let d = Direct::start_with(&["j", "t"], |_| "*", JumpOptions::default()).await;
         let err = d
             .dial(&d.plan(&["j", "t"]), Duration::from_secs(5))
@@ -1028,10 +1043,10 @@ async fn jump_failure_stage_table() {
             .expect_err("host-local");
         expect_failure(&err, 2, 2, "t", Stage::Denied, ErrorCode::PermissionDenied);
         d.shutdown().await;
-    }
+    };
 
     // limit: the previous hop is at its channel cap.
-    {
+    let limit_3 = async {
         let d = Direct::start_with(
             &["j", "t"],
             |_| "*",
@@ -1047,10 +1062,10 @@ async fn jump_failure_stage_table() {
             .expect_err("limit");
         expect_failure(&err, 2, 2, "t", Stage::Limit, ErrorCode::ResourceExhausted);
         d.shutdown().await;
-    }
+    };
 
     // resolve: the previous hop cannot resolve the name.
-    {
+    let resolve_4 = async {
         let d = Direct::start_with(
             &["j", "t"],
             |_| "*",
@@ -1068,10 +1083,10 @@ async fn jump_failure_stage_table() {
             .expect_err("resolve");
         expect_failure(&err, 2, 2, "t", Stage::Resolve, ErrorCode::ConnectionFailed);
         d.shutdown().await;
-    }
+    };
 
     // unreachable: the target's port refuses.
-    {
+    let unreachable_5 = async {
         let d = Direct::start(&["j", "t"]).await;
         let mut plan = d.plan(&["j", "t"]);
         plan.end = pin_at(
@@ -1092,10 +1107,10 @@ async fn jump_failure_stage_table() {
             ErrorCode::ConnectionFailed,
         );
         d.shutdown().await;
-    }
+    };
 
     // handshake: the packets pass but nobody answers in time.
-    {
+    let handshake_6 = async {
         let d = Direct::start_with(
             &["j", "t"],
             |_| "*",
@@ -1113,15 +1128,15 @@ async fn jump_failure_stage_table() {
             d.host("t").h.server_identity.fingerprint,
         );
         let err = d
-            .dial(&plan, Duration::from_millis(2500))
+            .dial(&plan, Duration::from_millis(1500))
             .await
             .expect_err("handshake");
         expect_failure(&err, 2, 2, "t", Stage::Handshake, ErrorCode::Timeout);
         d.shutdown().await;
-    }
+    };
 
     // auth: the second hop of three presents another certificate.
-    {
+    let auth_7 = async {
         let d = Direct::start(&["a", "b", "t"]).await;
         let mut plan = d.plan(&["a", "b", "t"]);
         plan.hops[1].fingerprint = make_identity().fingerprint;
@@ -1132,7 +1147,20 @@ async fn jump_failure_stage_table() {
         expect_failure(&err, 2, 3, "b", Stage::Auth, ErrorCode::AuthFailed);
         nothing_ran_on(d.host("t"));
         d.shutdown().await;
-    }
+    };
+
+    // The cases share nothing; each pays the host's drain grace on its own
+    // shutdown, so they run side by side.
+    tokio::join!(
+        unsupported_0,
+        denied_1,
+        denied_2,
+        limit_3,
+        resolve_4,
+        unreachable_5,
+        handshake_6,
+        auth_7
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
