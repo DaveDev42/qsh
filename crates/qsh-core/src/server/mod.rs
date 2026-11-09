@@ -57,6 +57,7 @@ use crate::tunnel::dial::{SystemDialer, TunnelDialer};
 use crate::tunnel::remote::{BindHostResolver, RemoteForwardBinder, SystemBinder, SystemResolver};
 use crate::tunnel::splice::splice_tcp_quic;
 
+mod agent;
 mod dispatch;
 mod exec;
 mod file;
@@ -307,6 +308,11 @@ pub struct PendingExec {
     /// before the `ExecExit` frame is sent, so the release is never
     /// observable after the result.
     pub permit: crate::quota::ExecPermit,
+    /// The exec's agent socket (ADR-0055 decision 8), when it asked for `-A` and
+    /// `forward.agent` allowed. It lives as long as this value: the ticket
+    /// expiring, the connection closing, or the data-stream handler that
+    /// runs the exec finishing drops it, and dropping it removes the socket.
+    pub(crate) agent: Option<agent::AgentTask>,
 }
 
 /// An authorized `session.write` whose bytes have not reached the child
@@ -656,6 +662,9 @@ pub struct Server {
     /// The hole-punching target service of a `qsh serve --to` host
     /// ([`Server::set_punch_target`]); unset everywhere else.
     punch: Mutex<Option<Arc<crate::punch::PunchTarget>>>,
+    /// The agent sockets of this host's sessions and the per-connection
+    /// `AGENT` stream budgets (ADR-0055).
+    agents: Arc<agent::AgentTable>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -824,6 +833,7 @@ impl Server {
             quotas,
             trust_watch: OnceLock::new(),
             punch: Mutex::new(None),
+            agents: Arc::new(agent::AgentTable::new()),
         })
     }
 
@@ -1182,6 +1192,7 @@ impl Server {
         for entry in &dying_forwards {
             entry.task.abort();
         }
+        self.agents.forget_connection(conn_id);
         self.sessions
             .release_connection(ConnectionId(conn_id as u64))
             .await;
@@ -2015,7 +2026,7 @@ impl Server {
                                 continue;
                             }
                             if !is_long_poll(&msg) {
-                                if let Some(reply) = self.dispatch(&ctx, &msg).await {
+                                if let Some(reply) = self.dispatch_on(&ctx, conn, &msg).await {
                                     ctl.send.send(&reply).await?;
                                 }
                                 continue;

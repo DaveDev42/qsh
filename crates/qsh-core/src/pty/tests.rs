@@ -57,6 +57,7 @@ fn sh(script: &str) -> SessionSpec {
         rows: 24,
         user: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -527,6 +528,7 @@ async fn a_shell_command_runs_through_the_login_shell_with_dash_c_under_a_tty() 
         shell: Some(crate::shell::ShellRequest::Command(
             "printf '[%s]' \"$QSH_T\" | tr a-z A-Z && test -t 0 && echo ' TTY_OK'".into(),
         )),
+        agent_sock: None,
     };
     let source = PtySource::new().with_login_shell("/bin/sh");
     let handle = broker.open_with(&spec, Box::new(source)).unwrap();
@@ -554,6 +556,7 @@ async fn empty_argv_runs_a_login_shell_with_dash_argv0() {
         rows: 24,
         user: None,
         shell: None,
+        agent_sock: None,
     };
     let source = PtySource::new().with_login_shell("/bin/sh");
     let handle = broker.open_with(&spec, Box::new(source)).unwrap();

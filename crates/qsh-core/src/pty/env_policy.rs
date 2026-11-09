@@ -28,7 +28,14 @@ pub(crate) const PASSTHROUGH: &[&str] = &["LANG", "LANGUAGE", "TZ"];
 /// Keys the client's `env` may not override on unix: the identity of the
 /// login (fixed by the password database) and `PATH`. `crate::exec`
 /// (`exec.run`, no PTY) pins the same five keys the same way.
-pub(crate) const PINNED_POSIX: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH"];
+pub(crate) const PINNED_POSIX: &[&str] =
+    &["HOME", "USER", "LOGNAME", "SHELL", "PATH", SSH_AUTH_SOCK];
+
+/// The agent socket variable (ADR-0055 decision 6). The host alone sets it, to
+/// the session's own socket or pipe, and a session without agent forwarding
+/// has no such variable: a client-sent value is dropped either way, so a peer
+/// cannot point the session's programs at another socket on the host.
+pub(crate) const SSH_AUTH_SOCK: &str = "SSH_AUTH_SOCK";
 
 /// Keys the client's `env` may not override on a Windows host: the unix five
 /// plus the Windows identity variables. Environment variable names on
@@ -46,6 +53,7 @@ pub(crate) const PINNED_WINDOWS: &[&str] = &[
     "HOMEPATH",
     "COMSPEC",
     "SystemRoot",
+    SSH_AUTH_SOCK,
     SIGNAL_EVENT_USR1,
     SIGNAL_EVENT_USR2,
 ];
@@ -109,6 +117,25 @@ pub(crate) fn windows_pinned_values(user_env: &[(String, String)]) -> Vec<(Strin
         .filter(|(k, _)| WINDOWS.is_pinned(k))
         .cloned()
         .collect()
+}
+
+/// The account block `user_env` with `SSH_AUTH_SOCK` replaced by the host's
+/// `agent_sock` (ADR-0055 decision 6): any value the block already holds is
+/// dropped, and `None` leaves the variable out. Because the key is pinned, the
+/// result is what the child gets, whatever the client's `env` says.
+pub(crate) fn windows_with_agent_sock(
+    user_env: &[(String, String)],
+    agent_sock: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = user_env
+        .iter()
+        .filter(|(k, _)| !WINDOWS.same_key(k, SSH_AUTH_SOCK))
+        .cloned()
+        .collect();
+    if let Some(sock) = agent_sock {
+        env.push((SSH_AUTH_SOCK.to_string(), sock.to_string()));
+    }
+    env
 }
 
 /// The pinned entries of a session: those of the user's environment plus the

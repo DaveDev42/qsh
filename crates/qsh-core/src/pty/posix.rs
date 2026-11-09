@@ -451,6 +451,11 @@ fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String,
     // overlay) can override them.
     env.retain(|(k, _)| !PINNED_ENV.contains(&k.as_str()));
     env.extend(pinned);
+    // The agent socket is pinned too: the host's value, or nothing (the
+    // client's own entry was dropped with the other pinned keys above).
+    if let Some(sock) = &spec.agent_sock {
+        env.push((super::env_policy::SSH_AUTH_SOCK.to_string(), sock.clone()));
+    }
     env
 }
 

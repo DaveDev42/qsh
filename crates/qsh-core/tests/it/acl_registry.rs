@@ -954,6 +954,7 @@ mod dod2_audit {
                 rows: 24,
                 user: None,
                 shell: None,
+                agent_sock: None,
             })
             .expect("plant a session directly at the broker");
         let id = SessionId(handle.id().to_string());

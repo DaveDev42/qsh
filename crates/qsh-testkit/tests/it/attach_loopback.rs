@@ -547,6 +547,7 @@ async fn attach_stream_ends_with_exit_when_the_child_exits<P: HostedPair>(h: P) 
             rows: 24,
             user: None,
             shell: None,
+            agent_sock: None,
         })
         .unwrap()
         .id()

@@ -76,6 +76,7 @@ fn probe_spec(mode: &str, report: &Path, env: &[(&str, &str)]) -> SessionSpec {
         rows: 24,
         user: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -655,6 +656,7 @@ async fn a_host_that_ignores_ctrl_c_still_lets_a_typed_ctrl_c_stop_a_program() {
         rows: 24,
         user: None,
         shell: None,
+        agent_sock: None,
     };
     let handle = broker.open_with(&spec, Box::new(source())).unwrap();
     pull_until(&handle, &clock, usize::MAX, |ev| {

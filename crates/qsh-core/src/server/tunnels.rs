@@ -391,6 +391,10 @@ impl Server {
         match ticket.purpose {
             TicketPurpose::Exec(pending) => {
                 let exec_id = pending.exec_id.clone();
+                // The exec's agent socket (ADR-0055 decision 8) lives until this arm
+                // ends: the child is gone and `ExecExit` is sent, or the connection
+                // closed and this task was aborted.
+                let _agent_socket = pending.agent;
                 stream.send.set_priority(wire::PRIORITY_EXEC_DATA);
                 // The permit moves into `run_exec`, which drops it after the
                 // child is gone and before `ExecExit` is sent; leaving it in

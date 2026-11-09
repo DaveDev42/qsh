@@ -334,7 +334,14 @@ mod tests {
     #[test]
     fn families_expand_and_stop_short_of_socks() {
         let all = expand_actions(&s(&["forward.*"])).unwrap();
-        assert_eq!(all, vec![Action::ForwardLocal, Action::ForwardRemote]);
+        assert_eq!(
+            all,
+            vec![
+                Action::ForwardLocal,
+                Action::ForwardRemote,
+                Action::ForwardAgent
+            ]
+        );
         assert_eq!(
             expand_actions(&s(&["forward.socks"])),
             Err(PinGrantsError::Socks)

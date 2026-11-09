@@ -8,6 +8,34 @@ impl Server {
     // dispatch — the choke point
     // ------------------------------------------------------------------
 
+    /// [`Self::dispatch`] for a message that arrived on `conn`. The three
+    /// requests that may carry an `agent_channel` (`session.open`,
+    /// `session.attach`, `exec.run`) need the connection: the agent socket's
+    /// `AGENT` streams are opened on it (ADR-0055 decision 5). Everything
+    /// else is `dispatch`.
+    pub(super) async fn dispatch_on(
+        &self,
+        ctx: &ConnCtx,
+        conn: &Connection,
+        msg: &ControlMessage,
+    ) -> Option<ControlMessage> {
+        let request_id = msg.request_id;
+        match &msg.body {
+            Some(control_message::Body::ExecStart(req)) => {
+                Some(self.handle_exec_start(ctx, Some(conn), request_id, req))
+            }
+            Some(control_message::Body::SessionOpen(req)) => Some(
+                self.handle_session_open(ctx, Some(conn), request_id, req)
+                    .await,
+            ),
+            Some(control_message::Body::SessionAttach(req)) => Some(
+                self.handle_session_attach(ctx, Some(conn), request_id, req)
+                    .await,
+            ),
+            _ => self.dispatch(ctx, msg).await,
+        }
+    }
+
     /// Decide and answer one control message. Returns `None` when no reply
     /// is due (e.g. an unsolicited `Pong`). Every handler authorizes and
     /// audits before its first `.await` and before touching any resource.
@@ -15,7 +43,7 @@ impl Server {
         let request_id = msg.request_id;
         match &msg.body {
             Some(control_message::Body::ExecStart(req)) => {
-                Some(self.handle_exec_start(ctx, request_id, req))
+                Some(self.handle_exec_start(ctx, None, request_id, req))
             }
             Some(control_message::Body::Ping(_)) => Some(ControlMessage::new(
                 request_id,
@@ -23,7 +51,7 @@ impl Server {
             )),
             Some(control_message::Body::Pong(_)) | Some(control_message::Body::Response(_)) => None,
             Some(control_message::Body::SessionOpen(req)) => {
-                Some(self.handle_session_open(ctx, request_id, req).await)
+                Some(self.handle_session_open(ctx, None, request_id, req).await)
             }
             Some(control_message::Body::SessionList(_)) => {
                 Some(self.handle_session_list(ctx, request_id))
@@ -44,7 +72,7 @@ impl Server {
                 Some(self.handle_session_close(ctx, request_id, req).await)
             }
             Some(control_message::Body::SessionAttach(req)) => {
-                Some(self.handle_session_attach(ctx, request_id, req).await)
+                Some(self.handle_session_attach(ctx, None, request_id, req).await)
             }
             // A host never consumes SessionEvent (it is the producer);
             // an unsolicited one is dropped like a stray Pong.

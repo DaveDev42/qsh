@@ -450,6 +450,7 @@ fn shell(command: &str) -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: Some(ShellRequest::Command(command.into())),
+        agent_sock: None,
     }
 }
 

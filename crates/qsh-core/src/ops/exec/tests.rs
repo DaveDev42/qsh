@@ -119,6 +119,7 @@ async fn exec_async_tries_every_resolved_address_not_only_the_first() {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     };
 
     let err = exec_async_resolving(
@@ -169,6 +170,7 @@ async fn exec_without_a_timeout_bounds_a_resolver_that_never_answers() {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     };
     let started = tokio::time::Instant::now();
     let err = tokio::time::timeout(

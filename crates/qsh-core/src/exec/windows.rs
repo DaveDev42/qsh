@@ -87,6 +87,8 @@ pub(super) fn spawn_child(spec: &ExecSpec) -> Result<Spawned, SpawnFailure> {
         message: format!("qsh: cannot resolve host account: {err}\n"),
     };
     let user_env = winproc::user_environment().map_err(account)?;
+    // ADR-0055 decision 6: `SSH_AUTH_SOCK` is the host's own value or absent.
+    let user_env = env_policy::windows_with_agent_sock(&user_env, spec.agent_sock.as_deref());
     let windows_dir = winproc::windows_directory().map_err(account)?;
     let cwd = std::env::current_dir().map_err(failure)?;
     let launch = match &spec.shell {

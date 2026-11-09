@@ -264,7 +264,7 @@ fn the_pin_notice_says_an_existing_acl_row_adds_to_the_role() {
     assert!(!notice.contains(PAIRING_ACL_ROW_ABSENT), "{notice}");
     assert!(
         notice.contains(
-            "`exec`, which grants: exec.run, session.open, session.list, session.attach, session.control, host.punch."
+            "`exec`, which grants: exec.run, session.open, session.list, session.attach, session.control, host.punch, forward.agent."
         ),
         "{notice}"
     );

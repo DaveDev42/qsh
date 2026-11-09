@@ -735,6 +735,17 @@ pub fn host_runtime(
     // target gets the same set because it comes through here too (ADR-0029
     // decision 5).
     server.set_file_host(paths.clone(), config.audit.clone());
+    // Agent forwarding (ADR-0055): sockets are made under the runtime directory,
+    // and the ones a dead `qsh serve` left behind are swept once, now.
+    let runtime_dir = paths.runtime_dir();
+    server.set_agent_runtime_dir(runtime_dir.clone());
+    tokio::spawn(async move {
+        if let Ok(removed) = crate::agent::sweep_stale(&runtime_dir).await
+            && removed > 0
+        {
+            tracing::info!(target: "qsh::agent", event = "stale_swept", removed);
+        }
+    });
     HostRuntime {
         server,
         audit,

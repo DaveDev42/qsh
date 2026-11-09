@@ -43,6 +43,7 @@ fn spec(argv: &[&str], env: &[(&str, &str)]) -> ExecSpec {
             .collect(),
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -729,6 +730,7 @@ async fn a_shell_command_runs_under_cmd_exe_and_reports_its_exit_code() {
         shell: Some(ShellRequest::Command(
             r#"echo "q u o t e" && echo %QSH_SHELL_X% | findstr /r "env" && exit 7"#.into(),
         )),
+        agent_sock: None,
     };
     let Spawned {
         mut child,

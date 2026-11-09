@@ -101,6 +101,7 @@ fn exec_spec() -> ExecSpec {
         env: Vec::new(),
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 

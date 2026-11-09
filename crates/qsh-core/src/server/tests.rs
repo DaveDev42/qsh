@@ -1040,8 +1040,10 @@ async fn ticket_sweep_sites_never_drop_an_exec_permit_while_the_tickets_lock_is_
                     env: Vec::new(),
                     timeout: None,
                     shell: None,
+                    agent_sock: None,
                 },
                 permit,
+                agent: None,
             }),
             conn_id,
             expires_at: Instant::now() - Duration::from_secs(1),
@@ -1070,8 +1072,10 @@ async fn ticket_sweep_sites_never_drop_an_exec_permit_while_the_tickets_lock_is_
                 env: Vec::new(),
                 timeout: None,
                 shell: None,
+                agent_sock: None,
             },
             permit: fresh_permit,
+            agent: None,
         }),
     );
 
