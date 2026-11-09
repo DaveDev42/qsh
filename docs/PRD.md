@@ -189,7 +189,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - 화면 상태 동기화(대화형 form의 재부착과 느린 링크)
 - 안전한 local echo prediction과 연결 상태 줄
 - 연결 시작 때 한 번의 홀펀칭(실패하면 포기)
-- agent forwarding
+- agent forwarding (ADR-0055)
 - jump chaining
 - 후보: read-only multi-attach, sftp 하위 시스템 호환. X11 forwarding은 넣지 않는다
 
