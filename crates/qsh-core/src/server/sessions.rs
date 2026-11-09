@@ -185,6 +185,13 @@ impl Server {
             Err(why) => return invalid_argument(request_id, why),
         };
 
+        // Agent forwarding (ADR-0055 decision 3): a length check like the
+        // ones above, so it precedes the ACL decision and writes no audit.
+        let agent = match agent_grant(ctx, &req.agent_channel) {
+            Ok(agent) => agent,
+            Err(why) => return invalid_argument(request_id, why),
+        };
+
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) = self.authorize(
             ctx,
@@ -358,6 +365,7 @@ impl Server {
                 initial_seq: 0,
                 expires_at,
                 screen_channel,
+                agent: agent as i32,
             }),
         )
     }
@@ -827,6 +835,10 @@ impl Server {
             Ok(screen) => screen,
             Err(why) => return invalid_argument(request_id, why),
         };
+        let agent = match agent_grant(ctx, &req.agent_channel) {
+            Ok(agent) => agent,
+            Err(why) => return invalid_argument(request_id, why),
+        };
         let id = SessionId(req.session_id.clone());
         // ---- Step 1: credential + bound identity, before anything else
         // touches the registry. ----
@@ -1037,6 +1049,7 @@ impl Server {
                 input_seq: input_from,
                 output_end: info.last_sequence,
                 screen_channel,
+                agent: agent as i32,
             }),
         )
     }
@@ -1061,6 +1074,26 @@ fn screen_params(
         fg: rgb(req.fg)?,
         bg: rgb(req.bg)?,
     }))
+}
+
+/// The `AgentGrant` this host answers to an `agent_channel` field
+/// (ADR-0055 decision 3). Empty means nothing was requested, and so does a
+/// field from a peer that did not advertise `agent.v1` (ignored, like
+/// `screen_params`). A channel that is not exactly 16 bytes is
+/// `INVALID_ARGUMENT`. This build has no agent socket yet, so every real
+/// request is `UNAVAILABLE`: the session or exec still opens and the reply
+/// says forwarding is off.
+pub(super) fn agent_grant(
+    ctx: &ConnCtx,
+    agent_channel: &[u8],
+) -> Result<wire::AgentGrant, &'static str> {
+    if agent_channel.is_empty() || !ctx.has_capability(wire::CAP_AGENT_V1) {
+        return Ok(wire::AgentGrant::Unspecified);
+    }
+    if agent_channel.len() != wire::AGENT_CHANNEL_LEN {
+        return Err("agent_channel must be exactly 16 bytes");
+    }
+    Ok(wire::AgentGrant::Unavailable)
 }
 
 /// A fresh 128-bit channel id (ADR-0052 decision 7). Issued only after the

@@ -383,7 +383,7 @@ impl Ops {
     /// §6.3). Value op: no attach, no PTY on this side; the returned
     /// `session_ref` is the handle for every later call.
     pub fn session_open(&self, req: SessionOpenReq) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, false, None)
+        self.session_open_gated(req, false, None, Vec::new())
     }
 
     /// [`Self::session_open`] for an interactive frontend that will draw
@@ -401,7 +401,7 @@ impl Ops {
         requires_dynamic: bool,
         screen: Option<ScreenAttach>,
     ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, requires_dynamic, screen)
+        self.session_open_gated(req, requires_dynamic, screen, Vec::new())
     }
 
     /// [`Self::session_open`]'s twin for the interactive `qsh [user@]host
@@ -420,7 +420,22 @@ impl Ops {
         &self,
         req: SessionOpenReq,
     ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, true, None)
+        self.session_open_gated(req, true, None, Vec::new())
+    }
+
+    /// [`Self::session_open`] asking for agent forwarding (ADR-0055
+    /// decision 3): `agent_channel` is the 16 bytes the client drew for this
+    /// request. Crate-internal until the `-A` flag lands; nothing outside
+    /// this crate can set the field, so a request without `-A` stays
+    /// byte-identical to today's. `Session::session_open` drops the field
+    /// again for a host that did not advertise `agent.v1`.
+    #[allow(dead_code)] // first caller is the `-A` step
+    pub(crate) fn session_open_with_agent(
+        &self,
+        req: SessionOpenReq,
+        agent_channel: Vec<u8>,
+    ) -> Result<SessionOpenData, OpError> {
+        self.session_open_gated(req, false, None, agent_channel)
     }
 
     /// The shared body of [`Self::session_open`]/
@@ -435,6 +450,7 @@ impl Ops {
         req: SessionOpenReq,
         require_dial_filter: bool,
         screen: Option<ScreenAttach>,
+        agent_channel: Vec<u8>,
     ) -> Result<SessionOpenData, OpError> {
         let host = req.host.clone();
         let screen = screen.filter(ScreenAttach::wanted);
@@ -450,6 +466,7 @@ impl Ops {
             // `Session::session_open` drops the field again for a host
             // that did not negotiate `screen.v1`.
             screen: screen.map(|s| s.request()),
+            agent_channel,
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
@@ -802,6 +819,18 @@ impl Ops {
         self.session_attach_screen(req, remote_forward_specs, None)
     }
 
+    /// [`Self::session_attach`] asking for agent forwarding (ADR-0055
+    /// decision 3). Crate-internal until the `-A` flag lands.
+    #[allow(dead_code)] // first caller is the `-A` step
+    pub(crate) fn session_attach_with_agent(
+        &self,
+        req: SessionAttachReq,
+        remote_forward_specs: &[wire::ForwardSpec],
+        agent_channel: Vec<u8>,
+    ) -> Result<SessionAttachStream, OpError> {
+        self.session_attach_inner(req, remote_forward_specs, None, agent_channel)
+    }
+
     /// [`Self::session_attach`] for an interactive frontend that draws on a
     /// terminal (ADR-0052 decisions 9, 11 and 15). With `screen` set the
     /// attach asks for screen sync; when the host grants it the events are
@@ -815,6 +844,16 @@ impl Ops {
         req: SessionAttachReq,
         remote_forward_specs: &[wire::ForwardSpec],
         screen: Option<ScreenAttach>,
+    ) -> Result<SessionAttachStream, OpError> {
+        self.session_attach_inner(req, remote_forward_specs, screen, Vec::new())
+    }
+
+    fn session_attach_inner(
+        &self,
+        req: SessionAttachReq,
+        remote_forward_specs: &[wire::ForwardSpec],
+        screen: Option<ScreenAttach>,
+        agent_channel: Vec<u8>,
     ) -> Result<SessionAttachStream, OpError> {
         let screen = screen.filter(ScreenAttach::wanted);
         let r = parse_session_ref(&req.session_ref)?;
@@ -876,6 +915,7 @@ impl Ops {
             // `Session::attach_request` drops it for a host without
             // `screen.v1`.
             screen: screen.map(|s| s.request()),
+            agent_channel,
         };
         if screen.is_some_and(|s| s.mode == ScreenSync::On)
             && !conn

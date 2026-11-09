@@ -42,6 +42,7 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
         "datagram.v1",
         "screen-echo.v1",
         "punch.v1",
+        "agent.v1",
     ];
     assert_eq!(s.capabilities, expected);
 

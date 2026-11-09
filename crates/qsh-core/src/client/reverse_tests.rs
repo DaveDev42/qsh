@@ -83,6 +83,7 @@ async fn open_attach_stream_on_a_reverse_session_reaches_the_same_daemon_socket_
             input_seq: 0,
             output_end: 0,
             screen_channel: Vec::new(),
+            agent: 0,
         })
         .await
         .unwrap();
@@ -161,6 +162,7 @@ async fn open_data_link_for_exec_data_on_a_reverse_session_opens_its_stream_on_t
                     body: Some(response::Body::ExecStarted(ExecStarted {
                         exec_id: "e1".to_string(),
                         ticket: vec![9, 9, 9],
+                        agent: 0,
                     })),
                 }),
             ))
@@ -272,6 +274,7 @@ async fn open_data_link_for_exec_data_on_a_reverse_session_fails_closed_when_the
                     body: Some(response::Body::ExecStarted(ExecStarted {
                         exec_id: "e1".to_string(),
                         ticket: vec![5, 5, 5],
+                        agent: 0,
                     })),
                 }),
             ))
@@ -403,6 +406,7 @@ async fn exec_on_a_reverse_session_still_collects_output_sent_after_stdin_eof() 
                     body: Some(response::Body::ExecStarted(ExecStarted {
                         exec_id: "e1".to_string(),
                         ticket: vec![7, 7, 7],
+                        agent: 0,
                     })),
                 }),
             ))
@@ -663,6 +667,7 @@ async fn killing_a_reverse_attachs_data_conduit_ends_the_reader_cleanly() {
             input_seq: 0,
             output_end: 0,
             screen_channel: Vec::new(),
+            agent: 0,
         })
         .await
         .unwrap();

@@ -89,6 +89,7 @@ fn opened_response(session_id: &str) -> wire::Response {
             initial_seq: 0,
             expires_at: String::new(),
             screen_channel: Vec::new(),
+            agent: 0,
         })),
     }
 }
@@ -287,6 +288,7 @@ async fn a_late_response_for_a_dead_conduit_is_dropped_and_sends_nothing() {
             user: None,
             shell_command: None,
             screen: None,
+            agent_channel: Vec::new(),
         }),
     )
     .unwrap();

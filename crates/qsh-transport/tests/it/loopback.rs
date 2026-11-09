@@ -220,6 +220,7 @@ async fn data_stream_framed_roundtrip_many_messages_and_clean_eof() {
                 timeout_ms: 1000,
                 login_shell: false,
                 shell_command: None,
+                agent_channel: Vec::new(),
             }),
         ),
         ControlMessage::new(
@@ -228,6 +229,7 @@ async fn data_stream_framed_roundtrip_many_messages_and_clean_eof() {
                 body: Some(response::Body::ExecStarted(ExecStarted {
                     exec_id: "e1".into(),
                     ticket: vec![9, 9, 9],
+                    agent: 0,
                 })),
             }),
         ),
@@ -379,6 +381,7 @@ async fn oversize_control_frame_rejected_and_encode_refuses_to_send_over_cap() {
             timeout_ms: 0,
             login_shell: false,
             shell_command: None,
+            agent_channel: Vec::new(),
         }),
     );
     match framed_send.send(&huge).await {

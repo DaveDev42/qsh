@@ -267,6 +267,11 @@ message ExecStart {
   // login shell itself, with no PTY and no `-c` (`qsh -T host`). Mutually
   // exclusive with a non-empty `argv` and with `shell_command`.
   bool login_shell = 5;
+  // ADR-0055 decision 3 (capability `agent.v1`, protocol.md §20): the client
+  // asks for ssh-agent forwarding for this exec. Exactly 16 bytes from the
+  // client's CSPRNG; empty = not requested. Set only when the negotiated
+  // capability set has `agent.v1`; an older host skips the field as unknown.
+  bytes agent_channel = 6;
 }
 
 // Success payload for ExecStart. `ticket` authorizes exactly one EXEC_DATA
@@ -275,6 +280,24 @@ message ExecStart {
 message ExecStarted {
   string exec_id = 1;
   bytes ticket = 2;
+  // ADR-0055 decision 3: outcome of `ExecStart.agent_channel`. UNSPECIFIED
+  // when forwarding was not requested. Additive field 3.
+  AgentGrant agent = 3;
+}
+
+// Outcome of an agent-forwarding request (ADR-0055 decision 3, protocol.md
+// §20). A value this build does not know is read as UNSPECIFIED.
+enum AgentGrant {
+  // Forwarding was not requested.
+  AGENT_GRANT_UNSPECIFIED = 0;
+  AGENT_GRANT_FORWARDED = 1;
+  // The `forward.agent` decision refused it.
+  AGENT_GRANT_DENIED = 2;
+  // The host cannot make the socket (directory, path length, switched off,
+  // or no agent support in this build).
+  AGENT_GRANT_UNAVAILABLE = 3;
+  // The attached session was opened without an agent socket.
+  AGENT_GRANT_NO_SOCKET = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +409,9 @@ message SessionOpen {
   // negotiated capability set has `screen.v1`; a host that did not
   // advertise it skips the field as unknown and the byte path runs.
   optional ScreenRequest screen = 8;
+  // ADR-0055 decision 3 (capability `agent.v1`): 16-byte agent channel from
+  // the client's CSPRNG; empty = no agent forwarding. Additive field 9.
+  bytes agent_channel = 9;
 }
 
 // What the client tells the host about its terminal when it asks for screen
@@ -415,6 +441,9 @@ message SessionOpened {
   // accepted `SessionOpen.screen`. Empty = no screen sync; the data stream
   // carries `Output` as it always did. Additive field 6.
   bytes screen_channel = 6;
+  // ADR-0055 decision 3: outcome of `SessionOpen.agent_channel`. Additive
+  // field 7.
+  AgentGrant agent = 7;
 }
 
 // Whether an attach wants to write. Only an explicit ATTACH_MODE_RW asks
@@ -443,6 +472,9 @@ message SessionAttach {
   // ADR-0052 decision 9: ask for screen sync on this attach (only with
   // `screen.v1` negotiated). Additive field 6.
   optional ScreenRequest screen = 6;
+  // ADR-0055 decision 3 (capability `agent.v1`): 16-byte agent channel, empty
+  // = no agent forwarding on this attach. Additive field 7.
+  bytes agent_channel = 7;
 }
 
 // Success payload for SessionAttach. The presented token is dead; the
@@ -470,6 +502,9 @@ message SessionAttached {
   // attach; the data stream then carries `ScreenUpdate` and no `Output`,
   // and `replay_from` equals `output_end` (no replay). Additive field 8.
   bytes screen_channel = 8;
+  // ADR-0055 decision 3: outcome of `SessionAttach.agent_channel`. Additive
+  // field 9.
+  AgentGrant agent = 9;
 }
 
 // Request: list this host's sessions (op `session.list`, ACL `session.list`).
@@ -628,6 +663,10 @@ enum StreamKind {
   // ADR-0029: a `file.read` / `file.write` transfer. Opened by the
   // requester with the ticket from `FileReadOpened` / `FileWriteOpened`.
   FILE_DATA = 5;
+  // ADR-0055 decision 4 (capability `agent.v1`, protocol.md §20): opened by
+  // the host toward the client; `StreamHeader.ticket` is the 16-byte
+  // `agent_channel`. Carries raw ssh-agent protocol bytes after the header.
+  AGENT = 6;
 }
 
 message StreamHeader {
@@ -635,6 +674,7 @@ message StreamHeader {
   // SESSION_DATA / EXEC_DATA / FILE_DATA: the ticket from the corresponding
   // response.
   // TCP_ACCEPTED: forward_id.
+  // AGENT: agent_channel (16 bytes).
   bytes ticket = 2;
   // TCP_CONNECT only.
   string host = 3;

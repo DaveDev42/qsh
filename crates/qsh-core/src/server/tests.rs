@@ -121,6 +121,7 @@ fn exec_start(request_id: u64, argv: &[&str]) -> ControlMessage {
             timeout_ms: 0,
             login_shell: false,
             shell_command: None,
+            agent_channel: Vec::new(),
         }),
     )
 }
@@ -407,6 +408,7 @@ fn shell_exec_start(
             timeout_ms: 0,
             shell_command: command.map(str::to_string),
             login_shell: login,
+            agent_channel: Vec::new(),
         }),
     )
 }

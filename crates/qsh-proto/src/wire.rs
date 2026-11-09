@@ -107,6 +107,18 @@ pub const CAP_SCREEN_ECHO_V1: &str = "screen-echo.v1";
 /// is never sent those messages (`protocol.md` §16.4).
 pub const CAP_PUNCH_V1: &str = "punch.v1";
 
+/// Capability string for ssh-agent forwarding (ADR-0055 decision 3,
+/// `docs/design/protocol.md` §20): this peer, as host, handles
+/// `agent_channel` on `SessionOpen`, `SessionAttach` and `ExecStart` and
+/// opens `AGENT` streams; as client, receives them. A peer without it is
+/// never sent `agent_channel` (`protocol.md` §16.4).
+pub const CAP_AGENT_V1: &str = "agent.v1";
+
+/// Length in bytes of an `agent_channel` (ADR-0055 decision 3): drawn by the
+/// client from a CSPRNG and carried again as `StreamHeader.ticket` of the
+/// `AGENT` stream it names.
+pub const AGENT_CHANNEL_LEN: usize = 16;
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -122,7 +134,8 @@ pub const CAP_PUNCH_V1: &str = "punch.v1";
 /// joined with the host emulator's stream carrier (ADR-0052 decision 9),
 /// and [`CAP_DATAGRAM_V1`] with the datagram carrier and the input copy.
 /// [`CAP_SCREEN_ECHO_V1`] joined with `ScreenEcho` (ADR-0053 decision 3), and
-/// [`CAP_PUNCH_V1`] with the hole-punching messages (ADR-0054 decision 9). The set is
+/// [`CAP_PUNCH_V1`] with the hole-punching messages (ADR-0054 decision 9), and
+/// [`CAP_AGENT_V1`] with agent forwarding (ADR-0055 decision 3). The set is
 /// the same on every platform.
 pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_EXEC,
@@ -135,6 +148,7 @@ pub const LOCAL_CAPABILITIES: &[&str] = &[
     CAP_DATAGRAM_V1,
     CAP_SCREEN_ECHO_V1,
     CAP_PUNCH_V1,
+    CAP_AGENT_V1,
 ];
 
 /// quinn send priority of the control stream — the top of the

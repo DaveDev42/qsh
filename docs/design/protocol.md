@@ -50,6 +50,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`·`screen_history`가 여기 딸린 항목이고 세부는 §18.8과 §18.11이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
 - `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
 - `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). `[punch].mode = "off"`여도 광고하고 요청에는 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다.
+- `agent.v1`(ADR-0055 결정 3)은 이 peer가 host로서 `SessionOpen`·`SessionAttach`·`ExecStart`의 `agent_channel`을 처리해 `AGENT` 스트림을 열고, client로서 `AGENT` 스트림을 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_AGENT_V1`). 광고하지 않은 peer에게는 `agent_channel`을 세팅하지 않는다. 옛 host는 모르는 필드를 버리므로 확인 없이 보내면 client가 forwarding이 켜졌다고 착각한다(§16.4, ADR-0019 결정 4와 같은 규칙). 세부는 §20이다.
 
 ## 5. Frame layer
 
@@ -80,6 +81,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 | Exec data | exec 요청자, exec당 1개 | bidi | `StreamHeader{EXEC_DATA, ticket}` 후 framed `Stdin/StdinEof/Stdout/Stderr/ExecExit` |
 | File data | 요청자, `file.read`/`file.write` 전송당 1개 | bidi | `StreamHeader{FILE_DATA, ticket}` 후 framed `FileFrame{data/end/result}`(ADR-0029 결정 9, 아래 문단) |
 | Tunnel (local fwd) | local listener 쪽, TCP 연결당 1개 | bidi | `StreamHeader{TCP_CONNECT, host, port}` → `ConnectResult{ok, code, message}` → (ok면) raw bytes |
+| Agent | host, agent 소켓에 들어온 로컬 연결당 1개 | bidi, host → client | `StreamHeader{AGENT, ticket = agent_channel}` 후 ssh-agent 프로토콜 바이트 그대로(§20, ADR-0055 결정 4) |
 | Tunnel (remote fwd) | remote port를 bind한 쪽, accept당 1개 | bidi | `StreamHeader{TCP_ACCEPTED, forward_id}` → raw bytes |
 
 **Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
@@ -171,23 +173,25 @@ message ControlMessage {
     Response            response = 11;      // 성공 payload 또는 Error — 상세는 아래 Response 참고
 
     SessionOpen         session_open = 20;  // argv, env, term, cols, rows, optional shell_command(7, §7.1),
-                                            //   optional user(hint; `qsh user@host`의 user — 검사 순서는
+                                            //   agent_channel(9, bytes, agent.v1, §20), optional user(hint; `qsh user@host`의 user — 검사 순서는
                                             //   ACL session.open → hint → spawn; serve 계정 login name과
                                             //   다르면 세션 생성 없이 UNSUPPORTED, 미인가 peer는 항상
                                             //   PERMISSION_DENIED, CLI.md §7)
                                             // -> SessionOpened{session_id, resume_token, ticket, initial_seq,
-                                            //      expires_at}
+                                            //      expires_at, screen_channel, agent(7, AgentGrant, §20)}
                                             //    session_id는 opaque·URL-safe; session_ref는 클라이언트가
                                             //    조립한다(ADR-0007). expires_at = 토큰/세션 TTL 만료 시각
                                             //    (클라이언트 resume.json 정리용)
     SessionAttach       session_attach = 21;// session_id, resume_token, last_output_seq,
-                                            //   mode(AttachMode: UNSPECIFIED=0|RW=1|RO=2), no_steal
+                                            //   mode(AttachMode: UNSPECIFIED=0|RW=1|RO=2), no_steal,
+                                            //   agent_channel(7, bytes, agent.v1, §20)
                                             //   — writer lease는 명시적 RW에만 요청된다. UNSPECIFIED(필드
                                             //   미설정)·미지 값은 INVALID_ARGUMENT, 절대 RW로 취급하지
                                             //   않는다. RO=2는 번호만 확보(관찰자 모드는 없다,
                                             //   ROADMAP §3) — 호스트는 INVALID_ARGUMENT로 답한다
                                             // -> SessionAttached{ticket, new_resume_token,
-                                            //      replay_from, writer_lease, expires_at, input_seq, output_end}
+                                            //      replay_from, writer_lease, expires_at, input_seq, output_end,
+                                            //      screen_channel, agent(9, AgentGrant, §20)}
                                             //    (output_end: attach 승인 시점의 출력 끝 offset, additive 필드 7 —
                                             //     [replay_from, output_end)가 재생분이고 TUI 렌더러만 쓴다)
     SessionList         session_list = 22;  // -> SessionInfo[] — wire SessionInfo는
@@ -219,8 +223,9 @@ message ControlMessage {
     SessionWrite        session_write = 28; // session_id, data(≤ 16 KiB, 초과 시 INVALID_ARGUMENT)
                                             // -> SessionWritten{bytes_written} ; ACL session.control
 
-    ExecStart           exec_start = 30;    // argv, env, timeout_ms, optional shell_command(4), login_shell(5) (§7.1)
-                                            //   -> ExecStarted{exec_id, ticket}
+    ExecStart           exec_start = 30;    // argv, env, timeout_ms, optional shell_command(4), login_shell(5) (§7.1),
+                                            //   agent_channel(6, bytes, agent.v1, §20)
+                                            //   -> ExecStarted{exec_id, ticket, agent(3, AgentGrant, §20)}
 
     RemoteForwardOpen   rfwd_open = 40;     // bind_host, bind_port, forward_host, forward_port,
                                             //   claim_token(§11-3 forward_id→conduit 등록표 —
@@ -314,8 +319,8 @@ message ReverseRegistration {
 
 // 모든 비-control 스트림의 첫 frame.
 message StreamHeader {
-  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED | FILE_DATA
-  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / FILE_DATA / TCP_ACCEPTED(forward_id)
+  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED | FILE_DATA | AGENT(6)
+  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / FILE_DATA / TCP_ACCEPTED(forward_id) / AGENT(agent_channel, 16바이트)
   string host = 3; uint32 port = 4;    // TCP_CONNECT 전용
   bool deny_host_local = 5;            // TCP_CONNECT 전용, dial-filter.v1을 광고하는 peer만 준수
                                         //   (ADR-0019 결정 3). 기본값 false = 오늘 동작(무필터).
@@ -715,7 +720,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 | `EXEC_CHUNK_MAX` / `SESSION_CHUNK_MAX` / `SESSION_READ_MAX_BYTES` | `crates/qsh-proto/src/wire.rs` | 16 KiB / 16 KiB / 192 KiB |
 | `FILE_CHUNK_MAX` / `FILE_LIST_PAGE_MAX` / `FILE_LIST_DIR_MAX` / `FILE_WRITE_FREE_RESERVE` | `crates/qsh-proto/src/wire.rs` | 32 KiB / 512 / 65536 / 256 MiB |
 | `enum FileKind` | 같은 파일의 `enum FileKind` | `UNSPECIFIED=0`/`FILE=1`/`DIR=2`/`SYMLINK=3`/`OTHER=4` |
-| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`. 0값의 취급은 §16.8 |
+| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`/`AGENT=6`. 0값의 취급은 §16.8 |
 | sequence 시맨틱 | §8; `crates/qsh-core/src/broker/ring.rs` 머리 주석 | 세션 수명 누적 output byte offset(`u64`). 오프셋 배정은 `ReplayStore::push` 한 곳뿐 |
 
 ### 16.2 동결 대상 — `.proto` 밖의 상호운용 계약
@@ -1118,7 +1123,32 @@ R이 B에게 보내는 `PunchOffer`는 등록 연결의 요청 채널을 쓴다.
 
 ## 20. agent forwarding (ADR-0055)
 
-이 절은 ADR-0055의 스텝 중 wire를 건드리지 않는 `qsh_proto::agent`가 구현한 부분만 적는다. capability `agent.v1`, `StreamKind::AGENT`, 요청·응답 필드와 `AgentGrant`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다.
+이 절은 ADR-0055의 wire(capability `agent.v1`, `StreamKind::AGENT`, 요청·응답 필드, `AgentGrant`)와 `qsh_proto::agent`의 메시지 framing·거르기 표를 적는다. host의 소켓, client의 로컬 agent 연결, 인가와 감사는 해당 스텝이 들어올 때 이 절에 더한다.
+
+### 20.0 capability와 필드
+
+```protobuf
+enum StreamKind { ...; AGENT = 6; }            // host -> client, StreamHeader.ticket = agent_channel
+message SessionOpen     { ...; bytes agent_channel = 9; }
+message SessionAttach   { ...; bytes agent_channel = 7; }
+message ExecStart       { ...; bytes agent_channel = 6; }
+message SessionOpened   { ...; AgentGrant agent = 7; }
+message SessionAttached { ...; AgentGrant agent = 9; }
+message ExecStarted     { ...; AgentGrant agent = 3; }
+enum AgentGrant {
+  AGENT_GRANT_UNSPECIFIED = 0;  // 요청하지 않음
+  AGENT_GRANT_FORWARDED = 1;
+  AGENT_GRANT_DENIED = 2;       // forward.agent 판정이 거부
+  AGENT_GRANT_UNAVAILABLE = 3;  // host가 소켓을 만들 수 없음(디렉터리, 경로 길이, 꺼짐, 이 빌드에 agent 지원이 아직 없음)
+  AGENT_GRANT_NO_SOCKET = 4;    // attach한 세션이 agent 없이 열렸음
+}
+```
+
+- `agent_channel`은 client가 CSPRNG로 만든 정확히 16바이트(`AGENT_CHANNEL_LEN`)다. 비어 있으면 요청하지 않은 것이다. 길이가 다르면 host는 ACL 결정 앞에서 `INVALID_ARGUMENT`로 답하고 audit 기록을 쓰지 않는다. `agent.v1`을 협상하지 않은 peer가 보낸 필드는 `screen`과 같이 오류 없이 무시하고 응답의 `agent`는 `UNSPECIFIED`다.
+- client는 협상된 교집합에 `agent.v1`이 있을 때만 `agent_channel`을 세팅한다(`Session::session_open`·`attach_request`·`exec_start_with_agent`가 광고하지 않은 peer 앞에서 필드를 비운다). `-A`를 주지 않은 요청은 이 필드가 없으므로 인코딩이 기존과 바이트 단위로 같다(`no_agent_field_without_dash_a`).
+- 모르는 `AgentGrant` 값은 `UNSPECIFIED`로 읽는다. 번호는 각 message의 다음 빈 번호이고 기존 번호는 건드리지 않았다. 새 control message는 없다.
+- 이 스텝의 host는 소켓을 만들지 못하므로, `agent.v1`을 협상한 peer가 16바이트 `agent_channel`을 보내면 세션이나 exec는 정상으로 열고 응답의 `agent`에 `UNAVAILABLE`을 싣는다. 오류로 끝내지 않는다. 이 답은 host 소켓 스텝이 `FORWARDED`·`DENIED`·`NO_SOCKET` 판정으로 바꾼다.
+- `AGENT` 스트림은 host가 연다. header의 `ticket`은 그 `agent_channel`이고 header 뒤의 바이트는 §20.1을 따른다. 받는 쪽의 header 대기는 기존 `HEADER_TIMEOUT`이다. 이 빌드의 `qsh listen` 데몬은 `AGENT` 종류의 `LOCAL_STREAM` header를 알 수 없는 종류와 똑같이 거절한다(reverse route의 중계는 데몬 스텝).
 
 ### 20.1 메시지 framing
 

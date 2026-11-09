@@ -51,20 +51,31 @@ fn arb_exec_start() -> impl Strategy<Value = ExecStart> {
         any::<u64>(),
         proptest::option::of(".{0,32}"),
         any::<bool>(),
+        arb_agent_channel(),
     )
         .prop_map(
-            |(argv, env, timeout_ms, shell_command, login_shell)| ExecStart {
+            |(argv, env, timeout_ms, shell_command, login_shell, agent_channel)| ExecStart {
                 argv,
                 env,
                 timeout_ms,
                 shell_command,
                 login_shell,
+                agent_channel,
             },
         )
 }
 
 fn arb_exec_started() -> impl Strategy<Value = ExecStarted> {
-    (".{0,26}", arb_bytes(16)).prop_map(|(exec_id, ticket)| ExecStarted { exec_id, ticket })
+    (".{0,26}", arb_bytes(16), any::<i32>()).prop_map(|(exec_id, ticket, agent)| ExecStarted {
+        exec_id,
+        ticket,
+        agent,
+    })
+}
+
+/// Empty (not requested) or the 16 bytes a client draws (ADR-0055 decision 3).
+fn arb_agent_channel() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![Just(Vec::new()), arb_bytes(16)]
 }
 
 // -- tunnel control (M4) --
@@ -148,17 +159,21 @@ fn arb_session_open() -> impl Strategy<Value = SessionOpen> {
         proptest::option::of("[a-z]{1,8}"),
         proptest::option::of(".{0,32}"),
         arb_screen_request(),
+        arb_agent_channel(),
     )
         .prop_map(
-            |(argv, env, term, cols, rows, user, shell_command, screen)| SessionOpen {
-                argv,
-                env,
-                term,
-                cols,
-                rows,
-                user,
-                shell_command,
-                screen,
+            |(argv, env, term, cols, rows, user, shell_command, screen, agent_channel)| {
+                SessionOpen {
+                    argv,
+                    env,
+                    term,
+                    cols,
+                    rows,
+                    user,
+                    shell_command,
+                    screen,
+                    agent_channel,
+                }
             },
         )
 }
@@ -171,9 +186,10 @@ fn arb_session_opened() -> impl Strategy<Value = SessionOpened> {
         any::<u64>(),
         arb_rfc3339(),
         arb_bytes(16),
+        any::<i32>(),
     )
         .prop_map(
-            |(session_id, resume_token, ticket, initial_seq, expires_at, screen_channel)| {
+            |(session_id, resume_token, ticket, initial_seq, expires_at, screen_channel, agent)| {
                 SessionOpened {
                     session_id,
                     resume_token,
@@ -181,6 +197,7 @@ fn arb_session_opened() -> impl Strategy<Value = SessionOpened> {
                     initial_seq,
                     expires_at,
                     screen_channel,
+                    agent,
                 }
             },
         )
@@ -196,15 +213,19 @@ fn arb_session_attach() -> impl Strategy<Value = SessionAttach> {
         any::<i32>(),
         any::<bool>(),
         arb_screen_request(),
+        arb_agent_channel(),
     )
         .prop_map(
-            |(session_id, resume_token, last_output_seq, mode, no_steal, screen)| SessionAttach {
-                session_id,
-                resume_token,
-                last_output_seq,
-                mode,
-                no_steal,
-                screen,
+            |(session_id, resume_token, last_output_seq, mode, no_steal, screen, agent_channel)| {
+                SessionAttach {
+                    session_id,
+                    resume_token,
+                    last_output_seq,
+                    mode,
+                    no_steal,
+                    screen,
+                    agent_channel,
+                }
             },
         )
 }
@@ -218,6 +239,7 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
         arb_rfc3339(),
         any::<u64>(),
         arb_bytes(16),
+        any::<i32>(),
     )
         .prop_map(
             |(
@@ -228,6 +250,7 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
                 expires_at,
                 input_seq,
                 screen_channel,
+                agent,
             )| {
                 SessionAttached {
                     ticket,
@@ -238,6 +261,7 @@ fn arb_session_attached() -> impl Strategy<Value = SessionAttached> {
                     input_seq,
                     output_end: 0,
                     screen_channel,
+                    agent,
                 }
             },
         )
@@ -1696,6 +1720,7 @@ fn golden_session_open_frame() {
             user: Some("dave".into()),
             shell_command: None,
             screen: None,
+            agent_channel: Vec::new(),
         }),
     );
     let wire = encode_control(&msg).unwrap();
@@ -1769,6 +1794,7 @@ fn exec_start_env_map_roundtrips() {
             timeout_ms: 1500,
             login_shell: false,
             shell_command: None,
+            agent_channel: Vec::new(),
         }),
     );
     roundtrip_via_frame(&msg, CONTROL_FRAME_MAX);
@@ -1932,6 +1958,7 @@ fn windows_build_advertises_file_v1() {
             CAP_DATAGRAM_V1,
             CAP_SCREEN_ECHO_V1,
             CAP_PUNCH_V1,
+            CAP_AGENT_V1,
         ]
     );
 }
@@ -2183,4 +2210,180 @@ fn screen_echo_validation_and_order() {
 fn screen_echo_is_advertised_by_every_build() {
     assert!(LOCAL_CAPABILITIES.contains(&CAP_SCREEN_ECHO_V1));
     assert_eq!(CAP_SCREEN_ECHO_V1, "screen-echo.v1");
+}
+
+// -- agent.v1 (ADR-0055 decision 3) --
+
+#[test]
+fn agent_v1_numbers_are_the_adr_numbers() {
+    assert_eq!(CAP_AGENT_V1, "agent.v1");
+    assert_eq!(LOCAL_CAPABILITIES.last(), Some(&CAP_AGENT_V1));
+    assert_eq!(AGENT_CHANNEL_LEN, 16);
+    assert_eq!(StreamKind::Agent as i32, 6);
+    assert_eq!(AgentGrant::Unspecified as i32, 0);
+    assert_eq!(AgentGrant::Forwarded as i32, 1);
+    assert_eq!(AgentGrant::Denied as i32, 2);
+    assert_eq!(AgentGrant::Unavailable as i32, 3);
+    assert_eq!(AgentGrant::NoSocket as i32, 4);
+
+    // Field numbers: the tag byte is `number << 3 | wire type` and the value
+    // follows. A 16-byte channel is `tag 0x10 <16 bytes>`.
+    let ch = vec![0xab; AGENT_CHANNEL_LEN];
+    let tail = |bytes: Vec<u8>| bytes[bytes.len() - 18..].to_vec();
+    let want = |tag: u8| [vec![tag, 0x10], ch.clone()].concat();
+    let open = SessionOpen {
+        agent_channel: ch.clone(),
+        ..Default::default()
+    };
+    assert_eq!(tail(open.encode_to_vec()), want(0x4a)); // field 9
+    let attach = SessionAttach {
+        agent_channel: ch.clone(),
+        ..Default::default()
+    };
+    assert_eq!(tail(attach.encode_to_vec()), want(0x3a)); // field 7
+    let exec = ExecStart {
+        agent_channel: ch.clone(),
+        ..Default::default()
+    };
+    assert_eq!(tail(exec.encode_to_vec()), want(0x32)); // field 6
+    // Grants are varints: field 7, 9 and 3, value 3 (`UNAVAILABLE`).
+    let g = AgentGrant::Unavailable as i32;
+    let opened = SessionOpened {
+        agent: g,
+        ..Default::default()
+    };
+    assert_eq!(opened.encode_to_vec(), [0x38, 3]);
+    let attached = SessionAttached {
+        agent: g,
+        ..Default::default()
+    };
+    assert_eq!(attached.encode_to_vec(), [0x48, 3]);
+    let started = ExecStarted {
+        agent: g,
+        ..Default::default()
+    };
+    assert_eq!(started.encode_to_vec(), [0x18, 3]);
+    // The header ticket of an `AGENT` stream is the channel itself.
+    let header = StreamHeader {
+        kind: StreamKind::Agent as i32,
+        ticket: ch.clone(),
+        ..Default::default()
+    };
+    assert_eq!(header.stream_kind(), Some(StreamKind::Agent));
+    assert_eq!(
+        decode_msg::<StreamHeader>(&header.encode_to_vec()).unwrap(),
+        header
+    );
+}
+
+/// DoD 13: a request that does not ask for agent forwarding encodes to the
+/// bytes it had before `agent.v1` existed. Pinned against golden bytes
+/// written from the pre-`agent.v1` schema.
+#[test]
+fn no_agent_field_without_dash_a() {
+    let open = SessionOpen {
+        argv: vec!["sh".into()],
+        term: "xterm".into(),
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+    assert_eq!(hex(&open.encode_to_vec()), "0a0273681a05787465726d20502818");
+    let attach = SessionAttach {
+        session_id: "S".into(),
+        resume_token: vec![1, 2],
+        mode: AttachMode::Rw as i32,
+        ..Default::default()
+    };
+    assert_eq!(hex(&attach.encode_to_vec()), "0a0153120201022001");
+    let exec = ExecStart {
+        argv: vec!["id".into()],
+        timeout_ms: 5,
+        ..Default::default()
+    };
+    assert_eq!(hex(&exec.encode_to_vec()), "0a0269641805");
+    // The same holds for the responses of a request that asked for nothing.
+    let opened = SessionOpened {
+        session_id: "S".into(),
+        ..Default::default()
+    };
+    assert_eq!(hex(&opened.encode_to_vec()), "0a0153");
+    let started = ExecStarted {
+        exec_id: "E".into(),
+        ..Default::default()
+    };
+    assert_eq!(hex(&started.encode_to_vec()), "0a0145");
+}
+
+#[test]
+fn agent_grant_unknown_values_are_kept_raw_and_read_as_unspecified() {
+    let started = ExecStarted {
+        agent: 99,
+        ..Default::default()
+    };
+    let back = decode_msg::<ExecStarted>(&started.encode_to_vec()).unwrap();
+    assert_eq!(back.agent, 99);
+    assert_eq!(
+        AgentGrant::try_from(back.agent).unwrap_or(AgentGrant::Unspecified),
+        AgentGrant::Unspecified
+    );
+}
+
+/// The checked-in fuzz seeds for the new fields decode to what their names
+/// say (DoD 12), so a schema edit that breaks them fails here and not only
+/// in the nightly fuzz run.
+#[test]
+fn agent_fuzz_seeds_decode_to_the_new_fields() {
+    use control_message::Body;
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fuzz/corpus");
+    let read = |target: &str, name: &str| {
+        std::fs::read(format!("{root}/{target}/{name}")).expect("fuzz seed")
+    };
+    let control = |name: &str| decode_msg::<ControlMessage>(&read("decode_control", name)).unwrap();
+    let response = |name: &str| match control(name).body {
+        Some(Body::Response(Response { body: Some(b) })) => b,
+        other => panic!("{name}: {other:?}"),
+    };
+
+    let Some(Body::SessionOpen(o)) = control("session_open_agent").body else {
+        panic!("session_open_agent")
+    };
+    assert_eq!(o.agent_channel.len(), AGENT_CHANNEL_LEN);
+    let Some(Body::SessionOpen(o)) = control("session_open_agent_bad_len").body else {
+        panic!("session_open_agent_bad_len")
+    };
+    assert_ne!(o.agent_channel.len(), AGENT_CHANNEL_LEN);
+    let Some(Body::SessionAttach(a)) = control("session_attach_agent").body else {
+        panic!("session_attach_agent")
+    };
+    assert_eq!(a.agent_channel.len(), AGENT_CHANNEL_LEN);
+    let Some(Body::ExecStart(e)) = control("exec_start_agent").body else {
+        panic!("exec_start_agent")
+    };
+    assert_eq!(e.agent_channel.len(), AGENT_CHANNEL_LEN);
+
+    let response::Body::SessionOpened(o) = response("session_opened_agent_grant") else {
+        panic!()
+    };
+    assert_eq!(o.agent, AgentGrant::Unavailable as i32);
+    let response::Body::SessionAttached(a) = response("session_attached_agent_grant") else {
+        panic!()
+    };
+    assert_eq!(a.agent, AgentGrant::NoSocket as i32);
+    let response::Body::ExecStarted(e) = response("exec_started_agent_grant") else {
+        panic!()
+    };
+    assert_eq!(e.agent, AgentGrant::Denied as i32);
+    let response::Body::ExecStarted(e) = response("exec_started_agent_grant_unknown") else {
+        panic!()
+    };
+    assert_eq!(e.agent, 99);
+
+    let header = decode_msg::<StreamHeader>(&read("decode_stream_header", "agent")).unwrap();
+    assert_eq!(header.stream_kind(), Some(StreamKind::Agent));
+    assert_eq!(header.ticket.len(), AGENT_CHANNEL_LEN);
+    let short =
+        decode_msg::<StreamHeader>(&read("decode_stream_header", "agent_short_ticket")).unwrap();
+    assert_eq!(short.stream_kind(), Some(StreamKind::Agent));
+    assert_ne!(short.ticket.len(), AGENT_CHANNEL_LEN);
 }

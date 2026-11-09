@@ -318,6 +318,9 @@ async fn local_reattach(
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
             screen: ctx.screen.as_ref().map(|s| s.request()),
+            // Carrying the channel across a recovery is the `-A` step's job
+            // (ADR-0055 decision 9); no flag sets one yet.
+            agent_channel: Vec::new(),
         })
         .await
         .inspect_err(|err| {

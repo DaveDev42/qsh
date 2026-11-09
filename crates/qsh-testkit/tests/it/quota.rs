@@ -2003,6 +2003,7 @@ mod reverse_target_quota {
             user: None,
             shell_command: None,
             screen: None,
+            agent_channel: Vec::new(),
         }
     }
 
@@ -2134,6 +2135,7 @@ mod reverse_target_quota {
                     timeout_ms: 0,
                     login_shell: false,
                     shell_command: None,
+                    agent_channel: Vec::new(),
                 }),
             )
             .await;
@@ -2159,6 +2161,7 @@ mod reverse_target_quota {
                     timeout_ms: 0,
                     login_shell: false,
                     shell_command: None,
+                    agent_channel: Vec::new(),
                 }),
             )
             .await;

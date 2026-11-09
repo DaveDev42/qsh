@@ -294,6 +294,7 @@ async fn reattach_sends_one_screen_not_the_backlog() {
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
             screen: s.screen_request(80, 24, None, None),
+            agent_channel: Vec::new(),
         })
         .await
         .expect("session.attach");
@@ -640,6 +641,7 @@ async fn reattach_does_not_replay_history_that_was_already_sent() {
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
             screen: s.screen_request(80, 24, None, None),
+            agent_channel: Vec::new(),
         })
         .await
         .expect("session.attach");

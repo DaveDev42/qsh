@@ -69,6 +69,7 @@ fn attach_req(session_id: &str, token: Vec<u8>, last_output_seq: u64) -> wire::S
         mode: wire::AttachMode::Rw as i32,
         no_steal: false,
         screen: None,
+        agent_channel: Vec::new(),
     }
 }
 
