@@ -9,6 +9,12 @@
 //! the one dial timeout the command already has (10 s, or `-o
 //! ConnectTimeout`), so punching never makes a command wait longer.
 //!
+//! A recovery re-dial runs the same race again ([`Dial::Redial`], ADR-0054
+//! decision 18): the local addresses and the rendezvous are taken afresh, so
+//! a changed local address means a new punch. Its time limit is the head
+//! start plus the 8 s punch budget in place of the command's dial timeout,
+//! and [`redial_deadline`] is what the recovery loop waits for one attempt.
+//!
 //! A punch that fails is not an error by itself: the command's error is the
 //! one the direct dial produced, with `details.punch{rendezvous, reason}`
 //! added. The ssh revival that follows (`Ops::revive_target`) sees that same
@@ -18,6 +24,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{
@@ -26,9 +33,38 @@ use qsh_transport::{
 };
 use tokio::time::{Instant, sleep, sleep_until};
 
+use crate::client::reconnect::REDIAL_DEADLINE;
 use crate::ops::exec::map_dial_error;
 use crate::ops::{AddressResolver, OpError};
-use crate::punch::{PunchFailure, PunchPlan, attempt};
+use crate::punch::{PUNCH_BUDGET, PunchFailure, PunchPlan, attempt};
+
+/// What a dial is for, which decides how long the whole route may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dial {
+    /// A command's first dial: the command's dial timeout (10 s, or `-o
+    /// ConnectTimeout`).
+    Command,
+    /// A recovery or supervised re-dial.
+    Redial,
+}
+
+/// The longest one re-dial attempt may take (ADR-0054 decision 18). A host
+/// that can be punched to gets the 8 s punch budget, after the head start
+/// when a direct dial runs first (at most 9 s, inside a command's 10 s dial
+/// timeout); any other host keeps [`REDIAL_DEADLINE`].
+pub(crate) fn redial_deadline(plan: Option<&Arc<PunchPlan>>, has_address: bool) -> Duration {
+    match plan {
+        Some(plan) if plan.has_rendezvous() => {
+            let head = if has_address {
+                plan.env.head_start
+            } else {
+                Duration::ZERO
+            };
+            head.saturating_add(PUNCH_BUDGET).max(REDIAL_DEADLINE)
+        }
+        _ => REDIAL_DEADLINE,
+    }
+}
 
 /// A connection of the forward route and the endpoint that carries it.
 #[derive(Debug)]
@@ -171,6 +207,7 @@ pub(crate) async fn dial_routed(
     plan: Option<&Arc<PunchPlan>>,
     tuning: TransportTuning,
     resolver: &dyn AddressResolver,
+    kind: Dial,
 ) -> Result<Routed, RouteError> {
     let has_address = !address.is_empty();
     let Some(plan) = plan else {
@@ -190,8 +227,12 @@ pub(crate) async fn dial_routed(
             });
     }
 
-    let timeout = default_dial_timeout();
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let mut timeout = match kind {
+        Dial::Command => default_dial_timeout(),
+        Dial::Redial => redial_deadline(Some(plan), has_address),
+    };
+    let deadline = started + timeout;
     let head = sleep(plan.env.head_start);
     tokio::pin!(head);
     let overall = sleep_until(deadline);
@@ -246,6 +287,16 @@ pub(crate) async fn dial_routed(
             Event::Punch(Err(fail)) => {
                 punch = None;
                 punch_failed = Some(fail);
+                // A re-dial whose punch is over has no use for the rest of
+                // the punch budget: the direct dial keeps the time a
+                // direct-only re-dial always had, and the recovery loop's
+                // backoff and attempt count take over from there.
+                if kind == Dial::Redial && direct.is_some() {
+                    timeout = REDIAL_DEADLINE;
+                    overall
+                        .as_mut()
+                        .reset((started + REDIAL_DEADLINE).max(Instant::now()));
+                }
             }
             Event::HeadStart => {
                 punch = Some(punch_future(plan, tuning, deadline));

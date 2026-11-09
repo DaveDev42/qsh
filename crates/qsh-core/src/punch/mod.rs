@@ -80,6 +80,11 @@ pub const PUNCH_HEAD_START: Duration = Duration::from_millis(1000);
 /// From the answer to adoption (decision 16).
 pub const PUNCH_WINDOW: Duration = Duration::from_millis(5000);
 
+/// What one punch may spend from the first signal to adoption: the signalling
+/// and the window together, 8 s (decision 16). A recovery attempt that
+/// punches gets this in place of `REDIAL_DEADLINE` (decision 18).
+pub const PUNCH_BUDGET: Duration = PUNCH_SIGNAL_BUDGET.saturating_add(PUNCH_WINDOW);
+
 /// The TLS server name A dials with. Informational: the verifier ignores it
 /// and SNI is off.
 pub const PUNCH_SERVER_NAME: &str = "qsh";

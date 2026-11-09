@@ -37,7 +37,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::client::pathwatch::{PathWatch, watch_path_with_wake};
-use crate::client::reconnect::{PathBinder, REDIAL_DEADLINE};
+use crate::client::reconnect::PathBinder;
 use crate::client::wake::{self, WakeEvent};
 use crate::client::{ControlIn, Session};
 use crate::ops::exec::map_client_error;
@@ -697,10 +697,16 @@ impl Supervisor {
         }
     }
 
-    /// One dial plus the two identity checks, bounded by [`REDIAL_DEADLINE`].
+    /// One dial plus the two identity checks, bounded by
+    /// [`PeerTarget::redial_deadline`]: `REDIAL_DEADLINE`, or the punch
+    /// budget for a host that can be punched to. Every attempt runs the
+    /// route again, so a blackout that moved this side's address ends in a
+    /// new punch (ADR-0054 decision 18).
     async fn attempt_forward(&self, target: &PeerTarget) -> Result<Established, AttemptError> {
         let (endpoint, connection, session) =
-            match tokio::time::timeout(REDIAL_DEADLINE, dial(target, self.params.tuning)).await {
+            match tokio::time::timeout(target.redial_deadline(), dial(target, self.params.tuning))
+                .await
+            {
                 Ok(result) => result?,
                 Err(_) => {
                     return Err(AttemptError::dial(
@@ -759,6 +765,7 @@ async fn dial(
         target.punch.as_ref(),
         tuning,
         &crate::ops::SystemResolver,
+        crate::ops::route::Dial::Redial,
     )
     .await
     .map_err(|route| {

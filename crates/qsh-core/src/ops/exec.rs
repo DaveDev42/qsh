@@ -399,6 +399,7 @@ async fn exec_async_tracked(
             punch,
             qsh_transport::TransportTuning::default(),
             resolver,
+            crate::ops::route::Dial::Command,
         ),
     )
     .await
