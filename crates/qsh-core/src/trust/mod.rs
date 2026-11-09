@@ -593,6 +593,7 @@ impl TrustStore {
             source: None,
             remote_qsh: None,
             rendezvous: Vec::new(),
+            jump: Vec::new(),
         };
         self.peers.push(peer.clone());
         (peer, true, false)
@@ -742,6 +743,15 @@ impl TrustStore {
             .position(|p| p.name == old)
             .ok_or(RenameError::OldMissing)?;
         self.peers[index].name = new.to_string();
+        // A jump chain names its hops (ADR-0056 decision 20); follow the
+        // rename so no chain is left pointing at a name that is gone.
+        for peer in &mut self.peers {
+            for hop in &mut peer.jump {
+                if hop == old {
+                    *hop = new.to_string();
+                }
+            }
+        }
         // The name was the ssh destination the revival uses (ADR-0051
         // decision 4); a new name is no longer one.
         self.peers[index].source = None;
@@ -797,6 +807,71 @@ impl TrustStore {
         let changed = peer.rendezvous != fingerprints;
         if changed {
             peer.rendezvous = fingerprints;
+        }
+        Ok((peer.clone(), changed))
+    }
+
+    /// The jump chain `base` with every hop's own `jump` folded in before
+    /// it, the way OpenSSH follows `ProxyJump` recursively (ADR-0056
+    /// decision 11): with `c.jump = [b]` and `b.jump = [a]`, `[b]` expands to
+    /// `[a, b]`. A name with no pin expands to itself (the caller reports
+    /// it). `None` when the expansion nests deeper than `depth_limit`, which
+    /// is how a loop (`a -> b -> a`) is caught. Hops already in front when a
+    /// pin's own chain names them again are not repeated.
+    pub fn expand_jump(&self, base: &[String], depth_limit: usize) -> Option<Vec<String>> {
+        fn walk(
+            store: &TrustStore,
+            name: &str,
+            depth: usize,
+            limit: usize,
+            out: &mut Vec<String>,
+        ) -> bool {
+            if depth > limit {
+                return false;
+            }
+            // A name a hop's own chain needs that is already in front of it
+            // is that same hop, not a second visit: `[a, b]` with
+            // `b.jump = [a]` is `a, b`. The names the caller listed are
+            // never merged (a pin twice is an error for `check_shape`).
+            if depth > 0 && out.iter().any(|seen| seen == name) {
+                return true;
+            }
+            if let Some(pin) = store.find(name) {
+                for hop in &pin.jump {
+                    if !walk(store, hop, depth + 1, limit, out) {
+                        return false;
+                    }
+                }
+            }
+            out.push(name.to_string());
+            true
+        }
+        let mut out = Vec::new();
+        for name in base {
+            if !walk(self, name, 0, depth_limit, &mut out) {
+                return None;
+            }
+        }
+        Some(out)
+    }
+
+    /// Replace the jump chain of the pin named `name` (`trust.set_jump`,
+    /// ADR-0056 decision 20). `hops` are pin names the caller already
+    /// checked. Pure, like [`Self::set_rendezvous`]. Returns the pin as it
+    /// now stands and whether anything changed.
+    pub fn set_jump(
+        &mut self,
+        name: &str,
+        hops: Vec<String>,
+    ) -> Result<(TrustPeer, bool), SetRoleError> {
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or(SetRoleError::NotFound)?;
+        let changed = peer.jump != hops;
+        if changed {
+            peer.jump = hops;
         }
         Ok((peer.clone(), changed))
     }
@@ -946,6 +1021,8 @@ impl TrustStore {
             // that finds it gone offers the install again.
             remote_qsh: old.remote_qsh.clone(),
             rendezvous: old.rendezvous.clone(),
+            // How the host is reached is not a trust fact either.
+            jump: old.jump.clone(),
         };
         Some((self.peers[index].clone(), old))
     }

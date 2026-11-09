@@ -17,8 +17,9 @@ use qsh_proto::{
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
     SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData,
-    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRendezvousData,
-    TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetJumpData,
+    TrustSetRendezvousData, TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData,
+    TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -520,6 +521,22 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     } else {
         writeln!(stdout, "{} not found (nothing to do)", sanitize(&data.name))
     }
+}
+
+/// Print the outcome of `qsh trust jump <name> [<hop>...]` (`docs/CLI.md`
+/// §6.11, ADR-0056 decision 20).
+pub fn print_trust_set_jump(data: &TrustSetJumpData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let name = sanitize(&data.peer.name);
+    if data.peer.jump.is_empty() {
+        return writeln!(stdout, "{name}: no jump chain");
+    }
+    let hops: Vec<String> = data.peer.jump.iter().map(|hop| sanitize(hop)).collect();
+    writeln!(
+        stdout,
+        "{name}: reached through {}, first hop first",
+        hops.join(", ")
+    )
 }
 
 /// Print the outcome of `qsh trust rendezvous <name> [<peer>...]`

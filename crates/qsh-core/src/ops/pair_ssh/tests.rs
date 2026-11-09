@@ -192,6 +192,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
             source: None,
             remote_qsh: None,
             rendezvous: Vec::new(),
+            jump: Vec::new(),
         },
         created: true,
         remote,
@@ -202,6 +203,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
         verify_error: None,
         replaced: None,
         installed: None,
+        jump: Vec::new(),
     }
 }
 
@@ -210,6 +212,7 @@ fn resolved(proxied: bool) -> SshResolved {
         hostname: "10.0.0.1".into(),
         user: None,
         proxied,
+        proxy_jump: None,
     }
 }
 

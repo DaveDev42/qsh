@@ -28,6 +28,7 @@ mod hosts_toml;
 mod identity_move_key;
 mod init_trust;
 mod jsonl_purity;
+mod jump_surface;
 mod lifecycle_lines;
 mod localctl_perms;
 mod predict_accept;

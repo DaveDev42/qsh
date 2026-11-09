@@ -144,6 +144,9 @@ pub struct PairSshData {
     pub identity_created: bool,
     /// `true` if ssh reached the remote through `ProxyJump` or
     /// `ProxyCommand`, which the QUIC dial does not use (결정 6).
+    ///
+    /// `false` when the bootstrap recorded the `ProxyJump` as the pin's
+    /// `jump` (ADR-0056 decision 21): QUIC then goes through the same hops.
     pub ssh_proxied: bool,
     /// `true` if a QUIC handshake with mutual pin verification to the
     /// recorded address succeeded (결정 13). No session is opened. Always
@@ -162,4 +165,10 @@ pub struct PairSshData {
     /// Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<PairSshInstalled>,
+    /// The pin names the bootstrap wrote as the remote's `jump` because ssh
+    /// reached it through a `ProxyJump` whose hops are all qsh pins
+    /// (ADR-0056 decision 21). Absent when none was written. Additive
+    /// (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump: Vec<String>,
 }

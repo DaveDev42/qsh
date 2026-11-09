@@ -63,6 +63,14 @@ pub struct TrustPeer {
     /// (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rendezvous: Vec<String>,
+    /// Names of the pinned peers this host is reached through, first hop
+    /// first (ADR-0056 decision 20): a dial to this host runs through that
+    /// jump chain unless the command line says otherwise. Set with
+    /// `trust.set_jump` or written by the SSH bootstrap from the host's
+    /// `ProxyJump`. Omitted when empty, so a pin without a jump reads and
+    /// prints as before. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump: Vec<String>,
 }
 
 /// Request for `trust.add`.
@@ -267,6 +275,35 @@ pub struct TrustSetRendezvousReq {
 pub struct TrustSetRendezvousData {
     /// The pin after the call.
     pub peer: TrustPeer,
+}
+
+/// Request for `trust.set_jump` (`qsh trust jump <name> [<hop>...]
+/// [--clear]`, ADR-0056 decision 20): replaces the pin's jump chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetJumpReq {
+    /// The pinned host whose chain is changed. A `[[ca]]` name is not a pin
+    /// and is `HOST_NOT_FOUND`.
+    pub name: String,
+    /// Names of the pinned peers to go through, first hop first. Each must
+    /// be pinned with an address (`HOST_NOT_FOUND` otherwise). The chain is
+    /// checked as a whole once the pins' own `jump` lists are folded in:
+    /// at most four hops, no name twice, never the host itself or a loop
+    /// (`INVALID_ARGUMENT`). Empty with `clear` false is `INVALID_ARGUMENT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jump: Vec<String>,
+    /// Empty the list. Not combined with `jump`.
+    #[serde(default)]
+    pub clear: bool,
+}
+
+/// Data payload of `trust.set_jump`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetJumpData {
+    /// The pin after the call.
+    pub peer: TrustPeer,
+    /// `false` when the pin already held exactly this chain: nothing was
+    /// written.
+    pub changed: bool,
 }
 
 /// Request for `trust.allow` (`qsh trust allow <name> <action>...`,

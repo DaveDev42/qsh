@@ -13,9 +13,9 @@ use qsh_proto::{
     IdentityMoveKeyData, IdentityMoveKeyReq, KeyStoreMode, SchemaData, TrustAcceptData,
     TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustAllowReq,
     TrustDenyReq, TrustGrantData, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRendezvousData,
-    TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData,
-    TrustSshPreviewReq, VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetJumpData, TrustSetJumpReq,
+    TrustSetRendezvousData, TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq,
+    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -515,6 +515,13 @@ impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
 }
 
+/// The `trust.set_jump` operation (`docs/CLI.md` §6.11, ADR-0056 결정 20).
+pub struct TrustSetJumpOp;
+
+impl Operation for TrustSetJumpOp {
+    const COMMAND: &'static str = "trust.set_jump";
+}
+
 /// The `trust.set_rendezvous` operation (`docs/CLI.md` §6.11, ADR-0054 결정 5).
 pub struct TrustSetRendezvousOp;
 
@@ -658,6 +665,10 @@ pub struct Ops {
     /// reached through, in order ([`Self::with_jump`], ADR-0056). `None`
     /// leaves every route as it was.
     jump: Option<Vec<String>>,
+    /// `-J none` / `--jump none` / `-o ProxyJump=none`: this command ignores
+    /// the `jump` of every pin and goes the ordinary way (ADR-0056 decision
+    /// 20). Without it, a host whose pin has a `jump` is reached through it.
+    jump_off: bool,
 }
 
 impl std::fmt::Debug for Ops {
@@ -772,6 +783,7 @@ impl Ops {
             punch: crate::punch::ClientPunch::default(),
             agent: None,
             jump: None,
+            jump_off: false,
         }
     }
 
@@ -788,7 +800,54 @@ impl Ops {
     #[must_use]
     pub fn with_jump(mut self, hops: Vec<String>) -> Self {
         self.jump = (!hops.is_empty()).then_some(hops);
+        self.jump_off = false;
         self
+    }
+
+    /// `-J none`: this process goes the ordinary way even to a host whose pin
+    /// has a `jump` (ADR-0056 decision 20). The hops of an earlier
+    /// [`Self::with_jump`] are dropped.
+    #[must_use]
+    pub fn without_jump(mut self) -> Self {
+        self.jump = None;
+        self.jump_off = true;
+        self
+    }
+
+    /// The hop names a dial to `host` goes through, in order, or `None` for
+    /// the ordinary route (ADR-0056 decision 20): the command line's hops
+    /// ([`Self::with_jump`]) or, when it gave none and did not turn jumping
+    /// off, the `jump` of `host`'s own pin. Either way each hop's own pin
+    /// `jump` is folded in front of it (decision 11), so `c -> b -> a` with
+    /// `c.jump = [b]` and `b.jump = [a]` is the chain `a, b`.
+    ///
+    /// A trust store that cannot be read is not an error here: the ordinary
+    /// resolution that follows reports it.
+    pub(crate) fn jump_hops_for(&self, host: &str) -> Result<Option<Vec<String>>, OpError> {
+        if self.jump.is_none() && self.jump_off {
+            return Ok(None);
+        }
+        let Ok(trust) = self.open_trust() else {
+            return Ok(self.jump.clone());
+        };
+        let snapshot = trust.snapshot();
+        let base: Vec<String> = match &self.jump {
+            Some(hops) => hops.clone(),
+            None => match snapshot.find(host::lookup_name(host)) {
+                Some(pin) if !pin.jump.is_empty() => pin.jump.clone(),
+                _ => return Ok(None),
+            },
+        };
+        let expanded = snapshot
+            .expand_jump(&base, crate::jump::MAX_JUMP_HOPS + 1)
+            .ok_or_else(|| {
+                OpError::new(
+                    ErrorCode::InvalidArgument,
+                    "the jump chain loops back on itself or nests too deep",
+                )
+                .with_retryable(false)
+            })?;
+        Ok(Some(expanded))
     }
 
     /// Decide agent forwarding for this process (ADR-0055 decision 18).
@@ -1073,8 +1132,8 @@ impl Ops {
             )
         })?;
         let trust = self.open_trust()?;
-        if self.jump.is_some() {
-            return self.jump_target(host, identity, trust);
+        if let Some(hops) = self.jump_hops_for(host)? {
+            return self.jump_target(host, identity, trust, hops);
         }
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
@@ -1107,9 +1166,9 @@ impl Ops {
         host: &str,
         identity: LoadedIdentity,
         trust: Arc<SharedTrustStore>,
+        hop_names: Vec<String>,
     ) -> Result<PeerTarget, OpError> {
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
-        let hop_names = self.jump.clone().unwrap_or_default();
         let names: Vec<&str> = hop_names.iter().map(|n| host::lookup_name(n)).collect();
         let end_name = host::lookup_name(host);
         crate::jump::chain::check_shape(&names, end_name)?;
@@ -1372,7 +1431,7 @@ impl Ops {
     /// multi-thread runtime exists.
     pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerRoute, OpError> {
         // A jump is the whole route (ADR-0056 decision 13).
-        if self.jump.is_some() {
+        if self.jump_hops_for(host)?.is_some() {
             return Ok(PeerRoute::Forward(self.resolve_peer(host)?));
         }
         let route = match self.resolve_host_route(host) {

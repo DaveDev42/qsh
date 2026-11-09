@@ -261,9 +261,11 @@ impl Ops {
         identity: LoadedIdentity,
     ) -> Result<PeerRoute, OpError> {
         // A jump is the whole route (ADR-0056 decision 13).
-        if self.jump.is_some() {
+        if let Some(hops) = self.jump_hops_for(host)? {
             let trust = self.open_trust()?;
-            return Ok(PeerRoute::Forward(self.jump_target(host, identity, trust)?));
+            return Ok(PeerRoute::Forward(
+                self.jump_target(host, identity, trust, hops)?,
+            ));
         }
         let route =
             match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found) {

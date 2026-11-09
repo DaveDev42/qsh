@@ -483,6 +483,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-trust-rename.1",
     },
     OpFace {
+        op: "trust.set_jump",
+        marker: "TrustSetJumpOp",
+        renderer: "print_trust_set_jump",
+        cli_spelling: "qsh trust jump",
+        man_file: "qsh-trust-jump.1",
+    },
+    OpFace {
         op: "trust.set_rendezvous",
         marker: "TrustSetRendezvousOp",
         renderer: "print_trust_set_rendezvous",

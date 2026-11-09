@@ -424,6 +424,7 @@ fn trust_invite_json_mode_makes_no_route_query_while_human_mode_does() {
 fn local_tunnel_open_args() -> TunnelOpenArgs {
     TunnelOpenArgs {
         host: "box".to_string(),
+        jump: Default::default(),
         local: Some("8080:localhost:3000".to_string()),
         remote: None,
         dynamic: Vec::new(),

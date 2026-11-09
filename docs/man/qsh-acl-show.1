@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-acl\-show \- Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH SYNOPSIS
-\fBqsh acl show\fR [\fB\-\-json\fR] [\fB\-\-auth\-path\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> 
+\fBqsh acl show\fR [\fB\-\-json\fR] [\fB\-\-auth\-path\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> 
 .SH DESCRIPTION
 Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH OPTIONS
@@ -41,6 +41,9 @@ Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
+.TP
+\fB\-\-jump\fR \fI<HOPS>\fR
+Reach the host through these pinned peers, first hop first, for this command: `a` or `a,b` (`docs/CLI.md` §7, ADR\-0056 decision 20). Each hop is the name of a pin; a `user@` or `:port` on it is ignored by the QUIC path. `none` goes the ordinary way even when the host\*(Aqs pin has a `jump`. Wins over `\-o ProxyJump` and over the pin\*(Aqs own `jump`. Not stored. The short `\-J` is the same flag on the commands that take it
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

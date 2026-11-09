@@ -15,7 +15,7 @@ use crate::types::{
     ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionListData,
     SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, SetupRunData,
     TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData, TrustListData,
-    TrustRemoveData, TrustRenameData, TrustSetRendezvousData, TrustSetRoleData,
+    TrustRemoveData, TrustRenameData, TrustSetJumpData, TrustSetRendezvousData, TrustSetRoleData,
     TrustSshPreviewData, TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
 };
 
@@ -65,6 +65,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "trust.list",
     "trust.remove",
     "trust.rename",
+    "trust.set_jump",
     "trust.set_rendezvous",
     "trust.set_role",
     "trust.ssh_preview",
@@ -127,6 +128,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "trust.list" => schema_for!(TrustListData),
         "trust.remove" => schema_for!(TrustRemoveData),
         "trust.rename" => schema_for!(TrustRenameData),
+        "trust.set_jump" => schema_for!(TrustSetJumpData),
         "trust.set_rendezvous" => schema_for!(TrustSetRendezvousData),
         "trust.set_role" => schema_for!(TrustSetRoleData),
         "trust.ssh_preview" => schema_for!(TrustSshPreviewData),

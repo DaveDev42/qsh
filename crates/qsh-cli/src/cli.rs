@@ -66,6 +66,16 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PEER", conflicts_with = "no_punch")]
     pub rendezvous: Option<String>,
 
+    /// Reach the host through these pinned peers, first hop first, for this
+    /// command: `a` or `a,b` (`docs/CLI.md` §7, ADR-0056 decision 20).
+    /// Each hop is the name of a pin; a `user@` or `:port` on it is ignored
+    /// by the QUIC path. `none` goes the ordinary way even when the host's
+    /// pin has a `jump`. Wins over `-o ProxyJump` and over the pin's own
+    /// `jump`. Not stored. The short `-J` is the same flag on the commands
+    /// that take it.
+    #[arg(long = "jump", global = true, value_name = "HOPS")]
+    pub jump_global: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -180,9 +190,10 @@ pub struct InteractiveArgs {
     #[arg(short = '6', requires = "target")]
     pub ipv6: bool,
 
-    /// Jump host list, `ssh -J`. Reaches the bootstrap ssh only; a jump on
-    /// the QUIC path is `UNSUPPORTED` until M26.
-    #[arg(short = 'J', value_name = "DEST", requires = "target")]
+    /// Jump host list, `ssh -J`, as pin names (ADR-0056): the QUIC
+    /// connection goes through these pinned peers, and the bootstrap ssh
+    /// goes through the same list. `none` skips the pin's own `jump`.
+    #[arg(short = 'J', value_name = "HOPS", requires = "target")]
     pub jump: Option<String>,
 
     /// Forward the local ssh-agent to the host for this command, `ssh -A`
@@ -416,6 +427,19 @@ impl AgentFlagArgs {
     }
 }
 
+/// `-J` for the commands that dial through the route and are named for it in
+/// ADR-0056 decision 20 (`exec`, `cp`, `attach`, `tunnel open`, `session
+/// open`); the root form has its own. Every other command takes the long
+/// `--jump` only.
+#[derive(Debug, Args, Clone, Default)]
+pub struct JumpFlagArgs {
+    /// Reach the host through these pinned peers for this command, `ssh
+    /// -J` spelled: `a` or `a,b`, or `none` to go the ordinary way
+    /// (ADR-0056). Same as `--jump`.
+    #[arg(short = 'J', id = "jump_short", value_name = "HOPS")]
+    pub jump_short: Option<String>,
+}
+
 /// Root options that take a value, for [`first_operand`]. Long forms are
 /// matched with their `=` or the next argument.
 const ROOT_VALUE_SHORTS: &str = "LRDlpiFoJEeSOwbBcmQW";
@@ -424,6 +448,8 @@ const ROOT_VALUE_LONGS: &[&str] = &[
     "--screen-sync",
     "--predict",
     "--status-line",
+    "--rendezvous",
+    "--jump",
 ];
 
 /// The first operand at or after `from` (index into `args`), skipping root
@@ -1021,6 +1047,9 @@ pub struct TunnelOpenArgs {
     /// Host alias from the trust store (`qsh trust list`).
     pub host: String,
 
+    #[command(flatten)]
+    pub jump: JumpFlagArgs,
+
     /// Local forward `[bind:]listen_port:host:host_port` — same grammar
     /// as the interactive `-L` (`docs/CLI.md` §6.9). Exactly one of
     /// `--local`/`--remote`/`--dynamic` is required.
@@ -1136,6 +1165,9 @@ pub struct ExecArgs {
 
     #[command(flatten)]
     pub agent: AgentFlagArgs,
+
+    #[command(flatten)]
+    pub jump: JumpFlagArgs,
 }
 
 /// Arguments of `qsh cp` (`docs/adr/0029-file-copy.md` decision 2).
@@ -1172,8 +1204,8 @@ pub struct CpArgs {
     pub scp_o: Vec<String>,
     #[arg(short = 'F', hide = true, value_name = "FILE")]
     pub scp_f: Option<String>,
-    #[arg(short = 'J', hide = true, value_name = "HOST")]
-    pub scp_j: Option<String>,
+    #[command(flatten)]
+    pub jump: JumpFlagArgs,
     #[arg(short = 'l', hide = true, value_name = "LIMIT")]
     pub scp_l: Option<String>,
     #[arg(short = 'c', hide = true, value_name = "CIPHER")]
@@ -1207,12 +1239,11 @@ impl CpArgs {
     /// The first scp flag that was given, as scp spells it. `qsh cp`
     /// refuses all of them (exit 2) and never ignores one.
     pub fn unsupported_flag(&self) -> Option<&'static str> {
-        let flags: [(bool, &'static str); 17] = [
+        let flags: [(bool, &'static str); 16] = [
             (self.scp_p_port.is_some(), "-P"),
             (self.scp_i.is_some(), "-i"),
             (!self.scp_o.is_empty(), "-o"),
             (self.scp_f.is_some(), "-F"),
-            (self.scp_j.is_some(), "-J"),
             (self.scp_l.is_some(), "-l"),
             (self.scp_c.is_some(), "-c"),
             (self.scp_s_program.is_some(), "-S"),
@@ -1262,6 +1293,9 @@ pub struct AttachArgs {
 
     #[command(flatten)]
     pub agent: AgentFlagArgs,
+
+    #[command(flatten)]
+    pub jump: JumpFlagArgs,
 }
 
 /// clap value parser for `--env NAME=VALUE`.
@@ -1479,6 +1513,22 @@ pub enum TrustCmd {
         #[arg(num_args = 0.., value_name = "PEER", conflicts_with = "clear")]
         peers: Vec<String>,
         /// Empty the list.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Set the chain of pinned peers a host is reached through
+    /// (`docs/CLI.md` §6.11, ADR-0056 decision 20). A dial to the host
+    /// goes through these hops, first hop first, unless the command line
+    /// gives `-J` or `--jump`. Each hop must be pinned with an address; at
+    /// most four hops, counting the hops' own chains, and a name only once.
+    /// `--clear` removes the chain. Takes effect from the next command.
+    Jump {
+        /// The pinned host the chain belongs to.
+        name: String,
+        /// Pinned peers to go through, first hop first.
+        #[arg(num_args = 0.., value_name = "HOP", conflicts_with = "clear")]
+        hops: Vec<String>,
+        /// Remove the chain.
         #[arg(long)]
         clear: bool,
     },
@@ -2028,6 +2078,9 @@ pub struct SessionOpenArgs {
 
     #[command(flatten)]
     pub agent: AgentFlagArgs,
+
+    #[command(flatten)]
+    pub jump: JumpFlagArgs,
 }
 
 /// Arguments of `qsh session read`.

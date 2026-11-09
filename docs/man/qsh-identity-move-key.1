@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-identity\-move\-key \- Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
 .SH SYNOPSIS
-\fBqsh identity move\-key\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-to\fR> 
+\fBqsh identity move\-key\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-to\fR> 
 .SH DESCRIPTION
 Move this device\*(Aqs private key to another key store (`file` or `platform`) without changing the device id, certificate or fingerprint, so peers\*(Aq pins and ACL rows stay valid (`docs/CLI.md` §6.11, ADR\-0032). A local command: it cannot be run against a remote host. Run it before an always\-on service (a LaunchDaemon, systemd linger) if the OS credential store is not reachable from there, as `qsh doctor` reports
 .SH OPTIONS
@@ -38,6 +38,9 @@ Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
+.TP
+\fB\-\-jump\fR \fI<HOPS>\fR
+Reach the host through these pinned peers, first hop first, for this command: `a` or `a,b` (`docs/CLI.md` §7, ADR\-0056 decision 20). Each hop is the name of a pin; a `user@` or `:port` on it is ignored by the QUIC path. `none` goes the ordinary way even when the host\*(Aqs pin has a `jump`. Wins over `\-o ProxyJump` and over the pin\*(Aqs own `jump`. Not stored. The short `\-J` is the same flag on the commands that take it
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

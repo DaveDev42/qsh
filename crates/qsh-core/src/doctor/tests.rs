@@ -124,7 +124,7 @@ fn keystore_session_bound_has_the_stable_snake_case_code() {
         DiagnosticId::KeystoreSessionBound
     );
     assert_eq!(KEYSTORE_SESSION_BOUND.code, "keystore_session_bound");
-    assert_eq!(EXPECTED_DOCTOR_CODES.len(), 36);
+    assert_eq!(EXPECTED_DOCTOR_CODES.len(), 38);
     assert!(
         KEYSTORE_SESSION_BOUND
             .remedy
@@ -187,12 +187,12 @@ fn transport_diagnostics_have_the_stable_snake_case_codes() {
 /// variant, exhaustively hand-listed (a variant added here without a
 /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
 /// exactly the drift this test exists to catch), must map to a unique
-/// code and the frozen set must be exactly those 36 codes — no more, no
+/// code and the frozen set must be exactly those 38 codes — no more, no
 /// fewer. Mirrors `qsh_proto::schema`'s
 /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
 #[test]
 fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-    const ALL: [DiagnosticId; 36] = [
+    const ALL: [DiagnosticId; 38] = [
         DiagnosticId::ControllerUnreachable,
         DiagnosticId::AuditPathUnwritable,
         DiagnosticId::AclPolicyMissing,
@@ -229,6 +229,8 @@ fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
         DiagnosticId::PunchNoRendezvous,
         DiagnosticId::AgentUnreachable,
         DiagnosticId::AgentDirUnusable,
+        DiagnosticId::JumpStreamCarrier,
+        DiagnosticId::JumpHopMissing,
     ];
     let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
     codes.sort_unstable();

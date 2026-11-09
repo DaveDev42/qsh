@@ -1,0 +1,16 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "jump_stream_carrier",
+        "detail": "A step of the jump chain to this host runs on the stream carrier, so the inner connection's packets travel on a reliable stream instead of datagrams. It works, and loss on that link costs more latency than it would with datagrams. step 2 (lab): datagram too small",
+        "status": "info"
+      }
+    ],
+    "overall": "ok"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

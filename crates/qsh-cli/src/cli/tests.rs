@@ -1335,3 +1335,50 @@ fn punch_flags_and_trust_rendezvous_parse() {
     ));
     assert!(Cli::try_parse_from(["qsh", "trust", "rendezvous", "box", "r1", "--clear"]).is_err());
 }
+
+/// ADR-0056 decision 20: `--jump` is global; the short `-J` is accepted by
+/// the root form and by the commands that reach a host; `trust jump` takes a
+/// name with hops or `--clear`; `-W` is still refused.
+#[test]
+fn jump_flags_and_trust_jump_parse() {
+    let cli = Cli::try_parse_from(["qsh", "--jump", "a,b", "exec", "box", "--", "true"]).unwrap();
+    assert_eq!(cli.jump_global.as_deref(), Some("a,b"));
+    let cli = Cli::try_parse_from(["qsh", "exec", "box", "--jump", "a", "--", "true"]).unwrap();
+    assert_eq!(cli.jump_global.as_deref(), Some("a"));
+    for argv in [
+        vec!["qsh", "exec", "box", "-J", "a", "--", "true"],
+        vec!["qsh", "attach", "box", "-J", "a"],
+        vec!["qsh", "session", "open", "box", "-J", "a"],
+        vec!["qsh", "tunnel", "open", "box", "-J", "a", "-L", "1:h:2"],
+        vec!["qsh", "cp", "-J", "a", "f", "box:/f"],
+    ] {
+        Cli::try_parse_from(argv.clone()).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+    }
+
+    let cli = Cli::try_parse_from(["qsh", "trust", "jump", "box", "a", "b"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Trust(TrustCmd::Jump { name, hops, clear }) => {
+            assert_eq!(name, "box");
+            assert_eq!(hops, ["a", "b"]);
+            assert!(!clear);
+        }
+        other => panic!("expected trust jump, got {other:?}"),
+    }
+    let cli = Cli::try_parse_from(["qsh", "trust", "jump", "box", "--clear"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Trust(TrustCmd::Jump { clear: true, .. })
+    ));
+    assert!(Cli::try_parse_from(["qsh", "trust", "jump", "box", "a", "--clear"]).is_err());
+}
+
+/// The operand scan skips the value of `--jump` and `--rendezvous`, so
+/// `qsh --jump a exec box` is the `exec` subcommand and not a host `a`.
+#[test]
+fn normalize_args_skips_long_option_values() {
+    let args: Vec<std::ffi::OsString> = ["qsh", "--jump", "a", "exec", "box", "--", "true"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    assert_eq!(normalize_args(args.clone()), args);
+}

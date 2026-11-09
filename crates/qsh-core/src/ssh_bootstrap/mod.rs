@@ -43,12 +43,14 @@ pub fn auto_bootstrap_notice(host: &str, dest: &str) -> String {
 mod dest;
 mod form;
 pub mod install;
+mod jump_spec;
 mod options;
 mod respond;
 mod ssh;
 
 pub use dest::{Dest, split_user_host};
 pub use form::{FormInput, FormMode, plan_form};
+pub use jump_spec::{JumpHop, JumpSpec};
 pub use options::{AddressFamily, SshFlags, SshOptions};
 pub use respond::{AUDIT_ACTION, AUDIT_ACTION_REPLACE, RespondEnd, Responder};
 pub use ssh::{

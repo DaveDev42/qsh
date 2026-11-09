@@ -230,6 +230,7 @@ fn ssh_g_reads_the_four_keys_and_skips_the_rest() {
             hostname: "box.example.com".into(),
             user: Some("dave".into()),
             proxied: false,
+            proxy_jump: None,
         }
     );
 }

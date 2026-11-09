@@ -74,6 +74,15 @@ use reader::{dial_peer, forget_if_closed, redial_peer};
 // `pub(in crate::ops)` rather than plain `use`.
 pub(in crate::ops) use reader::dial_reverse;
 use reconnect::{DialReconnect, LocalReconnect};
+
+/// Dial a resolved peer once with default tuning: the bootstrap's confirming
+/// dial through a jump chain (ADR-0056 decision 21) uses the same route a
+/// command would.
+pub(in crate::ops) async fn dial_target(
+    target: &PeerTarget,
+) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
+    dial_peer(target, TransportTuning::default()).await
+}
 use recovery::abandoned;
 use recovery::{ReattachTask, Recovery, lock, map_resume_error, recover_attach, spawn_reattach};
 use screen_sink::{ScreenSink, StatusInit, screen_sync_unsupported};

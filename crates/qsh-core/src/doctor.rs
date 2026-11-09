@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 36 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 38 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -60,7 +60,11 @@ pub mod probe;
 /// the thirty-fifth and thirty-sixth, 34 -> 36: a client whose
 /// `[agent].forward` is `"yes"` but whose ssh-agent does not answer, and a
 /// serve machine whose `agent/` directory cannot hold the sockets.
-/// The set is the same on every target: every build knows all 36 codes.
+/// `JumpStreamCarrier` and `JumpHopMissing` (ADR-0056 decision 22, M26) are
+/// the thirty-seventh and thirty-eighth, 36 -> 38: a jump chain to the host
+/// that runs a step on the stream carrier, and a pin whose `jump` names a pin
+/// this machine does not have.
+/// The set is the same on every target: every build knows all 38 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -102,6 +106,8 @@ pub enum DiagnosticId {
     PunchNoRendezvous,
     AgentUnreachable,
     AgentDirUnusable,
+    JumpStreamCarrier,
+    JumpHopMissing,
 }
 
 impl DiagnosticId {
@@ -152,6 +158,8 @@ impl DiagnosticId {
             DiagnosticId::PunchNoRendezvous => PUNCH_NO_RENDEZVOUS.code,
             DiagnosticId::AgentUnreachable => AGENT_UNREACHABLE.code,
             DiagnosticId::AgentDirUnusable => AGENT_DIR_UNUSABLE.code,
+            DiagnosticId::JumpStreamCarrier => JUMP_STREAM_CARRIER.code,
+            DiagnosticId::JumpHopMissing => JUMP_HOP_MISSING.code,
         }
     }
 }
@@ -181,6 +189,8 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "controller_unreachable",
     "datagram_unavailable",
     "host_pinned_without_address",
+    "jump_hop_missing",
+    "jump_stream_carrier",
     "keystore_session_bound",
     "keystore_unavailable",
     "launchagent_session_scoped",
@@ -254,6 +264,29 @@ pub const AGENT_DIR_UNUSABLE: Diagnostic = Diagnostic {
     code: "agent_dir_unusable",
     message: "The agent/ directory under qsh's runtime directory cannot be created or is not a private directory owned by this user. A session opened here with -A gets no agent socket, and the client is told forwarding is unavailable.",
     remedy: "Make the runtime directory and its agent/ directory owned by the account that runs qsh serve, with mode 0700, or remove the agent/ directory and let qsh serve create it again.",
+};
+
+/// ADR-0056 decision 22, `docs/CLI.md` §6.17: at least one step of the jump
+/// chain to the host carries its packets on the `JUMP` stream instead of
+/// datagrams. `info`: the connection works, and a lost packet is retransmitted
+/// by both the inner and the outer connection, which costs latency under loss.
+/// The detail names the steps and why.
+pub const JUMP_STREAM_CARRIER: Diagnostic = Diagnostic {
+    id: DiagnosticId::JumpStreamCarrier,
+    code: "jump_stream_carrier",
+    message: "A step of the jump chain to this host runs on the stream carrier, so the inner connection's packets travel on a reliable stream instead of datagrams. It works, and loss on that link costs more latency than it would with datagrams.",
+    remedy: "Nothing is required. The carrier switches to datagrams by itself when the link to the previous hop allows them (datagram.v1 offered and room for a 1217-byte datagram). A link with a 1280-byte MTU or a hop that does not offer datagrams stays on the stream.",
+};
+
+/// ADR-0056 decision 22, `docs/CLI.md` §6.17: a pin's `jump` names a pin this
+/// machine does not have (removed, or renamed from outside `qsh trust
+/// rename`). `warn`: a dial to that pin fails with `HOST_NOT_FOUND` at the
+/// `address` stage until the chain is fixed.
+pub const JUMP_HOP_MISSING: Diagnostic = Diagnostic {
+    id: DiagnosticId::JumpHopMissing,
+    code: "jump_hop_missing",
+    message: "A pin's jump chain names a peer this machine has no pin for, so a connection to that pin cannot be built.",
+    remedy: "Pin the missing hop again (qsh trust add), or set a new chain with `qsh trust jump <name> <hop>...`, or drop it with `qsh trust jump <name> --clear`.",
 };
 
 /// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently

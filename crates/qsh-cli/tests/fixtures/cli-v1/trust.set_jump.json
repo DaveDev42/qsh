@@ -1,0 +1,19 @@
+{
+  "command": "trust.set_jump",
+  "data": {
+    "changed": true,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "jump": [
+        "relay"
+      ],
+      "name": "lab-box",
+      "role": "full"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
