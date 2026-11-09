@@ -167,7 +167,10 @@ async fn a_connection_over_a_pipe_reaches_a_real_server_and_echoes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn plpmtud_rises_over_a_pipe_with_a_1452_limit() {
     let rig = rig(usize::from(JUMP_PACKET_MAX)).await;
-    assert_eq!(rig.dialed.connection.stats().path_mtu, JUMP_PACKET_MIN);
+    // No equality with the floor here: PLPMTUD's first probe leaves right
+    // after the handshake, so on a slow runner (ubuntu CI run 42610470096
+    // read 1389) it has already risen by the time the dial returns.
+    assert!(rig.dialed.connection.stats().path_mtu >= JUMP_PACKET_MIN);
     let (mut send, mut recv) = rig.dialed.connection.open_bi().await.unwrap();
     let (mtu, took) =
         drive_until_mtu_rises(&rig, &mut send, &mut recv, Duration::from_secs(20)).await;
