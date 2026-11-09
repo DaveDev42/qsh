@@ -46,7 +46,10 @@ pub(super) fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
 
-async fn blocking<T: Send + 'static>(ops: &Ops, f: impl FnOnce(&Ops) -> T + Send + 'static) -> T {
+pub(super) async fn blocking<T: Send + 'static>(
+    ops: &Ops,
+    f: impl FnOnce(&Ops) -> T + Send + 'static,
+) -> T {
     let ops = ops.clone();
     tokio::task::spawn_blocking(move || f(&ops))
         .await
@@ -124,7 +127,7 @@ async fn pin(ops: &Ops, name: &str, address: Option<String>, fingerprint: &Finge
     .unwrap_or_else(|err| panic!("trust.add: {err:?}"));
 }
 
-async fn exec(ops: &Ops, host: &str) -> Result<ExecRunOutput, OpError> {
+pub(super) async fn exec(ops: &Ops, host: &str) -> Result<ExecRunOutput, OpError> {
     let host = host.to_string();
     blocking(ops, move |ops| {
         ops.exec_run(
@@ -140,7 +143,7 @@ async fn exec(ops: &Ops, host: &str) -> Result<ExecRunOutput, OpError> {
     .await
 }
 
-fn punched(out: &ExecRunOutput) -> bool {
+pub(super) fn punched(out: &ExecRunOutput) -> bool {
     out.data.remote_exit_code == 0 && String::from_utf8_lossy(&out.stdout).contains("punched")
 }
 

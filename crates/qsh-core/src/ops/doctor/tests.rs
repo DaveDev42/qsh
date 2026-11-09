@@ -3363,6 +3363,7 @@ fn doctor_threshold_matches_the_overall_severity_order() {
             overall: overall_status(&findings),
             findings,
             transport: None,
+            punch: None,
         }
     };
     for (statuses, warn, error) in [

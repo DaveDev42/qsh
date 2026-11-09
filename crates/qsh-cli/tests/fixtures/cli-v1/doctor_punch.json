@@ -1,0 +1,24 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "punch_succeeded",
+        "detail": "This device has no direct path to the peer, and hole punching through its rendezvous peer opened one: the peer accepted a connection from this device's own UDP socket, with no relay in between. (host: laptop, rendezvous: hub, candidate: reflexive, family: ipv4)",
+        "remedy": "Nothing to fix. Commands to this peer start the punch themselves when the direct dial has not stood after one second. `-v` prints the `qsh::punch` lines of each attempt.",
+        "status": "info"
+      }
+    ],
+    "overall": "ok",
+    "punch": {
+      "candidate_kind": "reflexive",
+      "elapsed_ms": 412,
+      "family": "ipv4",
+      "outcome": "succeeded",
+      "rendezvous": "hub"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

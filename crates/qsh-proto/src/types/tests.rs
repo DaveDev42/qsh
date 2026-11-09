@@ -1272,6 +1272,7 @@ fn doctor_data_round_trips_with_findings_and_omits_remedy_when_absent() {
             },
         ],
         transport: None,
+        punch: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["overall"], "warn");
@@ -1292,6 +1293,7 @@ fn doctor_data_empty_findings_is_overall_ok() {
         overall: "ok".to_string(),
         findings: vec![],
         transport: None,
+        punch: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(json["findings"], serde_json::json!([]));

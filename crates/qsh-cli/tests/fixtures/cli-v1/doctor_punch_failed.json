@@ -1,0 +1,23 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "punch_failed",
+        "detail": "This device has no direct path to the peer, and hole punching through its rendezvous peer did not open one. The reason is named in this finding and in the punch object. (host: laptop, rendezvous: hub, reason: timeout)",
+        "remedy": "Read the reason. rendezvous_unreachable, rendezvous_unsupported and rendezvous_denied point at the rendezvous peer; target_not_registered, target_unsupported and target_denied point at the peer itself; timeout and no_candidate_pair usually mean a NAT that does not allow punching, such as one that picks a new port for every destination on both ends; rate_limited clears within a minute. `qsh -v doctor <host>` prints the `qsh::punch` lines.",
+        "status": "warn"
+      }
+    ],
+    "overall": "warn",
+    "punch": {
+      "elapsed_ms": 8003,
+      "outcome": "failed",
+      "reason": "timeout",
+      "rendezvous": "hub"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

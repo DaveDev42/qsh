@@ -475,6 +475,47 @@ fn build_tunnel_open_request_wires_supervise_and_accept_hold() {
     assert_eq!(request.accept_hold_ms, None);
 }
 
+/// ADR-0054 decision 20: the `qsh::punch` line is pure JSON and opt-in, like
+/// `qsh::adapt`: silent at default verbosity (a punch that works says
+/// nothing), on with `-v` or an explicit `QSH_LOG`, off again under `-q`.
+#[test]
+fn the_punch_line_is_pure_json_and_opt_in() {
+    let target = qsh_core::punch::TARGET;
+    assert_eq!(target, "qsh::punch");
+    let capture_punch = |spec: Option<&str>, default: &str, quiet: bool| {
+        let sink = Captured::default();
+        let layer = RecoveryLayer(sink.clone())
+            .with_filter(env_filter(spec, default))
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                !quiet && meta.target() == target
+            }));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            qsh_core::punch::log::emit(
+                "gave_up",
+                serde_json::json!({ "rendezvous": "hub", "reason": "timeout", "elapsed_ms": 5003 }),
+            );
+        });
+        let lines = sink.0.lock().expect("not poisoned");
+        lines.clone()
+    };
+    assert!(
+        capture_punch(None, "off", false).is_empty(),
+        "default verbosity"
+    );
+    let lines = capture_punch(None, "info", false);
+    assert_eq!(lines.len(), 1, "-v");
+    let parsed: serde_json::Value = serde_json::from_str(&lines[0]).expect("pure JSON");
+    assert_eq!(parsed["punch"], "gave_up");
+    assert_eq!(parsed["reason"], "timeout");
+    assert_eq!(
+        capture_punch(Some("qsh::punch=info"), "off", false).len(),
+        1,
+        "an explicit QSH_LOG turns it on"
+    );
+    assert!(capture_punch(None, "info", true).is_empty(), "-q");
+}
+
 /// ADR-0052 decision 14: the `qsh::adapt` line is pure JSON like the
 /// recovery record, but it is opt-in (`-v` or an explicit `QSH_LOG`) because
 /// it is written into the terminal an interactive session draws on.

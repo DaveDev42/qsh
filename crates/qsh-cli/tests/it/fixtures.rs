@@ -103,6 +103,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "doctor.run.keystore_session_bound.json",
     "doctor_transport.json",
     "doctor_screen_echo.json",
+    "doctor_punch.json",
+    "doctor_punch_failed.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -1644,6 +1646,7 @@ fn golden_doctor_transport_fixture() {
             nested: false,
             reasons: vec!["datagram_unavailable".to_string(), "rtt_low".to_string()],
         }),
+        punch: None,
     };
     // Every code the fixture names is a frozen doctor code.
     for f in &data.findings {
@@ -3483,6 +3486,7 @@ fn golden_doctor_screen_echo_fixture() {
             nested: false,
             reasons: vec!["rtt_high".to_string()],
         }),
+        punch: None,
     };
     assert!(
         qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&data.findings[0].code.as_str()),
@@ -3501,4 +3505,91 @@ fn golden_doctor_screen_echo_fixture() {
         "doctor_screen_echo.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
+}
+
+/// `qsh doctor <host>` against a host with no direct path whose punch through
+/// a rendezvous peer stood (ADR-0054 decision 20): `punch_succeeded` and the
+/// `punch` object. The findings are the production constants'; the object is
+/// built with what a punch over a home NAT would report. No address anywhere.
+#[test]
+fn golden_doctor_punch_fixture() {
+    use qsh_core::doctor::PUNCH_SUCCEEDED;
+    use qsh_proto::{DoctorData, DoctorFinding, DoctorPunch};
+
+    let data = DoctorData {
+        overall: "ok".to_string(),
+        findings: vec![DoctorFinding {
+            code: PUNCH_SUCCEEDED.code.to_string(),
+            status: "info".to_string(),
+            detail: format!(
+                "{} (host: laptop, rendezvous: hub, candidate: reflexive, family: ipv4)",
+                PUNCH_SUCCEEDED.message
+            ),
+            remedy: Some(PUNCH_SUCCEEDED.remedy.to_string()),
+        }],
+        transport: None,
+        punch: Some(DoctorPunch {
+            rendezvous: Some("hub".to_string()),
+            outcome: "succeeded".to_string(),
+            reason: None,
+            candidate_kind: Some("reflexive".to_string()),
+            family: Some("ipv4".to_string()),
+            elapsed_ms: Some(412),
+        }),
+    };
+    check("doctor_punch.json", doctor_envelope(&data));
+}
+
+/// The failing side of the same: `punch_failed` (`warn`) with the closed
+/// reason, and the object without a candidate.
+#[test]
+fn golden_doctor_punch_failed_fixture() {
+    use qsh_core::doctor::PUNCH_FAILED;
+    use qsh_proto::{DoctorData, DoctorFinding, DoctorPunch};
+
+    let data = DoctorData {
+        overall: "warn".to_string(),
+        findings: vec![DoctorFinding {
+            code: PUNCH_FAILED.code.to_string(),
+            status: "warn".to_string(),
+            detail: format!(
+                "{} (host: laptop, rendezvous: hub, reason: timeout)",
+                PUNCH_FAILED.message
+            ),
+            remedy: Some(PUNCH_FAILED.remedy.to_string()),
+        }],
+        transport: None,
+        punch: Some(DoctorPunch {
+            rendezvous: Some("hub".to_string()),
+            outcome: "failed".to_string(),
+            reason: Some("timeout".to_string()),
+            candidate_kind: None,
+            family: None,
+            elapsed_ms: Some(8003),
+        }),
+    };
+    check("doctor_punch_failed.json", doctor_envelope(&data));
+}
+
+/// The `doctor.run` envelope the binary builds around `data`, after checking
+/// every code in it is a frozen one.
+fn doctor_envelope(data: &qsh_proto::DoctorData) -> Value {
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope};
+
+    for f in &data.findings {
+        assert!(
+            qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&f.code.as_str()),
+            "{}",
+            f.code
+        );
+    }
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(data).expect("encode data")),
+        error: None,
+    };
+    serde_json::to_value(&envelope).expect("encode envelope")
 }

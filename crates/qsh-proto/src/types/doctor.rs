@@ -35,6 +35,40 @@ pub struct DoctorData {
     /// when no host was named or the measurement connection did not come up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<DoctorTransport>,
+    /// What the one hole punch `qsh doctor <host>` tried found, when the host
+    /// has no direct path (ADR-0054 decision 20). Absent when no host was
+    /// named, the direct path exists, or punching is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punch: Option<DoctorPunch>,
+}
+
+/// The `punch` object of [`DoctorData`] (`docs/CLI.md` §6.17, ADR-0054
+/// decision 20). Names and words only: no field can carry an IP address or a
+/// port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorPunch {
+    /// The rendezvous peer's pin name on this device. Absent when none was
+    /// usable (`outcome` is `"no_rendezvous"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendezvous: Option<String>,
+    /// `"succeeded"`, `"failed"` or `"no_rendezvous"`.
+    pub outcome: String,
+    /// Why the punch ended without a connection: one of the closed words of
+    /// `details.punch.reason` (`docs/CLI.md` §6.1). Absent on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Kind of the adopted candidate: `"host"`, `"reflexive"` or
+    /// `"peer_reflexive"`. Present on success only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_kind: Option<String>,
+    /// Address family of the adopted candidate: `"ipv4"` or `"ipv6"`. Present
+    /// on success only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// Milliseconds from the start of the attempt to the adopted handshake,
+    /// or to giving up. Absent when no attempt ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
 }
 
 /// The `transport` object of [`DoctorData`] (`docs/CLI.md` §6.17, ADR-0052

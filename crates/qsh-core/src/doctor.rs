@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 31 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 34 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -52,7 +52,11 @@ pub mod probe;
 /// findings of `qsh doctor <host>`'s measurement connection.
 /// `ScreenEchoUnsupported` (ADR-0053 decision 11, M23) is the thirty-first,
 /// 30 -> 31.
-/// The set is the same on every target: every build knows all 31 codes.
+/// `PunchSucceeded`, `PunchFailed` and `PunchNoRendezvous` (ADR-0054 decision
+/// 20, M24) are the thirty-second to thirty-fourth, 31 -> 34: the outcome of
+/// the one hole punch `qsh doctor <host>` tries when the host has no direct
+/// path.
+/// The set is the same on every target: every build knows all 34 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -89,6 +93,9 @@ pub enum DiagnosticId {
     ScreenSyncUnsupported,
     DatagramUnavailable,
     ScreenEchoUnsupported,
+    PunchSucceeded,
+    PunchFailed,
+    PunchNoRendezvous,
 }
 
 impl DiagnosticId {
@@ -134,6 +141,9 @@ impl DiagnosticId {
             DiagnosticId::ScreenSyncUnsupported => SCREEN_SYNC_UNSUPPORTED.code,
             DiagnosticId::DatagramUnavailable => DATAGRAM_UNAVAILABLE.code,
             DiagnosticId::ScreenEchoUnsupported => SCREEN_ECHO_UNSUPPORTED.code,
+            DiagnosticId::PunchSucceeded => PUNCH_SUCCEEDED.code,
+            DiagnosticId::PunchFailed => PUNCH_FAILED.code,
+            DiagnosticId::PunchNoRendezvous => PUNCH_NO_RENDEZVOUS.code,
         }
     }
 }
@@ -167,6 +177,9 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "logon_task_session_scoped",
     "no_route",
     "peer_untrusted",
+    "punch_failed",
+    "punch_no_rendezvous",
+    "punch_succeeded",
     "qsh_path_shadowed",
     "screen_echo_unsupported",
     "screen_sync_unsupported",
@@ -242,6 +255,38 @@ pub const SCREEN_ECHO_UNSUPPORTED: Diagnostic = Diagnostic {
     code: "screen_echo_unsupported",
     message: "The peer advertises screen.v1 but not screen-echo.v1, so interactive sessions to it draw no local echo prediction: typed characters appear only after the host's echo arrives. The status line still works.",
     remedy: "Upgrade qsh on the peer to a build that advertises screen-echo.v1. Until then `--predict=auto` and `--predict=always` predict nothing; `--predict=always` prints one line to stderr saying so, and `--predict=never` is the same without the line.",
+};
+
+/// ADR-0054 decision 20, `docs/CLI.md` §6.17: `qsh doctor <host>` found no
+/// direct path to the host (the direct probe failed, or the pin has no
+/// address), punched through a rendezvous peer once, and a connection stood.
+/// `info`: commands to the host reach it this way on their own.
+pub const PUNCH_SUCCEEDED: Diagnostic = Diagnostic {
+    id: DiagnosticId::PunchSucceeded,
+    code: "punch_succeeded",
+    message: "This device has no direct path to the peer, and hole punching through its rendezvous peer opened one: the peer accepted a connection from this device's own UDP socket, with no relay in between.",
+    remedy: "Nothing to fix. Commands to this peer start the punch themselves when the direct dial has not stood after one second. `-v` prints the `qsh::punch` lines of each attempt.",
+};
+
+/// ADR-0054 decision 20, `docs/CLI.md` §6.17: the punch `qsh doctor <host>`
+/// tried ended without a connection. `warn`; the finding's detail and
+/// `punch.reason` carry one word of the closed vocabulary of
+/// `details.punch.reason` (`docs/CLI.md` §6.1).
+pub const PUNCH_FAILED: Diagnostic = Diagnostic {
+    id: DiagnosticId::PunchFailed,
+    code: "punch_failed",
+    message: "This device has no direct path to the peer, and hole punching through its rendezvous peer did not open one. The reason is named in this finding and in the punch object.",
+    remedy: "Read the reason. rendezvous_unreachable, rendezvous_unsupported and rendezvous_denied point at the rendezvous peer; target_not_registered, target_unsupported and target_denied point at the peer itself; timeout and no_candidate_pair usually mean a NAT that does not allow punching, such as one that picks a new port for every destination on both ends; rate_limited clears within a minute. `qsh -v doctor <host>` prints the `qsh::punch` lines.",
+};
+
+/// ADR-0054 decision 20, `docs/CLI.md` §6.17: `qsh doctor <host>` found no
+/// direct path to the host and no rendezvous peer to punch through. `info`:
+/// nothing was tried.
+pub const PUNCH_NO_RENDEZVOUS: Diagnostic = Diagnostic {
+    id: DiagnosticId::PunchNoRendezvous,
+    code: "punch_no_rendezvous",
+    message: "This device has no direct path to the peer, and no rendezvous peer is set for it, so hole punching was not tried.",
+    remedy: "Name a peer that both this device and the target can reach, one pinned here with an address and holding the target's `qsh serve --to` registration: `qsh trust rendezvous <name> <peer>`, with <name> the host you are diagnosing.",
 };
 
 /// ADR-0052 decision 14, `docs/CLI.md` §6.17: the measurement connection of

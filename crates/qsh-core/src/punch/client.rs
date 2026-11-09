@@ -4,6 +4,7 @@
 //! The race with a direct dial, and the budget it shares, are `ops::route`'s;
 //! this module takes the deadline it is given and never goes past it.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,7 +22,7 @@ use tokio::time::{Instant, timeout_at};
 use super::{
     GiveUp, GiveUpReason, InitiatorParams, PUNCH_INITIAL_RTT, PUNCH_SERVER_NAME,
     PUNCH_SIGNAL_BUDGET, PUNCH_WINDOW, PunchFailure, PunchPlan, RendezvousPeer,
-    host_candidate_messages, host_candidates, is_public, run_initiator,
+    host_candidate_messages, host_candidates, is_public, log, run_initiator,
 };
 
 /// A connection that won the punch.
@@ -31,6 +32,21 @@ pub(crate) struct PunchWin {
     pub connection: Connection,
     /// The endpoint that carries it.
     pub endpoint: Endpoint,
+    /// What won, for `qsh doctor` and the `qsh::punch` line. No address.
+    pub info: WinInfo,
+}
+
+/// How a punch was won: words and numbers only, never an address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WinInfo {
+    /// The rendezvous pin's name.
+    pub rendezvous: String,
+    /// `host`, `reflexive` or `peer_reflexive` ([`log::KIND_HOST`] and kin).
+    pub kind: &'static str,
+    /// `ipv4` or `ipv6`.
+    pub family: &'static str,
+    /// From the start of the attempt to the adopted handshake.
+    pub elapsed_ms: u64,
 }
 
 /// Closes the endpoint when the attempt is dropped before it adopted
@@ -65,6 +81,30 @@ struct Signaled {
     attempt: AttemptId,
     /// Target candidates (validated), the derived one included.
     candidates: Vec<SocketAddr>,
+    /// What kind each candidate is.
+    kinds: HashMap<SocketAddr, &'static str>,
+    /// Candidates the shape check dropped.
+    rejected: usize,
+}
+
+/// A failed attempt with the one number the log line adds: datagrams the
+/// punching socket dropped for carrying a tag nobody expected.
+struct Failed {
+    failure: PunchFailure,
+    tag_rejected: u64,
+}
+
+impl From<PunchFailure> for Failed {
+    fn from(failure: PunchFailure) -> Self {
+        Self {
+            failure,
+            tag_rejected: 0,
+        }
+    }
+}
+
+fn ms_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// One punch attempt on a fresh endpoint. `deadline` bounds everything: the
@@ -76,15 +116,40 @@ pub(crate) async fn attempt(
     deadline: Instant,
 ) -> Result<PunchWin, PunchFailure> {
     let start = Instant::now();
-    let first = plan
-        .rendezvous
-        .first()
-        .ok_or_else(|| plan.no_rendezvous())?;
+    let Some(first) = plan.rendezvous.first() else {
+        let failure = plan.no_rendezvous();
+        log::gave_up(&failure.rendezvous, failure.reason.as_str(), 0, 0);
+        return Err(failure);
+    };
+    log::attempt(&first.name);
+    match attempt_inner(plan, tuning, deadline, start, first).await {
+        Ok(win) => Ok(win),
+        Err(Failed {
+            failure,
+            tag_rejected,
+        }) => {
+            log::gave_up(
+                &failure.rendezvous,
+                failure.reason.as_str(),
+                ms_since(start),
+                tag_rejected,
+            );
+            Err(failure)
+        }
+    }
+}
+
+async fn attempt_inner(
+    plan: &PunchPlan,
+    tuning: TransportTuning,
+    deadline: Instant,
+    start: Instant,
+    first: &RendezvousPeer,
+) -> Result<PunchWin, Failed> {
     let failed = |peer: &RendezvousPeer, reason| PunchFailure {
         rendezvous: peer.name.clone(),
         reason,
     };
-    tracing::info!(target: "qsh::punch", event = "attempt", rendezvous = %first.name);
 
     let source = plan
         .env
@@ -97,7 +162,7 @@ pub(crate) async fn attempt(
         plan.evaluator.clone(),
         tuning,
     )
-    .map_err(|_| failed(first, GiveUpReason::RendezvousUnreachable))?;
+    .map_err(|_| Failed::from(failed(first, GiveUpReason::RendezvousUnreachable)))?;
     let mut guard = EndpointGuard(Some(ep.clone()));
 
     let signal_deadline = deadline.min(start + PUNCH_SIGNAL_BUDGET);
@@ -117,35 +182,53 @@ pub(crate) async fn attempt(
             }
         }
     }
-    let (signaled, peer) = outcome?;
-    tracing::info!(
-        target: "qsh::punch",
-        event = "signaled",
-        rendezvous = %peer.name,
-        candidates = signaled.candidates.len()
-    );
+    let (signaled, peer) = outcome.map_err(Failed::from)?;
+    let mut counts = log::CandidateCounts::default();
+    for addr in &signaled.candidates {
+        let kind = signaled.kinds.get(addr).copied().unwrap_or(log::KIND_HOST);
+        counts.add(kind, addr);
+    }
+    log::signaled(&peer.name, &counts, signaled.rejected, ms_since(start));
 
     // The window runs from the answer, and never past the route's deadline.
     let budget = PUNCH_WINDOW.min(deadline.saturating_duration_since(Instant::now()));
     let params = InitiatorParams {
         attempt_id: signaled.attempt,
         expected_peer: plan.target,
-        candidates: signaled.candidates,
+        candidates: signaled.candidates.clone(),
         budget,
     };
     match run_initiator(&ep, &params).await {
         Ok(adopted) => {
             guard.disarm();
-            tracing::info!(
-                target: "qsh::punch",
-                event = "adopted",
-                rendezvous = %peer.name,
-                peer_reflexive = adopted.peer_reflexive,
-                elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+            let kind = if adopted.peer_reflexive {
+                log::KIND_PEER_REFLEXIVE
+            } else {
+                signaled
+                    .kinds
+                    .get(&adopted.remote)
+                    .copied()
+                    .unwrap_or(log::KIND_HOST)
+            };
+            let family = log::family_of(&adopted.remote);
+            let elapsed_ms = ms_since(start);
+            log::adopted(
+                &peer.name,
+                kind,
+                family,
+                elapsed_ms,
+                ep.stats().punch_rejected,
+                adopted.losers_closed,
             );
             Ok(PunchWin {
                 connection: adopted.connection,
                 endpoint: ep.endpoint(),
+                info: WinInfo {
+                    rendezvous: peer.name.clone(),
+                    kind,
+                    family,
+                    elapsed_ms,
+                },
             })
         }
         Err(give_up) => {
@@ -163,13 +246,10 @@ pub(crate) async fn attempt(
                     }
                 }
             };
-            tracing::info!(
-                target: "qsh::punch",
-                event = "gave_up",
-                rendezvous = %peer.name,
-                reason = reason.as_str()
-            );
-            Err(failed(peer, reason))
+            Err(Failed {
+                failure: failed(peer, reason),
+                tag_rejected: ep.stats().punch_rejected,
+            })
         }
     }
 }
@@ -303,6 +383,18 @@ async fn signal(
         let checked =
             check_candidates(&reply.candidates).map_err(|_| GiveUpReason::RendezvousUnsupported)?;
         let mut candidates = checked.accepted;
+        let rejected = checked.dropped;
+        let mut kinds: HashMap<SocketAddr, &'static str> = HashMap::new();
+        for c in &reply.candidates {
+            if let Some(addr) = c.socket_addr() {
+                let kind = if c.kind == PunchCandidateKind::Reflexive as i32 {
+                    log::KIND_REFLEXIVE
+                } else {
+                    log::KIND_HOST
+                };
+                kinds.entry(addr).or_insert(kind);
+            }
+        }
 
         // Decision 3: when R is behind the target's NAT, the address R saw
         // for the target is private. The target's outside address is then
@@ -320,6 +412,7 @@ async fn signal(
                 let derived = SocketAddr::new(IpAddr::V4(v4), port);
                 if !candidates.contains(&derived) {
                     candidates.push(derived);
+                    kinds.insert(derived, log::KIND_REFLEXIVE);
                 }
             }
         }
@@ -330,6 +423,8 @@ async fn signal(
         Ok(Signaled {
             attempt,
             candidates,
+            kinds,
+            rejected,
         })
     };
     match timeout_at(deadline, work).await {

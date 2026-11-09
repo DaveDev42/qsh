@@ -253,6 +253,28 @@ fn cli_md_quotes_the_transport_doctor_wording_verbatim() {
     }
 }
 
+/// ADR-0054 decision 20 (M24): the three punch findings of `qsh doctor
+/// <host>` are quoted from the constants.
+#[test]
+fn cli_md_quotes_the_punch_doctor_wording_verbatim() {
+    use qsh_core::doctor::{PUNCH_FAILED, PUNCH_NO_RENDEZVOUS, PUNCH_SUCCEEDED};
+
+    let cli_md = read_doc("docs/CLI.md");
+    for (what, text) in [
+        ("PUNCH_SUCCEEDED.message", PUNCH_SUCCEEDED.message),
+        ("PUNCH_SUCCEEDED.remedy", PUNCH_SUCCEEDED.remedy),
+        ("PUNCH_FAILED.message", PUNCH_FAILED.message),
+        ("PUNCH_FAILED.remedy", PUNCH_FAILED.remedy),
+        ("PUNCH_NO_RENDEZVOUS.message", PUNCH_NO_RENDEZVOUS.message),
+        ("PUNCH_NO_RENDEZVOUS.remedy", PUNCH_NO_RENDEZVOUS.remedy),
+    ] {
+        assert!(
+            cli_md.contains(text),
+            "docs/CLI.md §6.17 must quote {what} verbatim"
+        );
+    }
+}
+
 /// The LaunchAgent diagnostic's remedy and the recipe it names agree: the
 /// recipe heading exists in `docs/deploy/service.md`.
 #[test]

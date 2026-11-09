@@ -27,6 +27,7 @@ pub mod addrs;
 mod client;
 mod initiator;
 pub mod limits;
+pub mod log;
 mod plan;
 mod rendezvous;
 pub mod schedule;
@@ -41,6 +42,7 @@ pub use addrs::{
 pub(crate) use client::{PunchWin, attempt};
 pub use initiator::{Adopted, GiveUp, InitiatorParams, run_initiator};
 pub use limits::{AttemptLimiter, LimitHit};
+pub use log::TARGET;
 pub use plan::{
     ClientPunch, GiveUpReason, PunchFailure, PunchMode, PunchPlan, RendezvousPeer, SocketFactory,
 };
