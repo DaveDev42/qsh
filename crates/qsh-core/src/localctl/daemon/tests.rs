@@ -85,9 +85,13 @@ async fn bind_with_narrow_umask_creates_the_socket_node_at_0600_before_any_expli
     let path = dir.path().join("umask-atomicity.sock");
     let _listener = bind_with_narrow_umask(&path).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    // Owner-only, not exactly 0600: the umask held during the bind keeps
+    // the owner's bits (0o077) so a directory another thread creates in that
+    // window is not left unenterable; `tighten_socket_mode` makes it 0600.
     assert_eq!(
-        mode, 0o600,
-        "the socket node itself must be 0600 the instant bind(2) returns"
+        mode & 0o077,
+        0,
+        "the socket node must have no group or other access the instant bind(2) returns (mode {mode:o})"
     );
 }
 

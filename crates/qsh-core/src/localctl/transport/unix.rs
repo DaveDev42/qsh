@@ -171,15 +171,23 @@ pub(crate) fn process_is_verifiably_dead(pid: u32) -> bool {
 /// the rest of its lifetime).
 static UMASK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Bind `path` with this process's umask narrowed to `0o177` (owner
-/// read/write kept, everything else stripped) for the `bind(2)` syscall
-/// alone, restored immediately after regardless of outcome — so the socket
-/// node `bind(2)` creates (which has no mode parameter for `AF_UNIX`,
-/// unlike `open(2)`) is never observable at a mode looser than 0600, not
-/// even for the instant between `bind(2)` and an explicit `chmod`
-/// (adversarial review finding: without this, the node briefly existed at
-/// `0666 & ~umask` — typically 0644/0755-shaped — before
-/// [`tighten_socket_mode`] ran).
+/// The umask held during [`bind_with_narrow_umask`]: group and other bits
+/// stripped, the owner's three bits left alone. It must not strip the
+/// owner's execute bit (`0o177` did): `umask(2)` is process-wide, so a
+/// directory another thread creates with mode 0700 inside the window would
+/// come out 0600, which its owner cannot enter. The audit writer's lazily
+/// created state directory hit exactly that (`PermissionDenied` on
+/// `audit.log`, which fails every authorization closed). With these bits a
+/// concurrent create can only lose group/other permissions, never the
+/// owner's.
+const NARROW_UMASK: libc::mode_t = 0o077;
+
+/// Bind `path` with this process's umask narrowed to [`NARROW_UMASK`] for
+/// the `bind(2)` syscall alone, restored immediately after regardless of
+/// outcome. The socket node `bind(2)` creates has no mode parameter for
+/// `AF_UNIX` (unlike `open(2)`), and `0777 & !0o077` is owner-only (0700), so it
+/// is never observable with group or other access, not even for the instant between
+/// `bind(2)` and an explicit `chmod` ([`tighten_socket_mode`]).
 pub(crate) fn bind_with_narrow_umask(path: &Path) -> io::Result<UnixListener> {
     let _guard = UMASK_GUARD
         .lock()
@@ -189,7 +197,7 @@ pub(crate) fn bind_with_narrow_umask(path: &Path) -> io::Result<UnixListener> {
     // save/restore pair race-free against another thread's call to this
     // same function — `umask` itself has no thread-local variant to lean
     // on instead.
-    let previous = unsafe { libc::umask(0o177) };
+    let previous = unsafe { libc::umask(NARROW_UMASK) };
     let result = UnixListener::bind(path);
     unsafe { libc::umask(previous) };
     result
@@ -313,4 +321,50 @@ fn bind_error(path: &Path, err: &io::Error) -> OpError {
 /// stopped. A socket node outlives its process, so it is unlinked.
 pub(crate) fn remove_endpoint(endpoint: &Path) {
     let _ = std::fs::remove_file(endpoint);
+}
+
+#[cfg(test)]
+mod umask_tests {
+    use super::*;
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+
+    /// A directory another thread creates with mode 0700 while sockets are
+    /// being bound must stay enterable by its owner. With a narrowed umask
+    /// that stripped the owner's execute bit, some of these came out 0600.
+    #[tokio::test]
+    async fn a_bind_never_makes_a_concurrent_private_directory_unenterable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let maker = {
+            let (root, stop) = (root.path().to_path_buf(), stop.clone());
+            std::thread::spawn(move || {
+                let mut bad = Vec::new();
+                let mut n = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let dir = root.join(format!("d{n}"));
+                    n += 1;
+                    std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+                    let mode = std::fs::metadata(&dir).unwrap().mode() & 0o777;
+                    if mode != 0o700 {
+                        bad.push((dir, mode));
+                    }
+                }
+                bad
+            })
+        };
+        let sock_dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..300 {
+            let path = sock_dir.path().join(format!("s{i}.sock"));
+            let _listener = bind_with_narrow_umask(&path).expect("bind");
+            let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "the socket node is owner-only at bind time"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let bad = maker.join().expect("directory maker");
+        assert!(bad.is_empty(), "directories lost owner access: {bad:?}");
+    }
 }
