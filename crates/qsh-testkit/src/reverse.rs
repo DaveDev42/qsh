@@ -416,7 +416,7 @@ impl ReverseHarness {
             format!(
                 "[[acl]]\nprincipal = \"device:{controller_alias}\"\nallow = [\"exec.run\", \
                  \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
-                 \"host.reverse\", \"forward.local\", \"forward.remote\"]\n"
+                 \"host.reverse\", \"forward.local\", \"forward.remote\", \"forward.agent\"]\n"
             )
             .as_bytes(),
         )

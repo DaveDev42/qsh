@@ -8,6 +8,7 @@ mod admission;
 mod admission_retry_sever;
 mod agent_client;
 mod agent_host;
+mod agent_reverse;
 mod agent_wire;
 mod attach_loopback;
 mod bulk_yield;

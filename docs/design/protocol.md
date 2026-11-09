@@ -1148,7 +1148,7 @@ enum AgentGrant {
 - client는 협상된 교집합에 `agent.v1`이 있을 때만 `agent_channel`을 세팅한다(`Session::session_open`·`attach_request`·`exec_start_with_agent`가 광고하지 않은 peer 앞에서 필드를 비운다). `-A`를 주지 않은 요청은 이 필드가 없으므로 인코딩이 기존과 바이트 단위로 같다(`no_agent_field_without_dash_a`).
 - 모르는 `AgentGrant` 값은 `UNSPECIFIED`로 읽는다. 번호는 각 message의 다음 빈 번호이고 기존 번호는 건드리지 않았다. 새 control message는 없다.
 - 이 스텝의 host는 소켓을 만들지 못하므로, `agent.v1`을 협상한 peer가 16바이트 `agent_channel`을 보내면 세션이나 exec는 정상으로 열고 응답의 `agent`에 `UNAVAILABLE`을 싣는다. 오류로 끝내지 않는다. 이 답은 host 소켓 스텝이 `FORWARDED`·`DENIED`·`NO_SOCKET` 판정으로 바꾼다.
-- `AGENT` 스트림은 host가 연다. header의 `ticket`은 그 `agent_channel`이고 header 뒤의 바이트는 §20.1을 따른다. 받는 쪽의 header 대기는 기존 `HEADER_TIMEOUT`이다. 이 빌드의 `qsh listen` 데몬은 `AGENT` 종류의 `LOCAL_STREAM` header를 알 수 없는 종류와 똑같이 거절한다(reverse route의 중계는 데몬 스텝).
+- `AGENT` 스트림은 host가 연다. header의 `ticket`은 그 `agent_channel`이고 header 뒤의 바이트는 §20.1을 따른다. 받는 쪽의 header 대기는 기존 `HEADER_TIMEOUT`이다. reverse route에서는 `qsh listen` 데몬이 이 스트림을 받아 claim한 CLI에만 건넨다(§20.2.1).
 
 ### 20.1 메시지 framing
 
@@ -1162,6 +1162,15 @@ enum AgentGrant {
 
 client는 host에서 온 요청의 type을 `ALLOWED_REQUESTS`(`REQUEST_IDENTITIES` 11, `SIGN_REQUEST` 13)에서 찾는다(`request_disposition`). 표에 없는 type은 번호가 SSH1 시절의 것이든 모르는 것이든 로컬 agent에 보내지 않고, client가 `FAILURE_REPLY`(`00 00 00 01 05`)를 스트림에 쓴다. 표를 넓히려면 새 ADR이 필요하다(ADR-0055 결정 12). 응답은 거르지 않고 같은 decoder로 길이만 끊어 상한을 지킨다.
 
+### 20.2.1 역방향 route (ADR-0055 결정 14)
+
+target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬은 가운데에서 바이트만 옮기고 로컬 agent에 연결하지 않는다.
+
+- 등록. CLI가 `LOCAL_CONTROL` conduit으로 `agent_channel`이 든 `SessionOpen`·`SessionAttach`·`ExecStart`를 보내면, 데몬의 `ControlHub`는 그 요청을 QUIC으로 내보내는 순간 `agent_channel → conduit` 항목을 올린다. 응답을 기다리지 않는다. 길이가 16바이트가 아닌 필드는 올리지 않고, 다른 conduit이 이미 올린 channel은 가져가지 못한다. hub당 channel은 256개까지다. 등록한 conduit이 죽으면 항목이 내려가고 큐에 든 스트림은 reset된다. 재attach(resume)는 새 registration의 hub에 같은 channel을 다시 올린다.
+- 도착. target이 등록 연결 위로 `AGENT` 스트림을 열면 데몬은 header를 읽고, `ticket`이 정확히 16바이트이고 등록된 channel이며 hub가 32개(`MAX_AGENT_STREAMS_PER_HUB`)를 넘지 않을 때만 큐에 넣는다. 아니면 `BAD_HEADER`(`0x2001`) 또는 `RESOURCE_EXHAUSTED`(`0x200D`)로 reset한다. 큐에 든 스트림은 `TCP_ACCEPTED`와 같이 30초 안에 claim되지 않으면 `0x200C`로 reset된다. 슬롯은 큐와 splice를 통틀어 센다.
+- claim. CLI는 `LOCAL_STREAM` conduit에 `StreamHeader{AGENT, ticket = channel(16바이트) ‖ claim token(1~64바이트)}`를 보낸다. `TCP_ACCEPTED`처럼 데몬은 raw 바이트 전에 `LocalResponse`를 정확히 한 번 보낸다(`ClaimGranted` 또는 `LocalError`). 처음 claim한 토큰이 channel의 seat에 앉고, 이후에는 같은 토큰만 스트림을 가져간다. 다른 토큰, 빈 토큰, 등록 안 된 channel은 모두 같은 `TIMEOUT`을 즉시 받는다. 토큰은 CLI가 프로세스마다 CSPRNG로 만든다.
+- 이후 CLI가 로컬 agent에 연결하고 §20.2의 표로 거른다. 길이 오류나 로컬 agent 오류는 conduit을 닫는 것으로 끝나고, 데몬이 QUIC 스트림을 끝낸다(conduit에는 스트림 단위 reset이 없다).
+
 ### 20.3 시험
 
-단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.
+단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), 역방향 route의 `agent_hub_tests`(seat·상한·conduit 정리)와 `agent_reverse`(`agent_forward_over_the_reverse_route`, B47의 두 CLI, 33번째 스트림, 재attach), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.

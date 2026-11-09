@@ -646,11 +646,16 @@ async fn open_stream_over_inner(
     // `PROBE_TIMEOUT` wrapper bounds it just as tightly with `wait_ms`
     // left at its usual `0`.
     //
+    // `AGENT` (ADR-0055 decision 14) is claimed like `TCP_ACCEPTED` and
+    // answered the same way.
+    //
     // Every other kind (`SESSION_DATA`, `TCP_CONNECT`) is answered with
     // silence unconditionally and reads nothing here.
     if matches!(
         header.stream_kind(),
-        Some(wire::StreamKind::TcpAccepted) | Some(wire::StreamKind::ExecData)
+        Some(wire::StreamKind::TcpAccepted)
+            | Some(wire::StreamKind::ExecData)
+            | Some(wire::StreamKind::Agent)
     ) {
         let claim: LocalResponse = conduit.recv().await?.ok_or_else(|| {
             OpError::new(

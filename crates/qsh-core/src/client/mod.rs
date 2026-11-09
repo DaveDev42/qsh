@@ -571,11 +571,11 @@ impl Session {
         let started = Instant::now();
         let agent_requested = !agent_channel.is_empty();
         let started_msg = self.exec_start_with_agent(spec, agent_channel).await?;
-        let agent = crate::agent::grant_label(
-            agent_requested,
-            self.agent_supported() && self.conn.is_some(),
-            started_msg.agent,
-        );
+        // Both routes can carry it: the forward route's caller runs a
+        // dispatcher on the connection, the reverse route's a claim loop
+        // against the daemon (ADR-0055 decisions 13 and 14).
+        let agent =
+            crate::agent::grant_label(agent_requested, self.agent_supported(), started_msg.agent);
 
         // Data stream: header first, then pump — a QUIC bidi stream on
         // the forward route, or a fresh `LOCAL_STREAM` conduit to the

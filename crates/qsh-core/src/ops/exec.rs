@@ -228,11 +228,15 @@ impl Ops {
                 }
             }
             PeerRoute::Reverse(route) => {
-                let mut output =
-                    runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))?;
-                // Agent forwarding over the reverse route is a later step;
-                // say so rather than pretend.
-                if agent.is_some() {
+                let mut output = runtime.block_on(exec_async_reverse(
+                    &route,
+                    &spec,
+                    stdin,
+                    timeout,
+                    agent.as_ref(),
+                ))?;
+                // Asked for but never sent (a host without `agent.v1`).
+                if agent.is_some() && output.data.agent.is_none() {
                     output.data.agent = Some("unsupported".to_string());
                 }
                 Ok(output)
@@ -550,6 +554,7 @@ async fn exec_async_reverse(
     spec: &ExecSpec,
     stdin: ExecStdin,
     timeout: Option<Duration>,
+    agent: Option<&Arc<crate::agent::ClientAgent>>,
 ) -> Result<ExecRunOutput, OpError> {
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || timeout_error(timeout.unwrap_or_default());
@@ -564,8 +569,26 @@ async fn exec_async_reverse(
         ExecStdin::Inherit => Some(Box::new(tokio::io::stdin())),
     };
 
+    // `-A` (ADR-0055 decision 14): the channel is registered and its claim
+    // loop is running before `ExecStart` leaves, since the host may open the
+    // first `AGENT` stream before it answers. The loop claims from the
+    // daemon and this process filters; both end with the channel, when this
+    // function returns.
+    let channel = agent
+        .filter(|_| session.agent_supported())
+        .map(|a| a.register());
+    let mut agent_channel = Vec::new();
+    if let Some(channel) = &channel {
+        channel.serve_over_daemon(route.socket.clone(), route.host.clone());
+        agent_channel = channel.bytes();
+    }
     let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
-    let result = match until(deadline, session.exec(spec, stdin_reader, Some(kill_tx))).await {
+    let result = match until(
+        deadline,
+        session.exec_with_agent(spec, stdin_reader, Some(kill_tx), agent_channel),
+    )
+    .await
+    {
         Some(result) => result.map_err(map_client_error),
         None => {
             // Deadline hit mid-flight: shut the data conduit down right

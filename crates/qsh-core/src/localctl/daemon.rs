@@ -990,6 +990,17 @@ impl LocalctlDaemon {
                     .await;
                     return;
                 }
+                Some(LocalStreamRelay::ClaimAgent) => {
+                    self.serve_agent_claim(
+                        &hub,
+                        &conn,
+                        &header,
+                        deadline.saturating_sub(wait_start.elapsed()),
+                        conduit,
+                    )
+                    .await;
+                    return;
+                }
                 Some(LocalStreamRelay::OpenBidiAndSplice {
                     priority,
                     tunnel_permit,
@@ -1461,6 +1472,107 @@ impl LocalctlDaemon {
         // doc), so it stays alive across the `.await` below and drops
         // only once `tunnel_splice_uds_quic` returns.
         let watch = crate::tunnel::stall::StallWatch::on(conn, forward_id);
+        tunnel_splice_uds_quic(
+            uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
+        )
+        .await;
+    }
+
+    /// `AGENT`'s side of the `LOCAL_STREAM` conduit (ADR-0055 decision 14):
+    /// the CLI process that sent a request carrying `agent_channel` claims
+    /// the `AGENT` stream the target opened for it, and this splices the
+    /// two. The same shape as [`Self::serve_tcp_accepted`], with these
+    /// differences.
+    ///
+    /// - The ticket is the 16-byte channel followed by the claim token
+    ///   (1 to [`MAX_AGENT_CLAIM_TOKEN_LEN`] bytes). The channel has a fixed
+    ///   length because its bytes may include any value.
+    /// - The first token to claim a channel takes its seat; a different
+    ///   token, from another conduit or another CLI of the same uid, gets
+    ///   the same framed `Timeout` as a channel nobody registered and never
+    ///   sees the stream ([`ControlHub::claim_agent`]).
+    /// - The daemon splices bytes and does nothing else. It never connects
+    ///   to a local agent: its `SSH_AUTH_SOCK` is a service manager's, not
+    ///   the user's terminal's, and filtering is the claiming CLI's job.
+    ///
+    /// Exactly one framed `LocalResponse` leaves before any raw byte.
+    async fn serve_agent_claim(
+        &self,
+        hub: &Arc<crate::reverse::listen::ControlHub>,
+        conn: &qsh_transport::Connection,
+        header: &wire::StreamHeader,
+        deadline: std::time::Duration,
+        mut conduit: LocalConduit<LocalStream>,
+    ) {
+        let ticket = &header.ticket;
+        let token_len = ticket.len().saturating_sub(wire::AGENT_CHANNEL_LEN);
+        if ticket.len() <= wire::AGENT_CHANNEL_LEN
+            || token_len > crate::reverse::listen::MAX_AGENT_CLAIM_TOKEN_LEN
+        {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::InvalidArgument,
+                        "AGENT StreamHeader's ticket must be a 16-byte channel and a claim token",
+                    ))),
+                })
+                .await;
+            return;
+        }
+        let (channel, claim_token) = ticket.split_at(wire::AGENT_CHANNEL_LEN);
+
+        // A parked claim holds this conduit's daemon-wide slot for its whole
+        // wait, so it draws from the same per-owner pool `-R` claims do.
+        let Some(claim_permit) = hub.try_acquire_agent_claim_permit(channel) else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::ResourceExhausted,
+                        "too many concurrent claims on this host's reverse connection",
+                    ))),
+                })
+                .await;
+            return;
+        };
+        let claimed = hub.claim_agent(channel, claim_token, deadline).await;
+        // The parked wait is over; the splice below is bounded by the hub's
+        // agent budget (`_permit`), not by the claim pool.
+        drop(claim_permit);
+        let Some((quic_send, quic_recv, residue, _permit)) = claimed else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::Timeout,
+                        "no AGENT stream arrived for this channel within the wait budget",
+                    ))),
+                })
+                .await;
+            return;
+        };
+
+        if conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+            })
+            .await
+            .is_err()
+        {
+            let mut quic_send = quic_send;
+            let mut quic_recv = quic_recv;
+            let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(
+                RESET_CODE_LOCAL_PEER_GONE,
+            ));
+            let _ = quic_recv.stop(qsh_transport::StreamCode::from_u32(
+                RESET_CODE_LOCAL_PEER_GONE,
+            ));
+            return;
+        }
+
+        let (uds, prefetched) = conduit.into_raw();
+        let (uds_read, uds_write) = transport::split(uds);
+        let (uds_read, prefetched) = transport::raw_reader(uds_read, prefetched);
+        let uds_write = transport::raw_writer(uds_write);
+        let watch = crate::tunnel::stall::StallWatch::on(conn, "agent".to_string());
         tunnel_splice_uds_quic(
             uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
         )
@@ -1948,6 +2060,9 @@ enum LocalStreamRelay {
     /// (`LocalctlDaemon::serve_tcp_accepted`'s own path) instead of
     /// opening one — `TCP_ACCEPTED` only.
     ClaimTcpAccepted,
+    /// Claim an `AGENT` stream the target opened for a channel this
+    /// conduit's CLI registered ([`LocalctlDaemon::serve_agent_claim`]).
+    ClaimAgent,
 }
 
 /// Classify a `LOCAL_STREAM` header into what [`LocalctlDaemon::serve_stream`]
@@ -1994,10 +2109,11 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
             file_splice: true,
         }),
         Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
-        // `AGENT` is host -> client only, and its reverse-route relay lands
-        // with the daemon step of ADR-0055 decision 14; until then a
-        // `LOCAL_STREAM` header for it is refused like any unknown kind.
-        Some(wire::StreamKind::Agent) | Some(wire::StreamKind::Unspecified) | None => None,
+        // `AGENT` is host -> client only (ADR-0055 decision 14): the target
+        // opens the QUIC stream, so this conduit claims it like a
+        // `TCP_ACCEPTED` instead of opening one.
+        Some(wire::StreamKind::Agent) => Some(LocalStreamRelay::ClaimAgent),
+        Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 

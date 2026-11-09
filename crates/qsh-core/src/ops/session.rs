@@ -889,15 +889,29 @@ impl Ops {
         // Agent forwarding (ADR-0055 decisions 5 and 13). The channel is
         // registered and the dispatcher is already accepting before the
         // request leaves, because the host may open the first `AGENT`
-        // stream before the reply is read. Only a forward connection can
-        // host the dispatcher; the reverse route is a later step and
-        // reports `unsupported`.
+        // stream before the reply is read. A forward connection hosts the
+        // dispatcher itself.
         let agent_requested = self.agent.is_some();
-        let agent_supported = conn.connection().is_some()
+        // The reverse route claims the host's `AGENT` streams from the
+        // `qsh listen` daemon instead (decision 14), through a claim loop
+        // that lives as long as the channel does.
+        let agent_supported = (conn.connection().is_some() || conn.reverse_route().is_some())
             && conn.capabilities().iter().any(|c| c == wire::CAP_AGENT_V1);
         let mut agent_attach: Option<AgentAttach> = None;
         let mut early_acceptor = None;
-        if let (Some(agent), Some(connection), true) =
+        if let (Some(agent), Some((socket, route_host)), true) =
+            (&self.agent, conn.reverse_route(), agent_supported)
+        {
+            let channel = agent.register();
+            let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
+            conn.runtime().block_on(async {
+                channel.serve_over_daemon(socket, route_host);
+            });
+            agent_attach = Some(AgentAttach {
+                agent: Arc::clone(agent),
+                channel,
+            });
+        } else if let (Some(agent), Some(connection), true) =
             (&self.agent, conn.connection(), agent_supported)
         {
             let channel = agent.register();

@@ -252,6 +252,154 @@ impl TunnelArrival {
     }
 }
 
+/// Upper bound on `AGENT` streams this hub holds at once, queued for a
+/// claimant or being spliced (ADR-0055 decision 14). Counted apart from
+/// [`MAX_TUNNEL_STREAMS_PER_HUB`]: an agent stream is a short request/reply
+/// exchange, and a flood of them must not starve tunnels (or the other way
+/// round). The number is [`crate::agent::MAX_AGENT_STREAMS_PER_HUB`].
+pub(super) const MAX_AGENT_STREAMS_PER_HUB: usize = crate::agent::MAX_AGENT_STREAMS_PER_HUB;
+
+/// Upper bound on `agent_channel`s one hub keeps registered. A channel is
+/// one per live `-A` session attach or exec, so this is far above real use;
+/// it only bounds what a client that registers without ever ending can pin.
+const MAX_AGENT_CHANNELS_PER_HUB: usize = 256;
+
+/// Longest claim token an `AGENT` claim may present. The CLI sends 16
+/// random bytes; the cap keeps a hostile same-uid peer from parking a large
+/// token in the seat.
+pub(crate) const MAX_AGENT_CLAIM_TOKEN_LEN: usize = 64;
+
+/// Reset code for an `AGENT` stream naming a channel no conduit registered
+/// (`0x2001`, the same code the client dispatcher uses, decision 13).
+pub(super) const RESET_CODE_AGENT_UNKNOWN_CHANNEL: u32 = crate::server::RESET_CODE_BAD_HEADER;
+
+/// Reset code for an `AGENT` stream refused at [`MAX_AGENT_STREAMS_PER_HUB`]
+/// (`0x200D`).
+pub(super) const RESET_CODE_AGENT_HUB_EXHAUSTED: u32 = crate::server::RESET_CODE_RESOURCE_EXHAUSTED;
+
+/// One `AGENT` stream the target opened for a channel this hub knows,
+/// queued for the `LOCAL_STREAM` conduit that holds the channel's claim
+/// seat ([`ControlHub::deliver_agent`]/[`ControlHub::claim_agent`]). It owns
+/// the hub-wide agent permit for its whole life, queue and splice alike.
+pub(crate) struct AgentArrival {
+    send: SendStream,
+    recv: RecvStream,
+    /// Bytes the target pipelined past its header before it was queued.
+    residue: Vec<u8>,
+    queued_at: Instant,
+    _permit: crate::agent::Permit,
+}
+
+impl AgentArrival {
+    /// Reset both halves with `code`; a bare drop would finish them as if
+    /// the exchange had ended normally ([`TunnelArrival::reset`]).
+    pub(super) fn reset(mut self, code: u32) {
+        let _ = self.send.reset(qsh_transport::StreamCode::from_u32(code));
+        let _ = self.recv.stop(qsh_transport::StreamCode::from_u32(code));
+    }
+}
+
+/// What a claimed `AGENT` stream hands the daemon: both QUIC halves, the
+/// bytes already read past the header, and the hub permit to hold for the
+/// splice's whole life.
+pub(crate) type ClaimedAgent = (SendStream, RecvStream, Vec<u8>, crate::agent::Permit);
+
+/// The `AGENT` channels one hub knows (ADR-0055 decision 14): who registered
+/// each (the `LOCAL_CONTROL` conduit whose request carried it) and the one
+/// claim token allowed to take its streams. The token is private to this
+/// type and only ever compared through [`AgentChannels::admit_claim`], so
+/// the empty-token hole [`ClaimSeat`] closed for `forward_id`s cannot reopen
+/// here.
+#[derive(Default)]
+struct AgentChannels {
+    registrations: HashMap<Vec<u8>, AgentRegistration>,
+    queues: HashMap<Vec<u8>, VecDeque<AgentArrival>>,
+}
+
+struct AgentRegistration {
+    owner: ConduitId,
+    /// `None` until the first claim, which seats its token for good.
+    seat: Option<Vec<u8>>,
+}
+
+/// Compare two tokens without stopping at the first difference.
+fn tokens_equal(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The `agent_channel` a request carries, when it is one of the three that
+/// can and its length is the channel length. Anything else is left for the
+/// target to judge; this hub only registers well-formed channels.
+fn agent_channel_of(body: &wire::control_message::Body) -> Option<&[u8]> {
+    use wire::control_message::Body;
+    let channel: &[u8] = match body {
+        Body::SessionOpen(req) => &req.agent_channel,
+        Body::SessionAttach(req) => &req.agent_channel,
+        Body::ExecStart(req) => &req.agent_channel,
+        _ => return None,
+    };
+    (channel.len() == wire::AGENT_CHANNEL_LEN).then_some(channel)
+}
+
+impl AgentChannels {
+    /// Record that `owner` asked for `channel`. A channel another conduit
+    /// already registered is left alone (it cannot be taken over), and the
+    /// table stops growing at [`MAX_AGENT_CHANNELS_PER_HUB`].
+    fn register(&mut self, owner: ConduitId, channel: &[u8]) {
+        if self.registrations.contains_key(channel) {
+            return;
+        }
+        if self.registrations.len() >= MAX_AGENT_CHANNELS_PER_HUB {
+            tracing::warn!(
+                target: "qsh::agent",
+                event = "refused",
+                reason = "channel_table_full",
+            );
+            return;
+        }
+        self.registrations
+            .insert(channel.to_vec(), AgentRegistration { owner, seat: None });
+    }
+
+    /// The one place a presented claim token meets a seat. The first
+    /// non-empty token to ask sits in the seat; after that only the same
+    /// bytes pass. An unregistered channel and an empty token never pass.
+    fn admit_claim(&mut self, channel: &[u8], presented: &[u8]) -> bool {
+        if presented.is_empty() || presented.len() > MAX_AGENT_CLAIM_TOKEN_LEN {
+            return false;
+        }
+        let Some(registration) = self.registrations.get_mut(channel) else {
+            return false;
+        };
+        match &registration.seat {
+            None => {
+                registration.seat = Some(presented.to_vec());
+                true
+            }
+            Some(seated) => tokens_equal(seated, presented),
+        }
+    }
+
+    /// Remove everything `owner` registered and return the arrivals that
+    /// were still queued for it.
+    fn remove_owned_by(&mut self, owner: ConduitId) -> Vec<AgentArrival> {
+        let channels: Vec<Vec<u8>> = self
+            .registrations
+            .iter()
+            .filter(|(_, registration)| registration.owner == owner)
+            .map(|(channel, _)| channel.clone())
+            .collect();
+        let mut orphaned = Vec::new();
+        for channel in channels {
+            self.registrations.remove(&channel);
+            if let Some(queue) = self.queues.remove(&channel) {
+                orphaned.extend(queue);
+            }
+        }
+        orphaned
+    }
+}
+
 /// Whether a `ControlMessage` body a conduit is relaying is one of the
 /// target's long-poll-classified requests (mirrors
 /// `crate::server::is_long_poll`, which this module may not import —
@@ -697,6 +845,11 @@ pub(super) struct HubState {
     /// together, in the same locked section, so there is no window where
     /// one outlives the other.
     tunnel_queue: HashMap<String, VecDeque<TunnelArrival>>,
+    /// The `AGENT` channels this hub has seen in a conduit's requests, with
+    /// their claim seats and queued streams (ADR-0055 decision 14). Entered
+    /// by [`ControlHub::send_request`] when the request leaves for the
+    /// target, and swept with its conduit by [`ControlHub::unregister_conduit`].
+    agent_channels: AgentChannels,
     /// Set once, by [`ControlHub::mark_dead`], and never cleared —
     /// [`ControlHub::register_conduit`] checks it under the same lock it
     /// registers under, so a conduit that resolves this hub via
@@ -835,6 +988,12 @@ pub struct ControlHub {
     /// rather than per-`forward_id`, `Notify` is both correct and
     /// sufficient at this scale).
     tunnel_notify: Notify,
+    /// [`MAX_AGENT_STREAMS_PER_HUB`] slots for `AGENT` streams, queued or
+    /// being spliced (ADR-0055 decision 10).
+    agent_budget: crate::agent::StreamBudget,
+    /// Rung when an `AGENT` stream is queued and when a conduit's channels
+    /// are swept, like [`Self::tunnel_notify`] for `-R` claims.
+    agent_notify: Notify,
 }
 
 impl ControlHub {
@@ -860,6 +1019,7 @@ impl ControlHub {
                 pending_rfwd_opens: HashMap::new(),
                 pending_rfwd_closes: HashMap::new(),
                 tunnel_queue: HashMap::new(),
+                agent_channels: AgentChannels::default(),
                 dead: false,
             }),
             outbound_tx,
@@ -867,6 +1027,8 @@ impl ControlHub {
             tunnel_permits: Arc::new(Semaphore::new(MAX_TUNNEL_STREAMS_PER_HUB)),
             claim_permits: Arc::new(ClaimPool::default()),
             tunnel_notify: Notify::new(),
+            agent_budget: crate::agent::StreamBudget::new(MAX_AGENT_STREAMS_PER_HUB),
+            agent_notify: Notify::new(),
         })
     }
 
@@ -995,6 +1157,9 @@ impl ControlHub {
                 orphaned_arrivals.extend(queue);
             }
         }
+        // The `AGENT` channels this conduit asked for go with it, and the
+        // streams queued for them are reset (decision 14).
+        let orphaned_agent_arrivals = state.agent_channels.remove_owned_by(conduit);
         drop(state);
         // **Finding F2 — wake whoever was parked on what this sweep just
         // removed.** `claim_tcp_accepted` re-validates `admits_claim` on
@@ -1015,6 +1180,10 @@ impl ControlHub {
         self.tunnel_notify.notify_waiters();
         for arrival in orphaned_arrivals {
             arrival.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        }
+        self.agent_notify.notify_waiters();
+        for arrival in orphaned_agent_arrivals {
+            arrival.reset(RESET_CODE_AGENT_UNKNOWN_CHANNEL);
         }
     }
 
@@ -1136,6 +1305,12 @@ impl ControlHub {
                     forward_port: open.forward_port,
                 },
             );
+        }
+        // ADR-0055 decision 14: the channel is entered the moment the
+        // request is committed to leave, without waiting for the reply (the
+        // shell's rc file may run `ssh-add -l` before it).
+        if let Some(channel) = agent_channel_of(&body) {
+            state.agent_channels.register(conduit, channel);
         }
         drop(state);
         self.outbound_tx
@@ -1906,7 +2081,166 @@ impl ControlHub {
             );
             arrival.reset(RESET_CODE_TUNNEL_CLAIM_EXPIRED);
         }
+        count + self.sweep_expired_agent_arrivals()
+    }
+
+    // ----------------------------------------------------------------
+    // `AGENT` relay (ADR-0055 decision 14). The target opens an `AGENT`
+    // stream on the registered connection; `Listen::run_tunnel_accept_loop`
+    // accepts it and hands it to `deliver_agent`; the CLI process that sent
+    // the request carrying the channel claims it through a `LOCAL_STREAM`
+    // conduit (`claim_agent`). The daemon never touches a local agent.
+    // ----------------------------------------------------------------
+
+    /// Take one of this hub's [`MAX_AGENT_STREAMS_PER_HUB`] slots, or `None`
+    /// at the cap. Never waits: the next stream is refused at once.
+    pub(crate) fn try_acquire_agent_permit(&self) -> Option<crate::agent::Permit> {
+        self.agent_budget.try_acquire()
+    }
+
+    /// Queue an `AGENT` stream for the conduit that holds `channel`.
+    ///
+    /// `Err` hands the stream back untouched when `channel` is not a
+    /// registered channel of this hub (never sent in a request, its conduit
+    /// already gone, or the wrong length), so the caller can reset it with a
+    /// real code instead of dropping it clean. Nothing is queued then.
+    pub(crate) fn deliver_agent(
+        &self,
+        channel: &[u8],
+        send: SendStream,
+        recv: RecvStream,
+        residue: Vec<u8>,
+        permit: crate::agent::Permit,
+    ) -> Result<(), AgentArrival> {
+        let arrival = AgentArrival {
+            send,
+            recv,
+            residue,
+            queued_at: Instant::now(),
+            _permit: permit,
+        };
+        let mut state = self.lock();
+        if !state.agent_channels.registrations.contains_key(channel) {
+            return Err(arrival);
+        }
+        state
+            .agent_channels
+            .queues
+            .entry(channel.to_vec())
+            .or_default()
+            .push_back(arrival);
+        drop(state);
+        self.agent_notify.notify_waiters();
+        Ok(())
+    }
+
+    /// Acquire a parked-claim slot for the conduit that registered
+    /// `channel`, sharing [`ClaimPool`] with `-R` claims so one CLI cannot
+    /// park the whole daemon.
+    pub(crate) fn try_acquire_agent_claim_permit(&self, channel: &[u8]) -> Option<ClaimPermit> {
+        let owner = self
+            .lock()
+            .agent_channels
+            .registrations
+            .get(channel)
+            .map(|registration| registration.owner);
+        self.claim_permits.try_acquire(owner)
+    }
+
+    /// Wait up to `wait` for a stream queued for `channel`, handing it only
+    /// to the holder of the channel's seat. The token is checked against the
+    /// current seat, under the lock that pops the stream, on every wake
+    /// ([`HubState::admits_claim`]'s reasoning). `None` for an unregistered
+    /// channel, a token that does not match the seat, an empty token, and a
+    /// wait that ran out; the caller cannot and need not tell them apart.
+    pub(crate) async fn claim_agent(
+        &self,
+        channel: &[u8],
+        claim_token: &[u8],
+        wait: Duration,
+    ) -> Option<ClaimedAgent> {
+        let wait_for_arrival = async {
+            loop {
+                let notified = self.agent_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let mut state = self.lock();
+                    if !state.agent_channels.admit_claim(channel, claim_token) {
+                        return None;
+                    }
+                    if let Some(queue) = state.agent_channels.queues.get_mut(channel)
+                        && let Some(arrival) = queue.pop_front()
+                    {
+                        return Some((
+                            arrival.send,
+                            arrival.recv,
+                            arrival.residue,
+                            arrival._permit,
+                        ));
+                    }
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(wait, wait_for_arrival)
+            .await
+            .unwrap_or(None)
+    }
+
+    /// Reset queued `AGENT` streams nobody claimed within
+    /// [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`]; the same bound `-R` arrivals have.
+    fn sweep_expired_agent_arrivals(&self) -> usize {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        {
+            let mut state = self.lock();
+            state.agent_channels.queues.retain(|_, queue| {
+                while queue.front().is_some_and(|arrival| {
+                    now.saturating_duration_since(arrival.queued_at)
+                        >= MAX_QUEUED_TUNNEL_ARRIVAL_AGE
+                }) {
+                    expired.push(queue.pop_front().expect("the front was just observed"));
+                }
+                !queue.is_empty()
+            });
+        }
+        let count = expired.len();
+        for arrival in expired {
+            tracing::warn!(
+                target: "qsh::agent",
+                event = "refused",
+                reason = "claim_expired",
+            );
+            arrival.reset(RESET_CODE_TUNNEL_CLAIM_EXPIRED);
+        }
         count
+    }
+
+    /// Only for tests: how many `AGENT` slots this hub has taken.
+    #[cfg(test)]
+    pub(super) fn agent_streams_in_use(&self) -> usize {
+        self.agent_budget.in_use()
+    }
+
+    /// Only for tests: how many `AGENT` streams are queued for `channel`.
+    #[cfg(test)]
+    pub(super) fn queued_agent_count(&self, channel: &[u8]) -> usize {
+        self.lock()
+            .agent_channels
+            .queues
+            .get(channel)
+            .map_or(0, |queue| queue.len())
+    }
+
+    /// Only for tests: whether `channel` is registered, and to which conduit.
+    #[cfg(test)]
+    pub(super) fn agent_channel_owner(&self, channel: &[u8]) -> Option<ConduitId> {
+        self.lock()
+            .agent_channels
+            .registrations
+            .get(channel)
+            .map(|registration| registration.owner)
     }
 
     /// Only for tests: how many permits this hub's tunnel-stream pool
