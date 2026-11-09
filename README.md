@@ -427,8 +427,8 @@ are no custom ones, and each grants a fixed set of actions:
 
 | role | grants |
 |---|---|
-| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `host.reverse`, `file.read`, `file.write` (never qsh's own config and state files, see [Security posture](#security-posture)) |
-| `exec` | `exec.run`, `session.*` |
+| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `forward.agent`, `host.reverse`, `file.read`, `file.write` (never qsh's own config and state files, see [Security posture](#security-posture)) |
+| `exec` | `exec.run`, `session.*`, `forward.agent` |
 | `tunnel` | `forward.local`, `forward.remote` (it can only close remote forwards it opened itself) |
 | `read-only` | `session.list`, `session.attach`: watch sessions, no input |
 | `reverse` | `host.reverse`: register as a reverse target, nothing else |
@@ -696,10 +696,64 @@ remote shell with `-c`, as ssh does, so `$VAR`, pipes and `&&` are interpreted
 on the host. Exit status is the remote command's (0 to 254); `qsh`'s own
 failures, including a usage error in this form, exit 255. A host whose name is
 also a subcommand (`qsh version`) is reached as `user@host`, `-l user host` or
-`qsh -- host`. `-f` is only accepted together with `-N`. `-A` and a QUIC-side
-`-J` are refused as `UNSUPPORTED` for now, and so are `-X -Y -W -M -S -O -w -b
--B -c -m -Q`. `--json` and `--jsonl` are refused on this form, because its
+`qsh -- host`. `-f` is only accepted together with `-N`. A QUIC-side `-J` is
+refused as `UNSUPPORTED` for now, and so are `-X -Y -W -M -S -O -w -b -B -c -m
+-Q`. `-A` is accepted; see [Agent forwarding](#agent-forwarding--a). `--json` and `--jsonl` are refused on this form, because its
 stdout is the remote terminal; scripts use `qsh exec`.
+
+### Agent forwarding (`-A`)
+
+`-A` lets programs in the remote session use the ssh-agent on the machine
+you typed the command on, for example to push to a code host from the remote
+shell or to `ssh` on to a third machine. It is off by default.
+
+```bash
+qsh -A box                               # interactive session
+qsh -A box ssh-add -l                    # a command
+qsh exec -A box -- ssh-add -l            # machine mode; also qsh attach -A and qsh session open -A
+qsh config set agent.forward yes         # the default for every command; -a turns it off once
+```
+
+The host creates a socket for the session or the command, owner-only, and
+points `SSH_AUTH_SOCK` at it. The socket is removed when the session ends. Its
+path stays the same across reconnects, and the agent behind it is the one on
+the machine whose `-A` attach holds the writer lease. While no `-A` attach
+holds it, connections to the socket are closed at once. Each connection to the socket opens
+one stream back to your machine, and your machine decides what reaches the
+local agent: only list-identities and sign requests pass. Adding or removing
+keys, locking and every extension get a failure reply from qsh and never reach
+your agent, so `ssh-add -l` and `ssh` work on the host and `ssh-add key` does
+not.
+
+- The peer needs the `forward.agent` grant, which roles `full` and `exec` carry.
+  Without it the host answers `DENIED` and creates no socket. The session still
+  opens, and `qsh` prints one line on stderr.
+- `ForwardAgent` in `~/.ssh/config` is not read. The order is `-A`/`-a`, then
+  `-o ForwardAgent=yes|no|<path>|$VAR`, then `agent.forward`. `qsh cp -A` is
+  refused.
+- With no local agent, `qsh` says so on stderr and goes on. `qsh doctor`
+  reports `agent_unreachable` when `agent.forward` is `yes` and the agent
+  cannot be reached.
+- It works over a reverse connection too.
+
+The risk is the same as with ssh. While you are attached with `-A`, root on
+the host, and any process running as the same user there, can ask your agent
+to sign with any key it holds. The filter cannot tell a hostile signature
+request from a legitimate one. Load keys that should confirm every signature
+with `ssh-add -c`, and your local agent will ask you each time. A key added
+with a destination restriction (`ssh-add -h`) shows up in the list but cannot
+sign through qsh, because qsh does not pass the `session-bind` extension those
+keys need.
+
+On Windows, qsh talks to the OpenSSH agent's named pipe,
+`\\.\pipe\openssh-ssh-agent` by default, or the pipe path in `SSH_AUTH_SOCK`.
+The Windows `ssh-agent` service is disabled out of the box, so on a fresh
+machine the "no local agent" path is the usual one until an administrator
+enables and starts the service (`Set-Service ssh-agent -StartupType Manual`,
+then `Start-Service ssh-agent`). An agent that listens on an AF_UNIX or msys socket,
+such as the one bundled with Git for Windows, is not reachable. A Windows host
+works too: its socket is a named pipe, and the Win32-OpenSSH tools in the
+session read it from `SSH_AUTH_SOCK`.
 
 ### Port forwards
 
@@ -916,7 +970,7 @@ tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side name
 The ssh bootstrap is a second way to create pins, and it is not trust on
 first connect: the remote fingerprint comes from the remote account over an
 ssh connection that ssh has authenticated, and qsh adds no check of its own
-on top of ssh's host authentication. qsh never reads an SSH private key, a
+on top of ssh's host authentication. The bootstrap never reads an SSH private key, a
 passphrase or an agent socket; ssh does all of that in its own process. The
 pin written on the remote has role `full`, which is no more than the ssh
 login already gives that account; `--role` narrows it. The pin written on the
