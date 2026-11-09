@@ -482,31 +482,114 @@ pub(super) fn code(raw: u32) -> StreamCode {
     StreamCode::from_u32(raw)
 }
 
+/// The writing end of a channel's stream carrier: a QUIC stream, or the raw
+/// bytes of a local conduit (the CLI-to-daemon leg of a reverse first hop,
+/// ADR-0056 decision 14).
+pub(super) enum ChanTx {
+    /// A QUIC stream.
+    Quic(SendStream),
+    /// A local conduit's raw write half.
+    Raw(Box<dyn tokio::io::AsyncWrite + Send + Unpin>),
+}
+
+impl From<SendStream> for ChanTx {
+    fn from(send: SendStream) -> Self {
+        Self::Quic(send)
+    }
+}
+
+impl ChanTx {
+    pub(super) async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+        match self {
+            Self::Quic(send) => send.write_all(bytes).await.map_err(io::Error::other),
+            Self::Raw(raw) => raw.write_all(bytes).await,
+        }
+    }
+
+    /// Ends the direction. A QUIC stream resets with `how` or finishes; a
+    /// local conduit has no reset code, so either way it half-closes and the
+    /// peer reads an end of stream.
+    pub(super) async fn end(&mut self, how: Option<u32>) {
+        use tokio::io::AsyncWriteExt as _;
+        match self {
+            Self::Quic(send) => match how {
+                Some(raw) => {
+                    let _ = send.reset(code(raw));
+                }
+                None => {
+                    let _ = send.finish();
+                }
+            },
+            Self::Raw(raw) => {
+                let _ = raw.shutdown().await;
+            }
+        }
+    }
+}
+
+/// The reading end of a channel's stream carrier; see [`ChanTx`].
+pub(super) enum ChanRx {
+    /// A QUIC stream.
+    Quic(RecvStream),
+    /// A local conduit's raw read half.
+    Raw(Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+}
+
+impl From<RecvStream> for ChanRx {
+    fn from(recv: RecvStream) -> Self {
+        Self::Quic(recv)
+    }
+}
+
+impl ChanRx {
+    /// Bytes read; `Ok(None)` at a clean end.
+    pub(super) async fn read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        use tokio::io::AsyncReadExt as _;
+        match self {
+            Self::Quic(recv) => recv.read(buf).await.map_err(io::Error::other),
+            Self::Raw(raw) => match raw.read(buf).await? {
+                0 => Ok(None),
+                n => Ok(Some(n)),
+            },
+        }
+    }
+
+    /// Tells the peer to stop sending (a QUIC stream only; a local conduit
+    /// is closed by dropping it).
+    pub(super) fn stop(&mut self, raw: u32) {
+        if let Self::Quic(recv) = self {
+            let _ = recv.stop(code(raw));
+        }
+    }
+}
+
 /// Writes queued frames to the stream. `close` tells it how to end: `Some`
 /// resets with that code at once (queued bytes are discarded), anything else
 /// finishes.
 pub(super) async fn write_loop(
-    mut send: SendStream,
+    send: impl Into<ChanTx>,
     mut queue: QueueRx,
     mut close: oneshot::Receiver<Option<u32>>,
 ) {
+    let mut send = send.into();
     loop {
         tokio::select! {
             biased;
             how = &mut close => {
-                end_send(&mut send, how.ok().flatten());
+                send.end(how.ok().flatten()).await;
                 return;
             }
             next = queue.next() => {
                 let Some(frame) = next else {
-                    let _ = send.finish();
+                    send.end(None).await;
                     return;
                 };
                 let len = frame.len();
                 tokio::select! {
                     biased;
                     how = &mut close => {
-                        end_send(&mut send, how.ok().flatten());
+                        send.end(how.ok().flatten()).await;
                         return;
                     }
                     written = send.write_all(&frame) => {
@@ -517,17 +600,6 @@ pub(super) async fn write_loop(
                     }
                 }
             }
-        }
-    }
-}
-
-pub(super) fn end_send(send: &mut SendStream, how: Option<u32>) {
-    match how {
-        Some(raw) => {
-            let _ = send.reset(code(raw));
-        }
-        None => {
-            let _ = send.finish();
         }
     }
 }

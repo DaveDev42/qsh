@@ -1792,7 +1792,7 @@ impl Ops {
                     host: route_host.clone(),
                     expect: Some(crate::localctl::client::ExpectedPeer {
                         fingerprint: fingerprint.to_string(),
-                        generation,
+                        generation: Some(generation),
                     }),
                 };
                 Ok(SupervisionParts {

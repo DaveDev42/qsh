@@ -249,6 +249,19 @@ async fn dial_jump(
             .map_or_else(String::new, |op| op.message.clone());
         RouteError::plain(DirectFail::Chain(Box::new(failure.into_op(message, route))))
     };
+    // A first hop that registered reverse on this machine has no connection
+    // to dial: the local daemon holds it, and the chain's first channel is
+    // opened through the daemon (ADR-0056 decision 14).
+    if jump.first_reverse.is_some() {
+        let chained = crate::jump::dial_chain_via_daemon(jump, dialer, deadline)
+            .await
+            .map_err(|op| RouteError::plain(DirectFail::Chain(Box::new(op))))?;
+        return Ok(Routed {
+            connection: chained.connection,
+            endpoint: chained.endpoint,
+            punched: false,
+        });
+    }
     let server_name = crate::ops::server_name_for(&first.address);
     let first_hop = tokio::time::timeout_at(
         deadline,

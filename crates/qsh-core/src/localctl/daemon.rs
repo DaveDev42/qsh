@@ -28,7 +28,7 @@
 //!   |---|---|---|
 //!   | `LOCAL_ADMIN` | `LocalctlDaemon::serve_admin` | one `LocalAdminRequest` (`HostList` / `TunnelList` / `TunnelClose`, M4 Step 5 PR 5b) → one `LocalResponse`, from [`Listen::registry`]'s current snapshot or [`Listen::hubs_snapshot`]'s live forwards, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
 //!   | `LOCAL_CONTROL` (`M3 Step 6`) | `LocalctlDaemon::serve_control` | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
-//!   | `LOCAL_STREAM` (`M3 Step 7`) | `LocalctlDaemon::serve_stream` | `LocalHelloAck`, then exactly one wire `StreamHeader` frame — `SESSION_DATA`, `EXEC_DATA` (issue #5), `TCP_CONNECT` or `TCP_ACCEPTED` — then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection; for `EXEC_DATA` only, a `LocalResponse{ClaimGranted}` ack is written first, once `open_bi` has actually succeeded (`docs/design/protocol.md` §11-3's EXEC_DATA ack leg) — the daemon never parses anything past the header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
+//!   | `LOCAL_STREAM` (`M3 Step 7`) | `LocalctlDaemon::serve_stream` | `LocalHelloAck`, then exactly one wire `StreamHeader` frame — `SESSION_DATA`, `EXEC_DATA` (issue #5), `TCP_CONNECT` or `TCP_ACCEPTED` — then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection; for `EXEC_DATA` only, a `LocalResponse{ClaimGranted}` ack is written first, once `open_bi` has actually succeeded (`docs/design/protocol.md` §11-3's EXEC_DATA ack leg) — the daemon never parses anything past the header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). A `JUMP` header (ADR-0056 decision 14) is the exception to "raw splice": the daemon answers with one framed `ConnectResult` and then translates carriers between this conduit's `u16`-length frames and the registered connection's datagrams or `JUMP` stream (`crate::jump::relay`). |
 //!
 //!   An unspecified/unrecognized `LocalHello.kind` answers
 //!   `INVALID_ARGUMENT`. None of the three paths ever calls
@@ -1001,6 +1001,11 @@ impl LocalctlDaemon {
                     .await;
                     return;
                 }
+                Some(LocalStreamRelay::Jump) => {
+                    self.serve_jump(&hub, &conn, &header, &raw_header, conduit)
+                        .await;
+                    return;
+                }
                 Some(LocalStreamRelay::OpenBidiAndSplice {
                     priority,
                     tunnel_permit,
@@ -1476,6 +1481,258 @@ impl LocalctlDaemon {
             uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
         )
         .await;
+    }
+
+    /// `JUMP` over a registered connection (ADR-0056 decision 14,
+    /// `docs/design/protocol.md` §21.7). The CLI's `StreamHeader{JUMP,
+    /// channel, host, port}` is forwarded verbatim on a new stream of the
+    /// registered connection, where the host (`qsh serve --to`) decides
+    /// `forward.jump` exactly as an intermediate peer reached directly
+    /// would. This daemon authorizes nothing and reads no packet: it claims
+    /// the channel, bounds its own resources and translates carriers
+    /// ([`crate::jump::relay`]).
+    ///
+    /// Exactly one framed `ConnectResult` leaves before any raw byte: the
+    /// host's, verbatim, or the daemon's own refusal (`INVALID_ARGUMENT`,
+    /// `UNSUPPORTED`, `RESOURCE_EXHAUSTED`, `CONNECTION_FAILED`) before or
+    /// instead of one. The CLI reads it as it would read an intermediate
+    /// peer's.
+    async fn serve_jump(
+        &self,
+        hub: &Arc<crate::reverse::listen::ControlHub>,
+        conn: &qsh_transport::Connection,
+        header: &wire::StreamHeader,
+        raw_header: &[u8],
+        conduit: LocalConduit<LocalStream>,
+    ) {
+        use qsh_proto::datagram::ChannelId;
+        use tokio::io::AsyncReadExt as _;
+
+        use crate::jump::relay::{JUMP_OPEN_TIMEOUT, Relay};
+        use crate::reverse::listen::JumpClaimError;
+
+        let (uds, prefetched) = conduit.into_raw();
+        let (uds_read, uds_write) = transport::split(uds);
+        let (mut uds_read, mut prefetched) = transport::raw_reader(uds_read, prefetched);
+        let mut uds_write = transport::raw_writer(uds_write);
+
+        async fn answer<W: tokio::io::AsyncWrite + Unpin>(
+            out: &mut W,
+            ok: bool,
+            code: Option<ErrorCode>,
+            message: &str,
+        ) {
+            let result = wire::ConnectResult {
+                ok,
+                code: code.map(|c| c.as_str().to_string()).unwrap_or_default(),
+                message: message.to_string(),
+            };
+            if let Ok(bytes) = wire::encode_framed(&result, qsh_proto::frame::DATA_FRAME_MAX) {
+                let _ = out.write_all(&bytes).await;
+            }
+        }
+
+        let (_, _, _, capabilities) = hub.ack_fields();
+        let Some(channel) = header.jump_channel() else {
+            answer(
+                &mut uds_write,
+                false,
+                Some(ErrorCode::InvalidArgument),
+                "a JUMP StreamHeader's ticket must be a 16-byte channel",
+            )
+            .await;
+            return;
+        };
+        if raw_header.len() > qsh_proto::frame::DATA_FRAME_MAX {
+            answer(
+                &mut uds_write,
+                false,
+                Some(ErrorCode::InvalidArgument),
+                "LOCAL_STREAM's StreamHeader exceeds the data stream's frame cap",
+            )
+            .await;
+            return;
+        }
+        if !capabilities.iter().any(|c| c == wire::CAP_JUMP_V1) {
+            answer(
+                &mut uds_write,
+                false,
+                Some(ErrorCode::Unsupported),
+                "the registered host does not support jumping",
+            )
+            .await;
+            return;
+        }
+        let slot = match hub.claim_jump(channel) {
+            Ok(slot) => slot,
+            Err(JumpClaimError::InUse) => {
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::InvalidArgument),
+                    "this jump channel is already in use",
+                )
+                .await;
+                return;
+            }
+            Err(JumpClaimError::Full) => {
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::ResourceExhausted),
+                    "too many concurrent jump channels on this host's reverse connection; \
+                     retry shortly",
+                )
+                .await;
+                return;
+            }
+        };
+        let both_datagram = capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1);
+        // Registered before the stream opens, so no datagram of the host can
+        // arrive for a channel nobody holds yet.
+        let datagrams = crate::datagram::DatagramHub::of(conn).register(ChannelId(channel));
+
+        let opened = tokio::time::timeout(OPEN_DATA_STREAM_TIMEOUT, conn.open_bi()).await;
+        let (mut quic_send, mut quic_recv) = match opened {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    %err,
+                    "localctl: JUMP failed to open a stream on the registered connection"
+                );
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::ConnectionFailed),
+                    "could not open a jump channel: the registered connection is gone",
+                )
+                .await;
+                return;
+            }
+            Err(_elapsed) => {
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::ConnectionFailed),
+                    "could not open a jump channel: the registered connection is at its \
+                     stream limit",
+                )
+                .await;
+                return;
+            }
+        };
+        let _ = quic_send.set_priority(wire::PRIORITY_SESSION_DATA);
+        let abort = |send: &mut qsh_transport::SendStream, recv: &mut qsh_transport::RecvStream| {
+            let _ = send.reset(qsh_transport::StreamCode::from_u32(0x2007));
+            let _ = recv.stop(qsh_transport::StreamCode::from_u32(0x2007));
+        };
+        let framed_header = match qsh_proto::frame::encode_frame(raw_header) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                abort(&mut quic_send, &mut quic_recv);
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::InvalidArgument),
+                    "the StreamHeader cannot be framed",
+                )
+                .await;
+                return;
+            }
+        };
+        if quic_send.write_all(&framed_header).await.is_err() {
+            abort(&mut quic_send, &mut quic_recv);
+            answer(
+                &mut uds_write,
+                false,
+                Some(ErrorCode::ConnectionFailed),
+                "could not open a jump channel: the registered connection is gone",
+            )
+            .await;
+            return;
+        }
+
+        // The host's verdict, bounded; a CLI that hangs up meanwhile ends it.
+        let mut framed = qsh_transport::FramedRecv::data(quic_recv);
+        let mut scratch = [0u8; 256];
+        let verdict = {
+            let wait =
+                tokio::time::timeout(JUMP_OPEN_TIMEOUT, framed.recv::<wire::ConnectResult>());
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    biased;
+                    got = &mut wait => break Some(got),
+                    read = uds_read.read(&mut scratch) => match read {
+                        Ok(0) | Err(_) => break None,
+                        // The CLI waits for the verdict before it sends; what
+                        // it did send is the start of its packets.
+                        Ok(n) => prefetched.extend_from_slice(&scratch[..n]),
+                    },
+                }
+            }
+        };
+        let (mut quic_recv_raw, host_residue) = framed.into_raw();
+        let result = match verdict {
+            None => {
+                abort(&mut quic_send, &mut quic_recv_raw);
+                return;
+            }
+            Some(Ok(Ok(Some(result)))) => result,
+            Some(Ok(Ok(None))) | Some(Ok(Err(_))) => {
+                abort(&mut quic_send, &mut quic_recv_raw);
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::ConnectionFailed),
+                    "the registered host closed the jump channel without an answer",
+                )
+                .await;
+                return;
+            }
+            Some(Err(_elapsed)) => {
+                abort(&mut quic_send, &mut quic_recv_raw);
+                answer(
+                    &mut uds_write,
+                    false,
+                    Some(ErrorCode::ConnectionFailed),
+                    "the registered host did not answer the jump request in time",
+                )
+                .await;
+                return;
+            }
+        };
+        let granted = result.ok;
+        if let Ok(bytes) = wire::encode_framed(&result, qsh_proto::frame::DATA_FRAME_MAX)
+            && uds_write.write_all(&bytes).await.is_err()
+        {
+            abort(&mut quic_send, &mut quic_recv_raw);
+            return;
+        }
+        if !granted {
+            let _ = quic_send.finish();
+            let _ = uds_write.shutdown().await;
+            return;
+        }
+        let end = crate::jump::relay::run(Relay {
+            conn: conn.clone(),
+            send: quic_send,
+            recv: quic_recv_raw,
+            host_residue,
+            cli_read: Box::new(uds_read),
+            cli_residue: prefetched,
+            cli_write: Box::new(uds_write),
+            datagrams,
+            both_datagram,
+            stats: Arc::clone(hub.jump_stats()),
+        })
+        .await;
+        tracing::debug!(
+            target: crate::jump::TARGET,
+            event = "relay_ended",
+            reason = end.as_str(),
+        );
+        drop(slot);
     }
 
     /// `AGENT`'s side of the `LOCAL_STREAM` conduit (ADR-0055 decision 14):
@@ -2063,6 +2320,10 @@ enum LocalStreamRelay {
     /// Claim an `AGENT` stream the target opened for a channel this
     /// conduit's CLI registered ([`LocalctlDaemon::serve_agent_claim`]).
     ClaimAgent,
+    /// Open a `JUMP` stream on the registered connection and translate
+    /// carriers between the two legs ([`LocalctlDaemon::serve_jump`],
+    /// ADR-0056 decision 14).
+    Jump,
 }
 
 /// Classify a `LOCAL_STREAM` header into what [`LocalctlDaemon::serve_stream`]
@@ -2113,10 +2374,11 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
         // opens the QUIC stream, so this conduit claims it like a
         // `TCP_ACCEPTED` instead of opening one.
         Some(wire::StreamKind::Agent) => Some(LocalStreamRelay::ClaimAgent),
-        // `JUMP` (ADR-0056 decision 3) is not relayed through the local
-        // conduit yet; it is refused like an unknown kind, with nothing
-        // opened on QUIC. The reverse-route step gives it an arm.
-        Some(wire::StreamKind::Jump) | Some(wire::StreamKind::Unspecified) | None => None,
+        // `JUMP` (ADR-0056 decision 14): the CLI cannot open a stream on the
+        // registered connection, so the daemon opens it and translates the
+        // carriers. Nothing is opened before the channel is claimed.
+        Some(wire::StreamKind::Jump) => Some(LocalStreamRelay::Jump),
+        Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 

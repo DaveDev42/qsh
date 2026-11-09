@@ -10,10 +10,12 @@
 pub mod carrier;
 pub mod chain;
 pub mod middle;
+pub mod relay;
 pub mod report;
 
 pub use chain::{
-    ChainConn, ChainInfo, ChannelInfo, HopPin, JumpPlan, MAX_JUMP_HOPS, PumpEnd, dial_chain,
+    ChainConn, ChainInfo, ChannelInfo, HopPin, JumpPlan, MAX_JUMP_HOPS, PumpEnd, ReverseHop,
+    dial_chain, dial_chain_via_daemon,
 };
 pub use middle::{
     CloseReason, JUMP_GATE_TIMEOUT, JUMP_IDLE, JUMP_RESOLVE_TIMEOUT, JumpOptions, JumpStats,
@@ -23,4 +25,5 @@ pub use middle::{
 /// The tracing target of the jump lines (ADR-0056 decision 19). The lines are
 /// opt-in: they are emitted at `debug`, which the default filter drops.
 pub const TARGET: &str = "qsh::jump";
+pub use relay::{JUMP_OPEN_TIMEOUT, MAX_JUMP_CHANNELS_PER_HUB, RelayEnd, RelayStats};
 pub use report::{JumpFailure, Stage};

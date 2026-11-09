@@ -85,7 +85,9 @@ use hub::{
 };
 
 pub use hub::{ConduitInbound, ControlHub, HubSendError};
-pub(crate) use hub::{MAX_AGENT_CLAIM_TOKEN_LEN, TunnelCloseTarget, tunnel_close_target};
+pub(crate) use hub::{
+    JumpClaimError, MAX_AGENT_CLAIM_TOKEN_LEN, TunnelCloseTarget, tunnel_close_target,
+};
 
 /// How often [`Listen::run_stale_sweeper`] checks the registry for stale
 /// entries whose `[listen].stale_retention` has elapsed
