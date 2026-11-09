@@ -31,10 +31,10 @@ const CONTROLLER_ALIAS: &str = "unreachable-controller";
 /// point is to observe the *rendered* stderr text a real subprocess
 /// writes, not to call into the constant directly (that half of the
 /// anti-drift gate is `crates/qsh-core/tests/it/doctor_docs.rs`).
-const MESSAGE: &str = "Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.";
+const MESSAGE: &str = "Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.";
 
 /// `qsh_core::doctor::CONTROLLER_UNREACHABLE.remedy`, same rationale.
-const REMEDY: &str = "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.";
+const REMEDY: &str = "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.";
 
 /// Bound on the whole test — generous: on a sandbox without a fast
 /// ICMP-port-unreachable path back from a closed loopback UDP port, one
