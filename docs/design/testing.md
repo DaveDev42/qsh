@@ -166,7 +166,7 @@ CLI 경계는 `crates/qsh-cli/tests/it/setup.rs`의 테스트 일곱(`setup_mach
 
 ## L8 — Fuzzing (`cargo-fuzz`)
 
-cargo-fuzz 타깃 **27종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`·`host_emulator_input`·`client_predictor`(ADR-0053 결정 16의 10), ADR-0052가 더한 `decode_screen_diff`·`decode_datagram_frame`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`, ADR-0029가 더한 `decode_file_frame`, ADR-0044가 더한 `parse_ssh_bootstrap_line`, ADR-0054가 더한 `punch_candidates`(후보 검사·message 모양 검사·펀치 datagram tag), ADR-0055가 더한 `agent_frames`(ssh-agent 메시지 framing과 거르기 표)이다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
+cargo-fuzz 타깃 **28종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`의 `[[bin]]`과 같은 수). 구성은 sans-IO 파서 타깃, stateful 타깃 `broker_ops`·`host_emulator_input`·`client_predictor`(ADR-0053 결정 16의 10), ADR-0052가 더한 `decode_screen_diff`·`decode_datagram_frame`, ADR-0019가 더한 `parse_socks5`, ADR-0026이 더한 `parse_openssh_key`, ADR-0029가 더한 `decode_file_frame`, ADR-0044가 더한 `parse_ssh_bootstrap_line`, ADR-0054가 더한 `punch_candidates`(후보 검사·message 모양 검사·펀치 datagram tag), ADR-0055가 더한 `agent_frames`(ssh-agent 메시지 framing과 거르기 표), ADR-0056이 더한 `jump_frames`(jump 스트림 운반체 framing과 QUIC long header 판독·문 판정)이다. 아래 표는 `[[bin]]` 이름 그대로이고, 이 절이 처음 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13). 실행법과 `fuzz/`가 워크스페이스 밖에 있는 이유는 `fuzz/README.md`가 적는다.
 
 | 타깃 | 내용 | 비고 |
 |---|---|---|
@@ -184,6 +184,7 @@ cargo-fuzz 타깃 **27종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`�
 | `valid_forward_id` | `forward_id`/`ticket` 모양 검사 |  |
 | `punch_candidates` | 후보 검사 `valid_punch_candidate`·`check_candidates`, 펀칭 message 모양 검사, 펀치 datagram tag 대조 |  |
 | `agent_frames` | `crates/qsh-proto/src/agent.rs`의 `AgentDecoder`와 `request_disposition` — 첫 바이트가 청크 크기(1~64)를 고른다 (ADR-0055 결정 4·12) | `docs/design/protocol.md` §13-12, §20 |
+| `jump_frames` | `crates/qsh-proto/src/jump.rs`의 `JumpStreamDecoder`와 `read_long_header`·`is_v1_initial_shaped`·`answers_gate` — 첫 바이트가 청크 크기(1~64)를 고른다 (ADR-0056 결정 4·8) | `docs/design/protocol.md` §21 |
 | `parse_invite_code` | Crockford Base32 invite code 디코드 |  |
 | `parse_forward_spec` | `-L`/`-R` grammar (`[bind:]listen_port:host:host_port`) | 구 "문자열 파서류" |
 | `sanitize_peer_text` | 화면에 뿌릴 peer 문자열의 제어문자 제거 |  |
@@ -204,7 +205,7 @@ cargo-fuzz 타깃 **27종**이 `fuzz/fuzz_targets/`에 있다(`fuzz/Cargo.toml`�
 
 ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 평가기 property" 행이 그 자리다). action 어휘가 PRD §9의 닫힌 12종(`Action::ALL`)이고 wildcard가 trailing `.*`만 허용되도록 정해져 있으므로(`docs/design/architecture.md` §6), `session.control.escalate` 같은 가상의 깊은 이름 문제는 애초에 발생하지 않는다 — 로더가 `Action::ALL`의 어느 것에도 매칭되지 않는 패턴을 로드 시점 `CONFIG_ERROR`로 거부한다. property로 직접 표현할 질문은: `session.*`가 `session.control`에 매칭되는가? `forward.*`를 가진 정책에서도 `forward.socks`는 여전히 deny인가(항상-deny 게이트가 wildcard 매칭보다 먼저 적용)? `user:dave`가 `user:dave2`에 매칭되지 않는가?
 
-Corpus는 checked-in하고, 그중 `broker_ops`는 일반 유닛 테스트로 전 플랫폼에서 상시 replay된다(`crates/qsh-core/tests/it/broker_ops_corpus.rs`). 나머지 타깃 26종의 상시 replay는 선언일 뿐이고 현재는 `fuzz-smoke.yml`의 짧은 결정적 스모크가 그 자리를 맡는다. fuzzing이 돌지 않는 동안에도 발견된 crash는 seed로 고정된다. 공개 beta 전 목표는 타깃당 누적 72시간과 OSS-Fuzz 제출이다(`fuzz/oss-fuzz/README.md`).
+Corpus는 checked-in하고, 그중 `broker_ops`는 일반 유닛 테스트로 전 플랫폼에서 상시 replay된다(`crates/qsh-core/tests/it/broker_ops_corpus.rs`). 나머지 타깃 27종의 상시 replay는 선언일 뿐이고 현재는 `fuzz-smoke.yml`의 짧은 결정적 스모크가 그 자리를 맡는다. fuzzing이 돌지 않는 동안에도 발견된 crash는 seed로 고정된다. 공개 beta 전 목표는 타깃당 누적 72시간과 OSS-Fuzz 제출이다(`fuzz/oss-fuzz/README.md`).
 
 ## L9/L10 — Soak·Perf
 
