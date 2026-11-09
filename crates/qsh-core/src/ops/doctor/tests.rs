@@ -71,6 +71,8 @@ fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
         username: None,
         bindv6only_probe: never_v6_only,
         task_reader: &UnreadableTaskScheduler,
+        local_agent: None,
+        agent_runtime_dir: None,
     }
 }
 
@@ -661,6 +663,8 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
         username: None,
         bindv6only_probe: never_v6_only,
         task_reader: &UnreadableTaskScheduler,
+        local_agent: None,
+        agent_runtime_dir: None,
     };
 
     let data = ops
@@ -789,6 +793,8 @@ fn doctor_wires_the_path_shadow_finding_into_the_full_report_deterministically()
         username: None,
         bindv6only_probe: never_v6_only,
         task_reader: &UnreadableTaskScheduler,
+        local_agent: None,
+        agent_runtime_dir: None,
     };
 
     let data = ops
@@ -3570,4 +3576,58 @@ fn echo_finding_needs_screen_without_echo_and_prediction_wanted() {
         raised(false, false, true).is_none(),
         "screen_sync_unsupported covers it"
     );
+}
+
+// -----------------------------------------------------------------
+// agent_unreachable / agent_dir_unusable (ADR-0055 decision 19).
+// -----------------------------------------------------------------
+
+/// `[agent].forward = "yes"` and an ssh-agent that does not answer is one
+/// `warn`; an agent that answers, or `"no"`, is silence.
+#[test]
+fn agent_unreachable_needs_forward_yes_and_a_silent_agent() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let mut config = Config::default();
+    let silent = DoctorEnvironment {
+        local_agent: Some(false),
+        ..minimal_env(&keystore)
+    };
+    // Forwarding is off: whatever the probe says, nothing is reported.
+    assert!(doctor_agent_findings(&config, &silent).is_empty());
+    config.agent.forward = Some(crate::config::AgentForwardMode::Yes);
+    let findings = doctor_agent_findings(&config, &silent);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].code, "agent_unreachable");
+    assert_eq!(findings[0].status, "warn");
+    assert!(findings[0].remedy.as_deref().unwrap().contains("ssh-agent"));
+    let answering = DoctorEnvironment {
+        local_agent: Some(true),
+        ..minimal_env(&keystore)
+    };
+    assert!(doctor_agent_findings(&config, &answering).is_empty());
+    // Not probed (`doctor_with_host_state`): no verdict.
+    assert!(doctor_agent_findings(&config, &minimal_env(&keystore)).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn agent_dir_unusable_reports_a_loose_agent_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let runtime = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let env = DoctorEnvironment {
+        agent_runtime_dir: Some(runtime.path()),
+        ..minimal_env(&keystore)
+    };
+    let config = Config::default();
+    assert!(doctor_agent_findings(&config, &env).is_empty());
+
+    let agent = runtime.path().join("agent");
+    std::fs::create_dir(&agent).unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let findings = doctor_agent_findings(&config, &env);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].code, "agent_dir_unusable");
+    assert_eq!(findings[0].status, "warn");
 }

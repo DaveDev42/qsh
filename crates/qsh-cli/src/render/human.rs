@@ -1581,6 +1581,35 @@ pub fn print_notice(line: &str) -> io::Result<()> {
     writeln!(stderr, "qsh: {}", sanitize(line))
 }
 
+/// The stderr line for a host's answer to `-A` (ADR-0055 decisions 9, 16
+/// and 19). `None` when forwarding works or was not asked for. Core decides
+/// the word; this only words it.
+pub fn agent_note(host: &str, outcome: Option<&str>) -> Option<String> {
+    let host = sanitize(host);
+    match outcome? {
+        "denied" => Some(format!("agent forwarding to {host} was denied")),
+        "unavailable" => Some(format!(
+            "agent forwarding to {host} is unavailable: the host could not create the agent socket"
+        )),
+        "no_socket" => Some(format!(
+            "agent forwarding to {host} has no effect here: the session was opened without -A, \
+             so it has no agent socket (open it with `qsh session open -A`)"
+        )),
+        "unsupported" => Some(format!(
+            "agent forwarding to {host} is not supported: the host or this route does not offer it"
+        )),
+        _ => None,
+    }
+}
+
+/// Print [`agent_note`] to stderr, when there is one.
+pub fn print_agent_note(host: &str, outcome: Option<&str>) -> io::Result<()> {
+    match agent_note(host, outcome) {
+        Some(line) => print_notice(&line),
+        None => Ok(()),
+    }
+}
+
 /// Print the outcome of `qsh service install` (`docs/CLI.md` §6.18). Zero
 /// logic — `manager`/`mode`/`path` plus `created` in words, then one line
 /// for what `activation` says (ADR-0032 decisions 4 and 18; ADR-0051 decision

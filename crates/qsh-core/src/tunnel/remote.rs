@@ -696,8 +696,20 @@ impl RemoteForwardAcceptor {
     /// `qsh-cli` `tunnel_e2e` L5 suite panicking with "no reactor
     /// running").
     pub async fn spawn(conn: qsh_transport::Connection) -> Self {
+        Self::spawn_with_agent(conn, None).await
+    }
+
+    /// [`Self::spawn`] whose dispatcher also serves the host-opened `AGENT`
+    /// streams of `agent` (ADR-0055 decision 13). It is the same accept
+    /// loop: a second loop on one connection would steal the first one's
+    /// streams. With `None` an `AGENT` stream is reset like any other
+    /// unexpected kind.
+    pub async fn spawn_with_agent(
+        conn: qsh_transport::Connection,
+        agent: Option<crate::agent::AgentDispatch>,
+    ) -> Self {
         let table: RemoteForwardTable = Arc::new(Mutex::new(HashMap::new()));
-        let task = tokio::spawn(dispatch_remote_forwards(conn, Arc::clone(&table)));
+        let task = tokio::spawn(dispatch_remote_forwards(conn, Arc::clone(&table), agent));
         Self {
             table,
             dispatch: AcceptDispatch::Direct { task },
@@ -874,7 +886,11 @@ impl Drop for RemoteForwardAcceptor {
 /// transient-vs-fatal table to consult here the way
 /// [`crate::tunnel::local::accept_disposition`] gives the TCP accept
 /// loops; any error ends the dispatcher.
-async fn dispatch_remote_forwards(conn: qsh_transport::Connection, table: RemoteForwardTable) {
+async fn dispatch_remote_forwards(
+    conn: qsh_transport::Connection,
+    table: RemoteForwardTable,
+    agent: Option<crate::agent::AgentDispatch>,
+) {
     let mut tasks = DrainSplicesOnDrop(JoinSet::new());
     loop {
         tokio::select! {
@@ -896,8 +912,9 @@ async fn dispatch_remote_forwards(conn: qsh_transport::Connection, table: Remote
                 };
                 let table = Arc::clone(&table);
                 let conn_handle = conn.clone();
+                let agent = agent.clone();
                 tasks.0.spawn(async move {
-                    handle_accepted_stream(send, recv, &table, &conn_handle).await;
+                    handle_accepted_stream(send, recv, &table, &conn_handle, agent.as_ref()).await;
                 });
             }
             Some(joined) = tasks.0.join_next(), if !tasks.0.is_empty() => {
@@ -928,6 +945,7 @@ async fn handle_accepted_stream(
     recv: qsh_transport::RecvStream,
     table: &Mutex<HashMap<String, (String, u16)>>,
     conn: &qsh_transport::Connection,
+    agent: Option<&crate::agent::AgentDispatch>,
 ) {
     let mut stream = qsh_transport::FramedStream::data(send, recv);
     let header: StreamHeader = match tokio::time::timeout(
@@ -943,6 +961,17 @@ async fn handle_accepted_stream(
             return;
         }
     };
+    if header.stream_kind() == Some(StreamKind::Agent)
+        && let Some(agent) = agent
+    {
+        // The dispatcher is per connection and so is the channel table
+        // behind it: this is the only door to the local agent.
+        let (send, recv) = stream.split();
+        let (recv, residue) = recv.into_raw();
+        crate::agent::serve_agent_stream(send.into_raw(), recv, residue, &header.ticket, agent)
+            .await;
+        return;
+    }
     if header.stream_kind() != Some(StreamKind::TcpAccepted) {
         tracing::debug!(
             kind = header.kind,
@@ -1479,3 +1508,14 @@ async fn handle_reverse_claim(
 
 #[cfg(test)]
 mod tests;
+
+/// Run a dispatcher on `conn` that serves only `AGENT` streams: the exec and
+/// recovery paths have no `-R` table but still need the one accept loop.
+/// The task ends when the connection does.
+pub(crate) fn spawn_agent_dispatcher(
+    conn: qsh_transport::Connection,
+    agent: crate::agent::AgentDispatch,
+) -> tokio::task::JoinHandle<()> {
+    let table: RemoteForwardTable = Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn(dispatch_remote_forwards(conn, table, Some(agent)))
+}

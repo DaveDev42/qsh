@@ -55,6 +55,7 @@ fn exec_run_data_matches_documented_shape() {
         remote_exit_code: 0,
         signal: None,
         duration_ms: 18,
+        agent: None,
     };
     let json = serde_json::to_value(&data).unwrap();
     assert_eq!(
@@ -330,6 +331,7 @@ fn session_open_data_matches_documented_shape() {
     let d = SessionOpenData {
         session_ref: "personal-mac/01K0SESSION".into(),
         initial_sequence: 0,
+        agent: None,
     };
     assert_eq!(
         serde_json::to_value(&d).unwrap(),
@@ -1402,5 +1404,39 @@ fn acl_matching_rule_paths_omit_when_absent_and_round_trip() {
     assert_eq!(
         serde_json::from_value::<AclMatchingRule>(json).unwrap(),
         missing
+    );
+}
+
+/// ADR-0055 decision 19: `agent` is additive. Without `-A` the key is
+/// absent, so every earlier payload reads and writes as it did.
+#[test]
+fn the_agent_field_is_absent_without_dash_a_and_a_word_with_it() {
+    let open = SessionOpenData {
+        session_ref: "box/01K0".into(),
+        initial_sequence: 0,
+        agent: Some("forwarded".into()),
+    };
+    let json = serde_json::to_value(&open).unwrap();
+    assert_eq!(json["agent"], "forwarded");
+    let old: SessionOpenData = serde_json::from_value(
+        serde_json::json!({"session_ref": "box/01K0", "initial_sequence": 0}),
+    )
+    .unwrap();
+    assert_eq!(old.agent, None);
+
+    let exec: ExecRunData = serde_json::from_value(serde_json::json!({
+        "stdout_b64": "", "stderr_b64": "", "remote_exit_code": 0,
+        "signal": null, "duration_ms": 1, "agent": "denied"
+    }))
+    .unwrap();
+    assert_eq!(exec.agent.as_deref(), Some("denied"));
+    assert!(
+        serde_json::to_value(ExecRunData {
+            agent: None,
+            ..exec
+        })
+        .unwrap()
+        .get("agent")
+        .is_none()
     );
 }

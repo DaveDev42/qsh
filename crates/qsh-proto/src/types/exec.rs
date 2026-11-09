@@ -49,4 +49,9 @@ pub struct ExecRunData {
     pub signal: Option<String>,
     /// Wall-clock duration of the remote execution in milliseconds.
     pub duration_ms: u64,
+    /// The host's answer to `-A` (ADR-0055 decision 19): `"forwarded"`,
+    /// `"denied"`, `"unavailable"`, `"no_socket"` or `"unsupported"`.
+    /// Absent when `-A` was not asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }

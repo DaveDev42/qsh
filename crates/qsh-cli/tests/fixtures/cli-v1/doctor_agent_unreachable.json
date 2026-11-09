@@ -1,0 +1,17 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "agent_unreachable",
+        "detail": "[agent].forward is \"yes\", but no ssh-agent answers on this machine. Sessions and commands still open with agent forwarding requested, and a program on the host that asks for a key gets a failure.",
+        "remedy": "Start ssh-agent and ssh-add your key (on Windows, start the ssh-agent service), or check SSH_AUTH_SOCK. To stop forwarding, run `qsh config set agent.forward no`.",
+        "status": "warn"
+      }
+    ],
+    "overall": "warn"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

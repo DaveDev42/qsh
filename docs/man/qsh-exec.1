@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-exec \- Run a command on a pinned host and return its output
 .SH SYNOPSIS
-\fBqsh exec\fR [\fB\-\-json\fR] [\fB\-\-timeout\fR] [\fB\-\-env\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> <\fICOMMAND\fR> 
+\fBqsh exec\fR [\fB\-\-json\fR] [\fB\-\-timeout\fR] [\fB\-\-env\fR] [\fB\-\-jsonl\fR] [\fB\-A \fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-a \fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> <\fICOMMAND\fR> 
 .SH DESCRIPTION
 Run a command on a pinned host and return its output.
 .PP
@@ -23,8 +23,14 @@ Extra environment variable for the remote command (`NAME=VALUE`). Repeatable
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
 .TP
+\fB\-A\fR
+Forward the local ssh\-agent to the host for this command (ADR\-0055). Only listing keys and signing reach your agent. With `\-a`, the last one given wins
+.TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-a\fR
+Do not forward the agent for this command, even when `[agent].forward = "yes"`
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr

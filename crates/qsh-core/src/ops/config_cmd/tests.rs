@@ -434,6 +434,9 @@ fn every_field_populated() -> Config {
         punch: crate::config::PunchConfig {
             mode: Some(crate::punch::PunchMode::Auto),
         },
+        agent: crate::config::AgentConfig {
+            forward: Some(crate::config::AgentForwardMode::No),
+        },
     }
 }
 
@@ -445,6 +448,7 @@ fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
         "interactive.screen_sync" => "on".into(),
         "interactive.predict" => "always".into(),
         "interactive.status_line" => "off".into(),
+        "agent.forward" => "yes".into(),
         "recovery.probe_interval_ms" => "250".into(),
         "recovery.min_dead_after_ms" => "1000".into(),
         "recovery.strikes" => "3".into(),

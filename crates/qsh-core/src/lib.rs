@@ -82,7 +82,7 @@ pub(crate) mod winproc;
 
 pub use client::linkstatus::LinkStatus;
 pub use client::pathwatch::PathWatchConfig;
-pub use config::{Config, Paths, SshBootstrapMode, SshConfig, now_rfc3339};
+pub use config::{AgentForwardMode, Config, Paths, SshBootstrapMode, SshConfig, now_rfc3339};
 pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};

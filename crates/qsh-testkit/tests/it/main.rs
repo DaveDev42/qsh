@@ -6,6 +6,7 @@ mod acl_registry_audit;
 mod acl_uniformity;
 mod admission;
 mod admission_retry_sever;
+mod agent_client;
 mod agent_wire;
 mod attach_loopback;
 mod bulk_yield;

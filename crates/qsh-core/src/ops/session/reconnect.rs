@@ -318,8 +318,8 @@ async fn local_reattach(
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
             screen: ctx.screen.as_ref().map(|s| s.request()),
-            // Carrying the channel across a recovery is the `-A` step's job
-            // (ADR-0055 decision 9); no flag sets one yet.
+            // The reverse route has no QUIC connection of ours to host the
+            // `AGENT` dispatcher; its agent forwarding is a later step.
             agent_channel: Vec::new(),
         })
         .await

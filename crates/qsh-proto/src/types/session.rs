@@ -93,6 +93,13 @@ pub struct SessionOpenData {
     pub session_ref: String,
     /// Cumulative output offset at creation — `0` for a fresh session.
     pub initial_sequence: u64,
+    /// The host's answer to `-A` (ADR-0055 decision 19): `"forwarded"`,
+    /// `"denied"`, `"unavailable"`, `"no_socket"` or `"unsupported"` (the
+    /// host does not advertise `agent.v1`). Absent when `-A` was not asked
+    /// for, so a request without it serializes as it always did. An open
+    /// string: a reader treats a word it does not know as "not forwarded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Request for the stream operation `session.attach` (`docs/CLI.md` §7.1).

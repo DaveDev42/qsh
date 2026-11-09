@@ -105,6 +105,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "doctor_screen_echo.json",
     "doctor_punch.json",
     "doctor_punch_failed.json",
+    "doctor_agent_unreachable.json",
+    "session.open.agent.json",
+    "exec.run.agent_denied.json",
     "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
@@ -1731,6 +1734,87 @@ fn golden_doctor_transport_fixture() {
     check(
         "doctor_transport.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `doctor.run` with `agent_unreachable` (`docs/CLI.md` §6.17, ADR-0055
+/// decision 19). The finding is the production one; a drift in its code,
+/// status or text is a contract change.
+#[test]
+fn golden_doctor_agent_unreachable_fixture() {
+    use qsh_core::doctor::AGENT_UNREACHABLE;
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding};
+
+    let data = DoctorData {
+        overall: "warn".to_string(),
+        findings: vec![DoctorFinding {
+            code: AGENT_UNREACHABLE.code.to_string(),
+            status: "warn".to_string(),
+            detail: AGENT_UNREACHABLE.message.to_string(),
+            remedy: Some(AGENT_UNREACHABLE.remedy.to_string()),
+        }],
+        transport: None,
+        punch: None,
+    };
+    assert!(qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&data.findings[0].code.as_str()));
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor_agent_unreachable.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
+}
+
+/// `session.open` and `exec.run` with the additive `agent` field
+/// (ADR-0055 decision 19): the host's answer to `-A`. Without `-A` the key
+/// is absent, which is why `session.open.json` and `exec.run.json` did not
+/// change.
+#[test]
+fn golden_agent_result_fixtures() {
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, ExecRunData, SessionOpenData};
+
+    let envelope = |command: &str, data: serde_json::Value| CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: command.to_string(),
+        ok: true,
+        data: Some(data),
+        error: None,
+    };
+    let opened = SessionOpenData {
+        session_ref: "box/01K0SESSION".to_string(),
+        initial_sequence: 0,
+        agent: Some("forwarded".to_string()),
+    };
+    check(
+        "session.open.agent.json",
+        serde_json::to_value(envelope(
+            "session.open",
+            serde_json::to_value(&opened).expect("encode data"),
+        ))
+        .expect("encode envelope"),
+    );
+    let ran = ExecRunData {
+        stdout_b64: String::new(),
+        stderr_b64: String::new(),
+        remote_exit_code: 0,
+        signal: None,
+        duration_ms: 12,
+        agent: Some("denied".to_string()),
+    };
+    check(
+        "exec.run.agent_denied.json",
+        serde_json::to_value(envelope(
+            "exec.run",
+            serde_json::to_value(&ran).expect("encode data"),
+        ))
+        .expect("encode envelope"),
     );
 }
 
