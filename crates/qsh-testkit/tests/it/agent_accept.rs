@@ -17,6 +17,11 @@
 //! service is off skips. A missing tool skips with a message unless
 //! `QSH_REQUIRE_SSH_AGENT=1`, which CI sets and which turns a skip into a
 //! failure. Nothing here prints a key, a signature or an agent message.
+//!
+//! The two Windows-service tests share one agent per machine, so nextest runs
+//! them one at a time (`shared-ssh-agent` in `.config/nextest.toml`): the
+//! service has no per-test isolation, and a key another test adds mid-run
+//! would show up in this file's before/after list comparison.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

@@ -383,9 +383,13 @@ async fn ssh_auth_sock_is_pinned_by_the_host() {
             && stdout.ends_with(".sock"),
         "SSH_AUTH_SOCK was {stdout:?}"
     );
+    // The child must see the qsh pipe and nothing else: a Win32-OpenSSH tool
+    // with no `SSH_AUTH_SOCK` would fall back to the host's own default pipe.
     #[cfg(windows)]
     assert!(
-        stdout.starts_with(r"\\.\pipe\qsh-agent-"),
+        stdout
+            .strip_prefix(r"\\.\pipe\qsh-agent-")
+            .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())),
         "SSH_AUTH_SOCK was {stdout:?}"
     );
     s.close();
