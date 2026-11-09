@@ -8,8 +8,9 @@ use serde_json::Value;
 
 const SAMPLE_FINGERPRINT: &str = "sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
-/// A client whose pin `c` dials a closed loopback port and carries
-/// `jump = ["pj"]`, where `pj` is not a pin.
+/// A client whose pin `c` carries an address with port 0 (a direct
+/// dial fails at once, where a closed UDP port would wait out the handshake
+/// timeout) and `jump = ["pj"]`, where `pj` is not a pin.
 fn client() -> Sandbox {
     let sandbox = Sandbox::initialized();
     std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
@@ -19,7 +20,7 @@ fn client() -> Sandbox {
             "[[peer]]\n\
              name = \"c\"\n\
              fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
-             address = \"127.0.0.1:1\"\n\
+             address = \"127.0.0.1:0\"\n\
              added_at = \"2026-11-09T00:00:00Z\"\n\
              role = \"full\"\n\
              jump = [\"pj\"]\n"
@@ -82,7 +83,7 @@ fn jump_precedence_table() {
         },
         Row {
             name: "cp -J beats the pin",
-            args: &["cp", "-J", "a", "--json", "/dev/null", "c:/tmp/x"],
+            args: &["cp", "-J", "a", "--json", "/dev/null", "[c]:/tmp/x"],
             hop: Some("a"),
         },
         Row {

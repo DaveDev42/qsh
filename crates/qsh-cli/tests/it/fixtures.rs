@@ -133,6 +133,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.list.jump.json",
     "doctor_jump_stream_carrier.json",
     "pair.ssh.jump.json",
+    "pair.ssh.jump.refused.json",
     "trust.allow.json",
     "trust.allow.unchanged.json",
     "trust.deny.json",
@@ -1408,9 +1409,10 @@ fn golden_doctor_jump_stream_carrier_fixture() {
 
 /// `pair ssh` when `ssh -G` reports a `ProxyJump` whose hop is already a qsh
 /// pin with an address (ADR-0056 decision 21): the target's pin stores the
-/// chain and `data.jump` names it. The hop here points at a closed port, so
-/// the confirming dial does not succeed (`verified: false`) while the pins
-/// stand.
+/// chain and `data.jump` names it. The hop's address has port 0, which the
+/// transport refuses at once (a closed port would wait out the 10 s
+/// handshake), so the confirming dial does not succeed (`verified: false`)
+/// while the pins stand.
 #[test]
 fn golden_pair_ssh_jump_fixture() {
     use crate::ssh_bootstrap::pair::{World, other_fingerprint, store};
@@ -1418,7 +1420,7 @@ fn golden_pair_ssh_jump_fixture() {
     let mut w = World::new();
     w.fake.g_output(b"hostname box\nproxyjump hop\n");
     w.client
-        .trust_add("hop", Some("127.0.0.1:1"), &other_fingerprint(5));
+        .trust_add("hop", Some("127.0.0.1:0"), &other_fingerprint(5));
     let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
     assert_eq!(code, 0, "{got}");
     assert_eq!(got["data"]["jump"], serde_json::json!(["hop"]), "{got}");
@@ -1431,7 +1433,27 @@ fn golden_pair_ssh_jump_fixture() {
     let store = store(&w.client);
     let pin = store.find("box").expect("box pin");
     assert_eq!(pin.jump, ["hop"]);
-    check("pair.ssh.jump.json", got);
+    // `pair.ssh.jump.json` was recorded against a closed port, whose dial
+    // waits out the 10 s handshake; the fast port-0 hop gives a different
+    // `verify_error.message` only. The old fixture stays byte-for-byte and is
+    // compared with that one human-text field set aside; the new one pins
+    // the current output whole.
+    let without_message = |mut v: Value| {
+        if let Some(obj) = v
+            .pointer_mut("/data/verify_error")
+            .and_then(Value::as_object_mut)
+        {
+            obj.remove("message");
+        }
+        v
+    };
+    let old = fixtures::load_cli_v1("pair.ssh.jump.json");
+    assert_eq!(
+        pretty(&without_message(fixtures::normalize(got.clone()))),
+        pretty(&without_message(old)),
+        "pair.ssh.jump.json differs beyond verify_error.message"
+    );
+    check("pair.ssh.jump.refused.json", got);
 }
 
 /// `qsh config get|set|unset|list` (ADR-0051 결정 10, `docs/CLI.md` §6.23):
