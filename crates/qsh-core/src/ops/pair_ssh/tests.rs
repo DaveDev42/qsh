@@ -191,6 +191,7 @@ fn data(remote: PairSshRemote) -> PairSshData {
             scope: None,
             source: None,
             remote_qsh: None,
+            rendezvous: Vec::new(),
         },
         created: true,
         remote,

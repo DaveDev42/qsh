@@ -25,6 +25,7 @@
 
 pub mod addrs;
 mod client;
+mod hint;
 mod initiator;
 pub mod limits;
 pub mod log;
@@ -40,6 +41,7 @@ pub use addrs::{
     FixedAddrs, LocalAddrs, RouteAddrs, host_candidate_messages, host_candidates, is_public,
 };
 pub(crate) use client::{PunchWin, attempt};
+pub use hint::HintLearner;
 pub use initiator::{Adopted, GiveUp, InitiatorParams, run_initiator};
 pub use limits::{AttemptLimiter, LimitHit};
 pub use log::TARGET;
@@ -91,5 +93,7 @@ pub const PUNCH_BUDGET: Duration = PUNCH_SIGNAL_BUDGET.saturating_add(PUNCH_WIND
 /// and SNI is off.
 pub const PUNCH_SERVER_NAME: &str = "qsh";
 
+#[cfg(test)]
+mod hint_tests;
 #[cfg(test)]
 mod tests;

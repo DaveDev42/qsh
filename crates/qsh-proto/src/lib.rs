@@ -81,8 +81,9 @@ pub use types::{
     SetupRunData, SetupRunReq, SetupStatus, SetupStep, SetupStepId, SshPreviewEntry,
     SshPreviewStatus, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData,
     TrustAddReq, TrustAllowReq, TrustDenyReq, TrustGrantData, TrustInviteData, TrustInviteReq,
-    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData,
-    TrustSetRoleReq, TrustSshPreviewData, TrustSshPreviewReq, Tunnel, TunnelCloseData,
-    TunnelCloseReq, TunnelDynamicReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq,
+    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustRenameReq,
+    TrustSetRendezvousData, TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq,
+    TrustSshPreviewData, TrustSshPreviewReq, Tunnel, TunnelCloseData, TunnelCloseReq,
+    TunnelDynamicReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq,
     UnreachableHost, VersionData,
 };

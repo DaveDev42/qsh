@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-identity\-export \- Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md` §6.11, ADR\-0013). Without `\-\-out`, the PEM is the only thing this command writes to stdout, so it pipes directly into `qsh trust add \-\-cert\-file \-` on another host
 .SH SYNOPSIS
-\fBqsh identity export\fR [\fB\-\-json\fR] [\fB\-\-out\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh identity export\fR [\fB\-\-json\fR] [\fB\-\-out\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md` §6.11, ADR\-0013). Without `\-\-out`, the PEM is the only thing this command writes to stdout, so it pipes directly into `qsh trust add \-\-cert\-file \-` on another host
 .SH OPTIONS
@@ -32,6 +32,12 @@ When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answ
 .TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
+.TP
+\fB\-\-no\-punch\fR
+Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-rendezvous\fR \fI<PEER>\fR
+Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

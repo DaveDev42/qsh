@@ -431,6 +431,9 @@ fn every_field_populated() -> Config {
             predict: Some(crate::ops::Predict::Auto),
             status_line: Some(crate::ops::StatusLine::On),
         },
+        punch: crate::config::PunchConfig {
+            mode: Some(crate::punch::PunchMode::Auto),
+        },
     }
 }
 
@@ -690,5 +693,39 @@ fn predict_and_status_line_are_flag_then_key_then_default() {
         ops.predict_mode(Some(Predict::Never)).unwrap(),
         Predict::Never,
         "a flag needs no config at all"
+    );
+}
+
+/// ADR-0054 decision 19: `[punch].mode` is `auto` unless set to `off`, the
+/// flag wins, a value outside the set is refused by `config set` and is a
+/// load error when written by hand, and the key is read at start by the
+/// daemons (`applies_from`).
+#[test]
+fn punch_mode_is_a_validated_key() {
+    use crate::punch::{ClientPunch, PunchMode};
+    let (_g, ops) = temp_ops();
+    assert_eq!(ops.punch_mode().unwrap(), PunchMode::Auto);
+
+    let data = set(&ops, "punch.mode", "off").unwrap();
+    assert_eq!(data.applies_from.as_deref(), Some("next_start"));
+    assert_eq!(ops.punch_mode().unwrap(), PunchMode::Off);
+    set(&ops, "punch.mode", "auto").unwrap();
+    assert_eq!(ops.punch_mode().unwrap(), PunchMode::Auto);
+
+    assert!(set(&ops, "punch.mode", "sometimes").is_err());
+    assert!(set(&ops, "punch.mode", "on").is_err());
+
+    // `--no-punch` wins over the key.
+    set(&ops, "punch.mode", "auto").unwrap();
+    let flagged = ops.clone().with_punch(ClientPunch {
+        mode: PunchMode::Off,
+        ..ClientPunch::default()
+    });
+    assert_eq!(flagged.punch_mode().unwrap(), PunchMode::Off);
+
+    std::fs::write(ops.paths().config_file(), "[punch]\nmode = \"sometimes\"\n").unwrap();
+    assert_eq!(
+        ops.punch_mode().unwrap_err().code,
+        qsh_proto::ErrorCode::ConfigError
     );
 }

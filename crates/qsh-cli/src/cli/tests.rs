@@ -1303,3 +1303,35 @@ fn predict_and_status_line_flags_parse_on_both_interactive_forms() {
         other => panic!("expected attach, got {other:?}"),
     }
 }
+
+/// ADR-0054 decisions 4, 5, 19: `--no-punch` and `--rendezvous <peer>` are
+/// global, `--rendezvous` takes one name and not with `--no-punch`, and
+/// `trust rendezvous` takes a name with peers or `--clear`.
+#[test]
+fn punch_flags_and_trust_rendezvous_parse() {
+    let cli = Cli::try_parse_from(["qsh", "exec", "box", "--no-punch", "--", "true"]).unwrap();
+    assert!(cli.no_punch);
+    assert_eq!(cli.rendezvous, None);
+    let cli =
+        Cli::try_parse_from(["qsh", "--rendezvous", "relay", "exec", "box", "--", "true"]).unwrap();
+    assert_eq!(cli.rendezvous.as_deref(), Some("relay"));
+    assert!(
+        Cli::try_parse_from(["qsh", "--no-punch", "--rendezvous", "r", "exec", "box"]).is_err()
+    );
+
+    let cli = Cli::try_parse_from(["qsh", "trust", "rendezvous", "box", "r1", "r2"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Trust(TrustCmd::Rendezvous { name, peers, clear }) => {
+            assert_eq!(name, "box");
+            assert_eq!(peers, ["r1", "r2"]);
+            assert!(!clear);
+        }
+        other => panic!("expected trust rendezvous, got {other:?}"),
+    }
+    let cli = Cli::try_parse_from(["qsh", "trust", "rendezvous", "box", "--clear"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Trust(TrustCmd::Rendezvous { clear: true, .. })
+    ));
+    assert!(Cli::try_parse_from(["qsh", "trust", "rendezvous", "box", "r1", "--clear"]).is_err());
+}

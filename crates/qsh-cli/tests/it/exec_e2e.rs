@@ -227,3 +227,32 @@ fn serve_keeps_stdout_empty_and_audits_structurally() {
         output.stderr
     );
 }
+
+/// ADR-0054 decision 5: after the session is up the client asks the host for
+/// rendezvous hints. A plain `qsh serve` has no rendezvous to tell and
+/// answers `UNSUPPORTED`; that must change neither the exit code nor the
+/// pure-JSON stdout, nor leave a hint behind.
+#[test]
+fn a_host_that_cannot_answer_the_hint_query_does_not_disturb_the_command() {
+    let fleet = Fleet::start();
+
+    let args = [
+        "exec",
+        HOST_ALIAS,
+        "--json",
+        "--",
+        "sh",
+        "-c",
+        "echo hi; exit 3",
+    ];
+    let output = fleet.client.qsh(&args);
+
+    assert_eq!(exit_code(&output), 3);
+    let value = sole_envelope(&output.stdout, &args);
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["data"]["stdout_b64"], BASE64.encode("hi\n"));
+    let (_, listed) = fleet.client.json(&["trust", "list", "--json"]);
+    for peer in listed["data"]["peers"].as_array().unwrap() {
+        assert!(peer.get("rendezvous").is_none(), "{listed}");
+    }
+}

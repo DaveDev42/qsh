@@ -488,6 +488,20 @@ pub struct Config {
     /// (`--screen-sync`, `--predict`, `--status-line`; ADR-0052
     /// decision 15, ADR-0053 decisions 10 and 11).
     pub interactive: InteractiveConfig,
+    /// `[punch]` — hole punching (ADR-0054 decision 19).
+    pub punch: PunchConfig,
+}
+
+/// `[punch]` section (ADR-0054 decision 19).
+///
+/// A client command reads it each time it runs; `qsh listen` and `qsh serve
+/// --to` read it once when they start. `--no-punch` wins over the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PunchConfig {
+    /// `"auto"` or `"off"`. Unset is `"auto"`. An unknown value is a
+    /// `CONFIG_ERROR` at load.
+    pub mode: Option<crate::punch::PunchMode>,
 }
 
 /// `[interactive]` section (ADR-0052 decision 15).

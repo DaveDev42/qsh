@@ -13,7 +13,8 @@ use crate::ops::OpError;
 use super::{LocalAddrs, PUNCH_HEAD_START, RouteAddrs};
 
 /// `[punch].mode` (ADR-0054 decision 19).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PunchMode {
     /// Punch when there is a rendezvous candidate and the direct route does
     /// not stand quickly.
@@ -21,6 +22,16 @@ pub enum PunchMode {
     Auto,
     /// Never start a punch.
     Off,
+}
+
+impl PunchMode {
+    /// The spelling the flag and the config key use.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
 }
 
 /// Where a fresh endpoint's UDP socket comes from. Production leaves this
@@ -34,11 +45,15 @@ pub type SocketFactory = Arc<dyn Fn() -> SocketSource + Send + Sync>;
 pub struct ClientPunch {
     /// `auto` or `off`.
     pub mode: PunchMode,
-    /// Rendezvous peers by pin name, in the order to try them. This is
-    /// `--rendezvous` (which, when given, replaces the pin's own list).
-    /// Empty means no rendezvous is configured and the route is the direct
-    /// dial alone.
+    /// `--rendezvous`: pin names to use as the rendezvous for this command,
+    /// in the order to try them. When given, it replaces the target pin's
+    /// own `rendezvous` list (ADR-0054 decision 4). Empty means the pin's
+    /// list is used; with neither, the route is the direct dial alone.
     pub rendezvous: Vec<String>,
+    /// Whether a connection asks its host for rendezvous hints and stores
+    /// them on the pin (decision 5). The `qsh` binary turns it on; library
+    /// callers get no extra traffic unless they ask.
+    pub learn_hints: bool,
     /// How long the direct dial runs alone first.
     pub head_start: Duration,
     /// Where the local host candidates come from.
@@ -53,6 +68,7 @@ impl Default for ClientPunch {
         Self {
             mode: PunchMode::Auto,
             rendezvous: Vec::new(),
+            learn_hints: false,
             head_start: PUNCH_HEAD_START,
             local_addrs: Arc::new(RouteAddrs),
             socket: None,
@@ -65,6 +81,7 @@ impl std::fmt::Debug for ClientPunch {
         f.debug_struct("ClientPunch")
             .field("mode", &self.mode)
             .field("rendezvous", &self.rendezvous)
+            .field("learn_hints", &self.learn_hints)
             .field("head_start", &self.head_start)
             .field("socket", &self.socket.is_some())
             .finish_non_exhaustive()
@@ -236,12 +253,13 @@ impl std::fmt::Debug for PunchPlan {
 }
 
 impl PunchPlan {
-    /// Builds a plan; `None` when punching is off or no rendezvous name was
-    /// asked for.
+    /// Builds a plan; `None` when punching is off. `first_name` is what a
+    /// failure names when no candidate is usable.
     pub(crate) fn new(
         env: &ClientPunch,
         target: Fingerprint,
         rendezvous: Vec<RendezvousPeer>,
+        first_name: String,
         device_name: String,
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
@@ -249,7 +267,6 @@ impl PunchPlan {
         if env.mode == PunchMode::Off {
             return None;
         }
-        let first_name = env.rendezvous.first()?.clone();
         Some(Arc::new(Self {
             env: env.clone(),
             target,

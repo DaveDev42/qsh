@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-allow \- Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
 .SH SYNOPSIS
-\fBqsh trust allow\fR [\fB\-\-json\fR] [\fB\-\-path\fR] [\fB\-\-jsonl\fR] [\fB\-\-scope\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
+\fBqsh trust allow\fR [\fB\-\-json\fR] [\fB\-\-path\fR] [\fB\-\-jsonl\fR] [\fB\-\-scope\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> <\fIACTION\fR> 
 .SH DESCRIPTION
 Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it
 .SH OPTIONS
@@ -35,6 +35,12 @@ When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answ
 .TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
+.TP
+\fB\-\-no\-punch\fR
+Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-rendezvous\fR \fI<PEER>\fR
+Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

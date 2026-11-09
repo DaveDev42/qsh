@@ -54,6 +54,18 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with = "install_remote")]
     pub no_install_remote: bool,
 
+    /// Never start a hole punch on this command's behalf, and send no
+    /// `PunchRequest` (`docs/CLI.md` §7, ADR-0054 decision 19). The route is
+    /// the direct dial alone. Wins over `[punch].mode`.
+    #[arg(long, global = true)]
+    pub no_punch: bool,
+
+    /// Use this pinned peer as the rendezvous for hole punching on this
+    /// command, instead of the host's own `rendezvous` hints (`docs/CLI.md`
+    /// §7, ADR-0054 decision 4). Must be pinned with an address. Not stored.
+    #[arg(long, global = true, value_name = "PEER", conflicts_with = "no_punch")]
+    pub rendezvous: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -1398,6 +1410,21 @@ pub enum TrustCmd {
         name: String,
         /// The new role.
         role: String,
+    },
+    /// Set which pinned peers are asked to relay a hole punch to a pinned
+    /// host (`docs/CLI.md` §6.11, ADR-0054 decision 5), most preferred first.
+    /// Each must be pinned with an address; at most four. The list is also
+    /// filled in by itself after a connection to the host. `--clear` empties
+    /// it. Takes effect from the next command.
+    Rendezvous {
+        /// The pinned host the list belongs to.
+        name: String,
+        /// Pinned peers that relay for it.
+        #[arg(num_args = 0.., value_name = "PEER", conflicts_with = "clear")]
+        peers: Vec<String>,
+        /// Empty the list.
+        #[arg(long)]
+        clear: bool,
     },
     /// Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11,
     /// ADR-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin

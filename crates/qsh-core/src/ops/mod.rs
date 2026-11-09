@@ -13,8 +13,9 @@ use qsh_proto::{
     IdentityMoveKeyData, IdentityMoveKeyReq, KeyStoreMode, SchemaData, TrustAcceptData,
     TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustAllowReq,
     TrustDenyReq, TrustGrantData, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRoleData, TrustSetRoleReq,
-    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetRendezvousData,
+    TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData,
+    TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -90,6 +91,9 @@ pub(crate) struct PeerTarget {
     /// How to punch to this host when the direct dial does not stand; `None`
     /// when no rendezvous was asked for or punching is off.
     pub punch: Option<Arc<crate::punch::PunchPlan>>,
+    /// Asks the host for rendezvous hints once its session is up; `None`
+    /// when learning is off (ADR-0054 decision 5).
+    pub learn: Option<Arc<crate::punch::HintLearner>>,
 }
 
 impl PeerTarget {
@@ -128,6 +132,7 @@ pub struct ServeTarget {
 /// identity/trust material `HostRoute` deliberately does not (routing and
 /// display share one decision, `host::resolve_route`, but only one of
 /// their two callers ever needs a private key in hand).
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PeerRoute {
     /// Dial the peer directly over QUIC (forward route).
     Forward(PeerTarget),
@@ -495,6 +500,13 @@ pub struct TrustRenameOp;
 
 impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
+}
+
+/// The `trust.set_rendezvous` operation (`docs/CLI.md` §6.11, ADR-0054 결정 5).
+pub struct TrustSetRendezvousOp;
+
+impl Operation for TrustSetRendezvousOp {
+    const COMMAND: &'static str = "trust.set_rendezvous";
 }
 
 /// The `trust.set_role` operation (`docs/CLI.md` §6.11, ADR-0045 결정 8).
@@ -980,62 +992,146 @@ impl Ops {
                 };
             }
         };
-        let punch = self.punch_plan(host, &identity, &trust);
+        let punch = self.punch_plan(host, &identity, &trust)?;
+        let learn = self.hint_learner(&trust);
         Ok(PeerTarget {
             identity,
             trust,
             address,
             server_name,
             punch,
+            learn,
         })
     }
 
-    /// The punch plan for `host` (ADR-0054 decisions 4 and 16): the target
-    /// is the pin of that name, the rendezvous candidates are the peers
-    /// named in [`ClientPunch::rendezvous`](crate::punch::ClientPunch) that
-    /// are pinned here with an address (at most two are used). `None` when
-    /// punching is off, nothing was asked for, or `host` has no pin: a
+    /// The effective `[punch].mode`: `--no-punch` wins, then the key, then
+    /// `auto` (ADR-0054 decision 19). The key is read only when `--no-punch`
+    /// is absent; an unreadable `config.toml` is `CONFIG_ERROR`.
+    pub fn punch_mode(&self) -> Result<crate::punch::PunchMode, OpError> {
+        use crate::punch::PunchMode;
+        if self.punch.mode == PunchMode::Off {
+            return Ok(PunchMode::Off);
+        }
+        Ok(self.config()?.punch.mode.unwrap_or_default())
+    }
+
+    /// Whether this process may punch at all and where the rendezvous
+    /// candidates come from: `--rendezvous` names when given, else the
+    /// target pin's own hints. Cheap when neither exists.
+    fn punch_wanted(&self, target: &qsh_proto::TrustPeer) -> bool {
+        self.punch.mode != crate::punch::PunchMode::Off
+            && (!self.punch.rendezvous.is_empty() || !target.rendezvous.is_empty())
+    }
+
+    /// The punch plan for `host` (ADR-0054 decisions 4, 5 and 16): the
+    /// target is the pin of that name. The rendezvous candidates are, in
+    /// order, the pins named by `--rendezvous` when it was given (which
+    /// replaces everything else), else the pins whose fingerprints the
+    /// target pin lists in its `rendezvous` hints. A candidate must be
+    /// pinned here with an address; at most two are used.
+    ///
+    /// `Ok(None)` when punching is off, nothing was asked for and the pin
+    /// has no hint, or `host` has no pin: a
     /// punched handshake is checked against that pin and a host without one
-    /// has nothing to check against.
+    /// has nothing to check against. `--rendezvous` naming a peer that is
+    /// not pinned with an address is `HOST_NOT_FOUND`, and `[punch].mode` in
+    /// an unreadable `config.toml` is `CONFIG_ERROR`; both are raised only
+    /// for a host that is about to be dialed with a punch in view.
     pub(crate) fn punch_plan(
         &self,
         host: &str,
         identity: &LoadedIdentity,
         trust: &Arc<SharedTrustStore>,
-    ) -> Option<Arc<crate::punch::PunchPlan>> {
+    ) -> Result<Option<Arc<crate::punch::PunchPlan>>, OpError> {
         use crate::punch::{PunchMode, RendezvousPeer};
-        if self.punch.mode == PunchMode::Off || self.punch.rendezvous.is_empty() {
-            return None;
-        }
         let store = trust.snapshot();
         let key = host::lookup_name(host);
-        let target: Fingerprint = store.find(key)?.fingerprint.parse().ok()?;
-        let rendezvous = self
-            .punch
-            .rendezvous
-            .iter()
-            .filter(|name| name.as_str() != key)
-            .filter_map(|name| {
-                let peer = store.find(name)?;
-                if peer.address.is_empty() {
-                    return None;
-                }
-                Some(RendezvousPeer {
-                    name: peer.name.clone(),
-                    fingerprint: peer.fingerprint.parse().ok()?,
-                    address: peer.address.clone(),
-                })
+        let Some(pin) = store.find(key) else {
+            return Ok(None);
+        };
+        if !self.punch_wanted(pin) {
+            return Ok(None);
+        }
+        if self.punch_mode()? == PunchMode::Off {
+            return Ok(None);
+        }
+        let Ok(target) = pin.fingerprint.parse::<Fingerprint>() else {
+            return Ok(None);
+        };
+        let peer_of = |p: &qsh_proto::TrustPeer| -> Option<RendezvousPeer> {
+            Some(RendezvousPeer {
+                name: p.name.clone(),
+                fingerprint: p.fingerprint.parse().ok()?,
+                address: p.address.clone(),
             })
-            .take(2)
-            .collect();
-        crate::punch::PunchPlan::new(
+        };
+        let (candidates, first_name): (Vec<RendezvousPeer>, String) =
+            if self.punch.rendezvous.is_empty() {
+                let found: Vec<RendezvousPeer> = pin
+                    .rendezvous
+                    .iter()
+                    .filter_map(|text| {
+                        let fp = text.parse::<Fingerprint>().ok()?;
+                        if fp == target {
+                            return None;
+                        }
+                        peer_of(store.find_dialable(&fp)?)
+                    })
+                    .take(2)
+                    .collect();
+                // Hints that name nobody usable any more still make a plan:
+                // the failure then says `no_rendezvous`, with "-" for the
+                // name (the hint is a fingerprint, not a pin name).
+                let first = found
+                    .first()
+                    .map_or_else(|| "-".to_string(), |p| p.name.clone());
+                (found, first)
+            } else {
+                let mut found = Vec::new();
+                for name in self.punch.rendezvous.iter().filter(|n| n.as_str() != key) {
+                    match store.find(name) {
+                        Some(p) if !p.address.is_empty() => found.extend(peer_of(p)),
+                        _ => {
+                            return Err(OpError::new(
+                                ErrorCode::HostNotFound,
+                                format!(
+                                    "--rendezvous {name:?} is not a peer pinned with an address; \
+                                     see `qsh trust list`"
+                                ),
+                            )
+                            .with_retryable(false));
+                        }
+                    }
+                }
+                found.truncate(2);
+                (found, self.punch.rendezvous[0].clone())
+            };
+        Ok(crate::punch::PunchPlan::new(
             &self.punch,
             target,
-            rendezvous,
+            candidates,
+            first_name,
             identity.identity.device_id.clone(),
             identity.local.clone(),
             trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-        )
+        ))
+    }
+
+    /// The learner that asks a host for rendezvous hints once connected, when
+    /// this process learns hints and `[punch].mode` is not `off`
+    /// (ADR-0054 decision 5). An unreadable `config.toml` turns learning off
+    /// quietly; the command's own config reads report it.
+    pub(crate) fn hint_learner(
+        &self,
+        trust: &Arc<SharedTrustStore>,
+    ) -> Option<Arc<crate::punch::HintLearner>> {
+        if !self.punch.learn_hints {
+            return None;
+        }
+        match self.punch_mode() {
+            Ok(crate::punch::PunchMode::Auto) => Some(crate::punch::HintLearner::new(trust)),
+            _ => None,
+        }
     }
 
     /// A pin with no address can still be reached by punching, when a
@@ -1052,7 +1148,7 @@ impl Ops {
         if !pin.address.is_empty() {
             return None;
         }
-        let plan = self.punch_plan(host, identity, trust)?;
+        let plan = self.punch_plan(host, identity, trust).ok().flatten()?;
         if !plan.has_rendezvous() {
             return None;
         }
@@ -1062,6 +1158,7 @@ impl Ops {
             address: String::new(),
             server_name: "qsh".to_string(),
             punch: Some(plan),
+            learn: self.hint_learner(trust),
         })
     }
 
@@ -1099,9 +1196,6 @@ impl Ops {
     /// (ADR-0054 decision 16.3).
     fn punch_only_route(&self, host: &str, err: OpError) -> Result<PeerRoute, OpError> {
         if err.code != ErrorCode::HostNotFound {
-            return Err(err);
-        }
-        if self.punch.rendezvous.is_empty() {
             return Err(err);
         }
         let Some(identity) = self.load_identity().ok().flatten() else {

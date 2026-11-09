@@ -164,7 +164,12 @@ pub async fn run_reverse_observed(
         identity,
         controller,
         offered_name_flag,
-        ReverseOptions::default(),
+        // `[punch].mode = "off"` is read once, when the registration starts
+        // (ADR-0054 decision 19).
+        ReverseOptions {
+            punch_enabled: config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto,
+            ..ReverseOptions::default()
+        },
         on_runtime,
         on_unreachable,
         shutdown,

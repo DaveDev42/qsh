@@ -592,6 +592,7 @@ impl TrustStore {
             scope: None,
             source: None,
             remote_qsh: None,
+            rendezvous: Vec::new(),
         };
         self.peers.push(peer.clone());
         (peer, true, false)
@@ -778,6 +779,106 @@ impl TrustStore {
         Ok((self.peers[index].clone(), previous, changed))
     }
 
+    /// Replace the rendezvous hint list of the pin named `name`
+    /// (`trust.set_rendezvous`, ADR-0054 결정 5). `fingerprints` are already
+    /// in `sha256:` form, deduplicated and capped by the caller. Pure, like
+    /// [`Self::set_role`]. Returns the pin as it now stands and whether
+    /// anything changed.
+    pub fn set_rendezvous(
+        &mut self,
+        name: &str,
+        fingerprints: Vec<String>,
+    ) -> Result<(TrustPeer, bool), SetRoleError> {
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or(SetRoleError::NotFound)?;
+        let changed = peer.rendezvous != fingerprints;
+        if changed {
+            peer.rendezvous = fingerprints;
+        }
+        Ok((peer.clone(), changed))
+    }
+
+    /// Folds the fingerprints `listed` (a host's `RendezvousList`) into the
+    /// `rendezvous` hints of the pin whose key is `host` (ADR-0054 decision
+    /// 5). Pure; the caller holds the lock and saves.
+    ///
+    /// Only a fingerprint this store pins *with an address* is kept, and
+    /// never the host's own. The new list is the kept ones in the order the
+    /// host gave them, then the older hints that are still usable pins,
+    /// without repeats, at most four: what was just confirmed comes first,
+    /// and a list the user set with `trust rendezvous` is not wiped by a host
+    /// that no longer mentions it. An answer with nothing usable changes
+    /// nothing. Returns the pin's list length afterwards and whether it
+    /// changed.
+    pub fn learn_rendezvous(&mut self, host: &Fingerprint, listed: &[Vec<u8>]) -> (usize, bool) {
+        use qsh_proto::punch::MAX_RENDEZVOUS_FINGERPRINTS as MAX;
+        let Some(current) = self.find_by_fingerprint(host).map(|p| p.rendezvous.clone()) else {
+            return (0, false);
+        };
+        let mut fresh: Vec<String> = Vec::new();
+        for raw in listed.iter().take(MAX) {
+            let Ok(bytes) = <[u8; 32]>::try_from(raw.as_slice()) else {
+                continue;
+            };
+            let fp = Fingerprint::from_bytes(bytes);
+            if fp == *host || self.find_dialable(&fp).is_none() {
+                continue;
+            }
+            let text = fp.to_string();
+            if !fresh.contains(&text) {
+                fresh.push(text);
+            }
+        }
+        if fresh.is_empty() {
+            return (current.len(), false);
+        }
+        let mut merged = fresh;
+        for old in &current {
+            let usable = old
+                .parse::<Fingerprint>()
+                .is_ok_and(|fp| fp != *host && self.find_dialable(&fp).is_some());
+            if usable && !merged.contains(old) {
+                merged.push(old.clone());
+            }
+        }
+        merged.truncate(MAX);
+        if merged == current {
+            return (current.len(), false);
+        }
+        let count = merged.len();
+        if let Some(pin) = self.peers.iter_mut().find(|p| {
+            p.fingerprint
+                .parse::<Fingerprint>()
+                .is_ok_and(|f| f == *host)
+        }) {
+            pin.rendezvous = merged;
+        }
+        (count, true)
+    }
+
+    /// The pin whose key is `fingerprint`, with an address to dial it at.
+    /// A rendezvous candidate must be one (ADR-0054 결정 4).
+    pub fn find_dialable(&self, fingerprint: &Fingerprint) -> Option<&TrustPeer> {
+        self.peers.iter().find(|p| {
+            !p.address.is_empty()
+                && p.fingerprint
+                    .parse::<Fingerprint>()
+                    .is_ok_and(|fp| fp == *fingerprint)
+        })
+    }
+
+    /// The pin whose key is `fingerprint`.
+    pub fn find_by_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&TrustPeer> {
+        self.peers.iter().find(|p| {
+            p.fingerprint
+                .parse::<Fingerprint>()
+                .is_ok_and(|fp| fp == *fingerprint)
+        })
+    }
+
     /// Replace the `grants`, `paths` and `scope` keys of the pin named
     /// `name` (`qsh trust allow` / `deny`, ADR-0051 결정 12). Pure, like
     /// [`Self::set_role`]: `Ops::trust_allow` / `trust_deny` own the lock, the
@@ -844,6 +945,7 @@ impl TrustStore {
             // Where the remote's `qsh` lives is not a trust fact; a bootstrap
             // that finds it gone offers the install again.
             remote_qsh: old.remote_qsh.clone(),
+            rendezvous: old.rendezvous.clone(),
         };
         Some((self.peers[index].clone(), old))
     }
