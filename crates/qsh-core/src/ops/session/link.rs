@@ -109,7 +109,14 @@ impl Link {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::mem::replace(&mut *slot, (endpoint, connection))
+        let old = std::mem::replace(&mut *slot, (endpoint, connection));
+        // The chain under a jumped connection is rebuilt, never revived
+        // (ADR-0056 decision 16): closing the old end connection is what
+        // ends its layers, so no inner connection outlives the rebuild.
+        if old.0.is_nested() {
+            old.1.close(0, b"jump chain rebuilt");
+        }
+        old
     }
 }
 

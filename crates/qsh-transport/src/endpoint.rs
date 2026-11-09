@@ -1087,6 +1087,10 @@ fn next_connection_id() -> usize {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// How long [`Endpoint::wait_idle`] waits on an endpoint that runs over a
+/// pipe inside another connection.
+pub const NESTED_IDLE_CAP: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Debug)]
 enum EndpointBackend {
     Quic(quinn::Endpoint),
@@ -1102,13 +1106,46 @@ enum EndpointBackend {
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     inner: EndpointBackend,
+    rebind: Rebind,
+}
+
+/// What [`Endpoint::rebind_ephemeral`] does for this endpoint.
+#[derive(Clone, Debug, Default)]
+enum Rebind {
+    /// Bind a fresh socket under the endpoint (a UDP endpoint).
+    #[default]
+    Own,
+    /// The endpoint runs over a pipe inside another connection (a jump
+    /// hop, ADR-0056 decision 16): its path is the outer endpoint's, so
+    /// moving that one is the whole migration. The inner connection is not
+    /// touched.
+    Via(Arc<Endpoint>),
+    /// A pipe endpoint with no outer one to move.
+    Unsupported,
 }
 
 impl Endpoint {
     pub(crate) fn from_quic(endpoint: quinn::Endpoint) -> Self {
         Self {
             inner: EndpointBackend::Quic(endpoint),
+            rebind: Rebind::Own,
         }
+    }
+
+    /// Makes [`Self::rebind_ephemeral`] move `outer` instead of this
+    /// endpoint's own socket. For the endpoint of a connection that runs
+    /// inside `outer`'s (a jump chain, ADR-0056 decision 16): migration
+    /// happens at the outermost connection and the inner ones ride on it.
+    #[must_use]
+    pub fn rebinding_via(mut self, outer: Endpoint) -> Self {
+        self.rebind = Rebind::Via(Arc::new(outer));
+        self
+    }
+
+    /// Whether the endpoint runs over a pipe inside another connection (the
+    /// end of a jump chain) rather than over a socket of its own.
+    pub fn is_nested(&self) -> bool {
+        !matches!(self.rebind, Rebind::Own)
     }
 
     /// The local address the endpoint is bound to.
@@ -1120,10 +1157,17 @@ impl Endpoint {
 
     /// Resolves once every connection on the endpoint has fully closed and
     /// drained. Call it after closing connections for a clean shutdown.
+    ///
+    /// An endpoint on a pipe (the end of a jump chain) waits at most
+    /// [`NESTED_IDLE_CAP`]: its pipe is closed when the chain is torn down,
+    /// and quinn's endpoint task ends with the socket, after which no
+    /// closing connection is ever reported drained.
     pub async fn wait_idle(&self) {
-        match &self.inner {
-            EndpointBackend::Quic(e) => e.wait_idle().await,
+        if self.is_nested() {
+            self.wait_idle_for(NESTED_IDLE_CAP).await;
+            return;
         }
+        self.wait_idle_inner().await;
     }
 
     /// [`Self::wait_idle`] for at most `cap`: the wait that ends a command.
@@ -1137,7 +1181,13 @@ impl Endpoint {
     /// `exec` return 0.5 to 0.9 s after its output. Only a punched command
     /// uses this; a direct dial waits out its connection's full drain.
     pub async fn wait_idle_for(&self, cap: Duration) {
-        let _ = tokio::time::timeout(cap, self.wait_idle()).await;
+        let _ = tokio::time::timeout(cap, self.wait_idle_inner()).await;
+    }
+
+    async fn wait_idle_inner(&self) {
+        match &self.inner {
+            EndpointBackend::Quic(e) => e.wait_idle().await,
+        }
     }
 
     /// Close every connection on the endpoint with an application code and
@@ -1161,6 +1211,16 @@ impl Endpoint {
     /// whatever the OS grants by default. A backend with no migration
     /// would return [`io::ErrorKind::Unsupported`].
     pub fn rebind_ephemeral(&self) -> io::Result<SocketAddr> {
+        match &self.rebind {
+            Rebind::Own => {}
+            Rebind::Via(outer) => return outer.rebind_ephemeral(),
+            Rebind::Unsupported => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "an endpoint on a packet pipe has no socket to move",
+                ));
+            }
+        }
         match &self.inner {
             EndpointBackend::Quic(e) => {
                 let bind: SocketAddr = match e.local_addr()? {
@@ -1348,8 +1408,14 @@ impl Dialer {
             source,
         })?;
         endpoint.set_default_client_config(client_config);
-        self.connect_on(endpoint, PIPE_REMOTE_ADDR, server_name, verifier)
-            .await
+        let mut dialed = self
+            .connect_on(endpoint, PIPE_REMOTE_ADDR, server_name, verifier)
+            .await?;
+        // Binding a real socket under a pipe would cut the inner connection
+        // off its channel; a chain says whose socket to move instead
+        // ([`Endpoint::rebinding_via`]).
+        dialed.endpoint.rebind = Rebind::Unsupported;
+        Ok(dialed)
     }
 
     fn client_config(

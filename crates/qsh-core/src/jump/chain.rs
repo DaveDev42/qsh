@@ -72,6 +72,12 @@ const LIMIT_REFRESH: Duration = Duration::from_millis(250);
 /// How long a teardown waits for each layer's closing handshake to leave.
 const CLOSE_GRACE: Duration = Duration::from_millis(300);
 
+/// How long the supervisor keeps the layers up for the end connection's
+/// closing handshake: its closing period is three PTOs, which can be seconds
+/// on a path that just lost packets. Under the transport's
+/// `NESTED_IDLE_CAP`, which bounds the caller's own wait.
+const END_DRAIN: Duration = Duration::from_secs(2);
+
 /// Depth of a pipe's two queues, in packets.
 const PIPE_DEPTH: usize = 256;
 
@@ -592,12 +598,16 @@ pub async fn dial_chain(
     first: (Connection, Endpoint),
     deadline: Instant,
 ) -> Result<ChainConn, OpError> {
-    let mut layers: Vec<Layer> = Vec::with_capacity(plan.hop_count());
+    let mut layers = LayerGuard(Vec::with_capacity(plan.hop_count()));
     let mut infos: Vec<Arc<ChannelInfo>> = Vec::new();
-    match walk(plan, dialer, first, deadline, &mut layers, &mut infos).await {
+    match walk(plan, dialer, first, deadline, &mut layers.0, &mut infos).await {
         Ok((connection, endpoint)) => {
             let info = Arc::new(ChainInfo { channels: infos });
-            supervise(layers, connection.clone(), endpoint.clone());
+            supervise(
+                std::mem::take(&mut layers.0),
+                connection.clone(),
+                endpoint.clone(),
+            );
             tracing::debug!(
                 target: TARGET,
                 event = "chain_up",
@@ -615,8 +625,26 @@ pub async fn dial_chain(
                 event = "chain_failed",
                 stage = op.details["jump"]["stage"].as_str().unwrap_or("-"),
             );
-            teardown(layers).await;
+            teardown(std::mem::take(&mut layers.0)).await;
             Err(op)
+        }
+    }
+}
+
+/// Owns the layers while the chain is being walked. A walk that is dropped
+/// half way (a recovery attempt that ran out of time) must not leave its
+/// connections and pumps behind: recovery rebuilds the chain from the
+/// start and the old layers are not reused (decision 16).
+struct LayerGuard(Vec<Layer>);
+
+impl Drop for LayerGuard {
+    fn drop(&mut self) {
+        let layers = std::mem::take(&mut self.0);
+        if layers.is_empty() {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(teardown(layers));
         }
     }
 }
@@ -755,7 +783,10 @@ async fn walk(
             Err(end) => return Err(unreachable(end)),
         };
         let inner = dialed.connection;
-        let inner_endpoint = dialed.endpoint;
+        // Migration happens at the first hop only (decision 16): this
+        // endpoint's rebind moves the socket of the layer under it.
+        let parent_endpoint = layers.last().expect("a layer").endpoint.clone();
+        let inner_endpoint = dialed.endpoint.rebinding_via(parent_endpoint);
 
         if index + 1 == hops {
             return Ok((inner, inner_endpoint));
@@ -874,22 +905,23 @@ async fn open_channel(
 fn supervise(mut layers: Vec<Layer>, end: Connection, end_endpoint: Endpoint) {
     tokio::spawn(async move {
         let mut watch = JoinSet::new();
-        for layer in &layers {
+        for (index, layer) in layers.iter().enumerate() {
             let conn = layer.connection.clone();
             watch.spawn(async move {
-                let _ = conn.closed().await;
+                let reason = conn.closed().await;
+                format!("connection {index} closed: {reason}")
             });
         }
-        for layer in &mut layers {
+        for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(pump) = &mut layer.pump {
                 let mut ended = pump.ended.clone();
                 watch.spawn(async move {
                     loop {
-                        if ended.borrow_and_update().is_some() {
-                            return;
+                        if let Some(end) = *ended.borrow_and_update() {
+                            return format!("pump {index} ended: {end:?}");
                         }
                         if ended.changed().await.is_err() {
-                            return;
+                            return format!("pump {index} dropped");
                         }
                     }
                 });
@@ -903,15 +935,20 @@ fn supervise(mut layers: Vec<Layer>, end: Connection, end_endpoint: Endpoint) {
         };
         tokio::select! {
             () = end_closed => {}
-            _ = watch.join_next() => {
+            down = watch.join_next() => {
                 // A layer under the end connection died: the chain is one
                 // unit, so the end connection goes with it.
+                tracing::debug!(
+                    target: TARGET,
+                    event = "layer_down",
+                    why = down.and_then(Result::ok).unwrap_or_default(),
+                );
                 end.close(0, b"jump chain down");
             }
         }
         // The end connection's closing handshake leaves through the pumps,
         // so they stay up until it has.
-        end_endpoint.wait_idle_for(CLOSE_GRACE).await;
+        end_endpoint.wait_idle_for(END_DRAIN).await;
         teardown(layers).await;
     });
 }

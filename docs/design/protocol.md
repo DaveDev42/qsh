@@ -1280,3 +1280,19 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 안쪽 dial에서 핀 불일치로 거절되면 `auth`다. 시한 초과와 그 밖의 안쪽 dial 실패는 `handshake`로 묶고, 펌프가 먼저 끝났으면 `unreachable`이다. 끝 target이 거부해도 접속 중간에 새 세션이나 exec는 만들어지지 않는다. Ops의 jump는 정방향 route만 쓰고 ssh 되살리기는 끈다.
 
 **시험.** `crates/qsh-testkit/tests/it/jump_chain.rs`: `jump_one_hop_runs_every_feature`, `jump_two_hops_runs_session_exec_and_cp`, `a_malformed_chain_is_invalid_argument_and_dials_nothing`, `a_hop_without_a_pin_or_an_address_is_host_not_found_naming_it`, `jump_pin_mismatch_at_the_first_hop`, `jump_pin_mismatch_at_a_hop_and_at_the_end`, `a_jump_redirect_to_another_pinned_peer_fails_with_auth_failed`, `jump_carrier_selection_table`, `jump_mtu_budget_table`, `the_carrier_follows_the_outer_room_and_datagram_v1`, `jump_mtu_budget_on_a_four_hop_chain`, `jump_failure_stage_table`, `jump_failure_dial_stage_keeps_the_routes_code`, `jump_target_refusal_is_reported_fast`, `a_jump_never_sees_inner_plaintext`, `a_plan_refuses_the_shapes_decision_11_names`. 단위 시험은 `jump/carrier.rs`(침묵 규칙), `jump/report.rs`(stage 표)다. 침묵 폴백의 live 시험(kind 14 blackhole)과 netsim 손실 시험은 수용 시험 스텝이 맡는다.
+
+### 21.6 recovery, migration, `--supervise` (ADR-0056 결정 16)
+
+체인은 하나의 단위다. 끝 연결이 죽는 이유가 어느 층이든 복구는 같은 길이다.
+
+**Tier 1(migration).** `Endpoint::rebinding_via`가 안쪽 연결의 endpoint에 "바깥 endpoint를 옮긴다"를 건다. `dial_chain`이 층마다 아래 층의 endpoint를 거는 터라, 끝 endpoint의 `rebind_ephemeral`은 층을 타고 내려가 첫 hop의 UDP 소켓을 새 포트로 옮긴다. 안쪽 연결과 `JUMP` 채널은 그대로고 J의 소켓도 그대로여서 T는 아무것도 보지 않는다. recovery의 migration 시도와 `--supervise`의 `try_migrate`가 부르는 것이 이 함수다. 파이프 위의 endpoint는 자기 소켓이 없으므로, 바깥을 걸지 않은 파이프 endpoint의 rebind는 `Unsupported`다. 그렇지 않으면 진짜 소켓이 파이프 밑에 깔려 안쪽 연결이 채널에서 떨어진다.
+
+**Tier 2(resume).** 끝 연결의 PathWatch가 사망을 선언하고 migration이 연결을 살리지 못하면, 재dial은 `dial_routed`의 `Dial::Redial`로 체인을 처음부터 다시 세운다. 첫 hop의 route는 펀칭 경주까지 다시 돌고, 재dial 시도 하나의 시한은 첫 hop의 시한에 중간 peer마다 1초를 더한 값이며 명령의 dial 시한을 넘지 않는다(`PeerTarget::redial_deadline`). 새 끝 연결에서 §10의 reattach를 하므로 PTY 입력은 무손실·무중복이다. 대화형 attach의 recovery와 `--supervise` 터널(`-L`·`-R`·`-D`)이 같은 `dial_routed`를 쓴다. 안쪽 연결을 새 바깥 연결 위에 이어 붙이는 일은 하지 않는다.
+
+**옛 체인은 남지 않는다.** `Link::replace`가 옛 끝 연결이 체인 위의 것이면(`Endpoint::is_nested`) 닫는다. 끝 연결이 닫히면 감독 task가 안쪽 층부터 정리하고 J의 채널이 닫힌다. 직접 연결에서 옛 연결을 살려 두는 `--supervise`의 규칙(스플라이스가 끝날 때까지)은 체인에는 적용하지 않는다. 시한이 다 돼 걷는 도중에 버려진 `dial_chain` 호출도 이미 세운 층을 `LayerGuard`가 정리한다.
+
+**닫힘 대기의 상한.** 끝 연결을 닫은 호출자는 `Endpoint::wait_idle`로 닫는 절차(closing period, PTO의 세 배)가 끝나길 기다린다. 파이프 위의 endpoint는 체인이 정리되면 파이프가 닫히고, 그러면 quinn의 endpoint task도 소켓과 함께 끝나서 닫히던 연결이 drained로 보고되는 일이 없다. 경로가 막 끊겼다 살아난 연결은 PTO가 커서 이 경쟁에 질 수 있고, 그때 `--supervise` 터널의 `hold.close()`가 영원히 돌아오지 않았다(부하 아래 15회에 한 번). 그래서 파이프 위의 endpoint는 `NESTED_IDLE_CAP`(3초)까지만 기다리고, 감독 task는 그보다 짧은 `END_DRAIN`(2초) 동안 층을 살려 두어 closing 프레임이 먼저 나가게 한다.
+
+**ssh 되살리기는 jump 대상에 하지 않는다.** `Ops::revive_target`은 `jump`가 있는 대상에 `None`을 낸다. 되살린 serve의 주소는 체인이 쓰던 주소를 바꾸지 못하고, 체인 없는 `PeerTarget`을 내면 jump host가 바깥에서 직접 닿는 길로 새기 때문이다.
+
+**시험.** `crates/qsh-testkit/tests/it/jump_recovery.rs`: `a_session_through_a_jump_resumes_after_the_hop_link_dies`(C-J를 chaos proxy로 5초 끊음), `a_session_through_a_jump_resumes_after_the_target_link_dies`(J-T를 끊음), `outer_migration_is_invisible_to_the_inner_connection`, `a_nested_endpoint_never_binds_a_socket_of_its_own`, `a_supervised_tunnel_through_a_chain_survives_a_cut`, `a_supervised_tunnel_through_a_chain_survives_a_cut_behind_the_hop`, `a_supervised_tunnel_migrates_at_the_first_hop_and_keeps_its_chain`.
