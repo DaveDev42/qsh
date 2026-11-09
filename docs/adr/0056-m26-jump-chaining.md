@@ -1,7 +1,7 @@
 # ADR-0056: M26의 범위. `-J a[,b...]`를 주면 client가 첫 hop에 평소처럼 QUIC로 붙고, 그 연결 위의 새 스트림 `JUMP`로 다음 peer의 UDP 주소를 연 뒤 그 위에서 다음 QUIC 연결을 끝에서 끝으로 맺는다. 중간 peer는 안쪽 QUIC의 UDP 패킷을 바깥 연결의 QUIC DATAGRAM(자리가 없으면 같은 스트림)에 실어 나를 뿐 풀지 않는다. 각 hop은 그 hop의 pin으로, 끝단은 끝단 pin으로 확인한다. 중간 peer 쪽 인가는 새 action `forward.jump`다
 
 날짜: 2026-11-09
-상태: 제안됨
+상태: 승인됨
 
 개정 관계: ADR-0050 결정 5의 M26을 구체화한다. 다음을 개정한다.
 - ADR-0045 결정 2의 role 표와 PRD §9의 action 어휘. 새 action `forward.jump`를 더해 `Action::ALL`이 14종이 되고, `full`과 `tunnel`이 이 action을 준다(결정 18, Dave가 정할 것 2).
@@ -298,3 +298,4 @@ OpenSSH의 `-J a,b c`는 `a`에 SSH로 붙고, 그 연결의 `direct-tcpip` 채�
 ## 개정 이력
 
 - 2026-11-09 초안(에이전트). Dave가 정할 것 다섯 항목은 추천만 적었다.
+- 2026-11-09 Dave가 승인했다. Dave가 정할 것 다섯 항목 모두 (가)를 골랐다(datagram 우선과 스트림 짝, `forward.jump`는 `full`·`tunnel`, host-local을 뺀 목적지와 QUIC 문, 부트스트랩의 `ProxyJump`를 pin의 `jump`에 기록, 역방향 데몬의 운반체 번역). M26 크기는 3ew다.
