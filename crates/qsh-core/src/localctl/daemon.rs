@@ -1994,7 +1994,10 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
             file_splice: true,
         }),
         Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
-        Some(wire::StreamKind::Unspecified) | None => None,
+        // `AGENT` is host -> client only, and its reverse-route relay lands
+        // with the daemon step of ADR-0055 decision 14; until then a
+        // `LOCAL_STREAM` header for it is refused like any unknown kind.
+        Some(wire::StreamKind::Agent) | Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 

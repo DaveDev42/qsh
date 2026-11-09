@@ -233,6 +233,7 @@ async fn open_exec_argv(
             timeout_ms: 0,
             login_shell: false,
             shell_command: None,
+            agent_channel: Vec::new(),
         }),
     )
     .await;

@@ -31,6 +31,17 @@ impl Server {
                 wire::Error::new(ErrorCode::InvalidArgument, "argv must not be empty", false),
             );
         }
+        // Agent forwarding (ADR-0055 decision 3): a shape check, before the
+        // ACL decision and with no audit record.
+        let agent = match super::sessions::agent_grant(ctx, &req.agent_channel) {
+            Ok(agent) => agent,
+            Err(why) => {
+                return ControlMessage::error(
+                    request_id,
+                    wire::Error::new(ErrorCode::InvalidArgument, why, false),
+                );
+            }
+        };
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) =
@@ -120,6 +131,7 @@ impl Server {
             response::Body::ExecStarted(ExecStarted {
                 exec_id,
                 ticket: ticket.to_vec(),
+                agent: agent as i32,
             }),
         )
     }

@@ -139,6 +139,7 @@ async fn a_severed_path_is_redialed_and_resumed_inside_the_deadline() {
                     mode: wire::AttachMode::Rw as i32,
                     no_steal: false,
                     screen: None,
+                    agent_channel: Vec::new(),
                 })
                 .await?;
             let mut stream = redeem(&fresh, attached.ticket.clone()).await;

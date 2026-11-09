@@ -262,6 +262,13 @@ impl Session {
         self.has_capability(wire::CAP_SCREEN_V1)
     }
 
+    /// Whether the peer advertised `agent.v1` (ADR-0055 decision 3). A
+    /// request carries `agent_channel` only when this is true; an older host
+    /// would skip the field and the client would believe forwarding is on.
+    pub fn agent_supported(&self) -> bool {
+        self.has_capability(wire::CAP_AGENT_V1)
+    }
+
     /// The `ScreenRequest` to put in `SessionOpen`/`SessionAttach`, or
     /// `None` when the peer did not negotiate `screen.v1` (the sender then
     /// takes the byte path). `fg`/`bg` are 0xRRGGBB.
@@ -468,6 +475,22 @@ impl Session {
     /// opening an `EXEC_DATA` stream (see [`exec`](Self::exec), which does
     /// both).
     pub async fn exec_start(&mut self, spec: &ExecSpec) -> Result<ExecStarted, ClientError> {
+        self.exec_start_with_agent(spec, Vec::new()).await
+    }
+
+    /// [`Self::exec_start`] asking for agent forwarding (ADR-0055 decision
+    /// 3). A peer without `agent.v1` is never sent `agent_channel`; the
+    /// field is dropped and the reply's `agent` stays `UNSPECIFIED`.
+    pub async fn exec_start_with_agent(
+        &mut self,
+        spec: &ExecSpec,
+        agent_channel: Vec<u8>,
+    ) -> Result<ExecStarted, ClientError> {
+        let agent_channel = if self.agent_supported() {
+            agent_channel
+        } else {
+            Vec::new()
+        };
         if !self.has_capability(wire::CAP_EXEC) {
             return Err(ClientError::Unsupported(
                 "peer does not support exec".into(),
@@ -495,6 +518,7 @@ impl Session {
                     .map_or(0, |t| t.as_millis().min(u64::MAX as u128) as u64),
                 shell_command,
                 login_shell,
+                agent_channel,
             }))
             .await?;
         match resp.body {
@@ -645,6 +669,10 @@ impl Session {
         // `screen.v1` (ADR-0052 decision 9).
         if !self.screen_supported() {
             req.screen = None;
+        }
+        // Same rule for the agent field (ADR-0055 decision 3).
+        if !self.agent_supported() {
+            req.agent_channel.clear();
         }
         match self
             .session_request(control_message::Body::SessionOpen(req))
@@ -863,6 +891,9 @@ impl Session {
     ) -> Result<wire::SessionAttached, ClientError> {
         if !self.screen_supported() {
             req.screen = None;
+        }
+        if !self.agent_supported() {
+            req.agent_channel.clear();
         }
         match self
             .session_request(control_message::Body::SessionAttach(req))

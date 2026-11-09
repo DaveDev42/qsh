@@ -108,6 +108,7 @@ fn open_session() -> wire::SessionOpen {
         user: None,
         shell_command: None,
         screen: None,
+        agent_channel: Vec::new(),
     }
 }
 

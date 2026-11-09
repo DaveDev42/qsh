@@ -103,6 +103,7 @@ async fn a_resume_credential_never_reaches_a_log_line_or_the_json_contract() {
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
             screen: None,
+            agent_channel: Vec::new(),
         })
         .await
         .expect("resume is accepted");
@@ -123,6 +124,7 @@ async fn a_resume_credential_never_reaches_a_log_line_or_the_json_contract() {
             mode: wire::AttachMode::Rw as i32,
             no_steal: false,
             screen: None,
+            agent_channel: Vec::new(),
         })
         .await;
     assert!(refused.is_err(), "a bogus credential must be refused");

@@ -281,6 +281,7 @@ async fn restarted_serve_resets_an_attached_client_within_the_redial_deadline_an
         mode: wire::AttachMode::Rw as i32,
         no_steal: false,
         screen: None,
+        agent_channel: Vec::new(),
     };
     let lost = redialed
         .attach(attach(
