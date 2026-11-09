@@ -120,8 +120,8 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - [x] **`PacketPipe`와 `dial_over_pipe`.** 2026-11-09 착지(`f3ffaf1`, Dave-Windows qsh-transport 99개). `PacketPipe::new(depth) -> (PacketPipe, PipePeer)`, `PipePeer`에는 quinn 타입이 없다. `jump_pipe::` 넷(진짜 서버 echo, 1452 상한에서 PLPMTUD 상승, 1200 상한에서 유지, pin 불일치). netsim 시험은 없다.
 - [x] **`qsh_proto::jump`.** 2026-11-09 착지(`891d2a6`, fuzz 28종, protocol §21). 문 앞 판정은 ADR 결정 8보다 좁게 Initial 종류와 1200~1452만 통과시킨다(protocol §21.2).
 - [x] **`jump.v1` wire.** 2026-11-09 착지(`9992ec5`, `docs/CLI.md` v0.94). 중간 peer가 생기기 전이라 `jump.v1`은 상수만 있고 `LOCAL_CAPABILITIES`에 없다. 중간 peer 스텝이 광고를 넣고 `capabilities.json`을 다시 만들며 `jump_v1_is_defined_but_not_advertised_before_the_relay_exists`를 뒤집는다.
-- [ ] **`forward.jump`와 감사.** 14번째 action, role 표의 `full`·`tunnel`, 인라인 판정과 구조 감사.
-- [ ] **중간 peer.** 모양 검사 → 판정·감사 → 상한 → 해석 → host-local 거부 → `connect`된 UDP 소켓, QUIC 문, 60초 idle, on-demand serve가 살아 있는 채널을 센다(ADR-0051 결정 2 개정).
+- [x] **`forward.jump`와 감사.** 2026-11-09 착지(`fa284f5`, `docs/CLI.md` v0.95, PRD §9 어휘 14종, ADR-0045 개정 이력, threat model B49). `check_jump`가 Allowed·Denied·AuditFailed를 내고 감사 실패는 거부다. fixture 한 쌍(`acl.show.with_role_jump.json`, `setup.run.host_complete_with_role_jump.json`), 옛 fixture는 `forward.jump`를 뺀 채 비교한다.
+- [x] **중간 peer.** 2026-11-09 착지(`40843c9`, `docs/CLI.md` v0.96, protocol §21.3·§21.4, threat model B50·B51·C27·C28·D26, WSL·Dave-Windows 4241개, CI run 42614796814 초록). `jump.v1`을 광고하고 `capabilities.json`을 다시 만들었다. `jump_host::` 스무 개. T→C 운반체는 연결 때 한 번 정하는 정적 선택이고 침묵 전환은 운반체 스텝에 남았다. hub당 32 상한은 일반 serve에 해당하지 않아 시험이 없다.
 - [ ] **client 체인과 실패 보고.** hop마다 pin·fingerprint 정확 일치, 끝단 principal은 C, `details.jump`의 `{hop, hops, name, stage}`와 stage 아홉.
 - [ ] **운반체 고르기와 적응.** datagram 우선, 자리가 1217 아래이거나 datagram이 사라지는 경로는 같은 `JUMP` 스트림, PLPMTUD가 자리를 연 뒤의 전환.
 - [ ] **역방향 데몬.** 이 장비의 `qsh listen` 데몬으로만 닿는 첫 hop. 로컬 구간은 스트림, 등록 연결 구간은 datagram으로 바꿔 잇는다.
