@@ -97,6 +97,7 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 ## 2. 테스트 환경
 
 - CI의 `windows-latest` leg은 clippy, `cargo nextest run --workspace`, `cargo doc -D warnings`를 돌고, Windows host의 PTY·`exec`·파일 op·응답자를 정방향과 역방향으로 덮는다. 로컬 Windows 검사는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 하고 CI를 대신하지 않는다.
+- Dave-Windows에 SSH로 들어가 돌리는 전체 실행에서는 일곱 시험이 늘 실패한다: `cp_cancel::` 넷과 `auto_bootstrap::console::ctrl_c_during_the_bootstrap_ends_canceled_on_windows`(비대화 세션에 콘솔 Ctrl-C가 없다), `identity::keystore::tests::credential_manager_` 둘(SSH 로그온에는 Credential Manager가 없다). CI `windows-latest`에서는 통과한다. 로컬 Windows 판정은 이 일곱을 빼고 한다.
 - 부하 반복은 Linux·공통 테스트를 Dave-Windows-WSL(8 vCPU)에서, Windows 전용 타이밍 민감 테스트를 Dave-Windows에서 `scripts/stress/run.sh`로 돈다. 마일스톤별 필터는 `scripts/stress/m<N>.filter`다.
 
 ## 3. M25 스텝
