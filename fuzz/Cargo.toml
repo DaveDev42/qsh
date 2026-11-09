@@ -214,3 +214,10 @@ path = "fuzz_targets/agent_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "jump_frames"
+path = "fuzz_targets/jump_frames.rs"
+test = false
+doc = false
+bench = false

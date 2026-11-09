@@ -595,6 +595,8 @@ unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적
 
 **12. `agent_frames`(ADR-0055 결정 4·12, §20).** 첫 입력 바이트가 청크 크기(1~64)를 고르고, 나머지 바이트를 `AgentDecoder`에 그 크기로 나눠 먹인다. 단언: panic 없음, 돌려준 메시지는 길이 접두가 1 이상 `AGENT_MESSAGE_MAX` 이하이고 전체 바이트 수와 맞으며 type 바이트가 `kind`와 같다, 오류(길이 0, 상한 초과)는 그대로 유지되고 버퍼를 비운다, 청크 경계는 메시지와 오류를 바꾸지 않는다, 거르기 표는 11과 13만 넘긴다.
 
+**13. `jump_frames`(ADR-0056 결정 4·8, §21).** 첫 입력 바이트가 청크 크기(1~64)를 고르고, 나머지 바이트를 `JumpStreamDecoder`에 그 크기로 나눠 먹인다. 단언: panic 없음, 돌려준 패킷은 1 이상 `JUMP_PACKET_MAX` 이하이고 다시 부호화하면 소비한 바이트와 같다, 오류(길이 0, 상한 초과)는 유지되고 버퍼를 비운다, 청크 경계는 패킷과 오류를 바꾸지 않는다. 입력 전체와 각 패킷에 대해 short header는 `read_long_header`가 `None`이고, `is_v1_initial_shaped`가 참이면 version 1의 long header이고 길이가 1200~1452이며, `answers_gate`는 DCID가 주어진 SCID와 같을 때만 참이다.
+
 corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
@@ -1174,3 +1176,26 @@ target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬�
 ### 20.3 시험
 
 단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), 역방향 route의 `agent_hub_tests`(seat·상한·conduit 정리)와 `agent_reverse`(`agent_forward_over_the_reverse_route`, B47의 두 CLI, 33번째 스트림, 재attach), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.
+
+## 21. jump chaining (ADR-0056)
+
+이 절은 ADR-0056의 스텝 중 wire를 건드리지 않는 `qsh_proto::jump`가 구현한 부분만 적는다. capability `jump.v1`, `StreamKind::JUMP`, 종류 14 datagram, `forward.jump`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+
+### 21.1 스트림 운반체 framing
+
+`JUMP` 스트림은 `ConnectResult{ok}` 뒤로 `u16` big-endian 길이와 그만큼의 안쪽 QUIC 패킷 바이트를 되풀이한다. 몸통은 protobuf로 다시 싸지 않는다. `qsh_proto::jump::JumpStreamDecoder`(sans-IO)는 길이만 읽고 패킷은 해석하지 않는다.
+
+- 상수: `JUMP_PACKET_MIN = 1200`, `JUMP_PACKET_MAX = 1452`, `JUMP_STREAM_QUEUE = 65536`(보내는 쪽이 아직 나가지 않은 바이트의 상한), `JUMP_CHANNEL_LEN = 16`.
+- 길이 0(`JumpFrameError::ZeroLength`)과 `JUMP_PACKET_MAX` 초과(`JumpFrameError::Oversize`)는 길이 2바이트만 보고 거절한다. 선언된 길이로 버퍼를 미리 잡지 않고 실제로 도착한 바이트만 쌓는다. 오류가 나면 decoder는 그 상태로 굳고 쌓인 바이트를 버린다. 호출자는 이 오류를 `BAD_HEADER`(`0x2001`) 스트림 reset으로 바꾼다.
+- `encode_packet`은 빈 패킷이나 `JUMP_PACKET_MAX`를 넘는 패킷에 `None`을 돌려주고, 보내는 쪽은 그 패킷을 버리고 센다.
+
+### 21.2 QUIC long header 판독과 문의 판정
+
+`read_long_header`는 RFC 8999가 평문으로 고정한 필드만 읽는다: 형식 비트, version, DCID(길이 0~255)와 SCID. 짧거나 잘린 입력과 short header는 `None`이다. 암호문과 version별 필드는 보지 않는다.
+
+- `is_v1_initial_shaped`: long header(첫 바이트 상위 두 비트 `11`), version 1, 패킷 종류 Initial(첫 바이트의 `0x30` 비트가 0), 두 connection ID가 20바이트 이하, datagram 길이가 1200 이상 1452 이하. ADR-0056 결정 8은 종류 비트를 말하지 않고 "long header, version 1, 길이 1200 이상"만 적는다. 이 판정은 거기에 Initial 종류와 상한 1452를 더한 더 좁은 쪽이다. 문이 열리기 전에 client가 보낼 수 있는 것은 Initial뿐이고, 운반체가 1452를 넘는 패킷을 나르지 않기 때문이다.
+- `answers_gate(packet, client_scid)`: 대상에서 온 패킷이 long header(종류와 version 무관: Retry, Initial, Version Negotiation)이고 DCID가 client가 문을 통과시킨 패킷의 SCID와 같으면 참이다. short header는 문을 열지 않는다(`is_short_header`로 가려낸다). 문 앞 패킷 수·바이트·10초 시한은 `qsh-core`의 몫이다.
+
+### 21.3 시험
+
+단위 시험은 `crates/qsh-proto/src/jump.rs`의 `decoder_table`, `a_split_read_gives_the_same_packets`, `many_packets_in_one_chunk`, `the_declared_length_is_not_allocated_up_front`, `an_error_is_sticky_and_leaves_nothing_buffered`, `long_header_reader_table`, `initial_gate_table`, `answer_gate_table`와 proptest(`round_trip_under_any_chunking`, `readers_never_panic`)다. fuzz 타깃은 `jump_frames`(§13-13)다.

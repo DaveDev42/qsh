@@ -43,6 +43,10 @@
 //! - [`agent`]: ssh-agent message framing and the request filter table
 //!   (ADR-0055 decisions 4 and 12). Unwired until `agent.v1` lands.
 //!
+//! - [`jump`]: the jump stream carrier's length framing and the QUIC
+//!   long-header reader behind the gate (ADR-0056 decisions 4 and 8).
+//!   Unwired until `jump.v1` lands.
+//!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
 //! §13) and depends on no other workspace crate.
@@ -52,6 +56,7 @@ pub mod datagram;
 pub mod error;
 pub mod event;
 pub mod frame;
+pub mod jump;
 pub mod local;
 pub mod openssh;
 pub mod pairing;
