@@ -667,6 +667,12 @@ enum StreamKind {
   // the host toward the client; `StreamHeader.ticket` is the 16-byte
   // `agent_channel`. Carries raw ssh-agent protocol bytes after the header.
   AGENT = 6;
+  // ADR-0056 decision 3 (capability `jump.v1`, protocol.md §7): opened by the
+  // client toward an intermediate peer. `StreamHeader.ticket` is the 16-byte
+  // `jump_channel`, `host`/`port` the next hop's address (port 1..=65535). The
+  // reply is a `ConnectResult`; after `ok`, the stream carries u16 big-endian
+  // length + packet bytes, repeated (`qsh_proto::jump`).
+  JUMP = 7;
 }
 
 message StreamHeader {
@@ -675,8 +681,9 @@ message StreamHeader {
   // response.
   // TCP_ACCEPTED: forward_id.
   // AGENT: agent_channel (16 bytes).
+  // JUMP: jump_channel (exactly 16 bytes).
   bytes ticket = 2;
-  // TCP_CONNECT only.
+  // TCP_CONNECT and JUMP.
   string host = 3;
   uint32 port = 4;
   // TCP_CONNECT only; honored only by peers advertising dial-filter.v1;

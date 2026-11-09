@@ -51,6 +51,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
 - `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). `[punch].mode = "off"`여도 광고하고 요청에는 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다.
 - `agent.v1`(ADR-0055 결정 3)은 이 peer가 host로서 `SessionOpen`·`SessionAttach`·`ExecStart`의 `agent_channel`을 처리해 `AGENT` 스트림을 열고, client로서 `AGENT` 스트림을 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_AGENT_V1`). 광고하지 않은 peer에게는 `agent_channel`을 세팅하지 않는다. 옛 host는 모르는 필드를 버리므로 확인 없이 보내면 client가 forwarding이 켜졌다고 착각한다(§16.4, ADR-0019 결정 4와 같은 규칙). 세부는 §20이다.
+- `jump.v1`(ADR-0056 결정 3)은 이 peer가 중간 peer로서 `JUMP` 스트림과 종류 14 datagram을 처리한다는 뜻이다. 상수 `CAP_JUMP_V1`은 정의돼 있지만 **아직 `LOCAL_CAPABILITIES`에 없다**. 어느 빌드도 아직 relay하지 못하므로 광고하면 client가 relay를 믿게 된다. 중간 peer 스텝이 `LOCAL_CAPABILITIES`의 마지막 항목으로 더하고, 그때부터 모든 빌드가 광고한다. client는 협상된 교집합에 이 문자열이 있는 hop에만 `JUMP`를 연다. 세부는 §21이다.
 
 ## 5. Frame layer
 
@@ -82,6 +83,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 | File data | 요청자, `file.read`/`file.write` 전송당 1개 | bidi | `StreamHeader{FILE_DATA, ticket}` 후 framed `FileFrame{data/end/result}`(ADR-0029 결정 9, 아래 문단) |
 | Tunnel (local fwd) | local listener 쪽, TCP 연결당 1개 | bidi | `StreamHeader{TCP_CONNECT, host, port}` → `ConnectResult{ok, code, message}` → (ok면) raw bytes |
 | Agent | host, agent 소켓에 들어온 로컬 연결당 1개 | bidi, host → client | `StreamHeader{AGENT, ticket = agent_channel}` 후 ssh-agent 프로토콜 바이트 그대로(§20, ADR-0055 결정 4) |
+| Jump | client, `-J` hop당 1개 | bidi, client → 중간 peer | `StreamHeader{JUMP, ticket = jump_channel, host, port}` → `ConnectResult{ok, code, message}` → (ok면) `u16` BE 길이 + 패킷 바이트의 반복(§21, ADR-0056 결정 3·4) |
 | Tunnel (remote fwd) | remote port를 bind한 쪽, accept당 1개 | bidi | `StreamHeader{TCP_ACCEPTED, forward_id}` → raw bytes |
 
 **Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
@@ -319,10 +321,10 @@ message ReverseRegistration {
 
 // 모든 비-control 스트림의 첫 frame.
 message StreamHeader {
-  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED | FILE_DATA | AGENT(6)
-  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / FILE_DATA / TCP_ACCEPTED(forward_id) / AGENT(agent_channel, 16바이트)
-  string host = 3; uint32 port = 4;    // TCP_CONNECT 전용
-  bool deny_host_local = 5;            // TCP_CONNECT 전용, dial-filter.v1을 광고하는 peer만 준수
+  StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED | FILE_DATA | AGENT(6) | JUMP(7)
+  bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / FILE_DATA / TCP_ACCEPTED(forward_id) / AGENT(agent_channel, 16바이트) / JUMP(jump_channel, 정확히 16바이트)
+  string host = 3; uint32 port = 4;    // TCP_CONNECT, JUMP 전용. JUMP도 같은 모양 검사를 받고 port는 1..=65535
+  bool deny_host_local = 5;            // TCP_CONNECT 전용(JUMP는 읽지 않는다, host-local 거부가 늘 켜져 있다), dial-filter.v1을 광고하는 peer만 준수
                                         //   (ADR-0019 결정 3). 기본값 false = 오늘 동작(무필터).
 }
 
@@ -722,7 +724,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 | `EXEC_CHUNK_MAX` / `SESSION_CHUNK_MAX` / `SESSION_READ_MAX_BYTES` | `crates/qsh-proto/src/wire.rs` | 16 KiB / 16 KiB / 192 KiB |
 | `FILE_CHUNK_MAX` / `FILE_LIST_PAGE_MAX` / `FILE_LIST_DIR_MAX` / `FILE_WRITE_FREE_RESERVE` | `crates/qsh-proto/src/wire.rs` | 32 KiB / 512 / 65536 / 256 MiB |
 | `enum FileKind` | 같은 파일의 `enum FileKind` | `UNSPECIFIED=0`/`FILE=1`/`DIR=2`/`SYMLINK=3`/`OTHER=4` |
-| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`/`AGENT=6`. 0값의 취급은 §16.8 |
+| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto`의 `enum StreamKind` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`/`FILE_DATA=5`/`AGENT=6`/`JUMP=7`. 0값의 취급은 §16.8 |
 | sequence 시맨틱 | §8; `crates/qsh-core/src/broker/ring.rs` 머리 주석 | 세션 수명 누적 output byte offset(`u64`). 오프셋 배정은 `ReplayStore::push` 한 곳뿐 |
 
 ### 16.2 동결 대상 — `.proto` 밖의 상호운용 계약
@@ -754,6 +756,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 - 새 `message`, 또는 기존 oneof에 새 필드 번호 추가. 기존 번호의 재사용·재번호는 §16.5의 금지 사항이다.
 - **예약된 번호를 그 예약 대상으로 채우는 것.** 오늘 예약된 번호는 둘이다 — `reserved 25`(구 SessionSignal, P1)와 `AttachMode.ATTACH_MODE_RO = 2`(오늘은 `INVALID_ARGUMENT`). 둘 다 나란히 적어 둔다 — 나중에 "이 번호는 예약이었나 폐기였나"라는 분기가 생기지 않도록.
+- 새 `StreamKind` 값과 새 datagram 종류. `agent.v1`의 `AGENT=6`, `jump.v1`(ADR-0056)의 `JUMP=7`과 종류 14 `JumpPacket`이 그 사례다. 모르는 `StreamKind`는 `stream_kind()`가 `None`을 돌려주고 받는 쪽이 `BAD_HEADER` reset으로 답하며, 모르는 datagram 종류는 버린다. sender는 협상된 교집합에 해당 capability가 있을 때만 연다.
 - 새 capability 문자열과 그 capability에 딸린 새 optional message. `punch.v1`(ADR-0054)이 가장 새 사례다: `ControlMessage`의 새 블록 90번대(90~92)와 `Response`의 16~18, 새 message 7종과 enum 2종은 모두 이 규칙으로 들어왔고, sender는 협상된 교집합에 `punch.v1`이 있을 때만 보낸다. 기존 번호는 건드리지 않았다.
 - 새 `ErrorCode` 문자열. 구버전 peer는 `Unknown(raw)`로 무손실 왕복한다(`crates/qsh-proto/src/error.rs`; JSON 쪽 대응 규율은 `docs/CLI.md` §10).
 - **ADR-0018 결정 3.** `RemoteForwardOpen`의 `forward_id` 재수락(`-R` 자동 재발행)은 v1에 넣지 않는다. 필요해지면 P1 이후 `reclaim: bool` 같은 additive 필드로 넣을 수 있고, 이 freeze는 그 경로를 막지 않는다(`docs/adr/0018-tunnel-lifetime-bound-to-connection.md`). ADR-0023은 이 길을 쓰지 않았다. `-R` 재발행은 새 connection 위에서 옛 `forward_id`를 `RemoteForwardClose`로 닫고 `RemoteForwardOpen`을 다시 보내는 기존 두 op의 조합이다.
@@ -923,7 +926,7 @@ host는 화면이나 효과가 바뀔 때만 다음 `state_num`(1부터)을 낸�
 
 ### 18.6 `DatagramFrame` 머리
 
-datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, 13 `ScreenEcho`(ADR-0053 결정 3, §18.12), ADR-0052 결정 9의 필드 번호), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). payload는 종류에 따라 §18.8의 protobuf 메시지 하나다(10은 `ScreenUpdate` 조각, 11은 `ScreenAck`, 12는 `Input`, 13은 `ScreenEcho`). 조각 나눔(`part`/`parts`)은 `ScreenUpdate` 메시지가 가지고, datagram의 조각 규칙은 §18.9에 있다.
+datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 channel id, 종류 한 바이트(10 `ScreenUpdate`, 11 `ScreenAck`, 12 `Input`, 13 `ScreenEcho`(ADR-0053 결정 3, §18.12), ADR-0052 결정 9의 필드 번호, 14 `JumpPacket`(ADR-0056 결정 4, §21.0)), 나머지가 payload다. 알 수 없는 종류와 17바이트보다 짧은 입력은 버린다. channel id는 attach가 ACL을 통과한 뒤 host가 발급하는 난수이고, 모르는 channel의 datagram은 버리고 세기만 한다(결정 7). payload는 종류에 따라 §18.8의 protobuf 메시지 하나다(10은 `ScreenUpdate` 조각, 11은 `ScreenAck`, 12는 `Input`, 13은 `ScreenEcho`). 14는 예외로 payload가 protobuf가 아니라 안쪽 QUIC 패킷 바이트 그대로이고, channel은 `JUMP` 스트림의 `jump_channel`이라 jump 채널 표에서만 찾는다. 종류 10~13의 화면 channel과 섞이지 않으며, 14가 화면 channel에 오면 모르는 channel처럼 버린다(§21.0). 조각 나눔(`part`/`parts`)은 `ScreenUpdate` 메시지가 가지고, datagram의 조각 규칙은 §18.9에 있다.
 
 ### 18.7 fuzz와 시험
 
@@ -1179,7 +1182,22 @@ target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬�
 
 ## 21. jump chaining (ADR-0056)
 
-이 절은 ADR-0056의 스텝 중 wire를 건드리지 않는 `qsh_proto::jump`가 구현한 부분만 적는다. capability `jump.v1`, `StreamKind::JUMP`, 종류 14 datagram, `forward.jump`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+이 절은 ADR-0056의 wire 계약(§21.0)과 `qsh_proto::jump`가 구현한 부분(§21.1, §21.2)을 적는다. 중간 peer의 동작과 `forward.jump`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+
+### 21.0 capability와 wire (ADR-0056 결정 3·4)
+
+```proto
+enum StreamKind { ...; JUMP = 7; }   // client -> 중간 peer
+// StreamHeader{kind = JUMP, ticket = jump_channel(정확히 16바이트), host, port}
+// 응답: ConnectResult{ok, code, message}. ok면 그 뒤로 u16 BE 길이 + 패킷 바이트의 반복
+// DatagramFrame 종류 14 JumpPacket: channel = jump_channel, 몸통은 패킷 바이트 그대로
+```
+
+- capability 문자열은 `jump.v1`(`CAP_JUMP_V1`)이다. 상수와 wire 값만 이 스텝에 들어왔고 `LOCAL_CAPABILITIES`에는 아직 없다(§4). 이 빌드의 host는 `JUMP` 스트림을 모르는 종류처럼 `BAD_HEADER` reset으로 답하고, 종류 14 datagram은 모르는 channel로 버린다.
+- `jump_channel`은 client가 CSPRNG로 만든 정확히 16바이트(`JUMP_CHANNEL_LEN`)다. `StreamHeader::jump`가 header를 만들고 `StreamHeader::jump_channel`이 16바이트가 아닌 ticket과 `JUMP`가 아닌 header에 `None`을 돌려준다. 길이가 다르거나 쓰고 있는 값이면 중간 peer는 ACL 앞에서 `INVALID_ARGUMENT`로 답한다(audit 없음).
+- `host`와 `port`는 `TCP_CONNECT`와 같은 필드이고 모양 검사(255바이트, 제어문자 거부, ADR-0019 결정 5)와 `port`의 1..=65535 검사는 `TCP_CONNECT`처럼 받는 쪽(`qsh-core`)이 한다. `deny_host_local`은 읽지 않는다.
+- 종류 14 datagram의 몸통은 protobuf로 다시 싸지 않는다. 알 수 없는 channel은 받는 쪽이 버리고 센다.
+- 스트림 운반체의 길이 머리 오류(`JumpFrameError`)는 `BAD_HEADER`(`0x2001`) reset이다(§21.1).
 
 ### 21.1 스트림 운반체 framing
 

@@ -375,6 +375,10 @@ impl Server {
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
             Some(kind @ StreamKind::FileData) => kind,
+            // `JUMP` (ADR-0056 decision 3) lands here too: this build has no
+            // intermediate-peer behaviour yet and does not advertise
+            // `jump.v1`, so it answers as for any kind it does not serve.
+            // The middle-peer step replaces this arm with the handler.
             _ => {
                 tracing::debug!(principal = %ctx.principal, kind = header.kind, "unsupported stream kind");
                 stream.send.reset(RESET_CODE_BAD_HEADER);

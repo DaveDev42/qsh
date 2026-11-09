@@ -2387,3 +2387,130 @@ fn agent_fuzz_seeds_decode_to_the_new_fields() {
     assert_eq!(short.stream_kind(), Some(StreamKind::Agent));
     assert_ne!(short.ticket.len(), AGENT_CHANNEL_LEN);
 }
+
+/// Without `-J` the bytes of every request that exists today are what they
+/// were before `jump.v1`: the new `StreamKind` value and datagram kind are
+/// opt-in, and no existing message gained a field (ADR-0056 decision 3,
+/// DoD 25.17). Golden bytes written from the pre-`jump.v1` schema.
+#[test]
+fn no_jump_stream_without_dash_j() {
+    let open = SessionOpen {
+        argv: vec!["sh".into()],
+        term: "xterm".into(),
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+    assert_eq!(hex(&open.encode_to_vec()), "0a0273681a05787465726d20502818");
+    let exec = ExecStart {
+        argv: vec!["id".into()],
+        timeout_ms: 5,
+        ..Default::default()
+    };
+    assert_eq!(hex(&exec.encode_to_vec()), "0a0269641805");
+    assert_eq!(
+        hex(&StreamHeader::session_data(vec![1, 2]).encode_to_vec()),
+        "080112020102"
+    );
+    assert_eq!(
+        hex(&StreamHeader::exec_data(vec![9]).encode_to_vec()),
+        "0802120109"
+    );
+    assert_eq!(
+        hex(&StreamHeader {
+            kind: StreamKind::TcpConnect as i32,
+            ticket: vec![],
+            host: "h".into(),
+            port: 80,
+            deny_host_local: false,
+        }
+        .encode_to_vec()),
+        "08031a01682050"
+    );
+    assert_eq!(StreamKind::Jump as i32, 7);
+}
+
+#[test]
+fn jump_stream_header_round_trips_with_golden_bytes() {
+    let channel = [0xb0u8; crate::jump::JUMP_CHANNEL_LEN];
+    let header = StreamHeader::jump(channel, "h".into(), 80);
+    let bytes = header.encode_to_vec();
+    assert_eq!(
+        hex(&bytes),
+        format!("08071210{}1a01682050", "b0".repeat(16))
+    );
+    let back = decode_msg::<StreamHeader>(&bytes).unwrap();
+    assert_eq!(back, header);
+    assert_eq!(back.stream_kind(), Some(StreamKind::Jump));
+    assert_eq!(back.jump_channel(), Some(channel));
+    assert_eq!((back.host.as_str(), back.port), ("h", 80));
+}
+
+/// The ticket of a `JUMP` header is exactly 16 bytes (ADR-0056 decision 3);
+/// anything else, and any other kind, reads no channel.
+#[test]
+fn jump_ticket_must_be_exactly_sixteen_bytes() {
+    for len in [0usize, 1, 15, 17, 32, 64] {
+        let header = StreamHeader {
+            kind: StreamKind::Jump as i32,
+            ticket: vec![7; len],
+            host: "h".into(),
+            port: 80,
+            deny_host_local: false,
+        };
+        assert_eq!(header.jump_channel(), None, "len {len}");
+    }
+    let header = StreamHeader {
+        kind: StreamKind::Jump as i32,
+        ticket: vec![7; 16],
+        ..Default::default()
+    };
+    assert_eq!(header.jump_channel(), Some([7; 16]));
+    let agent = StreamHeader {
+        kind: StreamKind::Agent as i32,
+        ticket: vec![7; 16],
+        ..Default::default()
+    };
+    assert_eq!(agent.jump_channel(), None);
+}
+
+#[test]
+fn jump_fuzz_seeds_decode_to_what_their_names_say() {
+    use crate::datagram::{DatagramError, DatagramFrame, DatagramKind};
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fuzz/corpus");
+    let read = |target: &str, name: &str| {
+        std::fs::read(format!("{root}/{target}/{name}")).expect("fuzz seed")
+    };
+    let header =
+        |name: &str| decode_msg::<StreamHeader>(&read("decode_stream_header", name)).unwrap();
+    let ok = header("jump");
+    assert_eq!(ok.stream_kind(), Some(StreamKind::Jump));
+    assert!(ok.jump_channel().is_some());
+    assert_eq!((ok.host.as_str(), ok.port), ("10.0.0.7", 4433));
+    let short = header("jump_short_ticket");
+    assert_eq!(short.stream_kind(), Some(StreamKind::Jump));
+    assert_eq!(short.jump_channel(), None);
+    assert_eq!(header("jump_port_zero").port, 0);
+
+    let frame = |name: &str| read("decode_datagram_frame", name);
+    let packet = DatagramFrame::decode(&frame("jump_packet")).unwrap();
+    assert_eq!(packet.kind, DatagramKind::JumpPacket);
+    assert_eq!(packet.payload.len(), 14);
+    let empty = DatagramFrame::decode(&frame("jump_packet_empty")).unwrap();
+    assert_eq!(empty.kind, DatagramKind::JumpPacket);
+    assert!(empty.payload.is_empty());
+    assert_eq!(
+        DatagramFrame::decode(&frame("unknown_kind_15")),
+        Err(DatagramError::UnknownKind(15))
+    );
+}
+
+/// `jump.v1` is defined but not yet advertised: no build can relay, and a
+/// capability string is a promise (ADR-0056 decision 3 says every build
+/// advertises it once the feature exists). The intermediate-peer step flips
+/// this assertion together with the `capabilities.json` golden.
+#[test]
+fn jump_v1_is_defined_but_not_advertised_before_the_relay_exists() {
+    assert_eq!(CAP_JUMP_V1, "jump.v1");
+    assert!(!LOCAL_CAPABILITIES.contains(&CAP_JUMP_V1));
+}

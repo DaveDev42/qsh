@@ -119,6 +119,16 @@ pub const CAP_AGENT_V1: &str = "agent.v1";
 /// `AGENT` stream it names.
 pub const AGENT_CHANNEL_LEN: usize = 16;
 
+/// Capability string for jump chaining (ADR-0056 decision 3,
+/// `docs/design/protocol.md` §7 and §18.6): this peer, as an intermediate
+/// peer, handles the `JUMP` stream and datagram kind 14. A client opens
+/// `JUMP` only toward a hop whose negotiated set has it.
+///
+/// Deliberately **not** in [`LOCAL_CAPABILITIES`] yet: a capability string is
+/// a promise about behaviour, and no build can relay until the
+/// intermediate-peer step lands. That step appends it as the last entry.
+pub const CAP_JUMP_V1: &str = "jump.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
@@ -1142,6 +1152,31 @@ impl StreamHeader {
             port: 0,
             deny_host_local: false,
         }
+    }
+
+    /// Header for a `JUMP` stream (ADR-0056 decision 3): `channel` is the
+    /// client's `jump_channel`, `host:port` the next hop's address as the
+    /// client's trust store spells it.
+    pub fn jump(channel: [u8; crate::jump::JUMP_CHANNEL_LEN], host: String, port: u16) -> Self {
+        Self {
+            kind: StreamKind::Jump as i32,
+            ticket: channel.to_vec(),
+            host,
+            port: u32::from(port),
+            deny_host_local: false,
+        }
+    }
+
+    /// The `jump_channel` of a `JUMP` header: `Some` only for a `JUMP` header
+    /// whose ticket is exactly [`crate::jump::JUMP_CHANNEL_LEN`] bytes. Any
+    /// other length is the receiver's `INVALID_ARGUMENT` (ADR-0056
+    /// decision 3). The `host` and `port` shape checks stay with the
+    /// receiver, as for `TCP_CONNECT`.
+    pub fn jump_channel(&self) -> Option<[u8; crate::jump::JUMP_CHANNEL_LEN]> {
+        if self.stream_kind() != Some(StreamKind::Jump) {
+            return None;
+        }
+        self.ticket.as_slice().try_into().ok()
     }
 
     /// The declared stream kind, or `None` if this build does not know it.

@@ -34,6 +34,11 @@ pub enum DatagramKind {
     Input = 12,
     /// A `ScreenEcho` (ADR-0053 decision 3, capability `screen-echo.v1`).
     ScreenEcho = 13,
+    /// One inner QUIC packet of a jump channel (ADR-0056 decision 4,
+    /// capability `jump.v1`). The channel is the `jump_channel` of the `JUMP`
+    /// stream, looked up in the jump table only; the payload is the packet
+    /// bytes as they are, not a protobuf.
+    JumpPacket = 14,
 }
 
 impl DatagramKind {
@@ -44,6 +49,7 @@ impl DatagramKind {
             11 => Some(Self::ScreenAck),
             12 => Some(Self::Input),
             13 => Some(Self::ScreenEcho),
+            14 => Some(Self::JumpPacket),
             _ => None,
         }
     }
@@ -138,6 +144,29 @@ mod tests {
         assert_eq!(
             DatagramFrame::decode(&vec![0; MAX_DATAGRAM_FRAME + 1]),
             Err(DatagramError::TooLong)
+        );
+    }
+
+    #[test]
+    fn jump_packet_round_trips_with_an_opaque_body() {
+        // Kind 14 (ADR-0056 decision 4): the body is packet bytes, never
+        // interpreted here, so even a body that is no valid protobuf is kept.
+        let body = vec![0xc0, 0, 0, 0, 1, 0xff, 0xff];
+        let f = DatagramFrame {
+            channel: ChannelId([9; CHANNEL_ID_LEN]),
+            kind: DatagramKind::JumpPacket,
+            payload: body.clone(),
+        };
+        let bytes = f.encode();
+        assert_eq!(bytes[CHANNEL_ID_LEN], 14);
+        assert_eq!(DatagramKind::from_u8(14), Some(DatagramKind::JumpPacket));
+        assert_eq!(DatagramFrame::decode(&bytes), Ok(f));
+        assert_eq!(&bytes[DatagramFrame::HEADER_LEN..], body.as_slice());
+        let mut unknown = vec![0; CHANNEL_ID_LEN];
+        unknown.push(15);
+        assert_eq!(
+            DatagramFrame::decode(&unknown),
+            Err(DatagramError::UnknownKind(15))
         );
     }
 }

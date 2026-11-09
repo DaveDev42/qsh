@@ -5,7 +5,7 @@
 //! on-path replayer's) datagram touches.
 //!
 //! Invariants: no panic; an accepted datagram re-encodes to the same
-//! bytes; the kind is one of the four known bodies; the payload is
+//! bytes; the kind is one of the five known bodies; the payload is
 //! exactly the input minus the 17-byte header. When the payload is a
 //! `ScreenUpdate`, decoding it is also total (it is what the receiver does
 //! next, once the channel is known).
@@ -27,6 +27,7 @@ fuzz_target!(|data: &[u8]| {
                 | DatagramKind::ScreenAck
                 | DatagramKind::Input
                 | DatagramKind::ScreenEcho
+                | DatagramKind::JumpPacket
         ));
         if frame.kind == DatagramKind::ScreenUpdate {
             let _ = ScreenUpdate::decode(&frame.payload);
