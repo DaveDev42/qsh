@@ -72,6 +72,11 @@ pub struct SessionSpec {
     /// empty. Only `ShellRequest::Command` occurs here; the login shell is
     /// an empty `argv`.
     pub shell: Option<crate::shell::ShellRequest>,
+    /// The host-made `SSH_AUTH_SOCK` value (the agent socket path or pipe name
+    /// of this session, ADR-0055 decision 6). `None` means the child has no
+    /// `SSH_AUTH_SOCK` at all: the key is host-pinned, so a client `env` entry
+    /// of that name is dropped either way.
+    pub agent_sock: Option<String>,
 }
 
 /// How a source's child ended.

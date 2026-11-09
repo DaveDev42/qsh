@@ -931,7 +931,11 @@ fn acl_show_never_lists_forward_socks_and_lists_no_file_action_for_a_row_without
     write_acl_toml(&host, &table_toml("family_wildcards"));
     let data = acl_show(&host, CLIENT_PRINCIPAL, None);
     let set = effective(&data);
-    assert_eq!(set, ["forward.local", "forward.remote"], "{data}");
+    assert_eq!(
+        set,
+        ["forward.local", "forward.remote", "forward.agent"],
+        "{data}"
+    );
     // `forward.socks` is refused by the always-deny gate whatever the row
     // says. The file actions are absent only because the row has no `paths`
     // (ADR-0029 decision 4); a row with `paths` lists them (see
@@ -1257,6 +1261,7 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "file.read",
             "file.write",
             "host.punch",
+            "forward.agent",
         ],
         "exec" => &[
             "exec.run",
@@ -1265,6 +1270,7 @@ fn role_grants_literal(role: &str, action: &str) -> bool {
             "session.attach",
             "session.control",
             "host.punch",
+            "forward.agent",
         ],
         "tunnel" => &["forward.local", "forward.remote", "host.punch"],
         "read-only" => &["session.list", "session.attach", "host.punch"],

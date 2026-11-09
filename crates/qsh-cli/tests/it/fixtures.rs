@@ -202,6 +202,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.show.with_role.json",
     "acl.show.with_role_punch.json",
     "acl.show.host_punch.json",
+    "acl.show.with_role_agent.json",
+    "acl.show.forward_agent.json",
     // The golden test that exercises these two is `cfg(unix)` (path shaping
     // and the `paths` notation are host-specific), so on other targets this
     // list only proves the files exist.
@@ -223,6 +225,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.listener_pending_acl.json",
     "setup.run.host_complete_with_role.json",
     "setup.run.host_complete_with_role_punch.json",
+    "setup.run.host_complete_with_role_agent.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
     // `qsh cp` (`docs/CLI.md` §6.21, ADR-0029 decision 18·21). The golden test
     // is `cfg(unix)`: the fixtures hold unix path spelling, a unix host's mode
@@ -316,6 +319,8 @@ fn check_without_roles(name: &str, envelope: Value) {
     let mut expected = fixtures::load_cli_v1(name);
     strip_role_keys(&mut actual);
     strip_role_keys(&mut expected);
+    strip_forward_agent(&mut actual);
+    strip_forward_agent(&mut expected);
     assert_eq!(
         pretty(&actual),
         pretty(&expected),
@@ -335,17 +340,47 @@ fn check_without_roles(name: &str, envelope: Value) {
 /// fixtures (`acl.show.with_role_punch.json`,
 /// `setup.run.host_complete_with_role_punch.json`) that compare in full.
 fn strip_host_punch(value: &mut Value) {
+    strip_action(value, "host.punch");
+    strip_action(value, "forward.agent");
+}
+
+/// Drop `forward.agent` (ADR-0055 decision 16) the same way: `full` and
+/// `exec` grant it and a `forward.*` row covers it, so fixtures recorded
+/// before M25 are compared with it removed from both sides, and the
+/// post-M25 shapes have their own `*_agent` fixtures that compare in full.
+fn strip_forward_agent(value: &mut Value) {
+    strip_action(value, "forward.agent");
+}
+
+fn strip_action(value: &mut Value, action: &str) {
     match value {
-        Value::Object(map) => map.values_mut().for_each(strip_host_punch),
+        Value::Object(map) => map.values_mut().for_each(|v| strip_action(v, action)),
         Value::Array(items) => {
-            items.retain(|item| item.as_str() != Some("host.punch"));
-            items.iter_mut().for_each(strip_host_punch);
+            items.retain(|item| item.as_str() != Some(action));
+            items.iter_mut().for_each(|v| strip_action(v, action));
         }
-        Value::String(text) if text.contains(", host.punch") => {
-            *text = text.replace(", host.punch", "");
+        Value::String(text) if text.contains(&format!(", {action}")) => {
+            *text = text.replace(&format!(", {action}"), "");
         }
         _ => {}
     }
+}
+
+/// [`check`] for a fixture recorded before `forward.agent` existed.
+fn check_without_forward_agent(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_forward_agent(&mut actual);
+    strip_forward_agent(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (forward.agent ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
+    );
 }
 
 /// [`check`] for a fixture recorded before `host.punch` existed: never
@@ -696,7 +731,8 @@ fn golden_acl_show_fixtures() {
             "exec.run",
             "session.open",
             "forward.local",
-            "forward.remote"
+            "forward.remote",
+            "forward.agent"
         ]),
         "{show}"
     );
@@ -796,12 +832,14 @@ fn golden_acl_role_fixtures() {
             "session.control",
             "forward.local",
             "forward.remote",
-            "host.punch"
+            "host.punch",
+            "forward.agent"
         ]),
         "{shown}"
     );
     check_without_host_punch("acl.show.with_role.json", shown.clone());
-    check("acl.show.with_role_punch.json", shown);
+    check_without_forward_agent("acl.show.with_role_punch.json", shown.clone());
+    check("acl.show.with_role_agent.json", shown);
 
     // `host.punch` (ADR-0054 decision 6): a `none` pin gets it from a row
     // alone, and `acl check` names the row as the basis.
@@ -820,6 +858,24 @@ fn golden_acl_role_fixtures() {
         "{shown}"
     );
     check("acl.show.host_punch.json", shown);
+
+    // `forward.agent` (ADR-0055 decision 16): a `none` pin gets it from a
+    // row alone.
+    let agent = Sandbox::new();
+    write_trust(&agent, "none");
+    std::fs::write(
+        agent.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"forward.agent\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+    let (code, shown) = agent.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(
+        shown["data"]["effective_actions"],
+        serde_json::json!(["forward.agent"]),
+        "{shown}"
+    );
+    check("acl.show.forward_agent.json", shown);
 }
 
 /// `setup run` (`docs/CLI.md` §6.20, ADR-0024): three roles and the input
@@ -881,7 +937,11 @@ fn golden_setup_run_fixtures() {
         }
     }
     check_without_host_punch("setup.run.host_complete_with_role.json", role_run.clone());
-    check("setup.run.host_complete_with_role_punch.json", role_run);
+    check_without_forward_agent(
+        "setup.run.host_complete_with_role_punch.json",
+        role_run.clone(),
+    );
+    check("setup.run.host_complete_with_role_agent.json", role_run);
 
     let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
     let cert_path = listener.home_dir().join("peer.pem");

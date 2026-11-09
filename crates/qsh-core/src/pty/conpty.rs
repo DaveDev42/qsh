@@ -286,6 +286,8 @@ pub(crate) fn plan(spec: &SessionSpec, events: &SignalEvents) -> io::Result<Laun
             .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
     }
     let user_env = winproc::user_environment()?;
+    // ADR-0055 decision 6: `SSH_AUTH_SOCK` is the host's own value or absent.
+    let user_env = env_policy::windows_with_agent_sock(&user_env, spec.agent_sock.as_deref());
     plan_from(
         spec,
         &user_env,

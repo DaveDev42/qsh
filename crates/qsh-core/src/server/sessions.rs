@@ -141,6 +141,7 @@ impl Server {
     pub(super) async fn handle_session_open(
         &self,
         ctx: &ConnCtx,
+        conn: Option<&Connection>,
         request_id: u64,
         req: &wire::SessionOpen,
     ) -> ControlMessage {
@@ -187,8 +188,8 @@ impl Server {
 
         // Agent forwarding (ADR-0055 decision 3): a length check like the
         // ones above, so it precedes the ACL decision and writes no audit.
-        let agent = match agent_grant(ctx, &req.agent_channel) {
-            Ok(agent) => agent,
+        let agent_channel = match super::agent::requested_channel(ctx, &req.agent_channel) {
+            Ok(channel) => channel,
             Err(why) => return invalid_argument(request_id, why),
         };
 
@@ -252,6 +253,18 @@ impl Server {
             );
         }
 
+        // ---- `forward.agent` (ADR-0055 decision 16): after the request's own
+        // decision and every gate that can still refuse it, and before the
+        // session exists. A refusal never fails the request. The socket
+        // exists from here but accepts nothing until the session does. ----
+        let agent = self.prepare_agent(
+            ctx,
+            conn,
+            request_id,
+            crate::acl::AgentOp::SessionOpen,
+            agent_channel,
+        );
+
         // ---- Allowed: create the session, then a single-use ticket. ----
         let mut env: Vec<(String, String)> = req
             .env
@@ -267,6 +280,7 @@ impl Server {
             rows,
             user: req.user.clone(),
             shell,
+            agent_sock: agent.sock(),
         };
         // The opener is recorded as this session's owner (the M3 plan (2473c88) Step
         // 3.5 PR②) — `session.write`/`session.resize` bind to it from here
@@ -300,8 +314,13 @@ impl Server {
                 crate::audit::write_quota_audit(self.audit.as_ref(), &records);
                 return broker_error(request_id, BrokerError::QuotaExceeded(kind));
             }
+            // The socket made above is dropped with `agent`, which removes it.
             Err(err) => return broker_error(request_id, err),
         };
+        // The session exists: the socket starts accepting, backed by this
+        // connection until another attach takes the writer lease.
+        let agent_grant = agent.grant;
+        self.start_session_agent(&session_id, agent);
         // The host agreed to screen sync only if the session really runs an
         // emulator; the reply and the ticket say the same thing.
         let screen_channel = if screen.is_some() && self.sessions.screen_enabled(&session_id) {
@@ -365,7 +384,7 @@ impl Server {
                 initial_seq: 0,
                 expires_at,
                 screen_channel,
-                agent: agent as i32,
+                agent: agent_grant as i32,
             }),
         )
     }
@@ -819,6 +838,7 @@ impl Server {
     pub(super) async fn handle_session_attach(
         &self,
         ctx: &ConnCtx,
+        conn: Option<&Connection>,
         request_id: u64,
         req: &wire::SessionAttach,
     ) -> ControlMessage {
@@ -835,8 +855,8 @@ impl Server {
             Ok(screen) => screen,
             Err(why) => return invalid_argument(request_id, why),
         };
-        let agent = match agent_grant(ctx, &req.agent_channel) {
-            Ok(agent) => agent,
+        let agent_channel = match super::agent::requested_channel(ctx, &req.agent_channel) {
+            Ok(channel) => channel,
             Err(why) => return invalid_argument(request_id, why),
         };
         let id = SessionId(req.session_id.clone());
@@ -1030,6 +1050,10 @@ impl Server {
             // (ADR-0052 decision 10; `qsh session read` has them).
             let _ = self.sessions.screen_take_history(&id);
         }
+        // This attach takes the writer lease, so the session's agent socket (if it
+        // has one) is backed by this connection, or by nothing (ADR-0055
+        // decision 9). `forward.agent` is decided again on every attach.
+        let agent = self.attach_agent(ctx, conn, request_id, &id, agent_channel);
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
         tracing::info!(
             principal = %ctx.principal,
@@ -1074,26 +1098,6 @@ fn screen_params(
         fg: rgb(req.fg)?,
         bg: rgb(req.bg)?,
     }))
-}
-
-/// The `AgentGrant` this host answers to an `agent_channel` field
-/// (ADR-0055 decision 3). Empty means nothing was requested, and so does a
-/// field from a peer that did not advertise `agent.v1` (ignored, like
-/// `screen_params`). A channel that is not exactly 16 bytes is
-/// `INVALID_ARGUMENT`. This build has no agent socket yet, so every real
-/// request is `UNAVAILABLE`: the session or exec still opens and the reply
-/// says forwarding is off.
-pub(super) fn agent_grant(
-    ctx: &ConnCtx,
-    agent_channel: &[u8],
-) -> Result<wire::AgentGrant, &'static str> {
-    if agent_channel.is_empty() || !ctx.has_capability(wire::CAP_AGENT_V1) {
-        return Ok(wire::AgentGrant::Unspecified);
-    }
-    if agent_channel.len() != wire::AGENT_CHANNEL_LEN {
-        return Err("agent_channel must be exactly 16 bytes");
-    }
-    Ok(wire::AgentGrant::Unavailable)
 }
 
 /// A fresh 128-bit channel id (ADR-0052 decision 7). Issued only after the

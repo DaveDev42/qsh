@@ -78,6 +78,7 @@ fn cmd(script: &str) -> SessionSpec {
         rows: 24,
         user: None,
         shell: None,
+        agent_sock: None,
     }
 }
 

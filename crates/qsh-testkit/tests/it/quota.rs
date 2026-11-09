@@ -69,6 +69,7 @@ fn exec_spec(argv: &[&str]) -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn exec_spec_of(argv: Vec<String>) -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 

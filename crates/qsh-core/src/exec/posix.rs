@@ -81,6 +81,11 @@ pub(super) fn spawn_child(spec: &ExecSpec) -> Result<Spawned, SpawnFailure> {
         cmd.env(k, v);
     }
     cmd.envs(pinned);
+    // ADR-0055 decision 6: the host's agent socket, or no `SSH_AUTH_SOCK` at
+    // all (a client-sent value was skipped above as a pinned key).
+    if let Some(sock) = &spec.agent_sock {
+        cmd.env(crate::pty::env_policy::SSH_AUTH_SOCK, sock);
+    }
 
     let mut child = cmd.spawn().map_err(|err| SpawnFailure {
         code: spawn_failure_code(&err),

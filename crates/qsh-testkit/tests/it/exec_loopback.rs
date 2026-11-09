@@ -22,6 +22,7 @@ fn spec(argv: &[&str]) -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -524,6 +525,7 @@ fn shell_spec(command: &str) -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: Some(ShellRequest::Command(command.into())),
+        agent_sock: None,
     }
 }
 
@@ -600,6 +602,7 @@ async fn login_shell_without_a_command_reads_its_commands_from_stdin() {
         env: vec![],
         timeout: None,
         shell: Some(ShellRequest::Login),
+        agent_sock: None,
     };
     let stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(std::io::Cursor::new(
         b"printf 'hi %s' there\nexit 5\n".to_vec(),
@@ -634,6 +637,7 @@ async fn a_host_without_shell_command_v1_is_unsupported_before_anything_is_sent(
             env: vec![],
             timeout: None,
             shell: Some(ShellRequest::Login),
+            agent_sock: None,
         },
     ] {
         match s.exec(&sp, None, None).await.unwrap_err() {

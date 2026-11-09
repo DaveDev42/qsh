@@ -103,7 +103,7 @@ fn heading_section_slice<'a>(doc: &'a str, heading: &str) -> &'a str {
 }
 
 #[test]
-fn prd_section_9_lists_the_twelve_actions() {
+fn prd_section_9_lists_the_thirteen_actions() {
     // Sanity check on the extractor itself before trusting the equality
     // test below: PRD §9's prose repeats some action names outside the
     // bullet list (e.g. `session.control` in the paragraph right after),
@@ -111,8 +111,8 @@ fn prd_section_9_lists_the_twelve_actions() {
     let prd_actions = prd_section_9_actions();
     assert_eq!(
         prd_actions.len(),
-        12,
-        "docs/PRD.md §9 must name exactly 12 distinct dotted action tokens \
+        13,
+        "docs/PRD.md §9 must name exactly 13 distinct dotted action tokens \
          in backticks, found {prd_actions:?}"
     );
 }

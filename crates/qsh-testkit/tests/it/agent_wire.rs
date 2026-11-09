@@ -29,6 +29,7 @@ fn exec_spec() -> ExecSpec {
         env: vec![],
         timeout: None,
         shell: None,
+        agent_sock: None,
     }
 }
 
@@ -65,7 +66,8 @@ async fn a_host_without_agent_support_answers_unavailable_and_still_opens_the_se
         })
         .await
         .unwrap();
-    assert_eq!(attached.agent, AgentGrant::Unavailable as i32);
+    // The session was opened without a socket, so an attach has none to back.
+    assert_eq!(attached.agent, AgentGrant::NoSocket as i32);
 
     // exec.run
     let started = s

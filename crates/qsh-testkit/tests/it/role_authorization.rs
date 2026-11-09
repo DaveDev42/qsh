@@ -226,6 +226,7 @@ async fn probe_control_stream(s: &mut Session) -> BTreeMap<&'static str, bool> {
                 env: vec![],
                 timeout: None,
                 shell: None,
+                agent_sock: None,
             })
             .await,
         ),
@@ -750,6 +751,7 @@ async fn read_only_scenario<R: Route>() {
             rows: 24,
             user: None,
             shell: None,
+            agent_sock: None,
         })
         .expect("plant a session at the broker");
     let id = handle.id().to_string();

@@ -219,6 +219,9 @@ ACL principal은 certificate fingerprint 또는 CA가 발급한 user/device iden
 - `forward.local`, `forward.remote`, `forward.socks`
 - `file.read`, `file.write`
 - `host.reverse`, `host.punch`
+- `forward.agent`
+
+`forward.agent`는 host가 세션이나 exec 앞에 agent 소켓을 만들어 주는 인가다(ADR-0055 결정 16). `full`과 `exec`가 주고 `forward.*` 행이 이 action을 함께 덮는다. 거부돼도 세션과 exec는 그대로 열리고 소켓만 없다. 항상 거부 gate에는 들어가지 않는다.
 
 `host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
 
@@ -247,8 +250,8 @@ ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 �
 
 | role | 주는 action | 소유 축 |
 |---|---|---|
-| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse`, `host.punch` | any |
-| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `host.punch` | any |
+| `full` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `forward.local`, `forward.remote`, `file.read`, `file.write`, `host.reverse`, `host.punch`, `forward.agent` | any |
+| `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `host.punch`, `forward.agent` | any |
 | `tunnel` | `forward.local`, `forward.remote`, `host.punch` | owned |
 | `read-only` | `session.list`, `session.attach`, `host.punch` | any |
 | `reverse` | `host.reverse`, `host.punch` | 해당 없음 |

@@ -74,6 +74,9 @@ pub struct ExecSpec {
     /// half turns it into a program at spawn time (`crate::shell`); when it
     /// is set, `argv` is empty.
     pub shell: Option<ShellRequest>,
+    /// The host-made `SSH_AUTH_SOCK` value (ADR-0055 decision 6), pinned like
+    /// `HOME`; `None` leaves the child without the variable.
+    pub agent_sock: Option<String>,
 }
 
 /// How an exec ended, as reported to the client in `ExecExit`.

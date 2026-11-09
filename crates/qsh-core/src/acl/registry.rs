@@ -543,8 +543,15 @@ mod tests {
     /// reason.
     #[test]
     fn deny_seams_cover_every_action_except_forward_socks() {
-        let covered: std::collections::HashSet<Action> =
-            DENY_SEAMS.iter().map(|s| s.action).collect();
+        let covered: std::collections::HashSet<Action> = DENY_SEAMS
+            .iter()
+            .map(|s| s.action)
+            // `forward.agent` (ADR-0055 decision 16) never answers
+            // `PERMISSION_DENIED`: a refusal is a grant value on a request
+            // that opens anyway. Its three requests are listed in
+            // `AGENT_OPS` and driven by `acl::agent`'s tests.
+            .chain(crate::acl::AGENT_OPS.iter().map(|op| op.action()))
+            .collect();
         let excluded: std::collections::HashSet<Action> =
             ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
         assert!(

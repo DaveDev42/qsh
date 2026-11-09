@@ -118,6 +118,7 @@ impl Ops {
                     .collect(),
                 timeout: timeout_ms.map(Duration::from_millis),
                 shell,
+                agent_sock: None,
             },
             stdin,
         )
@@ -157,6 +158,7 @@ impl Ops {
                 .collect(),
             timeout: req.timeout_ms.map(Duration::from_millis),
             shell: None,
+            agent_sock: None,
         };
         self.exec_spec(&req.host, spec, stdin)
     }

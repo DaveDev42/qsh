@@ -30,6 +30,7 @@ use qsh_transport::{AuthPath, Principal};
 use crate::broker::PeerFingerprint;
 use crate::file::guard::Normalizer;
 
+mod agent;
 mod load;
 mod paths;
 mod pin_grants;
@@ -114,6 +115,7 @@ pub(crate) use acl_restart_notice;
 /// constant rather than retyping the wording, so the surfaces can never
 /// drift apart.
 pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
+pub use agent::{AGENT_OPS, AgentOp, AgentVerdict, check_agent};
 pub use punch::{PUNCH_OPS, PunchOp, check_punch, refuse_unpinned_punch};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
@@ -187,13 +189,21 @@ pub enum Action {
     /// it grants only the path to the target, what the target then allows is
     /// decided there by that peer's own role and rows.
     HostPunch,
+    /// Create the per-session (or per-exec) agent socket on this host for a
+    /// peer's `-A` (`forward.agent`; ADR-0055 decision 16). Checked through
+    /// the ordinary choke point after the request's own action
+    /// (`session.open`, `session.attach`, `exec.run`) was allowed and before
+    /// any socket exists. A denial does not refuse the request: the session
+    /// or exec still opens and the reply says `AGENT_GRANT_DENIED`. `full`
+    /// and `exec` grant it. The resource is the request's op name.
+    ForwardAgent,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order — the full
     /// PRD §9 vocabulary (`crates/qsh-core/tests/it/acl_docs.rs` fails CI if
     /// this ever drifts from that list).
-    pub const ALL: [Action; 12] = [
+    pub const ALL: [Action; 13] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
@@ -206,6 +216,7 @@ impl Action {
         Action::FileRead,
         Action::FileWrite,
         Action::HostPunch,
+        Action::ForwardAgent,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -224,6 +235,7 @@ impl Action {
             Action::FileRead => "file.read",
             Action::FileWrite => "file.write",
             Action::HostPunch => "host.punch",
+            Action::ForwardAgent => "forward.agent",
         }
     }
 

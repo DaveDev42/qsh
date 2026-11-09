@@ -392,6 +392,7 @@ async fn denied_peer_cannot_learn_whether_a_session_exists<P: HostedPair>(h: P) 
             rows: 24,
             user: None,
             shell: None,
+            agent_sock: None,
         })
         .unwrap()
         .id()

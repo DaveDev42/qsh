@@ -6,6 +6,7 @@ impl Server {
     pub(super) fn handle_exec_start(
         &self,
         ctx: &ConnCtx,
+        conn: Option<&Connection>,
         request_id: u64,
         req: &ExecStart,
     ) -> ControlMessage {
@@ -33,8 +34,8 @@ impl Server {
         }
         // Agent forwarding (ADR-0055 decision 3): a shape check, before the
         // ACL decision and with no audit record.
-        let agent = match super::sessions::agent_grant(ctx, &req.agent_channel) {
-            Ok(agent) => agent,
+        let agent_channel = match super::agent::requested_channel(ctx, &req.agent_channel) {
+            Ok(channel) => channel,
             Err(why) => {
                 return ControlMessage::error(
                     request_id,
@@ -100,6 +101,21 @@ impl Server {
             }
         };
 
+        // ---- `forward.agent` (ADR-0055 decision 16): after the exec's own
+        // decision and every gate that can still refuse it, before anything
+        // is issued. A refusal never fails the exec. The socket is made now
+        // and accepts at once; it goes with the pending ticket, or with the
+        // exec once the ticket is redeemed. ----
+        let prepared = self.prepare_agent(
+            ctx,
+            conn,
+            request_id,
+            crate::acl::AgentOp::ExecRun,
+            agent_channel,
+        );
+        let agent_grant = prepared.grant;
+        let agent_sock = prepared.sock();
+
         // ---- Allowed: issue a single-use ticket. Nothing spawned yet. ----
         let spec = ExecSpec {
             argv: req.argv.clone(),
@@ -110,6 +126,7 @@ impl Server {
                 .collect(),
             timeout: (req.timeout_ms > 0).then(|| Duration::from_millis(req.timeout_ms)),
             shell,
+            agent_sock,
         };
         let exec_id = ulid::Ulid::generate().to_string();
         let ticket = self.issue_ticket(
@@ -118,6 +135,7 @@ impl Server {
                 exec_id: exec_id.clone(),
                 spec,
                 permit,
+                agent: self.start_exec_agent(prepared),
             }),
         );
         tracing::info!(
@@ -131,7 +149,7 @@ impl Server {
             response::Body::ExecStarted(ExecStarted {
                 exec_id,
                 ticket: ticket.to_vec(),
-                agent: agent as i32,
+                agent: agent_grant as i32,
             }),
         )
     }
