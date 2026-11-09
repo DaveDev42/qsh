@@ -6,18 +6,15 @@
 //! temporary runtime directory for agent sockets. The client is a test: it
 //! sends `agent_channel` through the `Session` entry points the wire step
 //! added, accepts the host's `AGENT` streams itself and bridges each one to a
-//! [`FakeAgent`]. The program on the host is a small `python3` script (or the
-//! test itself, connecting to the socket the host announced), and the test
-//! skips with a message when `python3` is missing.
+//! [`FakeAgent`]. The program on the host is `qsh-agent-probe` (or the test
+//! itself, connecting to the socket the host announced); it speaks the
+//! protocol to a Unix socket or a Windows named pipe alike.
 //!
 //! The dispatcher that does this in the real client, the local agent connect
 //! and the filter are the client step's; nothing here depends on them.
 //!
 //! [`Server`]: qsh_core::server::Server
 
-#![cfg(unix)]
-
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,11 +26,13 @@ use qsh_core::broker::SourceExit;
 use qsh_core::client::ClientError;
 use qsh_core::config::Paths;
 use qsh_core::exec::ExecSpec;
+use qsh_core::server::Server;
 use qsh_core::trust::SharedTrustStore;
 use qsh_proto::ErrorCode;
 use qsh_proto::agent::SSH2_AGENTC_REQUEST_IDENTITIES;
 use qsh_proto::wire::{self, AgentGrant, ExecFrame, StreamHeader, StreamKind};
-use qsh_testkit::fake_agent::{FakeAgent, FakeIdentity, identities_answer};
+use qsh_testkit::agent_probe::{self, hex};
+use qsh_testkit::fake_agent::{FakeAgent, FakeIdentity, connect_endpoint, identities_answer};
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
 use qsh_testkit::pair::HostedPair;
 use qsh_transport::{Connection, FramedStream, Principal, StaticTrust};
@@ -51,6 +50,9 @@ struct Env {
     runtime: PathBuf,
     trust: Arc<SharedTrustStore>,
     client: TestIdentity,
+    /// The host under test, for finding its sockets where there is no
+    /// directory to list (Windows).
+    server: Mutex<Option<Arc<Server>>>,
 }
 
 impl Env {
@@ -73,8 +75,12 @@ impl Env {
         if let Some(text) = acl {
             let path = paths.acl_file();
             std::fs::write(&path, text).expect("write acl.toml");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .expect("chmod acl.toml");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .expect("chmod acl.toml");
+            }
         }
         let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
         let runtime = dir.path().join("run");
@@ -84,7 +90,13 @@ impl Env {
             runtime,
             trust,
             client,
+            server: Mutex::new(None),
         }
+    }
+
+    /// Remember `h`'s host as the one whose sockets [`Self::sockets`] lists.
+    fn watch(&self, h: &LoopbackHarness) {
+        *self.server.lock().unwrap() = Some(Arc::clone(&h.server));
     }
 
     fn authorizer(&self) -> Arc<dyn Authorizer> {
@@ -108,22 +120,34 @@ impl Env {
         )
         .await;
         h.server.set_agent_runtime_dir(self.runtime.clone());
+        self.watch(&h);
         h
     }
 
-    /// The names in `<runtime>/agent/`; empty when the directory is absent.
-    fn sockets(&self) -> Vec<String> {
-        agent_entries(&self.runtime)
-    }
-}
-
-fn agent_entries(runtime: &Path) -> Vec<String> {
-    match std::fs::read_dir(runtime.join("agent")) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(_) => Vec::new(),
+    /// The host's sockets. Unix: the files in `<runtime>/agent/` (exec
+    /// sockets included); empty when the directory is absent. Windows: a
+    /// named pipe has no directory, so the host's own list of session
+    /// sockets.
+    fn sockets(&self) -> Vec<PathBuf> {
+        #[cfg(unix)]
+        {
+            match std::fs::read_dir(self.runtime.join("agent")) {
+                Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.server
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|server| server.agent_session_endpoints())
+                .unwrap_or_default()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect()
+        }
     }
 }
 
@@ -149,9 +173,9 @@ fn open_req(agent_channel: &[u8]) -> wire::SessionOpen {
     }
 }
 
-fn exec_spec(argv: &[&str]) -> ExecSpec {
+fn exec_spec<S: AsRef<str>>(argv: &[S]) -> ExecSpec {
     ExecSpec {
-        argv: argv.iter().map(|s| s.to_string()).collect(),
+        argv: argv.iter().map(|s| s.as_ref().to_string()).collect(),
         env: vec![],
         timeout: None,
         shell: None,
@@ -229,7 +253,7 @@ impl Drop for ClientAgent {
 /// `REQUEST_IDENTITIES` and read one whole reply. `None` when the connection
 /// is refused or closed before a reply.
 async fn request_identities(sock: &Path) -> Option<Vec<u8>> {
-    let mut stream = tokio::net::UnixStream::connect(sock).await.ok()?;
+    let mut stream = connect_endpoint(sock.to_str()?).await.ok()?;
     stream
         .write_all(&[0, 0, 0, 1, SSH2_AGENTC_REQUEST_IDENTITIES])
         .await
@@ -255,27 +279,23 @@ async fn is_closed_at_once(sock: &Path) -> bool {
 fn the_one_socket(env: &Env) -> PathBuf {
     let entries = env.sockets();
     assert_eq!(entries.len(), 1, "exactly one agent socket: {entries:?}");
-    env.runtime.join("agent").join(&entries[0])
+    entries.into_iter().next().unwrap()
+}
+
+/// Wait until nothing listens on `sock` any more: a connect fails.
+async fn wait_until_gone(sock: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while connect_endpoint(sock.to_str().unwrap()).await.is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} still accepts connections",
+            sock.display()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 // ---- exec ---------------------------------------------------------------
-
-const PROGRAM: &str = r#"
-import os, socket, struct
-s = socket.socket(socket.AF_UNIX)
-s.connect(os.environ["SSH_AUTH_SOCK"])
-s.sendall(struct.pack(">IB", 1, 11))
-def rd(n):
-    b = b""
-    while len(b) < n:
-        c = s.recv(n - len(b))
-        if not c:
-            raise SystemExit(3)
-        b += c
-    return b
-(n,) = struct.unpack(">I", rd(4))
-print(rd(n).hex())
-"#;
 
 /// Run `argv` as an exec on `s`, returning stdout and the exit code.
 async fn run_exec(
@@ -310,36 +330,24 @@ async fn run_exec(
     (grant, String::from_utf8_lossy(&stdout).into_owned(), code)
 }
 
-fn have_python() -> bool {
-    let found = std::process::Command::new("python3")
-        .arg("-c")
-        .arg("import socket")
-        .status()
-        .is_ok_and(|s| s.success());
-    if !found {
-        eprintln!("skipping: python3 is not available to act as the program on the host");
-    }
-    found
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exec_program_lists_identities_through_the_forwarded_socket() {
-    if !have_python() {
-        return;
-    }
     let env = Env::new("role = \"full\"\n", None);
     let h = env.start().await;
     let fake = Arc::new(FakeAgent::start(fake_identities()).await.unwrap());
     let mut s = h.session().await;
     let client = ClientAgent::start(s.connection().clone(), CHANNEL.to_vec(), Arc::clone(&fake));
 
-    let (grant, stdout, code) =
-        run_exec(&mut s, &exec_spec(&["python3", "-c", PROGRAM]), &CHANNEL).await;
+    let (grant, stdout, code) = run_exec(
+        &mut s,
+        &exec_spec(&agent_probe::call_argv(&["11".into()])),
+        &CHANNEL,
+    )
+    .await;
     assert_eq!(grant, AgentGrant::Forwarded);
     assert_eq!(code, 0, "the program failed: {stdout}");
     let expected = identities_answer(&fake_identities());
-    let hex: String = expected[4..].iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(stdout.trim(), hex);
+    assert_eq!(stdout.trim(), hex(&expected[4..]));
     assert_eq!(client.served(), 1);
     assert_eq!(fake.received_kinds(), vec![SSH2_AGENTC_REQUEST_IDENTITIES]);
 
@@ -356,11 +364,12 @@ async fn ssh_auth_sock_is_pinned_by_the_host() {
     let env = Env::new("role = \"full\"\n", None);
     let h = env.start().await;
     let mut s = h.session().await;
-    let show = ["sh", "-c", "printf %s \"${SSH_AUTH_SOCK-unset}\""];
+    // Prints `$SSH_AUTH_SOCK` as the program sees it, or `unset`.
+    let show = agent_probe::sock_argv();
 
     // No agent: the client's value never reaches the child.
     let mut spec = exec_spec(&show);
-    spec.env = vec![("SSH_AUTH_SOCK".into(), "/tmp/evil.sock".into())];
+    spec.env = vec![("SSH_AUTH_SOCK".into(), "evil-socket".into())];
     let (grant, stdout, _) = run_exec(&mut s, &spec, &[]).await;
     assert_eq!(grant, AgentGrant::Unspecified);
     assert_eq!(stdout, "unset");
@@ -368,9 +377,15 @@ async fn ssh_auth_sock_is_pinned_by_the_host() {
     // With an agent: the host's own socket, whatever the client sent.
     let (grant, stdout, _) = run_exec(&mut s, &spec, &CHANNEL).await;
     assert_eq!(grant, AgentGrant::Forwarded);
+    #[cfg(unix)]
     assert!(
         stdout.starts_with(env.runtime.join("agent").to_str().unwrap())
             && stdout.ends_with(".sock"),
+        "SSH_AUTH_SOCK was {stdout:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        stdout.starts_with(r"\\.\pipe\qsh-agent-"),
         "SSH_AUTH_SOCK was {stdout:?}"
     );
     s.close();
@@ -398,14 +413,23 @@ async fn a_session_socket_is_private_pinned_in_the_spec_and_bridged() {
         sock.to_str(),
         "SSH_AUTH_SOCK is the host's socket"
     );
-    // 0700 directory, 0600 socket (decision 6).
-    let dir_mode = std::fs::metadata(env.runtime.join("agent"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(dir_mode & 0o777, 0o700);
-    let sock_mode = std::fs::metadata(&sock).unwrap().permissions().mode();
-    assert_eq!(sock_mode & 0o777, 0o600);
+    // 0700 directory, 0600 socket (decision 6). Windows has a pipe instead
+    // of a directory and a file; its owner-only DACL is pinned by
+    // `windows_agent_pipe_is_owner_only_and_rejects_remote_clients` and
+    // `agent_socket_is_owner_only`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir_mode = std::fs::metadata(env.runtime.join("agent"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700);
+        let sock_mode = std::fs::metadata(&sock).unwrap().permissions().mode();
+        assert_eq!(sock_mode & 0o777, 0o600);
+    }
+    #[cfg(windows)]
+    assert!(sock.to_string_lossy().starts_with(r"\\.\pipe\qsh-agent-"));
 
     let reply = request_identities(&sock).await.expect("a reply");
     assert_eq!(reply, identities_answer(&fake_identities()));
@@ -434,7 +458,7 @@ async fn agent_socket_is_removed_when_the_session_ends() {
         env.sockets().is_empty()
     })
     .await;
-    assert!(!sock.exists());
+    wait_until_gone(&sock).await;
 
     // The child exits by itself.
     let opened = s.session_open(open_req(&CHANNEL)).await.unwrap();
@@ -463,14 +487,16 @@ async fn dropping_the_host_removes_its_session_sockets() {
     let opened = s.session_open(open_req(&CHANNEL)).await.unwrap();
     assert_eq!(opened.agent, AgentGrant::Forwarded as i32);
     let _pipe = h.pipes().take().unwrap();
-    assert_eq!(env.sockets().len(), 1);
+    let sock = the_one_socket(&env);
     s.close();
     h.shutdown().await;
     drop(_pipe);
+    #[cfg(unix)]
     wait_until("the host's sockets are removed", || {
         env.sockets().is_empty()
     })
     .await;
+    wait_until_gone(&sock).await;
 }
 
 /// Decision 9: with nothing backing the socket, a local connection is closed
@@ -503,8 +529,9 @@ async fn a_socket_with_no_backing_closes_connections_at_once() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(closed, "a connection to an unbacked socket must be closed");
-    assert!(
-        sock.exists(),
+    assert_eq!(
+        env.sockets(),
+        vec![sock.clone()],
         "the socket belongs to the session, not to the connection"
     );
     assert!(is_closed_at_once(&sock).await);
@@ -761,6 +788,7 @@ async fn a_failed_audit_write_leaves_no_socket_and_answers_unavailable() {
     )
     .await;
     h.server.set_agent_runtime_dir(env.runtime.clone());
+    env.watch(&h);
     let mut s = h.session().await;
 
     let opened = s.session_open(open_req(&CHANNEL)).await.unwrap();

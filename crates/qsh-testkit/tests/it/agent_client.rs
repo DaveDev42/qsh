@@ -167,6 +167,69 @@ async fn a_disallowed_request_is_answered_by_the_client_and_never_reaches_the_ag
     );
 }
 
+/// The body of a `session-bind@openssh.com` extension request (type 27): the
+/// extension name, the host key, the session identifier, a signature and the
+/// forwarding flag, each string length-prefixed.
+fn session_bind_body() -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+    let mut body = Vec::new();
+    string(&mut body, b"session-bind@openssh.com");
+    string(&mut body, b"hostkey-blob");
+    string(&mut body, b"session-identifier");
+    string(&mut body, b"signature-of-the-session-identifier");
+    body.push(1);
+    body
+}
+
+/// ADR-0055 decision 22 A23: `session-bind@openssh.com` is how an ssh hop
+/// tells the agent which host a key is being used for, so a destination
+/// constrained key (`ssh-add -h`) can be checked. The client answers
+/// `FAILURE` to it and never forwards it, so a constrained key stays unbound
+/// on the forwarded connection (the agent then refuses to sign with it)
+/// instead of looking like a direct local use.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_bind_is_refused_so_constrained_keys_stay_unbound() {
+    let fake = FakeAgent::start(vec![key()]).await.unwrap();
+    let rig = rig(Some(fake.endpoint())).await;
+    let channel = rig.agent.register();
+    let (mut send, mut recv) = open_agent_stream(&rig.host, &channel.bytes()).await;
+
+    let bind = encode_message(27, &session_bind_body()).unwrap();
+    let before = exchange(&mut send, &mut recv, &list_request()).await;
+    assert_eq!(before, Some(identities_answer(&[key()])));
+    for round in 0..2 {
+        assert_eq!(
+            exchange(&mut send, &mut recv, &bind).await.as_deref(),
+            Some(&FAILURE_REPLY[..]),
+            "round {round}: the bind is answered by the client"
+        );
+    }
+
+    // The refusal does not poison the stream: signing still goes through.
+    let body = sign_request_body(&key().blob, b"challenge", 0);
+    let request = encode_message(SSH2_AGENTC_SIGN_REQUEST, &body).unwrap();
+    assert_eq!(
+        exchange(&mut send, &mut recv, &request).await,
+        Some(sign_response(&key().blob, b"challenge"))
+    );
+
+    // The same on a stream of its own, as the first and only request.
+    let (mut send2, mut recv2) = open_agent_stream(&rig.host, &channel.bytes()).await;
+    assert_eq!(
+        exchange(&mut send2, &mut recv2, &bind).await.as_deref(),
+        Some(&FAILURE_REPLY[..])
+    );
+
+    assert_eq!(
+        fake.received_kinds(),
+        vec![SSH2_AGENTC_REQUEST_IDENTITIES, SSH2_AGENTC_SIGN_REQUEST],
+        "no extension request (27) reached the local agent"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unregistered_agent_channel_never_reaches_the_local_agent() {
     let fake = FakeAgent::start(vec![key()]).await.unwrap();

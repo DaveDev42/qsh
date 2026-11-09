@@ -70,6 +70,7 @@
 //!
 //! This crate may depend on any workspace crate.
 
+pub mod agent_probe;
 pub mod asset_server;
 pub mod chaos;
 #[cfg(windows)]

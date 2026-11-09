@@ -177,6 +177,38 @@ where
     }
 }
 
+/// Open a connection to an agent endpoint: a Unix socket path, or on Windows
+/// a named pipe name. Works for the host's own socket as well as a
+/// [`FakeAgent`].
+#[cfg(unix)]
+pub async fn connect_endpoint(endpoint: &str) -> io::Result<AgentClientStream> {
+    tokio::net::UnixStream::connect(endpoint).await
+}
+
+/// Open a connection to an agent endpoint: a Unix socket path, or on Windows
+/// a named pipe name.
+///
+/// A pipe server creates the next instance only after a client has connected
+/// to the current one, so a second client that arrives in between sees
+/// `ERROR_PIPE_BUSY`. Retry briefly, as the tokio named-pipe client example
+/// does.
+#[cfg(windows)]
+pub async fn connect_endpoint(endpoint: &str) -> io::Result<AgentClientStream> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint) {
+            Err(err)
+                if err.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// A fake ssh-agent listening on a Unix socket (Windows: a named pipe).
 /// Dropping it stops the listener and every connection.
 pub struct FakeAgent {
@@ -261,32 +293,8 @@ impl FakeAgent {
     }
 
     /// Open a new connection to the agent.
-    #[cfg(unix)]
     pub async fn connect(&self) -> io::Result<AgentClientStream> {
-        tokio::net::UnixStream::connect(&self.endpoint).await
-    }
-
-    /// Open a new connection to the agent.
-    ///
-    /// The server creates the next pipe instance only after a client has
-    /// connected to the current one, so a second client that arrives in
-    /// between sees `ERROR_PIPE_BUSY`. Retry briefly, as the tokio
-    /// named-pipe client example does.
-    #[cfg(windows)]
-    pub async fn connect(&self) -> io::Result<AgentClientStream> {
-        const ERROR_PIPE_BUSY: i32 = 231;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match tokio::net::windows::named_pipe::ClientOptions::new().open(&self.endpoint) {
-                Err(err)
-                    if err.raw_os_error() == Some(ERROR_PIPE_BUSY)
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                }
-                other => return other,
-            }
-        }
+        connect_endpoint(&self.endpoint).await
     }
 
     /// Every message type received so far, in arrival order, across all
