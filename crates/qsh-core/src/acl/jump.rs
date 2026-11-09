@@ -34,19 +34,23 @@ pub enum JumpVerdict {
 /// Decide whether `requester` may jump through this host to `target`
 /// (`host:port` exactly as the stream header carried it), and record the
 /// decision, before the caller creates anything.
+///
+/// `request_id` is `None` for a `JUMP` stream, which is no control-stream
+/// request: the record then carries the connection-level `"-"` like every
+/// other inline stream decision.
 pub fn check_jump(
     authorizer: &dyn Authorizer,
     audit: &dyn AuditSink,
-    request_id: u64,
+    request_id: Option<u64>,
     target: &str,
     requester: &Requester<'_>,
     peer_addr: SocketAddr,
 ) -> JumpVerdict {
     let action = Action::ForwardJump;
     let verdict = authorizer.check(requester, action, ResourceRef::unowned(target));
-    let recorded = audit.record(
-        &AuditRecord::now(
-            request_id,
+    let record = match request_id {
+        Some(id) => AuditRecord::now(
+            id,
             requester.principal,
             requester.auth_path,
             action,
@@ -54,15 +58,50 @@ pub fn check_jump(
             verdict.decision,
             verdict.rule,
             peer_addr,
-        )
-        .with_verdict_role(verdict.role)
-        .with_verdict_pin_grant(verdict.pin_grant),
+        ),
+        None => AuditRecord::connection_level(
+            requester.principal,
+            requester.auth_path,
+            action,
+            target,
+            verdict.decision,
+            verdict.rule,
+            peer_addr,
+        ),
+    };
+    let recorded = audit.record(
+        &record
+            .with_verdict_role(verdict.role)
+            .with_verdict_pin_grant(verdict.pin_grant),
     );
     match (verdict.decision, recorded.is_ok()) {
         (Decision::Deny, _) => JumpVerdict::Denied,
         (Decision::Allow, false) => JumpVerdict::AuditFailed,
         (Decision::Allow, true) => JumpVerdict::Allowed,
     }
+}
+
+/// Record the second deny of a jump: the policy allowed `target`, but every
+/// address it resolved to is host-local, which is never a jump target. The
+/// caller answers the uniform `PERMISSION_DENIED`. Returns whether the line
+/// was written (a failed write is only logged: the request is refused anyway).
+pub fn record_host_local_deny(
+    audit: &dyn AuditSink,
+    target: &str,
+    requester: &Requester<'_>,
+    peer_addr: SocketAddr,
+) -> bool {
+    audit
+        .record(&AuditRecord::connection_level(
+            requester.principal,
+            requester.auth_path,
+            Action::ForwardJump,
+            target,
+            Decision::Deny,
+            None,
+            peer_addr,
+        ))
+        .is_ok()
 }
 
 #[cfg(test)]

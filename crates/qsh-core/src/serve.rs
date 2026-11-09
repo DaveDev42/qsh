@@ -384,7 +384,7 @@ fn is_address_taken(err: &SetupError) -> bool {
 }
 
 /// Resolves when the host has been idle for `idle`: no session, detached or
-/// not, and no connection. Starting up with nobody connecting counts the
+/// not, no connection and no live jump channel (ADR-0056 decision 9). Starting up with nobody connecting counts the
 /// same, so the clock starts when this future is first polled.
 async fn wait_until_idle(server: Arc<Server>, idle: Duration) {
     let poll = (idle / 4).clamp(Duration::from_millis(10), Duration::from_secs(1));
@@ -394,7 +394,7 @@ async fn wait_until_idle(server: Arc<Server>, idle: Duration) {
     loop {
         ticker.tick().await;
         let activity = server.activity();
-        if activity.sessions > 0 || activity.connections > 0 {
+        if activity.sessions > 0 || activity.connections > 0 || activity.jump_channels > 0 {
             idle_since = tokio::time::Instant::now();
         } else if idle_since.elapsed() >= idle {
             return;

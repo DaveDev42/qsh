@@ -63,6 +63,7 @@ mod exec;
 mod file;
 mod file_data;
 mod file_host;
+mod jump;
 mod punch;
 mod reverse;
 mod sessions;
@@ -279,6 +280,9 @@ pub struct HostActivity {
     pub sessions: usize,
     /// Open connections.
     pub connections: usize,
+    /// Live jump channels (ADR-0056 decision 9, ADR-0051 decision 2): one
+    /// keeps the host from counting as idle.
+    pub jump_channels: usize,
 }
 
 /// An authorized exec waiting for its data stream.
@@ -665,6 +669,14 @@ pub struct Server {
     /// The agent sockets of this host's sessions and the per-connection
     /// `AGENT` stream budgets (ADR-0055).
     agents: Arc<agent::AgentTable>,
+    /// The `JUMP` channels of this host's connections (ADR-0056).
+    jump: Arc<crate::jump::middle::JumpTable>,
+    /// Counters of those channels.
+    jump_stats: Arc<crate::jump::middle::JumpStats>,
+    /// Timers and filter of the intermediate peer, set at most once by
+    /// [`Server::set_jump_options`]. Unset (production) reads as the
+    /// defaults.
+    jump_options: OnceLock<crate::jump::middle::JumpOptions>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -834,6 +846,9 @@ impl Server {
             trust_watch: OnceLock::new(),
             punch: Mutex::new(None),
             agents: Arc::new(agent::AgentTable::new()),
+            jump: Arc::new(crate::jump::middle::JumpTable::new()),
+            jump_stats: Arc::new(crate::jump::middle::JumpStats::default()),
+            jump_options: OnceLock::new(),
         })
     }
 
@@ -972,6 +987,7 @@ impl Server {
         HostActivity {
             sessions: self.sessions.live_counts().live,
             connections: self.quotas.total_connections_in_use(),
+            jump_channels: self.jump.live_channels(),
         }
     }
 

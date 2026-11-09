@@ -67,7 +67,14 @@ fn check(sb: &Sandbox, audit: &dyn AuditSink) -> JumpVerdict {
         AuthPath::Pin,
         Some(PeerFingerprint::new(*sb.fingerprint.as_bytes())),
     );
-    check_jump(sb.authorizer.as_ref(), audit, 7, TARGET, &requester, peer())
+    check_jump(
+        sb.authorizer.as_ref(),
+        audit,
+        Some(7),
+        TARGET,
+        &requester,
+        peer(),
+    )
 }
 
 #[test]
@@ -206,4 +213,31 @@ fn the_audit_record_is_structural() {
             "unexpected audit key {key}"
         );
     }
+}
+
+/// A `JUMP` stream is no control-stream request, so it records the
+/// connection-level request id `"-"`.
+#[test]
+fn a_stream_decision_records_the_connection_level_request_id() {
+    let sb = sandbox("role = \"tunnel\"\n", None);
+    let audit = MemoryAuditSink::new();
+    let principal = phone();
+    let requester = Requester::new(
+        &principal,
+        AuthPath::Pin,
+        Some(PeerFingerprint::new(*sb.fingerprint.as_bytes())),
+    );
+    let verdict = check_jump(
+        sb.authorizer.as_ref(),
+        &audit,
+        None,
+        TARGET,
+        &requester,
+        peer(),
+    );
+    assert_eq!(verdict, JumpVerdict::Allowed);
+    let records = audit.records();
+    assert_eq!(records[0].request_id, "-");
+    assert_eq!(records[0].action, "forward.jump");
+    assert_eq!(records[0].resource, TARGET);
 }
