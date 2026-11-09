@@ -17,11 +17,16 @@ pub(super) async fn dial_peer(
     )
     .with_tuning(tuning);
     let address = target.address.clone();
-    let addrs = crate::ops::resolve_all(&address).await?;
-    let dialed =
-        crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &target.server_name))
-            .await
-            .map_err(|(err, attempted)| map_dial_error(err, &address, attempted))?;
+    let dialed = crate::ops::route::dial_routed(
+        &dialer,
+        &address,
+        &target.server_name,
+        target.punch.as_ref(),
+        tuning,
+        &crate::ops::SystemResolver,
+    )
+    .await
+    .map_err(|err| err.into_op(&address))?;
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {

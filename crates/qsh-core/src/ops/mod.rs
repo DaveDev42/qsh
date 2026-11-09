@@ -41,6 +41,7 @@ pub mod tunnel;
 
 mod identity;
 mod probe;
+pub(crate) mod route;
 mod trust;
 
 pub use acl::{AclCheckOp, AclShowOp};
@@ -86,6 +87,9 @@ pub(crate) struct PeerTarget {
     pub address: String,
     /// SNI value for the dial (see [`server_name_for`]).
     pub server_name: String,
+    /// How to punch to this host when the direct dial does not stand; `None`
+    /// when no rendezvous was asked for or punching is off.
+    pub punch: Option<Arc<crate::punch::PunchPlan>>,
 }
 
 /// [`Ops::resolve_serve_target`]'s result: the controller key
@@ -608,6 +612,9 @@ pub struct Ops {
     /// ([`Self::with_ssh_revival`], ADR-0051 decision 4). `None` (every
     /// `Ops::new`) never runs ssh on its own.
     revival: Option<Arc<SshRevival>>,
+    /// How this process punches ([`Self::with_punch`], ADR-0054). The
+    /// default asks for no rendezvous, so the route is the direct dial.
+    punch: crate::punch::ClientPunch,
 }
 
 impl std::fmt::Debug for Ops {
@@ -719,7 +726,17 @@ impl Ops {
             connect_runtime: Arc::new(OnceLock::new()),
             audit: None,
             revival: None,
+            punch: crate::punch::ClientPunch::default(),
         }
+    }
+
+    /// Set how this process punches: the mode and the rendezvous peers to
+    /// try (`--rendezvous`), plus the sources tests replace with a
+    /// simulated network (ADR-0054 decisions 4, 16, 19).
+    #[must_use]
+    pub fn with_punch(mut self, punch: crate::punch::ClientPunch) -> Self {
+        self.punch = punch;
+        self
     }
 
     /// Inject the audit sink `trust_rename` (and any future fail-closed
@@ -945,12 +962,97 @@ impl Ops {
         })?;
         let trust = self.open_trust()?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
-        let (address, server_name) = resolve_peer_address(&trust.snapshot(), &hosts, host)?;
+        let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                return match self.punch_only_target(host, &identity, &trust) {
+                    Some(target) => Ok(target),
+                    None => Err(err),
+                };
+            }
+        };
+        let punch = self.punch_plan(host, &identity, &trust);
         Ok(PeerTarget {
             identity,
             trust,
             address,
             server_name,
+            punch,
+        })
+    }
+
+    /// The punch plan for `host` (ADR-0054 decisions 4 and 16): the target
+    /// is the pin of that name, the rendezvous candidates are the peers
+    /// named in [`ClientPunch::rendezvous`](crate::punch::ClientPunch) that
+    /// are pinned here with an address (at most two are used). `None` when
+    /// punching is off, nothing was asked for, or `host` has no pin: a
+    /// punched handshake is checked against that pin and a host without one
+    /// has nothing to check against.
+    pub(crate) fn punch_plan(
+        &self,
+        host: &str,
+        identity: &LoadedIdentity,
+        trust: &Arc<SharedTrustStore>,
+    ) -> Option<Arc<crate::punch::PunchPlan>> {
+        use crate::punch::{PunchMode, RendezvousPeer};
+        if self.punch.mode == PunchMode::Off || self.punch.rendezvous.is_empty() {
+            return None;
+        }
+        let store = trust.snapshot();
+        let key = host::lookup_name(host);
+        let target: Fingerprint = store.find(key)?.fingerprint.parse().ok()?;
+        let rendezvous = self
+            .punch
+            .rendezvous
+            .iter()
+            .filter(|name| name.as_str() != key)
+            .filter_map(|name| {
+                let peer = store.find(name)?;
+                if peer.address.is_empty() {
+                    return None;
+                }
+                Some(RendezvousPeer {
+                    name: peer.name.clone(),
+                    fingerprint: peer.fingerprint.parse().ok()?,
+                    address: peer.address.clone(),
+                })
+            })
+            .take(2)
+            .collect();
+        crate::punch::PunchPlan::new(
+            &self.punch,
+            target,
+            rendezvous,
+            identity.identity.device_id.clone(),
+            identity.local.clone(),
+            trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
+        )
+    }
+
+    /// A pin with no address can still be reached by punching, when a
+    /// rendezvous is usable (ADR-0054 decision 16.3). The target has an
+    /// empty address, so the route skips the direct dial.
+    pub(crate) fn punch_only_target(
+        &self,
+        host: &str,
+        identity: &LoadedIdentity,
+        trust: &Arc<SharedTrustStore>,
+    ) -> Option<PeerTarget> {
+        let store = trust.snapshot();
+        let pin = store.find(host::lookup_name(host))?;
+        if !pin.address.is_empty() {
+            return None;
+        }
+        let plan = self.punch_plan(host, identity, trust)?;
+        if !plan.has_rendezvous() {
+            return None;
+        }
+        Some(PeerTarget {
+            identity: identity.clone(),
+            trust: trust.clone(),
+            address: String::new(),
+            server_name: "qsh".to_string(),
+            punch: Some(plan),
         })
     }
 
@@ -970,12 +1072,38 @@ impl Ops {
     /// probe runtime is built and torn down here, before the dial's own
     /// multi-thread runtime exists.
     pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerRoute, OpError> {
-        match self.resolve_host_route(host)? {
+        let route = match self.resolve_host_route(host) {
+            Ok(route) => route,
+            Err(err) => return self.punch_only_route(host, err),
+        };
+        match route {
             HostRoute::Forward { .. } => Ok(PeerRoute::Forward(self.resolve_peer(host)?)),
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
                 host: host.to_string(),
                 socket,
             })),
+        }
+    }
+
+    /// `err` is the routing failure for `host`. A pin with no address and a
+    /// usable rendezvous is a punch-only route instead of `HOST_NOT_FOUND`
+    /// (ADR-0054 decision 16.3).
+    fn punch_only_route(&self, host: &str, err: OpError) -> Result<PeerRoute, OpError> {
+        if err.code != ErrorCode::HostNotFound {
+            return Err(err);
+        }
+        if self.punch.rendezvous.is_empty() {
+            return Err(err);
+        }
+        let Some(identity) = self.load_identity().ok().flatten() else {
+            return Err(err);
+        };
+        let Ok(trust) = self.open_trust() else {
+            return Err(err);
+        };
+        match self.punch_only_target(host, &identity, &trust) {
+            Some(target) => Ok(PeerRoute::Forward(target)),
+            None => Err(err),
         }
     }
 

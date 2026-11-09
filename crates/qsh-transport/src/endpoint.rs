@@ -58,7 +58,10 @@ pub fn set_default_dial_timeout(timeout: Duration) {
     DIAL_TIMEOUT_OVERRIDE_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn default_dial_timeout() -> Duration {
+/// The dial timeout a [`Dialer`] built now starts with: [`DEFAULT_DIAL_TIMEOUT`],
+/// or the `-o ConnectTimeout` override ([`set_default_dial_timeout`]). The hole
+/// punching route bounds its race with a direct dial by this value.
+pub fn default_dial_timeout() -> Duration {
     match DIAL_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed) {
         0 => DEFAULT_DIAL_TIMEOUT,
         ms => Duration::from_millis(ms),
