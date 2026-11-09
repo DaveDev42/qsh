@@ -359,9 +359,8 @@ async fn the_33rd_reverse_agent_stream_is_reset() {
     harness.shutdown().await;
 }
 
-// ---- python-driven end to end ---------------------------------------------
+// ---- probe-driven end to end ----------------------------------------------
 
-#[cfg(unix)]
 mod end_to_end {
     use super::*;
 
@@ -370,39 +369,17 @@ mod end_to_end {
     use qsh_proto::event::SessionEvent;
     use qsh_proto::{EnvVar, ExecRunReq, IdentityInitReq, KeyStoreMode};
     use qsh_proto::{SessionAttachReq, SessionOpenReq};
+    use qsh_testkit::agent_probe::{self, hex};
     use qsh_testkit::fake_agent::sign_response;
     use qsh_testkit::{ChaosPolicy, ChaosProxy};
 
-    /// Lists the identities and signs once, printing both answers as hex.
-    const PROGRAM: &str = r#"
-import os, socket, struct
-s = socket.socket(socket.AF_UNIX)
-s.connect(os.environ["SSH_AUTH_SOCK"])
-f = s.makefile("rb")
-def ask(kind, body=b""):
-    s.sendall(struct.pack(">IB", len(body) + 1, kind) + body)
-    (n,) = struct.unpack(">I", f.read(4))
-    return f.read(n)
-def string(b):
-    return struct.pack(">I", len(b)) + b
-print(ask(11).hex())
-print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)).hex())
-"#;
-
-    fn have_python() -> bool {
-        let found = std::process::Command::new("python3")
-            .arg("-c")
-            .arg("import socket")
-            .status()
-            .is_ok_and(|s| s.success());
-        if !found {
-            eprintln!("skipping: python3 is not available to act as the program on the host");
-        }
-        found
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    /// The messages the program on the host sends: list, then sign `blob-a`
+    /// over `data-to-sign`. The probe prints both answers as hex.
+    fn program_messages() -> Vec<String> {
+        vec![
+            "11".into(),
+            agent_probe::sign_arg(b"blob-a", b"data-to-sign"),
+        ]
     }
 
     async fn blocking<T: Send + 'static>(
@@ -440,9 +417,6 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
     /// are the CLI-side agent's.
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_forward_over_the_reverse_route() {
-        if !have_python() {
-            return;
-        }
         let target = make_identity();
         let harness =
             ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "revhost"))
@@ -464,7 +438,7 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
                     ops.exec_run(
                         ExecRunReq {
                             host: "revhost".into(),
-                            argv: vec!["python3".into(), "-c".into(), PROGRAM.into()],
+                            argv: agent_probe::call_argv(&program_messages()),
                             env: vec![],
                             timeout_ms: Some(15_000),
                         },
@@ -495,11 +469,21 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
     }
 
     /// One identity request through the session's socket, printed with a tag
-    /// the typed line itself does not contain.
-    const SHELL_LIST: &str = "python3 -c 'import os,socket,struct,sys;s=socket.socket(socket.AF_UNIX);\
-        s.connect(os.environ[\"SSH_AUTH_SOCK\"]);s.sendall(struct.pack(\">IB\",1,11));\
-        f=s.makefile(\"rb\");n=struct.unpack(\">I\",f.read(4))[0];\
-        print(\"AG\"+\"ENT\"+sys.argv[1]+\":\"+f.read(n).hex())' ";
+    /// the typed line itself does not contain (the probe builds `AGENT<n>:`).
+    fn shell_list(n: u32) -> String {
+        agent_probe::shell_tagged_call(&n.to_string(), &["11".to_string()])
+    }
+
+    /// The shell a session runs, and the line ending that submits a command
+    /// typed into it.
+    #[cfg(unix)]
+    const SHELL: &[&str] = &["sh"];
+    #[cfg(unix)]
+    const EOL: &str = "\n";
+    #[cfg(windows)]
+    const SHELL: &[&str] = &["cmd.exe", "/q"];
+    #[cfg(windows)]
+    const EOL: &str = "\r\n";
 
     fn read_until(stream: &mut SessionAttachStream, seen: &mut String, needle: &str) {
         while let Some(event) = stream.next_event() {
@@ -530,9 +514,6 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
     /// request.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reverse_reattach_registers_its_channel_again() {
-        if !have_python() {
-            return;
-        }
         let target = make_identity();
         let harness =
             ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "revhost"))
@@ -590,7 +571,7 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
                 let session_ref = ops
                     .session_open(SessionOpenReq {
                         host: "revhost".into(),
-                        argv: vec!["sh".into()],
+                        argv: SHELL.iter().map(|a| (*a).to_string()).collect(),
                         env: vec![
                             EnvVar {
                                 name: "LANG".into(),
@@ -621,7 +602,7 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
                 assert_eq!(stream.agent_outcome(), Some("forwarded"));
                 let mut seen = String::new();
                 stream
-                    .write(format!("{SHELL_LIST}1\n").into_bytes())
+                    .write(format!("{}{EOL}", shell_list(1)).into_bytes())
                     .expect("write");
                 read_until(&mut stream, &mut seen, &format!("AGENT1:{answer}"));
 
@@ -631,7 +612,7 @@ print(ask(13, string(b"blob-a") + string(b"data-to-sign") + struct.pack(">I", 0)
                 // Typed into a session whose path is already dead; it runs
                 // after the recovery, and the socket has its backing again.
                 stream
-                    .write(format!("{SHELL_LIST}2\n").into_bytes())
+                    .write(format!("{}{EOL}", shell_list(2)).into_bytes())
                     .expect("write");
                 read_until(&mut stream, &mut seen, &format!("AGENT2:{answer}"));
                 stream.close();

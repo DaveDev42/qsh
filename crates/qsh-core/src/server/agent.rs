@@ -147,6 +147,8 @@ impl std::fmt::Debug for AgentTask {
 /// One session's socket: the task that owns the listener and the handle that
 /// swaps what stands behind it.
 struct SessionSocket {
+    /// The `SSH_AUTH_SOCK` value this socket was announced with.
+    endpoint: String,
     backing: watch::Sender<Option<Backing>>,
     _task: AgentTask,
 }
@@ -290,6 +292,21 @@ impl Server {
         let _ = self.agents.runtime_dir.set(dir);
     }
 
+    /// The `SSH_AUTH_SOCK` value (socket path, or pipe name on Windows) of
+    /// every live session socket. A test seam: a named pipe has no directory
+    /// to list, so a test that must find the socket a session announced asks
+    /// the host. Exec sockets are not included; they live as long as one
+    /// exec and are announced to the program itself.
+    pub fn agent_session_endpoints(&self) -> Vec<String> {
+        self.agents
+            .sockets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|s| s.endpoint.clone())
+            .collect()
+    }
+
     /// Decide `forward.agent` for a request that asked for an agent and, when
     /// allowed and recorded, create its socket (not yet accepting). Call this
     /// after the request's own authorization and before the session or exec
@@ -361,6 +378,7 @@ impl Server {
             return;
         };
         let table = &self.agents;
+        let endpoint = listener.auth_sock().to_string_lossy().into_owned();
         let (tx, rx) = watch::channel(backing);
         let key = id.0.clone();
         let weak = Arc::downgrade(table);
@@ -385,6 +403,7 @@ impl Server {
         sockets.insert(
             key,
             SessionSocket {
+                endpoint,
                 backing: tx,
                 _task: AgentTask(task),
             },

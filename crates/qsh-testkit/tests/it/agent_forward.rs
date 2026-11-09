@@ -4,12 +4,11 @@
 //!
 //! The host is a [`LoopbackHarness`] whose authorizer comes from a sandbox
 //! `trust.toml` that pins the `Ops` identity with role `full`. The program on
-//! the host is a small `python3` script (the test skips with a message when
-//! `python3` is missing) or, where only a connect matters, the test itself.
-//! A session in this harness is pipe-backed, so there the program is started
-//! by the test with `SSH_AUTH_SOCK` set to the socket the host made.
-
-#![cfg(unix)]
+//! the host runs `qsh-agent-probe` (a small ssh-agent client that works on
+//! every OS) or, where only a connect matters, the test itself. A session in
+//! this harness is pipe-backed, so there the program is started by the test
+//! with `SSH_AUTH_SOCK` set to the socket (on Windows, the named pipe) the
+//! host made.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use std::time::{Duration, Instant};
 use qsh_core::acl::{Authorizer, Role, load_or_deny};
 use qsh_core::agent::{AgentEndpoint, ClientAgent};
 use qsh_core::config::Paths;
+use qsh_core::server::Server;
 use qsh_core::trust::SharedTrustStore;
 use qsh_core::{ExecRunOutput, ExecStdin, Fingerprint, Ops, RecoveryConfig, SessionAttachStream};
 use qsh_proto::agent::{
@@ -26,9 +26,11 @@ use qsh_proto::agent::{
 use qsh_proto::{
     ExecRunReq, IdentityInitReq, KeyStoreMode, SessionAttachReq, SessionOpenReq, TrustAddReq,
 };
+use qsh_testkit::agent_probe::{self, hex, sign_arg};
 use qsh_testkit::chaos::{ChaosPolicy, DelayDist};
 use qsh_testkit::fake_agent::{
-    FakeAgent, FakeIdentity, identities_answer, sign_request_body, sign_response,
+    FakeAgent, FakeIdentity, connect_endpoint, fake_signature, identities_answer,
+    sign_request_body, sign_response,
 };
 use qsh_testkit::loopback::{LoopbackHarness, make_identity};
 use qsh_transport::{Principal, StaticTrust};
@@ -43,48 +45,14 @@ fn key(blob: &str) -> FakeIdentity {
     FakeIdentity::new(blob.as_bytes().to_vec(), "comment-never-logged")
 }
 
-/// The program on the host: connect to `$SSH_AUTH_SOCK` and send, one after
-/// the other on one connection, a list (11), a sign (13, request body in
-/// `argv[1]` as hex) and a remove-all (19). Prints each reply (without the
-/// length prefix) as a hex line.
-const PROGRAM: &str = r#"
-import os, socket, struct, sys
-s = socket.socket(socket.AF_UNIX)
-s.connect(os.environ["SSH_AUTH_SOCK"])
-def rd(n):
-    b = b""
-    while len(b) < n:
-        c = s.recv(n - len(b))
-        if not c:
-            raise SystemExit(3)
-        b += c
-    return b
-def call(msg):
-    s.sendall(struct.pack(">I", len(msg)) + msg)
-    (n,) = struct.unpack(">I", rd(4))
-    print(rd(n).hex(), flush=True)
-call(bytes([11]))
-call(bytes([13]) + bytes.fromhex(sys.argv[1]))
-call(bytes([19]))
-"#;
-
-fn have_python() -> bool {
-    let found = std::process::Command::new("python3")
-        .arg("-c")
-        .arg("import socket")
-        .status()
-        .is_ok_and(|s| s.success());
-    if !found {
-        eprintln!("skipping: python3 is not available to act as the program on the host");
-    }
-    found
+/// The messages the program on the host sends, one after the other on one
+/// connection: a list (11), a sign (13) and a remove-all (19). The probe
+/// prints each reply (without the length prefix) as a hex line.
+fn program_messages(key: &FakeIdentity) -> Vec<String> {
+    vec!["11".into(), sign_arg(&key.blob, CHALLENGE), "19".into()]
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// What `PROGRAM` must print for an agent that lists `key`: the list answer,
+/// What the program must print for an agent that lists `key`: the list answer,
 /// the signature, and the `FAILURE` the client gave the remove-all itself.
 fn expected_lines(key: &FakeIdentity) -> Vec<String> {
     vec![
@@ -92,10 +60,6 @@ fn expected_lines(key: &FakeIdentity) -> Vec<String> {
         hex(&sign_response(&key.blob, CHALLENGE)[4..]),
         hex(&FAILURE_REPLY[4..]),
     ]
-}
-
-fn sign_body_hex(key: &FakeIdentity) -> String {
-    hex(&sign_request_body(&key.blob, CHALLENGE, 0))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -199,16 +163,36 @@ impl Rig {
     }
 
     fn sockets(&self) -> Vec<PathBuf> {
-        match std::fs::read_dir(self.runtime.join("agent")) {
-            Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect(),
-            Err(_) => Vec::new(),
-        }
+        session_sockets(&self.runtime, &self.h.server)
     }
 
     fn the_socket(&self) -> PathBuf {
         let sockets = self.sockets();
         assert_eq!(sockets.len(), 1, "exactly one agent socket: {sockets:?}");
         sockets.into_iter().next().unwrap()
+    }
+}
+
+/// The sockets the host has made. Unix: the files in `<runtime>/agent/`,
+/// exec sockets included. Windows: a named pipe has no directory, so the
+/// host's own list of session sockets.
+fn session_sockets(runtime: &Path, server: &Server) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    {
+        let _ = server;
+        match std::fs::read_dir(runtime.join("agent")) {
+            Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = runtime;
+        server
+            .agent_session_endpoints()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
     }
 }
 
@@ -230,12 +214,7 @@ fn exec_req(host: &str, argv: Vec<String>) -> ExecRunReq {
 }
 
 fn program_argv(key: &FakeIdentity) -> Vec<String> {
-    vec![
-        "python3".into(),
-        "-c".into(),
-        PROGRAM.into(),
-        sign_body_hex(key),
-    ]
+    agent_probe::call_argv(&program_messages(key))
 }
 
 fn lines(out: &ExecRunOutput) -> Vec<String> {
@@ -245,17 +224,17 @@ fn lines(out: &ExecRunOutput) -> Vec<String> {
         .collect()
 }
 
-/// Run `PROGRAM` the way a shell in the session would: `SSH_AUTH_SOCK` set to
+/// Run the program the way a shell in the session would: `SSH_AUTH_SOCK` set to
 /// `sock`.
 async fn run_program(sock: &Path, key: &FakeIdentity) -> Vec<String> {
     let sock = sock.to_path_buf();
-    let body = sign_body_hex(key);
+    let argv = program_argv(key);
     blocking(move || {
-        let out = std::process::Command::new("python3")
-            .args(["-c", PROGRAM, &body])
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
             .env("SSH_AUTH_SOCK", &sock)
             .output()
-            .expect("run python3");
+            .expect("run qsh-agent-probe");
         assert!(out.status.success(), "the program failed: {:?}", out.status);
         String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -296,7 +275,7 @@ fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
 /// Connect to `sock`, send `request` and read one whole reply. `None` when the
 /// connection is refused or closed before a reply.
 async fn exchange(sock: &Path, request: &[u8]) -> Option<Vec<u8>> {
-    let mut stream = tokio::net::UnixStream::connect(sock).await.ok()?;
+    let mut stream = connect_endpoint(sock.to_str()?).await.ok()?;
     stream.write_all(request).await.ok()?;
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).await.ok()?;
@@ -327,9 +306,6 @@ async fn list(sock: &Path) -> Option<Vec<u8>> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_forward_loopback_lists_and_signs() {
-    if !have_python() {
-        return;
-    }
     let rig = Rig::start(None).await;
 
     // `-A` exec: the program lists, signs, and its remove-all never reaches
@@ -371,9 +347,6 @@ async fn agent_forward_loopback_lists_and_signs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_forward_over_a_punched_connection() {
-    if !have_python() {
-        return;
-    }
     let w = world(WorldOptions {
         direct_listener: false,
         pin_b_address: false,
@@ -408,17 +381,12 @@ async fn agent_forward_over_a_punched_connection() {
         attach(&ops2, &session_ref)
     })
     .await;
-    let dir = runtime.join("agent");
+    let b_server = w.b_server.as_ref().expect("B's server");
     wait_until("the session socket", || {
-        std::fs::read_dir(&dir).is_ok_and(|d| d.count() == 1)
+        session_sockets(&runtime, b_server).len() == 1
     })
     .await;
-    let sock = std::fs::read_dir(&dir)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let sock = session_sockets(&runtime, b_server).remove(0);
     assert_eq!(run_program(&sock, &k2).await, expected_lines(&k2));
     assert_eq!(
         fake2.received_kinds(),
@@ -610,6 +578,177 @@ async fn a_healthy_path_adds_no_round_trip_to_an_agent_request() {
              more than one round trip plus slack — {ctx}"
         );
         tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    drop(stream);
+    rig.h.shutdown().await;
+}
+
+// ---- decision 22 D24 -------------------------------------------------------
+
+/// Everything the tracing subscriber writes.
+#[derive(Clone, Default)]
+struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("capture lock")).into_owned()
+    }
+}
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The ways a byte string plausibly reaches a log line or an audit record:
+/// as text, Base64, hex, or the `[1, 2, ...]` a stray `{:?}` produces.
+fn renderings(what: &str, bytes: &[u8]) -> Vec<(String, String)> {
+    use base64::Engine as _;
+    let mut out = vec![
+        (
+            format!("{what} as base64"),
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ),
+        (format!("{what} as hex"), hex(bytes)),
+        (format!("{what} as a debug array"), format!("{bytes:?}")),
+    ];
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        out.push((format!("{what} as text"), text.to_string()));
+    }
+    out
+}
+
+/// ADR-0055 decision 22 D24: during a `-A` exec and a `-A` session that list,
+/// sign and try a remove-all, no tracing event (host or client, any target)
+/// and no audit record holds a key blob, a key comment, the data signed, the
+/// signature, a whole agent message or a socket path. What is logged is
+/// counts and kinds.
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_audit_and_logs_carry_no_payload() {
+    let capture = Capture::default();
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish(),
+    )
+    .expect("run under nextest: one process per test, so no other subscriber is installed");
+
+    const DATA: &[u8] = b"data-to-sign-never-logged-5a1c";
+    let k = FakeIdentity::new(
+        b"key-blob-never-logged-93e0".to_vec(),
+        "key-comment-never-logged-77b2",
+    );
+    let messages = vec!["11".to_string(), sign_arg(&k.blob, DATA), "19".to_string()];
+    let signature = fake_signature(&k.blob, DATA);
+    let list_answer = identities_answer(std::slice::from_ref(&k));
+    let sign_answer = sign_response(&k.blob, DATA);
+
+    let rig = Rig::start(None).await;
+    let fake = FakeAgent::start(vec![k.clone()]).await.unwrap();
+    let ops = rig.with_agent(&fake);
+
+    // The exec leg.
+    let argv = agent_probe::call_argv(&messages);
+    let out = blocking({
+        let ops = ops.clone();
+        move || ops.exec_run(exec_req("box", argv), ExecStdin::Closed)
+    })
+    .await
+    .expect("exec.run");
+    assert_eq!(out.data.remote_exit_code, 0, "{:?}", lines(&out));
+    assert_eq!(lines(&out).len(), 3);
+
+    // The session leg, through the socket the host announced.
+    let stream = blocking({
+        let ops = ops.clone();
+        move || {
+            let session_ref = open_shell(&ops, "box");
+            attach(&ops, &session_ref)
+        }
+    })
+    .await;
+    let sock = rig.the_socket();
+    let session_lines = {
+        let sock = sock.clone();
+        let mut argv = agent_probe::call_argv(&messages);
+        blocking(move || {
+            let out = std::process::Command::new(argv.remove(0))
+                .args(&argv)
+                .env("SSH_AUTH_SOCK", &sock)
+                .output()
+                .expect("run qsh-agent-probe");
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).lines().count()
+        })
+        .await
+    };
+    assert_eq!(session_lines, 3);
+    wait_until("the client logged both streams closing", || {
+        capture.text().matches("filtered=").count() >= 2
+    })
+    .await;
+
+    let logs = capture.text();
+    assert!(
+        logs.contains("qsh::agent") && logs.contains("requests="),
+        "the run logged no agent event, so the check below proves nothing:\n{logs}"
+    );
+    let audit = rig.h.audit.records();
+    assert!(
+        audit.iter().any(|r| r.action == "forward.agent"),
+        "the run audited no forward.agent decision"
+    );
+    let records: Vec<String> = audit
+        .iter()
+        .map(|r| serde_json::to_string(r).expect("audit record serializes"))
+        .collect();
+
+    let mut needles = Vec::new();
+    needles.extend(renderings("the key blob", &k.blob));
+    needles.extend(renderings("the key comment", k.comment.as_bytes()));
+    needles.extend(renderings("the data signed", DATA));
+    needles.extend(renderings("the signature", &signature));
+    needles.extend(renderings("the list answer", &list_answer));
+    needles.extend(renderings("the sign answer", &sign_answer));
+    needles.push((
+        "the socket path".into(),
+        sock.to_string_lossy().into_owned(),
+    ));
+    // The random part of the name alone, in case a log shortens the path.
+    let stem = sock
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.trim_end_matches(".sock").to_string())
+        .expect("socket file name");
+    needles.push(("the socket name".into(), stem));
+    for (label, needle) in &needles {
+        assert!(!needle.is_empty(), "{label}: empty needle");
+        assert!(
+            !logs.contains(needle.as_str()),
+            "{label} leaked into the logs"
+        );
+        for (i, record) in records.iter().enumerate() {
+            assert!(
+                !record.contains(needle.as_str()),
+                "{label} leaked into audit record {i}: {record}"
+            );
+        }
     }
     drop(stream);
     rig.h.shutdown().await;

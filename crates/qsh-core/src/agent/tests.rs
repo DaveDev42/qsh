@@ -324,3 +324,80 @@ mod windows {
         assert_eq!(listener.stats().refused_cap, 1);
     }
 }
+
+/// ADR-0055 decision 22 B48: the host's agent endpoint is reachable by its
+/// owner only. Unix: a 0700 directory owned by this user holds a 0600 socket
+/// owned by this user, a connection from this user is accepted, and a peer
+/// with any other uid would not be. Windows: every instance of the pipe has a
+/// protected DACL that grants only the owner, remote clients are rejected, and
+/// nobody else can claim the first instance of the name.
+#[tokio::test]
+async fn agent_socket_is_owner_only() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        // SAFETY: `geteuid(2)` takes no arguments, touches no memory and
+        // cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut listener = AgentListener::create(tmp.path()).expect("create");
+        let sock = listener.auth_sock().to_path_buf();
+        let dir = sock.parent().expect("parent").to_path_buf();
+
+        let dir_meta = std::fs::symlink_metadata(&dir).expect("dir metadata");
+        assert!(dir_meta.is_dir());
+        assert_eq!(dir_meta.uid(), euid);
+        assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
+        let sock_meta = std::fs::symlink_metadata(&sock).expect("socket metadata");
+        assert_eq!(sock_meta.uid(), euid);
+        assert_eq!(sock_meta.permissions().mode() & 0o777, 0o600);
+
+        // The accepted peer is checked by uid: ours passes.
+        let client = tokio::net::UnixStream::connect(&sock)
+            .await
+            .expect("connect as the owner");
+        let peer = client.peer_cred().expect("peer credentials");
+        assert_eq!(peer.uid(), euid);
+        let _served = listener.accept().await.expect("the owner is accepted");
+        assert_eq!(listener.stats().accepted, 1);
+        let other = euid.wrapping_add(1);
+        assert!(crate::localctl::transport::peer_is_authorized(euid, euid));
+        assert!(!crate::localctl::transport::peer_is_authorized(other, euid));
+        assert!(!crate::localctl::transport::peer_is_authorized(0, 1000));
+    }
+    #[cfg(windows)]
+    {
+        use crate::fsutil::dacl::ObjectKind;
+        use crate::fsutil::dacl::testing::{assert_owner_only_report, read_dacl_of_handle};
+        use crate::localctl::transport::windows::CreateOptions;
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let name =
+            std::path::PathBuf::from(format!(r"\\.\pipe\qsh-agent-test-{}", random_hex_name()));
+        let mut listener = AgentListener::bind_at(&name, 16).expect("bind");
+        assert_owner_only_report(
+            "the first agent pipe instance",
+            read_dacl_of_handle(listener.waiting_handle().cast()),
+            ObjectKind::Pipe,
+        );
+        let client = ClientOptions::new()
+            .open(&name)
+            .expect("connect as the owner");
+        let served = listener.accept().await.expect("the owner is accepted");
+        assert_owner_only_report(
+            "the next agent pipe instance",
+            read_dacl_of_handle(listener.waiting_handle().cast()),
+            ObjectKind::Pipe,
+        );
+        drop((client, served));
+        for first in [true, false] {
+            let options = CreateOptions::for_instance(first);
+            assert!(options.reject_remote_clients, "first_instance = {first}");
+        }
+        assert!(
+            AgentListener::bind_at(&name, 16).is_err(),
+            "the name cannot be claimed twice"
+        );
+    }
+}
