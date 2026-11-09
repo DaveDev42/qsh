@@ -198,6 +198,7 @@ impl Ops {
                         &target.address,
                         &target.server_name,
                         target.punch.as_ref(),
+                        target.learn.as_ref(),
                         &device_name,
                         &spec,
                         stdin,
@@ -259,13 +260,15 @@ impl Ops {
             HostRoute::Forward { address, .. } => {
                 let trust = self.open_trust()?;
                 let server_name = server_name_for(&address);
-                let punch = self.punch_plan(host, &identity, &trust);
+                let punch = self.punch_plan(host, &identity, &trust)?;
+                let learn = self.hint_learner(&trust);
                 Ok(PeerRoute::Forward(PeerTarget {
                     identity,
                     trust,
                     address,
                     server_name,
                     punch,
+                    learn,
                 }))
             }
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
@@ -309,6 +312,7 @@ async fn exec_async(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -320,6 +324,7 @@ async fn exec_async(
         address,
         server_name,
         punch,
+        learn,
         device_name,
         spec,
         stdin,
@@ -357,6 +362,7 @@ async fn exec_async_resolving(
         address,
         server_name,
         None,
+        None,
         device_name,
         spec,
         stdin,
@@ -376,6 +382,7 @@ async fn exec_async_tracked(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -416,6 +423,9 @@ async fn exec_async_tracked(
     let run = async {
         match Session::negotiate(dialed.connection, device_name).await {
             Ok(mut session) => {
+                if let Some(learn) = learn {
+                    learn.ask(&mut session, &connection).await;
+                }
                 // No kill-switch out-param on the forward route: a timeout
                 // here is handled below by closing the whole `connection`
                 // instead (unlike the reverse route, this connection is

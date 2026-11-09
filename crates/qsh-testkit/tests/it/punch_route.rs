@@ -73,15 +73,23 @@ pub(super) struct Client {
     pub(super) _dir: tempfile::TempDir,
     pub(super) ops: Ops,
     pub(super) fp: Fingerprint,
+    /// The punch settings `ops` was built with, so a test can derive a
+    /// variant (another flag) that keeps the virtual sockets.
+    pub(super) env: ClientPunch,
 }
 
 /// Builds the client on `site`. `rendezvous` are the pin names to punch
 /// through; each new endpoint takes the next port of the site.
 async fn client(site: &Site, rendezvous: &[&str]) -> Client {
-    client_with(site, rendezvous, PUNCH_HEAD_START).await
+    client_with(site, rendezvous, PUNCH_HEAD_START, false).await
 }
 
-async fn client_with(site: &Site, rendezvous: &[&str], head_start: Duration) -> Client {
+async fn client_with(
+    site: &Site,
+    rendezvous: &[&str],
+    head_start: Duration,
+    learn_hints: bool,
+) -> Client {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
         .with_runtime_dir(dir.path().join("run"));
@@ -101,17 +109,24 @@ async fn client_with(site: &Site, rendezvous: &[&str], head_start: Duration) -> 
         let port = next.fetch_add(1, Ordering::SeqCst);
         SocketSource::Virtual(Arc::new(socket_site.bind_wildcard(port).unwrap()))
     });
-    let ops = ops.with_punch(ClientPunch {
+    let env = ClientPunch {
         mode: PunchMode::Auto,
         rendezvous: rendezvous.iter().map(|s| (*s).to_string()).collect(),
+        learn_hints,
         head_start,
         local_addrs: Arc::new(FixedAddrs(vec![site.ip()])),
         socket: Some(factory),
-    });
-    Client { _dir: dir, ops, fp }
+    };
+    let ops = ops.with_punch(env.clone());
+    Client {
+        _dir: dir,
+        ops,
+        fp,
+        env,
+    }
 }
 
-async fn pin(ops: &Ops, name: &str, address: Option<String>, fingerprint: &Fingerprint) {
+pub(super) async fn pin(ops: &Ops, name: &str, address: Option<String>, fingerprint: &Fingerprint) {
     let name = name.to_string();
     let fp = fingerprint.to_string();
     blocking(ops, move |ops| {
@@ -172,6 +187,11 @@ pub(super) struct WorldOptions {
     pub(super) a_nat: NatKind,
     /// A's recovery settings; the defaults when unset.
     pub(super) recovery: Option<qsh_core::RecoveryConfig>,
+    /// `--rendezvous r` on every command. Off leaves the rendezvous to the
+    /// pin's hints.
+    pub(super) flag_rendezvous: bool,
+    /// A asks hosts for rendezvous hints, as the `qsh` binary does.
+    pub(super) learn_hints: bool,
 }
 
 impl Default for WorldOptions {
@@ -185,6 +205,8 @@ impl Default for WorldOptions {
             head_start: PUNCH_HEAD_START,
             a_nat: NatKind::PortRestricted,
             recovery: None,
+            flag_rendezvous: true,
+            learn_hints: false,
         }
     }
 }
@@ -222,7 +244,8 @@ pub(super) async fn world(opts: WorldOptions) -> World {
         PathConfig::delay(opts.a_b_delay),
     );
 
-    let mut a = client_with(&a_site, &["r"], opts.head_start).await;
+    let flagged: &[&str] = if opts.flag_rendezvous { &["r"] } else { &[] };
+    let mut a = client_with(&a_site, flagged, opts.head_start, opts.learn_hints).await;
     if let Some(recovery) = opts.recovery {
         a.ops = a.ops.with_recovery(recovery);
     }
@@ -686,6 +709,29 @@ async fn run_row(row: Row, extra_candidate: Option<&'static str>) -> (GiveUpReas
     pin(&a.ops, "c", None, &c_id.fingerprint).await;
     let b_address = row.b_has_address.then(|| BLACKHOLE.to_string());
     pin(&a.ops, "b", b_address, &b_id.fingerprint).await;
+    if row.reason == GiveUpReason::NoRendezvous {
+        // A hint that names a peer which is no longer pinned.
+        let ghost = make_identity();
+        pin(
+            &a.ops,
+            "ghost",
+            Some(BLACKHOLE.to_string()),
+            &ghost.fingerprint,
+        )
+        .await;
+        blocking(&a.ops, |ops| {
+            ops.trust_set_rendezvous(qsh_proto::TrustSetRendezvousReq {
+                name: "b".into(),
+                rendezvous: vec!["ghost".into()],
+                clear: false,
+            })
+        })
+        .await
+        .expect("trust.set_rendezvous");
+        blocking(&a.ops, |ops| ops.trust_remove("ghost"))
+            .await
+            .expect("trust.remove");
+    }
 
     let err = exec(&a.ops, "b")
         .await
@@ -742,9 +788,9 @@ async fn punch_give_up_reasons() {
             Row {
                 reason: GiveUpReason::NoRendezvous,
                 script: None,
-                rendezvous: &["ghost"],
+                rendezvous: &[],
                 b_has_address: true,
-                named: "ghost",
+                named: "-",
             },
             None,
         ),
@@ -987,6 +1033,7 @@ async fn without_a_rendezvous_or_with_punching_off_the_error_is_the_direct_dials
             _dir: a._dir,
             ops,
             fp: a.fp,
+            env: a.env,
         };
         let (r_id, b_id) = (make_identity(), make_identity());
         let requests = Arc::new(AtomicUsize::new(0));

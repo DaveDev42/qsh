@@ -297,6 +297,9 @@ pub async fn run_listen(
         quotas,
     );
     listen.set_path_watch(liveness.reverse_watch);
+    // `[punch].mode = "off"` is read once, here (ADR-0054 decision 19).
+    listen
+        .set_punch_enabled(config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto);
     listen.set_trust_watch(trust_for_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(

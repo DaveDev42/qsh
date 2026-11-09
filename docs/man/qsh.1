@@ -4,7 +4,7 @@
 .SH NAME
 qsh \- QSH: a QUIC\-based direct\-connect remote shell
 .SH SYNOPSIS
-\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-e\fR|\fB\-\-escape\-char\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-\-status\-line\fR] [\fB\-l \fR] [\fB\-p \fR] [\fB\-i \fR] [\fB\-F \fR] [\fB\-o \fR] [\fB\-C \fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-J \fR] [\fB\-A \fR] [\fB\-t \fR]... [\fB\-T \fR] [\fB\-N \fR] [\fB\-f \fR] [\fB\-E \fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIREMOTE_COMMAND\fR] [\fIsubcommands\fR]
+\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-e\fR|\fB\-\-escape\-char\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-\-status\-line\fR] [\fB\-l \fR] [\fB\-p \fR] [\fB\-i \fR] [\fB\-F \fR] [\fB\-o \fR] [\fB\-C \fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-J \fR] [\fB\-A \fR] [\fB\-t \fR]... [\fB\-T \fR] [\fB\-N \fR] [\fB\-f \fR] [\fB\-E \fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIREMOTE_COMMAND\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 QSH: a QUIC\-based direct\-connect remote shell
 .SH OPTIONS
@@ -29,6 +29,12 @@ When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answ
 .TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
+.TP
+\fB\-\-no\-punch\fR
+Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-rendezvous\fR \fI<PEER>\fR
+Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
 .TP
 \fB\-e\fR, \fB\-\-escape\-char\fR \fI<CHAR>\fR
 Escape character for the line\-start sequences (`~.` ends the session, `~d` detaches, `~^Z`, `~#`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal. `\-e` is the ssh spelling

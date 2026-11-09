@@ -114,10 +114,11 @@ pub use ops::{
     SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
     SessionWriteOp, SetupRunOp, SilentObserver, SshRevival, StatusLine, TrustAcceptOp,
     TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold,
-    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, meets_threshold,
-    normalize_invite_code, parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards,
-    read_cert_file_arg, resolve_invite_code_source, unconfigured_host_name,
+    TrustRenameOp, TrustSetRendezvousOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
+    TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    cert_file_fingerprint_conflict, meets_threshold, normalize_invite_code, parse_dynamic_forwards,
+    parse_local_forwards, parse_remote_forwards, read_cert_file_arg, resolve_invite_code_source,
+    unconfigured_host_name,
 };
 pub use setup::SetupEnv;
 pub use trust::{SharedTrustStore, TrustStore};

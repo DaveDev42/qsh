@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-listen \- Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH SYNOPSIS
-\fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH OPTIONS
@@ -32,6 +32,12 @@ When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answ
 .TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
+.TP
+\fB\-\-no\-punch\fR
+Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-rendezvous\fR \fI<PEER>\fR
+Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

@@ -1,0 +1,18 @@
+{
+  "command": "trust.set_rendezvous",
+  "data": {
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "lab-box",
+      "rendezvous": [
+        "sha256:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="
+      ],
+      "role": "full"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

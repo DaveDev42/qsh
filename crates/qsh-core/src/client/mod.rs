@@ -174,12 +174,19 @@ pub struct Session {
     /// never actually bound to (see that method's own doc).
     local_ack: Option<(String, u64)>,
     next_request_id: u64,
+    /// The `RendezvousQuery` in flight and what to hand its answer to
+    /// ([`Self::learn_rendezvous`]).
+    hint: Option<(u64, RendezvousSink)>,
     /// Capabilities both sides support.
     pub capabilities: Vec<String>,
     /// The peer's display name from its `Hello` (informational only —
     /// never an identity).
     pub peer_device_name: String,
 }
+
+/// Receives the fingerprints of a host's `RendezvousList` once
+/// ([`Session::learn_rendezvous`]).
+pub type RendezvousSink = std::sync::Arc<dyn Fn(Vec<Vec<u8>>) + Send + Sync>;
 
 impl Session {
     /// Open the control stream and exchange `Hello` on a fresh connection.
@@ -212,6 +219,41 @@ impl Session {
         let mut session = Self::from_control(conn, ctl, peer_hello);
         session.capabilities.retain(|c| !hide.contains(&c.as_str()));
         Ok(session)
+    }
+
+    /// Asks the host which controllers it is registered with, for the
+    /// rendezvous hints (ADR-0054 decision 5). The query is written and not
+    /// waited for: the answer is taken by whichever control-stream read sees
+    /// it first and handed to `sink`, and a session that ends first just
+    /// never learns. Sent at most once per session, and only when `punch.v1`
+    /// was negotiated on a connection of our own. Every failure is silent.
+    pub async fn learn_rendezvous(&mut self, sink: RendezvousSink) {
+        if self.conn.is_none() || self.hint.is_some() || !self.has_capability(wire::CAP_PUNCH_V1) {
+            return;
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let query = ControlMessage::new(
+            request_id,
+            control_message::Body::RendezvousQuery(wire::RendezvousQuery {}),
+        );
+        if self.link.send(&query).await.is_ok() {
+            self.hint = Some((request_id, sink));
+        }
+    }
+
+    /// A response nobody here waited for. If it answers the rendezvous
+    /// query, hand the list over; an error answer ends the query.
+    fn note_response(&mut self, request_id: u64, response: &wire::Response) {
+        if self.hint.as_ref().is_none_or(|(id, _)| *id != request_id) {
+            return;
+        }
+        let Some((_, sink)) = self.hint.take() else {
+            return;
+        };
+        if let Some(response::Body::RendezvousList(list)) = &response.body {
+            sink(list.fingerprints.clone());
+        }
     }
 
     /// Whether both sides negotiated screen state sync (`screen.v1`). A
@@ -252,6 +294,7 @@ impl Session {
             local: None,
             local_ack: None,
             next_request_id: 1,
+            hint: None,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
             peer_device_name: peer_hello.device_name,
         }
@@ -279,6 +322,7 @@ impl Session {
             local: Some((socket, host.clone())),
             local_ack: Some((peer_fingerprint, generation)),
             next_request_id: 1,
+            hint: None,
             capabilities,
             peer_device_name: host,
         }
@@ -407,6 +451,10 @@ impl Session {
                             control_message::Body::Pong(wire::Pong {}),
                         ))
                         .await?;
+                }
+                // The answer to the rendezvous query rides in here.
+                Some(control_message::Body::Response(resp)) => {
+                    self.note_response(msg.request_id, &resp);
                 }
                 // Responses to other requests / events: none exist in M1;
                 // ignore rather than fail.
@@ -943,7 +991,10 @@ impl Session {
                 // (`request()` reads its own correlated reply directly, not
                 // through this loop): ignore, not a request needing an
                 // answer.
-                Some(control_message::Body::Response(_)) => continue,
+                Some(control_message::Body::Response(resp)) => {
+                    self.note_response(msg.request_id, &resp);
+                    continue;
+                }
                 // Everything else the oneof can carry is request-shaped —
                 // `Hello` (unexpected after the handshake), every
                 // `session_*`/`exec_start` request, or an unknown/reserved

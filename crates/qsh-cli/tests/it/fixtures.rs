@@ -124,6 +124,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.accept.with_role.json",
     "trust.set_role.json",
     "trust.set_role.unchanged.json",
+    "trust.set_rendezvous.json",
+    "trust.list.rendezvous.json",
     "trust.allow.json",
     "trust.allow.unchanged.json",
     "trust.deny.json",
@@ -1139,6 +1141,68 @@ fn golden_trust_list_with_role_fixture() {
         "a pin with no `role` key must omit the field, not emit null: {listed}"
     );
     check("trust.list.with_role.json", listed);
+}
+
+/// A second valid fingerprint, for pins that must differ from
+/// [`SAMPLE_FINGERPRINT`].
+const OTHER_FINGERPRINT: &str = "sha256:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
+
+/// `trust rendezvous` (ADR-0054 결정 5, `docs/CLI.md` §6.11) and a pin that
+/// carries `rendezvous`. The key is omitted when the list is empty, so the
+/// older `trust.*` goldens are untouched; these two are the shapes that have
+/// it. Own sandbox, store written by hand like `golden_trust_list_with_role_fixture`.
+#[test]
+fn golden_trust_rendezvous_fixtures() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
+    std::fs::write(
+        sandbox.config_dir().join("trust.toml"),
+        format!(
+            "[[peer]]\n\
+             name = \"lab-box\"\n\
+             fingerprint = \"{SAMPLE_FINGERPRINT}\"\n\
+             address = \"\"\n\
+             added_at = \"2026-11-09T00:00:00Z\"\n\
+             role = \"full\"\n\
+             \n\
+             [[peer]]\n\
+             name = \"relay\"\n\
+             fingerprint = \"{OTHER_FINGERPRINT}\"\n\
+             address = \"relay.example.com:4433\"\n\
+             added_at = \"2026-11-09T00:00:00Z\"\n\
+             role = \"none\"\n"
+        ),
+    )
+    .expect("write trust.toml fixture");
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    for peer in listed["data"]["peers"].as_array().expect("data.peers") {
+        assert!(
+            peer.get("rendezvous").is_none(),
+            "a pin with no hints omits the key: {listed}"
+        );
+    }
+
+    let (code, set) = sandbox.json(&["trust", "rendezvous", "lab-box", "relay", "--json"]);
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(
+        set["data"]["peer"]["rendezvous"],
+        serde_json::json!([OTHER_FINGERPRINT]),
+        "{set}"
+    );
+    check("trust.set_rendezvous.json", set);
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    check("trust.list.rendezvous.json", listed);
+
+    let (code, cleared) = sandbox.json(&["trust", "rendezvous", "lab-box", "--clear", "--json"]);
+    assert_eq!(code, 0, "{cleared}");
+    assert!(
+        cleared["data"]["peer"].get("rendezvous").is_none(),
+        "--clear leaves no key: {cleared}"
+    );
 }
 
 /// `qsh config get|set|unset|list` (ADR-0051 결정 10, `docs/CLI.md` §6.23):

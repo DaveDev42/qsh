@@ -330,6 +330,93 @@ impl Ops {
         })
     }
 
+    /// `trust.set_rendezvous` — replace the list of peers asked to relay a
+    /// hole punch to a pinned host (`qsh trust rendezvous <name> [<peer>...]
+    /// [--clear]`, `docs/CLI.md` §6.11, ADR-0054 결정 5).
+    ///
+    /// A local op with no authorization, locked like [`Self::trust_set_role`]
+    /// (`TrustStore::lock` → `load` → mutate → `save`). It leaves no audit
+    /// record: the list grants nothing, it only says whom to ask first, and
+    /// every candidate is checked against the pins again on each use. The
+    /// list is stored as fingerprints, so `trust rename` leaves it alone.
+    ///
+    /// Errors: a name that is no pin (`[[ca]]` included), or a `<peer>` that
+    /// is not pinned with an address, is `HOST_NOT_FOUND`; the host itself as
+    /// its own rendezvous, more than four peers, no peer without `--clear`,
+    /// or both, is `INVALID_ARGUMENT`; an unreadable `trust.toml` is
+    /// `CONFIG_ERROR`. Setting what is already stored writes nothing.
+    pub fn trust_set_rendezvous(
+        &self,
+        req: TrustSetRendezvousReq,
+    ) -> Result<TrustSetRendezvousData, OpError> {
+        let invalid = |message: String| {
+            OpError::new(ErrorCode::InvalidArgument, message).with_retryable(false)
+        };
+        if req.clear && !req.rendezvous.is_empty() {
+            return Err(invalid(
+                "--clear and a list of rendezvous peers cannot be given together".into(),
+            ));
+        }
+        if !req.clear && req.rendezvous.is_empty() {
+            return Err(invalid(
+                "name at least one rendezvous peer, or pass --clear".into(),
+            ));
+        }
+        if req.rendezvous.len() > qsh_proto::punch::MAX_RENDEZVOUS_FINGERPRINTS {
+            return Err(invalid(format!(
+                "at most {} rendezvous peers",
+                qsh_proto::punch::MAX_RENDEZVOUS_FINGERPRINTS
+            )));
+        }
+
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let not_found = |name: &str| {
+            OpError::new(
+                ErrorCode::HostNotFound,
+                format!("{name:?} is not a pinned peer"),
+            )
+            .with_retryable(false)
+        };
+        let host = store
+            .find(&req.name)
+            .ok_or_else(|| not_found(&req.name))?
+            .clone();
+        let mut fingerprints: Vec<String> = Vec::new();
+        for name in &req.rendezvous {
+            let peer = store.find(name).ok_or_else(|| not_found(name))?;
+            if name == &host.name {
+                return Err(invalid(format!("{name:?} cannot be its own rendezvous")));
+            }
+            if peer.address.is_empty() {
+                return Err(OpError::new(
+                    ErrorCode::HostNotFound,
+                    format!(
+                        "{name:?} is pinned without an address, so it cannot relay a hole punch; \
+                         pin it with an address first"
+                    ),
+                )
+                .with_retryable(false));
+            }
+            let fingerprint = peer
+                .fingerprint
+                .parse::<Fingerprint>()
+                .map_err(|_| not_found(name))?
+                .to_string();
+            if !fingerprints.contains(&fingerprint) {
+                fingerprints.push(fingerprint);
+            }
+        }
+        let (peer, changed) = store
+            .set_rendezvous(&req.name, fingerprints)
+            .map_err(|_| not_found(&req.name))?;
+        if changed {
+            store.save(&path)?;
+        }
+        Ok(TrustSetRendezvousData { peer })
+    }
+
     /// `trust.allow` (`qsh trust allow`, `docs/CLI.md` §6.11, ADR-0051
     /// 결정 12): add actions to the pin's `grants`, with `paths` and `scope`.
     ///

@@ -57,9 +57,9 @@ use qsh_core::{
     SessionAttachOp, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
     SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp,
     TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TrustRenameOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
-    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
-    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    TrustRenameOp, TrustSetRendezvousOp, TrustSetRoleOp, TrustSshPreviewOp, TunnelCloseOp,
+    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
+    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -69,8 +69,8 @@ use qsh_proto::{
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
     SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
     TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustAllowReq, TrustDenyReq, TrustInviteReq,
-    TrustRenameReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq,
-    TunnelListReq, TunnelOpenReq,
+    TrustRenameReq, TrustSetRendezvousReq, TrustSetRoleReq, TrustSshPreviewReq, TunnelCloseReq,
+    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -463,6 +463,19 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     } else {
         ops.with_ssh_revival(ssh_revival(cli, None, SshOptions::default()))
     };
+    // Hole punching (ADR-0054): `--no-punch`, `--rendezvous`, and learning
+    // hints from each host this command connects to. `[punch].mode` is read
+    // by `Ops` when a route is built.
+    let ops = ops.with_punch(qsh_core::punch::ClientPunch {
+        mode: if cli.no_punch {
+            qsh_core::punch::PunchMode::Off
+        } else {
+            qsh_core::punch::PunchMode::Auto
+        },
+        rendezvous: cli.rendezvous.iter().cloned().collect(),
+        learn_hints: true,
+        ..qsh_core::punch::ClientPunch::default()
+    });
     // `[transport].adaptive` pins the bulk governor of every connection this
     // process dials, one-shot ops included (ADR-0052 decision 15).
     ops.pin_process_transport();
@@ -576,6 +589,16 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         Command::Pair(PairCmd::Ssh(args)) => run_pair_ssh(cli, &ops, args),
         Command::Pair(PairCmd::SshRespond) => run_ssh_respond(&ops),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
+        Command::Trust(TrustCmd::Rendezvous { name, peers, clear }) => finish(
+            cli,
+            TrustSetRendezvousOp::COMMAND,
+            ops.trust_set_rendezvous(TrustSetRendezvousReq {
+                name: name.clone(),
+                rendezvous: peers.clone(),
+                clear: *clear,
+            }),
+            human::print_trust_set_rendezvous,
+        ),
         Command::Trust(TrustCmd::SetRole { name, role }) => finish(
             cli,
             TrustSetRoleOp::COMMAND,
@@ -3127,6 +3150,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Trust(TrustCmd::Rendezvous { .. }) => TrustSetRendezvousOp::COMMAND,
         Command::Trust(TrustCmd::SetRole { .. }) => TrustSetRoleOp::COMMAND,
         Command::Trust(TrustCmd::Allow { .. }) => TrustAllowOp::COMMAND,
         Command::Trust(TrustCmd::Deny { .. }) => TrustDenyOp::COMMAND,

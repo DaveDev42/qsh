@@ -49,7 +49,16 @@ async fn dial_peer_as(
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {
-        Ok(session) => Ok((endpoint, connection, session)),
+        Ok(mut session) => {
+            // Only a command's first connection asks; a recovery is the same
+            // command carrying on.
+            if kind == crate::ops::route::Dial::Command
+                && let Some(learn) = &target.learn
+            {
+                learn.ask(&mut session, &connection).await;
+            }
+            Ok((endpoint, connection, session))
+        }
         Err(err) => {
             connection.close(0, b"done");
             endpoint.wait_idle().await;

@@ -17,8 +17,8 @@ use qsh_proto::{
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
     SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData,
-    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRoleData,
-    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetRendezvousData,
+    TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -520,6 +520,25 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     } else {
         writeln!(stdout, "{} not found (nothing to do)", sanitize(&data.name))
     }
+}
+
+/// Print the outcome of `qsh trust rendezvous <name> [<peer>...]`
+/// (`docs/CLI.md` §6.11, ADR-0054 decision 5).
+pub fn print_trust_set_rendezvous(data: &TrustSetRendezvousData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let name = sanitize(&data.peer.name);
+    if data.peer.rendezvous.is_empty() {
+        return writeln!(stdout, "{name}: no rendezvous peers");
+    }
+    writeln!(
+        stdout,
+        "{name}: hole punching asks {} rendezvous peer(s), most preferred first",
+        data.peer.rendezvous.len()
+    )?;
+    for fingerprint in &data.peer.rendezvous {
+        writeln!(stdout, "  {}", sanitize(fingerprint))?;
+    }
+    Ok(())
 }
 
 /// Print the outcome of `qsh trust rename <old> <new>` (`docs/CLI.md`

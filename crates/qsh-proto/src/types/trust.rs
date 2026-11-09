@@ -54,6 +54,15 @@ pub struct TrustPeer {
     /// every other pin. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_qsh: Option<String>,
+    /// Fingerprints (`sha256:BASE64`) of the pinned peers this device asks
+    /// to relay a hole punch to this host, most recently confirmed first
+    /// (ADR-0054 결정 5), at most four. Learned from the host after a
+    /// connection, or set with `trust.set_rendezvous`; each one is used only
+    /// while it is pinned here with an address. Omitted when empty, so a pin
+    /// without hints reads and prints as before. Additive
+    /// (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendezvous: Vec<String>,
 }
 
 /// Request for `trust.add`.
@@ -233,6 +242,31 @@ pub struct TrustSetRoleData {
     /// `false` when the pin already had exactly this role: nothing was
     /// written and no audit record was made.
     pub changed: bool,
+}
+
+/// Request for `trust.set_rendezvous` (`qsh trust rendezvous <name>
+/// [<peer>...] [--clear]`, ADR-0054 결정 5): replaces the pin's hint list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetRendezvousReq {
+    /// The pinned host whose list is changed. A `[[ca]]` name is not a pin
+    /// and is `HOST_NOT_FOUND`.
+    pub name: String,
+    /// Names of the pinned peers to relay for it, most preferred first. Each
+    /// must be pinned with an address (`HOST_NOT_FOUND` otherwise); at most
+    /// four (`INVALID_ARGUMENT`). Empty with `clear` false is
+    /// `INVALID_ARGUMENT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendezvous: Vec<String>,
+    /// Empty the list. Not combined with `rendezvous`.
+    #[serde(default)]
+    pub clear: bool,
+}
+
+/// Data payload of `trust.set_rendezvous`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetRendezvousData {
+    /// The pin after the call.
+    pub peer: TrustPeer,
 }
 
 /// Request for `trust.allow` (`qsh trust allow <name> <action>...`,
