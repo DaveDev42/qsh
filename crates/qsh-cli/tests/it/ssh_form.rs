@@ -219,6 +219,43 @@ fn ssh_option_table_argv_to_ssh_command_lines() {
     }
 }
 
+/// ADR-0055 decision 15 and DoD 23.8: `-N` has no session or command to use
+/// an agent, so `-N -A` says so, opens nothing that carries an agent, and
+/// never dials the local agent (a fake one, named by `SSH_AUTH_SOCK`, counts
+/// the connections).
+#[test]
+fn n_with_a_forwards_no_agent_and_says_so() {
+    use qsh_testkit::fake_agent::{FakeAgent, FakeIdentity};
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let agent = runtime
+        .block_on(FakeAgent::start(vec![FakeIdentity::new(
+            b"n-a-key".to_vec(),
+            "k",
+        )]))
+        .unwrap();
+    let (client, _fake) = client_with_failing_ssh();
+    let out = client
+        .command(&["-N", "-A", "-L", "18080:localhost:80", "box"])
+        .env("SSH_AUTH_SOCK", agent.endpoint())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(exit_code(&out), 255, "{stderr}");
+    assert!(
+        stderr.contains("qsh: -A has no effect with -N"),
+        "the note is on stderr: {stderr}"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(agent.connections(), 0, "the local agent was never dialed");
+    assert!(agent.received_kinds().is_empty());
+}
+
 /// The reject list (`-A` left it in M25, ADR-0055): named, `UNSUPPORTED`, exit 255, ssh never runs.
 #[test]
 fn rejected_ssh_options_name_themselves_and_run_nothing() {

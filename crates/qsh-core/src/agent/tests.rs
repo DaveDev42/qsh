@@ -269,6 +269,45 @@ mod windows {
         assert_eq!(&buf, b"ping");
     }
 
+    /// ADR-0055 decision 7 and threat model B48: every instance of the agent
+    /// pipe carries a protected DACL that grants only the owner, and the pipe
+    /// is created with `PIPE_REJECT_REMOTE_CLIENTS`. `GetNamedPipeInfo` does
+    /// not report the reject-remote flag, so that half is pinned by the
+    /// creation parameters the listener builds every instance from.
+    #[tokio::test]
+    async fn windows_agent_pipe_is_owner_only_and_rejects_remote_clients() {
+        use crate::fsutil::dacl::ObjectKind;
+        use crate::fsutil::dacl::testing::{assert_owner_only_report, read_dacl_of_handle};
+        use crate::localctl::transport::windows::CreateOptions;
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let name = unique_name();
+        let mut listener = AgentListener::bind_at(&name, 16).expect("bind");
+        assert_owner_only_report(
+            "the first agent pipe instance",
+            read_dacl_of_handle(listener.waiting_handle().cast()),
+            ObjectKind::Pipe,
+        );
+
+        // The instance created after a connection carries the same descriptor.
+        let client = ClientOptions::new().open(&name).expect("open");
+        let served = listener.accept().await.expect("accept");
+        assert_owner_only_report(
+            "the next agent pipe instance",
+            read_dacl_of_handle(listener.waiting_handle().cast()),
+            ObjectKind::Pipe,
+        );
+        drop((client, served));
+
+        for first in [true, false] {
+            let options = CreateOptions::for_instance(first);
+            assert!(options.reject_remote_clients, "first_instance = {first}");
+            assert_eq!(options.first_instance, first);
+        }
+        // A second first-instance claim of the same name fails.
+        assert!(AgentListener::bind_at(&name, 16).is_err());
+    }
+
     #[tokio::test]
     async fn per_socket_cap_closes_the_extra_connection() {
         use tokio::net::windows::named_pipe::ClientOptions;
