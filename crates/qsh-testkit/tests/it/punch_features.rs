@@ -18,8 +18,6 @@
 //! time. Nothing here prints PTY contents; a failure reports lengths and
 //! the screen rows of the shell this test itself started.
 
-use std::io::{Read as _, Write as _};
-use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -88,63 +86,10 @@ async fn exec_runs_over_a_punched_connection() {
 // -L
 // ---------------------------------------------------------------------------
 
-/// One round trip through the `-L` listener: write `payload`, half-close,
-/// read the echo to the end.
-///
-/// One socket handle, one thread. The obvious shape (a writer thread on a
-/// `try_clone` of the socket while this thread blocks in `read`) is wrong on
-/// Windows: `try_clone` is `WSADuplicateSocket`, and under CPU load the
-/// duplicate comes back unconnected (`getpeername` and
-/// `shutdown(SD_SEND)` fail with `WSAENOTCONN`, 10057) while `send` on it
-/// still works. The half-close is then never sent, the `-L` listener never
-/// sees EOF, and the read times out (10060) with every byte already echoed.
-/// So the socket is non-blocking and the writes and reads are interleaved
-/// here, which also keeps the kernel buffers from ever deadlocking the two
-/// directions against each other.
+/// One round trip through the `-L` listener; see
+/// [`qsh_testkit::tunnel::echo_round_trip`] for why it is one socket.
 fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut stream = TcpStream::connect_timeout(
-        &SocketAddr::from(([127, 0, 0, 1], listen_port)),
-        Duration::from_secs(5),
-    )?;
-    stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let timed_out = || std::io::Error::from(std::io::ErrorKind::TimedOut);
-    let mut sent = 0;
-    let mut half_closed = false;
-    let mut got = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        if Instant::now() >= deadline {
-            return Err(timed_out());
-        }
-        let mut progressed = false;
-        if sent < payload.len() {
-            match stream.write(&payload[sent..]) {
-                Ok(n) => {
-                    sent += n;
-                    progressed = true;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
-            }
-        } else if !half_closed {
-            stream.shutdown(Shutdown::Write)?;
-            half_closed = true;
-            progressed = true;
-        }
-        match stream.read(&mut buf) {
-            Ok(0) => return Ok(got),
-            Ok(n) => {
-                got.extend_from_slice(&buf[..n]);
-                progressed = true;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e),
-        }
-        if !progressed {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
+    qsh_testkit::tunnel::echo_round_trip(listen_port, payload, Duration::from_secs(20))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

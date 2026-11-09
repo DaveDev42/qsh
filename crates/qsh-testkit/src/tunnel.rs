@@ -28,9 +28,11 @@
 //! exactly as `qsh_core`'s own `tunnel::local` unit tests do. DoD 1's
 //! `8080` is illustrative; nothing here hardcodes a port.
 
-use std::io;
+use std::io::{self, Read as _, Write as _};
+use std::net::Shutdown;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use qsh_core::acl::{AllowAllPinned, Authorizer};
 use qsh_core::audit::MemoryAuditSink;
@@ -643,5 +645,65 @@ pub fn ephemeral_local_spec(host: &str, port: u16) -> ForwardSpec {
         listen_port: 0,
         host: host.to_string(),
         host_port: port,
+    }
+}
+
+/// One round trip through a `-L` listener at `127.0.0.1:listen_port`: write `payload`, half-close,
+/// read the echo to the end.
+///
+/// One socket handle, one thread. The obvious shape (a writer thread on a
+/// `try_clone` of the socket while this thread blocks in `read`) is wrong on
+/// Windows: `try_clone` is `WSADuplicateSocket`, and under CPU load the
+/// duplicate comes back unconnected (`getpeername` and
+/// `shutdown(SD_SEND)` fail with `WSAENOTCONN`, 10057) while `send` on it
+/// still works. The half-close is then never sent, the `-L` listener never
+/// sees EOF, and the read times out (10060) with every byte already echoed.
+/// So the socket is non-blocking and the writes and reads are interleaved
+/// here, which also keeps the kernel buffers from ever deadlocking the two
+/// directions against each other.
+/// The whole exchange must finish within `limit`.
+pub fn echo_round_trip(listen_port: u16, payload: &[u8], limit: Duration) -> io::Result<Vec<u8>> {
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], listen_port)),
+        Duration::from_secs(5),
+    )?;
+    stream.set_nonblocking(true)?;
+    let deadline = Instant::now() + limit;
+    let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
+    let mut sent = 0;
+    let mut half_closed = false;
+    let mut got = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(timed_out());
+        }
+        let mut progressed = false;
+        if sent < payload.len() {
+            match stream.write(&payload[sent..]) {
+                Ok(n) => {
+                    sent += n;
+                    progressed = true;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+        } else if !half_closed {
+            stream.shutdown(Shutdown::Write)?;
+            half_closed = true;
+            progressed = true;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Ok(got),
+            Ok(n) => {
+                got.extend_from_slice(&buf[..n]);
+                progressed = true;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+        if !progressed {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }

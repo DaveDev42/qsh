@@ -23,8 +23,7 @@
 //! decides it (the CLI's header reaches J unchanged, `jump_stats().opened`).
 
 use std::future::Future;
-use std::io::{Read as _, Write as _};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -240,21 +239,7 @@ async fn exec(
 /// One round trip through a `-L` listener: write `payload`, half-close, read
 /// the echo to the end.
 fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut stream = TcpStream::connect_timeout(
-        &SocketAddr::from(([127, 0, 0, 1], listen_port)),
-        Duration::from_secs(5),
-    )?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    let mut writer = stream.try_clone()?;
-    let data = payload.to_vec();
-    let writing = std::thread::spawn(move || {
-        writer.write_all(&data)?;
-        writer.shutdown(Shutdown::Write)
-    });
-    let mut got = Vec::new();
-    stream.read_to_end(&mut got)?;
-    writing.join().expect("writer thread")?;
-    Ok(got)
+    qsh_testkit::tunnel::echo_round_trip(listen_port, payload, Duration::from_secs(30))
 }
 
 // ----------------------------------------------------------------------
