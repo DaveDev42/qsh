@@ -136,6 +136,9 @@ fn capture_adopted() {
 // the runs
 // ---------------------------------------------------------------------------
 
+/// A pair, a seed and the loss on the A to B path.
+type Job = (NatKind, NatKind, u64, f64);
+
 struct Run {
     a: NatKind,
     b: NatKind,
@@ -150,13 +153,14 @@ impl Run {
     }
 }
 
-async fn run_pair((a, b, seed): (NatKind, NatKind, u64)) -> Run {
+async fn run_pair((a, b, seed, loss): Job) -> Run {
     let w = world(WorldOptions {
         a_nat: a,
         b_nat: b,
         direct_listener: false,
         pin_b_address: false,
         seed,
+        a_b_loss: loss,
         ..WorldOptions::default()
     })
     .await;
@@ -175,7 +179,7 @@ async fn run_pair((a, b, seed): (NatKind, NatKind, u64)) -> Run {
 }
 
 /// Five pairs side by side (the clocks are real, the links only sleep).
-async fn run_chunk(jobs: &[(NatKind, NatKind, u64)]) -> Vec<Run> {
+async fn run_chunk(jobs: &[Job]) -> Vec<Run> {
     assert!(jobs.len() <= 5);
     let job = |i: usize| jobs.get(i).copied();
     let run = |i: usize| async move {
@@ -208,7 +212,7 @@ async fn punch_route_nat_matrix() {
     for &a in &KINDS {
         for &b in &KINDS {
             for &seed in &seeds {
-                jobs.push((a, b, seed));
+                jobs.push((a, b, seed, 0.0));
             }
         }
     }
@@ -291,4 +295,72 @@ async fn punch_route_nat_matrix() {
     } else {
         eprintln!("p95 bound not asserted without QSH_ACCEPTANCE_SLOW=1");
     }
+}
+
+/// DoD 1 tail: the same table with 5% loss on the A to B path (both
+/// directions; the signalling links stay clean). Every pair that can open
+/// still stands inside the punch budget and runs its command over the
+/// adopted connection. The pairs that cannot open are the same three and
+/// loss does not change them, so only the 22 run. One seed by default, the
+/// five seeds of the ADR with `QSH_ACCEPTANCE_SLOW`.
+#[tokio::test(flavor = "multi_thread")]
+async fn punch_route_nat_matrix_survives_five_percent_ab_loss() {
+    capture_adopted();
+    let slow = slow_gate();
+    let seeds: Vec<u64> = if slow { vec![1, 2, 3, 4, 5] } else { vec![1] };
+    let budget = PUNCH_SIGNAL_BUDGET + PUNCH_WINDOW;
+    let mut jobs = Vec::new();
+    for &a in &KINDS {
+        for &b in &KINDS {
+            if expected_to_fail(a, b) {
+                continue;
+            }
+            for &seed in &seeds {
+                jobs.push((a, b, seed, 0.05));
+            }
+        }
+    }
+    let mut times: Vec<u64> = Vec::new();
+    let mut samples: Vec<u64> = Vec::new();
+    for chunk in jobs.chunks(5) {
+        adopted_ms()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let runs = run_chunk(chunk).await;
+        let wins = runs.len();
+        for run in runs {
+            let who = run.who();
+            let ok = run
+                .outcome
+                .unwrap_or_else(|err| panic!("{who}: should punch under 5% loss: {err:?}"));
+            assert!(ok, "{who}: the command did not run over the punch");
+            assert!(
+                run.exec_took < budget,
+                "{who}: took {:?} under loss, past the punch budget {budget:?}",
+                run.exec_took
+            );
+            times.push(run.exec_took.as_millis() as u64);
+        }
+        let got = adopted_ms()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(got.len(), wins, "one `adopted` line per punched connection");
+        samples.extend(got);
+    }
+    assert_eq!(times.len(), 22 * seeds.len());
+    times.sort_unstable();
+    samples.sort_unstable();
+    println!(
+        "5% A-B loss over {} punched connections (seeds {seeds:?}): route start to adopted \
+         p50 {} ms, p95 {} ms, max {} ms; exec p95 {} ms, max {} ms (budget {} ms)",
+        samples.len(),
+        percentile(&samples, 0.50),
+        percentile(&samples, 0.95),
+        samples.last().unwrap(),
+        percentile(&times, 0.95),
+        times.last().unwrap(),
+        budget.as_millis()
+    );
 }

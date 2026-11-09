@@ -194,6 +194,32 @@ pub(super) struct WorldOptions {
     pub(super) learn_hints: bool,
     /// The netsim seed (random NAT ports, loss).
     pub(super) seed: u64,
+    /// Where the three parties sit (ADR-0054 decision 23, the four scenes).
+    pub(super) layout: Layout,
+    /// Loss on the A to B public path, both directions. Signalling runs over
+    /// the A to R and B to R links, which stay clean.
+    pub(super) a_b_loss: f64,
+}
+
+/// The topology of a [`world`]. Everything but `Separate` is a scene of
+/// ADR-0054 decision 23.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Layout {
+    /// A, B and R on three sites (`a_nat`, `b_nat`, a public R).
+    Separate,
+    /// (a) B is a second host behind A's own NAT (`a_nat`); `b_nat` is
+    /// ignored.
+    SameNat,
+    /// (b) B sits behind a home box (`b_nat`) that sits behind a carrier box
+    /// (`b_nat` again), EIM on EIM when `b_nat` is a cone.
+    DoubleNat,
+    /// (c) IPv6 only: A and B are behind stateful firewalls without
+    /// translation and R has an IPv6 address; `a_nat` and `b_nat` are
+    /// ignored.
+    Ipv6Firewalls,
+    /// (d) R is a second host behind B's NAT (`b_nat`), with port 9000
+    /// forwarded to it. A is outside and reaches R at the box's address.
+    RendezvousBehindTarget,
 }
 
 impl Default for WorldOptions {
@@ -210,6 +236,8 @@ impl Default for WorldOptions {
             flag_rendezvous: true,
             learn_hints: false,
             seed: 7,
+            layout: Layout::Separate,
+            a_b_loss: 0.0,
         }
     }
 }
@@ -238,14 +266,69 @@ pub(super) async fn world(opts: WorldOptions) -> World {
         seed: opts.seed,
         ..NetConfig::default()
     });
-    let r_site = net.internet().site(NatKind::None, "r", ip("203.0.113.1"));
-    let a_site = net.internet().site(opts.a_nat, "a", ip("198.51.100.1"));
-    let b_site = net.internet().site(opts.b_nat, "b", ip("198.51.100.2"));
-    net.set_path(
-        a_site.external_ip(),
-        b_site.external_ip(),
-        PathConfig::delay(opts.a_b_delay),
-    );
+    let layout = opts.layout;
+    let v6 = layout == Layout::Ipv6Firewalls;
+    let (r_ip, a_ip, b_ip) = if v6 {
+        (
+            ip("2001:db8:ffff::1"),
+            ip("2001:db8:a::1"),
+            ip("2001:db8:b::1"),
+        )
+    } else {
+        (ip("203.0.113.1"), ip("198.51.100.1"), ip("198.51.100.2"))
+    };
+    let kind = |k: NatKind| if v6 { NatKind::FirewallV6 } else { k };
+    let internet = net.internet();
+    let a_site = internet.site(kind(opts.a_nat), "a", a_ip);
+    // `b_site` is where B lives and `b_public` the address the rest of the
+    // world sees its outermost box at.
+    let (b_site, r_site, b_public) = match layout {
+        Layout::SameNat => {
+            let b = a_site.add_host().expect("a second host behind A's box");
+            let public = b.external_ip();
+            (b, internet.site(NatKind::None, "r", r_ip), public)
+        }
+        Layout::DoubleNat => {
+            let carrier = internet.site(opts.b_nat, "carrier", b_ip);
+            let home = carrier
+                .nest(opts.b_nat, "home")
+                .expect("a box behind a box");
+            (home, internet.site(NatKind::None, "r", r_ip), b_ip)
+        }
+        Layout::RendezvousBehindTarget => {
+            let b = internet.site(opts.b_nat, "b", b_ip);
+            let r = b.add_host().expect("R behind B's box");
+            b.nat()
+                .expect("a translating box")
+                .forward(9000, SocketAddr::new(r.ip(), 9000));
+            let public = b.external_ip();
+            (b, r, public)
+        }
+        Layout::Separate | Layout::Ipv6Firewalls => {
+            let b = internet.site(kind(opts.b_nat), "b", b_ip);
+            let public = b.external_ip();
+            (b, internet.site(NatKind::None, "r", r_ip), public)
+        }
+    };
+    if a_site.external_ip() != b_public {
+        net.set_path(
+            a_site.external_ip(),
+            b_public,
+            PathConfig::delay(opts.a_b_delay).with_loss(opts.a_b_loss),
+        );
+    }
+    // R's address as A pins it and as B pins it (they differ when R sits
+    // behind B's box).
+    let (r_addr_a, r_addr_b) = match layout {
+        Layout::RendezvousBehindTarget => (
+            SocketAddr::new(b_public, 9000).to_string(),
+            SocketAddr::new(r_site.ip(), 9000).to_string(),
+        ),
+        _ => {
+            let addr = SocketAddr::new(r_ip, 9000).to_string();
+            (addr.clone(), addr)
+        }
+    };
 
     let flagged: &[&str] = if opts.flag_rendezvous { &["r"] } else { &[] };
     let mut a = client_with(&a_site, flagged, opts.head_start, opts.learn_hints).await;
@@ -286,7 +369,7 @@ pub(super) async fn world(opts: WorldOptions) -> World {
     let mut trust = TrustStore::default();
     trust.add_peer(
         "r",
-        Some(R_ADDR.to_string()),
+        Some(r_addr_b),
         r_id.fingerprint,
         "2026-01-01T00:00:00Z".to_string(),
     );
@@ -368,10 +451,10 @@ pub(super) async fn world(opts: WorldOptions) -> World {
         b_server = Some(server);
     }
 
-    pin(&a.ops, "r", Some(R_ADDR.to_string()), &r_id.fingerprint).await;
+    pin(&a.ops, "r", Some(r_addr_a), &r_id.fingerprint).await;
     let b_address = opts
         .pin_b_address
-        .then(|| SocketAddr::new(b_site.external_ip(), B_DIRECT_PORT).to_string());
+        .then(|| SocketAddr::new(b_public, B_DIRECT_PORT).to_string());
     pin(&a.ops, "b", b_address, &b_id.fingerprint).await;
 
     World {
