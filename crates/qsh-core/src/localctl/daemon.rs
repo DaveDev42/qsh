@@ -2113,7 +2113,10 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
         // opens the QUIC stream, so this conduit claims it like a
         // `TCP_ACCEPTED` instead of opening one.
         Some(wire::StreamKind::Agent) => Some(LocalStreamRelay::ClaimAgent),
-        Some(wire::StreamKind::Unspecified) | None => None,
+        // `JUMP` (ADR-0056 decision 3) is not relayed through the local
+        // conduit yet; it is refused like an unknown kind, with nothing
+        // opened on QUIC. The reverse-route step gives it an arm.
+        Some(wire::StreamKind::Jump) | Some(wire::StreamKind::Unspecified) | None => None,
     }
 }
 

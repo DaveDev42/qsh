@@ -1173,6 +1173,10 @@ async fn datagram_pump(
             }
             // The host sends updates; a client sending one is a slip.
             DatagramKind::ScreenUpdate | DatagramKind::ScreenEcho => {}
+            // Kind 14 names a jump channel, which lives in the jump table and
+            // never in a screen attach's channel map (ADR-0056 decision 3);
+            // one arriving here is dropped like any unknown channel.
+            DatagramKind::JumpPacket => {}
         }
     }
 }
