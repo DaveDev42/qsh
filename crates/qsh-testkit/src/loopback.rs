@@ -316,6 +316,19 @@ impl LoopbackHarness {
         Self::start_inner(authorizer, client, server_trust, Some(policy), None, None).await
     }
 
+    /// [`Self::start_chaotic_with`] for a client the caller already has: the
+    /// host pins `server_trust`'s fingerprints and the client dials through
+    /// the proxy. For a test whose client is a real `Ops` with its own
+    /// identity.
+    pub async fn start_chaotic_custom(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+        policy: ChaosPolicy,
+    ) -> Self {
+        Self::start_inner(authorizer, client, server_trust, Some(policy), None, None).await
+    }
+
     /// [`Self::start_custom`] with the host writing its audit records to
     /// `sink` instead of the in-memory one — for a test that needs the
     /// production writer (`qsh_core::audit::RotatingAuditSink`, its bounded

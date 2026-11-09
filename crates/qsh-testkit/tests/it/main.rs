@@ -7,6 +7,7 @@ mod acl_uniformity;
 mod admission;
 mod admission_retry_sever;
 mod agent_client;
+mod agent_forward;
 mod agent_host;
 mod agent_reverse;
 mod agent_wire;

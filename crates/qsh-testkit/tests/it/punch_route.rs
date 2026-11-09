@@ -365,7 +365,10 @@ pub(super) async fn world(opts: WorldOptions) -> World {
 
     // B: the real `qsh serve --to r` entry on the virtual network.
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    // B keeps its runtime files (agent sockets included) in the sandbox, never
+    // under the real `$XDG_RUNTIME_DIR`.
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
     let mut trust = TrustStore::default();
     trust.add_peer(
         "r",
