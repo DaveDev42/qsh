@@ -192,6 +192,8 @@ pub(super) struct WorldOptions {
     pub(super) flag_rendezvous: bool,
     /// A asks hosts for rendezvous hints, as the `qsh` binary does.
     pub(super) learn_hints: bool,
+    /// The netsim seed (random NAT ports, loss).
+    pub(super) seed: u64,
 }
 
 impl Default for WorldOptions {
@@ -207,6 +209,7 @@ impl Default for WorldOptions {
             recovery: None,
             flag_rendezvous: true,
             learn_hints: false,
+            seed: 7,
         }
     }
 }
@@ -232,7 +235,7 @@ pub(super) struct World {
 
 pub(super) async fn world(opts: WorldOptions) -> World {
     let net = Net::new(NetConfig {
-        seed: 7,
+        seed: opts.seed,
         ..NetConfig::default()
     });
     let r_site = net.internet().site(NatKind::None, "r", ip("203.0.113.1"));

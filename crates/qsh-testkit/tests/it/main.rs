@@ -29,6 +29,7 @@ mod pairing_loopback;
 mod pairing_quota;
 mod perf_out;
 mod punch;
+mod punch_accept;
 mod punch_doctor;
 mod punch_hints;
 mod punch_recovery;
