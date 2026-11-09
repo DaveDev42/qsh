@@ -3,8 +3,8 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds twenty-six `cargo-fuzz` targets.
-Twenty-three are parser harnesses over that surface; one of them,
+anything else touches it. This crate holds twenty-seven `cargo-fuzz` targets.
+Twenty-four are parser harnesses over that surface; one of them,
 `fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
 paths (trust store files, ACL principal text). Three more are stateful:
@@ -93,6 +93,7 @@ Run from `fuzz/`. `cargo fuzz list` prints the same set.
 | `valid_host_name` | `wire.rs` | `valid_host_name` — shape check on a reverse target's offered name, run before it can become an ACL resource/audit field. |
 | `valid_forward_id` | `wire.rs` | `valid_forward_id` — shape check on an opaque host-issued forward token a peer echoes back. |
 | `punch_candidates` | `crates/qsh-proto/src/punch.rs` | The hole-punching surface (ADR-0054 decisions 8, 11, 13). The first input byte picks: `PunchCandidate` and `valid_punch_candidate` (a valid address re-encodes to the same ip and port), the shape checks of `PunchRequest`/`PunchOffer`/`PunchAnswer`/`PunchReply`/`RendezvousList` with `check_candidates` (at most eight distinct, non-forbidden addresses, `accepted + dropped <= len`), or the 16-byte punch datagram with its tag comparison (verifies in its own direction only). The new messages are also seeded in the `decode_control` corpus. The wrapped socket's GRO receive filter in `qsh-transport` is covered by its unit tests. |
+| `agent_frames` | `crates/qsh-proto/src/agent.rs` | `AgentDecoder` and `request_disposition` (ADR-0055 decisions 4 and 12): ssh-agent message framing (4-byte length, type byte) fed in chunks of 1 to 64 bytes chosen by the first input byte. Checks no panic, that every returned message is whole (length 1 to `AGENT_MESSAGE_MAX`, type byte equal to `kind`), that an error (length 0 or over the cap) is sticky and leaves nothing buffered, that chunking changes neither the messages nor the error, and that the filter passes exactly types 11 and 13. |
 | `parse_invite_code` | `crates/qsh-proto/src/pairing.rs` | `parse_invite_code` — Crockford Base32 invite-code decode (case-fold, hyphen-agnostic, `i`/`l`/`o` remap, `u` rejected), reached from `qsh trust accept`. Transitively exercises the private per-`char` `decode_symbol` over the full Unicode domain. |
 | `parse_forward_spec` | `wire.rs` | `parse_forward_spec` — the `-L`/`-R` forward-spec grammar (`[bind:]listen_port:host:host_port`, IPv6 bracket tokenizing). Local-CLI-origin text, included because it's part of qsh-proto's sans-IO parser surface. |
 | `parse_socks5` | `crates/qsh-proto/src/socks5.rs` | `parse_greeting`/`parse_request` — the SOCKS5 sans-IO codec `-D` drives against its loopback listener (ADR-0019). Local-CLI-adjacent input like `parse_forward_spec`, not a `qsh`-to-`qsh` wire message. Checks no panic, `consumed <= input.len()`, and that every strict prefix of a valid message parses as `Incomplete`. |

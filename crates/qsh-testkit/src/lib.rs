@@ -41,6 +41,10 @@
 //!   driving the real client where the host has no PTY.
 //! - [`asset_server`]: a loopback HTTP server standing in for GitHub in the
 //!   remote install tests (ADR-0051 decision 3).
+//! - [`fake_agent`]: [`fake_agent::FakeAgent`], a fake ssh-agent on a Unix
+//!   socket (Windows: a named pipe) that lists configured identities, signs
+//!   with a deterministic blob, answers everything else with `FAILURE` and
+//!   records every message type it receives (ADR-0055 decision 23).
 //! - [`fake_ssh`]: [`fake_ssh::FakeSsh`], a private directory holding a copy
 //!   of the `qsh-fake-ssh` executable this crate builds, which records its
 //!   argv and plays the system `ssh` of the SSH bootstrap tests (ADR-0044)
@@ -72,6 +76,7 @@ pub mod chaos;
 pub mod conpty;
 pub mod echo_host;
 pub mod env_check;
+pub mod fake_agent;
 pub mod fake_ssh;
 pub mod fixtures;
 #[cfg(windows)]

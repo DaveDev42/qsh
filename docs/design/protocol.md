@@ -588,6 +588,8 @@ unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적
 
 **11. `punch_candidates`(ADR-0054 결정 8·11·13, §19).** 첫 입력 바이트로 후보(`PunchCandidate`, `valid_punch_candidate`), 펀칭 message 다섯의 모양 검사와 `check_candidates`, 16바이트 펀치 datagram과 tag 대조 중 하나를 고른다. 검사가 panic하지 않고, 받아들인 후보 목록이 여덟 이하의 서로 다른 허용 주소이며 `accepted + dropped <= len`이고, 유효한 주소가 같은 ip·port로 다시 부호화되며, tag로 만든 datagram이 제 방향에서만 맞는 것을 단언한다. 새 message는 `decode_control` corpus에도 들어 있다.
 
+**12. `agent_frames`(ADR-0055 결정 4·12, §20).** 첫 입력 바이트가 청크 크기(1~64)를 고르고, 나머지 바이트를 `AgentDecoder`에 그 크기로 나눠 먹인다. 단언: panic 없음, 돌려준 메시지는 길이 접두가 1 이상 `AGENT_MESSAGE_MAX` 이하이고 전체 바이트 수와 맞으며 type 바이트가 `kind`와 같다, 오류(길이 0, 상한 초과)는 그대로 유지되고 버퍼를 비운다, 청크 경계는 메시지와 오류를 바꾸지 않는다, 거르기 표는 11과 13만 넘긴다.
+
 corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
@@ -1113,3 +1115,23 @@ R이 B에게 보내는 `PunchOffer`는 등록 연결의 요청 채널을 쓴다.
 - **resume은 그대로다.** 재dial로 선 연결(직접이든 펀칭이든)에서 §10의 reattach 4단계를 그대로 하고, resume token은 route가 아니라 peer 신원에 묶여 있으므로 같은 세션을 이어 붙인다. 입력의 무손실·무중복(§10-5)도 같다. 새 session은 만들어지지 않는다.
 - **B의 주소가 바뀌면.** B의 등록 recovery(ADR-0041)가 먼저 R에 다시 등록하고 A의 시도가 그 뒤에 펀칭한다. 등록이 아직 없으면 `target_not_registered`로 그 시도가 실패하고 다음 시도로 넘어간다.
 - **`--supervise`.** 터널의 재dial 시도 하나도 같은 시한으로 route를 다시 돌고, 포기하지 않는 동안 listener는 묶여 있다(ADR-0023). `-L`·`-D`·`-R` 어느 쪽이든 carrier를 다시 세우는 길이 같다.
+
+## 20. agent forwarding (ADR-0055)
+
+이 절은 ADR-0055의 스텝 중 wire를 건드리지 않는 `qsh_proto::agent`가 구현한 부분만 적는다. capability `agent.v1`, `StreamKind::AGENT`, 요청·응답 필드와 `AgentGrant`는 아직 없고, 해당 스텝이 들어올 때 이 절에 더한다.
+
+### 20.1 메시지 framing
+
+`AGENT` 스트림은 ssh-agent 프로토콜 바이트를 그대로 싣는다. 메시지는 4바이트 big-endian 길이, 1바이트 type, 내용이고, 길이는 type 바이트와 내용을 센다. `qsh_proto::agent::AgentDecoder`(sans-IO)는 길이와 type 바이트만 읽고 내용은 해석하지 않는다.
+
+- 길이 상한은 `AGENT_MESSAGE_MAX = 262144`(256 KiB, OpenSSH `AGENT_MAX_LEN`과 같다)다. 길이 0(`AgentFrameError::ZeroLength`)과 상한 초과(`AgentFrameError::Oversize`)는 헤더 4바이트만 보고 거절한다. 선언된 길이로 버퍼를 미리 잡지 않고, 실제로 도착한 바이트만 쌓는다.
+- 오류가 나면 decoder는 그 상태로 굳고 쌓인 바이트를 버린다. 호출자는 이 오류를 `BAD_HEADER`(`0x2001`) 스트림 reset과 로컬 agent 연결 닫기로 바꾼다(스트림 수준의 시험은 client 스텝에서 더한다).
+- `next_message`는 길이 접두를 포함한 메시지 전체를 돌려주므로 로컬 agent에 그대로 쓸 수 있다.
+
+### 20.2 거르기 표
+
+client는 host에서 온 요청의 type을 `ALLOWED_REQUESTS`(`REQUEST_IDENTITIES` 11, `SIGN_REQUEST` 13)에서 찾는다(`request_disposition`). 표에 없는 type은 번호가 SSH1 시절의 것이든 모르는 것이든 로컬 agent에 보내지 않고, client가 `FAILURE_REPLY`(`00 00 00 01 05`)를 스트림에 쓴다. 표를 넓히려면 새 ADR이 필요하다(ADR-0055 결정 12). 응답은 거르지 않고 같은 decoder로 길이만 끊어 상한을 지킨다.
+
+### 20.3 시험
+
+단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.

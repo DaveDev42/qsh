@@ -207,3 +207,10 @@ path = "fuzz_targets/punch_candidates.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "agent_frames"
+path = "fuzz_targets/agent_frames.rs"
+test = false
+doc = false
+bench = false

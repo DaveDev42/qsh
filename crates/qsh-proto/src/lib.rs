@@ -40,10 +40,14 @@
 //! - [`punch`]: the 16-byte hole-punch datagram and its BLAKE3 tag
 //!   (ADR-0054 decision 13). Unnegotiated until `punch.v1` lands.
 //!
+//! - [`agent`]: ssh-agent message framing and the request filter table
+//!   (ADR-0055 decisions 4 and 12). Unwired until `agent.v1` lands.
+//!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
 //! §13) and depends on no other workspace crate.
 
+pub mod agent;
 pub mod datagram;
 pub mod error;
 pub mod event;
