@@ -63,8 +63,9 @@ pub struct SshFlags {
     pub ipv6: bool,
     /// `-J destination[,destination...]`.
     pub jump: Option<String>,
-    /// `-A`.
-    pub agent_forwarding: bool,
+    /// The last of `-A` (`Some(true)`) and `-a` (`Some(false)`); `None`
+    /// when neither was given.
+    pub agent_forwarding: Option<bool>,
     /// Options ssh has and qsh refuses (`-X`, `-W`, ...), as typed with
     /// their dash.
     pub rejected: Vec<String>,
@@ -80,17 +81,19 @@ pub struct SshOptions {
     batch_mode: bool,
     server_alive_interval: Option<Duration>,
     server_alive_count_max: Option<u32>,
+    agent_flag: Option<bool>,
+    forward_agent: Option<String>,
 }
 
 impl SshOptions {
     /// Validate `flags`.
     ///
     /// - A rejected option is `UNSUPPORTED` and names the option
-    ///   (`-W` is rejected by ADR-0011); `-A` is `UNSUPPORTED` until M25.
+    ///   (`-W` is rejected by ADR-0011).
     /// - `-p` must be a port, `-4` and `-6` do not combine, and `-o` values
     ///   that qsh also reads (`ConnectTimeout`, `BatchMode`,
-    ///   `ServerAliveInterval`, `ServerAliveCountMax`, `AddressFamily`) must
-    ///   parse. Every other `-o` key is ssh's to judge and is forwarded.
+    ///   `ServerAliveInterval`, `ServerAliveCountMax`, `AddressFamily`,
+    ///   `ForwardAgent`) must parse. Every other `-o` key is ssh's to judge and is forwarded.
     pub fn from_flags(flags: &SshFlags) -> Result<Self, OpError> {
         if let Some(first) = flags.rejected.first() {
             let why = if first == "-W" {
@@ -102,15 +105,13 @@ impl SshOptions {
                 "ssh option {first} is not supported ({why})"
             )));
         }
-        if flags.agent_forwarding {
-            return Err(unsupported(
-                "ssh option -A (agent forwarding) is not supported before M25",
-            ));
-        }
         if flags.ipv4 && flags.ipv6 {
             return Err(invalid("-4 and -6 do not combine"));
         }
-        let mut out = Self::default();
+        let mut out = Self {
+            agent_flag: flags.agent_forwarding,
+            ..Self::default()
+        };
         if let Some(file) = &flags.config_file {
             out.forwarded.push("-F".into());
             out.forwarded.push(checked_word("-F", file)?);
@@ -167,6 +168,14 @@ impl SshOptions {
                     };
                 }
                 "batchmode" => out.batch_mode = parse_yes_no(&key, &value)?,
+                "forwardagent" => {
+                    // Only the shape is checked here; `Ops::with_agent_forward`
+                    // decides what it means (ADR-0055 decision 18). The
+                    // option still goes to the bootstrap ssh like any other
+                    // `-o`, behind the fixed `-a`.
+                    crate::agent::ForwardAgentOption::parse(&value)?;
+                    out.forward_agent = Some(value.clone());
+                }
                 "serveraliveinterval" => {
                     let interval = parse_ssh_time(&key, &value)?;
                     out.server_alive_interval = (!interval.is_zero()).then_some(interval);
@@ -220,6 +229,17 @@ impl SshOptions {
     /// until M26.
     pub fn jump(&self) -> Option<&str> {
         self.jump.as_deref()
+    }
+
+    /// The last of `-A` (`Some(true)`) and `-a` (`Some(false)`).
+    pub fn agent_flag(&self) -> Option<bool> {
+        self.agent_flag
+    }
+
+    /// The value of the first `-o ForwardAgent=`: `yes`, `no`, a path or
+    /// `$VAR` (ADR-0055 decision 18).
+    pub fn forward_agent(&self) -> Option<&str> {
+        self.forward_agent.as_deref()
     }
 
     /// `-o ConnectTimeout`, as the QUIC dial deadline.
@@ -457,13 +477,29 @@ mod tests {
         let err = SshOptions::from_flags(&f).unwrap_err();
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert!(err.message.contains("-W"), "{}", err.message);
+    }
+
+    #[test]
+    fn agent_flags_and_forward_agent_are_read_not_forwarded() {
         let f = SshFlags {
-            agent_forwarding: true,
+            agent_forwarding: Some(true),
+            options: vec![
+                "ForwardAgent=/s/agent.sock".into(),
+                "ForwardAgent=no".into(),
+            ],
             ..flags()
         };
-        let err = SshOptions::from_flags(&f).unwrap_err();
-        assert_eq!(err.code, ErrorCode::Unsupported);
-        assert!(err.message.contains("-A"), "{}", err.message);
+        let o = SshOptions::from_flags(&f).unwrap();
+        assert_eq!(o.agent_flag(), Some(true));
+        // The first value wins, as in ssh.
+        assert_eq!(o.forward_agent(), Some("/s/agent.sock"));
+        // `-A` is never passed to the bootstrap ssh; only the `-o`s are.
+        assert!(!o.forwarded_args().iter().any(|a| a == "-A"));
+        let bad = SshFlags {
+            options: vec!["ForwardAgent=".into()],
+            ..flags()
+        };
+        assert!(SshOptions::from_flags(&bad).is_err());
     }
 
     #[test]

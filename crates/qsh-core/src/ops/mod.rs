@@ -636,6 +636,11 @@ pub struct Ops {
     /// How this process punches ([`Self::with_punch`], ADR-0054). The
     /// default asks for no rendezvous, so the route is the direct dial.
     punch: crate::punch::ClientPunch,
+    /// The local ssh-agent this process forwards, when `-A`, `-o
+    /// ForwardAgent` or `[agent].forward` turned forwarding on
+    /// ([`Self::with_agent_forward`], ADR-0055 decision 18). `None` leaves
+    /// every request byte-identical to one from before agent forwarding.
+    agent: Option<Arc<crate::agent::ClientAgent>>,
 }
 
 impl std::fmt::Debug for Ops {
@@ -748,7 +753,59 @@ impl Ops {
             audit: None,
             revival: None,
             punch: crate::punch::ClientPunch::default(),
+            agent: None,
         }
+    }
+
+    /// Decide agent forwarding for this process (ADR-0055 decision 18).
+    ///
+    /// `flag` is the last of `-A` (`Some(true)`) and `-a` (`Some(false)`);
+    /// `option` is the value of the first `-o ForwardAgent=`. They win over
+    /// `[agent].forward`, which is read only when neither decides, so an
+    /// unreadable `config.toml` is a `CONFIG_ERROR` only then. `~/.ssh/config`
+    /// is never read. The local agent is looked up from the process
+    /// environment ([`crate::agent::ClientAgent::from_env`]).
+    pub fn with_agent_forward(
+        mut self,
+        flag: Option<bool>,
+        option: Option<&str>,
+    ) -> Result<Self, OpError> {
+        use crate::agent::{AgentChoice, ClientAgent, ForwardAgentOption};
+        let option = option.map(ForwardAgentOption::parse).transpose()?;
+        let config = if flag.is_none() && option.is_none() {
+            self.config()?.agent.forward == Some(crate::config::AgentForwardMode::Yes)
+        } else {
+            false
+        };
+        self.agent = match AgentChoice::decide(flag, option.as_ref(), config) {
+            AgentChoice::Off => None,
+            AgentChoice::Forward { location } => Some(ClientAgent::from_env(location.as_deref())),
+        };
+        Ok(self)
+    }
+
+    /// Forward through `agent`, which names its local endpoint explicitly.
+    /// Tests use this to point at a fake agent without touching the process
+    /// environment.
+    #[must_use]
+    pub fn with_client_agent(mut self, agent: Arc<crate::agent::ClientAgent>) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    /// Whether this process forwards its agent.
+    pub fn agent_forwarding(&self) -> bool {
+        self.agent.is_some()
+    }
+
+    /// The stderr line for a local agent that cannot be reached, or `None`
+    /// when forwarding is off or the agent answers (ADR-0055 decision 11).
+    /// The request is sent either way; the frontend only prints this in
+    /// human mode.
+    pub fn agent_unreachable_note(&self) -> Option<String> {
+        let agent = self.agent.as_ref()?;
+        let runtime = self.connect_runtime().ok()?;
+        runtime.block_on(agent.unreachable_note())
     }
 
     /// Set how this process punches: the mode and the rendezvous peers to

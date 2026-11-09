@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 34 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 36 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -56,7 +56,11 @@ pub mod probe;
 /// 20, M24) are the thirty-second to thirty-fourth, 31 -> 34: the outcome of
 /// the one hole punch `qsh doctor <host>` tries when the host has no direct
 /// path.
-/// The set is the same on every target: every build knows all 34 codes.
+/// `AgentUnreachable` and `AgentDirUnusable` (ADR-0055 decision 19, M25) are
+/// the thirty-fifth and thirty-sixth, 34 -> 36: a client whose
+/// `[agent].forward` is `"yes"` but whose ssh-agent does not answer, and a
+/// serve machine whose `agent/` directory cannot hold the sockets.
+/// The set is the same on every target: every build knows all 36 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -96,6 +100,8 @@ pub enum DiagnosticId {
     PunchSucceeded,
     PunchFailed,
     PunchNoRendezvous,
+    AgentUnreachable,
+    AgentDirUnusable,
 }
 
 impl DiagnosticId {
@@ -144,6 +150,8 @@ impl DiagnosticId {
             DiagnosticId::PunchSucceeded => PUNCH_SUCCEEDED.code,
             DiagnosticId::PunchFailed => PUNCH_FAILED.code,
             DiagnosticId::PunchNoRendezvous => PUNCH_NO_RENDEZVOUS.code,
+            DiagnosticId::AgentUnreachable => AGENT_UNREACHABLE.code,
+            DiagnosticId::AgentDirUnusable => AGENT_DIR_UNUSABLE.code,
         }
     }
 }
@@ -161,6 +169,8 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "acl_policy_invalid",
     "acl_policy_missing",
     "acl_principal_unmatched",
+    "agent_dir_unusable",
+    "agent_unreachable",
     "audit_path_unwritable",
     "bindv6only_blocks_ipv4",
     "cert_expired",
@@ -220,6 +230,30 @@ pub const CONTROLLER_UNREACHABLE: Diagnostic = Diagnostic {
     code: "controller_unreachable",
     message: "Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.",
     remedy: "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.",
+};
+
+/// ADR-0055 decision 19, `docs/CLI.md` §6.17: `[agent].forward` is `"yes"`
+/// but no ssh-agent answers where this machine looks (`SSH_AUTH_SOCK`, or the
+/// Win32-OpenSSH pipe on Windows). `warn`: a session still opens, the
+/// forwarding request is sent anyway, and a program on the host that asks its
+/// agent gets a failure.
+pub const AGENT_UNREACHABLE: Diagnostic = Diagnostic {
+    id: DiagnosticId::AgentUnreachable,
+    code: "agent_unreachable",
+    message: "[agent].forward is \"yes\", but no ssh-agent answers on this machine. Sessions and commands still open with agent forwarding requested, and a program on the host that asks for a key gets a failure.",
+    remedy: "Start ssh-agent and ssh-add your key (on Windows, start the ssh-agent service), or check SSH_AUTH_SOCK. To stop forwarding, run `qsh config set agent.forward no`.",
+};
+
+/// ADR-0055 decision 19, `docs/CLI.md` §6.17: on a machine that serves, the
+/// `agent/` directory under qsh's runtime directory cannot be created, or is
+/// not a private (0700) directory owned by this user. `warn`: a request for
+/// agent forwarding to this host is answered `unavailable` while the session
+/// itself opens.
+pub const AGENT_DIR_UNUSABLE: Diagnostic = Diagnostic {
+    id: DiagnosticId::AgentDirUnusable,
+    code: "agent_dir_unusable",
+    message: "The agent/ directory under qsh's runtime directory cannot be created or is not a private directory owned by this user. A session opened here with -A gets no agent socket, and the client is told forwarding is unavailable.",
+    remedy: "Make the runtime directory and its agent/ directory owned by the account that runs qsh serve, with mode 0700, or remove the agent/ directory and let qsh serve create it again.",
 };
 
 /// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently

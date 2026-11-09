@@ -185,9 +185,19 @@ pub struct InteractiveArgs {
     #[arg(short = 'J', value_name = "DEST", requires = "target")]
     pub jump: Option<String>,
 
-    /// Agent forwarding, `ssh -A`. `UNSUPPORTED` until M25.
-    #[arg(short = 'A', requires = "target")]
+    /// Forward the local ssh-agent to the host for this command, `ssh -A`
+    /// (ADR-0055). Only listing keys and signing reach your agent. With
+    /// `-a`, the last one given wins.
+    #[arg(
+        short = 'A',
+        overrides_with = "no_agent_forwarding",
+        requires = "target"
+    )]
     pub agent_forwarding: bool,
+
+    /// Do not forward the agent for this command, `ssh -a`.
+    #[arg(short = 'a', overrides_with = "agent_forwarding", requires = "target")]
+    pub no_agent_forwarding: bool,
 
     /// Force a PTY (`-t`); twice (`-tt`) force it even when stdin is not a
     /// terminal. With a command, `-t` runs it in a PTY session that can be
@@ -358,7 +368,7 @@ impl InteractiveArgs {
             ipv4: self.ipv4,
             ipv6: self.ipv6,
             jump: self.jump.clone(),
-            agent_forwarding: self.agent_forwarding,
+            agent_forwarding: agent_flag(self.agent_forwarding, self.no_agent_forwarding),
             rejected,
         }
     }
@@ -370,6 +380,39 @@ impl InteractiveArgs {
             .as_ref()
             .and_then(|target| target.user.clone())
             .or_else(|| self.login.clone())
+    }
+}
+
+/// The `-A` / `-a` pair as one tri-state: `clap` has already let the last
+/// one given override the other, so at most one is set.
+pub fn agent_flag(forward: bool, no_forward: bool) -> Option<bool> {
+    match (forward, no_forward) {
+        (true, _) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    }
+}
+
+/// `-A` and `-a` for the commands that open a session or an exec
+/// (ADR-0055 decision 18). The last one given wins.
+#[derive(Debug, Args, Clone, Copy, Default)]
+pub struct AgentFlagArgs {
+    /// Forward the local ssh-agent to the host for this command (ADR-0055).
+    /// Only listing keys and signing reach your agent. With `-a`, the last
+    /// one given wins.
+    #[arg(short = 'A', overrides_with = "no_agent_forwarding")]
+    pub agent_forwarding: bool,
+
+    /// Do not forward the agent for this command, even when
+    /// `[agent].forward = "yes"`.
+    #[arg(short = 'a', overrides_with = "agent_forwarding")]
+    pub no_agent_forwarding: bool,
+}
+
+impl AgentFlagArgs {
+    /// `Some(true)` for `-A`, `Some(false)` for `-a`, `None` for neither.
+    pub fn flag(&self) -> Option<bool> {
+        agent_flag(self.agent_forwarding, self.no_agent_forwarding)
     }
 }
 
@@ -1090,6 +1133,9 @@ pub struct ExecArgs {
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub argv: Vec<String>,
+
+    #[command(flatten)]
+    pub agent: AgentFlagArgs,
 }
 
 /// Arguments of `qsh cp` (`docs/adr/0029-file-copy.md` decision 2).
@@ -1150,13 +1196,18 @@ pub struct CpArgs {
     pub scp_o_legacy: bool,
     #[arg(short = 's', hide = true)]
     pub scp_s_sftp: bool,
+    /// scp's `-A` (agent forwarding). `qsh cp` runs no program on the
+    /// remote that could use an agent, so it answers `UNSUPPORTED`
+    /// (ADR-0055 decision 1).
+    #[arg(short = 'A', hide = true)]
+    pub agent_forwarding: bool,
 }
 
 impl CpArgs {
     /// The first scp flag that was given, as scp spells it. `qsh cp`
     /// refuses all of them (exit 2) and never ignores one.
     pub fn unsupported_flag(&self) -> Option<&'static str> {
-        let flags: [(bool, &'static str); 16] = [
+        let flags: [(bool, &'static str); 17] = [
             (self.scp_p_port.is_some(), "-P"),
             (self.scp_i.is_some(), "-i"),
             (!self.scp_o.is_empty(), "-o"),
@@ -1173,6 +1224,8 @@ impl CpArgs {
             (self.scp_t, "-T"),
             (self.scp_o_legacy, "-O"),
             (self.scp_s_sftp, "-s"),
+            // ADR-0055 decision 1: `qsh cp` runs nothing that could use an agent.
+            (self.agent_forwarding, "-A"),
         ];
         flags
             .iter()
@@ -1206,6 +1259,9 @@ pub struct AttachArgs {
     /// Link-status line: `on` (default) or `off`. See `qsh --help`.
     #[arg(long, value_name = "MODE", value_parser = parse_status_line)]
     pub status_line: Option<StatusLine>,
+
+    #[command(flatten)]
+    pub agent: AgentFlagArgs,
 }
 
 /// clap value parser for `--env NAME=VALUE`.
@@ -1969,6 +2025,9 @@ pub struct SessionOpenArgs {
     /// The program and its arguments, after `--`. Omit for the login shell.
     #[arg(last = true, value_name = "COMMAND")]
     pub argv: Vec<String>,
+
+    #[command(flatten)]
+    pub agent: AgentFlagArgs,
 }
 
 /// Arguments of `qsh session read`.

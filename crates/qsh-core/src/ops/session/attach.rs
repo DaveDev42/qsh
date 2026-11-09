@@ -138,6 +138,9 @@ pub struct SessionAttachStream {
     /// Why `--predict=always` cannot act on this attach, if it asked and
     /// cannot (ADR-0053 decision 11).
     pub(super) predict_unavailable: Option<&'static str>,
+    /// What the host answered to `-A` for this attach, as the JSON word
+    /// (`"forwarded"`, `"denied"`, ...); `None` when `-A` was not asked.
+    pub(super) agent_outcome: Option<&'static str>,
 }
 
 /// Ends an attach the same way whether it was closed or merely dropped:
@@ -490,6 +493,13 @@ impl SessionAttachStream {
     /// and always for `auto` and `never`.
     pub fn predict_unavailable(&self) -> Option<&'static str> {
         self.predict_unavailable
+    }
+
+    /// The host's answer to `-A` for this attach (ADR-0055 decision 19):
+    /// `"forwarded"`, `"denied"`, `"unavailable"`, `"no_socket"` or
+    /// `"unsupported"`. `None` when agent forwarding was not asked for.
+    pub fn agent_outcome(&self) -> Option<&'static str> {
+        self.agent_outcome
     }
 
     /// The bytes that put the local terminal's modes back (alternate

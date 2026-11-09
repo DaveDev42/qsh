@@ -78,6 +78,18 @@ pub(super) struct AttachContext {
     /// recovery waits past the generation the recovery itself landed on,
     /// never the original one again.
     pub(super) reverse_route: Option<ReverseRoute>,
+    /// The `-A` channel of this attach and the table it lives in. It stays
+    /// registered for as long as the attach does, so a recovery's new
+    /// connection can carry the same channel (ADR-0055 decision 9) and its
+    /// `AGENT` streams still find it.
+    pub(super) agent: Option<AgentAttach>,
+}
+
+/// An attach's agent forwarding state: the shared client agent and this
+/// attach's registered channel, released when the attach ends.
+pub(super) struct AgentAttach {
+    pub(super) agent: Arc<crate::agent::ClientAgent>,
+    pub(super) channel: crate::agent::AgentChannel,
 }
 
 impl AttachContext {

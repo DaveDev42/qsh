@@ -4,7 +4,7 @@
 .SH NAME
 qsh \- QSH: a QUIC\-based direct\-connect remote shell
 .SH SYNOPSIS
-\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-e\fR|\fB\-\-escape\-char\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-\-status\-line\fR] [\fB\-l \fR] [\fB\-p \fR] [\fB\-i \fR] [\fB\-F \fR] [\fB\-o \fR] [\fB\-C \fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-J \fR] [\fB\-A \fR] [\fB\-t \fR]... [\fB\-T \fR] [\fB\-N \fR] [\fB\-f \fR] [\fB\-E \fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIREMOTE_COMMAND\fR] [\fIsubcommands\fR]
+\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-e\fR|\fB\-\-escape\-char\fR] [\fB\-\-screen\-sync\fR] [\fB\-\-predict\fR] [\fB\-\-status\-line\fR] [\fB\-l \fR] [\fB\-p \fR] [\fB\-i \fR] [\fB\-F \fR] [\fB\-o \fR] [\fB\-C \fR] [\fB\-4 \fR] [\fB\-6 \fR] [\fB\-J \fR] [\fB\-A \fR] [\fB\-a \fR] [\fB\-t \fR]... [\fB\-T \fR] [\fB\-N \fR] [\fB\-f \fR] [\fB\-E \fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIREMOTE_COMMAND\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 QSH: a QUIC\-based direct\-connect remote shell
 .SH OPTIONS
@@ -76,7 +76,10 @@ IPv6 only: the bootstrap ssh and the QUIC dial
 Jump host list, `ssh \-J`. Reaches the bootstrap ssh only; a jump on the QUIC path is `UNSUPPORTED` until M26
 .TP
 \fB\-A\fR
-Agent forwarding, `ssh \-A`. `UNSUPPORTED` until M25
+Forward the local ssh\-agent to the host for this command, `ssh \-A` (ADR\-0055). Only listing keys and signing reach your agent. With `\-a`, the last one given wins
+.TP
+\fB\-a\fR
+Do not forward the agent for this command, `ssh \-a`
 .TP
 \fB\-t\fR
 Force a PTY (`\-t`); twice (`\-tt`) force it even when stdin is not a terminal. With a command, `\-t` runs it in a PTY session that can be detached

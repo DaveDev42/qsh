@@ -555,8 +555,27 @@ impl Session {
         stdin: Option<Box<dyn AsyncRead + Send + Unpin>>,
         kill_tx: Option<tokio::sync::oneshot::Sender<DataKillSwitch>>,
     ) -> Result<ExecResult, ClientError> {
+        self.exec_with_agent(spec, stdin, kill_tx, Vec::new()).await
+    }
+
+    /// [`Self::exec`] asking for agent forwarding with `agent_channel`
+    /// (ADR-0055 decision 3); an empty channel asks for nothing. The caller
+    /// has registered the channel and is already accepting `AGENT` streams.
+    pub async fn exec_with_agent(
+        &mut self,
+        spec: &ExecSpec,
+        stdin: Option<Box<dyn AsyncRead + Send + Unpin>>,
+        kill_tx: Option<tokio::sync::oneshot::Sender<DataKillSwitch>>,
+        agent_channel: Vec<u8>,
+    ) -> Result<ExecResult, ClientError> {
         let started = Instant::now();
-        let started_msg = self.exec_start(spec).await?;
+        let agent_requested = !agent_channel.is_empty();
+        let started_msg = self.exec_start_with_agent(spec, agent_channel).await?;
+        let agent = crate::agent::grant_label(
+            agent_requested,
+            self.agent_supported() && self.conn.is_some(),
+            started_msg.agent,
+        );
 
         // Data stream: header first, then pump — a QUIC bidi stream on
         // the forward route, or a fresh `LOCAL_STREAM` conduit to the
@@ -628,6 +647,7 @@ impl Session {
             signal: exit.signal,
             timed_out: exit.timed_out,
             duration: started.elapsed(),
+            agent,
         })
     }
 
@@ -1187,6 +1207,9 @@ pub struct ExecResult {
     pub timed_out: bool,
     /// Wall-clock time from request to exit.
     pub duration: Duration,
+    /// The host's answer to `-A` as the JSON word (ADR-0055 decision 19);
+    /// `None` when the request carried no channel.
+    pub agent: Option<&'static str>,
 }
 
 /// A live `SESSION_DATA` stream (`docs/design/protocol.md` §9). Output,

@@ -490,6 +490,32 @@ pub struct Config {
     pub interactive: InteractiveConfig,
     /// `[punch]` — hole punching (ADR-0054 decision 19).
     pub punch: PunchConfig,
+    /// `[agent]` — agent forwarding (ADR-0055 decision 18).
+    pub agent: AgentConfig,
+}
+
+/// `[agent].forward` value (ADR-0055 decision 18).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentForwardMode {
+    /// Do not forward the local ssh-agent unless `-A` or `-o ForwardAgent`
+    /// asks for it.
+    #[default]
+    No,
+    /// Forward on every client command that opens a session or an exec.
+    Yes,
+}
+
+/// `[agent]` section (ADR-0055 decision 18).
+///
+/// A client command reads it each time it runs. `-A`/`-a` and `-o
+/// ForwardAgent` win over the key; `~/.ssh/config` is never read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// `"no"` (default) or `"yes"`. An unknown value is a `CONFIG_ERROR` at
+    /// load.
+    pub forward: Option<AgentForwardMode>,
 }
 
 /// `[punch]` section (ADR-0054 decision 19).

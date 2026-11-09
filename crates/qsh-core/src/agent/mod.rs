@@ -35,6 +35,8 @@ use std::task::{Context, Poll};
 use rand::Rng as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+mod client;
+mod dir;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -44,6 +46,13 @@ mod windows;
 pub use unix::{AgentListener, sweep_stale, sweep_stale_older_than};
 #[cfg(windows)]
 pub use windows::{AgentListener, sweep_stale, sweep_stale_older_than};
+
+pub(crate) use client::serve_agent_stream;
+pub use client::{
+    AgentChannel, AgentChoice, AgentDispatch, AgentEndpoint, AgentIo, ClientAgent,
+    ForwardAgentOption, LocalAgentStream, NoEndpoint, WINDOWS_DEFAULT_AGENT_PIPE, grant_label,
+};
+pub use dir::check_agent_dir;
 
 #[cfg(test)]
 mod tests;

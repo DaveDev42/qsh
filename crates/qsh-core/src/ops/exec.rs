@@ -185,6 +185,7 @@ impl Ops {
         // (or an exec alongside a live pull) no longer pays for a second
         // multi-thread runtime it never needed.
         let runtime = self.connect_runtime()?;
+        let agent = self.agent.clone();
         match self.resolve_exec_route(host, identity)? {
             PeerRoute::Forward(target) => {
                 let device_name = target.identity.identity.device_id.clone();
@@ -204,6 +205,7 @@ impl Ops {
                         stdin,
                         timeout,
                         dialed,
+                        agent.as_ref(),
                     ))
                 };
                 let dialed = AtomicBool::new(false);
@@ -224,7 +226,14 @@ impl Ops {
                 }
             }
             PeerRoute::Reverse(route) => {
-                runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))
+                let mut output =
+                    runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))?;
+                // Agent forwarding over the reverse route is a later step;
+                // say so rather than pretend.
+                if agent.is_some() {
+                    output.data.agent = Some("unsupported".to_string());
+                }
+                Ok(output)
             }
         }
     }
@@ -318,6 +327,7 @@ async fn exec_async(
     stdin: ExecStdin,
     timeout: Option<Duration>,
     dialed: &AtomicBool,
+    agent: Option<&Arc<crate::agent::ClientAgent>>,
 ) -> Result<ExecRunOutput, OpError> {
     exec_async_tracked(
         dialer,
@@ -331,6 +341,7 @@ async fn exec_async(
         timeout,
         &crate::ops::SystemResolver,
         dialed,
+        agent,
     )
     .await
 }
@@ -369,6 +380,7 @@ async fn exec_async_resolving(
         timeout,
         resolver,
         &AtomicBool::new(false),
+        None,
     )
     .await
 }
@@ -389,6 +401,7 @@ async fn exec_async_tracked(
     timeout: Option<Duration>,
     resolver: &dyn crate::ops::AddressResolver,
     dialed_flag: &AtomicBool,
+    agent: Option<&Arc<crate::agent::ClientAgent>>,
 ) -> Result<ExecRunOutput, OpError> {
     // One budget for everything the user is waiting on: resolve, dial,
     // negotiate, run. The connection teardown afterwards is *not* under it —
@@ -421,11 +434,27 @@ async fn exec_async_tracked(
         ExecStdin::Closed => None,
         ExecStdin::Inherit => Some(Box::new(tokio::io::stdin())),
     };
+    // `-A`: the channel is registered, and the dispatcher accepting, before
+    // `ExecStart` leaves, since the host may open the first `AGENT` stream
+    // before it answers (ADR-0055 decision 5). The channel leaves the table
+    // when this function returns.
+    let channel = agent.map(|a| a.register());
     let run = async {
         match Session::negotiate(dialed.connection, device_name).await {
             Ok(mut session) => {
                 if let Some(learn) = learn {
                     learn.ask(&mut session, &connection).await;
+                }
+                let mut dispatcher = None;
+                let mut agent_channel = Vec::new();
+                if let (Some(agent), Some(channel), true) =
+                    (agent, &channel, session.agent_supported())
+                {
+                    dispatcher = Some(crate::tunnel::remote::spawn_agent_dispatcher(
+                        connection.clone(),
+                        agent.dispatcher(),
+                    ));
+                    agent_channel = channel.bytes();
                 }
                 // No kill-switch out-param on the forward route: a timeout
                 // here is handled below by closing the whole `connection`
@@ -433,7 +462,16 @@ async fn exec_async_tracked(
                 // this one exec's alone, and closing it reaches through to
                 // its stdin-pump task's held stream regardless of which
                 // task currently owns it).
-                let result = session.exec(spec, stdin_reader, None).await;
+                let mut result = session
+                    .exec_with_agent(spec, stdin_reader, None, agent_channel)
+                    .await;
+                if let Some(dispatcher) = dispatcher {
+                    dispatcher.abort();
+                }
+                // Asked for but never sent: the host cannot do it.
+                if let (Ok(result), true) = (&mut result, agent.is_some()) {
+                    result.agent.get_or_insert("unsupported");
+                }
                 session.close();
                 result
             }
@@ -474,6 +512,7 @@ async fn exec_async_tracked(
         remote_exit_code: result.exit_code,
         signal: result.signal,
         duration_ms: u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX),
+        agent: result.agent.map(str::to_string),
     };
     Ok(ExecRunOutput {
         data,
@@ -556,6 +595,7 @@ async fn exec_async_reverse(
         remote_exit_code: result.exit_code,
         signal: result.signal,
         duration_ms: u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX),
+        agent: result.agent.map(str::to_string),
     };
     Ok(ExecRunOutput {
         data,

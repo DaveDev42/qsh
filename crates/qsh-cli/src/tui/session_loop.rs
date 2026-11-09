@@ -70,6 +70,17 @@ pub(super) fn run(
     // backstop (that method's own doc), but by the time it runs for this
     // call site the gate has already passed. The listeners themselves come
     // up after the attach, because they ride its connection.
+    let host_label = match &what {
+        Attach::Open { host, .. } => host.clone(),
+        Attach::Existing { session_ref } => session_ref
+            .rsplit_once('/')
+            .map(|(host, _)| host.to_string())
+            .unwrap_or_default(),
+    };
+    // What the host answered to `-A` at `session.open`, when this run opened
+    // the session. A refusal there is the real reason the attach that follows
+    // sees `no_socket`.
+    let mut open_agent: Option<String> = None;
     let (session_ref, opened, forward_specs, remote_forward_specs, dynamic_specs) = match what {
         Attach::Open {
             host,
@@ -83,18 +94,14 @@ pub(super) fn run(
             let remote_specs = qsh_core::parse_remote_forwards(&remote_forwards)?;
             let dynamic_specs = qsh_core::parse_dynamic_forwards(&dynamic_forwards)?;
             let requires_dynamic = !dynamic_specs.is_empty();
-            (
-                open_session(
-                    ops,
-                    open_request(host, user, size, terminal.fallback_term(), shell_command),
-                    requires_dynamic,
-                    screen,
-                )?,
-                true,
-                specs,
-                remote_specs,
-                dynamic_specs,
-            )
+            let (session_ref, agent) = open_session(
+                ops,
+                open_request(host, user, size, terminal.fallback_term(), shell_command),
+                requires_dynamic,
+                screen,
+            )?;
+            open_agent = agent;
+            (session_ref, true, specs, remote_specs, dynamic_specs)
         }
         Attach::Existing { session_ref } => {
             (session_ref, false, Vec::new(), Vec::new(), Vec::new())
@@ -126,6 +133,14 @@ pub(super) fn run(
             screen,
         )
         .map_err(orphan)?;
+
+    // `-A` that did not come through says so once, before raw mode
+    // (ADR-0055 decisions 9 and 16).
+    let agent_answer = match open_agent.as_deref() {
+        Some(word) if word != "forwarded" => Some(word),
+        _ => stream.agent_outcome(),
+    };
+    let _ = human::print_agent_note(&host_label, agent_answer);
 
     // `--predict=always` that cannot act says so once, before raw mode
     // (ADR-0053 decision 11).
@@ -321,9 +336,9 @@ fn open_session(
     req: SessionOpenReq,
     requires_dynamic: bool,
     screen: Option<ScreenAttach>,
-) -> Result<String, OpError> {
+) -> Result<(String, Option<String>), OpError> {
     let opened = ops.session_open_interactive(req, requires_dynamic, screen)?;
-    Ok(opened.session_ref)
+    Ok((opened.session_ref, opened.agent))
 }
 
 /// What to ask of `Ops` for `--screen-sync` (ADR-0052 decisions 1 and 15).

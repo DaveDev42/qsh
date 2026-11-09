@@ -58,7 +58,8 @@ pub use screen_sink::{InteractiveOptions, Predict, ScreenAttach, ScreenSync, Sta
 
 use attach::{AttachCommand, AttachStop, RenewalSchedule};
 use context::{
-    AbortOnDrop, AttachContext, LegEnd, LegPumps, Pump, RecoveryLink, ReverseKill, ReverseRoute,
+    AbortOnDrop, AgentAttach, AttachContext, LegEnd, LegPumps, Pump, RecoveryLink, ReverseKill,
+    ReverseRoute,
 };
 use drive::drive_attach;
 use link::ConnectedLink;
@@ -383,7 +384,7 @@ impl Ops {
     /// §6.3). Value op: no attach, no PTY on this side; the returned
     /// `session_ref` is the handle for every later call.
     pub fn session_open(&self, req: SessionOpenReq) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, false, None, Vec::new())
+        self.session_open_gated(req, false, None)
     }
 
     /// [`Self::session_open`] for an interactive frontend that will draw
@@ -401,7 +402,7 @@ impl Ops {
         requires_dynamic: bool,
         screen: Option<ScreenAttach>,
     ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, requires_dynamic, screen, Vec::new())
+        self.session_open_gated(req, requires_dynamic, screen)
     }
 
     /// [`Self::session_open`]'s twin for the interactive `qsh [user@]host
@@ -420,22 +421,7 @@ impl Ops {
         &self,
         req: SessionOpenReq,
     ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, true, None, Vec::new())
-    }
-
-    /// [`Self::session_open`] asking for agent forwarding (ADR-0055
-    /// decision 3): `agent_channel` is the 16 bytes the client drew for this
-    /// request. Crate-internal until the `-A` flag lands; nothing outside
-    /// this crate can set the field, so a request without `-A` stays
-    /// byte-identical to today's. `Session::session_open` drops the field
-    /// again for a host that did not advertise `agent.v1`.
-    #[allow(dead_code)] // first caller is the `-A` step
-    pub(crate) fn session_open_with_agent(
-        &self,
-        req: SessionOpenReq,
-        agent_channel: Vec<u8>,
-    ) -> Result<SessionOpenData, OpError> {
-        self.session_open_gated(req, false, None, agent_channel)
+        self.session_open_gated(req, true, None)
     }
 
     /// The shared body of [`Self::session_open`]/
@@ -450,9 +436,13 @@ impl Ops {
         req: SessionOpenReq,
         require_dial_filter: bool,
         screen: Option<ScreenAttach>,
-        agent_channel: Vec<u8>,
     ) -> Result<SessionOpenData, OpError> {
         let host = req.host.clone();
+        // `-A` on `session open` and on the interactive open: the host
+        // makes the socket for the session. The channel is registered only
+        // for the length of this call, since this connection is closed
+        // right after (the attach that follows brings its own).
+        let agent_channel = self.agent.as_ref().map(|agent| agent.register());
         let screen = screen.filter(ScreenAttach::wanted);
         let user = self.resolve_user_hint(&host, req.user)?;
         let msg = wire::SessionOpen {
@@ -466,7 +456,10 @@ impl Ops {
             // `Session::session_open` drops the field again for a host
             // that did not negotiate `screen.v1`.
             screen: screen.map(|s| s.request()),
-            agent_channel,
+            agent_channel: agent_channel
+                .as_ref()
+                .map(crate::agent::AgentChannel::bytes)
+                .unwrap_or_default(),
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
@@ -523,6 +516,8 @@ impl Ops {
             }
         }
         let peer = conn.peer_fingerprint();
+        let agent_requested = !msg.agent_channel.is_empty();
+        let agent_supported = conn.capabilities().iter().any(|c| c == wire::CAP_AGENT_V1);
         let opened = conn.run(move |s| Box::pin(s.session_open(msg)));
         conn.close();
         let opened = opened?;
@@ -538,6 +533,8 @@ impl Ops {
         Ok(SessionOpenData {
             session_ref,
             initial_sequence: opened.initial_seq,
+            agent: crate::agent::grant_label(agent_requested, agent_supported, opened.agent)
+                .map(str::to_string),
         })
     }
 
@@ -819,18 +816,6 @@ impl Ops {
         self.session_attach_screen(req, remote_forward_specs, None)
     }
 
-    /// [`Self::session_attach`] asking for agent forwarding (ADR-0055
-    /// decision 3). Crate-internal until the `-A` flag lands.
-    #[allow(dead_code)] // first caller is the `-A` step
-    pub(crate) fn session_attach_with_agent(
-        &self,
-        req: SessionAttachReq,
-        remote_forward_specs: &[wire::ForwardSpec],
-        agent_channel: Vec<u8>,
-    ) -> Result<SessionAttachStream, OpError> {
-        self.session_attach_inner(req, remote_forward_specs, None, agent_channel)
-    }
-
     /// [`Self::session_attach`] for an interactive frontend that draws on a
     /// terminal (ADR-0052 decisions 9, 11 and 15). With `screen` set the
     /// attach asks for screen sync; when the host grants it the events are
@@ -845,7 +830,7 @@ impl Ops {
         remote_forward_specs: &[wire::ForwardSpec],
         screen: Option<ScreenAttach>,
     ) -> Result<SessionAttachStream, OpError> {
-        self.session_attach_inner(req, remote_forward_specs, screen, Vec::new())
+        self.session_attach_inner(req, remote_forward_specs, screen)
     }
 
     fn session_attach_inner(
@@ -853,7 +838,6 @@ impl Ops {
         req: SessionAttachReq,
         remote_forward_specs: &[wire::ForwardSpec],
         screen: Option<ScreenAttach>,
-        agent_channel: Vec<u8>,
     ) -> Result<SessionAttachStream, OpError> {
         let screen = screen.filter(ScreenAttach::wanted);
         let r = parse_session_ref(&req.session_ref)?;
@@ -902,6 +886,32 @@ impl Ops {
                 return Err(why.into_error(&req.session_ref));
             }
         };
+        // Agent forwarding (ADR-0055 decisions 5 and 13). The channel is
+        // registered and the dispatcher is already accepting before the
+        // request leaves, because the host may open the first `AGENT`
+        // stream before the reply is read. Only a forward connection can
+        // host the dispatcher; the reverse route is a later step and
+        // reports `unsupported`.
+        let agent_requested = self.agent.is_some();
+        let agent_supported = conn.connection().is_some()
+            && conn.capabilities().iter().any(|c| c == wire::CAP_AGENT_V1);
+        let mut agent_attach: Option<AgentAttach> = None;
+        let mut early_acceptor = None;
+        if let (Some(agent), Some(connection), true) =
+            (&self.agent, conn.connection(), agent_supported)
+        {
+            let channel = agent.register();
+            early_acceptor = Some(conn.runtime().block_on(
+                crate::tunnel::remote::RemoteForwardAcceptor::spawn_with_agent(
+                    connection,
+                    Some(agent.dispatcher()),
+                ),
+            ));
+            agent_attach = Some(AgentAttach {
+                agent: Arc::clone(agent),
+                channel,
+            });
+        }
         let msg = wire::SessionAttach {
             session_id: r.session_id.clone(),
             resume_token: token.expose().to_vec(),
@@ -915,7 +925,10 @@ impl Ops {
             // `Session::attach_request` drops it for a host without
             // `screen.v1`.
             screen: screen.map(|s| s.request()),
-            agent_channel,
+            agent_channel: agent_attach
+                .as_ref()
+                .map(|a| a.channel.bytes())
+                .unwrap_or_default(),
         };
         if screen.is_some_and(|s| s.mode == ScreenSync::On)
             && !conn
@@ -942,6 +955,8 @@ impl Ops {
                 return Err(err);
             }
         };
+        let agent_outcome =
+            crate::agent::grant_label(agent_requested, agent_supported, attached.agent);
         // Durable before the stream is touched (ADR-0007): the presented
         // token is already invalid on the host, so a successor that only
         // exists in memory is one crash away from an unreachable session.
@@ -1002,7 +1017,7 @@ impl Ops {
         // listener bound with nobody left to dial its `TCP_ACCEPTED`
         // streams.
         let (remote_acceptor, remote_tunnels) = if remote_forward_specs.is_empty() {
-            (None, Vec::new())
+            (early_acceptor.take(), Vec::new())
         } else {
             // Same reverse-route refusal as `open_local_forwards`, and for
             // the same reason: this leg needs a raw QUIC connection of its
@@ -1015,11 +1030,15 @@ impl Ops {
                     "remote forwards over a reverse connection are not implemented yet",
                 ));
             };
+            // One accept loop per connection: when `-A` already started
+            // it, the `-R` table lives in that same dispatcher.
             let acceptor =
-                conn.runtime()
-                    .block_on(crate::tunnel::remote::RemoteForwardAcceptor::spawn(
-                        connection,
-                    ));
+                match early_acceptor.take() {
+                    Some(acceptor) => acceptor,
+                    None => conn.runtime().block_on(
+                        crate::tunnel::remote::RemoteForwardAcceptor::spawn(connection),
+                    ),
+                };
             let mut opened_ids: Vec<String> = Vec::with_capacity(remote_forward_specs.len());
             let mut tunnels = Vec::with_capacity(remote_forward_specs.len());
             let mut open_err = None;
@@ -1138,6 +1157,7 @@ impl Ops {
             finished: finished.clone(),
             applied_input,
             reverse_route,
+            agent: agent_attach,
         });
         let driver = conn
             .runtime()
@@ -1213,6 +1233,7 @@ impl Ops {
             link_status,
             screen: screen_sink,
             predict_unavailable,
+            agent_outcome,
         })
     }
 

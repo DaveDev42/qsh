@@ -152,6 +152,13 @@ struct DoctorEnvironment<'a> {
     /// a test, and a reader that reads nothing everywhere else. Only
     /// consulted when `os` is [`probe::HostOs::Windows`].
     task_reader: &'a dyn TaskDefinitionReader,
+    /// Whether this machine's own ssh-agent answered, read only when
+    /// `[agent].forward` is `"yes"` (`agent_unreachable`, ADR-0055 decision
+    /// 19). `None`: not checked.
+    local_agent: Option<bool>,
+    /// The runtime directory to look in for `agent_dir_unusable`; `None`
+    /// when this machine has none (it has never served).
+    agent_runtime_dir: Option<&'a Path>,
 }
 
 impl Ops {
@@ -228,6 +235,9 @@ impl Ops {
         let task_reader = ComTaskScheduler;
         #[cfg(not(windows))]
         let task_reader = UnreadableTaskScheduler;
+        let local_agent = (config.agent.forward == Some(crate::config::AgentForwardMode::Yes))
+            .then(|| self.doctor_local_agent_reachable());
+        let runtime_dir = self.paths.runtime_dir();
         let env = DoctorEnvironment {
             keystore: keystore.as_ref(),
             current_exe: current_exe.as_deref(),
@@ -240,6 +250,8 @@ impl Ops {
             username: username.as_deref(),
             bindv6only_probe: probe::probe_bindv6only,
             task_reader: &task_reader,
+            local_agent,
+            agent_runtime_dir: runtime_dir.is_dir().then_some(runtime_dir.as_path()),
         };
 
         self.doctor_assemble(req, now_unix, &identity, &config, &env)
@@ -279,6 +291,8 @@ impl Ops {
             username: host.username,
             bindv6only_probe: |_| Ok(false),
             task_reader: &UnreadableTaskScheduler,
+            local_agent: None,
+            agent_runtime_dir: None,
         };
         self.doctor_assemble(req, unix_seconds(now), &identity, &config, &env)
     }
@@ -325,6 +339,7 @@ impl Ops {
         findings.extend(connectivity);
         findings.extend(self.doctor_service_registration_findings(mode, env));
         findings.extend(self.doctor_bindv6only_finding(config, mode, env));
+        findings.extend(doctor_agent_findings(config, env));
         let transport = match req.host.as_deref() {
             Some(host) if !direct_missing && !reachability_failed(&findings) => {
                 self.doctor_transport(config, host, &mut findings)
@@ -422,6 +437,16 @@ impl Ops {
             predict_wanted,
         ));
         Some(sample.report)
+    }
+
+    /// One connection to this machine's ssh-agent, opened and closed without
+    /// a byte sent (ADR-0055 decision 11): does anything answer?
+    fn doctor_local_agent_reachable(&self) -> bool {
+        let Ok(runtime) = self.connect_runtime() else {
+            return false;
+        };
+        let agent = crate::agent::ClientAgent::from_env(None);
+        runtime.block_on(agent.unreachable_note()).is_none()
     }
 
     /// `audit_path_unwritable` (design brief row #9) — reuses
@@ -1708,6 +1733,34 @@ fn transport_findings(
                 remedy: Some(diag.remedy.to_string()),
             });
         }
+    }
+    out
+}
+
+/// `agent_unreachable` and `agent_dir_unusable` (ADR-0055 decision 19).
+/// Both are `warn`: nothing is refused, forwarding just cannot work.
+fn doctor_agent_findings(config: &Config, env: &DoctorEnvironment<'_>) -> Vec<DoctorFinding> {
+    use crate::doctor::{AGENT_DIR_UNUSABLE, AGENT_UNREACHABLE};
+    let mut out = Vec::new();
+    if config.agent.forward == Some(crate::config::AgentForwardMode::Yes)
+        && env.local_agent == Some(false)
+    {
+        out.push(DoctorFinding {
+            code: AGENT_UNREACHABLE.code.to_string(),
+            status: "warn".to_string(),
+            detail: AGENT_UNREACHABLE.message.to_string(),
+            remedy: Some(AGENT_UNREACHABLE.remedy.to_string()),
+        });
+    }
+    if let Some(dir) = env.agent_runtime_dir
+        && let Err(why) = crate::agent::check_agent_dir(dir)
+    {
+        out.push(DoctorFinding {
+            code: AGENT_DIR_UNUSABLE.code.to_string(),
+            status: "warn".to_string(),
+            detail: format!("{} ({why})", AGENT_DIR_UNUSABLE.message),
+            remedy: Some(AGENT_DIR_UNUSABLE.remedy.to_string()),
+        });
     }
     out
 }

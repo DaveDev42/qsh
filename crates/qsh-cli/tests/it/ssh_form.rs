@@ -219,7 +219,7 @@ fn ssh_option_table_argv_to_ssh_command_lines() {
     }
 }
 
-/// The reject list and `-A`: named, `UNSUPPORTED`, exit 255, ssh never runs.
+/// The reject list (`-A` left it in M25, ADR-0055): named, `UNSUPPORTED`, exit 255, ssh never runs.
 #[test]
 fn rejected_ssh_options_name_themselves_and_run_nothing() {
     let rows: &[(&[&str], &str)] = &[
@@ -235,7 +235,6 @@ fn rejected_ssh_options_name_themselves_and_run_nothing() {
         (&["-c", "aes256-ctr", "box"], "-c"),
         (&["-m", "hmac-sha2-256", "box"], "-m"),
         (&["-Q", "cipher", "box"], "-Q"),
-        (&["-A", "box"], "-A"),
     ];
     for (args, name) in rows {
         let (client, fake) = client_with_failing_ssh();

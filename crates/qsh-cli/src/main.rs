@@ -447,6 +447,25 @@ fn ssh_revival(cli: &Cli, user: Option<String>, ssh: SshOptions) -> qsh_core::Ss
     }
 }
 
+/// Decide agent forwarding for one command (ADR-0055 decision 18) and, in
+/// human mode, say once on stderr when the local agent cannot be reached.
+/// The request goes out either way; machine mode prints nothing extra.
+fn with_agent_forward(
+    cli: &Cli,
+    ops: &Ops,
+    flag: Option<bool>,
+    option: Option<&str>,
+) -> Result<Ops, OpError> {
+    let ops = ops.clone().with_agent_forward(flag, option)?;
+    if !cli.wants_json()
+        && !cli.quiet
+        && let Some(note) = ops.agent_unreachable_note()
+    {
+        let _ = human::print_notice(&note);
+    }
+    Ok(ops)
+}
+
 /// The command dispatch table, split out of [`run`] so a test can drive it
 /// against an [`Ops`] built from a temporary, test-controlled
 /// `qsh_core::Paths` instead of the real [`Ops::from_env`] — same match arms, same code, the
@@ -736,20 +755,27 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             screen_sync,
             predict,
             status_line,
-        }) => run_interactive(
-            cli,
-            &ops,
-            tui::Attach::Existing {
-                session_ref: session_ref.clone(),
-            },
-            *escape_char,
-            InteractiveFlags {
-                screen_sync: *screen_sync,
-                predict: *predict,
-                status_line: *status_line,
-            },
-            &SshOptions::default(),
-        ),
+            agent,
+        }) => {
+            let ops = match with_agent_forward(cli, &ops, agent.flag(), None) {
+                Ok(ops) => ops,
+                Err(err) => return report_error(cli, SessionAttachOp::COMMAND, &err),
+            };
+            run_interactive(
+                cli,
+                &ops,
+                tui::Attach::Existing {
+                    session_ref: session_ref.clone(),
+                },
+                *escape_char,
+                InteractiveFlags {
+                    screen_sync: *screen_sync,
+                    predict: *predict,
+                    status_line: *status_line,
+                },
+                &SshOptions::default(),
+            )
+        }
         Command::Session(cmd) => run_session(cli, &ops, cmd),
         Command::Sessions {
             host,
@@ -981,6 +1007,24 @@ fn run_ssh_form(cli: &Cli, ops: &Ops) -> i32 {
             .clone()
             .with_ssh_revival(ssh_revival(cli, user.clone(), ssh.clone()));
         &revival_ops
+    };
+    // `-A` / `-a` / `-o ForwardAgent` / `[agent].forward` (ADR-0055
+    // decision 18). `-N` has no session or command to use an agent, so it
+    // takes the flag, says so, and forwards nothing (decision 15).
+    let agent_ops;
+    let ops = if matches!(mode, FormMode::Forwards { .. }) {
+        if ssh.agent_flag() == Some(true) {
+            stderr_note!("qsh: -A has no effect with -N");
+        }
+        ops
+    } else {
+        match with_agent_forward(cli, ops, ssh.agent_flag(), ssh.forward_agent()) {
+            Ok(with_agent) => {
+                agent_ops = with_agent;
+                &agent_ops
+            }
+            Err(err) => return report_error(cli, SSH_FORM_COMMAND, &err),
+        }
     };
     match mode {
         FormMode::Interactive { shell_command } => run_interactive(
@@ -1259,10 +1303,12 @@ fn auto_bootstrap_before_open(
 /// looks inside a `session_ref`.
 fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
     match cmd {
-        SessionCmd::Open(args) => finish(
-            cli,
-            SessionOpenOp::COMMAND,
-            ops.session_open(SessionOpenReq {
+        SessionCmd::Open(args) => {
+            let ops = match with_agent_forward(cli, ops, args.agent.flag(), None) {
+                Ok(ops) => ops,
+                Err(err) => return report_error(cli, SessionOpenOp::COMMAND, &err),
+            };
+            let opened = ops.session_open(SessionOpenReq {
                 host: args.host.clone(),
                 argv: args.argv.clone(),
                 env: args.env.clone(),
@@ -1271,9 +1317,19 @@ fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
                 rows: args.rows.map(u32::from),
                 user: None,
                 shell_command: None,
-            }),
-            human::print_session_open,
-        ),
+            });
+            if let Ok(data) = &opened
+                && !cli.wants_json()
+            {
+                let _ = human::print_agent_note(&args.host, data.agent.as_deref());
+            }
+            finish(
+                cli,
+                SessionOpenOp::COMMAND,
+                opened,
+                human::print_session_open,
+            )
+        }
         SessionCmd::Get { session_ref } => finish(
             cli,
             SessionGetOp::COMMAND,
@@ -1434,9 +1490,13 @@ fn run_session_write(cli: &Cli, ops: &Ops, args: &SessionWriteArgs) -> i32 {
 /// forwarded to the remote command only when it is not a terminal, so an
 /// interactive `qsh exec host -- cat` does not sit waiting on the keyboard.
 fn run_exec(cli: &Cli, ops: &Ops, args: &ExecArgs) -> i32 {
+    let ops = match with_agent_forward(cli, ops, args.agent.flag(), None) {
+        Ok(ops) => ops,
+        Err(err) => return report_error(cli, ExecRunOp::COMMAND, &err),
+    };
     run_exec_command(
         cli,
-        ops,
+        &ops,
         &args.host,
         ExecCommand::Argv(args.argv.clone()),
         args.env.clone(),
@@ -1463,6 +1523,9 @@ fn run_exec_command(
         Ok(output) => output,
         Err(err) => return report_error(cli, ExecRunOp::COMMAND, &err),
     };
+    if !cli.wants_json() {
+        let _ = human::print_agent_note(host, output.data.agent.as_deref());
+    }
 
     let rendered = if cli.wants_json() {
         match serde_json::to_value(&output.data) {

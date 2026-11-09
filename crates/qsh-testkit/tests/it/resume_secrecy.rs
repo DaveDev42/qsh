@@ -170,6 +170,7 @@ async fn a_resume_credential_never_reaches_a_log_line_or_the_json_contract() {
     let payload = serde_json::to_value(qsh_proto::SessionOpenData {
         session_ref: "box/01K0".into(),
         initial_sequence: 0,
+        agent: None,
     })
     .expect("the contract type serialises");
     let mut fields: Vec<&str> = payload

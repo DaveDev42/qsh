@@ -357,6 +357,7 @@ async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_ty
         finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         applied_input,
         reverse_route: None,
+        agent: None,
     });
     let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(4);
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(4);
@@ -517,6 +518,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
             generation: std::sync::atomic::AtomicU64::new(1),
             registration_wait_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
         }),
+        agent: None,
     });
     let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(4);
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(4);

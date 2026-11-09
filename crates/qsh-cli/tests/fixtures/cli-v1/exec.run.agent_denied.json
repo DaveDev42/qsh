@@ -1,0 +1,14 @@
+{
+  "command": "exec.run",
+  "data": {
+    "agent": "denied",
+    "duration_ms": 0,
+    "remote_exit_code": 0,
+    "signal": null,
+    "stderr_b64": "",
+    "stdout_b64": ""
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

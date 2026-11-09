@@ -229,6 +229,19 @@ async fn reattach(
         .as_ref()
         .expect("reattach only runs on the forward route, which always resolves a PeerTarget");
     let (endpoint, connection, mut session) = redial_peer(target, ctx.tuning).await?;
+    // `-A` follows the attach to its new connection (ADR-0055 decision 9):
+    // the same channel in the request, and a dispatcher accepting before
+    // the request leaves. The task ends with the connection.
+    let agent_channel = match &ctx.agent {
+        Some(attach) if session.agent_supported() => {
+            crate::tunnel::remote::spawn_agent_dispatcher(
+                connection.clone(),
+                attach.agent.dispatcher(),
+            );
+            attach.channel.bytes()
+        }
+        _ => Vec::new(),
+    };
     let store = ResumeStore::new(&ctx.paths);
     let Some(peer) = connection.peer_fingerprint().map(|fp| fp.to_string()) else {
         connection.close(0, b"unverified");
@@ -253,9 +266,7 @@ async fn reattach(
             mode: wire::AttachMode::Rw as i32,
             no_steal: ctx.no_steal,
             screen: ctx.screen.as_ref().map(|s| s.request()),
-            // Carrying the channel across a recovery is the `-A` step's job
-            // (ADR-0055 decision 9); no flag sets one yet.
-            agent_channel: Vec::new(),
+            agent_channel,
         })
         .await
         .inspect_err(|err| {
