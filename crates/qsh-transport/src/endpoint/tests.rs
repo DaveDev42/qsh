@@ -888,8 +888,8 @@ fn listener_binds_dual_stack() {
 /// pinned by value so a change is a reviewed edit, not a drive-by.
 #[test]
 fn transport_config_pins_bbr_and_datagram_buffers() {
-    assert_eq!(DATAGRAM_RECEIVE_BUFFER_SIZE, 64 * 1024);
-    assert_eq!(DATAGRAM_SEND_BUFFER_SIZE, 64 * 1024);
+    assert_eq!(DATAGRAM_RECEIVE_BUFFER_SIZE, 512 * 1024);
+    assert_eq!(DATAGRAM_SEND_BUFFER_SIZE, 512 * 1024);
     // One MTU-sized datagram must fit in each buffer many times over.
     const { assert!(DATAGRAM_RECEIVE_BUFFER_SIZE >= 32 * 1500) };
     const { assert!(DATAGRAM_SEND_BUFFER_SIZE >= 32 * 1500) };

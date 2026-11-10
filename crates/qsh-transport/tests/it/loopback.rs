@@ -643,7 +643,7 @@ async fn datagrams_round_trip_and_oversize_is_rejected() {
         .expect("read");
     assert_eq!(&got[..], b"pong");
 
-    // Over the peer's advertised limit (our 64 KiB receive buffer) is
+    // Over the peer's advertised limit (our receive buffer) is
     // rejected whatever PMTUD has done meanwhile, and the connection keeps
     // working. (`max + 1` would race with the MTU growing.)
     let over = bytes::Bytes::from(vec![

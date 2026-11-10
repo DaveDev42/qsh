@@ -164,6 +164,12 @@ impl PipePeer {
         self.from_inner.recv().await
     }
 
+    /// The next packet already queued, without waiting; `None` when the
+    /// queue is empty (or closed). Lets the pump drain a burst per wakeup.
+    pub fn try_recv(&mut self) -> Option<Vec<u8>> {
+        self.from_inner.try_recv().ok()
+    }
+
     /// Hands `packet` to the inner endpoint. Returns `false` if it was
     /// dropped (queue full, longer than the limit, or the inner endpoint is
     /// gone); drops are counted in [`Self::stats`]. Never blocks.

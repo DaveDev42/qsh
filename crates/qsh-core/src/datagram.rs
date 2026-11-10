@@ -153,18 +153,29 @@ impl DatagramHub {
     }
 
     async fn read_loop(&self) {
+        // The channel of the previous datagram: a bulk flow sends one
+        // channel's frames back to back, so the table lock, the hash and the
+        // sender clone are paid once per run, not per datagram.
+        let mut cached: Option<([u8; CHANNEL_ID_LEN], mpsc::Sender<DatagramFrame>)> = None;
         while let Ok(bytes) = self.conn.read_datagram().await {
             let Ok(frame) = DatagramFrame::decode(&bytes) else {
                 self.counters.malformed.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
-            let tx = self
-                .channels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&frame.channel.0)
-                .cloned();
-            let Some(tx) = tx else {
+            let id = frame.channel.0;
+            if cached
+                .as_ref()
+                .is_none_or(|(c, tx)| *c != id || tx.is_closed())
+            {
+                let tx = self
+                    .channels
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&id)
+                    .cloned();
+                cached = tx.map(|tx| (id, tx));
+            }
+            let Some((_, tx)) = cached.as_ref() else {
                 self.counters
                     .unknown_channel
                     .fetch_add(1, Ordering::Relaxed);
@@ -193,6 +204,11 @@ impl DatagramRx {
     /// The next frame for this channel; `None` once the hub is gone.
     pub async fn recv(&mut self) -> Option<DatagramFrame> {
         self.rx.recv().await
+    }
+
+    /// The next frame already queued, without waiting.
+    pub fn try_recv(&mut self) -> Option<DatagramFrame> {
+        self.rx.try_recv().ok()
     }
 
     /// The hub, for sending.
