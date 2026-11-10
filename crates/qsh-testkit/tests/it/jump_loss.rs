@@ -56,6 +56,11 @@ async fn proxies(addrs: &[SocketAddr], seed: u64) -> Vec<ChaosProxy> {
 
 /// The features of DoD 25.1 over the lossy chain.
 async fn features(names: &[&str], seed: u64) {
+    // Every op dials the whole chain again, and an inner handshake to the
+    // end crosses every lossy link, so a run of lost flights can spend the
+    // 10 s chain deadline on doubling PTOs (CI run 42852092810). DoD 25.3
+    // pins lossless session I/O over the chain, not the dial time.
+    qsh_transport::set_default_dial_timeout(Duration::from_secs(30));
     let net = Net::start_unpinned(names, |_| "*", loopback_options()).await;
     let addrs: Vec<SocketAddr> = names.iter().map(|n| net.host(n).h.addr).collect();
     let proxies = proxies(&addrs, seed).await;
