@@ -785,7 +785,18 @@ qsh -J none nas                          # ignore the saved chain once
 - When the bootstrap finds a `ProxyJump` in your ssh config, or you pass `-J`,
   and every hop is (or can be made) a qsh pin, the target's pin stores the
   chain, so the next `qsh nas` needs no flag. If a hop cannot become a pin,
-  nothing is stored and QUIC dials the target directly, as before.
+  nothing is stored and QUIC dials the target directly, as before. qsh reads
+  `ProxyJump` only at that bootstrap, through the `ssh -G` it already runs. It
+  never parses `ssh_config` on later connections, so editing the file later
+  changes nothing until you run the bootstrap again or use `qsh trust jump`.
+- A middle host sees your device's address, the `host:port` you asked it to
+  reach, and the size and timing of the packets it carries, including when you
+  type. It cannot read their contents or the certificates inside. It can also
+  drop or delay the chain at any time; the only defence is not to pick that
+  host. `forward.jump` reaches any QUIC service the middle host can reach, not
+  only qsh, so grant it as you would `forward.local`. The target sees the
+  middle host's address as the source, so its per-source rate limit counts
+  everyone who comes through that host as one.
 - A failure names the step: `jump 2/3 (lab): ...`, with `error.details.jump`
   in `--json` mode. `qsh doctor nas` reports `jump_stream_carrier` when a step
   runs on the slower stream carrier, and `jump_hop_missing` for a saved chain

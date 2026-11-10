@@ -190,7 +190,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - 안전한 local echo prediction과 연결 상태 줄
 - 연결 시작 때 한 번의 홀펀칭(실패하면 포기)
 - agent forwarding (ADR-0055)
-- jump chaining
+- jump chaining (ADR-0056)
 - 후보: read-only multi-attach, sftp 하위 시스템 호환. X11 forwarding은 넣지 않는다
 
 mobile client SDK는 P2에서 뺐다(2026-10-12 사용자 결정). 모바일은 Rust client cross-compile로 충분하다.
@@ -369,6 +369,8 @@ qsh personal-mac --relay auto
 ```
 
 Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위해 logical session identity를 transport connection과 분리하되, MVP에는 relay 구현이나 negotiation을 포함하지 않는다.
+
+`-J` jump chaining(ADR-0056)은 이 절의 relay가 아니다. 사용자가 직접 고른 qsh peer를 지나는 것이고, 안쪽 연결은 client와 끝단 사이의 QUIC 연결이라 중간 peer는 payload와 endpoint private key를 보지 못한다. 별도 제품도 아니고 `--relay`의 negotiation도 없으며, 사용자가 `-J`를 줄 때만 쓰인다.
 
 ## 15. 성공 기준
 

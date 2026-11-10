@@ -86,7 +86,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 | Jump | client, `-J` hop당 1개 | bidi, client → 중간 peer | `StreamHeader{JUMP, ticket = jump_channel, host, port}` → `ConnectResult{ok, code, message}` → (ok면) `u16` BE 길이 + 패킷 바이트의 반복(§21, ADR-0056 결정 3·4) |
 | Tunnel (remote fwd) | remote port를 bind한 쪽, accept당 1개 | bidi | `StreamHeader{TCP_ACCEPTED, forward_id}` → raw bytes |
 
-**Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
+**Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 예외는 `TCP_CONNECT`(local forward)와 `JUMP`다 — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 각각 `forward.local`, `forward.jump` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(`JUMP`는 소켓도 채널도 만들지 않는다, ADR-0056 결정 7, §21.3). 거부 teardown은 아래.
 
 **`FILE_DATA`(ADR-0029 결정 9).** `FileReadOpen`/`FileWriteOpen`이 ACL을 통과한 뒤 발급되는 ticket으로만 열린다. 프레임은 §5 그대로(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이고 `data` 청크는 `FILE_CHUNK_MAX`(32 KiB) 이하다. `FileEnd{size, blake3}`가 바이트열을 닫고, `FileWriteResult`는 `file.write` 스트림에서 host가 요청자에게만 보낸다. 청크 상한 초과·`end` 뒤의 frame·요청자가 보낸 `result`·`FileWriteOpen.size`를 넘는 바이트·`end` 없이 끝난 요청자 send half는 `BAD_HEADER`(`0x2001`) reset이다. 알 수 없거나 이미 쓴 ticket도 같은 reset이다. 송신은 band 0이고 `SEND_DEPTH_CAP_BYTES`(128 KiB)마다 양보한다(ADR-0029 결정 15). 아래 두 흐름이 host의 동작이다.
 
@@ -608,7 +608,7 @@ corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 
 ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지한 제약이다. QSH의 transport는 QUIC 하나지만 wire와 프로토콜 코드는 QUIC 고유 개념에 기대지 않는다:
 
 - 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/it/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
-- **datagram은 선택 운반체다**(ADR-0052 결정 7. ADR-0043 결정 4의 "wire가 datagram에 기대지 않는다"를 이렇게 바꾼다). datagram으로 나르는 모든 메시지는 스트림에 같은 뜻의 짝이 있고, 스트림만으로 프로토콜이 완결된다. datagram 안의 메시지는 QUIC stream ID나 transport parameter가 아니라 자기 머리의 channel id로 식별한다. `qsh-transport`는 QUIC DATAGRAM을 켜고 파사드에 `Connection::max_datagram_size() -> Option<usize>`, `send_datagram(Bytes) -> Result<(), DatagramError>`, `read_datagram()`을 둔다. `DatagramError`는 상대 미지원, 로컬 비활성, 너무 큼, 연결 끊김 넷이고 앞의 셋은 호출자가 스트림 짝으로 되돌아가라는 뜻이다. 송신은 기다리지 않고, 송신 버퍼가 차면 가장 오래된 datagram부터 버린다. 버퍼는 `DATAGRAM_RECEIVE_BUFFER_SIZE`·`DATAGRAM_SEND_BUFFER_SIZE`(각 64 KiB)로 고정하고 단위 테스트가 값을 묶는다. 이 상수는 로컬 메모리 한도라 peer가 관측하는 wire 값은 아니지만, 수신 버퍼 크기가 곧 우리가 광고하는 `max_datagram_frame_size`(상대가 보낼 수 있는 datagram의 상한)이다. 화면 갱신·`ScreenAck`·`Input` 사본이 `datagram.v1`로 이것을 쓴다(§18.9). 그 밖의 메시지는 datagram을 쓰지 않는다.
+- **datagram은 선택 운반체다**(ADR-0052 결정 7. ADR-0043 결정 4의 "wire가 datagram에 기대지 않는다"를 이렇게 바꾼다). datagram으로 나르는 모든 메시지는 스트림에 같은 뜻의 짝이 있고, 스트림만으로 프로토콜이 완결된다. datagram 안의 메시지는 QUIC stream ID나 transport parameter가 아니라 자기 머리의 channel id로 식별한다. `qsh-transport`는 QUIC DATAGRAM을 켜고 파사드에 `Connection::max_datagram_size() -> Option<usize>`, `send_datagram(Bytes) -> Result<(), DatagramError>`, `read_datagram()`을 둔다. `DatagramError`는 상대 미지원, 로컬 비활성, 너무 큼, 연결 끊김 넷이고 앞의 셋은 호출자가 스트림 짝으로 되돌아가라는 뜻이다. 송신은 기다리지 않고, 송신 버퍼가 차면 가장 오래된 datagram부터 버린다. 버퍼는 `DATAGRAM_RECEIVE_BUFFER_SIZE`·`DATAGRAM_SEND_BUFFER_SIZE`(각 64 KiB)로 고정하고 단위 테스트가 값을 묶는다. 이 상수는 로컬 메모리 한도라 peer가 관측하는 wire 값은 아니지만, 수신 버퍼 크기가 곧 우리가 광고하는 `max_datagram_frame_size`(상대가 보낼 수 있는 datagram의 상한)이다. 화면 갱신·`ScreenAck`·`Input` 사본이 `datagram.v1`로 이것을 쓴다(§18.9). 종류 14 `JumpPacket`(ADR-0056 결정 4)도 datagram으로 나른다. 짝은 같은 패킷을 길이 frame으로 싣는 `JUMP` 스트림이고 channel id는 `jump_channel`이다(§21). 그 밖의 메시지는 datagram을 쓰지 않는다.
 - 그 밖의 QUIC 고유 개념(stream ID, transport parameter)에도 wire는 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
 
@@ -1184,7 +1184,7 @@ target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬�
 
 ## 21. jump chaining (ADR-0056)
 
-이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응(§21.5), recovery(§21.6), 역방향 데몬(§21.7)을 차례로 적는다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응(§21.5), recovery(§21.6), 역방향 데몬(§21.7), MTU 예산과 침묵 시한(§21.8)을 차례로 적는다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
 
 ### 21.0 capability와 wire (ADR-0056 결정 3·4)
 
@@ -1230,7 +1230,7 @@ enum StreamKind { ...; JUMP = 7; }   // client -> 중간 peer
 
 relay는 채널마다 한 task다. client에서 온 패킷(스트림 운반체의 `u16` 길이 frame과 종류 14 datagram)은 QUIC 문(§21.2)을 지나 소켓으로 나간다. 문이 닫혀 있는 동안은 Initial 모양만, `JUMP_PREGATE_PACKETS`(8)개·`JUMP_PREGATE_BYTES`(16 KiB)까지 통과하고, 그 SCID를 기억한다. target에서 온 패킷은 long header이고 DCID가 기억한 SCID 가운데 하나일 때 문을 열고(그 패킷도 통과), 그 전의 것은 버리고 센다. 문은 `JUMP_GATE_TIMEOUT`(10초) 안에 열려야 한다.
 
-target에서 client로 가는 운반체는 J가 자기 눈으로 패킷마다 고른다(ADR-0056 결정 4). 양쪽이 `datagram.v1`을 협상했고 바깥 연결의 `max_datagram_size()`가 `JUMP_PACKET_MIN + 17`(1217) 이상이면 종류 14 datagram이고 아니면 `JUMP` 스트림이다. datagram 모드에서 자리를 넘는 패킷은 스트림으로 돌리지 않고 버리고 센다(안쪽 PLPMTUD가 자리를 배운다). 스트림 모드에서는 아직 쓰지 못한 바이트가 `JUMP_STREAM_QUEUE`(64 KiB)를 넘으면 새 패킷을 버리고 센다. 이 스텝의 구현은 정적 선택이다. datagram이 돌아오지 않을 때 스트림으로 물러서고 30초마다 다시 시험하는 적응은 운반체 스텝이 더한다.
+target에서 client로 가는 운반체는 J가 자기 눈으로 패킷마다 고른다(ADR-0056 결정 4). 양쪽이 `datagram.v1`을 협상했고 바깥 연결의 `max_datagram_size()`가 `JUMP_PACKET_MIN + 17`(1217) 이상이면 종류 14 datagram이고 아니면 `JUMP` 스트림이다. datagram 모드에서 자리를 넘는 패킷은 스트림으로 돌리지 않고 버리고 센다(안쪽 PLPMTUD가 자리를 배운다). 스트림 모드에서는 아직 쓰지 못한 바이트가 `JUMP_STREAM_QUEUE`(64 KiB)를 넘으면 새 패킷을 버리고 센다. datagram이 돌아오지 않을 때 스트림으로 물러서고 30초마다 다시 시험하는 적응은 §21.5와 §21.8이 적는다. J는 같은 규칙을 바깥 연결의 srtt로 돌린다(ADR-0058).
 
 채널은 다음 가운데 하나로 끝나고 소켓과 점유가 함께 풀린다. 끝날 때 스트림을 어떻게 닫는지는 사유가 정한다.
 
@@ -1261,7 +1261,7 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 
 **걷기.** 첫 hop은 보통 경로(펀칭 포함)로 잇고 지문이 핀과 같은지 한 번 더 본다. 다음 단계마다 (1) 앞 연결의 협상 결과에 `jump.v1`이 있는지 보고, (2) CSPRNG 16바이트 channel을 뽑아 `DatagramHub`에 등록한 뒤 `JUMP` 스트림을 열고, (3) `ConnectResult`를 기다리고, (4) `PacketPipe`의 `PipePeer`를 스트림·datagram 운반체에 이어 펌프를 띄우고, (5) `Dialer::with_evaluator`로 그 hop의 정확한 지문만 믿는 평가기를 만들어 `dial_over_pipe`로 안쪽 연결을 맺는다. 마지막 연결이 끝 연결이고 일반 연결처럼 돌려준다(결정 15). 직접 dial과 경주하지 않고 자동 폴백도 없다(결정 13).
 
-**운반체.** client→J 방향은 `choose_carrier`가 정한다. 양쪽이 `datagram.v1`을 광고하고 바깥 연결의 `max_datagram_size()`가 1217 이상이면 datagram, 아니면 스트림이다. 250 ms마다 방을 다시 읽어 바꾼다. 안쪽 packet 상한은 `PipePeer::set_packet_limit`로 (바깥 방 - 17)에 맞춘다(ADR-0057: 한 겹 55바이트). 상한보다 큰 안쪽 packet은 버리고 센다. 침묵 규칙(`SilenceFallback`)은 datagram으로 보낸 뒤 4×srtt 동안 되돌아오는 datagram이 없으면 스트림으로 내리고, 30초마다 datagram을 다시 시도한다. 같은 헬퍼를 중간 peer의 J→client 방향도 쓴다.
+**운반체.** client→J 방향은 `choose_carrier`가 정한다. 양쪽이 `datagram.v1`을 광고하고 바깥 연결의 `max_datagram_size()`가 1217 이상이면 datagram, 아니면 스트림이다. 250 ms마다 방을 다시 읽어 바꾼다. 안쪽 packet 상한은 `PipePeer::set_packet_limit`로 (바깥 방 - 17)에 맞춘다(ADR-0057: 한 겹 55바이트). 상한보다 큰 안쪽 packet은 버리고 센다. 침묵 규칙(`SilenceFallback`)은 datagram으로 보낸 뒤 `4 × max(rtt, 50 ms) + 25 ms`(ADR-0058, §21.8) 동안 되돌아오는 datagram이 없으면 스트림으로 내리고, 30초마다 datagram을 다시 시도한다. 같은 헬퍼를 중간 peer의 J→client 방향도 쓴다.
 
 **감독.** 층마다 펌프가 하나다. 한 층이 죽으면 끝 연결을 닫고, 끝 연결이 닫히면 안쪽 층부터 정리한다(결정 16). 비정상 종료는 스트림을 `0x2007`로 reset한다. `ChainInfo`가 채널별 계수(보낸·받은 datagram과 스트림 packet 수, 버린 수, 전환 수, 침묵 폴백 수)를 낸다.
 
@@ -1332,3 +1332,17 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 **관측.** `ControlHub::jump_stats()`(`RelayStats`)는 개수만 쥔다: `opened`, `closed`, `to_host_datagrams`, `to_host_stream`, `from_host_datagrams`, `from_host_stream`, `to_cli`, `oversize_dropped`, `queue_dropped`, `datagram_unavailable`, `silence_fallbacks`. `ControlHub::jump_channels_in_use()`는 지금 쥔 슬롯이다. 로그는 target `qsh::jump`의 `channel_opened`·`channel_closed`(`side = "daemon"`, 사유 `cli_gone`·`host_ended`·`connection_closed`·`bad_frame_cli`·`bad_frame_host`)이고 기본에서 꺼져 있다. channel 값과 패킷은 싣지 않는다.
 
 **시험.** `crates/qsh-testkit/tests/it/jump_reverse.rs`: `jump_first_hop_over_the_reverse_route`(진짜 daemon·`serve --to`·loopback T에서 exec, 세션, `-L`이 끝나고 등록 연결 구간이 양방향 datagram 운반체를 쓴 것을 데몬과 J의 카운터로 확인), `a_reverse_first_hop_with_another_fingerprint_opens_nothing`, `the_daemon_claims_a_jump_channel_once_and_refuses_a_malformed_one`, `the_daemon_carries_at_most_32_jump_channels_per_registered_host`, `a_bad_frame_from_the_cli_ends_the_channel_and_frees_its_slot`, `the_daemon_cleans_up_when_the_cli_goes_away`, `a_refusal_of_the_host_reaches_the_cli_verbatim_and_frees_the_slot`, `a_registered_host_without_jump_v1_gets_no_jump_stream`. 펀칭한 첫 hop은 `crates/qsh-testkit/tests/it/jump_punch.rs`의 `jump_first_hop_over_a_punched_connection`(netsim)이다.
+
+### 21.8 MTU 예산과 침묵 시한 (ADR-0057, ADR-0058)
+
+**MTU 예산(ADR-0057).** 바깥 연결의 `max_datagram_size()`는 MTU에서 38바이트를 뺀 값이다(1-RTT 머리 예측 29, DATAGRAM frame 머리 상한 9). 그래서 한 겹 비용은 jump 머리 17에 38을 더한 55바이트다. 구현은 이 값을 굳히지 않고 실행 중 `max_datagram_size()`를 읽으며, 55는 표와 시험의 기대값이다. 링크별 안쪽 패킷 상한은 `jump_mtu_budget_table`이 고정한다.
+
+| 링크 | 바깥 UDP payload | hop 하나 | 둘 | 셋 | 넷 | 운반체 |
+|---|---|---|---|---|---|---|
+| 1500 (IPv4) | 1472, PLPMTUD 상한 1452 | 1397 | 1342 | 1287 | 1232 | 넷 모두 datagram |
+| 1280 (IPv4) | 1252 | 스트림 | 스트림 | 스트림 | 스트림 | 첫 hop부터 스트림(`max_datagram_size()` 1214 < 1217) |
+| 1280 (IPv6 최소 MTU) | 1232 | 스트림 | 스트림 | 스트림 | 스트림 | 첫 hop부터 스트림(1194 < 1217) |
+
+둘째 hop부터는 앞 hop의 안쪽 연결이 다음 hop의 바깥 연결이 되므로 hop마다 55씩 준다. 1500 링크의 넷째 hop 상한 1232가 `JUMP_PACKET_MIN`(1200) 위이므로 hop 상한은 넷이다(여유 32바이트). 운반체는 hop마다 그 hop을 나르는 바깥 연결의 `max_datagram_size()`로 고르고, 스트림 운반체는 안쪽 패킷 크기를 줄이지 않으므로 첫 hop이 스트림이어도 둘째 hop부터는 datagram이 될 수 있다. 바깥 PLPMTUD가 자리를 연 뒤에는 스트림에서 datagram으로 바뀐다(`jump_carrier_switches_to_datagram_after_pmtud`).
+
+**침묵 전환 시한(ADR-0058).** datagram으로 보낸 뒤 그 채널로 datagram이 한 번도 돌아오지 않는데 스트림과 바깥 ack는 살아 있으면 스트림으로 바꾼다. 시한은 `silence = 4 × max(rtt, 50 ms) + 25 ms`다(`RTT_FLOOR` 50 ms는 ADR-0052 구현과 같고 25 ms는 QUIC 기본 `max_ack_delay`다). `rtt`는 client(C에서 다음 hop 방향)가 그 채널 위에서 맺은 안쪽 연결의 srtt(끝에서 끝 왕복, handshake 전에는 바깥 srtt)이고, 중간 peer(T에서 C 방향)와 역방향 데몬은 바깥 연결의 srtt다. 30초 뒤 datagram을 다시 시험하는 것과 자리를 넘는 패킷을 버리고 세는 것은 그대로다. 시한 계산은 `jump_silence_window_table`이 고정하고, 건강한 경로에서 전환 0번은 `jump_tunnel_throughput`이, 진짜 침묵에서의 전환은 `jump_silence_on_the_datagram_path_falls_back_to_the_stream`이 본다.
