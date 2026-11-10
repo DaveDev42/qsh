@@ -119,3 +119,89 @@ async fn jump_first_hop_over_a_punched_connection() {
     t.shutdown().await;
     w.shutdown().await;
 }
+
+/// The first hop B is pinned without an address, so the only way to it is
+/// the punch through R (ADR-0056 decision 13, ADR-0054 decision 16.3). The
+/// chain must not stop at the `address` stage for it: B's address is never
+/// dialed or named in a header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_first_hop_with_no_address_is_reached_by_punching_alone() {
+    let w = world(WorldOptions {
+        pin_b_address: false,
+        direct_listener: false,
+        ..WorldOptions::default()
+    })
+    .await;
+    let b = w.b_server.clone().expect("B registered with R");
+    b.set_jump_options(JumpOptions {
+        allow_host_local: true,
+        ..JumpOptions::default()
+    });
+    let t = LoopbackHarness::start_custom(
+        Arc::new(AllowAllPinned),
+        make_identity(),
+        StaticTrust::empty().with_pin(w.a.fp, Principal::Device("a".into())),
+    )
+    .await;
+    pin(
+        &w.a.ops,
+        "t",
+        Some(t.addr.to_string()),
+        &t.server_identity.fingerprint,
+    )
+    .await;
+    let ops = w.a.ops.clone().with_jump(vec!["b".into()]);
+
+    let out = tokio::time::timeout(LIMIT, exec(&ops, "t"))
+        .await
+        .expect("the exec finished")
+        .expect("exec through a first hop that is only punchable");
+    assert!(punched(&out), "exit {}", out.data.remote_exit_code);
+    let opened = b.jump_stats().opened.load(Ordering::Relaxed);
+    assert_eq!(opened, 1, "B carried the one channel to T");
+    assert_eq!(
+        w.punch_requests() as u64,
+        opened,
+        "the first hop was one punch and no direct dial reached B"
+    );
+    t.shutdown().await;
+    w.shutdown().await;
+}
+
+/// A first hop with no address and a rendezvous that names nobody usable is
+/// still the `address` stage: punching alone needs a usable rendezvous.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_first_hop_with_no_address_and_no_rendezvous_is_the_address_stage() {
+    let w = world(WorldOptions {
+        pin_b_address: false,
+        direct_listener: false,
+        ..WorldOptions::default()
+    })
+    .await;
+    let t = LoopbackHarness::start_custom(
+        Arc::new(AllowAllPinned),
+        make_identity(),
+        StaticTrust::empty().with_pin(w.a.fp, Principal::Device("a".into())),
+    )
+    .await;
+    pin(
+        &w.a.ops,
+        "t",
+        Some(t.addr.to_string()),
+        &t.server_identity.fingerprint,
+    )
+    .await;
+    // `quiet` is pinned with no address and nobody lists a rendezvous for it
+    // (a hint-less pin, and `--rendezvous` names the punch target's own
+    // rendezvous only through `world`'s A).
+    pin(&w.a.ops, "quiet", None, &make_identity().fingerprint).await;
+    let ops = qsh_core::Ops::clone(&w.a.ops)
+        .with_punch(qsh_core::punch::ClientPunch::default())
+        .with_jump(vec!["quiet".into()]);
+    let err = exec(&ops, "t").await.expect_err("no way to the first hop");
+    assert_eq!(err.code, qsh_proto::ErrorCode::HostNotFound, "{err:?}");
+    assert_eq!(err.details["jump"]["stage"], "address", "{err:?}");
+    assert_eq!(err.details["jump"]["hop"], 1);
+    t.shutdown().await;
+    w.shutdown().await;
+}

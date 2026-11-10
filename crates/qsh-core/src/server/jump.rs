@@ -53,6 +53,17 @@ impl Server {
         let _ = self.jump_options.set(options);
     }
 
+    /// Make the path eat this host's kind 14 datagrams toward the client:
+    /// they are accepted and silently dropped, as a middlebox that discards
+    /// only UDP payloads of that shape would, while every other datagram and
+    /// every stream keeps working. For the silence-fallback test
+    /// (ADR-0058); production never calls it. Takes effect for every
+    /// channel, including running ones.
+    pub fn blackhole_jump_datagrams(&self, on: bool) {
+        self.jump_datagram_blackhole
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// This host's jump counters.
     pub fn jump_stats(&self) -> &std::sync::Arc<JumpStats> {
         &self.jump_stats
@@ -114,6 +125,7 @@ impl Server {
             options,
             stats: std::sync::Arc::clone(&self.jump_stats),
             guard,
+            blackhole: std::sync::Arc::clone(&self.jump_datagram_blackhole),
         })
         .await;
         tracing::debug!(

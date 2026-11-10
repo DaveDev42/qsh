@@ -610,6 +610,9 @@ pub struct Server {
     /// Test hook ([`Server::blackhole_datagrams`]): screen datagrams are
     /// accepted and dropped. Off in production.
     datagram_blackhole: Arc<AtomicBool>,
+    /// Test hook ([`Server::blackhole_jump_datagrams`]): kind 14 datagrams
+    /// toward a jump client are accepted and dropped. Off in production.
+    jump_datagram_blackhole: Arc<AtomicBool>,
     /// `[transport].keep_alive_ms` when the operator wrote the key
     /// ([`Server::pin_keep_alive`]): the keep-alive policy then leaves the
     /// interval alone (ADR-0052 decision 13).
@@ -619,6 +622,9 @@ pub struct Server {
     rebind_hook: Arc<AtomicU64>,
     /// Keep-alive `Ping`s the policy wrote ([`Server::keep_alive_pings`]).
     keep_alive_pings: Arc<AtomicU64>,
+    /// Shortened keep-alive intervals per peer, for this process's lifetime
+    /// (ADR-0052 decision 12 (e)).
+    keep_alive_memory: Arc<crate::adapt::KeepAliveMemory>,
     /// The path normalizer the remote file ops call, set at most once by
     /// [`Server::set_path_normalizer`]. Unset (production) reads as the real
     /// filesystem normalizer; a test injects a counting one
@@ -834,9 +840,11 @@ impl Server {
             notice_sink: OnceLock::new(),
             hidden_capabilities: OnceLock::new(),
             datagram_blackhole: Arc::new(AtomicBool::new(false)),
+            jump_datagram_blackhole: Arc::new(AtomicBool::new(false)),
             keep_alive_pin: OnceLock::new(),
             rebind_hook: Arc::new(AtomicU64::new(0)),
             keep_alive_pings: Arc::new(AtomicU64::new(0)),
+            keep_alive_memory: Arc::default(),
             path_normalizer: OnceLock::new(),
             file_host: OnceLock::new(),
             free_space: OnceLock::new(),

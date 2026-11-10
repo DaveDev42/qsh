@@ -38,8 +38,8 @@
 use crate::common;
 
 use qsh_testkit::net_probe::free_port;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::io::{BufRead as _, BufReader, Read as _};
+use std::net::{Shutdown, SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -98,28 +98,11 @@ fn payload() -> Vec<u8> {
 /// Write `payload` into `127.0.0.1:<port>` and read everything that comes
 /// back, half-closing after the write so the far end sees an EOF.
 ///
-/// The write runs on its own thread: a payload larger than the socket
-/// buffers would otherwise deadlock a write-then-read sequence against an
-/// echo that is itself blocked writing to us.
+/// One socket handle on one thread
+/// ([`qsh_testkit::tunnel::echo_round_trip`] explains why a `try_clone`
+/// writer thread is wrong on Windows under load).
 fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    let socket = TcpStream::connect(("127.0.0.1", port))?;
-    socket.set_read_timeout(Some(IO_TIMEOUT))?;
-    socket.set_write_timeout(Some(IO_TIMEOUT))?;
-    let mut writer = socket.try_clone()?;
-    let sender = thread::spawn(move || -> std::io::Result<()> {
-        writer.write_all(&payload)?;
-        writer.flush()?;
-        writer.shutdown(Shutdown::Write)
-    });
-    let mut back = Vec::new();
-    let read = {
-        let mut reader = socket;
-        reader.read_to_end(&mut back).map(|_| ())
-    };
-    let sent = sender.join().expect("the sender thread panicked");
-    // Report a read failure first: on a refused tunnel the write often
-    // succeeds into the local buffer and only the read observes the reset.
-    read.and(sent).map(|()| back)
+    qsh_testkit::tunnel::echo_round_trip(port, &payload, IO_TIMEOUT)
 }
 
 /// The bytes a *refused* tunnel delivers: none. Either the local socket is

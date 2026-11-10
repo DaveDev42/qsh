@@ -24,7 +24,7 @@ use qsh_core::acl::AllowAllPinned;
 use qsh_core::config::{Config, ReverseConfig};
 use qsh_core::screen::HostScreen;
 use qsh_core::{
-    Fingerprint, Ops, Paths, Predict, RecoveryConfig, ScreenAttach, ScreenSync,
+    Fingerprint, Ops, PathWatchConfig, Paths, Predict, RecoveryConfig, ScreenAttach, ScreenSync,
     SessionAttachStream, StatusLine,
 };
 use qsh_proto::event::SessionEvent;
@@ -392,20 +392,33 @@ async fn fresh_ops() -> (tempfile::TempDir, Ops, Fingerprint) {
     (dir, ops, fingerprint)
 }
 
-/// The same scenario through a reverse registration: there is no watchdog
-/// on this route, so the wait the line measures is the typed input that the
-/// target never answers, and the reconnect it names is the local daemon's
-/// wait for the target to register again.
-#[tokio::test(flavor = "multi_thread")]
-async fn reverse_status_line_appears_during_a_blackhole() {
-    if !slow_enabled() {
-        eprintln!("SKIP: needs QSH_ACCEPTANCE_SLOW=1");
-        return;
+/// The blackout switch the scenario thread (blocking) uses to ask the async
+/// side for a chaos blackhole on the registration.
+struct Blackout {
+    ask: tokio::sync::oneshot::Sender<()>,
+    started: std::sync::mpsc::Receiver<Instant>,
+}
+
+impl Blackout {
+    /// Black the registration out and return when it started.
+    fn start(self) -> Instant {
+        self.ask.send(()).ok();
+        self.started.recv().expect("the blackout start")
     }
+}
+
+/// Run `scenario` on a blocking thread against an interactive reverse attach
+/// that is open and showing its first prompt, through a `qsh listen` daemon
+/// whose registration rides a chaos proxy.
+async fn run_reverse(
+    seed: u64,
+    recovery: RecoveryConfig,
+    scenario: impl FnOnce(SessionAttachStream, LocalTerminal, Blackout, String) + Send + 'static,
+) {
     let target = make_identity();
     let harness =
         ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, HOST_ALIAS)).await;
-    let chaos = ChaosProxy::start(harness.addr, ChaosPolicy::seeded(0x5E7_A71))
+    let chaos = ChaosProxy::start(harness.addr, ChaosPolicy::seeded(seed))
         .await
         .expect("chaos proxy in front of the controller");
     let ctx = format!("chaos seed={:#x} front={}", chaos.seed(), chaos.addr());
@@ -424,22 +437,23 @@ async fn reverse_status_line_appears_during_a_blackhole() {
         },
     );
 
-    let scenario = async {
+    let scenario_run = async {
         let _first = wait_for(Duration::from_secs(20), || {
             harness.listen.registry().get(HOST_ALIAS)
         })
         .await;
         let (_ops_dir, ops, _fp) = fresh_ops().await;
         let localctl = harness.attach_localctl(ops.paths()).await;
-        let ops = ops.with_recovery(RecoveryConfig {
-            migration: false,
-            ..RecoveryConfig::default()
-        });
+        let ops = ops.with_recovery(recovery);
 
-        let (blackout_tx, blackout_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ask_tx, ask_rx) = tokio::sync::oneshot::channel::<()>();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<Instant>();
+        let blackout = Blackout {
+            ask: ask_tx,
+            started: started_rx,
+        };
         let ctx_thread = ctx.clone();
-        let scenario_handle = tokio::task::spawn_blocking(move || {
+        let mut handle = tokio::task::spawn_blocking(move || {
             let opened = ops
                 .session_open_interactive(open_req(), false, screen_attach())
                 .unwrap_or_else(|e| panic!("open: {e} — {ctx_thread}"));
@@ -458,6 +472,60 @@ async fn reverse_status_line_appears_during_a_blackhole() {
             pump_until(&mut stream, &mut term, "the first prompt", |t| {
                 t.shows_bare_prompt()
             });
+            scenario(stream, term, blackout, ctx_thread);
+        });
+
+        // The scenario asks for a blackout at most once, and may finish
+        // without asking.
+        let mut ask_rx = Some(ask_rx);
+        let finished = loop {
+            tokio::select! {
+                done = &mut handle => break done,
+                asked = async { ask_rx.as_mut().expect("guarded").await }, if ask_rx.is_some() => {
+                    ask_rx = None;
+                    if asked.is_ok() {
+                        let started = Instant::now();
+                        chaos.blackhole(BLACKOUT).await;
+                        started_tx.send(started).ok();
+                    }
+                }
+            }
+        };
+        finished.unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+
+        localctl.shutdown().await;
+        let _ = shutdown_tx.send(());
+    };
+
+    let ((), result) = tokio::join!(
+        async {
+            tokio::time::timeout(Duration::from_secs(120), scenario_run)
+                .await
+                .unwrap_or_else(|_| panic!("the reverse scenario did not finish — {ctx}"));
+        },
+        run_fut
+    );
+    result.unwrap_or_else(|err| panic!("the target must shut down cleanly: {err:?} — {ctx}"));
+    harness.shutdown().await;
+}
+
+/// The same scenario through a reverse registration: the wait the line
+/// measures is the typed input that the target never answers, and the
+/// reconnect it names is the local daemon's wait for the target to register
+/// again.
+#[tokio::test(flavor = "multi_thread")]
+async fn reverse_status_line_appears_during_a_blackhole() {
+    if !slow_enabled() {
+        eprintln!("SKIP: needs QSH_ACCEPTANCE_SLOW=1");
+        return;
+    }
+    run_reverse(
+        0x5E7_A71,
+        RecoveryConfig {
+            migration: false,
+            ..RecoveryConfig::default()
+        },
+        |mut stream, mut term, blackout, ctx| {
             for tag in ["ONE", "TWO"] {
                 stream.write(say(tag)).unwrap();
                 pump_until(&mut stream, &mut term, tag, |t| t.shows(&said(tag)));
@@ -471,31 +539,141 @@ async fn reverse_status_line_appears_during_a_blackhole() {
             settle(&mut stream, &mut term);
             let rows_before = term.rows();
 
-            blackout_tx.send(()).ok();
-            let started = started_rx.recv().expect("the blackout start");
+            let started = blackout.start();
             stream.write(b"ab".to_vec()).unwrap();
-            let seen = watch_blackout(&mut stream, &mut term, started, "qzab", &ctx_thread);
-            check_blackout(&seen, &term, &rows_before, &ctx_thread);
+            let seen = watch_blackout(&mut stream, &mut term, started, "qzab", &ctx);
+            check_blackout(&seen, &term, &rows_before, &ctx);
             assert_eq!(stream.link_status().recovering, None);
             stream.close();
-        });
+        },
+    )
+    .await;
+}
 
-        blackout_rx
-            .await
-            .expect("the scenario reaches the blackout");
-        let started = Instant::now();
-        chaos.blackhole(BLACKOUT).await;
-        started_tx.send(started).ok();
-        tokio::time::timeout(Duration::from_secs(120), scenario_handle)
-            .await
-            .unwrap_or_else(|_| panic!("the reverse blackout scenario did not finish — {ctx}"))
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+/// The idle beat the reverse tests run on: short enough that the heartbeat
+/// is not the slow part of the scenario.
+const IDLE_BEAT: Duration = Duration::from_secs(1);
 
-        localctl.shutdown().await;
-        let _ = shutdown_tx.send(());
-    };
+fn idle_beat_recovery() -> RecoveryConfig {
+    RecoveryConfig {
+        migration: false,
+        watch: PathWatchConfig {
+            idle_probe_interval: IDLE_BEAT,
+            ..PathWatchConfig::default()
+        },
+        ..RecoveryConfig::default()
+    }
+}
 
-    let ((), result) = tokio::join!(scenario, run_fut);
-    result.unwrap_or_else(|err| panic!("the target must shut down cleanly: {err:?} — {ctx}"));
-    harness.shutdown().await;
+/// A reverse attach nobody types into still asks the host whether it is
+/// there, so the link record's clock advances with no input at all (the
+/// local daemon answers a control `Ping` itself, so the question is an
+/// empty `Input`). Unix only: the reverse attach's local daemon route is.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn reverse_idle_attach_keeps_asking_the_host() {
+    run_reverse(
+        0x0001_D1E5,
+        idle_beat_recovery(),
+        |mut stream, mut term, _blackout, ctx| {
+            settle(&mut stream, &mut term);
+            let before = stream.link_status().last_reply;
+            // Nothing is typed and nothing is read: the driver answers the
+            // host on its own tasks, and an idle shell sends no events.
+            std::thread::sleep(5 * IDLE_BEAT);
+            let status = stream.link_status();
+            let moved = status.last_reply.saturating_duration_since(before);
+            assert!(
+                moved >= 3 * IDLE_BEAT,
+                "the host was not asked while the attach was idle: last reply moved {moved:?} \
+                 — {ctx}"
+            );
+            assert!(status.recovering.is_none(), "{ctx}");
+            stream.close();
+        },
+    )
+    .await;
+}
+
+/// The case the heartbeat exists for: a blackhole on a fully idle reverse
+/// attach. Nothing is typed, yet the line comes up within the threshold of
+/// the next heartbeat, counts, and clears once the target registers again.
+#[tokio::test(flavor = "multi_thread")]
+async fn reverse_idle_status_line_appears_during_a_blackhole() {
+    if !slow_enabled() {
+        eprintln!("SKIP: needs QSH_ACCEPTANCE_SLOW=1");
+        return;
+    }
+    run_reverse(
+        0x001D_1EB1,
+        idle_beat_recovery(),
+        |mut stream, mut term, blackout, ctx| {
+            // Two answers push the prompt off row 0, so the line takes the
+            // top row rather than the bottom one.
+            for tag in ["ONE", "TWO"] {
+                stream.write(say(tag)).unwrap();
+                pump_until(&mut stream, &mut term, tag, |t| t.shows(&said(tag)));
+            }
+            settle(&mut stream, &mut term);
+            let started = blackout.start();
+            let mut appeared = None;
+            let mut first_line = String::new();
+            let mut seconds = Vec::new();
+            let mut cleared = false;
+            while let Some(event) = stream.next_event() {
+                let event = event.unwrap_or_else(|err| {
+                    panic!("attach failed during the blackout: {err} — {ctx}")
+                });
+                if let Some(end @ (SessionEvent::Exit { .. } | SessionEvent::Closed { .. })) =
+                    term.feed(event)
+                {
+                    panic!("the session ended ({end:?}) — {ctx}");
+                }
+                match line_of(&term) {
+                    Some(line) => {
+                        if appeared.is_none() {
+                            appeared = Some(started.elapsed());
+                            first_line = line.clone();
+                        }
+                        let n = seconds_of(&line);
+                        if seconds.last() != Some(&n) {
+                            seconds.push(n);
+                        }
+                    }
+                    None if appeared.is_some() => {
+                        cleared = true;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            let appeared = appeared.unwrap_or_else(|| panic!("the line never appeared — {ctx}"));
+            // Raised by the unanswered question, not by the daemon's later
+            // discovery that the registration is gone (which names the
+            // reconnect): without the heartbeat the idle attach says nothing
+            // until the recovery starts.
+            assert!(
+                !first_line.contains("reconnecting"),
+                "the line first came up as {first_line:?}, from the recovery — {ctx}"
+            );
+            // One beat to the first question, then the threshold, and a
+            // second of slack, as in the active scenario.
+            assert!(
+                appeared <= IDLE_BEAT + APPEAR_BUDGET + Duration::from_secs(1),
+                "the line took {appeared:?} to appear on an idle attach — {ctx}"
+            );
+            assert!(
+                seconds.len() >= 2,
+                "the line was not refreshed: {seconds:?} — {ctx}"
+            );
+            assert!(cleared, "the line never cleared — {ctx}");
+            assert!(
+                !any_inverse(&term.screen),
+                "reverse video left over — {ctx}"
+            );
+            assert_eq!(stream.link_status().recovering, None);
+            stream.close();
+        },
+    )
+    .await;
 }

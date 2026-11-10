@@ -109,7 +109,10 @@ impl PeerTarget {
             // The first peer's route, then a second per further step
             // (ADR-0056 decision 16), never over the command's own limit.
             Some(plan) => {
-                let first = route::redial_deadline(plan.first_punch.as_ref(), true);
+                let first = route::redial_deadline(
+                    plan.first_punch.as_ref(),
+                    !plan.step(0).address.is_empty(),
+                );
                 (first + std::time::Duration::from_secs(plan.hops.len() as u64))
                     .min(qsh_transport::default_dial_timeout())
             }
@@ -1215,6 +1218,17 @@ impl Ops {
         use crate::jump::{HopPin, JumpFailure, Stage};
         let store = trust.snapshot();
         let total = hops.len() + 1;
+        // A registered first hop is not punched to: the daemon already holds
+        // its connection.
+        let first_punch = match reverse_first {
+            Some(_) => None,
+            None => self.punch_plan(hops[0], identity, trust)?,
+        };
+        // A first hop with no address is reached by punching alone
+        // (decision 13: the first hop takes the ordinary route, and a pin
+        // without an address has no direct dial in it, ADR-0054 decision
+        // 16.3). That needs a usable rendezvous, as for a plain command.
+        let first_punch_only = first_punch.as_ref().is_some_and(|p| p.has_rendezvous());
         let pin_of = |name: &str, index: usize, address: Option<&str>| {
             let missing = |why: &str| {
                 JumpFailure {
@@ -1229,10 +1243,12 @@ impl Ops {
                 .find(name)
                 .ok_or_else(|| missing("no pin with this name is recorded"))?;
             let address = address.unwrap_or(&pin.address);
-            // A first hop that registered reverse is reached through the
-            // daemon and is never dialed or named in a header, so it needs
-            // no address (decision 14).
-            if address.is_empty() && !(index == 0 && reverse_first.is_some()) {
+            // The first hop is never named in a header: a hop that registered
+            // reverse is reached through the daemon (decision 14) and one that
+            // can only be punched to by its rendezvous (decision 13), so
+            // neither needs an address.
+            if address.is_empty() && !(index == 0 && (reverse_first.is_some() || first_punch_only))
+            {
                 return Err(missing("the pin has no address to jump to"));
             }
             let fingerprint = pin
@@ -1250,12 +1266,6 @@ impl Ops {
             pins.push(pin_of(name, index, None)?);
         }
         let end_pin = pin_of(end, hops.len(), Some(end_address))?;
-        // A registered first hop is not punched to: the daemon already holds
-        // its connection.
-        let first_punch = match reverse_first {
-            Some(_) => None,
-            None => self.punch_plan(hops[0], identity, trust)?,
-        };
         let plan = crate::jump::JumpPlan::new(
             pins,
             end_pin,

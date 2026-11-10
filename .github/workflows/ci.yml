@@ -328,6 +328,27 @@ jobs:
         env:
           QSH_ACCEPTANCE_SLOW: 1
 
+  # The slow `predict_accept::` set on macOS (ADR-0053 decision 16 items 1, 3
+  # and 4). The `acceptance` job above is ubuntu only, so macOS ran just the
+  # unix half in the `test` job. The slow half needs nothing the runner lacks:
+  # a real `qsh serve` behind a chaos proxy over loopback UDP and the
+  # `/bin/sh` and `/bin/stty` every macOS has; no expect and no TTY. The
+  # 20 ms p95 bound is a timing assertion on a shared hosted runner, so this
+  # job is not in `ci-ok`'s `needs` until it has a run history; making it
+  # required is the same repository-setting call as `punch-netns`.
+  acceptance-macos:
+    name: acceptance (predict, macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^predict_accept::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
+
   # ADR-0054 decision 24 (DoD 13): hole punching against the Linux kernel's
   # own NAT. `scripts/netns/punch.sh` builds network namespaces with nftables
   # `masquerade` (and `masquerade fully-random`) boxes, runs release `qsh`

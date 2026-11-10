@@ -20,7 +20,7 @@
 //! line (결정 8) is read from the host's sink.
 //!
 //! **The 2-second contract.** Every "closes" assertion here waits up to
-//! [`CLOSE_BOUND`], generous for a loaded runner. The contract itself, one
+//! the close bound, generous for a loaded runner. The contract itself, one
 //! poll tick, is pinned on the clock by
 //! `trust_withdrawal_closes_within_one_poll_tick_under_paused_time`, and the
 //! real binary's version by `an_established_connection_is_closed_within_two_seconds_of_trust_remove`
@@ -392,7 +392,7 @@ async fn assert_withdrawn(conn: &Connection) {
 /// So a reset is accepted here, and any other close must carry the code.
 ///
 /// The flooding peer is flow-blocked and sends nothing, and the keep-alive
-/// interval (15 s) is longer than [`CLOSE_BOUND`]. If the one CONNECTION_CLOSE
+/// interval (15 s) is longer than the close bound. If the one CONNECTION_CLOSE
 /// datagram is missed, the peer would learn nothing until its next keep-alive.
 /// So while waiting, a probe task sends a tiny packet on a fresh stream every
 /// 100 ms: a still-draining host answers it with the close, a host that
@@ -504,6 +504,63 @@ async fn serve_inbound_connection_closes_on_trust_remove() {
     host.stop().await;
 }
 
+/// How many request-shaped messages the stopped-reading peer sends. Each
+/// is answered with an `UNSUPPORTED` error of about 75 bytes that the
+/// peer never reads, so about 28 000 fill the reply stream's 2 MiB
+/// window; this is twice that. The old 200 000 was nearly ten times what
+/// blocking the host needs, and as a debug-build loop its length scaled
+/// with runner load.
+const FLOOD_REQUESTS: u64 = 60_000;
+
+/// Send [`FLOOD_REQUESTS`] request-shaped messages into the control
+/// stream without ever reading it, then keep the stream open.
+///
+/// The loop yields every few hundred messages. Quinn's writes complete
+/// without suspending, so without it the task would hold a runtime worker
+/// for the whole flood and starve the connection driver, the trust poll
+/// and the clock of the close budget on a runner with few cores.
+fn flood_requests(mut ctl: qsh_transport::FramedStream) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        for id in 1..=FLOOD_REQUESTS {
+            let msg = qsh_proto::wire::ControlMessage::new(
+                id,
+                qsh_proto::wire::control_message::Body::SessionList(
+                    qsh_proto::wire::SessionList {},
+                ),
+            );
+            if ctl.send.send(&msg).await.is_err() {
+                return;
+            }
+            if id % 256 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        // Keep the stream alive so it is not reset.
+        std::future::pending::<()>().await;
+        drop(ctl);
+    })
+}
+
+/// Wait until the controller has reported that it is blocked sending on a
+/// stream (a `STREAM_DATA_BLOCKED` frame, counted in
+/// `ConnStats::peer_stream_blocked_events`): the reply stream's window is
+/// full because this side never reads it, so the controller's loop is
+/// parked in an awaited send. That is the state the test needs the
+/// withdrawal to land in. The wait is a precondition, not the contract
+/// under test, so its bound is generous and independent of
+/// the close bound.
+async fn wait_host_blocked(conn: &Connection) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while conn.stats().peer_stream_blocked_events == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the controller never reported a blocked reply stream: {:?}",
+            conn.stats()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// ADR-0031 결정 3: the watch runs in a task of its own, so a withdrawn peer
 /// that stops reading the control stream cannot delay the close. Its
 /// `session.list` replies (twenty sessions, about 2 KiB each) fill the
@@ -519,23 +576,11 @@ async fn serve_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream()
         opener.session_open(open_req()).await.expect("session.open");
     }
 
-    let (conn, mut ctl) = host.dial_raw(&client).await;
-    // Never read `ctl.recv`; keep it alive so the stream is not reset.
-    let flood = tokio::spawn(async move {
-        for id in 1..=6000u64 {
-            let msg = wire::ControlMessage::new(
-                id,
-                wire::control_message::Body::SessionList(wire::SessionList {}),
-            );
-            if ctl.send.send(&msg).await.is_err() {
-                break;
-            }
-        }
-        std::future::pending::<()>().await;
-        drop(ctl);
-    });
-    // Let the host fill the window and block in its send.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let (conn, ctl) = host.dial_raw(&client).await;
+    // Never read `ctl.recv`; the helper keeps the stream alive.
+    let flood = flood_requests(ctl);
+    // Wait until the host reports its reply stream blocked, not for a fixed time.
+    wait_host_blocked(&conn).await;
     assert!(
         conn.close_reason().is_none(),
         "still trusted, still open: {:?}",
@@ -1327,63 +1372,6 @@ mod listen {
         })
         .await;
         harness.shutdown().await;
-    }
-
-    /// How many request-shaped messages the stopped-reading peer sends. Each
-    /// is answered with an `UNSUPPORTED` error of about 75 bytes that the
-    /// peer never reads, so about 28 000 fill the reply stream's 2 MiB
-    /// window; this is twice that. The old 200 000 was nearly ten times what
-    /// blocking the host needs, and as a debug-build loop its length scaled
-    /// with runner load.
-    const FLOOD_REQUESTS: u64 = 60_000;
-
-    /// Send [`FLOOD_REQUESTS`] request-shaped messages into the control
-    /// stream without ever reading it, then keep the stream open.
-    ///
-    /// The loop yields every few hundred messages. Quinn's writes complete
-    /// without suspending, so without it the task would hold a runtime worker
-    /// for the whole flood and starve the connection driver, the trust poll
-    /// and the clock of the close budget on a runner with few cores.
-    fn flood_requests(mut ctl: qsh_transport::FramedStream) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            for id in 1..=FLOOD_REQUESTS {
-                let msg = qsh_proto::wire::ControlMessage::new(
-                    id,
-                    qsh_proto::wire::control_message::Body::SessionList(
-                        qsh_proto::wire::SessionList {},
-                    ),
-                );
-                if ctl.send.send(&msg).await.is_err() {
-                    return;
-                }
-                if id % 256 == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-            // Keep the stream alive so it is not reset.
-            std::future::pending::<()>().await;
-            drop(ctl);
-        })
-    }
-
-    /// Wait until the controller has reported that it is blocked sending on a
-    /// stream (a `STREAM_DATA_BLOCKED` frame, counted in
-    /// `ConnStats::peer_stream_blocked_events`): the reply stream's window is
-    /// full because this side never reads it, so the controller's loop is
-    /// parked in an awaited send. That is the state the test needs the
-    /// withdrawal to land in. The wait is a precondition, not the contract
-    /// under test, so its bound is generous and independent of
-    /// [`CLOSE_BOUND`].
-    async fn wait_host_blocked(conn: &Connection) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        while conn.stats().peer_stream_blocked_events == 0 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the controller never reported a blocked reply stream: {:?}",
-                conn.stats()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
 
     /// ADR-0031 결정 3: the registration's watch runs in its own task. The

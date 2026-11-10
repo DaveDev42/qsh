@@ -946,5 +946,60 @@ proptest! {
             feed(&mut s, chunk);
         }
         prop_assert!(s.snapshot().is_valid());
+        // A swallowed panic would still leave a valid screen; the guard in
+        // `feed` must not be what keeps this property true.
+        prop_assert_eq!(s.emulator_resets(), 0);
     }
+}
+
+// ---- emulator panic backstop ----
+
+#[test]
+fn an_emulator_panic_rebuilds_the_screen_and_the_session_keeps_going() {
+    let mut s = screen(5, 20);
+    s.set_client_colors(Some([1, 2, 3]), None);
+    feed(&mut s, b"before");
+    let before = s.update_since(0).unwrap();
+    // Four lines scroll off the top and are history the panic must not eat.
+    feed(&mut s, b"\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
+    let seq_before_panic = s.fed_seq;
+    let mut poisoned = b"zzz".to_vec();
+    poisoned.extend_from_slice(PANIC_TRIGGER);
+    feed(&mut s, &poisoned);
+    assert_eq!(s.emulator_resets(), 1);
+    assert_eq!(s.size(), (5, 20));
+    assert!(s.fed_seq > seq_before_panic, "the offset still advances");
+
+    // Output after the panic reaches the new emulator.
+    feed(&mut s, b"\x1b[Halive");
+    assert_eq!(s.emulator_resets(), 1);
+    let snap = s.snapshot();
+    assert_eq!(row_text(&snap, 0), "alive");
+
+    // Every client gets the full screen, whatever base it holds.
+    let u = s.update_since(before.new_num).unwrap();
+    assert_eq!(u.base_num, 0, "a retained base would hide the lost screen");
+    let state = u.apply(&ScreenState::blank(5, 20).unwrap()).unwrap();
+    assert_eq!(state.hash(), u.state_hash);
+    assert_eq!(row_text(&state, 0), "alive");
+    assert!(u.new_num > before.new_num);
+
+    // History, answers and colours survive the rebuild.
+    let h = s.take_history();
+    assert!(!h.lines.is_empty(), "scrolled-off lines were kept");
+    feed(&mut s, b"\x1b]10;?\x1b\\");
+    assert_eq!(s.take_answers(), b"\x1b]10;rgb:0101/0202/0303\x1b\\");
+}
+
+#[test]
+fn a_panic_in_one_slice_drops_only_that_slice() {
+    let mut s = screen(5, 20);
+    let mut data = vec![b'a'; FEED_SLICE];
+    data.extend_from_slice(PANIC_TRIGGER);
+    data.resize(FEED_SLICE * 2, b'b');
+    data.extend_from_slice(b"\x1b[Hlast");
+    feed(&mut s, &data);
+    assert_eq!(s.emulator_resets(), 1);
+    // The slice after the poisoned one went to the rebuilt emulator.
+    assert!(row_text(&s.snapshot(), 0).starts_with("last"));
 }

@@ -19,9 +19,14 @@ use qsh_proto::screen::{Effect, ScreenState};
 use qsh_proto::wire;
 
 use crate::adapt::{PredictPin, Prediction};
+use qsh_proto::event::SessionEvent;
+
+use super::pump::screen_output;
 use crate::client::linkstatus::{LinkLine, LinkTracker};
+use crate::client::pathwatch::PathWatch;
 use crate::client::predict_drive::PredictDriver;
 use crate::client::render::ScreenRenderer;
+use crate::ops::OpError;
 
 /// `--screen-sync` (ADR-0052 decision 15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -201,6 +206,10 @@ pub(super) struct ScreenSink {
     /// Rung when the link changed in a way that can alter the status line.
     /// `None` when the line is off.
     link: Option<Arc<LinkTracker>>,
+    /// Held from the moment a frame is computed until the frontend's queue
+    /// has taken it ([`Self::emit`]), so frames reach the terminal in the
+    /// order the renderer made them.
+    gate: tokio::sync::Mutex<()>,
 }
 
 /// The status line and what it reads.
@@ -359,13 +368,57 @@ impl ScreenSink {
             }),
             wake: tokio::sync::Notify::new(),
             link,
+            gate: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Compute one frame with `draw` and hand it to the frontend's event
+    /// queue, as one step no other task's frame can interleave with.
+    ///
+    /// The renderer diffs each frame against what the previous one left on
+    /// the terminal, so the bytes are only correct when written in the order
+    /// they were made. The input pump, the leg reader, the control pump and
+    /// the recovery ticker all draw, each from its own task; the sink's lock
+    /// orders the computing, but not the `send` that follows it, and a task
+    /// parked on a full queue would let a later frame overtake its earlier
+    /// one. The gate covers both. `watch`, when given, marks the wait as a
+    /// stalled consumer so the path watchdog does not read it as silence.
+    ///
+    /// Returns `false` when the frontend's receiver is gone.
+    pub(super) async fn emit(
+        &self,
+        events: &tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+        session_ref: &str,
+        watch: Option<&PathWatch>,
+        draw: impl FnOnce(&Self) -> (Vec<u8>, u64),
+    ) -> bool {
+        let _gate = match self.gate.try_lock() {
+            Ok(gate) => gate,
+            Err(_) => {
+                let _stalled = watch.map(PathWatch::stalled);
+                self.gate.lock().await
+            }
+        };
+        let (bytes, sequence) = draw(self);
+        if bytes.is_empty() {
+            return true;
+        }
+        let _stalled = watch.map(PathWatch::stalled);
+        events
+            .send(Ok(screen_output(session_ref, sequence, &bytes)))
+            .await
+            .is_ok()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether this attach draws the connection status line.
+    pub(super) fn has_status_line(&self) -> bool {
+        self.link.is_some()
     }
 
     /// The request to put in a recovery's `SessionAttach`: the window as it

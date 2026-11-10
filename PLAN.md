@@ -71,21 +71,22 @@ M20 계획 §0.2의 다섯 항목을 승계한다.
 
 M22가 남긴 후속이다(ADR-0052 개정 이력, M22 계획 `1a07d99`).
 
-- [ ] `FILE_DATA`는 bulk 예산을 내지만 16 KiB 알갱이로 쪼개지 않는다. 얕은 큐에서 `qsh cp`가 터널만큼 에코를 지키는지 `bulk_yield`에 cp 시나리오를 더해 확인한다.
-- [ ] 결정 12 (e)의 줄인 keep-alive 간격을 host별로 기억하지 않는다. 지금은 attach 단위다.
+- [x] `FILE_DATA`는 bulk 예산을 내지만 16 KiB 알갱이로 쪼개지 않는다. 얕은 큐에서 `qsh cp`가 터널만큼 에코를 지키는지 `bulk_yield`에 cp 시나리오를 더해 확인한다. 2026-11-11 `bulk_yield::bulk_yields_to_echo_on_a_shallow_queue_under_file_copy`로 확인했다. 얕은 큐에서 cp 부하의 echo p95는 68~72 ms(기준 min_rtt+50 ≈ 101 ms)로 터널(70 ms)과 같아 알갱이 변경은 필요 없다.
+- [x] 결정 12 (e)의 줄인 keep-alive 간격을 host별로 기억하지 않는다. 지금은 attach 단위다. 2026-11-11 결정 본문의 "프로세스가 host별로 기억한다"대로 `adapt::KeepAliveMemory`(프로세스 안, peer별, 최대 256, 줄이기만 하고 사용자 고정값 제외)가 다음 attach를 그 값으로 시작한다(`keep_alive_policy::a_shortened_interval_is_remembered_for_the_next_attach_of_the_same_peer`). host가 다시 뜨면 잊는다.
 - [ ] client가 로컬 fg/bg 색을 알리지 않아 host 에뮬레이터가 OSC 10/11에 답하지 않는다.
-- [ ] 결정 18의 11 처리량 비율이 로컬 0.61~0.64배로 하한 0.5배에 가깝다. 야간 perf의 `screen_cat_ratio`가 붉어지면 같은 task 직렬 경로(ADR-0052 개정 이력)부터 본다.
-- [ ] 중첩 바깥 운반체(결정 12 (f))의 netbench q6은 run 편차가 커서 M26 전에 반복 측정한다.
+- [ ] 결정 18의 11 처리량 비율이 로컬 0.61~0.64배로 하한 0.5배에 가깝다. 야간 perf의 `screen_cat_ratio`가 붉어지면 같은 task 직렬 경로(ADR-0052 개정 이력)부터 본다. 2026-11-11 프로파일을 시도했으나 load average 100 넘는 부하에서 한 번(끔 24 MiB/s, 켬 12, 0.497)만 재서 쓸 수 없었다. 조용한 host에서 PTY 시험과 in-process `screen_throughput`을 다섯 번씩 돌린 뒤 `perf record`로 parse 경로를 본다.
+- [ ] 중첩 바깥 운반체(결정 12 (f))의 netbench q6. 2026-11-11 네 변형을 열 번씩 돌렸다(Dave-Windows-WSL, 부하가 커서 절댓값은 거칠다). 직접 bulk 2.25 MB/s·echo p99 782 ms, 바깥 스트림 1.77 MB/s·p99 1563 ms(echo 유실 0, 편차 가장 작음), 바깥 datagram 0.36 MB/s(0.03~1.19)이고 열 번 모두 echo 360개 중 146~360개가 돌아오지 않았다(64 KiB 버퍼도 같음). netbench는 결정 12 (f)의 "바깥 datagram이 안쪽 p99를 반으로 줄인다"를 뒷받침하지 않는다. 다만 이 하네스의 중첩 datagram은 qsh jump 코드가 없는 합성 운반체이고, 실제 jump 채널(ADR-0056)은 `jump_perf`·`jump_loss`가 초록이다. (f)를 Datagram으로 둘지 Stream으로 바꿀지는 Dave 결정이다(ADR 개정). 원자료는 남기지 않았고 `scripts/netbench/run.sh`로 다시 만든다. 소유: Dave.
 - [ ] 흔들리는 테스트. 2026-11-07 셋을 고쳤다: `the_send_depth_gate_defers_updates_while_the_client_does_not_read`(개수 단언 제거, `2e8cc42`), `quit_is_ctrl_break_not_ctrl_c`(probe의 파일·콘솔 쓰기 순서, `bdf2300`), `concurrent_saves_to_the_same_path_never_corrupt_the_file`(Windows rename 재시도, `e1f3d0d`, 원인 미재현). 여러 에이전트가 Dave-Windows를 함께 쓰는 부하에서 전체 run이 다른 시간 의존 시험으로 흔들린다: `attach_recovery::a_repath_is_survived_by_the_live_attach`, `sessions_filter::sessions_filter_does_not_change_the_wire_request`, `ssh_revival::a_changed_port_updates_the_pin`, `ssh_revival::a_command_revives_the_serve_after_it_idled_out`, `supervised_reverse::supervised_with_wait_still_caps_the_initial_wait_to_stale_retention`, `reverse_resume_chaos::a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach`, `chaos_relay::reorder_lets_the_successor_arrive_first`. CI에서 붉어지면 하나씩 가른다.
 
 M23이 남긴 후속이다(ADR-0053 개정 이력, M23 계획 `d50f003`).
 
-- [ ] host 출력 pump가 에뮬레이터 panic으로 죽으면 그 세션의 출력이 알림 없이 멎는다(client는 오류를 받지 않는다). 알려진 trigger는 `d548c10`이 막았고, `catch_unwind`로 에뮬레이터를 다시 세우는 backstop은 두지 않았다.
+- [x] host 출력 pump가 에뮬레이터 panic으로 죽으면 그 세션의 출력이 알림 없이 멎는다(client는 오류를 받지 않는다). 알려진 trigger는 `d548c10`이 막았고, `catch_unwind`로 에뮬레이터를 다시 세우는 backstop은 두지 않았다. 2026-11-11 `HostScreen::feed`가 슬라이스마다 `catch_unwind`로 감싸 panic하면 그 슬라이스를 버리고 빈 에뮬레이터로 다시 세워 모든 client에 전체 화면을 보낸다(`an_emulator_panic_rebuilds_the_screen_and_the_session_keeps_going`, `an_emulator_panic_does_not_stop_the_output_pump`, threat model C23). 다시 세운 화면은 프로그램이 다시 그릴 때까지 비어 있고, fuzz 타깃 둘은 `emulator_resets() == 0`을 단언해 삼킨 panic도 crash로 센다.
 - [ ] `Vs16Filter` 탓에 U+FE0F가 필요한 이모지(하트·키캡)가 host 화면 모델에서 한 칸을 차지한다.
-- [ ] 서로 다른 task(입력 pump, reader, recovery ticker)의 화면 바이트를 직렬화하지 않는다. 수용 시험에서는 어긋나지 않았다.
-- [ ] 역방향 attach는 watchdog이 없어 입력이 있어야 상태 줄 시계가 돈다. 완전히 쉬는 역방향 attach는 conduit이 끊길 때까지 줄을 띄우지 않는다.
+- [x] 서로 다른 task(입력 pump, reader, recovery ticker)의 화면 바이트를 직렬화하지 않는다. 수용 시험에서는 어긋나지 않았다. 2026-11-11 `ScreenSink::emit`이 프레임 계산과 frontend 큐 삽입을 한 잠금 안에 묶는다(`frames_from_different_tasks_reach_the_frontend_in_the_order_they_were_made`, 잠금을 빼면 실패 확인).
+- [x] 역방향 attach는 watchdog이 없어 입력이 있어야 상태 줄 시계가 돈다. 2026-11-11 증상만 닫았다. 역방향 route의 Ping은 로컬 데몬에서 끝나므로(protocol §11) 상태 줄을 그리는 역방향 attach는 쉰 지 idle probe 간격(5초)이 지나면 바이트 없는 `Input`(이미 유효한 frame, wire 변경 없음)을 보내고 host는 반복 입력으로 읽어 `InputAck`로 답한다. host는 빈 `Input`을 bulk 양보의 대화형 입력으로 세지 않는다(protocol §18.10, `reverse_idle_attach_keeps_asking_the_host`, `reverse_idle_status_line_appears_during_a_blackhole`, `heartbeat::a_heartbeat_is_answered_with_the_applied_offset_and_runs_no_input`).
+- [ ] 역방향 route에는 경로가 죽었다는 PathWatch 판정이 없다(데몬의 등록 watchdog과 `LocalReconnect`가 맡는다). ADR-0053 본문은 역방향에도 watchdog이 있다고 적었는데 코드와 다르다. 빈 `Input` heartbeat를 받아들일지, 진짜 판정을 둘지(ADR 필요)는 Dave 결정이다. 소유: Dave.
 - [ ] client가 자기 principal을 몰라 첫 `writer_changed`로 배운다. 같은 principal의 둘째 attach와 첫 알림으로 온 steal을 구분하지 못한다(효과는 철회되는 예측 하나 또는 보류된 예측).
-- [ ] 느린 예측 수용 셋(`predict_accept::`)은 ubuntu acceptance job에서만 돈다. macOS는 test job의 unix 셋만 돈다.
+- [x] 느린 예측 수용 셋(`predict_accept::`)은 ubuntu acceptance job에서만 돈다. macOS는 test job의 unix 셋만 돈다. 2026-11-11 ci.yml에 macOS job `acceptance-macos`가 `QSH_ACCEPTANCE_SLOW=1`로 `predict_accept::`를 돈다. 20 ms p95가 공유 runner의 시간 단언이라 `ci-ok`의 `needs`에는 넣지 않았고, 몇 번 초록을 본 뒤 필수 검사로 올릴지는 저장소 설정이라 사람 몫이다.
 - [ ] Windows pwsh에서 키 서른 개 중 하나가 105~142 ms를 쓸 때가 있다(p95는 2.0 ms).
 
 M24가 남긴 후속이다(ADR-0054 개정 이력, M24 계획 `569e859`).
@@ -95,22 +96,22 @@ M24가 남긴 후속이다(ADR-0054 개정 이력, M24 계획 `569e859`).
 - [ ] derived 후보(결정 23 (d))는 IPv4만 만든다. IPv6에서 중개자가 B와 같은 방화벽 뒤인 장면은 시험이 없다.
 - [ ] 커널 대조는 masquerade(port-restricted)와 fully-random(symmetric)만 덮는다. full cone·restricted는 conntrack에 그대로 대응하는 것이 없어 netsim에서만 본다.
 - [ ] 역방향 등록 자체의 펀칭과 일반 `qsh serve`·on-demand serve의 펀칭은 ADR-0054에서 미뤘다.
-- [ ] 흔들림: `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 전체 실행 한 번과 CI run 42573815011에서 8초 안에 닫힘을 보지 못했다. `1acd3d6`이 고정 2.5초 sleep 대신 host가 막혔다는 보고(`peer_stream_blocked_events`)를 기다리고 flood를 60000건으로 줄여 양보하게 했다(제품 코드는 응답 스트림을 기다리지 않는다). 원래 실패는 로컬에서 재현되지 않아 원인은 가설이다. 부하 아래 30/30. 짝인 `serve_closes_a_withdrawn_peer…`는 아직 고정 1.5초 sleep이다. 같은 부하에서 `chaos_relay::reorder_lets_the_successor_arrive_first`가 전체 여섯 번 중 두 번 실패했다.
+- [ ] 흔들림: `trust_withdrawal::listen::listen_closes_a_withdrawn_peer_that_stopped_reading_the_control_stream`이 전체 실행 한 번과 CI run 42573815011에서 8초 안에 닫힘을 보지 못했다. `1acd3d6`이 고정 2.5초 sleep 대신 host가 막혔다는 보고(`peer_stream_blocked_events`)를 기다리고 flood를 60000건으로 줄여 양보하게 했다(제품 코드는 응답 스트림을 기다리지 않는다). 원래 실패는 로컬에서 재현되지 않아 원인은 가설이다. 부하 아래 30/30. 짝인 `serve_closes_a_withdrawn_peer…`도 2026-11-11 같은 방식으로 고쳤다. `chaos_relay::reorder_lets_the_successor_arrive_first`는 10 ms 보류가 부하에서 만료되던 시험 결함이었다(64 busy loop 18/60 실패). `ChaosPolicy::reorder_hold`로 이 시험만 4초로 넓혀 0/60이다.
 
 M25가 남긴 후속이다(ADR-0055 개정 이력, M25 계획 `3604a16`).
 
-- [ ] Windows에서 exec 소켓 제거를 기다리는 단언은 세션 소켓만 보아 거의 공으로 통과한다. exec pipe의 수명을 직접 보는 시험이 없다.
+- [x] Windows에서 exec 소켓 제거를 기다리는 단언은 세션 소켓만 보아 거의 공으로 통과한다. exec pipe의 수명을 직접 보는 시험이 없다. 2026-11-11 `agent_host::an_exec_agent_endpoint_is_gone_after_the_exec`가 exec가 받은 `SSH_AUTH_SOCK` 자체에 붙어 보아 끝난 뒤 `NotFound`를 단언한다(Linux, Dave-Windows).
 - [ ] Windows CI 러너의 `ssh-agent` 서비스는 기계 하나에 하나라서 그 서비스를 쓰는 시험은 시험 그룹 `shared-ssh-agent`로 한 번에 하나씩 돈다(`38d30ec`). 그 서비스를 쓰는 시험을 더하면 같은 그룹에 넣는다.
-- [x] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`의 Windows 10060(CI run 42594749119, 42612491760)은 시험 결함이었다. 부하 아래 `try_clone`(WSADuplicateSocket) 복제본이 미연결로 돌아와 `shutdown(Write)`가 WSAENOTCONN으로 실패해 half-close가 나가지 않았다(Dave-Windows 부하 아래 63/64 재현). 한 소켓으로 쓰고 읽게 고쳤다. 도우미는 `qsh_testkit::tunnel::echo_round_trip`으로 모았고 `jump_chain`·`jump_reverse`도 쓴다(`2f68b24`). 같은 모양(복제본에서 `shutdown(Write)`)이 `qsh-cli`의 `tunnel_e2e.rs`와 `route_cases.rs` echo 도우미에 남아 있다. 붉어지면 같은 방식으로 고친다.
+- [x] `punch_features::a_local_forward_carries_bytes_over_a_punched_connection`의 Windows 10060(CI run 42594749119, 42612491760)은 시험 결함이었다. 부하 아래 `try_clone`(WSADuplicateSocket) 복제본이 미연결로 돌아와 `shutdown(Write)`가 WSAENOTCONN으로 실패해 half-close가 나가지 않았다(Dave-Windows 부하 아래 63/64 재현). 한 소켓으로 쓰고 읽게 고쳤다. 도우미는 `qsh_testkit::tunnel::echo_round_trip`으로 모았고 `jump_chain`·`jump_reverse`도 쓴다(`2f68b24`). 2026-11-11 `qsh-cli`의 `tunnel_e2e.rs`·`route_cases.rs` 도우미도 `echo_round_trip`·`echo_exchange`로 바꿨다.
 - [x] `agent_reverse::end_to_end::a_reverse_reattach_registers_its_channel_again`의 간헐 실패는 제품 결함이었다. localctl 소켓 bind가 프로세스 전역 umask를 0o177로 좁히는 동안 다른 스레드가 만든 0700 디렉터리가 0600이 되어 audit 쓰기가 EACCES로 실패하고 허용이 fail-closed로 거부가 됐다. 0o077로 고치고 회귀 시험을 더했다.
 
 M26이 남긴 후속이다(ADR-0056·ADR-0058 개정 이력).
 
-- [ ] 종류 14 datagram만 골라 버리는 시험 훅이 없다. datagram 경로의 침묵은 chaos proxy로 링크 전체를 막거나 `set_max_packet`으로 줄여서만 만든다.
+- [x] 종류 14 datagram만 골라 버리는 시험 훅이 없다. datagram 경로의 침묵은 chaos proxy로 링크 전체를 막거나 `set_max_packet`으로 줄여서만 만든다. 2026-11-11 `Server::blackhole_jump_datagrams`(화면용 `blackhole_datagrams`와 같은 모양)와 `jump_chain::jump_silence_when_only_kind_14_datagrams_vanish_falls_back_to_the_stream`이 닫았다.
 - [ ] 연결 수명 중간에 PLPMTUD가 자리를 올려 운반체가 바뀌는 장면은 시험으로 몰 수 없다. 시작 직후 상승(`jump_carrier_switches_to_datagram_after_pmtud`)만 고정돼 있다.
-- [ ] 같은 포트로 다시 뜬 중간 peer를 체인이 다시 찾는 시험이 없다.
-- [ ] 주소 없이 펀칭으로만 닿는 첫 hop은 `jump_plan`의 주소 검사에 막힌다. 펀칭 첫 hop 시험은 주소가 있는 pin으로 돈다.
-- [ ] 건강한 경로에서 침묵 fallback이 드물게 한 번 난다. 답이 없는 datagram(순수 ACK 등)이 쉰 틈 뒤에도 세어지는 탓이라는 가설이 있고 확인하지 않았다. 맞다면 시한보다 긴 틈 뒤에 침묵 시계를 되돌리면 되지만 ADR-0058에 없는 동작이라 미뤘다.
+- [x] 같은 포트로 다시 뜬 중간 peer를 체인이 다시 찾는 시험이 없다. 2026-11-11 `jump_recovery::a_chain_finds_a_middle_peer_that_restarted_on_the_same_port`(감독 `-L`, 같은 포트·신원으로 재기동, 왕복이 약 0.26초에 복구). graceful stop이라 stateless reset이 아니라 중간 peer의 CONNECTION_CLOSE 경로를 덮는다. 런타임을 drop하는 crash 모양은 `datagram.rs`의 프로세스 전역 허브 표가 listener 소켓을 붙들어 시험에 쓸 수 없다(제품 영향 없음).
+- [x] 주소 없이 펀칭으로만 닿는 첫 hop은 `jump_plan`의 주소 검사에 막힌다. 펀칭 첫 hop 시험은 주소가 있는 pin으로 돈다. 2026-11-11 ADR-0056 결정 13(첫 hop은 평소 route)대로 `jump_plan`이 랑데부가 있으면 빈 주소를 통과시키고, redial 예산과 doctor의 첫 hop probe도 주소 없는 pin을 따른다(`jump_punch::jump_first_hop_with_no_address_is_reached_by_punching_alone`, 수정을 끄면 실패 확인).
+- [ ] 건강한 경로에서 침묵 fallback이 난다. 2026-11-11 가설을 확인했다. 직전 교환 끝에 받은 쪽이 보낸 ack-only datagram 하나가 답을 받지 못해 침묵 시계를 켜고, 시한보다 긴 틈(300 ms 이상) 뒤 다음 송신이 그것을 침묵으로 센다(임시 계측에서 틈 100 ms 0/6, 300·600·1000 ms 6/6, 손실 0). 반대편 datagram이 오면 풀려 운반체가 오간다. 개정안(ADR-0058 결정 1, Dave 승인 필요): 받은 datagram 뒤 첫 송신은 침묵 시계를 시작하지 않는다. 임시로 넣으면 같은 실험이 0/4이고 침묵 시험 둘도 통과했다. "시한보다 긴 틈 뒤 시계 되돌리기"는 srtt가 큰 경로에서 진짜 blackhole의 PTO 간격이 시한을 넘어 탐지를 막을 수 있어 권하지 않는다. 재현 시험 `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap`(`#[ignore]`, 개정 전까지 실패). 소유: Dave.
 - [ ] 명령마다 체인 전체를 다시 다이얼한다. 링크마다 3% 손실인 세 hop에서는 안쪽 handshake가 잃은 비행을 거듭하면 PTO가 두 배씩 늘어 10초 체인 시한을 다 쓸 수 있다(CI run 42852092810, 로컬 12/12 통과). `jump_loss`만 dial 시한을 30초로 넓혔다. 손실이 큰 다단 체인에서 사용자가 `TIMEOUT`(stage `handshake`)을 볼 수 있다는 뜻이고, 체인 연결 재사용이나 hop 수에 비례한 시한은 ADR이 필요하다.
 - [ ] 결정 25.3의 datagram·스트림 p95 비교는 출력만 하고 단언하지 않는다. C–J–T에서 차가 약 5%로 얇다.
 - [ ] 한 hop 처리량 비율은 조용한 WSL에서 0.68~0.73이고 CI acceptance(debug 빌드)에서는 runner 부하에 따라 하한 0.5에 가까울 수 있다. 붉어지면 재전송 비율(`jump_perf` 출력)부터 본다.

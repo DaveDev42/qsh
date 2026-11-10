@@ -11,8 +11,9 @@
 //! decision 13): [`CarrierRunner::next_ping_at`] says when the next one is
 //! due and the caller writes it.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use qsh_transport::ConnStats;
@@ -39,6 +40,48 @@ pub const ALIVE_WINDOW: Duration = Duration::from_secs(20);
 /// change is a path switch under traffic, not a lapsed binding, and
 /// `clamp(g / 2, 1 s, 15 s)` would pin the floor on a one-second gap.
 pub const NAT_REBIND_MIN_IDLE: Duration = Duration::from_secs(2);
+
+/// Most peers the keep-alive memory holds before it forgets the oldest.
+const KEEP_ALIVE_MEMORY_CAP: usize = 256;
+
+/// The shortened keep-alive interval of decision 12 (e), remembered per peer
+/// for the lifetime of this process. In-process only: nothing is persisted,
+/// so a restart starts every peer from the 15 s default again.
+#[derive(Debug, Default)]
+pub struct KeepAliveMemory {
+    inner: Mutex<(HashMap<String, Duration>, VecDeque<String>)>,
+}
+
+impl KeepAliveMemory {
+    /// The interval remembered for `peer`, if the policy ever shortened it.
+    pub fn get(&self, peer: &str) -> Option<Duration> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.0.get(peer).copied()
+    }
+
+    /// Remember `interval` for `peer`. Only a value below the default is
+    /// kept, and it only ever gets shorter.
+    pub fn remember(&self, peer: &str, interval: Duration) {
+        if interval >= KEEP_ALIVE_DEFAULT {
+            return;
+        }
+        let interval = interval.max(KEEP_ALIVE_MIN);
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (map, order) = &mut *g;
+        match map.get_mut(peer) {
+            Some(old) => *old = (*old).min(interval),
+            None => {
+                if map.len() >= KEEP_ALIVE_MEMORY_CAP
+                    && let Some(oldest) = order.pop_front()
+                {
+                    map.remove(&oldest);
+                }
+                map.insert(peer.to_owned(), interval);
+                order.push_back(peer.to_owned());
+            }
+        }
+    }
+}
 
 /// Per-connection state for the carrier knob.
 #[derive(Debug)]
@@ -138,6 +181,15 @@ impl CarrierRunner {
     /// The caller wrote a keep-alive `Ping`.
     pub fn ping_sent(&mut self, now: Instant) {
         self.last_ping = Some(now);
+    }
+
+    /// Start from an interval an earlier attach of the same peer shortened
+    /// (decision 12 (e): remembered per host). A pinned interval wins, and
+    /// the value never lengthens past the default.
+    pub fn seed_keep_alive(&mut self, remembered: Duration) {
+        if self.user.keep_alive.is_none() && remembered < KEEP_ALIVE_DEFAULT {
+            self.knobs.keep_alive = remembered.max(KEEP_ALIVE_MIN);
+        }
     }
 
     /// The current knobs.
@@ -357,6 +409,44 @@ mod tests {
         r.tick(t0, stats(20, 1), false, None);
         assert_eq!(r.next_ping_at(), None);
         assert!(!r.ping_due(t0 + secs(60)));
+    }
+
+    #[test]
+    fn a_shortened_interval_is_remembered_per_peer_and_seeds_the_next_attach() {
+        let memory = KeepAliveMemory::default();
+        assert_eq!(memory.get("a"), None);
+        memory.remember("a", KEEP_ALIVE_DEFAULT);
+        assert_eq!(memory.get("a"), None, "the default is not worth keeping");
+        memory.remember("a", secs(5));
+        memory.remember("a", secs(8));
+        assert_eq!(memory.get("a"), Some(secs(5)), "never lengthens");
+        assert_eq!(memory.get("b"), None, "per peer");
+        let mut next = CarrierRunner::new(Instant::now(), User::default());
+        next.seed_keep_alive(memory.get("a").unwrap());
+        assert_eq!(next.knobs().keep_alive, secs(5));
+        assert!(next.next_ping_at().is_some());
+        let mut pinned = CarrierRunner::new(
+            Instant::now(),
+            User {
+                keep_alive: Some(secs(8)),
+                ..User::default()
+            },
+        );
+        pinned.seed_keep_alive(secs(5));
+        assert_eq!(pinned.knobs().keep_alive, KEEP_ALIVE_DEFAULT);
+    }
+
+    #[test]
+    fn the_memory_forgets_the_oldest_peer_past_its_cap() {
+        let memory = KeepAliveMemory::default();
+        for i in 0..=KEEP_ALIVE_MEMORY_CAP {
+            memory.remember(&format!("p{i}"), secs(5));
+        }
+        assert_eq!(memory.get("p0"), None);
+        assert_eq!(
+            memory.get(&format!("p{KEEP_ALIVE_MEMORY_CAP}")),
+            Some(secs(5))
+        );
     }
 
     #[test]

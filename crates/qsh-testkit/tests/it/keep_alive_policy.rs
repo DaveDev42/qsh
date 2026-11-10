@@ -57,6 +57,24 @@ async fn after_a_nat_rebind_pings_flow_at_the_policy_interval() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_shortened_interval_is_remembered_for_the_next_attach_of_the_same_peer() {
+    let h = LoopbackHarness::start().await;
+    {
+        let (_s, _pipe, mut att) = attach(&h).await;
+        h.server.inject_nat_rebind(Duration::from_secs(2));
+        drain_for(&mut att, Duration::from_millis(2500)).await;
+    }
+    let before = h.server.keep_alive_pings();
+    assert!(before >= 1, "the first attach shortened the interval");
+    // A fresh attach with no rebind of its own starts at the remembered
+    // interval, so pings flow without any new injection.
+    let (_s, _pipe, mut att) = attach(&h).await;
+    drain_for(&mut att, Duration::from_millis(3500)).await;
+    let n = h.server.keep_alive_pings() - before;
+    assert!(n >= 2, "{n} pings from the second attach in 3.5 s");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_written_key_pins_the_interval_and_the_policy_stays_silent() {
     let h = LoopbackHarness::start().await;
     h.server.pin_keep_alive(Duration::from_secs(15));

@@ -49,6 +49,9 @@ fuzz_target!(|data: &[u8]| {
         pos = end;
         seq += chunk.len() as u64;
         host.feed(chunk, seq);
+        // `feed` survives an emulator panic by rebuilding; the fuzzer must
+        // still count that as a crash.
+        assert_eq!(host.emulator_resets(), 0, "the emulator panicked");
         assert!(host.take_answers().len() <= 4096);
         step = step.wrapping_add(1);
         if step == *resize_at {

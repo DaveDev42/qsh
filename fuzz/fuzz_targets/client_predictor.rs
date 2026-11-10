@@ -204,6 +204,8 @@ impl Run {
     /// into a NUL before the emulator sees it (threat model C23).
     fn feed(&mut self, bytes: &[u8], end: u64) {
         self.host.feed(bytes, end);
+        // The guard in `feed` swallows an emulator panic; here it is a crash.
+        assert_eq!(self.host.emulator_resets(), 0, "the emulator panicked");
     }
 
     fn apply_state(&mut self, num: u64) {
