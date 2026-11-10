@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -67,29 +68,24 @@ const PROBE_CEIL: Duration = Duration::from_secs(2);
 /// healthy for the whole idle timeout, and a stream opened on it just waits.
 /// The first local connection after that finds out with a probe
 /// ([`probe_path`]); this remembers the verdict so the connections after it
-/// close at once, until the peer's authenticated frames move again.
+/// close at once. The verdict is lifted only by a later probe that is
+/// answered ([`Self::mark_silent`] keeps probing in the background), never by
+/// the peer's frames moving: datagrams that left the peer before the path
+/// died can still be queued here and arrive after the verdict, and would
+/// make a dead path look alive again.
 #[derive(Default)]
 struct PathHealth {
-    /// `rx_frames` of the backing connection when a probe went unanswered.
-    suspect_at: Mutex<Option<u64>>,
+    /// A probe went unanswered and none has been answered since.
+    silent: AtomicBool,
     /// The last `rx_frames` a local connection saw and when it saw that
     /// value change.
     heard: Mutex<Option<(u64, std::time::Instant)>>,
 }
 
 impl PathHealth {
-    /// Whether the connection is still known to be silent: a probe failed
-    /// and nothing authenticated has arrived since.
-    fn still_silent(&self, rx_frames: u64) -> bool {
-        let mut suspect = self.suspect_at.lock().unwrap_or_else(|e| e.into_inner());
-        match *suspect {
-            Some(at) if at == rx_frames => true,
-            Some(_) => {
-                *suspect = None;
-                false
-            }
-            None => false,
-        }
+    /// Whether the connection is still known to be silent.
+    fn still_silent(&self) -> bool {
+        self.silent.load(Ordering::Acquire)
     }
 
     /// Whether the peer's authenticated frames moved within `wait` of the
@@ -111,8 +107,27 @@ impl PathHealth {
         }
     }
 
-    fn mark_silent(&self, rx_frames: u64) {
-        *self.suspect_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx_frames);
+    /// Remember that `conn` is silent, and keep probing it (one probe at a
+    /// time, `wait` apart) until one is answered or the connection ends, so
+    /// the sockets it backs work again once the path does.
+    fn mark_silent(self: &Arc<Self>, conn: &Connection, wait: Duration) {
+        if self.silent.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let health = Arc::clone(self);
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(wait).await;
+                if conn.close_reason().is_some() {
+                    return;
+                }
+                if probe_path(&conn, wait).await {
+                    health.silent.store(false, Ordering::Release);
+                    return;
+                }
+            }
+        });
     }
 }
 
@@ -575,7 +590,7 @@ async fn bridge(conn: AgentConn, backing: Backing) {
     let (local, _slots) = conn.into_parts();
     let frames = backing.conn.rx_frames();
     let wait = probe_wait(backing.conn.rtt());
-    if backing.health.still_silent(frames) {
+    if backing.health.still_silent() {
         tracing::info!(target: "qsh::agent", event = "accept_closed", reason = "path_silent");
         return;
     }
@@ -620,7 +635,16 @@ async fn bridge(conn: AgentConn, backing: Backing) {
     let grace = if probing { Duration::ZERO } else { wait };
     let probe = async {
         tokio::time::sleep(grace).await;
-        probe_path(&backing.conn, frames, wait).await
+        let seen = backing.conn.rx_frames();
+        if probe_path(&backing.conn, wait).await {
+            return true;
+        }
+        // Frames that arrived while the probe waited prove nothing about the
+        // path now (they may have been queued before it died), but they show
+        // a peer that was alive a moment ago and may only be slow to answer
+        // under load: it gets one more probe. A path with no sign of life at
+        // all is judged silent after the first.
+        backing.conn.rx_frames() != seen && probe_path(&backing.conn, wait).await
     };
     tokio::pin!(probe);
     tokio::select! {
@@ -631,7 +655,7 @@ async fn bridge(conn: AgentConn, backing: Backing) {
             } else {
                 // Dropping `copy` closes the local connection and resets the
                 // stream.
-                backing.health.mark_silent(frames);
+                backing.health.mark_silent(&backing.conn, wait);
                 tracing::info!(
                     target: "qsh::agent",
                     event = "accept_closed",
@@ -647,14 +671,16 @@ fn probe_wait(rtt: Duration) -> Duration {
     rtt.saturating_mul(4).clamp(PROBE_FLOOR, PROBE_CEIL)
 }
 
-/// Whether the backing connection's peer answers within `wait`. Two things
-/// count: the peer's authenticated frames moving past `frames` (the real
-/// stream's first packets get acknowledged), or the reset of an `AGENT`
-/// stream whose channel no client has registered (a client resets it at once,
-/// ADR-0055 decision 13, which is a round trip on the path). Nothing reaches
-/// a local agent, and the channel is random, so it never collides with a
-/// real one.
-async fn probe_path(conn: &Connection, frames: u64, wait: Duration) -> bool {
+/// Whether the backing connection's peer answers within `wait`. The proof is
+/// an `AGENT` stream whose channel no client has registered, opened and
+/// finished just now: the peer acknowledges its bytes (transport level, so a
+/// busy program on the other side cannot delay it) or resets it at once
+/// (ADR-0055 decision 13). Either is a round trip that began after this
+/// call. The peer's authenticated frames moving is not enough: datagrams
+/// that left the peer before the path died can still be queued here and
+/// would pass for a live path. Nothing reaches a local agent, and the
+/// channel is random, so it never collides with a real one.
+async fn probe_path(conn: &Connection, wait: Duration) -> bool {
     let stream = async {
         let (send, mut recv) = conn.open_bi().await.ok()?;
         let mut channel = [0u8; AGENT_CHANNEL_LEN];
@@ -669,23 +695,18 @@ async fn probe_path(conn: &Connection, frames: u64, wait: Duration) -> bool {
             .await
             .ok()?;
         let mut send = framed.into_raw();
+        send.finish().ok()?;
+        let stopped = send.stopped();
         let mut byte = [0u8; 1];
-        // Any answer proves the path: a reset, a stop or an end.
-        let _ = recv.read(&mut byte).await;
+        // Any answer proves the path: an acknowledgement, a reset, a stop or
+        // an end.
+        tokio::select! {
+            _ = recv.read(&mut byte) => {}
+            _ = stopped => {}
+        }
         let _ = send.reset(StreamCode::from_u32(RESET_CODE_TUNNEL_ABORT));
         Some(())
     };
-    let moved = async {
-        while conn.rx_frames() == frames {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    };
-    let answered = tokio::time::timeout(wait, async {
-        tokio::select! {
-            r = stream => r.is_some(),
-            () = moved => true,
-        }
-    })
-    .await;
-    matches!(answered, Ok(true)) && conn.close_reason().is_none()
+    let answered = tokio::time::timeout(wait, stream).await;
+    matches!(answered, Ok(Some(()))) && conn.close_reason().is_none()
 }
