@@ -1,6 +1,6 @@
-# PLAN.md — M26: jump chaining
+# PLAN.md — 자리표시자: 열린 마일스톤 없음
 
-M25(agent forwarding)는 2026-11-09 닫혔다. 직전 M25 계획의 마지막 커밋은 `3604a16`다. M26의 범위와 수용 기준은 ADR-0056(2026-11-09 승인, 크기 3ew)이다. 수용 기준은 결정 25의 열여덟 항목이고, 그보다 더 만들지 않는다.
+M26(jump chaining)이 2026-11-11 닫혀 P2(ADR-0050)의 마일스톤 여섯이 모두 끝났다. 직전 M26 계획의 마지막 커밋은 `4f60cf7`다. 다음 마일스톤은 아직 없고, 여는 것은 사용자 결정이다. 그때까지 이 파일의 live state는 §0의 사람 몫과 §1의 유지보수 확인이다.
 
 이 파일과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
@@ -122,45 +122,3 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - CI의 `windows-latest` leg은 clippy, `cargo nextest run --workspace`, `cargo doc -D warnings`를 돌고, Windows host의 PTY·`exec`·파일 op·응답자를 정방향과 역방향으로 덮는다. 로컬 Windows 검사는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 하고 CI를 대신하지 않는다.
 - Dave-Windows에 SSH로 들어가 돌리는 전체 실행에서는 일곱 시험이 늘 실패한다: `cp_cancel::` 넷과 `auto_bootstrap::console::ctrl_c_during_the_bootstrap_ends_canceled_on_windows`(비대화 세션에 콘솔 Ctrl-C가 없다), `identity::keystore::tests::credential_manager_` 둘(SSH 로그온에는 Credential Manager가 없다). CI `windows-latest`에서는 통과한다. 로컬 Windows 판정은 이 일곱을 빼고 한다.
 - 부하 반복은 Linux·공통 테스트를 Dave-Windows-WSL(8 vCPU)에서, Windows 전용 타이밍 민감 테스트를 Dave-Windows에서 `scripts/stress/run.sh`로 돈다. 마일스톤별 필터는 `scripts/stress/m<N>.filter`다.
-
-## 3. M26 스텝
-
-각 스텝은 PR 하나 크기다. 스텝마다 그 스텝의 시험과 일곱 게이트가 초록이어야 닫힌다. 순서는 위에서 아래다. 계약·wire를 건드리는 스텝은 ADR-0056 승인 뒤에 연다(2026-11-09 승인됨).
-
-- [x] **범위 ADR(ADR-0056).** 2026-11-09 승인(Dave 결정, 다섯 항목 모두 추천 (가)). ADR-0044 결정 6과 ADR-0051 결정 2·7, ADR-0045 결정 2를 개정한다. 그 ADR들의 개정 이력 줄은 문서 스텝에서 단다.
-- [x] **probe.** 2026-11-09 착지(`7b09b5c`, ADR-0056 개정 이력). 결정 5의 수치가 틀려 ADR-0057(승인됨, `79f80e5`)이 고쳤다. 한 겹 55바이트, 1500 링크는 hop 하나~넷 1397·1342·1287·1232, IPv4 1280 링크도 첫 hop부터 스트림. 구현이 지킬 것: 관 소켓은 `may_fragment() == false`, J의 UDP 소켓은 `connect`하고 `send`의 `ECONNREFUSED`도 거부로 읽으며 Windows에서 `SIO_UDP_CONNRESET`을 끄지 않는다.
-- [x] **`PacketPipe`와 `dial_over_pipe`.** 2026-11-09 착지(`f3ffaf1`, Dave-Windows qsh-transport 99개). `PacketPipe::new(depth) -> (PacketPipe, PipePeer)`, `PipePeer`에는 quinn 타입이 없다. `jump_pipe::` 넷(진짜 서버 echo, 1452 상한에서 PLPMTUD 상승, 1200 상한에서 유지, pin 불일치). netsim 시험은 없다.
-- [x] **`qsh_proto::jump`.** 2026-11-09 착지(`891d2a6`, fuzz 28종, protocol §21). 문 앞 판정은 ADR 결정 8보다 좁게 Initial 종류와 1200~1452만 통과시킨다(protocol §21.2).
-- [x] **`jump.v1` wire.** 2026-11-09 착지(`9992ec5`, `docs/CLI.md` v0.94). 중간 peer가 생기기 전이라 `jump.v1`은 상수만 있고 `LOCAL_CAPABILITIES`에 없다. 중간 peer 스텝이 광고를 넣고 `capabilities.json`을 다시 만들며 `jump_v1_is_defined_but_not_advertised_before_the_relay_exists`를 뒤집는다.
-- [x] **`forward.jump`와 감사.** 2026-11-09 착지(`fa284f5`, `docs/CLI.md` v0.95, PRD §9 어휘 14종, ADR-0045 개정 이력, threat model B49). `check_jump`가 Allowed·Denied·AuditFailed를 내고 감사 실패는 거부다. fixture 한 쌍(`acl.show.with_role_jump.json`, `setup.run.host_complete_with_role_jump.json`), 옛 fixture는 `forward.jump`를 뺀 채 비교한다.
-- [x] **중간 peer.** 2026-11-09 착지(`40843c9`, `docs/CLI.md` v0.96, protocol §21.3·§21.4, threat model B50·B51·C27·C28·D26, WSL·Dave-Windows 4241개, CI run 42614796814 초록). `jump.v1`을 광고하고 `capabilities.json`을 다시 만들었다. `jump_host::` 스무 개. T→C 운반체는 연결 때 한 번 정하는 정적 선택이고 침묵 전환은 운반체 스텝에 남았다. hub당 32 상한은 일반 serve에 해당하지 않아 시험이 없다.
-- [x] **client 체인과 실패 보고.** 2026-11-09 착지(`ce40d60`, `docs/CLI.md` v0.97, protocol §21.5, WSL·Dave-Windows 4265개, CI run 42620484401 초록). `Ops::with_jump`, `jump::{JumpPlan, dial_chain}`, 첫 hop에도 정확한 fingerprint 사후 확인. `details.jump.hop`은 세우던 단의 자리이고 stage가 앞 단이 한 일을 말한다(앞 단이 둘째 hop 열기를 거절하면 hop 2). `jump_chain::` 열여섯, fixture 셋.
-- [x] **운반체 고르기와 적응.** client 체인(`ce40d60`)에 함께 착지했다. 250 ms마다 다시 고르고 `set_packet_limit`이 바깥 자리 − 17을 따른다. 4×srtt 침묵 전환·30초 재시도는 `SilenceFallback`으로 client와 중간 peer가 같이 쓴다. 1280 링크에서 둘째 hop부터 datagram이 될 수 있는 것은 ADR-0057 개정 이력에 적었다. datagram만 막는 장면의 실시험과 PLPMTUD 뒤 datagram 전환 시험은 수용 시험 몫이다.
-- [x] **역방향 데몬.** 2026-11-10 착지(protocol §21.7, threat model C27). 첫 hop이 이 장비의 `qsh listen`에 등록한 host면 CLI는 `LOCAL_STREAM`으로 JUMP 채널을 열고, 데몬이 등록 연결 위에 같은 header로 JUMP를 열어 운반체를 번역한다(CLI 구간 스트림, 등록 연결 구간 datagram|스트림). 헤더 전에 `LocalHelloAck` 지문을 pin과 맞춘다. 인가는 등록한 host가 한다. `jump_reverse::` 여덟과 netsim `jump_first_hop_over_a_punched_connection`. 주소 없는 펀칭 전용 첫 hop에 jump를 거는 경우는 아직 `jump_plan`의 주소 검사가 막는다.
-- [x] **recovery와 `--supervise`.** 2026-11-10 착지(`b9c8c07`, protocol §21.6). 체인을 처음부터 다시 세우고 resume한다. 안쪽 endpoint의 rebind는 `Endpoint::rebinding_via`로 첫 hop의 소켓을 옮긴다. 파이프 위 endpoint의 `wait_idle`이 끝나지 않던 결함을 `NESTED_IDLE_CAP` 3초와 `END_DRAIN` 2초로 묶었다(CI의 `jump_chain` 60초 멈춤의 원인). `jump_recovery::` 일곱. 같은 포트로 J를 다시 띄우는 시험은 하네스가 못 해서 C–J·J–T 5초 차단으로 대신했다.
-- [x] **표면.** 2026-11-10 착지(`0c230d6`, `ebf3120`, `docs/CLI.md` v0.98, man, README). `-J`(명령마다)·`--jump`(전역)·`-o ProxyJump`·`-J none`, pin 필드 `jump`와 `qsh trust jump`, 부트스트랩의 `ProxyJump` 기록, pin jump의 재귀 펼침과 순환 거부, doctor `jump_stream_carrier`·`jump_hop_missing`. 명령줄 `-J`는 부트스트랩 때만 pin에 남는다. `trust remove`는 다른 pin의 jump 참조를 지우지 않고 doctor가 알린다.
-- [x] **수용 시험.** 2026-11-10~11 착지(`b6109b4`, `4fced61`, `0101fce`, `714a2b6`). 성능 둘(`jump_perf::`), 손실 체인(`jump_loss::`), PMTUD 뒤 datagram 전환과 침묵 fallback, 두 hop과 재귀 pin, 끝단 AEAD 변조·두 hop 감사·`jump.v1` 없는 hop·부트스트랩의 `ProxyJump` 기록(`jump_threat::` 등). 침묵 시한은 ADR-0058(승인됨)로 고쳤다. 한 hop 처리량이 CI debug 빌드에서 0.294였던 것은 바깥 datagram 버퍼가 64 KiB라 안쪽 burst가 넘친 탓이어서 512 KiB로 올렸다(ADR-0052·ADR-0056 개정 이력, 조용한 WSL 0.68~0.73). echo p95는 직접 0.72 ms, 한 hop +0.49 ms, 두 hop +0.91 ms(기준 hop마다 +2 ms)이고 `scripts/jumpbench`(netem 20 Mbit)의 비율은 0.871이다.
-- [x] **문서와 마감.** 2026-11-10 착지(`81db64f`, `docs/CLI.md` v0.99). threat model A24·B49~B51·C27·C28·D25·D26·E27·E28·F7·G13과 잔여 h57~h61, protocol §21, architecture §1·§6, testing, PRD §7·§14, README, 개정 ADR들의 개정 이력 줄.
-
-### 결정 25 대응표
-
-| 항목 | 고정 시험 |
-|---|---|
-| 1 한 hop | `jump_one_hop_runs_every_feature` |
-| 2 두 hop | `jump_two_hops_and_recursive_pins` |
-| 3 손실 아래 체인 | `jump_chain_under_loss_on_every_link`(datagram p95가 스트림보다 작음 2/2, 출력만) |
-| 4 운반체 | `jump_carrier_selection_table`, `jump_mtu_budget_table`, `jump_carrier_switches_to_datagram_after_pmtud`, `jump_silence_on_the_datagram_path_falls_back_to_the_stream` |
-| 5 평문 없음 | `a_jump_never_sees_inner_plaintext`, 끝단 AEAD 변조 시험(`jump_threat::`) |
-| 6 pin 불일치 | `jump_pin_mismatch_at_a_hop_and_at_the_end`, `a_jump_redirect_to_another_pinned_peer_fails_with_auth_failed` |
-| 7 인가와 감사 | `jump_without_forward_jump_opens_no_socket`, `a_jump_the_audit_cannot_record_is_refused`, `jump_refuses_host_local_targets`, `jump_audit_and_logs_carry_no_payload`, `jump_audit_names_the_requester_on_both_hops` |
-| 8 상한과 수명 | `jump_bounds`, `jump_idle_closes_the_channel_and_the_socket`, `on_demand_serve_stays_up_while_a_jump_channel_lives` |
-| 9 recovery | `a_session_through_a_jump_resumes_after_the_hop_link_dies`, `outer_migration_is_invisible_to_the_inner_connection` |
-| 10 펀칭과 역방향 | `jump_first_hop_over_a_punched_connection`, `jump_first_hop_over_the_reverse_route` |
-| 11 실패 보고 | `jump_failure_stage_table`, `jump_target_refusal_is_reported_fast` |
-| 12 표면 | `jump_precedence_table`, `a_hop_without_jump_v1_gets_no_jump_stream`, `bootstrap_records_proxyjump_as_the_pin_jump` |
-| 13 성능 | `jump_echo_overhead_per_hop`, `jump_tunnel_throughput`(`QSH_ACCEPTANCE_SLOW`, CI acceptance) |
-| 14 세 OS | CI `test` job 세 OS, Dave-Windows 전체 실행 |
-| 15 계약 | `capabilities.json` golden, `pair.ssh.jump.json`·`pair.ssh.jump.refused.json` 등 새 fixture, `EXPECTED_DOCTOR_CODES`, `acl_check_equivalence`의 role×action 표, `acl_docs.rs` 어휘 14종, `checked_in_man_pages_match_the_generator` |
-| 16 fuzz | 타깃 `jump_frames`(28종), `decode_stream_header`·`decode_datagram_frame` corpus 시드(`9992ec5`) |
-| 17 회귀 없음 | `no_jump_stream_without_dash_j`, CI acceptance의 `tunnel_echo_under_load`·`screen_sync_staleness_under_loss`·펀칭·agent 시험 |
-| 18 threat model | §4의 결정 24 행과 고정 시험(`81db64f`, `0101fce`가 g8을 닫음) |
