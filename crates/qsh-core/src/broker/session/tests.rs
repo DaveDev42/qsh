@@ -928,3 +928,60 @@ async fn the_output_pump_with_an_emulator_is_never_blocked_by_missing_consumers(
     let h = handle.screen_take_history().unwrap();
     assert!(h.skipped > 0 && h.lines.len() <= crate::screen::DEFAULT_HISTORY_ROWS);
 }
+
+/// An emulator panic on session output must not stop the pump: the bytes
+/// after the poisoned chunk still reach the ring and the screen, and the
+/// client is told by a full-screen update, not by silence.
+#[tokio::test]
+async fn an_emulator_panic_does_not_stop_the_output_pump() {
+    let (handle, mut pipe, clock) = spawn_screen_session(5, 30);
+    pipe.write_output(b"\x1b[2Jone").await.unwrap();
+    within(async {
+        while handle.info().last_sequence < 7 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let first = handle.screen_update_since(0).unwrap();
+    assert_eq!(first.base_num, 0);
+
+    let mut poisoned = b"two".to_vec();
+    poisoned.extend_from_slice(crate::screen::PANIC_TRIGGER);
+    pipe.write_output(&poisoned).await.unwrap();
+    // Wait until the pump has taken the poisoned chunk on its own: the
+    // guard drops a whole feed slice, so output coalesced into the same read
+    // would go with it.
+    let after_poison = (b"\x1b[2Jone".len() + poisoned.len()) as u64;
+    within(async {
+        while handle.info().last_sequence < after_poison {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    pipe.write_output(b"\x1b[Hthree").await.unwrap();
+
+    let sent = (b"\x1b[2Jone".len() + poisoned.len() + b"\x1b[Hthree".len()) as u64;
+    within(async {
+        while handle.info().last_sequence < sent {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    // Every byte is in the ring.
+    let out = within(handle.pull(
+        Cursor::from_offset(0),
+        4096,
+        Duration::from_secs(30),
+        &clock,
+    ))
+    .await
+    .unwrap();
+    assert!(collect_output(&out).ends_with(b"\x1b[Hthree"));
+    // And the screen is the rebuilt emulator's, sent in full.
+    let u = handle.screen_update_since(first.new_num).unwrap();
+    assert_eq!(u.base_num, 0, "the panic dropped the retained states");
+    let state = u
+        .apply(&qsh_proto::screen::ScreenState::blank(5, 30).unwrap())
+        .unwrap();
+    assert_eq!(&*state.grid[0].cells[0].text, "t");
+}

@@ -938,7 +938,12 @@ impl Ops {
             // (ADR-0056 decision 13). `jump_hop_missing` reports a hop that
             // is gone, so an unresolved first hop is left to it.
             if let Ok(Some(hops)) = self.jump_hops_for(host) {
-                if let Some(first) = hops.first() {
+                // A first hop pinned without an address is reached by
+                // punching; there is no direct path to probe.
+                if let Some(first) = hops
+                    .first()
+                    .filter(|first| !pin_has_no_address(&trust, first))
+                {
                     out.extend(probe_named_target(&trust, &hosts, first, false));
                 }
                 return Ok((out, false));

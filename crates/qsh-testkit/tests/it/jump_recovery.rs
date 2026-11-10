@@ -605,3 +605,213 @@ async fn supervised_tunnel_survives(cut: Cut, sever: bool, seed: u64) {
     }
     rig.shutdown().await;
 }
+
+// ----------------------------------------------------------------------
+// a middle peer that restarts on its own port
+// ----------------------------------------------------------------------
+
+/// A middle peer wired like `qsh serve`'s listener (the persistent reset key
+/// over a real config directory) on a runtime of its own, so that it can be
+/// stopped and started again on the same port.
+struct RestartableJ {
+    addr: std::net::SocketAddr,
+    crash: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+    server: Arc<qsh_core::server::Server>,
+}
+
+impl RestartableJ {
+    fn start(
+        paths: &qsh_core::config::Paths,
+        bind: std::net::SocketAddr,
+        identity: &qsh_testkit::loopback::TestIdentity,
+        client: qsh_core::Fingerprint,
+    ) -> Self {
+        use qsh_core::acl::AllowAllPinned;
+        use qsh_core::audit::MemoryAuditSink;
+        use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
+        use qsh_core::server::Server;
+        use qsh_transport::{Principal, StaticTrust};
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (crash, crash_rx) = std::sync::mpsc::channel::<()>();
+        let paths = paths.clone();
+        let local = identity.local.clone();
+        let thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let guard = rt.enter();
+            let trust = StaticTrust::empty().with_pin(client, Principal::Device("laptop".into()));
+            let (listener, _diagnostic) = qsh_core::reset_key::bind_listener(
+                &paths,
+                bind,
+                local,
+                Arc::new(trust),
+                qsh_transport::TransportTuning::default(),
+            )
+            .expect("bind the middle peer");
+            let broker = Broker::new(
+                Arc::new(SystemClock),
+                BrokerConfig {
+                    replay_bytes: 64 * 1024,
+                    resume_ttl: Duration::from_secs(3600),
+                    close_grace: Duration::from_millis(100),
+                    quota_limits: Default::default(),
+                },
+                Arc::new(PipeFactory::new(64 * 1024)),
+            );
+            tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
+            let gate = qsh_core::admission::Gate::new(
+                Arc::new(SystemClock),
+                qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+                qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+                qsh_core::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+            );
+            let server = Server::with_admission(
+                Arc::new(AllowAllPinned),
+                Arc::new(MemoryAuditSink::new()),
+                broker,
+                "j",
+                gate,
+            );
+            server.set_jump_options(loopback_options());
+            ready_tx
+                .send((listener.local_addr().expect("local addr"), server.clone()))
+                .expect("report readiness");
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+            let running = tokio::spawn(server.run(listener, async move {
+                let _ = stop_rx.await;
+            }));
+            let _ = crash_rx.recv();
+            // The datagram hub table is process-global and a hub leaves it
+            // only when its connection's reader ends, so dropping the
+            // runtime under live connections would leave the listener's
+            // socket held by the leaked hubs. Stop the server first.
+            let _ = stop_tx.send(());
+            let _ = rt.block_on(tokio::time::timeout(Duration::from_secs(10), running));
+            drop(guard);
+            drop(rt);
+        });
+        let (addr, server) = ready_rx.recv().expect("the middle peer came up");
+        Self {
+            addr,
+            crash,
+            thread,
+            server,
+        }
+    }
+
+    /// Stops the peer, waits until its socket is free and returns the port
+    /// it held.
+    fn stop(self) -> std::net::SocketAddr {
+        // The test's handle on the server must not outlive the runtime.
+        drop(self.server);
+        self.crash.send(()).expect("crash signal");
+        self.thread.join().expect("the peer's thread");
+        self.addr
+    }
+}
+
+/// The middle peer J stops and comes back on the same port with the same
+/// identity. The chain's first hop ends with J's close, recovery rebuilds the
+/// chain from the start (the first hop's route dials the pinned address
+/// again, then a new `JUMP` goes out), and a supervised `-L` tunnel carries
+/// on. The channel count is the new J's own: a channel it counts is one the
+/// rebuilt chain opened. The stop is graceful because the datagram hub table
+/// is process-global and a hub leaves it only when its connection's reader
+/// ends, so a dropped runtime would keep the old listener's socket bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chain_finds_a_middle_peer_that_restarted_on_the_same_port() {
+    let net = Net::start_unpinned(&["t"], |_| "*", loopback_options()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+    std::fs::create_dir_all(&paths.config_dir).expect("config dir");
+    let j_identity = qsh_testkit::loopback::make_identity();
+    let j = RestartableJ::start(&paths, "127.0.0.1:0".parse().unwrap(), &j_identity, net.fp);
+    let j_addr = j.addr;
+    net.pin("j", Some(j_addr.to_string()), j_identity.fingerprint)
+        .await;
+    let t = net.host("t");
+    net.pin(
+        "t",
+        Some(t.h.addr.to_string()),
+        t.h.server_identity.fingerprint,
+    )
+    .await;
+    let ops = net.via(&["j"]);
+    let echo = EchoServer::start().await.expect("echo server");
+    let echo_port = echo.port();
+    let listen_port = free_port();
+
+    // The middle peer is replaced from the test thread while the blocking
+    // thread keeps probing through the tunnel.
+    let (restart_tx, restart_rx) = std::sync::mpsc::channel::<()>();
+    let (restarted_tx, restarted_rx) = std::sync::mpsc::channel::<RestartableJ>();
+    let restarter = {
+        let paths = paths.clone();
+        let fp = net.fp;
+        std::thread::spawn(move || {
+            restart_rx.recv().expect("restart request");
+            let addr = j.stop();
+            let restarted = RestartableJ::start(&paths, addr, &j_identity, fp);
+            restarted_tx
+                .send(restarted)
+                .expect("hand over the new peer");
+        })
+    };
+    let (recovered_after, restarted) = blocking(move || {
+        let hold = ops
+            .tunnel_open(TunnelOpenReq {
+                host: "t".into(),
+                mode: "local".into(),
+                bind: None,
+                listen_port: u32::from(listen_port),
+                forward_host: "127.0.0.1".into(),
+                forward_port: u32::from(echo_port),
+                wait_ms: None,
+                supervise_ms: Some(300_000),
+                accept_hold_ms: None,
+            })
+            .expect("open the supervised -L tunnel through the chain");
+        let payload = vec![0xa5u8; 32 * 1024];
+        assert_eq!(
+            echo_once(listen_port, &payload).expect("a round trip before the restart"),
+            payload
+        );
+        restart_tx.send(()).expect("ask for the restart");
+        // The replacement is listening before the first probe, so a round
+        // trip that works now went through a rebuilt chain.
+        let restarted = restarted_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the restarted peer");
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(60);
+        loop {
+            match echo_once(listen_port, &payload) {
+                Ok(got) if got == payload => break,
+                Ok(_) | Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Ok(got) => panic!("a short echo ({} bytes)", got.len()),
+                Err(err) => panic!("no round trip within 60 s of the restart: {err}"),
+            }
+        }
+        let after = started.elapsed();
+        hold.close();
+        (after, restarted)
+    })
+    .await;
+    eprintln!("first round trip after the restart: {recovered_after:?}");
+    restarter.join().expect("restarter");
+    assert_eq!(restarted.addr, j_addr, "the peer came back on its own port");
+    assert!(
+        restarted.server.jump_stats().opened.load(Ordering::Relaxed) >= 1,
+        "the rebuilt chain opened its channel on the restarted peer"
+    );
+    drop(echo);
+    let _ = restarted.stop();
+    net.shutdown().await;
+}

@@ -48,6 +48,10 @@ pub const DEFAULT_HISTORY_ROWS: usize = 5000;
 pub const DEFAULT_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 /// Effects remembered for clients that are behind.
 const EFFECT_LOG_MAX: usize = 256;
+/// Test-only: a slice holding this makes [`HostScreen::feed`] panic inside
+/// the emulator guard, to exercise the rebuild.
+#[cfg(test)]
+pub(crate) const PANIC_TRIGGER: &[u8] = b"\x00qsh-test-emulator-panic\x00";
 
 /// How a [`HostScreen`] starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +117,8 @@ pub struct HostScreen {
     dirty: bool,
     /// Leading bytes of a U+FE0F that a feed ended in the middle of.
     vs16: Vs16Filter,
+    /// Times the emulator panicked and was rebuilt (see [`Self::feed`]).
+    resets: u64,
 }
 
 /// Replaces U+FE0F (VARIATION SELECTOR-16, `EF B8 8F`) in the byte stream with
@@ -220,6 +226,7 @@ impl HostScreen {
             fed_seq: 0,
             dirty: true,
             vs16: Vs16Filter::default(),
+            resets: 0,
         }
     }
 
@@ -232,13 +239,68 @@ impl HostScreen {
     /// Feed output the pump has just written to the ring. `end_seq` is the
     /// cumulative output offset after `data`. Work is done in slices of
     /// [`FEED_SLICE`]; nothing here blocks or waits.
+    ///
+    /// A panic inside the emulator on a slice does not escape: the output
+    /// pump that calls this is the only thing moving the session's output,
+    /// and a program's bytes are untrusted, so one that trips a `vt100` bug
+    /// must not silence the session. The slice is dropped, the emulator is
+    /// rebuilt blank at the same size (keeping the collected history,
+    /// effects, answers and client colours) and every retained state is
+    /// forgotten, so the next [`Self::update_since`] for any client is a
+    /// full screen. See [`Self::emulator_resets`].
     pub fn feed(&mut self, data: &[u8], end_seq: u64) {
         let data = self.vs16.filter(data);
         for slice in data.chunks(FEED_SLICE) {
-            self.parser.process(slice);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                if slice
+                    .windows(PANIC_TRIGGER.len())
+                    .any(|w| w == PANIC_TRIGGER)
+                {
+                    panic!("injected emulator panic");
+                }
+                self.parser.process(slice);
+            }));
+            if outcome.is_err() {
+                self.rebuild_emulator();
+            }
         }
         self.fed_seq = end_seq;
         self.dirty = true;
+    }
+
+    /// How many times the emulator panicked on fed bytes and was rebuilt.
+    pub fn emulator_resets(&self) -> u64 {
+        self.resets
+    }
+
+    /// Replace a panicked emulator with a blank one of the same size.
+    ///
+    /// The old parser may be half-way through an operation, so none of its
+    /// screen is trusted. What the collector holds is plain data the panic
+    /// cannot have corrupted beyond the slice that caused it, so it moves
+    /// to the new parser. Dropping the retained states makes the next
+    /// update for every client a full screen (an unretained base), which the
+    /// client applies like any other.
+    fn rebuild_emulator(&mut self) {
+        let (rows, cols) = self.size();
+        let collector = std::mem::replace(self.parser.callbacks_mut(), Collector::new(0, 0));
+        self.parser = vt100::Parser::new_with_callbacks(
+            NonZeroU16::new(rows).unwrap_or(vt100::Parser::DEFAULT_ROWS),
+            NonZeroU16::new(cols).unwrap_or(vt100::Parser::DEFAULT_COLS),
+            0,
+            collector,
+        );
+        self.cuts.clear();
+        self.effect_log.clear();
+        self.vs16 = Vs16Filter::default();
+        self.resets += 1;
+        tracing::error!(
+            rows,
+            cols,
+            resets = self.resets,
+            "terminal emulator panicked on session output; rebuilt it and resyncing clients"
+        );
     }
 
     /// Bytes to write into the PTY input: the host's answers to the queries

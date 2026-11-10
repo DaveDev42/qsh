@@ -30,6 +30,18 @@ pub(super) async fn pump_attach_input(
     let finished = &ctx.finished;
     let mut commands = commands.lock().await;
     let mut acks_open = true;
+    // The reverse route has no connection of its own to probe, and the
+    // local daemon answers a control `Ping` itself, so nothing else makes a
+    // quiet attach ask the host whether it is there. An empty `Input` does:
+    // the host answers it with an `InputAck`. It rides the idle probe
+    // cadence of the forward route's watchdog.
+    // Only an attach that can draw the status line has a use for the answer.
+    let heartbeat_every = (matches!(ctx.link, RecoveryLink::Reverse(_))
+        && ctx
+            .screen
+            .as_deref()
+            .is_some_and(ScreenSink::has_status_line))
+    .then_some(ctx.recovery.watch.idle_probe_interval);
     loop {
         let command = tokio::select! {
             biased;
@@ -52,6 +64,21 @@ pub(super) async fn pump_attach_input(
                     return;
                 }
                 if writer.send_screen_ack(ack).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            // Nothing was handed to this pump for a whole beat: ask the host
+            // to answer. A busy attach restarts the wait with every command
+            // and acknowledgement, and needs no question, since what comes
+            // back proves the path. The body is not cancellable, like the
+            // command handling below.
+            () = tokio::time::sleep(heartbeat_every.unwrap_or_default()), if heartbeat_every.is_some() => {
+                // At or below what the host acknowledged, so the host reads
+                // it as a repeat of bytes it already ran and never as a gap.
+                let up_to = (*ctx.applied_input.borrow()).min(writer.input_seq());
+                ctx.link_status.sent(std::time::Instant::now());
+                if writer.send_heartbeat(up_to).await.is_err() {
                     return;
                 }
                 continue;
@@ -101,12 +128,12 @@ pub(super) async fn pump_attach_input(
                 ctx.link_status.sent(std::time::Instant::now());
                 if let Some(sink) = &ctx.screen {
                     let end = writer.input_seq() + data.len() as u64;
-                    let (bytes, sequence) = sink.input(&data, end, std::time::Instant::now());
-                    if !bytes.is_empty() {
-                        let _ = events
-                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                            .await;
-                    }
+                    let now = std::time::Instant::now();
+                    let _ = sink
+                        .emit(&events, &ctx.session_ref, None, |s| {
+                            s.input(&data, end, now)
+                        })
+                        .await;
                 }
                 writer.send_input(&data).await.map(|_| ())
             }
@@ -118,12 +145,9 @@ pub(super) async fn pump_attach_input(
                 // Screen sync: the local window is what the screen is
                 // drawn into, so repaint it at the new size right away.
                 if let Some(sink) = &ctx.screen {
-                    let (bytes, sequence) = sink.set_local(cols, rows);
-                    if !bytes.is_empty() {
-                        let _ = events
-                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                            .await;
-                    }
+                    let _ = sink
+                        .emit(&events, &ctx.session_ref, None, |s| s.set_local(cols, rows))
+                        .await;
                 }
                 writer.resize(cols, rows).await
             }
@@ -254,17 +278,14 @@ pub(super) async fn pump_attach_control(
                         if let (Some(sink), Some(wire::session_event::Body::WriterChanged(w))) =
                             (screen, &event.body)
                         {
-                            let (bytes, sequence) =
-                                sink.writer_changed(w.new_writer.as_deref(), std::time::Instant::now());
-                            if !bytes.is_empty() {
-                                let _stalled = watch.stalled();
-                                if events
-                                    .send(Ok(screen_output(session_ref, sequence, &bytes)))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                            let now = std::time::Instant::now();
+                            if !sink
+                                .emit(&events, session_ref, Some(&watch), |s| {
+                                    s.writer_changed(w.new_writer.as_deref(), now)
+                                })
+                                .await
+                            {
+                                return;
                             }
                         }
                         if let Some(json) = control_event_json(session_ref, event) {

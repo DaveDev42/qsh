@@ -285,26 +285,11 @@ fn payload() -> Vec<u8> {
 /// Write `payload` into `127.0.0.1:<port>`, shut only the write side, and read
 /// the reply to its end. The echo destination closes its side only after it has seen the
 /// client's end of stream, so a close that did not travel through the route
-/// leaves the read waiting until the timeout. The write runs on its own
-/// thread because a payload larger than the socket buffers would otherwise
-/// deadlock against an echo that is itself blocked writing to us.
+/// leaves the read waiting until the timeout. One socket handle on one thread:
+/// see [`qsh_testkit::tunnel::echo_round_trip`] for why a `try_clone` writer
+/// thread fails on Windows under load.
 pub fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    let socket = TcpStream::connect(("127.0.0.1", port))?;
-    socket.set_read_timeout(Some(IO_TIMEOUT))?;
-    socket.set_write_timeout(Some(IO_TIMEOUT))?;
-    let mut writer = socket.try_clone()?;
-    let sender = thread::spawn(move || -> std::io::Result<()> {
-        writer.write_all(&payload)?;
-        writer.flush()?;
-        writer.shutdown(std::net::Shutdown::Write)
-    });
-    let mut back = Vec::new();
-    let read = {
-        let mut reader = socket;
-        reader.read_to_end(&mut back)
-    };
-    let sent = sender.join().expect("the sender thread panicked");
-    read.and(sent).map(|_| back)
+    qsh_testkit::tunnel::echo_round_trip(port, &payload, IO_TIMEOUT)
 }
 
 /// Compare an echoed payload with what was sent, naming the length and the
@@ -1146,24 +1131,8 @@ pub fn dynamic_forward_connect(route: &impl Route) {
         route.host()
     );
     let sent = payload();
-    let writer = socket.try_clone().expect("clone the SOCKS socket");
-    let sender = thread::spawn({
-        let sent = sent.clone();
-        move || -> std::io::Result<()> {
-            let mut writer = writer;
-            writer.write_all(&sent)?;
-            writer.flush()?;
-            writer.shutdown(std::net::Shutdown::Write)
-        }
-    });
-    let mut back = Vec::new();
-    socket
-        .read_to_end(&mut back)
-        .expect("read the echo through the SOCKS tunnel");
-    sender
-        .join()
-        .expect("the sender thread panicked")
-        .expect("write through the SOCKS tunnel");
+    let back = qsh_testkit::tunnel::echo_exchange(socket, &sent, IO_TIMEOUT)
+        .expect("echo through the SOCKS tunnel");
     assert_same_payload(&back, &sent, "the dynamic forward");
 
     assert!(tunnel.is_running(), "the holder exited while serving");

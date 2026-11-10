@@ -663,10 +663,21 @@ pub fn ephemeral_local_spec(host: &str, port: u16) -> ForwardSpec {
 /// directions against each other.
 /// The whole exchange must finish within `limit`.
 pub fn echo_round_trip(listen_port: u16, payload: &[u8], limit: Duration) -> io::Result<Vec<u8>> {
-    let mut stream = std::net::TcpStream::connect_timeout(
+    let stream = std::net::TcpStream::connect_timeout(
         &SocketAddr::from(([127, 0, 0, 1], listen_port)),
         Duration::from_secs(5),
     )?;
+    echo_exchange(stream, payload, limit)
+}
+
+/// [`echo_round_trip`] on a socket the caller already connected (for example
+/// after a SOCKS handshake): write `payload`, half-close, read to EOF, all on
+/// this one handle, within `limit`.
+pub fn echo_exchange(
+    mut stream: std::net::TcpStream,
+    payload: &[u8],
+    limit: Duration,
+) -> io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
     let deadline = Instant::now() + limit;
     let timed_out = || io::Error::from(io::ErrorKind::TimedOut);

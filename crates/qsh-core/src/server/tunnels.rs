@@ -515,6 +515,8 @@ impl Server {
                         pinned: self.keep_alive_pin.get().copied(),
                         rebind_hook: Arc::clone(&self.rebind_hook),
                         pings: Arc::clone(&self.keep_alive_pings),
+                        memory: Arc::clone(&self.keep_alive_memory),
+                        peer: ctx.principal.to_string(),
                     },
                 };
                 match pump.run(stream, &conn).await {

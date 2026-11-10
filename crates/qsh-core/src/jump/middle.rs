@@ -170,6 +170,9 @@ pub struct JumpStats {
     pub datagram_unavailable: AtomicU64,
     /// Sends the socket failed for a reason that is not a refusal.
     pub send_failed: AtomicU64,
+    /// Kind 14 datagrams the test hook ([`crate::server::Server::blackhole_jump_datagrams`])
+    /// accepted and dropped. Always 0 in production.
+    pub blackholed_datagrams: AtomicU64,
     /// Channels in the table that are past admission (the number the
     /// on-demand idle exit counts).
     live: AtomicUsize,
@@ -629,6 +632,10 @@ pub struct Relay {
     pub stats: Arc<JumpStats>,
     /// Holds the channel claim and the live slot until the relay ends.
     pub guard: ChannelGuard,
+    /// Test hook ([`crate::server::Server::blackhole_jump_datagrams`]): kind
+    /// 14 datagrams toward the client are accepted and dropped. Off in
+    /// production.
+    pub blackhole: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Whether a socket error is the target's refusal (Linux `ECONNREFUSED`,
@@ -662,6 +669,7 @@ struct State {
     /// Decision 4's silence rule for the target-to-client direction.
     silence: SilenceFallback,
     stats: Arc<JumpStats>,
+    blackhole: Arc<std::sync::atomic::AtomicBool>,
     last_forward: Instant,
     packets: u64,
     bytes: u64,
@@ -743,7 +751,18 @@ impl State {
                     kind: DatagramKind::JumpPacket,
                     payload: packet.to_vec(),
                 };
-                match self.datagrams.hub().send(&frame) {
+                // The hook eats the datagram after the send decision, as a
+                // path that swallows kind 14 alone would: the outer
+                // connection never sees it, so nothing else on it changes.
+                let result = if self.blackhole.load(Ordering::Relaxed) {
+                    self.stats
+                        .blackholed_datagrams
+                        .fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                } else {
+                    self.datagrams.hub().send(&frame)
+                };
+                match result {
                     Ok(()) => {
                         self.silence.sent_datagram(std::time::Instant::now());
                         self.stats
@@ -799,6 +818,7 @@ pub async fn run(relay: Relay) -> CloseReason {
         options,
         stats,
         mut guard,
+        blackhole,
     } = relay;
     let channel = datagrams.channel();
     let (queue, queue_rx) = StreamQueue::new(JUMP_STREAM_QUEUE);
@@ -815,6 +835,7 @@ pub async fn run(relay: Relay) -> CloseReason {
         both_datagram,
         silence: SilenceFallback::new(),
         stats: Arc::clone(&stats),
+        blackhole,
         last_forward: started,
         packets: 0,
         bytes: 0,

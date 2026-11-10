@@ -1320,6 +1320,11 @@ impl Attached {
         self.writer.send_input(data).await
     }
 
+    /// See [`AttachWriter::send_heartbeat`].
+    pub async fn send_heartbeat(&mut self, up_to: u64) -> Result<(), ClientError> {
+        self.writer.send_heartbeat(up_to).await
+    }
+
     /// Cumulative input offset sent so far.
     pub fn input_seq(&self) -> u64 {
         self.writer.input_seq()
@@ -1424,6 +1429,19 @@ impl AttachWriter {
                 .await?;
         }
         Ok(self.input_seq)
+    }
+
+    /// Ask the host to answer without sending anything: an `Input` frame
+    /// with no bytes ending at `up_to`, which the host takes for a repeat of
+    /// input it already ran and answers with an `InputAck` (see
+    /// `session_stream`'s input loop). `up_to` must not exceed what the host
+    /// has acknowledged, or it would read as a gap in the input. It moves no
+    /// input offset and is not interactive traffic.
+    pub async fn send_heartbeat(&mut self, up_to: u64) -> Result<(), ClientError> {
+        self.send
+            .send(&SessionFrame::input(up_to, Vec::new()))
+            .await?;
+        Ok(())
     }
 
     /// See [`Attached::resize`].

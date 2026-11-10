@@ -422,3 +422,58 @@ fn a_new_leg_takes_the_lease_answer_of_its_attach() {
     r.paint(out);
     assert!(r.row(3).contains("$ ab"), "drawn: {:?}", r.row(3));
 }
+
+/// Frames made by different tasks (input pump, reader, recovery ticker) must
+/// reach the frontend in the order the renderer made them: each is a diff
+/// against the one before. The draw closure stalls right after it takes its
+/// number, so a task that computed first is easily overtaken at the queue
+/// unless computing and queueing are one step.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frames_from_different_tasks_reach_the_frontend_in_the_order_they_were_made() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use qsh_proto::event::SessionEvent;
+
+    const TASKS: u64 = 4;
+    const FRAMES: u64 = 150;
+
+    let sink = Arc::new(ScreenSink::new(COLS, ROWS, None, None));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let made = Arc::new(AtomicU64::new(0));
+    let mut tasks = Vec::new();
+    for _ in 0..TASKS {
+        let (sink, tx, made) = (sink.clone(), tx.clone(), made.clone());
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..FRAMES {
+                let sent = sink
+                    .emit(&tx, "host/session", None, |_| {
+                        let n = made.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_micros(200));
+                        (vec![b'x'], n)
+                    })
+                    .await;
+                assert!(sent, "the frontend is still there");
+            }
+        }));
+    }
+    drop(tx);
+    let mut seen = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let Ok(SessionEvent::Output { sequence, .. }) = event else {
+            panic!("only screen output is emitted");
+        };
+        seen.push(sequence);
+        if seen.len() % 7 == 0 {
+            tokio::time::sleep(Duration::from_micros(300)).await;
+        }
+    }
+    for task in tasks {
+        task.await.expect("emitter");
+    }
+    let first_out_of_order = seen.iter().zip(0..).position(|(got, want)| *got != want);
+    assert_eq!(
+        (seen.len() as u64, first_out_of_order),
+        (TASKS * FRAMES, None),
+        "a frame overtook one made before it"
+    );
+}

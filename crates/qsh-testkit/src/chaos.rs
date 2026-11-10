@@ -210,6 +210,7 @@ pub struct ChaosPolicy {
     corrupt_p: f64,
     duplicate_p: f64,
     reorder_p: f64,
+    reorder_hold: Duration,
     delay: DelayDist,
     rate: Option<Rate>,
 }
@@ -259,6 +260,7 @@ impl ChaosPolicy {
             corrupt_p: 0.0,
             duplicate_p: 0.0,
             reorder_p: 0.0,
+            reorder_hold: REORDER_HOLD,
             delay: DelayDist::None,
             rate: None,
         }
@@ -312,6 +314,16 @@ impl ChaosPolicy {
     #[must_use]
     pub fn reorder(mut self, p: f64) -> Self {
         self.reorder_p = p;
+        self
+    }
+
+    /// How long a datagram parked by [`reorder`](Self::reorder) waits for a
+    /// successor (default [`REORDER_HOLD`], 10 ms). A test that sends the
+    /// successor from another task, and so races the hold against scheduler
+    /// delay on a loaded machine, widens it.
+    #[must_use]
+    pub fn reorder_hold(mut self, hold: Duration) -> Self {
+        self.reorder_hold = hold;
         self
     }
 
@@ -1077,7 +1089,7 @@ impl Runner {
                 (client, dir),
                 Held {
                     data,
-                    until: Instant::now() + REORDER_HOLD,
+                    until: Instant::now() + self.policy.reorder_hold,
                 },
             );
             return;

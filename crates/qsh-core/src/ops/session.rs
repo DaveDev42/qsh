@@ -63,9 +63,7 @@ use context::{
 };
 use drive::drive_attach;
 use link::ConnectedLink;
-use pump::{
-    InputSignals, attach_event_json, pump_attach_control, pump_attach_input, screen_output,
-};
+use pump::{InputSignals, attach_event_json, pump_attach_control, pump_attach_input};
 use reader::dial_reverse_wait;
 use reader::{dial_peer, forget_if_closed, redial_peer};
 // Wider than `session`'s own use of it needs (`pub(super)` would do for

@@ -291,14 +291,12 @@ async fn with_status_ticks<T>(
             out = &mut recovery => break out,
             () = screen_tick_due(ctx.screen.as_deref()) => {
                 if let Some(sink) = &ctx.screen {
-                    let (bytes, sequence) = sink.tick(std::time::Instant::now());
-                    if !bytes.is_empty() {
-                        // A frontend that went away ends the recovery by
-                        // its own `finished` flag; nothing to do here.
-                        let _ = events
-                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                            .await;
-                    }
+                    // A frontend that went away ends the recovery by
+                    // its own `finished` flag; nothing to do here.
+                    let now = std::time::Instant::now();
+                    let _ = sink
+                        .emit(events, &ctx.session_ref, None, |s| s.tick(now))
+                        .await;
                 }
             }
         }
@@ -343,16 +341,12 @@ async fn read_leg(
             // overlay (ADR-0053 decision 8). Pends forever without one.
             () = screen_tick_due(ctx.screen.as_deref()) => {
                 if let Some(sink) = &ctx.screen {
-                    let (bytes, sequence) = sink.tick(std::time::Instant::now());
-                    if !bytes.is_empty() {
-                        let _stalled = watch.stalled();
-                        if events
-                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                            .await
-                            .is_err()
-                        {
-                            return LegEnd::Gone;
-                        }
+                    let now = std::time::Instant::now();
+                    if !sink
+                        .emit(events, &ctx.session_ref, Some(watch), |s| s.tick(now))
+                        .await
+                    {
+                        return LegEnd::Gone;
                     }
                 }
                 continue;
@@ -391,16 +385,14 @@ async fn read_leg(
             && let AttachEvent::InputAck { acked_input_seq } = &event
             && let Some(sink) = &ctx.screen
         {
-            let (bytes, sequence) = sink.input_ack(*acked_input_seq, std::time::Instant::now());
-            if !bytes.is_empty() {
-                let _stalled = watch.stalled();
-                if events
-                    .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                    .await
-                    .is_err()
-                {
-                    return LegEnd::Gone;
-                }
+            let now = std::time::Instant::now();
+            if !sink
+                .emit(events, &ctx.session_ref, Some(watch), |s| {
+                    s.input_ack(*acked_input_seq, now)
+                })
+                .await
+            {
+                return LegEnd::Gone;
             }
         }
         // The host's input reflection point: judge the predictions it
@@ -410,16 +402,12 @@ async fn read_leg(
             && let AttachEvent::ScreenEcho(echo) = &event
         {
             if let Some(sink) = &ctx.screen {
-                let (bytes, sequence) = sink.echo(echo, std::time::Instant::now());
-                if !bytes.is_empty() {
-                    let _stalled = watch.stalled();
-                    if events
-                        .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                        .await
-                        .is_err()
-                    {
-                        return LegEnd::Gone;
-                    }
+                let now = std::time::Instant::now();
+                if !sink
+                    .emit(events, &ctx.session_ref, Some(watch), |s| s.echo(echo, now))
+                    .await
+                {
+                    return LegEnd::Gone;
                 }
             }
             continue;
@@ -438,16 +426,13 @@ async fn read_leg(
                     .iter()
                     .map(|l| String::from_utf8_lossy(l).into_owned())
                     .collect();
-                let (bytes, sequence) = sink.history(&lines, h.skipped);
-                if !bytes.is_empty() {
-                    let _stalled = watch.stalled();
-                    if events
-                        .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                        .await
-                        .is_err()
-                    {
-                        return LegEnd::Gone;
-                    }
+                if !sink
+                    .emit(events, &ctx.session_ref, Some(watch), |s| {
+                        s.history(&lines, h.skipped)
+                    })
+                    .await
+                {
+                    return LegEnd::Gone;
                 }
             }
             continue;
@@ -473,22 +458,14 @@ async fn read_leg(
                 } = outcome
                     && let (Some(sink), Some(state)) = (&ctx.screen, leg.client.state())
                 {
-                    let (bytes, sequence) = sink.draw(
-                        state,
-                        &effects,
-                        output_seq,
-                        new_num,
-                        std::time::Instant::now(),
-                    );
-                    if !bytes.is_empty() {
-                        let _stalled = watch.stalled();
-                        if events
-                            .send(Ok(screen_output(&ctx.session_ref, sequence, &bytes)))
-                            .await
-                            .is_err()
-                        {
-                            return LegEnd::Gone;
-                        }
+                    let now = std::time::Instant::now();
+                    if !sink
+                        .emit(events, &ctx.session_ref, Some(watch), |s| {
+                            s.draw(state, &effects, output_seq, new_num, now)
+                        })
+                        .await
+                    {
+                        return LegEnd::Gone;
                     }
                 }
                 continue;

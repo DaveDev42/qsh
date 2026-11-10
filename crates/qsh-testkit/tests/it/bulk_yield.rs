@@ -12,22 +12,35 @@
 //! - **Throughput.** With no interactive traffic, the tunnel alone carries
 //!   >= 80% of the link rate.
 //!
+//! The saturating load is either a tunnel ([`Load::Tunnel`]) or a `qsh cp`
+//! get ([`Load::FileCopy`], `FILE_DATA` streams run by the production copy
+//! engine on the same session as the PTY attach). Both are bulk senders that
+//! pay the same budget (protocol.md "bulk 양보"), so the cp scenario checks that
+//! `FILE_DATA` keeps the echo as well as a tunnel does.
+//!
 //! The throughput phase runs first, with the echo session attached but
 //! silent, so the budget has to switch itself off when nobody types. Gated by
 //! `QSH_ACCEPTANCE_SLOW` like the other acceptance gates.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use qsh_core::acl::{Role, load_or_deny};
 use qsh_core::broker::PipeHandle;
 use qsh_core::client::AttachEvent;
+use qsh_core::config::{AuditConfig, Paths};
+use qsh_core::file::guard::FsNormalizer;
+use qsh_core::ops::{CancelToken, FileCopyObserver, file_copy_over};
+use qsh_core::trust::SharedTrustStore;
 use qsh_core::tunnel::LocalForwardHandle;
-use qsh_proto::wire;
+use qsh_proto::{FileCopyEntry, FileCopyReq, wire};
 use qsh_testkit::chaos::{ChaosPolicy, DelayDist};
-use qsh_testkit::loopback::LoopbackHarness;
+use qsh_testkit::loopback::{LoopbackHarness, make_identity};
 use qsh_testkit::tunnel::{FloodServer, ephemeral_local_spec};
+use qsh_transport::{Principal, StaticTrust};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
 
@@ -41,6 +54,8 @@ const ECHO_MARGIN_MS: f64 = 50.0;
 /// ADR-0052 decision 18 item 6: tunnel share of the link without interactive
 /// traffic.
 const MIN_LINK_SHARE: f64 = 0.80;
+/// The same floor for the cp load; see `min_share` in `run`.
+const MIN_CP_LINK_SHARE: f64 = 0.70;
 /// Settling time before a phase is measured (BBR start-up, budget ramp).
 const WARMUP: Duration = Duration::from_secs(4);
 /// Throughput phase length after the warm-up.
@@ -52,6 +67,18 @@ const KEY_INTERVAL: Duration = Duration::from_millis(50);
 const MIN_SAMPLES: usize = 100;
 const ROUND_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_BYTES: usize = 4;
+/// Size of each file the cp load serves, and how many per copy call. Small
+/// enough that the per-file byte counter moves several times a second at the
+/// link rate, so a 6 s window can be read off it.
+const CP_FILE_BYTES: usize = 1024 * 1024;
+const CP_FILES: usize = 32;
+
+/// What saturates the link while the echo is measured.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Load {
+    Tunnel,
+    FileCopy,
+}
 
 fn gate_requested() -> bool {
     ["QSH_ACCEPTANCE_SLOW", "QSH_ACCEPTANCE_STRICT"]
@@ -106,7 +133,90 @@ async fn drain(addr: SocketAddr, total: Arc<AtomicU64>) {
     }
 }
 
-async fn run(name: &str, queue: Duration, adaptive: bool) {
+/// Adds the bytes of every finished copy item to a shared counter.
+struct CopyCounter(Arc<AtomicU64>);
+
+impl FileCopyObserver for CopyCounter {
+    fn entry(&self, entry: &FileCopyEntry) {
+        if let Some(bytes) = entry.bytes {
+            self.0.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The directory as the host spells it: canonical, and on Windows without
+/// the `\\?\` prefix the system puts on a final path.
+fn canonical_host_path(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).expect("canonical tempdir");
+    match canonical.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) => PathBuf::from(plain),
+        None => canonical,
+    }
+}
+
+/// A host state tree whose `trust.toml` pins the harness client with the
+/// `full` role, a directory of files to serve and one to copy into.
+struct CpTree {
+    _dir: tempfile::TempDir,
+    paths: Paths,
+    share: PathBuf,
+    out: PathBuf,
+}
+
+impl CpTree {
+    fn new(client_fingerprint: &str) -> Self {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = canonical_host_path(dir.path());
+        let host = root.join("host");
+        let share = root.join("share");
+        let out = root.join("out");
+        for d in [
+            &share,
+            &out,
+            &host.join("config/identity"),
+            &host.join("state"),
+            &host.join("run"),
+        ] {
+            std::fs::create_dir_all(d).expect("create dir");
+        }
+        let chunk: Vec<u8> = (0..CP_FILE_BYTES)
+            .map(|i| (i as u8).wrapping_mul(31))
+            .collect();
+        for n in 0..CP_FILES {
+            let mut file = std::fs::File::create(share.join(format!("f{n:02}.bin")))
+                .expect("create served file");
+            file.write_all(&chunk).expect("write served file");
+        }
+        let paths =
+            Paths::new(host.join("config"), host.join("state")).with_runtime_dir(host.join("run"));
+        let trust_text = format!(
+            "[[peer]]\nname = \"laptop\"\nfingerprint = \"{client_fingerprint}\"\n\
+             address = \"\"\nadded_at = \"2026-10-14T00:00:00Z\"\nrole = \"full\"\n\n"
+        );
+        std::fs::write(paths.trust_file(), trust_text).expect("write trust.toml");
+        Self {
+            _dir: dir,
+            paths,
+            share,
+            out,
+        }
+    }
+
+    fn request(&self) -> FileCopyReq {
+        FileCopyReq {
+            sources: (0..CP_FILES)
+                .map(|n| format!("box:{}", self.share.join(format!("f{n:02}.bin")).display()))
+                .collect(),
+            destination: self.out.display().to_string(),
+            recursive: false,
+            preserve: false,
+            no_clobber: false,
+        }
+    }
+}
+
+async fn run(name: &str, queue: Duration, adaptive: bool, load: Load) {
     if !gate_requested() {
         eprintln!("SKIP: {name} needs QSH_ACCEPTANCE_SLOW=1");
         return;
@@ -116,19 +226,48 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
     let policy = ChaosPolicy::seeded(0xB01C)
         .delay(DelayDist::fixed(ONE_WAY))
         .rate_with_queue_delay(LINK_BITS_PER_SEC, queue);
-    let h = LoopbackHarness::start_chaotic(policy).await;
+    let tree;
+    let h = match load {
+        Load::Tunnel => {
+            tree = None;
+            LoopbackHarness::start_chaotic(policy).await
+        }
+        Load::FileCopy => {
+            // The host is a real `Server` with `set_file_host`, pinned to the
+            // harness client with the `full` role, as in production.
+            let client = make_identity();
+            let t = CpTree::new(&client.fingerprint.to_string());
+            let trust = SharedTrustStore::open(t.paths.trust_file()).expect("open trust.toml");
+            let (authorizer, _diagnostic) = load_or_deny(&t.paths, Role::Serve, trust);
+            let host_trust = StaticTrust::empty()
+                .with_pin(client.fingerprint, Principal::Device("laptop".into()));
+            let h =
+                LoopbackHarness::start_chaotic_custom(authorizer, client, host_trust, policy).await;
+            h.server.set_path_normalizer(Arc::new(FsNormalizer));
+            h.server
+                .set_file_host(t.paths.clone(), AuditConfig::default());
+            tree = Some(t);
+            h
+        }
+    };
     let mut session = h.session().await;
     let connection = session.connection().clone();
-
-    let (flood, flood_done) = FloodServer::start().await.expect("bind flood source");
-    let forward = LocalForwardHandle::start(
-        &ephemeral_local_spec("127.0.0.1", flood.addr().port()),
-        connection.clone(),
-    )
-    .await
-    .expect("bind the saturating local forward");
     let total = Arc::new(AtomicU64::new(0));
-    let drain_task = tokio::spawn(drain(forward.local_addr(), total.clone()));
+
+    // The tunnel load starts before the session opens, as it always has.
+    let tunnel = if load == Load::Tunnel {
+        let (flood, flood_done) = FloodServer::start().await.expect("bind flood source");
+        let forward = LocalForwardHandle::start(
+            &ephemeral_local_spec("127.0.0.1", flood.addr().port()),
+            connection.clone(),
+        )
+        .await
+        .expect("bind the saturating local forward");
+        let drain_task = tokio::spawn(drain(forward.local_addr(), total.clone()));
+        Some((flood, forward, drain_task, flood_done))
+    } else {
+        None
+    };
 
     let opened = session
         .session_open(wire::SessionOpen {
@@ -154,6 +293,32 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
         .await
         .expect("attach the PTY-echo session");
     tokio::spawn(echo_loop(pipe));
+
+    // The cp load: get the files over and over on the very session the PTY
+    // attach was opened from, until cancelled.
+    let cancel = CancelToken::new();
+    let (mut session, cp_task) = match &tree {
+        None => (Some(session), None),
+        Some(tree) => {
+            let req = tree.request();
+            let cancel = cancel.clone();
+            let counter = Arc::new(CopyCounter(total.clone()));
+            let task = tokio::spawn(async move {
+                while !cancel.is_canceled() {
+                    let observer: Arc<dyn FileCopyObserver> = counter.clone();
+                    match file_copy_over(&mut session, &req, observer, &cancel).await {
+                        Ok(data) => assert_eq!(data.files as usize, CP_FILES, "{data:?}"),
+                        Err(err) if cancel.is_canceled() => {
+                            eprintln!("copy ended by the harness: {err:?}");
+                        }
+                        Err(err) => panic!("the background copy failed: {err:?}"),
+                    }
+                }
+                session
+            });
+            (None, Some(task))
+        }
+    };
 
     // Phase 1: the tunnel alone.
     tokio::time::sleep(WARMUP).await;
@@ -214,10 +379,22 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
         .map_or(0, |c| c.stats().queue_dropped)
         .saturating_sub(drops_before);
     attached.finish();
-    session.close();
-    drop(forward);
-    drain_task.abort();
-    let _ = flood_done.await;
+    if let Some(task) = cp_task {
+        cancel.cancel();
+        session = Some(
+            tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("the background copy stopped after cancel")
+                .expect("the copy task did not panic"),
+        );
+    }
+    session.take().expect("the session").close();
+    if let Some((flood, forward, drain_task, flood_done)) = tunnel {
+        drop(forward);
+        drain_task.abort();
+        let _ = flood_done.await;
+        drop(flood);
+    }
     h.shutdown().await;
 
     let p50 = percentile(echo_ms.clone(), 0.5);
@@ -225,6 +402,14 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
     let max = echo_ms.iter().copied().fold(f64::MIN, f64::max);
     let share_alone = tunnel_alone / LINK_BYTES_PER_SEC;
     let share_typing = tunnel_typing / LINK_BYTES_PER_SEC;
+    // The cp load is read off a per-file byte counter, so one finished
+    // 1 MiB file moves the 6 s window by about 7% of the link, and each file
+    // costs the copy engine request round trips the tunnel does not pay.
+    // Its floor is lower for that reason; the echo gate is the same.
+    let min_share = match load {
+        Load::Tunnel => MIN_LINK_SHARE,
+        Load::FileCopy => MIN_CP_LINK_SHARE,
+    };
     let report = format!(
         "{name}: echo p50={p50:.1}ms p95={p95:.1}ms max={max:.1}ms (min_rtt={min_rtt_ms:.1}ms, \
          bar min_rtt+{ECHO_MARGIN_MS}), samples={}, tunnel alone={:.2} MB/s ({:.0}% of link), \
@@ -244,8 +429,9 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
             "adaptive = off must leave bulk alone, but the echo was protected: {report}"
         );
         assert!(
-            share_alone >= MIN_LINK_SHARE,
-            "tunnel without interactive traffic below 80% of the link: {report}"
+            share_alone >= min_share,
+            "bulk without interactive traffic below {:.0}% of the link: {report}",
+            min_share * 100.0
         );
         return;
     }
@@ -258,19 +444,45 @@ async fn run(name: &str, queue: Duration, adaptive: bool) {
         "echo p95 above min_rtt + 50 ms: {report}"
     );
     assert!(
-        share_alone >= MIN_LINK_SHARE,
-        "tunnel without interactive traffic below 80% of the link: {report}"
+        share_alone >= min_share,
+        "bulk without interactive traffic below {:.0}% of the link: {report}",
+        min_share * 100.0
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bulk_yields_to_echo_on_a_deep_queue() {
-    run("deep queue (600 ms)", Duration::from_millis(600), true).await;
+    run(
+        "deep queue (600 ms)",
+        Duration::from_millis(600),
+        true,
+        Load::Tunnel,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bulk_yields_to_echo_on_a_shallow_queue() {
-    run("shallow queue (20 ms)", Duration::from_millis(20), true).await;
+    run(
+        "shallow queue (20 ms)",
+        Duration::from_millis(20),
+        true,
+        Load::Tunnel,
+    )
+    .await;
+}
+
+/// The same shallow queue with a `qsh cp` get as the bulk: `FILE_DATA` pays
+/// the same budget as a tunnel splice, so the echo gate must hold for it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_yields_to_echo_on_a_shallow_queue_under_file_copy() {
+    run(
+        "shallow queue (20 ms), qsh cp",
+        Duration::from_millis(20),
+        true,
+        Load::FileCopy,
+    )
+    .await;
 }
 
 /// `[transport].adaptive = "off"` (decision 15): no budget, so the deep queue
@@ -281,6 +493,7 @@ async fn bulk_does_not_yield_when_adaptive_is_off() {
         "deep queue (600 ms), adaptive off",
         Duration::from_millis(600),
         false,
+        Load::Tunnel,
     )
     .await;
 }

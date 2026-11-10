@@ -156,7 +156,17 @@ async fn duplicate_puts_the_datagram_on_the_wire_twice() {
 /// `reorder` really swaps two datagrams: the successor arrives first.
 #[tokio::test(flavor = "multi_thread")]
 async fn reorder_lets_the_successor_arrive_first() {
-    let w = Wire::start(ChaosPolicy::seeded(3).reorder(1.0)).await;
+    // The default 10 ms hold is shorter than a loaded runner's scheduling
+    // delay between "first" being parked, this task seeing it parked and
+    // "second" being sent: the hold then expires, "first" goes out alone and
+    // nothing overtakes it (or the poll below never sees it parked). A long
+    // hold costs nothing here, because the successor releases it at once.
+    let w = Wire::start(
+        ChaosPolicy::seeded(3)
+            .reorder(1.0)
+            .reorder_hold(Duration::from_secs(4)),
+    )
+    .await;
     let c = client().await;
     c.send_to(b"first", w.front()).await.expect("send");
     // The held datagram must be parked before its successor arrives,

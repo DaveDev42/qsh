@@ -237,9 +237,11 @@ async fn dial_jump(
 ) -> Result<Routed, RouteError> {
     let budget = match kind {
         Dial::Command => default_dial_timeout(),
-        Dial::Redial => (redial_deadline(jump.first_punch.as_ref(), true)
-            + Duration::from_secs(jump.hops.len() as u64))
-        .min(default_dial_timeout()),
+        Dial::Redial => {
+            (redial_deadline(jump.first_punch.as_ref(), !jump.step(0).address.is_empty())
+                + Duration::from_secs(jump.hops.len() as u64))
+            .min(default_dial_timeout())
+        }
     };
     let deadline = Instant::now() + budget;
     let first = jump.step(0);

@@ -357,6 +357,53 @@ async fn an_exec_program_lists_identities_through_the_forwarded_socket() {
     h.shutdown().await;
 }
 
+/// The exec's own endpoint dies with the exec. `sockets()` lists only session
+/// sockets on Windows (a pipe has no directory and `agent_session_endpoints`
+/// leaves exec pipes out), so the "exec socket is removed" waits above pass
+/// there without looking at the exec pipe. This one asks the endpoint the
+/// program was announced: the program printed it (and
+/// `ssh_auth_sock_is_pinned_by_the_host` pins its shape), and once the exec is
+/// over it must refuse a connect with `NotFound`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exec_agent_endpoint_is_gone_after_the_exec() {
+    let env = Env::new("role = \"full\"\n", None);
+    let h = env.start().await;
+    let fake = Arc::new(FakeAgent::start(fake_identities()).await.unwrap());
+    let mut s = h.session().await;
+    let _client = ClientAgent::start(s.connection().clone(), CHANNEL.to_vec(), Arc::clone(&fake));
+
+    // The program prints the endpoint it was given, then exits.
+    let spec = exec_spec(&agent_probe::sock_argv());
+    let (grant, endpoint, code) = run_exec(&mut s, &spec, &CHANNEL).await;
+    assert_eq!(grant, AgentGrant::Forwarded);
+    assert_eq!(code, 0, "the program failed: {endpoint}");
+    assert!(
+        !endpoint.is_empty() && endpoint != "unset",
+        "the program saw no endpoint: {endpoint:?}"
+    );
+
+    // Poll the endpoint itself: the exec is over, so it must stop existing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let kind = loop {
+        match qsh_testkit::fake_agent::connect_endpoint(&endpoint).await {
+            Err(err) => break err.kind(),
+            Ok(stream) => drop(stream),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exec's endpoint still accepts connections: {endpoint}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        kind,
+        std::io::ErrorKind::NotFound,
+        "the exec's endpoint should be gone, not merely refusing: {endpoint}"
+    );
+    s.close();
+    h.shutdown().await;
+}
+
 /// ADR-0055 decision 6: the host pins `SSH_AUTH_SOCK`. A value the client
 /// sends is dropped, with an agent and without one.
 #[tokio::test(flavor = "multi_thread")]

@@ -63,7 +63,7 @@ use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamErro
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, mpsc};
 
-use crate::adapt::{Carrier, CarrierRunner, FIXED_FRAME_INTERVAL, User};
+use crate::adapt::{Carrier, CarrierRunner, FIXED_FRAME_INTERVAL, KeepAliveMemory, User};
 use crate::datagram::{DatagramHub, DatagramRx, SendFailure, part_budget};
 use crate::input_times::InputTimes;
 
@@ -185,6 +185,10 @@ pub struct KeepAliveParams {
     /// Policy `Ping`s written, for tests and `qsh::adapt` debugging
     /// ([`crate::server::Server::keep_alive_pings`]).
     pub pings: Arc<AtomicU64>,
+    /// Shortened intervals this process remembers per peer, and the key of
+    /// this attach's peer (decision 12 (e)).
+    pub memory: Arc<KeepAliveMemory>,
+    pub peer: String,
 }
 
 /// What the dispatch edge hands a screen-sync attach for its datagram
@@ -1007,6 +1011,9 @@ async fn screen_pump(
         last_echo: None,
         just_sent: None,
     };
+    if let Some(remembered) = keep_alive.memory.get(&keep_alive.peer) {
+        sender.runner.seed_keep_alive(remembered);
+    }
     let mut dirty = true;
     let mut exit_grace_used = false;
     loop {
@@ -1018,6 +1025,11 @@ async fn screen_pump(
         }
         sender.observe_path(&keep_alive);
         sender.tick(now);
+        if keep_alive.pinned.is_none() {
+            keep_alive
+                .memory
+                .remember(&keep_alive.peer, sender.runner.knobs().keep_alive);
+        }
         sender.send_keep_alive(now, &events, &keep_alive);
         let mut wake = sender.runner.next_ping_at().filter(|at| *at > now);
         if let Some(at) = sender.resend_deadline() {
@@ -1247,7 +1259,11 @@ async fn input_pump(
             .map_err(|e| SessionStreamError::Protocol(e.to_string()))?;
         match frame.body {
             Some(session_frame::Body::Input(input)) => {
-                governor.note_interactive();
+                // An empty `Input` is a client's heartbeat (a repeat that
+                // is acknowledged again below), not a keystroke.
+                if !input.data.is_empty() {
+                    governor.note_interactive();
+                }
                 let len = input.data.len() as u64;
                 let mut applied_guard = axis.lock().await;
                 let mut applied = *applied_guard;

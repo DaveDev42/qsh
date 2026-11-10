@@ -31,7 +31,9 @@ pub use monitor::{
     PolicyMonitor, PolicySampler, Sample, TARGET, screen_sync_label, to_json_line, transport_report,
 };
 pub use rtt::RttVar;
-pub use runner::{ALIVE_WINDOW, CarrierRunner, LOSS_WINDOW, RTT_FLOOR, TICK, Tick};
+pub use runner::{
+    ALIVE_WINDOW, CarrierRunner, KeepAliveMemory, LOSS_WINDOW, RTT_FLOOR, TICK, Tick,
+};
 
 /// Decision 12 (a): LEDBAT-like queue delay target.
 pub const YIELD_TARGET: Duration = Duration::from_millis(25);

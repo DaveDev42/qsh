@@ -1017,8 +1017,9 @@ async fn jump_carrier_switches_to_datagram_after_pmtud() {
 /// back). The proxy in front of J eats everything for a moment; the outer
 /// connection survives it, the datagrams in flight are gone, and the next
 /// packet leaves on the stream. Nothing here is kind-specific: the proxy sees
-/// only encrypted outer packets, so a middlebox that drops DATAGRAM frames
-/// alone cannot be built outside the product. The 30 s retry is covered by
+/// only encrypted outer packets, so a path that drops kind 14 alone is built
+/// with the middle peer's hook in
+/// `jump_silence_when_only_kind_14_datagrams_vanish_falls_back_to_the_stream`. The 30 s retry is covered by
 /// `silence_moves_to_the_stream_and_retries_after_thirty_seconds`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jump_silence_on_the_datagram_path_falls_back_to_the_stream() {
@@ -1067,6 +1068,105 @@ async fn jump_silence_on_the_datagram_path_falls_back_to_the_stream() {
         .expect("session.list");
     assert_eq!(info.datagrams_out.load(Relaxed), datagrams, "{info:?}");
     assert!(info.stream_out.load(Relaxed) > streamed, "{info:?}");
+    drop(session);
+    close(chain).await;
+    d.shutdown().await;
+}
+
+/// The same fallback when only kind 14 datagrams vanish: the middle peer's
+/// hook (`Server::blackhole_jump_datagrams`) accepts the packets it would
+/// send to the client as datagrams and drops them, while the outer
+/// connection, its streams and every other datagram stay healthy. The
+/// client's datagrams reach J and the target answers, but nothing comes back
+/// on the datagram path, so the client's channel moves to the stream and the
+/// session keeps working over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jump_silence_when_only_kind_14_datagrams_vanish_falls_back_to_the_stream() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let d = Direct::start(&["j", "t"]).await;
+    let plan = d.plan(&["j", "t"]);
+    let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
+    let mut session = Session::negotiate(chain.connection.clone(), "laptop")
+        .await
+        .expect("hello with the end");
+    let info = Arc::clone(&chain.info.channels[0]);
+    let up = drive_until(&mut session, Duration::from_secs(15), || {
+        info.carrier() == Carrier::Datagram && info.datagrams_out.load(Relaxed) > 0
+    })
+    .await;
+    assert!(up, "the channel never reached datagrams: {info:?}");
+    assert_eq!(
+        info.silence_fallbacks.load(Relaxed),
+        0,
+        "a healthy path before the hook: {info:?}"
+    );
+    let j_stats = Arc::clone(d.host("j").h.server.jump_stats());
+    assert_eq!(j_stats.blackholed_datagrams.load(Relaxed), 0);
+
+    d.host("j").h.server.blackhole_jump_datagrams(true);
+    let fell = drive_until(&mut session, Duration::from_secs(30), || {
+        info.silence_fallbacks.load(Relaxed) > 0 && info.carrier() == Carrier::Stream
+    })
+    .await;
+    assert!(fell, "the client never left the datagram carrier: {info:?}");
+    assert!(
+        j_stats.blackholed_datagrams.load(Relaxed) > 0,
+        "the hook ate nothing: {j_stats:?}"
+    );
+
+    // The outer connection and the streams were never touched: the session
+    // keeps answering over the stream, and the client sends no further
+    // datagram until the 30 s retry.
+    let (datagrams, streamed) = (
+        info.datagrams_out.load(Relaxed),
+        info.stream_out.load(Relaxed),
+    );
+    tokio::time::timeout(Duration::from_secs(15), session.session_list())
+        .await
+        .expect("a reply over the stream")
+        .expect("session.list");
+    assert_eq!(info.datagrams_out.load(Relaxed), datagrams, "{info:?}");
+    assert!(info.stream_out.load(Relaxed) > streamed, "{info:?}");
+    drop(session);
+    close(chain).await;
+    d.shutdown().await;
+}
+
+/// Reproduction of the rare silence fallback on a healthy path (PLAN M26
+/// follow-up). After every exchange the receiving side answers with one
+/// ack-only datagram, which nothing answers (QUIC does not ack acks). The
+/// silence clock starts at that datagram, so the next send after an idle gap
+/// longer than the window (`4 x max(rtt, 50 ms) + 25 ms`, 225 ms here) finds
+/// the clock expired and moves the channel to the stream although the path
+/// never lost anything. With a 600 ms gap every chain falls back on its first
+/// idle gap. Ignored because the rule is ADR-0058's: the fix (a send that
+/// follows a receive and nothing else of ours does not start the clock) needs
+/// an amendment of decision 1 first. Run with `--run-ignored all`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs an ADR-0058 amendment: the silence clock counts an unanswered ack-only datagram across an idle gap"]
+async fn jump_silence_ignores_an_unanswered_ack_across_an_idle_gap() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let d = Direct::start(&["j", "t"]).await;
+    let plan = d.plan(&["j", "t"]);
+    let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
+    let mut session = Session::negotiate(chain.connection.clone(), "laptop")
+        .await
+        .expect("hello with the end");
+    let info = Arc::clone(&chain.info.channels[0]);
+    let up = drive_until(&mut session, Duration::from_secs(15), || {
+        info.carrier() == Carrier::Datagram && info.datagrams_out.load(Relaxed) > 0
+    })
+    .await;
+    assert!(up, "the channel never reached datagrams: {info:?}");
+    for _ in 0..4 {
+        session.session_list().await.expect("session.list");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+    assert_eq!(
+        info.silence_fallbacks.load(Relaxed),
+        0,
+        "a healthy path fell back after an idle gap: {info:?}"
+    );
     drop(session);
     close(chain).await;
     d.shutdown().await;
