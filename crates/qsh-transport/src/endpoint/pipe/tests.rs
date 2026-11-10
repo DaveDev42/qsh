@@ -53,6 +53,19 @@ async fn outgoing_overflow_drops_and_counts_without_blocking() {
 }
 
 #[tokio::test]
+async fn try_recv_drains_what_is_queued_and_never_waits() {
+    let (pipe, mut peer) = PacketPipe::new(8);
+    assert_eq!(peer.try_recv(), None);
+    for i in 0..3u8 {
+        pipe.socket.try_send(&transmit(&[i; 10])).unwrap();
+    }
+    for i in 0..3u8 {
+        assert_eq!(peer.try_recv(), Some(vec![i; 10]));
+    }
+    assert_eq!(peer.try_recv(), None);
+}
+
+#[tokio::test]
 async fn incoming_overflow_drops_and_counts_without_blocking() {
     let (pipe, peer) = PacketPipe::new(2);
     let accepted: Vec<bool> = (0..5u8).map(|i| peer.send(vec![i; 50])).collect();

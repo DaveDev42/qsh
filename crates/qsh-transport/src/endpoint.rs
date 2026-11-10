@@ -185,18 +185,25 @@ const fn const_min(a: u64, b: u64) -> u64 {
 ///
 /// Datagrams are an optional carrier for screen diffs and input copies
 /// (ADR-0052 decision 7), each at most one path MTU (about 1.2 KB), and a
-/// stale diff is worth less than the newest one. 64 KiB holds about fifty
-/// MTU-sized datagrams, several full-screen diffs, while a reader that stalls
-/// costs at most 64 KiB per connection. Quinn's own default is 1.25 MB, which
-/// is a per-connection memory cost with no use here (M8 DoD 2: session buffer
-/// <= 8 MB).
-pub const DATAGRAM_RECEIVE_BUFFER_SIZE: usize = 64 * 1024;
+/// stale diff is worth less than the newest one.
+///
+/// A jump hop (ADR-0056) puts a whole inner QUIC connection on the datagram
+/// carrier, and an inner sender emits bursts of tens of packets at once. At
+/// 64 KiB (about fifty MTU-sized datagrams) each burst overflowed the buffer
+/// and quinn evicted the oldest, which the inner connection read as loss: a
+/// one-hop bulk upload resent about 25% of its packets and moved 0.42 of the
+/// direct throughput. 512 KiB absorbs the bursts (about 3% resent, 0.7 of
+/// direct). It is a ceiling, not an allocation: a reader that stalls costs at
+/// most this much per connection, well under quinn's default of 1.25 MB (M8
+/// DoD 2: session buffer <= 8 MB).
+pub const DATAGRAM_RECEIVE_BUFFER_SIZE: usize = 512 * 1024;
 
 /// `quinn::TransportConfig::datagram_send_buffer_size`: bytes of outgoing
 /// datagram payload queued before quinn drops the oldest to make room. Same
-/// reasoning as [`DATAGRAM_RECEIVE_BUFFER_SIZE`]; for a sender, dropping the
-/// oldest is the right policy because the next diff supersedes it.
-pub const DATAGRAM_SEND_BUFFER_SIZE: usize = 64 * 1024;
+/// reasoning as [`DATAGRAM_RECEIVE_BUFFER_SIZE`], including the jump bursts;
+/// for a sender, dropping the oldest is the right policy because the next diff
+/// supersedes it.
+pub const DATAGRAM_SEND_BUFFER_SIZE: usize = 512 * 1024;
 
 /// QUIC application close code sent when the peer's principal cannot be
 /// re-derived after the handshake (should be unreachable — the verifier

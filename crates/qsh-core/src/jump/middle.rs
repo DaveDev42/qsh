@@ -644,6 +644,14 @@ fn is_refusal(err: &io::Error) -> bool {
     )
 }
 
+/// Packets one wakeup relays before the loop looks at the other inputs again.
+const RELAY_BATCH: usize = 64;
+
+/// How far the idle/gate deadline may drift from the armed timer before the
+/// timer is moved. The timer fires late by at most this much, which the
+/// idle and gate bounds (seconds) do not notice.
+const DEADLINE_SLACK: Duration = Duration::from_millis(250);
+
 struct State {
     socket: UdpSocket,
     gate: Gate,
@@ -673,7 +681,12 @@ impl State {
         if via_datagram {
             self.silence.received_datagram();
         }
-        match self.socket.send(packet).await {
+        // The socket buffer almost always has room; only a full one waits.
+        let sent = match self.socket.try_send(packet) {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => self.socket.send(packet).await,
+            other => other,
+        };
+        match sent {
             Ok(_) => {
                 self.stats.to_target_packets.fetch_add(1, Ordering::Relaxed);
                 self.stats
@@ -816,6 +829,9 @@ pub async fn run(relay: Relay) -> CloseReason {
     // full-size one without reading the rest.
     let mut socket_buf = vec![0u8; JUMP_PACKET_MAX + 1];
     let gate_deadline = started + options.gate_timeout;
+    let mut armed = started + options.idle.min(options.gate_timeout);
+    let timer = tokio::time::sleep_until(armed);
+    tokio::pin!(timer);
 
     let reason = 'channel: loop {
         loop {
@@ -835,24 +851,54 @@ pub async fn run(relay: Relay) -> CloseReason {
         } else {
             (gate_deadline, CloseReason::GateTimeout)
         };
+        // One timer for the whole channel: it is moved only when the
+        // deadline moved by a tick, not once per packet.
+        if deadline.saturating_duration_since(armed) > DEADLINE_SLACK
+            || armed.saturating_duration_since(deadline) > DEADLINE_SLACK
+        {
+            armed = deadline;
+            timer.as_mut().reset(deadline);
+        }
         tokio::select! {
             read = recv.read(&mut read_buf) => match read {
                 Ok(Some(n)) => decoder.push(&read_buf[..n]),
                 Ok(None) | Err(_) => break CloseReason::StreamEnd,
             },
             frame = state.datagrams.recv() => match frame {
-                Some(frame) if frame.kind == DatagramKind::JumpPacket => {
-                    if let Err(reason) = state.relay_client(&frame.payload, true).await {
-                        break reason;
+                Some(frame) => {
+                    // Everything already queued goes in the same wakeup.
+                    let mut next = Some(frame);
+                    let mut budget = RELAY_BATCH;
+                    while let Some(frame) = next.take() {
+                        if frame.kind == DatagramKind::JumpPacket
+                            && let Err(reason) = state.relay_client(&frame.payload, true).await
+                        {
+                            break 'channel reason;
+                        }
+                        budget -= 1;
+                        if budget > 0 {
+                            next = state.datagrams.try_recv();
+                        }
                     }
                 }
-                Some(_) => {}
                 None => break CloseReason::ConnectionClosed,
             },
             received = state.socket.recv(&mut socket_buf) => match received {
                 Ok(n) => {
                     if let Err(reason) = state.relay_target(&socket_buf[..n]) {
                         break reason;
+                    }
+                    for _ in 1..RELAY_BATCH {
+                        match state.socket.try_recv(&mut socket_buf) {
+                            Ok(n) => {
+                                if let Err(reason) = state.relay_target(&socket_buf[..n]) {
+                                    break 'channel reason;
+                                }
+                            }
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(err) if is_refusal(&err) => break 'channel CloseReason::Unreachable,
+                            Err(_) => break 'channel CloseReason::SocketError,
+                        }
                     }
                 }
                 Err(err) if is_refusal(&err) => break CloseReason::Unreachable,
@@ -862,7 +908,14 @@ pub async fn run(relay: Relay) -> CloseReason {
                 writer_done = true;
                 break CloseReason::StreamEnd;
             }
-            () = tokio::time::sleep_until(deadline) => break on_deadline,
+            () = &mut timer => {
+                // The timer is lazy: the real deadline may have moved on.
+                if Instant::now() >= deadline {
+                    break on_deadline;
+                }
+                armed = deadline;
+                timer.as_mut().reset(deadline);
+            }
         }
     };
 

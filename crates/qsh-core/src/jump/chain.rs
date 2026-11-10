@@ -81,6 +81,9 @@ const END_DRAIN: Duration = Duration::from_secs(2);
 /// Depth of a pipe's two queues, in packets.
 const PIPE_DEPTH: usize = 256;
 
+/// Packets one pump wakeup moves before it looks at its other inputs again.
+const PUMP_BATCH: usize = 64;
+
 /// A peer of the chain as the client's trust store has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HopPin {
@@ -421,6 +424,7 @@ async fn pump(
     let mut refresh = tokio::time::interval(LIMIT_REFRESH);
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last: Option<Carrier> = None;
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(PUMP_BATCH);
 
     // The first limit is the room's until a packet or the refresh reads it
     // again, so a packet is never held to a stale datagram budget.
@@ -443,6 +447,14 @@ async fn pump(
             _ = &mut stop => break PumpEnd::Stopped,
             packet = peer.recv() => {
                 let Some(packet) = packet else { break PumpEnd::Stopped };
+                // Everything the inner endpoint already queued rides the same
+                // wakeup; the carrier is decided once for the burst.
+                batch.push(packet);
+                while batch.len() < PUMP_BATCH
+                    && let Some(more) = peer.try_recv()
+                {
+                    batch.push(more);
+                }
                 let room = hub.as_ref().and_then(|h| h.max_datagram_size());
                 let rule = choose_carrier(both_datagram, room);
                 // End to end once the inner connection is up, the outer
@@ -458,53 +470,74 @@ async fn pump(
                 note_carrier(&info, &mut last, carrier);
                 // The pipe holds packets to the limit of the carrier in use.
                 apply_limit(&peer, &info, carrier, room);
-                match carrier {
-                    Carrier::Datagram => {
-                        let room = room.unwrap_or(0);
-                        if DATAGRAM_HEADER + packet.len() > room {
-                            info.oversize_dropped.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                        let frame = DatagramFrame {
-                            channel,
-                            kind: DatagramKind::JumpPacket,
-                            payload: packet,
-                        };
-                        let sent = match &hub {
-                            Some(hub) => hub.send(&frame),
-                            None => Err(SendFailure::Unavailable),
-                        };
-                        match sent {
-                            Ok(()) => {
-                                silence.sent_datagram(std::time::Instant::now());
-                                info.datagrams_out.fetch_add(1, Ordering::Relaxed);
+                let mut sent_datagrams = 0_u64;
+                let mut closed = false;
+                for packet in batch.drain(..) {
+                    match carrier {
+                        Carrier::Datagram => {
+                            let room = room.unwrap_or(0);
+                            if DATAGRAM_HEADER + packet.len() > room {
+                                info.oversize_dropped.fetch_add(1, Ordering::Relaxed);
+                                continue;
                             }
-                            Err(SendFailure::Closed) => break PumpEnd::ConnectionClosed,
-                            Err(SendFailure::Unavailable) => {
-                                info.datagram_unavailable.fetch_add(1, Ordering::Relaxed);
+                            let frame = DatagramFrame {
+                                channel,
+                                kind: DatagramKind::JumpPacket,
+                                payload: packet,
+                            };
+                            let sent = match &hub {
+                                Some(hub) => hub.send(&frame),
+                                None => Err(SendFailure::Unavailable),
+                            };
+                            match sent {
+                                Ok(()) => sent_datagrams += 1,
+                                Err(SendFailure::Closed) => {
+                                    closed = true;
+                                    break;
+                                }
+                                Err(SendFailure::Unavailable) => {
+                                    info.datagram_unavailable.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Carrier::Stream => {
+                            let Some(frame) = encode_packet(&packet) else {
+                                info.oversize_dropped.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            };
+                            if queue.push(frame) {
+                                info.stream_out.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                info.queue_dropped.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
-                    Carrier::Stream => {
-                        let Some(frame) = encode_packet(&packet) else {
-                            info.oversize_dropped.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        };
-                        if queue.push(frame) {
-                            info.stream_out.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            info.queue_dropped.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+                }
+                if sent_datagrams > 0 {
+                    silence.sent_datagram(std::time::Instant::now());
+                    info.datagrams_out.fetch_add(sent_datagrams, Ordering::Relaxed);
+                }
+                if closed {
+                    batch.clear();
+                    break PumpEnd::ConnectionClosed;
                 }
             }
             frame = next_datagram(&mut datagrams) => match frame {
-                Some(frame) if frame.kind == DatagramKind::JumpPacket => {
-                    silence.received_datagram();
-                    info.datagrams_in.fetch_add(1, Ordering::Relaxed);
-                    peer.send(frame.payload);
+                Some(frame) => {
+                    let mut next = Some(frame);
+                    let mut budget = PUMP_BATCH;
+                    while let Some(frame) = next.take() {
+                        if frame.kind == DatagramKind::JumpPacket {
+                            silence.received_datagram();
+                            info.datagrams_in.fetch_add(1, Ordering::Relaxed);
+                            peer.send(frame.payload);
+                        }
+                        budget -= 1;
+                        if budget > 0 {
+                            next = datagrams.as_mut().and_then(|d| d.try_recv());
+                        }
+                    }
                 }
-                Some(_) => {}
                 None => break PumpEnd::ConnectionClosed,
             },
             read = recv.read(&mut read_buf) => match read {
