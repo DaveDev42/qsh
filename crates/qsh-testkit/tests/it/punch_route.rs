@@ -865,12 +865,13 @@ async fn run_row(row: Row, extra_candidate: Option<&'static str>) -> (GiveUpReas
 
 /// DoD 4: every reason of decision 17 is provoked and reported as
 /// `details.punch.reason`, with the pin name of the rendezvous and no
-/// address. The rows run side by side, each in a world of its own. The
-/// dial timeout is 4 s so the slow rows (the 3 s signalling budget, the
-/// window) end inside it.
+/// address. The rows run side by side, each in a world of its own. The dial
+/// timeout is the product default (10 s), so the punch window is the whole
+/// 5 s of decision 16: the `peer_mismatch` row needs a handshake to finish
+/// and be refused, and on a loaded machine a shorter route deadline cut the
+/// window before that and reported `timeout`.
 #[tokio::test(flavor = "multi_thread")]
 async fn punch_give_up_reasons() {
-    qsh_transport::set_default_dial_timeout(Duration::from_secs(4));
     let blackhole: SocketAddr = "198.51.100.201:9".parse().unwrap();
     let rows: Vec<(Row, Option<&'static str>)> = vec![
         (
