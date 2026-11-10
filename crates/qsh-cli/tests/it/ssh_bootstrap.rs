@@ -1696,6 +1696,34 @@ pub(crate) mod pair {
         assert_eq!(exec["data"]["stdout_b64"], expected, "{exec}");
     }
 
+    /// ADR-0056 decision 21: when `ssh -G` reports a `proxyjump` that names
+    /// qsh pins, the remote's pin records those hops as its `jump`, and the
+    /// hop pins themselves stay as they were.
+    #[test]
+    fn bootstrap_records_proxyjump_as_the_pin_jump() {
+        let mut w = World::new();
+        w.fake.g_output(b"hostname box\nproxyjump hop\n");
+        w.client
+            .trust_add("hop", Some("127.0.0.1:0"), &other_fingerprint(5));
+        let (code, got) = w.pair(&["box", "--remote-as", "laptop"]);
+        assert_eq!(code, 0, "{got}");
+        assert_eq!(got["data"]["jump"], serde_json::json!(["hop"]), "{got}");
+        // The chain replaces the ssh_proxied warning: QUIC goes through the hop.
+        assert_eq!(got["data"]["ssh_proxied"], false, "{got}");
+        assert_eq!(
+            got["data"]["peer"]["jump"],
+            serde_json::json!(["hop"]),
+            "{got}"
+        );
+        let local = store(&w.client);
+        let pin = local.find("box").expect("the box pin");
+        assert_eq!(pin.jump, ["hop"]);
+        assert_eq!(pin.fingerprint, w.remote.fingerprint());
+        let hop = local.find("hop").expect("the hop pin");
+        assert!(hop.jump.is_empty(), "the hop pin gained a jump: {hop:?}");
+        assert_eq!(hop.fingerprint, other_fingerprint(5));
+    }
+
     #[test]
     fn ssh_bootstrap_role_flag_sets_the_remote_role() {
         let w = World::new();

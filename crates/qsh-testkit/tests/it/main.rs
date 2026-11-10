@@ -33,6 +33,7 @@ mod jump_perf;
 mod jump_punch;
 mod jump_recovery;
 mod jump_reverse;
+mod jump_threat;
 mod keep_alive_policy;
 mod liveness_config;
 mod local_control_reverse;

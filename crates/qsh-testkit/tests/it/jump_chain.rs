@@ -606,7 +606,7 @@ async fn a_hop_without_a_pin_or_an_address_is_host_not_found_naming_it() {
 // pins
 // ----------------------------------------------------------------------
 
-fn nothing_ran_on(host: &Host) {
+pub(super) fn nothing_ran_on(host: &Host) {
     let ran: Vec<_> = host
         .h
         .audit
@@ -1113,7 +1113,7 @@ async fn jump_mtu_budget_on_a_four_hop_chain() {
 // the failure report
 // ----------------------------------------------------------------------
 
-fn expect_failure(
+pub(super) fn expect_failure(
     err: &OpError,
     hop: usize,
     hops: usize,
