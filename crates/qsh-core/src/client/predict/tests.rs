@@ -530,6 +530,36 @@ fn a_report_naming_a_mid_redraw_state_waits_for_a_state_with_the_cursor_shown() 
     assert_eq!(r.p.stats().mispredicted, 1);
 }
 
+/// Found by the `client_predictor` fuzz target (fuzz-smoke run 42860272411):
+/// after a new leg, a report that covers every key and names a state with the
+/// cursor hidden still gives no verdict on a prediction the cell does not
+/// show. That is the shell-mid-redraw rule above, not a leak: the prediction
+/// is judged by the next state that shows the cursor, so a "quiet end" that
+/// leaves the host cursor hidden cannot expect `pending_len() == 0`.
+#[test]
+fn a_new_leg_report_on_a_hidden_cursor_state_leaves_the_verdict_to_the_next_shown_state() {
+    let mut r = Rig::confirmed(Prediction::Display);
+    r.key(b"b");
+    r.p.on_leg_change();
+    r.n = 0;
+    let mut hidden = line(40, "a");
+    hidden.modes.flags |= Modes::CURSOR_HIDDEN;
+    r.state(&hidden);
+    r.echo();
+    assert_eq!(
+        r.p.pending_len(),
+        1,
+        "no verdict while the cursor is hidden"
+    );
+    assert_eq!(r.p.stats().mispredicted, 0);
+
+    // The next state shows the cursor; the one report still covers the key.
+    r.state(&line(40, "a"));
+    assert_eq!(r.p.pending_len(), 0);
+    assert_eq!(r.p.stats().mispredicted, 1);
+    assert!(r.p.overlay().is_empty());
+}
+
 /// ConPTY paints cells and moves the cursor in separate frames: a state can
 /// show the character just typed with the cursor still a column short. The
 /// predictions behind it stay (ADR-0053 decision 14, PSReadLine); a cursor
