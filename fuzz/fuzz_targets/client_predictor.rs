@@ -23,7 +23,8 @@
 //! status line appears, changes or goes away.
 //!
 //! After the ops, the engine is brought to a quiet end (writer, a fresh
-//! state, one report covering every byte sent, tty `Kernel`); then nothing is
+//! state with the cursor shown, one report covering every byte sent, tty
+//! `Kernel`); then nothing is
 //! pending and the overlay is empty.
 
 #![no_main]
@@ -399,6 +400,11 @@ fuzz_target!(|data: &[u8]| {
     // (up to `u64::MAX`) cannot make the closing report look stale.
     run.p.on_leg_change();
     run.last_key = None;
+    // Show the host cursor: while it is hidden the predictor gives no verdict
+    // on a key whose cell is not painted yet (a shell in the middle of
+    // redrawing its line, ADR-0053 decision 6 amendments), so a state with
+    // the cursor hidden may legitimately leave predictions pending.
+    run.feed(b"\x1b[?25h", run.sent);
     run.apply_state(1);
     run.echo(EchoReport {
         state_num: 1,
