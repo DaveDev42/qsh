@@ -207,27 +207,27 @@ fn set_file_host_call_sites(relative: &str) -> Vec<String> {
 /// runtime directories, audit file). Without it every file request that the
 /// ACL allows fails closed with `PERMISSION_DENIED`, so a dropped call would
 /// leave the feature silently dead while every hand-wired test stays green.
-/// The call lives in `serve::host_runtime`, the one factory `qsh serve`, `qsh
-/// listen`'s controller and a `qsh serve --to` target share, and nowhere
-/// else in production code.
+/// The call lives in `serve::host_runtime_with`, the one factory `qsh serve`
+/// (through `host_runtime`), a `qsh serve --to` target and a combined
+/// `qsh listen --serve` endpoint share, and nowhere else in production code.
 #[test]
-fn set_file_host_is_called_once_and_only_inside_host_runtime() {
+fn set_file_host_is_called_once_and_only_inside_host_runtime_with() {
     let source = production_source("crates/qsh-core/src/serve.rs");
     let sites = set_file_host_call_sites("crates/qsh-core/src/serve.rs");
     assert_eq!(sites.len(), 1, "serve.rs: {sites:?}");
 
     let start = source
-        .find("pub fn host_runtime(")
-        .expect("serve.rs lost host_runtime");
+        .find("pub fn host_runtime_with(")
+        .expect("serve.rs lost host_runtime_with");
     // The function ends at the first closing brace in column 0.
     let end = start
         + source[start..]
             .find("\n}\n")
-            .expect("host_runtime has no closing brace");
+            .expect("host_runtime_with has no closing brace");
     let body = &source[start..end];
     assert!(
         body.contains(".set_file_host("),
-        "set_file_host must be called inside serve::host_runtime"
+        "set_file_host must be called inside serve::host_runtime_with"
     );
 
     for relative in [

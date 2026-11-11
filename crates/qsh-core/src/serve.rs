@@ -12,7 +12,7 @@ use std::time::Duration;
 use qsh_proto::ErrorCode;
 use qsh_transport::{SetupError, TrustEvaluator};
 
-use crate::acl::{Role, StartupDiagnostic, load_or_deny_with_index};
+use crate::acl::{Authorizer, Role, StartupDiagnostic, load_or_deny_with_index};
 use crate::audit::RotatingAuditSink;
 use crate::broker::{Broker, BrokerConfig, SystemClock};
 use crate::config::{Config, Paths};
@@ -642,74 +642,160 @@ pub struct HostRuntime {
     pub policy_diagnostic: Option<StartupDiagnostic>,
 }
 
-/// Build a [`HostRuntime`]: session broker (with its TTL reaper spawned),
-/// the `acl.toml`-backed policy this process resolved at startup
-/// ([`load_or_deny_with_index`] — falls back to `DenyAll` plus a
-/// [`HostRuntime::policy_diagnostic`] on anything short of a clean load,
-/// M5 plan Step 6 (2473c88); replaces the M1–M4 `AllowAllPinned` interim
-/// posture), the rotating, bounded-queue audit sink at `[audit]`'s
-/// configured path (`crate::audit::RotatingAuditSink`, the M5 plan (2473c88) Step
-/// 3), and the `Server` that ties them together under `device_id`.
+/// The parts one process builds once and every role it serves shares
+/// (ADR-0059 decision 8): the rotating audit sink, the `acl.toml`-backed
+/// [`Authorizer`] (loaded exactly once), the admission [`Gate`] and the
+/// connection/session [`Quotas`], plus the trust store the authorizer and
+/// the transport's verifier read.
 ///
-/// The broker outlives every connection (`docs/design/architecture.md`
-/// §3); its TTL reaper stops on its own once the returned `Server` (and the
-/// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix and
-/// ConPTY-backed on Windows (`crate::pty::factory`).
+/// `qsh serve`, a `qsh serve --to` target and `qsh listen` each build their
+/// own with [`SharedParts::load`] and hand it to [`host_runtime_with`] or to
+/// [`crate::reverse::listen::Listen`]. A process that plays two roles on one
+/// endpoint builds it once and hands the same one to both, which is what
+/// keeps the policy snapshot, the audit file writer, the handshake gate and
+/// the connection pool single.
 ///
-/// Policy loads exactly once, here, at process start — never hot-reloaded
-/// (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a reverse target
-/// calls this once per process too (`crate::reverse::target::run_reverse_observed`),
-/// not once per reconnect, for the same reason.
+/// The stateless reset key is not part of this: it is read by the one
+/// [`crate::reset_key::bind_listener`] call that binds the endpoint.
+///
+/// [`Authorizer`]: crate::acl::Authorizer
+/// [`Gate`]: crate::admission::Gate
+/// [`Quotas`]: crate::quota::Quotas
+pub struct SharedParts {
+    /// The store the transport's verifier reads and the authorizer resolves
+    /// trust roles through (ADR-0045 decision 6).
+    pub trust: Arc<SharedTrustStore>,
+    /// The audit sink every decision of the process is written to.
+    pub audit: Arc<RotatingAuditSink>,
+    /// The policy this process resolved at startup; [`crate::acl::DenyAll`]
+    /// when `acl.toml` is unusable.
+    pub authorizer: Arc<dyn Authorizer>,
+    /// `Some` when `acl.toml` could not be turned into a usable policy; the
+    /// caller prints [`StartupDiagnostic::render`] exactly once.
+    pub policy_diagnostic: Option<StartupDiagnostic>,
+    /// The pin-path principal set the loaded policy enforces (ADR-0017
+    /// decision 3).
+    pub pinned_principals: crate::acl::PinnedPrincipalIndex,
+    /// L2-L3 admission, built from the operator's `[serve]` values.
+    pub admission: Arc<crate::admission::Gate>,
+    /// Post-authorization quotas, built from the operator's `[serve]`
+    /// limits.
+    pub quotas: Arc<crate::quota::Quotas>,
+}
+
+impl SharedParts {
+    /// Build the shared parts for a process whose startup diagnostic
+    /// example row is `role`'s. Policy loads exactly once, here, at process
+    /// start, never hot-reloaded (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6
+    /// (2473c88)).
+    pub fn load(paths: &Paths, config: &Config, trust: Arc<SharedTrustStore>, role: Role) -> Self {
+        let audit = Arc::new(RotatingAuditSink::spawn(
+            config.audit.path(paths),
+            config.audit.max_bytes(),
+            config.audit.retain(),
+            config.audit.queue_depth(),
+        ));
+        // `_with_index` over plain `load_or_deny`: the pairing-pin
+        // notice (ADR-0017 결정 3) needs to ask "does a pin-path row already
+        // name this principal", which only the concrete `Policy` this call
+        // just loaded can answer (`crate::acl::PinnedPrincipalIndex`'s own
+        // doc) — by the time `authorizer` below is an `Arc<dyn Authorizer>`
+        // that type is erased. A role that never reaches
+        // `Server::serve_pairing_connection` simply ignores the index.
+        let (authorizer, policy_diagnostic, pinned_principals) =
+            load_or_deny_with_index(paths, role, Arc::clone(&trust));
+        // M8 plan Step 2 (52639fc): the same operator-configured admission
+        // bounds for every role (`qsh serve`, a reverse target's own accept
+        // loop and `qsh listen`: `[listen]` has no admission keys of its
+        // own and inherits `[serve]`'s) — all internet-exposed accept loops
+        // per the design's own audit finding.
+        let admission = Arc::new(crate::admission::Gate::new(
+            Arc::new(SystemClock),
+            config.serve.max_concurrent_handshakes(),
+            config.serve.handshake_rate_per_source(),
+            config.serve.validated_rate_per_source(),
+        ));
+        // M8 plan Step 3 (52639fc): the same operator-configured `[serve]`
+        // quota limits the broker resolves via `BrokerConfig::from_serve`
+        // (session-count axes), so the quota tracker (`exec.run`
+        // concurrency, the connection axes and every axis's
+        // audit-aggregation window, `crate::quota` module doc) sees the
+        // identical values instead of `QuotaLimits::default`.
+        let quotas = crate::quota::Quotas::new(
+            crate::quota::QuotaLimits::from_serve(&config.serve),
+            Arc::new(SystemClock),
+        );
+        Self {
+            trust,
+            audit,
+            authorizer,
+            policy_diagnostic,
+            pinned_principals,
+            admission,
+            quotas,
+        }
+    }
+}
+
+/// Build a [`HostRuntime`] for `qsh serve` and a reverse target: the shared
+/// parts of the `Serve` role ([`SharedParts::load`]) and the host built on
+/// them ([`host_runtime_with`]).
 pub fn host_runtime(
     paths: &Paths,
     config: &Config,
     device_id: impl Into<String>,
     trust: Arc<SharedTrustStore>,
 ) -> HostRuntime {
-    let audit = Arc::new(RotatingAuditSink::spawn(
-        config.audit.path(paths),
-        config.audit.max_bytes(),
-        config.audit.retain(),
-        config.audit.queue_depth(),
-    ));
+    host_runtime_with(
+        paths,
+        config,
+        device_id,
+        SharedParts::load(paths, config, trust, Role::Serve),
+    )
+}
+
+/// Build a [`HostRuntime`] on already-built [`SharedParts`]: session broker
+/// (with its TTL reaper spawned) and the `Server` that ties it to the
+/// shared audit sink, authorizer, admission gate and quotas under
+/// `device_id`. The audit sink is the one in `parts`
+/// (`crate::audit::RotatingAuditSink`, the M5 plan (2473c88) Step 3, at
+/// `[audit]`'s configured path); the policy is the `acl.toml`-backed one
+/// `parts` resolved at startup (falls back to `DenyAll` plus a
+/// [`HostRuntime::policy_diagnostic`] on anything short of a clean load, M5
+/// plan Step 6 (2473c88); replaces the M1–M4 `AllowAllPinned` interim
+/// posture).
+///
+/// The broker outlives every connection (`docs/design/architecture.md`
+/// §3); its TTL reaper stops on its own once the returned `Server` (and the
+/// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix and
+/// ConPTY-backed on Windows (`crate::pty::factory`).
+///
+/// Policy loads exactly once per process, in [`SharedParts::load`] — never
+/// hot-reloaded (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a
+/// reverse target builds this once per process too
+/// (`crate::reverse::target::run_reverse_observed`), not once per
+/// reconnect, for the same reason.
+pub fn host_runtime_with(
+    paths: &Paths,
+    config: &Config,
+    device_id: impl Into<String>,
+    parts: SharedParts,
+) -> HostRuntime {
+    let SharedParts {
+        trust,
+        audit,
+        authorizer,
+        policy_diagnostic,
+        pinned_principals,
+        admission,
+        quotas,
+    } = parts;
     let broker = Broker::new(
         Arc::new(SystemClock),
         BrokerConfig::from_serve(&config.serve),
         crate::pty::factory(),
     );
     tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-    // `_with_index` over plain `load_or_deny`: the pairing-pin
-    // notice (ADR-0017 결정 3) needs to ask "does a pin-path row already
-    // name this principal", which only the concrete `Policy` this call
-    // just loaded can answer (`crate::acl::PinnedPrincipalIndex`'s own
-    // doc) — by the time `authorizer` below is an `Arc<dyn Authorizer>`
-    // that type is erased. `crate::reverse::listen::run_listen` keeps
-    // calling plain `load_or_deny`: a reverse target never reaches
-    // `Server::serve_pairing_connection` at all.
-    let trust_for_watch = Arc::clone(&trust);
-    let (authorizer, policy_diagnostic, pinned_principals) =
-        load_or_deny_with_index(paths, Role::Serve, trust);
-    // M8 plan Step 2 (52639fc): the same operator-configured admission bounds
-    // for every host role this constructs (`qsh serve` and a reverse
-    // target's own accept loop, `crate::reverse::target::run_reverse_observed`
-    // — both are internet-exposed accept loops per the design's own audit
-    // finding).
-    let admission = crate::admission::Gate::new(
-        Arc::new(SystemClock),
-        config.serve.max_concurrent_handshakes(),
-        config.serve.handshake_rate_per_source(),
-        config.serve.validated_rate_per_source(),
-    );
-    // M8 plan Step 3 (52639fc): the same operator-configured `[serve]` quota
-    // limits the broker above already resolved via `BrokerConfig::
-    // from_serve` (session-count axes), so the `Server`'s own quota
-    // tracker (`exec.run` concurrency + every axis's audit-aggregation
-    // window, `crate::quota` module doc) sees the identical values instead
-    // of `QuotaLimits::default`.
-    let quotas = crate::quota::Quotas::new(
-        crate::quota::QuotaLimits::from_serve(&config.serve),
-        Arc::new(SystemClock),
-    );
     let server = Server::with_admission_and_quotas(
         authorizer,
         audit.clone(),
@@ -729,7 +815,7 @@ pub fn host_runtime(
     // connections of `qsh serve` and the outbound one of `qsh serve --to`
     // (ADR-0031 결정 2~3): `trust_watch` is how this host's connections hear
     // that trust was withdrawn.
-    server.set_trust_watch(Arc::clone(&trust_for_watch));
+    server.set_trust_watch(trust);
     // The remote file ops resolve qsh's own state tree (config, state and
     // runtime directories, the audit file) per request from these; a reverse
     // target gets the same set because it comes through here too (ADR-0029

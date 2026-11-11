@@ -54,7 +54,6 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 #[cfg(test)]
 use crate::acl::AllowAllPinned;
 use crate::acl::Authorizer;
-use crate::audit::RotatingAuditSink;
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::Clock;
 use crate::broker::SessionId;
@@ -235,26 +234,15 @@ pub async fn run_listen(
             format!("cannot read bound address: {err}"),
         )
     })?;
-    // F7 (M5 plan Step 3 (2473c88) arbitration): the controller shares the same
-    // config-driven `RotatingAuditSink` construction `serve.rs`'s
+    // F7 (M5 plan Step 3 (2473c88) arbitration): the controller shares the
+    // same config-driven `RotatingAuditSink` construction `serve.rs`'s
     // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/
     // `queue_depth` all apply here too, rather than `FileAuditSink`'s
     // fixed, unrotated `paths.audit_log()`. `qsh listen` and `qsh serve`/
     // `qsh reverse` (`crate::serve::host_runtime`) default to the exact
     // same path, which is safe now that F6 gives `RotatingAuditSink`
     // multi-writer rotation locking.
-    let audit = Arc::new(RotatingAuditSink::spawn(
-        config.audit.path(paths),
-        config.audit.max_bytes(),
-        config.audit.retain(),
-        config.audit.queue_depth(),
-    ));
-    // Kept past `Listen::new` (which takes ownership of a clone below) so
-    // the shutdown tail can wait on it directly — see the F2 comment near
-    // `listen.run(..)`.
-    let audit_for_shutdown = audit.clone();
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
+    //
     // M5 plan Step 6 (2473c88): the controller's `host.reverse` choke point
     // (`super::admit::admit`) is gated by the same `acl.toml`-backed
     // policy `crate::serve::host_runtime` builds for `qsh serve`/`qsh
@@ -262,42 +250,33 @@ pub async fn run_listen(
     // `AllowAllPinned`) plus a diagnostic on anything short of a clean
     // load. `trust` is the same handle the listener's TLS verifier reads
     // (ADR-0045 결정 6: the authorizer resolves each requester's trust
-    // role through it); `load_or_deny` still opens `paths.trust_file()`
-    // itself to fill the diagnostic's example policy with this machine's
-    // actual pins.
-    let trust_for_watch = trust.clone();
-    let (authorizer, policy_diagnostic) =
-        crate::acl::load_or_deny(paths, crate::acl::Role::Listen, trust);
-    if let Some(diag) = &policy_diagnostic {
+    // role through it). `[listen]` has no admission or quota keys of its
+    // own — it inherits `[serve]`'s (M8 plan Step 2 (52639fc) design
+    // arbitration, `docs/CLI.md` §6.12; M8 Step 3b ruling R6: the
+    // *values* still come from the operator's `[serve]` section).
+    // All five come from `SharedParts::load`, the one builder every role
+    // of a process shares (ADR-0059 decision 8).
+    let parts = crate::serve::SharedParts::load(paths, config, trust, crate::acl::Role::Listen);
+    if let Some(diag) = &parts.policy_diagnostic {
         on_policy_diagnostic(&diag.render());
     }
-    // `[listen]` has no admission keys of its own — it inherits
-    // `[serve].max_concurrent_handshakes`/`handshake_rate_per_source`
-    // (M8 plan Step 2 (52639fc) design arbitration, `docs/CLI.md` §6.12).
-    let admission = crate::admission::Gate::new(
-        clock.clone(),
-        config.serve.max_concurrent_handshakes(),
-        config.serve.handshake_rate_per_source(),
-        config.serve.validated_rate_per_source(),
-    );
-    // `[listen]` has no quota keys of its own either — same inheritance
-    // as `admission` just above (M8 Step 3b ruling R6: this controller's
-    // connection cap is its own accept arm, but the *values* it enforces
-    // still come from the operator's `[serve]` section).
-    let quotas = crate::quota::Quotas::new(
-        crate::quota::QuotaLimits::from_serve(&config.serve),
-        clock.clone(),
-    );
+    // Kept past `Listen::new` (which takes ownership of a clone below) so
+    // the shutdown tail can wait on it directly — see the F2 comment near
+    // `listen.run(..)`.
+    let audit_for_shutdown = parts.audit.clone();
+    let trust_for_watch = parts.trust.clone();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
     let listen = Listen::with_admission_and_quotas(
         registry,
-        authorizer,
-        audit,
+        parts.authorizer,
+        parts.audit,
         identity.identity.device_id.clone(),
         clock,
         stale_retention,
         STALE_SWEEP_TICK,
-        admission,
-        quotas,
+        parts.admission,
+        parts.quotas,
     );
     listen.set_path_watch(liveness.reverse_watch);
     // `[punch].mode = "off"` is read once, here (ADR-0054 decision 19).
@@ -423,7 +402,7 @@ pub struct Listen {
     /// `docs/adr/0009-admission-defenses.md`) — same type, same ordering,
     /// as `crate::server::Server`'s own field; consulted by [`Self::run`]
     /// before an `Incoming` reaches [`Self::accept_and_register`].
-    admission: crate::admission::Gate,
+    admission: Arc<crate::admission::Gate>,
     /// M8 Step 3b ruling R6: `[serve].max_connections`/
     /// `max_connections_per_principal` is enforced **per accept arm**,
     /// not per process — this controller is its own arm, independent of
@@ -539,7 +518,7 @@ impl Listen {
         device_name: impl Into<String>,
         clock: Arc<dyn Clock>,
         stale_retention: Duration,
-        admission: crate::admission::Gate,
+        admission: impl Into<Arc<crate::admission::Gate>>,
     ) -> Arc<Self> {
         Self::with_admission_and_sweep_tick(
             registry,
@@ -564,7 +543,7 @@ impl Listen {
         clock: Arc<dyn Clock>,
         stale_retention: Duration,
         sweep_tick: Duration,
-        admission: crate::admission::Gate,
+        admission: impl Into<Arc<crate::admission::Gate>>,
     ) -> Arc<Self> {
         let quotas = crate::quota::Quotas::new(crate::quota::QuotaLimits::default(), clock.clone());
         Self::with_admission_and_quotas(
@@ -598,7 +577,7 @@ impl Listen {
         clock: Arc<dyn Clock>,
         stale_retention: Duration,
         sweep_tick: Duration,
-        admission: crate::admission::Gate,
+        admission: impl Into<Arc<crate::admission::Gate>>,
         quotas: Arc<crate::quota::Quotas>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -611,7 +590,7 @@ impl Listen {
             clock,
             stale_retention,
             sweep_tick,
-            admission,
+            admission: admission.into(),
             quotas,
             path_watch: std::sync::OnceLock::new(),
             trust_watch: std::sync::OnceLock::new(),

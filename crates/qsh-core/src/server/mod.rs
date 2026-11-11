@@ -650,7 +650,7 @@ pub struct Server {
     /// [`Server::new`]; production (`crate::serve::run_serve`) instead
     /// builds one from the operator's actual config via
     /// [`Server::with_admission`].
-    admission: crate::admission::Gate,
+    admission: Arc<crate::admission::Gate>,
     /// Post-authorization resource quotas (M8 plan Step 3 (52639fc), `docs/adr/
     /// 0010-resource-quotas.md`) — the `exec.run` concurrency reservation
     /// ([`Self::handle_exec_start`]) plus the shared audit-aggregation
@@ -802,7 +802,7 @@ impl Server {
         audit: Arc<dyn AuditSink>,
         sessions: Arc<dyn SessionBackend>,
         device_name: impl Into<String>,
-        admission: crate::admission::Gate,
+        admission: impl Into<Arc<crate::admission::Gate>>,
     ) -> Arc<Self> {
         let quotas = crate::quota::Quotas::new(
             crate::quota::QuotaLimits::default(),
@@ -824,7 +824,7 @@ impl Server {
         audit: Arc<dyn AuditSink>,
         sessions: Arc<dyn SessionBackend>,
         device_name: impl Into<String>,
-        admission: crate::admission::Gate,
+        admission: impl Into<Arc<crate::admission::Gate>>,
         quotas: Arc<crate::quota::Quotas>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -849,7 +849,7 @@ impl Server {
             file_host: OnceLock::new(),
             free_space: OnceLock::new(),
             file_write_gate: OnceLock::new(),
-            admission,
+            admission: admission.into(),
             quotas,
             trust_watch: OnceLock::new(),
             punch: Mutex::new(None),
