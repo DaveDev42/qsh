@@ -20,6 +20,7 @@ mod console_probe;
 mod cp_many_small_files;
 mod cp_scripted_host;
 mod datagram_carrier;
+mod direct_pin;
 mod dynamic_loopback;
 mod dynamic_reverse;
 mod exec_loopback;

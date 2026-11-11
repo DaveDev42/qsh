@@ -34,6 +34,8 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 2. 아니면 **private CA 체인 검증**(rustls-webpki, 신뢰 root는 trust store의 CA만) 성공 시 → 허용, principal = leaf의 SAN URI(`qsh://user/dave`, `qsh://device/hermes`).
 3. 그 외 → 거부. **web PKI root는 어떤 경로로도 로드하지 않는다.**
 
+**client가 이름으로 dial할 때는 판정 범위가 그 이름으로 좁혀진다**(ADR-0060). verifier는 같고 evaluator만 `BoundTrust`로 좁힌다. 이름에 pin이 있으면 그 pin의 fingerprint와 정확히 같은 leaf만 허용하고(다른 pin, CA 체인, 열린 pairing invite 어느 것도 이 연결을 받지 않는다), pin이 없는 이름(`hosts.toml`에만 있는 이름 등)은 CA 체인이 맞는 leaf만 허용한다. 어긋나면 handshake가 실패하므로 client 인증서도 스트림도 가지 않는다. server가 client를 받는 쪽은 이 규칙을 쓰지 않는다. 위 1~3번 그대로, 어느 pin이든 받는다. jump 체인은 단마다 자기 pin 하나로 좁히고(ADR-0056 결정 10), 펀칭은 기대 fingerprint를 견준다(ADR-0054 결정 12). 이제 직접 dial도 같은 규칙이다.
+
 두 경로 모두에서 leaf 인증서의 **유효기간(not_before/not_after)을 검사**한다 — pin 일치라도 만료·미도래 인증서는 거부한다(장기 device cert에서 유효기간은 유일한 revocation 레버이며, 모호하면 fail closed). SNI/hostname은 검증에 쓰지 않는다(identity는 pin 또는 SAN principal이지 DNS 이름이 아니다). 클라이언트는 SNI를 아예 보내지 않는다(rustls `enable_sni = false`, ADR-0040 결정 2). 접속 대상 hostname이 ClientHello에 실리지 않으며, 서버도 SNI를 읽지 않는다.
 
 확립된 연결은 trust 변경 뒤 같은 검증 코어로 재검증된다(`Connection::reverify`, ADR-0031 결정 10). 거부되거나 신뢰 경로가 바뀐 연결은 `0x1005`로 닫히며, wire에 새 바이트는 없다.

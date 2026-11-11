@@ -134,7 +134,7 @@ pub(super) enum Route {
     Forward {
         /// The resolved peer; re-dialed as is, never re-resolved from
         /// `hosts.toml`.
-        target: PeerTarget,
+        target: Box<PeerTarget>,
         /// Shared with the tunnel's `Connected`, so closing the tunnel
         /// closes the current pair.
         link: Link,
@@ -752,11 +752,8 @@ async fn dial(
     tuning: qsh_transport::TransportTuning,
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), AttemptError> {
     let device_name = target.identity.identity.device_id.clone();
-    let dialer = qsh_transport::Dialer::new(
-        target.identity.local.clone(),
-        target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-    )
-    .with_tuning(tuning);
+    let dialer = qsh_transport::Dialer::new(target.identity.local.clone(), target.evaluator())
+        .with_tuning(tuning);
     let address = target.address.clone();
     let dialed = crate::ops::route::dial_routed(
         &dialer,

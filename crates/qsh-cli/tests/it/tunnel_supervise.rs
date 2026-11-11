@@ -532,11 +532,15 @@ fn supervised_forward_redial_to_a_different_fingerprint_ends_with_auth_failed_an
         0,
         "a different peer must never become the carrier"
     );
-    // The impostor was dialed and dropped; nothing was ever sent to it.
+    // The impostor was dialed and dropped; nothing was ever sent to it. The
+    // redial is bound to the tunnel's pin (ADR-0060), so the client ends the
+    // handshake itself and the impostor can only log that refused handshake.
+    let seen = other.audit_records();
     assert!(
-        other.audit_records().is_empty(),
-        "the different peer saw a request: {:?}",
-        other.audit_records()
+        seen.iter().all(|r| {
+            r["resource"] == "handshake" && r["decision"] == "deny" && r["principal"] == "-"
+        }),
+        "the different peer saw a request: {seen:?}"
     );
 }
 

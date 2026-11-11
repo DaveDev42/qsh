@@ -482,8 +482,34 @@ impl PunchEndpoint {
         addr: SocketAddr,
         server_name: &str,
     ) -> Result<Dialed, DialError> {
+        self.dial_with(addr, server_name, self.shared.evaluator.clone())
+            .await
+    }
+
+    /// [`Self::dial_trusted`] that accepts only the peer `binding` names
+    /// (ADR-0060): the registration dial of `qsh serve --to` must reach its
+    /// controller's pin, not any pinned device at that address.
+    pub async fn dial_trusted_bound(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+        binding: crate::tls::PeerBinding,
+    ) -> Result<Dialed, DialError> {
+        let evaluator = Arc::new(crate::tls::BoundTrust::new(
+            self.shared.evaluator.clone(),
+            binding,
+        ));
+        self.dial_with(addr, server_name, evaluator).await
+    }
+
+    async fn dial_with(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+        evaluator: Arc<dyn TrustEvaluator>,
+    ) -> Result<Dialed, DialError> {
         let s = &self.shared;
-        let verifier = Arc::new(QshPeerVerifier::new(s.evaluator.clone()));
+        let verifier = Arc::new(QshPeerVerifier::new(evaluator));
         let tls = client_tls_config(&s.identity, verifier.clone())?;
         let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(quic));

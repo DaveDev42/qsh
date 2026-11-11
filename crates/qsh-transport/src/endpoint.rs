@@ -1341,6 +1341,17 @@ impl Dialer {
         }
     }
 
+    /// A dialer with this one's identity, timeout and tuning that accepts
+    /// only the peer `binding` names (ADR-0060): the pin's exact key, or a
+    /// CA-issued leaf. The evaluator it narrows is this dialer's own.
+    #[must_use]
+    pub fn bound_to(&self, binding: crate::tls::PeerBinding) -> Self {
+        self.with_evaluator(Arc::new(crate::tls::BoundTrust::new(
+            self.evaluator.clone(),
+            binding,
+        )))
+    }
+
     /// Apply a [`TransportTuning`] to every connection this dialer makes.
     /// [`Self::new`] keeps the compiled default.
     #[must_use]

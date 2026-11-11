@@ -1776,10 +1776,7 @@ impl Ops {
                 let initial = ForwardCarrier::Direct(link.connection());
                 Ok(SupervisionParts {
                     session,
-                    route: supervise::Route::Forward {
-                        target: *target,
-                        link,
-                    },
+                    route: supervise::Route::Forward { target, link },
                     initial,
                 })
             }

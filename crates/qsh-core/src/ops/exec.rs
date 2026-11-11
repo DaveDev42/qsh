@@ -192,10 +192,7 @@ impl Ops {
             PeerRoute::Forward(target) => {
                 let device_name = target.identity.identity.device_id.clone();
                 let run = |target: &PeerTarget, stdin: ExecStdin, dialed: &AtomicBool| {
-                    let dialer = Dialer::new(
-                        target.identity.local.clone(),
-                        target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-                    );
+                    let dialer = Dialer::new(target.identity.local.clone(), target.evaluator());
                     runtime.block_on(exec_async(
                         &dialer,
                         &target.address,
@@ -285,6 +282,7 @@ impl Ops {
                 let server_name = server_name_for(&address);
                 let punch = self.punch_plan(host, &identity, &trust)?;
                 let learn = self.hint_learner(&trust);
+                let binding = Some(crate::ops::peer_binding(&trust.snapshot(), host)?);
                 Ok(PeerRoute::Forward(PeerTarget {
                     identity,
                     trust,
@@ -293,6 +291,7 @@ impl Ops {
                     punch,
                     learn,
                     jump: None,
+                    binding,
                 }))
             }
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {

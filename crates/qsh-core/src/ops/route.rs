@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{
-    Connection, DialError, Dialed, Dialer, Endpoint, PunchEndpoint, TransportTuning,
+    Connection, DialError, Dialed, Dialer, Endpoint, PeerBinding, PunchEndpoint, TransportTuning,
     default_dial_timeout,
 };
 use tokio::time::{Instant, sleep, sleep_until};
@@ -169,11 +169,20 @@ async fn direct_dial(
         }
         None => None,
     };
+    // The simulated direct dial reaches the host's pin and nobody else
+    // (ADR-0060), the key the punch itself expects.
+    let plan_target = sim.map(|plan| plan.target);
     let dialed = crate::ops::dial_first_reachable(&addrs, |addr: SocketAddr| {
         let simulated = simulated.clone();
         async move {
             match simulated {
-                Some(ep) => ep.dial_trusted(addr, server_name).await,
+                Some(ep) => match plan_target {
+                    Some(target) => {
+                        ep.dial_trusted_bound(addr, server_name, PeerBinding::Pin(target))
+                            .await
+                    }
+                    None => ep.dial_trusted(addr, server_name).await,
+                },
                 None => dialer.dial(addr, server_name).await,
             }
         }

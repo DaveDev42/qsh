@@ -20,10 +20,7 @@ impl Ops {
         };
         let plan = target.jump.clone()?;
         let runtime = self.connect_runtime().ok()?;
-        let dialer = qsh_transport::Dialer::new(
-            target.identity.local.clone(),
-            target.trust.clone() as std::sync::Arc<dyn qsh_transport::TrustEvaluator>,
-        );
+        let dialer = qsh_transport::Dialer::new(target.identity.local.clone(), target.evaluator());
         let first = plan.step(0).clone();
         let chain = runtime.block_on(async {
             let server_name = crate::ops::server_name_for(&first.address);

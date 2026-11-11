@@ -58,8 +58,8 @@ pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParse
 pub use mux::{TransportCaps, TransportKind};
 pub use stream::{RecvStream, SendStream};
 pub use tls::{
-    AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, StaticTrust, TrustEvaluator,
-    VerifiedPeer,
+    AuthPath, BoundTrust, Observation, PeerBinding, PeerRole, QshPeerVerifier, RejectReason,
+    StaticTrust, TrustEvaluator, VerifiedPeer,
 };
 
 // Re-export the certificate type callers need to build a `LocalIdentity`, so

@@ -834,20 +834,25 @@ async fn dial_and_register_resolving(
     let addrs = crate::ops::resolve_all_with(resolver, &address)
         .await
         .map_err(|err| (err, ReconnectCause::Resolve))?;
-    let dialed =
-        crate::ops::dial_first_reachable(&addrs, |addr| endpoint.dial_trusted(addr, &server_name))
-            .await
-            .map_err(|(err, attempted)| {
-                // Issue #4 item 2: `cause` classifies the LAST address's
-                // failure — the same one `map_dial_error` below turns into
-                // the human message, so the two never disagree about which
-                // attempt is "the" failure.
-                let cause = classify_dial_error(&err);
-                (
-                    crate::ops::exec::map_dial_error(err, &address, attempted),
-                    cause,
-                )
-            })?;
+    // The registration reaches the controller's pin and nobody else
+    // (ADR-0060); a controller without a pin is reached through the CA.
+    let binding = crate::ops::peer_binding(&trust.snapshot(), controller)
+        .map_err(|err| (err, ReconnectCause::Local))?;
+    let dialed = crate::ops::dial_first_reachable(&addrs, |addr| {
+        endpoint.dial_trusted_bound(addr, &server_name, binding)
+    })
+    .await
+    .map_err(|(err, attempted)| {
+        // Issue #4 item 2: `cause` classifies the LAST address's
+        // failure — the same one `map_dial_error` below turns into
+        // the human message, so the two never disagree about which
+        // attempt is "the" failure.
+        let cause = classify_dial_error(&err);
+        (
+            crate::ops::exec::map_dial_error(err, &address, attempted),
+            cause,
+        )
+    })?;
     let (ctl, peer_hello) = crate::handshake::initiate(&dialed.connection, local_hello.clone())
         .await
         .map_err(|err| {

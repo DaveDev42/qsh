@@ -17,7 +17,9 @@ use qsh_proto::{
     TrustSetRendezvousData, TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq,
     TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
-use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
+use qsh_transport::{
+    BoundTrust, DialError, Dialer, Fingerprint, PeerBinding, Principal, StaticTrust,
+};
 
 use crate::audit::{AuditRecord, AuditSink, FileAuditSink};
 use crate::config::{Config, Paths, now_rfc3339};
@@ -98,9 +100,24 @@ pub(crate) struct PeerTarget {
     /// decision 13: such a host is reached through its chain alone, never
     /// raced against a direct dial or a punch).
     pub jump: Option<Arc<crate::jump::JumpPlan>>,
+    /// Whom the direct dial may reach (ADR-0060): the named pin's exact key,
+    /// or a CA-issued leaf for a name with no pin. `None` for a jump chain,
+    /// whose every step compares the fingerprint to its own pin
+    /// (ADR-0056 decision 10).
+    pub binding: Option<PeerBinding>,
 }
 
 impl PeerTarget {
+    /// The evaluator every dial to this host must use (ADR-0060): the trust
+    /// store narrowed to [`Self::binding`], never the whole store.
+    pub(crate) fn evaluator(&self) -> Arc<dyn qsh_transport::TrustEvaluator> {
+        let store = self.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>;
+        match self.binding {
+            Some(binding) => Arc::new(BoundTrust::new(store, binding)),
+            None => store,
+        }
+    }
+
     /// How long one recovery or supervised re-dial attempt may take
     /// (ADR-0054 decision 18): `REDIAL_DEADLINE`, or the punch budget when
     /// this host can be punched to.
@@ -1150,6 +1167,7 @@ impl Ops {
         };
         let punch = self.punch_plan(host, &identity, &trust)?;
         let learn = self.hint_learner(&trust);
+        let binding = Some(peer_binding(&trust.snapshot(), host)?);
         Ok(PeerTarget {
             identity,
             trust,
@@ -1158,6 +1176,7 @@ impl Ops {
             punch,
             learn,
             jump: None,
+            binding,
         })
     }
 
@@ -1200,6 +1219,7 @@ impl Ops {
             punch: None,
             learn,
             jump: Some(plan),
+            binding: None,
         })
     }
 
@@ -1442,6 +1462,7 @@ impl Ops {
         if !plan.has_rendezvous() {
             return None;
         }
+        let binding = Some(peer_binding(&store, host).ok()?);
         Some(PeerTarget {
             identity: identity.clone(),
             trust: trust.clone(),
@@ -1450,6 +1471,7 @@ impl Ops {
             punch: Some(plan),
             learn: self.hint_learner(trust),
             jump: None,
+            binding,
         })
     }
 
@@ -1819,12 +1841,11 @@ where
 /// Address resolution: `hosts.toml` layered over `trust`'s pinned peers,
 /// via [`host::resolve_forward`] — the exact same decision
 /// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (the M7 plan (69dd788) Step
-/// 3, §4.1 #4). Identity/trust is unaffected: the fingerprint a dial
-/// actually presents is still verified solely against `trust` at the TLS
-/// layer ([`qsh_transport::TrustEvaluator::lookup_pin`] is fingerprint-
-/// keyed across the whole store, not scoped to `host`) — `hosts.toml`
-/// supplying an address for a name with no trust peer, or a different
-/// address than trust's own pin, never changes *who* is allowed to answer.
+/// 3, §4.1 #4). Identity/trust is unaffected: `hosts.toml` supplying an
+/// address for a name with no trust peer, or a different address than
+/// trust's own pin, never changes *who* is allowed to answer. That is
+/// decided by [`peer_binding`] (ADR-0060): the name's pin key, or a CA
+/// leaf for a name with no pin.
 pub(crate) fn resolve_peer_address(
     trust: &TrustStore,
     hosts: &HostsFile,
@@ -1863,6 +1884,27 @@ pub(crate) fn resolve_peer_address(
     )?;
     let server_name = server_name_for(&entry.address);
     Ok((entry.address, server_name))
+}
+
+/// Whom a client dial to `host` may reach (ADR-0060): the pinned key when
+/// the trust store has a pin of that name, otherwise only a CA-issued leaf.
+/// A pin whose fingerprint does not parse is an error rather than a name
+/// without a pin, so a damaged `trust.toml` never widens what a dial accepts.
+pub(crate) fn peer_binding(trust: &TrustStore, host: &str) -> Result<PeerBinding, OpError> {
+    let key = host::lookup_name(host);
+    match trust.find(key) {
+        Some(peer) => peer
+            .fingerprint
+            .parse::<Fingerprint>()
+            .map(PeerBinding::Pin)
+            .map_err(|_| {
+                OpError::new(
+                    ErrorCode::ConfigError,
+                    format!("the pin {key:?} in trust.toml has an unreadable fingerprint"),
+                )
+            }),
+        None => Ok(PeerBinding::CaOnly),
+    }
 }
 
 /// `ServerName` for a dial. rustls requires one, so the host part of the
