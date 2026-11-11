@@ -12,6 +12,7 @@ mod audit_query;
 mod auto_bootstrap;
 mod cert_e2e;
 mod cert_file_exchange;
+mod combined_accept;
 mod combined_lifecycle;
 mod combined_surface;
 mod console_probe;

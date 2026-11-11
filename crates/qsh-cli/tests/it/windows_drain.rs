@@ -39,7 +39,7 @@ use crate::route_cases::{ReverseRoute, Route};
 const DEADLINE: Duration = Duration::from_secs(120);
 
 /// Bound on the drain itself: the stop event to the host's exit.
-const DRAIN_BOUND: Duration = Duration::from_secs(30);
+pub(crate) const DRAIN_BOUND: Duration = Duration::from_secs(30);
 
 /// How long a session's command may take to start or to be gone.
 const PROCESS_BOUND: Duration = Duration::from_secs(30);
@@ -52,7 +52,7 @@ fn ops_for(sandbox: &Sandbox) -> Ops {
 /// Run `scenario` on a worker thread and fail if it has not finished within
 /// [`DEADLINE`]: `Ops`'s attach API blocks the calling thread with no timeout
 /// of its own.
-fn with_deadline<T: Send + 'static>(
+pub(crate) fn with_deadline<T: Send + 'static>(
     what: &'static str,
     scenario: impl FnOnce() -> T + Send + 'static,
 ) -> T {
@@ -111,19 +111,19 @@ const DRAINED_PREFIX: &str = "{\"lifecycle\":\"drained\"";
 
 /// What one drained host did: its exit, the consumer's last word, and the
 /// `drained` line it wrote.
-struct Drained {
-    status_success: bool,
-    closed_reason: String,
-    drained: Vec<String>,
-    session_refs: Vec<String>,
-    marker_dirs: Vec<String>,
+pub(crate) struct Drained {
+    pub(crate) status_success: bool,
+    pub(crate) closed_reason: String,
+    pub(crate) drained: Vec<String>,
+    pub(crate) session_refs: Vec<String>,
+    pub(crate) marker_dirs: Vec<String>,
 }
 
 /// Open two sessions through `client` to `host`, each running a command that
 /// outlives the test, keep the first attached and leave the second detached,
 /// then run `stop` (which stops the host and returns its exit status and a
 /// reader of its stderr) and check what is left.
-fn drain_two_sessions(
+pub(crate) fn drain_two_sessions(
     client: &Sandbox,
     host: &str,
     stop: impl FnOnce() -> (bool, Box<dyn Fn() -> Vec<String>>),
@@ -192,7 +192,7 @@ fn drain_two_sessions(
 
 /// The `drained` line counts both sessions and carries nothing that names a
 /// session, a command or a path (`docs/CLI.md` §6.12).
-fn assert_drained(run: &Drained) {
+pub(crate) fn assert_drained(run: &Drained) {
     assert!(run.status_success, "the host did not exit 0 on the stop");
     assert_eq!(
         run.closed_reason, "closed",
