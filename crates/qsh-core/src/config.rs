@@ -1091,6 +1091,11 @@ pub struct ListenConfig {
     /// against `[reverse].backoff_max_ms` by [`ListenConfig::stale_retention`]
     /// — see that method's doc for why.
     pub stale_retention: Option<u64>,
+    /// Whether this `qsh listen` also serves forward connections on the
+    /// same socket (ADR-0059 decision 1): `true` makes it the combined
+    /// endpoint that is a `qsh serve` host as well as the reverse
+    /// controller. Default `false`. Read once at start.
+    pub serve: bool,
 }
 
 impl ListenConfig {

@@ -17,6 +17,7 @@ mod bulk_yield;
 mod chaos_proxy;
 mod chaos_relay;
 mod combined;
+mod combined_lifecycle;
 mod combined_punch;
 mod console_probe;
 mod cp_many_small_files;

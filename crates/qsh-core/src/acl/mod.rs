@@ -73,8 +73,8 @@ pub use load::{
 // generators `minimal_policy_example` (used only inside `acl::load` now)
 // itself calls for `acl_policy_missing`/`acl_policy_invalid`.
 pub(crate) use load::{
-    ca_policy_example_row, example_allow_actions, load_policy_or_deny, policy_example_rows,
-    policy_example_rows_with,
+    ca_policy_example_row, example_allow_actions, load_policy_or_deny, minimal_policy_example,
+    policy_example_rows, policy_example_rows_with,
 };
 pub use pin_grants::{
     MAX_PIN_PATHS, PinGrantKeys, PinGrants, PinGrantsError, apply_allow, apply_deny, expand_actions,

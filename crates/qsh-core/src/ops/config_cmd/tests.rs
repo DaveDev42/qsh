@@ -396,6 +396,7 @@ fn every_field_populated() -> Config {
             bind: Some(String::new()),
             allow_advertised_names: true,
             stale_retention: Some(1),
+            serve: true,
         },
         reverse: ReverseConfig {
             controller: Some(String::new()),

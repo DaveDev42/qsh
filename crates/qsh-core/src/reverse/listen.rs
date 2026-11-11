@@ -176,6 +176,75 @@ pub async fn run_listen(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnMut(&str),
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
+    run_listen_impl(
+        paths,
+        config,
+        identity,
+        bind_flag,
+        None,
+        on_bound,
+        on_policy_diagnostic,
+        shutdown,
+    )
+    .await
+}
+
+/// [`run_listen`] for a process that also serves forward connections on the
+/// same socket (`[listen].serve = true` or `qsh listen --serve`, ADR-0059).
+///
+/// One endpoint, one identity, one trust store, one `Authorizer`, one audit
+/// sink, one admission gate and one quota pool serve three kinds of
+/// connection: a reverse registration (`Hello.reverse`), a hole-punching
+/// connection (a forward connection whose first request is a `PunchRequest`)
+/// and a forward host connection (everything else, pairing included). The
+/// `Server` is the front of the accept loop and the [`Listen`] controller is
+/// attached to it ([`crate::server::Server::set_listen`]), so SIGTERM runs
+/// the `Server`'s drain after the registrations are closed (decision 19).
+///
+/// Differences from [`run_listen`] for the caller: `on_notice` receives the
+/// pairing-pin and invite-replay notices a forward `qsh serve` would print;
+/// `serve.json` is published (decision 17) and removed on the way out; the
+/// caller prints [`crate::lifecycle::RESTART_BANNER`] because sessions now
+/// live in this process.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_listen_serve(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind_flag: Option<&str>,
+    on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnMut(&str),
+    on_notice: impl Fn(&str) + Send + Sync + 'static,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
+    run_listen_impl(
+        paths,
+        config,
+        identity,
+        bind_flag,
+        Some(Arc::new(on_notice)),
+        on_bound,
+        on_policy_diagnostic,
+        shutdown,
+    )
+    .await
+}
+
+/// The sink for the notices a forward host prints (pairing pins, invite
+/// replays); `Some` in the combined mode only.
+type NoticeFn = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[allow(clippy::too_many_arguments)]
+async fn run_listen_impl(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind_flag: Option<&str>,
+    combined: Option<NoticeFn>,
+    on_bound: impl FnOnce(SocketAddr),
     mut on_policy_diagnostic: impl FnMut(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
@@ -210,6 +279,20 @@ pub async fn run_listen(
     let trust = SharedTrustStore::open(paths.trust_file()).inspect_err(|_| {
         transport::remove_endpoint(&localctl_socket_path);
     })?;
+    // The pairing window of a forward host (ADR-0059 decision 16): attached
+    // before the bind, like `run_serve_with` does, because every accepted
+    // connection's TLS verification reads `pairing_open()` off this same
+    // evaluator.
+    let invites = if combined.is_some() {
+        let invites =
+            crate::trust::SharedInviteStore::open(paths.invites_file()).inspect_err(|_| {
+                transport::remove_endpoint(&localctl_socket_path);
+            })?;
+        trust.attach_pairing(Arc::clone(&invites));
+        Some(invites)
+    } else {
+        None
+    };
     // The stateless reset key (ADR-0036) is read or created before the
     // bind; an unusable key file never fails the start, it yields one
     // diagnostic, delivered through the same callback as the ACL one.
@@ -256,7 +339,11 @@ pub async fn run_listen(
     // *values* still come from the operator's `[serve]` section).
     // All five come from `SharedParts::load`, the one builder every role
     // of a process shares (ADR-0059 decision 8).
-    let parts = crate::serve::SharedParts::load(paths, config, trust, crate::acl::Role::Listen);
+    let parts = if combined.is_some() {
+        crate::serve::SharedParts::load_combined(paths, config, Arc::clone(&trust))
+    } else {
+        crate::serve::SharedParts::load(paths, config, trust.clone(), crate::acl::Role::Listen)
+    };
     if let Some(diag) = &parts.policy_diagnostic {
         on_policy_diagnostic(&diag.render());
     }
@@ -267,6 +354,17 @@ pub async fn run_listen(
     let trust_for_watch = parts.trust.clone();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
+    // The forward host of a combined endpoint is built on the very same
+    // parts (decision 8), before they are handed to the controller below.
+    let host = combined.as_ref().map(|_| {
+        crate::serve::host_runtime_with(
+            paths,
+            config,
+            identity.identity.device_id.clone(),
+            parts.clone(),
+        )
+        .server
+    });
     let listen = Listen::with_admission_and_quotas(
         registry,
         parts.authorizer,
@@ -284,6 +382,16 @@ pub async fn run_listen(
         .set_punch_enabled(config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto);
     listen.set_trust_watch(trust_for_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+    if let (Some(server), Some(notice), Some(invites)) = (&host, &combined, &invites) {
+        server.set_listen(Arc::clone(&listen)).inspect_err(|_| {
+            transport::remove_endpoint(&localctl_socket_path);
+        })?;
+        let notice = Arc::clone(notice);
+        server.set_notice_sink(move |text: &str| notice(text));
+        // The same `trust`/`invites` pair the listener's evaluator was built
+        // from, as in `run_serve_with`.
+        server.set_pairing(Arc::clone(&trust), Arc::clone(invites));
+    }
     tracing::info!(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
@@ -309,6 +417,28 @@ pub async fn run_listen(
         let _ = localctl_shutdown_rx.await;
     }));
 
+    // The runtime record of a combined endpoint (ADR-0059 decision 17),
+    // published once the socket is held and before the address is announced,
+    // so a bootstrap that finds it does not start an on-demand serve beside
+    // this one. A write failure is a warning, not a startup failure. There is
+    // no on-demand idle exit here: a listen runs until it is told to stop.
+    let record_guard = host.as_ref().and_then(|_| {
+        let own_pid = std::process::id();
+        match crate::serve::record::write(
+            paths,
+            &crate::serve::record::ServeRecord::for_current_process(
+                actual,
+                crate::serve::record::ServeRecordMode::Persistent,
+            ),
+        ) {
+            Ok(()) => Some(crate::serve::record::RecordGuard::new(paths, own_pid)),
+            Err(err) => {
+                tracing::warn!(error = %err.message, "cannot write serve.json");
+                None
+            }
+        }
+    });
+
     // Announced here, not right after `local_addr()` above, for the reason
     // spelled out at the matching call in `crate::serve::run_serve` — the
     // stderr line is what external scripts synchronize on, so it must not
@@ -320,13 +450,24 @@ pub async fn run_listen(
     // real, disk-latency-bounded gap rather than a scheduling-only one.
     on_bound(actual);
 
-    listen.run(listener, shutdown).await;
+    match host {
+        // The `Server` is the front of the accept loop; its shutdown closes
+        // the registrations, drains the sessions and closes the endpoint, in
+        // that order (ADR-0059 decision 19).
+        Some(server) => {
+            drop(listen);
+            server.run(listener, shutdown).await;
+        }
+        None => listen.run(listener, shutdown).await,
+    }
 
     let _ = localctl_shutdown_tx.send(());
     if let Err(join_err) = localctl_task.await {
         tracing::warn!(%join_err, "localctl daemon task panicked");
     }
     transport::remove_endpoint(&localctl_socket_path);
+    // After the local socket, last of the process's own files.
+    drop(record_guard);
 
     // F2 (M5 plan Step 3 (2473c88)): `Listen::run` detaches each accepted
     // connection's task the same way `server::Server::run` does — a
@@ -646,6 +787,23 @@ impl Listen {
     /// the connection stays a punching one.
     pub(crate) fn try_punch_client(&self) -> Option<OwnedSemaphorePermit> {
         self.rendezvous.try_client()
+    }
+
+    /// Close every registered connection the way [`Self::run`]'s endpoint
+    /// close would (code 0, reason `shutdown`), and tell each hub its host is
+    /// gone so the conduits of a local `qsh` command end with a typed error
+    /// instead of waiting for the connection tasks to notice. A target
+    /// re-dials after its backoff. The combined endpoint's `Server::run`
+    /// calls it between "stop accepting" and the session drain, so no
+    /// registration outlives the point where the process starts erasing
+    /// sessions (ADR-0059 decision 19).
+    pub(crate) fn close_registrations(&self) {
+        for (_, conn) in self.conns.snapshot() {
+            conn.close(0, b"shutdown");
+        }
+        for (_, hub) in self.hubs.snapshot() {
+            hub.mark_dead();
+        }
     }
 
     /// Punching connections open now (tests and diagnostics).

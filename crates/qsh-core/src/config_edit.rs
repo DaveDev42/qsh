@@ -120,6 +120,7 @@ pub const KEYS: &[ConfigKey] = &[
     key("listen", "bind", Str, true),
     key("listen", "allow_advertised_names", Bool, true),
     key("listen", "stale_retention", Int, true),
+    key("listen", "serve", Bool, true),
     key("reverse", "controller", Str, true),
     key("reverse", "offered_name", Str, true),
     key("reverse", "backoff_initial_ms", Int, true),

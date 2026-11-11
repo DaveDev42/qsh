@@ -51,7 +51,7 @@ use qsh_proto::{EnvVar, SessionAttachReq, SessionOpenReq};
 /// teardown). Every wait inside is a real round trip or a real process
 /// exit, never a sleep standing in for one — this is only the "declare it
 /// broken" backstop, mirroring `attach_ops.rs`'s `DEADLINE`.
-const DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const DEADLINE: Duration = Duration::from_secs(60);
 
 /// Bound on the drain itself: SIGTERM to process exit. The default
 /// `[serve].close_grace_ms` (5000) only matters if the child ignores a
@@ -60,23 +60,23 @@ const DEADLINE: Duration = Duration::from_secs(60);
 /// over the worst case (two grace periods, ~10 s) rather than a tight bound,
 /// so scheduler contention on a loaded CI box cannot turn a real pass into a
 /// flake.
-const DRAIN_BOUND: Duration = Duration::from_secs(30);
+pub(super) const DRAIN_BOUND: Duration = Duration::from_secs(30);
 
 /// Prefix the session's child prints, carrying its own pid, so this test
 /// can ask the operating system — not the broker — whether it is still
 /// there.
-const PID_PREFIX: &str = "QSHPID=";
+pub(super) const PID_PREFIX: &str = "QSHPID=";
 
 /// The session's child: announce its pid, then sit on something that would
 /// still be running if nobody cleaned it up. `exec` keeps the announced pid
 /// (no fork), matching `session_kill9.rs`'s own producer.
-fn child_script() -> String {
+pub(super) fn child_script() -> String {
     format!("printf '{PID_PREFIX}%s\\n' $$\nexec sleep 600\n")
 }
 
 /// `Ops` bound to a sandbox's config/state pair, called in-process —
 /// exactly `attach_ops.rs`'s helper of the same name.
-fn ops_for(sandbox: &Sandbox) -> Ops {
+pub(super) fn ops_for(sandbox: &Sandbox) -> Ops {
     Ops::new(Paths::new(sandbox.config_dir(), sandbox.state_dir()))
 }
 
@@ -84,7 +84,7 @@ fn ops_for(sandbox: &Sandbox) -> Ops {
 /// finished within [`DEADLINE`]. `Ops`'s attach API blocks the calling
 /// thread with no timeout of its own, so this is what keeps a wedged drain
 /// from hanging the suite instead of failing it (`attach_ops.rs` precedent).
-fn with_deadline<T: Send + 'static>(
+pub(super) fn with_deadline<T: Send + 'static>(
     what: &'static str,
     scenario: impl FnOnce() -> T + Send + 'static,
 ) -> T {
@@ -119,7 +119,7 @@ fn decode(data_b64: &str) -> Vec<u8> {
 /// return the pid. The replay always starts at offset 0 (`Ops::session_attach`
 /// sends `last_output_seq: 0`), so this also exercises the ordinary
 /// attach-then-replay path, not a special case for this test.
-fn read_pid(stream: &mut SessionAttachStream) -> i32 {
+pub(super) fn read_pid(stream: &mut SessionAttachStream) -> i32 {
     let mut rendered = Vec::new();
     loop {
         let event = stream
@@ -148,7 +148,7 @@ fn read_pid(stream: &mut SessionAttachStream) -> i32 {
 /// precedes it (`docs/CLI.md` §6.7/§6.4) — expected, and skipped here. The
 /// stream ending without ever delivering `session.closed` is the one
 /// failure this exists to catch.
-fn read_closed_reason(stream: &mut SessionAttachStream) -> String {
+pub(super) fn read_closed_reason(stream: &mut SessionAttachStream) -> String {
     loop {
         match stream.next_event() {
             Some(Ok(SessionEvent::Closed { reason, .. })) => return reason,

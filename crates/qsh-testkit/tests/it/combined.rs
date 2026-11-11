@@ -930,6 +930,68 @@ async fn a_combined_punch_connection_keeps_the_rendezvous_limits() {
 }
 
 // ---------------------------------------------------------------------------
+// Decision 19: the order of a shutdown.
+// ---------------------------------------------------------------------------
+
+/// SIGTERM's order on the endpoint (the part of it `Server::run` owns):
+/// accept stops, the registered connections close with the endpoint's own
+/// code, only then the sessions drain, and the endpoint closes last. The
+/// session child here ignores `SIGHUP` and `SIGTERM`, so the drain takes the
+/// close escalation's time: a target that sees its registration close while
+/// the session is still alive saw the registrations go first. Done the other
+/// way round, the session would be gone by then.
+#[tokio::test(flavor = "multi_thread")]
+async fn combined_shutdown_closes_registrations_before_the_drain() {
+    use qsh_core::broker::{PipeFactory, Signal};
+
+    let target = make_identity();
+    let client = make_identity();
+    let pipes = Arc::new(PipeFactory::with_ignored_signals(
+        64 * 1024,
+        &[Signal::Hup, Signal::Term],
+    ));
+    let h = CombinedHarness::start_with_pipes(
+        Arc::new(AllowAllPinned),
+        pins(&[(&target, "widget"), (&client, "laptop")]),
+        limits(512, 32),
+        pipes,
+    )
+    .await;
+    let (reg, reg_ctl, _) = h.register(&target, "").await.expect("registers");
+    let _keep = keepalive(reg_ctl);
+    let (dialed, ctl, hello) = h.forward(&client).await.expect("forward hello");
+    open_session(&dialed, ctl, hello)
+        .await
+        .expect("a forward peer opens a session");
+    assert_eq!(h.broker.live_counts().live, 1);
+
+    let broker = h.broker.clone();
+    let stopping = tokio::spawn(h.shutdown());
+
+    let closed = tokio::time::timeout(TIMEOUT, reg.connection.closed())
+        .await
+        .expect("the registration is closed by the shutdown");
+    let live_then = broker.live_counts().live;
+    match closed {
+        qsh_transport::ConnectionError::ApplicationClosed(app) => {
+            assert_eq!(app.error_code.into_inner(), 0, "the endpoint's own code");
+            assert_eq!(&app.reason[..], b"shutdown");
+        }
+        other => panic!("expected the endpoint's close, got {other:?}"),
+    }
+    assert_eq!(
+        live_then, 1,
+        "the registration closed while the session was still alive: registrations go first"
+    );
+
+    tokio::time::timeout(TIMEOUT, stopping)
+        .await
+        .expect("the endpoint stops")
+        .expect("no panic");
+    assert_eq!(broker.live_counts().live, 0, "the drain closed the session");
+}
+
+// ---------------------------------------------------------------------------
 // Decision 8: one policy snapshot, one audit sink, fail closed everywhere.
 // ---------------------------------------------------------------------------
 
