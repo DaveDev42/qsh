@@ -33,14 +33,14 @@ use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::{forward_hello, wait_for, wait_for_audit_records};
 use qsh_transport::{Dialed, FramedStream, Principal, ReadError, StaticTrust, StreamError};
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The reset code a controller ends a peer-opened stream with when its
 /// header is not one the registered connection carries (`server::
 /// RESET_CODE_BAD_HEADER`).
 const RESET_BAD_HEADER: u64 = 0x2001;
 
-fn pins(peers: &[(&TestIdentity, &str)]) -> StaticTrust {
+pub(super) fn pins(peers: &[(&TestIdentity, &str)]) -> StaticTrust {
     peers
         .iter()
         .fold(StaticTrust::empty(), |trust, (id, name)| {
@@ -48,7 +48,7 @@ fn pins(peers: &[(&TestIdentity, &str)]) -> StaticTrust {
         })
 }
 
-fn remote(err: HelloError) -> (ErrorCode, String, bool) {
+pub(super) fn remote(err: HelloError) -> (ErrorCode, String, bool) {
     match err {
         HelloError::Remote {
             code,
@@ -68,7 +68,7 @@ fn expect_err<T>(result: Result<T, HelloError>, msg: &str) -> HelloError {
     }
 }
 
-fn open_req() -> wire::SessionOpen {
+pub(super) fn open_req() -> wire::SessionOpen {
     wire::SessionOpen {
         argv: vec!["sh".into()],
         env: Default::default(),
@@ -81,7 +81,7 @@ fn open_req() -> wire::SessionOpen {
 
 /// Keep a registered test connection answering the controller's liveness
 /// `Ping`s so its watchdog does not judge the idle test connection dead.
-fn keepalive(mut ctl: FramedStream) -> tokio::task::JoinHandle<()> {
+pub(super) fn keepalive(mut ctl: FramedStream) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Ok(Some(msg)) = ctl.recv.recv::<ControlMessage>().await {
             if let Some(control_message::Body::Ping(_)) = msg.body
@@ -100,7 +100,7 @@ fn keepalive(mut ctl: FramedStream) -> tokio::task::JoinHandle<()> {
     })
 }
 
-fn limits(max_connections: usize, per_principal: usize) -> QuotaLimits {
+pub(super) fn limits(max_connections: usize, per_principal: usize) -> QuotaLimits {
     QuotaLimits {
         max_connections,
         max_connections_per_principal: per_principal,
@@ -121,7 +121,7 @@ async fn open_session(
 /// A `PunchRequest` for a target nobody registered: well formed, so the
 /// rendezvous answers it with a refusal reply (`TARGET_NOT_REGISTERED`)
 /// rather than an error.
-fn punch_request() -> wire::PunchRequest {
+pub(super) fn punch_request() -> wire::PunchRequest {
     wire::PunchRequest {
         attempt_id: vec![7u8; 16],
         target_fingerprint: vec![9u8; 32],
@@ -133,7 +133,11 @@ fn punch_request() -> wire::PunchRequest {
 }
 
 /// Send one control message and read the reply to it.
-async fn ask(ctl: &mut FramedStream, id: u64, body: control_message::Body) -> ControlMessage {
+pub(super) async fn ask(
+    ctl: &mut FramedStream,
+    id: u64,
+    body: control_message::Body,
+) -> ControlMessage {
     ctl.send
         .send(&ControlMessage::new(id, body))
         .await
@@ -148,13 +152,13 @@ async fn ask(ctl: &mut FramedStream, id: u64, body: control_message::Body) -> Co
 /// What a reply is, for a table row: the error code, or the refusal of a
 /// `PunchReply`.
 #[derive(Debug, PartialEq)]
-enum Reply {
+pub(super) enum Reply {
     Error(String),
     PunchRefusal(i32),
     Other,
 }
 
-fn classify(msg: ControlMessage) -> Reply {
+pub(super) fn classify(msg: ControlMessage) -> Reply {
     match msg.body {
         Some(control_message::Body::Response(wire::Response { body: Some(body) })) => match body {
             wire::response::Body::Error(e) => Reply::Error(e.code),

@@ -270,6 +270,13 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_echo_under_load::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
+      # ADR-0059 DoD 27.12: the same echo-under-load budget (measured RTT +
+      # 10ms) on a combined `listen --serve` endpoint that also holds a
+      # registered reverse target, so the forward branch is judged with both
+      # roles on one socket, one gate and one quota tracker.
+      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^combined_echo_under_load::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # ADR-0037 (`docs/design/testing.md` L9/L10): the starvation axis next
       # to the saturation one above. Tunnel consumers that never read must
       # not stop PTY output or push PTY echo p95 past measured RTT + 10ms;
