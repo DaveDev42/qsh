@@ -192,3 +192,7 @@ Dave의 요청은 이렇다. Dave-MacMini는 지금 두 데몬을 돌린다. `qs
 
 - 2026-11-11 초안(에이전트). 요청의 "ADR-0003 sessions-in-listener" 전제를 바로잡았다(맥락 절). Dave가 정할 것 네 항목은 추천만 적었다.
 - 2026-11-11 승인(Dave 결정). 정할 것 네 항목 모두 추천 (가): 키와 플래그, 펀칭은 첫 요청으로 가름, admission 풀 하나, pairing 붙임. M27로 연다.
+- 2026-11-12 리뷰 반영(결정 본문은 고치지 않았다). 결정 3의 `punch.v1` 광고 조건은 실제와 다르다: 코드는 단독 역할과 같게 `LOCAL_CAPABILITIES`로 `punch.v1`을 늘 광고하고, `[punch].mode = off`는 광고가 아니라 펀칭 가로채기와 `PunchRequest` 처리를 끈다(그 요청은 정방향의 `UNSUPPORTED`). 동작은 `production_runtime_punch_mode_off_turns_the_intercept_off`가 고정한다.
+- 2026-11-12 threat model 번호: 이 ADR의 A25(등록된 연결로 정방향 셸을 여는 역할 혼동)는 ADR-0060이 A25를 먼저 써서 A26으로 적었다. B52·B53·C29·C30·D27·G14는 그대로다.
+- 2026-11-12 DoD 27.9의 blackhole은 5 s에서 8 s로 늘렸다. 5 s 감지 상한을 넘겨야 재등록(generation 증가)이 결정적으로 일어난다. 재다이얼 `attempts`는 10이다(기본 3이면 `status_line`과 같은 이유로 회복이 늦다).
+- 2026-11-12 DoD 27.3의 진짜 바이너리 시험은 `qsh-cli`의 `combined_accept`(unix 전체, Windows는 축소판)다. `-J`는 호스트-로컬 hop 거부에 `set_jump_options` 훅이 필요해 testkit 안에 남는다.

@@ -426,8 +426,19 @@ message FileFrame {
    - **ACL:** 그 principal에 ACL action `host.reverse`를 검사한다. 기본 deny이고, 거부 시 연결 종료 + audit이며 리소스는 하나도 만들지 않는다.
    - **이름 확정:** 허용되면 controller가 자기 통제 하의 이름으로 등록한다. 그 fingerprint의 trust-store alias가 우선이고, `offered_name`은 명시적 `allow_advertised_names` 설정 시에만 쓴다(둘 다 없으면 `PERMISSION_DENIED`). 인가된 장비가 `personal-mac` 같은 이름을 사칭(name-squatting)하는 것을 막기 위해서다.
    - **충돌:** 같은 이름의 live 등록이 이미 있고 fingerprint가 **다르면** 신규 등록을 `INVALID_ARGUMENT` + 연결 종료로 거절한다(조용한 덮어쓰기 금지). **같은 fingerprint면** 기존 등록을 대체하고 옛 연결을 닫으며 `generation`을 1 증가시킨다(NAT rebind로 인한 재등록이 정상 경로).
-   - **그 밖의 입력:** `qsh serve`(정방향 host)가 `Hello.reverse`를 받는 것은 대칭 원칙 아래 실제로 발생 가능한 입력이며, 등록하지 않고 `UNSUPPORTED`로 답한다. `Hello.reverse` 없는 peer가 `qsh listen`에 연결한 경우도 `UNSUPPORTED` 후 종료다.
+   - **그 밖의 입력(단독 모드):** 단독 `qsh serve`(정방향 host)가 `Hello.reverse`를 받는 것은 대칭 원칙 아래 실제로 발생 가능한 입력이며, 등록하지 않고 `UNSUPPORTED`로 답한다. `Hello.reverse` 없는 peer가 단독 `qsh listen`에 연결한 경우도 `UNSUPPORTED` 후 종료다. 이 상호 거절은 두 역할이 서로 다른 프로세스일 때의 규칙이다. `[listen].serve = true`인 합친 프로세스는 아래 "합친 모드의 갈림"을 따른다(ADR-0059).
    - controller가 localctl UDS 연결을 accept할 때 하는 peer credential 검사(`SO_PEERCRED`/`getpeereid`)는 이 QUIC 등록 절차와 별개이며 §11-3의 conduit 수립 시 수행된다.
+   **합친 모드의 갈림(ADR-0059).** `[listen].serve = true`(또는 `qsh listen --serve`)인 `qsh listen` 프로세스는 같은 UDP 소켓에서 두 역할을 받는다. wire는 바뀌지 않는다(ALPN `qsh/1`, `Hello`, capability, `ErrorCode` 그대로). 갈림은 연결마다 한 번이고 순서는 `Gate` → TLS accept → quota 예약 → `respond` 콜백 → (필요하면) 첫 요청이다. 합친 endpoint가 보내는 `Hello` 응답은 peer의 `Hello`로 정해진다. `Hello.reverse`가 있으면 단독 listen이 보내는 응답을, 없으면 단독 serve가 보내는 응답을 보낸다.
+
+   | peer의 `Hello` | 첫 요청(`Ping` 제외) | 갈래 | 인가 | 이어지는 함수 |
+   |---|---|---|---|---|
+   | `reverse` 있음 | 해당 없음 | 역방향 등록 | `host.reverse` | `Listen::finish_registration` |
+   | `reverse` 없음, `punch.v1` 양쪽, `[punch].mode ≠ off` | `PunchRequest` | 펀칭 연결(§19.9) | `host.punch` | `Listen::relay_punch` |
+   | `reverse` 없음 | 그 밖의 control message, 또는 peer가 연 데이터 스트림 | 정방향 host | 요청마다 단독 serve의 판정 | `Server::serve_control` |
+   | `Principal::Pairing` | 해당 없음 | pairing(§15.1) | 초대 상환 규칙 | `serve_pairing_connection` |
+
+   등록된 연결은 `Server` dispatch에 닿지 않는다. 그 연결에서 peer가 연 스트림은 단독 listen처럼 `TCP_ACCEPTED`와 `AGENT`만 받고 나머지는 reset한다. 정방향 연결은 단독 serve처럼 Hello 전에 quota를 예약하고 거절을 먼저 알리며(R3), 등록은 ACL을 먼저 보고 quota 거절을 그다음에 알린다(A2/B5). `Gate`, `Quotas`, 감사 sink, `Authorizer`는 프로세스에 하나씩이고 `max_connections`와 principal별 상한은 endpoint 하나의 풀이다. `punch.v1`은 `[punch].mode`와 관계없이 `LOCAL_CAPABILITIES`로 언제나 광고되므로 `Hello` 응답의 capability는 단독 listen·단독 serve와 같다. `[punch].mode = off`는 광고가 아니라 가로채기와 `PunchRequest` 처리를 끈다.
+
 3. 이후 controller에서 `qsh <name>`(신규 세션)이나 `qsh attach <name>/<session_id>`(재attach) 등을 실행하면, CLI 프로세스는 상주 `qsh listen` 데몬과 **local unix socket IPC**(`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 0600, package `qsh.local.v1`)로 통신한다. §5와 같은 frame codec(`qsh_proto::frame`, u32-BE + prost)을 `tokio::net::UnixStream` 위에서 재사용하되, wire(`qsh.wire.v1`)와는 별도 `.proto` 파일·별도 package다.
 
    **conduit 모델.** UDS 연결 하나가 논리 스트림(conduit) 하나이고, 첫 frame `LocalHello{version, kind, host, wait_ms}`가 그 정체를 정한다.
@@ -620,7 +631,7 @@ ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지�
 
 ### 15.1 TLS 게이트 — 세 번째 accept 경로
 
-§3의 `QshPeerVerifier`는 기존 두 경로(pin, private CA 체인) 중 어느 쪽도 통과하지 못한 leaf 인증서를 무조건 거부한다. 페어링은 정의상 서로 한 번도 본 적 없는 상대를 다루므로, 이 거부 앞에 세 번째 경로를 하나 더 둔다: `TrustEvaluator::pairing_open(&self) -> bool`(기본 구현은 `false`)이 `true`를 답하는 동안에만, pin도 CA도 통과하지 못한 leaf가 principal `Pairing`/auth path `Pairing`으로 허용된다. `SharedTrustStore::pairing_open()`은 살아 있는(= `INVITE_RETENTION`, 20분 이내의) invite 레코드가 하나라도 있으면 `true`다 — invite가 하나도 없거나 전부 그 창을 넘기면 즉시 원래의 두-경로 전용 거부로 돌아간다. `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`)는 이 evaluator를 attach하지 않으므로(§15.8) 이 세 번째 경로 자체가 존재하지 않는다.
+§3의 `QshPeerVerifier`는 기존 두 경로(pin, private CA 체인) 중 어느 쪽도 통과하지 못한 leaf 인증서를 무조건 거부한다. 페어링은 정의상 서로 한 번도 본 적 없는 상대를 다루므로, 이 거부 앞에 세 번째 경로를 하나 더 둔다: `TrustEvaluator::pairing_open(&self) -> bool`(기본 구현은 `false`)이 `true`를 답하는 동안에만, pin도 CA도 통과하지 못한 leaf가 principal `Pairing`/auth path `Pairing`으로 허용된다. `SharedTrustStore::pairing_open()`은 살아 있는(= `INVITE_RETENTION`, 20분 이내의) invite 레코드가 하나라도 있으면 `true`다 — invite가 하나도 없거나 전부 그 창을 넘기면 즉시 원래의 두-경로 전용 거부로 돌아간다. 단독 `qsh listen`과 `qsh serve --to`(구 표기 `qsh reverse`)는 이 evaluator를 attach하지 않으므로(§15.8) 이 세 번째 경로 자체가 존재하지 않는다. 합친 모드(`[listen].serve`, §11)의 `qsh listen`은 인바운드 `qsh serve`처럼 bind 전에 evaluator를 attach하므로 같은 포트에서 이 경로가 열린다. 창구는 살아 있는 invite가 있을 때만 받고 §15의 통제를 그대로 진다(ADR-0059 결정 16).
 
 이 게이트는 **누가 pin됐는지**는 전혀 묻지 않는다 — "지금 이 host에 살아 있는 invite가 있는가"만 묻는다. 실제 인증(이 연결이 그 invite의 secret을 정말로 아는가)은 TLS 계층이 아니라 §15.3의 control-stream 교환이 담당한다.
 
@@ -695,7 +706,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 ### 15.8 범위
 
-이 절은 forward-host(`qsh serve`) 페어링만 다룬다. `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`)(역방향 conduit)는 이 evaluator를 attach하지 않으므로 페어링 대상이 아니다 — reverse target은 애초에 자신의 accept loop을 돌리지 않고 controller에 dial해 들어가는 쪽이라, 이 절의 TLS 게이트(§15.1)에 도달할 경로 자체가 없다.
+이 절은 forward-host 페어링만 다룬다. forward host는 인바운드 `qsh serve`와, `[listen].serve`를 켠 합친 `qsh listen`(ADR-0059 결정 16)이다. 단독 `qsh listen`과 `qsh serve --to`(구 표기 `qsh reverse`)(역방향 conduit)는 이 evaluator를 attach하지 않으므로 페어링 대상이 아니다 — reverse target은 애초에 자신의 accept loop을 돌리지 않고 controller에 dial해 들어가는 쪽이라, 이 절의 TLS 게이트(§15.1)에 도달할 경로 자체가 없다.
 
 ### 15.9 Fuzzing
 
@@ -1093,7 +1104,7 @@ R은 후보를 중개할 뿐 신원을 보증하지 않는다. A는 펀칭한 �
 
 ### 19.9 R의 중개와 B의 offer 처리
 
-**펀칭 연결.** `qsh listen`(R)은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer를 등록 대신 펀칭 연결로 받는다. `[punch].mode = "off"`이면 이 분기는 없고 기존 `host.reverse` 누락 거절이 그대로 나간다. 펀칭 연결은 동시에 16개(`RENDEZVOUS_MAX_CLIENTS`)이고 넘으면 `Hello`에 `RESOURCE_EXHAUSTED`로 답한다. 이 연결이 받는 것은 `Ping`(`Pong`으로 답한다)과 `PunchRequest` 한 번이고, 그 밖의 message는 `UNSUPPORTED`다. 요청 없이 3초(`RENDEZVOUS_IDLE`), 답을 보낸 뒤 3초가 지나면 R이 연결을 닫는다. 거부나 오류로 끝난 요청은 오류 frame을 보낸 뒤 바로 닫는다.
+**펀칭 연결.** 단독 `qsh listen`(R)은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer를 `Hello` 시점에 등록 대신 펀칭 연결로 받는다. 합친 모드(§11, ADR-0059 결정 5)에서는 `punch.v1`이 모든 빌드의 광고라 `Hello`만으로 정방향 client와 펀칭 client를 가를 수 없으므로, `Hello.reverse`가 없는 연결을 정방향으로 시작하고 첫 요청(`Ping` 제외)이 `PunchRequest`일 때 그 연결을 펀칭 연결로 바꾼다. 16개 상한의 permit은 전환 시점에 얻고(모자라면 `RESOURCE_EXHAUSTED`, retryable, 뒤 닫음), 연결 quota는 처음부터 쥔다. `relay_punch`는 최대 1.5초를 기다리므로 control loop를 막지 않는 갈래로 돈다. 다른 요청이나 먼저 연 데이터 스트림은 정방향으로 굳고, 굳은 연결의 `PunchRequest`는 단독 serve처럼 `UNSUPPORTED`다. 아래 3초 규칙과 "그 밖의 message는 `UNSUPPORTED`"는 전환 뒤에 그대로 적용된다. `[punch].mode = "off"`이면 이 분기는 없고 기존 `host.reverse` 누락 거절이 그대로 나간다. 펀칭 연결은 동시에 16개(`RENDEZVOUS_MAX_CLIENTS`)이고 넘으면 `Hello`에 `RESOURCE_EXHAUSTED`로 답한다. 이 연결이 받는 것은 `Ping`(`Pong`으로 답한다)과 `PunchRequest` 한 번이고, 그 밖의 message는 `UNSUPPORTED`다. 요청 없이 3초(`RENDEZVOUS_IDLE`), 답을 보낸 뒤 3초가 지나면 R이 연결을 닫는다. 거부나 오류로 끝난 요청은 오류 frame을 보낸 뒤 바로 닫는다.
 
 **R이 요청을 처리하는 순서.** 인가 전에는 자원을 만들지 않는다.
 

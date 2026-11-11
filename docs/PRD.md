@@ -66,7 +66,7 @@ ADR-0045(승인됨, 2026-10-14)에 따라 이 원칙은 "권한은 신뢰를 등
 
 ### 단일 바이너리
 
-`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 철회, ADR-0011).
+`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 철회, ADR-0011). 한 장비가 listener와 정방향 host를 겸하면 `[listen].serve`(또는 `qsh listen --serve`)로 한 프로세스, 한 포트에 합칠 수 있다(ADR-0059).
 
 ## 5. 주요 사용자
 
@@ -308,7 +308,7 @@ JSON schema는 version을 포함하고, stdout에는 결과만 출력한다. 진
 qsh [user@]host                 대화형 셸
 qsh exec host -- command        비대화형 실행
 qsh serve                       target listener
-qsh listen                      reverse listener
+qsh listen                      reverse listener(`--serve`는 정방향 host도 겸함, ADR-0059)
 qsh serve --to controller       역방향 연결(구 qsh reverse, 숨김 alias로 남음)
 qsh hosts                       호스트 조회
 qsh sessions [host]             세션 조회

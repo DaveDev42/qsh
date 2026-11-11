@@ -30,6 +30,8 @@ QUIC 스택은 `qsh-transport` 안에만 있다. `qsh-core`와 `qsh-cli`는 매�
 
 **jump chaining의 자리(ADR-0056).** `-J`로 hop을 지나는 안쪽 QUIC 연결은 UDP 소켓이 없다. 소켓에 해당하는 부분은 `qsh-transport`의 `PacketPipe` 하나다. 두 개의 유한 큐로 만든 메모리 관이 quinn의 추상 소켓 인터페이스를 구현하고(`may_fragment()`는 `false`라 PLPMTUD가 켜지고, `max_transmit_segments()`는 1이며, 한도를 넘는 패킷은 오류 없이 버리고, 큐가 차면 막지 않고 새 패킷을 버리고 센다), 반대 끝 `PipePeer`는 quinn 타입을 이름 짓지 않아 `qsh-core`가 들 수 있다. `Dialer::dial_over_pipe`가 이 관 위에서 client 전용 endpoint를 돌리고, `Endpoint::rebinding_via`가 안쪽 endpoint에 바깥 endpoint 이동을 건다(자기 소켓을 갖지 않으므로 바깥 연결의 migration이 안쪽에 보이지 않는다). 로직은 `qsh-core::jump`에 있다: `chain`(client: `JumpPlan`을 hop 목록으로 펼치고 단마다 pin을 검사하며 `dial_chain`으로 한 겹씩 올린다), `carrier`(hop마다 `choose_carrier`와 침묵 규칙 `SilenceFallback`, MTU 예산), `middle`(중간 peer J: `connect`한 UDP 소켓, QUIC 문, 상한, 정리), `relay`(`qsh listen` 데몬이 CLI 구간과 등록 연결 구간의 운반체를 번역하는 일. 인가는 하지 않는다), `report`(실패 단계와 `details.jump`). J의 admission은 `server/jump.rs`가 하고 인가는 `acl::check_jump`가 한다. `qsh-core::jump`는 quinn 타입을 이름 짓지 않으며(`xtask arch`의 quinn 금지), 안쪽 패킷의 바이트는 문이 읽는 long header 몇 필드 말고는 읽지 않는다. 프로토콜은 `protocol.md` §21에 있다.
 
+**합친 endpoint의 조립(ADR-0059).** `[listen].serve = true`인 `qsh listen`은 `Server`의 accept loop를 앞에 두고 `Listen`을 붙인다. `Server::run`이 heartbeat, quota 정리, SIGTERM drain을 이미 갖고 있기 때문이다. `crates/qsh-core/src/serve.rs`의 `host_runtime`은 두 부분으로 나뉜다. 하나는 프로세스에 하나씩인 공유 부품을 만드는 `SharedParts::load`(`load_combined`)다. 감사 sink(`RotatingAuditSink`), `acl.toml`을 한 번 읽은 `Arc<dyn Authorizer>`, `Gate`(`Arc<Gate>`), `Quotas`, trust store가 거기 든다. 다른 하나는 그 부품 위에 broker와 `Server`를 얹는 `host_runtime_with`다. 단독 `qsh serve`와 `qsh serve --to`, 단독 `qsh listen`(`SharedParts::load`를 `Role::Listen`으로)도 같은 부품 빌더를 쓴다. `Server`는 `Option<Arc<Listen>>`을 갖고(`set_listen`은 인가·감사·`Gate`·`Quotas`가 같은 부품이 아니면 거절한다), `respond` 콜백의 `Hello.reverse`는 `Listen`이 붙어 있으면 `decide_registration`으로, 아니면 `UNSUPPORTED`로 간다. 등록된 연결은 `finish_registration`으로 넘어가 `Server` dispatch에 닿지 않는다. `Listen`의 side task(localctl 데몬, stale sweeper, path watch, punch switch, trust watch)는 `run_listen`과 같은 코드가 띄운다. 종료 순서는 accept 중단, `Listen::close_registrations`, `Server::drain`, endpoint close, localctl 소켓 정리, `serve.json` 제거다.
+
 **확장 기준 패턴:** 새 operation은 `crates/qsh-core/src/ops/mod.rs`의 기존 패턴을 따른다 — `Operation` trait(`COMMAND: &'static str` = dotted 이름, envelope·audit·ACL의 join key), `OpError { code: ErrorCode, message, retryable, details }`, `Ops` façade의 메서드 하나. `version.get`(`VersionOp`)이 살아 있는 예시다.
 
 ## 2. Typed operation layer
@@ -50,7 +52,7 @@ QUIC 스택은 `qsh-transport` 안에만 있다. `qsh-core`와 `qsh-cli`는 매�
 
 ## 3. Session broker
 
-세션 수명을 transport 수명과 분리하는 핵심 서브시스템. `qsh serve` 프로세스 내부에 산다 ([ADR-0003](../adr/0003-sessions-in-listener.md)).
+세션 수명을 transport 수명과 분리하는 핵심 서브시스템. `qsh serve` 프로세스 내부에 산다 ([ADR-0003](../adr/0003-sessions-in-listener.md)). 단독 `qsh listen`에는 broker도 `Server`도 없다(`Listen`이 가진 것은 `Registry`, `ConnTable`, `ControlHub`, `Gate`, `Quotas`, `RendezvousState`, localctl 데몬이고, 등록된 연결에서 `Listen`은 protocol client다). 합친 모드(`[listen].serve`, [ADR-0059](../adr/0059-combined-listen-serve-endpoint.md))의 `qsh listen` 프로세스는 broker를 갖는다. 세션은 그 프로세스 안에 살고, 아래 "합친 endpoint의 조립"이 그 배치를 적는다.
 
 ```
 Broker
@@ -178,7 +180,7 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 
 - `[serve]` 기본: `bind`, `replay_bytes`, `resume_ttl`, `close_grace_ms`, `on_demand_idle_ms`(숨김 `--on-demand` 전용, `docs/CLI.md` §6.12).
 - `[serve]` admission: `max_concurrent_handshakes`(기본 64), `handshake_rate_per_source`(기본 10/s), `validated_rate_per_source`(기본 10/s).
-- `[serve]` quota ([ADR-0010](../adr/0010-resource-quotas.md)): `max_sessions`(기본 256), `max_sessions_per_principal`(기본 32), `max_exec_per_principal`(기본 32), `max_exec`(기본 256), `max_tunnel_streams_per_principal`(기본 256), `max_tunnel_streams_per_forward`(기본 64), `max_remote_forwards_per_principal`(기본 16), `max_connections_per_principal`(기본 32), `max_connections`(기본 512), `max_file_transfers_per_principal`(기본 4), `max_file_transfers`(기본 64). `max_connections`는 `qsh serve`/`qsh listen` 각자 독립된 accept arm 단위 상한이고 프로세스 전역이 아니다.
+- `[serve]` quota ([ADR-0010](../adr/0010-resource-quotas.md)): `max_sessions`(기본 256), `max_sessions_per_principal`(기본 32), `max_exec_per_principal`(기본 32), `max_exec`(기본 256), `max_tunnel_streams_per_principal`(기본 256), `max_tunnel_streams_per_forward`(기본 64), `max_remote_forwards_per_principal`(기본 16), `max_connections_per_principal`(기본 32), `max_connections`(기본 512), `max_file_transfers_per_principal`(기본 4), `max_file_transfers`(기본 64). `max_connections`는 `qsh serve`/`qsh listen` 각자 독립된 accept arm 단위 상한이고 프로세스 전역이 아니다. 합친 모드는 arm이 하나라서 단위가 endpoint 하나이고 정방향 연결과 역방향 등록이 한 풀(기본 512, principal마다 32)을 나눈다(ADR-0059 결정 9).
 - `[serve].to`: `qsh serve --to`의 config 경로(ADR-0012 결정 4/5). CLI의 `--to`가 이 키보다, 이 키가 legacy `[reverse].controller`보다 우선한다. 두 키가 서로 다른 값으로 동시에 설정되면 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail-closed하고 `qsh doctor`는 `config_serve_to_conflict` finding으로 보고하되 `doctor.run`은 exit 0이다. `crate::serve::resolve_serve_mode`/`config_serve_to_conflict`가 단일 진실 공급원이다.
 - `[identity]`: `key_store`.
 - `[audit]`: `path`, `max_bytes`(64MiB), `retain`(5), `queue_depth`(1024).

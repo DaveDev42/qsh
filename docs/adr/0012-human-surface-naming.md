@@ -55,3 +55,7 @@
 - 구 표기(`qsh reverse`, `qsh trust invite`/`accept`)를 이번에 즉시 제거한다. 기각한다. alpha 기간에 사람이 손으로 만든 unit·스크립트·셸 별칭이 구 명령줄을 그대로 고정해 갖고 있을 수 있고, 그 실패는 로그 없이는 안 보인다.
 - `[reverse].controller`를 이번에 폐기하고 `[serve].to` 단일 키만 지원한다. 기각한다. 그 필드는 오늘도 `qsh doctor`의 유일한 실제 소비자(`controller_unreachable` 판정)라 폐기하면 doctor의 기존 동작이 깨진다. 이중 읽기가 이번 개명의 실제 이행 비용을 doctor 쪽에서 없애 준다.
 - `pair accept`의 `code`를 선택 인자로 바꾸거나 `--code-stdin`을 추가해 argv 노출(셸 히스토리, 같은 호스트 다른 사용자의 `ps`)을 없앤다. ADR-0013 결정 8이 해소한다. 이 ADR이 `serve --pair`를 기각하며 든 stderr 노출(10분 TTL 비밀)과 이 argv 노출은 같은 비밀의 다른 두 노출 축이다.
+
+## 개정 이력
+
+- 2026-11-11 ADR-0059가 `qsh listen --serve`와 `[listen].serve`로 listener와 정방향 host를 한 프로세스에 합치는 길을 열었다. 이 ADR의 "`serve`와 `listen`은 서로 다른 프로세스의 두 역할"이라는 서술은 합치지 않은 구성에서 그대로이고, `serve --pair` 기각 사유도 바뀌지 않는다. 결정 본문은 고치지 않았다.
