@@ -116,6 +116,11 @@ M26이 남긴 후속이다(ADR-0056·ADR-0058 개정 이력).
 - [ ] 결정 25.3의 datagram·스트림 p95 비교는 출력만 하고 단언하지 않는다. C–J–T에서 차가 약 5%로 얇다.
 - [ ] 한 hop 처리량 비율은 조용한 WSL에서 0.68~0.73이고 CI acceptance(debug 빌드)에서는 runner 부하에 따라 하한 0.5에 가까울 수 있다. 붉어지면 재전송 비율(`jump_perf` 출력)부터 본다.
 
+M27이 남긴 후속이다(ADR-0059 개정 이력).
+
+- [ ] 합친 endpoint를 hop으로 쓰는 `-J`는 testkit(`every_feature_with`) 안에서만 시험된다. 진짜 바이너리 시험은 호스트-로컬 hop 거부를 끄는 `set_jump_options` 훅이 바이너리에 없어서 빠졌다(ADR-0059 개정 이력 2026-11-12).
+- [ ] DoD 27.9의 재다이얼 `attempts` 10은 합친 endpoint에서만 확인했다. 단독 serve에 같은 8 s blackhole을 건 대조 실험은 없다. 기본 3으로 회복이 늦는 원인이 합친 모드 고유인지 가르려면 이 대조부터 한다.
+
 M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4b272`, 신호 사건 실측 둘(결정 22)은 `a475f08`이 닫았다.
 
 ## 2. 테스트 환경
@@ -129,13 +134,33 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 각 스텝은 PR 하나 크기다. 스텝마다 그 스텝의 시험과 일곱 게이트가 초록이어야 닫힌다. 순서는 위에서 아래다. wire 변경은 없고, 계약(키·플래그·doctor 코드) 스텝은 ADR-0059 승인 뒤에 연다(2026-11-11 승인됨).
 
 - [x] **범위 ADR(ADR-0059).** 2026-11-11 승인(Dave 결정, 정할 것 네 항목 모두 (가)).
-- [ ] **공유 부품.** `host_runtime`을 공유 부품(`Gate`, `Quotas`, 감사 sink, `Authorizer`, trust watch, reset key)을 받는 부분과 broker·`Server`를 만드는 부분으로 나누고, `Listen::with_admission_and_quotas`도 같은 부품을 받게 한다. 동작 변경 없음, 기존 시험 초록.
-- [ ] **등록 갈래.** `Server`에 `Option<Arc<Listen>>`, `respond` 콜백의 `UNSUPPORTED` 자리에 `decide_registration`, 등록 연결은 `finish_registration`으로. 결정 4·6·7·8·9, DoD 27.1의 등록 행·27.6·27.7.
-- [ ] **펀칭 가로채기.** 첫 요청 `PunchRequest`의 전환, 16개 permit, 3초 규칙, 굳은 연결의 `UNSUPPORTED`. 결정 5·13, DoD 27.1·27.2·27.4.
-- [ ] **수명.** SIGTERM 순서와 배너, localctl, `serve.json`, pairing, agent 디렉터리. 결정 15~19, DoD 27.8·27.11.
-- [ ] **표면.** `[listen].serve`·`--serve`, config 레지스트리, doctor 코드 둘, service 안내문, man page. 결정 20~23, DoD 27.10.
-- [ ] **수용 시험.** 두 역할 동시(L3), 인가 행렬, recovery(L4), 성능, 세 OS. DoD 27.3·27.5·27.9·27.12·27.13.
-- [ ] **문서와 마감.** `docs/CLI.md`, protocol §11·§15.1·§19, architecture, threat model 결정 26의 행, ADR-0012·0014·0054 개정 이력, README, ROADMAP M27 마감 노트. DoD 27.14·27.15.
+- [x] **공유 부품.** (`d1644bc`) `host_runtime`을 공유 부품(`Gate`, `Quotas`, 감사 sink, `Authorizer`, trust watch, reset key)을 받는 부분과 broker·`Server`를 만드는 부분으로 나누고, `Listen::with_admission_and_quotas`도 같은 부품을 받게 한다. 동작 변경 없음, 기존 시험 초록.
+- [x] **등록 갈래.** (`c6e2434`) `Server`에 `Option<Arc<Listen>>`, `respond` 콜백의 `UNSUPPORTED` 자리에 `decide_registration`, 등록 연결은 `finish_registration`으로. 결정 4·6·7·8·9, DoD 27.1의 등록 행·27.6·27.7.
+- [x] **펀칭 가로채기.** (`2ff1dfe`) 첫 요청 `PunchRequest`의 전환, 16개 permit, 3초 규칙, 굳은 연결의 `UNSUPPORTED`. 결정 5·13, DoD 27.1·27.2·27.4.
+- [x] **수명.** (`b5f6c9e`) SIGTERM 순서와 배너, localctl, `serve.json`, pairing, agent 디렉터리. 결정 15~19, DoD 27.8·27.11.
+- [x] **표면.** (`a08d769`) `[listen].serve`·`--serve`, config 레지스트리, doctor 코드 둘, service 안내문, man page. 결정 20~23, DoD 27.10.
+- [x] **수용 시험.** (`187e585`, 리뷰 보강 `f9b21d4`·`882a775`) 두 역할 동시(L3), 인가 행렬, recovery(L4), 성능, 세 OS. DoD 27.3·27.5·27.9·27.12·27.13.
+- [x] **문서와 마감.** (`34dd790`) `docs/CLI.md`, protocol §11·§15.1·§19, architecture, threat model 결정 26의 행, ADR-0012·0014·0054 개정 이력, README, ROADMAP M27 마감 노트. DoD 27.14·27.15.
+
+### 3.1 결정 27 대응표
+
+| DoD | 근거 |
+|---|---|
+| 27.1 갈림 표 | `combined_dispatch_table`(`c6e2434`·`2ff1dfe`) |
+| 27.2 조용한 정방향 client, 펀칭 상한 | `a_quiet_forward_client_on_a_combined_endpoint_is_not_closed_as_punch` 외(`2ff1dfe`) |
+| 27.3 두 역할 동시 | `combined_endpoint_serves_registration_and_forward_at_once`(`187e585`), 진짜 바이너리 `combined_accept`(`f9b21d4`). `-J`는 testkit 안에서만(ADR-0059 개정 이력 2026-11-12) |
+| 27.4 펀칭 | `punch_through_a_combined_rendezvous`, `punch_route_nat_matrix`의 합친 R seed(`2ff1dfe`) |
+| 27.5 인가와 감사 | `combined_role_matrix`(`187e585`, file·tunnel 확장 `f9b21d4`, Windows 경로 `882a775`) |
+| 27.6 quota | 네 시험(`d1644bc`·`c6e2434`) |
+| 27.7 회귀 없음 | `listen_without_serve_hello_is_unchanged`, `capabilities.json` diff 0(`c6e2434`) |
+| 27.8 수명 | `combined_sigterm_drains_sessions_and_closes_registrations`, `serve.json`·부트스트랩(`b5f6c9e`) |
+| 27.9 recovery | `combined_endpoint_recovers_both_roles_after_a_blackhole`(`187e585`, 8 s와 generation 단언 `f9b21d4`) |
+| 27.10 표면 | `listen_serve_flag_and_config_key`, doctor 코드 둘과 fixture, man(`a08d769`) |
+| 27.11 pairing | `pair_invite_redeems_on_a_combined_endpoint`(`b5f6c9e`) |
+| 27.12 성능 | `combined_tunnel_echo_under_load`, 로컬 p95 1.8 ms(`187e585`) |
+| 27.13 세 OS | CI 세 OS, Windows 수명(ConPTY와 named pipe 한 프로세스, `f9b21d4`), Dave-Windows 4371/4371 |
+| 27.14 fuzz | wire 변경 없음, 타깃 28 그대로 |
+| 27.15 문서 | `34dd790`(CLI v0.102, threat model A26·B52·B53·C29·C30·D27·G14·h63~h66) |
 
 ## 4. M27 뒤 dave-environment
 
