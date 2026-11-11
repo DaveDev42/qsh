@@ -1,13 +1,15 @@
 //! L4 for the combined endpoint (ADR-0059 DoD 27.9, `docs/design/testing.md`
 //! L4): one chaos proxy sits in front of the endpoint's one UDP port, so the
 //! registration of a reverse target and the forward session of a client
-//! cross the same path. A 5 s blackhole takes both away at once, and the
+//! cross the same path. An 8 s blackhole (longer than the registration's 5 s
+//! detection ceiling, so the registration must re-form) takes both away at once, and the
 //! test holds the endpoint to what each role owes after it:
 //!
 //! - the registration stands again inside the ADR-0041 budget (the reverse
 //!   registration's detection ceiling plus the target's backoff plus the 2 s
 //!   resume bound plus slack), shown by a real exec over the reverse route
-//!   through the endpoint's localctl daemon;
+//!   through the endpoint's localctl daemon and by the registry entry's
+//!   `generation`, which only a new registration can raise;
 //! - the forward session is the same session (one `session_ref`, one live
 //!   session on the host's broker), its output tiles the stream with no gap
 //!   and no redelivery, and the input typed before, during and after the
@@ -33,8 +35,13 @@ use qsh_transport::{Principal, StaticTrust};
 use super::combined_accept::{client, pin, target_paths};
 use super::jump_chain::{blocking, echo_argv, exec, stdout_of};
 
-/// How long the proxy swallows every datagram.
-const BLACKHOLE: Duration = Duration::from_secs(5);
+/// How long the proxy swallows every datagram. It has to outlast the
+/// registration's detection ceiling below, or the registered connection could
+/// ride the outage out (QUIC's own idle timeout is 45 s) and never re-form:
+/// the test would then pass without the re-registration it exists to prove.
+/// With 8 s the target's and the controller's path watches must both declare
+/// the path dead before the proxy gives it back.
+const BLACKHOLE: Duration = Duration::from_secs(8);
 
 /// ADR-0041 decision 4: the registration's detection ceiling.
 const REVERSE_DETECTION_CEILING: Duration = Duration::from_millis(5_000);
@@ -177,8 +184,14 @@ async fn combined_endpoint_recovers_both_roles_after_a_blackhole() {
         migration: false,
         // Enough attempts to outlast the blackhole: each redial is bounded
         // by REDIAL_DEADLINE, and one begun inside the outage carries the
-        // QUIC handshake's retransmission backoff past the end of it
-        // (`status_line.rs` does the same for its 6 s blackout).
+        // QUIC handshake's retransmission backoff past the end of it. This
+        // is a property of the forward route and the outage, not of the
+        // combined endpoint: `status_line.rs` needs the same 10 against a
+        // standalone `qsh serve` for its 6 s blackout. With the default 3
+        // attempts this test fails ("not recovered within 2000 ms": all
+        // three redials, 3 x REDIAL_DEADLINE, fall inside the 8 s outage);
+        // the forward half of the endpoint is the standalone `Server`, so
+        // nothing about it asks for more than a standalone serve does.
         attempts: 10,
         ..RecoveryConfig::default()
     });
@@ -375,13 +388,22 @@ async fn combined_endpoint_recovers_both_roles_after_a_blackhole() {
             "the forward session took {forward_took:?}, over {forward_budget:?} — {}",
             chaos.detail()
         );
+        // The registration re-formed: a connection that rode the outage out
+        // would still hold the baseline generation.
+        let final_generation = h
+            .listen
+            .registry()
+            .get("widget")
+            .expect("registered after the blackhole")
+            .generation;
+        assert!(
+            final_generation > baseline_generation,
+            "the registration was never replaced (generation {baseline_generation} -> \
+             {final_generation}) — {ctx}"
+        );
         eprintln!(
-            "recovery: forward {forward_took:?}, reverse {reverse_took:?}, generation {} -> {}",
-            baseline_generation,
-            h.listen
-                .registry()
-                .get("widget")
-                .map_or(0, |e| e.generation)
+            "recovery: forward {forward_took:?}, reverse {reverse_took:?}, generation \
+             {baseline_generation} -> {final_generation}"
         );
 
         let ops_close = ops.clone();

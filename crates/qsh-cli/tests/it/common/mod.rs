@@ -1134,6 +1134,12 @@ impl ListenGuard {
             .clone()
     }
 
+    /// The live capture itself, for a caller that polls after the child is
+    /// gone (the reader thread may still be copying its last lines).
+    pub fn stderr_sink(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.stderr)
+    }
+
     /// Attempt to start `qsh listen --bind <bind>`, but do not block
     /// waiting for a "listening on" line — for a bind-conflict scenario
     /// where the child is expected to fail setup and exit instead.

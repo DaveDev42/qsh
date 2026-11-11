@@ -70,7 +70,7 @@ const PAYLOAD_LEN: usize = 96 * 1024;
 /// until the peer half-closes, then this side half-closes too. The
 /// accept loop is detached — it lives as long as the test process, which
 /// under `nextest` is one process per test.
-fn start_echo() -> SocketAddr {
+pub(crate) fn start_echo() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind the echo server");
     let addr = listener.local_addr().expect("echo server address");
     thread::spawn(move || {
@@ -89,7 +89,7 @@ fn start_echo() -> SocketAddr {
 
 /// `PAYLOAD_LEN` bytes that are not a repeat of any single buffer's worth,
 /// so a mis-ordered or dropped chunk cannot look correct.
-fn payload() -> Vec<u8> {
+pub(crate) fn payload() -> Vec<u8> {
     (0..PAYLOAD_LEN)
         .map(|i| (i % 251) as u8)
         .collect::<Vec<u8>>()
@@ -101,7 +101,7 @@ fn payload() -> Vec<u8> {
 /// One socket handle on one thread
 /// ([`qsh_testkit::tunnel::echo_round_trip`] explains why a `try_clone`
 /// writer thread is wrong on Windows under load).
-fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
+pub(crate) fn round_trip(port: u16, payload: Vec<u8>) -> std::io::Result<Vec<u8>> {
     qsh_testkit::tunnel::echo_round_trip(port, &payload, IO_TIMEOUT)
 }
 
@@ -216,7 +216,7 @@ impl PtyClient {
 /// A running `qsh tunnel open … --json` child, killed on drop. The
 /// process *is* the tunnel's holder (M4 plan §4.1 #1 (2473c88)), so there is no
 /// close RPC: killing it is the whole teardown.
-struct TunnelGuard {
+pub(crate) struct TunnelGuard {
     child: Child,
     stdout: BufReader<std::process::ChildStdout>,
 }
@@ -224,7 +224,7 @@ struct TunnelGuard {
 impl TunnelGuard {
     /// Start a `"local"`-mode (`--local`) child. See [`Self::start_mode`]
     /// for the general form `--remote` also uses.
-    fn start(client: &Sandbox, spec: &str) -> (Self, Value) {
+    pub(crate) fn start(client: &Sandbox, spec: &str) -> (Self, Value) {
         Self::start_mode(client, "--local", spec)
     }
 
@@ -232,7 +232,7 @@ impl TunnelGuard {
     /// prints before it starts holding. `flag` is `"--local"` or
     /// `"--remote"` (`docs/CLI.md` §6.9) — the two are mutually exclusive
     /// on `qsh tunnel open`, so exactly one is ever passed.
-    fn start_mode(client: &Sandbox, flag: &str, spec: &str) -> (Self, Value) {
+    pub(crate) fn start_mode(client: &Sandbox, flag: &str, spec: &str) -> (Self, Value) {
         let mut command: Command =
             client.command(&["tunnel", "open", HOST_ALIAS, flag, spec, "--json"]);
         let mut child = command
@@ -259,7 +259,7 @@ impl TunnelGuard {
     }
 
     /// Whether the child is still holding the tunnel.
-    fn is_running(&mut self) -> bool {
+    pub(crate) fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
 
@@ -267,7 +267,7 @@ impl TunnelGuard {
     /// which must be nothing: machine mode is one JSON line per command
     /// (`docs/CLI.md` §2.2), and the end of a held tunnel is reported on
     /// stderr.
-    fn finish(mut self) -> String {
+    pub(crate) fn finish(mut self) -> String {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let mut rest = String::new();
@@ -305,7 +305,12 @@ fn drain_stderr(child: &mut Child) -> String {
 /// from being *on disk*. Waiting for `want` and then demanding exactly
 /// `want` is what makes "one decision per tunnel connection" a real
 /// assertion instead of a race.
-fn forward_audit(host: &Sandbox, action: &str, resource: &str, want: usize) -> Vec<Value> {
+pub(crate) fn forward_audit(
+    host: &Sandbox,
+    action: &str,
+    resource: &str,
+    want: usize,
+) -> Vec<Value> {
     let records = common::poll_until(
         &format!("{want} {action} record(s) for {resource}"),
         IO_TIMEOUT,

@@ -7,13 +7,21 @@
 //! `combined_lifecycle::*`); this file proves them against real children:
 //! `qsh listen` with the key in its `config.toml`, `qsh serve --to` as the
 //! registered target, and a client with a session of its own.
-
-#![cfg(unix)]
+//!
+//! Every OS runs these (DoD 27.13). The stop differs: SIGTERM on unix,
+//! `CTRL_BREAK` to the child's process group on Windows (`common::send_stop`,
+//! the event a console close or a service stop becomes). So does the proof
+//! that no session child survives: `kill -0` on a pid the shell printed on
+//! unix, the marker file of `qsh_testkit::shell::Runaway` on Windows
+//! (`windows_drain.rs`). Both versions of the drain test carry the same name.
 
 use crate::common;
+#[cfg(unix)]
 use crate::serve_sigterm_drain::{
     DRAIN_BOUND, child_script, ops_for, read_closed_reason, read_pid, with_deadline,
 };
+#[cfg(windows)]
+use crate::windows_drain::{DRAIN_BOUND, assert_drained, drain_two_sessions, with_deadline};
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,8 +30,11 @@ use common::{
     CLIENT_ALIAS, HOST_ALIAS, ListenGuard, ReverseGuard, Sandbox, exit_code, hosts_array,
     poll_until,
 };
+#[cfg(unix)]
 use nix::sys::signal::kill;
+#[cfg(unix)]
 use nix::unistd::Pid;
+#[cfg(unix)]
 use qsh_proto::{EnvVar, SessionAttachReq, SessionOpenReq};
 use qsh_testkit::fake_ssh::FakeSsh;
 use serde_json::Value;
@@ -45,6 +56,7 @@ fn serve_record(sandbox: &Sandbox) -> Option<Value> {
 /// nothing answers for the session's child, `serve.json` is gone, and the
 /// banner that says sessions live in this process was printed. The `drained`
 /// line carries counts only.
+#[cfg(unix)]
 #[test]
 fn combined_sigterm_drains_sessions_and_closes_registrations() {
     with_deadline("combined sigterm", || {
@@ -169,6 +181,99 @@ fn combined_sigterm_drains_sessions_and_closes_registrations() {
             "{lines:?}"
         );
         stream.close();
+        target_proc.shut_down();
+    });
+}
+
+/// The Windows twin of the test above, same name: `CTRL_BREAK` to a combined
+/// `qsh listen` that has a registered target, one attached session and one
+/// detached session. The process exits `0`, the attached consumer's last word
+/// is `session.closed{reason:"closed"}`, no process of either session
+/// survives (`Runaway`'s marker files), the `drained` line counts the two
+/// sessions, the target hears its registration close at once (`lost` with
+/// `peer_closed`, not an idle timeout), `serve.json` is gone, and the
+/// banner and both startup lines were printed.
+#[cfg(windows)]
+#[test]
+fn combined_sigterm_drains_sessions_and_closes_registrations() {
+    with_deadline("combined stop", || {
+        let host = Sandbox::initialized();
+        std::fs::write(host.config_dir().join("config.toml"), COMBINED).unwrap();
+        let target = Sandbox::initialized();
+        let client = Sandbox::initialized();
+        let (host_fp, target_fp, client_fp) = (
+            host.fingerprint(),
+            target.fingerprint(),
+            client.fingerprint(),
+        );
+        host.trust_add("widget", None, &target_fp);
+        host.trust_add_with_role(CLIENT_ALIAS, None, &client_fp, "none");
+
+        let mut listen = ListenGuard::start_with(&host, "127.0.0.1:0");
+        let addr = listen.addr().to_string();
+        client.trust_add(HOST_ALIAS, Some(&addr), &host_fp);
+        target.trust_add("ctl", Some(&addr), &host_fp);
+        let target_proc = ReverseGuard::start_serve_to(&target, "ctl");
+        poll_until("the target's registration", Duration::from_secs(30), || {
+            hosts_array(&host)
+                .iter()
+                .any(|h| h["connection_mode"] == "reverse" && h["state"] == "reachable")
+                .then_some(())
+        });
+
+        let lines = listen.stderr_lines();
+        let at = |prefix: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no `{prefix}` line in {lines:?}"))
+        };
+        assert!(
+            at("qsh listen: listening on ") < at("qsh serve: listening on "),
+            "serve's address line follows listen's: {lines:?}"
+        );
+        at("qsh serve: sessions live inside this process");
+        let record = serve_record(&host).expect("serve.json while running");
+        assert_eq!(record["mode"], "persistent", "{record}");
+        assert_eq!(record["pid"].as_u64(), Some(u64::from(listen.pid())));
+        assert_eq!(record["addr"], addr.as_str(), "{record}");
+
+        let run = drain_two_sessions(&client, HOST_ALIAS, || {
+            listen.terminate();
+            let status = listen.wait_timeout(DRAIN_BOUND).unwrap_or_else(|| {
+                panic!("the combined listen did not exit within {DRAIN_BOUND:?}")
+            });
+            let stderr = listen.stderr_sink();
+            (
+                status.success(),
+                Box::new(move || stderr.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+            )
+        });
+        assert_drained(&run);
+
+        poll_until(
+            "the target to hear its registration close",
+            Duration::from_secs(10),
+            || {
+                target_proc
+                    .stderr_snapshot()
+                    .iter()
+                    .any(|l| l.contains("\"event\":\"lost\"") && l.contains("peer_closed"))
+                    .then_some(())
+            },
+        );
+        assert!(
+            serve_record(&host).is_none(),
+            "a clean exit removes serve.json"
+        );
+        assert!(
+            listen
+                .stderr_lines()
+                .iter()
+                .any(|l| l == "qsh listen: shutting down"),
+            "{:?}",
+            listen.stderr_lines()
+        );
         target_proc.shut_down();
     });
 }
