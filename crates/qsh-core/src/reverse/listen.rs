@@ -634,6 +634,20 @@ impl Listen {
         self.rendezvous.set_enabled(enabled);
     }
 
+    /// Whether this listener relays punch requests (`[punch].mode`, ADR-0054
+    /// decision 19). A combined endpoint's `Server` asks before it turns a
+    /// forward connection into a punching one (ADR-0059 decision 5).
+    pub(crate) fn punch_enabled(&self) -> bool {
+        self.rendezvous.enabled()
+    }
+
+    /// A slot against `RENDEZVOUS_MAX_CLIENTS` for one more punching
+    /// connection, or `None` at the cap. The permit is held for as long as
+    /// the connection stays a punching one.
+    pub(crate) fn try_punch_client(&self) -> Option<OwnedSemaphorePermit> {
+        self.rendezvous.try_client()
+    }
+
     /// Punching connections open now (tests and diagnostics).
     pub fn punch_connections(&self) -> usize {
         self.rendezvous.clients()

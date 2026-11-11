@@ -37,6 +37,70 @@ use qsh_transport::{
 use crate::loopback::{TestIdentity, make_identity};
 use crate::reverse::{forward_hello, reverse_hello};
 
+/// The two roles of a combined endpoint, assembled the way the production
+/// runtime does: a [`Server`] in front, a [`Listen`] attached to it, both
+/// built on the one `authorizer`, `sink`, `gate` and `quotas` given.
+pub struct Roles {
+    /// The front of the endpoint.
+    pub server: Arc<Server>,
+    /// The controller attached to it.
+    pub listen: Arc<Listen>,
+    /// The server's session broker (pipe-backed sources, real clock).
+    pub broker: Arc<Broker>,
+    /// The test's side of every session child.
+    pub pipes: Arc<PipeFactory>,
+}
+
+/// Build [`Roles`] without binding anything, so a test can run
+/// `roles.server.clone().run(listener, ..)` on a listener of its own (a
+/// netsim one, for instance). Spawns the broker's reaper and the listen
+/// controller's stale sweeper, as the real runtime does.
+pub fn build_roles(
+    authorizer: Arc<dyn Authorizer>,
+    sink: Arc<dyn AuditSink>,
+    gate: Arc<Gate>,
+    quotas: Arc<Quotas>,
+    limits: QuotaLimits,
+) -> Roles {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let pipes = Arc::new(PipeFactory::new(64 * 1024));
+    let broker = Broker::new(
+        clock.clone(),
+        BrokerConfig {
+            replay_bytes: 64 * 1024,
+            resume_ttl: Duration::from_secs(3600),
+            close_grace: Duration::from_millis(100),
+            quota_limits: limits,
+        },
+        pipes.clone(),
+    );
+    tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
+
+    let listen = Listen::with_admission_and_quotas(
+        Registry::new(clock.clone(), false),
+        authorizer.clone(),
+        sink.clone(),
+        "box",
+        clock,
+        Duration::from_secs(120),
+        STALE_SWEEP_TICK,
+        gate.clone(),
+        quotas.clone(),
+    );
+    tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+    let server =
+        Server::with_admission_and_quotas(authorizer, sink, broker.clone(), "box", gate, quotas);
+    server
+        .set_listen(listen.clone())
+        .expect("the roles are built on one set of parts");
+    Roles {
+        server,
+        listen,
+        broker,
+        pipes,
+    }
+}
+
 /// A combined endpoint on `127.0.0.1:0`; see the module docs.
 pub struct CombinedHarness {
     /// The front of the endpoint: the host that serves the forward roles.
@@ -161,42 +225,12 @@ impl CombinedHarness {
             )
         });
 
-        let pipes = Arc::new(PipeFactory::new(64 * 1024));
-        let broker = Broker::new(
-            clock.clone(),
-            BrokerConfig {
-                replay_bytes: 64 * 1024,
-                resume_ttl: Duration::from_secs(3600),
-                close_grace: Duration::from_millis(100),
-                quota_limits: limits,
-            },
-            pipes.clone(),
-        );
-        tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-
-        let listen = Listen::with_admission_and_quotas(
-            Registry::new(clock.clone(), false),
-            authorizer.clone(),
-            sink.clone(),
-            "box",
-            clock,
-            Duration::from_secs(120),
-            STALE_SWEEP_TICK,
-            gate.clone(),
-            quotas.clone(),
-        );
-        tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
-        let server = Server::with_admission_and_quotas(
-            authorizer,
-            sink,
-            broker.clone(),
-            "box",
-            gate.clone(),
-            quotas.clone(),
-        );
-        server
-            .set_listen(listen.clone())
-            .expect("the harness builds both roles on one set of parts");
+        let Roles {
+            server,
+            listen,
+            broker,
+            pipes,
+        } = build_roles(authorizer, sink, gate.clone(), quotas.clone(), limits);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(server.clone().run(listener, async move {

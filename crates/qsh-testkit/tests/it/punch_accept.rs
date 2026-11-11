@@ -153,7 +153,7 @@ impl Run {
     }
 }
 
-async fn run_pair((a, b, seed, loss): Job) -> Run {
+async fn run_pair((a, b, seed, loss): Job, combined_r: bool) -> Run {
     let w = world(WorldOptions {
         a_nat: a,
         b_nat: b,
@@ -161,6 +161,7 @@ async fn run_pair((a, b, seed, loss): Job) -> Run {
         pin_b_address: false,
         seed,
         a_b_loss: loss,
+        combined_r,
         ..WorldOptions::default()
     })
     .await;
@@ -179,12 +180,12 @@ async fn run_pair((a, b, seed, loss): Job) -> Run {
 }
 
 /// Five pairs side by side (the clocks are real, the links only sleep).
-async fn run_chunk(jobs: &[Job]) -> Vec<Run> {
+async fn run_chunk(jobs: &[Job], combined_r: bool) -> Vec<Run> {
     assert!(jobs.len() <= 5);
     let job = |i: usize| jobs.get(i).copied();
     let run = |i: usize| async move {
         match job(i) {
-            Some(j) => Some(run_pair(j).await),
+            Some(j) => Some(run_pair(j, combined_r).await),
             None => None,
         }
     };
@@ -201,8 +202,20 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 /// `punch.reason = timeout` inside the signalling budget plus the window.
 #[tokio::test(flavor = "multi_thread")]
 async fn punch_route_nat_matrix() {
+    nat_matrix(false).await;
+}
+
+/// ADR-0059 DoD 27.4: the same table with R a combined `listen --serve`
+/// endpoint. One seed, whatever the gate: the rendezvous is the same code and
+/// the five-seed p95 belongs to the bare listener above.
+#[tokio::test(flavor = "multi_thread")]
+async fn punch_route_nat_matrix_through_a_combined_rendezvous() {
+    nat_matrix(true).await;
+}
+
+async fn nat_matrix(combined_r: bool) {
     capture_adopted();
-    let slow = slow_gate();
+    let slow = slow_gate() && !combined_r;
     let seeds: Vec<u64> = if slow { vec![1, 2, 3, 4, 5] } else { vec![1] };
     let budget = PUNCH_SIGNAL_BUDGET + PUNCH_WINDOW;
 
@@ -224,7 +237,7 @@ async fn punch_route_nat_matrix() {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        let runs = run_chunk(chunk).await;
+        let runs = run_chunk(chunk, combined_r).await;
         let mut wins = 0;
         for run in runs {
             let who = run.who();
@@ -327,7 +340,7 @@ async fn punch_route_nat_matrix_survives_five_percent_ab_loss() {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        let runs = run_chunk(chunk).await;
+        let runs = run_chunk(chunk, false).await;
         let wins = runs.len();
         for run in runs {
             let who = run.who();

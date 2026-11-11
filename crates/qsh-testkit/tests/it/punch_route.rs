@@ -199,6 +199,10 @@ pub(super) struct WorldOptions {
     /// Loss on the A to B public path, both directions. Signalling runs over
     /// the A to R and B to R links, which stay clean.
     pub(super) a_b_loss: f64,
+    /// R is a combined `listen --serve` endpoint (ADR-0059): a `Server` in
+    /// front with the `Listen` attached, on the same socket, instead of a
+    /// bare `Listen`. A reaches it the same way.
+    pub(super) combined_r: bool,
 }
 
 /// The topology of a [`world`]. Everything but `Separate` is a scene of
@@ -238,6 +242,7 @@ impl Default for WorldOptions {
             seed: 7,
             layout: Layout::Separate,
             a_b_loss: 0.0,
+            combined_r: false,
         }
     }
 }
@@ -350,18 +355,41 @@ pub(super) async fn world(opts: WorldOptions) -> World {
     .unwrap();
     let r_audit = Arc::new(MemoryAuditSink::new());
     let clock: Arc<dyn qsh_core::broker::Clock> = Arc::new(SystemClock);
-    let r_listen = Listen::new(
-        Registry::new(clock.clone(), false),
-        Arc::new(AllowAll),
-        r_audit.clone(),
-        "controller-device",
-        clock,
-        Duration::from_secs(120),
-    );
     let (r_tx, r_rx) = oneshot::channel::<()>();
-    let r_task = tokio::spawn(r_listen.clone().run(r_listener, async move {
-        let _ = r_rx.await;
-    }));
+    let (r_listen, r_task) = if opts.combined_r {
+        let limits = qsh_core::quota::QuotaLimits::default();
+        let gate = Arc::new(qsh_core::admission::Gate::new(
+            clock.clone(),
+            qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            qsh_core::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        ));
+        let roles = qsh_testkit::combined::build_roles(
+            Arc::new(AllowAll),
+            r_audit.clone(),
+            gate,
+            qsh_core::quota::Quotas::new(limits, clock),
+            limits,
+        );
+        let listen = roles.listen.clone();
+        let task = tokio::spawn(roles.server.clone().run(r_listener, async move {
+            let _ = r_rx.await;
+        }));
+        (listen, task)
+    } else {
+        let listen = Listen::new(
+            Registry::new(clock.clone(), false),
+            Arc::new(AllowAll),
+            r_audit.clone(),
+            "controller-device",
+            clock,
+            Duration::from_secs(120),
+        );
+        let task = tokio::spawn(listen.clone().run(r_listener, async move {
+            let _ = r_rx.await;
+        }));
+        (listen, task)
+    };
 
     // B: the real `qsh serve --to r` entry on the virtual network.
     let dir = tempfile::tempdir().unwrap();
