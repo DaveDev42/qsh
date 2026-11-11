@@ -506,7 +506,13 @@ async fn combined_role_matrix_covers_files_streams_agent_and_socks() {
 
         // file.* : denied for the reverse role, as for every role without a
         // `paths` row.
-        let probe = "/srv/qsh-combined-probe/x";
+        // An absolute path on every OS: a Windows host rejects "/srv/..." as
+        // not absolute before the scope check runs.
+        let probe = if cfg!(windows) {
+            r"C:\qsh-combined-probe\x"
+        } else {
+            "/srv/qsh-combined-probe/x"
+        };
         for (name, body) in [
             (
                 "file.read",
