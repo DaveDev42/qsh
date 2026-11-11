@@ -9,6 +9,245 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.6.0`
+
+A minor release on top of `v0.5.8`. It ships the P2 milestones M21 to M26
+(ADR-0050 to ADR-0058), the combined `listen --serve` endpoint (M27,
+ADR-0059), and a security fix for direct dials (ADR-0060). Upgrade your
+clients. The fix is client-side, and it changes which servers a client
+accepts (see "Security fix" and "Behavior changes").
+
+### Security fix
+
+- A client that dialed a host by name accepted any server whose key was
+  pinned anywhere in the client's trust store, not only the key pinned
+  under that name. Take a client C with three pins: `ctl` (host A's key and
+  address), `other` (host B's key and address) and `mm` (host A's key with
+  host B's address). `qsh exec mm -- …` ran on B, and B's audit log
+  recorded an allowed `exec.run` from C. Authentication itself was not
+  bypassed, because B is a host C had pinned. But a name no longer meant
+  one key, so a command, a piped secret, a `qsh cp` upload or a `-L`
+  tunnel could land on a different pinned machine than the name promised.
+  Editing a `hosts.toml` address or one `trust.toml` address field was
+  enough to trigger it. It was reproduced on 0.4.3 and the same code path
+  was still in `v0.5.8`.
+- A direct dial by name now accepts only the server whose key matches that
+  name's pin. The check runs inside the TLS handshake, so a wrong server
+  gets no client certificate and no stream, and its audit log records
+  nothing. It covers `exec`, `session open`, `attach`, `cp`,
+  `capabilities`, `tunnel open` (including supervised redials), the
+  interactive form and its session recovery, the route and SSH-bootstrap
+  revival paths, and the registration dial of `qsh serve --to`. Jump hops
+  and hole punching already bound each step to its pin (ADR-0056, ADR-0054)
+  and are unchanged. The refusal is the existing `AUTH_FAILED` with
+  `details.category: "untrusted"`. There is no new error code and no new
+  JSON field.
+- A name with no pin (for example a name that exists only in `hosts.toml`,
+  or a controller that trusts only a CA) now accepts only a server whose
+  certificate chains to the trusted CA. It no longer accepts a server that
+  is pinned under some other name.
+- Servers are not affected: a server still accepts any client whose key is
+  pinned or chains to its CA, and the ACL decides what that client may do.
+  Upgrading clients is what closes the hole. An old client talking to a new
+  server stays exposed.
+
+### Behavior changes to expect
+
+These follow from the fix and can break setups that worked before.
+
+- A name whose address belongs to a different pinned host now fails with
+  `AUTH_FAILED` (`untrusted`). If you meant to reach that host through an
+  alias, re-pin the alias to that host's key.
+- A pinned host whose key was replaced, including a new key signed by your
+  CA, is refused under its old name. A CA signature on the same key keeps
+  working, because the pin is the SPKI hash and `qsh cert issue` does not
+  change it. A new key needs re-pinning through the normal path, for
+  example `qsh pair ssh --replace-pin`.
+- A `hosts.toml` name with no pin that points at a self-signed host which
+  you had pinned under another name is refused. Pin the host under that
+  name, or use the pinned name.
+- A pin whose fingerprint cannot be read gives `CONFIG_ERROR`. It is not
+  treated as an unpinned name.
+- A long-lived supervised tunnel or a session in recovery keeps the pin it
+  started with. If that pin is replaced meanwhile, the redial is refused
+  until the command is started again.
+- `qsh service install` now activates the unit by default. `--no-activate`
+  restores the old write-the-file-only behavior (ADR-0051).
+- In an interactive terminal, `--screen-sync` defaults to `auto`, and the
+  status line defaults to on. When the host supports screen sync, the
+  client draws the host's screen state instead of replaying its bytes.
+  `--screen-sync=off` restores the byte path. `--json`, `--jsonl`, `exec`,
+  `session read`, tunnels and `qsh cp` are unchanged.
+
+### New features
+
+- First connection without setup, and `ssh` compatibility (M21,
+  ADR-0051). `qsh [ssh options] [user@]host [command…]` follows `ssh`
+  syntax. It reads `~/.ssh/config` through `ssh -G` and takes `-l -p -i -F
+  -o -C -4 -6 -J -t -T -tt -N -f -E -e`. It rejects the options it cannot
+  honor (`-X -Y -W -M -S -O -w -b -B -c -m -Q`). Usage errors exit 255 as
+  `ssh` does. The escape sequences follow `ssh` (`~.` ends the session and
+  exits 255, `~d` detaches, plus `~^Z`, `~#`, `~&`). A trailing command
+  runs in the remote account's shell through the new `shell_command` field,
+  so Windows hosts take it too. On a first connection, one command finds
+  the remote `qsh`, or installs it with your consent into `~/.local/bin`
+  (`--install-remote`), starts a user-level `qsh serve` on demand, pins the
+  keys, and then connects over QUIC. `qsh service install` activates by
+  default, and `--always-on` runs the per-OS recipe for staying up after
+  logout. New: `qsh config get|set|unset|list`, `qsh trust allow|deny`
+  (grants finer than a role), and pin replacement on re-pairing.
+- Screen-state sync and adaptive transport (M22, ADR-0052). In the
+  interactive form the host keeps the terminal state and sends the client
+  only the difference from the current screen. A reattach gets one current
+  screen. When output backs up, intermediate screens are skipped.
+  Scrollback lines that scroll off the top still reach the local terminal.
+  Updates use QUIC DATAGRAM with a stream fallback. An adaptive policy,
+  computed from connection statistics, sets bulk-transfer yielding, the
+  update interval, the carrier, the prediction switch and a shorter
+  keep-alive after NAT rebinding. `qsh doctor <host>` now reports a
+  measured `data.transport`.
+- Local echo prediction and status line (M23, ADR-0053). Typed
+  characters are drawn at once, underlined until the host confirms them,
+  and turned off for echo-off input, full-screen programs and repeated
+  mispredictions. Secret input is never drawn. When the host stops
+  answering, the top line shows `qsh: last reply Ns ago`. Flags are
+  `--predict=auto|always|never` and `--status-line=on|off`, with config
+  keys under `[interactive]`.
+- Hole punching (M24, ADR-0054). A client that cannot reach a host
+  directly asks a peer both can reach (a rendezvous, normally the
+  controller a `qsh serve --to` host registered with) to exchange
+  candidate addresses, then both sides send at once and the first
+  completed handshake is used. There is no relay, TURN or public STUN
+  server. If punching fails, the client falls through to the next route.
+  Direct dial and punching race, and recovery and `--supervise` re-resolve
+  the route on each attempt. New: `--rendezvous <peer>`, a pin
+  `rendezvous` list, `qsh trust rendezvous`, and the `host.punch` ACL
+  action.
+- Agent forwarding (M25, ADR-0055). `-A` (and `-a`, `-o
+  ForwardAgent=yes|no|<path>|$VAR`, and the `agent.forward` config key)
+  lets the remote session use the local ssh-agent. It is off by default
+  and gated by the new `forward.agent` ACL action, which the `full` and
+  `exec` roles grant. It also works over reverse routes and on Windows
+  (named pipe). `qsh cp -A` exits 2.
+- Jump chaining (M26, ADR-0056 to ADR-0058). `-J <hops>`, the global
+  `--jump`, `-o ProxyJump=hops|none` and a pin-level `jump` list (set with
+  `qsh trust jump`) carry the QUIC connection through intermediate qsh
+  peers. Each hop relays UDP and never sees the session. The final host is
+  authenticated against its own pin, and every hop is checked against its
+  own pin. New ACL action: `forward.jump`. The SSH bootstrap copies a
+  `ProxyJump` chain into the pin when every hop is a qsh pin.
+- Combined endpoint (M27, ADR-0059). `qsh listen --serve` (or
+  `[listen].serve = true`) makes one `qsh listen` process also act as an
+  inbound `qsh serve` on the same UDP socket. It takes registrations from
+  `serve --to` hosts and also serves sessions, exec, tunnels, files, agent
+  forwarding, jump relay and pairing. Connections are sorted by
+  `Hello.reverse` (registration), a first `PunchRequest` (punching), or
+  forward otherwise. There is no wire change, and the flag does not
+  persist: set the config key to keep it. Serving several listeners over
+  one connection is out of scope.
+- Smaller changes since `v0.5.8` include a Windows host fix that stopped
+  `Ctrl-C` from being ignored in children, a fix for a localctl bind
+  `umask` that blocked concurrently created directories, and a fix for an
+  agent probe that took a delayed old frame as a live path.
+
+### Interoperability
+
+- The wire format is frozen (`docs/design/protocol.md` §16) and every
+  change since `v0.5.8` is additive: new optional fields on existing
+  messages (`shell_command`, `login_shell`, `ScreenRequest`, agent and
+  screen channels, grant results), new control and response tags in the
+  90s and 16 to 18, new session frames (screen update, ack, history,
+  echo), `StreamKind` values `AGENT` and `JUMP`, and new datagram kinds. No tag or field number was reused or
+  renumbered. Unknown fields are ignored and unknown stream kinds are
+  reset.
+- New features are negotiated as the intersection of the capability
+  strings both sides advertise. This build adds `shell-command.v1`,
+  `screen.v1`, `datagram.v1`, `screen-echo.v1`, `punch.v1`, `agent.v1` and
+  `jump.v1`. A feature that needs a capability the peer lacks is not used,
+  or fails with `UNSUPPORTED` before anything is sent.
+- `v0.5.x` and `v0.4.x` peers keep working with this build for everything
+  they supported before: attach, exec, sessions, tunnels, `cp`, pairing,
+  reverse registration and resume. The combined endpoint is invisible to
+  them, and an old client reaches it as it would reach a `qsh serve`.
+- What needs both sides on `v0.6.0`: screen sync, datagram transport and
+  prediction (host must advertise `screen.v1`, `datagram.v1`,
+  `screen-echo.v1`; otherwise the client uses the byte path and `--predict`
+  has nothing to draw on), `shell_command` on a Windows host or a trailing
+  command run through the remote shell, hole punching (the target and the
+  rendezvous both need `punch.v1`), agent forwarding (the host needs
+  `agent.v1`), and jump chaining (every hop and the final host need
+  `jump.v1`).
+- The ADR-0060 check runs in the client, so it does not change what an
+  old host accepts. The registration dial of a `v0.6.0` `qsh serve --to`
+  host also refuses a controller address that answers with a key other
+  than the controller's pin.
+
+### Contract changes
+
+- `qsh.cli/v1` and `qsh.event/v1` stay additive-only. New optional fields
+  and operations include `agent` on session and exec results, `jump` on
+  pins, `pair.ssh` results and error `details`, `always_on` on
+  `service.install` and `service.uninstall`, `data.transport` on
+  `doctor.run`, and `shell_command` on the session open request. New
+  operations: `config.get|set|unset|list`, `trust.allow|deny`,
+  `trust.set_jump` and `trust.set_rendezvous`. No existing field
+  changed type or was removed. No new `ErrorCode`.
+- The ACL action vocabulary grows by three, to 14: `host.punch`,
+  `forward.agent` and `forward.jump` are new (a `trust allow` or an
+  `[[acl]]` row can name them), and `acl show` / `acl check` list them.
+  Roles grant them as documented in `docs/CLI.md` §2.5. The always-deny
+  gate and default-deny are unchanged.
+- The doctor code set grows from 28 to 40: `screen_sync_unsupported`,
+  `datagram_unavailable`, `screen_echo_unsupported`, `punch_failed`,
+  `punch_no_rendezvous`, `punch_succeeded`, `agent_unreachable`,
+  `agent_dir_unusable`, `jump_hop_missing`, `jump_stream_carrier`,
+  `listen_serve_ignores_serve_bind` and `serve_unit_beside_listen_serve`.
+  Each has a new append-only fixture. Existing fixtures are unchanged.
+  `capabilities.json` was regenerated for the seven new capability strings.
+- New config keys include `[interactive].screen_sync`,
+  `[interactive].predict`, `[interactive].status_line`, `agent.forward`,
+  and `[listen].serve`, listed in
+  `docs/CLI.md` §6.23. Keys read only at startup report
+  `applies_from: "next_start"`.
+- The man pages in `docs/man/` were regenerated.
+
+### Assets and signing
+
+Unchanged from `v0.5.8`: the same nine assets plus `SHA256SUMS`, with
+`v0.6.0` in the names. `.github/workflows/release.yml` is identical to the
+one that built `v0.5.8`.
+
+### What is still unproven
+
+Everything `v0.5.8` lists, plus these items from the P2 work:
+
+- Hole punching has been measured only on simulated NATs and the Linux
+  kernel's own NAT in a network namespace (`punch-netns`, nine pairs
+  matched expectation in CI), not on real networks. The real-network round
+  in `docs/campaigns/m24-punch.md` (phone tethering behind CGNAT, a home
+  router, an office network, an IPv6-only network) has not been run.
+  `punch-netns` is not yet a required check.
+- The `--always-on` recipe (linger, LaunchDaemon, a Windows `Password`
+  task) is tested only down to the bytes it writes. Nobody has yet logged
+  out and checked that `qsh serve` stays up on each OS.
+- The Windows remote install script (`--install-remote` against a Windows
+  OpenSSH Server without `qsh`) is covered by string tests only.
+- The P0 rounds `v0.5.8` lists as open stay open: the macOS x86_64 clean
+  install and Gatekeeper rounds, the musl check on an old glibc
+  distribution, the SC1 stopwatch runs, and 60 or more real-device
+  mobility runs.
+- Throughput with screen sync on is 0.61 to 0.64 times the byte path in
+  the local test, close to the 0.5 floor the acceptance criterion sets. A
+  shared CI runner has gone over the idle-memory and echo-latency limits
+  once each in recent runs, and those limits are watched.
+- Combined `listen --serve` has acceptance tests (one endpoint serving
+  registration and forward at once, the role matrix, recovery after a 5
+  second blackhole). It has had no soak run and no real-network trial.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.5.8`
 
 A patch release on top of `v0.5.7` with one interactive client fix,
