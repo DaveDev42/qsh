@@ -62,8 +62,9 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0057](0057-jump-mtu-budget-correction.md) | ADR-0056 결정 5의 MTU 수치를 probe 측정으로 고친다. 한 겹 비용은 55바이트(jump 머리 17, 바깥 1-RTT 머리와 tag 29, DATAGRAM frame 머리 9)이고, 1500 링크의 안쪽 상한은 hop마다 1397·1342·1287·1232, IPv4 1280 링크도 첫 hop부터 스트림 운반체다. hop 상한 넷과 운반체 고르기 규칙은 그대로 | 승인됨 |
 | [0058](0058-jump-silence-window.md) | ADR-0056 결정 4의 침묵 전환 시한을 고친다. `4 × max(rtt, 50 ms) + 25 ms`이고, rtt는 client 쪽이 안쪽 연결(끝에서 끝)의 srtt, 중간 peer와 역방향 데몬은 바깥 연결의 srtt다 | 승인됨 |
 | [0059](0059-combined-listen-serve-endpoint.md) | `[listen].serve = true`(또는 `qsh listen --serve`)인 `qsh listen`이 같은 UDP 소켓에서 인바운드 `qsh serve` 노릇도 한다. 연결은 `Hello.reverse`가 있으면 등록, 첫 요청이 `PunchRequest`면 펀칭, 그 밖은 정방향으로 갈린다. wire 변경 없음 | 승인됨 |
+| [0060](0060-direct-dial-pin-binding.md) | client가 이름으로 dial하는 연결은 그 이름의 pin이 가진 키와 정확히 같은 서버만 받는다(다른 이름의 pin이나 CA 체인은 받지 않는다). pin이 없는 이름은 CA 경로의 서버만 받는다. 새 코드·필드 없이 `AUTH_FAILED`/`untrusted`, wire 변경 없음 | 승인됨 |
 
-P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회), 0044(SSH 부트스트랩), 0045(역할 기반 권한), 0046(dual-stack listener), 0047(Windows USR 신호의 종료 상태), 0048(재생분 질의 제거), 0049(독립 보안 리뷰 생략), 0050(P2 목표와 원칙), 0051(M21 범위), 0052(M22 범위), 0053(M23 범위), 0054(M24 범위), 0055(M25 범위), 0056(M26 범위), 0057(jump MTU 수치 정정), 0058(jump 침묵 전환 시한)이 받았으므로 다음 새 번호는 0059다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff), 0043(TCP fallback 철회), 0044(SSH 부트스트랩), 0045(역할 기반 권한), 0046(dual-stack listener), 0047(Windows USR 신호의 종료 상태), 0048(재생분 질의 제거), 0049(독립 보안 리뷰 생략), 0050(P2 목표와 원칙), 0051(M21 범위), 0052(M22 범위), 0053(M23 범위), 0054(M24 범위), 0055(M25 범위), 0056(M26 범위), 0057(jump MTU 수치 정정), 0058(jump 침묵 전환 시한), 0059(listen·serve 한 endpoint), 0060(직접 dial의 pin 결속)이 받았으므로 다음 새 번호는 0061이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0034 세션 거처(M18). 착수 조건(M8 DoD 3 기록)이 닫히면 쓴다
 
