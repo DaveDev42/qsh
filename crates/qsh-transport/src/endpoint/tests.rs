@@ -1,5 +1,5 @@
 use super::*;
-use crate::tls::StaticTrust;
+use crate::tls::{PeerBinding, StaticTrust};
 
 /// (b) `send_fairness` and the tunnel-sized `stream_receive_window`
 /// are actually set on the `TransportConfig` every dial/listen builds
@@ -918,4 +918,135 @@ fn transport_config_pins_bbr_and_datagram_buffers() {
             .is_ok(),
         "congestion controller is not BBR"
     );
+}
+
+/// A server that accepts every attempt and keeps the connections it got.
+fn serve_all(
+    server_id: LocalIdentity,
+    server_trust: StaticTrust,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(server_trust),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut kept = Vec::new();
+        while let Some(incoming) = listener.accept().await {
+            if let Ok(conn) = incoming.accept().await {
+                kept.push(conn);
+            }
+        }
+    });
+    (addr, task)
+}
+
+/// ADR-0060: a dial bound to a pin reaches that pin's key and nobody else,
+/// even when the store also pins the stranger or trusts the CA that signed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bound_dial_accepts_only_the_peer_it_names() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let ((_, other_fp), _) = test_pair();
+    let (addr, task) = serve_all(
+        server_id,
+        StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into())),
+    );
+    // The client pins the server under one name and a stranger's key under
+    // another, and has a pairing invite open.
+    let store = Arc::new(
+        StaticTrust::empty()
+            .with_pin(server_fp, Principal::Device("box".into()))
+            .with_pin(other_fp, Principal::Device("other".into()))
+            .with_pairing_open(true),
+    );
+    let dialer = Dialer::new(client_id, store);
+
+    // Its own pin: through, and the principal is the store's.
+    let ok = dialer
+        .bound_to(PeerBinding::Pin(server_fp))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("the pinned key is accepted");
+    assert_eq!(*ok.connection.principal(), Principal::Device("box".into()));
+    drop(ok);
+
+    // Another pin of the same store: refused, and the key that answered is
+    // reported so the caller can tell which one it was.
+    let err = dialer
+        .bound_to(PeerBinding::Pin(other_fp))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect_err("a different pin's server is refused");
+    match err {
+        DialError::LocalRejected { reason, observed } => {
+            assert_eq!(reason, RejectReason::Untrusted);
+            assert_eq!(observed, Some(server_fp));
+        }
+        other => panic!("expected a local rejection, got {other:?}"),
+    }
+
+    // A name without a pin accepts a CA leaf only: this server is pinned,
+    // not CA-issued, and an open pairing invite does not change that.
+    let err = dialer
+        .bound_to(PeerBinding::CaOnly)
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect_err("a pinned server does not answer a name without a pin");
+    assert!(matches!(
+        err,
+        DialError::LocalRejected {
+            reason: RejectReason::Untrusted,
+            ..
+        }
+    ));
+    task.abort();
+}
+
+/// ADR-0060: CA mode. A name without a pin reaches a CA-issued leaf, and a
+/// pin does not follow a re-issued leaf with a new key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dial_bound_to_the_ca_reaches_a_ca_leaf_and_a_pin_does_not_follow_a_new_key() {
+    let (_, (client_id, client_fp)) = test_pair();
+    let (ca_der, server_id) = ca_and_leaf("host");
+    let leaf_fp = Fingerprint::of_cert_der(&server_id.cert_chain[0]).unwrap();
+    let (addr, task) = serve_all(
+        server_id,
+        StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into())),
+    );
+    let ((_, old_key), _) = test_pair();
+    let dialer = Dialer::new(
+        client_id.clone(),
+        Arc::new(StaticTrust::empty().with_ca(ca_der)),
+    );
+
+    let ok = dialer
+        .bound_to(PeerBinding::CaOnly)
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("a CA-issued leaf answers a name without a pin");
+    assert_eq!(ok.connection.auth_path(), AuthPath::Ca);
+    assert_eq!(*ok.connection.principal(), Principal::Device("host".into()));
+    drop(ok);
+
+    // A pin on the old key does not admit the new, CA-issued key.
+    let err = dialer
+        .bound_to(PeerBinding::Pin(old_key))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect_err("the pin names a different key");
+    assert!(matches!(err, DialError::LocalRejected { .. }));
+
+    // A pin on the leaf's own key is the one thing a pin accepts.
+    let pinned = Dialer::new(
+        client_id,
+        Arc::new(StaticTrust::empty().with_pin(leaf_fp, Principal::Device("h".into()))),
+    );
+    pinned
+        .bound_to(PeerBinding::Pin(leaf_fp))
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("the leaf's own fingerprint is accepted");
+    task.abort();
 }

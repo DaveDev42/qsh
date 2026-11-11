@@ -116,6 +116,7 @@ impl Ops {
                 punch: None,
                 learn: None,
                 jump: None,
+                binding: target.binding,
             }),
             Err(err) => {
                 (revival.notice)(&format!(

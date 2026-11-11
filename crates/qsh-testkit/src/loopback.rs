@@ -348,6 +348,30 @@ impl LoopbackHarness {
             None,
             None,
             Some(sink),
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::start_custom`] with a caller-built host identity instead of a
+    /// fresh self-signed one: a host whose leaf a private CA issued, or one
+    /// that reuses a key. `server_identity` is what the host presents; the
+    /// harness's own client pins its fingerprint as `device:box`.
+    pub async fn start_with_server_identity(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+        server_identity: TestIdentity,
+    ) -> Self {
+        Self::start_inner_with_audit(
+            authorizer,
+            client,
+            server_trust,
+            None,
+            None,
+            None,
+            None,
+            Some(server_identity),
         )
         .await
     }
@@ -368,10 +392,12 @@ impl LoopbackHarness {
             admission,
             quota_limits,
             None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_inner_with_audit(
         authorizer: Arc<dyn Authorizer>,
         client: TestIdentity,
@@ -380,8 +406,9 @@ impl LoopbackHarness {
         admission: Option<(usize, u32, u32)>,
         quota_limits: Option<qsh_core::quota::QuotaLimits>,
         audit_sink: Option<Arc<dyn AuditSink>>,
+        server_identity: Option<TestIdentity>,
     ) -> Self {
-        let server_identity = make_identity();
+        let server_identity = server_identity.unwrap_or_else(make_identity);
         let client_pin = server_trust.lookup_pin(&client.fingerprint);
         let client_trust = StaticTrust::empty()
             .with_pin(server_identity.fingerprint, Principal::Device("box".into()));

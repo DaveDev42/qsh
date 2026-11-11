@@ -29,11 +29,7 @@ async fn dial_peer_as(
     kind: crate::ops::route::Dial,
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
     let device_name = target.identity.identity.device_id.clone();
-    let dialer = Dialer::new(
-        target.identity.local.clone(),
-        target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-    )
-    .with_tuning(tuning);
+    let dialer = Dialer::new(target.identity.local.clone(), target.evaluator()).with_tuning(tuning);
     let address = target.address.clone();
     let dialed = crate::ops::route::dial_routed(
         &dialer,

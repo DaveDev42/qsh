@@ -1674,3 +1674,115 @@ fn jitter_applies_to_the_quick_loss_delay_and_stays_in_its_band() {
         }
     }
 }
+
+/// ADR-0060: the registration dial of `qsh serve --to <controller>` reaches
+/// that controller's pin and nobody else. The controller `ctl` is pinned to
+/// A's key, but its address leads to B, which this host also pins as
+/// `other`. B is a trusted peer, so the old whole-store check accepted it;
+/// now the dial is a TLS rejection, and `other` itself still passes the
+/// handshake.
+#[tokio::test]
+async fn dial_and_register_refuses_a_pinned_stranger_at_the_controllers_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity_in = |name: &str| {
+        let paths = Paths::new(
+            dir.path().join(name).join("config"),
+            dir.path().join(name).join("state"),
+        );
+        crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+        crate::identity::load(&paths).unwrap().unwrap()
+    };
+    let (me, a, b) = (identity_in("me"), identity_in("a"), identity_in("b"));
+
+    // B accepts this host's key and answers every handshake.
+    let listener = qsh_transport::Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        b.local.clone(),
+        Arc::new(qsh_transport::StaticTrust::empty().with_pin(
+            me.identity.fingerprint,
+            qsh_transport::Principal::Device("hermes".into()),
+        )),
+    )
+    .unwrap();
+    let b_addr = listener.local_addr().unwrap();
+    let kept = tokio::spawn(async move {
+        let mut kept = Vec::new();
+        while let Some(incoming) = listener.accept().await {
+            if let Ok(conn) = incoming.accept().await {
+                kept.push(conn);
+            }
+        }
+    });
+
+    let paths = Paths::new(dir.path().join("me/config"), dir.path().join("me/state"));
+    let mut store = crate::trust::TrustStore::default();
+    store.add_peer(
+        "ctl",
+        Some(b_addr.to_string()),
+        a.identity.fingerprint,
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    store.add_peer(
+        "other",
+        Some(b_addr.to_string()),
+        b.identity.fingerprint,
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    store.save(&paths.trust_file()).expect("save trust.toml");
+    let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
+
+    let runtime = crate::serve::host_runtime(
+        &paths,
+        &Config::default(),
+        "hermes",
+        SharedTrustStore::open(paths.trust_file()).unwrap(),
+    );
+    let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
+        offered_name: "hermes".into(),
+        capabilities: Vec::new(),
+    }));
+    let endpoint = punch_endpoint(me.local.clone(), &trust);
+    endpoint.set_dial_timeout(std::time::Duration::from_secs(5));
+
+    struct Fixed(std::net::SocketAddr);
+    impl crate::ops::AddressResolver for Fixed {
+        fn resolve_all<'a>(&'a self, _address: &'a str) -> crate::ops::ResolveFuture<'a> {
+            let addr = self.0;
+            Box::pin(async move { Ok(vec![addr]) })
+        }
+    }
+
+    let Err((err, cause)) = dial_and_register_resolving(
+        &endpoint,
+        &trust,
+        &paths,
+        "ctl",
+        &local_hello,
+        &Fixed(b_addr),
+    )
+    .await
+    else {
+        panic!("B is not the controller's pin and must not be registered with");
+    };
+    assert_eq!(cause, ReconnectCause::TlsRejected, "{err:?}");
+    assert_eq!(err.code, qsh_proto::ErrorCode::AuthFailed, "{err:?}");
+
+    // The same address under B's own pin passes the TLS check (B speaks no
+    // qsh, so the exchange after it never finishes and the wait times out).
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        dial_and_register_resolving(
+            &endpoint,
+            &trust,
+            &paths,
+            "other",
+            &local_hello,
+            &Fixed(b_addr),
+        ),
+    )
+    .await;
+    if let Ok(Err((err, cause))) = attempt {
+        assert_ne!(cause, ReconnectCause::TlsRejected, "{err:?}");
+    }
+    kept.abort();
+}

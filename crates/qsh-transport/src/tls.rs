@@ -12,6 +12,9 @@
 //! rejected on both paths — expiry is the one revocation lever pinned device
 //! certs have, and "fail closed on ambiguity" wins.
 //!
+//! A client dial that names a host narrows the evaluator to that host's
+//! pin ([`BoundTrust`], ADR-0060); the server side keeps the whole store.
+//!
 //! Trust *evaluation* (what is pinned, which CAs exist) is injected via
 //! [`TrustEvaluator`], implemented by `qsh-core::trust`; this crate only
 //! owns the verification mechanics.
@@ -54,6 +57,59 @@ pub trait TrustEvaluator: Send + Sync + 'static {
     fn pairing_open(&self) -> bool {
         false
     }
+}
+
+/// Whom a dial is meant to reach (ADR-0060). A client dial names a host, and
+/// the host's pin decides who may answer: a verifier over the whole trust
+/// store would accept any other pinned device sitting at the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerBinding {
+    /// The name has a pin: only the leaf whose SPKI fingerprint is exactly
+    /// this one is accepted. Neither another pin nor a CA chain admits a
+    /// different key.
+    Pin(Fingerprint),
+    /// The name has no pin (a `hosts.toml` alias, or a controller reached
+    /// through the CA): only a leaf that chains to a trusted CA is accepted.
+    /// A pin of some other name never admits it.
+    CaOnly,
+}
+
+/// A [`TrustEvaluator`] narrowed by a [`PeerBinding`]: it answers like
+/// `inner` for the one peer the dial meant to reach and refuses everyone
+/// else, so the handshake itself fails before any stream exists. Use it for
+/// dials only; a server must keep its whole store (it legitimately accepts
+/// any pinned client).
+pub struct BoundTrust {
+    inner: Arc<dyn TrustEvaluator>,
+    binding: PeerBinding,
+}
+
+impl BoundTrust {
+    /// Narrow `inner` to `binding`.
+    pub fn new(inner: Arc<dyn TrustEvaluator>, binding: PeerBinding) -> Self {
+        Self { inner, binding }
+    }
+}
+
+impl TrustEvaluator for BoundTrust {
+    fn lookup_pin(&self, fingerprint: &Fingerprint) -> Option<Principal> {
+        match self.binding {
+            PeerBinding::Pin(expected) if expected == *fingerprint => {
+                self.inner.lookup_pin(fingerprint)
+            }
+            _ => None,
+        }
+    }
+
+    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+        match self.binding {
+            PeerBinding::Pin(_) => Vec::new(),
+            PeerBinding::CaOnly => self.inner.ca_roots(),
+        }
+    }
+
+    // The pairing fallback admits a stranger by design; a bound dial never
+    // does (the default `false`).
 }
 
 /// Which side of the handshake the peer certificate is for.
