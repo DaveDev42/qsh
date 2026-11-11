@@ -147,8 +147,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use qsh_core::broker::PipeHandle;
-use qsh_core::client::AttachEvent;
+use qsh_core::broker::{PipeFactory, PipeHandle};
+use qsh_core::client::{AttachEvent, Session};
 use qsh_core::tunnel::LocalForwardHandle;
 use qsh_proto::wire;
 use qsh_testkit::loopback::LoopbackHarness;
@@ -159,14 +159,14 @@ use tokio::net::TcpStream;
 
 /// Wall-clock length of the concurrent saturate+echo measurement — see
 /// the module doc's "Saturation shape".
-const MEASUREMENT_DURATION: Duration = Duration::from_secs(15);
+pub(super) const MEASUREMENT_DURATION: Duration = Duration::from_secs(15);
 
 /// Floor on samples collected: below this, the p95 is statistically
 /// meaningless (too few rounds fit in [`MEASUREMENT_DURATION`], which on
 /// any plausible CI runner means the round loop itself is badly starved —
 /// worth failing loudly on rather than reporting a p95 over a handful of
 /// points).
-const MIN_SAMPLES: usize = 200;
+pub(super) const MIN_SAMPLES: usize = 200;
 
 /// Hang guard on one round: on a healthy prioritized connection this is
 /// never approached (loopback RTT is sub-millisecond) — it exists only so
@@ -182,7 +182,7 @@ const MARKER_BYTES: usize = 4;
 const SATURATE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 /// `testing.md` L10's literal bound.
-const MAX_MARGIN_MS: f64 = 10.0;
+pub(super) const MAX_MARGIN_MS: f64 = 10.0;
 
 fn env_flag(name: &str) -> bool {
     let Some(value) = std::env::var_os(name) else {
@@ -195,11 +195,11 @@ fn env_flag(name: &str) -> bool {
 
 /// Unlike DoD 3's ratio, DoD 4 has no strict/smoke split (see the module
 /// doc) — either acceptance-job env var simply turns the gate on.
-fn gate_requested() -> bool {
+pub(super) fn gate_requested() -> bool {
     env_flag("QSH_ACCEPTANCE_STRICT") || env_flag("QSH_ACCEPTANCE_SLOW")
 }
 
-fn skip() {
+pub(super) fn skip() {
     eprintln!(
         "SKIP: the M4 DoD 4 echo-under-load p95 gate requires QSH_ACCEPTANCE_SLOW=1 or \
          QSH_ACCEPTANCE_STRICT=1 (neither set on this run) — `.github/workflows/ci.yml`'s \
@@ -209,7 +209,7 @@ fn skip() {
 }
 
 /// Nearest-rank percentile (`p` in `[0, 1]`) over `samples`.
-fn percentile(mut samples: Vec<f64>, p: f64) -> f64 {
+pub(super) fn percentile(mut samples: Vec<f64>, p: f64) -> f64 {
     samples.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
     let n = samples.len();
     let idx = ((n as f64) * p).ceil() as usize;
@@ -280,21 +280,54 @@ async fn drain_flood(addr: SocketAddr, stop: Arc<AtomicBool>) -> u64 {
     received
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
-    if !gate_requested() {
-        skip();
-        return;
+/// What one saturate-and-echo run measured.
+pub(super) struct Measured {
+    pub(super) margins_ms: Vec<f64>,
+    pub(super) rtts_ms: Vec<f64>,
+    pub(super) clamped_zero: usize,
+    pub(super) drained_bytes: u64,
+    pub(super) flood_bytes: u64,
+}
+
+impl Measured {
+    pub(super) fn p95(&self) -> f64 {
+        percentile(self.margins_ms.clone(), 0.95)
     }
 
-    // `QSH_PERF_INJECT_DELAY_MS` (nightly perf job only, `perf.rs`): put a
-    // fixed one-way delay on the loopback path through the chaos proxy.
-    let inject_ms = perf::inject_delay_ms();
-    let h = match perf::inject_policy(inject_ms) {
-        Some(policy) => LoopbackHarness::start_chaotic(policy).await,
-        None => LoopbackHarness::start().await,
-    };
-    let mut session = h.session().await;
+    pub(super) fn report(&self) -> String {
+        let rounds = self.margins_ms.len();
+        let p95 = self.p95();
+        let max = self.margins_ms.iter().cloned().fold(f64::MIN, f64::max);
+        let min = self.margins_ms.iter().cloned().fold(f64::MAX, f64::min);
+        format!(
+            "p95={p95:.3}ms (required < {MAX_MARGIN_MS}ms), min={min:.3}ms max={max:.3}ms, \
+             rounds={rounds} (min {MIN_SAMPLES}), clamped_zero={}, \
+             duration={MEASUREMENT_DURATION:?}, flood_bytes={} drained_bytes={}",
+            self.clamped_zero, self.flood_bytes, self.drained_bytes
+        )
+    }
+
+    /// The two gates: enough rounds for a meaningful p95, and the p95 under
+    /// the bound.
+    pub(super) fn assert_gates(&self, report: &str) {
+        let rounds = self.margins_ms.len();
+        assert!(
+            rounds >= MIN_SAMPLES,
+            "M4 DoD 4 harness fault: only {rounds} echo rounds fit in {MEASUREMENT_DURATION:?} (need \
+             ≥{MIN_SAMPLES} for a meaningful p95) — {report}"
+        );
+        assert!(
+            self.p95() < MAX_MARGIN_MS,
+            "M4 DoD 4 (PTY-echo p95 < measured RTT + 10ms) missed: {report}"
+        );
+    }
+}
+
+/// Saturate a `-L` tunnel host-to-client on `session`'s connection and, on
+/// the same connection, time PTY-echo round trips over an attach stream of a
+/// session whose child is the next one `pipes` makes. The caller closes
+/// `session`.
+pub(super) async fn measure_saturated_echo(session: &mut Session, pipes: &PipeFactory) -> Measured {
     let connection = session.connection().clone();
 
     // The saturating -L forward's destination: a source that floods the
@@ -319,7 +352,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
         .session_open(open_req())
         .await
         .expect("session.open");
-    let pipe = h.pipes.take().expect("pipe handle for the opened session");
+    let pipe = pipes.take().expect("pipe handle for the opened session");
     let mut attached = session
         .attach(wire::SessionAttach {
             session_id: opened.session_id.clone(),
@@ -406,19 +439,37 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
     let flood_bytes = flood_done.await.unwrap_or(0);
 
     attached.finish();
-    session.close();
     drop(forward);
+    Measured {
+        margins_ms,
+        rtts_ms,
+        clamped_zero,
+        drained_bytes,
+        flood_bytes,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
+    if !gate_requested() {
+        skip();
+        return;
+    }
+
+    // `QSH_PERF_INJECT_DELAY_MS` (nightly perf job only, `perf.rs`): put a
+    // fixed one-way delay on the loopback path through the chaos proxy.
+    let inject_ms = perf::inject_delay_ms();
+    let h = match perf::inject_policy(inject_ms) {
+        Some(policy) => LoopbackHarness::start_chaotic(policy).await,
+        None => LoopbackHarness::start().await,
+    };
+    let mut session = h.session().await;
+    let measured = measure_saturated_echo(&mut session, &h.pipes).await;
+    session.close();
     h.shutdown().await;
 
-    let rounds = margins_ms.len();
-    let p95 = percentile(margins_ms.clone(), 0.95);
-    let max = margins_ms.iter().cloned().fold(f64::MIN, f64::max);
-    let min = margins_ms.iter().cloned().fold(f64::MAX, f64::min);
-    let report = format!(
-        "p95={p95:.3}ms (required < {MAX_MARGIN_MS}ms), min={min:.3}ms max={max:.3}ms, \
-         rounds={rounds} (min {MIN_SAMPLES}), clamped_zero={clamped_zero}, \
-         duration={MEASUREMENT_DURATION:?}, flood_bytes={flood_bytes} drained_bytes={drained_bytes}"
-    );
+    let p95 = measured.p95();
+    let report = measured.report();
     // DoD 4's acceptance-job log is the record of the criterion
     // (M4 plan Step 7 (d) (2473c88)) — print on success too, not just failure.
     eprintln!("tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms: {report}");
@@ -428,7 +479,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
     perf::record(&serde_json::json!({
         "test": "tunnel_echo_under_load",
         "echo_p95_ms": p95,
-        "rtt_ms": percentile(rtts_ms, 0.5),
+        "rtt_ms": percentile(measured.rtts_ms.clone(), 0.5),
         "inject_delay_ms": inject_ms,
     }));
     if inject_ms > 0 {
@@ -437,13 +488,5 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
         eprintln!("injected delay {inject_ms}ms: p95 and sample-count gates not applied");
         return;
     }
-    assert!(
-        rounds >= MIN_SAMPLES,
-        "M4 DoD 4 harness fault: only {rounds} echo rounds fit in {MEASUREMENT_DURATION:?} (need \
-         ≥{MIN_SAMPLES} for a meaningful p95) — {report}"
-    );
-    assert!(
-        p95 < MAX_MARGIN_MS,
-        "M4 DoD 4 (PTY-echo p95 < measured RTT + 10ms) missed: {report}"
-    );
+    measured.assert_gates(&report);
 }

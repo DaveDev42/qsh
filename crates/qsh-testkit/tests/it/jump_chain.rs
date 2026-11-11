@@ -271,7 +271,7 @@ impl Net {
     }
 }
 
-fn echo_argv(text: &str) -> Vec<String> {
+pub(super) fn echo_argv(text: &str) -> Vec<String> {
     #[cfg(unix)]
     {
         vec!["sh".into(), "-c".into(), format!("echo {text}")]
@@ -282,7 +282,7 @@ fn echo_argv(text: &str) -> Vec<String> {
     }
 }
 
-async fn exec(
+pub(super) async fn exec(
     ops: &Ops,
     host: &str,
     argv: Vec<String>,
@@ -297,7 +297,7 @@ async fn exec(
     blocking(move || ops.exec_run(req, ExecStdin::Closed)).await
 }
 
-fn stdout_of(out: &qsh_core::ExecRunOutput) -> String {
+pub(super) fn stdout_of(out: &qsh_core::ExecRunOutput) -> String {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(out.data.stdout_b64.as_bytes())
@@ -307,7 +307,7 @@ fn stdout_of(out: &qsh_core::ExecRunOutput) -> String {
 
 /// One round trip through a `-L` listener: write `payload`, half-close, read
 /// the echo to the end.
-fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(super) fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     qsh_testkit::tunnel::echo_round_trip(listen_port, payload, Duration::from_secs(30))
 }
 
@@ -315,6 +315,17 @@ fn echo_through(listen_port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
 /// exec, a PTY session (the host's side is the test's pipe), a `-L` tunnel
 /// to an echo server and a `qsh cp`. Returns after each has finished.
 pub(super) async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str) {
+    every_feature_with(ops, target, &net.host(target).h.pipes, tag).await;
+}
+
+/// [`every_feature`] for a host that is not a [`Net`] member: `pipes` is the
+/// host's side of the PTY sessions it makes.
+pub(super) async fn every_feature_with(
+    ops: &Ops,
+    target: &str,
+    pipes: &qsh_core::broker::PipeFactory,
+    tag: &str,
+) {
     // exec
     let said = format!("exec-{tag}");
     let out = exec(ops, target, echo_argv(&said))
@@ -343,12 +354,7 @@ pub(super) async fn every_feature(net: &Net, ops: &Ops, target: &str, tag: &str)
         .await
         .expect("session.open through the chain")
     };
-    let mut pipe = net
-        .host(target)
-        .h
-        .pipes
-        .take()
-        .expect("the host's side of the session");
+    let mut pipe = pipes.take().expect("the host's side of the session");
     let hello = format!("hello-{tag}");
     pipe.write_output(hello.as_bytes()).await.expect("output");
     let read = {
