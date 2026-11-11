@@ -62,8 +62,28 @@ pub fn build_roles(
     quotas: Arc<Quotas>,
     limits: QuotaLimits,
 ) -> Roles {
+    build_roles_with_pipes(
+        authorizer,
+        sink,
+        gate,
+        quotas,
+        limits,
+        Arc::new(PipeFactory::new(64 * 1024)),
+    )
+}
+
+/// [`build_roles`] with a session source factory of the caller's, for a test
+/// whose session children must behave in a particular way (ignore a signal,
+/// say).
+pub fn build_roles_with_pipes(
+    authorizer: Arc<dyn Authorizer>,
+    sink: Arc<dyn AuditSink>,
+    gate: Arc<Gate>,
+    quotas: Arc<Quotas>,
+    limits: QuotaLimits,
+    pipes: Arc<PipeFactory>,
+) -> Roles {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let pipes = Arc::new(PipeFactory::new(64 * 1024));
     let broker = Broker::new(
         clock.clone(),
         BrokerConfig {
@@ -145,6 +165,30 @@ impl CombinedHarness {
             audit,
             limits,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::start`] with the session children made by `pipes` — for a
+    /// test whose children must outlast a signal (the drain then takes the
+    /// close escalation's time).
+    pub async fn start_with_pipes(
+        authorizer: Arc<dyn Authorizer>,
+        trust: StaticTrust,
+        limits: QuotaLimits,
+        pipes: Arc<PipeFactory>,
+    ) -> Self {
+        let audit = Arc::new(MemoryAuditSink::new());
+        Self::assemble(
+            make_identity(),
+            Arc::new(trust),
+            authorizer,
+            audit.clone(),
+            audit,
+            limits,
+            None,
+            Some(pipes),
         )
         .await
     }
@@ -164,6 +208,7 @@ impl CombinedHarness {
             sink,
             Arc::new(MemoryAuditSink::new()),
             limits,
+            None,
             None,
         )
         .await
@@ -190,10 +235,12 @@ impl CombinedHarness {
             Arc::new(MemoryAuditSink::new()),
             QuotaLimits::default(),
             Some((admission, quotas)),
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn assemble(
         host: TestIdentity,
         trust: Arc<dyn TrustEvaluator>,
@@ -202,6 +249,7 @@ impl CombinedHarness {
         memory: Arc<MemoryAuditSink>,
         limits: QuotaLimits,
         shared: Option<(Arc<Gate>, Arc<Quotas>)>,
+        pipes: Option<Arc<PipeFactory>>,
     ) -> Self {
         crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
@@ -230,7 +278,14 @@ impl CombinedHarness {
             listen,
             broker,
             pipes,
-        } = build_roles(authorizer, sink, gate.clone(), quotas.clone(), limits);
+        } = build_roles_with_pipes(
+            authorizer,
+            sink,
+            gate.clone(),
+            quotas.clone(),
+            limits,
+            pipes.unwrap_or_else(|| Arc::new(PipeFactory::new(64 * 1024))),
+        );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(server.clone().run(listener, async move {

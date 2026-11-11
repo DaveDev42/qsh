@@ -1151,6 +1151,30 @@ impl ListenGuard {
     pub fn shut_down(mut self) {
         stop_gracefully(&mut self.child);
     }
+
+    /// Ask the child to stop gracefully without waiting for it and without a
+    /// kill to fall back on: a caller that needs the graceful path must not
+    /// get a kill in its place. Follow with [`wait_timeout`](Self::wait_timeout).
+    pub fn terminate(&self) {
+        assert!(
+            send_stop(self.child.id()),
+            "the graceful stop could not be sent to the child"
+        );
+    }
+
+    /// Wait up to `timeout` for the child to exit **on its own**.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 impl Drop for ListenGuard {

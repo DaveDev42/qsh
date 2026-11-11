@@ -661,6 +661,7 @@ pub struct HostRuntime {
 /// [`Authorizer`]: crate::acl::Authorizer
 /// [`Gate`]: crate::admission::Gate
 /// [`Quotas`]: crate::quota::Quotas
+#[derive(Clone)]
 pub struct SharedParts {
     /// The store the transport's verifier reads and the authorizer resolves
     /// trust roles through (ADR-0045 decision 6).
@@ -734,6 +735,25 @@ impl SharedParts {
             admission,
             quotas,
         }
+    }
+}
+
+impl SharedParts {
+    /// [`Self::load`] for a process that plays both the `Serve` and the
+    /// `Listen` role on one endpoint (ADR-0059 decision 8). The policy loads
+    /// once, as always; the only difference is the startup diagnostic, which
+    /// shows the example row of both roles because the operator needs a row
+    /// for each of them.
+    pub fn load_combined(paths: &Paths, config: &Config, trust: Arc<SharedTrustStore>) -> Self {
+        let mut parts = Self::load(paths, config, trust, Role::Serve);
+        if let Some(diagnostic) = &mut parts.policy_diagnostic {
+            diagnostic.example = format!(
+                "{}\n{}",
+                diagnostic.example,
+                crate::acl::minimal_policy_example(paths, Role::Listen)
+            );
+        }
+        parts
     }
 }
 

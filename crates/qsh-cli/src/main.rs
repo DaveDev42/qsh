@@ -888,7 +888,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             *on_demand,
             cli.quiet,
         ),
-        Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
+        Command::Listen { bind } => run_listen(&ops, bind.as_deref(), cli.quiet),
         Command::Service(ServiceCmd::Install {
             activate: _,
             no_activate,
@@ -986,7 +986,7 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
         return report_long_running_setup_error(name, &err);
     }
     match (mode, controller) {
-        ("listen", _) => run_listen(ops, None),
+        ("listen", _) => run_listen(ops, None, cli.quiet),
         (_, controller) => run_serve(ops, None, controller, None, false, cli.quiet),
     }
 }
@@ -2324,7 +2324,7 @@ fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
 /// operation: no envelope, nothing on stdout at all; the bound address and
 /// registration events go to stderr and the process runs until
 /// SIGINT/SIGTERM, exactly like [`run_serve`].
-fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
+fn run_listen(ops: &Ops, bind: Option<&str>, quiet: bool) -> i32 {
     let result = (|| -> Result<(), OpError> {
         let config = ops.config()?;
         // Identity is loaded synchronously, before any runtime exists: the
@@ -2342,40 +2342,73 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
         // Registered before the `listening` line can be written.
         let shutdown = arm_shutdown_signal(&runtime);
-        runtime.block_on(qsh_core::reverse::listen::run_listen(
-            ops.paths(),
-            &config,
-            identity,
-            bind,
-            |addr| {
-                stderr_note!("qsh listen: listening on {addr}");
-                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Listen);
-                // `docs/CLI.md` §6.13's "Controller reachability 요구":
-                // reverse only makes the *target* reachable through NAT —
-                // this controller must still be dialable at `addr` by
-                // every target. `qsh_core::doctor::CONTROLLER_UNREACHABLE`
-                // is the single source of truth for that reminder's
-                // wording (doctor.rs's own docs, docs/CLI.md §6.13's "같은
-                // 상수를 qsh listen 시작 배너 ... 함께 소비한다") — this
-                // banner renders it verbatim rather than forking its own
-                // paraphrase, same as the target's connection-failure path
-                // below (adversarial review finding, M3 Step 9: a second
-                // hardcoded copy here could silently drift from the
-                // constant with no test catching it).
-                stderr_note!("qsh listen: targets must be able to reach {addr} directly over UDP");
-                let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-                stderr_note!("qsh listen: {}", diag.message);
-                stderr_note!("qsh listen: {}", diag.remedy);
-            },
-            // M5 plan Step 6 (2473c88): fires at most once, only when `acl.toml`
-            // did not produce a usable policy — `rendered` is already the
-            // complete banner (`qsh_core::acl::StartupDiagnostic::render`);
-            // this closure prints it verbatim, no ACL logic here.
-            |rendered| {
-                stderr_note!("qsh listen: {rendered}");
-            },
-            shutdown,
-        ))
+        // `[listen].serve = true` makes this process a forward host on the
+        // same socket as well (ADR-0059): sessions live in it, so its
+        // `listening on` lines and the restart banner are a serve's.
+        let combined = config.listen.serve;
+        let device_id = identity.identity.device_id.clone();
+        let fingerprint = identity.identity.fingerprint.to_string();
+        let on_bound = |addr: SocketAddr| {
+            stderr_note!("qsh listen: listening on {addr}");
+            qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Listen);
+            // `docs/CLI.md` §6.13's "Controller reachability 요구":
+            // reverse only makes the *target* reachable through NAT —
+            // this controller must still be dialable at `addr` by
+            // every target. `qsh_core::doctor::CONTROLLER_UNREACHABLE`
+            // is the single source of truth for that reminder's
+            // wording (doctor.rs's own docs, docs/CLI.md §6.13's "같은
+            // 상수를 qsh listen 시작 배너 ... 함께 소비한다") — this
+            // banner renders it verbatim rather than forking its own
+            // paraphrase, same as the target's connection-failure path
+            // below (adversarial review finding, M3 Step 9: a second
+            // hardcoded copy here could silently drift from the
+            // constant with no test catching it).
+            stderr_note!("qsh listen: targets must be able to reach {addr} directly over UDP");
+            let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
+            stderr_note!("qsh listen: {}", diag.message);
+            stderr_note!("qsh listen: {}", diag.remedy);
+            if combined {
+                // After every line a script that waits on the listen
+                // reads, so their bytes and order stay as they were.
+                stderr_note!("qsh serve: listening on {addr}");
+                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Serve);
+                stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
+                if !quiet {
+                    stderr_note!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER);
+                }
+            }
+        };
+        // M5 plan Step 6 (2473c88): fires at most once, only when `acl.toml`
+        // did not produce a usable policy — `rendered` is already the
+        // complete banner (`qsh_core::acl::StartupDiagnostic::render`);
+        // this closure prints it verbatim, no ACL logic here.
+        let on_policy = |rendered: &str| {
+            stderr_note!("qsh listen: {rendered}");
+        };
+        if combined {
+            runtime.block_on(qsh_core::reverse::listen::run_listen_serve(
+                ops.paths(),
+                &config,
+                identity,
+                bind,
+                on_bound,
+                on_policy,
+                // The pairing-pin and invite-replay notices of a forward
+                // host (ADR-0017 결정 3/4), as `qsh serve` prints them.
+                |notice| stderr_note!("qsh serve: {notice}"),
+                shutdown,
+            ))
+        } else {
+            runtime.block_on(qsh_core::reverse::listen::run_listen(
+                ops.paths(),
+                &config,
+                identity,
+                bind,
+                on_bound,
+                on_policy,
+                shutdown,
+            ))
+        }
     })();
     // Lets a console close that is waiting on this process go (Windows only).
     console_shutdown_finished();

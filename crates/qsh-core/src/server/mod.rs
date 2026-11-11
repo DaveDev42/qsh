@@ -1392,6 +1392,13 @@ impl Server {
         let records = self.admission.flush_expired(self.admission.now());
         crate::audit::write_admission_audit(self.audit.as_ref(), &records);
         self.quota_housekeeping();
+        // A combined endpoint (ADR-0059 decision 19) closes its registered
+        // connections first, with the code the endpoint close would give
+        // them, so the targets start their backoff and no local route stays
+        // open into a process that is about to erase its sessions.
+        if let Some(listen) = self.listen.get() {
+            listen.close_registrations();
+        }
         // SIGTERM graceful drain (CLI.md §6.12, ADR-0003) runs *before* the
         // listener closes: closing it first would sever every control
         // stream — including the ones carrying `session.closed` to an
