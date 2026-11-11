@@ -1728,11 +1728,19 @@ impl Server {
             is_reverse_registration: false,
         };
 
+        // A combined endpoint (ADR-0059 decision 5) cannot tell a forward
+        // client from a hole-punching one at `Hello`: every build advertises
+        // `punch.v1`. The connection is a forward one until its first
+        // request, and that request being a `PunchRequest` switches it.
+        let punch = listen
+            .filter(|listen| listen.punch_enabled() && ctx.has_capability(wire::CAP_PUNCH_V1))
+            .cloned();
+
         // `None`: a forward `qsh serve` host relies on the *client's* own
         // `ops/session.rs` recovery driver to notice a dead path — nobody
         // here needs to watch this connection's own liveness
         // (`serve_control`'s `probe` doc comment).
-        self.serve_control(conn, ctl, ctx, None).await
+        self.serve_control_with(conn, ctl, ctx, None, punch).await
     }
 
     /// Answer a `Principal::Pairing` connection (ADR-0002, the M7 plan (69dd788)
@@ -1974,13 +1982,40 @@ impl Server {
     pub async fn serve_control(
         self: Arc<Self>,
         conn: &Connection,
-        mut ctl: FramedStream,
+        ctl: FramedStream,
         ctx: ConnCtx,
         probe: Option<(
             crate::client::pathwatch::PathWatch,
             Arc<tokio::sync::Notify>,
         )>,
     ) -> Result<(), ConnError> {
+        self.serve_control_with(conn, ctl, ctx, probe, None).await
+    }
+
+    /// [`Self::serve_control`] for a connection that may still turn out to
+    /// be a hole-punching one: `punch` is the combined endpoint's controller
+    /// (ADR-0059 decision 5), and `Some` means no request but `Ping` has
+    /// arrived yet and no data stream has been opened. The first request
+    /// being a `PunchRequest` switches the connection to the rendezvous
+    /// role; anything else, or a data stream, settles it as a forward
+    /// connection for good.
+    async fn serve_control_with(
+        self: Arc<Self>,
+        conn: &Connection,
+        mut ctl: FramedStream,
+        ctx: ConnCtx,
+        probe: Option<(
+            crate::client::pathwatch::PathWatch,
+            Arc<tokio::sync::Notify>,
+        )>,
+        mut undecided: Option<Arc<crate::reverse::listen::Listen>>,
+    ) -> Result<(), ConnError> {
+        // The punching role (ADR-0054 decision 10 (2), ADR-0059 decision 5):
+        // `permit` counts the connection against `RENDEZVOUS_MAX_CLIENTS`
+        // and outlives the loop so the count drops only once the connection
+        // is closed.
+        let mut punch = PunchRole::default();
+        let mut punch_permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
         // Control messages are handled inline, in arrival order, so the
         // control stream keeps its ordering guarantee for mutating ops. The
         // two exceptions never park this loop:
@@ -2088,6 +2123,57 @@ impl Server {
                                     continue;
                                 }
                             }
+                            // A switched connection answers `Ping` and
+                            // nothing else; `dispatch` is out of reach.
+                            if punch.active {
+                                Self::serve_punching_message(&mut ctl, &msg).await?;
+                                continue;
+                            }
+                            // The first request that is not a `Ping` decides
+                            // the role of a connection that could still be a
+                            // punching one (ADR-0059 decision 5).
+                            if undecided.is_some()
+                                && !matches!(msg.body, Some(control_message::Body::Ping(_)))
+                            {
+                                let listen = undecided.take().expect("checked just above");
+                                if let Some(control_message::Body::PunchRequest(req)) = &msg.body
+                                    && listen.punch_enabled()
+                                {
+                                    let Some(permit) = listen.try_punch_client() else {
+                                        // The cap is a connection-level refusal:
+                                        // say why, let it arrive, close.
+                                        let refusal = ControlMessage::error(
+                                            msg.request_id,
+                                            wire::Error::new(
+                                                ErrorCode::ResourceExhausted,
+                                                "too many hole-punching connections",
+                                                true,
+                                            ),
+                                        );
+                                        ctl.send.send(&refusal).await?;
+                                        finish_and_wait(&mut ctl).await;
+                                        punch.active = true;
+                                        return Ok(());
+                                    };
+                                    punch_permit = Some(permit);
+                                    punch.active = true;
+                                    let (tx, rx) = tokio::sync::oneshot::channel();
+                                    punch.relay = Some(rx);
+                                    let conn = conn.clone();
+                                    let request_id = msg.request_id;
+                                    let req = req.clone();
+                                    // `relay_punch` waits up to
+                                    // `PUNCH_ANSWER_TIMEOUT` for the target, so
+                                    // it runs beside this loop, owned by
+                                    // `blocking` like every other long task.
+                                    blocking.spawn(async move {
+                                        let outcome =
+                                            listen.relay_punch(&conn, request_id, req).await;
+                                        let _ = tx.send(outcome);
+                                    });
+                                    continue;
+                                }
+                            }
                             if let Some(control_message::Body::SessionWrite(req)) = &msg.body {
                                 // Reserve the queue slot *before* authorizing,
                                 // so a full backlog never leaves a lease taken
@@ -2174,8 +2260,37 @@ impl Server {
                     () = crate::trust::connection_watch::withdrawn(&mut withdrawal) => return Ok(()),
                     // Reap finished tasks so the set never grows unbounded.
                     Some(_) = blocking.join_next(), if !blocking.is_empty() => {}
-                    stream = conn.accept_bi() => match stream {
+                    // The relay's answer: send it, then give the peer the
+                    // rendezvous idle window (or close, when the request was
+                    // wrong or refused).
+                    outcome = async {
+                        match punch.relay.as_mut() {
+                            Some(rx) => rx.await,
+                            None => std::future::pending().await,
+                        }
+                    }, if punch.relay.is_some() => {
+                        punch.relay = None;
+                        let Ok((reply, terminal)) = outcome else { return Ok(()) };
+                        ctl.send.send(&reply).await?;
+                        if terminal {
+                            finish_and_wait(&mut ctl).await;
+                            return Ok(());
+                        }
+                        punch.deadline = Some(tokio::time::Instant::now() + crate::punch::RENDEZVOUS_IDLE);
+                    }
+                    () = async {
+                        match punch.deadline {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    }, if punch.deadline.is_some() => return Ok(()),
+                    // A punching connection serves no data stream: they stay
+                    // unaccepted, the connection closes within the idle window.
+                    stream = conn.accept_bi(), if !punch.active => match stream {
                         Ok((send, recv)) => {
+                            // A stream the peer opens first makes this a
+                            // forward connection for good.
+                            undecided = None;
                             let server = self.clone();
                             let ctx = ctx.clone();
                             let conn = conn.clone();
@@ -2199,7 +2314,60 @@ impl Server {
         }
         .await;
         blocking.shutdown().await;
+        if punch.active {
+            conn.close(0, b"punch done");
+        }
+        drop(punch_permit);
         result
+    }
+
+    /// One message on a connection that switched to the punching role: a
+    /// `Ping` is answered, everything else (a second `PunchRequest`
+    /// included) is `UNSUPPORTED`, the same answers a standalone `qsh
+    /// listen` gives its punching connections.
+    async fn serve_punching_message(
+        ctl: &mut FramedStream,
+        msg: &ControlMessage,
+    ) -> Result<(), ConnError> {
+        let reply = match &msg.body {
+            Some(control_message::Body::Ping(_)) => {
+                ControlMessage::new(msg.request_id, control_message::Body::Pong(wire::Pong {}))
+            }
+            _ => ControlMessage::error(
+                msg.request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "a hole-punching connection answers one PunchRequest and Ping",
+                    false,
+                ),
+            ),
+        };
+        ctl.send.send(&reply).await?;
+        Ok(())
+    }
+}
+
+/// The punching role of a combined endpoint's connection (ADR-0059
+/// decision 5), once its first request switched it.
+#[derive(Default)]
+struct PunchRole {
+    /// The connection is a punching one.
+    active: bool,
+    /// The relay's reply and whether to close after it, while it is out.
+    relay: Option<tokio::sync::oneshot::Receiver<(ControlMessage, bool)>>,
+    /// When the connection closes: `RENDEZVOUS_IDLE` after the answer.
+    deadline: Option<tokio::time::Instant>,
+}
+
+/// Signal FIN on the control stream and give the peer a bounded moment to
+/// take what was written before the connection closes.
+async fn finish_and_wait(ctl: &mut FramedStream) {
+    if ctl.send.finish().is_ok() {
+        let _ = tokio::time::timeout(
+            crate::handshake::REJECTION_DRAIN_TIMEOUT,
+            ctl.send.stopped(),
+        )
+        .await;
     }
 }
 

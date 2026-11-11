@@ -212,7 +212,12 @@ impl Listen {
 
     /// One `PunchRequest`. Returns the reply and whether the connection
     /// should close after it (the request itself was wrong or refused).
-    async fn relay_punch(
+    ///
+    /// `pub(crate)`: the combined endpoint's `Server` runs it for a forward
+    /// connection that turned out to be a punching one (ADR-0059 decision
+    /// 5), off its control loop because it waits up to
+    /// [`PUNCH_ANSWER_TIMEOUT`] for the target.
+    pub(crate) async fn relay_punch(
         &self,
         conn: &Connection,
         request_id: u64,
