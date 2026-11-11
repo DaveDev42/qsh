@@ -1,7 +1,7 @@
 # ADR-0059: 한 `qsh listen` 프로세스가 `[listen].serve = true`(또는 `qsh listen --serve`)일 때 같은 UDP 소켓에서 인바운드 `qsh serve` 노릇도 한다. 연결은 `Hello.reverse`가 있으면 역방향 등록, 없으면 첫 요청이 `PunchRequest`일 때만 펀칭 연결, 그 밖은 정방향 host로 갈린다. wire 변경은 없고, Gate·quota·감사 sink·`Authorizer`는 프로세스에 하나씩이다
 
 날짜: 2026-11-11
-상태: 제안됨
+상태: 승인됨
 
 개정 관계: 다음을 개정한다.
 - ADR-0012 결정 1의 역할 표. 이 표는 `qsh listen`을 "client·인바운드"로만 둔다. `[listen].serve = true`인 `qsh listen`은 "host·인바운드"도 겸한다. "listener는 중계기가 아니라 내가 앉아 있는 client 머신"이라는 서술(`docs/CLI.md` §6.13)도 "listener는 client 머신이고, `serve`를 켜면 host도 된다"로 고친다.
@@ -40,6 +40,8 @@ Dave의 요청은 이렇다. Dave-MacMini는 지금 두 데몬을 돌린다. `qs
 - jump 중간 peer(`server/jump.rs`)는 `Server`에만 있다. listen 전용 장비는 정방향 client를 거절하므로 hop이 될 수 없다.
 
 ## Dave가 정할 것
+
+2026-11-11 Dave가 네 항목 모두 (가)로 정했다.
 
 1. 표면. (가) config 키 `[listen].serve = true`와 플래그 `qsh listen --serve`를 둘 다 둔다. 둘 중 하나라도 켜면 합친 모드다. (나) config 키만 둔다. (다) 반대 방향으로 `qsh serve`에 `[serve].reverse = true`를 둔다. 추천은 (가). 서비스 유닛의 argv는 `listen` 그대로라서 상시 기동은 config 키 하나로 바뀐다. 플래그는 foreground로 시험할 때 쓰고, 플래그를 하나 더하는 비용은 man page 재생성뿐이다. (다)는 Dave의 배포에서 `[listen]` 블록과 controller 이름이 이미 listen 쪽에 있어 옮길 것이 더 많고, run mode 추론 순서(`[listen]` 존재가 먼저)와도 어긋난다.
 2. 펀칭과 정방향을 가르는 시점. (가) `Hello.reverse`가 없는 연결은 정방향으로 받는다. 그 연결의 첫 요청(`Ping`은 세지 않는다)이 `PunchRequest`이면 그때 펀칭 연결로 바꾸고 16개 상한과 3초 규칙을 건다. 첫 요청이 다른 control message이거나 peer가 데이터 스트림을 먼저 열면 정방향으로 굳는다(결정 5). (나) 상태를 두지 않는다. 정방향 연결 어디서든 `PunchRequest`를 받고, 16개 상한은 동시에 진행 중인 중계 수에만 건다. (다) client가 Hello에 펀칭 전용 표시를 싣는다. wire 변경이다. 추천은 (가). 지금의 펀칭 연결 규약("요청 하나, 3초")이 갈린 뒤에는 그대로 유지되고, 조용한 정방향 client(요청 없이 `-L`만 쥔 홀더)가 3초 만에 끊기지 않는다. (나)는 "한 연결, 한 역할"이 무너지고 펀칭 감사가 정방향 연결에 섞인다. (다)는 최소 wire 원칙과 §16 freeze에 걸린다.
@@ -189,3 +191,4 @@ Dave의 요청은 이렇다. Dave-MacMini는 지금 두 데몬을 돌린다. `qs
 ## 개정 이력
 
 - 2026-11-11 초안(에이전트). 요청의 "ADR-0003 sessions-in-listener" 전제를 바로잡았다(맥락 절). Dave가 정할 것 네 항목은 추천만 적었다.
+- 2026-11-11 승인(Dave 결정). 정할 것 네 항목 모두 추천 (가): 키와 플래그, 펀칭은 첫 요청으로 가름, admission 풀 하나, pairing 붙임. M27로 연다.
