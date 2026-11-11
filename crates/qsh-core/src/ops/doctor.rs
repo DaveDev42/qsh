@@ -320,11 +320,18 @@ impl Ops {
         env: &DoctorEnvironment<'_>,
     ) -> Result<DoctorData, OpError> {
         let mode = infer_run_mode(config);
+        // `qsh listen` with `[listen].serve` is also a forward host
+        // (ADR-0059): the checks that only a session host needs run for it.
+        let combined = combined::is_combined(mode, config);
         let mut findings = Vec::new();
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
         findings.extend(self.doctor_config_serve_to_conflict_finding(config));
-        findings.extend(self.doctor_acl_findings(mode, unix_to_system_time(now_unix))?);
+        findings.extend(self.doctor_acl_findings_for(
+            mode,
+            combined,
+            unix_to_system_time(now_unix),
+        )?);
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
         findings.extend(keystore_finding_of(env.keystore));
@@ -337,7 +344,10 @@ impl Ops {
         let (connectivity, direct_missing) =
             self.doctor_connectivity_findings(config, req.host.as_deref())?;
         findings.extend(connectivity);
-        findings.extend(self.doctor_service_registration_findings(mode, env));
+        findings.extend(self.doctor_service_registration_findings_for(mode, combined, env));
+        if combined {
+            findings.extend(self.doctor_combined_findings(config, env));
+        }
         findings.extend(self.doctor_bindv6only_finding(config, mode, env));
         findings.extend(doctor_agent_findings(config, env));
         let transport = match req.host.as_deref() {
@@ -513,17 +523,37 @@ impl Ops {
     /// not count a pin with a role, and `acl_ca_auth_path_missing` also
     /// fires when `acl.toml` is absent, since a role pin can silence
     /// `acl_policy_missing` while the CA path (which has no role) stays shut.
+    #[cfg(test)]
     fn doctor_acl_findings(
         &self,
         mode: &str,
         now: SystemTime,
     ) -> Result<Vec<DoctorFinding>, OpError> {
-        let role = if mode == "listen" {
+        self.doctor_acl_findings_for(mode, false, now)
+    }
+
+    /// [`Self::doctor_acl_findings`] for a `qsh listen` that may also serve
+    /// (`combined`, ADR-0059): the missing/invalid-policy example then shows
+    /// the row of both roles.
+    fn doctor_acl_findings_for(
+        &self,
+        mode: &str,
+        combined: bool,
+        now: SystemTime,
+    ) -> Result<Vec<DoctorFinding>, OpError> {
+        // The combined endpoint starts from the `Serve` row and gets the
+        // `Listen` one added below, as its own startup does.
+        let role = if mode == "listen" && !combined {
             Role::Listen
         } else {
             Role::Serve
         };
-        let (_policy, diagnostic, index) = load_policy_or_deny(&self.paths, role);
+        let (_policy, mut diagnostic, index) = load_policy_or_deny(&self.paths, role);
+        if combined && let Some(diagnostic) = &mut diagnostic {
+            // Both roles read this one file, so the example shows both rows
+            // (ADR-0059 decision 8), as the endpoint's own startup does.
+            crate::serve::add_listen_example(&self.paths, diagnostic);
+        }
         let trust = self.doctor_load_trust()?;
         let mut out = Vec::new();
         let mut policy_loaded = true;
@@ -1095,9 +1125,21 @@ impl Ops {
     /// foldable `target_os` check alone decide which branch's result is
     /// kept — the same struct-field dead-code hazard
     /// [`DoctorEnvironment`]'s own doc explains this sidesteps.
+    #[cfg(test)]
     fn doctor_service_registration_findings(
         &self,
         mode: &str,
+        env: &DoctorEnvironment<'_>,
+    ) -> Vec<DoctorFinding> {
+        self.doctor_service_registration_findings_for(mode, false, env)
+    }
+
+    /// [`Self::doctor_service_registration_findings`] for a `qsh listen`
+    /// that may also host sessions (`combined`, ADR-0059).
+    fn doctor_service_registration_findings_for(
+        &self,
+        mode: &str,
+        combined: bool,
         env: &DoctorEnvironment<'_>,
     ) -> Vec<DoctorFinding> {
         let mut out = Vec::new();
@@ -1114,7 +1156,9 @@ impl Ops {
         };
         match registered {
             Some(true) => {
-                out.extend(probe::service_restart_drops_sessions_finding(mode));
+                out.extend(probe::service_restart_drops_sessions_finding(
+                    mode, combined,
+                ));
                 // The LaunchAgent notice is silent once the same mode has a
                 // LaunchDaemon plist: the always-on form already answers it
                 // (ADR-0032 결정 14).
@@ -1689,6 +1733,7 @@ pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
     })
 }
 
+mod combined;
 mod jump;
 
 #[cfg(test)]

@@ -1,0 +1,17 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "serve_unit_beside_listen_serve",
+        "detail": "[listen].serve is on, and a separate qsh serve is also set up on this machine (a serve service unit, or a running serve recorded in serve.json). Two processes answer forward connections, and the SSH bootstrap finds whichever wrote serve.json last. (a serve service unit is registered)",
+        "remedy": "Once clients use the combined endpoint's address, stop and remove the serve unit (docs/deploy/service.md) or stop the extra qsh serve. To go back instead, turn [listen].serve off.",
+        "status": "warn"
+      }
+    ],
+    "overall": "warn"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

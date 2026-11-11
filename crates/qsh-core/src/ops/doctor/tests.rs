@@ -1977,6 +1977,7 @@ fn doctor_wires_the_service_not_registered_finding_into_the_full_report_determin
 /// The three run modes `infer_run_mode` can return.
 const MODES: [&str; 3] = ["serve", "listen", "reverse"];
 
+mod combined;
 mod logon_task;
 
 fn codes(findings: &[DoctorFinding]) -> Vec<&str> {

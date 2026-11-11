@@ -747,14 +747,21 @@ impl SharedParts {
     pub fn load_combined(paths: &Paths, config: &Config, trust: Arc<SharedTrustStore>) -> Self {
         let mut parts = Self::load(paths, config, trust, Role::Serve);
         if let Some(diagnostic) = &mut parts.policy_diagnostic {
-            diagnostic.example = format!(
-                "{}\n{}",
-                diagnostic.example,
-                crate::acl::minimal_policy_example(paths, Role::Listen)
-            );
+            add_listen_example(paths, diagnostic);
         }
         parts
     }
+}
+
+/// Adds the `Role::Listen` example row to a diagnostic that carries the
+/// `Role::Serve` one, for a process that plays both roles (ADR-0059 decision
+/// 8). The startup banner and `qsh doctor` share it.
+pub(crate) fn add_listen_example(paths: &Paths, diagnostic: &mut crate::acl::StartupDiagnostic) {
+    diagnostic.example = format!(
+        "{}\n{}",
+        diagnostic.example,
+        crate::acl::minimal_policy_example(paths, Role::Listen)
+    );
 }
 
 /// Build a [`HostRuntime`] for `qsh serve` and a reverse target: the shared

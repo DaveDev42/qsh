@@ -1,0 +1,17 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "listen_serve_ignores_serve_bind",
+        "detail": "[listen].serve is on, so qsh listen also serves forward connections and binds [listen].bind (or [::]:4433). The value in [serve].bind is not read in this mode.",
+        "remedy": "Move the address you want to [listen].bind, or remove [serve].bind. The other [serve] keys (sessions, replay, admission) still apply to the forward sessions of the combined endpoint.",
+        "status": "info"
+      }
+    ],
+    "overall": "ok"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

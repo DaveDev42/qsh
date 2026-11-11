@@ -1063,18 +1063,27 @@ impl ListenGuard {
     /// e.g. a fixed port, to provoke a real `EADDRINUSE` bind conflict.
     pub fn start_with(sandbox: &Sandbox, bind: &str) -> Self {
         plant_allow_all_acl(sandbox);
-        Self::spawn(sandbox, bind)
+        Self::spawn(sandbox, bind, &[])
+    }
+
+    /// Like [`start_with`](Self::start_with), with extra `qsh listen`
+    /// arguments after `--bind` (`--serve`, ADR-0059 decision 20).
+    pub fn start_with_args(sandbox: &Sandbox, bind: &str, extra: &[&str]) -> Self {
+        plant_allow_all_acl(sandbox);
+        Self::spawn(sandbox, bind, extra)
     }
 
     /// Like [`start_with`](Self::start_with), but never plants an
     /// `acl.toml` — see [`ServeGuard::start_without_policy`] for why a
     /// test reaches for this instead.
     pub fn start_without_policy(sandbox: &Sandbox, bind: &str) -> Self {
-        Self::spawn(sandbox, bind)
+        Self::spawn(sandbox, bind, &[])
     }
 
-    fn spawn(sandbox: &Sandbox, bind: &str) -> Self {
-        let mut command = sandbox.command(&["listen", "--bind", bind]);
+    fn spawn(sandbox: &Sandbox, bind: &str, extra: &[&str]) -> Self {
+        let mut args = vec!["listen", "--bind", bind];
+        args.extend_from_slice(extra);
+        let mut command = sandbox.command(&args);
         let mut child = own_process_group(&mut command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

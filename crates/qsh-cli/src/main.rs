@@ -888,7 +888,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             *on_demand,
             cli.quiet,
         ),
-        Command::Listen { bind } => run_listen(&ops, bind.as_deref(), cli.quiet),
+        Command::Listen { bind, serve } => run_listen(&ops, bind.as_deref(), *serve, cli.quiet),
         Command::Service(ServiceCmd::Install {
             activate: _,
             no_activate,
@@ -897,10 +897,8 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             name,
             always_on,
             move_key,
-        }) => finish(
-            cli,
-            ServiceInstallOp::COMMAND,
-            ops.service_install(
+        }) => {
+            let result = ops.service_install(
                 &ServiceInstallOptions {
                     activate: !*no_activate,
                     to: to.clone(),
@@ -910,9 +908,13 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                     move_key: *move_key,
                 },
                 &qsh_core::prompts::StdioPrompter::new(cli.json || cli.jsonl),
-            ),
-            human::print_service_install,
-        ),
+            );
+            // Read after the install, which may have written config keys.
+            let hosts_sessions = ops.config().is_ok_and(|config| config.listen.serve);
+            finish(cli, ServiceInstallOp::COMMAND, result, |data| {
+                human::print_service_install(data, hosts_sessions)
+            })
+        }
         Command::Service(ServiceCmd::Uninstall {
             deactivate,
             always_on,
@@ -986,7 +988,7 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
         return report_long_running_setup_error(name, &err);
     }
     match (mode, controller) {
-        ("listen", _) => run_listen(ops, None, cli.quiet),
+        ("listen", _) => run_listen(ops, None, false, cli.quiet),
         (_, controller) => run_serve(ops, None, controller, None, false, cli.quiet),
     }
 }
@@ -2324,9 +2326,11 @@ fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
 /// operation: no envelope, nothing on stdout at all; the bound address and
 /// registration events go to stderr and the process runs until
 /// SIGINT/SIGTERM, exactly like [`run_serve`].
-fn run_listen(ops: &Ops, bind: Option<&str>, quiet: bool) -> i32 {
+fn run_listen(ops: &Ops, bind: Option<&str>, serve_flag: bool, quiet: bool) -> i32 {
     let result = (|| -> Result<(), OpError> {
-        let config = ops.config()?;
+        let mut config = ops.config()?;
+        // `--serve` turns the key on for this run only (ADR-0059 decision 20).
+        config.listen.serve |= serve_flag;
         // Identity is loaded synchronously, before any runtime exists: the
         // credential store may block (and prompt) — keep that off the
         // runtime's workers.

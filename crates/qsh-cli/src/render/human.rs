@@ -1631,8 +1631,10 @@ pub fn print_agent_note(host: &str, outcome: Option<&str>) -> io::Result<()> {
 /// logic — `manager`/`mode`/`path` plus `created` in words, then one line
 /// for what `activation` says (ADR-0032 decisions 4 and 18; ADR-0051 decision
 /// 11), or, with `--no-activate`, the pointer at the activation recipe, and
-/// one line for what `always_on` says.
-pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
+/// one line for what `always_on` says. `hosts_sessions` is `[listen].serve`
+/// as the caller read it after the install: a `listen` unit with it on also
+/// hosts sessions (ADR-0059 decision 21), and a restart ends them.
+pub fn print_service_install(data: &ServiceInstallData, hosts_sessions: bool) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let manager = sanitize(&data.manager);
     writeln!(
@@ -1663,6 +1665,13 @@ pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
              binary path changed, repeat the always-on recipe in docs/deploy/service.md."
         ),
     }?;
+    if hosts_sessions && data.mode == "listen" {
+        writeln!(
+            stdout,
+            "This unit also hosts sessions ([listen].serve is on), so a restart ends every \
+             detached session as well as every registration."
+        )?;
+    }
     if let Some(always_on) = &data.always_on {
         write_always_on(&mut stdout, always_on, true)?;
     }
