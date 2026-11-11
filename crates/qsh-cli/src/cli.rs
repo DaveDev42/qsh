@@ -827,9 +827,17 @@ pub enum Command {
         /// Listen address (`ip:port`). Overrides `[listen].bind` in
         /// `config.toml`; defaults to `[::]:4433` — the same default as
         /// `qsh serve`, so running both roles on one host needs an
-        /// explicit `--bind` on at least one of them.
+        /// explicit `--bind` on at least one of them, or `--serve`.
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
+
+        /// Also serve forward connections on this socket (ADR-0059): this
+        /// process then hosts sessions, exec, tunnels, files and pairing
+        /// like `qsh serve`, beside the reverse registrations. Turns on
+        /// `[listen].serve` for this run only; there is no flag that turns
+        /// the key off.
+        #[arg(long)]
+        serve: bool,
     },
 
     /// Manage this machine's platform service unit for its inferred run

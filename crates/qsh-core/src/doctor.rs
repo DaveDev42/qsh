@@ -64,7 +64,11 @@ pub mod probe;
 /// the thirty-seventh and thirty-eighth, 36 -> 38: a jump chain to the host
 /// that runs a step on the stream carrier, and a pin whose `jump` names a pin
 /// this machine does not have.
-/// The set is the same on every target: every build knows all 38 codes.
+/// `ListenServeIgnoresServeBind` and `ServeUnitBesideListenServe` (ADR-0059
+/// decision 22, M27) are the thirty-ninth and fortieth, 38 -> 40: a combined
+/// `qsh listen` (`[listen].serve = true`) that has a `[serve].bind` it does not
+/// read, and one that runs beside a second `qsh serve`.
+/// The set is the same on every target: every build knows all 40 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -108,6 +112,8 @@ pub enum DiagnosticId {
     AgentDirUnusable,
     JumpStreamCarrier,
     JumpHopMissing,
+    ListenServeIgnoresServeBind,
+    ServeUnitBesideListenServe,
 }
 
 impl DiagnosticId {
@@ -160,6 +166,8 @@ impl DiagnosticId {
             DiagnosticId::AgentDirUnusable => AGENT_DIR_UNUSABLE.code,
             DiagnosticId::JumpStreamCarrier => JUMP_STREAM_CARRIER.code,
             DiagnosticId::JumpHopMissing => JUMP_HOP_MISSING.code,
+            DiagnosticId::ListenServeIgnoresServeBind => LISTEN_SERVE_IGNORES_SERVE_BIND.code,
+            DiagnosticId::ServeUnitBesideListenServe => SERVE_UNIT_BESIDE_LISTEN_SERVE.code,
         }
     }
 }
@@ -194,6 +202,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "keystore_session_bound",
     "keystore_unavailable",
     "launchagent_session_scoped",
+    "listen_serve_ignores_serve_bind",
     "logon_task_session_scoped",
     "no_route",
     "peer_untrusted",
@@ -203,6 +212,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "qsh_path_shadowed",
     "screen_echo_unsupported",
     "screen_sync_unsupported",
+    "serve_unit_beside_listen_serve",
     "service_not_registered",
     "service_restart_drops_sessions",
     "systemd_linger_disabled",
@@ -287,6 +297,32 @@ pub const JUMP_HOP_MISSING: Diagnostic = Diagnostic {
     code: "jump_hop_missing",
     message: "A pin's jump chain names a peer this machine has no pin for, so a connection to that pin cannot be built.",
     remedy: "Pin the missing hop again (qsh trust add), or set a new chain with `qsh trust jump <name> <hop>...`, or drop it with `qsh trust jump <name> --clear`.",
+};
+
+/// ADR-0059 decision 22, `docs/CLI.md` §6.17: `[listen].serve` is on, so this
+/// process serves forward connections on the `qsh listen` socket, and
+/// `[serve].bind` has a value anyway. The combined endpoint binds
+/// `--bind`, `[listen].bind`, then `[::]:4433` and never reads `[serve].bind`.
+/// `info`: nothing is wrong, the key is just dead weight that suggests a
+/// second socket that does not exist.
+pub const LISTEN_SERVE_IGNORES_SERVE_BIND: Diagnostic = Diagnostic {
+    id: DiagnosticId::ListenServeIgnoresServeBind,
+    code: "listen_serve_ignores_serve_bind",
+    message: "[listen].serve is on, so qsh listen also serves forward connections and binds [listen].bind (or [::]:4433). The value in [serve].bind is not read in this mode.",
+    remedy: "Move the address you want to [listen].bind, or remove [serve].bind. The other [serve] keys (sessions, replay, admission) still apply to the forward sessions of the combined endpoint.",
+};
+
+/// ADR-0059 decision 22, `docs/CLI.md` §6.17: `[listen].serve` is on and a
+/// second `qsh serve` exists on this machine, either as a registered `serve`
+/// service unit or as a live `serve.json` that does not belong to a `qsh
+/// listen`. `warn`: that is the normal middle of a move to the combined
+/// endpoint (ADR-0059 decision 24), but two processes now answer forward
+/// connections and the later `serve.json` wins the SSH bootstrap's lookup.
+pub const SERVE_UNIT_BESIDE_LISTEN_SERVE: Diagnostic = Diagnostic {
+    id: DiagnosticId::ServeUnitBesideListenServe,
+    code: "serve_unit_beside_listen_serve",
+    message: "[listen].serve is on, and a separate qsh serve is also set up on this machine (a serve service unit, or a running serve recorded in serve.json). Two processes answer forward connections, and the SSH bootstrap finds whichever wrote serve.json last.",
+    remedy: "Once clients use the combined endpoint's address, stop and remove the serve unit (docs/deploy/service.md) or stop the extra qsh serve. To go back instead, turn [listen].serve off.",
 };
 
 /// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently

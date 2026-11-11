@@ -13,6 +13,7 @@ mod auto_bootstrap;
 mod cert_e2e;
 mod cert_file_exchange;
 mod combined_lifecycle;
+mod combined_surface;
 mod console_probe;
 mod cp_cancel;
 mod cp_e2e;

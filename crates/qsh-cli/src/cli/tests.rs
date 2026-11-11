@@ -594,11 +594,17 @@ fn listen_bind_is_optional() {
     let cli = Cli::try_parse_from(["qsh", "listen"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Listen { bind: None }
+        Command::Listen {
+            bind: None,
+            serve: false
+        }
     ));
     let cli = Cli::try_parse_from(["qsh", "listen", "--bind", "127.0.0.1:0"]).unwrap();
     match cli.command.unwrap() {
-        Command::Listen { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
+        Command::Listen { bind, serve } => {
+            assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
+            assert!(!serve);
+        }
         other => panic!("expected listen, got {other:?}"),
     }
 }

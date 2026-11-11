@@ -1633,5 +1633,6 @@ fn activation_flags_cannot_be_defaulted_by_config_or_env() {
 }
 
 mod always_on;
+mod combined;
 mod windows_manager;
 mod windows_task;

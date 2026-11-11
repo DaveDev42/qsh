@@ -148,7 +148,10 @@ fn ops_from_env_failure_routes_serve_listen_and_reverse_off_the_envelope_path() 
         Some(SERVE_MODE)
     );
     assert_eq!(
-        long_running_setup_mode(&Some(Command::Listen { bind: None })),
+        long_running_setup_mode(&Some(Command::Listen {
+            bind: None,
+            serve: false
+        })),
         Some(LISTEN_MODE)
     );
     assert_eq!(

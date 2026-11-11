@@ -132,6 +132,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.set_jump.json",
     "trust.list.jump.json",
     "doctor_jump_stream_carrier.json",
+    "doctor_listen_serve_ignores_serve_bind.json",
+    "doctor_serve_unit_beside_listen_serve.json",
     "pair.ssh.jump.json",
     "pair.ssh.jump.refused.json",
     "trust.allow.json",
@@ -1405,6 +1407,54 @@ fn golden_doctor_jump_stream_carrier_fixture() {
         "doctor_jump_stream_carrier.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
+}
+
+/// `doctor.run` with the two combined-endpoint codes (ADR-0059 decision 22).
+/// The codes and the leading text are the production ones.
+#[test]
+fn golden_doctor_combined_endpoint_fixtures() {
+    use qsh_core::doctor::{LISTEN_SERVE_IGNORES_SERVE_BIND, SERVE_UNIT_BESIDE_LISTEN_SERVE};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding};
+
+    for (name, diag, status, tail) in [
+        (
+            "doctor_listen_serve_ignores_serve_bind.json",
+            &LISTEN_SERVE_IGNORES_SERVE_BIND,
+            "info",
+            "",
+        ),
+        (
+            "doctor_serve_unit_beside_listen_serve.json",
+            &SERVE_UNIT_BESIDE_LISTEN_SERVE,
+            "warn",
+            " (a serve service unit is registered)",
+        ),
+    ] {
+        let data = DoctorData {
+            overall: if status == "warn" { "warn" } else { "ok" }.to_string(),
+            findings: vec![DoctorFinding {
+                code: diag.code.to_string(),
+                status: status.to_string(),
+                detail: format!("{}{tail}", diag.message),
+                remedy: Some(diag.remedy.to_string()),
+            }],
+            transport: None,
+            punch: None,
+        };
+        assert!(qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&data.findings[0].code.as_str()));
+        let envelope = CliEnvelope {
+            schema: CLI_SCHEMA_V1.to_string(),
+            request_id: "01K0EXAMPLE".to_string(),
+            command: "doctor.run".to_string(),
+            ok: true,
+            data: Some(serde_json::to_value(&data).expect("encode data")),
+            error: None,
+        };
+        check(
+            name,
+            serde_json::to_value(&envelope).expect("encode envelope"),
+        );
+    }
 }
 
 /// `pair ssh` when `ssh -G` reports a `ProxyJump` whose hop is already a qsh
