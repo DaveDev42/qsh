@@ -133,14 +133,7 @@ impl Listen {
                 // undoing exactly what `admit` did, nothing more.
                 if let Some(outcome) = outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner())
                 {
-                    // `rollback_target` drops `replaced_entry` back to
-                    // `None` if the connection it describes is no longer
-                    // `conns`'s live occupant for this name — see its own
-                    // doc comment.
-                    let replaced =
-                        rollback_target(&self.conns, &outcome.entry.name, outcome.replaced_entry);
-                    self.registry
-                        .rollback(&outcome.entry.name, outcome.entry.generation, replaced);
+                    self.rollback_unsent(outcome);
                 }
                 conn.close(
                     qsh_transport::endpoint::CLOSE_CODE_PROTOCOL,
@@ -168,6 +161,19 @@ impl Listen {
         self.finish_registration(conn, ctl, peer_hello, outcome)
             .await;
         drop(quota_permit);
+    }
+
+    /// Undo an admitted registration whose `Hello` reply never went out:
+    /// the registry entry [`admit`] inserted has no connection behind it.
+    /// `rollback_target` drops `replaced_entry` back to `None` if the
+    /// connection it describes is no longer `conns`'s live occupant for
+    /// this name — see its own doc comment. Shared by
+    /// [`Self::register_connection`] and the combined endpoint's
+    /// registration branch (`crate::server::Server`, ADR-0059 decision 4).
+    pub(crate) fn rollback_unsent(&self, outcome: RegisterOutcome) {
+        let replaced = rollback_target(&self.conns, &outcome.entry.name, outcome.replaced_entry);
+        self.registry
+            .rollback(&outcome.entry.name, outcome.entry.generation, replaced);
     }
 
     /// The synchronous decision `crate::handshake::respond`'s
@@ -199,7 +205,7 @@ impl Listen {
     /// `Registry::rollback` pair `Listen::register_connection`'s own
     /// failed-`Hello`-reply path already uses for the identical shape
     /// (an admitted entry with nothing to drive it).
-    pub(super) fn decide_registration(
+    pub(crate) fn decide_registration(
         &self,
         conn: &Connection,
         peer_hello: &Hello,
@@ -261,10 +267,7 @@ impl Listen {
                 // arm below: an ACL-denied peer must never learn whether
                 // the controller happens to be at capacity.
                 if let Some(kind) = refused {
-                    let replaced =
-                        rollback_target(&self.conns, &outcome.entry.name, outcome.replaced_entry);
-                    self.registry
-                        .rollback(&outcome.entry.name, outcome.entry.generation, replaced);
+                    self.rollback_unsent(outcome);
                     return Err(wire::Error::new(
                         ErrorCode::ResourceExhausted,
                         kind.wire_message(),
@@ -323,7 +326,7 @@ impl Listen {
     /// in — [`ConnTable::publish`]'s doc comment (M3 plan Step 4 (2473c88) (4),
     /// fixing the KNOWN RACE PR 3b left here — see git blame for that
     /// comment's history).
-    async fn finish_registration(
+    pub(crate) async fn finish_registration(
         self: Arc<Self>,
         conn: Connection,
         ctl: FramedStream,

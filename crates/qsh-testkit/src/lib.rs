@@ -14,6 +14,9 @@
 //!   target's wire role, and [`reverse::ReversePairHarness`], the
 //!   role-swapped counterpart of [`loopback::LoopbackHarness`] used to
 //!   prove role-axis independence (M3 plan Step 3 (2473c88), PR 3b).
+//! - [`combined`]: [`combined::CombinedHarness`], the combined `listen` +
+//!   `serve` endpoint (ADR-0059) — a `Server` in front of a `Listen`, built
+//!   on one set of shared parts, reached over one address.
 //! - [`pair`]: [`pair::HostedPair`], the trait that lets one scenario body
 //!   run unmodified against both harnesses above.
 //! - [`tunnel`]: in-process loopback **tunnel** harness (L3) — a
@@ -73,6 +76,7 @@
 pub mod agent_probe;
 pub mod asset_server;
 pub mod chaos;
+pub mod combined;
 #[cfg(windows)]
 pub mod conpty;
 pub mod echo_host;
