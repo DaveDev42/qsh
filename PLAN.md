@@ -1,6 +1,6 @@
-# PLAN.md — 자리표시자: 열린 마일스톤 없음
+# PLAN.md — M27: listen과 serve를 한 endpoint에
 
-M26(jump chaining)이 2026-11-11 닫혀 P2(ADR-0050)의 마일스톤 여섯이 모두 끝났다. 직전 M26 계획의 마지막 커밋은 `4f60cf7`다. 다음 마일스톤은 아직 없고, 여는 것은 사용자 결정이다. 그때까지 이 파일의 live state는 §0의 사람 몫과 §1의 유지보수 확인이다.
+M26(jump chaining)은 2026-11-11 닫혔고 P2(ADR-0050)가 끝났다. 직전 자리표시자 계획의 마지막 커밋은 `cc53436`이다. M27의 범위와 수용 기준은 ADR-0059(2026-11-11 승인, 크기 1.5ew)다. 수용 기준은 결정 27의 열다섯 항목이고, 그보다 더 만들지 않는다.
 
 이 파일과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
@@ -123,3 +123,25 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 - CI의 `windows-latest` leg은 clippy, `cargo nextest run --workspace`, `cargo doc -D warnings`를 돌고, Windows host의 PTY·`exec`·파일 op·응답자를 정방향과 역방향으로 덮는다. 로컬 Windows 검사는 Dave-Windows(`ssh dave-windows.tail91e9e.ts.net`)에서 하고 CI를 대신하지 않는다.
 - Dave-Windows에 SSH로 들어가 돌리는 전체 실행에서는 일곱 시험이 늘 실패한다: `cp_cancel::` 넷과 `auto_bootstrap::console::ctrl_c_during_the_bootstrap_ends_canceled_on_windows`(비대화 세션에 콘솔 Ctrl-C가 없다), `identity::keystore::tests::credential_manager_` 둘(SSH 로그온에는 Credential Manager가 없다). CI `windows-latest`에서는 통과한다. 로컬 Windows 판정은 이 일곱을 빼고 한다.
 - 부하 반복은 Linux·공통 테스트를 Dave-Windows-WSL(8 vCPU)에서, Windows 전용 타이밍 민감 테스트를 Dave-Windows에서 `scripts/stress/run.sh`로 돈다. 마일스톤별 필터는 `scripts/stress/m<N>.filter`다.
+
+## 3. M27 스텝
+
+각 스텝은 PR 하나 크기다. 스텝마다 그 스텝의 시험과 일곱 게이트가 초록이어야 닫힌다. 순서는 위에서 아래다. wire 변경은 없고, 계약(키·플래그·doctor 코드) 스텝은 ADR-0059 승인 뒤에 연다(2026-11-11 승인됨).
+
+- [x] **범위 ADR(ADR-0059).** 2026-11-11 승인(Dave 결정, 정할 것 네 항목 모두 (가)).
+- [ ] **공유 부품.** `host_runtime`을 공유 부품(`Gate`, `Quotas`, 감사 sink, `Authorizer`, trust watch, reset key)을 받는 부분과 broker·`Server`를 만드는 부분으로 나누고, `Listen::with_admission_and_quotas`도 같은 부품을 받게 한다. 동작 변경 없음, 기존 시험 초록.
+- [ ] **등록 갈래.** `Server`에 `Option<Arc<Listen>>`, `respond` 콜백의 `UNSUPPORTED` 자리에 `decide_registration`, 등록 연결은 `finish_registration`으로. 결정 4·6·7·8·9, DoD 27.1의 등록 행·27.6·27.7.
+- [ ] **펀칭 가로채기.** 첫 요청 `PunchRequest`의 전환, 16개 permit, 3초 규칙, 굳은 연결의 `UNSUPPORTED`. 결정 5·13, DoD 27.1·27.2·27.4.
+- [ ] **수명.** SIGTERM 순서와 배너, localctl, `serve.json`, pairing, agent 디렉터리. 결정 15~19, DoD 27.8·27.11.
+- [ ] **표면.** `[listen].serve`·`--serve`, config 레지스트리, doctor 코드 둘, service 안내문, man page. 결정 20~23, DoD 27.10.
+- [ ] **수용 시험.** 두 역할 동시(L3), 인가 행렬, recovery(L4), 성능, 세 OS. DoD 27.3·27.5·27.9·27.12·27.13.
+- [ ] **문서와 마감.** `docs/CLI.md`, protocol §11·§15.1·§19, architecture, threat model 결정 26의 행, ADR-0012·0014·0054 개정 이력, README, ROADMAP M27 마감 노트. DoD 27.14·27.15.
+
+## 4. M27 뒤 dave-environment
+
+ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과 Toss 기계의 converge는 밖으로 나가는 일이라 사람 몫이다.
+
+- [ ] MacMini의 `[listen]`에 `serve = true`를 렌더하고 converge(Dave 승인). 옛 serve는 겹치는 동안 둔다.
+- [ ] Toss의 `macmini` pin을 :443으로(`qsh_public.serve_port`), Toss converge는 Dave가 한다.
+- [ ] 라우터의 UDP 4433 포워딩을 지운다(Dave, `nvram` 백업 뒤).
+- [ ] MacMini의 `io.qsh.serve`를 내리고 `[serve].bind`를 지운다. tailnet의 mbp16·wsl serve :4433은 그대로.
