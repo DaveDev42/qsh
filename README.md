@@ -1229,10 +1229,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   `QueryUnbiasedInterruptTime` on Windows. A real suspend-and-resume on
   Windows is checked by hand, not by CI.
 - `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
-  unless told otherwise, so a machine taking both roles needs an explicit
-  `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The
-  second one to start fails immediately with `CONFIG_ERROR` and exit `255`,
-  with this remedy on stderr, exactly:
+  unless told otherwise, so running them as two processes needs an explicit
+  `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. To
+  take both roles on one port, set `[listen].serve = true` or run
+  `qsh listen --serve`: one process then accepts registrations and forward
+  connections, but a restart drops both. When two separate processes
+  collide, the second one to start fails immediately with `CONFIG_ERROR` and
+  exit `255`, with this remedy on stderr, exactly:
 
   > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - `acl.toml` has no hot reload: an edit takes effect the next time
