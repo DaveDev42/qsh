@@ -683,6 +683,11 @@ pub struct Server {
     /// [`Server::set_jump_options`]. Unset (production) reads as the
     /// defaults.
     jump_options: OnceLock<crate::jump::middle::JumpOptions>,
+    /// The `qsh listen` controller of a combined endpoint (ADR-0059), set at
+    /// most once by [`Server::set_listen`]. Unset (a standalone `qsh serve`,
+    /// every test harness but the combined one) keeps the registration
+    /// refusal this host has always had.
+    listen: OnceLock<Arc<crate::reverse::listen::Listen>>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -857,6 +862,7 @@ impl Server {
             jump: Arc::new(crate::jump::middle::JumpTable::new()),
             jump_stats: Arc::new(crate::jump::middle::JumpStats::default()),
             jump_options: OnceLock::new(),
+            listen: OnceLock::new(),
         })
     }
 
@@ -869,6 +875,33 @@ impl Server {
     /// `qsh serve --to` under the same rule. No-op past the first call.
     pub fn set_trust_watch(&self, trust: Arc<crate::trust::SharedTrustStore>) {
         let _ = self.trust_watch.set(trust);
+    }
+
+    /// Make this host the front of a combined endpoint (ADR-0059 decisions
+    /// 2, 4): a connection whose `Hello` carries `reverse` is no longer
+    /// refused `UNSUPPORTED` but decided by `listen`'s `host.reverse` choke
+    /// point and, when admitted, handed to `listen` for the rest of its life
+    /// (decision 6: it never reaches this host's dispatch).
+    ///
+    /// `listen` must have been built on the same authorizer, audit sink,
+    /// admission gate and quota tracker as this server (decision 8), checked
+    /// by identity. A mismatch is refused and leaves the server standalone,
+    /// which is the fail-closed outcome: no registration is accepted by a
+    /// pair that could hold two policy snapshots or two connection pools.
+    /// No-op past the first successful call.
+    pub fn set_listen(
+        &self,
+        listen: Arc<crate::reverse::listen::Listen>,
+    ) -> Result<(), crate::ops::OpError> {
+        if !listen.shares_parts(&self.authorizer, &self.audit, &self.admission, &self.quotas) {
+            return Err(crate::ops::OpError::new(
+                ErrorCode::Internal,
+                "a combined endpoint must build its server and its listen controller on one \
+                 authorizer, one audit sink, one admission gate and one quota tracker",
+            ));
+        }
+        let _ = self.listen.set(listen);
+        Ok(())
     }
 
     /// Wire this host's trust store and invite store together so `qsh
@@ -1591,7 +1624,25 @@ impl Server {
             return self.serve_pairing_connection(conn).await;
         }
 
-        let (ctl, peer_hello) = crate::handshake::respond(conn, |peer_hello| {
+        // Set by the registration branch of the callback below (a combined
+        // endpoint only): the admitted registration this connection carries.
+        // `Mutex`, not `RefCell`, for the same reason `Listen::register_connection`
+        // uses one: the closure is held across an `.await`.
+        let outcome_cell: Mutex<Option<crate::reverse::registry::RegisterOutcome>> =
+            Mutex::new(None);
+        let listen = self.listen.get();
+        let result = crate::handshake::respond(conn, |peer_hello| {
+            // A combined endpoint (ADR-0059 decision 4): `Hello.reverse` is a
+            // registration, decided by the controller's `host.reverse` choke
+            // point with the quota order of that path — the ACL first, the
+            // connection-count refusal only after it (A2/B5, so a peer the
+            // registry would deny anyway never learns the pool is full). It
+            // comes ahead of the R3 check below on purpose.
+            if let Some(listen) = listen
+                && peer_hello.reverse.is_some()
+            {
+                return listen.decide_registration(conn, peer_hello, &outcome_cell, refused);
+            }
             // M8 Step 3b ruling R3: the connection-count refusal decided
             // in `Self::serve_connection`, before this callback ever ran,
             // surfaces first — ahead of the reverse-registration check
@@ -1608,7 +1659,7 @@ impl Server {
                     true,
                 ));
             }
-            // A forward host does not accept registrations — the
+            // A standalone forward host does not accept registrations — the
             // symmetric-protocol counterpart of `qsh listen` refusing a
             // peer with no `Hello.reverse` at all (`docs/design/
             // protocol.md` §11-2, M3 plan Step 3 (2473c88)). Zero resources:
@@ -1625,8 +1676,39 @@ impl Server {
             }
             Ok(self.local_hello(None))
         })
-        .await
-        .map_err(map_hello_error)?;
+        .await;
+
+        let (ctl, peer_hello) = match result {
+            Ok(pair) => pair,
+            Err(err) => {
+                // The registration was admitted but its `Hello` reply never
+                // went out: undo exactly what the choke point inserted, as
+                // `Listen::register_connection` does for the same failure.
+                if let Some(listen) = listen
+                    && let Some(outcome) =
+                        outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner())
+                {
+                    listen.rollback_unsent(outcome);
+                }
+                return Err(map_hello_error(err));
+            }
+        };
+
+        // An admitted registration belongs to the controller from here on
+        // (ADR-0059 decision 6): it is a client-role connection that only
+        // ever carries `TCP_ACCEPTED` and `AGENT` streams from its peer, and
+        // nothing below (`ConnCtx`, `serve_control`, `dispatch`) is reachable
+        // from it. The connection-count permit `Self::serve_connection` holds
+        // stays held until this returns, which is the end of the registered
+        // session (B3).
+        if let Some(listen) = listen
+            && let Some(outcome) = outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner())
+        {
+            Arc::clone(listen)
+                .finish_registration(conn.clone(), ctl, peer_hello, outcome)
+                .await;
+            return Ok(());
+        }
 
         let ctx = ConnCtx {
             principal: conn.principal().clone(),

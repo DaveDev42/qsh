@@ -602,6 +602,32 @@ impl Listen {
         })
     }
 
+    /// Whether this controller was built on exactly these shared parts: the
+    /// same [`Authorizer`], audit sink, admission gate and quota tracker, by
+    /// identity rather than by value (ADR-0059 decision 8). A combined
+    /// endpoint runs a [`crate::server::Server`] and a `Listen` in one
+    /// process, and [`crate::server::Server::set_listen`] refuses a pair
+    /// that does not share them, so the two roles can never hold two policy
+    /// snapshots, two audit writers or two connection pools.
+    pub(crate) fn shares_parts(
+        &self,
+        authorizer: &Arc<dyn Authorizer>,
+        audit: &Arc<dyn AuditSink>,
+        admission: &Arc<crate::admission::Gate>,
+        quotas: &Arc<crate::quota::Quotas>,
+    ) -> bool {
+        // Data pointers only: comparing the vtable half of a `dyn` pointer is
+        // not reliable across codegen units.
+        std::ptr::eq(
+            Arc::as_ptr(&self.authorizer).cast::<()>(),
+            Arc::as_ptr(authorizer).cast::<()>(),
+        ) && std::ptr::eq(
+            Arc::as_ptr(&self.audit).cast::<()>(),
+            Arc::as_ptr(audit).cast::<()>(),
+        ) && Arc::ptr_eq(&self.admission, admission)
+            && Arc::ptr_eq(&self.quotas, quotas)
+    }
+
     /// `[punch].mode = "off"`: this listener stops relaying punch requests
     /// and answers them `UNSUPPORTED` (ADR-0054 decision 19). On by default.
     pub fn set_punch_enabled(&self, enabled: bool) {

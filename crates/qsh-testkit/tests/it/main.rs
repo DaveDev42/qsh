@@ -16,6 +16,7 @@ mod attach_loopback;
 mod bulk_yield;
 mod chaos_proxy;
 mod chaos_relay;
+mod combined;
 mod console_probe;
 mod cp_many_small_files;
 mod cp_scripted_host;
