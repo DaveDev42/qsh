@@ -34,6 +34,8 @@ fn record(n: u32, principal: &str, action: &str, resource: &str, decision: &str)
         count: None,
         role: None,
         grant: None,
+        peer_path: None,
+        relay: None,
     }
 }
 
@@ -53,6 +55,21 @@ pub(crate) fn series() -> Vec<AuditRecord> {
         record(3, "device:phone", "exec.run", "exec", "deny"),
         with_role,
     ]
+}
+
+/// The records of a keyed (iroh) peer (ADR-0061 decision 6): a relay-path
+/// allow, then a direct-path one after the connection moved. `peer_addr` is
+/// `iroh:<fingerprint>` on both; `relay` is there only on the relay one.
+pub(crate) fn iroh_series() -> Vec<AuditRecord> {
+    let peer_addr = "iroh:sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".to_string();
+    let mut on_relay = record(1, "device:laptop", "exec.run", "exec", "allow");
+    on_relay.peer_addr = peer_addr.clone();
+    on_relay.peer_path = Some("relay".to_string());
+    on_relay.relay = Some("https://relay.example.test".to_string());
+    let mut direct = record(2, "device:laptop", "session.open", "session", "allow");
+    direct.peer_addr = peer_addr;
+    direct.peer_path = Some("direct".to_string());
+    vec![on_relay, direct]
 }
 
 fn log_path(sandbox: &Sandbox) -> std::path::PathBuf {

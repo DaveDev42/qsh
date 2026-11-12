@@ -16,7 +16,9 @@ exclude = ["/tests/"]
 [features]
 # Test seams for sibling crates' tests (`Connection::with_peer_chain_dropped`).
 # Never enabled by a normal build; `qsh-core` turns it on in dev-dependencies.
-test-support = []
+# Also builds `test_relay` (an in-process iroh relay server) for the serve
+# tests in sibling crates; never enabled by a normal build.
+test-support = ["dep:iroh-relay"]
 
 [dependencies]
 qsh-proto.workspace = true
@@ -36,6 +38,8 @@ tracing.workspace = true
 socket2.workspace = true
 zeroize.workspace = true
 iroh.workspace = true
+# The relay server behind `test_relay`, `test-support` only.
+iroh-relay = { version = "1.4.1", optional = true, default-features = false, features = ["server", "test-utils"] }
 
 [dev-dependencies]
 rcgen.workspace = true

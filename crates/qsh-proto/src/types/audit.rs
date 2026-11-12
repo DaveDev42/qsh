@@ -77,6 +77,16 @@ pub struct AuditRecordView {
     /// the stored record carries no `grant` key. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+    /// The path a keyed (iroh) peer's connection used, `"direct"` or
+    /// `"relay"` (ADR-0061 decision 6); omitted for a socket-address peer and
+    /// whenever the stored record carries no `peer_path` key. Additive. An
+    /// open string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_path: Option<String>,
+    /// Scheme and host of the relay behind a `peer_path` of `"relay"`;
+    /// omitted otherwise. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// Data payload of `audit.query` (ADR-0033 결정 9).

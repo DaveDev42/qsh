@@ -688,6 +688,10 @@ pub struct Server {
     /// every test harness but the combined one) keeps the registration
     /// refusal this host has always had.
     listen: OnceLock<Arc<crate::reverse::listen::Listen>>,
+    /// The relay endpoint beside the UDP socket (ADR-0061 decision 2), set at
+    /// most once by [`Server::set_iroh`]. Unset (every host that did not ask
+    /// for one) means no endpoint exists and nothing contacts a relay.
+    iroh: OnceLock<qsh_transport::IrohEndpoint>,
 }
 
 /// The configuration [`Server::set_file_host`] hands the remote file ops:
@@ -863,6 +867,7 @@ impl Server {
             jump_stats: Arc::new(crate::jump::middle::JumpStats::default()),
             jump_options: OnceLock::new(),
             listen: OnceLock::new(),
+            iroh: OnceLock::new(),
         })
     }
 
@@ -902,6 +907,25 @@ impl Server {
         }
         let _ = self.listen.set(listen);
         Ok(())
+    }
+
+    /// Attach the relay endpoint of this host (ADR-0061 decision 2): its
+    /// attempts are accepted by [`Self::run`] beside the listener's, judged
+    /// by [`crate::iroh_serve`]'s two-stage admission, and then served
+    /// exactly like a QUIC connection. [`Self::run`] closes it after the
+    /// drain, with the listener. No-op past the first call.
+    ///
+    /// `endpoint` must be built on this host's identity and trust store
+    /// ([`crate::iroh_serve::bind`]); a host never given one has no endpoint.
+    pub fn set_iroh(&self, endpoint: qsh_transport::IrohEndpoint) {
+        let _ = self.iroh.set(endpoint);
+    }
+
+    /// The relay endpoint attached with [`Self::set_iroh`]; `None` for a host
+    /// that has none, which then has no iroh socket and has contacted no
+    /// relay.
+    pub fn iroh_endpoint(&self) -> Option<&qsh_transport::IrohEndpoint> {
+        self.iroh.get()
     }
 
     /// Wire this host's trust store and invite store together so `qsh
@@ -1362,12 +1386,23 @@ impl Server {
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_logged_heartbeat: Option<AcceptHeartbeat> = None;
         let mut ticks_since_heartbeat_log: u32 = 0;
+        // The relay endpoint, when this host has one (ADR-0061 decision 2): its
+        // attempts are accepted in the same loop, so shutdown, the heartbeat and
+        // the audit flush below cover both ways in. Once it reports closed it is
+        // not polled again.
+        let mut iroh_open = self.iroh.get().is_some();
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 incoming = listener.accept() => {
                     let Some(incoming) = incoming else { break };
                     self.clone().admit(incoming);
+                }
+                incoming = crate::iroh_serve::next_incoming(self.iroh.get()), if iroh_open => {
+                    match incoming {
+                        Some(incoming) => self.clone().admit_iroh(incoming),
+                        None => iroh_open = false,
+                    }
                 }
                 _ = audit_flush.tick() => {
                     let records = self.admission.flush_expired(self.admission.now());
@@ -1404,6 +1439,9 @@ impl Server {
         // stream — including the ones carrying `session.closed` to an
         // attached consumer — before `drain` gets a chance to send it.
         self.drain().await;
+        if let Some(iroh) = self.iroh.get() {
+            iroh.close().await;
+        }
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
     }
@@ -1486,6 +1524,46 @@ impl Server {
         let peer = incoming.remote_address();
         let result = incoming.accept().await;
         drop(permit);
+        self.serve_accepted(peer, result, on_accept).await;
+    }
+
+    /// The accept loop's handling of one inbound relay attempt (ADR-0061
+    /// decision 4), before its handshake: [`crate::iroh_serve::admit_attempt`]
+    /// decides synchronously and only an admitted attempt costs a task.
+    fn admit_iroh(self: Arc<Self>, incoming: qsh_transport::IrohIncoming) {
+        let Some((incoming, permit)) =
+            crate::iroh_serve::admit_attempt(&self.admission, self.audit.as_ref(), incoming)
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            let peer = incoming.remote_address();
+            let result = incoming.accept().await;
+            drop(permit);
+            // After the handshake the key is proven: judge it as a key, then
+            // hand the connection to the same path a QUIC one takes.
+            match result {
+                // Over its budget: already audited and closed.
+                Ok(conn)
+                    if !crate::iroh_serve::judge_keyed(
+                        &self.admission,
+                        self.audit.as_ref(),
+                        &conn,
+                    ) => {}
+                result => self.serve_accepted(peer, result, |_| {}).await,
+            }
+        });
+    }
+
+    /// What follows an accept, whichever transport it came from: serve the
+    /// verified connection, or audit the rejected handshake with its
+    /// category.
+    async fn serve_accepted(
+        self: Arc<Self>,
+        peer: PeerAddr,
+        result: Result<Connection, qsh_transport::AcceptError>,
+        on_accept: impl FnOnce(&Connection),
+    ) {
         match result {
             Ok(conn) => {
                 on_accept(&conn);

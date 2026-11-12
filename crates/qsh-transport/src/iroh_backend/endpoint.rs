@@ -38,7 +38,8 @@ use super::key::fingerprint_of_endpoint;
 use crate::endpoint::{
     AcceptError, CLOSE_CODE_UNVERIFIED_PEER, CONNECTION_RECEIVE_WINDOW,
     DATAGRAM_RECEIVE_BUFFER_SIZE, DATAGRAM_SEND_BUFFER_SIZE, DialError, LocalIdentity,
-    MAX_CONCURRENT_BIDI_STREAMS, SetupError, TUNNEL_STREAM_RECEIVE_WINDOW, default_dial_timeout,
+    MAX_CONCURRENT_BIDI_STREAMS, MAX_IDLE_TIMEOUT, SetupError, TUNNEL_STREAM_RECEIVE_WINDOW,
+    default_dial_timeout,
 };
 use crate::error::ConnectionError;
 use crate::identity::{CertificateDer, Fingerprint};
@@ -157,11 +158,17 @@ fn setup_err(what: &str, err: &dyn std::error::Error) -> SetupError {
 
 /// The connection-level transport settings qsh sets on its QUIC connections,
 /// applied to the iroh connection too: stream table, flow-control windows,
-/// send fairness and the datagram buffers (`docs/design/protocol.md` §12).
-/// Keep-alive, idle timeout and congestion control stay iroh's, which tunes
-/// them for its multipath holepunching.
+/// send fairness and the datagram buffers (`docs/design/protocol.md` §12),
+/// and the 45 s idle timeout the QUIC backend uses. The keep-alive interval
+/// stays iroh's 5 s: it is shorter than the QUIC backend's 15 s, so it keeps
+/// a relay path and a NAT binding at least as alive, and iroh warns against
+/// raising it (its multipath keeps a per-path heartbeat of its own). The
+/// congestion controller stays iroh's, which tunes it for holepunching.
 fn transport_config() -> QuicTransportConfig {
+    let idle = ie::IdleTimeout::try_from(MAX_IDLE_TIMEOUT)
+        .expect("45s fits in a QUIC idle timeout VarInt");
     QuicTransportConfig::builder()
+        .max_idle_timeout(Some(idle))
         .max_concurrent_bidi_streams(VarInt::from_u32(MAX_CONCURRENT_BIDI_STREAMS))
         .send_fairness(true)
         .datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_SIZE))
@@ -268,6 +275,12 @@ impl IrohEndpoint {
     /// The local UDP sockets the endpoint is bound on.
     pub fn bound_sockets(&self) -> Vec<SocketAddr> {
         self.ep.bound_sockets()
+    }
+
+    /// The relay this endpoint homes on, as the URL it was configured with;
+    /// `None` when the relay is disabled.
+    pub fn relay_url(&self) -> Option<String> {
+        self.relay.as_ref().map(ToString::to_string)
     }
 
     /// Resolves once the endpoint is connected to its relay (never, when the
@@ -437,6 +450,18 @@ impl IrohIncoming {
             // and is never matched against the trust store).
             _ => PeerAddr::Socket(SocketAddr::from(([0, 0, 0, 0], 0))),
         }
+    }
+
+    /// Refuse the attempt: the peer is told the endpoint is at capacity and
+    /// no handshake runs.
+    pub fn refuse(self) {
+        self.incoming.refuse();
+    }
+
+    /// Drop the attempt without answering: no handshake runs and nothing is
+    /// sent back.
+    pub fn ignore(self) {
+        self.incoming.ignore();
     }
 
     /// Whether the attempt arrives through a relay.

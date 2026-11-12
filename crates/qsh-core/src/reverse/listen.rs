@@ -185,6 +185,34 @@ pub async fn run_listen(
         identity,
         bind_flag,
         None,
+        crate::iroh_serve::iroh_serve_from_config(config),
+        on_bound,
+        on_policy_diagnostic,
+        shutdown,
+    )
+    .await
+}
+
+/// [`run_listen`] with the relay endpoint given explicitly (ADR-0061
+/// decision 2): `None` is a controller without one.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_listen_with_iroh(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind_flag: Option<&str>,
+    iroh: Option<crate::iroh_serve::IrohServe>,
+    on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnMut(&str),
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
+    run_listen_impl(
+        paths,
+        config,
+        identity,
+        bind_flag,
+        None,
+        iroh,
         on_bound,
         on_policy_diagnostic,
         shutdown,
@@ -226,6 +254,36 @@ pub async fn run_listen_serve(
         identity,
         bind_flag,
         Some(Arc::new(on_notice)),
+        crate::iroh_serve::iroh_serve_from_config(config),
+        on_bound,
+        on_policy_diagnostic,
+        shutdown,
+    )
+    .await
+}
+
+/// [`run_listen_serve`] with the relay endpoint given explicitly (ADR-0061
+/// decision 2). A combined endpoint serves forward hosts, hole-punching
+/// connections and registrations over it exactly as over its UDP socket.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_listen_serve_with_iroh(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind_flag: Option<&str>,
+    iroh: Option<crate::iroh_serve::IrohServe>,
+    on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnMut(&str),
+    on_notice: impl Fn(&str) + Send + Sync + 'static,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
+    run_listen_impl(
+        paths,
+        config,
+        identity,
+        bind_flag,
+        Some(Arc::new(on_notice)),
+        iroh,
         on_bound,
         on_policy_diagnostic,
         shutdown,
@@ -244,6 +302,7 @@ async fn run_listen_impl(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     combined: Option<NoticeFn>,
+    iroh: Option<crate::iroh_serve::IrohServe>,
     on_bound: impl FnOnce(SocketAddr),
     mut on_policy_diagnostic: impl FnMut(&str),
     shutdown: impl std::future::Future<Output = ()>,
@@ -299,7 +358,7 @@ async fn run_listen_impl(
     let (listener, reset_key_diagnostic) = crate::reset_key::bind_listener(
         paths,
         bind,
-        identity.local,
+        identity.local.clone(),
         trust.clone(),
         liveness.tuning(),
     )
@@ -317,6 +376,23 @@ async fn run_listen_impl(
             format!("cannot read bound address: {err}"),
         )
     })?;
+    // The relay endpoint (ADR-0061 decision 2), when asked for: judged by the
+    // very store the listener's verifier reads, bound before anything is
+    // announced so a failure to start it is a failed start.
+    let iroh_endpoint = match &iroh {
+        Some(serve) => Some(
+            crate::iroh_serve::bind(
+                serve,
+                &identity.local,
+                Arc::clone(&trust) as Arc<dyn qsh_transport::TrustEvaluator>,
+            )
+            .await
+            .inspect_err(|_| {
+                transport::remove_endpoint(&localctl_socket_path);
+            })?,
+        ),
+        None => None,
+    };
     // F7 (M5 plan Step 3 (2473c88) arbitration): the controller shares the
     // same config-driven `RotatingAuditSink` construction `serve.rs`'s
     // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/
@@ -382,6 +458,14 @@ async fn run_listen_impl(
         .set_punch_enabled(config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto);
     listen.set_trust_watch(trust_for_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+    // A combined endpoint accepts the relay endpoint in the `Server` in
+    // front, so one loop takes both ways in and one drain closes both.
+    if let Some(endpoint) = &iroh_endpoint {
+        match &host {
+            Some(server) => server.set_iroh(endpoint.clone()),
+            None => listen.set_iroh(endpoint.clone()),
+        }
+    }
     if let (Some(server), Some(notice), Some(invites)) = (&host, &combined, &invites) {
         server.set_listen(Arc::clone(&listen)).inspect_err(|_| {
             transport::remove_endpoint(&localctl_socket_path);
@@ -424,13 +508,14 @@ async fn run_listen_impl(
     // no on-demand idle exit here: a listen runs until it is told to stop.
     let record_guard = host.as_ref().and_then(|_| {
         let own_pid = std::process::id();
-        match crate::serve::record::write(
-            paths,
-            &crate::serve::record::ServeRecord::for_current_process(
-                actual,
-                crate::serve::record::ServeRecordMode::Persistent,
-            ),
-        ) {
+        let mut record = crate::serve::record::ServeRecord::for_current_process(
+            actual,
+            crate::serve::record::ServeRecordMode::Persistent,
+        );
+        if let Some(endpoint) = &iroh_endpoint {
+            record = record.with_iroh(crate::iroh_serve::describe(endpoint));
+        }
+        match crate::serve::record::write(paths, &record) {
             Ok(()) => Some(crate::serve::record::RecordGuard::new(paths, own_pid)),
             Err(err) => {
                 tracing::warn!(error = %err.message, "cannot write serve.json");
@@ -573,6 +658,10 @@ pub struct Listen {
     /// attempt table and the `[punch].mode` switch. The relay itself is in
     /// `listen/punch.rs`.
     rendezvous: crate::punch::RendezvousState,
+    /// The relay endpoint beside the UDP socket (ADR-0061 decision 2), set at
+    /// most once by [`Listen::set_iroh`]; its attempts are accepted by
+    /// [`Self::run`] and join the registration path a QUIC attempt takes.
+    iroh: std::sync::OnceLock<qsh_transport::IrohEndpoint>,
 }
 
 impl std::fmt::Debug for Listen {
@@ -740,6 +829,7 @@ impl Listen {
             #[cfg(test)]
             test_control_stall: tokio::sync::watch::Sender::new(false),
             rendezvous: crate::punch::RendezvousState::default(),
+            iroh: std::sync::OnceLock::new(),
         })
     }
 
@@ -767,6 +857,15 @@ impl Listen {
             Arc::as_ptr(audit).cast::<()>(),
         ) && Arc::ptr_eq(&self.admission, admission)
             && Arc::ptr_eq(&self.quotas, quotas)
+    }
+
+    /// Attach the relay endpoint of this controller (ADR-0061 decision 2):
+    /// [`Self::run`] accepts its attempts beside the listener's and closes it
+    /// on the way out. A combined endpoint attaches its endpoint to the
+    /// `Server` in front instead ([`crate::server::Server::set_iroh`]). No-op
+    /// past the first call.
+    pub fn set_iroh(&self, endpoint: qsh_transport::IrohEndpoint) {
+        let _ = self.iroh.set(endpoint);
     }
 
     /// `[punch].mode = "off"`: this listener stops relaying punch requests
@@ -1115,12 +1214,21 @@ impl Listen {
         // `MissedTickBehavior`.
         let mut audit_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
         audit_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // See `crate::server::Server::run`: the relay endpoint is accepted in
+        // the same loop and not polled again once it reports closed.
+        let mut iroh_open = self.iroh.get().is_some();
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 incoming = listener.accept() => {
                     let Some(incoming) = incoming else { break };
                     self.clone().admit(incoming);
+                }
+                incoming = crate::iroh_serve::next_incoming(self.iroh.get()), if iroh_open => {
+                    match incoming {
+                        Some(incoming) => self.clone().admit_iroh(incoming),
+                        None => iroh_open = false,
+                    }
                 }
                 _ = audit_flush.tick() => {
                     let records = self.admission.flush_expired(self.admission.now());
@@ -1143,6 +1251,9 @@ impl Listen {
         crate::audit::write_admission_audit(self.audit.as_ref(), &records);
         let quota_records = self.quotas.flush_expired(self.quotas.now());
         crate::audit::write_quota_audit(self.audit.as_ref(), &quota_records);
+        if let Some(iroh) = self.iroh.get() {
+            iroh.close().await;
+        }
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
     }

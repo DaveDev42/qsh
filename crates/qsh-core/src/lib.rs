@@ -56,6 +56,7 @@ pub mod handshake;
 pub mod hosts;
 pub mod identity;
 pub mod input_times;
+pub mod iroh_serve;
 pub mod iroh_settings;
 pub mod jump;
 pub mod lifecycle;

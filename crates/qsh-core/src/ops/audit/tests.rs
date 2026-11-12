@@ -31,6 +31,8 @@ fn record(n: i64) -> AuditRecord {
         count: None,
         role: None,
         grant: None,
+        peer_path: None,
+        relay: None,
     }
 }
 

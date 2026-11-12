@@ -297,6 +297,7 @@ fn a_record_with_a_dead_pid_is_absent() {
         addr: "[::]:4433".into(),
         mode: ServeRecordMode::OnDemand,
         started_at: "2026-11-05T00:00:00Z".into(),
+        iroh: None,
     };
     record::write(&rig.paths, &stale).unwrap();
     assert_eq!(record::read(&rig.paths), Some(stale.clone()));
@@ -396,6 +397,7 @@ fn ensure_ignores_a_stale_record_and_times_out_when_the_serve_never_comes_up() {
         addr: "[::]:4433".into(),
         mode: ServeRecordMode::OnDemand,
         started_at: "2026-11-05T00:00:00Z".into(),
+        iroh: None,
     };
     record::write(&rig.paths, &stale).unwrap();
     // `true` accepts the arguments, publishes nothing and exits.

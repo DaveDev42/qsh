@@ -9,7 +9,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -53,6 +53,32 @@ struct Shared {
     peer: Fingerprint,
     /// The peer's Ed25519 public key (its endpoint id).
     key: PeerKey,
+    /// The smallest round trip seen on the current kind of path (noq keeps
+    /// no minimum of its own). See [`MinRtt`].
+    min_rtt: Mutex<MinRtt>,
+}
+
+/// A running minimum of the sampled round trip, reset whenever the selected
+/// path switches between direct and relay: the floor of a 15 ms direct path
+/// says nothing about a 250 ms relay path, and the bulk governor reads
+/// `srtt - min_rtt` as queueing delay, so a stale floor would read a
+/// relay-path switch as a standing queue.
+#[derive(Debug, Default)]
+struct MinRtt {
+    relay: bool,
+    min: Option<Duration>,
+}
+
+impl MinRtt {
+    fn observe(&mut self, relay: bool, rtt: Duration) -> Duration {
+        if self.relay != relay {
+            *self = Self { relay, min: None };
+        }
+        if !rtt.is_zero() {
+            self.min = Some(self.min.map_or(rtt, |m| m.min(rtt)));
+        }
+        self.min.unwrap_or(Duration::ZERO)
+    }
 }
 
 impl IrohConn {
@@ -64,6 +90,7 @@ impl IrohConn {
                 _endpoint: endpoint,
                 peer,
                 key,
+                min_rtt: Mutex::new(MinRtt::default()),
             }),
         }
     }
@@ -179,15 +206,23 @@ impl MuxConn for IrohConn {
         let paths = self.conn().paths();
         // Per-path numbers (rtt, cwnd, mtu) come from the path data is sent
         // on; the counters are connection-wide sums.
-        let selected = paths.iter().find(|p| p.is_selected()).map(|p| p.stats());
+        let selected = paths.iter().find(|p| p.is_selected());
+        let on_relay = !selected.as_ref().is_some_and(|p| p.is_ip());
+        let selected = selected.map(|p| p.stats());
         let (rtt, cwnd, congestion_events, mtu) = selected
             .map(|s| (s.rtt, s.cwnd, s.congestion_events, s.current_mtu))
             .unwrap_or((Duration::ZERO, 0, 0, 0));
+        // noq keeps no per-path minimum, so one is kept here from the samples
+        // `stats()` is polled with; zero is the documented "no sample" value.
+        let min_rtt = self
+            .shared
+            .min_rtt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .observe(on_relay, rtt);
         ConnStats {
             rtt,
-            // noq keeps no per-path minimum; zero is the documented "no
-            // sample" value.
-            min_rtt: Duration::ZERO,
+            min_rtt,
             cwnd,
             congestion_events,
             lost_bytes: total.lost_bytes,
