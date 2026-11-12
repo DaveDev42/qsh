@@ -163,6 +163,72 @@ pub struct AuditRecord {
     /// omitted from the JSONL line) on every other record.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub grant: Option<String>,
+    /// The path a keyed (iroh) peer's connection used when the record was
+    /// written, `"direct"` or `"relay"` (ADR-0061 decision 6, `docs/CLI.md`
+    /// §6.22). `None`, and omitted from the JSONL line, for a socket-address
+    /// peer and for a record with no peer, so those records stay
+    /// byte-identical to what they were before iroh. Structural, no payload.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub peer_path: Option<String>,
+    /// The relay behind a `peer_path` of `"relay"`: scheme and host of its
+    /// URL, nothing else (no path, no query, no credentials). `None` and
+    /// omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub relay: Option<String>,
+}
+
+/// `peer`'s [`AuditRecord::peer_path`]: only a keyed peer has one.
+fn peer_path(peer: &qsh_transport::PeerAddr) -> Option<String> {
+    match peer {
+        qsh_transport::PeerAddr::Socket(_) => None,
+        qsh_transport::PeerAddr::Keyed { path, .. } => Some(
+            match path {
+                qsh_transport::PeerPath::Direct(_) => "direct",
+                qsh_transport::PeerPath::Relay(_) => "relay",
+            }
+            .to_string(),
+        ),
+    }
+}
+
+/// `peer`'s [`AuditRecord::relay`]: the scheme and host of the relay URL of
+/// a keyed peer on a relay path. Anything after the host (a path, a query, a
+/// port's userinfo) is dropped, so a relay URL that carried a credential
+/// cannot reach the log; a URL that does not parse as `scheme://host` is not
+/// recorded at all.
+fn relay_of(peer: &qsh_transport::PeerAddr) -> Option<String> {
+    let qsh_transport::PeerAddr::Keyed {
+        path: qsh_transport::PeerPath::Relay(url),
+        ..
+    } = peer
+    else {
+        return None;
+    };
+    relay_scheme_host(url)
+}
+
+fn relay_scheme_host(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // Drop userinfo; keep the host and the port when the URL names one. A
+    // trailing dot (a fully qualified name) is not part of the host's
+    // spelling in the record.
+    let host_port = authority.rsplit('@').next()?;
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => (host, Some(port)),
+        _ => (host_port, None),
+    };
+    let host = host.trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some(match port {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
 }
 
 impl AuditRecord {
@@ -199,6 +265,8 @@ impl AuditRecord {
             rule,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -232,6 +300,8 @@ impl AuditRecord {
             rule,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: "-".to_string(),
+            peer_path: None,
+            relay: None,
             count: None,
             role: None,
             grant: None,
@@ -283,6 +353,8 @@ impl AuditRecord {
             rule,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -305,6 +377,8 @@ impl AuditRecord {
             rule: None,
             auth_path: "-".to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -336,6 +410,8 @@ impl AuditRecord {
             rule: None,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -363,6 +439,8 @@ impl AuditRecord {
             rule: None,
             auth_path: "-".to_string(),
             peer_addr: "-".to_string(),
+            peer_path: None,
+            relay: None,
             count: Some(count),
             role: None,
             grant: None,
@@ -413,6 +491,8 @@ impl AuditRecord {
             rule: None,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -445,6 +525,8 @@ impl AuditRecord {
             rule: None,
             auth_path: "-".to_string(),
             peer_addr: "-".to_string(),
+            peer_path: None,
+            relay: None,
             count: Some(count),
             role: None,
             grant: None,
@@ -476,6 +558,8 @@ impl AuditRecord {
             rule: None,
             auth_path: auth_path_str(AuthPath::Pairing).to_string(),
             peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
             count: None,
             role: None,
             grant: None,
@@ -511,6 +595,8 @@ impl AuditRecord {
             rule: None,
             auth_path: "local".to_string(),
             peer_addr: "-".to_string(),
+            peer_path: None,
+            relay: None,
             count: None,
             role: None,
             grant: None,
@@ -807,5 +893,7 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod iroh_tests;
 #[cfg(test)]
 mod tests;

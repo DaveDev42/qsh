@@ -100,6 +100,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.move_key.noop.json",
     "audit.query.json",
     "audit.query.truncated.json",
+    "audit.query.iroh_relay.json",
     "doctor.run.keystore_session_bound.json",
     "doctor_transport.json",
     "doctor_screen_echo.json",
@@ -1883,6 +1884,21 @@ fn golden_audit_query_fixtures() {
     assert_eq!(code, 0, "{cut}");
     assert_eq!(cut["data"]["truncated"], true, "{cut}");
     check("audit.query.truncated.json", cut);
+}
+
+/// `qsh audit` over the records of an iroh peer (`docs/CLI.md` §6.22,
+/// ADR-0061 결정 6): `peer_addr` is `iroh:<fingerprint>`, and the additive
+/// `peer_path` and `relay` keys show only on the records that carry them
+/// (`relay` only on the relay-path one). A new fixture beside the existing
+/// two, which stay as they were.
+#[test]
+fn golden_audit_query_iroh_relay_fixture() {
+    let sandbox = Sandbox::initialized();
+    crate::audit_query::plant(&sandbox, &crate::audit_query::iroh_series(), None);
+
+    let (code, all) = sandbox.json(&["audit", "--json"]);
+    assert_eq!(code, 0, "{all}");
+    check("audit.query.iroh_relay.json", all);
 }
 
 /// `qsh identity move-key` (`docs/CLI.md` §6.11, ADR-0032 결정 15).

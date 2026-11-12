@@ -143,7 +143,17 @@ impl CarrierRunner {
     /// connection receive again.
     pub fn observe_peer(&mut self, addr: impl Into<PeerAddr>) {
         let addr = addr.into();
-        if self.peer.as_ref().is_some_and(|p| *p != addr) {
+        // A keyed (iroh) peer is the same peer on whichever path carries it:
+        // the connection moves between its relay and direct paths by itself
+        // and keeps each alive, so a path change is no lapsed NAT binding.
+        let moved = match (&self.peer, &addr) {
+            (Some(PeerAddr::Keyed { key: before, .. }), PeerAddr::Keyed { key: after, .. }) => {
+                before != after
+            }
+            (Some(before), _) => *before != addr,
+            (None, _) => false,
+        };
+        if moved {
             self.rebind_pending = true;
         }
         self.peer = Some(addr);

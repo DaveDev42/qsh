@@ -245,17 +245,24 @@ impl SketchRow {
 enum SourceKey {
     V4(u32),
     V6(u64),
+    /// A peer known by key rather than by address (ADR-0061 decision 4): its
+    /// own bucket, whatever path carries it, so neither a relay's address
+    /// nor the peer's moving direct address can merge it into, or split it
+    /// out of, an IP bucket.
+    Key([u8; qsh_transport::PEER_KEY_LEN]),
 }
 
 impl SourceKey {
-    /// The bucket for `peer`: its IP when it has one.
-    ///
-    /// TODO(ADR-0061 decision 4): a peer without a socket address (a relay
-    /// path, never produced yet) must be keyed on its peer key after the
-    /// handshake, not here. Until that exists such a peer falls into one
-    /// shared bucket (`::/64`), which can only over-limit, never let a
+    /// The bucket for `peer`: its key when it is a keyed (iroh) peer, else
+    /// its IP (ADR-0061 decision 4). A keyed peer is only ever judged after
+    /// its handshake proved the key ([`Gate::decide_keyed`]); an address
+    /// the type cannot give (never produced for a socket peer) falls into
+    /// one shared bucket (`::/64`), which can only over-limit, never let a
     /// source evade the limiter.
     fn from_peer(peer: &PeerAddr) -> Self {
+        if let Some(key) = peer.key() {
+            return SourceKey::Key(key.0);
+        }
         match peer.socket_addr() {
             Some(addr) => Self::from_addr(addr.ip()),
             None => Self::from_addr(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
@@ -588,6 +595,95 @@ impl Gate {
         }
     }
 
+    /// Admission of one inbound iroh attempt, before its handshake runs
+    /// (ADR-0061 decision 4). iroh gives the caller no Retry round trip, so
+    /// nothing here is address-validated: the attempt is judged on what it
+    /// is, then holds a handshake permit from the same pool the QUIC
+    /// accepts use.
+    ///
+    /// - A direct attempt carries a socket address, so it is rate limited by
+    ///   source like an unvalidated QUIC attempt ([`Decision::Ignore`]) and
+    ///   its refusals are audited and aggregated the same way.
+    /// - A relay attempt has no source address and only an unproven claimed
+    ///   key, so there is nothing to bucket it by yet: it takes a permit or
+    ///   is refused at the cap, and that refusal writes no audit row
+    ///   (`docs/CLI.md` §6.22). The key-based judgment follows the handshake
+    ///   ([`Self::decide_keyed`]).
+    ///
+    /// Returns [`Decision::Admit`] with the permit (hold it until the
+    /// handshake resolves, as for QUIC), [`Decision::Ignore`] or
+    /// [`Decision::Refuse`]; never [`Decision::Retry`].
+    pub fn decide_iroh_attempt(&self, peer: &PeerAddr, now: Instant) -> Decision {
+        let has_source = peer.socket_addr().is_some();
+        if has_source && self.rate_exceeded(&self.sketch, self.rate_per_source, peer, now) {
+            let records = self.record_rejection(RejectReason::RateLimited, peer, now);
+            self.decision_counters
+                .ignore
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::admission",
+                peer = %peer,
+                reason = ?RejectReason::RateLimited,
+                "admission decision: ignore (iroh)"
+            );
+            return Decision::Ignore(RejectReason::RateLimited, records);
+        }
+        match self.handshake_permits.clone().try_acquire_owned() {
+            Ok(permit) => {
+                self.decision_counters.admit.fetch_add(1, Ordering::Relaxed);
+                Decision::Admit(permit)
+            }
+            Err(_) => {
+                let records = if has_source {
+                    self.record_rejection(RejectReason::AtCapacity, peer, now)
+                } else {
+                    Vec::new()
+                };
+                self.decision_counters
+                    .refuse
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::trace!(
+                    target: "qsh_core::admission",
+                    peer = %peer,
+                    reason = ?RejectReason::AtCapacity,
+                    "admission decision: refuse (iroh)"
+                );
+                Decision::Refuse(RejectReason::AtCapacity, records)
+            }
+        }
+    }
+
+    /// The key-based judgment of a handshaken iroh peer (ADR-0061
+    /// decision 4): the connection is counted against a per-key bucket (the
+    /// validated-axis budget, `[serve].validated_rate_per_source`), not
+    /// against the address of whatever relay or path carried it.
+    ///
+    /// `Ok(())` admits. `Err(records)` means the key is over its budget: the
+    /// caller closes the connection and writes `records` (a first
+    /// `connect`/`deny` record with the peer's `iroh:<fingerprint>`, then
+    /// the usual windowed summaries).
+    pub fn decide_keyed(&self, peer: &PeerAddr, now: Instant) -> Result<(), Vec<AuditRecord>> {
+        if self.rate_exceeded(
+            &self.validated_sketch,
+            self.validated_rate_per_source,
+            peer,
+            now,
+        ) {
+            let records = self.record_rejection(RejectReason::ValidatedRateLimited, peer, now);
+            self.decision_counters
+                .refuse
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::admission",
+                peer = %peer,
+                reason = ?RejectReason::ValidatedRateLimited,
+                "admission decision: refuse (keyed)"
+            );
+            return Err(records);
+        }
+        Ok(())
+    }
+
     /// Record one event for `peer` in `sketch` and report whether that
     /// source is now over `rate`'s per-epoch budget — the shared body
     /// behind both the unvalidated and the validated rate checks in
@@ -747,5 +843,7 @@ impl Gate {
     }
 }
 
+#[cfg(test)]
+mod iroh_tests;
 #[cfg(test)]
 mod tests;

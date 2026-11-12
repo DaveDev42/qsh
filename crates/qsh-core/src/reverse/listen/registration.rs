@@ -29,6 +29,44 @@ impl Listen {
         let peer = incoming.remote_address();
         let result = incoming.accept().await;
         drop(permit);
+        self.register_accepted(peer, result).await;
+    }
+
+    /// The accept loop's handling of one inbound relay attempt (ADR-0061
+    /// decision 4): admitted before the handshake and judged by key after it
+    /// ([`crate::iroh_serve`]), then registered exactly like a QUIC
+    /// connection.
+    pub(super) fn admit_iroh(self: Arc<Self>, incoming: qsh_transport::IrohIncoming) {
+        let Some((incoming, permit)) =
+            crate::iroh_serve::admit_attempt(&self.admission, self.audit.as_ref(), incoming)
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            let peer = incoming.remote_address();
+            let result = incoming.accept().await;
+            drop(permit);
+            match result {
+                // Over its budget: already audited and closed.
+                Ok(conn)
+                    if !crate::iroh_serve::judge_keyed(
+                        &self.admission,
+                        self.audit.as_ref(),
+                        &conn,
+                    ) => {}
+                result => self.register_accepted(peer, result).await,
+            }
+        });
+    }
+
+    /// What follows an accept, whichever transport it came from: reserve the
+    /// connection slot and run the registration, or audit the rejected
+    /// handshake.
+    async fn register_accepted(
+        self: Arc<Self>,
+        peer: qsh_transport::PeerAddr,
+        result: Result<Connection, AcceptError>,
+    ) {
         match result {
             Ok(conn) => {
                 let opener = crate::acl::opener_key(conn.principal(), conn.auth_path());

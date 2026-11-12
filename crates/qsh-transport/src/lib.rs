@@ -48,6 +48,8 @@ mod mux;
 pub mod peer_addr;
 mod quinn_backend;
 pub mod stream;
+#[cfg(feature = "test-support")]
+pub mod test_relay;
 pub mod tls;
 
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};

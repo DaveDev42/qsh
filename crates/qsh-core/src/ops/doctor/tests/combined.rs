@@ -137,6 +137,7 @@ fn write_record(ops: &Ops, pid: u32) {
             addr: "127.0.0.1:4433".to_string(),
             mode: crate::serve::record::ServeRecordMode::Persistent,
             started_at: "2026-11-11T00:00:00Z".to_string(),
+            iroh: None,
         },
     )
     .unwrap();

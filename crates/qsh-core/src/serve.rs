@@ -447,6 +447,39 @@ pub async fn run_serve_with(
     on_notice: impl Fn(&str) + Send + Sync + 'static,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
+    // An on-demand serve is the helper an SSH bootstrap starts for one
+    // session and lets expire: it never opens a relay endpoint of its own.
+    let iroh = if on_demand.is_some() {
+        None
+    } else {
+        crate::iroh_serve::iroh_serve_from_config(config)
+    };
+    run_serve_with_iroh(
+        paths, config, identity, bind, on_demand, iroh, on_bound, on_runtime, on_notice, shutdown,
+    )
+    .await
+}
+
+/// [`run_serve_with`] with the relay endpoint given explicitly (ADR-0061
+/// decision 2). `iroh` is `None` for a host without one: no endpoint exists,
+/// no extra socket is bound and no relay is contacted. With `Some`, the
+/// endpoint is bound on the host's own identity and trust store before the
+/// address is announced, accepted in the same loop as the UDP socket (the
+/// connections it yields are served by the same pipeline), recorded in
+/// `serve.json`, and closed with the listener after the drain.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_serve_with_iroh(
+    paths: &Paths,
+    config: &Config,
+    identity: LoadedIdentity,
+    bind: SocketAddr,
+    on_demand: Option<OnDemandOptions>,
+    iroh: Option<crate::iroh_serve::IrohServe>,
+    on_bound: impl FnOnce(SocketAddr),
+    on_runtime: impl FnOnce(&HostRuntime),
+    on_notice: impl Fn(&str) + Send + Sync + 'static,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), OpError> {
     // The liveness sections are validated before any resource exists: a
     // nonsensical value is a `CONFIG_ERROR` at startup, never clamped
     // (ADR-0021).
@@ -524,12 +557,29 @@ pub async fn run_serve_with(
             format!("cannot read bound address: {err}"),
         )
     })?;
+    // The relay endpoint, bound before anything is announced so a failure to
+    // start it is a failed start, not a serve that quietly lacks it. It
+    // judges peers by the very store the listener's verifier reads.
+    let iroh_endpoint = match &iroh {
+        Some(serve) => Some(
+            crate::iroh_serve::bind(
+                serve,
+                &identity.local,
+                Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     let runtime = host_runtime(
         paths,
         config,
         identity.identity.device_id.clone(),
         Arc::clone(&trust),
     );
+    if let Some(endpoint) = &iroh_endpoint {
+        runtime.server.set_iroh(endpoint.clone());
+    }
     // Wired before `on_runtime`/`on_bound` so it is live for every
     // connection the accept loop below could ever admit.
     runtime
@@ -550,10 +600,11 @@ pub async fn run_serve_with(
     } else {
         record::ServeRecordMode::Persistent
     };
-    let _record_guard = match record::write(
-        paths,
-        &record::ServeRecord::for_current_process(actual, mode),
-    ) {
+    let mut serve_record = record::ServeRecord::for_current_process(actual, mode);
+    if let Some(endpoint) = &iroh_endpoint {
+        serve_record = serve_record.with_iroh(crate::iroh_serve::describe(endpoint));
+    }
+    let _record_guard = match record::write(paths, &serve_record) {
         Ok(()) => Some(record::RecordGuard::new(paths, own_pid)),
         Err(err) => {
             tracing::warn!(error = %err.message, "cannot write serve.json");

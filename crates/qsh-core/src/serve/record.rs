@@ -37,6 +37,22 @@ pub struct ServeRecord {
     pub mode: ServeRecordMode,
     /// When it started, RFC 3339 UTC.
     pub started_at: String,
+    /// The relay endpoint this serve runs beside its socket, when it has
+    /// one (ADR-0061 decision 2, `docs/CLI.md` §6.12). Absent, not null, for
+    /// a serve without one, so a record written without iroh is byte for
+    /// byte what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iroh: Option<IrohRecord>,
+}
+
+/// The `iroh` object of `serve.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrohRecord {
+    /// The endpoint's id as a qsh fingerprint: the name a peer's pin gives
+    /// this host.
+    pub endpoint_id: String,
+    /// The relay URL the endpoint homes on.
+    pub relay: String,
 }
 
 impl ServeRecord {
@@ -47,7 +63,18 @@ impl ServeRecord {
             addr: addr.to_string(),
             mode,
             started_at: now_rfc3339(),
+            iroh: None,
         }
+    }
+
+    /// This record with the relay endpoint the serve runs.
+    #[must_use]
+    pub fn with_iroh(mut self, bound: crate::iroh_serve::IrohBound) -> Self {
+        self.iroh = Some(IrohRecord {
+            endpoint_id: bound.endpoint_id,
+            relay: bound.relay,
+        });
+        self
     }
 
     /// The recorded address as a socket address, when it parses.

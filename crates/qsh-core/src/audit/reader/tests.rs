@@ -37,6 +37,8 @@ fn record(n: i64, principal: &str, action: &str, resource: &str, decision: &str)
         count: None,
         role: None,
         grant: None,
+        peer_path: None,
+        relay: None,
     }
 }
 
