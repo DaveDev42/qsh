@@ -1359,3 +1359,61 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 둘째 hop부터는 앞 hop의 안쪽 연결이 다음 hop의 바깥 연결이 되므로 hop마다 55씩 준다. 1500 링크의 넷째 hop 상한 1232가 `JUMP_PACKET_MIN`(1200) 위이므로 hop 상한은 넷이다(여유 32바이트). 운반체는 hop마다 그 hop을 나르는 바깥 연결의 `max_datagram_size()`로 고르고, 스트림 운반체는 안쪽 패킷 크기를 줄이지 않으므로 첫 hop이 스트림이어도 둘째 hop부터는 datagram이 될 수 있다. 바깥 PLPMTUD가 자리를 연 뒤에는 스트림에서 datagram으로 바뀐다(`jump_carrier_switches_to_datagram_after_pmtud`).
 
 **침묵 전환 시한(ADR-0058).** datagram으로 보낸 뒤 그 채널로 datagram이 한 번도 돌아오지 않는데 스트림과 바깥 ack는 살아 있으면 스트림으로 바꾼다. 시한은 `silence = 4 × max(rtt, 50 ms) + 25 ms`다(`RTT_FLOOR` 50 ms는 ADR-0052 구현과 같고 25 ms는 QUIC 기본 `max_ack_delay`다). `rtt`는 client(C에서 다음 hop 방향)가 그 채널 위에서 맺은 안쪽 연결의 srtt(끝에서 끝 왕복, handshake 전에는 바깥 srtt)이고, 중간 peer(T에서 C 방향)와 역방향 데몬은 바깥 연결의 srtt다. 30초 뒤 datagram을 다시 시험하는 것과 자리를 넘는 패킷을 버리고 세는 것은 그대로다. 시한 계산은 `jump_silence_window_table`이 고정하고, 건강한 경로에서 전환 0번은 `jump_tunnel_throughput`이, 진짜 침묵에서의 전환은 `jump_silence_on_the_datagram_path_falls_back_to_the_stream`이 본다.
+
+## 22. iroh relay route (ADR-0061, 초안 — M28 구현 전)
+
+> 이 절은 M28 스텝 4~6이 착지하는 동작을 미리 적은 것이다. 구현이 이 절과 다르면 이 절을 먼저 고친다. 값(시한, 기본 relay URL)은 구현에서 정해지면 채운다.
+
+### 22.1 route 순서
+
+호스트의 route 목록(`hosts.toml`의 route, 기본 route)에 `iroh` 종류가 생긴다.
+
+- 기본 route 목록은 바뀌지 않는다. `iroh`가 목록에 없는 설정은 relay에 한 번도 접속하지 않고 iroh endpoint도 만들지 않는다.
+- 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 돌고 `iroh`가 마지막이다. 직결과 펀칭의 경주(ADR-0054 결정 16)와 head start는 그대로이고, iroh는 그 경주가 모두 실패한 뒤에 시작한다. 직결이 서면 relay에 아무것도 보내지 않는다.
+- 새로 도는 route는 §19.10과 같은 규칙으로 **재해석**된다. recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.
+- 이름 없는 대상(주소만 있는 대상)에는 iroh route가 없다. EndpointId를 아는 pin(이름)만 iroh로 dial한다.
+- 첫 dial의 시한 안에서 iroh 시도에 쓸 시간은 구현에서 정한다(미결 1).
+
+### 22.2 relay 경로
+
+- relay 접속은 HTTPS 위 WebSocket(`/relay`)이다. relay URL은 pin(`trust.toml`)의 선택 필드이고, 없으면 설정의 기본 relay URL이다. 양 끝이 같은 기본값을 쓰면 pin에 URL을 적지 않아도 닿는다.
+- endpoint는 **설정된 relay URL 하나에 고정**으로 붙는다. 발견(pkarr, n0 DNS)으로 home relay를 고르지 않고 게시도 조회도 하지 않는다. 상대가 다른 relay에 붙어 있으면 pin에 적힌 URL이 그 relay다.
+- relay TLS는 OS 인증서 저장소로 검증한다(`platform-verifier`, `CaTlsConfig::system()`). qsh의 다른 곳에서 web PKI를 쓰지 않는다는 규칙(§3)과 충돌하지 않는다: 이 검증은 relay 서버 인증서에만 쓰이고 qsh 신원은 건드리지 않는다.
+- relay는 안쪽 QUIC 패킷을 나르는 중계자다. 내용도 신원도 relay가 아니라 **안쪽 QUIC의 pin 인증**이 세운다. relay가 가짜이거나 망이 TLS를 가로채도 pin이 맞는 상대를 만들어 낼 수 없다(threat-model D28·D29).
+- 프록시 환경에서는 iroh의 `proxy_url`·`proxy_from_env`를 따를지는 구현에서 정한다(미결 2).
+
+### 22.3 신원과 handshake
+
+- iroh route의 상대 식별자는 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. qsh fingerprint(SPKI SHA-256)는 같은 키에서 계산한다.
+- **검증은 handshake 직후 훅에서** 한다. pin 대조와 ADR-0060의 이름 결속(이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId여야 함)을 거치고, 실패하면 `AUTH_FAILED`로 끝난다. 이 판정 전에는 `Hello`도, 어떤 스트림도, 세션·터널·listener도 없다.
+- 사설 CA 모드(체인, SAN principal)는 iroh route에서 `UNSUPPORTED`다. jump 체인의 어느 hop도 iroh route로 열지 않는다(`UNSUPPORTED`, ADR-0061 결정 14).
+- 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 한다. 페어링을 iroh route 위에서 허용할지는 구현 때 확인한다(미결 3).
+
+### 22.4 직접 경로로의 승격
+
+iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(multipath). relay로 선 연결은 홀펀칭이 성공하면 **같은 연결 안에서** 직접 경로로 승격되고, 연결이 끊기거나 새로 서지 않는다. 그래서:
+
+- qsh 계층에서는 연결 하나가 그대로다. 세션, 스트림, resume token에 변화가 없다. 경로 변화는 migration과 같은 급의 지연 최적화이고 correctness는 §10의 resume이 지킨다.
+- 승격 뒤 pin된 상대는 내 IP를 안다(threat-model D30). 승격 전에는 relay가 본다.
+- §19의 qsh 자체 펀칭(`punch.v1`)과 별개다. iroh route 위에서는 `punch.v1`을 쓰지 않는다(경로 승격은 iroh의 몫).
+- 경로 정보(어느 경로로 가고 있는가, rtt)는 `PathWatch`와 상태 줄, 감사의 선택 필드로 읽기 전용으로 올라간다. 정책은 정하지 않는다.
+- `LinkStatus`와 침묵 판정(§18.12, §21.8)은 경로가 바뀌어도 한 연결의 값으로 계속 돈다. relay 경유로 RTT가 늘어난 연결이 직결 기준 시한에 걸리지 않는지는 구현에서 시험으로 확인한다(미결 4).
+
+### 22.5 wire에서 그대로인 것
+
+- ALPN `qsh/1`, frame layer(§5), `.proto` 계약(§9), 스트림 배치(§7), `Hello`·capability 협상(§4)은 바뀌지 않는다. iroh 연결의 안쪽 QUIC도 같은 ALPN과 같은 메시지를 쓴다. 새 capability는 만들지 않는다(additive 변경 없음).
+- **resume은 SPKI + token 기준**이다(§10). 세션은 route가 아니라 peer 신원(SPKI SHA-256)에 묶여 있으므로 직결로 만든 세션을 relay로 이어 붙일 수 있고 그 반대도 된다. reattach 4단계, 입력의 무손실·무중복(§10-5)도 같다.
+- 0-RTT 금지(§2)는 iroh 연결에도 같다. 활성화 옵션이 있어도 켜지 않는다.
+- datagram(§14)은 iroh backend도 제공한다. 못 쓰면 스트림 짝으로 돌아가는 기존 규칙(`DatagramError`)을 따른다.
+- 역방향(§11): `qsh serve --to`의 등록 dial이 iroh route로 컨트롤러에 닿을 수 있고, 컨트롤러(`listen`, 합친 endpoint 포함)가 iroh endpoint로 받는다. 등록 연결의 watchdog과 heartbeat(ADR-0053 개정, ADR-0041)는 그대로다. 역방향 admission은 handshake 뒤 키 기준으로 판정한다.
+
+### 22.6 시험
+
+planned. 이름과 계층은 `testing.md`의 「iroh relay route와 backend 경계」 절에 있다. 핀 테스트 인덱스는 `threat-model.md` §4(A27·B54·D28~D31·G15)가 canonical이다.
+
+### 22.7 미결
+
+1. 첫 dial 시한 안에서 iroh 시도에 배정할 시간과 head start 규칙.
+2. 프록시(`proxy_url`, `proxy_from_env`)를 기본으로 따를지.
+3. 페어링(§15)을 iroh route 위에서 허용할지. 허용하면 invite 질의 경로(`pair invite`)의 EndpointId 안내가 필요하다.
+4. relay 경유 RTT에서 `LinkStatus`·침묵 시한의 기본값이 충분한지.

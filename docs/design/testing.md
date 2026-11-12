@@ -260,6 +260,36 @@ Corpus는 checked-in하고, 그중 `broker_ops`는 일반 유닛 테스트로 �
   - RSS/fd 측정은 `/proc` 기반이라 Linux 전용이다. `/proc`이 없는 플랫폼(macOS)에서는 `QSH_LOAD_STRICT`가 아닌 한 그 시나리오가 skip이다.
 - **musl 바이너리의 RSS 주장 범위.** `docs/PRD.md` §13의 idle 30 MB는 gnu 바이너리에만 주장한다. `x86_64-unknown-linux-musl` 빌드는 `tikv-jemallocator` 의존이 `target_env = "gnu"`로 좁혀져 시스템(musl) 할당자를 쓰고, 그 의존이 겨냥한 retention 자체가 glibc arena high-water라서 대상이 아니다. soak·적대적 부하 회차는 gnu 바이너리로만 돌고, musl 자산이 릴리스 전에 통과하는 것은 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`의 기능 네 축과 정적 링크 증거뿐이다. musl 바이너리의 idle RSS 수치가 필요해지면 별도 회차를 연다.
 
+## iroh relay route와 backend 경계 (ADR-0061, M28 — 계획)
+
+아래는 M28이 갚아야 하는 시험이다. 전부 구현 전이고 이름은 계획이다. 위협별 대응은 [threat-model.md](threat-model.md) §4(A27·B54·D28~D31·G15)가 canonical이고, 결정 28(수용 기준, PLAN §4.2)의 항목 번호를 괄호에 적는다. 스텝 1~3(trait, `PeerAddr`, 오류 매핑, arch)은 동작 변화가 없어서 새 시험보다 기존 시험이 그대로 초록인 것이 증거다(결정 28-1).
+
+**테스트 망.** 실제 공용 relay에는 접속하지 않는다. 두 가지를 쓴다.
+- 프로세스 안 `iroh-relay`(crate의 `server` feature). 시험 전용 사설 루트로 서명한 인증서를 쓰고, 그 루트를 신뢰 저장소에 넣어 OS 저장소 검증을 구동한다. 포트는 0으로 묶고 4433·4434·443은 열지도 dial하지도 않는다.
+- "직결 UDP 차단, relay만 열림" 망. 이식 가능한 쪽은 `qsh-testkit`의 `netsim`(시뮬레이션 소켓)에서 direct path 전부를 버리고 relay 소켓만 통과시키는 규칙이고, 리눅스 전용 쪽은 `scripts/netns/`의 netns 구성(직결 UDP drop, relay 주소만 허용)이다. netns 쪽은 `punch-netns`처럼 root 필요 job이라 필수 게이트가 아니다.
+
+**1. backend별 conformance (결정 28-3).** `crates/qsh-transport/tests/it/conformance.rs`가 이미 backend 생성자 하나를 매개변수로 받는다(`2cacaff0`). iroh 생성자를 더하면 스트림 순서·FIN·reset 코드, datagram 왕복과 한도, TLS exporter 일치, 상대 신원, close 의미, AsyncRead/Write 일치가 quinn과 iroh에서 같은 본문으로 돈다. iroh 쪽은 프로세스 안 relay를 거친다. 새 conformance 항목이 생기면 두 backend에 같이 들어간다.
+
+**2. 오류 매핑 (ADR-0061 결정 7).** 틀린 pin, 죽은 relay, 닫힌 연결, 지원하지 않는 모드를 같은 입력으로 backend마다 넣고 같은 `ErrorCode`(`AUTH_FAILED`·`CONNECTION_FAILED`·`UNSUPPORTED`)가 나오는지 conformance에 포함한다. backend 오류 타입은 `qsh-core` 시험에서 이름으로 보이지 않는다.
+
+**3. relay만 열린 망에서의 종단 (결정 28-4·5).** `iroh_route::` 모듈(`tests/it/iroh_route.rs`)에서 직결 UDP가 막히고 relay만 열린 망에 대해 정방향 `exec`, 대화형 세션과 끊김 뒤 resume, `-L` 터널, `cp`, 그리고 역방향 등록·attach를 돈다. 정방향/역방향은 `route_cases.rs`의 같은 케이스 함수를 route만 바꿔 거는 기존 방식을 따른다. 승격은 별도 시험(`iroh_route::a_relay_connection_upgrades_to_a_direct_path_in_place`)이 같은 연결 id로 경로가 relay에서 직접으로 바뀌고 세션이 끊기지 않음을 본다. 시각은 `tokio::time::pause()` 또는 이벤트 통지로 잡고 `sleep()`을 쓰지 않는다.
+
+**4. pin 거절 (결정 28-6).** `iroh_route_rejects_a_peer_with_another_pin`, `iroh_route_binds_the_dialed_name_to_its_pin_key`(ADR-0060과 같은 결과), `an_unpinned_endpoint_id_never_reaches_dispatch`. 거절이 handshake 직후 훅에서 일어나고 그 전후로 세션·터널·listener가 없다는 것을 서버 자원 수로 단언한다.
+
+**5. `UNSUPPORTED` (결정 28-6).** `private_ca_mode_over_iroh_is_unsupported`, `a_jump_hop_over_iroh_is_unsupported`(바깥 hop과 안쪽 hop 모두, ADR-0061 결정 14). 메시지 문면은 `failure_text_discipline.rs`가 CLI.md와 고정한다.
+
+**6. relay 비접속 (결정 28-7).** `no_relay_contact_when_the_route_is_not_enabled`는 기본 route 목록으로 dial과 serve를 끝까지 돌리고, 프로세스 안 relay의 접속 수가 0이며 iroh endpoint가 만들어지지 않았음을 본다. `an_iroh_endpoint_resolves_nothing_through_discovery`는 iroh route를 켠 상태에서 DNS·pkarr 질의가 한 건도 나가지 않음을 본다(결정 11). 시험 resolver를 주입하거나 네트워크 계층에서 목적지를 센다.
+
+**7. OS 인증서 저장소 (결정 28-9).** `relay_tls::relay_tls_is_verified_with_the_os_trust_store`는 시험 사설 루트를 신뢰 저장소에 넣은 relay에 연결이 서는 것을, `relay_tls_with_an_untrusted_root_fails_closed`는 루트가 없을 때 연결이 서지 않는 것을 본다. OS 저장소를 건드리는 시험이라 러너를 오염시키지 않도록 격리된 프로세스/컨테이너나 전용 환경 변수로 저장소 위치를 바꿀 수 있는 플랫폼에서만 돌린다(플랫폼별 가능 여부는 구현 때 확인하는 미결이다). 못 도는 레그는 `skip` 사유를 출력하고 조용히 통과시키지 않는다.
+
+**8. 감사와 로그 (결정 28-8).** relay 경로(URL, EndpointId)는 구조적 필드로만 남고 payload가 없다. 기존 `agent_audit_and_logs_carry_no_payload`와 같은 방식으로 표식 문자열이 감사 파일과 stderr에 없음을 본다. 새 감사 필드는 새 fixture로 등록한다(append-only, `REQUIRED_FIXTURES`).
+
+**9. arch (결정 28-2).** `xtask arch`의 `iroh`·`noq` manifest 금지와 토큰 금지는 각각 위반 입력을 만들어 실패하는 시험을 갖는다. 오류 매핑 위치 규칙도 같다.
+
+**10. 문서와 표면 (결정 28-10).** CLI.md의 iroh route 절, 설정 키, doctor 코드는 `EXPECTED_DOCTOR_CODES`와 `cli_md_prose_doctor_code_count_matches_expected_len`에 반영되고, man 페이지는 `checked_in_man_pages_match_the_generator`가 지킨다.
+
+**CI.** iroh의 프로세스 안 relay 시험은 일반 `test` job의 네 OS에서 돈다(포트 0, 루프백). netns 시험은 `punch-netns`와 같은 방식의 root job으로 두고 처음에는 필수 게이트가 아니다. 타이밍 민감 시험은 착지 전에 `scripts/stress/run.sh`로 50회 연속 초록을 확인한다. 의존이 느는 만큼 `cargo deny`(`webpki-roots`의 CDLA-Permissive-2.0 허용 여부)가 스텝 4의 게이트다.
+
 ## CI 규율
 
 - **환경 문제는 빠르고 분명하게 실패한다(재시도로 가리지 않는다):** 호스트 nftables 잔재(`udp dport 60000-61000 drop`, loopback 예외 없음)가 loopback UDP를 막아 `bind(0)` QUIC endpoint의 약 4.3%가 도달 불능이 되었고, 그 테스트들이 10초 타임아웃으로 죽으며 제품 flake처럼 보였다. 원인 규칙은 dave-environment c6c5359c가 제거했다. nextest `--retries`로 이런 실패를 덮지 않는다. 재시도는 원인 진단을 늦추고 환경 결함을 통과로 바꿔 버린다. 대신 `qsh-testkit`의 `env_check::ensure_loopback_udp`(프로세스당 한 번, 50ms 미만)가 하네스 생성자(`Listener::bind` 앞, `ServeGuard` spawn, raw endpoint)에서 ephemeral 범위와 60000-61000의 UDP 왕복을 확인하고, 막혔으면 막힌 포트와 예상 원인, 우회책을 담은 메시지로 즉시 panic한다. `qsh-core` 단위 테스트는 `qsh-testkit`에 의존할 수 없어(아키텍처 §1) 이 점검 밖이다. 우회책은 `scripts/test/nextest-ns.sh`로, `unshare -Urn`과 `lo` 기동, 안쪽 `unshare -U --map-user/--map-group`으로 전용 netns에서 비루트로 스위트를 돌린다(nft 테이블은 netns마다 별개). 같은 계열로 긴 `$TMPDIR`(약 100자 이상)는 unix socket 경로를 `sun_path` 108바이트 밖으로 밀어 약 120개 테스트를 `path must be shorter than SUN_LEN`으로 죽였다. `.config/nextest.toml`의 setup script `scripts/test/short-tmpdir.sh`가 `$TMPDIR`가 48바이트를 넘으면 `/tmp/qsh-t-<uid>`로 바꿔 준다.
