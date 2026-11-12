@@ -145,7 +145,7 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 
 ### 4.1 스텝
 
-- [ ] **1. backend trait.** `qsh-transport`의 연결 표면(연결, 양방향·단방향 스트림, datagram, TLS exporter, 상대 신원, 경로 정보, close, stats)을 trait으로 정의하고 quinn 구현을 그 뒤로 옮긴다. `Connection::quinn()`을 없앤다. `ConnBackend` enum이 있으면 trait 구현으로 바꾼다. conformance 시험이 backend를 매개변수로 받게 한다. 완료: 공개 표면에 quinn·rustls 타입 없음, 시험 초록.
+- [x] **1. backend trait.** `2cacaff0`. trait(`mux.rs`의 `MuxConn`·`SendHalf`·`RecvHalf`)은 M14 (a)부터 있었다. 이 스텝은 `Connection::quinn()`을 없애고 conformance를 backend 매개변수 매크로로 넓혔다(exporter·상대 신원·datagram 추가). 남은 quinn·rustls 노출(endpoint 단의 quinn 코드 위치, `CertificateDer` re-export, `SocketSource::Virtual`의 `quinn::AsyncUdpSocket`)은 스텝 3이 맡는다. 원래 문안: `qsh-transport`의 연결 표면(연결, 양방향·단방향 스트림, datagram, TLS exporter, 상대 신원, 경로 정보, close, stats)을 trait으로 정의하고 quinn 구현을 그 뒤로 옮긴다. `Connection::quinn()`을 없앤다. `ConnBackend` enum이 있으면 trait 구현으로 바꾼다. conformance 시험이 backend를 매개변수로 받게 한다. 완료: 공개 표면에 quinn·rustls 타입 없음, 시험 초록.
 - [ ] **2. `PeerAddr`.** `qsh-transport`에 `PeerAddr`(소켓 주소, 또는 키와 경로)를 두고 `qsh-core`의 admission·감사·ACL이 이 타입을 쓴다. 이 스텝에서는 소켓 주소 갈래만 생기므로 JSON과 감사 레코드는 바이트 단위로 같다. 완료: fixture 무변경, 시험 초록.
 - [ ] **3. 오류 매핑과 arch.** quinn·rustls 오류를 중립 오류로 바꾸는 코드를 quinn backend 모듈 안으로 모은다. `xtask arch`가 `qsh-core`·`qsh-cli`의 `iroh`·`noq` manifest 항목과 토큰을 막는다. 완료: `cargo xtask arch`가 새 규칙의 위반 시험을 갖고 초록.
 - [ ] **4. iroh backend.** 의존 `iroh`(기본 빌드, `platform-verifier`)를 `qsh-transport`에만 들인다. qsh 신원 키로 `SecretKey`를 만들고 EndpointId에서 qsh fingerprint를 계산한다. relay는 설정된 URL 하나에 고정하고 발견 게시와 조회는 끈다. pin 검증과 ADR-0060의 이름 결속은 handshake 직후 훅에서 한다. `cargo deny` 설정을 맞춘다. 완료: 로컬 relay(테스트용 in-process `iroh-relay`)를 거친 conformance 시험이 iroh backend로 초록.
