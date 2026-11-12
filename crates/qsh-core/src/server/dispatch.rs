@@ -217,7 +217,7 @@ impl Server {
                 resource,
                 verdict.decision,
                 verdict.rule,
-                ctx.peer_addr,
+                &ctx.peer_addr,
             )
             .with_verdict_role(verdict.role)
             .with_verdict_pin_grant(verdict.pin_grant),
@@ -247,7 +247,7 @@ impl Server {
                 resource,
                 verdict.decision,
                 verdict.rule,
-                ctx.peer_addr,
+                &ctx.peer_addr,
             )
             .with_verdict_role(verdict.role)
             .with_verdict_pin_grant(verdict.pin_grant),
@@ -334,7 +334,7 @@ impl Server {
                 resource.id,
                 verdict.decision,
                 verdict.rule,
-                ctx.peer_addr,
+                &ctx.peer_addr,
             )
             .with_verdict_role(verdict.role)
             .with_verdict_pin_grant(verdict.pin_grant),
@@ -439,7 +439,7 @@ impl Server {
                     &id.0,
                     Decision::Deny,
                     None,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                 ));
                 Err(Box::new(Self::permission_denied(request_id, action)))
             }

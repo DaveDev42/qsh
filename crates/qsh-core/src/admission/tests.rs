@@ -1,6 +1,7 @@
 use super::*;
 use crate::broker::TestClock;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 
 fn addr(ip: IpAddr, port: u16) -> SocketAddr {
     SocketAddr::new(ip, port)
@@ -33,15 +34,15 @@ async fn gate_admits_then_refuses_at_cap() {
     let gate = Gate::new(clock.clone(), 2, 10, 10);
     let peer = addr(v4(203, 0, 113, 1), 1);
 
-    let permit1 = match gate.decide(peer, true, gate.now()) {
+    let permit1 = match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Admit(p) => p,
         _ => panic!("expected Admit"),
     };
-    let permit2 = match gate.decide(peer, true, gate.now()) {
+    let permit2 = match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Admit(p) => p,
         _ => panic!("expected Admit"),
     };
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::AtCapacity, records) => {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].resource, "at_capacity");
@@ -67,7 +68,7 @@ async fn gate_counters_tally_every_decision_branch() {
     assert_eq!(gate.counters(), AdmissionCounters::default());
 
     // Retry: unvalidated, under its rate limit.
-    match gate.decide(addr(v4(203, 0, 113, 1), 1), false, gate.now()) {
+    match gate.decide(&addr(v4(203, 0, 113, 1), 1).into(), false, gate.now()) {
         Decision::Retry => {}
         other => panic!("expected Retry, got {}", decision_kind(&other)),
     }
@@ -80,7 +81,7 @@ async fn gate_counters_tally_every_decision_branch() {
     );
 
     // Admit: validated, under the cap.
-    let permit = match gate.decide(addr(v4(203, 0, 113, 2), 1), true, gate.now()) {
+    let permit = match gate.decide(&addr(v4(203, 0, 113, 2), 1).into(), true, gate.now()) {
         Decision::Admit(p) => p,
         other => panic!("expected Admit, got {}", decision_kind(&other)),
     };
@@ -94,7 +95,7 @@ async fn gate_counters_tally_every_decision_branch() {
     );
 
     // Refuse: validated, but the cap (now 1/1) is already held.
-    match gate.decide(addr(v4(203, 0, 113, 3), 1), true, gate.now()) {
+    match gate.decide(&addr(v4(203, 0, 113, 3), 1).into(), true, gate.now()) {
         Decision::Refuse(RejectReason::AtCapacity, _) => {}
         other => panic!("expected Refuse(AtCapacity), got {}", decision_kind(&other)),
     }
@@ -114,7 +115,7 @@ async fn gate_counters_tally_every_decision_branch() {
     let mut saw_ignore = false;
     for _ in 0..10_000 {
         if let Decision::Ignore(RejectReason::RateLimited, _) =
-            gate.decide(flood_peer, false, gate.now())
+            gate.decide(&flood_peer.into(), false, gate.now())
         {
             saw_ignore = true;
             break;
@@ -136,18 +137,18 @@ async fn gate_releases_permit_on_handshake_completion() {
     let gate = Gate::new(clock.clone(), 1, 10, 10);
     let peer = addr(v4(203, 0, 113, 2), 1);
 
-    let permit = match gate.decide(peer, true, gate.now()) {
+    let permit = match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Admit(p) => p,
         _ => panic!("expected Admit"),
     };
     assert_eq!(gate.available_permits(), 0);
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(..) => {}
         _ => panic!("expected Refuse while the permit is held"),
     }
     drop(permit); // the handshake "resolved"
     assert_eq!(gate.available_permits(), 1);
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Admit(_) => {}
         _ => panic!("expected Admit once the permit was released"),
     }
@@ -167,7 +168,7 @@ async fn gate_throttles_per_source_and_recovers_next_window() {
     let mut retried = 0;
     let mut ignored = 0;
     for _ in 0..10 {
-        match gate.decide(peer, false, gate.now()) {
+        match gate.decide(&peer.into(), false, gate.now()) {
             Decision::Retry => retried += 1,
             Decision::Ignore(RejectReason::RateLimited, _) => ignored += 1,
             _ => panic!("unvalidated attempt must be Retry or Ignore"),
@@ -176,7 +177,7 @@ async fn gate_throttles_per_source_and_recovers_next_window() {
     assert_eq!(retried, 10, "all 10 attempts are within burst=10");
     assert_eq!(ignored, 0);
 
-    match gate.decide(peer, false, gate.now()) {
+    match gate.decide(&peer.into(), false, gate.now()) {
         Decision::Ignore(RejectReason::RateLimited, records) => {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].resource, "rate_limited");
@@ -188,7 +189,7 @@ async fn gate_throttles_per_source_and_recovers_next_window() {
     // of this source's history (the sliding-window blend still
     // weights the immediately-prior epoch otherwise).
     clock.advance(EPOCH * 2);
-    match gate.decide(peer, false, gate.now()) {
+    match gate.decide(&peer.into(), false, gate.now()) {
         Decision::Retry => {}
         _ => panic!("expected recovery after the window passed"),
     }
@@ -211,19 +212,19 @@ async fn gate_keys_ipv6_by_64_prefix() {
     // Exhaust the shared /64's burst using both addresses.
     for _ in 0..4 {
         assert!(matches!(
-            gate.decide(same_prefix_a, false, gate.now()),
+            gate.decide(&same_prefix_a.into(), false, gate.now()),
             Decision::Retry
         ));
     }
     // The *second* address in the same /64 is already over budget —
     // proof the two share one bucket, not two.
     assert!(matches!(
-        gate.decide(same_prefix_b, false, gate.now()),
+        gate.decide(&same_prefix_b.into(), false, gate.now()),
         Decision::Ignore(RejectReason::RateLimited, _)
     ));
     // A genuinely different /64 has its own, untouched budget.
     assert!(matches!(
-        gate.decide(different_prefix, false, gate.now()),
+        gate.decide(&different_prefix.into(), false, gate.now()),
         Decision::Retry
     ));
 }
@@ -248,7 +249,7 @@ async fn gate_table_is_constant_size_under_forged_cardinality() {
         // Ignore the outcome — the point is that `decide` never
         // panics and never needs to allocate to accommodate a source
         // it has never seen before.
-        let _ = gate.decide(peer, false, gate.now());
+        let _ = gate.decide(&peer.into(), false, gate.now());
     }
 
     let after = gate.sketch_storage_pointers();
@@ -276,7 +277,7 @@ async fn gate_false_positive_rate_under_flood() {
     for i in 0..FORGED_SOURCES {
         // Offset well clear of the legitimate range below.
         let ip = v4(10, (i >> 16) as u8, (i >> 8) as u8, i as u8);
-        let _ = gate.decide(addr(ip, 1), false, now);
+        let _ = gate.decide(&addr(ip, 1).into(), false, now);
     }
 
     const LEGITIMATE_SOURCES: u32 = 1_000;
@@ -291,7 +292,7 @@ async fn gate_false_positive_rate_under_flood() {
         let mut this_source_throttled = false;
         for _ in 0..LEGITIMATE_REQUESTS_PER_SOURCE {
             if matches!(
-                gate.decide(peer, false, now),
+                gate.decide(&peer.into(), false, now),
                 Decision::Ignore(RejectReason::RateLimited, _)
             ) {
                 this_source_throttled = true;
@@ -338,7 +339,7 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
             // the permit pool), which
             // `unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero`
             // already pins per-call; this test pins it across time.
-            let _ = gate.decide(peer, false, gate.now());
+            let _ = gate.decide(&peer.into(), false, gate.now());
         }
         clock.advance(EPOCH);
     }
@@ -372,7 +373,10 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     // estimate.
     let honest = addr(v4(192, 168, 0, 7), 1);
     assert!(
-        matches!(gate.decide(honest, false, gate.now()), Decision::Retry),
+        matches!(
+            gate.decide(&honest.into(), false, gate.now()),
+            Decision::Retry
+        ),
         "a legitimate source amid a sustained forged flood spanning many EPOCH rollovers \
          must not be falsely throttled"
     );
@@ -394,10 +398,10 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     // part checks, so pick a source with nothing against it first.
     let noisy = (1..=254)
         .map(|d| addr(v4(203, 0, 113, d), 1))
-        .find(|peer| gate.unvalidated_estimate_before(*peer, gate.now()) == 0)
+        .find(|peer| gate.unvalidated_estimate_before(&(*peer).into(), gate.now()) == 0)
         .expect("one of 254 sources has no forged count in some row");
     for i in 1..=20 {
-        match gate.decide(noisy, false, gate.now()) {
+        match gate.decide(&noisy.into(), false, gate.now()) {
             Decision::Retry => {}
             other => panic!(
                 "burst attempt {i}/20 within one epoch must be Retry, got {}",
@@ -407,7 +411,7 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     }
     assert!(
         matches!(
-            gate.decide(noisy, false, gate.now()),
+            gate.decide(&noisy.into(), false, gate.now()),
             Decision::Ignore(RejectReason::RateLimited, _)
         ),
         "the 21st attempt within one epoch must be throttled once burst_limit=20 is exceeded"
@@ -415,7 +419,10 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     clock.advance(EPOCH);
     clock.advance(EPOCH);
     assert!(
-        matches!(gate.decide(noisy, false, gate.now()), Decision::Retry),
+        matches!(
+            gate.decide(&noisy.into(), false, gate.now()),
+            Decision::Retry
+        ),
         "two EPOCH rollovers after being throttled, the same source must be admitted again \
          — proof the rollover actually resets its counters, not just that nothing crashes \
          if it doesn't"
@@ -439,7 +446,7 @@ async fn unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero() {
     let before = gate.available_permits();
     assert_eq!(before, 0, "cap=0 starts with zero permits, not unlimited");
 
-    match gate.decide(peer, false, gate.now()) {
+    match gate.decide(&peer.into(), false, gate.now()) {
         Decision::Retry => {}
         other => panic!(
             "an unvalidated peer at cap=0 must still be Retry (never Refuse) — the \
@@ -456,7 +463,7 @@ async fn unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero() {
 
     // A validated peer at the same cap=0 is the contrasting case:
     // Refuse, from the semaphore, not the rate limiter.
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::AtCapacity, _) => {}
         other => panic!(
             "a validated peer at cap=0 must be Refuse(AtCapacity), got {}",
@@ -485,7 +492,7 @@ async fn gate_flush_expired_emits_exactly_one_summary_after_the_window_closes() 
 
     const REJECTIONS: usize = 7;
     for _ in 0..REJECTIONS {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Refuse(RejectReason::AtCapacity, _) => {}
             other => panic!("expected Refuse(AtCapacity), got {}", decision_kind(&other)),
         }
@@ -547,7 +554,7 @@ async fn gate_rate_limit_bounds_sustained_rate_not_just_instantaneous_burst() {
 
     // Sustained 5/s (200 ms apart) for 6 s = 30 attempts, all Retry.
     for tick in 0..30 {
-        match gate.decide(five_per_sec, false, gate.now()) {
+        match gate.decide(&five_per_sec.into(), false, gate.now()) {
             Decision::Retry => {}
             other => panic!(
                 "sustained 5/s (well under the 10/s budget) must never be throttled — \
@@ -561,7 +568,7 @@ async fn gate_rate_limit_bounds_sustained_rate_not_just_instantaneous_burst() {
     // 20 back-to-back attempts from a fresh source, same instant: all
     // Retry (estimate climbs 1..=20, burst_limit is 20, `>` not `>=`).
     for i in 1..=20 {
-        match gate.decide(burst_peer, false, gate.now()) {
+        match gate.decide(&burst_peer.into(), false, gate.now()) {
             Decision::Retry => {}
             other => panic!(
                 "burst attempt {i}/20 within one epoch must be Retry, got {}",
@@ -569,7 +576,7 @@ async fn gate_rate_limit_bounds_sustained_rate_not_just_instantaneous_burst() {
             ),
         }
     }
-    match gate.decide(burst_peer, false, gate.now()) {
+    match gate.decide(&burst_peer.into(), false, gate.now()) {
         Decision::Ignore(RejectReason::RateLimited, _) => {}
         other => panic!(
             "the 21st attempt within one epoch must be Ignore, got {}",
@@ -583,7 +590,7 @@ async fn gate_rate_limit_bounds_sustained_rate_not_just_instantaneous_burst() {
     let mut elapsed = Duration::ZERO;
     while elapsed < Duration::from_secs(2) {
         if matches!(
-            gate.decide(fifteen_per_sec, false, gate.now()),
+            gate.decide(&fifteen_per_sec.into(), false, gate.now()),
             Decision::Ignore(RejectReason::RateLimited, _)
         ) {
             ignored_before_2s = true;
@@ -626,7 +633,7 @@ async fn gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_
 
     // Window 1: 3 rejections — 1 first-occurrence row + 2 suppressed.
     for _ in 0..3 {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Refuse(RejectReason::AtCapacity, _) => {}
             other => panic!("expected Refuse(AtCapacity), got {}", decision_kind(&other)),
         }
@@ -637,7 +644,7 @@ async fn gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_
     // This rejection opens window 2 and, in the same call, lazily
     // closes window 1 (`record_rejection`'s doc) — exactly
     // [summary(count=Some(2)), first_row_of_window_2].
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::AtCapacity, records) => {
             assert_eq!(
                 records.len(),
@@ -667,7 +674,7 @@ async fn gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_
     // returned for either (same-window suppression never reports
     // synchronously).
     for _ in 0..2 {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Refuse(RejectReason::AtCapacity, records) => {
                 assert!(
                     records.is_empty(),
@@ -706,7 +713,7 @@ async fn gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_
     // carried over from window 2, which `flush_expired` already
     // closed above — its first row must come alone, no summary.
     clock.advance(AUDIT_AGGREGATION_WINDOW + Duration::from_secs(1));
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::AtCapacity, records) => {
             assert_eq!(
                 records.len(),
@@ -736,7 +743,7 @@ async fn validated_rate_limit_rejects_without_taking_a_permit() {
 
     let mut held_permits = Vec::new();
     for i in 1..=10 {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Admit(p) => held_permits.push(p),
             other => panic!(
                 "attempt {i}/10 within the validated burst must be Admit, got {}",
@@ -746,7 +753,7 @@ async fn validated_rate_limit_rejects_without_taking_a_permit() {
     }
     let permits_before = gate.available_permits();
 
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::ValidatedRateLimited, records) => {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].resource, "validated_rate_limited");
@@ -793,7 +800,7 @@ fn validated_rate_rejection_never_dips_the_permit_pool_even_transiently() {
     let flooder = std::thread::spawn(move || {
         while !flood_stop.load(Ordering::Relaxed) {
             let now = flood_gate.now();
-            match flood_gate.decide(peer, true, now) {
+            match flood_gate.decide(&peer.into(), true, now) {
                 Decision::Refuse(RejectReason::ValidatedRateLimited, _) => {}
                 other => panic!(
                     "every validated attempt at rate 0 must be \
@@ -832,9 +839,9 @@ async fn unvalidated_flood_does_not_consume_a_validated_sources_budget() {
     // Flood the unvalidated axis well past its own burst from this
     // address — the validated axis must not notice.
     for _ in 0..15 {
-        let _ = gate.decide(peer, false, gate.now());
+        let _ = gate.decide(&peer.into(), false, gate.now());
     }
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Admit(_) => {}
         other => panic!(
             "a validated attempt from an address that only flooded the unvalidated \
@@ -848,9 +855,9 @@ async fn unvalidated_flood_does_not_consume_a_validated_sources_budget() {
     // must still see a clean slate.
     let other_peer = addr(v4(203, 0, 113, 43), 1);
     for _ in 0..15 {
-        let _ = gate.decide(other_peer, true, gate.now());
+        let _ = gate.decide(&other_peer.into(), true, gate.now());
     }
-    match gate.decide(other_peer, false, gate.now()) {
+    match gate.decide(&other_peer.into(), false, gate.now()) {
         Decision::Retry => {}
         other => panic!(
             "an unvalidated attempt from an address that only flooded the validated \
@@ -874,7 +881,7 @@ async fn validated_rate_state_is_constant_size_under_forged_cardinality() {
     for i in 0..FORGED_SOURCES {
         let ip = v4((i >> 24) as u8, (i >> 16) as u8, (i >> 8) as u8, i as u8);
         let peer = addr(ip, 1);
-        let _ = gate.decide(peer, true, gate.now());
+        let _ = gate.decide(&peer.into(), true, gate.now());
     }
 
     let after = gate.validated_sketch_storage_pointers();
@@ -904,7 +911,7 @@ async fn validated_rate_threshold_matches_the_documented_sustained_rate() {
     let mut held_permits = Vec::new();
 
     for i in 1..=20 {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Admit(p) => held_permits.push(p),
             other => panic!(
                 "attempt {i}/20 at the documented default validated rate must be \
@@ -913,7 +920,7 @@ async fn validated_rate_threshold_matches_the_documented_sustained_rate() {
             ),
         }
     }
-    match gate.decide(peer, true, gate.now()) {
+    match gate.decide(&peer.into(), true, gate.now()) {
         Decision::Refuse(RejectReason::ValidatedRateLimited, _) => {}
         other => panic!(
             "the 21st validated attempt at the documented default (10/s, burst 20) \
@@ -964,7 +971,7 @@ async fn one_source_dialing_at_a_sustained_rate_passes_both_axes_across_epochs()
     let total_dials = RATE_PER_SEC * EPOCHS * (EPOCH.as_secs() as u32);
 
     for dial in 1..=total_dials {
-        match gate.decide(peer, false, gate.now()) {
+        match gate.decide(&peer.into(), false, gate.now()) {
             Decision::Retry => {}
             other => panic!(
                 "dial {dial}/{total_dials}: the unvalidated axis of a sustained \
@@ -972,7 +979,7 @@ async fn one_source_dialing_at_a_sustained_rate_passes_both_axes_across_epochs()
                 decision_kind(&other)
             ),
         }
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Admit(permit) => drop(permit),
             other => panic!(
                 "dial {dial}/{total_dials}: the validated axis of a sustained \
@@ -1001,7 +1008,7 @@ async fn validated_rate_limited_rejections_aggregate_into_first_row_then_summary
 
     const REJECTIONS: usize = 5;
     for i in 0..REJECTIONS {
-        match gate.decide(peer, true, gate.now()) {
+        match gate.decide(&peer.into(), true, gate.now()) {
             Decision::Refuse(RejectReason::ValidatedRateLimited, records) => {
                 if i == 0 {
                     assert_eq!(records.len(), 1, "the first rejection carries its own row");

@@ -541,7 +541,7 @@ fn rejections_by_kind_tallies_each_kind_independently() {
     quotas.record_rejection(
         QuotaKind::ExecPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         None,
         qsh_transport::AuthPath::Ca,
@@ -549,7 +549,7 @@ fn rejections_by_kind_tallies_each_kind_independently() {
     quotas.record_rejection(
         QuotaKind::Connections,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         None,
         qsh_transport::AuthPath::Ca,
@@ -584,7 +584,7 @@ fn rejections_by_kind_counts_a_window_suppressed_rejection_too() {
     let first = quotas.record_rejection(
         QuotaKind::ExecPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         None,
         qsh_transport::AuthPath::Ca,
@@ -598,7 +598,7 @@ fn rejections_by_kind_counts_a_window_suppressed_rejection_too() {
     let second = quotas.record_rejection(
         QuotaKind::ExecPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0 + std::time::Duration::from_secs(1),
         None,
         qsh_transport::AuthPath::Ca,
@@ -626,7 +626,7 @@ fn quota_audit_reports_first_then_summary() {
     let first_batch = quotas.record_rejection(
         QuotaKind::ExecPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -647,7 +647,7 @@ fn quota_audit_reports_first_then_summary() {
             .record_rejection(
                 QuotaKind::ExecPerPrincipal,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -659,7 +659,7 @@ fn quota_audit_reports_first_then_summary() {
             .record_rejection(
                 QuotaKind::ExecPerPrincipal,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(2),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -706,7 +706,7 @@ fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
     let first = quotas.record_rejection(
         QuotaKind::TunnelStreamsPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         None,
         qsh_transport::AuthPath::Ca,
@@ -723,7 +723,7 @@ fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
     let unrelated_first = quotas.record_rejection(
         QuotaKind::ExecPerPrincipal,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         Some(9),
         qsh_transport::AuthPath::Ca,
@@ -737,7 +737,7 @@ fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
                 .record_rejection(
                     QuotaKind::TunnelStreamsPerPrincipal,
                     "device:a",
-                    peer,
+                    &peer.into(),
                     t0 + sec * i as u32,
                     None,
                     qsh_transport::AuthPath::Ca,
@@ -752,7 +752,7 @@ fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
             .record_rejection(
                 QuotaKind::ExecPerPrincipal,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + sec,
                 Some(9),
                 qsh_transport::AuthPath::Ca,
@@ -817,7 +817,7 @@ fn flush_expired_closes_every_new_category_window() {
         let first = quotas.record_rejection(
             kind,
             "device:a",
-            peer,
+            &peer.into(),
             t0,
             None,
             qsh_transport::AuthPath::Ca,
@@ -829,7 +829,7 @@ fn flush_expired_closes_every_new_category_window() {
                     .record_rejection(
                         kind,
                         "device:a",
-                        peer,
+                        &peer.into(),
                         t0 + sec * i as u32,
                         None,
                         qsh_transport::AuthPath::Ca,
@@ -886,7 +886,7 @@ fn flush_expired_summary_names_the_correct_kind_for_every_category() {
         let first = quotas.record_rejection(
             kind,
             "device:a",
-            peer,
+            &peer.into(),
             t0,
             Some(1),
             qsh_transport::AuthPath::Ca,
@@ -906,7 +906,7 @@ fn flush_expired_summary_names_the_correct_kind_for_every_category() {
                 .record_rejection(
                     kind,
                     "device:a",
-                    peer,
+                    &peer.into(),
                     t0 + sec,
                     Some(1),
                     qsh_transport::AuthPath::Ca
@@ -943,7 +943,7 @@ fn quota_flush_expired_closes_a_window_with_no_further_rejections() {
     let first = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -993,7 +993,7 @@ fn quota_flush_expired_closes_a_window_with_no_further_rejections() {
     let reopened = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:a",
-        peer,
+        &peer.into(),
         t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(2),
         Some(2),
         qsh_transport::AuthPath::Ca,
@@ -1028,7 +1028,7 @@ fn quota_flush_expired_resets_suppressed_not_just_reports_it() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0,
                 Some(1),
                 qsh_transport::AuthPath::Ca
@@ -1042,7 +1042,7 @@ fn quota_flush_expired_resets_suppressed_not_just_reports_it() {
                 .record_rejection(
                     QuotaKind::Sessions,
                     "device:a",
-                    peer,
+                    &peer.into(),
                     t0 + sec * (n as u32),
                     Some(1),
                     qsh_transport::AuthPath::Ca,
@@ -1062,7 +1062,7 @@ fn quota_flush_expired_resets_suppressed_not_just_reports_it() {
     let later = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:b",
-        peer,
+        &peer.into(),
         t0 + AUDIT_AGGREGATION_WINDOW + sec * 2,
         Some(7),
         qsh_transport::AuthPath::Ca,
@@ -1097,7 +1097,7 @@ fn quota_rejection_reopens_a_stale_window_with_both_its_summary_and_a_fresh_firs
     let first = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -1108,7 +1108,7 @@ fn quota_rejection_reopens_a_stale_window_with_both_its_summary_and_a_fresh_firs
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1120,7 +1120,7 @@ fn quota_rejection_reopens_a_stale_window_with_both_its_summary_and_a_fresh_firs
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(2),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1144,7 +1144,7 @@ fn quota_rejection_reopens_a_stale_window_with_both_its_summary_and_a_fresh_firs
     let stale_reopen = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:a",
-        peer,
+        &peer.into(),
         t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1),
         Some(9),
         qsh_transport::AuthPath::Pin,
@@ -1447,7 +1447,7 @@ fn a_second_principals_first_rejection_opens_its_own_window() {
     let a_first = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:a",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -1462,7 +1462,7 @@ fn a_second_principals_first_rejection_opens_its_own_window() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1475,7 +1475,7 @@ fn a_second_principals_first_rejection_opens_its_own_window() {
     let b_first = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:b",
-        peer,
+        &peer.into(),
         t0 + std::time::Duration::from_secs(1),
         Some(2),
         qsh_transport::AuthPath::Ca,
@@ -1525,7 +1525,7 @@ fn two_principals_audit_windows_expire_independently() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0,
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1538,7 +1538,7 @@ fn two_principals_audit_windows_expire_independently() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:a",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1555,7 +1555,7 @@ fn two_principals_audit_windows_expire_independently() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:b",
-                peer,
+                &peer.into(),
                 t_b,
                 Some(2),
                 qsh_transport::AuthPath::Ca,
@@ -1568,7 +1568,7 @@ fn two_principals_audit_windows_expire_independently() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:b",
-                peer,
+                &peer.into(),
                 t_b + std::time::Duration::from_secs(1),
                 Some(2),
                 qsh_transport::AuthPath::Ca,
@@ -1643,7 +1643,7 @@ fn flush_expired_removes_every_closed_window_entry() {
                 .record_rejection(
                     QuotaKind::Sessions,
                     &principal,
-                    peer,
+                    &peer.into(),
                     t0,
                     Some(1),
                     qsh_transport::AuthPath::Ca,
@@ -1704,7 +1704,7 @@ fn the_sixty_fifth_principal_falls_into_the_category_overflow_window() {
                 .record_rejection(
                     QuotaKind::Sessions,
                     &principal,
-                    peer,
+                    &peer.into(),
                     t0,
                     Some(1),
                     qsh_transport::AuthPath::Ca,
@@ -1725,7 +1725,7 @@ fn the_sixty_fifth_principal_falls_into_the_category_overflow_window() {
     let first_65th = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:overflow-1",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -1746,7 +1746,7 @@ fn the_sixty_fifth_principal_falls_into_the_category_overflow_window() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:overflow-2",
-                peer,
+                &peer.into(),
                 t0,
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1797,7 +1797,7 @@ fn overflow_window_reopening_emits_a_dash_summary_line_from_record_rejection() {
                 .record_rejection(
                     QuotaKind::Sessions,
                     &principal,
-                    peer,
+                    &peer.into(),
                     t0,
                     Some(1),
                     qsh_transport::AuthPath::Ca,
@@ -1812,7 +1812,7 @@ fn overflow_window_reopening_emits_a_dash_summary_line_from_record_rejection() {
     let overflow_first = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:overflow-a",
-        peer,
+        &peer.into(),
         t0,
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -1827,7 +1827,7 @@ fn overflow_window_reopening_emits_a_dash_summary_line_from_record_rejection() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "device:overflow-b",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 Some(1),
                 qsh_transport::AuthPath::Ca,
@@ -1843,7 +1843,7 @@ fn overflow_window_reopening_emits_a_dash_summary_line_from_record_rejection() {
     let stale_reopen = quotas.record_rejection(
         QuotaKind::Sessions,
         "device:overflow-c",
-        peer,
+        &peer.into(),
         t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1),
         Some(1),
         qsh_transport::AuthPath::Ca,
@@ -1886,7 +1886,7 @@ fn a_rejection_audited_under_the_reserved_dash_principal_lands_in_overflow() {
     let first = quotas.record_rejection(
         QuotaKind::Sessions,
         "-",
-        peer,
+        &peer.into(),
         t0,
         None,
         qsh_transport::AuthPath::Ca,
@@ -1905,7 +1905,7 @@ fn a_rejection_audited_under_the_reserved_dash_principal_lands_in_overflow() {
             .record_rejection(
                 QuotaKind::Sessions,
                 "-",
-                peer,
+                &peer.into(),
                 t0 + std::time::Duration::from_secs(1),
                 None,
                 qsh_transport::AuthPath::Ca,

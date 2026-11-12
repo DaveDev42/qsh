@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 use crate::error::{ConnectError, ConnectionError, DatagramError, ExportError};
 use crate::identity::{Fingerprint, Principal};
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
+use crate::peer_addr::PeerAddr;
 use crate::quic::QuicConn;
 use crate::stream::{RecvStream, SendStream};
 use crate::tls::{
@@ -954,9 +955,9 @@ impl Connection {
 
     /// Peer socket address (may change over the connection's life via
     /// migration; this is the current one).
-    pub fn remote_address(&self) -> SocketAddr {
+    pub fn remote_address(&self) -> PeerAddr {
         match &self.inner {
-            ConnBackend::Quic(c) => c.remote_address(),
+            ConnBackend::Quic(c) => PeerAddr::Socket(c.remote_address()),
         }
     }
 
@@ -1768,8 +1769,8 @@ pub struct Incoming {
 
 impl Incoming {
     /// Peer address of the attempt (before authentication — for logs only).
-    pub fn remote_address(&self) -> SocketAddr {
-        self.incoming.remote_address()
+    pub fn remote_address(&self) -> PeerAddr {
+        PeerAddr::Socket(self.incoming.remote_address())
     }
 
     /// Whether the sender of this attempt's Initial has already proved it

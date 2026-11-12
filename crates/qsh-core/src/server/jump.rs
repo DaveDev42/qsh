@@ -165,7 +165,7 @@ impl Server {
             None,
             &resource,
             &ctx.requester(),
-            ctx.peer_addr,
+            &ctx.peer_addr,
         ) {
             JumpVerdict::Allowed => {}
             JumpVerdict::Denied | JumpVerdict::AuditFailed => {
@@ -191,7 +191,7 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                     self.quotas.now(),
                     None,
                     ctx.auth_path,
@@ -231,7 +231,7 @@ impl Server {
                 self.audit.as_ref(),
                 &resource,
                 &ctx.requester(),
-                ctx.peer_addr,
+                &ctx.peer_addr,
             ) {
                 tracing::warn!(
                     principal = %ctx.principal,

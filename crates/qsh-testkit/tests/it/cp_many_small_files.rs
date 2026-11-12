@@ -258,7 +258,7 @@ fn audit_drain_probe(paths: Paths) -> f64 {
         config.queue_depth(),
     );
     let peer: std::net::SocketAddr = "127.0.0.1:1".parse().expect("addr");
-    let record = AuditRecord::handshake_rejected(peer, "probe");
+    let record = AuditRecord::handshake_rejected(&peer.into(), "probe");
     let started = Instant::now();
     let mut sent = 0u64;
     while sent < DRAIN_PROBE_RECORDS {

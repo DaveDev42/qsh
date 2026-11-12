@@ -1154,7 +1154,7 @@ impl Listen {
         let peer = incoming.remote_address();
         let validated = incoming.remote_address_validated();
         let now = self.admission.now();
-        match self.admission.decide(peer, validated, now) {
+        match self.admission.decide(&peer, validated, now) {
             crate::admission::Decision::Retry => {
                 if let Err(returned) = incoming.retry() {
                     returned.ignore();

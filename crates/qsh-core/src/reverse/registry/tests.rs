@@ -1,6 +1,7 @@
 use super::*;
 use crate::broker::TestClock;
 use proptest::prelude::*;
+use std::net::SocketAddr;
 
 fn addr() -> SocketAddr {
     "127.0.0.1:4433".parse().unwrap()
@@ -14,7 +15,7 @@ fn entry<'a>(fingerprint: &'a str, principal: &'a str) -> AdmittedEntry<'a> {
     AdmittedEntry {
         fingerprint,
         principal,
-        address: addr(),
+        address: addr().to_string(),
         capabilities: vec!["exec".to_string()],
     }
 }
@@ -24,7 +25,7 @@ fn stub_entry(name: &str, generation: u64) -> ReverseEntry {
         name: name.to_string(),
         fingerprint: "sha256:a".to_string(),
         principal: "device:x".to_string(),
-        address: addr(),
+        address: addr().to_string(),
         capabilities: Vec::new(),
         registered_at: "2026-01-01T00:00:00Z".to_string(),
         generation,

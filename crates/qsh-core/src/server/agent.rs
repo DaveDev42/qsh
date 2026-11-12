@@ -350,7 +350,7 @@ impl Server {
             request_id,
             op,
             &ctx.requester(),
-            ctx.peer_addr,
+            &ctx.peer_addr,
         ) {
             AgentVerdict::Denied => {
                 return PreparedAgent::without_socket(wire::AgentGrant::Denied);
@@ -468,7 +468,7 @@ impl Server {
             request_id,
             AgentOp::SessionAttach,
             &ctx.requester(),
-            ctx.peer_addr,
+            &ctx.peer_addr,
         ) {
             AgentVerdict::Denied => {
                 self.agents.set_backing(&session.0, None);

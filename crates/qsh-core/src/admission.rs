@@ -23,10 +23,12 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use qsh_transport::PeerAddr;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -246,6 +248,20 @@ enum SourceKey {
 }
 
 impl SourceKey {
+    /// The bucket for `peer`: its IP when it has one.
+    ///
+    /// TODO(ADR-0061 decision 4): a peer without a socket address (a relay
+    /// path, never produced yet) must be keyed on its peer key after the
+    /// handshake, not here. Until that exists such a peer falls into one
+    /// shared bucket (`::/64`), which can only over-limit, never let a
+    /// source evade the limiter.
+    fn from_peer(peer: &PeerAddr) -> Self {
+        match peer.socket_addr() {
+            Some(addr) => Self::from_addr(addr.ip()),
+            None => Self::from_addr(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+        }
+    }
+
     fn from_addr(addr: IpAddr) -> Self {
         match addr.to_canonical() {
             IpAddr::V4(v4) => SourceKey::V4(u32::from(v4)),
@@ -499,7 +515,7 @@ impl Gate {
     /// semaphore" ordering ADR-0009 established, just extended to the
     /// axis that ADR-0009's 한계 section left open. `RejectReason::
     /// ValidatedRateLimited` never touches `handshake_permits`.
-    pub fn decide(&self, peer: SocketAddr, validated: bool, now: Instant) -> Decision {
+    pub fn decide(&self, peer: &PeerAddr, validated: bool, now: Instant) -> Decision {
         if !validated {
             if self.rate_exceeded(&self.sketch, self.rate_per_source, peer, now) {
                 let records = self.record_rejection(RejectReason::RateLimited, peer, now);
@@ -578,8 +594,8 @@ impl Gate {
     /// [`Gate::decide`]; only which `sketch`/`rate` pair is passed in
     /// differs between the two axes. See [`Sketch::record_and_estimate`]
     /// for the epoch/burst math this wraps.
-    fn rate_exceeded(&self, sketch: &Sketch, rate: u32, peer: SocketAddr, now: Instant) -> bool {
-        let key = SourceKey::from_addr(peer.ip());
+    fn rate_exceeded(&self, sketch: &Sketch, rate: u32, peer: &PeerAddr, now: Instant) -> bool {
+        let key = SourceKey::from_peer(peer);
         let elapsed = now.saturating_duration_since(self.origin);
         let epoch_len = EPOCH.as_secs_f64();
         let epoch_position = elapsed.as_secs_f64() / epoch_len;
@@ -612,7 +628,7 @@ impl Gate {
     fn record_rejection(
         &self,
         reason: RejectReason,
-        peer: SocketAddr,
+        peer: &PeerAddr,
         now: Instant,
     ) -> Vec<AuditRecord> {
         let window = &self.windows[reason as usize];
@@ -709,8 +725,8 @@ impl Gate {
     /// count-min overestimate a test asserting an exact burst boundary
     /// has to rule out first.
     #[cfg(test)]
-    fn unvalidated_estimate_before(&self, peer: SocketAddr, now: Instant) -> u32 {
-        let key = SourceKey::from_addr(peer.ip());
+    fn unvalidated_estimate_before(&self, peer: &PeerAddr, now: Instant) -> u32 {
+        let key = SourceKey::from_peer(peer);
         let epoch_position =
             now.saturating_duration_since(self.origin).as_secs_f64() / EPOCH.as_secs_f64();
         let epoch_index = epoch_position as u64;

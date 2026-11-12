@@ -16,7 +16,7 @@ fn record_for(i: u64) -> AuditRecord {
         "exec",
         Decision::Allow,
         None,
-        "127.0.0.1:4433".parse().unwrap(),
+        &"127.0.0.1:4433".parse().unwrap(),
     )
 }
 

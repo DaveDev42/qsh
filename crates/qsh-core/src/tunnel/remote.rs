@@ -515,7 +515,7 @@ pub(crate) async fn serve_remote_forward(
                         let records = quotas.record_rejection(
                             kind,
                             &owner,
-                            peer,
+                            &qsh_transport::PeerAddr::from(peer),
                             quotas.now(),
                             None,
                             conn.auth_path(),

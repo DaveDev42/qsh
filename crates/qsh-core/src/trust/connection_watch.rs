@@ -261,7 +261,7 @@ impl ConnectionWatch {
         let record = AuditRecord::connection_withdrawn(
             &self.established.principal,
             self.established.auth_path,
-            self.conn.remote_address(),
+            &self.conn.remote_address(),
             reason.as_str(),
         );
         if let Err(err) = audit.record(&record) {

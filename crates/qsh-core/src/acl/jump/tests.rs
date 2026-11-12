@@ -73,7 +73,7 @@ fn check(sb: &Sandbox, audit: &dyn AuditSink) -> JumpVerdict {
         Some(7),
         TARGET,
         &requester,
-        peer(),
+        &peer().into(),
     )
 }
 
@@ -233,7 +233,7 @@ fn a_stream_decision_records_the_connection_level_request_id() {
         None,
         TARGET,
         &requester,
-        peer(),
+        &peer().into(),
     );
     assert_eq!(verdict, JumpVerdict::Allowed);
     let records = audit.records();
