@@ -1366,13 +1366,13 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 
 ### 22.1 route 순서
 
-호스트의 route 목록(`hosts.toml`의 route, 기본 route)에 `iroh` 종류가 생긴다.
+pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/CLI.md` §6.1, §6.11).
 
 - 기본 route 목록은 바뀌지 않는다. `iroh`가 목록에 없는 설정은 relay에 한 번도 접속하지 않고 iroh endpoint도 만들지 않는다.
-- 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 돌고 `iroh`가 마지막이다. 직결과 펀칭의 경주(ADR-0054 결정 16)와 head start는 그대로이고, iroh는 그 경주가 모두 실패한 뒤에 시작한다. 직결이 서면 relay에 아무것도 보내지 않는다.
+- 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 출발한다. 직결과 펀칭의 경주(ADR-0054 결정 16)는 그대로이고, 그 경주가 3초(`IROH_HEAD_START`) 안에 서지 않거나 그 전에 모두 바로 실패하면 iroh 시도를 나란히 시작해 먼저 선 연결을 쓴다. 진 쪽은 닫는다. UDP가 막힌 망에서는 직결이 dial 시한을 다 써야 실패하므로, 경주가 끝나기를 기다리면 iroh에 남는 시간이 없다. 3초 안에 직결이나 펀칭이 서면 relay에 아무것도 보내지 않는다.
 - 새로 도는 route는 §19.10과 같은 규칙으로 **재해석**된다. recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.
 - 이름 없는 대상(주소만 있는 대상)에는 iroh route가 없다. EndpointId를 아는 pin(이름)만 iroh로 dial한다.
-- 첫 dial의 시한 안에서 iroh 시도에 쓸 시간은 구현에서 정한다(미결 1).
+- iroh 시도도 명령의 dial 시한(10초)을 늘리지 않는다. 남은 시한으로 잘린다.
 
 ### 22.2 relay 경로
 
@@ -1380,14 +1380,14 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 - endpoint는 **설정된 relay URL 하나에 고정**으로 붙는다. 발견(pkarr, n0 DNS)으로 home relay를 고르지 않고 게시도 조회도 하지 않는다. 상대가 다른 relay에 붙어 있으면 pin에 적힌 URL이 그 relay다.
 - relay TLS는 OS 인증서 저장소로 검증한다(`platform-verifier`, `CaTlsConfig::system()`). qsh의 다른 곳에서 web PKI를 쓰지 않는다는 규칙(§3)과 충돌하지 않는다: 이 검증은 relay 서버 인증서에만 쓰이고 qsh 신원은 건드리지 않는다.
 - relay는 안쪽 QUIC 패킷을 나르는 중계자다. 내용도 신원도 relay가 아니라 **안쪽 QUIC의 pin 인증**이 세운다. relay가 가짜이거나 망이 TLS를 가로채도 pin이 맞는 상대를 만들어 낼 수 없다(threat-model D28·D29).
-- 프록시 환경에서는 iroh의 `proxy_url`·`proxy_from_env`를 따를지는 구현에서 정한다(미결 2).
+- HTTP 프록시는 `[iroh].proxy`(기본 `env`, 환경 변수를 따름)로 정한다(`docs/CLI.md` §6.23).
 
 ### 22.3 신원과 handshake
 
 - iroh route의 상대 식별자는 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. qsh fingerprint(SPKI SHA-256)는 같은 키에서 계산한다.
 - **검증은 handshake 직후 훅에서** 한다. pin 대조와 ADR-0060의 이름 결속(이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId여야 함)을 거치고, 실패하면 `AUTH_FAILED`로 끝난다. 이 판정 전에는 `Hello`도, 어떤 스트림도, 세션·터널·listener도 없다.
 - 사설 CA 모드(체인, SAN principal)는 iroh route에서 `UNSUPPORTED`다. jump 체인의 어느 hop도 iroh route로 열지 않는다(`UNSUPPORTED`, ADR-0061 결정 14).
-- 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 한다. 페어링을 iroh route 위에서 허용할지는 구현 때 확인한다(미결 3).
+- 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 한다. 페어링을 iroh route 위에서 허용할지는 구현 때 확인한다(미결 1).
 
 ### 22.4 직접 경로로의 승격
 
@@ -1397,7 +1397,7 @@ iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(m
 - 승격 뒤 pin된 상대는 내 IP를 안다(threat-model D30). 승격 전에는 relay가 본다.
 - §19의 qsh 자체 펀칭(`punch.v1`)과 별개다. iroh route 위에서는 `punch.v1`을 쓰지 않는다(경로 승격은 iroh의 몫).
 - 경로 정보(어느 경로로 가고 있는가, rtt)는 `PathWatch`와 상태 줄, 감사의 선택 필드로 읽기 전용으로 올라간다. 정책은 정하지 않는다.
-- `LinkStatus`와 침묵 판정(§18.12, §21.8)은 경로가 바뀌어도 한 연결의 값으로 계속 돈다. relay 경유로 RTT가 늘어난 연결이 직결 기준 시한에 걸리지 않는지는 구현에서 시험으로 확인한다(미결 4).
+- `LinkStatus`와 침묵 판정(§18.12, §21.8)은 경로가 바뀌어도 한 연결의 값으로 계속 돈다. relay 경유로 RTT가 늘어난 연결이 직결 기준 시한에 걸리지 않는지는 구현에서 시험으로 확인한다(미결 2).
 
 ### 22.5 wire에서 그대로인 것
 
@@ -1413,7 +1413,5 @@ planned. 이름과 계층은 `testing.md`의 「iroh relay route와 backend 경�
 
 ### 22.7 미결
 
-1. 첫 dial 시한 안에서 iroh 시도에 배정할 시간과 head start 규칙.
-2. 프록시(`proxy_url`, `proxy_from_env`)를 기본으로 따를지.
-3. 페어링(§15)을 iroh route 위에서 허용할지. 허용하면 invite 질의 경로(`pair invite`)의 EndpointId 안내가 필요하다.
-4. relay 경유 RTT에서 `LinkStatus`·침묵 시한의 기본값이 충분한지.
+1. 페어링(§15)을 iroh route 위에서 허용할지. 허용하면 invite 질의 경로(`pair invite`)의 EndpointId 안내가 필요하다.
+2. relay 경유 RTT에서 `LinkStatus`·침묵 시한의 기본값이 충분한지.
