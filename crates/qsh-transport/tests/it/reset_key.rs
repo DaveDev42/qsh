@@ -123,7 +123,7 @@ async fn client_sees_reset_after_restart(
     let second = Server::start(addr, server_id, server_trust(), second_key);
 
     // The first packet after the restart: the client writes on a new stream.
-    let (mut send, _recv) = dialed.connection.quinn().open_bi().await.expect("open_bi");
+    let (mut send, _recv) = dialed.connection.open_bi().await.expect("open_bi");
     let _ = send.write_all(b"ping").await;
 
     let outcome = tokio::time::timeout(window, dialed.connection.closed())

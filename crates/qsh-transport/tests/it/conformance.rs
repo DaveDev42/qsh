@@ -4,8 +4,8 @@
 //!
 //! The behaviors are written once, in [`transport_conformance!`], and
 //! instantiated per backend with a function that yields a connected pair.
-//! Today that is QUIC only; a second backend adds one more line at the
-//! bottom and inherits the whole list. This is a conformance list and not a
+//! Today that is QUIC only; a second backend adds one pair constructor and
+//! one more line at the bottom and inherits the whole list. This is a conformance list and not a
 //! mock: both ends are real connections over real sockets
 //! (`docs/design/testing.md` L4).
 //!
@@ -355,29 +355,75 @@ macro_rules! transport_conformance {
                     "the cancelled open_bi must not have produced a stream"
                 );
             }
+
+            /// Both ends derive the same exporter value from the shared TLS
+            /// session (pairing's channel binding, ADR-0002), and a different
+            /// label gives a different value.
+            #[tokio::test]
+            async fn the_tls_exporter_agrees_on_both_ends() {
+                let p = $pair().await;
+                let (mut a, mut b, mut c) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+                p.client
+                    .export_keying_material(&mut a, b"qsh test", b"ctx")
+                    .unwrap();
+                p.server
+                    .export_keying_material(&mut b, b"qsh test", b"ctx")
+                    .unwrap();
+                p.server
+                    .export_keying_material(&mut c, b"other", b"ctx")
+                    .unwrap();
+                assert_eq!(a, b);
+                assert_ne!(b, c);
+            }
+
+            /// Each end sees the other's pinned identity.
+            #[tokio::test]
+            async fn each_end_sees_the_peer_identity() {
+                let p = $pair().await;
+                assert_eq!(p.client.principal(), &Principal::Device("server".into()));
+                assert_eq!(p.server.principal(), &Principal::Device("client".into()));
+                assert!(p.client.peer_fingerprint().is_some());
+                assert!(p.server.peer_fingerprint().is_some());
+            }
+
+            /// A datagram, when the backend carries them, arrives whole; a
+            /// backend without them reports no maximum size.
+            #[tokio::test]
+            async fn a_datagram_round_trips_when_supported() {
+                let p = $pair().await;
+                let Some(max) = p.client.max_datagram_size() else {
+                    return;
+                };
+                assert!(max >= 16);
+                p.client
+                    .send_datagram(bytes::Bytes::from_static(b"dgram"))
+                    .unwrap();
+                let got = within(p.server.read_datagram()).await.unwrap();
+                assert_eq!(&got[..], b"dgram");
+            }
+
+            /// `AsyncRead`/`AsyncWrite` on the facades reach the same stream the
+            /// inherent methods do (the splice and the PTY pump use the trait form).
+            #[tokio::test]
+            async fn the_async_io_form_agrees_with_the_inherent_form() {
+                let p = $pair().await;
+                let (mut c_send, mut c_recv) = within(p.client.open_bi()).await.unwrap();
+                AsyncWriteExt::write_all(&mut c_send, b"via-trait")
+                    .await
+                    .unwrap();
+                AsyncWriteExt::shutdown(&mut c_send).await.unwrap();
+                let (mut s_send, mut s_recv) = within(p.server.accept_bi()).await.unwrap();
+                let mut got = Vec::new();
+                within(AsyncReadExt::read_to_end(&mut s_recv, &mut got))
+                    .await
+                    .unwrap();
+                assert_eq!(got, b"via-trait");
+                s_send.write_all(b"back").await.unwrap();
+                s_send.finish().unwrap();
+                assert_eq!(within(c_recv.read_to_end(16)).await.unwrap(), b"back");
+            }
         }
     };
 }
 
 transport_conformance!(quic, quic_pair, TransportKind::Quic);
-
-/// `AsyncRead`/`AsyncWrite` on the facades reach the same stream the
-/// inherent methods do (the splice and the PTY pump use the trait form).
-#[tokio::test]
-async fn the_async_io_form_agrees_with_the_inherent_form() {
-    let p = quic_pair().await;
-    let (mut c_send, mut c_recv) = within(p.client.open_bi()).await.unwrap();
-    AsyncWriteExt::write_all(&mut c_send, b"via-trait")
-        .await
-        .unwrap();
-    AsyncWriteExt::shutdown(&mut c_send).await.unwrap();
-    let (mut s_send, mut s_recv) = within(p.server.accept_bi()).await.unwrap();
-    let mut got = Vec::new();
-    within(AsyncReadExt::read_to_end(&mut s_recv, &mut got))
-        .await
-        .unwrap();
-    assert_eq!(got, b"via-trait");
-    s_send.write_all(b"back").await.unwrap();
-    s_send.finish().unwrap();
-    assert_eq!(within(c_recv.read_to_end(16)).await.unwrap(), b"back");
-}
