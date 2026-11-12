@@ -2,7 +2,7 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P2(ADR-0050)의 마일스톤 여섯은 2026-11-11까지 모두 닫혔고(아래 §6 마감 노트), 그 뒤에 연 M27(listen과 serve를 한 endpoint에, ADR-0059)도 2026-11-11 닫혔다(§7). 열린 마일스톤은 없고, 다음 것을 여는 것은 사용자 결정이다. 남은 사람 몫은 `PLAN.md` §0, M27 뒤 dave-environment 후속은 `PLAN.md` §3에 있다.
+**현재 위치:** P2(ADR-0050)의 마일스톤 여섯은 2026-11-11까지 모두 닫혔고(아래 §6 마감 노트), 그 뒤에 연 M27(listen과 serve를 한 endpoint에, ADR-0059)도 2026-11-11 닫혔다(§7). 2026-11-13 M28(iroh relay route와 transport backend 경계, ADR-0061)을 열었다(§7). 계획은 `PLAN.md` §4다. 남은 사람 몫은 `PLAN.md` §0, M27 뒤 dave-environment 후속은 `PLAN.md` §3에 있다.
 
 이 문서는 P0 MVP(M0~M10), P1(M11~M20), P2(M21~M26, ADR-0050)의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -458,3 +458,10 @@ P2를 닫은 뒤 사용자가 연 마일스톤이다. §6.1의 원칙을 그대�
 - **범위:** `[listen].serve = true`(또는 `qsh listen --serve`)인 `qsh listen`이 같은 UDP 소켓에서 인바운드 `qsh serve`가 받는 것(세션, exec, 터널, 파일, agent, jump 중간 peer, pairing)도 받는다. 연결은 `Hello.reverse`가 있으면 역방향 등록, 첫 요청이 `PunchRequest`면 펀칭, 그 밖은 정방향으로 갈린다. wire 변경은 없다. 결정과 수용 기준은 ADR-0059(승인됨) 결정 27이다. 연결 하나에 listener 여러 개를 싣는 다중화는 범위 밖이다.
 - **크기:** 1.5ew(ADR-0059)
 - **마감 (2026-11-11).** 에이전트 몫이 모두 착지했다. 범위 ADR(`cc53436`, 승인 `cc3789f`), 공유 부품(`d1644bc`), 등록 갈래(`c6e2434`), 펀칭 가로채기(`2ff1dfe`), 수명(`b5f6c9e`), 표면(v0.101, `a08d769`), 수용 시험(`187e585`, 리뷰 보강 `f9b21d4`·`882a775`), 문서(v0.102, `34dd790`). 결정 27의 열다섯 항목은 `d6c4738`의 대응표에서 모두 충족이다. wire와 `capabilities.json`은 바뀌지 않았고 fuzz 타깃은 28 그대로다. 합친 endpoint 위 포화 터널 echo p95는 이 머신에서 1.8 ms로 단독 serve와 같았다. 같은 기간 이름으로 dial하는 연결이 그 이름의 pin 키만 받게 한 보안 수정(ADR-0060, `641a6cd`)이 함께 착지했다. 사람 몫은 새로 생기지 않았고 dave-environment 후속(MacMini 합친 모드, 라우터 4433 포워딩 제거, Toss 키 교체)은 `PLAN.md` §3에 있다. CI run 43013231638 초록. 남은 후속은 `PLAN.md` §1로 넘어갔다. M27 계획을 마지막으로 담은 커밋은 `d6c4738`다.
+
+### M28 — iroh relay route와 transport backend 경계
+
+- **범위:** 결정은 ADR-0061(승인됨)이다. 먼저 `qsh-transport`를 backend trait으로 정리해 quinn을 그 구현 하나로 두고(`Connection::quinn()` 제거), 소켓 주소 대신 `PeerAddr`를 감사·ACL·admission에 쓰고, backend별 오류 매핑을 각 backend 안에 가두고, `xtask arch`가 `qsh-core`·`qsh-cli`의 `iroh`·`noq` 이름을 막는다. 이 정리는 동작 변화 없이 착지한다. 그 위에 iroh backend를 더해 사용자가 route 목록에 `iroh`를 넣은 호스트와 iroh endpoint를 켠 `serve`·`listen`이 relay로 닿게 한다. 기본 relay는 n0 공용 relay의 고정 URL 하나이고 설정으로 바꾼다. 발견 게시는 하지 않는다. relay TLS는 OS 인증서 저장소로 검증한다. 사설 CA 모드와 `-J`의 iroh hop은 `UNSUPPORTED`다. 직결 경로, wire, 기본 route 목록은 바뀌지 않는다. 다른 백엔드(ut 등)는 범위 밖이다.
+- **크기:** 3~4ew(추정, 2026-11-13 결합도 조사 기준 3,500~5,000줄)
+- **수용 기준(결정 28):** `PLAN.md` §4.2의 항목이 모두 근거 시험이나 기록으로 충족될 때 닫는다.
+

@@ -45,3 +45,6 @@ ADR-0028을 쓰면서 드러난 비용은 이렇다.
 - `docs/PRD.md` §7 P1 목록, §16 위험 표, §17 확정된 결정, `docs/adr/README.md`(0005 개정 표시, 0028 기각, 0043 추가), `docs/design/protocol.md` §14, README.
 - 코드: `crates/qsh-core/src/doctor.rs`의 `UDP_EGRESS_BLOCKED` message와 그 문면을 옮겨 적은 `docs/CLI.md` §6.17, transport facade의 모듈 주석. wire·fixture·capability·`qsh.cli/v1` 변경 없음.
 - 인용된 ADR-0028 결정 0은 기각된 ADR 안에 있지만 이 ADR 결정 3이 그 모양을 승인하므로, 코드 주석의 `docs/adr/0028-tcp-tls-fallback.md` decision 0 인용은 이 ADR 결정 3으로 바꾼다.
+
+## 개정 이력
+- 2026-11-13 ADR-0061이 결정 1을 좁혔다. qsh는 여전히 자체 TCP/TLS transport를 만들지 않지만, 사용자가 켜는 iroh relay route(TLS 위 WebSocket relay)를 코어에 받는다. 결정 3의 중립 facade는 ADR-0061 결정 5~8의 backend 경계로 넓어진다. 결정 본문은 고치지 않았다.

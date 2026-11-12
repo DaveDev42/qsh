@@ -1,6 +1,6 @@
-# PLAN.md — 자리표시자: 열린 마일스톤 없음
+# PLAN.md — M28: iroh relay route와 transport backend 경계
 
-M27(listen과 serve를 한 endpoint에)이 2026-11-11 닫혔다. 직전 M27 계획의 마지막 커밋은 `d6c4738`이다. 다음 마일스톤은 아직 없고, 여는 것은 사용자 결정이다. 그때까지 이 파일의 live state는 §0의 사람 몫, §1의 유지보수 확인, §3의 dave-environment 후속이다.
+M28은 2026-11-13 열었다(ADR-0061, `docs/ROADMAP.md` §7). 직전 M27 계획의 마지막 커밋은 `d6c4738`이다. 이 파일의 live state는 §4의 M28 스텝이고, §0의 사람 몫, §1의 유지보수 확인, §3의 dave-environment 후속은 그대로 승계한다.
 
 이 파일과 `docs/ROADMAP.md`의 편집은 main 세션만 한다.
 
@@ -134,7 +134,36 @@ M20이 더했던 ConPTY 배치 실측 셋(ADR-0035 결정 20)은 `d538468`·`bd4
 ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과 Toss 기계의 converge는 밖으로 나가는 일이라 사람 몫이다.
 
 - [ ] MacMini의 `[listen]`에 `serve = true`를 렌더하고 converge(Dave 승인). 옛 serve는 겹치는 동안 둔다.
-- [ ] Toss의 `macmini` pin을 :443으로(`qsh_public.serve_port`), Toss converge는 Dave가 한다.
-- [ ] 라우터의 UDP 4433 포워딩을 지운다(Dave, `nvram` 백업 뒤).
+- [ ] Toss의 `macmini` pin을 :443으로(`qsh_public.serve_port`), Toss converge는 Dave가 한다. **보류(2026-11-13).** Toss가 쓰는 기업 VPN(TITAN)이 집 공인 IP로 가는 UDP 가운데 4433과 41641만 통과시킨다(각 20회 실측, 집 IP를 바꿔도 같음). :443으로 옮기거나 아래의 4433 포워딩을 지우면 Toss의 정방향 링크도 끊긴다. Toss 역방향 링크는 M28의 iroh route로 되살리는 것이 계획이다.
+- [ ] 라우터의 UDP 4433 포워딩을 지운다(Dave, `nvram` 백업 뒤). **보류(2026-11-13)**, 위 항목과 같은 이유.
 - [ ] MacMini의 `io.qsh.serve`를 내리고 `[serve].bind`를 지운다. tailnet의 mbp16·wsl serve :4433은 그대로.
 - [ ] Toss의 신원을 Keychain으로 옮기며 새 키로 바꾼다(Dave). Toss에서 `qsh init --key-store platform`으로 새 신원을 만들고, inventory의 `qsh_fingerprint_by_host.toss`를 새 지문으로, `qsh_key_store_by_host.toss`를 `platform`으로 고치고 vault의 옛 신원을 지운 뒤 macmini, Toss 순으로 converge한다. 옛 pin은 converge가 지운다(dave-environment `cd9835e`).
+
+## 4. M28 스텝
+
+순서는 ADR-0061 결정 9대로 정리가 먼저다. 스텝 1~3은 동작 변화가 없어야 하고 기존 시험과 `crates/qsh-transport/tests/it/conformance.rs`가 그대로 초록이어야 한다. 각 스텝은 CLAUDE.md의 일곱 검사가 초록일 때 커밋한다.
+
+### 4.1 스텝
+
+- [ ] **1. backend trait.** `qsh-transport`의 연결 표면(연결, 양방향·단방향 스트림, datagram, TLS exporter, 상대 신원, 경로 정보, close, stats)을 trait으로 정의하고 quinn 구현을 그 뒤로 옮긴다. `Connection::quinn()`을 없앤다. `ConnBackend` enum이 있으면 trait 구현으로 바꾼다. conformance 시험이 backend를 매개변수로 받게 한다. 완료: 공개 표면에 quinn·rustls 타입 없음, 시험 초록.
+- [ ] **2. `PeerAddr`.** `qsh-transport`에 `PeerAddr`(소켓 주소, 또는 키와 경로)를 두고 `qsh-core`의 admission·감사·ACL이 이 타입을 쓴다. 이 스텝에서는 소켓 주소 갈래만 생기므로 JSON과 감사 레코드는 바이트 단위로 같다. 완료: fixture 무변경, 시험 초록.
+- [ ] **3. 오류 매핑과 arch.** quinn·rustls 오류를 중립 오류로 바꾸는 코드를 quinn backend 모듈 안으로 모은다. `xtask arch`가 `qsh-core`·`qsh-cli`의 `iroh`·`noq` manifest 항목과 토큰을 막는다. 완료: `cargo xtask arch`가 새 규칙의 위반 시험을 갖고 초록.
+- [ ] **4. iroh backend.** 의존 `iroh`(기본 빌드, `platform-verifier`)를 `qsh-transport`에만 들인다. qsh 신원 키로 `SecretKey`를 만들고 EndpointId에서 qsh fingerprint를 계산한다. relay는 설정된 URL 하나에 고정하고 발견 게시와 조회는 끈다. pin 검증과 ADR-0060의 이름 결속은 handshake 직후 훅에서 한다. `cargo deny` 설정을 맞춘다. 완료: 로컬 relay(테스트용 in-process `iroh-relay`)를 거친 conformance 시험이 iroh backend로 초록.
+- [ ] **5. 설정과 표면.** 호스트 route 목록의 `iroh` 종류, pin의 선택 필드 relay URL, `serve`·`listen`의 iroh endpoint 설정(기본 끔)과 기본 relay URL. `qsh.cli/v1`과 감사 레코드는 additive 필드만(경로가 relay일 때). 사설 CA 모드와 `-J`의 iroh hop은 `UNSUPPORTED`. doctor 항목, `docs/CLI.md`, man 페이지(`cargo xtask man`), 새 fixture는 append-only로.
+- [ ] **6. 역방향과 서버.** `qsh serve --to`의 등록 dial이 iroh route로 컨트롤러에 닿고, 컨트롤러(`listen`, 합친 endpoint 포함)가 iroh endpoint로 받는다. admission은 handshake 뒤 키 기준으로 판정한다. 완료: relay만 열린 시험망에서 정방향 `exec`·세션·resume과 역방향 등록·attach가 돈다.
+- [ ] **7. 문서와 위협 모델.** `docs/design/architecture.md`(backend 경계), `docs/design/protocol.md`(route 순서), `docs/design/threat-model.md`(relay 운영자와 TLS를 가로채는 망이 보는 것, 공용 relay의 rate limit), `docs/design/testing.md`, README.
+- [ ] **8. 마감.** 결정 28 대응표, CI 초록, ROADMAP 마감 노트.
+
+### 4.2 결정 28 (수용 기준)
+
+1. 스텝 1~3 뒤에 wire, fixture, `capabilities.json`, 기존 시험 결과가 바뀌지 않았다.
+2. `qsh-core`와 `qsh-cli`는 quinn·rustls·iroh·noq를 이름으로 쓰지 않고, `xtask arch`가 이를 막는다.
+3. conformance 시험이 quinn과 iroh 두 backend에서 모두 초록이다.
+4. 직결 UDP가 막히고 relay만 열린 시험망에서 `iroh` route로 정방향 `exec`, 대화형 세션과 끊김 뒤 resume, `-L` 터널, `cp`가 돈다.
+5. 같은 시험망에서 역방향 등록과 attach가 돈다.
+6. iroh route에서도 pin이 다른 상대는 `AUTH_FAILED`로 거절되고(ADR-0060과 같은 결과), 사설 CA 모드와 `-J`의 iroh hop은 `UNSUPPORTED`다.
+7. 기본 route 목록에 `iroh`가 없는 설정은 relay에 한 번도 접속하지 않는다(시험으로 확인).
+8. 감사 레코드와 로그에 relay 경로가 구조적으로만 남고 payload는 없다.
+9. relay TLS가 OS 인증서 저장소로 검증된다(사설 루트를 신뢰 저장소에 넣은 시험 relay로 확인).
+10. 문서(스텝 7)와 man 페이지가 구현과 같다.
+
