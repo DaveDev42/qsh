@@ -28,7 +28,7 @@ use crate::error::{
     ClosedStream, ReadError, ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 use crate::mux::{RecvHalf, SendHalf};
-use crate::quic::{QuicRecv, QuicSend};
+use crate::quinn_backend::conn::{QuicRecv, QuicSend};
 
 #[derive(Debug)]
 enum SendBackend {

@@ -14,12 +14,13 @@
 //! `crates/qsh-core/src/broker/` can catch a regression (architecture.md
 //! §9-2 named this an "arch-lint 확장 후보").
 //!
-//! The QUIC stack is confined to `qsh-transport` the same two ways: the
-//! manifests of `qsh-core` and `qsh-cli` may not list `quinn`
-//! ([`FORBIDDEN_DEPS`]), and nothing under their `src/` may name a `quinn::`
-//! path or call the hidden `.quinn()` accessor ([`QUINN_TOKENS`]). That is
-//! what lets a second transport backend land behind `qsh_transport`'s
-//! neutral types (`docs/adr/0043-no-tcp-fallback.md` decision 3).
+//! The QUIC stacks are confined to `qsh-transport` the same two ways: the
+//! manifests of `qsh-core` and `qsh-cli` may not list `quinn`, `iroh` or
+//! `noq` (or their sub-crates, [`FORBIDDEN_DEPS`]), and nothing under their
+//! `src/` may name a `quinn::`, `iroh::` or `noq::` path or call the hidden
+//! `.quinn()` accessor ([`QUINN_TOKENS`], [`BACKEND_TOKENS`]). That is what
+//! lets a second transport backend land behind `qsh_transport`'s neutral
+//! types (`docs/adr/0043-no-tcp-fallback.md` decision 3, ADR-0061 decision 8).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -64,14 +65,25 @@ fn matrix() -> Vec<(&'static str, Rule)> {
 }
 
 /// Third-party dependencies a workspace crate must not declare, by crate
-/// name. `qsh-core` and `qsh-cli` reach the QUIC stack only through
-/// `qsh-transport`'s neutral types, so a `quinn` entry in either manifest is
-/// a regression even before a `use` line appears.
-const FORBIDDEN_DEPS: [(&str, &str); 4] = [
+/// name. `qsh-core` and `qsh-cli` reach a QUIC stack only through
+/// `qsh-transport`'s neutral types, so an entry for quinn, iroh or noq (or
+/// one of their sub-crates) in either manifest is a regression even before a
+/// `use` line appears (ADR-0061 decision 8).
+const FORBIDDEN_DEPS: [(&str, &str); 14] = [
     ("qsh-core", "quinn"),
     ("qsh-core", "quinn-proto"),
+    ("qsh-core", "iroh"),
+    ("qsh-core", "iroh-base"),
+    ("qsh-core", "iroh-relay"),
+    ("qsh-core", "noq"),
+    ("qsh-core", "noq-proto"),
     ("qsh-cli", "quinn"),
     ("qsh-cli", "quinn-proto"),
+    ("qsh-cli", "iroh"),
+    ("qsh-cli", "iroh-base"),
+    ("qsh-cli", "iroh-relay"),
+    ("qsh-cli", "noq"),
+    ("qsh-cli", "noq-proto"),
 ];
 
 /// Run the arch-lint check against `workspace_root/crates/*/Cargo.toml`.
@@ -334,8 +346,12 @@ const FILE_GUARD_TOKEN_SET: [&str; 7] = [
 /// "quinn" legitimately.
 const CORE_SRC_DIR: &str = "crates/qsh-core/src";
 const QUINN_TOKENS: [&str; 2] = ["quinn::", ".quinn("];
-const QUINN_REASON: &str = "only qsh-transport may name the QUIC stack; qsh-core and qsh-cli go through qsh_transport's \
-     neutral Connection/SendStream/RecvStream/Endpoint and error types (docs/adr/0043-no-tcp-fallback.md decision 3)";
+/// The other backends' crate paths (iroh, and noq, the QUIC implementation
+/// iroh builds on), banned in the same two crates and for the same reason
+/// (ADR-0061 decision 8). Path form only, like `quinn::`.
+const BACKEND_TOKENS: [&str; 2] = ["iroh::", "noq::"];
+const QUINN_REASON: &str = "only qsh-transport may name a QUIC stack (quinn, iroh, noq); qsh-core and qsh-cli go through qsh_transport's \
+     neutral Connection/SendStream/RecvStream/Endpoint and error types (docs/adr/0043-no-tcp-fallback.md decision 3, docs/adr/0061-iroh-relay-route-and-transport-backends.md decision 8)";
 
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
@@ -433,7 +449,7 @@ fn module_bans() -> Vec<ModuleBan> {
     }
 
     for dir in [CORE_SRC_DIR, CLI_SRC_DIR] {
-        for forbidden in QUINN_TOKENS {
+        for forbidden in QUINN_TOKENS.into_iter().chain(BACKEND_TOKENS) {
             bans.push(ModuleBan {
                 scope: Scope::Dir(dir),
                 forbidden,

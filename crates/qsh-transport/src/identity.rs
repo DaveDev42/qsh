@@ -15,6 +15,54 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use x509_parser::prelude::*;
 
+/// A DER-encoded X.509 certificate, owned and cheap to clone.
+///
+/// The transport-neutral spelling of what the TLS stack calls a certificate
+/// (ADR-0061 decision 7): callers build one from DER bytes and read the
+/// bytes back through `AsRef<[u8]>`/`Deref`; the backend converts to its
+/// own certificate type at its boundary.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CertificateDer(std::sync::Arc<[u8]>);
+
+impl CertificateDer {
+    /// The DER bytes.
+    pub fn as_der(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for CertificateDer {
+    fn from(der: Vec<u8>) -> Self {
+        Self(der.into())
+    }
+}
+
+impl From<&[u8]> for CertificateDer {
+    fn from(der: &[u8]) -> Self {
+        Self(der.into())
+    }
+}
+
+impl AsRef<[u8]> for CertificateDer {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for CertificateDer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CertificateDer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CertificateDer({} bytes)", self.0.len())
+    }
+}
+
 /// Textual prefix of a fingerprint: `sha256:BASE64`.
 pub const FINGERPRINT_PREFIX: &str = "sha256:";
 

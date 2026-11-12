@@ -24,7 +24,7 @@ fn party() -> Party {
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
     let params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
     let cert = params.self_signed(&key).unwrap();
-    let der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let der = crate::identity::CertificateDer::from(cert.der().to_vec());
     Party {
         fingerprint: Fingerprint::of_cert_der(&der).unwrap(),
         identity: LocalIdentity {

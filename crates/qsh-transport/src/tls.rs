@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer as TlsCert, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, OtherError,
@@ -32,7 +32,7 @@ use rustls::{
 };
 use webpki::{EndEntityCert, KeyUsage};
 
-use crate::identity::{Fingerprint, Principal, principal_from_san, validity_unix};
+use crate::identity::{CertificateDer, Fingerprint, Principal, principal_from_san, validity_unix};
 
 /// Source of trust decisions, injected by `qsh-core::trust`.
 ///
@@ -43,7 +43,7 @@ pub trait TrustEvaluator: Send + Sync + 'static {
     fn lookup_pin(&self, fingerprint: &Fingerprint) -> Option<Principal>;
 
     /// DER-encoded private CA root certificates. Empty = CA mode disabled.
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>>;
+    fn ca_roots(&self) -> Vec<CertificateDer>;
 
     /// Whether an unpinned, non-CA peer should still be admitted under
     /// [`Principal::Pairing`] (ADR-0002, one-time invite pairing,
@@ -101,7 +101,7 @@ impl TrustEvaluator for BoundTrust {
         }
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         match self.binding {
             PeerBinding::Pin(_) => Vec::new(),
             PeerBinding::CaOnly => self.inner.ca_roots(),
@@ -211,7 +211,7 @@ impl QshPeerVerifier {
     /// attached to the connection. Uses the same core as the handshake.
     pub fn principal_of(
         &self,
-        chain: &[CertificateDer<'_>],
+        chain: &[CertificateDer],
         role: PeerRole,
     ) -> Result<Principal, RejectReason> {
         self.verify_peer(chain, role).map(|v| v.principal)
@@ -221,7 +221,7 @@ impl QshPeerVerifier {
     /// trust path admitted the peer.
     pub fn verify_peer(
         &self,
-        chain: &[CertificateDer<'_>],
+        chain: &[CertificateDer],
         role: PeerRole,
     ) -> Result<VerifiedPeer, RejectReason> {
         verify_chain(&*self.evaluator, self.algs, chain, role)
@@ -231,8 +231,8 @@ impl QshPeerVerifier {
     /// plus the precise rustls error to hand back to the handshake.
     fn verify_core(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        end_entity: &TlsCert<'_>,
+        intermediates: &[TlsCert<'_>],
         now: UnixTime,
         role: PeerRole,
     ) -> Result<VerifiedPeer, (RejectReason, TlsError)> {
@@ -248,8 +248,8 @@ impl QshPeerVerifier {
 
     fn verify_and_record(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        end_entity: &TlsCert<'_>,
+        intermediates: &[TlsCert<'_>],
         now: UnixTime,
         role: PeerRole,
     ) -> Result<VerifiedPeer, TlsError> {
@@ -274,9 +274,11 @@ impl QshPeerVerifier {
 fn verify_chain(
     evaluator: &dyn TrustEvaluator,
     algs: WebPkiSupportedAlgorithms,
-    chain: &[CertificateDer<'_>],
+    chain: &[CertificateDer],
     role: PeerRole,
 ) -> Result<VerifiedPeer, RejectReason> {
+    // Borrowed views of the neutral chain; nothing is copied.
+    let chain: Vec<TlsCert<'_>> = chain.iter().map(|c| TlsCert::from(c.as_der())).collect();
     let (end_entity, intermediates) = match chain.split_first() {
         Some(x) => x,
         None => return Err(RejectReason::Untrusted),
@@ -298,7 +300,7 @@ fn verify_chain(
 /// pairing fallback. An empty chain is an `Untrusted` rejection.
 pub(crate) fn reverify_chain(
     evaluator: &dyn TrustEvaluator,
-    chain: &[CertificateDer<'_>],
+    chain: &[CertificateDer],
     role: PeerRole,
 ) -> Result<VerifiedPeer, RejectReason> {
     verify_chain(evaluator, default_algs(), chain, role)
@@ -317,8 +319,8 @@ fn default_algs() -> WebPkiSupportedAlgorithms {
 fn verify_core(
     evaluator: &dyn TrustEvaluator,
     algs: WebPkiSupportedAlgorithms,
-    end_entity: &CertificateDer<'_>,
-    intermediates: &[CertificateDer<'_>],
+    end_entity: &TlsCert<'_>,
+    intermediates: &[TlsCert<'_>],
     now: UnixTime,
     role: PeerRole,
 ) -> Result<VerifiedPeer, (RejectReason, TlsError)> {
@@ -372,7 +374,7 @@ fn verify_core(
         let anchors = roots
             .iter()
             .map(|der| {
-                webpki::anchor_from_trusted_cert(der)
+                webpki::anchor_from_trusted_cert(&TlsCert::from(der.as_der()))
                     .map(|anchor| anchor.to_owned())
                     .map_err(|_| {
                         (
@@ -449,8 +451,8 @@ fn webpki_to_tls(err: webpki::Error) -> TlsError {
 impl ServerCertVerifier for QshPeerVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        end_entity: &TlsCert<'_>,
+        intermediates: &[TlsCert<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         now: UnixTime,
@@ -464,7 +466,7 @@ impl ServerCertVerifier for QshPeerVerifier {
     fn verify_tls12_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
+        cert: &TlsCert<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         verify_tls12_signature(message, cert, dss, &self.algs)
@@ -473,7 +475,7 @@ impl ServerCertVerifier for QshPeerVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
+        cert: &TlsCert<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         verify_tls13_signature(message, cert, dss, &self.algs)
@@ -502,8 +504,8 @@ impl ClientCertVerifier for QshPeerVerifier {
 
     fn verify_client_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        end_entity: &TlsCert<'_>,
+        intermediates: &[TlsCert<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, TlsError> {
         self.verify_and_record(end_entity, intermediates, now, PeerRole::Client)?;
@@ -513,7 +515,7 @@ impl ClientCertVerifier for QshPeerVerifier {
     fn verify_tls12_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
+        cert: &TlsCert<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         verify_tls12_signature(message, cert, dss, &self.algs)
@@ -522,7 +524,7 @@ impl ClientCertVerifier for QshPeerVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert: &CertificateDer<'_>,
+        cert: &TlsCert<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         verify_tls13_signature(message, cert, dss, &self.algs)
@@ -539,7 +541,7 @@ impl ClientCertVerifier for QshPeerVerifier {
 #[derive(Debug, Default, Clone)]
 pub struct StaticTrust {
     pins: Vec<(Fingerprint, Principal)>,
-    cas: Vec<CertificateDer<'static>>,
+    cas: Vec<CertificateDer>,
     pairing_open: bool,
 }
 
@@ -558,7 +560,7 @@ impl StaticTrust {
 
     /// Add a private CA root (DER).
     #[must_use]
-    pub fn with_ca(mut self, root_der: CertificateDer<'static>) -> Self {
+    pub fn with_ca(mut self, root_der: CertificateDer) -> Self {
         self.cas.push(root_der);
         self
     }
@@ -580,7 +582,7 @@ impl TrustEvaluator for StaticTrust {
             .map(|(_, p)| p.clone())
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         self.cas.clone()
     }
 

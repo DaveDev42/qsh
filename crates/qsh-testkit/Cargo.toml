@@ -9,7 +9,9 @@ license.workspace = true
 
 [dependencies]
 qsh-proto.workspace = true
-qsh-transport.workspace = true
+# `test-support` exposes `SocketSource::Virtual` (the netsim socket) to the
+# punch tests; it is off in every normal build.
+qsh-transport = { workspace = true, features = ["test-support"] }
 qsh-core.workspace = true
 quinn.workspace = true
 tokio.workspace = true

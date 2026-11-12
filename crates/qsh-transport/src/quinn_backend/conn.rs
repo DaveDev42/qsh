@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::endpoint::ConnStats;
+use crate::endpoint::{ConnStats, DialError};
+use crate::identity::CertificateDer;
+use crate::tls::Observation;
 use bytes::Bytes;
 
 use crate::error::{
@@ -126,7 +128,7 @@ impl SendHalf for QuicSend {
     }
 
     fn reset(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
-        Ok(self.0.reset(code.to_varint())?)
+        Ok(self.0.reset(super::error::varint(code))?)
     }
 
     fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
@@ -164,7 +166,7 @@ impl RecvHalf for QuicRecv {
     }
 
     fn stop(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
-        Ok(self.0.stop(code.to_varint())?)
+        Ok(self.0.stop(super::error::varint(code))?)
     }
 }
 
@@ -232,4 +234,48 @@ fn fold_frames_rx(f: &quinn::FrameStats) -> u64 {
     ]
     .into_iter()
     .fold(0u64, u64::saturating_add)
+}
+
+/// The peer's certificate chain (leaf first) as the handshake verified it,
+/// converted from rustls' type to the neutral one. Empty when quinn has no
+/// peer identity.
+pub(crate) fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer> {
+    conn.peer_identity()
+        .and_then(|any| {
+            any.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                .ok()
+        })
+        .map(|chain| {
+            chain
+                .iter()
+                .map(|c| CertificateDer::from(c.as_ref()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Map a failed handshake to a [`DialError`], using the verifier's
+/// observation to tell "we rejected them" from "they rejected us".
+pub(crate) fn classify_dial_failure(
+    err: quinn::ConnectionError,
+    obs: Option<Observation>,
+) -> DialError {
+    let err = ConnectionError::from(err);
+    if let Some(Observation {
+        fingerprint,
+        outcome: Err(reason),
+    }) = obs
+    {
+        return DialError::LocalRejected {
+            reason,
+            observed: fingerprint,
+        };
+    }
+    if err.is_crypto_failure() {
+        return DialError::RemoteRejected;
+    }
+    if err.is_refused() {
+        return DialError::Refused;
+    }
+    DialError::Failed(err)
 }

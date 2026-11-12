@@ -2,14 +2,15 @@
 //!
 //! `qsh-transport`'s public surface names no quinn type
 //! (`docs/adr/0043-no-tcp-fallback.md` decision 3): the errors a caller can
-//! match are owned here, and the QUIC backend converts quinn's into them with
-//! the `From` impls below.
+//! match are owned here, and each backend converts its own errors into them
+//! inside its module (`quinn_backend::error` for the QUIC backend,
+//! ADR-0061 decision 7). This module names no backend's error type.
 //!
 //! Two properties are load-bearing:
 //!
 //! - **`Display` is byte-identical to quinn's.** The strings flow into CLI
 //!   messages (`connection lost: {err}`, `handshake failed: {err}`), so the
-//!   `display_matches_quinn_*` tests pin every variant against quinn's own
+//!   `display_matches_quinn_*` tests (in `quinn_backend::error`) pin every variant against quinn's own
 //!   rendering.
 //! - **Variant names mirror quinn's** where a caller already matches them
 //!   (`ConnectionError::{ApplicationClosed, LocallyClosed, TimedOut, Reset}`,
@@ -26,14 +27,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use thiserror::Error;
-
-/// Lowest QUIC transport error code that encodes a TLS alert (RFC 9001
-/// §4.8: `0x100 + alert`).
-const CRYPTO_CODE_MIN: u64 = 0x100;
-/// Highest QUIC transport error code that encodes a TLS alert.
-const CRYPTO_CODE_MAX: u64 = 0x1ff;
-/// QUIC `CONNECTION_REFUSED` (RFC 9000 §20.1).
-const CONNECTION_REFUSED_CODE: u64 = 0x2;
 
 /// An application-defined stream or connection error code (a stream reset,
 /// a stop-sending, a connection close).
@@ -61,10 +54,10 @@ impl StreamCode {
         u32::try_from(self.0).ok()
     }
 
-    /// quinn's varint for this code. A value past the varint range (not
-    /// constructible from `u32`) clamps to the maximum.
-    pub(crate) fn to_varint(self) -> quinn::VarInt {
-        quinn::VarInt::from_u64(self.0).unwrap_or(quinn::VarInt::MAX)
+    /// A code from a raw wire value (a backend building one from its own
+    /// error types; callers use [`from_u32`](Self::from_u32)).
+    pub(crate) const fn from_u64(code: u64) -> Self {
+        Self(code)
     }
 }
 
@@ -77,12 +70,6 @@ impl From<u32> for StreamCode {
 impl From<StreamCode> for u64 {
     fn from(code: StreamCode) -> Self {
         code.0
-    }
-}
-
-impl From<quinn::VarInt> for StreamCode {
-    fn from(code: quinn::VarInt) -> Self {
-        Self(code.into_inner())
     }
 }
 
@@ -111,15 +98,6 @@ impl fmt::Display for ApplicationClose {
             f.write_str(" (code ")?;
             self.error_code.fmt(f)?;
             f.write_str(")")
-        }
-    }
-}
-
-impl From<quinn::ApplicationClose> for ApplicationClose {
-    fn from(close: quinn::ApplicationClose) -> Self {
-        Self {
-            error_code: close.error_code.into(),
-            reason: close.reason,
         }
     }
 }
@@ -240,43 +218,6 @@ impl fmt::Display for ConnectionError {
 
 impl std::error::Error for ConnectionError {}
 
-impl From<quinn::ConnectionError> for ConnectionError {
-    fn from(err: quinn::ConnectionError) -> Self {
-        match err {
-            quinn::ConnectionError::VersionMismatch => Self::VersionMismatch,
-            quinn::ConnectionError::ApplicationClosed(close) => {
-                Self::ApplicationClosed(close.into())
-            }
-            quinn::ConnectionError::Reset => Self::Reset,
-            quinn::ConnectionError::TimedOut => Self::TimedOut,
-            quinn::ConnectionError::LocallyClosed => Self::LocallyClosed,
-            quinn::ConnectionError::CidsExhausted => Self::CidsExhausted,
-            // We detected the violation ourselves. Only the crypto class is
-            // told apart; the code is never `CONNECTION_REFUSED` here (that
-            // is a peer-sent close).
-            quinn::ConnectionError::TransportError(te) => {
-                let text: Arc<str> = te.to_string().into();
-                match crypto_alert(te.code.into()) {
-                    Some(alert) => Self::Crypto { alert, text },
-                    None => Self::Other(text),
-                }
-            }
-            // The peer's QUIC stack aborted the connection.
-            quinn::ConnectionError::ConnectionClosed(cc) => {
-                let raw: u64 = cc.error_code.into();
-                let text: Arc<str> = format!("aborted by peer: {cc}").into();
-                if let Some(alert) = crypto_alert(raw) {
-                    Self::Crypto { alert, text }
-                } else if raw == CONNECTION_REFUSED_CODE {
-                    Self::Refused { text }
-                } else {
-                    Self::Other(text)
-                }
-            }
-        }
-    }
-}
-
 /// The same `io::ErrorKind` mapping quinn applies to its connection error.
 impl From<ConnectionError> for std::io::Error {
     fn from(err: ConnectionError) -> Self {
@@ -296,24 +237,11 @@ impl From<ConnectionError> for std::io::Error {
     }
 }
 
-/// The TLS alert a QUIC transport code encodes, if it is in the crypto band.
-fn crypto_alert(code: u64) -> Option<u8> {
-    (CRYPTO_CODE_MIN..=CRYPTO_CODE_MAX)
-        .contains(&code)
-        .then_some((code & 0xff) as u8)
-}
-
 /// A stream operation on a stream that is already finished, reset, stopped
 /// or was never open.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Error)]
 #[error("closed stream")]
 pub struct ClosedStream;
-
-impl From<quinn::ClosedStream> for ClosedStream {
-    fn from(_: quinn::ClosedStream) -> Self {
-        Self
-    }
-}
 
 /// A failed read from a stream.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -333,18 +261,6 @@ pub enum ReadError {
     /// A 0-RTT stream the server rejected (qsh never opens one).
     #[error("0-RTT rejected")]
     ZeroRttRejected,
-}
-
-impl From<quinn::ReadError> for ReadError {
-    fn from(err: quinn::ReadError) -> Self {
-        match err {
-            quinn::ReadError::Reset(code) => Self::Reset(code.into()),
-            quinn::ReadError::ConnectionLost(e) => Self::ConnectionLost(e.into()),
-            quinn::ReadError::ClosedStream => Self::ClosedStream,
-            quinn::ReadError::IllegalOrderedRead => Self::IllegalOrderedRead,
-            quinn::ReadError::ZeroRttRejected => Self::ZeroRttRejected,
-        }
-    }
 }
 
 /// The same `io::ErrorKind` mapping quinn applies, so an `io::Error` built
@@ -373,15 +289,6 @@ pub enum ReadExactError {
     ReadError(#[from] ReadError),
 }
 
-impl From<quinn::ReadExactError> for ReadExactError {
-    fn from(err: quinn::ReadExactError) -> Self {
-        match err {
-            quinn::ReadExactError::FinishedEarly(n) => Self::FinishedEarly(n),
-            quinn::ReadExactError::ReadError(e) => Self::ReadError(e.into()),
-        }
-    }
-}
-
 /// A failed [`RecvStream::read_to_end`](crate::RecvStream::read_to_end).
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ReadToEndError {
@@ -391,15 +298,6 @@ pub enum ReadToEndError {
     /// The stream is larger than the caller-supplied limit.
     #[error("stream too long")]
     TooLong,
-}
-
-impl From<quinn::ReadToEndError> for ReadToEndError {
-    fn from(err: quinn::ReadToEndError) -> Self {
-        match err {
-            quinn::ReadToEndError::Read(e) => Self::Read(e.into()),
-            quinn::ReadToEndError::TooLong => Self::TooLong,
-        }
-    }
 }
 
 /// A failed write to a stream.
@@ -417,17 +315,6 @@ pub enum WriteError {
     /// A 0-RTT stream the server rejected (qsh never opens one).
     #[error("0-RTT rejected")]
     ZeroRttRejected,
-}
-
-impl From<quinn::WriteError> for WriteError {
-    fn from(err: quinn::WriteError) -> Self {
-        match err {
-            quinn::WriteError::Stopped(code) => Self::Stopped(code.into()),
-            quinn::WriteError::ConnectionLost(e) => Self::ConnectionLost(e.into()),
-            quinn::WriteError::ClosedStream => Self::ClosedStream,
-            quinn::WriteError::ZeroRttRejected => Self::ZeroRttRejected,
-        }
-    }
 }
 
 impl From<ClosedStream> for WriteError {
@@ -460,15 +347,6 @@ pub enum StoppedError {
     ZeroRttRejected,
 }
 
-impl From<quinn::StoppedError> for StoppedError {
-    fn from(err: quinn::StoppedError) -> Self {
-        match err {
-            quinn::StoppedError::ConnectionLost(e) => Self::ConnectionLost(e.into()),
-            quinn::StoppedError::ZeroRttRejected => Self::ZeroRttRejected,
-        }
-    }
-}
-
 /// A dial that failed before any packet was sent.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ConnectError {
@@ -493,33 +371,11 @@ pub enum ConnectError {
     UnsupportedVersion,
 }
 
-impl From<quinn::ConnectError> for ConnectError {
-    fn from(err: quinn::ConnectError) -> Self {
-        match err {
-            quinn::ConnectError::EndpointStopping => Self::EndpointStopping,
-            quinn::ConnectError::CidsExhausted => Self::CidsExhausted,
-            quinn::ConnectError::InvalidServerName(name) => Self::InvalidServerName(name),
-            quinn::ConnectError::InvalidRemoteAddress(addr) => Self::InvalidRemoteAddress(addr),
-            quinn::ConnectError::NoDefaultClientConfig => Self::NoDefaultClientConfig,
-            quinn::ConnectError::UnsupportedVersion => Self::UnsupportedVersion,
-        }
-    }
-}
-
 /// The TLS keying-material exporter refused the request (the requested
 /// output was too long).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("keying material export failed")]
 pub struct ExportError;
-
-impl From<quinn::crypto::ExportKeyingMaterialError> for ExportError {
-    fn from(_: quinn::crypto::ExportKeyingMaterialError) -> Self {
-        Self
-    }
-}
-
-#[cfg(test)]
-mod tests;
 
 /// A failed datagram send (`Connection::send_datagram`).
 ///
@@ -542,15 +398,4 @@ pub enum DatagramError {
     /// The connection was lost.
     #[error("connection lost")]
     ConnectionLost(#[from] ConnectionError),
-}
-
-impl From<quinn::SendDatagramError> for DatagramError {
-    fn from(err: quinn::SendDatagramError) -> Self {
-        match err {
-            quinn::SendDatagramError::UnsupportedByPeer => Self::UnsupportedByPeer,
-            quinn::SendDatagramError::Disabled => Self::Disabled,
-            quinn::SendDatagramError::TooLarge => Self::TooLarge,
-            quinn::SendDatagramError::ConnectionLost(e) => Self::ConnectionLost(e.into()),
-        }
-    }
 }

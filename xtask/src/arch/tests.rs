@@ -668,6 +668,77 @@ fn module_ban_flags_quinn_paths_and_the_accessor_under_core_and_cli_src() {
     );
 }
 
+/// `iroh::` and `noq::` paths are banned in `qsh-core/src` and `qsh-cli/src`
+/// like `quinn::` (ADR-0061 decision 8); prose and string literals are fine.
+#[test]
+fn module_ban_flags_iroh_and_noq_paths_under_core_and_cli_src() {
+    let root = tempfile::tempdir().unwrap();
+    let core = root.path().join("crates/qsh-core/src");
+    let cli_src = root.path().join("crates/qsh-cli/src");
+    fs::create_dir_all(&core).unwrap();
+    fs::create_dir_all(&cli_src).unwrap();
+    fs::write(
+        core.join("route.rs"),
+        "fn f(e: iroh::Endpoint) { let _ = e; }\n",
+    )
+    .unwrap();
+    fs::write(cli_src.join("render.rs"), "use noq::VarInt;\n").unwrap();
+    fs::write(
+        core.join("fine.rs"),
+        "// iroh::Endpoint and noq::Connection are only mentioned in prose\n\
+         fn route_kind() -> &'static str { \"iroh\" }\n",
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+    let hits: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("`iroh::`") || v.contains("`noq::`"))
+        .collect();
+    assert_eq!(hits.len(), 2, "{violations:?}");
+    assert!(hits.iter().any(|v| v.contains("qsh-core/src/route.rs:1")));
+    assert!(hits.iter().any(|v| v.contains("qsh-cli/src/render.rs:1")));
+    assert!(
+        !violations.iter().any(|v| v.contains("fine.rs")),
+        "{violations:?}"
+    );
+}
+
+/// An `iroh` or `noq` entry (or a sub-crate of either) in the `qsh-core` or
+/// `qsh-cli` manifest, runtime or dev, fails the lint with no `use` line yet.
+#[test]
+fn run_flags_iroh_and_noq_dependencies_in_core_and_cli_manifests() {
+    let root = tempfile::tempdir().unwrap();
+    for (name, section, dep) in [
+        ("qsh-core", "dependencies", "iroh"),
+        ("qsh-core", "dev-dependencies", "noq-proto"),
+        ("qsh-cli", "dependencies", "noq"),
+        ("qsh-cli", "dev-dependencies", "iroh-relay"),
+    ] {
+        let dir = root.path().join("crates").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("Cargo.toml");
+        let mut text = fs::read_to_string(&manifest)
+            .unwrap_or_else(|_| format!("[package]\nname = \"{name}\"\n"));
+        text.push_str(&format!("\n[{section}]\n{dep} = \"1\"\n"));
+        fs::write(manifest, text).unwrap();
+    }
+
+    let err = run(root.path()).unwrap_err().to_string();
+    for (name, dep) in [
+        ("qsh-core", "iroh"),
+        ("qsh-core", "noq-proto"),
+        ("qsh-cli", "noq"),
+        ("qsh-cli", "iroh-relay"),
+    ] {
+        assert!(
+            err.contains(&format!("{name} declares a dependency on `{dep}`")),
+            "{name} {dep}: {err}"
+        );
+    }
+}
+
 /// A broker file that names `quinn::` is reported once, under the broader
 /// `quinn` ban, not a second time under the `quinn::` ban that also covers
 /// `qsh-core/src`.

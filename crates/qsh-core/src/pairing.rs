@@ -650,7 +650,7 @@ impl TrustEvaluator for AcceptAnyForPairing {
         Some(Principal::Pairing)
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         Vec::new()
     }
 }

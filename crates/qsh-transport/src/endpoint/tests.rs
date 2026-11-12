@@ -1,4 +1,6 @@
 use super::*;
+use crate::quinn_backend::config::{congestion_controller_factory, server_tls_config};
+use crate::quinn_backend::socket::{LISTENER_DUAL_STACK_V6, prepare_udp_socket};
 use crate::tls::{PeerBinding, StaticTrust};
 
 /// (b) `send_fairness` and the tunnel-sized `stream_receive_window`
@@ -551,7 +553,7 @@ async fn handshake_pair(
 }
 
 /// A private CA plus a leaf it signs with a `qsh://device/<name>` SAN.
-fn ca_and_leaf(name: &str) -> (CertificateDer<'static>, LocalIdentity) {
+fn ca_and_leaf(name: &str) -> (CertificateDer, LocalIdentity) {
     use rcgen::string::Ia5String;
     let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
     let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();

@@ -1135,7 +1135,7 @@ impl TrustStore {
     }
 
     /// CA roots as DER. Unparsable PEM is skipped with a `WARN`.
-    fn parsed_cas(&self) -> Vec<CertificateDer<'static>> {
+    fn parsed_cas(&self) -> Vec<CertificateDer> {
         self.cas
             .iter()
             .filter_map(|ca| match pem::decode_first(pem::CERTIFICATE, &ca.cert_pem) {
@@ -1171,7 +1171,7 @@ struct Cached {
     /// [`SharedTrustStore::resolve_role`] compares a connection against.
     /// `role` is `None` for a pin with no `role` key.
     pin_roles: Vec<PinRole>,
-    cas: Vec<CertificateDer<'static>>,
+    cas: Vec<CertificateDer>,
     /// The on-disk text (`None` = missing file) of the last reload that
     /// failed to parse, while that text is still what the file holds.
     /// `Some(_)` means the snapshot above is *stale*: pin authentication
@@ -1689,7 +1689,7 @@ impl TrustEvaluator for SnapshotView {
             .map(|(_, principal)| principal.clone())
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         self.0.read().cas.clone()
     }
 
@@ -1723,7 +1723,7 @@ impl TrustEvaluator for SharedTrustStore {
             .map(|(_, principal)| principal.clone())
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         self.refresh();
         self.read().cas.clone()
     }

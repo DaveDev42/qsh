@@ -40,7 +40,7 @@ pub mod error;
 pub mod identity;
 mod mux;
 pub mod peer_addr;
-mod quic;
+mod quinn_backend;
 pub mod stream;
 pub mod tls;
 
@@ -57,7 +57,9 @@ pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, DatagramError, ExportError,
     ReadError, ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
-pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
+pub use identity::{
+    CertificateDer, Fingerprint, FingerprintParseError, Principal, PrincipalParseError,
+};
 pub use mux::{TransportCaps, TransportKind};
 pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};
 pub use stream::{RecvStream, SendStream};
@@ -65,7 +67,3 @@ pub use tls::{
     AuthPath, BoundTrust, Observation, PeerBinding, PeerRole, QshPeerVerifier, RejectReason,
     StaticTrust, TrustEvaluator, VerifiedPeer,
 };
-
-// Re-export the certificate type callers need to build a `LocalIdentity`, so
-// `qsh-core` never depends on rustls directly.
-pub use rustls::pki_types::CertificateDer;

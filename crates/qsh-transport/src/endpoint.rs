@@ -15,17 +15,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use socket2::{Domain, Protocol, Socket, Type};
+use quinn::crypto::rustls::QuicClientConfig;
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::error::{ConnectError, ConnectionError, DatagramError, ExportError};
-use crate::identity::{Fingerprint, Principal};
+use crate::identity::{CertificateDer, Fingerprint, Principal};
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
 use crate::peer_addr::PeerAddr;
-use crate::quic::QuicConn;
+pub use crate::quinn_backend::config::transport_config_debug;
+use crate::quinn_backend::config::{
+    client_tls_config, server_config, server_endpoint_config, transport_config,
+};
+use crate::quinn_backend::conn::{QuicConn, classify_dial_failure, peer_chain};
+use crate::quinn_backend::socket::bind_listener_socket;
+pub use crate::quinn_backend::socket::bind_tuned_udp_socket;
 use crate::stream::{RecvStream, SendStream};
 use crate::tls::{
     AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator, VerifiedPeer,
@@ -236,7 +241,7 @@ pub const NOT_ADOPTED_REASON: &[u8] = b"not adopted";
 #[derive(Clone)]
 pub struct LocalIdentity {
     /// Leaf first. Self-signed device certs are a chain of one.
-    pub cert_chain: Vec<CertificateDer<'static>>,
+    pub cert_chain: Vec<CertificateDer>,
     /// PKCS#8 DER private key. `Zeroizing` covers the resident copy this
     /// struct owns; `key()` below draws one further copy out of it via
     /// `.to_vec()` (not `.clone()` — the result is a plain `Vec<u8>`,
@@ -261,7 +266,7 @@ impl std::fmt::Debug for LocalIdentity {
 }
 
 impl LocalIdentity {
-    fn key(&self) -> PrivateKeyDer<'static> {
+    pub(crate) fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8_der.to_vec()))
     }
 }
@@ -368,58 +373,6 @@ impl Default for TransportTuning {
     }
 }
 
-/// The congestion controller factory every qsh connection uses: BBR
-/// (`docs/design/protocol.md` §12). Its own function so a unit test can build
-/// a controller from it, because `quinn::TransportConfig` does not print the
-/// factory in `Debug`.
-fn congestion_controller_factory() -> Arc<quinn::congestion::BbrConfig> {
-    Arc::new(quinn::congestion::BbrConfig::default())
-}
-
-fn transport_config(tuning: TransportTuning) -> quinn::TransportConfig {
-    let mut tc = quinn::TransportConfig::default();
-    tc.keep_alive_interval(Some(tuning.keep_alive));
-    tc.max_idle_timeout(Some(
-        MAX_IDLE_TIMEOUT
-            .try_into()
-            .expect("45s fits in a QUIC idle timeout VarInt"),
-    ));
-    tc.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
-    // Tunnel/backpressure config (`docs/design/protocol.md` §12,
-    // M4 plan Step 2 (2473c88)) — priority (queue order, applied per-stream at
-    // the call site: `qsh_transport::control::FramedSend::set_priority`,
-    // `qsh_proto::wire::PRIORITY_TUNNEL`) plus these three connection-level
-    // knobs (queue depth), so a saturated tunnel cannot starve PTY chunks
-    // buffered behind it:
-    tc.congestion_controller_factory(congestion_controller_factory());
-    tc.send_fairness(true);
-    // QUIC DATAGRAM, enabled as an optional carrier (ADR-0052 decision 7).
-    // Quinn's defaults (1.25 MB receive, 1 MiB send) are pinned down here so
-    // the memory bound is ours; a unit test reads these constants.
-    tc.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_SIZE));
-    tc.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER_SIZE);
-    tc.stream_receive_window(quinn::VarInt::from_u32(TUNNEL_STREAM_RECEIVE_WINDOW));
-    // `docs/ROADMAP.md` M8 DoD 2 ("세션당 buffer ≤ 8 MB") — see
-    // `CONNECTION_RECEIVE_WINDOW`'s own doc for the derivation. Never set
-    // before M8 Step 2, so this connection-wide ceiling was quinn's own
-    // `VarInt::MAX` (unbounded) the whole time `stream_receive_window`
-    // above was already finite per-stream.
-    tc.receive_window(
-        quinn::VarInt::try_from(CONNECTION_RECEIVE_WINDOW).expect("8 MiB fits in a QUIC VarInt"),
-    );
-    tc
-}
-
-/// The `Debug` rendering of the `quinn::TransportConfig` that `tuning`
-/// produces. A test seam: `quinn::TransportConfig` has no public getters,
-/// so a caller in another crate (the `[transport].keep_alive_ms` tests in
-/// `qsh-core`) can only observe what reached quinn through its `Debug`
-/// output, exactly as this module's own tests do.
-#[doc(hidden)]
-pub fn transport_config_debug(tuning: TransportTuning) -> String {
-    format!("{:?}", transport_config(tuning))
-}
-
 /// Cap on `quinn::ServerConfig::max_incoming` — how many inbound connection
 /// attempts quinn is willing to hold as an unaccepted `Incoming` (a slab
 /// slot plus derived Initial keys already spent) before it starts
@@ -524,226 +477,6 @@ pub const INCOMING_BUFFER_SIZE: u64 = 64 * 1024;
 /// outcome ordinary packet loss produces).
 pub const INCOMING_BUFFER_SIZE_TOTAL: u64 = INCOMING_BUFFER_SIZE * 256;
 
-/// Descending candidate ladder for the UDP socket buffer tuning below.
-/// Deliberately **decoupled** from [`TUNNEL_STREAM_RECEIVE_WINDOW`]: the
-/// window is a QUIC-level flow-control ceiling tuned against the M4 perf
-/// DoDs (and, per that constant's own doc, may need to come *down* to
-/// protect PTY latency), while this ladder is a queue-*depth* floor one
-/// layer below it (the OS socket) that must never shrink — a socket
-/// buffer smaller than whatever window is in effect would itself become
-/// the bottleneck a bufferbloat-sensitive stream queues behind, defeating
-/// the point regardless of which window value wins. Kept independent
-/// (and always ≥ the current window) rather than derived from it, so a
-/// future window change can never accidentally shrink this.
-const SOCKET_BUFFER_LADDER_BYTES: [usize; 4] = [
-    8 * 1024 * 1024,
-    4 * 1024 * 1024,
-    2 * 1024 * 1024,
-    1024 * 1024,
-];
-
-/// Try each rung of [`SOCKET_BUFFER_LADDER_BYTES`], largest first, keeping
-/// the first rung whose OS-granted result beats what the OS already had
-/// before this function touched it (`get`/`set` are `recv_buffer_size`/
-/// `set_recv_buffer_size` or the `send_*` pair). **Never reduces the
-/// buffer:** a candidate at or below the already-granted default is
-/// skipped outright (never handed to `set`), and a rung whose `set`
-/// either fails or is silently clamped back down to (or below) the
-/// default is undone by re-asserting the default before the next
-/// (smaller) rung is tried — so a clamped-low attempt can never leave the
-/// socket worse off than it started, and this function is safe to call
-/// even on a platform whose default already exceeds every rung.
-///
-/// **Why independently sized ladders per direction, not one shared call.**
-/// macOS grants a default `SO_RCVBUF` of ~768 KiB but a default
-/// `SO_SNDBUF` of only ~9 KiB — the two directions differ by two orders
-/// of magnitude on the same platform, so a single fixed request applied
-/// to both (this file's previous approach: a flat 128 KiB for both) was a
-/// measured **6x reduction** of macOS's own recv default, the opposite of
-/// what `docs/design/testing.md`'s CI 규율 ("GHA macOS runner는 UDP 소켓
-/// 버퍼 기본값이 작다") exists to guard against. Sizing each direction
-/// from its own read-back default, independently, is what keeps a
-/// well-provisioned platform's default from ever being *reduced* by this
-/// tuning.
-fn tune_socket_buffer(
-    socket: &Socket,
-    get: impl Fn(&Socket) -> io::Result<usize>,
-    set: impl Fn(&Socket, usize) -> io::Result<()>,
-) {
-    let Ok(default) = get(socket) else {
-        // Can't read the baseline back — nothing safe to compare against,
-        // so leave the socket untouched rather than risk a reduction.
-        return;
-    };
-    for candidate in SOCKET_BUFFER_LADDER_BYTES {
-        if candidate <= default {
-            // Never call `set` with a value at or below the read-back
-            // default — either it would be a no-op or, on a platform that
-            // honors requests literally instead of clamping them up, a
-            // reduction.
-            continue;
-        }
-        if set(socket, candidate).is_err() {
-            continue;
-        }
-        match get(socket) {
-            Ok(granted) if granted > default => return,
-            _ => {
-                // Didn't stick, or the OS granted something at/below the
-                // default — restore before trying a smaller rung.
-                let _ = set(socket, default);
-            }
-        }
-    }
-}
-
-/// Bind a UDP socket at `addr` with `tune_socket_buffer` applied
-/// independently to each direction, in place of
-/// `quinn::Endpoint::client`/`::server`'s own internal bind (which offers
-/// no way to ask for a bigger buffer). `dual_stack_v6` mirrors
-/// `quinn::Endpoint::client`'s own best-effort `IPV6_V6ONLY` handling for
-/// a wildcard v6 bind. [`Dialer::dial`]'s replacement and the listener
-/// (`bind_listener_socket`, `docs/adr/0046-dual-stack-wildcard-listener.md`)
-/// both pass `true`, so a `[::]` listener accepts IPv4 peers on every OS
-/// instead of leaving that to the OS default (Windows opens new IPv6
-/// sockets `IPV6_V6ONLY`). Failing to clear the option never fails the
-/// bind. Also used by
-/// `qsh_core::client::reconnect`'s migration rebind (`PathBinder`), so a
-/// post-migration socket keeps the same tuning and dual-stack behavior
-/// the original dial got.
-///
-/// Every step here is best-effort except the bind itself: a platform that
-/// refuses (or silently caps) the buffer request keeps its own default,
-/// which only degrades *how fast* a loopback benchmark can measure, never
-/// correctness (`crates/qsh-testkit/tests/it/tunnel_throughput.rs`'s own
-/// module doc walks through why the M4 DoD 3 ratio gate is tolerant of
-/// this either way).
-pub fn bind_tuned_udp_socket(
-    addr: SocketAddr,
-    dual_stack_v6: bool,
-) -> io::Result<std::net::UdpSocket> {
-    let socket = prepare_udp_socket(addr, dual_stack_v6)?;
-    socket.bind(&addr.into())?;
-    Ok(socket.into())
-}
-
-/// Everything [`bind_tuned_udp_socket`] does before `bind(2)`. Split out
-/// because Linux forces `IPV6_V6ONLY` on once a socket binds a specific
-/// (non-wildcard) IPv6 address, so only the pre-bind state can show the
-/// option was cleared on a loopback address.
-fn prepare_udp_socket(addr: SocketAddr, dual_stack_v6: bool) -> io::Result<Socket> {
-    let domain = if addr.is_ipv6() {
-        Domain::IPV6
-    } else {
-        Domain::IPV4
-    };
-    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-    if dual_stack_v6 && addr.is_ipv6() {
-        let _ = socket.set_only_v6(false);
-    }
-    tune_socket_buffer(
-        &socket,
-        Socket::recv_buffer_size,
-        Socket::set_recv_buffer_size,
-    );
-    tune_socket_buffer(
-        &socket,
-        Socket::send_buffer_size,
-        Socket::set_send_buffer_size,
-    );
-    socket.set_nonblocking(true)?;
-    Ok(socket)
-}
-
-/// The server-side UDP bind: [`bind_tuned_udp_socket`] with
-/// `dual_stack_v6=true` (`docs/adr/0046-dual-stack-wildcard-listener.md`
-/// decision 1). Kept as one helper so a test can pin the flag the
-/// [`Listener`] actually uses ([`LISTENER_DUAL_STACK_V6`]).
-pub(crate) fn bind_listener_socket(bind: SocketAddr) -> io::Result<std::net::UdpSocket> {
-    bind_tuned_udp_socket(bind, LISTENER_DUAL_STACK_V6)
-}
-
-/// The `dual_stack_v6` argument the listener binds with.
-pub(crate) const LISTENER_DUAL_STACK_V6: bool = true;
-
-fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-}
-
-fn client_tls_config(
-    identity: &LocalIdentity,
-    verifier: Arc<QshPeerVerifier>,
-) -> Result<rustls::ClientConfig, SetupError> {
-    let mut tls = rustls::ClientConfig::builder_with_provider(crypto_provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(identity.cert_chain.clone(), identity.key())?;
-    tls.alpn_protocols = vec![qsh_proto::wire::ALPN.to_vec()];
-    // No 0-RTT, no session resumption (`protocol.md` §2).
-    tls.enable_early_data = false;
-    tls.resumption = rustls::client::Resumption::disabled();
-    // Never put the dialed hostname on the wire: the server verifies by
-    // pin and ignores SNI, so it would only leak the name to on-path
-    // observers (`docs/adr/0040-ech-policy.md` decision 2). rustls still
-    // takes a `ServerName` for verification plumbing.
-    tls.enable_sni = false;
-    Ok(tls)
-}
-
-fn server_tls_config(
-    identity: &LocalIdentity,
-    verifier: Arc<QshPeerVerifier>,
-) -> Result<rustls::ServerConfig, SetupError> {
-    let mut tls = rustls::ServerConfig::builder_with_provider(crypto_provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(identity.cert_chain.clone(), identity.key())?;
-    tls.alpn_protocols = vec![qsh_proto::wire::ALPN.to_vec()];
-    // No early data, no tickets: every connection re-runs full mutual
-    // authentication (`protocol.md` §2).
-    tls.max_early_data_size = 0;
-    tls.send_tls13_tickets = 0;
-    tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-    Ok(tls)
-}
-
-/// Build the `quinn::ServerConfig` [`Listener::bind_inner`] hands to
-/// `quinn::Endpoint::new` — TLS, the given `transport`, and the L0
-/// admission bounds ([`MAX_INCOMING`]/[`INCOMING_BUFFER_SIZE`]/
-/// [`INCOMING_BUFFER_SIZE_TOTAL`], M8 plan Step 2 (52639fc), `docs/adr/0009-
-/// admission-defenses.md`) — never set before M8, so these sat at quinn's
-/// own defaults (65536 / 10 MiB / 100 MiB, `quinn-proto` `config/mod.rs`).
-/// This is L0 of the L0-L5 admission ordering: the cheap shed quinn
-/// applies *before* deriving Initial keys or handing us an `Incoming` at
-/// all — `admission::Gate` (qsh-core) is L2-L3, one layer above, and only
-/// ever sees what gets past this.
-///
-/// **The single construction site** (M8 plan Step 2 (52639fc) verification
-/// round, P2-1): before this existed, the test that pinned these three
-/// bounds (`tests::server_config_sets_admission_bounds`) rebuilt its own
-/// copy of this same sequence of calls and asserted against *that* copy —
-/// tautological, since deleting the setters from `bind_inner` alone
-/// (leaving the test's copy untouched) left the test green. `bind_inner`
-/// and the test now both call this one function, so there is exactly one
-/// place the three bounds can be set, and the test asserts on the actual
-/// production construction path.
-fn server_config(
-    identity: &LocalIdentity,
-    verifier: Arc<QshPeerVerifier>,
-    transport: quinn::TransportConfig,
-) -> Result<quinn::ServerConfig, SetupError> {
-    let tls = server_tls_config(identity, verifier)?;
-    let quic = QuicServerConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
-    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    server_config.transport_config(Arc::new(transport));
-    server_config
-        .max_incoming(MAX_INCOMING)
-        .incoming_buffer_size(INCOMING_BUFFER_SIZE)
-        .incoming_buffer_size_total(INCOMING_BUFFER_SIZE_TOTAL);
-    Ok(server_config)
-}
-
 /// A verified QUIC connection: quinn's connection plus the peer's
 /// certificate-derived principal.
 #[derive(Clone, Debug)]
@@ -758,7 +491,7 @@ pub struct Connection {
     /// The peer's certificate chain (DER, leaf first) from the handshake,
     /// kept so [`Connection::reverify`] can re-run the verifier later
     /// (ADR-0031 decision 4). A few KB per connection; shared by clones.
-    peer_chain: Arc<[CertificateDer<'static>]>,
+    peer_chain: Arc<[CertificateDer]>,
     /// Which side of the handshake the peer was, for the chain verifier's
     /// key-usage check.
     peer_role: PeerRole,
@@ -854,7 +587,7 @@ impl Connection {
     /// Wrap a handshaken quinn connection whose peer the verifier accepted.
     fn from_quic(
         conn: quinn::Connection,
-        chain: &[CertificateDer<'static>],
+        chain: &[CertificateDer],
         role: PeerRole,
         verified: VerifiedPeer,
     ) -> Self {
@@ -1301,13 +1034,6 @@ pub struct ConnStats {
     pub rx_datagram_frames: u64,
 }
 
-fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer<'static>> {
-    conn.peer_identity()
-        .and_then(|any| any.downcast::<Vec<CertificateDer<'static>>>().ok())
-        .map(|b| *b)
-        .unwrap_or_default()
-}
-
 /// Client-side factory: dials servers with our identity, verifying them
 /// through `evaluator`.
 pub struct Dialer {
@@ -1505,7 +1231,7 @@ impl Dialer {
 /// The part of a dial after the handshake: run the pin/CA check on the
 /// server's chain and wrap the connection. Shared by [`Dialer`] and
 /// [`PunchEndpoint::dial`].
-fn finish_dial(
+pub(crate) fn finish_dial(
     conn: quinn::Connection,
     verifier: &QshPeerVerifier,
 ) -> Result<Connection, DialError> {
@@ -1551,29 +1277,6 @@ impl Dialed {
     }
 }
 
-/// Map a failed handshake to a [`DialError`], using the verifier's
-/// observation to tell "we rejected them" from "they rejected us".
-fn classify_dial_failure(err: quinn::ConnectionError, obs: Option<Observation>) -> DialError {
-    let err = ConnectionError::from(err);
-    if let Some(Observation {
-        fingerprint,
-        outcome: Err(reason),
-    }) = obs
-    {
-        return DialError::LocalRejected {
-            reason,
-            observed: fingerprint,
-        };
-    }
-    if err.is_crypto_failure() {
-        return DialError::RemoteRejected;
-    }
-    if err.is_refused() {
-        return DialError::Refused;
-    }
-    DialError::Failed(err)
-}
-
 /// Whether a connection error is a TLS/crypto-class failure — i.e. the peer
 /// (or we) aborted the handshake with a TLS alert. A free-function spelling
 /// of [`ConnectionError::is_crypto_failure`], kept for the classifiers that
@@ -1593,41 +1296,6 @@ pub struct Listener {
 /// [`Listener::bind_with_reset_key`] takes (`docs/adr/0036-stateless-reset-key.md`
 /// decision 2).
 pub const RESET_KEY_LEN: usize = 32;
-
-/// The server endpoint's `quinn::EndpointConfig`: quinn's own default
-/// (a fresh random HMAC key per process) when `reset_key` is `None`, else
-/// the given key, so a restarted process derives the same stateless reset
-/// token for a connection ID the previous process issued (RFC 9000 §10.3,
-/// `docs/design/reexec-estimate.md` §3 H1b). The only construction site of
-/// a server `EndpointConfig`; the client endpoint and the testkit's raw
-/// quinn path keep `default()`.
-///
-/// The connection ID generator is keyed from the same secret. quinn drops a
-/// short-header packet whose destination ID its generator cannot validate
-/// *before* it considers a stateless reset, and the default generator draws
-/// a fresh key per process, so a restarted endpoint would silently discard
-/// every packet of a connection it issued IDs for and the reset key alone
-/// would change nothing. The generator key is a domain-separated HMAC
-/// output, so it reveals nothing about the reset key.
-fn server_endpoint_config(reset_key: Option<&[u8; RESET_KEY_LEN]>) -> quinn::EndpointConfig {
-    let Some(key) = reset_key else {
-        return quinn::EndpointConfig::default();
-    };
-    let hmac_key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
-    let tag = aws_lc_rs::hmac::sign(&hmac_key, CID_KEY_LABEL);
-    let mut cid_key = [0u8; 8];
-    cid_key.copy_from_slice(&tag.as_ref()[..8]);
-    let cid_key = u64::from_le_bytes(cid_key);
-    let mut config = quinn::EndpointConfig::new(Arc::new(hmac_key));
-    config.cid_generator(move || {
-        Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(cid_key))
-    });
-    config
-}
-
-/// Domain separation label for the connection ID generator key derived in
-/// [`server_endpoint_config`].
-const CID_KEY_LABEL: &[u8] = b"qsh stateless reset: connection id generator key v1";
 
 impl Listener {
     /// Bind a server endpoint on `bind`. The stateless reset key is
@@ -1768,6 +1436,12 @@ pub struct Incoming {
 }
 
 impl Incoming {
+    /// Wrap a quinn attempt with the verifier of the endpoint that received
+    /// it.
+    pub(crate) fn from_quic(incoming: quinn::Incoming, verifier: Arc<QshPeerVerifier>) -> Self {
+        Self { incoming, verifier }
+    }
+
     /// Peer address of the attempt (before authentication — for logs only).
     pub fn remote_address(&self) -> PeerAddr {
         PeerAddr::Socket(self.incoming.remote_address())
@@ -1871,13 +1545,11 @@ impl Incoming {
     }
 }
 
-mod pipe;
-pub use pipe::{
+pub use crate::quinn_backend::pipe::{
     JUMP_PACKET_MAX, JUMP_PACKET_MIN, PIPE_LOCAL_ADDR, PIPE_REMOTE_ADDR, PacketPipe, PipePeer,
     PipeStats,
 };
-mod punch;
-pub use punch::{
+pub use crate::quinn_backend::punch::{
     MAX_PUNCH_WINDOWS, PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow,
     SocketSource,
 };

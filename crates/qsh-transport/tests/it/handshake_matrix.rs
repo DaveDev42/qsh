@@ -62,7 +62,9 @@ use std::time::Duration;
 use rcgen::string::Ia5String;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, PKCS_ED25519, SanType};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::pki_types::{
+    CertificateDer as TlsCert, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
+};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
@@ -125,7 +127,7 @@ fn self_signed_not_yet_valid() -> Cert {
 struct Ca {
     key: KeyPair,
     params: CertificateParams,
-    der: CertificateDer<'static>,
+    der: CertificateDer,
 }
 
 fn make_ca() -> Ca {
@@ -696,8 +698,8 @@ struct AcceptAllServerCerts;
 impl ServerCertVerifier for AcceptAllServerCerts {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        _end_entity: &TlsCert<'_>,
+        _intermediates: &[TlsCert<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
@@ -708,7 +710,7 @@ impl ServerCertVerifier for AcceptAllServerCerts {
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &CertificateDer<'_>,
+        _cert: &TlsCert<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
@@ -717,7 +719,7 @@ impl ServerCertVerifier for AcceptAllServerCerts {
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert: &CertificateDer<'_>,
+        _cert: &TlsCert<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
@@ -886,7 +888,7 @@ impl TrustEvaluator for CountingTrust {
         self.inner.lookup_pin(fingerprint)
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         self.inner.ca_roots()
     }
 
@@ -964,7 +966,15 @@ async fn case18_alpn_mismatch_remote_rejected_before_application_state() {
         .unwrap()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAllServerCerts))
-        .with_client_auth_cert(client.identity.cert_chain.clone(), key)
+        .with_client_auth_cert(
+            client
+                .identity
+                .cert_chain
+                .iter()
+                .map(|c| TlsCert::from(c.to_vec()))
+                .collect(),
+            key,
+        )
         .unwrap();
     // The one deliberately wrong value in this test: every other knob
     // mirrors `client_tls_config` (`crates/qsh-transport/src/endpoint.rs`).

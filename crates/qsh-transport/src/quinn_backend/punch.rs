@@ -36,12 +36,15 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, Runtime, UdpPoller};
 use tokio::sync::mpsc;
 
-use super::{
-    Connection, DialError, Dialed, Endpoint, Fingerprint, Incoming, LocalIdentity, SetupError,
-    TransportTuning, bind_tuned_udp_socket, classify_dial_failure, client_tls_config, finish_dial,
-    server_config, transport_config,
+use crate::endpoint::{
+    Connection, DialError, Dialed, Endpoint, Incoming, LocalIdentity, SetupError, TransportTuning,
+    finish_dial,
 };
 use crate::error::ConnectError;
+use crate::identity::Fingerprint;
+use crate::quinn_backend::config::{client_tls_config, server_config, transport_config};
+use crate::quinn_backend::conn::classify_dial_failure;
+use crate::quinn_backend::socket::bind_tuned_udp_socket;
 use crate::tls::{QshPeerVerifier, RejectReason, TrustEvaluator};
 
 /// How many server windows may be open on one endpoint at once
@@ -63,8 +66,11 @@ pub enum SocketSource {
     /// A real OS socket: `[::]:0` dual-stack, or `0.0.0.0:0` where the host
     /// cannot make an IPv6 socket. Must be used inside a tokio runtime.
     Os,
-    /// A simulated socket (`qsh_testkit::netsim`). Not part of the stable
-    /// surface: it carries quinn's socket trait for the test harness only.
+    /// A simulated socket (`qsh_testkit::netsim`). It carries quinn's socket
+    /// trait, so it exists only under the `test-support` feature (or this
+    /// crate's own tests): a normal build's public surface names no quinn
+    /// type (ADR-0061 decision 7).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     Virtual(Arc<dyn AsyncUdpSocket>),
 }
@@ -73,6 +79,7 @@ impl std::fmt::Debug for SocketSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SocketSource::Os => f.write_str("SocketSource::Os"),
+            #[cfg(any(test, feature = "test-support"))]
             SocketSource::Virtual(_) => f.write_str("SocketSource::Virtual"),
         }
     }
@@ -308,7 +315,7 @@ impl std::fmt::Debug for PunchEndpoint {
 impl PunchEndpoint {
     /// Creates the endpoint on `source`. It dials with `identity`, checks the
     /// peer through `evaluator`, and (inside a window) accepts the same way.
-    /// Unlike [`Listener`](super::Listener) it carries no stateless reset key:
+    /// Unlike [`Listener`](crate::endpoint::Listener) it carries no stateless reset key:
     /// a restarted host forgets its sessions anyway.
     pub fn new(
         source: SocketSource,
@@ -318,6 +325,7 @@ impl PunchEndpoint {
     ) -> Result<Self, SetupError> {
         let unspecified_v6 = SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0));
         let inner: Arc<dyn AsyncUdpSocket> = match source {
+            #[cfg(any(test, feature = "test-support"))]
             SocketSource::Virtual(sock) => sock,
             SocketSource::Os => {
                 let runtime = quinn::TokioRuntime;
@@ -364,7 +372,8 @@ impl PunchEndpoint {
                 server_verifier,
                 windows: Mutex::new(0),
                 dial_timeout_ms: AtomicU64::new(
-                    u64::try_from(super::default_dial_timeout().as_millis()).unwrap_or(u64::MAX),
+                    u64::try_from(crate::endpoint::default_dial_timeout().as_millis())
+                        .unwrap_or(u64::MAX),
                 ),
             }),
         })
@@ -453,7 +462,10 @@ impl PunchEndpoint {
         let connection = finish_dial(conn, &verifier)?;
         let observed = connection.peer_fingerprint();
         if observed.as_ref() != Some(expected_peer) {
-            connection.close(super::CLOSE_CODE_UNVERIFIED_PEER, b"unexpected peer");
+            connection.close(
+                crate::endpoint::CLOSE_CODE_UNVERIFIED_PEER,
+                b"unexpected peer",
+            );
             return Err(DialError::LocalRejected {
                 reason: RejectReason::Untrusted,
                 observed,
@@ -559,13 +571,13 @@ impl PunchEndpoint {
 
     /// The next inbound connection attempt. Only produces one while a window
     /// is open. `None` once the endpoint is closed. Admission (Retry, caps)
-    /// is the caller's, exactly as with [`Listener::accept`](super::Listener::accept).
+    /// is the caller's, exactly as with [`Listener::accept`](crate::endpoint::Listener::accept).
     pub async fn accept(&self) -> Option<Incoming> {
         let incoming = self.shared.endpoint.accept().await?;
-        Some(Incoming {
+        Some(Incoming::from_quic(
             incoming,
-            verifier: self.shared.server_verifier.clone(),
-        })
+            self.shared.server_verifier.clone(),
+        ))
     }
 
     /// The socket's counters.
@@ -581,7 +593,7 @@ impl PunchEndpoint {
     }
 
     /// A transport-neutral handle on the same endpoint, to keep a connection's
-    /// endpoint alive the way [`Dialed::endpoint`](super::Dialed::endpoint) does.
+    /// endpoint alive the way [`Dialed::endpoint`](crate::endpoint::Dialed::endpoint) does.
     pub fn endpoint(&self) -> Endpoint {
         Endpoint::from_quic(self.shared.endpoint.clone())
     }
