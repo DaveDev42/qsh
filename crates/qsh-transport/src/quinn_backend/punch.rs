@@ -43,7 +43,8 @@ use crate::endpoint::{
 use crate::error::ConnectError;
 use crate::identity::Fingerprint;
 use crate::quinn_backend::config::{client_tls_config, server_config, transport_config};
-use crate::quinn_backend::conn::classify_dial_failure;
+use crate::quinn_backend::conn::{QuicConn, classify_dial_failure};
+use crate::quinn_backend::endpoint::{QuicEndpoint, QuicIncoming};
 use crate::quinn_backend::socket::bind_tuned_udp_socket;
 use crate::tls::{QshPeerVerifier, RejectReason, TrustEvaluator};
 
@@ -459,7 +460,7 @@ impl PunchEndpoint {
             Ok(conn) => conn,
             Err(err) => return Err(classify_dial_failure(err, verifier.last_observation())),
         };
-        let connection = finish_dial(conn, &verifier)?;
+        let connection = finish_dial(QuicConn(conn), &verifier)?;
         let observed = connection.peer_fingerprint();
         if observed.as_ref() != Some(expected_peer) {
             connection.close(
@@ -536,7 +537,7 @@ impl PunchEndpoint {
             Ok(Ok(conn)) => conn,
             Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
         };
-        let connection = finish_dial(conn, &verifier)?;
+        let connection = finish_dial(QuicConn(conn), &verifier)?;
         Ok(Dialed {
             connection,
             endpoint: self.endpoint(),
@@ -575,7 +576,7 @@ impl PunchEndpoint {
     pub async fn accept(&self) -> Option<Incoming> {
         let incoming = self.shared.endpoint.accept().await?;
         Some(Incoming::from_quic(
-            incoming,
+            QuicIncoming(incoming),
             self.shared.server_verifier.clone(),
         ))
     }
@@ -595,7 +596,7 @@ impl PunchEndpoint {
     /// A transport-neutral handle on the same endpoint, to keep a connection's
     /// endpoint alive the way [`Dialed::endpoint`](crate::endpoint::Dialed::endpoint) does.
     pub fn endpoint(&self) -> Endpoint {
-        Endpoint::from_quic(self.shared.endpoint.clone())
+        Endpoint::from_quic(QuicEndpoint(self.shared.endpoint.clone()))
     }
 
     /// Closes every connection with `code` and refuses new ones.

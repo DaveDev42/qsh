@@ -50,7 +50,10 @@ pub(super) fn conn_err(err: ie::ConnectionError) -> ConnectionError {
         // alert. Report the same neutral classification (a crypto failure,
         // `unknown_ca`, what an untrusted certificate becomes there), so
         // the callers that turn that into "the server rejected this
-        // device" need no iroh case.
+        // device" need no iroh case. The mapping is direction-agnostic
+        // because the neutral error carries no side: only a server sends
+        // this close code, so a dialing client is the only side that can
+        // receive it, and the server never sees it on its own connections.
         ie::ConnectionError::ApplicationClosed(close)
             if close.error_code.into_inner() == u64::from(CLOSE_CODE_UNVERIFIED_PEER) =>
         {

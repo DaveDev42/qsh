@@ -1,4 +1,5 @@
-//! quinn endpoint construction (`docs/design/protocol.md` §2, §4):
+//! Endpoint construction (`docs/design/protocol.md` §2, §4), backend-neutral;
+//! the QUIC work itself is in `quinn_backend::endpoint`:
 //! ALPN `qsh/1`, TLS 1.3 only, keep-alive 15 s / idle 45 s, **no 0-RTT**,
 //! **no session tickets** (long-lived connections; a resumed handshake must
 //! never skip client-certificate verification), mutual authentication via
@@ -9,14 +10,12 @@
 //! [`Principal`], computed from the certificate chain — never from wire data.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use quinn::crypto::rustls::QuicClientConfig;
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -26,11 +25,8 @@ use crate::iroh_backend::IrohConn;
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
 use crate::peer_addr::PeerAddr;
 pub use crate::quinn_backend::config::transport_config_debug;
-use crate::quinn_backend::config::{
-    client_tls_config, server_config, server_endpoint_config, transport_config,
-};
-use crate::quinn_backend::conn::{QuicConn, classify_dial_failure, peer_chain};
-use crate::quinn_backend::socket::bind_listener_socket;
+use crate::quinn_backend::conn::{QuicConn, peer_chain};
+use crate::quinn_backend::endpoint::{QuicEndpoint, QuicIncoming, TransportProfile, VirtualSocket};
 pub use crate::quinn_backend::socket::bind_tuned_udp_socket;
 use crate::stream::{RecvStream, SendStream};
 use crate::tls::{
@@ -263,12 +259,6 @@ impl std::fmt::Debug for LocalIdentity {
         f.debug_struct("LocalIdentity")
             .field("cert_chain_len", &self.cert_chain.len())
             .finish_non_exhaustive()
-    }
-}
-
-impl LocalIdentity {
-    pub(crate) fn key(&self) -> PrivateKeyDer<'static> {
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8_der.to_vec()))
     }
 }
 
@@ -579,21 +569,21 @@ enum ConnBackend {
 
 #[cfg(test)]
 impl Connection {
-    /// The quinn connection, for this crate's own backend unit tests
-    /// (handshake data, keep-alive ping counters). Compiled only under
-    /// `cfg(test)`: no caller outside `qsh-transport` can reach quinn.
-    fn quic_for_test(&self) -> &quinn::Connection {
+    /// The QUIC backend's connection, for this crate's own backend unit
+    /// tests (see `quinn_backend::conn`'s `quic_for_test`). Compiled only
+    /// under `cfg(test)`.
+    pub(crate) fn quic_conn(&self) -> &QuicConn {
         match &self.inner {
-            ConnBackend::Quic(c) => &c.0,
-            ConnBackend::Iroh(_) => panic!("quic_for_test on an iroh connection"),
+            ConnBackend::Quic(c) => c,
+            ConnBackend::Iroh(_) => panic!("quic_conn on an iroh connection"),
         }
     }
 }
 
 impl Connection {
-    /// Wrap a handshaken quinn connection whose peer the verifier accepted.
+    /// Wrap a handshaken QUIC connection whose peer the verifier accepted.
     fn from_quic(
-        conn: quinn::Connection,
+        conn: QuicConn,
         chain: &[CertificateDer],
         role: PeerRole,
         verified: VerifiedPeer,
@@ -603,7 +593,7 @@ impl Connection {
             peer_chain: chain.into(),
             peer_role: role,
             local_close: Arc::new(Mutex::new(LocalClose::default())),
-            inner: ConnBackend::Quic(QuicConn(conn)),
+            inner: ConnBackend::Quic(conn),
             id: next_connection_id(),
             principal: verified.principal,
             auth_path: verified.auth_path,
@@ -880,7 +870,7 @@ pub const NESTED_IDLE_CAP: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 enum EndpointBackend {
-    Quic(quinn::Endpoint),
+    Quic(QuicEndpoint),
 }
 
 /// The local socket a connection runs over: what a [`Dialed`] hands back and
@@ -912,11 +902,18 @@ enum Rebind {
 }
 
 impl Endpoint {
-    pub(crate) fn from_quic(endpoint: quinn::Endpoint) -> Self {
+    pub(crate) fn from_quic(endpoint: QuicEndpoint) -> Self {
         Self {
             inner: EndpointBackend::Quic(endpoint),
             rebind: Rebind::Own,
         }
+    }
+
+    /// This endpoint with no socket of its own to move: it runs over a pipe
+    /// and nothing outside a chain may rebind it.
+    pub(crate) fn without_rebind(mut self) -> Self {
+        self.rebind = Rebind::Unsupported;
+        self
     }
 
     /// Makes [`Self::rebind_ephemeral`] move `outer` instead of this
@@ -981,7 +978,7 @@ impl Endpoint {
     /// refuse new ones. Idempotent.
     pub fn close(&self, code: u32, reason: &[u8]) {
         match &self.inner {
-            EndpointBackend::Quic(e) => e.close(quinn::VarInt::from_u32(code), reason),
+            EndpointBackend::Quic(e) => e.close(code, reason),
         }
     }
 
@@ -1009,15 +1006,7 @@ impl Endpoint {
             }
         }
         match &self.inner {
-            EndpointBackend::Quic(e) => {
-                let bind: SocketAddr = match e.local_addr()? {
-                    SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-                    SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-                };
-                let socket = bind_tuned_udp_socket(bind, true)?;
-                e.rebind(socket)?;
-                e.local_addr()
-            }
+            EndpointBackend::Quic(e) => e.rebind_ephemeral(),
         }
     }
 }
@@ -1083,10 +1072,10 @@ pub struct ConnStats {
 /// Client-side factory: dials servers with our identity, verifying them
 /// through `evaluator`.
 pub struct Dialer {
-    identity: LocalIdentity,
-    evaluator: Arc<dyn TrustEvaluator>,
-    timeout: Duration,
-    tuning: TransportTuning,
+    pub(crate) identity: LocalIdentity,
+    pub(crate) evaluator: Arc<dyn TrustEvaluator>,
+    pub(crate) timeout: Duration,
+    pub(crate) tuning: TransportTuning,
 }
 
 impl Dialer {
@@ -1145,7 +1134,7 @@ impl Dialer {
     /// principal attached, plus the endpoint (which must outlive the
     /// connection).
     pub async fn dial(&self, addr: SocketAddr, server_name: &str) -> Result<Dialed, DialError> {
-        self.dial_inner(addr, server_name, transport_config(self.tuning))
+        self.dial_quic(addr, server_name, TransportProfile::Tuned(self.tuning))
             .await
     }
 
@@ -1166,7 +1155,7 @@ impl Dialer {
         addr: SocketAddr,
         server_name: &str,
     ) -> Result<Dialed, DialError> {
-        self.dial_inner(addr, server_name, quinn::TransportConfig::default())
+        self.dial_quic(addr, server_name, TransportProfile::Stock)
             .await
     }
 
@@ -1181,96 +1170,7 @@ impl Dialer {
         pipe: PacketPipe,
         server_name: &str,
     ) -> Result<Dialed, DialError> {
-        let mut transport = transport_config(self.tuning);
-        transport.initial_mtu(JUMP_PACKET_MIN);
-        transport.min_mtu(JUMP_PACKET_MIN);
-        let mut mtud = quinn::MtuDiscoveryConfig::default();
-        mtud.upper_bound(JUMP_PACKET_MAX);
-        transport.mtu_discovery_config(Some(mtud));
-        let (client_config, verifier) = self.client_config(transport)?;
-        let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
-            quinn::EndpointConfig::default(),
-            None,
-            pipe.into_socket(),
-            Arc::new(quinn::TokioRuntime),
-        )
-        .map_err(|source| SetupError::Bind {
-            addr: PIPE_LOCAL_ADDR,
-            source,
-        })?;
-        endpoint.set_default_client_config(client_config);
-        let mut dialed = self
-            .connect_on(endpoint, PIPE_REMOTE_ADDR, server_name, verifier)
-            .await?;
-        // Binding a real socket under a pipe would cut the inner connection
-        // off its channel; a chain says whose socket to move instead
-        // ([`Endpoint::rebinding_via`]).
-        dialed.endpoint.rebind = Rebind::Unsupported;
-        Ok(dialed)
-    }
-
-    fn client_config(
-        &self,
-        transport: quinn::TransportConfig,
-    ) -> Result<(quinn::ClientConfig, Arc<QshPeerVerifier>), DialError> {
-        let verifier = Arc::new(QshPeerVerifier::new(self.evaluator.clone()));
-        let tls = client_tls_config(&self.identity, verifier.clone())?;
-        let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
-        let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
-        client_config.transport_config(Arc::new(transport));
-        Ok((client_config, verifier))
-    }
-
-    async fn connect_on(
-        &self,
-        endpoint: quinn::Endpoint,
-        addr: SocketAddr,
-        server_name: &str,
-        verifier: Arc<QshPeerVerifier>,
-    ) -> Result<Dialed, DialError> {
-        let connecting = endpoint
-            .connect(addr, server_name)
-            .map_err(ConnectError::from)?;
-        let result = tokio::time::timeout(self.timeout, connecting).await;
-        let conn = match result {
-            Err(_) => return Err(DialError::Timeout(self.timeout)),
-            Ok(Ok(conn)) => conn,
-            Ok(Err(err)) => return Err(classify_dial_failure(err, verifier.last_observation())),
-        };
-
-        let connection = finish_dial(conn, &verifier)?;
-        Ok(Dialed {
-            connection,
-            endpoint: Endpoint::from_quic(endpoint),
-            verifier,
-        })
-    }
-
-    async fn dial_inner(
-        &self,
-        addr: SocketAddr,
-        server_name: &str,
-        transport: quinn::TransportConfig,
-    ) -> Result<Dialed, DialError> {
-        let (client_config, verifier) = self.client_config(transport)?;
-
-        // Bind in the remote's address family so we never rely on
-        // dual-stack sockets.
-        let bind: SocketAddr = match addr.ip() {
-            IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-            IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-        };
-        let socket = bind_tuned_udp_socket(bind, true)
-            .map_err(|source| SetupError::Bind { addr: bind, source })?;
-        let mut endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            None,
-            socket,
-            Arc::new(quinn::TokioRuntime),
-        )
-        .map_err(|source| SetupError::Bind { addr: bind, source })?;
-        endpoint.set_default_client_config(client_config);
-        self.connect_on(endpoint, addr, server_name, verifier).await
+        self.dial_quic_over_pipe(pipe, server_name).await
     }
 }
 
@@ -1278,7 +1178,7 @@ impl Dialer {
 /// server's chain and wrap the connection. Shared by [`Dialer`] and
 /// [`PunchEndpoint::dial`].
 pub(crate) fn finish_dial(
-    conn: quinn::Connection,
+    conn: QuicConn,
     verifier: &QshPeerVerifier,
 ) -> Result<Connection, DialError> {
     let chain = peer_chain(&conn);
@@ -1290,10 +1190,7 @@ pub(crate) fn finish_dial(
             verified,
         )),
         Err(reason) => {
-            conn.close(
-                quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
-                b"unverified peer",
-            );
+            conn.close(CLOSE_CODE_UNVERIFIED_PEER, b"unverified peer");
             Err(DialError::LocalRejected {
                 reason,
                 observed: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
@@ -1334,8 +1231,8 @@ pub fn is_crypto_failure(err: &ConnectionError) -> bool {
 /// Server-side listener: accepts inbound connections, verifying clients
 /// through `evaluator`.
 pub struct Listener {
-    endpoint: quinn::Endpoint,
-    verifier: Arc<QshPeerVerifier>,
+    pub(crate) endpoint: QuicEndpoint,
+    pub(crate) verifier: Arc<QshPeerVerifier>,
 }
 
 /// Length in bytes of the stateless reset key
@@ -1352,11 +1249,11 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(
+        Self::bind_quic(
             bind,
             identity,
             evaluator,
-            transport_config(TransportTuning::default()),
+            TransportProfile::Tuned(TransportTuning::default()),
             None,
         )
     }
@@ -1372,11 +1269,11 @@ impl Listener {
         reset_key: &[u8; RESET_KEY_LEN],
         tuning: TransportTuning,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(
+        Self::bind_quic(
             bind,
             identity,
             evaluator,
-            transport_config(tuning),
+            TransportProfile::Tuned(tuning),
             Some(reset_key),
         )
     }
@@ -1390,34 +1287,7 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(
-            bind,
-            identity,
-            evaluator,
-            quinn::TransportConfig::default(),
-            None,
-        )
-    }
-
-    fn bind_inner(
-        bind: SocketAddr,
-        identity: LocalIdentity,
-        evaluator: Arc<dyn TrustEvaluator>,
-        transport: quinn::TransportConfig,
-        reset_key: Option<&[u8; RESET_KEY_LEN]>,
-    ) -> Result<Self, SetupError> {
-        let verifier = Arc::new(QshPeerVerifier::new(evaluator));
-        let server_config = server_config(&identity, verifier.clone(), transport)?;
-        let socket =
-            bind_listener_socket(bind).map_err(|source| SetupError::Bind { addr: bind, source })?;
-        let endpoint = quinn::Endpoint::new(
-            server_endpoint_config(reset_key),
-            Some(server_config),
-            socket,
-            Arc::new(quinn::TokioRuntime),
-        )
-        .map_err(|source| SetupError::Bind { addr: bind, source })?;
-        Ok(Self { endpoint, verifier })
+        Self::bind_quic(bind, identity, evaluator, TransportProfile::Stock, None)
     }
 
     /// A listener on a caller-supplied (simulated) UDP socket, with the
@@ -1427,24 +1297,12 @@ impl Listener {
     /// escape-hatch status as [`SocketSource::Virtual`].
     #[doc(hidden)]
     pub fn bind_virtual(
-        socket: Arc<dyn quinn::AsyncUdpSocket>,
+        socket: Arc<VirtualSocket>,
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
         tuning: TransportTuning,
     ) -> Result<Self, SetupError> {
-        let verifier = Arc::new(QshPeerVerifier::new(evaluator));
-        let server_config = server_config(&identity, verifier.clone(), transport_config(tuning))?;
-        let addr = socket
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)));
-        let endpoint = quinn::Endpoint::new_with_abstract_socket(
-            server_endpoint_config(None),
-            Some(server_config),
-            socket,
-            Arc::new(quinn::TokioRuntime),
-        )
-        .map_err(|source| SetupError::Bind { addr, source })?;
-        Ok(Self { endpoint, verifier })
+        Self::bind_quic_virtual(socket, identity, evaluator, tuning)
     }
 
     /// The actual bound address (useful with port 0).
@@ -1465,7 +1323,7 @@ impl Listener {
     /// Begin a graceful shutdown: refuse new connections and close existing
     /// ones with `code`.
     pub fn close(&self, code: u32, reason: &[u8]) {
-        self.endpoint.close(quinn::VarInt::from_u32(code), reason);
+        self.endpoint.close(code, reason);
     }
 
     /// A handle on the listener's endpoint (e.g. for `wait_idle`, or to keep
@@ -1477,17 +1335,11 @@ impl Listener {
 
 /// An inbound connection attempt whose handshake has not completed yet.
 pub struct Incoming {
-    incoming: quinn::Incoming,
-    verifier: Arc<QshPeerVerifier>,
+    pub(crate) incoming: QuicIncoming,
+    pub(crate) verifier: Arc<QshPeerVerifier>,
 }
 
 impl Incoming {
-    /// Wrap a quinn attempt with the verifier of the endpoint that received
-    /// it.
-    pub(crate) fn from_quic(incoming: quinn::Incoming, verifier: Arc<QshPeerVerifier>) -> Self {
-        Self { incoming, verifier }
-    }
-
     /// Peer address of the attempt (before authentication — for logs only).
     pub fn remote_address(&self) -> PeerAddr {
         PeerAddr::Socket(self.incoming.remote_address())
@@ -1538,10 +1390,7 @@ impl Incoming {
         let Self { incoming, verifier } = self;
         match incoming.retry() {
             Ok(()) => Ok(()),
-            Err(err) => Err(Self {
-                incoming: err.into_incoming(),
-                verifier,
-            }),
+            Err(incoming) => Err(Self { incoming, verifier }),
         }
     }
 
@@ -1571,7 +1420,7 @@ impl Incoming {
     /// (the verifier rejected it) — nothing above the transport ever sees
     /// such a peer.
     pub async fn accept(self) -> Result<Connection, AcceptError> {
-        let conn = self.incoming.await.map_err(ConnectionError::from)?;
+        let conn = self.incoming.handshake().await?;
         let chain = peer_chain(&conn);
         match self.verifier.verify_peer(&chain, PeerRole::Client) {
             Ok(verified) => Ok(Connection::from_quic(
@@ -1581,10 +1430,7 @@ impl Incoming {
                 verified,
             )),
             Err(reason) => {
-                conn.close(
-                    quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
-                    b"unverified peer",
-                );
+                conn.close(CLOSE_CODE_UNVERIFIED_PEER, b"unverified peer");
                 Err(AcceptError::Unverified(reason))
             }
         }

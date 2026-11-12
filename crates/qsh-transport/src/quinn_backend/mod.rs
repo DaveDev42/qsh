@@ -6,6 +6,8 @@
 //!
 //! - [`conn`]: `MuxConn`, `SendHalf` and `RecvHalf` over a quinn connection.
 //! - [`config`]: TLS, transport and server configuration for quinn.
+//! - [`endpoint`]: the quinn endpoints behind `Dialer`, `Listener`,
+//!   `Incoming` and `Endpoint`.
 //! - [`error`]: quinn error to neutral error conversions.
 //! - [`pipe`]: the in-memory packet pipe a jump hop's inner connection runs
 //!   over (ADR-0056).
@@ -15,6 +17,7 @@
 
 pub(crate) mod config;
 pub(crate) mod conn;
+pub(crate) mod endpoint;
 pub(crate) mod error;
 pub(crate) mod pipe;
 pub(crate) mod punch;

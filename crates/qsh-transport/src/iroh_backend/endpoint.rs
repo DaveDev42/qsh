@@ -418,10 +418,12 @@ impl IrohIncoming {
                 key: PeerKey(*endpoint_id.as_bytes()),
                 path: PeerPath::Relay(url.to_string()),
             },
-            _ => PeerAddr::Keyed {
-                key: PeerKey([0; 32]),
-                path: PeerPath::Relay(String::new()),
-            },
+            // A transport iroh adds later: neither a socket address nor a
+            // claimed key is known before the handshake, and a made-up key
+            // would read as a real peer in logs. The unspecified socket
+            // address is the explicit "unknown" (this value is for logs only
+            // and is never matched against the trust store).
+            _ => PeerAddr::Socket(SocketAddr::from(([0, 0, 0, 0], 0))),
         }
     }
 
@@ -483,6 +485,22 @@ pub(crate) fn verify_iroh_peer(
     Err(RejectReason::Untrusted)
 }
 
+/// Whether `err` is a TLS alert about the peer's certificate or key proof
+/// (RFC 8446 6.2): `bad_certificate` 42 through `certificate_unknown` 46,
+/// `unknown_ca` 48, `access_denied` 49, `decrypt_error` 51 and
+/// `certificate_required` 116. Other alerts (`handshake_failure`,
+/// `no_application_protocol` 120 for an ALPN mismatch, ...) say nothing about
+/// whether the dialed key matched.
+fn is_certificate_alert(err: &ConnectionError) -> bool {
+    matches!(
+        err,
+        ConnectionError::Crypto {
+            alert: 42..=46 | 48 | 49 | 51 | 116,
+            ..
+        }
+    )
+}
+
 /// Map a failed iroh connect to the dial error the ops layer classifies.
 fn classify_connect(err: ie::ConnectError) -> DialError {
     // The QUIC-level cause, wherever iroh nested it.
@@ -500,12 +518,35 @@ fn classify_connect(err: ie::ConnectError) -> DialError {
         // close). A TLS failure while connecting therefore means the server
         // did not hold the key we dialed: a local rejection of the target,
         // never a server-side rejection of us.
-        Some(q) if q.is_crypto_failure() => DialError::LocalRejected {
+        Some(q) if is_certificate_alert(&q) => DialError::LocalRejected {
             reason: RejectReason::Untrusted,
             observed: None,
         },
         Some(q) if q.is_refused() => DialError::Refused,
         Some(q) => DialError::Failed(q),
         None => DialError::Failed(ConnectionError::Other(chain(&err).into())),
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    #[test]
+    fn only_certificate_class_alerts_count_as_an_untrusted_target() {
+        for alert in [42, 43, 44, 45, 46, 48, 49, 51, 116] {
+            assert!(
+                is_certificate_alert(&ConnectionError::crypto(alert)),
+                "alert {alert}"
+            );
+        }
+        // handshake_failure, protocol_version, no_application_protocol (ALPN).
+        for alert in [40, 70, 120] {
+            assert!(
+                !is_certificate_alert(&ConnectionError::crypto(alert)),
+                "alert {alert}"
+            );
+        }
+        assert!(!is_certificate_alert(&ConnectionError::TimedOut));
     }
 }

@@ -239,8 +239,9 @@ fn fold_frames_rx(f: &quinn::FrameStats) -> u64 {
 /// The peer's certificate chain (leaf first) as the handshake verified it,
 /// converted from rustls' type to the neutral one. Empty when quinn has no
 /// peer identity.
-pub(crate) fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer> {
-    conn.peer_identity()
+pub(crate) fn peer_chain(conn: &QuicConn) -> Vec<CertificateDer> {
+    conn.0
+        .peer_identity()
         .and_then(|any| {
             any.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
                 .ok()
@@ -278,4 +279,14 @@ pub(crate) fn classify_dial_failure(
         return DialError::Refused;
     }
     DialError::Failed(err)
+}
+
+#[cfg(test)]
+impl crate::endpoint::Connection {
+    /// The quinn connection, for this crate's own backend unit tests
+    /// (handshake data, keep-alive ping counters). Compiled only under
+    /// `cfg(test)`: no caller outside `qsh-transport` can reach quinn.
+    pub(crate) fn quic_for_test(&self) -> &quinn::Connection {
+        &self.quic_conn().0
+    }
 }
