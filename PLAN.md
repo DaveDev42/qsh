@@ -154,6 +154,11 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 - [ ] **7. 문서와 위협 모델.** `docs/design/architecture.md`(backend 경계), `docs/design/protocol.md`(route 순서), `docs/design/threat-model.md`(relay 운영자와 TLS를 가로채는 망이 보는 것, 공용 relay의 rate limit), `docs/design/testing.md`, README.
 - [ ] **8. 마감.** 결정 28 대응표, CI 초록, ROADMAP 마감 노트.
 
+### 4.3 M28 뒤 후속 (범위 밖, 결정 대상)
+
+- [ ] **M24 펀칭과 iroh 펀칭 비교.** `punch_accept::punch_route_nat_matrix`의 25 NAT 쌍에서 iroh route(relay 경유 신호, multipath 승격)의 직결 승격률과 지연을 M24와 같은 기준으로 잰다. iroh가 같거나 낫고 "relay 없는 펀칭"을 포기한다는 결정이 서면, M24(`punch.v1`, `host.punch`, 펀칭 모듈과 시험)를 걷어내는 ADR을 연다. 그 전에는 M24가 relay 없는 기본 경로의 유일한 펀칭이라 유지한다.
+- [ ] **Toss 링크 구성 (dave-environment).** 평소는 지금의 4433 직결(MacMini 경유)을 두고, 역방향은 Toss가 iroh endpoint로 relay에 상시 붙어 fleet이 Toss 키로 dial하는 구성으로 바꾼다(역방향 등록 불필요). MBP16·WSL의 serve에 iroh endpoint를 켜면 Toss가 MacMini를 거치지 않고 닿는다. n0 공용 relay는 서울에 없어(가장 가까운 `aps1`) 지연이 늘므로, 지연이 문제 되면 서울 클라우드에 자가 `iroh-relay`를 둔다(TITAN은 집 IP의 TCP 443도 막아 집에는 둘 수 없다). Toss 쪽 converge는 Dave 몫.
+
 ### 4.2 결정 28 (수용 기준)
 
 1. 스텝 1~3 뒤에 wire, fixture, `capabilities.json`, 기존 시험 결과가 바뀌지 않았다.
