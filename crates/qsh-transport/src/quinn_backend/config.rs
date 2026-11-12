@@ -29,6 +29,13 @@ fn tls_chain(identity: &LocalIdentity) -> Vec<rustls::pki_types::CertificateDer<
         .collect()
 }
 
+/// `identity`'s private key in rustls' type.
+fn identity_key(identity: &LocalIdentity) -> rustls::pki_types::PrivateKeyDer<'static> {
+    rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        identity.key_pkcs8_der.to_vec(),
+    ))
+}
+
 pub(crate) fn congestion_controller_factory() -> Arc<quinn::congestion::BbrConfig> {
     Arc::new(quinn::congestion::BbrConfig::default())
 }
@@ -89,7 +96,7 @@ pub(crate) fn client_tls_config(
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(tls_chain(identity), identity.key())?;
+        .with_client_auth_cert(tls_chain(identity), identity_key(identity))?;
     tls.alpn_protocols = vec![qsh_proto::wire::ALPN.to_vec()];
     // No 0-RTT, no session resumption (`protocol.md` §2).
     tls.enable_early_data = false;
@@ -109,7 +116,7 @@ pub(crate) fn server_tls_config(
     let mut tls = rustls::ServerConfig::builder_with_provider(crypto_provider())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
-        .with_single_cert(tls_chain(identity), identity.key())?;
+        .with_single_cert(tls_chain(identity), identity_key(identity))?;
     tls.alpn_protocols = vec![qsh_proto::wire::ALPN.to_vec()];
     // No early data, no tickets: every connection re-runs full mutual
     // authentication (`protocol.md` §2).
