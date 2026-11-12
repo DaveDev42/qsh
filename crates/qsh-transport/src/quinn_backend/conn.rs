@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -18,6 +17,7 @@ use crate::error::{
     ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 use crate::mux::{MuxConn, RecvHalf, SendHalf, TransportCaps, TransportKind};
+use crate::peer_addr::PeerAddr;
 
 /// A quinn connection.
 #[derive(Clone, Debug)]
@@ -68,8 +68,8 @@ impl MuxConn for QuicConn {
         self.0.close_reason().map(ConnectionError::from)
     }
 
-    fn remote_address(&self) -> SocketAddr {
-        self.0.remote_address()
+    fn remote_address(&self) -> PeerAddr {
+        PeerAddr::Socket(self.0.remote_address())
     }
 
     fn max_datagram_size(&self) -> Option<usize> {

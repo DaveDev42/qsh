@@ -4,10 +4,11 @@
 //!
 //! The behaviors are written once, in [`transport_conformance!`], and
 //! instantiated per backend with a function that yields a connected pair.
-//! Today that is QUIC only; a second backend adds one pair constructor and
-//! one more line at the bottom and inherits the whole list. This is a conformance list and not a
-//! mock: both ends are real connections over real sockets
-//! (`docs/design/testing.md` L4).
+//! Today that is QUIC and iroh (once over a direct loopback address, once
+//! through an in-process relay); another backend adds one pair constructor
+//! and one more line at the bottom and inherits the whole list. This is a
+//! conformance list and not a mock: both ends are real connections over real
+//! sockets (`docs/design/testing.md` L4).
 //!
 //! Callers depend on these behaviors, and each test names the one it pins:
 //! the tunnel splice guard relies on drop-is-FIN, the denial teardown in
@@ -24,6 +25,8 @@ use qsh_transport::{
     Principal, ReadError, ReadToEndError, StaticTrust, StreamCode, TransportKind, WriteError,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::iroh_support::{Route, iroh_pair};
 
 /// How long a behavior may take before the test calls it a hang.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -77,6 +80,28 @@ async fn quic_pair() -> Pair {
         client: dialed.connection.clone(),
         server,
         _keep: Box::new((listener, dialed)),
+    }
+}
+
+/// Two pinned peers over iroh, dialed by direct loopback address with the
+/// relay disabled.
+async fn iroh_direct_pair() -> Pair {
+    let p = iroh_pair(Route::Direct).await;
+    Pair {
+        client: p.client.clone(),
+        server: p.server.clone(),
+        _keep: Box::new(p),
+    }
+}
+
+/// Two pinned peers over iroh, dialed by key and relay URL alone against an
+/// in-process relay server.
+async fn iroh_relay_pair() -> Pair {
+    let p = iroh_pair(Route::Relay).await;
+    Pair {
+        client: p.client.clone(),
+        server: p.server.clone(),
+        _keep: Box::new(p),
     }
 }
 
@@ -427,3 +452,5 @@ macro_rules! transport_conformance {
 }
 
 transport_conformance!(quic, quic_pair, TransportKind::Quic);
+transport_conformance!(iroh_direct, iroh_direct_pair, TransportKind::Iroh);
+transport_conformance!(iroh_relay, iroh_relay_pair, TransportKind::Iroh);

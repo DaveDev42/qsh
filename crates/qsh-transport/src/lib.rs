@@ -14,6 +14,8 @@
 //!   punch-aware UDP socket (ADR-0054 decisions 3, 7, 13).
 //! - [`control`]: framed prost message I/O over transport streams.
 //! - [`stream`]: transport-neutral [`SendStream`]/[`RecvStream`].
+//! - [`IrohEndpoint`] (module `iroh_backend`): the iroh relay
+//!   backend (ADR-0061), dialing a peer by its Ed25519 key.
 //! - `mux` and `quic` (private): the contract every backend implements
 //!   (`MuxConn`, `SendHalf`, `RecvHalf`) and the QUIC backend that does.
 //!   `tests/it/conformance.rs` holds each backend to the same behavior list.
@@ -31,13 +33,17 @@
 //! type (`docs/adr/0043-no-tcp-fallback.md` decision 3, ADR-0061 decision 5;
 //! the `Connection::quinn` escape hatch is gone): [`Connection`],
 //! [`Endpoint`], [`SendStream`] and [`RecvStream`] are closed enums over the
-//! backends. QUIC is the only one: ADR-0043 withdrew the TCP fallback and
-//! kept this surface as the boundary that confines quinn to this crate.
+//! backends: QUIC over UDP and, since ADR-0061, the iroh relay
+//! backend ([`IrohEndpoint`] builds its connections; `Connection` itself
+//! has no iroh constructor in its public surface). ADR-0043 withdrew the TCP
+//! fallback and kept this surface as the boundary that confines quinn, and
+//! now iroh and noq, to this crate.
 
 pub mod control;
 pub mod endpoint;
 pub mod error;
 pub mod identity;
+mod iroh_backend;
 mod mux;
 pub mod peer_addr;
 mod quinn_backend;
@@ -59,6 +65,10 @@ pub use error::{
 };
 pub use identity::{
     CertificateDer, Fingerprint, FingerprintParseError, Principal, PrincipalParseError,
+};
+pub use iroh_backend::{
+    DEFAULT_RELAY_URL, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming, IrohPeer, IrohRelay,
+    IrohRelayTrust, fingerprint_of_ed25519_key,
 };
 pub use mux::{TransportCaps, TransportKind};
 pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};

@@ -1,13 +1,14 @@
 //! [`PeerAddr`]: where the far end of a connection is, in a form that does
 //! not assume a UDP socket address (ADR-0061 decision 6).
 //!
-//! Today every connection is a direct QUIC connection, so the only value
-//! ever produced is [`PeerAddr::Socket`] and it renders exactly like the
-//! `SocketAddr` it wraps (audit records, logs and JSON output are
-//! byte-identical to before the type existed). [`PeerAddr::Keyed`] is the
-//! shape the iroh backend fills (ADR-0061 decisions 1 and 3): the peer is
+//! A QUIC connection reports [`PeerAddr::Socket`], which renders exactly like
+//! the `SocketAddr` it wraps (audit records, logs and JSON output are
+//! byte-identical to before the type existed). [`PeerAddr::Keyed`] is what
+//! the iroh backend reports (ADR-0061 decisions 1, 3 and 6): the peer is
 //! known by its Ed25519 key, and the path that carried the connection is
-//! either a direct socket address or a relay URL.
+//! either a direct socket address or a relay URL. It renders as
+//! `iroh:<fingerprint>` whatever the path (`docs/CLI.md` §6.22); the path
+//! is a separate field in the audit record.
 //!
 //! Callers that truly need an IP (admission rate limits, hole punching,
 //! prediction of the NAT mapping) go through [`PeerAddr::socket_addr`] and
@@ -15,6 +16,9 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+
+use crate::identity::Fingerprint;
+use crate::iroh_backend::fingerprint_of_ed25519_key;
 
 /// Length of a [`PeerKey`] in bytes (an Ed25519 public key).
 pub const PEER_KEY_LEN: usize = 32;
@@ -29,6 +33,14 @@ impl fmt::Display for PeerKey {
             write!(f, "{b:02x}")?;
         }
         Ok(())
+    }
+}
+
+impl PeerKey {
+    /// The qsh fingerprint (SPKI SHA-256) of this key, the name a pin and
+    /// an audit record give the peer.
+    pub fn fingerprint(&self) -> Fingerprint {
+        fingerprint_of_ed25519_key(&self.0)
     }
 }
 
@@ -61,8 +73,7 @@ impl fmt::Display for PeerPath {
 pub enum PeerAddr {
     /// A plain UDP socket address (every QUIC backend connection today).
     Socket(SocketAddr),
-    /// A peer identified by key, reached over `path` (iroh backend, not
-    /// produced yet).
+    /// A peer identified by key, reached over `path` (iroh backend).
     Keyed {
         /// The peer's public key.
         key: PeerKey,
@@ -99,14 +110,13 @@ impl PeerAddr {
 
 /// Renders the socket variant exactly like `SocketAddr` (audit `peer_addr`
 /// strings and log fields depend on it). The keyed variant renders
-/// `<hex key>@<path>`; that text is provisional until the iroh backend
-/// lands (ADR-0061 decision 6 adds a separate additive field for relay
-/// paths rather than reusing this string).
+/// `iroh:<fingerprint>` whatever its path (`docs/CLI.md` §6.22: the path is
+/// a separate additive audit field, not part of this string).
 impl fmt::Display for PeerAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PeerAddr::Socket(addr) => addr.fmt(f),
-            PeerAddr::Keyed { key, path } => write!(f, "{key}@{path}"),
+            PeerAddr::Keyed { key, .. } => write!(f, "iroh:{}", key.fingerprint()),
         }
     }
 }
@@ -160,6 +170,19 @@ mod tests {
         };
         assert_eq!(relay.socket_addr(), None);
         assert_eq!(relay.key(), Some(&key));
-        assert!(relay.to_string().ends_with("@relay:https://relay.example"));
+    }
+
+    #[test]
+    fn keyed_variant_renders_as_iroh_fingerprint_on_every_path() {
+        let sa: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+        let key = PeerKey([7; PEER_KEY_LEN]);
+        let want = format!("iroh:{}", fingerprint_of_ed25519_key(&key.0));
+        assert!(want.starts_with("iroh:sha256:"));
+        for path in [
+            PeerPath::Direct(sa),
+            PeerPath::Relay("https://relay.example".into()),
+        ] {
+            assert_eq!(PeerAddr::Keyed { key, path }.to_string(), want);
+        }
     }
 }

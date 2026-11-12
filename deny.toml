@@ -16,6 +16,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained standalone crate, merged into zbus 6; pulled by secret-service 5.2" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained standalone crate, merged into zbus 6; pulled by secret-service 5.2" },
     { id = "RUSTSEC-2026-0441", reason = "pin-utils: archived 2026-10-01, unmaintained; dev-only, pulled by expectrl 0.9 -> nix 0.26 for PTY acceptance tests" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained, a compile-time macro crate with no runtime code; pulled by iroh 1.4 -> netwatch -> netdev -> netlink-packet-core (ADR-0061). Drop once iroh's netlink stack moves off it." },
 ]
 
 [licenses]
@@ -28,6 +29,13 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # webpki-roots and webpki-root-certs (Mozilla's CA bundle as data), pulled
+    # by iroh's relay TLS (ADR-0061 decision 12).
+    "CDLA-Permissive-2.0",
+    # async_io_stream, pharos and ws_stream_wasm: iroh-relay's browser (wasm)
+    # transport. Public-domain style; not linked into native builds, but
+    # `cargo deny` walks every target.
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 

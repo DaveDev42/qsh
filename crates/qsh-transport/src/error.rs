@@ -44,6 +44,11 @@ impl StreamCode {
         Self(code as u64)
     }
 
+    /// The code for a raw QUIC varint value a backend received.
+    pub(crate) const fn from_raw(code: u64) -> Self {
+        Self(code)
+    }
+
     /// The code as a `u64` (a peer-sent code can exceed `u32::MAX`).
     pub const fn into_inner(self) -> u64 {
         self.0

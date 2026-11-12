@@ -13,7 +13,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -24,6 +23,7 @@ use crate::error::{
     ClosedStream, ConnectionError, DatagramError, ExportError, ReadError, ReadExactError,
     ReadToEndError, StoppedError, StreamCode, WriteError,
 };
+use crate::peer_addr::PeerAddr;
 
 /// Which transport a connection runs over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,12 +31,16 @@ use crate::error::{
 pub enum TransportKind {
     /// QUIC over UDP.
     Quic,
+    /// QUIC over iroh: direct, holepunched or relayed paths in one
+    /// connection (ADR-0061).
+    Iroh,
 }
 
 impl fmt::Display for TransportKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Quic => f.write_str("quic"),
+            Self::Iroh => f.write_str("iroh"),
         }
     }
 }
@@ -86,7 +90,7 @@ pub(crate) trait MuxConn: Clone + Send + Sync + 'static {
     fn closed(&self) -> impl Future<Output = ConnectionError> + Send;
     fn close_reason(&self) -> Option<ConnectionError>;
 
-    fn remote_address(&self) -> SocketAddr;
+    fn remote_address(&self) -> PeerAddr;
 
     /// Largest datagram payload `send_datagram` accepts right now; `None`
     /// when the peer (or this side) does not do datagrams.

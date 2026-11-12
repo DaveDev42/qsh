@@ -35,8 +35,13 @@ thiserror.workspace = true
 tracing.workspace = true
 socket2.workspace = true
 zeroize.workspace = true
+iroh.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+# In-process relay server for the iroh tests (`iroh_relay::server::testing`
+# mints the self-signed certificate the tests then trust explicitly).
+iroh = { workspace = true, features = ["test-utils"] }
+iroh-relay = { version = "1.4.1", default-features = false, features = ["server", "test-utils"] }
 time.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
