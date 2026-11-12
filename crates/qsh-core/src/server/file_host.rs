@@ -164,7 +164,7 @@ impl Server {
             resource,
             Decision::Deny,
             None,
-            ctx.peer_addr,
+            &ctx.peer_addr,
         ));
         Self::permission_denied(request_id, action)
     }
@@ -186,7 +186,7 @@ impl Server {
             let records = self.quotas.record_rejection(
                 kind,
                 &opener,
-                ctx.peer_addr,
+                &ctx.peer_addr,
                 self.quotas.now(),
                 Some(request_id),
                 ctx.auth_path,

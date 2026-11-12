@@ -26,8 +26,8 @@
 //! request) are separate axes (`docs/ROADMAP.md` principle 7c): this module
 //! is "the side that answers requests", regardless of who dialed.
 
+use qsh_transport::PeerAddr;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -211,7 +211,7 @@ pub struct ConnCtx {
     /// leaf did not re-parse, which fails resume closed.
     pub peer_fingerprint: Option<PeerFingerprint>,
     /// Peer address at connection time (audit only).
-    pub peer_addr: SocketAddr,
+    pub peer_addr: PeerAddr,
     /// Connection identity used to bind tickets to the connection that
     /// earned them and to hold writer leases.
     pub conn_id: usize,
@@ -1421,7 +1421,7 @@ impl Server {
         let peer = incoming.remote_address();
         let validated = incoming.remote_address_validated();
         let now = self.admission.now();
-        match self.admission.decide(peer, validated, now) {
+        match self.admission.decide(&peer, validated, now) {
             crate::admission::Decision::Retry => {
                 if let Err(returned) = incoming.retry() {
                     // Should be unreachable — `decide` only returns
@@ -1504,7 +1504,7 @@ impl Server {
                 // the resume-credential deny above.
                 if let Err(audit_err) = self
                     .audit
-                    .record(&AuditRecord::handshake_rejected(peer, &category))
+                    .record(&AuditRecord::handshake_rejected(&peer, &category))
                 {
                     tracing::warn!(%peer, %audit_err, "failed to record handshake rejection");
                 }
@@ -1543,7 +1543,7 @@ impl Server {
                 Ok(permit) => {
                     let result = self.clone().serve_connection_inner(&conn, None).await;
                     self.purge_connection(conn_id, permit).await;
-                    self.log_and_close_on_error(&conn, &principal, peer_addr, result);
+                    self.log_and_close_on_error(&conn, &principal, &peer_addr, result);
                 }
                 Err(kind) => {
                     // Ruling R2: audited with the connection's own
@@ -1554,7 +1554,7 @@ impl Server {
                     let records = self.quotas.record_rejection(
                         kind,
                         &principal.to_string(),
-                        peer_addr,
+                        &peer_addr,
                         self.quotas.now(),
                         None,
                         conn.auth_path(),
@@ -1573,7 +1573,7 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
-                    peer_addr,
+                    &peer_addr,
                     self.quotas.now(),
                     None,
                     conn.auth_path(),
@@ -1585,7 +1585,7 @@ impl Server {
 
         let result = self.clone().serve_connection_inner(&conn, refused).await;
         self.purge_connection(conn_id, permit).await;
-        self.log_and_close_on_error(&conn, &principal, peer_addr, result);
+        self.log_and_close_on_error(&conn, &principal, &peer_addr, result);
     }
 
     /// Shared tail of [`Self::serve_connection`]'s two branches (pairing
@@ -1596,7 +1596,7 @@ impl Server {
         &self,
         conn: &Connection,
         principal: &Principal,
-        peer_addr: SocketAddr,
+        peer_addr: &PeerAddr,
         result: Result<(), ConnError>,
     ) {
         match result {
@@ -1789,7 +1789,7 @@ impl Server {
                 "pairing-principal connection admitted but no pairing store is attached; closing"
             );
             let _ = self.audit.record(&AuditRecord::pairing(
-                peer_addr,
+                &peer_addr,
                 Decision::Deny,
                 "not-configured",
             ));
@@ -1804,7 +1804,7 @@ impl Server {
         let Some(observed_fp) = conn.peer_fingerprint() else {
             tracing::error!("pairing connection has no peer certificate fingerprint; closing");
             let _ = self.audit.record(&AuditRecord::pairing(
-                peer_addr,
+                &peer_addr,
                 Decision::Deny,
                 "no-fingerprint",
             ));
@@ -1902,7 +1902,7 @@ impl Server {
             Ok(success) => {
                 tracing::info!(peer = %success.pinned_name, "pairing succeeded");
                 let _ = self.audit.record(&AuditRecord::pairing(
-                    peer_addr,
+                    &peer_addr,
                     Decision::Allow,
                     &success.pinned_name,
                 ));
@@ -1930,7 +1930,7 @@ impl Server {
                 if !err.is_connection_lost() {
                     let category = pairing_audit_category(&err);
                     let _ = self.audit.record(&AuditRecord::pairing(
-                        peer_addr,
+                        &peer_addr,
                         Decision::Deny,
                         category,
                     ));

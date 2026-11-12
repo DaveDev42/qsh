@@ -140,7 +140,7 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                     self.quotas.now(),
                     Some(request_id),
                     ctx.auth_path,

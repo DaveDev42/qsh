@@ -17,6 +17,8 @@
 //! - `mux` and `quic` (private): the contract every backend implements
 //!   (`MuxConn`, `SendHalf`, `RecvHalf`) and the QUIC backend that does.
 //!   `tests/it/conformance.rs` holds each backend to the same behavior list.
+//! - [`peer_addr`]: [`PeerAddr`], the remote end of a connection (socket
+//!   address today; key plus direct or relay path for ADR-0061's iroh backend).
 //! - [`error`]: transport-neutral error and code types
 //!   ([`ConnectionError`], [`ReadError`], [`WriteError`], [`StreamCode`]),
 //!   whose `Display` matches the QUIC stack's byte for byte.
@@ -37,6 +39,7 @@ pub mod endpoint;
 pub mod error;
 pub mod identity;
 mod mux;
+pub mod peer_addr;
 mod quic;
 pub mod stream;
 pub mod tls;
@@ -56,6 +59,7 @@ pub use error::{
 };
 pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
 pub use mux::{TransportCaps, TransportKind};
+pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};
 pub use stream::{RecvStream, SendStream};
 pub use tls::{
     AuthPath, BoundTrust, Observation, PeerBinding, PeerRole, QshPeerVerifier, RejectReason,

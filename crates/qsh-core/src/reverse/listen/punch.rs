@@ -25,10 +25,22 @@ use qsh_proto::wire::{
 use super::*;
 use crate::acl::{PunchOp, Requester, check_punch};
 use crate::punch::{LimitHit, PUNCH_ANSWER_TIMEOUT, RENDEZVOUS_IDLE, is_public};
+use qsh_transport::PeerAddr;
 
 /// Unmaps an IPv4-mapped peer address, the form a dual-stack listener sees.
 fn canonical(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
+/// The reflexive address a connection's peer presents: its canonical socket
+/// address. A peer without one (a relay path, ADR-0061; never produced yet)
+/// yields `0.0.0.0:0`, which `valid_punch_candidate` rejects, so such a peer
+/// contributes no reflexive candidate, the same as a non-public address.
+fn reflexive(peer: &PeerAddr) -> SocketAddr {
+    canonical(
+        peer.socket_addr()
+            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0))),
+    )
 }
 
 fn refusal_reply(request_id: u64, refusal: PunchRefusal) -> wire::ControlMessage {
@@ -329,7 +341,7 @@ impl Listen {
         // A's reflexive is the address this connection arrived from. The
         // offer carries at most eight candidates, so the host list yields a
         // slot to it.
-        let initiator_reflexive = canonical(conn.remote_address());
+        let initiator_reflexive = reflexive(&conn.remote_address());
         let reflexive_ok = qsh_proto::punch::valid_punch_candidate(
             &ip_bytes(initiator_reflexive),
             u32::from(initiator_reflexive.port()),
@@ -377,7 +389,7 @@ impl Listen {
         // B's reflexive is the address its registration connection arrived
         // from; when that is not an address a stranger can send to, R and B
         // share a NAT and A derives a candidate (decision 8).
-        let target_reflexive = canonical(target_conn.remote_address());
+        let target_reflexive = reflexive(&target_conn.remote_address());
         let target_reflexive_ok = qsh_proto::punch::valid_punch_candidate(
             &ip_bytes(target_reflexive),
             u32::from(target_reflexive.port()),

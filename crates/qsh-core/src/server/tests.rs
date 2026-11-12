@@ -5,6 +5,7 @@ use crate::broker::{
     Broker, BrokerConfig, PipeFactory, PipeHandle, RESUME_TOKEN_LEN, SessionState, SourceExit,
     TestClock,
 };
+use std::net::SocketAddr;
 
 const ALL_CAPS: &[&str] = &["exec", "session"];
 

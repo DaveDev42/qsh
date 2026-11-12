@@ -11,8 +11,8 @@
 //! decision 13): [`CarrierRunner::next_ping_at`] says when the next one is
 //! due and the caller writes it.
 
+use qsh_transport::PeerAddr;
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,7 @@ pub struct CarrierRunner {
     user: User,
     /// Where the peer was last seen, whether it moved since the last
     /// receive, and the idle time of a rebind not yet fed to [`decide`].
-    peer: Option<SocketAddr>,
+    peer: Option<PeerAddr>,
     rebind_pending: bool,
     rebind_idle: Option<Duration>,
     /// When the last keep-alive `Ping` went out.
@@ -141,8 +141,9 @@ impl CarrierRunner {
     /// report is a NAT rebind when the connection had been idle: the idle
     /// time `g` is measured to the next [`Self::tick`] that sees the
     /// connection receive again.
-    pub fn observe_peer(&mut self, addr: SocketAddr) {
-        if self.peer.is_some_and(|p| p != addr) {
+    pub fn observe_peer(&mut self, addr: impl Into<PeerAddr>) {
+        let addr = addr.into();
+        if self.peer.as_ref().is_some_and(|p| *p != addr) {
             self.rebind_pending = true;
         }
         self.peer = Some(addr);
@@ -282,6 +283,7 @@ impl CarrierRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
 
     fn stats(rtt_ms: u64, rx: u64) -> ConnStats {
         ConnStats {

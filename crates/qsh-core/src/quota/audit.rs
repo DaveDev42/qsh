@@ -75,7 +75,7 @@ impl Quotas {
         &self,
         kind: QuotaKind,
         principal: &str,
-        peer_addr: std::net::SocketAddr,
+        peer_addr: &qsh_transport::PeerAddr,
         now: Instant,
         request_id: Option<u64>,
         auth_path: qsh_transport::AuthPath,

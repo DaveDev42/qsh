@@ -504,7 +504,7 @@ async fn listen_run_flushes_its_quota_audit_window_on_the_periodic_tick() {
     let first = listen.quotas.record_rejection(
         crate::quota::QuotaKind::Connections,
         "device:flush-probe",
-        peer_addr,
+        &peer_addr.into(),
         now,
         None,
         qsh_transport::AuthPath::Pin,
@@ -528,7 +528,7 @@ async fn listen_run_flushes_its_quota_audit_window_on_the_periodic_tick() {
         let suppressed = listen.quotas.record_rejection(
             crate::quota::QuotaKind::Connections,
             "device:flush-probe",
-            peer_addr,
+            &peer_addr.into(),
             listen.quotas.now(),
             None,
             qsh_transport::AuthPath::Pin,

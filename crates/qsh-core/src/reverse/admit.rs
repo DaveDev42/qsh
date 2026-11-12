@@ -10,7 +10,7 @@
 //! same shape `server::Server::handle_exec_start` established for the
 //! forward choke point (`docs/design/architecture.md` §6).
 
-use std::net::SocketAddr;
+use qsh_transport::PeerAddr;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{AuthPath, Principal};
@@ -35,7 +35,7 @@ pub struct AdmitRequest<'a> {
     /// SPKI SHA-256 fingerprint of the peer's verified leaf certificate.
     pub fingerprint: qsh_transport::Fingerprint,
     /// Peer socket address at connection time.
-    pub address: SocketAddr,
+    pub address: PeerAddr,
     /// `ReverseRegistration.offered_name`, verbatim off the wire — **never**
     /// an authentication or authorization input by itself (name-squatting
     /// prevention, `docs/design/protocol.md` §11-2).
@@ -121,7 +121,7 @@ pub fn admit(
                 // Pre-choke-point: name resolution failed, never reached
                 // `Authorizer::check`, so no rule index applies.
                 None,
-                req.address,
+                &req.address,
             ));
             return Err(err);
         }
@@ -151,7 +151,7 @@ pub fn admit(
             &name,
             verdict.decision,
             verdict.rule,
-            req.address,
+            &req.address,
         )
         .with_verdict_role(verdict.role)
         .with_verdict_pin_grant(verdict.pin_grant),
@@ -171,7 +171,7 @@ pub fn admit(
         AdmittedEntry {
             fingerprint: &req.fingerprint.to_string(),
             principal: &req.principal.to_string(),
-            address: req.address,
+            address: req.address.to_string(),
             capabilities: req.capabilities,
         },
     )
@@ -194,6 +194,7 @@ fn trust_alias(principal: &Principal, auth_path: AuthPath) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
     use qsh_transport::Fingerprint;
@@ -232,7 +233,7 @@ mod tests {
             principal,
             auth_path,
             fingerprint,
-            address: addr(),
+            address: addr().into(),
             offered_name,
             capabilities: vec!["exec".to_string()],
         }

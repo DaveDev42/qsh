@@ -306,7 +306,7 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                     self.quotas.now(),
                     Some(request_id),
                     ctx.auth_path,
@@ -891,7 +891,7 @@ impl Server {
                     // verification failure upstream of `Authorizer::
                     // check`, so no rule index applies.
                     None,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                 ));
                 tracing::warn!(
                     principal = %ctx.principal,

@@ -14,7 +14,7 @@
 //! It has no field that could hold a socket path, a channel or an agent
 //! message.
 
-use std::net::SocketAddr;
+use qsh_transport::PeerAddr;
 
 use crate::audit::{AuditRecord, AuditSink};
 
@@ -75,7 +75,7 @@ pub fn check_agent(
     request_id: u64,
     op: AgentOp,
     requester: &Requester<'_>,
-    peer_addr: SocketAddr,
+    peer_addr: &PeerAddr,
 ) -> AgentVerdict {
     let verdict = authorizer.check(requester, op.action(), ResourceRef::unowned(op.as_str()));
     let recorded = audit.record(

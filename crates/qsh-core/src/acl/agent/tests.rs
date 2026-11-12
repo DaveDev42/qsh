@@ -65,7 +65,14 @@ fn check(sb: &Sandbox, audit: &dyn AuditSink, op: AgentOp) -> AgentVerdict {
         AuthPath::Pin,
         Some(PeerFingerprint::new(*sb.fingerprint.as_bytes())),
     );
-    check_agent(sb.authorizer.as_ref(), audit, 7, op, &requester, peer())
+    check_agent(
+        sb.authorizer.as_ref(),
+        audit,
+        7,
+        op,
+        &requester,
+        &peer().into(),
+    )
 }
 
 #[test]

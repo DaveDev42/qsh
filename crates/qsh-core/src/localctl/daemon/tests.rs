@@ -161,7 +161,7 @@ async fn local_host_list_returns_the_registrys_current_entries_including_stale()
             AdmittedEntry {
                 fingerprint: "sha256:aaaa",
                 principal: "device:phone",
-                address: addr(),
+                address: addr().to_string(),
                 capabilities: vec!["pty".to_string()],
             },
         )
@@ -173,7 +173,7 @@ async fn local_host_list_returns_the_registrys_current_entries_including_stale()
             AdmittedEntry {
                 fingerprint: "sha256:bbbb",
                 principal: "device:old-laptop",
-                address: addr(),
+                address: addr().to_string(),
                 capabilities: vec![],
             },
         )
@@ -245,7 +245,7 @@ async fn discover_against_a_real_daemon_with_no_matching_host_is_host_not_found(
             AdmittedEntry {
                 fingerprint: "sha256:cccc",
                 principal: "device:some-other-host",
-                address: addr(),
+                address: addr().to_string(),
                 capabilities: vec![],
             },
         )

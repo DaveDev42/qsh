@@ -38,7 +38,7 @@ impl Listen {
                         let records = self.quotas.record_rejection(
                             kind,
                             &opener,
-                            peer,
+                            &peer,
                             self.quotas.now(),
                             None,
                             conn.auth_path(),
@@ -69,7 +69,7 @@ impl Listen {
                 // `server::Server::accept_and_serve`.
                 if let Err(audit_err) = self
                     .audit
-                    .record(&AuditRecord::handshake_rejected(peer, &category))
+                    .record(&AuditRecord::handshake_rejected(&peer, &category))
                 {
                     tracing::warn!(%peer, %audit_err, "failed to record handshake rejection");
                 }

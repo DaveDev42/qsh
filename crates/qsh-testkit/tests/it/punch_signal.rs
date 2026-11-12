@@ -272,8 +272,10 @@ async fn rig(opts: RigOptions) -> Rig {
         if opts.b_audit_broken {
             // The first record is queued and fails in the writer thread;
             // from then on the sink refuses every record.
-            let probe =
-                AuditRecord::handshake_rejected(SocketAddr::new(ip("192.0.2.1"), 1), "probe");
+            let probe = AuditRecord::handshake_rejected(
+                &(SocketAddr::new(ip("192.0.2.1"), 1)).into(),
+                "probe",
+            );
             wait_for(TIMEOUT, || audit.record(&probe).is_err().then_some(())).await;
         }
         // Registered: R holds a live hub for B, and B knows its controller.

@@ -24,7 +24,6 @@
 //! in [`super::admit`], which this file has no knowledge of.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,10 +67,10 @@ pub struct ReverseEntry {
     /// `audit::AuditRecord::principal` uses) — never the typed `Principal`
     /// itself (module docs).
     pub principal: String,
-    /// The peer's socket address at registration time. Diagnostic only —
+    /// The peer's address at registration time, rendered. Diagnostic only —
     /// reverse hosts are never dialed back by the controller; this just
     /// records where the inbound connection came from.
-    pub address: SocketAddr,
+    pub address: String,
     /// Capabilities the target's `Hello` negotiated.
     pub capabilities: Vec<String>,
     /// RFC 3339 registration timestamp, from the registry's injected
@@ -141,8 +140,8 @@ pub struct AdmittedEntry<'a> {
     pub fingerprint: &'a str,
     /// `qsh_transport::Principal::to_string()`, canonical form.
     pub principal: &'a str,
-    /// Peer socket address at connection time.
-    pub address: SocketAddr,
+    /// Peer address at connection time, rendered (`PeerAddr`'s `Display`); this file names no transport type.
+    pub address: String,
     /// `Hello.capabilities` (the negotiated intersection).
     pub capabilities: Vec<String>,
 }

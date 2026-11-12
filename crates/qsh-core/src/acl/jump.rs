@@ -12,7 +12,7 @@
 //! `forward.local` records), the decision and the rule. It has no field that
 //! could hold a packet, a connection ID, a channel value or a resolved IP.
 
-use std::net::SocketAddr;
+use qsh_transport::PeerAddr;
 
 use crate::audit::{AuditRecord, AuditSink};
 
@@ -44,7 +44,7 @@ pub fn check_jump(
     request_id: Option<u64>,
     target: &str,
     requester: &Requester<'_>,
-    peer_addr: SocketAddr,
+    peer_addr: &PeerAddr,
 ) -> JumpVerdict {
     let action = Action::ForwardJump;
     let verdict = authorizer.check(requester, action, ResourceRef::unowned(target));
@@ -89,7 +89,7 @@ pub fn record_host_local_deny(
     audit: &dyn AuditSink,
     target: &str,
     requester: &Requester<'_>,
-    peer_addr: SocketAddr,
+    peer_addr: &PeerAddr,
 ) -> bool {
     audit
         .record(&AuditRecord::connection_level(

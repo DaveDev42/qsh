@@ -202,7 +202,7 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                     self.quotas.now(),
                     None,
                     ctx.auth_path,
@@ -244,7 +244,7 @@ impl Server {
                     &resource,
                     Decision::Deny,
                     None,
-                    ctx.peer_addr,
+                    &ctx.peer_addr,
                 ));
                 if recorded.is_err() {
                     // Fail-closed (`CLAUDE.md` "the audit writer is

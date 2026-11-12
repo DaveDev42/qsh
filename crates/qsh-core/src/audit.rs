@@ -187,7 +187,7 @@ impl AuditRecord {
         resource: &str,
         decision: Decision,
         rule: Option<u32>,
-        peer_addr: std::net::SocketAddr,
+        peer_addr: &qsh_transport::PeerAddr,
     ) -> Self {
         Self {
             ts: now_rfc3339(),
@@ -271,7 +271,7 @@ impl AuditRecord {
         resource: &str,
         decision: Decision,
         rule: Option<u32>,
-        peer_addr: std::net::SocketAddr,
+        peer_addr: &qsh_transport::PeerAddr,
     ) -> Self {
         Self {
             ts: now_rfc3339(),
@@ -294,7 +294,7 @@ impl AuditRecord {
     /// whole point is that none could be established — so `principal` and
     /// `auth_path` are both `"-"`, `action` is `"connect"` and `resource` is
     /// the coarse rejection category (never a detailed reason).
-    pub fn handshake_rejected(peer_addr: std::net::SocketAddr, category: &str) -> Self {
+    pub fn handshake_rejected(peer_addr: &qsh_transport::PeerAddr, category: &str) -> Self {
         Self {
             ts: now_rfc3339(),
             request_id: "-".to_string(),
@@ -323,7 +323,7 @@ impl AuditRecord {
     pub fn connection_withdrawn(
         principal: &Principal,
         auth_path: AuthPath,
-        peer_addr: std::net::SocketAddr,
+        peer_addr: &qsh_transport::PeerAddr,
         reason: &str,
     ) -> Self {
         Self {
@@ -399,7 +399,7 @@ impl AuditRecord {
     pub fn quota_rejected(
         kind: QuotaKind,
         principal: &str,
-        peer_addr: std::net::SocketAddr,
+        peer_addr: &qsh_transport::PeerAddr,
         request_id: Option<u64>,
         auth_path: AuthPath,
     ) -> Self {
@@ -461,7 +461,11 @@ impl AuditRecord {
     /// on success, or a failure category (`"no-match"`, `"expired"`, …) on
     /// failure — **never** the invite code, the proof bytes or the exported
     /// keying material (architecture.md §6: never log key material).
-    pub fn pairing(peer_addr: std::net::SocketAddr, decision: Decision, resource: &str) -> Self {
+    pub fn pairing(
+        peer_addr: &qsh_transport::PeerAddr,
+        decision: Decision,
+        resource: &str,
+    ) -> Self {
         Self {
             ts: now_rfc3339(),
             request_id: "-".to_string(),

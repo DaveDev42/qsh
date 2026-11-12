@@ -10,7 +10,7 @@ fn sample() -> AuditRecord {
         "exec",
         Decision::Allow,
         None,
-        "127.0.0.1:4433".parse().unwrap(),
+        &"127.0.0.1:4433".parse().unwrap(),
     )
 }
 
@@ -74,7 +74,7 @@ fn record_has_only_structural_fields() {
     let withdrawn = AuditRecord::connection_withdrawn(
         &Principal::Device("laptop".into()),
         AuthPath::Pin,
-        "192.0.2.7:4433".parse().unwrap(),
+        &"192.0.2.7:4433".parse().unwrap(),
         "trust_withdrawn",
     );
     let withdrawn = serde_json::to_value(&withdrawn).unwrap();
@@ -135,7 +135,7 @@ fn connection_withdrawn_record_keeps_the_structural_key_set() {
         let record = AuditRecord::connection_withdrawn(
             &qsh_transport::Principal::Device("laptop".into()),
             path,
-            addr,
+            &addr.into(),
             reason,
         );
         let value = serde_json::to_value(&record).unwrap();
