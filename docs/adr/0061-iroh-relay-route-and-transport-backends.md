@@ -66,3 +66,8 @@ qsh 쪽 결합 지점(2026-11-13 조사):
 - **qsh 자체 TCP/TLS transport.** ADR-0043이 따진 비용 그대로이고, TLS를 가로채는 망에서는 pin 인증이 실패한다.
 - **표준 TURN 클라이언트.** UDP 3478이 열린 망에서만 통하고, 실측한 망에서 UDP 443 TURN은 막혔다. 만남의 광장 문제도 따로 풀어야 한다.
 - **transport 전체를 iroh로 교체.** jump 체인(사용자 정의 소켓 위 QUIC-in-QUIC), 사설 CA 모드, 주소 기반 admission을 잃는다. 선택 route로 두면 그것들을 지킨다.
+
+## 개정 이력
+
+- 2026-11-13 Toss(TITAN) 실측. 단독 probe(iroh 1.4.1, relay TLS는 OS 인증서 저장소, n0 `aps1-1` relay 고정, 발견 끔)로 Toss에서 MacMini(집 LAN, 임의 포트 bind)에 연결했다. relay 경유 541 ms에 연결되고(첫 RTT 214 ms) 0.2 s에 직결로 승격했다(집 공인 IP의 NAT 매핑 포트 `52705`, RTT 15~19 ms). 10회 반복에서 10/10 직결 승격, 연결 501~513 ms. 일방적으로 보낸 UDP는 집 IP의 같은 종류 포트에서 막혔으므로(맥락 절), TITAN은 상대도 보내 오는 흐름을 통과시키는 것으로 보인다. 같은 조건에서 기성 `dumbpipe` 0.40.1(webpki 루트만 신뢰)은 relay TLS가 `UnknownIssuer`로 거부돼 연결하지 못했다. 결정 12가 이 망에서 필수임을 확인했다. relay 주소 탐지 UDP 7842도 통과했다. 결정 본문은 고치지 않았다.
+
