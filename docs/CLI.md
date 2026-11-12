@@ -321,7 +321,14 @@ qsh host get personal-mac --json
 
 **홀펀칭이 끼는 자리(ADR-0054 결정 16).** route 순서는 (1) live 역방향 등록(펀칭하지 않는다), (2) pin·`hosts.toml`의 주소로 직접 dial, (3) 직접 dial이 1초(`PUNCH_HEAD_START`) 안에 서지 않거나 그 전에 바로 실패하면 중개자를 통한 펀칭을 나란히 시작해 먼저 선 쪽을 사용, (4) SSH 부트스트랩 pin의 serve 되살리기, (5) 모르는 이름의 자동 부트스트랩이다. 주소가 없는 pin에 중개자 후보가 있으면 (2)를 건너뛰고 곧바로 펀칭하며, 중개자 후보가 없을 때만 아래 "주소 없음" `HOST_NOT_FOUND`가 난다. 펀칭은 명령의 dial 시한(10초, `-o ConnectTimeout`이 줄이면 그 값)을 늘리지 않는다: 신호(중개자 dial·요청·답)에 3초, 답을 받은 뒤 채택까지 5초이고 어느 쪽이든 남은 시한으로 잘린다. 펀칭으로 채택하는 연결은 pin된 target의 fingerprint를 내민 것뿐이다. 진 쪽 연결은 닫는다.
 
-**iroh relay route가 끼는 자리(ADR-0061 결정 1·14, 제안).** pin에 `routes = ["iroh"]`가 있을 때만 (2)·(3) 뒤에 iroh relay 시도가 붙는다. (2)·(3)이 3초(`IROH_HEAD_START`) 안에 서지 않거나 그 전에 모두 바로 실패하면 relay 시도를 나란히 시작하고 먼저 선 연결을 쓴다. 진 쪽 연결은 닫는다. 직접 dial이나 펀칭이 3초 안에 서면 relay에는 한 번도 접속하지 않는다. UDP가 막힌 망에서 직접 dial은 시한이 다 되어야 실패하므로, 모두 실패하기를 기다리면 relay에 남는 시간이 없다. 그래서 펀칭처럼 앞 route에 먼저 출발할 시간만 준다. (4)·(5)는 relay 시도까지 실패한 뒤의 일이다. `routes`가 없는 pin, `--no-iroh`, `[iroh].mode = "off"`는 기존 순서 그대로다. relay 연결은 한 QUIC 연결 안에서 relay 경로로 시작하고, iroh가 직접 경로를 찾으면 같은 연결 위에서 직접 경로로 옮겨 간다. 연결이 서면 pin 검사와 ADR-0060의 이름 결속을 handshake 직후에 똑같이 한다. dial한 EndpointId가 그 이름의 pin 키와 다르면 `AUTH_FAILED`(`details.category: "untrusted"`)이고 아무 자원도 만들지 않는다. relay 시도는 명령의 dial 시한(10초)을 늘리지 않고 남은 시한으로 잘린다. 다음 경우는 route를 시도하지 않고 `UNSUPPORTED`다. (a) 상대가 사설 CA 경로(`[[ca]]`)로만 인증되는 서버일 때, (b) `-J` 체인의 hop이나 끝 target을 iroh로 열어야 할 때(`details.jump.stage: "unsupported"`. 첫 구현은 체인 전체가 직결·펀칭 route만 쓴다). 역방향 등록(순서 (1))은 `qsh serve --to`가 iroh로 등록한 연결이어도 순서가 같다. 새 오류 코드는 없고 `details.iroh.reason`(§3.3)만 더해진다.
+**iroh relay route가 끼는 자리(ADR-0061 결정 1·14, 제안).** pin에 `routes = ["iroh"]`가 있을 때만 (2)·(3) 뒤에 iroh relay 시도가 붙는다. (2)·(3)이 `[iroh].head_start_ms`(기본 1000) 안에 서지 않거나 그 전에 모두 바로 실패하면 relay 시도를 나란히 시작하고 먼저 선 연결을 쓴다. 진 쪽 연결은 닫는다. 직접 dial이나 펀칭이 그 안에 서면 relay에는 한 번도 접속하지 않는다. UDP가 막힌 망에서 직접 dial은 시한이 다 되어야 실패하므로, 모두 실패하기를 기다리면 relay에 남는 시간이 없다. 그래서 펀칭처럼 앞 route에 먼저 출발할 시간만 준다. (4)·(5)는 relay 시도까지 실패한 뒤의 일이다. `routes`가 없는 pin, `--no-iroh`, `[iroh].mode = "off"`는 기존 순서 그대로다. relay 연결은 한 QUIC 연결 안에서 relay 경로로 시작하고, iroh가 직접 경로를 찾으면 같은 연결 위에서 직접 경로로 옮겨 간다. 연결이 서면 pin 검사와 ADR-0060의 이름 결속을 handshake 직후에 똑같이 한다. dial한 EndpointId가 그 이름의 pin 키와 다르면 `AUTH_FAILED`(`details.category: "untrusted"`)이고 아무 자원도 만들지 않는다. relay 시도는 명령의 dial 시한(10초)을 늘리지 않고 남은 시한으로 잘린다. 다음 경우는 route를 시도하지 않고 `UNSUPPORTED`다. (a) 상대가 사설 CA 경로(`[[ca]]`)로만 인증되는 서버일 때, (b) `-J` 체인의 hop이나 끝 target을 iroh로 열어야 할 때(`details.jump.stage: "unsupported"`. 첫 구현은 체인 전체가 직결·펀칭 route만 쓴다). 역방향 등록(순서 (1))은 `qsh serve --to`가 iroh로 등록한 연결이어도 순서가 같다. 새 오류 코드는 없고 `details.iroh.reason`(§3.3)만 더해진다.
+
+**route 기억(ADR-0061 결정 1, 제안).** 막힐 것이 뻔한 route를 dial마다 다시 두드리지 않도록, 이 장비는 pin마다 마지막으로 이긴 route와 실패한 route를 기억한다. 기억은 state 디렉터리의 `route-cache.json`에 두는 내부 상태이고 계약 파일이 아니다(읽지 못하거나 모양이 틀리면 없는 것으로 보고 다시 쓴다). 규칙은 넷이다.
+- 지난번에 iroh route가 이겼고 그때 (2)·(3)이 시한까지 서지 못한 pin은, 다음 dial에서 iroh를 head start 없이 곧바로 시작하고 (2)·(3)은 건너뛴다. 그 연결이 iroh 안에서 직접 경로로 승격하면 성능은 직결과 같다(protocol §22.4).
+- 건너뛴 route는 쉬는 시간이 끝나면 다시 한 번 시도한다. 쉬는 시간은 처음 10분이고 연속 실패마다 두 배로 늘어 1시간에서 멈춘다. 다시 시도할 때도 iroh와 나란히 돌리므로 사용자가 기다리는 시간은 늘지 않는다.
+- 이 장비의 네트워크가 바뀌면(로컬 주소 집합이나 기본 경로가 바뀌면) 기억을 모두 버리고 평소 순서로 돌아간다. 막혔던 망을 떠나면 바로 직결을 다시 쓴다.
+- recovery와 `--supervise`의 재dial(protocol §19.10)도 같은 기억을 쓴다. 끊긴 연결을 되살리는 재dial이 막힌 route를 연달아 두드리지 않는다.
+`--no-iroh`나 `[iroh].mode = "off"`인 dial은 기억을 읽지도 쓰지도 않고, `routes`에 `iroh`가 없는 pin도 마찬가지다. 기억은 route 선택만 바꾸고 인가와 pin 검사는 그대로다.
 
 **jump 체인이 route를 대신한다(ADR-0056 결정 13·20).** `-J`·`--jump`가 있거나 그 host의 pin에 `jump`가 있으면(`-J none`이 아니면) 그 host로 가는 route는 체인 하나다. live 역방향 등록, 직접 dial, 펀칭은 target에 대해 시도하지 않는다. 첫 hop만 위 순서(펀칭 포함)로 닿는다. 모든 hop과 target은 dial 전에 pin으로 풀고, pin이 없거나 주소가 없으면 `HOST_NOT_FOUND`(`details.jump.stage: "address"`)다. hop을 펼친 체인이 넷을 넘거나 같은 pin이 두 번 나오거나 target이 hop에 들면 dial 전에 `INVALID_ARGUMENT`다. 명령에 `-J`가 있으면 그 host의 pin의 `jump`는 읽지 않지만 `-J`의 hop마다 자기 pin의 `jump`는 그 hop 앞에 펼친다.
 
@@ -2663,7 +2670,7 @@ qsh config unset serve.to
 |---|---|---|---|
 | `listen.serve` | `true`, `false` | `false` | 시작 때만(`applies_from: next_start`). `true`면 `qsh listen`이 인바운드 host도 겸한다(§6.13 "합친 모드"). `qsh listen --serve`는 이번 기동에서만 켠다. `qsh doctor`의 `config_unknown_key`도 이 키를 안다 |
 
-**iroh 키(ADR-0061 결정 2·10·11, 제안).** 다섯 키가 더해지고 section 목록(위 "키 문법")에 `iroh`가 든다. 의미는 §6.12의 "iroh endpoint" 항목이 정한다.
+**iroh 키(ADR-0061 결정 2·10·11, 제안).** 여섯 키가 더해지고 section 목록(위 "키 문법")에 `iroh`가 든다. 의미는 §6.12의 "iroh endpoint" 항목이 정한다.
 
 | 키 | 값 | 기본 | 읽는 때 |
 |---|---|---|---|
@@ -2672,8 +2679,9 @@ qsh config unset serve.to
 | `iroh.bind_port` | `0..=65535` | `0` | 시작 때만 |
 | `iroh.mode` | `auto`, `off` | `auto` | 명령마다. `--no-iroh`가 이긴다 |
 | `iroh.proxy` | `env`, `off` | `env` | 데몬은 시작 때만, client 명령은 명령마다 |
+| `iroh.head_start_ms` | `0..=10000` | `1000` | 명령마다. 직결·펀칭에 먼저 줄 시간. `0`이면 처음부터 나란히 돈다. route 기억(§6.1)이 iroh를 곧바로 고른 dial에는 쓰지 않는다 |
 
-`qsh doctor`의 `config_unknown_key`도 이 다섯 키를 안다.
+`qsh doctor`의 `config_unknown_key`도 이 여섯 키를 안다.
 
 **전송 적응과 화면 동기화 키(ADR-0052 결정 15).** 두 키가 더해진다.
 
