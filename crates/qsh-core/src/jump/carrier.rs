@@ -82,6 +82,11 @@ pub struct SilenceFallback {
     /// When the oldest datagram that no datagram has answered since was
     /// sent.
     unanswered_since: Option<Instant>,
+    /// A datagram came in and nothing of ours went out since. The next send
+    /// is usually the ack-only reply to that datagram, which no one answers
+    /// in turn, so it does not start the clock (ADR-0058 decision 1, as
+    /// amended 2026-11-13).
+    just_received: bool,
     /// When the channel left the datagram carrier for silence.
     fell_back_at: Option<Instant>,
 }
@@ -94,6 +99,9 @@ impl SilenceFallback {
 
     /// A datagram went out on the channel.
     pub fn sent_datagram(&mut self, now: Instant) {
+        if std::mem::take(&mut self.just_received) {
+            return;
+        }
         self.unanswered_since.get_or_insert(now);
     }
 
@@ -102,6 +110,7 @@ impl SilenceFallback {
     pub fn received_datagram(&mut self) {
         self.unanswered_since = None;
         self.fell_back_at = None;
+        self.just_received = true;
     }
 
     /// Whether the channel is on the stream because datagrams went quiet.
@@ -186,12 +195,30 @@ mod tests {
         f.received_datagram();
         let late = t0 + Duration::from_secs(5);
         assert_eq!(f.choose(Carrier::Datagram, late, srtt), Carrier::Datagram);
-        // A fallback also ends when one arrives.
+        // A fallback also ends when one arrives. The first send after the
+        // receive does not start the clock; the second does.
+        f.sent_datagram(late);
         f.sent_datagram(late);
         let later = late + Duration::from_secs(1);
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Stream);
         f.received_datagram();
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Datagram);
+    }
+
+    #[test]
+    fn the_first_send_after_a_receive_does_not_start_the_clock() {
+        let t0 = Instant::now();
+        let srtt = Duration::from_millis(50);
+        let mut f = SilenceFallback::new();
+        f.received_datagram();
+        // The ack-only reply to that datagram is never answered.
+        f.sent_datagram(t0);
+        let late = t0 + Duration::from_secs(5);
+        assert_eq!(f.choose(Carrier::Datagram, late, srtt), Carrier::Datagram);
+        // The next send starts the clock and a blackhole is caught in time.
+        f.sent_datagram(late);
+        let after = late + Duration::from_millis(250);
+        assert_eq!(f.choose(Carrier::Datagram, after, srtt), Carrier::Stream);
     }
 
     #[test]

@@ -1145,11 +1145,10 @@ async fn jump_silence_when_only_kind_14_datagrams_vanish_falls_back_to_the_strea
 /// longer than the window (`4 x max(rtt, 50 ms) + 25 ms`, 225 ms here) finds
 /// the clock expired and moves the channel to the stream although the path
 /// never lost anything. With a 600 ms gap every chain falls back on its first
-/// idle gap. Ignored because the rule is ADR-0058's: the fix (a send that
-/// follows a receive and nothing else of ours does not start the clock) needs
-/// an amendment of decision 1 first. Run with `--run-ignored all`.
+/// idle gap. ADR-0058 decision 1 (amended 2026-11-13): a send that follows
+/// a received datagram does not start the clock, so the ack-only reply is
+/// not counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs an ADR-0058 amendment: the silence clock counts an unanswered ack-only datagram across an idle gap"]
 async fn jump_silence_ignores_an_unanswered_ack_across_an_idle_gap() {
     use std::sync::atomic::Ordering::Relaxed;
     let d = Direct::start(&["j", "t"]).await;
