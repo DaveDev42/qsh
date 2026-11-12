@@ -26,6 +26,7 @@
 - 홀펀칭 신호(`punch.v1`, ADR-0054). 진입점은 `Server::dispatch`와 R·B의 펀칭 service(`reverse/listen/punch.rs`, `server/punch.rs`), 위협은 §4(A21·A22·B43·B44·C24·D23·E23·E24·G11)에 있다. 통제가 아직 코드에 없는 행의 핀 테스트는 "예정"으로 적고 해당 스텝이 착지할 때 채운다.
 - 직접 dial의 이름 결속(ADR-0060). 진입점은 client의 모든 이름 dial(`PeerTarget::evaluator`)과 `serve --to`의 등록 dial이고, 위협은 §4(A25), 잔여 위험은 §7(h62)에 있다.
 - jump chaining(`-J`, ADR-0056). 진입점은 §3의 `JUMP` 스트림(중간 peer)과 client의 관(`PacketPipe`), 위협은 §4(A24·B49~B51·C27·C28·D25·D26·E27·E28·F7·G13), 잔여 위험은 §7(h57~h61)에 있다. 안쪽 연결은 끝에서 끝의 QUIC이므로 새 신뢰 판단은 중간 peer를 jump로 고르는 일 하나다.
+- iroh relay route(ADR-0061). 진입점은 §3의 iroh endpoint와 relay에서 오는 연결이고, 위협은 §4(A27·B54·D28~D31·G15), 잔여 위험은 §7(h67~h70)에 있다. 상태는 계획이다: 구현 전까지 이 항목의 핀 테스트는 이름만 적은 계획이다.
 
 비범위:
 
@@ -50,6 +51,7 @@
 | localctl UDS | `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 디렉터리 0700, 소켓 파일 0600 | `architecture.md` §7; `crates/qsh-core/src/localctl/daemon.rs` |
 | localctl named pipe | `\\.\pipe\qsh-<scope>-<pid>`, `<scope>`는 사용자 SID와 runtime 디렉터리 정규 경로에서 정해지는 16 hex. 인스턴스마다 소유자 전용 보호 DACL, 원격 클라이언트 거부 | `architecture.md` §7; `crates/qsh-core/src/localctl/transport/windows.rs` |
 | ReplayRing(세션 output 이력) | 세션당 기본 8 MiB byte 예산의 메모리 chunk ring, `ReplayStore` trait 뒤 | `docs/adr/0004-replay-buffer-memory-only.md`(ADR-0004 결정); `crates/qsh-core/src/broker/ring.rs`; 기본값 `crates/qsh-core/src/config.rs` |
+| relay 접속 설정과 EndpointId | `config.toml`의 relay URL, `trust.toml` pin의 선택 필드 relay URL, 신원 키에서 계산되는 EndpointId. 키는 device 개인키와 같은 자산이고 새 키를 만들지 않는다. EndpointId는 공개 정보이며 relay 운영자가 본다 | `architecture.md` §10; ADR-0061 결정 3·11 |
 
 ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프로세스 메모리에만 남고 디스크에는 어떤 경로로도 남지 않는다는 것이 ADR-0004의 보안적 요점이고("PTY 내용이 디스크에 남는 것 자체가 새로운 공격 표면", 평문 disk spool은 "논의 대상조차 아니다"), 그 대가가 §7 h15의 8 MiB 상한이다.
 
@@ -65,6 +67,8 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | 같은 호스트의 다른 사용자 | localctl UDS·named pipe와 로컬 상태 파일에는 없음. `-L`/`-D`가 여는 loopback TCP listener에는 있다 — 그 principal의 `forward.local` 권한 전체(`-D`는 host가 닿는 모든 목적지) | localctl UDS·상태 파일: 파일 권한(0600/0700) + accept 시 euid 검사. localctl named pipe: 소유자 전용 DACL + accept 시 사용자 SID 대조. loopback TCP listener: 없음 — TCP 포트는 파일 권한도 euid 검사도 거치지 않고 같은 머신의 어떤 uid에서도 그냥 connect된다(ADR-0019 결정, §7 h16) |
 | 네트워크 관찰자·능동 공격자 | 없음 | QUIC/TLS 1.3 양방향 인증(`protocol.md` §3), 0-RTT 전면 금지(`protocol.md` §2) |
 | 에이전트(`--json` 호출자) | 그 CLI를 실행한 사용자와 같다 | 별도 경계가 아니다 — `Ops` 파사드를 통과할 뿐이고, JSON 모드는 권한이 아니라 출력 형식이다 |
+| relay 운영자(n0 공용 relay 또는 자가 운영) | 없음 — 인증 주체가 아니다. 암호문, 양 끝의 EndpointId, 접속 시각과 양을 본다 | 안쪽 QUIC이 pin 인증된 종단 암호화다(`protocol.md` §22.2). relay는 신원을 세우지도 위조하지도 못한다 |
+| relay TLS를 가로채는 망 | 없음 — relay 구간의 암호문을 본다 | relay TLS를 OS 저장소로 검증하므로(ADR-0061 결정 12) 이 망 아래에서도 relay 연결이 선다. 안쪽 QUIC은 영향을 받지 않는다 |
 
 경계는 셋이다. (1) 네트워크 ↔ `qsh serve` 프로세스: TLS 검증 코어가 유일한 통과점이고, 검증된 principal 없이는 어떤 스트림도 application 계층에 닿지 않는다. (2) principal ↔ 리소스: `Server::dispatch`(`crates/qsh-core/src/server/mod.rs`)가 단일 choke point이고 네 인가 지점이 그 아래에 있다(`server/mod.rs`, `crates/qsh-core/src/reverse/admit.rs`). (3) 로컬 파일 시스템 ↔ 프로세스: 권한 비트 하나가 전부다.
 
@@ -107,6 +111,7 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | `JUMP` 스트림(중간 peer)과 종류 14 datagram, 그 스트림이 여는 `connect`된 UDP 소켓 | 인증된 peer(`forward.jump`가 있는 role이나 행) | 스트림을 여는 그 자리에서 판정하고(ADR-0056 결정 7) 인가 전에는 소켓도 채널도 없다(B49). 해석된 host-local 주소는 늘 거부하고(B50) QUIC가 답하기 전에는 Initial 모양의 패킷 여덟 개만 나가며(B50), 소켓은 목적지 하나에서 온 datagram만 받는다(B51). 채널 수·큐·문 앞 패킷은 상한이 있다(C27, C28) |
 | client가 안쪽 연결을 올리는 메모리 관(`PacketPipe`)과 바깥 연결의 `JUMP` 스트림·종류 14 datagram에서 돌아오는 바이트 | 인증된 중간 peer(손상됐을 수 있다) | 중간 peer가 돌려주는 바이트는 안쪽 QUIC 패킷으로만 해석한다. 관은 패킷 한도를 넘는 payload를 버리고 세며, 운반체 전환은 침묵 시한(ADR-0058)과 바깥 자리가 정하고 중간 peer가 고르지 못한다. 단마다 안쪽 연결의 pin 검사가 끝단 신원을 정한다(A24). 잘못된 frame 길이는 채널을 닫는다(E28) |
 | `Server::dispatch` | 인증된 peer | `server/mod.rs` — 디코딩된 모든 요청의 단일 통과점 |
+| iroh endpoint(`serve`·`listen`이 설정으로 띄우는 두 번째 수신 지점)와 relay에서 오는 연결 | 미인증. relay를 거쳐 EndpointId로 도달한다 | 기본값은 끈다. 직결 UDP 소켓과 별개이고, handshake 뒤 훅에서 pin을 판정해야 application 계층에 닿는다(ADR-0061 결정 2·4). iroh가 handshake 전 `Incoming` 제어를 열지 않으므로 Retry 기반 admission(ADR-0009)이 이 진입점에는 없다. 증폭·flood 방어는 relay와 iroh 쪽 제한에 기댄다(구현 때 확인할 미결) |
 
 `.proto` 디코더와 로컬 입력 파서가 이 진입점들의 첫 코드다. 그 표면 전체가 freeze 대상이자 fuzz 대상이며(`protocol.md` §16.9, ADR-0001 결과 4번째 불릿), fuzz 타깃 21종 중 19종의 상태는 [m8-fuzz.md](../campaigns/m8-fuzz.md)가 기록한다. `decode_file_frame`과 `parse_ssh_bootstrap_line`의 캠페인 상태는 아직 기록하지 않았다.
 
@@ -144,6 +149,7 @@ STRIDE를 이 저장소의 증거 구조에 맞춰 일곱 범주로 쓴다: A �
 | A24 | 중간 peer가 안쪽 연결을 C가 믿는 다른 장비로 돌린다. 또는 hop 자신이 다른 인증서를 낸다 | 단마다 안쪽 연결이 그 이름의 pin과 fingerprint가 정확히 같을 때만 선다. 어긋나면 `AUTH_FAILED`이고 `details.jump`가 그 단을 가리키며, 끝단에 세션도 exec도 생기지 않는다. 중간 peer는 C가 pin한 다른 장비로도 돌릴 수 없다(fingerprint가 이름에 묶인다) | ADR-0056 결정 11·12·24 | `crates/qsh-testkit/tests/it/jump_chain.rs` `a_jump_redirect_to_another_pinned_peer_fails_with_auth_failed`, `jump_pin_mismatch_at_a_hop_and_at_the_end`, `jump_pin_mismatch_at_the_first_hop` | 중간 peer가 C의 연결을 거부하거나 늦추는 일은 막지 못한다(§7 h58) |
 | A25 | client가 이름 `mm`으로 dial했는데, 그 주소의 서버가 `mm`의 pin이 아니라 client가 다른 이름으로 pin한(또는 CA가 서명한) 다른 장비다. 주소 재정의(`hosts.toml`), `trust.toml`의 주소 오기, 경로 위 공격자의 UDP 리다이렉트로 일어난다. 명령(stdin, `cp`한 파일, `-L`의 상대)이 사용자가 믿는 장비가 아닌 곳에서 돈다 | 이름을 댄 dial은 evaluator를 `BoundTrust`로 좁혀 그 이름의 pin이 가진 SPKI fingerprint와 정확히 같은 leaf만 TLS handshake에서 받는다. 다른 pin, CA 체인, 열린 pairing invite는 이 연결을 받지 않는다. 어긋나면 `AUTH_FAILED`(`details.category: untrusted`)이고, client 인증서가 가기 전에 끊기므로 그 장비에 세션도 allow 감사도 남지 않는다. pin이 없는 이름은 CA 경로의 leaf만 받는다. 컨트롤러로 가는 `serve --to`의 등록 dial도 같다 | ADR-0060 결정 1~3, ADR-0054 결정 12, ADR-0056 결정 10 | `crates/qsh-testkit/tests/it/direct_pin.rs` `a_name_pinned_to_one_host_never_reaches_another_pinned_host`, `a_name_without_a_pin_is_reached_through_the_ca_and_not_through_a_pin`, `crates/qsh-transport/src/endpoint/tests.rs` `a_bound_dial_accepts_only_the_peer_it_names`, `crates/qsh-core/src/reverse/target/tests.rs` `dial_and_register_refuses_a_pinned_stranger_at_the_controllers_address` | CA에 맞는 이름에서는 그 CA가 서명한 어느 장비든 답할 수 있다(h62). 명령 시작 때 정한 결속은 실행 중 pin 교체를 따라가지 않는다(재dial이 거절될 뿐이다) |
 | A26 | 등록된 target의 연결로 합친 장비의 셸을 연다(역할 혼동). 합친 endpoint에서 `Hello.reverse`로 들어온 연결이 정방향 `Server` dispatch에 닿으면 `reverse` role이 아니어도 등록만 한 장비가 셸·exec·터널을 얻는다 | 등록된 연결은 `finish_registration`으로 넘어가 `Server` dispatch에 닿지 않는다. 그 연결에서 peer가 연 스트림은 `TCP_ACCEPTED`와 `AGENT`만 받고 나머지는 reset한다. 정방향이 필요하면 따로 연 정방향 연결에서 요청마다 인가된다 | ADR-0059 결정 4·6·26 | `crates/qsh-testkit/tests/it/combined.rs` `a_registered_connection_never_reaches_forward_dispatch`, `combined_dispatch_table` | 없음 |
+| A27 | iroh route에서 다른 EndpointId(다른 키)가 이름을 가로챈다: 공격자가 relay에서 같은 이름을 대는 자기 endpoint를 세워 dial을 받는다 | iroh route의 신원은 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. handshake 직후 훅에서 상대 키의 SPKI SHA-256을 `trust.toml` pin과 대조하고, 이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId만 받는다(ADR-0060과 같은 결과). 훅이 거절하면 연결은 application 계층에 닿지 못하고 `AUTH_FAILED`다 | ADR-0061 결정 3; ADR-0060; `protocol.md` §22.3 | (계획) `iroh_route::iroh_route_rejects_a_peer_with_another_pin`, `iroh_route::iroh_route_binds_the_dialed_name_to_its_pin_key`, `iroh_route::an_unpinned_endpoint_id_never_reaches_dispatch` | — |
 
 `exec`, `session.write`, tunnel open은 전부 부수효과가 있다. A9가 다른 행과 성격이 다른 이유가 그것이다 — 재전송이 곧 재실행이므로, replay 가능성을 남기는 대신 성능을 포기했다.
 
@@ -207,6 +213,7 @@ A11이 A7과 짝이다. A7은 pairing이 pin/CA를 다운그레이드하지 못�
 | B51 | 제3자가 중간 peer의 채널 포트로 datagram을 넣어 안쪽 연결에 끼어들거나 중간 peer를 반사기로 쓴다 | 채널마다 UDP 소켓을 만들어 target 주소 하나에 `connect`한다. 다른 출발지가 그 포트로 보낸 패킷은 커널이 버리고 중간 peer까지 올라오지 않는다. 넣더라도 안쪽 AEAD가 버린다 | ADR-0056 결정 8·24 | `crates/qsh-testkit/tests/it/jump_host.rs` `a_jump_socket_drops_datagrams_from_other_sources` | 소켓이 `connect`한 target 자신의 주소를 위조할 수 있는 경로 위 공격자는 막지 못한다. 그가 넣은 패킷은 안쪽 AEAD가 버린다(E27) |
 | B52 | role `reverse` pin(역방향 target)이 같은 포트에서 정방향 셸을 얻는다. 합친 endpoint가 단독 listen의 감사 없는 `UNSUPPORTED` 대신 정방향 요청을 받으므로 그 판정이 새로 필요하다 | 정방향 요청마다 기본 거부이고 감사된다. role `reverse`는 `host.reverse`와 `host.punch`만 준다. `session.*`, `exec.run`, `file.*`, `forward.local`, `forward.jump`, `forward.agent`는 균일한 `PERMISSION_DENIED`이고 `forward.socks`는 항상-deny 게이트가 role보다 먼저 막는다. 거부에는 자원이 없다 | ADR-0059 결정 12·26, ADR-0045 결정 2 | `crates/qsh-testkit/tests/it/combined_roles.rs` `combined_role_matrix`, `combined_role_matrix_covers_files_streams_agent_and_socks`; `crates/qsh-testkit/tests/it/combined_lifecycle.rs` `production_runtime_judges_pin_roles_on_all_three_branches`(프로덕션 `run_listen_serve`와 진짜 `trust.toml`) | 없음 |
 | B53 | 한 갈래의 판정이 다른 갈래에 새거나, 정책 스냅샷이 둘이어서 같은 pin이 갈래마다 다르게 판정된다 | `Authorizer`는 `acl.toml`을 한 번 읽은 하나이고 감사 sink도 하나다. `acl.toml`을 파싱할 수 없으면 등록, 펀칭, 정방향 세 갈래가 모두 거부되고(role 포함), 감사를 쓰지 못하면 세 갈래가 모두 거부된다 | ADR-0059 결정 8·12·26 | `crates/qsh-testkit/tests/it/combined.rs` `combined_endpoint_loads_acl_once_and_writes_one_audit_sink`, `combined_unparseable_acl_denies_every_path`, `combined_audit_failure_fails_closed_on_every_path`; `crates/qsh-testkit/tests/it/combined_lifecycle.rs` `production_runtime_with_an_unparseable_acl_denies_all_three_branches` | 없음 |
+| B54 | iroh route로 지원하지 않는 모드를 우회로로 쓴다: 사설 CA 체인(SAN principal)으로 relay를 통해 들어오거나, `-J` 체인의 hop을 iroh로 연다 | iroh route는 pin 신원만 받는다. CA 경로(`AuthPath::Ca`)와 jump hop은 `UNSUPPORTED`로 거절하고, 거절은 자원을 만들기 전이다. admission은 handshake 뒤 키 기준으로 판정하되 판정 전에는 세션·터널·listener가 생기지 않는다 | ADR-0061 결정 4·14; `architecture.md` §10 | (계획) `iroh_route::private_ca_mode_over_iroh_is_unsupported`, `iroh_route::a_jump_hop_over_iroh_is_unsupported`, `iroh_route::no_resource_exists_before_the_post_handshake_decision` | — |
 
 B8은 B4의 TLS 계층 평행 위협이다. 설치 직후·설정 소실·잘못된 config 경로로 pin도 CA도 없이 뜬 노드가 아무나 받아들이면, ACL이 아무리 옳아도 그 앞에서 이미 졌다. B9는 원격 peer가 아니라 같은 머신의 다른 사용자를 상대로 같은 모양의 게이트를 세운다.
 
@@ -280,6 +287,10 @@ C10의 coalescing이 없으면 1바이트씩 echo하는 PTY가 entry 하나당 �
 | D25 | 중간 peer가 안쪽 평문(PTY 입출력, exec 인자, 파일 내용, agent 서명 데이터)을 본다 | 안쪽 TLS가 C와 T 사이의 끝에서 끝이다. 중간 peer는 암호문 패킷을 나르기만 하고 안쪽 키를 갖지 못한다. 시험은 J를 지나는 모든 바이트를 기록해 PTY 입출력, exec argv, 파일 내용, agent 서명 데이터에 넣은 표지와 두 장비의 인증서 DER이 한 번도 나오지 않음을 본다 | ADR-0056 결정 2·24 | `crates/qsh-testkit/tests/it/jump_chain.rs` `a_jump_never_sees_inner_plaintext` | 중간 peer는 C의 신원, 목적지, 안쪽 트래픽의 크기와 시각을 본다(§7 h57) |
 | D26 | 감사·로그·카운터에 해석된 IP, 패킷 내용, connection ID, channel 값이 샌다 | 감사는 `forward.jump` 판정과 host-local deny를 구조 필드로만 쓰고 resource는 요청한 `host:port` 문자열이다. 해석된 주소는 감사에도 로그에도 응답에도 싣지 않는다. `qsh::jump` target은 `channel_opened`·`gate_opened`·`channel_closed`와 개수·종료 사유 단어만 낸다(기본에서 꺼져 있다). `JumpStats`는 개수뿐이다 | ADR-0056 결정 19·24 | `crates/qsh-testkit/tests/it/jump_host.rs` `jump_audit_and_logs_carry_no_payload`, `jump_refuses_host_local_targets`, `crates/qsh-core/src/acl/jump/tests.rs` `the_audit_record_is_structural`; `crates/qsh-testkit/tests/it/jump_threat.rs` `jump_audit_names_the_requester_on_both_hops`(두 hop의 감사) | 없음 |
 | D27 | `host.reverse`가 없는 pin된 peer가 정방향 갈래의 quota 거절(R3)로 이 endpoint의 연결 풀이 찼음을 안다. A2/B5(권한 없는 peer가 포화 여부를 알 수 없다)를 합친 모드에서 약하게 만든다 | 정방향은 Hello 전에 quota를 예약하고 거절을 먼저 알린다(R3). 이 동작을 시험이 고정한다. 콜백에 닿는 것은 pin된 peer뿐이고 드러나는 것은 "이 endpoint가 연결 상한에 찼다"는 사실 하나다 | ADR-0059 결정 9·26 | `crates/qsh-testkit/tests/it/combined.rs` `combined_forward_reports_quota_before_hello`, `combined_registration_checks_acl_before_quota` | 남는 위험으로 둔다(§7 h64) |
+| D28 | relay 운영자(n0 공용 relay 또는 자가 운영 relay)가 트래픽을 읽거나 변조한다 | relay 구간은 안쪽 QUIC을 그대로 나르는 암호문이다. 안쪽 QUIC은 pin으로 인증한 종단 암호화(TLS 1.3 + 양방향 pin)라 relay는 내용을 읽지 못하고 신원을 위조하지 못한다. relay가 보는 것은 암호문, 양 끝의 EndpointId, 접속 시각과 양이다(h67). 변조는 안쪽 AEAD가 거른다 | ADR-0061 결정 3·12; `protocol.md` §22.2 | (계획) `iroh_route::a_relay_that_flips_bytes_cannot_get_data_accepted`(변조 relay를 끼운 시험망), `iroh_route::the_relay_never_sees_plaintext`(relay 쪽 캡처에 PTY 표식 문자열 없음) | 메타데이터(누가 누구와 언제 얼마나) → h67 |
+| D29 | TLS를 가로채는 망이 relay 구간을 본다: 기업망이 자기 루트로 재서명한 인증서를 OS 저장소에 넣어 둔 기기에서 relay TLS가 그 망에 들여다보인다 | relay TLS는 OS 인증서 저장소로 검증한다(`platform-verifier`). 그래서 가로채는 망에서도 relay 연결이 서고, 그 구간의 바이트는 그 망에 보인다. 보이는 것은 안쪽 QUIC 암호문이고, 안쪽 QUIC의 내용과 신원은 pin으로 보호된다. relay 인증은 qsh의 신원 보증이 아니다: relay가 가짜여도 pin이 맞는 상대를 만들어 낼 수 없다 | ADR-0061 결정 12 | (계획) `relay_tls::relay_tls_is_verified_with_the_os_trust_store`(사설 루트를 신뢰 저장소에 넣은 시험 relay), `relay_tls::relay_tls_with_an_untrusted_root_fails_closed`, `iroh_route::an_intercepting_relay_cannot_get_a_wrong_peer_accepted` | 그 망에는 EndpointId, 시각, 양이 보인다 → h68 |
+| D30 | 홀펀칭으로 직접 경로가 서면 두 끝의 IP가 서로에게 드러난다 | 직접 경로는 같은 연결 안의 경로 승격이다(multipath). 드러나는 상대는 pin으로 인증된 끝뿐이다. 제3자에게는 아무것도 게시하지 않는다 | ADR-0061 결정 11; `protocol.md` §22.4 | (계획) `iroh_route::no_discovery_traffic_leaves_the_endpoint`(DNS·pkarr 목적지 없음), `iroh_route::direct_path_candidates_are_sent_only_inside_the_pinned_connection` | 직접 경로가 선 뒤 pin된 상대는 내 IP를 안다 → h69 |
+| D31 | iroh 기본 동작이 EndpointId와 주소를 제3자 서비스(pkarr, n0 DNS)에 게시하거나 조회한다 | 발견 게시와 조회를 끈다. endpoint는 설정된 relay URL 하나에 고정으로 붙고, 상대의 relay URL은 pin에서 온다. 기본 route 목록에 `iroh`가 없으면 relay에도 접속하지 않는다 | ADR-0061 결정 1·11 | (계획) `iroh_route::an_iroh_endpoint_resolves_nothing_through_discovery`, `iroh_route::no_relay_contact_when_the_route_is_not_enabled` | — |
 
 D7은 테스트로 지킬 수 있는 성질이 아니라 코드가 없어서 성립하는 성질이다. 그러므로 이 행을 깨는 방법은 회귀가 아니라 새 기능이고, 그 시점의 방어선은 ADR 하나다.
 
@@ -354,6 +365,7 @@ F5가 F1의 로컬판이면서 비대칭이다. F1은 원격 인가 전부가 �
 | G12 | 죽은 host 프로세스가 남긴 agent 소켓이 쌓이거나 다른 프로세스가 쓰는 소켓을 지운다 | 시작 때 `sweep_stale`이 한 번 돌아 연결을 거절하는 죽은 소켓만 지우고 살아 있는 소켓은 두며, 세션 종료·`session close`·TTL 만료·exec 종료·host drop 때 소켓이 제거된다 | ADR-0055 결정 8 | `crates/qsh-testkit/tests/it/agent_host.rs` `agent_socket_is_removed_when_the_session_ends`, `dropping_the_host_removes_its_session_sockets`, `crates/qsh-core/src/agent` `stale_agent_sockets_are_swept_at_start` | 소켓 제거는 task abort로 비동기라 아주 짧은 지연이 있다 |
 | G13 | 체인의 한 단이 죽거나 C의 경로가 바뀌어 안쪽 세션이 끊긴다 | C의 경로 변경은 바깥 연결의 migration이 첫 단에서 끝내고 안쪽 연결은 보지 못한다. 단이 죽으면 recovery가 체인을 다시 세워 같은 세션에 resume한다. `--supervise` 터널도 같은 체인으로 다시 선다. 안쪽 연결은 자기 소켓을 갖지 않는다 | ADR-0056 결정 14·15·24 | `crates/qsh-testkit/tests/it/jump_recovery.rs` `outer_migration_is_invisible_to_the_inner_connection`, `a_session_through_a_jump_resumes_after_the_hop_link_dies`, `a_session_through_a_jump_resumes_after_the_target_link_dies`, `a_nested_endpoint_never_binds_a_socket_of_its_own`, `a_supervised_tunnel_through_a_chain_survives_a_cut` | 중간 peer는 체인을 언제든 끊거나 늦출 수 있다(§7 h58) |
 | G14 | 한 프로세스의 crash, OOM, 재시작이 detached 세션과 모든 역방향 등록을 함께 끊는다(합친 모드) | 재시작 배너(`sessions live inside this process`), SIGTERM 순서(accept 중단, 등록 닫음, drain, endpoint close, localctl 소켓 정리, `serve.json` 제거), target의 backoff 재등록, 경로가 죽으면 등록은 새 generation으로 다시 서고 정방향 세션은 같은 세션으로 resume한다 | ADR-0059 결정 10·19·26 | `crates/qsh-cli/tests/it/combined_lifecycle.rs` `combined_sigterm_drains_sessions_and_closes_registrations`(unix SIGTERM, Windows `CTRL_BREAK`); `crates/qsh-testkit/tests/it/combined.rs` `combined_shutdown_closes_registrations_before_the_drain`; `crates/qsh-testkit/tests/it/combined_chaos.rs` `combined_endpoint_recovers_both_roles_after_a_blackhole` | 두 역할이 한 프로세스의 운명을 나눈다(§7 h63) |
+| G15 | relay가 막히거나 rate limit에 걸린다: n0 공용 relay가 끊기거나 조건이 바뀌거나 한도를 건다 | iroh route는 직결·펀칭이 모두 실패한 뒤의 마지막 route라 relay 장애는 그 route를 쓰는 사용자에게만 영향이 간다. 상대의 pin에 자가 운영 relay URL을 적을 수 있고, 장애는 `CONNECTION_FAILED`로 드러난다. 이미 선 세션은 qsh 계층의 resume으로 이어 붙는다 | ADR-0061 결정 10 | (계획) `iroh_route::a_dead_relay_fails_with_connection_failed_within_the_dial_budget`, `iroh_route::a_session_over_a_restarted_relay_resumes` | 공용 relay는 우리가 통제하지 못하는 가용성이다 → h70 |
 
 ## 5. 갭 — 통제는 있고 핀 테스트가 없거나 불확실한 것
 
@@ -456,6 +468,10 @@ g1~g5와 g8은 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지
 | h64 | pin된 peer는 정방향 quota 거절로 합친 endpoint의 연결 풀이 찼음을 알 수 있다. 등록 쪽 포화 여부의 비노출(A2/B5)이 약해진다 | ADR-0059 결정 26, D27 |
 | h65 | 합친 endpoint에서 등록과 정방향이 연결 상한 512를 나눈다. principal마다 상한이 있어도 여러 principal의 동시 홍수는 등록 자리를 줄일 수 있다 | ADR-0059 결과 절, C29 |
 | h66 | 이 ADR 전의 바이너리는 `[listen].serve`를 조용히 무시하고 등록 전용으로 뜬다(`ListenConfig`에 `deny_unknown_fields`가 없다). 옮길 때 바이너리를 먼저 올리고 `qsh serve: listening on` 줄로 확인해야 한다 | ADR-0059 결정 23 |
+| h67 | relay 운영자는 암호문, 양 끝의 EndpointId, 접속 시각과 양(타이밍·볼륨)을 본다. 내용은 못 읽는다. 이 메타데이터를 숨기는 통제는 없고, 피하려면 자가 운영 relay를 쓴다 | ADR-0061 결과 절 |
+| h68 | TLS를 가로채는 망은 relay 구간의 암호문과 두 EndpointId, 시각, 양을 본다. relay TLS를 OS 저장소로 검증하는 것의 대가이고(ADR-0061 결정 12), 내용과 신원은 안쪽 pin 인증이 지킨다 | ADR-0061 결정 12 |
+| h69 | 홀펀칭으로 직접 경로가 서면 pin된 상대가 내 공인 IP를 안다. relay를 거치는 동안에는 relay가 내 IP를 본다 | ADR-0061 결정 3·11 |
+| h70 | n0 공용 relay의 가용성, rate limit, 약관 변경은 통제 밖이다. iroh는 단일 회사가 이끄는 1.x 의존이다. 대응은 relay URL을 설정으로 바꾸는 길과 backend 경계(`architecture.md` §10)다 | ADR-0061 결정 10, 결과 절 |
 
 h4와 h5는 함께 읽어야 한다. 손상된 peer는 그 장비에서 `trust remove`를 실행하면 2초 안에 끊긴다. 개별 인증서 revocation이 없으므로 CA가 서명한 인증서는 CA 전체를 거두어야 하고, 신뢰는 장비마다 따로 거두어야 한다. 그 peer의 세션은 연결이 닫혀도 남으므로 끝내려면 `qsh session close`를 쓴다.
 
@@ -487,14 +503,15 @@ qsh가 지키지 않고 운영자에게 맡긴 것들이다.
 
 - **시계 동기.** cert 유효기간(`protocol.md` §3), invite TTL 10분과 retention 20분(`protocol.md` §15.5), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
 - **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md` §15.7).
-- **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. relay·NAT traversal·discovery를 qsh는 제공하지 않는다(`README.md` "Known limitations"; PRD §12).
+- **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. 기본 route에는 relay·발견이 없고, 사용자가 iroh route를 켠 경우에만 relay가 낀다(ADR-0061, 아래 "relay 선택"). (`README.md` "Known limitations"; PRD §12).
+- **relay 선택.** iroh route를 켜면 기본 relay는 n0 공용 relay다(ADR-0061 결정 10). 메타데이터 노출(h67)이나 공용 relay 의존(h70)을 받아들일 수 없는 운영자는 자가 운영 `iroh-relay`의 URL을 설정하거나 route를 켜지 않는다. 기기의 OS 인증서 저장소가 오염되지 않았다는 것도 가정이다(D29).
 - **CA 키 복제 관행.** CSR을 만들지 않으므로(ADR-0016 기각) 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016 맥락 2번째 문단).
 - **`acl.toml` 재시작 규율.** h10에 따라 정책 편집은 재시작해야 반영된다. 편집했는데 반영이 안 된 상태를 "정책이 느슨한 채로 돌고 있는 창"으로 인식해야 한다.
 - **replay 여유 조정.** `[serve].replay_bytes` 기본 8 MiB가 자기 워크로드에 충분한지는 운영자가 판단한다. ADR-0004 근거 3번째 불릿이 "전형적 텍스트 터미널 output 기준 수십 초~수 분 분량"이라고 추정한 값이다.
 
 ## 9. 명시적 비목표
 
-- **relay·NAT traversal.** 제품 경계 밖이다(`README.md` "Known limitations"; PRD §14).
+- **relay·NAT traversal(일부 개정, ADR-0061).** NAT traversal은 M24 홀펀칭으로, relay는 사용자가 켜는 iroh route 하나로 코어에 들어왔다. 여전히 비목표인 것은 qsh가 relay를 운영하거나 중앙 서비스를 두는 일이다. 직결이 기본이고 route를 켜지 않으면 relay에 접속하지 않는다(D31).
 - **user switching.** child는 항상 `qsh serve`를 실행한 OS 계정으로 spawn하고, `SessionOpen`의 `user` hint가 다르면 spawn 없이 `UNSUPPORTED`다(`architecture.md` §4). qsh는 OS 사용자 경계를 대신하지 않는다.
 - **세션 안 활동의 통제.** ACL은 요청 종류를 판정하고, 그 뒤 셸에서 벌어지는 일은 OS의 소관이다.
 - **PTY 내용의 감사.** F2가 구조적으로 보장하는 비목표다 — 감사 레코드에 payload를 담을 필드가 없다.

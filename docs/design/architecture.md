@@ -240,6 +240,7 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 | schemars | 1 (workspace) | `*Req`에서 `qsh.cli/v1` JSON 스키마 생성(`qsh schema --json`) — 내장 MCP adapter는 ADR-0011로 철회돼 tool schema 용도는 없다 |
 | blake3 / subtle / zeroize | 1 / 2 / 1 | resume token 해시 / 상수시간 비교 / 키 위생. blake3는 `qsh-proto`의 화면 `state_hash`(§18)도 맡는다 |
 | vt100 | 0.18 (`qsh-core`) | host 터미널 에뮬레이터(ADR-0052 결정 2). 순수 Rust·I/O 없음·MIT·`cargo deny` 통과, 의존은 vte·unicode-width·itoa뿐. 미처리 CSI/OSC를 callback으로 내줘서 질의 답과 효과를 가로챌 수 있고 `on_scroll`이 밀려난 행을 준다 |
+| iroh (+ noq, iroh-relay는 시험 전용) | 1.x (조사 시점 1.4.1), M28 스텝 4부터 `qsh-transport`만 | iroh relay route의 backend(§10, ADR-0061). 기본 빌드, feature `platform-verifier`. 발견 기능은 쓰지 않는다. 라이선스 MIT/Apache-2.0, `cargo deny`에 `webpki-roots`(CDLA-Permissive-2.0) 허용이 필요할 수 있다. 계획 |
 | clap 4.5 · serde 1 · tracing 0.1 · toml 1 · ulid 3 · bytes 1 · base64 0.23 | | frontend·계약·진단 |
 
 ## 9. 아키텍처 리스크 5건
@@ -249,3 +250,68 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 3. **Headless Linux 키 저장** — platform store 부재 시 file fallback이 조용히 일어나면 보안 태세 공백. 대응: init/doctor의 명시 보고를 계약으로 유지.
 4. **(해소, ADR-0011)** 내장 MCP adapter의 rmcp API 변동 리스크는 adapter 철회와 함께 사라졌다.
 5. **느린 소비자 backpressure vs PTY 생존성** — cursor-pull + 유계 구독자 버퍼 + gap 재동기화가 설계 답이지만 QUIC flow control과의 상호작용은 soak test로 실증해야 한다 (testing.md의 frozen-consumer soak).
+
+## 10. Transport backend 경계 (ADR-0061 결정 5~9, 초안 — M28 구현 전)
+
+> 이 절은 M28이 착지하는 구조를 미리 적은 것이다. 구현이 이 절과 다르게 되면 이 절을 먼저 고친다. 스텝 1~3(trait, `PeerAddr`, 오류 매핑과 arch)은 동작 변화가 없고, iroh backend는 스텝 4 이후다.
+
+### 10.1 trait과 닫힌 enum
+
+연결 표면은 `crates/qsh-transport/src/mux.rs`의 trait 셋(`MuxConn`, `SendHalf`, `RecvHalf`)이 정의한다. 연결, 양방향·단방향 스트림, datagram, TLS exporter, 상대 신원, 경로 정보, close, stats가 거기 들어간다. 이 trait은 비공개다. 공개 표면은 `Connection`·`SendStream`·`RecvStream` **닫힌 enum**이고 각 variant가 backend 구현을 담는다. 이유는 두 가지다.
+
+- backend를 추가할 때 메서드 하나라도 빠지면 컴파일이 깨진다. `match`에 wildcard arm을 두지 않는다.
+- `dyn`도 제네릭 매개변수도 `qsh-core`까지 올라가지 않는다. splice 핫패스에 vtable이 끼지 않고, backend 선택은 variant 하나다.
+
+`Connection::quinn()` 같은 탈출구는 없다(`2cacaff0`). backend 고유 접근이 시험에 필요하면 `cfg(test)` 접근자로 같은 crate 안에서만 연다. trait은 mock 지점이 아니다(`testing.md` L4). 한 backend가 지켜야 할 행동 목록은 `crates/qsh-transport/tests/it/conformance.rs`가 고정하고, 이 시험은 backend 생성자 하나를 매개변수로 받아 quinn과 iroh에 같은 본문으로 돈다.
+
+### 10.2 backend 셋
+
+| backend | 상태 | 맡는 route | 비고 |
+|---|---|---|---|
+| quinn | 기본, 현재 유일 | 직결(주소, DNS 이름), 홀펀칭, `-J`의 관 위 안쪽 연결, 역방향 | 사설 CA 모드와 주소 기반 admission(Retry)은 이 backend만 지원한다 |
+| iroh (noq) | M28 스텝 4, 기본 빌드 | `iroh` route(relay, 이어서 직접 경로로 승격) | 신원은 pin만. 사설 CA 모드와 `-J` hop은 `UNSUPPORTED`. noq는 n0의 quinn 포크이고 multipath를 가진다 |
+| ut | 미래 | 미정 | 세 번째 variant로 들어온다. 이 절의 경계가 그 자리를 비워 두는 이유다 |
+
+두 backend는 같은 `Connection` enum의 다른 variant이므로 `qsh-core`의 코드는 어느 backend인지 모르고 쓴다. `TransportKind`(지금은 `Quic` 하나)는 "어느 backend, 어느 경로인가"를 감사와 진단에 알리는 값으로 넓힌다(additive).
+
+### 10.3 `PeerAddr`
+
+소켓 주소에 기대던 곳은 넷이었다. admission(`Incoming` 제어), 감사와 ACL의 `peer_addr: SocketAddr`, 펀칭과 route, serve의 bind. 앞의 둘을 `PeerAddr`가 받는다.
+
+- 갈래는 `Socket(SocketAddr)`(quinn)과 `Key { id, path }`(iroh; `path`는 `Direct(SocketAddr)` 또는 `Relay(url)`)다. 스텝 2에서는 `Socket` 갈래만 생겨서 JSON과 감사 레코드가 바이트 단위로 같다.
+- 감사 레코드와 `qsh.cli/v1`의 기존 `peer_addr` 문자열 필드는 그대로 두고, 경로가 relay일 때만 선택 필드(예: `route`, `relay`)를 더한다. 계약은 additive-only이므로(CLAUDE.md) 기존 fixture는 건드리지 않고 새 fixture를 등록한다.
+- relay URL과 EndpointId는 구조적 값이다. payload나 키 비밀이 아니고 감사 레코드에 쓸 수 있다.
+- 펀칭과 serve의 bind는 소켓 주소를 계속 쓴다. 이 둘은 quinn backend 안의 일이다.
+
+### 10.4 오류 매핑
+
+backend 고유 오류(`quinn::ConnectionError`, `rustls::Error`, `noq::*`, iroh의 `ConnectError` 등)는 **각 backend 모듈 안에서** 중립 오류(`qsh-transport/src/error`의 `ConnectionError`·`ReadError`·`WriteError` 등)로 바뀐다. 변환 코드는 backend 모듈 밖에 두지 않고, `qsh-core`는 중립 오류만 본다. `ErrorCode`와 doctor 코드는 중립 오류에서 정해진다.
+
+| 중립 오류의 뜻 | quinn | iroh | `ErrorCode` |
+|---|---|---|---|
+| 상대 신원이 pin과 다름 | rustls 검증 실패 | handshake 직후 훅의 거절 | `AUTH_FAILED` |
+| 닿지 못함, 시한 초과 | `ConnectError`, idle/timed out | relay 연결 실패, 경로 없음 | `CONNECTION_FAILED` |
+| 지원하지 않는 모드 | 해당 없음 | 사설 CA, jump hop | `UNSUPPORTED` |
+| 상대가 닫음 | application close | application close | 기존 매핑 그대로 |
+
+같은 뜻이면 backend가 달라도 같은 `ErrorCode`다. 이 대응은 conformance 시험이 backend마다 같은 입력(틀린 pin, 죽은 상대, 닫힌 연결)으로 고정한다. 구현 때 표의 iroh 열을 실제 오류 타입으로 채운다.
+
+### 10.5 iroh backend의 구조
+
+- 의존은 `qsh-transport`에만 들인다(`iroh`, `platform-verifier` feature). `qsh-core`·`qsh-cli`의 manifest에는 나타나지 않는다.
+- **신원.** qsh 신원 키(Ed25519)가 iroh `SecretKey`와 같은 키다. fingerprint(SPKI SHA-256)는 EndpointId에서 계산한다. 새 키를 만들지 않는다.
+- **pin 검증 지점.** iroh는 handshake 전 `Incoming` 제어를 열지 않으므로 pin 검사와 ADR-0060의 이름 결속은 handshake 직후 훅(`EndpointHooks::after_handshake` 또는 동등한 지점)에서 한다. 거절하면 연결은 그 훅에서 끝나고 application 계층(`Server::dispatch`)에 닿지 않는다. 판정 전에는 세션·터널·listener가 생기지 않는다.
+- **relay.** endpoint는 설정된 relay URL 하나에 고정으로 붙는다(발견 없음, 지연 선택 없음). 기본값은 n0 공용 relay 한 URL, 설정으로 자가 운영 `iroh-relay`를 지정한다. relay TLS는 `CaTlsConfig::system()`으로 OS 저장소를 쓴다. 발견 게시와 조회(pkarr, n0 DNS)는 끈다.
+- **서버.** `serve`·`listen`이 설정으로 iroh endpoint를 하나 더 띄운다(기본 끔). 기존 UDP 소켓과 별개이고, 고정 UDP 포트에 bind할 수 있다. 합친 endpoint(ADR-0059)의 두 역할 모두 같은 endpoint를 쓴다.
+- **migration과 경로.** iroh는 한 연결 안에서 relay와 직접 경로를 다룬다. qsh는 경로를 고르지 않고, 경로 정보는 `PeerAddr`와 `PathWatch`에 읽기 전용으로 올린다. 경로가 바뀌는 것은 지연 최적화일 뿐이고 correctness는 resume이 지킨다(`protocol.md` §2).
+
+### 10.6 `xtask arch` 규칙
+
+- `qsh-core`와 `qsh-cli`는 manifest에 `quinn`, `quinn-proto`, `rustls`에 더해 `iroh`, `noq`도 둘 수 없다. `src/` 어디서도 `iroh::`, `noq::` 경로를 쓸 수 없다(`tests.rs` 포함). 기존 `quinn::`·`.quinn(` 토큰 금지와 같은 방식이고 manifest와 토큰 둘 다 막는다.
+- 허용 의존 매트릭스는 바뀌지 않는다. iroh는 `qsh-transport` 내부 의존일 뿐이다.
+- backend 모듈 경계도 경로 범위 규칙이다: 오류 매핑은 해당 backend 모듈 안에만 있다. 파일을 합치거나 디렉터리로 바꾸면 같은 커밋에서 `xtask/src/arch.rs`를 고친다(위 §1과 같은 규율).
+- 새 규칙마다 위반을 일부러 만드는 시험이 있어야 하고(`xtask arch`가 새 규칙의 위반 시험을 갖고 초록), `cargo deny`의 라이선스 허용(`webpki-roots` 등)과 의존 증가는 스텝 4에서 맞춘다.
+
+### 10.7 건드리지 않는 것
+
+wire(`qsh/1` ALPN, frame, 스트림 배치), resume(SPKI + token), ACL 단일 통과점, 감사의 fail-closed, `qsh.cli/v1` 계약은 backend와 무관하다. backend 경계는 그 아래의 교체 지점이다.
