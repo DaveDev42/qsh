@@ -3,7 +3,7 @@
 //!
 //! [`SendStream`] and [`RecvStream`] are what [`Connection::open_bi`] and
 //! [`Connection::accept_bi`] hand out. Each is a closed enum over the
-//! backends (only QUIC), so another backend would be one more variant
+//! backends (QUIC and iroh), so another backend is one more variant
 //! without a generic parameter or a vtable on the splice hot path.
 //!
 //! The drop semantics are quinn's, and callers rely on them (the tunnel
@@ -27,17 +27,20 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::error::{
     ClosedStream, ReadError, ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
+use crate::iroh_backend::{IrohRecv, IrohSend};
 use crate::mux::{RecvHalf, SendHalf};
 use crate::quinn_backend::conn::{QuicRecv, QuicSend};
 
 #[derive(Debug)]
 enum SendBackend {
     Quic(QuicSend),
+    Iroh(Box<IrohSend>),
 }
 
 #[derive(Debug)]
 enum RecvBackend {
     Quic(QuicRecv),
+    Iroh(Box<IrohRecv>),
 }
 
 /// The sending half of a bidirectional stream.
@@ -53,10 +56,17 @@ impl SendStream {
         }
     }
 
+    pub(crate) fn from_iroh(stream: IrohSend) -> Self {
+        Self {
+            inner: SendBackend::Iroh(Box::new(stream)),
+        }
+    }
+
     /// Write some of `buf`, returning how many bytes were accepted.
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, WriteError> {
         match &mut self.inner {
             SendBackend::Quic(s) => s.write(buf).await,
+            SendBackend::Iroh(s) => s.write(buf).await,
         }
     }
 
@@ -64,6 +74,7 @@ impl SendStream {
     pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), WriteError> {
         match &mut self.inner {
             SendBackend::Quic(s) => s.write_all(buf).await,
+            SendBackend::Iroh(s) => s.write_all(buf).await,
         }
     }
 
@@ -72,6 +83,7 @@ impl SendStream {
     pub fn finish(&mut self) -> Result<(), ClosedStream> {
         match &mut self.inner {
             SendBackend::Quic(s) => s.finish(),
+            SendBackend::Iroh(s) => s.finish(),
         }
     }
 
@@ -80,6 +92,7 @@ impl SendStream {
     pub fn reset(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
         match &mut self.inner {
             SendBackend::Quic(s) => s.reset(code),
+            SendBackend::Iroh(s) => s.reset(code),
         }
     }
 
@@ -88,6 +101,7 @@ impl SendStream {
     pub fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
         match &self.inner {
             SendBackend::Quic(s) => s.set_priority(priority),
+            SendBackend::Iroh(s) => s.set_priority(priority),
         }
     }
 
@@ -96,6 +110,7 @@ impl SendStream {
     pub fn priority(&self) -> Result<i32, ClosedStream> {
         match &self.inner {
             SendBackend::Quic(s) => s.priority(),
+            SendBackend::Iroh(s) => s.priority(),
         }
     }
 
@@ -106,8 +121,21 @@ impl SendStream {
         &self,
     ) -> impl Future<Output = Result<Option<StreamCode>, StoppedError>> + Send + Sync + 'static
     {
-        match &self.inner {
-            SendBackend::Quic(s) => s.stopped(),
+        // Each backend's future is its own opaque type; holding them in an
+        // enum and awaiting inside one `async` block avoids boxing.
+        enum Pending<A, B> {
+            Quic(A),
+            Iroh(B),
+        }
+        let pending = match &self.inner {
+            SendBackend::Quic(s) => Pending::Quic(s.stopped()),
+            SendBackend::Iroh(s) => Pending::Iroh(s.stopped()),
+        };
+        async move {
+            match pending {
+                Pending::Quic(f) => f.await,
+                Pending::Iroh(f) => f.await,
+            }
         }
     }
 }
@@ -120,18 +148,21 @@ impl AsyncWrite for SendStream {
     ) -> Poll<io::Result<usize>> {
         match &mut self.get_mut().inner {
             SendBackend::Quic(s) => AsyncWrite::poll_write(Pin::new(s), cx, buf),
+            SendBackend::Iroh(s) => AsyncWrite::poll_write(Pin::new(s), cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             SendBackend::Quic(s) => AsyncWrite::poll_flush(Pin::new(s), cx),
+            SendBackend::Iroh(s) => AsyncWrite::poll_flush(Pin::new(s), cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             SendBackend::Quic(s) => AsyncWrite::poll_shutdown(Pin::new(s), cx),
+            SendBackend::Iroh(s) => AsyncWrite::poll_shutdown(Pin::new(s), cx),
         }
     }
 }
@@ -149,11 +180,18 @@ impl RecvStream {
         }
     }
 
+    pub(crate) fn from_iroh(stream: IrohRecv) -> Self {
+        Self {
+            inner: RecvBackend::Iroh(Box::new(stream)),
+        }
+    }
+
     /// Read contiguous data into `buf`. `Ok(None)` is a clean end-of-stream.
     /// Cancel-safe.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError> {
         match &mut self.inner {
             RecvBackend::Quic(s) => s.read(buf).await,
+            RecvBackend::Iroh(s) => s.read(buf).await,
         }
     }
 
@@ -161,6 +199,7 @@ impl RecvStream {
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), ReadExactError> {
         match &mut self.inner {
             RecvBackend::Quic(s) => s.read_exact(buf).await,
+            RecvBackend::Iroh(s) => s.read_exact(buf).await,
         }
     }
 
@@ -169,6 +208,7 @@ impl RecvStream {
     pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ReadToEndError> {
         match &mut self.inner {
             RecvBackend::Quic(s) => s.read_to_end(size_limit).await,
+            RecvBackend::Iroh(s) => s.read_to_end(size_limit).await,
         }
     }
 
@@ -177,6 +217,7 @@ impl RecvStream {
     pub fn stop(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
         match &mut self.inner {
             RecvBackend::Quic(s) => s.stop(code),
+            RecvBackend::Iroh(s) => s.stop(code),
         }
     }
 }
@@ -189,6 +230,7 @@ impl AsyncRead for RecvStream {
     ) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             RecvBackend::Quic(s) => AsyncRead::poll_read(Pin::new(s), cx, buf),
+            RecvBackend::Iroh(s) => AsyncRead::poll_read(Pin::new(s), cx, buf),
         }
     }
 }

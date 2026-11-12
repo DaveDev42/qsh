@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{ConnectError, ConnectionError, DatagramError, ExportError};
 use crate::identity::{CertificateDer, Fingerprint, Principal};
+use crate::iroh_backend::IrohConn;
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
 use crate::peer_addr::PeerAddr;
 pub use crate::quinn_backend::config::transport_config_debug;
@@ -290,6 +291,10 @@ pub enum SetupError {
         #[source]
         source: std::io::Error,
     },
+    /// The iroh endpoint could not be set up (the identity is not an
+    /// Ed25519 key, an address or URL did not parse, the bind failed).
+    #[error("iroh endpoint: {0}")]
+    Iroh(String),
 }
 
 /// Errors from a dial attempt, already classified for the ops layer.
@@ -569,6 +574,7 @@ impl LocalClose {
 #[derive(Clone, Debug)]
 enum ConnBackend {
     Quic(QuicConn),
+    Iroh(IrohConn),
 }
 
 #[cfg(test)]
@@ -579,6 +585,7 @@ impl Connection {
     fn quic_for_test(&self) -> &quinn::Connection {
         match &self.inner {
             ConnBackend::Quic(c) => &c.0,
+            ConnBackend::Iroh(_) => panic!("quic_for_test on an iroh connection"),
         }
     }
 }
@@ -603,10 +610,26 @@ impl Connection {
         }
     }
 
+    /// Wrap an iroh connection whose peer key the trust store accepted.
+    /// There is no certificate chain; the peer is its key.
+    pub(crate) fn from_iroh(conn: IrohConn, role: PeerRole, verified: VerifiedPeer) -> Self {
+        Self {
+            peer_fingerprint: Some(conn.peer()),
+            peer_chain: Arc::from(Vec::new()),
+            peer_role: role,
+            local_close: Arc::new(Mutex::new(LocalClose::default())),
+            inner: ConnBackend::Iroh(conn),
+            id: next_connection_id(),
+            principal: verified.principal,
+            auth_path: verified.auth_path,
+        }
+    }
+
     /// Which transport the connection runs over.
     pub fn transport_kind(&self) -> TransportKind {
         match &self.inner {
             ConnBackend::Quic(c) => c.kind(),
+            ConnBackend::Iroh(c) => c.kind(),
         }
     }
 
@@ -614,6 +637,7 @@ impl Connection {
     pub fn caps(&self) -> TransportCaps {
         match &self.inner {
             ConnBackend::Quic(c) => c.caps(),
+            ConnBackend::Iroh(c) => c.caps(),
         }
     }
 
@@ -649,6 +673,11 @@ impl Connection {
     /// whose leaf no longer parses cannot be judged and is rejected
     /// (decision 5: undecidable means untrusted).
     pub fn reverify(&self, evaluator: &dyn TrustEvaluator) -> Result<VerifiedPeer, RejectReason> {
+        // An iroh peer has no certificate chain, only a key: re-judge it by
+        // pin (and the pairing window), as the handshake did.
+        if let ConnBackend::Iroh(c) = &self.inner {
+            return crate::iroh_backend::verify_iroh_peer(evaluator, &c.peer());
+        }
         reverify_chain(evaluator, &self.peer_chain, self.peer_role)
     }
 
@@ -690,7 +719,8 @@ impl Connection {
     /// migration; this is the current one).
     pub fn remote_address(&self) -> PeerAddr {
         match &self.inner {
-            ConnBackend::Quic(c) => PeerAddr::Socket(c.remote_address()),
+            ConnBackend::Quic(c) => c.remote_address(),
+            ConnBackend::Iroh(c) => c.remote_address(),
         }
     }
 
@@ -715,6 +745,10 @@ impl Connection {
                 let (send, recv) = c.open_bi().await?;
                 Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
             }
+            ConnBackend::Iroh(c) => {
+                let (send, recv) = c.open_bi().await?;
+                Ok((SendStream::from_iroh(send), RecvStream::from_iroh(recv)))
+            }
         }
     }
 
@@ -724,6 +758,10 @@ impl Connection {
             ConnBackend::Quic(c) => {
                 let (send, recv) = c.accept_bi().await?;
                 Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
+            }
+            ConnBackend::Iroh(c) => {
+                let (send, recv) = c.accept_bi().await?;
+                Ok((SendStream::from_iroh(send), RecvStream::from_iroh(recv)))
             }
         }
     }
@@ -736,6 +774,7 @@ impl Connection {
     pub fn max_datagram_size(&self) -> Option<usize> {
         match &self.inner {
             ConnBackend::Quic(c) => c.max_datagram_size(),
+            ConnBackend::Iroh(c) => c.max_datagram_size(),
         }
     }
 
@@ -748,6 +787,7 @@ impl Connection {
     pub fn send_datagram(&self, data: Bytes) -> Result<(), DatagramError> {
         match &self.inner {
             ConnBackend::Quic(c) => c.send_datagram(data),
+            ConnBackend::Iroh(c) => c.send_datagram(data),
         }
     }
 
@@ -756,6 +796,7 @@ impl Connection {
     pub async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {
         match &self.inner {
             ConnBackend::Quic(c) => c.read_datagram().await,
+            ConnBackend::Iroh(c) => c.read_datagram().await,
         }
     }
 
@@ -770,6 +811,7 @@ impl Connection {
         local.record(code, self.close_reason());
         match &self.inner {
             ConnBackend::Quic(c) => c.close(code, reason),
+            ConnBackend::Iroh(c) => c.close(code, reason),
         }
     }
 
@@ -777,6 +819,7 @@ impl Connection {
     pub async fn closed(&self) -> ConnectionError {
         match &self.inner {
             ConnBackend::Quic(c) => c.closed().await,
+            ConnBackend::Iroh(c) => c.closed().await,
         }
     }
 
@@ -784,6 +827,7 @@ impl Connection {
     pub fn close_reason(&self) -> Option<ConnectionError> {
         match &self.inner {
             ConnBackend::Quic(c) => c.close_reason(),
+            ConnBackend::Iroh(c) => c.close_reason(),
         }
     }
 
@@ -802,6 +846,7 @@ impl Connection {
     pub fn stats(&self) -> ConnStats {
         match &self.inner {
             ConnBackend::Quic(c) => c.stats(),
+            ConnBackend::Iroh(c) => c.stats(),
         }
     }
 
@@ -818,6 +863,7 @@ impl Connection {
     ) -> Result<(), ExportError> {
         match &self.inner {
             ConnBackend::Quic(c) => c.export_keying_material(output, label, context),
+            ConnBackend::Iroh(c) => c.export_keying_material(output, label, context),
         }
     }
 }
