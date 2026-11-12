@@ -9,7 +9,7 @@
 
 QSH는 QUIC 기반의 직접 연결형 원격 셸이다. SSH의 핵심 기능을 제공하면서 네트워크 변경과 일시적 단절에도 동일한 PTY 세션을 유지한다.
 
-중앙 서버나 relay 없이 동작하며, 사용자가 제공한 IP 주소나 hostname으로 연결한다. 그 아래의 네트워크 구성에는 관여하지 않는다.
+중앙 서버나 relay 없이 동작하며, 사용자가 제공한 IP 주소나 hostname으로 연결한다. 직결이 막힌 망을 위해 사용자가 켜는 relay route 하나(iroh relay, ADR-0061)를 둔다. 그 아래의 네트워크 구성에는 관여하지 않는다.
 
 > 한 번의 명령으로 접속하고, 연결이 끊겨도 같은 셸로 돌아온다.
 
@@ -32,13 +32,13 @@ QSH는 이를 해결하는 작은 원격 세션 primitive를 제공한다.
 5. 셸, 명령 실행, 포트 포워딩을 제공한다.
 6. 사람이 쓰는 CLI와 프로그램이 쓰는 JSON 인터페이스를 하나의 명령 체계로 제공한다.
 7. 단일 Rust 바이너리로 배포한다.
-8. relay 없이 완전히 동작한다.
+8. relay 없이 완전히 동작한다. relay route(ADR-0061)는 사용자가 켤 때만 쓰는 선택 사항이다.
 
 ## 4. 제품 원칙
 
 ### Direct first
 
-두 endpoint 사이에 IP 경로가 있거나, 둘 다 닿는 사용자의 qsh peer를 중개자로 써서 홀펀칭으로 경로를 열 수 있으면 제3자 서비스 없이 작동한다. 홀펀칭은 연결을 시작할 때 한 번 시도하고 실패하면 포기한다. relay는 코어에 포함하지 않는다(§14, ADR-0050).
+두 endpoint 사이에 IP 경로가 있거나, 둘 다 닿는 사용자의 qsh peer를 중개자로 써서 홀펀칭으로 경로를 열 수 있으면 제3자 서비스 없이 작동한다. 홀펀칭은 연결을 시작할 때 한 번 시도하고 실패하면 포기한다. relay는 사용자가 켜는 iroh relay route 하나만 코어에 둔다(§14, ADR-0061). 기본 route 목록에는 들어가지 않는다.
 
 ### Configuration-free, interactive, SSH-compatible
 
@@ -111,7 +111,7 @@ qsh <name>                      # 새 세션
 qsh attach <name>/<session_id>  # 재attach
 ```
 
-역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이 제약은 지금도 유효하다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. relay는 만들지 않는다. 홀펀칭(§14, ADR-0054)은 이 controller를 중개자로 쓰므로, target이 닿지 못하는 controller는 펀칭할 길도 없다. 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
+역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이 제약은 지금도 유효하다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. 직결 경로가 없으면 사용자가 켠 iroh relay route(ADR-0061)로 닿을 수 있다. 홀펀칭(§14, ADR-0054)은 이 controller를 중개자로 쓰므로, target이 닿지 못하는 controller는 펀칭할 길도 없다. 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
 
 > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
 >
@@ -369,6 +369,8 @@ qsh personal-mac --relay auto
 ```
 
 Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위해 logical session identity를 transport connection과 분리하되, MVP에는 relay 구현이나 negotiation을 포함하지 않는다.
+
+2026-11-13 ADR-0061로 relay 하나가 코어에 들어왔다. 별도 relay 제품을 만드는 대신 iroh relay(TLS 위 WebSocket, 기본 n0 공용 relay, 자가 운영 `iroh-relay`로 바꿀 수 있음)를 사용자가 켜는 route로 받는다. 위 조건(payload와 private key를 보지 못함, 기본 접속 형태와 endpoint identity 유지)은 그대로다. 안쪽 연결은 pin으로 인증한 QUIC이고, EndpointId가 곧 qsh 신원 키다. 아래 `--relay auto` 예시는 ADR-0061 구현이 정하는 CLI 형태로 바뀔 수 있다.
 
 `-J` jump chaining(ADR-0056)은 이 절의 relay가 아니다. 사용자가 직접 고른 qsh peer를 지나는 것이고, 안쪽 연결은 client와 끝단 사이의 QUIC 연결이라 중간 peer는 payload와 endpoint private key를 보지 못한다. 별도 제품도 아니고 `--relay`의 negotiation도 없으며, 사용자가 `-J`를 줄 때만 쓰인다.
 
