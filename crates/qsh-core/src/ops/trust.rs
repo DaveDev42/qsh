@@ -417,6 +417,79 @@ impl Ops {
         Ok(TrustSetRendezvousData { peer })
     }
 
+    /// `trust.set_iroh` — turn the iroh relay route on or off for one pin
+    /// (`qsh trust iroh <name> [--relay <url>] [--key <hex>] [--off]`,
+    /// `docs/CLI.md` §6.11, ADR-0061 decisions 1 and 11).
+    ///
+    /// A local op with no authorization, locked like [`Self::trust_set_jump`].
+    /// It leaves no audit record: the field only says where to go, it grants
+    /// nothing. `--off` removes `routes` and `relay`; the `key` stays, since
+    /// it is a fact about the pin's identity and not a choice of route.
+    ///
+    /// Errors: `--relay` with `--off`, a relay that is not an `https` URL, a
+    /// key that is not 64 hex characters or whose SPKI SHA-256 is not the
+    /// pin's fingerprint, or nothing to do at all is `INVALID_ARGUMENT`; a
+    /// `[[ca]]` name is `UNSUPPORTED` (`details.iroh.reason`:
+    /// `private_ca_unsupported`) and an unknown name `HOST_NOT_FOUND`; an
+    /// unreadable `trust.toml` is `CONFIG_ERROR`. Setting what the pin
+    /// already holds writes nothing.
+    pub fn trust_set_iroh(&self, req: TrustSetIrohReq) -> Result<TrustSetIrohData, OpError> {
+        use crate::trust::iroh_pin;
+        let invalid = |message: String| {
+            OpError::new(ErrorCode::InvalidArgument, message).with_retryable(false)
+        };
+        if req.off && req.relay.is_some() {
+            return Err(invalid("--relay and --off cannot be given together".into()));
+        }
+        if let Some(relay) = &req.relay {
+            iroh_pin::validate_relay_url(relay)
+                .map_err(|why| invalid(format!("--relay: {why}")))?;
+        }
+        let key = match &req.key {
+            Some(text) => Some(
+                iroh_pin::parse_key_hex(text).map_err(|why| invalid(format!("--key: {why}")))?,
+            ),
+            None => None,
+        };
+        let path = self.paths.trust_file();
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let Some(pin) = store.find(&req.name) else {
+            if store.cas().iter().any(|ca| ca.name == req.name) {
+                return Err(crate::iroh_settings::unsupported_private_ca(&req.name));
+            }
+            return Err(OpError::new(
+                ErrorCode::HostNotFound,
+                format!("{:?} is not a pinned peer", req.name),
+            )
+            .with_retryable(false));
+        };
+        if let Some(key) = &key
+            && !iroh_pin::key_matches(&iroh_pin::key_to_hex(key), &pin.fingerprint)
+        {
+            return Err(invalid(format!(
+                "--key: that key's SPKI SHA-256 is not the fingerprint pinned for {:?}",
+                req.name
+            )));
+        }
+        let change = iroh_pin::IrohPinChange {
+            off: req.off,
+            relay: req.relay.clone(),
+            key,
+        };
+        let (peer, changed) = store.set_iroh(&req.name, &change).map_err(|_| {
+            OpError::new(
+                ErrorCode::HostNotFound,
+                format!("{:?} is not a pinned peer", req.name),
+            )
+            .with_retryable(false)
+        })?;
+        if changed {
+            store.save(&path)?;
+        }
+        Ok(TrustSetIrohData { peer, changed })
+    }
+
     /// `trust.set_jump` — replace the chain of pinned peers a host is reached
     /// through (`qsh trust jump <name> [<hop>...] [--clear]`, `docs/CLI.md`
     /// §6.11, ADR-0056 decision 20).

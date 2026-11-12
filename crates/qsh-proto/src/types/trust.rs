@@ -71,6 +71,28 @@ pub struct TrustPeer {
     /// prints as before. Additive (`docs/CLI.md` §10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub jump: Vec<String>,
+    /// Route kinds this device tries to reach this host after the direct
+    /// dial and hole punching (ADR-0061 decision 1): the only value today is
+    /// `"iroh"`. An open string list; a value this build does not know is
+    /// kept and skipped. Set with `trust.set_iroh`. Omitted when empty, so
+    /// a pin without it reads and prints as before and never touches a
+    /// relay. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<String>,
+    /// The relay (`https://...`) this host's iroh endpoint is homed on
+    /// (ADR-0061 decision 11). Read only when `routes` has `iroh`; without
+    /// it the device's `[iroh].relay_url` applies. Omitted when unset.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    /// The host's Ed25519 public key as 64 lowercase hex characters, which
+    /// is its iroh endpoint id (ADR-0061 decision 3). The pin's
+    /// `fingerprint` is the SPKI SHA-256 of this key, so a key whose
+    /// fingerprint differs makes the pin file a `CONFIG_ERROR`. Omitted
+    /// until a direct connection, `trust.set_iroh` or a pairing records it.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// Request for `trust.add`.
@@ -302,6 +324,37 @@ pub struct TrustSetJumpData {
     /// The pin after the call.
     pub peer: TrustPeer,
     /// `false` when the pin already held exactly this chain: nothing was
+    /// written.
+    pub changed: bool,
+}
+
+/// Request for `trust.set_iroh` (`qsh trust iroh <name> [--relay <url>]
+/// [--key <hex>] [--off]`, ADR-0061 decisions 1 and 11): turns the iroh
+/// relay route on or off for one pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetIrohReq {
+    /// The pinned host. A `[[ca]]` name is `UNSUPPORTED`, an unknown name
+    /// `HOST_NOT_FOUND`.
+    pub name: String,
+    /// The relay URL (`https://...`) the host's iroh endpoint is homed on.
+    /// Not combined with `off`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    /// The host's Ed25519 public key, 64 hex characters. Its SPKI SHA-256
+    /// must equal the pin's fingerprint (`INVALID_ARGUMENT` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Remove `routes` and `relay` from the pin. The `key` stays.
+    #[serde(default)]
+    pub off: bool,
+}
+
+/// Data payload of `trust.set_iroh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSetIrohData {
+    /// The pin after the call.
+    pub peer: TrustPeer,
+    /// `false` when the pin already held exactly this state: nothing was
     /// written.
     pub changed: bool,
 }

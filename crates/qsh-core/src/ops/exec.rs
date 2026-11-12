@@ -198,6 +198,7 @@ impl Ops {
                         &target.address,
                         &target.server_name,
                         target.punch.as_ref(),
+                        target.iroh.as_ref(),
                         target.jump.as_ref(),
                         target.learn.as_ref(),
                         &device_name,
@@ -269,7 +270,7 @@ impl Ops {
                 Ok(route) => route,
                 Err(err) if err.code == ErrorCode::HostNotFound => {
                     let trust = self.open_trust()?;
-                    return match self.punch_only_target(host, &identity, &trust) {
+                    return match self.punch_only_target(host, &identity, &trust)? {
                         Some(target) => Ok(PeerRoute::Forward(target)),
                         None => Err(err),
                     };
@@ -281,6 +282,7 @@ impl Ops {
                 let trust = self.open_trust()?;
                 let server_name = server_name_for(&address);
                 let punch = self.punch_plan(host, &identity, &trust)?;
+                let iroh = self.iroh_plan(host, &identity, &trust)?;
                 let learn = self.hint_learner(&trust);
                 let binding = Some(crate::ops::peer_binding(&trust.snapshot(), host)?);
                 Ok(PeerRoute::Forward(PeerTarget {
@@ -292,6 +294,7 @@ impl Ops {
                     learn,
                     jump: None,
                     binding,
+                    iroh,
                 }))
             }
             HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
@@ -335,6 +338,7 @@ async fn exec_async(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    iroh: Option<&Arc<crate::iroh_settings::IrohPlan>>,
     jump: Option<&Arc<crate::jump::JumpPlan>>,
     learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
@@ -349,6 +353,7 @@ async fn exec_async(
         address,
         server_name,
         punch,
+        iroh,
         jump,
         learn,
         device_name,
@@ -391,6 +396,7 @@ async fn exec_async_resolving(
         None,
         None,
         None,
+        None,
         device_name,
         spec,
         stdin,
@@ -411,6 +417,7 @@ async fn exec_async_tracked(
     address: &str,
     server_name: &str,
     punch: Option<&Arc<crate::punch::PunchPlan>>,
+    iroh: Option<&Arc<crate::iroh_settings::IrohPlan>>,
     jump: Option<&Arc<crate::jump::JumpPlan>>,
     learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
@@ -435,6 +442,7 @@ async fn exec_async_tracked(
             address,
             server_name,
             punch,
+            iroh,
             jump,
             qsh_transport::TransportTuning::default(),
             resolver,

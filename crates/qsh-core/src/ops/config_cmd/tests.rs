@@ -438,6 +438,14 @@ fn every_field_populated() -> Config {
         agent: crate::config::AgentConfig {
             forward: Some(crate::config::AgentForwardMode::No),
         },
+        iroh: crate::iroh_settings::IrohSection {
+            enable: Some(true),
+            relay_url: Some(String::new()),
+            bind_port: Some(1),
+            mode: Some(crate::iroh_settings::IrohMode::Auto),
+            proxy: Some(crate::iroh_settings::IrohProxy::Env),
+            head_start_ms: Some(1),
+        },
     }
 }
 
@@ -450,6 +458,8 @@ fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
         "interactive.predict" => "always".into(),
         "interactive.status_line" => "off".into(),
         "agent.forward" => "yes".into(),
+        "iroh.relay_url" => "https://relay.example".into(),
+        "iroh.proxy" => "off".into(),
         "recovery.probe_interval_ms" => "250".into(),
         "recovery.min_dead_after_ms" => "1000".into(),
         "recovery.strikes" => "3".into(),

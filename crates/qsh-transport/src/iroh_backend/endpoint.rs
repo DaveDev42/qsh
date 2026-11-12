@@ -99,6 +99,11 @@ pub struct IrohConfig {
     /// ephemeral ports. A server that wants a fixed port names it here
     /// (`0.0.0.0:PORT`, and `[::]:PORT` for IPv6).
     pub bind: Vec<SocketAddr>,
+    /// Send the relay connection through the HTTP(S) proxy the environment
+    /// names (`HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`).
+    /// Off by default, so an endpoint built without saying so never reads
+    /// the environment (`[iroh].proxy`, `docs/CLI.md` §6.23).
+    pub proxy_from_env: bool,
 }
 
 /// Whom to dial: the peer's Ed25519 public key plus however to reach it.
@@ -216,11 +221,18 @@ impl IrohEndpoint {
         if let Some(url) = &relay {
             builder = builder.relay_mode(RelayMode::custom([url.clone()]));
         }
+        if config.proxy_from_env {
+            builder = builder.proxy_from_env();
+        }
         if !config.bind.is_empty() {
             builder = builder.clear_ip_transports();
             for addr in &config.bind {
+                // The IPv6 wildcard may fail to bind on a host without IPv6
+                // (iroh's own default socket is optional the same way);
+                // every other address is required.
+                let optional = addr.ip().is_unspecified() && addr.is_ipv6();
                 builder = builder
-                    .bind_addr(*addr)
+                    .bind_addr_with_opts(*addr, ie::BindOpts::default().set_is_required(!optional))
                     .map_err(|e| setup_err("bind address", &e))?;
             }
         }

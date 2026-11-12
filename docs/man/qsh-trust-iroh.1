@@ -1,0 +1,63 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-trust-iroh 1  "iroh 0.6.0" 
+.SH NAME
+qsh\-trust\-iroh \- Turn the iroh relay route on or off for a pinned host (`docs/CLI.md` §6.11, ADR\-0061 decisions 1 and 11). The host is then also tried over an iroh relay when the direct dial and the punch have not stood within `[iroh].head_start_ms`, or at once when the pin has no address. It needs the host\*(Aqs Ed25519 public key (`\-\-key`, 64 hex characters, whose SPKI SHA\-256 must be the pin\*(Aqs fingerprint). `\-\-relay` names the relay the host is homed on (`https://...`); without it `[iroh].relay_url` applies. `\-\-off` removes the route; the key stays. Takes effect from the next command. A private CA root cannot take this route
+.SH SYNOPSIS
+\fBqsh trust iroh\fR [\fB\-\-json\fR] [\fB\-\-relay\fR] [\fB\-\-jsonl\fR] [\fB\-\-key\fR] [\fB\-\-off\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-no\-iroh\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
+.SH DESCRIPTION
+Turn the iroh relay route on or off for a pinned host (`docs/CLI.md` §6.11, ADR\-0061 decisions 1 and 11). The host is then also tried over an iroh relay when the direct dial and the punch have not stood within `[iroh].head_start_ms`, or at once when the pin has no address. It needs the host\*(Aqs Ed25519 public key (`\-\-key`, 64 hex characters, whose SPKI SHA\-256 must be the pin\*(Aqs fingerprint). `\-\-relay` names the relay the host is homed on (`https://...`); without it `[iroh].relay_url` applies. `\-\-off` removes the route; the key stays. Takes effect from the next command. A private CA root cannot take this route
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-relay\fR \fI<URL>\fR
+The relay the host\*(Aqs iroh endpoint is homed on
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-key\fR \fI<HEX>\fR
+The host\*(Aqs Ed25519 public key, 64 hex characters
+.TP
+\fB\-\-off\fR
+Remove the iroh route (`routes` and `relay`) from the pin
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-\-no\-ssh\fR
+Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
+.TP
+\fB\-\-install\-remote\fR
+When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
+.TP
+\fB\-\-no\-install\-remote\fR
+Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`
+.TP
+\fB\-\-no\-punch\fR
+Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-no\-iroh\fR
+Never take the iroh relay route on this command, whatever the host\*(Aqs pin `routes` and `[iroh].mode` say, and contact no relay (`docs/CLI.md` §7, ADR\-0061 decision 1). Not stored
+.TP
+\fB\-\-rendezvous\fR \fI<PEER>\fR
+Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
+.TP
+\fB\-\-jump\fR \fI<HOPS>\fR
+Reach the host through these pinned peers, first hop first, for this command: `a` or `a,b` (`docs/CLI.md` §7, ADR\-0056 decision 20). Each hop is the name of a pin; a `user@` or `:port` on it is ignored by the QUIC path. `none` goes the ordinary way even when the host\*(Aqs pin has a `jump`. Wins over `\-o ProxyJump` and over the pin\*(Aqs own `jump`. Not stored. The short `\-J` is the same flag on the commands that take it
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fINAME\fR>
+The pinned host
+.SH VERSION
+v0.6.0

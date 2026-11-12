@@ -57,8 +57,8 @@ use qsh_core::{
     SessionAttachOp, SessionCloseOp, SessionFilter, SessionGetOp, SessionListOp, SessionOpenOp,
     SessionReadOp, SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp,
     TrustAddCaOp, TrustAddOp, TrustAllowOp, TrustDenyOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TrustRenameOp, TrustSetJumpOp, TrustSetRendezvousOp, TrustSetRoleOp, TrustSshPreviewOp,
-    TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    TrustRenameOp, TrustSetIrohOp, TrustSetJumpOp, TrustSetRendezvousOp, TrustSetRoleOp,
+    TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
     cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
     read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
@@ -70,8 +70,8 @@ use qsh_proto::{
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
     SessionResizeReq, SessionWriteReq, SetupRole, SetupRunReq, SetupStatus, SetupStepId,
     TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustAllowReq, TrustDenyReq, TrustInviteReq,
-    TrustRenameReq, TrustSetJumpReq, TrustSetRendezvousReq, TrustSetRoleReq, TrustSshPreviewReq,
-    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    TrustRenameReq, TrustSetIrohReq, TrustSetJumpReq, TrustSetRendezvousReq, TrustSetRoleReq,
+    TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -536,6 +536,9 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         learn_hints: true,
         ..qsh_core::punch::ClientPunch::default()
     });
+    // `--no-iroh` (ADR-0061): this command never takes the relay route.
+    // `[iroh]` is read by `Ops` when a route is built.
+    let ops = ops.with_no_iroh(cli.no_iroh);
     // `[transport].adaptive` pins the bulk governor of every connection this
     // process dials, one-shot ops included (ADR-0052 decision 15).
     ops.pin_process_transport();
@@ -665,6 +668,22 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 clear: *clear,
             }),
             human::print_trust_set_jump,
+        ),
+        Command::Trust(TrustCmd::Iroh {
+            name,
+            relay,
+            key,
+            off,
+        }) => finish(
+            cli,
+            TrustSetIrohOp::COMMAND,
+            ops.trust_set_iroh(TrustSetIrohReq {
+                name: name.clone(),
+                relay: relay.clone(),
+                key: key.clone(),
+                off: *off,
+            }),
+            human::print_trust_set_iroh,
         ),
         Command::Trust(TrustCmd::Rendezvous { name, peers, clear }) => finish(
             cli,
@@ -3318,6 +3337,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Trust(TrustCmd::Iroh { .. }) => TrustSetIrohOp::COMMAND,
         Command::Trust(TrustCmd::Jump { .. }) => TrustSetJumpOp::COMMAND,
         Command::Trust(TrustCmd::Rendezvous { .. }) => TrustSetRendezvousOp::COMMAND,
         Command::Trust(TrustCmd::SetRole { .. }) => TrustSetRoleOp::COMMAND,

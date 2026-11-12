@@ -492,6 +492,8 @@ pub struct Config {
     pub punch: PunchConfig,
     /// `[agent]` — agent forwarding (ADR-0055 decision 18).
     pub agent: AgentConfig,
+    /// `[iroh]` — the iroh relay route (ADR-0061 decisions 2, 10 and 11).
+    pub iroh: crate::iroh_settings::IrohSection,
 }
 
 /// `[agent].forward` value (ADR-0055 decision 18).
@@ -1616,6 +1618,7 @@ impl Config {
         self.serve.on_demand_idle()?;
         self.ssh.program()?;
         self.ssh.remote_qsh()?;
+        self.iroh.settings()?;
         Ok(())
     }
 

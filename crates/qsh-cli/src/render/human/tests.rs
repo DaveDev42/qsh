@@ -55,6 +55,9 @@ fn format_trust_pin_line_sanitizes_the_name_and_keeps_the_fingerprint_intact() {
         remote_qsh: None,
         rendezvous: Vec::new(),
         jump: Vec::new(),
+        routes: Vec::new(),
+        relay: None,
+        key: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -87,6 +90,9 @@ fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
         remote_qsh: None,
         rendezvous: Vec::new(),
         jump: Vec::new(),
+        routes: Vec::new(),
+        relay: None,
+        key: None,
     };
 
     let line = format_trust_pin_line("pinned", &peer);
@@ -148,6 +154,9 @@ fn role_cell_shows_the_role_or_none_legacy() {
         remote_qsh: None,
         rendezvous: Vec::new(),
         jump: Vec::new(),
+        routes: Vec::new(),
+        relay: None,
+        key: None,
     };
     assert_eq!(role_cell(&peer), "(none, legacy)");
     peer.role = Some("read-only".to_string());
@@ -173,6 +182,9 @@ fn grant_summary_lists_present_keys_and_is_empty_otherwise() {
         remote_qsh: None,
         rendezvous: Vec::new(),
         jump: Vec::new(),
+        routes: Vec::new(),
+        relay: None,
+        key: None,
     };
     assert_eq!(grant_summary(&peer), None);
     peer.grants = Some(vec!["file.read".to_string(), "exec.run".to_string()]);

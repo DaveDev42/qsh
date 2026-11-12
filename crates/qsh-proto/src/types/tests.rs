@@ -119,6 +119,9 @@ fn trust_types_match_documented_shape() {
         remote_qsh: None,
         rendezvous: Vec::new(),
         jump: Vec::new(),
+        routes: Vec::new(),
+        relay: None,
+        key: None,
     };
     let add = TrustAddData {
         peer: peer.clone(),
