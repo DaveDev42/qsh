@@ -97,7 +97,7 @@ impl qsh_transport::TrustEvaluator for AlwaysPairingOpen {
         None
     }
 
-    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+    fn ca_roots(&self) -> Vec<CertificateDer> {
         Vec::new()
     }
 

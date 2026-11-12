@@ -1,5 +1,5 @@
 //! [`PacketPipe`]: an in-memory datagram socket for a QUIC endpoint, and the
-//! [`Dialer::dial_over_pipe`](super::Dialer::dial_over_pipe) that runs a
+//! [`Dialer::dial_over_pipe`](crate::endpoint::Dialer::dial_over_pipe) that runs a
 //! client-only endpoint on it (ADR-0056 decisions 2, 4, 5 and 6; MTU numbers
 //! from ADR-0057).
 //!
@@ -93,7 +93,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The inner endpoint's side of a pipe. Pass it to
-/// [`Dialer::dial_over_pipe`](super::Dialer::dial_over_pipe); it becomes the
+/// [`Dialer::dial_over_pipe`](crate::endpoint::Dialer::dial_over_pipe); it becomes the
 /// endpoint's socket.
 pub struct PacketPipe {
     socket: Arc<PipeSocket>,
@@ -152,7 +152,7 @@ impl PacketPipe {
         )
     }
 
-    pub(super) fn into_socket(self) -> Arc<dyn AsyncUdpSocket> {
+    pub(crate) fn into_socket(self) -> Arc<dyn AsyncUdpSocket> {
         self.socket
     }
 }

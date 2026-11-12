@@ -55,7 +55,7 @@ pub struct TestCa {
     key: rcgen::KeyPair,
     params: rcgen::CertificateParams,
     /// DER of the CA root (for `StaticTrust::with_ca`).
-    pub root_der: CertificateDer<'static>,
+    pub root_der: CertificateDer,
 }
 
 /// Generate a private CA root.
