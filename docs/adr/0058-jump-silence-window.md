@@ -37,3 +37,4 @@ M26 수용 시험(2026-11-10)에서 건강한 datagram 채널이 스트림으로
 
 - 2026-11-10 초안(main 세션, M26 수용 시험의 측정에서).
 - 2026-11-10 Dave가 승인했다.
+- 2026-11-13 Dave가 결정 1의 개정을 승인했다. 받은 datagram 뒤 첫 송신은 침묵 시계를 시작하지 않는다(그 송신은 대개 받은 datagram에 대한 ack-only 응답이고 이것에는 되돌아오는 datagram이 없다). 이 송신 뒤의 둘째 송신부터 시계가 시작되므로 진짜 blackhole은 시한 안에 그대로 탐지된다. "시한보다 긴 틈 뒤 시계 되돌리기"는 srtt가 큰 경로에서 blackhole의 PTO 간격이 시한을 넘어 탐지를 막을 수 있어 기각했다. 시험: `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap`.
