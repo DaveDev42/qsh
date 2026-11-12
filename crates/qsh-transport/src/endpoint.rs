@@ -837,6 +837,18 @@ enum ConnBackend {
     Quic(QuicConn),
 }
 
+#[cfg(test)]
+impl Connection {
+    /// The quinn connection, for this crate's own backend unit tests
+    /// (handshake data, keep-alive ping counters). Compiled only under
+    /// `cfg(test)`: no caller outside `qsh-transport` can reach quinn.
+    fn quic_for_test(&self) -> &quinn::Connection {
+        match &self.inner {
+            ConnBackend::Quic(c) => &c.0,
+        }
+    }
+}
+
 impl Connection {
     /// Wrap a handshaken quinn connection whose peer the verifier accepted.
     fn from_quic(
@@ -1056,18 +1068,6 @@ impl Connection {
     pub fn stats(&self) -> ConnStats {
         match &self.inner {
             ConnBackend::Quic(c) => c.stats(),
-        }
-    }
-
-    /// The underlying quinn connection: a QUIC-backend escape hatch for
-    /// `qsh-transport`'s own backend tests (handshake data, keep-alive ping
-    /// counters). Not part of the supported surface — `qsh-core` and
-    /// `qsh-cli` must go through the neutral methods on this type, and
-    /// `cargo xtask arch` bars them from naming quinn at all.
-    #[doc(hidden)]
-    pub fn quinn(&self) -> &quinn::Connection {
-        match &self.inner {
-            ConnBackend::Quic(c) => &c.0,
         }
     }
 

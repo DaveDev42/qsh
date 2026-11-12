@@ -14,8 +14,7 @@ use qsh_proto::wire::{
 use qsh_transport::endpoint::{KEEP_ALIVE_INTERVAL, MAX_IDLE_TIMEOUT};
 use qsh_transport::{
     CertificateDer, Connection, DialError, Dialer, Fingerprint, FramedRecv, FramedSend,
-    FramedStream, Listener, LocalIdentity, Principal, RESET_KEY_LEN, RejectReason, StaticTrust,
-    StreamError, TransportTuning,
+    FramedStream, Listener, LocalIdentity, Principal, RejectReason, StaticTrust, StreamError,
 };
 
 fn make_identity() -> (LocalIdentity, Fingerprint) {
@@ -395,52 +394,6 @@ async fn oversize_control_frame_rejected_and_encode_refuses_to_send_over_cap() {
     dialed.connection.close(0, b"encode-refuses case done");
 }
 
-/// `[transport].keep_alive_ms` (ADR-0021 decision 1) reaches quinn on both
-/// ends: a dialer and a listener built with a one-second tuning each send
-/// keep-alive PINGs on an idle connection well inside the default 15 s,
-/// which would have sent none in this window.
-#[tokio::test]
-async fn a_tuned_keep_alive_pings_an_idle_connection_from_both_ends() {
-    let (server_id, server_fp) = make_identity();
-    let (client_id, client_fp) = make_identity();
-    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
-    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
-    let tuning = TransportTuning {
-        keep_alive: Duration::from_secs(1),
-    };
-
-    let listener = Listener::bind_with_reset_key(
-        loopback(),
-        server_id,
-        Arc::new(server_trust),
-        &[7u8; RESET_KEY_LEN],
-        tuning,
-    )
-    .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let incoming = listener.accept().await.expect("one connection");
-        let conn = incoming.accept().await.expect("handshake");
-        tokio::time::sleep(Duration::from_millis(3500)).await;
-        conn.quinn().stats().frame_tx.ping
-    });
-
-    let dialer = Dialer::new(client_id, Arc::new(client_trust)).with_tuning(tuning);
-    let dialed = dialer.dial(addr, "127.0.0.1").await.expect("dial");
-    tokio::time::sleep(Duration::from_millis(3500)).await;
-    let client_pings = dialed.connection.quinn().stats().frame_tx.ping;
-    let server_pings = server.await.unwrap();
-    assert!(
-        client_pings >= 2,
-        "dialer sent {client_pings} keep-alive pings in 3.5 s at a 1 s interval"
-    );
-    assert!(
-        server_pings >= 2,
-        "listener sent {server_pings} keep-alive pings in 3.5 s at a 1 s interval"
-    );
-    dialed.connection.close(0, b"done");
-}
-
 #[tokio::test]
 async fn keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips() {
     assert_eq!(KEEP_ALIVE_INTERVAL, Duration::from_secs(15));
@@ -556,43 +509,6 @@ async fn rx_frames_moves_on_authenticated_stream_frames() {
     ctl.send.finish().unwrap();
     dialed.connection.close(0, b"rx_frames case done");
     server.await.unwrap();
-}
-
-/// ADR-0040 decision 2: dialing by a hostname puts no SNI in the
-/// ClientHello, and pin verification still succeeds. quinn's rustls
-/// `HandshakeData` on the server side carries the ClientHello's
-/// `server_name()`.
-#[tokio::test]
-async fn client_hello_carries_no_sni_for_a_hostname_address() {
-    let (server_id, server_fp) = make_identity();
-    let (client_id, client_fp) = make_identity();
-    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
-    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
-
-    let listener = Listener::bind(loopback(), server_id, Arc::new(server_trust)).unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let incoming = listener.accept().await.expect("one connection");
-        let conn = incoming.accept().await.expect("handshake");
-        let data = conn
-            .quinn()
-            .handshake_data()
-            .expect("handshake data")
-            .downcast::<quinn::crypto::rustls::HandshakeData>()
-            .expect("rustls handshake data");
-        let sni = data.server_name.clone();
-        conn.close(0, b"done");
-        sni
-    });
-
-    let dialer = Dialer::new(client_id, Arc::new(client_trust));
-    let dialed = dialer.dial(addr, "localhost").await.expect("dial");
-    assert_eq!(
-        dialed.connection.principal(),
-        &Principal::Device("box".into())
-    );
-    let sni = server.await.unwrap();
-    assert_eq!(sni, None, "hostname must not appear as SNI");
 }
 
 /// Handshake a loopback pair on port 0. Returns (server side, client side).

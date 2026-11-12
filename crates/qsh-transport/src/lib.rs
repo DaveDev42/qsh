@@ -25,9 +25,9 @@
 //! datagrams): stream identity is always the in-band `StreamHeader`
 //! (`docs/design/protocol.md` §7, §14). QUIC DATAGRAM is enabled as an
 //! optional carrier only (`Connection::send_datagram`, ADR-0052 decision 7):
-//! every datagram message has a stream twin. The public surface names no quinn
-//! type but the hidden `Connection::quinn` test escape hatch
-//! (`docs/adr/0043-no-tcp-fallback.md` decision 3): [`Connection`],
+//! every datagram message has a stream twin. The connection surface names no quinn
+//! type (`docs/adr/0043-no-tcp-fallback.md` decision 3, ADR-0061 decision 5;
+//! the `Connection::quinn` escape hatch is gone): [`Connection`],
 //! [`Endpoint`], [`SendStream`] and [`RecvStream`] are closed enums over the
 //! backends. QUIC is the only one: ADR-0043 withdrew the TCP fallback and
 //! kept this surface as the boundary that confines quinn to this crate.

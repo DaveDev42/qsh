@@ -64,7 +64,7 @@ pub enum SocketSource {
     /// cannot make an IPv6 socket. Must be used inside a tokio runtime.
     Os,
     /// A simulated socket (`qsh_testkit::netsim`). Not part of the stable
-    /// surface; the same escape-hatch status as `Connection::quinn`.
+    /// surface: it carries quinn's socket trait for the test harness only.
     #[doc(hidden)]
     Virtual(Arc<dyn AsyncUdpSocket>),
 }

@@ -1050,3 +1050,89 @@ async fn a_dial_bound_to_the_ca_reaches_a_ca_leaf_and_a_pin_does_not_follow_a_ne
         .expect("the leaf's own fingerprint is accepted");
     task.abort();
 }
+
+/// `[transport].keep_alive_ms` (ADR-0021 decision 1) reaches quinn on both
+/// ends: a dialer and a listener built with a one-second tuning each send
+/// keep-alive PINGs on an idle connection well inside the default 15 s,
+/// which would have sent none in this window.
+#[tokio::test]
+async fn a_tuned_keep_alive_pings_an_idle_connection_from_both_ends() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+    let tuning = TransportTuning {
+        keep_alive: Duration::from_secs(1),
+    };
+
+    let listener = Listener::bind_with_reset_key(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(server_trust),
+        &[7u8; crate::RESET_KEY_LEN],
+        tuning,
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let incoming = listener.accept().await.expect("one connection");
+        let conn = incoming.accept().await.expect("handshake");
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        conn.quic_for_test().stats().frame_tx.ping
+    });
+
+    let dialer = Dialer::new(client_id, Arc::new(client_trust)).with_tuning(tuning);
+    let dialed = dialer.dial(addr, "127.0.0.1").await.expect("dial");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let client_pings = dialed.connection.quic_for_test().stats().frame_tx.ping;
+    let server_pings = server.await.unwrap();
+    assert!(
+        client_pings >= 2,
+        "dialer sent {client_pings} keep-alive pings in 3.5 s at a 1 s interval"
+    );
+    assert!(
+        server_pings >= 2,
+        "listener sent {server_pings} keep-alive pings in 3.5 s at a 1 s interval"
+    );
+    dialed.connection.close(0, b"done");
+}
+
+/// ADR-0040 decision 2: dialing by a hostname puts no SNI in the
+/// ClientHello, and pin verification still succeeds. quinn's rustls
+/// `HandshakeData` on the server side carries the ClientHello's
+/// `server_name()`.
+#[tokio::test]
+async fn client_hello_carries_no_sni_for_a_hostname_address() {
+    let ((server_id, server_fp), (client_id, client_fp)) = test_pair();
+    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(server_trust),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let incoming = listener.accept().await.expect("one connection");
+        let conn = incoming.accept().await.expect("handshake");
+        let data = conn
+            .quic_for_test()
+            .handshake_data()
+            .expect("handshake data")
+            .downcast::<quinn::crypto::rustls::HandshakeData>()
+            .expect("rustls handshake data");
+        let sni = data.server_name.clone();
+        conn.close(0, b"done");
+        sni
+    });
+
+    let dialer = Dialer::new(client_id, Arc::new(client_trust));
+    let dialed = dialer.dial(addr, "localhost").await.expect("dial");
+    assert_eq!(
+        dialed.connection.principal(),
+        &Principal::Device("box".into())
+    );
+    let sni = server.await.unwrap();
+    assert_eq!(sni, None, "hostname must not appear as SNI");
+}
