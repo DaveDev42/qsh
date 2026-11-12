@@ -13,9 +13,9 @@ use qsh_proto::{
     IdentityMoveKeyData, IdentityMoveKeyReq, KeyStoreMode, SchemaData, TrustAcceptData,
     TrustAcceptReq, TrustAddCaData, TrustAddCaReq, TrustAddData, TrustAddReq, TrustAllowReq,
     TrustDenyReq, TrustGrantData, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetJumpData, TrustSetJumpReq,
-    TrustSetRendezvousData, TrustSetRendezvousReq, TrustSetRoleData, TrustSetRoleReq,
-    TrustSshPreviewData, TrustSshPreviewReq, VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSetIrohData, TrustSetIrohReq,
+    TrustSetJumpData, TrustSetJumpReq, TrustSetRendezvousData, TrustSetRendezvousReq,
+    TrustSetRoleData, TrustSetRoleReq, TrustSshPreviewData, TrustSshPreviewReq, VersionData,
 };
 use qsh_transport::{
     BoundTrust, DialError, Dialer, Fingerprint, PeerBinding, Principal, StaticTrust,
@@ -105,6 +105,10 @@ pub(crate) struct PeerTarget {
     /// whose every step compares the fingerprint to its own pin
     /// (ADR-0056 decision 10).
     pub binding: Option<PeerBinding>,
+    /// The iroh relay route to this host, when the pin asks for it and this
+    /// command may take it (ADR-0061). Raced beside the direct dial and the
+    /// punch, or dialed alone for a pin with no address.
+    pub iroh: Option<Arc<crate::iroh_settings::IrohPlan>>,
 }
 
 impl PeerTarget {
@@ -129,11 +133,16 @@ impl PeerTarget {
                 let first = route::redial_deadline(
                     plan.first_punch.as_ref(),
                     !plan.step(0).address.is_empty(),
+                    None,
                 );
                 (first + std::time::Duration::from_secs(plan.hops.len() as u64))
                     .min(qsh_transport::default_dial_timeout())
             }
-            None => route::redial_deadline(self.punch.as_ref(), !self.address.is_empty()),
+            None => route::redial_deadline(
+                self.punch.as_ref(),
+                !self.address.is_empty(),
+                self.iroh.as_ref(),
+            ),
         }
     }
 }
@@ -535,6 +544,13 @@ impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
 }
 
+/// The `trust.set_iroh` operation (`docs/CLI.md` §6.11, ADR-0061 결정 1).
+pub struct TrustSetIrohOp;
+
+impl Operation for TrustSetIrohOp {
+    const COMMAND: &'static str = "trust.set_iroh";
+}
+
 /// The `trust.set_jump` operation (`docs/CLI.md` §6.11, ADR-0056 결정 20).
 pub struct TrustSetJumpOp;
 
@@ -689,6 +705,13 @@ pub struct Ops {
     /// the `jump` of every pin and goes the ordinary way (ADR-0056 decision
     /// 20). Without it, a host whose pin has a `jump` is reached through it.
     jump_off: bool,
+    /// `--no-iroh`: this command never takes the iroh relay route, whatever
+    /// the pins' `routes` and `[iroh].mode` say ([`Self::with_no_iroh`],
+    /// ADR-0061 decision 1).
+    no_iroh: bool,
+    /// Extra roots for the relay's TLS certificate, set only by tests that
+    /// run their own relay ([`Self::with_iroh_relay_roots`]).
+    iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
 }
 
 impl std::fmt::Debug for Ops {
@@ -804,7 +827,102 @@ impl Ops {
             agent: None,
             jump: None,
             jump_off: false,
+            no_iroh: false,
+            iroh_relay_roots: Vec::new(),
         }
+    }
+
+    /// Trust `roots` for the iroh relay's TLS certificate in addition to the
+    /// operating system's store. A seam for tests that run their own relay
+    /// with a private certificate; no flag or config key reaches it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_iroh_relay_roots(mut self, roots: Vec<qsh_transport::CertificateDer>) -> Self {
+        self.iroh_relay_roots = roots;
+        self
+    }
+
+    /// `--no-iroh`: this process never takes the iroh relay route, which is
+    /// `[iroh].mode = "off"` for one command (ADR-0061 decision 1). It wins
+    /// over the key, and an `[iroh]` section that does not validate does not
+    /// stop such a command.
+    #[must_use]
+    pub fn with_no_iroh(mut self, no_iroh: bool) -> Self {
+        self.no_iroh = no_iroh;
+        self
+    }
+
+    /// The iroh settings in effect for this process: `[iroh]` validated and
+    /// defaulted, with the route turned off by `--no-iroh`. An `[iroh]`
+    /// section that does not validate is `CONFIG_ERROR`, unless `--no-iroh`
+    /// already switched the route off.
+    pub fn iroh_settings(&self) -> Result<crate::iroh_settings::IrohSettings, OpError> {
+        let settings = match self.config().and_then(|c| c.iroh.settings()) {
+            Ok(settings) => settings,
+            Err(_) if self.no_iroh => crate::iroh_settings::IrohSettings::default(),
+            Err(err) => return Err(err),
+        };
+        let settings = settings.with_relay_roots(self.iroh_relay_roots.clone());
+        Ok(if self.no_iroh {
+            settings.route_off()
+        } else {
+            settings
+        })
+    }
+
+    /// The plan to dial `host` over the iroh relay route, or `None` when this
+    /// command does not take that route to this host: `--no-iroh` or
+    /// `[iroh].mode = "off"`, a name with no pin, a pin whose `routes` lacks
+    /// `iroh`, or a pin with no recorded `key` (it cannot be dialed by key).
+    /// A pin without `routes` never reads `config.toml` here, so a command
+    /// that does not use the route is unchanged. Builds no endpoint and
+    /// touches no network.
+    pub(crate) fn iroh_plan(
+        &self,
+        host: &str,
+        identity: &LoadedIdentity,
+        trust: &Arc<SharedTrustStore>,
+    ) -> Result<Option<Arc<crate::iroh_settings::IrohPlan>>, OpError> {
+        let store = trust.snapshot();
+        let Some(pin) = store.find(host::lookup_name(host)) else {
+            return Ok(None);
+        };
+        if !crate::trust::iroh_pin::wants_iroh(pin) || self.no_iroh {
+            return Ok(None);
+        }
+        let settings = self.iroh_settings()?;
+        let Some(target) = crate::iroh_settings::IrohTarget::for_pin(&settings, pin) else {
+            return Ok(None);
+        };
+        let binding = peer_binding(&store, host)?;
+        let evaluator: Arc<dyn qsh_transport::TrustEvaluator> = Arc::new(BoundTrust::new(
+            trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
+            binding,
+        ));
+        Ok(Some(Arc::new(crate::iroh_settings::IrohPlan {
+            name: pin.name.clone(),
+            target,
+            identity: identity.local.clone(),
+            evaluator,
+        })))
+    }
+
+    /// Whether `host`'s pin can only be reached over the iroh relay route
+    /// (no address) and this command may take it. A jump chain refuses such
+    /// a hop (ADR-0061 decision 14).
+    pub(crate) fn iroh_only_pin(&self, host: &str, trust: &Arc<SharedTrustStore>) -> bool {
+        let store = trust.snapshot();
+        let Some(pin) = store.find(host::lookup_name(host)) else {
+            return false;
+        };
+        pin.address.is_empty()
+            && !self.no_iroh
+            && crate::trust::iroh_pin::wants_iroh(pin)
+            && self
+                .iroh_settings()
+                .ok()
+                .and_then(|s| crate::iroh_settings::IrohTarget::for_pin(&s, pin))
+                .is_some()
     }
 
     /// Reach every host this process dials through `hops`, the pin names of
@@ -1159,13 +1277,14 @@ impl Ops {
         let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
             Ok(resolved) => resolved,
             Err(err) => {
-                return match self.punch_only_target(host, &identity, &trust) {
+                return match self.punch_only_target(host, &identity, &trust)? {
                     Some(target) => Ok(target),
                     None => Err(err),
                 };
             }
         };
         let punch = self.punch_plan(host, &identity, &trust)?;
+        let iroh = self.iroh_plan(host, &identity, &trust)?;
         let learn = self.hint_learner(&trust);
         let binding = Some(peer_binding(&trust.snapshot(), host)?);
         Ok(PeerTarget {
@@ -1177,6 +1296,7 @@ impl Ops {
             learn,
             jump: None,
             binding,
+            iroh,
         })
     }
 
@@ -1198,6 +1318,9 @@ impl Ops {
         let (address, server_name) = match resolve_peer_address(&trust.snapshot(), &hosts, host) {
             Ok(resolved) => resolved,
             Err(err) if err.code == ErrorCode::HostNotFound => {
+                if self.iroh_only_pin(host, &trust) {
+                    return Err(crate::iroh_settings::unsupported_jump(end_name));
+                }
                 return Err(crate::jump::JumpFailure {
                     hop: hops_total,
                     hops: hops_total,
@@ -1220,6 +1343,7 @@ impl Ops {
             learn,
             jump: Some(plan),
             binding: None,
+            iroh: None,
         })
     }
 
@@ -1269,6 +1393,11 @@ impl Ops {
             // neither needs an address.
             if address.is_empty() && !(index == 0 && (reverse_first.is_some() || first_punch_only))
             {
+                // A pin reachable only over the iroh relay route cannot be a
+                // hop of a chain (ADR-0061 decision 14).
+                if self.iroh_only_pin(name, trust) {
+                    return Err(crate::iroh_settings::unsupported_jump(name));
+                }
                 return Err(missing("the pin has no address to jump to"));
             }
             let fingerprint = pin
@@ -1452,27 +1581,40 @@ impl Ops {
         host: &str,
         identity: &LoadedIdentity,
         trust: &Arc<SharedTrustStore>,
-    ) -> Option<PeerTarget> {
+    ) -> Result<Option<PeerTarget>, OpError> {
         let store = trust.snapshot();
-        let pin = store.find(host::lookup_name(host))?;
+        let Some(pin) = store.find(host::lookup_name(host)) else {
+            return Ok(None);
+        };
         if !pin.address.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let plan = self.punch_plan(host, identity, trust).ok().flatten()?;
-        if !plan.has_rendezvous() {
-            return None;
+        // A pin with no address is reached by a punch that has a usable
+        // rendezvous, by the iroh relay route when the pin asks for it
+        // (ADR-0061), or by both racing.
+        let punch = self
+            .punch_plan(host, identity, trust)
+            .ok()
+            .flatten()
+            .filter(|plan| plan.has_rendezvous());
+        let iroh = self.iroh_plan(host, identity, trust)?;
+        if punch.is_none() && iroh.is_none() {
+            return Ok(None);
         }
-        let binding = Some(peer_binding(&store, host).ok()?);
-        Some(PeerTarget {
+        let Ok(binding) = peer_binding(&store, host) else {
+            return Ok(None);
+        };
+        Ok(Some(PeerTarget {
             identity: identity.clone(),
             trust: trust.clone(),
             address: String::new(),
             server_name: "qsh".to_string(),
-            punch: Some(plan),
+            punch,
             learn: self.hint_learner(trust),
             jump: None,
-            binding,
-        })
+            binding: Some(binding),
+            iroh,
+        }))
     }
 
     /// Resolve `host` to a [`PeerRoute`] — the routing decision
@@ -1521,7 +1663,7 @@ impl Ops {
         let Ok(trust) = self.open_trust() else {
             return Err(err);
         };
-        match self.punch_only_target(host, &identity, &trust) {
+        match self.punch_only_target(host, &identity, &trust)? {
             Some(target) => Ok(PeerRoute::Forward(target)),
             None => Err(err),
         }

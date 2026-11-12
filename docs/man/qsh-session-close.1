@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-session\-close \- Terminate a session\*(Aqs process group and remove the session
 .SH SYNOPSIS
-\fBqsh session close\fR [\fB\-\-json\fR] [\fB\-\-signal\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
+\fBqsh session close\fR [\fB\-\-json\fR] [\fB\-\-signal\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-no\-iroh\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
 .SH DESCRIPTION
 Terminate a session\*(Aqs process group and remove the session
 .SH OPTIONS
@@ -35,6 +35,9 @@ Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qs
 .TP
 \fB\-\-no\-punch\fR
 Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-no\-iroh\fR
+Never take the iroh relay route on this command, whatever the host\*(Aqs pin `routes` and `[iroh].mode` say, and contact no relay (`docs/CLI.md` §7, ADR\-0061 decision 1). Not stored
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored

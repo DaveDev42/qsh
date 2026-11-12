@@ -62,6 +62,7 @@ impl TestRelay {
             relay: IrohRelay::Url(self.url.clone()),
             relay_trust: IrohRelayTrust::OnlyRoots(vec![self.cert.clone()]),
             bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
+            proxy_from_env: false,
         }
     }
 }
@@ -89,6 +90,7 @@ pub fn direct_config() -> IrohConfig {
         relay: IrohRelay::Disabled,
         relay_trust: IrohRelayTrust::System,
         bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
+        proxy_from_env: false,
     }
 }
 

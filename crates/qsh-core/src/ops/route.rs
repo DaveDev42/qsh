@@ -15,10 +15,22 @@
 //! start plus the 8 s punch budget in place of the command's dial timeout,
 //! and [`redial_deadline`] is what the recovery loop waits for one attempt.
 //!
+//! The iroh relay route (ADR-0061, `docs/CLI.md` §6.1) is the last route and
+//! only a pin with `routes = ["iroh"]` and a recorded `key` has it. A pin
+//! with no address and no usable rendezvous dials iroh at once. Otherwise
+//! iroh starts beside the direct dial and the punch when none of them has
+//! stood after `[iroh].head_start_ms` (1 s), or when all of them failed
+//! sooner. The first connection that stands wins; the rest are dropped,
+//! which closes them. Everything stays inside the one dial timeout.
+//!
 //! A punch that fails is not an error by itself: the command's error is the
 //! one the direct dial produced, with `details.punch{rendezvous, reason}`
 //! added. The ssh revival that follows (`Ops::revive_target`) sees that same
 //! error.
+
+// `RouteError` carries up to three route failures (direct, punch, iroh) and is
+// only built when a dial has already failed, so its size is not on a hot path.
+#![allow(clippy::result_large_err)]
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -28,12 +40,13 @@ use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{
-    Connection, DialError, Dialed, Dialer, Endpoint, PeerBinding, PunchEndpoint, TransportTuning,
-    default_dial_timeout,
+    Connection, DialError, Dialed, Dialer, Endpoint, IrohEndpoint, PeerBinding, PunchEndpoint,
+    TransportTuning, default_dial_timeout,
 };
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::client::reconnect::REDIAL_DEADLINE;
+use crate::iroh_settings::IrohPlan;
 use crate::jump::{JumpFailure, JumpPlan, Stage};
 use crate::ops::exec::map_dial_error;
 use crate::ops::{AddressResolver, OpError};
@@ -49,13 +62,24 @@ pub(crate) enum Dial {
     Redial,
 }
 
+/// The time the iroh route gets once it starts, in a re-dial: the relay
+/// connection takes about half a second, and a slow network a few more.
+const IROH_REDIAL_BUDGET: Duration = Duration::from_secs(8);
+
 /// The longest one re-dial attempt may take (ADR-0054 decision 18). A host
 /// that can be punched to gets the 8 s punch budget, after the head start
 /// when a direct dial runs first (at most 9 s, inside a command's 10 s dial
-/// timeout); any other host keeps [`REDIAL_DEADLINE`].
-pub(crate) fn redial_deadline(plan: Option<&Arc<PunchPlan>>, has_address: bool) -> Duration {
-    match plan {
-        Some(plan) if plan.has_rendezvous() => {
+/// timeout); any other host keeps [`REDIAL_DEADLINE`]. A host with an iroh
+/// route also gets [`IROH_REDIAL_BUDGET`] after the iroh head start (none
+/// when iroh is the only route).
+pub(crate) fn redial_deadline(
+    plan: Option<&Arc<PunchPlan>>,
+    has_address: bool,
+    iroh: Option<&Arc<IrohPlan>>,
+) -> Duration {
+    let rendezvous = plan.is_some_and(|p| p.has_rendezvous());
+    let base = match plan {
+        Some(plan) if rendezvous => {
             let head = if has_address {
                 plan.env.head_start
             } else {
@@ -64,6 +88,17 @@ pub(crate) fn redial_deadline(plan: Option<&Arc<PunchPlan>>, has_address: bool) 
             head.saturating_add(PUNCH_BUDGET).max(REDIAL_DEADLINE)
         }
         _ => REDIAL_DEADLINE,
+    };
+    match iroh {
+        Some(iroh) => {
+            let head = if has_address || rendezvous {
+                iroh.head_start()
+            } else {
+                Duration::ZERO
+            };
+            base.max(head.saturating_add(IROH_REDIAL_BUDGET))
+        }
+        None => base,
     }
 }
 
@@ -75,7 +110,8 @@ pub(crate) struct Routed {
     /// Kept for the connection's life.
     pub endpoint: Endpoint,
     /// The connection came from a punch race, so the endpoint also holds the
-    /// closed candidates that lost it.
+    /// closed candidates that lost it. Also set for an iroh connection, whose
+    /// endpoint closes with a bounded wait.
     pub punched: bool,
 }
 
@@ -107,6 +143,8 @@ pub(crate) enum DirectFail {
 pub(crate) struct RouteError {
     pub direct: DirectFail,
     pub punch: Option<PunchFailure>,
+    /// Why the iroh route gave nothing, when it was tried.
+    pub iroh: Option<Box<OpError>>,
 }
 
 impl RouteError {
@@ -114,12 +152,22 @@ impl RouteError {
         Self {
             direct,
             punch: None,
+            iroh: None,
         }
     }
 
     /// The command's error: what the direct dial said, naming the punch
     /// when it was tried (`details.punch`, and a clause on the human line).
     pub(crate) fn into_op(self, address: &str) -> OpError {
+        let iroh = self.iroh;
+        // A host with no address that only the iroh route could reach: the
+        // iroh failure is the answer (it is the only route that was tried).
+        if let (DirectFail::NoAddress, Some(iroh)) = (&self.direct, &iroh) {
+            return match &self.punch {
+                Some(punch) => punch.attach_to((**iroh).clone()),
+                None => (**iroh).clone(),
+            };
+        }
         let op = match self.direct {
             DirectFail::Resolve(op) => op,
             DirectFail::Dial { err, attempted } => map_dial_error(err, address, attempted),
@@ -129,11 +177,35 @@ impl RouteError {
             ),
             DirectFail::Chain(op) => *op,
         };
-        match &self.punch {
+        let op = match &self.punch {
             Some(punch) => punch.attach_to(op),
             None => op,
+        };
+        match iroh {
+            None => op,
+            // The relay route reached the host and the host refused us: that
+            // is the better answer than an unreachable address.
+            Some(iroh)
+                if iroh.code == ErrorCode::AuthFailed && op.code != ErrorCode::AuthFailed =>
+            {
+                *iroh
+            }
+            Some(iroh) => attach_iroh(op, &iroh),
         }
     }
+}
+
+/// `details.iroh{tried, code}` on a failure that also tried the relay route.
+fn attach_iroh(mut op: OpError, iroh: &OpError) -> OpError {
+    let note = serde_json::json!({ "tried": true, "code": iroh.code.to_string() });
+    match &mut op.details {
+        serde_json::Value::Null => op.details = serde_json::json!({ "iroh": note }),
+        serde_json::Value::Object(map) => {
+            map.insert("iroh".to_string(), note);
+        }
+        _ => {}
+    }
+    op
 }
 
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -224,6 +296,7 @@ pub(crate) async fn dial_routed(
     address: &str,
     server_name: &str,
     plan: Option<&Arc<PunchPlan>>,
+    iroh: Option<&Arc<IrohPlan>>,
     jump: Option<&Arc<JumpPlan>>,
     tuning: TransportTuning,
     resolver: &dyn AddressResolver,
@@ -231,7 +304,19 @@ pub(crate) async fn dial_routed(
 ) -> Result<Routed, RouteError> {
     match jump {
         Some(jump) => dial_jump(dialer, jump, tuning, resolver, kind).await,
-        None => dial_routed_plain(dialer, address, server_name, plan, tuning, resolver, kind).await,
+        None => {
+            dial_routed_plain(
+                dialer,
+                address,
+                server_name,
+                plan,
+                iroh,
+                tuning,
+                resolver,
+                kind,
+            )
+            .await
+        }
     }
 }
 
@@ -246,11 +331,12 @@ async fn dial_jump(
 ) -> Result<Routed, RouteError> {
     let budget = match kind {
         Dial::Command => default_dial_timeout(),
-        Dial::Redial => {
-            (redial_deadline(jump.first_punch.as_ref(), !jump.step(0).address.is_empty())
-                + Duration::from_secs(jump.hops.len() as u64))
-            .min(default_dial_timeout())
-        }
+        Dial::Redial => (redial_deadline(
+            jump.first_punch.as_ref(),
+            !jump.step(0).address.is_empty(),
+            None,
+        ) + Duration::from_secs(jump.hops.len() as u64))
+        .min(default_dial_timeout()),
     };
     let deadline = Instant::now() + budget;
     let first = jump.step(0);
@@ -281,6 +367,8 @@ async fn dial_jump(
             &first.address,
             &server_name,
             jump.first_punch.as_ref(),
+            // A chain never opens a hop over iroh (ADR-0061 decision 14).
+            None,
             tuning,
             resolver,
             kind,
@@ -333,9 +421,137 @@ async fn dial_jump(
     })
 }
 
-/// Dials a host the forward way. With no `plan` this is the direct dial
-/// alone, exactly as before the punch existed.
+/// Dials a host the forward way, the iroh relay route included when the pin
+/// has one. With no `iroh` this is [`dial_direct_punch`] alone, exactly as
+/// before the relay route existed: no endpoint is built and no relay is
+/// contacted.
+#[allow(clippy::too_many_arguments)]
 async fn dial_routed_plain(
+    dialer: &Dialer,
+    address: &str,
+    server_name: &str,
+    plan: Option<&Arc<PunchPlan>>,
+    iroh: Option<&Arc<IrohPlan>>,
+    tuning: TransportTuning,
+    resolver: &dyn AddressResolver,
+    kind: Dial,
+) -> Result<Routed, RouteError> {
+    let Some(iroh) = iroh else {
+        return dial_direct_punch(dialer, address, server_name, plan, tuning, resolver, kind).await;
+    };
+    let has_address = !address.is_empty();
+    let has_other = has_address || plan.is_some_and(|p| p.has_rendezvous());
+    let timeout = match kind {
+        Dial::Command => default_dial_timeout(),
+        Dial::Redial => redial_deadline(plan, has_address, Some(iroh)),
+    };
+    let deadline = Instant::now() + timeout;
+    if !has_other {
+        // Nothing else can reach this host: iroh at once, no head start.
+        return dial_iroh(iroh, deadline).await.map_err(|op| RouteError {
+            direct: DirectFail::NoAddress,
+            punch: None,
+            iroh: Some(Box::new(op)),
+        });
+    }
+
+    let mut other: Option<BoxFut<'_, Result<Routed, RouteError>>> = Some(Box::pin(
+        dial_direct_punch(dialer, address, server_name, plan, tuning, resolver, kind),
+    ));
+    let mut iroh_fut: Option<BoxFut<'_, Result<Routed, OpError>>> = None;
+    let mut iroh_started = false;
+    let mut other_failed: Option<RouteError> = None;
+    let mut iroh_failed: Option<OpError> = None;
+    let head = sleep(iroh.head_start());
+    tokio::pin!(head);
+    let overall = sleep_until(deadline);
+    tokio::pin!(overall);
+    if iroh.head_start().is_zero() {
+        iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));
+        iroh_started = true;
+    }
+
+    loop {
+        if other.is_none() && iroh_fut.is_none() {
+            break;
+        }
+        enum Ev {
+            Other(Result<Routed, RouteError>),
+            Iroh(Result<Routed, OpError>),
+            HeadStart,
+            Deadline,
+        }
+        let event = tokio::select! {
+            biased;
+            r = within(&mut other) => Ev::Other(r),
+            r = within(&mut iroh_fut) => Ev::Iroh(r),
+            () = &mut head, if !iroh_started && other.is_some() => Ev::HeadStart,
+            () = &mut overall => Ev::Deadline,
+        };
+        match event {
+            // The loser is dropped on return, which abandons its handshake
+            // and closes its endpoint.
+            Ev::Other(Ok(routed)) | Ev::Iroh(Ok(routed)) => return Ok(routed),
+            Ev::Other(Err(fail)) => {
+                other = None;
+                other_failed = Some(fail);
+                if !iroh_started {
+                    iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));
+                    iroh_started = true;
+                }
+            }
+            Ev::Iroh(Err(op)) => {
+                iroh_fut = None;
+                iroh_failed = Some(op);
+            }
+            Ev::HeadStart => {
+                iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));
+                iroh_started = true;
+            }
+            Ev::Deadline => break,
+        }
+    }
+    drop(other);
+    drop(iroh_fut);
+    let mut err = other_failed.unwrap_or_else(|| {
+        RouteError::plain(DirectFail::Dial {
+            err: DialError::Timeout(timeout),
+            attempted: 1,
+        })
+    });
+    err.iroh = iroh_failed.map(Box::new);
+    Err(err)
+}
+
+/// Dials the pin by key over iroh: builds the endpoint, homed on the relay
+/// the plan names, and dials. The endpoint lives as long as the connection.
+async fn dial_iroh(plan: &Arc<IrohPlan>, deadline: Instant) -> Result<Routed, OpError> {
+    let label = format!("{} over the iroh relay route", plan.name);
+    let endpoint = IrohEndpoint::bind(
+        &plan.identity,
+        plan.evaluator.clone(),
+        plan.target.config.clone(),
+    )
+    .await
+    .map_err(|e| map_dial_error(DialError::Setup(e), &label, 1))?;
+    let left = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
+    let endpoint = endpoint.with_timeout(left);
+    let connection = endpoint
+        .dial(&plan.target.peer)
+        .await
+        .map_err(|e| map_dial_error(e, &label, 1))?;
+    Ok(Routed {
+        connection,
+        endpoint: Endpoint::from_iroh(endpoint),
+        punched: true,
+    })
+}
+
+/// The direct dial and the hole-punching race. With no `plan` this is the
+/// direct dial alone, exactly as before the punch existed.
+async fn dial_direct_punch(
     dialer: &Dialer,
     address: &str,
     server_name: &str,
@@ -359,13 +575,14 @@ async fn dial_routed_plain(
             .map_err(|direct| RouteError {
                 direct,
                 punch: Some(plan.no_rendezvous()),
+                iroh: None,
             });
     }
 
     let started = Instant::now();
     let mut timeout = match kind {
         Dial::Command => default_dial_timeout(),
-        Dial::Redial => redial_deadline(Some(plan), has_address),
+        Dial::Redial => redial_deadline(Some(plan), has_address, None),
     };
     let deadline = started + timeout;
     let head = sleep(plan.env.head_start);
@@ -480,5 +697,6 @@ async fn dial_routed_plain(
     Err(RouteError {
         direct: direct_error,
         punch: punch_error,
+        iroh: None,
     })
 }

@@ -131,6 +131,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.list.rendezvous.json",
     "trust.set_jump.json",
     "trust.list.jump.json",
+    "trust.set_iroh.json",
+    "trust.list.iroh.json",
     "doctor_jump_stream_carrier.json",
     "doctor_listen_serve_ignores_serve_bind.json",
     "doctor_serve_unit_beside_listen_serve.json",
@@ -1371,6 +1373,96 @@ fn golden_trust_jump_fixtures() {
     let (code, cleared) = sandbox.json(&["trust", "jump", "lab-box", "--clear", "--json"]);
     assert_eq!(code, 0, "{cleared}");
     assert!(cleared["data"]["peer"].get("jump").is_none(), "{cleared}");
+}
+
+/// `trust iroh` (ADR-0061 decisions 1, 3 and 11, `docs/CLI.md` §6.11) and a
+/// pin that carries `routes`, `relay` and `key`. The three keys are omitted
+/// when unset, so the older `trust.*` goldens are untouched.
+#[test]
+fn golden_trust_iroh_fixtures() {
+    // The Ed25519 public key `07` x 32 and its SPKI SHA-256.
+    const IROH_KEY: &str = "0707070707070707070707070707070707070707070707070707070707070707";
+    const IROH_FINGERPRINT: &str = "sha256:XS16KUJTfwPOfDiK+1SGH7z4f0hUucDay22zqBcE3qM=";
+
+    let sandbox = Sandbox::new();
+    std::fs::create_dir_all(sandbox.config_dir()).expect("create config dir");
+    std::fs::write(
+        sandbox.config_dir().join("trust.toml"),
+        format!(
+            "[[peer]]\n\
+             name = \"lab-box\"\n\
+             fingerprint = \"{IROH_FINGERPRINT}\"\n\
+             address = \"\"\n\
+             added_at = \"2026-11-09T00:00:00Z\"\n\
+             role = \"full\"\n"
+        ),
+    )
+    .expect("write trust.toml fixture");
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    for peer in listed["data"]["peers"].as_array().expect("data.peers") {
+        for key in ["routes", "relay", "key"] {
+            assert!(
+                peer.get(key).is_none(),
+                "a pin with no iroh route omits {key}: {listed}"
+            );
+        }
+    }
+
+    let (code, set) = sandbox.json(&[
+        "trust",
+        "iroh",
+        "lab-box",
+        "--relay",
+        "https://relay.example.com",
+        "--key",
+        IROH_KEY,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{set}");
+    assert_eq!(
+        set["data"]["peer"]["routes"],
+        serde_json::json!(["iroh"]),
+        "{set}"
+    );
+    assert_eq!(set["data"]["changed"], true, "{set}");
+    check("trust.set_iroh.json", set);
+
+    let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    check("trust.list.iroh.json", listed);
+
+    let args = [
+        "trust",
+        "iroh",
+        "lab-box",
+        "--relay",
+        "https://relay.example.com",
+        "--key",
+        IROH_KEY,
+        "--json",
+    ];
+    let (code, again) = sandbox.json(&args);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["data"]["changed"], false, "{again}");
+
+    // A key that is not this pin's is refused and writes nothing.
+    let wrong = "08".repeat(32);
+    let (code, refused) = sandbox.json(&["trust", "iroh", "lab-box", "--key", &wrong, "--json"]);
+    assert_ne!(code, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "INVALID_ARGUMENT", "{refused}");
+
+    // `--off` removes the route and its relay; the key is a fact about the
+    // pin and stays.
+    let (code, off) = sandbox.json(&["trust", "iroh", "lab-box", "--off", "--json"]);
+    assert_eq!(code, 0, "{off}");
+    let peer = &off["data"]["peer"];
+    assert!(
+        peer.get("routes").is_none() && peer.get("relay").is_none(),
+        "{off}"
+    );
+    assert_eq!(peer["key"], IROH_KEY, "{off}");
 }
 
 /// `doctor.run` with `jump_stream_carrier` (ADR-0056 decision 22). The

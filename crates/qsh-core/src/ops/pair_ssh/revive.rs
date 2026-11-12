@@ -117,6 +117,8 @@ impl Ops {
                 learn: None,
                 jump: None,
                 binding: target.binding,
+                // Same reason: the revived serve has no iroh endpoint.
+                iroh: None,
             }),
             Err(err) => {
                 (revival.notice)(&format!(

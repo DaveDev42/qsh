@@ -3631,6 +3631,7 @@ version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
+ "iroh-relay",
  "libc",
  "portable-pty",
  "qsh-core",

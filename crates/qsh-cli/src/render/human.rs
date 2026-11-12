@@ -17,7 +17,7 @@ use qsh_proto::{
     ServiceUninstallData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, SetupRole, SetupRunData, SetupStatus,
     SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData, TrustGrantData, TrustInviteData,
-    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetJumpData,
+    TrustListData, TrustPeer, TrustRemoveData, TrustRenameData, TrustSetIrohData, TrustSetJumpData,
     TrustSetRendezvousData, TrustSetRoleData, TrustSshPreviewData, Tunnel, TunnelCloseData,
     TunnelListData, VersionData,
 };
@@ -521,6 +521,31 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     } else {
         writeln!(stdout, "{} not found (nothing to do)", sanitize(&data.name))
     }
+}
+
+/// Print the outcome of `qsh trust iroh <name>` (`docs/CLI.md` §6.11,
+/// ADR-0061 decisions 1 and 11). Prints the relay's scheme and host only.
+pub fn print_trust_set_iroh(data: &TrustSetIrohData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let name = sanitize(&data.peer.name);
+    if !data.peer.routes.iter().any(|r| r == "iroh") {
+        return writeln!(stdout, "{name}: no iroh relay route");
+    }
+    let relay = data
+        .peer
+        .relay
+        .as_deref()
+        .and_then(qsh_core::trust::iroh_pin::relay_scheme_host)
+        .map_or_else(
+            || "the default relay ([iroh].relay_url)".to_string(),
+            |label| sanitize(&label),
+        );
+    let key = if data.peer.key.is_some() {
+        ""
+    } else {
+        "; no key is recorded yet, so it cannot be dialed by key (give --key)"
+    };
+    writeln!(stdout, "{name}: also reached over iroh via {relay}{key}")
 }
 
 /// Print the outcome of `qsh trust jump <name> [<hop>...]` (`docs/CLI.md`

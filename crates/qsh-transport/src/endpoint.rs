@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{ConnectError, ConnectionError, DatagramError, ExportError};
 use crate::identity::{CertificateDer, Fingerprint, Principal};
-use crate::iroh_backend::IrohConn;
+use crate::iroh_backend::{IrohConn, IrohEndpoint};
 use crate::mux::{MuxConn, TransportCaps, TransportKind};
 use crate::peer_addr::PeerAddr;
 pub use crate::quinn_backend::config::transport_config_debug;
@@ -871,6 +871,9 @@ pub const NESTED_IDLE_CAP: Duration = Duration::from_secs(3);
 #[derive(Clone, Debug)]
 enum EndpointBackend {
     Quic(QuicEndpoint),
+    /// An iroh endpoint (ADR-0061): dialed by key, carried over a relay or a
+    /// direct path.
+    Iroh(IrohEndpoint),
 }
 
 /// The local socket a connection runs over: what a [`Dialed`] hands back and
@@ -909,6 +912,16 @@ impl Endpoint {
         }
     }
 
+    /// The endpoint of an iroh connection, kept for the connection's life
+    /// (ADR-0061). It has no single local address and cannot be rebound by
+    /// qsh: iroh moves its own paths.
+    pub fn from_iroh(endpoint: IrohEndpoint) -> Self {
+        Self {
+            inner: EndpointBackend::Iroh(endpoint),
+            rebind: Rebind::Unsupported,
+        }
+    }
+
     /// This endpoint with no socket of its own to move: it runs over a pipe
     /// and nothing outside a chain may rebind it.
     pub(crate) fn without_rebind(mut self) -> Self {
@@ -936,6 +949,12 @@ impl Endpoint {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         match &self.inner {
             EndpointBackend::Quic(e) => e.local_addr(),
+            EndpointBackend::Iroh(e) => e.bound_sockets().into_iter().next().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "the iroh endpoint has no socket",
+                )
+            }),
         }
     }
 
@@ -971,6 +990,9 @@ impl Endpoint {
     async fn wait_idle_inner(&self) {
         match &self.inner {
             EndpointBackend::Quic(e) => e.wait_idle().await,
+            // iroh waits for the close frames to be acknowledged inside
+            // `close`; connections are closed by their holders first.
+            EndpointBackend::Iroh(e) => e.close().await,
         }
     }
 
@@ -979,6 +1001,14 @@ impl Endpoint {
     pub fn close(&self, code: u32, reason: &[u8]) {
         match &self.inner {
             EndpointBackend::Quic(e) => e.close(code, reason),
+            EndpointBackend::Iroh(e) => {
+                // iroh closes asynchronously; without a runtime the endpoint
+                // closes when its last handle drops.
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let e = e.clone();
+                    runtime.spawn(async move { e.close().await });
+                }
+            }
         }
     }
 
@@ -1007,6 +1037,10 @@ impl Endpoint {
         }
         match &self.inner {
             EndpointBackend::Quic(e) => e.rebind_ephemeral(),
+            EndpointBackend::Iroh(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "an iroh endpoint moves its own paths",
+            )),
         }
     }
 }

@@ -84,3 +84,7 @@ time.workspace = true
 # `tests/it/trust_withdrawal.rs` pauses the clock after the connection is up to
 # pin the one-poll-tick bound (ADR-0031 결정 3); test-only, same pinned version.
 tokio = { workspace = true, features = ["test-util"] }
+# `tests/it/iroh_route.rs` runs the client route against an in-process iroh
+# relay (the same self-signed relay `qsh-transport`'s iroh tests use) so no test
+# reaches a public relay.
+iroh-relay = { version = "1.4.1", default-features = false, features = ["server", "test-utils"] }

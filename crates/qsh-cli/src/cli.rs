@@ -60,6 +60,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_punch: bool,
 
+    /// Never take the iroh relay route on this command, whatever the host's
+    /// pin `routes` and `[iroh].mode` say, and contact no relay
+    /// (`docs/CLI.md` §7, ADR-0061 decision 1). Not stored.
+    #[arg(long, global = true)]
+    pub no_iroh: bool,
+
     /// Use this pinned peer as the rendezvous for hole punching on this
     /// command, instead of the host's own `rendezvous` hints (`docs/CLI.md`
     /// §7, ADR-0054 decision 4). Must be pinned with an address. Not stored.
@@ -1539,6 +1545,29 @@ pub enum TrustCmd {
         /// Remove the chain.
         #[arg(long)]
         clear: bool,
+    },
+    /// Turn the iroh relay route on or off for a pinned host (`docs/CLI.md`
+    /// §6.11, ADR-0061 decisions 1 and 11). The host is then also tried over
+    /// an iroh relay when the direct dial and the punch have not stood
+    /// within `[iroh].head_start_ms`, or at once when the pin has no
+    /// address. It needs the host's Ed25519 public key (`--key`, 64 hex
+    /// characters, whose SPKI SHA-256 must be the pin's fingerprint).
+    /// `--relay` names the relay the host is homed on (`https://...`);
+    /// without it `[iroh].relay_url` applies. `--off` removes the route; the
+    /// key stays. Takes effect from the next command. A private CA root
+    /// cannot take this route.
+    Iroh {
+        /// The pinned host.
+        name: String,
+        /// The relay the host's iroh endpoint is homed on.
+        #[arg(long, value_name = "URL", conflicts_with = "off")]
+        relay: Option<String>,
+        /// The host's Ed25519 public key, 64 hex characters.
+        #[arg(long, value_name = "HEX")]
+        key: Option<String>,
+        /// Remove the iroh route (`routes` and `relay`) from the pin.
+        #[arg(long)]
+        off: bool,
     },
     /// Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11,
     /// ADR-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin

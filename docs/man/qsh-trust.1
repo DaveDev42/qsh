@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust \- Manage the trust store (pinned peers)
 .SH SYNOPSIS
-\fBqsh trust\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+\fBqsh trust\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-no\-iroh\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
 Manage the trust store (pinned peers)
 .SH OPTIONS
@@ -32,6 +32,9 @@ Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qs
 .TP
 \fB\-\-no\-punch\fR
 Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
+.TP
+\fB\-\-no\-iroh\fR
+Never take the iroh relay route on this command, whatever the host\*(Aqs pin `routes` and `[iroh].mode` say, and contact no relay (`docs/CLI.md` §7, ADR\-0061 decision 1). Not stored
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored
@@ -69,6 +72,9 @@ Set which pinned peers are asked to relay a hole punch to a pinned host (`docs/C
 .TP
 qsh\-trust\-jump(1)
 Set the chain of pinned peers a host is reached through (`docs/CLI.md` §6.11, ADR\-0056 decision 20). A dial to the host goes through these hops, first hop first, unless the command line gives `\-J` or `\-\-jump`. Each hop must be pinned with an address; at most four hops, counting the hops\*(Aq own chains, and a name only once. `\-\-clear` removes the chain. Takes effect from the next command
+.TP
+qsh\-trust\-iroh(1)
+Turn the iroh relay route on or off for a pinned host (`docs/CLI.md` §6.11, ADR\-0061 decisions 1 and 11). The host is then also tried over an iroh relay when the direct dial and the punch have not stood within `[iroh].head_start_ms`, or at once when the pin has no address. It needs the host\*(Aqs Ed25519 public key (`\-\-key`, 64 hex characters, whose SPKI SHA\-256 must be the pin\*(Aqs fingerprint). `\-\-relay` names the relay the host is homed on (`https://...`); without it `[iroh].relay_url` applies. `\-\-off` removes the route; the key stays. Takes effect from the next command. A private CA root cannot take this route
 .TP
 qsh\-trust\-allow(1)
 Grant a pinned peer actions beyond its role (`docs/CLI.md` §6.11, ADR\-0051 결정 12). Writes `grants` (and `paths`, `scope`) on the pin in `trust.toml`; takes effect from the peer\*(Aqs next request with no restart. The decision order is the always\-deny gate, the role, these grants, then `acl.toml` rows. Actions are names from the ACL vocabulary or a trailing `.*` family (`forward.*`); `forward.socks` can never be granted. `file.read` and `file.write` need `\-\-path`. A grant only counts for the pin path and for the fingerprint the pin holds now: CA\-authenticated peers and a re\-pinned name do not use it

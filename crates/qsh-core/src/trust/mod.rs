@@ -45,8 +45,10 @@ use crate::ops::OpError;
 
 pub(crate) mod connection_watch;
 pub mod invite_address;
+pub mod iroh_pin;
 pub mod pairing;
 mod role;
+pub use iroh_pin::IrohPinChange;
 pub use pairing::{
     LiveInviteCounts, SharedInviteStore, live_invite_counts, live_role_invite_count,
 };
@@ -373,6 +375,24 @@ impl TrustStore {
                 .with_retryable(false));
             }
         }
+        // ADR-0061: the iroh fields of a pin (`relay`, `key`) are checked
+        // the same way. A `relay` that is not an https URL, or a `key`
+        // whose fingerprint is not the pin's, makes the whole file a
+        // `CONFIG_ERROR`: no route is built from a pin that contradicts
+        // itself.
+        for peer in &file.peers {
+            if let Some(why) = iroh_pin::field_error(peer) {
+                return Err(OpError::new(
+                    ErrorCode::ConfigError,
+                    format!(
+                        "invalid trust store {}: peer {:?}: {why}",
+                        path.display(),
+                        peer.name
+                    ),
+                )
+                .with_retryable(false));
+            }
+        }
         Ok(Self {
             peers: file.peers,
             cas: file.cas,
@@ -594,6 +614,9 @@ impl TrustStore {
             remote_qsh: None,
             rendezvous: Vec::new(),
             jump: Vec::new(),
+            routes: Vec::new(),
+            relay: None,
+            key: None,
         };
         self.peers.push(peer.clone());
         (peer, true, false)
@@ -1023,6 +1046,15 @@ impl TrustStore {
             rendezvous: old.rendezvous.clone(),
             // How the host is reached is not a trust fact either.
             jump: old.jump.clone(),
+            // Where the relay route goes is not a trust fact either. The key
+            // is: it stays only if it is still the key of the new
+            // fingerprint.
+            routes: old.routes.clone(),
+            relay: old.relay.clone(),
+            key: old
+                .key
+                .clone()
+                .filter(|k| iroh_pin::key_matches(k, &fingerprint.to_string())),
         };
         Some((self.peers[index].clone(), old))
     }
