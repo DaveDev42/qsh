@@ -57,12 +57,56 @@ fuzzing, soak and adversarial-load campaigns
 format `qsh/1` has been frozen since 2026-11-05; changes follow
 [docs/design/protocol.md](docs/design/protocol.md) §16.
 
+## How it works
+
+QSH has two concepts.
+
+- **Server.** `qsh serve`, one per device. It accepts connections from the
+  peers you have pinned and offers a shell, one-shot commands, port forwards
+  and file copy to them, each limited by the peer's role.
+- **Client.** Everything else you type: `qsh box`, `qsh exec`, `qsh cp`,
+  `qsh tunnel`, `qsh attach`. A client connects to a server.
+
+Any device can be both. Run `qsh serve` on every machine, pin the machines
+to each other, and each one can connect to the others. Which side starts the
+connection does not decide whether it can be made: a peer's key is its
+address, the relay (HTTPS, TCP 443) is always reachable, and the connection
+moves to a direct path when one exists (direct dial, hole punching, or a port
+mapping the daemon asked the router for). The relay only carries ciphertext,
+and only until a direct path opens. Since 0.8.0 the daemon starts that
+endpoint by default; see [the relay
+route](#when-udp-is-blocked-the-optional-iroh-relay-route) for what it
+contacts and how to turn it off.
+
+The smallest configuration is one pin per peer in `trust.toml`: a name, the
+peer's key and a role. There is no `config.toml` and no `acl.toml` to write.
+`qsh box` (over ssh) or `qsh pair` writes the pins for you, and
+[Choosing what a peer may do](#choosing-what-a-peer-may-do) shows the three
+lines.
+
+```toml
+# <config_dir>/trust.toml, on the machine that lets "laptop" in
+[[peer]]
+name = "laptop"
+key  = "<laptop's public key, 64 hex characters>"
+role = "full"
+```
+
+**Advanced: the reverse fallback.** `qsh listen` and `qsh serve --to` invert
+the dial: the machine you sit at listens, and the host behind NAT dials out
+and serves over that connection. You do not need this when the machines reach
+each other through the relay. It is for networks that block the relay, for
+setups with `iroh.enable = false` or peers that do not use iroh, and for
+jump chains through a particular host. See [Reverse
+connections](#reverse-connections).
+
 ## Contents
 
 - [Install](#install): prebuilt binaries, Homebrew, or from source.
+- [How it works](#how-it-works): server and client, and the smallest configuration.
 - [First run](#first-run): pin two machines to each other, over ssh or by hand, and open a shell.
 - [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
-- [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, reverse connections.
+- [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, and the advanced reverse fallback.
 - [Automation](#automation): the JSON CLI for scripts and agents.
 - [Security posture](#security-posture): authentication, the ACL, the audit log.
 - [Known limitations](#known-limitations), including that QSH needs UDP.
@@ -965,7 +1009,14 @@ resolver. Destinations on the host's loopback or link-local ranges get
 
 ### Reverse connections
 
-When the host cannot accept inbound packets, invert the dial. The
+This is the advanced fallback; most setups never need it. The relay route
+usually reaches a host behind NAT without it (see [How it
+works](#how-it-works)). Use it when the relay is blocked on your network,
+when iroh is off (`iroh.enable = false`) or the peer does not use it, or when
+a chain has to go through a particular host.
+
+When the host cannot accept inbound packets and the relay cannot reach it,
+invert the dial. The
 controller listens; the target dials out and then serves that connection as
 a host. The controller plays both listener and client roles; the target is
 the host machine (ADR-0012).
