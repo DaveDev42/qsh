@@ -124,7 +124,8 @@ impl IrohProxy {
 #[serde(default)]
 pub struct IrohSection {
     /// Whether a daemon (`qsh serve`, `qsh listen`, `qsh serve --to`) brings
-    /// up an iroh endpoint. Unset is `false`.
+    /// up an iroh endpoint. Unset is `true` (ADR-0063); `false` keeps the
+    /// daemon off every relay.
     pub enable: Option<bool>,
     /// The relay (`https://...`) this device homes on, or the list of
     /// candidate relays it homes on the best of and fails over among
@@ -195,7 +196,7 @@ impl IrohSection {
             )));
         }
         Ok(IrohSettings {
-            enable: self.enable.unwrap_or(false),
+            enable: self.enable.unwrap_or(true),
             relay_urls,
             bind_port,
             mode: self.mode.unwrap_or_default(),
@@ -240,7 +241,7 @@ impl Default for IrohSettings {
         // The defaults of an empty section; `settings()` of an empty section
         // cannot fail.
         Self {
-            enable: false,
+            enable: true,
             relay_urls: default_relay_urls(),
             bind_port: 0,
             mode: IrohMode::Auto,

@@ -48,6 +48,7 @@ pub mod invite_address;
 pub mod iroh_pin;
 pub(crate) mod key_fill;
 pub mod pairing;
+mod pin_file;
 mod role;
 pub use iroh_pin::IrohPinChange;
 pub use pairing::{
@@ -281,17 +282,32 @@ pub const PIN_SOURCE_SSH_BOOTSTRAP: &str = "ssh_bootstrap";
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TrustFile {
     #[serde(default, rename = "peer", skip_serializing_if = "Vec::is_empty")]
-    peers: Vec<TrustPeer>,
+    peers: Vec<pin_file::PinRecord>,
     #[serde(default, rename = "ca", skip_serializing_if = "Vec::is_empty")]
     cas: Vec<CaEntry>,
 }
 
 /// An in-memory snapshot of the trust store.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct TrustStore {
     peers: Vec<TrustPeer>,
     cas: Vec<CaEntry>,
+    /// The `[[peer]]` tables as they were read, keyed by pin name, each with
+    /// the pin it resolved to. [`TrustStore::save`] writes such a table back
+    /// unchanged while its pin is unchanged, so saving the file for another
+    /// pin's sake does not reformat the pins it did not touch (ADR-0063
+    /// decision 4). Not part of the store's identity: [`PartialEq`] ignores
+    /// it.
+    written: std::collections::HashMap<String, (TrustPeer, pin_file::PinRecord)>,
 }
+
+impl PartialEq for TrustStore {
+    fn eq(&self, other: &Self) -> bool {
+        self.peers == other.peers && self.cas == other.cas
+    }
+}
+
+impl Eq for TrustStore {}
 
 /// Why [`TrustStore::rename`] refused (`docs/CLI.md` §6.11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,11 +351,36 @@ impl TrustStore {
             )
             .with_retryable(false)
         })?;
+        // ADR-0063: a pin may leave out `fingerprint` (derived from `key`),
+        // `address`, `added_at` and `routes`. A pin that contradicts itself
+        // (a `key` and a `fingerprint` that disagree) or says too little (it
+        // has neither) makes the whole file a `CONFIG_ERROR`.
+        let mut peers = Vec::with_capacity(file.peers.len());
+        let mut written = std::collections::HashMap::new();
+        for record in file.peers {
+            let peer = record.resolve().map_err(|why| {
+                OpError::new(
+                    ErrorCode::ConfigError,
+                    format!(
+                        "invalid trust store {}: peer {:?}: {why}",
+                        path.display(),
+                        record.name()
+                    ),
+                )
+                .with_retryable(false)
+            })?;
+            written.insert(peer.name.clone(), (peer.clone(), record));
+            peers.push(peer);
+        }
+        let file = TrustFile {
+            peers: Vec::new(),
+            cas: file.cas,
+        };
         // ADR-0045 결정 3: a `role` outside the six names makes the whole
         // file a `CONFIG_ERROR`, the same treatment as any other malformed
         // field. Checked here, not at deserialization, because the wire type
         // (`TrustPeer.role`) is an open string.
-        for peer in &file.peers {
+        for peer in &peers {
             if let Some(role) = &peer.role
                 && let Err(err) = role.parse::<TrustRole>()
             {
@@ -359,7 +400,7 @@ impl TrustStore {
         // grant with no `paths`, a relative path, ...) make the whole file a
         // `CONFIG_ERROR`, like a bad `role`: pin authentication keeps the last
         // good snapshot and role and pin grants are suspended.
-        for peer in &file.peers {
+        for peer in &peers {
             if let Err(err) = PinGrants::parse(
                 peer.grants.as_deref(),
                 peer.paths.as_deref(),
@@ -381,7 +422,7 @@ impl TrustStore {
         // whose fingerprint is not the pin's, makes the whole file a
         // `CONFIG_ERROR`: no route is built from a pin that contradicts
         // itself.
-        for peer in &file.peers {
+        for peer in &peers {
             if let Some(why) = iroh_pin::field_error(peer) {
                 return Err(OpError::new(
                     ErrorCode::ConfigError,
@@ -395,8 +436,9 @@ impl TrustStore {
             }
         }
         Ok(Self {
-            peers: file.peers,
+            peers,
             cas: file.cas,
+            written,
         })
     }
 
@@ -456,8 +498,20 @@ impl TrustStore {
             // is hardening.
             ensure_private_dir(parent)?;
         }
+        // A pin that is as it was read keeps the table it was read from; a
+        // pin that changed keeps the keys its table spelled out; a pin that
+        // is new is written in the shortest form that reads back as it is
+        // (ADR-0063 decision 4).
         let file = TrustFile {
-            peers: self.peers.clone(),
+            peers: self
+                .peers
+                .iter()
+                .map(|peer| match self.written.get(&peer.name) {
+                    Some((read, record)) if read == peer => record.clone(),
+                    Some((_, record)) => record.updated(peer),
+                    None => pin_file::PinRecord::minimal(peer),
+                })
+                .collect(),
             cas: self.cas.clone(),
         };
         let text = toml::to_string_pretty(&file).map_err(|err| {

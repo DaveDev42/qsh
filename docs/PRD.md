@@ -370,7 +370,7 @@ qsh personal-mac --relay auto
 
 Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위해 logical session identity를 transport connection과 분리하되, MVP에는 relay 구현이나 negotiation을 포함하지 않는다.
 
-2026-11-13 ADR-0061로 relay 하나가 코어에 들어왔다. 별도 relay 제품을 만드는 대신 iroh relay(TLS 위 WebSocket, 기본 n0 공용 relay, 자가 운영 `iroh-relay`로 바꿀 수 있음)를 사용자가 켜는 route로 받는다. 위 조건(payload와 private key를 보지 못함, 기본 접속 형태와 endpoint identity 유지)은 그대로다. 안쪽 연결은 pin으로 인증한 QUIC이고, EndpointId가 곧 qsh 신원 키다. 아래 `--relay auto` 예시는 ADR-0061 구현이 정하는 CLI 형태로 바뀔 수 있다.
+2026-11-13 ADR-0061로 relay 하나가 코어에 들어왔다. 별도 relay 제품을 만드는 대신 iroh relay(TLS 위 WebSocket, 기본 n0 공용 relay, 자가 운영 `iroh-relay`로 바꿀 수 있음)를 사용자가 켜는 route로 받는다. 위 조건(payload와 private key를 보지 못함, 기본 접속 형태와 endpoint identity 유지)은 그대로다. 안쪽 연결은 pin으로 인증한 QUIC이고, EndpointId가 곧 qsh 신원 키다. 아래 `--relay auto` 예시는 ADR-0061 구현이 정하는 CLI 형태로 바뀔 수 있다. 같은 날 ADR-0063이 데몬 쪽 기본값을 켜짐으로 바꿨다. `qsh serve`·`qsh listen`은 `[iroh].enable`을 끄지 않는 한 기본 relay에 연결을 하나 유지하고, 주소 없이 키만 있는 pin은 기본으로 relay route를 쓴다. 사용자가 끄는 길(`[iroh].enable = false`, `--no-iroh`)은 그대로 있다.
 
 `-J` jump chaining(ADR-0056)은 이 절의 relay가 아니다. 사용자가 직접 고른 qsh peer를 지나는 것이고, 안쪽 연결은 client와 끝단 사이의 QUIC 연결이라 중간 peer는 payload와 endpoint private key를 보지 못한다. 별도 제품도 아니고 `--relay`의 negotiation도 없으며, 사용자가 `-J`를 줄 때만 쓰인다.
 

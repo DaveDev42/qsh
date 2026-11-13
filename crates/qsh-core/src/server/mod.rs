@@ -1958,7 +1958,7 @@ impl Server {
                 }
                 // The redeeming peer's key came with the certificate it proved
                 // in this handshake: the pin's key (ADR-0061 decision 3).
-                let learned = peer_key.is_some_and(|key| store.learn_key(&key));
+                let learned = peer_key.is_some_and(|key| store.learn_key_from_connection(&key));
                 if (created || updated || learned)
                     && let Err(err) = store.save(path)
                 {

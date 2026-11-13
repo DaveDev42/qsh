@@ -51,7 +51,7 @@
 | localctl UDS | `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 디렉터리 0700, 소켓 파일 0600 | `architecture.md` §7; `crates/qsh-core/src/localctl/daemon.rs` |
 | localctl named pipe | `\\.\pipe\qsh-<scope>-<pid>`, `<scope>`는 사용자 SID와 runtime 디렉터리 정규 경로에서 정해지는 16 hex. 인스턴스마다 소유자 전용 보호 DACL, 원격 클라이언트 거부 | `architecture.md` §7; `crates/qsh-core/src/localctl/transport/windows.rs` |
 | ReplayRing(세션 output 이력) | 세션당 기본 8 MiB byte 예산의 메모리 chunk ring, `ReplayStore` trait 뒤 | `docs/adr/0004-replay-buffer-memory-only.md`(ADR-0004 결정); `crates/qsh-core/src/broker/ring.rs`; 기본값 `crates/qsh-core/src/config.rs` |
-| relay 접속 설정과 EndpointId | `config.toml`의 relay URL, `trust.toml` pin의 선택 필드 relay URL, 신원 키에서 계산되는 EndpointId. 키는 device 개인키와 같은 자산이고 새 키를 만들지 않는다. EndpointId는 공개 정보이며 relay 운영자가 본다 | `architecture.md` §10; ADR-0061 결정 3·11 |
+| relay 접속 설정과 EndpointId | `config.toml`의 relay URL(없으면 내장 기본값), `trust.toml` pin의 선택 필드 relay URL, 신원 키에서 계산되는 EndpointId. 데몬은 `[iroh].enable`을 끄지 않는 한 기본 relay에 TCP 443 연결을 하나 유지하므로 설정 파일이 없는 장비도 이 자산을 relay 운영자에게 보인다(ADR-0063). 키는 device 개인키와 같은 자산이고 새 키를 만들지 않는다. EndpointId는 공개 정보이며 relay 운영자가 본다 | `architecture.md` §10; ADR-0061 결정 3·11 |
 
 ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프로세스 메모리에만 남고 디스크에는 어떤 경로로도 남지 않는다는 것이 ADR-0004의 보안적 요점이고("PTY 내용이 디스크에 남는 것 자체가 새로운 공격 표면", 평문 disk spool은 "논의 대상조차 아니다"), 그 대가가 §7 h15의 8 MiB 상한이다.
 
@@ -505,7 +505,7 @@ qsh가 지키지 않고 운영자에게 맡긴 것들이다.
 - **시계 동기.** cert 유효기간(`protocol.md` §3), invite TTL 10분과 retention 20분(`protocol.md` §15.5), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
 - **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md` §15.7).
 - **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. 기본 route에는 relay·발견이 없고, 사용자가 iroh route를 켠 경우에만 relay가 낀다(ADR-0061, 아래 "relay 선택"). (`README.md` "Known limitations"; PRD §12).
-- **relay 선택.** iroh route를 켜면 기본 relay는 n0 공용 relay다(ADR-0061 결정 10). 메타데이터 노출(h67)이나 공용 relay 의존(h70)을 받아들일 수 없는 운영자는 자가 운영 `iroh-relay`의 URL을 설정하거나 route를 켜지 않는다. 기기의 OS 인증서 저장소가 오염되지 않았다는 것도 가정이다(D29).
+- **relay 선택.** 데몬은 기본으로 iroh endpoint를 띄우고(ADR-0063) 주소 없이 키만 있는 pin은 기본으로 relay route를 쓰므로, 설정 없이 둔 장비는 n0 공용 relay에 TCP 443 연결을 하나 계속 유지하고 그 relay가 데몬의 EndpointId와 접속 시각을 본다. 이전에는 사용자가 `[iroh].enable`을 켠 장비만 그랬다. 이를 받아들일 수 없는 운영자는 `[iroh].enable = false`(그 실행에만 `--no-iroh`)로 끄고, 인가 판정은 endpoint 유무와 무관하다. 기본 relay는 n0 공용 relay다(ADR-0061 결정 10). 메타데이터 노출(h67)이나 공용 relay 의존(h70)을 받아들일 수 없는 운영자는 자가 운영 `iroh-relay`의 URL을 설정하거나 route를 켜지 않는다. 기기의 OS 인증서 저장소가 오염되지 않았다는 것도 가정이다(D29).
 - **CA 키 복제 관행.** CSR을 만들지 않으므로(ADR-0016 기각) 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016 맥락 2번째 문단).
 - **`acl.toml` 재시작 규율.** h10에 따라 정책 편집은 재시작해야 반영된다. 편집했는데 반영이 안 된 상태를 "정책이 느슨한 채로 돌고 있는 창"으로 인식해야 한다.
 - **replay 여유 조정.** `[serve].replay_bytes` 기본 8 MiB가 자기 워크로드에 충분한지는 운영자가 판단한다. ADR-0004 근거 3번째 불릿이 "전형적 텍스트 터미널 output 기준 수십 초~수 분 분량"이라고 추정한 값이다.

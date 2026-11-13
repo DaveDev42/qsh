@@ -52,7 +52,7 @@ Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qs
 Never start a hole punch on this command\*(Aqs behalf, and send no `PunchRequest` (`docs/CLI.md` §7, ADR\-0054 decision 19). The route is the direct dial alone. Wins over `[punch].mode`
 .TP
 \fB\-\-no\-iroh\fR
-Never take the iroh relay route on this command, whatever the host\*(Aqs pin `routes` and `[iroh].mode` say, and contact no relay (`docs/CLI.md` §7, ADR\-0061 decision 1). Not stored
+Never take the iroh relay route on this command, whatever the host\*(Aqs pin `routes` and `[iroh].mode` say, and contact no relay (`docs/CLI.md` §7, ADR\-0061 decision 1). On `qsh serve` and `qsh listen` it also keeps the iroh endpoint down, which they otherwise bring up unless `[iroh].enable = false` (ADR\-0063). Not stored
 .TP
 \fB\-\-rendezvous\fR \fI<PEER>\fR
 Use this pinned peer as the rendezvous for hole punching on this command, instead of the host\*(Aqs own `rendezvous` hints (`docs/CLI.md` §7, ADR\-0054 decision 4). Must be pinned with an address. Not stored

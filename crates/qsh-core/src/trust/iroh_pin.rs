@@ -7,9 +7,13 @@
 //! - `relay` is the URL (`https://...`) of the relay the host's iroh
 //!   endpoint is homed on.
 //! - `key` is the host's Ed25519 public key in lowercase hex (its iroh
-//!   endpoint id). The pin's `fingerprint` is the SPKI SHA-256 of that key,
-//!   so the file is only valid when the two agree; a hash cannot be turned
-//!   back into a key, which is why the key is stored at all.
+//!   endpoint id). The pin's `fingerprint` is the SPKI SHA-256 of that key.
+//!   A file that holds both is only valid when they agree, and a file that
+//!   holds the key alone has its fingerprint derived (ADR-0063); a hash
+//!   cannot be turned back into a key, which is why the key is stored at
+//!   all.
+//! - A pin that has a `key` and no `address` has `routes = ["iroh"]` unless
+//!   the file says otherwise (`trust/pin_file.rs`).
 
 use qsh_proto::TrustPeer;
 use qsh_transport::{Fingerprint, fingerprint_of_ed25519_key};
@@ -163,6 +167,19 @@ impl TrustStore {
     /// recomputed from the key here, so a caller cannot attach a key to a
     /// pin it does not belong to. Returns whether anything changed.
     pub fn learn_key(&mut self, key: &[u8; KEY_LEN]) -> bool {
+        self.learn_key_inner(key, false)
+    }
+
+    /// [`Self::learn_key`] for a key learned from a connection (a direct
+    /// dial, a pairing). A pin with a key and no address reaches its host
+    /// over the relay by default (ADR-0063 decision 3), and a pin that had
+    /// not asked for any route yet becomes that pin now, instead of being
+    /// written with an explicit empty `routes`.
+    pub fn learn_key_from_connection(&mut self, key: &[u8; KEY_LEN]) -> bool {
+        self.learn_key_inner(key, true)
+    }
+
+    fn learn_key_inner(&mut self, key: &[u8; KEY_LEN], adopt_default_routes: bool) -> bool {
         let fingerprint = fingerprint_of_ed25519_key(key);
         let hex = key_to_hex(key);
         let mut changed = false;
@@ -173,6 +190,9 @@ impl TrustStore {
                 .is_ok_and(|fp| fp == fingerprint);
             if peer.key.is_none() && same {
                 peer.key = Some(hex.clone());
+                if adopt_default_routes && peer.routes.is_empty() {
+                    peer.routes = super::pin_file::default_routes(peer);
+                }
                 changed = true;
             }
         }

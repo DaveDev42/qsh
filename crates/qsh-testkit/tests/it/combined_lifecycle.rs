@@ -59,6 +59,8 @@ impl Runtime {
         let host_fp = loaded.identity.fingerprint;
         let mut config = Config::default();
         config.listen.serve = true;
+        // ADR-0063: the endpoint is on by default; this test uses no relay.
+        config.iroh.enable = Some(false);
         setup(&paths, &mut config);
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
 

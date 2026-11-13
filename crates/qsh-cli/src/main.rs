@@ -2147,7 +2147,7 @@ fn run_serve(
     on_demand: bool,
     quiet: bool,
 ) -> i32 {
-    let config = match ops.config() {
+    let config = match ops.daemon_config() {
         Ok(config) => config,
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
     };
@@ -2347,7 +2347,7 @@ fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
 /// SIGINT/SIGTERM, exactly like [`run_serve`].
 fn run_listen(ops: &Ops, bind: Option<&str>, serve_flag: bool, quiet: bool) -> i32 {
     let result = (|| -> Result<(), OpError> {
-        let mut config = ops.config()?;
+        let mut config = ops.daemon_config()?;
         // `--serve` turns the key on for this run only (ADR-0059 decision 20).
         config.listen.serve |= serve_flag;
         // Identity is loaded synchronously, before any runtime exists: the
@@ -2467,7 +2467,7 @@ fn run_reverse(
     quiet: bool,
 ) -> i32 {
     let result = (|| -> Result<(), OpError> {
-        let config = ops.config()?;
+        let config = ops.daemon_config()?;
         let identity = ops.load_identity()?.ok_or_else(|| {
             OpError::new(
                 ErrorCode::ConfigError,

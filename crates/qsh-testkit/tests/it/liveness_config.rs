@@ -91,7 +91,10 @@ fn temp_paths(dir: &tempfile::TempDir) -> Paths {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_daemon_fails_closed_on_an_out_of_range_liveness_value_before_binding() {
-    for (label, config) in bad_configs() {
+    for (label, mut config) in bad_configs() {
+        // ADR-0063: a daemon brings its iroh endpoint up unless told not to,
+        // and these tests must never reach a public relay.
+        config.iroh.enable = Some(false);
         let dir = tempfile::tempdir().unwrap();
         let paths = temp_paths(&dir);
         let identity = make_identity();

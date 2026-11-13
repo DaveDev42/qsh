@@ -72,6 +72,11 @@ pub struct IrohServe {
     /// form. Production leaves it empty.
     #[doc(hidden)]
     pub bind_addrs: Vec<SocketAddr>,
+    /// The endpoint is on only because `[iroh].enable` was never set
+    /// (ADR-0063): if it cannot be bound, the host says so and runs without
+    /// it instead of refusing to start. An `enable = true` that was written
+    /// down keeps failing closed.
+    pub optional: bool,
 }
 
 impl Default for IrohServe {
@@ -82,6 +87,7 @@ impl Default for IrohServe {
             proxy_from_env: true,
             relay_roots: Vec::new(),
             bind_addrs: Vec::new(),
+            optional: false,
         }
     }
 }
@@ -102,6 +108,7 @@ impl IrohServe {
             proxy_from_env: true,
             relay_roots: Vec::new(),
             bind_addrs: Vec::new(),
+            optional: false,
         }
     }
 }
@@ -118,6 +125,7 @@ pub fn iroh_serve_from_config(config: &Config) -> Option<IrohServe> {
     }
     let mut serve = IrohServe::with_relays(settings.relay_urls, settings.bind_port);
     serve.proxy_from_env = matches!(settings.proxy, crate::iroh_settings::IrohProxy::Env);
+    serve.optional = config.iroh.enable.is_none();
     Some(serve)
 }
 
@@ -323,7 +331,20 @@ pub async fn bind_exclusive(
             return Ok(None);
         }
     };
-    let endpoint = bind(serve, identity, trust).await?;
+    let endpoint = match bind(serve, identity, trust).await {
+        Ok(endpoint) => endpoint,
+        Err(err) if serve.optional => {
+            let line = format!(
+                "the iroh relay endpoint is not started: {}. The host runs without it; set \
+                 [iroh].enable = false to stop trying.",
+                err.message
+            );
+            tracing::warn!("{line}");
+            notice(&line);
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
     Ok(Some(OwnedEndpoint {
         endpoint,
         _claim: claim,
@@ -431,5 +452,45 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         let _held = claim(&paths(&a), "serve");
         assert!(matches!(claim(&paths(&b), "serve"), IrohSlot::Claimed(_)));
+    }
+
+    /// A daemon whose endpoint is on only by default runs on without it when
+    /// the endpoint cannot be set up; one that was told `enable = true` fails
+    /// closed (ADR-0063 decision 1).
+    #[tokio::test]
+    async fn a_defaulted_endpoint_that_cannot_start_does_not_stop_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+        let loaded = crate::identity::load(&paths).unwrap().unwrap();
+        let trust: Arc<dyn TrustEvaluator> = Arc::new(qsh_transport::StaticTrust::empty());
+
+        let mut serve = IrohServe::new("http://not-https.example", 0);
+        serve.optional = true;
+        let mut said = Vec::new();
+        let endpoint = bind_exclusive(&serve, &loaded.local, trust.clone(), &paths, "serve", |l| {
+            said.push(l.to_string());
+        })
+        .await
+        .expect("a defaulted endpoint is not required");
+        assert!(endpoint.is_none());
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("enable = false"), "{said:?}");
+
+        serve.optional = false;
+        let err = bind_exclusive(&serve, &loaded.local, trust, &paths, "serve", |_| {})
+            .await
+            .expect_err("a written enable = true fails closed");
+        assert_eq!(err.code, ErrorCode::ConfigError);
+    }
+
+    #[test]
+    fn only_an_unset_enable_makes_the_endpoint_optional() {
+        let mut config = Config::default();
+        assert!(iroh_serve_from_config(&config).unwrap().optional);
+        config.iroh.enable = Some(true);
+        assert!(!iroh_serve_from_config(&config).unwrap().optional);
+        config.iroh.enable = Some(false);
+        assert!(iroh_serve_from_config(&config).is_none());
     }
 }

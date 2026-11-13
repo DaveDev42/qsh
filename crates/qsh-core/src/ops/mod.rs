@@ -722,6 +722,9 @@ pub struct Ops {
     /// Extra roots for the relay's TLS certificate, set only by tests that
     /// run their own relay ([`Self::with_iroh_relay_roots`]).
     iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
+    /// The relays a test's client dials through when the config names none
+    /// ([`Self::with_iroh_relay_urls`]); empty is the built-in public relays.
+    iroh_relay_urls: Vec<String>,
     /// The sockets a client iroh endpoint binds, set only by tests that need
     /// the relay to be the only path ([`Self::with_iroh_client_bind`]).
     iroh_client_bind: Vec<std::net::SocketAddr>,
@@ -845,6 +848,7 @@ impl Ops {
             jump_off: false,
             no_iroh: false,
             iroh_relay_roots: Vec::new(),
+            iroh_relay_urls: Vec::new(),
             iroh_client_bind: Vec::new(),
             route_clock: None,
         }
@@ -866,6 +870,17 @@ impl Ops {
     #[must_use]
     pub fn with_iroh_relay_roots(mut self, roots: Vec<qsh_transport::CertificateDer>) -> Self {
         self.iroh_relay_roots = roots;
+        self
+    }
+
+    /// Dial through `urls` instead of the built-in public relays when neither
+    /// the pin nor `[iroh].relay_url` names one. A seam for tests that run
+    /// their own relay and want a pin with nothing but a key. No flag or
+    /// config key reaches it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_iroh_relay_urls(mut self, urls: Vec<String>) -> Self {
+        self.iroh_relay_urls = urls;
         self
     }
 
@@ -896,11 +911,16 @@ impl Ops {
     /// section that does not validate is `CONFIG_ERROR`, unless `--no-iroh`
     /// already switched the route off.
     pub fn iroh_settings(&self) -> Result<crate::iroh_settings::IrohSettings, OpError> {
-        let settings = match self.config().and_then(|c| c.iroh.settings()) {
+        let config = self.config();
+        let relay_named = config.as_ref().is_ok_and(|c| c.iroh.relay_url.is_some());
+        let mut settings = match config.and_then(|c| c.iroh.settings()) {
             Ok(settings) => settings,
             Err(_) if self.no_iroh => crate::iroh_settings::IrohSettings::default(),
             Err(err) => return Err(err),
         };
+        if !relay_named && !self.iroh_relay_urls.is_empty() {
+            settings.relay_urls = self.iroh_relay_urls.clone();
+        }
         let settings = settings
             .with_relay_roots(self.iroh_relay_roots.clone())
             .with_client_bind(self.iroh_client_bind.clone());
@@ -1170,6 +1190,21 @@ impl Ops {
     /// Load `config.toml` (missing = defaults).
     pub fn config(&self) -> Result<Config, OpError> {
         Config::load(&self.paths)
+    }
+
+    /// [`Self::config`] for a long-running process (`qsh serve`, `qsh
+    /// listen`, `qsh serve --to`), with `--no-iroh` applied to the one thing
+    /// it can still decide there: the daemon's own iroh endpoint stays down,
+    /// as `[iroh].enable = false` would keep it (ADR-0063 decision 1). The
+    /// registration dial of `qsh serve --to` keeps following `[iroh].mode`
+    /// (`docs/CLI.md` §6.13). Without the flag this is the file's config
+    /// unchanged.
+    pub fn daemon_config(&self) -> Result<Config, OpError> {
+        let mut config = self.config()?;
+        if self.no_iroh {
+            config.iroh.enable = Some(false);
+        }
+        Ok(config)
     }
 
     /// The validated `[transport]` setting an attach or `tunnel open` dials
