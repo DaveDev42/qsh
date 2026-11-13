@@ -24,7 +24,6 @@
 //!    whichever path it happens to be on.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -186,6 +185,11 @@ fn bind_error(serve: &IrohServe, err: &dyn std::fmt::Display) -> OpError {
 /// machine homes on the relay with the device key.
 const CLAIM_FILE: &str = "iroh-endpoint.lock";
 
+/// Who holds [`CLAIM_FILE`], for the message the next claimant prints. A
+/// separate file because Windows locks are mandatory: the locked file cannot
+/// be read by anyone but the holder's handle.
+const HOLDER_FILE: &str = "iroh-endpoint.holder";
+
 /// The right to home on the relay with this device's key, held for as long
 /// as the value lives (an advisory lock the OS drops when the process dies).
 ///
@@ -229,7 +233,7 @@ pub fn claim(paths: &Paths, role: &str) -> IrohSlot {
                 .truncate(false)
                 .open(&path)
         });
-    let mut file = match opened {
+    let file = match opened {
         Ok(file) => file,
         Err(err) => {
             tracing::warn!(path = %path.display(), %err, "cannot open the iroh claim file; not checking for another endpoint of this device");
@@ -239,13 +243,15 @@ pub fn claim(paths: &Paths, role: &str) -> IrohSlot {
     match file.try_lock() {
         Ok(()) => {
             // Informational: the next claimant names this process from it.
-            let _ = file.set_len(0);
-            let _ = write!(file, "{} {}", role, std::process::id());
-            let _ = file.flush();
+            let _ = std::fs::write(
+                paths.state_dir.join(HOLDER_FILE),
+                format!("{} {}", role, std::process::id()),
+            );
             IrohSlot::Claimed(IrohClaim { _file: Some(file) })
         }
         Err(TryLockError::WouldBlock) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text =
+                std::fs::read_to_string(paths.state_dir.join(HOLDER_FILE)).unwrap_or_default();
             let mut parts = text.split_whitespace();
             let holder = match (parts.next(), parts.next()) {
                 (Some(role), Some(pid)) => format!("`qsh {role}` (pid {pid})"),
