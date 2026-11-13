@@ -502,6 +502,11 @@ async fn dial_routed_plain(
     let mut iroh_failed: Option<OpError> = None;
     let head = sleep(iroh.head_start());
     tokio::pin!(head);
+    // A relay that hangs instead of refusing would hold the dial to its
+    // deadline and leave the fallback no time, so a rest gives iroh a bounded
+    // share of the dial before the others start beside it.
+    let patience = sleep(rest_patience(timeout));
+    tokio::pin!(patience);
     let overall = sleep_until(deadline);
     tokio::pin!(overall);
     if stance != Stance::Normal || iroh.head_start().is_zero() {
@@ -526,6 +531,7 @@ async fn dial_routed_plain(
             Other(Result<Routed, RouteError>),
             Iroh(Result<Routed, OpError>),
             HeadStart,
+            Patience,
             Deadline,
         }
         let event = tokio::select! {
@@ -533,6 +539,7 @@ async fn dial_routed_plain(
             r = within(&mut other) => Ev::Other(r),
             r = within(&mut iroh_fut) => Ev::Iroh(r),
             () = &mut head, if !iroh_started && other.is_some() => Ev::HeadStart,
+            () = &mut patience, if other_pending => Ev::Patience,
             () = &mut overall => Ev::Deadline,
         };
         match event {
@@ -567,6 +574,13 @@ async fn dial_routed_plain(
                 iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));
                 iroh_started = true;
             }
+            Ev::Patience => {
+                // iroh is still going: the others start beside it. A win by
+                // them ends the rest, a win by iroh lengthens it.
+                other_pending = false;
+                other_ran = true;
+                other = Some(dial_other());
+            }
             Ev::Deadline => break,
         }
     }
@@ -580,6 +594,15 @@ async fn dial_routed_plain(
     });
     err.iroh = iroh_failed.map(Box::new);
     Err(err)
+}
+
+/// How long iroh has the dial to itself in a rest before the direct dial and
+/// the punch start beside it (`docs/CLI.md` §6.1 "route 기억").
+const REST_PATIENCE: Duration = Duration::from_secs(2);
+
+/// [`REST_PATIENCE`], held to half of a dial that is shorter than twice it.
+fn rest_patience(dial: Duration) -> Duration {
+    REST_PATIENCE.min(dial / 2)
 }
 
 /// Dials the pin by key over iroh: builds the endpoint, homed on the relay
@@ -667,6 +690,16 @@ async fn relay_failure_reason(
     {
         return None;
     }
+    // The check connects straight to the relay host. A relay connection that
+    // follows a proxy the environment names did not go there, so the check
+    // would send a connection the proxy setting forbids, and its answer would
+    // describe another path: no reason is better than a wrong one.
+    if !relay_check_applies(
+        plan.target.config.proxy_from_env,
+        qsh_transport::proxy_in_environment(),
+    ) {
+        return None;
+    }
     if budget.is_zero() {
         return Some(REASON_RELAY_UNREACHABLE);
     }
@@ -677,6 +710,12 @@ async fn relay_failure_reason(
     )
     .await;
     reason_of_probe(&checked)
+}
+
+/// Whether the outside relay check may run: not when the relay connection
+/// goes through a proxy from the environment.
+fn relay_check_applies(proxy_from_env: bool, proxy_in_environment: bool) -> bool {
+    !(proxy_from_env && proxy_in_environment)
 }
 
 pub(crate) const REASON_RELAY_UNREACHABLE: &str = "relay_unreachable";
@@ -905,6 +944,15 @@ mod tests {
         );
         // A relay that passes the check is not what failed.
         assert_eq!(reason_of_probe(&Ok(())), None);
+    }
+
+    #[test]
+    fn the_relay_check_does_not_bypass_a_proxy_the_connection_follows() {
+        assert!(!relay_check_applies(true, true));
+        assert!(relay_check_applies(true, false));
+        // `[iroh].proxy = "off"`: the connection is direct, so is the check.
+        assert!(relay_check_applies(false, true));
+        assert!(relay_check_applies(false, false));
     }
 
     #[test]

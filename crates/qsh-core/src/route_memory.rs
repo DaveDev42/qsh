@@ -9,8 +9,9 @@
 //!
 //! 1. A pin whose last dial was won by iroh while the direct dial and the
 //!    punch were not standing is in a rest: dials start iroh with no head
-//!    start and do not start them. If iroh fails before the dial's time is
-//!    up, they start then, as a fallback, and a win by them ends the rest.
+//!    start and do not start them. If iroh has not stood after two seconds
+//!    (half of a dial shorter than four), or fails sooner, they start then
+//!    beside it, as a fallback, and a win by them ends the rest.
 //! 2. A rest ends after 10 minutes, doubling with every consecutive time
 //!    iroh won again, up to one hour. The first dial after it runs them
 //!    beside iroh (no head start), so the user waits no longer than before.
