@@ -102,6 +102,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "audit.query.truncated.json",
     "audit.query.iroh_relay.json",
     "doctor.run.keystore_session_bound.json",
+    "doctor.run.client_mode.json",
+    "doctor.run.server_mode.json",
     "doctor_transport.json",
     "doctor_screen_echo.json",
     "doctor_punch.json",
@@ -236,6 +238,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "setup.run.host_pending_acl.json",
     "setup.run.client_complete.json",
     "setup.run.client_complete_without_acl.json",
+    "setup.run.client_complete_judged_client.json",
     "setup.run.listener_pending_acl.json",
     "setup.run.host_complete_with_role.json",
     "setup.run.host_complete_with_role_punch.json",
@@ -346,6 +349,45 @@ fn strip_pin_key(value: &mut Value) {
     }
 }
 
+/// Drop `mode` and `mode_basis` (ADR-0066 decision 5) from every `doctor.run`
+/// data object, at any depth (an object holding both `overall` and
+/// `findings`, which also finds the `result` of a `setup.run` doctor step).
+/// `doctor.run` now always says which kind of device it judged, so the
+/// fixtures recorded before ADR-0066 stay byte-for-byte untouched and are
+/// compared with the two keys removed from both sides. The shapes that carry
+/// them have their own fixtures (`doctor.run.client_mode.json`,
+/// `doctor.run.server_mode.json`) that compare in full.
+fn strip_doctor_mode(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("overall") && map.contains_key("findings") {
+                map.remove("mode");
+                map.remove("mode_basis");
+            }
+            map.values_mut().for_each(strip_doctor_mode);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_doctor_mode),
+        _ => {}
+    }
+}
+
+/// [`check`] for a fixture recorded before `doctor.run` said its `mode`.
+fn check_without_doctor_mode(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_doctor_mode(&mut actual);
+    strip_doctor_mode(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (doctor mode ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
+    );
+}
+
 /// [`check`] for a fixture that compares in full except for the pin `key`.
 fn check_without_pin_key(name: &str, envelope: Value) {
     if updating() {
@@ -378,6 +420,8 @@ fn check_without_roles(name: &str, envelope: Value) {
     strip_pin_key(&mut expected);
     strip_forward_agent(&mut actual);
     strip_forward_agent(&mut expected);
+    strip_doctor_mode(&mut actual);
+    strip_doctor_mode(&mut expected);
     assert_eq!(
         pretty(&actual),
         pretty(&expected),
@@ -1086,8 +1130,11 @@ fn golden_setup_run_fixtures() {
     check_without_roles("setup.run.client_complete.json", client_run);
 
     // The same client with no `acl.toml` at all (ADR-0038): `complete` is
-    // true and the doctor step still reports `overall: "error"`.
-    let bare = with_config("");
+    // true and the doctor step still reports `overall: "error"`. Doctor only
+    // reports `acl_policy_missing` for a device it judges a server
+    // (ADR-0066), so this client says so in `[doctor].mode`: a machine that
+    // also serves is the case ADR-0038's exemption still covers.
+    let bare = with_config("[doctor]\nmode = \"server\"\n");
     let cert_path = bare.home_dir().join("peer.pem");
     let (code, mut bare_run) = bare.json(&[
         "setup",
@@ -1111,6 +1158,39 @@ fn golden_setup_run_fixtures() {
         }
     }
     check_without_roles("setup.run.client_complete_without_acl.json", bare_run);
+
+    // The same bare client with nothing that says it serves (ADR-0066):
+    // doctor judges it a client, finds nothing wrong with a missing
+    // `acl.toml`, and the step says so in its `mode`.
+    let judged = with_config("");
+    let cert_path = judged.home_dir().join("peer.pem");
+    let (code, mut judged_run) = judged.json(&[
+        "setup",
+        "client",
+        "laptop",
+        "--address",
+        "host.example:4433",
+        "--peer-cert",
+        cert_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{judged_run}");
+    assert_eq!(judged_run["data"]["complete"], true, "{judged_run}");
+    for step in judged_run["data"]["steps"].as_array_mut().unwrap() {
+        if step["id"] == "doctor" {
+            assert_eq!(step["result"]["mode"], "client", "{step}");
+            assert_ne!(step["result"]["overall"], "error", "{step}");
+            step["detail"] = serde_json::json!("overall: <overall>");
+            step["result"] = serde_json::json!({
+                "mode": step["result"]["mode"],
+                "mode_basis": step["result"]["mode_basis"],
+                "overall": "<overall>",
+            });
+        }
+    }
+    // The pin's `key` is a fresh value per sandbox.
+    strip_pin_key(&mut judged_run);
+    check("setup.run.client_complete_judged_client.json", judged_run);
 
     let missing = with_config("");
     let (code, missing_run) = missing.json(&[
@@ -1517,6 +1597,8 @@ fn golden_doctor_jump_stream_carrier_fixture() {
 
     let data = DoctorData {
         overall: "ok".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: JUMP_STREAM_CARRIER.code.to_string(),
             status: "info".to_string(),
@@ -1567,6 +1649,8 @@ fn golden_doctor_combined_endpoint_fixtures() {
     ] {
         let data = DoctorData {
             overall: if status == "warn" { "warn" } else { "ok" }.to_string(),
+            mode: None,
+            mode_basis: None,
             findings: vec![DoctorFinding {
                 code: diag.code.to_string(),
                 status: status.to_string(),
@@ -2096,7 +2180,10 @@ fn golden_doctor_keystore_session_bound_fixture() {
     };
     let data = ops
         .doctor_with_host_state(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
             std::time::SystemTime::now(),
             &host,
         )
@@ -2116,10 +2203,89 @@ fn golden_doctor_keystore_session_bound_fixture() {
         data: Some(serde_json::to_value(&data).expect("encode data")),
         error: None,
     };
-    check(
+    check_without_doctor_mode(
         "doctor.run.keystore_session_bound.json",
         serde_json::to_value(&envelope).expect("encode envelope"),
     );
+}
+
+/// `doctor.run` for a client-only device and for the same device told to
+/// judge itself a server (`docs/CLI.md` §6.17, ADR-0066). The device holds a
+/// pin with no `acl.toml` row, which only a server reports
+/// (`acl_principal_unmatched`). Produced in-process through
+/// [`Ops::doctor_with_host_state`], so no `$PATH` or service state of the
+/// machine running the test reaches the envelope; the file key store is read
+/// from the sandbox, not the OS credential store.
+#[test]
+fn golden_doctor_mode_fixtures() {
+    use qsh_core::identity::{FileKeyStore, KEY_FILE};
+    use qsh_core::{DoctorHostState, Ops, Paths};
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorReq};
+
+    let sandbox = Sandbox::initialized();
+    let run_dir = tempfile::tempdir().expect("run dir");
+    let ops = Ops::new(
+        Paths::new(sandbox.config_dir(), sandbox.state_dir()).with_runtime_dir(run_dir.path()),
+    );
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"user:x\"\nallow = [\"exec.run\"]\n",
+    )
+    .expect("write acl.toml");
+    sandbox.trust_add(
+        "laptop",
+        Some("laptop.example:4433"),
+        &qsh_transport::Fingerprint::of_spki_der(b"laptop").to_string(),
+    );
+    let keystore = FileKeyStore::new(ops.paths().identity_dir().join(KEY_FILE));
+    let system_root = tempfile::tempdir().expect("system root");
+    let home = tempfile::tempdir().expect("home");
+    let linger = tempfile::tempdir().expect("linger dir");
+    let host = DoctorHostState {
+        keystore: &keystore,
+        home_dir: Some(home.path()),
+        system_root: system_root.path(),
+        linger_dir: linger.path(),
+        username: Some("golden-user"),
+    };
+    for (mode, fixture, finding) in [
+        (None, "doctor.run.client_mode.json", None),
+        (
+            Some("server".to_string()),
+            "doctor.run.server_mode.json",
+            Some("acl_principal_unmatched"),
+        ),
+    ] {
+        let data = ops
+            .doctor_with_host_state(
+                DoctorReq { host: None, mode },
+                std::time::SystemTime::now(),
+                &host,
+            )
+            .expect("doctor");
+        let reported = data
+            .findings
+            .iter()
+            .any(|f| f.code == "acl_principal_unmatched");
+        assert_eq!(
+            reported,
+            finding.is_some(),
+            "{fixture}: {:?}",
+            data.findings
+        );
+        let envelope = CliEnvelope {
+            schema: CLI_SCHEMA_V1.to_string(),
+            request_id: "01K0EXAMPLE".to_string(),
+            command: "doctor.run".to_string(),
+            ok: true,
+            data: Some(serde_json::to_value(&data).expect("encode data")),
+            error: None,
+        };
+        check(
+            fixture,
+            serde_json::to_value(&envelope).expect("encode envelope"),
+        );
+    }
 }
 
 /// `doctor.run` with the `transport` object and both transport `info`
@@ -2143,6 +2309,8 @@ fn golden_doctor_transport_fixture() {
     };
     let data = DoctorData {
         overall: "ok".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![
             finding(&SCREEN_SYNC_UNSUPPORTED),
             finding(&DATAGRAM_UNAVAILABLE),
@@ -2195,6 +2363,8 @@ fn golden_doctor_agent_unreachable_fixture() {
 
     let data = DoctorData {
         overall: "warn".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: AGENT_UNREACHABLE.code.to_string(),
             status: "warn".to_string(),
@@ -4124,6 +4294,8 @@ fn golden_doctor_screen_echo_fixture() {
 
     let data = DoctorData {
         overall: "ok".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: SCREEN_ECHO_UNSUPPORTED.code.to_string(),
             status: "info".to_string(),
@@ -4176,6 +4348,8 @@ fn golden_doctor_punch_fixture() {
 
     let data = DoctorData {
         overall: "ok".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: PUNCH_SUCCEEDED.code.to_string(),
             status: "info".to_string(),
@@ -4207,6 +4381,8 @@ fn golden_doctor_punch_failed_fixture() {
 
     let data = DoctorData {
         overall: "warn".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: PUNCH_FAILED.code.to_string(),
             status: "warn".to_string(),

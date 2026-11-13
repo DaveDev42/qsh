@@ -1,0 +1,19 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "trust_remove_scope",
+        "detail": "trust.toml has at least one pinned peer. Removing a pin or lowering its role closes that peer's established connections. It applies to new connections from the next handshake, and to connections held open by a running `qsh serve`, `qsh listen` or `qsh serve --to` within 2 seconds. It applies on this device only; no other device is told. It does not end sessions: a session on a closed connection is detached, and a peer that is still trusted can reconnect and resume it.",
+        "remedy": "Trust is withdrawn per device: run the same `qsh trust remove` (or `qsh trust set-role`) on every other device that trusts the peer. To end the peer's sessions as well, close them with `qsh session close`.",
+        "status": "info"
+      }
+    ],
+    "mode": "client",
+    "mode_basis": "no_server_signal",
+    "overall": "ok"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

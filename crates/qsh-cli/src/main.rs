@@ -562,8 +562,18 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.capabilities(CapabilitiesReq { host: host.clone() }),
             human::print_capabilities,
         ),
-        Command::Doctor { host, fail_on } => {
-            let result = ops.doctor(DoctorReq { host: host.clone() }, SystemTime::now());
+        Command::Doctor {
+            host,
+            fail_on,
+            mode,
+        } => {
+            let result = ops.doctor(
+                DoctorReq {
+                    host: host.clone(),
+                    mode: mode.clone(),
+                },
+                SystemTime::now(),
+            );
             // The verdict is taken from the successful report before it is
             // rendered; a failed run keeps its 255 (ADR-0027 decision 5).
             let tripped = match (fail_on, &result) {

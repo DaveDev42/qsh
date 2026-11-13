@@ -20,6 +20,7 @@ mod cp_cancel;
 mod cp_e2e;
 mod cp_recursive;
 mod doctor_fail_on;
+mod doctor_mode;
 mod doctor_transport;
 mod dynamic_forward;
 mod echo_host;

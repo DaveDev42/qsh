@@ -90,7 +90,7 @@ use KeyType::{Bool, Int, Str, StrOrList};
 ///
 /// `serve.*`, `listen.*`, `reverse.*`, `audit.*`, `transport.*` and
 /// `recovery.*` are read once when a daemon or a connecting command starts.
-/// `identity.key_store`, `ssh.*`, `interactive.*` and `agent.forward` are read by each command
+/// `identity.key_store`, `ssh.*`, `interactive.*`, `agent.forward` and `doctor.mode` are read by each command
 /// that uses them, so they apply to the next command. `punch.mode` is read by
 /// each client command, but `qsh listen` and `qsh serve --to` read it once at
 /// start, so it applies from the next start. `iroh.enable`, `iroh.relay_url`,
@@ -187,6 +187,10 @@ pub const KEYS: &[ConfigKey] = &[
     },
     key("iroh", "head_start_ms", Int, false),
     key("iroh", "portmap", Bool, true),
+    ConfigKey {
+        choices: &["auto", "client", "server"],
+        ..key("doctor", "mode", Str, false)
+    },
 ];
 
 fn invalid(message: String) -> OpError {

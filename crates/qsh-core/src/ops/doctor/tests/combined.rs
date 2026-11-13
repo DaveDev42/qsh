@@ -32,7 +32,10 @@ fn report(ops: &Ops, env: &DoctorEnvironment<'_>) -> Vec<DoctorFinding> {
     let identity = ops.load_identity().unwrap().unwrap().identity;
     let config = ops.config().unwrap();
     ops.doctor_assemble(
-        DoctorReq { host: None },
+        DoctorReq {
+            host: None,
+            mode: None,
+        },
         unix_seconds(SystemTime::now()),
         &identity,
         &config,

@@ -75,6 +75,34 @@ const DOCTOR_PROBE_TIMEOUT: Duration = super::PROBE_DIAL_TIMEOUT;
 /// 30일 전 doctor 경고", design brief row #5).
 const CERT_EXPIRING_SOON_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 
+/// The kind of device `doctor.run` judged (ADR-0066 decision 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceMode {
+    /// Dials out only: takes no inbound request.
+    Client,
+    /// Takes inbound connections (or may, the moment it is started).
+    Server,
+}
+
+impl DeviceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Server => "server",
+        }
+    }
+}
+
+/// A [`DeviceMode`] and the closed word that says why (`DoctorData.mode_basis`).
+struct ModeJudgment {
+    mode: DeviceMode,
+    basis: &'static str,
+}
+
+/// Said beside an unparseable `acl.toml` on a client-only device
+/// (ADR-0066 decision 4), in place of the role clause a server gets.
+const ACL_POLICY_INVALID_CLIENT_CLAUSE: &str = "This device is judged a client, which takes no inbound request, so nothing is refused for it today. If it ever serves, this file refuses every request and role grants too.";
+
 /// The host state [`Ops::doctor_with_host_state`] takes instead of reading
 /// the real machine: the key store the diagnosed identity records, `$HOME`,
 /// the root under which `Library/LaunchDaemons` is looked up, the systemd
@@ -319,6 +347,8 @@ impl Ops {
         config: &Config,
         env: &DoctorEnvironment<'_>,
     ) -> Result<DoctorData, OpError> {
+        let judged = self.doctor_judge_mode(req.mode.as_deref(), config, env, now_unix)?;
+        let server = judged.mode == DeviceMode::Server;
         let mode = infer_run_mode(config);
         // `qsh listen` with `[listen].serve` is also a forward host
         // (ADR-0059): the checks that only a session host needs run for it.
@@ -327,11 +357,18 @@ impl Ops {
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
         findings.extend(self.doctor_config_serve_to_conflict_finding(config));
-        findings.extend(self.doctor_acl_findings_for(
-            mode,
-            combined,
-            unix_to_system_time(now_unix),
-        )?);
+        // A client-only device takes no inbound request, so everything that
+        // only matters for inbound authorization, the service unit, the
+        // listener and the session host is left out (ADR-0066 decision 4).
+        if server {
+            findings.extend(self.doctor_acl_findings_for(
+                mode,
+                combined,
+                unix_to_system_time(now_unix),
+            )?);
+        } else {
+            findings.extend(self.doctor_acl_findings_client());
+        }
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
         findings.extend(keystore_finding_of(env.keystore));
@@ -344,12 +381,14 @@ impl Ops {
         let (connectivity, direct_missing) =
             self.doctor_connectivity_findings(config, req.host.as_deref())?;
         findings.extend(connectivity);
-        findings.extend(self.doctor_service_registration_findings_for(mode, combined, env));
-        if combined {
-            findings.extend(self.doctor_combined_findings(config, env));
+        if server {
+            findings.extend(self.doctor_service_registration_findings_for(mode, combined, env));
+            if combined {
+                findings.extend(self.doctor_combined_findings(config, env));
+            }
+            findings.extend(self.doctor_bindv6only_finding(config, mode, env));
         }
-        findings.extend(self.doctor_bindv6only_finding(config, mode, env));
-        findings.extend(doctor_agent_findings(config, env));
+        findings.extend(doctor_agent_findings(config, env, server));
         let transport = match req.host.as_deref() {
             Some(host) if !direct_missing && !reachability_failed(&findings) => {
                 self.doctor_transport(config, host, &mut findings)
@@ -373,9 +412,146 @@ impl Ops {
 
         Ok(DoctorData {
             overall: overall_status(&findings),
+            mode: Some(judged.mode.as_str().to_string()),
+            mode_basis: Some(judged.basis.to_string()),
             findings,
             transport,
             punch,
+        })
+    }
+
+    /// Which kind of device this is (ADR-0066 decisions 2 and 3): the
+    /// request's `mode`, else `[doctor].mode`, else what the device's own
+    /// state shows. A `"server"` signal wins over everything an absent
+    /// signal would say, because the wrong answer in that direction (a
+    /// server judged a client) silences the checks that guard inbound
+    /// authorization.
+    fn doctor_judge_mode(
+        &self,
+        requested: Option<&str>,
+        config: &Config,
+        env: &DoctorEnvironment<'_>,
+        now_unix: i64,
+    ) -> Result<ModeJudgment, OpError> {
+        use crate::config::DoctorModeSetting;
+        let requested = match requested {
+            None | Some("auto") => None,
+            Some("client") => Some(DoctorModeSetting::Client),
+            Some("server") => Some(DoctorModeSetting::Server),
+            Some(other) => {
+                return Err(OpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("invalid doctor mode {other:?}: expected `auto`, `client` or `server`"),
+                )
+                .with_retryable(false));
+            }
+        };
+        let fixed = |setting: DoctorModeSetting, basis: &'static str| match setting {
+            DoctorModeSetting::Client => Some(ModeJudgment {
+                mode: DeviceMode::Client,
+                basis,
+            }),
+            DoctorModeSetting::Server => Some(ModeJudgment {
+                mode: DeviceMode::Server,
+                basis,
+            }),
+            DoctorModeSetting::Auto => None,
+        };
+        if let Some(judged) = requested.and_then(|setting| fixed(setting, "request")) {
+            return Ok(judged);
+        }
+        if let Some(judged) = config
+            .doctor
+            .mode
+            .and_then(|setting| fixed(setting, "config"))
+        {
+            return Ok(judged);
+        }
+        let basis = self.doctor_server_signal(config, env, unix_to_system_time(now_unix))?;
+        Ok(match basis {
+            Some(basis) => ModeJudgment {
+                mode: DeviceMode::Server,
+                basis,
+            },
+            None => ModeJudgment {
+                mode: DeviceMode::Client,
+                basis: "no_server_signal",
+            },
+        })
+    }
+
+    /// The first sign that this device takes inbound connections, in the
+    /// order ADR-0066 decision 3 lists them: a `[serve]`, `[listen]` or
+    /// `[reverse]` table with a key set, a registered service unit, a daemon
+    /// (a `serve.json` record, live or left by a crash, or a live localctl
+    /// endpoint), a pin with a role other than `none`, a live invite that
+    /// pins one. `None` when there is none.
+    fn doctor_server_signal(
+        &self,
+        config: &Config,
+        env: &DoctorEnvironment<'_>,
+        now: SystemTime,
+    ) -> Result<Option<&'static str>, OpError> {
+        if config.serve != crate::config::ServeConfig::default()
+            || config.listen != crate::config::ListenConfig::default()
+            || config.reverse != crate::config::ReverseConfig::default()
+        {
+            return Ok(Some("config_section"));
+        }
+        let unit_registered = ["serve", "listen", "reverse"].iter().any(|mode| {
+            let registered = if env.os == probe::HostOs::Windows {
+                Some(probe::windows_task_definition_present(
+                    &self.paths.config_dir,
+                    mode,
+                ))
+            } else {
+                probe::service_unit_registered(env.os, env.home_dir, env.system_root, mode)
+            };
+            registered == Some(true)
+        });
+        if unit_registered {
+            return Ok(Some("service_unit"));
+        }
+        let listening = crate::localctl::client::candidate_sockets(&self.paths.runtime_dir())
+            .unwrap_or_default()
+            .iter()
+            .any(|(pid, _)| crate::serve::record::process_is_alive(*pid));
+        if crate::serve::record::read(&self.paths).is_some() || listening {
+            return Ok(Some("daemon"));
+        }
+        let trust = self.doctor_load_trust()?;
+        if trust.peers().iter().any(peer_has_role) {
+            return Ok(Some("role_pin"));
+        }
+        if crate::trust::live_role_invite_count(&self.paths.invites_file(), now)
+            .is_ok_and(|live| live > 0)
+        {
+            return Ok(Some("role_invite"));
+        }
+        Ok(None)
+    }
+
+    /// What `acl.toml` still means on a client-only device (ADR-0066
+    /// decision 4): nothing is enforced here, so the missing file, the
+    /// unmatched pins and the other rows that only matter once a request
+    /// arrives are left out. A file that does not parse is still a broken
+    /// file, and it would refuse every request the day this device serves,
+    /// so it is reported as a `warn`, not an `error`.
+    fn doctor_acl_findings_client(&self) -> Option<DoctorFinding> {
+        let (_policy, diagnostic, _index) = load_policy_or_deny(&self.paths, Role::Serve);
+        let diagnostic = diagnostic.filter(|d| d.code == crate::acl::ACL_POLICY_INVALID_CODE)?;
+        Some(DoctorFinding {
+            code: diagnostic.code.to_string(),
+            status: "warn".to_string(),
+            detail: format!(
+                "{}\n{ACL_POLICY_INVALID_CLIENT_CLAUSE}",
+                diagnostic.render_block()
+            ),
+            remedy: Some(format!(
+                "{}. {}",
+                crate::acl::ACL_STARTUP_NO_AUTOGEN,
+                crate::acl::ACL_STARTUP_CHECK_HINT
+            )),
         })
     }
 
@@ -1833,7 +2009,11 @@ fn transport_findings(
 
 /// `agent_unreachable` and `agent_dir_unusable` (ADR-0055 decision 19).
 /// Both are `warn`: nothing is refused, forwarding just cannot work.
-fn doctor_agent_findings(config: &Config, env: &DoctorEnvironment<'_>) -> Vec<DoctorFinding> {
+fn doctor_agent_findings(
+    config: &Config,
+    env: &DoctorEnvironment<'_>,
+    server: bool,
+) -> Vec<DoctorFinding> {
     use crate::doctor::{AGENT_DIR_UNUSABLE, AGENT_UNREACHABLE};
     let mut out = Vec::new();
     if config.agent.forward == Some(crate::config::AgentForwardMode::Yes)
@@ -1846,7 +2026,10 @@ fn doctor_agent_findings(config: &Config, env: &DoctorEnvironment<'_>) -> Vec<Do
             remedy: Some(AGENT_UNREACHABLE.remedy.to_string()),
         });
     }
-    if let Some(dir) = env.agent_runtime_dir
+    // The agent directory is where a serving host puts the sockets it
+    // forwards to; a client-only device has no use for it (ADR-0066).
+    if server
+        && let Some(dir) = env.agent_runtime_dir
         && let Err(why) = crate::agent::check_agent_dir(dir)
     {
         out.push(DoctorFinding {

@@ -99,6 +99,12 @@ pub fn print_doctor(data: &DoctorData) -> io::Result<()> {
 /// testable without a real stdout.
 fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
     let mut lines = vec![format!("overall: {}", sanitize(&data.overall))];
+    if let Some(mode) = &data.mode {
+        lines.push(match &data.mode_basis {
+            Some(basis) => format!("mode: {} ({})", sanitize(mode), sanitize(basis)),
+            None => format!("mode: {}", sanitize(mode)),
+        });
+    }
     if data.findings.is_empty() {
         lines.push("no findings".to_string());
     } else {

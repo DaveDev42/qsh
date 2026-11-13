@@ -1238,17 +1238,23 @@ fn contract_types_have_json_schemas_for_acl_check() {
 
 #[test]
 fn doctor_req_omits_host_when_absent_and_round_trips_when_present() {
-    let bare = DoctorReq { host: None };
+    let bare = DoctorReq {
+        host: None,
+        mode: None,
+    };
     let json = serde_json::to_value(&bare).unwrap();
     assert!(json.get("host").is_none());
+    assert!(json.get("mode").is_none());
     let back: DoctorReq = serde_json::from_value(json).unwrap();
     assert_eq!(back, bare);
 
     let with_host = DoctorReq {
         host: Some("web1".to_string()),
+        mode: Some("client".to_string()),
     };
     let json = serde_json::to_value(&with_host).unwrap();
     assert_eq!(json["host"], "web1");
+    assert_eq!(json["mode"], "client");
     let back: DoctorReq = serde_json::from_value(json).unwrap();
     assert_eq!(back, with_host);
 }
@@ -1257,13 +1263,21 @@ fn doctor_req_omits_host_when_absent_and_round_trips_when_present() {
 fn doctor_req_defaults_host_when_omitted_by_an_older_client() {
     let json = serde_json::json!({});
     let req: DoctorReq = serde_json::from_value(json).unwrap();
-    assert_eq!(req, DoctorReq { host: None });
+    assert_eq!(
+        req,
+        DoctorReq {
+            host: None,
+            mode: None
+        }
+    );
 }
 
 #[test]
 fn doctor_data_round_trips_with_findings_and_omits_remedy_when_absent() {
     let data = DoctorData {
         overall: "warn".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![
             DoctorFinding {
                 code: "keystore_unavailable".to_string(),
@@ -1298,6 +1312,8 @@ fn doctor_data_empty_findings_is_overall_ok() {
     // `qsh_core::ops::doctor`'s own tests).
     let data = DoctorData {
         overall: "ok".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![],
         transport: None,
         punch: None,
@@ -1306,6 +1322,30 @@ fn doctor_data_empty_findings_is_overall_ok() {
     assert_eq!(json["findings"], serde_json::json!([]));
     let back: DoctorData = serde_json::from_value(json).unwrap();
     assert_eq!(back, data);
+}
+
+/// ADR-0066 decision 5: `mode` and `mode_basis` are additive. A report from
+/// before they existed still parses, and a report without them writes
+/// neither key.
+#[test]
+fn doctor_data_mode_is_additive() {
+    let old = serde_json::json!({ "overall": "ok", "findings": [] });
+    let data: DoctorData = serde_json::from_value(old).unwrap();
+    assert_eq!(data.mode, None);
+    assert_eq!(data.mode_basis, None);
+    let json = serde_json::to_value(&data).unwrap();
+    assert!(json.get("mode").is_none() && json.get("mode_basis").is_none());
+
+    let with_mode = DoctorData {
+        mode: Some("server".to_string()),
+        mode_basis: Some("service_unit".to_string()),
+        ..data
+    };
+    let json = serde_json::to_value(&with_mode).unwrap();
+    assert_eq!(json["mode"], "server");
+    assert_eq!(json["mode_basis"], "service_unit");
+    let back: DoctorData = serde_json::from_value(json).unwrap();
+    assert_eq!(back, with_mode);
 }
 
 #[test]

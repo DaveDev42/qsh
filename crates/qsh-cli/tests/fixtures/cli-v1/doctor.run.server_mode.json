@@ -1,0 +1,31 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "acl_principal_unmatched",
+        "detail": "trust.toml pins a peer that no acl.toml row with auth_path \"pin\" matches — neither its device:<name> principal nor its fp:sha256:<fingerprint> principal. Every request from this peer is denied (default-deny) until a matching row exists. (peer: laptop)\nminimal example:\n[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]\n",
+        "remedy": "Add a matching [[acl]] row (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.",
+        "status": "error"
+      },
+      {
+        "code": "trust_remove_scope",
+        "detail": "trust.toml has at least one pinned peer. Removing a pin or lowering its role closes that peer's established connections. It applies to new connections from the next handshake, and to connections held open by a running `qsh serve`, `qsh listen` or `qsh serve --to` within 2 seconds. It applies on this device only; no other device is told. It does not end sessions: a session on a closed connection is detached, and a peer that is still trusted can reconnect and resume it.",
+        "remedy": "Trust is withdrawn per device: run the same `qsh trust remove` (or `qsh trust set-role`) on every other device that trusts the peer. To end the peer's sessions as well, close them with `qsh session close`.",
+        "status": "info"
+      },
+      {
+        "code": "service_not_registered",
+        "detail": "No platform service unit is registered for this machine's inferred run mode. Until one is, this mode only runs in the foreground; it does not survive logout, reboot, or a crash. (inferred mode: serve)",
+        "remedy": "Run `qsh service install` to write this mode's unit and start it. docs/deploy/service.md has the same steps by hand: `launchctl bootstrap gui/$UID …` (macOS) or `systemctl --user enable --now …` (Linux).",
+        "status": "info"
+      }
+    ],
+    "mode": "server",
+    "mode_basis": "request",
+    "overall": "error"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
