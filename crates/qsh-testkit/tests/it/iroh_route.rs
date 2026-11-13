@@ -906,6 +906,47 @@ async fn a_change_of_network_forgets_the_rest_and_the_head_start_returns() {
     rig.net.shutdown().await;
 }
 
+/// A pin in a rest whose relay later hangs (accepts the TCP connection and
+/// never answers) must not lose the direct route that works again: iroh gets
+/// a bounded share of the dial, then the direct dial starts beside it, wins,
+/// and ends the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_that_hangs_in_a_rest_does_not_lock_out_the_direct_route() {
+    qsh_transport::set_default_dial_timeout(Duration::from_secs(6));
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "300").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    // iroh wins over the blackholed direct route: the pin is in a rest.
+    timed_exec(&rig.ops, "far", "first").await;
+    assert!(rig.ops.paths().route_cache_file().exists());
+
+    // Now the address is good and the relay hangs.
+    let real = rig.net.host("far").h.addr.to_string();
+    let fingerprint = rig.net.host("far").h.server_identity.fingerprint;
+    rig.net.pin("far", Some(real), fingerprint).await;
+    let hung = CountingPort::bind().await;
+    rig.set_iroh("far", Some(&hung.url), None)
+        .await
+        .expect("a relay that never answers");
+
+    let took = timed_exec(&rig.ops, "far", "direct").await;
+    assert!(hung.contacts() > 0, "the rest still gave iroh the first go");
+    assert!(
+        took < Duration::from_secs(4),
+        "the direct dial starts beside a hanging relay long before the dial's end: {took:?}"
+    );
+
+    // The direct win ended the rest: the next dial runs the usual order and
+    // a direct dial that stands inside the head start never contacts the relay.
+    let contacts = hung.contacts();
+    timed_exec(&rig.ops, "far", "again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(hung.contacts(), contacts);
+    rig.net.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_direct_route_that_stands_ends_the_rest() {
     let rig = Rig::start(true).await;

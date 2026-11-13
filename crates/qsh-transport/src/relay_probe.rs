@@ -126,6 +126,26 @@ pub fn system_trust_root_count() -> usize {
     rustls_native_certs::load_native_certs().certs.len()
 }
 
+/// The environment variables a relay connection follows for its proxy when
+/// `proxy_from_env` is on (see `IrohConfig::proxy_from_env`).
+const PROXY_VARS: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+
+/// Whether the process environment names an HTTP(S) proxy. The check below
+/// connects straight to the relay host, so a caller whose relay connection
+/// follows the environment cannot use it to say what the relay connection
+/// saw.
+pub fn proxy_in_environment() -> bool {
+    proxy_named_by(|name| std::env::var(name).ok())
+}
+
+/// [`proxy_in_environment`] over `get`, for a test that must not touch the
+/// real environment.
+pub fn proxy_named_by(get: impl Fn(&str) -> Option<String>) -> bool {
+    PROXY_VARS
+        .iter()
+        .any(|name| get(name).is_some_and(|v| !v.trim().is_empty()))
+}
+
 /// An error and its `source()` chain as one line.
 fn chain_text(err: &dyn std::error::Error) -> String {
     let mut out = err.to_string();
@@ -339,5 +359,30 @@ pub async fn probe_relay(
     match tokio::time::timeout(limit + Duration::from_millis(500), work).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) | Err(_) => Err(fail(RelayProbeStage::Timeout, "the check did not finish")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proxy_named_by;
+
+    #[test]
+    fn any_of_the_four_proxy_variables_with_a_value_counts() {
+        for name in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            assert!(
+                proxy_named_by(|n| (n == name).then(|| "http://proxy.invalid:3128".to_string())),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_variable_or_an_empty_one_is_no_proxy() {
+        assert!(!proxy_named_by(|_| None));
+        assert!(!proxy_named_by(|_| Some(String::new())));
+        assert!(!proxy_named_by(|_| Some("  ".to_string())));
+        assert!(!proxy_named_by(
+            |n| (n == "NO_PROXY").then(|| "x".to_string())
+        ));
     }
 }

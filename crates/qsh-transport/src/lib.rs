@@ -76,7 +76,10 @@ pub use iroh_backend::{
 };
 pub use mux::{TransportCaps, TransportKind};
 pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};
-pub use relay_probe::{RelayProbeFailure, RelayProbeStage, probe_relay, system_trust_root_count};
+pub use relay_probe::{
+    RelayProbeFailure, RelayProbeStage, probe_relay, proxy_in_environment, proxy_named_by,
+    system_trust_root_count,
+};
 pub use stream::{RecvStream, SendStream};
 pub use tls::{
     AuthPath, BoundTrust, Observation, PeerBinding, PeerRole, QshPeerVerifier, RejectReason,
