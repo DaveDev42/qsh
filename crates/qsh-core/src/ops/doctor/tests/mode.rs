@@ -386,3 +386,42 @@ fn the_config_key_takes_only_the_three_words() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
 }
+
+/// `qsh trust allow` grants authorize inbound requests whatever the pin's
+/// role is, so a pin that holds some is a server's pin. Without this a
+/// device that authorizes only through grants would be judged a client and
+/// lose `acl_policy_missing`.
+#[test]
+fn a_pin_with_grants_and_no_role_makes_the_device_a_server() {
+    let (_guard, ops) = client_ops();
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        run_in(&ops, None, home.path()).mode.as_deref(),
+        Some("client")
+    );
+
+    ops.trust_allow(qsh_proto::TrustAllowReq {
+        name: "laptop".into(),
+        actions: vec!["exec.run".into()],
+        paths: Vec::new(),
+        scope: None,
+    })
+    .unwrap();
+    let data = run_in(&ops, None, home.path());
+    assert_eq!(data.mode.as_deref(), Some("server"));
+    assert_eq!(data.mode_basis.as_deref(), Some("role_pin"));
+    assert!(codes(&data.findings).contains(&"acl_policy_missing"));
+}
+
+/// An `invites.toml` that exists and does not parse is an unknown, and an
+/// unknown reads as a server: the wrong guess in the other direction hides
+/// the policy checks.
+#[test]
+fn an_unreadable_invite_store_reads_as_a_server() {
+    let (_guard, ops) = client_ops();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(ops.paths().invites_file(), b"this is = not [valid toml").unwrap();
+    let data = run_in(&ops, None, home.path());
+    assert_eq!(data.mode.as_deref(), Some("server"));
+    assert_eq!(data.mode_basis.as_deref(), Some("role_invite"));
+}
