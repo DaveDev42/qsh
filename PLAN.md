@@ -154,7 +154,7 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 - [x] **6. 역방향과 서버.** `ddde444f`, `bca04b4a`, `fab3c75b`. 클라이언트 endpoint는 임의 iroh 키와 연결 안 신원 증명을 쓴다(`15629dcd`, protocol §22.8, ADR-0061 개정 이력). 짧은 명령의 close 대기는 `b0bc0d18`이 없앴다. 원래 문안: `qsh serve --to`의 등록 dial이 iroh route로 컨트롤러에 닿고, 컨트롤러(`listen`, 합친 endpoint 포함)가 iroh endpoint로 받는다. admission은 handshake 뒤 키 기준으로 판정한다. 완료: relay만 열린 시험망에서 정방향 `exec`·세션·resume과 역방향 등록·attach가 돈다.
 - **진행 방식(2026-11-13 Dave 요청으로 축약).** 스텝 5·5b·6은 바뀐 crate·모듈의 시험만 돌리고 단계별 검증 에이전트를 두지 않는다. 검사 일곱과 적대적 검증 한 번, 실망 측정(Toss)은 릴리스 직전에 몰아서 한다. 스텝 7은 초안의 "(제안)" 표시를 걷고 구현과 다른 곳만 고친다. 더 줄여서(같은 날) Toss 전환에 필요한 것만 이번 릴리스에 넣는다: `[iroh]` 설정, pin의 `routes`·`relay`·`key`와 `qsh trust iroh`, `--no-iroh`, client dial(주소 없는 iroh pin은 곧바로, 주소 있는 pin은 head start 경주), serve·listen의 iroh accept와 키 기준 admission, 감사 `peer_path`·`relay`. 릴리스 뒤로 미루는 것: route 기억(스텝 5b 후반), `serve --to` 등록의 iroh 경유, doctor 코드 넷과 `iroh` 객체, 연결에서 pin `key` 자동 채우기. 미룬 것은 CLI.md 초안에서 "(제안)"으로 남긴다. Toss 전환(converge)을 마치고 링크가 정상이 되면 곧바로 미룬 것을 이어서 구현하고, 그때 M28을 닫는다.
 - [x] **7. 문서와 위협 모델.** `f9091913`, `f19237f1`. 원래 문안: `docs/design/architecture.md`(backend 경계), `docs/design/protocol.md`(route 순서), `docs/design/threat-model.md`(relay 운영자와 TLS를 가로채는 망이 보는 것, 공용 relay의 rate limit), `docs/design/testing.md`, README.
-- [ ] **8. 마감.** 결정 28 대응표, CI 초록, ROADMAP 마감 노트. 릴리스 태그는 `v0.7.0`이다(`v0.6.0`은 2026-11-11 M27까지로 이미 나갔다). 수용 기준 4의 resume·`-L`·`cp` relay 전용 시험을 더한 뒤 닫는다.
+- [x] **8. 마감.** 결정 28 대응표는 §4.2 아래, CI와 fuzz-smoke는 `97d2bdc6`에서 초록(Windows 빌드·macOS 시험·fuzz 락 보정 `ba50855d`·`59cb804b`·`97d2bdc6`). 릴리스 태그는 `v0.7.0`이다(`v0.6.0`은 2026-11-11 M27까지로 이미 나갔다). 버전 올림 `62b74864`, 릴리스 노트 `77a1acf8`.
 
 ### 4.2 결정 28 (수용 기준)
 
@@ -169,7 +169,26 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 9. relay TLS가 OS 인증서 저장소로 검증된다(사설 루트를 신뢰 저장소에 넣은 시험 relay로 확인).
 10. 문서(스텝 7)와 man 페이지가 구현과 같다.
 
+#### 결정 28 대응표 (2026-11-13)
+
+| 항목 | 판정 | 근거 |
+|---|---|---|
+| 1 스텝 1~3 무변경 | 충족 | `2cacaff0`·`83dd9af3`·`c6838405`에서 fixture·`crates/qsh-proto/proto`·`capabilities.json` diff 0, 기존 시험 초록 |
+| 2 이름 금지 | 충족 | `xtask/src/arch/tests.rs`의 `module_ban_flags_iroh_and_noq_paths_under_core_and_cli_src`, `run_flags_iroh_and_noq_dependencies_in_core_and_cli_manifests` |
+| 3 두 backend conformance | 충족 | `qsh-transport/tests/it/conformance.rs`의 `quic`·`iroh_direct`·relay 세 쌍 |
+| 4 relay 전용 망의 exec·세션·resume·`-L`·`cp` | 충족 | `iroh_relay_only::`(`exec_session_tunnel_and_cp_all_run_over_the_relay_alone`, `a_session_over_the_relay_resumes_after_a_break_with_identical_output`, `a_local_forward_over_the_relay_carries_bytes_both_ways`, `cp_up_and_down_over_the_relay_keeps_the_bytes`, `the_rig_has_no_direct_path_to_win`), `23c9e647` |
+| 5 역방향 등록과 attach | 충족 | `iroh_reverse::a_target_registers_over_the_relay_and_exec_runs_through_the_controller`, `iroh_reverse::a_relay_only_registration_carries_exec_and_an_attached_session` |
+| 6 다른 pin 거절, 사설 CA·`-J` 거부 | 충족 | `iroh_route::a_host_that_does_not_trust_the_client_is_auth_failed`, `iroh_route::a_key_that_is_not_the_pins_is_a_config_error_on_every_command`, `iroh_identity::`의 위조·재사용·누락 증명 거절, `iroh_route::a_jump_chain_cannot_open_an_iroh_only_hop_and_a_private_ca_cannot_take_the_route` |
+| 7 끈 설정은 relay 비접속 | 충족 | `iroh_route::a_disabled_route_contacts_no_relay_and_keeps_the_old_errors` |
+| 8 감사는 구조만 | 충족 | `audit::iroh_tests::`(`a_keyed_peer_record_names_its_path_and_relay`, `the_relay_field_drops_credentials_and_unparseable_urls` 등), fixture `audit.query.iroh_relay.json` |
+| 9 relay TLS는 OS 저장소 | 충족 | `iroh_backend::the_relay_certificate_is_verified_against_the_trust_store`(Linux·Windows·macOS 검증기) |
+| 10 문서와 man | 충족 | `f9091913`·`f19237f1`·`f82554f9`, `checked_in_man_pages_match_the_generator`, `cli_md_status_header_cites_only_sections_that_exist` |
+
+범위에서 뺀 것: doctor의 iroh 코드 넷과 `doctor.run`의 `iroh` 객체(계약에서도 뺐다, CLI.md v0.104). 시험으로 고정하지 못한 것: relay에서 직결로 승격하는 경로(실제 망 측정 항목, §4.3의 Toss 측정).
+
 ### 4.3 M28 뒤 후속 (범위 밖, 결정 대상)
+
+- [ ] **Toss 실망 측정.** v0.7.0을 깐 Toss에서 qsh 자체의 iroh 연결이 직결로 승격하는지 감사 `peer_path`로 확인하고 연결 시간과 RTT를 ADR-0061 개정 이력에 적는다.
 
 - [ ] **TITAN 아래 M24 펀칭 확인.** iroh 펀칭이 통과했으니(상대도 보내 오는 흐름은 TITAN이 막지 않는 것으로 보임), 중개자 MacMini가 4433으로 닿는 M24도 Toss에서 될 가능성이 있다. 공유기 conntrack으로 펀칭 흐름의 첫 패킷 방향을 확인해 TITAN의 판정 규칙을 기록한다.
 - [ ] **M24 펀칭과 iroh 펀칭 비교.** `punch_accept::punch_route_nat_matrix`의 25 NAT 쌍에서 iroh route(relay 경유 신호, multipath 승격)의 직결 승격률과 지연을 M24와 같은 기준으로 잰다. iroh가 같거나 낫고 "relay 없는 펀칭"을 포기한다는 결정이 서면, M24(`punch.v1`, `host.punch`, 펀칭 모듈과 시험)를 걷어내는 ADR을 연다. 그 전에는 M24가 relay 없는 기본 경로의 유일한 펀칭이라 유지한다.
