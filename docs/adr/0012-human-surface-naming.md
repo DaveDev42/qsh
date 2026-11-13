@@ -59,3 +59,4 @@
 ## 개정 이력
 
 - 2026-11-11 ADR-0059가 `qsh listen --serve`와 `[listen].serve`로 listener와 정방향 host를 한 프로세스에 합치는 길을 열었다. 이 ADR의 "`serve`와 `listen`은 서로 다른 프로세스의 두 역할"이라는 서술은 합치지 않은 구성에서 그대로이고, `serve --pair` 기각 사유도 바뀌지 않는다. 결정 본문은 고치지 않았다.
+- 2026-11-13 ADR-0065가 qsh를 server(`qsh serve`)와 client(`qsh <host>`, `exec`, `tunnel`, `cp` 등) 두 개념으로 설명하기로 하고, 키 기반 iroh route로 연결 방향이 도달 가능성을 가르지 않게 된 뒤의 역방향(`qsh listen`, `qsh serve --to`)을 고급 fallback으로 내렸다. 결정 1의 역할 표와 결정 2·4의 이름 규약은 그대로 유효하고, 사용자에게 먼저 보이는 설명에서 고급 절의 정의로 자리만 옮긴다. 결정 본문은 고치지 않았다.
