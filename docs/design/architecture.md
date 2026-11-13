@@ -240,7 +240,7 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 | schemars | 1 (workspace) | `*Req`에서 `qsh.cli/v1` JSON 스키마 생성(`qsh schema --json`) — 내장 MCP adapter는 ADR-0011로 철회돼 tool schema 용도는 없다 |
 | blake3 / subtle / zeroize | 1 / 2 / 1 | resume token 해시 / 상수시간 비교 / 키 위생. blake3는 `qsh-proto`의 화면 `state_hash`(§18)도 맡는다 |
 | vt100 | 0.18 (`qsh-core`) | host 터미널 에뮬레이터(ADR-0052 결정 2). 순수 Rust·I/O 없음·MIT·`cargo deny` 통과, 의존은 vte·unicode-width·itoa뿐. 미처리 CSI/OSC를 callback으로 내줘서 질의 답과 효과를 가로챌 수 있고 `on_scroll`이 밀려난 행을 준다 |
-| iroh (+ noq, iroh-relay는 시험 전용) | 1.x (조사 시점 1.4.1), M28 스텝 4부터 `qsh-transport`만 | iroh relay route의 backend(§10, ADR-0061). 기본 빌드, feature `platform-verifier`. 발견 기능은 쓰지 않는다. 라이선스 MIT/Apache-2.0, `cargo deny`에 `webpki-roots`(CDLA-Permissive-2.0) 허용이 필요할 수 있다. 계획 |
+| iroh (+ noq, iroh-relay는 시험 전용) | 1.x (조사 시점 1.4.1), M28부터 `qsh-transport`만 | iroh relay route의 backend(§10, ADR-0061). 기본 빌드, feature `platform-verifier`. 발견 기능은 쓰지 않는다. 라이선스 MIT/Apache-2.0 |
 | clap 4.5 · serde 1 · tracing 0.1 · toml 1 · ulid 3 · bytes 1 · base64 0.23 | | frontend·계약·진단 |
 
 ## 9. 아키텍처 리스크 5건
@@ -251,9 +251,9 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 4. **(해소, ADR-0011)** 내장 MCP adapter의 rmcp API 변동 리스크는 adapter 철회와 함께 사라졌다.
 5. **느린 소비자 backpressure vs PTY 생존성** — cursor-pull + 유계 구독자 버퍼 + gap 재동기화가 설계 답이지만 QUIC flow control과의 상호작용은 soak test로 실증해야 한다 (testing.md의 frozen-consumer soak).
 
-## 10. Transport backend 경계 (ADR-0061 결정 5~9, 초안 — M28 구현 전)
+## 10. Transport backend 경계 (ADR-0061 결정 5~9, M28)
 
-> 이 절은 M28이 착지하는 구조를 미리 적은 것이다. 구현이 이 절과 다르게 되면 이 절을 먼저 고친다. 스텝 1~3(trait, `PeerAddr`, 오류 매핑과 arch)은 동작 변화가 없고, iroh backend는 스텝 4 이후다.
+> 이 절은 M28이 착지한 구조를 적는다. 구현이 이 절과 다르게 되면 이 절을 먼저 고친다. trait, `PeerAddr`, 오류 매핑과 arch 규칙은 동작 변화 없는 리팩터로 먼저 들어갔고, iroh backend와 그 위의 route·서버·역방향 표면이 그 뒤에 붙었다.
 
 ### 10.1 trait과 닫힌 enum
 
@@ -268,18 +268,18 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 
 | backend | 상태 | 맡는 route | 비고 |
 |---|---|---|---|
-| quinn | 기본, 현재 유일 | 직결(주소, DNS 이름), 홀펀칭, `-J`의 관 위 안쪽 연결, 역방향 | 사설 CA 모드와 주소 기반 admission(Retry)은 이 backend만 지원한다 |
-| iroh (noq) | M28 스텝 4, 기본 빌드 | `iroh` route(relay, 이어서 직접 경로로 승격) | 신원은 pin만. 사설 CA 모드와 `-J` hop은 `UNSUPPORTED`. noq는 n0의 quinn 포크이고 multipath를 가진다 |
+| quinn | 기본 | 직결(주소, DNS 이름), 홀펀칭, `-J`의 관 위 안쪽 연결, 역방향 | 사설 CA 모드와 주소 기반 admission(Retry)은 이 backend만 지원한다 |
+| iroh (noq) | M28, 기본 빌드 | `iroh` route(relay, 이어서 직접 경로로 승격) | 신원은 pin만. 사설 CA 모드와 `-J` hop은 `UNSUPPORTED`. noq는 n0의 quinn 포크이고 multipath를 가진다 |
 | ut | 미래 | 미정 | 세 번째 variant로 들어온다. 이 절의 경계가 그 자리를 비워 두는 이유다 |
 
-두 backend는 같은 `Connection` enum의 다른 variant이므로 `qsh-core`의 코드는 어느 backend인지 모르고 쓴다. `TransportKind`(지금은 `Quic` 하나)는 "어느 backend, 어느 경로인가"를 감사와 진단에 알리는 값으로 넓힌다(additive).
+두 backend는 같은 `Connection` enum의 다른 variant이므로 `qsh-core`의 코드는 어느 backend인지 모르고 쓴다. `TransportKind`는 `Quic`과 `Iroh` 둘이고 "어느 backend인가"를 알린다. 어느 경로(직결, relay)인가는 `PeerAddr`가 맡는다.
 
 ### 10.3 `PeerAddr`
 
 소켓 주소에 기대던 곳은 넷이었다. admission(`Incoming` 제어), 감사와 ACL의 `peer_addr: SocketAddr`, 펀칭과 route, serve의 bind. 앞의 둘을 `PeerAddr`가 받는다.
 
-- 갈래는 `Socket(SocketAddr)`(quinn)과 `Key { id, path }`(iroh; `path`는 `Direct(SocketAddr)` 또는 `Relay(url)`)다. 스텝 2에서는 `Socket` 갈래만 생겨서 JSON과 감사 레코드가 바이트 단위로 같다.
-- 감사 레코드와 `qsh.cli/v1`의 기존 `peer_addr` 문자열 필드는 그대로 두고, 경로가 relay일 때만 선택 필드(예: `route`, `relay`)를 더한다. 계약은 additive-only이므로(CLAUDE.md) 기존 fixture는 건드리지 않고 새 fixture를 등록한다.
+- 갈래는 `Socket(SocketAddr)`(quinn)과 `Keyed`(iroh; 상대 키와 경로, 경로는 직결 소켓 주소 또는 relay URL)다(`crates/qsh-transport/src/peer_addr.rs`). `Socket` 갈래는 감싼 `SocketAddr`와 똑같이 그려지므로 소켓 주소 연결의 JSON과 감사 레코드는 바이트 단위로 같다. `Keyed`는 경로와 무관하게 `iroh:<fingerprint>`로 그려진다.
+- 감사 레코드와 `qsh.cli/v1`의 기존 `peer_addr` 문자열 필드는 그대로 두고, iroh 연결의 레코드에만 선택 필드 `peer_path`(`direct`/`relay`)와 `relay`(relay일 때, 스킴과 호스트만)를 더한다(`docs/CLI.md` §6.22). 계약은 additive-only이므로(CLAUDE.md) 기존 fixture는 건드리지 않고 새 fixture를 등록한다.
 - relay URL과 EndpointId는 구조적 값이다. payload나 키 비밀이 아니고 감사 레코드에 쓸 수 있다.
 - 펀칭과 serve의 bind는 소켓 주소를 계속 쓴다. 이 둘은 quinn backend 안의 일이다.
 
@@ -289,20 +289,22 @@ backend 고유 오류(`quinn::ConnectionError`, `rustls::Error`, `noq::*`, iroh�
 
 | 중립 오류의 뜻 | quinn | iroh | `ErrorCode` |
 |---|---|---|---|
-| 상대 신원이 pin과 다름 | rustls 검증 실패 | handshake 직후 훅의 거절 | `AUTH_FAILED` |
+| 상대 신원이 pin과 다름 | rustls 검증 실패 | handshake 직후 pin 검사와 서버의 close 0x1001 | `AUTH_FAILED` |
 | 닿지 못함, 시한 초과 | `ConnectError`, idle/timed out | relay 연결 실패, 경로 없음 | `CONNECTION_FAILED` |
 | 지원하지 않는 모드 | 해당 없음 | 사설 CA, jump hop | `UNSUPPORTED` |
 | 상대가 닫음 | application close | application close | 기존 매핑 그대로 |
 
-같은 뜻이면 backend가 달라도 같은 `ErrorCode`다. 이 대응은 conformance 시험이 backend마다 같은 입력(틀린 pin, 죽은 상대, 닫힌 연결)으로 고정한다. 구현 때 표의 iroh 열을 실제 오류 타입으로 채운다.
+같은 뜻이면 backend가 달라도 같은 `ErrorCode`다. 이 대응은 conformance 시험이 backend마다 같은 입력(틀린 pin, 죽은 상대, 닫힌 연결)으로 고정한다. iroh 쪽 변환은 `crates/qsh-transport/src/iroh_backend/errors.rs` 한 곳이다.
 
 ### 10.5 iroh backend의 구조
 
 - 의존은 `qsh-transport`에만 들인다(`iroh`, `platform-verifier` feature). `qsh-core`·`qsh-cli`의 manifest에는 나타나지 않는다.
-- **신원.** qsh 신원 키(Ed25519)가 iroh `SecretKey`와 같은 키다. fingerprint(SPKI SHA-256)는 EndpointId에서 계산한다. 새 키를 만들지 않는다.
-- **pin 검증 지점.** iroh는 handshake 전 `Incoming` 제어를 열지 않으므로 pin 검사와 ADR-0060의 이름 결속은 handshake 직후 훅(`EndpointHooks::after_handshake` 또는 동등한 지점)에서 한다. 거절하면 연결은 그 훅에서 끝나고 application 계층(`Server::dispatch`)에 닿지 않는다. 판정 전에는 세션·터널·listener가 생기지 않는다.
+- **신원.** 데몬 endpoint(`serve`·`listen`)는 qsh 신원 키(Ed25519)를 iroh `SecretKey`로 쓴다. fingerprint(SPKI SHA-256)는 EndpointId에서 계산한다. 클라이언트 endpoint는 endpoint마다 임의 iroh 키로 열고 qsh 신원은 연결 직후의 97바이트 증명으로 서버에 보인다(`protocol.md` §22.8, `iroh_backend/identity_proof.rs`). relay가 EndpointId 하나에 홈 연결 하나만 두기 때문에 한 기기의 프로세스들이 같은 키로 열면 서로를 밀어낸다. 새 장기 키는 만들지 않는다.
+- **pin 검증 지점.** iroh는 handshake 전 `Incoming` 제어를 열지 않으므로 클라이언트 쪽 pin 검사와 ADR-0060의 이름 결속은 `IrohEndpoint::dial`에서, 서버 쪽 판정은 `IrohIncoming::accept`가 handshake 직후 증명을 읽은 뒤(`verify_iroh_peer`) 한다. 거절하면 연결은 close 0x1001로 끝나고 application 계층(`Server::dispatch`)에 닿지 않는다. 판정 전에는 세션·터널·listener가 생기지 않는다.
 - **relay.** endpoint는 설정된 relay URL 하나에 고정으로 붙는다(발견 없음, 지연 선택 없음). 기본값은 n0 공용 relay 한 URL, 설정으로 자가 운영 `iroh-relay`를 지정한다. relay TLS는 `CaTlsConfig::system()`으로 OS 저장소를 쓴다. 발견 게시와 조회(pkarr, n0 DNS)는 끈다.
-- **서버.** `serve`·`listen`이 설정으로 iroh endpoint를 하나 더 띄운다(기본 끔). 기존 UDP 소켓과 별개이고, 고정 UDP 포트에 bind할 수 있다. 합친 endpoint(ADR-0059)의 두 역할 모두 같은 endpoint를 쓴다.
+- **서버.** `serve`·`listen`이 설정으로 iroh endpoint를 하나 더 띄운다(기본 끔, `qsh-core`의 `iroh_serve.rs`의 `IrohServe`, `None`이면 endpoint도 relay 접속도 없다). 기존 UDP 소켓과 별개이고, 고정 UDP 포트에 bind할 수 있다. 합친 endpoint(ADR-0059)의 두 역할 모두 같은 endpoint를 쓴다. admission은 handshake 전에 동시 handshake 상한(직결이면 source 주소 rate limit 포함)을, handshake와 증명 뒤에 증명된 키 기준 버킷(`Gate::decide_keyed`)을 쓴다.
+- **route 층.** 정방향 dial은 `ops/route.rs`가 직결·펀칭·iroh를 경주시키고(`[iroh].head_start_ms`), `route_memory.rs`가 pin별 기억(state의 `route-cache.json`)으로 막힌 route를 건너뛴다. `iroh_settings.rs`가 `[iroh]` 설정과 pin의 `routes`·`relay`·`key`를 검증해 계획(`IrohPlan`)으로 만든다. 역방향 등록의 relay route는 `reverse/target/relay.rs`가 같은 순서로 하되 route 기억은 쓰지 않는다. pin의 `key` 채움은 `trust/key_fill.rs`다.
+- **종료.** 클라이언트 endpoint는 마지막 소유자가 놓을 때 닫기를 시작하고 `wait_idle_for`가 최소 3초 닫기를 기다린다. 닫기 전에 버리면 iroh가 오류 로그를 남기기 때문이다.
 - **migration과 경로.** iroh는 한 연결 안에서 relay와 직접 경로를 다룬다. qsh는 경로를 고르지 않고, 경로 정보는 `PeerAddr`와 `PathWatch`에 읽기 전용으로 올린다. 경로가 바뀌는 것은 지연 최적화일 뿐이고 correctness는 resume이 지킨다(`protocol.md` §2).
 
 ### 10.6 `xtask arch` 규칙
