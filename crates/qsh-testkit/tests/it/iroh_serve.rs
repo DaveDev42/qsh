@@ -247,7 +247,7 @@ struct Client {
 impl Client {
     async fn new(host: &Host, id: TestIdentity) -> Self {
         let trust = StaticTrust::empty().with_pin(host.host_fp, Principal::Device("box".into()));
-        let endpoint = IrohEndpoint::bind(&id.local, Arc::new(trust), host.relay.config())
+        let endpoint = IrohEndpoint::bind_client(&id.local, Arc::new(trust), host.relay.config())
             .await
             .expect("bind the client endpoint")
             .with_timeout(Duration::from_secs(5));

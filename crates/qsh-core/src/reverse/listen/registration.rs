@@ -43,8 +43,7 @@ impl Listen {
             return;
         };
         tokio::spawn(async move {
-            let peer = incoming.remote_address();
-            let result = incoming.accept().await;
+            let (result, peer) = incoming.accept_with_peer().await;
             drop(permit);
             match result {
                 // Over its budget: already audited and closed.

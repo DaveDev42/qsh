@@ -1537,8 +1537,9 @@ impl Server {
             return;
         };
         tokio::spawn(async move {
-            let peer = incoming.remote_address();
-            let result = incoming.accept().await;
+            // `peer` names the proven identity key when the client proved
+            // one, so a refusal is audited under the key that was refused.
+            let (result, peer) = incoming.accept_with_peer().await;
             drop(permit);
             // After the handshake the key is proven: judge it as a key, then
             // hand the connection to the same path a QUIC one takes.

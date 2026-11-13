@@ -40,6 +40,13 @@ use crate::tls::{
 /// [`Endpoint::wait_idle`].
 pub const CLOSE_DRAIN_CAP: Duration = Duration::from_millis(200);
 
+/// The least [`Endpoint::wait_idle_for`] waits on an iroh endpoint, whatever
+/// cap it is given. iroh bounds a graceful close at about three seconds and
+/// usually finishes in one round trip of the path; a shorter wait would stop
+/// waiting with the close unfinished, which iroh reports as an error when the
+/// process then drops the endpoint.
+pub const IROH_CLOSE_CAP: Duration = Duration::from_secs(3);
+
 /// Application-level keep-alive interval (`protocol.md` §2). The default
 /// of [`TransportTuning`]; `[transport].keep_alive_ms` in `config.toml`
 /// replaces it (`docs/adr/0021-transport-liveness-knobs.md` decision 1).
@@ -984,6 +991,10 @@ impl Endpoint {
     /// `exec` return 0.5 to 0.9 s after its output. Only a punched command
     /// uses this; a direct dial waits out its connection's full drain.
     pub async fn wait_idle_for(&self, cap: Duration) {
+        let cap = match &self.inner {
+            EndpointBackend::Iroh(_) => cap.max(IROH_CLOSE_CAP),
+            EndpointBackend::Quic(_) => cap,
+        };
         let _ = tokio::time::timeout(cap, self.wait_idle_inner()).await;
     }
 

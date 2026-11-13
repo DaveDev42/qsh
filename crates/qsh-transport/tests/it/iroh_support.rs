@@ -135,7 +135,7 @@ pub async fn iroh_pair(route: Route) -> IrohPair {
     let server_ep = IrohEndpoint::bind(&server_id, Arc::new(server_trust), config(&relay))
         .await
         .expect("bind server endpoint");
-    let client_ep = IrohEndpoint::bind(&client_id, Arc::new(client_trust), config(&relay))
+    let client_ep = IrohEndpoint::bind_client(&client_id, Arc::new(client_trust), config(&relay))
         .await
         .expect("bind client endpoint");
 

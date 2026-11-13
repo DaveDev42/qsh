@@ -525,9 +525,14 @@ async fn dial_routed_plain(
 
 /// Dials the pin by key over iroh: builds the endpoint, homed on the relay
 /// the plan names, and dials. The endpoint lives as long as the connection.
+///
+/// The endpoint is a client endpoint: it binds a fresh random iroh key, so
+/// this command and any other client process of this machine each have an
+/// `EndpointId` of their own and the relay keeps all of them, and it proves
+/// the machine's qsh identity to the host in-band (protocol §22.8).
 async fn dial_iroh(plan: &Arc<IrohPlan>, deadline: Instant) -> Result<Routed, OpError> {
     let label = format!("{} over the iroh relay route", plan.name);
-    let endpoint = IrohEndpoint::bind(
+    let endpoint = IrohEndpoint::bind_client(
         &plan.identity,
         plan.evaluator.clone(),
         plan.target.config.clone(),

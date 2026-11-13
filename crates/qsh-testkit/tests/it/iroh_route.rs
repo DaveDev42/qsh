@@ -246,6 +246,38 @@ async fn an_address_less_iroh_pin_runs_exec_through_the_relay() {
     rig.net.shutdown().await;
 }
 
+/// Two commands of one machine at the same time, the long-lived tunnel holder
+/// and an interactive `exec` of the field report: each dials with its own
+/// client endpoint, so the second does not displace the first's relay home
+/// connection, and the host sees the machine's one qsh identity on both.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_commands_of_one_identity_both_finish_over_iroh() {
+    let rig = Rig::start(true).await;
+    rig.pin_iroh("far", None, &rig.relay.url).await;
+
+    let first = {
+        let ops = rig.ops.clone();
+        tokio::spawn(async move {
+            exec(&ops, "far", echo_argv("first; sleep 3; echo first-done")).await
+        })
+    };
+    // The first command is connected and running when the second dials.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let second = exec(&rig.ops, "far", echo_argv("second"))
+        .await
+        .expect("the second command while the first is running");
+    assert_eq!(stdout_of(&second).trim(), "second");
+
+    let first = first
+        .await
+        .expect("the first command's task")
+        .expect("the first command survives the second");
+    assert_eq!(stdout_of(&first).trim(), "first\nfirst-done");
+    assert_eq!(rig.allowed_on_host(), 2, "the host allowed both execs");
+    rig.net.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn iroh_starts_after_the_head_start_when_the_direct_dial_never_answers() {
     let rig = Rig::start(true).await;
