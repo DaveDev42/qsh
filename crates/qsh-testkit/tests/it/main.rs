@@ -35,6 +35,7 @@ mod file_copy_echo_under_load;
 mod file_host;
 mod heartbeat;
 mod host_list_reverse;
+mod iroh_reverse;
 mod iroh_route;
 mod iroh_serve;
 mod jump_chain;

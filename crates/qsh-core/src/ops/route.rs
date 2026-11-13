@@ -198,7 +198,7 @@ impl RouteError {
 }
 
 /// `details.iroh{tried, code}` on a failure that also tried the relay route.
-fn attach_iroh(mut op: OpError, iroh: &OpError) -> OpError {
+pub(crate) fn attach_iroh(mut op: OpError, iroh: &OpError) -> OpError {
     let mut note = serde_json::json!({ "tried": true, "code": iroh.code.to_string() });
     if let Some(reason) = iroh
         .details
@@ -589,7 +589,7 @@ async fn dial_routed_plain(
 /// this command and any other client process of this machine each have an
 /// `EndpointId` of their own and the relay keeps all of them, and it proves
 /// the machine's qsh identity to the host in-band (protocol §22.8).
-async fn dial_iroh(plan: &Arc<IrohPlan>, deadline: Instant) -> Result<Routed, OpError> {
+pub(crate) async fn dial_iroh(plan: &Arc<IrohPlan>, deadline: Instant) -> Result<Routed, OpError> {
     let label = format!("{} over the iroh relay route", plan.name);
     let endpoint = IrohEndpoint::bind_client(
         &plan.identity,

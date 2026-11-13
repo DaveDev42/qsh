@@ -139,7 +139,7 @@ async fn dial_and_register_maps_an_unresolvable_controller_to_resolve_cause() {
     let dialer = punch_endpoint(local, &trust);
 
     let (err, cause) =
-        match dial_and_register(&dialer, &trust, &paths, "widget", &local_hello).await {
+        match dial_and_register(&dialer, &trust, &paths, "widget", &local_hello, None).await {
             Ok(_) => panic!("mac.example.invalid must never resolve"),
             Err(pair) => pair,
         };
@@ -859,6 +859,7 @@ async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
         "widget",
         &local_hello,
         &StubResolver(addrs),
+        None,
     )
     .await
     {
@@ -928,6 +929,7 @@ async fn dial_and_register_bounds_a_resolver_that_never_answers() {
             "widget",
             &local_hello,
             &SilentResolver,
+            None,
         ),
     )
     .await
@@ -1759,6 +1761,7 @@ async fn dial_and_register_refuses_a_pinned_stranger_at_the_controllers_address(
         "ctl",
         &local_hello,
         &Fixed(b_addr),
+        None,
     )
     .await
     else {
@@ -1778,6 +1781,7 @@ async fn dial_and_register_refuses_a_pinned_stranger_at_the_controllers_address(
             "other",
             &local_hello,
             &Fixed(b_addr),
+            None,
         ),
     )
     .await;
