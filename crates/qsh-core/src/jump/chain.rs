@@ -528,7 +528,7 @@ async fn pump(
                     let mut budget = PUMP_BATCH;
                     while let Some(frame) = next.take() {
                         if frame.kind == DatagramKind::JumpPacket {
-                            silence.received_datagram();
+                            silence.received_datagram(std::time::Instant::now());
                             info.datagrams_in.fetch_add(1, Ordering::Relaxed);
                             peer.send(frame.payload);
                         }

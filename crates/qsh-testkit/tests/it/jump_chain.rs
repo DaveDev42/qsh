@@ -1145,9 +1145,12 @@ async fn jump_silence_when_only_kind_14_datagrams_vanish_falls_back_to_the_strea
 /// longer than the window (`4 x max(rtt, 50 ms) + 25 ms`, 225 ms here) finds
 /// the clock expired and moves the channel to the stream although the path
 /// never lost anything. With a 600 ms gap every chain falls back on its first
-/// idle gap. ADR-0058 decision 1 (amended 2026-11-13): a send that follows
-/// a received datagram does not start the clock, so the ack-only reply is
-/// not counted.
+/// idle gap. ADR-0058 decision 1 (amended 2026-11-14): a send within 200 ms
+/// of a received datagram does not start the clock, so the ack-only replies
+/// are not counted. The first amendment (the first send after a receive) let
+/// Windows through: one receive batch of two datagrams drew two ack-only
+/// packets in separate sends, and the second started the clock (12 of 20
+/// runs on a Windows box, 0 of 30 after the window).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jump_silence_ignores_an_unanswered_ack_across_an_idle_gap() {
     use std::sync::atomic::Ordering::Relaxed;
