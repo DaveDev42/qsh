@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-config-set 1  "set 0.8.0" 
+.TH qsh-config-set 1  "set 0.8.1" 
 .SH NAME
 qsh\-config\-set \- Write one key. The edited file must pass the same validation the daemons apply at startup, or nothing is written. Comments and key order in `config.toml` are kept
 .SH SYNOPSIS
@@ -54,4 +54,4 @@ Dotted key path, e.g. `serve.bind`
 <\fIVALUE\fR>
 The new value. A string key keeps it verbatim, an integer key takes decimal digits, a boolean key takes `true` or `false`
 .SH VERSION
-v0.8.0
+v0.8.1
