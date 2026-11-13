@@ -129,9 +129,16 @@ fn a_client_judgment_leaves_out_every_server_only_check() {
         "acl_ca_auth_path_missing",
         "service_not_registered",
         "bindv6only_blocks_ipv4",
-        "agent_dir_unusable",
     ] {
         assert!(found.contains(&code), "{code} missing from {found:?}");
+    }
+    // `check_agent_dir` only inspects a directory on unix; Windows forwards
+    // the agent over a named pipe and never reports this code.
+    if cfg!(unix) {
+        assert!(
+            found.contains(&"agent_dir_unusable"),
+            "agent_dir_unusable missing from {found:?}"
+        );
     }
 }
 
