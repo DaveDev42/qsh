@@ -165,7 +165,8 @@ pub struct IrohConfig {
     /// (ADR-0064, `[iroh].portmap`). Honored by a daemon endpoint
     /// ([`IrohEndpoint::bind`]) only: a client endpoint never maps. Off by
     /// default, so an endpoint built without saying so never probes the LAN
-    /// gateway; iroh only maps while a relay is configured.
+    /// gateway. An endpoint with no relay never maps either, whatever this
+    /// says (iroh would start a mapping at bind on its own).
     pub portmap: bool,
     /// Test seam: the UDP port of the relay's QUIC address discovery
     /// service, when it is not the standard one (7842). A test relay that
@@ -619,7 +620,6 @@ impl IrohEndpoint {
         ephemeral: bool,
     ) -> Result<Self, SetupError> {
         let identity_key = identity.iroh_secret_key()?;
-        let mapping = portmap::mapping_wanted(!ephemeral, config.portmap);
         let secret = if ephemeral {
             SecretKey::generate()
         } else {
@@ -641,6 +641,11 @@ impl IrohEndpoint {
                 relays.push(parsed);
             }
         }
+
+        // After the relay list: iroh hands its socket's port to the
+        // portmapper at bind, relay or not, so a relay-less endpoint has to be
+        // told `Disabled` here (ADR-0064).
+        let mapping = portmap::mapping_wanted(!ephemeral, config.portmap, !relays.is_empty());
 
         // `presets::Empty`: no address lookup (no pkarr, no DNS), relays
         // disabled until set below. The crypto provider is named explicitly

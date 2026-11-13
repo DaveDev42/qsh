@@ -225,6 +225,9 @@ async fn raw_endpoint(secret: SecretKey) -> iroh::Endpoint {
         .crypto_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
         .clear_address_lookup()
         .relay_mode(RelayMode::Disabled)
+        // iroh's own default is an enabled portmapper (the `portmapper`
+        // feature, ADR-0064): a test endpoint must not search the LAN.
+        .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
         .bind()
         .await
         .expect("bind the raw client")

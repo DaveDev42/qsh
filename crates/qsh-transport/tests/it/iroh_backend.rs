@@ -42,12 +42,14 @@ async fn the_endpoint_fingerprint_is_the_identity_fingerprint() {
     assert_eq!(IrohPeer::new(ep.public_key()).fingerprint(), fp);
 }
 
-/// ADR-0064: the router-mapping request reaches a daemon endpoint and never
-/// a client endpoint, and an endpoint built without asking never maps. The
-/// relay is off here, so iroh runs no net report and no mapping: nothing in
-/// this test touches the LAN gateway.
+/// ADR-0064: an endpoint without a relay never asks the router for a
+/// mapping, whatever the config says, and a client endpoint never does either.
+/// The relay is off here on purpose: iroh starts a mapping at bind when its
+/// portmapper is enabled (an SSDP search on the LAN), so a hermetic test cannot
+/// bind an endpoint that maps. The positive case, a daemon with a relay that
+/// asks, is `iroh_backend::portmap::tests`.
 #[tokio::test]
-async fn only_a_daemon_endpoint_that_asks_maps_a_router_port() {
+async fn an_endpoint_without_a_relay_never_maps_a_router_port() {
     let (id, _fp) = make_identity();
     let asking = IrohConfig {
         portmap: true,
@@ -61,7 +63,10 @@ async fn only_a_daemon_endpoint_that_asks_maps_a_router_port() {
     let daemon = IrohEndpoint::bind(&id, trust(), asking.clone())
         .await
         .expect("bind daemon");
-    assert!(daemon.portmap_enabled());
+    assert!(
+        !daemon.portmap_enabled(),
+        "no relay, no mapping, even when asked"
+    );
 
     let client = IrohEndpoint::bind_client(&id, trust(), asking)
         .await
