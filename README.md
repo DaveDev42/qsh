@@ -70,7 +70,8 @@ QSH has two concepts.
 Any device can be both. Run `qsh serve` on every machine, pin the machines
 to each other, and each one can connect to the others. Which side starts the
 connection does not decide whether it can be made: a peer's key is its
-address, the relay (HTTPS, TCP 443) is always reachable, and the connection
+address, the relay (HTTPS, TCP 443) is reachable on any network that
+passes HTTPS, and the connection
 moves to a direct path when one exists (direct dial, hole punching, or a port
 mapping the daemon asked the router for). The relay only carries ciphertext,
 and only until a direct path opens. Since 0.8.0 the daemon starts that
