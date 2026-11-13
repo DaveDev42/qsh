@@ -198,6 +198,12 @@ impl Paths {
         self.state_dir.join("resume.json.lock")
     }
 
+    /// The route memory of the forward dial (`crate::route_memory`,
+    /// `docs/CLI.md` §6.1): internal state, not a contract.
+    pub fn route_cache_file(&self) -> PathBuf {
+        self.state_dir.join("route-cache.json")
+    }
+
     /// The runtime record of the `qsh serve` that is running for this user
     /// (`crate::serve::record`, ADR-0051 decision 2).
     pub fn serve_record_file(&self) -> PathBuf {

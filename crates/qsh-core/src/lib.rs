@@ -70,6 +70,7 @@ pub mod quota;
 pub mod reset_key;
 pub mod resume;
 pub mod reverse;
+pub mod route_memory;
 pub mod screen;
 pub mod serve;
 pub mod server;
