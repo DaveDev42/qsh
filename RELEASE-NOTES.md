@@ -9,6 +9,48 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.7.1`
+
+A patch release on top of `v0.7.0`. It fixes one cause of intermittent
+failures on the iroh relay route.
+
+### Fixes
+
+- `qsh serve` and a separate `qsh listen` on one machine, both with
+  `iroh.enable = true`, shared the device key and so one iroh endpoint id.
+  A relay keeps one home connection per id, so the later process took the
+  relay from the earlier one without an error. A client dial then landed
+  on whichever process held the relay at that moment, and a `listen`
+  closes a connection that is not a host request ("punch done"). The
+  client saw `CONNECTION_FAILED` or `no response from <host> over the
+  iroh relay route`, intermittently, because the two processes could take
+  the relay back from each other. Now one process per state directory
+  opens the endpoint, guarded by an advisory lock on `iroh-endpoint.lock`.
+  A second daemon starts without the relay endpoint and prints why. Use
+  `qsh listen --serve` to serve and control from one process, or set
+  `iroh.enable = false` for one of them. See protocol §22.9.
+
+### What is still unproven
+
+Everything `v0.7.0` lists, plus these items:
+
+- A relay connection that stays on the relay and never moves to a direct
+  path was not reproduced. In a Linux network-namespace lab with
+  masquerade NATs, qsh's endpoint settings moved to a direct path as the
+  standalone probe did, and a new test now guards the upgrade on loopback.
+  If a field pair still stays on the relay after `v0.7.1`, the cause is
+  not in qsh's transport settings; capture `RUST_LOG=iroh=debug` from both
+  ends.
+- A first relay dial that hangs until the dial budget ends is not
+  retried. It is still possible when the relay's first connection stalls.
+- The `unable to send to relay actor, already closed` warning at client
+  exit comes from iroh's shutdown order. It was not reproduced and qsh
+  does not filter it.
+
+### Assets and signing
+
+Unchanged from `v0.7.0`, with `v0.7.1` in the asset names.
+
 ## `v0.7.0`
 
 A minor release on top of `v0.6.0`. It adds an optional iroh relay route

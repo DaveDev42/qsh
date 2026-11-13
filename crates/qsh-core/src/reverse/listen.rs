@@ -379,20 +379,27 @@ async fn run_listen_impl(
     // The relay endpoint (ADR-0061 decision 2), when asked for: judged by the
     // very store the listener's verifier reads, bound before anything is
     // announced so a failure to start it is a failed start.
-    let iroh_endpoint = match &iroh {
-        Some(serve) => Some(
-            crate::iroh_serve::bind(
-                serve,
-                &identity.local,
-                Arc::clone(&trust) as Arc<dyn qsh_transport::TrustEvaluator>,
-            )
-            .await
-            .inspect_err(|_| {
-                transport::remove_endpoint(&localctl_socket_path);
-            })?,
-        ),
+    let iroh_owned = match &iroh {
+        Some(serve) => crate::iroh_serve::bind_exclusive(
+            serve,
+            &identity.local,
+            Arc::clone(&trust) as Arc<dyn qsh_transport::TrustEvaluator>,
+            paths,
+            if combined.is_some() {
+                "listen --serve"
+            } else {
+                "listen"
+            },
+            &mut on_policy_diagnostic,
+        )
+        .await
+        .inspect_err(|_| {
+            transport::remove_endpoint(&localctl_socket_path);
+        })?,
         None => None,
     };
+    // The claim stays in `iroh_owned` until this function returns.
+    let iroh_endpoint = iroh_owned.as_ref().map(|owned| owned.endpoint.clone());
     // F7 (M5 plan Step 3 (2473c88) arbitration): the controller shares the
     // same config-driven `RotatingAuditSink` construction `serve.rs`'s
     // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/

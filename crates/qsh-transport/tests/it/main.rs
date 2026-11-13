@@ -7,6 +7,7 @@ mod handshake_matrix;
 mod iroh_backend;
 mod iroh_identity;
 mod iroh_support;
+mod iroh_upgrade;
 mod jump_pipe;
 mod loopback;
 mod relay_probe;

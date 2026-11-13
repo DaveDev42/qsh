@@ -373,6 +373,87 @@ async fn a_pinned_iroh_client_runs_exec_and_a_session_through_serve() {
     client.endpoint.close().await;
 }
 
+/// `qsh serve` and a separate `qsh listen` on one machine, both with
+/// `[iroh].enable`, share the device key and so one `EndpointId`. A relay keeps
+/// one home connection per id: the process that connects last would take the
+/// relay from the other and every dial would land on it, a controller that
+/// closes a forward client's first request ("punch done"). The second daemon
+/// leaves the relay to the first, says why, and still starts (protocol 22.9).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_listen_beside_serve_leaves_the_relay_to_serve() {
+    let client_id = make_identity();
+    let mut host = Host::start(Runtime::Serve, Iroh::OnTestRelay, &[&client_id]).await;
+
+    // The controller of the same device: same state directory and identity,
+    // its own runtime directory, the same relay.
+    let loaded = identity::load(&host.paths)
+        .expect("load")
+        .expect("an identity");
+    let mut serve = IrohServe::new(host.relay.url.clone(), 0);
+    serve.relay_roots = vec![host.relay.cert.clone()];
+    let notices = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let listen_dir = tempfile::tempdir().expect("tempdir");
+    let listen_paths = host
+        .paths
+        .clone()
+        .with_runtime_dir(listen_dir.path().join("run"));
+    let listen = {
+        let notices = Arc::clone(&notices);
+        tokio::spawn(async move {
+            qsh_core::reverse::listen::run_listen_with_iroh(
+                &listen_paths,
+                &Config::default(),
+                loaded,
+                Some("127.0.0.1:0"),
+                Some(serve),
+                move |addr| {
+                    let _ = bound_tx.send(addr);
+                },
+                move |line| notices.lock().unwrap().push(line.to_string()),
+                async move {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(TIMEOUT, bound_rx)
+        .await
+        .expect("the controller starts")
+        .expect("it binds");
+    let said = notices.lock().unwrap().join("\n");
+    assert!(
+        said.contains("iroh relay endpoint is not started") && said.contains("`qsh serve`"),
+        "the controller says serve holds the relay: {said:?}"
+    );
+
+    // The relay still leads to serve.
+    let client = Client::new(&host, client_id).await;
+    let conn = client.dial(&host).await.expect("dial by key");
+    let mut session = Session::negotiate(conn.clone(), "laptop")
+        .await
+        .expect("hello over the relay");
+    let ran = tokio::time::timeout(
+        TIMEOUT,
+        session.exec(&exec_spec(&["sh", "-c", "echo hi"]), None, None),
+    )
+    .await
+    .expect("exec finishes")
+    .expect("exec reaches serve, not the controller");
+    assert_eq!(ran.stdout, b"hi\n");
+
+    let _ = stop_tx.send(());
+    tokio::time::timeout(TIMEOUT, listen)
+        .await
+        .expect("the controller stops")
+        .expect("no panic")
+        .expect("a clean stop");
+    host.stop().await;
+    client.endpoint.close().await;
+}
+
 /// A key the host does not pin gets no further than the handshake: no
 /// session, no ticket, no connection slot, and one `connect` deny record
 /// naming the iroh peer.
