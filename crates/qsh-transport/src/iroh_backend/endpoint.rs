@@ -35,7 +35,8 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iroh::endpoint::{self as ie, QuicTransportConfig, VarInt, presets};
@@ -146,6 +147,48 @@ impl IrohPeer {
     }
 }
 
+/// Endpoints whose graceful close is running in the background.
+///
+/// A static on purpose. iroh's `Endpoint::close` takes about a second even
+/// on loopback, because the endpoint's QUIC address discovery connection to
+/// its relay is closed too and the relay never answers that close, so the
+/// endpoint waits out the connection's closing period (three PTOs) before it
+/// reports the close done. A short command cannot afford that wait, so it
+/// starts the close and exits. A process that exits while the close task
+/// runs drops the task and the clone it holds; if that were the last clone,
+/// iroh would log "Endpoint dropped without calling `Endpoint::close`". The
+/// clone kept here is never dropped by a process exit (statics are not
+/// dropped), so the endpoint dies with the process, silently. The close task
+/// removes its entry when it finishes, so a long-lived process holds an
+/// entry only for the seconds a close takes.
+static CLOSING: Mutex<Vec<(u64, iroh::Endpoint)>> = Mutex::new(Vec::new());
+
+/// Start `ep`'s graceful close on the current runtime and return at once.
+/// Outside a runtime there is nothing to run it on and the endpoint is left
+/// to iroh's own drop.
+fn close_in_background(ep: &iroh::Endpoint) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    if ep.is_closed() {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let token = NEXT.fetch_add(1, Ordering::Relaxed);
+    CLOSING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((token, ep.clone()));
+    let ep = ep.clone();
+    runtime.spawn(async move {
+        ep.close().await;
+        CLOSING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(t, _)| *t != token);
+    });
+}
+
 /// Owns an iroh endpoint and closes it when the last holder lets go.
 ///
 /// iroh logs an error ("Endpoint dropped without calling `Endpoint::close`")
@@ -153,9 +196,7 @@ impl IrohPeer {
 /// ends early, a dial that loses a route race or fails, or an endpoint whose
 /// graceful wait was cut short all reach that drop. This handle, shared by
 /// [`IrohEndpoint`] and every [`IrohConn`] made from it, starts the close
-/// itself when it is the last to go, in a task that holds the endpoint until
-/// the close is done. Outside a runtime there is nothing to run it on and
-/// iroh drops the endpoint as it would have.
+/// itself when it is the last to go ([`close_in_background`]).
 pub(crate) struct EndpointHandle {
     ep: iroh::Endpoint,
     /// The qsh identity key: signs the in-band proof, and is what peers pin.
@@ -163,7 +204,64 @@ pub(crate) struct EndpointHandle {
     /// in [`IrohEndpoint`], so the handle every `Endpoint` carries stays
     /// small.
     identity: SecretKey,
+    /// Connections a holder closed, kept so the end of a command can wait
+    /// for the peer's answer to their `CONNECTION_CLOSE` ([`Self::flush`]).
+    /// A closed connection needs no auto-close on drop, so holding a clone
+    /// changes nothing about its lifetime.
+    closing: Mutex<Vec<ie::Connection>>,
 }
+
+impl EndpointHandle {
+    fn new(ep: iroh::Endpoint, identity: SecretKey) -> Self {
+        Self {
+            ep,
+            identity,
+            closing: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Remember a connection a holder just closed.
+    pub(crate) fn note_closed(&self, conn: &ie::Connection) {
+        let mut closing = self.closing.lock().unwrap_or_else(|e| e.into_inner());
+        if !closing.iter().any(|c| c.stable_id() == conn.stable_id()) {
+            closing.push(conn.clone());
+            // A client closes a handful (a punch race, a reconnect); a daemon
+            // closes one per peer for as long as it runs and never flushes.
+            if closing.len() > MAX_NOTED_CLOSES {
+                closing.remove(0);
+            }
+        }
+    }
+
+    /// Wait, for at most `cap`, until the peer has answered the close of
+    /// every connection a holder closed. The peer answers a
+    /// `CONNECTION_CLOSE` with its own, and that arriving proves ours got
+    /// through; a connection the peer closed first has it already. One
+    /// round trip in practice, so a path that does not answer costs `cap`.
+    async fn flush(&self, cap: Duration) {
+        let conns: Vec<ie::Connection> = self
+            .closing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let deadline = tokio::time::Instant::now() + cap;
+        while !conns
+            .iter()
+            .all(|c| c.stats().frame_rx.connection_close > 0)
+        {
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(FLUSH_POLL).await;
+        }
+    }
+}
+
+/// How many closed connections an endpoint handle remembers.
+const MAX_NOTED_CLOSES: usize = 16;
+
+/// How often [`EndpointHandle::flush`] looks for the peer's answer.
+const FLUSH_POLL: Duration = Duration::from_millis(2);
 
 impl fmt::Debug for EndpointHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -184,13 +282,7 @@ impl std::ops::Deref for EndpointHandle {
 
 impl Drop for EndpointHandle {
     fn drop(&mut self) {
-        if self.ep.is_closed() {
-            return;
-        }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let ep = self.ep.clone();
-            runtime.spawn(async move { ep.close().await });
-        }
+        close_in_background(&self.ep);
     }
 }
 
@@ -338,10 +430,7 @@ impl IrohEndpoint {
             .await
             .map_err(|e| setup_err("bind iroh endpoint", &e))?;
         Ok(Self {
-            ep: Arc::new(EndpointHandle {
-                ep,
-                identity: identity_key,
-            }),
+            ep: Arc::new(EndpointHandle::new(ep, identity_key)),
             evaluator,
             relay,
             timeout: default_dial_timeout(),
@@ -438,6 +527,26 @@ impl IrohEndpoint {
         let ep = Arc::clone(&self.ep);
         let close = tokio::spawn(async move { ep.close().await });
         let _ = close.await;
+    }
+
+    /// End a client command's use of the endpoint: wait up to `cap` for the
+    /// peer to answer the close of every connection a holder closed, then
+    /// start the endpoint's own close in the background and return.
+    ///
+    /// [`Self::close`] is for a daemon that shuts down and can spend the
+    /// seconds iroh needs; waiting for it here added a second to every short
+    /// command (see `close_in_background`). The peer learns of the close
+    /// from the `CONNECTION_CLOSE` the connection sent, which has left by the
+    /// time the answer is back; the endpoint's close adds nothing the
+    /// command's exit needs.
+    pub async fn finish(&self, cap: Duration) {
+        self.ep.flush(cap).await;
+        close_in_background(&self.ep);
+    }
+
+    /// Start the endpoint's close without waiting for it.
+    pub fn close_in_background(&self) {
+        close_in_background(&self.ep);
     }
 
     /// Dial `peer` and judge it by the trust store.

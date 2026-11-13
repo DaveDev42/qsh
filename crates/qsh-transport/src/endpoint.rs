@@ -40,12 +40,14 @@ use crate::tls::{
 /// [`Endpoint::wait_idle`].
 pub const CLOSE_DRAIN_CAP: Duration = Duration::from_millis(200);
 
-/// The least [`Endpoint::wait_idle_for`] waits on an iroh endpoint, whatever
-/// cap it is given. iroh bounds a graceful close at about three seconds and
-/// usually finishes in one round trip of the path; a shorter wait would stop
-/// waiting with the close unfinished, which iroh reports as an error when the
-/// process then drops the endpoint.
-pub const IROH_CLOSE_CAP: Duration = Duration::from_secs(3);
+/// How long the end of a command waits on an iroh endpoint for the peer to
+/// answer the close of its connections ([`Endpoint::wait_idle`] and
+/// [`Endpoint::wait_idle_for`]). One round trip in practice. iroh's own
+/// `Endpoint::close` is not waited for: it takes a second or more because the
+/// endpoint's relay address-discovery connection never gets an answer to its
+/// close, and it carries nothing the peer needs (the endpoint's close
+/// continues in the background).
+pub const IROH_CLOSE_FLUSH_CAP: Duration = Duration::from_millis(150);
 
 /// Application-level keep-alive interval (`protocol.md` §2). The default
 /// of [`TransportTuning`]; `[transport].keep_alive_ms` in `config.toml`
@@ -1001,19 +1003,16 @@ impl Endpoint {
     /// `exec` return 0.5 to 0.9 s after its output. Only a punched command
     /// uses this; a direct dial waits out its connection's full drain.
     pub async fn wait_idle_for(&self, cap: Duration) {
-        let cap = match &self.inner {
-            EndpointBackend::Iroh(_) => cap.max(IROH_CLOSE_CAP),
-            EndpointBackend::Quic(_) => cap,
-        };
         let _ = tokio::time::timeout(cap, self.wait_idle_inner()).await;
     }
 
     async fn wait_idle_inner(&self) {
         match &self.inner {
             EndpointBackend::Quic(e) => e.wait_idle().await,
-            // iroh waits for the close frames to be acknowledged inside
-            // `close`; connections are closed by their holders first.
-            EndpointBackend::Iroh(e) => e.close().await,
+            // Connections are closed by their holders first. Wait for the
+            // peer to answer those closes, then let the endpoint finish
+            // closing in the background (`IrohEndpoint::finish`).
+            EndpointBackend::Iroh(e) => e.finish(IROH_CLOSE_FLUSH_CAP).await,
         }
     }
 
@@ -1022,14 +1021,9 @@ impl Endpoint {
     pub fn close(&self, code: u32, reason: &[u8]) {
         match &self.inner {
             EndpointBackend::Quic(e) => e.close(code, reason),
-            EndpointBackend::Iroh(e) => {
-                // iroh closes asynchronously; without a runtime the endpoint
-                // closes when its last handle drops.
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let e = e.clone();
-                    runtime.spawn(async move { e.close().await });
-                }
-            }
+            // iroh closes asynchronously; without a runtime the endpoint
+            // closes when its last handle drops.
+            EndpointBackend::Iroh(e) => e.close_in_background(),
         }
     }
 

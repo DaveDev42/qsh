@@ -763,3 +763,120 @@ async fn dropping_a_client_endpoint_closes_it_gracefully() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(recorded_errors(), Vec::<String>::new());
 }
+
+/// What the end of a short iroh command costs, and whether the server hears
+/// the close. The client closes its connection, drops it, and waits for its
+/// endpoint as `exec` does; the server's view of that connection must end
+/// with the client's application close, promptly, not with the 45 s idle
+/// timeout. A command that took a second here (iroh's own `Endpoint::close`
+/// waits out its relay address-discovery connection) is the regression.
+///
+/// Server and client run in runtimes of their own, and the client's is
+/// dropped the moment the command ends, the way a process exit drops every
+/// task still in it: the close the server sees was sent before that, not
+/// by a background task that never got to run.
+fn short_command_close(relay: bool) {
+    collect_errors();
+    let server_rt = tokio::runtime::Runtime::new().unwrap();
+    let server = identity();
+    let client = identity();
+    let (test_relay, server_ep, accepted) = server_rt.block_on(async {
+        let test_relay = if relay {
+            Some(TestRelay::spawn().await)
+        } else {
+            None
+        };
+        let config = match &test_relay {
+            Some(r) => r.config(),
+            None => direct_config(),
+        };
+        let server_ep = IrohEndpoint::bind(&server.local, Arc::new(server_trust(&client)), config)
+            .await
+            .unwrap();
+        if relay {
+            tokio::time::timeout(DEADLINE, server_ep.online())
+                .await
+                .expect("the server reaches the relay");
+        }
+        let accepted = accept_n(&server_ep, 1);
+        (test_relay, server_ep, accepted)
+    });
+
+    let command = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut peer = IrohPeer::new(server_ep.public_key());
+    if !relay {
+        peer.direct_addrs = server_ep.bound_sockets();
+    }
+    let config = match &test_relay {
+        Some(r) => r.config(),
+        None => direct_config(),
+    };
+    let (close_took, closed_at) = command.block_on(async {
+        let ep = IrohEndpoint::bind_client(&client.local, client_trust(&server), config)
+            .await
+            .unwrap();
+        let conn = ep.dial(&peer).await.expect("dial");
+        let server_side = accepted.await.unwrap().remove(0);
+        let endpoint = Endpoint::from_iroh(ep);
+        echo(&conn, b"one round trip").await;
+
+        // The server's wait for the connection to end, timed on its own
+        // runtime from the moment the command starts closing.
+        let started = Instant::now();
+        let seen = server_rt.spawn(async move {
+            let err = server_side.closed().await;
+            (err, Instant::now())
+        });
+
+        // What `exec` does at the end of a command.
+        conn.close(0, b"done");
+        drop(conn);
+        endpoint.wait_idle().await;
+        let close_took = started.elapsed();
+        drop(endpoint);
+        (close_took, (started, seen))
+    });
+    drop(command);
+
+    let (started, seen) = closed_at;
+    let (err, at) = server_rt.block_on(seen).unwrap();
+    assert!(
+        matches!(err, qsh_transport::ConnectionError::ApplicationClosed(_)),
+        "the server must hear the client's close, got {err:?}"
+    );
+    let heard_after = at.duration_since(started);
+    eprintln!(
+        "relay={relay}: the command's close took {close_took:?}, the server heard it after {heard_after:?}"
+    );
+    assert!(
+        close_took < Duration::from_millis(400),
+        "a short iroh command's close took {close_took:?}; the budget is one round trip, \
+         capped at {:?}",
+        qsh_transport::IROH_CLOSE_FLUSH_CAP
+    );
+    assert!(
+        heard_after < Duration::from_secs(2),
+        "the server heard the close after {heard_after:?}, which is a timeout, not the close"
+    );
+    // Whatever iroh logs from the dropped runtime has been logged by now.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(recorded_errors(), Vec::<String>::new());
+
+    server_rt.block_on(server_ep.close());
+    drop(server_ep);
+    drop(test_relay);
+    drop(server_rt);
+}
+
+#[test]
+fn a_short_command_over_a_relay_closes_fast_and_the_server_hears_it() {
+    short_command_close(true);
+}
+
+#[test]
+fn a_short_command_over_a_direct_path_closes_fast_and_the_server_hears_it() {
+    short_command_close(false);
+}
