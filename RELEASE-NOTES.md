@@ -13,8 +13,8 @@ carries the parts that do not change commit to commit.
 
 A minor release on top of `v0.5.8`. It ships the P2 milestones M21 to M26
 (ADR-0050 to ADR-0058), the combined `listen --serve` endpoint (M27,
-ADR-0059), and a security fix for direct dials (ADR-0060). Upgrade your
-clients. The fix is client-side, and it changes which servers a client
+ADR-0059), an optional iroh relay route (M28, ADR-0061), and a security fix
+for direct dials (ADR-0060). Upgrade your clients. The fix is client-side, and it changes which servers a client
 accepts (see "Security fix" and "Behavior changes").
 
 ### Security fix
@@ -78,6 +78,12 @@ These follow from the fix and can break setups that worked before.
   client draws the host's screen state instead of replaying its bytes.
   `--screen-sync=off` restores the byte path. `--json`, `--jsonl`, `exec`,
   `session read`, tunnels and `qsh cp` are unchanged.
+- The iroh relay route changes nothing until you enable it, with one
+  exception: after a direct or punched connection passes a pin check, the
+  client writes the host's public key as `key` into that pin in
+  `trust.toml`, under the file lock and only when the pin has none. The
+  write goes through the same code as other `trust.*` edits, so hand-written
+  comments and layout in `trust.toml` are normalized on that first write.
 
 ### New features
 
@@ -145,6 +151,30 @@ These follow from the fix and can break setups that worked before.
   forward otherwise. There is no wire change, and the flag does not
   persist: set the config key to keep it. Serving several listeners over
   one connection is out of scope.
+- Optional iroh relay route (M28, ADR-0061). For a pinned host, a relay
+  route can reach it when UDP is blocked and an iroh relay is reachable over
+  HTTPS. It is off until you switch it on, and nothing changes for a setup
+  that does not. On the host, `iroh.enable = true` makes `qsh serve` and
+  `qsh listen` open an iroh endpoint beside the UDP socket. On the client,
+  `qsh trust iroh <name> [--relay <url>] [--key <hex>] [--off]` adds
+  `routes = ["iroh"]` to a pin, and `--no-iroh` or `iroh.mode = "off"`
+  skips the route. The direct dial and hole punching go first. The relay
+  starts beside them after `iroh.head_start_ms` (1000 ms) and the first
+  connection that stands wins. A pin with no address goes straight to the
+  relay. The client remembers a blocked direct route per pin (ten minutes,
+  doubling to an hour, cleared on a network change) in `route-cache.json`.
+  `qsh serve --to` can register over the relay too. Sessions resume across
+  routes because resume is keyed on the peer's key. The default relay is the
+  public n0 relay, which has rate limits; set `iroh.relay_url` or `--relay`
+  for your own `iroh-relay`. The relay sees ciphertext, both endpoint ids and
+  timing. Relay TLS is checked against the OS trust store. Daemon endpoints
+  use the device key as their endpoint id. A client endpoint uses a random
+  key and proves its qsh identity inside the connection (97 bytes, bound to
+  that connection), which is the only wire change and exists only on this
+  route. Private-CA hosts and `-J` chains cannot use it. The release
+  binaries include iroh by default, so they carry more dependencies than
+  `v0.5.8`. Pins learn the host's `key` from the first direct, punched,
+  paired or `trust add --cert-file` connection.
 - Smaller changes since `v0.5.8` include a Windows host fix that stopped
   `Ctrl-C` from being ignored in children, a fix for a localctl bind
   `umask` that blocked concurrently created directories, and a fix for an
@@ -190,8 +220,12 @@ These follow from the fix and can break setups that worked before.
   `service.install` and `service.uninstall`, `data.transport` on
   `doctor.run`, and `shell_command` on the session open request. New
   operations: `config.get|set|unset|list`, `trust.allow|deny`,
-  `trust.set_jump` and `trust.set_rendezvous`. No existing field
-  changed type or was removed. No new `ErrorCode`.
+  `trust.set_jump`, `trust.set_rendezvous` and `trust.set_iroh`. M28 adds
+  optional `routes`, `relay` and `key` on pins, `peer_path` and `relay` on
+  audit records of iroh connections, `iroh` on `serve.json`, and
+  `details.iroh` (with `reason`) on errors. A refusal by the host is
+  `AUTH_FAILED` with `details.category: "remote_rejected"`. No existing
+  field changed type or was removed. No new `ErrorCode`.
 - The ACL action vocabulary grows by three, to 14: `host.punch`,
   `forward.agent` and `forward.jump` are new (a `trust allow` or an
   `[[acl]]` row can name them), and `acl show` / `acl check` list them.
@@ -204,7 +238,7 @@ These follow from the fix and can break setups that worked before.
   `listen_serve_ignores_serve_bind` and `serve_unit_beside_listen_serve`.
   Each has a new append-only fixture. Existing fixtures are unchanged.
   `capabilities.json` was regenerated for the seven new capability strings.
-- New config keys include `[interactive].screen_sync`,
+- New config keys include the six `[iroh]` keys, `[interactive].screen_sync`,
   `[interactive].predict`, `[interactive].status_line`, `agent.forward`,
   and `[listen].serve`, listed in
   `docs/CLI.md` §6.23. Keys read only at startup report
@@ -240,6 +274,13 @@ Everything `v0.5.8` lists, plus these items from the P2 work:
   the local test, close to the 0.5 floor the acceptance criterion sets. A
   shared CI runner has gone over the idle-memory and echo-latency limits
   once each in recent runs, and those limits are watched.
+- The iroh relay route has been tested only against an in-process relay.
+  A standalone probe connected through a TLS-intercepting corporate VPN
+  to a home machine, but qsh itself has not run on that network or any other
+  real one, so the head start, the route memory and the relay's rate limits
+  are unmeasured in the field. Pairing over the relay, a path upgrade from
+  relay to direct inside qsh, the effect of relay latency on the silence
+  rules, and discovery traffic have no test.
 - Combined `listen --serve` has acceptance tests (one endpoint serving
   registration and forward at once, the role matrix, recovery after a 5
   second blackhole). It has had no soak run and no real-network trial.

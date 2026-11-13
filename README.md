@@ -31,13 +31,14 @@ consent), start a serve there, and pin both machines to each other. Taking a pee
 role, closes its open connections on that machine within 2 seconds.
 
 QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
-UDP cannot connect (see [Known limitations](#known-limitations)).
+UDP cannot connect (see [Known limitations](#known-limitations)), unless you
+switch on the optional [iroh relay route](#when-udp-is-blocked-the-optional-iroh-relay-route).
 
 When a host registered with `qsh serve --to` sits behind NAT and the direct
-dial does not connect, the client can try UDP hole punching. There is no relay
-server: the two devices exchange addresses through a `qsh listen` that both
-can reach and that you have pinned, then connect to each other directly. It is
-one attempt of up to 8 seconds, and it fails when both NATs choose a new port
+dial does not connect, the client can try UDP hole punching. The punching
+itself uses no relay server: the two devices exchange addresses through a
+`qsh listen` that both can reach and that you have pinned, then connect to each
+other directly. It is one attempt of up to 8 seconds, and it fails when both NATs choose a new port
 for every destination, or when one does and the other filters by port. See
 [Known limitations](#known-limitations).
 
@@ -803,6 +804,52 @@ qsh -J none nas                          # ignore the saved chain once
   that names a pin you no longer have.
 - `-W` is still refused.
 
+### When UDP is blocked: the optional iroh relay route
+
+Some networks pass HTTPS and drop UDP to everything else. For a host you have
+pinned, you can add a relay route: the connection goes through an iroh relay
+(HTTPS and WebSocket), and the QUIC session inside it is still authenticated
+by the pins, so the relay only carries ciphertext. It is off by default. The
+binary includes it, and nothing contacts a relay until you switch it on.
+
+```bash
+# On the host (qsh serve or qsh listen), then restart it:
+qsh config set iroh.enable true
+
+# On the client, once per host. The key is the host's public key; the first
+# direct connection fills it in, or pass --key <64 hex characters>.
+qsh trust iroh nas
+qsh trust iroh nas --relay https://relay.example.net   # a relay you run
+qsh trust iroh nas --off                               # drop the route again
+
+qsh --no-iroh nas uname -a                             # skip the relay for one command
+```
+
+- The direct dial and hole punching still go first. The relay starts beside
+  them if they have not connected after one second (`iroh.head_start_ms`), and
+  the first connection that stands wins. A pin with no address goes straight
+  to the relay. After a relay win the client remembers, for ten minutes up to
+  an hour, that the direct route was blocked, and skips it. A change of
+  network clears that memory.
+- A relay connection moves to a direct path inside the same connection when
+  iroh finds one. From then on the host sees your address, as with any direct
+  connection.
+- The default relay is a public one run by n0 (`aps1-1.relay.n0.iroh.link`).
+  It has rate limits and its terms can change, and QSH has no say in either.
+  For regular use, run your own `iroh-relay` and set `iroh.relay_url` or
+  `--relay`. Nothing is published to iroh's discovery services.
+- The relay sees ciphertext, the endpoint ids of both ends, and when and how
+  much you connect. It cannot read the session or pose as the host. A client
+  uses a fresh random endpoint id for each command, and proves its qsh key
+  inside the connection. The relay's own certificate is checked against the
+  operating system's trust store, so a network that re-signs TLS still lets the
+  relay connection through, and that network sees the same metadata.
+- Private-CA hosts and `-J` chains cannot use this route. A failed relay
+  attempt reports `details.iroh.reason` in `--json` mode.
+- It is tested against an in-process relay. A standalone probe connected
+  through a corporate VPN, but qsh itself has not been measured on a real
+  network yet.
+
 ### Port forwards
 
 `-L` and `-R` are companion flags on the interactive form. They open
@@ -1157,8 +1204,10 @@ Some of these are MVP scope decisions, some are unfinished work.
   blocks or drops UDP (some corporate and hotel networks) cannot connect.
   `qsh doctor` reports a blocked UDP egress. This is a scope decision, not
   pending work ([ADR-0043](docs/adr/0043-no-tcp-fallback.md)): on such a
-  network use SSH, or run QSH inside an overlay such as WireGuard or
-  Tailscale that can carry UDP.
+  network use SSH, run QSH inside an overlay such as WireGuard or Tailscale
+  that can carry UDP, or switch on the optional
+  [iroh relay route](#when-udp-is-blocked-the-optional-iroh-relay-route),
+  which needs a relay that is reachable over HTTPS.
 - A jump chain costs latency per hop and a bit more under packet loss when a
   step has to use the stream carrier. It has at most four hops, and `-W`
   (stdio forwarding) is not supported
@@ -1169,7 +1218,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   (`qsh trust rendezvous`). Symmetric NAT against port-restricted NAT, and
   symmetric against symmetric, never open: the attempt gives up after at most
   8 seconds and the other routes and SSH remain. A firewall that drops replies
-  to flows the host started also blocks it. There is no relay to fall back on
+  to flows the host started also blocks it. Punching has no relay of its own;
+  the optional iroh relay route is the separate option
   ([ADR-0054](docs/adr/0054-m24-hole-punching.md)).
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so a restart
@@ -1466,7 +1516,7 @@ Some of these are MVP scope decisions, some are unfinished work.
 - Reverse mode needs a directly reachable path from the target to the
   controller:
 
-  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
+  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH's own routes use no relay (the optional iroh relay route is separate); hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
   >
   > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
 - macOS asks "Do you want the application “qsh” to accept incoming network

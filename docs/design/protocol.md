@@ -1360,9 +1360,9 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 
 **침묵 전환 시한(ADR-0058).** datagram으로 보낸 뒤 그 채널로 datagram이 한 번도 돌아오지 않는데 스트림과 바깥 ack는 살아 있으면 스트림으로 바꾼다. 시한은 `silence = 4 × max(rtt, 50 ms) + 25 ms`다(`RTT_FLOOR` 50 ms는 ADR-0052 구현과 같고 25 ms는 QUIC 기본 `max_ack_delay`다). `rtt`는 client(C에서 다음 hop 방향)가 그 채널 위에서 맺은 안쪽 연결의 srtt(끝에서 끝 왕복, handshake 전에는 바깥 srtt)이고, 중간 peer(T에서 C 방향)와 역방향 데몬은 바깥 연결의 srtt다. 30초 뒤 datagram을 다시 시험하는 것과 자리를 넘는 패킷을 버리고 세는 것은 그대로다. 시한 계산은 `jump_silence_window_table`이 고정하고, 건강한 경로에서 전환 0번은 `jump_tunnel_throughput`이, 진짜 침묵에서의 전환은 `jump_silence_on_the_datagram_path_falls_back_to_the_stream`이 본다.
 
-## 22. iroh relay route (ADR-0061, 초안 — M28 구현 전)
+## 22. iroh relay route (ADR-0061, M28)
 
-> 이 절은 M28 스텝 4~6이 착지하는 동작을 미리 적은 것이다. 구현이 이 절과 다르면 이 절을 먼저 고친다. 값(시한, 기본 relay URL)은 구현에서 정해지면 채운다.
+> 이 절은 M28이 착지한 동작을 적는다. 값은 `[iroh]` 설정(`docs/CLI.md` §6.12, §6.23)이 정한다: 기본 relay URL은 `https://aps1-1.relay.n0.iroh.link`, `head_start_ms`는 1000, 대기 시한은 명령의 dial 시한(10초)이다. 구현이 이 절과 다르면 이 절을 먼저 고친다.
 
 ### 22.1 route 순서
 
@@ -1372,7 +1372,8 @@ pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/
 - 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 출발한다. 직결과 펀칭의 경주(ADR-0054 결정 16)는 그대로이고, 그 경주가 `[iroh].head_start_ms`(기본 1초) 안에 서지 않거나 그 전에 모두 바로 실패하면 iroh 시도를 나란히 시작해 먼저 선 연결을 쓴다. 진 쪽은 닫는다. UDP가 막힌 망에서는 직결이 dial 시한을 다 써야 실패하므로, 경주가 끝나기를 기다리면 iroh에 남는 시간이 없다. 그 안에 직결이나 펀칭이 서면 relay에 아무것도 보내지 않는다.
 - **route 기억.** pin마다 마지막으로 이긴 route와 실패한 route를 state의 `route-cache.json`에 둔다. iroh가 이기고 직결·펀칭이 시한까지 못 선 pin은 다음 dial에서 iroh를 곧바로 시작하고 직결·펀칭을 건너뛴다. 건너뛴 route는 10분 뒤(연속 실패마다 두 배, 상한 1시간) iroh와 나란히 한 번 다시 시도한다. 로컬 주소 집합이나 기본 경로가 바뀌면 기억을 버린다. 막힌 망에서 dial과 재dial이 같은 route를 연달아 두드리지 않게 하려는 것이다(`docs/CLI.md` §6.1).
 - 새로 도는 route는 §19.10과 같은 규칙으로 **재해석**된다. recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.
-- 이름 없는 대상(주소만 있는 대상)에는 iroh route가 없다. EndpointId를 아는 pin(이름)만 iroh로 dial한다.
+- 주소도 중개자 후보도 없는 pin에 `routes = ["iroh"]`와 `key`가 있으면 직결·펀칭이 없으므로 head start 없이 곧바로 iroh로 dial한다.
+- 이름 없는 대상(주소만 있는 대상)에는 iroh route가 없다. EndpointId를 아는 pin(이름)만 iroh로 dial한다. pin에 `routes = ["iroh"]`가 있어도 `key`가 없으면 iroh는 건너뛴다(`key`는 직결·펀칭·페어링·`trust add --cert-file`·SSH 확인 dial이 채우거나 `qsh trust iroh --key`로 적는다).
 - iroh 시도도 명령의 dial 시한(10초)을 늘리지 않는다. 남은 시한으로 잘린다.
 
 ### 22.2 relay 경로
@@ -1386,9 +1387,9 @@ pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/
 ### 22.3 신원과 handshake
 
 - iroh route에서 서버(데몬)의 식별자는 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. qsh fingerprint(SPKI SHA-256)는 같은 키에서 계산한다. 클라이언트의 EndpointId는 endpoint마다 새로 뽑는 임의 키이고, 클라이언트의 qsh 신원은 연결 안에서 증명한다(§22.8).
-- **검증은 handshake 직후 훅에서** 한다. pin 대조와 ADR-0060의 이름 결속(이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId여야 함)을 거치고, 실패하면 `AUTH_FAILED`로 끝난다. 이 판정 전에는 `Hello`도, 어떤 스트림도, 세션·터널·listener도 없다.
+- **검증은 handshake 직후에** 한다. 클라이언트는 서버의 pin 대조와 ADR-0060의 이름 결속(이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId여야 함)을 거치고, 서버는 §22.8의 증명으로 클라이언트를 판정한다. 서버가 거절하면 클라이언트는 `AUTH_FAILED`(`details.category: "remote_rejected"`)로 끝난다. 이 판정 전에는 `Hello`도, 어떤 스트림도, 세션·터널·listener도 없다.
 - 사설 CA 모드(체인, SAN principal)는 iroh route에서 `UNSUPPORTED`다. jump 체인의 어느 hop도 iroh route로 열지 않는다(`UNSUPPORTED`, ADR-0061 결정 14).
-- 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 한다. 페어링을 iroh route 위에서 허용할지는 구현 때 확인한다(미결 1).
+- 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 할 수 있다. 다만 클라이언트가 iroh route로 페어링하는 경로는 만들지 않았다(미결 1).
 
 ### 22.4 직접 경로로의 승격
 
@@ -1410,12 +1411,12 @@ iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(m
 
 ### 22.6 시험
 
-planned. 이름과 계층은 `testing.md`의 「iroh relay route와 backend 경계」 절에 있다. 핀 테스트 인덱스는 `threat-model.md` §4(A27·B54·D28~D31·G15)가 canonical이다.
+이름과 계층은 `testing.md`의 「iroh relay route와 backend 경계」 절에 있다. 핀 테스트 인덱스는 `threat-model.md` §4(A27·A28·B54·D28~D31·G15)가 canonical이다.
 
 ### 22.7 미결
 
-1. 페어링(§15)을 iroh route 위에서 허용할지. 허용하면 invite 질의 경로(`pair invite`)의 EndpointId 안내가 필요하다.
-2. relay 경유 RTT에서 `LinkStatus`·침묵 시한의 기본값이 충분한지.
+1. 페어링(§15)을 iroh route 위에서 허용할지. 구현하지 않았다: `pair accept`는 초대에 든 주소로 직결 dial하는 경로만 가진다. 허용하려면 invite에 EndpointId 안내가 필요하다.
+2. 실제 망에서 relay 경유 RTT에 `LinkStatus`·침묵 시한의 기본값이 충분한지. 이 항목을 겨냥한 시험은 없고 TITAN 같은 실제 망 측정은 릴리스 전 항목으로 남아 있다.
 
 ### 22.8 클라이언트 신원 증명
 
@@ -1461,7 +1462,7 @@ ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capab
 
 - exporter가 서명에 들어 있으므로 다른 연결로 복사한 프레임은 그 연결의 exporter와 맞지 않아 거절된다(재전송 방지). 두 EndpointId가 들어 있어 같은 서버·같은 클라이언트 endpoint가 아닌 쌍에도 쓸 수 없다.
 - 읽는 쪽은 최대 97바이트만 잡는다. 프레임이 더 길면 길이 초과로 거절하고 그 이상을 버퍼링하지 않는다.
-- 서버는 상대의 EndpointId가 pin인지 따로 보지 않는다. 데몬이 기기 키로 dial하는 연결(`serve --to`의 이후 구현 포함)도 같은 프레임을 보내며, 이때 증명된 키는 EndpointId와 같다. 한 경로로 검증한다.
+- 서버는 상대의 EndpointId가 pin인지 따로 보지 않는다. 데몬이 기기 키로 dial하는 연결(`serve --to`의 등록 dial 포함)도 같은 프레임을 보내며, 이때 증명된 키는 EndpointId와 같다. 한 경로로 검증한다.
 - 증명 읽기는 handshake permit을 쥔 채 일어나므로 시한까지의 점유는 handshake 동시 상한이 막는다(admission, ADR-0061 결정 4). 키 기준 버킷(`decide_keyed`)은 증명 뒤에 증명된 키로 센다.
 - 증명 전에 클라이언트 쪽이 서버 신원을 먼저 확인하므로(dial 전 pin 검사, handshake 직후 재검사) 가짜 서버에 증명이 가지 않는다. 가더라도 증명은 그 연결에 묶여 있어 다른 연결에서는 쓸 수 없다.
 - 클라이언트 endpoint는 끝날 때 연결의 close가 상대에게 갔는지만 짧게 기다린다(`wait_idle`·`wait_idle_for`가 상대의 `CONNECTION_CLOSE` 응답을 `IROH_CLOSE_FLUSH_CAP`(150ms)까지 기다린다. 보통 한 왕복). iroh의 `Endpoint::close`는 기다리지 않고 백그라운드로 시작한다. relay와 맺은 주소 발견(QAD) 연결의 close에 relay가 답하지 않아 endpoint가 그 연결의 closing 기간(PTO의 세 배)을 채워야 끝나고, loopback에서도 1초가 걸리기 때문이다(실제 relay에서는 최대 3초). 상대는 연결의 `CONNECTION_CLOSE`로 이미 close를 알았으므로 이 기다림은 명령 종료에 필요하지 않다. 백그라운드 닫기가 끝나기 전에 프로세스가 끝나면 iroh가 "Endpoint dropped without calling `Endpoint::close`" 오류를 로그에 남기므로, 닫는 중인 endpoint의 복제본을 프로세스 전역에 쥐어 두어 프로세스 종료가 endpoint를 drop하지 않게 한다. 마지막 핸들이 닫기 전에 사라지는 경로(오류, 진 route 경주, 취소)도 같은 백그라운드 닫기를 쓴다.
