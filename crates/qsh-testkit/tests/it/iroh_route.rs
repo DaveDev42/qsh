@@ -604,6 +604,79 @@ async fn a_jump_chain_cannot_open_an_iroh_only_hop_and_a_private_ca_cannot_take_
     rig.net.shutdown().await;
 }
 
+/// The relay-stage reason of a failed `exec` to the address-less pin `far`
+/// homed on `relay_url`, with the dial limited to five seconds.
+async fn failure_reason(rig: &Rig, relay_url: &str) -> (ErrorCode, Option<String>) {
+    qsh_transport::set_default_dial_timeout(Duration::from_secs(5));
+    rig.pin_iroh("far", None, relay_url).await;
+    let started = Instant::now();
+    let err = exec(&rig.ops, "far", echo_argv("never"))
+        .await
+        .expect_err("the relay route cannot stand");
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "the diagnosis stays inside the dial time: {:?}",
+        started.elapsed()
+    );
+    let reason = err
+        .details
+        .pointer("/iroh/reason")
+        .and_then(|r| r.as_str())
+        .map(str::to_string);
+    (err.code, reason)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_whose_certificate_is_not_trusted_is_relay_tls() {
+    let rig = Rig::start(true).await;
+    // A second relay the client has no root for.
+    let stranger = TestRelay::spawn().await;
+    let (code, reason) = failure_reason(&rig, &stranger.url).await;
+    assert_eq!(code, ErrorCode::ConnectionFailed);
+    assert_eq!(reason.as_deref(), Some("relay_tls"));
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_that_never_answers_or_is_not_there_is_relay_unreachable() {
+    let rig = Rig::start(true).await;
+    let silent = CountingPort::bind().await;
+    let (code, reason) = failure_reason(&rig, &silent.url).await;
+    assert_eq!(code, ErrorCode::ConnectionFailed);
+    assert_eq!(reason.as_deref(), Some("relay_unreachable"));
+
+    // Nothing listens at all.
+    let closed = {
+        let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        format!("https://{}", socket.local_addr().unwrap())
+    };
+    let (_, reason) = failure_reason(&rig, &closed).await;
+    assert_eq!(reason.as_deref(), Some("relay_unreachable"));
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_healthy_relay_with_no_peer_behind_it_is_not_a_relay_failure() {
+    let rig = Rig::start(true).await;
+    // A pin whose key nobody holds on this relay.
+    let ghost = qsh_testkit::loopback::make_identity();
+    rig.net.pin("far", None, ghost.fingerprint).await;
+    let key = hex(&ghost.local.iroh_public_key().expect("ed25519"));
+    rig.set_iroh("far", Some(&rig.relay.url), Some(&key))
+        .await
+        .expect("trust.set_iroh");
+    qsh_transport::set_default_dial_timeout(Duration::from_secs(5));
+    let err = exec(&rig.ops, "far", echo_argv("never"))
+        .await
+        .expect_err("nobody is there");
+    assert_eq!(err.code, ErrorCode::ConnectionFailed, "{err:?}");
+    assert!(
+        err.details.pointer("/iroh/reason").is_none(),
+        "the relay was fine: {err:?}"
+    );
+    rig.net.shutdown().await;
+}
+
 /// The `key` of the pin `name` in `trust.toml`, if it has one.
 fn pin_key(ops: &Ops, name: &str) -> Option<String> {
     let store = qsh_core::trust::TrustStore::load(&ops.paths().trust_file()).expect("trust.toml");

@@ -199,7 +199,15 @@ impl RouteError {
 
 /// `details.iroh{tried, code}` on a failure that also tried the relay route.
 fn attach_iroh(mut op: OpError, iroh: &OpError) -> OpError {
-    let note = serde_json::json!({ "tried": true, "code": iroh.code.to_string() });
+    let mut note = serde_json::json!({ "tried": true, "code": iroh.code.to_string() });
+    if let Some(reason) = iroh
+        .details
+        .pointer("/iroh/reason")
+        .and_then(|r| r.as_str())
+        && let Some(map) = note.as_object_mut()
+    {
+        map.insert("reason".to_string(), serde_json::json!(reason));
+    }
     match &mut op.details {
         serde_json::Value::Null => op.details = serde_json::json!({ "iroh": note }),
         serde_json::Value::Object(map) => {
@@ -593,16 +601,116 @@ async fn dial_iroh(plan: &Arc<IrohPlan>, deadline: Instant) -> Result<Routed, Op
     let left = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_millis(1));
-    let endpoint = endpoint.with_timeout(left);
-    let connection = endpoint
-        .dial(&plan.target.peer)
+    // A dial with time to spare keeps the end of it to find out why it
+    // failed (`details.iroh.reason`); a short one spends all of it dialing.
+    let reserve = if left > RELAY_DIAGNOSIS_MIN_BUDGET {
+        RELAY_DIAGNOSIS
+    } else {
+        Duration::ZERO
+    };
+    let endpoint = endpoint.with_timeout(left - reserve);
+    match endpoint.dial(&plan.target.peer).await {
+        Ok(connection) => Ok(Routed {
+            connection,
+            endpoint: Endpoint::from_iroh(endpoint),
+            punched: true,
+        }),
+        Err(err) => {
+            let reason = relay_failure_reason(plan, &endpoint, &err, reserve).await;
+            let op = map_dial_error(err, &label, 1);
+            Err(match reason {
+                Some(reason) => with_iroh_reason(op, reason),
+                None => op,
+            })
+        }
+    }
+}
+
+/// What a relay dial keeps at the end of its time to say why it failed.
+const RELAY_DIAGNOSIS: Duration = Duration::from_millis(1500);
+
+/// A dial with less time than this spends all of it dialing.
+const RELAY_DIAGNOSIS_MIN_BUDGET: Duration = Duration::from_secs(4);
+
+/// How long the endpoint gets to say it reached its relay before the relay
+/// is checked from the outside.
+const RELAY_ONLINE_GRACE: Duration = Duration::from_millis(150);
+
+/// `details.iroh.reason` for a failed relay dial (`docs/CLI.md` §3.3), or
+/// `None` when the failure is not a relay-stage one: the peer refused us, the
+/// endpoint could not be built, or the relay is fine and the peer is not
+/// there.
+///
+/// A dial that did not stand tells nothing about the relay by itself. The
+/// endpoint says whether it reached its home relay; when it did not, the
+/// relay is checked from the outside the way `qsh doctor` does, which names
+/// the stage, within `budget`.
+async fn relay_failure_reason(
+    plan: &IrohPlan,
+    endpoint: &IrohEndpoint,
+    err: &DialError,
+    budget: Duration,
+) -> Option<&'static str> {
+    match err {
+        DialError::Setup(_) | DialError::LocalRejected { .. } | DialError::RemoteRejected => {
+            return None;
+        }
+        DialError::Failed(inner) if inner.is_crypto_failure() => return None,
+        DialError::Failed(inner) if inner.to_string().contains("relay disabled") => {
+            return Some(REASON_NO_RELAY);
+        }
+        _ => {}
+    }
+    if tokio::time::timeout(RELAY_ONLINE_GRACE, endpoint.online())
         .await
-        .map_err(|e| map_dial_error(e, &label, 1))?;
-    Ok(Routed {
-        connection,
-        endpoint: Endpoint::from_iroh(endpoint),
-        punched: true,
-    })
+        .is_ok()
+    {
+        return None;
+    }
+    if budget.is_zero() {
+        return Some(REASON_RELAY_UNREACHABLE);
+    }
+    let checked = qsh_transport::probe_relay(
+        &plan.target.relay_url,
+        &plan.target.config.relay_trust,
+        budget,
+    )
+    .await;
+    reason_of_probe(&checked)
+}
+
+pub(crate) const REASON_RELAY_UNREACHABLE: &str = "relay_unreachable";
+pub(crate) const REASON_RELAY_TLS: &str = "relay_tls";
+pub(crate) const REASON_RELAY_UPGRADE: &str = "relay_upgrade";
+pub(crate) const REASON_NO_RELAY: &str = "no_relay_configured";
+
+/// The reason word for the outcome of the relay check run after a dial that
+/// did not stand. A relay that passes the check is not what failed.
+pub(crate) fn reason_of_probe(
+    checked: &Result<(), qsh_transport::RelayProbeFailure>,
+) -> Option<&'static str> {
+    use qsh_transport::RelayProbeStage as Stage;
+    match checked {
+        Ok(()) => None,
+        Err(failure) => Some(match failure.stage {
+            Stage::Resolve | Stage::Connect | Stage::Timeout => REASON_RELAY_UNREACHABLE,
+            Stage::Tls => REASON_RELAY_TLS,
+            Stage::Http | Stage::Upgrade => REASON_RELAY_UPGRADE,
+        }),
+    }
+}
+
+/// `op` with `details.iroh.reason` set.
+fn with_iroh_reason(mut op: OpError, reason: &str) -> OpError {
+    let note = serde_json::json!({ "reason": reason });
+    match &mut op.details {
+        serde_json::Value::Null => op.details = serde_json::json!({ "iroh": note }),
+        serde_json::Value::Object(map) => {
+            map.insert("iroh".to_string(), note);
+        }
+        _ => {}
+    }
+    op
 }
 
 /// The direct dial and the hole-punching race. With no `plan` this is the
@@ -755,4 +863,77 @@ async fn dial_direct_punch(
         punch: punch_error,
         iroh: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use qsh_transport::{RelayProbeFailure, RelayProbeStage};
+
+    use super::*;
+
+    fn failed(stage: RelayProbeStage) -> Result<(), RelayProbeFailure> {
+        Err(RelayProbeFailure {
+            stage,
+            detail: String::new(),
+        })
+    }
+
+    #[test]
+    fn the_stage_of_a_failed_relay_check_names_the_reason() {
+        use RelayProbeStage as S;
+        let reasons: Vec<_> = [
+            S::Resolve,
+            S::Connect,
+            S::Tls,
+            S::Http,
+            S::Upgrade,
+            S::Timeout,
+        ]
+        .into_iter()
+        .map(|stage| reason_of_probe(&failed(stage)))
+        .collect();
+        assert_eq!(
+            reasons,
+            [
+                Some("relay_unreachable"),
+                Some("relay_unreachable"),
+                Some("relay_tls"),
+                Some("relay_upgrade"),
+                Some("relay_upgrade"),
+                Some("relay_unreachable"),
+            ]
+        );
+        // A relay that passes the check is not what failed.
+        assert_eq!(reason_of_probe(&Ok(())), None);
+    }
+
+    #[test]
+    fn the_reason_rides_along_with_the_route_failure() {
+        let direct = OpError::new(ErrorCode::ConnectionFailed, "no response");
+        let iroh = with_iroh_reason(
+            OpError::new(ErrorCode::ConnectionFailed, "relay"),
+            REASON_RELAY_TLS,
+        );
+        assert_eq!(iroh.details["iroh"]["reason"], "relay_tls");
+        let op = attach_iroh(direct, &iroh);
+        assert_eq!(op.details["iroh"]["tried"], true);
+        assert_eq!(op.details["iroh"]["code"], "CONNECTION_FAILED");
+        assert_eq!(op.details["iroh"]["reason"], "relay_tls");
+
+        // No reason, none invented.
+        let bare = attach_iroh(
+            OpError::new(ErrorCode::ConnectionFailed, "no response"),
+            &OpError::new(ErrorCode::ConnectionFailed, "peer offline"),
+        );
+        assert!(bare.details["iroh"].get("reason").is_none());
+    }
+
+    #[test]
+    fn a_reason_is_added_next_to_the_details_a_failure_already_has() {
+        let op = OpError::new(ErrorCode::ConnectionFailed, "x")
+            .with_details(serde_json::json!({ "timeout_ms": 5 }));
+        let op = with_iroh_reason(op, REASON_RELAY_UPGRADE);
+        assert_eq!(op.details["timeout_ms"], 5);
+        assert_eq!(op.details["iroh"]["reason"], "relay_upgrade");
+    }
 }

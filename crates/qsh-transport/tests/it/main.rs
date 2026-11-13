@@ -9,4 +9,5 @@ mod iroh_identity;
 mod iroh_support;
 mod jump_pipe;
 mod loopback;
+mod relay_probe;
 mod reset_key;
