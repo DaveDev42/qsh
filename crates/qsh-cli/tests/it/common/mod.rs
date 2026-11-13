@@ -163,6 +163,13 @@ impl Sandbox {
     /// (docs/campaigns/m8-adversarial-load.md §2/J2).
     pub fn command_with_bin(&self, bin: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(bin);
+        // A daemon brings its iroh endpoint up by default (ADR-0063), and no
+        // test may contact a public relay: `--no-iroh` keeps it down for
+        // every `serve` and `listen` this harness starts. The tests that run
+        // a daemon with an endpoint do so in-process, against their own relay.
+        if args.iter().any(|arg| matches!(*arg, "serve" | "listen")) {
+            command.arg("--no-iroh");
+        }
         command
             .args(args)
             .env("QSH_CONFIG_DIR", &self.config)

@@ -9,6 +9,104 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.8.0`
+
+A minor release that changes defaults so a typical device needs no
+`config.toml`, no `acl.toml`, and a `trust.toml` pin of three lines.
+
+### Changes
+
+- `qsh serve` and `qsh listen` bring up their iroh endpoint when
+  `[iroh].enable` is not set. Before, you had to write `enable = true`.
+  `enable = false` still keeps the daemon off every relay, and so does
+  `--no-iroh` on `qsh serve` or `qsh listen` for one run. `qsh serve
+  --on-demand` never opens an endpoint. A daemon that is on only because
+  `enable` is unset keeps running when the endpoint cannot be set up and
+  says so on stderr; a written `enable = true` still stops it with
+  `CONFIG_ERROR`. See ADR-0063.
+- A `[[peer]]` in `trust.toml` is valid with just a `key` (the peer's
+  Ed25519 public key, 64 hex characters, the same value as its iroh endpoint
+  id). Its `fingerprint` is derived from the key. If a pin has both, they
+  must match, as before; a pin with neither is `CONFIG_ERROR`. `address`
+  and `added_at` can be left out. `routes` can be left out too: a pin that
+  has a key and no address defaults to `routes = ["iroh"]`, and every other
+  pin keeps the old default (direct and hole punching only). A `routes`
+  line you write wins, an empty list included.
+- A pin is now three lines:
+
+  ```toml
+  [[peer]]
+  name = "toss"
+  key  = "<iroh endpoint key>"
+  role = "tunnel"
+  ```
+
+- What qsh writes is shorter. A pin it creates or changes has no empty
+  `address`, no `added_at` when there is none, no `routes` equal to the
+  default, and no `fingerprint` when it has a `key`. A pin it leaves alone
+  is written back as it was read, and a pin it changes keeps the lines its
+  table already had. The one case where qsh adds `routes = []` is a key
+  taken from `qsh trust add --cert-file` for a pin with no address, so that
+  pin keeps not using the relay.
+- `trust.list` and the other `qsh.cli/v1` outputs are unchanged: they still
+  carry `fingerprint`, `address` and `added_at`, filled in. No new fields,
+  no new error codes. `acl.toml` stays optional and is read as before;
+  default-deny and the rule that a pin with no `role` grants nothing are
+  unchanged.
+- The `--no-iroh` flag now also keeps the iroh endpoint of `qsh serve` and
+  `qsh listen` down. The registration dial of `qsh serve --to` still
+  follows `[iroh].mode` only.
+
+### What changes on the network
+
+A daemon with no `[iroh]` section now keeps one HTTPS (TCP 443) connection
+to one of n0's public relays open (`aps1-1`, `usw1-1`, `use1-1`, `euc1-1`
+under `relay.n0.iroh.link`, the fastest that answers). The relay sees
+ciphertext, your endpoint id, and when and how much you connect. Public
+relays have rate limits and their terms can change. A network that blocks
+outbound TCP 443 to those hosts leaves the endpoint without a home relay;
+the direct UDP listener is unaffected. To opt out, write this in
+`config.toml`, or run `qsh config set iroh.enable false` and restart:
+
+```toml
+[iroh]
+enable = false
+```
+
+### Upgrading
+
+- Daemons contact n0's public relays by default now. If your policy does
+  not allow that, set `[iroh] enable = false` before you restart the new
+  binary, or start the daemon with `--no-iroh`. A config that already
+  says `enable = false` behaves as before and contacts no relay.
+- A pin with a key, no address and no `routes` line, for example an
+  inbound-only client pin whose key qsh filled in after a direct connection,
+  is now a pin the relay route can dial. `qsh exec <that name>` used to
+  fail with `HOST_NOT_FOUND` and now tries the relay. Write `routes = []`
+  on the pin to keep the old behavior.
+- Every file that loaded under `v0.7.x` loads the same way. A file that
+  uses the shorter pin form does not load in `v0.7.x` (it needs a
+  `fingerprint`), so upgrade every device that reads a shared `trust.toml`
+  before you write short pins into it. For the relay route to work both
+  ends need `v0.7.2` or later (see its notes).
+- `[serve].bind` already defaults to `[::]:4433`. `[identity].key_store`
+  defaults to `auto`, not `file`: the platform store when it works and a
+  file when it does not. Neither default changed.
+
+### What is still unproven
+
+Everything `v0.7.2` lists, plus these items:
+
+- No test starts a daemon on its default relays. The daemon tests use an
+  in-process relay or switch the endpoint off, and the default-on path is
+  checked by reading the settings a default config produces.
+- Whether a daemon with no reachable relay (TCP 443 blocked) logs and
+  retries in a way that is quiet enough was not measured.
+
+### Assets and signing
+
+Unchanged from `v0.7.2`, with `v0.8.0` in the asset names.
+
 ## `v0.7.2`
 
 A patch release on top of `v0.7.1`. The iroh relay route no longer depends

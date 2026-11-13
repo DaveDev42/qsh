@@ -992,7 +992,7 @@ impl Ops {
         }
         // The responder's key came with the certificate it just proved; it is
         // the pin's key (ADR-0061 decision 3).
-        let learned = peer_key.is_some_and(|key| store.learn_key(&key));
+        let learned = peer_key.is_some_and(|key| store.learn_key_from_connection(&key));
         if created || updated || learned {
             store.save(&path)?;
         }

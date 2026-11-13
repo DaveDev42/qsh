@@ -1877,3 +1877,286 @@ fn rename_follows_jump_references() {
     store.rename("a", "bastion").unwrap();
     assert_eq!(store.find("c").unwrap().jump, ["bastion"]);
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0063: a pin is `name` + `key` (+ `role`)
+// ---------------------------------------------------------------------------
+
+const MINIMAL_KEY: [u8; 32] = [7u8; 32];
+
+fn minimal_key_hex() -> String {
+    iroh_pin::key_to_hex(&MINIMAL_KEY)
+}
+
+fn minimal_fingerprint() -> String {
+    qsh_transport::fingerprint_of_ed25519_key(&MINIMAL_KEY).to_string()
+}
+
+#[test]
+fn a_pin_with_only_name_key_and_role_loads_with_everything_derived() {
+    let store = load_text(&format!(
+        "[[peer]]\nname = \"toss\"\nkey = \"{}\"\nrole = \"tunnel\"\n",
+        minimal_key_hex()
+    ))
+    .unwrap();
+    let pin = store.find("toss").unwrap();
+    assert_eq!(pin.fingerprint, minimal_fingerprint());
+    assert_eq!(pin.address, "");
+    assert_eq!(pin.added_at, "");
+    assert_eq!(pin.role.as_deref(), Some("tunnel"));
+    assert_eq!(pin.key.as_deref(), Some(minimal_key_hex().as_str()));
+    assert_eq!(pin.routes, ["iroh"], "no address: the relay is the way in");
+}
+
+#[test]
+fn a_key_with_an_address_and_no_routes_keeps_the_old_route_list() {
+    let store = load_text(&format!(
+        "[[peer]]\nname = \"box\"\nkey = \"{}\"\naddress = \"box:4433\"\n",
+        minimal_key_hex()
+    ))
+    .unwrap();
+    assert!(store.find("box").unwrap().routes.is_empty());
+}
+
+#[test]
+fn routes_written_in_the_file_win_over_the_default() {
+    let store = load_text(&format!(
+        "[[peer]]\nname = \"off\"\nkey = \"{}\"\nroutes = []\n",
+        minimal_key_hex()
+    ))
+    .unwrap();
+    assert!(store.find("off").unwrap().routes.is_empty());
+}
+
+#[test]
+fn a_key_and_the_fingerprint_it_hashes_to_may_both_be_written() {
+    let store = load_text(&format!(
+        "[[peer]]\nname = \"both\"\nfingerprint = \"{}\"\nkey = \"{}\"\naddress = \"\"\n\
+         added_at = \"2026-11-13T00:00:00Z\"\nroutes = [\"iroh\"]\n",
+        minimal_fingerprint(),
+        minimal_key_hex()
+    ))
+    .unwrap();
+    assert_eq!(
+        store.find("both").unwrap().fingerprint,
+        minimal_fingerprint()
+    );
+}
+
+#[test]
+fn a_key_and_a_fingerprint_that_disagree_are_a_config_error() {
+    let err = load_text(&format!(
+        "[[peer]]\nname = \"liar\"\nfingerprint = \"{}\"\nkey = \"{}\"\n",
+        fp(b"another host"),
+        minimal_key_hex()
+    ))
+    .expect_err("must not load");
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(err.message.contains("liar"), "{}", err.message);
+}
+
+#[test]
+fn a_pin_with_neither_key_nor_fingerprint_is_a_config_error() {
+    let err =
+        load_text("[[peer]]\nname = \"empty\"\nrole = \"full\"\n").expect_err("must not load");
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(err.message.contains("empty"), "{}", err.message);
+}
+
+#[test]
+fn a_key_that_is_not_hex_is_a_config_error() {
+    let err = load_text("[[peer]]\nname = \"bad\"\nkey = \"nothex\"\n").expect_err("must not load");
+    assert_eq!(err.code, ErrorCode::ConfigError);
+}
+
+#[test]
+fn a_pin_that_learns_its_key_is_written_without_fingerprint_address_or_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let mut store = TrustStore::default();
+    store.add_peer_with_role(
+        "toss",
+        None,
+        qsh_transport::fingerprint_of_ed25519_key(&MINIMAL_KEY),
+        "2026-11-13T00:00:00Z".into(),
+        TrustRole::Tunnel,
+    );
+    assert!(store.learn_key_from_connection(&MINIMAL_KEY));
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("fingerprint"), "{text}");
+    assert!(!text.contains("address"), "{text}");
+    assert!(!text.contains("routes"), "{text}");
+    assert!(text.contains("key = "), "{text}");
+    assert!(text.contains("role = \"tunnel\""), "{text}");
+    assert_eq!(TrustStore::load(&path).unwrap(), store);
+}
+
+#[test]
+fn a_pin_without_a_key_still_writes_its_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let mut store = TrustStore::default();
+    store.add_peer_with_role(
+        "box",
+        Some("box:4433".into()),
+        fp(b"box"),
+        "2026-11-13T00:00:00Z".into(),
+        TrustRole::Full,
+    );
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("fingerprint = "), "{text}");
+    assert!(text.contains("address = \"box:4433\""), "{text}");
+    assert!(!text.contains("routes"), "{text}");
+}
+
+#[test]
+fn a_pin_with_an_address_and_the_iroh_route_writes_its_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "box",
+        Some("box:4433".into()),
+        qsh_transport::fingerprint_of_ed25519_key(&MINIMAL_KEY),
+        "t".into(),
+    );
+    store
+        .set_iroh(
+            "box",
+            &IrohPinChange {
+                key: Some(MINIMAL_KEY),
+                ..IrohPinChange::default()
+            },
+        )
+        .unwrap();
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("routes = [\"iroh\"]"), "{text}");
+    assert!(!text.contains("fingerprint"), "{text}");
+    assert_eq!(TrustStore::load(&path).unwrap(), store);
+}
+
+#[test]
+fn turning_the_route_off_on_a_key_only_pin_is_written_and_survives_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[[peer]]\nname = \"toss\"\nkey = \"{}\"\nrole = \"tunnel\"\n",
+            minimal_key_hex()
+        ),
+    )
+    .unwrap();
+    let mut store = TrustStore::load(&path).unwrap();
+    store
+        .set_iroh(
+            "toss",
+            &IrohPinChange {
+                off: true,
+                ..IrohPinChange::default()
+            },
+        )
+        .unwrap();
+    store.save(&path).unwrap();
+    let reloaded = TrustStore::load(&path).unwrap();
+    assert!(reloaded.find("toss").unwrap().routes.is_empty());
+}
+
+#[test]
+fn saving_for_one_pin_leaves_the_tables_of_the_others_as_they_were_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let old = format!(
+        "[[peer]]\nname = \"wsl\"\nfingerprint = \"{}\"\naddress = \"\"\n\
+         added_at = \"2026-10-01T00:00:00Z\"\nrole = \"tunnel\"\nroutes = [\"iroh\"]\nkey = \"{}\"\n",
+        minimal_fingerprint(),
+        minimal_key_hex()
+    );
+    std::fs::write(&path, &old).unwrap();
+    let mut store = TrustStore::load(&path).unwrap();
+    store.add_peer_with_role(
+        "other",
+        Some("other:4433".into()),
+        fp(b"other"),
+        "2026-11-13T00:00:00Z".into(),
+        TrustRole::Full,
+    );
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    for line in [
+        "address = \"\"",
+        "added_at = \"2026-10-01T00:00:00Z\"",
+        "routes = [\"iroh\"]",
+    ] {
+        assert!(
+            text.contains(line),
+            "the untouched pin lost {line:?}: {text}"
+        );
+    }
+    assert!(
+        text.contains(&format!("fingerprint = \"{}\"", minimal_fingerprint())),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_pin_that_gains_a_key_keeps_the_lines_its_table_had() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[[peer]]\nname = \"box\"\nfingerprint = \"{}\"\naddress = \"127.0.0.1:1\"\n\
+             added_at = \"t\"\nrole = \"none\"\n",
+            minimal_fingerprint()
+        ),
+    )
+    .unwrap();
+    let mut store = TrustStore::load(&path).unwrap();
+    assert!(store.learn_key_from_connection(&MINIMAL_KEY));
+    store.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("fingerprint = "), "{text}");
+    assert!(text.contains("key = "), "{text}");
+    assert!(
+        !text.contains("routes"),
+        "an address keeps the old route list: {text}"
+    );
+}
+
+#[test]
+fn a_key_learned_from_a_connection_gives_an_address_less_pin_the_relay_route() {
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "client",
+        None,
+        qsh_transport::fingerprint_of_ed25519_key(&MINIMAL_KEY),
+        "t".into(),
+    );
+    assert!(store.learn_key_from_connection(&MINIMAL_KEY));
+    assert_eq!(store.find("client").unwrap().routes, ["iroh"]);
+
+    // The key a certificate file carried is not a dial: the route stays off,
+    // and the pin says so, because a reload would otherwise turn it on.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "client",
+        None,
+        qsh_transport::fingerprint_of_ed25519_key(&MINIMAL_KEY),
+        "t".into(),
+    );
+    assert!(store.learn_key(&MINIMAL_KEY));
+    assert!(store.find("client").unwrap().routes.is_empty());
+    store.save(&path).unwrap();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("routes = []")
+    );
+    assert_eq!(TrustStore::load(&path).unwrap(), store);
+}

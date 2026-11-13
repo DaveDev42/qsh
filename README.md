@@ -450,7 +450,29 @@ against `full`: a peer that can run commands as the `qsh serve` account can
 run `qsh trust set-role` too. The roles that hold up as boundaries are
 `tunnel`, `read-only`, `reverse` and `none`.
 
-For finer control than six roles, add `[[acl]]` rows. A request is allowed
+The role is the normal way to say what a peer may do, and it is all a typical
+device needs: no `config.toml`, no `acl.toml`, and a `trust.toml` whose pins
+are three lines each.
+
+```toml
+# <config_dir>/trust.toml
+[[peer]]
+name = "toss"
+key  = "<the peer's iroh endpoint key, 64 hex characters>"
+role = "tunnel"
+```
+
+`key` is the peer's Ed25519 public key. The pin's fingerprint is derived from
+it, so you do not write one. If you write both, they must agree. `address`
+and `added_at` can be left out (a pin without an address is reached through
+the relay route, see below), and so can `routes`. A pin you pinned by
+fingerprint and address keeps working as it is, and qsh only writes the short
+form for the pins it creates or changes. `qsh serve` and `qsh listen` bring
+their iroh endpoint up on their own; see
+[the relay route](#when-udp-is-blocked-the-iroh-relay-route) for what that
+means for the network, and how to turn it off.
+
+For finer control than six roles, add `[[acl]]` rows, which are optional. A request is allowed
 when the peer's role grants it or a row does. Rows are written by hand, qsh
 never generates the file, and they load once at startup:
 
@@ -809,15 +831,21 @@ qsh -J none nas                          # ignore the saved chain once
 Some networks pass HTTPS and drop UDP to everything else. For a host you have
 pinned, you can add a relay route: the connection goes through an iroh relay
 (HTTPS and WebSocket), and the QUIC session inside it is still authenticated
-by the pins, so the relay only carries ciphertext. It is off by default. The
-binary includes it, and nothing contacts a relay until you switch it on.
+by the pins, so the relay only carries ciphertext. Since 0.8.0 the daemons
+(`qsh serve`, `qsh listen`) bring their iroh endpoint up by default, so they
+keep one HTTPS (TCP 443) connection to a public n0 relay open, and a pin that
+has a `key` and no `address` is reached through the relay without any further
+setting. To keep a daemon off every relay, set `iroh.enable` to `false` (or
+start it with `--no-iroh` for one run); a config that says so never contacts a
+relay.
 
 ```bash
-# On the host (qsh serve or qsh listen), then restart it:
-qsh config set iroh.enable true
+# On the host, to keep it off the relays (restart it afterwards):
+qsh config set iroh.enable false
 
-# On the client, once per host. The key is the host's public key; the first
-# direct connection fills it in, or pass --key <64 hex characters>.
+# On the client, once per host that has an address too. The key is the host's
+# public key; the first direct connection fills it in, or pass
+# --key <64 hex characters>.
 qsh trust iroh nas
 qsh trust iroh nas --relay https://relay.example.net   # a relay you run
 qsh trust iroh nas --off                               # drop the route again

@@ -106,3 +106,4 @@ mod tunnel_loopback;
 mod tunnel_remote_loopback;
 mod tunnel_stalled_streams;
 mod tunnel_throughput;
+mod zero_config;

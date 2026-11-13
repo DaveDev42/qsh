@@ -104,7 +104,7 @@ impl PinKeyFill {
 pub(crate) fn record(path: &std::path::Path, key: &[u8; 32]) -> Result<bool, crate::ops::OpError> {
     let _lock = TrustStore::lock(path)?;
     let mut store = TrustStore::load(path)?;
-    let changed = store.learn_key(key);
+    let changed = store.learn_key_from_connection(key);
     if changed {
         store.save(path)?;
     }

@@ -1368,7 +1368,7 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 
 pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/CLI.md` §6.1, §6.11).
 
-- 기본 route 목록은 바뀌지 않는다. `iroh`가 목록에 없는 설정은 relay에 한 번도 접속하지 않고 iroh endpoint도 만들지 않는다.
+- 기본 route 목록은 바뀌지 않는다. `iroh`가 목록에 없는 pin은 relay에 한 번도 접속하지 않는다. 키가 있고 주소가 없는 pin은 `routes`를 적지 않아도 `["iroh"]`다(ADR-0063). 데몬(`serve`, `listen`)은 `[iroh].enable`이 없으면 iroh endpoint를 만들어 기본 relay에 TCP 443(HTTPS 위 WebSocket) 연결을 하나 계속 유지한다. `enable = false`인 설정과 `--no-iroh`를 준 `serve`·`listen`은 endpoint도 relay 접속도 없다.
 - 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 출발한다. 직결과 펀칭의 경주(ADR-0054 결정 16)는 그대로이고, 그 경주가 `[iroh].head_start_ms`(기본 1초) 안에 서지 않거나 그 전에 모두 바로 실패하면 iroh 시도를 나란히 시작해 먼저 선 연결을 쓴다. 진 쪽은 닫는다. UDP가 막힌 망에서는 직결이 dial 시한을 다 써야 실패하므로, 경주가 끝나기를 기다리면 iroh에 남는 시간이 없다. 그 안에 직결이나 펀칭이 서면 relay에 아무것도 보내지 않는다.
 - **route 기억.** pin마다 마지막으로 이긴 route와 실패한 route를 state의 `route-cache.json`에 둔다. iroh가 이기고 직결·펀칭이 시한까지 못 선 pin은 다음 dial에서 iroh를 곧바로 시작하고 직결·펀칭을 건너뛴다. 건너뛴 route는 10분 뒤(연속 실패마다 두 배, 상한 1시간) iroh와 나란히 한 번 다시 시도한다. 로컬 주소 집합이나 기본 경로가 바뀌면 기억을 버린다. 막힌 망에서 dial과 재dial이 같은 route를 연달아 두드리지 않게 하려는 것이다(`docs/CLI.md` §6.1).
 - 새로 도는 route는 §19.10과 같은 규칙으로 **재해석**된다. recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.

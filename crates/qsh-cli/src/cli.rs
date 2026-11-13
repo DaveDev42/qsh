@@ -62,7 +62,9 @@ pub struct Cli {
 
     /// Never take the iroh relay route on this command, whatever the host's
     /// pin `routes` and `[iroh].mode` say, and contact no relay
-    /// (`docs/CLI.md` §7, ADR-0061 decision 1). Not stored.
+    /// (`docs/CLI.md` §7, ADR-0061 decision 1). On `qsh serve` and `qsh
+    /// listen` it also keeps the iroh endpoint down, which they otherwise
+    /// bring up unless `[iroh].enable = false` (ADR-0063). Not stored.
     #[arg(long, global = true)]
     pub no_iroh: bool,
 

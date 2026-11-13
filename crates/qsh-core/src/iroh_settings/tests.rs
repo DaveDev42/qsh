@@ -30,7 +30,10 @@ fn error_code(section: IrohSection) -> ErrorCode {
 #[test]
 fn an_empty_section_gives_the_documented_defaults() {
     let settings = IrohSection::default().settings().unwrap();
-    assert!(!settings.enable);
+    assert!(
+        settings.enable,
+        "ADR-0063: a daemon brings the endpoint up unless told not to"
+    );
     assert_eq!(settings.relay_urls, DEFAULT_RELAY_URLS);
     assert_eq!(settings.relay_urls.len(), 4);
     assert_eq!(settings.bind_port, 0);
