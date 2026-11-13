@@ -859,6 +859,16 @@ qsh --no-iroh nas uname -a                             # skip the relay for one 
   to the relay. After a relay win the client remembers, for ten minutes up to
   an hour, that the direct route was blocked, and skips it. A change of
   network clears that memory.
+- A daemon also asks the router for a port mapping (UPnP, NAT-PMP or PCP)
+  and advertises the mapped address. A peer behind a fully symmetric NAT
+  cannot be punched toward, but it can send first to a mapped address, so
+  this is what lets such a peer connect directly. It adds one UDP entry
+  named `iroh-portmap` to the router's table while the daemon runs, and
+  UPnP, NAT-PMP and PCP requests to your default gateway at start and after a
+  network change. Commands (`qsh exec`, `qsh attach`, `qsh serve --to`) never
+  ask. A router that supports none of the three just does not answer. To leave
+  the router alone, set `iroh.portmap` to `false` (restart the daemon);
+  `iroh.enable = false` and `--no-iroh` open no mapping either.
 - A relay connection moves to a direct path inside the same connection when
   iroh finds one. From then on the host sees your address, as with any direct
   connection.

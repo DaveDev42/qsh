@@ -97,6 +97,10 @@ async fn two_devices_with_key_only_pins_and_no_config_reach_each_other() {
     let mut serve = iroh_serve_from_config(&Config::default()).expect("on by default");
     serve.relay_urls = vec![relay.url.clone()];
     serve.relay_roots = vec![relay.cert.clone()];
+    // What a default config asks for includes a router mapping (ADR-0064);
+    // this test must not probe the LAN gateway of the machine running it.
+    assert!(serve.portmap, "on by default");
+    serve.portmap = false;
 
     let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();

@@ -56,6 +56,25 @@ A minor release that changes defaults so a typical device needs no
 - The `--no-iroh` flag now also keeps the iroh endpoint of `qsh serve` and
   `qsh listen` down. The registration dial of `qsh serve --to` still
   follows `[iroh].mode` only.
+- A daemon (`qsh serve`, `qsh listen`) now asks the router for a port
+  mapping through UPnP, NAT-PMP or PCP and advertises the mapped address with
+  its other addresses. A peer behind a fully symmetric NAT, where hole
+  punching cannot start, can send first to that address and connect
+  directly. In a field test on 2026-11-13, the same two machines connected
+  directly 43 times in 50 with iroh's port mapping on, and could not with
+  0.7.x, which left it out of the build. The setting is `[iroh].portmap`;
+  unset means on. While the daemon runs the router has one UDP entry
+  described as `iroh-portmap`, and the daemon sends UPnP, NAT-PMP and PCP
+  requests to the default gateway at start and after a network change. A
+  router that supports none of them does not answer, and the daemon runs as
+  before. Set `[iroh].portmap = false` and restart to leave the router alone.
+  `[iroh].enable = false` and `--no-iroh` have no endpoint and so no mapping.
+  Client commands (`qsh exec`, `qsh attach`, `qsh serve --to`'s registration
+  dial) never ask for a mapping. This builds the iroh `portmapper` feature in,
+  which adds `portmapper`, `igd-next` and a few small crates. All are MIT or
+  Apache-2.0 except `attohttpc` (MPL-2.0, used unmodified), which has its own
+  exception in `deny.toml`. See ADR-0064, which revises ADR-0054's decision not to use these
+  protocols for the daemon endpoint.
 
 ### What changes on the network
 
@@ -73,12 +92,30 @@ the direct UDP listener is unaffected. To opt out, write this in
 enable = false
 ```
 
+The same daemon also talks to your router. At start, and again after a
+network change, it sends UPnP (SSDP multicast plus HTTP to the gateway),
+NAT-PMP and PCP requests to the default gateway, and if the router agrees it
+holds one UDP mapping described as `iroh-portmap` until the daemon stops
+(or, after a crash, until the router's lease of at most two hours runs out).
+Anyone on the LAN can see that traffic, and a host firewall or macOS may ask
+about local network access. IPv4 only. To keep the relay but leave the router
+alone:
+
+```toml
+[iroh]
+portmap = false
+```
+
 ### Upgrading
 
 - Daemons contact n0's public relays by default now. If your policy does
   not allow that, set `[iroh] enable = false` before you restart the new
   binary, or start the daemon with `--no-iroh`. A config that already
   says `enable = false` behaves as before and contacts no relay.
+- Daemons also ask the router for a port mapping by default (see above).
+  Where a router entry or LAN UPnP traffic is not acceptable, set
+  `[iroh] portmap = false` before you restart the new binary. The key is
+  unknown to `v0.7.x`, which ignores it.
 - A pin with a key, no address and no `routes` line, for example an
   inbound-only client pin whose key qsh filled in after a direct connection,
   is now a pin the relay route can dial. `qsh exec <that name>` used to

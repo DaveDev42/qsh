@@ -40,7 +40,33 @@ fn an_empty_section_gives_the_documented_defaults() {
     assert_eq!(settings.mode, IrohMode::Auto);
     assert_eq!(settings.proxy, IrohProxy::Env);
     assert_eq!(settings.head_start, Duration::from_millis(1000));
+    assert!(
+        settings.portmap,
+        "ADR-0064: a daemon asks the router for a mapping unless told not to"
+    );
     assert_eq!(settings, IrohSettings::default());
+}
+
+/// ADR-0064: `[iroh].portmap` reaches the daemon's endpoint configuration
+/// and no client's. An unset key is on, an explicit `false` is off, and a
+/// client endpoint is off whatever the key says.
+#[test]
+fn portmap_reaches_the_daemon_endpoint_and_no_client() {
+    let target = pin(&["iroh"], None, Some([7; 32]));
+    for (written, expected) in [(None, true), (Some(true), true), (Some(false), false)] {
+        let settings = IrohSection {
+            portmap: written,
+            ..IrohSection::default()
+        }
+        .settings()
+        .unwrap();
+        assert_eq!(settings.portmap, expected, "[iroh].portmap = {written:?}");
+        assert_eq!(settings.server_config().portmap, expected, "{written:?}");
+        assert!(
+            !settings.client_config(&target).portmap,
+            "a client endpoint never maps ({written:?})"
+        );
+    }
 }
 
 #[test]

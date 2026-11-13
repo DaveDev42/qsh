@@ -143,6 +143,11 @@ pub struct IrohSection {
     /// How long direct dial and hole punching run alone before the relay
     /// attempt starts, in milliseconds, `0..=10000`. Unset is 1000.
     pub head_start_ms: Option<u64>,
+    /// Whether a daemon endpoint asks the router for a port mapping (UPnP,
+    /// NAT-PMP, PCP) so a peer behind a symmetric NAT can send first to the
+    /// mapped address (ADR-0064). Unset is `true`; `false` leaves the router
+    /// alone. A client command never maps.
+    pub portmap: Option<bool>,
 }
 
 fn config_error(message: String) -> OpError {
@@ -202,6 +207,7 @@ impl IrohSection {
             mode: self.mode.unwrap_or_default(),
             proxy: self.proxy.unwrap_or_default(),
             head_start: Duration::from_millis(head_start_ms),
+            portmap: self.portmap.unwrap_or(true),
             relay_roots: Vec::new(),
             client_bind: Vec::new(),
         })
@@ -226,6 +232,10 @@ pub struct IrohSettings {
     /// How long direct dial and punching run alone before the relay attempt
     /// starts. Zero starts everything at once.
     pub head_start: Duration,
+    /// Whether a daemon endpoint asks the router for a port mapping
+    /// (ADR-0064). Only [`Self::server_config`] carries it; a client
+    /// endpoint never maps.
+    pub portmap: bool,
     /// Roots trusted for the relay's TLS certificate besides the operating
     /// system's store. Never read from a config file: only a test that runs
     /// its own relay sets it ([`Self::with_relay_roots`]).
@@ -247,6 +257,7 @@ impl Default for IrohSettings {
             mode: IrohMode::Auto,
             proxy: IrohProxy::Env,
             head_start: Duration::from_millis(DEFAULT_HEAD_START_MS),
+            portmap: true,
             relay_roots: Vec::new(),
             client_bind: Vec::new(),
         }
@@ -329,7 +340,12 @@ impl IrohSettings {
         iroh_pin::relay_scheme_host(url).unwrap_or_else(|| "https://-".to_string())
     }
 
-    fn base_config(&self, relays: &[&str], bind: Vec<std::net::SocketAddr>) -> IrohConfig {
+    fn base_config(
+        &self,
+        relays: &[&str],
+        bind: Vec<std::net::SocketAddr>,
+        portmap: bool,
+    ) -> IrohConfig {
         IrohConfig {
             relay: match relays {
                 [one] => IrohRelay::Url((*one).to_string()),
@@ -344,6 +360,7 @@ impl IrohSettings {
             },
             bind,
             proxy_from_env: self.proxy == IrohProxy::Env,
+            portmap,
             relay_quic_port: None,
         }
     }
@@ -351,12 +368,14 @@ impl IrohSettings {
     /// The configuration of a client endpoint that dials `pin`: the relays
     /// [`Self::relays_for`] picks, on ephemeral UDP ports.
     pub fn client_config(&self, pin: &TrustPeer) -> IrohConfig {
-        self.base_config(&self.relays_for(pin), self.client_bind.clone())
+        // A client endpoint never asks the router for a mapping (ADR-0064).
+        self.base_config(&self.relays_for(pin), self.client_bind.clone(), false)
     }
 
     /// The configuration of a daemon's endpoint: homed on the best of this
     /// device's relays, on `bind_port` when one is set (IPv4 and IPv6) and on
-    /// ephemeral ports otherwise.
+    /// ephemeral ports otherwise, asking the router for a port mapping unless
+    /// `[iroh].portmap` is off (ADR-0064).
     pub fn server_config(&self) -> IrohConfig {
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
         let bind = if self.bind_port == 0 {
@@ -368,7 +387,7 @@ impl IrohSettings {
             ]
         };
         let relays: Vec<&str> = self.relay_urls.iter().map(String::as_str).collect();
-        self.base_config(&relays, bind)
+        self.base_config(&relays, bind, self.portmap)
     }
 }
 

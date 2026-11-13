@@ -34,6 +34,10 @@ fn rig(idle_ms: u64) -> Rig {
     identity::init(&paths, KeyStoreMode::File).unwrap();
     let mut config = Config::default();
     config.serve.on_demand_idle_ms = Some(idle_ms);
+    // A serve that is not on demand brings its iroh endpoint up unless told
+    // not to (ADR-0063) and asks the router for a port mapping (ADR-0064);
+    // these tests must reach neither a public relay nor the LAN gateway.
+    config.iroh.enable = Some(false);
     Rig {
         _dir: dir,
         paths,

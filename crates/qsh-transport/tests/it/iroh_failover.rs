@@ -220,6 +220,7 @@ async fn a_daemon_rehomes_when_its_home_relay_dies_and_a_fresh_dial_succeeds() {
                 relay_trust: IrohRelayTrust::OnlyRoots(vec![a.cert.clone(), b.cert.clone()]),
                 bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
                 proxy_from_env: false,
+                portmap: false,
                 relay_quic_port: None,
             },
             Duration::from_secs(15),
@@ -317,6 +318,7 @@ async fn a_candidate_that_never_answers_does_not_stall_the_dial() {
         relay_trust: IrohRelayTrust::OnlyRoots(vec![live.cert.clone()]),
         bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
         proxy_from_env: false,
+        portmap: false,
         relay_quic_port: None,
     };
     let pair = Pair::start(set(&live)).await;
@@ -374,6 +376,7 @@ async fn a_bad_candidate_set_is_refused_before_binding() {
             relay_trust: IrohRelayTrust::System,
             bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
             proxy_from_env: false,
+            portmap: false,
             relay_quic_port: None,
         };
         assert!(

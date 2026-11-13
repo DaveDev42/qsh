@@ -38,6 +38,14 @@ allow = [
     "Unlicense",
 ]
 confidence-threshold = 0.8
+# attohttpc (MPL-2.0) is igd-next's blocking HTTP client, pulled in by iroh's
+# portmapper (ADR-0064). MPL-2.0 is a file-level copyleft: using the crate
+# unmodified from crates.io, as here, obliges nothing beyond keeping its
+# source available, which crates.io does. The exception is per crate, so a
+# new MPL-2.0 dependency still fails the license check.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "attohttpc" },
+]
 
 [bans]
 multiple-versions = "warn"

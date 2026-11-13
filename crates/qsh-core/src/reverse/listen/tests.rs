@@ -1,6 +1,16 @@
 use super::hub::*;
 use super::*;
 
+/// The default config with the iroh endpoint off: a listener brings one up
+/// unless told not to (ADR-0063) and asks the router for a port mapping
+/// (ADR-0064), and these tests must reach neither a public relay nor the LAN
+/// gateway.
+fn no_iroh_config() -> Config {
+    let mut config = Config::default();
+    config.iroh.enable = Some(false);
+    config
+}
+
 #[test]
 fn bind_precedence_flag_then_config_then_default() {
     let mut config = Config::default();
@@ -896,7 +906,7 @@ async fn run_listen_unlinks_its_localctl_socket_on_shutdown() {
     let task = tokio::spawn(async move {
         run_listen(
             &run_paths,
-            &Config::default(),
+            &no_iroh_config(),
             identity,
             Some("127.0.0.1:0"),
             move |_addr| {
@@ -961,7 +971,7 @@ async fn run_listen_unlinks_its_localctl_socket_when_startup_fails_after_binding
 
     let err = run_listen(
         &paths,
-        &Config::default(),
+        &no_iroh_config(),
         identity,
         Some("127.0.0.1:0"),
         |_addr| panic!("must fail before the QUIC listener ever reports bound"),
@@ -999,7 +1009,7 @@ async fn listen_fails_before_the_quic_listener_when_the_pipe_name_is_taken() {
 
     let err = run_listen(
         &paths,
-        &Config::default(),
+        &no_iroh_config(),
         identity,
         Some("127.0.0.1:0"),
         |_addr| panic!("must fail before the QUIC listener ever reports bound"),

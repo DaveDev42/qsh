@@ -504,6 +504,7 @@ fn every_field_populated() -> Config {
             mode: Some(crate::iroh_settings::IrohMode::Auto),
             proxy: Some(crate::iroh_settings::IrohProxy::Env),
             head_start_ms: Some(1),
+            portmap: Some(true),
         },
     }
 }
