@@ -660,6 +660,16 @@ impl Connection {
         self.peer_fingerprint
     }
 
+    /// The peer's raw Ed25519 public key (32 bytes), when the connection
+    /// carries a certificate whose key is Ed25519. `None` for an iroh
+    /// connection (its pin already holds the key it was dialed by) and for a
+    /// certificate with another key type. The key's fingerprint is
+    /// [`peer_fingerprint`](Self::peer_fingerprint); like it, this is not an
+    /// ACL input.
+    pub fn peer_ed25519_key(&self) -> Option<[u8; 32]> {
+        crate::identity::ed25519_key_of_cert_der(self.peer_chain.first()?)
+    }
+
     /// Re-run the handshake's verification over the peer chain kept from
     /// the handshake, against `evaluator`'s current view of the trust
     /// store (ADR-0031 decision 4).

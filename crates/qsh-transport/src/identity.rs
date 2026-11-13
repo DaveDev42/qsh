@@ -63,6 +63,25 @@ impl fmt::Debug for CertificateDer {
     }
 }
 
+/// DER of the fixed SubjectPublicKeyInfo header of an Ed25519 key (RFC 8410):
+/// SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING (33 bytes, 0 unused
+/// bits) }, followed by the 32 key bytes.
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+/// The raw Ed25519 public key of a DER certificate, or `None` when the
+/// certificate does not parse or its key is not an Ed25519 key. This is the
+/// key an iroh endpoint is named by and a pin's `key` field holds
+/// (ADR-0061 decision 3); `Fingerprint::of_spki_der` of its SPKI is the pin's
+/// fingerprint.
+pub fn ed25519_key_of_cert_der(cert_der: &[u8]) -> Option<[u8; 32]> {
+    let (_, cert) = X509Certificate::from_der(cert_der).ok()?;
+    let spki = cert.tbs_certificate.subject_pki.raw;
+    let key = spki.strip_prefix(&ED25519_SPKI_PREFIX)?;
+    key.try_into().ok()
+}
+
 /// Textual prefix of a fingerprint: `sha256:BASE64`.
 pub const FINGERPRINT_PREFIX: &str = "sha256:";
 

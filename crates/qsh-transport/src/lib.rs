@@ -47,6 +47,7 @@ mod iroh_backend;
 mod mux;
 pub mod peer_addr;
 mod quinn_backend;
+pub mod relay_probe;
 pub mod stream;
 #[cfg(feature = "test-support")]
 pub mod test_relay;
@@ -67,6 +68,7 @@ pub use error::{
 };
 pub use identity::{
     CertificateDer, Fingerprint, FingerprintParseError, Principal, PrincipalParseError,
+    ed25519_key_of_cert_der,
 };
 pub use iroh_backend::{
     DEFAULT_RELAY_URL, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming, IrohPeer, IrohRelay,
@@ -74,6 +76,7 @@ pub use iroh_backend::{
 };
 pub use mux::{TransportCaps, TransportKind};
 pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};
+pub use relay_probe::{RelayProbeFailure, RelayProbeStage, probe_relay, system_trust_root_count};
 pub use stream::{RecvStream, SendStream};
 pub use tls::{
     AuthPath, BoundTrust, Observation, PeerBinding, PeerRole, QshPeerVerifier, RejectReason,
