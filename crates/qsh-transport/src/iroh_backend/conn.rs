@@ -50,7 +50,7 @@ struct Shared {
     /// Keeps the endpoint (its sockets and relay connection) alive for as
     /// long as any clone of the connection is, like a QUIC `Dialed` keeps
     /// its endpoint, and closes it gracefully when the last one goes.
-    _endpoint: Arc<EndpointHandle>,
+    endpoint: Arc<EndpointHandle>,
     /// The peer's qsh fingerprint, computed from its identity key.
     peer: Fingerprint,
     /// The peer's qsh identity key. For a server it is its endpoint id; for
@@ -93,7 +93,7 @@ impl IrohConn {
         Self {
             shared: Arc::new(Shared {
                 conn,
-                _endpoint: endpoint,
+                endpoint,
                 peer: fingerprint_of_key(&peer_key),
                 key: PeerKey(peer_key),
                 min_rtt: Mutex::new(MinRtt::default()),
@@ -178,6 +178,7 @@ impl MuxConn for IrohConn {
 
     fn close(&self, code: u32, reason: &[u8]) {
         self.conn().close(ie::VarInt::from_u32(code), reason);
+        self.shared.endpoint.note_closed(self.conn());
     }
 
     async fn closed(&self) -> ConnectionError {
