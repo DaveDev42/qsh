@@ -419,9 +419,12 @@ async fn the_relay_certificate_is_verified_against_the_trust_store() {
         .probe_relay_tls(relay.addr())
         .await
         .expect_err("a private relay certificate must not verify against the OS store");
+    // The verdict's wording is the platform verifier's: rustls-webpki says
+    // `UnknownIssuer` on Linux and Windows, while macOS Security.framework
+    // reports the chain as "not trusted" (errSecNotTrusted, -67843).
     assert!(
-        reason.contains("UnknownIssuer"),
-        "expected an unknown-issuer verdict, got: {reason}"
+        reason.contains("UnknownIssuer") || reason.contains("is not trusted"),
+        "expected an untrusted-issuer verdict, got: {reason}"
     );
     ep.close().await;
 
