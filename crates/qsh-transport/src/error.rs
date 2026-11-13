@@ -147,6 +147,9 @@ pub enum ConnectionError {
         /// The transport's rendering of the failure.
         text: Arc<str>,
     },
+    /// A dial had nowhere to go: no relay (disabled) and no direct address.
+    /// Typed so the relay diagnostic does not classify by message text.
+    NoRoute,
     /// Any other transport-level failure.
     Other(Arc<str>),
 }
@@ -166,6 +169,12 @@ impl ConnectionError {
     /// The handshake was aborted with a TLS alert (by the peer or by us).
     pub fn is_crypto_failure(&self) -> bool {
         matches!(self, Self::Crypto { .. })
+    }
+
+    /// The dial had no route at all: the relay is disabled and the peer has
+    /// no direct address, so nothing was attempted.
+    pub fn is_no_route(&self) -> bool {
+        matches!(self, Self::NoRoute)
     }
 
     /// The peer refused the attempt outright (`CONNECTION_REFUSED`), as
@@ -214,6 +223,9 @@ impl fmt::Display for ConnectionError {
             Self::TimedOut => f.write_str("timed out"),
             Self::LocallyClosed => f.write_str("closed"),
             Self::CidsExhausted => f.write_str("CIDs exhausted"),
+            Self::NoRoute => {
+                f.write_str("no route to the peer: relay disabled and no direct address")
+            }
             Self::Crypto { text, .. } | Self::Refused { text } | Self::Other(text) => {
                 f.write_str(text)
             }

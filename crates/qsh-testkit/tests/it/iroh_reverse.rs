@@ -54,6 +54,16 @@ struct Controller {
 impl Controller {
     /// A controller that pins `target` as `b` and lets it register.
     async fn start(relay: &TestRelay, target: &TestIdentity) -> Self {
+        Self::start_with_acl(
+            relay,
+            target,
+            b"[[acl]]\nprincipal = \"device:b\"\nallow = [\"host.reverse\"]\n",
+        )
+        .await
+    }
+
+    /// A controller that pins `target` as `b` under the given `acl.toml`.
+    async fn start_with_acl(relay: &TestRelay, target: &TestIdentity, acl: &[u8]) -> Self {
         qsh_testkit::env_check::ensure_loopback_udp();
         let (dir, paths) = sandbox();
         let id = make_identity();
@@ -65,11 +75,7 @@ impl Controller {
             "2026-01-01T00:00:00Z".to_string(),
         );
         trust.save(&paths.trust_file()).expect("trust.toml");
-        qsh_core::config::write_private_file(
-            &paths.acl_file(),
-            b"[[acl]]\nprincipal = \"device:b\"\nallow = [\"host.reverse\"]\n",
-        )
-        .expect("acl.toml");
+        qsh_core::config::write_private_file(&paths.acl_file(), acl).expect("acl.toml");
 
         let mut serve = IrohServe::new(relay.url.clone(), 0);
         serve.relay_roots = vec![relay.cert.clone()];
@@ -145,6 +151,19 @@ impl Target {
         controller_key: &str,
         address: Option<String>,
     ) -> Self {
+        Self::start_with_file_key(relay, id, controller, controller_key, address, None).await
+    }
+
+    /// [`Self::start`] with the pin's `key` line then edited by hand to
+    /// `file_key`, which `trust.set_iroh` would have refused.
+    async fn start_with_file_key(
+        relay: &TestRelay,
+        id: &TestIdentity,
+        controller: &Controller,
+        controller_key: &str,
+        address: Option<String>,
+        file_key: Option<&str>,
+    ) -> Self {
         let (dir, paths) = sandbox();
         let ops = Ops::new(paths.clone());
         let name = "ctl".to_string();
@@ -174,6 +193,13 @@ impl Target {
             b"[[acl]]\nprincipal = \"device:ctl\"\nallow = [\"exec.run\"]\n",
         )
         .expect("acl.toml");
+        if let Some(file_key) = file_key {
+            let text = std::fs::read_to_string(paths.trust_file()).expect("trust.toml");
+            assert!(text.contains(controller_key), "{text}");
+            let edited = text.replace(controller_key, file_key);
+            qsh_core::config::write_private_file(&paths.trust_file(), edited.as_bytes())
+                .expect("edited trust.toml");
+        }
 
         let loaded = loaded_identity(id, "b");
         let roots = vec![relay.cert.clone()];
@@ -201,6 +227,20 @@ impl Target {
             _dir: dir,
             task,
             stop: Some(stop_tx),
+        }
+    }
+
+    /// End the target whatever it is doing; its result does not matter to a
+    /// test that expects it never to register.
+    async fn abort(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if tokio::time::timeout(Duration::from_secs(5), &mut self.task)
+            .await
+            .is_err()
+        {
+            self.task.abort();
         }
     }
 
@@ -329,6 +369,94 @@ async fn a_dead_controller_address_falls_back_to_the_relay() {
 
     target.stop().await;
     controller.stop().await;
+}
+
+/// A registrant the controller's ACL does not grant `host.reverse` is refused
+/// over the relay like over UDP: the audit log has the denial, no registration
+/// is admitted, and the client never sees `b` as reachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registrant_without_the_reverse_role_is_refused_over_the_relay() {
+    let relay = TestRelay::spawn().await;
+    let target_id = make_identity();
+    let mut controller = Controller::start_with_acl(
+        &relay,
+        &target_id,
+        b"[[acl]]\nprincipal = \"device:b\"\nallow = [\"exec.run\"]\n",
+    )
+    .await;
+    let controller_key = hex(&controller.id.local.iroh_public_key().expect("ed25519"));
+    let mut target = Target::start(&relay, &target_id, &controller, &controller_key, None).await;
+
+    let denied = wait_for(TIMEOUT, || {
+        controller
+            .audit()
+            .into_iter()
+            .find(|r| r["action"] == "host.reverse" && r["decision"] == "deny")
+    })
+    .await;
+    assert_eq!(
+        denied["peer_addr"],
+        format!("iroh:{}", target_id.fingerprint),
+        "{denied}"
+    );
+    assert!(
+        !controller
+            .audit()
+            .iter()
+            .any(|r| r["action"] == "host.reverse" && r["decision"] == "allow"),
+        "{:?}",
+        controller.audit()
+    );
+    let (_dir, ops) = client_of(&controller, &target_id).await;
+    let listed = blocking(move || ops.host_list()).await.expect("host.list");
+    assert!(
+        !listed
+            .hosts
+            .iter()
+            .any(|h| h.name == "b" && h.connection_mode == "reverse" && h.state == "reachable"),
+        "{listed:?}"
+    );
+
+    target.abort().await;
+    controller.stop().await;
+}
+
+/// A pin whose `key` was edited to another controller's key is not dialed:
+/// the key must hash to the pinned fingerprint (ADR-0060 name binding), so
+/// the other controller, which would admit this target, sees nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_whose_key_is_not_the_pinned_fingerprints_is_never_dialed() {
+    let relay = TestRelay::spawn().await;
+    let target_id = make_identity();
+    let mut real = Controller::start(&relay, &target_id).await;
+    let mut impostor = Controller::start(&relay, &target_id).await;
+    let real_key = hex(&real.id.local.iroh_public_key().expect("ed25519"));
+    let impostor_key = hex(&impostor.id.local.iroh_public_key().expect("ed25519"));
+    assert_ne!(real_key, impostor_key);
+    let mut target = Target::start_with_file_key(
+        &relay,
+        &target_id,
+        &real,
+        &real_key,
+        None,
+        Some(&impostor_key),
+    )
+    .await;
+
+    // Long enough for several registration attempts if any were made.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    for controller in [&real, &impostor] {
+        let seen: Vec<_> = controller
+            .audit()
+            .into_iter()
+            .filter(|r| r["action"] == "host.reverse")
+            .collect();
+        assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    target.abort().await;
+    real.stop().await;
+    impostor.stop().await;
 }
 
 /// The controller's audit log has the registration as an iroh peer: it was

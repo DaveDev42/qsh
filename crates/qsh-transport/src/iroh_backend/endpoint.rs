@@ -478,9 +478,7 @@ impl IrohEndpoint {
             addr = addr.with_ip_addr(*direct);
         }
         if addr.is_empty() {
-            return Err(DialError::Failed(ConnectionError::Other(
-                "no route to the peer: relay disabled and no direct address".into(),
-            )));
+            return Err(DialError::Failed(ConnectionError::NoRoute));
         }
 
         let conn = match tokio::time::timeout(self.timeout, self.ep.connect(addr, IROH_ALPN)).await
