@@ -23,6 +23,8 @@
 //!    a peer is limited as a key, not as the address of a relay or of
 //!    whichever path it happens to be on.
 
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -35,7 +37,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use crate::admission::{Decision, Gate};
 use crate::audit::AuditSink;
-use crate::config::Config;
+use crate::config::{Config, Paths};
 use crate::ops::OpError;
 use crate::server::CLOSE_CODE_RESOURCE_EXHAUSTED;
 
@@ -179,6 +181,124 @@ fn bind_error(serve: &IrohServe, err: &dyn std::fmt::Display) -> OpError {
     )
 }
 
+/// The file in the state directory whose lock says which process of this
+/// machine homes on the relay with the device key.
+const CLAIM_FILE: &str = "iroh-endpoint.lock";
+
+/// The right to home on the relay with this device's key, held for as long
+/// as the value lives (an advisory lock the OS drops when the process dies).
+///
+/// A relay keeps one home connection per `EndpointId`, and a daemon endpoint
+/// has the device key as its id, so two daemons of one machine (`qsh serve`
+/// beside a separate `qsh listen`, both with `[iroh].enable`) would take the
+/// relay from each other: the later connection wins, the other process goes
+/// deaf without an error ("Another endpoint connected with the same endpoint
+/// id"), and a peer's dial lands on whichever happens to hold the relay. A
+/// dial that reaches the controller instead of the host is not served. Only
+/// one process at a time opens the endpoint; the others say so and run
+/// without it (protocol §22.9).
+#[derive(Debug)]
+pub struct IrohClaim {
+    _file: Option<File>,
+}
+
+/// What [`claim`] found.
+#[derive(Debug)]
+pub enum IrohSlot {
+    /// This process may open the endpoint; keep the claim for as long as the
+    /// endpoint lives.
+    Claimed(IrohClaim),
+    /// Another live process of this machine holds it; the string names it
+    /// ("`qsh serve` (pid 123)").
+    Taken(String),
+}
+
+/// Try to take the right to home on the relay with this device's key for
+/// `role` (`"serve"` or `"listen"`, for the message the other side prints).
+/// A state directory that cannot hold the lock file leaves the process as it
+/// was before the claim existed: it gets the slot, with a warning.
+pub fn claim(paths: &Paths, role: &str) -> IrohSlot {
+    let path = paths.state_dir.join(CLAIM_FILE);
+    let opened = crate::config::ensure_private_dir(&paths.state_dir)
+        .map_err(|err| std::io::Error::other(err.message))
+        .and_then(|()| {
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+        });
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "cannot open the iroh claim file; not checking for another endpoint of this device");
+            return IrohSlot::Claimed(IrohClaim { _file: None });
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            // Informational: the next claimant names this process from it.
+            let _ = file.set_len(0);
+            let _ = write!(file, "{} {}", role, std::process::id());
+            let _ = file.flush();
+            IrohSlot::Claimed(IrohClaim { _file: Some(file) })
+        }
+        Err(TryLockError::WouldBlock) => {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let mut parts = text.split_whitespace();
+            let holder = match (parts.next(), parts.next()) {
+                (Some(role), Some(pid)) => format!("`qsh {role}` (pid {pid})"),
+                _ => "another qsh process".to_string(),
+            };
+            IrohSlot::Taken(holder)
+        }
+        Err(TryLockError::Error(err)) => {
+            tracing::warn!(path = %path.display(), %err, "cannot lock the iroh claim file; not checking for another endpoint of this device");
+            IrohSlot::Claimed(IrohClaim { _file: Some(file) })
+        }
+    }
+}
+
+/// The endpoint of a daemon plus the claim that lets it exist.
+#[derive(Debug)]
+pub struct OwnedEndpoint {
+    /// The endpoint, homed on the relay with the device key.
+    pub endpoint: IrohEndpoint,
+    _claim: IrohClaim,
+}
+
+/// [`bind`], once this process holds the machine's claim on the device key
+/// ([`claim`]). Returns `Ok(None)` and says why through `notice` when another
+/// process holds it: the host still starts, without the relay endpoint.
+pub async fn bind_exclusive(
+    serve: &IrohServe,
+    identity: &LocalIdentity,
+    trust: Arc<dyn TrustEvaluator>,
+    paths: &Paths,
+    role: &str,
+    notice: impl FnOnce(&str),
+) -> Result<Option<OwnedEndpoint>, OpError> {
+    let claim = match claim(paths, role) {
+        IrohSlot::Claimed(claim) => claim,
+        IrohSlot::Taken(holder) => {
+            let line = format!(
+                "the iroh relay endpoint is not started: {holder} of this device already homes \
+                 on the relay with the device key, and a relay keeps one connection per key, so \
+                 two processes would take it from each other. Serve and listen from one \
+                 `qsh listen --serve`, or set [iroh].enable = false for one of them."
+            );
+            tracing::warn!("{line}");
+            notice(&line);
+            return Ok(None);
+        }
+    };
+    let endpoint = bind(serve, identity, trust).await?;
+    Ok(Some(OwnedEndpoint {
+        endpoint,
+        _claim: claim,
+    }))
+}
+
 /// What `serve.json` records for a bound endpoint.
 pub fn describe(endpoint: &IrohEndpoint) -> IrohBound {
     IrohBound {
@@ -240,5 +360,44 @@ pub(crate) fn judge_keyed(gate: &Gate, audit: &dyn AuditSink, conn: &Connection)
             conn.close(CLOSE_CODE_RESOURCE_EXHAUSTED, b"at capacity");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(dir: &tempfile::TempDir) -> Paths {
+        Paths::new(dir.path().join("c"), dir.path().join("s"))
+    }
+
+    /// Two daemons of one machine cannot both home on the relay with the
+    /// device key: the second one is told who has it, and gets the slot back
+    /// once the first lets go (or dies; the lock is the OS's).
+    #[test]
+    fn one_process_per_state_dir_holds_the_device_key_at_the_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(&dir);
+        let first = match claim(&paths, "serve") {
+            IrohSlot::Claimed(claim) => claim,
+            IrohSlot::Taken(who) => panic!("a fresh state dir is free, got {who}"),
+        };
+        match claim(&paths, "listen") {
+            IrohSlot::Taken(who) => {
+                assert_eq!(who, format!("`qsh serve` (pid {})", std::process::id()));
+            }
+            IrohSlot::Claimed(_) => panic!("a second claim in the same state dir must wait"),
+        }
+        drop(first);
+        assert!(matches!(claim(&paths, "listen"), IrohSlot::Claimed(_)));
+    }
+
+    /// Another state dir is another device identity as far as the lock goes.
+    #[test]
+    fn another_state_dir_has_its_own_slot() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let _held = claim(&paths(&a), "serve");
+        assert!(matches!(claim(&paths(&b), "serve"), IrohSlot::Claimed(_)));
     }
 }

@@ -560,17 +560,23 @@ pub async fn run_serve_with_iroh(
     // The relay endpoint, bound before anything is announced so a failure to
     // start it is a failed start, not a serve that quietly lacks it. It
     // judges peers by the very store the listener's verifier reads.
-    let iroh_endpoint = match &iroh {
-        Some(serve) => Some(
-            crate::iroh_serve::bind(
+    let iroh_owned = match &iroh {
+        Some(serve) => {
+            let notice = Arc::clone(&on_notice);
+            crate::iroh_serve::bind_exclusive(
                 serve,
                 &identity.local,
                 Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
+                paths,
+                "serve",
+                move |line| notice(line),
             )
-            .await?,
-        ),
+            .await?
+        }
         None => None,
     };
+    // The claim stays in `iroh_owned` until this function returns.
+    let iroh_endpoint = iroh_owned.as_ref().map(|owned| owned.endpoint.clone());
     let runtime = host_runtime(
         paths,
         config,

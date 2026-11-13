@@ -1468,3 +1468,18 @@ ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capab
 - 클라이언트 endpoint는 끝날 때 연결의 close가 상대에게 갔는지만 짧게 기다린다(`wait_idle`·`wait_idle_for`가 상대의 `CONNECTION_CLOSE` 응답을 `IROH_CLOSE_FLUSH_CAP`(150ms)까지 기다린다. 보통 한 왕복). iroh의 `Endpoint::close`는 기다리지 않고 백그라운드로 시작한다. relay와 맺은 주소 발견(QAD) 연결의 close에 relay가 답하지 않아 endpoint가 그 연결의 closing 기간(PTO의 세 배)을 채워야 끝나고, loopback에서도 1초가 걸리기 때문이다(실제 relay에서는 최대 3초). 상대는 연결의 `CONNECTION_CLOSE`로 이미 close를 알았으므로 이 기다림은 명령 종료에 필요하지 않다. 백그라운드 닫기가 끝나기 전에 프로세스가 끝나면 iroh가 "Endpoint dropped without calling `Endpoint::close`" 오류를 로그에 남기므로, 닫는 중인 endpoint의 복제본을 프로세스 전역에 쥐어 두어 프로세스 종료가 endpoint를 drop하지 않게 한다. 마지막 핸들이 닫기 전에 사라지는 경로(오류, 진 route 경주, 취소)도 같은 백그라운드 닫기를 쓴다.
 
 **시험.** `qsh-transport`의 `iroh_identity::` 모듈이 정한다: 같은 신원의 클라이언트 endpoint 둘이 relay에서 모두 살아 있음(`two_client_endpoints_of_one_identity_both_stay_connected`), 손으로 만든 정상 프레임을 받음(`a_hand_made_proof_is_accepted`), 서명 위조(`a_forged_signature_is_refused`), 다른 endpoint 쌍용 증명(`a_proof_made_for_another_endpoint_pair_is_refused`), pin이 아닌 증명 키(`a_proof_for_a_key_the_server_does_not_pin_is_refused`), 증명 없음(`a_missing_proof_times_out`), 길이·버전 오류(`malformed_frames_are_refused`), 다른 연결로 옮긴 증명(`a_proof_replayed_onto_another_connection_is_refused`), 정상 종료 시 오류 로그 없음(`a_short_client_command_ends_without_an_error_log`, `dropping_a_client_endpoint_closes_it_gracefully`), 짧은 명령의 close가 빠르고 서버가 idle timeout이 아니라 close로 연결의 끝을 앎(`a_short_command_over_a_relay_closes_fast_and_the_server_hears_it`, `a_short_command_over_a_direct_path_closes_fast_and_the_server_hears_it`).
+
+### 22.9 한 기기의 데몬 endpoint는 하나
+
+데몬 endpoint의 EndpointId는 기기 키이므로(§22.8) 한 기기에서 `qsh serve`와 따로 도는 `qsh listen`이 둘 다 `[iroh].enable`이면 같은 EndpointId로 relay에 붙는다. relay는 EndpointId 하나에 홈 연결 하나만 두니 나중에 붙은 쪽이 앞선 쪽을 밀어내고(relay 로그 "Another endpoint connected with the same endpoint id"), 밀린 쪽은 오류 없이 수신 능력만 잃는다. 클라이언트의 dial은 그 순간 relay를 쥔 프로세스에 닿는다. 그 프로세스가 `listen`이면 `punch.v1` 컨트롤러라서 호스트 요청이 아닌 연결을 "punch done"으로 닫고, 클라이언트는 `CONNECTION_FAILED`나 응답 없는 시한 초과를 본다. 밀려난 쪽이 재접속하며 서로 다시 밀면 relay 홈이 번갈아 바뀌어 증상이 간헐적으로 나온다.
+
+규칙.
+
+- 데몬 endpoint를 여는 프로세스(`serve`, `listen`, `listen --serve`)는 먼저 상태 디렉터리의 `iroh-endpoint.lock`에 배타 advisory lock(`flock`)을 건다. 잡히면 endpoint를 열고 lock을 endpoint 수명 동안 쥔다. OS가 프로세스 종료 때 lock을 놓으므로 비정상 종료 뒤에도 stale 상태가 남지 않는다.
+- 이미 다른 프로세스가 쥐고 있으면 endpoint를 열지 않고 시작은 계속한다. 이유(`the iroh relay endpoint is not started: ...`)를 알림 줄과 `warn` 로그로 한 번 낸다. UDP 수신, ACL, 감사 등 나머지는 그대로다.
+- lock 파일을 열거나 잠글 수 없는 상태 디렉터리(읽기 전용 등)는 claim 도입 전과 같이 endpoint를 연다. 경고만 남긴다.
+- lock 파일의 내용은 `<역할> <pid>` 한 줄이고 다음 시도가 알림 줄에 이름을 대는 용도뿐이다. 판정은 lock이 한다.
+- 합친 `listen --serve`는 프로세스 하나가 수신을 모두 맡으므로 이 규칙과 무관하게 endpoint 하나다.
+- 클라이언트 endpoint(§22.8)는 임의 키라서 claim 대상이 아니다.
+
+**시험.** `qsh-core`의 `iroh_serve::tests`(`one_process_per_state_dir_holds_the_device_key_at_the_relay`, `another_state_dir_has_its_own_slot`)가 claim 규칙을, `qsh-testkit`의 `iroh_serve::a_listen_beside_serve_leaves_the_relay_to_serve`가 `serve` 옆의 `listen`이 알림을 내고 시작하며 dial이 여전히 `serve`에 닿는 것을 본다. 승격은 `qsh-transport`의 `iroh_upgrade::a_relay_dial_moves_to_a_direct_path`가 relay로 선 연결이 직접 경로로 옮겨 가는 것을 지킨다.
