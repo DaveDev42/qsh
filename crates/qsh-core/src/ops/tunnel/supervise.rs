@@ -762,6 +762,7 @@ async fn dial(
         target.punch.as_ref(),
         target.iroh.as_ref(),
         target.jump.as_ref(),
+        target.key_fill().as_ref(),
         tuning,
         &crate::ops::SystemResolver,
         crate::ops::route::Dial::Redial,
