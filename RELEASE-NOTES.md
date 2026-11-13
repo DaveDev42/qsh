@@ -9,6 +9,102 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.8.1`
+
+A patch release on top of `v0.8.0`. `qsh doctor` now tells a client-only
+device from a server, and no longer reports server problems on a device that
+only dials out.
+
+### Changes
+
+- `qsh doctor` judges each device as a `client` (it only dials out) or a
+  `server` (it takes inbound connections), and says which in the report:
+  `data.mode` is `"client"` or `"server"`, and `data.mode_basis` says why.
+  The human output prints it on the line after `overall`, for example
+  `mode: client (no_server_signal)`. See ADR-0066.
+- Before, doctor treated every device as a server. A laptop that runs no
+  `qsh serve` or `qsh listen`, with `role none` pins and an `acl.toml` that
+  your deployment renders for every device, reported
+  `acl_principal_unmatched` for each pin with no row, and `acl_policy_missing`
+  once the file was gone, both as errors, plus `service_not_registered`. It
+  now comes out `ok`, with or without the file.
+  `qsh doctor --fail-on error` exits 0 on it.
+- What makes a device a server, in the order doctor looks: a `[serve]`,
+  `[listen]` or `[reverse]` table with a key in `config.toml`; a registered
+  service unit (any of `serve`, `listen`, `reverse`); a `serve.json`, even
+  one a crashed `qsh serve` left behind, or a live `qsh listen`; a pin whose
+  role is not `none`; a live invite that pins a role other than `none`. Any
+  one of them makes the device a server. With none of them it is a client.
+  An `acl.toml` is not a sign either way, because deployments put one on
+  every device.
+- You can set the judgment. `qsh doctor --mode auto|client|server` for one
+  run, or `qsh config set doctor.mode client|server` for the device. The flag
+  wins over the key, the key wins over what doctor infers. A new device
+  that has not started `qsh serve` yet and has no pin with a role looks like
+  a client; give it `--mode server` or `doctor.mode = server` to get the
+  server checks. `qsh serve` and `qsh listen` still print their own startup
+  diagnostic for a missing or broken `acl.toml`, and the ACL itself still
+  denies everything it does not allow.
+- A device judged a client leaves out the checks that only matter for
+  inbound connections: `acl_policy_missing`, `acl_principal_unmatched`,
+  `acl_ca_auth_path_missing`, `acl_forward_socks_ineffective`,
+  `acl_file_paths_missing`, `service_not_registered`,
+  `service_restart_drops_sessions`, `systemd_linger_disabled`,
+  `launchagent_session_scoped`, `logon_task_session_scoped`,
+  `keystore_session_bound`, `bindv6only_blocks_ipv4`,
+  `listen_serve_ignores_serve_bind`, `serve_unit_beside_listen_serve` and
+  `agent_dir_unusable`. `acl_policy_invalid` still shows, as a `warn`
+  instead of an `error`: a file that does not parse would deny everything if
+  the device ever served. Every other check runs as before, so an expired
+  certificate or a clock that is off is still an error on a client.
+- A server device gets the same report as before.
+- `qsh setup host`, `qsh setup host --to` and `qsh setup listener` ask doctor
+  to judge the device a server, so their `complete` stays `false` without an
+  `acl.toml` or a role, as in `v0.8.0`. `qsh setup client` leaves the judgment
+  to doctor, so a client-only device finishes with `complete: true` and no
+  exemption. The exemption from ADR-0038 stays for a client that also serves.
+- `qsh.cli/v1` gets `mode` on the `doctor.run` request and `mode` and
+  `mode_basis` on its data, all optional. No new error code, no new finding
+  code. `config get`, `config set` and `config list` know the new key
+  `doctor.mode`.
+- A jump chain whose path is healthy no longer falls back to the stream
+  carrier after an idle gap. The silence clock ignores any send within 200 ms
+  of a received datagram, where before it ignored only the first one. When two
+  datagrams arrived in one batch, the inner endpoint's two ack-only replies
+  both started the clock, and on Windows 12 of 20 runs of the idle-gap test
+  failed (0 of 30 after the fix). A real blackhole is still detected within
+  the window plus 200 ms. See ADR-0058, decision 1 (revision history).
+- Test only: `qsh doctor` on a device with `role none` pins and no
+  `acl.toml` is now pinned by a regression test (it reports
+  `acl_policy_missing` and not `acl_principal_unmatched`, as a server).
+
+### Upgrading
+
+- A script that gates a client-only device on `qsh doctor --fail-on error`
+  or on `overall` used to fail there and now passes. If one of your devices is
+  a server that shows none of the signs above, doctor now judges it a client
+  and its `acl_policy_missing` is gone from the report. Set
+  `doctor.mode = server` on it, or pass `--mode server` in the script.
+- Nothing else changes for a device that serves.
+- Every file that loaded under `v0.8.0` loads the same way. `doctor.mode` is
+  unknown to `v0.8.0`, which ignores it (and reports it as `config_unknown_key`).
+
+### What is still unproven
+
+Everything `v0.8.0` lists, plus these items:
+
+- The judgment was tested against temporary config directories, injected
+  service-unit locations and a fake `$HOME`. It was not run against the
+  devices that motivated it (the client-only laptop), so it is not checked
+  that each of their files and processes reads as "no server signal".
+- A running `qsh listen` is detected through its localctl endpoint in the
+  runtime directory. On Windows that is the named-pipe listing, which was
+  not exercised in this release's tests.
+
+### Assets and signing
+
+Unchanged from `v0.8.0`, with `v0.8.1` in the asset names.
+
 ## `v0.8.0`
 
 A minor release that changes defaults so a typical device needs no
