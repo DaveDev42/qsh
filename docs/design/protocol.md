@@ -1518,3 +1518,17 @@ relay로 선 연결이 직접 경로로 옮겨 가려면 두 끝이 서로의 �
 **wire.** 바뀌는 것이 없다. 후보 목록은 클라이언트와 데몬이 각자 설정에서 읽고 서로에게 알리지 않는다. 한쪽이 후보 하나만 쓰면 그 하나가 상대의 후보에 들어 있을 때만 닿는다(양 끝이 기본값이면 항상 닿는다).
 
 **시험.** `qsh-transport`의 `iroh_failover::`(`a_dial_through_the_candidate_set_reaches_the_daemon_wherever_it_is_homed`, `a_dialers_set_needs_only_the_relay_the_daemon_is_on`, `a_daemon_rehomes_when_its_home_relay_dies_and_a_fresh_dial_succeeds`, `a_redial_started_at_the_moment_the_relay_dies_succeeds_once_the_daemon_has_moved`, `a_candidate_that_is_down_from_the_start_costs_a_dial_nothing`, `a_candidate_that_never_answers_does_not_stall_the_dial`, `with_every_candidate_down_the_dial_fails_within_its_timeout`, `a_bad_candidate_set_is_refused_before_binding`)와 `qsh-testkit`의 `iroh_route::`(`a_device_relay_list_with_dead_entries_still_reaches_the_host`, `a_command_after_the_hosts_relay_died_runs_through_the_other_relay`, `the_reason_is_unreachable_only_when_no_candidate_is_reachable`)이 프로세스 안 relay 둘로 고정한다. 설정은 `qsh-core`의 `iroh_settings::tests`와 `ops/config_cmd`의 `iroh_relay_url_takes_one_string_or_a_list`가 맡는다.
+
+### 22.12 데몬 endpoint는 공유기에 포트 매핑을 요청한다 (ADR-0064)
+
+완전 대칭 NAT(주소와 포트 모두에 따라 매핑이 달라지고 필터링도 하는 NAT) 뒤의 상대는 relay의 주소 발견이 알려 준 공인 주소로도 닿지 못하고, 동시에 보내는 펀칭도 서지 않는다. 데몬이 공유기에서 외부 포트를 하나 받아 두면 그 상대가 그 주소로 먼저 보낼 수 있다. 현장 실측(2026-11-13)에서 portmapper를 켠 probe는 MacMini와 Toss 사이가 43/50 직결로 섰고, portmapper가 없는 qsh 0.8.0은 구조상 0%였다.
+
+규칙.
+
+- 데몬 endpoint(`IrohEndpoint::bind`, §22.8)만 요청한다. 클라이언트 endpoint(`bind_client`)는 `IrohConfig::portmap`이 켜져 있어도 iroh의 portmapper 설정을 `Disabled`로 명시해서 연다. iroh는 `portmapper` 기능을 빌드에 넣으면 설정을 비워 둔 endpoint의 기본값을 `Enabled`로 하므로, 값을 항상 넘긴다(`iroh_backend/portmap.rs`).
+- 스위치는 `[iroh].portmap`(없으면 `true`)이고 `IrohServe::portmap`, `IrohConfig::portmap`으로 endpoint builder에 닿는다. `IrohConfig`의 기본값은 `false`라서 손으로 만든 설정은 공유기를 건드리지 않는다. `[iroh].enable = false`나 `--no-iroh`는 endpoint가 없으므로 요청도 없다.
+- iroh는 소켓을 열 때 IPv4 UDP 소켓의 포트를 portmapper에 알리고, net report를 돌릴 때마다 매핑이 없으면 요청한다. relay가 하나도 없는 endpoint는 net report를 돌리지 않으므로 요청도 하지 않는다. 매핑은 IPv4만이다. 갱신(UPnP 요청 수명 2시간, PCP 1시간의 절반마다)과 endpoint가 닫힐 때의 해제는 portmapper가 한다.
+- 받은 외부 주소는 iroh의 알림 집합에 `Portmapped` 종류로 들어가 인터페이스 주소와 공인 주소(`Qad`)와 함께 상대에게 간다. 알림 집합은 portmapper 주소, net report 주소, 인터페이스 주소, 설정된 외부 주소 순으로 쌓고 같은 소켓 주소는 먼저 들어간 종류를 유지한다. §22.10의 keeper는 설정된 외부 주소만 고치므로 매핑 주소를 가리거나 지우지 못하고, 같은 주소를 쥐고 있어도 `Portmapped`로 남는다.
+- 이 규칙은 wire를 바꾸지 않는다. 달라지는 것은 상대가 받는 후보 주소 집합과 공유기의 상태(`iroh-portmap` 설명의 UDP 매핑 항목)다.
+
+**시험.** 공유기와의 협상은 시험하지 않는다(시험 하니스가 호스트의 공유기를 건드리면 안 된다). `qsh-transport`의 `iroh_backend::portmap::tests`(요청이 데몬에만 가는 조건, builder에 `Enabled`와 `Disabled`가 모두 명시되는 것)와 `iroh_backend::only_a_daemon_endpoint_that_asks_maps_a_router_port`(relay를 끈 endpoint로 데몬은 요청하고 클라이언트는 요청하지 않음)가 endpoint 쪽 배선을, `qsh-core`의 `iroh_settings::portmap_reaches_the_daemon_endpoint_and_no_client`와 `iroh_serve::portmap_follows_the_config_and_a_disabled_endpoint_has_none`이 설정에서 endpoint까지의 배선과 `enable = false`일 때 endpoint가 없음을 고정한다. 데몬을 띄우는 시험은 `enable = false`를 쓰거나 `IrohServe`를 손으로 만들어 `portmap = false`로 둔다.

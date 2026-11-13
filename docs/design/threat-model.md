@@ -26,7 +26,7 @@
 - 홀펀칭 신호(`punch.v1`, ADR-0054). 진입점은 `Server::dispatch`와 R·B의 펀칭 service(`reverse/listen/punch.rs`, `server/punch.rs`), 위협은 §4(A21·A22·B43·B44·C24·D23·E23·E24·G11)에 있다. 통제가 아직 코드에 없는 행의 핀 테스트는 "예정"으로 적고 해당 스텝이 착지할 때 채운다.
 - 직접 dial의 이름 결속(ADR-0060). 진입점은 client의 모든 이름 dial(`PeerTarget::evaluator`)과 `serve --to`의 등록 dial이고, 위협은 §4(A25), 잔여 위험은 §7(h62)에 있다.
 - jump chaining(`-J`, ADR-0056). 진입점은 §3의 `JUMP` 스트림(중간 peer)과 client의 관(`PacketPipe`), 위협은 §4(A24·B49~B51·C27·C28·D25·D26·E27·E28·F7·G13), 잔여 위험은 §7(h57~h61)에 있다. 안쪽 연결은 끝에서 끝의 QUIC이므로 새 신뢰 판단은 중간 peer를 jump로 고르는 일 하나다.
-- iroh relay route(ADR-0061). 진입점은 §3의 iroh endpoint와 relay에서 오는 연결이고, 위협은 §4(A27·A28·B54·D28~D31·G15), 잔여 위험은 §7(h67~h70)에 있다. 핀 테스트는 M28이 착지시킨 시험의 이름이고, 직접 시험이 없는 행은 그 행에 적었다.
+- iroh relay route(ADR-0061). 진입점은 §3의 iroh endpoint와 relay에서 오는 연결이고, 위협은 §4(A27·A28·B54·D28~D32·G15), 잔여 위험은 §7(h67~h71)에 있다. D32·h71은 ADR-0064의 공유기 포트 매핑이다. 핀 테스트는 M28이 착지시킨 시험의 이름이고, 직접 시험이 없는 행은 그 행에 적었다.
 
 비범위:
 
@@ -292,6 +292,7 @@ C10의 coalescing이 없으면 1바이트씩 echo하는 PTY가 entry 하나당 �
 | D29 | TLS를 가로채는 망이 relay 구간을 본다: 기업망이 자기 루트로 재서명한 인증서를 OS 저장소에 넣어 둔 기기에서 relay TLS가 그 망에 들여다보인다 | relay TLS는 OS 인증서 저장소로 검증한다(`platform-verifier`). 그래서 가로채는 망에서도 relay 연결이 서고, 그 구간의 바이트는 그 망에 보인다. 보이는 것은 안쪽 QUIC 암호문이고, 안쪽 QUIC의 내용과 신원은 pin으로 보호된다. relay 인증은 qsh의 신원 보증이 아니다: relay가 가짜여도 pin이 맞는 상대를 만들어 낼 수 없다 | ADR-0061 결정 12 | `iroh_backend::the_relay_certificate_is_verified_against_the_trust_store`(시험 사설 루트를 넣은 신뢰 저장소로 relay 인증서 검증), `iroh_route::a_relay_whose_certificate_is_not_trusted_is_relay_tls`(루트가 없으면 닫힌 채로 실패), `relay_probe::a_certificate_the_trust_does_not_accept_stops_at_tls`. 실제 OS 저장소를 쓰는 시험은 없고 실제 가로채는 망은 릴리스 전 측정 항목이다 | 그 망에는 EndpointId, 시각, 양이 보인다 → h68 |
 | D30 | 홀펀칭으로 직접 경로가 서면 두 끝의 IP가 서로에게 드러난다 | 직접 경로는 같은 연결 안의 경로 승격이다(multipath). 드러나는 상대는 pin으로 인증된 끝뿐이다. 제3자에게는 아무것도 게시하지 않는다 | ADR-0061 결정 11; `protocol.md` §22.4 | 직접 시험 없음(발견은 endpoint 설정에서 끄고, 경로 후보는 pin된 연결 안에서만 오간다) | 직접 경로가 선 뒤 pin된 상대는 내 IP를 안다 → h69 |
 | D31 | iroh 기본 동작이 EndpointId와 주소를 제3자 서비스(pkarr, n0 DNS)에 게시하거나 조회한다 | 발견 게시와 조회를 끈다. endpoint가 접속하는 relay는 설정된 후보 목록(ADR-0062)과 pin의 `relay`뿐이고, 후보는 설정과 pin에서만 온다. 기본 route 목록에 `iroh`가 없으면 relay에도 접속하지 않는다 | ADR-0061 결정 1·11 | `iroh_route::a_disabled_route_contacts_no_relay_and_keeps_the_old_errors`, `iroh_route::a_direct_dial_that_stands_never_contacts_the_relay`, `iroh_serve::without_an_iroh_serve_there_is_no_endpoint_and_no_relay_contact`. 발견 질의가 나가지 않음을 직접 세는 시험은 없다 | — |
+| D32 | 데몬이 공유기에 포트 매핑을 요청하는 부수효과: 공유기 표에 UDP 항목이 생기고(같은 LAN의 장비가 게이트웨이에서 볼 수 있다), LAN에 UPnP(SSDP 멀티캐스트)·NAT-PMP·PCP 트래픽이 나가며, 매핑된 포트로 LAN 밖의 누구나 데몬 소켓에 UDP를 보낼 수 있다 | 매핑은 이미 열려 있는 데몬 endpoint의 소켓 하나에 대한 것이고 새 서비스를 열지 않는다. 그 소켓으로 오는 것은 relay 경유와 같은 endpoint이므로 handshake 뒤 pin·role·ACL·admission을 거친다(ADR-0061 결정 3·4, ADR-0009의 Retry와 handshake 상한). 매핑은 IPv4 UDP 하나이고 데몬이 끝나면 해제하며 비정상 종료는 공유기의 수명(최대 2시간)이 지운다. client endpoint는 요청하지 않는다. 끄는 길은 `[iroh].portmap = false`이고 `[iroh].enable = false`와 `--no-iroh`는 endpoint 자체가 없다. 시험은 공유기에 묻지 않도록 기본값이 `false`인 `IrohConfig`·`IrohServe`를 쓴다 | ADR-0064 결정 1~3·7; `protocol.md` §22.12 | `iroh_backend::only_a_daemon_endpoint_that_asks_maps_a_router_port`(client는 요청하지 않음), `iroh_settings::portmap_reaches_the_daemon_endpoint_and_no_client`, `iroh_serve::portmap_follows_the_config_and_a_disabled_endpoint_has_none`(`enable = false`면 endpoint가 없음). 공유기의 표에 항목이 생기고 해제되는 것을 직접 보는 시험은 없다(호스트의 공유기를 건드리지 않는다) | 공유기 표의 항목과 LAN 트래픽은 매핑의 의도된 결과이고 끄는 것은 설정이다 → h71 |
 
 D7은 테스트로 지킬 수 있는 성질이 아니라 코드가 없어서 성립하는 성질이다. 그러므로 이 행을 깨는 방법은 회귀가 아니라 새 기능이고, 그 시점의 방어선은 ADR 하나다.
 
@@ -473,6 +474,7 @@ g1~g5와 g8은 닫혔고 g6·g7은 열려 있다. 닫힌 갭의 행은 지우지
 | h68 | TLS를 가로채는 망은 relay 구간의 암호문과 두 EndpointId, 시각, 양을 본다. relay TLS를 OS 저장소로 검증하는 것의 대가이고(ADR-0061 결정 12), 내용과 신원은 안쪽 pin 인증이 지킨다 | ADR-0061 결정 12 |
 | h69 | 홀펀칭으로 직접 경로가 서면 pin된 상대가 내 공인 IP를 안다. relay를 거치는 동안에는 relay가 내 IP를 본다 | ADR-0061 결정 3·11 |
 | h70 | n0 공용 relay의 가용성, rate limit, 약관 변경은 통제 밖이다. iroh는 단일 회사가 이끄는 1.x 의존이다. 대응은 relay URL을 설정으로 바꾸는 길과 backend 경계(`architecture.md` §10)다 | ADR-0061 결정 10, 결과 절 |
+| h71 | 데몬이 도는 동안 공유기에 UDP 매핑 항목이 생기고 기본 게이트웨이로 UPnP·NAT-PMP·PCP 요청이 나간다. 같은 LAN의 장비는 이를 볼 수 있고, 호스트 방화벽이나 macOS의 로컬 네트워크 권한이 이를 물을 수 있다. 공유기가 UPnP를 켜 둔 채 신뢰할 수 없는 장비가 있는 망에서 데몬이 공유기의 매핑을 쓰는 것은 그 공유기의 정책이다. 끄려면 `[iroh].portmap = false`를 쓴다. 매핑된 포트는 relay 없이 직결 UDP를 여는 것과 같은 노출이고 새 면은 없다 | ADR-0064 결과 절 |
 
 h4와 h5는 함께 읽어야 한다. 손상된 peer는 그 장비에서 `trust remove`를 실행하면 2초 안에 끊긴다. 개별 인증서 revocation이 없으므로 CA가 서명한 인증서는 CA 전체를 거두어야 하고, 신뢰는 장비마다 따로 거두어야 한다. 그 peer의 세션은 연결이 닫혀도 남으므로 끝내려면 `qsh session close`를 쓴다.
 
@@ -505,7 +507,7 @@ qsh가 지키지 않고 운영자에게 맡긴 것들이다.
 - **시계 동기.** cert 유효기간(`protocol.md` §3), invite TTL 10분과 retention 20분(`protocol.md` §15.5), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
 - **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md` §15.7).
 - **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. 기본 route에는 relay·발견이 없고, 사용자가 iroh route를 켠 경우에만 relay가 낀다(ADR-0061, 아래 "relay 선택"). (`README.md` "Known limitations"; PRD §12).
-- **relay 선택.** 데몬은 기본으로 iroh endpoint를 띄우고(ADR-0063) 주소 없이 키만 있는 pin은 기본으로 relay route를 쓰므로, 설정 없이 둔 장비는 n0 공용 relay에 TCP 443 연결을 하나 계속 유지하고 그 relay가 데몬의 EndpointId와 접속 시각을 본다. 이전에는 사용자가 `[iroh].enable`을 켠 장비만 그랬다. 이를 받아들일 수 없는 운영자는 `[iroh].enable = false`(그 실행에만 `--no-iroh`)로 끄고, 인가 판정은 endpoint 유무와 무관하다. 기본 relay는 n0 공용 relay다(ADR-0061 결정 10). 메타데이터 노출(h67)이나 공용 relay 의존(h70)을 받아들일 수 없는 운영자는 자가 운영 `iroh-relay`의 URL을 설정하거나 route를 켜지 않는다. 기기의 OS 인증서 저장소가 오염되지 않았다는 것도 가정이다(D29).
+- **relay 선택.** 데몬은 기본으로 iroh endpoint를 띄우고(ADR-0063) 주소 없이 키만 있는 pin은 기본으로 relay route를 쓰므로, 설정 없이 둔 장비는 n0 공용 relay에 TCP 443 연결을 하나 계속 유지하고 그 relay가 데몬의 EndpointId와 접속 시각을 본다. 이전에는 사용자가 `[iroh].enable`을 켠 장비만 그랬다. 이를 받아들일 수 없는 운영자는 `[iroh].enable = false`(그 실행에만 `--no-iroh`)로 끄고, 인가 판정은 endpoint 유무와 무관하다. 기본 relay는 n0 공용 relay다(ADR-0061 결정 10). 메타데이터 노출(h67)이나 공용 relay 의존(h70)을 받아들일 수 없는 운영자는 자가 운영 `iroh-relay`의 URL을 설정하거나 route를 켜지 않는다. 기기의 OS 인증서 저장소가 오염되지 않았다는 것도 가정이다(D29). 데몬은 같은 방식으로 기본으로 공유기에 포트 매핑을 요청하므로(ADR-0064, D32·h71) 공유기 표의 항목이나 LAN의 UPnP 트래픽이 문제인 망에서는 `[iroh].portmap = false`로 끈다.
 - **CA 키 복제 관행.** CSR을 만들지 않으므로(ADR-0016 기각) 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016 맥락 2번째 문단).
 - **`acl.toml` 재시작 규율.** h10에 따라 정책 편집은 재시작해야 반영된다. 편집했는데 반영이 안 된 상태를 "정책이 느슨한 채로 돌고 있는 창"으로 인식해야 한다.
 - **replay 여유 조정.** `[serve].replay_bytes` 기본 8 MiB가 자기 워크로드에 충분한지는 운영자가 판단한다. ADR-0004 근거 3번째 불릿이 "전형적 텍스트 터미널 output 기준 수십 초~수 분 분량"이라고 추정한 값이다.

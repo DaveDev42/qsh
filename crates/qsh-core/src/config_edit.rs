@@ -94,8 +94,9 @@ use KeyType::{Bool, Int, Str, StrOrList};
 /// that uses them, so they apply to the next command. `punch.mode` is read by
 /// each client command, but `qsh listen` and `qsh serve --to` read it once at
 /// start, so it applies from the next start. `iroh.enable`, `iroh.relay_url`,
-/// `iroh.bind_port` and `iroh.proxy` are read once by a daemon (ADR-0061);
-/// `iroh.mode` and `iroh.head_start_ms` only by client commands.
+/// `iroh.bind_port`, `iroh.proxy` and `iroh.portmap` are read once by a daemon
+/// (ADR-0061, ADR-0064); `iroh.mode` and `iroh.head_start_ms` only by client
+/// commands.
 pub const KEYS: &[ConfigKey] = &[
     key("serve", "bind", Str, true),
     key("serve", "to", Str, true),
@@ -185,6 +186,7 @@ pub const KEYS: &[ConfigKey] = &[
         ..key("iroh", "proxy", Str, true)
     },
     key("iroh", "head_start_ms", Int, false),
+    key("iroh", "portmap", Bool, true),
 ];
 
 fn invalid(message: String) -> OpError {

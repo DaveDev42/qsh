@@ -588,7 +588,12 @@ impl ConfiguredRig {
         );
         std::fs::write(controller_paths.config_file(), controller_toml)
             .expect("write controller config.toml");
-        let controller_config = Config::load(&controller_paths).expect("controller config");
+        let mut controller_config = Config::load(&controller_paths).expect("controller config");
+        // A listener brings its iroh endpoint up unless told not to
+        // (ADR-0063) and asks the router for a port mapping (ADR-0064); this
+        // rig reaches the controller through its own UDP relay and must not
+        // contact a public relay or the LAN gateway.
+        controller_config.iroh.enable = Some(false);
 
         let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
         let (controller_shutdown, controller_rx) = oneshot::channel::<()>();

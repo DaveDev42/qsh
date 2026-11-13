@@ -77,6 +77,13 @@ pub struct IrohServe {
     /// it instead of refusing to start. An `enable = true` that was written
     /// down keeps failing closed.
     pub optional: bool,
+    /// Ask the router for a port mapping (UPnP, NAT-PMP, PCP) so a peer
+    /// behind a symmetric NAT can send first to the mapped address
+    /// (`[iroh].portmap`, ADR-0064). [`iroh_serve_from_config`] sets it from
+    /// the config (unset is on); `new`, `with_relays` and `default` leave it
+    /// off, so a test that builds an `IrohServe` by hand never probes the
+    /// LAN gateway.
+    pub portmap: bool,
 }
 
 impl Default for IrohServe {
@@ -88,6 +95,7 @@ impl Default for IrohServe {
             relay_roots: Vec::new(),
             bind_addrs: Vec::new(),
             optional: false,
+            portmap: false,
         }
     }
 }
@@ -109,6 +117,7 @@ impl IrohServe {
             relay_roots: Vec::new(),
             bind_addrs: Vec::new(),
             optional: false,
+            portmap: false,
         }
     }
 }
@@ -126,6 +135,7 @@ pub fn iroh_serve_from_config(config: &Config) -> Option<IrohServe> {
     let mut serve = IrohServe::with_relays(settings.relay_urls, settings.bind_port);
     serve.proxy_from_env = matches!(settings.proxy, crate::iroh_settings::IrohProxy::Env);
     serve.optional = config.iroh.enable.is_none();
+    serve.portmap = settings.portmap;
     Some(serve)
 }
 
@@ -181,6 +191,7 @@ pub async fn bind(
         relay_trust: trust_roots.clone(),
         bind,
         proxy_from_env: serve.proxy_from_env,
+        portmap: serve.portmap,
         relay_quic_port: None,
     };
     if serve.bind_port == 0 {
@@ -482,6 +493,27 @@ mod tests {
             .await
             .expect_err("a written enable = true fails closed");
         assert_eq!(err.code, ErrorCode::ConfigError);
+    }
+
+    /// ADR-0064: the daemon's mapping switch is `[iroh].portmap` (unset is
+    /// on), and `--no-iroh` or `[iroh].enable = false` leaves no endpoint
+    /// that could open a mapping. An `IrohServe` built by hand never maps.
+    #[test]
+    fn portmap_follows_the_config_and_a_disabled_endpoint_has_none() {
+        let mut config = Config::default();
+        assert!(iroh_serve_from_config(&config).unwrap().portmap);
+        config.iroh.portmap = Some(false);
+        assert!(!iroh_serve_from_config(&config).unwrap().portmap);
+        config.iroh.portmap = Some(true);
+        assert!(iroh_serve_from_config(&config).unwrap().portmap);
+
+        // `--no-iroh` is `enable = false` (`Ops::daemon_config`): no
+        // endpoint, so nothing asks a router for anything.
+        config.iroh.enable = Some(false);
+        assert!(iroh_serve_from_config(&config).is_none());
+
+        assert!(!IrohServe::default().portmap);
+        assert!(!IrohServe::new("https://relay.example", 0).portmap);
     }
 
     #[test]

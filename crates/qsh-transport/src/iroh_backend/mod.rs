@@ -13,6 +13,8 @@
 //!   (protocol §22.8).
 //! - `key`: the qsh identity key as an iroh key, and the fingerprint of an
 //!   endpoint id.
+//! - `portmap`: whether an endpoint asks its router for a mapping
+//!   (ADR-0064).
 //! - `errors`: noq errors into the transport-neutral ones.
 
 mod conn;
@@ -20,6 +22,7 @@ mod endpoint;
 mod errors;
 mod identity_proof;
 mod key;
+mod portmap;
 mod reflexive;
 #[cfg(test)]
 mod size_guard;

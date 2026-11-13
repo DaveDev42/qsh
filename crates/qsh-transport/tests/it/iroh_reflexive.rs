@@ -150,6 +150,7 @@ async fn a_failed_address_discovery_probe_does_not_unadvertise_the_public_addres
             relay_trust: IrohRelayTrust::OnlyRoots(vec![relay.cert.clone()]),
             bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
             proxy_from_env: false,
+            portmap: false,
             relay_quic_port: Some(nat.front.port()),
         },
     )

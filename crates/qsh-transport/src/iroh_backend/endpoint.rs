@@ -57,6 +57,7 @@ use super::conn::IrohConn;
 use super::errors::{chain, conn_err};
 use super::identity_proof::{self, PROOF_TIMEOUT, ProofError};
 use super::key::{fingerprint_of_endpoint, fingerprint_of_key};
+use super::portmap;
 use super::reflexive::{Action, Keeper};
 use crate::endpoint::{
     AcceptError, CLOSE_CODE_UNVERIFIED_PEER, CONNECTION_RECEIVE_WINDOW,
@@ -159,6 +160,13 @@ pub struct IrohConfig {
     /// Off by default, so an endpoint built without saying so never reads
     /// the environment (`[iroh].proxy`, `docs/CLI.md` §6.23).
     pub proxy_from_env: bool,
+    /// Ask the router for a port mapping (UPnP, NAT-PMP, PCP) so a peer
+    /// behind a symmetric NAT can send first to the mapped address
+    /// (ADR-0064, `[iroh].portmap`). Honored by a daemon endpoint
+    /// ([`IrohEndpoint::bind`]) only: a client endpoint never maps. Off by
+    /// default, so an endpoint built without saying so never probes the LAN
+    /// gateway; iroh only maps while a relay is configured.
+    pub portmap: bool,
     /// Test seam: the UDP port of the relay's QUIC address discovery
     /// service, when it is not the standard one (7842). A test relay that
     /// binds an ephemeral port names it here; production leaves it `None`.
@@ -508,6 +516,8 @@ pub struct IrohEndpoint {
     relays: Arc<Vec<RelayUrl>>,
     /// [`IrohConfig::relay_quic_port`], kept for [`Self::refresh_net_report`].
     relay_quic_port: Option<u16>,
+    /// Whether this endpoint asked iroh to map a router port.
+    mapping: bool,
     timeout: Duration,
     /// How long an accepted connection may take to send its identity proof.
     proof_timeout: Duration,
@@ -609,6 +619,7 @@ impl IrohEndpoint {
         ephemeral: bool,
     ) -> Result<Self, SetupError> {
         let identity_key = identity.iroh_secret_key()?;
+        let mapping = portmap::mapping_wanted(!ephemeral, config.portmap);
         let secret = if ephemeral {
             SecretKey::generate()
         } else {
@@ -641,7 +652,10 @@ impl IrohEndpoint {
             .crypto_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
             .clear_address_lookup()
             .ca_tls_config(ca_tls_config(&config.relay_trust))
-            .transport_config(transport_config());
+            .transport_config(transport_config())
+            // Always set, never left to iroh's default (`Enabled` once the
+            // `portmapper` feature is compiled in): a client must say no.
+            .portmapper_config(portmap::portmapper_config(mapping));
         if !relays.is_empty() {
             builder = builder.relay_mode(RelayMode::Custom(
                 relays
@@ -675,6 +689,7 @@ impl IrohEndpoint {
             evaluator,
             relays: Arc::new(relays),
             relay_quic_port: config.relay_quic_port,
+            mapping,
             timeout: default_dial_timeout(),
             proof_timeout: PROOF_TIMEOUT,
         })
@@ -712,6 +727,13 @@ impl IrohEndpoint {
     /// The qsh fingerprint of [`Self::identity_key`].
     pub fn fingerprint(&self) -> Fingerprint {
         fingerprint_of_endpoint(&self.ep.identity.public())
+    }
+
+    /// Whether this endpoint asks the router for a port mapping: a daemon
+    /// endpoint built with [`IrohConfig::portmap`]. A client endpoint is
+    /// always `false`.
+    pub fn portmap_enabled(&self) -> bool {
+        self.mapping
     }
 
     /// The local UDP sockets the endpoint is bound on.

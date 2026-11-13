@@ -42,6 +42,36 @@ async fn the_endpoint_fingerprint_is_the_identity_fingerprint() {
     assert_eq!(IrohPeer::new(ep.public_key()).fingerprint(), fp);
 }
 
+/// ADR-0064: the router-mapping request reaches a daemon endpoint and never
+/// a client endpoint, and an endpoint built without asking never maps. The
+/// relay is off here, so iroh runs no net report and no mapping: nothing in
+/// this test touches the LAN gateway.
+#[tokio::test]
+async fn only_a_daemon_endpoint_that_asks_maps_a_router_port() {
+    let (id, _fp) = make_identity();
+    let asking = IrohConfig {
+        portmap: true,
+        ..direct_config()
+    };
+    let trust = || Arc::new(StaticTrust::empty());
+
+    let default = bind(&id, StaticTrust::empty(), direct_config()).await;
+    assert!(!default.portmap_enabled(), "off unless asked");
+
+    let daemon = IrohEndpoint::bind(&id, trust(), asking.clone())
+        .await
+        .expect("bind daemon");
+    assert!(daemon.portmap_enabled());
+
+    let client = IrohEndpoint::bind_client(&id, trust(), asking)
+        .await
+        .expect("bind client");
+    assert!(
+        !client.portmap_enabled(),
+        "a client endpoint never maps, whatever the config says"
+    );
+}
+
 /// Each end's `peer_fingerprint` is the other's identity fingerprint, and
 /// the connection reports the iroh transport.
 #[tokio::test]
@@ -404,6 +434,7 @@ async fn the_relay_certificate_is_verified_against_the_trust_store() {
         relay_trust: IrohRelayTrust::System,
         bind: vec![(std::net::Ipv4Addr::LOCALHOST, 0).into()],
         proxy_from_env: false,
+        portmap: false,
         relay_quic_port: None,
     };
     let ep = bind(&id, StaticTrust::empty(), distrusting).await;
@@ -434,6 +465,7 @@ async fn the_relay_certificate_is_verified_against_the_trust_store() {
         relay_trust: IrohRelayTrust::SystemWithRoots(vec![relay.cert.clone()]),
         bind: vec![(std::net::Ipv4Addr::LOCALHOST, 0).into()],
         proxy_from_env: false,
+        portmap: false,
         relay_quic_port: None,
     };
     let ep = bind(&id, StaticTrust::empty(), trusting).await;
