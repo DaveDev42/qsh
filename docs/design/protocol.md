@@ -1385,7 +1385,7 @@ pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/
 
 ### 22.3 신원과 handshake
 
-- iroh route의 상대 식별자는 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. qsh fingerprint(SPKI SHA-256)는 같은 키에서 계산한다.
+- iroh route에서 서버(데몬)의 식별자는 EndpointId, 곧 qsh 신원 키의 Ed25519 공개키다. qsh fingerprint(SPKI SHA-256)는 같은 키에서 계산한다. 클라이언트의 EndpointId는 endpoint마다 새로 뽑는 임의 키이고, 클라이언트의 qsh 신원은 연결 안에서 증명한다(§22.8).
 - **검증은 handshake 직후 훅에서** 한다. pin 대조와 ADR-0060의 이름 결속(이름으로 dial했다면 그 이름의 pin 키와 같은 EndpointId여야 함)을 거치고, 실패하면 `AUTH_FAILED`로 끝난다. 이 판정 전에는 `Hello`도, 어떤 스트림도, 세션·터널·listener도 없다.
 - 사설 CA 모드(체인, SAN principal)는 iroh route에서 `UNSUPPORTED`다. jump 체인의 어느 hop도 iroh route로 열지 않는다(`UNSUPPORTED`, ADR-0061 결정 14).
 - 페어링의 TLS exporter 채널 바인딩(§15.3)은 iroh 연결의 `export_keying_material`로 같은 방식으로 한다. 페어링을 iroh route 위에서 허용할지는 구현 때 확인한다(미결 1).
@@ -1416,3 +1416,54 @@ planned. 이름과 계층은 `testing.md`의 「iroh relay route와 backend 경�
 
 1. 페어링(§15)을 iroh route 위에서 허용할지. 허용하면 invite 질의 경로(`pair invite`)의 EndpointId 안내가 필요하다.
 2. relay 경유 RTT에서 `LinkStatus`·침묵 시한의 기본값이 충분한지.
+
+### 22.8 클라이언트 신원 증명
+
+relay는 EndpointId 하나에 홈 연결 하나만 둔다. 한 기기의 qsh 프로세스가 모두 기기 신원 키로 endpoint를 열면 같은 EndpointId가 겹치고, 나중에 붙은 프로세스가 먼저 붙은 프로세스의 relay 경로를 밀어낸다(relay 로그: "Another endpoint connected with the same endpoint id"). 장기로 도는 `qsh tunnel open`과 대화형 `qsh exec`를 함께 쓰면 앞의 것이 끊긴다. 그래서 endpoint의 두 역할이 키를 달리 쓴다.
+
+- **데몬 endpoint**(`serve`·`listen`이 띄우는 수신 endpoint): 기기 신원 키로 연다. EndpointId가 pin 키이고 상대가 dial하는 값이다. 바뀐 것이 없다.
+- **클라이언트 endpoint**(route 층이 명령마다, 재dial마다 만드는 endpoint): endpoint마다 새 임의 iroh 키로 연다. 같은 기기의 클라이언트 프로세스끼리 EndpointId가 겹치지 않는다. qsh 신원은 아래 증명으로 서버에 알린다.
+
+ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capability 없음). QUIC route는 건드리지 않는다. 이 절은 iroh route 안의 연결 직후 한 번만 있는 교환이다.
+
+**교환.** handshake가 끝나고 클라이언트가 서버를 pin으로 확인한 직후, **다른 어떤 스트림보다 먼저** 클라이언트가 단방향 스트림 하나를 열어 증명 프레임을 쓰고 `finish`한다. 클라이언트는 답을 기다리지 않는다(왕복을 더하지 않는다). 서버는 handshake 직후 이 스트림을 받아 읽고, 검증이 끝나기 전에는 어떤 양방향 스트림도 받지 않는다. 거절은 연결 close로 온다.
+
+**프레임.** 97바이트 고정.
+
+| 오프셋 | 길이 | 내용 |
+|---|---|---|
+| 0 | 1 | 버전, `1` |
+| 1 | 32 | 클라이언트의 qsh 신원 Ed25519 공개키 |
+| 33 | 64 | Ed25519 서명 |
+
+서명 대상은 다음을 이어 붙인 바이트열이다.
+
+```
+"qsh iroh client identity v1"        (도메인 문자열, 27바이트, ASCII)
+|| exporter                          (32바이트)
+|| server_endpoint_id                (32바이트, 서버 EndpointId)
+|| client_endpoint_id                (32바이트, 클라이언트의 임의 EndpointId)
+```
+
+`exporter`는 이 iroh 연결의 TLS exporter(RFC 5705)다. 라벨은 `"qsh iroh client identity exporter v1"`, context는 빈 값, 출력은 32바이트. 서명 검증은 엄격 검증(`verify_strict`)이다.
+
+**서버의 검증.** 서버는 자기 EndpointId, 연결의 상대 EndpointId(handshake가 증명한 값), 연결의 exporter로 같은 바이트열을 만들어 프레임의 공개키로 서명을 검증한다. 통과하면 그 공개키가 이 연결의 **상대 신원**이다. fingerprint(SPKI SHA-256)를 이 키에서 계산하고, 이후 pin·role·ACL·감사·admission의 키 기준 버킷·resume 결속(§10)·`Connection::reverify`는 모두 EndpointId가 아니라 이 증명된 키를 쓴다. pin 판정은 §22.3과 같은 함수다(pin이면 `Principal`, 아니면 열린 페어링 창이 있을 때 `Pairing`, 아니면 거절).
+
+**거절.** 다음은 모두 같은 결과다: 연결을 `CLOSE_CODE_UNVERIFIED_PEER`(0x1001)로 닫고, 어떤 `Connection`도 application 계층에 올리지 않는다. 세션·터널·listener 등 자원은 만들어지지 않는다. 서버는 거절 사유를 상대에게 구별해 알리지 않는다(감사 category는 `untrusted`).
+
+- 증명 스트림이 헤더 시한(`server::HEADER_TIMEOUT`, 10초) 안에 오지 않음
+- 프레임 길이가 97이 아님(짧거나 97바이트를 넘음), 버전이 `1`이 아님
+- 공개키가 올바른 Ed25519 점이 아님, 서명이 맞지 않음
+- 서명이 이 연결의 exporter, 서버 EndpointId, 클라이언트 EndpointId 중 하나라도 다른 값에 대한 것임
+- 증명된 키가 pin이 아니고 열린 페어링 창도 없음
+
+**한계와 근거.**
+
+- exporter가 서명에 들어 있으므로 다른 연결로 복사한 프레임은 그 연결의 exporter와 맞지 않아 거절된다(재전송 방지). 두 EndpointId가 들어 있어 같은 서버·같은 클라이언트 endpoint가 아닌 쌍에도 쓸 수 없다.
+- 읽는 쪽은 최대 97바이트만 잡는다. 프레임이 더 길면 길이 초과로 거절하고 그 이상을 버퍼링하지 않는다.
+- 서버는 상대의 EndpointId가 pin인지 따로 보지 않는다. 데몬이 기기 키로 dial하는 연결(`serve --to`의 이후 구현 포함)도 같은 프레임을 보내며, 이때 증명된 키는 EndpointId와 같다. 한 경로로 검증한다.
+- 증명 읽기는 handshake permit을 쥔 채 일어나므로 시한까지의 점유는 handshake 동시 상한이 막는다(admission, ADR-0061 결정 4). 키 기준 버킷(`decide_keyed`)은 증명 뒤에 증명된 키로 센다.
+- 증명 전에 클라이언트 쪽이 서버 신원을 먼저 확인하므로(dial 전 pin 검사, handshake 직후 재검사) 가짜 서버에 증명이 가지 않는다. 가더라도 증명은 그 연결에 묶여 있어 다른 연결에서는 쓸 수 없다.
+- 클라이언트 endpoint는 끝날 때 우아하게 닫는다(`Endpoint::close`가 상대의 close 확인을 기다리고, 기다림은 `IROH_CLOSE_CAP`(3초)로 묶는다). 마지막 핸들이 닫기 전에 사라지는 경로(오류, 진 route 경주, 취소)는 핸들이 직접 닫기를 시작한다. 닫기 전에 endpoint를 버리면 iroh가 "Endpoint dropped without calling `Endpoint::close`" 오류를 로그에 남긴다.
+
+**시험.** `qsh-transport`의 `iroh_identity::` 모듈이 정한다: 같은 신원의 클라이언트 endpoint 둘이 relay에서 모두 살아 있음(`two_client_endpoints_of_one_identity_both_stay_connected`), 손으로 만든 정상 프레임을 받음(`a_hand_made_proof_is_accepted`), 서명 위조(`a_forged_signature_is_refused`), 다른 endpoint 쌍용 증명(`a_proof_made_for_another_endpoint_pair_is_refused`), pin이 아닌 증명 키(`a_proof_for_a_key_the_server_does_not_pin_is_refused`), 증명 없음(`a_missing_proof_times_out`), 길이·버전 오류(`malformed_frames_are_refused`), 다른 연결로 옮긴 증명(`a_proof_replayed_onto_another_connection_is_refused`), 정상 종료 시 오류 로그 없음(`a_short_client_command_ends_without_an_error_log`, `dropping_a_client_endpoint_closes_it_gracefully`).
