@@ -651,6 +651,12 @@ pub enum Command {
         /// (`warn` or `error`); the output is unchanged (ADR-0027).
         #[arg(long, value_name = "SEVERITY", value_parser = parse_doctor_threshold)]
         fail_on: Option<DoctorThreshold>,
+        /// Judge this device as `client` (dials out only: skips the checks
+        /// that matter only for inbound connections), `server`, or `auto`
+        /// (the default: `config.toml`'s `[doctor].mode`, then the device's
+        /// own state). The report's `mode` says which it used (ADR-0066).
+        #[arg(long, value_name = "MODE", value_parser = ["auto", "client", "server"])]
+        mode: Option<String>,
     },
 
     /// Create this device's identity (keypair + self-signed certificate).

@@ -94,7 +94,13 @@ fn events() -> Vec<String> {
 async fn doctor(ops: &qsh_core::Ops, host: &str) -> DoctorData {
     let host = host.to_string();
     blocking(ops, move |ops| {
-        ops.doctor(DoctorReq { host: Some(host) }, SystemTime::now())
+        ops.doctor(
+            DoctorReq {
+                host: Some(host),
+                mode: None,
+            },
+            SystemTime::now(),
+        )
     })
     .await
     .expect("doctor.run")

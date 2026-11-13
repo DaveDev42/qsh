@@ -84,7 +84,13 @@ fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
 fn doctor_without_identity_is_a_config_error() {
     let (_guard, ops) = temp_ops();
     let err = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::ConfigError);
     assert!(err.message.contains("qsh init"), "{err}");
@@ -100,7 +106,13 @@ fn doctor_reports_acl_policy_missing_when_acl_toml_is_absent() {
     init_identity(&ops);
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: Some("server".to_string()),
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert_eq!(data.overall, "error");
     let finding = data
@@ -119,7 +131,13 @@ fn doctor_reports_acl_policy_invalid_for_malformed_acl_toml() {
     std::fs::write(ops.paths().acl_file(), "not valid toml {{{").unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: Some("server".to_string()),
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -164,7 +182,13 @@ fn doctor_reports_audit_path_unwritable_for_a_0500_directory() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -203,7 +227,13 @@ fn doctor_reports_audit_path_unwritable_when_the_parent_path_is_occupied_by_a_fi
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -233,7 +263,15 @@ fn doctor_reports_cert_expired_when_now_is_past_not_after() {
         qsh_transport::identity::validity_unix(&identity.identity.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_after + 86_400) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     assert_eq!(data.overall, "error");
     assert!(
         data.findings.iter().any(|f| f.code == "cert_expired"),
@@ -254,7 +292,15 @@ fn doctor_reports_cert_expiring_soon_within_the_30_day_window() {
         qsh_transport::identity::validity_unix(&identity.identity.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_after - 20 * 86_400) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -274,7 +320,15 @@ fn doctor_reports_cert_expired_when_now_exactly_equals_not_after() {
         qsh_transport::identity::validity_unix(&identity.identity.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(not_after as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     assert!(
         data.findings.iter().any(|f| f.code == "cert_expired"),
         "{:?}",
@@ -294,7 +348,15 @@ fn doctor_reports_cert_expiring_soon_at_exactly_the_30_day_window() {
     let now = SystemTime::UNIX_EPOCH
         + Duration::from_secs((not_after - CERT_EXPIRING_SOON_WINDOW_SECS) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -321,7 +383,15 @@ fn doctor_reports_cert_expired_for_both_leaf_and_ca_root_once_both_are_past_not_
         qsh_transport::identity::validity_unix(&ca_root.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((ca_not_after + 86_400) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let expired: Vec<_> = data
         .findings
         .iter()
@@ -371,7 +441,15 @@ fn doctor_reports_cert_expired_only_for_the_leaf_when_only_the_leaf_is_past_not_
         "fixture assumption: leaf must expire well before the CA root"
     );
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let expired: Vec<_> = data
         .findings
         .iter()
@@ -397,7 +475,13 @@ fn doctor_reports_cert_expired_only_for_the_leaf_when_only_the_leaf_is_past_not_
 fn doctor_reports_no_cert_findings_well_before_expiry() {
     let (_guard, ops) = healthy_ops();
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert!(
         data.findings
@@ -417,7 +501,15 @@ fn doctor_reports_clock_skew_error_past_the_backdate_margin() {
     // 10 minutes behind not_before: exceeds the 5-minute backdate margin.
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_before - 10 * 60) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -435,7 +527,15 @@ fn doctor_reports_clock_skew_warn_within_the_backdate_margin() {
     // 3 minutes behind not_before: inside the 5-minute backdate margin.
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_before - 3 * 60) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -457,7 +557,15 @@ fn doctor_reports_clock_skew_error_at_301_seconds_past_the_margin() {
         qsh_transport::identity::validity_unix(&identity.identity.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_before - 301) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -478,7 +586,15 @@ fn doctor_reports_clock_skew_warn_at_exactly_the_5_minute_margin() {
         qsh_transport::identity::validity_unix(&identity.identity.cert_der).unwrap();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs((not_before - 300) as u64);
 
-    let data = ops.doctor(DoctorReq { host: None }, now).unwrap();
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            now,
+        )
+        .unwrap();
     let finding = data
         .findings
         .iter()
@@ -502,7 +618,13 @@ fn doctor_reports_peer_untrusted_for_a_hosts_toml_entry_with_no_pin() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -517,7 +639,13 @@ fn doctor_reports_peer_untrusted_for_a_hosts_toml_entry_with_no_pin() {
 fn doctor_has_no_peer_untrusted_when_hosts_toml_is_empty() {
     let (_guard, ops) = healthy_ops();
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert!(data.findings.iter().all(|f| f.code != "peer_untrusted"));
 }
@@ -536,7 +664,13 @@ fn doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned() {
     )
     .unwrap();
     let before = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert!(
         before
@@ -556,7 +690,13 @@ fn doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned() {
     .unwrap();
 
     let after = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = after
         .findings
@@ -592,7 +732,13 @@ fn doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned() {
 fn doctor_keystore_probe_does_not_panic_and_only_ever_reports_warn() {
     let (_guard, ops) = healthy_ops();
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     if let Some(finding) = data
         .findings
@@ -669,7 +815,10 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
 
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -700,7 +849,13 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
 fn doctor_path_shadow_probe_does_not_panic_and_only_ever_reports_warn() {
     let (_guard, ops) = healthy_ops();
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     if let Some(finding) = data.findings.iter().find(|f| f.code == "qsh_path_shadowed") {
         assert_eq!(finding.status, "warn");
@@ -799,7 +954,10 @@ fn doctor_wires_the_path_shadow_finding_into_the_full_report_deterministically()
 
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -878,7 +1036,13 @@ fn doctor_reports_controller_unreachable_for_a_dangling_controller_alias() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -912,7 +1076,13 @@ fn doctor_connectivity_probes_serve_to_before_the_legacy_reverse_controller() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -944,7 +1114,13 @@ fn doctor_connectivity_falls_back_to_the_legacy_reverse_controller_when_serve_to
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     let finding = data
         .findings
@@ -963,7 +1139,13 @@ fn doctor_connectivity_falls_back_to_the_legacy_reverse_controller_when_serve_to
 
 fn config_serve_to_conflict_findings(ops: &Ops) -> Vec<DoctorFinding> {
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     data.findings
         .into_iter()
@@ -1028,7 +1210,13 @@ fn doctor_still_exits_zero_with_a_serve_to_conflict() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .expect("doctor.run must still succeed with a serve_to conflict present");
     assert_eq!(data.overall, "error");
 }
@@ -1064,6 +1252,7 @@ fn doctor_probing_the_controller_alias_as_extra_host_reports_one_code_only() {
         .doctor(
             DoctorReq {
                 host: Some("ctrl".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -1095,6 +1284,7 @@ fn doctor_with_an_unknown_extra_host_is_host_not_found() {
         .doctor(
             DoctorReq {
                 host: Some("nowhere".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -1120,6 +1310,7 @@ fn doctor_probes_a_pinned_extra_host_and_classifies_a_black_hole_as_udp_egress_b
         .doctor(
             DoctorReq {
                 host: Some("quiet".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -1171,6 +1362,7 @@ fn doctor_probe_gets_a_version_negotiation_reply_from_a_live_qsh_listener() {
         .doctor(
             DoctorReq {
                 host: Some("live".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -1228,6 +1420,7 @@ fn doctor_reports_no_route_for_a_pinned_address_with_an_unparseable_port() {
         .doctor(
             DoctorReq {
                 host: Some("bad".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -1277,7 +1470,13 @@ fn doctor_finding_status_is_always_one_of_the_locked_vocabulary() {
     .unwrap();
 
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert!(
         !data.findings.is_empty(),
@@ -1338,7 +1537,13 @@ fn overall_status_is_worst_of_error_warn_ok() {
 
 fn config_unknown_key_findings(ops: &Ops) -> Vec<DoctorFinding> {
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     data.findings
         .into_iter()
@@ -1948,7 +2153,10 @@ fn doctor_wires_the_service_not_registered_finding_into_the_full_report_determin
 
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: Some("server".to_string()),
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -1979,6 +2187,7 @@ const MODES: [&str; 3] = ["serve", "listen", "reverse"];
 
 mod combined;
 mod logon_task;
+mod mode;
 
 fn codes(findings: &[DoctorFinding]) -> Vec<&str> {
     findings.iter().map(|f| f.code.as_str()).collect()
@@ -2307,7 +2516,14 @@ fn doctor_wires_keystore_session_bound_into_the_full_report_deterministically() 
         username: Some(ACCOUNT),
     };
     let data = ops
-        .doctor_with_host_state(DoctorReq { host: None }, SystemTime::now(), &host)
+        .doctor_with_host_state(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+            &host,
+        )
         .unwrap();
     let count = data
         .findings
@@ -2427,7 +2643,10 @@ fn doctor_wires_the_bindv6only_finding_into_the_full_report_deterministically() 
 
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: Some("server".to_string()),
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -3021,7 +3240,13 @@ fn doctor_trust_parse_failure_names_the_role_suspension() {
     std::fs::write(ops.paths().trust_file(), "this is = [not valid").unwrap();
 
     let err = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::ConfigError);
     assert!(
@@ -3120,7 +3345,10 @@ fn doctor_wires_the_acl_principal_and_ca_findings_into_the_full_report() {
     let keystore = crate::identity::MemoryKeyStore::new();
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: Some("server".to_string()),
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -3367,7 +3595,10 @@ fn doctor_wires_the_host_pinned_without_address_finding_into_the_full_report() {
     let keystore = crate::identity::MemoryKeyStore::new();
     let data = ops
         .doctor_assemble(
-            DoctorReq { host: None },
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
             unix_seconds(SystemTime::now()),
             &identity,
             &config,
@@ -3401,6 +3632,8 @@ fn doctor_threshold_matches_the_overall_severity_order() {
         let findings: Vec<DoctorFinding> = statuses.iter().map(|s| finding(s)).collect();
         DoctorData {
             overall: overall_status(&findings),
+            mode: None,
+            mode_basis: None,
             findings,
             transport: None,
             punch: None,
@@ -3480,7 +3713,13 @@ fn doctor_config_unknown_key_accepts_transport_and_recovery_and_flags_rtt_multip
 fn doctor_without_a_host_has_no_transport_object() {
     let (_guard, ops) = healthy_ops();
     let data = ops
-        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .doctor(
+            DoctorReq {
+                host: None,
+                mode: None,
+            },
+            SystemTime::now(),
+        )
         .unwrap();
     assert!(data.transport.is_none());
     let json = serde_json::to_value(&data).unwrap();
@@ -3520,6 +3759,7 @@ fn doctor_leaves_transport_out_when_the_measurement_connection_fails() {
         .doctor(
             DoctorReq {
                 host: Some("refuses".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -3556,6 +3796,7 @@ fn doctor_does_not_measure_a_host_the_probe_found_unreachable() {
         .doctor(
             DoctorReq {
                 host: Some("quiet2".to_string()),
+                mode: None,
             },
             SystemTime::now(),
         )
@@ -3627,9 +3868,9 @@ fn agent_unreachable_needs_forward_yes_and_a_silent_agent() {
         ..minimal_env(&keystore)
     };
     // Forwarding is off: whatever the probe says, nothing is reported.
-    assert!(doctor_agent_findings(&config, &silent).is_empty());
+    assert!(doctor_agent_findings(&config, &silent, true).is_empty());
     config.agent.forward = Some(crate::config::AgentForwardMode::Yes);
-    let findings = doctor_agent_findings(&config, &silent);
+    let findings = doctor_agent_findings(&config, &silent, true);
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].code, "agent_unreachable");
     assert_eq!(findings[0].status, "warn");
@@ -3638,9 +3879,9 @@ fn agent_unreachable_needs_forward_yes_and_a_silent_agent() {
         local_agent: Some(true),
         ..minimal_env(&keystore)
     };
-    assert!(doctor_agent_findings(&config, &answering).is_empty());
+    assert!(doctor_agent_findings(&config, &answering, true).is_empty());
     // Not probed (`doctor_with_host_state`): no verdict.
-    assert!(doctor_agent_findings(&config, &minimal_env(&keystore)).is_empty());
+    assert!(doctor_agent_findings(&config, &minimal_env(&keystore), true).is_empty());
 }
 
 #[cfg(unix)]
@@ -3655,12 +3896,12 @@ fn agent_dir_unusable_reports_a_loose_agent_directory() {
         ..minimal_env(&keystore)
     };
     let config = Config::default();
-    assert!(doctor_agent_findings(&config, &env).is_empty());
+    assert!(doctor_agent_findings(&config, &env, true).is_empty());
 
     let agent = runtime.path().join("agent");
     std::fs::create_dir(&agent).unwrap();
     std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let findings = doctor_agent_findings(&config, &env);
+    let findings = doctor_agent_findings(&config, &env, true);
     assert_eq!(findings.len(), 1, "{findings:?}");
     assert_eq!(findings[0].code, "agent_dir_unusable");
     assert_eq!(findings[0].status, "warn");

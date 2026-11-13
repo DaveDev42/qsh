@@ -500,6 +500,33 @@ pub struct Config {
     pub agent: AgentConfig,
     /// `[iroh]` — the iroh relay route (ADR-0061 decisions 2, 10 and 11).
     pub iroh: crate::iroh_settings::IrohSection,
+    /// `[doctor]` — which kind of device `qsh doctor` judges this one to be
+    /// (ADR-0066 decision 2).
+    pub doctor: DoctorConfig,
+}
+
+/// `[doctor].mode` value (ADR-0066 decision 2). The same three words
+/// `qsh doctor --mode` takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorModeSetting {
+    /// Let doctor read the device's own state (ADR-0066 decision 3).
+    #[default]
+    Auto,
+    /// Judge this device as a client, whatever its state shows.
+    Client,
+    /// Judge this device as a server, whatever its state shows.
+    Server,
+}
+
+/// `[doctor]` section (ADR-0066 decision 2). `qsh doctor` reads it each time
+/// it runs; `--mode` wins over the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DoctorConfig {
+    /// `"auto"` (unset is the same), `"client"` or `"server"`. An unknown
+    /// value is a `CONFIG_ERROR` at load.
+    pub mode: Option<DoctorModeSetting>,
 }
 
 /// `[agent].forward` value (ADR-0055 decision 18).

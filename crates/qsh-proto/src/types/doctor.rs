@@ -17,6 +17,12 @@ pub struct DoctorReq {
     /// controller (when configured) and this host's own local state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// Which kind of device to judge this one as: `"auto"`, `"client"` or
+    /// `"server"` (ADR-0066 decision 2). Omit for `"auto"`, which reads
+    /// `[doctor].mode` and then the device's own state. Any other value is
+    /// `INVALID_ARGUMENT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// Data payload of `doctor.run` (`docs/CLI.md` §6.17).
@@ -28,6 +34,19 @@ pub struct DoctorData {
     /// case (`PLAN.md` M7 §4.1 #6: `"ok"` only ever appears here, never on
     /// an individual [`DoctorFinding::status`]).
     pub overall: String,
+    /// The kind of device doctor judged this one to be: `"client"` or
+    /// `"server"` (ADR-0066 decision 5). A `"client"` report leaves out the
+    /// checks that only matter for inbound connections. Absent in a report
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Why doctor judged `mode` (ADR-0066 decision 5), a closed word:
+    /// `"request"` (the `--mode` flag), `"config"` (`[doctor].mode`), or what
+    /// the device's own state showed: `"no_server_signal"` for `"client"`;
+    /// `"service_unit"`, `"daemon"`, `"config_section"`, `"role_pin"` or
+    /// `"role_invite"` for `"server"`. Absent whenever `mode` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_basis: Option<String>,
     /// One entry per diagnostic that fired. Empty when nothing did.
     pub findings: Vec<DoctorFinding>,
     /// What a short measurement connection to `DoctorReq.host` saw and what

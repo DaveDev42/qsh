@@ -506,6 +506,9 @@ fn every_field_populated() -> Config {
             head_start_ms: Some(1),
             portmap: Some(true),
         },
+        doctor: crate::config::DoctorConfig {
+            mode: Some(crate::config::DoctorModeSetting::Auto),
+        },
     }
 }
 
@@ -605,7 +608,10 @@ fn doctor_reports_no_config_unknown_key_for_anything_config_set_wrote() {
     set(&ops, "audit.path", &audit.display().to_string()).unwrap();
     let unknown = |ops: &Ops| {
         ops.doctor(
-            qsh_proto::DoctorReq { host: None },
+            qsh_proto::DoctorReq {
+                host: None,
+                mode: None,
+            },
             std::time::SystemTime::now(),
         )
         .unwrap()

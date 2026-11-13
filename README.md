@@ -1227,7 +1227,15 @@ them are detached, not ended. If the file is missing, the process
 comes up and prints one line to stderr (`no acl.toml`, code
 `acl_policy_missing`, and that requests are authorized by trust roles only);
 `qsh doctor` reports `acl_policy_missing` only when no role grants anything
-either. If the file is invalid at startup, the process still comes up (it
+either, and only for a device it judges a server. A device with no sign of
+serving (no service unit, no `[serve]`, `[listen]` or `[reverse]` table, no
+`serve.json`, no pin with a role) is judged a client: `qsh doctor` leaves out
+the `acl_*`, service unit and listener checks, which only matter for inbound
+connections, and reports `ok` whether or not an `acl.toml` is there. The
+report names the judgment (`mode: client (no_server_signal)`). To run the
+server checks on a device that shows no sign yet, use `qsh doctor --mode
+server` or `qsh config set doctor.mode server` (ADR-0066). If the file is
+invalid at startup, the process still comes up (it
 answers, and denies everything) and prints a diagnostic to stderr exactly
 once, made of:
 

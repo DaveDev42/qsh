@@ -878,7 +878,21 @@ impl Ops {
         // boundary would otherwise date its own invite after "now" and not
         // count it as live (`acl_policy_missing` on a role-granting setup).
         let now = env.now.max(SystemTime::now());
-        let data = self.doctor(DoctorReq { host: None }, now)?;
+        // A host role is a server by the user's own choice, so doctor judges
+        // it as one whatever its state shows yet: the locks of ADR-0038
+        // decision 6 depend on `acl_policy_missing` being reported on it
+        // (ADR-0066 decision 6). `client` leaves the judgment to doctor.
+        let judged = match req.role {
+            SetupRole::Host | SetupRole::HostTo | SetupRole::Listener => Some("server".to_string()),
+            SetupRole::Client => None,
+        };
+        let data = self.doctor(
+            DoctorReq {
+                host: None,
+                mode: judged,
+            },
+            now,
+        )?;
         let mut detail = format!("overall: {}", data.overall);
         let result = to_value(&data)?;
         if let Some(code) = exempted_error_code(req.role, Some(&result)) {

@@ -2,7 +2,9 @@
 //! §6.17, `docs/design/testing.md` L6).
 //!
 //! Three sandboxes give a known severity mix:
-//! - `error_box`: initialized, no `acl.toml` -> `acl_policy_missing` (error).
+//! - `error_box`: initialized, judged a server (`[doctor].mode = "server"`),
+//!   no `acl.toml` -> `acl_policy_missing` (error). Without the key doctor
+//!   would judge the bare sandbox a client and report nothing (ADR-0066).
 //! - `warn_box`: initialized, a valid `acl.toml` and one unknown
 //!   `config.toml` key -> `config_unknown_key` (warn), no error.
 //! - an uninitialized sandbox, where doctor cannot start.
@@ -18,6 +20,11 @@ use serde_json::Value;
 
 fn error_box() -> Sandbox {
     let sandbox = Sandbox::initialized();
+    std::fs::write(
+        sandbox.config_dir().join("config.toml"),
+        "[doctor]\nmode = \"server\"\n",
+    )
+    .expect("write config.toml");
     let (code, env) = sandbox.json(&["doctor", "--json"]);
     assert_eq!(code, 0, "{env}");
     assert_eq!(env["data"]["overall"], "error", "precondition: {env}");
@@ -149,20 +156,14 @@ fn doctor_fail_on_does_not_change_the_255_of_a_doctor_that_cannot_start() {
 }
 
 /// The findings a freshly initialized client reports are the same on every
-/// platform (ADR-0035 decision 17, `docs/CLI.md` §6.17): only the ones that
-/// read the machine differ. `qsh_path_shadowed` depends on `$PATH`;
-/// `service_not_registered` needs a service backend, which Windows gets with
-/// the Windows service; `bindv6only_blocks_ipv4` fires only where the OS cannot
-/// open a dual-stack IPv6 socket (ADR-0046). Everything else is
-/// what the client's own state says, and every code is one of the shared
+/// platform (ADR-0035 decision 17, ADR-0066): doctor judges a device with no
+/// server signal a client, so none of the checks that read the service
+/// registry, the listener or the ACL policy run. Only `qsh_path_shadowed`
+/// depends on the machine (`$PATH`). Every code is one of the shared
 /// vocabulary.
 #[test]
 fn doctor_on_an_initialized_client_reports_the_same_findings_on_every_platform() {
-    const MACHINE_DEPENDENT: &[&str] = &[
-        "qsh_path_shadowed",
-        "service_not_registered",
-        "bindv6only_blocks_ipv4",
-    ];
+    const MACHINE_DEPENDENT: &[&str] = &["qsh_path_shadowed"];
     let sandbox = Sandbox::initialized();
     let (code, env) = sandbox.json(&["doctor", "--json"]);
     assert_eq!(code, 0, "{env}");
@@ -184,6 +185,8 @@ fn doctor_on_an_initialized_client_reports_the_same_findings_on_every_platform()
         .copied()
         .filter(|code| !MACHINE_DEPENDENT.contains(code))
         .collect();
-    assert_eq!(client_state, ["acl_policy_missing"], "{env}");
-    assert_eq!(env["data"]["overall"], "error", "{env}");
+    assert!(client_state.is_empty(), "{env}");
+    assert_ne!(env["data"]["overall"], "error", "{env}");
+    assert_eq!(env["data"]["mode"], "client", "{env}");
+    assert_eq!(env["data"]["mode_basis"], "no_server_signal", "{env}");
 }

@@ -673,6 +673,11 @@ fn doctor_error_codes(data: &SetupRunData) -> Vec<String> {
 #[test]
 fn setup_client_completes_without_acl_toml() {
     let sandbox = Sandbox::new();
+    // A client that also serves: doctor reports the missing policy for it
+    // (ADR-0066), and the exemption of ADR-0038 is what lets `complete`
+    // through. `[doctor].mode` pins the judgment so the machine running the
+    // test (a registered service unit, a `serve.json`) cannot change it.
+    sandbox.write_config("[doctor]\nmode = \"server\"\n");
     let pem = peer_pem();
     let data = sandbox
         .ops
@@ -705,6 +710,10 @@ fn setup_client_completes_without_acl_toml() {
 #[test]
 fn setup_client_incomplete_on_invalid_acl_toml() {
     let sandbox = Sandbox::new();
+    // Judged a server, an unparseable policy is an error (ADR-0038 decision
+    // 3); `setup_client_judged_client_completes_on_invalid_acl_toml` is the
+    // client-only side.
+    sandbox.write_config("[doctor]\nmode = \"server\"\n");
     let pem = peer_pem();
     sandbox.put_acl("this is = [not valid");
     let data = sandbox
@@ -714,6 +723,54 @@ fn setup_client_incomplete_on_invalid_acl_toml() {
     assert!(doctor_error_codes(&data).contains(&"acl_policy_invalid".to_string()));
     assert!(!data.complete, "{:?}", data.steps);
     assert!(data.next.is_empty(), "{:?}", data.next);
+}
+
+/// A device doctor judges a client needs no `acl.toml`, and `complete` does
+/// not lean on the exemption: doctor reports nothing to exempt (ADR-0066
+/// decisions 4 and 6).
+#[test]
+fn setup_client_judged_client_completes_without_acl_toml() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[doctor]\nmode = \"client\"\n");
+    let pem = peer_pem();
+    let data = sandbox
+        .ops
+        .setup_run(&client("box", &pem), &sandbox.env())
+        .unwrap();
+    assert!(data.complete, "{:?}", data.steps);
+    assert!(data.next.iter().any(|n| n == "qsh box"), "{:?}", data.next);
+    assert!(!sandbox.acl_path().exists());
+    let doctor = step_of(&data, SetupStepId::Doctor);
+    let result = doctor.result.as_ref().unwrap();
+    assert_eq!(result["mode"], "client");
+    assert_ne!(result["overall"], "error");
+    assert!(doctor_error_codes(&data).is_empty(), "{:?}", doctor.result);
+    assert!(
+        !doctor.detail.as_deref().unwrap().contains("not counted"),
+        "{:?}",
+        doctor.detail
+    );
+}
+
+#[test]
+fn setup_client_judged_client_completes_on_invalid_acl_toml() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[doctor]\nmode = \"client\"\n");
+    let pem = peer_pem();
+    sandbox.put_acl("this is = [not valid");
+    let data = sandbox
+        .ops
+        .setup_run(&client("box", &pem), &sandbox.env())
+        .unwrap();
+    assert!(data.complete, "{:?}", data.steps);
+    let result = step_of(&data, SetupStepId::Doctor).result.clone().unwrap();
+    let finding = result["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "acl_policy_invalid")
+        .unwrap();
+    assert_eq!(finding["status"], "warn");
 }
 
 #[test]

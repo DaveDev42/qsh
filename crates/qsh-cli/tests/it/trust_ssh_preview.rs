@@ -153,7 +153,9 @@ fn trust_ssh_preview_placeholder_row_pasted_unedited_matches_no_pinned_principal
     assert_eq!(code, 0, "{value}");
     assert_eq!(value["data"]["decision"], "deny", "{value}");
 
-    let (code, doctor) = sandbox.json(&["doctor", "--json"]);
+    // `--mode server`: the bare sandbox has no server signal, and a client
+    // does not check `acl.toml` rows against its pins (ADR-0066).
+    let (code, doctor) = sandbox.json(&["doctor", "--mode", "server", "--json"]);
     assert_eq!(code, 0, "{doctor}");
     assert!(
         doctor.to_string().contains("acl_principal_unmatched"),

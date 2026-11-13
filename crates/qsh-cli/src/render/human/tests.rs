@@ -113,6 +113,8 @@ fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
 fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independently() {
     let data = DoctorData {
         overall: "error".to_string(),
+        mode: None,
+        mode_basis: None,
         findings: vec![DoctorFinding {
             code: "acl_policy_missing".to_string(),
             status: "error".to_string(),
@@ -134,6 +136,36 @@ fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independe
             "      line three".to_string(),
             "    remedy: do the thing".to_string(),
         ]
+    );
+}
+
+/// ADR-0066 decision 5: the judged mode and its basis follow `overall`, one
+/// line, sanitized like every other word of the report; a report without them
+/// (an older peer's) prints no such line.
+#[test]
+fn render_doctor_lines_names_the_judged_mode_and_its_basis() {
+    let mut data = DoctorData {
+        overall: "ok".to_string(),
+        mode: Some("client".to_string()),
+        mode_basis: Some("no_server_signal".to_string()),
+        findings: vec![],
+        transport: None,
+        punch: None,
+    };
+    assert_eq!(
+        render_doctor_lines(&data),
+        vec![
+            "overall: ok".to_string(),
+            "mode: client (no_server_signal)".to_string(),
+            "no findings".to_string(),
+        ]
+    );
+    data.mode_basis = None;
+    assert_eq!(render_doctor_lines(&data)[1], "mode: client");
+    data.mode = None;
+    assert_eq!(
+        render_doctor_lines(&data),
+        vec!["overall: ok".to_string(), "no findings".to_string()]
     );
 }
 
