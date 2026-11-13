@@ -73,6 +73,9 @@ socket2 = "0.6"
 # and quinn already use) instead of adding ring, `platform-verifier` makes the
 # relay TLS check use the OS trust store (decision 12), and metrics, the
 # UPnP/NAT-PMP portmapper and the Apple fast datapath stay out of the build.
+# Counts the operating system's trust anchors for `qsh doctor` (the crate the
+# platform verifier already reads the store with).
+rustls-native-certs = "0.8"
 iroh = { version = "1.4.1", default-features = false, features = ["tls-aws-lc-rs", "platform-verifier"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "signal", "io-std"] }
 

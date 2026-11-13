@@ -3666,6 +3666,7 @@ dependencies = [
  "quinn-proto",
  "rcgen",
  "rustls",
+ "rustls-native-certs",
  "rustls-webpki",
  "sha2",
  "socket2",

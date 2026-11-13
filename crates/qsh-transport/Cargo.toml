@@ -38,6 +38,7 @@ tracing.workspace = true
 socket2.workspace = true
 zeroize.workspace = true
 iroh.workspace = true
+rustls-native-certs.workspace = true
 # The relay server behind `test_relay`, `test-support` only.
 iroh-relay = { version = "1.4.1", optional = true, default-features = false, features = ["server", "test-utils"] }
 
