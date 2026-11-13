@@ -54,6 +54,18 @@ the old behavior. If you run your own `iroh-relay`, list it alone, or list
 it next to n0's relays if you want n0 as a fallback; the daemon picks by
 latency, not by order.
 
+### Upgrading
+
+Upgrade both ends. A `v0.7.1` or older client dials only `aps1-1` unless
+its `relay_url` says otherwise, while a `v0.7.2` daemon homes on whichever
+candidate answers fastest (with `aps1-1` down, never that one). The old
+client then cannot reach the new daemon. A `v0.7.2` client reaching an old
+daemon works, since the daemon's relay is among the four it offers.
+A pin created with `qsh trust iroh --relay <url>` keeps naming that one
+relay and does not fail over. Run `qsh trust iroh <name> --off` and then
+`qsh trust iroh <name>` (the key stays) to clear its `relay` and use the
+device's list.
+
 ### What is still unproven
 
 Everything `v0.7.1` lists, plus these items:

@@ -21,16 +21,20 @@ use qsh_transport::{
 use crate::iroh_support::{TestRelay, make_identity};
 
 /// How long a re-home may take in these tests: the grace the daemon gives a
-/// home relay before it asks iroh for a net report (3 s), plus a report whose
-/// HTTPS probe of the dead relay has to give up (3 s), plus slack for a loaded
-/// machine.
-const REHOME_BOUND: Duration = Duration::from_secs(20);
+/// home relay before it asks iroh for a net report (3 s, measured at about
+/// 3 s), plus slack for a loaded machine. It stays well under iroh's own
+/// report period (20 to 26 s, first tick counted from the bind), so a daemon
+/// that only waited for that timer fails these tests instead of passing by
+/// luck of where the tick falls.
+const REHOME_BOUND: Duration = Duration::from_secs(12);
 
 /// A dial that has to wait for the daemon to re-home.
-const REDIAL_BOUND: Duration = Duration::from_secs(30);
+const REDIAL_BOUND: Duration = Duration::from_secs(12);
 
-/// A dial with a dead candidate in the set, once the daemon is homed.
-const DEAD_CANDIDATE_DIAL_BOUND: Duration = Duration::from_secs(8);
+/// A dial with a dead candidate in the set, once the daemon is homed. On
+/// loopback such a dial takes tens of milliseconds; the bound is far under the
+/// 3 s a dial would lose by waiting on the dead candidate's probe.
+const DEAD_CANDIDATE_DIAL_BOUND: Duration = Duration::from_secs(2);
 
 struct Pair {
     daemon: IrohEndpoint,
