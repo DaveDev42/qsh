@@ -197,6 +197,11 @@ pub struct ReverseOptions {
     /// one). Production leaves it empty, which is the OS store.
     #[doc(hidden)]
     pub iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
+    /// Test seam: when non-empty, the registration's iroh client endpoint
+    /// binds exactly these sockets, so a test can keep the relay the only
+    /// path (see `IrohServe::bind_addrs`). Production leaves it empty.
+    #[doc(hidden)]
+    pub iroh_client_bind: Vec<std::net::SocketAddr>,
 }
 
 impl Default for ReverseOptions {
@@ -207,6 +212,7 @@ impl Default for ReverseOptions {
             punch_enabled: true,
             punch_window: None,
             iroh_relay_roots: Vec::new(),
+            iroh_client_bind: Vec::new(),
         }
     }
 }
@@ -249,8 +255,12 @@ pub async fn run_reverse_on(
     let local_identity = identity.local.clone();
     // The relay route of the registration (`relay.rs`): off unless the
     // controller's pin asks for it.
-    let iroh_route =
-        relay::RelayRoute::new(config, identity.local.clone(), &options.iroh_relay_roots);
+    let iroh_route = relay::RelayRoute::new(
+        config,
+        identity.local.clone(),
+        &options.iroh_relay_roots,
+        &options.iroh_client_bind,
+    );
     let tuning = liveness.tuning();
     // An OS socket is replaced after a lost connection (a fresh source port,
     // like the fresh endpoint every redial used to have); a simulated one
