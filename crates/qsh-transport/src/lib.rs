@@ -55,11 +55,11 @@ pub mod tls;
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
     AcceptError, CLOSE_CODE_NOT_ADOPTED, CLOSE_DRAIN_CAP, ConnStats, Connection, DialError, Dialed,
-    Dialer, Endpoint, Incoming, JUMP_PACKET_MAX, JUMP_PACKET_MIN, Listener, LocalIdentity,
-    MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON, PIPE_LOCAL_ADDR, PIPE_REMOTE_ADDR, PacketPipe, PipePeer,
-    PipeStats, PunchArrival, PunchEndpoint, PunchInbox, PunchStats, PunchWindow, RESET_KEY_LEN,
-    SetupError, SocketSource, TransportTuning, bind_tuned_udp_socket, default_dial_timeout,
-    set_default_dial_timeout,
+    Dialer, Endpoint, IROH_CLOSE_CAP, Incoming, JUMP_PACKET_MAX, JUMP_PACKET_MIN, Listener,
+    LocalIdentity, MAX_PUNCH_WINDOWS, NOT_ADOPTED_REASON, PIPE_LOCAL_ADDR, PIPE_REMOTE_ADDR,
+    PacketPipe, PipePeer, PipeStats, PunchArrival, PunchEndpoint, PunchInbox, PunchStats,
+    PunchWindow, RESET_KEY_LEN, SetupError, SocketSource, TransportTuning, bind_tuned_udp_socket,
+    default_dial_timeout, set_default_dial_timeout,
 };
 pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, DatagramError, ExportError,

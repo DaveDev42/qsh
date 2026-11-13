@@ -18,10 +18,12 @@ use iroh::TransportAddr;
 use iroh::endpoint as ie;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use super::endpoint::EndpointHandle;
 use super::errors::{
     closed_stream, code_of, conn_err, datagram_err, export_err, read_err, read_exact_err,
     read_to_end_err, stopped_err, varint_of, write_err,
 };
+use super::key::fingerprint_of_key;
 use crate::endpoint::ConnStats;
 use crate::error::{
     ClosedStream, ConnectionError, DatagramError, ExportError, ReadError, ReadExactError,
@@ -47,11 +49,12 @@ struct Shared {
     conn: ie::Connection,
     /// Keeps the endpoint (its sockets and relay connection) alive for as
     /// long as any clone of the connection is, like a QUIC `Dialed` keeps
-    /// its endpoint.
-    _endpoint: iroh::Endpoint,
-    /// The peer's qsh fingerprint, computed from its endpoint id.
+    /// its endpoint, and closes it gracefully when the last one goes.
+    _endpoint: Arc<EndpointHandle>,
+    /// The peer's qsh fingerprint, computed from its identity key.
     peer: Fingerprint,
-    /// The peer's Ed25519 public key (its endpoint id).
+    /// The peer's qsh identity key. For a server it is its endpoint id; for
+    /// a client it is the key proven in-band, not the random endpoint id.
     key: PeerKey,
     /// The smallest round trip seen on the current kind of path (noq keeps
     /// no minimum of its own). See [`MinRtt`].
@@ -82,14 +85,17 @@ impl MinRtt {
 }
 
 impl IrohConn {
-    pub(crate) fn new(conn: ie::Connection, endpoint: iroh::Endpoint, peer: Fingerprint) -> Self {
-        let key = PeerKey(*conn.remote_id().as_bytes());
+    pub(crate) fn new(
+        conn: ie::Connection,
+        endpoint: Arc<EndpointHandle>,
+        peer_key: [u8; 32],
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 conn,
                 _endpoint: endpoint,
-                peer,
-                key,
+                peer: fingerprint_of_key(&peer_key),
+                key: PeerKey(peer_key),
                 min_rtt: Mutex::new(MinRtt::default()),
             }),
         }

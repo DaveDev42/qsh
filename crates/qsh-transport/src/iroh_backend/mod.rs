@@ -9,6 +9,8 @@
 //! - `conn`: the [`MuxConn`](crate::mux::MuxConn) / `SendHalf` / `RecvHalf`
 //!   implementations.
 //! - `endpoint`: [`IrohEndpoint`] (bind, dial, accept) and the pin check.
+//! - `identity_proof`: the client's in-band proof of its qsh identity
+//!   (protocol §22.8).
 //! - `key`: the qsh identity key as an iroh key, and the fingerprint of an
 //!   endpoint id.
 //! - `errors`: noq errors into the transport-neutral ones.
@@ -16,6 +18,7 @@
 mod conn;
 mod endpoint;
 mod errors;
+mod identity_proof;
 mod key;
 #[cfg(test)]
 mod size_guard;

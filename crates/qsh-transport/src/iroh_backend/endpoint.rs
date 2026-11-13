@@ -21,6 +21,17 @@
 //!   before the connection is handed to anyone. A peer that is not pinned is
 //!   closed with `CLOSE_CODE_UNVERIFIED_PEER`, the code the QUIC backend
 //!   uses for the same refusal.
+//! - **Daemons use the device key, clients a fresh one** (protocol §22.8).
+//!   A relay keeps one home connection per `EndpointId`, so two client
+//!   processes of one machine on the device key would evict each other. A
+//!   client endpoint ([`IrohEndpoint::bind_client`]) therefore binds with a
+//!   random key and proves its qsh identity in-band right after the
+//!   handshake; the server judges the proven key, not the endpoint id. A
+//!   daemon endpoint ([`IrohEndpoint::bind`]) keeps the device key, so its
+//!   `EndpointId` is the key peers pin and dial.
+//! - **Graceful close** ([`EndpointHandle`]). iroh logs an error when the
+//!   last handle of an endpoint drops before `Endpoint::close` ran, so the
+//!   handle closes the endpoint itself when it is dropped inside a runtime.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -29,12 +40,13 @@ use std::time::Duration;
 
 use iroh::endpoint::{self as ie, QuicTransportConfig, VarInt, presets};
 use iroh::tls::CaTlsConfig;
-use iroh::{EndpointAddr, EndpointId, RelayMode, RelayUrl};
+use iroh::{EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
 use rustls::pki_types::CertificateDer as TlsCertificateDer;
 
 use super::conn::IrohConn;
 use super::errors::{chain, conn_err};
-use super::key::fingerprint_of_endpoint;
+use super::identity_proof::{self, PROOF_TIMEOUT, ProofError};
+use super::key::{fingerprint_of_endpoint, fingerprint_of_key};
 use crate::endpoint::{
     AcceptError, CLOSE_CODE_UNVERIFIED_PEER, CONNECTION_RECEIVE_WINDOW,
     DATAGRAM_RECEIVE_BUFFER_SIZE, DATAGRAM_SEND_BUFFER_SIZE, DialError, LocalIdentity,
@@ -134,13 +146,63 @@ impl IrohPeer {
     }
 }
 
+/// Owns an iroh endpoint and closes it when the last holder lets go.
+///
+/// iroh logs an error ("Endpoint dropped without calling `Endpoint::close`")
+/// when its endpoint is dropped before `close` finished, and a command that
+/// ends early, a dial that loses a route race or fails, or an endpoint whose
+/// graceful wait was cut short all reach that drop. This handle, shared by
+/// [`IrohEndpoint`] and every [`IrohConn`] made from it, starts the close
+/// itself when it is the last to go, in a task that holds the endpoint until
+/// the close is done. Outside a runtime there is nothing to run it on and
+/// iroh drops the endpoint as it would have.
+pub(crate) struct EndpointHandle {
+    ep: iroh::Endpoint,
+    /// The qsh identity key: signs the in-band proof, and is what peers pin.
+    /// Equal to the endpoint's own key for a daemon endpoint. Kept here, not
+    /// in [`IrohEndpoint`], so the handle every `Endpoint` carries stays
+    /// small.
+    identity: SecretKey,
+}
+
+impl fmt::Debug for EndpointHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never the identity key.
+        f.debug_struct("EndpointHandle")
+            .field("id", &self.ep.id().fmt_short().to_string())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for EndpointHandle {
+    type Target = iroh::Endpoint;
+
+    fn deref(&self) -> &iroh::Endpoint {
+        &self.ep
+    }
+}
+
+impl Drop for EndpointHandle {
+    fn drop(&mut self) {
+        if self.ep.is_closed() {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let ep = self.ep.clone();
+            runtime.spawn(async move { ep.close().await });
+        }
+    }
+}
+
 /// An iroh endpoint bound to a qsh identity. A cheap `Clone` handle.
 #[derive(Clone)]
 pub struct IrohEndpoint {
-    ep: iroh::Endpoint,
+    ep: Arc<EndpointHandle>,
     evaluator: Arc<dyn TrustEvaluator>,
     relay: Option<RelayUrl>,
     timeout: Duration,
+    /// How long an accepted connection may take to send its identity proof.
+    proof_timeout: Duration,
 }
 
 impl fmt::Debug for IrohEndpoint {
@@ -198,14 +260,42 @@ fn ca_tls_config(trust: &IrohRelayTrust) -> CaTlsConfig {
 }
 
 impl IrohEndpoint {
-    /// Bind an endpoint for `identity`. `evaluator` is the trust store every
-    /// connecting and accepted peer is judged by.
+    /// Bind a daemon endpoint for `identity`: the iroh key is the qsh
+    /// identity key, so [`Self::public_key`] is the key peers pin and dial.
+    /// `evaluator` is the trust store every connecting and accepted peer is
+    /// judged by.
     pub async fn bind(
         identity: &LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
         config: IrohConfig,
     ) -> Result<Self, SetupError> {
-        let secret = identity.iroh_secret_key()?;
+        Self::bind_with(identity, evaluator, config, false).await
+    }
+
+    /// Bind a client endpoint for `identity`: the iroh key is a fresh random
+    /// one, so concurrent client endpoints of one identity have distinct
+    /// `EndpointId`s and a relay keeps all of them. Every dial proves the qsh
+    /// identity in-band (protocol §22.8). Use one per command or per dial.
+    pub async fn bind_client(
+        identity: &LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+        config: IrohConfig,
+    ) -> Result<Self, SetupError> {
+        Self::bind_with(identity, evaluator, config, true).await
+    }
+
+    async fn bind_with(
+        identity: &LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+        config: IrohConfig,
+        ephemeral: bool,
+    ) -> Result<Self, SetupError> {
+        let identity_key = identity.iroh_secret_key()?;
+        let secret = if ephemeral {
+            SecretKey::generate()
+        } else {
+            identity_key.clone()
+        };
         let relay = match &config.relay {
             IrohRelay::Disabled => None,
             IrohRelay::Url(url) => Some(
@@ -248,10 +338,14 @@ impl IrohEndpoint {
             .await
             .map_err(|e| setup_err("bind iroh endpoint", &e))?;
         Ok(Self {
-            ep,
+            ep: Arc::new(EndpointHandle {
+                ep,
+                identity: identity_key,
+            }),
             evaluator,
             relay,
             timeout: default_dial_timeout(),
+            proof_timeout: PROOF_TIMEOUT,
         })
     }
 
@@ -262,14 +356,31 @@ impl IrohEndpoint {
         self
     }
 
-    /// This endpoint's Ed25519 public key.
+    /// Override how long an accepted connection may take to send its
+    /// identity proof (default: [`PROOF_TIMEOUT`], the header timeout). A
+    /// test hook: nothing outside tests has a reason to move it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_proof_timeout(mut self, timeout: Duration) -> Self {
+        self.proof_timeout = timeout;
+        self
+    }
+
+    /// This endpoint's iroh key: its `EndpointId`, what a peer dials. For a
+    /// daemon endpoint ([`Self::bind`]) this is the qsh identity key; a
+    /// client endpoint ([`Self::bind_client`]) has a random one.
     pub fn public_key(&self) -> [u8; 32] {
         *self.ep.id().as_bytes()
     }
 
-    /// This endpoint's qsh fingerprint.
+    /// The qsh identity key this endpoint speaks for: what a server pins.
+    pub fn identity_key(&self) -> [u8; 32] {
+        *self.ep.identity.public().as_bytes()
+    }
+
+    /// The qsh fingerprint of [`Self::identity_key`].
     pub fn fingerprint(&self) -> Fingerprint {
-        fingerprint_of_endpoint(&self.ep.id())
+        fingerprint_of_endpoint(&self.ep.identity.public())
     }
 
     /// The local UDP sockets the endpoint is bound on.
@@ -317,10 +428,16 @@ impl IrohEndpoint {
         .map_err(|e| e.to_string())?
     }
 
-    /// Close the endpoint and every connection on it, waiting briefly for
-    /// the close frames to be acknowledged.
+    /// Close the endpoint and every connection on it, waiting for the close
+    /// frames to be acknowledged (iroh bounds that at about three seconds).
+    ///
+    /// The close runs in its own task, so a caller that stops waiting (a
+    /// timeout around this future) does not cancel it half way: iroh treats
+    /// an endpoint dropped before its close finished as an error.
     pub async fn close(&self) {
-        self.ep.close().await;
+        let ep = Arc::clone(&self.ep);
+        let close = tokio::spawn(async move { ep.close().await });
+        let _ = close.await;
     }
 
     /// Dial `peer` and judge it by the trust store.
@@ -383,7 +500,22 @@ impl IrohEndpoint {
             Err(RejectReason::Untrusted)
         };
         match verified {
-            Ok(verified) => Ok(self.wrap(conn, fp, PeerRole::Server, verified)),
+            Ok(verified) => {
+                // The server is the pinned key; now prove who we are, before
+                // any other stream (protocol §22.8).
+                if let Err(err) =
+                    identity_proof::send(&conn, &self.ep.identity, &self.ep.id()).await
+                {
+                    return Err(match err {
+                        ProofError::Lost(lost) => DialError::Failed(conn_err(lost)),
+                        ProofError::Invalid(why) => {
+                            conn.close(VarInt::from_u32(0), b"identity proof failed");
+                            DialError::Failed(ConnectionError::Other(why.into()))
+                        }
+                    });
+                }
+                Ok(self.wrap(conn, peer_id.as_bytes(), PeerRole::Server, verified))
+            }
             Err(reason) => {
                 conn.close(
                     VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
@@ -408,14 +540,20 @@ impl IrohEndpoint {
         })
     }
 
+    /// Wrap a verified connection. `peer_key` is the qsh identity key of the
+    /// other end: the dialed server's key, or the key a client proved.
     fn wrap(
         &self,
         conn: ie::Connection,
-        peer: Fingerprint,
+        peer_key: &[u8; 32],
         role: PeerRole,
         verified: VerifiedPeer,
     ) -> Connection {
-        Connection::from_iroh(IrohConn::new(conn, self.ep.clone(), peer), role, verified)
+        Connection::from_iroh(
+            IrohConn::new(conn, Arc::clone(&self.ep), *peer_key),
+            role,
+            verified,
+        )
     }
 }
 
@@ -474,6 +612,39 @@ impl IrohIncoming {
     /// with `CLOSE_CODE_UNVERIFIED_PEER` and never surfaces as a
     /// [`Connection`].
     pub async fn accept(self) -> Result<Connection, AcceptError> {
+        self.accept_with_peer().await.0
+    }
+
+    /// [`Self::accept`], plus the address to name the peer by in a log or
+    /// audit record of the outcome. When the client's identity proof
+    /// verified, that is its qsh identity key (on the path the attempt came
+    /// by), even if the key turned out not to be pinned: the operator needs
+    /// the key that was refused, not the random endpoint id the client
+    /// dialed from. When no proof verified (none, or a bad one) it is the
+    /// attempt's claimed address ([`Self::remote_address`]), which is all
+    /// there is.
+    pub async fn accept_with_peer(self) -> (Result<Connection, AcceptError>, PeerAddr) {
+        let claimed = self.remote_address();
+        let mut proven = None;
+        let result = self.accept_inner(&mut proven).await;
+        let peer = match (proven, claimed) {
+            (Some(key), PeerAddr::Keyed { path, .. }) => PeerAddr::Keyed {
+                key: PeerKey(key),
+                path,
+            },
+            (Some(key), PeerAddr::Socket(addr)) => PeerAddr::Keyed {
+                key: PeerKey(key),
+                path: PeerPath::Direct(addr),
+            },
+            (None, claimed) => claimed,
+        };
+        (result, peer)
+    }
+
+    async fn accept_inner(
+        self,
+        proven_out: &mut Option<[u8; 32]>,
+    ) -> Result<Connection, AcceptError> {
         let Self { incoming, endpoint } = self;
         let accepting = incoming
             .accept()
@@ -484,18 +655,47 @@ impl IrohIncoming {
             }
             other => AcceptError::Handshake(ConnectionError::Other(chain(&other).into())),
         })?;
-        let fp = fingerprint_of_endpoint(&conn.remote_id());
-        match verify_iroh_peer(&*endpoint.evaluator, &fp) {
-            Ok(verified) => Ok(endpoint.wrap(conn, fp, PeerRole::Client, verified)),
-            Err(reason) => {
-                conn.close(
-                    VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
-                    b"unverified peer",
-                );
-                Err(AcceptError::Unverified(reason))
+        // The handshake proved the endpoint id, which for a client is a
+        // random key. The qsh identity is the key it proves in-band; until
+        // that arrives (and within the header timeout) nothing else on the
+        // connection is read.
+        let proven = match tokio::time::timeout(
+            endpoint.proof_timeout,
+            identity_proof::receive(&conn, &endpoint.ep.id()),
+        )
+        .await
+        {
+            Ok(Ok(key)) => key,
+            Ok(Err(ProofError::Lost(lost))) => {
+                return Err(AcceptError::Handshake(conn_err(lost)));
             }
+            Ok(Err(ProofError::Invalid(why))) => {
+                tracing::debug!(why, "iroh identity proof refused");
+                return Err(unverified(&conn));
+            }
+            Err(_) => {
+                tracing::debug!("iroh identity proof did not arrive in time");
+                return Err(unverified(&conn));
+            }
+        };
+        *proven_out = Some(proven);
+        let fp = fingerprint_of_key(&proven);
+        match verify_iroh_peer(&*endpoint.evaluator, &fp) {
+            Ok(verified) => Ok(endpoint.wrap(conn, &proven, PeerRole::Client, verified)),
+            Err(_) => Err(unverified(&conn)),
         }
     }
+}
+
+/// Refuse a client the way every refusal of an unverified peer goes: the
+/// same close code and the same reason for a missing proof, a bad proof and
+/// an unpinned key, so the peer learns nothing about which it was.
+fn unverified(conn: &ie::Connection) -> AcceptError {
+    conn.close(
+        VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
+        b"unverified peer",
+    );
+    AcceptError::Unverified(RejectReason::Untrusted)
 }
 
 /// The trust decision for an iroh peer: the same pin lookup and pairing
