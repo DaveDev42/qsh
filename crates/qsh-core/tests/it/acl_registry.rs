@@ -312,6 +312,7 @@ mod section_2_5 {
                 "trust.list",
                 "trust.remove",
                 "trust.rename",
+                "trust.set_iroh",
                 "trust.set_jump",
                 "trust.set_rendezvous",
                 "trust.set_role",
