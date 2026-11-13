@@ -776,11 +776,15 @@ pub enum Command {
         attachable: bool,
     },
 
-    /// Run the host: accept connections from pinned peers, or (with
-    /// `--to`) dial out and register as a reverse target instead
-    /// (`docs/CLI.md` §6.12/§6.13, ADR-0012 decision 2/4). Foreground
-    /// only; the bound address, or the dial/registration events, go to
-    /// stderr.
+    /// Run the server: accept connections from pinned peers and offer
+    /// shell, exec, tunnels and files.
+    ///
+    /// One `qsh serve` per device is the whole server side (`docs/CLI.md`
+    /// §6.12, ADR-0065). With `--to` it instead dials out and registers as
+    /// a reverse target, an advanced fallback for when the peers cannot
+    /// reach each other over iroh (`docs/CLI.md` §6.13, ADR-0012 decision
+    /// 2/4). Foreground only; the bound address, or the dial/registration
+    /// events, go to stderr.
     Serve {
         // Precedent for not using a clap `value_parser`/`conflicts_with`
         // here: `crate::serve::resolve_serve_mode` decides the
@@ -793,8 +797,10 @@ pub enum Command {
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
 
-        /// Dial this controller and register as a reverse target instead
-        /// of listening inbound — the same role `qsh reverse <controller>`
+        /// Advanced fallback: dial this controller and register as a
+        /// reverse target instead of listening inbound, for when the relay
+        /// (TCP 443 HTTPS) is blocked, iroh is off, or the peer does not
+        /// use iroh (ADR-0065) — the same role `qsh reverse <controller>`
         /// plays, reached under its new name (ADR-0012 decision 2/4). A
         /// trust-store alias, same as `qsh reverse`'s positional, or a
         /// bare `host[:port]` address that resolves against pinned peers
@@ -827,9 +833,13 @@ pub enum Command {
         on_demand: bool,
     },
 
-    /// Run the reverse-mode controller: accept dial-in registrations from
-    /// `qsh serve --to` (the hidden `qsh reverse` alias dials the same
-    /// way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground
+    /// Advanced fallback: run the reverse-mode controller, for when peers
+    /// cannot reach each other over iroh.
+    ///
+    /// Use it when the relay (TCP 443 HTTPS) is blocked, iroh is off, or a
+    /// peer does not use iroh (ADR-0065). It accepts dial-in registrations
+    /// from `qsh serve --to` (the hidden `qsh reverse` alias dials the same
+    /// way) and serves them as hosts (`docs/CLI.md` §6.13). Foreground
     /// only; the bound address and registration events go to stderr.
     Listen {
         /// Listen address (`ip:port`). Overrides `[listen].bind` in
