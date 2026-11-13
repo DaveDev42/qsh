@@ -520,11 +520,13 @@ impl Ops {
             return Ok(Some("daemon"));
         }
         let trust = self.doctor_load_trust()?;
-        if trust.peers().iter().any(peer_has_role) {
+        if trust.peers().iter().any(peer_authorizes_inbound) {
             return Ok(Some("role_pin"));
         }
+        // An `invites.toml` that exists and cannot be read is an unknown
+        // too: only a device that takes inbound pairing writes one.
         if crate::trust::live_role_invite_count(&self.paths.invites_file(), now)
-            .is_ok_and(|live| live > 0)
+            .map_or(true, |live| live > 0)
         {
             return Ok(Some("role_invite"));
         }
@@ -1483,6 +1485,19 @@ fn peer_has_role(peer: &qsh_proto::TrustPeer) -> bool {
         .as_deref()
         .and_then(|role| role.parse::<TrustRole>().ok())
         .is_some_and(|role| role != TrustRole::None)
+}
+
+/// Whether `peer` is authorized for something without an `acl.toml` row: a
+/// role other than `none`, or `grants` from `qsh trust allow` (ADR-0051
+/// 결정 12), which are judged whatever the role is. Either one says this
+/// device authorizes inbound requests, which is what makes it a server
+/// (ADR-0066 decision 3, `role_pin`).
+fn peer_authorizes_inbound(peer: &qsh_proto::TrustPeer) -> bool {
+    peer_has_role(peer)
+        || peer
+            .grants
+            .as_ref()
+            .is_some_and(|grants| !grants.is_empty())
 }
 
 /// `now_unix` back to a `SystemTime`, for the one finding that needs a clock

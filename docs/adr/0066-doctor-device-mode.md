@@ -3,6 +3,8 @@
 날짜: 2026-11-14
 상태: 승인됨 (2026-11-14 Dave 결정. "client 전용 장비가 doctor에서 ok로 나오게 풀어라")
 
+개정 이력: 2026-11-14 같은 날 검토에서 결정 3의 `role_pin`을 grant가 있는 pin까지 넓히고(role `none`이어도 `qsh trust allow`로 인가받은 server가 client로 판정되던 틈), 읽을 수 없는 `invites.toml`을 징후로 읽게 했다. 판정 방향은 그대로다.
+
 개정 관계: [ADR-0038](0038-setup-client-complete-without-acl.md) 결정 4와 대안 1이 doctor를 고치지 않기로 한 이유("doctor는 역할을 모른다")를 이 ADR이 푼다. doctor가 장비 종류를 판정하는 입력을 정하고, 그 판정이 틀렸을 때 안전한 쪽으로 틀리게 하고, 사람이 판정을 고정하는 길을 둔다. ADR-0038의 면제 목록과 `complete` 판정 규칙은 그대로 두고, 면제가 쓰이는 범위만 좁아진다(결정 6). [ADR-0045](0045-trust-roles.md) 결정 12의 "client pin의 기본 role은 `none`"을 판정의 입력으로 쓰고, 그 결정이 정한 doctor 문안과 조건은 server로 판정된 장비에서 그대로다. [ADR-0065](0065-server-client-concept-model.md) 결정 1의 server·client 개념을 doctor의 보고에 연결한다. ADR-0065 결정 5가 막은 "doctor 문안 변경"은 문서 단계에 한정된 말이고 이 ADR은 문안을 바꾸지 않는다. `qsh.cli/v1`은 additive다(결정 5).
 
 ## 맥락
@@ -32,9 +34,9 @@ ADR-0038이 doctor를 고치지 않은 이유는 두 가지였다. client 장비
    |---|---|---|
    | 1 | `config_section` | `config.toml`의 `[serve]`·`[listen]`·`[reverse]` 표 가운데 하나라도 값을 하나 이상 가진다 |
    | 2 | `service_unit` | `serve`·`listen`·`reverse` 어느 mode든 그 서비스 유닛이 등록돼 있다(`service_not_registered`가 쓰는 같은 검출. Windows는 작업 정의 파일) |
-   | 3 | `daemon` | `serve.json`이 있거나(가리키는 프로세스가 죽었어도, 비정상 종료한 serve의 흔적이다), 런타임 디렉터리에 살아 있는 프로세스의 localctl endpoint가 있다 |
-   | 4 | `role_pin` | `trust.toml`에 role이 `none`이 아닌 pin이 있다. 인바운드를 role로 인가한다는 뜻이다 |
-   | 5 | `role_invite` | role이 `none`이 아닌 role을 실은 살아 있는 초대(`invites.toml`)가 있다 |
+   | 3 | `daemon` | `serve.json`이 있거나(가리키는 프로세스가 죽었어도, 비정상 종료한 serve의 흔적이다), 런타임 디렉터리에 살아 있는 프로세스의 localctl endpoint가 있다|
+   | 4 | `role_pin` | `trust.toml`에 role이 `none`이 아닌 pin이나 `qsh trust allow`가 준 `grants`가 있는 pin이 있다. 인바운드를 role이나 grant로 인가한다는 뜻이다(grant는 role과 무관하게 판정되므로 role `none` pin도 인가받는다, ADR-0051 결정 12) |
+   | 5 | `role_invite` | role이 `none`이 아닌 role을 실은 살아 있는 초대(`invites.toml`)가 있다. 파일이 있는데 읽히지 않는 것도 징후로 본다 |
    | 없음 | `no_server_signal` | 위 어느 것도 없다. `client`다 |
 
    징후가 아닌 것도 못 박는다. `acl.toml`의 유무와 내용은 징후가 아니다(배포가 client에도 렌더한다). `role none`이거나 role 키가 없는 pin, `[iroh]`·`[interactive]`·`[agent]`·`[punch]`·`[transport]` 같은 client 설정, 열려 있는 `hosts.toml`도 아니다. 추론은 파일과 프로세스 목록만 읽고 어떤 네트워크 호출도 하지 않는다.
@@ -57,7 +59,7 @@ ADR-0038이 doctor를 고치지 않은 이유는 두 가지였다. client 장비
 
 6. **`qsh setup`.** host 쪽 세 역할(`host`, `host --to`, `listener`)의 doctor 단계는 `mode: "server"`를 요청한다. 사용자가 server로 만들겠다고 고른 장비이므로 아직 서비스도 pin도 없는 setup 도중에도 `acl_policy_missing`이 나와야 ADR-0038 결정 6의 이중 잠금이 유지된다. `client` 역할은 `auto`로 둔다. 그 결과 징후 없는 client 장비의 `setup client`는 doctor 단계에서 `acl_policy_missing` 자체가 나오지 않아 `complete: true`가 면제 없이 선다. ADR-0038의 면제(`client` 역할의 `acl_policy_missing`)는 그대로 남고, client 역할 장비가 server로 판정되는 경우(예: client 겸 server)에만 쓰인다.
 
-7. **틀릴 수 있는 방향과 그 비용.** 아직 한 번도 띄운 적 없고 서비스·`serve.json`·role pin·role 초대·`[serve]` 표가 하나도 없는 server 후보는 `client`로 판정된다. 이때 `acl.toml`을 빠뜨려도 `qsh doctor`는 `acl_policy_missing`을 내지 않는다. 이 틈을 다음이 메운다.
+7. **틀릴 수 있는 방향과 그 비용.** 아직 한 번도 띄운 적 없고 서비스·`serve.json`·role이나 grant를 가진 pin·role 초대·`[serve]` 표가 하나도 없는 server 후보는 `client`로 판정된다. 설정과 `serve.json` 없이 손으로 띄운 `qsh reverse <controller>`도 같다(localctl endpoint도 `serve.json`도 남기지 않는다). 이때 `acl.toml`을 빠뜨려도 `qsh doctor`는 `acl_policy_missing`을 내지 않는다. 이 틈을 다음이 메운다.
    - `qsh serve`·`qsh listen`의 시작 진단은 이 ADR과 무관하게 그대로 `acl_policy_missing`·`acl_policy_invalid`를 낸다. 인가기는 role도 `acl.toml` 행도 허용하지 않으면 요청을 거부한다(default-deny). doctor의 판정은 인가에 관여하지 않는다.
    - 결정 3의 징후 가운데 role pin·role 초대는 `qsh trust add --role`, `qsh pair invite`, `qsh setup host`가 server를 세우는 첫 단계에서 이미 남긴다.
    - `qsh setup host`(결정 6), `qsh doctor --mode server`, `[doctor].mode = "server"`는 판정을 고정한다. 배포가 server 장비에 `[doctor].mode = "server"`를 렌더하면 징후와 무관하게 점검이 돈다.

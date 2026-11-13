@@ -1865,9 +1865,9 @@ qsh doctor [host] [--mode <auto|client|server>] [--fail-on <warn|error>] --json
 |---|---|
 | `config_section` | `config.toml`의 `[serve]`·`[listen]`·`[reverse]` 표 가운데 하나라도 값을 하나 이상 가진다 |
 | `service_unit` | `serve`·`listen`·`reverse` 어느 mode든 서비스 유닛이 등록돼 있다(`service_not_registered`와 같은 검출) |
-| `daemon` | `serve.json`이 있다(가리키는 프로세스가 죽었어도 비정상 종료한 serve의 흔적이다). 또는 런타임 디렉터리에 살아 있는 프로세스의 localctl endpoint가 있다 |
-| `role_pin` | `trust.toml`에 role이 `none`이 아닌 pin이 있다 |
-| `role_invite` | role이 `none`이 아닌 role을 실은 살아 있는 초대가 있다 |
+| `daemon` | `serve.json`이 있다(가리키는 프로세스가 죽었어도 비정상 종료한 serve의 흔적이다). 또는 런타임 디렉터리에 살아 있는 프로세스의 localctl endpoint가 있다|
+| `role_pin` | `trust.toml`에 role이 `none`이 아닌 pin이나 `qsh trust allow`로 준 `grants`가 있는 pin이 있다 |
+| `role_invite` | role이 `none`이 아닌 role을 실은 살아 있는 초대가 있다. `invites.toml`이 있는데 읽히지 않을 때도 같다 |
 
 `acl.toml`의 유무와 내용, `role none`이거나 role 키가 없는 pin, client 설정(`[iroh]`·`[interactive]`·`[agent]`·`[punch]`·`[transport]`)은 징후가 아니다. 추론은 파일과 프로세스 목록만 읽고 네트워크를 쓰지 않는다. 징후가 하나도 없는 server 후보(한 번도 띄운 적 없고 pin에 role도 없는 장비)는 `client`로 판정된다. 그 장비를 점검하려면 `--mode server`나 `[doctor].mode = "server"`를 쓴다. `qsh serve`·`qsh listen`의 시작 진단은 이 판정과 무관하게 그대로다.
 
