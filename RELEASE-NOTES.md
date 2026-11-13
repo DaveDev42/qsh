@@ -9,6 +9,71 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.7.2`
+
+A patch release on top of `v0.7.1`. The iroh relay route no longer depends
+on one relay being up.
+
+### Changes
+
+- On 2026-11-13 the default relay, `aps1-1.relay.n0.iroh.link`, went down
+  (TCP connections refused). qsh pinned that one relay, so every iroh link
+  died with it while n0's other relays were fine. qsh now keeps a list of
+  candidate relays. By default the list is n0's four public relays:
+  `aps1-1`, `usw1-1`, `use1-1` and `euc1-1` under `relay.n0.iroh.link`.
+  A daemon (`qsh serve`, `qsh listen`, `qsh serve --to`) homes on the
+  candidate that answers fastest. When that relay stops answering for
+  three seconds, the daemon asks iroh to measure the candidates again and
+  moves to another one, without a restart or a config change. In the
+  in-process tests the move takes about three seconds; iroh's own timer
+  did not move the daemon within 20 seconds. A client dial offers every
+  candidate in the host's address, so it reaches the host wherever it is
+  homed, and a dead or silent candidate does not use up the dial time.
+  Discovery stays off: the candidates come from your configuration, and
+  nothing is published or looked up. See ADR-0062 and protocol §22.11.
+- `[iroh].relay_url` takes one URL as before, or a list of up to eight
+  (`relay_url = ["https://a.example", "https://b.example"]`).
+  `qsh config set iroh.relay_url "https://a.example,https://b.example"`
+  writes the list. One URL means one relay and no failover. An empty list,
+  a URL that is not `https`, or more than eight entries is `CONFIG_ERROR`.
+- A pin's own `relay` (`qsh trust iroh --relay`) is still one URL. A pin
+  that has one dials only that relay and does not fail over. Leave it
+  unset to use the device's list.
+- `details.iroh.reason` is `relay_unreachable` only when no candidate
+  could be reached. If one candidate answers a check, no relay reason is
+  given; if a reachable one fails at TLS or the WebSocket upgrade, that
+  stage is the reason.
+- `serve.json`'s optional `iroh` object gains `relays`, the candidate list.
+  `relay` is the relay the endpoint was on when the file was written.
+
+### What changes on the network
+
+A client dial connects to every candidate relay, so by default it talks to
+four n0 hosts instead of one. Set `iroh.relay_url` to a single URL to keep
+the old behavior. If you run your own `iroh-relay`, list it alone, or list
+it next to n0's relays if you want n0 as a fallback; the daemon picks by
+latency, not by order.
+
+### What is still unproven
+
+Everything `v0.7.1` lists, plus these items:
+
+- The failover was tested against two in-process relays on loopback, with a
+  relay stopped under a running daemon, one relay down from the start, and
+  one that accepts TCP and never answers. It was not run against the public
+  n0 relays, and not on the corporate network (TITAN) behind which the
+  relay route was measured. On the public relays, which answer address
+  discovery, a net report should end sooner than in the tests.
+- Moving from a relay to a direct path is unchanged by this release. The
+  `v0.7.0` item about that upgrade still stands.
+- What happens to a connection that is already up when its relay dies was
+  not measured. The tests cover the new dial and the recovery re-dial that
+  starts right after the relay dies, not the old connection's last moments.
+
+### Assets and signing
+
+Unchanged from `v0.7.1`, with `v0.7.2` in the asset names.
+
 ## `v0.7.1`
 
 A patch release on top of `v0.7.0`. It fixes one cause of intermittent

@@ -51,8 +51,14 @@ pub struct IrohRecord {
     /// The endpoint's id as a qsh fingerprint: the name a peer's pin gives
     /// this host.
     pub endpoint_id: String,
-    /// The relay URL the endpoint homes on.
+    /// The relay URL the endpoint is homed on when the record is written, or
+    /// the first candidate when it has not picked one yet.
     pub relay: String,
+    /// Every candidate relay the endpoint may home on (ADR-0062), in the
+    /// order configured. Absent in a record written before candidate lists
+    /// existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
 }
 
 impl ServeRecord {
@@ -73,6 +79,7 @@ impl ServeRecord {
         self.iroh = Some(IrohRecord {
             endpoint_id: bound.endpoint_id,
             relay: bound.relay,
+            relays: bound.relays,
         });
         self
     }

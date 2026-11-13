@@ -23,7 +23,7 @@ pub struct TestRelay {
     pub url: String,
     /// The relay's self-signed certificate.
     pub cert: CertificateDer,
-    _server: Server,
+    server: Option<Server>,
 }
 
 impl TestRelay {
@@ -44,7 +44,7 @@ impl TestRelay {
         Self {
             url,
             cert: CertificateDer::from(certs[0].to_vec()),
-            _server: server,
+            server: Some(server),
         }
     }
 
@@ -54,6 +54,27 @@ impl TestRelay {
             .trim_start_matches("https://")
             .parse()
             .expect("the test relay url is a socket address")
+    }
+
+    /// Stop the relay: its listener closes and every client connection to it
+    /// drops, so a dial to its URL is refused from now on. Stopping twice is
+    /// harmless.
+    pub async fn kill(&mut self) {
+        if let Some(server) = self.server.take() {
+            let _ = server.shutdown().await;
+        }
+    }
+
+    /// An endpoint config that homes on the best of `relays` and trusts all
+    /// of their certificates, bound to loopback only.
+    pub fn candidates_config(relays: &[&TestRelay]) -> IrohConfig {
+        IrohConfig {
+            relay: IrohRelay::Urls(relays.iter().map(|r| r.url.clone()).collect()),
+            relay_trust: IrohRelayTrust::OnlyRoots(relays.iter().map(|r| r.cert.clone()).collect()),
+            bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
+            proxy_from_env: false,
+            relay_quic_port: None,
+        }
     }
 
     /// An endpoint config that homes on this relay and trusts its

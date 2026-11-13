@@ -834,10 +834,13 @@ qsh --no-iroh nas uname -a                             # skip the relay for one 
 - A relay connection moves to a direct path inside the same connection when
   iroh finds one. From then on the host sees your address, as with any direct
   connection.
-- The default relay is a public one run by n0 (`aps1-1.relay.n0.iroh.link`).
-  It has rate limits and its terms can change, and QSH has no say in either.
-  For regular use, run your own `iroh-relay` and set `iroh.relay_url` or
-  `--relay`. Nothing is published to iroh's discovery services.
+- The default relays are public ones run by n0 (`aps1-1`, `usw1-1`, `use1-1`
+  and `euc1-1` under `relay.n0.iroh.link`). QSH homes on the fastest one that
+  answers and moves to another by itself when it stops answering, so one relay
+  being down does not cut your links. They have rate limits and their terms can
+  change, and QSH has no say in either. For regular use, run your own
+  `iroh-relay` and set `iroh.relay_url` (a URL, or a list of URLs to fail over
+  among) or `--relay` (one relay, no failover). Nothing is published to iroh's discovery services.
 - The relay sees ciphertext, the endpoint ids of both ends, and when and how
   much you connect. It cannot read the session or pose as the host. A client
   uses a fresh random endpoint id for each command, and proves its qsh key

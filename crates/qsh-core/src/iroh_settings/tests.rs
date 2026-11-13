@@ -31,7 +31,8 @@ fn error_code(section: IrohSection) -> ErrorCode {
 fn an_empty_section_gives_the_documented_defaults() {
     let settings = IrohSection::default().settings().unwrap();
     assert!(!settings.enable);
-    assert_eq!(settings.relay_url, DEFAULT_RELAY_URL);
+    assert_eq!(settings.relay_urls, DEFAULT_RELAY_URLS);
+    assert_eq!(settings.relay_urls.len(), 4);
     assert_eq!(settings.bind_port, 0);
     assert_eq!(settings.mode, IrohMode::Auto);
     assert_eq!(settings.proxy, IrohProxy::Env);
@@ -76,11 +77,11 @@ fn the_pins_relay_beats_the_device_relay_and_only_with_the_route_on() {
     .settings()
     .unwrap();
     let on = pin(&["iroh"], Some("https://pin.example"), Some([7; 32]));
-    assert_eq!(settings.relay_for(&on), "https://pin.example");
+    assert_eq!(settings.relays_for(&on), ["https://pin.example"]);
     let no_relay = pin(&["iroh"], None, Some([7; 32]));
-    assert_eq!(settings.relay_for(&no_relay), "https://device.example");
+    assert_eq!(settings.relays_for(&no_relay), ["https://device.example"]);
     let route_off = pin(&[], Some("https://pin.example"), Some([7; 32]));
-    assert_eq!(settings.relay_for(&route_off), "https://device.example");
+    assert_eq!(settings.relays_for(&route_off), ["https://device.example"]);
 }
 
 #[test]
@@ -90,10 +91,17 @@ fn a_target_needs_the_route_a_valid_key_and_a_device_with_the_mode_on() {
     let target = IrohTarget::for_pin(&settings, &ready).expect("a target");
     assert_eq!(target.peer.key, [7; 32]);
     assert!(target.uses_default_relay());
+    // The default is every n0 relay, so one of them being down is survivable.
     assert_eq!(
         target.config.relay,
-        IrohRelay::Url(DEFAULT_RELAY_URL.to_string())
+        IrohRelay::Urls(
+            DEFAULT_RELAY_URLS
+                .iter()
+                .map(|u| (*u).to_string())
+                .collect()
+        )
     );
+    assert_eq!(target.relay_urls, DEFAULT_RELAY_URLS);
     assert!(target.config.proxy_from_env);
     assert!(matches!(target.config.relay_trust, IrohRelayTrust::System));
 
@@ -131,4 +139,116 @@ fn a_relay_is_named_by_scheme_and_host_only() {
     );
     assert!(is_default_relay("https://aps1-1.relay.n0.iroh.link./"));
     assert!(!is_default_relay("https://other.example"));
+}
+
+fn section_of(toml_text: &str) -> IrohSection {
+    toml::from_str(toml_text).expect("the section parses")
+}
+
+#[test]
+fn relay_url_is_a_string_or_a_list_of_strings() {
+    let one = section_of(r#"relay_url = "https://relay.example""#);
+    assert_eq!(
+        one.relay_url,
+        Some(RelayUrlSetting::One("https://relay.example".into()))
+    );
+    let settings = one.settings().unwrap();
+    assert_eq!(settings.relay_urls, ["https://relay.example"]);
+    // A single URL is the old behavior: the endpoint's only relay.
+    assert_eq!(
+        settings
+            .client_config(&pin(&["iroh"], None, Some([7; 32])))
+            .relay,
+        IrohRelay::Url("https://relay.example".into())
+    );
+
+    let many = section_of(r#"relay_url = ["https://a.example", "https://b.example:8443"]"#);
+    let settings = many.settings().unwrap();
+    assert_eq!(
+        settings.relay_urls,
+        ["https://a.example", "https://b.example:8443"]
+    );
+    assert_eq!(
+        settings.server_config().relay,
+        IrohRelay::Urls(vec![
+            "https://a.example".into(),
+            "https://b.example:8443".into()
+        ])
+    );
+    assert!(
+        !IrohTarget::for_pin(&settings, &pin(&["iroh"], None, Some([7; 32])))
+            .unwrap()
+            .uses_default_relay()
+    );
+
+    // Both forms survive a round trip through the config file's TOML.
+    for section in [one, many] {
+        let text = toml::to_string(&section).unwrap();
+        assert_eq!(section_of(&text), section, "{text}");
+    }
+}
+
+#[test]
+fn a_bad_relay_list_is_a_config_error_and_a_duplicate_is_one_candidate() {
+    let list = |urls: &[&str]| IrohSection {
+        relay_url: Some(RelayUrlSetting::Many(
+            urls.iter().map(|u| (*u).to_string()).collect(),
+        )),
+        ..IrohSection::default()
+    };
+    // Empty: the key's absence is how the defaults are asked for.
+    assert_eq!(error_code(list(&[])), ErrorCode::ConfigError);
+    // One bad element spoils the list.
+    assert_eq!(
+        error_code(list(&["https://ok.example", "http://not-https.example"])),
+        ErrorCode::ConfigError
+    );
+    assert_eq!(
+        error_code(list(&["https://ok.example", ""])),
+        ErrorCode::ConfigError
+    );
+    // Over the cap.
+    let many: Vec<String> = (0..=MAX_RELAY_URLS)
+        .map(|i| format!("https://r{i}.example"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert_eq!(error_code(list(&many)), ErrorCode::ConfigError);
+    assert!(list(&many[..MAX_RELAY_URLS]).settings().is_ok());
+    // The same relay spelled twice is one candidate, in first-seen order.
+    let settings = list(&[
+        "https://a.example",
+        "https://b.example",
+        "https://A.example/",
+        "https://b.example.",
+    ])
+    .settings()
+    .unwrap();
+    assert_eq!(
+        settings.relay_urls,
+        ["https://a.example", "https://b.example"]
+    );
+}
+
+#[test]
+fn the_default_set_is_the_four_n0_relays_and_is_recognised_as_default() {
+    assert_eq!(DEFAULT_RELAY_URLS.len(), 4);
+    for host in ["aps1-1", "usw1-1", "use1-1", "euc1-1"] {
+        let url = format!("https://{host}.relay.n0.iroh.link");
+        assert!(DEFAULT_RELAY_URLS.contains(&url.as_str()), "{url}");
+        assert!(is_default_relay(&url));
+        assert!(is_default_relay(&format!("{url}./")));
+    }
+    assert!(!is_default_relay("https://relay.example"));
+    // A pin's own relay is not the default set, even when it is an n0 relay
+    // spelled out: the dial uses that one relay only.
+    let settings = IrohSettings::default();
+    let named = pin(
+        &["iroh"],
+        Some("https://aps1-1.relay.n0.iroh.link"),
+        Some([7; 32]),
+    );
+    assert_eq!(
+        settings.relays_for(&named),
+        ["https://aps1-1.relay.n0.iroh.link"]
+    );
 }

@@ -9,9 +9,18 @@
 //!   published to or resolved from pkarr or DNS. A peer is reached by the
 //!   addresses the caller supplies: an optional relay URL (the default relay
 //!   when the caller names none) and optional direct socket addresses.
-//! - **One fixed relay** (decision 11). The relay map holds one URL, so the
-//!   endpoint always picks it as its home relay; there is no latency-based
-//!   choice among n0's servers.
+//! - **A configured set of relays** (decision 11, amended by ADR-0062). The
+//!   relay map holds exactly the candidate URLs the caller names, and nothing
+//!   else is ever added to it. iroh measures them (QUIC address discovery and
+//!   an HTTPS probe per relay), homes on the one with the best recent
+//!   latency, and moves home to another candidate when the home one stops
+//!   answering: the next net report leaves a dead relay out of the latency
+//!   table, so it cannot be preferred. A daemon endpoint also asks for a
+//!   report as soon as its home relay has been down for a few seconds
+//!   ([`keep_home_relay`]) instead of waiting out iroh's 20 to 26 second
+//!   period. A dial puts every candidate in the target's address, so the
+//!   first packet reaches whichever relay the target is homed on. None of
+//!   this needs discovery: the candidates come from configuration.
 //! - **OS trust store for relay TLS** (decision 12): [`IrohRelayTrust::System`]
 //!   is the default. The relay hop is not what authenticates the peer; the
 //!   QUIC connection inside it is, by pin.
@@ -65,10 +74,25 @@ use crate::{Connection, Principal};
 /// string (`qsh/1`).
 pub const IROH_ALPN: &[u8] = b"qsh/1";
 
-/// The relay used when none is configured: one of n0's public relays, fixed
-/// (ADR-0061 decisions 10 and 11). The public relays are rate limited and
-/// their terms can change; a self-hosted `iroh-relay` is the alternative.
+/// One of n0's public relays (ADR-0061 decisions 10 and 11), the first of
+/// [`DEFAULT_RELAY_URLS`]. The public relays are rate limited and their terms
+/// can change; a self-hosted `iroh-relay` is the alternative.
 pub const DEFAULT_RELAY_URL: &str = "https://aps1-1.relay.n0.iroh.link.";
+
+/// The relays used when none is configured: n0's four public relays
+/// (ADR-0062). The endpoint homes on whichever answers fastest and moves to
+/// another when it stops answering, so one relay being down does not take
+/// every link with it.
+pub const DEFAULT_RELAY_URLS: [&str; 4] = [
+    "https://aps1-1.relay.n0.iroh.link.",
+    "https://usw1-1.relay.n0.iroh.link.",
+    "https://use1-1.relay.n0.iroh.link.",
+    "https://euc1-1.relay.n0.iroh.link.",
+];
+
+/// The most relay candidates one endpoint takes. A dial opens a connection
+/// to every candidate, so the set stays small.
+pub const MAX_RELAY_CANDIDATES: usize = 8;
 
 /// How an iroh endpoint uses relays.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,13 +101,29 @@ pub enum IrohRelay {
     /// relay.
     Disabled,
     /// Home on this one relay URL and dial peers through it unless the peer
-    /// names another.
+    /// names another. No failover: the relay is the only candidate.
     Url(String),
+    /// Home on the best of these candidate relays and move to another when it
+    /// fails; dial peers through all of them unless the peer names one. At
+    /// most [`MAX_RELAY_CANDIDATES`], none empty.
+    Urls(Vec<String>),
+}
+
+impl IrohRelay {
+    /// The candidate URLs, in the order given; empty when the relay is
+    /// disabled.
+    pub fn candidates(&self) -> Vec<&str> {
+        match self {
+            Self::Disabled => Vec::new(),
+            Self::Url(url) => vec![url.as_str()],
+            Self::Urls(urls) => urls.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 impl Default for IrohRelay {
     fn default() -> Self {
-        Self::Url(DEFAULT_RELAY_URL.to_owned())
+        Self::Urls(DEFAULT_RELAY_URLS.iter().map(|u| (*u).to_owned()).collect())
     }
 }
 
@@ -106,7 +146,7 @@ pub enum IrohRelayTrust {
 /// How to build an [`IrohEndpoint`].
 #[derive(Clone, Debug, Default)]
 pub struct IrohConfig {
-    /// Relay use. Defaults to the fixed public relay.
+    /// Relay use. Defaults to n0's public relays ([`DEFAULT_RELAY_URLS`]).
     pub relay: IrohRelay,
     /// How the relay's certificate is verified. Defaults to the OS store.
     pub relay_trust: IrohRelayTrust,
@@ -131,7 +171,9 @@ pub struct IrohConfig {
 pub struct IrohPeer {
     /// The peer's Ed25519 public key (its iroh endpoint id).
     pub key: [u8; 32],
-    /// The relay the peer homes on; `None` means this endpoint's own relay.
+    /// The one relay the peer homes on; `None` means every candidate relay of
+    /// this endpoint (the peer fails over among its own candidates, so the
+    /// dial offers them all).
     pub relay: Option<String>,
     /// Direct socket addresses to try alongside the relay.
     pub direct_addrs: Vec<SocketAddr>,
@@ -215,20 +257,33 @@ pub(crate) struct EndpointHandle {
     /// A closed connection needs no auto-close on drop, so holding a clone
     /// changes nothing about its lifetime.
     closing: Mutex<Vec<ie::Connection>>,
-    /// The task that keeps a daemon endpoint's public address advertised
-    /// ([`keep_reflexive_address`]); `None` for a client endpoint. It holds
-    /// a clone of the iroh endpoint, so [`Drop`] ends it before the close.
-    keeper: Option<tokio::task::JoinHandle<()>>,
+    /// The tasks that keep a daemon endpoint healthy: its public address
+    /// advertised ([`keep_reflexive_address`]) and its home relay replaced
+    /// when it dies ([`keep_home_relay`]); empty for a client endpoint. They
+    /// hold clones of the iroh endpoint, so [`Drop`] ends them before the
+    /// close.
+    keepers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl EndpointHandle {
-    fn new(ep: iroh::Endpoint, identity: SecretKey, daemon: bool) -> Self {
-        let keeper = daemon.then(|| tokio::spawn(keep_reflexive_address(ep.clone())));
+    fn new(
+        ep: iroh::Endpoint,
+        identity: SecretKey,
+        daemon: bool,
+        nudge: Option<RelayNudge>,
+    ) -> Self {
+        let mut keepers = Vec::new();
+        if daemon {
+            keepers.push(tokio::spawn(keep_reflexive_address(ep.clone())));
+            if let Some(nudge) = nudge {
+                keepers.push(tokio::spawn(keep_home_relay(ep.clone(), nudge)));
+            }
+        }
         Self {
             ep,
             identity,
             closing: Mutex::new(Vec::new()),
-            keeper,
+            keepers,
         }
     }
 
@@ -294,7 +349,7 @@ impl std::ops::Deref for EndpointHandle {
 
 impl Drop for EndpointHandle {
     fn drop(&mut self) {
-        if let Some(keeper) = self.keeper.take() {
+        for keeper in self.keepers.drain(..) {
             keeper.abort();
         }
         close_in_background(&self.ep);
@@ -360,12 +415,97 @@ async fn apply(ep: &iroh::Endpoint, actions: Vec<Action>) {
     }
 }
 
+/// What it takes to make iroh run a net report at once: the relay set, whose
+/// re-insertion is the one public way to start a full report.
+#[derive(Clone)]
+struct RelayNudge {
+    relays: Vec<(RelayUrl, Arc<iroh::RelayConfig>)>,
+}
+
+impl RelayNudge {
+    fn new(urls: &[RelayUrl], quic_port: Option<u16>) -> Self {
+        Self {
+            relays: urls
+                .iter()
+                .map(|url| (url.clone(), Arc::new(relay_config(url, quic_port))))
+                .collect(),
+        }
+    }
+
+    /// Re-insert the first candidate: iroh treats it as a relay map change
+    /// and starts a full report, which measures every candidate again and
+    /// re-picks the home relay among those that answered.
+    async fn run(&self, ep: &iroh::Endpoint) {
+        if let Some((url, config)) = self.relays.first() {
+            ep.insert_relay(url.clone(), Arc::clone(config)).await;
+        }
+    }
+}
+
+/// How long a daemon endpoint's home relay may be down before the endpoint
+/// asks for a net report to re-pick it.
+const HOME_RELAY_GRACE: Duration = Duration::from_secs(3);
+
+/// How often a daemon endpoint asks again while no home relay is connected.
+const HOME_RELAY_NUDGE_EVERY: Duration = Duration::from_secs(10);
+
+/// Re-home a daemon endpoint quickly when its home relay goes away.
+///
+/// iroh re-picks its home relay from each net report and runs one every 20
+/// to 26 seconds. A dead relay is left out of a report's latency table, so
+/// the report names another candidate, but a link would wait up to that long
+/// for it. This task watches the home relay's connection state and, once no
+/// home relay has been connected for [`HOME_RELAY_GRACE`], asks for a report
+/// ([`RelayNudge::run`]), again every [`HOME_RELAY_NUDGE_EVERY`] until one is
+/// connected. It only asks; the choice stays iroh's. Runs until the task is
+/// aborted ([`EndpointHandle`]'s drop) or the status watcher disconnects.
+async fn keep_home_relay(ep: iroh::Endpoint, nudge: RelayNudge) {
+    let mut status = ep.home_relay_status();
+    let mut down: Option<tokio::time::Instant> = None;
+    let mut next = tokio::time::Instant::now();
+    loop {
+        if status
+            .get()
+            .iter()
+            .any(iroh::endpoint::RelayStatus::is_connected)
+        {
+            down = None;
+            if status.updated().await.is_err() {
+                return;
+            }
+            continue;
+        }
+        let now = tokio::time::Instant::now();
+        if down.is_none() {
+            down = Some(now);
+            next = now + HOME_RELAY_GRACE;
+        }
+        tokio::select! {
+            changed = status.updated() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep_until(next) => {
+                tracing::info!("iroh: no home relay is connected; asking for a net report to re-home");
+                nudge.run(&ep).await;
+                next = tokio::time::Instant::now() + HOME_RELAY_NUDGE_EVERY;
+            }
+        }
+    }
+}
+
 /// An iroh endpoint bound to a qsh identity. A cheap `Clone` handle.
 #[derive(Clone)]
 pub struct IrohEndpoint {
     ep: Arc<EndpointHandle>,
     evaluator: Arc<dyn TrustEvaluator>,
-    relay: Option<RelayUrl>,
+    /// The candidate relays, in the order configured; empty when the relay
+    /// is disabled.
+    ///
+    /// Behind an `Arc` so the handle stays as small as it was with a single
+    /// relay (an enum in `qsh-core` holds these by value).
+    relays: Arc<Vec<RelayUrl>>,
     /// [`IrohConfig::relay_quic_port`], kept for [`Self::refresh_net_report`].
     relay_quic_port: Option<u16>,
     timeout: Duration,
@@ -377,7 +517,7 @@ impl fmt::Debug for IrohEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IrohEndpoint")
             .field("id", &self.ep.id().fmt_short().to_string())
-            .field("relay", &self.relay)
+            .field("relays", &self.relays)
             .finish_non_exhaustive()
     }
 }
@@ -474,13 +614,22 @@ impl IrohEndpoint {
         } else {
             identity_key.clone()
         };
-        let relay = match &config.relay {
-            IrohRelay::Disabled => None,
-            IrohRelay::Url(url) => Some(
-                url.parse::<RelayUrl>()
-                    .map_err(|e| setup_err("relay url", &e))?,
-            ),
-        };
+        let candidates = config.relay.candidates();
+        if candidates.len() > MAX_RELAY_CANDIDATES {
+            return Err(SetupError::Iroh(format!(
+                "relay url: {} candidates given, at most {MAX_RELAY_CANDIDATES} are taken",
+                candidates.len()
+            )));
+        }
+        let mut relays: Vec<RelayUrl> = Vec::with_capacity(candidates.len());
+        for url in candidates {
+            let parsed = url
+                .parse::<RelayUrl>()
+                .map_err(|e| setup_err("relay url", &e))?;
+            if !relays.contains(&parsed) {
+                relays.push(parsed);
+            }
+        }
 
         // `presets::Empty`: no address lookup (no pkarr, no DNS), relays
         // disabled until set below. The crypto provider is named explicitly
@@ -493,11 +642,13 @@ impl IrohEndpoint {
             .clear_address_lookup()
             .ca_tls_config(ca_tls_config(&config.relay_trust))
             .transport_config(transport_config());
-        if let Some(url) = &relay {
-            builder = builder.relay_mode(RelayMode::Custom(iroh::RelayMap::from(relay_config(
-                url,
-                config.relay_quic_port,
-            ))));
+        if !relays.is_empty() {
+            builder = builder.relay_mode(RelayMode::Custom(
+                relays
+                    .iter()
+                    .map(|url| relay_config(url, config.relay_quic_port))
+                    .collect::<iroh::RelayMap>(),
+            ));
         }
         if config.proxy_from_env {
             builder = builder.proxy_from_env();
@@ -518,10 +669,11 @@ impl IrohEndpoint {
             .bind()
             .await
             .map_err(|e| setup_err("bind iroh endpoint", &e))?;
+        let nudge = (!relays.is_empty()).then(|| RelayNudge::new(&relays, config.relay_quic_port));
         Ok(Self {
-            ep: Arc::new(EndpointHandle::new(ep, identity_key, !ephemeral)),
+            ep: Arc::new(EndpointHandle::new(ep, identity_key, !ephemeral, nudge)),
             evaluator,
-            relay,
+            relays: Arc::new(relays),
             relay_quic_port: config.relay_quic_port,
             timeout: default_dial_timeout(),
             proof_timeout: PROOF_TIMEOUT,
@@ -579,11 +731,12 @@ impl IrohEndpoint {
     /// report at once.
     #[doc(hidden)]
     pub async fn refresh_net_report(&self) {
-        let Some(url) = self.relay.clone() else {
+        if self.relays.is_empty() {
             return;
-        };
-        let config = relay_config(&url, self.relay_quic_port);
-        self.ep.insert_relay(url, Arc::new(config)).await;
+        }
+        RelayNudge::new(self.relays.as_slice(), self.relay_quic_port)
+            .run(&self.ep)
+            .await;
     }
 
     /// Resolves with the next net report that found no public IPv4 address,
@@ -602,10 +755,31 @@ impl IrohEndpoint {
         tokio::time::timeout(within, wait).await.unwrap_or(false)
     }
 
-    /// The relay this endpoint homes on, as the URL it was configured with;
-    /// `None` when the relay is disabled.
+    /// The candidate relays, as the URLs they were configured with, in the
+    /// order given; empty when the relay is disabled.
+    pub fn relay_urls(&self) -> Vec<String> {
+        self.relays.iter().map(ToString::to_string).collect()
+    }
+
+    /// The relay this endpoint is homed on right now, when it has picked one
+    /// (a connected home relay is preferred over one still connecting);
+    /// `None` before the first pick, while no candidate answers, and when the
+    /// relay is disabled.
+    pub fn home_relay(&self) -> Option<String> {
+        let mut status = self.ep.home_relay_status();
+        let homes = status.get();
+        homes
+            .iter()
+            .find(|s| s.is_connected())
+            .or_else(|| homes.first())
+            .map(|s| s.url().to_string())
+    }
+
+    /// The relay to name in a log or report: the home relay when there is
+    /// one, else the first candidate; `None` when the relay is disabled.
     pub fn relay_url(&self) -> Option<String> {
-        self.relay.as_ref().map(ToString::to_string)
+        self.home_relay()
+            .or_else(|| self.relays.first().map(ToString::to_string))
     }
 
     /// Resolves once the endpoint is connected to its relay (never, when the
@@ -697,15 +871,20 @@ impl IrohEndpoint {
             });
         }
         let mut addr = EndpointAddr::new(id);
-        let relay = match &peer.relay {
-            Some(url) => Some(url.parse::<RelayUrl>().map_err(|e| {
+        // The peer fails over among its own candidates, so it may be homed on
+        // any of them. Every candidate goes in the address: iroh sends the
+        // first packet to all of them at once, a dead one costs nothing but
+        // its own queue, and the handshake completes through the one the peer
+        // is on.
+        let relays = match &peer.relay {
+            Some(url) => vec![url.parse::<RelayUrl>().map_err(|e| {
                 DialError::Failed(ConnectionError::Other(
                     format!("peer relay url: {e}").into(),
                 ))
-            })?),
-            None => self.relay.clone(),
+            })?],
+            None => self.relays.to_vec(),
         };
-        if let Some(url) = relay {
+        for url in relays {
             addr = addr.with_relay_url(url);
         }
         for direct in &peer.direct_addrs {

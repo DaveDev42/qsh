@@ -27,7 +27,7 @@ mod size_guard;
 pub(crate) use conn::{IrohConn, IrohRecv, IrohSend};
 pub(crate) use endpoint::verify_iroh_peer;
 pub use endpoint::{
-    DEFAULT_RELAY_URL, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming, IrohPeer, IrohRelay,
-    IrohRelayTrust,
+    DEFAULT_RELAY_URL, DEFAULT_RELAY_URLS, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming,
+    IrohPeer, IrohRelay, IrohRelayTrust, MAX_RELAY_CANDIDATES,
 };
 pub use key::fingerprint_of_ed25519_key;
