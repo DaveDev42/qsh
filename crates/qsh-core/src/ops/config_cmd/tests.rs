@@ -187,6 +187,65 @@ fn unknown_keys_are_rejected_everywhere() {
     assert_eq!(read_config(&ops), COMMENTED);
 }
 
+/// ADR-0062: `iroh.relay_url` holds one URL as a string, as it always did,
+/// and several as an array; `config get` returns whichever is stored.
+#[test]
+fn iroh_relay_url_takes_one_string_or_a_list() {
+    let (_g, ops) = temp_ops();
+    let get = |ops: &Ops| {
+        ops.config_get(ConfigGetReq {
+            key: "iroh.relay_url".into(),
+        })
+        .unwrap()
+        .value
+    };
+    set(&ops, "iroh.relay_url", "https://a.example").unwrap();
+    assert_eq!(get(&ops), Some("https://a.example".into()));
+    assert!(read_config(&ops).contains("relay_url = \"https://a.example\""));
+
+    let data = set(
+        &ops,
+        "iroh.relay_url",
+        "https://a.example, https://b.example https://c.example",
+    )
+    .unwrap();
+    assert!(data.changed);
+    assert_eq!(
+        get(&ops),
+        Some(serde_json::json!([
+            "https://a.example",
+            "https://b.example",
+            "https://c.example"
+        ]))
+    );
+    let settings = ops.config().unwrap().iroh.settings().unwrap();
+    assert_eq!(settings.relay_urls.len(), 3);
+
+    // Setting the same list again writes nothing.
+    let again = set(
+        &ops,
+        "iroh.relay_url",
+        "https://a.example,https://b.example,https://c.example",
+    )
+    .unwrap();
+    assert!(!again.changed);
+
+    // One element is a string again; a value with no URL is refused and the
+    // file keeps the last good value.
+    set(&ops, "iroh.relay_url", "https://b.example").unwrap();
+    assert_eq!(get(&ops), Some("https://b.example".into()));
+    assert!(set(&ops, "iroh.relay_url", " , ").is_err());
+    assert!(
+        set(
+            &ops,
+            "iroh.relay_url",
+            "https://ok.example,http://not-https.example"
+        )
+        .is_err()
+    );
+    assert_eq!(get(&ops), Some("https://b.example".into()));
+}
+
 #[test]
 fn get_list_and_unset() {
     let (_g, ops) = temp_ops();
@@ -440,7 +499,7 @@ fn every_field_populated() -> Config {
         },
         iroh: crate::iroh_settings::IrohSection {
             enable: Some(true),
-            relay_url: Some(String::new()),
+            relay_url: Some(crate::iroh_settings::RelayUrlSetting::One(String::new())),
             bind_port: Some(1),
             mode: Some(crate::iroh_settings::IrohMode::Auto),
             proxy: Some(crate::iroh_settings::IrohProxy::Env),
@@ -471,7 +530,7 @@ fn sample(path: &str, key: &crate::config_edit::ConfigKey) -> String {
         "reverse.backoff_jitter_pct" => "20".into(),
         _ => match key.ty {
             KeyType::Str if !key.choices.is_empty() => key.choices[0].into(),
-            KeyType::Str => "value".into(),
+            KeyType::Str | KeyType::StrOrList => "value".into(),
             KeyType::Int => "100".into(),
             KeyType::Bool => "true".into(),
         },

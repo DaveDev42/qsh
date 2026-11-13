@@ -28,6 +28,11 @@ pub enum KeyType {
     Int,
     /// `true` or `false`.
     Bool,
+    /// One string, or a list of strings (`iroh.relay_url`, ADR-0062). On the
+    /// command line the list is written separated by commas or spaces. One
+    /// value is stored as a TOML string, so a key that has always held a
+    /// string keeps doing so; two or more are stored as an array.
+    StrOrList,
 }
 
 /// One settable key.
@@ -79,7 +84,7 @@ const fn key(
     }
 }
 
-use KeyType::{Bool, Int, Str};
+use KeyType::{Bool, Int, Str, StrOrList};
 
 /// Every key `config.toml` reads, in documentation order.
 ///
@@ -169,7 +174,7 @@ pub const KEYS: &[ConfigKey] = &[
         ..key("agent", "forward", Str, false)
     },
     key("iroh", "enable", Bool, true),
-    key("iroh", "relay_url", Str, true),
+    key("iroh", "relay_url", StrOrList, true),
     key("iroh", "bind_port", Int, true),
     ConfigKey {
         choices: &["auto", "off"],
@@ -217,6 +222,18 @@ fn scalar_to_json(k: &ConfigKey, value: &Value) -> Result<Json, OpError> {
         Value::String(s) => Ok(Json::String(s.value().clone())),
         Value::Integer(i) => Ok(Json::from(*i.value())),
         Value::Boolean(b) => Ok(Json::Bool(*b.value())),
+        Value::Array(items) if k.ty == KeyType::StrOrList => items
+            .iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(Json::String(s.value().clone())),
+                other => Err(config_error(format!(
+                    "config key {} holds a list with a {} where a string is expected",
+                    k.path(),
+                    other.type_name()
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Json::Array),
         other => Err(config_error(format!(
             "config key {} holds a {} where a string, integer or boolean is expected",
             k.path(),
@@ -267,6 +284,20 @@ pub fn parse_argument(k: &ConfigKey, raw: &str) -> Result<Value, OpError> {
             let n = i64::try_from(n)
                 .map_err(|_| invalid(format!("{} value {n} is too large to store", k.path())))?;
             Ok(Value::from(n))
+        }
+        KeyType::StrOrList => {
+            let items: Vec<&str> = raw
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|item| !item.is_empty())
+                .collect();
+            match items.as_slice() {
+                [] => Err(invalid(format!(
+                    "{} takes a value, or several separated by commas, got {raw:?}",
+                    k.path()
+                ))),
+                [one] => Ok(Value::from(*one)),
+                many => Ok(Value::Array(many.iter().copied().collect())),
+            }
         }
         KeyType::Bool => match raw {
             "true" => Ok(Value::from(true)),

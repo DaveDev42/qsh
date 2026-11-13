@@ -1379,7 +1379,7 @@ pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/
 ### 22.2 relay 경로
 
 - relay 접속은 HTTPS 위 WebSocket(`/relay`)이다. relay URL은 pin(`trust.toml`)의 선택 필드이고, 없으면 설정의 기본 relay URL이다. 양 끝이 같은 기본값을 쓰면 pin에 URL을 적지 않아도 닿는다.
-- endpoint는 **설정된 relay URL 하나에 고정**으로 붙는다. 발견(pkarr, n0 DNS)으로 home relay를 고르지 않고 게시도 조회도 하지 않는다. 상대가 다른 relay에 붙어 있으면 pin에 적힌 URL이 그 relay다.
+- endpoint는 **설정된 후보 relay 목록**을 안다(ADR-0062, §22.11). 후보는 설정과 pin에서만 오고, 발견(pkarr, n0 DNS)은 게시도 조회도 하지 않는다. 후보가 하나(문자열 하나로 설정했거나 pin에 `relay`가 있는 경우)면 그 relay에 고정으로 붙는다. 상대가 후보 가운데 어느 relay에 있는지는 dial이 후보를 모두 실어 보내는 것으로 해결한다.
 - relay TLS는 OS 인증서 저장소로 검증한다(`platform-verifier`, `CaTlsConfig::system()`). qsh의 다른 곳에서 web PKI를 쓰지 않는다는 규칙(§3)과 충돌하지 않는다: 이 검증은 relay 서버 인증서에만 쓰이고 qsh 신원은 건드리지 않는다.
 - relay는 안쪽 QUIC 패킷을 나르는 중계자다. 내용도 신원도 relay가 아니라 **안쪽 QUIC의 pin 인증**이 세운다. relay가 가짜이거나 망이 TLS를 가로채도 pin이 맞는 상대를 만들어 낼 수 없다(threat-model D28·D29).
 - HTTP 프록시는 `[iroh].proxy`(기본 `env`, 환경 변수를 따름)로 정한다(`docs/CLI.md` §6.23).
@@ -1501,3 +1501,20 @@ relay로 선 연결이 직접 경로로 옮겨 가려면 두 끝이 서로의 �
 
 **시험.** `qsh-transport`의 `iroh_reflexive::a_failed_address_discovery_probe_does_not_unadvertise_the_public_address`가 NAT 역할의 UDP 중계 뒤에 QAD를 둔 relay로 데몬 endpoint가 공인 주소를 배우고, 중계를 막은 뒤의 report가 그 주소 없이 끝나도 알림 집합에 남는 것을 본다(keeper 없이는 마지막 단언에서 실패한다). 상태 기계는 `reflexive::tests`(`a_report_without_an_address_does_not_unpin_it`, `a_confirming_report_restarts_the_clock`, `a_new_address_replaces_the_old_one`, `an_unconfirmed_address_expires`, `each_family_keeps_its_own_clock`)가 맡는다. 두 NAT 사이 승격은 netns 실험(NAT 둘, QAD relay, 데몬 쪽 QAD만 차단)으로 확인했고 시험 스위트에는 넣지 않았다.
 
+### 22.11 relay 후보와 자동 장애 전환 (ADR-0062)
+
+기본 relay 하나(`aps1-1`)가 내려간 날 relay URL 하나에 고정된 endpoint는 home relay를 잃었고, 클라이언트는 죽은 relay로만 dial해서 모든 iroh 링크가 끊겼다. endpoint는 이제 후보 relay 목록을 쥐고 iroh의 home relay 선택을 쓴다. 발견은 계속 끈다.
+
+**후보.** `[iroh].relay_url`(문자열 하나 또는 배열, 최대 8개, 기본은 n0의 `aps1-1`·`usw1-1`·`use1-1`·`euc1-1`)이 장비의 후보 목록이다. pin에 `relay`가 있으면 그 pin으로 가는 dial의 후보는 그 하나다. endpoint는 후보를 모두 `RelayMode::Custom`의 `RelayMap`에 넣고 그 밖의 relay는 넣지 않는다.
+
+**home 선택(iroh 1.4.1이 한다).** net report가 맵의 relay를 모두 재서(QUIC 주소 발견과 HTTPS probe) 응답한 relay만 지연표에 올리고 최근 5분 지연이 가장 낮은 것을 `preferred_relay`로 낸다(`net_report.rs` `add_report_history_and_set_preferred_relay`). relay actor가 report의 `preferred_relay`로 home을 바꾼다(`socket/transports/relay/actor.rs` `on_network_change`). 죽은 relay는 지연표에 없으므로 home이 될 수 없고, 옛 home이 아직 답하면 새 후보가 지연의 2/3 이하일 때만 옮긴다. 이 선택에는 발견이 필요 없다.
+
+**dial.** 대상의 `EndpointAddr`에 후보 relay를 모두 넣는다. iroh는 연결 경로가 정해지기 전의 첫 패킷(QUIC Initial)을 알려진 모든 경로로 동시에 보내므로(`socket/remote_map/remote_state.rs` `send_datagram_to_targets`) 상대가 어느 후보에 붙어 있어도 handshake가 서고, 죽었거나 대답 없는 후보는 자기 송신 큐만 막는다. 후보를 순서대로 시도하는 단계가 없으므로 죽은 후보가 dial 시한을 쓰지 않는다. 상대가 relay를 옮기는 중이면 Initial의 재전송이 옮긴 뒤 다시 모든 후보로 나간다. 이 dial은 `ops/route.rs`의 직결·펀칭·iroh 경주와 시한 계산을 바꾸지 않는다.
+
+**데몬의 재선택 요청.** iroh의 report 주기는 20~26초(`socket.rs` `new_re_stun_timer`)이고, 시험에서 home relay를 죽인 데몬은 20초 안에 옮기지 못했다. 데몬 endpoint(`IrohEndpoint::bind`, §22.8)는 `home_relay_status()`를 지켜보다가 연결된 home이 3초(`HOME_RELAY_GRACE`) 동안 없으면 relay 맵의 한 항목을 다시 넣어 iroh에 전체 net report를 요청하고(맵이 바뀌면 report가 즉시 돈다, `handle_relay_map_change`), 연결된 home이 생길 때까지 10초마다 되풀이한다. 요청만 하고 고르는 것은 iroh다. 한 번의 report는 최대 5초(`OVERALL_REPORT_TIMEOUT`)라서 죽은 relay가 하나 끼면 그만큼 걸린다(공용 relay는 QUIC 주소 발견으로 먼저 끝난다). 클라이언트 endpoint는 수명이 짧아 이 감시를 두지 않는다.
+
+**진단.** 연결이 서지 못했을 때 endpoint가 home relay에 닿지 못했으면 후보를 모두 한꺼번에(한 시한 안에) 밖에서 점검한다(`relay_probe`). 하나라도 통과하면 `reason`은 없고, 모두 실패하면 접속은 됐으나 TLS·업그레이드에서 실패한 후보의 `relay_tls`·`relay_upgrade`가 우선하며, `relay_unreachable`은 어느 후보에도 접속하지 못했을 때만이다.
+
+**wire.** 바뀌는 것이 없다. 후보 목록은 클라이언트와 데몬이 각자 설정에서 읽고 서로에게 알리지 않는다. 한쪽이 후보 하나만 쓰면 그 하나가 상대의 후보에 들어 있을 때만 닿는다(양 끝이 기본값이면 항상 닿는다).
+
+**시험.** `qsh-transport`의 `iroh_failover::`(`a_dial_through_the_candidate_set_reaches_the_daemon_wherever_it_is_homed`, `a_dialers_set_needs_only_the_relay_the_daemon_is_on`, `a_daemon_rehomes_when_its_home_relay_dies_and_a_fresh_dial_succeeds`, `a_redial_started_at_the_moment_the_relay_dies_succeeds_once_the_daemon_has_moved`, `a_candidate_that_is_down_from_the_start_costs_a_dial_nothing`, `a_candidate_that_never_answers_does_not_stall_the_dial`, `with_every_candidate_down_the_dial_fails_within_its_timeout`, `a_bad_candidate_set_is_refused_before_binding`)와 `qsh-testkit`의 `iroh_route::`(`a_device_relay_list_with_dead_entries_still_reaches_the_host`, `a_command_after_the_hosts_relay_died_runs_through_the_other_relay`, `the_reason_is_unreachable_only_when_no_candidate_is_reachable`)이 프로세스 안 relay 둘로 고정한다. 설정은 `qsh-core`의 `iroh_settings::tests`와 `ops/config_cmd`의 `iroh_relay_url_takes_one_string_or_a_list`가 맡는다.

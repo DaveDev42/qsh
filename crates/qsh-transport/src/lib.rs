@@ -71,8 +71,8 @@ pub use identity::{
     ed25519_key_of_cert_der,
 };
 pub use iroh_backend::{
-    DEFAULT_RELAY_URL, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming, IrohPeer, IrohRelay,
-    IrohRelayTrust, fingerprint_of_ed25519_key,
+    DEFAULT_RELAY_URL, DEFAULT_RELAY_URLS, IROH_ALPN, IrohConfig, IrohEndpoint, IrohIncoming,
+    IrohPeer, IrohRelay, IrohRelayTrust, MAX_RELAY_CANDIDATES, fingerprint_of_ed25519_key,
 };
 pub use mux::{TransportCaps, TransportKind};
 pub use peer_addr::{PEER_KEY_LEN, PeerAddr, PeerKey, PeerPath};

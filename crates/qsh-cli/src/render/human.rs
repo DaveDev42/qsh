@@ -537,7 +537,7 @@ pub fn print_trust_set_iroh(data: &TrustSetIrohData) -> io::Result<()> {
         .as_deref()
         .and_then(qsh_core::trust::iroh_pin::relay_scheme_host)
         .map_or_else(
-            || "the default relay ([iroh].relay_url)".to_string(),
+            || "the device relays ([iroh].relay_url)".to_string(),
             |label| sanitize(&label),
         );
     let key = if data.peer.key.is_some() {

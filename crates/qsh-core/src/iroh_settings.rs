@@ -23,11 +23,51 @@ use serde::{Deserialize, Serialize};
 use crate::ops::OpError;
 use crate::trust::iroh_pin;
 
-/// The relay used when neither the pin nor `[iroh].relay_url` names one: one
-/// of n0's public relays (ADR-0061 decision 10). Public relays are rate
-/// limited and their terms can change; a self-hosted `iroh-relay` is the
-/// alternative.
+/// One of n0's public relays, the first of [`DEFAULT_RELAY_URLS`]
+/// (ADR-0061 decision 10). Public relays are rate limited and their terms can
+/// change; a self-hosted `iroh-relay` is the alternative.
 pub const DEFAULT_RELAY_URL: &str = "https://aps1-1.relay.n0.iroh.link";
+
+/// The relays used when neither the pin nor `[iroh].relay_url` names any:
+/// n0's four public relays (ADR-0062). A daemon homes on the one that answers
+/// fastest and moves to another when it stops answering; a client dial
+/// offers all of them.
+pub const DEFAULT_RELAY_URLS: [&str; 4] = [
+    "https://aps1-1.relay.n0.iroh.link",
+    "https://usw1-1.relay.n0.iroh.link",
+    "https://use1-1.relay.n0.iroh.link",
+    "https://euc1-1.relay.n0.iroh.link",
+];
+
+/// The most relay URLs `[iroh].relay_url` may list
+/// ([`qsh_transport::MAX_RELAY_CANDIDATES`]).
+pub const MAX_RELAY_URLS: usize = qsh_transport::MAX_RELAY_CANDIDATES;
+
+/// `[iroh].relay_url` as written: one URL (a string) or a candidate list (an
+/// array of strings, ADR-0062). A string keeps meaning what it always did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RelayUrlSetting {
+    /// `relay_url = "https://relay.example"`.
+    One(String),
+    /// `relay_url = ["https://a.example", "https://b.example"]`.
+    Many(Vec<String>),
+}
+
+impl RelayUrlSetting {
+    fn urls(&self) -> Vec<&str> {
+        match self {
+            Self::One(url) => vec![url.as_str()],
+            Self::Many(urls) => urls.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl From<&str> for RelayUrlSetting {
+    fn from(url: &str) -> Self {
+        Self::One(url.to_string())
+    }
+}
 
 /// `[iroh].head_start_ms` when the key is unset.
 pub const DEFAULT_HEAD_START_MS: u64 = 1000;
@@ -86,9 +126,10 @@ pub struct IrohSection {
     /// Whether a daemon (`qsh serve`, `qsh listen`, `qsh serve --to`) brings
     /// up an iroh endpoint. Unset is `false`.
     pub enable: Option<bool>,
-    /// The relay (`https://...`) this device homes on. Unset is
-    /// [`DEFAULT_RELAY_URL`].
-    pub relay_url: Option<String>,
+    /// The relay (`https://...`) this device homes on, or the list of
+    /// candidate relays it homes on the best of and fails over among
+    /// (ADR-0062). Unset is [`DEFAULT_RELAY_URLS`].
+    pub relay_url: Option<RelayUrlSetting>,
     /// The UDP port of the daemon's iroh endpoint, `0..=65535`. Unset or `0`
     /// is an ephemeral port. Held wide so an out-of-range value reaches
     /// [`IrohSection::settings`] as a `CONFIG_ERROR` rather than a parse
@@ -112,13 +153,34 @@ impl IrohSection {
     /// (not retryable) for a relay URL that is not an `https` URL, a port or
     /// a head start out of range.
     pub fn settings(&self) -> Result<IrohSettings, OpError> {
-        let relay_url = match &self.relay_url {
-            Some(url) => {
-                iroh_pin::validate_relay_url(url)
-                    .map_err(|why| config_error(format!("[iroh].relay_url: {why}")))?;
-                url.clone()
+        let relay_urls = match &self.relay_url {
+            Some(setting) => {
+                let given = setting.urls();
+                if given.is_empty() {
+                    return Err(config_error(
+                        "[iroh].relay_url is an empty list; name at least one relay or unset \
+                         the key for the default relays"
+                            .to_string(),
+                    ));
+                }
+                let mut urls: Vec<String> = Vec::with_capacity(given.len());
+                for url in given {
+                    iroh_pin::validate_relay_url(url)
+                        .map_err(|why| config_error(format!("[iroh].relay_url: {why}")))?;
+                    // The same relay spelled twice is one candidate.
+                    if !urls.iter().any(|seen| same_relay(seen, url)) {
+                        urls.push(url.to_string());
+                    }
+                }
+                if urls.len() > MAX_RELAY_URLS {
+                    return Err(config_error(format!(
+                        "[iroh].relay_url lists {} relays, at most {MAX_RELAY_URLS} are taken",
+                        urls.len()
+                    )));
+                }
+                urls
             }
-            None => DEFAULT_RELAY_URL.to_string(),
+            None => default_relay_urls(),
         };
         let bind_port = match self.bind_port {
             None => 0,
@@ -134,7 +196,7 @@ impl IrohSection {
         }
         Ok(IrohSettings {
             enable: self.enable.unwrap_or(false),
-            relay_url,
+            relay_urls,
             bind_port,
             mode: self.mode.unwrap_or_default(),
             proxy: self.proxy.unwrap_or_default(),
@@ -151,8 +213,9 @@ impl IrohSection {
 pub struct IrohSettings {
     /// A daemon brings up an iroh endpoint.
     pub enable: bool,
-    /// The relay this device homes on (the default relay when unset).
-    pub relay_url: String,
+    /// The relays this device homes on the best of and dials through (the
+    /// default relays when unset); never empty.
+    pub relay_urls: Vec<String>,
     /// The daemon endpoint's UDP port, `0` for an ephemeral one.
     pub bind_port: u16,
     /// Whether client commands may use the relay route at all.
@@ -178,7 +241,7 @@ impl Default for IrohSettings {
         // cannot fail.
         Self {
             enable: false,
-            relay_url: DEFAULT_RELAY_URL.to_string(),
+            relay_urls: default_relay_urls(),
             bind_port: 0,
             mode: IrohMode::Auto,
             proxy: IrohProxy::Env,
@@ -189,15 +252,29 @@ impl Default for IrohSettings {
     }
 }
 
-/// Whether `url` is the built-in default relay, ignoring a trailing slash or
-/// a fully-qualified-name dot.
+fn default_relay_urls() -> Vec<String> {
+    DEFAULT_RELAY_URLS
+        .iter()
+        .map(|u| (*u).to_string())
+        .collect()
+}
+
+/// A relay URL without a trailing slash or a fully-qualified-name dot, in
+/// lower case: what two spellings of one relay have in common.
+fn relay_key(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn same_relay(a: &str, b: &str) -> bool {
+    relay_key(a) == relay_key(b)
+}
+
+/// Whether `url` is one of the built-in default relays, ignoring a trailing
+/// slash or a fully-qualified-name dot.
 pub fn is_default_relay(url: &str) -> bool {
-    let trim = |s: &str| {
-        s.trim_end_matches('/')
-            .trim_end_matches('.')
-            .to_ascii_lowercase()
-    };
-    trim(url) == trim(DEFAULT_RELAY_URL)
+    DEFAULT_RELAY_URLS.iter().any(|d| same_relay(url, d))
 }
 
 impl IrohSettings {
@@ -234,13 +311,14 @@ impl IrohSettings {
         self.mode == IrohMode::Auto
     }
 
-    /// The relay a dial to `pin` uses: the pin's own `relay`, else this
-    /// device's (`docs/CLI.md` §6.11). The pin's value is read only when its
-    /// `routes` has `iroh`.
-    pub fn relay_for<'a>(&'a self, pin: &'a TrustPeer) -> &'a str {
+    /// The relays a dial to `pin` goes through: the pin's own `relay` alone
+    /// (a pin that names a relay names the one it is homed on, so it has no
+    /// failover), else this device's candidates (`docs/CLI.md` §6.11). The
+    /// pin's value is read only when its `routes` has `iroh`.
+    pub fn relays_for<'a>(&'a self, pin: &'a TrustPeer) -> Vec<&'a str> {
         match &pin.relay {
-            Some(relay) if iroh_pin::wants_iroh(pin) => relay,
-            _ => &self.relay_url,
+            Some(relay) if iroh_pin::wants_iroh(pin) => vec![relay.as_str()],
+            _ => self.relay_urls.iter().map(String::as_str).collect(),
         }
     }
 
@@ -250,9 +328,12 @@ impl IrohSettings {
         iroh_pin::relay_scheme_host(url).unwrap_or_else(|| "https://-".to_string())
     }
 
-    fn base_config(&self, relay: &str, bind: Vec<std::net::SocketAddr>) -> IrohConfig {
+    fn base_config(&self, relays: &[&str], bind: Vec<std::net::SocketAddr>) -> IrohConfig {
         IrohConfig {
-            relay: IrohRelay::Url(relay.to_string()),
+            relay: match relays {
+                [one] => IrohRelay::Url((*one).to_string()),
+                many => IrohRelay::Urls(many.iter().map(|u| (*u).to_string()).collect()),
+            },
             // The operating system's store (ADR-0061 decision 12), plus the
             // roots a test relay brings.
             relay_trust: if self.relay_roots.is_empty() {
@@ -266,14 +347,14 @@ impl IrohSettings {
         }
     }
 
-    /// The configuration of a client endpoint that dials `pin`: homed on the
-    /// relay [`Self::relay_for`] picks, on ephemeral UDP ports.
+    /// The configuration of a client endpoint that dials `pin`: the relays
+    /// [`Self::relays_for`] picks, on ephemeral UDP ports.
     pub fn client_config(&self, pin: &TrustPeer) -> IrohConfig {
-        self.base_config(self.relay_for(pin), self.client_bind.clone())
+        self.base_config(&self.relays_for(pin), self.client_bind.clone())
     }
 
-    /// The configuration of a daemon's endpoint: homed on this device's
-    /// relay, on `bind_port` when one is set (IPv4 and IPv6) and on
+    /// The configuration of a daemon's endpoint: homed on the best of this
+    /// device's relays, on `bind_port` when one is set (IPv4 and IPv6) and on
     /// ephemeral ports otherwise.
     pub fn server_config(&self) -> IrohConfig {
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -285,7 +366,8 @@ impl IrohSettings {
                 SocketAddr::from((Ipv6Addr::UNSPECIFIED, self.bind_port)),
             ]
         };
-        self.base_config(&self.relay_url, bind)
+        let relays: Vec<&str> = self.relay_urls.iter().map(String::as_str).collect();
+        self.base_config(&relays, bind)
     }
 }
 
@@ -295,12 +377,14 @@ impl IrohSettings {
 pub struct IrohTarget {
     /// The settings this target was built from.
     pub settings: IrohSettings,
-    /// Whom to dial: the pin's key, homed on the endpoint's relay.
+    /// Whom to dial: the pin's key, offered through every relay of the
+    /// endpoint.
     pub peer: IrohPeer,
     /// The client endpoint configuration for this pin.
     pub config: IrohConfig,
-    /// The relay this dial goes through.
-    pub relay_url: String,
+    /// The relays this dial goes through: the pin's own, or the device's
+    /// candidates.
+    pub relay_urls: Vec<String>,
 }
 
 impl IrohTarget {
@@ -315,13 +399,17 @@ impl IrohTarget {
             settings: settings.clone(),
             peer: IrohPeer::new(key),
             config: settings.client_config(pin),
-            relay_url: settings.relay_for(pin).to_string(),
+            relay_urls: settings
+                .relays_for(pin)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         })
     }
 
-    /// Whether this dial uses the built-in public relay.
+    /// Whether this dial uses only the built-in public relays.
     pub fn uses_default_relay(&self) -> bool {
-        is_default_relay(&self.relay_url)
+        self.relay_urls.iter().all(|url| is_default_relay(url))
     }
 }
 
@@ -356,7 +444,15 @@ impl std::fmt::Debug for IrohPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrohPlan")
             .field("name", &self.name)
-            .field("relay", &IrohSettings::relay_label(&self.target.relay_url))
+            .field(
+                "relays",
+                &self
+                    .target
+                    .relay_urls
+                    .iter()
+                    .map(|url| IrohSettings::relay_label(url))
+                    .collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }

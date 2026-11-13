@@ -1552,8 +1552,9 @@ pub enum TrustCmd {
     /// within `[iroh].head_start_ms`, or at once when the pin has no
     /// address. It needs the host's Ed25519 public key (`--key`, 64 hex
     /// characters, whose SPKI SHA-256 must be the pin's fingerprint).
-    /// `--relay` names the relay the host is homed on (`https://...`);
-    /// without it `[iroh].relay_url` applies. `--off` removes the route; the
+    /// `--relay` names the one relay the host is homed on (`https://...`), so
+    /// the pin has no relay failover; without it every relay of
+    /// `[iroh].relay_url` is offered and the host may be on any of them. `--off` removes the route; the
     /// key stays. Takes effect from the next command. A private CA root
     /// cannot take this route.
     Iroh {

@@ -33,7 +33,7 @@ use super::jump_chain::{Net, blocking, echo_argv, exec, loopback_options, stdout
 struct TestRelay {
     url: String,
     cert: CertificateDer,
-    _server: RelayServer,
+    server: Option<RelayServer>,
 }
 
 impl TestRelay {
@@ -52,7 +52,14 @@ impl TestRelay {
         Self {
             url: format!("https://{}", server.https_addr().expect("https bound")),
             cert: CertificateDer::from(certs[0].to_vec()),
-            _server: server,
+            server: Some(server),
+        }
+    }
+
+    /// Stop the relay: its URL is refused from now on.
+    async fn kill(&mut self) {
+        if let Some(server) = self.server.take() {
+            let _ = server.shutdown().await;
         }
     }
 
@@ -66,6 +73,18 @@ impl TestRelay {
             proxy_from_env: false,
             relay_quic_port: None,
         }
+    }
+}
+
+/// The host side homed on the best of `relays`, trusting all their
+/// certificates.
+fn host_config_for(relays: &[&TestRelay]) -> IrohConfig {
+    IrohConfig {
+        relay: IrohRelay::Urls(relays.iter().map(|r| r.url.clone()).collect()),
+        relay_trust: IrohRelayTrust::OnlyRoots(relays.iter().map(|r| r.cert.clone()).collect()),
+        bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
+        proxy_from_env: false,
+        relay_quic_port: None,
     }
 }
 
@@ -183,6 +202,8 @@ impl Drop for Blackhole {
 struct Rig {
     net: Net,
     relay: TestRelay,
+    /// A second relay the host also homes on (`Rig::start_with_two_relays`).
+    second: Option<TestRelay>,
     ops: Ops,
     clock: Arc<TestClock>,
     addrs: Arc<TestAddrs>,
@@ -195,21 +216,40 @@ impl Rig {
     /// `trusts_client`: whether the host pins the client. When it does not,
     /// the host closes every iroh connection after the handshake.
     async fn start(trusts_client: bool) -> Self {
+        Self::start_with(trusts_client, false).await
+    }
+
+    /// A host that homes on the best of two relays, and a client that trusts
+    /// both (ADR-0062).
+    async fn start_with_two_relays() -> Self {
+        Self::start_with(true, true).await
+    }
+
+    async fn start_with(trusts_client: bool, two_relays: bool) -> Self {
         let net = Net::start_unpinned(&["far"], |_| "*", loopback_options()).await;
         let relay = TestRelay::spawn().await;
+        let second = if two_relays {
+            Some(TestRelay::spawn().await)
+        } else {
+            None
+        };
+        let host_config = match &second {
+            Some(second) => host_config_for(&[&relay, second]),
+            None => relay.host_config(),
+        };
+        let roots: Vec<CertificateDer> = std::iter::once(relay.cert.clone())
+            .chain(second.iter().map(|r| r.cert.clone()))
+            .collect();
         let host = net.host("far");
         let trust = if trusts_client {
             StaticTrust::empty().with_pin(net.fp, Principal::Device("laptop".into()))
         } else {
             StaticTrust::empty()
         };
-        let endpoint = IrohEndpoint::bind(
-            &host.h.server_identity.local,
-            Arc::new(trust),
-            relay.host_config(),
-        )
-        .await
-        .expect("bind the host's iroh endpoint");
+        let endpoint =
+            IrohEndpoint::bind(&host.h.server_identity.local, Arc::new(trust), host_config)
+                .await
+                .expect("bind the host's iroh endpoint");
         assert_eq!(
             endpoint.fingerprint(),
             host.h.server_identity.fingerprint,
@@ -236,7 +276,7 @@ impl Rig {
         let ops = net
             .ops
             .clone()
-            .with_iroh_relay_roots(vec![relay.cert.clone()])
+            .with_iroh_relay_roots(roots)
             .with_route_clock(clock.clone())
             .with_punch(ClientPunch {
                 local_addrs: addrs.clone(),
@@ -246,6 +286,7 @@ impl Rig {
             key: hex(&endpoint.public_key()),
             net,
             relay,
+            second,
             ops,
             clock,
             addrs,
@@ -1008,5 +1049,136 @@ async fn the_memory_is_not_used_without_the_route_and_a_broken_file_is_ignored()
     assert!(took >= Duration::from_millis(900), "{took:?}");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("\"pins\""), "{text}");
+    rig.net.shutdown().await;
+}
+
+/// Pin `far` with the iroh route on and no relay of its own, so the device's
+/// `[iroh].relay_url` candidates are what the dial uses.
+async fn pin_with_device_relays(rig: &Rig, name: &str) {
+    let fingerprint = rig.net.host(name).h.server_identity.fingerprint;
+    rig.net.pin(name, None, fingerprint).await;
+    rig.set_iroh(name, None, Some(&rig.key))
+        .await
+        .expect("trust.set_iroh");
+}
+
+/// A URL nothing listens on.
+fn closed_url() -> String {
+    let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    format!("https://{}", socket.local_addr().unwrap())
+}
+
+/// ADR-0062: the device's relay list is what a pin without its own relay
+/// dials through, and a dead or silent entry costs the dial nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_relay_list_with_dead_entries_still_reaches_the_host() {
+    let rig = Rig::start(true).await;
+    let silent = CountingPort::bind().await;
+    rig.config_set(
+        "iroh.relay_url",
+        &format!("{},{},{}", closed_url(), silent.url, rig.relay.url),
+    )
+    .await;
+    pin_with_device_relays(&rig, "far").await;
+
+    let started = Instant::now();
+    let out = exec(&rig.ops, "far", echo_argv("through-the-list"))
+        .await
+        .expect("exec over the iroh route with a dead entry first");
+    assert_eq!(stdout_of(&out).trim(), "through-the-list");
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "dead entries must not eat the dial: {:?}",
+        started.elapsed()
+    );
+    assert!(silent.contacts() >= 1, "the silent entry was offered too");
+    rig.net.shutdown().await;
+}
+
+/// ADR-0062: the host's home relay dies; the host moves to the other one on
+/// its own and the next command runs without anyone touching the config.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_command_after_the_hosts_relay_died_runs_through_the_other_relay() {
+    let mut rig = Rig::start_with_two_relays().await;
+    let second_url = rig.second.as_ref().unwrap().url.clone();
+    rig.config_set(
+        "iroh.relay_url",
+        &format!("{},{}", rig.relay.url, second_url),
+    )
+    .await;
+    pin_with_device_relays(&rig, "far").await;
+
+    let before = exec(&rig.ops, "far", echo_argv("before"))
+        .await
+        .expect("exec while both relays are up");
+    assert_eq!(stdout_of(&before).trim(), "before");
+
+    // Stop the relay the host is homed on, whichever of the two it picked.
+    let home = rig._endpoint.home_relay().expect("the host is homed");
+    let home_is_first = home.trim_end_matches('/') == rig.relay.url.trim_end_matches('/');
+    match (home_is_first, rig.second.as_mut()) {
+        (true, _) => rig.relay.kill().await,
+        (false, Some(second)) => second.kill().await,
+        (false, None) => unreachable!("two relays"),
+    }
+    let started = Instant::now();
+    let mut last = None;
+    for _ in 0..4 {
+        match exec(&rig.ops, "far", echo_argv("after")).await {
+            Ok(out) => {
+                last = Some(out);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    let out = last.expect("the host re-homed and a command got through");
+    assert_eq!(stdout_of(&out).trim(), "after");
+    assert!(
+        started.elapsed() < Duration::from_secs(40),
+        "recovery took {:?}",
+        started.elapsed()
+    );
+    rig.net.shutdown().await;
+}
+
+/// `details.iroh.reason` is `relay_unreachable` only when no candidate can be
+/// reached, and a candidate that was reached but broke names its own stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_reason_is_unreachable_only_when_no_candidate_is_reachable() {
+    let rig = Rig::start(true).await;
+    pin_with_device_relays(&rig, "far").await;
+    qsh_transport::set_default_dial_timeout(Duration::from_secs(5));
+    let reason_with = |urls: String| {
+        let rig = &rig;
+        async move {
+            rig.config_set("iroh.relay_url", &urls).await;
+            let err = exec(&rig.ops, "far", echo_argv("never"))
+                .await
+                .expect_err("the relay route cannot stand");
+            err.details
+                .pointer("/iroh/reason")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        }
+    };
+
+    let silent = CountingPort::bind().await;
+    assert_eq!(
+        reason_with(format!("{},{}", closed_url(), silent.url))
+            .await
+            .as_deref(),
+        Some("relay_unreachable"),
+        "nothing answers"
+    );
+    // A second relay the client has no root for: it answers, but its
+    // certificate is refused, which is a more specific answer than "down".
+    let stranger = TestRelay::spawn().await;
+    assert_eq!(
+        reason_with(format!("{},{}", closed_url(), stranger.url))
+            .await
+            .as_deref(),
+        Some("relay_tls")
+    );
     rig.net.shutdown().await;
 }

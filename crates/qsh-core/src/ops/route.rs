@@ -703,13 +703,23 @@ async fn relay_failure_reason(
     if budget.is_zero() {
         return Some(REASON_RELAY_UNREACHABLE);
     }
-    let checked = qsh_transport::probe_relay(
-        &plan.target.relay_url,
-        &plan.target.config.relay_trust,
-        budget,
-    )
-    .await;
-    reason_of_probe(&checked)
+    // Every candidate is checked at once, so a set of several costs one
+    // budget, not one each.
+    let mut checks = tokio::task::JoinSet::new();
+    for url in &plan.target.relay_urls {
+        let url = url.clone();
+        let trust = plan.target.config.relay_trust.clone();
+        checks.spawn(async move { qsh_transport::probe_relay(&url, &trust, budget).await });
+    }
+    let mut checked = Vec::new();
+    while let Some(done) = checks.join_next().await {
+        match done {
+            Ok(result) => checked.push(result),
+            // A check that did not finish says nothing about its relay.
+            Err(_) => continue,
+        }
+    }
+    reason_of_probes(&checked)
 }
 
 /// Whether the outside relay check may run: not when the relay connection
@@ -737,6 +747,27 @@ pub(crate) fn reason_of_probe(
             Stage::Http | Stage::Upgrade => REASON_RELAY_UPGRADE,
         }),
     }
+}
+
+/// The reason word for the relay checks of a candidate set. One candidate that
+/// passes means the relay layer is not what failed. When none passes, a
+/// candidate that was reached but broke (its certificate, its upgrade) is the
+/// more specific answer, so `relay_unreachable` is the reason only when no
+/// candidate could be reached at all (ADR-0062).
+pub(crate) fn reason_of_probes(
+    checked: &[Result<(), qsh_transport::RelayProbeFailure>],
+) -> Option<&'static str> {
+    if checked.is_empty() || checked.iter().any(Result::is_ok) {
+        return None;
+    }
+    let reasons: Vec<&'static str> = checked
+        .iter()
+        .filter_map(|result| reason_of_probe(result))
+        .collect();
+    [REASON_RELAY_TLS, REASON_RELAY_UPGRADE]
+        .into_iter()
+        .find(|reason| reasons.contains(reason))
+        .or(Some(REASON_RELAY_UNREACHABLE))
 }
 
 /// `op` with `details.iroh.reason` set.
@@ -944,6 +975,32 @@ mod tests {
         );
         // A relay that passes the check is not what failed.
         assert_eq!(reason_of_probe(&Ok(())), None);
+    }
+
+    #[test]
+    fn a_candidate_set_is_unreachable_only_when_no_candidate_is_reachable() {
+        use RelayProbeStage as S;
+        // One candidate that passes: the relay layer is not what failed.
+        assert_eq!(
+            reason_of_probes(&[failed(S::Connect), Ok(()), failed(S::Timeout)]),
+            None
+        );
+        // None passes and none was reached.
+        assert_eq!(
+            reason_of_probes(&[failed(S::Connect), failed(S::Timeout), failed(S::Resolve)]),
+            Some("relay_unreachable")
+        );
+        // A candidate that was reached but broke is the more specific answer.
+        assert_eq!(
+            reason_of_probes(&[failed(S::Connect), failed(S::Upgrade)]),
+            Some("relay_upgrade")
+        );
+        assert_eq!(
+            reason_of_probes(&[failed(S::Upgrade), failed(S::Tls), failed(S::Connect)]),
+            Some("relay_tls")
+        );
+        // No check ran: no reason is better than a wrong one.
+        assert_eq!(reason_of_probes(&[]), None);
     }
 
     #[test]

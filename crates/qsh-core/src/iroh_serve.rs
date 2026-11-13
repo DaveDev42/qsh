@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::{
-    CertificateDer, Connection, DEFAULT_RELAY_URL, IrohConfig, IrohEndpoint, IrohIncoming,
+    CertificateDer, Connection, DEFAULT_RELAY_URLS, IrohConfig, IrohEndpoint, IrohIncoming,
     IrohRelay, IrohRelayTrust, LocalIdentity, TrustEvaluator,
 };
 use tokio::sync::OwnedSemaphorePermit;
@@ -48,9 +48,10 @@ use crate::server::CLOSE_CODE_RESOURCE_EXHAUSTED;
 /// its configuration.
 #[derive(Debug, Clone)]
 pub struct IrohServe {
-    /// The one relay the endpoint homes on (`[iroh].relay_url`). Must be an
-    /// `https` URL.
-    pub relay_url: String,
+    /// The relays the endpoint homes on the best of and fails over among
+    /// (`[iroh].relay_url`, one or several). Every one must be an `https`
+    /// URL.
+    pub relay_urls: Vec<String>,
     /// The UDP port for the endpoint's direct path (`[iroh].bind_port`);
     /// `0` lets the OS pick, which is what a host behind a firewall that
     /// only needs the relay wants.
@@ -76,7 +77,7 @@ pub struct IrohServe {
 impl Default for IrohServe {
     fn default() -> Self {
         Self {
-            relay_url: DEFAULT_RELAY_URL.to_owned(),
+            relay_urls: DEFAULT_RELAY_URLS.iter().map(|u| (*u).to_owned()).collect(),
             bind_port: 0,
             proxy_from_env: true,
             relay_roots: Vec::new(),
@@ -86,10 +87,17 @@ impl Default for IrohServe {
 }
 
 impl IrohServe {
-    /// An endpoint on `relay_url` with its direct path on `bind_port`.
+    /// An endpoint on the one relay `relay_url` with its direct path on
+    /// `bind_port`.
     pub fn new(relay_url: impl Into<String>, bind_port: u16) -> Self {
+        Self::with_relays(vec![relay_url.into()], bind_port)
+    }
+
+    /// An endpoint that homes on the best of `relay_urls` (ADR-0062) with its
+    /// direct path on `bind_port`.
+    pub fn with_relays(relay_urls: Vec<String>, bind_port: u16) -> Self {
         Self {
-            relay_url: relay_url.into(),
+            relay_urls,
             bind_port,
             proxy_from_env: true,
             relay_roots: Vec::new(),
@@ -108,7 +116,7 @@ pub fn iroh_serve_from_config(config: &Config) -> Option<IrohServe> {
     if !settings.enable {
         return None;
     }
-    let mut serve = IrohServe::new(settings.relay_url, settings.bind_port);
+    let mut serve = IrohServe::with_relays(settings.relay_urls, settings.bind_port);
     serve.proxy_from_env = matches!(settings.proxy, crate::iroh_settings::IrohProxy::Env);
     Some(serve)
 }
@@ -118,8 +126,11 @@ pub fn iroh_serve_from_config(config: &Config) -> Option<IrohServe> {
 pub struct IrohBound {
     /// The endpoint's id as a qsh fingerprint (what a peer's pin names).
     pub endpoint_id: String,
-    /// The relay it homes on.
+    /// The relay it is homed on, or its first candidate when it has not
+    /// picked one yet.
     pub relay: String,
+    /// Every candidate relay, in the order configured.
+    pub relays: Vec<String>,
 }
 
 /// Bind the endpoint `serve` describes for `identity`, judging every peer by
@@ -131,12 +142,21 @@ pub async fn bind(
     identity: &LocalIdentity,
     trust: Arc<dyn TrustEvaluator>,
 ) -> Result<IrohEndpoint, OpError> {
-    if !serve.relay_url.starts_with("https://") {
+    if serve.relay_urls.is_empty() {
+        return Err(OpError::new(
+            ErrorCode::ConfigError,
+            "no iroh relay URL is given. Fix [iroh].relay_url and restart.".to_string(),
+        ));
+    }
+    if let Some(bad) = serve
+        .relay_urls
+        .iter()
+        .find(|url| !url.starts_with("https://"))
+    {
         return Err(OpError::new(
             ErrorCode::ConfigError,
             format!(
-                "the iroh relay URL {:?} must be an https URL. Fix [iroh].relay_url and restart.",
-                serve.relay_url
+                "the iroh relay URL {bad:?} must be an https URL. Fix [iroh].relay_url and restart."
             ),
         ));
     }
@@ -146,7 +166,10 @@ pub async fn bind(
         IrohRelayTrust::OnlyRoots(serve.relay_roots.clone())
     };
     let config = |bind: Vec<SocketAddr>| IrohConfig {
-        relay: IrohRelay::Url(serve.relay_url.clone()),
+        relay: match serve.relay_urls.as_slice() {
+            [one] => IrohRelay::Url(one.clone()),
+            many => IrohRelay::Urls(many.to_vec()),
+        },
         relay_trust: trust_roots.clone(),
         bind,
         proxy_from_env: serve.proxy_from_env,
@@ -173,10 +196,11 @@ fn bind_error(serve: &IrohServe, err: &dyn std::fmt::Display) -> OpError {
     OpError::new(
         ErrorCode::ConfigError,
         format!(
-            "cannot start the iroh endpoint (relay {}, port {}): {err}. Nothing is being served. \
+            "cannot start the iroh endpoint (relays {}, port {}): {err}. Nothing is being served. \
              Free the port or set [iroh].bind_port to a free one (0 lets the OS choose), or set \
              [iroh].enable = false.",
-            serve.relay_url, serve.bind_port
+            serve.relay_urls.join(", "),
+            serve.bind_port
         ),
     )
 }
@@ -311,6 +335,7 @@ pub fn describe(endpoint: &IrohEndpoint) -> IrohBound {
     IrohBound {
         endpoint_id: endpoint.fingerprint().to_string(),
         relay: endpoint.relay_url().unwrap_or_default(),
+        relays: endpoint.relay_urls(),
     }
 }
 
