@@ -199,10 +199,10 @@ qsh\-sessions(1)
 List sessions on one pinned host, or on every pinned host
 .TP
 qsh\-serve(1)
-Run the host: accept connections from pinned peers, or (with `\-\-to`) dial out and register as a reverse target instead (`docs/CLI.md` §6.12/§6.13, ADR\-0012 decision 2/4). Foreground only; the bound address, or the dial/registration events, go to stderr
+Run the server: accept connections from pinned peers and offer shell, exec, tunnels and files
 .TP
 qsh\-listen(1)
-Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+Advanced fallback: run the reverse\-mode controller, for when peers cannot reach each other over iroh
 .TP
 qsh\-service(1)
 Manage this machine\*(Aqs platform service unit for its inferred run mode (`docs/CLI.md` §6.18): `install`/`uninstall`/`status` against launchd (macOS) or systemd (Linux) user units. `UNSUPPORTED` on every other platform

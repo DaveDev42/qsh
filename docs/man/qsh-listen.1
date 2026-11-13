@@ -2,11 +2,13 @@
 .el .ds Aq '
 .TH qsh-listen 1  "listen 0.8.0" 
 .SH NAME
-qsh\-listen \- Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+qsh\-listen \- Advanced fallback: run the reverse\-mode controller, for when peers cannot reach each other over iroh
 .SH SYNOPSIS
 \fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-serve\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-no\-punch\fR] [\fB\-\-no\-iroh\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+Advanced fallback: run the reverse\-mode controller, for when peers cannot reach each other over iroh.
+.PP
+Use it when the relay (TCP 443 HTTPS) is blocked, iroh is off, or a peer does not use iroh (ADR\-0065). It accepts dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serves them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr.
 .SH OPTIONS
 .TP
 \fB\-\-bind\fR \fI<IP:PORT>\fR
@@ -49,7 +51,7 @@ Use this pinned peer as the rendezvous for hole punching on this command, instea
 Reach the host through these pinned peers, first hop first, for this command: `a` or `a,b` (`docs/CLI.md` §7, ADR\-0056 decision 20). Each hop is the name of a pin; a `user@` or `:port` on it is ignored by the QUIC path. `none` goes the ordinary way even when the host\*(Aqs pin has a `jump`. Wins over `\-o ProxyJump` and over the pin\*(Aqs own `jump`. Not stored. The short `\-J` is the same flag on the commands that take it
 .TP
 \fB\-h\fR, \fB\-\-help\fR
-Print help
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Print version
