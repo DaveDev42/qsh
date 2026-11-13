@@ -10,7 +10,8 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use iroh_relay::server::testing::self_signed_tls_certs_and_config;
@@ -18,6 +19,8 @@ use iroh_relay::server::{
     AllowAll, CertConfig, RelayConfig as RelayServerConfig, Server as RelayServer, ServerConfig,
     TlsConfig,
 };
+use qsh_core::punch::{ClientPunch, LocalAddrs};
+use qsh_core::route_memory::RouteClock;
 use qsh_core::{ExecStdin, OpError, Ops};
 use qsh_proto::{ConfigSetReq, ErrorCode, ExecRunReq, TrustAddCaReq, TrustSetIrohReq};
 use qsh_transport::{
@@ -99,12 +102,89 @@ fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The route memory's clock, moved by the test.
+struct TestClock(AtomicU64);
+
+impl TestClock {
+    fn advance(&self, by: Duration) {
+        self.0
+            .fetch_add(u64::try_from(by.as_millis()).unwrap(), Ordering::SeqCst);
+    }
+}
+
+impl RouteClock for TestClock {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The addresses this client sends from, which are its "network" for the
+/// route memory; the test moves it to another network.
+struct TestAddrs(Mutex<Vec<std::net::IpAddr>>);
+
+impl TestAddrs {
+    fn set(&self, ip: &str) {
+        *self.0.lock().unwrap() = vec![ip.parse().unwrap()];
+    }
+}
+
+impl LocalAddrs for TestAddrs {
+    fn observe(&self) -> Vec<std::net::IpAddr> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A UDP port that takes every packet and never answers, and counts them.
+struct Blackhole {
+    addr: std::net::SocketAddr,
+    packets: Arc<AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Blackhole {
+    fn bind() -> Self {
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind blackhole");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("read timeout");
+        let addr = socket.local_addr().expect("addr");
+        let packets = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (seen, done) = (packets.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while !done.load(Ordering::SeqCst) {
+                if socket.recv_from(&mut buf).is_ok() {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            addr,
+            packets,
+            stop,
+        }
+    }
+
+    fn packets(&self) -> usize {
+        self.packets.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Blackhole {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 /// A host `far` that accepts over an iroh endpoint, and the client `Ops` that
 /// trusts the test relay.
 struct Rig {
     net: Net,
     relay: TestRelay,
     ops: Ops,
+    clock: Arc<TestClock>,
+    addrs: Arc<TestAddrs>,
     /// The host's iroh public key, 64 hex characters.
     key: String,
     _endpoint: IrohEndpoint,
@@ -149,15 +229,25 @@ impl Rig {
                 });
             }
         });
+        let clock = Arc::new(TestClock(AtomicU64::new(1_800_000_000_000)));
+        let addrs = Arc::new(TestAddrs(Mutex::new(Vec::new())));
+        addrs.set("192.0.2.10");
         let ops = net
             .ops
             .clone()
-            .with_iroh_relay_roots(vec![relay.cert.clone()]);
+            .with_iroh_relay_roots(vec![relay.cert.clone()])
+            .with_route_clock(clock.clone())
+            .with_punch(ClientPunch {
+                local_addrs: addrs.clone(),
+                ..ClientPunch::default()
+            });
         Self {
             key: hex(&endpoint.public_key()),
             net,
             relay,
             ops,
+            clock,
+            addrs,
             _endpoint: endpoint,
         }
     }
@@ -524,4 +614,198 @@ fn pem_of(der: &[u8]) -> String {
     }
     pem.push_str("-----END CERTIFICATE-----\n");
     pem
+}
+
+/// The time `exec` takes against a pin, and whether it ran.
+async fn timed_exec(ops: &Ops, host: &str, word: &str) -> Duration {
+    let started = Instant::now();
+    let out = exec(ops, host, echo_argv(word))
+        .await
+        .expect("exec over the relay route");
+    assert_eq!(stdout_of(&out).trim(), word);
+    started.elapsed()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_dial_skips_the_blackholed_direct_route_and_starts_iroh_at_once() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "1500").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+
+    // The first dial waits out the head start while the direct dial hangs.
+    let first = timed_exec(&rig.ops, "far", "first").await;
+    assert!(first >= Duration::from_millis(1500), "{first:?}");
+    let knocks = blackhole.packets();
+    assert!(knocks > 0, "the first dial tried the direct route");
+
+    // The second one remembers: iroh at once, the blackhole is left alone.
+    let second = timed_exec(&rig.ops, "far", "second").await;
+    assert!(
+        second < Duration::from_millis(1400),
+        "no head start the second time: {second:?}"
+    );
+    assert_eq!(
+        blackhole.packets(),
+        knocks,
+        "the direct route is not tried while it rests"
+    );
+    assert!(rig.ops.paths().route_cache_file().exists());
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rest_that_has_ended_tries_the_blocked_route_once_beside_iroh() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "1500").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    timed_exec(&rig.ops, "far", "first").await;
+    let mut knocks = blackhole.packets();
+    assert!(knocks > 0);
+
+    // Nine minutes: still resting.
+    rig.clock.advance(Duration::from_secs(9 * 60));
+    timed_exec(&rig.ops, "far", "resting").await;
+    assert_eq!(blackhole.packets(), knocks);
+
+    // Ten: one look at the blocked route, beside iroh, so no waiting.
+    rig.clock.advance(Duration::from_secs(60));
+    let retry = timed_exec(&rig.ops, "far", "retry").await;
+    assert!(retry < Duration::from_millis(1400), "{retry:?}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        blackhole.packets() > knocks,
+        "the rest ended, the route was tried"
+    );
+    knocks = blackhole.packets();
+
+    // It lost again, so the next rest is twenty minutes.
+    rig.clock.advance(Duration::from_secs(19 * 60));
+    timed_exec(&rig.ops, "far", "twenty").await;
+    assert_eq!(
+        blackhole.packets(),
+        knocks,
+        "twenty minutes have not passed"
+    );
+    rig.clock.advance(Duration::from_secs(60));
+    timed_exec(&rig.ops, "far", "twenty-one").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(blackhole.packets() > knocks, "the doubled rest ended");
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn twelve_dials_in_twelve_minutes_knock_on_the_blocked_route_twice() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "300").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    let mut dials_that_knocked = Vec::new();
+    for n in 0..12 {
+        let before = blackhole.packets();
+        timed_exec(&rig.ops, "far", &format!("dial-{n}")).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if blackhole.packets() > before {
+            dials_that_knocked.push(n);
+        }
+        rig.clock.advance(Duration::from_secs(60));
+    }
+    assert_eq!(
+        dials_that_knocked,
+        [0, 10],
+        "the first dial and the first one after the ten-minute rest"
+    );
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_of_network_forgets_the_rest_and_the_head_start_returns() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "1200").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    timed_exec(&rig.ops, "far", "first").await;
+    let second = timed_exec(&rig.ops, "far", "second").await;
+    assert!(second < Duration::from_millis(1100), "{second:?}");
+    let knocks = blackhole.packets();
+
+    rig.addrs.set("198.51.100.20");
+    let third = timed_exec(&rig.ops, "far", "third").await;
+    assert!(
+        third >= Duration::from_millis(1200),
+        "a new network gets the usual head start again: {third:?}"
+    );
+    assert!(
+        blackhole.packets() > knocks,
+        "and the direct route is tried again"
+    );
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_route_that_stands_ends_the_rest() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "300").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    timed_exec(&rig.ops, "far", "first").await;
+    // The address now works: after the rest the direct dial wins the race.
+    let real = rig.net.host("far").h.addr.to_string();
+    let fingerprint = rig.net.host("far").h.server_identity.fingerprint;
+    rig.net.pin("far", Some(real), fingerprint).await;
+    rig.clock.advance(Duration::from_secs(10 * 60));
+    timed_exec(&rig.ops, "far", "direct").await;
+    // No rest is left: the next dial runs the usual order, and a direct dial
+    // that stands inside the head start never contacts the relay.
+    let watched = CountingPort::bind().await;
+    rig.set_iroh("far", Some(&watched.url), None)
+        .await
+        .expect("a relay that nobody answers");
+    timed_exec(&rig.ops, "far", "again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(watched.contacts(), 0);
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_memory_is_not_used_without_the_route_and_a_broken_file_is_ignored() {
+    let rig = Rig::start(true).await;
+    let blackhole = Blackhole::bind();
+    rig.config_set("iroh.head_start_ms", "300").await;
+    rig.pin_iroh("far", Some(blackhole.addr.to_string()), &rig.relay.url)
+        .await;
+    timed_exec(&rig.ops, "far", "first").await;
+
+    // `--no-iroh` neither reads nor writes the memory, and a pin without
+    // routes has none.
+    let path = rig.ops.paths().route_cache_file();
+    let before = std::fs::read(&path).expect("the memory was written");
+    let err = exec_within(
+        &rig.ops.clone().with_no_iroh(true),
+        "far",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect_err("the blackholed address alone");
+    assert!(
+        matches!(err.code, ErrorCode::Timeout | ErrorCode::ConnectionFailed),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // A broken file is an empty memory: the head start is back, and the
+    // file is written again.
+    std::fs::write(&path, b"{ not json").unwrap();
+    rig.config_set("iroh.head_start_ms", "900").await;
+    let took = timed_exec(&rig.ops, "far", "after-corruption").await;
+    assert!(took >= Duration::from_millis(900), "{took:?}");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"pins\""), "{text}");
+    rig.net.shutdown().await;
 }

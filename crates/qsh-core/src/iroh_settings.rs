@@ -323,6 +323,9 @@ pub struct IrohPlan {
     /// The trust store narrowed to the pin's exact key (ADR-0060), the same
     /// view the direct dial uses.
     pub evaluator: Arc<dyn TrustEvaluator>,
+    /// What this device remembers about the pin's routes (`docs/CLI.md`
+    /// §6.1 "route 기억"); `None` keeps every dial in the usual order.
+    pub memory: Option<crate::route_memory::RouteMemory>,
 }
 
 impl IrohPlan {

@@ -51,6 +51,7 @@ use crate::jump::{JumpFailure, JumpPlan, Stage};
 use crate::ops::exec::map_dial_error;
 use crate::ops::{AddressResolver, OpError};
 use crate::punch::{PUNCH_BUDGET, PunchFailure, PunchPlan, attempt};
+use crate::route_memory::{RouteMemory, Stance};
 
 /// What a dial is for, which decides how long the whole route may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,9 +456,30 @@ async fn dial_routed_plain(
         });
     }
 
-    let mut other: Option<BoxFut<'_, Result<Routed, RouteError>>> = Some(Box::pin(
-        dial_direct_punch(dialer, address, server_name, plan, tuning, resolver, kind),
-    ));
+    // What this device remembers about the pin (`docs/CLI.md` §6.1 "route
+    // 기억"): in a rest the direct dial and the punch wait behind iroh, after
+    // a rest they run beside it, and otherwise the head start decides.
+    let stance = iroh
+        .memory
+        .as_ref()
+        .map_or(Stance::Normal, RouteMemory::stance);
+    let dial_other = || -> BoxFut<'_, Result<Routed, RouteError>> {
+        Box::pin(dial_direct_punch(
+            dialer,
+            address,
+            server_name,
+            plan,
+            tuning,
+            resolver,
+            kind,
+        ))
+    };
+    let mut other: Option<BoxFut<'_, Result<Routed, RouteError>>> =
+        (stance != Stance::Skip).then(dial_other);
+    // A pin in a rest: they start only when iroh has failed, so a relay that
+    // is down does not lock a pin out of the path that may be open again.
+    let mut other_pending = stance == Stance::Skip;
+    let mut other_ran = !other_pending;
     let mut iroh_fut: Option<BoxFut<'_, Result<Routed, OpError>>> = None;
     let mut iroh_started = false;
     let mut other_failed: Option<RouteError> = None;
@@ -466,10 +488,19 @@ async fn dial_routed_plain(
     tokio::pin!(head);
     let overall = sleep_until(deadline);
     tokio::pin!(overall);
-    if iroh.head_start().is_zero() {
+    if stance != Stance::Normal || iroh.head_start().is_zero() {
         iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));
         iroh_started = true;
     }
+    let remember = |won_by_iroh: bool, other_ran: bool| {
+        if let Some(memory) = &iroh.memory {
+            if won_by_iroh {
+                memory.note_iroh_won(other_ran);
+            } else if stance != Stance::Normal {
+                memory.note_other_won();
+            }
+        }
+    };
 
     loop {
         if other.is_none() && iroh_fut.is_none() {
@@ -491,7 +522,14 @@ async fn dial_routed_plain(
         match event {
             // The loser is dropped on return, which abandons its handshake
             // and closes its endpoint.
-            Ev::Other(Ok(routed)) | Ev::Iroh(Ok(routed)) => return Ok(routed),
+            Ev::Other(Ok(routed)) => {
+                remember(false, other_ran);
+                return Ok(routed);
+            }
+            Ev::Iroh(Ok(routed)) => {
+                remember(true, other_ran);
+                return Ok(routed);
+            }
             Ev::Other(Err(fail)) => {
                 other = None;
                 other_failed = Some(fail);
@@ -503,6 +541,11 @@ async fn dial_routed_plain(
             Ev::Iroh(Err(op)) => {
                 iroh_fut = None;
                 iroh_failed = Some(op);
+                if other_pending {
+                    other_pending = false;
+                    other_ran = true;
+                    other = Some(dial_other());
+                }
             }
             Ev::HeadStart => {
                 iroh_fut = Some(Box::pin(dial_iroh(iroh, deadline)));

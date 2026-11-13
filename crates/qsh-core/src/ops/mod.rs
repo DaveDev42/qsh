@@ -712,6 +712,9 @@ pub struct Ops {
     /// Extra roots for the relay's TLS certificate, set only by tests that
     /// run their own relay ([`Self::with_iroh_relay_roots`]).
     iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
+    /// The clock of the route memory, set only by tests
+    /// ([`Self::with_route_clock`]); the wall clock otherwise.
+    route_clock: Option<Arc<dyn crate::route_memory::RouteClock>>,
 }
 
 impl std::fmt::Debug for Ops {
@@ -829,7 +832,17 @@ impl Ops {
             jump_off: false,
             no_iroh: false,
             iroh_relay_roots: Vec::new(),
+            route_clock: None,
         }
+    }
+
+    /// Read the route memory's time from `clock` instead of the wall clock.
+    /// A seam for tests of the rest times; no flag or config key reaches it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_route_clock(mut self, clock: Arc<dyn crate::route_memory::RouteClock>) -> Self {
+        self.route_clock = Some(clock);
+        self
     }
 
     /// Trust `roots` for the iroh relay's TLS certificate in addition to the
@@ -899,11 +912,20 @@ impl Ops {
             trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
             binding,
         ));
+        let memory = crate::route_memory::RouteMemory::new(
+            self.paths.route_cache_file(),
+            pin.fingerprint.as_str(),
+            self.route_clock
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::route_memory::SystemRouteClock)),
+            self.punch.local_addrs.clone(),
+        );
         Ok(Some(Arc::new(crate::iroh_settings::IrohPlan {
             name: pin.name.clone(),
             target,
             identity: identity.local.clone(),
             evaluator,
+            memory: Some(memory),
         })))
     }
 
