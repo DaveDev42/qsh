@@ -687,7 +687,7 @@ impl State {
             return Ok(());
         }
         if via_datagram {
-            self.silence.received_datagram();
+            self.silence.received_datagram(std::time::Instant::now());
         }
         // The socket buffer almost always has room; only a full one waits.
         let sent = match self.socket.try_send(packet) {

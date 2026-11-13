@@ -293,7 +293,7 @@ pub async fn run(relay: Relay) -> RelayEnd {
             },
             frame = datagrams.recv() => match frame {
                 Some(frame) if frame.kind == DatagramKind::JumpPacket => {
-                    state.silence.received_datagram();
+                    state.silence.received_datagram(std::time::Instant::now());
                     stats.from_host_datagrams.fetch_add(1, Ordering::Relaxed);
                     state.send_to_cli(&frame.payload);
                 }

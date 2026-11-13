@@ -35,6 +35,14 @@ pub const RTT_FLOOR: Duration = Duration::from_millis(50);
 /// default `max_ack_delay`).
 pub const ACK_DELAY_ALLOWANCE: Duration = Duration::from_millis(25);
 
+/// How long after a received datagram the sends that follow still count as
+/// replies to it (ADR-0058 decision 1, as amended 2026-11-14). The receiver's
+/// ack-only answers leave within `max_ack_delay` (25 ms) of the datagram that
+/// asked for them, plus whatever the timer granularity and the scheduler add;
+/// the allowance is eight times that, so a loaded host (a Windows timer tick
+/// is 15.6 ms) does not turn an ack into the start of a silence.
+pub const REPLY_WINDOW: Duration = Duration::from_millis(200);
+
 /// How long datagrams may go unanswered before the channel falls back to the
 /// stream: `4 x max(rtt, RTT_FLOOR) + 25 ms` (ADR-0058 decision 1). `rtt` is
 /// the client's inner connection's srtt (the outer one until it has
@@ -82,11 +90,13 @@ pub struct SilenceFallback {
     /// When the oldest datagram that no datagram has answered since was
     /// sent.
     unanswered_since: Option<Instant>,
-    /// A datagram came in and nothing of ours went out since. The next send
-    /// is usually the ack-only reply to that datagram, which no one answers
-    /// in turn, so it does not start the clock (ADR-0058 decision 1, as
-    /// amended 2026-11-13).
-    just_received: bool,
+    /// When the last datagram came in. A send within [`REPLY_WINDOW`] of it
+    /// is usually an ack-only reply, which no one answers in turn (QUIC does
+    /// not ack acks), so it does not start the clock (ADR-0058 decision 1,
+    /// as amended 2026-11-14). A single datagram can owe several such
+    /// replies, and an ack can follow the datagram by a timer tick or more,
+    /// so the rule is a window and not "the first send".
+    last_received: Option<Instant>,
     /// When the channel left the datagram carrier for silence.
     fell_back_at: Option<Instant>,
 }
@@ -99,7 +109,10 @@ impl SilenceFallback {
 
     /// A datagram went out on the channel.
     pub fn sent_datagram(&mut self, now: Instant) {
-        if std::mem::take(&mut self.just_received) {
+        if self
+            .last_received
+            .is_some_and(|at| now.saturating_duration_since(at) <= REPLY_WINDOW)
+        {
             return;
         }
         self.unanswered_since.get_or_insert(now);
@@ -107,10 +120,10 @@ impl SilenceFallback {
 
     /// A datagram came in on the channel: the path works, so a fallback
     /// ends.
-    pub fn received_datagram(&mut self) {
+    pub fn received_datagram(&mut self, now: Instant) {
         self.unanswered_since = None;
         self.fell_back_at = None;
-        self.just_received = true;
+        self.last_received = Some(now);
     }
 
     /// Whether the channel is on the stream because datagrams went quiet.
@@ -192,33 +205,61 @@ mod tests {
         let srtt = Duration::from_millis(50);
         let mut f = SilenceFallback::new();
         f.sent_datagram(t0);
-        f.received_datagram();
+        f.received_datagram(t0 + Duration::from_millis(10));
         let late = t0 + Duration::from_secs(5);
         assert_eq!(f.choose(Carrier::Datagram, late, srtt), Carrier::Datagram);
-        // A fallback also ends when one arrives. The first send after the
-        // receive does not start the clock; the second does.
-        f.sent_datagram(late);
+        // A fallback also ends when one arrives. A send long after the last
+        // receive starts the clock.
         f.sent_datagram(late);
         let later = late + Duration::from_secs(1);
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Stream);
-        f.received_datagram();
+        f.received_datagram(later);
         assert_eq!(f.choose(Carrier::Datagram, later, srtt), Carrier::Datagram);
     }
 
     #[test]
-    fn the_first_send_after_a_receive_does_not_start_the_clock() {
+    fn sends_right_after_a_receive_do_not_start_the_clock() {
         let t0 = Instant::now();
-        let srtt = Duration::from_millis(50);
+        let ms = Duration::from_millis;
+        let srtt = ms(50);
         let mut f = SilenceFallback::new();
-        f.received_datagram();
-        // The ack-only reply to that datagram is never answered.
+        f.received_datagram(t0);
+        // The ack-only replies to that datagram are never answered, however
+        // many there are and however late the timer sends them.
         f.sent_datagram(t0);
+        f.sent_datagram(t0 + ms(1));
+        f.sent_datagram(t0 + ms(30));
+        f.sent_datagram(t0 + REPLY_WINDOW);
         let late = t0 + Duration::from_secs(5);
         assert_eq!(f.choose(Carrier::Datagram, late, srtt), Carrier::Datagram);
-        // The next send starts the clock and a blackhole is caught in time.
-        f.sent_datagram(late);
-        let after = late + Duration::from_millis(250);
+        // A send past the window starts the clock and a blackhole is caught
+        // in time.
+        let past = t0 + REPLY_WINDOW + ms(1);
+        f.sent_datagram(past);
+        let after = past + ms(250);
         assert_eq!(f.choose(Carrier::Datagram, after, srtt), Carrier::Stream);
+    }
+
+    #[test]
+    fn a_reply_burst_after_one_receive_leaves_a_healthy_path_alone() {
+        // The field shape of the Windows flake: a receive batch of two
+        // datagrams (a server ack and its follow-up) is answered by two
+        // ack-only packets in separate sends, then the path idles for
+        // longer than the window.
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let srtt = ms(1);
+        let mut f = SilenceFallback::new();
+        f.sent_datagram(t0);
+        f.received_datagram(t0 + ms(1));
+        f.sent_datagram(t0 + ms(28));
+        f.received_datagram(t0 + ms(29));
+        f.received_datagram(t0 + ms(29));
+        f.sent_datagram(t0 + ms(29));
+        f.sent_datagram(t0 + ms(29));
+        let next = t0 + ms(600);
+        assert_eq!(f.choose(Carrier::Datagram, next, srtt), Carrier::Datagram);
+        assert!(!f.fell_back());
     }
 
     #[test]
