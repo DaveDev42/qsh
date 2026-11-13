@@ -2,6 +2,11 @@
 //! a module here, so the workspace links one test executable per crate instead of
 //! one per file. Run one former file with `-E 'test(/^<name>::/)'`.
 
+// `supervised_reverse::lose_and_regain_then` awaits the whole serve, supervise and
+// iroh dial pipeline in one future, and rustc's layout query for that future
+// nests deeper than the default limit of 128.
+#![recursion_limit = "256"]
+
 mod acl_registry_audit;
 mod acl_uniformity;
 mod admission;
