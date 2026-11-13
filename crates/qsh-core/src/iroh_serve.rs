@@ -14,11 +14,11 @@
 //! What differs is admission, because iroh offers no Retry round trip and
 //! no peer address that means anything behind a relay (decision 4):
 //!
-//! 1. before the handshake, [`admit_attempt`]: a direct attempt is rate
+//! 1. before the handshake, `admit_attempt`: a direct attempt is rate
 //!    limited by its source address, every attempt takes a permit from the
 //!    same concurrent-handshake pool QUIC attempts use, and an attempt over
 //!    the cap is refused without running a handshake;
-//! 2. after the handshake, [`judge_keyed`]: the proven key is counted
+//! 2. after the handshake, `judge_keyed`: the proven key is counted
 //!    against its own bucket ([`crate::admission::Gate::decide_keyed`]), so
 //!    a peer is limited as a key, not as the address of a relay or of
 //!    whichever path it happens to be on.

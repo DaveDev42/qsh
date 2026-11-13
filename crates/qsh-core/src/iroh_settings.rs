@@ -311,7 +311,7 @@ impl IrohTarget {
 /// How the route layer dials one pin over the relay route: the target, and
 /// the identity and trust the endpoint is built with. One per command (and
 /// per recovery re-dial); it holds no socket, so building it touches no
-/// network ([`crate::ops::route`] binds the endpoint when the route starts).
+/// network (`crate::ops::route` binds the endpoint when the route starts).
 #[derive(Clone)]
 pub struct IrohPlan {
     /// The pin name, for messages.
