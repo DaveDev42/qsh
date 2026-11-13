@@ -1,8 +1,8 @@
 # QSH
 
 QSH is a remote shell that speaks QUIC and connects straight to the machine
-you name. No relay, no broker, no account. One binary, `qsh`, is both ends: it
-serves, and it connects.
+you name. No broker, no account, and no relay in the data path once a direct
+path is up. One binary, `qsh`, is both ends: it serves, and it connects.
 
 ## Why it exists
 
@@ -15,10 +15,15 @@ serve` process, and the client's connection is only a way to reach it. When
 the connection drops or the client's address changes, the client reconnects
 and resumes the same session, with the output it missed replayed, instead of
 starting a new shell. A change of network that QUIC can migrate across does
-not even interrupt the connection. Nothing sits in the middle: every
-connection is a direct QUIC connection to a hostname or IP you supply,
+not even interrupt the connection. There is no broker or account: every
+connection is a QUIC connection to a hostname, IP or pinned key you supply,
 authenticated by TLS 1.3 mutual authentication against certificates you have
-pinned.
+pinned, and a direct path is always tried first. Daemons keep one HTTPS
+connection to a public iroh relay run by n0 so that peers behind NAT can find
+each other. The relay carries only ciphertext until a direct path opens, and
+sees nothing but the two endpoint keys and when and how much you send; set
+`[iroh] enable = false` to keep a daemon off it. See [the relay
+route](#when-udp-is-blocked-the-optional-iroh-relay-route).
 
 Beyond the shell, the same connection carries one-shot commands (`qsh exec`),
 scp-style file copy (`qsh cp`), port forwards (`-L`, `-R`, and a SOCKS5 proxy
@@ -36,7 +41,7 @@ switch on the optional [iroh relay route](#when-udp-is-blocked-the-optional-iroh
 
 When a host registered with `qsh serve --to` sits behind NAT and the direct
 dial does not connect, the client can try UDP hole punching. The punching
-itself uses no relay server: the two devices exchange addresses through a
+itself needs no relay server: the two devices exchange addresses through a
 `qsh listen` that both can reach and that you have pinned, then connect to each
 other directly. It is one attempt of up to 8 seconds, and it fails when both NATs choose a new port
 for every destination, or when one does and the other filters by port. See
@@ -1607,7 +1612,8 @@ Some of these are MVP scope decisions, some are unfinished work.
   runs the Windows test suite on `windows-latest`, including the ConPTY
   session, signal and Job Object tests.
 - Reverse mode needs a directly reachable path from the target to the
-  controller:
+  controller. The reverse path itself has no relay (the n0 relay belongs to
+  the iroh route above), so the doctor message reads:
 
   > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
   >
