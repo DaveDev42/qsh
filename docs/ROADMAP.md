@@ -2,7 +2,7 @@
 
 **상태:** 확정. 구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다. 개정 기록은 git 이력에 있다.
 
-**현재 위치:** P2(ADR-0050)의 마일스톤 여섯은 2026-11-11까지 모두 닫혔고(아래 §6 마감 노트), 그 뒤에 연 M27(listen과 serve를 한 endpoint에, ADR-0059)도 2026-11-11 닫혔다(§7). 2026-11-13 M28(iroh relay route와 transport backend 경계, ADR-0061)을 열고 같은 날 닫았다(§7). 릴리스 태그는 `v0.7.0`이다. M28 뒤 Toss 링크 전환과 실망 측정은 `PLAN.md` §4.3에 있다. 남은 사람 몫은 `PLAN.md` §0, M27 뒤 dave-environment 후속은 `PLAN.md` §3에 있다.
+**현재 위치:** P2(ADR-0050)의 마일스톤 여섯은 2026-11-11까지 모두 닫혔고(아래 §6 마감 노트), 그 뒤에 연 M27(listen과 serve를 한 endpoint에, ADR-0059)도 2026-11-11 닫혔다(§7). 2026-11-13 M28(iroh relay route와 transport backend 경계, ADR-0061)을 열고 같은 날 닫았다(§7). 릴리스 태그는 `v0.7.0`이고, 같은 날부터 이튿날까지 M28 후속 패치 `v0.7.1`·`v0.7.2`와 `v0.8.0`(ADR-0062~0065)이 나갔다(§7 M28 아래 "M28 뒤 릴리스"). 남은 후속은 `PLAN.md` §4.3에 있다. 남은 사람 몫은 `PLAN.md` §0, M27 뒤 dave-environment 후속은 `PLAN.md` §3에 있다.
 
 이 문서는 P0 MVP(M0~M10), P1(M11~M20), P2(M21~M26, ADR-0050)의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 완료 정의(Definition of Done)이고, 수용 기준을 통과하는 테스트나 시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다(SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -465,4 +465,5 @@ P2를 닫은 뒤 사용자가 연 마일스톤이다. §6.1의 원칙을 그대�
 - **크기:** 3~4ew(추정, 2026-11-13 결합도 조사 기준 3,500~5,000줄)
 - **수용 기준(결정 28):** `PLAN.md` §4.2의 항목이 모두 근거 시험이나 기록으로 충족될 때 닫는다.
 - **마감 (2026-11-13).** 에이전트 몫이 모두 착지했다. backend 정리(`2cacaff0`·`83dd9af3`·`c6838405`), iroh backend(`15a409d5`·`4818b135`), 클라이언트 route(`eef9b3b3`), serve·listen의 iroh endpoint(`ddde444f`·`7f935c76`), 클라이언트 임의 키와 연결 안 신원 증명(`15629dcd`, protocol §22.8, ADR-0061 개정 이력), route 기억(`50dd306a`), pin key 채우기(`a649b9b4`), `details.iroh.reason`(`b20945e7`), `serve --to`의 iroh 등록(`bca04b4a`), 짧은 명령의 close 대기 제거(`b0bc0d18`), relay 전용 수용 시험(`23c9e647`), 문서(CLI.md v0.104, `f9091913`). 결정 28의 열 항목은 `PLAN.md` §4.2 대응표에서 모두 충족이고, CI(run 43370250620, Windows 시간 시험 하나는 재실행에서 통과)와 fuzz-smoke는 `97d2bdc6`에서 초록이다. doctor의 iroh 코드 넷과 `doctor.run`의 `iroh` 객체는 만들지 않고 계약에서도 뺐다. relay에서 직결로 올라가는 경로는 시험으로 고정하지 못했고 Toss 실망 측정으로 확인한다. 릴리스는 `v0.7.0`이다(`62b74864`, `v0.6.0`은 M27까지).
+- **M28 뒤 릴리스 (2026-11-13~14, 마일스톤 밖).** 실망에서 드러난 문제를 패치 태그로 고쳤다. `v0.7.1`(`618bf8d6`): 한 state 디렉터리의 데몬 iroh endpoint를 하나로 묶는다(serve와 listen이 relay 홈을 두고 서로 밀어내던 문제, protocol §22.9), 데몬이 net report 실패 사이에도 공인 주소를 알린다(§22.10), Windows의 claim 보유자 표시. `v0.7.2`(`b8dfac01`, ADR-0062): relay 후보 목록과 자동 장애 전환(2026-11-13 aps1 relay 장애로 Toss 링크가 끊긴 뒤). `v0.8.0`(`d15a4031`): 설정 파일 없이 장비가 닿는 기본값과 key만 있는 pin(ADR-0063), 데몬 endpoint의 공유기 포트 매핑(ADR-0064), server·client 개념 모델과 역방향의 fallback 강등(ADR-0065, 1단계 문서만), quinn 보안 권고 셋(`a89c0659`). 실망: Toss NAT는 주소·포트 의존 매핑과 필터링, 무작위 포트의 완전한 symmetric NAT이고(2160쌍 중 일치 0), v0.8.0에서 Toss→MacMini는 10회 모두 직결(공유기 UPnP 외부 포트, 약 0.3초 뒤 승격), 집→Toss는 집 쪽 클라이언트가 매핑을 열지 않아 relay에 머문다. 이 결과는 ADR-0064 개정 이력과 `PLAN.md` §4.3에 있다.
 

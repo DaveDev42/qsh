@@ -135,8 +135,8 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 
 - [ ] MacMini의 `[listen]`에 `serve = true`를 렌더하고 converge(Dave 승인). 옛 serve는 겹치는 동안 둔다.
 - [ ] Toss의 `macmini` pin을 :443으로(`qsh_public.serve_port`), Toss converge는 Dave가 한다. **보류(2026-11-13).** Toss가 쓰는 기업 VPN(TITAN)이 집 공인 IP로 가는 UDP 가운데 4433과 41641만 통과시킨다(각 20회 실측, 집 IP를 바꿔도 같음). :443으로 옮기거나 아래의 4433 포워딩을 지우면 Toss의 정방향 링크도 끊긴다. Toss 역방향 링크는 M28의 iroh route로 되살리는 것이 계획이다.
-- [ ] 라우터의 UDP 4433 포워딩을 지운다(Dave, `nvram` 백업 뒤). **보류(2026-11-13)**, 위 항목과 같은 이유.
-- [ ] MacMini의 `io.qsh.serve`를 내리고 `[serve].bind`를 지운다. tailnet의 mbp16·wsl serve :4433은 그대로.
+- [x] 라우터의 UDP 포워딩 둘(4433, 443→4434)과 ASUS DDNS를 지웠다(2026-11-13, Dave 지시, 웹 UI 호출, dave-environment `d56b3fee`). Toss는 iroh route로 닿는다.
+- [x] MacMini의 listen을 은퇴시켰다(2026-11-13, dave-environment `81adfdf9`). serve는 Toss 링크의 상대로 다시 띄웠다(`3b6d2ad4`, UPnP 매핑으로 Toss→MacMini 직결).
 - [ ] Toss의 신원을 Keychain으로 옮기며 새 키로 바꾼다(Dave). Toss에서 `qsh init --key-store platform`으로 새 신원을 만들고, inventory의 `qsh_fingerprint_by_host.toss`를 새 지문으로, `qsh_key_store_by_host.toss`를 `platform`으로 고치고 vault의 옛 신원을 지운 뒤 macmini, Toss 순으로 converge한다. 옛 pin은 converge가 지운다(dave-environment `cd9835e`).
 
 ## 4. M28 스텝
@@ -188,7 +188,12 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 
 ### 4.3 M28 뒤 후속 (범위 밖, 결정 대상)
 
-- [ ] **Toss 실망 측정.** v0.7.0을 깐 Toss에서 qsh 자체의 iroh 연결이 직결로 승격하는지 감사 `peer_path`로 확인하고 연결 시간과 RTT를 ADR-0061 개정 이력에 적는다.
+- [x] **Toss 실망 측정.** 2026-11-14 `v0.8.0`에서 Toss→MacMini 10/10 직결, 집→Toss 0/10(relay). 원인 분석(Toss NAT 완전 symmetric, qsh에 portmapper가 없었음)과 수치는 ADR-0064 개정 이력과 `docs/ROADMAP.md` §7 "M28 뒤 릴리스". 감사 `peer_path`는 admission 시점 값이라 승격 뒤에도 `relay`로 남는다(후속 아래).
+- [ ] **감사 `peer_path`가 승격을 못 담는다.** admission 때 한 번 기록하므로 relay로 시작해 직결로 오른 연결도 `relay`다. 승격을 구조적으로 남길지(새 레코드 또는 close 레코드의 필드) 정한다.
+- [ ] **역방향 2단계(ADR-0065).** audit의 `host.reverse` 기록과 상시 listen·`--to` 사용을 확인한 뒤 제거 여부를 새 ADR로 정한다. 2026-11-13 기준 fleet에서 상시 쓰는 곳은 없다(MacMini listen 은퇴, Toss reverse 링크 제거).
+- [ ] **ut 도입 대비 transport 중립 이름.** `[iroh]` 절, pin route 이름 `iroh`, `details.iroh`는 iroh에 묶여 있다. ut backend를 붙일 때 새 ADR로 중립 이름을 정한다(계약은 additive라 새 필드를 더하는 방식).
+- [ ] **doctor `acl_principal_unmatched`(클라이언트 전용 장비).** MBP16(serve 없음, acl.toml 없음)에서 error로 나온다. 의도된 판정인지 확인하고 고친다(2026-11-14 진행 중).
+- [ ] **Windows `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap` 간헐 실패.** `fd7d3587` CI에서 한 번, 재실행 통과(2026-11-14 진행 중).
 
 - [ ] **TITAN 아래 M24 펀칭 확인.** iroh 펀칭이 통과했으니(상대도 보내 오는 흐름은 TITAN이 막지 않는 것으로 보임), 중개자 MacMini가 4433으로 닿는 M24도 Toss에서 될 가능성이 있다. 공유기 conntrack으로 펀칭 흐름의 첫 패킷 방향을 확인해 TITAN의 판정 규칙을 기록한다.
 - [ ] **M24 펀칭과 iroh 펀칭 비교.** `punch_accept::punch_route_nat_matrix`의 25 NAT 쌍에서 iroh route(relay 경유 신호, multipath 승격)의 직결 승격률과 지연을 M24와 같은 기준으로 잰다. iroh가 같거나 낫고 "relay 없는 펀칭"을 포기한다는 결정이 서면, M24(`punch.v1`, `host.punch`, 펀칭 모듈과 시험)를 걷어내는 ADR을 연다. 그 전에는 M24가 relay 없는 기본 경로의 유일한 펀칭이라 유지한다.
