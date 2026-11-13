@@ -60,7 +60,7 @@ use tokio::time::Instant;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
-use qsh_transport::{Dialed, FramedStream, PunchEndpoint, SocketSource, TrustEvaluator};
+use qsh_transport::{FramedStream, PunchEndpoint, SocketSource, TrustEvaluator};
 // Consumed by `run_reverse_observed`'s `StdRng::try_from_rng(&mut SysRng)` (below) —
 // production's replacement for `rand::rng()`'s `!Send` `ThreadRng`
 // (adversarial review finding: it made `run_reverse`'s returned future
@@ -74,6 +74,7 @@ use crate::config::BackoffLimits;
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
+use crate::ops::route::Routed;
 use crate::reverse::ReconnectCause;
 use crate::server::ConnCtx;
 use crate::trust::SharedTrustStore;
@@ -191,6 +192,11 @@ pub struct ReverseOptions {
     pub punch_enabled: bool,
     /// The server window's length; `None` is ADR-0054's six seconds.
     pub punch_window: Option<Duration>,
+    /// Test seam: when non-empty, the iroh relay's certificate is checked
+    /// against exactly these roots (an in-process relay has a self-signed
+    /// one). Production leaves it empty, which is the OS store.
+    #[doc(hidden)]
+    pub iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
 }
 
 impl Default for ReverseOptions {
@@ -200,6 +206,7 @@ impl Default for ReverseOptions {
             local_addrs: Arc::new(crate::punch::RouteAddrs),
             punch_enabled: true,
             punch_window: None,
+            iroh_relay_roots: Vec::new(),
         }
     }
 }
@@ -240,6 +247,10 @@ pub async fn run_reverse_on(
     // opens a window.
     let evaluator = trust.clone() as Arc<dyn TrustEvaluator>;
     let local_identity = identity.local.clone();
+    // The relay route of the registration (`relay.rs`): off unless the
+    // controller's pin asks for it.
+    let iroh_route =
+        relay::RelayRoute::new(config, identity.local.clone(), &options.iroh_relay_roots);
     let tuning = liveness.tuning();
     // An OS socket is replaced after a lost connection (a fresh source port,
     // like the fresh endpoint every redial used to have); a simulated one
@@ -329,7 +340,7 @@ pub async fn run_reverse_on(
                 runtime.server.drain_as(crate::lifecycle::Process::ServeTo).await;
                 return Ok(());
             }
-            result = dial_and_register(&endpoint, &trust, paths, controller, &local_hello) => result,
+            result = dial_and_register(&endpoint, &trust, paths, controller, &local_hello, iroh_route.as_ref()) => result,
         };
 
         let (dialed, ctl, peer_hello) = match attempt {
@@ -789,11 +800,12 @@ fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: Wa
 /// is the only place [`ReconnectCause::Resolve`] is constructed on its own.
 async fn dial_and_register(
     endpoint: &PunchEndpoint,
-    trust: &SharedTrustStore,
+    trust: &Arc<SharedTrustStore>,
     paths: &Paths,
     controller: &str,
     local_hello: &wire::Hello,
-) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
+    iroh: Option<&relay::RelayRoute>,
+) -> Result<(Routed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
     dial_and_register_resolving(
         endpoint,
         trust,
@@ -801,6 +813,7 @@ async fn dial_and_register(
         controller,
         local_hello,
         &crate::ops::SystemResolver,
+        iroh,
     )
     .await
 }
@@ -817,21 +830,69 @@ async fn dial_and_register(
 /// (`dial_and_register_tries_every_resolved_address_not_only_the_first`).
 async fn dial_and_register_resolving(
     endpoint: &PunchEndpoint,
-    trust: &SharedTrustStore,
+    trust: &Arc<SharedTrustStore>,
     paths: &Paths,
     controller: &str,
     local_hello: &wire::Hello,
     resolver: &dyn crate::ops::AddressResolver,
-) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
+    iroh: Option<&relay::RelayRoute>,
+) -> Result<(Routed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
     let hosts = crate::hosts::HostsFile::load(&paths.hosts_file())
         .map_err(|err| (err, ReconnectCause::Local))?;
-    let (address, server_name) =
-        crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)
-            .map_err(|err| (err, ReconnectCause::Local))?;
+    // The relay route, when the controller's pin asks for it and has a key
+    // (ADR-0061): read afresh per attempt so a `qsh trust add` is seen.
+    let relay = match iroh {
+        Some(route) => route
+            .plan_for(trust, controller)
+            .map_err(|err| (err, ReconnectCause::Local))?,
+        None => None,
+    };
+    let resolved = crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller);
+    let (address, server_name) = match (resolved, &relay) {
+        (Ok(found), _) => found,
+        // A controller with no address that only the relay can reach.
+        (Err(_), Some(plan)) if no_address(trust, controller) => {
+            return finish(relay::dial_only(plan).await?, local_hello).await;
+        }
+        (Err(err), _) => return Err((err, ReconnectCause::Local)),
+    };
+    let direct = dial_direct(
+        endpoint,
+        trust,
+        controller,
+        &address,
+        &server_name,
+        resolver,
+    );
+    let routed = match &relay {
+        Some(plan) => relay::race(direct, plan).await?,
+        None => direct.await?,
+    };
+    finish(routed, local_hello).await
+}
+
+/// Whether the pin of `controller` has no address and no `hosts.toml` entry
+/// supplies one.
+fn no_address(trust: &Arc<SharedTrustStore>, controller: &str) -> bool {
+    trust
+        .snapshot()
+        .find(crate::ops::host::lookup_name(controller))
+        .is_some_and(|pin| pin.address.is_empty())
+}
+
+/// The direct dial of a registration: resolve, then each address in turn.
+async fn dial_direct(
+    endpoint: &PunchEndpoint,
+    trust: &Arc<SharedTrustStore>,
+    controller: &str,
+    address: &str,
+    server_name: &str,
+    resolver: &dyn crate::ops::AddressResolver,
+) -> Result<Routed, (OpError, ReconnectCause)> {
     // Bounded by `crate::ops::RESOLVE_TIMEOUT`: an unbounded resolve would
     // hold this whole loop with no packet to the controller, no `retry`
     // line and no backoff.
-    let addrs = crate::ops::resolve_all_with(resolver, &address)
+    let addrs = crate::ops::resolve_all_with(resolver, address)
         .await
         .map_err(|err| (err, ReconnectCause::Resolve))?;
     // The registration reaches the controller's pin and nobody else
@@ -839,7 +900,7 @@ async fn dial_and_register_resolving(
     let binding = crate::ops::peer_binding(&trust.snapshot(), controller)
         .map_err(|err| (err, ReconnectCause::Local))?;
     let dialed = crate::ops::dial_first_reachable(&addrs, |addr| {
-        endpoint.dial_trusted_bound(addr, &server_name, binding)
+        endpoint.dial_trusted_bound(addr, server_name, binding)
     })
     .await
     .map_err(|(err, attempted)| {
@@ -849,11 +910,20 @@ async fn dial_and_register_resolving(
         // attempt is "the" failure.
         let cause = classify_dial_error(&err);
         (
-            crate::ops::exec::map_dial_error(err, &address, attempted),
+            crate::ops::exec::map_dial_error(err, address, attempted),
             cause,
         )
     })?;
-    let (ctl, peer_hello) = crate::handshake::initiate(&dialed.connection, local_hello.clone())
+    Ok(dialed.into())
+}
+
+/// The registration handshake over the connection that stood, whichever
+/// route carried it.
+async fn finish(
+    routed: Routed,
+    local_hello: &wire::Hello,
+) -> Result<(Routed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
+    let (ctl, peer_hello) = crate::handshake::initiate(&routed.connection, local_hello.clone())
         .await
         .map_err(|err| {
             let cause = classify_hello_error(&err);
@@ -862,7 +932,7 @@ async fn dial_and_register_resolving(
                 cause,
             )
         })?;
-    Ok((dialed, ctl, peer_hello))
+    Ok((routed, ctl, peer_hello))
 }
 
 /// The fingerprint of the controller `qsh serve --to <controller>` names, when
@@ -1335,6 +1405,8 @@ impl ReconnectEvent<'_> {
         );
     }
 }
+
+mod relay;
 
 #[cfg(test)]
 mod tests;
