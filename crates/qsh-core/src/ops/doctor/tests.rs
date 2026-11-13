@@ -2848,6 +2848,39 @@ fn doctor_acl_policy_missing_is_silent_when_a_role_pin_exists() {
     );
 }
 
+/// A client-only device (no `acl.toml`, every pin `none` or role-less) gets
+/// `acl_policy_missing` and never `acl_principal_unmatched`: the per-peer
+/// check runs only against a policy that loaded (`docs/CLI.md` §6.17,
+/// ADR-0038 결정 3). The file's presence is what turns on the per-peer error.
+#[test]
+fn doctor_without_acl_toml_reports_policy_missing_not_principal_unmatched() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_pin(&ops, "dial-only", Some("none"));
+    add_legacy_pin(&ops, "legacy", "legacy.example:4433");
+
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let codes = codes_of(&findings);
+    assert!(codes.contains(&"acl_policy_missing"), "{findings:?}");
+    assert!(!codes.contains(&"acl_principal_unmatched"), "{findings:?}");
+
+    // The same pins against an `acl.toml` that loads but names neither of
+    // them: now each is a per-peer error, which is the reported state.
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+    let findings = ops.doctor_acl_findings("serve", SystemTime::now()).unwrap();
+    let codes = codes_of(&findings);
+    assert!(!codes.contains(&"acl_policy_missing"), "{findings:?}");
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|c| **c == "acl_principal_unmatched")
+            .count(),
+        2,
+        "{findings:?}"
+    );
+}
+
 #[test]
 fn doctor_acl_policy_missing_is_silent_while_a_role_invite_is_live() {
     let (_guard, ops) = temp_ops();
