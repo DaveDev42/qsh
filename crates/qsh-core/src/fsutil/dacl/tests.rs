@@ -25,7 +25,7 @@ fn audit_record() -> crate::audit::AuditRecord {
         "exec",
         crate::acl::Decision::Allow,
         None,
-        "127.0.0.1:4433".parse().unwrap(),
+        &"127.0.0.1:4433".parse::<qsh_transport::PeerAddr>().unwrap(),
     )
 }
 

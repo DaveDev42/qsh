@@ -6,6 +6,11 @@
 // iroh dial pipeline in one future, and rustc's layout query for that future
 // nests deeper than the default limit of 128.
 #![recursion_limit = "256"]
+// On macOS, ld64 warns that this binary's `__eh_frame` exceeds the 16 MB that
+// compact unwind can encode. The warning is about unwind-table performance in a
+// test executable, not about correctness, and `build.warnings = "deny"` would
+// otherwise turn it into a build failure on the macOS CI legs.
+#![cfg_attr(target_os = "macos", allow(linker_messages))]
 
 mod acl_registry_audit;
 mod acl_uniformity;
