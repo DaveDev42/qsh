@@ -6,6 +6,7 @@ mod conformance;
 mod handshake_matrix;
 mod iroh_backend;
 mod iroh_identity;
+mod iroh_reflexive;
 mod iroh_support;
 mod iroh_upgrade;
 mod jump_pipe;

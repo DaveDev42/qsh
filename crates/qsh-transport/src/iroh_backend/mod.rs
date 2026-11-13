@@ -20,6 +20,7 @@ mod endpoint;
 mod errors;
 mod identity_proof;
 mod key;
+mod reflexive;
 #[cfg(test)]
 mod size_guard;
 

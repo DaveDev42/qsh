@@ -1483,3 +1483,21 @@ ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capab
 - 클라이언트 endpoint(§22.8)는 임의 키라서 claim 대상이 아니다.
 
 **시험.** `qsh-core`의 `iroh_serve::tests`(`one_process_per_state_dir_holds_the_device_key_at_the_relay`, `another_state_dir_has_its_own_slot`)가 claim 규칙을, `qsh-testkit`의 `iroh_serve::a_listen_beside_serve_leaves_the_relay_to_serve`가 `serve` 옆의 `listen`이 알림을 내고 시작하며 dial이 여전히 `serve`에 닿는 것을 본다. 승격은 `qsh-transport`의 `iroh_upgrade::a_relay_dial_moves_to_a_direct_path`가 relay로 선 연결이 직접 경로로 옮겨 가는 것을 지킨다.
+
+### 22.10 데몬 endpoint는 자기 공인 주소를 계속 알린다
+
+relay로 선 연결이 직접 경로로 옮겨 가려면 두 끝이 서로의 주소를 알고 서로에게 패킷을 먼저 보내야 한다. 상대가 내게 알려 주는 주소 집합은 iroh가 endpoint 안에서 net report가 끝날 때마다 새로 만든다. 공인 주소(NAT 바깥에서 보이는 주소)는 relay의 QUIC 주소 발견(QAD) 연결이 알려 주는 값이고, 그 probe가 시한(3초) 안에 답을 못 받은 report는 공인 주소 없이 집합을 다시 만든다.
+
+단명 클라이언트 endpoint는 report를 한 번만 돌려서 이 차이가 드러나지 않는다. 데몬 endpoint는 20~26초마다 report를 돌리고, 그때마다 iroh는 이미 QAD 연결이 하나 열려 있는 같은 소켓에서 QAD 연결을 새로 연다(첫 연결의 관측값은 주소가 *바뀔 때*만 채워지므로 iroh는 재사용할 값을 찾지 못한다). 공개 n0 relay(`aps1-1.relay.n0.iroh.link`)는 그 새 연결에 가끔만 답한다. 실측에서 이어진 probe의 절반쯤이, 오래 돈 데몬의 패킷 캡처에서는 본 report 전부가 relay의 응답 없이 3초에 시한이 찼다. 그 report마다 데몬의 공인 주소가 알림 집합에서 빠지고, 그 사이에 dial한 클라이언트는 데몬의 사설 주소만 받는다. 상대 방향으로 들어오는 UDP를 먼저 보낸 흐름에만 열어 주는 망(TITAN)에서는 클라이언트도 데몬도 서로를 향해 펀치를 시작하지 못하고, 연결은 relay에 머문다(v0.7.0 현장 기록: 클라이언트의 `remote_candidates`에 데몬의 사설 주소만 있음).
+
+규칙.
+
+- 데몬 endpoint(`IrohEndpoint::bind`, §22.8)만 이 규칙을 가진다. 클라이언트 endpoint는 report 하나로 끝나므로 켜지 않는다.
+- endpoint는 net report가 찾은 공인 주소(IPv4와 IPv6 각각)를 마지막으로 확인된 값으로 쥐고 있다가 iroh의 외부 주소로 설정한다(`add_external_addr`). 이후 report가 공인 주소를 못 찾아도 그 주소는 알림 집합에 남는다.
+- 새 report가 다른 공인 주소를 찾으면 앞의 것을 지우고 새것을 설정한다. 같은 주소를 다시 찾으면 확인 시각만 갱신한다.
+- 어떤 report도 10분(`GRACE`, iroh가 전체 report를 도는 5분 간격의 두 배) 동안 그 주소를 확인하지 않으면 지운다. 망을 떠난 호스트가 옛 주소를 영영 알리지 않게 하는 한도이고, 틀린 후보는 상대에게 probe 몇 번의 비용일 뿐이다.
+- 주소를 설정하고 지울 때 `info` 로그를 남긴다(`iroh: advertising the public address a net report found`, `iroh: no longer advertising a public address no report has confirmed`).
+- 이 규칙은 wire를 바꾸지 않는다. 달라지는 것은 상대가 받는 후보 주소 집합뿐이다.
+
+**시험.** `qsh-transport`의 `iroh_reflexive::a_failed_address_discovery_probe_does_not_unadvertise_the_public_address`가 NAT 역할의 UDP 중계 뒤에 QAD를 둔 relay로 데몬 endpoint가 공인 주소를 배우고, 중계를 막은 뒤의 report가 그 주소 없이 끝나도 알림 집합에 남는 것을 본다(keeper 없이는 마지막 단언에서 실패한다). 상태 기계는 `reflexive::tests`(`a_report_without_an_address_does_not_unpin_it`, `a_confirming_report_restarts_the_clock`, `a_new_address_replaces_the_old_one`, `an_unconfirmed_address_expires`, `each_family_keeps_its_own_clock`)가 맡는다. 두 NAT 사이 승격은 netns 실험(NAT 둘, QAD relay, 데몬 쪽 QAD만 차단)으로 확인했고 시험 스위트에는 넣지 않았다.
+

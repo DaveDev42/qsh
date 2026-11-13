@@ -64,6 +64,7 @@ impl TestRelay {
             relay_trust: IrohRelayTrust::OnlyRoots(vec![self.cert.clone()]),
             bind: vec![(Ipv4Addr::LOCALHOST, 0).into()],
             proxy_from_env: false,
+            relay_quic_port: None,
         }
     }
 }

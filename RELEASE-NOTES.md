@@ -29,18 +29,34 @@ failures on the iroh relay route.
   A second daemon starts without the relay endpoint and prints why. Use
   `qsh listen --serve` to serve and control from one process, or set
   `iroh.enable = false` for one of them. See protocol §22.9.
+- A long-running `qsh serve` or `qsh listen` with `iroh.enable = true` did
+  not keep telling peers its public address, so a relay connection to it
+  never moved to a direct path through a network that passes UDP only for
+  flows both sides send into. iroh rebuilds the address set from every net
+  report (every 20 to 26 seconds in a daemon), and on the later runs its
+  QUIC address discovery probe to the public n0 relay often times out
+  (about half of them in one measurement, every one in a capture of a
+  long-running daemon). A report without the probe's answer dropped the
+  public address, so a client that dialed in during the gap saw only the
+  daemon's private addresses in its `remote_candidates` and neither side
+  started punching. The daemon endpoint now keeps the last public address
+  a report found, replaces it when a report finds another, and drops it
+  after ten minutes without a confirming report. In a network-namespace
+  lab with two masquerade NATs and the relay refusing the daemon's
+  address discovery after the first report, `v0.7.0` showed the client only
+  the private address and stayed on the relay; with the fix the client saw
+  the public address and moved to a direct path. See protocol §22.10.
 
 ### What is still unproven
 
 Everything `v0.7.0` lists, plus these items:
 
-- A relay connection that stays on the relay and never moves to a direct
-  path was not reproduced. In a Linux network-namespace lab with
-  masquerade NATs, qsh's endpoint settings moved to a direct path as the
-  standalone probe did, and a new test now guards the upgrade on loopback.
-  If a field pair still stays on the relay after `v0.7.1`, the cause is
-  not in qsh's transport settings; capture `RUST_LOG=iroh=debug` from both
-  ends.
+- Whether the public-address fix is enough on the corporate network
+  (TITAN) that passes UDP only for flows both sides send into was not
+  measured there; the namespace lab models that filter with masquerade
+  NATs. If a field pair still stays on the relay after `v0.7.1`, capture
+  `RUST_LOG=iroh=debug` from both ends and check that the client's
+  `remote_candidates` for the host include its public address.
 - A first relay dial that hangs until the dial budget ends is not
   retried. It is still possible when the relay's first connection stalls.
 - The `unable to send to relay actor, already closed` warning at client
