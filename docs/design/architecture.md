@@ -318,3 +318,13 @@ backend 고유 오류(`quinn::ConnectionError`, `rustls::Error`, `noq::*`, iroh�
 ### 10.7 건드리지 않는 것
 
 wire(`qsh/1` ALPN, frame, 스트림 배치), resume(SPKI + token), ACL 단일 통과점, 감사의 fail-closed, `qsh.cli/v1` 계약은 backend와 무관하다. backend 경계는 그 아래의 교체 지점이다.
+
+## 11. 개념 모델: server와 client (ADR-0065)
+
+> 이 절은 설명의 틀을 적는다. crate 경계, 모듈, wire, 동작은 하나도 바뀌지 않는다.
+
+사용자에게는 개념 둘로 설명한다. server는 `qsh serve`로, 인바운드 연결을 받아 broker(§3)에 세션·exec·터널·파일을 내준다. client는 그 밖의 명령으로, `Ops` façade(§2)를 거쳐 server에 연결을 건다. 한 장비가 둘을 겸하는 것이 평범하다.
+
+이 틀이 성립하는 것은 transport가 키로 주소를 정하기 때문이다. iroh backend(§10.5)에서는 pin의 `key`가 곧 endpoint 주소이고 relay로는 늘 닿으므로, 연결을 누가 시작하느냐가 도달 가능성을 가르지 않는다. 방향은 연결 수립 사실일 뿐이고, 요청을 인가하는 쪽은 control 스트림이 서고 나면 언제나 요청을 받는 쪽이다(`docs/design/protocol.md` §11 대칭 원칙).
+
+역방향(`qsh listen`, `qsh serve --to`, 등록 registry, 합친 endpoint)은 이 모델 안의 고급 fallback이다. relay(TCP 443 HTTPS)가 막힌 망, `[iroh].enable = false`이거나 iroh를 쓰지 않는 peer, 특정 장비를 거치는 jump 체인과 홀펀칭 중개자(ADR-0054)에 쓴다. 코드, `xtask arch`의 모듈 규칙, `reverse/`와 `broker/`의 경계는 그대로다. 역방향을 제거할지는 사용을 확인한 뒤 새 ADR로 정하며(ADR-0065 결정 6), 그때까지 이 절의 어떤 것도 제거를 전제하지 않는다.
