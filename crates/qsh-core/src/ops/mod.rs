@@ -722,6 +722,9 @@ pub struct Ops {
     /// Extra roots for the relay's TLS certificate, set only by tests that
     /// run their own relay ([`Self::with_iroh_relay_roots`]).
     iroh_relay_roots: Vec<qsh_transport::CertificateDer>,
+    /// The sockets a client iroh endpoint binds, set only by tests that need
+    /// the relay to be the only path ([`Self::with_iroh_client_bind`]).
+    iroh_client_bind: Vec<std::net::SocketAddr>,
     /// The clock of the route memory, set only by tests
     /// ([`Self::with_route_clock`]); the wall clock otherwise.
     route_clock: Option<Arc<dyn crate::route_memory::RouteClock>>,
@@ -842,6 +845,7 @@ impl Ops {
             jump_off: false,
             no_iroh: false,
             iroh_relay_roots: Vec::new(),
+            iroh_client_bind: Vec::new(),
             route_clock: None,
         }
     }
@@ -865,6 +869,18 @@ impl Ops {
         self
     }
 
+    /// Bind every client iroh endpoint of this `Ops` to `addrs` instead of
+    /// ephemeral ports on every interface. A seam for tests that must prove
+    /// the relay carried a connection: a client with only an IPv6 loopback
+    /// socket cannot reach a host with only an IPv4 one, so no direct path can
+    /// form. No flag or config key reaches it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_iroh_client_bind(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
+        self.iroh_client_bind = addrs;
+        self
+    }
+
     /// `--no-iroh`: this process never takes the iroh relay route, which is
     /// `[iroh].mode = "off"` for one command (ADR-0061 decision 1). It wins
     /// over the key, and an `[iroh]` section that does not validate does not
@@ -885,7 +901,9 @@ impl Ops {
             Err(_) if self.no_iroh => crate::iroh_settings::IrohSettings::default(),
             Err(err) => return Err(err),
         };
-        let settings = settings.with_relay_roots(self.iroh_relay_roots.clone());
+        let settings = settings
+            .with_relay_roots(self.iroh_relay_roots.clone())
+            .with_client_bind(self.iroh_client_bind.clone());
         Ok(if self.no_iroh {
             settings.route_off()
         } else {

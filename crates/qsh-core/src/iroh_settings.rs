@@ -140,6 +140,7 @@ impl IrohSection {
             proxy: self.proxy.unwrap_or_default(),
             head_start: Duration::from_millis(head_start_ms),
             relay_roots: Vec::new(),
+            client_bind: Vec::new(),
         })
     }
 }
@@ -165,6 +166,10 @@ pub struct IrohSettings {
     /// system's store. Never read from a config file: only a test that runs
     /// its own relay sets it ([`Self::with_relay_roots`]).
     pub relay_roots: Vec<CertificateDer>,
+    /// The sockets a client endpoint binds; empty is ephemeral ports on every
+    /// interface. Never read from a config file: only a test that must keep
+    /// the relay the sole path sets it ([`Self::with_client_bind`]).
+    pub client_bind: Vec<std::net::SocketAddr>,
 }
 
 impl Default for IrohSettings {
@@ -179,6 +184,7 @@ impl Default for IrohSettings {
             proxy: IrohProxy::Env,
             head_start: Duration::from_millis(DEFAULT_HEAD_START_MS),
             relay_roots: Vec::new(),
+            client_bind: Vec::new(),
         }
     }
 }
@@ -210,6 +216,16 @@ impl IrohSettings {
     #[must_use]
     pub fn with_relay_roots(mut self, roots: Vec<CertificateDer>) -> Self {
         self.relay_roots = roots;
+        self
+    }
+
+    /// These settings whose client endpoints bind `addrs`. A seam for tests
+    /// that must keep the relay the only path; no config key or flag reaches
+    /// it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_client_bind(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
+        self.client_bind = addrs;
         self
     }
 
@@ -252,7 +268,7 @@ impl IrohSettings {
     /// The configuration of a client endpoint that dials `pin`: homed on the
     /// relay [`Self::relay_for`] picks, on ephemeral UDP ports.
     pub fn client_config(&self, pin: &TrustPeer) -> IrohConfig {
-        self.base_config(self.relay_for(pin), Vec::new())
+        self.base_config(self.relay_for(pin), self.client_bind.clone())
     }
 
     /// The configuration of a daemon's endpoint: homed on this device's

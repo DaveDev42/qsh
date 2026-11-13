@@ -63,6 +63,13 @@ pub struct IrohServe {
     /// leaves it empty, which is the OS store (ADR-0061 decision 12).
     #[doc(hidden)]
     pub relay_roots: Vec<CertificateDer>,
+    /// Test seam: when non-empty and `bind_port` is `0`, the endpoint binds
+    /// exactly these sockets instead of ephemeral ports on every interface.
+    /// A test that must prove the relay carried a connection binds the host
+    /// to IPv4 loopback and its peer to IPv6 loopback, so no direct path can
+    /// form. Production leaves it empty.
+    #[doc(hidden)]
+    pub bind_addrs: Vec<SocketAddr>,
 }
 
 impl Default for IrohServe {
@@ -72,6 +79,7 @@ impl Default for IrohServe {
             bind_port: 0,
             proxy_from_env: true,
             relay_roots: Vec::new(),
+            bind_addrs: Vec::new(),
         }
     }
 }
@@ -84,6 +92,7 @@ impl IrohServe {
             bind_port,
             proxy_from_env: true,
             relay_roots: Vec::new(),
+            bind_addrs: Vec::new(),
         }
     }
 }
@@ -142,7 +151,7 @@ pub async fn bind(
         proxy_from_env: serve.proxy_from_env,
     };
     if serve.bind_port == 0 {
-        return IrohEndpoint::bind(identity, trust, config(Vec::new()))
+        return IrohEndpoint::bind(identity, trust, config(serve.bind_addrs.clone()))
             .await
             .map_err(|err| bind_error(serve, &err));
     }

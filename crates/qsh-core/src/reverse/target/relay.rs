@@ -38,16 +38,19 @@ impl RelayRoute {
     /// section does not validate (fail closed: no relay contact).
     /// `relay_roots` is the test seam for an in-process relay; production
     /// passes none and the OS store judges the relay's certificate.
+    /// `client_bind` is the same kind of seam for the endpoint's sockets.
     pub(super) fn new(
         config: &Config,
         identity: LocalIdentity,
         relay_roots: &[CertificateDer],
+        client_bind: &[std::net::SocketAddr],
     ) -> Option<Self> {
         let settings = config
             .iroh
             .settings()
             .ok()?
-            .with_relay_roots(relay_roots.to_vec());
+            .with_relay_roots(relay_roots.to_vec())
+            .with_client_bind(client_bind.to_vec());
         settings
             .route_enabled()
             .then_some(Self { identity, settings })
@@ -222,7 +225,8 @@ mod tests {
         let me = identity_in(&dir.path().join("me"));
         let ctl = identity_in(&dir.path().join("ctl"));
         let key = ctl.local.iroh_public_key().expect("ed25519");
-        let route = RelayRoute::new(&Config::default(), me.local.clone(), &[]).expect("mode auto");
+        let route =
+            RelayRoute::new(&Config::default(), me.local.clone(), &[], &[]).expect("mode auto");
         assert_eq!(key_to_hex(&key).len(), 64);
 
         let with_key = IrohPinChange {
@@ -262,10 +266,10 @@ mod tests {
         let me = identity_in(dir.path());
         let mut config = Config::default();
         config.iroh.mode = Some(crate::iroh_settings::IrohMode::Off);
-        assert!(RelayRoute::new(&config, me.local.clone(), &[]).is_none());
+        assert!(RelayRoute::new(&config, me.local.clone(), &[], &[]).is_none());
         let mut config = Config::default();
         config.iroh.relay_url = Some("http://not-https".into());
-        assert!(RelayRoute::new(&config, me.local.clone(), &[]).is_none());
+        assert!(RelayRoute::new(&config, me.local.clone(), &[], &[]).is_none());
     }
 
     #[test]

@@ -18,7 +18,11 @@ use qsh_core::iroh_serve::IrohServe;
 use qsh_core::reverse::target::{ReverseOptions, run_reverse_on};
 use qsh_core::trust::TrustStore;
 use qsh_core::{ExecStdin, Ops};
-use qsh_proto::{ExecRunReq, IdentityInitReq, KeyStoreMode, TrustAddReq, TrustSetIrohReq};
+use qsh_proto::event::SessionEvent;
+use qsh_proto::{
+    ExecRunReq, IdentityInitReq, KeyStoreMode, SessionAttachReq, SessionCloseReq, SessionOpenReq,
+    TrustAddReq, TrustSetIrohReq,
+};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::{loaded_identity, wait_for};
 use qsh_transport::test_relay::TestRelay;
@@ -64,6 +68,27 @@ impl Controller {
 
     /// A controller that pins `target` as `b` under the given `acl.toml`.
     async fn start_with_acl(relay: &TestRelay, target: &TestIdentity, acl: &[u8]) -> Self {
+        Self::start_inner(relay, target, acl, false).await
+    }
+
+    /// [`Self::start`] with the relay endpoint bound to IPv4 loopback alone,
+    /// so a target that has only IPv6 loopback has no direct path to it.
+    async fn start_relay_only(relay: &TestRelay, target: &TestIdentity) -> Self {
+        Self::start_inner(
+            relay,
+            target,
+            b"[[acl]]\nprincipal = \"device:b\"\nallow = [\"host.reverse\"]\n",
+            true,
+        )
+        .await
+    }
+
+    async fn start_inner(
+        relay: &TestRelay,
+        target: &TestIdentity,
+        acl: &[u8],
+        relay_only: bool,
+    ) -> Self {
         qsh_testkit::env_check::ensure_loopback_udp();
         let (dir, paths) = sandbox();
         let id = make_identity();
@@ -79,6 +104,9 @@ impl Controller {
 
         let mut serve = IrohServe::new(relay.url.clone(), 0);
         serve.relay_roots = vec![relay.cert.clone()];
+        if relay_only {
+            serve.bind_addrs = vec![SocketAddr::from(([127, 0, 0, 1], 0))];
+        }
         let loaded = loaded_identity(&id, "controller");
         let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<SocketAddr>();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -154,6 +182,17 @@ impl Target {
         Self::start_with_file_key(relay, id, controller, controller_key, address, None).await
     }
 
+    /// [`Self::start`] with the registration's iroh endpoint bound to IPv6
+    /// loopback alone.
+    async fn start_relay_only(
+        relay: &TestRelay,
+        id: &TestIdentity,
+        controller: &Controller,
+        controller_key: &str,
+    ) -> Self {
+        Self::start_inner(relay, id, controller, controller_key, None, None, true).await
+    }
+
     /// [`Self::start`] with the pin's `key` line then edited by hand to
     /// `file_key`, which `trust.set_iroh` would have refused.
     async fn start_with_file_key(
@@ -163,6 +202,27 @@ impl Target {
         controller_key: &str,
         address: Option<String>,
         file_key: Option<&str>,
+    ) -> Self {
+        Self::start_inner(
+            relay,
+            id,
+            controller,
+            controller_key,
+            address,
+            file_key,
+            false,
+        )
+        .await
+    }
+
+    async fn start_inner(
+        relay: &TestRelay,
+        id: &TestIdentity,
+        controller: &Controller,
+        controller_key: &str,
+        address: Option<String>,
+        file_key: Option<&str>,
+        relay_only: bool,
     ) -> Self {
         let (dir, paths) = sandbox();
         let ops = Ops::new(paths.clone());
@@ -203,6 +263,11 @@ impl Target {
 
         let loaded = loaded_identity(id, "b");
         let roots = vec![relay.cert.clone()];
+        let client_bind = if relay_only {
+            vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0))]
+        } else {
+            Vec::new()
+        };
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             run_reverse_on(
@@ -213,6 +278,7 @@ impl Target {
                 None,
                 ReverseOptions {
                     iroh_relay_roots: roots,
+                    iroh_client_bind: client_bind,
                     ..ReverseOptions::default()
                 },
                 |_| {},
@@ -476,4 +542,132 @@ async fn assert_registered_over_the_relay(controller: &Controller, target_id: &T
         format!("iroh:{}", target_id.fingerprint),
         "{admitted}"
     );
+}
+
+/// A target and a controller with no address family in common (IPv6 loopback
+/// against IPv4 loopback), so the relay is the only path there is: the
+/// registration is admitted with `peer_path = "relay"`, `exec` reaches the
+/// target through it, and an interactive session opened and attached through
+/// the controller runs a command in the target's shell. The audit record is
+/// written when the registration is admitted; that no direct path can take
+/// over afterwards is the split of address families, not the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_only_registration_carries_exec_and_an_attached_session() {
+    let relay = TestRelay::spawn().await;
+    let target_id = make_identity();
+    let mut controller = Controller::start_relay_only(&relay, &target_id).await;
+    let controller_key = hex(&controller.id.local.iroh_public_key().expect("ed25519"));
+    let mut target =
+        Target::start_relay_only(&relay, &target_id, &controller, &controller_key).await;
+
+    let (_dir, ops) = client_of(&controller, &target_id).await;
+    wait_reachable(&ops).await;
+
+    let out = tokio::time::timeout(
+        TIMEOUT,
+        blocking({
+            let ops = ops.clone();
+            move || {
+                ops.exec_run(
+                    ExecRunReq {
+                        host: "b".into(),
+                        argv: vec!["sh".into(), "-c".into(), "exit 9".into()],
+                        env: vec![],
+                        timeout_ms: Some(10_000),
+                    },
+                    ExecStdin::Closed,
+                )
+            }
+        }),
+    )
+    .await
+    .expect("exec returns")
+    .expect("exec through the controller reaches the relay-only target");
+    assert_eq!(out.data.remote_exit_code, 9);
+
+    // An interactive session on the target, attached through the controller:
+    // type a command whose answer differs from what the terminal echoes back.
+    let ran = tokio::time::timeout(
+        TIMEOUT,
+        blocking({
+            let ops = ops.clone();
+            move || attach_and_run(&ops)
+        }),
+    )
+    .await
+    .expect("the session answers");
+    assert!(ran.contains("relay-42"), "{ran:?}");
+
+    // The controller admitted the registration over the relay and nothing
+    // else could have carried it.
+    assert_registered_over_the_relay(&controller, &target_id).await;
+    let admitted = controller
+        .audit()
+        .into_iter()
+        .find(|r| r["action"] == "host.reverse" && r["decision"] == "allow")
+        .expect("an admitted registration");
+    assert_eq!(admitted["peer_path"], "relay", "{admitted}");
+    let relay_label = admitted["relay"].as_str().expect("relay accompanies relay");
+    assert!(relay_label.starts_with("https://127.0.0.1:"), "{admitted}");
+    assert!(
+        controller
+            .audit()
+            .iter()
+            .filter(|r| r["decision"] == "allow" && r.get("peer_path").is_some())
+            .all(|r| r["peer_path"] == "relay"),
+        "{:?}",
+        controller.audit()
+    );
+
+    target.stop().await;
+    controller.stop().await;
+}
+
+/// Open a shell on `b`, attach, run a command and return what the terminal
+/// showed once its answer arrived.
+fn attach_and_run(ops: &Ops) -> String {
+    use base64::Engine as _;
+    let opened = ops
+        .session_open(SessionOpenReq {
+            host: "b".into(),
+            argv: vec!["sh".into()],
+            env: vec![],
+            term: Some("xterm-256color".into()),
+            cols: Some(80),
+            rows: Some(24),
+            user: None,
+            shell_command: None,
+        })
+        .expect("session.open through the controller");
+    let mut stream = ops
+        .session_attach(
+            SessionAttachReq {
+                session_ref: opened.session_ref.clone(),
+                no_steal: false,
+            },
+            &[],
+        )
+        .expect("session.attach through the controller");
+    stream
+        .write(b"echo relay-$((20+22))\n".to_vec())
+        .expect("session input");
+    let mut seen = String::new();
+    while !seen.contains("relay-42") {
+        match stream.next_event() {
+            Some(Ok(SessionEvent::Output { data_b64, .. })) => {
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(data_b64.as_bytes())
+                    .expect("Base64 output");
+                seen.push_str(&String::from_utf8_lossy(&data));
+            }
+            Some(Ok(_)) => {}
+            other => panic!("the attach ended early ({other:?}); saw {seen:?}"),
+        }
+    }
+    stream.close();
+    let _ = ops.session_close(SessionCloseReq {
+        session_ref: opened.session_ref,
+        signal: None,
+    });
+    seen
 }
