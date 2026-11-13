@@ -9,12 +9,145 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.7.0`
+
+A minor release on top of `v0.6.0`. It adds an optional iroh relay route
+(M28, ADR-0061) for hosts that a direct dial and hole punching cannot
+reach, and fixes a false fallback in jump chains (ADR-0058). The relay
+route is off until you enable it, so a setup that does not use it sees one
+change only (see "Behavior changes to expect").
+
+### Behavior changes to expect
+
+- After a direct or punched connection passes a pin check, the client
+  writes the host's public key as `key` into that pin in `trust.toml`,
+  under the file lock and only when the pin has none. It never creates a
+  pin and never overwrites a key. The write goes through the same code as
+  other `trust.*` edits, so hand-written comments and layout in
+  `trust.toml` are normalized on that first write. Pairing and
+  `trust add --cert-file` fill the key the same way.
+- A jump chain on a healthy path no longer falls back to the carrier
+  stream after an idle gap (see "Fixes").
+
+### New features
+
+- Optional iroh relay route (M28, ADR-0061). For a pinned host, a relay
+  route can reach it when UDP is blocked and an iroh relay is reachable
+  over HTTPS. On the host, `iroh.enable = true` makes `qsh serve` and
+  `qsh listen` open an iroh endpoint beside the UDP socket. On the client,
+  `qsh trust iroh <name> [--relay <url>] [--key <hex>] [--off]` adds
+  `routes = ["iroh"]` to a pin, and `--no-iroh` or `iroh.mode = "off"`
+  skips the route.
+- Route order. The direct dial and hole punching go first. The relay
+  starts beside them after `iroh.head_start_ms` (1000 ms), and the first
+  connection that stands wins. A pin with no address goes straight to the
+  relay. The client remembers a blocked direct route per pin (ten minutes,
+  doubling to an hour, cleared on a network change) in `route-cache.json`
+  and skips it while the memory holds.
+- `qsh serve --to` can register with a controller over the relay. The
+  controller applies the same `host.reverse` check as for a direct
+  registration and records the iroh peer in the audit log.
+- Sessions resume across routes, because resume is keyed on the peer's key
+  and not on its address.
+- When the relay stage fails, errors carry `details.iroh.reason`
+  (`relay_unreachable`, `relay_tls`, `relay_upgrade` or
+  `no_relay_configured`). The reason comes from probing the relay from the
+  outside (resolve, connect, TLS, `/ping`, upgrade). The probe runs only
+  when the deadline leaves room for it, and not when the peer was missing
+  or refused the connection.
+- The default relay is the public n0 relay, which has rate limits. Set
+  `iroh.relay_url` or `--relay` to use your own `iroh-relay`. The relay
+  sees ciphertext, both endpoint ids and timing. Relay TLS is checked
+  against the OS trust store. Hosts with a private CA and `-J` chains
+  cannot use the route.
+- The release binaries include iroh by default, so they carry more
+  dependencies than `v0.6.0`.
+
+### Fixes
+
+- Per-process client key and in-band proof. A client used to open its iroh
+  endpoint with the device key, so two qsh processes on one machine shared
+  an endpoint id and the relay dropped whichever connected first. The
+  client now opens each endpoint with a random key and proves its qsh
+  identity inside the connection. One unidirectional stream carries 97
+  bytes (version, public key, signature), and the signature covers this
+  connection's TLS exporter and both endpoint ids. The host decides pin,
+  role, ACL, audit and admission from the proven key, and closes with
+  `0x1001` when the proof is late, wrong or not a pin. Daemon endpoints
+  still use the device key as their endpoint id.
+- Close latency. Short iroh commands waited about a second at exit, even on
+  loopback. The relay never answers the close of the address-discovery
+  connection, so iroh waited out the closing period. `wait_idle` now waits
+  at most 150 ms for the peer's `CONNECTION_CLOSE` and closes the endpoint
+  in the background. A process-wide handle keeps a closing endpoint alive,
+  which stops the drop error that was logged at exit.
+- Direct fallback for a resting pin. When iroh cannot stand within 2
+  seconds (half that for a short dial), the direct dial and punching now
+  start beside it, so the fallback fits inside the deadline. The relay
+  diagnostic no longer skips the proxy when it checks TCP.
+- Jump silence clock (ADR-0058 decision 1, amended). The first datagram
+  sent after one was received no longer starts the silence clock, so an
+  ack-only reply after an idle gap on a healthy path does not trigger the
+  silence fallback. A real blackhole is still detected within the
+  deadline, because the clock starts at the second send.
+
+### Interoperability
+
+- The wire format change is additive. The only new wire element is the
+  97-byte client proof, which exists only on the iroh route. No tag or
+  field number was reused, and no capability string was added.
+- `v0.6.0` and earlier peers keep working for everything they supported.
+  The relay route needs `v0.7.0` on both the client and the host. The pin
+  `key` field is optional, and an older client ignores it.
+
+### Contract changes
+
+- `qsh.cli/v1` and `qsh.event/v1` stay additive-only. New optional fields:
+  `routes`, `relay` and `key` on pins, `peer_path` and `relay` on audit
+  records of iroh connections, `iroh` on `serve.json`, and `details.iroh`
+  (with `reason`) on errors. New operation: `trust.set_iroh`. A refusal by
+  the host is `AUTH_FAILED` with `details.category: "remote_rejected"`. No
+  existing field changed type or was removed. No new `ErrorCode`.
+- New config keys: the six `[iroh]` keys, listed in `docs/CLI.md` §6.23.
+  New global flag: `--no-iroh`.
+- Three new append-only fixtures: `audit.query.iroh_relay.json`,
+  `trust.list.iroh.json` and `trust.set_iroh.json`. Existing fixtures and
+  `capabilities.json` are unchanged.
+- The man pages in `docs/man/` were regenerated, and `qsh-trust-iroh.1` is
+  new.
+
+### Assets and signing
+
+Unchanged from `v0.6.0`: the same nine assets plus `SHA256SUMS`, with
+`v0.7.0` in the names. `.github/workflows/release.yml` is identical to the
+one that built `v0.6.0`.
+
+### What is still unproven
+
+Everything `v0.6.0` lists, plus these items:
+
+- The iroh relay route has been tested only against an in-process relay.
+  A standalone probe connected through a TLS-intercepting corporate VPN to
+  a home machine, but qsh itself has not run on that network or any other
+  real one. The head start, the route memory and the relay's rate limits
+  are unmeasured in the field.
+- The upgrade from a relay path to a direct path inside qsh is not tested
+  directly. The standalone probe saw it happen, but no qsh test does.
+- Pairing over the relay, the effect of relay latency on the silence
+  rules, and discovery traffic have no test.
+- The jump silence fix has a unit test and an acceptance test that was
+  previously ignored. It has not run against a real multi-hop chain.
+
+### Not for production use
+
+Unchanged from `v0.5.0`.
+
 ## `v0.6.0`
 
 A minor release on top of `v0.5.8`. It ships the P2 milestones M21 to M26
 (ADR-0050 to ADR-0058), the combined `listen --serve` endpoint (M27,
-ADR-0059), an optional iroh relay route (M28, ADR-0061), and a security fix
-for direct dials (ADR-0060). Upgrade your clients. The fix is client-side, and it changes which servers a client
+ADR-0059), and a security fix for direct dials (ADR-0060). Upgrade your
+clients. The fix is client-side, and it changes which servers a client
 accepts (see "Security fix" and "Behavior changes").
 
 ### Security fix
@@ -78,12 +211,6 @@ These follow from the fix and can break setups that worked before.
   client draws the host's screen state instead of replaying its bytes.
   `--screen-sync=off` restores the byte path. `--json`, `--jsonl`, `exec`,
   `session read`, tunnels and `qsh cp` are unchanged.
-- The iroh relay route changes nothing until you enable it, with one
-  exception: after a direct or punched connection passes a pin check, the
-  client writes the host's public key as `key` into that pin in
-  `trust.toml`, under the file lock and only when the pin has none. The
-  write goes through the same code as other `trust.*` edits, so hand-written
-  comments and layout in `trust.toml` are normalized on that first write.
 
 ### New features
 
@@ -151,30 +278,6 @@ These follow from the fix and can break setups that worked before.
   forward otherwise. There is no wire change, and the flag does not
   persist: set the config key to keep it. Serving several listeners over
   one connection is out of scope.
-- Optional iroh relay route (M28, ADR-0061). For a pinned host, a relay
-  route can reach it when UDP is blocked and an iroh relay is reachable over
-  HTTPS. It is off until you switch it on, and nothing changes for a setup
-  that does not. On the host, `iroh.enable = true` makes `qsh serve` and
-  `qsh listen` open an iroh endpoint beside the UDP socket. On the client,
-  `qsh trust iroh <name> [--relay <url>] [--key <hex>] [--off]` adds
-  `routes = ["iroh"]` to a pin, and `--no-iroh` or `iroh.mode = "off"`
-  skips the route. The direct dial and hole punching go first. The relay
-  starts beside them after `iroh.head_start_ms` (1000 ms) and the first
-  connection that stands wins. A pin with no address goes straight to the
-  relay. The client remembers a blocked direct route per pin (ten minutes,
-  doubling to an hour, cleared on a network change) in `route-cache.json`.
-  `qsh serve --to` can register over the relay too. Sessions resume across
-  routes because resume is keyed on the peer's key. The default relay is the
-  public n0 relay, which has rate limits; set `iroh.relay_url` or `--relay`
-  for your own `iroh-relay`. The relay sees ciphertext, both endpoint ids and
-  timing. Relay TLS is checked against the OS trust store. Daemon endpoints
-  use the device key as their endpoint id. A client endpoint uses a random
-  key and proves its qsh identity inside the connection (97 bytes, bound to
-  that connection), which is the only wire change and exists only on this
-  route. Private-CA hosts and `-J` chains cannot use it. The release
-  binaries include iroh by default, so they carry more dependencies than
-  `v0.5.8`. Pins learn the host's `key` from the first direct, punched,
-  paired or `trust add --cert-file` connection.
 - Smaller changes since `v0.5.8` include a Windows host fix that stopped
   `Ctrl-C` from being ignored in children, a fix for a localctl bind
   `umask` that blocked concurrently created directories, and a fix for an
@@ -220,12 +323,8 @@ These follow from the fix and can break setups that worked before.
   `service.install` and `service.uninstall`, `data.transport` on
   `doctor.run`, and `shell_command` on the session open request. New
   operations: `config.get|set|unset|list`, `trust.allow|deny`,
-  `trust.set_jump`, `trust.set_rendezvous` and `trust.set_iroh`. M28 adds
-  optional `routes`, `relay` and `key` on pins, `peer_path` and `relay` on
-  audit records of iroh connections, `iroh` on `serve.json`, and
-  `details.iroh` (with `reason`) on errors. A refusal by the host is
-  `AUTH_FAILED` with `details.category: "remote_rejected"`. No existing
-  field changed type or was removed. No new `ErrorCode`.
+  `trust.set_jump` and `trust.set_rendezvous`. No existing field
+  changed type or was removed. No new `ErrorCode`.
 - The ACL action vocabulary grows by three, to 14: `host.punch`,
   `forward.agent` and `forward.jump` are new (a `trust allow` or an
   `[[acl]]` row can name them), and `acl show` / `acl check` list them.
@@ -238,7 +337,7 @@ These follow from the fix and can break setups that worked before.
   `listen_serve_ignores_serve_bind` and `serve_unit_beside_listen_serve`.
   Each has a new append-only fixture. Existing fixtures are unchanged.
   `capabilities.json` was regenerated for the seven new capability strings.
-- New config keys include the six `[iroh]` keys, `[interactive].screen_sync`,
+- New config keys include `[interactive].screen_sync`,
   `[interactive].predict`, `[interactive].status_line`, `agent.forward`,
   and `[listen].serve`, listed in
   `docs/CLI.md` §6.23. Keys read only at startup report
@@ -274,13 +373,6 @@ Everything `v0.5.8` lists, plus these items from the P2 work:
   the local test, close to the 0.5 floor the acceptance criterion sets. A
   shared CI runner has gone over the idle-memory and echo-latency limits
   once each in recent runs, and those limits are watched.
-- The iroh relay route has been tested only against an in-process relay.
-  A standalone probe connected through a TLS-intercepting corporate VPN
-  to a home machine, but qsh itself has not run on that network or any other
-  real one, so the head start, the route memory and the relay's rate limits
-  are unmeasured in the field. Pairing over the relay, a path upgrade from
-  relay to direct inside qsh, the effect of relay latency on the silence
-  rules, and discovery traffic have no test.
 - Combined `listen --serve` has acceptance tests (one endpoint serving
   registration and forward at once, the role matrix, recovery after a 5
   second blackhole). It has had no soak run and no real-network trial.
