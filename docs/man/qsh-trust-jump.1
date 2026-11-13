@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-trust-jump 1  "jump 0.7.2" 
+.TH qsh-trust-jump 1  "jump 0.8.0" 
 .SH NAME
 qsh\-trust\-jump \- Set the chain of pinned peers a host is reached through (`docs/CLI.md` §6.11, ADR\-0056 decision 20). A dial to the host goes through these hops, first hop first, unless the command line gives `\-J` or `\-\-jump`. Each hop must be pinned with an address; at most four hops, counting the hops\*(Aq own chains, and a name only once. `\-\-clear` removes the chain. Takes effect from the next command
 .SH SYNOPSIS
@@ -57,4 +57,4 @@ The pinned host the chain belongs to
 [\fIHOP\fR]
 Pinned peers to go through, first hop first
 .SH VERSION
-v0.7.2
+v0.8.0
