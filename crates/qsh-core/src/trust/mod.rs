@@ -46,6 +46,7 @@ use crate::ops::OpError;
 pub(crate) mod connection_watch;
 pub mod invite_address;
 pub mod iroh_pin;
+pub(crate) mod key_fill;
 pub mod pairing;
 mod role;
 pub use iroh_pin::IrohPinChange;

@@ -737,6 +737,15 @@ impl Ops {
                         proxied,
                     )),
                 };
+                // The handshake passed the pin check, so the certificate's key
+                // is the pin's key: record it for the iroh route (ADR-0061
+                // decision 3). A failed write only leaves the pin without
+                // a key, which a later direct connection fills.
+                if outcome.is_ok()
+                    && let Some(key) = dialed.connection.peer_ed25519_key()
+                {
+                    let _ = crate::trust::key_fill::record(&self.paths.trust_file(), &key);
+                }
                 dialed.connection.close(0, b"verified");
                 let _ = tokio::time::timeout(CONFIRM_SETTLE, dialed.endpoint.wait_idle()).await;
                 outcome

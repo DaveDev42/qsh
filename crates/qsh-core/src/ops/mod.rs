@@ -122,6 +122,16 @@ impl PeerTarget {
         }
     }
 
+    /// What fills the pin's `key` from a connection to it (ADR-0061
+    /// decision 3): `None` for a jump chain, for a name with no pin, and for
+    /// a pin that has its key.
+    pub(crate) fn key_fill(&self) -> Option<Arc<crate::trust::key_fill::PinKeyFill>> {
+        if self.jump.is_some() {
+            return None;
+        }
+        crate::trust::key_fill::PinKeyFill::for_target(&self.trust, self.binding)
+    }
+
     /// How long one recovery or supervised re-dial attempt may take
     /// (ADR-0054 decision 18): `REDIAL_DEADLINE`, or the punch budget when
     /// this host can be punched to.

@@ -155,6 +155,30 @@ pub struct IrohPinChange {
 }
 
 impl TrustStore {
+    /// Record `key` as the `key` of every pin whose fingerprint is that of
+    /// `key` and which has none yet (ADR-0061 decision 3,
+    /// `docs/CLI.md` §6.11 "채우는 길"). Pure: the caller holds the lock and
+    /// saves. A pin that already has a key is never overwritten, a key whose
+    /// fingerprint matches no pin creates nothing, and the fingerprint is
+    /// recomputed from the key here, so a caller cannot attach a key to a
+    /// pin it does not belong to. Returns whether anything changed.
+    pub fn learn_key(&mut self, key: &[u8; KEY_LEN]) -> bool {
+        let fingerprint = fingerprint_of_ed25519_key(key);
+        let hex = key_to_hex(key);
+        let mut changed = false;
+        for peer in &mut self.peers {
+            let same = peer
+                .fingerprint
+                .parse::<Fingerprint>()
+                .is_ok_and(|fp| fp == fingerprint);
+            if peer.key.is_none() && same {
+                peer.key = Some(hex.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Apply `change` to the pin named `name` (`trust.set_iroh`). Pure: the
     /// caller holds the lock and saves. Without `off` the pin ends with
     /// `"iroh"` in `routes` (other values are kept), with `relay` and `key`

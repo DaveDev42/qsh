@@ -52,6 +52,7 @@ use crate::ops::exec::map_dial_error;
 use crate::ops::{AddressResolver, OpError};
 use crate::punch::{PUNCH_BUDGET, PunchFailure, PunchPlan, attempt};
 use crate::route_memory::{RouteMemory, Stance};
+use crate::trust::key_fill::PinKeyFill;
 
 /// What a dial is for, which decides how long the whole route may take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +300,7 @@ pub(crate) async fn dial_routed(
     plan: Option<&Arc<PunchPlan>>,
     iroh: Option<&Arc<IrohPlan>>,
     jump: Option<&Arc<JumpPlan>>,
+    fill: Option<&Arc<PinKeyFill>>,
     tuning: TransportTuning,
     resolver: &dyn AddressResolver,
     kind: Dial,
@@ -306,7 +308,7 @@ pub(crate) async fn dial_routed(
     match jump {
         Some(jump) => dial_jump(dialer, jump, tuning, resolver, kind).await,
         None => {
-            dial_routed_plain(
+            let routed = dial_routed_plain(
                 dialer,
                 address,
                 server_name,
@@ -316,7 +318,13 @@ pub(crate) async fn dial_routed(
                 resolver,
                 kind,
             )
-            .await
+            .await?;
+            // A connection that passed the pin check over a direct or
+            // punched path teaches the pin its key (CLI.md §6.11).
+            if let Some(fill) = fill {
+                fill.note(&routed.connection);
+            }
+            Ok(routed)
         }
     }
 }

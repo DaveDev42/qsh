@@ -55,6 +55,13 @@ async fn pairing_dod_success_pins_both_sides_of_the_wire_exchange() {
         .cloned()
         .expect("laptop pinned on the host");
     assert_eq!(pinned.fingerprint, laptop.fingerprint.to_string());
+    // The key came with the certificate the initiator proved, so the pin can
+    // be dialed over the iroh route later (ADR-0061 decision 3).
+    let key = laptop.local.iroh_public_key().expect("ed25519 identity");
+    assert_eq!(
+        pinned.key.as_deref(),
+        Some(qsh_core::trust::iroh_pin::key_to_hex(&key).as_str())
+    );
 
     dialed.connection.close(0, b"done");
     host.shutdown().await;

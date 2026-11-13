@@ -22,7 +22,7 @@ use iroh_relay::server::{
 use qsh_core::punch::{ClientPunch, LocalAddrs};
 use qsh_core::route_memory::RouteClock;
 use qsh_core::{ExecStdin, OpError, Ops};
-use qsh_proto::{ConfigSetReq, ErrorCode, ExecRunReq, TrustAddCaReq, TrustSetIrohReq};
+use qsh_proto::{ConfigSetReq, ErrorCode, ExecRunReq, TrustAddCaReq, TrustAddReq, TrustSetIrohReq};
 use qsh_transport::{
     CertificateDer, IrohConfig, IrohEndpoint, IrohRelay, IrohRelayTrust, Principal, StaticTrust,
 };
@@ -601,6 +601,92 @@ async fn a_jump_chain_cannot_open_an_iroh_only_hop_and_a_private_ca_cannot_take_
         err.details["iroh"]["reason"], "private_ca_unsupported",
         "{err:?}"
     );
+    rig.net.shutdown().await;
+}
+
+/// The `key` of the pin `name` in `trust.toml`, if it has one.
+fn pin_key(ops: &Ops, name: &str) -> Option<String> {
+    let store = qsh_core::trust::TrustStore::load(&ops.paths().trust_file()).expect("trust.toml");
+    store.find(name).and_then(|p| p.key.clone())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_connection_teaches_the_pin_its_key_and_never_overwrites_it() {
+    let rig = Rig::start(true).await;
+    let addr = rig.net.host("far").h.addr.to_string();
+    let fingerprint = rig.net.host("far").h.server_identity.fingerprint;
+    rig.net.pin("far", Some(addr), fingerprint).await;
+    assert_eq!(pin_key(&rig.ops, "far"), None, "a fresh pin has no key");
+
+    let out = exec(&rig.ops, "far", echo_argv("direct"))
+        .await
+        .expect("direct exec");
+    assert_eq!(stdout_of(&out).trim(), "direct");
+    // The write happens off the dial path; wait for it.
+    let mut learned = None;
+    for _ in 0..50 {
+        learned = pin_key(&rig.ops, "far");
+        if learned.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(learned.as_deref(), Some(rig.key.as_str()));
+
+    // The pin now dials by key: `trust iroh` with no `--key` suffices.
+    let set = rig
+        .set_iroh("far", Some(&rig.relay.url), None)
+        .await
+        .expect("trust.set_iroh without a key");
+    assert_eq!(set.peer.key.as_deref(), Some(rig.key.as_str()));
+    // Another key is refused rather than replacing it.
+    let other = "08".repeat(32);
+    let err = rig
+        .set_iroh("far", None, Some(&other))
+        .await
+        .expect_err("a key of another fingerprint");
+    assert_eq!(err.code, ErrorCode::InvalidArgument, "{err:?}");
+    assert_eq!(pin_key(&rig.ops, "far").as_deref(), Some(rig.key.as_str()));
+    rig.net.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trust_add_with_a_certificate_records_the_key() {
+    let rig = Rig::start(true).await;
+    let pem = pem_of(&rig.net.host("far").h.server_identity.cert_der);
+    let ops = rig.ops.clone();
+    let added = blocking(move || {
+        ops.trust_add(TrustAddReq {
+            name: "from-cert".into(),
+            address: None,
+            fingerprint: None,
+            cert_pem: Some(pem),
+            role: None,
+        })
+    })
+    .await
+    .expect("trust add --cert-file");
+    assert_eq!(added.peer.key.as_deref(), Some(rig.key.as_str()));
+    assert_eq!(
+        pin_key(&rig.ops, "from-cert").as_deref(),
+        Some(rig.key.as_str())
+    );
+
+    // A fingerprint alone knows no key.
+    let fingerprint = rig.net.host("far").h.server_identity.fingerprint;
+    let ops = rig.ops.clone();
+    let added = blocking(move || {
+        ops.trust_add(TrustAddReq {
+            name: "from-fp".into(),
+            address: None,
+            fingerprint: Some(fingerprint.to_string()),
+            cert_pem: None,
+            role: None,
+        })
+    })
+    .await
+    .expect("trust add --fingerprint");
+    assert_eq!(added.peer.key, None);
     rig.net.shutdown().await;
 }
 

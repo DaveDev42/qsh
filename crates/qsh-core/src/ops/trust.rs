@@ -64,12 +64,16 @@ impl Ops {
             .as_deref()
             .map(|address| crate::trust::normalize_peer_address(address).address);
 
+        // The certificate's Ed25519 key, when `--cert-file` gave a certificate
+        // that has one: the pin's `key` (ADR-0061 decision 3).
+        let mut cert_key: Option<[u8; 32]> = None;
         let fingerprint = if let Some(cert_pem) = req.cert_pem.as_deref() {
             check_cert_pem_size(cert_pem)?;
             // ADR-0013 결정 4/5: 구조 검증(라벨 multiset·단일 블록·X.509
             // 파싱)까지 마친 값만 fingerprint로 쓴다.
-            let (_der, fingerprint) =
+            let (der, fingerprint) =
                 crate::identity::pem::single_certificate(cert_pem).map_err(cert_pem_op_error)?;
+            cert_key = qsh_transport::ed25519_key_of_cert_der(&der);
             fingerprint
         } else {
             match req.fingerprint.as_deref() {
@@ -115,9 +119,17 @@ impl Ops {
         if created {
             self.record_role_write("trust.add", &peer.name, role)?;
         }
-        if created || updated {
+        // The key is learned from the certificate the operator supplied. It
+        // fills a pin that has none and only when it is that pin's key.
+        let learned = cert_key.is_some_and(|key| store.learn_key(&key));
+        if created || updated || learned {
             store.save(&path)?;
         }
+        let peer = if learned {
+            store.find(&peer.name).cloned().unwrap_or(peer)
+        } else {
+            peer
+        };
         Ok(TrustAddData {
             peer,
             created,
@@ -905,11 +917,12 @@ impl Ops {
                 )
                 .with_retryable(false)
             })?;
+            let peer_key = dialed.connection.peer_ed25519_key();
             dialed.connection.close(0, b"paired");
-            Ok::<_, OpError>((success, observed_fp))
+            Ok::<_, OpError>((success, observed_fp, peer_key))
         });
         runtime.shutdown_timeout(Duration::from_millis(200));
-        let (success, observed_fp) = outcome?;
+        let (success, observed_fp, peer_key) = outcome?;
 
         let path = self.paths.trust_file();
         // See `trust_add`'s identical comment — whole cycle under lock.
@@ -977,9 +990,17 @@ impl Ops {
                     .with_details(serde_json::json!({ "new_invite_required": true }))
                 })?;
         }
-        if created || updated {
+        // The responder's key came with the certificate it just proved; it is
+        // the pin's key (ADR-0061 decision 3).
+        let learned = peer_key.is_some_and(|key| store.learn_key(&key));
+        if created || updated || learned {
             store.save(&path)?;
         }
+        let peer = if learned {
+            store.find(&peer.name).cloned().unwrap_or(peer)
+        } else {
+            peer
+        };
         Ok(TrustAcceptData {
             peer,
             created,

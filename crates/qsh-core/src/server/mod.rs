@@ -1892,6 +1892,7 @@ impl Server {
         };
 
         let trust = &state.trust;
+        let peer_key = conn.peer_ed25519_key();
         let result = crate::pairing::respond(
             conn,
             &state.invites,
@@ -1955,7 +1956,10 @@ impl Server {
                         return None;
                     }
                 }
-                if (created || updated)
+                // The redeeming peer's key came with the certificate it proved
+                // in this handshake: the pin's key (ADR-0061 decision 3).
+                let learned = peer_key.is_some_and(|key| store.learn_key(&key));
+                if (created || updated || learned)
                     && let Err(err) = store.save(path)
                 {
                     tracing::error!(%err, "failed to persist the trust store during pairing");
