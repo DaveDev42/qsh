@@ -1516,7 +1516,7 @@ Some of these are MVP scope decisions, some are unfinished work.
 - Reverse mode needs a directly reachable path from the target to the
   controller:
 
-  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH's own routes use no relay (the optional iroh relay route is separate); hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
+  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
   >
   > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
 - macOS asks "Do you want the application “qsh” to accept incoming network
