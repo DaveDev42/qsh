@@ -367,7 +367,11 @@ async fn a_dial_with_no_route_fails_immediately() {
     .await
     .expect("no timeout wait")
     .unwrap_err();
-    assert!(matches!(err, DialError::Failed(_)), "{err:?}");
+    // The relay diagnostic keys off this variant, not off the message text.
+    assert!(
+        matches!(&err, DialError::Failed(inner) if inner.is_no_route()),
+        "{err:?}"
+    );
 }
 
 /// A key that is not an Ed25519 key cannot name an iroh endpoint.

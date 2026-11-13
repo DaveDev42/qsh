@@ -679,7 +679,7 @@ async fn relay_failure_reason(
             return None;
         }
         DialError::Failed(inner) if inner.is_crypto_failure() => return None,
-        DialError::Failed(inner) if inner.to_string().contains("relay disabled") => {
+        DialError::Failed(inner) if inner.is_no_route() => {
             return Some(REASON_NO_RELAY);
         }
         _ => {}
