@@ -417,6 +417,8 @@ message FileFrame {
 
 ## 11. 역방향 모드
 
+> **위치(ADR-0065).** 사용자 문서는 qsh를 server(`qsh serve`)와 client로 설명하고 이 절의 역방향을 고급 fallback으로 둔다. 키 기반 iroh route(§22)로 연결 방향이 도달 가능성을 가르지 않기 때문이다. 이 절의 wire와 절차는 바뀌지 않았다(§16 freeze). 아래 "대칭 원칙"이 바로 그 모델의 근거다.
+
 **대칭 원칙:** TLS 역할(누가 dial했나)과 QSH 역할(누가 셸을 제공하나)은 `Hello`에서 분리된다. control 스트림 수립 후 프로토콜은 완전 대칭 — 어느 쪽이든 요청을 보낼 수 있고, **요청 수신자가 자기 ACL을 평가**한다. "client/host"는 연결 단위가 아니라 요청 단위 역할이다.
 
 1. `qsh listen`(controller)이 QUIC listener 실행, `qsh serve --to <controller>`(구 표기 `qsh reverse`)(target)가 평범한 상호 TLS로 dial.

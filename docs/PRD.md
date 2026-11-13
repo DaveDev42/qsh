@@ -13,6 +13,8 @@ QSH는 QUIC 기반의 직접 연결형 원격 셸이다. SSH의 핵심 기능을
 
 > 한 번의 명령으로 접속하고, 연결이 끊겨도 같은 셸로 돌아온다.
 
+**개념은 둘이다(ADR-0065).** server는 `qsh serve`로, 장비마다 하나를 두고 신뢰한 peer의 연결을 받아 셸·exec·터널·파일을 내준다. client는 `qsh <host>`, `qsh exec`, `qsh tunnel`, `qsh cp` 같은 명령으로 server에 연결을 건다. 키로 주소를 정하는 iroh route(ADR-0061, ADR-0063)가 있어서 relay로는 늘 닿고 직결이 되면 직결로 서므로, 어느 쪽이 연결을 시작하느냐가 도달 가능성을 가르지 않는다. 장비마다 `qsh serve`를 띄우고 서로 pin하면 어느 장비에서든 다른 장비로 걸 수 있다. 역방향(`qsh listen`, `qsh serve --to`)은 relay가 막힌 망이나 iroh를 못 쓰는 peer처럼 이 경로가 닿지 못할 때의 고급 fallback이다(§6 "고급: 역방향 fallback").
+
 ## 2. 해결하려는 문제
 
 - SSH 연결은 IP 변경, 절전, Wi-Fi 전환과 일시적 단절에 취약하다.
@@ -54,6 +56,8 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 ### 연결 방향과 역할의 분리
 
+기본 설명의 틀은 server와 client이고 역방향은 고급 fallback이다(2026-11-13, ADR-0065). 아래는 그 fallback과 기능 동등의 정의이고, 결정 내용은 그대로다.
+
 연결을 시작한 endpoint가 반드시 셸을 사용하는 쪽일 필요는 없다. target이 controller로 연결한 뒤 자신의 셸을 제공할 수 있다.
 
 정방향과 역방향은 같은 기능을 갖고, 이 동등은 모든 지원 플랫폼(Linux, macOS, Windows)에서 성립한다(2026-10-13 사용자 결정). 셸, exec, 세션, 터널, 파일 복사, 신뢰 부트스트랩처럼 정방향 route에서 되는 기능은 역방향 route에서도 되어야 하고, 한 플랫폼에서 되는 기능은 client 역할이든 host 역할이든 다른 플랫폼에서도 되어야 한다. 한쪽 방향이나 일부 플랫폼만 지원하는 설계는 그 이유(그 플랫폼에 개념 자체가 없다는 것 등)를 ADR에 적고 사용자 승인을 받는다.
@@ -87,7 +91,7 @@ qsh serve
 
 `qsh init`은 device identity를 생성하고 private key를 OS credential store에 보관한다. Peer 신뢰는 fingerprint 확인, 일회용 pairing code, private CA, 또는 인증서 파일 교환(`qsh identity export`로 낸 PEM을 `qsh trust add --cert-file`로 pin, 외부 CA 루트는 `qsh trust add-ca`)으로 설정한다(ADR-0013) — 어느 경로든 개인키는 이 장비 밖으로 나가지 않는다.
 
-### 정방향 접속
+### 접속: client가 server에 연결
 
 ```bash
 qsh dave@personal-mac
@@ -97,7 +101,9 @@ qsh dave@personal-mac
 
 `user@`는 SSH 근육 기억을 위해 받아들이며 생략할 수 있다(`qsh personal-mac`). MVP에는 user switching이 없다 — 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행되고, 인가 principal은 `user@`가 아니라 항상 인증서에서 나온다(§9). `user@`를 지정하면 세션 생성 요청에 hint로 전달되고, 그 값이 serve 계정의 login name과 다르면 host는 세션을 만들지 않고 `UNSUPPORTED`(user switching is not supported)로 거부한다 — fail closed(CLI.md §7).
 
-### 역방향 접속
+### 고급: 역방향 fallback
+
+기본 경로(위 "접속")는 방향을 가리지 않고 pin한 장비끼리 닿으므로 평소에는 이 절이 필요 없다. 역방향은 relay(TCP 443 HTTPS)가 막힌 망, `[iroh].enable = false`이거나 iroh를 쓰지 않는 peer, 특정 장비를 거치는 jump 체인이나 홀펀칭 중개자를 둘 때 쓴다(ADR-0065 결정 3). 이 절에서 "정방향"은 client가 server에 dial하는 위 경로를 가리킨다.
 
 ```bash
 # Controller
@@ -305,11 +311,12 @@ JSON schema는 version을 포함하고, stdout에는 결과만 출력한다. 진
 ## 11. 명령 체계
 
 ```text
+# server
+qsh serve                       server(인바운드로 연결을 받는 host)
+
+# client
 qsh [user@]host                 대화형 셸
 qsh exec host -- command        비대화형 실행
-qsh serve                       target listener
-qsh listen                      reverse listener(`--serve`는 정방향 host도 겸함, ADR-0059)
-qsh serve --to controller       역방향 연결(구 qsh reverse, 숨김 alias로 남음)
 qsh hosts                       호스트 조회
 qsh sessions [host]             세션 조회
 qsh attach <session-ref>        세션 attach
@@ -324,6 +331,10 @@ qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 qsh service install|uninstall|status  플랫폼 서비스 유닛 관리(launchd·systemd user)
 qsh setup host|client|listener  이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않는다. 기본 role은 `--peer-role`로 정하고 `none`일 때만 넣을 행을 인쇄한다. 자동 신뢰 없음, `docs/CLI.md` §6.20)
+
+# 고급: 역방향 fallback(ADR-0065)
+qsh listen                      reverse listener(`--serve`는 정방향 host도 겸함, ADR-0059)
+qsh serve --to controller       역방향 연결(구 qsh reverse, 숨김 alias로 남음)
 ```
 
 SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).
@@ -399,7 +410,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 
 - 제품명과 CLI는 `QSH` / `qsh`다.
 - MVP는 relay 없는 direct-only다.
-- 정방향과 역방향은 모두 일급 기능이다.
+- 정방향과 역방향은 모두 일급 기능이다. 설명의 틀은 server와 client이고 역방향은 고급 fallback으로 문서화한다(2026-11-13, ADR-0065). 기능 동등은 그대로다.
 - Rust 단일 바이너리로 시작한다.
 - QUIC과 TLS 1.3 상호 인증을 기본으로 한다.
 - PTY session lifetime을 transport lifetime과 분리한다.
