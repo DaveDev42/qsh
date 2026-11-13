@@ -159,9 +159,19 @@ fn round_trip_through_a_fake_platform_store(
     (before, identity(sandbox))
 }
 
-/// `trust.toml` as bytes: what a peer's pin of this device is stored in.
+/// `trust.toml` as bytes: what a peer's pin of this device is stored in, minus
+/// the `key = ` lines. The first dial that passes the pin check fills in a
+/// pin's missing `key` (ADR-0061 decision 3) and changes nothing else, so
+/// the comparison leaves that one line out and the pin's fingerprint, name,
+/// address and role must still be byte-identical.
 fn trust_file(sandbox: &Sandbox) -> Vec<u8> {
-    std::fs::read(sandbox.config_dir().join("trust.toml")).expect("trust.toml")
+    let text =
+        std::fs::read_to_string(sandbox.config_dir().join("trust.toml")).expect("trust.toml");
+    text.lines()
+        .filter(|line| !line.starts_with("key = "))
+        .flat_map(|line| [line, "\n"])
+        .collect::<String>()
+        .into_bytes()
 }
 
 /// PRD §4 route equivalence, real processes and real QUIC: after the key

@@ -483,6 +483,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-trust-rename.1",
     },
     OpFace {
+        op: "trust.set_iroh",
+        marker: "TrustSetIrohOp",
+        renderer: "print_trust_set_iroh",
+        cli_spelling: "qsh trust iroh",
+        man_file: "qsh-trust-iroh.1",
+    },
+    OpFace {
         op: "trust.set_jump",
         marker: "TrustSetJumpOp",
         renderer: "print_trust_set_jump",

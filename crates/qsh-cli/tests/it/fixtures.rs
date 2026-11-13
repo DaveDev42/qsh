@@ -324,8 +324,48 @@ fn strip_role_keys(value: &mut Value) {
     }
 }
 
+/// Drop a pin's `key` (ADR-0061 decision 3) from every `peer` object, at any
+/// depth. Every dial path that passes the pin check now writes the peer
+/// certificate's Ed25519 key into a pin that has none (`trust add
+/// --cert-file` and `trust accept` record it as they pin), so the commands
+/// that return the stored pin carry a `key` the fixtures recorded before
+/// iroh never had. The key is a fresh value per sandbox, which `normalize`
+/// leaves alone, so those fixtures are compared with it removed from both
+/// sides and stay byte-for-byte untouched. The key-bearing shapes have
+/// their own fixtures (`trust.set_iroh.json`, `trust.list.iroh.json`).
+fn strip_pin_key(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(peer)) = map.get_mut("peer") {
+                peer.remove("key");
+            }
+            map.values_mut().for_each(strip_pin_key);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_pin_key),
+        _ => {}
+    }
+}
+
+/// [`check`] for a fixture that compares in full except for the pin `key`.
+fn check_without_pin_key(name: &str, envelope: Value) {
+    if updating() {
+        return;
+    }
+    let mut actual = fixtures::normalize(envelope);
+    let mut expected = fixtures::load_cli_v1(name);
+    strip_pin_key(&mut actual);
+    strip_pin_key(&mut expected);
+    assert_eq!(
+        pretty(&actual),
+        pretty(&expected),
+        "fixture {name} no longer matches the binary's output (pin key ignored).\n\
+         Fixtures are append-only (docs/CLI.md §10)."
+    );
+}
+
 /// [`check`] for a fixture recorded before roles existed: never writes, and
-/// compares with [`strip_role_keys`] applied to both sides.
+/// compares with [`strip_role_keys`] (and [`strip_pin_key`]) applied to both
+/// sides.
 fn check_without_roles(name: &str, envelope: Value) {
     if updating() {
         return;
@@ -334,6 +374,8 @@ fn check_without_roles(name: &str, envelope: Value) {
     let mut expected = fixtures::load_cli_v1(name);
     strip_role_keys(&mut actual);
     strip_role_keys(&mut expected);
+    strip_pin_key(&mut actual);
+    strip_pin_key(&mut expected);
     strip_forward_agent(&mut actual);
     strip_forward_agent(&mut expected);
     assert_eq!(
@@ -1807,7 +1849,7 @@ fn golden_trust_accept_fixture() {
 
 /// `trust accept --role` pins the responder with an explicit role
 /// (ADR-0045 결정 8): the role keys stay in this fixture, which compares in
-/// full, unlike `trust.accept.json`.
+/// full (the pin `key` aside), unlike `trust.accept.json`.
 #[test]
 fn golden_trust_accept_with_role_fixture() {
     let host = Sandbox::initialized();
@@ -1829,7 +1871,7 @@ fn golden_trust_accept_with_role_fixture() {
     ]);
     assert_eq!(code, 0, "{accepted}");
     assert_eq!(accepted["data"]["peer"]["role"], "exec", "{accepted}");
-    check("trust.accept.with_role.json", accepted);
+    check_without_pin_key("trust.accept.with_role.json", accepted);
 }
 
 /// Name-authority fixtures (ADR-0012 결정 3/4/6, `docs/CLI.md` §6.11):
