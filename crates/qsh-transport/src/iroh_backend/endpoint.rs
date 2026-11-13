@@ -41,13 +41,14 @@ use std::time::Duration;
 
 use iroh::endpoint::{self as ie, QuicTransportConfig, VarInt, presets};
 use iroh::tls::CaTlsConfig;
-use iroh::{EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
+use iroh::{EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher as _};
 use rustls::pki_types::CertificateDer as TlsCertificateDer;
 
 use super::conn::IrohConn;
 use super::errors::{chain, conn_err};
 use super::identity_proof::{self, PROOF_TIMEOUT, ProofError};
 use super::key::{fingerprint_of_endpoint, fingerprint_of_key};
+use super::reflexive::{Action, Keeper};
 use crate::endpoint::{
     AcceptError, CLOSE_CODE_UNVERIFIED_PEER, CONNECTION_RECEIVE_WINDOW,
     DATAGRAM_RECEIVE_BUFFER_SIZE, DATAGRAM_SEND_BUFFER_SIZE, DialError, LocalIdentity,
@@ -118,6 +119,11 @@ pub struct IrohConfig {
     /// Off by default, so an endpoint built without saying so never reads
     /// the environment (`[iroh].proxy`, `docs/CLI.md` §6.23).
     pub proxy_from_env: bool,
+    /// Test seam: the UDP port of the relay's QUIC address discovery
+    /// service, when it is not the standard one (7842). A test relay that
+    /// binds an ephemeral port names it here; production leaves it `None`.
+    #[doc(hidden)]
+    pub relay_quic_port: Option<u16>,
 }
 
 /// Whom to dial: the peer's Ed25519 public key plus however to reach it.
@@ -209,14 +215,20 @@ pub(crate) struct EndpointHandle {
     /// A closed connection needs no auto-close on drop, so holding a clone
     /// changes nothing about its lifetime.
     closing: Mutex<Vec<ie::Connection>>,
+    /// The task that keeps a daemon endpoint's public address advertised
+    /// ([`keep_reflexive_address`]); `None` for a client endpoint. It holds
+    /// a clone of the iroh endpoint, so [`Drop`] ends it before the close.
+    keeper: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl EndpointHandle {
-    fn new(ep: iroh::Endpoint, identity: SecretKey) -> Self {
+    fn new(ep: iroh::Endpoint, identity: SecretKey, daemon: bool) -> Self {
+        let keeper = daemon.then(|| tokio::spawn(keep_reflexive_address(ep.clone())));
         Self {
             ep,
             identity,
             closing: Mutex::new(Vec::new()),
+            keeper,
         }
     }
 
@@ -282,7 +294,69 @@ impl std::ops::Deref for EndpointHandle {
 
 impl Drop for EndpointHandle {
     fn drop(&mut self) {
+        if let Some(keeper) = self.keeper.take() {
+            keeper.abort();
+        }
         close_in_background(&self.ep);
+    }
+}
+
+/// Keep the daemon endpoint `ep` advertising the public address its net
+/// reports find, through the gaps in which iroh's own set loses it
+/// (`reflexive.rs` has the why). Runs until the task is aborted, which
+/// [`EndpointHandle`] does when the last holder lets go, or until iroh's
+/// report watcher disconnects.
+async fn keep_reflexive_address(ep: iroh::Endpoint) {
+    let mut keeper = Keeper::default();
+    let mut reports = ep.net_report();
+    let mut pending = Some(reports.get());
+    loop {
+        let report = match pending.take() {
+            Some(report) => report,
+            None => {
+                let wake = keeper.next_expiry();
+                tokio::select! {
+                    next = reports.updated() => match next {
+                        Ok(report) => report,
+                        Err(_) => return,
+                    },
+                    () = async {
+                        match wake {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        apply(&ep, keeper.on_tick(tokio::time::Instant::now())).await;
+                        continue;
+                    }
+                }
+            }
+        };
+        let Some(report) = report else {
+            continue;
+        };
+        let actions = keeper.on_report(
+            tokio::time::Instant::now(),
+            report.global_v4.map(SocketAddr::V4),
+            report.global_v6.map(SocketAddr::V6),
+        );
+        apply(&ep, actions).await;
+    }
+}
+
+/// Carry out the keeper's decisions on `ep`.
+async fn apply(ep: &iroh::Endpoint, actions: Vec<Action>) {
+    for action in actions {
+        match action {
+            Action::Add(addr) => {
+                tracing::info!(%addr, "iroh: advertising the public address a net report found");
+                ep.add_external_addr(addr).await;
+            }
+            Action::Remove(addr) => {
+                tracing::info!(%addr, "iroh: no longer advertising a public address no report has confirmed");
+                ep.remove_external_addr(&addr).await;
+            }
+        }
     }
 }
 
@@ -292,6 +366,8 @@ pub struct IrohEndpoint {
     ep: Arc<EndpointHandle>,
     evaluator: Arc<dyn TrustEvaluator>,
     relay: Option<RelayUrl>,
+    /// [`IrohConfig::relay_quic_port`], kept for [`Self::refresh_net_report`].
+    relay_quic_port: Option<u16>,
     timeout: Duration,
     /// How long an accepted connection may take to send its identity proof.
     proof_timeout: Duration,
@@ -332,6 +408,16 @@ fn transport_config() -> QuicTransportConfig {
             VarInt::try_from(CONNECTION_RECEIVE_WINDOW).unwrap_or(VarInt::from_u32(u32::MAX)),
         )
         .build()
+}
+
+/// The relay's configuration: its URL with the standard QUIC address
+/// discovery port, or `quic_port` when a test relay binds another.
+fn relay_config(url: &RelayUrl, quic_port: Option<u16>) -> iroh::RelayConfig {
+    let mut config = iroh::RelayConfig::from(url.clone());
+    if let (Some(port), Some(quic)) = (quic_port, config.quic.as_mut()) {
+        quic.port = port;
+    }
+    config
 }
 
 /// The neutral certificates in the TLS stack's type, at the backend boundary.
@@ -408,7 +494,10 @@ impl IrohEndpoint {
             .ca_tls_config(ca_tls_config(&config.relay_trust))
             .transport_config(transport_config());
         if let Some(url) = &relay {
-            builder = builder.relay_mode(RelayMode::custom([url.clone()]));
+            builder = builder.relay_mode(RelayMode::Custom(iroh::RelayMap::from(relay_config(
+                url,
+                config.relay_quic_port,
+            ))));
         }
         if config.proxy_from_env {
             builder = builder.proxy_from_env();
@@ -430,9 +519,10 @@ impl IrohEndpoint {
             .await
             .map_err(|e| setup_err("bind iroh endpoint", &e))?;
         Ok(Self {
-            ep: Arc::new(EndpointHandle::new(ep, identity_key)),
+            ep: Arc::new(EndpointHandle::new(ep, identity_key, !ephemeral)),
             evaluator,
             relay,
+            relay_quic_port: config.relay_quic_port,
             timeout: default_dial_timeout(),
             proof_timeout: PROOF_TIMEOUT,
         })
@@ -475,6 +565,41 @@ impl IrohEndpoint {
     /// The local UDP sockets the endpoint is bound on.
     pub fn bound_sockets(&self) -> Vec<SocketAddr> {
         self.ep.bound_sockets()
+    }
+
+    /// The direct addresses the endpoint advertises to peers right now: its
+    /// own interface addresses plus the public address a net report found
+    /// (a daemon endpoint keeps that one through a failed probe). For logs and tests.
+    pub fn advertised_addrs(&self) -> Vec<SocketAddr> {
+        self.ep.addr().ip_addrs().copied().collect()
+    }
+
+    /// Run a net report now (a test hook: the periodic one runs every 20 to
+    /// 26 seconds). Re-inserting the relay is what makes iroh start a full
+    /// report at once.
+    #[doc(hidden)]
+    pub async fn refresh_net_report(&self) {
+        let Some(url) = self.relay.clone() else {
+            return;
+        };
+        let config = relay_config(&url, self.relay_quic_port);
+        self.ep.insert_relay(url, Arc::new(config)).await;
+    }
+
+    /// Resolves with the next net report that found no public IPv4 address,
+    /// or `false` when none finishes within `within` (a test hook).
+    #[doc(hidden)]
+    pub async fn next_report_without_public_v4(&self, within: Duration) -> bool {
+        let mut reports = self.ep.net_report();
+        let wait = async {
+            while let Ok(report) = reports.updated().await {
+                if report.is_some_and(|r| r.global_v4.is_none()) {
+                    return true;
+                }
+            }
+            false
+        };
+        tokio::time::timeout(within, wait).await.unwrap_or(false)
     }
 
     /// The relay this endpoint homes on, as the URL it was configured with;

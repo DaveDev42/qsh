@@ -262,6 +262,7 @@ impl IrohSettings {
             },
             bind,
             proxy_from_env: self.proxy == IrohProxy::Env,
+            relay_quic_port: None,
         }
     }
 

@@ -151,6 +151,7 @@ pub async fn bind(
         relay_trust: trust_roots.clone(),
         bind,
         proxy_from_env: serve.proxy_from_env,
+        relay_quic_port: None,
     };
     if serve.bind_port == 0 {
         return IrohEndpoint::bind(identity, trust, config(serve.bind_addrs.clone()))

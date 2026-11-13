@@ -404,6 +404,7 @@ async fn the_relay_certificate_is_verified_against_the_trust_store() {
         relay_trust: IrohRelayTrust::System,
         bind: vec![(std::net::Ipv4Addr::LOCALHOST, 0).into()],
         proxy_from_env: false,
+        relay_quic_port: None,
     };
     let ep = bind(&id, StaticTrust::empty(), distrusting).await;
     assert!(
@@ -433,6 +434,7 @@ async fn the_relay_certificate_is_verified_against_the_trust_store() {
         relay_trust: IrohRelayTrust::SystemWithRoots(vec![relay.cert.clone()]),
         bind: vec![(std::net::Ipv4Addr::LOCALHOST, 0).into()],
         proxy_from_env: false,
+        relay_quic_port: None,
     };
     let ep = bind(&id, StaticTrust::empty(), trusting).await;
     tokio::time::timeout(DEADLINE, ep.online())

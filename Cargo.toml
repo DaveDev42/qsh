@@ -76,7 +76,7 @@ socket2 = "0.6"
 # Counts the operating system's trust anchors for `qsh doctor` (the crate the
 # platform verifier already reads the store with).
 rustls-native-certs = "0.8"
-iroh = { version = "1.4.1", default-features = false, features = ["tls-aws-lc-rs", "platform-verifier"] }
+iroh = { version = "1.4.1", default-features = false, features = ["tls-aws-lc-rs", "platform-verifier", "unstable-net-report"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "signal", "io-std"] }
 
 # identity / crypto hygiene
