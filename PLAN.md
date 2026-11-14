@@ -192,8 +192,8 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 - [ ] **감사 `peer_path`가 승격을 못 담는다.** admission 때 한 번 기록하므로 relay로 시작해 직결로 오른 연결도 `relay`다. 승격을 구조적으로 남길지(새 레코드 또는 close 레코드의 필드) 정한다.
 - [ ] **역방향 2단계(ADR-0065).** audit의 `host.reverse` 기록과 상시 listen·`--to` 사용을 확인한 뒤 제거 여부를 새 ADR로 정한다. 2026-11-13 기준 fleet에서 상시 쓰는 곳은 없다(MacMini listen 은퇴, Toss reverse 링크 제거).
 - [ ] **ut 도입 대비 transport 중립 이름.** `[iroh]` 절, pin route 이름 `iroh`, `details.iroh`는 iroh에 묶여 있다. ut backend를 붙일 때 새 ADR로 중립 이름을 정한다(계약은 additive라 새 필드를 더하는 방식).
-- [ ] **doctor `acl_principal_unmatched`(클라이언트 전용 장비).** MBP16(serve 없음, acl.toml 없음)에서 error로 나온다. 의도된 판정인지 확인하고 고친다(2026-11-14 진행 중).
-- [ ] **Windows `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap` 간헐 실패.** `fd7d3587` CI에서 한 번, 재실행 통과(2026-11-14 진행 중).
+- [x] **doctor `acl_principal_unmatched`(클라이언트 전용 장비).** ADR-0066으로 장비를 client와 server로 판정하고 client에서는 server 전용 점검을 건너뛴다. `v0.8.1`에 실었다(`9b14e7da`, `2f222c17`). 2026-11-15 배포 뒤 MBP16에 남은 `host_pinned_without_address`(iroh로 key를 보고 걸 수 있는 pin을 주소 없음으로 본 오판)도 고쳤다(ADR-0063 개정 이력).
+- [x] **Windows `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap` 간헐 실패.** 실제 결함이었다. 침묵 시계 수정과 REPLY_WINDOW 200 ms를 `v0.8.1`에 실었다(ADR-0058 결정 1 개정 이력, `2ccff333`).
 
 - [ ] **TITAN 아래 M24 펀칭 확인.** iroh 펀칭이 통과했으니(상대도 보내 오는 흐름은 TITAN이 막지 않는 것으로 보임), 중개자 MacMini가 4433으로 닿는 M24도 Toss에서 될 가능성이 있다. 공유기 conntrack으로 펀칭 흐름의 첫 패킷 방향을 확인해 TITAN의 판정 규칙을 기록한다.
 - [ ] **M24 펀칭과 iroh 펀칭 비교.** `punch_accept::punch_route_nat_matrix`의 25 NAT 쌍에서 iroh route(relay 경유 신호, multipath 승격)의 직결 승격률과 지연을 M24와 같은 기준으로 잰다. iroh가 같거나 낫고 "relay 없는 펀칭"을 포기한다는 결정이 서면, M24(`punch.v1`, `host.punch`, 펀칭 모듈과 시험)를 걷어내는 ADR을 연다. 그 전에는 M24가 relay 없는 기본 경로의 유일한 펀칭이라 유지한다.

@@ -3618,6 +3618,30 @@ fn doctor_wires_the_host_pinned_without_address_finding_into_the_full_report() {
     );
 }
 
+/// ADR-0063: a pin written as name, key and role has no address, and the
+/// iroh route dials it by key, so it is reachable and not reported.
+#[test]
+fn a_key_only_pin_the_iroh_route_dials_is_not_pinned_without_address() {
+    let (_guard, ops) = healthy_ops();
+    let key = crate::trust::iroh_pin::key_to_hex(&[7u8; 32]);
+    std::fs::write(
+        ops.paths().trust_file(),
+        format!("[[peer]]\nname = \"toss\"\nkey = \"{key}\"\nrole = \"none\"\n"),
+    )
+    .unwrap();
+
+    let findings = ops.doctor_pinned_no_address_findings().unwrap();
+    assert!(findings.is_empty(), "{findings:?}");
+
+    let ops = ops.with_no_iroh(true);
+    let findings = ops.doctor_pinned_no_address_findings().unwrap();
+    assert_eq!(
+        findings.len(),
+        1,
+        "with the route off the pin has no way in"
+    );
+}
+
 /// ADR-0027: the threshold answers in the same order `overall` uses, and
 /// `info` findings never trip either threshold.
 #[test]
