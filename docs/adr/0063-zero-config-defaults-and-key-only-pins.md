@@ -65,3 +65,7 @@ key = "<64자리 hex>"
 - **`fingerprint`를 없애고 `key`만 두기.** `fingerprint`는 사설 CA가 아닌 일반 직결 pin의 유일한 식별자이고(주소로 접속한 뒤 TOFU로 얻는다), 키는 iroh 키가 되는 Ed25519 신원에서만 나온다. 둘 다 받는다.
 - **파일의 모든 pin을 저장할 때 짧은 형태로 다시 쓰기.** 사람이 손으로 맞춘 파일이 `trust add` 한 번에 전부 바뀐다. 읽은 표를 그대로 두는 비용이 작다(결정 4).
 - **`trust add --key` 추가.** 요청 형(`TrustAddReq`)에 필드를 더하는 일이라 이 ADR에서 하지 않는다. 필요하면 별도 결정으로 한다.
+
+## 개정 이력
+
+- 2026-11-15: doctor의 `host_pinned_without_address`가 iroh 경로로 key를 보고 걸 수 있는 주소 없는 pin을 더는 내지 않는다. 이 ADR의 pin은 name·key·role만 적으므로 0.8.1까지는 client 장비의 doctor가 정상 배치를 warn으로 보고했다(`docs/CLI.md` §6.17, 시험 `a_key_only_pin_the_iroh_route_dials_is_not_pinned_without_address`). 결정 본문은 바뀌지 않는다.

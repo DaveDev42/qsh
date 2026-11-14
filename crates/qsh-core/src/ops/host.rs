@@ -1063,9 +1063,17 @@ impl Ops {
         // A pin with a rendezvous candidate can be reached by punching, so
         // it is not "pinned without a way to reach it" (ADR-0054 decision 20).
         let punchable = self.punchable_names();
+        // A key-only pin that the iroh route dials by key is reachable with
+        // no address at all (ADR-0063), so it is not flagged either.
+        let iroh_trust = self.open_trust().ok();
         Ok(host_pinned_without_address(&reverse, &store, &hosts)
             .into_iter()
             .filter(|name| !punchable.contains(name))
+            .filter(|name| {
+                !iroh_trust
+                    .as_ref()
+                    .is_some_and(|trust| self.iroh_only_pin(name, trust))
+            })
             .map(|name| DoctorFinding {
                 code: diag.code.to_string(),
                 status: "warn".to_string(),
