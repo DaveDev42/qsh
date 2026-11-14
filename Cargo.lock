@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.23.1",
@@ -3693,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-proto"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-testkit"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -3736,7 +3736,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-transport"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -6011,7 +6011,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "clap",
