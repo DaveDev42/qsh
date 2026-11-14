@@ -9,6 +9,39 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.8.2`
+
+A patch release on top of `v0.8.1`. `qsh doctor` no longer warns about a
+pin that the iroh route can dial by its key.
+
+### Changes
+
+- A pin written the way `v0.8.0` writes it (name, key and role, no address)
+  made `qsh doctor` report `host_pinned_without_address` as a `warn`, although
+  `qsh` reaches that host over the iroh route with no address at all. On a
+  client-only device with such pins, `overall` came out `warn` instead of
+  `ok`. Doctor now skips a pin that this command would dial over the iroh
+  route: the pin has a key, its `routes` include `iroh`, and neither
+  `--no-iroh` nor `[iroh].mode = "off"` turns the route off. With the route
+  off, the finding comes back. See ADR-0063 (revision history) and
+  `docs/CLI.md` §6.17.
+- No change to `qsh.cli/v1`, the wire format or any file format.
+
+### Upgrading
+
+- Nothing to do. A script that gated a client-only device on
+  `qsh doctor --fail-on warn` and failed on this finding now passes.
+
+### What is still unproven
+
+Everything `v0.8.1` lists, except the first item: `v0.8.1` was run on the
+client-only laptop (Dave-MBP16) and judged it a client with basis
+`no_server_signal`. That run is what found the finding this release fixes.
+
+### Assets and signing
+
+Unchanged from `v0.8.0`, with `v0.8.2` in the asset names.
+
 ## `v0.8.1`
 
 A patch release on top of `v0.8.0`. `qsh doctor` now tells a client-only
