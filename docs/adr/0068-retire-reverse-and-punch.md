@@ -66,3 +66,7 @@
 - 옛 스크립트가 `qsh listen`이나 `qsh serve --to`를 부르면 대안을 말하는 `UNSUPPORTED`를 받는다. 남은 설정은 doctor가 짚고, `qsh serve`는 위험한 조합에서 멈춘다.
 - CI의 필수 검사 목록에서 걷힌 시험 이름이 빠진다. 저장소 설정의 필수 검사(`punch-netns` 등)는 Dave가 고친다. CLAUDE.md의 수용 시험 목록은 main 세션이 고친다.
 - 다시 역방향이 필요해지면 새 ADR로 연다. wire와 어휘가 남아 있으므로 같은 번호를 다시 쓸 수 있다.
+
+## 개정 이력
+
+- 2026-11-15 1단계 구현(`0b8f8a73`)에서 설정 키 이름을 바로잡았다. 결정 4의 `[transport].reverse_min_dead_after_ms`·`reverse_strikes`는 실제로 `[recovery]` 표의 키이고, `[serve].name`은 설정 키가 없고 CLI 플래그 `--name`만 있다. 결정의 뜻은 그대로다.
