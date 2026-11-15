@@ -9,6 +9,99 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.9.0`
+
+A minor release that removes reverse connections and qsh's own hole
+punching. NAT traversal is left to the iroh route (ADR-0061 to ADR-0064):
+pin a host's key and `qsh` reaches it over a relay, and goes direct when
+iroh can punch through or the daemon has mapped a port. See ADR-0068. The
+release also records iroh path changes in the audit log (ADR-0067).
+
+### Removed
+
+- Reverse connections: `qsh listen` (with or without `--serve`),
+  `qsh serve --to` and `--name`, the hidden `qsh reverse`, controller
+  registration, the reverse registry and routing through it, and the
+  combined listen-and-serve endpoint (ADR-0059).
+- The surfaces that only served them: `qsh setup listener`,
+  `qsh setup host --to`, `qsh pair ssh --reverse`, the `listen` and
+  `reverse` modes of `qsh service install` and `qsh service run`, and the
+  local control daemon with its `qsh.local.v1` protocol.
+- qsh's own hole punching (ADR-0054): the client's punch route, the
+  mediator and target services, and `--rendezvous`.
+- Each removed command and flag still parses. It exits 255 with
+  `UNSUPPORTED`, `details.reason` is `"reverse_retired"`, and the message
+  names the replacement: run `qsh serve` on the target and pin its key.
+  `qsh listen` and `qsh setup listener` are hidden from `--help`, and their
+  man pages are gone.
+- `--no-punch`, `[punch].mode` and `qsh trust rendezvous` still parse and
+  do nothing.
+
+### Changes
+
+- `qsh serve` refuses to start when `config.toml` still has `[serve].to` or
+  `[reverse].controller`, so a device that used to dial out does not start
+  listening on `[::]:4433` without anyone noticing.
+- `qsh doctor` has a new finding, `reverse_config_retired` (warn). It names
+  the leftover keys (`[listen]`, `[serve].to`, `[reverse]`,
+  `[recovery].reverse_min_dead_after_ms`, `[recovery].reverse_strikes`) and
+  any leftover `listen` or `reverse` service unit. `qsh config set` on those
+  keys returns `UNSUPPORTED`. `qsh config unset` still works, so you can
+  clean them up.
+- Leftover `[listen]` and `[reverse]` tables no longer make doctor judge a
+  device a server (ADR-0066).
+- `qsh hosts` lists only hosts this device dials itself. `qsh tunnel list`
+  returns an empty list and `qsh tunnel close` reports `closed: false`,
+  because the only tunnels they managed lived in the removed daemon.
+- `qsh serve` writes an audit record for each iroh connection's path:
+  `action` `connect`, `resource` `path`, with `peer_path` `direct` or
+  `relay`. It writes one when it starts watching the connection, and one
+  each time the path moves between relay and direct. A new kind must hold
+  for two one-second samples, and a connection gets at most 16 change
+  records. Read them with
+  `qsh audit --action connect --resource path`. The record is an
+  observation: a failed write never closes the connection. See ADR-0067.
+
+### Unchanged
+
+- The `qsh.cli/v1` contract, the wire format and every file format load as
+  before. No field is removed. `connection_mode: "reverse"` and `lost_at`
+  just stop appearing. The trust role `reverse` and the ACL action
+  `host.reverse` still parse and now have no effect. Doctor's reverse and
+  punch finding codes stay in the vocabulary and no longer fire.
+- `qsh serve` still answers an old `qsh serve --to` with `UNSUPPORTED`, as
+  it did before. Every build still advertises the `punch.v1` capability,
+  which now means "understood, not performed".
+- `-R` tunnels (`forward.remote`), jumps through `qsh serve` hosts, direct
+  dialing by address, and the iroh route work as in `v0.8.2`.
+
+### Upgrading
+
+- Before upgrading, run `qsh service status` on every device and
+  `qsh service uninstall` any `listen` or `reverse` unit. Otherwise a unit
+  that restarts on exit will keep hitting `UNSUPPORTED`.
+- Move a reverse-only device to `qsh serve` and pin its key on the
+  devices that reach it: `qsh trust add <name> --key ...`.
+- A network that blocks the relay (TCP 443) and does not let a device be
+  reached by address leaves no way in. Reverse connections and qsh's
+  punching used to cover that case. You can run your own relay with
+  `[iroh].relay_url`.
+
+### What is still unproven
+
+Everything `v0.8.2` lists, plus these:
+
+- The path records are tested with a fake path source. On real networks,
+  the relay-to-direct moves were measured before this release
+  (ADR-0064's revision history), but the records themselves have not yet
+  been read from a device that moved.
+- The Windows-only test files were only built in CI, never on a
+  developer machine.
+
+### Assets and signing
+
+Unchanged from `v0.8.0`, with `v0.9.0` in the asset names.
+
 ## `v0.8.2`
 
 A patch release on top of `v0.8.1`. `qsh doctor` no longer warns about a
