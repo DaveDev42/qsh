@@ -212,15 +212,14 @@ saturation. `m15-latency.filter` selects exactly those three
 (`role_resolution_per_decision_costs_*`, `file_copy_echo_under_load`,
 `cp_many_small_files`); run them 50 times with no competing load at `-j 1`.
 `m26.filter` is the M26 set: the jump chain tests (`jump_chain`, `jump_host`,
-`jump_recovery`, `jump_reverse` in `qsh-testkit`, `jump_surface` in
+`jump_recovery` in `qsh-testkit`, `jump_surface` in
 `qsh-cli`). It leaves out `jump_perf` and `jump_loss`, which measure p95 and
 throughput and fail by design under CPU saturation; `m26-latency.filter`
 selects those two, to be run with no competing load under
 `QSH_ACCEPTANCE_SLOW=1`. The four-hop MTU test is the one that showed a layer
 leaving the datagram carrier through the silence rule under 16 burners.
 `m16.filter` is the M16 set: the trust-withdrawal tests (per-connection
-watch, close code `0x1005`, the three processes `serve`, `serve --to` and
-`listen`, the trust-store poll) and the SSH bootstrap tests (`ssh_bootstrap`,
+watch, close code `0x1005`, the `qsh serve` process, the trust-store poll) and the SSH bootstrap tests (`ssh_bootstrap`,
 `ssh_respond`, `auto_bootstrap`, `bootstrapped_` prefixes, run against the
 fake `ssh` harness). It leaves out
 `one_change_closes_many_connections_within_two_seconds`, a measurement whose
@@ -232,21 +231,13 @@ in `ops::service::tests` (the argv per manager, the deadline paths of
 activation scenario over a fake `launchctl`/`systemctl` on `PATH`, the
 `--json`/`--jsonl` purity rows, and the doc-versus-argv comparison. None of
 them calls a real service manager. It also covers `qsh identity move-key`:
-the `identity_move_key::` module and the route-equivalence test
-`move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins`
-(real `qsh serve`, `qsh listen` and `qsh serve --to` processes after a key
-moved through a fake platform store; no test touches the OS credential
-store). It also covers `qsh sessions` filters: the `sessions_filter::` module,
-including the route-equivalence test
-`sessions_filter_applies_identically_to_forward_and_reverse_hosts` (real
-`qsh serve`, `qsh listen` and `qsh serve --to` processes, with a pty client
-holding a writer lease on each host). It also covers `qsh audit`: the
-`audit_query::` module (real binary against a planted log), the op-level
-`ops::audit::tests::` and `audit_query_classification::` source-scan pins, and
-the route-equivalence test
-`audit_query_reads_records_written_by_serve_listen_and_serve_to` (real
-`qsh serve`, `qsh listen` and `qsh serve --to` processes writing one device's
-audit log, read back by one `qsh audit`). The `audit_query_reads_while_the_writer_rotates`
+the `identity_move_key::` module and the test
+`move_key_then_serve_handshakes_with_unchanged_pins` (a real `qsh serve`
+process after a key moved through a fake platform store; no test touches the
+OS credential store). It also covers `qsh sessions` filters: the
+`sessions_filter::` module. It also covers `qsh audit`: the
+`audit_query::` module (real binary against a planted log) and the op-level
+`ops::audit::tests::` and `audit_query_classification::` source-scan pins. The `audit_query_reads_while_the_writer_rotates`
 reader test is part of the same set. M17 adds no p95 budget, so there is no
 `m17-latency.filter`.
 `m20.filter` is the M20 set, for Windows only: the `conpty_` tests of the
@@ -254,7 +245,7 @@ ConPTY backend (output order against the exit event, a slow consumer, the Job
 Object, resize, the owner-only host pipes, the environment and working
 directory of the child, the close escalation), the hundred-session leak test
 (`hundred_sequential_conpty_`) and the `pty_session_` route
-cases (`windows_forward_e2e`, `windows_reverse_e2e`) that run the session ops
+cases (`windows_forward_e2e`) that run the session ops
 against a real `qsh serve` host. The session signals are in it too: the
 `pty::conpty::tests::signals::` tests (each signal as the event a
 `qsh-signal-probe` on the console receives, the escalation, the two named
