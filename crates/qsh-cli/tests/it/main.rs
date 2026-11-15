@@ -10,6 +10,7 @@ mod attach_ops;
 mod attach_recovery;
 mod audit_query;
 mod auto_bootstrap;
+mod blackout;
 mod cert_e2e;
 mod cert_file_exchange;
 mod console_probe;

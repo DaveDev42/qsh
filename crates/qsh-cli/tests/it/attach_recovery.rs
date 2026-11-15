@@ -60,19 +60,19 @@ const DEADLINE: Duration = Duration::from_secs(90);
 
 /// The contract bound from `docs/design/testing.md` L4, restated here so a
 /// change to it fails this test rather than passing quietly.
-const REDIAL_DEADLINE_MS: u64 = 2_000;
+pub(super) const REDIAL_DEADLINE_MS: u64 = 2_000;
 
 /// quinn's idle timeout (`docs/design/protocol.md` §2). A recovery that
 /// takes anywhere near this long recovered by waiting, which L4 defines as
 /// a failure.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Room for everything the bounds below do not model: a real `qsh serve`
 /// on a loaded CI box, the shell's own round trip, and the proxy in the
 /// middle. Generous, but an order of magnitude short of the idle timeout —
 /// which is the point, because "the idle timeout eventually fired" must
 /// not be able to pass.
-const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
+pub(super) const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
 
 /// The longest the watchdog may take to call a silent path dead, derived
 /// from the config the product actually ships rather than restated: a
@@ -80,7 +80,7 @@ const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
 ///
 /// Derived rather than hard-coded so the wall-clock bound below tracks
 /// what the product actually ships.
-fn detection_budget(cfg: &qsh_core::PathWatchConfig) -> Duration {
+pub(super) fn detection_budget(cfg: &qsh_core::PathWatchConfig) -> Duration {
     cfg.probe_interval * cfg.strikes + cfg.min_dead_after
 }
 
@@ -94,7 +94,7 @@ fn detection_budget(cfg: &qsh_core::PathWatchConfig) -> Duration {
 /// contract — *noticing* a dead path may not cost more than L4 allows for
 /// recovering from it, since what the user experiences is the sum.
 /// Shipped today this is 250 ms × 3 + 1 s = 1.75 s.
-const DETECTION_CEILING: Duration = Duration::from_millis(REDIAL_DEADLINE_MS);
+pub(super) const DETECTION_CEILING: Duration = Duration::from_millis(REDIAL_DEADLINE_MS);
 
 // ---------------------------------------------------------------------------
 // recovery telemetry capture
@@ -111,7 +111,7 @@ fn recovery_lines() -> &'static Mutex<Vec<String>> {
 }
 
 /// Install the capturing subscriber once per test binary.
-fn capture_recovery_records() {
+pub(super) fn capture_recovery_records() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         tracing_subscriber::registry()
@@ -161,13 +161,13 @@ impl tracing::field::Visit for MessageOnly<'_> {
 
 /// One parsed recovery record.
 #[derive(Debug, Clone)]
-struct RecoveryRecord {
-    recovery: String,
-    time_to_recovery_ms: u64,
+pub(super) struct RecoveryRecord {
+    pub(super) recovery: String,
+    pub(super) time_to_recovery_ms: u64,
 }
 
 /// Every record emitted for `session_ref`, oldest first.
-fn records_for(session_ref: &str) -> Vec<RecoveryRecord> {
+pub(super) fn records_for(session_ref: &str) -> Vec<RecoveryRecord> {
     recovery_lines()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -245,7 +245,7 @@ impl ProxiedFleet {
         self.proxy.context()
     }
 
-    fn detail(&self) -> String {
+    pub(super) fn detail(&self) -> String {
         self.proxy.detail()
     }
 
@@ -266,7 +266,7 @@ impl ProxiedFleet {
     /// How many `session.attach` decisions the host allowed. A resume is a
     /// second one, recorded by the host itself rather than inferred by the
     /// client.
-    fn attach_allows(&self) -> usize {
+    pub(super) fn attach_allows(&self) -> usize {
         self.host
             .audit_records()
             .iter()
@@ -281,11 +281,11 @@ impl ProxiedFleet {
 
 /// Everything an attach delivered, with the cumulative offsets it claimed.
 #[derive(Default)]
-struct Delivered {
-    text: String,
+pub(super) struct Delivered {
+    pub(super) text: String,
     /// `(sequence_after, len)` for every output frame, in delivery order.
     frames: Vec<(u64, usize)>,
-    gaps: Vec<(u64, u64)>,
+    pub(super) gaps: Vec<(u64, u64)>,
 }
 
 impl Delivered {
@@ -302,7 +302,7 @@ impl Delivered {
     /// first frame to the last says the client saw the host's bytes once
     /// each, in order — with no gap at the seam a recovery leaves and no
     /// byte redelivered across it.
-    fn assert_tiles_the_stream(&self, ctx: &str) {
+    pub(super) fn assert_tiles_the_stream(&self, ctx: &str) {
         assert!(self.gaps.is_empty(), "unexpected replay gap(s) — {ctx}");
         let mut expected = self
             .frames
@@ -328,7 +328,12 @@ impl Delivered {
 }
 
 /// Drain events until the accumulated output contains `needle`.
-fn read_until(stream: &mut SessionAttachStream, seen: &mut Delivered, needle: &str, ctx: &str) {
+pub(super) fn read_until(
+    stream: &mut SessionAttachStream,
+    seen: &mut Delivered,
+    needle: &str,
+    ctx: &str,
+) {
     while let Some(event) = stream.next_event() {
         match event.unwrap_or_else(|err| panic!("attach stream failed: {err} — {ctx}")) {
             SessionEvent::Output {
@@ -390,7 +395,7 @@ pub(super) fn with_deadline<T: Send + 'static>(
 
 use qsh_testkit::shell::{said, said_count, say};
 
-fn open_shell(ops: &Ops) -> String {
+pub(super) fn open_shell(ops: &Ops) -> String {
     ops.session_open(SessionOpenReq {
         host: HOST_ALIAS.to_string(),
         argv: qsh_testkit::shell::pty_shell(),
@@ -414,7 +419,7 @@ fn open_shell(ops: &Ops) -> String {
     .session_ref
 }
 
-fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
+pub(super) fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
     ops.session_attach(
         SessionAttachReq {
             session_ref: session_ref.to_string(),
