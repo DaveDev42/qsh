@@ -195,6 +195,9 @@ impl TunnelHolder {
 
     /// Like [`Self::open`] with `--supervise <budget_ms>`, collecting the
     /// supervisor's stderr lines for [`Self::wait_supervise`].
+    // Unused since ADR-0068 retired the reverse routes that drove it; kept
+    // for a supervised forward route case.
+    #[allow(dead_code)]
     pub fn open_supervised(
         route: &impl Route,
         flag: &str,
@@ -275,6 +278,9 @@ impl TunnelHolder {
 
     /// The supervisor's diagnostic lines (`{"supervise":…}`) on stderr so
     /// far, in order. Only a holder from [`Self::open_supervised`] has any.
+    // Unused since ADR-0068 retired the reverse routes that drove it; kept
+    // for a supervised forward route case.
+    #[allow(dead_code)]
     pub fn supervise_lines(&self) -> Vec<Value> {
         self.stderr
             .lock()
@@ -287,6 +293,9 @@ impl TunnelHolder {
 
     /// Wait until the supervisor has logged at least `count` lines of `kind`
     /// (`lost`, `reestablished`, …); returns them.
+    // Unused since ADR-0068 retired the reverse routes that drove it; kept
+    // for a supervised forward route case.
+    #[allow(dead_code)]
     pub fn wait_supervise(&self, kind: &str, count: usize, deadline: Duration) -> Vec<Value> {
         poll_until(
             &format!("{count} `{kind}` supervise line(s)"),
