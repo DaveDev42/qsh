@@ -23,9 +23,9 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0017](0017-acl-toml-not-written.md) | `acl.toml`은 어떤 명령도 쓰지 않고 부담은 doctor 진단과 페어링 직후 고지로 옮긴다 | 승인됨 |
 | [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |
 | [0019](0019-socks-dynamic-forward.md) | SOCKS `-D`를 구현한다. client가 SOCKS5를 번역해 CONNECT마다 기존 `TCP_CONNECT`로 싣고 host는 그 dial에서 host-local 주소를 거른다 | 승인됨 |
-| [0020](0020-socks-reverse-route.md) | 역방향 route에서도 `-D`를 켠다(ADR-0019 결정 10 개정) | 승인됨 |
+| [0020](0020-socks-reverse-route.md) | 역방향 route에서도 `-D`를 켠다(ADR-0019 결정 10 개정) | 승인됨 → 은퇴(ADR-0068) |
 | [0021](0021-transport-liveness-knobs.md) | keep-alive만 `[transport]` 설정으로 열고 idle timeout 45초는 고정 상수로 남긴다. `PathWatchConfig`의 세 값은 `[recovery]`로 내린다 | 승인됨 |
-| [0022](0022-reverse-health-surface.md) | 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고, push 계약 표면은 필요가 관측된 뒤에 `qsh.event/v1`에 additive로 연다 | 승인됨 |
+| [0022](0022-reverse-health-surface.md) | 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고, push 계약 표면은 필요가 관측된 뒤에 `qsh.event/v1`에 additive로 연다 | 승인됨 → 은퇴(ADR-0068) |
 | [0023](0023-tunnel-supervise.md) | `qsh tunnel open --supervise`로 연결 유실 뒤 터널을 스스로 재수립한다(ADR-0018 결정 2·3 개정, 결정 1 유지) | 승인됨 |
 | [0024](0024-setup-orchestrator.md) | `qsh setup`은 기존 op을 정해진 순서로 부르는 오케스트레이터다. `acl.toml`은 쓰지 않고 자동 신뢰는 없다 | 승인됨 |
 | [0025](0025-acl-show-read-only.md) | writer 없이 ACL 가시성만 올린다. 읽기 전용 `qsh acl show`를 신설하고 `acl grant`/`acl revoke`는 기각한다 | 승인됨 |
@@ -43,7 +43,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0038](0038-setup-client-complete-without-acl.md) | `qsh setup client`의 `complete`는 doctor의 `acl_policy_missing` 하나를 세지 않는다(ADR-0024 결정 9 개정). doctor의 진단 등급과 host 쪽 역할의 판정은 그대로 둔다 | 승인됨 |
 | [0039](0039-forced-doh-resolver.md) | DNS-over-HTTPS 강제 모드는 P1에 넣지 않는다. P2 후보로 두고 착수할 때의 모양(해석 seam 하나, IP 리터럴 bootstrap, fail closed `doh-only`)만 지금 고정한다 | 승인됨 |
 | [0040](0040-ech-policy.md) | ECH는 기본으로 켜지 않는다. rustls에 서버 쪽 ECH가 생길 때까지 구현을 보류하고 `off`/`prefer`/`require` 정책의 모양만 고정한다. hostname SNI는 ECH와 별개로 보내지 않는 쪽을 권한다 | 승인됨 |
-| [0041](0041-reverse-registration-detection-budget.md) | 역방향 등록 연결의 PathWatch 감지 예산을 대화형 attach의 2초 상한에서 분리하고 기본 창을 약 5초로 둔다. attach 기본값은 그대로이고 역방향 등록은 `min_dead_after` 4250ms·`strikes` 3, 재정의 키 `reverse_min_dead_after_ms`·`reverse_strikes`, 상한 5초다(ADR-0021 결정 4의 기본값과 결과 절 상한을 역방향에 한해 개정) | 승인됨 |
+| [0041](0041-reverse-registration-detection-budget.md) | 역방향 등록 연결의 PathWatch 감지 예산을 대화형 attach의 2초 상한에서 분리하고 기본 창을 약 5초로 둔다. attach 기본값은 그대로이고 역방향 등록은 `min_dead_after` 4250ms·`strikes` 3, 재정의 키 `reverse_min_dead_after_ms`·`reverse_strikes`, 상한 5초다(ADR-0021 결정 4의 기본값과 결과 절 상한을 역방향에 한해 개정) | 승인됨 → 은퇴(ADR-0068) |
 | [0042](0042-watch-self-delay-and-quick-loss-backoff.md) | PathWatch는 자기 tick의 지연을 침묵에서 덜어내고(`late >= probe_interval`이면 `last_inbound`를 앞으로 밀고 그 tick은 사망을 선언하지 못한다) 판정 줄에 `tick_gap_ms`를 싣는다. 역방향 target은 60초 안에 끝난 등록이 연속되면 재dial 지연을 두 번째부터 2배씩 8초까지 늘린다. `cause` 분류를 보정한다(`Reset`은 `peer_closed`, `Hello` 시간 초과는 `dial_timeout`). 설정 키·wire 변경 없음 | 승인됨 |
 | [0043](0043-no-tcp-fallback.md) | TCP/TLS fallback을 만들지 않는다. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다. M14를 철회로 닫고 (a)의 transport facade는 유지한다 | 승인됨 |
 | [0044](0044-ssh-bootstrap.md) | SSH 부트스트랩. pin이 없는 대상에 `qsh <dest>`(와 `qsh cp`)를 부르면 시스템 ssh를 한 번 거쳐(`ssh -G`로 HostName 해석, ssh 설정·agent·known_hosts는 ssh가 처리) 원격 숨김 응답자 `qsh pair ssh-respond`와 fingerprint를 교환하고 양쪽 pin을 쓴 뒤 QUIC로 접속한다. 원격 pin은 0045 role `full`(`--role`), 이 장비 쪽 pin은 role `none`이고, 명시 명령은 `qsh pair ssh`(op `pair.ssh`)다 | 승인됨 (2026-10-14) |
