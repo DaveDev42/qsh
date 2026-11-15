@@ -40,3 +40,7 @@ ADR-0019 결정 10은 첫 착지에서 `-D`를 정방향 route에서만 켜고 �
 - `docs/CLI.md` §6.9의 역방향 거절 설명은 역방향 동작 설명으로 바뀐다. 대화형 `-L` 역방향 제한도 사라진다.
 - 역방향 e2e는 `crates/qsh-testkit`의 `ReverseHarness`로 고정한다. SOCKS CONNECT가 daemon을 거쳐 target에서 나가는 왕복, target의 loopback을 가리키는 이름이 `REP 0x02`로 거절되는 경우(필드 5가 daemon을 통과했다는 증거), capability가 없을 때 아무것도 bind하지 않는 거절, 대화형 `-L`의 역방향 왕복이다.
 - `docs/design/threat-model.md`의 `-D` 행에 역방향 경로를 더한다. 새 신뢰 경계는 없다.
+
+## 개정 이력
+
+- 2026-11-15 ADR-0068이 역방향 연결을 걷어 SOCKS의 역방향 경로(daemon 경유 `-D`)와 `ReverseHarness` 시험이 사라졌다. `forward.socks` 항상 거부 관문과 정방향 `-D`는 그대로다.

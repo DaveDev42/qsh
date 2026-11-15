@@ -72,3 +72,7 @@ push가 아예 없는 것도 아니다. `qsh::reverse` 줄은 한 줄 JSON이고
   - R2. `lost_at`은 controller가 관측한 시각이지 target이 죽은 시각이 아니다. `Ping`/`Pong` 3-strike 판정이 끝난 뒤에 찍히므로 실제 사망보다 늦다(`docs/design/protocol.md` §11-4).
   - R3. 정방향 host의 health는 이 ADR로도 여전히 `"unknown"`이다. `host.list`는 dial하지 않기 때문이다(`docs/CLI.md` §6.1). 정방향 도달성 표면은 이 결정과 별개 문제로 남는다.
 - 지금 여는 구현 작업이 없으므로 크기 추정을 두지 않는다. 결정 3을 열 때 event type 셋과 carrier 하나를 그 시점에 센다.
+
+## 개정 이력
+
+- 2026-11-15 ADR-0068이 역방향 연결과 controller 등록을 걷었다. 역방향 host의 `state: "stale"`·`lost_at`은 더 나오지 않고, 정방향 host의 health는 그대로 `unknown`이다.

@@ -296,3 +296,4 @@ ICE는 후보(로컬 인터페이스의 host, STUN 서버가 본 server-reflexiv
 - 2026-11-13 ADR-0061이 범위 문장의 "relay 없음"을 개정했다. 홀펀칭 설계는 바뀌지 않고, 펀칭이 실패한 뒤 사용자가 켠 iroh relay route가 따로 시도될 수 있다. 결정 본문은 고치지 않았다.
 - 2026-11-13 공유기 포트 매핑 개정. 결정 8의 "공유기에 묻는 프로토콜(UPnP·NAT-PMP·PCP)도 쓰지 않는다"와 기각한 대안의 "UPnP·NAT-PMP·PCP로 공유기에 포트를 연다"는 ADR-0064가 데몬의 iroh endpoint에 한해 고친다. `qsh serve`·`qsh listen`의 iroh endpoint는 기본으로 공유기에 매핑을 요청하고(`[iroh].portmap`으로 끈다) client endpoint는 요청하지 않는다. 펀칭(`punch.v1`)의 범위와 방식, 이 ADR의 나머지 결정은 그대로다. 결정 본문은 고치지 않았다.
 - 2026-11-13 ADR-0065가 역방향(`qsh listen`, `qsh serve --to`)을 고급 fallback으로 설명하는 틀로 내렸다. 홀펀칭의 중개자는 여전히 양쪽이 닿는 사용자의 `qsh listen`이고(결정 20), 이 ADR의 결정은 하나도 바뀌지 않는다. 바뀌는 것은 문서에서 이 경로가 놓이는 자리뿐이다. 결정 본문은 고치지 않았다.
+- 2026-11-15 ADR-0068이 결정 9의 꺼짐 동작을 영구로 고정했다. client는 punch route를 시작하지 않고 B·R 쪽은 `PunchRequest`에 `UNSUPPORTED`, `PunchOffer`에 `TARGET_UNSUPPORTED`로 답한다. 중개자가 기대던 역방향 등록이 사라져 홀펀칭은 다시 설 수 없다.

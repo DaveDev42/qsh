@@ -91,3 +91,7 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
 - 설정이 없을 때의 `PathWatchConfig` Debug 출력은 attach 쪽이 오늘과 같다. 이 불변을 구현 테스트가 byte 단위로 고정한다. 역방향 등록의 기본은 새 값이고 그 값도 테스트가 고정한다.
 - `docs/ROADMAP.md`와 `PLAN.md`의 배치는 메인 세션이 정한다.
 - 잔여 위험은 셋이다. 느슨한 감지는 진짜로 죽은 등록의 `stale` 표시를 늦춘다. 새 기본은 상한에 닿아 있어서 한 키만 올리면 `CONFIG_ERROR`가 난다. 그리고 호스트 자체가 5초 넘게 멈추는 경우(이슈 #11)는 이 기본으로 풀리지 않는다. 복호화 전에 세는 datagram 카운터가 가짜 datagram으로 감지를 지연시킬 수 있는 위험(`docs/design/threat-model.md` §4 G7)은 창이 길어져도 달라지지 않는다.
+
+## 개정 이력
+
+- 2026-11-15 ADR-0068이 역방향 등록과 그 감지 예산을 걷었다. `[recovery].reverse_min_dead_after_ms`·`reverse_strikes`는 파싱만 되고 아무 일도 하지 않는다.

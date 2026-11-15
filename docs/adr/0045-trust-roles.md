@@ -220,3 +220,7 @@
 - 문서 밖. `CLAUDE.md` "Security defaults"의 "a request matching no `[[acl]]` row is denied, and a missing or unparseable `acl.toml` denies every request" 문장, README의 First run과 보안 절, ADR-0026의 `trust ssh-preview`가 내는 ACL 초안(`--role`을 단 pin 명령으로 바꾼다)을 고친다. `docs/adr/README.md` 색인과 `docs/ROADMAP.md` M15는 메인 세션이 고친다.
 - architecture rule. role 표, role 해석, 평가기 변경, doctor 검출기는 모두 `qsh-core`에 둔다. `qsh-proto`에는 열린 문자열 필드와 새 op 타입만 들어간다. `qsh-cli`는 clap 정의와 렌더러만 바뀐다. 새 모듈이 `xtask arch`의 경로 범위 금지 목록에 들어가야 하는지는 구현 커밋이 판단한다.
 - 크기. 2.7~4.2ew로 추정한다. 측정값이 아니다. ADR과 계약 문서 0.3~0.5, `trust.toml`·`invites.toml`의 role 키와 네 명령의 플래그, 새 op `trust.set_role`의 등록 완전성 0.6~0.9, 평가기 ⓡ과 `Authorizer` 입력 변경, 판정마다의 role 해석과 reload 실패 시 정지 0.5~0.8, `acl check`·`acl show` 필드와 3-way 대조 0.3~0.5, doctor·시작 진단·페어링 고지 0.3~0.4, `qsh setup` 연동 0.2~0.3, audit optional 키 0.1~0.2, 위 핀 테스트와 oracle 확장 0.4~0.6이다. ADR-0029의 크기와는 따로 센다.
+
+## 개정 이력
+
+- 2026-11-15 ADR-0068 이후 trust role `reverse`와 ACL action `host.reverse`는 어휘로만 남고 효과가 없다. 이 값을 쓴 `trust.toml`·`acl.toml`은 계속 파싱된다.
