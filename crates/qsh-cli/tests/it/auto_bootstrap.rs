@@ -93,7 +93,9 @@ fn run_cp(client: &Sandbox, payload: &Payload, host: &str, extra: &[&str]) -> st
 
 mod world {
     use super::*;
-    use crate::common::{exit_code, poll_until};
+    use crate::common::exit_code;
+    #[cfg(unix)]
+    use crate::common::poll_until;
     use crate::ssh_bootstrap::pair::{World, other_fingerprint, store};
 
     fn set_client_config(w: &World, extra: &str) {
