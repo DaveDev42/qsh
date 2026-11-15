@@ -43,7 +43,7 @@ use crate::client::{ControlIn, Session};
 use crate::ops::exec::map_client_error;
 use crate::ops::session::{Link, RecoveryConfig, probe_alive};
 use crate::ops::{OpError, PeerTarget};
-use crate::reverse::{ReconnectCause, classify_connection_error};
+use crate::reconnect::{ReconnectCause, classify_connection_error};
 use crate::tunnel::carrier::{ActivityHook, CarrierState, CarrierView, HoldSignal, hold_gate};
 use crate::tunnel::local::ForwardCarrier;
 use crate::tunnel::supervise::TARGET;

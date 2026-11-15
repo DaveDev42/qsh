@@ -1,6 +1,7 @@
 //! Registration path of [`Listen`]: accept, admit, publish into the connection table, drive the registered session, and the per-hub tunnel accept loop.
 
 use super::*;
+use crate::reconnect::{CLOSE_CODE_PATH_DEAD, CLOSE_CODE_REPLACED};
 
 impl Listen {
     /// Accept one inbound connection and run the registration handshake on
@@ -327,7 +328,7 @@ impl Listen {
                     // Fixed: every `denied` is the `host.reverse`
                     // ACL/registry choke point refusing the registration
                     // (issue #4 item 6).
-                    cause: Some(crate::reverse::ReconnectCause::RegistrationDenied.as_str()),
+                    cause: Some(crate::reconnect::ReconnectCause::RegistrationDenied.as_str()),
                     at: crate::config::now_rfc3339(),
                     since_registered_ms: None,
                     srtt_ms: None,
@@ -504,7 +505,7 @@ impl Listen {
                 // is already done; the teardown below removes the entry and
                 // ends the relay like for any lost registration.
                 () = crate::trust::connection_watch::withdrawn(&mut withdrawal) => {
-                    loss_cause = crate::reverse::ReconnectCause::TlsRejected;
+                    loss_cause = crate::reconnect::ReconnectCause::TlsRejected;
                     break;
                 }
                 () = watch.dead() => {
@@ -521,10 +522,10 @@ impl Listen {
                     let pre_close_reason = session.connection().close_reason();
                     session.connection().close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
                     loss_cause = match pre_close_reason {
-                        Some(err) => crate::reverse::classify_connection_error(&err),
+                        Some(err) => crate::reconnect::classify_connection_error(&err),
                         None => {
                             own_verdict = watch.dead_verdict();
-                            crate::reverse::ReconnectCause::PathDead
+                            crate::reconnect::ReconnectCause::PathDead
                         }
                     };
                     break;
@@ -578,7 +579,7 @@ impl Listen {
                         // A clean end of stream — the peer closed its
                         // send side (issue #4 item 6).
                         Ok(None) => {
-                            loss_cause = crate::reverse::ReconnectCause::PeerClosed;
+                            loss_cause = crate::reconnect::ReconnectCause::PeerClosed;
                             break;
                         }
                         Err(err) => {
@@ -654,7 +655,7 @@ impl Listen {
         // caused, before the arm above is polled; the transport records which
         // side closed and why, so the classification does not race the task.
         if session.connection().closed_by_trust_withdrawal() {
-            loss_cause = crate::reverse::ReconnectCause::TlsRejected;
+            loss_cause = crate::reconnect::ReconnectCause::TlsRejected;
         }
         drop(withdrawal);
         watchdog.abort();
@@ -985,9 +986,9 @@ impl Listen {
 }
 
 /// Classify a [`ClientError`] from [`Listen::drive_registered_session`]'s
-/// own `session.next_control_message()` read into [`crate::reverse::ReconnectCause`]'s
+/// own `session.next_control_message()` read into [`crate::reconnect::ReconnectCause`]'s
 /// `peer_closed`/`path_dead`/`idle_timeout`/`local` slice (issue #4 item 6) — the same
-/// judgment [`crate::reverse::classify_connection_error`] already applies to a raw
+/// judgment [`crate::reconnect::classify_connection_error`] already applies to a raw
 /// `ConnectionError`, reached through whichever of `ClientError`'s two
 /// variants actually carries one on this client role's control stream.
 /// Everything else (`Remote`, a peer-sent wire `Error` reply;
@@ -997,18 +998,18 @@ impl Listen {
 /// stream error) falls to `local`: none of it is a peer-initiated clean
 /// close or a PathWatch-class idle judgment, so by elimination it is
 /// "something about this side's own read that isn't one of the other
-/// two", the same catch-all `crate::reverse::classify_connection_error`'s own doc
+/// two", the same catch-all `crate::reconnect::classify_connection_error`'s own doc
 /// already claims.
-fn classify_client_error(err: &ClientError) -> crate::reverse::ReconnectCause {
+fn classify_client_error(err: &ClientError) -> crate::reconnect::ReconnectCause {
     match err {
-        ClientError::Connection(e) => crate::reverse::classify_connection_error(e),
+        ClientError::Connection(e) => crate::reconnect::classify_connection_error(e),
         ClientError::Stream(qsh_transport::StreamError::Read(
             qsh_transport::ReadError::ConnectionLost(e),
         ))
         | ClientError::Stream(qsh_transport::StreamError::Write(
             qsh_transport::WriteError::ConnectionLost(e),
-        )) => crate::reverse::classify_connection_error(e),
-        _ => crate::reverse::ReconnectCause::Local,
+        )) => crate::reconnect::classify_connection_error(e),
+        _ => crate::reconnect::ReconnectCause::Local,
     }
 }
 

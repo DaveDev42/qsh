@@ -105,33 +105,6 @@ pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 /// `wait_ms` window of waiting never becomes a hot loop.
 const HUB_WAIT_POLL: Duration = Duration::from_millis(75);
 
-/// Close code for the connection a NAT-rebind reconnect displaces
-/// (`docs/design/protocol.md` §11-2's "same-fingerprint replace"). Local to
-/// this module — the meaning is registration-specific, not a transport
-/// concern, so it does not belong in `qsh-transport`
-/// (`docs/design/architecture.md` §1).
-const CLOSE_CODE_REPLACED: u32 = 0x1003;
-
-/// Close code `drive_registered_session` uses when its own [`watch_path`]
-/// declares this connection's path dead — the controller-side twin of
-/// `reverse::target`'s identical `CLOSE_CODE_PATH_DEAD` (same value, same
-/// meaning, duplicated rather than shared for the same reason
-/// `CLOSE_CODE_REPLACED` above is local to this module: registration
-/// semantics, not a transport concern). Without an explicit close here, a
-/// silently-severed path leaves the QUIC connection object technically
-/// alive — nothing tells quinn to give up on it — so any stream still
-/// reading on it (in particular a `LOCAL_STREAM` splice pump relaying this
-/// host's session data, `M3 Step 7`) blocks until quinn's own
-/// unconfigurable `max_idle_timeout` (`docs/design/protocol.md` §10, 45 s)
-/// finally kills it. That is exactly the "late idle-timeout" recovery
-/// Step 8 (i) criterion ⑤ forbids: `mark_hub_dead`/`ConnTable::remove_if`
-/// below already stop *new* `LOCAL_CONTROL` work promptly, but do nothing
-/// for streams already open on the connection object itself — only
-/// closing the connection does that (`reverse::target`'s own identical
-/// `watch.dead()` arm makes the same argument for `serve_control`'s
-/// blocking read).
-const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
-
 /// Resolve the bind address: CLI flag > `config.toml` `[listen].bind` >
 /// [`crate::serve::DEFAULT_BIND`] — the same default `qsh serve` uses
 /// (`docs/CLI.md` §6.13: running both roles on one host needs an explicit
@@ -1340,10 +1313,10 @@ struct RegistrationEvent<'a> {
     /// resolved far enough to reach [`Registry::admit`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
-    /// Fixed vocabulary ([`super::ReconnectCause`]), present only on
+    /// Fixed vocabulary ([`crate::reconnect::ReconnectCause`]), present only on
     /// `"denied"` (always `registration_denied`) and `"lost"`
     /// (`peer_closed`/`path_dead`/`idle_timeout`/`local`,
-    /// `super::classify_connection_error`'s
+    /// `crate::reconnect::classify_connection_error`'s
     /// judgment) — absent, never null, on every other event.
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<&'static str>,

@@ -75,7 +75,7 @@ use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
 use crate::ops::route::Routed;
-use crate::reverse::ReconnectCause;
+use crate::reconnect::{CLOSE_CODE_PATH_DEAD, ReconnectCause};
 use crate::server::ConnCtx;
 use crate::trust::SharedTrustStore;
 
@@ -122,15 +122,6 @@ pub async fn run_reverse(
     )
     .await
 }
-
-/// Close code for the connection this target's own path-death watchdog
-/// (`docs/design/protocol.md` §10) condemns — a silent NAT/path death,
-/// never a clean QUIC close. Local to this module, same rationale as
-/// [`super::listen`]'s `CLOSE_CODE_REPLACED`: the meaning is
-/// reconnect-loop-specific, not a transport concern
-/// (`docs/design/architecture.md` §1). Only [`run_reverse_observed`] ever
-/// closes a connection for this reason.
-const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 
 /// [`run_reverse`], plus two hooks: `on_runtime` fires exactly once —
 /// synchronously, before the first dial — with the long-lived host runtime
@@ -582,7 +573,7 @@ pub async fn run_reverse_on(
                     let _ = (&mut serve_control).await;
                     loss_cause = match pre_close_reason {
                         Some(_) if trust_withdrawn => ReconnectCause::TlsRejected,
-                        Some(err) => super::classify_connection_error(&err),
+                        Some(err) => crate::reconnect::classify_connection_error(&err),
                         None => {
                             own_verdict = watch.dead_verdict();
                             ReconnectCause::PathDead
@@ -931,7 +922,7 @@ fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
 /// answering with a wire `Error` (name-squatting shape check, ACL denial,
 /// or an unpinned peer past the version check — `dial_and_register`'s own
 /// module docs) — always `registration_denied`. `Connection`/a
-/// `ConnectionLost` stream error reuse [`crate::reverse::classify_connection_error`]'s
+/// `ConnectionLost` stream error reuse [`crate::reconnect::classify_connection_error`]'s
 /// judgment. `Timeout` is the `Hello` reply not arriving within
 /// `HELLO_TIMEOUT`, which is the dial not completing: `dial_timeout`, not
 /// `local` (issue #11 request 3 — under load this is the one a stalled host
@@ -949,13 +940,13 @@ fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
         HelloError::Remote { .. } => ReconnectCause::RegistrationDenied,
         HelloError::Timeout => ReconnectCause::DialTimeout,
         HelloError::ClosedBeforeHello => ReconnectCause::PeerClosed,
-        HelloError::Connection(e) => super::classify_connection_error(e),
+        HelloError::Connection(e) => crate::reconnect::classify_connection_error(e),
         HelloError::Stream(qsh_transport::StreamError::Read(
             qsh_transport::ReadError::ConnectionLost(e),
         ))
         | HelloError::Stream(qsh_transport::StreamError::Write(
             qsh_transport::WriteError::ConnectionLost(e),
-        )) => super::classify_connection_error(e),
+        )) => crate::reconnect::classify_connection_error(e),
         _ => ReconnectCause::Local,
     }
 }
@@ -972,7 +963,7 @@ fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
 /// clean end-of-stream (the controller closed its send side) *and* when
 /// `accept_bi` fails because the connection ended, whatever the reason.
 /// `close_reason` tells the two apart (issue #11 request 3): a connection
-/// that is closed is judged by [`crate::reverse::classify_connection_error`]
+/// that is closed is judged by [`crate::reconnect::classify_connection_error`]
 /// like any other, so an idle timeout that surfaced through `accept_bi` is
 /// `idle_timeout`, not `peer_closed`; an open connection is a clean
 /// end-of-stream, `peer_closed`. `Ok(Err(err))` extracts the underlying
@@ -989,16 +980,17 @@ fn classify_target_connection_loss(
 ) -> ReconnectCause {
     use crate::server::ConnError;
     match joined {
-        Ok(Ok(())) => {
-            close_reason.map_or(ReconnectCause::PeerClosed, super::classify_connection_error)
-        }
-        Ok(Err(ConnError::Connection(e))) => super::classify_connection_error(e),
+        Ok(Ok(())) => close_reason.map_or(
+            ReconnectCause::PeerClosed,
+            crate::reconnect::classify_connection_error,
+        ),
+        Ok(Err(ConnError::Connection(e))) => crate::reconnect::classify_connection_error(e),
         Ok(Err(ConnError::Stream(qsh_transport::StreamError::Read(
             qsh_transport::ReadError::ConnectionLost(e),
-        )))) => super::classify_connection_error(e),
+        )))) => crate::reconnect::classify_connection_error(e),
         Ok(Err(ConnError::Stream(qsh_transport::StreamError::Write(
             qsh_transport::WriteError::ConnectionLost(e),
-        )))) => super::classify_connection_error(e),
+        )))) => crate::reconnect::classify_connection_error(e),
         Ok(Err(_)) | Err(_) => ReconnectCause::Local,
     }
 }
@@ -1288,7 +1280,7 @@ struct ReconnectEvent<'a> {
     fingerprint: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delay_ms: Option<u64>,
-    /// Fixed vocabulary ([`crate::reverse::ReconnectCause`]), present only
+    /// Fixed vocabulary ([`crate::reconnect::ReconnectCause`]), present only
     /// on `"lost"` and the `"retry"` that follows it, and on a `"retry"`
     /// from a failed dial/register attempt — absent, never null, on
     /// `"registered"` (`docs/CLI.md` §6.13's `cause` bullet, issue #4 item

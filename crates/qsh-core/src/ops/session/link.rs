@@ -320,7 +320,7 @@ impl Connected {
         match &self.link {
             ConnectedLink::Forward(link) => {
                 let err = link.connection().closed().await;
-                let cause = crate::reverse::classify_connection_error(&err).as_str();
+                let cause = crate::reconnect::classify_connection_error(&err).as_str();
                 (
                     OpError::new(
                         ErrorCode::ConnectionFailed,
