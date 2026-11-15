@@ -51,7 +51,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 - `shell-command.v1`(ADR-0051 결정 6)은 host가 명령 문자열 하나를 계정의 셸에 넘겨 실행한다는 뜻이다. `ExecStart`의 `shell_command`·`login_shell`과 `SessionOpen`의 `shell_command`가 이 capability에 딸린 필드이고, 세부는 §7.1이다. **모든 빌드가 광고한다**(상수 `CAP_SHELL_COMMAND_V1`). 옛 host가 이 필드를 건너뛰는 문제 때문에 sender는 협상된 교집합에 이 문자열이 있을 때만 필드를 세팅한다(§16.4, ADR-0019 결정 4와 같은 규칙).
 - `screen.v1`(ADR-0052 결정 9)은 host가 세션마다 터미널 에뮬레이터를 돌리고 `SESSION_DATA` 스트림에 `Output` 대신 `ScreenUpdate`를 싣고 `ScreenAck`를 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_V1`). `SessionOpen.screen`·`SessionAttach.screen`·`SessionOpened.screen_channel`·`SessionAttached.screen_channel`과 `SessionFrame`의 `screen_update`·`screen_ack`·`screen_history`가 여기 딸린 항목이고 세부는 §18.8과 §18.11이다. sender는 협상된 교집합에 이 문자열이 있을 때만 요청 필드를 세팅하고 `ScreenAck`를 보내며, host는 광고하지 않은 peer에게 `ScreenUpdate`를 보내지 않는다(§16.4). `datagram.v1`(ADR-0052 결정 9, 상수 `CAP_DATAGRAM_V1`, `LOCAL_CAPABILITIES`의 마지막 항목)도 모든 빌드가 광고한다. 이 peer가 화면 동기화 attach의 channel id로 오는 `ScreenUpdate`·`ScreenAck`·`Input` datagram을 처리한다는 뜻이다. 양쪽이 광고하고 transport가 `max_datagram_size()`를 `Some`으로 알려 줄 때만 datagram을 쓰고, 세부는 §18.9다.
 - `screen-echo.v1`(ADR-0053 결정 3)은 화면 동기화 attach에서 host가 `ScreenEcho`를 보내고(`SessionFrame` 10, `DatagramFrame` 종류 13) client가 해석한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_SCREEN_ECHO_V1`). host는 협상된 교집합에 이 문자열이 있고 화면 동기화 attach일 때만 보내고, 없는 peer는 `SessionFrame` 10도 종류 13도 받지 않는다. client도 협상되지 않았으면 받은 `ScreenEcho`를 버린다. 세부는 §18.12다.
-- `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). `[punch].mode = "off"`여도 광고하고 요청에는 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다.
+- `punch.v1`(ADR-0054 결정 9)은 이 peer가 홀펀칭 신호 message(`PunchRequest`·`PunchOffer`·`PunchReply`·`PunchAnswer`·`RendezvousQuery`·`RendezvousList`)를 이해하고 자기 역할에서 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_PUNCH_V1`). ADR-0068로 qsh 자체 홀펀칭이 영구히 꺼진 뒤에도 광고는 그대로 둔다(golden `capabilities.json`이 바뀌지 않는다). 광고의 뜻은 이제 "알아듣지만 하지 않는다"이다. 요청에는 `[punch].mode = "off"`일 때와 같이 `UNSUPPORTED`로 답한다. 광고하지 않은 peer에게는 이 message를 보내지 않는다(§16.4). 세부는 §19다(휴면).
 - `agent.v1`(ADR-0055 결정 3)은 이 peer가 host로서 `SessionOpen`·`SessionAttach`·`ExecStart`의 `agent_channel`을 처리해 `AGENT` 스트림을 열고, client로서 `AGENT` 스트림을 받는다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_AGENT_V1`). 광고하지 않은 peer에게는 `agent_channel`을 세팅하지 않는다. 옛 host는 모르는 필드를 버리므로 확인 없이 보내면 client가 forwarding이 켜졌다고 착각한다(§16.4, ADR-0019 결정 4와 같은 규칙). 세부는 §20이다.
 - `jump.v1`(ADR-0056 결정 3)은 이 peer가 중간 peer로서 `JUMP` 스트림과 종류 14 datagram을 처리한다는 뜻이다. **모든 빌드가 광고한다**(`LOCAL_CAPABILITIES`의 마지막 항목, 상수 `CAP_JUMP_V1`). client는 협상된 교집합에 이 문자열이 있는 hop에만 `JUMP`를 연다. 교집합에 없는 연결의 `JUMP` 스트림은 host가 모르는 종류로 거절한다(`BAD_HEADER` reset, 판정도 소켓도 없다). 세부는 §21이다.
 
@@ -131,7 +131,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 - `forward.remote` 권한 자체가 없는 principal은 owner 유무와 무관하게 principal-일치 단계에서 걸리므로, 실재하지 않는 `forward_id`와 실재하되 남의 것인 `forward_id`에 대한 판정이 byte-for-byte 동일하다(`session_loopback.rs`의 `denied_peer_cannot_learn_whether_a_session_exists`와 같은 원칙).
 - `forward.remote`를 가진 principal에게는 둘이 갈린다. 남의 owner를 가진 `forward_id`는 `scope = "owned"`가 걸러 3에서 `PERMISSION_DENIED`이고, 알려지지 않은 `forward_id`는 3을 통과해 remove 단계에서 "등록표에 없음"으로 `INVALID_ARGUMENT`("no such forward_id", CLI.md §6.9)를 받는다. `session.write`/`resize`가 남의 세션에는 `PERMISSION_DENIED`, 없는 세션에는 (ACL 통과 뒤 broker 조회에서) `SESSION_NOT_FOUND`를 주는 것과 같은 트레이드오프다.
 
-이 principal 축은 §11-3의 localctl 쪽 conduit 소유권(`ControlHub`의 `owner: ConduitId`, 같은 머신 위 두 CLI 프로세스를 구별하는 문제)과 별개 계층이다. 이쪽은 원격 QUIC peer가 누구인지, 저쪽은 그 peer를 대신해 로컬에서 요청한 프로세스가 어느 것인지를 답한다.
+이 principal 축은 원격 QUIC peer가 누구인지를 답한다. 옛 localctl 데몬의 conduit 소유권(같은 머신 위 두 CLI 프로세스를 구별하는 축)은 ADR-0068로 걷혔다.
 
 **연결 CLOSE 코드.** 연결 전체를 닫는 `APPLICATION_CLOSE` 코드는 `0x100x` 대역이고 위 RESET 코드(`0x200x`)와 달리 스트림이 아니라 연결에 붙는다. peer는 이 값에 따라 분기하지 않는다(진단·audit 상관관계용이다). 가장 새 값 `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 그 연결을 보증하지 않아 닫을 때 쓰고(ADR-0031 결정 7), reason은 주체나 사유를 싣지 않는 고정 문자열 `trust withdrawn`이다. `0x1006`(`CLOSE_CODE_NOT_ADOPTED`)은 펀칭 경주에서 채택되지 않은 연결을 닫을 때 쓰고 reason은 고정 문자열 `not adopted`다(ADR-0054 결정 15, §19.6). 값 목록과 동결 지위는 §16.3·§16.5다.
 
@@ -232,8 +232,8 @@ message ControlMessage {
                                             //   -> ExecStarted{exec_id, ticket, agent(3, AgentGrant, §20)}
 
     RemoteForwardOpen   rfwd_open = 40;     // bind_host, bind_port, forward_host, forward_port,
-                                            //   claim_token(§11-3 forward_id→conduit 등록표 —
-                                            //   target은 검사하지 않음, requester-local claim 증명용)
+                                            //   claim_token(은퇴, §11: 옛 역방향 claim 증명용.
+                                            //   target은 검사하지 않는다. 필드는 동결)
                                             //   (`-R`, CLI.md §6.9 grammar) — non-loopback bind_host는
                                             //   INVALID_ARGUMENT(host-side policy, parser는 모양만 검사,
                                             //   CLI.md §6.9); ACL forward.remote
@@ -304,17 +304,17 @@ message Hello {
   repeated uint32 versions = 1;        // major 내 minor; 교집합 채택
   string device_name = 2;              // 표시용. principal은 항상 TLS cert에서 나온다.
   repeated string capabilities = 3;    // "session","exec","tunnel.local","tunnel.remote","resume.v1",...
-  ReverseRegistration reverse = 4;     // 역방향 target이 자신을 host로 제공할 때만 존재
+  ReverseRegistration reverse = 4;     // 은퇴(ADR-0068): 받는 host는 UNSUPPORTED로 답한다(§11)
 }
 
-// target이 자신을 host로 제공할 때 Hello.reverse에 담는 값(§11-2).
+// target이 자신을 host로 제공할 때 Hello.reverse에 담는 값. 은퇴(ADR-0068): 값은 동결, 처리는 §11.
 message ReverseRegistration {
   string offered_name = 1;  // 인증에 절대 쓰이지 않는 자기 신고 값. 검사 규칙은
                              //   `name.is_empty() || wire::valid_host_name(name)` — 빈 문자열은
                              //   검사에서 제외(이름을 controller에 위임한다는 뜻)이고, 비어 있지
                              //   않으면 wire::valid_host_name()(1..=64 bytes, [A-Za-z0-9._-])을
-                             //   만족해야 한다. 실제 등록 이름은 controller가 정한다(§11-2 이름
-                             //   확정 규칙) — name-squatting 방지.
+                             //   만족해야 한다. 실제 등록 이름은 controller가 정했다(은퇴, §11) —
+                             //   name-squatting 방지.
   repeated string capabilities = 2;  // 이 target이 **이 등록에서 host 역할로 제공할** 기능
                              //   문자열 집합(비어 있으면 Hello.capabilities와 동일). 미지 문자열은
                              //   controller가 무시하며, 인가·identity 입력이 아니다. 신규 문자열을
@@ -415,156 +415,37 @@ message FileFrame {
 
 **Writer lease.** 세션당 writer lease 1개. lease는 소유 연결이 죽으면 자동 해제된다(세션은 유지). `mode=RW` attach는 **기본이 steal**이다 — "절전 후 같은 사람이 재접속"이 지배적 경로이므로 수동 정리를 요구하면 핵심 약속이 깨진다. 기존 보유자가 실제로 살아 있으면 `SessionEvent::WriterChanged`를 받고 read-only로 강등된다. 신중한 자동화를 위해 `no_steal = true`는 steal 대신 `SESSION_CONFLICT`를 반환한다. 모든 handover 판정은 broker 단일 락 안에서 일어난다.
 
-## 11. 역방향 모드
+## 11. 은퇴, wire는 남는다 (구 역방향 모드)
 
-> **위치(ADR-0065).** 사용자 문서는 qsh를 server(`qsh serve`)와 client로 설명하고 이 절의 역방향을 고급 fallback으로 둔다. 키 기반 iroh route(§22)로 연결 방향이 도달 가능성을 가르지 않기 때문이다. 이 절의 wire와 절차는 바뀌지 않았다(§16 freeze). 아래 "대칭 원칙"이 바로 그 모델의 근거다.
+> **은퇴(ADR-0068).** 역방향 연결(`qsh listen`, `qsh serve --to`, 숨김 `qsh reverse`, controller 등록과 registry, 합친 endpoint, localctl 데몬)은 v0.9.0에서 걷혔다. 이 절은 번호를 두고, 남은 wire와 그 동작만 적는다. 절차와 상태 기계를 설명하던 옛 본문은 지우고 git 이력(ADR-0068 결정 9 4·5단계 커밋 `59c4fdbd`, `0f3e4c28`)에 둔다. 연결 방향이 도달 가능성을 가르지 않는 모델은 §22의 iroh route가 맡는다(ADR-0065).
 
-**대칭 원칙:** TLS 역할(누가 dial했나)과 QSH 역할(누가 셸을 제공하나)은 `Hello`에서 분리된다. control 스트림 수립 후 프로토콜은 완전 대칭 — 어느 쪽이든 요청을 보낼 수 있고, **요청 수신자가 자기 ACL을 평가**한다. "client/host"는 연결 단위가 아니라 요청 단위 역할이다.
+**남은 wire와 동결.** 아래는 모두 §16의 freeze대로 `.proto`와 상수에 그대로 있다. 코드가 없어도 번호와 의미를 다시 쓰지 않는다.
 
-1. `qsh listen`(controller)이 QUIC listener 실행, `qsh serve --to <controller>`(구 표기 `qsh reverse`)(target)가 평범한 상호 TLS로 dial.
-2. target이 `Hello.reverse = ReverseRegistration{offered_name, capabilities}`를 보낸다.
-   - **인증:** controller는 target을 **인증서로** 인증한다(pin 또는 CA, `offered_name`은 인증에 쓰지 않는다). mTLS는 QUIC handshake에서 이미 끝나 있으므로 이 인증은 `Hello` 프레임을 읽기 전에 완료돼 있다.
-   - **모양 검사:** `offered_name`에 `name.is_empty() || valid_host_name(name)`을 적용한다. 빈 문자열은 검사에서 제외되고 실제 이름은 controller가 정한다. 위반은 `INVALID_ARGUMENT` + 연결 종료이며 choke point 이전이므로 audit이 없다.
-   - **ACL:** 그 principal에 ACL action `host.reverse`를 검사한다. 기본 deny이고, 거부 시 연결 종료 + audit이며 리소스는 하나도 만들지 않는다.
-   - **이름 확정:** 허용되면 controller가 자기 통제 하의 이름으로 등록한다. 그 fingerprint의 trust-store alias가 우선이고, `offered_name`은 명시적 `allow_advertised_names` 설정 시에만 쓴다(둘 다 없으면 `PERMISSION_DENIED`). 인가된 장비가 `personal-mac` 같은 이름을 사칭(name-squatting)하는 것을 막기 위해서다.
-   - **충돌:** 같은 이름의 live 등록이 이미 있고 fingerprint가 **다르면** 신규 등록을 `INVALID_ARGUMENT` + 연결 종료로 거절한다(조용한 덮어쓰기 금지). **같은 fingerprint면** 기존 등록을 대체하고 옛 연결을 닫으며 `generation`을 1 증가시킨다(NAT rebind로 인한 재등록이 정상 경로).
-   - **그 밖의 입력(단독 모드):** 단독 `qsh serve`(정방향 host)가 `Hello.reverse`를 받는 것은 대칭 원칙 아래 실제로 발생 가능한 입력이며, 등록하지 않고 `UNSUPPORTED`로 답한다. `Hello.reverse` 없는 peer가 단독 `qsh listen`에 연결한 경우도 `UNSUPPORTED` 후 종료다. 이 상호 거절은 두 역할이 서로 다른 프로세스일 때의 규칙이다. `[listen].serve = true`인 합친 프로세스는 아래 "합친 모드의 갈림"을 따른다(ADR-0059).
-   - controller가 localctl UDS 연결을 accept할 때 하는 peer credential 검사(`SO_PEERCRED`/`getpeereid`)는 이 QUIC 등록 절차와 별개이며 §11-3의 conduit 수립 시 수행된다.
-   **합친 모드의 갈림(ADR-0059).** `[listen].serve = true`(또는 `qsh listen --serve`)인 `qsh listen` 프로세스는 같은 UDP 소켓에서 두 역할을 받는다. wire는 바뀌지 않는다(ALPN `qsh/1`, `Hello`, capability, `ErrorCode` 그대로). 갈림은 연결마다 한 번이고 순서는 `Gate` → TLS accept → quota 예약 → `respond` 콜백 → (필요하면) 첫 요청이다. 합친 endpoint가 보내는 `Hello` 응답은 peer의 `Hello`로 정해진다. `Hello.reverse`가 있으면 단독 listen이 보내는 응답을, 없으면 단독 serve가 보내는 응답을 보낸다.
+- `Hello.reverse`(`ReverseRegistration{offered_name, capabilities}`)
+- `RemoteForwardOpen.claim_token`
+- 닫힘 코드 `CLOSE_CODE_REPLACED`(`0x1003`)·`CLOSE_CODE_PATH_DEAD`(`0x1004`)(§16)
 
-   | peer의 `Hello` | 첫 요청(`Ping` 제외) | 갈래 | 인가 | 이어지는 함수 |
-   |---|---|---|---|---|
-   | `reverse` 있음 | 해당 없음 | 역방향 등록 | `host.reverse` | `Listen::finish_registration` |
-   | `reverse` 없음, `punch.v1` 양쪽, `[punch].mode ≠ off` | `PunchRequest` | 펀칭 연결(§19.9) | `host.punch` | `Listen::relay_punch` |
-   | `reverse` 없음 | 그 밖의 control message, 또는 peer가 연 데이터 스트림 | 정방향 host | 요청마다 단독 serve의 판정 | `Server::serve_control` |
-   | `Principal::Pairing` | 해당 없음 | pairing(§15.1) | 초대 상환 규칙 | `serve_pairing_connection` |
+**대칭 원칙은 그대로다.** TLS 역할(누가 dial했나)과 QSH 역할(누가 셸을 제공하나)은 `Hello`에서 분리되고, 요청 수신자가 자기 ACL을 평가한다. 다만 지금 빌드는 정방향 dial만 하므로 "client/host"는 연결 단위로도 요청 단위로도 같은 쪽을 가리킨다.
 
-   등록된 연결은 `Server` dispatch에 닿지 않는다. 그 연결에서 peer가 연 스트림은 단독 listen처럼 `TCP_ACCEPTED`와 `AGENT`만 받고 나머지는 reset한다. 정방향 연결은 단독 serve처럼 Hello 전에 quota를 예약하고 거절을 먼저 알리며(R3), 등록은 ACL을 먼저 보고 quota 거절을 그다음에 알린다(A2/B5). `Gate`, `Quotas`, 감사 sink, `Authorizer`는 프로세스에 하나씩이고 `max_connections`와 principal별 상한은 endpoint 하나의 풀이다. `punch.v1`은 `[punch].mode`와 관계없이 `LOCAL_CAPABILITIES`로 언제나 광고되므로 `Hello` 응답의 capability는 단독 listen·단독 serve와 같다. `[punch].mode = off`는 광고가 아니라 가로채기와 `PunchRequest` 처리를 끈다.
+1. **`Hello.reverse`에는 `UNSUPPORTED`로 답한다.** `qsh serve`는 `Hello.reverse`가 든 연결을 등록하지 않는다. 핸드셰이크 응답 단계에서, 세션·ticket·등록 상태가 하나도 생기기 전에 `UNSUPPORTED`("this host does not accept reverse registrations", `retryable: false`)로 거절한다. 옛 `qsh serve --to`가 보는 동작은 그대로다. 옛 빌드의 target이 새 `qsh serve`에 등록을 걸면 이 답을 받는다. `Hello.reverse` 없는 정방향 peer의 처리와 핸드셰이크 순서는 바뀌지 않았다. 새 빌드의 명령 표면(`qsh listen`, `qsh serve --to`)이 내는 `UNSUPPORTED`는 `details.reason = "reverse_retired"`를 싣는다(`docs/CLI.md`).
+2. **등록 의미론은 더 없다.** `ReverseRegistration`의 이름 확정, 충돌 처리, `generation`, 같은 fingerprint의 대체 등록, `host.reverse` ACL 검사는 어느 빌드도 수행하지 않는다. role `reverse`와 ACL action `host.reverse`는 어휘에 남아 있어 그 값을 쓴 `trust.toml`·`acl.toml`이 계속 파싱되지만 효과가 없다. `CLOSE_CODE_REPLACED`는 값만 고정이고 지금 코드에서는 상수 정의로만 남는다. 두 닫힘 코드 상수는 중립 모듈 `crates/qsh-core/src/reconnect.rs`로 옮겼다(동작 변화 없음).
+3. **localctl 데몬과 `qsh.local.v1`은 없다.** 상주 `qsh listen` 데몬과 CLI가 UDS로 주고받던 `qsh.local.v1`(`LocalHello`, conduit, 다중화, `LOCAL_ADMIN`, `TCP_ACCEPTED` claim leg, `EXEC_DATA` ack leg), `ControlHub`의 `forward_id` 등록표와 claim seat, 소유 conduit 규칙은 걷혔다. fuzz target `decode_local_admin_request`·`decode_local_hello`도 같이 없다(§13). 남은 것은 로컬 소켓 운반체와 chunk framing뿐이고, agent forwarding(§20)의 host 쪽 끝점이 쓴다.
+4. **heartbeat와 재등록은 없다.** 등록 연결 전용 watch 값(`[recovery].reverse_min_dead_after_ms`, `reverse_strikes`)은 config가 파싱만 하고 쓰지 않는다. `stale` 표시와 target의 재dial backoff도 없다. 정방향 attach의 사망 감지와 재연결은 §10이 정본이다. 닫힘 코드 `0x1004`(`CLOSE_CODE_PATH_DEAD`)는 그 정방향 감시가 쓰는 값으로 남는다.
 
-3. 이후 controller에서 `qsh <name>`(신규 세션)이나 `qsh attach <name>/<session_id>`(재attach) 등을 실행하면, CLI 프로세스는 상주 `qsh listen` 데몬과 **local unix socket IPC**(`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 0600, package `qsh.local.v1`)로 통신한다. §5와 같은 frame codec(`qsh_proto::frame`, u32-BE + prost)을 `tokio::net::UnixStream` 위에서 재사용하되, wire(`qsh.wire.v1`)와는 별도 `.proto` 파일·별도 package다.
+### 로컬 소켓의 raw 구간 chunk framing (Windows)
 
-   **conduit 모델.** UDS 연결 하나가 논리 스트림(conduit) 하나이고, 첫 frame `LocalHello{version, kind, host, wait_ms}`가 그 정체를 정한다.
-   - `LOCAL_CONTROL`: 그 host의 control 세션. 이후 QUIC 위와 **완전히 같은** `ControlMessage`/`Response`가 흐른다.
-   - `LOCAL_STREAM`: 다음 frame이 wire `StreamHeader`인 data 스트림.
-   - `LOCAL_ADMIN`: 데몬 자신에 대한 조회(`LocalHostList` 등).
-
-   **`LocalHelloAck`.** `LOCAL_CONTROL`/`LOCAL_STREAM`에서 데몬은 `LocalHelloAck{host, peer_fingerprint, generation, capabilities}`로 응답한다. 두 kind 모두 `LocalHello.host`가 가리키는 구체적 등록 host가 있고 ack의 모든 필드가 그 host에 관한 값이기 때문이다. `peer_fingerprint`는 CLI 프로세스가 스스로 알 수 없는 peer SPKI fingerprint(CLI는 TLS endpoint가 아니다)를 돌려줘서, `Ops`가 ADR-0007의 fail-closed peer-mismatch 검사를 역방향에서도 수행하게 한다.
-
-   **`LOCAL_ADMIN`은 이 ack를 받지 않는다.** 이 kind에서 `LocalHello.host`는 무시되고, ack의 네 필드는 모두 특정 host 하나를 전제하므로 채울 대상이 없다. 대신 데몬은 `LocalHello` 바로 뒤에 오는 구체적 요청(`LocalHostList` 등)까지 한 번에 읽고, 그 요청 하나에 `LocalResponse` 하나만 돌려준다. 예: `LocalHello{kind=LOCAL_ADMIN} + LocalHostList{}` → 정확히 하나의 `LocalResponse{host_list_result: LocalHostListResult{...}}`(`crates/qsh-proto/proto/qsh/local/v1.proto` 머리말도 이 구분을 명시한다).
-
-   **request_id 재매핑.** `LOCAL_CONTROL` conduit 위의 `ControlMessage.request_id`는 CLI 프로세스가 로컬에서 채번한 값이다. 여러 CLI 프로세스가 같은 QUIC connection을 공유해 채번 공간이 겹칠 수 있으므로, 데몬은 이를 역방향 QUIC connection 위에서 실제로 보내는 `request_id`(`daemon_request_id`)로 재매핑해 상관시킨다.
-
-   **다중화 규칙**(`crates/qsh-core/src/localctl/mux.rs`가 이 표의 순수 상태 기계를 구현한다).
-   - conduit마다 in-flight 항목은 최대 `MAX_INFLIGHT_PER_CONDUIT`(64)개다. `crate::server::MAX_INFLIGHT_REQUESTS_PER_CONN`과 같은 크기이지만 다른 것을 세는 독립 상수다. 초과분은 QUIC 연결에 얹지 않고 데몬이 그 자리에서 `RESOURCE_EXHAUSTED`로 답하며, 다른 conduit의 상한이나 전역 `daemon_request_id` 카운터에는 영향이 없다.
-   - `Response`가 도착하면 데몬은 `daemon_request_id`로 표를 조회해, 그것을 채번했던 conduit에게만 `peer_request_id`를 복원해 전달한다. 조회와 동시에 항목은 표에서 제거된다. 모든 삽입은 정확히 한 번 제거된다(응답 도착, conduit 사망, QUIC 연결 사망 중 한 경로로만).
-   - **비동기 event 라우팅:** `request_id = 0`인 `SessionEvent`는 그 `session_id`를 구독 중인 conduit에만 전달된다. 구독은 그 conduit이 `session.open`/`session.attach` 응답을 받은 시점에 성립한다. 모르거나 아무도 구독하지 않은 `session_id`의 event는 어느 conduit에도 가지 않고, 클라이언트도 낯선 `session_id`의 event는 방어적으로 무시한다. 유일한 예외는 `session.writer_changed`다. `docs/CLI.md` §6.4의 "모든 read 소비자에게 broadcast" 계약을 conduit 단위에서 만족시키려고, 구독 여부와 무관하게 그 host에 등록된 모든 control conduit에 전달한다.
-   - **Ping:** conduit이 보낸 `Ping`은 QUIC 연결에 얹지 않고 데몬이 즉시 로컬 `Pong`으로 답한다. liveness는 연결을 실제로 쥔 데몬의 몫이며 CLI로 새어 나가지 않는다.
-   - **conduit 사망:** UDS 연결이 죽으면 데몬은 그 conduit이 소유하던 in-flight 항목 전량과 event 구독을 표에서 즉시 제거한다(부분 정리 없음). 이 정리는 로컬 상태에 한정된다. 여러 conduit이 QUIC control 스트림 하나를 공유하므로, 이미 target에 전달된 요청 하나만 취소하는 wire 수단은 없다. target이 나중에 그 `daemon_request_id`로 응답하면 표에 항목이 없으므로 데몬은 조용히 버린다.
-   - **conduit 사망 뒤의 세션:** 세션 수명은 connection 수명과 분리된다(`docs/PRD.md`). 정방향에서 `session.open` 전송 후 `SessionOpened` 수신 전에 CLI가 죽어도 target에 살아 있는 세션이 남아 `session.list`로 조회되고 `session.close`로 닫을 수 있다. 역방향 relay도 같다. conduit이 죽은 뒤 도착한 `SessionOpened`는 버려지고, target이 만든 세션은 그대로 살아 있다. 데몬(relay)은 자기 판단으로 control 요청을 발신하지 않는다. 아무도 요청하지 않은 `session.close`를 controller principal 명의로 보내면 target이 그것을 그 principal의 실제 요청으로 감사하게 되기 때문이다.
-   - **long-poll 점유:** 위 wire 한계 때문에 `SessionRead`/`SessionClose` long-poll은, 죽은 conduit이 쥐고 있던 target 쪽 허용량이 자체 타임아웃(`crate::server::SESSION_READ_MAX_WAIT`)까지 점유된 채 남을 수 있다. 데몬은 이를 사후가 아니라 **사전에** 막는다. 이 hub가 한 번에 QUIC 연결에 얹는 long-poll 총량을(살아 있든 죽었든 모든 conduit 합산) target의 연결당 상한보다 훨씬 낮은 `MAX_INFLIGHT_LONG_POLL_PER_HUB`(16, `crates/qsh-core/src/reverse/listen/hub.rs`)로 고정한다.
-   - **QUIC 사망:** 역방향 QUIC 연결이 죽으면 그 host의 모든 conduit이 명확한 typed error로 함께 끝난다(host의 전체 conduit 집합에 위 전량 정리를 반복하는 것과 같다).
-
-   **peer credential과 인가.** 데몬은 accept한 UDS 연결의 발신 프로세스가 자신과 같은 로컬 사용자인지 `SO_PEERCRED`(Linux)/`getpeereid`(macOS)로 검사한다. **localctl은 인가 계층이 아니다.** 데몬이 살아 있는 역방향 연결 위로 `SessionOpen`/`SessionAttach`를 그대로 전달하면 target이 자기 ACL(`session.open` 등)을 controller principal에 대해 평가한다. **역방향 등록은 도달성만 부여하고 권한은 부여하지 않는다.**
-
-   **응답 envelope.** 데몬→클라이언트 방향의 모든 frame은 예외 없이 `LocalResponse{oneof body}` 하나다. `LocalHelloAck`/`LocalError`/`LocalHostListResult`가 필드 shape상 서로 구별되지 않아 필요하며, wire의 `Response{oneof body}`와 같은 이유다. 실패 응답은 `LocalError{code, message}`(`code`는 `docs/CLI.md` §3.3 어휘 그대로)다. `LocalHostList`의 성공 응답은 `LocalHostListResult{repeated LocalHost hosts}`이고, `LocalHost{name, address, state, fingerprint, capabilities, generation, registered_at}`는 데몬의 admin view다(JSON `Host`와는 별개 타입, `docs/CLI.md` §5).
-**터널 conduit.** 터널 data 스트림은 새 `LocalStreamKind`를 얻지 않는다. `LOCAL_STREAM`이 이미 "다음 frame이 wire `StreamHeader`인 data 스트림"이라는 뜻이므로, `StreamHeader{TCP_CONNECT, host, port}`와 `StreamHeader{TCP_ACCEPTED, forward_id}`는 `StreamHeader{SESSION_DATA, ticket}`과 **같은 `LOCAL_STREAM` conduit**을 탄다(§7의 `StreamKind` 판별로 충분하다).
-- **`-R`:** controller(client 역할)가 그 host에 `RemoteForwardOpen`을 보내면, target(host 역할)이 자기 loopback에 `listen_port`를 bind하고 accept마다 `StreamHeader{TCP_ACCEPTED, forward_id}`를 **target → controller** 방향으로 연다. `TCP_ACCEPTED`를 여는 쪽은 언제나 accept를 실제로 받은 쪽이므로(§7의 표, 대칭 원칙: 리소스를 쥔 쪽이 스트림을 연다) 정방향의 "attach하는 쪽이 연다"와 방향이 반대다. 그 스트림은 controller가 상주 `qsh listen` 데몬과 맺은 `LOCAL_STREAM` conduit으로 relay되어, controller의 CLI 프로세스가 쥔 로컬 `host:host_port`로 splice된다.
-- **`-L`:** controller가 `TCP_CONNECT` 스트림을 여는 쪽이다(§7의 표대로 "local listener 쪽"). 그 스트림은 controller의 `LOCAL_STREAM` conduit을 거쳐 데몬의 역방향 연결 위로 relay되고, target이 `ConnectResult`로 답한 뒤 raw byte splice가 이어진다. 정방향 `-L`과 같은 흐름에 conduit relay 한 단계가 더해진다.
-
-**`exec` conduit(issue #5).** `StreamHeader{EXEC_DATA, ticket}`도 새 `LocalStreamKind` 없이 같은 `LOCAL_STREAM` conduit을 탄다. `ExecStart`(control, `LOCAL_CONTROL`)가 발급한 ticket을 `LOCAL_STREAM` conduit이 `StreamHeader{EXEC_DATA, ticket}`으로 상환하는 흐름은 `session.open`의 `SESSION_DATA` 상환과 같다.
-
-**`JUMP` conduit (ADR-0056 결정 14).** `StreamHeader{JUMP, channel, host, port}`도 새 `LocalStreamKind` 없이 같은 `LOCAL_STREAM` conduit을 탄다. 데몬은 `ConnectResult` 정확히 하나를 먼저 쓰고(등록한 host의 것이거나 자신의 거절), 이어서 `u16` 길이 frame으로 안쪽 QUIC 패킷을 옮기며 등록 연결 쪽 운반체를 datagram과 스트림 가운데 고른다. 자세한 규칙은 §21.7.
-
-**raw 구간의 chunk framing (Windows).** conduit은 `LocalHello`·`LocalHelloAck`·`StreamHeader`·ack 같은 framed `qsh.local.v1` 메시지를 마친 뒤 raw byte 중계로 바뀐다(`SESSION_DATA`·`TCP_CONNECT`·`TCP_ACCEPTED`·`EXEC_DATA`·`FILE_DATA`). unix 소켓은 이 구간에서 쓰기 방향만 닫을 수 있어 바이트를 그대로 나르지만, Windows byte 모드 named pipe는 그럴 수 없다(ADR-0035 결정 14). 그래서 Windows는 raw 구간의 두 방향을 모두 chunk로 나른다.
-
+agent forwarding의 로컬 끝점은 unix에서 UDS, Windows에서 named pipe다(`crates/qsh-core/src/localctl/transport/`, ADR-0035 결정 14, ADR-0055). unix 소켓은 쓰기 방향만 닫을 수 있어 raw 구간의 바이트를 그대로 나르지만, Windows byte 모드 named pipe는 그럴 수 없다. 그래서 Windows는 raw 구간의 두 방향을 모두 chunk로 나른다.
 ```
 chunk := length (4바이트, big-endian u32) || length 바이트
 ```
 
 - 길이 `0`은 end chunk다. 쓰는 쪽이 자기 방향을 끝냈다는 뜻이고(half-close), 읽는 쪽은 end of stream을 보고하며 반대 방향은 계속 흐른다.
-- 길이 상한은 65536이다. 그보다 큰 길이는 프로토콜 오류이고 I/O 오류와 같은 abort로 conduit을 끊는다.
+- 길이 상한은 65536이다. 그보다 큰 길이는 프로토콜 오류이고 I/O 오류와 같은 abort로 연결을 끊는다.
 - end chunk 뒤에 오는 바이트도 프로토콜 오류다.
 - chunk 경계에서 end chunk 없이 스트림이 끝나면 소켓의 drop과 같은 평범한 EOF로 읽는다. chunk 헤더나 본문 중간에서 끝나면 `UnexpectedEof`다.
 - framed 구간과 그 마지막 메시지 뒤에 같이 읽혀 들어온 바이트(read-ahead)도 chunk 스트림의 시작이므로 같은 해석기로 푼다.
-- 데몬이 QUIC data 스트림을 열지 못했을 때 raw 구간으로 보내는 한 바이트 sentinel(`0x00`)도 chunk 하나로 감싼다. `EXEC_DATA`는 ack 전까지 framed 구간이라 그 시점의 sentinel은 감싸지 않는다.
 
-unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적용하지 않는다. Windows의 localctl은 이 변경 전에 배포된 적이 없어 버전 불일치가 없다. 구현은 `qsh-core`의 `localctl/chunked.rs`이고 두 OS에서 컴파일·시험된다. 접점은 `localctl/transport`의 `raw_reader`·`raw_writer`·`raw_bytes`·`shutdown_write`다.
-
-**UDS EOF는 QUIC stream reset으로 옮겨진다. clean close가 아니다.** `SESSION_DATA`/`TCP_CONNECT`/`TCP_ACCEPTED`는 순수 byte splice라서, 로컬 UDS 쪽이 정상 종료되면 QUIC stream도 정상 종료(FIN)로 닫아도 된다. 그러나 `EXEC_DATA`는 framed 프로토콜(`Stdin`/`StdinEof`/`Stdout`/`Stderr`/`ExecExit`, §7)이고 `StdinEof`가 이미 "이 방향은 끝"을 명시적으로 나른다. 그래서 로컬 UDS 쪽이 (exec 클라이언트 프로세스가 종료·drop·취소되어) EOF로 끝나면 데몬은 이를 clean close가 아니라 QUIC stream reset으로 옮긴다. stdin을 닫는 경우는 해당하지 않는다.
-
-이유는 `run_exec`(`crates/qsh-core/src/exec/mod.rs`)의 stdin 펌프에 있다. 그 루프는 읽기 *오류*만 "peer가 사라졌다" 신호로 보고 자식을 죽이고, 깨끗한 스트림 종료(`Ok(None)`)는 루프를 빠져나가는 무동작이라 아무도 자식을 죽이지 않는다. reset이 없으면 output 없는 명령이 exec 클라이언트가 사라진 뒤에도 host에 고아로 남는다(`local_stream_relay_kind`, `crates/qsh-core/src/localctl/daemon.rs`). 이 규칙은 로컬 UDS→QUIC 방향에만 적용된다. target이 보내는 `Stdout`/`Stderr`/`ExecExit`는 그대로 splice되고, `ExecExit`가 그 exec의 논리적 끝을 명시한다.
-
-**`forward_id` → conduit 등록표.** 위 다중화 규칙은 어느 conduit이 어느 `forward_id`의 `TCP_ACCEPTED`를 받을 자격이 있는지를 정하지 않는다. 그 등록표는 `ControlHub`(`crates/qsh-core/src/reverse/listen/hub.rs`)의 `forwards: HashMap<forward_id, ForwardRegistration>`이고, 소유 conduit(`owner`)과 claim seat(`seat`)을 **한 항목**으로 묶는다. 병행하는 두 map이면 한쪽만 갱신하는 편집이 가능해 실제로 구멍이 됐었다.
-
-*등록.*
-- 등록 시점은 그 `forward_id`가 존재하게 되는 순간이다. target의 `RemoteForwardOpened`가 도착해 `daemon_request_id`를 발신 conduit으로 되매핑하는 함수(`ControlHub::deliver_response`) 안에서, 같은 락 아래 등록한다. `forward_id`는 target이 발급하므로 응답 이전에는 존재하지 않아 더 일찍 등록할 방법이 없고, 등록은 되매핑이 방금 증명한 conduit에게만 귀속된다.
-- 같은 `forward_id`가 두 번째로 도착하면(target 버그 또는 적대적 target) 등록은 갱신되지 않고 경고 로그만 남긴 채 버려진다. 첫 등록이 최종이며, 소유권이 나중 도착으로 조용히 넘어가는 창을 열지 않는다.
-- 되돌아온 `forward_id`가 모양 검사(`qsh_proto::wire::valid_forward_id`)를 통과하지 못하면 등록 자체가 일어나지 않는다.
-
-*claim seat.* 등록(`owner`)은 `TCP_ACCEPTED`를 어느 conduit에 *배달*할지만 정한다. 같은 uid의 다른 conduit이 그 `forward_id`를 안다는 사실만으로 claim할 수 있어서는 안 되므로, 같은 `ForwardRegistration` 안에 `owner`와 별개로 claim seat(`ClaimSeat`)이 있다.
-- `token`은 opaque bytes다. 이 hub가 아니라 **요청자**(`crate::tunnel::remote::RemoteForwardAcceptor`)가 인스턴스당 한 번 mint해 `RemoteForwardOpen.claim_token`(§9)에 실어 보내고, target은 이 값을 들여다보거나 비교하지 않는다.
-- 요청자 쪽 `ControlHub`가 `send_request` 시점에 `daemon_request_id`로 토큰을 미리 붙잡아 두었다가, `deliver_response`가 `ForwardRegistration`을 등록하는 같은 락 안에서 seat도 앉힌다. `owner`와 seat이 원자적으로 함께 생기므로, 등록 직후 아직 아무도 claim하지 않은 순간에 같은 uid의 다른 conduit이 가로챌 창이 없다.
-- **빈 토큰은 영구히 claim 불가능이다.** `claim_token`이 비어 있으면 seat은 `ClaimSeat::seat`에 의해 즉시 "claim 불가능" 상태로 앉고, 이후 어떤 재등록으로도 다시 채워지지 않는다. hub가 토큰을 스스로 mint하지 않는 이유는, 되돌려줄 wire round trip이 없어 hub가 만든 토큰은 정당한 소유자를 잠글 뿐이기 때문이다. 등록(`forward_id`·`owner`)은 유지되어 예약·sweep·소유자의 close 대상이 되지만, 그 `forward_id`로 도착한 `TCP_ACCEPTED`는 큐에 들어가기 전에 거부된다. 부재/빈 capability는 통과가 아니라 거부다.
-- 이후 모든 claim 시도(claim이 끝난 뒤 같은 인스턴스의 재시도 포함)는 seat 값과 바이트가 같아야 하고, 다르거나 앉은 토큰이 없거나 비어 있으면 큐 조회 이전에 거부된다.
-- **비교는 arrival이 실제로 손을 바꾸는 매 순간 다시 이뤄진다.** claim이 arrival을 기다리며 파킹된 동안에도 그 `forward_id`는 재등록될 수 있다(소유 conduit이 닫고 새 `RemoteForwardOpen`을 여는 경우 등, seat이 다른 토큰으로 갈릴 수 있다). 그래서 데몬은 진입 시점에 한 번만 비교하지 않고, 큐에서 arrival을 꺼내기 직전 잠금을 쥔 채 그 순간의 seat에 대해 다시 비교하여 통과해야만 넘긴다. 진입 시점 검사 하나만으로는 파킹 도중 재등록된 새 소유자의 arrival이 옛 claimant에게 새어 나갈 수 있다(check-then-use).
-
-*소멸.* 데이터-플레인 경로는 둘뿐이다.
-- 등록한 conduit이 죽으면(`ControlHub::unregister_conduit`) 그 conduit이 소유한 등록 전량이 즉시 표에서 제거되고, 그 순간 대기 중이던 `TCP_ACCEPTED` 큐(`tunnel_queue`)의 항목 전부가 내부 코드 `0x200A`로 reset된다. peer가 알 필요는 "이 `forward_id`는 더 이상 유효하지 않다" 하나뿐이라 wire 계약이 아니다(§7의 `0x2007`과 같은 성격).
-- `RemoteForwardClose`가 성공(빈 `Response`)으로 답하면 같은 함수 안에서 같은 teardown이 일어난다.
-- **close도 소유 conduit만 할 수 있다.** outbound(CLI가 보낸 `RfwdClose`)는 그 `forward_id`가 다른 conduit 소유면 target에 아무것도 보내지 않고(`daemon_request_id`를 만들기도 전에 걸러진다) 그 CLI에게만 즉시 `PERMISSION_DENIED`를 돌려준다. inbound(target이 보낸 `RemoteForwardClose`의 성공 `Response`)는 되매핑된 conduit이 `owner`와 다르면 등록도 큐도 그대로 두고 `Response`만 그 conduit에게 평범하게 전달한다(owner의 이후 close나 owner conduit의 사망만이 이 상태를 바꾼다). target이 보는 것은 연결 하나뿐이라 그 위의 두 CLI conduit을 구별할 수 없고, 구별은 데몬만 할 수 있기 때문이다.
-
-*세 번째 경로: `LOCAL_ADMIN` `tunnel.close`.* `qsh tunnel close <id>`를 위해 `ControlHub::admin_close_forward`가 소유 conduit 비교 없이 등록을 지우고 큐를 비운 뒤 target에 `RemoteForwardClose`를 보낸다. 이는 위 owner-conduit 게이트의 우회가 아니라 **다른 축의 인가**다.
-- 위 게이트가 지키는 것은 "target이 구별 못 하는 두 conduit 중 누가 진짜 소유자인가"(데이터-플레인, target 신뢰 없음)다.
-- `admin_close_forward`가 서는 지점은 그 축과 무관한 **로컬 머신 신뢰 경계**, 즉 UDS accept 시점에 이미 검사한 same-uid peer credential이다(§11-3 앞부분, [architecture.md](architecture.md) §3).
-- `docs/CLI.md` §2.5의 `tunnel.close`/`tunnel.list` 행이 "해당 tunnel의 소유 **peer**이면 허용"이라 쓰는 것도 이 축이다. 그 peer를 대신해 요청하는 프로세스가 tunnel을 연 바로 그 프로세스일 필요는 없다. `qsh tunnel close <id>`가 `--host` 없이 새 프로세스로 실행되는 것이 그 증거다(`docs/CLI.md` §6.9 사용 예).
-- `forward_id`는 target이 발급하므로 한 hub 안에서만 유일하다. `tunnel.close`가 여러 등록 host의 hub를 동시에 뒤질 때 같은 id가 둘 이상의 hub에서 매치되면 무엇을 닫을지 정할 수 없다. 이때 `tunnel_close_target`(`crates/qsh-core/src/reverse/listen/hub.rs`)은 아무것도 닫지 않고 `closed: false`로 답한다(fail-closed, `CLAUDE.md`의 ambiguous-state 기본값과 같다).
-
-*hub 상한.*
-- **터널 스트림 총량:** 한 hub가 동시에 물고 있는 터널 스트림은 `MAX_TUNNEL_STREAMS_PER_HUB`(64, `Semaphore`)로 묶인다. accept된 순간(`TCP_ACCEPTED`) 또는 `open_bi` 직전(`TCP_CONNECT`)부터 splice가 끝날 때까지 보유되므로, 아직 아무도 claim하지 않은 큐잉 backlog도 이 상한을 소비한다. claim을 게을리하는 CLI 하나가 같은 hub의 다른 host/CLI conduit을 굶기지 못한다. 상한 초과로 도착한 `TCP_ACCEPTED`는 큐에 들어가기 전에 내부 코드 `0x200B`로 거부된다(CLI 쪽에서 같은 상한에 걸린 `TCP_CONNECT`는 `RESOURCE_EXHAUSTED`, `docs/CLI.md` §3.3).
-- **큐잉된 arrival의 수명:** 큐는 claim 성공·소유 conduit 사망·소유자의 close로만 비워졌으므로, 느리거나 굶주린 claimant의 backlog가 hub permit과 살아 있는 QUIC 스트림을 무한정 붙잡을 수 있었다. 그래서 큐에 들어간 arrival이 `MAX_QUEUED_TUNNEL_ARRIVAL_AGE`(30초)를 넘겨 claim되지 않으면 hub의 주기적 sweep이 내부 코드 `0x200C`로 reset하고 permit을 pool에 돌려준다. 맨 드롭하지 않는 이유는 §7의 splice 규율과 같다. 맨 드롭은 스트림을 정상 종료로 닫아, 아무도 splice하지 않은 연결을 target에게 "정상적으로 끝났다"고 보고한다. 등록 자체는 건드리지 않으므로 backlog가 만료된 `-R`도 여전히 claim 가능한 forward다. 30초는 정상 claimant의 소비 속도보다 몇 자릿수 위다. 등록된 `-R`의 claim loop은 항상 하나를 파킹해 두고 돌아오는 즉시 재무장하므로 보통 1밀리초 안에 claim되고, 모든 claim이 거부돼 200ms 백오프로 재시도되는 최악에도 상한만큼의 backlog가 13초 안에 빠진다.
-- **parked-claim 상한:** claim이 arrival을 기다리며 파킹돼 있는 것 자체는 QUIC 자원을 쥐지 않는다. 그러나 그 파킹은 daemon 전역 `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`(256) permit을 `wait_ms` 예산이 끝날 때까지(최악 `LOCAL_WAIT_MAX` 60초) 붙들고 있어, 한 CLI가 오래 기다리는 claim을 여러 개 열면 daemon 전체 pool을 혼자 소진할 수 있다. 그래서 hub마다 별도 pool(`claim_permits`, `MAX_PARKED_CLAIMS_PER_HUB` = 32)이 있고, 데몬은 `hub.claim_tcp_accepted`를 부르기 **전에** 이 permit을 얻어야 한다. 못 얻으면 파킹이 시작되지 않고 `LocalResponse{error: RESOURCE_EXHAUSTED}`가 즉시 돌아온다(아래 claim leg).
-- **parked-claim pool은 conduit별로 나뉜다.** 상한만으로는 공격은 막아도 정상 동작은 못 막는다. 건강한 `-R`의 정상 상태가 permit을 쥔 채 파킹해 있는 것이라, reverse forward를 32개 띄운 CLI 하나가 그 host의 permit 전부를 영구히 쥐고 다른 모든 CLI의 `-R` claim을 막게 된다. 그래서 permit은 그 `forward_id`를 등록한 conduit(=CLI 프로세스)별로 `MAX_PARKED_CLAIMS_PER_CONDUIT`(8, pool의 1/4)까지만 나간다. 이 귀속은 **공정성 회계일 뿐 인가가 아니다.** 누가 arrival을 받을 자격이 있는지는 위 seat 비교 하나뿐이고, 잘못된 토큰을 낸 claim은 await 이전에 거부되어 permit을 즉시 놓으므로 남의 몫을 지속적으로 점유할 수 없다.
-
-데몬은 이 relay 어디에서도 payload를 파싱하거나 로그하지 않는다. 등록표·큐가 들고 있는 것은 `forward_id`·conduit id·스트림 핸들뿐이다.
-
-**`TCP_ACCEPTED` claim leg의 요청/응답.** 위 등록표를 소비하는 쪽, 즉 controller의 CLI 프로세스가 데몬과 주고받는 순서다.
-
-*CLI가 여는 것.* `LOCAL_STREAM` conduit 하나(`LocalHello{version, kind=LOCAL_STREAM, host, wait_ms}`) → `LocalHelloAck` → 다음 frame으로 `StreamHeader{TCP_ACCEPTED, ticket}`.
-- `ticket = forward_id ++ 0x00 ++ claim_token`이다. `forward_id`의 문자셋(`[A-Za-z0-9_-]`)에 NUL이 없으므로 첫 NUL로 잘라 무모호하게 분리된다. `crate::tunnel::remote::claim_ticket`이 이 shape를 만드는 유일한 지점이라 양쪽이 어긋날 수 없다.
-- 여기까지는 `SESSION_DATA`/`TCP_CONNECT`와 같다. `wait_ms`는 데몬이 그 `forward_id`의 arrival을 기다려 주기를 바라는 예산이며 `clamp_wait`로 `LOCAL_WAIT_MAX`까지 잘린다.
-
-*데몬이 답하는 것.* 이 header에 대해서는 raw byte가 한 바이트라도 흐르기 전에 **반드시 정확히 하나의 `LocalResponse` frame**이 먼저 간다.
-- **성공:** `LocalResponse{claim_granted: LocalClaimGranted{}}`이고, 그 frame의 마지막 byte 다음부터가 claim된 `TCP_ACCEPTED` 스트림의 raw payload다. 메시지가 비어 있는 것은 의도다. CLI는 자기가 어느 `forward_id`를 claim했는지 이미 알고, 데몬은 payload에 관해 아무것도 모른다.
-- **실패:** 기존 `LocalResponse{error: LocalError{code, message}}` 경로이며 code는 다음과 같이 갈린다.
-  - `INVALID_ARGUMENT`: `ticket`에 NUL 구분자가 없거나, 앞부분이 UTF-8이 아니거나, `valid_forward_id` 모양 검사에 걸릴 때. 등록표 조회 이전에 걸러진다. header 자체가 relayable한 네 `StreamKind`(`SESSION_DATA`/`EXEC_DATA`/`TCP_CONNECT`/`TCP_ACCEPTED`) 중 어느 것도 아니거나 data frame 상한을 넘을 때도 같다.
-  - `TIMEOUT`: 이 hub가 그 `forward_id`를 등록한 적이 없을 때, 등록은 있으나 제시한 `claim_token`이 seat 값과 다를 때(소유하지 않은 conduit의 claim), `wait_ms`가 끝나도록 arrival이 없을 때. 셋은 구별되지 않는다(CLI가 구별할 수 없어야 하는 이유는 위 등록표 항목).
-  - `RESOURCE_EXHAUSTED`: 데몬의 `LOCAL_STREAM` conduit 슬롯이 가득 찬 경우(header를 읽기도 전인 `LocalHello` 단계), 또는 header는 읽었으나 parked-claim permit을 얻지 못한 경우. 후자는 hub의 `MAX_PARKED_CLAIMS_PER_HUB`가 찼든 그 `forward_id`를 등록한 conduit이 자기 몫(`MAX_PARKED_CLAIMS_PER_CONDUIT`)을 다 썼든 파킹을 시작하지 않고 그 자리에서 돌려주며, 두 이유는 CLI에게 같은 code·같은 message로 보인다.
-  - `MAX_TUNNEL_STREAMS_PER_HUB` 상한은 이 leg에서 별도 code를 만들지 않는다. 그 permit은 arrival과 함께 이동하고, 상한 초과는 arrival이 큐에 들어가기 전에 `0x200B`로 거부되므로 claim하는 CLI에게는 "아무것도 오지 않았다"와 구별되지 않는 `TIMEOUT`으로 보인다.
-
-*침묵은 응답이 아니다.* 성공도 timeout도 명시적 frame이므로 CLI의 reader는 `StreamHeader`를 보낸 뒤 frame을 정확히 **하나** 읽고, 그 하나로 성공/실패를 판정한 다음 그 자리에서 raw 모드로 전환한다. 그 frame과 같은 `read()`에 실려 온 raw 잔여 byte는 `FrameDecoder::take_remaining`으로 **순서 그대로** 회수되어 splice의 맨 앞에 붙는다. 버려지지도 뒤로 밀리지도 않는다. CLI는 byte 내용으로 "이것이 frame인가 payload인가"를 판정하지 않는다. 어떤 byte 열이든 length prefix로 읽힐 수 있어 그 판정은 원리적으로 결정 불가능하고, 틀리면 살아 있는 연결을 죽이거나 터널 byte를 재배열한다. 마찬가지로 "아무것도 오지 않음"을 성공으로 읽지 않는다. 조용한 성공과 느린 실패는 구별되지 않기 때문이다.
-
-**`EXEC_DATA` ack leg(issue #5).** `TCP_ACCEPTED` claim leg와 나란히 서는 `EXEC_DATA`만의 ack-before-splice 규율이다. `LocalHello{kind=LOCAL_STREAM}` → `LocalHelloAck` → `StreamHeader{EXEC_DATA, ticket}`까지는 같고, 그 뒤가 갈린다.
-
-1. header의 모양이 틀렸거나(위 네 `StreamKind` 중 하나가 아니거나 data frame 상한을 넘음) conduit의 `LOCAL_STREAM` 슬롯이 가득 찬 경우에는 아직 conduit이 framed `qsh.local.v1`를 말하는 중이다. 그래서 `TCP_ACCEPTED`와 마찬가지로 framed `LocalResponse{error: LocalError{code, message}}`(`INVALID_ARGUMENT` 또는 `RESOURCE_EXHAUSTED`)로 답한다. 이 시점까지 QUIC 쪽에는 아무것도 열리지 않았다.
-2. header 검증을 통과하면 `LocalConduit::into_raw`가 conduit의 framing 능력을 거둬 가고(이후 이 conduit은 framed 메시지를 말할 수 없다), 그다음에야 `conn.open_bi()`를 시도한다.
-3. `open_bi`가 실패하거나 `OPEN_DATA_STREAM_TIMEOUT`(10초) 안에 끝나지 않으면, CLI는 handshake가 성공했다고 믿고 `LocalResponse` frame을 기다리지만 데몬은 더는 그것을 보낼 수 없다. 대신 raw sentinel byte 한 개(`[0]`)를 UDS에 쓰고 스트림을 끝낸다. CLI에서 이 byte는 정상 frame으로 decode되지 않으므로 truncated-frame 오류(`ConnectionFailed`)로 관측되고 `LocalError`로는 도달하지 않는다.
-4. `open_bi`가 성공한 뒤에만 데몬은 raw byte splice를 시작하기 직전에 `LocalResponse{claim_granted: LocalClaimGranted{}}` ack을 (여전히 raw로, `encode_local`을 직접 호출해) 쓴다. `TCP_ACCEPTED`의 claim ack과 같은 모양이지만 뜻은 claim 성공이 아니라 "이 exec의 QUIC data stream이 방금 열렸다"이다.
-
-이 순서(ack은 `open_bi` 성공 **후에만**) 덕분에 CLI는 세 결과를 구별한다. framed `LocalError`(header 자체가 거부됨), raw sentinel byte(header는 통과했으나 QUIC stream을 못 엶), `LocalClaimGranted` ack 뒤의 raw splice(정상 진행).
-
-`EXEC_DATA`를 모르는 옛 `qsh listen` 데몬(issue #5 이전)은 이 header를 옛 세 갈래 판정에서 걸러 framed `INVALID_ARGUMENT`로 거부한다. 이 조합은 그 자체로 진단적이라, CLI(`map_local_stream_open_error`, `crate::client`)는 이를 "이 머신의 상주 `qsh listen`이 issue #5 이전 빌드"라는 구체적 메시지로 재작성한다.
-
-4. **heartbeat의 정체:** 신규 wire 메시지는 없다.
-   - 연결 유지는 §2의 keep-alive(기본 15s)이고, 사망 **감지**는 §10 "Path 사망 감지"와 같은 control 스트림 `Ping`/`Pong` probe다. 두 cadence·RTT 비례 deadline·strike 판정을 양쪽 role에서 재사용한다. 인증된 QUIC frame의 수신은 `Pong`과 같은 응답으로 세고, 수신된 UDP datagram은 생존이 아니라 한 번의 유예를 받는 힌트다. target과 controller 양쪽의 watch가 같은 `watch_path` 경로를 지나므로 둘 다 적용된다.
-   - **등록 연결의 기본값:** attach의 기본(`min_dead_after` 1초, `P×S+D` 1750ms)과 따로 `min_dead_after` 4250ms, `strikes` 3, cadence 250ms를 쓴다(`P×S+D` 5000ms, ADR-0041). 등록이 끊기면 그 위의 역방향 터널이 재생 없이 모두 끝나고 기다리는 사람이 없기 때문이다. 4250ms는 이슈 #10이 잰 최장 업링크 손실 구간 3.6초에 tick 하나와 여유를 더한 값이다.
-   - 각 프로세스가 자기 `config.toml`의 `[recovery]`를 읽고(`reverse_min_dead_after_ms`·`reverse_strikes`가 이 연결에만 적용된다) target과 controller는 따로 조정되므로, 양 끝을 같이 올려야 효과가 있다. 진짜로 죽은 등록이 `stale`로 표시되고 target이 재dial하기까지는 attach 기본보다 약 3.25초 늦다.
-   - 이 4.25~4.5초는 등록이 쓰이는 구간(control 활동이나 터널 바이트가 15초 안에 있었다)의 값이다. 15초 넘게 아무것도 나르지 않은 등록은 idle beat(5초)로 probe가 나가 `(S+1)×5초`, 기본 20초 안팎에 판정이 선다(ADR-0041 결정 8). control 스트림이 막혀도 터널 스트림 데이터나 ACK가 담긴 인증된 frame이 도착하는 등록은 죽은 것으로 판정되지 않는다.
-   - **stale과 재등록:** 연결이 죽으면 controller는 host 목록에서 `state: "stale"`로 표시했다가 `[listen].stale_retention`(기본 120s, `stale_retention > backoff_max_ms × 3`이어야 하며 target의 `backoff_max_ms` 기본 30000ms보다 확실히 크다) 후 제거한다. target은 사망 판정 후 `Hello.reverse`를 재전송해 재등록한다. target의 세션들은 재등록과 무관하게 유지되고 §10으로 resume된다.
-   - **target의 재dial backoff:** 지수 backoff + jitter로 무한 재시도한다(`backoff_initial_ms` 기본 500 → 배수 2 → `backoff_max_ms` 기본 30000, 등록 성공 시 초기값으로 리셋).
-     - 60초가 못 되어 끝난 등록이 연속되면 두 번째 유실부터 그 뒤 첫 재dial의 지연이 유실마다 두 배가 되어 `max(backoff_initial_ms, 8000)`ms에서 멈춘다(`backoff_max_ms`가 작으면 그 값). 60초 넘게 산 등록이 끝나거나 wake가 오면 연속 횟수는 0으로 돌아가고, dial 실패가 이어질 때의 지수 backoff는 이와 별개다(ADR-0042 결정 2).
-     - 절전 복귀(wake, ADR-0023 결정 17)를 감지하면 초기값으로 되돌리고 진행 중인 대기를 끊어 즉시 재dial하며, 이후 60초 동안은 지연에 `max(backoff_initial_ms, 2000)`ms 상한을 둔다. `backoff_max_ms`가 그보다 작으면 그 값이 이긴다.
-
-   **역방향에서의 §10 Reattach 매핑:** 재dial의 주체는 항상 **target**(host role)이지 controller가 아니다 — controller는 target이 새 연결을 세우기를 기다릴 뿐 자신은 아무것도 dial하지 않는다. controller 측 attach driver(§10의 재dial+redemption task에 대응하는 위치)는 registry에서 그 host의 새 `generation` 등록을 기다렸다가, 등록이 관측되면 §10 절차의 2단계(`SessionAttach{session_id, resume_token, last_output_seq}`)부터 그 새 연결 위에서 수행한다 — §10의 1단계("새 QUIC 연결")는 target이 이미 수행했으므로 controller가 이 leg에서 반복하지 않는다. **migration(`Endpoint::rebind()`)은 이 leg에 존재하지 않는다** — target의 재dial 자체가 유일한 복구 경로다.
+구현은 `qsh-core`의 `localctl/chunked.rs`이고 두 OS에서 컴파일·시험된다. 접점은 `localctl/transport`의 `raw_reader`·`raw_writer`·`raw_bytes`·`shutdown_write`다. unix는 raw 구간을 바이트 그대로 나르고 이 chunk 규칙을 적용하지 않는다.
 
 ## 12. 우선순위와 backpressure
 
@@ -589,10 +470,10 @@ unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **21종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9), `parse_ssh_bootstrap_line`(10)이 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **26종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9), `parse_ssh_bootstrap_line`(10)이 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
 
 1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
-2. **wire·local 메시지 decode 8종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로), `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`, localctl UDS 첫 두 메시지). 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
+2. **wire 메시지 decode 6종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로). 옛 `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`)는 ADR-0068로 걷혔다. 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
 3. **로컬 입력 파서·검증기 6종** — `valid_host_name`, `valid_forward_id`, `parse_invite_code`, `parse_forward_spec`, `sanitize_peer_text`, `fingerprint_principal`. 신뢰 불가 peer bytes가 아니라 CLI 인자·trust store·화면 표시 문자열처럼 로컬 기원 입력이지만, `qsh-proto`의 sans-IO 파서 표면에 같이 있어 같은 취급을 받는다(각 타깃 파일 머리 주석에 근거).
 4. **JSON 계약 표면 1종** — `json_request_types`. `serde_json::from_slice`로 `qsh_proto::types::*Req`(에이전트가 `--json`으로 주는 요청 타입)를 흔든다.
 5. **proptest 모델 테스트** — ACL `decide`를 naive coverage 오라클과 대조(`crates/qsh-core/src/acl/policy.rs`), ring buffer를 naive Vec 오라클과 대조(임의 append/attach/evict 후 replay·gap 정확성, `crates/qsh-core/src/broker/ring.rs`), reverse registry의 `generation` 단조성(`crates/qsh-core/src/reverse/registry.rs`), reverse target의 backoff 단조성(`crates/qsh-core/src/reverse/target.rs`), localctl mux의 request-id 교차 부재(`crates/qsh-core/src/localctl/mux.rs`).
@@ -616,7 +497,7 @@ unix는 raw 구간을 바이트 그대로 나르고 이 절의 어떤 것도 적
 
 **13. `jump_frames`(ADR-0056 결정 4·8, §21).** 첫 입력 바이트가 청크 크기(1~64)를 고르고, 나머지 바이트를 `JumpStreamDecoder`에 그 크기로 나눠 먹인다. 단언: panic 없음, 돌려준 패킷은 1 이상 `JUMP_PACKET_MAX` 이하이고 다시 부호화하면 소비한 바이트와 같다, 오류(길이 0, 상한 초과)는 유지되고 버퍼를 비운다, 청크 경계는 패킷과 오류를 바꾸지 않는다. 입력 전체와 각 패킷에 대해 short header는 `read_long_header`가 `None`이고, `is_v1_initial_shaped`가 참이면 version 1의 long header이고 길이가 1200~1452이며, `answers_gate`는 DCID가 주어진 SCID와 같을 때만 참이다.
 
-corpus는 `fuzz/corpus/`에 체크인한다. **21종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+corpus는 `fuzz/corpus/`에 체크인한다. **26종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 20종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. transport 중립 제약
 
@@ -633,7 +514,7 @@ ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지�
 
 ### 15.1 TLS 게이트 — 세 번째 accept 경로
 
-§3의 `QshPeerVerifier`는 기존 두 경로(pin, private CA 체인) 중 어느 쪽도 통과하지 못한 leaf 인증서를 무조건 거부한다. 페어링은 정의상 서로 한 번도 본 적 없는 상대를 다루므로, 이 거부 앞에 세 번째 경로를 하나 더 둔다: `TrustEvaluator::pairing_open(&self) -> bool`(기본 구현은 `false`)이 `true`를 답하는 동안에만, pin도 CA도 통과하지 못한 leaf가 principal `Pairing`/auth path `Pairing`으로 허용된다. `SharedTrustStore::pairing_open()`은 살아 있는(= `INVITE_RETENTION`, 20분 이내의) invite 레코드가 하나라도 있으면 `true`다 — invite가 하나도 없거나 전부 그 창을 넘기면 즉시 원래의 두-경로 전용 거부로 돌아간다. 단독 `qsh listen`과 `qsh serve --to`(구 표기 `qsh reverse`)는 이 evaluator를 attach하지 않으므로(§15.8) 이 세 번째 경로 자체가 존재하지 않는다. 합친 모드(`[listen].serve`, §11)의 `qsh listen`은 인바운드 `qsh serve`처럼 bind 전에 evaluator를 attach하므로 같은 포트에서 이 경로가 열린다. 창구는 살아 있는 invite가 있을 때만 받고 §15의 통제를 그대로 진다(ADR-0059 결정 16).
+§3의 `QshPeerVerifier`는 기존 두 경로(pin, private CA 체인) 중 어느 쪽도 통과하지 못한 leaf 인증서를 무조건 거부한다. 페어링은 정의상 서로 한 번도 본 적 없는 상대를 다루므로, 이 거부 앞에 세 번째 경로를 하나 더 둔다: `TrustEvaluator::pairing_open(&self) -> bool`(기본 구현은 `false`)이 `true`를 답하는 동안에만, pin도 CA도 통과하지 못한 leaf가 principal `Pairing`/auth path `Pairing`으로 허용된다. `SharedTrustStore::pairing_open()`은 살아 있는(= `INVITE_RETENTION`, 20분 이내의) invite 레코드가 하나라도 있으면 `true`다 — invite가 하나도 없거나 전부 그 창을 넘기면 즉시 원래의 두-경로 전용 거부로 돌아간다. `qsh serve`는 bind 전에 evaluator를 attach하므로 같은 포트에서 이 경로가 열린다. 옛 단독 `qsh listen`·`qsh serve --to`와 합친 모드의 `qsh listen`(ADR-0059)은 ADR-0068로 은퇴했다. 창구는 살아 있는 invite가 있을 때만 받고 §15의 통제를 그대로 진다(ADR-0059 결정 16).
 
 이 게이트는 **누가 pin됐는지**는 전혀 묻지 않는다 — "지금 이 host에 살아 있는 invite가 있는가"만 묻는다. 실제 인증(이 연결이 그 invite의 secret을 정말로 아는가)은 TLS 계층이 아니라 §15.3의 control-stream 교환이 담당한다.
 
@@ -708,7 +589,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 ### 15.8 범위
 
-이 절은 forward-host 페어링만 다룬다. forward host는 인바운드 `qsh serve`와, `[listen].serve`를 켠 합친 `qsh listen`(ADR-0059 결정 16)이다. 단독 `qsh listen`과 `qsh serve --to`(구 표기 `qsh reverse`)(역방향 conduit)는 이 evaluator를 attach하지 않으므로 페어링 대상이 아니다 — reverse target은 애초에 자신의 accept loop을 돌리지 않고 controller에 dial해 들어가는 쪽이라, 이 절의 TLS 게이트(§15.1)에 도달할 경로 자체가 없다.
+이 절은 forward-host 페어링만 다룬다. forward host는 인바운드 `qsh serve`다(옛 합친 `qsh listen`, ADR-0059 결정 16은 ADR-0068로 은퇴). `qsh listen`과 `qsh serve --to`(구 표기 `qsh reverse`)는 v0.9.0에서 걷혔다(ADR-0068, `UNSUPPORTED`, `details.reason = "reverse_retired"`). 합친 `qsh listen`도 같이 없어져 지금 forward host는 `qsh serve`뿐이다.
 
 ### 15.9 Fuzzing
 
@@ -762,10 +643,10 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 아래는 freeze가 명시적으로 선을 그은 것들이다 — wire freeze의 additive-only 규율(§16.4)이 적용되지 않는다.
 
-- **`qsh.local.v1`**(localctl UDS). `crates/qsh-proto/proto/qsh/local/v1.proto` 머리말이 이유를 직접 적고 있다. wire freeze가 얼리는 것은 네트워크를 건너 두 peer 사이를 오가는 원격 계약 `qsh.wire.v1`뿐이고, 이 파일의 메시지는 전부 한 머신 안, same-uid만 열 수 있는 소켓 위에서만 오간다. 별도 버전 축(`LOCAL_HELLO_VERSION = 2`, `crates/qsh-proto/src/local.rs`)을 쓴다.
+- **`qsh.local.v1`**(옛 localctl UDS, 은퇴). ADR-0068로 `.proto`와 `local.rs`가 지워졌다. 아래는 그 계약이 동결 밖이었던 이유의 기록이다. `qsh-proto/proto/qsh/local/v1.proto` 머리말이 이유를 적고 있었다. wire freeze가 얼리는 것은 네트워크를 건너 두 peer 사이를 오가는 원격 계약 `qsh.wire.v1`뿐이고, 이 파일의 메시지는 전부 한 머신 안, same-uid만 열 수 있는 소켓 위에서만 오간다. 별도 버전 축(`LOCAL_HELLO_VERSION = 2`, `crates/qsh-proto/src/local.rs`)을 쓴다.
 - **`qsh.event/v1` JSON 봉투**(`crates/qsh-proto/src/event.rs`의 `EVENT_SCHEMA`, `KNOWN_EVENT_TYPES` 5종). wire의 `SessionEvent`(태그 60)와는 다른 표면이고, `docs/CLI.md` §10이 이미 자기 additive-only 규율을 갖는다 — 대조는 §16.6.
 - **`ForwardSpec`/`ForwardDirection`**(`crates/qsh-proto/src/wire.rs`의 `ForwardSpec`·`ForwardDirection`). `-L`/`-R` CLI 인자를 로컬에서 파싱한 결과 타입이지 wire에 실리는 값이 아니다 — `.proto` 전체에 이 이름의 message도 field도 없다. `parse_forward_spec`이 §13의 fuzz 타깃인 것은 신뢰 불가 **로컬** 입력 파서이기 때문이지, wire 표면이기 때문이 아니다.
-- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200E`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs`(`CLOSE_CODE_UNVERIFIED_PEER`·`CLOSE_CODE_PROTOCOL`·`CLOSE_CODE_TRUST_WITHDRAWN`·`CLOSE_CODE_NOT_ADOPTED`)·`crates/qsh-core/src/server/mod.rs`(`CLOSE_CODE_RESOURCE_EXHAUSTED`)·`crates/qsh-core/src/reverse/listen.rs`(`CLOSE_CODE_REPLACED`·`CLOSE_CODE_PATH_DEAD`)·`crates/qsh-core/src/reverse/target/mod.rs`이고, RESET 대역(`0x200x`)의 근거는 §7이다. `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 연결을 보증하지 않아 닫을 때 쓰는 값이다(ADR-0031 결정 7). `0x1006`(`CLOSE_CODE_NOT_ADOPTED`, `crates/qsh-transport/src/endpoint.rs`)은 펀칭 경주에서 채택되지 않고 이미 선 연결을 닫을 때 쓰는 값이고 reason은 고정 문자열 `not adopted`다(ADR-0054 결정 15, §19.6). 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
+- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200E`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs`(`CLOSE_CODE_UNVERIFIED_PEER`·`CLOSE_CODE_PROTOCOL`·`CLOSE_CODE_TRUST_WITHDRAWN`·`CLOSE_CODE_NOT_ADOPTED`)·`crates/qsh-core/src/server/mod.rs`(`CLOSE_CODE_RESOURCE_EXHAUSTED`)·`crates/qsh-core/src/reconnect.rs`(`CLOSE_CODE_REPLACED`·`CLOSE_CODE_PATH_DEAD`)이고, RESET 대역(`0x200x`)의 근거는 §7이다. `0x1005`(`CLOSE_CODE_TRUST_WITHDRAWN`)는 로컬 trust store가 더는 연결을 보증하지 않아 닫을 때 쓰는 값이다(ADR-0031 결정 7). `0x1006`(`CLOSE_CODE_NOT_ADOPTED`, `crates/qsh-transport/src/endpoint.rs`)은 펀칭 경주에서 채택되지 않고 이미 선 연결을 닫을 때 쓰는 값이고 reason은 고정 문자열 `not adopted`다(ADR-0054 결정 15, §19.6). `CLOSE_CODE_REPLACED`(`0x1003`)와 `CLOSE_CODE_PATH_DEAD`(`0x1004`)는 역방향 등록의 코드로 정해졌지만 은퇴(ADR-0068)한 뒤에도 값을 바꾸거나 다른 뜻으로 재사용하지 않는다. 옛 빌드의 peer가 보낸 `0x1004`는 지금도 `ReconnectCause::PathDead`로 읽힌다. 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
 - **우선순위 band 값**. 로컬 송신 큐 힌트일 뿐 peer가 관측하는 wire 필드가 아니다(값 자체는 §16.2에 명문화돼 있다).
 - **SOCKS5 로컬 codec**(`crates/qsh-proto/src/socks5.rs`, ADR-0019). `-D`가 로컬 loopback listener에서 받는 클라이언트 프로토콜이지 두 `qsh` peer 사이의 wire 계약이 아니다 — `.proto`에 이 이름의 message가 없다. `parse_socks5`가 §13의 fuzz 타깃인 것도 `parse_forward_spec`과 같은 이유(신뢰 불가 로컬 입력)이지 wire 표면이기 때문이 아니다.
 
@@ -963,7 +844,7 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 ### 18.9 datagram 운반체와 입력 사본 (ADR-0052 결정 6·7·8·9·12 (c))
 
-**조건.** 아래가 모두 맞을 때만 쓴다. (1) 협상된 교집합에 `datagram.v1`이 있다. (2) 화면 동기화 attach이고 `screen_channel`이 16바이트다. (3) forward 연결이다. `qsh listen` 데몬을 거치는 reverse 등록은 client가 로컬 conduit 뒤에 있어 datagram을 읽지 못하므로 host가 쓰지 않는다. (4) transport의 `max_datagram_size()`가 `Some`이다. 모든 datagram 메시지는 스트림에 같은 뜻의 짝이 있으므로, 조건이 하나라도 깨지거나 송신이 `UnsupportedByPeer`·`Disabled`·`TooLarge`로 실패하면 그 메시지는 스트림으로 간다.
+**조건.** 아래가 모두 맞을 때만 쓴다. (1) 협상된 교집합에 `datagram.v1`이 있다. (2) 화면 동기화 attach이고 `screen_channel`이 16바이트다. (3) forward 연결이다(역방향 등록은 ADR-0068로 없어져 모든 연결이 forward다). (4) transport의 `max_datagram_size()`가 `Some`이다. 모든 datagram 메시지는 스트림에 같은 뜻의 짝이 있으므로, 조건이 하나라도 깨지거나 송신이 `UnsupportedByPeer`·`Disabled`·`TooLarge`로 실패하면 그 메시지는 스트림으로 간다.
 
 **channel id.** `screen_channel`이 곧 datagram의 channel id다. ACL을 통과한 attach에만 host가 난수로 발급하고 그 연결에서만 유효하다. 연결마다 datagram reader가 하나(`qsh_core::datagram::DatagramHub`)이고, host는 data 스트림을 시작할 때, client는 스트림을 열 때 자기 attach의 channel을 등록한다. 등록되지 않은 channel의 datagram은 버리고 `unknown_channel`로 센다. 디코드되지 않으면 `malformed`, channel 큐(256개)가 차면 `overflow`로 센다. datagram은 어떤 자원도 만들지 못한다.
 
@@ -1040,9 +921,11 @@ datagram 하나가 한 frame이라서 길이 머리가 없다. 16바이트 chann
 
 **client의 사용(attach driver).** `ScreenSink`가 `PredictDriver`(`crates/qsh-core/src/client/predict_drive.rs`)를 쥔다. input pump는 `Input`을 쓰기 직전에 `on_input(bytes, 쓰고 난 뒤의 누적 offset)`을 부르고 곧바로 예측을 겹쳐 다시 그린다. reader는 적용한 상태마다 `on_state`를, 받은 `ScreenEcho`마다 `on_echo`를 부른다. 이름 붙은 상태가 아직 적용되지 않았으면 `Predictor`가 그 리포트를 하나만 들고 있다가(더 새것이 오면 바꾼다. 상한 하나, ADR-0053 결정 3·15) 그 상태를 적용할 때 판정한다. 상태 번호는 attach(leg)마다 1부터라서 새 leg에서는 적용한 상태 번호와 들고 있던 리포트를 버린다. 늦은 확인의 250 ms는 `Predictor::next_deadline`까지 reader가 잠들었다가 `tick`으로 밑줄을 그린다(시간으로 걷어 내지는 않는다). 정책 값은 정방향에서는 `PolicyMonitor`가 1초마다 내는 `prediction`이고, 역방향 route에서는 `Input`을 쓴 시각과 그 offset을 덮는 `InputAck`이 온 시각의 차이를 EWMA(1/8)로 낸 srtt를 `adapt::decide`에 넣어 1초에 한 번 결정한다. 첫 표본 전에는 `Off`다. `--predict=always`는 `adapt::User.prediction`의 `Always` 핀으로 `[transport].adaptive = "off"`보다 이기고 `reasons`에 `user_override`를 남긴다. 양쪽이 `screen-echo.v1`을 광고하지 않으면 예측은 하지 않는다. 상태 변화는 tracing target `qsh::predict`에 한 줄 JSON으로 남는다(개수와 사유만). 시험: `crates/qsh-core/src/client/predict_drive/tests.rs`, `crates/qsh-core/src/ops/session/predict_tests.rs`, `crates/qsh-cli/tests/it/screen_sync.rs`의 `a_predicted_keystroke_is_drawn_before_the_echo_arrives`.
 
-## 19. 홀펀칭 (ADR-0054)
+## 19. 홀펀칭 (ADR-0054, 휴면)
 
-NAT 뒤 장비 B에 밖의 장비 A가 닿도록, 둘 다 닿는 사용자의 `qsh listen` R이 후보 주소를 중개하고 양 끝이 같은 UDP 소켓에서 동시에 보내 구멍을 뚫는다. 이 절은 wire 계약(capability `punch.v1`, message, 상한, 검사, 펀치 datagram, close 코드)만 적는다. 흐름의 역할 분담은 ADR-0054 결정 10이 정본이고, R의 중개 서비스와 B의 offer 처리는 §19.9가 적는다. client 경주는 뒤 스텝이 이 절에 더한다.
+> **휴면(ADR-0068).** qsh 자체 홀펀칭은 영구히 꺼졌다. client는 punch route를 시작하지 않고 어느 host도 중개(R)나 offer 처리(B)를 하지 않으며 서버 창도 열지 않는다. 모든 빌드가 `punch.v1`(`CAP_PUNCH_V1`)을 그대로 광고하고, 그 광고는 "알아듣지만 하지 않는다"는 뜻이다. `PunchRequest`에는 `UNSUPPORTED`로, `PunchOffer`와 `RendezvousQuery`에도 같은 `UNSUPPORTED` 오류로 답한다. 이 오류를 중개자에게서 읽은 initiator는 `PunchRefusal`로 `TARGET_UNSUPPORTED`를 본다. ADR-0054 결정 9의 `[punch].mode = "off"` 동작이 그대로 영구 동작이 됐다. `[punch].mode`, `--no-punch`, `qsh trust rendezvous`는 파싱하고 아무 일도 하지 않으며 `--rendezvous`는 `UNSUPPORTED`다. 아래 19.1~19.8의 message, 상한, 검사, datagram 규칙은 wire 계약으로 동결돼 있고 `qsh-proto`가 계속 검증한다(fuzz target `punch_candidates`가 남는다). 19.9와 19.10의 절차는 걷혔다.
+
+NAT 뒤 장비 B에 밖의 장비 A가 닿도록, 둘 다 닿는 사용자의 `qsh listen` R이 후보 주소를 중개하고(옛 설계, 지금은 휴면) 양 끝이 같은 UDP 소켓에서 동시에 보내 구멍을 뚫는다. 이 절은 wire 계약(capability `punch.v1`, message, 상한, 검사, 펀치 datagram, close 코드)만 적는다. 흐름의 역할 분담은 ADR-0054 결정 10이 정본이고, R의 중개 서비스와 B의 offer 처리는 §19.9가 적는다. client 경주는 뒤 스텝이 이 절에 더한다.
 
 ### 19.1 message
 
@@ -1106,42 +989,11 @@ R은 후보를 중개할 뿐 신원을 보증하지 않는다. A는 펀칭한 �
 
 ### 19.9 R의 중개와 B의 offer 처리
 
-**펀칭 연결.** 단독 `qsh listen`(R)은 `Hello.reverse` 없이 `punch.v1`을 광고한 peer를 `Hello` 시점에 등록 대신 펀칭 연결로 받는다. 합친 모드(§11, ADR-0059 결정 5)에서는 `punch.v1`이 모든 빌드의 광고라 `Hello`만으로 정방향 client와 펀칭 client를 가를 수 없으므로, `Hello.reverse`가 없는 연결을 정방향으로 시작하고 첫 요청(`Ping` 제외)이 `PunchRequest`일 때 그 연결을 펀칭 연결로 바꾼다. 16개 상한의 permit은 전환 시점에 얻고(모자라면 `RESOURCE_EXHAUSTED`, retryable, 뒤 닫음), 연결 quota는 처음부터 쥔다. `relay_punch`는 최대 1.5초를 기다리므로 control loop를 막지 않는 갈래로 돈다. 다른 요청이나 먼저 연 데이터 스트림은 정방향으로 굳고, 굳은 연결의 `PunchRequest`는 단독 serve처럼 `UNSUPPORTED`다. 아래 3초 규칙과 "그 밖의 message는 `UNSUPPORTED`"는 전환 뒤에 그대로 적용된다. `[punch].mode = "off"`이면 이 분기는 없고 기존 `host.reverse` 누락 거절이 그대로 나간다. 펀칭 연결은 동시에 16개(`RENDEZVOUS_MAX_CLIENTS`)이고 넘으면 `Hello`에 `RESOURCE_EXHAUSTED`로 답한다. 이 연결이 받는 것은 `Ping`(`Pong`으로 답한다)과 `PunchRequest` 한 번이고, 그 밖의 message는 `UNSUPPORTED`다. 요청 없이 3초(`RENDEZVOUS_IDLE`), 답을 보낸 뒤 3초가 지나면 R이 연결을 닫는다. 거부나 오류로 끝난 요청은 오류 frame을 보낸 뒤 바로 닫는다.
-
-**R이 요청을 처리하는 순서.** 인가 전에는 자원을 만들지 않는다.
-
-1. `host.punch`(`punch.request`)를 연결의 principal로 판정하고 감사한다. 거부는 균일한 `PERMISSION_DENIED`이고 어떤 등록이 있는지 알리지 않는다.
-2. 모양 검사(§19.2)와 후보 검사(§19.3). 후보가 여덟을 넘거나 모양이 틀리면 `INVALID_ARGUMENT`이고 연결을 닫는다. 검사에 걸린 후보는 버리고 개수만 센다.
-3. 속도 표. A 하나(fingerprint)에 진행 중인 시도 하나, 60초에 여섯. 넘으면 `RESOURCE_EXHAUSTED`(재시도 가능)이고 연결은 열려 있다. 거부된 시도는 횟수에 넣지 않는다.
-4. `target_fingerprint`의 등록 연결을 찾는다. 없거나 `punch.v1`을 광고하지 않았으면 `PunchReply`의 `refusal`이 `TARGET_NOT_REGISTERED`·`TARGET_UNSUPPORTED`다.
-5. A의 후보에 R이 본 A의 주소(이 연결의 원격 주소)를 `REFLEXIVE`로 더해(후보는 여덟 이하로 맞춘다) `PunchOffer`를 B의 등록 연결로 보낸다. 후보 값은 바꾸지 않는다.
-6. B의 `PunchAnswer`를 1.5초(`PUNCH_ANSWER_TIMEOUT`) 기다린다. B의 오류는 `UNSUPPORTED`가 `TARGET_UNSUPPORTED`, `RESOURCE_EXHAUSTED`가 `TARGET_BUSY`, 나머지(`PERMISSION_DENIED` 포함)가 `TARGET_DENIED`로 바뀌고, 시간이 지나면 `TARGET_TIMEOUT`이다.
-7. `PunchReply`에 B의 후보와 R이 본 B의 주소(등록 연결의 원격 주소, `REFLEXIVE`)를 담고, `initiator_reflexive`에 A의 주소를 담는다. B의 주소가 공인 주소가 아니면(R과 B가 NAT 하나를 나눈다) `target_reflexive_private`가 참이고 A가 후보를 유도한다(ADR-0054 결정 8).
-
-R이 B에게 보내는 `PunchOffer`는 등록 연결의 요청 채널을 쓴다. B가 보기에는 controller가 보낸 요청이고 응답은 같은 `request_id`로 돌아온다.
-
-**B의 처리.** B(`qsh serve --to`)는 등록 연결로 받은 `PunchOffer`만 받는다(그 밖의 연결에서는 `UNSUPPORTED`). 순서는 다음과 같다.
-
-1. 모양 검사. 틀리면 `INVALID_ARGUMENT`.
-2. offer의 `initiator_fingerprint`를 B의 `trust.toml` pin으로 찾아 그 principal로 `host.punch`(`punch.offer`)를 판정하고 감사한다. pin이 없으면 감사에 거부를 남기고 균일한 `PERMISSION_DENIED`로 답한다. 권한 평가기가 허용하더라도 pin이 없는 initiator는 받지 않는다.
-3. 후보 검사. 쓸 수 있는 후보가 없으면 `INVALID_ARGUMENT`.
-4. 속도 표(initiator당 60초에 여섯)와 창 수(동시 `MAX_PUNCH_WINDOWS` = 4). 넘으면 `RESOURCE_EXHAUSTED`이고 창도 소켓 전송도 없다.
-5. 서버 창을 6초 연다. 호스트 후보(`invite_address` 경로 조회로 얻은 IPv4 하나, 전역·ULA IPv6 하나)와 이 창의 소켓 포트를 `PunchAnswer`로 답하고, offer의 후보로 펀치 datagram을 보낸다(ADR-0054 결정 14, 일정은 `run_target`).
-6. 창이 받은 연결은 검증된 fingerprint가 열려 있는 창의 initiator일 때만 일반 serve 경로로 넘긴다. 여러 창이 동시에 열려 있으면 Initial은 어느 창의 loop에든 닿으므로 "이 창의 initiator"가 아니라 "그 fingerprint의 창이 열려 있다"를 본다. 아니면 `0x1001`로 닫는다.
-
-`RendezvousQuery`는 B에 이미 선 어떤 연결에서든 보낼 수 있다. `host.punch`(`punch.rendezvous`)를 연결의 principal로 판정하고, 통과하면 B가 지금 등록해 있는 controller의 fingerprint(살아 있는 등록이 먼저, 그다음 `[serve].to`의 pin, 중복 없이 넷까지)를 `RendezvousList`로 답한다.
-
-**기록.** `qsh::punch` 로그는 `relayed`(결과 이름과 후보 개수)와 `window_opened`·`window_closed`(개수)만 낸다. 주소, fingerprint, `attempt_id`는 로그에도 감사에도 없다.
+은퇴(ADR-0068). 중개자 R의 신호 처리(`host.punch` 인가, 후보 중개, `RendezvousState`)와 B의 offer 처리(서버 창, `PunchTarget`)는 걷혔다. 합친 endpoint의 첫 요청 갈림도 같이 없다. 지금 동작은 §19 머리말과 같다. `PunchRequest`는 `UNSUPPORTED`, `PunchOffer`는 `UNSUPPORTED`이고, `RendezvousQuery`에 대한 응답 규칙도 더 없다. ACL action `host.punch`는 어휘로 남지만 효과가 없다.
 
 ### 19.10 recovery와 `--supervise`의 route 재해석 (ADR-0054 결정 18)
 
-§10의 recovery는 연결이 죽으면 재dial하는데, 이 재dial은 처음 해석한 주소를 다시 쓰지 않고 **route를 다시 돈다**. 직접 dial과 펀칭의 경주(결정 16)를 그 순간의 소켓·로컬 후보·중개자로 새로 한다. 그래서 A의 바깥 주소가 바뀌면(NAT 매핑이 사라지거나 다른 망으로 옮기면) 새 주소로 다시 펀칭하고, 직접 길이 돌아와 있으면 직접 dial이 1초 head start 안에 서서 중개자에게 아무것도 보내지 않는다. 이 규칙은 forward 연결의 attach recovery(`recover_attach`의 재dial)와 `--supervise` 터널의 재dial이 같이 쓴다. 역방향 등록 연결의 recovery(§11-4)는 지금 그대로다.
-
-- **시한.** 펀칭할 수 있는 host(중개자 후보가 있고 `[punch].mode`가 `auto`)의 재dial 시도 하나는 `REDIAL_DEADLINE`(2초) 대신 펀칭 예산을 쓴다. 신호 3초와 창 5초를 합한 8초이고(`PUNCH_BUDGET`), 직접 dial이 먼저 도는 host는 그 앞에 head start 1초가 붙어 9초다. 주소가 없는 pin은 곧바로 펀칭하므로 8초다. 명령의 첫 dial 시한(10초)을 넘지 않는다. 펀칭할 수 없는 host는 2초 그대로다. recovery 루프가 시도 하나를 기다리는 시한(`Reconnect::attempt_deadline`)도 같은 값이다. 시한을 넘긴 재dial은 task로 계속 돌고 다음 시도가 이어받으므로(`spawn_reattach`), 시한은 기다림의 한도이지 재dial을 자르는 칼이 아니다.
-- **펀칭이 끝난 시도.** 펀칭이 먼저 실패하면(중개자에 닿지 않음, `target_not_registered` 등) 직접 dial은 시도가 시작된 뒤 2초까지만 더 기다린다. 직접 dial만 있던 재dial이 쓰던 시간이다. 이미 2초가 지났으면 곧바로 실패하고, 시도 횟수·backoff(0, 200 ms, 800 ms)·상태 줄의 `reconnecting (attempt k)`는 §10 그대로 다음 시도로 넘어간다. 시도마다 `qsh::recovery` 기록이 남고 모든 시도가 실패하면 attach의 오류는 `CONNECTION_FAILED`다.
-- **resume은 그대로다.** 재dial로 선 연결(직접이든 펀칭이든)에서 §10의 reattach 4단계를 그대로 하고, resume token은 route가 아니라 peer 신원에 묶여 있으므로 같은 세션을 이어 붙인다. 입력의 무손실·무중복(§10-5)도 같다. 새 session은 만들어지지 않는다.
-- **B의 주소가 바뀌면.** B의 등록 recovery(ADR-0041)가 먼저 R에 다시 등록하고 A의 시도가 그 뒤에 펀칭한다. 등록이 아직 없으면 `target_not_registered`로 그 시도가 실패하고 다음 시도로 넘어간다.
-- **`--supervise`.** 터널의 재dial 시도 하나도 같은 시한으로 route를 다시 돌고, 포기하지 않는 동안 listener는 묶여 있다(ADR-0023). `-L`·`-D`·`-R` 어느 쪽이든 carrier를 다시 세우는 길이 같다.
+은퇴(ADR-0068). 재dial이 route를 다시 돌 때 직접 dial과 펀칭을 겨루던 규칙(펀칭 예산 `PUNCH_BUDGET`, 펀칭이 끝난 시도의 2초 대기)은 걷혔다. recovery와 `--supervise` 재dial은 직접 dial과 iroh route(§22)만 다시 돈다. resume은 그대로 peer 신원에 묶여 있다(§10).
 
 ## 20. agent forwarding (ADR-0055)
 
@@ -1170,7 +1022,7 @@ enum AgentGrant {
 - client는 협상된 교집합에 `agent.v1`이 있을 때만 `agent_channel`을 세팅한다(`Session::session_open`·`attach_request`·`exec_start_with_agent`가 광고하지 않은 peer 앞에서 필드를 비운다). `-A`를 주지 않은 요청은 이 필드가 없으므로 인코딩이 기존과 바이트 단위로 같다(`no_agent_field_without_dash_a`).
 - 모르는 `AgentGrant` 값은 `UNSPECIFIED`로 읽는다. 번호는 각 message의 다음 빈 번호이고 기존 번호는 건드리지 않았다. 새 control message는 없다.
 - 이 스텝의 host는 소켓을 만들지 못하므로, `agent.v1`을 협상한 peer가 16바이트 `agent_channel`을 보내면 세션이나 exec는 정상으로 열고 응답의 `agent`에 `UNAVAILABLE`을 싣는다. 오류로 끝내지 않는다. 이 답은 host 소켓 스텝이 `FORWARDED`·`DENIED`·`NO_SOCKET` 판정으로 바꾼다.
-- `AGENT` 스트림은 host가 연다. header의 `ticket`은 그 `agent_channel`이고 header 뒤의 바이트는 §20.1을 따른다. 받는 쪽의 header 대기는 기존 `HEADER_TIMEOUT`이다. reverse route에서는 `qsh listen` 데몬이 이 스트림을 받아 claim한 CLI에만 건넨다(§20.2.1).
+- `AGENT` 스트림은 host가 연다. header의 `ticket`은 그 `agent_channel`이고 header 뒤의 바이트는 §20.1을 따른다. 받는 쪽의 header 대기는 기존 `HEADER_TIMEOUT`이다. 옛 reverse route에서 `qsh listen` 데몬이 받던 갈래는 걷혔다(§20.2.1).
 
 ### 20.1 메시지 framing
 
@@ -1184,22 +1036,17 @@ enum AgentGrant {
 
 client는 host에서 온 요청의 type을 `ALLOWED_REQUESTS`(`REQUEST_IDENTITIES` 11, `SIGN_REQUEST` 13)에서 찾는다(`request_disposition`). 표에 없는 type은 번호가 SSH1 시절의 것이든 모르는 것이든 로컬 agent에 보내지 않고, client가 `FAILURE_REPLY`(`00 00 00 01 05`)를 스트림에 쓴다. 표를 넓히려면 새 ADR이 필요하다(ADR-0055 결정 12). 응답은 거르지 않고 같은 decoder로 길이만 끊어 상한을 지킨다.
 
-### 20.2.1 역방향 route (ADR-0055 결정 14)
+### 20.2.1 역방향 route (ADR-0055 결정 14, 은퇴)
 
-target(`qsh serve --to`)이 host이고 controller 쪽 CLI가 client다. 데몬은 가운데에서 바이트만 옮기고 로컬 agent에 연결하지 않는다.
-
-- 등록. CLI가 `LOCAL_CONTROL` conduit으로 `agent_channel`이 든 `SessionOpen`·`SessionAttach`·`ExecStart`를 보내면, 데몬의 `ControlHub`는 그 요청을 QUIC으로 내보내는 순간 `agent_channel → conduit` 항목을 올린다. 응답을 기다리지 않는다. 길이가 16바이트가 아닌 필드는 올리지 않고, 다른 conduit이 이미 올린 channel은 가져가지 못한다. hub당 channel은 256개까지다. 등록한 conduit이 죽으면 항목이 내려가고 큐에 든 스트림은 reset된다. 재attach(resume)는 새 registration의 hub에 같은 channel을 다시 올린다.
-- 도착. target이 등록 연결 위로 `AGENT` 스트림을 열면 데몬은 header를 읽고, `ticket`이 정확히 16바이트이고 등록된 channel이며 hub가 32개(`MAX_AGENT_STREAMS_PER_HUB`)를 넘지 않을 때만 큐에 넣는다. 아니면 `BAD_HEADER`(`0x2001`) 또는 `RESOURCE_EXHAUSTED`(`0x200D`)로 reset한다. 큐에 든 스트림은 `TCP_ACCEPTED`와 같이 30초 안에 claim되지 않으면 `0x200C`로 reset된다. 슬롯은 큐와 splice를 통틀어 센다.
-- claim. CLI는 `LOCAL_STREAM` conduit에 `StreamHeader{AGENT, ticket = channel(16바이트) ‖ claim token(1~64바이트)}`를 보낸다. `TCP_ACCEPTED`처럼 데몬은 raw 바이트 전에 `LocalResponse`를 정확히 한 번 보낸다(`ClaimGranted` 또는 `LocalError`). 처음 claim한 토큰이 channel의 seat에 앉고, 이후에는 같은 토큰만 스트림을 가져간다. 다른 토큰, 빈 토큰, 등록 안 된 channel은 모두 같은 `TIMEOUT`을 즉시 받는다. 토큰은 CLI가 프로세스마다 CSPRNG로 만든다.
-- 이후 CLI가 로컬 agent에 연결하고 §20.2의 표로 거른다. 길이 오류나 로컬 agent 오류는 conduit을 닫는 것으로 끝나고, 데몬이 QUIC 스트림을 끝낸다(conduit에는 스트림 단위 reset이 없다).
+은퇴(ADR-0068). 역방향 등록 위의 agent forwarding(데몬 hub의 `agent_channel → conduit` 표, claim 토큰, hub당 스트림 상한)은 걷혔다. agent forwarding은 forward 연결에서만 동작한다.
 
 ### 20.3 시험
 
-단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), 역방향 route의 `agent_hub_tests`(seat·상한·conduit 정리)와 `agent_reverse`(`agent_forward_over_the_reverse_route`, B47의 두 CLI, 33번째 스트림, 재attach), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.
+단위 시험은 `crates/qsh-proto/src/agent.rs`의 `agent_filter_table`(type 0~255 전수와 이름 붙은 행), `an_oversized_agent_frame_resets_the_stream`(decoder 수준), `a_zero_length_message_is_an_error`, `the_cap_itself_is_accepted`, `the_declared_length_is_not_allocated_up_front`, 청크 무관성 proptest다. 가짜 agent(`qsh_testkit::fake_agent::FakeAgent`)는 unix 소켓(Windows는 named pipe)에서 목록 조회와 결정적 서명에 답하고 나머지는 `FAILURE`로 답하며 받은 type을 모두 기록한다. fuzz 타깃은 `agent_frames`(§13-12)다.
 
 ## 21. jump chaining (ADR-0056)
 
-이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응(§21.5), recovery(§21.6), 역방향 데몬(§21.7), MTU 예산과 침묵 시한(§21.8)을 차례로 적는다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
+이 절은 ADR-0056의 wire 계약(§21.0), `qsh_proto::jump`가 구현한 부분(§21.1, §21.2), 중간 peer의 처리 순서(§21.3)를 적는다. client 체인과 실패 보고, 운반체 적응(§21.5), recovery(§21.6), 역방향 첫 hop(§21.7, 은퇴), MTU 예산과 침묵 시한(§21.8)을 차례로 적는다. MTU 수치는 ADR-0057이 고친 것을 따른다(한 겹 비용 55바이트).
 
 ### 21.0 capability와 wire (ADR-0056 결정 3·4)
 
@@ -1274,7 +1121,7 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 
 **검증.** dial 전에 `JumpPlan::new`가 모양을 본다. hop이 4개를 넘거나, 같은 지문이 두 번 나오거나, 끝 target이 hop 목록에 있으면 `INVALID_ARGUMENT`이고 아무것도 dial하지 않는다. hop의 핀이 없거나 주소·지문이 비어 있으면 `HOST_NOT_FOUND`(stage `address`)다. client는 이름을 풀지 않고 핀의 주소를 그대로 다음 hop의 `StreamHeader{host, port}`에 싣는다.
 
-**걷기.** 첫 hop은 보통 경로(펀칭 포함)로 잇고 지문이 핀과 같은지 한 번 더 본다. 다음 단계마다 (1) 앞 연결의 협상 결과에 `jump.v1`이 있는지 보고, (2) CSPRNG 16바이트 channel을 뽑아 `DatagramHub`에 등록한 뒤 `JUMP` 스트림을 열고, (3) `ConnectResult`를 기다리고, (4) `PacketPipe`의 `PipePeer`를 스트림·datagram 운반체에 이어 펌프를 띄우고, (5) `Dialer::with_evaluator`로 그 hop의 정확한 지문만 믿는 평가기를 만들어 `dial_over_pipe`로 안쪽 연결을 맺는다. 마지막 연결이 끝 연결이고 일반 연결처럼 돌려준다(결정 15). 직접 dial과 경주하지 않고 자동 폴백도 없다(결정 13).
+**걷기.** 첫 hop은 보통 경로(직접 dial, 필요하면 iroh)로 잇고 지문이 핀과 같은지 한 번 더 본다. 다음 단계마다 (1) 앞 연결의 협상 결과에 `jump.v1`이 있는지 보고, (2) CSPRNG 16바이트 channel을 뽑아 `DatagramHub`에 등록한 뒤 `JUMP` 스트림을 열고, (3) `ConnectResult`를 기다리고, (4) `PacketPipe`의 `PipePeer`를 스트림·datagram 운반체에 이어 펌프를 띄우고, (5) `Dialer::with_evaluator`로 그 hop의 정확한 지문만 믿는 평가기를 만들어 `dial_over_pipe`로 안쪽 연결을 맺는다. 마지막 연결이 끝 연결이고 일반 연결처럼 돌려준다(결정 15). 직접 dial과 경주하지 않고 자동 폴백도 없다(결정 13).
 
 **운반체.** client→J 방향은 `choose_carrier`가 정한다. 양쪽이 `datagram.v1`을 광고하고 바깥 연결의 `max_datagram_size()`가 1217 이상이면 datagram, 아니면 스트림이다. 250 ms마다 방을 다시 읽어 바꾼다. 안쪽 packet 상한은 `PipePeer::set_packet_limit`로 (바깥 방 - 17)에 맞춘다(ADR-0057: 한 겹 55바이트). 상한보다 큰 안쪽 packet은 버리고 센다. 침묵 규칙(`SilenceFallback`)은 datagram으로 보낸 뒤 `4 × max(rtt, 50 ms) + 25 ms`(ADR-0058, §21.8) 동안 되돌아오는 datagram이 없으면 스트림으로 내리고(받은 datagram 뒤 200 ms(`REPLY_WINDOW`) 안의 송신은 대개 그 datagram에 대한 ack-only 응답이라 되돌아오는 것이 없으므로 시계를 시작하지 않는다. ADR-0058 결정 1 개정, `jump_silence_ignores_an_unanswered_ack_across_an_idle_gap`), 30초마다 datagram을 다시 시도한다. 같은 헬퍼를 중간 peer의 J→client 방향도 쓴다.
 
@@ -1304,7 +1151,7 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 
 **Tier 1(migration).** `Endpoint::rebinding_via`가 안쪽 연결의 endpoint에 "바깥 endpoint를 옮긴다"를 건다. `dial_chain`이 층마다 아래 층의 endpoint를 거는 터라, 끝 endpoint의 `rebind_ephemeral`은 층을 타고 내려가 첫 hop의 UDP 소켓을 새 포트로 옮긴다. 안쪽 연결과 `JUMP` 채널은 그대로고 J의 소켓도 그대로여서 T는 아무것도 보지 않는다. recovery의 migration 시도와 `--supervise`의 `try_migrate`가 부르는 것이 이 함수다. 파이프 위의 endpoint는 자기 소켓이 없으므로, 바깥을 걸지 않은 파이프 endpoint의 rebind는 `Unsupported`다. 그렇지 않으면 진짜 소켓이 파이프 밑에 깔려 안쪽 연결이 채널에서 떨어진다.
 
-**Tier 2(resume).** 끝 연결의 PathWatch가 사망을 선언하고 migration이 연결을 살리지 못하면, 재dial은 `dial_routed`의 `Dial::Redial`로 체인을 처음부터 다시 세운다. 첫 hop의 route는 펀칭 경주까지 다시 돌고, 재dial 시도 하나의 시한은 첫 hop의 시한에 중간 peer마다 1초를 더한 값이며 명령의 dial 시한을 넘지 않는다(`PeerTarget::redial_deadline`). 새 끝 연결에서 §10의 reattach를 하므로 PTY 입력은 무손실·무중복이다. 대화형 attach의 recovery와 `--supervise` 터널(`-L`·`-R`·`-D`)이 같은 `dial_routed`를 쓴다. 안쪽 연결을 새 바깥 연결 위에 이어 붙이는 일은 하지 않는다.
+**Tier 2(resume).** 끝 연결의 PathWatch가 사망을 선언하고 migration이 연결을 살리지 못하면, 재dial은 `dial_routed`의 `Dial::Redial`로 체인을 처음부터 다시 세운다. 첫 hop의 route는 직접 dial과 iroh까지 다시 돌고, 재dial 시도 하나의 시한은 첫 hop의 시한에 중간 peer마다 1초를 더한 값이며 명령의 dial 시한을 넘지 않는다(`PeerTarget::redial_deadline`). 새 끝 연결에서 §10의 reattach를 하므로 PTY 입력은 무손실·무중복이다. 대화형 attach의 recovery와 `--supervise` 터널(`-L`·`-R`·`-D`)이 같은 `dial_routed`를 쓴다. 안쪽 연결을 새 바깥 연결 위에 이어 붙이는 일은 하지 않는다.
 
 **옛 체인은 남지 않는다.** `Link::replace`가 옛 끝 연결이 체인 위의 것이면(`Endpoint::is_nested`) 닫는다. 끝 연결이 닫히면 감독 task가 안쪽 층부터 정리하고 J의 채널이 닫힌다. 직접 연결에서 옛 연결을 살려 두는 `--supervise`의 규칙(스플라이스가 끝날 때까지)은 체인에는 적용하지 않는다. 시한이 다 돼 걷는 도중에 버려진 `dial_chain` 호출도 이미 세운 층을 `LayerGuard`가 정리한다.
 
@@ -1314,39 +1161,9 @@ client 쪽은 `crates/qsh-core/src/jump/{chain,carrier,report}.rs`다. 호출자
 
 **시험.** `crates/qsh-testkit/tests/it/jump_recovery.rs`: `a_session_through_a_jump_resumes_after_the_hop_link_dies`(C-J를 chaos proxy로 5초 끊음), `a_session_through_a_jump_resumes_after_the_target_link_dies`(J-T를 끊음), `outer_migration_is_invisible_to_the_inner_connection`, `a_nested_endpoint_never_binds_a_socket_of_its_own`, `a_supervised_tunnel_through_a_chain_survives_a_cut`, `a_supervised_tunnel_through_a_chain_survives_a_cut_behind_the_hop`, `a_supervised_tunnel_migrates_at_the_first_hop_and_keeps_its_chain`.
 
-### 21.7 역방향 첫 hop: 데몬의 운반체 번역 (ADR-0056 결정 14)
+### 21.7 역방향 첫 hop: 데몬의 운반체 번역 (ADR-0056 결정 14, 은퇴)
 
-첫 hop이 이 장비의 `qsh listen` 데몬에 live 역방향 등록(`qsh serve --to`)을 들고 있으면 CLI는 그 hop에 QUIC 연결이 없다. 연결은 데몬이 쥐고 있다. 그래서 첫 `JUMP` 채널만 `LOCAL_STREAM` conduit으로 열고, 둘째 hop부터는 §21.5의 걷기가 그대로다. 새 `LocalStreamKind`는 없다(§11-3).
-
-```
-CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 스트림)== 첫 hop(J) --UDP-- 다음 hop
-```
-
-**CLI가 하는 일.** `Ops::resolve_route`가 첫 hop의 이름으로 live 역방향 등록을 찾으면(`Ops::reverse_first_hop`, 평소 라우팅과 같은 규칙) 계획의 `first_reverse`에 데몬 소켓과 이름을 적는다. 그 hop의 pin은 주소가 없어도 되고 펀칭 계획은 세우지 않는다. `dial_chain_via_daemon`이 (1) `LocalHello` 뒤의 `LocalHelloAck.peer_fingerprint`가 첫 hop pin의 지문과 같은지 **헤더를 보내기 전에** 본다(`open_stream_expecting`, `generation`은 보지 않는다). 다르면 stage `auth`이고 데몬도 J도 아무것도 열지 않는다. (2) `StreamHeader{JUMP, channel, host, port}`를 보낸다. `host:port`는 둘째 hop(없으면 끝단)의 pin 주소다. (3) 데몬의 `ConnectResult`를 읽고(아래), (4) 이 conduit을 채널의 스트림 운반체로 삼아 §21.5와 같은 펌프를 띄운다. CLI 구간에는 datagram이 없다(`both_datagram = false`). 안쪽 endpoint는 바깥 소켓이 없으므로 첫 hop의 migration(Tier 1)은 해당이 없고 `rebinding_via`를 걸지 않는다. recovery(Tier 2)와 `--supervise`는 같은 `dial_jump`가 데몬 길을 다시 걷는다.
-
-**데몬이 하는 일.** `serve_jump`(`localctl/daemon.rs`)는 raw 단계로 넘어가 `ConnectResult` 정확히 하나를 먼저 쓴다. 순서는 이렇다. 앞 단계가 실패하면 뒤 단계는 돌지 않고, 등록 연결에는 아무것도 열리지 않는다.
-
-1. `jump_channel`이 정확히 16바이트이고 header가 `DATA_FRAME_MAX` 이하인지 본다. 아니면 `INVALID_ARGUMENT`.
-2. 등록한 host의 capability에 `jump.v1`이 있는지 본다. 없으면 `UNSUPPORTED`.
-3. hub마다 `JumpSlot`을 잡는다(`ControlHub::claim_jump`). 이미 이 hub에 있는 channel 값이면 `INVALID_ARGUMENT`, hub가 `MAX_JUMP_CHANNELS_PER_HUB`(32)개를 쥐고 있으면 `RESOURCE_EXHAUSTED`. 값 점유가 먼저고 상한이 나중이다(J의 모양 검사와 같은 순서). 슬롯은 relay가 끝날 때 풀린다.
-4. 등록 연결의 `DatagramHub`에 channel을 등록한 뒤 `open_bi`(`OPEN_DATA_STREAM_TIMEOUT` 10초)로 `JUMP` 스트림을 연다(session band). 열리지 않으면 `CONNECTION_FAILED`.
-5. header를 **받은 바이트 그대로** 보내고 J의 `ConnectResult`를 `JUMP_OPEN_TIMEOUT`(12초) 안에 기다린다. 그동안 CLI가 끊으면 스트림을 `0x2007`로 reset하고 끝낸다. 시한이 지나거나 J가 답 없이 닫으면 `CONNECTION_FAILED`.
-6. `ConnectResult`를 CLI에 그대로 건넨다. `ok`가 아니면(J의 `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, `CONNECTION_FAILED`) 송신을 `finish()`하고 CLI conduit을 닫는다. CLI는 §21.5의 `refusal`로 stage를 정한다. 데몬 자신의 거절도 같은 모양(`ok = false`와 `code`)이라 CLI는 둘을 가르지 않는다.
-7. `ok`면 `jump::relay::run`이 패킷을 옮긴다.
-
-**인가는 데몬의 일이 아니다.** `forward.jump`는 등록한 host(J)가 스트림을 받는 자리에서 판정한다(§21.3, 결정 7). 주체는 데몬의 신원(listen 쪽 신원)이다. 데몬은 가시성과 자원만 쥔다: "등록은 도달 가능성을 주지, 권한을 주지 않는다"(§11-3).
-
-**번역.** `run`은 채널마다 한 task다.
-
-- CLI → host: CLI 구간의 `u16` 길이 frame을 `JumpStreamDecoder`로 읽는다. 패킷마다 `choose_carrier(both_datagram, 등록 연결의 max_datagram_size())`와 `SilenceFallback`(데몬 쪽 눈, srtt는 등록 연결의 것)이 고른다. datagram이면 종류 14 frame이고, 자리를 넘으면 스트림으로 돌리지 않고 버리고 센다. 스트림이면 `encode_packet`으로 `JUMP` 스트림의 큐(`JUMP_STREAM_QUEUE` 64 KiB)에 넣고 넘치면 버리고 센다. `both_datagram`은 등록한 host의 capability에 `datagram.v1`이 있는지다(데몬은 늘 광고한다).
-- host → CLI: 종류 14 datagram과 `JUMP` 스트림의 frame을 모두 받는다. 둘 다 CLI 구간에 `u16` 길이 frame으로 쓴다. CLI 구간의 쓰기 큐도 64 KiB이고 넘으면 버리고 센다.
-- 데몬이 읽는 것은 길이 머리뿐이다. 패킷은 해석하지도 복호화하지도 않는다. 길이 0이나 1452 초과는 어느 쪽에서 오든 `BAD_HEADER`(`0x2001`)다: 등록 연결 쪽 스트림은 그 코드로 reset하고, CLI conduit은 닫는다.
-
-**끝.** CLI conduit이 닫히면(프로세스 종료 포함) 송신을 `finish()`하고 수신을 `stop`한다. J는 스트림 종료로 채널과 소켓을 닫고(`stream_end`) 데몬은 슬롯과 datagram 등록을 푼다. host 쪽 스트림이 끝나거나 reset되면 CLI conduit을 half-close하고 CLI의 펌프는 `StreamEnded`로 끝난다. 등록 연결이 닫히면 같은 길이다. 데몬에는 자기 idle 시한이 없다. 60초 idle은 J가 닫고(`JUMP_IDLE`) 그 reset이 데몬을 끝낸다.
-
-**관측.** `ControlHub::jump_stats()`(`RelayStats`)는 개수만 쥔다: `opened`, `closed`, `to_host_datagrams`, `to_host_stream`, `from_host_datagrams`, `from_host_stream`, `to_cli`, `oversize_dropped`, `queue_dropped`, `datagram_unavailable`, `silence_fallbacks`. `ControlHub::jump_channels_in_use()`는 지금 쥔 슬롯이다. 로그는 target `qsh::jump`의 `channel_opened`·`channel_closed`(`side = "daemon"`, 사유 `cli_gone`·`host_ended`·`connection_closed`·`bad_frame_cli`·`bad_frame_host`)이고 기본에서 꺼져 있다. channel 값과 패킷은 싣지 않는다.
-
-**시험.** `crates/qsh-testkit/tests/it/jump_reverse.rs`: `jump_first_hop_over_the_reverse_route`(진짜 daemon·`serve --to`·loopback T에서 exec, 세션, `-L`이 끝나고 등록 연결 구간이 양방향 datagram 운반체를 쓴 것을 데몬과 J의 카운터로 확인), `a_reverse_first_hop_with_another_fingerprint_opens_nothing`, `the_daemon_claims_a_jump_channel_once_and_refuses_a_malformed_one`, `the_daemon_carries_at_most_32_jump_channels_per_registered_host`, `a_bad_frame_from_the_cli_ends_the_channel_and_frees_its_slot`, `the_daemon_cleans_up_when_the_cli_goes_away`, `a_refusal_of_the_host_reaches_the_cli_verbatim_and_frees_the_slot`, `a_registered_host_without_jump_v1_gets_no_jump_stream`. 펀칭한 첫 hop은 `crates/qsh-testkit/tests/it/jump_punch.rs`의 `jump_first_hop_over_a_punched_connection`(netsim)이다.
+은퇴(ADR-0068). 첫 hop이 데몬에 든 역방향 등록일 때 CLI가 `LOCAL_STREAM` conduit으로 첫 `JUMP` 채널을 열고 데몬이 CLI 구간과 등록 연결 구간의 운반체를 번역하던 절차(`serve_jump`, `JumpSlot`, `MAX_JUMP_CHANNELS_PER_HUB`)는 걷혔다. 첫 hop은 항상 CLI가 직접 세운 QUIC 연결이고, 둘째 hop부터는 §21.5의 걷기 그대로다. 역방향으로만 닿던 hop은 jump 체인에서 사라졌다. iroh로만 닿는 hop은 이전처럼 `UNSUPPORTED`다(ADR-0061 결정 14). `jump.v1` capability와 `JUMP` 스트림 wire는 동결이다.
 
 ### 21.8 MTU 예산과 침묵 시한 (ADR-0057, ADR-0058)
 
@@ -1371,10 +1188,10 @@ CLI ==LOCAL_STREAM (u16 길이 frame)== 데몬 ==등록 연결 (datagram | JUMP 
 pin(`trust.toml`)의 선택 필드 `routes`에 `iroh` 종류가 생긴다(`docs/CLI.md` §6.1, §6.11).
 
 - 기본 route 목록은 바뀌지 않는다. `iroh`가 목록에 없는 pin은 relay에 한 번도 접속하지 않는다. 키가 있고 주소가 없는 pin은 `routes`를 적지 않아도 `["iroh"]`다(ADR-0063). 데몬(`serve`, `listen`)은 `[iroh].enable`이 없으면 iroh endpoint를 만들어 기본 relay에 TCP 443(HTTPS 위 WebSocket) 연결을 하나 계속 유지한다. `enable = false`인 설정과 `--no-iroh`를 준 `serve`·`listen`은 endpoint도 relay 접속도 없다.
-- 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)과 펀칭(§19)이 먼저** 출발한다. 직결과 펀칭의 경주(ADR-0054 결정 16)는 그대로이고, 그 경주가 `[iroh].head_start_ms`(기본 1초) 안에 서지 않거나 그 전에 모두 바로 실패하면 iroh 시도를 나란히 시작해 먼저 선 연결을 쓴다. 진 쪽은 닫는다. UDP가 막힌 망에서는 직결이 dial 시한을 다 써야 실패하므로, 경주가 끝나기를 기다리면 iroh에 남는 시간이 없다. 그 안에 직결이나 펀칭이 서면 relay에 아무것도 보내지 않는다.
-- **route 기억.** pin마다 마지막으로 이긴 route와 실패한 route를 state의 `route-cache.json`에 둔다. iroh가 이기고 직결·펀칭이 시한까지 못 선 pin은 다음 dial에서 iroh를 곧바로 시작하고 직결·펀칭을 건너뛴다. 건너뛴 route는 10분 뒤(연속 실패마다 두 배, 상한 1시간) iroh와 나란히 한 번 다시 시도한다. 로컬 주소 집합이나 기본 경로가 바뀌면 기억을 버린다. 막힌 망에서 dial과 재dial이 같은 route를 연달아 두드리지 않게 하려는 것이다(`docs/CLI.md` §6.1).
-- 새로 도는 route는 §19.10과 같은 규칙으로 **재해석**된다. recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.
-- 주소도 중개자 후보도 없는 pin에 `routes = ["iroh"]`와 `key`가 있으면 직결·펀칭이 없으므로 head start 없이 곧바로 iroh로 dial한다.
+- 사용자가 `iroh`를 목록에 넣으면 **직결(주소, DNS 이름)이 먼저** 출발한다. 펀칭(§19)은 ADR-0068로 휴면이라 경주에 끼지 않는다. 직결이 `[iroh].head_start_ms`(기본 1초) 안에 서지 않거나 그 전에 모두 바로 실패하면 iroh 시도를 나란히 시작해 먼저 선 연결을 쓴다. 진 쪽은 닫는다. UDP가 막힌 망에서는 직결이 dial 시한을 다 써야 실패하므로, 경주가 끝나기를 기다리면 iroh에 남는 시간이 없다. 그 안에 직결이나 펀칭이 서면 relay에 아무것도 보내지 않는다.
+- **route 기억.** pin마다 마지막으로 이긴 route와 실패한 route를 state의 `route-cache.json`에 둔다. iroh가 이기고 직결이 시한까지 못 선 pin은 다음 dial에서 iroh를 곧바로 시작하고 직결을 건너뛴다. 건너뛴 route는 10분 뒤(연속 실패마다 두 배, 상한 1시간) iroh와 나란히 한 번 다시 시도한다. 로컬 주소 집합이나 기본 경로가 바뀌면 기억을 버린다. 막힌 망에서 dial과 재dial이 같은 route를 연달아 두드리지 않게 하려는 것이다(`docs/CLI.md` §6.1).
+- 새로 도는 route는 재해석된다(옛 펀칭 경주 규칙은 §19.10에서 은퇴). recovery나 `--supervise`의 재dial은 처음 선 route를 고집하지 않고 route를 다시 돈다. relay로 선 연결도 직결이 돌아와 있으면 다음 재dial에서 직결로 선다.
+- 주소가 없는 pin에 `routes = ["iroh"]`와 `key`가 있으면 직결이 없으므로 head start 없이 곧바로 iroh로 dial한다.
 - 이름 없는 대상(주소만 있는 대상)에는 iroh route가 없다. EndpointId를 아는 pin(이름)만 iroh로 dial한다. pin에 `routes = ["iroh"]`가 있어도 `key`가 없으면 iroh는 건너뛴다(`key`는 직결·펀칭·페어링·`trust add --cert-file`·SSH 확인 dial이 채우거나 `qsh trust iroh --key`로 적는다).
 - iroh 시도도 명령의 dial 시한(10초)을 늘리지 않는다. 남은 시한으로 잘린다.
 
@@ -1399,7 +1216,7 @@ iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(m
 
 - qsh 계층에서는 연결 하나가 그대로다. 세션, 스트림, resume token에 변화가 없다. 경로 변화는 migration과 같은 급의 지연 최적화이고 correctness는 §10의 resume이 지킨다.
 - 승격 뒤 pin된 상대는 내 IP를 안다(threat-model D30). 승격 전에는 relay가 본다.
-- §19의 qsh 자체 펀칭(`punch.v1`)과 별개다. iroh route 위에서는 `punch.v1`을 쓰지 않는다(경로 승격은 iroh의 몫).
+- §19의 qsh 자체 펀칭(`punch.v1`, 휴면)과 별개다. iroh route 위에서는 `punch.v1`을 쓰지 않는다(경로 승격은 iroh의 몫).
 - 경로 정보(어느 경로로 가고 있는가, rtt)는 `PathWatch`와 상태 줄, 감사의 선택 필드로 읽기 전용으로 올라간다. 정책은 정하지 않는다.
 - `LinkStatus`와 침묵 판정(§18.12, §21.8)은 경로가 바뀌어도 한 연결의 값으로 계속 돈다. relay 경유로 RTT가 늘어난 연결이 직결 기준 시한에 걸리지 않는지는 구현에서 시험으로 확인한다(미결 2).
 
@@ -1409,7 +1226,7 @@ iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(m
 - **resume은 SPKI + token 기준**이다(§10). 세션은 route가 아니라 peer 신원(SPKI SHA-256)에 묶여 있으므로 직결로 만든 세션을 relay로 이어 붙일 수 있고 그 반대도 된다. reattach 4단계, 입력의 무손실·무중복(§10-5)도 같다.
 - 0-RTT 금지(§2)는 iroh 연결에도 같다. 활성화 옵션이 있어도 켜지 않는다.
 - datagram(§14)은 iroh backend도 제공한다. 못 쓰면 스트림 짝으로 돌아가는 기존 규칙(`DatagramError`)을 따른다.
-- 역방향(§11): `qsh serve --to`의 등록 dial이 iroh route로 컨트롤러에 닿을 수 있고, 컨트롤러(`listen`, 합친 endpoint 포함)가 iroh endpoint로 받는다. 등록 연결의 watchdog과 heartbeat(ADR-0053 개정, ADR-0041)는 그대로다. 역방향 admission은 handshake 뒤 키 기준으로 판정한다.
+- 역방향(§11): 은퇴(ADR-0068). 옛 `qsh serve --to`의 등록 dial과 컨트롤러 endpoint는 없다. 같은 일은 대상이 `qsh serve`를 돌리고 이 장비가 그 키를 pin하면 iroh route로 열린 포트 없이 닿는 것으로 대신한다.
 
 ### 22.6 시험
 
@@ -1424,7 +1241,7 @@ iroh는 한 연결 안에서 relay 경로와 직접 경로를 함께 다룬다(m
 
 relay는 EndpointId 하나에 홈 연결 하나만 둔다. 한 기기의 qsh 프로세스가 모두 기기 신원 키로 endpoint를 열면 같은 EndpointId가 겹치고, 나중에 붙은 프로세스가 먼저 붙은 프로세스의 relay 경로를 밀어낸다(relay 로그: "Another endpoint connected with the same endpoint id"). 장기로 도는 `qsh tunnel open`과 대화형 `qsh exec`를 함께 쓰면 앞의 것이 끊긴다. 그래서 endpoint의 두 역할이 키를 달리 쓴다.
 
-- **데몬 endpoint**(`serve`·`listen`이 띄우는 수신 endpoint): 기기 신원 키로 연다. EndpointId가 pin 키이고 상대가 dial하는 값이다. 바뀐 것이 없다.
+- **데몬 endpoint**(`serve`가 띄우는 수신 endpoint. 옛 `listen`은 은퇴): 기기 신원 키로 연다. EndpointId가 pin 키이고 상대가 dial하는 값이다. 바뀐 것이 없다.
 - **클라이언트 endpoint**(route 층이 명령마다, 재dial마다 만드는 endpoint): endpoint마다 새 임의 iroh 키로 연다. 같은 기기의 클라이언트 프로세스끼리 EndpointId가 겹치지 않는다. qsh 신원은 아래 증명으로 서버에 알린다.
 
 ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capability 없음). QUIC route는 건드리지 않는다. 이 절은 iroh route 안의 연결 직후 한 번만 있는 교환이다.
@@ -1464,7 +1281,7 @@ ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capab
 
 - exporter가 서명에 들어 있으므로 다른 연결로 복사한 프레임은 그 연결의 exporter와 맞지 않아 거절된다(재전송 방지). 두 EndpointId가 들어 있어 같은 서버·같은 클라이언트 endpoint가 아닌 쌍에도 쓸 수 없다.
 - 읽는 쪽은 최대 97바이트만 잡는다. 프레임이 더 길면 길이 초과로 거절하고 그 이상을 버퍼링하지 않는다.
-- 서버는 상대의 EndpointId가 pin인지 따로 보지 않는다. 데몬이 기기 키로 dial하는 연결(`serve --to`의 등록 dial 포함)도 같은 프레임을 보내며, 이때 증명된 키는 EndpointId와 같다. 한 경로로 검증한다.
+- 서버는 상대의 EndpointId가 pin인지 따로 보지 않는다. 데몬이 기기 키로 dial하는 연결(옛 `serve --to`의 등록 dial이 그랬다)도 같은 프레임을 보내며, 이때 증명된 키는 EndpointId와 같다. 한 경로로 검증한다.
 - 증명 읽기는 handshake permit을 쥔 채 일어나므로 시한까지의 점유는 handshake 동시 상한이 막는다(admission, ADR-0061 결정 4). 키 기준 버킷(`decide_keyed`)은 증명 뒤에 증명된 키로 센다.
 - 증명 전에 클라이언트 쪽이 서버 신원을 먼저 확인하므로(dial 전 pin 검사, handshake 직후 재검사) 가짜 서버에 증명이 가지 않는다. 가더라도 증명은 그 연결에 묶여 있어 다른 연결에서는 쓸 수 없다.
 - 클라이언트 endpoint는 끝날 때 연결의 close가 상대에게 갔는지만 짧게 기다린다(`wait_idle`·`wait_idle_for`가 상대의 `CONNECTION_CLOSE` 응답을 `IROH_CLOSE_FLUSH_CAP`(150ms)까지 기다린다. 보통 한 왕복). iroh의 `Endpoint::close`는 기다리지 않고 백그라운드로 시작한다. relay와 맺은 주소 발견(QAD) 연결의 close에 relay가 답하지 않아 endpoint가 그 연결의 closing 기간(PTO의 세 배)을 채워야 끝나고, loopback에서도 1초가 걸리기 때문이다(실제 relay에서는 최대 3초). 상대는 연결의 `CONNECTION_CLOSE`로 이미 close를 알았으므로 이 기다림은 명령 종료에 필요하지 않다. 백그라운드 닫기가 끝나기 전에 프로세스가 끝나면 iroh가 "Endpoint dropped without calling `Endpoint::close`" 오류를 로그에 남기므로, 닫는 중인 endpoint의 복제본을 프로세스 전역에 쥐어 두어 프로세스 종료가 endpoint를 drop하지 않게 한다. 마지막 핸들이 닫기 전에 사라지는 경로(오류, 진 route 경주, 취소)도 같은 백그라운드 닫기를 쓴다.
@@ -1473,15 +1290,15 @@ ALPN(`qsh/1`), frame layer, `Hello`·capability 협상은 그대로다(새 capab
 
 ### 22.9 한 기기의 데몬 endpoint는 하나
 
-데몬 endpoint의 EndpointId는 기기 키이므로(§22.8) 한 기기에서 `qsh serve`와 따로 도는 `qsh listen`이 둘 다 `[iroh].enable`이면 같은 EndpointId로 relay에 붙는다. relay는 EndpointId 하나에 홈 연결 하나만 두니 나중에 붙은 쪽이 앞선 쪽을 밀어내고(relay 로그 "Another endpoint connected with the same endpoint id"), 밀린 쪽은 오류 없이 수신 능력만 잃는다. 클라이언트의 dial은 그 순간 relay를 쥔 프로세스에 닿는다. 그 프로세스가 `listen`이면 `punch.v1` 컨트롤러라서 호스트 요청이 아닌 연결을 "punch done"으로 닫고, 클라이언트는 `CONNECTION_FAILED`나 응답 없는 시한 초과를 본다. 밀려난 쪽이 재접속하며 서로 다시 밀면 relay 홈이 번갈아 바뀌어 증상이 간헐적으로 나온다.
+데몬 endpoint의 EndpointId는 기기 키이므로(§22.8) 한 기기에서 `qsh serve`와 따로 도는 다른 데몬 endpoint(옛 `qsh listen`이 그랬고 ADR-0068로 은퇴했다)가 둘 다 `[iroh].enable`이면 같은 EndpointId로 relay에 붙는다. relay는 EndpointId 하나에 홈 연결 하나만 두니 나중에 붙은 쪽이 앞선 쪽을 밀어내고(relay 로그 "Another endpoint connected with the same endpoint id"), 밀린 쪽은 오류 없이 수신 능력만 잃는다. 클라이언트의 dial은 그 순간 relay를 쥔 프로세스에 닿는다. 그 프로세스가 옛 `listen`이면 컨트롤러라서 호스트 요청이 아닌 연결을 닫고, 클라이언트는 `CONNECTION_FAILED`나 응답 없는 시한 초과를 본다. 밀려난 쪽이 재접속하며 서로 다시 밀면 relay 홈이 번갈아 바뀌어 증상이 간헐적으로 나온다.
 
 규칙.
 
-- 데몬 endpoint를 여는 프로세스(`serve`, `listen`, `listen --serve`)는 먼저 상태 디렉터리의 `iroh-endpoint.lock`에 배타 advisory lock(`flock`)을 건다. 잡히면 endpoint를 열고 lock을 endpoint 수명 동안 쥔다. OS가 프로세스 종료 때 lock을 놓으므로 비정상 종료 뒤에도 stale 상태가 남지 않는다.
+- 데몬 endpoint를 여는 프로세스(`serve`. 옛 `listen`, `listen --serve`도 같았다)는 먼저 상태 디렉터리의 `iroh-endpoint.lock`에 배타 advisory lock(`flock`)을 건다. 잡히면 endpoint를 열고 lock을 endpoint 수명 동안 쥔다. OS가 프로세스 종료 때 lock을 놓으므로 비정상 종료 뒤에도 stale 상태가 남지 않는다.
 - 이미 다른 프로세스가 쥐고 있으면 endpoint를 열지 않고 시작은 계속한다. 이유(`the iroh relay endpoint is not started: ...`)를 알림 줄과 `warn` 로그로 한 번 낸다. UDP 수신, ACL, 감사 등 나머지는 그대로다.
 - lock 파일을 열거나 잠글 수 없는 상태 디렉터리(읽기 전용 등)는 claim 도입 전과 같이 endpoint를 연다. 경고만 남긴다.
 - lock 파일의 내용은 `<역할> <pid>` 한 줄이고 다음 시도가 알림 줄에 이름을 대는 용도뿐이다. 판정은 lock이 한다.
-- 합친 `listen --serve`는 프로세스 하나가 수신을 모두 맡으므로 이 규칙과 무관하게 endpoint 하나다.
+- 옛 합친 `listen --serve`(은퇴)는 프로세스 하나가 수신을 모두 맡아 이 규칙과 무관하게 endpoint 하나였다.
 - 클라이언트 endpoint(§22.8)는 임의 키라서 claim 대상이 아니다.
 
 **시험.** `qsh-core`의 `iroh_serve::tests`(`one_process_per_state_dir_holds_the_device_key_at_the_relay`, `another_state_dir_has_its_own_slot`)가 claim 규칙을, `qsh-testkit`의 `iroh_serve::a_listen_beside_serve_leaves_the_relay_to_serve`가 `serve` 옆의 `listen`이 알림을 내고 시작하며 dial이 여전히 `serve`에 닿는 것을 본다. 승격은 `qsh-transport`의 `iroh_upgrade::a_relay_dial_moves_to_a_direct_path`가 relay로 선 연결이 직접 경로로 옮겨 가는 것을 지킨다.
