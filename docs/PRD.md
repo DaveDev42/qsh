@@ -13,7 +13,7 @@ QSH는 QUIC 기반의 직접 연결형 원격 셸이다. SSH의 핵심 기능을
 
 > 한 번의 명령으로 접속하고, 연결이 끊겨도 같은 셸로 돌아온다.
 
-**개념은 둘이다(ADR-0065).** server는 `qsh serve`로, 장비마다 하나를 두고 신뢰한 peer의 연결을 받아 셸·exec·터널·파일을 내준다. client는 `qsh <host>`, `qsh exec`, `qsh tunnel`, `qsh cp` 같은 명령으로 server에 연결을 건다. 키로 주소를 정하는 iroh route(ADR-0061, ADR-0063)가 있어서 relay로는 늘 닿고 직결이 되면 직결로 서므로, 어느 쪽이 연결을 시작하느냐가 도달 가능성을 가르지 않는다. 장비마다 `qsh serve`를 띄우고 서로 pin하면 어느 장비에서든 다른 장비로 걸 수 있다. 역방향(`qsh listen`, `qsh serve --to`)은 relay가 막힌 망이나 iroh를 못 쓰는 peer처럼 이 경로가 닿지 못할 때의 고급 fallback이다(§6 "고급: 역방향 fallback").
+**개념은 둘이다(ADR-0065).** server는 `qsh serve`로, 장비마다 하나를 두고 신뢰한 peer의 연결을 받아 셸·exec·터널·파일을 내준다. client는 `qsh <host>`, `qsh exec`, `qsh tunnel`, `qsh cp` 같은 명령으로 server에 연결을 건다. 키로 주소를 정하는 iroh route(ADR-0061, ADR-0063)가 있어서 relay로는 늘 닿고 직결이 되면 직결로 서므로, 어느 쪽이 연결을 시작하느냐가 도달 가능성을 가르지 않는다. 장비마다 `qsh serve`를 띄우고 서로 pin하면 어느 장비에서든 다른 장비로 걸 수 있다. 역방향(`qsh listen`, `qsh serve --to`)은 v0.9.0에서 걷혔다(ADR-0068). relay가 막힌 망처럼 이 경로가 닿지 못하는 장비에는 qsh로 닿을 길이 없고, 이는 받아들인 위험이다(§6 "고급: 역방향 fallback"은 은퇴 안내).
 
 ## 2. 해결하려는 문제
 
@@ -28,7 +28,7 @@ QSH는 이를 해결하는 작은 원격 세션 primitive를 제공한다.
 ## 3. 목표
 
 1. SSH처럼 한 줄로 접속한다.
-2. 정방향과 역방향 연결을 동일하게 지원한다.
+2. 정방향과 역방향 연결을 동일하게 지원한다. 은퇴(ADR-0068): 역방향은 v0.9.0에서 걷혔고 iroh route(ADR-0061)가 연결 방향과 무관하게 장비끼리 닿게 한다.
 3. 모든 연결을 상호 인증하고 암호화한다.
 4. transport 연결과 무관하게 PTY 세션을 유지한다.
 5. 셸, 명령 실행, 포트 포워딩을 제공한다.
@@ -40,7 +40,7 @@ QSH는 이를 해결하는 작은 원격 세션 primitive를 제공한다.
 
 ### Direct first
 
-두 endpoint 사이에 IP 경로가 있거나, 둘 다 닿는 사용자의 qsh peer를 중개자로 써서 홀펀칭으로 경로를 열 수 있으면 제3자 서비스 없이 작동한다. 홀펀칭은 연결을 시작할 때 한 번 시도하고 실패하면 포기한다. relay는 사용자가 켜는 iroh relay route 하나만 코어에 둔다(§14, ADR-0061). 기본 route 목록에는 들어가지 않는다.
+두 endpoint 사이에 IP 경로가 있으면 제3자 서비스 없이 작동한다. 중개자를 거치는 qsh 자체 홀펀칭은 영구히 꺼졌고(은퇴, ADR-0068) NAT 통과는 iroh route의 몫이다. relay는 사용자가 켜는 iroh relay route 하나만 코어에 둔다(§14, ADR-0061). 기본 route 목록에는 들어가지 않는다.
 
 ### Configuration-free, interactive, SSH-compatible
 
@@ -56,11 +56,11 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 ### 연결 방향과 역할의 분리
 
-기본 설명의 틀은 server와 client이고 역방향은 고급 fallback이다(2026-11-13, ADR-0065). 아래는 그 fallback과 기능 동등의 정의이고, 결정 내용은 그대로다.
+은퇴(ADR-0068): 역방향은 v0.9.0에서 걷혔다. ADR-0065가 고급 fallback으로 내렸고 사용 증거가 없어 ADR-0068이 걷었다. 아래 둘째 문단은 걷히기 전의 정의로 기록에 남기고, 연결 방향은 도달 가능성을 가르지 않는다(iroh route, ADR-0061).
 
-연결을 시작한 endpoint가 반드시 셸을 사용하는 쪽일 필요는 없다. target이 controller로 연결한 뒤 자신의 셸을 제공할 수 있다.
+옛 정의(은퇴): 연결을 시작한 endpoint가 반드시 셸을 사용하는 쪽일 필요는 없었다. target이 controller로 연결한 뒤 자신의 셸을 제공할 수 있었다.
 
-정방향과 역방향은 같은 기능을 갖고, 이 동등은 모든 지원 플랫폼(Linux, macOS, Windows)에서 성립한다(2026-10-13 사용자 결정). 셸, exec, 세션, 터널, 파일 복사, 신뢰 부트스트랩처럼 정방향 route에서 되는 기능은 역방향 route에서도 되어야 하고, 한 플랫폼에서 되는 기능은 client 역할이든 host 역할이든 다른 플랫폼에서도 되어야 한다. 한쪽 방향이나 일부 플랫폼만 지원하는 설계는 그 이유(그 플랫폼에 개념 자체가 없다는 것 등)를 ADR에 적고 사용자 승인을 받는다.
+방향 사이의 기능 동등(셸, exec, 세션, 터널, 파일 복사, 신뢰 부트스트랩이 정방향과 역방향에서 같다는 것)은 역방향과 함께 은퇴했다(ADR-0068). 플랫폼 사이의 동등은 그대로다(모든 지원 플랫폼 Linux, macOS, Windows, 2026-10-13 사용자 결정). 한 플랫폼에서 되는 기능은 client 역할이든 host 역할이든 다른 플랫폼에서도 되어야 한다. 일부 플랫폼만 지원하는 설계는 그 이유(그 플랫폼에 개념 자체가 없다는 것 등)를 ADR에 적고 사용자 승인을 받는다.
 
 ### 명시적 권한
 
@@ -70,7 +70,7 @@ ADR-0045(승인됨, 2026-10-14)에 따라 이 원칙은 "권한은 신뢰를 등
 
 ### 단일 바이너리
 
-`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 철회, ADR-0011). 한 장비가 listener와 정방향 host를 겸하면 `[listen].serve`(또는 `qsh listen --serve`)로 한 프로세스, 한 포트에 합칠 수 있다(ADR-0059).
+`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 철회, ADR-0011). listener와 정방향 host를 한 프로세스, 한 포트에 합치던 `[listen].serve`(`qsh listen --serve`, ADR-0059)는 은퇴했다(ADR-0068). `[listen].serve`는 읽기 전용으로 파싱만 한다.
 
 ## 5. 주요 사용자
 
@@ -101,9 +101,11 @@ qsh dave@personal-mac
 
 `user@`는 SSH 근육 기억을 위해 받아들이며 생략할 수 있다(`qsh personal-mac`). MVP에는 user switching이 없다 — 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행되고, 인가 principal은 `user@`가 아니라 항상 인증서에서 나온다(§9). `user@`를 지정하면 세션 생성 요청에 hint로 전달되고, 그 값이 serve 계정의 login name과 다르면 host는 세션을 만들지 않고 `UNSUPPORTED`(user switching is not supported)로 거부한다 — fail closed(CLI.md §7).
 
-### 고급: 역방향 fallback
+### 고급: 역방향 fallback(은퇴, ADR-0068)
 
-기본 경로(위 "접속")는 방향을 가리지 않고 pin한 장비끼리 닿으므로 평소에는 이 절이 필요 없다. 역방향은 relay(TCP 443 HTTPS)가 막힌 망, `[iroh].enable = false`이거나 iroh를 쓰지 않는 peer, 특정 장비를 거치는 jump 체인이나 홀펀칭 중개자를 둘 때 쓴다(ADR-0065 결정 3). 이 절에서 "정방향"은 client가 server에 dial하는 위 경로를 가리킨다.
+역방향은 v0.9.0에서 걷혔다. `qsh listen`, `qsh serve --to`, 숨김 alias `qsh reverse`는 파싱되고 `UNSUPPORTED`(`details.reason = "reverse_retired"`)를 낸다. 대안은 대상에서 `qsh serve`를 돌리고 이 장비에 그 키를 pin하는 것이다(`qsh trust add <name> --key …`). 열린 포트 없이 iroh route로 닿고 `-R` 터널은 그대로다. 기본 경로(위 "접속")가 방향을 가리지 않고 pin한 장비끼리 닿으므로 이 절의 용도는 없어졌다.
+
+걷히기 전의 사용법은 다음과 같았다.
 
 ```bash
 # Controller
@@ -111,17 +113,9 @@ qsh listen
 
 # Target
 qsh serve --to controller.example.com
-
-# Controller
-qsh <name>                      # 새 세션
-qsh attach <name>/<session_id>  # 재attach
 ```
 
-역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이 제약은 지금도 유효하다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. 직결 경로가 없으면 사용자가 켠 iroh relay route(ADR-0061)로 닿을 수 있다. 홀펀칭(§14, ADR-0054)은 이 controller를 중개자로 쓰므로, target이 닿지 못하는 controller는 펀칭할 길도 없다. 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
-
-> Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
->
-> Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
+relay(TCP 443)가 막힌 망에서는 iroh route가 서지 않고, 주소로 직접 닿지 못하는 장비에는 qsh로 닿을 길이 없다. 역방향과 qsh 자체 홀펀칭이 하던 이 fallback이 사라지는 것은 ADR-0068이 받아들인 위험이다. doctor 코드 `controller_unreachable`은 어휘에 남고 더 나오지 않는다.
 
 ### 세션 복구
 
@@ -157,7 +151,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 | 영역 | 요구사항 |
 |---|---|
 | Transport | QUIC과 TLS 1.3 상호 인증 |
-| Connection | 정방향 및 역방향 direct connection |
+| Connection | 정방향 direct connection. 역방향은 은퇴(ADR-0068) |
 | Mobility | IP 변경 시 connection migration, 단절 시 session resume |
 | PTY | POSIX PTY, resize, signal, attach와 detach |
 | Recovery | sequence 기반 output replay와 중복 제거 |
@@ -189,12 +183,12 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 
 처음 P1에 있었으나 철회한 항목: UDP가 차단된 환경을 위한 TCP/TLS fallback. QSH는 QUIC 전용이고 UDP가 막힌 망은 범위 밖이다(ADR-0043, 2026-10-11).
 
-### P2 — SSH 주요 기능, 홀펀칭, mosh 수준 사용성 (ADR-0050)
+### P2 — SSH 주요 기능, 홀펀칭, mosh 수준 사용성 (ADR-0050. 홀펀칭은 ADR-0068로 은퇴)
 
 - 설정 없는 첫 접속(mosh식 SSH 부트스트랩, 필요할 때 뜨는 serve)과 SSH 명령 호환
 - 화면 상태 동기화(대화형 form의 재부착과 느린 링크)
 - 안전한 local echo prediction과 연결 상태 줄
-- 연결 시작 때 한 번의 홀펀칭(실패하면 포기)
+- 은퇴(ADR-0068): 연결 시작 때 한 번의 홀펀칭(실패하면 포기). 영구히 꺼졌고 NAT 통과는 iroh route가 맡는다
 - agent forwarding (ADR-0055)
 - jump chaining (ADR-0056)
 - 후보: read-only multi-attach, sftp 하위 시스템 호환. X11 forwarding은 넣지 않는다
@@ -232,7 +226,7 @@ ACL principal은 certificate fingerprint 또는 CA가 발급한 user/device iden
 
 `forward.jump`는 중간 peer가 `-J` 체인의 JUMP 스트림마다 UDP 소켓과 채널을 만들기 전에 거는 인가다(ADR-0056 결정 18). 판정 자리는 스트림마다 인라인이고 resource는 요청한 `host:port` 문자열이다. `full`과 `tunnel`이 주고 `forward.*` 행이 이 action을 함께 덮는다. `forward.agent`와 달리 실제로 넓어지는 권한이다. `forward.local`이 TCP로 닿는 곳에 QUIC로 답하는 UDP 서비스가 더해지므로, `allow = ["forward.*"]` 행을 가진 peer는 업그레이드 뒤 이 action도 얻는다. 항상 거부 gate에는 들어가지 않고, 목적지 축은 없다. host-local 거부와 QUIC 문이 모든 principal에 같이 걸린다.
 
-`host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
+`host.reverse`와 `host.punch`는 ADR-0068로 역방향과 홀펀칭이 걷혀 어휘로만 남고 효과가 없다. 그 값을 쓴 `trust.toml`·`acl.toml`은 계속 파싱된다. 옛 정의: `host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
 
 ACL action은 인가 어휘로 operation 이름과 별개 차원이며, 하나의 action이 여러 operation을 커버할 수 있다(`session.control`은 write/resize/close를 커버). Operation과 action의 매핑은 CLI.md §2.5에서 정의한다.
 
@@ -263,7 +257,7 @@ ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 �
 | `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `host.punch`, `forward.agent` | any |
 | `tunnel` | `forward.local`, `forward.remote`, `host.punch`, `forward.jump` | owned |
 | `read-only` | `session.list`, `session.attach`, `host.punch` | any |
-| `reverse` | `host.reverse`, `host.punch` | 해당 없음 |
+| `reverse` | `host.reverse`, `host.punch`(둘 다 효과 없음, ADR-0068) | 해당 없음 |
 | `none` | 없음 | 해당 없음 |
 
 role 하나로 장비를 들이는 예는 다음과 같다. 세밀한 제어가 필요할 때만 ACL 정책 파일을 쓴다.
@@ -330,11 +324,11 @@ qsh <command> --json            machine-readable result
 qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 qsh service install|uninstall|status  플랫폼 서비스 유닛 관리(launchd·systemd user)
-qsh setup host|client|listener  이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않는다. 기본 role은 `--peer-role`로 정하고 `none`일 때만 넣을 행을 인쇄한다. 자동 신뢰 없음, `docs/CLI.md` §6.20)
+qsh setup host|client|listener  (`listener`는 ADR-0068로 은퇴, `UNSUPPORTED`) 이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않는다. 기본 role은 `--peer-role`로 정하고 `none`일 때만 넣을 행을 인쇄한다. 자동 신뢰 없음, `docs/CLI.md` §6.20)
 
-# 고급: 역방향 fallback(ADR-0065)
-qsh listen                      reverse listener(`--serve`는 정방향 host도 겸함, ADR-0059)
-qsh serve --to controller       역방향 연결(구 qsh reverse, 숨김 alias로 남음)
+# 은퇴한 역방향(ADR-0065에서 고급 fallback, ADR-0068에서 걷힘). 아래 둘은 파싱되고 UNSUPPORTED다
+qsh listen                      은퇴(ADR-0068). 옛 reverse listener(`--serve`는 정방향 host도 겸함, ADR-0059)
+qsh serve --to controller       은퇴(ADR-0068). 옛 역방향 연결(구 qsh reverse, 숨김 alias)
 ```
 
 SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).
@@ -355,7 +349,7 @@ QSH 밖에서 해결하는 것:
 - hostname과 IP reachability
 - VPN과 사설 overlay network
 - DNS와 service discovery
-- 홀펀칭으로 열리지 않는 NAT(양쪽 모두 목적지마다 매핑이 바뀌는 NAT 등)의 통과
+- NAT 통과. qsh 자체 홀펀칭은 영구히 꺼졌고(ADR-0068) iroh의 NAT 통과에 맡긴다. relay가 막힌 망의 통과도 범위 밖이다
 - 조직 계정과 중앙 관리
 
 QSH는 `qsh user@host`에 주어진 주소로 연결할 뿐이다.
@@ -381,7 +375,7 @@ qsh personal-mac --relay auto
 
 Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위해 logical session identity를 transport connection과 분리하되, MVP에는 relay 구현이나 negotiation을 포함하지 않는다.
 
-2026-11-13 ADR-0061로 relay 하나가 코어에 들어왔다. 별도 relay 제품을 만드는 대신 iroh relay(TLS 위 WebSocket, 기본 n0 공용 relay, 자가 운영 `iroh-relay`로 바꿀 수 있음)를 사용자가 켜는 route로 받는다. 위 조건(payload와 private key를 보지 못함, 기본 접속 형태와 endpoint identity 유지)은 그대로다. 안쪽 연결은 pin으로 인증한 QUIC이고, EndpointId가 곧 qsh 신원 키다. 아래 `--relay auto` 예시는 ADR-0061 구현이 정하는 CLI 형태로 바뀔 수 있다. 같은 날 ADR-0063이 데몬 쪽 기본값을 켜짐으로 바꿨다. `qsh serve`·`qsh listen`은 `[iroh].enable`을 끄지 않는 한 기본 relay에 연결을 하나 유지하고, 주소 없이 키만 있는 pin은 기본으로 relay route를 쓴다. 사용자가 끄는 길(`[iroh].enable = false`, `--no-iroh`)은 그대로 있다.
+2026-11-13 ADR-0061로 relay 하나가 코어에 들어왔다. 별도 relay 제품을 만드는 대신 iroh relay(TLS 위 WebSocket, 기본 n0 공용 relay, 자가 운영 `iroh-relay`로 바꿀 수 있음)를 사용자가 켜는 route로 받는다. 위 조건(payload와 private key를 보지 못함, 기본 접속 형태와 endpoint identity 유지)은 그대로다. 안쪽 연결은 pin으로 인증한 QUIC이고, EndpointId가 곧 qsh 신원 키다. 아래 `--relay auto` 예시는 ADR-0061 구현이 정하는 CLI 형태로 바뀔 수 있다. 같은 날 ADR-0063이 데몬 쪽 기본값을 켜짐으로 바꿨다. `qsh serve`는(`qsh listen`은 ADR-0068로 은퇴) `[iroh].enable`을 끄지 않는 한 기본 relay에 연결을 하나 유지하고, 주소 없이 키만 있는 pin은 기본으로 relay route를 쓴다. 사용자가 끄는 길(`[iroh].enable = false`, `--no-iroh`)은 그대로 있다.
 
 `-J` jump chaining(ADR-0056)은 이 절의 relay가 아니다. 사용자가 직접 고른 qsh peer를 지나는 것이고, 안쪽 연결은 client와 끝단 사이의 QUIC 연결이라 중간 peer는 payload와 endpoint private key를 보지 못한다. 별도 제품도 아니고 `--relay`의 negotiation도 없으며, 사용자가 `-J`를 줄 때만 쓰인다.
 
@@ -402,7 +396,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 | 기업망의 UDP 차단 | 범위 밖으로 둔다(ADR-0043). `qsh doctor`가 차단을 진단하고 README가 SSH·overlay 우회를 안내한다 |
 | Replay buffer 초과 | 누락 구간 표시, configurable buffer |
 | Shell 권한의 과도한 범위 | 제한 자동화는 별도 `exec.run` 사용 |
-| 역방향 연결을 relay로 오인 | Controller reachability 요구 명시 |
+| 은퇴(ADR-0068): 역방향 연결을 relay로 오인 | 역방향이 걷혀 위험이 없다 |
 | Listener 재시작으로 세션 손실 | 초기 제한 명시, 추후 supervisor 검토 |
 | `qsh` 기존 명령과 충돌 | crates.io `qsh`는 동일 컨셉의 활성 프로젝트(haukened/quicshell)가 선점, Debian/Ubuntu는 gridengine-client가 `/usr/bin/qsh`를 점유, npm에도 `qsh`가 존재(Homebrew·Arch·Nix는 충돌 없음 확인). 대응: crate 이름 분리(`qsh-cli`), 주 배포 채널은 Homebrew tap/curl\|sh 스크립트, `qsh doctor`가 PATH 상의 다른 `qsh` 바이너리를 경고 |
 
@@ -410,7 +404,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 
 - 제품명과 CLI는 `QSH` / `qsh`다.
 - MVP는 relay 없는 direct-only다.
-- 정방향과 역방향은 모두 일급 기능이다. 설명의 틀은 server와 client이고 역방향은 고급 fallback으로 문서화한다(2026-11-13, ADR-0065). 기능 동등은 그대로다.
+- 정방향과 역방향은 모두 일급 기능이다. 설명의 틀은 server와 client이고 역방향은 고급 fallback으로 문서화한다(2026-11-13, ADR-0065). 기능 동등은 그대로다. 은퇴(ADR-0068): 역방향은 v0.9.0에서 걷혔고 이 결정은 기록으로 남는다.
 - Rust 단일 바이너리로 시작한다.
 - QUIC과 TLS 1.3 상호 인증을 기본으로 한다.
 - PTY session lifetime을 transport lifetime과 분리한다.
