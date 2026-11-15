@@ -26,7 +26,7 @@ name: long
 # 30-minute round first and defeat the whole point of a fast-failing
 # control — the two are split into separate steps, each filtered with
 # `-E 'test(...)'` to exactly one test, specifically so the 60-second one
-# runs, and can fail, first: if the reverse harness is broken, that is
+# runs, and can fail, first: if the forward resume path is broken, that is
 # under two minutes of signal instead of thirty.
 
 on:
@@ -58,7 +58,7 @@ jobs:
     # on a warm local box the 60s round alone is ~64s of test after ~50s of
     # cold compile; budgeted here as ~1 minute for the control round on top
     # of the build, plus this round's own deadline overhead
-    # (blackout + ~1 minute, `reverse_blackout.rs`'s `deadline`), leaving
+    # (blackout + ~1 minute, `blackout.rs`'s `deadline`), leaving
     # roughly 25 minutes of headroom under the 60-minute ceiling without
     # letting a runaway eat the runner's 6-hour default.
     timeout-minutes: 60
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -o pipefail
           cargo nextest run --profile long -p qsh-cli --test it \
-            -E 'test(/^reverse_blackout::/) & test(a_real_60_second_blackout_survives_and_resumes_the_same_session)' \
+            -E 'test(/^blackout::/) & test(a_real_60_second_blackout_survives_and_resumes_the_same_session)' \
             2>&1 | tee "${{ runner.temp }}/blackout.log"
         env:
           QSH_ACCEPTANCE_SLOW: 1
@@ -84,7 +84,7 @@ jobs:
         run: |
           set -o pipefail
           cargo nextest run --profile long -p qsh-cli --test it \
-            -E 'test(/^reverse_blackout::/) & test(a_real_30_minute_blackout_is_resumed_within_the_ttl)' \
+            -E 'test(/^blackout::/) & test(a_real_30_minute_blackout_is_resumed_within_the_ttl)' \
             2>&1 | tee -a "${{ runner.temp }}/blackout.log"
         env:
           QSH_ACCEPTANCE_LONG: 1

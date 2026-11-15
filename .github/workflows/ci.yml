@@ -189,6 +189,15 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test it -E 'test(/^socks_curl::/)'
         env:
           QSH_ACCEPTANCE_STRICT: curl
+      # `docs/ROADMAP.md` M3 DoD 2: a real 60-second blackout over a forward
+      # connection (client to `qsh serve` through the chaos proxy), longer
+      # than quinn's 45 s idle timeout, and the same attach resumes the same
+      # session afterwards. `QSH_ACCEPTANCE_SLOW` keeps the wall clock off
+      # the unit suite (`docs/design/testing.md` L4). The 30-minute twin
+      # in the same module skips here: only `long.yml` sets its gate.
+      - run: cargo nextest run -p qsh-cli --test it -E 'test(/^blackout::/)'
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # The two ~50-second `idle_timeout` tests (`docs/design/testing.md` L4,
       # ADR-0022 결정 5·6): a cut relay under a `#[cfg(test)]`-raised
       # `PathWatch` floor makes quinn's 45 s idle timeout, not `PathWatch`,

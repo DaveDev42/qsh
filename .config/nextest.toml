@@ -92,7 +92,7 @@ slow-timeout = { period = "3600s" }
 
 # `long.yml`'s 30-minute blackout round
 # (`a_real_30_minute_blackout_is_resumed_within_the_ttl`,
-# `crates/qsh-cli/tests/it/reverse_blackout.rs`), the release-gate evidence for
+# `crates/qsh-cli/tests/it/blackout.rs`), the release-gate evidence for
 # `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" row. Two departures
 # from `[profile.default]`:
 # - `slow-timeout`'s `period` is an hour and `terminate-after` is omitted —
