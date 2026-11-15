@@ -82,8 +82,17 @@ async fn relay_direct_relay_leaves_two_path_records() {
     )
     .await;
     let records = sink.records();
-    assert_eq!(records.len(), 2, "{records:?}");
-    let (up, down) = (&records[0], &records[1]);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(
+        records[0].peer_path.as_deref(),
+        Some("relay"),
+        "start record"
+    );
+    assert_eq!(
+        records[0].relay.as_deref(),
+        Some("https://relay.example.test")
+    );
+    let (up, down) = (&records[1], &records[2]);
     for r in &records {
         assert_eq!(r.action, "connect");
         assert_eq!(r.resource, "path");
@@ -109,7 +118,7 @@ async fn a_one_sample_blip_leaves_no_record() {
         &sink,
     )
     .await;
-    assert!(sink.records().is_empty(), "{:?}", sink.records());
+    assert_eq!(sink.records().len(), 1, "{:?}", sink.records());
 }
 
 #[tokio::test(start_paused = true)]
@@ -121,7 +130,7 @@ async fn an_address_change_inside_one_kind_leaves_no_record() {
         &sink,
     )
     .await;
-    assert!(sink.records().is_empty());
+    assert_eq!(sink.records().len(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -136,7 +145,34 @@ async fn the_seventeenth_change_is_not_written() {
     }
     let ticks = script.len() as u64 + 2;
     run(script, ticks, &sink).await;
-    assert_eq!(sink.records().len(), MAX_PATH_RECORDS as usize);
+    // The start record plus the sixteen changes.
+    assert_eq!(sink.records().len(), MAX_PATH_RECORDS as usize + 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_initial_path_is_recorded_once_and_does_not_count_toward_the_cap() {
+    let sink = MemoryAuditSink::new();
+    run(vec![direct(1), direct(1), direct(2)], 3, &sink).await;
+    let records = sink.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].resource, "path");
+    assert_eq!(records[0].peer_path.as_deref(), Some("direct"));
+    assert_eq!(records[0].relay, None);
+
+    // Sixteen changes after the start record all land: the start did not use
+    // up a slot.
+    let sink = MemoryAuditSink::new();
+    let mut script = vec![relay()];
+    for i in 0..16 {
+        let p = if i % 2 == 0 { direct(1) } else { relay() };
+        script.push(p.clone());
+        script.push(p);
+    }
+    let ticks = script.len() as u64 + 2;
+    run(script, ticks, &sink).await;
+    let records = sink.records();
+    assert_eq!(records.len(), 17);
+    assert_eq!(records[16].peer_path.as_deref(), Some("relay"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -210,5 +246,5 @@ async fn the_observer_ends_when_the_connection_closes() {
         AuthPath::Pin,
     )
     .await;
-    assert!(sink.records().is_empty());
+    assert_eq!(sink.records().len(), 1);
 }

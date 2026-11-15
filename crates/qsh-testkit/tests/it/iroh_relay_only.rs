@@ -153,7 +153,7 @@ impl RelayOnly {
         let records = self.net.host("far").h.audit.records();
         let allowed: Vec<_> = records.iter().filter(|r| r.decision == "allow").collect();
         assert!(
-            allowed.len() >= at_least,
+            allowed.iter().filter(|r| r.resource != "path").count() >= at_least,
             "expected at least {at_least} allowed requests, saw {}: {allowed:?}",
             allowed.len()
         );
@@ -179,7 +179,9 @@ impl RelayOnly {
                 other => panic!("an accepted connection is not on the relay path: {other:?}"),
             }
         }
-        allowed.len()
+        // The `connect`/`path` records (ADR-0067) are observations, checked
+        // above for the relay but not counted as requests.
+        allowed.iter().filter(|r| r.resource != "path").count()
     }
 
     async fn shutdown(self) {
