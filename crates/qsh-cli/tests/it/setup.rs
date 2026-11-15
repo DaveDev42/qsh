@@ -322,23 +322,22 @@ fn setup_host_service_writes_the_task_definition_through_the_binary() {
     assert_eq!(exit_code(&output), 0, "{output:?}");
     let envelope = sole_envelope(&output.stdout, &["setup", "host"]);
 
-    for (sandbox, envelope, mode) in [(&host, &envelope, "serve")] {
-        let service = step(&envelope["data"], "service");
-        assert_eq!(service["status"], "done", "{mode}: {envelope}");
-        assert_eq!(service["result"]["manager"], "task_scheduler", "{mode}");
-        assert_eq!(service["result"]["mode"], mode, "{mode}");
-        assert!(
-            service["result"]
-                .get("activation")
-                .is_none_or(Value::is_null),
-            "{mode}: setup registers no task: {envelope}"
-        );
-        let definition = sandbox
-            .config_dir()
-            .join("service")
-            .join(format!("qsh-{mode}.task.xml"));
-        assert!(definition.is_file(), "{mode}: {}", definition.display());
-    }
+    let (sandbox, envelope, mode) = (&host, &envelope, "serve");
+    let service = step(&envelope["data"], "service");
+    assert_eq!(service["status"], "done", "{mode}: {envelope}");
+    assert_eq!(service["result"]["manager"], "task_scheduler", "{mode}");
+    assert_eq!(service["result"]["mode"], mode, "{mode}");
+    assert!(
+        service["result"]
+            .get("activation")
+            .is_none_or(Value::is_null),
+        "{mode}: setup registers no task: {envelope}"
+    );
+    let definition = sandbox
+        .config_dir()
+        .join("service")
+        .join(format!("qsh-{mode}.task.xml"));
+    assert!(definition.is_file(), "{mode}: {}", definition.display());
 }
 
 /// The step id, status and role names in `docs/CLI.md` §6.20 are the ones
