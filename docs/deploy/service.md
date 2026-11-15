@@ -1,9 +1,11 @@
 # Running qsh as a service
 
-`qsh serve`, `qsh listen`, and `qsh serve --to` (old spelling `qsh reverse`,
-`docs/CLI.md` §6.13) are foreground-only (`docs/CLI.md` §6.12/§6.13/§6.18);
-qsh does not daemonize itself. Keeping one of them running across logout,
-reboot, or a crash is the OS service manager's job. `qsh service
+`qsh serve` is foreground-only (`docs/CLI.md` §6.12); qsh does not
+daemonize itself. Keeping it running across logout, reboot, or a crash is the
+OS service manager's job. `qsh listen` and `qsh serve --to` (old spelling
+`qsh reverse`) were retired in v0.9.0 (ADR-0068). `qsh service install`
+installs only the `serve` unit now, and the `listen` and `reverse` units below
+are kept as a record of what an older install left behind. `qsh service
 install|uninstall|status` (`docs/CLI.md` §6.18) generates a unit for this
 machine's inferred run mode and, by default, loads and starts it through the
 service manager (launchd on macOS, systemd on Linux, the Task Scheduler on
@@ -29,11 +31,15 @@ environment variable turns activation on or off.
 | `qsh service uninstall --always-on` | Reverses each `--always-on` step. |
 | `qsh service status --live` | Reports whether the unit is running, from one exit code of the manager. |
 
-`qsh service install --to <listener> --bind <ip:port> --name <name>` writes
-`[serve].to`, `[serve].bind` and `[reverse].offered_name` of `config.toml`
-the way `qsh config set` does (locked, validated, comments kept) before the
-run mode is inferred. The values never reach the unit's arguments, which stay
-fixed.
+`qsh service install --to <listener> --name <name>` and the `listen` and
+`reverse` run modes were retired in v0.9.0 (ADR-0068). They answer
+`UNSUPPORTED` with `details.reason = "reverse_retired"` and write nothing.
+`--bind <ip:port>` still writes `[serve].bind` of `config.toml` the way
+`qsh config set` does (locked, validated, comments kept) before the run mode
+is inferred. The value never reaches the unit's arguments, which stay fixed.
+`qsh service status` and `qsh service uninstall` still recognize a `listen` or
+`reverse` unit that an earlier version installed, and `uninstall` removes it.
+`qsh doctor` reports one as `reverse_config_retired` (warn).
 
 On Windows the manager calls are `schtasks` and the Task Scheduler COM API:
 the default activation runs `schtasks /Create /F` (and `/Run` when the task is
@@ -100,6 +106,8 @@ Each mode gets its own plist at `~/Library/LaunchAgents/io.qsh.<mode>.plist`.
 
 `~/Library/LaunchAgents/io.qsh.listen.plist`:
 
+Retired in v0.9.0 (ADR-0068) and no longer installed. This fence is kept so a leftover unit can be recognized.
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -136,9 +144,11 @@ Each mode gets its own plist at `~/Library/LaunchAgents/io.qsh.<mode>.plist`.
 </plist>
 ```
 
-`~/Library/LaunchAgents/io.qsh.reverse.plist` — file name and `Label` still
-say `reverse`, but `ProgramArguments` runs `qsh serve --to <controller>`, not
-the hidden `qsh reverse` alias (`docs/CLI.md` §6.13, §6.18):
+`~/Library/LaunchAgents/io.qsh.reverse.plist` — retired in v0.9.0 (ADR-0068),
+no longer installed. File name and `Label` say `reverse`, and `ProgramArguments`
+runs `qsh serve --to <controller>`, which now answers `UNSUPPORTED`
+(`docs/CLI.md` §6.13, §6.18). Remove a leftover one with `qsh service
+uninstall`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -178,9 +188,8 @@ the hidden `qsh reverse` alias (`docs/CLI.md` §6.13, §6.18):
 </plist>
 ```
 
-`controller` here is a `trust.toml`/`hosts.toml` alias, the same name you'd
-pass to `qsh serve --to <controller>` by hand (`docs/CLI.md` §6.13), not a
-literal string to copy.
+`controller` here is a `trust.toml`/`hosts.toml` alias, the name the retired
+unit passed to `qsh serve --to`, not a literal string to copy.
 
 Load and check one, which is what `qsh service install` and
 `qsh service status --live` run (`install` has already made the log
@@ -281,9 +290,7 @@ This is the LaunchAgent's plist for the same mode with two keys added.
 `UserName` (your account) and `GroupName` (`staff`) make the daemon run as
 you instead of root, so it reads your `~/.config/qsh`. A LaunchDaemon gets no
 `HOME` of its own, which is why the `HOME` entry in `EnvironmentVariables`
-matters. For `listen` and `reverse`, take `Label`, `ProgramArguments` and the
-log file names from the LaunchAgent fence of that mode above and keep the
-three other additions. Write the file somewhere you can read it, for
+matters. Write the file somewhere you can read it, for
 example the current directory, because the first command below removes the
 LaunchAgent copy.
 
@@ -358,6 +365,8 @@ WantedBy=default.target
 
 `~/.config/systemd/user/qsh-listen.service`:
 
+Retired in v0.9.0 (ADR-0068) and no longer installed. This fence is kept so a leftover unit can be recognized.
+
 ```ini
 [Unit]
 Description=qsh listen
@@ -371,9 +380,10 @@ RestartSec=2
 WantedBy=default.target
 ```
 
-`~/.config/systemd/user/qsh-reverse.service` — file name still says
-`reverse`, but `ExecStart` runs `qsh serve --to controller`, not the hidden
-`qsh reverse` alias (`docs/CLI.md` §6.13, §6.18):
+`~/.config/systemd/user/qsh-reverse.service` — retired in v0.9.0 (ADR-0068),
+no longer installed. The file name says `reverse`, and `ExecStart` runs
+`qsh serve --to controller`, which now answers `UNSUPPORTED`
+(`docs/CLI.md` §6.13, §6.18):
 
 ```ini
 [Unit]
@@ -479,7 +489,7 @@ task definition has no field for a log path. The action is `qsh service run
 <mode>`, a hidden subcommand that detaches from the console, appends stdout to
 `%USERPROFILE%\.local\state\qsh\log\<mode>.out.log` and stderr to
 `<mode>.err.log` (each created with an owner-only DACL), and then runs exactly
-what `qsh serve`, `qsh listen` or `qsh serve --to` runs. The `listening on`
+what `qsh serve` runs (a leftover `listen` or `reverse` task ends with `UNSUPPORTED`, ADR-0068). The `listening on`
 line and every error land in the `.err.log`. `qsh service run` does the same
 redirection on macOS and Linux, but their units do not call it.
 
@@ -529,6 +539,8 @@ redirection on macOS and Linux, but their units do not call it.
 
 `%USERPROFILE%\.config\qsh\service\qsh-listen.task.xml`:
 
+Retired in v0.9.0 (ADR-0068) and no longer installed. This fence is kept so a leftover unit can be recognized.
+
 ```xml
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -571,8 +583,9 @@ redirection on macOS and Linux, but their units do not call it.
 </Task>
 ```
 
-`%USERPROFILE%\.config\qsh\service\qsh-reverse.task.xml` — file name and task
-name still say `reverse`, but the action runs `qsh serve --to controller`
+`%USERPROFILE%\.config\qsh\service\qsh-reverse.task.xml` — retired in v0.9.0
+(ADR-0068), no longer installed. The file name and task name say `reverse`, and
+the action runs `qsh serve --to controller`, which now answers `UNSUPPORTED`
 (the controller literal is frozen into `Arguments` at install time and
 quoted for the command line when it holds whitespace):
 
@@ -671,11 +684,11 @@ task state from the Task Scheduler COM API, as `qsh doctor` does.
 `qsh doctor` reads the file, not the scheduler, for these two: it reports
 `service_not_registered` (info) when the file is absent, and
 `service_restart_drops_sessions` (info) when it is present, for `serve` and
-`reverse`. The notice means that `/End` or a restart ends the PTY sessions and
+for a leftover `reverse` task. The notice means that `/End` or a restart ends the PTY sessions and
 connections the host holds, as on the other platforms (Notes for both below).
-`qsh setup host --service` and `qsh setup host --to --service` write the same
-task definition files (`qsh-serve.task.xml`, `qsh-reverse.task.xml`) and
-register nothing.
+`qsh setup host --service` writes the same task definition file
+(`qsh-serve.task.xml`) and registers nothing. `qsh setup host --to` was
+retired in v0.9.0 (ADR-0068).
 
 ### Always-on: a task that runs with nobody logged on
 
@@ -855,9 +868,9 @@ harmless executable in a directory whose name contains spaces.
 
 ## Supervised tunnels
 
-`qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost `--local`, `--dynamic` or `--remote` tunnel by itself, over a forward or a reverse route, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). A `--local` or `--dynamic` listener stays bound across the loss. The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
+`qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost `--local`, `--dynamic` or `--remote` tunnel by itself, over a forward route, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). A `--local` or `--dynamic` listener stays bound across the loss. The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
 
-`qsh service install` does not generate these units. It manages the `serve`, `listen`, and `serve --to` modes only, and no test compares the fences below against generated output. They are hand-written examples, so the path, the host alias `hub`, the port `1080`, and the budget are yours to change. The fences use `plist` and `systemd` tags on purpose, so they stay outside the byte-for-byte check on the `xml` and `ini` fences above.
+`qsh service install` does not generate these units. It manages the `serve` mode only, and no test compares the fences below against generated output. They are hand-written examples, so the path, the host alias `hub`, the port `1080`, and the budget are yours to change. The fences use `plist` and `systemd` tags on purpose, so they stay outside the byte-for-byte check on the `xml` and `ini` fences above.
 
 Both examples run `qsh tunnel open hub --dynamic 1080 --supervise 300000`. The budget is five minutes of total outage, not counting the time the machine was asleep. The tunnel process writes the `tunnel.open` envelope to stdout once and the `qsh::lifecycle` and `qsh::tunnel::supervise` lines to stderr, which the log paths below collect (`docs/CLI.md` §6.14).
 
@@ -928,7 +941,7 @@ What each side restarts:
 |---|---|---|
 | Connection lost (sleep, VPN or underlay switch, peer restart) | the supervisor inside the process | Same listener, same `tunnel_id` (a `--remote` tunnel gets a new one); `lost`, `retry`, `reestablished` lines on stderr |
 | Total outage past `--supervise` | the process, then the service manager | `gave_up` line, exit `255`, a fresh `open` after `ThrottleInterval` or `RestartSec` |
-| First `open` fails (host unreachable, no ACL yet, reverse registration stale) | the service manager | Exit `255` and a retry. Add `--wait <ms>` for a stale reverse registration (`docs/CLI.md` §6.9) |
+| First `open` fails (host unreachable, no ACL yet) | the service manager | Exit `255` and a retry |
 | `SIGTERM` from `launchctl bootout` or `systemctl stop` | the supervisor | Listener released, exit `0` |
 
 A restart by the service manager opens a new tunnel, so every TCP connection that went through the old one is gone. Only the supervisor keeps a listener across a loss, and only for the forms `docs/CLI.md` §6.9 lists as supported. Any other form answers `UNSUPPORTED` with `--supervise` and relies on the service manager alone. `--supervise` does not retry a peer that rejects the pinned fingerprint or a policy that denies the request: both end the process with `AUTH_FAILED` or `PERMISSION_DENIED`, and the service manager then retries to the same result every few seconds. Fix the pin or `acl.toml` instead of widening the restart interval.
@@ -937,22 +950,22 @@ A restart by the service manager opens a new tunnel, so every TCP connection tha
 
 `Restart=always` (systemd) and `KeepAlive` (launchd) restart the process
 after a crash, but neither retries a bad argument or a missing
-`acl.toml` into working state. Both `serve` and `listen`/`serve --to` read
-`acl.toml` once at startup and deny everything if it's missing or invalid
-(`docs/CLI.md` §6.12/§6.13), so a unit that keeps bouncing is usually a
+`acl.toml` into working state. `serve` reads
+`acl.toml` once at startup and denies everything if it's missing or invalid
+(`docs/CLI.md` §6.12), so a unit that keeps bouncing is usually a
 config problem, not a supervisor problem. Check the log path first.
 
 Every restart, whether the supervisor bounced a crashed process or you
 asked for one, also ends every detached session on that listener. A
-session lives only as long as the `serve` or `listen`/`serve --to` process
+session lives only as long as the `serve` process
 that opened it, so a service-manager restart is not a resume point (README,
 Known limitations). Detach before restarting only if you are fine losing
 the shell. `qsh doctor` reports this as `service_restart_drops_sessions`
-(info) whenever a unit is registered for `serve` or `reverse`, and
+(info) whenever a unit is registered for `serve` (or a leftover `reverse`), and
 `qsh sessions` lists what a restart would end.
 
 A client that was attached when the listener restarted does not have to
-wait for the 45 s idle timeout to find out. `serve` and `listen` keep a
+wait for the 45 s idle timeout to find out. `serve` keeps a
 stateless reset key in `stateless_reset.key` next to `config.toml`, so the
 restarted process answers the client's first packet with a QUIC stateless
 reset and the client knows the session is gone within one round trip
