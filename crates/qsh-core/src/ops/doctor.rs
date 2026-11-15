@@ -465,8 +465,8 @@ impl Ops {
     }
 
     /// The first sign that this device takes inbound connections, in the
-    /// order ADR-0066 decision 3 lists them: a `[serve]`, `[listen]` or
-    /// `[reverse]` table with a key set, a registered service unit, a daemon
+    /// order ADR-0066 decision 3 lists them: a `[serve]` table with a key
+    /// set (a leftover `[listen]` or `[reverse]` table is not a signal), a registered service unit, a daemon
     /// (a `serve.json` record, live or left by a crash), a pin with a role other than `none`, a live invite that
     /// pins one. `None` when there is none.
     fn doctor_server_signal(
@@ -475,10 +475,7 @@ impl Ops {
         env: &DoctorEnvironment<'_>,
         now: SystemTime,
     ) -> Result<Option<&'static str>, OpError> {
-        if config.serve != crate::config::ServeConfig::default()
-            || config.listen != crate::config::ListenConfig::default()
-            || config.reverse != crate::config::ReverseConfig::default()
-        {
+        if config.serve != crate::config::ServeConfig::default() {
             return Ok(Some("config_section"));
         }
         let unit_registered = ["serve", "listen", "reverse"].iter().any(|mode| {

@@ -205,6 +205,31 @@ fn a_config_section_for_serving_makes_the_device_a_server() {
     assert!(codes(&data.findings).contains(&"acl_policy_missing"));
 }
 
+/// ADR-0068: the retired `[listen]` and `[reverse]` tables no longer say the
+/// device takes inbound connections; `[serve]` still does.
+#[test]
+fn leftover_listen_and_reverse_tables_are_not_a_server_signal() {
+    let (_guard, ops) = client_ops();
+    std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[listen]\nbind = \"[::]:4433\"\n[reverse]\noffered_name = \"phone\"\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let data = run_in(&ops, None, home.path());
+    assert_eq!(data.mode.as_deref(), Some("client"));
+
+    std::fs::write(
+        ops.paths().config_file(),
+        "[listen]\nbind = \"[::]:4433\"\n[serve]\nmax_sessions = 8\n",
+    )
+    .unwrap();
+    let data = run_in(&ops, None, home.path());
+    assert_eq!(data.mode.as_deref(), Some("server"));
+    assert_eq!(data.mode_basis.as_deref(), Some("config_section"));
+}
+
 #[test]
 fn a_registered_service_unit_of_any_run_mode_makes_the_device_a_server() {
     for mode in ["serve", "listen", "reverse"] {
