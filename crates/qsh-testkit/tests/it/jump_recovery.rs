@@ -403,13 +403,8 @@ async fn outer_migration_is_invisible_to_the_inner_connection() {
         address: addr.to_string(),
         fingerprint: host.h.server_identity.fingerprint,
     };
-    let plan = JumpPlan::new(
-        vec![at(j, a.addr())],
-        at(t, b.addr()),
-        None,
-        "laptop".into(),
-    )
-    .expect("a plan");
+    let plan =
+        JumpPlan::new(vec![at(j, a.addr())], at(t, b.addr()), "laptop".into()).expect("a plan");
     let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
     let mut session = Session::negotiate(chain.connection.clone(), "laptop")
         .await

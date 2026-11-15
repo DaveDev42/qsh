@@ -2861,47 +2861,28 @@ fn golden_connection_failed_fixture() {
 }
 
 /// `CONNECTION_FAILED` that names a hole punch (ADR-0054 decision 17):
-/// `details.punch{rendezvous, reason}` and the clause on the message. The
-/// binary cannot produce it yet (the `--rendezvous` flag and the pin's
-/// `rendezvous` key land in a later step), so the envelope is built the way
-/// the route builds the error: the direct dial's `CONNECTION_FAILED`, with
-/// the punch attached by `PunchFailure::attach_to`. The route test
-/// `punch_route::punch_give_up_reasons` produces the same shape from a real
-/// failed route for every reason.
+/// `details.punch{rendezvous, reason}` and the clause on the message. qsh no
+/// longer punches (ADR-0068), so nothing builds this envelope any more. The
+/// file stays registered and unedited and this test decodes it into the typed
+/// DTO and pins its key values: `details.punch` is still part of the
+/// `qsh.cli/v1` vocabulary.
 #[test]
-fn golden_connection_failed_punch_fixture() {
-    use qsh_core::OpError;
-    use qsh_core::punch::{GiveUpReason, PunchFailure};
-    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, CliError};
-
-    let direct = OpError::new(
-        ErrorCode::ConnectionFailed,
-        "no response from 127.0.0.1:<port> within 10s",
+fn frozen_connection_failed_punch_fixture() {
+    let env: qsh_proto::CliEnvelope =
+        serde_json::from_value(fixtures::load_cli_v1("error.CONNECTION_FAILED.punch.json"))
+            .expect("error.CONNECTION_FAILED.punch.json decodes as an envelope");
+    assert!(!env.ok);
+    assert_eq!(env.command, "exec.run");
+    let error = env.error.expect("the envelope carries an error");
+    assert_eq!(error.code, ErrorCode::ConnectionFailed);
+    assert!(error.retryable);
+    assert!(
+        error
+            .message
+            .contains("hole punching via home failed: timeout")
     );
-    let err = PunchFailure {
-        rendezvous: "home".into(),
-        reason: GiveUpReason::Timeout,
-    }
-    .attach_to(direct);
-    assert_eq!(err.details["punch"]["rendezvous"], "home");
-    assert_eq!(err.details["punch"]["reason"], "timeout");
-    let envelope = CliEnvelope {
-        schema: CLI_SCHEMA_V1.to_string(),
-        request_id: "01JTESTTESTTESTTESTTESTTES".to_string(),
-        command: "exec.run".to_string(),
-        ok: false,
-        data: None,
-        error: Some(CliError {
-            code: err.code.clone(),
-            message: err.message.clone(),
-            retryable: err.retryable,
-            details: err.details.clone(),
-        }),
-    };
-    check(
-        "error.CONNECTION_FAILED.punch.json",
-        serde_json::to_value(envelope).expect("envelope"),
-    );
+    assert_eq!(error.details["punch"]["rendezvous"], "home");
+    assert_eq!(error.details["punch"]["reason"], "timeout");
 }
 
 /// The jump chain's failure report (ADR-0056 decision 12, `docs/CLI.md`

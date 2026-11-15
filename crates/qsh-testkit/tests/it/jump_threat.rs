@@ -153,7 +153,6 @@ fn plan_via(d: &Direct, address: String) -> JumpPlan {
             address,
             fingerprint: t.fingerprint,
         },
-        None,
         "laptop".into(),
     )
     .expect("a valid plan")

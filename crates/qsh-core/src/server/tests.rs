@@ -5517,6 +5517,47 @@ async fn dispatch_rfwd_open_with_no_connection_is_unsupported() {
     assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
 }
 
+/// ADR-0068: qsh no longer punches or mediates a punch, so every build gives
+/// the answer ADR-0054 decision 9 gives for `[punch].mode = "off"`:
+/// `PunchRequest` and `PunchOffer` (and `RendezvousQuery`) are `UNSUPPORTED`,
+/// whoever asks and whatever the connection is, with no `host.punch` decision
+/// and nothing created. (A rendezvous reads the target's `UNSUPPORTED` as the
+/// `TARGET_UNSUPPORTED` refusal toward the initiator.)
+#[tokio::test]
+async fn punch_messages_are_unsupported_on_every_connection() {
+    let rig = allow_rig();
+    for registration in [false, true] {
+        let mut ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        ctx.is_reverse_registration = registration;
+        let candidate = wire::PunchCandidate::from_addr(
+            "198.51.100.7:5000".parse().unwrap(),
+            wire::PunchCandidateKind::Host,
+        );
+        let bodies = [
+            control_message::Body::PunchRequest(wire::PunchRequest {
+                attempt_id: vec![7; 16],
+                target_fingerprint: vec![9; 32],
+                candidates: vec![candidate.clone()],
+            }),
+            control_message::Body::PunchOffer(wire::PunchOffer {
+                attempt_id: vec![7; 16],
+                initiator_fingerprint: vec![9; 32],
+                candidates: vec![candidate],
+            }),
+            control_message::Body::RendezvousQuery(wire::RendezvousQuery {}),
+        ];
+        for (index, body) in bodies.into_iter().enumerate() {
+            let msg = ControlMessage::new(index as u64 + 1, body);
+            let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::Unsupported),
+                "message {index}, registration {registration}"
+            );
+        }
+    }
+}
+
 /// `RemoteForwardClose`, unlike `RemoteForwardOpen`, needs no
 /// connection — it is an ACL choke point over a `Server::
 /// remote_forwards` lookup plus an abort — so it is handled by

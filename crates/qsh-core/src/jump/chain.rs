@@ -2,7 +2,7 @@
 //! 15; MTU numbers from ADR-0057).
 //!
 //! [`dial_chain`] takes the connection to the first peer (the caller got it
-//! the ordinary way, punching included) and walks the rest of the chain:
+//! the ordinary way) and walks the rest of the chain:
 //!
 //! 1. negotiate with the peer reached so far and check it advertises
 //!    `jump.v1`;
@@ -53,7 +53,6 @@ use super::report::{JumpFailure, Stage};
 use crate::client::Session;
 use crate::datagram::{DatagramHub, DatagramRx, SendFailure};
 use crate::ops::OpError;
-use crate::punch::PunchPlan;
 
 /// Intermediate peers a chain may have (ADR-0056 decision 11). The end
 /// target is not counted.
@@ -102,8 +101,6 @@ pub struct JumpPlan {
     pub hops: Vec<HopPin>,
     /// The end target.
     pub end: HopPin,
-    /// The punch plan for the first peer's ordinary route (decision 13).
-    pub first_punch: Option<Arc<PunchPlan>>,
     /// The device name the client presents in `Hello` to every peer.
     pub device_name: String,
     /// Set when the first hop is a registered host reached only through the
@@ -134,12 +131,7 @@ impl JumpPlan {
     /// `INVALID_ARGUMENT` for no hop, more than [`MAX_JUMP_HOPS`], the same
     /// pin twice (by name or by fingerprint), or the end target among the
     /// hops.
-    pub fn new(
-        hops: Vec<HopPin>,
-        end: HopPin,
-        first_punch: Option<Arc<PunchPlan>>,
-        device_name: String,
-    ) -> Result<Self, OpError> {
+    pub fn new(hops: Vec<HopPin>, end: HopPin, device_name: String) -> Result<Self, OpError> {
         let names: Vec<&str> = hops.iter().map(|h| h.name.as_str()).collect();
         check_shape(&names, &end.name)?;
         for (i, hop) in hops.iter().enumerate() {
@@ -151,7 +143,6 @@ impl JumpPlan {
         Ok(Self {
             hops,
             end,
-            first_punch,
             device_name,
             first_reverse: None,
         })

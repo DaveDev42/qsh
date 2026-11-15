@@ -298,17 +298,6 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^bulk_yield::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
-      # ADR-0054 DoD 1: the 25 NAT pairs through the real client route over
-      # netsim, a real `qsh listen` as the rendezvous and the real `qsh serve
-      # --to` as the target, five seeds, 25 ms a link. The 22 pairs must run a
-      # command over a punched connection with p95 at or under 1.0 s from
-      # route start (signalling included) to the adopted connection, and the
-      # 3 expected failures give up inside the punch budget. The functional
-      # half runs on every OS in the `test` job; `QSH_ACCEPTANCE_SLOW` adds
-      # the five seeds and the p95 bound, which want a quiet runner.
-      - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^punch_accept::/)'
-        env:
-          QSH_ACCEPTANCE_SLOW: 1
       # ADR-0056 decision 25 DoD 13: what a jump chain costs over real
       # loopback UDP. `jump_echo_overhead_per_hop` keeps the PTY echo p95
       # within 2 ms per hop of the direct connection (one hop and two);
@@ -333,7 +322,7 @@ jobs:
   # `/bin/sh` and `/bin/stty` every macOS has; no expect and no TTY. The
   # 20 ms p95 bound is a timing assertion on a shared hosted runner, so this
   # job is not in `ci-ok`'s `needs` until it has a run history; making it
-  # required is the same repository-setting call as `punch-netns`.
+  # required is a repository-setting call.
   acceptance-macos:
     name: acceptance (predict, macOS)
     runs-on: macos-15
@@ -346,34 +335,6 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test it -E 'test(/^predict_accept::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
-
-  # ADR-0054 decision 24 (DoD 13): hole punching against the Linux kernel's
-  # own NAT. `scripts/netns/punch.sh` builds network namespaces with nftables
-  # `masquerade` (and `masquerade fully-random`) boxes, runs release `qsh`
-  # binaries as A, R and B across the nine none/masq/rand pairs and compares
-  # the outcome with netsim's table. It needs root and the netns/nftables
-  # tools, so it is its own job. Making it a required check is a repository
-  # setting (a person's call), which is why it is not in `ci-ok`'s `needs`.
-  # `sch_netem` (the 25 ms links) comes with linux-modules-extra when the
-  # image lacks it; the script says so if the delay could not be set.
-  punch-netns:
-    name: punch-netns (kernel NAT)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - name: Install the namespace tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y nftables iproute2
-          sudo apt-get install --no-install-recommends -y "linux-modules-extra-$(uname -r)" || true
-          sudo modprobe sch_netem || true
-      - run: cargo build --release -p qsh-cli
-      - name: Run the namespace harness
-        run: sudo -E scripts/netns/punch.sh
-        env:
-          QSH_ACCEPTANCE_NETNS: 1
-          QSH_BIN: target/release/qsh
 
   arch:
     name: arch-lint

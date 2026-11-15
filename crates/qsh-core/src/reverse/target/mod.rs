@@ -165,12 +165,7 @@ pub async fn run_reverse_observed(
         identity,
         controller,
         offered_name_flag,
-        // `[punch].mode = "off"` is read once, when the registration starts
-        // (ADR-0054 decision 19).
-        ReverseOptions {
-            punch_enabled: config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto,
-            ..ReverseOptions::default()
-        },
+        ReverseOptions::default(),
         on_runtime,
         on_unreachable,
         shutdown,
@@ -179,19 +174,11 @@ pub async fn run_reverse_observed(
 }
 
 /// What [`run_reverse_on`] varies beyond [`run_reverse_observed`]: the socket
-/// the registration connection and the hole-punching window share, how the
-/// host learns its own addresses, and the window length. Production uses
-/// the default; a test on a simulated network supplies a virtual socket and
-/// fixed addresses (ADR-0054 decisions 7 and 22).
+/// the registration connection leaves from. Production uses the default; a
+/// test on a simulated network supplies a virtual socket.
 pub struct ReverseOptions {
     /// Where the UDP socket comes from.
     pub socket: SocketSource,
-    /// How this host learns the addresses it offers as host candidates.
-    pub local_addrs: Arc<dyn crate::punch::LocalAddrs>,
-    /// `false` is `[punch].mode = "off"`: offers and queries get `UNSUPPORTED`.
-    pub punch_enabled: bool,
-    /// The server window's length; `None` is ADR-0054's six seconds.
-    pub punch_window: Option<Duration>,
     /// Test seam: when non-empty, the iroh relay's certificate is checked
     /// against exactly these roots (an in-process relay has a self-signed
     /// one). Production leaves it empty, which is the OS store.
@@ -208,9 +195,6 @@ impl Default for ReverseOptions {
     fn default() -> Self {
         Self {
             socket: SocketSource::Os,
-            local_addrs: Arc::new(crate::punch::RouteAddrs),
-            punch_enabled: true,
-            punch_window: None,
             iroh_relay_roots: Vec::new(),
             iroh_client_bind: Vec::new(),
         }
@@ -247,10 +231,6 @@ pub async fn run_reverse_on(
     // long-lived handle still picks up an operator's `qsh trust add`
     // without needing to be reopened.
     let trust = SharedTrustStore::open(paths.trust_file())?;
-    // The registration connection leaves from a punch-aware endpoint, so the
-    // NAT mapping the rendezvous sees is the one a later hole-punching window
-    // uses (ADR-0054 decision 7). The server side stays off until an offer
-    // opens a window.
     let evaluator = trust.clone() as Arc<dyn TrustEvaluator>;
     let local_identity = identity.local.clone();
     // The relay route of the registration (`relay.rs`): off unless the
@@ -281,24 +261,6 @@ pub async fn run_reverse_on(
     // once, reused across every attempt below, never rebuilt on a
     // reconnect. This is what makes "sessions survive reconnection" true.
     let runtime = crate::serve::host_runtime(paths, config, device_id.clone(), Arc::clone(&trust));
-    let build_target = |endpoint: &PunchEndpoint| {
-        let mut target = crate::punch::PunchTarget::new(
-            endpoint.clone(),
-            evaluator.clone(),
-            options.local_addrs.clone(),
-        );
-        if !options.punch_enabled {
-            target = target.disabled();
-        }
-        if let Some(window) = options.punch_window {
-            target = target.with_window(window);
-        }
-        let target = Arc::new(target);
-        target.set_configured(configured_controller(&trust, controller));
-        target
-    };
-    let mut punch_target = build_target(&endpoint);
-    runtime.server.set_punch_target(punch_target.clone());
     on_runtime(&runtime);
     let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
         offered_name: offered_name.clone(),
@@ -444,10 +406,6 @@ pub async fn run_reverse_on(
         // Must outlive the connection (`Dialer::dial`'s own docs).
         let _endpoint = dialed.endpoint;
         let conn = dialed.connection;
-        let controller_fp = conn.peer_fingerprint().map(|fp| *fp.as_bytes());
-        if let Some(fp) = controller_fp {
-            punch_target.note_registered(fp);
-        }
         let peer_fp = conn
             .peer_fingerprint()
             .map(|fp| fp.to_string())
@@ -688,9 +646,6 @@ pub async fn run_reverse_on(
                  ordinary backoff"
             );
         }
-        if let Some(fp) = &controller_fp {
-            punch_target.note_lost(fp);
-        }
         if rebind_on_loss {
             match PunchEndpoint::new(
                 SocketSource::Os,
@@ -700,8 +655,6 @@ pub async fn run_reverse_on(
             ) {
                 Ok(fresh) => {
                     endpoint = fresh;
-                    punch_target = build_target(&endpoint);
-                    runtime.server.set_punch_target(punch_target.clone());
                 }
                 // Keep the old socket; the next dial still works from it.
                 Err(err) => tracing::warn!(error = %err, "cannot open a fresh registration socket"),
@@ -943,20 +896,6 @@ async fn finish(
             )
         })?;
     Ok((routed, ctl, peer_hello))
-}
-
-/// The fingerprint of the controller `qsh serve --to <controller>` names, when
-/// this host's trust store pins it, for the `RendezvousList` a
-/// `RendezvousQuery` is answered with (ADR-0054 decision 5).
-fn configured_controller(trust: &SharedTrustStore, controller: &str) -> Vec<[u8; 32]> {
-    let store = trust.snapshot();
-    let Some(peer) = store.resolve_host(controller) else {
-        return Vec::new();
-    };
-    peer.fingerprint
-        .parse::<qsh_transport::Fingerprint>()
-        .map(|fp| vec![*fp.as_bytes()])
-        .unwrap_or_default()
 }
 
 /// Classify a [`qsh_transport::DialError`] into [`ReconnectCause`]'s

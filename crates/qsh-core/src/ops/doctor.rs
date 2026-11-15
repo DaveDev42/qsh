@@ -27,9 +27,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use qsh_proto::{
-    DoctorData, DoctorFinding, DoctorPunch, DoctorReq, DoctorTransport, ErrorCode, KeyStoreKind,
-};
+use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, DoctorTransport, ErrorCode, KeyStoreKind};
 use qsh_transport::{AuthPath, TransportTuning};
 
 use crate::acl::{Role, ca_policy_example_row, load_policy_or_deny, policy_example_rows};
@@ -39,10 +37,9 @@ use crate::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_FILE_PATHS_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE,
     ACL_POLICY_INVALID_ROLE_CLAUSE, ACL_POLICY_MISSING_SET_ROLE_HINT, ACL_PRINCIPAL_UNMATCHED,
     CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY,
-    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, PUNCH_FAILED, PUNCH_NO_RENDEZVOUS, PUNCH_SUCCEEDED,
-    QSH_PATH_SHADOWED, SCREEN_ECHO_UNSUPPORTED, SCREEN_SYNC_UNSUPPORTED,
-    TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET, TRUST_REMOVE_SCOPE,
-    probe_audit_path_writable,
+    DATAGRAM_UNAVAILABLE, PEER_UNTRUSTED, QSH_PATH_SHADOWED, SCREEN_ECHO_UNSUPPORTED,
+    SCREEN_SYNC_UNSUPPORTED, TRUST_FILE_ROLES_SUSPENDED_CLAUSE, TRUST_PIN_ROLE_UNSET,
+    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -396,12 +393,6 @@ impl Ops {
             }
             _ => None,
         };
-        // A host with no direct path gets one hole punch (ADR-0054 decision
-        // 20); a host with one does not.
-        let punch = match req.host.as_deref() {
-            Some(host) if direct_missing => self.doctor_punch(host, &mut findings),
-            _ => None,
-        };
         // A host behind a jump chain: which steps run on the stream carrier
         // (ADR-0056 decision 22). Only when the host is reachable at all.
         if let Some(host) = req.host.as_deref()
@@ -417,7 +408,10 @@ impl Ops {
             mode_basis: Some(judged.basis.to_string()),
             findings,
             transport,
-            punch,
+            // The `punch` object and the `punch_*` findings are kept in the
+            // contract; qsh no longer punches, so none is ever produced
+            // (ADR-0068).
+            punch: None,
         })
     }
 
@@ -1098,7 +1092,7 @@ impl Ops {
     /// The flag is whether `extra_host` has no direct path: its UDP probe
     /// failed (`no_route`, `udp_egress_blocked`, or `controller_unreachable`
     /// when the host is the controller), or it is a pin with no address.
-    /// That is when `qsh doctor <host>` punches (ADR-0054 decision 20).
+    /// That is when `qsh doctor <host>` skips the transport measurement.
     fn doctor_connectivity_findings(
         &self,
         config: &Config,
@@ -1128,8 +1122,8 @@ impl Ops {
             // silently turning into an "unreachable" finding.
             let (address, _server_name) = match resolve_peer_address(&trust, &hosts, host) {
                 Ok(resolved) => resolved,
-                // A pin with no address has no direct path to probe; only a
-                // punch can reach it. Anything else stays the hard error.
+                // A pin with no address has no direct path to probe.
+                // Anything else stays the hard error.
                 Err(err)
                     if err.code == ErrorCode::HostNotFound && pin_has_no_address(&trust, host) =>
                 {
@@ -1147,8 +1141,8 @@ impl Ops {
             // (ADR-0056 decision 13). `jump_hop_missing` reports a hop that
             // is gone, so an unresolved first hop is left to it.
             if let Ok(Some(hops)) = self.jump_hops_for(host) {
-                // A first hop pinned without an address is reached by
-                // punching; there is no direct path to probe.
+                // A first hop pinned without an address has no direct path
+                // to probe.
                 if let Some(first) = hops
                     .first()
                     .filter(|first| !pin_has_no_address(&trust, first))
@@ -1185,98 +1179,6 @@ impl Ops {
         }
 
         Ok((out, direct_missing))
-    }
-
-    /// The `punch` object and its finding (ADR-0054 decision 20): one punch
-    /// through the host's rendezvous peer, on the 8 s budget a command's
-    /// punch has, with the connection closed again once it stands. `None`
-    /// when punching is off or the host is reached through a reverse
-    /// registration. No address or port reaches the object, the finding, or
-    /// the `qsh::punch` lines the attempt writes.
-    ///
-    /// The rendezvous candidates are the route's own: `--rendezvous` when
-    /// given, else the pin's `rendezvous` hints. `--no-punch` or
-    /// `[punch].mode = "off"` turns the check off; an unreadable
-    /// `config.toml` does too, since the config findings already report it.
-    fn doctor_punch(&self, host: &str, findings: &mut Vec<DoctorFinding>) -> Option<DoctorPunch> {
-        use crate::punch::{PUNCH_BUDGET, PunchMode};
-
-        if !matches!(self.punch_mode(), Ok(PunchMode::Auto)) {
-            return None;
-        }
-        let plan = match self.resolve_route(host) {
-            Ok(PeerRoute::Forward(target)) => target.punch.filter(|plan| plan.has_rendezvous()),
-            Ok(PeerRoute::Reverse(_)) => return None,
-            // An address-less pin with no usable rendezvous is `HOST_NOT_FOUND`.
-            Err(err) if err.code == ErrorCode::HostNotFound => None,
-            Err(_) => return None,
-        };
-        let Some(plan) = plan else {
-            findings.push(punch_finding(&PUNCH_NO_RENDEZVOUS, "info", host, ""));
-            return Some(DoctorPunch {
-                rendezvous: None,
-                outcome: "no_rendezvous".to_string(),
-                reason: Some(
-                    crate::punch::GiveUpReason::NoRendezvous
-                        .as_str()
-                        .to_string(),
-                ),
-                candidate_kind: None,
-                family: None,
-                elapsed_ms: None,
-            });
-        };
-        let runtime = self.connect_runtime().ok()?;
-        let started = std::time::Instant::now();
-        let result = runtime.block_on(async {
-            let deadline = tokio::time::Instant::now() + PUNCH_BUDGET;
-            crate::punch::attempt(&plan, TransportTuning::default(), deadline).await
-        });
-        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        Some(match result {
-            Ok(win) => {
-                let info = win.info.clone();
-                // The point was that it stands; nothing runs over it.
-                win.connection.close(0, b"done");
-                win.endpoint.close(0, b"done");
-                findings.push(punch_finding(
-                    &PUNCH_SUCCEEDED,
-                    "info",
-                    host,
-                    &format!(
-                        ", rendezvous: {}, candidate: {}, family: {}",
-                        info.rendezvous, info.kind, info.family
-                    ),
-                ));
-                DoctorPunch {
-                    rendezvous: Some(info.rendezvous),
-                    outcome: "succeeded".to_string(),
-                    reason: None,
-                    candidate_kind: Some(info.kind.to_string()),
-                    family: Some(info.family.to_string()),
-                    elapsed_ms: Some(info.elapsed_ms),
-                }
-            }
-            Err(failure) => {
-                findings.push(punch_finding(
-                    &PUNCH_FAILED,
-                    "warn",
-                    host,
-                    &format!(
-                        ", rendezvous: {}, reason: {}",
-                        failure.rendezvous, failure.reason
-                    ),
-                ));
-                DoctorPunch {
-                    rendezvous: Some(failure.rendezvous),
-                    outcome: "failed".to_string(),
-                    reason: Some(failure.reason.as_str().to_string()),
-                    candidate_kind: None,
-                    family: None,
-                    elapsed_ms: Some(elapsed_ms),
-                }
-            }
-        })
     }
 
     /// `service_restart_drops_sessions` (M13 H1) joins the registered-unit
@@ -1931,23 +1833,6 @@ mod retired;
 
 #[cfg(test)]
 mod tests;
-
-/// One of the three punch findings: the diagnostic's text, then the host
-/// and `extra` (words from closed vocabularies and pin names, never an
-/// address).
-fn punch_finding(
-    diag: &crate::doctor::Diagnostic,
-    status: &str,
-    host: &str,
-    extra: &str,
-) -> DoctorFinding {
-    DoctorFinding {
-        code: diag.code.to_string(),
-        status: status.to_string(),
-        detail: format!("{} (host: {host}{extra})", diag.message),
-        remedy: Some(diag.remedy.to_string()),
-    }
-}
 
 /// Whether `host` names a pin that records no address.
 fn pin_has_no_address(trust: &TrustStore, host: &str) -> bool {

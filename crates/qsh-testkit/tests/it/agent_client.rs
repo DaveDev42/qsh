@@ -2,9 +2,9 @@
 //! 10, 12, 13 and 14): a test "host" opens `AGENT` streams on a real client
 //! connection, and the client's dispatcher bridges them to a `FakeAgent`.
 //!
-//! The host side here is a few lines of test code. The end-to-end tests that
-//! need the real host (`agent_forward_loopback_lists_and_signs`,
-//! `agent_forward_over_a_punched_connection`) belong to the host-side step.
+//! The host side here is a few lines of test code. The end-to-end test that
+//! needs the real host (`agent_forward_loopback_lists_and_signs`) belongs to
+//! the host-side step.
 
 use std::sync::Arc;
 use std::time::Duration;

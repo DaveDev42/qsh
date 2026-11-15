@@ -36,8 +36,6 @@ use qsh_testkit::loopback::{LoopbackHarness, make_identity};
 use qsh_transport::{Principal, StaticTrust};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::punch_route::{WorldOptions, world};
-
 const CHALLENGE: &[u8] = b"challenge-bytes";
 
 /// A key a fake agent lists, named by `blob`.
@@ -343,57 +341,6 @@ async fn agent_forward_loopback_lists_and_signs() {
     );
     drop(stream);
     rig.h.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agent_forward_over_a_punched_connection() {
-    let w = world(WorldOptions {
-        direct_listener: false,
-        pin_b_address: false,
-        ..WorldOptions::default()
-    })
-    .await;
-    // B's runtime directory, as `world` set it up.
-    let runtime = w._dir.path().join("run");
-
-    let k = key("punched-key");
-    let fake = FakeAgent::start(vec![k.clone()]).await.unwrap();
-    let ops = w.a.ops.clone().with_client_agent(client_agent(&fake));
-    let argv = program_argv(&k);
-    let out = blocking(move || ops.exec_run(exec_req("b", argv), ExecStdin::Closed))
-        .await
-        .expect("exec over the punch");
-    assert_eq!(out.data.remote_exit_code, 0, "{:?}", lines(&out));
-    assert_eq!(lines(&out), expected_lines(&k));
-    assert_eq!(
-        fake.received_kinds(),
-        vec![SSH2_AGENTC_REQUEST_IDENTITIES, SSH2_AGENTC_SIGN_REQUEST]
-    );
-    assert_eq!(w.punch_requests(), 1, "the connection came from a punch");
-
-    // The same flow in a session, with the test connecting to the socket the
-    // host announced.
-    let k2 = key("punched-session-key");
-    let fake2 = FakeAgent::start(vec![k2.clone()]).await.unwrap();
-    let ops2 = w.a.ops.clone().with_client_agent(client_agent(&fake2));
-    let stream = blocking(move || {
-        let session_ref = open_shell(&ops2, "b");
-        attach(&ops2, &session_ref)
-    })
-    .await;
-    let b_server = w.b_server.as_ref().expect("B's server");
-    wait_until("the session socket", || {
-        session_sockets(&runtime, b_server).len() == 1
-    })
-    .await;
-    let sock = session_sockets(&runtime, b_server).remove(0);
-    assert_eq!(run_program(&sock, &k2).await, expected_lines(&k2));
-    assert_eq!(
-        fake2.received_kinds(),
-        vec![SSH2_AGENTC_REQUEST_IDENTITIES, SSH2_AGENTC_SIGN_REQUEST]
-    );
-    drop(stream);
-    w.shutdown().await;
 }
 
 // ---- DoD 23.5 --------------------------------------------------------------

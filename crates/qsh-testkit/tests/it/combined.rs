@@ -7,10 +7,10 @@
 //! 27.5, 27.6, 27.7): which branch a connection takes at `Hello`, that a
 //! registered connection never reaches the host's dispatch, the quota order
 //! of each branch (R3 forward, A2/B5 registration), the single connection
-//! pool, and the single policy snapshot and audit sink. Decision 5's punch
-//! rows (the first request that is not a `Ping` decides, `[punch].mode = off`
-//! never switches) and the limits a switched connection keeps are here too;
-//! the netsim half of the punch branch is in `combined_punch.rs`.
+//! pool, and the single policy snapshot and audit sink. The retired
+//! punch rows (ADR-0068: every build answers a `PunchRequest` on a forward
+//! connection `UNSUPPORTED`, whatever comes before it, and never switches the
+//! connection to a rendezvous role) are here too.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,9 +118,8 @@ async fn open_session(
     session.session_open(open_req()).await
 }
 
-/// A `PunchRequest` for a target nobody registered: well formed, so the
-/// rendezvous answers it with a refusal reply (`TARGET_NOT_REGISTERED`)
-/// rather than an error.
+/// A well-formed `PunchRequest` for a target nobody registered. Since
+/// ADR-0068 no host relays it: the answer is the host's `UNSUPPORTED`.
 pub(super) fn punch_request() -> wire::PunchRequest {
     wire::PunchRequest {
         attempt_id: vec![7u8; 16],
@@ -188,7 +187,6 @@ async fn punch_reply_message(ctl: &mut FramedStream, id: u64) -> (Reply, String)
 }
 
 const NOT_SERVED: &str = "hole-punching requests are not served by this peer";
-const PUNCH_ONLY: &str = "a hole-punching connection answers one PunchRequest and Ping";
 
 // ---------------------------------------------------------------------------
 // DoD 27.1 registration rows: the branch is decided by the peer's `Hello`.
@@ -272,13 +270,12 @@ async fn combined_dispatch_table() {
     punch_rows().await;
 }
 
-/// Decision 4 and 5, the rows that start at the first request: a `Hello`
-/// without `reverse` is a forward connection until its first request that is
-/// not a `Ping`, and only a `PunchRequest` there switches it to a punching
-/// connection. A request of any other kind, or a data stream the peer opens,
-/// settles it as a forward connection, and a `PunchRequest` that comes later
-/// is the host's `UNSUPPORTED`. `[punch].mode = off` and a peer without
-/// `punch.v1` never switch.
+/// Decision 4 and 5 as ADR-0068 left them, the rows that start at the first
+/// request: a `Hello` without `reverse` is a forward connection and stays one
+/// whatever its first request is. A `PunchRequest` is the host's
+/// `UNSUPPORTED` (ADR-0054 decision 9's "off" answer) whether it comes
+/// first, after a `Ping`, after a settled request or on a peer without
+/// `punch.v1`, and it never makes a `host.punch` decision.
 async fn punch_rows() {
     #[derive(Clone, Copy, Debug)]
     enum First {
@@ -299,75 +296,49 @@ async fn punch_rows() {
     struct Row {
         label: &'static str,
         first: First,
-        mode_off: bool,
         peer_has_punch: bool,
-        /// Whether the connection ends up a punching one.
-        switches: bool,
     }
 
     let rows = [
         Row {
             label: "Ping then PunchRequest",
             first: First::PingThenPunch,
-            mode_off: false,
             peer_has_punch: true,
-            switches: true,
         },
         Row {
             label: "PunchRequest first",
             first: First::Punch,
-            mode_off: false,
             peer_has_punch: true,
-            switches: true,
         },
         Row {
             label: "SessionOpen first",
             first: First::SessionOpen,
-            mode_off: false,
             peer_has_punch: true,
-            switches: false,
         },
         Row {
             label: "ExecStart first",
             first: First::ExecStart,
-            mode_off: false,
             peer_has_punch: true,
-            switches: false,
         },
         Row {
             label: "RendezvousQuery first",
             first: First::RendezvousQuery,
-            mode_off: false,
             peer_has_punch: true,
-            switches: false,
         },
         Row {
             label: "TCP_CONNECT stream first",
             first: First::TcpConnectStream,
-            mode_off: false,
             peer_has_punch: true,
-            switches: false,
         },
         Row {
             label: "JUMP stream first",
             first: First::JumpStream,
-            mode_off: false,
             peer_has_punch: true,
-            switches: false,
-        },
-        Row {
-            label: "[punch].mode = off",
-            first: First::Punch,
-            mode_off: true,
-            peer_has_punch: true,
-            switches: false,
         },
         Row {
             label: "peer without punch.v1",
             first: First::Punch,
-            mode_off: false,
             peer_has_punch: false,
-            switches: false,
         },
     ];
 
@@ -380,7 +351,6 @@ async fn punch_rows() {
             limits(512, 32),
         )
         .await;
-        h.listen.set_punch_enabled(!row.mode_off);
         let mut hello = forward_hello();
         if !row.peer_has_punch {
             hello.capabilities.retain(|c| c != wire::CAP_PUNCH_V1);
@@ -403,11 +373,6 @@ async fn punch_rows() {
                 assert!(
                     matches!(pong.body, Some(control_message::Body::Pong(_))),
                     "{label}: a Ping is answered by either role"
-                );
-                assert_eq!(
-                    h.listen.punch_connections(),
-                    0,
-                    "{label}: Ping decides nothing"
                 );
             }
             First::Punch => {}
@@ -468,45 +433,12 @@ async fn punch_rows() {
         }
 
         let (reply, message) = punch_reply_message(&mut ctl, id()).await;
-        if row.switches {
-            assert_eq!(
-                reply,
-                Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32),
-                "{label}: the rendezvous answers it"
-            );
-            assert_eq!(h.listen.punch_connections(), 1, "{label}");
-            let records = wait_for_audit_records(&h.audit, 1, TIMEOUT).await;
-            assert!(
-                records
-                    .iter()
-                    .any(|r| r.action == "host.punch" && r.decision == "allow"),
-                "{label}: judged as host.punch: {records:?}"
-            );
-            // A switched connection answers Ping and nothing else.
-            let (reply, message) = {
-                let msg = ask(
-                    &mut ctl,
-                    id(),
-                    control_message::Body::SessionOpen(open_req()),
-                )
-                .await;
-                match classify(msg) {
-                    Reply::Error(code) => (Reply::Error(code), PUNCH_ONLY.to_string()),
-                    other => (other, String::new()),
-                }
-            };
-            assert_eq!(reply, Reply::Error("UNSUPPORTED".into()), "{label}");
-            assert_eq!(message, PUNCH_ONLY, "{label}");
-            assert_eq!(h.broker.live_counts().live, 0, "{label}: no session");
-        } else {
-            assert_eq!(reply, Reply::Error("UNSUPPORTED".into()), "{label}");
-            assert_eq!(message, NOT_SERVED, "{label}: the host's own answer");
-            assert_eq!(h.listen.punch_connections(), 0, "{label}");
-            assert!(
-                h.audit.records().iter().all(|r| r.action != "host.punch"),
-                "{label}: no punch decision was made"
-            );
-        }
+        assert_eq!(reply, Reply::Error("UNSUPPORTED".into()), "{label}");
+        assert_eq!(message, NOT_SERVED, "{label}: the host's own answer");
+        assert!(
+            h.audit.records().iter().all(|r| r.action != "host.punch"),
+            "{label}: no punch decision was made"
+        );
         drop(dialed);
         h.shutdown().await;
     }
@@ -540,8 +472,7 @@ async fn listen_without_serve_hello_is_unchanged() {
     };
     host.shutdown().await;
 
-    // Standalone listen: a peer with no `Hello.reverse` (and no `punch.v1`,
-    // which would make it a punching connection) is refused, a registering
+    // Standalone listen: a peer with no `Hello.reverse` is refused, a registering
     // peer is answered with the controller's `Hello`.
     let target = make_identity();
     let listen = ReverseHarness::start_with(
@@ -830,110 +761,6 @@ async fn forward_flood_from_one_principal_leaves_room_for_registration() {
 }
 
 // ---------------------------------------------------------------------------
-// Decision 5: a connection that switched to the punching role keeps the
-// rendezvous limits of ADR-0054 decision 10 (2).
-// ---------------------------------------------------------------------------
-
-/// C30: the connection quota is held from the start, the 16-connection permit
-/// is taken at the switch, an answered punching connection closes three
-/// seconds later, and everything but `Ping` on it is `UNSUPPORTED`. The
-/// sixteen permits are not the forward pool: a forward client still gets a
-/// session while they are all taken.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_combined_punch_connection_keeps_the_rendezvous_limits() {
-    use qsh_core::punch::RENDEZVOUS_IDLE;
-
-    const CAP: usize = qsh_proto::punch::RENDEZVOUS_MAX_CLIENTS;
-    // One initiator may have a single attempt in flight and six a minute, so
-    // sixteen punching connections need sixteen initiators.
-    let punchers: Vec<TestIdentity> = (0..=CAP).map(|_| make_identity()).collect();
-    let names: Vec<String> = (0..=CAP).map(|i| format!("p{i}")).collect();
-    let forwarder = make_identity();
-    let mut peers: Vec<(&TestIdentity, &str)> = punchers
-        .iter()
-        .zip(names.iter())
-        .map(|(id, n)| (id, n.as_str()))
-        .collect();
-    peers.push((&forwarder, "fwd"));
-    let h = CombinedHarness::start(Arc::new(AllowAllPinned), pins(&peers), limits(512, 32)).await;
-
-    let mut held = Vec::new();
-    let mut answered_at = Vec::new();
-    for id in &punchers[..CAP] {
-        let (dialed, mut ctl, _) = h.forward(id).await.expect("forward hello");
-        let (reply, _) = punch_reply_message(&mut ctl, 1).await;
-        assert_eq!(
-            reply,
-            Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32)
-        );
-        answered_at.push(tokio::time::Instant::now());
-        held.push((dialed, ctl));
-    }
-    assert_eq!(h.listen.punch_connections(), CAP);
-    assert_eq!(
-        h.quotas.total_connections_in_use(),
-        CAP,
-        "a punching connection holds its connection quota from the start"
-    );
-
-    // The seventeenth is refused at the switch: retryable, then closed.
-    let (dialed17, mut ctl17, _) = h.forward(&punchers[CAP]).await.expect("forward hello");
-    let (reply, message) = punch_reply_message(&mut ctl17, 1).await;
-    assert_eq!(reply, Reply::Error("RESOURCE_EXHAUSTED".into()));
-    assert_eq!(message, "too many hole-punching connections");
-    tokio::time::timeout(TIMEOUT, dialed17.connection.closed())
-        .await
-        .expect("the refused connection is closed");
-    assert_eq!(h.listen.punch_connections(), CAP, "the cap held");
-
-    // Not the forward pool: a forward client opens a session meanwhile.
-    let (dialed, ctl, hello) = h.forward(&forwarder).await.expect("forward hello");
-    open_session(&dialed, ctl, hello)
-        .await
-        .expect("a forward client is served while the punch permits are all taken");
-
-    // One request and `Ping` only: a second `PunchRequest` and any other
-    // request draw `UNSUPPORTED`; `Ping` is answered.
-    {
-        let (_, ctl) = &mut held[0];
-        let (reply, message) = punch_reply_message(ctl, 2).await;
-        assert_eq!(reply, Reply::Error("UNSUPPORTED".into()));
-        assert_eq!(message, PUNCH_ONLY);
-        let pong = ask(ctl, 3, control_message::Body::Ping(wire::Ping {})).await;
-        assert!(matches!(pong.body, Some(control_message::Body::Pong(_))));
-    }
-
-    // Three seconds after its answer each one is closed, and the permits and
-    // the connection quota come back.
-    for (i, (dialed, _)) in held.iter().enumerate() {
-        tokio::time::timeout(RENDEZVOUS_IDLE + TIMEOUT, dialed.connection.closed())
-            .await
-            .expect("an answered punching connection is closed");
-        assert!(
-            answered_at[i].elapsed() >= RENDEZVOUS_IDLE - Duration::from_millis(200),
-            "connection {i} lived {:?}, less than the rendezvous window",
-            answered_at[i].elapsed()
-        );
-    }
-    wait_for(TIMEOUT, || {
-        (h.listen.punch_connections() == 0).then_some(())
-    })
-    .await;
-    wait_for(TIMEOUT, || {
-        (h.quotas.total_connections_in_use() <= 1).then_some(())
-    })
-    .await;
-    let (_d, mut ctl, _) = h.forward(&punchers[CAP]).await.expect("forward hello");
-    let (reply, _) = punch_reply_message(&mut ctl, 1).await;
-    assert_eq!(
-        reply,
-        Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32),
-        "a freed permit is usable again"
-    );
-    h.shutdown().await;
-}
-
-// ---------------------------------------------------------------------------
 // Decision 19: the order of a shutdown.
 // ---------------------------------------------------------------------------
 
@@ -1130,18 +957,11 @@ async fn combined_unparseable_acl_denies_every_path() {
     }
     assert_eq!(h.broker.live_counts().live, 0);
 
-    // The punch branch: the same policy, the same denial. The refusal is
-    // final, so the connection closes and its permit comes back.
-    let (dialed, mut ctl, _) = h.forward(&peer).await.expect("forward hello");
+    // A `PunchRequest` is `UNSUPPORTED` without any policy decision, so a
+    // policy that denies everything has nothing to deny (ADR-0068).
+    let (_dialed, mut ctl, _) = h.forward(&peer).await.expect("forward hello");
     let (reply, _) = punch_reply_message(&mut ctl, 1).await;
-    assert_eq!(reply, Reply::Error("PERMISSION_DENIED".into()));
-    tokio::time::timeout(TIMEOUT, dialed.connection.closed())
-        .await
-        .expect("a denied punching connection is closed");
-    wait_for(TIMEOUT, || {
-        (h.listen.punch_connections() == 0).then_some(())
-    })
-    .await;
+    assert_eq!(reply, Reply::Error("UNSUPPORTED".into()));
     h.shutdown().await;
 }
 
@@ -1200,14 +1020,11 @@ async fn combined_audit_failure_fails_closed_on_every_path() {
     assert!(h.listen.registry().snapshot().is_empty());
     assert_eq!(h.listen.live_connections(), 0);
 
-    // The punch branch: judged as `host.punch`, which cannot be recorded, so
-    // it is denied and nothing is relayed.
-    let (dialed, mut ctl, _) = h.forward(&peer).await.expect("forward hello");
+    // A `PunchRequest` makes no decision to record, so it is `UNSUPPORTED`
+    // even with the sink failing (ADR-0068).
+    let (_dialed, mut ctl, _) = h.forward(&peer).await.expect("forward hello");
     let (reply, _) = punch_reply_message(&mut ctl, 1).await;
-    assert_eq!(reply, Reply::Error("PERMISSION_DENIED".into()));
-    tokio::time::timeout(TIMEOUT, dialed.connection.closed())
-        .await
-        .expect("a denied punching connection is closed");
+    assert_eq!(reply, Reply::Error("UNSUPPORTED".into()));
 
     // The latch is not permanent: the next successful write recovers.
     sink.failing.store(false, Ordering::SeqCst);
