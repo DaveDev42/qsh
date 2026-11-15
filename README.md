@@ -1267,6 +1267,12 @@ Some of these are MVP scope decisions, some are unfinished work.
   the only NAT traversal. On a network that blocks both UDP and the relay
   (TCP 443) a host behind NAT cannot be reached, and qsh has no other path.
   Use SSH there. A host you can reach by address is unaffected.
+- Port clash, historical. `qsh serve` and the retired `qsh listen` both
+  defaulted to port 4433. A second process that collided still reports
+  `CONFIG_ERROR` (exit `255`) with this remedy on stderr, kept here because the
+  text stays in the contract:
+
+  > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` process that opened it, so a restart
   ends every detached session on it; it is not a resume point. A client that
