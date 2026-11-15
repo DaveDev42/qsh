@@ -52,7 +52,7 @@ pseudo-console, `qsh exec`, `qsh cp`, port forwards, the ssh
 bootstrap and `qsh setup host`. See [Known limitations](#known-limitations)
 for what differs.
 
-**Status.** Version 0.5.8, not for production use while several campaigns
+**Status.** Version 0.9.0, not for production use while several campaigns
 that a person runs by hand are still open; see
 [Project status](#project-status). There is no external security review: the
 protocol and key lifecycle are checked by the project's own threat model,
