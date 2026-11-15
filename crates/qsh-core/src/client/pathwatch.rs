@@ -52,9 +52,6 @@
 //! — the closest thing to the "PTO 실패" `protocol.md` §2 names. A false
 //! positive costs a re-dial and a replay, never correctness; that asymmetry
 //! is why the defaults lean towards declaring death rather than waiting.
-//! A reverse registration is the exception, because its loss ends every
-//! tunnel carried on it with no replay; it gets
-//! [`PathWatchConfig::reverse_default`] on both ends.
 //!
 //! **A starved watchdog is not a dead path either.** The watch measures the
 //! path with its own timer, so a process that was not scheduled (a host at
@@ -119,27 +116,6 @@ impl Default for PathWatchConfig {
 }
 
 impl PathWatchConfig {
-    /// The default for a reverse registration connection, on both ends of
-    /// it: the target's `qsh serve --to` watch and the controller's
-    /// `qsh listen` watch (ADR-0041).
-    ///
-    /// The probe cadence and strike count are [`Default::default`]'s; only
-    /// the silence floor moves, from 1 s to 4.25 s. An interactive attach
-    /// wants a dead path called within its 2 s redial budget. A registration
-    /// has no one waiting on it, and each loss drops every reverse tunnel
-    /// carried on it with no replay, so it is worth riding out the 2 to 4 s
-    /// uplink bursts a lossy Wi-Fi hop produces (the longest measured in
-    /// issue #10 was 3.6 s; the watchdog samples per tick, so it can see
-    /// up to one cadence more). `P×S+D` is then exactly 5 s, the
-    /// `REVERSE_DETECTION_CEILING_MS` that `config::RecoverySection`
-    /// enforces on every `[recovery]` override.
-    pub fn reverse_default() -> Self {
-        Self {
-            min_dead_after: Duration::from_millis(4_250),
-            ..Self::default()
-        }
-    }
-
     /// How late a watchdog tick must fire before the lateness is blamed on
     /// this process rather than the path (ADR-0042 decision 1): one probe
     /// interval, the unit a strike is counted in. Derived rather than a
@@ -152,7 +128,7 @@ impl PathWatchConfig {
     /// The one extension granted when the dead-path timer expires while raw
     /// UDP datagrams were still arriving but no authenticated frame did
     /// ([`ProbeSource::rx_datagrams`]): `probe_interval × strikes`, one
-    /// whole round of probes (750 ms by default, on the reverse default too).
+    /// whole round of probes (750 ms by default).
     /// Once per dead-timer cycle, and only an authenticated frame starts a
     /// new cycle, so it is also the most a forger can delay a verdict.
     /// Derived rather than a field, like `self_delay_threshold`, so

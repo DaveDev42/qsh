@@ -721,8 +721,7 @@ pub struct ServeConfig {
 impl ServeConfig {
     /// Default on-demand idle limit: 10 minutes (ADR-0051 decision 2).
     pub const DEFAULT_ON_DEMAND_IDLE_MS: u64 = 10 * 60 * 1000;
-    /// Upper bound of `on_demand_idle_ms`: 24 hours, the same ceiling
-    /// `[reverse].backoff_max_ms` has.
+    /// Upper bound of `on_demand_idle_ms`: 24 hours.
     pub const MAX_ON_DEMAND_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
 
     /// Default per-session replay budget: 8 MiB (`docs/PRD.md` §13).
@@ -1100,12 +1099,11 @@ impl AuditConfig {
     }
 }
 
-/// `[listen]` section — `qsh listen`, the reverse-mode controller
-/// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2/§11-4).
+/// `[listen]` section — the retired `qsh listen` controller (ADR-0068).
 ///
-/// M3 plan Step 3 (2473c88) PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
-/// `stale_retention`, read by the retired `Listen` stale-eviction sweeper
-/// (ADR-0068); the key still parses.
+/// Nothing reads these keys any more. They still parse, `config list` and
+/// `config get` still show them, and [`crate::retired::leftover_config_keys`]
+/// reports a table that still carries one; no value is validated.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ListenConfig {
@@ -1121,10 +1119,7 @@ pub struct ListenConfig {
     pub allow_advertised_names: bool,
     /// How long a registration whose connection died stays visible as
     /// `state: "stale"` before the controller removes it, in seconds
-    /// (`docs/design/protocol.md` §11-4, `docs/CLI.md` §6.13). Unset ⇒
-    /// [`ListenConfig::DEFAULT_STALE_RETENTION_SECS`] (120 s). Validated
-    /// against `[reverse].backoff_max_ms` by [`ListenConfig::stale_retention`]
-    /// — see that method's doc for why.
+    /// (`docs/design/protocol.md` §11-4, `docs/CLI.md` §6.13).
     pub stale_retention: Option<u64>,
     /// Whether this `qsh listen` also serves forward connections on the
     /// same socket (ADR-0059 decision 1): `true` makes it the combined
@@ -1133,74 +1128,11 @@ pub struct ListenConfig {
     pub serve: bool,
 }
 
-impl ListenConfig {
-    /// Default stale retention: 120 s (`docs/design/protocol.md` §11-4,
-    /// `docs/CLI.md` §6.13).
-    pub const DEFAULT_STALE_RETENTION_SECS: u64 = 120;
-
-    /// The multiple of `[reverse].backoff_max_ms` [`ListenConfig::stale_retention`]
-    /// requires `stale_retention` to clear (`docs/design/protocol.md` §11-4:
-    /// `stale_retention > backoff_max_ms × 3`).
-    pub const STALE_RETENTION_BACKOFF_MULTIPLE: u32 = 3;
-
-    /// Defaulted and validated stale retention, checked against `backoff_max`
-    /// — the *other* section's already-validated [`ReverseConfig::backoff`]
-    /// ceiling, taken as a parameter here rather than read from a sibling
-    /// `Config::reverse` field so this section stays ignorant of its
-    /// sibling's shape (`Config::stale_retention` below is the one call site
-    /// that wires the two together, the same split
-    /// `reverse::listen::run_listen` already keeps between config
-    /// sections).
-    ///
-    /// **Why `× 3`:** a target's worst-case re-registration delay is
-    /// `backoff_max_ms` (the exponential backoff ceiling) plus jitter —
-    /// bounded well under `backoff_max_ms × 2`. `stale_retention` must clear
-    /// that with real headroom or the entry is evicted while a legitimate
-    /// reconnect is still in flight, which would make `qsh hosts` show a
-    /// host as gone right as it is about to come back. The extra margin
-    /// beyond `× 2` is reserved for Step 8's re-attach wait, which needs to
-    /// observe the *stale* state (not a vanished entry) for long enough to
-    /// still be waiting when the reconnect lands. Fails closed
-    /// (`CONFIG_ERROR`, non-retryable) rather than silently clamping —
-    /// the same discipline [`ReverseConfig::backoff`] applies to its own
-    /// knobs.
-    pub fn stale_retention(
-        &self,
-        backoff_max: std::time::Duration,
-    ) -> Result<std::time::Duration, OpError> {
-        let secs = self
-            .stale_retention
-            .unwrap_or(Self::DEFAULT_STALE_RETENTION_SECS);
-        if secs == 0 {
-            return Err(Self::stale_retention_config_error(
-                "[listen].stale_retention must be greater than 0",
-            ));
-        }
-        let retention = std::time::Duration::from_secs(secs);
-        let floor = backoff_max.saturating_mul(Self::STALE_RETENTION_BACKOFF_MULTIPLE);
-        if retention <= floor {
-            return Err(Self::stale_retention_config_error(format!(
-                "[listen].stale_retention ({secs}s) must be greater than \
-                 [reverse].backoff_max_ms × {} ({}ms)",
-                Self::STALE_RETENTION_BACKOFF_MULTIPLE,
-                floor.as_millis(),
-            )));
-        }
-        Ok(retention)
-    }
-
-    fn stale_retention_config_error(message: impl Into<String>) -> OpError {
-        OpError::new(ErrorCode::ConfigError, message).with_retryable(false)
-    }
-}
-
-/// `[reverse]` section — `qsh reverse <controller>`, the reverse-mode
-/// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2, §11-4).
+/// `[reverse]` section — the retired `qsh reverse` target (ADR-0068).
 ///
-/// M3 plan Step 3 (2473c88) PR 3a wired `offered_name` only — `controller` parses
-/// but is not read by any code path (see its own field doc). The M3 plan (2473c88)
-/// Step 4 adds the backoff knobs below, read by the reconnect loop in
-/// `reverse::target::run_reverse`.
+/// `controller` is still read as a legacy key that makes `qsh serve` refuse
+/// to start ([`crate::retired::check_serve_config`]); the backoff keys parse
+/// and nothing validates or reads them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReverseConfig {
@@ -1221,108 +1153,14 @@ pub struct ReverseConfig {
     /// `[serve].to` silently wins when the two agree.
     pub controller: Option<String>,
     /// Name this target offers itself as. `--offered-name` wins over this.
-    /// Only takes effect when the controller has no trust-store alias for
-    /// this peer *and* the controller's `[listen].allow_advertised_names`
-    /// is set — see `reverse::admit::admit`.
+    /// Retired; parsed and ignored.
     pub offered_name: Option<String>,
-    /// Delay before the first re-dial after the reconnect loop judges the
-    /// connection to the controller dead, in milliseconds. Doubles on each
-    /// further failure up to [`ReverseConfig::backoff`]'s `max`
-    /// (`docs/design/protocol.md` §11-4 — the multiplier itself is fixed
-    /// at 2, not configurable). Unset ⇒
-    /// [`ReverseConfig::DEFAULT_BACKOFF_INITIAL_MS`] (500 ms).
+    /// Retired; parsed and ignored.
     pub backoff_initial_ms: Option<u64>,
-    /// Ceiling the backoff delay never exceeds, in milliseconds. Unset ⇒
-    /// [`ReverseConfig::DEFAULT_BACKOFF_MAX_MS`] (30 s) —
-    /// `[listen].stale_retention`'s documented default (120 s) is sized
-    /// against this default specifically (`docs/design/protocol.md`
-    /// §11-4: `stale_retention > backoff_max_ms × 3`).
+    /// Retired; parsed and ignored.
     pub backoff_max_ms: Option<u64>,
-    /// `±` jitter applied to every backoff delay, as a whole-number
-    /// percentage. Unset ⇒ [`ReverseConfig::DEFAULT_BACKOFF_JITTER_PCT`]
-    /// (20, i.e. `±20%`).
+    /// Retired; parsed and ignored.
     pub backoff_jitter_pct: Option<u8>,
-}
-
-/// Effective, validated `[reverse]` backoff parameters
-/// (`docs/design/protocol.md` §11-4), returned by [`ReverseConfig::backoff`].
-/// The multiplier is fixed at 2 and is not a field here — nothing in the
-/// CLI/config contract makes it configurable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BackoffLimits {
-    /// Delay before the first re-dial after a connection death.
-    pub initial: std::time::Duration,
-    /// Ceiling the (pre-jitter) delay never exceeds.
-    pub max: std::time::Duration,
-    /// `±` jitter applied to each delay, as a percentage in `0..100`.
-    pub jitter_pct: u8,
-}
-
-impl ReverseConfig {
-    /// Default initial backoff: 500 ms (`docs/design/protocol.md` §11-4).
-    pub const DEFAULT_BACKOFF_INITIAL_MS: u64 = 500;
-    /// Default backoff ceiling: 30 s (`docs/design/protocol.md` §11-4).
-    pub const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
-    /// Default backoff jitter: `±20%` (`docs/design/protocol.md` §11-4).
-    pub const DEFAULT_BACKOFF_JITTER_PCT: u8 = 20;
-    /// Upper bound on `backoff_max_ms` (and therefore `backoff_initial_ms`,
-    /// which is validated `<= max_ms` below) — 24 hours, wildly more
-    /// generous than any real reconnect ceiling but small enough that
-    /// `target::jitter`'s `u128 → i64` millisecond cast and its
-    /// `millis * offset_pct` multiply (`offset_pct` bounded to `±99` by the
-    /// `< 100` check below) never come close to overflowing (adversarial
-    /// review finding: an unbounded config value let that arithmetic wrap
-    /// or go negative, producing a zero-length backoff that busy-loops
-    /// redials — exactly what this validation exists to fail closed on
-    /// instead).
-    const MAX_BACKOFF_MS: u64 = 24 * 60 * 60 * 1000;
-
-    /// Defaulted and validated backoff parameters. Fails closed
-    /// (`CONFIG_ERROR`, non-retryable) on nonsense rather than silently
-    /// clamping it: a `0` initial delay would busy-loop redials, a `max`
-    /// below `initial` is a contradiction, a jitter `≥ 100%` can swing a
-    /// delay down to (or past) zero, defeating backoff's entire purpose,
-    /// and a `max` past `Self::MAX_BACKOFF_MS` risks the same zero-delay
-    /// failure through integer overflow in `target::jitter` instead.
-    pub fn backoff(&self) -> Result<BackoffLimits, OpError> {
-        let initial_ms = self
-            .backoff_initial_ms
-            .unwrap_or(Self::DEFAULT_BACKOFF_INITIAL_MS);
-        let max_ms = self.backoff_max_ms.unwrap_or(Self::DEFAULT_BACKOFF_MAX_MS);
-        let jitter_pct = self
-            .backoff_jitter_pct
-            .unwrap_or(Self::DEFAULT_BACKOFF_JITTER_PCT);
-        if initial_ms == 0 {
-            return Err(Self::backoff_config_error(
-                "[reverse].backoff_initial_ms must be greater than 0",
-            ));
-        }
-        if max_ms < initial_ms {
-            return Err(Self::backoff_config_error(format!(
-                "[reverse].backoff_max_ms ({max_ms}) must be >= backoff_initial_ms ({initial_ms})"
-            )));
-        }
-        if max_ms > Self::MAX_BACKOFF_MS {
-            return Err(Self::backoff_config_error(format!(
-                "[reverse].backoff_max_ms ({max_ms}) must be <= {} (24h)",
-                Self::MAX_BACKOFF_MS
-            )));
-        }
-        if jitter_pct >= 100 {
-            return Err(Self::backoff_config_error(format!(
-                "[reverse].backoff_jitter_pct ({jitter_pct}) must be < 100"
-            )));
-        }
-        Ok(BackoffLimits {
-            initial: std::time::Duration::from_millis(initial_ms),
-            max: std::time::Duration::from_millis(max_ms),
-            jitter_pct,
-        })
-    }
-
-    fn backoff_config_error(message: impl Into<String>) -> OpError {
-        OpError::new(ErrorCode::ConfigError, message).with_retryable(false)
-    }
 }
 
 /// `[transport]` section (`docs/adr/0021-transport-liveness-knobs.md`
@@ -1410,39 +1248,24 @@ impl TransportConfig {
 /// (`docs/adr/0021-transport-liveness-knobs.md` decision 4).
 pub const RECOVERY_DETECTION_CEILING_MS: u64 = 2_000;
 
-/// Ceiling on the detection budget `P×S+D` of a reverse registration
-/// connection, in milliseconds (ADR-0041 decision 4). A registration has no
-/// one waiting on it and its loss takes every reverse tunnel with it, so it
-/// is allowed 5 s where an attach is allowed
-/// [`RECOVERY_DETECTION_CEILING_MS`]. `reverse_blackout.rs` and
-/// `reverse_resume_chaos.rs` pin their reverse recovery against this figure
-/// by their own copy of the number; `attach_recovery.rs` keeps 2000.
-pub const REVERSE_DETECTION_CEILING_MS: u64 = 5_000;
-
 /// `[recovery]` section (ADR-0021 decision 4, ADR-0041).
 ///
-/// Three of the watchdog's six knobs are open, plus a two-key override for
-/// the reverse registration connection. `rtt_multiple` (8),
+/// Three of the watchdog's six knobs are open. `rtt_multiple` (8),
 /// `idle_probe_interval` and `active_window` stay closed: a key such as
 /// `[recovery].rtt_multiple` is reported by `qsh doctor` as
 /// `config_unknown_key` and otherwise ignored.
 ///
-/// `min_dead_after_ms` and `strikes` govern the attach and the supervised
-/// tunnel. The reverse registration connection, watched from both the
-/// target (`qsh serve --to`/`qsh reverse`) and the controller (`qsh listen`),
-/// has its own default (4250 ms, 3 strikes) and its own keys
-/// `reverse_min_dead_after_ms` and `reverse_strikes`; it does not follow
-/// the general two. `probe_interval_ms` is the cadence of both kinds.
+/// `reverse_min_dead_after_ms` and `reverse_strikes` belonged to the retired
+/// reverse registration connection (ADR-0068). They still parse so an old
+/// `config.toml` loads, and nothing validates or applies them;
+/// [`crate::retired::leftover_config_keys`] is their only reader.
 ///
-/// Each process reads its own `config.toml`, so the target and the
-/// controller are tuned separately, and an attach or `tunnel open` follows
-/// the machine it runs on. For the reverse registration a looser value on
-/// one end alone does not help: the other end still closes the connection
-/// with `CLOSE_CODE_PATH_DEAD` by its own watch, so raise both ends
-/// together. A forward `qsh serve` has no watch on the connections it
-/// accepts (only the dialing client watches them), so it validates
-/// `[recovery]` at startup and nothing more: an attach or supervised tunnel
-/// follows the client's values alone.
+/// `min_dead_after_ms` and `strikes` govern the attach and the supervised
+/// tunnel; `probe_interval_ms` is the cadence. Each process reads its own
+/// `config.toml`, and an attach or `tunnel open` follows the machine it runs
+/// on. A forward `qsh serve` has no watch on the connections it accepts (only
+/// the dialing client watches them), so it validates `[recovery]` at startup
+/// and nothing more.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecoverySection {
@@ -1456,10 +1279,9 @@ pub struct RecoverySection {
     /// Unanswered probes required before silence is a verdict. Unset ⇒ 3.
     /// Attach and supervised tunnels only.
     pub strikes: Option<u32>,
-    /// [`Self::min_dead_after_ms`] for the reverse registration connection.
-    /// Unset ⇒ 4250 ([`PathWatchConfig::reverse_default`]).
+    /// Retired (ADR-0068); parsed, never applied.
     pub reverse_min_dead_after_ms: Option<u64>,
-    /// [`Self::strikes`] for the reverse registration connection. Unset ⇒ 3.
+    /// Retired (ADR-0068); parsed, never applied.
     pub reverse_strikes: Option<u32>,
 }
 
@@ -1498,27 +1320,6 @@ impl RecoverySection {
             &WatchKeys {
                 dead: "min_dead_after_ms",
                 strikes: "strikes",
-            },
-        )
-    }
-
-    /// The watchdog config of a reverse registration connection
-    /// (ADR-0041): [`PathWatchConfig::reverse_default`] with the shared
-    /// `probe_interval_ms` and the `reverse_*` keys applied, under the same
-    /// bounds as [`Self::path_watch`] except that the ceiling is
-    /// [`REVERSE_DETECTION_CEILING_MS`]. The general `min_dead_after_ms`
-    /// and `strikes` do not reach it, so tightening them for attach never
-    /// tightens a registration by accident.
-    pub fn reverse_path_watch(&self) -> Result<PathWatchConfig, OpError> {
-        Self::validated(
-            PathWatchConfig::reverse_default(),
-            self.probe_interval_ms,
-            self.reverse_min_dead_after_ms,
-            self.reverse_strikes,
-            REVERSE_DETECTION_CEILING_MS,
-            &WatchKeys {
-                dead: "reverse_min_dead_after_ms",
-                strikes: "reverse_strikes",
             },
         )
     }
@@ -1586,11 +1387,6 @@ pub struct Liveness {
     /// `[recovery]`, validated and merged over the defaults: what an attach
     /// and a supervised tunnel watch with.
     pub watch: PathWatchConfig,
-    /// `[recovery]`'s reverse registration watch, validated and merged over
-    /// [`PathWatchConfig::reverse_default`] (ADR-0041). Both the target's
-    /// `serve --to` and the controller's `listen` build their registration
-    /// watch from it.
-    pub reverse_watch: PathWatchConfig,
     /// `[transport].adaptive` when the operator wrote it. `None` leaves the
     /// process pin where it is (`crate::adapt::set_process_adaptive`).
     pub adaptive: Option<AdaptiveMode>,
@@ -1623,31 +1419,17 @@ impl Config {
         Ok(Liveness {
             keep_alive: self.transport.keep_alive()?,
             watch: self.recovery.path_watch()?,
-            reverse_watch: self.recovery.reverse_path_watch()?,
             adaptive: self.transport.adaptive,
         })
     }
 
-    /// Defaulted and validated `[listen].stale_retention`, checked against
-    /// this same config's `[reverse].backoff_max_ms` — the one call site
-    /// that wires [`ListenConfig::stale_retention`] to
-    /// [`ReverseConfig::backoff`] (`docs/design/protocol.md` §11-4). Used by
-    /// `reverse::listen::run_listen` before constructing the
-    /// controller's stale sweeper — fail closed on either section's
-    /// nonsense before any resource is created.
-    pub fn stale_retention(&self) -> Result<std::time::Duration, OpError> {
-        let backoff = self.reverse.backoff()?;
-        self.listen.stale_retention(backoff.max)
-    }
-
     /// Every semantic check the startup paths apply on top of parsing:
-    /// [`Self::liveness`] (`[transport]`, `[recovery]`), [`Self::stale_retention`]
-    /// (`[listen]` against `[reverse]`) and the non-blank `[ssh]` programs.
+    /// [`Self::liveness`] (`[transport]`, `[recovery]`), the `[serve]` on-demand
+    /// idle limit, `[iroh]` and the non-blank `[ssh]` programs.
     /// `qsh config set` runs it on the edited document before saving, so a
     /// value a daemon would refuse at startup is refused at the command.
     pub fn validate(&self) -> Result<(), OpError> {
         self.liveness()?;
-        self.stale_retention()?;
         self.serve.on_demand_idle()?;
         self.ssh.program()?;
         self.ssh.remote_qsh()?;

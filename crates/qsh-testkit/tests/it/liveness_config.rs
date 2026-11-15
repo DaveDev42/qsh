@@ -57,20 +57,6 @@ fn bad_configs() -> Vec<(&'static str, Config)> {
             },
         ),
         bad_recovery(
-            "reverse_min_dead_after_ms = 4251 (P*S+D = 5001)",
-            RecoverySection {
-                reverse_min_dead_after_ms: Some(4_251),
-                ..RecoverySection::default()
-            },
-        ),
-        bad_recovery(
-            "reverse_strikes = 1",
-            RecoverySection {
-                reverse_strikes: Some(1),
-                ..RecoverySection::default()
-            },
-        ),
-        bad_recovery(
             "probe_interval_ms = 49",
             RecoverySection {
                 probe_interval_ms: Some(49),
