@@ -12,13 +12,13 @@
 use crate::common;
 
 use std::io::{BufRead as _, BufReader};
-use std::net::{TcpListener, UdpSocket};
+use std::net::TcpListener;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use common::{Fleet, HOST_ALIAS, ListenGuard, Sandbox, ServeGuard, poll_until};
+use common::{Fleet, HOST_ALIAS, Sandbox, ServeGuard, poll_until};
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -217,11 +217,9 @@ fn stop_host(fleet: &mut Fleet) {
 }
 
 #[test]
-fn serve_and_listen_listening_lines_are_byte_identical_and_a_lifecycle_line_carries_at() {
+fn serve_listening_line_is_unchanged_and_a_lifecycle_line_carries_at() {
     let host = Sandbox::initialized();
     let serve = ServeGuard::start(&host);
-    let controller = Sandbox::initialized();
-    let listen = ListenGuard::start(&controller);
 
     let serve_addr = serve.addr().to_string();
     let human = format!("qsh serve: listening on {serve_addr}");
@@ -248,31 +246,6 @@ fn serve_and_listen_listening_lines_are_byte_identical_and_a_lifecycle_line_carr
     assert_eq!(parsed[0]["process"], "serve");
     let port = serve_addr.rsplit(':').next().expect("a port");
     check_shape(&serve_lines, &[serve_addr.as_str(), port]);
-
-    let listen_addr = listen.addr().to_string();
-    let human = format!("qsh listen: listening on {listen_addr}");
-    let listen_lines = poll_until("listen's lifecycle line", Duration::from_secs(20), || {
-        let lines = listen.stderr_lines();
-        lines
-            .iter()
-            .any(|l| l.starts_with("{\"lifecycle\":\"listening\""))
-            .then_some(lines)
-    });
-    assert!(
-        listen_lines.contains(&human),
-        "the human line is unchanged: {listen_lines:?}"
-    );
-    assert!(
-        position(&listen_lines, |l| l == human)
-            < position(&listen_lines, |l| l
-                .starts_with("{\"lifecycle\":\"listening\"")),
-        "the human line comes first: {listen_lines:?}"
-    );
-    let parsed = lifecycle_lines(&listen_lines);
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0]["process"], "listen");
-    let port = listen_addr.rsplit(':').next().expect("a port");
-    check_shape(&listen_lines, &[listen_addr.as_str(), port]);
 }
 
 #[test]
@@ -428,71 +401,6 @@ fn quiet_suppresses_the_restart_banner() {
     );
 }
 
-#[test]
-fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
-    let sandbox = Sandbox::initialized();
-    // A controller nothing answers at: the target's runtime still comes up,
-    // which is all `listening` promises for a target.
-    let port = {
-        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway UDP port");
-        socket.local_addr().expect("local addr").port()
-    };
-    let fingerprint = sandbox.fingerprint();
-    sandbox.trust_add("nowhere", Some(&format!("127.0.0.1:{port}")), &fingerprint);
-
-    let mut command = sandbox.command(&["serve", "--to", "nowhere"]);
-    let mut child = common::own_process_group(&mut command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn qsh serve --to");
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let mut readers = vec![
-        collect(
-            child.stdout.take().expect("stdout pipe"),
-            Arc::clone(&stdout),
-        ),
-        collect(
-            child.stderr.take().expect("stderr pipe"),
-            Arc::clone(&stderr),
-        ),
-    ];
-    let snapshot = || stderr.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    poll_until("the listening record", Duration::from_secs(30), || {
-        snapshot()
-            .iter()
-            .any(|l| l.starts_with("{\"lifecycle\":\"listening\""))
-            .then_some(())
-    });
-    assert!(
-        common::send_stop(child.id()),
-        "the graceful stop could not be sent"
-    );
-    let code = wait_exit(&mut child, &mut readers, "qsh serve --to");
-    assert_eq!(code, 0);
-
-    let lines = snapshot();
-    let parsed = lifecycle_lines(&lines);
-    assert_eq!(parsed.len(), 3, "{lines:?}");
-    assert_eq!(parsed[0]["lifecycle"], "listening");
-    // A target hosts sessions, so its drain reports too (none were open).
-    assert_eq!(parsed[1]["lifecycle"], "drained");
-    assert_eq!(parsed[1]["sessions_closed"], 0, "{lines:?}");
-    assert_eq!(parsed[2]["lifecycle"], "shutting_down");
-    assert!(parsed.iter().all(|line| line["process"] == "serve_to"));
-    assert!(
-        position(&lines, |l| l.starts_with("qsh ")
-            && l.ends_with(": shutting down"))
-            < position(&lines, |l| l
-                .starts_with("{\"lifecycle\":\"shutting_down\"")),
-        "the human line comes first: {lines:?}"
-    );
-    check_shape(&lines, &[port.to_string().as_str(), "127.0.0.1"]);
-    assert!(stdout.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
-}
-
 /// Spawn `qsh <args>`, wait for its `listening` record, SIGTERM it at once
 /// and return the exit code and stderr.
 fn sigterm_after_listening(args: &[&str]) -> (i32, Vec<String>) {
@@ -531,21 +439,18 @@ fn sigterm_after_listening(args: &[&str]) -> (i32, Vec<String>) {
 }
 
 #[test]
-fn serve_and_listen_exit_cleanly_on_a_sigterm_sent_right_after_the_listening_record() {
-    for (args, process) in [
-        (&["serve", "--bind", "127.0.0.1:0"][..], "serve"),
-        (&["listen", "--bind", "127.0.0.1:0"][..], "listen"),
-    ] {
-        let (code, lines) = sigterm_after_listening(args);
-        assert_eq!(
-            code, 0,
-            "{process} died instead of shutting down: {lines:?}"
-        );
-        let parsed = lifecycle_lines(&lines);
-        assert_eq!(
-            parsed.last().map(|l| l["lifecycle"].clone()),
-            Some("shutting_down".into())
-        );
-        assert!(parsed.iter().all(|l| l["process"] == process), "{lines:?}");
-    }
+fn serve_exits_cleanly_on_a_sigterm_sent_right_after_the_listening_record() {
+    let args = &["serve", "--bind", "127.0.0.1:0"][..];
+    let process = "serve";
+    let (code, lines) = sigterm_after_listening(args);
+    assert_eq!(
+        code, 0,
+        "{process} died instead of shutting down: {lines:?}"
+    );
+    let parsed = lifecycle_lines(&lines);
+    assert_eq!(
+        parsed.last().map(|l| l["lifecycle"].clone()),
+        Some("shutting_down".into())
+    );
+    assert!(parsed.iter().all(|l| l["process"] == process), "{lines:?}");
 }

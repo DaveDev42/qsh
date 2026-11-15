@@ -68,12 +68,11 @@ fn banner_count(text: &str, banner: &str) -> usize {
 }
 
 /// A sandbox whose config binds `mode` to an ephemeral loopback port.
-fn bound_sandbox(mode: &str) -> Sandbox {
+fn bound_sandbox(_mode: &str) -> Sandbox {
     let sandbox = Sandbox::initialized();
-    let table = if mode == "listen" { "listen" } else { "serve" };
     std::fs::write(
         sandbox.config_dir().join("config.toml"),
-        format!("[{table}]\nbind = \"127.0.0.1:0\"\n"),
+        "[serve]\nbind = \"127.0.0.1:0\"\n",
     )
     .unwrap();
     sandbox
@@ -81,10 +80,7 @@ fn bound_sandbox(mode: &str) -> Sandbox {
 
 #[test]
 fn service_run_redirects_stdout_and_stderr_to_the_mode_logs() {
-    for (mode, banner) in [
-        ("serve", "qsh serve: listening on "),
-        ("listen", "qsh listen: listening on "),
-    ] {
+    for (mode, banner) in [("serve", "qsh serve: listening on ")] {
         let sandbox = bound_sandbox(mode);
         let err_name = format!("{mode}.err.log");
         let out_name = format!("{mode}.out.log");
@@ -168,6 +164,26 @@ fn service_run_reports_a_log_it_cannot_open_on_the_original_stderr() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("log"), "{stderr}");
+}
+
+/// A leftover `listen` or `reverse` unit (ADR-0068) still redirects to its own
+/// logs, then ends with the one `UNSUPPORTED` line there and exit 255; it
+/// never starts a listener.
+#[test]
+fn service_run_of_a_retired_mode_logs_the_retirement_and_exits() {
+    for (args, mode) in [
+        (&["service", "run", "listen"][..], "listen"),
+        (&["service", "run", "reverse", "hub"][..], "reverse"),
+    ] {
+        let sandbox = bound_sandbox(mode);
+        let output = sandbox.qsh(args);
+        assert_eq!(common::exit_code(&output), 255, "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let log = log_text(&sandbox, &format!("{mode}.err.log")).expect("the mode's err log");
+        assert!(log.contains("ADR-0068"), "{mode}: {log}");
+        assert!(log.contains("(UNSUPPORTED)"), "{mode}: {log}");
+        assert_eq!(log.lines().count(), 1, "{mode}: {log}");
+    }
 }
 
 #[test]

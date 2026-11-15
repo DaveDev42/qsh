@@ -10,7 +10,7 @@
 //! process.
 
 use crate::common::{Sandbox, poll_until};
-use crate::cp_e2e::{Forward, Reverse, assert_no_part_files};
+use crate::cp_e2e::{Forward, assert_no_part_files};
 
 use std::net::UdpSocket;
 use std::path::Path;
@@ -210,33 +210,6 @@ fn cp_canceled_mid_transfer_exits_255_and_leaves_no_temp_file() {
     assert!(
         !inbound.join("big.bin").exists(),
         "a canceled get kept a file"
-    );
-}
-
-#[test]
-fn cp_canceled_mid_transfer_exits_255_and_leaves_no_temp_file_reverse() {
-    let rig = Reverse::start();
-    let work = rig.work.path();
-    let big = work.join("big.bin");
-    sparse_file(&big);
-    let outbound = work.join("outbound");
-    let inbound = work.join("inbound");
-    std::fs::create_dir(&outbound).unwrap();
-    std::fs::create_dir(&inbound).unwrap();
-
-    let remote = rig.remote("outbound/big.bin");
-    cancel_mid_transfer(
-        &rig.controller,
-        &["cp", "--json", big.to_str().unwrap(), &remote],
-        &outbound,
-        &[&outbound, &inbound],
-    );
-    let source = rig.remote("big.bin");
-    cancel_mid_transfer(
-        &rig.controller,
-        &["cp", "--json", &source, inbound.to_str().unwrap()],
-        &inbound,
-        &[&outbound, &inbound],
     );
 }
 

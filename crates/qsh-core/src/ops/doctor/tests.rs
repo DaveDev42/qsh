@@ -2188,6 +2188,7 @@ const MODES: [&str; 3] = ["serve", "listen", "reverse"];
 mod combined;
 mod logon_task;
 mod mode;
+mod retired;
 
 fn codes(findings: &[DoctorFinding]) -> Vec<&str> {
     findings.iter().map(|f| f.code.as_str()).collect()

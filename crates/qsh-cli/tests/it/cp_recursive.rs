@@ -11,7 +11,7 @@
 //! (ADR-0035 decision 26), a FIFO the walk must refuse becomes a file another
 //! process holds open without sharing, and symbolic links become junctions.
 
-use crate::cp_e2e::{Forward, Reverse, digests, write_random_file};
+use crate::cp_e2e::{Forward, digests, write_random_file};
 
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -185,16 +185,6 @@ fn tree_round_trip(
 #[test]
 fn cp_recursive_round_trip_tree_is_identical_forward() {
     let rig = Forward::start();
-    tree_round_trip(
-        rig.work.path(),
-        |name| rig.remote(name),
-        |args| rig.cp_json(args),
-    );
-}
-
-#[test]
-fn cp_recursive_round_trip_tree_is_identical_reverse() {
-    let rig = Reverse::start();
     tree_round_trip(
         rig.work.path(),
         |name| rig.remote(name),

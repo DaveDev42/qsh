@@ -1,28 +1,19 @@
 //! The echo host behind the real `qsh` client (`qsh_testkit::echo_host`), on
-//! both routes.
+//! its forward route (the reverse route retired with ADR-0068).
 //!
 //! The interactive client's console tests on Windows want a host whose output
 //! is exactly what it was sent, not a ConPTY's rendering of it. These routes
 //! put an echo-session host behind the real client instead: the forward route
-//! is a QUIC listener that pins the client's fingerprint, the reverse route is a real `qsh listen` daemon with
-//! the echo host registered on it as a target. Everything but the session
-//! source is production code.
+//! is a QUIC listener that pins the client's fingerprint. Everything but the
+//! session source is production code.
 //!
-//! The cases in this file need no terminal, so they run on every platform and
-//! prove the routes themselves; `windows_attach.rs` drives the interactive
+//! The case in this file needs no terminal, so it runs on every platform and
+//! proves the route itself; `windows_attach.rs` drives the interactive
 //! client through them in a ConPTY.
 
-use crate::common::{HOST_ALIAS, ListenGuard, Sandbox, hosts_array, poll_until};
-
-use std::time::Duration;
+use crate::common::{HOST_ALIAS, Sandbox};
 
 use qsh_testkit::echo_host::EchoHost;
-
-/// The name the controller's trust store gives the echo target.
-pub const REVERSE_NAME: &str = "echo-target";
-
-/// How long the daemon may take to show the registration.
-const REGISTERED_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A route from a real `qsh` client to an echo host.
 pub trait EchoRoute {
@@ -64,56 +55,6 @@ impl EchoRoute for EchoForward {
     }
 }
 
-/// Client to an echo host registered on the client's own `qsh listen` daemon.
-pub struct EchoReverse {
-    /// The controller, and the sandbox the client commands run in.
-    pub controller: Sandbox,
-    pub _listen: ListenGuard,
-    pub host: EchoHost,
-}
-
-impl EchoReverse {
-    /// Daemon up, echo host registered and listed as reachable.
-    pub fn start() -> Self {
-        let controller = Sandbox::initialized();
-        let host = EchoHost::new();
-        // The daemon pins the target by fingerprint only, with no address:
-        // the one way to reach `REVERSE_NAME` is the live registration.
-        controller.trust_add(REVERSE_NAME, None, &host.fingerprint());
-        let listen = ListenGuard::start(&controller);
-        host.register(listen.addr(), &controller.fingerprint(), REVERSE_NAME);
-        poll_until(
-            "the echo target to be listed as a reachable reverse entry",
-            REGISTERED_DEADLINE,
-            || {
-                hosts_array(&controller)
-                    .into_iter()
-                    .find(|h| h["name"] == REVERSE_NAME && h["connection_mode"] == "reverse")
-                    .filter(|h| h["state"] == "reachable")
-            },
-        );
-        Self {
-            controller,
-            _listen: listen,
-            host,
-        }
-    }
-}
-
-impl EchoRoute for EchoReverse {
-    fn client(&self) -> &Sandbox {
-        &self.controller
-    }
-
-    fn name(&self) -> &str {
-        REVERSE_NAME
-    }
-
-    fn host(&self) -> &EchoHost {
-        &self.host
-    }
-}
-
 /// `qsh session open` through the route makes one session on the echo host,
 /// which `qsh sessions` then lists as running and detached (nobody attached).
 fn session_open_then_list(route: &impl EchoRoute) {
@@ -135,9 +76,4 @@ fn session_open_then_list(route: &impl EchoRoute) {
 #[test]
 fn echo_host_serves_a_session_over_the_forward_route() {
     session_open_then_list(&EchoForward::start());
-}
-
-#[test]
-fn echo_host_serves_a_session_over_the_reverse_route() {
-    session_open_then_list(&EchoReverse::start());
 }

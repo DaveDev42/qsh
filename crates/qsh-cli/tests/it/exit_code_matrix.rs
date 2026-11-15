@@ -24,7 +24,6 @@ use crate::common;
 use crate::ssh_golden;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
-use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 
 /// What a scenario produces, independent of output mode.
 enum Outcome {
@@ -121,89 +120,6 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     denied_host.trust_add(CLIENT_ALIAS, None, &denied_client_fp);
     let denied_serve = ServeGuard::start_without_policy(&denied_host, &[]);
     denied_client.trust_add(HOST_ALIAS, Some(denied_serve.addr()), &denied_host_fp);
-
-    // A real duplicate-name routing conflict (M3 plan Step 7 (2473c88) DoD 1,
-    // `Ops::host.host.get`'s `resolve_route`): the *same* controller
-    // machine — one `QSH_CONFIG_DIR`/`QSH_STATE_DIR`, so one trust store
-    // and one `runtime_dir` — runs **two** independent `qsh listen`
-    // daemons (`hosts_reverse.rs`'s own `dup` rig proves the merge-by-name
-    // rule with one daemon `+` one forward pin; this is Step 7's new
-    // case, two *live reverse* holders of the same name at once). Both
-    // daemons resolve the same pinned fingerprint to the same name
-    // ("dup"), so once the one target dials into both, `host.list`'s
-    // reverse source (`admin_host_list_all`, unioned across every socket
-    // under `runtime_dir`) sees two live, independent claims on "dup" —
-    // exactly `ops::host`'s own
-    // `resolve_host_route_async_is_invalid_argument_when_two_daemons_both_hold_it_live`
-    // unit test, reproduced here against two real OS processes instead of
-    // two fake admin daemons.
-    let dup_controller = Sandbox::initialized();
-    let dup_target = Sandbox::initialized();
-    // Bound to `_` in each guard's own binding (not a block) so normal
-    // end-of-function `Drop` order kills every child — no `mem::forget`,
-    // no leaked processes; these just need to outlive the `host get dup`
-    // case below, exactly like `fleet`/`rogue`/`all_dead` above.
-    let (_listen_a, _listen_b, _reverse_a, _reverse_b) = {
-        let target_fp = dup_target.fingerprint();
-        let controller_fp = dup_controller.fingerprint();
-        dup_controller.trust_add("dup", None, &target_fp);
-        let listen_a = ListenGuard::start(&dup_controller);
-        let listen_b = ListenGuard::start(&dup_controller);
-        dup_target.trust_add("hub-a", Some(listen_a.addr()), &controller_fp);
-        dup_target.trust_add("hub-b", Some(listen_b.addr()), &controller_fp);
-        let reverse_a = ReverseGuard::start(&dup_target, "hub-a");
-        let reverse_b = ReverseGuard::start(&dup_target, "hub-b");
-        poll_until(
-            "both live reverse registrations of \"dup\" to appear",
-            std::time::Duration::from_secs(15),
-            || {
-                let hosts = hosts_array(&dup_controller);
-                let live_dups = hosts
-                    .iter()
-                    .filter(|h| h["name"] == "dup" && h["connection_mode"] == "reverse")
-                    .count();
-                (live_dups == 2).then_some(())
-            },
-        );
-        (listen_a, listen_b, reverse_a, reverse_b)
-    };
-
-    // issue #4 items 4/3a: a name whose reverse registration exists but
-    // has gone stale (no forward pin to fall back to) — the *other*
-    // `HOST_NOT_FOUND` producer this table's "exec: unpinned host name"
-    // row does not reach at all (that row's name was never registered
-    // anywhere). Same rig shape as the `dup` case just above, one target
-    // instead of two, shut down instead of duplicated.
-    let stale_controller = Sandbox::initialized();
-    let stale_target = Sandbox::initialized();
-    let _stale_listen = {
-        let target_fp = stale_target.fingerprint();
-        let controller_fp = stale_controller.fingerprint();
-        stale_controller.trust_add("stale-only", None, &target_fp);
-        let listen = ListenGuard::start(&stale_controller);
-        stale_target.trust_add("hub", Some(listen.addr()), &controller_fp);
-        let reverse = ReverseGuard::start(&stale_target, "hub");
-        poll_until(
-            "the stale-only reverse registration to appear",
-            std::time::Duration::from_secs(10),
-            || {
-                hosts_array(&stale_controller)
-                    .into_iter()
-                    .find(|h| h["name"] == "stale-only" && h["connection_mode"] == "reverse")
-            },
-        );
-        reverse.shut_down();
-        poll_until(
-            "the stale-only reverse registration to go stale",
-            std::time::Duration::from_secs(10),
-            || {
-                hosts_array(&stale_controller)
-                    .into_iter()
-                    .find(|h| h["name"] == "stale-only" && h["state"] == "stale")
-            },
-        );
-        listen
-    };
 
     // ADR-0013: a chain of two certificates on disk, for the
     // `trust add --cert-file` `INVALID_ARGUMENT` row below. Built from two
@@ -842,17 +758,75 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             args: &["tunnel", "close", "01K0NOSUCHTUNNEL"],
             outcome: Outcome::Succeeds(0),
         },
+        // ADR-0068: every retired reverse entry point parses and answers
+        // `UNSUPPORTED`, exit 255. The long-running ones write no envelope
+        // even under `--json` (`long_running_setup_mode`); the operations
+        // answer with one.
         Case {
-            // ROADMAP M9 (b): `--to` and `--bind` together is `INVALID_ARGUMENT`
-            // (`qsh_core::serve::resolve_serve_mode`, step 1) — but
-            // `qsh serve` is a long-running setup mode
-            // (`long_running_setup_mode`), so this refusal never becomes a
-            // `qsh.cli/v1` envelope even under `--json`
-            // (`RefusedWithoutEnvelope`'s own doc).
-            name: "serve: --to and --bind together is refused with no envelope",
+            name: "listen: retired, refused with no envelope",
+            sandbox: &fleet.client,
+            args: &["listen"],
+            outcome: Outcome::RefusedWithoutEnvelope("UNSUPPORTED"),
+        },
+        Case {
+            name: "listen --serve: retired, refused with no envelope",
+            sandbox: &fleet.client,
+            args: &["listen", "--serve"],
+            outcome: Outcome::RefusedWithoutEnvelope("UNSUPPORTED"),
+        },
+        Case {
+            name: "reverse: retired, refused with no envelope",
+            sandbox: &fleet.client,
+            args: &["reverse", "hub"],
+            outcome: Outcome::RefusedWithoutEnvelope("UNSUPPORTED"),
+        },
+        Case {
+            name: "serve --to: retired, refused with no envelope",
             sandbox: &fleet.client,
             args: &["serve", "--to", "box", "--bind", "127.0.0.1:0"],
-            outcome: Outcome::RefusedWithoutEnvelope("INVALID_ARGUMENT"),
+            outcome: Outcome::RefusedWithoutEnvelope("UNSUPPORTED"),
+        },
+        Case {
+            name: "serve --name: retired, refused with no envelope",
+            sandbox: &fleet.client,
+            args: &["serve", "--name", "laptop"],
+            outcome: Outcome::RefusedWithoutEnvelope("UNSUPPORTED"),
+        },
+        Case {
+            name: "setup listener: retired",
+            sandbox: &fleet.client,
+            args: &["setup", "listener", "--peer", "m"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "setup host --to: retired",
+            sandbox: &fleet.client,
+            args: &["setup", "host", "--to", "m"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "pair ssh --reverse: retired",
+            sandbox: &fleet.client,
+            args: &["pair", "ssh", "--reverse", "--to", "hub:4433", "box"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "service install --to: retired",
+            sandbox: &fleet.client,
+            args: &["service", "install", "--to", "hub"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "config set on a retired reverse key",
+            sandbox: &fleet.client,
+            args: &["config", "set", "listen.bind", "127.0.0.1:0"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "--rendezvous: retired",
+            sandbox: &fleet.client,
+            args: &["version", "--rendezvous", "hub"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
         },
     ];
 
@@ -921,25 +895,6 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         sandbox: &fleet.client,
         args: &["service", "status", "--live"],
         outcome: Outcome::Succeeds(0),
-    });
-
-    cases.push(Case {
-        name: "host get: duplicate name held live by two reverse daemons at once",
-        sandbox: &dup_controller,
-        args: &["host", "get", "dup"],
-        outcome: Outcome::Fails("INVALID_ARGUMENT"),
-    });
-
-    // issue #4 items 4/3a: exit stays 255 for the retryable stale-registration
-    // `HOST_NOT_FOUND` variant, exactly like the ordinary non-retryable
-    // "exec: unpinned host name" row above — `retryable` changes what the
-    // caller *should do next*, never the exit code itself
-    // (`docs/CLI.md` §3.2/§4).
-    cases.push(Case {
-        name: "host get: stale reverse registration, no forward pin to fall back to",
-        sandbox: &stale_controller,
-        args: &["host", "get", "stale-only"],
-        outcome: Outcome::Fails("HOST_NOT_FOUND"),
     });
 
     for case in &cases {
@@ -1223,55 +1178,62 @@ fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
 }
 
 // ---------------------------------------------------------------------
-// `qsh listen` bind conflict and `qsh reverse` registration refusal:
-// separate assertions, not matrix rows — neither `Command::Listen` nor
-// `Command::Reverse` produces a `qsh.cli/v1` envelope at all
-// (`report_long_running_setup_error`'s own module docs), so they cannot
-// be expressed as an `Outcome` the shared `check()` machinery understands.
+// The retired reverse entry points (ADR-0068) are matrix rows above. These
+// two tests pin what a row cannot: the message names the alternative, and
+// `details.reason` is `reverse_retired` in the envelope.
 // ---------------------------------------------------------------------
 
+/// The long-running retired commands put one line on stderr and nothing on
+/// stdout; the line names the retirement, its ADR and one alternative.
 #[test]
-fn qsh_listen_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
+fn retired_long_running_commands_say_the_alternative_on_one_stderr_line() {
     let sandbox = Sandbox::initialized();
-    let holder = ListenGuard::start(&sandbox);
+    for (args, alternative) in [
+        (&["listen"][..], "qsh serve"),
+        (
+            &["listen", "--serve"][..],
+            "`[listen].bind`는 `[serve].bind`로 옮긴다",
+        ),
+        (&["reverse", "hub"][..], "qsh serve"),
+        (&["serve", "--to", "hub"][..], "qsh serve"),
+    ] {
+        let output = sandbox.qsh(args);
+        assert_eq!(exit_code(&output), EXIT_RUNTIME_FAILURE, "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{args:?}: {stderr:?}");
+        assert!(stderr.contains("ADR-0068"), "{args:?}: {stderr:?}");
+        assert!(stderr.contains(alternative), "{args:?}: {stderr:?}");
+        assert!(stderr.contains("(UNSUPPORTED)"), "{args:?}: {stderr:?}");
+    }
+}
 
-    let output = ListenGuard::run_to_completion(&sandbox, holder.addr(), &[]);
-
-    assert_eq!(exit_code(&output), EXIT_RUNTIME_FAILURE, "{output:?}");
-    assert!(
-        output.stdout.is_empty(),
-        "a bind conflict must never write to stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lines: Vec<&str> = stderr.lines().collect();
-    assert_eq!(
-        lines.len(),
-        1,
-        "expected exactly one stderr line: {stderr:?}"
-    );
-    assert!(
-        lines[0].starts_with("qsh: cannot listen on"),
-        "stderr: {stderr:?}"
-    );
-    assert!(lines[0].contains("(CONFIG_ERROR)"), "stderr: {stderr:?}");
-    // `reverse/listen.rs`'s bind-failure `map_err`
-    // now calls the shared `qsh_core::serve::bind_unavailable`, so the
-    // remedy is on this line too — the five assertions above are
-    // untouched (`bind_unavailable`'s observation clause is byte-
-    // identical to the pre-M9 format string).
-    assert!(
-        lines[0].contains(qsh_core::serve::BIND_UNAVAILABLE_REMEDY),
-        "stderr must carry the bind-conflict remedy: {stderr:?}"
-    );
-
-    drop(holder);
+/// An operation answers with the envelope: `UNSUPPORTED`, not retryable,
+/// `details.reason` `reverse_retired`.
+#[test]
+fn retired_operations_carry_the_reason_in_the_envelope() {
+    let sandbox = Sandbox::initialized();
+    for args in [
+        &["setup", "listener", "--peer", "m", "--json"][..],
+        &["setup", "host", "--to", "m", "--json"][..],
+        &["service", "install", "--to", "hub", "--json"][..],
+        &["config", "set", "serve.to", "hub", "--json"][..],
+        &["version", "--rendezvous", "hub", "--json"][..],
+    ] {
+        let (code, envelope) = sandbox.json(args);
+        assert_eq!(code, EXIT_RUNTIME_FAILURE, "{args:?}: {envelope}");
+        assert_eq!(envelope["ok"], false, "{args:?}: {envelope}");
+        assert_eq!(envelope["error"]["code"], "UNSUPPORTED", "{args:?}");
+        assert_eq!(envelope["error"]["retryable"], false, "{args:?}");
+        assert_eq!(
+            envelope["error"]["details"]["reason"], "reverse_retired",
+            "{args:?}: {envelope}"
+        );
+    }
 }
 
 /// `qsh serve`'s bind failure carries the remedy on one stderr line with
-/// exit 255, the twin of the `qsh listen` bind-conflict test above — same
-/// shared `qsh_core::serve::bind_unavailable`, reached through `serve.rs`'s
-/// own `Listener::bind` call site rather than `reverse/listen.rs`'s.
+/// exit 255, through `serve.rs`'s own `Listener::bind` call site.
 #[test]
 fn qsh_serve_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
     let sandbox = Sandbox::initialized();
@@ -1303,273 +1265,4 @@ fn qsh_serve_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
     );
 
     drop(holder);
-}
-
-/// A running `qsh -v reverse <controller>` child with both streams fully
-/// captured — deliberately not `common::ReverseGuard` (which discards its
-/// child's output), since this scenario's entire point is inspecting
-/// stdout/stderr while the process is still alive and retrying.
-struct CapturedReverse {
-    child: std::process::Child,
-    stdout: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-}
-
-impl CapturedReverse {
-    fn start(sandbox: &Sandbox, controller: &str) -> Self {
-        Self::start_with(sandbox, &["-v", "reverse", controller])
-    }
-
-    /// Like [`start`](Self::start), with the full argv — the ROADMAP M9 (b)
-    /// `qsh serve --to` spelling reaches this same harness through this
-    /// entry point, since both spellings converge on the same
-    /// `run_reverse` call (`main.rs`'s own doc on `run_serve`, pinned by
-    /// `crates/qsh-cli/src/cli/tests.rs`'s
-    /// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`)
-    /// and this harness's whole point is inspecting the stderr that call
-    /// writes.
-    fn start_with(sandbox: &Sandbox, args: &[&str]) -> Self {
-        // Incremental line reads, not `read_to_end` — the whole point of
-        // this struct is inspecting output *while the process is still
-        // running*, and `read_to_end` would block on the pipe until the
-        // child closes it (i.e. exits), which this scenario's process
-        // deliberately never does on its own.
-        use std::io::BufRead as _;
-        let mut command = sandbox.command(args);
-        let mut child = common::own_process_group(&mut command)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn qsh reverse");
-        let stdout = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let out_pipe = child.stdout.take().expect("stdout pipe");
-        let err_pipe = child.stderr.take().expect("stderr pipe");
-        {
-            let sink = std::sync::Arc::clone(&stdout);
-            std::thread::spawn(move || {
-                for line in std::io::BufReader::new(out_pipe)
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
-                    buf.extend_from_slice(line.as_bytes());
-                    buf.push(b'\n');
-                }
-            });
-        }
-        {
-            let sink = std::sync::Arc::clone(&stderr);
-            std::thread::spawn(move || {
-                for line in std::io::BufReader::new(err_pipe)
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
-                    buf.extend_from_slice(line.as_bytes());
-                    buf.push(b'\n');
-                }
-            });
-        }
-        Self {
-            child,
-            stdout,
-            stderr,
-        }
-    }
-
-    fn stdout_so_far(&self) -> Vec<u8> {
-        self.stdout
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    fn stderr_so_far(&self) -> Vec<u8> {
-        self.stderr
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
-    /// A graceful stop, bounded wait for the process to end (`SIGTERM` on
-    /// unix, `CTRL_BREAK` to its own process group on Windows).
-    fn shut_down(mut self) {
-        common::stop_gracefully(&mut self.child);
-    }
-}
-
-impl Drop for CapturedReverse {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// A controller the target does **not** pin — `qsh reverse`'s registration
-/// attempt is refused (`AUTH_FAILED`, unpinned peer) on every attempt. Per
-/// `reverse/target.rs`'s own module docs ("Registration is the target's
-/// only reachability path, so it is never fatal"), this is **not** a
-/// one-shot setup failure: the process retries forever with backoff and
-/// never exits on its own — the opposite shape from `qsh listen`'s bind
-/// conflict above. What this test actually pins down (deviating from the
-/// task brief's literal "exit 255" framing, which does not hold for this
-/// scenario as landed in Step 4 — see this stage's own reported
-/// deviations) is the two guarantees that *do* hold unconditionally for a
-/// long-running setup mode: stdout stays byte-for-byte empty no matter how
-/// many attempts fail, and the process is still alive (retrying, not
-/// crashed, not hung on the first attempt) well past the time a single
-/// dial could plausibly take.
-#[test]
-fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
-    let controller = Sandbox::initialized();
-    let target = Sandbox::initialized();
-    let controller_fp = controller.fingerprint();
-    // Deliberately no `controller.trust_add` for the target's fingerprint
-    // — every attempt is refused.
-    let listen = ListenGuard::start(&controller);
-    target.trust_add("hub", Some(listen.addr()), &controller_fp);
-
-    let mut reverse = CapturedReverse::start(&target, "hub");
-
-    // Deadline-polled, not a fixed sleep (no `sleep()`-as-synchronization
-    // — this suite spawns many real `qsh listen`/`qsh reverse`/`qsh serve`
-    // children concurrently, so a fixed short sleep is a flake on a loaded
-    // box on the way in and wasted wall-clock time on a fast one): wait
-    // until at least one refused attempt and one structured retry event
-    // have actually been logged, bounded well past what a single dial +
-    // refusal + backoff should ever take.
-    poll_until(
-        "a refused registration attempt and a retry event to be logged",
-        std::time::Duration::from_secs(15),
-        || {
-            let stderr_bytes = reverse.stderr_so_far();
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
-            (stderr.contains("AUTH_FAILED") && stderr.contains("\"event\":\"retry\"")).then_some(())
-        },
-    );
-
-    assert!(
-        matches!(reverse.child.try_wait(), Ok(None)),
-        "a refused registration must not end the process — it retries forever"
-    );
-    assert!(
-        reverse.stdout_so_far().is_empty(),
-        "qsh reverse must never write to stdout, refused or not: {:?}",
-        String::from_utf8_lossy(&reverse.stdout_so_far())
-    );
-
-    reverse.shut_down();
-    drop(listen);
-}
-
-/// ROADMAP M9 (b): `qsh serve --to <controller>` writes its
-/// stderr under the `qsh serve:` prefix, never `qsh reverse:` — the one
-/// difference between the two spellings once they reach `run_reverse`
-/// (`main.rs`'s own doc). Same refused-registration rig as
-/// `qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout`
-/// above, spelled with `--to` instead of the hidden alias.
-#[test]
-fn qsh_serve_to_registration_refusal_uses_the_serve_stderr_prefix_not_reverse() {
-    let controller = Sandbox::initialized();
-    let target = Sandbox::initialized();
-    let controller_fp = controller.fingerprint();
-    // Deliberately no `controller.trust_add` for the target's fingerprint
-    // — every attempt is refused.
-    let listen = ListenGuard::start(&controller);
-    target.trust_add("hub", Some(listen.addr()), &controller_fp);
-
-    let reverse = CapturedReverse::start_with(&target, &["-v", "serve", "--to", "hub"]);
-
-    poll_until(
-        "a refused registration attempt and a retry event to be logged",
-        std::time::Duration::from_secs(15),
-        || {
-            let stderr_bytes = reverse.stderr_so_far();
-            let stderr = String::from_utf8_lossy(&stderr_bytes);
-            (stderr.contains("AUTH_FAILED") && stderr.contains("\"event\":\"retry\"")).then_some(())
-        },
-    );
-
-    let stderr_bytes = reverse.stderr_so_far();
-    let stderr = String::from_utf8_lossy(&stderr_bytes);
-    assert!(
-        stderr.contains("qsh serve:"),
-        "qsh serve --to must prefix its stderr with \"qsh serve:\": {stderr:?}"
-    );
-    assert!(
-        !stderr.contains("qsh reverse:"),
-        "qsh serve --to must never fall back to the \"qsh reverse:\" prefix: {stderr:?}"
-    );
-    assert!(
-        reverse.stdout_so_far().is_empty(),
-        "qsh serve --to must never write to stdout, refused or not: {:?}",
-        String::from_utf8_lossy(&reverse.stdout_so_far())
-    );
-
-    reverse.shut_down();
-    drop(listen);
-}
-
-/// The `ADDRESS_PORT_ASSUMED_NOTICE` emission site in
-/// `run_serve` (`main.rs`) had no test of its own — deleting the three
-/// lines `if resolved.port_filled { stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}"); }`
-/// left the whole suite green. Same idiom as `init_trust.rs`'s
-/// `trust_add_with_a_port_less_address_notes_the_assumed_port_once_and_pins_it`,
-/// run against the two `resolve_serve_target` branches instead of `trust
-/// add`: the address branch notes the assumed port exactly once, the
-/// name branch never does. No real controller is needed on either
-/// side — the notice, when it fires, does so before `run_reverse`'s dial
-/// loop starts, so a real refused-or-unreachable dial (the same
-/// `"event":"retry"` line the sibling tests above poll for) is enough to
-/// prove the process is actually running and has had a chance to print
-/// it.
-#[test]
-fn qsh_serve_to_emits_the_port_assumed_notice_only_on_the_address_branch() {
-    const PEER_FINGERPRINT: &str = "sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
-
-    // Address branch: pinned by address only, no alias — `--to
-    // 127.0.0.1` normalizes to the default port 4433 (ADR-0014 결정 5)
-    // and matches this pin, so `port_filled` is true.
-    let address_target = Sandbox::initialized();
-    address_target.trust_add("hub", Some("127.0.0.1"), PEER_FINGERPRINT);
-    let address_run =
-        CapturedReverse::start_with(&address_target, &["-v", "serve", "--to", "127.0.0.1"]);
-    poll_until(
-        "the assumed-port notice to be printed",
-        std::time::Duration::from_secs(15),
-        || {
-            let stderr = String::from_utf8_lossy(&address_run.stderr_so_far()).into_owned();
-            stderr.contains("assuming port 4433").then_some(())
-        },
-    );
-    let address_stderr = String::from_utf8_lossy(&address_run.stderr_so_far()).into_owned();
-    assert_eq!(
-        address_stderr.matches("assuming port 4433").count(),
-        1,
-        "the address branch must note the assumed port exactly once, even across retries: \
-         {address_stderr:?}"
-    );
-    address_run.shut_down();
-
-    // Name branch: pinned by alias, so `--to hub` resolves at step 1 —
-    // nothing is normalized, so no notice, ever.
-    let name_target = Sandbox::initialized();
-    name_target.trust_add("hub", Some("127.0.0.1:4433"), PEER_FINGERPRINT);
-    let name_run = CapturedReverse::start_with(&name_target, &["-v", "serve", "--to", "hub"]);
-    poll_until(
-        "a retry event to be logged",
-        std::time::Duration::from_secs(15),
-        || {
-            let stderr = String::from_utf8_lossy(&name_run.stderr_so_far()).into_owned();
-            stderr.contains("\"event\":\"retry\"").then_some(())
-        },
-    );
-    let name_stderr = String::from_utf8_lossy(&name_run.stderr_so_far()).into_owned();
-    assert!(
-        !name_stderr.contains("assuming port"),
-        "the name branch must never note an assumed port: {name_stderr:?}"
-    );
-    name_run.shut_down();
 }

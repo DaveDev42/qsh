@@ -50,7 +50,7 @@ qsh hosts --json
 - `-v`, `-vv`: stderr 진단 수준 증가
 - `--no-ssh`(전역): qsh가 스스로 ssh를 부르는 두 길을 끈다. 모르는 이름의 자동 부트스트랩(§7)과, SSH 부트스트랩으로 세운 pin에 dial이 실패했을 때의 serve 되살리기(§7)다. `[ssh].bootstrap = "off"`는 같은 두 길을 설정으로 끈다. 사용자가 ssh를 부르는 `qsh pair ssh`에는 영향이 없다.
 - `--no-punch`(전역): 이 명령에서 홀펀칭을 시작하지 않는다. `PunchRequest`가 나가지 않으므로 route는 직접 dial뿐이고 오류는 펀칭이 없던 때와 같다. `[punch].mode = "off"`는 같은 일을 설정으로 하고, 플래그가 이긴다. 이 장비가 중개자나 target일 때의 `off`는 §6.13이 말한다.
-- `--rendezvous <peer>`(전역, `--no-punch`와 함께 못 쓴다): 정방향 route로 dial하는 명령이 이번에 쓸 중개자를 이 pin 하나로 정한다. 주면 그 host의 pin에 적힌 `rendezvous` 목록은 보지 않는다. 저장하지 않는다. `<peer>`가 주소 있는 pin이 아니면 `HOST_NOT_FOUND`다(펀칭을 볼 만한 host를 dial하기 전에 난다). 역방향 route나 펀칭이 없는 명령에서는 읽히지 않는다. 중개자 후보를 고르는 순서는 `--rendezvous`, 그다음 pin의 `rendezvous`다. 각 후보는 이 장비의 trust store에 주소와 함께 pin된 peer여야 하고 아니면 건너뛴다. 한 번의 시도는 둘까지 쓴다(§6.1).
+- `--rendezvous <peer>`(전역, `--no-punch`와 함께 못 쓴다): 정방향 route로 dial하는 명령이 이번에 쓸 중개자를 이 pin 하나로 정한다. 주면 그 host의 pin에 적힌 `rendezvous` 목록은 보지 않는다. 저장하지 않는다. `<peer>`가 주소 있는 pin이 아니면 `HOST_NOT_FOUND`다(펀칭을 볼 만한 host를 dial하기 전에 난다). 역방향 route나 펀칭이 없는 명령에서는 읽히지 않는다. 중개자 후보를 고르는 순서는 `--rendezvous`, 그다음 pin의 `rendezvous`다. 각 후보는 이 장비의 trust store에 주소와 함께 pin된 peer여야 하고 아니면 건너뛴다. 한 번의 시도는 둘까지 쓴다(§6.1). **v0.9.0에서 걷혔다(ADR-0068).** `--rendezvous`는 파싱되고 `UNSUPPORTED`(`details.reason` `"reverse_retired"`)로 끝난다. `--no-punch`, `[punch].mode`, `qsh trust rendezvous`는 파싱하고 아무 일도 하지 않는다.
 - `--jump <hops>`(전역, 짧은 형태 `-J`): 이 명령이 host에 닿는 길을 pin 이름의 체인으로 정한다(ADR-0056 결정 20). `<hops>`는 ssh `-J`처럼 쉼표로 나눈 `[user@]host[:port]` 목록이고, qsh 쪽에서는 각 항목의 host 부분이 pin 이름이다(`user@`와 `:port`는 QUIC 경로가 쓰지 않고 부트스트랩 ssh만 쓴다, §7.2). 첫 hop에는 평소 route로 붙고 그 연결 위에서 다음 peer로 `JUMP` 스트림을 연다(protocol §21). `none`은 이번 명령에서 pin의 `jump`를 끄고 평소 route로 간다. 저장하지 않는다. 짧은 `-J`는 루트 ssh 형식(§7.2), `qsh cp`(§6.21), `qsh exec`(§6.8), `qsh attach`, `qsh tunnel open`, `qsh session open`이 받고 그 밖의 명령은 `--jump`만 받는다. 값이 비었거나 항목이 pin 이름 꼴이 아니거나 `:port`가 포트가 아니면 `INVALID_ARGUMENT`다. 펼친 hop이 넷을 넘거나 같은 pin이 두 번 나오거나 끝단이 hop에 들면 dial 전에 `INVALID_ARGUMENT`다. 우선순위는 `-J`/`--jump`, `-o ProxyJump`(루트 형식만), 그 host의 pin의 `jump`, 평소 route 순이다. `-W`는 지금처럼 이름을 대며 `UNSUPPORTED`(종료 255)다.
 - `--no-iroh`(전역, ADR-0061 결정 1): 이 명령의 정방향 dial은 pin의 `routes`에 `iroh`가 있어도 relay route를 시도하지 않고 relay에 접속하지 않으며 route 기억(§6.1)도 읽거나 쓰지 않는다. `[iroh].mode = "off"`와 같은 효과를 명령 하나에만 준다. `qsh serve --to`의 등록 dial은 이 플래그가 아니라 `[iroh].mode`를 따른다(§6.13). `qsh serve`와 `qsh listen`에 주면 그 실행의 iroh endpoint를 띄우지 않는다(`[iroh].enable = false`와 같은 효과, ADR-0063). `--iroh`는 만들지 않는다. relay는 pin에 적힌 `routes`로만 켠다(`--no-punch`와 같은 비대칭).
 - `--install-remote` / `--no-install-remote`(전역): ssh 부트스트랩이 원격에서 `qsh`를 못 찾거나 너무 낮은 버전을 찾았을 때의 설치 질문(§6.11, §7)에 미리 답한다. 둘은 함께 쓸 수 없다(clap 사용법 오류, 종료 2). 플래그가 있으면 `--json`/`--jsonl`에서도 그대로 따르고, 플래그가 없으면 TTY의 사람 모드에서만 묻는다.
@@ -1325,6 +1325,9 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 **`qsh pair ssh <[user@]host>`(ADR-0044, `pair.ssh`).** 이미 ssh로 닿는 장비에 시스템 `ssh`를 한 번 거쳐 양쪽 pin을 세운다. 원격이 이 장비의 fingerprint를 pin하고, 이 장비가 원격의 fingerprint를 pin하고, 마지막에 QUIC handshake로 확인한다. 인증은 전부 ssh 프로세스 안에서 일어나므로 암호·passphrase·2FA·host key 확인은 ssh가 직접 묻고 qsh는 SSH 개인키·암호·agent 소켓을 읽지 않는다(ssh 쪽 규칙은 §7 끝의 "시스템 ssh를 부르는 규칙"). 원격에 qsh를 설치하지 않고(설치는 ADR-0051 결정 3의 몫), `hosts.toml`·`config.toml`·`acl.toml`을 어느 쪽에서도 쓰지 않는다. 원격 응답자가 `hello`에 `on_demand: true`를 실으면 이 계정의 serve를 띄우거나 이미 뜬 것을 찾아 달라고 요청한다(아래 "원격 serve", 정방향만). 인가 불요 local op이고(§2.5) 원격 peer가 요청할 수 없다. 기본은 이 장비가 원격으로 dial하는 정방향이고, `--reverse --to`는 원격이 이 장비로 dial하는 역방향이다(아래 "역방향" 항목).
 
+> **v0.9.0에서 걷혔다(ADR-0068): `--reverse`와 `--to`.** 둘은 clap에 남아 파싱되고 ssh를 부르기 전에 `UNSUPPORTED`(`details.reason` `"reverse_retired"`)로 끝난다. 대안은 두 플래그 없이 `qsh pair ssh <dest>`다.
+
+
 ```bash
 qsh pair ssh <[user@]host> --json
 qsh pair ssh <[user@]host> --as <name> --remote-as <name> --role <role>
@@ -1458,7 +1461,7 @@ human 출력은 `trust_command`에 `--role full`을 붙여 보여 주고 `acl_ro
 }
 ```
 
-`doctor.run`의 전체 계약(§6.17)은 진단 코드 40종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
+`doctor.run`의 전체 계약(§6.17)은 진단 코드 41종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -1466,6 +1469,8 @@ human 출력은 `trust_command`에 `--role full`을 붙여 보여 주고 `acl_ro
 - `AUTH_FAILED`: certificate 검증 실패(만료, CA 불일치, client certificate 미제시, 이름으로 dial한 서버가 그 이름의 pin과 다른 키를 낸 경우 등). 이름의 pin이 아닌 다른 pin의 서버도 거절한다(ADR-0060). `retryable: false`. 보안상 `details`에는 실패 category만 담고 상세 사유를 노출하지 않는다.
 
 ### 6.12 장기 실행 모드: `qsh serve`
+
+> **v0.9.0에서 걷혔다(ADR-0068): `--to`, `--name`, 설정의 `[serve].to`·`[reverse].controller`.** 두 플래그는 clap에 남아 파싱되고 `UNSUPPORTED`(exit 255, `retryable: false`, `details.reason`는 `"reverse_retired"`)로 끝난다. 메시지는 대안 하나를 말한다: 인자 없이 `qsh serve`를 돌리고 상대 장비에 그 키를 pin한다. 설정에 `[serve].to`나 `[reverse].controller`가 남아 있으면 `--bind`를 줘도 `qsh serve`는 같은 `UNSUPPORTED`로 멈춘다. 밖으로만 걸던 장비가 말없이 `[::]:4433`을 여는 일을 막는다. 남은 키는 `qsh config unset`으로 지운다. 아래 `--to` 설명은 v0.8까지의 동작이다.
 
 **server.** `qsh serve`가 server 개념의 전부다. 장비마다 하나를 띄우고, pin한 peer는 어느 장비에서든 이 server에 연결을 걸 수 있다(iroh route의 key 주소, ADR-0063). `--to`는 server를 연결을 받는 쪽이 아니라 거는 쪽으로 돌리는 고급 fallback이며 §6.13이 정한다(ADR-0065).
 
@@ -1604,6 +1609,8 @@ qsh serve --to <listener|host:port> [--name <name>]
 재시작 고지. `qsh serve`는 기동할 때 `qsh serve: listening on {addr}`와 `qsh serve: identity …` 줄 뒤에 사람용 한 줄 `qsh serve: sessions live inside this process; a restart drops every detached session`을 stderr에 낸다. 세션은 이 프로세스 안에 살아서 서비스 매니저의 재시작이 detach된 세션을 전부 지우기 때문이다(ADR-0003, `docs/deploy/service.md`). 앞선 줄들의 바이트와 순서는 바뀌지 않으므로 `listening on` 접두로 주소를 읽는 하네스는 영향이 없다. `--quiet`이면 내지 않는다. `qsh serve --to`는 런타임이 올라온 시점에 같은 문면을 `qsh serve:`(숨김 alias `qsh reverse`는 `qsh reverse:`) 접두로 낸다. `qsh listen`은 세션을 호스팅하지 않으므로 내지 않는다. 다만 합친 모드(`[listen].serve = true` 또는 `qsh listen --serve`, §6.13)의 `qsh listen`은 세션을 이 프로세스 안에 호스팅하므로, `qsh listen: listening on {addr}` 줄들 뒤에 `qsh serve: listening on {addr}`를 내고 이어서 같은 문면을 `qsh serve:` 접두로 같은 stderr에 낸다(ADR-0059 결정 19·20).
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`
+
+> **v0.9.0에서 걷혔다(ADR-0068).** `qsh listen`(`--serve` 포함), `qsh serve --to`·`--name`, 숨김 `qsh reverse`는 clap에 남아 파싱되고 `UNSUPPORTED`(exit 255, `retryable: false`, `details.reason`는 `"reverse_retired"`)로 끝난다. 이 명령들은 장기 실행 모드라 envelope 없이 stderr에 오류를 한 줄 쓰고 stdout에는 아무것도 쓰지 않는다. 메시지는 명령마다 대안을 하나 말한다. 기본 꼴은 "대상에서 `qsh serve`를 돌리고 이 장비에 그 키를 pin하면(`qsh trust add <name> --key …`) 열린 포트 없이 iroh route로 닿는다. `-R` 터널은 그대로다"이고, `listen --serve`에는 "`[listen].bind`는 `[serve].bind`로 옮긴다"가 더 붙는다. `qsh listen`은 도움말과 man 페이지에서 숨긴다. `-R`(`forward.remote`)은 정방향 연결 위의 터널이라 그대로다. 아래는 v0.8까지의 동작이고, 다시 쓰이지 않는다.
 
 **고급: 역방향 fallback.** 이 절의 명령은 기본 경로가 아니다. 키 기반 iroh route로 pin한 장비끼리 방향에 상관없이 닿으므로 평소에는 `qsh serve`와 client 명령이면 충분하다. 역방향은 relay(TCP 443 HTTPS)가 막힌 망, `[iroh].enable = false`이거나 iroh를 쓰지 않는 peer, 특정 장비를 거치는 jump 체인이나 홀펀칭 중개자를 둘 때 쓴다(ADR-0065 결정 3). 아래 계약은 그대로다.
 
@@ -1921,7 +1928,7 @@ qsh doctor [host] [--mode <auto|client|server>] [--fail-on <warn|error>] --json
 
 **대화형 client의 `qsh::adapt` 줄.** `screen sync`를 요청한 대화형 client(`qsh [user@]host`, `qsh attach`)는 같은 정책을 자기 연결의 통계로 초당 한 번 돌려, 이산 손잡이(화면 운반체, bulk 양보, 예측, keep-alive, DATAGRAM 유무)가 바뀔 때와 첫 표본마다 stderr에 tracing target `qsh::adapt`의 한 줄 JSON을 남긴다. 한 줄은 `{"adapt":"policy",` 뒤에 위 `transport` 객체의 필드를 같은 순서로 이은 pure JSON이고, 접두사·시각·수준이 붙지 않는다(`qsh::recovery`와 같은 규율). RTT 흔들림이나 프레임 간격의 변화만으로는 줄을 내지 않는다. 이 줄은 기본 verbosity에서는 꺼져 있다(대화형 세션이 그리는 터미널에 정책 변화가 제멋대로 찍히지 않도록). `-v` 또는 `QSH_LOG=qsh::adapt=info`가 켜고 `-q`가 끈다. `--json`/`--jsonl` stdout에는 영향이 없다. 같은 값을 `SessionAttachStream::adapt_report()`(`qsh-core`의 `Ops`)가 내며 M23의 상태 줄이 그것을 읽는다.
 
-**40종 진단 코드** (재사용 5종·신설 35종 — `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)가 확정한 잠금 어휘, `config_unknown_key`는 `6d8de8c`가, M9의 8종은 `963809e`+`699af37`이 더했다 — 범위 (h)의 7종 + `host_pinned_without_address` — `acl_forward_socks_ineffective`는 ADR-0019 결과 절 R6의 후속이고 `service_restart_drops_sessions`는 M13 graceful re-exec H1이, `trust_pin_role_unset`은 ADR-0045 결정 12(M15)가, `acl_file_paths_missing`은 ADR-0029 결정 19(M15)가, `keystore_session_bound`는 ADR-0032 결정 15(M17)가, `logon_task_session_scoped`는 ADR-0035 결정 27(M19)이, `screen_sync_unsupported`와 `datagram_unavailable`은 ADR-0052 결정 14(M22)가, `screen_echo_unsupported`는 ADR-0053 결정 11(M23)이, `punch_succeeded`·`punch_failed`·`punch_no_rendezvous`는 ADR-0054 결정 20(M24)이, `agent_unreachable`과 `agent_dir_unusable`은 ADR-0055 결정 19(M25)가, `jump_stream_carrier`와 `jump_hop_missing`은 ADR-0056 결정 22(M26)가, `listen_serve_ignores_serve_bind`와 `serve_unit_beside_listen_serve`는 ADR-0059 결정 22(M27)가 더했다. 코드 집합은 세 OS에서 같고, Windows 빌드도 40종을 모두 안다. `keystore_session_bound`는 macOS와 Linux에서만 나오고(Windows의 `Password` 주체 작업은 Credential Manager를 읽는 것으로 실측돼 내지 않는다), `logon_task_session_scoped`는 Windows에서만 낸다. 이 장비의 상태를 읽는 진단(identity·trust·config·acl 계열)은 Windows client에서도 다른 OS와 같은 조건으로 나온다. 장비 환경을 읽는 세 코드만 환경에 따라 갈린다: `qsh_path_shadowed`는 Windows에서 `qsh.exe`를 `PATH`에서 찾고, `bindv6only_blocks_ipv4`는 `IPV6_V6ONLY`를 끄려는 시도 뒤에도 IPv6 소켓이 IPv6 전용으로 남는 OS에서 `[::]` bind에 대해서만 나오며(ADR-0046, Windows에서도 기본 상태에서는 나오지 않는다), `service_not_registered`는 Windows에서 작업 정의 파일(`<config_dir>\service\qsh-<mode>.task.xml`)이 없을 때 나오고, `logon_task_session_scoped`는 Windows에서만 나온다):
+**41종 진단 코드** (재사용 5종·신설 36종 — `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)가 확정한 잠금 어휘, `config_unknown_key`는 `6d8de8c`가, M9의 8종은 `963809e`+`699af37`이 더했다 — 범위 (h)의 7종 + `host_pinned_without_address` — `acl_forward_socks_ineffective`는 ADR-0019 결과 절 R6의 후속이고 `service_restart_drops_sessions`는 M13 graceful re-exec H1이, `trust_pin_role_unset`은 ADR-0045 결정 12(M15)가, `acl_file_paths_missing`은 ADR-0029 결정 19(M15)가, `keystore_session_bound`는 ADR-0032 결정 15(M17)가, `logon_task_session_scoped`는 ADR-0035 결정 27(M19)이, `screen_sync_unsupported`와 `datagram_unavailable`은 ADR-0052 결정 14(M22)가, `screen_echo_unsupported`는 ADR-0053 결정 11(M23)이, `punch_succeeded`·`punch_failed`·`punch_no_rendezvous`는 ADR-0054 결정 20(M24)이, `agent_unreachable`과 `agent_dir_unusable`은 ADR-0055 결정 19(M25)가, `jump_stream_carrier`와 `jump_hop_missing`은 ADR-0056 결정 22(M26)가, `listen_serve_ignores_serve_bind`와 `serve_unit_beside_listen_serve`는 ADR-0059 결정 22(M27)가, `reverse_config_retired`는 ADR-0068 결정 4가 더했다. 코드 집합은 세 OS에서 같고, Windows 빌드도 41종을 모두 안다. `keystore_session_bound`는 macOS와 Linux에서만 나오고(Windows의 `Password` 주체 작업은 Credential Manager를 읽는 것으로 실측돼 내지 않는다), `logon_task_session_scoped`는 Windows에서만 낸다. 이 장비의 상태를 읽는 진단(identity·trust·config·acl 계열)은 Windows client에서도 다른 OS와 같은 조건으로 나온다. 장비 환경을 읽는 세 코드만 환경에 따라 갈린다: `qsh_path_shadowed`는 Windows에서 `qsh.exe`를 `PATH`에서 찾고, `bindv6only_blocks_ipv4`는 `IPV6_V6ONLY`를 끄려는 시도 뒤에도 IPv6 소켓이 IPv6 전용으로 남는 OS에서 `[::]` bind에 대해서만 나오며(ADR-0046, Windows에서도 기본 상태에서는 나오지 않는다), `service_not_registered`는 Windows에서 작업 정의 파일(`<config_dir>\service\qsh-<mode>.task.xml`)이 없을 때 나오고, `logon_task_session_scoped`는 Windows에서만 나온다):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
@@ -1952,6 +1959,7 @@ qsh doctor [host] [--mode <auto|client|server>] [--fail-on <warn|error>] --json
 | `jump_hop_missing` | warn | pin의 `jump`가 이 trust store에 없는 이름을 가리킨다(pin을 지웠거나 `trust.toml`을 손으로 고쳤다). 없는 이름마다 한 건이고 `detail`에 pin 이름과 없는 hop 이름이 든다. remedy는 `qsh trust jump <name> <hop>...`이나 `--clear`다. 그 pin으로 가는 dial은 `HOST_NOT_FOUND`(`details.jump.stage: "address"`)로 끝난다 |
 | `listen_serve_ignores_serve_bind` | info | `[listen].serve`가 켜져 있어(config 또는 `--serve`가 아니라 `config.toml`의 값을 본다) `qsh listen`이 정방향 연결도 받는데 `[serve].bind`에 값이 있다. 합친 endpoint는 `--bind`, `[listen].bind`, `[::]:4433` 순서로 bind하고 `[serve].bind`는 읽지 않는다. 동작에는 영향이 없어 info다. remedy는 원하는 주소를 `[listen].bind`로 옮기거나 `[serve].bind`를 지우라는 것이고, `[serve]`의 세션·replay·admission 키는 그대로 적용된다(ADR-0059 결정 11, 22) |
 | `serve_unit_beside_listen_serve` | warn | `[listen].serve`가 켜져 있는데 이 장비에 `qsh serve`가 따로 있다. `serve` mode의 service unit이 등록돼 있거나(Windows는 작업 정의 파일), `serve.json`이 가리키는 pid가 살아 있고 그 pid가 localctl endpoint를 가진 `qsh listen`이 아니다. 합친 endpoint가 스스로 쓴 `serve.json`은 세지 않는다. 두 프로세스가 정방향 연결을 받고 SSH 부트스트랩은 `serve.json`을 마지막에 쓴 쪽을 찾는다. 두 데몬에서 합친 모드로 옮기는 중간(ADR-0059 결정 24)에는 정상이라 error가 아니라 warn이다. 합친 endpoint 없이 `qsh listen`과 `qsh serve`를 나란히 두는 구성에서는 나오지 않는다 |
+| `reverse_config_retired` | warn | 걷힌 역방향 연결(ADR-0068)의 흔적이 남았다. `config.toml`에 `[listen]`, `[serve].to`, `[reverse]`(어느 키든), `[recovery].reverse_min_dead_after_ms`, `[recovery].reverse_strikes` 중 하나라도 기본값이 아닌 값으로 있거나, `listen`·`reverse` mode의 service 유닛(Windows는 작업 정의 파일)이 등록돼 있다. `detail`이 남은 키 이름과 유닛을 말한다. 키는 읽기 전용으로 파싱되어 `config_unknown_key`는 내지 않고, 아무 효과가 없다. `[serve].to`나 `[reverse].controller`가 있으면 `qsh serve`가 `UNSUPPORTED`로 멈춘다. remedy는 `qsh config unset <key>`와 `qsh service uninstall`이다. client와 server 어느 쪽으로 판정된 장비에서도 낸다. |
 | `bindv6only_blocks_ipv4` | warn | 유효 bind 주소가 IPv6 wildcard이고, 새 IPv6 UDP 소켓에서 `IPV6_V6ONLY`를 끈 뒤 다시 읽은 값이 여전히 켜져 있거나 끄기 호출이 실패하는 경우(ADR-0046) — `Listener::bind`는 `dual_stack_v6=true`로 best-effort로 끄므로 OS 기본값과는 관계가 없고, 끌 수 없는 OS에서만 `[::]:4433` listener가 IPv4 peer를 조용히 거부한다 |
 | `acl_principal_unmatched` | error | `trust.toml`이 pin한 peer 중 `auth_path = "pin"`인 `acl.toml` 행 어디에도 매칭되지 않는 것이 있음. `device:<name>`·`fp:sha256:<fingerprint>` 두 후보 다 확인한다. role이 `none`이 아닌 pin은 세지 않는다. 행이 없어도 role로 인가되기 때문이다. `acl.toml`이 없거나 파싱되지 않으면 이 검사는 돌지 않는다. `PEER_UNTRUSTED`와 같은 이유로 error다: 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2, ADR-0045 결정 12) |
 | `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음. `acl.toml`이 아예 없는 경우에도 낸다. CA 경로에는 role이 없어서(ADR-0045 결정 4), role pin이 `acl_policy_missing`을 침묵시켜도 CA 경로가 조용히 막힌 사실을 알릴 곳은 이 code뿐이다. peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
@@ -2041,6 +2049,8 @@ qsh doctor [host] [--mode <auto|client|server>] [--fail-on <warn|error>] --json
 **`--fail-on <warn|error>` (ADR-0027).** CI 게이트용 옵션이다. 주지 않으면 exit code와 stdout이 이 옵션이 생기기 전과 바이트 단위로 같다. 주면 조회가 성공한 뒤 `findings`에 임계 이상 `status`가 하나라도 있을 때만 exit `1`로 끝난다. `warn`은 `status`가 `"warn"`이나 `"error"`인 finding이 있을 때, `error`는 `"error"`인 finding이 있을 때 걸린다(순서는 `data.overall`과 같다). `"info"` finding은 `trust_remove_scope`처럼 상시 뜨는 고지라서 임계로 받지 않으며, `info`나 그 밖의 값은 clap이 exit `2`로 거절한다. envelope은 임계에 걸려도 그대로다: `ok: true`이고 `data.overall`과 `data.findings`를 모두 싣는다. 그래서 `ok: true`와 exit `1`의 조합은 정상이며, `ok: false`는 여전히 exit `255`와만 짝을 이룬다. doctor가 조회를 시작하지 못하는 경우(위 `Err`)는 `--fail-on`과 무관하게 exit `255`다. 따라서 `255`는 "판정할 수 없었다", `1`은 "판정했고 걸렸다"로 읽는다. human과 `--json`에서 같은 finding 집합이 같은 exit를 낸다(§4). JSON 모양은 바뀌지 않는다.
 
 ### 6.18 `qsh service` — 플랫폼 서비스 유닛 관리 (ROADMAP M9 (g))
+
+> **v0.9.0에서 걷혔다(ADR-0068): `listen`·`reverse` 모드.** `qsh service install --to`(와 `--name`)는 `UNSUPPORTED`(`details.reason` `"reverse_retired"`)로 끝나고, 설정이 `listen`이나 `reverse` 모드를 가리키는 장비(`[listen]`, `[serve].to`, `[reverse]`가 남은 경우)에서도 유닛을 쓰지 않는다. 숨김 `qsh service run listen|reverse`도 같은 `UNSUPPORTED`를 유닛의 stderr 로그에 남기고 끝난다. `qsh service status`와 `qsh service uninstall`은 남은 `listen`·`reverse` 유닛을 계속 알아보고 지운다.
 
 ```bash
 qsh service install [--no-activate] [--to <LISTENER|HOST:PORT>] [--bind <IP:PORT>] [--name <NAME>] [--always-on [--move-key]] [--json]
@@ -2372,6 +2382,8 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
 
 ### 6.20 `qsh setup`
 
+> **v0.9.0에서 걷혔다(ADR-0068): `qsh setup listener`와 `qsh setup host --to`.** 둘은 clap에 남아 파싱되고, 아무것도 쓰기 전에 `UNSUPPORTED`(`details.reason` `"reverse_retired"`)로 끝난다. `qsh setup listener`는 도움말과 man 페이지에서 숨긴다. 대안은 `qsh setup host`다.
+
 ```bash
 qsh setup host --peer <name> [--peer-cert <path|->] [--forward] [--service] [--peer-role <role>] --json
 qsh setup host --to <alias> --address <addr> --peer-cert <path|-> [--forward] [--service] [--peer-role <role>] --json
@@ -2657,6 +2669,8 @@ qsh audit --principal device:laptop --action file.write --limit 20 --json
 Windows named pipe localctl(ADR-0035 결정 14)에도 이 op의 요청이 없다. localctl 소스 전체를 훑는 `audit_query_has_no_wire_message_and_no_localctl_request`가 pipe transport 파일도 덮고, `localctl_request_enum_has_no_audit_variant_on_any_platform`이 요청 enum이 닫혀 있음을 모든 OS에서 지킨다.
 
 ### 6.23 `qsh config` — `config.toml` 읽기와 쓰기
+
+> **v0.9.0에서 걷힌 키(ADR-0068).** `[listen]`의 모든 키, `[serve].to`, `[reverse]`의 모든 키, `[recovery].reverse_min_dead_after_ms`, `[recovery].reverse_strikes`는 읽기 전용으로 파싱만 한다(`config_unknown_key`를 내지 않는다). `qsh config set`은 이 키에 `UNSUPPORTED`(`details.reason` `"reverse_retired"`)를 내고 파일을 건드리지 않는다. `qsh config unset`은 정리를 위해 그대로 허용한다. `qsh doctor`의 `reverse_config_retired`(§6.17)가 남은 키를 말한다.
 
 ```bash
 qsh config get <key> [--json]

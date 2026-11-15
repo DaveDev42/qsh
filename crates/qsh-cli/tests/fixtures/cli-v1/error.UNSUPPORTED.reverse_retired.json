@@ -1,0 +1,14 @@
+{
+  "command": "setup.run",
+  "error": {
+    "code": "UNSUPPORTED",
+    "details": {
+      "reason": "reverse_retired"
+    },
+    "message": "`qsh setup listener`는 v0.9.0에서 걷혔다(ADR-0068). `qsh setup host`로 이 장비를 서버로 준비하고 client 장비에 그 키를 pin한다. 대상에서 `qsh serve`를 돌리고 이 장비에 그 키를 pin하면(`qsh trust add <name> --key …`) 열린 포트 없이 iroh route로 닿는다. `-R` 터널은 그대로다.",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

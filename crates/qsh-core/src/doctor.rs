@@ -68,7 +68,10 @@ pub mod probe;
 /// decision 22, M27) are the thirty-ninth and fortieth, 38 -> 40: a combined
 /// `qsh listen` (`[listen].serve = true`) that has a `[serve].bind` it does not
 /// read, and one that runs beside a second `qsh serve`.
-/// The set is the same on every target: every build knows all 40 codes.
+/// `ReverseConfigRetired` (ADR-0068 decision 4) is the forty-first, 40 -> 41:
+/// reverse-connection config keys or a `listen`/`reverse` service unit left on
+/// a machine after the feature was retired.
+/// The set is the same on every target: every build knows all 41 codes.
 /// [`LOGON_TASK_SESSION_SCOPED`] is emitted on Windows only, and
 /// [`KEYSTORE_SESSION_BOUND`] on all three platforms (ADR-0032 결정 15,
 /// ADR-0035 결정 27).
@@ -114,6 +117,7 @@ pub enum DiagnosticId {
     JumpHopMissing,
     ListenServeIgnoresServeBind,
     ServeUnitBesideListenServe,
+    ReverseConfigRetired,
 }
 
 impl DiagnosticId {
@@ -168,6 +172,7 @@ impl DiagnosticId {
             DiagnosticId::JumpHopMissing => JUMP_HOP_MISSING.code,
             DiagnosticId::ListenServeIgnoresServeBind => LISTEN_SERVE_IGNORES_SERVE_BIND.code,
             DiagnosticId::ServeUnitBesideListenServe => SERVE_UNIT_BESIDE_LISTEN_SERVE.code,
+            DiagnosticId::ReverseConfigRetired => REVERSE_CONFIG_RETIRED.code,
         }
     }
 }
@@ -210,6 +215,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "punch_no_rendezvous",
     "punch_succeeded",
     "qsh_path_shadowed",
+    "reverse_config_retired",
     "screen_echo_unsupported",
     "screen_sync_unsupported",
     "serve_unit_beside_listen_serve",
@@ -323,6 +329,20 @@ pub const SERVE_UNIT_BESIDE_LISTEN_SERVE: Diagnostic = Diagnostic {
     code: "serve_unit_beside_listen_serve",
     message: "[listen].serve is on, and a separate qsh serve is also set up on this machine (a serve service unit, or a running serve recorded in serve.json). Two processes answer forward connections, and the SSH bootstrap finds whichever wrote serve.json last.",
     remedy: "Once clients use the combined endpoint's address, stop and remove the serve unit (docs/deploy/service.md) or stop the extra qsh serve. To go back instead, turn [listen].serve off.",
+};
+
+/// ADR-0068 decision 4, `docs/CLI.md` §6.17: `config.toml` still carries a
+/// key of the retired reverse connection (`[listen]`, `[serve].to`,
+/// `[reverse]`, `[recovery].reverse_min_dead_after_ms`,
+/// `[recovery].reverse_strikes`), or a `listen`/`reverse` service unit is
+/// still registered. `warn`: the keys parse and do nothing, `qsh serve`
+/// refuses to start while `[serve].to` or `[reverse].controller` is set, and
+/// `qsh config unset` removes any of them. The detail names what was found.
+pub const REVERSE_CONFIG_RETIRED: Diagnostic = Diagnostic {
+    id: DiagnosticId::ReverseConfigRetired,
+    code: "reverse_config_retired",
+    message: "Reverse connections were retired in v0.9.0 (ADR-0068), but this machine still has settings or a service unit for them. They have no effect, and qsh serve refuses to start while [serve].to or [reverse].controller is set.",
+    remedy: "Remove each key with `qsh config unset <section>.<key>` and the unit with `qsh service uninstall`. To be reachable, run `qsh serve` and pin this machine's key on the other side (`qsh trust add <name> --key ...`).",
 };
 
 /// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently

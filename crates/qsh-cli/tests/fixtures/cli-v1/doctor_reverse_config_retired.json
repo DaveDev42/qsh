@@ -1,0 +1,17 @@
+{
+  "command": "doctor.run",
+  "data": {
+    "findings": [
+      {
+        "code": "reverse_config_retired",
+        "detail": "Reverse connections were retired in v0.9.0 (ADR-0068), but this machine still has settings or a service unit for them. They have no effect, and qsh serve refuses to start while [serve].to or [reverse].controller is set. (left over: [listen], [serve].to, listen service unit)",
+        "remedy": "Remove each key with `qsh config unset <section>.<key>` and the unit with `qsh service uninstall`. To be reachable, run `qsh serve` and pin this machine's key on the other side (`qsh trust add <name> --key ...`).",
+        "status": "warn"
+      }
+    ],
+    "overall": "warn"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

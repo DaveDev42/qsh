@@ -264,65 +264,33 @@ pub fn config_outbound_target(config: &Config) -> Result<Option<String>, OpError
         .or_else(|| config.reverse.controller.clone()))
 }
 
-/// Resolve what `qsh serve` does this run: listen inbound, or dial out as a
-/// reverse target (`docs/CLI.md` §6.12/§6.13, ADR-0012 결정 2/4/5, ADR-0014
-/// 결정 7). All decision logic lives here, in `qsh-core` — `qsh-cli` only
-/// parses `--to`/`--name`/`--bind` and dispatches on the result
-/// (`CLAUDE.md`'s crate boundary).
-///
-/// Strict order, each step short-circuiting the rest:
-/// 1. `to` and `bind` both given → [`ErrorCode::InvalidArgument`] (never a
-///    clap `conflicts_with` — this must exit `255`, not clap's `2`, the
-///    same precedent `cli.rs`'s `-L` doc sets for a spec clap itself could
-///    reject but deliberately does not).
-/// 2. `name` given without `to` → `InvalidArgument` — a name is only
-///    meaningful outbound; failing closed here is cheaper than silently
-///    ignoring an operator's flag.
-/// 3. `to` given → [`ServeMode::Outbound`] with that literal. The config
-///    keys are not read *at all* on this path — the short-circuit happens
-///    before either lookup, so "no conflict verdict when `--to` wins" is
-///    unreachable by construction, not a suppressed check.
-/// 4. `bind` given (no `to`) → [`ServeMode::Inbound`] via [`resolve_bind`].
-///    The config's outbound keys are not read either: a CLI flag is tier
-///    one, and the operator typed an inbound address.
-/// 5. Neither given → [`config_outbound_target`] decides: `Some` is
-///    outbound, `None` falls back to [`resolve_bind`] with no CLI flag.
+/// Resolve what `qsh serve` does this run (`docs/CLI.md` §6.12). Since
+/// ADR-0068 the only answer is [`ServeMode::Inbound`]; every way of asking
+/// for the retired outbound mode is `UNSUPPORTED` with
+/// `details.reason = "reverse_retired"`, checked in this order:
+/// 1. `to` given.
+/// 2. `name` given.
+/// 3. `[serve].to` or `[reverse].controller` set in the config, even when
+///    `bind` was given: a device that used to dial out must stop, not open
+///    a listening socket nobody asked for.
+/// 4. Otherwise [`resolve_bind`] decides the address.
 pub fn resolve_serve_mode(
     to: Option<&str>,
     name: Option<&str>,
     bind: Option<&str>,
     config: &Config,
 ) -> Result<ServeMode, OpError> {
-    if to.is_some() && bind.is_some() {
-        return Err(OpError::new(
-            ErrorCode::InvalidArgument,
-            "--to and --bind are mutually exclusive: --to dials out as a reverse target, \
-             --bind listens inbound. Pick one.",
-        ));
+    // ADR-0068: the outbound branch is retired. Both flags and both config
+    // keys fail closed, whatever else was given, so a device that used to
+    // dial out never silently opens `[::]:4433` instead.
+    if to.is_some() {
+        return Err(crate::retired::RetiredEntry::ServeTo.error());
     }
-    if to.is_none() && name.is_some() {
-        return Err(OpError::new(
-            ErrorCode::InvalidArgument,
-            "--name only takes effect together with --to; it names nothing when this process \
-             listens inbound.",
-        ));
+    if name.is_some() {
+        return Err(crate::retired::RetiredEntry::ServeName.error());
     }
-    if let Some(target) = to {
-        return Ok(ServeMode::Outbound {
-            target: target.to_string(),
-            offered_name: name.map(str::to_owned),
-        });
-    }
-    if bind.is_some() {
-        return Ok(ServeMode::Inbound(resolve_bind(bind, config)?));
-    }
-    match config_outbound_target(config)? {
-        Some(target) => Ok(ServeMode::Outbound {
-            target,
-            offered_name: None,
-        }),
-        None => Ok(ServeMode::Inbound(resolve_bind(None, config)?)),
-    }
+    crate::retired::check_serve_config(config)?;
+    Ok(ServeMode::Inbound(resolve_bind(bind, config)?))
 }
 
 /// The ports `qsh serve --on-demand` falls back to when the configured port

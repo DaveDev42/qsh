@@ -357,6 +357,7 @@ impl Ops {
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
         findings.extend(self.doctor_config_serve_to_conflict_finding(config));
+        findings.extend(self.doctor_reverse_config_retired_finding(config, env));
         // A client-only device takes no inbound request, so everything that
         // only matters for inbound authorization, the service unit, the
         // listener and the session host is left out (ADR-0066 decision 4).
@@ -1926,6 +1927,7 @@ pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
 
 mod combined;
 mod jump;
+mod retired;
 
 #[cfg(test)]
 mod tests;

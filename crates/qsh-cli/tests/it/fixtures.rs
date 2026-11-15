@@ -36,8 +36,8 @@ use std::process::Stdio;
 
 #[cfg(unix)]
 use common::FakeServiceManager;
+use common::poll_until;
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
-use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use qsh_proto::ErrorCode;
 use qsh_testkit::fixtures;
 use serde_json::Value;
@@ -140,6 +140,10 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "doctor_jump_stream_carrier.json",
     "doctor_listen_serve_ignores_serve_bind.json",
     "doctor_serve_unit_beside_listen_serve.json",
+    // ADR-0068 (v0.9.0): the retired reverse entry points and the doctor row
+    // for what they left behind.
+    "error.UNSUPPORTED.reverse_retired.json",
+    "doctor_reverse_config_retired.json",
     "pair.ssh.jump.json",
     "pair.ssh.jump.refused.json",
     "trust.allow.json",
@@ -1079,22 +1083,14 @@ fn golden_setup_run_fixtures() {
     );
     check("setup.run.host_complete_with_role_jump.json", role_run);
 
-    let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
-    let cert_path = listener.home_dir().join("peer.pem");
-    let (code, listener_run) = listener.json(&[
-        "setup",
-        "listener",
-        "--peer",
-        "macmini",
-        "--peer-cert",
-        cert_path.to_str().unwrap(),
-        "--peer-role",
-        "none",
-        "--json",
-    ]);
-    assert_eq!(code, 0, "{listener_run}");
-    assert_eq!(listener_run["data"]["complete"], false, "{listener_run}");
-    check_without_roles("setup.run.listener_pending_acl.json", listener_run);
+    // `setup.run.listener_pending_acl.json` was recorded from `qsh setup
+    // listener`, retired by ADR-0068. The file stays registered and
+    // unedited; this only checks that it still decodes.
+    let frozen: qsh_proto::CliEnvelope =
+        serde_json::from_value(fixtures::load_cli_v1("setup.run.listener_pending_acl.json"))
+            .expect("setup.run.listener_pending_acl.json decodes as an envelope");
+    assert!(frozen.ok);
+    assert_eq!(frozen.data.expect("data")["complete"], false);
 
     let client = with_config("");
     // A doctor `overall` of "error" would keep `complete` false, and a
@@ -1675,6 +1671,56 @@ fn golden_doctor_combined_endpoint_fixtures() {
             serde_json::to_value(&envelope).expect("encode envelope"),
         );
     }
+}
+
+/// The retired reverse entry points (ADR-0068): one real run of a retired
+/// command that has an envelope, and the doctor row for what it left behind.
+#[test]
+fn golden_reverse_retired_fixtures() {
+    use qsh_core::doctor::REVERSE_CONFIG_RETIRED;
+    use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, DoctorData, DoctorFinding};
+
+    let sandbox = Sandbox::new();
+    let (code, refused) = sandbox.json(&["setup", "listener", "--peer", "hub", "--json"]);
+    assert_eq!(code, 255, "{refused}");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"]["code"], "UNSUPPORTED", "{refused}");
+    assert_eq!(refused["error"]["retryable"], false, "{refused}");
+    assert_eq!(
+        refused["error"]["details"]["reason"], "reverse_retired",
+        "{refused}"
+    );
+    check("error.UNSUPPORTED.reverse_retired.json", refused);
+
+    let data = DoctorData {
+        overall: "warn".to_string(),
+        mode: None,
+        mode_basis: None,
+        findings: vec![DoctorFinding {
+            code: REVERSE_CONFIG_RETIRED.code.to_string(),
+            status: "warn".to_string(),
+            detail: format!(
+                "{} (left over: [listen], [serve].to, listen service unit)",
+                REVERSE_CONFIG_RETIRED.message
+            ),
+            remedy: Some(REVERSE_CONFIG_RETIRED.remedy.to_string()),
+        }],
+        transport: None,
+        punch: None,
+    };
+    assert!(qsh_core::doctor::EXPECTED_DOCTOR_CODES.contains(&"reverse_config_retired"));
+    let envelope = CliEnvelope {
+        schema: CLI_SCHEMA_V1.to_string(),
+        request_id: "01K0EXAMPLE".to_string(),
+        command: "doctor.run".to_string(),
+        ok: true,
+        data: Some(serde_json::to_value(&data).expect("encode data")),
+        error: None,
+    };
+    check(
+        "doctor_reverse_config_retired.json",
+        serde_json::to_value(&envelope).expect("encode envelope"),
+    );
 }
 
 /// `pair ssh` when `ssh -G` reports a `ProxyJump` whose hop is already a qsh
@@ -3013,84 +3059,48 @@ fn golden_resource_exhausted_fixture() {
     check("error.RESOURCE_EXHAUSTED.json", refused);
 }
 
-/// issue #4 items 4/3a: a real `qsh listen`/`qsh reverse` pair, the target
-/// registered under a client-only pin (no `--address`, so nothing else
-/// can ever answer this name once the registration goes stale — same
-/// "pinned without an address" shape `hosts_reverse.rs`'s own
-/// `stale_only_registration_with_no_forward_pin_is_retryable_host_not_found`
-/// drives, reused here to source this milestone's two new golden fixtures
-/// rather than duplicating a third copy of the same scenario). Produces:
-/// `host.list.reverse_stale.json` (the stale entry, `lost_at` present) and
-/// `error.HOST_NOT_FOUND.reverse_stale.json` (`host get` on that same
-/// name, retryable, `details.reason: "reverse_registration_stale"`).
-///
-/// A distinctly-named `host.get.reverse_stale.json` "success" fixture is
-/// deliberately not produced: `host.get` on a stale-only name (no forward
-/// fallback) can only ever fail with this retryable envelope — there is
-/// no `HostRoute` success variant for "stale" (`resolve_route`'s live
-/// filter excludes a stale entry from ever becoming `HostRoute::Reverse`)
-/// — so no separate `host.get.reverse_stale.json` success fixture is
-/// possible or needed; `error.HOST_NOT_FOUND.reverse_stale.json` is the
-/// `host.get` coverage for this branch (issue #4 item 3a, `docs/CLI.md`
-/// §6.1).
+/// The reverse-stale fixtures (issue #4 items 4/3a) were recorded from a
+/// live `qsh listen`/`qsh reverse` pair. ADR-0068 retired those commands, so
+/// the files stay registered and unedited and this test only decodes them
+/// into the typed DTOs and pins their key values: the wire vocabulary
+/// (`connection_mode: "reverse"`, `reverse_registration_stale`) is still part
+/// of the `qsh.cli/v1` contract.
 #[test]
-fn golden_reverse_stale_fixtures() {
-    const NAME: &str = "stale-only-host";
+fn frozen_reverse_stale_fixtures() {
+    use qsh_proto::{CliEnvelope, HostListData};
 
-    let listen_sandbox = Sandbox::initialized();
-    let target_sandbox = Sandbox::initialized();
-    let listen_fp = listen_sandbox.fingerprint();
-    let target_fp = target_sandbox.fingerprint();
+    let hosts: CliEnvelope =
+        serde_json::from_value(fixtures::load_cli_v1("host.list.reverse_stale.json"))
+            .expect("host.list.reverse_stale.json decodes as an envelope");
+    assert!(hosts.ok);
+    let list: HostListData = serde_json::from_value(hosts.data.expect("data"))
+        .expect("host.list.reverse_stale.json data decodes as HostListData");
+    assert_eq!(list.hosts.len(), 1);
+    assert_eq!(list.hosts[0].name, "stale-only-host");
+    assert_eq!(list.hosts[0].connection_mode, "reverse");
+    assert_eq!(list.hosts[0].state, "stale");
 
-    listen_sandbox.trust_add(NAME, None, &target_fp);
-
-    // `ListenGuard::start` plants the `acl.toml` `qsh listen` itself now
-    // requires (`common::ListenGuard::start_with`'s own doc).
-    let listen = ListenGuard::start(&listen_sandbox);
-    target_sandbox.trust_add("hub", Some(listen.addr()), &listen_fp);
-    let reverse = ReverseGuard::start(&target_sandbox, "hub");
-
-    poll_until(
-        "the reverse registration to appear",
-        std::time::Duration::from_secs(10),
-        || {
-            hosts_array(&listen_sandbox)
-                .into_iter()
-                .find(|h| h["name"] == NAME && h["connection_mode"] == "reverse")
-        },
-    );
-
-    reverse.shut_down();
-
-    poll_until(
-        "the reverse registration to go stale",
-        std::time::Duration::from_secs(10),
-        || {
-            hosts_array(&listen_sandbox)
-                .into_iter()
-                .find(|h| h["name"] == NAME && h["state"] == "stale")
-        },
-    );
-
-    let (code, hosts) = listen_sandbox.json(&["hosts", "--json"]);
-    assert_eq!(code, 0, "{hosts}");
-    check("host.list.reverse_stale.json", hosts);
-
-    let (code, not_found) = listen_sandbox.json(&["host", "get", NAME, "--json"]);
-    assert_eq!(code, 255, "{not_found}");
-    assert_eq!(not_found["error"]["code"], "HOST_NOT_FOUND", "{not_found}");
-    assert_eq!(not_found["error"]["retryable"], true, "{not_found}");
-    assert_eq!(
-        not_found["error"]["details"]["reason"], "reverse_registration_stale",
-        "{not_found}"
-    );
-    check("error.HOST_NOT_FOUND.reverse_stale.json", not_found);
-
-    drop(listen);
+    for name in [
+        "error.HOST_NOT_FOUND.reverse_stale.json",
+        "error.HOST_NOT_FOUND.exec_reverse_stale.json",
+    ] {
+        let env: CliEnvelope = serde_json::from_value(fixtures::load_cli_v1(name))
+            .unwrap_or_else(|e| panic!("{name} decodes as an envelope: {e}"));
+        assert!(!env.ok, "{name}");
+        let error = env
+            .error
+            .unwrap_or_else(|| panic!("{name} carries an error"));
+        assert_eq!(error.code, ErrorCode::HostNotFound, "{name}");
+        assert!(error.retryable, "{name}");
+        assert_eq!(
+            error.details["reason"], "reverse_registration_stale",
+            "{name}"
+        );
+    }
 }
 
 /// issue #3 item b2 (PR-D): the two remaining `HOST_NOT_FOUND` branches
-/// `golden_reverse_stale_fixtures` above does not cover — no `qsh
+/// `frozen_reverse_stale_fixtures` above does not cover — no `qsh
 /// listen`/`qsh reverse` pair needed for either, since both are decided
 /// from local trust/hosts state alone. `error.HOST_NOT_FOUND.json`
 /// (`REQUIRED_FIXTURES`, driven by `qsh exec nowhere`) pins a different
@@ -3112,7 +3122,7 @@ fn golden_host_not_found_split_fixtures() {
 
     // Branch (iii): a client-only pin (`trust add` with no `--address`)
     // and no reverse registration at all, ever — distinct from
-    // `golden_reverse_stale_fixtures`'s same client-only pin shape once a
+    // `frozen_reverse_stale_fixtures`'s same client-only pin shape once a
     // registration has gone stale.
     let pinned_sandbox = Sandbox::initialized();
     let fingerprint = pinned_sandbox.fingerprint();
@@ -3128,7 +3138,7 @@ fn golden_host_not_found_split_fixtures() {
 /// (`Ops::resolve_host_route_with`) instead of the old forward-only
 /// `resolve_peer`, so both of `resolve_route`'s addressless branches now
 /// answer through `exec` too, with the identical wording
-/// `golden_reverse_stale_fixtures`/`golden_host_not_found_split_fixtures`
+/// `frozen_reverse_stale_fixtures`/`golden_host_not_found_split_fixtures`
 /// above already pin for `host get` — this test reaches the same two
 /// branches through `exec` instead, to prove its routing produces that
 /// same wording rather than the exec-specific "is not in the trust store"
@@ -3147,54 +3157,6 @@ fn golden_exec_reverse_fixtures() {
     assert_eq!(pinned["error"]["code"], "HOST_NOT_FOUND", "{pinned}");
     assert_eq!(pinned["error"]["retryable"], false, "{pinned}");
     check("error.HOST_NOT_FOUND.exec_pinned_no_address.json", pinned);
-
-    // A real `qsh listen`/`qsh reverse` pair, registered then severed so
-    // the registration goes stale — `exec`'s own version of
-    // `golden_reverse_stale_fixtures` above.
-    const NAME: &str = "stale-only-exec-host";
-    let listen_sandbox = Sandbox::initialized();
-    let target_sandbox = Sandbox::initialized();
-    let listen_fp = listen_sandbox.fingerprint();
-    let target_fp = target_sandbox.fingerprint();
-    listen_sandbox.trust_add(NAME, None, &target_fp);
-
-    let listen = ListenGuard::start(&listen_sandbox);
-    target_sandbox.trust_add("hub", Some(listen.addr()), &listen_fp);
-    let reverse = ReverseGuard::start(&target_sandbox, "hub");
-
-    poll_until(
-        "the reverse registration to appear",
-        std::time::Duration::from_secs(10),
-        || {
-            hosts_array(&listen_sandbox)
-                .into_iter()
-                .find(|h| h["name"] == NAME && h["connection_mode"] == "reverse")
-        },
-    );
-
-    reverse.shut_down();
-
-    poll_until(
-        "the reverse registration to go stale",
-        std::time::Duration::from_secs(10),
-        || {
-            hosts_array(&listen_sandbox)
-                .into_iter()
-                .find(|h| h["name"] == NAME && h["state"] == "stale")
-        },
-    );
-
-    let (code, not_found) = listen_sandbox.json(&["exec", NAME, "--json", "--", "true"]);
-    assert_eq!(code, 255, "{not_found}");
-    assert_eq!(not_found["error"]["code"], "HOST_NOT_FOUND", "{not_found}");
-    assert_eq!(not_found["error"]["retryable"], true, "{not_found}");
-    assert_eq!(
-        not_found["error"]["details"]["reason"], "reverse_registration_stale",
-        "{not_found}"
-    );
-    check("error.HOST_NOT_FOUND.exec_reverse_stale.json", not_found);
-
-    drop(listen);
 }
 
 /// Everything that needs a live peer on the other end.
@@ -3683,25 +3645,20 @@ fn golden_pair_ssh_installed_fixture() {
     check("pair.ssh.installed.json", got);
 }
 
-/// `pair ssh --reverse --to` (ADR-0044 decision 22): the remote dials this
-/// machine, so this machine's pin has no address and role `reverse`, no
-/// connection is made (`verified: false`, no `verify_error`) and the result
-/// names the command to run on the remote. The remote is a real
-/// `qsh pair ssh-respond` run by the fake `ssh`.
+/// `pair.ssh.reverse.json` was recorded from `pair ssh --reverse --to`
+/// (ADR-0044 decision 22), which ADR-0068 retired. The file stays registered
+/// and unedited; this test decodes it into the typed DTO and pins the shape.
 #[test]
-fn golden_pair_ssh_reverse() {
-    use crate::ssh_bootstrap::pair_reverse::World;
+fn frozen_pair_ssh_reverse_fixture() {
+    use qsh_proto::{CliEnvelope, PairSshData};
 
-    let w = World::new();
-    let (code, got) = w.pair(&[]);
-    assert_eq!(code, 0, "{got}");
-    assert_eq!(got["data"]["direction"], "reverse", "{got}");
-    assert_eq!(got["data"]["verified"], false, "{got}");
-    // `normalize` masks `address` unconditionally, so the fixture shows
-    // `<address>`; the real value is the empty string (this machine's pin
-    // has no dial target), asserted here before the mask erases it.
-    assert_eq!(got["data"]["peer"]["address"], "", "{got}");
-    check("pair.ssh.reverse.json", got);
+    let env: CliEnvelope = serde_json::from_value(fixtures::load_cli_v1("pair.ssh.reverse.json"))
+        .expect("pair.ssh.reverse.json decodes as an envelope");
+    assert!(env.ok);
+    let data: PairSshData = serde_json::from_value(env.data.expect("data"))
+        .expect("pair.ssh.reverse.json data decodes as PairSshData");
+    assert_eq!(data.direction, qsh_proto::PairSshDirection::Reverse);
+    assert!(!data.verified);
 }
 
 /// `pair ssh` against a remote where the shell cannot find `qsh` (ssh exit

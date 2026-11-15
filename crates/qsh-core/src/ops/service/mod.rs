@@ -920,9 +920,29 @@ impl Ops {
         options: &ServiceInstallOptions,
         prompter: &dyn Prompter,
     ) -> Result<ServiceInstallData, OpError> {
+        // ADR-0068: no new `listen` or `reverse` unit. The unit-writing engine
+        // below still knows those modes (it goes with the reverse code), but
+        // this public path never reaches it with one.
+        self.refuse_retired_service_install(options)?;
         let runner = CommandRunner::system();
         let host = ServiceHost::resolve(&runner)?;
         self.service_install_with_options(&host, crate::config::home_dir(), options, prompter)
+    }
+
+    /// `UNSUPPORTED` for `--to`/`--name`, and for a config that infers the
+    /// retired `listen` or `reverse` mode (ADR-0068 decision 1).
+    fn refuse_retired_service_install(
+        &self,
+        options: &ServiceInstallOptions,
+    ) -> Result<(), OpError> {
+        if options.to.is_some() || options.name.is_some() {
+            return Err(crate::retired::RetiredEntry::ServiceInstallTo.error());
+        }
+        let config = Config::load(&self.paths)?;
+        if super::doctor::infer_run_mode(&config) != "serve" {
+            return Err(crate::retired::RetiredEntry::ServiceInstallMode.error());
+        }
+        Ok(())
     }
 
     /// `service.uninstall` — remove the unit for this machine's inferred

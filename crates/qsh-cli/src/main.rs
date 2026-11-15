@@ -47,6 +47,7 @@ use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
+use qsh_core::retired::RetiredEntry;
 use qsh_core::ssh_bootstrap::{FormInput, FormMode, SshOptions, plan_form};
 use qsh_core::{
     AclCheckOp, AclShowOp, AuditQueryOp, CancelToken, CapabilitiesOp, CertInitOp, CertIssueOp,
@@ -515,6 +516,13 @@ fn command_jump_flag(command: &Command) -> Option<&str> {
 /// (below) exercise the real `Command::Trust(TrustCmd::Invite)` arm rather
 /// than a hand-built stand-in for it.
 fn dispatch(cli: &Cli, ops: Ops) -> i32 {
+    // `--rendezvous` was retired with qsh's own hole punching (ADR-0068).
+    if let Err(err) = qsh_core::retired::check_rendezvous(cli.rendezvous.as_deref()) {
+        return match long_running_setup_mode(&cli.command) {
+            Some(mode) => report_long_running_setup_error(mode, &err),
+            None => report_error(cli, command_name(cli), &err),
+        };
+    }
     // A dial to a pin the SSH bootstrap wrote may restart that host's serve
     // over ssh once (ADR-0051 decision 4); `--no-ssh` and the `Ops` default
     // leave ssh alone.
@@ -917,7 +925,14 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             *on_demand,
             cli.quiet,
         ),
-        Command::Listen { bind, serve } => run_listen(&ops, bind.as_deref(), *serve, cli.quiet),
+        Command::Listen { serve, .. } => {
+            let entry = if *serve {
+                RetiredEntry::ListenServe
+            } else {
+                RetiredEntry::Listen
+            };
+            report_long_running_setup_error(LISTEN_MODE, &entry.error())
+        }
         Command::Service(ServiceCmd::Install {
             activate: _,
             no_activate,
@@ -962,16 +977,9 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         Command::Service(ServiceCmd::Run { mode, controller }) => {
             run_service_run(cli, &ops, mode, controller.as_deref())
         }
-        Command::Reverse {
-            controller,
-            offered_name,
-        } => run_reverse(
-            &ops,
-            REVERSE_MODE,
-            controller,
-            offered_name.as_deref(),
-            cli.quiet,
-        ),
+        Command::Reverse { .. } => {
+            report_long_running_setup_error(REVERSE_MODE, &RetiredEntry::Reverse.error())
+        }
         // Handled in `run` before an `Ops` exists; a caller that builds its
         // own `Ops` for `dispatch` gets the same behavior.
         Command::Internal(InternalCmd::ConsoleCtrl { pid, kind }) => run_console_ctrl(*pid, *kind),
@@ -993,17 +1001,17 @@ fn run_console_ctrl(pid: u32, kind: qsh_core::pty::console_ctrl::CtrlKind) -> i3
 
 /// The hidden `qsh service run <mode> [controller]` (`docs/CLI.md` §6.18):
 /// the redirection of [`Ops::service_run_redirect`], then the entry function
-/// the foreground `qsh serve`, `qsh listen` and `qsh serve --to` use. Not an
+/// the foreground `qsh serve` uses (`listen` and `reverse` answer the retired
+/// `UNSUPPORTED`, ADR-0068). Not an
 /// operation: no envelope, nothing on stdout, and a redirection failure is
 /// reported on the stderr the process still has.
 fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -> i32 {
-    let (name, controller) = match (mode, controller) {
+    let (name, entry) = match (mode, controller) {
         ("serve", None) => (SERVE_MODE, None),
-        ("listen", None) => (LISTEN_MODE, None),
-        ("reverse", Some(controller)) => (SERVE_MODE, Some(controller)),
+        ("listen", _) => (LISTEN_MODE, Some(RetiredEntry::ServiceRunListen)),
+        ("reverse", _) => (SERVE_MODE, Some(RetiredEntry::ServiceRunReverse)),
         _ => {
-            // clap already requires the controller for `reverse`; this arm is
-            // a controller given to a mode that takes none.
+            // `serve` given a controller.
             let _ = Cli::command()
                 .error(
                     clap::error::ErrorKind::ArgumentConflict,
@@ -1016,10 +1024,12 @@ fn run_service_run(cli: &Cli, ops: &Ops, mode: &str, controller: Option<&str>) -
     if let Err(err) = ops.service_run_redirect(mode) {
         return report_long_running_setup_error(name, &err);
     }
-    match (mode, controller) {
-        ("listen", _) => run_listen(ops, None, false, cli.quiet),
-        (_, controller) => run_serve(ops, None, controller, None, false, cli.quiet),
+    // ADR-0068: a leftover unit of a retired mode ends here, with the
+    // alternative in the unit's own stderr log.
+    if let Some(entry) = entry {
+        return report_long_running_setup_error(name, &entry.error());
     }
+    run_serve(ops, None, None, None, false, cli.quiet)
 }
 
 /// Environment variable-free marker for the log: the name this form reports
@@ -2139,16 +2149,9 @@ fn hold_tunnel(hold: qsh_core::TunnelHold, shutdown: Option<TunnelShutdown>) -> 
 /// inbound-vs-outbound decision logic lives in
 /// [`qsh_core::serve::resolve_serve_mode`]; this function only parses the
 /// already-parsed flags apart, dispatches on the result, and does the
-/// stderr I/O the outbound branch needs before converging on
-/// [`run_reverse`] (`CLAUDE.md`'s crate boundary — `qsh-cli` never holds
+/// stderr I/O the retired `--to`/`--name` branches need (ADR-0068: they end
+/// in `UNSUPPORTED`; `CLAUDE.md`'s crate boundary — `qsh-cli` never holds
 /// decision logic of its own).
-///
-/// The hidden `qsh reverse <controller>` alias never reaches this
-/// function at all — its own `Command::Reverse` dispatch arm calls
-/// [`run_reverse`] directly — but both spellings converge on that one
-/// call, which is the roundtrip test's convergence point
-/// (`crates/qsh-cli/src/cli/tests.rs`'s
-/// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`).
 fn run_serve(
     ops: &Ops,
     bind: Option<&str>,
@@ -2161,6 +2164,8 @@ fn run_serve(
         Ok(config) => config,
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
     };
+    // `--to`, `--name` and a config that still dials out are retired
+    // (ADR-0068): `resolve_serve_mode` answers them with `UNSUPPORTED`.
     let mode = match qsh_core::serve::resolve_serve_mode(to, name, bind, &config) {
         Ok(mode) => mode,
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
@@ -2169,35 +2174,8 @@ fn run_serve(
         qsh_core::serve::ServeMode::Inbound(addr) => {
             run_serve_inbound(ops, &config, addr, on_demand, quiet)
         }
-        qsh_core::serve::ServeMode::Outbound { .. } if on_demand => {
-            let err = OpError::new(
-                ErrorCode::InvalidArgument,
-                "--on-demand only applies to an inbound serve; it cannot be combined with --to \
-                 or a configured [serve].to.",
-            );
-            report_long_running_setup_error(SERVE_MODE, &err)
-        }
-        qsh_core::serve::ServeMode::Outbound {
-            target,
-            offered_name,
-        } => {
-            let resolved = match ops.resolve_serve_target(&target) {
-                Ok(resolved) => resolved,
-                Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
-            };
-            // ADR-0014 결정 5, same wording and same trigger condition as
-            // `run_trust_add` — qsh-core decides whether the port was
-            // filled in, this function only prints the fixed notice.
-            if resolved.port_filled {
-                stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
-            }
-            run_reverse(
-                ops,
-                SERVE_MODE,
-                &resolved.controller,
-                offered_name.as_deref(),
-                quiet,
-            )
+        qsh_core::serve::ServeMode::Outbound { .. } => {
+            report_long_running_setup_error(SERVE_MODE, &RetiredEntry::ServeTo.error())
         }
     }
 }
@@ -2341,7 +2319,7 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
 /// stderr only, never `report_error`'s JSON-envelope path, because these
 /// three long-running modes have no envelope at all and stdout must see
 /// zero bytes on every path (`docs/CLI.md` §2.2, §6.12, §6.13). Shared by
-/// [`run_serve`]/[`run_listen`]/[`run_reverse`]'s own runtime-failure arms
+/// [`run_serve`]'s own runtime-failure arms and the retired-mode refusals
 /// and by [`run`]'s pre-dispatch `Ops::from_env()` failure, so the paths
 /// cannot drift apart.
 fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
@@ -2349,195 +2327,6 @@ fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
         stderr_note!("qsh {mode}: failed to write output: {io_err}");
     }
     EXIT_RUNTIME_FAILURE
-}
-
-/// `qsh listen` — the reverse-mode controller (`docs/CLI.md` §6.13). Not an
-/// operation: no envelope, nothing on stdout at all; the bound address and
-/// registration events go to stderr and the process runs until
-/// SIGINT/SIGTERM, exactly like [`run_serve`].
-fn run_listen(ops: &Ops, bind: Option<&str>, serve_flag: bool, quiet: bool) -> i32 {
-    let result = (|| -> Result<(), OpError> {
-        let mut config = ops.daemon_config()?;
-        // `--serve` turns the key on for this run only (ADR-0059 decision 20).
-        config.listen.serve |= serve_flag;
-        // Identity is loaded synchronously, before any runtime exists: the
-        // credential store may block (and prompt) — keep that off the
-        // runtime's workers.
-        let identity = ops.load_identity()?.ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConfigError,
-                "no device identity; run `qsh init` first",
-            )
-        })?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        // Registered before the `listening` line can be written.
-        let shutdown = arm_shutdown_signal(&runtime);
-        // `[listen].serve = true` makes this process a forward host on the
-        // same socket as well (ADR-0059): sessions live in it, so its
-        // `listening on` lines and the restart banner are a serve's.
-        let combined = config.listen.serve;
-        let device_id = identity.identity.device_id.clone();
-        let fingerprint = identity.identity.fingerprint.to_string();
-        let on_bound = |addr: SocketAddr| {
-            stderr_note!("qsh listen: listening on {addr}");
-            qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Listen);
-            // `docs/CLI.md` §6.13's "Controller reachability 요구":
-            // reverse only makes the *target* reachable through NAT —
-            // this controller must still be dialable at `addr` by
-            // every target. `qsh_core::doctor::CONTROLLER_UNREACHABLE`
-            // is the single source of truth for that reminder's
-            // wording (doctor.rs's own docs, docs/CLI.md §6.13's "같은
-            // 상수를 qsh listen 시작 배너 ... 함께 소비한다") — this
-            // banner renders it verbatim rather than forking its own
-            // paraphrase, same as the target's connection-failure path
-            // below (adversarial review finding, M3 Step 9: a second
-            // hardcoded copy here could silently drift from the
-            // constant with no test catching it).
-            stderr_note!("qsh listen: targets must be able to reach {addr} directly over UDP");
-            let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-            stderr_note!("qsh listen: {}", diag.message);
-            stderr_note!("qsh listen: {}", diag.remedy);
-            if combined {
-                // After every line a script that waits on the listen
-                // reads, so their bytes and order stay as they were.
-                stderr_note!("qsh serve: listening on {addr}");
-                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Serve);
-                stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
-                if !quiet {
-                    stderr_note!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER);
-                }
-            }
-        };
-        // M5 plan Step 6 (2473c88): fires at most once, only when `acl.toml`
-        // did not produce a usable policy — `rendered` is already the
-        // complete banner (`qsh_core::acl::StartupDiagnostic::render`);
-        // this closure prints it verbatim, no ACL logic here.
-        let on_policy = |rendered: &str| {
-            stderr_note!("qsh listen: {rendered}");
-        };
-        if combined {
-            runtime.block_on(qsh_core::reverse::listen::run_listen_serve(
-                ops.paths(),
-                &config,
-                identity,
-                bind,
-                on_bound,
-                on_policy,
-                // The pairing-pin and invite-replay notices of a forward
-                // host (ADR-0017 결정 3/4), as `qsh serve` prints them.
-                |notice| stderr_note!("qsh serve: {notice}"),
-                shutdown,
-            ))
-        } else {
-            runtime.block_on(qsh_core::reverse::listen::run_listen(
-                ops.paths(),
-                &config,
-                identity,
-                bind,
-                on_bound,
-                on_policy,
-                shutdown,
-            ))
-        }
-    })();
-    // Lets a console close that is waiting on this process go (Windows only).
-    console_shutdown_finished();
-    match result {
-        Ok(()) => {
-            stderr_note!("qsh listen: shutting down");
-            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::Listen);
-            0
-        }
-        Err(err) => report_long_running_setup_error(LISTEN_MODE, &err),
-    }
-}
-
-/// `qsh reverse <controller>` / `qsh serve --to` — the reverse-mode target
-/// (`docs/CLI.md` §6.13). Not an operation: no envelope, nothing on stdout
-/// at all. Registers and reconnects forever with backoff whenever the
-/// connection to the controller dies (`docs/design/protocol.md` §11-4,
-/// M3 plan Step 4 (2473c88)) — registration is this target's only reachability
-/// path, so it is never abandoned; a clean SIGINT/SIGTERM is the only way
-/// this returns.
-///
-/// `mode` is the stderr prefix and the mode name
-/// [`report_long_running_setup_error`] reports under: `SERVE_MODE` when
-/// reached from `qsh serve --to` (via [`run_serve`]), `REVERSE_MODE` when
-/// reached from the hidden `qsh reverse <controller>` alias directly — the
-/// only difference between the two spellings once they get here (M9 Step
-/// 5).
-fn run_reverse(
-    ops: &Ops,
-    mode: &'static str,
-    controller: &str,
-    offered_name: Option<&str>,
-    quiet: bool,
-) -> i32 {
-    let result = (|| -> Result<(), OpError> {
-        let config = ops.daemon_config()?;
-        let identity = ops.load_identity()?.ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConfigError,
-                "no device identity; run `qsh init` first",
-            )
-        })?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        // Registered now, not on the future's first poll: the `listening`
-        // lifecycle record fires from `on_runtime`, and a supervisor that
-        // signals the process on seeing it must find the handlers in place.
-        let shutdown = arm_shutdown_signal(&runtime);
-        runtime.block_on(qsh_core::reverse::target::run_reverse_observed(
-            ops.paths(),
-            &config,
-            identity,
-            controller,
-            offered_name,
-            // M5 plan Step 6 (2473c88): a reverse target is a host
-            // (`crate::serve::host_runtime`) — its own `acl.toml` gates the
-            // sessions it serves the controller, loaded once here, not per
-            // reconnect (`on_runtime` fires exactly once, before the first
-            // dial, `run_reverse_observed`'s own docs).
-            |runtime| {
-                if let Some(diag) = &runtime.policy_diagnostic {
-                    stderr_note!("qsh {mode}: {}", diag.render());
-                }
-                // A target has no `listening` line of its own; this is the
-                // moment its runtime is up and the first dial starts.
-                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::ServeTo);
-                if !quiet {
-                    stderr_note!("qsh {mode}: {}", qsh_core::lifecycle::RESTART_BANNER);
-                }
-            },
-            // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
-            // once per process (`run_reverse_observed`'s own docs — the
-            // once-only guard lives in qsh-core, this closure only
-            // renders it): the first failed dial/registration attempt,
-            // never once per backoff retry (`docs/CLI.md` §6.13,
-            // M3 plan Step 9 (2473c88)).
-            || {
-                let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-                stderr_note!("qsh {mode}: {}", diag.message);
-                stderr_note!("qsh {mode}: {}", diag.remedy);
-            },
-            shutdown,
-        ))
-    })();
-    // Lets a console close that is waiting on this process go (Windows only).
-    console_shutdown_finished();
-    match result {
-        Ok(()) => {
-            stderr_note!("qsh {mode}: shutting down");
-            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::ServeTo);
-            0
-        }
-        Err(err) => report_long_running_setup_error(mode, &err),
-    }
 }
 
 /// [`shutdown_signal`] with the Unix handlers registered on `runtime` at
@@ -3050,10 +2839,15 @@ fn run_setup(cli: &Cli, ops: &Ops, cmd: &Option<SetupCmd>) -> i32 {
         },
     };
 
+    // ADR-0068: the reverse roles end here, before any question is asked.
+    if let Err(err) = qsh_core::retired::check_setup_role(role) {
+        return report_error(cli, command, &err);
+    }
+
     let mut name = args.name;
     if name.is_none() && interactive {
         let question = match role {
-            SetupRole::HostTo => "qsh setup: reverse-listener alias (--to)?",
+            SetupRole::HostTo => "qsh setup: the peer's trust-store name (--to)?",
             SetupRole::Client => "qsh setup: name to pin the host under?",
             _ => "qsh setup: the peer's trust-store name (--peer)?",
         };

@@ -299,6 +299,8 @@ impl Ops {
     /// **Runtime caveat:** `identity` and `pair` block on a key store and a
     /// nested runtime; call this outside a tokio runtime.
     pub fn setup_run(&self, req: &SetupRunReq, env: &SetupEnv) -> Result<SetupRunData, OpError> {
+        // ADR-0068: the reverse roles are retired; nothing is written.
+        crate::retired::check_setup_role(req.role)?;
         validate(req)?;
         let mut steps: Vec<SetupStep> = Vec::new();
         let mut blocked = false;

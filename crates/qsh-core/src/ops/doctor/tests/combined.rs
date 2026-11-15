@@ -8,6 +8,16 @@ use qsh_proto::ConfigSetReq;
 use super::*;
 
 fn set(ops: &Ops, key: &str, value: &str) {
+    if crate::retired::is_retired_config_key(key) {
+        // ADR-0068: `config set` refuses these keys, but a config an older
+        // qsh wrote still has them; write the file the way that qsh did.
+        let path = ops.paths().config_file();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let key = crate::config_edit::lookup(key).unwrap();
+        let edit = crate::config_edit::set(&text, key, value).unwrap();
+        std::fs::write(path, edit.text).unwrap();
+        return;
+    }
     ops.config_set(ConfigSetReq {
         key: key.to_string(),
         value: value.to_string(),

@@ -504,6 +504,10 @@ impl Ops {
 
     /// Validate every argument that can be validated without a side effect.
     fn pair_ssh_plan(&self, req: &PairSshReq, env: &PairSshEnv) -> Result<Plan, OpError> {
+        // ADR-0068: the remote-dials-us direction is retired.
+        if req.reverse || req.to.is_some() {
+            return Err(crate::retired::RetiredEntry::PairSshReverse.error());
+        }
         // The direction flags first (decision 1): no other argument can make
         // an inconsistent pair valid.
         let to = match req.to.as_deref() {

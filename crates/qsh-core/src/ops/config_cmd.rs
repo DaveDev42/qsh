@@ -69,6 +69,11 @@ impl Ops {
     /// Setting the value a key already holds writes nothing.
     pub fn config_set(&self, req: ConfigSetReq) -> Result<ConfigSetData, OpError> {
         let key = config_edit::lookup(&req.key)?;
+        // ADR-0068: the reverse keys still parse and `config unset` still
+        // clears them, but nothing new is written.
+        if crate::retired::is_retired_config_key(&key.path()) {
+            return Err(crate::retired::config_set_error(&key.path()));
+        }
         let edit = self.commit_config_edit(key, |text| config_edit::set(text, key, &req.value))?;
         let changed = edit.changed();
         Ok(ConfigSetData {
