@@ -14,8 +14,7 @@ pub(super) async fn dial_peer(
 }
 
 /// [`dial_peer`] for a recovery: the route is run again from scratch (a new
-/// socket, the local addresses read now), and a host that can be punched to
-/// gets the punch budget instead of `REDIAL_DEADLINE` (ADR-0054 decision 18).
+/// socket, the local addresses read now).
 pub(super) async fn redial_peer(
     target: &PeerTarget,
     tuning: TransportTuning,
@@ -35,7 +34,6 @@ async fn dial_peer_as(
         &dialer,
         &address,
         &target.server_name,
-        target.punch.as_ref(),
         target.iroh.as_ref(),
         target.jump.as_ref(),
         target.key_fill().as_ref(),
@@ -48,16 +46,7 @@ async fn dial_peer_as(
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {
-        Ok(mut session) => {
-            // Only a command's first connection asks; a recovery is the same
-            // command carrying on.
-            if kind == crate::ops::route::Dial::Command
-                && let Some(learn) = &target.learn
-            {
-                learn.ask(&mut session, &connection).await;
-            }
-            Ok((endpoint, connection, session))
-        }
+        Ok(session) => Ok((endpoint, connection, session)),
         Err(err) => {
             connection.close(0, b"done");
             endpoint.wait_idle().await;

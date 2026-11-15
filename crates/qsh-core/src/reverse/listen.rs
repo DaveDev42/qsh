@@ -73,7 +73,6 @@ use super::registry::{self, RegisterOutcome, Registry};
 
 mod conn_table;
 mod hub;
-mod punch;
 mod registration;
 
 use conn_table::{ConnTable, Published, rollback_target};
@@ -460,9 +459,6 @@ async fn run_listen_impl(
         parts.quotas,
     );
     listen.set_path_watch(liveness.reverse_watch);
-    // `[punch].mode = "off"` is read once, here (ADR-0054 decision 19).
-    listen
-        .set_punch_enabled(config.punch.mode.unwrap_or_default() == crate::punch::PunchMode::Auto);
     listen.set_trust_watch(trust_for_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     // A combined endpoint accepts the relay endpoint in the `Server` in
@@ -661,10 +657,6 @@ pub struct Listen {
     /// reads nor writes its control stream (see [`Self::control_stalled`]).
     #[cfg(test)]
     test_control_stall: tokio::sync::watch::Sender<bool>,
-    /// The rendezvous role (ADR-0054): the punching-connection cap, the
-    /// attempt table and the `[punch].mode` switch. The relay itself is in
-    /// `listen/punch.rs`.
-    rendezvous: crate::punch::RendezvousState,
     /// The relay endpoint beside the UDP socket (ADR-0061 decision 2), set at
     /// most once by [`Listen::set_iroh`]; its attempts are accepted by
     /// [`Self::run`] and join the registration path a QUIC attempt takes.
@@ -835,7 +827,6 @@ impl Listen {
             test_path_watch: std::sync::Mutex::new(None),
             #[cfg(test)]
             test_control_stall: tokio::sync::watch::Sender::new(false),
-            rendezvous: crate::punch::RendezvousState::default(),
             iroh: std::sync::OnceLock::new(),
         })
     }
@@ -875,26 +866,6 @@ impl Listen {
         let _ = self.iroh.set(endpoint);
     }
 
-    /// `[punch].mode = "off"`: this listener stops relaying punch requests
-    /// and answers them `UNSUPPORTED` (ADR-0054 decision 19). On by default.
-    pub fn set_punch_enabled(&self, enabled: bool) {
-        self.rendezvous.set_enabled(enabled);
-    }
-
-    /// Whether this listener relays punch requests (`[punch].mode`, ADR-0054
-    /// decision 19). A combined endpoint's `Server` asks before it turns a
-    /// forward connection into a punching one (ADR-0059 decision 5).
-    pub(crate) fn punch_enabled(&self) -> bool {
-        self.rendezvous.enabled()
-    }
-
-    /// A slot against `RENDEZVOUS_MAX_CLIENTS` for one more punching
-    /// connection, or `None` at the cap. The permit is held for as long as
-    /// the connection stays a punching one.
-    pub(crate) fn try_punch_client(&self) -> Option<OwnedSemaphorePermit> {
-        self.rendezvous.try_client()
-    }
-
     /// Close every registered connection the way [`Self::run`]'s endpoint
     /// close would (code 0, reason `shutdown`), and tell each hub its host is
     /// gone so the conduits of a local `qsh` command end with a typed error
@@ -910,11 +881,6 @@ impl Listen {
         for (_, hub) in self.hubs.snapshot() {
             hub.mark_dead();
         }
-    }
-
-    /// Punching connections open now (tests and diagnostics).
-    pub fn punch_connections(&self) -> usize {
-        self.rendezvous.clients()
     }
 
     /// The [`PathWatchConfig`] each registered connection's liveness watch

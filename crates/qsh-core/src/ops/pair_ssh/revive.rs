@@ -111,10 +111,6 @@ impl Ops {
                 trust: target.trust.clone(),
                 server_name: server_name_for(&address),
                 address,
-                // The revived serve holds no registration, so only a direct
-                // dial can reach it (ADR-0054 decision 16.4).
-                punch: None,
-                learn: None,
                 jump: None,
                 binding: target.binding,
                 // Same reason: the revived serve has no iroh endpoint.

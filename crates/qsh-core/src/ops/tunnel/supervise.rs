@@ -759,7 +759,6 @@ async fn dial(
         &dialer,
         &address,
         &target.server_name,
-        target.punch.as_ref(),
         target.iroh.as_ref(),
         target.jump.as_ref(),
         target.key_fill().as_ref(),

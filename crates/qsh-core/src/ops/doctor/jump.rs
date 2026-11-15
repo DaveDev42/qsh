@@ -28,7 +28,6 @@ impl Ops {
                 &dialer,
                 &first.address,
                 &server_name,
-                plan.first_punch.as_ref(),
                 None,
                 None,
                 None,

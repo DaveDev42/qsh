@@ -780,7 +780,6 @@ impl Direct {
         JumpPlan::new(
             hops.iter().map(|n| self.host(n).pin()).collect(),
             self.host(end).pin(),
-            None,
             "laptop".into(),
         )
         .expect("a valid plan")
@@ -982,7 +981,7 @@ async fn jump_carrier_switches_to_datagram_after_pmtud() {
     proxy.set_max_packet(Some(1200));
     let mut j = d.host("j").pin();
     j.address = proxy.addr().to_string();
-    let plan = JumpPlan::new(vec![j], d.host("t").pin(), None, "laptop".into()).expect("a plan");
+    let plan = JumpPlan::new(vec![j], d.host("t").pin(), "laptop".into()).expect("a plan");
     let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
     let mut session = Session::negotiate(chain.connection.clone(), "laptop")
         .await
@@ -1039,7 +1038,7 @@ async fn jump_silence_on_the_datagram_path_falls_back_to_the_stream() {
     );
     let mut j = d.host("j").pin();
     j.address = proxy.addr().to_string();
-    let plan = JumpPlan::new(vec![j], d.host("t").pin(), None, "laptop".into()).expect("a plan");
+    let plan = JumpPlan::new(vec![j], d.host("t").pin(), "laptop".into()).expect("a plan");
     let chain = d.dial(&plan, Duration::from_secs(10)).await.expect("chain");
     let mut session = Session::negotiate(chain.connection.clone(), "laptop")
         .await
@@ -1682,7 +1681,7 @@ fn a_plan_refuses_the_shapes_decision_11_names() {
         address: "127.0.0.1:1".into(),
         fingerprint: make_identity().fingerprint,
     };
-    let plan = |hops: Vec<HopPin>, end: HopPin| JumpPlan::new(hops, end, None, "d".into());
+    let plan = |hops: Vec<HopPin>, end: HopPin| JumpPlan::new(hops, end, "d".into());
     assert!(plan(vec![pin("a")], pin("t")).is_ok());
     let four: Vec<HopPin> = ["a", "b", "c", "d"].map(pin).into();
     assert!(plan(four.clone(), pin("t")).is_ok());

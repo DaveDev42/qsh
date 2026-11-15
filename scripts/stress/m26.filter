@@ -1,1 +1,1 @@
-(test(/^jump_(chain|host|punch|recovery|reverse|surface)::/))
+(test(/^jump_(chain|host|recovery|reverse|surface)::/))

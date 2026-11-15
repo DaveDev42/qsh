@@ -2,15 +2,15 @@
 //! 27.5): one endpoint, one `trust.toml`, one authorizer built the way
 //! production builds it ([`qsh_core::acl::load_or_deny`] over a hand-written
 //! `trust.toml` and no `acl.toml`), and every pin role driven through all
-//! three branches of the endpoint: the registration (`host.reverse`), the
-//! punching connection (`host.punch`) and the six control-stream forward
-//! actions.
+//! branches of the endpoint: the registration (`host.reverse`), the retired
+//! punching connection (ADR-0068: a `PunchRequest` is `UNSUPPORTED` for every
+//! role and makes no `host.punch` decision) and the six control-stream
+//! forward actions.
 //!
 //! The expectations are this file's own literal copy of ADR-0045 결정 2's
-//! table (and its `host.punch` revision), not a call into the code under
-//! test. A denial must be the uniform `PERMISSION_DENIED`, must be audited,
-//! and must leave no resource behind: no registry entry, no session, no
-//! punching connection. No audit record may carry a payload.
+//! table, not a call into the code under test. A denial must be the uniform
+//! `PERMISSION_DENIED`, must be audited, and must leave no resource behind:
+//! no registry entry, no session. No audit record may carry a payload.
 
 use qsh_core::acl::{PERMISSION_DENIED_MESSAGE, Role, load_or_deny};
 use qsh_core::client::{ClientError, Session};
@@ -70,10 +70,6 @@ impl Peer {
 /// actions a role may use.
 fn registration_allowed(role: &str) -> bool {
     matches!(role, "full" | "reverse")
-}
-
-fn punch_allowed(role: &str) -> bool {
-    role != "none"
 }
 
 /// The six forward actions each role may use.
@@ -206,12 +202,11 @@ fn expect_allow(peer: &Peer, action: &str) -> bool {
     let role = peer.effective();
     match action {
         "host.reverse" => registration_allowed(role),
-        "host.punch" => punch_allowed(role),
         other => forward_allowed(role).contains(&other),
     }
 }
 
-/// Every role of the matrix through the registration, the punch and the
+/// Every role of the matrix through the registration, the retired punch and the
 /// forward branch of one combined endpoint.
 #[tokio::test(flavor = "multi_thread")]
 async fn combined_role_matrix() {
@@ -225,7 +220,6 @@ async fn combined_role_matrix() {
 
     let pin_list: Vec<(&TestIdentity, &str)> = peers.iter().map(|p| (&p.id, p.name)).collect();
     let h = CombinedHarness::start(authorizer, pins(&pin_list), limits(512, 32)).await;
-    h.listen.set_punch_enabled(true);
 
     // Every peer's connections stay open to the end, so a resource a denial
     // wrongly created could not be reaped before the asserts below.
@@ -273,10 +267,9 @@ async fn combined_role_matrix() {
         "only the roles that may register hold an entry"
     );
 
-    // --- branch 2: the punching connection --------------------------------
-    let mut punching = 0usize;
+    // --- branch 2: the retired punching connection --------------------------
+    // Every role gets the host's own `UNSUPPORTED`, with no policy decision.
     for p in &peers {
-        let role = p.effective();
         let (dialed, mut ctl, _) = h
             .forward(&p.id)
             .await
@@ -287,31 +280,14 @@ async fn combined_role_matrix() {
             control_message::Body::PunchRequest(punch_request()),
         )
         .await;
-        let reply = classify(msg);
-        if punch_allowed(role) {
-            assert_eq!(
-                reply,
-                Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32),
-                "{}: the rendezvous answers",
-                p.name
-            );
-            punching += 1;
-            held.push(Box::new((dialed, ctl)));
-        } else {
-            assert_eq!(
-                reply,
-                Reply::Error("PERMISSION_DENIED".into()),
-                "{}: the role {role} must not punch",
-                p.name
-            );
-        }
+        assert_eq!(
+            classify(msg),
+            Reply::Error("UNSUPPORTED".into()),
+            "{}: a punch request is not served",
+            p.name
+        );
+        held.push(Box::new((dialed, ctl)));
     }
-    // A denied punch connection is counted until the host has closed it, so
-    // the count settles on the allowed ones.
-    wait_for(TIMEOUT, || {
-        (h.listen.punch_connections() == punching).then_some(())
-    })
-    .await;
 
     // --- branch 3: the forward actions ------------------------------------
     let mut sessions_expected = 0usize;
@@ -347,14 +323,11 @@ async fn combined_role_matrix() {
     );
 
     // --- the audit trail ----------------------------------------------------
-    let per_peer = 2 + FORWARD_ACTIONS.len();
+    let per_peer = 1 + FORWARD_ACTIONS.len();
     let records = wait_for_audit_records(&h.audit, per_peer * peers.len(), TIMEOUT).await;
     for p in &peers {
         let principal = format!("device:{}", p.name);
-        for action in ["host.reverse", "host.punch"]
-            .into_iter()
-            .chain(FORWARD_ACTIONS)
-        {
+        for action in ["host.reverse"].into_iter().chain(FORWARD_ACTIONS) {
             let mine: Vec<_> = records
                 .iter()
                 .filter(|r| r.principal == principal && r.action == action)
@@ -380,6 +353,7 @@ async fn combined_role_matrix() {
     for r in &records {
         let line = serde_json::to_string(r).expect("serialize a record");
         assert!(!line.contains(MARKER), "a record holds a payload: {line}");
+        assert_ne!(r.action, "host.punch", "no punch decision is made: {line}");
     }
 
     drop(held);

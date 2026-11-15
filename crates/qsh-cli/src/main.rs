@@ -531,17 +531,15 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     } else {
         ops.with_ssh_revival(ssh_revival(cli, None, SshOptions::default()))
     };
-    // Hole punching (ADR-0054): `--no-punch`, `--rendezvous`, and learning
-    // hints from each host this command connects to. `[punch].mode` is read
-    // by `Ops` when a route is built.
+    // `--no-punch` parses and changes nothing: qsh's own hole punching was
+    // retired (ADR-0068), so "off" is the only behavior left. `[punch].mode`
+    // is likewise read and ignored.
     let ops = ops.with_punch(qsh_core::punch::ClientPunch {
         mode: if cli.no_punch {
             qsh_core::punch::PunchMode::Off
         } else {
             qsh_core::punch::PunchMode::Auto
         },
-        rendezvous: cli.rendezvous.iter().cloned().collect(),
-        learn_hints: true,
         ..qsh_core::punch::ClientPunch::default()
     });
     // `--no-iroh` (ADR-0061): this command never takes the relay route.

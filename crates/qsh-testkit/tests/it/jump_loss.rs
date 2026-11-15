@@ -103,7 +103,7 @@ async fn lossy_echo(names: &[&str], seed: u64, stream_only: bool) -> (f64, u64) 
         })
         .collect();
     let (end, hops) = pins.split_last().expect("an end");
-    let plan = JumpPlan::new(hops.to_vec(), end.clone(), None, "laptop".into()).expect("a plan");
+    let plan = JumpPlan::new(hops.to_vec(), end.clone(), "laptop".into()).expect("a plan");
     let chain = d
         .dial(&plan, Duration::from_secs(60))
         .await

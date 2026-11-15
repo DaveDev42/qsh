@@ -197,11 +197,9 @@ impl Ops {
                         &dialer,
                         &target.address,
                         &target.server_name,
-                        target.punch.as_ref(),
                         target.iroh.as_ref(),
                         target.jump.as_ref(),
                         target.key_fill().as_ref(),
-                        target.learn.as_ref(),
                         &device_name,
                         &spec,
                         stdin,
@@ -271,7 +269,7 @@ impl Ops {
                 Ok(route) => route,
                 Err(err) if err.code == ErrorCode::HostNotFound => {
                     let trust = self.open_trust()?;
-                    return match self.punch_only_target(host, &identity, &trust)? {
+                    return match self.iroh_only_target(host, &identity, &trust)? {
                         Some(target) => Ok(PeerRoute::Forward(target)),
                         None => Err(err),
                     };
@@ -282,17 +280,13 @@ impl Ops {
             HostRoute::Forward { address, .. } => {
                 let trust = self.open_trust()?;
                 let server_name = server_name_for(&address);
-                let punch = self.punch_plan(host, &identity, &trust)?;
                 let iroh = self.iroh_plan(host, &identity, &trust)?;
-                let learn = self.hint_learner(&trust);
                 let binding = Some(crate::ops::peer_binding(&trust.snapshot(), host)?);
                 Ok(PeerRoute::Forward(PeerTarget {
                     identity,
                     trust,
                     address,
                     server_name,
-                    punch,
-                    learn,
                     jump: None,
                     binding,
                     iroh,
@@ -338,11 +332,9 @@ async fn exec_async(
     dialer: &Dialer,
     address: &str,
     server_name: &str,
-    punch: Option<&Arc<crate::punch::PunchPlan>>,
     iroh: Option<&Arc<crate::iroh_settings::IrohPlan>>,
     jump: Option<&Arc<crate::jump::JumpPlan>>,
     fill: Option<&Arc<crate::trust::key_fill::PinKeyFill>>,
-    learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -354,11 +346,9 @@ async fn exec_async(
         dialer,
         address,
         server_name,
-        punch,
         iroh,
         jump,
         fill,
-        learn,
         device_name,
         spec,
         stdin,
@@ -399,8 +389,6 @@ async fn exec_async_resolving(
         None,
         None,
         None,
-        None,
-        None,
         device_name,
         spec,
         stdin,
@@ -420,11 +408,9 @@ async fn exec_async_tracked(
     dialer: &Dialer,
     address: &str,
     server_name: &str,
-    punch: Option<&Arc<crate::punch::PunchPlan>>,
     iroh: Option<&Arc<crate::iroh_settings::IrohPlan>>,
     jump: Option<&Arc<crate::jump::JumpPlan>>,
     fill: Option<&Arc<crate::trust::key_fill::PinKeyFill>>,
-    learn: Option<&Arc<crate::punch::HintLearner>>,
     device_name: &str,
     spec: &ExecSpec,
     stdin: ExecStdin,
@@ -446,7 +432,6 @@ async fn exec_async_tracked(
             dialer,
             address,
             server_name,
-            punch,
             iroh,
             jump,
             fill,
@@ -475,9 +460,6 @@ async fn exec_async_tracked(
     let run = async {
         match Session::negotiate(dialed.connection, device_name).await {
             Ok(mut session) => {
-                if let Some(learn) = learn {
-                    learn.ask(&mut session, &connection).await;
-                }
                 let mut dispatcher = None;
                 let mut agent_channel = Vec::new();
                 if let (Some(agent), Some(channel), true) =
@@ -527,9 +509,8 @@ async fn exec_async_tracked(
     connection.close(0, b"done");
     drop(connection);
     if punched {
-        // The losers of the punch race are closing too, and each counts its
-        // closing period from the initial RTT guess (about 0.9 s); the
-        // adopted connection's own close frame is already out.
+        // An iroh connection's endpoint closes with a bounded wait; the
+        // connection's own close frame is already out.
         endpoint.wait_idle_for(qsh_transport::CLOSE_DRAIN_CAP).await;
     } else {
         endpoint.wait_idle().await;

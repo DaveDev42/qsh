@@ -102,17 +102,15 @@ impl Server {
                     false,
                 ),
             )),
-            // Hole-punching signals (ADR-0054, `punch.v1`). Only the target
-            // role of a `qsh serve --to` host serves them. `RendezvousQuery`
-            // is answerable here; `PunchOffer` needs the `Arc<Server>` and is
-            // intercepted in `serve_control` before it gets here, so a direct
-            // dispatch of one (and a `PunchRequest`, which only a
-            // rendezvous relays) draws `UNSUPPORTED`, the answer a peer with
-            // `[punch].mode = "off"` gives (decision 9).
-            Some(control_message::Body::RendezvousQuery(_)) => {
-                Some(self.handle_rendezvous_query(ctx, request_id))
-            }
-            Some(control_message::Body::PunchRequest(_))
+            // Hole-punching signals (ADR-0054, `punch.v1`). qsh no longer
+            // punches or mediates a punch (ADR-0068), so every build gives
+            // the answer a peer with `[punch].mode = "off"` gave
+            // (ADR-0054 decision 9): `UNSUPPORTED`, which a rendezvous
+            // reading it from a target reports to the initiator as
+            // `TARGET_UNSUPPORTED`. The capability is still advertised: it
+            // means "understood", not "performed".
+            Some(control_message::Body::RendezvousQuery(_))
+            | Some(control_message::Body::PunchRequest(_))
             | Some(control_message::Body::PunchOffer(_)) => Some(ControlMessage::error(
                 request_id,
                 wire::Error::new(

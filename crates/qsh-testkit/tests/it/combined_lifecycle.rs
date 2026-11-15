@@ -235,14 +235,14 @@ async fn combined_runtime_publishes_serve_json_and_cleans_up_on_shutdown() {
 }
 
 // ---------------------------------------------------------------------------
-// The production assembly: roles, policy, trust watch, punch switch
+// The production assembly: roles, policy, trust watch, retired punch switch
 // ---------------------------------------------------------------------------
 //
 // `combined.rs` and `combined_roles.rs` hand-wire a `Server` and a `Listen`
 // from the same parts. The tests below start the production entry
 // (`run_listen_serve`) on a sandbox with a real `trust.toml` and no
 // `acl.toml` (or a broken one), so everything `run_listen_impl` adds on top
-// of the parts is in play: `set_punch_enabled`, `set_path_watch`,
+// of the parts is in play: `set_path_watch`,
 // `set_trust_watch`, the pairing window, the notice sink and `serve.json`.
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
@@ -389,8 +389,8 @@ async fn production_runtime_judges_pin_roles_on_all_three_branches() {
     let (d2, mut ctl2, _) = rt.forward(&reverse).await;
     assert_eq!(
         punch(&mut ctl2).await,
-        Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32),
-        "a reverse pin may use the rendezvous (host.punch)"
+        Reply::Error("UNSUPPORTED".into()),
+        "a punch request is not served (ADR-0068)"
     );
 
     // --- the `full` pin ---------------------------------------------------
@@ -408,10 +408,7 @@ async fn production_runtime_judges_pin_roles_on_all_three_branches() {
         "full: session.open on the production host"
     );
     let (fd2, mut fctl2, _) = rt.forward(&full).await;
-    assert_eq!(
-        punch(&mut fctl2).await,
-        Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32)
-    );
+    assert_eq!(punch(&mut fctl2).await, Reply::Error("UNSUPPORTED".into()));
 
     // --- the `none` pin ---------------------------------------------------
     match rt.register(&none, "none-target").await {
@@ -427,8 +424,8 @@ async fn production_runtime_judges_pin_roles_on_all_three_branches() {
     let (nd2, mut nctl2, _) = rt.forward(&none).await;
     assert_eq!(
         punch(&mut nctl2).await,
-        Reply::Error("PERMISSION_DENIED".into()),
-        "none: no rendezvous"
+        Reply::Error("UNSUPPORTED".into()),
+        "none: a punch request is not served either"
     );
 
     // --- trust watch ------------------------------------------------------
@@ -478,8 +475,9 @@ async fn production_runtime_judges_pin_roles_on_all_three_branches() {
 
 /// An `acl.toml` that does not parse denies every request from every peer,
 /// roles included (CLAUDE.md "Security defaults"): on the production
-/// assembly the combined endpoint refuses the registration, the punch and the
-/// forward request of a `full` pin, and the startup diagnostic says why.
+/// assembly the combined endpoint refuses the registration and the forward
+/// request of a `full` pin (a punch request is `UNSUPPORTED` before any
+/// policy), and the startup diagnostic says why.
 #[tokio::test(flavor = "multi_thread")]
 async fn production_runtime_with_an_unparseable_acl_denies_all_three_branches() {
     let full = make_identity();
@@ -506,10 +504,7 @@ async fn production_runtime_with_an_unparseable_acl_denies_all_three_branches() 
         other => panic!("registration must be denied: {:?}", other.map(|_| ())),
     }
     let (_pd, mut pctl, _) = rt.forward(&full).await;
-    assert_eq!(
-        punch(&mut pctl).await,
-        Reply::Error("PERMISSION_DENIED".into())
-    );
+    assert_eq!(punch(&mut pctl).await, Reply::Error("UNSUPPORTED".into()));
     let (fd, fctl, fhello) = rt.forward(&full).await;
     let mut fs = Session::from_control(fd.connection.clone(), fctl, fhello);
     assert!(!allowed(fs.exec_start(&exec_true()).await), "forward exec");
@@ -517,13 +512,10 @@ async fn production_runtime_with_an_unparseable_acl_denies_all_three_branches() 
     rt.stop().await;
 }
 
-/// `[punch].mode = "off"` is read by the production assembly
-/// (`set_punch_enabled`) and by the host's own dispatch: the first-request
-/// intercept is off, so a `PunchRequest` is the host's `UNSUPPORTED` for a
-/// `full` pin, while the same runtime with the default mode answers it as a
-/// rendezvous.
+/// ADR-0068: a `PunchRequest` is the host's `UNSUPPORTED` whatever
+/// `[punch].mode` says, so the `off` spelling and the default behave alike.
 #[tokio::test(flavor = "multi_thread")]
-async fn production_runtime_punch_mode_off_turns_the_intercept_off() {
+async fn production_runtime_answers_a_punch_request_unsupported_in_either_mode() {
     for off in [false, true] {
         let full = make_identity();
         let text = trust_toml(&[("p-full", &full, "full")]);
@@ -537,15 +529,7 @@ async fn production_runtime_punch_mode_off_turns_the_intercept_off() {
         .await;
         let (_d, mut ctl, _) = rt.forward(&full).await;
         let reply = punch(&mut ctl).await;
-        if off {
-            assert_eq!(reply, Reply::Error("UNSUPPORTED".into()), "mode off");
-        } else {
-            assert_eq!(
-                reply,
-                Reply::PunchRefusal(wire::PunchRefusal::TargetNotRegistered as i32),
-                "mode auto"
-            );
-        }
+        assert_eq!(reply, Reply::Error("UNSUPPORTED".into()), "off = {off}");
         rt.stop().await;
     }
 }
