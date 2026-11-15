@@ -189,9 +189,9 @@ ADR-0059를 담은 태그가 나간 뒤에 한다. 라우터 포워딩 변경과
 ### 4.3 M28 뒤 후속 (범위 밖, 결정 대상)
 
 - [x] **Toss 실망 측정.** 2026-11-14 `v0.8.0`에서 Toss→MacMini 10/10 직결, 집→Toss 0/10(relay). 원인 분석(Toss NAT 완전 symmetric, qsh에 portmapper가 없었음)과 수치는 ADR-0064 개정 이력과 `docs/ROADMAP.md` §7 "M28 뒤 릴리스". 감사 `peer_path`는 admission 시점 값이라 승격 뒤에도 `relay`로 남는다(후속 아래).
-- [ ] **감사 `peer_path`가 승격을 못 담는다.** admission 때 한 번 기록하므로 relay로 시작해 직결로 오른 연결도 `relay`다. 승격을 구조적으로 남길지(새 레코드 또는 close 레코드의 필드) 정한다.
-- [ ] **역방향 2단계(ADR-0065).** audit의 `host.reverse` 기록과 상시 listen·`--to` 사용을 확인한 뒤 제거 여부를 새 ADR로 정한다. 2026-11-13 기준 fleet에서 상시 쓰는 곳은 없다(MacMini listen 은퇴, Toss reverse 링크 제거).
-- [ ] **ut 도입 대비 transport 중립 이름.** `[iroh]` 절, pin route 이름 `iroh`, `details.iroh`는 iroh에 묶여 있다. ut backend를 붙일 때 새 ADR로 중립 이름을 정한다(계약은 additive라 새 필드를 더하는 방식).
+- [x] **감사 `peer_path`가 승격을 못 담는다.** ADR-0067(2026-11-15 Dave 결정)로 iroh 연결의 관찰 시작 경로와 relay↔직결 변경을 `connect`/`path` 레코드로 남긴다(`6959ab18`, `162bf856`). v0.9.0에 실린다.
+- [ ] **역방향과 qsh 홀펀칭 은퇴(ADR-0068, v0.9.0).** 2026-11-15 Dave 결정: 역방향 연결과 qsh 자체 홀펀칭을 걷고 NAT 통과는 iroh에 맡긴다. ADR-0068 결정 9의 일곱 단계로 진행한다. 저장소의 필수 검사 설정(`punch-netns`와 걷힌 시험 이름)은 Dave가 고친다.
+- [ ] **ut 도입 대비 transport 중립 이름(ut backend가 생길 때).** `[iroh]` 절, pin route 이름 `iroh`, `details.iroh`는 iroh에 묶여 있다. ut backend를 붙일 때 새 ADR로 중립 이름을 정한다(계약은 additive라 새 필드를 더하는 방식).
 - [x] **doctor `acl_principal_unmatched`(클라이언트 전용 장비).** ADR-0066으로 장비를 client와 server로 판정하고 client에서는 server 전용 점검을 건너뛴다. `v0.8.1`에 실었다(`9b14e7da`, `2f222c17`). 2026-11-15 배포 뒤 MBP16에 남은 `host_pinned_without_address`(iroh로 key를 보고 걸 수 있는 pin을 주소 없음으로 본 오판)도 고쳤다(ADR-0063 개정 이력).
 - [x] **Windows `jump_chain::jump_silence_ignores_an_unanswered_ack_across_an_idle_gap` 간헐 실패.** 실제 결함이었다. 침묵 시계 수정과 REPLY_WINDOW 200 ms를 `v0.8.1`에 실었다(ADR-0058 결정 1 개정 이력, `2ccff333`).
 
