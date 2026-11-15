@@ -8,7 +8,8 @@
 //! consecutive samples. Address or port changes inside one kind, and moves
 //! between relays, write nothing.
 //!
-//! The record is an observation, not a decision: a failed write is a log line
+//! The observer also writes one record for the path it starts on (not counted
+//! toward the cap). The record is an observation, not a decision: a failed write is a log line
 //! and never closes or blocks the connection. At most [`MAX_PATH_RECORDS`]
 //! records are attempted per connection; the observer then stops. No lock is
 //! held across an await.
@@ -55,9 +56,14 @@ pub(crate) async fn observe(
     principal: &Principal,
     auth_path: AuthPath,
 ) {
-    let Some(mut recorded) = kind_of(&source()) else {
+    let start = source();
+    let Some(mut recorded) = kind_of(&start) else {
         return;
     };
+    // The start record: connections are not otherwise recorded when they are
+    // accepted, so the path the observation begins on is written once. It does
+    // not count toward `MAX_PATH_RECORDS`.
+    write(audit, principal, auth_path, &start);
     let mut pending: Option<Kind> = None;
     let mut written = 0u32;
     tokio::pin!(closed);
@@ -79,13 +85,18 @@ pub(crate) async fn observe(
         pending = None;
         recorded = seen;
         written += 1;
-        let record = AuditRecord::path_changed(principal, auth_path, &peer);
-        if let Err(err) = audit.record(&record) {
-            tracing::warn!(%err, "failed to record a connection path change; the connection is unaffected");
-        }
+        write(audit, principal, auth_path, &peer);
         if written >= MAX_PATH_RECORDS {
             return;
         }
+    }
+}
+
+/// Write one path record; a failure is a log line and nothing else.
+fn write(audit: &dyn AuditSink, principal: &Principal, auth_path: AuthPath, peer: &PeerAddr) {
+    let record = AuditRecord::path_changed(principal, auth_path, peer);
+    if let Err(err) = audit.record(&record) {
+        tracing::warn!(%err, "failed to record a connection path; the connection is unaffected");
     }
 }
 
