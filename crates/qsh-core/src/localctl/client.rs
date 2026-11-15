@@ -962,20 +962,6 @@ impl tokio::io::AsyncRead for SharedRead {
     }
 }
 
-/// The raw halves of a conduit already past its framed phase, for tests that
-/// stand in for the CLI side of a relay.
-#[cfg(test)]
-pub(crate) fn raw_halves_for_test(stream: LocalStream) -> (RawUdsWrite, RawUdsRead) {
-    let socket = Arc::new(stream);
-    let (reader, _) = transport::raw_reader(
-        SharedRead {
-            socket: socket.clone(),
-        },
-        Vec::new(),
-    );
-    (transport::raw_writer(SharedWrite { socket }), reader)
-}
-
 /// Write all of `buf` to `socket`'s send direction, via the readiness-based
 /// `writable`/`try_write` pair rather than [`tokio::io::AsyncWriteExt`] —
 /// the latter needs a `&mut LocalStream`, which an `Arc`-shared socket

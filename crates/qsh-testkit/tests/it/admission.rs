@@ -1,6 +1,6 @@
 //! Admission control integration tests (M8 plan Step 2 (52639fc),
 //! `docs/adr/0009-admission-defenses.md`): `qsh_core::admission::Gate`
-//! wired into a *real*, running `Server::run`/`Listen::run` accept loop
+//! wired into a *real*, running `Server::run` accept loop
 //! over real loopback QUIC — `qsh-core::admission`'s own unit tests pin
 //! `Gate::decide`'s pure logic (permits, sketch, keying, aggregation)
 //! without a network; these pin the same invariants end to end, against
@@ -8,17 +8,10 @@
 //! real already-open session.
 //!
 //! `crates/qsh-testkit/src/loopback.rs`'s `LoopbackHarness::
-//! start_with_admission` and `crates/qsh-testkit/src/reverse.rs`'s
-//! `ReverseHarness::start_with_admission` build the `Server`/`Listen` host
-//! with a caller-chosen `(max_concurrent_handshakes,
-//! handshake_rate_per_source)` instead of `ServeConfig`'s defaults, so
-//! these tests reach the cap/rate limit without hundreds of real
-//! connections. Both accept loops share the same `qsh_core::admission::
-//! Gate` type and the same `Decision` mapping (`Listen::admit` mirrors
-//! `Server::admit` exactly) — the `listen_*` tests below exist because
-//! that mirroring was, until the M8 Step 2 verification round, entirely
-//! unpinned: `Listen::admit`'s gate check could be deleted outright with
-//! every other test in the workspace still green.
+//! start_with_admission` builds the `Server` host with a caller-chosen
+//! `(max_concurrent_handshakes, handshake_rate_per_source)` instead of
+//! `ServeConfig`'s defaults, so these tests reach the cap/rate limit
+//! without hundreds of real connections.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,8 +21,7 @@ use qsh_core::audit::AuditRecord;
 use qsh_core::broker::PipeHandle;
 use qsh_core::client::Session;
 use qsh_proto::wire;
-use qsh_testkit::loopback::{LoopbackHarness, make_identity};
-use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::loopback::LoopbackHarness;
 use qsh_transport::{DialError, Dialer, FramedStream, Principal, StaticTrust};
 use tokio::net::UdpSocket;
 
@@ -432,21 +424,19 @@ async fn host_survives_garbage_initial_flood() {
 /// own const is `pub(crate)`, not visible from this external test crate.
 const AUDIT_AGGREGATION_WINDOW: Duration = Duration::from_secs(10);
 
-/// How long the on-exit-flush tests (`admission_on_exit_flush_reports_
-/// suppressed_rejections_at_shutdown`, its `Listen`-arm twin) wait after
-/// harness start before dialing at all, so the rejection window they open
+/// How long the on-exit-flush test (`admission_on_exit_flush_reports_
+/// suppressed_rejections_at_shutdown`) waits after
+/// harness start before dialing at all, so the rejection window it opens
 /// starts with a wide margin from the accept loop's own periodic-tick
-/// schedule instead of a millisecond-scale race against it — see those
-/// tests' own doc for why that race is otherwise decided by ordinary
+/// schedule instead of a millisecond-scale race against it — see that
+/// test's own doc for why that race is otherwise decided by ordinary
 /// scheduling jitter, not by which flush path is actually under test.
 const WINDOW_OPEN_DELAY_FROM_LOOP_START: Duration = Duration::from_secs(4);
 
 /// Poll `records_fn` for up to `AUDIT_AGGREGATION_WINDOW + 10s` slack for a
 /// `resource`-category record carrying a `count` (the summary half of §5's
-/// "first + summary" aggregation) — used by both
-/// `admission_rejection_summary_flushes_without_further_dials` (Server
-/// arm) and `listen_admission_rejection_summary_flushes_without_further_dials`
-/// (Listen arm) so the two integration tests share one polling shape.
+/// "first + summary" aggregation), used by
+/// `admission_rejection_summary_flushes_without_further_dials`.
 async fn poll_for_summary(
     records_fn: impl Fn() -> Vec<AuditRecord>,
     resource: &str,
@@ -520,69 +510,6 @@ async fn admission_rejection_summary_flushes_without_further_dials() {
     h.shutdown().await;
 }
 
-/// M8 plan Step 2 (52639fc) verification round, P1-1 + P1-3/F1: the `Listen`
-/// arm's own coverage of `Listen::admit`'s admission cap — before this,
-/// the whole `Listen::run` accept loop had zero admission integration
-/// coverage (a mutation deleting the gate check outright passed
-/// 1151/1151). `k` deterministic `AtCapacity` refusals against a real,
-/// running `Listen::run` accept loop, no session/registration/task ever
-/// created, and the summary record for the suppressed refusals appears
-/// via `Listen::run`'s own periodic flush tick — the `Listen`-arm
-/// counterpart to `admission_rejection_summary_flushes_without_further_dials`.
-#[tokio::test(flavor = "multi_thread")]
-async fn listen_admission_cap_refuses_creates_nothing_and_summary_flushes() {
-    const REJECTIONS: usize = 5;
-    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
-    let target = make_identity();
-
-    for _ in 0..REJECTIONS {
-        match h.dial(&target).await {
-            Err(DialError::Refused) => {}
-            other => panic!("expected Refused at cap=0, got {other:?}"),
-        }
-    }
-
-    assert_eq!(
-        h.listen.live_connections(),
-        0,
-        "no dial at cap=0 must ever produce a live Listen connection"
-    );
-    assert_eq!(
-        h.listen.registry().snapshot().len(),
-        0,
-        "no dial at cap=0 must ever reach the registry — the QUIC handshake itself was refused"
-    );
-
-    let records = h.audit.records();
-    let first: Vec<_> = records
-        .iter()
-        .filter(|r| r.resource == "at_capacity" && r.count.is_none())
-        .collect();
-    assert_eq!(
-        first.len(),
-        1,
-        "{REJECTIONS} refusals inside one aggregation window must collapse to exactly one \
-         un-summarized first-in-window record: {records:?}"
-    );
-    assert!(
-        first[0].peer_addr.parse::<SocketAddr>().is_ok(),
-        "the first record keeps the real observed peer_addr: {:?}",
-        first[0]
-    );
-    for r in &records {
-        assert_eq!(r.action, "connect");
-        assert_eq!(r.decision, "deny");
-        assert_eq!(r.principal, "-");
-        assert_eq!(r.auth_path, "-");
-        assert!(r.rule.is_none());
-    }
-
-    // No further dial from here on.
-    let summary = poll_for_summary(|| h.audit.records(), "at_capacity").await;
-    assert_eq!(summary.count, Some((REJECTIONS - 1) as u32));
-    assert_eq!(summary.peer_addr, "-");
-}
-
 /// Mutation-testing round 4, X3: pins that a handshake permit is released
 /// the instant the handshake itself resolves
 /// (`crate::admission::Decision::Admit`'s own doc;
@@ -629,14 +556,6 @@ async fn admission_permit_is_released_at_handshake_end_not_connection_end() {
         .session_open(open_req())
         .await
         .expect("session.open B — proves B's handshake actually completed, not just dialed");
-
-    // `ReverseHarness::start_with_admission` hardcodes an empty controller
-    // trust store (no target identity can be pinned through its current
-    // signature), so no target can pass mTLS peer verification on that
-    // arm — a live/negotiated Listen-arm connection isn't reachable
-    // without threading a trust store through a new harness parameter.
-    // Skipped rather than forced through a signature change on a shared
-    // harness function other suites also call.
 
     session_a.close();
     session_b.close();
@@ -699,58 +618,6 @@ async fn admission_on_exit_flush_reports_suppressed_rejections_at_shutdown() {
     // nowhere near the accept loop's third periodic tick (~t0+20, per
     // this fn's doc) — see the doc above for why only the on-exit flush
     // can be responsible for what this test asserts.
-    tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
-
-    let audit = h.audit.clone();
-    h.shutdown().await;
-
-    let records = audit.records();
-    let summary = records
-        .iter()
-        .find(|r| r.resource == "at_capacity" && r.count.is_some())
-        .unwrap_or_else(|| {
-            panic!("expected an at_capacity summary record from the on-exit flush, got {records:?}")
-        });
-    assert_eq!(
-        summary.count,
-        Some((REJECTIONS - 1) as u32),
-        "the first rejection was reported immediately; the on-exit summary covers only \
-         the remaining {} suppressed ones",
-        REJECTIONS - 1
-    );
-    assert_eq!(summary.peer_addr, "-");
-}
-
-/// `Listen`-arm twin of
-/// `admission_on_exit_flush_reports_suppressed_rejections_at_shutdown` —
-/// cheap here (unlike X3's twin above): this scenario never needs a live,
-/// mTLS-verified connection, only address-validated rejections at cap=0,
-/// which `crate::admission::Gate::decide` resolves before any peer
-/// certificate is ever checked. `Listen::run`'s on-exit flush is a
-/// separate two-line block from `Server::run`'s (mirrored, not shared
-/// code), so a mutation deleting only the `Listen::run` copy needs its
-/// own pin. Same real-time-wait rationale as the Server-arm version's own
-/// doc — including the same `WINDOW_OPEN_DELAY_FROM_LOOP_START` delay
-/// before the first dial, for the same reason (empirically, dialing
-/// immediately after harness start puts the window's staleness point
-/// within milliseconds of the periodic tick's own nominal firing, which
-/// is decided by scheduling jitter rather than proving anything about the
-/// on-exit flush specifically).
-#[tokio::test(flavor = "multi_thread")]
-async fn listen_admission_on_exit_flush_reports_suppressed_rejections_at_shutdown() {
-    const REJECTIONS: usize = 3;
-    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
-    let target = make_identity();
-
-    tokio::time::sleep(WINDOW_OPEN_DELAY_FROM_LOOP_START).await;
-
-    for _ in 0..REJECTIONS {
-        match h.dial(&target).await {
-            Err(DialError::Refused) => {}
-            other => panic!("expected Refused at cap=0, got {other:?}"),
-        }
-    }
-
     tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
 
     let audit = h.audit.clone();

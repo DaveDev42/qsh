@@ -5,13 +5,8 @@
 //! pipe-backed session (`docs/design/testing.md` §3). Zero PTY code.
 //!
 //! Every scenario below is a generic `async fn<P: HostedPair>(h: P)` run
-//! twice — once against [`LoopbackHarness`] (forward: the client dials the
-//! host) and once against [`ReversePairHarness`] (reverse: the target
-//! dials the controller, and *it* is the host; the controller drives ops
-//! as the client-role peer) — with the identical body and identical
-//! assertions in both. That is the mechanical proof of role-axis
-//! independence M3 plan Step 3 (2473c88) PR 3b owes: the `session.*` `Ops` code
-//! never learns which side dialed.
+//! against [`LoopbackHarness`] (the client dials the host); the reverse
+//! topology it once also ran against retired with ADR-0068.
 
 use std::sync::Arc;
 
@@ -23,7 +18,6 @@ use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
 use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
-use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
 
 fn open_req(argv: &[&str]) -> wire::SessionOpen {
@@ -259,12 +253,6 @@ async fn session_full_path_open_write_read_resize_get_list_close_forward() {
     session_full_path_open_write_read_resize_get_list_close(LoopbackHarness::start().await).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn session_full_path_open_write_read_resize_get_list_close_reverse() {
-    session_full_path_open_write_read_resize_get_list_close(ReversePairHarness::start().await)
-        .await;
-}
-
 async fn sessions_survive_the_connection_and_leases_are_released<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let opened = s.session_open(open_req(&["sh"])).await.unwrap();
@@ -300,12 +288,6 @@ async fn sessions_survive_the_connection_and_leases_are_released<P: HostedPair>(
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_survive_the_connection_and_leases_are_released_forward() {
     sessions_survive_the_connection_and_leases_are_released(LoopbackHarness::start().await).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn sessions_survive_the_connection_and_leases_are_released_reverse() {
-    sessions_survive_the_connection_and_leases_are_released(ReversePairHarness::start().await)
-        .await;
 }
 
 /// The redeemable-once `SESSION_DATA` ticket: valid → the host consumes it
@@ -371,11 +353,6 @@ async fn session_data_ticket_is_consumed_exactly_once_forward() {
     session_data_ticket_is_consumed_exactly_once(LoopbackHarness::start().await).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn session_data_ticket_is_consumed_exactly_once_reverse() {
-    session_data_ticket_is_consumed_exactly_once(ReversePairHarness::start().await).await;
-}
-
 /// Under `DenyAll` every session op is `PERMISSION_DENIED`, nothing is
 /// created (no session, no ticket, no pipe), and — the non-distinguishing
 /// property — an unauthorized peer gets the *same* answer for a real and a
@@ -439,14 +416,6 @@ async fn denied_peer_cannot_learn_whether_a_session_exists_forward() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn denied_peer_cannot_learn_whether_a_session_exists_reverse() {
-    denied_peer_cannot_learn_whether_a_session_exists(
-        ReversePairHarness::start_with(Arc::new(DenyAll)).await,
-    )
-    .await;
-}
-
 /// `session.attach` for an unknown id is the same non-distinguishing
 /// `AUTH_FAILED` a wrong credential gets (protocol.md §10-2) — decided
 /// after mode validation, audited as a deny, with nothing created. The
@@ -456,8 +425,7 @@ async fn denied_peer_cannot_learn_whether_a_session_exists_reverse() {
 /// wire shape itself is under test, not the typed client wrapper — the
 /// `Hello` exchange to get there is `qsh_core::handshake::initiate`/
 /// `respond` (product code) rather than a hand-rolled frame, which is what
-/// makes this parametrizable: in reverse, only the *host* side (`qsh
-/// listen`'s equivalent) accepts, and it never opens the raw stream itself.
+/// makes this parametrizable.
 async fn attach_to_an_unknown_session_creates_nothing<P: HostedPair>(h: P) {
     let (conn, mut ctl) = h.raw_session().await;
     ctl.send
@@ -505,17 +473,11 @@ async fn attach_to_an_unknown_session_creates_nothing_forward() {
     attach_to_an_unknown_session_creates_nothing(LoopbackHarness::start().await).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_to_an_unknown_session_creates_nothing_reverse() {
-    attach_to_an_unknown_session_creates_nothing(ReversePairHarness::start().await).await;
-}
-
 // ==========================================================================
 // Session ownership (M3 plan Step 3 (2473c88).5 PR②, PRD §6, audit A2 P0):
 // `session.write`/`session.resize` bind to the session's opener.
-// Forward-only, same reason `resume_loopback.rs`'s multi-principal section
-// gives — a reverse target has exactly one peer, ever, so there is no
-// second, distinct principal to test ownership against.
+// Needs a second, distinct principal, which the generic scenarios above do
+// not provide.
 // ==========================================================================
 
 /// A second pinned device: its own dialer, its own connection, its own

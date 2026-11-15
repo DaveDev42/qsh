@@ -24,13 +24,13 @@
 //!    `every_session_op_passes_the_choke_point_with_the_mapped_action`
 //!    precedent to an external integration test. The remaining three
 //!    (`forward.local`, `forward.remote`, `host.reverse`) each need a real
-//!    QUIC connection or a real reverse registration to ever reach their
-//!    choke point — `Server::authorize_and_dial_tunnel`/
+//!    QUIC connection to ever reach their choke point —
+//!    `Server::authorize_and_dial_tunnel`/
 //!    `authorize_and_bind_remote_forward`/`handle_rfwd_open` are
-//!    `pub(crate)`, and `reverse::admit::admit`'s registry needs a real
-//!    `Listen` controller — so `crates/qsh-testkit/tests/
+//!    `pub(crate)`, and `host.reverse` is a retired registry row no
+//!    test drives any more (ADR-0068) — so `crates/qsh-testkit/tests/
 //!    acl_registry_audit.rs` drives those instead, over
-//!    `qsh_testkit::tunnel::TunnelHarness`/`reverse::ReverseHarness`.
+//!    `qsh_testkit::tunnel::TunnelHarness`.
 //!    [`single_source::every_op_registry_row_is_driven_somewhere`] is the
 //!    guard that keeps `OP_REGISTRY` as the *one* enumeration both files
 //!    consume — an eighteenth row added to the registry with neither file taught

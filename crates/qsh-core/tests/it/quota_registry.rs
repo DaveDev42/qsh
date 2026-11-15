@@ -1,65 +1,31 @@
 //! An M8 soak adversarial-review finding (docs/campaigns/m8-soak.md §3) had a
-//! wrong premise: it assumed `Quotas::reserve_connection` has exactly one
-//! production call site, when there are really two, one per accept path
-//! that reserves a connection slot before authorizing anything else —
+//! wrong premise about how many production call sites
+//! `Quotas::reserve_connection` has. It has exactly one,
 //! `Server::serve_connection` (`qsh serve`'s own accept loop,
-//! `crates/qsh-core/src/server/mod.rs`) and `Listen::
-//! accept_and_register_permitted` (the reverse-target controller's accept
-//! loop, `crates/qsh-core/src/reverse/listen.rs`).
+//! `crates/qsh-core/src/server/mod.rs`); the reverse-target controller's
+//! second accept path was retired with `qsh listen` (ADR-0068).
 //!
 //! `live_conns` (the accept-loop heartbeat) and the per-connection quota
-//! itself both depend on every accepted connection actually reaching one
-//! of these two calls — there is no exhaustive-match anchor for "every
-//! accept path" the way `qsh_proto::wire::control_message::Body` gives
-//! layer 2 of `tests/it/acl_registry.rs`, so this pins the fact by source
-//! text instead, the same precedent `tests/it/acl_registry.rs::source_scan::
+//! itself both depend on every accepted connection actually reaching that
+//! call — there is no exhaustive-match anchor for "every accept path" the
+//! way `qsh_proto::wire::control_message::Body` gives layer 2 of
+//! `tests/it/acl_registry.rs`, so this pins the fact by source text
+//! instead, the same precedent `tests/it/acl_registry.rs::source_scan::
 //! authorize_stream_has_exactly_two_production_call_sites` uses for a
-//! property with the identical shape: a third call site anywhere (or the
-//! loss of either of these two) fails here instead of silently changing
-//! which accept path actually reserves the slot the heartbeat and the
-//! quota believe every live connection holds.
+//! property with the identical shape: a second call site anywhere (or the
+//! loss of this one) fails here instead of silently changing which accept
+//! path actually reserves the slot the heartbeat and the quota believe
+//! every live connection holds.
 
 use crate::docs;
 use docs::{read_doc, repo_root};
 
-/// `relative`'s source, which is production code only: both scanned files
-/// keep their tests in sibling files (`server/tests.rs`, `reverse/listen/
-/// *_tests.rs` and `listen/tests.rs`), so a `#[cfg(test)]` call site never
-/// counts. Same shape as `tests/it/acl_registry.rs::source_scan::
+/// `relative`'s source, which is production code only: the scanned files
+/// keep their tests in sibling files (`server/tests.rs`), so a
+/// `#[cfg(test)]` call site never counts. Same shape as `tests/it/acl_registry.rs::source_scan::
 /// server_mod_production_source`.
 fn production_source(relative: &str) -> String {
     read_doc(relative)
-}
-
-/// `reverse/listen.rs` plus every production `.rs` file in the
-/// `reverse/listen/` directory beside it (`conn_table.rs`, `hub.rs`,
-/// `registration.rs`, and whatever is added later), concatenated. The
-/// test files are the ones named `tests.rs` or ending in `_tests.rs`.
-fn reverse_listen_production_source() -> String {
-    let dir = repo_root().join("crates/qsh-core/src/reverse/listen");
-    let mut paths: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()))
-        .map(|entry| entry.expect("read_dir entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .filter(|path| {
-            let name = path.file_name().unwrap().to_string_lossy();
-            name != "tests.rs" && !name.ends_with("_tests.rs")
-        })
-        .collect();
-    paths.sort();
-    assert!(
-        !paths.is_empty(),
-        "no production files under {}",
-        dir.display()
-    );
-    let mut source = production_source("crates/qsh-core/src/reverse/listen.rs");
-    for path in paths {
-        source.push('\n');
-        source.push_str(&production_source(
-            &path.strip_prefix(repo_root()).unwrap().to_string_lossy(),
-        ));
-    }
-    source
 }
 
 /// Every line of `source`, blanking any line that is itself a comment
@@ -105,22 +71,6 @@ fn reserve_connection_has_exactly_one_production_call_site_in_server_mod() {
         1,
         "Server::serve_connection must be the sole reserve_connection call site in \
          server/mod.rs, not {}: {sites:?}",
-        sites.len()
-    );
-}
-
-/// The other half of the same check: `Listen::accept_and_register_permitted`
-/// must be the sole `reserve_connection` call site under `reverse/listen.rs`
-/// and `reverse/listen/` — the reverse-target controller's own accept path,
-/// independent of `qsh serve`'s.
-#[test]
-fn reserve_connection_has_exactly_one_production_call_site_in_reverse_listen() {
-    let sites = reserve_connection_call_sites_in(&reverse_listen_production_source());
-    assert_eq!(
-        sites.len(),
-        1,
-        "Listen::accept_and_register_permitted must be the sole reserve_connection call \
-         site under reverse/listen.rs and reverse/listen/, not {}: {sites:?}",
         sites.len()
     );
 }
@@ -234,7 +184,6 @@ fn set_file_host_is_called_once_and_only_inside_host_runtime_with() {
         "crates/qsh-core/src/server/mod.rs",
         "crates/qsh-core/src/server/file.rs",
         "crates/qsh-core/src/server/file_host.rs",
-        "crates/qsh-core/src/reverse/target/mod.rs",
         "crates/qsh-cli/src/main.rs",
     ] {
         let sites = set_file_host_call_sites(relative);
@@ -247,19 +196,15 @@ fn set_file_host_is_called_once_and_only_inside_host_runtime_with() {
     }
 }
 
-/// Both production hosts reach `set_file_host` through `host_runtime`:
-/// `run_serve` and the reverse target each call it exactly once.
+/// The production host reaches `set_file_host` through `host_runtime`:
+/// `run_serve` calls it exactly once.
 #[test]
-fn run_serve_and_the_reverse_target_both_build_their_server_through_host_runtime() {
-    for relative in [
-        "crates/qsh-core/src/serve.rs",
-        "crates/qsh-core/src/reverse/target/mod.rs",
-    ] {
-        let calls: Vec<String> = non_comment_lines(&production_source(relative))
-            .into_iter()
-            .filter(|line| line.contains("host_runtime(") && !line.contains("fn host_runtime("))
-            .map(|line| line.trim().to_string())
-            .collect();
-        assert_eq!(calls.len(), 1, "{relative}: {calls:?}");
-    }
+fn run_serve_builds_its_server_through_host_runtime() {
+    let relative = "crates/qsh-core/src/serve.rs";
+    let calls: Vec<String> = non_comment_lines(&production_source(relative))
+        .into_iter()
+        .filter(|line| line.contains("host_runtime(") && !line.contains("fn host_runtime("))
+        .map(|line| line.trim().to_string())
+        .collect();
+    assert_eq!(calls.len(), 1, "{relative}: {calls:?}");
 }

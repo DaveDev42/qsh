@@ -56,9 +56,7 @@
 //! The M4 plan (2473c88) for M4 Step 3/4 (compiles, does not run the
 //! integration leg on Windows). [`RemoteForwardAcceptor`] is the
 //! requester leg, not the host leg, and is **not** `cfg(unix)`-gated —
-//! same reasoning as `crate::tunnel::local`'s own requester-side listener —
-//! and neither is its reverse-claim dispatch, since localctl builds on every
-//! platform.
+//! same reasoning as `crate::tunnel::local`'s own requester-side listener.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -67,8 +65,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-// The reverse claim loop's backoff decision is the only consumer.
-use std::time::Instant;
 
 use qsh_proto::wire::{StreamHeader, StreamKind, sanitize_peer_text, valid_forward_id};
 use thiserror::Error;
@@ -631,53 +627,9 @@ type RemoteForwardTable = Arc<Mutex<HashMap<String, (String, u16)>>>;
 /// host-side handling did.
 pub struct RemoteForwardAcceptor {
     table: RemoteForwardTable,
-    dispatch: AcceptDispatch,
-}
-
-/// How [`RemoteForwardAcceptor`] actually receives `TCP_ACCEPTED` streams
-/// — the requester leg's own carrier axis, M4 plan Step 5 (a) (2473c88)'s
-/// counterpart to [`crate::tunnel::local::ForwardCarrier`]. The two
-/// variants are not merely two ways to reach the same primitive: on the
-/// forward route this process holds the live QUIC connection and
-/// `accept_bi()` hands back *every* peer-opened stream on it, so one
-/// shared dispatcher loop and [`RemoteForwardTable`] lookup is exactly
-/// [`crate::tunnel::local::ForwardCarrier`]'s own reasoning for a shared
-/// table. On the reverse route this process holds no connection at all —
-/// the resident daemon does — and the only primitive it offers is a
-/// *named* claim (`crate::localctl::client::open_stream_with_wait` with a
-/// `TCP_ACCEPTED{ticket: forward_id}` header): there is no "accept
-/// anything" operation to share a loop over, so each registered
-/// `forward_id` gets its own persistent claim loop instead.
-enum AcceptDispatch {
-    /// Forward route: [`dispatch_remote_forwards`] already running against
-    /// a live [`qsh_transport::Connection`], shared by every `-R` on it.
-    Direct { task: tokio::task::JoinHandle<()> },
-    /// Reverse route: this machine's resident daemon socket, plus one
-    /// claim-loop task per currently-registered `forward_id`
-    /// (`claim_remote_forward_reverse`).
-    Local {
-        socket: std::path::PathBuf,
-        host: String,
-        claims: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-        /// This instance's own claim token
-        /// (`crate::reverse::listen::ControlHub::claim_tcp_accepted`'s own
-        /// doc on why one is required at all — adversarial-review
-        /// finding: knowing a `forward_id` must not be enough to claim
-        /// it). Minted once, here, and reused verbatim by every claim
-        /// attempt this instance ever makes, for every `forward_id` it
-        /// registers — the daemon's ownership check is keyed on exactly
-        /// this stability: the *first* claim for a given `forward_id`
-        /// seats whatever token it presented, and every later claim,
-        /// including this instance's own retries after a claimed splice
-        /// ends, must keep presenting the same bytes.
-        claim_token: Vec<u8>,
-        /// Told the `forward_id` of a claim loop whose attempt came back
-        /// at once, before it could have waited out its budget: the daemon
-        /// no longer lists that forward. A supervised tunnel reads this as
-        /// the cue to ask whether an operator closed it (ADR-0023
-        /// decision 14).
-        vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    },
+    /// The [`dispatch_remote_forwards`] task shared by every `-R` on the
+    /// connection.
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl RemoteForwardAcceptor {
@@ -710,169 +662,47 @@ impl RemoteForwardAcceptor {
     ) -> Self {
         let table: RemoteForwardTable = Arc::new(Mutex::new(HashMap::new()));
         let task = tokio::spawn(dispatch_remote_forwards(conn, Arc::clone(&table), agent));
-        Self {
-            table,
-            dispatch: AcceptDispatch::Direct { task },
-        }
-    }
-
-    /// [`Self::spawn`]'s reverse-route sibling, `-R over reverse`
-    /// (M4 plan Step 5 (a) (2473c88)): `socket_path` is this machine's resident
-    /// `qsh listen` daemon's UDS socket, `host` the reverse registration
-    /// it should relay each claim to. Unlike [`Self::spawn`] this starts
-    /// no task at all — there is nothing to dispatch until
-    /// [`Self::register`] names the first `forward_id`, at which point a
-    /// dedicated claim loop starts for exactly that id
-    /// (`AcceptDispatch::Local`'s own doc on why one loop per id, not
-    /// one shared loop).
-    pub async fn spawn_reverse(socket_path: std::path::PathBuf, host: String) -> Self {
-        Self::spawn_reverse_watching(socket_path, host, None).await
-    }
-
-    /// [`Self::spawn_reverse`] that also reports, on `vanished`, each time
-    /// a claim loop's attempt returns at once (`AcceptDispatch::Local`'s
-    /// `vanished`).
-    pub(crate) async fn spawn_reverse_watching(
-        socket_path: std::path::PathBuf,
-        host: String,
-        vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    ) -> Self {
-        Self {
-            table: Arc::new(Mutex::new(HashMap::new())),
-            dispatch: AcceptDispatch::Local {
-                socket: socket_path,
-                host,
-                claims: Mutex::new(HashMap::new()),
-                // A `Ulid` is convenient, unguessable (128 bits, 80 of
-                // them random) entropy already a direct dependency of
-                // this crate (`Server::handle_rfwd_open` mints
-                // `forward_id` the same way) — its meaning here is
-                // unrelated to `forward_id`'s (a *claim token*, never
-                // compared against or substituted for a `forward_id`
-                // anywhere), it is simply a convenient source of a fresh
-                // random byte string.
-                claim_token: ulid::Ulid::generate().to_string().into_bytes(),
-                vanished,
-            },
-        }
-    }
-
-    /// This instance's own claim token, reverse route only — the exact
-    /// bytes `Self::spawn_reverse` minted, unchanged. `None` on the
-    /// forward route (`AcceptDispatch::Direct` has no claim token; a
-    /// live QUIC connection makes the token's whole purpose moot, since
-    /// nothing else can claim from it). A caller that opens a `-R over
-    /// reverse` forward must call this **before** it sends
-    /// `RemoteForwardOpen`, so the request carries this exact value in
-    /// `claim_token` — `crate::reverse::listen::ControlHub`'s
-    /// `claim_tokens` doc: the hub seats whatever token that request
-    /// carried the instant it registers the `forward_id`, and every
-    /// claim [`Self::register`]'s claim loop makes afterward must
-    /// present those identical bytes back or be refused. This is the
-    /// only way the two ever agree — there is no wire round trip that
-    /// echoes the token back for this side to read.
-    pub fn claim_token(&self) -> Option<&[u8]> {
-        match &self.dispatch {
-            AcceptDispatch::Direct { .. } => None,
-            AcceptDispatch::Local { claim_token, .. } => Some(claim_token.as_slice()),
-        }
+        Self { table, task }
     }
 
     /// Route future `TCP_ACCEPTED{ticket: forward_id}` streams to
     /// `host:port` — this side's own local dial target for the `-R` spec
-    /// `forward_id` was minted for. On the reverse route this is also
-    /// what starts `forward_id`'s claim loop — there is nothing to
-    /// register *into* the way the forward route's shared table is; the
-    /// registration and the dispatch start together.
+    /// `forward_id` was minted for.
     pub fn register(&self, forward_id: String, host: String, port: u16) {
         self.table
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(forward_id.clone(), (host.clone(), port));
-        if let AcceptDispatch::Local {
-            socket,
-            host: daemon_host,
-            claims,
-            claim_token,
-            vanished,
-        } = &self.dispatch
-        {
-            let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
-            claims.entry(forward_id.clone()).or_insert_with(|| {
-                tokio::spawn(claim_remote_forward_reverse(
-                    socket.clone(),
-                    daemon_host.clone(),
-                    forward_id,
-                    claim_token.clone(),
-                    host,
-                    port,
-                    vanished.clone(),
-                ))
-            });
-        }
+            .insert(forward_id, (host, port));
     }
 
     /// Stop routing `forward_id` — a later `TCP_ACCEPTED` naming it is
     /// rejected as unknown rather than dialed. Called on `-R` teardown
     /// (`RemoteForwardClose`) and, best-effort, when a sibling `-R` in the
     /// same [`crate::ops::Ops::session_attach`] call fails after this one
-    /// already opened. On the reverse route this also aborts
-    /// `forward_id`'s claim loop — the same one-drop teardown
-    /// [`Self::drop`] gives every remaining claim loop, just scoped to
-    /// this one id — which stops *new* claims immediately but, same as
-    /// the forward route's own `dispatch_remote_forwards`, never
-    /// disturbs a splice already in flight for this id: it drains to its
-    /// own natural end (`DrainSplicesOnDrop`'s own doc on how the
-    /// abort above achieves that rather than tearing those splices down
-    /// with it).
+    /// already opened. A splice already in flight for this id is never
+    /// disturbed: it drains to its own natural end.
     pub fn unregister(&self, forward_id: &str) {
         self.table
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(forward_id);
-        if let AcceptDispatch::Local { claims, .. } = &self.dispatch
-            && let Some(task) = claims
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(forward_id)
-        {
-            task.abort();
-        }
     }
 }
 
 impl Drop for RemoteForwardAcceptor {
     fn drop(&mut self) {
-        // Aborts every still-running dispatch/claim-loop task —
-        // `dispatch_remote_forwards` (forward route) or every currently-
-        // registered `forward_id`'s `claim_remote_forward_reverse`
-        // (reverse route) — which stops *new* work immediately on both
-        // routes. What that abort does to work already in flight is
-        // deliberately identical on both routes too (adversarial-review
-        // finding, this type's headline claim that the role axis is
-        // independent of connection direction): every already-accepted
-        // or already-claimed splice *drains* to its own natural end
-        // rather than being force-aborted, because on both routes the
-        // aborted task's own `JoinSet` of splices is wrapped in
-        // `DrainSplicesOnDrop`, and the reverse route additionally wraps
-        // its one outstanding claim attempt in `DrainClaimAttemptOnDrop`
-        // so a claim granted the instant after teardown still completes
-        // instead of vanishing. This is *not*
+        // Aborts the dispatch task, which stops *new* work immediately.
+        // Work already in flight is not aborted: every already-accepted
+        // splice *drains* to its own natural end, because the aborted
+        // task's own `JoinSet` of splices is wrapped in
+        // `DrainSplicesOnDrop`. This is *not*
         // `crate::tunnel::local::LocalForwardHandle`'s `Drop` — that type
         // owns the TCP listener itself and correctly tears everything
         // down with it (its own doc); this type owns only the dispatch
-        // side, where the peer's connection (forward route) or the
-        // resident daemon (reverse route) is what actually accepted the
+        // side, where the peer's connection is what actually accepted the
         // TCP connection, so refusing to finish relaying it would abandon
         // a connection someone else already committed to.
-        match &self.dispatch {
-            AcceptDispatch::Direct { task } => task.abort(),
-            AcceptDispatch::Local { claims, .. } => {
-                for (_, task) in claims.lock().unwrap_or_else(|e| e.into_inner()).drain() {
-                    task.abort();
-                }
-            }
-        }
+        self.task.abort();
     }
 }
 
@@ -902,8 +732,8 @@ async fn dispatch_remote_forwards(
                     // `tasks`; wrapped in `DrainSplicesOnDrop`, so this
                     // return hands them to a detached reaper that drains
                     // them to their own end rather than aborting them —
-                    // matching `RemoteForwardAcceptor::drop`'s reverse-
-                    // route behavior (`DrainSplicesOnDrop`'s own doc). In
+                    // matching `RemoteForwardAcceptor::drop`
+                    // (`DrainSplicesOnDrop`'s own doc). In
                     // practice each already-accepted stream rides this
                     // same now-dead `conn`, so it fails on its own almost
                     // immediately either way; this path exists so that
@@ -1074,58 +904,13 @@ async fn handle_accepted_stream(
     }
 }
 
-// ---------------------------------------------------------------------
-// Stage E: the reverse-route requester leg — `-R over reverse`
-// (M4 plan Step 5 (a) (2473c88)).
-// ---------------------------------------------------------------------
-
-/// How long each claim attempt long-polls the daemon for the next
-/// `TCP_ACCEPTED` arrival before trying again — the same ceiling the
-/// daemon itself clamps every `LOCAL_STREAM` wait to
-/// (`crate::localctl::daemon`'s `clamp_wait`/`LOCAL_WAIT_MAX`), so this
-/// asks for the largest budget the daemon will actually honor.
-const REVERSE_CLAIM_WAIT_MS: u32 = qsh_proto::local::LOCAL_WAIT_MAX.as_millis() as u32;
-
-/// How long to pause before retrying a claim that failed for a reason
-/// other than "nothing arrived yet" (`ErrorCode::Timeout`) — a daemon
-/// that is transiently unreachable (restarting, momentarily overloaded)
-/// should not be hammered with a fresh UDS connect in a tight loop. Same
-/// order of magnitude as [`crate::tunnel::local::ACCEPT_BACKOFF`], for the
-/// same reason.
-const REVERSE_CLAIM_RETRY_BACKOFF: Duration = Duration::from_millis(200);
-
-/// Build a `TCP_ACCEPTED` claim's `ticket`: `forward_id`, a NUL byte,
-/// then `claim_token` — the one place this exact shape is produced, and
-/// `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`'s own
-/// doc names this function as the shape it parses back apart. A NUL is a
-/// safe, unambiguous separator because `forward_id` can never contain one
-/// (`wire::valid_forward_id`'s charset is `[A-Za-z0-9_-]`) while
-/// `claim_token` is opaque bytes with no charset restriction of its own.
-fn claim_ticket(forward_id: &str, claim_token: &[u8]) -> Vec<u8> {
-    let mut ticket = Vec::with_capacity(forward_id.len() + 1 + claim_token.len());
-    ticket.extend_from_slice(forward_id.as_bytes());
-    ticket.push(0);
-    ticket.extend_from_slice(claim_token);
-    ticket
-}
-
 /// Owns an accept/dispatch loop's in-flight splice tasks so that when the
 /// loop's own task ends — including via `.abort()`
-/// ([`RemoteForwardAcceptor::unregister`] on the reverse route,
-/// [`RemoteForwardAcceptor::drop`] on both routes) — those splices
-/// *drain* to completion instead of being force-aborted with it. Shared,
-/// not per-route, on purpose: this is exactly the adversarial-review
-/// finding that this type exists to close — reverse-route teardown used
-/// to abort every in-flight splice for a forward while the forward-route
-/// dispatcher never did, an observable behavioral difference across the
-/// role axis this whole PR's headline claim says is independent of
-/// connection direction. Both [`dispatch_remote_forwards`] (forward
-/// route) and [`claim_remote_forward_reverse`] (reverse route) wrap their
-/// splice `JoinSet` in this same type now, so `Drop` drains on both sides
-/// identically — the one place this still differs is [`serve_remote_forward`],
-/// the *target*-side TCP listener, which is not part of the role axis
-/// this type closes (its own doc explains why it tears down with its
-/// splices instead).
+/// ([`RemoteForwardAcceptor::drop`]) — those splices *drain* to completion
+/// instead of being force-aborted with it. [`dispatch_remote_forwards`]
+/// wraps its splice `JoinSet` in this type; the one place that differs is
+/// [`serve_remote_forward`], the *target*-side TCP listener, whose own doc
+/// explains why it tears down with its splices instead.
 ///
 /// Rust drops every live local when a task ends, `.abort()` included —
 /// tokio's documented cancellation mechanism is to drop the task's future
@@ -1146,363 +931,6 @@ impl Drop for DrainSplicesOnDrop {
         }
         let mut set = std::mem::take(&mut self.0);
         tokio::spawn(async move { while set.join_next().await.is_some() {} });
-    }
-}
-
-/// Spawn one claim attempt as its own detached task and return its
-/// [`tokio::task::JoinHandle`] — the cancel-safety seam
-/// [`claim_remote_forward_reverse`]'s own doc explains: a `JoinHandle`
-/// dropped mid-poll does **not** abort the task it names (unlike the
-/// `JoinSet` [`DrainSplicesOnDrop`] guards), it merely stops *this*
-/// caller from observing the result — the underlying `open_stream_with_wait`
-/// call keeps running to completion on the runtime regardless of whether
-/// or how many times the returned handle is polled. Owned copies of
-/// `socket`/`daemon_host`/`header` move into the spawned future so it is
-/// fully self-contained (`'static`), independent of the loop's own stack
-/// frame.
-type ClaimAttemptHandle = tokio::task::JoinHandle<
-    Result<
-        (
-            crate::client::link::DataSend,
-            crate::client::link::DataRecv,
-            crate::client::link::DataKillSwitch,
-        ),
-        ClientError,
-    >,
->;
-
-fn spawn_claim_attempt(
-    socket: std::path::PathBuf,
-    daemon_host: String,
-    header: StreamHeader,
-) -> ClaimAttemptHandle {
-    tokio::spawn(async move {
-        let link = DataLink::Local {
-            socket: &socket,
-            host: &daemon_host,
-        };
-        crate::tunnel::open_stream_with_wait(&link, &header, REVERSE_CLAIM_WAIT_MS).await
-    })
-}
-
-/// Guards [`claim_remote_forward_reverse`]'s single currently-outstanding
-/// [`spawn_claim_attempt`] handle against the same silent-loss failure
-/// mode [`DrainSplicesOnDrop`] fixes for already-spawned splices, one
-/// level earlier (adversarial-review finding: `unregister`/[`Drop`] abort
-/// only the claim *loop*'s task, never the detached attempt it was
-/// polling — that attempt keeps running regardless, per
-/// [`spawn_claim_attempt`]'s own doc, and can still be granted a real
-/// [`crate::reverse::listen::hub::TunnelArrival`] by the daemon after nothing
-/// is left to hand it to [`handle_reverse_claim`]. Left alone, the
-/// runtime just drops that `(send, recv, kill)` return value the instant
-/// the orphaned task finishes — no reset, no log, the arrival simply
-/// stops existing).
-///
-/// Dropping this type hands the outstanding handle to its own detached
-/// reaper, exactly [`DrainSplicesOnDrop`]'s technique: await it, and if
-/// it *was* granted, run it to completion through the same
-/// [`handle_reverse_claim`] the loop itself would have called — which
-/// dials and splices on success, or calls
-/// [`crate::client::link::DataKillSwitch::kill`] and logs on a dial
-/// failure or a non-`Local` carrier. So a win after teardown is either
-/// completed or explicitly, visibly reset — never silently dropped.
-/// `Timeout` or any other non-granted outcome needs nothing further;
-/// there is no arrival to lose. A `None` handle (the loop always holds
-/// `Some` between iterations, see [`claim_remote_forward_reverse`]) is
-/// simply a no-op, same as `DrainSplicesOnDrop` on an empty set.
-struct DrainClaimAttemptOnDrop {
-    handle: Option<ClaimAttemptHandle>,
-    host: String,
-    port: u16,
-}
-
-impl DrainClaimAttemptOnDrop {
-    fn new(handle: ClaimAttemptHandle, host: String, port: u16) -> Self {
-        Self {
-            handle: Some(handle),
-            host,
-            port,
-        }
-    }
-
-    /// Replace the outstanding attempt with a fresh one, same as
-    /// reassigning a bare `claim_handle` local did before this type
-    /// existed. The handle being replaced has already resolved (it is
-    /// only ever called with the just-`joined` arm's own next attempt),
-    /// so dropping it here is an ordinary no-op, not a loss.
-    fn replace(&mut self, handle: ClaimAttemptHandle) {
-        self.handle = Some(handle);
-    }
-
-    /// Forget the handle that just resolved. Every arm that consumed it
-    /// calls this first: an arm may `.await` (the retry backoff) before it
-    /// reaches [`Self::replace`], and if the loop is aborted during that
-    /// await, [`Drop`] must not find the already-completed handle and
-    /// poll it again (tokio panics with "`JoinHandle` polled after
-    /// completion").
-    fn resolved(&mut self) {
-        self.handle = None;
-    }
-
-    /// The live handle to poll in `select!` — always `Some` between loop
-    /// iterations ([`Self::new`] seeds it, every arm that consumes it
-    /// calls [`Self::replace`] before the next poll).
-    fn poll_handle(&mut self) -> &mut ClaimAttemptHandle {
-        self.handle
-            .as_mut()
-            .expect("claim_remote_forward_reverse always holds an outstanding attempt")
-    }
-}
-
-impl Drop for DrainClaimAttemptOnDrop {
-    fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        let host = std::mem::take(&mut self.host);
-        let port = self.port;
-        tokio::spawn(async move {
-            if let Ok(Ok((send, recv, kill))) = handle.await {
-                tracing::debug!(
-                    host,
-                    port,
-                    "qsh::tunnel: reverse TCP_ACCEPTED claim granted after its loop was torn \
-                     down, completing the splice instead of discarding it"
-                );
-                handle_reverse_claim(send, recv, kill, host, port).await;
-            }
-        });
-    }
-}
-
-/// One registered `forward_id`'s persistent claim loop on the reverse
-/// route (`AcceptDispatch::Local`'s own doc on why one loop per id): long-
-/// poll [`crate::tunnel::open_stream_with_wait`] over a
-/// [`DataLink::Local`] for the next queued `TCP_ACCEPTED` arrival, spawn a
-/// dial-and-splice task for it, and claim again immediately — never
-/// waiting for that task to finish, so more than one accepted connection
-/// for the same `forward_id` can be in flight at once, exactly like
-/// [`serve_remote_forward`]'s own per-connection [`JoinSet`].
-///
-/// **Cancel-safety** (adversarial review finding, three lenses): the
-/// obvious shape — race the claim future directly inside the same
-/// `select!` that also races `tasks.join_next()` — is *not* cancel-safe.
-/// When an unrelated splice task happens to finish at the same moment a
-/// claim is in flight, `select!` polls every branch and, if the splice
-/// branch wins, drops the *other* branches' futures — including a claim
-/// future that may already have been granted by the daemon (it dequeued
-/// a real `TunnelArrival` and is mid-`send` of the `ClaimGranted` frame,
-/// or has already sent it): dropping that future there destroys the
-/// claimed connection with no trace, silently, for a reason (a *different*
-/// forward's splice finishing) that has nothing to do with this claim at
-/// all. The fix is [`spawn_claim_attempt`]: each claim attempt is spawned
-/// as its own detached task, and only its *`JoinHandle`* is raced in
-/// `select!` below. Losing that race — a splice's `tasks.join_next()`
-/// branch winning instead — drops only the losing `select!` arm's
-/// reference to the handle for *this poll*, not the task the handle
-/// names; the claim keeps running to completion on the runtime regardless,
-/// and the next loop iteration reaches this same `select!` again and polls
-/// the identical, still-live `claim_handle`.
-///
-/// Runs until [`RemoteForwardAcceptor::unregister`] or
-/// [`RemoteForwardAcceptor::drop`] aborts this task — there is no other
-/// exit, matching every other tunnel accept loop's contract in this
-/// crate ([`DrainSplicesOnDrop`]'s own doc on what happens to any splices
-/// still running at that point, [`DrainClaimAttemptOnDrop`]'s own doc on
-/// the one attempt still outstanding when that happens). `ErrorCode::Timeout` is the loop's
-/// *ordinary* outcome (nothing arrived within this attempt's budget,
-/// `crate::localctl::daemon`'s `serve_tcp_accepted`'s own doc on why an
-/// unregistered and a merely-idle `forward_id` answer the same way) and
-/// is not logged or backed off *when the attempt actually spent its
-/// budget waiting* — claiming again is the wait. Any other error gets a
-/// short backoff so a genuinely unreachable daemon is retried, not
-/// hammered. A claim task ending via `JoinError` (panic) is treated the
-/// same as any other failed attempt — logged, backed off, and retried —
-/// rather than silently stalling the loop.
-///
-/// **Fast-timeout guard (adversarial-review finding, M4 plan Step 5 (2473c88)
-/// PR 5b: a third party — `qsh tunnel close`, via
-/// `crate::reverse::listen::ControlHub::admin_close_forward` — can remove
-/// this loop's `forward_id` registration without ending this loop's own
-/// conduit).** Once that happens, `admits_claim` is `false` for every
-/// future attempt and `crate::reverse::listen::ControlHub::claim_tcp_accepted`
-/// returns `None` on its very first poll, before any `.await` — so the
-/// attempt resolves to `Timeout` in microseconds instead of after the
-/// real ~60s (`qsh_proto::local::LOCAL_WAIT_MAX`) budget. Treating that
-/// the same as an ordinary exhausted-budget timeout turns this loop into
-/// an unbounded hot spin of UDS connect + `LocalHello` + `StreamHeader`
-/// for as long as the process lives. Distinguishing the two without a
-/// wire change: a `Timeout` whose attempt took under
-/// [`FAST_TIMEOUT_THRESHOLD`] cannot have genuinely waited out the
-/// budget, so it gets the same [`REVERSE_CLAIM_RETRY_BACKOFF`] every
-/// other failure mode gets; only a `Timeout` that actually spent close to
-/// the full budget is the ordinary long-poll outcome and is retried at
-/// once.
-const FAST_TIMEOUT_THRESHOLD: Duration = Duration::from_secs(1);
-
-/// The decision [`FAST_TIMEOUT_THRESHOLD`]'s doc describes, pulled out as
-/// a pure function so it is unit-testable without driving the real
-/// `select!` loop: `true` means the just-finished attempt could not have
-/// genuinely waited out [`REVERSE_CLAIM_WAIT_MS`]'s ~60s budget, so it
-/// must be a registration that vanished out from under this loop (the
-/// only way `claim_tcp_accepted` returns before its first `.await`) — get
-/// backed off like every other failure, not retried instantly.
-fn timeout_needs_backoff(elapsed: Duration) -> bool {
-    elapsed < FAST_TIMEOUT_THRESHOLD
-}
-
-async fn claim_remote_forward_reverse(
-    socket: std::path::PathBuf,
-    daemon_host: String,
-    forward_id: String,
-    claim_token: Vec<u8>,
-    host: String,
-    port: u16,
-    vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-) {
-    let header = StreamHeader {
-        kind: StreamKind::TcpAccepted as i32,
-        ticket: claim_ticket(&forward_id, &claim_token),
-        host: String::new(),
-        port: 0,
-        deny_host_local: false,
-    };
-    let mut tasks = DrainSplicesOnDrop(JoinSet::new());
-    let mut attempt_started = Instant::now();
-    let mut claim_handle = DrainClaimAttemptOnDrop::new(
-        spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone()),
-        host.clone(),
-        port,
-    );
-    loop {
-        tokio::select! {
-            joined = claim_handle.poll_handle() => {
-                claim_handle.resolved();
-                let next = match joined {
-                    Ok(Ok((send, recv, kill))) => {
-                        tasks
-                            .0
-                            .spawn(handle_reverse_claim(send, recv, kill, host.clone(), port));
-                        attempt_started = Instant::now();
-                        spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
-                    }
-                    Ok(Err(ClientError::Remote { code: qsh_proto::ErrorCode::Timeout, .. }))
-                        if !timeout_needs_backoff(attempt_started.elapsed()) =>
-                    {
-                        // Nothing arrived within this attempt's budget —
-                        // the ordinary long-poll outcome. Claim again
-                        // right away.
-                        attempt_started = Instant::now();
-                        spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
-                    }
-                    Ok(Err(err)) => {
-                        if let (Some(vanished), ClientError::Remote { code: qsh_proto::ErrorCode::Timeout, .. }) =
-                            (&vanished, &err)
-                        {
-                            let _ = vanished.send(forward_id.clone());
-                        }
-                        tracing::warn!(
-                            forward_id,
-                            %err,
-                            "qsh::tunnel: reverse TCP_ACCEPTED claim failed, retrying"
-                        );
-                        tokio::time::sleep(REVERSE_CLAIM_RETRY_BACKOFF).await;
-                        attempt_started = Instant::now();
-                        spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
-                    }
-                    Err(join_err) => {
-                        if join_err.is_panic() {
-                            tracing::warn!(
-                                forward_id,
-                                %join_err,
-                                "qsh::tunnel: reverse TCP_ACCEPTED claim task panicked, retrying"
-                            );
-                        }
-                        tokio::time::sleep(REVERSE_CLAIM_RETRY_BACKOFF).await;
-                        attempt_started = Instant::now();
-                        spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
-                    }
-                };
-                claim_handle.replace(next);
-            }
-            Some(joined) = tasks.0.join_next(), if !tasks.0.is_empty() => {
-                if let Err(err) = joined
-                    && err.is_panic()
-                {
-                    tracing::warn!(
-                        %err,
-                        "qsh::tunnel: reverse remote-forward connection task panicked"
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// One claimed `TCP_ACCEPTED` arrival's whole life on the reverse-route
-/// requester side: dial this side's own local `host:port` and splice —
-/// the reverse-route sibling of [`accept_one`] with the direction of
-/// "who dials" unchanged (this side always dials its own local
-/// destination; only *how the claim itself was obtained* differs from the
-/// forward route's `accept_bi()`/[`handle_accepted_stream`]).
-///
-/// No `forward_id` lookup here, unlike [`handle_accepted_stream`]: the
-/// claim that produced `send`/`recv` already named `forward_id` explicitly
-/// (`claim_remote_forward_reverse`'s own header), so there is nothing left
-/// to look up — `host`/`port` arrive already resolved, captured by
-/// [`RemoteForwardAcceptor::register`] at the moment this loop was
-/// spawned.
-async fn handle_reverse_claim(
-    send: crate::client::link::DataSend,
-    recv: crate::client::link::DataRecv,
-    kill: crate::client::link::DataKillSwitch,
-    host: String,
-    port: u16,
-) {
-    let (Ok(raw_send), Ok((raw_recv, residue))) = (send.into_raw_local(), recv.into_raw_local())
-    else {
-        kill.kill();
-        tracing::warn!(
-            "qsh::tunnel: reverse TCP_ACCEPTED claim produced a non-Local carrier, dropping"
-        );
-        return;
-    };
-
-    // Same dialer, same timeout, as `handle_accepted_stream`'s own dial —
-    // and, like that one, unfiltered: this is `-R`'s own registered
-    // destination, not a `TCP_CONNECT` stream field.
-    let dialer = SystemDialer::default();
-    let tcp = match dialer
-        .dial(&host, port, &crate::tunnel::dial::DialPolicy::default())
-        .await
-    {
-        Ok(tcp) => tcp,
-        Err(err) => {
-            kill.kill();
-            tracing::warn!(
-                host,
-                port,
-                %err,
-                "qsh::tunnel: remote-forward local dial failed (reverse route)"
-            );
-            return;
-        }
-    };
-
-    match crate::tunnel::splice::splice_tcp_uds(tcp, raw_send, raw_recv, residue).await {
-        Ok(stats) => tracing::debug!(
-            host,
-            port,
-            sent = stats.local_to_remote,
-            received = stats.remote_to_local,
-            "qsh::tunnel: remote-forward local connection closed (reverse route)"
-        ),
-        Err(err) => tracing::warn!(
-            host,
-            port,
-            %err,
-            "qsh::tunnel: remote-forward local connection failed (reverse route)"
-        ),
     }
 }
 

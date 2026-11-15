@@ -623,10 +623,9 @@ pub fn keystore_session_bound_finding(mode: &str) -> DoctorFinding {
 
 /// `service_restart_drops_sessions`'s finding. Info, and only for a mode
 /// that hosts sessions: `listen` is a controller and keeps none, so this
-/// returns `None` for it, unless it is the combined endpoint (`combined`,
-/// ADR-0059), whose sessions live in the same process.
-pub fn service_restart_drops_sessions_finding(mode: &str, combined: bool) -> Option<DoctorFinding> {
-    if mode == "listen" && !combined {
+/// returns `None` for it.
+pub fn service_restart_drops_sessions_finding(mode: &str) -> Option<DoctorFinding> {
+    if mode == "listen" {
         return None;
     }
     let diag = &super::SERVICE_RESTART_DROPS_SESSIONS;

@@ -3,22 +3,20 @@
 //! bound or connection dialed. An out-of-range value is `CONFIG_ERROR`
 //! (non-retryable), never a clamp.
 //!
-//! Each daemon entry point is handed a config whose `[transport]` is out of
+//! The daemon entry point is handed a config whose `[transport]` is out of
 //! range (or whose `[recovery]` breaks the detection budget, attach or
 //! reverse registration) and a shutdown future that never resolves: a
-//! daemon that skipped the validation would bind and wait, so the test's own timeout is what
-//! catches it.
+//! daemon that skipped the validation would bind and wait, so the test's own
+//! timeout is what catches it. (`qsh listen` and `qsh reverse` retired with
+//! ADR-0068.)
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use qsh_core::config::{Config, Paths, RecoverySection, TransportConfig};
-use qsh_core::reverse::listen::run_listen;
-use qsh_core::reverse::target::run_reverse;
 use qsh_core::serve::run_serve;
 use qsh_proto::ErrorCode;
-use qsh_testkit::loopback::make_identity;
-use qsh_testkit::reverse::loaded_identity;
+use qsh_testkit::loopback::{loaded_identity, make_identity};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -118,40 +116,5 @@ async fn every_daemon_fails_closed_on_an_out_of_range_liveness_value_before_bind
         let err = serve.expect_err("qsh serve must fail closed");
         assert_eq!(err.code, ErrorCode::ConfigError, "{label}: serve");
         assert!(!err.retryable, "{label}: serve");
-
-        let listen = tokio::time::timeout(
-            TIMEOUT,
-            run_listen(
-                &paths,
-                &config,
-                loaded_identity(&identity, "controller"),
-                Some("127.0.0.1:0"),
-                |_| panic!("{label}: qsh listen must not bind"),
-                |_| {},
-                std::future::pending::<()>(),
-            ),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{label}: qsh listen started instead of failing"));
-        let err = listen.expect_err("qsh listen must fail closed");
-        assert_eq!(err.code, ErrorCode::ConfigError, "{label}: listen");
-        assert!(!err.retryable, "{label}: listen");
-
-        let reverse = tokio::time::timeout(
-            TIMEOUT,
-            run_reverse(
-                &paths,
-                &config,
-                loaded_identity(&identity, "target"),
-                "controller.invalid:4433",
-                None,
-                std::future::pending::<()>(),
-            ),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{label}: qsh reverse started instead of failing"));
-        let err = reverse.expect_err("qsh reverse must fail closed");
-        assert_eq!(err.code, ErrorCode::ConfigError, "{label}: reverse");
-        assert!(!err.retryable, "{label}: reverse");
     }
 }

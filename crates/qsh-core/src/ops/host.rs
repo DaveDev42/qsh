@@ -443,84 +443,6 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
     entry.local.state == "reachable"
 }
 
-/// Which daemon socket a supervised reverse-route tunnel asks again after
-/// losing its registration (ADR-0023 decisions 4 and 7-1). This is the
-/// reverse half of [`resolve_route`] and nothing else: it never looks at
-/// `trust.toml` or `hosts.toml`, so a forward pin of the same name is never
-/// a candidate (decision 22).
-///
-/// - a live registration wins; two daemons holding the name live is
-///   `INVALID_ARGUMENT`, as in routing, and ends the tunnel;
-/// - else a stale one, preferring `previous` (the daemon that held the
-///   route before), which is where the daemon's own wait for a newer
-///   generation happens;
-/// - else the name is on no daemon: `HOST_NOT_FOUND`, retried by the
-///   caller. The registration was swept after `stale_retention`, or has
-///   not come back yet;
-/// - no daemon at all is `CONNECTION_FAILED`, also retried: a restarting
-///   `qsh listen` binds a new socket.
-pub(crate) fn pick_reverse_socket(
-    daemons: &[crate::localctl::client::DaemonHostList],
-    name: &str,
-    previous: &std::path::Path,
-) -> Result<PathBuf, OpError> {
-    let key = lookup_name(name);
-    if daemons.is_empty() {
-        return Err(OpError::new(
-            ErrorCode::ConnectionFailed,
-            "no qsh listen daemon is running on this machine",
-        ));
-    }
-    let named: Vec<(&crate::localctl::client::DaemonHostList, &LocalHost)> = daemons
-        .iter()
-        .flat_map(|daemon| daemon.hosts.iter().map(move |host| (daemon, host)))
-        .filter(|(_, host)| host.name == key)
-        .collect();
-    let live: Vec<_> = named
-        .iter()
-        .filter(|(_, host)| host.state == "reachable")
-        .collect();
-    match live.as_slice() {
-        [] => {}
-        [(daemon, _)] => return Ok(daemon.socket.clone()),
-        many => {
-            let mut pids: Vec<u32> = many.iter().map(|(daemon, _)| daemon.pid).collect();
-            pids.sort_unstable();
-            pids.dedup();
-            return Err(OpError::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "host {name:?} is registered live by more than one qsh listen daemon on \
-                     this machine (pids {pids:?}); routing refuses to guess which one to use"
-                ),
-            )
-            .with_details(serde_json::json!({ "pids": pids })));
-        }
-    }
-    if let Some((daemon, _)) = named
-        .iter()
-        .find(|(daemon, _)| daemon.socket.as_path() == previous)
-        .or_else(|| named.first())
-    {
-        return Ok(daemon.socket.clone());
-    }
-    Err(OpError::new(
-        ErrorCode::HostNotFound,
-        format!("no qsh listen daemon on this machine lists host {name:?} right now"),
-    )
-    .with_retryable(true))
-}
-
-/// [`pick_reverse_socket`] over the daemons found under `runtime_dir`.
-pub(crate) async fn find_reverse_socket(
-    runtime_dir: &std::path::Path,
-    name: &str,
-    previous: &std::path::Path,
-) -> Result<PathBuf, OpError> {
-    let daemons = crate::localctl::client::admin_host_list_all(runtime_dir).await;
-    pick_reverse_socket(&daemons, name, previous)
-}
-
 /// `ErrorCode::InvalidArgument` for an empty/whitespace-only (or, after
 /// [`hint_alias`] strips a `user@` prefix, empty-after-stripping) host
 /// name. One error value, every empty-alias call site in [`resolve_route`]
@@ -1227,54 +1149,18 @@ impl Ops {
     /// localctl daemon discovered on this machine, a Unix socket or a Windows
     /// named pipe (`docs/CLI.md` §6.13).
     ///
-    /// Sync wrapper around [`Self::reverse_host_entries_async`]: builds a
-    /// throwaway current-thread runtime and `block_on`s it, exactly the
-    /// way [`Self::resolve_host_route`] always has — this method is that
-    /// runtime-management, factored out so the async logic itself lives in
-    /// exactly one place.
+    /// The registrations of this machine's `qsh listen` daemons. ADR-0068
+    /// retired the daemon, so none exist and routing never sees a reverse
+    /// entry; the empty list stays until `resolve_route` drops its reverse
+    /// input with the localctl client.
     fn reverse_host_entries(&self) -> Vec<ReverseHostEntry> {
-        {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    // Never fail `host.list` over this: a runtime that
-                    // cannot even start is exactly the "one sleeping
-                    // laptop must not hide every other host" discipline
-                    // extended to "this machine's own daemons must not
-                    // hide the forward hosts" (`docs/CLI.md` §6.2).
-                    tracing::warn!(
-                        %err,
-                        "host.list: failed to start an async runtime for the reverse source; \
-                         reporting forward hosts only"
-                    );
-                    return Vec::new();
-                }
-            };
-            runtime.block_on(self.reverse_host_entries_async())
-        }
+        Vec::new()
     }
 
-    /// The truly-async half of [`Self::reverse_host_entries`] — no runtime
-    /// of its own, so it is safe to `.await` directly from inside a
-    /// caller's own runtime (see [`Self::resolve_host_route_async`]).
+    /// [`Self::reverse_host_entries`] for a caller already inside a runtime.
+    #[allow(clippy::unused_async)]
     async fn reverse_host_entries_async(&self) -> Vec<ReverseHostEntry> {
-        let runtime_dir = self.paths().runtime_dir();
-        crate::localctl::client::admin_host_list_all(&runtime_dir)
-            .await
-            .into_iter()
-            .flat_map(|daemon| {
-                let pid = daemon.pid;
-                let socket = daemon.socket;
-                daemon.hosts.into_iter().map(move |local| ReverseHostEntry {
-                    pid,
-                    socket: socket.clone(),
-                    local,
-                })
-            })
-            .collect()
+        Vec::new()
     }
 }
 

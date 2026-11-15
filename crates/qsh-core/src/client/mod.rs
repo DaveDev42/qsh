@@ -1720,9 +1720,3 @@ async fn pump_stdin(
     }
     send.send(&ExecFrame::stdin_eof()).await
 }
-
-// These tests drive `Session::from_local_control`/`open_local_data_link`
-// against a fake daemon bound to a `UnixListener`, so the whole module is
-// unix-only, rather than gating each test individually.
-#[cfg(all(test, unix))]
-mod reverse_tests;

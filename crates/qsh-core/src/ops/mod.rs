@@ -1398,8 +1398,7 @@ impl Ops {
             }
             Err(err) => return Err(err),
         };
-        let reverse_first = self.reverse_first_hop(hop_names[0].as_str());
-        let plan = self.jump_plan(&names, end_name, &address, &identity, &trust, reverse_first)?;
+        let plan = self.jump_plan(&names, end_name, &address, &identity, &trust)?;
         Ok(PeerTarget {
             identity,
             trust,
@@ -1421,7 +1420,6 @@ impl Ops {
         end_address: &str,
         identity: &LoadedIdentity,
         trust: &Arc<SharedTrustStore>,
-        reverse_first: Option<crate::jump::ReverseHop>,
     ) -> Result<Arc<crate::jump::JumpPlan>, OpError> {
         use crate::jump::{HopPin, JumpFailure, Stage};
         let store = trust.snapshot();
@@ -1440,10 +1438,7 @@ impl Ops {
                 .find(name)
                 .ok_or_else(|| missing("no pin with this name is recorded"))?;
             let address = address.unwrap_or(&pin.address);
-            // The first hop is never named in a header: a hop that registered
-            // reverse is reached through the daemon (decision 14), so it
-            // needs no address.
-            if address.is_empty() && !(index == 0 && reverse_first.is_some()) {
+            if address.is_empty() {
                 // A pin reachable only over the iroh relay route cannot be a
                 // hop of a chain (ADR-0061 decision 14).
                 if self.iroh_only_pin(name, trust) {
@@ -1467,26 +1462,7 @@ impl Ops {
         }
         let end_pin = pin_of(end, hops.len(), Some(end_address))?;
         let plan = crate::jump::JumpPlan::new(pins, end_pin, identity.identity.device_id.clone())?;
-        let plan = match reverse_first {
-            Some(route) => plan.with_reverse_first(route),
-            None => plan,
-        };
         Ok(Arc::new(plan))
-    }
-
-    /// The first hop of a chain as the local `qsh listen` daemon holds it,
-    /// when its registration is live (ADR-0056 decision 14; the same rule
-    /// that routes a plain command to a registered host,
-    /// [`Self::resolve_host_route`]). `None` for a host the daemon does not
-    /// hold, which is dialed the ordinary way.
-    fn reverse_first_hop(&self, name: &str) -> Option<crate::jump::ReverseHop> {
-        match self.resolve_host_route(name) {
-            Ok(HostRoute::Reverse { socket, .. }) => Some(crate::jump::ReverseHop {
-                host: host::lookup_name(name).to_string(),
-                socket,
-            }),
-            _ => None,
-        }
     }
 
     /// A pin with no address can still be reached by the iroh relay route

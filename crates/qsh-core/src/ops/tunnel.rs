@@ -371,11 +371,6 @@ enum ForwardResource {
     Remote {
         acceptor: RemoteForwardAcceptor,
         forward_id: String,
-        /// Reverse route only: the claim loop reports here when its
-        /// `forward_id` no longer admits claims (a `qsh tunnel close`
-        /// removed the registration out from under this holder). `None`
-        /// on the forward route, which has no such loop.
-        vanished: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     },
     /// `-D`'s own SOCKS5 listener (ADR-0019 decision 11). Symmetric with
     /// `Local` for teardown purposes (dropping it aborts its accept task —
@@ -469,7 +464,6 @@ async fn wait_for_end(
         match supervisor {
             Some(supervisor) => match supervisor.finished().await {
                 SuperviseEnd::Failed(err) => Ending::Failed(err, None),
-                SuperviseEnd::Closed => Ending::Closed,
             },
             None => {
                 let (err, cause) = conn.wait_dead_with_cause().await;
@@ -484,29 +478,6 @@ async fn wait_for_end(
                     ErrorCode::ConnectionFailed,
                     format!("the local forward's listener failed: {err}"),
                 ), None),
-                ended = carrier_end => ended,
-            }
-        }
-        ForwardResource::Remote {
-            vanished: Some(vanished),
-            ..
-        } => {
-            // An unsupervised reverse `-R` whose registration an operator
-            // closed (`qsh tunnel close`): its claim loop would otherwise
-            // retry a forward_id the daemon no longer knows forever.
-            // Either that or a registration swap ends the holder; the
-            // `LOCAL_CONTROL` conduit ending says the same through
-            // `carrier_end`, so whichever is seen first wins.
-            tokio::select! {
-                forward_id = vanished.recv() => match forward_id {
-                    Some(_) => Ending::Failed(OpError::new(
-                        ErrorCode::ConnectionFailed,
-                        "the tunnel was closed: its registration is gone from the daemon \
-                         (qsh tunnel close, or the host re-registered)",
-                    ), None),
-                    // The loop's sender is gone; only the carrier can end this.
-                    None => std::future::pending().await,
-                },
                 ended = carrier_end => ended,
             }
         }
@@ -527,8 +498,6 @@ async fn wait_for_end(
 enum Ending {
     /// On its own, with this error and the diagnostic cause when known.
     Failed(OpError, Option<&'static str>),
-    /// An operator closed it (ADR-0023 decision 14): a deliberate end.
-    Closed,
 }
 
 impl Ending {
@@ -536,10 +505,6 @@ impl Ending {
     fn into_error(self) -> OpError {
         match self {
             Ending::Failed(err, _) => err,
-            Ending::Closed => OpError::new(
-                ErrorCode::ConnectionFailed,
-                "the tunnel was closed by an operator",
-            ),
         }
     }
 }
@@ -627,11 +592,10 @@ impl TunnelHold {
             let conn = &mut self.conn;
             handle.block_on(wait_for_end(forward, supervisor, conn))
         };
-        if let Ending::Failed(err, cause) = &ending {
-            ids.ended(err, *cause);
-        }
+        let Ending::Failed(err, cause) = ending;
+        ids.ended(&err, cause);
         self.close();
-        ending.into_error()
+        err
     }
 
     /// The runtime this tunnel runs on. A frontend that must be ready for a
@@ -667,10 +631,7 @@ impl TunnelHold {
             ids.ended(err, *cause);
         }
         self.close();
-        match outcome {
-            Some(Ending::Failed(err, _)) => Some(err),
-            Some(Ending::Closed) | None => None,
-        }
+        outcome.map(|Ending::Failed(err, _)| err)
     }
 
     /// Like [`Self::hold`], but also returns early — a deliberate close,
@@ -788,7 +749,6 @@ impl Ops {
             },
         )?;
         let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
-        let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
         let liveness = self.liveness()?;
         let (conn, seed) = self.connect_with_wait(&req.host, wait_budget_ms, liveness.tuning())?;
         let supervision =
@@ -805,7 +765,7 @@ impl Ops {
         }
         match conn.connection() {
             Some(connection) => Self::tunnel_open_forward(conn, connection, &spec, &req.host),
-            None => Self::tunnel_open_reverse(conn, &spec, &req.host),
+            None => Err(retired_reverse_connection(conn)),
         }
     }
 
@@ -831,7 +791,6 @@ impl Ops {
         };
         Ok(Some(Supervision {
             seed,
-            runtime_dir: self.paths().runtime_dir(),
             fingerprint,
             total: Duration::from_millis(u64::from(ms)),
             accept_hold: accept_hold_ms
@@ -869,39 +828,6 @@ impl Ops {
         retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || {
             self.connect_keeping_target(host, tuning)
         })
-    }
-
-    /// Cap a wait budget at this machine's own effective
-    /// `[listen].stale_retention` (`docs/design/protocol.md` §11-4, issue
-    /// #4 item 5a) — [`WAIT_MS_MAX`]'s own `0..=600_000` bound is a wire-
-    /// level sanity check, not a promise that the whole range stays
-    /// retryable: once `stale_retention` elapses,
-    /// `Registry::sweep_expired` (`crates/qsh-core/src/reverse/registry.rs`)
-    /// removes the registry entry outright, and the next resolution falls
-    /// through to a non-retryable "not configured" `HOST_NOT_FOUND`
-    /// (`ops::host::unconfigured_host_not_found`) that
-    /// [`is_stale_registration`] no longer recognizes. Left uncapped, a
-    /// `--wait` past that window would silently stop being retryable
-    /// partway through — contradicting `docs/CLI.md` §6.9's "예산이 다
-    /// 떨어지면 마지막 시도가 낸 것과 같은 retryable `HOST_NOT_FOUND`를
-    /// 그대로 돌려준다" promise. Capping here keeps `retry_while_stale`
-    /// from ever running past the point where a stale error could still
-    /// occur, so its own expiry branch always returns one.
-    ///
-    /// Same best-effort/infallible-on-config-error shape as
-    /// [`host::Ops::stale_retry_after_ms`](super::host)'s own doc: a
-    /// malformed local `config.toml` must not turn this bound into a hard
-    /// routing failure, so any load/validation error falls back to the
-    /// compiled-in default ([`crate::config::ListenConfig::
-    /// DEFAULT_STALE_RETENTION_SECS`], 120 s) instead of propagating.
-    fn cap_wait_budget_to_stale_retention(&self, wait_budget_ms: u64) -> u64 {
-        let retention_ms = self
-            .config()
-            .ok()
-            .and_then(|config| config.stale_retention().ok())
-            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-            .unwrap_or(crate::config::ListenConfig::DEFAULT_STALE_RETENTION_SECS * 1_000);
-        wait_budget_ms.min(retention_ms)
     }
 
     /// Forward route: dial the peer's QUIC connection directly — exactly
@@ -952,110 +878,6 @@ impl Ops {
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
-                        vanished: None,
-                    },
-                    tunnel: TunnelDto::Forward(tunnel),
-                })
-            }
-        }
-    }
-
-    /// Reverse route (M4 plan Step 5 (2473c88) PR 5b): relay through this
-    /// machine's resident `qsh listen` daemon over the `LOCAL_STREAM`
-    /// conduit instead of a QUIC connection this process does not hold.
-    /// `"local"` mode: `LocalForwardHandle::start_reverse` — each
-    /// forwarded TCP connection opens its own `TCP_CONNECT`-carrying
-    /// `LOCAL_STREAM` conduit, same as the forward route's per-connection
-    /// stream, just relayed. `"remote"` mode:
-    /// `RemoteForwardAcceptor::spawn_reverse` mints this holder's own
-    /// claim token *before* `RemoteForwardOpen` is sent — the daemon seats
-    /// whatever `claim_token` that request carries as the only credential
-    /// that may ever claim the resulting `forward_id`'s `TCP_ACCEPTED`
-    /// arrivals (`crate::reverse::listen::ForwardRegistration`'s own doc;
-    /// [`remote_forward_open_from_spec`]'s forward-route build leaves this
-    /// field empty on purpose, so it is overwritten here, never reused).
-    ///
-    /// `conn.connection()` returning `None` is the reverse route on every
-    /// platform: localctl is a Unix socket or a Windows named pipe
-    /// (`crate::localctl::transport`), and `Ops::resolve_route` produces a
-    /// reverse route on both.
-    fn tunnel_open_reverse(
-        mut conn: Connected,
-        spec: &ForwardSpec,
-        host: &str,
-    ) -> Result<TunnelHold, OpError> {
-        let Some((socket, route_host)) = conn.reverse_route() else {
-            conn.close();
-            return Err(OpError::new(
-                ErrorCode::Internal,
-                "reverse connection is missing its localctl route",
-            ));
-        };
-        let socket = socket.to_path_buf();
-        let route_host = route_host.to_string();
-        match spec.direction {
-            ForwardDirection::Local => {
-                let forward = match conn
-                    .runtime()
-                    .block_on(LocalForwardHandle::start_reverse(spec, socket, route_host))
-                {
-                    Ok(forward) => forward,
-                    Err(err) => {
-                        conn.close();
-                        return Err(map_local_forward_error(err));
-                    }
-                };
-                let tunnel = forward.tunnel(host);
-                Ok(TunnelHold {
-                    conn,
-                    supervisor: None,
-                    forward: ForwardResource::Local(forward),
-                    tunnel: TunnelDto::Forward(tunnel),
-                })
-            }
-            ForwardDirection::Remote => {
-                let (vanished_tx, vanished_rx) = tokio::sync::mpsc::unbounded_channel();
-                let acceptor =
-                    conn.runtime()
-                        .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
-                            socket,
-                            route_host,
-                            Some(vanished_tx),
-                        ));
-                let claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
-                let mut open_req = remote_forward_open_from_spec(spec);
-                open_req.claim_token = claim_token;
-                let opened = match conn.run(move |s| Box::pin(s.rfwd_open(open_req))) {
-                    Ok(opened) => opened,
-                    Err(err) => {
-                        conn.close();
-                        return Err(err);
-                    }
-                };
-                // Reverse-route `register()` starts this `forward_id`'s
-                // claim loop via a bare `tokio::spawn`
-                // ([`RemoteForwardAcceptor::register`]'s own doc), which
-                // panics ("no reactor running") unless called from inside
-                // an entered Tokio runtime. `qsh-cli`'s `fn main()` is
-                // plain synchronous -- there is no ambient runtime on this
-                // thread outside a `block_on` call -- so this must be
-                // driven through `conn.runtime()` exactly like
-                // `spawn_reverse` a few lines above
-                // ([`RemoteForwardAcceptor::spawn`]'s own doc names the
-                // exact failure mode this call site reproduced until this
-                // fix: "the `qsh-cli` `tunnel_e2e` L5 suite panicking with
-                // 'no reactor running'").
-                conn.runtime().block_on(async {
-                    acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
-                });
-                let tunnel = remote_tunnel_dto(spec, &opened, host);
-                Ok(TunnelHold {
-                    conn,
-                    supervisor: None,
-                    forward: ForwardResource::Remote {
-                        acceptor,
-                        forward_id: opened.forward_id,
-                        vanished: Some(vanished_rx),
                     },
                     tunnel: TunnelDto::Forward(tunnel),
                 })
@@ -1209,7 +1031,7 @@ impl Ops {
             Some(connection) => {
                 Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host)
             }
-            None => Self::tunnel_dynamic_reverse(conn, bind, listen_port, host),
+            None => Err(retired_reverse_connection(conn)),
         }
     }
 
@@ -1227,51 +1049,6 @@ impl Ops {
             bind,
             listen_port,
             connection,
-        )) {
-            Ok(forward) => forward,
-            Err(err) => {
-                conn.close();
-                return Err(map_local_forward_error(err));
-            }
-        };
-        let tunnel = forward.dynamic_tunnel(host);
-        Ok(TunnelHold {
-            conn,
-            supervisor: None,
-            forward: ForwardResource::Dynamic(forward),
-            tunnel: TunnelDto::Dynamic(tunnel),
-        })
-    }
-
-    /// Reverse route (ADR-0020 decision 1): relay through this machine's
-    /// resident `qsh listen` daemon over the `LOCAL_STREAM` conduit
-    /// instead of a QUIC connection this process does not hold — same
-    /// shape as [`Self::tunnel_open_reverse`]'s `"local"` mode, just with
-    /// [`DynamicForwardHandle::start_reverse`] in place of
-    /// `LocalForwardHandle::start_reverse`.
-    ///
-    /// `conn.connection()` returning `None` is the reverse route on every
-    /// platform, same as [`Self::tunnel_open_reverse`].
-    fn tunnel_dynamic_reverse(
-        conn: Connected,
-        bind: Option<&str>,
-        listen_port: u16,
-        host: &str,
-    ) -> Result<TunnelHold, OpError> {
-        let Some((socket, route_host)) = conn.reverse_route() else {
-            conn.close();
-            return Err(OpError::new(
-                ErrorCode::Internal,
-                "reverse connection is missing its localctl route",
-            ));
-        };
-        let socket = socket.to_path_buf();
-        let route_host = route_host.to_string();
-        let forward = match conn.runtime().block_on(DynamicForwardHandle::start_reverse(
-            bind,
-            listen_port,
-            socket,
-            route_host,
         )) {
             Ok(forward) => forward,
             Err(err) => {
@@ -1489,14 +1266,23 @@ impl Ops {
     }
 }
 
+/// A `Connected` that holds no QUIC connection is a localctl route to a
+/// `qsh listen` daemon, which ADR-0068 retired and `resolve_route` no longer
+/// produces. Close it and say so.
+fn retired_reverse_connection(conn: Connected) -> OpError {
+    conn.close();
+    OpError::new(
+        ErrorCode::Unsupported,
+        "reverse connections were retired in v0.9.0 (ADR-0068)",
+    )
+    .with_details(serde_json::json!({ "reason": crate::retired::REASON }))
+}
+
 /// What a supervised open carries over from the first connection
 /// (ADR-0023 decisions 4 and 7).
 struct Supervision {
     /// What the first open learned about how to find the carrier again.
     seed: RouteSeed,
-    /// Where `qsh listen` daemons leave their sockets; the reverse route
-    /// asks them again from here.
-    runtime_dir: std::path::PathBuf,
     /// The fingerprint the first open verified.
     fingerprint: String,
     /// The disconnection budget.
@@ -1527,15 +1313,13 @@ impl Ops {
     ) -> Result<TunnelHold, OpError> {
         let Supervision {
             seed,
-            runtime_dir,
             fingerprint,
             total,
             accept_hold,
             recovery,
             tuning,
         } = supervision;
-        let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
-        {
+        let parts = match Self::supervision_parts(&mut conn, seed) {
             Ok(parts) => parts,
             Err(err) => {
                 conn.close();
@@ -1590,7 +1374,6 @@ impl Ops {
     ) -> Result<TunnelHold, OpError> {
         let Supervision {
             seed,
-            runtime_dir,
             fingerprint,
             total,
             accept_hold: _,
@@ -1598,15 +1381,14 @@ impl Ops {
             tuning,
         } = supervision;
         // The first open is the unsupervised one, step for step.
-        let (acceptor, open, opened, vanished) = match Self::open_remote(&mut conn, spec) {
+        let (acceptor, open, opened) = match Self::open_remote(&mut conn, spec) {
             Ok(opened) => opened,
             Err(err) => {
                 conn.close();
                 return Err(err);
             }
         };
-        let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
-        {
+        let parts = match Self::supervision_parts(&mut conn, seed) {
             Ok(parts) => parts,
             Err(err) => {
                 conn.close();
@@ -1614,7 +1396,7 @@ impl Ops {
             }
         };
         let tunnel = remote_tunnel_dto(spec, &opened, host);
-        let (remote, handle) = supervise::RemoteTunnel::new(acceptor, open, &opened, vanished);
+        let (remote, handle) = supervise::RemoteTunnel::new(acceptor, open, &opened);
         let task = conn.runtime().block_on(async {
             let wiring = supervise::Wiring::new(parts.initial, &recovery, None);
             supervise::spawn(
@@ -1641,12 +1423,9 @@ impl Ops {
         })
     }
 
-    /// The first `RemoteForwardOpen` of a supervised `-R` tunnel, on
-    /// whichever route `conn` rides. Returns the acceptor serving the new
-    /// registration, the request as sent, the peer's answer, and, on the
-    /// reverse route, the channel that reports forwards the daemon no
-    /// longer lists.
-    #[allow(clippy::type_complexity)]
+    /// The first `RemoteForwardOpen` of a supervised `-R` tunnel. Returns
+    /// the acceptor serving the new registration, the request as sent and
+    /// the peer's answer.
     fn open_remote(
         conn: &mut Connected,
         spec: &ForwardSpec,
@@ -1655,45 +1434,24 @@ impl Ops {
             RemoteForwardAcceptor,
             wire::RemoteForwardOpen,
             wire::RemoteForwardOpened,
-            Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
         ),
         OpError,
     > {
-        let mut open_req = remote_forward_open_from_spec(spec);
-        let mut vanished = None;
-        let acceptor = match conn.connection() {
-            Some(connection) => conn
-                .runtime()
-                .block_on(RemoteForwardAcceptor::spawn(connection)),
-            None => {
-                let Some((socket, route_host)) = conn.reverse_route() else {
-                    return Err(OpError::new(
-                        ErrorCode::Internal,
-                        "reverse connection is missing its localctl route",
-                    ));
-                };
-                let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                vanished = Some(rx);
-                let acceptor =
-                    conn.runtime()
-                        .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
-                            socket,
-                            route_host,
-                            Some(tx),
-                        ));
-                open_req.claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
-                acceptor
-            }
+        let open_req = remote_forward_open_from_spec(spec);
+        let Some(connection) = conn.connection() else {
+            return Err(OpError::new(
+                ErrorCode::Unsupported,
+                "reverse connections were retired in v0.9.0 (ADR-0068)",
+            )
+            .with_details(serde_json::json!({ "reason": crate::retired::REASON })));
         };
+        let acceptor = conn
+            .runtime()
+            .block_on(RemoteForwardAcceptor::spawn(connection));
         let sent = open_req.clone();
         let opened = conn.run(move |s| Box::pin(s.rfwd_open(open_req)))?;
-        // The reverse route starts this id's claim loop with a bare
-        // `tokio::spawn`, which needs a runtime around it.
-        conn.runtime().block_on(async {
-            acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
-        });
-        Ok((acceptor, sent, opened, vanished))
+        acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
+        Ok((acceptor, sent, opened))
     }
 
     /// `-D` with `--supervise`; see [`Self::supervised_local`].
@@ -1706,15 +1464,13 @@ impl Ops {
     ) -> Result<TunnelHold, OpError> {
         let Supervision {
             seed,
-            runtime_dir,
             fingerprint,
             total,
             accept_hold,
             recovery,
             tuning,
         } = supervision;
-        let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
-        {
+        let parts = match Self::supervision_parts(&mut conn, seed) {
             Ok(parts) => parts,
             Err(err) => {
                 conn.close();
@@ -1764,47 +1520,17 @@ impl Ops {
     fn supervision_parts(
         conn: &mut Connected,
         seed: RouteSeed,
-        runtime_dir: &std::path::Path,
-        fingerprint: &str,
-        alias: &str,
     ) -> Result<SupervisionParts, OpError> {
         let internal = || OpError::new(ErrorCode::Internal, "the connection is not supervisable");
-        match seed {
-            RouteSeed::Forward(target) => {
-                let link = conn.forward_link().ok_or_else(internal)?;
-                let session = conn.take_session().ok_or_else(internal)?;
-                let initial = ForwardCarrier::Direct(link.connection());
-                Ok(SupervisionParts {
-                    session,
-                    route: supervise::Route::Forward { target, link },
-                    initial,
-                })
-            }
-            RouteSeed::Reverse { generation } => {
-                let (socket, route_host) = conn.reverse_route().ok_or_else(internal)?;
-                let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
-                let session = conn.take_session().ok_or_else(internal)?;
-                let initial = ForwardCarrier::Local {
-                    socket: socket.clone(),
-                    host: route_host.clone(),
-                    expect: Some(crate::localctl::client::ExpectedPeer {
-                        fingerprint: fingerprint.to_string(),
-                        generation: Some(generation),
-                    }),
-                };
-                Ok(SupervisionParts {
-                    session,
-                    route: supervise::Route::Reverse(supervise::ReverseRoute {
-                        alias: alias.to_string(),
-                        host: route_host,
-                        runtime_dir: runtime_dir.to_path_buf(),
-                        socket,
-                        generation,
-                    }),
-                    initial,
-                })
-            }
-        }
+        let RouteSeed::Forward(target) = seed;
+        let link = conn.forward_link().ok_or_else(internal)?;
+        let session = conn.take_session().ok_or_else(internal)?;
+        let initial = ForwardCarrier::Direct(link.connection());
+        Ok(SupervisionParts {
+            session,
+            route: supervise::Route { target, link },
+            initial,
+        })
     }
 }
 

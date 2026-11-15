@@ -5,7 +5,7 @@
 //! is as it was before the iroh route existed: no endpoint, no extra socket
 //! and no contact with any relay. A host given `Some` binds an
 //! [`IrohEndpoint`] on its own identity and attaches it to its accept loop
-//! ([`crate::server::Server::set_iroh`], [`crate::reverse::listen::Listen::set_iroh`]).
+//! ([`crate::server::Server::set_iroh`]).
 //! Connections that arrive through it join the pipeline QUIC connections
 //! use, unchanged from the handshake on: the pin check, role, ACL, audit,
 //! quotas, session broker, exec, tunnels and files do not know which

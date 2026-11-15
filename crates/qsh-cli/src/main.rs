@@ -220,16 +220,6 @@ fn init_tracing(cli: &Cli) {
     // `-v` says, because §6.4 fixes the record as visible at *default*
     // verbosity. An explicit spec governs it like anything else.
     let recovery_default = format!("{default},{}=info", qsh_core::telemetry::TARGET);
-    // `qsh listen`'s registration diagnostics (`registered`/`denied`/
-    // `replaced`/`lost`, `docs/CLI.md` §6.13) are the exact same shape of
-    // promise as the recovery record above — a one-line JSON record an
-    // operator/campaign script must see at *default* verbosity, never
-    // wrapped in the human formatter's timestamp/level prefix (adversarial
-    // review: at `warn` default the line was invisible outright; at `-v`
-    // it came out doubled and non-JSON, because both layers reused the
-    // same `human` filter/formatter that this constant now special-cases).
-    let reverse_target = qsh_core::reverse::listen::TARGET;
-    let reverse_default = format!("{default},{reverse_target}=info");
     // Target `qsh::tunnel::supervise`. `--supervise`'s `lost`/`retry`/`reestablished`/`gave_up`/`wake` lines
     // (`docs/CLI.md` §6.14, ADR-0023 decision 12) follow the same promise:
     // one-line JSON, visible at default verbosity, off under `--quiet`.
@@ -266,7 +256,6 @@ fn init_tracing(cli: &Cli) {
         .with_filter(env_filter(spec, default))
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             meta.target() != qsh_core::telemetry::TARGET
-                && meta.target() != qsh_core::reverse::listen::TARGET
                 && meta.target() != qsh_core::tunnel::supervise::TARGET
                 && meta.target() != qsh_core::lifecycle::TARGET
                 && meta.target() != adapt_target
@@ -278,12 +267,6 @@ fn init_tracing(cli: &Cli) {
         .with_filter(env_filter(spec, &recovery_default))
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
-        }));
-    let reverse_enabled = !cli.quiet;
-    let reverse = RecoveryLayer(StderrLines)
-        .with_filter(env_filter(spec, &reverse_default))
-        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
-            reverse_enabled && meta.target() == reverse_target
         }));
     let supervise_enabled = !cli.quiet;
     let supervise = RecoveryLayer(StderrLines)
@@ -321,7 +304,6 @@ fn init_tracing(cli: &Cli) {
         .with(predict)
         .with(punch)
         .with(recovery)
-        .with(reverse)
         .with(supervise)
         .with(lifecycle)
         .init();

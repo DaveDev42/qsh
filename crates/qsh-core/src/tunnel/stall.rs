@@ -46,19 +46,6 @@
 //! The ledger holds byte *counts* and timestamps only — there is no field a
 //! payload byte could be put in (`crate::tunnel::splice`'s module doc).
 //!
-//! **A second reader of the same counters: traffic hooks.** Every byte a
-//! tunnel splice moves, on either end and through the `localctl` relay
-//! alike, is reported through a [`StreamTrack`], which makes it the one
-//! place that sees tunnel traffic on a connection whose control stream is
-//! quiet. A reverse registration's path watch needs exactly that: it holds
-//! the fast probe cadence only while the registration is *in use*
-//! (`PathWatchConfig::active_window`), and a registration that carries
-//! nothing but tunnels sends no control message the watch could count
-//! (ADR-0041 decision 6). [`report_traffic`] registers a hook for one
-//! connection; the tracks created on that connection call it whenever a
-//! pump moves bytes. The hook carries no payload and no count, only "bytes
-//! moved".
-//!
 //! [`pump`]: crate::tunnel::splice::pump
 
 use std::collections::HashMap;
@@ -170,22 +157,12 @@ pub(crate) struct StreamTrack {
     received: AtomicU64,
     evicted: AtomicBool,
     notify: Notify,
-    /// The connection's [`report_traffic`] hook as of this stream's start.
-    traffic: Option<TrafficHook>,
     /// The connection's bulk governor (ADR-0052 decision 12 (a)): what the
     /// send-direction pump asks before it writes.
     governor: Arc<crate::adapt::BulkGovernor>,
 }
 
 impl StreamTrack {
-    fn note_traffic(&self, n: usize) {
-        if n > 0
-            && let Some(hook) = &self.traffic
-        {
-            hook();
-        }
-    }
-
     fn stamp(&self, at: Instant) -> u64 {
         let micros = at.saturating_duration_since(self.epoch).as_micros();
         u64::try_from(micros).unwrap_or(u64::MAX - 1) + 1
@@ -201,7 +178,6 @@ impl StreamTrack {
     pub(crate) fn leave_write(&self, n: usize) {
         self.write_entered.store(0, Ordering::Relaxed);
         self.received.fetch_add(n as u64, Ordering::Relaxed);
-        self.note_traffic(n);
     }
 
     /// Wait until the connection's bulk budget lets `n` more bytes out
@@ -221,7 +197,6 @@ impl StreamTrack {
     /// only — that direction never stalls the connection's receive window).
     pub(crate) fn count_sent(&self, n: usize) {
         self.sent.fetch_add(n as u64, Ordering::Relaxed);
-        self.note_traffic(n);
     }
 
     /// When the current local write began, if the pump is inside one.
@@ -268,58 +243,6 @@ pub(crate) struct StallLedger {
 }
 
 type Registry = Mutex<HashMap<usize, Weak<StallLedger>>>;
-
-/// Called when a tunnel stream on a connection moves bytes. Cheap enough to
-/// run per chunk (a path watch takes one short mutex), and never given the
-/// bytes.
-pub(crate) type TrafficHook = Arc<dyn Fn() + Send + Sync>;
-
-type TrafficHooks = Mutex<HashMap<usize, TrafficHook>>;
-
-fn traffic_hooks() -> &'static TrafficHooks {
-    static HOOKS: OnceLock<TrafficHooks> = OnceLock::new();
-    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Report the tunnel traffic of `conn` to `hook` for as long as the returned
-/// guard lives. One hook per connection: a second registration on the same
-/// connection replaces the first, and the first's guard then leaves the
-/// second's entry alone.
-///
-/// Keyed by `stable_id` like the ledger registry. The guard removes the
-/// entry, so a hook never outlives the registration that owns it and the id
-/// of a closed connection is not left behind.
-pub(crate) fn report_traffic(conn: &qsh_transport::Connection, hook: TrafficHook) -> TrafficGuard {
-    let id = conn.stable_id();
-    let token = Arc::as_ptr(&hook).cast::<()>() as usize;
-    lock(traffic_hooks()).insert(id, hook);
-    TrafficGuard { id, token }
-}
-
-/// See [`report_traffic`].
-#[must_use = "dropping the guard stops the reporting"]
-pub(crate) struct TrafficGuard {
-    id: usize,
-    /// Address of the hook this guard installed, so a replaced entry is not
-    /// removed by the guard it replaced.
-    token: usize,
-}
-
-impl Drop for TrafficGuard {
-    fn drop(&mut self) {
-        let mut hooks = lock(traffic_hooks());
-        if hooks
-            .get(&self.id)
-            .is_some_and(|hook| Arc::as_ptr(hook).cast::<()>() as usize == self.token)
-        {
-            hooks.remove(&self.id);
-        }
-    }
-}
-
-fn traffic_hook_for(conn: &qsh_transport::Connection) -> Option<TrafficHook> {
-    lock(traffic_hooks()).get(&conn.stable_id()).cloned()
-}
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
@@ -386,7 +309,6 @@ impl StallLedger {
             received: AtomicU64::new(0),
             evicted: AtomicBool::new(false),
             notify: Notify::new(),
-            traffic: traffic_hook_for(&self.conn),
             governor: crate::adapt::BulkGovernor::for_connection(&self.conn),
         });
         state.tracks.insert(id, Arc::clone(&track));

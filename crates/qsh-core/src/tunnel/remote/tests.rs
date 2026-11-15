@@ -5,39 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 use crate::tunnel::testutil::{ScriptedResolver, addr, loopback_pair};
 
-// ---- timeout_needs_backoff: the busy-loop guard (adversarial-review
-// finding — `qsh tunnel close` on a still-claimed reverse forward left
-// its claim loop spinning with no backoff at all) ------------------
-
-/// The regression this whole function exists for: a `Timeout` that
-/// came back in well under the ~60s wait budget cannot have genuinely
-/// waited it out — `claim_tcp_accepted` only returns that fast when
-/// `admits_claim` was already `false` before the first `.await`
-/// (registration removed out from under this loop, e.g. by
-/// `ControlHub::admin_close_forward`). Before this fix, every
-/// `Timeout` retried instantly regardless — this is the exact
-/// condition (`elapsed` near zero) that turned into an unbounded hot
-/// spin.
-#[test]
-fn a_near_instant_timeout_needs_backoff() {
-    assert!(
-        timeout_needs_backoff(Duration::from_millis(0)),
-        "a Timeout with ~0 elapsed is the fast-path (unregistered) case and must back off"
-    );
-    assert!(timeout_needs_backoff(Duration::from_millis(5)));
-    assert!(timeout_needs_backoff(Duration::from_millis(500)));
-}
-
-/// The ordinary case must be left alone: a `Timeout` that actually
-/// spent close to the real ~60s wait budget is the long-poll draining
-/// normally, and retrying at once *is* the wait — backing it off too
-/// would silently slow down every healthy `-R`'s throughput.
-#[test]
-fn a_genuine_long_poll_timeout_does_not_need_backoff() {
-    assert!(!timeout_needs_backoff(FAST_TIMEOUT_THRESHOLD));
-    assert!(!timeout_needs_backoff(Duration::from_secs(60)));
-}
-
 // ---- all_loopback: the pure fold, network-free -------------------
 
 #[test]
@@ -303,76 +270,6 @@ fn not_loopback_displays_the_three_part_notice() {
         NotLoopback.to_string(),
         REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE,
         "NotLoopback::Display must stay defined in terms of the shared constant"
-    );
-}
-
-// ---- claim_remote_forward_reverse cancel-safety (finding C) -------
-
-/// **The primitive [`claim_remote_forward_reverse`]'s `select!` relies
-/// on for cancel-safety, pinned directly.** Its loop races
-/// `&mut claim_handle` (a [`tokio::task::JoinHandle`] naming a
-/// *detached* [`spawn_claim_attempt`] task) against
-/// `tasks.0.join_next()`; when a splice finishes at the same moment a
-/// claim is in flight and the `join_next()` branch wins, `select!`
-/// only stops polling `claim_handle` for that iteration — it does not
-/// drop the task the handle names, because that task was already
-/// spawned onto the runtime independently of whether anything ever
-/// polls its handle again.
-///
-/// This test reproduces exactly that shape without any real daemon or
-/// QUIC connection: a task is spawned (the fix's shape) and its
-/// handle is raced, every iteration, against an *already-ready*
-/// sibling future — the sibling always wins, so the handle's branch
-/// never completes inside the loop, mirroring a claim that keeps
-/// losing to a splice's `join_next()` resolving first. The spawned
-/// task must still deliver its result afterward regardless.
-///
-/// **Mutation-check target:** replace the `tokio::spawn(...)` below
-/// with the bare, un-spawned future awaited directly as the `select!`
-/// arm — the exact shape `claim_remote_forward_reverse` used before
-/// `spawn_claim_attempt` existed. Polled directly rather than merely
-/// referenced, that future is what `select!` actually drops when the
-/// sibling branch wins, so `tx.send(())` never runs and the
-/// `timeout(...)` below fires instead of returning the sent value —
-/// this is precisely the finding: an in-flight, already-granted claim
-/// destroyed with no trace by an unrelated branch completing.
-#[tokio::test]
-async fn a_detached_claim_task_survives_losing_its_select_branch_every_time() {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut handle = tokio::spawn(async move {
-        // Stands in for the real claim's `open_stream_with_wait`
-        // eventually resolving with a granted arrival — long enough
-        // that every iteration of the loop below observes it as not
-        // yet ready, so the already-ready sibling wins every single
-        // race, never once by chance yielding to `handle` instead.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = tx.send(());
-    });
-    for _ in 0..20 {
-        tokio::select! {
-            _joined = &mut handle => {
-                panic!(
-                    "the already-ready sibling must win every iteration of this loop; \
-                     the claim handle becoming ready here defeats the scenario"
-                );
-            }
-            _ = std::future::ready(()) => {
-                // The unrelated branch — standing in for a splice's
-                // `tasks.join_next()` resolving — always wins. Under
-                // the fix, this must not disturb the detached task
-                // `handle` names at all.
-            }
-        }
-    }
-    let delivered = tokio::time::timeout(Duration::from_secs(2), rx).await;
-    assert!(
-        delivered.is_ok(),
-        "the detached claim task must still complete even though its select! branch lost \
-         every race — a timeout here means the task was effectively cancelled"
-    );
-    assert!(
-        delivered.unwrap().is_ok(),
-        "the task must have actually sent its result, not merely been dropped without a panic"
     );
 }
 
@@ -1100,46 +997,4 @@ async fn remote_forward_accept_past_the_per_principal_stream_cap_is_refused_on_t
     held.lock().unwrap_or_else(|e| e.into_inner()).clear();
     serve_task.abort();
     accept_task.abort();
-}
-
-/// A claim loop aborted while it sleeps out the retry backoff (the holder
-/// dropping its acceptor right after `vanished` fired) must not make
-/// [`DrainClaimAttemptOnDrop`]'s reaper poll the already-resolved
-/// `JoinHandle` again — tokio panics with "JoinHandle polled after
-/// completion" on a worker thread, which no test outcome would otherwise
-/// show. A panic hook counts it; nextest gives this test its own process.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn aborting_a_claim_loop_during_its_retry_backoff_does_not_repoll_a_resolved_handle() {
-    let panics = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let previous = std::panic::take_hook();
-    let seen = Arc::clone(&panics);
-    std::panic::set_hook(Box::new(move |_| {
-        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }));
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    // No daemon behind this path: every attempt fails fast with a
-    // non-Timeout error, so the loop goes straight into its backoff sleep.
-    let task = tokio::spawn(claim_remote_forward_reverse(
-        dir.path().join("missing.sock"),
-        "daemon".to_string(),
-        "fwd".to_string(),
-        vec![1, 2, 3],
-        "127.0.0.1".to_string(),
-        1,
-        None,
-    ));
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert!(!task.is_finished(), "the loop only ends by abort");
-    task.abort();
-    let _ = task.await;
-    // Let the Drop reaper run to completion.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    std::panic::set_hook(previous);
-    assert_eq!(
-        panics.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "the drop reaper polled a JoinHandle that had already completed"
-    );
 }

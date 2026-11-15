@@ -1388,78 +1388,6 @@ fn tunnel_dynamic_non_loopback_bind_is_invalid_argument_before_connect() {
     assert_eq!(err.code, ErrorCode::InvalidArgument);
 }
 
-#[cfg(unix)]
-fn sample_local_host(name: &str) -> qsh_proto::local::LocalHost {
-    qsh_proto::local::LocalHost {
-        name: name.to_string(),
-        address: "203.0.113.5:51820".to_string(),
-        state: "reachable".to_string(),
-        fingerprint: qsh_transport::Fingerprint::of_spki_der(b"reverse-peer").to_string(),
-        capabilities: vec!["pty".to_string()],
-        generation: 1,
-        registered_at: "2026-08-22T00:00:00Z".to_string(),
-        lost_at: None,
-    }
-}
-
-/// Bind a one-shot fake `LOCAL_ADMIN` daemon at `<pid>.sock` under
-/// `runtime_dir`, answering exactly one `LocalHostList` with `hosts`,
-/// on its own OS thread with its own runtime — see this section's own
-/// header for why it cannot share the test's thread/runtime.
-#[cfg(unix)]
-fn spawn_fake_admin_daemon_thread(
-    runtime_dir: &std::path::Path,
-    pid: u32,
-    hosts: Vec<qsh_proto::local::LocalHost>,
-) -> std::thread::JoinHandle<()> {
-    std::fs::create_dir_all(runtime_dir).unwrap();
-    let sock = runtime_dir.join(format!("{pid}.sock"));
-    // Bind synchronously, on the caller's thread, before handing off:
-    // `resolve_route` must never race the socket file into existence.
-    let std_listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-    std_listener.set_nonblocking(true).unwrap();
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async move {
-            let listener = tokio::net::UnixListener::from_std(std_listener).unwrap();
-            let (stream, _addr) = listener.accept().await.unwrap();
-            let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
-            let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
-            let _req: qsh_proto::local::LocalHostList = conduit.recv().await.unwrap().unwrap();
-            conduit
-                .send(&qsh_proto::local::LocalResponse {
-                    body: Some(qsh_proto::local::local_response::Body::HostListResult(
-                        qsh_proto::local::LocalHostListResult { hosts },
-                    )),
-                })
-                .await
-                .unwrap();
-        });
-    })
-}
-
-#[test]
-#[cfg(unix)]
-fn resolve_route_reverse_returns_the_local_route_to_the_live_daemon() {
-    let dir = tempfile::tempdir().unwrap();
-    let ops = resolve_route_ops(dir.path());
-    let runtime_dir = ops.paths().runtime_dir();
-    let daemon =
-        spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
-
-    match ops.resolve_route("phone").unwrap() {
-        PeerRoute::Reverse(route) => {
-            assert_eq!(route.host, "phone");
-            assert_eq!(route.socket, runtime_dir.join("100.sock"));
-        }
-        PeerRoute::Forward(_) => panic!("expected a reverse route"),
-    }
-    daemon.join().unwrap();
-}
-
 // `tunnel_dynamic_on_reverse_route_is_unsupported_before_connect` used to
 // live here, pinning ADR-0019 decision 10's forward-only restriction on
 // `-D`: a reverse route was refused with `UNSUPPORTED` strictly before
@@ -1472,53 +1400,7 @@ fn resolve_route_reverse_returns_the_local_route_to_the_live_daemon() {
 // daemon answers only `LocalHostList` (`spawn_fake_admin_daemon_thread`'s
 // own doc) and cannot play the `LOCAL_CONTROL` handshake side of a real
 // connect, so there is no cheap way to keep a same-shaped test here — the
-// full round trip is `crates/qsh-testkit`'s `ReverseHarness` job instead.
-
-#[test]
-#[cfg(unix)]
-fn resolve_route_reverse_prefers_the_live_daemon_over_a_forward_pin() {
-    let dir = tempfile::tempdir().unwrap();
-    let ops = resolve_route_ops(dir.path());
-    ops.identity_init(file_mode()).unwrap();
-    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"forward-pin").to_string();
-    ops.trust_add(TrustAddReq {
-        name: "phone".into(),
-        address: Some("stale.example.com:4433".into()),
-        fingerprint: Some(fingerprint),
-        cert_pem: None,
-        role: None,
-    })
-    .unwrap();
-    let runtime_dir = ops.paths().runtime_dir();
-    let daemon =
-        spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
-
-    match ops.resolve_route("phone").unwrap() {
-        PeerRoute::Reverse(route) => assert_eq!(route.host, "phone"),
-        PeerRoute::Forward(_) => {
-            panic!("a live reverse registration must beat a forward pin")
-        }
-    }
-    daemon.join().unwrap();
-}
-
-#[test]
-#[cfg(unix)]
-fn resolve_route_duplicate_live_daemons_is_invalid_argument() {
-    let dir = tempfile::tempdir().unwrap();
-    let ops = resolve_route_ops(dir.path());
-    let runtime_dir = ops.paths().runtime_dir();
-    let a = spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("dup")]);
-    let b = spawn_fake_admin_daemon_thread(&runtime_dir, 101, vec![sample_local_host("dup")]);
-
-    let err = match ops.resolve_route("dup") {
-        Err(err) => err,
-        Ok(_) => panic!("expected an error for two live daemons holding the same name"),
-    };
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
-    a.join().unwrap();
-    b.join().unwrap();
-}
+// full round trip is covered elsewhere.
 
 #[test]
 fn resolve_peer_address_strips_a_user_at_hint_from_the_host_not_found_remedy() {

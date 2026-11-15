@@ -11,8 +11,7 @@
 //! the chain under test is the production one: trust role -> evaluator ->
 //! state-path check -> open and recheck. Each scenario is generic over
 //! [`Route`] and runs on the forward route (`qsh serve`,
-//! [`LoopbackHarness`]) and the reverse route (`qsh serve --to`,
-//! [`ReversePairHarness`]) with the same body.
+//! [`LoopbackHarness`]); the reverse route retired with ADR-0068.
 //!
 //! The sandbox keeps the served data (`share/`, `outside/`) and qsh's own
 //! state (`host/config`, `host/state`, `host/run`) side by side, so a path
@@ -43,7 +42,7 @@ use qsh_proto::wire::{
 };
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
 use qsh_testkit::pair::HostedPair;
-use qsh_testkit::reverse::{ReversePairHarness, wait_for};
+use qsh_testkit::wait::wait_for;
 use qsh_transport::{FramedStream, Principal, ReadError, StaticTrust, StreamError};
 
 // ---------------------------------------------------------------------------
@@ -347,24 +346,11 @@ impl Route for LoopbackHarness {
     }
 }
 
-impl Route for ReversePairHarness {
-    async fn start(env: &Env) -> Self {
-        let h = ReversePairHarness::start_custom(env.authorizer(), env.client.clone()).await;
-        env.wire(h.server());
-        h
-    }
-}
-
-macro_rules! both_routes {
-    ($scenario:ident => $forward:ident, $reverse:ident) => {
+macro_rules! forward_route {
+    ($scenario:ident => $forward:ident) => {
         #[tokio::test(flavor = "multi_thread")]
         async fn $forward() {
             $scenario::<LoopbackHarness>().await;
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn $reverse() {
-            $scenario::<ReversePairHarness>().await;
         }
     };
 }
@@ -658,9 +644,7 @@ async fn ops_denied_without_a_grant<R: Route>() {
         h.shutdown().await;
     }
 }
-both_routes!(ops_denied_without_a_grant =>
-    file_ops_are_denied_without_a_matching_rule_or_role_forward,
-    file_ops_are_denied_without_a_matching_rule_or_role_reverse);
+forward_route!(ops_denied_without_a_grant => file_ops_are_denied_without_a_matching_rule_or_role_forward);
 
 async fn rule_without_paths<R: Route>() {
     // A row that names `file.*` but has no `paths` grants nothing, and the
@@ -674,9 +658,7 @@ async fn rule_without_paths<R: Route>() {
     assert_eq!(env.normalizer_calls(), 0);
     h.shutdown().await;
 }
-both_routes!(rule_without_paths =>
-    file_rule_without_paths_grants_no_file_access_forward,
-    file_rule_without_paths_grants_no_file_access_reverse);
+forward_route!(rule_without_paths => file_rule_without_paths_grants_no_file_access_forward);
 
 async fn no_grant_no_normalize<R: Route>() {
     let env = Env::new(None).acl_rows(&["exec.run"], None);
@@ -698,9 +680,7 @@ async fn no_grant_no_normalize<R: Route>() {
     assert!(env.normalizer_calls() > 0);
     h.shutdown().await;
 }
-both_routes!(no_grant_no_normalize =>
-    file_request_without_a_file_grant_touches_no_filesystem_forward,
-    file_request_without_a_file_grant_touches_no_filesystem_reverse);
+forward_route!(no_grant_no_normalize => file_request_without_a_file_grant_touches_no_filesystem_forward);
 
 // ---------------------------------------------------------------------------
 // State paths
@@ -764,9 +744,7 @@ async fn full_role_allows_any_path_but_not_state<R: Route>() {
     assert_eq!(h.server().pending_tickets(), tickets);
     h.shutdown().await;
 }
-both_routes!(full_role_allows_any_path_but_not_state =>
-    role_full_file_ops_allow_any_path_but_still_deny_state_paths_forward,
-    role_full_file_ops_allow_any_path_but_still_deny_state_paths_reverse);
+forward_route!(full_role_allows_any_path_but_not_state => role_full_file_ops_allow_any_path_but_still_deny_state_paths_forward);
 
 async fn full_role_cannot_touch_trust_state<R: Route>() {
     // No acl.toml: asking to create one is as refused as overwriting one.
@@ -783,9 +761,7 @@ async fn full_role_cannot_touch_trust_state<R: Route>() {
     assert!(!env.paths.acl_file().exists(), "no acl.toml was created");
     h.shutdown().await;
 }
-both_routes!(full_role_cannot_touch_trust_state =>
-    role_full_file_ops_still_deny_state_paths_forward,
-    role_full_file_ops_still_deny_state_paths_reverse);
+forward_route!(full_role_cannot_touch_trust_state => role_full_file_ops_still_deny_state_paths_forward);
 
 async fn root_paths_write_to_state<R: Route>() {
     let env = Env::new(None).acl_rows(&["file.*"], Some(&[fs_root().as_path()]));
@@ -816,9 +792,7 @@ async fn root_paths_write_to_state<R: Route>() {
     assert_eq!(snapshot(&env.host), before);
     h.shutdown().await;
 }
-both_routes!(root_paths_write_to_state =>
-    file_write_to_state_paths_is_denied_even_with_root_paths_forward,
-    file_write_to_state_paths_is_denied_even_with_root_paths_reverse);
+forward_route!(root_paths_write_to_state => file_write_to_state_paths_is_denied_even_with_root_paths_forward);
 
 async fn root_paths_read_state<R: Route>() {
     let env = Env::new(None).acl_rows(&["file.*"], Some(&[fs_root().as_path()]));
@@ -846,9 +820,7 @@ async fn root_paths_read_state<R: Route>() {
     assert_eq!(h.server().pending_tickets(), tickets);
     h.shutdown().await;
 }
-both_routes!(root_paths_read_state =>
-    file_read_of_state_paths_is_denied_even_with_root_paths_forward,
-    file_read_of_state_paths_is_denied_even_with_root_paths_reverse);
+forward_route!(root_paths_read_state => file_read_of_state_paths_is_denied_even_with_root_paths_forward);
 
 async fn list_and_mkdir_in_state_dirs<R: Route>() {
     let env = Env::new(Some("full"));
@@ -876,9 +848,7 @@ async fn list_and_mkdir_in_state_dirs<R: Route>() {
     assert_eq!(snapshot(&env.host), before);
     h.shutdown().await;
 }
-both_routes!(list_and_mkdir_in_state_dirs =>
-    file_list_and_mkdir_in_state_dirs_are_denied_forward,
-    file_list_and_mkdir_in_state_dirs_are_denied_reverse);
+forward_route!(list_and_mkdir_in_state_dirs => file_list_and_mkdir_in_state_dirs_are_denied_forward);
 
 async fn custom_audit_path_is_protected<R: Route>() {
     // An `[audit] path` outside the state directory is protected too, with
@@ -902,9 +872,7 @@ async fn custom_audit_path_is_protected<R: Route>() {
     conn.read(&env.share_path("a.txt")).await.read();
     h.shutdown().await;
 }
-both_routes!(custom_audit_path_is_protected =>
-    file_ops_protect_a_custom_audit_path_and_its_rotated_slots_forward,
-    file_ops_protect_a_custom_audit_path_and_its_rotated_slots_reverse);
+forward_route!(custom_audit_path_is_protected => file_ops_protect_a_custom_audit_path_and_its_rotated_slots_forward);
 
 // ---------------------------------------------------------------------------
 // `paths`
@@ -935,9 +903,7 @@ async fn symlink_out_of_paths<R: Route>() {
     assert_eq!(snapshot(&env.outside), before);
     h.shutdown().await;
 }
-both_routes!(symlink_out_of_paths =>
-    file_read_through_a_symlink_out_of_paths_is_denied_forward,
-    file_read_through_a_symlink_out_of_paths_is_denied_reverse);
+forward_route!(symlink_out_of_paths => file_read_through_a_symlink_out_of_paths_is_denied_forward);
 
 async fn dotdot_out_of_paths<R: Route>() {
     let probe = Env::new(None);
@@ -960,9 +926,7 @@ async fn dotdot_out_of_paths<R: Route>() {
     assert_eq!(snapshot(&env.outside), before);
     h.shutdown().await;
 }
-both_routes!(dotdot_out_of_paths =>
-    file_dotdot_escape_out_of_paths_is_denied_forward,
-    file_dotdot_escape_out_of_paths_is_denied_reverse);
+forward_route!(dotdot_out_of_paths => file_dotdot_escape_out_of_paths_is_denied_forward);
 
 async fn recheck_the_opened_handle<R: Route>() {
     // The normalizer here is lexical, so it does not see the symlink at
@@ -1005,9 +969,7 @@ async fn recheck_the_opened_handle<R: Route>() {
     assert_eq!(snapshot(&env.outside), before);
     h.shutdown().await;
 }
-both_routes!(recheck_the_opened_handle =>
-    file_paths_recheck_the_opened_handle_forward,
-    file_paths_recheck_the_opened_handle_reverse);
+forward_route!(recheck_the_opened_handle => file_paths_recheck_the_opened_handle_forward);
 
 // ---------------------------------------------------------------------------
 // Nothing is created before authorization, nothing is left by an
@@ -1042,9 +1004,7 @@ async fn denied_write_leaves_nothing<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(denied_write_leaves_nothing =>
-    denied_file_write_leaves_no_file_or_temp_behind_forward,
-    denied_file_write_leaves_no_file_or_temp_behind_reverse);
+forward_route!(denied_write_leaves_nothing => denied_file_write_leaves_no_file_or_temp_behind_forward);
 
 async fn unredeemed_ticket_leaves_nothing<R: Route>() {
     let env = Env::new(Some("full"));
@@ -1077,9 +1037,7 @@ async fn unredeemed_ticket_leaves_nothing<R: Route>() {
     assert_eq!(snapshot(&env.share), before);
     h.shutdown().await;
 }
-both_routes!(unredeemed_ticket_leaves_nothing =>
-    unredeemed_file_write_ticket_leaves_nothing_behind_forward,
-    unredeemed_file_write_ticket_leaves_nothing_behind_reverse);
+forward_route!(unredeemed_ticket_leaves_nothing => unredeemed_file_write_ticket_leaves_nothing_behind_forward);
 
 // ---------------------------------------------------------------------------
 // file.list
@@ -1142,9 +1100,7 @@ async fn list_pages<R: Route>() {
     assert!(!tail.more);
     h.shutdown().await;
 }
-both_routes!(list_pages =>
-    file_list_pages_are_sorted_and_resumable_by_cursor_forward,
-    file_list_pages_are_sorted_and_resumable_by_cursor_reverse);
+forward_route!(list_pages => file_list_pages_are_sorted_and_resumable_by_cursor_forward);
 
 async fn list_entry_cap<R: Route>() {
     let env = Env::new(Some("full"));
@@ -1168,9 +1124,7 @@ async fn list_entry_cap<R: Route>() {
     assert!(page.more);
     h.shutdown().await;
 }
-both_routes!(list_entry_cap =>
-    file_list_rejects_directories_over_the_entry_cap_forward,
-    file_list_rejects_directories_over_the_entry_cap_reverse);
+forward_route!(list_entry_cap => file_list_rejects_directories_over_the_entry_cap_forward);
 
 // ---------------------------------------------------------------------------
 // Object facts and caller mistakes (only reachable past the ACL)
@@ -1239,9 +1193,7 @@ async fn replies_for_allowed_requests<R: Route>() {
     assert!(!env.share.join("not-there").exists());
     h.shutdown().await;
 }
-both_routes!(replies_for_allowed_requests =>
-    file_ops_answer_allowed_requests_with_the_object_facts_forward,
-    file_ops_answer_allowed_requests_with_the_object_facts_reverse);
+forward_route!(replies_for_allowed_requests => file_ops_answer_allowed_requests_with_the_object_facts_forward);
 
 async fn user_hint<R: Route>() {
     // With a grant, a `user@` that is not the serve account is UNSUPPORTED.
@@ -1270,9 +1222,7 @@ async fn user_hint<R: Route>() {
     assert!(reply.is_denied(), "{reply:?}");
     h.shutdown().await;
 }
-both_routes!(user_hint =>
-    file_user_hint_is_unsupported_only_after_an_allow_forward,
-    file_user_hint_is_unsupported_only_after_an_allow_reverse);
+forward_route!(user_hint => file_user_hint_is_unsupported_only_after_an_allow_forward);
 
 // ---------------------------------------------------------------------------
 // Audit
@@ -1356,9 +1306,7 @@ async fn audit_has_path_but_no_payload<R: Route>() {
     }
     h.shutdown().await;
 }
-both_routes!(audit_has_path_but_no_payload =>
-    file_audit_record_carries_path_but_no_payload_forward,
-    file_audit_record_carries_path_but_no_payload_reverse);
+forward_route!(audit_has_path_but_no_payload => file_audit_record_carries_path_but_no_payload_forward);
 
 // ---------------------------------------------------------------------------
 // `acl check --path` and enforcement agree
@@ -1507,9 +1455,7 @@ async fn acl_check_agrees_with_enforcement<R: Route>() {
         h.shutdown().await;
     }
 }
-both_routes!(acl_check_agrees_with_enforcement =>
-    acl_check_path_agrees_with_enforcement_forward,
-    acl_check_path_agrees_with_enforcement_reverse);
+forward_route!(acl_check_agrees_with_enforcement => acl_check_path_agrees_with_enforcement_forward);
 
 // ---------------------------------------------------------------------------
 // FILE_DATA: the data plane
@@ -1751,9 +1697,7 @@ async fn file_capability<R: Route>() {
     session.close();
     h.shutdown().await;
 }
-both_routes!(file_capability =>
-    file_v1_is_negotiated_by_a_host_forward,
-    file_v1_is_negotiated_by_a_host_reverse);
+forward_route!(file_capability => file_v1_is_negotiated_by_a_host_forward);
 
 // ---- file.read ---------------------------------------------------------
 
@@ -1787,9 +1731,7 @@ async fn read_streams<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(read_streams =>
-    file_read_streams_chunks_and_a_matching_end_forward,
-    file_read_streams_chunks_and_a_matching_end_reverse);
+forward_route!(read_streams => file_read_streams_chunks_and_a_matching_end_forward);
 
 async fn ticket_is_single_use<R: Route>() {
     let env = Env::new(Some("full"));
@@ -1804,9 +1746,7 @@ async fn ticket_is_single_use<R: Route>() {
     assert_eq!(reset_code_of(&mut second).await, RESET_BAD_HEADER);
     h.shutdown().await;
 }
-both_routes!(ticket_is_single_use =>
-    file_data_ticket_is_single_use_forward,
-    file_data_ticket_is_single_use_reverse);
+forward_route!(ticket_is_single_use => file_data_ticket_is_single_use_forward);
 
 // ---- file.write: replacement ------------------------------------------
 
@@ -1919,9 +1859,7 @@ async fn write_overwrites<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(write_overwrites =>
-    file_write_overwrites_atomically_by_default_forward,
-    file_write_overwrites_atomically_by_default_reverse);
+forward_route!(write_overwrites => file_write_overwrites_atomically_by_default_forward);
 
 async fn write_no_clobber<R: Route>() {
     let env = Env::new(Some("full"));
@@ -1974,9 +1912,7 @@ async fn write_no_clobber<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(write_no_clobber =>
-    file_write_no_clobber_never_replaces_an_existing_file_forward,
-    file_write_no_clobber_never_replaces_an_existing_file_reverse);
+forward_route!(write_no_clobber => file_write_no_clobber_never_replaces_an_existing_file_forward);
 
 // ---- file.write: interruption -------------------------------------------
 
@@ -1997,9 +1933,7 @@ async fn interrupted_by_connection_loss<R: Route>() {
     assert_eq!(snapshot(&env.share), before, "the destination is untouched");
     h.shutdown().await;
 }
-both_routes!(interrupted_by_connection_loss =>
-    interrupted_file_write_removes_its_temp_file_on_connection_loss_forward,
-    interrupted_file_write_removes_its_temp_file_on_connection_loss_reverse);
+forward_route!(interrupted_by_connection_loss => interrupted_file_write_removes_its_temp_file_on_connection_loss_forward);
 
 async fn interrupted_by_cancel<R: Route>() {
     let env = Env::new(Some("full"));
@@ -2026,9 +1960,7 @@ async fn interrupted_by_cancel<R: Route>() {
     assert!(result.ok, "{result:?}");
     h.shutdown().await;
 }
-both_routes!(interrupted_by_cancel =>
-    interrupted_file_write_removes_its_temp_file_on_cancel_forward,
-    interrupted_file_write_removes_its_temp_file_on_cancel_reverse);
+forward_route!(interrupted_by_cancel => interrupted_file_write_removes_its_temp_file_on_cancel_forward);
 
 /// A disk writer that waits until it is released, so a transfer's local
 /// write can be held still on demand (the ADR-0037 stall).
@@ -2148,9 +2080,7 @@ async fn interrupted_by_the_stall_ledger<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(interrupted_by_the_stall_ledger =>
-    interrupted_file_write_removes_its_temp_file_on_a_ledger_stop_forward,
-    interrupted_file_write_removes_its_temp_file_on_a_ledger_stop_reverse);
+forward_route!(interrupted_by_the_stall_ledger => interrupted_file_write_removes_its_temp_file_on_a_ledger_stop_forward);
 
 // ---- file.write: integrity and violations --------------------------------
 
@@ -2213,9 +2143,7 @@ async fn write_mismatch<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(write_mismatch =>
-    file_write_size_or_hash_mismatch_renames_nothing_forward,
-    file_write_size_or_hash_mismatch_renames_nothing_reverse);
+forward_route!(write_mismatch => file_write_size_or_hash_mismatch_renames_nothing_forward);
 
 async fn write_violations<R: Route>() {
     let env = Env::new(Some("full"));
@@ -2301,9 +2229,7 @@ async fn write_violations<R: Route>() {
     assert_eq!(h.server().pending_tickets(), 0);
     h.shutdown().await;
 }
-both_routes!(write_violations =>
-    file_write_protocol_violations_reset_the_stream_and_rename_nothing_forward,
-    file_write_protocol_violations_reset_the_stream_and_rename_nothing_reverse);
+forward_route!(write_violations => file_write_protocol_violations_reset_the_stream_and_rename_nothing_forward);
 
 // ---- file.write: free space ----------------------------------------------
 
@@ -2354,9 +2280,7 @@ async fn write_free_space<R: Route>() {
     }
     h.shutdown().await;
 }
-both_routes!(write_free_space =>
-    file_write_refused_below_the_free_space_reserve_forward,
-    file_write_refused_below_the_free_space_reserve_reverse);
+forward_route!(write_free_space => file_write_refused_below_the_free_space_reserve_forward);
 
 // ---------------------------------------------------------------------------
 // Windows host (ADR-0035 decision 26): what differs from the unix scenarios
@@ -2420,9 +2344,7 @@ mod windows_host {
         );
         h.shutdown().await;
     }
-    both_routes!(temp_file_is_owner_only_until_rename =>
-        windows_put_temp_file_is_owner_only_until_rename_then_inherits_forward,
-        windows_put_temp_file_is_owner_only_until_rename_then_inherits_reverse);
+    forward_route!(temp_file_is_owner_only_until_rename => windows_put_temp_file_is_owner_only_until_rename_then_inherits_forward);
 
     async fn read_only_attribute<R: Route>() {
         let env = Env::new(Some("full"));
@@ -2446,9 +2368,7 @@ mod windows_host {
         assert!(!read_only(&path));
         h.shutdown().await;
     }
-    both_routes!(read_only_attribute =>
-        windows_put_sets_read_only_only_when_owner_write_is_clear_forward,
-        windows_put_sets_read_only_only_when_owner_write_is_clear_reverse);
+    forward_route!(read_only_attribute => windows_put_sets_read_only_only_when_owner_write_is_clear_forward);
 
     async fn mode_bits_are_synthesized<R: Route>() {
         let env = Env::new(Some("full"));
@@ -2480,9 +2400,7 @@ mod windows_host {
         perms.set_readonly(false);
         std::fs::set_permissions(&ro, perms).unwrap();
     }
-    both_routes!(mode_bits_are_synthesized =>
-        windows_get_synthesizes_mode_bits_forward,
-        windows_get_synthesizes_mode_bits_reverse);
+    forward_route!(mode_bits_are_synthesized => windows_get_synthesizes_mode_bits_forward);
 
     async fn put_preserves_mtime<R: Route>() {
         let env = Env::new(Some("full"));
@@ -2517,9 +2435,7 @@ mod windows_host {
         assert!(mtime > std::time::UNIX_EPOCH + Duration::from_secs(1_500_000_000));
         h.shutdown().await;
     }
-    both_routes!(put_preserves_mtime =>
-        windows_put_preserves_mtime_with_p_forward,
-        windows_put_preserves_mtime_with_p_reverse);
+    forward_route!(put_preserves_mtime => windows_put_preserves_mtime_with_p_forward);
 
     async fn real_free_space_probe_admits_a_small_write<R: Route>() {
         // No injected probe: the production `GetDiskFreeSpaceExW` reading is
@@ -2547,13 +2463,9 @@ mod windows_host {
     // The injected-probe refusal below the reserve is the shared
     // `write_free_space` scenario; it is named here too so the Windows leg
     // lists it beside the real-probe test.
-    both_routes!(write_free_space =>
-        windows_put_refuses_when_free_space_is_short_forward,
-        windows_put_refuses_when_free_space_is_short_reverse);
+    forward_route!(write_free_space => windows_put_refuses_when_free_space_is_short_forward);
 
-    both_routes!(real_free_space_probe_admits_a_small_write =>
-        windows_put_uses_the_disk_free_space_probe_forward,
-        windows_put_uses_the_disk_free_space_probe_reverse);
+    forward_route!(real_free_space_probe_admits_a_small_write => windows_put_uses_the_disk_free_space_probe_forward);
 
     async fn unc_and_device_paths_are_malformed_before_the_acl<R: Route>() {
         // `full` would allow anything; the shape check comes first, so the
@@ -2587,9 +2499,7 @@ mod windows_host {
         }
         h.shutdown().await;
     }
-    both_routes!(unc_and_device_paths_are_malformed_before_the_acl =>
-        windows_remote_path_unc_is_invalid_argument_with_no_audit_line_forward,
-        windows_remote_path_unc_is_invalid_argument_with_no_audit_line_reverse);
+    forward_route!(unc_and_device_paths_are_malformed_before_the_acl => windows_remote_path_unc_is_invalid_argument_with_no_audit_line_forward);
 
     async fn case_variants_and_streams_of_state_paths<R: Route>() {
         // The volume ignores case: a differently cased spelling of a state
@@ -2613,7 +2523,5 @@ mod windows_host {
         assert_eq!(snapshot(&env.host), before);
         h.shutdown().await;
     }
-    both_routes!(case_variants_and_streams_of_state_paths =>
-        windows_state_paths_fold_case_and_refuse_streams_forward,
-        windows_state_paths_fold_case_and_refuse_streams_reverse);
+    forward_route!(case_variants_and_streams_of_state_paths => windows_state_paths_fold_case_and_refuse_streams_forward);
 }

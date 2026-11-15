@@ -9,38 +9,20 @@
 //!   ordinary PR regression tests instead of a manual campaign.
 //! - [`fixtures`]: golden-fixture loader for `crates/qsh-cli/tests/fixtures`
 //!   (L6).
-//! - [`reverse`]: in-process reverse-mode harness (L3) — a `qsh listen`
-//!   controller plus the raw dial primitives to play a `qsh reverse`
-//!   target's wire role, and [`reverse::ReversePairHarness`], the
-//!   role-swapped counterpart of [`loopback::LoopbackHarness`] used to
-//!   prove role-axis independence (M3 plan Step 3 (2473c88), PR 3b).
-//! - [`combined`]: [`combined::CombinedHarness`], the combined `listen` +
-//!   `serve` endpoint (ADR-0059) — a `Server` in front of a `Listen`, built
-//!   on one set of shared parts, reached over one address.
-//! - [`pair`]: [`pair::HostedPair`], the trait that lets one scenario body
-//!   run unmodified against both harnesses above.
-//! - [`tunnel`]: in-process loopback **tunnel** harness (L3) — a
-//!   [`loopback::LoopbackHarness`] host plus a client `-L` listener plus a
-//!   local echo destination, so a forwarded byte's whole path is one
-//!   process (M4 plan Step 3 (2473c88)).
-//! - [`procstat`]: `/proc`-based RSS/fd readers and the poll-until-stable
-//!   convergence helper T2's `adversarial_load.rs` and M8 Step 5's
-//!   `soak.rs` both need (docs/campaigns/m8-soak.md §4, moved from
-//!   `crates/qsh-cli/tests/it/common/mod.rs`).
+//! - [`wait`]: bounded polling for assertions with no channel to await.
 //! - [`env_check`]: one-shot loopback-UDP self-check the QUIC harness
 //!   constructors run first, so a host firewall that drops loopback UDP
 //!   fails with one clear message instead of 10 s timeouts.
 //! - [`net_probe`]: non-loopback IPv4 route/hairpin discovery plus the
 //!   CI-aware skip-or-fail [`net_probe::Gap`] policy, shared by any suite
 //!   that needs a real off-loopback destination (`-D`'s
-//!   `crates/qsh-testkit/tests/it/dynamic_loopback.rs` and its reverse-route
-//!   twin).
+//!   `crates/qsh-testkit/tests/it/dynamic_loopback.rs`).
 //! - [`netsim`]: a virtual UDP network for real quinn endpoints with RFC 4787
 //!   NAT boxes, on tokio's (pausable) clock, for the hole-punching tests
 //!   (ADR-0054 decision 22).
 //!
 //! - [`echo_host`]: [`echo_host::EchoHost`], a host whose sessions are the
-//!   broker's headless echo, reachable forward or as a reverse target, for
+//!   broker's headless echo, reachable forward, for
 //!   driving the real client where the host has no PTY.
 //! - [`asset_server`]: a loopback HTTP server standing in for GitHub in the
 //!   remote install tests (ADR-0051 decision 3).
@@ -76,7 +58,6 @@
 pub mod agent_probe;
 pub mod asset_server;
 pub mod chaos;
-pub mod combined;
 #[cfg(windows)]
 pub mod conpty;
 pub mod echo_host;
@@ -94,11 +75,11 @@ pub mod pairing;
 pub mod perf;
 pub mod procstat;
 pub mod raw_quic;
-pub mod reverse;
 pub mod shell;
 pub mod signal_probe;
 pub mod testbin;
 pub mod tunnel;
+pub mod wait;
 
 pub use chaos::{ChaosPolicy, ChaosProxy, ChaosStats, DelayDist};
 pub use loopback::{LoopbackHarness, TestIdentity, make_identity};

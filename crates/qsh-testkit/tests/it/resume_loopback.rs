@@ -13,21 +13,14 @@
 //! Every wait is a real round trip under a wall-clock deadline — no
 //! sleep-based synchronisation.
 //!
-//! **Role-axis parametrization (M3 plan Step 3 (2473c88) PR 3b).** The first
-//! three scenarios are generic `async fn<P: HostedPair>(h: P)`, each run
-//! once against [`LoopbackHarness`] (forward) and once against
-//! [`ReversePairHarness`] (reverse) with an identical body — the mechanical
-//! proof that resume's `Ops` code never learns which side dialed. The last
-//! three (`a_stolen_credential_is_useless_to_a_different_peer`,
+//! The first three scenarios are generic `async fn<P: HostedPair>(h: P)`
+//! run against [`LoopbackHarness`] (the reverse topology they once also ran
+//! against retired with ADR-0068). The last three
+//! (`a_stolen_credential_is_useless_to_a_different_peer`,
 //! `an_attach_without_a_credential_is_refused_by_the_host`,
-//! `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential`) stay
-//! forward-only — a **named exclusion**, not a silent one:
-//! [`ReversePairHarness`]'s own module docs explain why a reverse target
-//! structurally cannot have a *second, distinct* principal reach the same
-//! host (it has exactly one peer, ever — the controller it dialed to
-//! register with), which is exactly the shape these three scenarios need
-//! (an "owner" and a "thief"/"other" device racing for the same session on
-//! one host).
+//! `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential`) need
+//! a second, distinct principal reaching the same host, an "owner" and a
+//! "thief"/"other" device racing for one session.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +32,6 @@ use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_frame};
 use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::{LoopbackHarness, make_identity};
-use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
 
 /// Wall-clock ceiling for anything that should resolve in milliseconds.
@@ -47,8 +39,7 @@ use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
 const DEADLINE: Duration = Duration::from_secs(20);
 
 /// The harness' replay ring: what the ring still holds is what a resume
-/// can still be given. Both [`LoopbackHarness`] and [`ReversePairHarness`]
-/// build a 64 KiB ring.
+/// can still be given. [`LoopbackHarness`] builds a 64 KiB ring.
 const RING_BYTES: usize = 64 * 1024;
 
 fn open_req() -> wire::SessionOpen {
@@ -288,14 +279,6 @@ async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offs
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset_reverse() {
-    a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset(
-        ReversePairHarness::start().await,
-    )
-    .await;
-}
-
 /// A resume that asks for an offset the ring has evicted opens with a
 /// `Gap` naming where the stream can actually continue, and then continues
 /// from exactly there. The client is told output was lost; it is never
@@ -390,14 +373,6 @@ async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_availab
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from_reverse() {
-    a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from(
-        ReversePairHarness::start().await,
-    )
-    .await;
-}
-
 /// Input that was sent but never acknowledged is retransmitted after a
 /// resume — and the child must not see it twice. The dedup cursor lives in
 /// the session, keyed by the input stream a resumed attach inherits
@@ -482,16 +457,9 @@ async fn retransmitted_input_is_applied_exactly_once_across_a_resume_forward() {
         .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn retransmitted_input_is_applied_exactly_once_across_a_resume_reverse() {
-    retransmitted_input_is_applied_exactly_once_across_a_resume(ReversePairHarness::start().await)
-        .await;
-}
-
 // ==========================================================================
-// Forward-only: multi-principal scenarios (module docs above — a reverse
-// target has exactly one peer, ever, so there is no reverse-mode analogue
-// of "a second, distinct device reaches the same host").
+// Multi-principal scenarios (module docs above): a second, distinct device
+// reaches the same host.
 // ==========================================================================
 
 /// A credential is bound to the peer it was issued to (protocol.md §10-2,

@@ -46,7 +46,9 @@ pub(crate) enum ReconnectCause {
     /// pin, or the peer rejecting ours.
     TlsRejected,
     /// The controller's `host.reverse` ACL/registry choke point refused
-    /// the registration.
+    /// the registration. Still part of the documented vocabulary
+    /// (`docs/CLI.md` §6.13) but nothing produces it since ADR-0068.
+    #[allow(dead_code)]
     RegistrationDenied,
     /// The peer closed an already-established connection, or answered it with
     /// a stateless reset because it no longer holds it.

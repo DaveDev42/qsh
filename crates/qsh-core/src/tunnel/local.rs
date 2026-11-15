@@ -803,7 +803,6 @@ pub(crate) fn note_denial(
         {
             view.note_permission_denied(carrier);
         }
-        ForwardConnError::PeerChanged => view.note_peer_changed(carrier),
         _ => {}
     }
 }

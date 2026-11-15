@@ -42,20 +42,11 @@
 //! names only `qsh_transport` for this pair; `quinn`/`rustls` are this
 //! project's own stricter superset, since a QUIC name reaching either file
 //! by any route is the same seam violation `qsh_transport` itself would
-//! be). This is a narrower token set than [`crate::reverse::registry`]'s —
-//! that module additionally bans `crate::client`, `crate::Principal` and
-//! `crate::Fingerprint` (the full six tokens `BROKER_DIR`'s rule bans in
-//! `broker/`), because `ReverseEntry` must mechanically never hold a live
-//! `client::Session` (M3 plan Step 3 (2473c88)). `frame`/`client` have no
-//! parallel invariant to protect with those extra three tokens — they
-//! never construct a `Session`/`Principal`/`Fingerprint` in the first
-//! place — so the M3 plan (2473c88) does not ask for them here and arch-lint does not
-//! enforce them here; do not assume they are covered by this seam. A CLI
+//! be). A CLI
 //! process has no business holding a QUIC connection regardless.
 //!
 //! `daemon` is the one module allowed to import `qsh_transport` here (only
-//! indirectly, through [`crate::reverse::listen::Listen`]/`Registry`, which
-//! this PR does not itself add a fresh `qsh_transport` name to): it is the
+//! indirectly, through the retired `Listen`/`Registry`): it is the
 //! bridge that answers this machine's `LOCAL_ADMIN` conduit from the
 //! registry `qsh listen` already holds, and — from M3 plan Step 6 (2473c88)
 //! onward — relays a `LOCAL_CONTROL` conduit's requests onto a live reverse
@@ -96,7 +87,6 @@
 
 pub mod chunked;
 pub mod client;
-pub mod daemon;
 pub mod frame;
 pub mod mux;
 pub mod transport;

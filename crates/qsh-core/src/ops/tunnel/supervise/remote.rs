@@ -13,7 +13,7 @@ use std::time::Duration;
 use qsh_proto::{ErrorCode, wire};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AttemptError, Established, Route, Supervisor};
+use super::{AttemptError, Established, Supervisor};
 use crate::client::ClientError;
 use crate::ops::exec::map_client_error;
 use crate::tunnel::remote::RemoteForwardAcceptor;
@@ -100,8 +100,6 @@ pub(in crate::ops::tunnel) struct RemoteTunnel {
     target_port: u16,
     /// The registration's current id.
     forward_id: String,
-    /// Claim loops that found their forward gone (reverse route only).
-    vanished: Option<mpsc::UnboundedReceiver<String>>,
     shared: Arc<Shared>,
     /// The command channel of the first carrier, made with the tunnel so a
     /// shutdown that arrives before the supervisor has started monitoring
@@ -116,12 +114,10 @@ impl RemoteTunnel {
         acceptor: RemoteForwardAcceptor,
         mut open: wire::RemoteForwardOpen,
         opened: &wire::RemoteForwardOpened,
-        vanished: Option<mpsc::UnboundedReceiver<String>>,
     ) -> (Self, RemoteHandle) {
         let target_host = open.forward_host.clone();
         let target_port = u16::try_from(open.forward_port).unwrap_or(u16::MAX);
         open.bind_port = opened.actual_port;
-        open.claim_token = Vec::new();
         let (pump_tx, first_pump) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             forward_id: Mutex::new(opened.forward_id.clone()),
@@ -135,16 +131,11 @@ impl RemoteTunnel {
                 target_host,
                 target_port,
                 forward_id: opened.forward_id.clone(),
-                vanished,
                 shared,
                 first_pump: Some(first_pump),
             },
             handle,
         )
-    }
-
-    pub(super) fn forward_id(&self) -> &str {
-        &self.forward_id
     }
 
     /// A fresh command channel for the control pump of a newly monitored
@@ -162,27 +153,12 @@ impl RemoteTunnel {
     pub(super) fn clear_pump(&self) {
         *self.shared.pump.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
-
-    /// The next claim loop that found its forward gone, if this route
-    /// reports them.
-    pub(super) async fn vanished(&mut self) -> Option<String> {
-        match &mut self.vanished {
-            Some(rx) => rx.recv().await,
-            None => std::future::pending().await,
-        }
-    }
-
-    /// Stop listening for a channel that has closed.
-    pub(super) fn stop_watching_vanished(&mut self) {
-        self.vanished = None;
-    }
 }
 
 /// A registration made on a new carrier, not yet installed.
 pub(super) struct Reissued {
     acceptor: RemoteForwardAcceptor,
     forward_id: String,
-    vanished: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl Supervisor {
@@ -206,8 +182,8 @@ impl Supervisor {
         remote: &RemoteTunnel,
         next: &mut Established,
     ) -> Result<Reissued, AttemptError> {
-        let (acceptor, vanished) = self.new_acceptor(next).await;
-        let session = next.session_mut();
+        let acceptor = self.new_acceptor(next).await;
+        let session = &mut next.session;
         // The old registration usually died with its connection, and a
         // peer that has already forgotten it says so. Both outcomes mean
         // the same thing: it is gone.
@@ -224,11 +200,7 @@ impl Supervisor {
             }) => {}
             Err(err) => return Err(self.request_failed(err)),
         }
-        let mut open = remote.open.clone();
-        open.claim_token = acceptor
-            .claim_token()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
+        let open = remote.open.clone();
         let mut resent = 0;
         let opened = loop {
             match session.rfwd_open(open.clone()).await {
@@ -255,37 +227,12 @@ impl Supervisor {
         Ok(Reissued {
             acceptor,
             forward_id: opened.forward_id,
-            vanished,
         })
     }
 
     /// The acceptor for a new carrier.
-    async fn new_acceptor(
-        &self,
-        next: &Established,
-    ) -> (
-        RemoteForwardAcceptor,
-        Option<mpsc::UnboundedReceiver<String>>,
-    ) {
-        match next {
-            Established::Forward { connection, .. } => {
-                (RemoteForwardAcceptor::spawn(connection.clone()).await, None)
-            }
-            Established::Reverse(next) => {
-                let host = match &self.params.route {
-                    Route::Reverse(route) => route.host.clone(),
-                    Route::Forward { .. } => String::new(),
-                };
-                let (tx, rx) = mpsc::unbounded_channel();
-                let acceptor = RemoteForwardAcceptor::spawn_reverse_watching(
-                    next.socket.clone(),
-                    host,
-                    Some(tx),
-                )
-                .await;
-                (acceptor, Some(rx))
-            }
-        }
+    async fn new_acceptor(&self, next: &Established) -> RemoteForwardAcceptor {
+        RemoteForwardAcceptor::spawn(next.connection.clone()).await
     }
 
     /// A request on the fresh carrier failed. A peer's answer is
@@ -307,13 +254,9 @@ impl Supervisor {
     /// used, through no answer of the peer's.
     fn transient(&self, what: &str) -> AttemptError {
         let op = crate::ops::OpError::new(ErrorCode::ConnectionFailed, what.to_string());
-        let source = match &self.params.route {
-            Route::Forward { .. } => Source::LocalDial,
-            Route::Reverse(_) => Source::LocalDaemon,
-        };
         AttemptError {
             op,
-            source,
+            source: Source::LocalDial,
             cause: None,
         }
     }
@@ -326,10 +269,8 @@ impl Supervisor {
         let Reissued {
             acceptor,
             forward_id,
-            vanished,
         } = reissued;
         remote.acceptor = acceptor;
-        remote.vanished = vanished;
         let previous = std::mem::replace(&mut remote.forward_id, forward_id.clone());
         *remote
             .shared

@@ -10,23 +10,16 @@
 //! file builds the files itself.
 //!
 //! **Routes.** A control-stream scenario is generic over [`Route`] and runs
-//! on the forward route (`qsh serve`, [`LoopbackHarness`]) and the reverse
-//! route (`qsh serve --to`, [`ReversePairHarness`]) with the same body. The
-//! `host.reverse` row has its own route (`qsh listen`,
-//! [`ReverseHarness`]); the inline `forward.local` gate its own harness
-//! ([`TunnelHarness`]).
+//! on the forward route (`qsh serve`, [`LoopbackHarness`]); the reverse
+//! routes (`qsh serve --to`, `qsh listen`) retired with ADR-0068. The inline
+//! `forward.local` gate has its own harness ([`TunnelHarness`]).
 //!
 //! The two scenarios that need something the generic [`Route`] does not
 //! offer (a CA-issued leaf; a second distinct principal on one host) are
-//! written out per route with `_forward` / `_reverse` suffixes. On the reverse
-//! route they use [`ReversePairHarness::start_custom_trusting`] (a CA-issued
-//! controller) and [`ReversePairHarness::session_from_second_controller`] (a
-//! second controller the target dials). Every scenario therefore runs on both
-//! routes.
+//! written out with a `_forward` suffix.
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use qsh_core::acl::{
@@ -37,15 +30,12 @@ use qsh_core::broker::{PeerFingerprint, SessionSpec};
 use qsh_core::client::{ClientError, Session};
 use qsh_core::config::Paths;
 use qsh_core::exec::ExecSpec;
-use qsh_core::handshake::HelloError;
 use qsh_core::trust::SharedTrustStore;
-use qsh_core::tunnel::RemoteForwardAcceptor;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_ca, make_identity};
 use qsh_testkit::pair::HostedPair;
-use qsh_testkit::reverse::{ReverseHarness, ReversePairHarness};
-use qsh_testkit::tunnel::{EchoServer, TunnelHarness};
+use qsh_testkit::tunnel::TunnelHarness;
 use qsh_transport::{AuthPath, Dialer, Principal, StaticTrust};
 
 /// How the sandbox's `acl.toml` is left (ADR-0045 결정 6's three states).
@@ -147,23 +137,12 @@ impl Route for LoopbackHarness {
     }
 }
 
-impl Route for ReversePairHarness {
-    async fn start(env: &Env) -> Self {
-        ReversePairHarness::start_custom(env.authorizer(Role::Serve), env.client.clone()).await
-    }
-}
-
-/// Run `$scenario::<Route>()` on both routes as two tests.
-macro_rules! both_routes {
-    ($scenario:ident => $forward:ident, $reverse:ident) => {
+/// Run `$scenario::<Route>()` as a test.
+macro_rules! forward_route {
+    ($scenario:ident => $forward:ident) => {
         #[tokio::test(flavor = "multi_thread")]
         async fn $forward() {
             $scenario::<LoopbackHarness>().await;
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn $reverse() {
-            $scenario::<ReversePairHarness>().await;
         }
     };
 }
@@ -344,9 +323,7 @@ async fn legacy_pin_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(legacy_pin_scenario =>
-    legacy_pin_without_role_is_authorized_by_acl_rows_only_forward,
-    legacy_pin_without_role_is_authorized_by_acl_rows_only_reverse);
+forward_route!(legacy_pin_scenario => legacy_pin_without_role_is_authorized_by_acl_rows_only_forward);
 
 // --- the table, all six roles, no acl.toml -----------------------------
 
@@ -362,9 +339,7 @@ async fn role_table_scenario<R: Route>() {
     }
 }
 
-both_routes!(role_table_scenario =>
-    role_full_without_acl_toml_allows_every_action_but_forward_socks_forward,
-    role_full_without_acl_toml_allows_every_action_but_forward_socks_reverse);
+forward_route!(role_table_scenario => role_full_without_acl_toml_allows_every_action_but_forward_socks_forward);
 
 /// The actions with no control-stream wire call in this build. They are not
 /// drivable, so the authorizer is asked directly: `forward.socks` is behind
@@ -397,14 +372,12 @@ fn role_full_without_acl_toml_allows_every_action_but_forward_socks_undrivable_a
     }
 }
 
-/// The inline `forward.local` gate and the `host.reverse` registration take
-/// their own routes through the same table.
+/// The inline `forward.local` gate takes its own route through the same
+/// table.
 #[tokio::test(flavor = "multi_thread")]
-async fn role_full_without_acl_toml_allows_every_action_but_forward_socks_inline_and_registration()
-{
+async fn role_full_without_acl_toml_allows_every_action_but_forward_socks_inline() {
     for role in ROLES {
         let want_forward_local = matches!(role, "full" | "tunnel");
-        let want_host_reverse = matches!(role, "full" | "reverse");
 
         let env = Env::new(Some(role), AclFile::Missing);
         let h = TunnelHarness::start_custom(
@@ -423,32 +396,6 @@ async fn role_full_without_acl_toml_allows_every_action_but_forward_socks_inline
             assert_eq!(result.message, PERMISSION_DENIED_MESSAGE);
         }
         h.shutdown().await;
-
-        let target = make_identity();
-        let env = Env::with_trust_text(
-            make_identity(),
-            &peer_block("widget", &target.fingerprint, Some(role)),
-            AclFile::Missing,
-        );
-        let pin = StaticTrust::empty()
-            .with_pin(target.fingerprint, Principal::Device("widget".to_string()));
-        let harness = ReverseHarness::start_with(env.authorizer(Role::Listen), false, pin).await;
-        match harness.register(&target, "widget").await {
-            Ok(_) => assert!(
-                want_host_reverse,
-                "host.reverse must be denied under {role}"
-            ),
-            Err(HelloError::Remote { code, message, .. }) => {
-                assert!(
-                    !want_host_reverse,
-                    "host.reverse must be allowed under {role}"
-                );
-                assert_eq!(code, ErrorCode::PermissionDenied);
-                assert_eq!(message, PERMISSION_DENIED_MESSAGE);
-            }
-            Err(other) => panic!("unexpected registration failure under {role}: {other:?}"),
-        }
-        harness.shutdown().await;
     }
 }
 
@@ -466,12 +413,10 @@ async fn invalid_acl_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(invalid_acl_scenario =>
-    invalid_acl_toml_denies_role_grants_too_forward,
-    invalid_acl_toml_denies_role_grants_too_reverse);
+forward_route!(invalid_acl_scenario => invalid_acl_toml_denies_role_grants_too_forward);
 
 #[tokio::test(flavor = "multi_thread")]
-async fn invalid_acl_toml_denies_role_grants_too_inline_and_registration() {
+async fn invalid_acl_toml_denies_role_grants_too_inline() {
     let env = Env::new(Some("full"), AclFile::Garbage);
     let h = TunnelHarness::start_custom(
         env.authorizer(Role::Serve),
@@ -483,25 +428,6 @@ async fn invalid_acl_toml_denies_role_grants_too_inline_and_registration() {
     assert!(!result.ok, "forward.local must be denied");
     assert_eq!(result.message, PERMISSION_DENIED_MESSAGE);
     h.shutdown().await;
-
-    let target = make_identity();
-    let env = Env::with_trust_text(
-        make_identity(),
-        &peer_block("widget", &target.fingerprint, Some("full")),
-        AclFile::Garbage,
-    );
-    let pin =
-        StaticTrust::empty().with_pin(target.fingerprint, Principal::Device("widget".to_string()));
-    let harness = ReverseHarness::start_with(env.authorizer(Role::Listen), false, pin).await;
-    match harness.register(&target, "widget").await {
-        Ok(_) => panic!("host.reverse must be denied"),
-        Err(HelloError::Remote { code, message, .. }) => {
-            assert_eq!(code, ErrorCode::PermissionDenied);
-            assert_eq!(message, PERMISSION_DENIED_MESSAGE);
-        }
-        Err(other) => panic!("unexpected registration failure: {other:?}"),
-    }
-    harness.shutdown().await;
 }
 
 // --- fingerprint binding ------------------------------------------------
@@ -536,9 +462,7 @@ async fn fingerprint_binding_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(fingerprint_binding_scenario =>
-    role_requires_the_connection_fingerprint_to_match_the_current_pin_forward,
-    role_requires_the_connection_fingerprint_to_match_the_current_pin_reverse);
+forward_route!(fingerprint_binding_scenario => role_requires_the_connection_fingerprint_to_match_the_current_pin_forward);
 
 /// Forward route: a CA leaf that names the pinned device (`qsh://device/laptop`) is
 /// classified as `device:laptop` over `AuthPath::Ca`; the pin's role must not
@@ -590,44 +514,6 @@ async fn role_grant_does_not_reach_a_ca_leaf_naming_a_pinned_device_forward() {
     h.shutdown().await;
 }
 
-/// Reverse-route twin of the CA-leaf scenario: the *controller* presents the
-/// CA leaf naming `device:laptop`, the target (host role) authenticates it by
-/// CA only, and the pin's role must not reach it. A second pair whose
-/// controller is the genuinely pinned key keeps its role.
-#[tokio::test(flavor = "multi_thread")]
-async fn role_grant_does_not_reach_a_ca_leaf_naming_a_pinned_device_reverse() {
-    let env = Env::new(Some("full"), AclFile::Missing);
-    let ca = make_ca();
-    let leaf = ca.issue("qsh://device/laptop");
-    let ca_only = StaticTrust::empty().with_ca(ca.root_der.clone());
-    let h =
-        ReversePairHarness::start_custom_trusting(env.authorizer(Role::Serve), leaf, ca_only).await;
-    let mut via_ca = h.session().await;
-    assert!(
-        !authorized(via_ca.session_list().await),
-        "a CA leaf must not inherit the pin's role"
-    );
-    let records = h.audit().records();
-    assert!(
-        records
-            .iter()
-            .any(|r| r.principal == "device:laptop" && r.auth_path == "ca" && r.decision == "deny"),
-        "{records:?}"
-    );
-    via_ca.close();
-    h.shutdown().await;
-
-    let pinned_pair =
-        ReversePairHarness::start_custom(env.authorizer(Role::Serve), env.client.clone()).await;
-    let mut pinned = pinned_pair.session().await;
-    assert!(
-        authorized(pinned.session_list().await),
-        "the pinned key keeps its role"
-    );
-    pinned.close();
-    pinned_pair.shutdown().await;
-}
-
 // --- trust.toml changes while connected ---------------------------------
 
 async fn trust_remove_scenario<R: Route>() {
@@ -648,9 +534,7 @@ async fn trust_remove_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(trust_remove_scenario =>
-    trust_remove_ends_role_grants_on_the_next_request_forward,
-    trust_remove_ends_role_grants_on_the_next_request_reverse);
+forward_route!(trust_remove_scenario => trust_remove_ends_role_grants_on_the_next_request_forward);
 
 async fn reload_failure_scenario<R: Route>() {
     let env = Env::new(Some("full"), AclFile::Missing);
@@ -681,9 +565,7 @@ async fn reload_failure_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(reload_failure_scenario =>
-    trust_store_reload_failure_suspends_role_grants_forward,
-    trust_store_reload_failure_suspends_role_grants_reverse);
+forward_route!(reload_failure_scenario => trust_store_reload_failure_suspends_role_grants_forward);
 
 // --- audit ----------------------------------------------------------------
 
@@ -729,15 +611,13 @@ async fn role_audit_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(role_audit_scenario =>
-    role_grant_audit_record_names_the_role_and_no_rule_forward,
-    role_grant_audit_record_names_the_role_and_no_rule_reverse);
+forward_route!(role_audit_scenario => role_grant_audit_record_names_the_role_and_no_rule_forward);
 
 // --- scope ---------------------------------------------------------------
 
 /// `read-only` may attach to a session (read its output) but may not write
 /// to it. The session is planted at the broker so the test needs no second
-/// principal and runs on both routes.
+/// principal.
 async fn read_only_scenario<R: Route>() {
     let env = Env::new(Some("read-only"), AclFile::Missing);
     let h = R::start(&env).await;
@@ -776,14 +656,10 @@ async fn read_only_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(read_only_scenario =>
-    role_read_only_can_attach_but_not_write_forward,
-    role_read_only_can_attach_but_not_write_reverse);
+forward_route!(read_only_scenario => role_read_only_can_attach_but_not_write_forward);
 
 /// `tunnel` is the one owned role: it may open and close its own `-R`
-/// forward, never close another principal's. Forward route here (two devices
-/// dial one host); the `_reverse` twin below has two controllers the target
-/// dials.
+/// forward, never close another principal's (two devices dial one host).
 #[tokio::test(flavor = "multi_thread")]
 async fn role_tunnel_cannot_close_another_principals_remote_forward_forward() {
     let owner = make_identity();
@@ -865,98 +741,6 @@ async fn role_tunnel_cannot_close_another_principals_remote_forward_forward() {
     h.shutdown().await;
 }
 
-/// Reverse route: `laptop` (the harness controller) opens a `-R` forward on the
-/// target; a second controller `desktop`, also dialed by the target and served
-/// by the same host, holds `tunnel` too but must not close `laptop`'s forward.
-#[tokio::test(flavor = "multi_thread")]
-async fn role_tunnel_cannot_close_another_principals_remote_forward_reverse() {
-    let owner = make_identity();
-    let other = make_identity();
-    let text = format!(
-        "{}{}",
-        peer_block("laptop", &owner.fingerprint, Some("tunnel")),
-        peer_block("desktop", &other.fingerprint, Some("tunnel"))
-    );
-    let env = Env::with_trust_text(owner.clone(), &text, AclFile::Missing);
-    let h = ReversePairHarness::start_custom(env.authorizer(Role::Serve), owner).await;
-    let echo = EchoServer::start().await.expect("echo server");
-
-    let mut laptop = h.session().await;
-    let acceptor = RemoteForwardAcceptor::spawn(laptop.connection().clone()).await;
-    let opened = laptop
-        .rfwd_open(wire::RemoteForwardOpen {
-            bind_host: String::new(),
-            bind_port: 0,
-            forward_host: "127.0.0.1".to_string(),
-            forward_port: u32::from(echo.port()),
-            claim_token: Vec::new(),
-        })
-        .await
-        .expect("a tunnel peer may open a forward");
-    let forward_id = opened.forward_id.clone();
-    acceptor.register(forward_id.clone(), "127.0.0.1".to_string(), echo.port());
-    let addr = SocketAddr::from((
-        [127, 0, 0, 1],
-        u16::try_from(opened.actual_port).expect("port fits u16"),
-    ));
-
-    let mut desktop = h.session_from_second_controller(&other, "desktop").await;
-    match desktop
-        .rfwd_close(wire::RemoteForwardClose {
-            forward_id: forward_id.clone(),
-        })
-        .await
-    {
-        Err(ClientError::Remote { code, message, .. }) => {
-            assert_eq!(code, ErrorCode::PermissionDenied);
-            assert_eq!(message, PERMISSION_DENIED_MESSAGE);
-        }
-        other => panic!("a tunnel peer must not close another's forward, got {other:?}"),
-    }
-    assert_eq!(
-        TunnelHarness::round_trip(addr, b"still alive".to_vec())
-            .await
-            .expect("round trip"),
-        b"still alive",
-        "the forward survives the refused close"
-    );
-    let records = h.audit().records();
-    assert!(
-        records.iter().any(|r| r.principal == "device:desktop"
-            && r.action == "forward.remote"
-            && r.decision == "deny"
-            && r.resource == forward_id),
-        "{records:?}"
-    );
-
-    // Its own forward, the other peer can open and close freely.
-    let own = desktop
-        .rfwd_open(wire::RemoteForwardOpen {
-            bind_host: String::new(),
-            bind_port: 0,
-            forward_host: "127.0.0.1".to_string(),
-            forward_port: u32::from(echo.port()),
-            claim_token: Vec::new(),
-        })
-        .await
-        .expect("a tunnel peer may open a forward");
-    desktop
-        .rfwd_close(wire::RemoteForwardClose {
-            forward_id: own.forward_id,
-        })
-        .await
-        .expect("and close its own");
-
-    desktop.close();
-    acceptor.unregister(&forward_id);
-    laptop
-        .rfwd_close(wire::RemoteForwardClose { forward_id })
-        .await
-        .expect("the owner closes its own");
-    laptop.close();
-    h.shutdown().await;
-}
-
 // --- pin grants (ADR-0051 결정 12) ---------------------------------------
 
 /// A pin block like [`peer_block`] with extra TOML keys (`grants`, `paths`,
@@ -1020,9 +804,7 @@ async fn pin_grant_applies_on_the_next_request_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(pin_grant_applies_on_the_next_request_scenario =>
-    pin_grant_applies_on_the_next_request_without_restart_forward,
-    pin_grant_applies_on_the_next_request_without_restart_reverse);
+forward_route!(pin_grant_applies_on_the_next_request_scenario => pin_grant_applies_on_the_next_request_without_restart_forward);
 
 /// B18 for grants: a `trust.toml` that stops parsing suspends the pin's
 /// grants like its role, and a good file brings them back.
@@ -1059,9 +841,7 @@ async fn broken_trust_toml_suspends_pin_grants_scenario<R: Route>() {
     h.shutdown().await;
 }
 
-both_routes!(broken_trust_toml_suspends_pin_grants_scenario =>
-    trust_store_reload_failure_suspends_pin_grants_forward,
-    trust_store_reload_failure_suspends_pin_grants_reverse);
+forward_route!(broken_trust_toml_suspends_pin_grants_scenario => trust_store_reload_failure_suspends_pin_grants_forward);
 
 /// B16 and B17 for grants, and the gate in front of them: a CA-authenticated
 /// peer that names the pinned device, a connection whose fingerprint is not

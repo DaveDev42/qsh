@@ -2185,7 +2185,6 @@ fn doctor_wires_the_service_not_registered_finding_into_the_full_report_determin
 /// The three run modes `infer_run_mode` can return.
 const MODES: [&str; 3] = ["serve", "listen", "reverse"];
 
-mod combined;
 mod logon_task;
 mod mode;
 mod retired;
@@ -2586,24 +2585,6 @@ fn doctor_bindv6only_finding_is_none_for_a_non_wildcard_bind() {
         ops.doctor_bindv6only_finding(&config, "serve", &env)
             .is_none()
     );
-}
-
-/// `listen` mode reads `[listen].bind`, not `[serve].bind`.
-#[test]
-fn doctor_bindv6only_finding_reads_the_listen_bind_for_listen_mode() {
-    let keystore = crate::identity::MemoryKeyStore::new();
-    let (_guard, ops) = healthy_ops();
-    let mut config = Config::default();
-    config.serve.bind = Some("127.0.0.1:4433".to_string());
-    config.listen.bind = Some("[::]:4433".to_string());
-    let env = DoctorEnvironment {
-        bindv6only_probe: always_v6_only,
-        ..minimal_env(&keystore)
-    };
-    let finding = ops
-        .doctor_bindv6only_finding(&config, "listen", &env)
-        .expect("bindv6only_blocks_ipv4 finding");
-    assert_eq!(finding.code, "bindv6only_blocks_ipv4");
 }
 
 /// `qsh reverse` dials out and binds no listener at all — falling
