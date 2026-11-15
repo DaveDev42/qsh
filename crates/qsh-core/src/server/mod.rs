@@ -64,6 +64,7 @@ mod file;
 mod file_data;
 mod file_host;
 mod jump;
+mod path_watch;
 mod punch;
 mod reverse;
 mod sessions;
@@ -2185,6 +2186,17 @@ impl Server {
             )
             .spawn(Arc::clone(&self.audit))
         });
+
+        // The path observer (ADR-0067): a keyed connection gets one task that
+        // writes a `connect`/`path` record when its path kind settles on a new
+        // value. It never closes the connection; the guard aborts it when the
+        // loop ends.
+        let _path_watch = path_watch::spawn(
+            conn,
+            Arc::clone(&self.audit),
+            ctx.principal.clone(),
+            ctx.auth_path,
+        );
 
         // Nothing detached may still be running when `purge_connection`
         // releases this connection's leases: `JoinSet::drop` only *requests*
