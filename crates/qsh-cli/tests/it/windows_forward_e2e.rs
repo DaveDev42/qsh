@@ -91,10 +91,11 @@ fn hosts_lists_the_forward_host_without_a_daemon() {
     let route = ForwardRoute::start();
     cases::hosts_names_the_host(&route, "forward");
 
-    // No daemon runs on the client's side and nothing is reverse.
+    // Nothing is reverse on a forward-only machine.
+    let hosts = crate::common::hosts_array(&route.fleet.client);
     assert!(
-        cases::reverse_entries(&route.fleet.client).is_empty(),
-        "a forward-only machine listed a reverse entry"
+        hosts.iter().all(|h| h["connection_mode"] != "reverse"),
+        "a forward-only machine listed a reverse entry: {hosts:?}"
     );
 }
 
