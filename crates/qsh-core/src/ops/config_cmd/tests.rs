@@ -112,7 +112,6 @@ fn invalid_values_are_rejected_and_the_file_is_unchanged() {
         ("transport.keep_alive_ms", "99999", ErrorCode::ConfigError),
         ("recovery.strikes", "1", ErrorCode::ConfigError),
         ("recovery.probe_interval_ms", "900", ErrorCode::ConfigError),
-        ("listen.stale_retention", "10", ErrorCode::ConfigError),
         ("ssh.program", "  ", ErrorCode::ConfigError),
         (
             "transport.keep_alive_ms",
@@ -120,18 +119,8 @@ fn invalid_values_are_rejected_and_the_file_is_unchanged() {
             ErrorCode::InvalidArgument,
         ),
         ("transport.keep_alive_ms", "-5", ErrorCode::InvalidArgument),
-        (
-            "listen.allow_advertised_names",
-            "yes",
-            ErrorCode::InvalidArgument,
-        ),
         ("ssh.bootstrap", "sometimes", ErrorCode::InvalidArgument),
         ("identity.key_store", "vault", ErrorCode::InvalidArgument),
-        (
-            "reverse.backoff_jitter_pct",
-            "300",
-            ErrorCode::InvalidArgument,
-        ),
     ];
     for (key, value, code) in cases {
         let err = set(&ops, key, value).unwrap_err();
@@ -560,11 +549,26 @@ fn every_config_key_is_settable() {
     let (_g, ops) = temp_ops();
     for key in KEYS {
         let path = key.path();
+        if crate::retired::is_retired_config_key(&path) {
+            // ADR-0068: parsed and unset-able, never written by `config set`.
+            continue;
+        }
         let data = set(&ops, &path, &sample(&path, key))
             .unwrap_or_else(|err| panic!("{path}: {}", err.message));
         assert!(data.changed, "{path}");
         assert_eq!(data.applies_from.is_some(), key.startup_only, "{path}");
     }
+    // A config an older qsh wrote still carries the retired keys.
+    let mut text = read_config(&ops);
+    for key in KEYS {
+        let path = key.path();
+        if crate::retired::is_retired_config_key(&path) {
+            text = crate::config_edit::set(&text, key, &sample(&path, key))
+                .unwrap_or_else(|err| panic!("{path}: {}", err.message))
+                .text;
+        }
+    }
+    write_config(&ops, &text);
     let loaded = Config::load(&ops.paths).unwrap();
     loaded.validate().unwrap();
     let mut loaded_keys = BTreeSet::new();
@@ -599,9 +603,24 @@ fn doctor_reports_no_config_unknown_key_for_anything_config_set_wrote() {
     .unwrap();
     for key in KEYS {
         let path = key.path();
+        if crate::retired::is_retired_config_key(&path) {
+            // Written by hand below: `config set` refuses them (ADR-0068),
+            // and the doctor must still know them as keys.
+            continue;
+        }
         set(&ops, &path, &sample(&path, key))
             .unwrap_or_else(|err| panic!("{path}: {}", err.message));
     }
+    let mut merged = read_config(&ops);
+    for key in KEYS {
+        let path = key.path();
+        if crate::retired::is_retired_config_key(&path) {
+            merged = crate::config_edit::set(&merged, key, &sample(&path, key))
+                .unwrap_or_else(|err| panic!("{path}: {}", err.message))
+                .text;
+        }
+    }
+    write_config(&ops, &merged);
     // `doctor` opens the audit path to see that it is writable; the sample
     // `value` is relative and would land in the working directory.
     let audit = _g.path().join("audit-probe.log");
@@ -628,6 +647,39 @@ fn doctor_reports_no_config_unknown_key_for_anything_config_set_wrote() {
     let found = unknown(&ops);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].detail.contains("servr.bind"), "{found:?}");
+}
+
+/// ADR-0068: the reverse keys still parse, `config set` refuses each one
+/// without touching the file, and `config unset` still clears it.
+#[test]
+fn retired_keys_are_refused_by_set_and_cleared_by_unset() {
+    let (_g, ops) = temp_ops();
+    write_config(&ops, COMMENTED);
+    let before = Config::load(&ops.paths).unwrap();
+    for path in crate::retired::RETIRED_CONFIG_KEYS {
+        let err = set(&ops, path, "1").unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unsupported, "{path}");
+        assert!(!err.retryable, "{path}");
+        assert_eq!(err.details["reason"], "reverse_retired", "{path}");
+        assert_eq!(read_config(&ops), COMMENTED, "{path} changed the file");
+    }
+    let mut text = read_config(&ops);
+    for path in crate::retired::RETIRED_CONFIG_KEYS {
+        let key = crate::config_edit::lookup(path).unwrap();
+        text = crate::config_edit::set(&text, key, &sample(path, key))
+            .unwrap()
+            .text;
+    }
+    write_config(&ops, &text);
+    for path in crate::retired::RETIRED_CONFIG_KEYS {
+        let data = ops
+            .config_unset(ConfigUnsetReq {
+                key: path.to_string(),
+            })
+            .unwrap();
+        assert!(data.changed, "{path}");
+    }
+    assert_eq!(Config::load(&ops.paths).unwrap(), before);
 }
 
 /// ADR-0052 decision 15: `--screen-sync` beats `[interactive].screen_sync`,

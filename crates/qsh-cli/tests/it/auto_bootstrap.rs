@@ -93,7 +93,7 @@ fn run_cp(client: &Sandbox, payload: &Payload, host: &str, extra: &[&str]) -> st
 
 mod world {
     use super::*;
-    use crate::common::{ReverseGuard, exit_code, hosts_array, poll_until};
+    use crate::common::{exit_code, poll_until};
     use crate::ssh_bootstrap::pair::{World, other_fingerprint, store};
 
     fn set_client_config(w: &World, extra: &str) {
@@ -245,13 +245,11 @@ mod world {
     }
 
     /// A name qsh already knows something about is qsh's to resolve: a
-    /// `hosts.toml` entry, a pin (with or without an address), a reverse
-    /// registration (live, or stale after the target went away). None of
-    /// them runs ssh (decision 2).
+    /// `hosts.toml` entry, a pin (with or without an address). None of them
+    /// runs ssh (decision 2). (The reverse-registration half of this case
+    /// retired with ADR-0068.)
     #[test]
-    fn ssh_bootstrap_is_not_triggered_for_hosts_toml_or_reverse_names() {
-        use crate::ssh_bootstrap::pair_reverse::World as Reverse;
-
+    fn ssh_bootstrap_is_not_triggered_for_hosts_toml_or_pinned_names() {
         let w = World::new();
         let payload = Payload::new();
         std::fs::write(
@@ -277,58 +275,6 @@ mod world {
             assert!(!stderr.contains("setting one up"), "{host}: {stderr}");
         }
         assert_eq!(w.fake.calls().len(), 0, "ssh ran for a known name");
-
-        // The reverse half, on the reverse fixture: after a `--reverse --to`
-        // bootstrap the target's name is pinned without an address. It is
-        // known while nothing is registered yet, while the registration is
-        // live (the copy goes through the relay), and once it has gone
-        // stale; ssh runs for none of the three.
-        let r = Reverse::new();
-        let (code, got) = r.pair(&[]);
-        assert_eq!(code, 0, "{got}");
-        let before = r.fake.calls().len();
-
-        let out = run_cp(&r.controller, &payload, "box", &[]);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(exit_code(&out), 255, "pinned, not registered: {stderr}");
-        assert!(stderr.contains("HOST_NOT_FOUND"), "{stderr}");
-        assert!(!stderr.contains("setting one up"), "{stderr}");
-
-        let reverse = ReverseGuard::start_serve_to(&r.target, "hub");
-        poll_until(
-            "the reverse registration to appear reachable",
-            std::time::Duration::from_secs(20),
-            || {
-                hosts_array(&r.controller)
-                    .iter()
-                    .any(|h| h["name"] == "box" && h["state"] == "reachable")
-                    .then_some(())
-            },
-        );
-        let out = run_cp(&r.controller, &payload, "box", &[]);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(exit_code(&out), 0, "live: {stderr}");
-        assert!(!stderr.contains("setting one up"), "{stderr}");
-
-        reverse.shut_down();
-        poll_until(
-            "the reverse registration to go stale",
-            std::time::Duration::from_secs(20),
-            || {
-                hosts_array(&r.controller)
-                    .iter()
-                    .any(|h| h["name"] == "box" && h["state"] == "stale")
-                    .then_some(())
-            },
-        );
-        std::fs::remove_file(&payload.dst).unwrap();
-        let out = run_cp(&r.controller, &payload, "box", &[]);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(exit_code(&out), 255, "stale: {stderr}");
-        assert!(stderr.contains("HOST_NOT_FOUND"), "{stderr}");
-        assert!(!stderr.contains("setting one up"), "{stderr}");
-        assert!(!payload.dst.exists());
-        assert_eq!(r.fake.calls().len(), before, "ssh ran for a reverse name");
     }
 
     /// Ctrl-C while ssh runs (a password prompt, say) ends the call with

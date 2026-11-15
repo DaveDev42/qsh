@@ -39,13 +39,13 @@ Suppress diagnostic output on stderr
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition
 .TP
 \fB\-\-reverse\fR
-Reverse direction: the remote dials this machine\*(Aqs `qsh listen` instead of this machine dialing the remote. Goes with `\-\-to`, and does not combine with `\-\-address` (either mistake is an `INVALID_ARGUMENT` before ssh runs). The remote pins this machine at the `\-\-to` address with the `\-\-role` role; this machine pins the remote without an address and with role `reverse`. Nothing is started on the remote and no connection is tried: the result names the `qsh serve \-\-to` command to run there
+Retired in v0.9.0 (ADR\-0068): the reverse direction. Answers `UNSUPPORTED` with `details.reason` `reverse_retired`
 .TP
 \fB\-\-install\-remote\fR
 When the ssh bootstrap finds no `qsh` on the remote host (or one too old to answer it), install this machine\*(Aqs release into `~/.local/bin` there without asking (`docs/CLI.md` §7). Works with `\-\-json`
 .TP
 \fB\-\-to\fR \fI<HOST[:PORT]>\fR
-With `\-\-reverse`: the `host[:port]` the remote dials to reach this machine\*(Aqs `qsh listen`. With no `:port`, port 4433 is assumed
+Retired in v0.9.0 with `\-\-reverse` (ADR\-0068): answers `UNSUPPORTED`
 .TP
 \fB\-\-no\-install\-remote\fR
 Never install or upgrade `qsh` on the remote host, and do not ask; a missing `qsh` ends as `remote_qsh_missing`

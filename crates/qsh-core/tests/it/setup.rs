@@ -145,18 +145,34 @@ fn host(name: &str) -> SetupRunReq {
     req(SetupRole::Host, name)
 }
 
-fn host_to(name: &str, pem: &str) -> SetupRunReq {
+/// A `host` that pins the peer from a certificate instead of minting an invite.
+fn host_with_cert(name: &str, pem: &str) -> SetupRunReq {
     SetupRunReq {
-        address: Some("127.0.0.1:1".to_string()),
         peer_cert_pem: Some(pem.to_string()),
-        ..req(SetupRole::HostTo, name)
+        ..host(name)
     }
 }
 
-fn listener(name: &str, pem: &str) -> SetupRunReq {
-    SetupRunReq {
-        peer_cert_pem: Some(pem.to_string()),
-        ..req(SetupRole::Listener, name)
+/// ADR-0068: `host --to` and `listener` are retired; the op refuses them
+/// before any step runs, and writes nothing.
+#[test]
+fn the_reverse_setup_roles_are_unsupported_and_write_nothing() {
+    let pem = peer_pem();
+    for role in [SetupRole::HostTo, SetupRole::Listener] {
+        let sandbox = Sandbox::new();
+        let request = SetupRunReq {
+            address: Some("127.0.0.1:1".to_string()),
+            peer_cert_pem: Some(pem.clone()),
+            ..req(role, "peer")
+        };
+        let err = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap_err();
+        assert_eq!(err.code, qsh_proto::ErrorCode::Unsupported, "{role:?}");
+        assert!(!err.retryable, "{role:?}");
+        assert_eq!(err.details["reason"], "reverse_retired", "{role:?}");
+        assert!(
+            !sandbox.config_dir().join("trust.toml").exists(),
+            "{role:?}"
+        );
     }
 }
 
@@ -178,12 +194,7 @@ fn step_of(data: &SetupRunData, id: SetupStepId) -> &SetupStep {
 /// Every setup role twice: with `--peer-role none` (the pre-role behavior
 /// the helpers above build) and with the role default (`peer_role` absent).
 fn all_roles(pem: &str) -> Vec<SetupRunReq> {
-    let none = vec![
-        host("laptop"),
-        host_to("macmini", pem),
-        client("box", pem),
-        listener("ctl", pem),
-    ];
+    let none = vec![host("laptop"), client("box", pem)];
     let defaults = none
         .iter()
         .cloned()
@@ -201,11 +212,6 @@ fn setup_never_writes_acl_toml_in_any_role() {
     for request in all_roles(&pem) {
         // No acl.toml before: none after.
         let sandbox = Sandbox::new();
-        if request.role == SetupRole::HostTo {
-            sandbox.write_config("[serve]\nto = \"macmini\"\n");
-        } else if request.role == SetupRole::Listener {
-            sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
-        }
         sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
         assert!(
             !sandbox.acl_path().exists(),
@@ -232,15 +238,7 @@ fn setup_printed_rows_pasted_verbatim_make_acl_check_allow_every_intended_action
     let pem = peer_pem();
     let mut with_forward = host("laptop");
     with_forward.forward = true;
-    let mut to_forward = host_to("macmini", &pem);
-    to_forward.forward = true;
-    let requests = vec![
-        host("laptop"),
-        with_forward,
-        host_to("macmini", &pem),
-        to_forward,
-        listener("ctl", &pem),
-    ];
+    let requests = vec![host("laptop"), with_forward];
     for request in requests {
         let sandbox = Sandbox::new();
         let plan = sandbox.ops.setup_plan(&request, &sandbox.env()).unwrap();
@@ -376,7 +374,7 @@ fn setup_refuses_second_name_for_pinned_fingerprint() {
         .unwrap();
     let data = sandbox
         .ops
-        .setup_run(&listener("second", &pem), &sandbox.env())
+        .setup_run(&client("second", &pem), &sandbox.env())
         .unwrap();
     let pin = step_of(&data, SetupStepId::PinCert);
     assert_eq!(pin.status, SetupStatus::Pending);
@@ -404,7 +402,7 @@ fn setup_pin_cert_pending_on_fingerprint_mismatch() {
     let before = sandbox.ops.trust_list().unwrap().peers;
     let data = sandbox
         .ops
-        .setup_run(&listener("ctl", &other), &sandbox.env())
+        .setup_run(&client("ctl", &other), &sandbox.env())
         .unwrap();
     assert_eq!(
         step_of(&data, SetupStepId::PinCert).status,
@@ -420,8 +418,7 @@ fn setup_trust_add_always_carries_cert_pem() {
     // connection error. It pins from the certificate alone.
     let sandbox = Sandbox::new();
     let pem = peer_pem();
-    sandbox.write_config("[serve]\nto = \"macmini\"\n");
-    let request = host_to("macmini", &pem);
+    let request = client("macmini", &pem);
     let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
     let pin = step_of(&data, SetupStepId::PinCert);
     assert_eq!(pin.status, SetupStatus::Done, "{pin:?}");
@@ -433,7 +430,6 @@ fn setup_trust_add_always_carries_cert_pem() {
 
 #[test]
 fn setup_mode_config_pending_on_wrong_run_mode() {
-    let pem = peer_pem();
     let status = |text: &str, request: &SetupRunReq| {
         let sandbox = Sandbox::new();
         sandbox.write_config(text);
@@ -450,28 +446,6 @@ fn setup_mode_config_pending_on_wrong_run_mode() {
         status("[serve]\nto = \"x\"\n", &host("a")),
         SetupStatus::Pending
     );
-    // listener runs `qsh listen`.
-    assert_eq!(status("", &listener("a", &pem)), SetupStatus::Pending);
-    assert_eq!(
-        status("[listen]\nbind = \"[::]:4433\"\n", &listener("a", &pem)),
-        SetupStatus::Already
-    );
-    // host --to dials the outbound target named by --to.
-    assert_eq!(status("", &host_to("a", &pem)), SetupStatus::Pending);
-    assert_eq!(
-        status("[serve]\nto = \"a\"\n", &host_to("a", &pem)),
-        SetupStatus::Already
-    );
-    assert_eq!(
-        status("[serve]\nto = \"other\"\n", &host_to("a", &pem)),
-        SetupStatus::Pending,
-        "[serve].to disagreeing with --to"
-    );
-    assert_eq!(
-        status("[reverse]\ncontroller = \"a\"\n", &host_to("a", &pem)),
-        SetupStatus::Already,
-        "the legacy key counts"
-    );
 }
 
 #[test]
@@ -480,9 +454,8 @@ fn setup_rerun_after_completion_changes_no_file() {
     let pem = peer_pem();
     let request = SetupRunReq {
         service: true,
-        ..listener("ctl", &pem)
+        ..host_with_cert("ctl", &pem)
     };
-    sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
     let rows = sandbox
         .ops
         .setup_plan(&request, &sandbox.env())
@@ -526,10 +499,9 @@ fn setup_rerun_after_completion_changes_no_file() {
 fn setup_service_unsupported_is_skipped() {
     let sandbox = Sandbox::new();
     let pem = peer_pem();
-    sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
     let request = SetupRunReq {
         service: true,
-        ..listener("ctl", &pem)
+        ..host_with_cert("ctl", &pem)
     };
     let rows = sandbox
         .ops
@@ -574,25 +546,14 @@ fn setup_service_unsupported_is_skipped() {
 #[cfg(windows)]
 #[test]
 fn setup_host_service_writes_the_task_definition_on_windows() {
-    let pem = peer_pem();
-    for (request, mode) in [
-        (
-            SetupRunReq {
-                service: true,
-                peer_role: None,
-                ..host("laptop")
-            },
-            "serve",
-        ),
-        (
-            SetupRunReq {
-                service: true,
-                peer_role: None,
-                ..host_to("macmini", &pem)
-            },
-            "reverse",
-        ),
-    ] {
+    for (request, mode) in [(
+        SetupRunReq {
+            service: true,
+            peer_role: None,
+            ..host("laptop")
+        },
+        "serve",
+    )] {
         let sandbox = sandbox_for(&request);
         let definition = sandbox
             .config_dir()
@@ -637,14 +598,13 @@ fn setup_host_service_writes_the_task_definition_on_windows() {
 fn setup_op_failure_keeps_code_and_retryable_and_adds_step_ids_without_results() {
     let sandbox = Sandbox::new();
     let pem = peer_pem();
-    sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
     // A trust store that does not parse: `pin_cert` fails after `identity`.
     std::fs::write(sandbox.config_dir().join("trust.toml"), "not = [valid").unwrap();
     let direct: OpError = sandbox.ops.trust_list().unwrap_err();
 
     let err = sandbox
         .ops
-        .setup_run(&listener("ctl", &pem), &sandbox.env())
+        .setup_run(&client("ctl", &pem), &sandbox.env())
         .unwrap_err();
     assert_eq!(err.code, direct.code);
     assert_eq!(err.retryable, direct.retryable);
@@ -794,22 +754,11 @@ fn setup_client_incomplete_on_other_doctor_error() {
 /// `setup_host_roles_complete_with_a_role_and_no_acl_toml`.
 #[test]
 fn setup_host_roles_incomplete_without_acl_toml() {
-    let pem = peer_pem();
-    for request in [
-        host("laptop"),
-        host_to("macmini", &pem),
-        listener("ctl", &pem),
-    ] {
-        let sandbox = Sandbox::new();
-        if request.role == SetupRole::HostTo {
-            sandbox.write_config("[serve]\nto = \"macmini\"\n");
-        } else if request.role == SetupRole::Listener {
-            sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
-        }
-        let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
-        assert!(!data.complete, "{:?}: {:?}", request.role, data.steps);
-        assert!(!sandbox.acl_path().exists());
-    }
+    let request = host("laptop");
+    let sandbox = Sandbox::new();
+    let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
+    assert!(!data.complete, "{:?}: {:?}", request.role, data.steps);
+    assert!(!sandbox.acl_path().exists());
 }
 
 /// The pin (or invite) role `trust list` and the invite step report, per
@@ -826,61 +775,36 @@ fn pinned_role(sandbox: &Sandbox, name: &str) -> Option<String> {
         .role
 }
 
-fn sandbox_for(request: &SetupRunReq) -> Sandbox {
-    let sandbox = Sandbox::new();
-    if request.role == SetupRole::HostTo {
-        sandbox.write_config("[serve]\nto = \"macmini\"\n");
-    } else if request.role == SetupRole::Listener {
-        sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
-    }
-    sandbox
+fn sandbox_for(_request: &SetupRunReq) -> Sandbox {
+    Sandbox::new()
 }
 
 #[test]
 fn setup_host_roles_complete_with_a_role_and_no_acl_toml() {
-    let pem = peer_pem();
-    for request in [
-        SetupRunReq {
-            peer_role: None,
-            ..host("laptop")
-        },
-        SetupRunReq {
-            peer_role: None,
-            ..host_to("macmini", &pem)
-        },
-        SetupRunReq {
-            peer_role: None,
-            ..listener("ctl", &pem)
-        },
-    ] {
-        let sandbox = sandbox_for(&request);
-        let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
-        if request.role == SetupRole::HostTo {
-            // The sandbox has no controller to dial: doctor's own
-            // `controller_unreachable` is the only error left, and it is
-            // not about the policy.
-            assert_eq!(doctor_error_codes(&data), ["controller_unreachable"]);
-        } else {
-            assert!(data.complete, "{:?}: {:?}", request.role, data.steps);
-        }
-        assert!(!sandbox.acl_path().exists(), "{:?}", request.role);
-        assert!(
-            data.acl_rows.is_none(),
-            "{:?}: nothing to paste",
-            request.role
-        );
-        let acl = step_of(&data, SetupStepId::Acl);
-        assert_eq!(acl.status, SetupStatus::Done, "{acl:?}");
-        assert!(acl.result.is_none(), "{acl:?}");
-        let detail = acl.detail.as_deref().unwrap();
-        assert!(detail.contains("no [[acl]] rows are needed"), "{detail}");
-        // doctor stayed quiet about the missing policy: a role authorizes.
-        assert!(
-            !doctor_error_codes(&data).contains(&"acl_policy_missing".to_string()),
-            "{:?}",
-            doctor_error_codes(&data)
-        );
-    }
+    let request = SetupRunReq {
+        peer_role: None,
+        ..host("laptop")
+    };
+    let sandbox = sandbox_for(&request);
+    let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
+    assert!(data.complete, "{:?}: {:?}", request.role, data.steps);
+    assert!(!sandbox.acl_path().exists(), "{:?}", request.role);
+    assert!(
+        data.acl_rows.is_none(),
+        "{:?}: nothing to paste",
+        request.role
+    );
+    let acl = step_of(&data, SetupStepId::Acl);
+    assert_eq!(acl.status, SetupStatus::Done, "{acl:?}");
+    assert!(acl.result.is_none(), "{acl:?}");
+    let detail = acl.detail.as_deref().unwrap();
+    assert!(detail.contains("no [[acl]] rows are needed"), "{detail}");
+    // doctor stayed quiet about the missing policy: a role authorizes.
+    assert!(
+        !doctor_error_codes(&data).contains(&"acl_policy_missing".to_string()),
+        "{:?}",
+        doctor_error_codes(&data)
+    );
 }
 
 #[test]
@@ -899,23 +823,14 @@ fn setup_peer_role_defaults_follow_the_setup_role() {
     assert_eq!(invite.result.as_ref().unwrap()["assigned_role"], "full");
     assert_eq!(invite.command, "qsh pair invite --as laptop --role full");
 
-    // host --to: the listener pin gets `full`.
+    // host with a certificate: the pin gets `full`.
     let request = SetupRunReq {
         peer_role: None,
-        ..host_to("macmini", &pem)
+        ..host_with_cert("ctl", &pem)
     };
     let sandbox = sandbox_for(&request);
     sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
-    assert_eq!(pinned_role(&sandbox, "macmini").as_deref(), Some("full"));
-
-    // listener: the target pin gets `reverse`.
-    let request = SetupRunReq {
-        peer_role: None,
-        ..listener("ctl", &pem)
-    };
-    let sandbox = sandbox_for(&request);
-    sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
-    assert_eq!(pinned_role(&sandbox, "ctl").as_deref(), Some("reverse"));
+    assert_eq!(pinned_role(&sandbox, "ctl").as_deref(), Some("full"));
 
     // client: the server pin gets `none`, written explicitly.
     let request = SetupRunReq {
@@ -932,7 +847,7 @@ fn setup_explicit_peer_role_overrides_the_default() {
     let pem = peer_pem();
     let request = SetupRunReq {
         peer_role: Some("read-only".to_string()),
-        ..listener("ctl", &pem)
+        ..host_with_cert("ctl", &pem)
     };
     let sandbox = sandbox_for(&request);
     let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
@@ -953,22 +868,6 @@ fn setup_explicit_peer_role_overrides_the_default() {
         "{:?}",
         step_of(&data, SetupStepId::PinCert)
     );
-}
-
-#[test]
-fn setup_peer_role_none_keeps_the_rows_and_writes_a_none_pin() {
-    let pem = peer_pem();
-    let request = listener("ctl", &pem);
-    assert_eq!(request.peer_role.as_deref(), Some("none"));
-    let sandbox = sandbox_for(&request);
-    let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
-    assert_eq!(pinned_role(&sandbox, "ctl").as_deref(), Some("none"));
-    assert_eq!(
-        step_of(&data, SetupStepId::Acl).status,
-        SetupStatus::Pending
-    );
-    assert!(data.acl_rows.is_some());
-    assert!(!data.complete);
 }
 
 #[test]

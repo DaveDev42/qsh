@@ -12,9 +12,6 @@ mod audit_query;
 mod auto_bootstrap;
 mod cert_e2e;
 mod cert_file_exchange;
-mod combined_accept;
-mod combined_lifecycle;
-mod combined_surface;
 mod console_probe;
 mod cp_cancel;
 mod cp_e2e;
@@ -27,20 +24,15 @@ mod echo_host;
 mod exec_e2e;
 mod exit_code_matrix;
 mod fixtures;
-mod hosts_reverse;
 mod hosts_toml;
 mod identity_move_key;
 mod init_trust;
 mod jsonl_purity;
 mod jump_surface;
 mod lifecycle_lines;
-mod localctl_perms;
 mod predict_accept;
 mod release_smoke;
 mod remote_install;
-mod reverse_blackout;
-mod reverse_e2e;
-mod reverse_unreachable_diagnostic;
 #[cfg(windows)]
 mod route_cases;
 mod screen_sync;
@@ -71,8 +63,6 @@ mod windows_attach;
 mod windows_drain;
 #[cfg(windows)]
 mod windows_forward_e2e;
-#[cfg(windows)]
-mod windows_reverse_e2e;
 
 mod common;
 mod ssh_golden;

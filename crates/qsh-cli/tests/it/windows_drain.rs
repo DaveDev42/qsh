@@ -1,5 +1,5 @@
-//! The Windows host's graceful stop: `qsh serve` and `qsh serve --to` that
-//! are told to stop close every session and leave no process behind
+//! The Windows host's graceful stop: a `qsh serve` that is told to stop
+//! closes every session and leaves no process behind
 //! (`docs/CLI.md` §6.12, ADR-0003, ADR-0035 decision 22).
 //!
 //! This is the Windows counterpart of `serve_sigterm_drain.rs`, which is unix
@@ -30,8 +30,6 @@ use qsh_core::{Ops, Paths, SessionAttachStream};
 use qsh_proto::event::SessionEvent;
 use qsh_proto::{EnvVar, SessionAttachReq, SessionOpenReq};
 use qsh_testkit::shell::Runaway;
-
-use crate::route_cases::{ReverseRoute, Route};
 
 /// Wall-clock bound for the whole scenario. Every wait inside is a real round
 /// trip or a real process exit; this is only the "declare it broken"
@@ -233,32 +231,6 @@ fn serve_stop_drains_sessions_and_leaves_no_orphan_on_windows() {
             );
             let stderr = output.stderr;
             (status.success(), Box::new(move || stderr.clone()))
-        })
-    });
-    assert_drained(&run);
-}
-
-/// `qsh serve --to` told to stop with the same two sessions, reached through
-/// the controller's daemon: the same exit, the same last word on the
-/// consumer's stream, and no process left behind.
-#[test]
-fn serve_to_stop_drains_sessions_and_leaves_no_orphan_on_windows() {
-    let run = with_deadline("serve --to stop drain", || {
-        let mut route = ReverseRoute::start();
-        let host = route.host().to_string();
-        drain_two_sessions(&route.controller, &host, || {
-            route.reverse.terminate();
-            let status = route
-                .reverse
-                .wait_timeout(DRAIN_BOUND)
-                .unwrap_or_else(|| panic!("qsh serve --to did not exit within {DRAIN_BOUND:?}"));
-            // The live capture, not a copy: the reader thread may still be
-            // draining the pipe, and the caller polls for the last line.
-            let stderr = route.reverse.stderr_sink();
-            (
-                status.success(),
-                Box::new(move || stderr.lock().unwrap_or_else(|e| e.into_inner()).clone()),
-            )
         })
     });
     assert_drained(&run);

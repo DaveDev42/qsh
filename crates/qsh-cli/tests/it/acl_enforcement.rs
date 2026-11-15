@@ -11,7 +11,7 @@
 //! unit concern, nothing a subprocess-level test would add to).
 //!
 //! Every test here uses [`common::ServeGuard::start_without_policy`] /
-//! [`common::ListenGuard::start_without_policy`] instead of `Fleet`/
+//! (the listen twin retired with ADR-0068) instead of `Fleet`/
 //! `start`/`start_with`: those plant a permissive `acl.toml` automatically
 //! (`common/mod.rs`'s `plant_allow_all_acl`) so every *other* fixture in
 //! this crate keeps behaving the way it did under `AllowAllPinned` — the
@@ -20,8 +20,6 @@
 use crate::common;
 
 use common::{CLIENT_ALIAS, CLIENT_PRINCIPAL, HOST_ALIAS, Sandbox, ServeGuard};
-use common::{ListenGuard, ReverseGuard};
-use common::{hosts_array, wait_for_audit};
 use serde_json::Value;
 
 /// The exact, invariant `PERMISSION_DENIED` wording
@@ -254,66 +252,6 @@ fn minimal_allow_policy_grants_exec_run_and_denies_session_open() {
     assert!(session_deny["rule"].is_null(), "{session_deny}");
 }
 
-/// Owed test (5): the controller side of the flip. `qsh listen` with no
-/// `acl.toml` denies every `host.reverse` registration attempt — the
-/// target never appears in `host.list`, and the controller's audit log
-/// shows only denies, never an allow (`crates/qsh-core/src/reverse/admit.rs`'s
-/// `host.reverse` choke point holds through the policy path, not just the
-/// old hardcoded one).
-#[test]
-fn listen_without_acl_toml_denies_every_reverse_registration() {
-    const TARGET_ALIAS: &str = "denied-target";
-    let controller = Sandbox::new();
-    let target = Sandbox::new();
-    let controller_fp = controller.fingerprint();
-    let target_fp = target.fingerprint();
-    controller.trust_add(TARGET_ALIAS, None, &target_fp);
-    let listen = ListenGuard::start_without_policy(&controller, "127.0.0.1:0");
-    target.trust_add("hub", Some(listen.addr()), &controller_fp);
-    // Fast, low-jitter backoff so the target retries (and the deny is
-    // re-exercised) promptly within this test's bounded wait.
-    std::fs::write(
-        target.config_dir().join("config.toml"),
-        "[reverse]\nbackoff_initial_ms = 10\nbackoff_max_ms = 40\nbackoff_jitter_pct = 0\n",
-    )
-    .expect("write config.toml");
-    let _reverse = ReverseGuard::start(&target, "hub");
-
-    let records = wait_for_audit(&controller, "a host.reverse deny", |record| {
-        record["action"] == "host.reverse" && record["decision"] == "deny"
-    });
-    assert!(
-        !records
-            .iter()
-            .any(|r| r["action"] == "host.reverse" && r["decision"] == "allow"),
-        "no reverse registration should ever have been allowed: {records:#?}"
-    );
-
-    let hosts = hosts_array(&controller);
-    assert!(
-        hosts.is_empty(),
-        "a denied registration must never appear in host.list: {hosts:?}"
-    );
-
-    // F6 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): the controller's own
-    // startup diagnostic — deleting the `on_policy_diagnostic` call
-    // entirely in `crates/qsh-core/src/reverse/listen.rs`'s `run_listen`
-    // still left every test in this file green before this assertion
-    // existed (`ListenGuard` discarded stderr outright). Assert it
-    // actually printed, exactly once.
-    let controller_stderr = listen.stderr_lines();
-    let diagnostic_lines: Vec<&String> = controller_stderr
-        .iter()
-        .filter(|line| line.contains("acl_policy_missing"))
-        .collect();
-    assert_eq!(
-        diagnostic_lines.len(),
-        1,
-        "the controller's startup diagnostic must print exactly once: {:#?}",
-        controller_stderr
-    );
-}
-
 /// ADR-0045 결정 8: `qsh trust set-role` on the host takes effect from the
 /// next request of the same running `qsh serve`, with no restart and with
 /// no `acl.toml` in play (a missing `acl.toml` is "no rows", the role still
@@ -346,47 +284,4 @@ fn set_role_takes_effect_on_the_next_request_without_restart() {
     let (code, denied) = run();
     assert_eq!(code, 255, "{denied}");
     assert_eq!(denied["error"]["code"], "PERMISSION_DENIED", "{denied}");
-}
-
-/// The `serve --to` half: the controller's `qsh listen` keeps refusing the
-/// target's registration while the target's pin has role `none`, and the
-/// target's own retry loop registers as soon as `trust set-role <target>
-/// reverse` runs on the controller, with neither process restarted.
-#[test]
-fn set_role_takes_effect_for_a_reverse_registration_without_restart() {
-    const TARGET_ALIAS: &str = "late-target";
-    let controller = Sandbox::new();
-    let target = Sandbox::new();
-    let controller_fp = controller.fingerprint();
-    let target_fp = target.fingerprint();
-    controller.trust_add_with_role(TARGET_ALIAS, None, &target_fp, "none");
-    let listen = ListenGuard::start_without_policy(&controller, "127.0.0.1:0");
-    target.trust_add("hub", Some(listen.addr()), &controller_fp);
-    std::fs::write(
-        target.config_dir().join("config.toml"),
-        "[reverse]\nbackoff_initial_ms = 10\nbackoff_max_ms = 40\nbackoff_jitter_pct = 0\n",
-    )
-    .expect("write config.toml");
-    let reverse = ReverseGuard::start_serve_to(&target, "hub");
-
-    common::wait_for_audit(&controller, "a host.reverse deny", |record| {
-        record["action"] == "host.reverse" && record["decision"] == "deny"
-    });
-    assert!(hosts_array(&controller).is_empty());
-
-    let (code, set) = controller.json(&["trust", "set-role", TARGET_ALIAS, "reverse", "--json"]);
-    assert_eq!(code, 0, "{set}");
-
-    common::poll_until(
-        "the reverse registration to be admitted after set-role",
-        std::time::Duration::from_secs(15),
-        || {
-            hosts_array(&controller)
-                .iter()
-                .any(|h| h["name"] == TARGET_ALIAS && h["connection_mode"] == "reverse")
-                .then_some(())
-        },
-    );
-    reverse.shut_down();
-    drop(listen);
 }

@@ -12,17 +12,12 @@ use crate::common;
 use common::{Sandbox, exit_code};
 
 use {
-    common::{HOST_ALIAS, ListenGuard, ReverseGuard, ServeGuard, hosts_array, poll_until},
+    common::{HOST_ALIAS, ServeGuard},
     qsh_core::identity::MemoryKeyStore,
     qsh_core::{Ops, Paths},
     qsh_proto::{IdentityMoveKeyReq, KeyStoreKind},
     serde_json::Value,
-    std::time::Duration,
 };
-
-/// Generous: each wait polls an observable state, so a loaded machine
-/// slows a case down without failing it.
-const WAIT: Duration = Duration::from_secs(60);
 
 /// `<config>/identity/<name>` as bytes, if the file exists.
 fn identity_file(sandbox: &Sandbox, name: &str) -> Option<Vec<u8>> {
@@ -175,40 +170,21 @@ fn trust_file(sandbox: &Sandbox) -> Vec<u8> {
 }
 
 /// PRD §4 route equivalence, real processes and real QUIC: after the key
-/// has been moved platform -> file, this device still handshakes in each
-/// of its three roles, with the peers' `trust.toml` untouched. The peers
-/// pinned the fingerprint from before the move, so a changed fingerprint
-/// would be a failed handshake here, not a silent repin.
-///
-/// 1. this device is the forward host (`qsh serve`), a client execs on it;
-/// 2. this device is the reverse listener (`qsh listen`), a target
-///    registers into it;
-/// 3. this device is the reverse target (`qsh serve --to`), registering
-///    into a listener.
-///
-/// All three roles run on every OS.
+/// has been moved platform -> file, this device still handshakes as the
+/// forward host (`qsh serve`) with the peer's `trust.toml` untouched. The
+/// peer pinned the fingerprint from before the move, so a changed
+/// fingerprint would be a failed handshake here, not a silent repin. (The
+/// reverse listener and reverse target roles retired with ADR-0068.)
 #[test]
-fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
+fn move_key_then_serve_handshakes_with_unchanged_pins() {
     let device = Sandbox::initialized();
     let device_fp = device.fingerprint();
 
-    // Peers, each pinning this device by the fingerprint it had before the
-    // move.
-    let client = Sandbox::initialized(); // role 1: execs on this device
+    // The peer pins this device by the fingerprint it had before the move.
+    let client = Sandbox::initialized(); // execs on this device
     let client_fp = client.fingerprint();
-    let (target, target_fp) = {
-        let target = Sandbox::initialized(); // role 2: registers into this device
-        let fp = target.fingerprint();
-        (target, fp)
-    };
-    let (controller, controller_fp) = {
-        let controller = Sandbox::initialized(); // role 3: this device registers into it
-        let fp = controller.fingerprint();
-        (controller, fp)
-    };
 
-    // Role 1 and role 2 need this device to run first, for the address
-    // the peers pin; start nothing until the key has moved.
+    // Nothing starts until the key has moved.
     let (before, after) = round_trip_through_a_fake_platform_store(&device);
     assert_eq!(before, after, "device id and fingerprint survive the move");
     assert_eq!(after.1, device_fp);
@@ -221,7 +197,6 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     assert_eq!(audited[0]["resource"], "file->platform");
     assert_eq!(audited[1]["resource"], "platform->file");
 
-    // --- Role 1: forward host.
     device.trust_add_with_role("laptop", None, &client_fp, "full");
     let serve = ServeGuard::start(&device);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &device_fp);
@@ -230,62 +205,4 @@ fn move_key_then_serve_listen_and_serve_to_handshake_with_unchanged_pins() {
     assert_eq!(code, 0, "forward host after move-key: {envelope}");
     assert_eq!(trust_file(&client), client_trust, "client trust.toml");
     drop(serve);
-
-    reverse_roles_after_move(
-        &device,
-        &device_fp,
-        &target,
-        &target_fp,
-        &controller,
-        &controller_fp,
-    );
-}
-
-/// Roles 2 and 3 of the route test: this device as the reverse listener a
-/// target registers into, then as the reverse target registering into a
-/// controller.
-fn reverse_roles_after_move(
-    device: &Sandbox,
-    device_fp: &str,
-    target: &Sandbox,
-    target_fp: &str,
-    controller: &Sandbox,
-    controller_fp: &str,
-) {
-    // --- Role 2: reverse listener.
-    device.trust_add_with_role("nat-target", None, target_fp, "reverse");
-    let listen = ListenGuard::start(device);
-    target.trust_add("hub", Some(listen.addr()), device_fp);
-    let target_trust = trust_file(target);
-    let reverse = ReverseGuard::start_serve_to(target, "hub");
-    let hosts = poll_until("the target to register into this device", WAIT, || {
-        let hosts = hosts_array(device);
-        hosts
-            .iter()
-            .any(|h| h["connection_mode"] == "reverse" && h["state"] == "reachable")
-            .then_some(hosts)
-    });
-    assert!(!hosts.is_empty());
-    assert_eq!(trust_file(target), target_trust, "target trust.toml");
-    reverse.shut_down();
-    drop(listen);
-
-    // --- Role 3: reverse target.
-    controller.trust_add_with_role("moved-device", None, device_fp, "reverse");
-    let controller_listen = ListenGuard::start(controller);
-    device.trust_add("hub", Some(controller_listen.addr()), controller_fp);
-    let controller_trust = trust_file(controller);
-    let moved_target = ReverseGuard::start_serve_to(device, "hub");
-    poll_until("this device to register into the controller", WAIT, || {
-        hosts_array(controller)
-            .iter()
-            .any(|h| h["connection_mode"] == "reverse" && h["state"] == "reachable")
-            .then_some(())
-    });
-    assert_eq!(
-        trust_file(controller),
-        controller_trust,
-        "controller trust.toml"
-    );
-    moved_target.shut_down();
 }

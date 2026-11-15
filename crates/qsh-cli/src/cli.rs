@@ -786,10 +786,8 @@ pub enum Command {
     /// shell, exec, tunnels and files.
     ///
     /// One `qsh serve` per device is the whole server side (`docs/CLI.md`
-    /// §6.12, ADR-0065). With `--to` it instead dials out and registers as
-    /// a reverse target, an advanced fallback for when the peers cannot
-    /// reach each other over iroh (`docs/CLI.md` §6.13, ADR-0012 decision
-    /// 2/4). Foreground only; the bound address, or the dial/registration
+    /// §6.12, ADR-0065). `--to` and `--name` (the reverse-target mode) were
+    /// retired in v0.9.0 and answer `UNSUPPORTED` (ADR-0068). Foreground only; the bound address, or the dial/registration
     /// events, go to stderr.
     Serve {
         // Precedent for not using a clap `value_parser`/`conflicts_with`
@@ -803,30 +801,14 @@ pub enum Command {
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
 
-        /// Advanced fallback: dial this controller and register as a
-        /// reverse target instead of listening inbound, for when the relay
-        /// (TCP 443 HTTPS) is blocked, iroh is off, or the peer does not
-        /// use iroh (ADR-0065) — the same role `qsh reverse <controller>`
-        /// plays, reached under its new name (ADR-0012 decision 2/4). A
-        /// trust-store alias, same as `qsh reverse`'s positional, or a
-        /// bare `host[:port]` address that resolves against pinned peers
-        /// by normalized address when no name matches (ADR-0014 decision
-        /// 7). Wins over `[serve].to` and the legacy
-        /// `[reverse].controller` config keys, which are not read at all
-        /// when this is given. The former `qsh reverse <controller>`
-        /// spelling still works as a hidden alias — no deprecation
-        /// warning, no scheduled removal.
+        /// Retired in v0.9.0 (ADR-0068): parses and answers `UNSUPPORTED`
+        /// with `details.reason` `reverse_retired`. Run `qsh serve` without
+        /// it and pin this machine's key on the other side instead.
         #[arg(long, value_name = "LISTENER|HOST:PORT")]
         to: Option<String>,
 
-        /// Name to register under when `--to` is given. Only takes effect
-        /// when the controller has no trust-store alias for this peer and
-        /// its `[listen].allow_advertised_names` is set; otherwise the
-        /// controller assigns the name from its own trust store, ignoring
-        /// this (same rule as `qsh reverse --offered-name`). Given without
-        /// `--to` is `INVALID_ARGUMENT` — a name is only meaningful
-        /// outbound, so this fails closed rather than silently ignoring
-        /// it.
+        /// Retired in v0.9.0 (ADR-0068) together with `--to`: parses and
+        /// answers `UNSUPPORTED` with `details.reason` `reverse_retired`.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
 
@@ -839,14 +821,13 @@ pub enum Command {
         on_demand: bool,
     },
 
-    /// Advanced fallback: run the reverse-mode controller, for when peers
-    /// cannot reach each other over iroh.
+    /// Retired in v0.9.0 (ADR-0068): the reverse-mode controller.
     ///
-    /// Use it when the relay (TCP 443 HTTPS) is blocked, iroh is off, or a
-    /// peer does not use iroh (ADR-0065). It accepts dial-in registrations
-    /// from `qsh serve --to` (the hidden `qsh reverse` alias dials the same
-    /// way) and serves them as hosts (`docs/CLI.md` §6.13). Foreground
-    /// only; the bound address and registration events go to stderr.
+    /// Still parses (`qsh.cli/v1` keeps its words), hidden from this help,
+    /// and answers `UNSUPPORTED` with `details.reason` `reverse_retired`
+    /// and the alternative: run `qsh serve` on the target and pin its key
+    /// here (`docs/CLI.md` §6.13).
+    #[command(hide = true)]
     Listen {
         /// Listen address (`ip:port`). Overrides `[listen].bind` in
         /// `config.toml`; defaults to `[::]:4433` — the same default as
@@ -882,17 +863,11 @@ pub enum Command {
     /// listed by (`Ops::tunnel_list`'s own doc).
     Tunnels,
 
-    /// Dial `<controller>` and register this device as a reverse target,
-    /// and keep it registered, redialing with backoff when the link drops
-    /// (`docs/CLI.md` §6.13). On success this process serves the connection
-    /// as a host, the same broker/writer-lease discipline as `qsh serve`.
+    /// Retired in v0.9.0 (ADR-0068): the reverse-mode target.
     ///
-    /// Hidden from `qsh --help`'s `Commands:` block (ADR-0012 decision 2/4):
-    /// `qsh serve --to <controller>` is the spelling documented from this
-    /// rename on (ROADMAP M9 (b)). This form still parses and still works, silently, with
-    /// no deprecation warning — `hide` only removes it from the parent's
-    /// listing, not from the CLI (`qsh reverse --help` still renders this
-    /// subcommand's own help in full).
+    /// Hidden from `qsh --help`'s `Commands:` block. It still parses and
+    /// answers `UNSUPPORTED` with `details.reason` `reverse_retired`
+    /// (`docs/CLI.md` §6.13).
     #[command(hide = true)]
     Reverse {
         /// Trust-store alias of the controller to dial (`qsh trust list`).
@@ -965,9 +940,8 @@ pub enum ServiceCmd {
         #[arg(long, conflicts_with_all = ["activate", "always_on"])]
         no_activate: bool,
 
-        /// Dial this controller and register as a reverse target: written to
-        /// `[serve].to` in `config.toml` (the `qsh config set` path), not to
-        /// the unit's arguments, before the run mode is inferred.
+        /// Retired in v0.9.0 (ADR-0068): answers `UNSUPPORTED` with
+        /// `details.reason` `reverse_retired`.
         #[arg(long, value_name = "LISTENER|HOST:PORT")]
         to: Option<String>,
 
@@ -976,8 +950,7 @@ pub enum ServiceCmd {
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
 
-        /// Name to register under with `--to`: written to
-        /// `[reverse].offered_name` in `config.toml`.
+        /// Retired in v0.9.0 (ADR-0068) with `--to`: answers `UNSUPPORTED`.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
 
@@ -1028,7 +1001,8 @@ pub enum ServiceCmd {
     /// The entry the Windows Task Scheduler task runs (ADR-0035 decision
     /// 27): detach from the console, point stdout and stderr at
     /// `<state_dir>/log/<mode>.out.log` and `.err.log`, then run the same
-    /// foreground entry as `qsh serve`, `qsh listen` or `qsh serve --to`.
+    /// foreground entry as `qsh serve`. `listen` and `reverse` are retired
+    /// (ADR-0068) and answer `UNSUPPORTED`.
     ///
     /// Hidden from `qsh --help` and the man pages: it is plumbing for the
     /// unit a person installs with `qsh service install`, not something to
@@ -1757,19 +1731,11 @@ pub struct PairSshArgs {
     /// `:port`, port 4433 is assumed.
     #[arg(long, value_name = "HOST[:PORT]")]
     pub address: Option<String>,
-    /// Reverse direction: the remote dials this machine's `qsh listen`
-    /// instead of this machine dialing the remote. Goes with `--to`, and
-    /// does not combine with `--address` (either mistake is an
-    /// `INVALID_ARGUMENT` before ssh runs). The
-    /// remote pins this machine at the `--to` address with the `--role`
-    /// role; this machine pins the remote without an address and with
-    /// role `reverse`. Nothing is started on the remote and no connection
-    /// is tried: the result names the `qsh serve --to` command to run
-    /// there.
+    /// Retired in v0.9.0 (ADR-0068): the reverse direction. Answers
+    /// `UNSUPPORTED` with `details.reason` `reverse_retired`.
     #[arg(long)]
     pub reverse: bool,
-    /// With `--reverse`: the `host[:port]` the remote dials to reach this
-    /// machine's `qsh listen`. With no `:port`, port 4433 is assumed.
+    /// Retired in v0.9.0 with `--reverse` (ADR-0068): answers `UNSUPPORTED`.
     #[arg(long, value_name = "HOST[:PORT]")]
     pub to: Option<String>,
     /// The `qsh` to run on the remote (default: `[ssh].remote_qsh` in
@@ -1794,17 +1760,16 @@ pub struct PairSshArgs {
 /// prompt in human mode on a terminal.
 #[derive(Debug, Subcommand)]
 pub enum SetupCmd {
-    /// This machine runs `qsh serve` (`--peer`) or `qsh serve --to`
-    /// (`--to` with `--address`).
+    /// This machine runs `qsh serve` (`--peer`).
     Host {
         /// The peer's trust-store name; also the `device:<name>` principal
         /// of the printed `[[acl]]` rows.
         #[arg(long, value_name = "NAME", conflicts_with = "to")]
         peer: Option<String>,
-        /// Serve one reverse-listener alias instead (`qsh serve --to`).
+        /// Retired in v0.9.0 (ADR-0068): answers `UNSUPPORTED`.
         #[arg(long, value_name = "ALIAS")]
         to: Option<String>,
-        /// `host:port` recorded on the pin (with `--to`).
+        /// Retired in v0.9.0 with `--to` (ADR-0068).
         #[arg(long, value_name = "ADDR")]
         address: Option<String>,
         /// Pin the peer from its certificate file (`-` reads standard
@@ -1849,7 +1814,8 @@ pub enum SetupCmd {
         #[arg(long, value_name = "ROLE")]
         peer_role: Option<String>,
     },
-    /// This machine runs `qsh listen` for a reverse peer.
+    /// Retired in v0.9.0 (ADR-0068): answers `UNSUPPORTED`.
+    #[command(hide = true)]
     Listener {
         /// The peer's trust-store name.
         #[arg(long, value_name = "NAME")]

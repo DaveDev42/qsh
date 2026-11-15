@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH qsh-setup-host 1  "host 0.8.2" 
 .SH NAME
-qsh\-setup\-host \- This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
+qsh\-setup\-host \- This machine runs `qsh serve` (`\-\-peer`)
 .SH SYNOPSIS
 \fBqsh setup host\fR [\fB\-\-json\fR] [\fB\-\-peer\fR] [\fB\-\-jsonl\fR] [\fB\-\-to\fR] [\fB\-\-address\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-peer\-cert\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-forward\fR] [\fB\-\-no\-ssh\fR] [\fB\-\-install\-remote\fR] [\fB\-\-service\fR] [\fB\-\-no\-install\-remote\fR] [\fB\-\-peer\-role\fR] [\fB\-\-no\-punch\fR] [\fB\-\-no\-iroh\fR] [\fB\-\-rendezvous\fR] [\fB\-\-jump\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
+This machine runs `qsh serve` (`\-\-peer`)
 .SH OPTIONS
 .TP
 \fB\-\-json\fR
@@ -19,10 +19,10 @@ The peer\*(Aqs trust\-store name; also the `device:<name>` principal of the prin
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
 .TP
 \fB\-\-to\fR \fI<ALIAS>\fR
-Serve one reverse\-listener alias instead (`qsh serve \-\-to`)
+Retired in v0.9.0 (ADR\-0068): answers `UNSUPPORTED`
 .TP
 \fB\-\-address\fR \fI<ADDR>\fR
-`host:port` recorded on the pin (with `\-\-to`)
+Retired in v0.9.0 with `\-\-to` (ADR\-0068)
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)

@@ -1,9 +1,7 @@
 //! L5 — `qsh cp` end to end (ADR-0029, `docs/CLI.md` §6.21), M15 plan Step 14 (1a4af3b).
 //!
-//! Real processes, no fakes: a `qsh serve` host (forward route) or a
-//! `qsh listen` controller plus a `qsh serve --to` target (reverse route,
-//! where the FILE_DATA bytes go through the controller's localctl daemon
-//! relay), and the `qsh cp` client as a subprocess.
+//! Real processes, no fakes: a `qsh serve` host and the `qsh cp` client as a
+//! subprocess. (The reverse rig retired with ADR-0068.)
 //!
 //! The host authorizes file actions from the pin's role (ADR-0045), so the
 //! host pins the client with `--role full`; the stock `acl.toml` planted by
@@ -21,10 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use common::{
-    CLIENT_ALIAS, HOST_ALIAS, ListenGuard, ReverseGuard, Sandbox, ServeGuard, exit_code,
-    hosts_array, poll_until,
-};
+use common::{CLIENT_ALIAS, HOST_ALIAS, Sandbox, ServeGuard, exit_code};
 use serde_json::Value;
 use sha2::Digest as _;
 
@@ -70,71 +65,6 @@ impl Forward {
         let mut argv = vec!["cp", "--json"];
         argv.extend_from_slice(args);
         self.client.json(&argv)
-    }
-}
-
-/// A reverse rig. The client runs from the controller's own sandbox so it
-/// finds the controller's localctl daemon, which relays FILE_DATA to the
-/// target (`docs/design/architecture.md` §7).
-pub(crate) struct Reverse {
-    pub(crate) controller: Sandbox,
-    _target: Sandbox,
-    _listen: ListenGuard,
-    _reverse: ReverseGuard,
-    pub(crate) work: tempfile::TempDir,
-}
-
-pub(crate) const TARGET_NAME: &str = "nat-target";
-pub(crate) const CONTROLLER_ALIAS: &str = "hub";
-
-impl Reverse {
-    pub(crate) fn start() -> Self {
-        let controller = Sandbox::initialized();
-        let target = Sandbox::initialized();
-        controller.trust_add(TARGET_NAME, None, &target.fingerprint());
-        let listen = ListenGuard::start(&controller);
-        target.trust_add_with_role(
-            CONTROLLER_ALIAS,
-            Some(listen.addr()),
-            &controller.fingerprint(),
-            "full",
-        );
-        let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
-        poll_until(
-            "the reverse registration to appear reachable",
-            Duration::from_secs(20),
-            || {
-                hosts_array(&controller)
-                    .iter()
-                    .any(|h| {
-                        h["name"] == TARGET_NAME
-                            && h["connection_mode"] == "reverse"
-                            && h["state"] == "reachable"
-                    })
-                    .then_some(())
-            },
-        );
-        Self {
-            controller,
-            _target: target,
-            _listen: listen,
-            _reverse: reverse,
-            work: tempfile::tempdir().expect("work dir"),
-        }
-    }
-
-    pub(crate) fn path(&self, name: &str) -> PathBuf {
-        self.work.path().join(name)
-    }
-
-    pub(crate) fn remote(&self, name: &str) -> String {
-        format!("{TARGET_NAME}:{}", self.path(name).display())
-    }
-
-    pub(crate) fn cp_json(&self, args: &[&str]) -> (i32, Value) {
-        let mut argv = vec!["cp", "--json"];
-        argv.extend_from_slice(args);
-        self.controller.json(&argv)
     }
 }
 
@@ -242,19 +172,6 @@ fn file_round_trip_is_byte_identical_forward() {
     let dst = rig.remote("stored.bin");
     round_trip(rig.work.path(), &dst, &dst, |args| rig.cp_json(args));
     // The host really holds the bytes in the middle: its copy is the same.
-    assert_eq!(
-        digests(&rig.path("stored.bin")),
-        digests(&rig.path("original.bin"))
-    );
-}
-
-#[test]
-fn file_round_trip_is_byte_identical_reverse() {
-    // The FILE_DATA stream of both directions runs through the controller's
-    // localctl daemon relay (ADR-0029 decision 16), end to end.
-    let rig = Reverse::start();
-    let dst = rig.remote("stored.bin");
-    round_trip(rig.work.path(), &dst, &dst, |args| rig.cp_json(args));
     assert_eq!(
         digests(&rig.path("stored.bin")),
         digests(&rig.path("original.bin"))

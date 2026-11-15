@@ -8,7 +8,7 @@ qsh\-serve \- Run the server: accept connections from pinned peers and offer she
 .SH DESCRIPTION
 Run the server: accept connections from pinned peers and offer shell, exec, tunnels and files.
 .PP
-One `qsh serve` per device is the whole server side (`docs/CLI.md` §6.12, ADR\-0065). With `\-\-to` it instead dials out and registers as a reverse target, an advanced fallback for when the peers cannot reach each other over iroh (`docs/CLI.md` §6.13, ADR\-0012 decision 2/4). Foreground only; the bound address, or the dial/registration events, go to stderr.
+One `qsh serve` per device is the whole server side (`docs/CLI.md` §6.12, ADR\-0065). `\-\-to` and `\-\-name` (the reverse\-target mode) were retired in v0.9.0 and answer `UNSUPPORTED` (ADR\-0068). Foreground only; the bound address, or the dial/registration events, go to stderr.
 .SH OPTIONS
 .TP
 \fB\-\-bind\fR \fI<IP:PORT>\fR
@@ -21,10 +21,10 @@ Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable te
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
 .TP
 \fB\-\-to\fR \fI<LISTENER|HOST:PORT>\fR
-Advanced fallback: dial this controller and register as a reverse target instead of listening inbound, for when the relay (TCP 443 HTTPS) is blocked, iroh is off, or the peer does not use iroh (ADR\-0065) — the same role `qsh reverse <controller>` plays, reached under its new name (ADR\-0012 decision 2/4). A trust\-store alias, same as `qsh reverse`\*(Aqs positional, or a bare `host[:port]` address that resolves against pinned peers by normalized address when no name matches (ADR\-0014 decision 7). Wins over `[serve].to` and the legacy `[reverse].controller` config keys, which are not read at all when this is given. The former `qsh reverse <controller>` spelling still works as a hidden alias — no deprecation warning, no scheduled removal
+Retired in v0.9.0 (ADR\-0068): parses and answers `UNSUPPORTED` with `details.reason` `reverse_retired`. Run `qsh serve` without it and pin this machine\*(Aqs key on the other side instead
 .TP
 \fB\-\-name\fR \fI<NAME>\fR
-Name to register under when `\-\-to` is given. Only takes effect when the controller has no trust\-store alias for this peer and its `[listen].allow_advertised_names` is set; otherwise the controller assigns the name from its own trust store, ignoring this (same rule as `qsh reverse \-\-offered\-name`). Given without `\-\-to` is `INVALID_ARGUMENT` — a name is only meaningful outbound, so this fails closed rather than silently ignoring it
+Retired in v0.9.0 (ADR\-0068) together with `\-\-to`: parses and answers `UNSUPPORTED` with `details.reason` `reverse_retired`
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)

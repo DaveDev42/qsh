@@ -34,9 +34,9 @@ use qsh_testkit::conpty::ConPtyProbe;
 
 use crate::common::{Sandbox, poll_until};
 use crate::console_probe::qsh_bin;
-use crate::echo_host::{EchoForward, EchoReverse, EchoRoute};
+use crate::echo_host::{EchoForward, EchoRoute};
 use crate::route_cases::{
-    self as cases, ForwardRoute, ReverseRoute, Route, sessions_on, strip_vt, write_to_session,
+    self as cases, ForwardRoute, Route, sessions_on, strip_vt, write_to_session,
 };
 
 /// What an echo session prints first (`qsh_core::broker::ECHO_BANNER`).
@@ -221,28 +221,13 @@ fn echo_round_trip_forward() {
 }
 
 #[test]
-fn echo_round_trip_reverse() {
-    echo_round_trip(&EchoReverse::start());
-}
-
-#[test]
 fn detach_then_attach_resumes_forward() {
     detach_then_attach_resumes(&EchoForward::start());
 }
 
 #[test]
-fn detach_then_attach_resumes_reverse() {
-    detach_then_attach_resumes(&EchoReverse::start());
-}
-
-#[test]
 fn console_close_detaches_and_keeps_the_session() {
     console_close_detaches(&EchoForward::start());
-}
-
-#[test]
-fn console_close_detaches_and_keeps_the_session_reverse() {
-    console_close_detaches(&EchoReverse::start());
 }
 
 /// `user@` is an assertion, not a choice: a name that is not the serve
@@ -526,18 +511,8 @@ fn pty_attach_round_trip_forward() {
 }
 
 #[test]
-fn pty_attach_round_trip_reverse() {
-    pty_attach_round_trip(&ReverseRoute::start());
-}
-
-#[test]
 fn pty_detach_then_attach_resumes_forward() {
     pty_detach_then_attach_resumes(&ForwardRoute::start());
-}
-
-#[test]
-fn pty_detach_then_attach_resumes_reverse() {
-    pty_detach_then_attach_resumes(&ReverseRoute::start());
 }
 
 #[test]
@@ -546,26 +521,11 @@ fn pty_resize_propagates_forward() {
 }
 
 #[test]
-fn pty_resize_propagates_reverse() {
-    pty_resize_propagates(&ReverseRoute::start());
-}
-
-#[test]
 fn killed_client_leaves_the_session_running_forward() {
     killed_client_leaves_the_session_running(&ForwardRoute::start());
 }
 
 #[test]
-fn killed_client_leaves_the_session_running_reverse() {
-    killed_client_leaves_the_session_running(&ReverseRoute::start());
-}
-
-#[test]
 fn pty_console_close_detaches_and_keeps_the_session_forward() {
     pty_console_close_detaches(&ForwardRoute::start(), true);
-}
-
-#[test]
-fn pty_console_close_detaches_and_keeps_the_session_reverse() {
-    pty_console_close_detaches(&ReverseRoute::start(), false);
 }

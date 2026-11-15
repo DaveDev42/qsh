@@ -19,7 +19,7 @@ Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-st
 Write the unit file and stop: the manager is not called. The former default
 .TP
 \fB\-\-to\fR \fI<LISTENER|HOST:PORT>\fR
-Dial this controller and register as a reverse target: written to `[serve].to` in `config.toml` (the `qsh config set` path), not to the unit\*(Aqs arguments, before the run mode is inferred
+Retired in v0.9.0 (ADR\-0068): answers `UNSUPPORTED` with `details.reason` `reverse_retired`
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
@@ -31,7 +31,7 @@ Listen address (`ip:port`): written to `[serve].bind` in `config.toml`, not to t
 Suppress diagnostic output on stderr
 .TP
 \fB\-\-name\fR \fI<NAME>\fR
-Name to register under with `\-\-to`: written to `[reverse].offered_name` in `config.toml`
+Retired in v0.9.0 (ADR\-0068) with `\-\-to`: answers `UNSUPPORTED`
 .TP
 \fB\-\-no\-ssh\fR
 Never run ssh on this command\*(Aqs behalf: no automatic bootstrap of an unknown name, and no restarting of a pinned host\*(Aqs serve over ssh when the connection fails (`docs/CLI.md` §7). `qsh pair ssh` is not affected; it is ssh by definition

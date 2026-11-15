@@ -1,14 +1,9 @@
-//! The cases `windows_forward_e2e.rs` and `windows_reverse_e2e.rs` share, and
-//! the two routes they run over (ADR-0035 decisions 1, 2 and 14).
+//! The cases `windows_forward_e2e.rs` and the release smoke test share, and
+//! the route they run over (ADR-0035 decisions 1, 2 and 14).
 //!
 //! A case takes a [`Route`] and drives only real `qsh` processes through it:
-//! the forward route is a `qsh serve` host that pins a client, the reverse
-//! route is a `qsh listen` controller with a `qsh serve --to` target
-//! registered on it and the client running in the controller's sandbox (the
-//! client finds the daemon through the sandbox's runtime directory, so it has
-//! to share it). No test-only harness stands in for either side, so the same
-//! function proves the same behaviour on both routes and only the way the
-//! route is built differs.
+//! the forward route is a `qsh serve` host that pins a client. No test-only
+//! harness stands in for it. (The reverse route retired with ADR-0068.)
 //!
 //! Half-close works through both routes the same way on every platform: a
 //! client that shuts only its write side has that end delivered to the
@@ -27,7 +22,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use common::{Fleet, HOST_ALIAS, ListenGuard, ReverseGuard, Sandbox, hosts_array, poll_until};
+use common::{Fleet, HOST_ALIAS, Sandbox, hosts_array, poll_until};
 use qsh_testkit::net_probe::free_port;
 use serde_json::Value;
 
@@ -41,12 +36,6 @@ pub const READY_DEADLINE: Duration = Duration::from_secs(30);
 /// repeat of any single buffer's worth, so a dropped or reordered chunk
 /// cannot look correct.
 const PAYLOAD_LEN: usize = 96 * 1024;
-
-/// The name the controller's trust store gives the reverse target.
-pub const REVERSE_NAME: &str = "nat-target";
-
-/// The alias the target's trust store uses for the controller it dials.
-pub const CONTROLLER_ALIAS: &str = "hub";
 
 /// A route from a client to a host, as a case sees it.
 pub trait Route {
@@ -94,127 +83,6 @@ impl Route for ForwardRoute {
     fn host_sandbox(&self) -> &Sandbox {
         &self.fleet.host
     }
-}
-
-/// Client to a `qsh serve --to` target registered on a `qsh listen` daemon
-/// of the same sandbox.
-pub struct ReverseRoute {
-    /// The controller, and the sandbox the client commands run in.
-    pub controller: Sandbox,
-    /// The target's own sandbox.
-    pub target: Sandbox,
-    pub listen: ListenGuard,
-    pub reverse: ReverseGuard,
-}
-
-impl ReverseRoute {
-    /// Controller, target, and the registration between them, up and
-    /// reachable from the controller's `qsh hosts`.
-    pub fn start() -> Self {
-        let route = Self::start_unregistered(None, "none");
-        route.wait_registered();
-        route
-    }
-
-    /// Like [`Self::start`], with the target pinning the controller with the
-    /// `full` role: the route `qsh cp` cases need.
-    pub fn start_full() -> Self {
-        let route = Self::start_unregistered(None, "full");
-        route.wait_registered();
-        route
-    }
-
-    /// Like [`Self::start`], with the controller on `bind` instead of an
-    /// ephemeral port, so a restarted controller can come back to the address
-    /// the target dials. Waits for the registration as well.
-    pub fn start_at(bind: &str) -> Self {
-        let route = Self::start_unregistered(Some(bind), "none");
-        route.wait_registered();
-        route
-    }
-
-    fn start_unregistered(bind: Option<&str>, controller_role: &str) -> Self {
-        let controller = Sandbox::initialized();
-        let target = Sandbox::initialized();
-        let target_fp = target.fingerprint();
-        let controller_fp = controller.fingerprint();
-
-        // The controller pins the target by fingerprint only, with no
-        // address: the only route to `REVERSE_NAME` is a live registration,
-        // never a forward dial.
-        controller.trust_add(REVERSE_NAME, None, &target_fp);
-        let listen = match bind {
-            Some(bind) => ListenGuard::start_with(&controller, bind),
-            None => ListenGuard::start(&controller),
-        };
-        target.trust_add_with_role(
-            CONTROLLER_ALIAS,
-            Some(listen.addr()),
-            &controller_fp,
-            controller_role,
-        );
-        fast_reconnect(&target);
-        let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
-        Self {
-            controller,
-            target,
-            listen,
-            reverse,
-        }
-    }
-
-    /// Wait until the controller's `qsh hosts` shows the target as a
-    /// reachable reverse entry.
-    pub fn wait_registered(&self) {
-        wait_reverse_entry(&self.controller, "reachable", READY_DEADLINE);
-    }
-}
-
-impl Route for ReverseRoute {
-    fn client(&self) -> &Sandbox {
-        &self.controller
-    }
-
-    fn host(&self) -> &str {
-        REVERSE_NAME
-    }
-
-    fn host_sandbox(&self) -> &Sandbox {
-        &self.target
-    }
-}
-
-/// A target that retries quickly, so a controller that goes away and comes
-/// back is found again within a test's patience instead of a backoff's.
-fn fast_reconnect(target: &Sandbox) {
-    std::fs::write(
-        target.config_dir().join("config.toml"),
-        "[reverse]\nbackoff_initial_ms = 100\nbackoff_max_ms = 400\nbackoff_jitter_pct = 0\n",
-    )
-    .expect("write the target's config.toml");
-}
-
-/// Poll `qsh hosts` in `controller` until the reverse entry for
-/// [`REVERSE_NAME`] is in `state`, and return it.
-pub fn wait_reverse_entry(controller: &Sandbox, state: &str, deadline: Duration) -> Value {
-    poll_until(
-        &format!("the reverse entry to be {state}"),
-        deadline,
-        || {
-            hosts_array(controller)
-                .into_iter()
-                .find(|h| h["name"] == REVERSE_NAME && h["connection_mode"] == "reverse")
-                .filter(|h| h["state"] == state)
-        },
-    )
-}
-
-/// The reverse entries `qsh hosts` shows right now.
-pub fn reverse_entries(controller: &Sandbox) -> Vec<Value> {
-    hosts_array(controller)
-        .into_iter()
-        .filter(|h| h["connection_mode"] == "reverse")
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

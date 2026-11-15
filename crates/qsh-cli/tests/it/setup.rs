@@ -89,8 +89,6 @@ fn setup_machine_mode_rejects_missing_input_before_any_write() {
             "--json",
         ],
         &["setup", "client", "--address", "h.example:4433", "--json"],
-        &["setup", "listener", "--peer", "macmini", "--json"],
-        &["setup", "host", "--to", "macmini", "--json"],
         // `--peer-role` outside the six names (ADR-0045 결정 8).
         &[
             "setup",
@@ -124,7 +122,7 @@ fn setup_machine_mode_rejects_missing_input_before_any_write() {
     let bad = write_cert(&sandbox, "not a certificate\n");
     let (code, envelope) = sandbox.json(&[
         "setup",
-        "listener",
+        "host",
         "--peer",
         "macmini",
         "--peer-cert",
@@ -278,7 +276,7 @@ fn setup_output_never_carries_key_material() {
     assert!(!stderr.contains(invite_code), "code on stderr: {stderr}");
     record("host", &host, &output);
 
-    // client, listener and host --to, all by certificate file.
+    // client, by certificate file.
     let client = configured("");
     let path = write_cert(&client, &pem);
     let output = client.qsh(&[
@@ -293,36 +291,6 @@ fn setup_output_never_carries_key_material() {
     ]);
     assert_eq!(exit_code(&output), 0);
     record("client", &client, &output);
-
-    let listener = configured("[listen]\nbind = \"[::]:4433\"\n");
-    let path = write_cert(&listener, &pem);
-    let output = listener.qsh(&[
-        "setup",
-        "listener",
-        "--peer",
-        "macmini",
-        "--peer-cert",
-        &path,
-        "--json",
-    ]);
-    assert_eq!(exit_code(&output), 0);
-    record("listener", &listener, &output);
-
-    let host_to = configured("[serve]\nto = \"macmini\"\n");
-    let path = write_cert(&host_to, &pem);
-    let output = host_to.qsh(&[
-        "setup",
-        "host",
-        "--to",
-        "macmini",
-        "--address",
-        "m.example:4433",
-        "--peer-cert",
-        &path,
-        "--json",
-    ]);
-    assert_eq!(exit_code(&output), 0);
-    record("host_to", &host_to, &output);
 
     // An error envelope carries no key material either.
     let broken = configured("");
@@ -341,42 +309,20 @@ fn setup_output_never_carries_key_material() {
     }
 }
 
-/// `--service` on both host spellings through the binary, on a Windows host
+/// `--service` on `setup host` through the binary, on a Windows host
 /// (ADR-0035 decisions 25 and 27): the `service` step is `done`, not the
 /// `UNSUPPORTED` skip, and the Task Scheduler task definition is the only
 /// thing written. Nothing is registered (no `activation`), so the test leaves
 /// the machine's scheduler alone.
 #[cfg(windows)]
 #[test]
-fn setup_host_and_host_to_service_write_task_definitions_through_the_binary() {
-    let pem = peer_cert_pem();
-
+fn setup_host_service_writes_the_task_definition_through_the_binary() {
     let host = configured("");
     let output = host.qsh(&["setup", "host", "--peer", "laptop", "--service", "--json"]);
     assert_eq!(exit_code(&output), 0, "{output:?}");
     let envelope = sole_envelope(&output.stdout, &["setup", "host"]);
 
-    let host_to = configured("[serve]\nto = \"macmini\"\n");
-    let path = write_cert(&host_to, &pem);
-    let output_to = host_to.qsh(&[
-        "setup",
-        "host",
-        "--to",
-        "macmini",
-        "--address",
-        "m.example:4433",
-        "--peer-cert",
-        &path,
-        "--service",
-        "--json",
-    ]);
-    assert_eq!(exit_code(&output_to), 0, "{output_to:?}");
-    let envelope_to = sole_envelope(&output_to.stdout, &["setup", "host"]);
-
-    for (sandbox, envelope, mode) in [
-        (&host, &envelope, "serve"),
-        (&host_to, &envelope_to, "reverse"),
-    ] {
+    for (sandbox, envelope, mode) in [(&host, &envelope, "serve")] {
         let service = step(&envelope["data"], "service");
         assert_eq!(service["status"], "done", "{mode}: {envelope}");
         assert_eq!(service["result"]["manager"], "task_scheduler", "{mode}");

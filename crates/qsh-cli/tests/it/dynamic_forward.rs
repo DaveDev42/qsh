@@ -56,7 +56,6 @@ use common::{DynamicTunnelGuard, Fleet, HOST_ALIAS, Sandbox, exit_code};
 use serde_json::Value;
 
 use crate::tunnel_e2e::PtyClient;
-use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 
 /// `qsh`'s own runtime-failure exit code (`docs/CLI.md` §4) — a private
 /// copy, same self-containment reasoning `exit_code_matrix.rs`'s own copy
@@ -66,18 +65,6 @@ const EXIT_RUNTIME_FAILURE: i32 = 255;
 /// clap's usage-error exit code (`docs/CLI.md` §4) — private copy, same
 /// reasoning as [`EXIT_RUNTIME_FAILURE`].
 const EXIT_USAGE: i32 = 2;
-
-/// How long we wait for a reverse registration to show up reachable on the
-/// controller's `qsh hosts --json` (mirrors `reverse_e2e.rs`'s own copy).
-const REGISTRATION_DEADLINE: Duration = Duration::from_secs(15);
-
-/// The name the controller's own trust store assigns the target (mirrors
-/// `reverse_e2e.rs`'s own copy — each file keeps its own rather than
-/// sharing, `reverse_e2e.rs`'s module doc explains why).
-const TARGET_NAME: &str = "dash-d-target";
-
-/// The alias the target's own trust store uses for the controller.
-const CONTROLLER_ALIAS: &str = "hub";
 
 /// Speak just enough SOCKS5 to prove a listener really is one: the
 /// greeting (version 5, one method, no-auth) and the method-select reply
@@ -96,65 +83,6 @@ fn socks5_greet(stream: &mut TcpStream) {
         [0x05, 0x00],
         "a real SOCKS5 listener must select no-auth"
     );
-}
-
-/// A real, live-round-trip pre-flight check on a just-started
-/// [`qsh_testkit::net_probe::LanEcho`] — a plain `connect` + write + read
-/// against `addr`, bounded by `bound`.
-///
-/// Needed because [`qsh_testkit::net_probe::usable_non_loopback_v4`]'s own
-/// probe only proves the *connecting* side's `connect()` resolves inside
-/// its 2s bound, which on a host behind a hairpin-NAT-like virtual network
-/// interface can succeed at the TCP layer while the listening socket's own
-/// `accept()` never actually dequeues the connection (observed running
-/// this suite on such a host: `connect()` returns `Ok` immediately, but a
-/// full echo round trip on the same address never completes). This test
-/// file's own reverse-route tests need a destination this host can
-/// *actually* round-trip a byte through, not merely dial, so this checks
-/// that directly rather than trusting the address `usable_non_loopback_v4`
-/// already handed back.
-fn live_round_trip_probe(addr: std::net::SocketAddrV4, bound: Duration) -> bool {
-    let Ok(mut socket) = TcpStream::connect(addr) else {
-        return false;
-    };
-    if socket.set_read_timeout(Some(bound)).is_err() || socket.set_nodelay(true).is_err() {
-        return false;
-    }
-    let probe = b"net-probe-preflight";
-    if socket.write_all(probe).is_err() {
-        return false;
-    }
-    let mut back = [0u8; 19];
-    matches!(socket.read_exact(&mut back), Ok(()) if &back == probe)
-}
-
-/// [`live_round_trip_probe`]'s own `Gap`-style policy — `in_ci` is
-/// [`qsh_testkit::net_probe::in_ci`] (`net_probe::Gap`'s own doc): off CI a
-/// failed preflight is a printed skip, on CI it is a hard failure, so a
-/// real qsh regression cannot hide behind an environment that merely
-/// *looks* reachable the way [`usable_non_loopback_v4`]'s own probe can be
-/// fooled (this helper's own doc).
-///
-/// [`usable_non_loopback_v4`]: qsh_testkit::net_probe::usable_non_loopback_v4
-macro_rules! live_round_trip_or_return {
-    ($addr:expr, $test_name:expr) => {
-        if !live_round_trip_probe($addr, Duration::from_secs(5)) {
-            if qsh_testkit::net_probe::in_ci() {
-                panic!(
-                    "{}: a live round trip to its own just-bound non-loopback echo server did \
-                     not complete (CI requires one; see crates/qsh-cli/tests/it/dynamic_forward.rs::\
-                     live_round_trip_probe)",
-                    $test_name
-                );
-            }
-            eprintln!(
-                "skipping {}: a live round trip to a non-loopback destination on this host did \
-                 not complete (hairpin NAT or similar — see live_round_trip_probe's own doc)",
-                $test_name
-            );
-            return;
-        }
-    };
 }
 
 // ---------------------------------------------------------------------
@@ -297,127 +225,6 @@ fn non_loopback_bind_is_invalid_argument_and_binds_nothing() {
     });
 }
 
-/// `-D` on a reverse-route target round-trips real bytes (ADR-0020
-/// decisions 1, 3): the controller's `tunnel open --dynamic` resolves the
-/// reverse route, dials the controller's own `qsh listen` daemon over
-/// `LOCAL_CONTROL`, confirms `dial-filter.v1` (present — every real daemon
-/// this crate spawns advertises it, this file's own module doc), then
-/// binds the SOCKS listener. A `CONNECT` to a non-loopback destination
-/// crosses the reverse conduit as a `LOCAL_STREAM`/`TCP_CONNECT`, reaches
-/// the target's own outbound socket, and echoes back verbatim — proof the
-/// whole relay is a real byte pipe, not merely an accepted handshake. Real
-/// controller/target processes, same technique as `reverse_e2e.rs`: the
-/// `tunnel open --dynamic` call runs from the controller's own sandbox,
-/// because that is how `Ops::connect`'s reverse route is reached at all.
-///
-/// Needs a real, non-loopback IPv4 route that this host can genuinely
-/// round-trip a byte through — [`live_round_trip_probe`]'s own doc explains
-/// why the shared [`qsh_testkit::net_probe::usable_non_loopback_v4`] probe
-/// alone is not enough to trust here. Off CI this skips with a printed
-/// reason when that is not so; on CI the same gap fails the test
-/// ([`live_round_trip_or_return`]'s own doc).
-#[test]
-fn dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination() {
-    const TEST_NAME: &str = "dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination";
-    let ip = qsh_testkit::gap_or_return!(
-        qsh_testkit::net_probe::require_non_loopback_v4_route(
-            "no non-loopback IPv4 route on this host"
-        ),
-        "dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination"
-    );
-
-    let rt = tokio::runtime::Runtime::new().expect("build a tokio runtime for the echo server");
-    let echo = rt
-        .block_on(qsh_testkit::net_probe::LanEcho::start(ip))
-        .expect("bind a non-loopback echo server");
-    let echo_addr = match echo.addr() {
-        std::net::SocketAddr::V4(v4) => v4,
-        std::net::SocketAddr::V6(_) => panic!("LanEcho::start(Ipv4Addr) must bind an IPv4 socket"),
-    };
-    live_round_trip_or_return!(echo_addr, TEST_NAME);
-
-    let controller = Sandbox::initialized();
-    let target = Sandbox::initialized();
-    let target_fp = target.fingerprint();
-    let controller_fp = controller.fingerprint();
-
-    controller.trust_add(TARGET_NAME, None, &target_fp);
-    let listen = ListenGuard::start(&controller);
-
-    target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
-    let _reverse = ReverseGuard::start(&target, CONTROLLER_ALIAS);
-
-    poll_until(
-        "the reverse registration to appear reachable",
-        REGISTRATION_DEADLINE,
-        || {
-            let hosts = hosts_array(&controller);
-            hosts
-                .iter()
-                .find(|h| h["name"] == TARGET_NAME && h["connection_mode"] == "reverse")
-                .filter(|h| h["state"] == "reachable")
-                .is_some()
-                .then_some(())
-        },
-    );
-
-    let port = free_port();
-    let (mut guard, envelope) =
-        DynamicTunnelGuard::start_against(&controller, TARGET_NAME, &port.to_string());
-    assert_eq!(envelope["ok"], true, "{envelope}");
-    assert_eq!(
-        envelope["data"]["dial_policy"], "deny_host_local",
-        "{envelope}"
-    );
-
-    let bind = envelope["data"]["bind"]
-        .as_str()
-        .expect("bind string")
-        .to_string();
-    let mut socket = TcpStream::connect(&bind).expect("connect to the dynamic listener");
-    socket
-        .set_read_timeout(Some(Duration::from_secs(20)))
-        .expect("set a read timeout");
-    socks5_greet(&mut socket);
-
-    let mut request = vec![0x05, 0x01, 0x00, 0x01];
-    request.extend_from_slice(&echo_addr.ip().octets());
-    request.extend_from_slice(&echo_addr.port().to_be_bytes());
-    socket
-        .write_all(&request)
-        .expect("write the socks5 CONNECT request");
-    let mut rep = [0u8; 10];
-    socket
-        .read_exact(&mut rep)
-        .expect("read the socks5 REP frame");
-    assert_eq!(
-        rep[1], 0x00,
-        "CONNECT to a real, non-loopback destination over a reverse route must succeed: {rep:?}"
-    );
-
-    let payload = b"DASH_D_REVERSE_ROUND_TRIP";
-    socket
-        .write_all(payload)
-        .expect("write the echo payload through the reverse conduit");
-    let mut echoed = vec![0u8; payload.len()];
-    socket
-        .read_exact(&mut echoed)
-        .expect("read the echo payload back through the reverse conduit");
-    assert_eq!(&echoed, payload, "the reverse relay must not alter bytes");
-    drop(socket);
-
-    assert!(
-        guard.is_running(),
-        "the holder must still be running after one client's round trip"
-    );
-    let _ = guard.finish();
-
-    // The port is free again once the holder is gone.
-    TcpListener::bind(("127.0.0.1", port))
-        .unwrap_or_else(|e| panic!("port {port} was not re-bindable after the holder exited: {e}"));
-    drop(rt);
-}
-
 // ---------------------------------------------------------------------
 // The interactive form
 // ---------------------------------------------------------------------
@@ -495,115 +302,6 @@ fn interactive_dash_d_non_loopback_bind_creates_no_session_even_combined_with_lo
         .expect("the refused -D spec bound its own listen port");
     TcpListener::bind(("127.0.0.1", local_port))
         .expect("the refused -D spec bound the companion -L's listen port");
-}
-
-/// The interactive twin of
-/// `dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination`
-/// (ADR-0020 decisions 2, 3): `qsh <reverse-target> -D <port>` opens a
-/// real session on the target *and* a real SOCKS5 listener beside it, and
-/// a client speaking through that listener reaches a real, non-loopback
-/// destination via the reverse conduit — the interactive form's own
-/// `open_dynamic_forwards` runs the identical capability gate and reverse
-/// opener the standalone form's `Ops::tunnel_dynamic` does, so this is the
-/// same property, proven through the pty entry point instead of `tunnel
-/// open`. Checking `qsh sessions` on the target through the controller's
-/// reverse route (same technique `reverse_e2e.rs` uses) is the proof that a
-/// real session — not a stranded or refused one — exists.
-///
-/// Needs a real, non-loopback IPv4 route this host can genuinely round-trip
-/// a byte through, same gap policy as
-/// `dash_d_on_reverse_route_round_trips_to_a_non_loopback_destination`
-/// ([`live_round_trip_probe`]'s own doc).
-#[test]
-fn interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips() {
-    const TEST_NAME: &str = "interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips";
-    let ip = qsh_testkit::gap_or_return!(
-        qsh_testkit::net_probe::require_non_loopback_v4_route(
-            "no non-loopback IPv4 route on this host"
-        ),
-        "interactive_dash_d_on_reverse_route_opens_a_session_and_round_trips"
-    );
-
-    let rt = tokio::runtime::Runtime::new().expect("build a tokio runtime for the echo server");
-    let echo = rt
-        .block_on(qsh_testkit::net_probe::LanEcho::start(ip))
-        .expect("bind a non-loopback echo server");
-    let echo_addr = match echo.addr() {
-        std::net::SocketAddr::V4(v4) => v4,
-        std::net::SocketAddr::V6(_) => panic!("LanEcho::start(Ipv4Addr) must bind an IPv4 socket"),
-    };
-    live_round_trip_or_return!(echo_addr, TEST_NAME);
-
-    let controller = Sandbox::initialized();
-    let target = Sandbox::initialized();
-    let target_fp = target.fingerprint();
-    let controller_fp = controller.fingerprint();
-
-    controller.trust_add(TARGET_NAME, None, &target_fp);
-    let listen = ListenGuard::start(&controller);
-
-    target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
-    let _reverse = ReverseGuard::start(&target, CONTROLLER_ALIAS);
-
-    poll_until(
-        "the reverse registration to appear reachable",
-        REGISTRATION_DEADLINE,
-        || {
-            let hosts = hosts_array(&controller);
-            hosts
-                .iter()
-                .find(|h| h["name"] == TARGET_NAME && h["connection_mode"] == "reverse")
-                .filter(|h| h["state"] == "reachable")
-                .is_some()
-                .then_some(())
-        },
-    );
-
-    let port = free_port();
-    let port_str = port.to_string();
-    let mut client = PtyClient::spawn(&controller, &[TARGET_NAME, "-D", &port_str]);
-    client.expect("dynamic forward (socks5) listening on");
-    client.shell_round_trip("INTERACTIVE_DASH_D_REVERSE");
-
-    let mut socket = TcpStream::connect(("127.0.0.1", port)).expect("connect to the -D listener");
-    socks5_greet(&mut socket);
-    let mut request = vec![0x05, 0x01, 0x00, 0x01];
-    request.extend_from_slice(&echo_addr.ip().octets());
-    request.extend_from_slice(&echo_addr.port().to_be_bytes());
-    socket
-        .write_all(&request)
-        .expect("write the socks5 CONNECT request");
-    let mut rep = [0u8; 10];
-    socket
-        .read_exact(&mut rep)
-        .expect("read the socks5 REP frame");
-    assert_eq!(
-        rep[1], 0x00,
-        "CONNECT to a real, non-loopback destination over an interactive reverse -D must \
-         succeed: {rep:?}"
-    );
-    let payload = b"INTERACTIVE_DASH_D_REVERSE_ECHO";
-    socket
-        .write_all(payload)
-        .expect("write the echo payload through the reverse conduit");
-    let mut echoed = vec![0u8; payload.len()];
-    socket
-        .read_exact(&mut echoed)
-        .expect("read the echo payload back through the reverse conduit");
-    assert_eq!(&echoed, payload, "the reverse relay must not alter bytes");
-    drop(socket);
-
-    let (code, listed) = controller.json(&["sessions", TARGET_NAME, "--json"]);
-    assert_eq!(code, 0, "{listed}");
-    assert_eq!(
-        listed["data"]["sessions"].as_array().map(Vec::len),
-        Some(1),
-        "interactive reverse -D must have opened exactly one real session on the target: {listed}"
-    );
-
-    client.shell_round_trip("INTERACTIVE_DASH_D_REVERSE_STILL_ALIVE");
-    client.type_("exit\r");
-    drop(rt);
 }
 
 /// `docs/CLI.md` §7's machine-mode gate answers `INVALID_ARGUMENT` before

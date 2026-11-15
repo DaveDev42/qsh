@@ -163,11 +163,11 @@ fn no_activate_is_the_file_only_form_on_all_three_managers() {
 }
 
 // ---------------------------------------------------------------------
-// --to / --bind / --name go through `config set`, never into the argv
+// --bind goes through `config set`, never into the argv
 // ---------------------------------------------------------------------
 
 #[test]
-fn to_bind_and_name_are_written_to_the_config_not_the_unit() {
+fn bind_is_written_to_the_config_not_the_unit() {
     let (_dir, ops) = ops_with("# mine\n[serve]\nmax_sessions = 7\n");
     let runner = FakeRunner::default();
     let root = temp_home();
@@ -175,27 +175,23 @@ fn to_bind_and_name_are_written_to_the_config_not_the_unit() {
     let host = host_for(Manager::Systemd, &runner, root.path());
     let with_flags = ServiceInstallOptions {
         activate: false,
-        to: Some("controller".to_string()),
         bind: Some("127.0.0.1:5555".to_string()),
-        name: Some("lab".to_string()),
         ..options()
     };
     let data = install_with(&ops, &host, &home, &with_flags, &NoPrompter).unwrap();
 
-    // The mode is inferred from the config the flags just wrote.
-    assert_eq!(data.mode, "reverse");
+    // `--to` and `--name` are retired (ADR-0068); `--bind` still goes
+    // through `config set`.
+    assert_eq!(data.mode, "serve");
     let config = std::fs::read_to_string(ops.paths().config_file()).unwrap();
     assert!(config.contains("# mine"), "comments survive: {config}");
     assert!(config.contains("max_sessions = 7"), "{config}");
-    assert!(config.contains("to = \"controller\""), "{config}");
     assert!(config.contains("bind = \"127.0.0.1:5555\""), "{config}");
-    assert!(config.contains("offered_name = \"lab\""), "{config}");
 
     // The unit argv is the fixed one: no bind, no name.
     let unit = std::fs::read_to_string(&data.path).unwrap();
     assert!(unit.contains("ExecStart="), "{unit}");
-    assert!(unit.contains("serve --to controller"), "{unit}");
-    assert!(!unit.contains("5555") && !unit.contains("lab"), "{unit}");
+    assert!(!unit.contains("5555"), "{unit}");
     assert!(
         !unit.contains("--bind") && !unit.contains("--name"),
         "{unit}"

@@ -121,52 +121,32 @@ fn bind_setup_error_attaches_the_remedy_only_to_an_actual_bind_failure() {
     );
 }
 
-// `resolve_serve_mode` (ROADMAP M9 (b), ADR-0012 결정 2/5): every step of the
-// strict order, each proven to short-circuit the steps after it.
+// `resolve_serve_mode` since ADR-0068: the outbound branch is retired, so
+// every way into it is `UNSUPPORTED` with `details.reason = "reverse_retired"`,
+// and only the inbound answer is left.
 
-#[test]
-fn resolve_serve_mode_to_and_bind_together_is_invalid_argument() {
-    let config = Config::default();
-    let err = resolve_serve_mode(Some("box"), None, Some("127.0.0.1:0"), &config).unwrap_err();
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
+fn assert_retired(err: &OpError) {
+    assert_eq!(err.code, ErrorCode::Unsupported, "{err:?}");
+    assert!(!err.retryable);
+    assert_eq!(err.details["reason"], "reverse_retired");
 }
 
 #[test]
-fn resolve_serve_mode_name_without_to_is_invalid_argument() {
-    let config = Config::default();
-    let err = resolve_serve_mode(None, Some("laptop"), None, &config).unwrap_err();
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
-}
-
-#[test]
-fn resolve_serve_mode_to_wins_and_never_reads_config_at_all() {
-    // Both config keys are set (and even disagree) — `--to` must
-    // still win outright, unexamined, because the short-circuit
-    // happens before either lookup (this function's own doc, step 3).
+fn resolve_serve_mode_to_is_unsupported_whatever_else_is_given() {
     let mut config = Config::default();
-    config.serve.to = Some("from-config".into());
-    config.reverse.controller = Some("also-from-config".into());
-    let mode = resolve_serve_mode(Some("box"), Some("laptop"), None, &config).unwrap();
-    assert_eq!(
-        mode,
-        ServeMode::Outbound {
-            target: "box".to_string(),
-            offered_name: Some("laptop".to_string()),
-        }
+    assert_retired(&resolve_serve_mode(Some("box"), None, None, &config).unwrap_err());
+    assert_retired(&resolve_serve_mode(Some("box"), Some("n"), None, &config).unwrap_err());
+    assert_retired(
+        &resolve_serve_mode(Some("box"), None, Some("127.0.0.1:0"), &config).unwrap_err(),
     );
+    config.serve.to = Some("from-config".into());
+    assert_retired(&resolve_serve_mode(Some("box"), None, None, &config).unwrap_err());
 }
 
 #[test]
-fn resolve_serve_mode_to_without_name_carries_no_offered_name() {
+fn resolve_serve_mode_name_is_unsupported() {
     let config = Config::default();
-    let mode = resolve_serve_mode(Some("box"), None, None, &config).unwrap();
-    assert_eq!(
-        mode,
-        ServeMode::Outbound {
-            target: "box".to_string(),
-            offered_name: None,
-        }
-    );
+    assert_retired(&resolve_serve_mode(None, Some("laptop"), None, &config).unwrap_err());
 }
 
 #[test]
@@ -177,43 +157,21 @@ fn resolve_serve_mode_bind_without_to_is_inbound_via_resolve_bind() {
 }
 
 #[test]
-fn resolve_serve_mode_bind_alone_never_reads_the_conflicting_config_keys() {
-    // A CLI `--bind` is tier one just like `--to` is: the outbound
-    // config keys are not read at all, so a disagreement between them
-    // that would otherwise be a `CONFIG_ERROR` never surfaces here.
-    let mut config = Config::default();
-    config.serve.to = Some("from-config".into());
-    config.reverse.controller = Some("also-from-config".into());
-    let mode = resolve_serve_mode(None, None, Some("127.0.0.1:9000"), &config).unwrap();
-    assert_eq!(mode, ServeMode::Inbound("127.0.0.1:9000".parse().unwrap()));
-}
-
-#[test]
-fn resolve_serve_mode_neither_given_falls_back_to_config_serve_to() {
-    let mut config = Config::default();
-    config.serve.to = Some("from-config".into());
-    let mode = resolve_serve_mode(None, None, None, &config).unwrap();
-    assert_eq!(
-        mode,
-        ServeMode::Outbound {
-            target: "from-config".to_string(),
-            offered_name: None,
-        }
-    );
-}
-
-#[test]
-fn resolve_serve_mode_neither_given_falls_back_to_the_legacy_reverse_controller() {
-    let mut config = Config::default();
-    config.reverse.controller = Some("legacy-controller".into());
-    let mode = resolve_serve_mode(None, None, None, &config).unwrap();
-    assert_eq!(
-        mode,
-        ServeMode::Outbound {
-            target: "legacy-controller".to_string(),
-            offered_name: None,
-        }
-    );
+fn resolve_serve_mode_refuses_a_config_that_still_dials_out_even_with_a_bind() {
+    for (serve_to, controller) in [
+        (Some("from-config"), None),
+        (None, Some("legacy-controller")),
+        (Some("a"), Some("a")),
+        (Some("a"), Some("b")),
+    ] {
+        let mut config = Config::default();
+        config.serve.to = serve_to.map(str::to_owned);
+        config.reverse.controller = controller.map(str::to_owned);
+        assert_retired(&resolve_serve_mode(None, None, None, &config).unwrap_err());
+        assert_retired(
+            &resolve_serve_mode(None, None, Some("127.0.0.1:9000"), &config).unwrap_err(),
+        );
+    }
 }
 
 #[test]
@@ -221,15 +179,6 @@ fn resolve_serve_mode_neither_given_and_neither_config_key_set_is_inbound() {
     let config = Config::default();
     let mode = resolve_serve_mode(None, None, None, &config).unwrap();
     assert_eq!(mode, ServeMode::Inbound(DEFAULT_BIND.parse().unwrap()));
-}
-
-#[test]
-fn resolve_serve_mode_neither_given_and_config_keys_disagree_is_config_error() {
-    let mut config = Config::default();
-    config.serve.to = Some("from-config".into());
-    config.reverse.controller = Some("also-from-config".into());
-    let err = resolve_serve_mode(None, None, None, &config).unwrap_err();
-    assert_eq!(err.code, ErrorCode::ConfigError);
 }
 
 // `config_serve_to_conflict` / `config_outbound_target` on their own,
