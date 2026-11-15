@@ -16,7 +16,7 @@ use crate::client::{ClientError, Session};
 use crate::exec::ExecSpec;
 use crate::identity::LoadedIdentity;
 use crate::ops::host::{self, HostRoute};
-use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget, server_name_for};
+use crate::ops::{OpError, Operation, Ops, PeerTarget, server_name_for};
 use crate::shell::ShellRequest;
 
 /// The `exec.run` operation.
@@ -188,63 +188,43 @@ impl Ops {
         // multi-thread runtime it never needed.
         let runtime = self.connect_runtime()?;
         let agent = self.agent.clone();
-        match self.resolve_exec_route(host, identity)? {
-            PeerRoute::Forward(target) => {
-                let device_name = target.identity.identity.device_id.clone();
-                let run = |target: &PeerTarget, stdin: ExecStdin, dialed: &AtomicBool| {
-                    let dialer = Dialer::new(target.identity.local.clone(), target.evaluator());
-                    runtime.block_on(exec_async(
-                        &dialer,
-                        &target.address,
-                        &target.server_name,
-                        target.iroh.as_ref(),
-                        target.jump.as_ref(),
-                        target.key_fill().as_ref(),
-                        &device_name,
-                        &spec,
-                        stdin,
-                        timeout,
-                        dialed,
-                        agent.as_ref(),
-                    ))
-                };
-                let dialed = AtomicBool::new(false);
-                // Only the dial may be retried (ADR-0051 decision 4): once
-                // the connection stood, the command may have run, and
-                // running it twice is not a recovery. Stdin is read only after
-                // the dial, so a failed dial has not consumed any of it.
-                match run(&target, stdin, &dialed) {
-                    Err(err)
-                        if !dialed.load(Ordering::SeqCst) && err.code != ErrorCode::Timeout =>
-                    {
-                        match self.revive_target(&target, &err) {
-                            Some(revived) => run(&revived, stdin, &AtomicBool::new(false)),
-                            None => Err(err),
-                        }
-                    }
-                    other => other,
+        let target = self.resolve_exec_route(host, identity)?;
+        let device_name = target.identity.identity.device_id.clone();
+        let run = |target: &PeerTarget, stdin: ExecStdin, dialed: &AtomicBool| {
+            let dialer = Dialer::new(target.identity.local.clone(), target.evaluator());
+            runtime.block_on(exec_async(
+                &dialer,
+                &target.address,
+                &target.server_name,
+                target.iroh.as_ref(),
+                target.jump.as_ref(),
+                target.key_fill().as_ref(),
+                &device_name,
+                &spec,
+                stdin,
+                timeout,
+                dialed,
+                agent.as_ref(),
+            ))
+        };
+        let dialed = AtomicBool::new(false);
+        // Only the dial may be retried (ADR-0051 decision 4): once
+        // the connection stood, the command may have run, and
+        // running it twice is not a recovery. Stdin is read only after
+        // the dial, so a failed dial has not consumed any of it.
+        match run(&target, stdin, &dialed) {
+            Err(err) if !dialed.load(Ordering::SeqCst) && err.code != ErrorCode::Timeout => {
+                match self.revive_target(&target, &err) {
+                    Some(revived) => run(&revived, stdin, &AtomicBool::new(false)),
+                    None => Err(err),
                 }
             }
-            PeerRoute::Reverse(route) => {
-                let mut output = runtime.block_on(exec_async_reverse(
-                    &route,
-                    &spec,
-                    stdin,
-                    timeout,
-                    agent.as_ref(),
-                ))?;
-                // Asked for but never sent (a host without `agent.v1`).
-                if agent.is_some() && output.data.agent.is_none() {
-                    output.data.agent = Some("unsupported".to_string());
-                }
-                Ok(output)
-            }
+            other => other,
         }
     }
 
     /// [`Ops::resolve_route`] (`ops/mod.rs`), specialized for `exec_run`:
-    /// same routing decision (`Ops::resolve_host_route`'s live-reverse-
-    /// first priority), but built from an **already-loaded** `identity`
+    /// same routing decision (`Ops::resolve_host_route`), but built from an **already-loaded** `identity`
     /// instead of calling [`Ops::resolve_peer`] a second time on the
     /// forward branch (which would reload it, touching the platform key
     /// store twice for one call) — and with `host::not_in_trust_store_host_not_found`
@@ -256,13 +236,11 @@ impl Ops {
         &self,
         host: &str,
         identity: LoadedIdentity,
-    ) -> Result<PeerRoute, OpError> {
+    ) -> Result<PeerTarget, OpError> {
         // A jump is the whole route (ADR-0056 decision 13).
         if let Some(hops) = self.jump_hops_for(host)? {
             let trust = self.open_trust()?;
-            return Ok(PeerRoute::Forward(
-                self.jump_target(host, identity, trust, hops)?,
-            ));
+            return self.jump_target(host, identity, trust, hops);
         }
         let route =
             match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found) {
@@ -270,33 +248,26 @@ impl Ops {
                 Err(err) if err.code == ErrorCode::HostNotFound => {
                     let trust = self.open_trust()?;
                     return match self.iroh_only_target(host, &identity, &trust)? {
-                        Some(target) => Ok(PeerRoute::Forward(target)),
+                        Some(target) => Ok(target),
                         None => Err(err),
                     };
                 }
                 Err(err) => return Err(err),
             };
-        match route {
-            HostRoute::Forward { address, .. } => {
-                let trust = self.open_trust()?;
-                let server_name = server_name_for(&address);
-                let iroh = self.iroh_plan(host, &identity, &trust)?;
-                let binding = Some(crate::ops::peer_binding(&trust.snapshot(), host)?);
-                Ok(PeerRoute::Forward(PeerTarget {
-                    identity,
-                    trust,
-                    address,
-                    server_name,
-                    jump: None,
-                    binding,
-                    iroh,
-                }))
-            }
-            HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
-                host: host.to_string(),
-                socket,
-            })),
-        }
+        let HostRoute::Forward { address, .. } = route;
+        let trust = self.open_trust()?;
+        let server_name = server_name_for(&address);
+        let iroh = self.iroh_plan(host, &identity, &trust)?;
+        let binding = Some(crate::ops::peer_binding(&trust.snapshot(), host)?);
+        Ok(PeerTarget {
+            identity,
+            trust,
+            address,
+            server_name,
+            jump: None,
+            binding,
+            iroh,
+        })
     }
 }
 
@@ -478,7 +449,7 @@ async fn exec_async_tracked(
                 // its stdin-pump task's held stream regardless of which
                 // task currently owns it).
                 let mut result = session
-                    .exec_with_agent(spec, stdin_reader, None, agent_channel)
+                    .exec_with_agent(spec, stdin_reader, agent_channel)
                     .await;
                 if let Some(dispatcher) = dispatcher {
                     dispatcher.abort();
@@ -515,108 +486,6 @@ async fn exec_async_tracked(
     } else {
         endpoint.wait_idle().await;
     }
-    let result = result?;
-    if result.timed_out {
-        // The host enforced the same deadline first and told us so.
-        return Err(timed_out());
-    }
-    let data = ExecRunData {
-        stdout_b64: BASE64.encode(&result.stdout),
-        stderr_b64: BASE64.encode(&result.stderr),
-        remote_exit_code: result.exit_code,
-        signal: result.signal,
-        duration_ms: u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX),
-        agent: result.agent.map(str::to_string),
-    };
-    Ok(ExecRunOutput {
-        data,
-        stdout: result.stdout,
-        stderr: result.stderr,
-    })
-}
-
-/// [`exec_async`]'s reverse-route twin (issue #5): relay through this
-/// machine's resident `qsh listen` daemon instead of dialing the peer
-/// directly, under the same single `--timeout` deadline `exec_async`
-/// itself uses for resolve+dial+negotiate+run. `dial_reverse` opens a
-/// fresh `LOCAL_CONTROL` conduit to `route`'s daemon/host (the same one
-/// `Ops::connect_reverse` uses, `ops/session.rs`), and `Session::exec`
-/// then relays `EXEC_DATA` over a fresh `LOCAL_STREAM` conduit to the
-/// same daemon (`Session::open_data_link`, issue #5's daemon `EXEC_DATA`
-/// relay, `crate::localctl::daemon::local_stream_relay_kind`).
-///
-/// Unlike the forward route, there is no QUIC `Connection` here for a
-/// timeout to force-close: the CLI process is not itself a QUIC endpoint
-/// on the reverse route. `exec`'s `kill_tx` out-parameter is exactly the
-/// substitute — a [`crate::client::link::DataKillSwitch`] shuts the
-/// `LOCAL_STREAM` conduit's raw fd down at the OS level the instant the
-/// deadline hits, regardless of which task (`Session::exec`'s own stdin
-/// pump, `crate::client::pump_stdin`, moves the send half into a detached
-/// `tokio::spawn`) currently holds the async wrapper around it — dropping
-/// the cancelled `run` future alone would not reach that fd promptly. The
-/// daemon's own EXEC_DATA UDS-EOF→reset rule then resets the target's
-/// stream, and the host kills the command, exactly like the forward
-/// route's `connection.close(0, b"timeout")` does over QUIC.
-async fn exec_async_reverse(
-    route: &LocalRoute,
-    spec: &ExecSpec,
-    stdin: ExecStdin,
-    timeout: Option<Duration>,
-    agent: Option<&Arc<crate::agent::ClientAgent>>,
-) -> Result<ExecRunOutput, OpError> {
-    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
-    let timed_out = || timeout_error(timeout.unwrap_or_default());
-
-    let mut session = match until(deadline, crate::ops::session::dial_reverse(route)).await {
-        Some(dialed) => dialed?.0,
-        None => return Err(timed_out()),
-    };
-
-    let stdin_reader: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>> = match stdin {
-        ExecStdin::Closed => None,
-        ExecStdin::Inherit => Some(Box::new(tokio::io::stdin())),
-    };
-
-    // `-A` (ADR-0055 decision 14): the channel is registered and its claim
-    // loop is running before `ExecStart` leaves, since the host may open the
-    // first `AGENT` stream before it answers. The loop claims from the
-    // daemon and this process filters; both end with the channel, when this
-    // function returns.
-    let channel = agent
-        .filter(|_| session.agent_supported())
-        .map(|a| a.register());
-    let mut agent_channel = Vec::new();
-    if let Some(channel) = &channel {
-        channel.serve_over_daemon(route.socket.clone(), route.host.clone());
-        agent_channel = channel.bytes();
-    }
-    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
-    let result = match until(
-        deadline,
-        session.exec_with_agent(spec, stdin_reader, Some(kill_tx), agent_channel),
-    )
-    .await
-    {
-        Some(result) => result.map_err(map_client_error),
-        None => {
-            // Deadline hit mid-flight: shut the data conduit down right
-            // now (see this function's own doc on why dropping `run`
-            // alone would not) so the host notices and kills the command
-            // rather than running on as a silent orphan. `kill_rx` closes
-            // with no value when the deadline hit before the data link
-            // even opened (still inside `exec_start`'s control round
-            // trip) — nothing was relaying yet, so there is nothing to
-            // kill.
-            if let Ok(kill) = kill_rx.await {
-                kill.kill();
-            }
-            Err(timed_out())
-        }
-    };
-    // Idempotent-in-effect (a no-op `ControlLink::Local::finish`, then
-    // drop): covers the exec-failed path too, and there is no connection
-    // to `wait_idle` on for this route (this function's own doc).
-    session.close();
     let result = result?;
     if result.timed_out {
         // The host enforced the same deadline first and told us so.

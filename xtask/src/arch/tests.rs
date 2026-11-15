@@ -133,7 +133,7 @@ fn module_ban_recurses_into_subdirectories() {
 
 /// Every configured module-ban target that doesn't exist is flagged
 /// once — not once per token bound to it (the ban targets must exist
-/// once their consumers land: `BROKER_DIR`, the two `localctl` files,
+/// once their consumers land: `BROKER_DIR`, the two `localctl/transport` files,
 /// the three `FILE_GUARD_FILES` and the three `FILE_HOST_FILES`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
 /// `SETUP_DIR` directory, the `CORE_SRC_DIR` directory the `quinn` ban
 /// scopes, and the `INVITE_ADDRESS_DIR` directory that two
@@ -143,65 +143,10 @@ fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 16, "{violations:?}");
+    assert_eq!(violations.len(), 14, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"
-    );
-}
-
-/// `localctl/frame.rs` and `client.rs` ban `qsh_transport`/`quinn`/
-/// `rustls` — but `daemon.rs`, the transport bridge, is deliberately
-/// exempt because the ban is file-scoped, not directory-scoped.
-#[test]
-fn module_ban_flags_transport_in_localctl_frame_and_client_but_daemon_is_exempt() {
-    let root = tempfile::tempdir().unwrap();
-    let localctl = root.path().join("crates/qsh-core/src/localctl");
-    fs::create_dir_all(&localctl).unwrap();
-    fs::write(
-        localctl.join("frame.rs"),
-        "use qsh_transport::Connection;\n",
-    )
-    .unwrap();
-    fs::write(
-        localctl.join("client.rs"),
-        "fn f() { let _ = quinn::Endpoint::client; }\n",
-    )
-    .unwrap();
-    fs::write(
-        localctl.join("daemon.rs"),
-        // No `quinn::` line: `daemon.rs` is exempt from the file-scoped
-        // localctl bans, but not from the `qsh-core/src` ban on `quinn::`.
-        "use qsh_transport::Connection;\nuse rustls::ClientConfig;\n",
-    )
-    .unwrap();
-
-    let mut violations = Vec::new();
-    check_module_bans(root.path(), &mut violations).unwrap();
-
-    // Match on `<file>:<line>` (the violation's location prefix), not a
-    // bare filename — the shared reason string itself mentions
-    // `daemon.rs` in prose, which would otherwise false-positive here.
-    let frame_hits: Vec<_> = violations
-        .iter()
-        .filter(|v| v.contains("frame.rs:"))
-        .collect();
-    let client_hits: Vec<_> = violations
-        .iter()
-        .filter(|v| v.contains("client.rs:"))
-        .collect();
-    let daemon_hits: Vec<_> = violations
-        .iter()
-        .filter(|v| v.contains("daemon.rs:"))
-        .collect();
-
-    assert_eq!(frame_hits.len(), 1, "{violations:?}");
-    assert!(frame_hits[0].contains("qsh_transport"));
-    assert_eq!(client_hits.len(), 1, "{violations:?}");
-    assert!(client_hits[0].contains("quinn"));
-    assert!(
-        daemon_hits.is_empty(),
-        "daemon.rs is the transport bridge and must stay exempt: {violations:?}"
     );
 }
 
@@ -752,8 +697,7 @@ fn run_flags_a_quinn_dependency_in_core_and_cli_manifests() {
 }
 
 /// The real workspace tree must respect every module ban: the broker,
-/// `localctl/{frame,client}.rs` (with `daemon.rs` exempt), and
-/// `qsh-cli/src`.
+/// `localctl/transport/{unix,windows}.rs`, and `qsh-cli/src`.
 #[test]
 fn real_tree_respects_all_module_bans() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();

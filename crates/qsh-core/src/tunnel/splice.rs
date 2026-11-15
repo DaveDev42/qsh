@@ -109,11 +109,10 @@ const SPLICE_BUF_LEN: usize = 64 * 1024;
 /// cap (ADR-0029 decision 15).
 ///
 /// 128 KiB applies uniformly to every [`pump`] direction, including the
-/// two that never touch quinn (`splice_tcp_uds`'s UDS halves) — an extra
-/// yield point on a plain TCP/UDS copy is harmless (fairness with
-/// whatever else is on that runtime), so a single constant is simpler to
-/// reason about than threading a "this direction matters" flag through
-/// every call site.
+/// ones that never touch quinn — an extra yield point on a plain copy is
+/// harmless (fairness with whatever else is on that runtime), so a single
+/// constant is simpler to reason about than threading a "this direction
+/// matters" flag through every call site.
 pub(crate) const SEND_DEPTH_CAP_BYTES: u64 = 128 * 1024;
 
 /// QUIC application error code used to reset a tunnel stream whose splice
@@ -511,132 +510,6 @@ pub(crate) async fn splice_tcp_quic(
                 ))),
             }
         }
-    }
-}
-
-/// [`SpliceGuard`]'s counterpart for [`splice_tcp_uds`]: only the local TCP
-/// half needs drop-driven reset teardown here. The remote half is the
-/// reverse `LOCAL_STREAM` conduit to this same machine's resident daemon
-/// (raw `crate::localctl::client::RawUdsRead`/`RawUdsWrite`), which has
-/// no equivalent abrupt-close signal available through tokio — exactly the
-/// asymmetry `crate::localctl::daemon::TunnelQuicGuard`'s own doc already
-/// establishes for the daemon's own UDS↔QUIC relay hop ("losing the
-/// clean/abrupt distinction there does not create data loss or
-/// misdelivery, only a coarser signal to a process on this same machine").
-/// So this guard, unlike [`SpliceGuard`], only ever holds the TCP halves —
-/// the UDS halves are plain local variables in [`splice_tcp_uds`] and drop
-/// however they drop.
-struct LocalTcpGuard {
-    local_read: Option<OwnedReadHalf>,
-    local_write: Option<OwnedWriteHalf>,
-}
-
-impl LocalTcpGuard {
-    fn new(local_read: OwnedReadHalf, local_write: OwnedWriteHalf) -> Self {
-        Self {
-            local_read: Some(local_read),
-            local_write: Some(local_write),
-        }
-    }
-
-    /// The clean-finish path — see [`SpliceGuard::disarm`]'s own doc.
-    fn disarm(mut self) {
-        self.local_read.take();
-        self.local_write.take();
-    }
-}
-
-impl Drop for LocalTcpGuard {
-    fn drop(&mut self) {
-        // Reached only on a truncated transfer or this future being
-        // dropped mid-poll — see [`SpliceGuard`]'s own doc for why a bare
-        // drop here would be the wrong signal to the forwarded
-        // application.
-        if let Some(read) = self.local_read.take() {
-            let _ = read.as_ref().set_zero_linger();
-        }
-        if let Some(write) = self.local_write.take() {
-            write.forget();
-        }
-    }
-}
-
-/// Splice a local TCP connection against a reverse `LOCAL_STREAM` conduit
-/// (`crate::localctl::client::RawUdsRead`/`RawUdsWrite`) until both
-/// directions end — the `-L over reverse` counterpart of
-/// [`splice_tcp_quic`] (M4 plan Step 5 (a) (2473c88)), reusing the exact same
-/// [`pump`] primitive and half-close discipline so a forwarded protocol
-/// that shuts down one direction and keeps draining the other behaves
-/// identically on either carrier.
-///
-/// `residue` is the handshake leftover
-/// `crate::localctl::client::DataRecvHalf::into_raw` hands back — see
-/// [`splice_tcp_quic`]'s own doc on why it must lead the stream.
-///
-/// Teardown is asymmetric by design — see [`LocalTcpGuard`]'s own doc: the
-/// local TCP side gets the same `SO_LINGER 0` RST-on-truncation treatment
-/// [`splice_tcp_quic`] gives it, while the UDS side (a process-local hop to
-/// this machine's own daemon) is simply dropped, clean or not.
-pub(crate) async fn splice_tcp_uds(
-    local: TcpStream,
-    mut uds_write: crate::localctl::client::RawUdsWrite,
-    mut uds_read: crate::localctl::client::RawUdsRead,
-    residue: Vec<u8>,
-) -> Result<SpliceStats, SpliceError> {
-    let (local_read, local_write) = local.into_split();
-    let mut guard = LocalTcpGuard::new(local_read, local_write);
-
-    let (up, down) = {
-        let up = pump(
-            guard.local_read.as_mut().expect("armed"),
-            &mut uds_write,
-            &[],
-        );
-        let down = pump(
-            &mut uds_read,
-            guard.local_write.as_mut().expect("armed"),
-            &residue,
-        );
-        tokio::pin!(up, down);
-
-        let mut up_res: Option<io::Result<u64>> = None;
-        let mut down_res: Option<io::Result<u64>> = None;
-        while up_res.is_none() || down_res.is_none() {
-            tokio::select! {
-                r = &mut up, if up_res.is_none() => {
-                    let failed = r.is_err();
-                    up_res = Some(r);
-                    if failed {
-                        break;
-                    }
-                }
-                r = &mut down, if down_res.is_none() => {
-                    let failed = r.is_err();
-                    down_res = Some(r);
-                    if failed {
-                        break;
-                    }
-                }
-            }
-        }
-        (up_res, down_res)
-    };
-
-    match (up, down) {
-        (Some(Ok(local_to_remote)), Some(Ok(remote_to_local))) => {
-            guard.disarm();
-            Ok(SpliceStats {
-                local_to_remote,
-                remote_to_local,
-            })
-        }
-        (up, down) => match (up, down) {
-            (Some(Err(err)), _) => Err(SpliceError::LocalToRemote(err)),
-            (_, Some(Err(err))) => Err(SpliceError::RemoteToLocal(err)),
-            _ => Err(SpliceError::RemoteToLocal(io::Error::other(
-                "tunnel splice ended with neither direction resolved",
-            ))),
-        },
     }
 }
 

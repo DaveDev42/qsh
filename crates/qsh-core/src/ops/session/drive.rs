@@ -2,32 +2,10 @@
 
 use super::*;
 
-/// Start (or, on the reverse route, deliberately not start) the path
-/// watchdog for one leg.
-///
-/// Forward: [`watch_path`] polls the real QUIC `Connection` this attach's
-/// [`RecoveryLink::Forward`] holds, exactly as before Step 7. Reverse:
-/// there is no connection this attach owns alone to probe (`RecoveryLink`'s
-/// own doc) — the returned task simply never completes, so `watch.dead()`
-/// never fires and [`read_leg`]'s `select!` is decided purely by the
-/// `LOCAL_STREAM` conduit's own reader (a clean end is [`LegEnd::Ended`],
-/// an error is [`LegEnd::Broken`] — both already handled with no recovery
-/// attempted, since `drive_attach`'s gate only ever calls [`recover_attach`]
-/// on a `Forward` link).
-fn spawn_watchdog(
-    link: &RecoveryLink,
-    watch: PathWatch,
-    probes: Arc<tokio::sync::Notify>,
-) -> AbortOnDrop {
-    match link {
-        RecoveryLink::Forward(link) => {
-            AbortOnDrop(tokio::spawn(watch_path(link.connection(), watch, probes)))
-        }
-        RecoveryLink::Reverse(_) => AbortOnDrop(tokio::spawn(async move {
-            let _ = (watch, probes);
-            std::future::pending::<()>().await;
-        })),
-    }
+/// Start the path watchdog for one leg: [`watch_path`] polls the real QUIC
+/// `Connection` this attach's [`Link`] holds.
+fn spawn_watchdog(link: &Link, watch: PathWatch, probes: Arc<tokio::sync::Notify>) -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(watch_path(link.connection(), watch, probes)))
 }
 
 /// Drive one attach for its whole life, across as many connections as it
@@ -159,17 +137,9 @@ pub(super) async fn drive_attach(
             };
             // A connection the frontend closed on purpose (a detach) is not
             // a path that died, and recovering from it would resurrect an
-            // attach the user just ended — checked identically on both
-            // routes. Which `Reconnect` `recover_attach` gets built with is
-            // the one thing that still depends on the route (`RecoveryLink`'s
-            // own doc): the forward route redials itself (`DialReconnect`),
-            // the reverse route waits for the target's own re-dial to land
-            // as a new registration generation (`LocalReconnect`, Step 8).
-            let recovery = if let RecoveryLink::Forward(link) = &ctx.link
-                && ctx.recovery.enabled
-                && !ctx.finished()
-            {
-                let forward_link = link.clone();
+            // attach the user just ended.
+            let recovery = if ctx.recovery.enabled && !ctx.finished() {
+                let forward_link = ctx.link.clone();
                 drop(watchdog);
                 let reconnector =
                     DialReconnect::new(ctx.clone(), forward_link.clone(), pending.clone());
@@ -178,7 +148,7 @@ pub(super) async fn drive_attach(
                     &events,
                     recover_attach(
                         &ctx,
-                        Some(&forward_link),
+                        &forward_link,
                         leg_survived,
                         &watch,
                         &probes,
@@ -191,10 +161,7 @@ pub(super) async fn drive_attach(
                 if matches!(recovery, Recovery::SameLeg) {
                     // Migrated: the connection, both streams and every
                     // cursor are exactly as they were. Re-arm the watchdog
-                    // and keep reading the same stream. Only the forward
-                    // route can ever produce this (`recover_attach`'s own
-                    // doc on its `link: None` branch), so it is handled
-                    // here rather than in the route-agnostic match below.
+                    // and keep reading the same stream.
                     watch.revive();
                     watchdog = AbortOnDrop(tokio::spawn(watch_path(
                         forward_link.connection(),
@@ -204,27 +171,6 @@ pub(super) async fn drive_attach(
                     continue;
                 }
                 recovery
-            } else if let RecoveryLink::Reverse(_) = &ctx.link
-                && ctx.recovery.enabled
-                && !ctx.finished()
-            {
-                drop(watchdog);
-                let reconnector = LocalReconnect::new(ctx.clone(), pending.clone());
-                with_status_ticks(
-                    &ctx,
-                    &events,
-                    recover_attach(
-                        &ctx,
-                        None,
-                        leg_survived,
-                        &watch,
-                        &probes,
-                        &cursor,
-                        &mut pumps,
-                        &reconnector,
-                    ),
-                )
-                .await
             } else {
                 if let Some(err) = recoverable {
                     let _ = events.send(Err(map_client_error(err))).await;
@@ -234,19 +180,14 @@ pub(super) async fn drive_attach(
 
             match recovery {
                 Recovery::SameLeg => {
-                    // Structurally reachable only from the forward branch
-                    // above, which already `continue`d before getting
-                    // here — a typed error rather than `unreachable!()` so
-                    // a future `Reconnect` implementation that breaks that
-                    // invariant fails closed instead of panicking
-                    // (`docs/design/testing.md`; M3 plan Step 8 (2473c88)'s
-                    // "recovery == migrated must be impossible on the
-                    // reverse leg").
+                    // Already handled by the `continue` above — a typed
+                    // error rather than `unreachable!()` so a future change
+                    // that breaks that invariant fails closed instead of
+                    // panicking (`docs/design/testing.md`).
                     let _ = events
                         .send(Err(OpError::new(
                             ErrorCode::Internal,
-                            "recovery reported a migrated connection on a route with no \
-                             migration",
+                            "recovery reported a migrated connection where none can occur",
                         )))
                         .await;
                     return;

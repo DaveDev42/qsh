@@ -12,10 +12,6 @@
 //!   that [`event::SessionEvent`] (JSON) and [`wire::SessionEvent`]
 //!   (protobuf, control-stream notification) are distinct types; only the
 //!   JSON one is re-exported at the crate root.
-//! - [`local`]: the prost-generated `qsh.local.v1` messages (localctl IPC,
-//!   `proto/qsh/local/v1.proto`) and their frame-layer glue — a separate
-//!   package from [`wire`] but sharing its frame layer (M3,
-//!   `docs/design/protocol.md` §11-3).
 //! - [`pairing`]: the invite-code display encoding (Crockford Base32) for
 //!   one-time pairing (ADR-0002, `docs/design/protocol.md` §15).
 //! - [`openssh`]: the hand-written OpenSSH key parsers behind
@@ -57,7 +53,6 @@ pub mod error;
 pub mod event;
 pub mod frame;
 pub mod jump;
-pub mod local;
 pub mod openssh;
 pub mod pairing;
 pub mod punch;

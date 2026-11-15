@@ -355,14 +355,6 @@ enum RemoteForwardConnError {
     /// The `TCP_ACCEPTED` stream could not be opened.
     #[error(transparent)]
     Link(#[from] ClientError),
-    /// The carrier cannot surrender a raw byte pipe: a remote forward over
-    /// the reverse `LOCAL_STREAM` conduit, which is M4 plan Step 5 (2473c88).
-    /// Never reached in Step 4 — the only carrier this stage ever builds
-    /// is [`DataLink::Direct`] — kept as a real variant rather than
-    /// `unreachable!()` so a future carrier that is not yet raw-capable
-    /// fails loudly instead of panicking a spliced connection's task.
-    #[error("remote forwards over a reverse connection land in M4 Step 5")]
-    CarrierNotRaw,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
     Splice(#[from] SpliceError),
@@ -394,20 +386,16 @@ async fn accept_one(
         port: 0,
         deny_host_local: false,
     };
-    let link = DataLink::Direct(conn);
-    let (send, recv, kill) = match crate::tunnel::open_stream(&link, &header).await {
+    let link = DataLink::new(conn);
+    let (send, recv) = match crate::tunnel::open_stream(&link, &header).await {
         Ok(opened) => opened,
         Err(err) => {
             reset_tcp(tcp);
             return Err(err.into());
         }
     };
-    let (Ok(raw_send), Ok((raw_recv, residue))) = (send.into_raw_direct(), recv.into_raw_direct())
-    else {
-        kill.kill();
-        reset_tcp(tcp);
-        return Err(RemoteForwardConnError::CarrierNotRaw);
-    };
+    let raw_send = send.into_raw();
+    let (raw_recv, residue) = recv.into_raw();
     let watch = StallWatch::on(conn, String::from_utf8_lossy(forward_id));
     Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue, watch).await?)
 }

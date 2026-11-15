@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use qsh_proto::local::{LOCAL_HELLO_VERSION, LocalHello, LocalStreamKind};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use windows_sys::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT};
 
 use super::*;
 use crate::fsutil::dacl::testing::{NoSid, assert_owner_only_report, read_dacl_of_handle};
-use crate::localctl::frame::LocalConduit;
 
 /// `S-1-5-18` (LocalSystem), a user this test process is not.
 fn other_sid() -> Vec<u32> {
@@ -51,15 +49,9 @@ fn bind_with(dir: &Path, pid: u32, sids: impl ProcessSids + 'static) -> PipeList
     .unwrap()
 }
 
-fn hello() -> LocalHello {
-    LocalHello {
-        version: LOCAL_HELLO_VERSION,
-        kind: LocalStreamKind::LocalAdmin as i32,
-        host: String::new(),
-        wait_ms: 0,
-        known_generation: None,
-    }
-}
+/// Bytes a client writes first; the server side never reads them from a
+/// peer it rejects.
+const HELLO: &[u8] = b"hello";
 
 // ---- the DoD pins ----
 
@@ -108,8 +100,7 @@ async fn pipe_server_drops_a_client_with_another_sid_before_reading_a_frame() {
 
     let mut client = connect(&name).await.unwrap();
     // The frame is written, and the server must never surface the stream.
-    let mut conduit = LocalConduit::new(&mut client);
-    let _ = conduit.send(&hello()).await;
+    let _ = client.write_all(HELLO).await;
     let mut byte = [0u8; 1];
     let ended = tokio::time::timeout(Duration::from_secs(5), client.read(&mut byte))
         .await
@@ -317,20 +308,22 @@ async fn the_next_pipe_instance_exists_before_the_current_connection_is_handed_o
 }
 
 #[tokio::test]
-async fn pipe_stream_carries_localctl_frames_both_ways() {
+async fn pipe_stream_carries_bytes_both_ways() {
     let dir = tempfile::tempdir().unwrap();
     let mut listener = bind_in(dir.path(), 4009);
     let name = listener.name().to_path_buf();
     let server = tokio::spawn(async move {
-        let mut conduit = LocalConduit::new(listener.accept().await.unwrap());
-        let got: LocalHello = conduit.recv().await.unwrap().unwrap();
-        conduit.send(&got).await.unwrap();
+        let mut stream = listener.accept().await.unwrap();
+        let mut got = [0u8; HELLO.len()];
+        stream.read_exact(&mut got).await.unwrap();
+        stream.write_all(&got).await.unwrap();
     });
 
-    let mut conduit = LocalConduit::new(connect(&name).await.unwrap());
-    conduit.send(&hello()).await.unwrap();
-    let echoed: LocalHello = conduit.recv().await.unwrap().unwrap();
-    assert_eq!(echoed, hello());
+    let mut stream = connect(&name).await.unwrap();
+    stream.write_all(HELLO).await.unwrap();
+    let mut echoed = [0u8; HELLO.len()];
+    stream.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(echoed, HELLO);
     server.await.unwrap();
 }
 

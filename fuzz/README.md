@@ -3,8 +3,8 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds twenty-eight `cargo-fuzz` targets.
-Twenty-five are parser harnesses over that surface; one of them,
+anything else touches it. This crate holds twenty-six `cargo-fuzz` targets.
+Twenty-three are parser harnesses over that surface; one of them,
 `fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
 paths (trust store files, ACL principal text). Three more are stateful:
@@ -87,8 +87,6 @@ Run from `fuzz/`. `cargo fuzz list` prints the same set.
 | `decode_session_frame` | `wire.rs` | `decode_msg::<SessionFrame>` + `.validate()` chained — the SESSION_DATA stream oneof the PTY/replay-ring pump calls on every decoded frame (including the screen-sync frames `ScreenUpdate`, `ScreenAck`, since ADR-0052 decision 10 `ScreenHistory`, whose chunk cap `validate` checks, and since ADR-0053 decision 3 `ScreenEcho`, whose tty value and sent-offset check must stay total). |
 | `decode_stream_header` | `wire.rs` | `decode_msg::<StreamHeader>` + `.stream_kind()` chained — the first message on every newly-opened QUIC stream, before kind-based dispatch. |
 | `decode_connect_result` | `wire.rs` | `decode_msg::<ConnectResult>` + `sanitize_peer_text` on `code`/`message` chained — the reply a `-L` local-forward dial reads off the `TCP_CONNECT` stream (`crates/qsh-core/src/tunnel/local.rs`), the sole top-level `decode_msg` message reached with no ticket in front of it. |
-| `decode_local_hello` | `crates/qsh-proto/src/local.rs` | `decode_local::<LocalHello>` — first frame of every localctl conduit (separate `qsh.local.v1` package from `qsh.wire.v1`). |
-| `decode_local_admin_request` | `local.rs` | `decode_local::<LocalAdminRequest>` — the `LOCAL_ADMIN` conduit's second frame (`LocalHostList`/`LocalTunnelList`/`LocalTunnelClose` oneof). |
 | `sanitize_peer_text` | `wire.rs` | `sanitize_peer_text` — the ANSI/OSC-hostile control-character stripper for any peer-authored prose this side displays. Asserts no un-replaced control byte (other than `\t`) and no dropped/merged characters. |
 | `valid_host_name` | `wire.rs` | `valid_host_name` — shape check on a reverse target's offered name, run before it can become an ACL resource/audit field. |
 | `valid_forward_id` | `wire.rs` | `valid_forward_id` — shape check on an opaque host-issued forward token a peer echoes back. |
@@ -228,10 +226,6 @@ tests and fixtures — not random bytes — per target:
   32-byte hash, an `end` with a wrong-length hash, a succeeded `result`
   (`overwritten`) and a failed one, the empty input, an unknown field and a
   truncated length prefix.
-- `decode_local_hello` / `decode_local_admin_request`: the same treatment
-  for `qsh.local.v1`, covering each `LocalStreamKind` variant and each
-  `LocalAdminRequest` oneof arm plus the `body: None` discriminator case
-  the message's own doc comment calls out.
 - `sanitize_peer_text`: plain prose, an ESC/CSI cursor-move sequence, an
   OSC title-set sequence, tab-preservation, and multi-byte UTF-8 — the
   ANSI/OSC injection threat model the function's own doc names explicitly.

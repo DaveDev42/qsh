@@ -12,7 +12,7 @@
 //!   `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name somebody else already holds
 //!   makes [`PipeListener::bind`] fail instead of silently sharing it. Remote
 //!   clients are always rejected and the pipe is a byte stream
-//!   ([`CreateOptions`]); `frame.rs` does the framing.
+//!   ([`CreateOptions`]).
 //! - **Access.** Every instance gets a protected DACL with one ACE for the
 //!   owner (`crate::fsutil::dacl`, [`ObjectKind::Pipe`]): read, write and
 //!   `FILE_CREATE_PIPE_INSTANCE`. The default pipe DACL would give Everyone

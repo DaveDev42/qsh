@@ -76,20 +76,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "decode_local_hello"
-path = "fuzz_targets/decode_local_hello.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "decode_local_admin_request"
-path = "fuzz_targets/decode_local_admin_request.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "decode_connect_result"
 path = "fuzz_targets/decode_connect_result.rs"
 test = false

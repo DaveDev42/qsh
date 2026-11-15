@@ -240,29 +240,6 @@ fn a_serve_record_live_or_left_by_a_crash_makes_the_device_a_server() {
     assert_eq!(data.mode_basis.as_deref(), Some("daemon"));
 }
 
-/// A `qsh listen` writes no `serve.json`; its localctl endpoint in the
-/// runtime directory is what shows it is running.
-#[cfg(unix)]
-#[test]
-fn a_live_localctl_endpoint_makes_the_device_a_server() {
-    let (_guard, ops) = client_ops();
-    let run_dir = ops.paths().runtime_dir();
-    std::fs::create_dir_all(&run_dir).unwrap();
-    let home = tempfile::tempdir().unwrap();
-
-    // A leftover endpoint of a process that is gone shows nothing.
-    std::fs::write(run_dir.join(format!("{}.sock", u32::MAX - 1)), b"").unwrap();
-    assert_eq!(
-        run_in(&ops, None, home.path()).mode.as_deref(),
-        Some("client")
-    );
-
-    std::fs::write(run_dir.join(format!("{}.sock", std::process::id())), b"").unwrap();
-    let data = run_in(&ops, None, home.path());
-    assert_eq!(data.mode.as_deref(), Some("server"));
-    assert_eq!(data.mode_basis.as_deref(), Some("daemon"));
-}
-
 #[test]
 fn a_pin_with_a_role_or_a_live_role_invite_makes_the_device_a_server() {
     let home = tempfile::tempdir().unwrap();

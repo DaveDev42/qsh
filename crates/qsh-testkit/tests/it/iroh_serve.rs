@@ -313,7 +313,7 @@ async fn a_pinned_iroh_client_runs_exec_and_a_session_through_serve() {
         .expect("hello over the relay");
     let ran = tokio::time::timeout(
         TIMEOUT,
-        session.exec(&exec_spec(&["sh", "-c", "echo hi; exit 3"]), None, None),
+        session.exec(&exec_spec(&["sh", "-c", "echo hi; exit 3"]), None),
     )
     .await
     .expect("exec finishes")

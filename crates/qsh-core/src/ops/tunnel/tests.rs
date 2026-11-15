@@ -44,7 +44,7 @@ fn wait_ms_is_bounded_0_to_600_000() {
 /// previously called `tunnel_open` with an out-of-range `wait_ms`, so
 /// a mutation that let it silently become `0` passed the whole
 /// suite). `wait_budget_ms(req.wait_ms)?` runs before
-/// `connect_with_wait` ever dials anything, so this needs no daemon
+/// `connect_keeping_target` ever dials anything, so this needs no daemon
 /// or peer — a valid `listen_port` (`req`'s own default shape) keeps
 /// `spec_from_request`'s own port check from firing first and masking
 /// which check actually rejected the request.
@@ -96,117 +96,6 @@ fn tunnel_open_and_dynamic_reject_an_out_of_range_keep_alive_before_ever_connect
         Err(err) => err,
     };
     assert_eq!(err.code, ErrorCode::ConfigError);
-}
-
-/// A retryable `HOST_NOT_FOUND` shaped exactly like
-/// `crate::ops::host::stale_host_not_found`'s output (that function is
-/// private to `ops::host`, so this rebuilds the same shape from its
-/// public `STALE_REGISTRATION_REASON` rather than reaching into it) —
-/// the one branch [`retry_while_stale`] is allowed to retry.
-fn stale_err() -> OpError {
-    OpError::new(ErrorCode::HostNotFound, "reverse registration is stale")
-        .with_retryable(true)
-        .with_details(serde_json::json!({
-            "reason": host::STALE_REGISTRATION_REASON,
-            "lost_ago_ms": 1234,
-            "retry_after_ms": 30_000,
-        }))
-}
-
-/// A `HOST_NOT_FOUND` for a name with **no** registration at all
-/// (`crate::ops::host::unconfigured_host_not_found`'s shape) —
-/// same code as [`stale_err`], `retryable: false`, no `reason` in
-/// `details`. [`is_stale_registration`]/[`retry_while_stale`] must
-/// tell the two apart on more than `code` alone.
-fn unretryable_not_found_err() -> OpError {
-    OpError::new(ErrorCode::HostNotFound, "no such host").with_retryable(false)
-}
-
-#[test]
-fn is_stale_registration_matches_only_the_pr_c_shape() {
-    assert!(is_stale_registration(&stale_err()));
-    assert!(!is_stale_registration(&unretryable_not_found_err()));
-    // Same code, retryable, but a different `details.reason` — must
-    // not be mistaken for the stale branch.
-    let other_reason = OpError::new(ErrorCode::HostNotFound, "x")
-        .with_retryable(true)
-        .with_details(serde_json::json!({ "reason": "something_else" }));
-    assert!(!is_stale_registration(&other_reason));
-    assert!(!is_stale_registration(&OpError::new(
-        ErrorCode::ConnectionFailed,
-        "x"
-    )));
-}
-
-/// Mutation check (issue #4 item 5a's own "Tests" ask): comment the
-/// retry loop out of [`retry_while_stale`] — i.e. make it return on
-/// the very first `Err` regardless of budget — and this test reds,
-/// because it would then see `stale_err()` instead of the eventual
-/// `Ok`.
-#[test]
-fn retry_while_stale_retries_the_stale_branch_until_it_succeeds() {
-    let mut calls = 0u32;
-    let result = retry_while_stale(5_000, Duration::from_millis(5), || {
-        calls += 1;
-        if calls < 3 {
-            Err(stale_err())
-        } else {
-            Ok("connected")
-        }
-    });
-    assert_eq!(result, Ok("connected"));
-    assert_eq!(
-        calls, 3,
-        "must have retried exactly twice before succeeding"
-    );
-}
-
-/// Mutation check (issue #4 item 5a's own "Tests" ask): replace the
-/// expiry return with a generic/synthesized error instead of the
-/// last attempt's own `Err`, and this test reds — the returned error
-/// must equal `stale_err()` field-for-field (code, `retryable`, and
-/// `details` all included, via `OpError`'s derived `PartialEq`), not
-/// merely share its `ErrorCode`.
-#[test]
-fn retry_while_stale_returns_the_last_attempts_own_stale_error_on_expiry() {
-    let mut calls = 0u32;
-    let result: Result<(), OpError> = retry_while_stale(30, Duration::from_millis(10), || {
-        calls += 1;
-        Err(stale_err())
-    });
-    assert_eq!(result, Err(stale_err()));
-    assert!(
-        calls >= 2,
-        "a 30ms budget over a 10ms poll must retry at least once: {calls}"
-    );
-}
-
-/// A non-stale error — even one that shares `HOST_NOT_FOUND` — returns
-/// on the very first attempt regardless of budget: `--wait` never
-/// widens retrying beyond the one documented branch.
-#[test]
-fn retry_while_stale_never_retries_a_non_stale_error() {
-    let mut calls = 0u32;
-    let result: Result<(), OpError> = retry_while_stale(5_000, Duration::from_millis(5), || {
-        calls += 1;
-        Err(unretryable_not_found_err())
-    });
-    assert_eq!(result, Err(unretryable_not_found_err()));
-    assert_eq!(calls, 1);
-}
-
-/// `wait_budget_ms == 0` (absent `--wait`, or `--wait 0`) is a single
-/// attempt even when that attempt is the stale branch — the
-/// byte-identical-to-before-this-flag guarantee (`docs/CLI.md` §6.9).
-#[test]
-fn retry_while_stale_with_a_zero_budget_never_retries_even_the_stale_branch() {
-    let mut calls = 0u32;
-    let result: Result<(), OpError> = retry_while_stale(0, Duration::from_millis(5), || {
-        calls += 1;
-        Err(stale_err())
-    });
-    assert_eq!(result, Err(stale_err()));
-    assert_eq!(calls, 1);
 }
 
 /// A `-R` request is refused as unimplemented, not as malformed, and
@@ -388,88 +277,6 @@ fn tunnel_dynamic_without_dial_filter_capability_is_unsupported_and_binds_nothin
     assert_eq!(err.message, DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE);
 }
 
-/// ADR-0020 decision 2's reverse-route twin of the test just above:
-/// a reverse route whose `LOCAL_CONTROL` registration never negotiated
-/// `dial-filter.v1` gets `UNSUPPORTED` naming both possible causes, and
-/// **nothing is bound** — same "no handle to ask for a bound port, so
-/// the only way to observe it is that this call never got that far"
-/// pin as the forward-route test.
-///
-/// Builds a real (but registration-free) reverse-route [`Connected`]
-/// via [`Connected::for_test_reverse`]: a fake localctl daemon,
-/// speaking exactly the `qsh.local.v1` `LOCAL_CONTROL` handshake
-/// [`crate::localctl::client::open_control_over`] drives, answers with
-/// a `LocalHelloAck` whose `capabilities` omits
-/// [`wire::CAP_DIAL_FILTER_V1`] — the same "target predates the
-/// capability, or this machine's own `qsh listen` daemon has not been
-/// restarted since its own upgrade" state ADR-0020 decision 2 names.
-#[cfg(unix)]
-#[test]
-fn tunnel_dynamic_over_reverse_without_dial_filter_capability_is_unsupported_and_binds_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
-    let ops = Ops::new(paths);
-    let runtime = ops.connect_runtime().unwrap();
-
-    let handshake = runtime.block_on(async {
-        let (client_end, daemon_end) = tokio::net::UnixStream::pair().expect("socketpair");
-        tokio::spawn(async move {
-            let mut daemon = crate::localctl::frame::LocalConduit::new(daemon_end);
-            let _hello: qsh_proto::local::LocalHello = daemon
-                .recv()
-                .await
-                .expect("recv LocalHello")
-                .expect("conduit open");
-            let ack = qsh_proto::local::LocalResponse {
-                body: Some(qsh_proto::local::local_response::Body::HelloAck(
-                    qsh_proto::local::LocalHelloAck {
-                        host: "target".to_string(),
-                        peer_fingerprint: "sha256:deadbeef".to_string(),
-                        generation: 1,
-                        // `dial-filter.v1` deliberately missing — an
-                        // old target, or a daemon still relaying its
-                        // pre-upgrade registration.
-                        capabilities: vec![qsh_proto::wire::CAP_EXEC.to_string()],
-                    },
-                )),
-            };
-            daemon.send(&ack).await.expect("send LocalHelloAck");
-            // Keep the daemon end alive for the test's whole duration —
-            // dropping it here would race the client's own read of the
-            // ack above with an early EOF.
-            std::future::pending::<()>().await
-        });
-        crate::localctl::client::open_control_over(client_end, "target", 0, None)
-            .await
-            .expect("fake LOCAL_CONTROL handshake")
-    });
-
-    let session = crate::client::Session::from_local_control(
-        handshake.conduit,
-        handshake.capabilities,
-        handshake.host,
-        dir.path().join("fake.sock"),
-        handshake.peer_fingerprint,
-        handshake.generation,
-    );
-    let conn = Connected::for_test_reverse(
-        runtime,
-        session,
-        dir.path().join("fake.sock"),
-        "target".to_string(),
-    );
-
-    let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "target", None) {
-        Err(err) => err,
-        Ok(_) => panic!("-D over reverse must never bind without dial-filter.v1"),
-    };
-    assert_eq!(err.code, ErrorCode::Unsupported);
-    assert_eq!(
-        err.message,
-        DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE
-    );
-}
-
 /// ADR-0019 decision 11 promises that a same-process `tunnel.close`
 /// really tears a `-D` hold down — this
 /// proves it through the same `register_hold` mechanism
@@ -543,35 +350,22 @@ mod require_dial_filter_capability_tests {
     use super::*;
 
     #[test]
-    fn present_capability_is_ok_on_either_route() {
+    fn present_capability_is_ok() {
         let caps = vec![wire::CAP_DIAL_FILTER_V1.to_string(), "other.v1".to_string()];
-        assert!(require_dial_filter_capability(&caps, false).is_ok());
-        assert!(require_dial_filter_capability(&caps, true).is_ok());
+        assert!(require_dial_filter_capability(&caps).is_ok());
     }
 
     #[test]
-    fn missing_capability_on_forward_route_is_the_forward_message() {
+    fn missing_capability_is_the_forward_message() {
         let caps = vec!["other.v1".to_string()];
-        let err = require_dial_filter_capability(&caps, false).expect_err("must refuse");
+        let err = require_dial_filter_capability(&caps).expect_err("must refuse");
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert_eq!(err.message, DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE);
     }
 
     #[test]
-    fn missing_capability_on_reverse_route_names_both_causes() {
-        let err = require_dial_filter_capability(&[], true).expect_err("must refuse");
-        assert_eq!(err.code, ErrorCode::Unsupported);
-        assert_eq!(
-            err.message,
-            DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE
-        );
-        assert!(err.message.contains("target's qsh predates"));
-        assert!(err.message.contains("qsh listen` daemon started before"));
-    }
-
-    #[test]
     fn empty_capability_list_is_unsupported() {
-        let err = require_dial_filter_capability(&[], false).expect_err("must refuse");
+        let err = require_dial_filter_capability(&[]).expect_err("must refuse");
         assert_eq!(err.code, ErrorCode::Unsupported);
     }
 }

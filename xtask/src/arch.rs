@@ -206,27 +206,21 @@ const BROKER_TOKEN_SET: [&str; 6] = [
     "crate::client",
 ];
 
-/// `localctl/client.rs` (CLI-process side) is pure local-stream + `qsh-proto`
-/// framing and must never reach for a transport type; `localctl/frame.rs`
-/// is the shared conduit codec underneath it and is bound by the same rule,
-/// and so are the two platform halves under `localctl/transport/`, which
-/// hold the only socket and named-pipe code of the CLI-process side.
-/// `localctl/daemon.rs` is the bridge to QUIC and is deliberately *not*
-/// listed here — file scope, not the directory, is what lets it stay
-/// exempt (`docs/design/architecture.md` §1).
-const LOCALCTL_FRAME_FILE: &str = "crates/qsh-core/src/localctl/frame.rs";
-const LOCALCTL_CLIENT_FILE: &str = "crates/qsh-core/src/localctl/client.rs";
+/// The two platform halves under `localctl/transport/` hold the only socket
+/// and named-pipe code left in `localctl` (agent forwarding rides them) and
+/// must never reach for a transport type. File scope, not the directory, is
+/// what the ban uses, so a future sibling stays unbanned until it is listed
+/// (`docs/design/architecture.md` §1).
 const LOCALCTL_TRANSPORT_UNIX_FILE: &str = "crates/qsh-core/src/localctl/transport/unix.rs";
 const LOCALCTL_TRANSPORT_WINDOWS_FILE: &str = "crates/qsh-core/src/localctl/transport/windows.rs";
-const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs and localctl/transport/{unix,windows}.rs are pure local-stream + qsh-proto framing on the CLI-process side; \
-     localctl/daemon.rs is the transport bridge and is deliberately exempt (docs/design/architecture.md §1)";
+const LOCALCTL_TRANSPORT_REASON: &str = "localctl/transport/{unix,windows}.rs are plain local-stream code and must not name a QUIC or TLS type (docs/design/architecture.md §1)";
 
-/// `qsh-cli/src` never opens a UDS socket or a named pipe directly — it goes
-/// through `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
+/// `qsh-cli/src` never opens a UDS socket or a named pipe directly — local
+/// streams belong to `qsh-core`'s `localctl::transport`. Scope is `src/` only, not the crate
 /// root: `crates/qsh-cli/tests/it/localctl_perms.rs` pokes UDS permissions
 /// directly and legitimately needs `UnixStream` (`docs/design/architecture.md` §1).
 const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
-const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
+const CLI_SRC_REASON: &str = "qsh-cli reaches local streams only through qsh-core, never by opening a UDS \
      socket or a named pipe itself (docs/design/architecture.md §1); crates/qsh-cli/tests is out of scope for this rule";
 
 /// `trust/invite_address/route.rs` (and any future sibling under the same
@@ -330,7 +324,7 @@ const FILE_GUARD_TOKEN_SET: [&str; 7] = [
 /// type, so a second transport backend needs no edit above `qsh-transport`
 /// (`docs/adr/0043-no-tcp-fallback.md` decision 3). The ban covers the
 /// whole `src/` tree, `tests.rs` files included, with no per-file exemption;
-/// `localctl/daemon.rs` no longer needs one.
+/// no file needs one.
 ///
 /// The tokens are the path form `quinn::` and the hidden accessor
 /// `.quinn(`, not the bare word: prose, test names that pin a documented
@@ -356,8 +350,6 @@ fn module_bans() -> Vec<ModuleBan> {
         .collect();
 
     for file in [
-        LOCALCTL_FRAME_FILE,
-        LOCALCTL_CLIENT_FILE,
         LOCALCTL_TRANSPORT_UNIX_FILE,
         LOCALCTL_TRANSPORT_WINDOWS_FILE,
     ] {

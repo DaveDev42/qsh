@@ -50,10 +50,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::client::ClientError;
-use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
+use crate::client::link::{DataLink, DataRecv, DataSend};
 use crate::tunnel::carrier::{Admit, CarrierView, Ticket};
 use crate::tunnel::dial::DialPolicy;
-use crate::tunnel::splice::splice_tcp_uds;
 use crate::tunnel::splice::{SpliceError, SpliceStats, splice_tcp_quic};
 use crate::tunnel::stall::StallWatch;
 
@@ -80,30 +79,6 @@ pub(crate) enum ForwardCarrier {
     /// (ADR-0023) swaps the value under the running listener, so new
     /// accepts ride the replacement connection.
     Direct(qsh_transport::Connection),
-    /// This machine's resident `qsh listen` daemon socket plus the host
-    /// name to relay to (reverse route) — see [`DataLink::Local`].
-    /// `-L over reverse`, M4 plan Step 5 (a) (2473c88): each forwarded
-    /// connection opens its own `TCP_CONNECT` over a fresh `LOCAL_STREAM`
-    /// conduit, and past `ConnectResult{ok:true}` splices raw bytes with
-    /// [`crate::tunnel::splice::splice_tcp_uds`] — the reverse carrier's
-    /// counterpart to [`ForwardCarrier::Direct`]'s `splice_tcp_quic`.
-    ///
-    /// Constructing and splicing over this variant is complete as of this
-    /// stage (M4 plan Step 5 (a) (2473c88)); wired up by every route-aware
-    /// `Ops` entry point (`-L`/`-D`, standalone and interactive) since
-    /// ADR-0020.
-    Local {
-        /// The daemon's UDS socket path.
-        socket: std::path::PathBuf,
-        /// The registered host name to relay to.
-        host: String,
-        /// The registration a supervised tunnel confirmed on its
-        /// `LOCAL_CONTROL` leg (ADR-0023 decision 7-5). When set, every
-        /// `LOCAL_STREAM` conduit's `LocalHelloAck` is compared with it
-        /// before the `StreamHeader` is sent. `None` for an unsupervised
-        /// tunnel, whose behavior is unchanged.
-        expect: Option<crate::localctl::client::ExpectedPeer>,
-    },
 }
 
 impl ForwardCarrier {
@@ -111,11 +86,7 @@ impl ForwardCarrier {
     /// wants.
     fn link(&self) -> DataLink<'_> {
         match self {
-            ForwardCarrier::Direct(conn) => DataLink::Direct(conn),
-            ForwardCarrier::Local { socket, host, .. } => DataLink::Local {
-                socket: socket.as_path(),
-                host: host.as_str(),
-            },
+            ForwardCarrier::Direct(conn) => DataLink::new(conn),
         }
     }
 }
@@ -189,27 +160,12 @@ pub(crate) enum ForwardConnError {
     /// either way.
     #[error("peer closed the tunnel stream without a ConnectResult")]
     NoConnectResult,
-    /// The carrier cannot surrender the raw byte pipe [`forward_connection`]
-    /// expected for it. Not reachable in practice — `carrier`'s variant and
-    /// `carrier.link()`'s variant always agree, so the matching
-    /// `into_raw_direct`/`into_raw_local` call always succeeds — but kept as
-    /// a real, reported variant rather than `unreachable!()` so a future
-    /// carrier this splice does not yet know how to pump fails loudly
-    /// instead of panicking a live connection's task.
-    #[error("this tunnel carrier cannot surrender a raw byte pipe")]
-    CarrierNotRaw,
     /// The forward's carrier is disconnected (ADR-0023 decision 5): either
     /// it already was when the connection arrived, or it was left while this
     /// connection waited for `ConnectResult`. Only a supervised tunnel ever
     /// produces this.
     #[error("the tunnel's connection is down")]
     CarrierDisconnected,
-    /// The registration behind the host name is no longer the one a
-    /// supervised reverse-route tunnel confirmed (ADR-0023 decision 7-5).
-    /// The accept is refused like a disconnected carrier and nothing was
-    /// sent toward the new registration's device.
-    #[error("the registration behind this host changed")]
-    PeerChanged,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
     Splice(#[from] SpliceError),
@@ -437,37 +393,6 @@ impl LocalForwardHandle {
         Self::start_with_carrier(spec, ForwardCarrier::Direct(connection)).await
     }
 
-    /// [`Self::start`]'s reverse-route sibling, `-L over reverse`
-    /// (M4 plan Step 5 (a) (2473c88)): each connection accepted on this
-    /// forward's listener relays through `socket_path` (this machine's
-    /// resident `qsh listen` daemon's UDS socket) to `host`'s live reverse
-    /// registration, instead of dialing a QUIC connection directly. See
-    /// `ForwardCarrier::Local`'s own doc for the wire shape this opens
-    /// per connection.
-    ///
-    /// `pub`, not `pub(crate)` — the same Stage D widening
-    /// `crate::tunnel::RemoteForwardAcceptor::spawn_reverse` already
-    /// got: `crates/qsh-testkit/tests/it/reverse_tunnel.rs` (L3, Step 5 (a))
-    /// drives the real `-L over reverse` requester leg end to end rather
-    /// than re-implementing it, which needs this callable from outside
-    /// `qsh-core`. `Ops`'s route-aware entry point (PR 5b) is still the
-    /// only *production* caller.
-    pub async fn start_reverse(
-        spec: &ForwardSpec,
-        socket_path: std::path::PathBuf,
-        host: String,
-    ) -> Result<Self, LocalForwardError> {
-        Self::start_with_carrier(
-            spec,
-            ForwardCarrier::Local {
-                socket: socket_path,
-                host,
-                expect: None,
-            },
-        )
-        .await
-    }
-
     async fn start_with_carrier(
         spec: &ForwardSpec,
         carrier: ForwardCarrier,
@@ -586,12 +511,6 @@ pub(crate) enum OpenedTunnel {
         residue: Vec<u8>,
         watch: StallWatch,
     },
-    /// Opened on [`ForwardCarrier::Local`].
-    Local {
-        send: crate::localctl::client::RawUdsWrite,
-        recv: crate::localctl::client::RawUdsRead,
-        residue: Vec<u8>,
-    },
 }
 
 /// Open one tunnel stream on `carrier` for `host:port` and wait for the
@@ -634,21 +553,18 @@ pub(crate) async fn open_tunnel(
     };
     let opened_stream = open_carrier_stream(carrier, &header).await;
     drop(turn);
-    let (send, mut recv, kill) = opened_stream?;
+    let (send, mut recv) = opened_stream?;
 
     let result: ConnectResult = match recv.recv().await {
         Ok(Some(result)) => result,
         Ok(None) => {
-            kill.kill();
             return Err(ForwardConnError::NoConnectResult);
         }
         Err(err) => {
-            kill.kill();
             return Err(err.into());
         }
     };
     if !result.ok {
-        kill.kill();
         return Err(ForwardConnError::Refused {
             // Sanitized at construction — the peer authored these and
             // they end up in this side's diagnostics, possibly on a
@@ -659,18 +575,11 @@ pub(crate) async fn open_tunnel(
     }
 
     // Past `ConnectResult{ok:true}` the stream is a raw byte pipe (§5, §7):
-    // convert both halves to whichever raw carrier this connection actually
-    // opened its stream on — `carrier`'s own variant decides which raw
-    // conversion must succeed, so the two always agree; the `CarrierNotRaw`
-    // arm exists only as a defensive fallback (`ForwardConnError::
-    // CarrierNotRaw`'s own doc), never a reachable outcome.
+    // convert both halves to the raw QUIC streams the splice needs.
     match carrier {
         ForwardCarrier::Direct(conn) => {
-            let (Ok(send), Ok((recv, residue))) = (send.into_raw_direct(), recv.into_raw_direct())
-            else {
-                kill.kill();
-                return Err(ForwardConnError::CarrierNotRaw);
-            };
+            let send = send.into_raw();
+            let (recv, residue) = recv.into_raw();
             Ok(OpenedTunnel::Direct {
                 send,
                 recv,
@@ -678,48 +587,14 @@ pub(crate) async fn open_tunnel(
                 watch: StallWatch::on(conn, format!("{host}:{port}")),
             })
         }
-        ForwardCarrier::Local { .. } => {
-            let (Ok(send), Ok((recv, residue))) = (send.into_raw_local(), recv.into_raw_local())
-            else {
-                kill.kill();
-                return Err(ForwardConnError::CarrierNotRaw);
-            };
-            Ok(OpenedTunnel::Local {
-                send,
-                recv,
-                residue,
-            })
-        }
     }
 }
 
-/// Open the tunnel stream on `carrier`. A reverse carrier that carries an
-/// [`crate::localctl::client::ExpectedPeer`] checks the daemon's ack before
-/// the header goes out (ADR-0023 decision 7-5); every other carrier opens
-/// as it always did.
+/// Open the tunnel stream on `carrier`.
 async fn open_carrier_stream(
     carrier: &ForwardCarrier,
     header: &StreamHeader,
-) -> Result<(DataSend, DataRecv, DataKillSwitch), ForwardConnError> {
-    if let ForwardCarrier::Local {
-        socket,
-        host,
-        expect: Some(expect),
-    } = carrier
-    {
-        use crate::localctl::client::{StreamOpenError, open_stream_expecting};
-        return match open_stream_expecting(socket, host, header, expect).await {
-            Ok(handshake) => Ok((
-                DataSend::Local(handshake.send),
-                DataRecv::Local(handshake.recv),
-                DataKillSwitch::new(handshake.socket.clone()),
-            )),
-            Err(StreamOpenError::PeerChanged) => Err(ForwardConnError::PeerChanged),
-            Err(StreamOpenError::Op(err)) => Err(ForwardConnError::Link(
-                crate::client::link::op_error_to_client_error(err),
-            )),
-        };
-    }
+) -> Result<(DataSend, DataRecv), ForwardConnError> {
     let link = carrier.link();
     Ok(crate::tunnel::open_stream(&link, header).await?)
 }
@@ -739,11 +614,6 @@ pub(crate) async fn splice_opened(
             residue,
             watch,
         } => Ok(splice_tcp_quic(tcp, send, recv, residue, watch).await?),
-        OpenedTunnel::Local {
-            send,
-            recv,
-            residue,
-        } => Ok(splice_tcp_uds(tcp, send, recv, residue).await?),
     }
 }
 

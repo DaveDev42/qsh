@@ -35,26 +35,17 @@ pub(super) enum Recovery {
 /// and return [`Recovery::SameLeg`], which is a broken reader handed back
 /// to a caller that will fail on it again with no backoff.
 ///
-/// `link` is `Some` only on the forward route (`Step 8`: this function is
-/// now shared with the reverse route too, unlike before Step 8, when it
-/// was forward-only and took a bare `&Link`). `None` disables migration
-/// unconditionally, regardless of `leg_survived`/`ctx.recovery.migration`
-/// — there is no `Connection` to probe or rebind on the reverse route
-/// (`RecoveryLink`'s own doc), so every attempt falls straight through to
-/// `reconnect`. In practice `leg_survived` is already always `false` on
-/// that route (reverse's [`spawn_watchdog`] never produces
-/// [`LegEnd::PathDead`], the only end [`LegEnd::leg_survived`] answers
-/// `true` for), so this is defence in depth, not the only thing standing
-/// between a reverse leg and a migration attempt.
+/// `link` is the connection this attach rides; its endpoint is what a
+/// migration rebinds and its connection is what the probe asks.
 #[allow(
     clippy::too_many_arguments,
-    reason = "one more than before Step 8 (`reconnect`, the `Reconnect` seam the forward call \
-              site builds a `DialReconnect` for — bundling it into `ctx` would put a route- \
-              specific reconnect step back where `RecoveryLink` already keeps the routes apart)"
+    reason = "`reconnect`, the `Reconnect` seam the call site builds a `DialReconnect` for, \
+              rides next to the leg's own state; bundling it into `ctx` would put the redial \
+              step back inside the context"
 )]
 pub(super) async fn recover_attach(
     ctx: &Arc<AttachContext>,
-    link: Option<&Link>,
+    link: &Link,
     leg_survived: bool,
     watch: &PathWatch,
     probes: &Arc<tokio::sync::Notify>,
@@ -83,14 +74,12 @@ pub(super) async fn recover_attach(
         // Only the first attempt still has a live leg behind it, so only
         // the first can migrate: after a re-dial has been attempted the
         // old connection and its control stream are gone. And only a leg
-        // whose streams outlived the failure can be kept at all. `link`
-        // being `None` (the reverse route) forces this `false` too — see
-        // this function's own doc.
-        let live_leg = link.is_some() && leg_survived && attempt == 0 && !reconnect.has_pending();
-        let binder = link.map(Link::endpoint);
+        // whose streams outlived the failure can be kept at all.
+        let live_leg = leg_survived && attempt == 0 && !reconnect.has_pending();
+        let binder = link.endpoint();
         let migration = live_leg && ctx.recovery.migration;
         let path_binder: Option<&dyn PathBinder> = if migration {
-            binder.as_ref().map(|b| b as &dyn PathBinder)
+            Some(&binder as &dyn PathBinder)
         } else {
             None
         };
@@ -103,17 +92,8 @@ pub(super) async fn recover_attach(
             || {
                 let watch = watch.clone();
                 let probes = probes.clone();
-                // `None` only when `link` is `None` (the reverse route),
-                // in which case `live_leg` is already forced `false`
-                // above — so `rtt.is_none()` short-circuits the `&&`
-                // below before `probe_alive` would ever need a value.
-                let rtt = link.map(|link| link.connection().rtt());
-                async move {
-                    match rtt {
-                        Some(rtt) => live_leg && probe_alive(&watch, &probes, rtt).await,
-                        None => false,
-                    }
-                }
+                let rtt = link.connection().rtt();
+                async move { live_leg && probe_alive(&watch, &probes, rtt).await }
             },
             || async {
                 // Past the point of no return for this leg: stop the pumps
@@ -123,9 +103,7 @@ pub(super) async fn recover_attach(
                 reconnect.reconnect(last_output_seq).await
             },
             // Read only after the attempt above has resolved (`recover`'s
-            // own doc) — `0` on the forward route, the reverse route's
-            // measured re-registration wait on the other
-            // (`Reconnect::registration_wait_ms`'s own doc).
+            // own doc); `0` for a redial, which waits on nothing but itself.
             || reconnect.registration_wait_ms(),
         )
         .await;
@@ -202,11 +180,8 @@ pub(super) fn spawn_reattach(
 /// credential, persist its successor, open the data stream, and retransmit
 /// the input the host never acknowledged (`docs/design/protocol.md` §10).
 ///
-/// `link` is the same forward [`Link`] `drive_attach`'s gate already pulled
-/// out of `ctx.link` — never re-derived here, and never itself the reverse
-/// route's kind, because [`recover_attach`] (this function's only caller,
-/// via [`spawn_reattach`]) is never invoked with one (`RecoveryLink`'s own
-/// doc).
+/// `link` is the same [`Link`] `drive_attach` already pulled out of
+/// `ctx.link` — never re-derived here.
 async fn reattach(
     ctx: &Arc<AttachContext>,
     link: &Link,
@@ -219,16 +194,7 @@ async fn reattach(
     if ctx.finished() {
         return Err(abandoned());
     }
-    // `ctx.target` is `Some` on every forward-route attach (the only kind
-    // that ever reaches `reattach` — this fn's own doc), and `None` only
-    // on the reverse route, which never resolves one at all
-    // (`session_attach`'s own doc). `AttachContext::target`'s doc names
-    // this same invariant.
-    let target = ctx
-        .target
-        .as_ref()
-        .expect("reattach only runs on the forward route, which always resolves a PeerTarget");
-    let (endpoint, connection, mut session) = redial_peer(target, ctx.tuning).await?;
+    let (endpoint, connection, mut session) = redial_peer(&ctx.target, ctx.tuning).await?;
     // `-A` follows the attach to its new connection (ADR-0055 decision 9):
     // the same channel in the request, and a dispatcher accepting before
     // the request leaves. The task ends with the connection.

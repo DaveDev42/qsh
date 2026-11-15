@@ -162,42 +162,6 @@ pub struct ServeTarget {
     pub port_filled: bool,
 }
 
-/// Where `Ops::connect`/`connect_target` (`crate::ops::session`) actually
-/// reach `host` through — the dial-time counterpart of
-/// [`host::HostRoute`], resolved by [`Ops::resolve_route`] (the M3 plan (2473c88)
-/// Step 6). `HostRoute` is what `host.get`/the human renderer *display*;
-/// `PeerRoute` is what a connection is actually built over, carrying the
-/// identity/trust material `HostRoute` deliberately does not (routing and
-/// display share one decision, `host::resolve_route`, but only one of
-/// their two callers ever needs a private key in hand).
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum PeerRoute {
-    /// Dial the peer directly over QUIC (forward route).
-    Forward(PeerTarget),
-    /// Relay through this machine's resident `qsh listen` daemon (reverse
-    /// route).
-    Reverse(LocalRoute),
-}
-
-/// Everything a reverse dial needs: which daemon (by its localctl socket)
-/// and which of its registered hosts (by the alias name `LocalHello.host`
-/// carries) to ask for.
-///
-/// Deliberately **not** carrying the fingerprint [`host::HostRoute::Reverse`]
-/// observed at resolution time — [`crate::ops::session::Connected::peer_fingerprint`]
-/// (the ADR-0007 presentation-condition input) must be the value *this*
-/// connection's own `LocalHelloAck` reports, not a possibly-stale one read
-/// moments earlier during routing (`docs/design/protocol.md` §11-3, the M3 plan (2473c88)
-/// M3 Step 6's "Connected::peer_fingerprint() on the reverse leg returns
-/// LocalHelloAck.peer_fingerprint" rule).
-pub(crate) struct LocalRoute {
-    /// The host alias to ask the daemon for (`LocalHello.host`).
-    // Read by `ops/session.rs`'s `dial_reverse`.
-    pub host: String,
-    /// The daemon's localctl socket path.
-    pub socket: std::path::PathBuf,
-}
-
 /// How long the `trust.add` fingerprint probe waits for a handshake before
 /// reporting `CONNECTION_FAILED`. Deliberately shorter than the transport's
 /// default dial timeout: this dial is expected to fail (we trust nothing),
@@ -1498,43 +1462,29 @@ impl Ops {
         }))
     }
 
-    /// Resolve `host` to a [`PeerRoute`] — the routing decision
-    /// [`Self::resolve_host_route`] already makes (live reverse
-    /// registration beats a forward pin), turned into what
-    /// `Ops::connect`/`connect_target` (`crate::ops::session`) need to
-    /// actually build a connection over either link (M3 plan Step 6 (2473c88)).
+    /// Resolve `host` to the [`PeerTarget`] `Ops::connect`/`connect_target`
+    /// (`crate::ops::session`) build a connection over — the routing
+    /// decision [`Self::resolve_host_route`] already makes, turned into the
+    /// identity/trust material a dial needs.
     ///
     /// **Sync, and not callable from inside a running Tokio runtime** —
-    /// same caveat as [`Self::resolve_peer`] (identity loads synchronously
-    /// on the forward branch, which a platform key store will not hand
-    /// over from inside one) and [`Self::resolve_host_route`] (whose own
-    /// doc this delegates to). Called from `Ops::connect`/`connect_target`
-    /// *before* either builds its own runtime for the dial — sequential,
-    /// not nested, runtimes: [`Self::resolve_host_route`]'s throwaway
-    /// probe runtime is built and torn down here, before the dial's own
-    /// multi-thread runtime exists.
-    pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerRoute, OpError> {
+    /// same caveat as [`Self::resolve_peer`]: identity loads synchronously,
+    /// which a platform key store will not hand over from inside one.
+    pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerTarget, OpError> {
         // A jump is the whole route (ADR-0056 decision 13).
         if self.jump_hops_for(host)?.is_some() {
-            return Ok(PeerRoute::Forward(self.resolve_peer(host)?));
+            return self.resolve_peer(host);
         }
-        let route = match self.resolve_host_route(host) {
-            Ok(route) => route,
-            Err(err) => return self.iroh_only_route(host, err),
-        };
-        match route {
-            HostRoute::Forward { .. } => Ok(PeerRoute::Forward(self.resolve_peer(host)?)),
-            HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
-                host: host.to_string(),
-                socket,
-            })),
+        match self.resolve_host_route(host) {
+            Ok(HostRoute::Forward { .. }) => self.resolve_peer(host),
+            Err(err) => self.iroh_only_route(host, err),
         }
     }
 
     /// `err` is the routing failure for `host`. A pin with no address that
     /// asks for the iroh relay route is an iroh-only route instead of
     /// `HOST_NOT_FOUND` (ADR-0061).
-    fn iroh_only_route(&self, host: &str, err: OpError) -> Result<PeerRoute, OpError> {
+    fn iroh_only_route(&self, host: &str, err: OpError) -> Result<PeerTarget, OpError> {
         if err.code != ErrorCode::HostNotFound {
             return Err(err);
         }
@@ -1545,7 +1495,7 @@ impl Ops {
             return Err(err);
         };
         match self.iroh_only_target(host, &identity, &trust)? {
-            Some(target) => Ok(PeerRoute::Forward(target)),
+            Some(target) => Ok(target),
             None => Err(err),
         }
     }

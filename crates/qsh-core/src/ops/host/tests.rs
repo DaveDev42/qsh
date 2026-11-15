@@ -1,50 +1,7 @@
 use super::*;
 
-fn sample_local(name: &str, state: &str, fingerprint: &str) -> LocalHost {
-    LocalHost {
-        name: name.to_string(),
-        address: "203.0.113.5:51820".to_string(),
-        state: state.to_string(),
-        fingerprint: fingerprint.to_string(),
-        capabilities: vec!["pty".to_string()],
-        generation: 1,
-        registered_at: "2026-08-22T00:00:00Z".to_string(),
-        lost_at: None,
-    }
-}
-
-/// Fixed test defaults for [`resolve_route`]'s injected `now`/
-/// `retry_after_ms` (`docs/design/testing.md` L2) — every pre-existing
-/// test in this module predates the stale branch and does not exercise
-/// it, so a deterministic constant keeps them behavior-neutral while
-/// still letting the new stale-branch tests below pass their own values
-/// straight to [`resolve_route`] when they need to control the clock.
-const TEST_NOW: std::time::SystemTime = std::time::UNIX_EPOCH;
-const TEST_RETRY_AFTER_MS: u64 = 30_000;
-
-fn resolve(
-    reverse: &[ReverseHostEntry],
-    store: &TrustStore,
-    hosts: &HostsFile,
-    name: &str,
-) -> Result<HostRoute, OpError> {
-    resolve_route(
-        reverse,
-        store,
-        hosts,
-        name,
-        TEST_NOW,
-        TEST_RETRY_AFTER_MS,
-        unconfigured_host_not_found,
-    )
-}
-
-fn reverse_entry(pid: u32, name: &str, state: &str, fingerprint: &str) -> ReverseHostEntry {
-    ReverseHostEntry {
-        pid,
-        socket: PathBuf::from(format!("/run/qsh/{pid}.sock")),
-        local: sample_local(name, state, fingerprint),
-    }
+fn resolve(store: &TrustStore, hosts: &HostsFile, name: &str) -> Result<HostRoute, OpError> {
+    resolve_route(store, hosts, name, unconfigured_host_not_found)
 }
 
 fn forward_store(name: &str, address: &str, fingerprint: &str) -> TrustStore {
@@ -100,67 +57,10 @@ const FP_B: &str = "sha256:u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=";
 #[test]
 fn merge_forward_only() {
     let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &[], &no_hosts());
+    let hosts = forward_hosts(&store, &no_hosts());
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].connection_mode, "forward");
     assert_eq!(hosts[0].state, "unknown");
-}
-
-#[test]
-fn merge_reverse_only() {
-    let reverse = vec![reverse_entry(100, "phone", "reachable", FP_A)];
-    let hosts = merge_hosts(Vec::new(), &reverse, &no_hosts());
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].connection_mode, "reverse");
-    assert_eq!(hosts[0].state, "reachable");
-}
-
-#[test]
-fn merge_same_name_both_sources_yields_two_entries() {
-    let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    let reverse = vec![reverse_entry(100, "mac", "reachable", FP_B)];
-    let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &reverse, &no_hosts());
-    assert_eq!(hosts.len(), 2, "same name in both sources must not merge");
-    let modes: std::collections::BTreeSet<&str> =
-        hosts.iter().map(|h| h.connection_mode.as_str()).collect();
-    assert_eq!(
-        modes,
-        std::collections::BTreeSet::from(["forward", "reverse"])
-    );
-}
-
-#[test]
-fn merge_includes_stale_reverse_entries() {
-    let reverse = vec![reverse_entry(100, "old-laptop", "stale", FP_A)];
-    let hosts = merge_hosts(Vec::new(), &reverse, &no_hosts());
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].state, "stale");
-}
-
-#[test]
-fn merge_with_no_daemons_is_forward_only_not_an_error() {
-    let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &[], &no_hosts());
-    assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].connection_mode, "forward");
-}
-
-#[test]
-fn merge_carries_the_hosts_toml_user_hint_onto_a_reverse_entry() {
-    // P3-5 (M9 plan Step 3 (a)-추기 ④ (b9a621b)): `Ops::session_open`'s
-    // `resolve_user_hint` fills the default purely from the host
-    // *name*, before routing ever decides forward vs. reverse — so a
-    // reverse-routed name's listed `Host.user` must match, not show
-    // `None` while the hint is genuinely applied.
-    let reverse = vec![reverse_entry(100, "phone", "reachable", FP_A)];
-    let hosts = hosts_with(&[("phone", "unused.example.com:1", Some("dave"))]);
-    let listed = merge_hosts(Vec::new(), &reverse, &hosts);
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].user.as_deref(), Some("dave"));
-    assert_eq!(
-        listed[0].source, None,
-        "source stays a pure address concept — never set for a reverse entry"
-    );
 }
 
 #[test]
@@ -206,8 +106,8 @@ fn forward_hosts_and_resolve_route_agree_on_routability() {
         std::collections::BTreeSet::from(["routable".to_string()])
     );
 
-    assert!(resolve(&[], &store, &no_hosts(), "routable").is_ok());
-    let err = resolve(&[], &store, &no_hosts(), "addressless").unwrap_err();
+    assert!(resolve(&store, &no_hosts(), "routable").is_ok());
+    let err = resolve(&store, &no_hosts(), "addressless").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
 }
 
@@ -253,7 +153,7 @@ fn hosts_toml_only_name_is_forward_routable_with_no_fingerprint() {
     );
     assert_eq!(listed[0].source.as_deref(), Some("hosts"));
 
-    let route = resolve(&[], &store, &hosts, "headless").unwrap();
+    let route = resolve(&store, &hosts, "headless").unwrap();
     assert_eq!(
         route,
         HostRoute::Forward {
@@ -312,7 +212,7 @@ fn hosts_toml_address_wins_over_trust_toml_address_for_the_same_name() {
         "addresses disagree -> hosts.toml's address won, not a same-address agreement"
     );
 
-    let route = resolve(&[], &store, &hosts, "mac").unwrap();
+    let route = resolve(&store, &hosts, "mac").unwrap();
     assert_eq!(
         route,
         HostRoute::Forward {
@@ -342,7 +242,7 @@ fn hosts_toml_and_trust_toml_agreeing_on_the_same_address_report_source_both() {
         "same address on both sides -> \"both\", not just \"hosts\""
     );
 
-    let route = resolve(&[], &store, &hosts, "mac").unwrap();
+    let route = resolve(&store, &hosts, "mac").unwrap();
     assert_eq!(
         route,
         HostRoute::Forward {
@@ -371,7 +271,7 @@ fn a_port_less_trust_pin_and_a_hosts_toml_address_with_the_port_report_source_bo
         "same address, port-spelling only difference -> \"both\""
     );
 
-    let route = resolve(&[], &store, &hosts, "mac").unwrap();
+    let route = resolve(&store, &hosts, "mac").unwrap();
     assert_eq!(
         route,
         HostRoute::Forward {
@@ -394,33 +294,6 @@ fn a_port_less_hosts_toml_address_resolves_with_the_default_port() {
     assert_eq!(listed[0].source.as_deref(), Some("hosts"));
 }
 
-/// ADR-0014 결정 4: a *live* reverse registration's address is an
-/// observed value from an active daemon, never a hand-written file —
-/// it must never be run through the peer-address normalizer.
-#[test]
-fn a_live_reverse_registration_address_is_never_normalized() {
-    let mut entry = reverse_entry(100, "mac", "reachable", FP_B);
-    entry.local.address = "203.0.113.5".to_string();
-    let hosts = no_hosts();
-
-    let reverse = vec![entry.clone()];
-    let route = resolve(&reverse, &TrustStore::default(), &hosts, "mac").unwrap();
-    assert_eq!(
-        route,
-        HostRoute::Reverse {
-            pid: 100,
-            socket: entry.socket.clone(),
-            address: "203.0.113.5".to_string(),
-            fingerprint: FP_B.to_string(),
-            generation: 1,
-            user: None,
-        }
-    );
-
-    let merged = merge_hosts(Vec::new(), &reverse, &hosts);
-    assert_eq!(merged[0].address, "203.0.113.5");
-}
-
 /// M9 plan §6 (b9a621b) 행 i: surrounding whitespace in a lookup key is
 /// trimmed and still finds the pin; a `user@` hint is a different kind
 /// of prefix and must keep failing closed.
@@ -429,7 +302,7 @@ fn a_lookup_key_with_surrounding_whitespace_finds_the_pin_but_a_user_at_prefix_s
     let store = forward_store("mac", "mac.example.com:4433", FP_A);
     let hosts = no_hosts();
 
-    let route = resolve(&[], &store, &hosts, " mac ").unwrap();
+    let route = resolve(&store, &hosts, " mac ").unwrap();
     assert_eq!(
         route,
         HostRoute::Forward {
@@ -440,7 +313,7 @@ fn a_lookup_key_with_surrounding_whitespace_finds_the_pin_but_a_user_at_prefix_s
         }
     );
 
-    let err = resolve(&[], &store, &hosts, "dave@mac").unwrap_err();
+    let err = resolve(&store, &hosts, "dave@mac").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(
         err.message.contains("qsh trust add mac --address"),
@@ -457,10 +330,9 @@ fn hosts_toml_user_hint_is_carried_through_forward_hosts_and_route() {
     let listed = forward_hosts(&store, &hosts);
     assert_eq!(listed[0].user.as_deref(), Some("dave"));
 
-    let route = resolve(&[], &store, &hosts, "mac").unwrap();
+    let route = resolve(&store, &hosts, "mac").unwrap();
     match route {
         HostRoute::Forward { user, .. } => assert_eq!(user.as_deref(), Some("dave")),
-        other => panic!("expected a forward route, got {other:?}"),
     }
 }
 
@@ -502,53 +374,10 @@ fn hosts_toml_never_makes_an_addressless_client_only_pin_forward_routable_on_its
     // fingerprint being empty here is the on-paper proof of it.
     let store = TrustStore::default();
     let hosts = hosts_with(&[("ghost", "ghost.example.com:4433", None)]);
-    let route = resolve(&[], &store, &hosts, "ghost").unwrap();
+    let route = resolve(&store, &hosts, "ghost").unwrap();
     match route {
         HostRoute::Forward { fingerprint, .. } => assert_eq!(fingerprint, ""),
-        other => panic!("expected a forward route, got {other:?}"),
     }
-}
-
-// ---- routing table (M3 plan Step 5 (c) (2473c88)) ----
-//
-// These call `resolve_route` (the pure function `Ops::resolve_host_route`
-// itself delegates to) directly against hand-built sources — the
-// injectable seam the module docs promise, no real socket or on-disk
-// trust file involved.
-
-#[test]
-fn routing_prefers_live_reverse_over_forward_pin() {
-    let store = forward_store("mac", "stale-estimate.example.com:4433", FP_A);
-    let reverse = vec![reverse_entry(100, "mac", "reachable", FP_B)];
-    let route = resolve(&reverse, &store, &no_hosts(), "mac").unwrap();
-    assert_eq!(
-        route,
-        HostRoute::Reverse {
-            pid: 100,
-            socket: PathBuf::from("/run/qsh/100.sock"),
-            address: "203.0.113.5:51820".to_string(),
-            fingerprint: FP_B.to_string(),
-            generation: 1,
-            user: None,
-        }
-    );
-}
-
-#[test]
-fn routing_falls_back_to_forward_pin_when_no_live_reverse_entry() {
-    let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    // Only a stale reverse entry — not live, must not win.
-    let reverse = vec![reverse_entry(100, "mac", "stale", FP_B)];
-    let route = resolve(&reverse, &store, &no_hosts(), "mac").unwrap();
-    assert_eq!(
-        route,
-        HostRoute::Forward {
-            address: "mac.example.com:4433".to_string(),
-            fingerprint: FP_A.to_string(),
-            source: None,
-            user: None,
-        }
-    );
 }
 
 #[test]
@@ -560,7 +389,7 @@ fn routing_on_an_empty_or_whitespace_name_is_invalid_argument_not_host_not_found
     // (adversarial review finding).
     let store = TrustStore::default();
     for name in ["", "   ", "\t"] {
-        let err = resolve(&[], &store, &no_hosts(), name).unwrap_err();
+        let err = resolve(&store, &no_hosts(), name).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
     }
 }
@@ -568,7 +397,7 @@ fn routing_on_an_empty_or_whitespace_name_is_invalid_argument_not_host_not_found
 #[test]
 fn routing_unregistered_and_unpinned_is_host_not_found() {
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), "nowhere").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "nowhere").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
 }
 
@@ -584,7 +413,7 @@ fn host_not_found_message_never_leaks_a_user_at_prefix() {
     // `qsh_proto::wire::valid_host_name`'s `[A-Za-z0-9._-]`, `1..=64`
     // rule, which rejects `@` outright.
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), "dave@nowhere").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "dave@nowhere").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(
         !err.message.contains('@'),
@@ -612,7 +441,7 @@ fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
     // new one (M8 plan Step 6 (52639fc), lens-2 finding).
     let store = TrustStore::default();
     for name in ["dave@", "@", "dave@ "] {
-        let err = resolve(&[], &store, &no_hosts(), name).unwrap_err();
+        let err = resolve(&store, &no_hosts(), name).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
         assert_eq!(
             err.message, "host name must not be empty",
@@ -634,7 +463,7 @@ fn routing_trims_a_stray_space_left_by_an_at_split_and_still_finds_host_not_foun
     // `qsh trust add` command is runnable and the message matches the
     // `@`-free case exactly.
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), "dave@ nowhere").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "dave@ nowhere").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(
         err.message.contains("qsh trust add nowhere --address"),
@@ -650,7 +479,7 @@ fn routing_trims_a_bare_name_with_no_at_sign_the_same_way() {
     // surface the untrimmed (and therefore not `valid_host_name`)
     // string in the remedy.
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), " nowhere").unwrap_err();
+    let err = resolve(&store, &no_hosts(), " nowhere").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(
         err.message.contains("qsh trust add nowhere --address"),
@@ -668,7 +497,7 @@ fn routing_an_internal_space_left_after_stripping_is_invalid_argument_not_host_n
     // this must be a distinct `INVALID_ARGUMENT`, not the empty-name
     // wording either.
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), "dave@no where").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "dave@no where").unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert_eq!(
         err.message,
@@ -677,73 +506,6 @@ fn routing_an_internal_space_left_after_stripping_is_invalid_argument_not_host_n
     assert_ne!(
         err.message, "host name must not be empty",
         "a non-empty invalid alias must not share the empty-name wording"
-    );
-}
-
-#[test]
-fn routing_two_live_daemons_is_invalid_argument_with_pids() {
-    let store = TrustStore::default();
-    let reverse = vec![
-        reverse_entry(200, "mac", "reachable", FP_A),
-        reverse_entry(100, "mac", "reachable", FP_B),
-    ];
-    let err = resolve(&reverse, &store, &no_hosts(), "mac").unwrap_err();
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
-    assert_eq!(err.details["pids"], serde_json::json!([100, 200]));
-}
-
-/// Issue #5's own inherited-behavior claim, pinned at the seam that
-/// actually decides it: the two-live-daemon conflict is the "many" branch
-/// of `resolve_route`'s live match, which returns before ever consulting
-/// `unconfigured` (`resolve_route`'s own doc on that parameter) — so
-/// `qsh exec`'s routing (`Ops::resolve_host_route_with`, which passes
-/// `not_in_trust_store_host_not_found` instead of
-/// `unconfigured_host_not_found`) must get the identical
-/// `InvalidArgument`/`pids` result `host.get`/attach do
-/// (`routing_two_live_daemons_is_invalid_argument_with_pids` above), not a
-/// different one. A regression that made the "many" branch consult
-/// `unconfigured` at all — or made it depend in any way on which
-/// constructor was passed — would change this result; today's code
-/// cannot, which is exactly what this pins.
-#[test]
-fn routing_two_live_daemons_is_invalid_argument_regardless_of_the_unconfigured_constructor() {
-    let store = TrustStore::default();
-    let reverse = vec![
-        reverse_entry(200, "mac", "reachable", FP_A),
-        reverse_entry(100, "mac", "reachable", FP_B),
-    ];
-    let err = resolve_route(
-        &reverse,
-        &store,
-        &no_hosts(),
-        "mac",
-        TEST_NOW,
-        TEST_RETRY_AFTER_MS,
-        not_in_trust_store_host_not_found,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::InvalidArgument);
-    assert_eq!(err.details["pids"], serde_json::json!([100, 200]));
-}
-
-#[test]
-fn routing_ignores_a_stale_duplicate_and_uses_the_live_one() {
-    let store = TrustStore::default();
-    let reverse = vec![
-        reverse_entry(200, "mac", "stale", FP_A),
-        reverse_entry(100, "mac", "reachable", FP_B),
-    ];
-    let route = resolve(&reverse, &store, &no_hosts(), "mac").unwrap();
-    assert_eq!(
-        route,
-        HostRoute::Reverse {
-            pid: 100,
-            socket: PathBuf::from("/run/qsh/100.sock"),
-            address: "203.0.113.5:51820".to_string(),
-            fingerprint: FP_B.to_string(),
-            generation: 1,
-            user: None,
-        }
     );
 }
 
@@ -760,300 +522,12 @@ fn host_route_into_host_matches_the_json_contract_vocabulary() {
     assert_eq!(forward.state, "unknown");
     assert_eq!(forward.source.as_deref(), Some("both"));
     assert_eq!(forward.user.as_deref(), Some("dave"));
-
-    // `user: Some(...)` here too (unlike `source`, which a reverse
-    // route always omits) — P3-5, `into_host`'s Reverse arm must carry
-    // the hint through rather than hard-coding `None`.
-    let reverse = HostRoute::Reverse {
-        pid: 100,
-        socket: PathBuf::from("/run/qsh/100.sock"),
-        address: "203.0.113.5:51820".to_string(),
-        fingerprint: FP_B.to_string(),
-        generation: 3,
-        user: Some("dave".to_string()),
-    }
-    .into_host("phone");
-    assert_eq!(reverse.connection_mode, "reverse");
-    assert_eq!(reverse.state, "reachable");
-    assert_eq!(
-        reverse.source, None,
-        "a reverse route is never hosts.toml-sourced"
-    );
-    assert_eq!(
-        reverse.user.as_deref(),
-        Some("dave"),
-        "user is not tied to source — it must still come through"
-    );
-}
-
-// ---- stale-registration retryable `HOST_NOT_FOUND` (issue #4 items 4/3a) ----
-
-/// A `sample_local`-shaped stale entry carrying `lost_at`, for the tests
-/// below that need to control it directly rather than through
-/// `reverse_entry`'s `None` default.
-fn stale_reverse_entry(pid: u32, name: &str, fingerprint: &str, lost_at: &str) -> ReverseHostEntry {
-    let mut entry = reverse_entry(pid, name, "stale", fingerprint);
-    entry.local.lost_at = Some(lost_at.to_string());
-    entry
-}
-
-#[test]
-fn three_way_table_never_registered_vs_stale_vs_swept() {
-    let store = TrustStore::default();
-
-    // (a) never registered at all — today's non-retryable HOST_NOT_FOUND,
-    // unchanged text and `details`.
-    let never = resolve(&[], &store, &no_hosts(), "nowhere").unwrap_err();
-    assert_eq!(never.code, ErrorCode::HostNotFound);
-    assert!(!never.retryable, "never-registered stays non-retryable");
-    assert!(
-        never.details.get("reason").is_none(),
-        "never-registered must not carry the stale reason: {:?}",
-        never.details
-    );
-
-    // (b) stale within `stale_retention` — the daemon still lists it
-    // (`sweep_expired` has not dropped it), so this is the new retryable
-    // branch.
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    let stale = resolve(&reverse, &store, &no_hosts(), "phone").unwrap_err();
-    assert_eq!(stale.code, ErrorCode::HostNotFound);
-    assert!(
-        stale.retryable,
-        "a stale-but-listed entry must be retryable"
-    );
-    assert_eq!(
-        stale.details["reason"],
-        serde_json::json!(STALE_REGISTRATION_REASON)
-    );
-
-    // (c) stale then swept — `sweep_expired` has already dropped the
-    // entry, so the daemon's list no longer carries it at all: from
-    // `resolve_route`'s point of view this is indistinguishable from (a),
-    // by construction (an empty `reverse` slice), and must answer
-    // identically.
-    let swept = resolve(&[], &store, &no_hosts(), "phone").unwrap_err();
-    assert_eq!(swept.code, ErrorCode::HostNotFound);
-    assert!(
-        !swept.retryable,
-        "a swept entry is exactly the unknown case"
-    );
-    assert!(swept.details.get("reason").is_none());
-}
-
-/// A registry entry whose `state` is neither `"reachable"` nor `"stale"`
-/// (an open string, `docs/CLI.md` §5/§10 — not reachable through
-/// `EntryState`'s current two variants, but the wire-level `state` field
-/// itself carries no such guarantee) must not be picked up by the stale
-/// branch: it is neither live nor documented-stale, so it reads exactly
-/// like a never-registered name. Pins the explicit `state == "stale"`
-/// match against `!is_live(entry)`'s looser "anything not reachable".
-#[test]
-fn stale_route_does_not_treat_an_undocumented_third_state_as_stale() {
-    let store = TrustStore::default();
-    let mut reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    reverse[0].local.state = "unknown".to_string();
-    let err = resolve(&reverse, &store, &no_hosts(), "phone").unwrap_err();
-    assert_eq!(err.code, ErrorCode::HostNotFound);
-    assert!(
-        !err.retryable,
-        "an undocumented state must not be treated as retryable-stale"
-    );
-    assert!(err.details.get("reason").is_none());
-}
-
-#[test]
-fn stale_route_reports_lost_ago_ms_from_the_supplied_now() {
-    let store = TrustStore::default();
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    let now = parse_rfc3339("2026-01-01T00:00:07Z").expect("parses");
-    let err = resolve_route(
-        &reverse,
-        &store,
-        &no_hosts(),
-        "phone",
-        now,
-        30_000,
-        unconfigured_host_not_found,
-    )
-    .unwrap_err();
-    assert_eq!(err.details["lost_ago_ms"], serde_json::json!(7_000));
-}
-
-#[test]
-fn stale_route_defaults_lost_ago_ms_to_zero_when_lost_at_is_missing_or_malformed() {
-    let store = TrustStore::default();
-    for lost_at in ["not-a-timestamp", ""] {
-        let reverse = vec![stale_reverse_entry(100, "phone", FP_A, lost_at)];
-        let err = resolve(&reverse, &store, &no_hosts(), "phone").unwrap_err();
-        assert_eq!(
-            err.details["lost_ago_ms"],
-            serde_json::json!(0),
-            "lost_at {lost_at:?} must default rather than panic or fail closed"
-        );
-    }
-
-    // `lost_at` entirely absent (`None`, e.g. `reverse_entry`'s own
-    // default) behaves the same as malformed.
-    let reverse = vec![reverse_entry(100, "phone", "stale", FP_A)];
-    let err = resolve(&reverse, &store, &no_hosts(), "phone").unwrap_err();
-    assert_eq!(err.details["lost_ago_ms"], serde_json::json!(0));
-}
-
-/// Two daemons on this machine each holding a stale entry under the same
-/// name (the live branch's ambiguity, but for the stale branch instead)
-/// must resolve deterministically rather than through
-/// `Self::reverse_host_entries`'s unpinned discovery order — the smallest
-/// `pid` wins, regardless of the order the two entries appear in
-/// `reverse`.
-#[test]
-fn stale_route_picks_the_smallest_pid_deterministically_when_two_daemons_both_hold_it_stale() {
-    let store = TrustStore::default();
-    let reverse = vec![
-        stale_reverse_entry(200, "phone", FP_A, "2026-01-01T00:00:10Z"),
-        stale_reverse_entry(100, "phone", FP_B, "2026-01-01T00:00:00Z"),
-    ];
-    let now = parse_rfc3339("2026-01-01T00:00:20Z").expect("parses");
-    let err = resolve_route(
-        &reverse,
-        &store,
-        &no_hosts(),
-        "phone",
-        now,
-        30_000,
-        unconfigured_host_not_found,
-    )
-    .unwrap_err();
-    assert_eq!(
-        err.details["lost_ago_ms"],
-        serde_json::json!(20_000),
-        "must report the pid-100 entry's lost_at, not pid-200's: {:?}",
-        err.details
-    );
-
-    // Order-independence: reversing the input slice must not change which
-    // entry wins.
-    let reversed = vec![
-        stale_reverse_entry(100, "phone", FP_B, "2026-01-01T00:00:00Z"),
-        stale_reverse_entry(200, "phone", FP_A, "2026-01-01T00:00:10Z"),
-    ];
-    let err2 = resolve_route(
-        &reversed,
-        &store,
-        &no_hosts(),
-        "phone",
-        now,
-        30_000,
-        unconfigured_host_not_found,
-    )
-    .unwrap_err();
-    assert_eq!(err2.details["lost_ago_ms"], serde_json::json!(20_000));
-}
-
-#[test]
-fn stale_route_propagates_the_caller_supplied_retry_after_ms() {
-    let store = TrustStore::default();
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    let err = resolve_route(
-        &reverse,
-        &store,
-        &no_hosts(),
-        "phone",
-        TEST_NOW,
-        12_345,
-        unconfigured_host_not_found,
-    )
-    .unwrap_err();
-    assert_eq!(err.details["retry_after_ms"], serde_json::json!(12_345));
-}
-
-#[test]
-fn stale_route_trims_surrounding_whitespace_the_same_way_live_routing_does() {
-    // `lookup_name` trims before the key lookup (see its own doc) and
-    // `hint_alias` trims again for the display name — both must agree, or
-    // a stray space finds the stale entry by key but then fails to
-    // interpolate a clean alias into the message (or the reverse: finds
-    // no entry at all because only one of the two trims ran).
-    let store = TrustStore::default();
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    let err = resolve(&reverse, &store, &no_hosts(), " phone ").unwrap_err();
-    assert_eq!(err.code, ErrorCode::HostNotFound);
-    assert!(
-        err.retryable,
-        "the trimmed key must still find the stale entry"
-    );
-    assert_eq!(
-        err.details["reason"],
-        serde_json::json!(STALE_REGISTRATION_REASON)
-    );
-    assert!(
-        err.message.contains("\"phone\""),
-        "message must interpolate the trimmed alias, not the raw padded name: {:?}",
-        err.message
-    );
-}
-
-#[test]
-fn stale_route_never_matches_a_user_at_prefixed_query_key() {
-    // The lookup *key* is only ever whitespace-trimmed, never
-    // `user@`-stripped (`lookup_name`'s own doc: stripping the hint for
-    // the key, not just the display name, would let `qsh exec dave@mac`
-    // silently resolve to `mac` and run as the wrong account). So a
-    // `user@`-prefixed query against a name that is genuinely stale must
-    // still miss the stale branch (key `"dave@phone"` != `"phone"`) and
-    // fall through to the ordinary non-retryable `HOST_NOT_FOUND`, not a
-    // retryable one — the stale branch does not get a wider match rule
-    // than the live branch it mirrors.
-    let store = TrustStore::default();
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "phone",
-        FP_A,
-        "2026-01-01T00:00:00Z",
-    )];
-    let err = resolve(&reverse, &store, &no_hosts(), "dave@phone").unwrap_err();
-    assert_eq!(err.code, ErrorCode::HostNotFound);
-    assert!(
-        !err.retryable,
-        "a user@-prefixed query must not match the stale entry by key"
-    );
-    assert!(err.details.get("reason").is_none());
-    assert!(
-        !err.message.contains('@'),
-        "message leaked the user@ hint: {:?}",
-        err.message
-    );
 }
 
 // ---------------------------------------------------------------------
 // issue #3 item b2 (PR-D): the single OR-ed `HOST_NOT_FOUND` fallback
 // splits into three branches. Branch (ii) is PR-C's retryable stale
-// branch above (`three_way_table_never_registered_vs_stale_vs_swept`'s
+// branch, retired with the registry (ADR-0068); these tests cover (i)/(iii)
 // row (b)); these tests cover (i)/(iii) and the mutation check across
 // all three.
 // ---------------------------------------------------------------------
@@ -1066,7 +540,7 @@ fn stale_route_never_matches_a_user_at_prefixed_query_key() {
 #[test]
 fn unconfigured_name_gets_the_not_configured_wording() {
     let store = TrustStore::default();
-    let err = resolve(&[], &store, &no_hosts(), "nowhere").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "nowhere").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(!err.retryable);
     assert_eq!(err, unconfigured_host_not_found("nowhere"));
@@ -1088,7 +562,7 @@ fn pinned_without_address_and_no_registration_gets_the_pinned_wording() {
         FP_A.parse().expect("fingerprint"),
         "2026-01-01T00:00:00Z".to_string(),
     );
-    let err = resolve(&[], &store, &no_hosts(), "phone").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "phone").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(!err.retryable);
     assert_eq!(err, pinned_without_address_host_not_found("phone"));
@@ -1119,7 +593,7 @@ fn pinned_without_address_and_no_registration_gets_the_pinned_wording() {
 fn hosts_toml_entry_with_an_empty_address_and_no_trust_pin_gets_the_pinned_wording_too() {
     let store = TrustStore::default();
     let hosts = hosts_with(&[("phone", "", None)]);
-    let err = resolve(&[], &store, &hosts, "phone").unwrap_err();
+    let err = resolve(&store, &hosts, "phone").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert_eq!(err, pinned_without_address_host_not_found("phone"));
 }
@@ -1133,7 +607,7 @@ fn hosts_toml_entry_with_an_empty_address_and_no_trust_pin_gets_the_pinned_wordi
 #[test]
 fn a_user_at_prefixed_query_against_a_fully_routable_pin_does_not_claim_it_is_unpinned() {
     let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    let err = resolve(&[], &store, &no_hosts(), "dave@mac").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "dave@mac").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(!err.retryable);
     assert!(
@@ -1173,7 +647,7 @@ fn a_user_at_prefixed_query_against_an_addressless_pin_does_not_claim_no_pin() {
         FP_A.parse().expect("fingerprint"),
         "2026-01-01T00:00:00Z".to_string(),
     );
-    let err = resolve(&[], &store, &no_hosts(), "dave@phone").unwrap_err();
+    let err = resolve(&store, &no_hosts(), "dave@phone").unwrap_err();
     assert_eq!(err.code, ErrorCode::HostNotFound);
     assert!(!err.retryable);
     assert!(
@@ -1184,51 +658,11 @@ fn a_user_at_prefixed_query_against_an_addressless_pin_does_not_claim_no_pin() {
     assert!(!err.message.contains('@'));
 }
 
-/// Mutation check (`docs/design/testing.md`'s discipline): collapsing
-/// any two of the three `HOST_NOT_FOUND` branches into one wording would
-/// red exactly one of the three `*_message` assertions below, at the
-/// wording-constant level.
-///
-/// Mapping — the test that goes red if a branch is collapsed into
-/// another:
-/// - (i)=(ii): `unconfigured_vs_stale_message` below guards the two
-///   wording constants directly; it cannot see a *routing-level*
-///   collapse (e.g. the stale arm in `resolve_route` returning
-///   `unconfigured_host_not_found` instead of `stale_host_not_found`),
-///   since it calls both constructors rather than going through
-///   `resolve`. `three_way_table_never_registered_vs_stale_vs_swept`'s
-///   `code`/`retryable`/`details.reason` assertions and the byte-pinned
-///   `error.HOST_NOT_FOUND.reverse_stale.json` golden are what guard that
-///   arm at the routing level.
-/// - (i)=(iii): `unconfigured_vs_pinned_message` below (and
-///   `pinned_without_address_and_no_registration_gets_the_pinned_wording`'s
-///   `assert_ne!` above) — this pair is reachable through `resolve(...)`
-///   directly, so both the constructor-level and routing-level checks
-///   exist for it.
-/// - (ii)=(iii): `stale_vs_pinned_message` below guards the wording
-///   constants only, for the same reason as (i)=(ii);
-///   `stale_route_never_matches_a_user_at_prefixed_query_key` and the
-///   `error.HOST_NOT_FOUND.reverse_stale.json`/`pinned_no_address.json`
-///   goldens are the routing-level guard for that arm.
-#[test]
-fn unconfigured_vs_stale_message() {
-    let unconfigured = unconfigured_host_not_found("phone").message;
-    let stale = stale_host_not_found("phone", None, TEST_NOW, TEST_RETRY_AFTER_MS).message;
-    assert_ne!(unconfigured, stale);
-}
-
 #[test]
 fn unconfigured_vs_pinned_message() {
     let unconfigured = unconfigured_host_not_found("phone").message;
     let pinned = pinned_without_address_host_not_found("phone").message;
     assert_ne!(unconfigured, pinned);
-}
-
-#[test]
-fn stale_vs_pinned_message() {
-    let stale = stale_host_not_found("phone", None, TEST_NOW, TEST_RETRY_AFTER_MS).message;
-    let pinned = pinned_without_address_host_not_found("phone").message;
-    assert_ne!(stale, pinned);
 }
 
 /// No branch's remedy leaks an unescaped `@` or interpolates anything
@@ -1242,36 +676,10 @@ fn no_host_not_found_branch_leaks_an_at_sign() {
     let messages = [
         unconfigured_host_not_found("we-re-a-name").message,
         pinned_without_address_host_not_found("we-re-a-name").message,
-        stale_host_not_found("we-re-a-name", None, TEST_NOW, TEST_RETRY_AFTER_MS).message,
     ];
     for message in messages {
         assert!(!message.contains('@'), "leaked an @: {message:?}");
     }
-}
-
-#[test]
-fn stale_route_loses_to_a_forward_pin_when_one_exists() {
-    // A stale reverse entry is not live, so it never outranks a forward
-    // pin — same priority the non-retryable "falls back to forward"
-    // test above already pins, restated here with the retryable branch
-    // in the mix to prove the new check does not jump the queue.
-    let store = forward_store("mac", "mac.example.com:4433", FP_A);
-    let reverse = vec![stale_reverse_entry(
-        100,
-        "mac",
-        FP_B,
-        "2026-01-01T00:00:00Z",
-    )];
-    let route = resolve(&reverse, &store, &no_hosts(), "mac").unwrap();
-    assert_eq!(
-        route,
-        HostRoute::Forward {
-            address: "mac.example.com:4433".to_string(),
-            fingerprint: FP_A.to_string(),
-            source: None,
-            user: None,
-        }
-    );
 }
 
 // ---- `host_pinned_without_address` (ROADMAP M9 (h)) ----
@@ -1292,105 +700,52 @@ fn pinless_store(name: &str, fingerprint: &str) -> TrustStore {
 }
 
 #[test]
-fn host_pinned_without_address_fires_for_an_addressless_pin_with_no_reverse_entry_at_all() {
+fn host_pinned_without_address_fires_for_an_addressless_pin() {
     let store = pinless_store("mac", FP_A);
-    let names = host_pinned_without_address(&[], &store, &no_hosts());
+    let names = host_pinned_without_address(&store, &no_hosts());
     assert_eq!(names, vec!["mac".to_string()]);
-}
-
-/// "live **or stale**" — a live registration suppresses the finding
-/// (`crate::doctor::HOST_PINNED_WITHOUT_ADDRESS`'s own doc).
-#[test]
-fn host_pinned_without_address_is_suppressed_by_a_live_reverse_entry() {
-    let store = pinless_store("mac", FP_A);
-    let reverse = [reverse_entry(1, "mac", "reachable", FP_A)];
-    assert!(host_pinned_without_address(&reverse, &store, &no_hosts()).is_empty());
-}
-
-/// The other half of that rule — a merely *stale* registration (not evicted
-/// yet) still proves this device has heard from the name before, so it
-/// suppresses the finding exactly like a live one: this is the one place
-/// [`host_pinned_without_address`] deliberately does **not** reuse
-/// [`is_live`]'s live-only filter.
-#[test]
-fn host_pinned_without_address_is_suppressed_by_a_stale_reverse_entry_too() {
-    let store = pinless_store("mac", FP_A);
-    let reverse = [reverse_entry(1, "mac", "stale", FP_A)];
-    assert!(host_pinned_without_address(&reverse, &store, &no_hosts()).is_empty());
 }
 
 #[test]
 fn host_pinned_without_address_is_silent_when_the_trust_pin_has_an_address() {
     let store = forward_store("mac", "mac.example:4433", FP_A);
-    assert!(host_pinned_without_address(&[], &store, &no_hosts()).is_empty());
+    assert!(host_pinned_without_address(&store, &no_hosts()).is_empty());
 }
 
 #[test]
 fn host_pinned_without_address_is_silent_when_hosts_toml_supplies_the_address() {
     let store = pinless_store("mac", FP_A);
     let hosts = hosts_with(&[("mac", "mac.example:4433", None)]);
-    assert!(host_pinned_without_address(&[], &store, &hosts).is_empty());
-}
-
-/// A reverse entry for an unrelated name must not suppress this one —
-/// the suppression is keyed by name, not by "some reverse entry exists
-/// somewhere".
-#[test]
-fn host_pinned_without_address_ignores_a_reverse_entry_for_a_different_name() {
-    let store = pinless_store("mac", FP_A);
-    let reverse = [reverse_entry(1, "phone", "reachable", FP_B)];
-    assert_eq!(
-        host_pinned_without_address(&reverse, &store, &no_hosts()),
-        vec!["mac".to_string()]
-    );
+    assert!(host_pinned_without_address(&store, &hosts).is_empty());
 }
 
 // ---- the automatic bootstrap's "wholly unconfigured" probe (ADR-0044 decision 2) ----
 
-fn probe_fires(
-    reverse: &[ReverseHostEntry],
-    store: &TrustStore,
-    hosts: &HostsFile,
-    name: &str,
-) -> bool {
+fn probe_fires(store: &TrustStore, hosts: &HostsFile, name: &str) -> bool {
     matches!(
-        resolve_route(
-            reverse,
-            store,
-            hosts,
-            name,
-            TEST_NOW,
-            TEST_RETRY_AFTER_MS,
-            unconfigured_probe,
-        ),
+        resolve_route(store, hosts, name, unconfigured_probe),
         Err(err) if err.message == UNCONFIGURED_PROBE
     )
 }
 
 /// Only the first `HOST_NOT_FOUND` branch of `docs/CLI.md` §6.1 starts the
-/// bootstrap: a live or a stale reverse registration, a pin with or without
+/// bootstrap: a pin with or without
 /// an address, and a `hosts.toml` entry each count as "qsh already knows this
 /// name".
 #[test]
 fn the_unconfigured_probe_fires_only_when_nothing_mentions_the_name() {
     let empty_store = TrustStore::default();
     let empty_hosts = HostsFile::default();
-    assert!(probe_fires(&[], &empty_store, &empty_hosts, "box"));
-    assert!(!probe_fires(&[], &empty_store, &empty_hosts, "  "));
-
-    let live = [reverse_entry(100, "box", "reachable", FP_A)];
-    assert!(!probe_fires(&live, &empty_store, &empty_hosts, "box"));
-    let stale = [reverse_entry(100, "box", "stale", FP_A)];
-    assert!(!probe_fires(&stale, &empty_store, &empty_hosts, "box"));
-    assert!(probe_fires(&stale, &empty_store, &empty_hosts, "other"));
+    assert!(probe_fires(&empty_store, &empty_hosts, "box"));
+    assert!(!probe_fires(&empty_store, &empty_hosts, "  "));
 
     let pinned = forward_store("box", "203.0.113.5:4433", FP_A);
-    assert!(!probe_fires(&[], &pinned, &empty_hosts, "box"));
+    assert!(!probe_fires(&pinned, &empty_hosts, "box"));
     // A `user@` hint on a configured alias is its own branch.
-    assert!(!probe_fires(&[], &pinned, &empty_hosts, "dave@box"));
+    assert!(!probe_fires(&pinned, &empty_hosts, "dave@box"));
     let book = hosts_with(&[("book", "203.0.113.6:4433", None), ("blank", "", None)]);
-    assert!(!probe_fires(&[], &empty_store, &book, "book"));
-    assert!(!probe_fires(&[], &empty_store, &book, "blank"));
+    assert!(!probe_fires(&empty_store, &book, "book"));
+    assert!(!probe_fires(&empty_store, &book, "blank"));
     let mut inbound = TrustStore::default();
     inbound.add_peer(
         "box",
@@ -1398,5 +753,5 @@ fn the_unconfigured_probe_fires_only_when_nothing_mentions_the_name() {
         FP_A.parse().unwrap(),
         "2026-01-01T00:00:00Z".into(),
     );
-    assert!(!probe_fires(&[], &inbound, &empty_hosts, "box"));
+    assert!(!probe_fires(&inbound, &empty_hosts, "box"));
 }

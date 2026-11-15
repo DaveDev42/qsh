@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use qsh_proto::wire::{
     self, ForwardDirection, ForwardSpec, parse_dynamic_spec, parse_forward_spec,
@@ -48,7 +48,6 @@ use qsh_proto::{
     TunnelListData, TunnelListReq, TunnelOpenReq,
 };
 
-use crate::ops::host;
 use crate::ops::session::{Connected, RecoveryConfig, RouteSeed};
 use crate::ops::{OpError, Operation, Ops};
 use crate::tunnel::local::ForwardCarrier;
@@ -146,8 +145,10 @@ pub(crate) fn dynamic_forward_capability_unsupported() -> OpError {
     )
 }
 
-/// [`Ops::tunnel_dynamic`]'s missing-capability refusal on the reverse
-/// route (ADR-0020 decision 2). Unlike the forward-route message, a
+/// The missing-capability refusal [`Ops::tunnel_dynamic`] gave on the
+/// reverse route (ADR-0020 decision 2); ADR-0068 retired that route, so
+/// nothing emits it any more and the text stays only as recorded
+/// vocabulary. Unlike the forward-route message, a
 /// missing `dial-filter.v1` here has two distinct possible causes this
 /// side cannot tell apart — the target's `qsh` may predate the
 /// capability, or this machine's own resident `qsh listen` daemon may
@@ -161,39 +162,20 @@ pub const DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE: &str = "SOCKS 
      machine's own qsh was last upgraded and is still relaying its old capability set; nothing \
      was bound. Upgrade qsh on the target, then restart `qsh listen` on this machine and retry.";
 
-/// [`DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE`]'s
-/// constructor — see [`dynamic_forward_capability_unsupported`]'s own doc
-/// for the sharing rationale, which applies identically here.
-pub(crate) fn dynamic_forward_reverse_capability_unsupported() -> OpError {
-    OpError::new(
-        ErrorCode::Unsupported,
-        DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE,
-    )
-}
-
-/// The gate itself (ADR-0019 decision 3, "no fallback"; ADR-0020 decision
-/// 2's dual-cause reverse wording), factored out so
+/// The gate itself (ADR-0019 decision 3, "no fallback"), factored out so
 /// [`Ops::tunnel_dynamic_with_connected`],
 /// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`] and
 /// [`Ops::session_open_gated`] share one predicate, not just the error
 /// constructors above — a duplicated `if !caps.iter().any(...)` at each
 /// call site meant a test deleting one copy would not have caught the
 /// other rotting (found in review; each call site used to re-derive this
-/// check independently). `is_reverse` picks which of the two refusal
-/// messages a missing capability gets — the connected route already knows
-/// which one it is (`Connected::connection().is_none()`), so every call
-/// site can pass that straight through rather than re-deriving it.
-pub(crate) fn require_dial_filter_capability(
-    capabilities: &[String],
-    is_reverse: bool,
-) -> Result<(), OpError> {
+/// check independently).
+pub(crate) fn require_dial_filter_capability(capabilities: &[String]) -> Result<(), OpError> {
     if capabilities
         .iter()
         .any(|cap| cap == wire::CAP_DIAL_FILTER_V1)
     {
         Ok(())
-    } else if is_reverse {
-        Err(dynamic_forward_reverse_capability_unsupported())
     } else {
         Err(dynamic_forward_capability_unsupported())
     }
@@ -748,9 +730,12 @@ impl Ops {
                 ForwardDirection::Remote => SuperviseMode::Remote,
             },
         )?;
-        let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
+        // `--wait` waited for a reverse registration to come back
+        // (ADR-0023); ADR-0068 retired that, so the value is validated and
+        // otherwise ignored.
+        wait_budget_ms(req.wait_ms)?;
         let liveness = self.liveness()?;
-        let (conn, seed) = self.connect_with_wait(&req.host, wait_budget_ms, liveness.tuning())?;
+        let (conn, seed) = self.connect_keeping_target(&req.host, liveness.tuning())?;
         let supervision =
             self.supervision(req.supervise_ms, req.accept_hold_ms, seed, &conn, &liveness)?;
         if let Some(supervision) = supervision {
@@ -763,10 +748,8 @@ impl Ops {
                 }
             };
         }
-        match conn.connection() {
-            Some(connection) => Self::tunnel_open_forward(conn, connection, &spec, &req.host),
-            None => Err(retired_reverse_connection(conn)),
-        }
+        let connection = conn.connection();
+        Self::tunnel_open_forward(conn, connection, &spec, &req.host)
     }
 
     /// The supervision inputs of a `--supervise` open, once the route is
@@ -801,37 +784,7 @@ impl Ops {
         }))
     }
 
-    /// [`Self::connect`], retried while — and only while — it keeps
-    /// failing with the PR-C stale-registration branch (issue #4 items
-    /// 3a/5a): `HOST_NOT_FOUND`, `retryable: true`,
-    /// `details.reason == host::STALE_REGISTRATION_REASON`
-    /// ([`is_stale_registration`]). Any other error, including a
-    /// `HOST_NOT_FOUND` for a name with no registration at all, returns
-    /// on the very first attempt — this never widens what `--wait`
-    /// retries beyond the one documented branch. `wait_budget_ms == 0`
-    /// (absent `--wait`, or `--wait 0`) also takes exactly one attempt,
-    /// so this is a no-op wrapper in every call site that existed before
-    /// the flag did.
-    ///
-    /// The retry decision itself is [`retry_while_stale`], factored out
-    /// generic over the attempt's return type so it is unit-testable
-    /// against a fake attempt closure without a real daemon or peer
-    /// (`docs/design/testing.md` L2) — the real-daemon case (registration
-    /// actually coming back mid-wait) is
-    /// `crates/qsh-testkit/tests/it/reverse_tunnel.rs`'s job.
-    fn connect_with_wait(
-        &self,
-        host: &str,
-        wait_budget_ms: u64,
-        tuning: qsh_transport::TransportTuning,
-    ) -> Result<(Connected, RouteSeed), OpError> {
-        retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || {
-            self.connect_keeping_target(host, tuning)
-        })
-    }
-
-    /// Forward route: dial the peer's QUIC connection directly — exactly
-    /// [`Self::tunnel_open`]'s original (pre-Step-5) body, unchanged.
+    /// Open the forward on `connection`, the QUIC connection `conn` holds.
     fn tunnel_open_forward(
         mut conn: Connected,
         connection: qsh_transport::Connection,
@@ -1008,10 +961,9 @@ impl Ops {
 
     /// The post-connect half of [`Self::tunnel_dynamic`], split out as a
     /// test seam: a test can hand this a [`Connected`] built directly
-    /// ([`Connected::for_test_forward`]/[`Connected::for_test_reverse`])
-    /// carrying a fabricated negotiated capability set, to exercise the
-    /// capability gate without a real peer `Hello`/`LocalHelloAck`
-    /// answering a dial.
+    /// ([`Connected::for_test_forward`]) carrying a fabricated negotiated
+    /// capability set, to exercise the capability gate without a real peer
+    /// `Hello` answering a dial.
     fn tunnel_dynamic_with_connected(
         conn: Connected,
         bind: Option<&str>,
@@ -1019,25 +971,19 @@ impl Ops {
         host: &str,
         supervision: Option<Supervision>,
     ) -> Result<TunnelHold, OpError> {
-        let is_reverse = conn.connection().is_none();
-        if let Err(err) = require_dial_filter_capability(conn.capabilities(), is_reverse) {
+        if let Err(err) = require_dial_filter_capability(conn.capabilities()) {
             conn.close();
             return Err(err);
         }
         if let Some(supervision) = supervision {
             return Self::supervised_dynamic(conn, bind, listen_port, host, supervision);
         }
-        match conn.connection() {
-            Some(connection) => {
-                Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host)
-            }
-            None => Err(retired_reverse_connection(conn)),
-        }
+        let connection = conn.connection();
+        Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host)
     }
 
-    /// Forward route: dial the peer's QUIC connection directly — exactly
-    /// [`Self::tunnel_dynamic_with_connected`]'s original (pre-ADR-0020)
-    /// body once the capability gate has already passed.
+    /// Open the `-D` forward on `connection` once the capability gate has
+    /// already passed.
     fn tunnel_dynamic_forward(
         conn: Connected,
         connection: qsh_transport::Connection,
@@ -1083,7 +1029,7 @@ impl Ops {
     /// [`Self::tunnel_open_and_hold`] registered in this same `Ops` (any
     /// clone of it — the registry is shared) and has not already ended on
     /// its own; `false` otherwise, leaving [`Self::tunnel_close`] to fall
-    /// back to [`Self::admin_close_tunnel`]'s cross-process daemon fan-out.
+    /// answer `closed: false`.
     fn close_registered_tunnel_hold(&self, tunnel_id: &str) -> bool {
         let close_tx = self
             .tunnel_holds
@@ -1110,172 +1056,36 @@ impl Ops {
         true
     }
 
-    /// `tunnel.list` (`qsh tunnels`, `docs/CLI.md` §6.9, the M4 plan (2473c88) Step
-    /// 5 PR 5b): every tunnel visible to this caller.
+    /// `tunnel.list` (`qsh tunnels`, `docs/CLI.md` §6.9): the empty list.
     ///
-    /// Only ever the daemon-held reverse source — the direct structural
-    /// twin of [`crate::ops::Ops::host_list`]'s reverse source
-    /// (`crate::localctl::client::admin_tunnel_list_all`, the twin of
-    /// `admin_host_list_all`). A forward-route `-L`/`-R` opened by a
-    /// standalone `qsh tunnel open` has **no** entry here: that tunnel's
-    /// only holder is the CLI process that opened it (`docs/CLI.md` §6.14's
-    /// ordinary rule — no resident client daemon), and there is no IPC
-    /// surface by which a second, later `qsh tunnels` process could reach
-    /// into a first, unrelated process's memory to ask it anything
-    /// (M4 plan §3 (2473c88) non-goals: "client-측 상주 터널 데몬(미확정)").
-    /// This is a real, deliberate visibility gap, not an oversight — the
-    /// only tunnels a resident `qsh listen` daemon can report on are the
-    /// ones *it* holds, and only `-R over reverse` ever registers a
-    /// `forward_id` with a daemon at all
-    /// ([`qsh_proto::local::LocalTunnel::mode`]'s own doc:
-    /// `ForwardMeta::mode` is always
-    /// `"remote"`).
-    ///
-    /// Never dials anything and never fails closed on an unreachable or
-    /// absent daemon — an empty list is the ordinary "no reverse
-    /// connections right now" state, not an error (`docs/CLI.md` §6.9:
-    /// same "부분 실패를 감추지 않는다" discipline `host.list` already
-    /// documents, applied here to tunnels instead of hosts).
+    /// The only tunnels this command could ever report were the ones a
+    /// resident `qsh listen` daemon held (`-R` over a reverse route).
+    /// ADR-0068 retired the daemon, and a forward-route tunnel's only
+    /// holder is the CLI process that opened it (`docs/CLI.md` §6.14: no
+    /// resident client daemon), so a second process has nothing to ask.
+    /// The command and its JSON shape stay (ADR-0068 decision 8).
     pub fn tunnel_list(&self, _req: TunnelListReq) -> Result<TunnelListData, OpError> {
         Ok(TunnelListData {
-            tunnels: self.reverse_tunnel_entries(),
+            tunnels: Vec::new(),
         })
     }
 
-    /// `tunnel.close <id>` (`docs/CLI.md` §6.9, M4 plan Step 5 (2473c88) PR
-    /// 5b): ask every localctl daemon on this machine to close `tunnel_id`
-    /// and report whether any of them held it.
-    ///
-    /// **Ownership decision** (`docs/CLI.md` §2.5: "해당 tunnel의 소유
-    /// peer이면 허용"). The wire-level owning-peer check already exists
-    /// and is unchanged by this op: `Server::handle_rfwd_close`
-    /// (`crates/qsh-core/src/server/mod.rs`) scopes `RemoteForwardClose` to
-    /// the **principal** that opened it (`RemoteForwardEntry::owner`, its
-    /// own doc — an `opener_key`, not a `conn_id`; F6, M5 Step 5
-    /// adversarial review corrected this doc's earlier "scoped to the
-    /// connection" premise), so every `RfwdClose` this op eventually causes
-    /// the daemon to send still passes that check regardless of which live
-    /// connection instance actually carries it — the resident daemon
-    /// authenticates to this host as the same device identity on the
-    /// reverse connection or on any replacement resume opens for it, so
-    /// this does not even need "the daemon is the sole holder of one
-    /// connection" to hold. What this op decides is
-    /// a *different*, purely local question the wire-level check has
-    /// nothing to say about: which local CLI process — this one, running
-    /// as a brand-new `qsh tunnel close <id>` invocation, distinct from
-    /// whichever process ran the original `tunnel.open` — is allowed to
-    /// ask the daemon to do that at all. `ControlHub::admin_close_forward`
-    /// (`crate::reverse::listen`) answers it: `localctl`'s same-uid accept
-    /// check (`crate::localctl` module docs, `docs/design/architecture.md`
-    /// §7) is already the trust boundary every local process crosses to
-    /// talk to this daemon in the first place, so a second same-uid
-    /// process asking to close a forward the first one opened is still
-    /// the owning peer asking — anything stricter (e.g. requiring the same
-    /// live conduit) would make `qsh tunnel close <id>` unable to ever
-    /// work for a daemon-held forward, since `docs/CLI.md` §6.9's own
-    /// usage example has no `--host`/process-affinity argument for it to
-    /// reconnect through. This does not weaken the *data*-plane
-    /// misdelivery invariant PR 5a built (`docs/design/protocol.md`
-    /// §11-3's owner-conduit gate on `RfwdClose` *relay*) — that gate
-    /// still applies unchanged to `Self::close` (forward route,
-    /// `TunnelHold::close`) and to any other conduit's own `RfwdClose`;
-    /// this op instead acts with the *daemon's own authority*, tearing the
-    /// registration down locally first (so nothing can be misdelivered to
-    /// it from the instant this call is made) before best-effort notifying
-    /// the target — see `admin_close_forward`'s own doc for the full
-    /// argument.
-    ///
-    /// No resource is created by this op ever, on any path — closing is
-    /// pure teardown, so there is no "authorize before creating" ordering
-    /// concern here the way there is for `tunnel.open`.
-    ///
-    /// Idempotent: `closed: false` (never an error) when `tunnel_id` names
-    /// nothing any reachable daemon currently holds — never registered,
-    /// already closed, a `"local"` mode id (never registered daemon-side
-    /// at all), or a forward-route id (no daemon involved,
-    /// [`Self::tunnel_list`]'s own doc) — same shape
+    /// `tunnel.close <id>` (`docs/CLI.md` §6.9): `closed: true` only for a
+    /// tunnel [`Self::tunnel_open_and_hold`] registered in this same `Ops`
+    /// (any clone of it — the registry is shared); `closed: false`, never
+    /// an error, for anything else (never registered, already closed, or
+    /// held by another process), the shape
     /// [`qsh_proto::TunnelCloseData::closed`]'s own doc requires.
+    ///
+    /// No resource is created by this op ever — closing is pure teardown,
+    /// so there is no "authorize before creating" ordering concern.
     pub fn tunnel_close(&self, req: TunnelCloseReq) -> Result<TunnelCloseData, OpError> {
-        // Same-process registrations (`Self::tunnel_open_and_hold`, F2)
-        // take priority: if this `Ops` (or a clone of it) is itself
-        // holding `tunnel_id`, that is authoritative and requires no
-        // daemon round trip at all. Only when nothing local matches does
-        // this fall back to the pre-existing cross-process daemon fan-out
-        // — unchanged, still the only path for a reverse-route `-R`
-        // opened by a *different* process (`Self::admin_close_tunnel`'s
-        // own doc).
-        let closed = self.close_registered_tunnel_hold(&req.tunnel_id)
-            || self.admin_close_tunnel(&req.tunnel_id);
+        let closed = self.close_registered_tunnel_hold(&req.tunnel_id);
         Ok(TunnelCloseData {
             tunnel_id: req.tunnel_id,
             closed,
         })
     }
-
-    fn reverse_tunnel_entries(&self) -> Vec<Tunnel> {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                // Never fail `tunnel.list` over this — same "one daemon
-                // this machine cannot even start a runtime for must not
-                // hide every other tunnel" discipline `host.list` already
-                // applies (`crate::ops::host::Ops::reverse_host_entries`).
-                tracing::warn!(
-                    %err,
-                    "tunnel.list: failed to start an async runtime for the reverse source; \
-                     reporting no tunnels"
-                );
-                return Vec::new();
-            }
-        };
-        runtime.block_on(self.reverse_tunnel_entries_async())
-    }
-
-    async fn reverse_tunnel_entries_async(&self) -> Vec<Tunnel> {
-        let runtime_dir = self.paths().runtime_dir();
-        crate::localctl::client::admin_tunnel_list_all(&runtime_dir)
-            .await
-            .into_iter()
-            .flat_map(|daemon| daemon.tunnels.into_iter().map(to_tunnel_dto))
-            .collect()
-    }
-
-    fn admin_close_tunnel(&self, tunnel_id: &str) -> bool {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::warn!(
-                    %err,
-                    "tunnel.close: failed to start an async runtime for the localctl fan-out; \
-                     reporting not closed"
-                );
-                return false;
-            }
-        };
-        let runtime_dir = self.paths().runtime_dir();
-        runtime.block_on(crate::localctl::client::admin_tunnel_close_all(
-            &runtime_dir,
-            tunnel_id,
-        ))
-    }
-}
-
-/// A `Connected` that holds no QUIC connection is a localctl route to a
-/// `qsh listen` daemon, which ADR-0068 retired and `resolve_route` no longer
-/// produces. Close it and say so.
-fn retired_reverse_connection(conn: Connected) -> OpError {
-    conn.close();
-    OpError::new(
-        ErrorCode::Unsupported,
-        "reverse connections were retired in v0.9.0 (ADR-0068)",
-    )
-    .with_details(serde_json::json!({ "reason": crate::retired::REASON }))
 }
 
 /// What a supervised open carries over from the first connection
@@ -1438,13 +1248,7 @@ impl Ops {
         OpError,
     > {
         let open_req = remote_forward_open_from_spec(spec);
-        let Some(connection) = conn.connection() else {
-            return Err(OpError::new(
-                ErrorCode::Unsupported,
-                "reverse connections were retired in v0.9.0 (ADR-0068)",
-            )
-            .with_details(serde_json::json!({ "reason": crate::retired::REASON })));
-        };
+        let connection = conn.connection();
         let acceptor = conn
             .runtime()
             .block_on(RemoteForwardAcceptor::spawn(connection));
@@ -1523,7 +1327,7 @@ impl Ops {
     ) -> Result<SupervisionParts, OpError> {
         let internal = || OpError::new(ErrorCode::Internal, "the connection is not supervisable");
         let RouteSeed::Forward(target) = seed;
-        let link = conn.forward_link().ok_or_else(internal)?;
+        let link = conn.forward_link();
         let session = conn.take_session().ok_or_else(internal)?;
         let initial = ForwardCarrier::Direct(link.connection());
         Ok(SupervisionParts {
@@ -1531,25 +1335,6 @@ impl Ops {
             route: supervise::Route { target, link },
             initial,
         })
-    }
-}
-
-/// Map a daemon-reported [`qsh_proto::local::LocalTunnel`] to the JSON
-/// [`Tunnel`] DTO `tunnel.list` returns — a plain field-for-field copy;
-/// `host` is already filled in by the daemon
-/// (`LocalctlDaemon::serve_admin_tunnel_list`'s own doc), unlike
-/// `host.list`'s reverse source, which fills it from the client-side
-/// registration name instead (there is no per-entry ambiguity to resolve
-/// here: one `LocalTunnel` is always exactly one forward on exactly one
-/// host).
-fn to_tunnel_dto(local: qsh_proto::local::LocalTunnel) -> Tunnel {
-    Tunnel {
-        tunnel_id: local.tunnel_id,
-        mode: local.mode,
-        bind: local.bind,
-        forward_to: local.forward_to,
-        actual_port: Some(local.actual_port),
-        host: local.host,
     }
 }
 
@@ -1616,24 +1401,12 @@ fn port(value: u32, field: &str) -> Result<u16, OpError> {
 /// Upper bound on `TunnelOpenReq.wait_ms` (`docs/CLI.md` §6.9's `--wait`,
 /// issue #4 item 5a) — ten minutes, an effectively-unbounded-hang refusal
 /// at the wire/parse layer, checked by [`wait_budget_ms`] before a
-/// connection is ever attempted. It is not, by itself, a promise that the
-/// whole `0..=600_000` range stays retryable: the value that actually
-/// governs how long a stale registration stays retryable is
-/// `[listen].stale_retention` (`crate::config::ListenConfig`, default
-/// 120 s — well under this constant), because
-/// [`Ops::cap_wait_budget_to_stale_retention`] additionally caps the
-/// budget at that value before retrying.
+/// connection is ever attempted. ADR-0068 retired the wait itself, so the
+/// bound only keeps an out-of-range request an `INVALID_ARGUMENT`.
 const WAIT_MS_MAX: u32 = 600_000;
 
-/// Poll interval for [`retry_while_stale`]'s client-side retry loop —
-/// short enough that a registration coming back mid-wait is picked up
-/// promptly, long enough not to hammer the local daemon list
-/// (`Ops::reverse_host_entries`, one `admin_host_list_all` round trip per
-/// attempt) while waiting.
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-/// Validate and narrow `TunnelOpenReq.wait_ms` to the millisecond budget
-/// [`retry_while_stale`] takes — same "a request that skipped the CLI
+/// Validate and narrow `TunnelOpenReq.wait_ms` to a millisecond budget —
+/// same "a request that skipped the CLI
 /// parser is still caught here" discipline as [`port`] just above.
 /// Absent maps to `0` (one attempt, unchanged from before `--wait`
 /// existed).
@@ -1715,56 +1488,6 @@ fn reject_supervise_for_and_hold(supervise_ms: Option<u32>) -> Result<(), OpErro
         ));
     }
     Ok(())
-}
-
-/// Whether `err` is exactly the PR-C stale-registration branch
-/// (`crate::ops::host::stale_host_not_found`'s own doc; issue #4 items
-/// 3a/5a) — `--wait` retries this branch alone, never a `HOST_NOT_FOUND`
-/// for a name with no registration at all (that one is `retryable:
-/// false`) and never any other error code.
-fn is_stale_registration(err: &OpError) -> bool {
-    err.code == ErrorCode::HostNotFound
-        && err.retryable
-        && err
-            .details
-            .get("reason")
-            .and_then(serde_json::Value::as_str)
-            == Some(host::STALE_REGISTRATION_REASON)
-}
-
-/// The retry driver [`Ops::connect_with_wait`] wires to a real
-/// [`Ops::connect`] — kept generic and free of `Connected`/`resolve_route`
-/// so it is unit-testable against a fake `attempt` closure
-/// (this module's `tests::retry_while_stale_tests`).
-///
-/// Attempts `attempt` once unconditionally; on
-/// [`is_stale_registration`] error and remaining budget, sleeps up to
-/// `poll_interval` (capped by what is left) and attempts again. Any other
-/// error, or an exhausted budget, returns that attempt's own `Err`
-/// unchanged — in particular, on expiry this is the *same* retryable
-/// stale error the last attempt produced, not a generic timeout (issue
-/// #4 item 5a's own "returns the SAME retryable error" requirement).
-/// `wait_budget_ms == 0` never retries at all, regardless of what
-/// `attempt` returns.
-fn retry_while_stale<T>(
-    wait_budget_ms: u64,
-    poll_interval: Duration,
-    mut attempt: impl FnMut() -> Result<T, OpError>,
-) -> Result<T, OpError> {
-    let deadline = Instant::now() + Duration::from_millis(wait_budget_ms);
-    loop {
-        match attempt() {
-            Ok(value) => return Ok(value),
-            Err(err) if wait_budget_ms > 0 && is_stale_registration(&err) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(err);
-                }
-                std::thread::sleep(poll_interval.min(deadline - now));
-            }
-            Err(err) => return Err(err),
-        }
-    }
 }
 
 #[cfg(test)]

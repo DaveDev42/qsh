@@ -18,48 +18,11 @@ pub(crate) struct Connected {
     /// dropped from any context, including from inside another async
     /// runtime (as `qsh-testkit`'s fixtures do).
     pub(super) runtime: Option<Arc<crate::ops::SharedRuntime>>,
-    /// The endpoint and connection currently carrying this attach — the
-    /// forward route's swappable pair — or, on the reverse route, the
-    /// facts a `LOCAL_CONTROL` handshake produced instead of one
-    /// (M3 plan Step 6 (2473c88)).
-    pub(super) link: ConnectedLink,
+    /// The endpoint and connection currently carrying this attach — a
+    /// swappable pair (recovery-capable — see [`Link`]'s own doc).
+    pub(super) link: Link,
     /// `None` only after the session was consumed by the teardown.
     pub(super) session: Option<Session>,
-}
-
-/// Which of [`PeerRoute`](crate::ops::PeerRoute)'s two carriers this
-/// [`Connected`] rides.
-pub(super) enum ConnectedLink {
-    /// The forward route: a real, swappable QUIC endpoint/connection pair
-    /// (recovery-capable — see [`Link`]'s own doc).
-    Forward(Link),
-    /// The reverse route: relayed through this machine's `qsh listen`
-    /// daemon over a `LOCAL_CONTROL` conduit. There is no separate
-    /// endpoint/connection for this leg to hold — [`Connected::close`]'s
-    /// `session.close()` alone tears the conduit down — so this variant
-    /// carries only what [`Connected::peer_fingerprint`] needs: the
-    /// `LocalHelloAck.peer_fingerprint` this connection's own handshake
-    /// reported (`None` only if the daemon's ack omitted it, which never
-    /// happens on a live registration but is not this type's job to
-    /// assume).
-    Reverse {
-        peer_fingerprint: Option<String>,
-        /// This machine's resident `qsh listen` daemon's localctl socket
-        /// and the registered host alias this leg is for — exactly
-        /// [`LocalRoute`]'s two fields, carried forward from
-        /// [`Ops::connect_reverse`] rather than re-resolved, because
-        /// re-resolving could name a *different* daemon/registration than
-        /// the one this specific `Connected`'s `LOCAL_CONTROL` conduit is
-        /// actually talking to. [`Connected::reverse_route`] is the only
-        /// reader — `crate::ops::tunnel`'s route-aware `tunnel_open`
-        /// (M4 plan Step 5 (2473c88) PR 5b), which needs both to open the
-        /// per-connection `LOCAL_STREAM` conduits
-        /// `crate::tunnel::LocalForwardHandle::start_reverse` and
-        /// `crate::tunnel::remote::RemoteForwardAcceptor::spawn_reverse`
-        /// take.
-        socket: std::path::PathBuf,
-        host: String,
-    },
 }
 
 /// The endpoint/connection pair an attach is riding right now.
@@ -139,37 +102,7 @@ impl Connected {
     ) -> Self {
         Self {
             runtime: Some(runtime),
-            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
-            session: Some(session),
-        }
-    }
-
-    /// Build a reverse-route `Connected` directly from an already-built
-    /// `LOCAL_CONTROL` [`Session`], with no live `qsh listen` daemon or
-    /// registration behind it — the reverse-route sibling of
-    /// [`Self::for_test_forward`], for the same
-    /// `crate::ops::tunnel`/`crate::ops::session` capability-gate tests
-    /// (ADR-0020 decisions 2–3): a `session` built with
-    /// [`Session::from_local_control`](crate::client::Session::from_local_control)
-    /// from a hand-written capability list (e.g. one omitting
-    /// `dial-filter.v1`) is enough to exercise the gate without a real
-    /// `qsh listen` daemon or a live reverse registration. `socket`/`host`
-    /// only need to be *some* path/name — this seam's tests never dial
-    /// them, only read `Connected::reverse_route()` back.
-    #[cfg(all(test, unix))]
-    pub(crate) fn for_test_reverse(
-        runtime: Arc<crate::ops::SharedRuntime>,
-        session: Session,
-        socket: std::path::PathBuf,
-        host: String,
-    ) -> Self {
-        Self {
-            runtime: Some(runtime),
-            link: ConnectedLink::Reverse {
-                peer_fingerprint: None,
-                socket,
-                host,
-            },
+            link: Link::new(endpoint, connection),
             session: Some(session),
         }
     }
@@ -213,52 +146,28 @@ impl Connected {
         self.session.take()
     }
 
-    /// The forward route's swappable endpoint/connection pair, shared with
-    /// this `Connected`: a supervisor that replaces the pair
-    /// ([`Link::replace`]) keeps [`Self::close`] and [`Self::wait_dead_with_cause`]
-    /// pointed at the live one. `None` on the reverse route.
-    pub(crate) fn forward_link(&self) -> Option<Link> {
-        match &self.link {
-            ConnectedLink::Forward(link) => Some(link.clone()),
-            ConnectedLink::Reverse { .. } => None,
-        }
+    /// The swappable endpoint/connection pair, shared with this
+    /// `Connected`: a supervisor that replaces the pair ([`Link::replace`])
+    /// keeps [`Self::close`] and [`Self::wait_dead_with_cause`] pointed at
+    /// the live one.
+    pub(crate) fn forward_link(&self) -> Link {
+        self.link.clone()
     }
 
     /// `sha256:…` fingerprint of the peer this connection verified — the
     /// identity a resume credential is bound to (protocol.md §10-2). Not
     /// an authorization input: the host authorizes on the mTLS principal.
-    ///
-    /// Forward: read straight off this connection's own TLS-verified peer.
-    /// Reverse: the `LocalHelloAck.peer_fingerprint` this leg's own
-    /// handshake reported — the daemon's TLS-verified peer for *this*
-    /// registration, which is the ADR-0007 presentation-condition input on
-    /// that leg since the CLI process is not itself a TLS endpoint on the
-    /// underlying connection (M3 plan Step 6 (2473c88)).
+    /// Read straight off this connection's own TLS-verified peer.
     pub(crate) fn peer_fingerprint(&self) -> Option<String> {
-        match &self.link {
-            ConnectedLink::Forward(link) => link
-                .connection()
-                .peer_fingerprint()
-                .map(|fp| fp.to_string()),
-            ConnectedLink::Reverse {
-                peer_fingerprint, ..
-            } => peer_fingerprint.clone(),
-        }
+        self.link
+            .connection()
+            .peer_fingerprint()
+            .map(|fp| fp.to_string())
     }
 
-    /// The QUIC connection underneath, on the forward route only.
-    ///
-    /// `None` on the reverse route, where this process is not a QUIC
-    /// endpoint at all — its peer traffic is relayed by the resident `qsh
-    /// listen` daemon over a `LOCAL_STREAM` conduit
-    /// ([`ConnectedLink::Reverse`]). A caller that needs a raw byte pipe
-    /// of its own (a tunnel splice) has to refuse there rather than
-    /// improvise, which is what M4 plan Step 5 (2473c88) exists to fix.
-    pub(crate) fn connection(&self) -> Option<qsh_transport::Connection> {
-        match &self.link {
-            ConnectedLink::Forward(link) => Some(link.connection()),
-            ConnectedLink::Reverse { .. } => None,
-        }
+    /// The QUIC connection underneath.
+    pub(crate) fn connection(&self) -> qsh_transport::Connection {
+        self.link.connection()
     }
 
     /// The capabilities negotiated with the peer at handshake time
@@ -276,101 +185,27 @@ impl Connected {
             .unwrap_or(&[])
     }
 
-    /// The reverse-route carrier [`crate::ops::tunnel`]'s route-aware
-    /// `tunnel_open` needs to open its own `LOCAL_STREAM` conduits
-    /// (M4 plan Step 5 (2473c88) PR 5b) — this machine's resident `qsh listen`
-    /// daemon socket and the registered host alias, i.e. exactly
-    /// [`ConnectedLink::Reverse`]'s two extra fields. `None` on the
-    /// forward route (the mirror image of [`Self::connection`] being
-    /// `None` on the reverse route) — a caller branches on one or the
-    /// other, never both.
-    pub(crate) fn reverse_route(&self) -> Option<(&std::path::Path, &str)> {
-        match &self.link {
-            ConnectedLink::Forward(_) => None,
-            ConnectedLink::Reverse { socket, host, .. } => Some((socket.as_path(), host.as_str())),
-        }
-    }
-
     /// Wait until this connection ends, and say why — the one signal
     /// [`crate::ops::tunnel::TunnelHold::hold`] blocks on for as long as
     /// the tunnel it holds is alive (`docs/CLI.md` §6.14).
     ///
-    /// Forward route: [`qsh_transport::Connection::closed`], the QUIC
-    /// connection's own close future. Reverse route: there is no such
-    /// object on this side ([`Self::connection`]'s own doc), so this
-    /// drives [`Session::next_control`] in a loop instead — `Ok(None)` is
-    /// the daemon ending the `LOCAL_CONTROL` conduit, which is also how
-    /// this side learns its reverse registration died
-    /// (`crate::client::link::ControlLink::recv`'s own doc,
-    /// `docs/design/protocol.md` §11-3), and any `Err` is the conduit
-    /// itself failing. `next_control` performs no write (unlike
-    /// [`Session::next_event`], which answers a peer `Ping` inline), so
-    /// this is safe to run with nothing else touching the session — which
-    /// is exactly `tunnel_open`'s reverse-route `Connected`, since it is
-    /// never attached to any session and issues only the occasional
-    /// `RfwdOpen`/`RfwdClose` request on it. A message that is not a
-    /// clean end or an error (there should never legitimately be one on
-    /// this bare value-op connection) is simply discarded and the loop
-    /// keeps waiting — the same "nothing here to answer" posture every
-    /// other bare value-op `Connected` already has, forward or reverse.
-    ///
-    /// Returns the error plus the `cause` word for the close when the
-    /// connection itself says (forward route only; `qsh::lifecycle`).
+    /// [`qsh_transport::Connection::closed`], the QUIC connection's own
+    /// close future. Returns the error plus the `cause` word for the close
+    /// (`qsh::lifecycle`).
     pub(crate) async fn wait_dead_with_cause(&mut self) -> (OpError, Option<&'static str>) {
-        match &self.link {
-            ConnectedLink::Forward(link) => {
-                let err = link.connection().closed().await;
-                let cause = crate::reconnect::classify_connection_error(&err).as_str();
-                (
-                    OpError::new(
-                        ErrorCode::ConnectionFailed,
-                        format!("the connection carrying this tunnel closed: {err}"),
-                    ),
-                    Some(cause),
-                )
-            }
-            ConnectedLink::Reverse { .. } => {
-                let Some(session) = self.session.as_mut() else {
-                    return (
-                        OpError::new(
-                            ErrorCode::ConnectionFailed,
-                            "the reverse connection carrying this tunnel is already closed",
-                        ),
-                        None,
-                    );
-                };
-                loop {
-                    match session.next_control().await {
-                        Ok(None) => {
-                            return (
-                                OpError::new(
-                                    ErrorCode::ConnectionFailed,
-                                    "the reverse connection carrying this tunnel closed",
-                                ),
-                                None,
-                            );
-                        }
-                        Ok(Some(_)) => continue,
-                        Err(err) => {
-                            return (
-                                OpError::new(
-                                    ErrorCode::ConnectionFailed,
-                                    format!(
-                                        "the reverse connection carrying this tunnel failed: {err}"
-                                    ),
-                                ),
-                                None,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let err = self.link.connection().closed().await;
+        let cause = crate::reconnect::classify_connection_error(&err).as_str();
+        (
+            OpError::new(
+                ErrorCode::ConnectionFailed,
+                format!("the connection carrying this tunnel closed: {err}"),
+            ),
+            Some(cause),
+        )
     }
 
     /// Give the peer a bounded chance to acknowledge something before the
-    /// connection is closed (forward route; the reverse route has no
-    /// connection of its own here).
+    /// connection is closed.
     ///
     /// quinn-proto will not put a `CONNECTION_CLOSE` on the wire while the
     /// congestion window is full of unacknowledged data and stream frames
@@ -382,11 +217,10 @@ impl Connected {
     /// peer is an acknowledgment that frees window, so the close frame goes
     /// out right after. `grace` caps the wait for a peer that is gone.
     pub(crate) fn settle_before_close(&self, grace: Duration) {
-        let (Some(runtime), ConnectedLink::Forward(link)) = (self.runtime.as_ref(), &self.link)
-        else {
+        let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
-        let connection = link.connection();
+        let connection = self.link.connection();
         runtime.block_on(async move {
             let seen = connection.rx_frames();
             let deadline = tokio::time::Instant::now() + grace;
@@ -397,9 +231,7 @@ impl Connected {
     }
 
     /// Close the control stream and the connection, then let the QUIC close
-    /// frames drain (forward route) — or just the control stream (reverse
-    /// route: there is no separate connection here to close, and no QUIC
-    /// close frame of this process's own to drain).
+    /// frames drain.
     ///
     /// The runtime is shared (M7 plan Step 7-2 (69dd788) ①), so this only drops
     /// this `Connected`'s own `Arc` handle to it — and only after
@@ -416,26 +248,15 @@ impl Connected {
             return;
         };
         let session = self.session.take();
-        match &self.link {
-            ConnectedLink::Forward(link) => {
-                let (endpoint, connection) = link.get();
-                runtime.block_on(async move {
-                    if let Some(session) = session {
-                        session.close();
-                    }
-                    connection.close(0, b"done");
-                    drop(connection);
-                    endpoint.wait_idle().await;
-                });
+        let (endpoint, connection) = self.link.get();
+        runtime.block_on(async move {
+            if let Some(session) = session {
+                session.close();
             }
-            ConnectedLink::Reverse { .. } => {
-                runtime.block_on(async move {
-                    if let Some(session) = session {
-                        session.close();
-                    }
-                });
-            }
-        }
+            connection.close(0, b"done");
+            drop(connection);
+            endpoint.wait_idle().await;
+        });
     }
 }
 
@@ -456,9 +277,7 @@ impl Drop for Connected {
         let taken = self.runtime.take();
         if taken.is_some() {
             self.session.take();
-            if let ConnectedLink::Forward(link) = &self.link {
-                link.connection().close(0, b"done");
-            }
+            self.link.connection().close(0, b"done");
             // Only release this `Connected`'s handle after the close
             // request above has gone out. If this was the last `Arc`,
             // `shutdown_background()` runs here.

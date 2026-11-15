@@ -188,83 +188,29 @@ async fn a_resume_credential_never_reaches_a_log_line_or_the_json_contract() {
     );
 }
 
-/// **L6, extended to `qsh.local.v1` (M3 plan Step 5 (c) (2473c88)):** the same
-/// "never a place to put a credential" claim as the test above, applied to
-/// the localctl surface Step 5 introduces. `qsh.local.v1`'s message set
-/// (`crates/qsh-proto/proto/qsh/local/v1.proto`, fixed by Step 1) never
-/// had a `resume_token` field in the first place, so this is a structural
-/// guarantee, not a leak hunt — but a field added later, on any message a
-/// localctl conduit carries, must trip this the same way a new field on
-/// `SessionOpenData` would trip the test above.
-///
-/// Three places are checked, matching `crate::localctl` module docs' own
-/// framing of "what must never cross a localctl frame":
-///
-/// 1. **Every `qsh.local.v1` message type** — the derived `Debug` output of
-///    a default-constructed instance always names every field the
-///    generated struct has, regardless of that field's value, so this
-///    proves no message type was ever *given* a `resume_token` field
-///    without needing a live client/daemon round trip.
-/// 2. **The `.proto` source itself** — the human-authored contract Step 1
-///    fixed, read as text.
-/// 3. **The `localctl` module's own Rust source** — `mod.rs`/`frame.rs`/
-///    `client.rs`/`daemon.rs`, read as text, so nothing threads a token
-///    through by another name that still happens to be spelled
-///    `resume_token` (a local variable, a comment referencing the field it
-///    must *not* forward, etc. would all still be worth catching here).
+/// The `localctl` module (what is left of it after ADR-0068: the stream
+/// carriers agent forwarding rides) never names a `resume_token`: nothing
+/// that crosses a local conduit carries one, and a source file that starts
+/// to thread one through under any spelling trips this the same way a new
+/// field on `SessionOpenData` would trip the test above.
 #[test]
-fn no_localctl_message_type_or_source_file_ever_names_a_resume_token() {
-    use qsh_proto::local::{
-        LocalError, LocalHello, LocalHelloAck, LocalHost, LocalHostList, LocalHostListResult,
-        LocalResponse,
-    };
-
-    // ---- 1. every qsh.local.v1 message type, via its Debug shape ----
-    let debug_renderings = [
-        format!("{:?}", LocalHello::default()),
-        format!("{:?}", LocalResponse::default()),
-        format!("{:?}", LocalHelloAck::default()),
-        format!("{:?}", LocalError::default()),
-        format!("{:?}", LocalHostList::default()),
-        format!("{:?}", LocalHostListResult::default()),
-        format!("{:?}", LocalHost::default()),
-    ];
-    for rendering in &debug_renderings {
-        assert!(
-            !rendering.contains("resume_token"),
-            "a qsh.local.v1 message type grew a resume_token field: {rendering}"
-        );
-    }
-
-    // ---- 2. the .proto source itself ----
-    let proto_source = include_str!("../../../qsh-proto/proto/qsh/local/v1.proto");
-    assert!(
-        !proto_source.contains("resume_token"),
-        "qsh/local/v1.proto must never gain a resume_token field"
-    );
-
-    // ---- 3. the localctl module's own Rust source ----
+fn no_localctl_source_file_ever_names_a_resume_token() {
     let module_sources = [
         (
             "localctl/mod.rs",
             include_str!("../../../qsh-core/src/localctl/mod.rs"),
         ),
         (
-            "localctl/frame.rs",
-            include_str!("../../../qsh-core/src/localctl/frame.rs"),
+            "localctl/transport/mod.rs",
+            include_str!("../../../qsh-core/src/localctl/transport/mod.rs"),
         ),
         (
-            "localctl/client.rs",
-            include_str!("../../../qsh-core/src/localctl/client.rs"),
+            "localctl/transport/unix.rs",
+            include_str!("../../../qsh-core/src/localctl/transport/unix.rs"),
         ),
         (
-            // M3 Step 6: the pure (conduit, peer_request_id) <->
-            // daemon_request_id remap table (`crate::localctl::mux`) —
-            // added after this sweep's file list was first written, and
-            // just as covered by the HARD RULE ("resume_secrecy sweeps
-            // localctl/*.rs") as every other file in this module.
-            "localctl/mux.rs",
-            include_str!("../../../qsh-core/src/localctl/mux.rs"),
+            "localctl/transport/windows.rs",
+            include_str!("../../../qsh-core/src/localctl/transport/windows.rs"),
         ),
     ];
     for (name, source) in module_sources {
