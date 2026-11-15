@@ -340,7 +340,9 @@ impl Rig {
             .audit
             .records()
             .iter()
-            .filter(|r| r.decision == "allow")
+            // A `connect`/`path` record is an observation (ADR-0067), not an
+            // authorization the host granted.
+            .filter(|r| r.decision == "allow" && r.resource != "path")
             .count()
     }
 }

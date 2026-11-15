@@ -101,6 +101,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "audit.query.json",
     "audit.query.truncated.json",
     "audit.query.iroh_relay.json",
+    "audit.query.iroh_path.json",
     "doctor.run.keystore_session_bound.json",
     "doctor.run.client_mode.json",
     "doctor.run.server_mode.json",
@@ -2025,6 +2026,27 @@ fn golden_audit_query_iroh_relay_fixture() {
     let (code, all) = sandbox.json(&["audit", "--json"]);
     assert_eq!(code, 0, "{all}");
     check("audit.query.iroh_relay.json", all);
+}
+
+/// `qsh audit --action connect --resource path` over an iroh connection's
+/// path records (`docs/CLI.md` §6.22, ADR-0067): the filter keeps the two
+/// `connect`/`path` records and drops the ordinary one.
+#[test]
+fn golden_audit_query_iroh_path_fixture() {
+    let sandbox = Sandbox::initialized();
+    crate::audit_query::plant(&sandbox, &crate::audit_query::iroh_path_series(), None);
+
+    let (code, path) = sandbox.json(&[
+        "audit",
+        "--action",
+        "connect",
+        "--resource",
+        "path",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{path}");
+    assert_eq!(path["data"]["records"].as_array().map(Vec::len), Some(2));
+    check("audit.query.iroh_path.json", path);
 }
 
 /// `qsh identity move-key` (`docs/CLI.md` §6.11, ADR-0032 결정 15).

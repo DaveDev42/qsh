@@ -361,6 +361,36 @@ impl AuditRecord {
         }
     }
 
+    /// The path of an established keyed (iroh) connection changed kind
+    /// between `direct` and `relay` (ADR-0067). `action` is `"connect"`,
+    /// `resource` is `"path"`, `decision` is `"allow"` and `rule` is `None`;
+    /// `principal`, `auth_path` and `peer_addr` are the connection's own,
+    /// `request_id` is `"-"`. `peer_addr` is the address *after* the change, so
+    /// `peer_path` and `relay` carry the new path. An observation, not a
+    /// decision: no `role`, no `grant`.
+    pub fn path_changed(
+        principal: &Principal,
+        auth_path: AuthPath,
+        peer_addr: &qsh_transport::PeerAddr,
+    ) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: principal.to_string(),
+            action: "connect".to_string(),
+            resource: "path".to_string(),
+            decision: Decision::Allow.as_str().to_string(),
+            rule: None,
+            auth_path: auth_path_str(auth_path).to_string(),
+            peer_addr: peer_addr.to_string(),
+            peer_path: peer_path(peer_addr),
+            relay: relay_of(peer_addr),
+            count: None,
+            role: None,
+            grant: None,
+        }
+    }
+
     /// A connection-level deny: the peer never got past the TLS handshake
     /// (no client cert, unpinned, expired…). There is no principal — the
     /// whole point is that none could be established — so `principal` and

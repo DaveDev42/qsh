@@ -72,6 +72,26 @@ pub(crate) fn iroh_series() -> Vec<AuditRecord> {
     vec![on_relay, direct]
 }
 
+/// An iroh connection's path records (ADR-0067): an ordinary allow, then two
+/// `connect`/`path` records, up to `direct` and back down to `relay`.
+pub(crate) fn iroh_path_series() -> Vec<AuditRecord> {
+    let peer_addr = "iroh:sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".to_string();
+    let mut shell = record(1, "device:laptop", "session.open", "session", "allow");
+    shell.peer_addr = peer_addr.clone();
+    shell.peer_path = Some("relay".to_string());
+    shell.relay = Some("https://relay.example.test".to_string());
+    let mut up = record(2, "device:laptop", "connect", "path", "allow");
+    up.request_id = "-".to_string();
+    up.peer_addr = peer_addr.clone();
+    up.peer_path = Some("direct".to_string());
+    let mut down = record(3, "device:laptop", "connect", "path", "allow");
+    down.request_id = "-".to_string();
+    down.peer_addr = peer_addr;
+    down.peer_path = Some("relay".to_string());
+    down.relay = Some("https://relay.example.test".to_string());
+    vec![shell, up, down]
+}
+
 fn log_path(sandbox: &Sandbox) -> std::path::PathBuf {
     sandbox.state_dir().join("audit.log")
 }
