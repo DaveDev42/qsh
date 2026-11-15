@@ -14,8 +14,7 @@ pub mod relay;
 pub mod report;
 
 pub use chain::{
-    ChainConn, ChainInfo, ChannelInfo, HopPin, JumpPlan, MAX_JUMP_HOPS, PumpEnd, ReverseHop,
-    dial_chain, dial_chain_via_daemon,
+    ChainConn, ChainInfo, ChannelInfo, HopPin, JumpPlan, MAX_JUMP_HOPS, PumpEnd, dial_chain,
 };
 pub use middle::{
     CloseReason, JUMP_GATE_TIMEOUT, JUMP_IDLE, JUMP_RESOLVE_TIMEOUT, JumpOptions, JumpStats,

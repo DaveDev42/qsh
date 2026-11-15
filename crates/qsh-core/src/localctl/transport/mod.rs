@@ -48,12 +48,19 @@
 //!   these, so a shut-down write half reaches the peer as an end-of-stream
 //!   while it can still answer, on every platform.
 
+// ADR-0068 retired the daemon, so the listening half of these two files
+// (`bind`, `Listener`, `remove_endpoint`, `split`, `wait_for_hangup`) has no
+// caller left. It is deleted with the rest of localctl (decision 9 step 5),
+// not here, because the Windows half cannot be compiled by every contributor.
 #[cfg(unix)]
+#[allow(dead_code)]
 mod unix;
 #[cfg(windows)]
+#[allow(dead_code)]
 pub(crate) mod windows;
 
 #[cfg(unix)]
+#[allow(unused_imports)]
 pub(crate) use unix::{
     Listener, OwnedReadHalf, OwnedWriteHalf, RawReader, RawWriter, bind, candidate_endpoints,
     forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint, shutdown_both,
@@ -67,6 +74,7 @@ pub(crate) use unix::{authorized_peer, bind_with_narrow_umask};
 pub(crate) use unix::{peer_is_authorized, process_is_verifiably_dead};
 
 #[cfg(windows)]
+#[allow(unused_imports)]
 pub(crate) use windows::{
     Listener, OwnedReadHalf, OwnedWriteHalf, RawReader, RawWriter, bind, candidate_endpoints,
     forget_refused_endpoint, raw_bytes, raw_reader, raw_writer, remove_endpoint, shutdown_both,

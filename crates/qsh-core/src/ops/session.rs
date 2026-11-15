@@ -1572,9 +1572,11 @@ impl Ops {
                 let conn = self.connect_target(&target, tuning)?;
                 Ok((conn, RouteSeed::Forward(Box::new(target))))
             }
-            PeerRoute::Reverse(route) => self
-                .connect_reverse(&route)
-                .map(|(conn, generation)| (conn, RouteSeed::Reverse { generation })),
+            PeerRoute::Reverse(_) => Err(OpError::new(
+                ErrorCode::Unsupported,
+                "reverse connections were retired in v0.9.0 (ADR-0068)",
+            )
+            .with_details(serde_json::json!({ "reason": crate::retired::REASON }))),
         }
     }
 
@@ -1640,12 +1642,6 @@ impl Ops {
 pub(crate) enum RouteSeed {
     /// Forward route: the peer as resolved, re-dialed as is.
     Forward(Box<PeerTarget>),
-    /// Reverse route: the generation of the registration the first open
-    /// rode. The daemon socket and host name are on the `Connected`.
-    Reverse {
-        // Read only by the reverse supervisor.
-        generation: u64,
-    },
 }
 
 #[cfg(test)]

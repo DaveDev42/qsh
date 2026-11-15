@@ -12,7 +12,9 @@ use qsh_core::acl::{AllowAllPinned, Authorizer};
 use qsh_core::audit::{AuditSink, MemoryAuditSink};
 use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
 use qsh_core::client::Session;
+use qsh_core::identity::{Identity, LoadedIdentity};
 use qsh_core::server::Server;
+use qsh_proto::KeyStoreKind;
 use qsh_proto::wire::{self, Hello};
 use qsh_transport::{
     CertificateDer, Connection, Dialed, Dialer, Fingerprint, FramedStream, Listener, LocalIdentity,
@@ -730,5 +732,24 @@ impl HostedPair for LoopbackHarness {
 
     async fn shutdown(self) {
         LoopbackHarness::shutdown(self).await
+    }
+}
+
+/// Build a [`LoadedIdentity`] straight from a [`TestIdentity`], bypassing
+/// `identity::init`/a key store entirely — a caller only needs the
+/// shape, and every field it is built from ([`Identity::device_id`]/
+/// `fingerprint`/`cert_der`, [`LoadedIdentity::local`]) is already sitting
+/// in `test` from [`crate::loopback::make_identity`].
+pub fn loaded_identity(test: &TestIdentity, device_id: &str) -> LoadedIdentity {
+    LoadedIdentity {
+        identity: Identity {
+            device_id: device_id.to_string(),
+            fingerprint: test.fingerprint,
+            key_store: KeyStoreKind::File,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cert_der: test.cert_der.clone(),
+            issued_by_ca: None,
+        },
+        local: test.local.clone(),
     }
 }

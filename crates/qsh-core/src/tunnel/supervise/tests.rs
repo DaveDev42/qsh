@@ -357,9 +357,8 @@ fn supervise_budget_excludes_slept_time_and_still_attempts_once_after_a_wake_lon
 
 // -- decision 9: classification ----------------------------------------------
 
-const SOURCES: [Source; 5] = [
+const SOURCES: [Source; 4] = [
     Source::LocalDial,
-    Source::LocalDaemon,
     Source::SupervisorCheck,
     Source::Peer,
     Source::LocalListener,
@@ -371,11 +370,6 @@ const SOURCES: [Source; 5] = [
 fn retried_codes(source: Source) -> &'static [ErrorCode] {
     match source {
         Source::LocalDial => &[ErrorCode::ConnectionFailed],
-        Source::LocalDaemon => &[
-            ErrorCode::HostNotFound,
-            ErrorCode::Timeout,
-            ErrorCode::ConnectionFailed,
-        ],
         _ => &[],
     }
 }
@@ -420,15 +414,6 @@ fn supervise_error_classification_covers_every_source_and_error_code() {
 #[test]
 fn supervise_error_classification_matches_the_adr_examples() {
     use Disposition::{Retry, Stop};
-    // Both HOST_NOT_FOUND shapes (stale inside the window, swept after it).
-    assert_eq!(
-        classify(Source::LocalDaemon, &ErrorCode::HostNotFound, true),
-        Retry
-    );
-    assert_eq!(
-        classify(Source::LocalDaemon, &ErrorCode::HostNotFound, false),
-        Retry
-    );
     // Quota is retried, a bind failure is not.
     assert_eq!(
         classify(Source::Peer, &ErrorCode::ResourceExhausted, true),

@@ -134,7 +134,7 @@ fn module_ban_recurses_into_subdirectories() {
 /// Every configured module-ban target that doesn't exist is flagged
 /// once — not once per token bound to it (the ban targets must exist
 /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
-/// `REGISTRY_FILE`, the three `FILE_GUARD_FILES` and the three `FILE_HOST_FILES`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
+/// the three `FILE_GUARD_FILES` and the three `FILE_HOST_FILES`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
 /// `SETUP_DIR` directory, the `CORE_SRC_DIR` directory the `quinn` ban
 /// scopes, and the `INVITE_ADDRESS_DIR` directory that two
 /// separate bans share — a shared target is still one entry in `reported_missing`, not two).
@@ -143,7 +143,7 @@ fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 17, "{violations:?}");
+    assert_eq!(violations.len(), 16, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"
@@ -466,46 +466,6 @@ fn a_violation_path_is_spelled_with_forward_slashes_on_every_platform() {
     );
 }
 
-/// `reverse/registry.rs` bans the same six-token set as `BROKER_DIR` —
-/// a sibling file in the same directory (e.g. `listen.rs`, the live
-/// bridge) is not in scope for this rule.
-#[test]
-fn module_ban_flags_a_leak_in_reverse_registry_but_not_its_sibling_listen_rs() {
-    let root = tempfile::tempdir().unwrap();
-    let reverse = root.path().join("crates/qsh-core/src/reverse");
-    fs::create_dir_all(&reverse).unwrap();
-    fs::write(
-        reverse.join("registry.rs"),
-        "use crate::client::Session;\nfn f() { let _ = quinn::Endpoint::client; }\n",
-    )
-    .unwrap();
-    fs::write(
-        reverse.join("listen.rs"),
-        "use qsh_transport::Connection; // legitimate: listen.rs is the live bridge\n",
-    )
-    .unwrap();
-
-    let mut violations = Vec::new();
-    check_module_bans(root.path(), &mut violations).unwrap();
-
-    let registry_hits: Vec<_> = violations
-        .iter()
-        .filter(|v| v.contains("registry.rs"))
-        .collect();
-    let listen_hits: Vec<_> = violations
-        .iter()
-        .filter(|v| v.contains("listen.rs"))
-        .collect();
-
-    assert_eq!(registry_hits.len(), 2, "{violations:?}");
-    assert!(registry_hits.iter().any(|v| v.contains("crate::client")));
-    assert!(registry_hits.iter().any(|v| v.contains("quinn")));
-    assert!(
-        listen_hits.is_empty(),
-        "listen.rs is not in scope for the registry rule: {violations:?}"
-    );
-}
-
 /// `file/guard.rs` is a pure path judgement: it must not name the async
 /// runtime or the session/ACL layers. The ban is file-scoped, so a sibling
 /// (`copy.rs`, which may drive transport streams) and the guard's own
@@ -792,8 +752,8 @@ fn run_flags_a_quinn_dependency_in_core_and_cli_manifests() {
 }
 
 /// The real workspace tree must respect every module ban: the broker,
-/// `localctl/{frame,client}.rs` (with `daemon.rs` exempt),
-/// `reverse/registry.rs`, and `qsh-cli/src`.
+/// `localctl/{frame,client}.rs` (with `daemon.rs` exempt), and
+/// `qsh-cli/src`.
 #[test]
 fn real_tree_respects_all_module_bans() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();

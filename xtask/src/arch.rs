@@ -221,14 +221,6 @@ const LOCALCTL_TRANSPORT_WINDOWS_FILE: &str = "crates/qsh-core/src/localctl/tran
 const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs and localctl/transport/{unix,windows}.rs are pure local-stream + qsh-proto framing on the CLI-process side; \
      localctl/daemon.rs is the transport bridge and is deliberately exempt (docs/design/architecture.md §1)";
 
-/// `reverse/registry.rs` holds `ReverseEntry` metadata only (already narrowed — the live `client::Session` stays in `reverse/listen.rs`),
-/// so it can carry the same six-token ban as the broker: `crate::client`
-/// staying clean here is the mechanical proof that a `ReverseEntry` never
-/// holds a live session.
-const REGISTRY_FILE: &str = "crates/qsh-core/src/reverse/registry.rs";
-const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only; it must not hold a live client::Session or \
-     name a transport type — same token set as BROKER_DIR (docs/design/architecture.md §1)";
-
 /// `qsh-cli/src` never opens a UDS socket or a named pipe directly — it goes
 /// through `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
 /// root: `crates/qsh-cli/tests/it/localctl_perms.rs` pokes UDS permissions
@@ -376,14 +368,6 @@ fn module_bans() -> Vec<ModuleBan> {
                 reason: LOCALCTL_TRANSPORT_REASON,
             });
         }
-    }
-
-    for forbidden in BROKER_TOKEN_SET {
-        bans.push(ModuleBan {
-            scope: Scope::File(REGISTRY_FILE),
-            forbidden,
-            reason: REGISTRY_REASON,
-        });
     }
 
     // `named_pipe` is tokio's module path; the two spellings of the pipe
@@ -568,7 +552,7 @@ fn repo_relative_display(path: &Path) -> String {
 /// sufficient for this lint: this assumption — no string literal embeds `//`
 /// before a banned token, and no block comments (`/* … */`) are used — has
 /// been re-verified for every scope this lint currently scans (`BROKER_DIR`,
-/// the `localctl` files, `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_DIR`,
+/// the `localctl` files, `CLI_SRC_DIR`, `INVITE_ADDRESS_DIR`,
 /// `INVITE_ADDRESS_FILE` and `SETUP_DIR`). **Adding a new scanned scope requires
 /// re-checking this assumption against that scope's actual source** before
 /// trusting this naive strip on it.

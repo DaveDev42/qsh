@@ -18,12 +18,6 @@ use qsh_proto::ErrorCode;
 pub(crate) enum Source {
     /// This machine dialing a forward-route peer.
     LocalDial,
-    /// This machine asking its own `qsh listen` daemon (reverse route).
-    #[cfg_attr(
-        not(any(test, unix)),
-        allow(dead_code, reason = "only the unix reverse supervisor uses it")
-    )]
-    LocalDaemon,
     /// The supervisor's own checks on a fresh carrier (fingerprint match,
     /// capability presence).
     SupervisorCheck,
@@ -58,13 +52,6 @@ pub(crate) fn classify(source: Source, code: &ErrorCode, retryable: bool) -> Dis
         // us), `INTERNAL`, `CONFIG_ERROR` and everything else: stop. Retrying
         // an auth failure after `trust remove` would be failing open.
         (Source::LocalDial, _) => Stop,
-
-        // Both `HOST_NOT_FOUND` shapes count: a stale entry inside
-        // `stale_retention` (retryable) and an entry already swept
-        // (not retryable) are both "the route we had is not there yet".
-        (Source::LocalDaemon, ErrorCode::HostNotFound) => Retry,
-        (Source::LocalDaemon, ErrorCode::Timeout | ErrorCode::ConnectionFailed) => Retry,
-        (Source::LocalDaemon, _) => Stop,
 
         // A fingerprint mismatch or a missing capability never heals by
         // itself.

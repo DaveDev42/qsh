@@ -14,10 +14,9 @@
 //!   `dispatch_rfwd_open_with_no_connection_is_unsupported` test), and
 //!   `forward.local` has no `Body` variant at all (protocol.md §7's inline
 //!   `TCP_CONNECT` gate, not a control-stream op).
-//! - `host.reverse`'s gate (`reverse::admit::admit`) is `pub`, but
-//!   reaching it for real needs a live `Listen` controller accepting a
-//!   real `Hello.reverse` dial-in — the connection-time check this crate's
-//!   `ReverseHarness` exists to drive.
+//! - `host.reverse` keeps its registry row and vocabulary entry (ADR-0068),
+//!   but the connection-time registration gate it named is retired, so
+//!   no test here drives it any more.
 //!
 //! This file adds no new coverage on its own: `tunnel_loopback.rs`/
 //! `tunnel_remote_loopback.rs`/`reverse_loopback.rs` already exercise
@@ -35,14 +34,10 @@
 //! half of that guard.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use qsh_core::acl::{
-    Action, ActionPattern, AllowAllPinned, DenyAll, OP_REGISTRY, Op, Policy, Rule, Scope,
-};
+use qsh_core::acl::{Action, ActionPattern, DenyAll, OP_REGISTRY, Op, Policy, Rule, Scope};
 use qsh_proto::ErrorCode;
-use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::{ReverseHarness, wait_for_audit_records};
+use qsh_testkit::loopback::make_identity;
 use qsh_testkit::tunnel::TunnelHarness;
 use qsh_transport::{AuthPath, Principal, StaticTrust};
 
@@ -51,12 +46,6 @@ use qsh_transport::{AuthPath, Principal, StaticTrust};
 /// `crates/qsh-core/tests/it/acl_registry.rs`'s single-source guard has
 /// something concrete to name.
 const TESTKIT_ONLY_OPS: &[&str] = &["forward.local", "forward.remote", "host.reverse"];
-
-const TIMEOUT: Duration = Duration::from_secs(5);
-
-fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
-    StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
-}
 
 #[test]
 fn testkit_only_ops_are_exactly_three_real_registry_rows() {
@@ -244,60 +233,4 @@ async fn forward_remote_close_owned_flag_matches_the_observed_ownership_gate() {
     }
 
     h.shutdown().await;
-}
-
-// ---------------------------------------------------------------------
-// host.reverse — the `Hello.reverse` connection-time registration check.
-// ---------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread")]
-async fn host_reverse_is_audited_allow_and_deny() {
-    let action = Op::HostReverse.action();
-    assert_eq!(action, Action::HostReverse);
-
-    let allow_target = make_identity();
-    let allow_harness = ReverseHarness::start_with(
-        Arc::new(AllowAllPinned),
-        false,
-        pin(&allow_target, "widget"),
-    )
-    .await;
-    allow_harness
-        .register(&allow_target, "")
-        .await
-        .expect("AllowAllPinned admits a pinned, correctly-aliased target");
-    let records = wait_for_audit_records(&allow_harness.audit, 1, TIMEOUT).await;
-    let mine: Vec<_> = records
-        .iter()
-        .filter(|r| r.action.as_str() == action.as_str())
-        .collect();
-    assert_eq!(mine.len(), 1, "{records:?}");
-    assert_eq!(mine[0].decision, "allow");
-    allow_harness.shutdown().await;
-
-    let deny_target = make_identity();
-    let deny_harness =
-        ReverseHarness::start_with(Arc::new(DenyAll), false, pin(&deny_target, "widget")).await;
-    // Not `.expect_err(...)`: the `Ok` type `(Dialed, FramedStream,
-    // wire::Hello)` doesn't implement `Debug` (`FramedStream` owns live
-    // QUIC stream halves), the same reason `reverse_loopback.rs`'s own
-    // `expect_hello_err` helper exists.
-    let err = match deny_harness.register(&deny_target, "").await {
-        Ok(_) => panic!("DenyAll denies everything"),
-        Err(err) => err,
-    };
-    match err {
-        qsh_core::handshake::HelloError::Remote { code, .. } => {
-            assert_eq!(code, ErrorCode::PermissionDenied);
-        }
-        other => panic!("expected a Remote/PERMISSION_DENIED error, got {other:?}"),
-    }
-    let records = wait_for_audit_records(&deny_harness.audit, 1, TIMEOUT).await;
-    let mine: Vec<_> = records
-        .iter()
-        .filter(|r| r.action.as_str() == action.as_str())
-        .collect();
-    assert_eq!(mine.len(), 1, "{records:?}");
-    assert_eq!(mine[0].decision, "deny");
-    deny_harness.shutdown().await;
 }

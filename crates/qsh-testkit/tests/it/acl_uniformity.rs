@@ -24,8 +24,8 @@
 //! unrelated wire shapes — ordinary control-stream ops
 //! ([`qsh_testkit::loopback::LoopbackHarness`]), the `forward.local`
 //! inline `TCP_CONNECT` gate ([`qsh_testkit::tunnel::TunnelHarness`]),
-//! the `host.reverse` connection-time registration
-//! ([`qsh_testkit::reverse::ReverseHarness`]), and the `SessionData`
+//! the retired `host.reverse` registration (a registry row with no driver
+//! any more, ADR-0068), and the `SessionData`
 //! reattach inline gate (also [`qsh_testkit::loopback::LoopbackHarness`],
 //! but under a bespoke policy — see [`OpenOnlyDenyAttach`]'s doc) — so no
 //! single existing per-op-family suite is the natural home for a test
@@ -65,14 +65,12 @@ use qsh_core::audit::MemoryAuditSink;
 use qsh_core::broker::{PeerFingerprint, SessionBackend, SessionId, SessionSpec};
 use qsh_core::client::{ClientError, Session};
 use qsh_core::exec::ExecSpec;
-use qsh_core::handshake::HelloError;
 use qsh_core::server::RESET_CODE_FORBIDDEN;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
-use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::TunnelHarness;
-use qsh_transport::{Dialed, FramedStream, Principal, StaticTrust};
+use qsh_transport::{FramedStream, Principal, StaticTrust};
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
@@ -344,35 +342,6 @@ fn assert_new_audit_deny_for_seam(audit: &MemoryAuditSink, before: usize, seam: 
     );
 }
 
-/// [`Result::expect_err`] needs `T: Debug`, and a successful `Hello.reverse`
-/// exchange's success type (`(Dialed, FramedStream, Hello)`) is not
-/// (`FramedStream` owns live QUIC stream halves) — the same shape check
-/// `reverse_loopback.rs`'s own `expect_hello_err` provides, duplicated here
-/// rather than shared (each test binary is its own crate; there is no
-/// shared support module for these small per-file wire helpers to live
-/// in — same division `reverse_tunnel.rs`'s own `connect_control` doc
-/// notes).
-fn expect_hello_err(
-    result: Result<(Dialed, FramedStream, wire::Hello), HelloError>,
-    msg: &str,
-) -> HelloError {
-    match result {
-        Ok(_) => panic!("{msg}"),
-        Err(err) => err,
-    }
-}
-
-fn remote(err: HelloError) -> (ErrorCode, String, bool) {
-    match err {
-        HelloError::Remote {
-            code,
-            message,
-            retryable,
-        } => (code, message, retryable),
-        other => panic!("expected a remote error frame, got {other:?}"),
-    }
-}
-
 /// [`SeamKind::StreamReset`]'s driver needs a policy shape a blanket
 /// [`DenyAll`] cannot provide, and this is deliberate, not a shortcut
 /// (F3, M5 Step 4 adversarial review). The `SessionData` reattach inline
@@ -626,40 +595,10 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
         h.shutdown().await;
     }
 
-    // (d) SeamKind::ReverseRegistration: host.reverse's connection-time
-    // registration check.
-    {
-        let seam = DENY_SEAMS
-            .iter()
-            .find(|s| s.name == "host.reverse")
-            .expect("DENY_SEAMS must have a host.reverse row");
-        assert_eq!(
-            seam.kind,
-            SeamKind::ReverseRegistration,
-            "host.reverse: this block only knows how to drive a ReverseRegistration seam — a \
-             different SeamKind here means the registry row and this driver have drifted apart"
-        );
-        let target = make_identity();
-        let harness =
-            ReverseHarness::start_with(wrap(Arc::new(DenyAll)), false, pin(&target, "widget"))
-                .await;
-        let before = harness.audit.records().len();
-        let mark = probe_mark(probe);
-        let err = expect_hello_err(
-            harness.register(&target, "widget").await,
-            "DenyAll must deny host.reverse",
-        );
-        let (code, message, _retryable) = remote(err);
-        assert_eq!(code, ErrorCode::PermissionDenied, "host.reverse");
-        assert_eq!(
-            message, PERMISSION_DENIED_MESSAGE,
-            "host.reverse: message must be the uniform PERMISSION_DENIED_MESSAGE, byte for byte"
-        );
-        assert_new_audit_deny_for_seam(&harness.audit, before, seam);
-        probe_assert(probe, mark, seam, &target.fingerprint);
-        assert!(driven.insert(seam.name), "duplicate host.reverse drive");
-        harness.shutdown().await;
-    }
+    // (d) SeamKind::ReverseRegistration: `host.reverse` keeps its registry
+    // row and vocabulary entry (ADR-0068), but the connection-time
+    // registration it judged is retired, so no wire path reaches it and
+    // nothing here drives it. The coverage check below excludes the row.
 
     // (e) SeamKind::StreamReset: the SessionData reattach inline gate.
     // Needs OpenOnlyDenyAttach, not DenyAll — see that struct's doc for
@@ -768,7 +707,11 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
     // empty" property M5 plan Step 4 (2473c88) DoD 4 asks for: there is no
     // separate documented-exemption branch anywhere in this file because
     // every row really is driven.
-    let registry_names: BTreeSet<&'static str> = DENY_SEAMS.iter().map(|seam| seam.name).collect();
+    let registry_names: BTreeSet<&'static str> = DENY_SEAMS
+        .iter()
+        .filter(|seam| seam.kind != SeamKind::ReverseRegistration)
+        .map(|seam| seam.name)
+        .collect();
     assert_eq!(
         driven, registry_names,
         "every DENY_SEAMS row must be driven by exactly one driver in this test — a \
@@ -881,22 +824,6 @@ async fn role_absent_out_of_scope_and_reload_failure_denials_are_uniform() {
             "no role: forward.local"
         );
         t.shutdown().await;
-
-        let target = make_identity();
-        let sandbox = RoleSandbox::new("widget", &target.fingerprint, None);
-        let harness = ReverseHarness::start_with(
-            sandbox.authorizer(Role::Listen),
-            false,
-            pin(&target, "widget"),
-        )
-        .await;
-        let (code, message, _) = remote(expect_hello_err(
-            harness.register(&target, "widget").await,
-            "no role must deny host.reverse",
-        ));
-        assert_eq!(code, ErrorCode::PermissionDenied);
-        assert_eq!(message, PERMISSION_DENIED_MESSAGE, "no role: host.reverse");
-        harness.shutdown().await;
     }
 
     // (b) out of scope: `read-only` covers the session reads, nothing else.

@@ -6,13 +6,9 @@
 //! is exactly what it was sent, not a ConPTY's rendering of it. [`EchoHost`]
 //! stands in for the host behind a real client: it runs the same [`Server`]
 //! and [`Broker`] a `qsh serve` runs, with the echo factory as the session
-//! source, and reaches the client over either route.
-//!
-//! - [`EchoHost::serve_forward`]: a QUIC listener on `127.0.0.1:0` that pins
-//!   the client's fingerprint, for a client that dials it.
-//! - [`EchoHost::register`]: the host dials a real `qsh listen` daemon and
-//!   registers as a reverse target, so the client reaches it through the
-//!   daemon's local socket or pipe.
+//! source, and reaches the client over a QUIC listener
+//! ([`EchoHost::serve_forward`]) on `127.0.0.1:0` that pins the client's
+//! fingerprint.
 //!
 //! Only the session source differs from production. The wire, the handshake,
 //! the ACL choke point and the broker's detach and resume are the real ones.
@@ -27,19 +23,11 @@ use std::time::Duration;
 
 use qsh_core::acl::AllowAllPinned;
 use qsh_core::audit::MemoryAuditSink;
-use qsh_core::broker::{
-    Broker, BrokerConfig, EchoPipeFactory, LiveCounts, PeerFingerprint, SystemClock,
-};
-use qsh_core::handshake;
-use qsh_core::server::{ConnCtx, Server};
-use qsh_transport::{Dialer, Fingerprint, Listener, Principal, StaticTrust};
+use qsh_core::broker::{Broker, BrokerConfig, EchoPipeFactory, LiveCounts, SystemClock};
+use qsh_core::server::Server;
+use qsh_transport::{Fingerprint, Listener, Principal, StaticTrust};
 
 use crate::loopback::{TestIdentity, make_identity};
-use crate::reverse::reverse_hello;
-
-/// How long [`EchoHost::register`] waits for the daemon to take the
-/// registration before it panics.
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A host with echo sessions. See the module docs.
 pub struct EchoHost {
@@ -138,63 +126,6 @@ impl EchoHost {
                 .await;
         });
         addr
-    }
-
-    /// Dial the `qsh listen` daemon at `controller_addr` (which presents
-    /// `controller_fingerprint`), register as the reverse target named
-    /// `offered_name`, and serve that connection. Returns once the daemon has
-    /// accepted the registration.
-    pub fn register(
-        &self,
-        controller_addr: &str,
-        controller_fingerprint: &str,
-        offered_name: &str,
-    ) {
-        let controller = Fingerprint::from_str(controller_fingerprint)
-            .unwrap_or_else(|e| panic!("{controller_fingerprint:?} is not a fingerprint: {e:?}"));
-        let addr: SocketAddr = controller_addr
-            .parse()
-            .unwrap_or_else(|e| panic!("{controller_addr:?} is not an address: {e}"));
-        let trust = StaticTrust::empty().with_pin(controller, Principal::Device("hub".into()));
-        let dialer = Dialer::new(self.identity.local.clone(), Arc::new(trust));
-        let server = self.server.clone();
-        let name = offered_name.to_string();
-        let mut stop = self.stop.as_ref().expect("not dropped").subscribe();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
-        self.runtime().spawn(async move {
-            let dialed = dialer
-                .dial(addr, "127.0.0.1")
-                .await
-                .unwrap_or_else(|e| panic!("the echo target dials the controller {addr}: {e:?}"));
-            let (ctl, controller_hello) =
-                handshake::initiate(&dialed.connection, reverse_hello(&name))
-                    .await
-                    .unwrap_or_else(|e| panic!("the controller refused the registration: {e:?}"));
-            let conn = dialed.connection.clone();
-            let ctx = ConnCtx {
-                principal: conn.principal().clone(),
-                auth_path: conn.auth_path(),
-                peer_fingerprint: conn
-                    .peer_fingerprint()
-                    .map(|fp| PeerFingerprint::new(*fp.as_bytes())),
-                peer_addr: conn.remote_address(),
-                conn_id: conn.stable_id(),
-                capabilities: handshake::negotiated_capabilities(&controller_hello),
-                is_reverse_registration: true,
-            };
-            let conn_id = ctx.conn_id;
-            let _ = ready_tx.send(());
-            tokio::select! {
-                _ = server.clone().serve_control(&conn, ctl, ctx, None) => {}
-                _ = stop.wait_for(|stopped| *stopped) => {}
-            }
-            server.purge_connection(conn_id, ()).await;
-            // The endpoint must outlive the connection (`Dialed::endpoint`).
-            drop(dialed);
-        });
-        ready_rx
-            .recv_timeout(REGISTER_TIMEOUT)
-            .unwrap_or_else(|_| panic!("the controller did not take the registration"));
     }
 }
 

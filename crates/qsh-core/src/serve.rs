@@ -194,9 +194,8 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 /// carries the *literal* the operator or config named, not yet resolved
 /// through the trust store/`hosts.toml` — [`crate::ops::Ops::resolve_serve_target`]
 /// is the next step for a caller that needs the actual controller key,
-/// mirroring [`crate::reverse::target`]'s own "keep the literal, resolve it
-/// per dial attempt" discipline so both spellings share one resolution
-/// path.
+/// keeping the literal and resolving it per dial attempt, so both
+/// spellings share one resolution path.
 ///
 /// [`Outbound`]: ServeMode::Outbound
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,12 +672,11 @@ pub struct HostRuntime {
 /// connection/session [`Quotas`], plus the trust store the authorizer and
 /// the transport's verifier read.
 ///
-/// `qsh serve`, a `qsh serve --to` target and `qsh listen` each build their
-/// own with [`SharedParts::load`] and hand it to [`host_runtime_with`] or to
-/// [`crate::reverse::listen::Listen`]. A process that plays two roles on one
-/// endpoint builds it once and hands the same one to both, which is what
-/// keeps the policy snapshot, the audit file writer, the handshake gate and
-/// the connection pool single.
+/// `qsh serve` builds its own with [`SharedParts::load`] and hands it to
+/// [`host_runtime_with`]. A process that plays two roles on one endpoint
+/// builds it once and hands the same one to both, which is what keeps the
+/// policy snapshot, the audit file writer, the handshake gate and the
+/// connection pool single.
 ///
 /// The stateless reset key is not part of this: it is read by the one
 /// [`crate::reset_key::bind_listener`] call that binds the endpoint.

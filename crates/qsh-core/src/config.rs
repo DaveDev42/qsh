@@ -1104,8 +1104,8 @@ impl AuditConfig {
 /// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2/§11-4).
 ///
 /// M3 plan Step 3 (2473c88) PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
-/// `stale_retention`, read by [`crate::reverse::listen::Listen`]'s stale-eviction
-/// sweeper (`crates/qsh-core/src/reverse/listen.rs`).
+/// `stale_retention`, read by the retired `Listen` stale-eviction sweeper
+/// (ADR-0068); the key still parses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ListenConfig {

@@ -78,10 +78,8 @@ tempfile.workspace = true
 base64.workspace = true
 jsonschema.workspace = true
 qsh-testkit.workspace = true
-# Test-only, direct transport-level types two integration-test files need
+# Test-only, direct transport-level types an integration-test file needs
 # and `qsh-core` does not re-export:
-# - `crates/qsh-cli/tests/it/reverse_blackout.rs`: pins a `StaticTrust` for
-#   `qsh_testkit::reverse::ReverseHarness`.
 # - `crates/qsh-cli/tests/it/acl_check_equivalence.rs`: `AuthPath` (its
 #   `Principal` usage comes from `qsh-core`'s own re-export instead,
 #   `qsh-core/src/lib.rs`).

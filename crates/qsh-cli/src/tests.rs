@@ -84,45 +84,6 @@ fn quiet_and_an_explicit_log_level_both_silence_it() {
     );
 }
 
-/// `docs/CLI.md` §6.13: a `qsh listen` registration event
-/// (`RegistrationEvent`, `qsh_core::reverse::listen::TARGET`) is one
-/// line of pure JSON on stderr **at default verbosity** — exactly the
-/// same promise §6.4 makes for a recovery record, and `init_tracing`
-/// now wires a dedicated layer for it (mirroring `recovery`) instead of
-/// leaving it to fall through the `warn`-default human layer, which
-/// would either drop it entirely or wrap it in a timestamp/level prefix
-/// (adversarial review finding). This test pins the *composition* —
-/// the same `EnvFilter`/`filter_fn` shape `init_tracing` builds — not
-/// `RegistrationEvent` itself, which is private to `qsh-core` and
-/// already pins its own JSON shape in `reverse::listen`'s unit tests.
-#[test]
-fn a_reverse_registration_event_is_one_pure_json_line_at_default_verbosity() {
-    let target = qsh_core::reverse::listen::TARGET;
-    let sink = Captured::default();
-    let default = "warn"; // `cli.verbose == 0`, `cli.quiet == false`
-    let reverse_default = format!("{default},{target}=info");
-    let layer = RecoveryLayer(sink.clone())
-        .with_filter(env_filter(None, &reverse_default))
-        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
-            meta.target() == target
-        }));
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let line =
-        r#"{"event":"registered","host":"widget","fingerprint":"sha256:abc","generation":0}"#;
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::info!(target: qsh_core::reverse::listen::TARGET, "{}", line);
-    });
-    let lines = sink.0.lock().expect("not poisoned");
-    assert_eq!(
-        *lines,
-        vec![line.to_string()],
-        "visible at default verbosity, byte-identical, no prefix"
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&lines[0]).expect("the line is pure JSON");
-    assert_eq!(parsed["event"], "registered");
-    assert_eq!(parsed["host"], "widget");
-}
-
 /// `docs/CLI.md` §2.2/§6.12/§6.13: `qsh serve`/`qsh listen`/`qsh
 /// reverse` write zero bytes to stdout on every path, envelope
 /// included — even a setup failure this early (`Ops::from_env()`,

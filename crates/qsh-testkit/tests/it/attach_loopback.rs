@@ -7,12 +7,8 @@
 //! sleep-based synchronisation.
 //!
 //! Every scenario below is a generic `async fn<P: HostedPair>(h: P)` run
-//! twice — once against [`LoopbackHarness`] (forward) and once against
-//! [`ReversePairHarness`] (reverse: the target dials the controller and
-//! *is* the host; the controller drives the attach stream as the
-//! client-role peer) — identical body, identical assertions, in both
-//! directions: the mechanical proof of role-axis independence the M3 plan (2473c88)
-//! Step 3 PR 3b owes.
+//! against [`LoopbackHarness`] (the reverse topology it once also ran
+//! against retired with ADR-0068).
 
 use std::time::Duration;
 
@@ -22,15 +18,14 @@ use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_frame};
 use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::LoopbackHarness;
-use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::FramedStream;
 
 /// Wall-clock ceiling for anything that should resolve in milliseconds.
 /// A miss is a hang, which is a failure, not flake.
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// The harness' replay ring and pipe buffers (`LoopbackHarness`/
-/// `ReversePairHarness` both build a 64 KiB ring).
+/// The harness' replay ring and pipe buffers (`LoopbackHarness` builds a
+/// 64 KiB ring).
 const RING_BYTES: usize = 64 * 1024;
 
 fn open_req() -> wire::SessionOpen {
@@ -127,14 +122,6 @@ async fn attach_stream_delivers_output_in_order_with_monotonic_sequences_forward
         .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_stream_delivers_output_in_order_with_monotonic_sequences_reverse() {
-    attach_stream_delivers_output_in_order_with_monotonic_sequences(
-        ReversePairHarness::start().await,
-    )
-    .await;
-}
-
 /// `Input.input_seq` is a cumulative offset, so replaying a frame the host
 /// already applied is discarded and re-acked — lossless and duplicate-free
 /// (protocol.md §10-5).
@@ -180,11 +167,6 @@ async fn replayed_input_is_discarded_and_re_acked_exactly_once<P: HostedPair>(h:
 #[tokio::test(flavor = "multi_thread")]
 async fn replayed_input_is_discarded_and_re_acked_exactly_once_forward() {
     replayed_input_is_discarded_and_re_acked_exactly_once(LoopbackHarness::start().await).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn replayed_input_is_discarded_and_re_acked_exactly_once_reverse() {
-    replayed_input_is_discarded_and_re_acked_exactly_once(ReversePairHarness::start().await).await;
 }
 
 /// Read frames until the next `InputAck`, returning its offset.
@@ -306,14 +288,6 @@ async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked<P: Hos
 async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_forward() {
     stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked(
         LoopbackHarness::start().await,
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_reverse() {
-    stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked(
-        ReversePairHarness::start().await,
     )
     .await;
 }
@@ -446,14 +420,6 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection_for
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection_reverse() {
-    a_wedged_child_cannot_stall_other_control_traffic_on_the_connection(
-        ReversePairHarness::start().await,
-    )
-    .await;
-}
-
 /// A saturated write backlog is refused with a retryable
 /// `RESOURCE_EXHAUSTED`, not by parking the connection.
 async fn a_saturated_write_backlog_is_refused_retryably<P: HostedPair>(h: P) {
@@ -519,11 +485,6 @@ async fn a_saturated_write_backlog_is_refused_retryably<P: HostedPair>(h: P) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_saturated_write_backlog_is_refused_retryably_forward() {
     a_saturated_write_backlog_is_refused_retryably(LoopbackHarness::start().await).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_saturated_write_backlog_is_refused_retryably_reverse() {
-    a_saturated_write_backlog_is_refused_retryably(ReversePairHarness::start().await).await;
 }
 
 /// `session.attach` carries the session's output the same way the
@@ -625,11 +586,6 @@ async fn attach_stream_ends_with_exit_when_the_child_exits_forward() {
     attach_stream_ends_with_exit_when_the_child_exits(LoopbackHarness::start().await).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_stream_ends_with_exit_when_the_child_exits_reverse() {
-    attach_stream_ends_with_exit_when_the_child_exits(ReversePairHarness::start().await).await;
-}
-
 /// Read control messages until the one correlated to `request_id`.
 async fn reply_to(ctl: &mut FramedStream, request_id: u64) -> wire::response::Body {
     tokio::time::timeout(DEADLINE, async {
@@ -726,11 +682,6 @@ async fn pipelined_writes_reach_a_draining_child_in_send_order_forward() {
     pipelined_writes_reach_a_draining_child_in_send_order(LoopbackHarness::start().await).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn pipelined_writes_reach_a_draining_child_in_send_order_reverse() {
-    pipelined_writes_reach_a_draining_child_in_send_order(ReversePairHarness::start().await).await;
-}
-
 /// Losing the writer lease **demotes** an attach to read-only; it does not
 /// end it (protocol.md §10 "기존 보유자가 … read-only로 강등된다"). The
 /// stream keeps acking so the peer's input stream stays contiguous, keeps
@@ -825,14 +776,6 @@ async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it_reverse() {
-    a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it(
-        ReversePairHarness::start().await,
-    )
-    .await;
-}
-
 /// Read frames until an `InputAck` arrives, returning its offset.
 async fn read_ack(data: &mut FramedStream) -> u64 {
     tokio::time::timeout(DEADLINE, async {
@@ -865,4 +808,34 @@ async fn read_child_input(pipe: &mut PipeHandle, want: usize) -> Vec<u8> {
     })
     .await
     .expect("the child receives the input within the deadline")
+}
+
+/// ADR-0068: `qsh listen` is retired, but a forward host still answers a
+/// peer that sends `Hello.reverse` with `UNSUPPORTED` and creates nothing,
+/// exactly as it did when a `listen` was the only thing that accepted one.
+#[tokio::test(flavor = "multi_thread")]
+async fn hello_reverse_is_refused_as_unsupported() {
+    let host = LoopbackHarness::start().await;
+    let dialed = host.dial().await;
+    let hello = wire::Hello {
+        versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+        device_name: "target".to_string(),
+        capabilities: wire::LOCAL_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        reverse: Some(wire::ReverseRegistration {
+            offered_name: "x".to_string(),
+            capabilities: Vec::new(),
+        }),
+    };
+    match qsh_core::handshake::initiate(&dialed.connection, hello).await {
+        Err(qsh_core::handshake::HelloError::Remote { code, message, .. }) => {
+            assert_eq!(code, ErrorCode::Unsupported);
+            assert_eq!(message, "this host does not accept reverse registrations");
+        }
+        Ok(_) => panic!("a forward host must refuse Hello.reverse"),
+        Err(other) => panic!("expected a remote UNSUPPORTED, got {other:?}"),
+    }
+    host.shutdown().await;
 }

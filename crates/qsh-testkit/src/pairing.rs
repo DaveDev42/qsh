@@ -28,7 +28,7 @@ use qsh_proto::pairing::INVITE_SECRET_LEN;
 use qsh_transport::{Dialed, Dialer, Listener, LocalIdentity, TrustEvaluator};
 
 use crate::loopback::make_identity;
-use crate::reverse::wait_for;
+use crate::wait::wait_for;
 
 /// A real, on-disk-backed `qsh serve`-shaped host with pairing wired in —
 /// the same `Server::set_pairing`/`SharedTrustStore::attach_pairing` shape
