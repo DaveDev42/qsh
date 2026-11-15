@@ -263,8 +263,8 @@ async fn a_traffic_guard_removes_only_its_own_hook() {
     );
 }
 
-/// The reverse registration's wiring: tunnel bytes on the registration's
-/// connection count as activity for its path watch, and nothing else does.
+/// The traffic hook's wiring: tunnel bytes on a connection count as activity
+/// for a path watch, and nothing else does.
 #[tokio::test(start_paused = true)]
 async fn tunnel_bytes_hold_a_path_watch_on_the_fast_cadence() {
     use crate::client::pathwatch::{PathWatch, PathWatchConfig};
@@ -272,7 +272,8 @@ async fn tunnel_bytes_hold_a_path_watch_on_the_fast_cadence() {
     let (conn, _peer) = crate::tunnel::testutil::loopback_pair().await;
     let cfg = PathWatchConfig::default();
     let watch = PathWatch::new(cfg);
-    let _guard = crate::reverse::report_tunnel_traffic(&watch, &conn);
+    let hook_watch = watch.clone();
+    let _guard = report_traffic(&conn, std::sync::Arc::new(move || hook_watch.activity()));
     let tunnel = StallWatch::on(&conn, "tunnel");
 
     // Well past the active window with nothing counted: idle.

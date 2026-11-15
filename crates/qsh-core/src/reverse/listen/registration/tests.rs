@@ -15,7 +15,7 @@ fn classify_client_error_maps_the_documented_vocabulary() {
     ));
     assert_eq!(
         classify_client_error(&closed),
-        crate::reverse::ReconnectCause::PeerClosed
+        crate::reconnect::ReconnectCause::PeerClosed
     );
 
     // `Connection(TimedOut)` — quinn's own idle-timeout expiry on an
@@ -24,7 +24,7 @@ fn classify_client_error_maps_the_documented_vocabulary() {
     let timed_out = ClientError::Connection(qsh_transport::ConnectionError::TimedOut);
     assert_eq!(
         classify_client_error(&timed_out),
-        crate::reverse::ReconnectCause::IdleTimeout
+        crate::reconnect::ReconnectCause::IdleTimeout
     );
 
     // Everything else — a peer-sent wire `Error` reply, here — is
@@ -37,6 +37,6 @@ fn classify_client_error_maps_the_documented_vocabulary() {
     };
     assert_eq!(
         classify_client_error(&remote),
-        crate::reverse::ReconnectCause::Local
+        crate::reconnect::ReconnectCause::Local
     );
 }

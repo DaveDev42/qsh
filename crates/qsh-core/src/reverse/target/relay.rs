@@ -19,11 +19,11 @@ use qsh_proto::ErrorCode;
 use qsh_transport::{BoundTrust, CertificateDer, LocalIdentity, TrustEvaluator};
 use tokio::time::{Instant, sleep};
 
-use super::ReconnectCause;
 use crate::config::Config;
 use crate::iroh_settings::{IrohPlan, IrohSettings, IrohTarget};
 use crate::ops::OpError;
 use crate::ops::route::{Routed, attach_iroh, dial_iroh};
+use crate::reconnect::ReconnectCause;
 use crate::trust::SharedTrustStore;
 
 /// What a registration needs to take the relay route: this device's identity
