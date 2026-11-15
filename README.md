@@ -27,7 +27,7 @@ route](#when-udp-is-blocked-the-optional-iroh-relay-route).
 
 Beyond the shell, the same connection carries one-shot commands (`qsh exec`),
 scp-style file copy (`qsh cp`), port forwards (`-L`, `-R`, and a SOCKS5 proxy
-with `-D`), reverse connections for hosts behind NAT, and a JSON CLI contract
+with `-D`), and a JSON CLI contract
 (`qsh.cli/v1`) for scripts and agents.
 
 If you can already `ssh` to a machine, `qsh box` is the whole setup. The first
@@ -39,17 +39,16 @@ QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
 UDP cannot connect (see [Known limitations](#known-limitations)), unless you
 switch on the optional [iroh relay route](#when-udp-is-blocked-the-optional-iroh-relay-route).
 
-When a host registered with `qsh serve --to` sits behind NAT and the direct
-dial does not connect, the client can try UDP hole punching. The punching
-itself needs no relay server: the two devices exchange addresses through a
-`qsh listen` that both can reach and that you have pinned, then connect to each
-other directly. It is one attempt of up to 8 seconds, and it fails when both NATs choose a new port
-for every destination, or when one does and the other filters by port. See
-[Known limitations](#known-limitations).
+A host behind NAT needs no special mode. Run `qsh serve` on it and pin its key
+from the machine you sit at; the iroh route reaches it with no open port.
+Reverse connections (`qsh listen`, `qsh serve --to`) and qsh's own UDP hole
+punching were retired in v0.9.0
+([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)). See [Retired:
+reverse connections](#retired-reverse-connections).
 
 Linux, macOS and Windows 10 1809 or later run both ends. A Windows machine
 has the same features as the others: interactive sessions on a ConPTY
-pseudo-console, `qsh exec`, `qsh cp`, port forwards, reverse mode, the ssh
+pseudo-console, `qsh exec`, `qsh cp`, port forwards, the ssh
 bootstrap and `qsh setup host`. See [Known limitations](#known-limitations)
 for what differs.
 
@@ -77,8 +76,8 @@ to each other, and each one can connect to the others. Which side starts the
 connection does not decide whether it can be made: a peer's key is its
 address, the relay (HTTPS, TCP 443) is reachable on any network that
 passes HTTPS, and the connection
-moves to a direct path when one exists (direct dial, hole punching, or a port
-mapping the daemon asked the router for). The relay only carries ciphertext,
+moves to a direct path when one exists (direct dial, iroh's hole punching, or a
+port mapping the daemon asked the router for). The relay only carries ciphertext,
 and only until a direct path opens. Since 0.8.0 the daemon starts that
 endpoint by default; see [the relay
 route](#when-udp-is-blocked-the-optional-iroh-relay-route) for what it
@@ -98,13 +97,12 @@ key  = "<laptop's public key, 64 hex characters>"
 role = "full"
 ```
 
-**Advanced: the reverse fallback.** `qsh listen` and `qsh serve --to` invert
-the dial: the machine you sit at listens, and the host behind NAT dials out
-and serves over that connection. You do not need this when the machines reach
-each other through the relay. It is for networks that block the relay, for
-setups with `iroh.enable = false` or peers that do not use iroh, and for
-jump chains through a particular host. See [Reverse
-connections](#reverse-connections).
+**Retired: the reverse fallback.** `qsh listen` and `qsh serve --to` (the
+hidden `qsh reverse` alias too) inverted the dial so a host behind NAT could
+reach out to the machine you sit at. v0.9.0 retired them
+([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)); the iroh route
+replaces them. See [Retired: reverse
+connections](#retired-reverse-connections).
 
 ## Contents
 
@@ -112,7 +110,7 @@ connections](#reverse-connections).
 - [How it works](#how-it-works): server and client, and the smallest configuration.
 - [First run](#first-run): pin two machines to each other, over ssh or by hand, and open a shell.
 - [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
-- [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, and the advanced reverse fallback.
+- [Everyday use](#everyday-use): commands, file copy, detach and reattach, forwards, and the retired reverse connections.
 - [Automation](#automation): the JSON CLI for scripts and agents.
 - [Security posture](#security-posture): authentication, the ACL, the audit log.
 - [Known limitations](#known-limitations), including that QSH needs UDP.
@@ -341,7 +339,7 @@ host.
 
 This happens for the interactive `qsh [user@]host`, for `qsh host command` and
 for `qsh cp`, never with `--json`/`--jsonl`, and never for a name that is
-already in `hosts.toml`, `trust.toml` or a reverse registration. Put
+already in `hosts.toml` or `trust.toml`. Put
 `bootstrap = "off"` under `[ssh]` in `config.toml`, or pass `--no-ssh`, to turn
 it off, or run the pinning step yourself with `qsh pair ssh box`. A pin
 that no longer matches the key the ssh login reaches (the host was reinstalled,
@@ -353,8 +351,8 @@ when the OpenSSH Server optional feature is on (see [Known
 limitations](#known-limitations)).
 
 The other ways to pin are for machines that cannot use ssh: direct QUIC with
-fingerprints you copy, a one-time pairing code, a certificate file, and
-reverse connections for a host behind NAT. All of them are described below.
+fingerprints you copy, a one-time pairing code, and a certificate file. All of
+them are described below.
 
 Without ssh, six commands pin the two machines by hand. This path, not the
 one above, is the literal script that `docs/campaigns/m9-stopwatch.md` and
@@ -382,8 +380,8 @@ qsh dave@box
 
 Pinning a machine is also what lets it in. The host's `trust add laptop`
 has no `--address`, so it is a pin for a machine that connects *to* this
-one, and it gets the trust role `full`: shell, `exec`, port forwards and
-reverse registration, the same power as the account running `qsh serve`.
+one, and it gets the trust role `full`: shell, `exec` and port forwards,
+the same power as the account running `qsh serve`.
 No policy file is needed. The client's `trust add box --address …` is a pin
 for a machine it dials, so it gets role `none` and `box` can do nothing on
 the client. [Choosing what a peer may do](#choosing-what-a-peer-may-do) below
@@ -433,9 +431,9 @@ more. On the redeeming machine, `pair accept` pins the host with role `none`
 unless you pass `--role`.
 
 A third way is to exchange certificate files directly (ADR-0013). Only an
-inbound `qsh serve` opens the invite-redemption window, so nothing can pair
-*to* a `qsh listen` or `qsh serve --to` peer by code; a certificate file is
-how that peer gets pinned.
+inbound `qsh serve` opens the invite-redemption window, so a peer that does
+not run `qsh serve` cannot be paired to by code; a certificate file is how
+that peer gets pinned.
 
 ```bash
 qsh identity export > box.pem                     # on box
@@ -451,7 +449,7 @@ over SSH with `--cert-file -`.
 
 From here, `qsh hosts` lists what this machine can reach and `qsh sessions
 box` lists what is alive on the host. [Everyday use](#everyday-use) covers
-detach/reattach, port forwards and reverse connections. To skip retyping
+detach/reattach and port forwards. To skip retyping
 `user@` or to move an address without touching the trust store, add the
 name to `hosts.toml` by hand, next to `trust.toml`:
 
@@ -478,11 +476,11 @@ are no custom ones, and each grants a fixed set of actions:
 
 | role | grants |
 |---|---|
-| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `forward.agent`, `host.reverse`, `file.read`, `file.write` (never qsh's own config and state files, see [Security posture](#security-posture)) |
+| `full` | `exec.run`, `session.*`, `forward.local`, `forward.remote`, `forward.agent`, `host.reverse` (no effect since v0.9.0), `file.read`, `file.write` (never qsh's own config and state files, see [Security posture](#security-posture)) |
 | `exec` | `exec.run`, `session.*`, `forward.agent` |
 | `tunnel` | `forward.local`, `forward.remote` (it can only close remote forwards it opened itself) |
 | `read-only` | `session.list`, `session.attach`: watch sessions, no input |
-| `reverse` | `host.reverse`: register as a reverse target, nothing else |
+| `reverse` | `host.reverse`, which no longer does anything since v0.9.0 (ADR-0068): the role still parses and grants nothing usable |
 | `none` | nothing |
 
 ```bash
@@ -517,8 +515,8 @@ it, so you do not write one. If you write both, they must agree. `address`
 and `added_at` can be left out (a pin without an address is reached through
 the relay route, see below), and so can `routes`. A pin you pinned by
 fingerprint and address keeps working as it is, and qsh only writes the short
-form for the pins it creates or changes. `qsh serve` and `qsh listen` bring
-their iroh endpoint up on their own; see
+form for the pins it creates or changes. `qsh serve` brings
+its iroh endpoint up on its own; see
 [the relay route](#when-udp-is-blocked-the-iroh-relay-route) for what that
 means for the network, and how to turn it off.
 
@@ -562,12 +560,8 @@ the manual path above keeps working. One line per role:
 
 ```bash
 qsh setup host --peer laptop                  # host: init, issue an invite named "laptop"
-qsh setup host --to box --address host.example.com:4433 --peer-cert box.pem
-                                              # host behind NAT, for `qsh serve --to box`
 qsh setup client box --address host.example.com:4433 <code>
                                               # client: redeem the host's invite code
-qsh setup listener --peer controller --peer-cert controller.pem
-                                              # controller side, for `qsh listen`
 ```
 
 `--peer-cert <path|->` takes the certificate file the other side made with
@@ -580,13 +574,14 @@ terminal, or with `--json`, setup asks nothing and fails with
 
 Setup never writes `acl.toml`, `config.toml` or `hosts.toml`. It pins the
 peer with a role instead: `--peer-role` picks it, and the defaults are `full`
-for `setup host`, `reverse` for `setup listener` and `none` for `setup
-client`. With any role but `none` the ACL step is `done` and no rows are
+for `setup host` and `none` for `setup client`. With any role but `none` the ACL step is `done` and no rows are
 needed. With `--peer-role none` setup prints the `[[acl]]` rows the role
 needs, checks with `qsh acl check` whether the file already allows them, and
 stops with the step marked `pending` until you have saved the rows yourself
 and run `qsh setup` again.
-Setup also does not start `qsh serve` or `qsh listen` and does not enable
+`qsh setup host --to` and `qsh setup listener` were retired in v0.9.0
+([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)) and answer
+`UNSUPPORTED`. Setup also does not start `qsh serve` and does not enable
 the service unit.
 
 There is no automatic trust. A peer is pinned only from an invite code or a
@@ -618,8 +613,8 @@ qsh exec box --json -- sh -c 'echo out; echo err >&2; exit 7'
 echo $?                                  # 7, the remote exit code (255 clamps to 254; qsh's own failures are 255)
 ```
 
-`qsh hosts` lists everything this machine can reach, pinned forward hosts
-and live reverse registrations together, without dialing any of them.
+`qsh hosts` lists everything this machine can reach, the pinned hosts, without
+dialing any of them.
 
 Every authorized request is written as one structured line to
 `$XDG_STATE_HOME/qsh/audit.log`. Config lives in `$XDG_CONFIG_HOME/qsh`
@@ -661,9 +656,7 @@ Only qsh hosts are spoken to, so the syntax is all it shares with scp; the
 transport options (`-P`, `-i`, `-o` and the rest) are refused with exit `2`
 instead of being ignored. Remote-to-remote copies are refused too. The host
 needs the `file.read` and `file.write` actions, which role `full` gives and
-an `acl.toml` row can give for the directories in its `paths`. Over a reverse
-connection the command works the same way, through the local `qsh listen`
-daemon.
+an `acl.toml` row can give for the directories in its `paths`.
 
 A file is written to a temporary name, checked against its size and BLAKE3
 hash, and renamed into place, so a reader never sees half a file and a failed
@@ -807,7 +800,6 @@ not.
 - With no local agent, `qsh` says so on stderr and goes on. `qsh doctor`
   reports `agent_unreachable` when `agent.forward` is `yes` and the agent
   cannot be reached.
-- It works over a reverse connection too.
 
 The risk is the same as with ssh. While you are attached with `-A`, root on
 the host, and any process running as the same user there, can ask your agent
@@ -853,8 +845,7 @@ qsh -J none nas                          # ignore the saved chain once
   alone. It cannot reach loopback, link-local or multicast addresses.
 - The order is `-J` or `--jump`, then `-o ProxyJump`, then the `jump` saved on
   the target's pin, then the ordinary route. A hop's own saved `jump` is
-  placed in front of it. A host reached this way is not tried directly or by
-  hole punching.
+  placed in front of it. A host reached this way is not tried directly.
 - When the bootstrap finds a `ProxyJump` in your ssh config, or you pass `-J`,
   and every hop is (or can be made) a qsh pin, the target's pin stores the
   chain, so the next `qsh nas` needs no flag. If a hop cannot become a pin,
@@ -881,9 +872,9 @@ qsh -J none nas                          # ignore the saved chain once
 Some networks pass HTTPS and drop UDP to everything else. For a host you have
 pinned, you can add a relay route: the connection goes through an iroh relay
 (HTTPS and WebSocket), and the QUIC session inside it is still authenticated
-by the pins, so the relay only carries ciphertext. Since 0.8.0 the daemons
-(`qsh serve`, `qsh listen`) bring their iroh endpoint up by default, so they
-keep one HTTPS (TCP 443) connection to a public n0 relay open, and a pin that
+by the pins, so the relay only carries ciphertext. Since 0.8.0 the daemon
+(`qsh serve`) brings its iroh endpoint up by default, so it
+keeps one HTTPS (TCP 443) connection to a public n0 relay open, and a pin that
 has a `key` and no `address` is reached through the relay without any further
 setting. To keep a daemon off every relay, set `iroh.enable` to `false` (or
 start it with `--no-iroh` for one run); a config that says so never contacts a
@@ -903,7 +894,7 @@ qsh trust iroh nas --off                               # drop the route again
 qsh --no-iroh nas uname -a                             # skip the relay for one command
 ```
 
-- The direct dial and hole punching still go first. The relay starts beside
+- The direct dial still goes first. The relay starts beside
   them if they have not connected after one second (`iroh.head_start_ms`), and
   the first connection that stands wins. A pin with no address goes straight
   to the relay. After a relay win the client remembers, for ten minutes up to
@@ -915,7 +906,7 @@ qsh --no-iroh nas uname -a                             # skip the relay for one 
   this is what lets such a peer connect directly. It adds one UDP entry
   named `iroh-portmap` to the router's table while the daemon runs, and
   UPnP, NAT-PMP and PCP requests to your default gateway at start and after a
-  network change. Commands (`qsh exec`, `qsh attach`, `qsh serve --to`) never
+  network change. Commands (`qsh exec`, `qsh attach`) never
   ask. A router that supports none of the three just does not answer. To leave
   the router alone, set `iroh.portmap` to `false` (restart the daemon);
   `iroh.enable = false` and `--no-iroh` open no mapping either.
@@ -964,16 +955,14 @@ For a tunnel with no shell attached, use the machine-mode form. It emits one
 ```bash
 qsh tunnel open box --local 8080:localhost:3000 --json
 qsh tunnel open box --remote 9000:localhost:9000 --json
-qsh tunnels --json                       # tunnels a resident daemon holds
+qsh tunnels --json                       # always empty since v0.9.0
 qsh tunnel close <tunnel-id> --json
 ```
 
-A tunnel lives as long as the process holding it, with one exception: an
-`-R` listener over a reverse connection is held by the resident `qsh listen`
-daemon, so it survives the CLI and dies with the reverse connection. `qsh
-tunnels`/`qsh tunnel close` only see and act on what a daemon holds, so a
-plain foreground `-L`/`-R` never shows up there; closing one of those means
-interrupting the process that opened it. See [Known
+A tunnel lives as long as the process holding it. No resident daemon holds
+tunnels since v0.9.0 (ADR-0068), so `qsh tunnels` lists nothing and `qsh tunnel
+close` reports `closed: false`; a foreground `-L`/`-R` never shows up there, and
+closing one means interrupting the process that opened it. See [Known
 limitations](#known-limitations) for what happens to a tunnel across a
 dropped connection; it is not the same as what happens to a session.
 
@@ -1002,84 +991,50 @@ Two things have to be true before the first `CONNECT` succeeds:
   `read-only` do not. `-R` needs `forward.remote` the same way.
 - Both ends run a build that negotiates `dial-filter.v1`, which lets the host
   refuse loopback, link-local and metadata destinations. An older peer is
-  refused before anything binds. Over a reverse route
-  ([ADR-0020](docs/adr/0020-socks-reverse-route.md)) the resident `qsh listen`
-  daemon relays the capability set it negotiated with the target at
-  registration; a daemon still running from before this machine's upgrade
-  keeps relaying the old set, so restart it.
+  refused before anything binds.
 
 Point applications at `socks5h://127.0.0.1:1080` so the host resolves the
 name; with plain `socks5://` it is resolved here and leaks to the local
 resolver. Destinations on the host's loopback or link-local ranges get
 `REP 0x02` no matter what the ACL says; `-L` is the tool for those.
 
-### Reverse connections
+### Retired: reverse connections
 
-This is the advanced fallback; most setups never need it. The relay route
-usually reaches a host behind NAT without it (see [How it
-works](#how-it-works)). Use it when the relay is blocked on your network,
-when iroh is off (`iroh.enable = false`) or the peer does not use it, or when
-a chain has to go through a particular host.
+v0.9.0 retired reverse connections and qsh's own UDP hole punching
+([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)). `qsh listen`,
+`qsh serve --to`, the hidden `qsh reverse` alias, `qsh setup listener`,
+`qsh setup host --to`, `qsh pair ssh --reverse` and the `listen` and `reverse`
+modes of `qsh service install` still parse, and each answers `UNSUPPORTED`
+(exit 255, `details.reason = "reverse_retired"`) with a message that names the
+replacement. A `qsh serve` whose config still holds `[serve].to` or
+`[reverse].controller` refuses to start, so a host that used to dial out never
+silently opens `[::]:4433`.
 
-When the host cannot accept inbound packets and the relay cannot reach it,
-invert the dial. The
-controller listens; the target dials out and then serves that connection as
-a host. The controller plays both listener and client roles; the target is
-the host machine (ADR-0012).
+The iroh route replaces them. Run `qsh serve` on the host behind NAT and pin
+its key on the machine you sit at (`qsh trust add <name> --key ...`). The
+relay (TCP 443) always reaches it, iroh's hole punching and the daemon's port
+mapping open a direct path when one exists, and no port has to be open.
+`-R` tunnels are unchanged. The one thing the iroh route cannot do is reach a
+host on a network that blocks the relay; there is no fallback for that now.
 
-Two axes decide the four commands (ADR-0012 decision 1):
-
-| | accepts inbound | dials out |
-|---|---|---|
-| gives up a shell (host) | `qsh serve` | `qsh serve --to` |
-| gets a shell (client) | `qsh listen` | `qsh <name>`, `qsh exec` |
-
-```bash
-# On the controller, which needs a reachable UDP address:
-qsh listen --bind 0.0.0.0:4433
-
-# On the target, behind NAT, using the controller's trust-store alias:
-qsh serve --to controller --name workshop
-
-# From the controller, as usual:
-qsh sessions workshop
-qsh workshop -L 8080:localhost:3000
-```
-
-Each side pins the other with the role it needs. The controller pins the
-target with `--role reverse` (it only has to register), and the target pins
-the controller with `--address … --role full`, because the controller's
-requests are authorized by the target's trust store. Without that `--role`
-an address pin is `none` and the target refuses them.
-
-If you can reach the target over ssh, the controller can do both pins in one
-step: `qsh pair ssh workshop --reverse --to controller.example.com:4433`. The
-target pins the controller at that address with role `full` (`--role`
-overrides it) and the controller pins the target with role `reverse`. Nothing
-is started on the target. The command prints the line to run there,
-`qsh serve --to <name>`, and the target shows up in `qsh hosts` once it has
-registered. The automatic bootstrap never picks this direction.
-
-A peer address with no port defaults to 4433: `controller` and `controller:4433` resolve the same way, and an IPv6 literal needs brackets once a port follows it, as in `[::1]:4433`.
-
-`qsh serve --to` keeps reconnecting with backoff, so the target comes back
-on its own after the link drops. `--name` only takes effect when the
-controller has no trust-store alias for that peer and its
-`[listen].allow_advertised_names` is set; otherwise the controller names the
-peer from its own trust store. The older `qsh reverse controller
---offered-name workshop` spelling still works as a hidden alias.
+The role `reverse`, the ACL action `host.reverse` and the doctor code
+`reverse_config_retired` stay in the vocabulary so older `trust.toml`,
+`acl.toml` and scripts keep parsing. The role and the action grant nothing
+that works. `qsh doctor` reports leftover `[listen]`, `[reverse]` and `[serve].to`
+keys and leftover `listen` or `reverse` service units; `qsh service uninstall`
+removes the units.
 
 <!-- Behavior below is pinned by: lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint,
      lookup_pin_follows_a_reordered_trust_toml_without_a_restart (qsh-core trust tests),
      an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered (qsh-cli/tests/it/trust_alias_order.rs),
      acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row (qsh-core doctor tests).
      Per-direction pins were considered and dropped (ADR-0030, rejected 2026-10-12). -->
-#### One machine, two aliases
+### One machine, two aliases
 
 One machine can be reachable two ways: directly at an address for `qsh serve`,
-and through `qsh serve --to` from behind NAT. You may want a trust-store
-name for each, both pinning the same fingerprint (for example `workshop-lan`
-with an address, and `workshop` for the reverse registration). qsh accepts
+and through the iroh route with a key and no address. You may want a
+trust-store name for each, both pinning the same fingerprint (for example
+`workshop-lan` with an address, and `workshop` without one). qsh accepts
 that, but the two names are not equal. When a peer authenticates, qsh looks
 its fingerprint up in `trust.toml` and takes the first entry in file order.
 That name is the principal every inbound `[[acl]]` row is matched against,
@@ -1097,17 +1052,6 @@ re-read on every handshake, so reordering the two entries changes the
 principal immediately, without a restart; `acl.toml` still needs the
 restart. Splitting the aliases by direction is not planned (ADR-0030 was
 rejected), so this layout rule stays.
-
-#### Riding out a long outage
-
-A controller keeps a registration whose connection died as `stale` for
-`[listen].stale_retention` before it drops it from `qsh hosts` (default 120
-seconds). If your targets can be offline longer than that and you want the
-controller to keep the name across the gap, raise it in `config.toml`. It
-must stay above `[reverse].backoff_max_ms` times 3 (default 30000 ms, so
-above 90 s), or the controller refuses to start with a config error. The
-limit on how many addresses a single reconnect attempt tries is in
-`docs/CLI.md` §6.13.
 
 ## Automation
 
@@ -1217,8 +1161,7 @@ to turn it off. Every refusal a remote peer sees is the same opaque
 path outside `paths`, a protected path, a policy file that failed to load, or
 an audit-write failure.
 
-The `acl.toml` rows load once, when `qsh serve`/`qsh listen`/`qsh serve --to`
-starts, so an edit to the file only takes effect on the next restart. Roles
+The `acl.toml` rows load once, when `qsh serve` starts, so an edit to the file only takes effect on the next restart. Roles
 are the opposite: they are read from `trust.toml` on every request, so
 `qsh trust set-role` and `qsh trust remove` apply from the next request with
 no restart. A role that shrinks, or a pin that is removed, closes the
@@ -1228,7 +1171,7 @@ comes up and prints one line to stderr (`no acl.toml`, code
 `acl_policy_missing`, and that requests are authorized by trust roles only);
 `qsh doctor` reports `acl_policy_missing` only when no role grants anything
 either, and only for a device it judges a server. A device with no sign of
-serving (no service unit, no `[serve]`, `[listen]` or `[reverse]` table, no
+serving (no service unit, no `[serve]` table, no
 `serve.json`, no pin with a role) is judged a client: `qsh doctor` leaves out
 the `acl_*`, service unit and listener checks, which only matter for inbound
 connections, and reports `ok` whether or not an `acl.toml` is there. The
@@ -1284,19 +1227,12 @@ and no ACL action, so no remote peer can list who connected or what was
 refused, and moving the device key with `qsh identity move-key` leaves its own
 audit record first and does nothing if that record cannot be written.
 
-The local control endpoint that `qsh listen` and `qsh serve --to` keep for the
-commands on the same machine (`qsh hosts`, `qsh tunnels`, reverse attach) is
-not an authorization layer. It answers the account that runs the daemon and
-no one else, and a process of that account can already read the device key.
-On unix it is a socket with mode 0600 whose peer uid is checked before the
-first frame. On Windows it is a named pipe whose every instance carries an
-owner-only DACL, which also refuses remote clients; the daemon fails to start
-if the name is already taken, the client opens it so the server cannot
-impersonate it, and both sides compare the other end's user SID with their own
-before a frame is read or written. That SID check is a second layer behind the
-DACL. It reads the peer's token in two steps (client pid, then the process), so
-a pid that is reused in between leaves a narrow gap, which the DACL still
-covers (`docs/design/threat-model.md` §7, ADR-0035 decision 14).
+The local control daemon that `qsh listen` and `qsh serve --to` kept for the
+commands on the same machine was retired in v0.9.0
+([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)), so no resident
+process of this kind listens on a local socket or pipe. The Windows peer-SID
+check in `docs/design/threat-model.md` §7 and ADR-0035 decision 14 now applies
+only to the agent-forwarding transport that remains.
 
 ## Known limitations
 
@@ -1318,22 +1254,19 @@ Some of these are MVP scope decisions, some are unfinished work.
   step has to use the stream carrier. It has at most four hops, and `-W`
   (stdio forwarding) is not supported
   ([ADR-0056](docs/adr/0056-m26-jump-chaining.md)).
-- Hole punching does not open every NAT pair, and it needs a rendezvous. It
-  works only for hosts registered with `qsh serve --to`, and only when a
-  pinned `qsh listen` that both devices can reach carries the signalling
-  (`qsh trust rendezvous`). Symmetric NAT against port-restricted NAT, and
-  symmetric against symmetric, never open: the attempt gives up after at most
-  8 seconds and the other routes and SSH remain. A firewall that drops replies
-  to flows the host started also blocks it. Punching has no relay of its own;
-  the optional iroh relay route is the separate option
-  ([ADR-0054](docs/adr/0054-m24-hole-punching.md)).
+- No fallback when the relay is blocked. v0.9.0 retired reverse connections
+  and qsh's own hole punching
+  ([ADR-0068](docs/adr/0068-retire-reverse-and-punch.md)); the iroh route is
+  the only NAT traversal. On a network that blocks both UDP and the relay
+  (TCP 443) a host behind NAT cannot be reached, and qsh has no other path.
+  Use SSH there. A host you can reach by address is unaffected.
 - Sessions die with the listener process. A session lives only as long as
-  the `qsh serve` or `qsh serve --to` process that opened it, so a restart
+  the `qsh serve` process that opened it, so a restart
   ends every detached session on it; it is not a resume point. A client that
   was attached learns this within one round trip, not after the 45 s idle
   timeout, because the server keeps a stateless reset key in
-  `stateless_reset.key` in the config directory (ADR-0036). `qsh serve` and
-  `qsh serve --to` say so in one stderr line at startup (not under
+  `stateless_reset.key` in the config directory (ADR-0036). `qsh serve`
+  says so in one stderr line at startup (not under
   `--quiet`), and `qsh doctor` reports `service_restart_drops_sessions`
   (info) when a service unit is registered. A clean SIGTERM drains: no new
   `session.open`, `session.attach` or `exec.run` is admitted from the signal
@@ -1345,13 +1278,11 @@ Some of these are MVP scope decisions, some are unfinished work.
   still outlive the process. A separate session supervisor is planned after
   MVP ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
 - A tunnel does not resume the way a session does. `-L`, `-R` and `-D` work
-  over both forward and reverse connections (ADR-0020 decisions 1–3); a `-D`
-  listener over a reverse route relays every `CONNECT` through this
-  machine's resident `qsh listen` daemon to the target's live registration,
-  with the same host-local address filter as a forward route. Either route
-  is refused before anything binds if the peer never negotiated
-  `dial-filter.v1`. `qsh tunnels`/`qsh tunnel close` manage what a resident
-  daemon holds. There is no UDP forwarding (`UDP ASSOCIATE` gets `REP 0x07`,
+  over a forward connection (ADR-0020 decisions 1–3; the reverse route was
+  retired in v0.9.0, ADR-0068). A `-D` listener is refused before anything
+  binds if the peer never negotiated `dial-filter.v1`. `qsh tunnels` lists
+  nothing and `qsh tunnel close` reports `closed: false`, since no resident
+  daemon holds tunnels any more. There is no UDP forwarding (`UDP ASSOCIATE` gets `REP 0x07`,
   as BIND does), and remote forwards bind loopback only, ACL
   notwithstanding. A tunnel has no replay ring: when a connection drops and
   later resumes, any in-flight tunnel TCP connection ends cleanly instead of
@@ -1363,44 +1294,31 @@ Some of these are MVP scope decisions, some are unfinished work.
   tethering, a changed IP) carries an open tunnel through, as it does a
   session.
 - `--supervise <ms>` keeps a `-L`, `-D` or `-R` tunnel alive across a lost
-  connection, over a forward or a reverse route, within limits. A supervised
+  connection, over a forward route, within limits. A supervised
   `-R` tunnel closes the old registration and opens the same bind again on
   the new connection; if the port cannot be kept (someone else took it, or
   the peer's policy no longer allows it), the tunnel ends instead of moving
   to another port. Each reissue gets a new `tunnel_id`: the envelope printed
   at open keeps the first, and the current one is in the `reestablished`
-  diagnostic line and in `qsh tunnels` on a reverse route. A supervised
+  diagnostic line. A supervised
   forward tunnel re-dials the address it resolved at open and never looks
-  the host up again, so a peer that moved is not followed. A supervised
-  reverse tunnel asks the local daemon again and never looks at a forward
-  pin of the same name; a reverse-only host must therefore have no address in
-  its pin if the first open is to take the reverse route. The first open is
+  the host up again, so a peer that moved is not followed. The first open is
   not supervised: if it fails, the command fails as it does without the flag
   (`--wait` or a service-manager restart covers a host that is not up yet).
   A TCP connection that was spliced when the connection died lives on only
-  if the old connection comes back, which only a forward route can do;
+  if the old connection comes back;
   otherwise it ends, and only new connections ride the re-established one.
   Sleep detection compares the wall clock with a monotonic clock that does
   not count suspended time: tokio's `Instant` on macOS and Linux, and
   `QueryUnbiasedInterruptTime` on Windows. A real suspend-and-resume on
   Windows is checked by hand, not by CI.
-- `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
-  unless told otherwise, so running them as two processes needs an explicit
-  `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. To
-  take both roles on one port, set `[listen].serve = true` or run
-  `qsh listen --serve`: one process then accepts registrations and forward
-  connections, but a restart drops both. When two separate processes
-  collide, the second one to start fails immediately with `CONFIG_ERROR` and
-  exit `255`, with this remedy on stderr, exactly:
-
-  > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - `acl.toml` has no hot reload: an edit takes effect the next time
-  `qsh serve`/`qsh listen`/`qsh serve --to` starts. Trust roles do not have
+  `qsh serve` starts. Trust roles do not have
   this limit; they apply from the next request. See [Security
   posture](#security-posture).
-- The audit log is fail-closed. `qsh serve`/`qsh serve --to` deny an
+- The audit log is fail-closed. `qsh serve` denies an
   otherwise-allowed `session.open`, `session.attach`, session write,
-  `exec.run`, file operation or `host.reverse` registration rather than let
+  `exec.run` or file operation rather than let
   it through with no durable audit record. A full disk, a permissions
   problem on the audit directory, or a writer backlogged past its bounded
   queue all deny the way a policy refusal does, with no override and no
@@ -1419,8 +1337,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   `0` or left unset means the default, not unlimited, and no switch turns a
   cap off. The ACL engine itself never enforces quotas.
 - `qsh trust remove` closes the removed peer's established connections on
-  this device within 2 seconds (ADR-0031), in a running `qsh serve`, `qsh
-  listen` or `qsh serve --to`, and the next handshake from that peer is
+  this device within 2 seconds (ADR-0031), in a running `qsh serve`, and the next handshake from that peer is
   rejected with no restart (`docs/CLI.md` §6.11). Lowering a role with `qsh
   trust set-role` and renaming a pin that has a role close the connection
   the same way. Raising a role, renaming a pin without a role and
@@ -1443,8 +1360,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   rows catch up.
 - `qsh service status` and `qsh service uninstall` only look at the run mode
   inferred from today's `config.toml` (`docs/CLI.md` §6.18). A unit
-  installed under a previous mode (say `listen`, with `config.toml` now
-  saying `serve --to`) is invisible to both. The unit's recorded binary path
+  installed under a previous mode is invisible to both, except that a
+  leftover `listen` or `reverse` unit is still recognized and removable
+  (ADR-0068). The unit's recorded binary path
   differs per platform: macOS keeps a Homebrew Cellar symlink unresolved on
   purpose, so `brew upgrade` does not pin a stale path, while Linux's
   `/proc/self/exe` has already resolved any symlink.
@@ -1506,11 +1424,6 @@ Some of these are MVP scope decisions, some are unfinished work.
   reachability check: behind NAT or a firewall none of them may work, and a
   host with no default route gets no candidates at all. The operator picks
   the address and relays it out of band (`docs/CLI.md` §6.11).
-- A listener is not a code-pairing peer: only an inbound `qsh serve` redeems
-  invite codes, so `qsh pair invite`/`qsh pair accept` cannot pin a `qsh
-  listen` or `qsh serve --to` peer. Pin it by certificate file (`qsh
-  identity export`, `qsh trust add --cert-file`; `docs/CLI.md` §6.11,
-  §6.13), or over ssh with `qsh pair ssh --reverse --to`.
 - `exec.run` output is capped at 64 MiB. Stdout plus stderr come back in one
   envelope, and anything beyond the cap is `RESOURCE_EXHAUSTED`. Use `qsh
   session read` or an interactive session for streaming output.
@@ -1569,16 +1482,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   routes. Its remote paths are drive paths (`C:\x` or `C:/x`) or relative to
   the serving account's profile directory, and UNC and device paths
   (`\\server\share`, `\\?\`, `\\.\`) are refused before any access
-  check. `acl.toml` writes `paths` as `C:/data`. Reverse mode runs on Windows: `qsh listen` keeps
-  its local control endpoint on a named pipe, and `qsh exec`, tunnels,
-  `qsh hosts`, `qsh tunnels` and `qsh tunnel close` work over a reverse
-  connection as they do on unix. A Windows `qsh serve --to` target serves
-  PTY sessions, `exec`, tunnels and file operations.
-  On a reverse connection a local program that closes only its write side
-  and waits for the answer is seen by the destination, as on unix
-  (`docs/CLI.md` §6.13). `qsh tunnel open --dynamic` and the interactive `-D`
+  check. `acl.toml` writes `paths` as `C:/data`. `qsh tunnel open --dynamic` and the interactive `-D`
   spelling work like `--local`/`--remote`. `qsh setup host`
-  (with `--to` and `--service`) and `qsh pair invite` run on a Windows host
+  (with `--service`) and `qsh pair invite` run on a Windows host
   as on the other platforms; `--service` writes the Task Scheduler task
   definition and registers nothing (`qsh service install` does).
 - The ssh bootstrap works the same way on Windows: `qsh pair ssh` and the
@@ -1600,7 +1506,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   `irm ... | iex` is not affected, and neither is a `qsh.exe` started from a
   terminal or one built by `cargo install`. The release `SHA256SUMS` and
   the provenance attestation still cover the zips.
-- The first time `qsh serve` or `qsh listen` binds a fixed UDP port on a
+- The first time `qsh serve` binds a fixed UDP port on a
   non-loopback address, Windows Defender Firewall asks whether to allow it,
   once per executable path (a `qsh.exe` at a new path asks again). Peers on
   other machines need it allowed; connections from the same machine do not.
@@ -1614,18 +1520,11 @@ Some of these are MVP scope decisions, some are unfinished work.
   rule instead. Until it is allowed, packets from
   other machines are dropped without an answer, even over an overlay such
   as Tailscale, and `qsh doctor <host>` run
-  from a peer can report `udp_egress_blocked`. `qsh serve --to`, the client,
+  from a peer can report `udp_egress_blocked`. The client,
   other outbound dials and loopback listeners never trigger the prompt, and
   `qsh` does not add or change firewall rules. CI builds, lints and
   runs the Windows test suite on `windows-latest`, including the ConPTY
   session, signal and Job Object tests.
-- Reverse mode needs a directly reachable path from the target to the
-  controller. The reverse path itself has no relay (the n0 relay belongs to
-  the iroh route above), so the doctor message reads:
-
-  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
-  >
-  > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
 - macOS asks "Do you want the application “qsh” to accept incoming network
   connections?" the first time a given build dials out (`-L` and `-D`
   listeners are loopback-only and do not trigger it). The cause is qsh's QUIC
@@ -1690,7 +1589,7 @@ old-glibc check.
 | M0 | Decisions, workspace scaffold, CI | Done |
 | M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
 | M2 | Session broker, PTY, migration and resume | Done |
-| M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done |
+| M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done, then retired (ADR-0068) |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done, then retired (ADR-0011) |
@@ -1759,7 +1658,7 @@ The binary is `qsh`; the Cargo package is `qsh-cli`
 
 QSH owns secure sessions, PTY lifecycle, reconnect, command execution and
 port forwarding. Getting a routable address to the host is somebody else's
-job; see the reverse-reachability entry under [Known
+job; see the relay entry under [Known
 limitations](#known-limitations).
 
 ## Development
