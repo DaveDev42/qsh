@@ -602,14 +602,12 @@ async fn bridge(conn: AgentConn, backing: Backing) {
         port: 0,
         deny_host_local: false,
     };
-    let link = DataLink::Direct(&backing.conn);
-    let Ok((send, recv, kill)) = crate::tunnel::open_stream(&link, &header).await else {
+    let link = DataLink::new(&backing.conn);
+    let Ok((send, recv)) = crate::tunnel::open_stream(&link, &header).await else {
         return;
     };
-    let (Ok(send), Ok((recv, residue))) = (send.into_raw_direct(), recv.into_raw_direct()) else {
-        kill.kill();
-        return;
-    };
+    let send = send.into_raw();
+    let (recv, residue) = recv.into_raw();
     let copy = async move {
         let mut guard = StreamGuard {
             send: Some(send),

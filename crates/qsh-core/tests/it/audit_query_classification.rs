@@ -2,10 +2,9 @@
 //! `docs/CLI.md` §2.4/§2.5/§6.22). These tests pin the three facts that keep
 //! it from becoming an enumeration oracle or a way to shorten the audit log:
 //!
-//! - nothing a remote peer can send names it: no wire message, and no
-//!   localctl request either (the scan walks the whole localctl source tree,
-//!   which includes the Unix socket and the Windows named-pipe transport,
-//!   ADR-0035 결정 14);
+//! - nothing a remote peer can send names it: no wire message, and nothing in
+//!   the localctl source tree either (the scan walks it whole, which includes
+//!   the Unix socket and the Windows named-pipe transport, ADR-0035 결정 14);
 //! - it has no ACL action or `OP_REGISTRY` row of its own;
 //! - under `crates/qsh-core/src/ops/` it is the only op that reads the audit
 //!   log back, and no op can delete, truncate or rewrite it (SC6).
@@ -61,27 +60,23 @@ fn assert_no_audit_query_spelling(label: &str, text: &str) {
     }
 }
 
-/// The wire protocol, the frame layer and the localctl request surface
-/// (`proto/qsh/local/v1.proto`, `qsh-proto/src/local.rs`, the localctl
-/// modules of `qsh-core`) carry no audit-query message, and the ACL has no
-/// action or registry row for it.
+/// The wire protocol, the frame layer and the localctl modules of `qsh-core`
+/// carry no audit-query message, and the ACL has no action or registry row
+/// for it.
 #[test]
 fn audit_query_has_no_wire_message_and_no_localctl_request() {
     let root = repo_root();
     for relative in [
         "crates/qsh-proto/proto/qsh/wire/v1.proto",
-        "crates/qsh-proto/proto/qsh/local/v1.proto",
         "crates/qsh-proto/src/wire.rs",
         "crates/qsh-proto/src/frame.rs",
-        "crates/qsh-proto/src/local.rs",
     ] {
         let text = read_doc(relative);
         assert!(!text.trim().is_empty(), "{relative} looks empty");
         assert_no_audit_query_spelling(relative, &text);
     }
 
-    // Every localctl module of qsh-core: the daemon's request dispatch and
-    // the client that builds requests.
+    // Every localctl module of qsh-core, both platform transports included.
     let localctl = root.join("crates/qsh-core/src/localctl");
     let files = rust_files_under(&localctl);
     assert!(!files.is_empty(), "localctl sources not found");
@@ -108,28 +103,9 @@ fn audit_query_has_no_wire_message_and_no_localctl_request() {
     }
 }
 
-/// The localctl request enum is closed over the three admin requests on every
-/// platform. The exhaustive match stops compiling when a variant is added, so
-/// an `audit.query` request cannot arrive without this test being read; the
-/// source scan above then covers both transports, the Windows named pipe
-/// included.
+/// Both platform transports are part of the scanned localctl tree.
 #[test]
-fn localctl_request_enum_has_no_audit_variant_on_any_platform() {
-    use qsh_proto::local::{LocalAdminRequest, local_admin_request};
-
-    fn name(request: &LocalAdminRequest) -> &'static str {
-        match request.body.as_ref() {
-            Some(local_admin_request::Body::HostList(_)) => "host_list",
-            Some(local_admin_request::Body::TunnelList(_)) => "tunnel_list",
-            Some(local_admin_request::Body::TunnelClose(_)) => "tunnel_close",
-            None => "none",
-        }
-    }
-    let request = LocalAdminRequest {
-        body: Some(local_admin_request::Body::HostList(Default::default())),
-    };
-    assert_eq!(name(&request), "host_list");
-
+fn localctl_scan_covers_both_platform_transports() {
     for transport in ["unix.rs", "windows.rs"] {
         let path = repo_root()
             .join("crates/qsh-core/src/localctl/transport")

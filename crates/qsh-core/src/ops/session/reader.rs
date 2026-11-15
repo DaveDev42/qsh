@@ -55,67 +55,6 @@ async fn dial_peer_as(
     }
 }
 
-/// Open a `LOCAL_CONTROL` conduit to `route`'s daemon and build a
-/// [`Session`] over it — the async half of [`Ops::connect_reverse`], split
-/// out the same way [`dial_peer`] is. `wait_ms: 0`, `known_generation:
-/// None`: [`Ops::resolve_route`] already observed a *live* registration
-/// before this is ever called (`crate::localctl::client::open_control`'s
-/// own doc), so there is nothing to wait for and no prior generation to
-/// gate on here — [`dial_reverse_wait`] is the Step 8 sibling that does
-/// both.
-///
-/// Returns the ack's `peer_fingerprint` and `generation` alongside the
-/// session — [`Connected::peer_fingerprint`] on the reverse leg is exactly
-/// this `peer_fingerprint` value (`docs/adr/`'s ADR-0007 presentation
-/// condition, M3 plan Step 6 (2473c88)), never re-derived from a QUIC
-/// connection this process does not itself hold; `generation` seeds
-/// [`AttachContext`]'s reverse-route baseline that Step 8's
-/// `LocalReconnect` waits past.
-///
-/// `pub(in crate::ops)` rather than `pub(super)`: `crate::ops::exec`'s
-/// reverse route (issue #5) dials this directly under its own `--timeout`
-/// deadline, the same way `session.rs` re-exports it (`ops/session.rs`'s
-/// `pub(in crate::ops) use reader::dial_reverse` doc explains why).
-pub(in crate::ops) async fn dial_reverse(
-    route: &LocalRoute,
-) -> Result<(Session, Option<String>, u64), OpError> {
-    dial_reverse_wait(route, 0, None).await
-}
-
-/// [`dial_reverse`], generalized with the two inputs Step 8's
-/// `LocalReconnect` needs on top of a first attach's `wait_ms: 0,
-/// known_generation: None`: how long to wait for a *live* registration
-/// (`LOCAL_WAIT_MAX`-clamped by the daemon, `crate::localctl::client::open_control`'s
-/// own doc) and which generation it must be strictly newer than
-/// (`qsh/local/v1.proto`'s `LocalHello.known_generation` doc). Opens both
-/// the `LOCAL_CONTROL` conduit this returns *and* nothing else — the data
-/// conduit is a separate `open_stream` call the caller makes once it has
-/// something to attach.
-pub(super) async fn dial_reverse_wait(
-    route: &LocalRoute,
-    wait_ms: u32,
-    known_generation: Option<u64>,
-) -> Result<(Session, Option<String>, u64), OpError> {
-    let handshake = crate::localctl::client::open_control(
-        &route.socket,
-        &route.host,
-        wait_ms,
-        known_generation,
-    )
-    .await?;
-    let peer_fingerprint = Some(handshake.peer_fingerprint.clone());
-    let generation = handshake.generation;
-    let session = Session::from_local_control(
-        handshake.conduit,
-        handshake.capabilities,
-        handshake.host,
-        route.socket.clone(),
-        handshake.peer_fingerprint,
-        handshake.generation,
-    );
-    Ok((session, peer_fingerprint, generation))
-}
-
 /// A live cursor on one session's replay ring — the single pull primitive
 /// behind `session read --wait`, `session read --follow` and a long-running
 /// external process's (e.g. an agent tool) long-poll. See

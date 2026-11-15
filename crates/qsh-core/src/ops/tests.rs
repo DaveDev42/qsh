@@ -1168,28 +1168,10 @@ fn server_name_strips_the_port_and_brackets() {
     assert_eq!(server_name_for("[::1]"), "::1");
 }
 
-// ---- `Ops::resolve_route` — `PeerRoute` selection (the M3 plan (2473c88)
-// Step 6) ----
+// ---- `Ops::resolve_route` — forward target resolution ----
 //
-// `resolve_route` is a thin `HostRoute` -> `PeerRoute` mapping over
-// the same routing decision `resolve_host_route`/
-// `resolve_host_route_async` already make and already test
-// exhaustively at the `HostRoute` level (`crate::ops::host`'s own
-// test module). What these add is proof the *mapping* itself is
-// right: a forward `HostRoute` becomes a fully resolved `PeerTarget`
-// (identity loaded, address/server_name carried through
-// `resolve_peer`), a reverse `HostRoute` becomes the `LocalRoute`
-// `Ops::connect_reverse` actually dials with (host alias + that
-// daemon's own socket, nothing else), and not-found/duplicate stay
-// plain error propagation through the mapping.
-//
-// `resolve_route` is sync — same identity-load constraint as
-// `resolve_peer` — so on the reverse/duplicate cases below the fake
-// `LOCAL_ADMIN` daemon has to live on its own OS thread with its own
-// runtime (mirroring a real `qsh listen` process), never on the
-// test's own thread: calling `resolve_route` from inside a runtime
-// that already exists is exactly the "cannot start a runtime from
-// within a runtime" hazard `resolve_host_route`'s own doc flags.
+// `resolve_route` is sync (the identity load) and maps the host routing
+// decision to a fully resolved `PeerTarget`; not-found stays a plain error.
 
 fn resolve_route_ops(dir: &std::path::Path) -> Ops {
     let paths = Paths::new(dir.join("config"), dir.join("state")).with_runtime_dir(dir.join("run"));
@@ -1223,13 +1205,9 @@ fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
     })
     .unwrap();
 
-    match ops.resolve_route("mac").unwrap() {
-        PeerRoute::Forward(target) => {
-            assert_eq!(target.address, "mac.example.com:4433");
-            assert_eq!(target.server_name, "mac.example.com");
-        }
-        PeerRoute::Reverse(_) => panic!("expected a forward route"),
-    }
+    let target = ops.resolve_route("mac").unwrap();
+    assert_eq!(target.address, "mac.example.com:4433");
+    assert_eq!(target.server_name, "mac.example.com");
 }
 
 // `Ops::resolve_serve_target` (ROADMAP M9 (b), ADR-0014 결정 7): the two-step

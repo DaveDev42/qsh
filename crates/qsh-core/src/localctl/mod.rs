@@ -1,92 +1,27 @@
-//! `localctl` — the IPC a CLI process on this machine speaks to *its own*
-//! resident `qsh listen` daemon over a Unix domain socket
-//! (`$XDG_RUNTIME_DIR/qsh/<pid>.sock`) or, on Windows, a named pipe
-//! (`\\.\pipe\qsh-<scope>-<pid>`; [`transport`]; `docs/design/architecture.md` §7,
-//! `docs/design/protocol.md` §11-3, ADR-0003 결과 절 2026-08-18/19 추기).
-//! M3 plan Step 5 (2473c88) introduces this module tree, split into two PRs: 5a
-//! (this transport/security layer) and 5b (`Ops::host_list`/`host_get`,
-//! `qsh hosts`, renderers — layered on top, not here).
+//! `localctl` — the local-socket transport that agent forwarding binds its
+//! per-session listener on: a Unix domain socket on unix, a named pipe on
+//! Windows ([`transport`]; `docs/design/architecture.md` §7, ADR-0035
+//! decision 14, ADR-0055).
 //!
-//! ## Trust model (read before touching any conduit code)
+//! The module used to hold the IPC a CLI process spoke to its own resident
+//! `qsh listen` daemon (`qsh.local.v1`). ADR-0068 retired the daemon, the
+//! protocol and its client; only the transport stays, because agent
+//! forwarding reuses its trust model:
 //!
-//! **localctl grants no new authority.** The only thing that can connect
-//! to this socket is a process running as *this machine's same OS user* —
-//! the socket is mode 0600 inside a mode 0700 directory, and the daemon
-//! additionally rejects any connecting peer whose euid does not match its
-//! own (`SO_PEERCRED` on Linux / `getpeereid` on macOS), checked **before**
-//! it reads a single frame off the connection — fail closed even if the
-//! runtime directory's permission bits were somehow wrong. That same OS
-//! user can already read this machine's device key, so nothing localctl
-//! exposes hands out privilege the caller did not already have.
+//! - unix: the socket node is mode 0600, and the accepting side rejects a
+//!   peer whose euid is not its own (`SO_PEERCRED` on Linux, `getpeereid` on
+//!   macOS) before it reads a byte;
+//! - Windows: every pipe instance carries a protected, owner-only DACL,
+//!   remote clients are rejected, and each side compares the peer process's
+//!   user SID with its own before the first byte.
 //!
-//! **localctl is not an authorization layer.** The daemon never calls
-//! `Authorizer::check` for a conduit — doing so would evaluate the
-//! *wrong* principal (itself, not the remote peer the request is
-//! ultimately headed to). Real authorization happens exactly where it
-//! always has: the *target* evaluates its own ACL against the
-//! *controller's* TLS-authenticated principal when a relayed
-//! `SessionOpen`/`SessionAttach` arrives over the live reverse QUIC
-//! connection (`docs/design/protocol.md` §11-3 — "역방향 등록은 도달성만
-//! 부여하고 권한은 부여하지 않는다"). The daemon also **never trusts any
-//! principal-like value the CLI side sends it**: a local socket peer can
-//! put anything it likes in a frame body, and the only fact localctl is
-//! allowed to act on is the OS-level peer credential it checked at accept
-//! time. No ACL or audit call belongs on the conduit path.
+//! [`chunked`] is the length-prefixed chunk framing the Windows pipe applies
+//! to a raw byte phase, because a byte-mode pipe cannot half-close. It is
+//! platform-neutral so every OS compiles and tests it.
 //!
-//! ## Module layout and the arch rule this seam protects
-//!
-//! [`frame`] and [`client`] run in the *CLI process* and are **pure local-stream
-//! and `qsh-proto` framing**: they must never name `qsh_transport`,
-//! `quinn` or `rustls` — mechanically enforced by `xtask/src/arch.rs`'s
-//! file-scoped `ModuleBan` for exactly these two files (M3 plan Step 5 (2473c88)
-//! names only `qsh_transport` for this pair; `quinn`/`rustls` are this
-//! project's own stricter superset, since a QUIC name reaching either file
-//! by any route is the same seam violation `qsh_transport` itself would
-//! be). A CLI
-//! process has no business holding a QUIC connection regardless.
-//!
-//! `daemon` is the one module allowed to import `qsh_transport` here (only
-//! indirectly, through the retired `Listen`/`Registry`): it is the
-//! bridge that answers this machine's `LOCAL_ADMIN` conduit from the
-//! registry `qsh listen` already holds, and — from M3 plan Step 6 (2473c88)
-//! onward — relays a `LOCAL_CONTROL` conduit's requests onto a live reverse
-//! QUIC connection and relays the answers back. Blurring that line would
-//! erode exactly the seam `docs/design/architecture.md` §9 risk 2 ("in-listener session vs
-//! listener restart") depends on staying sharp — a future out-of-process
-//! supervisor needs `SessionBackend` (ADR-0003) and this IPC layer to
-//! already be proven transport-free.
-//!
-//! [`mux`] (M3 plan Step 6 (2473c88), Stage A1) is the pure `request_id`
-//! remapping and event-routing table `daemon` drives once it starts
-//! multiplexing several `LOCAL_CONTROL` conduits onto one reverse QUIC
-//! connection — it names no transport type at all (not even indirectly)
-//! and has no async, no lock, no socket; see its own module docs for the
-//! invariant it enforces.
-//!
-//! [`transport`] is where the platform shows. [`frame`] and [`client`] speak
-//! to a [`transport::LocalStream`] (a `UnixStream` on unix, a named pipe end
-//! on Windows) and compile everywhere, and so does `daemon`, which binds the
-//! endpoint through `transport::bind` and takes each connection from
-//! `transport::Listener::accept` together with the verdict of the
-//! credential check (`docs/CLI.md` §6.13, ADR-0035 decision 14). A socket can
-//! end its write direction while the peer can still answer, a byte-mode pipe
-//! cannot, so on Windows the raw byte phase of a conduit, after its framed
-//! `qsh.local.v1` messages, carries its bytes in length-prefixed chunks with a
-//! zero-length end chunk ([`chunked`]; `docs/design/protocol.md` §11-3). Every
-//! relay of raw bytes goes through the transport's `raw_*` helpers, so
-//! half-close works the same on both platforms.
-//!
-//! ## What must never cross a localctl frame
-//!
-//! Resume tokens (`docs/adr/0007-session-ref-and-resume-token-custody.md`)
-//! never travel over a localctl conduit — `qsh.local.v1`'s message set
-//! (`crates/qsh-proto/proto/qsh/local/v1.proto`, fixed by Step 1) has no
-//! field for one, and nothing in this module tree should ever thread one
-//! through it (`docs/design/testing.md` L6 `resume_secrecy` discipline
-//! extends here, made mechanical by PR 5b's fixtures).
+//! Nothing in this tree may name `qsh_transport`, `quinn` or `rustls`; the
+//! file-scoped bans in `xtask/src/arch.rs` enforce that for the two platform
+//! files.
 
 pub mod chunked;
-pub mod client;
-pub mod frame;
-pub mod mux;
 pub mod transport;

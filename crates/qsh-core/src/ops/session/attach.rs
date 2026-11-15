@@ -71,7 +71,7 @@ pub struct SessionAttachStream {
     /// (ADR-0052 decision 14). Declared **before** `conn` for the same
     /// reason the forwards are: its sampling task runs on `conn`'s runtime
     /// and is aborted by its drop. `None` for a stream that is not an
-    /// interactive screen attach and on the reverse route.
+    /// interactive screen attach.
     pub(super) adapt: Option<crate::adapt::PolicyMonitor>,
     /// The `-R` remote forwards opened on this attach, if any — one shared
     /// [`crate::tunnel::remote::RemoteForwardAcceptor`] for every `-R` spec
@@ -126,11 +126,8 @@ pub struct SessionAttachStream {
     pub(super) expires_at: String,
     /// What [`Self::handle`] hands each [`AttachHandle`] — computed once
     /// at `session_attach` and kept here rather than re-derived from
-    /// `conn` on every call, because the reverse route's half
-    /// (`attached.kill`) only ever exists for the instant right after
-    /// `open_attach_stream` returns (`crate::ops::session::RecoveryLink`'s
-    /// own doc).
-    pub(super) link: RecoveryLink,
+    /// `conn` on every call.
+    pub(super) link: Link,
     /// See [`Self::link_status`].
     pub(super) link_status: Arc<crate::client::linkstatus::LinkTracker>,
     /// Drawing state when the host granted screen sync for this attach.
@@ -266,11 +263,7 @@ impl SessionAttachStream {
     /// the terminal — a bind failure is an ordinary typed error, and the
     /// caller should report it rather than half-start a session.
     ///
-    /// Route-aware (ADR-0020 decision 3): a forward route opens each
-    /// forward's own QUIC stream directly; a reverse route relays through
-    /// this machine's resident `qsh listen` daemon, exactly the way
-    /// [`Ops::tunnel_open`](crate::ops::Ops::tunnel_open)'s reverse leg
-    /// does for the standalone `-L` form.
+    /// Each forward opens its own QUIC stream on the attach's connection.
     ///
     /// Returns the [`qsh_proto::Tunnel`] DTO of each forward, in `specs`
     /// order, for
@@ -283,17 +276,14 @@ impl SessionAttachStream {
             return Ok(Vec::new());
         }
         let host = parse_session_ref(&self.session_ref)?.host;
-        let started = match self.conn.connection() {
-            Some(connection) => self.start_local_forwards_forward(specs, connection)?,
-            None => self.start_local_forwards_reverse(specs)?,
-        };
+        let started = self.start_local_forwards(specs, self.conn.connection())?;
         let tunnels = started.iter().map(|f| f.tunnel(&host)).collect();
         self.forwards.extend(started);
         Ok(tunnels)
     }
 
-    /// [`Self::open_local_forwards`]'s forward-route half.
-    fn start_local_forwards_forward(
+    /// Start every `-L` forward in `specs` on `connection`.
+    fn start_local_forwards(
         &self,
         specs: &[qsh_proto::wire::ForwardSpec],
         connection: qsh_transport::Connection,
@@ -314,44 +304,12 @@ impl SessionAttachStream {
         Ok(started)
     }
 
-    /// [`Self::open_local_forwards`]'s reverse-route half (ADR-0020
-    /// decision 3): each forward's listener relays through this machine's
-    /// resident `qsh listen` daemon instead of dialing a QUIC connection
-    /// this process does not hold on the reverse route.
-    fn start_local_forwards_reverse(
-        &self,
-        specs: &[qsh_proto::wire::ForwardSpec],
-    ) -> Result<Vec<crate::tunnel::LocalForwardHandle>, OpError> {
-        let Some((socket, route_host)) = self.conn.reverse_route() else {
-            return Err(OpError::new(
-                ErrorCode::Internal,
-                "reverse connection is missing its localctl route",
-            ));
-        };
-        let socket = socket.to_path_buf();
-        let route_host = route_host.to_string();
-        let runtime = self.conn.runtime();
-        let mut started = Vec::with_capacity(specs.len());
-        for spec in specs {
-            let handle = runtime
-                .block_on(crate::tunnel::LocalForwardHandle::start_reverse(
-                    spec,
-                    socket.clone(),
-                    route_host.clone(),
-                ))
-                .map_err(crate::ops::tunnel::map_local_forward_error)?;
-            started.push(handle);
-        }
-        Ok(started)
-    }
-
     /// Bind and start this attach's `-D` dynamic (SOCKS5) forwards
     /// (ADR-0019 decision 11, ADR-0020 decisions 1–3) — the interactive
     /// twin of [`Ops::tunnel_dynamic`](crate::ops::Ops::tunnel_dynamic),
-    /// shaped like [`Self::open_local_forwards`]: route-aware (forward or
-    /// reverse), refuses the connected route's missing `dial-filter.v1`
-    /// capability (ADR-0019 decision 3, no fallback; ADR-0020 decision 2's
-    /// dual-cause reverse wording) before binding anything, and is
+    /// shaped like [`Self::open_local_forwards`]: refuses the connected
+    /// peer's missing `dial-filter.v1` capability (ADR-0019 decision 3, no
+    /// fallback) before binding anything, and is
     /// all-or-nothing — a spec that fails drops every listener this call
     /// already bound.
     ///
@@ -374,25 +332,21 @@ impl SessionAttachStream {
             return Ok(Vec::new());
         }
         let host = parse_session_ref(&self.session_ref)?.host;
-        let is_reverse = self.conn.connection().is_none();
         // ADR-0019 decision 3, ADR-0020 decision 2: no fallback if the
         // connected route never advertised the capability this dial
         // policy depends on — refused here, before any listener binds,
         // exactly like `Ops::tunnel_dynamic`'s own gate. Shares the actual
         // predicate with that gate through `require_dial_filter_capability`,
         // not a second independently re-derived `if`.
-        crate::ops::tunnel::require_dial_filter_capability(&self.capabilities, is_reverse)?;
-        let started = match self.conn.connection() {
-            Some(connection) => self.start_dynamic_forwards_forward(specs, connection)?,
-            None => self.start_dynamic_forwards_reverse(specs)?,
-        };
+        crate::ops::tunnel::require_dial_filter_capability(&self.capabilities)?;
+        let started = self.start_dynamic_forwards(specs, self.conn.connection())?;
         let tunnels = started.iter().map(|f| f.dynamic_tunnel(&host)).collect();
         self.dynamic_forwards.extend(started);
         Ok(tunnels)
     }
 
-    /// [`Self::open_dynamic_forwards`]'s forward-route half.
-    fn start_dynamic_forwards_forward(
+    /// Start every `-D` forward in `specs` on `connection`.
+    fn start_dynamic_forwards(
         &self,
         specs: &[qsh_proto::wire::DynamicSpec],
         connection: qsh_transport::Connection,
@@ -407,40 +361,6 @@ impl SessionAttachStream {
                     spec.bind.as_deref(),
                     spec.listen_port,
                     connection.clone(),
-                ))
-                .map_err(crate::ops::tunnel::map_local_forward_error)?;
-            started.push(handle);
-        }
-        Ok(started)
-    }
-
-    /// [`Self::open_dynamic_forwards`]'s reverse-route half (ADR-0020
-    /// decision 1): each `-D` listener relays every `CONNECT` through this
-    /// machine's resident `qsh listen` daemon instead of dialing a QUIC
-    /// connection this process does not hold on the reverse route. The
-    /// capability gate has already run in [`Self::open_dynamic_forwards`]
-    /// by the time this is reached.
-    fn start_dynamic_forwards_reverse(
-        &self,
-        specs: &[qsh_proto::wire::DynamicSpec],
-    ) -> Result<Vec<crate::tunnel::DynamicForwardHandle>, OpError> {
-        let Some((socket, route_host)) = self.conn.reverse_route() else {
-            return Err(OpError::new(
-                ErrorCode::Internal,
-                "reverse connection is missing its localctl route",
-            ));
-        };
-        let socket = socket.to_path_buf();
-        let route_host = route_host.to_string();
-        let runtime = self.conn.runtime();
-        let mut started = Vec::with_capacity(specs.len());
-        for spec in specs {
-            let handle = runtime
-                .block_on(crate::tunnel::DynamicForwardHandle::start_reverse(
-                    spec.bind.as_deref(),
-                    spec.listen_port,
-                    socket.clone(),
-                    route_host.clone(),
                 ))
                 .map_err(crate::ops::tunnel::map_local_forward_error)?;
             started.push(handle);
@@ -634,7 +554,7 @@ impl SessionAttachStream {
 #[derive(Clone)]
 pub struct AttachHandle {
     commands: tokio::sync::mpsc::Sender<AttachCommand>,
-    link: RecoveryLink,
+    link: Link,
     finished: Arc<std::sync::atomic::AtomicBool>,
     /// Held for as long as a detach is flushing, so the thread that owns
     /// the stream cannot tear the driver down mid-flush. See
@@ -744,16 +664,9 @@ impl AttachHandle {
         } else {
             DetachFlush::Unconfirmed
         };
-        // Forward: closing the connection is what makes `next_event`
-        // return and the host release the writer lease (this doc's own
-        // opening paragraph). Reverse: there is no connection this attach
-        // owns alone to close (`RecoveryLink`'s own doc) — the hard-stop
-        // is this attach's own `LOCAL_STREAM` conduit going away locally,
-        // which needs no cooperation from the daemon or the peer either.
-        match &self.link {
-            RecoveryLink::Forward(link) => link.connection().close(0, b"detach"),
-            RecoveryLink::Reverse(kill) => kill.kill(),
-        }
+        // Closing the connection is what makes `next_event` return and the
+        // host release the writer lease (this doc's own opening paragraph).
+        self.link.connection().close(0, b"detach");
         outcome
     }
 

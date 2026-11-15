@@ -1,616 +1,155 @@
-//! The two concrete carriers a `Session`'s control channel can run over
-//! (`docs/design/protocol.md` §11-3, M3 plan Step 6 (2473c88)): a QUIC control
-//! stream dialed straight to the peer (the forward route, unchanged since
-//! M1), or a `LOCAL_CONTROL` conduit to this machine's resident `qsh
-//! listen` daemon, which relays to the peer over its live reverse
-//! registration (`crate::localctl::client`, `crate::reverse::listen`'s
-//! `ControlHub` on the daemon side).
-//!
-//! `ControlLink` is deliberately an **enum**, never a generic type
-//! parameter or an ADR-0005 `Transport`/`StreamMux` trait object — a
-//! `Session` is either dialed or relayed, never a third thing, and every
-//! caller (`crate::client::Session`) already knows the wire messages it
-//! sends and receives (`qsh.wire.v1::ControlMessage`) regardless of which
-//! carrier is underneath, so there is nothing a trait's extra indirection
-//! would buy here.
-//!
-//! Dependency direction: this file depends on `crate::localctl::client`,
-//! never the reverse — `localctl::client` stays transport-free (it must
-//! never name `qsh_transport`/`quinn`/`rustls`, `xtask arch`'s
-//! `LOCALCTL_CLIENT_FILE` ban) and has no reason to know this enum exists.
+//! The carriers a `Session`'s streams run over: the control stream, the
+//! per-attach data stream, and the borrowed handle that opens a fresh data
+//! stream. Each wraps the QUIC stream dialed straight to the peer
+//! (`docs/design/protocol.md` §11-3 described a second, daemon-relayed
+//! carrier for the reverse route; ADR-0068 retired it, and these types keep
+//! their shape so call sites do not name the transport stream types).
 //!
 //! Only the surface [`crate::client::Session`] actually uses is exposed:
-//! send one `ControlMessage`, receive the next one, and a best-effort
-//! half-close. Nothing here decides *when* to reconnect or *what* a
-//! session_open/get/list/read/write/resize/close request looks like —
-//! that stays entirely in `crate::ops::session`, unchanged by which
-//! variant is underneath (M3 plan Step 6 (2473c88)'s "Zero reverse-specific
-//! business logic" rule).
+//! send one message, receive the next one, and a best-effort half-close.
+//! Nothing here decides *when* to reconnect or *what* a
+//! session_open/get/list/read/write/resize/close request looks like — that
+//! stays entirely in `crate::ops::session`.
 
 use prost::Message;
 use qsh_proto::wire::{ControlMessage, StreamHeader};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
 
-// `crate::localctl` builds on every platform (a Unix socket on unix, a named
-// pipe on Windows), so the `Local` carrier this file adds exists everywhere,
-// next to `Direct` (unchanged since M1).
-use crate::localctl::client::{ControlConduit, DataRecvHalf, DataSendHalf};
-use crate::ops::OpError;
-
 use super::ClientError;
 
-/// A `Session`'s control channel: either half of a QUIC control stream
-/// dialed straight to the peer, or a `LOCAL_CONTROL` conduit to this
-/// machine's resident daemon that relays the exact same
-/// `ControlMessage`/`Response` pair onto the peer's live reverse
-/// registration (`docs/design/protocol.md` §11-3's "conn 이 아니라
-/// stream 이 대상" framing extended to a second carrier).
-pub(crate) enum ControlLink {
-    /// Dialed straight to the peer over whatever transport the connection
-    /// runs on (forward route). Named for the route, not the transport.
-    Direct(FramedStream),
-    /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_CONTROL` conduit (reverse route). Not platform-gated:
-    /// localctl is a Unix socket or a Windows named pipe
-    /// (`crate::localctl::transport`), and the carrier is the same on both.
-    Local(ControlConduit),
-}
+/// A `Session`'s control channel: both halves of the QUIC control stream
+/// dialed straight to the peer.
+pub(crate) struct ControlLink(FramedStream);
 
 impl ControlLink {
-    /// Encode + send one `ControlMessage`, whichever carrier this is.
+    pub(crate) fn new(stream: FramedStream) -> Self {
+        Self(stream)
+    }
+
+    /// Encode + send one `ControlMessage`.
     pub(crate) async fn send(&mut self, msg: &ControlMessage) -> Result<(), ClientError> {
-        match self {
-            ControlLink::Direct(stream) => Ok(stream.send.send(msg).await?),
-            ControlLink::Local(conduit) => {
-                conduit.send(msg).await.map_err(op_error_to_client_error)
-            }
-        }
+        Ok(self.0.send.send(msg).await?)
     }
 
     /// Read the next `ControlMessage`. `Ok(None)` on a clean end of the
-    /// link — a QUIC stream FIN at a frame boundary, or the daemon closing
-    /// the UDS conduit the same way (`crate::localctl::daemon`'s
-    /// `serve_control`: a dead host ends every conduit of that host this
-    /// way, so this is also how the CLI side learns of a reverse
-    /// connection's death — `docs/design/protocol.md` §11-3).
+    /// link — a QUIC stream FIN at a frame boundary.
     pub(crate) async fn recv(&mut self) -> Result<Option<ControlMessage>, ClientError> {
-        match self {
-            ControlLink::Direct(stream) => Ok(stream.recv.recv::<ControlMessage>().await?),
-            ControlLink::Local(conduit) => conduit.recv().await.map_err(op_error_to_client_error),
-        }
+        Ok(self.0.recv.recv::<ControlMessage>().await?)
     }
 
     /// Best-effort half-close of the send side (`Session::close`'s
     /// "finish, then close the connection" sequence). Errors are ignored
     /// here exactly as [`qsh_transport::control::FramedSend::finish`]'s own
     /// doc allows ("a second call errors with `ClosedStream`, which
-    /// callers may ignore") — the Local carrier has no equivalent
-    /// close-frame drain to wait for: dropping the underlying `UnixStream`
-    /// (this `Session`'s eventual drop) closes the fd, which the daemon
-    /// sees as a clean EOF on its own read, the same signal a QUIC FIN
-    /// gives it.
+    /// callers may ignore").
     pub(crate) fn finish(&mut self) {
-        if let ControlLink::Direct(stream) = self {
-            let _ = stream.send.finish();
-        }
+        let _ = self.0.send.finish();
     }
 }
 
-/// [`OpError`] (what `crate::localctl::client`'s conduit calls return) →
-/// [`ClientError`] (what every other `Session` method returns), preserving
-/// the code/message/retryable triple verbatim — the same "nothing to
-/// translate" shape as `crate::localctl::client::remote_error`'s
-/// `LocalError` → `OpError` mapping one layer down.
-pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
-    ClientError::Remote {
-        code: err.code,
-        message: err.message,
-        retryable: err.retryable,
-    }
-}
-
-/// A synchronous, any-thread "end this attach's data conduit right now"
-/// primitive for the reverse route (M3 plan Step 7 (2473c88)) — the
-/// `LOCAL_STREAM` UDS socket's counterpart to
-/// [`qsh_transport::Connection::close`]'s own nature: queues the teardown
-/// and returns immediately, needs no Tokio runtime, and unblocks a pending
-/// local read with no cooperation from the daemon or the peer needed
-/// (`docs/design/protocol.md` §11-3) — the forward route's equivalent
-/// relies on the whole QUIC connection being this one attach's alone to
-/// close, which the reverse route's single shared registration is not
-/// (`crate::ops::session`'s `RecoveryLink` doc explains why that
-/// difference is exactly what makes reverse recovery Step 8's problem, not
-/// this one's).
-///
-/// Always constructible (`Default`, inert — nothing to kill) so callers on
-/// the forward route never needs an `Option` wrapper around this type;
-/// only `Self::new` (the reverse route's `LOCAL_STREAM` conduit) produces a
-/// live one.
-///
-/// `pub`, not `pub(crate)`: [`crate::client::Session::exec`]'s `kill_tx`
-/// out-parameter (issue #5's reverse route) hands one to callers outside
-/// this crate, so the type it names must be nameable there too — only the
-/// struct and [`Self::kill`] need that reach; `Self::new` stays
-/// `pub(crate)` since only this crate ever constructs a live one.
-#[derive(Clone, Default)]
-pub struct DataKillSwitch {
-    socket: Option<std::sync::Arc<crate::localctl::transport::LocalStream>>,
-}
-
-impl DataKillSwitch {
-    /// Wrap a live `LOCAL_STREAM` socket. `socket` should be a clone of
-    /// the same `Arc` [`DataSend`]/[`DataRecv`]'s `Local` halves hold
-    /// (`crate::localctl::client::open_stream_over_inner`'s own doc on
-    /// why a held clone, never a bare fd, is what makes [`Self::kill`]
-    /// safe to call at any time) — this is the third clone, kept only for
-    /// this purpose.
-    pub(crate) fn new(socket: std::sync::Arc<crate::localctl::transport::LocalStream>) -> Self {
-        Self {
-            socket: Some(socket),
-        }
-    }
-
-    /// Shut both directions of the underlying socket down immediately. A
-    /// no-op when nothing was ever wrapped (the forward route, or a
-    /// non-unix build — see [`Self`]'s own doc): there is nothing to kill
-    /// there, and this is called unconditionally by
-    /// [`crate::ops::session::AttachHandle::detach`] regardless of which
-    /// route an attach rides.
-    pub fn kill(&self) {
-        if let Some(socket) = &self.socket {
-            // The transport keeps the descriptor-reuse argument: `socket`
-            // is a held clone, so the descriptor stays allocated for as
-            // long as `self` (or any clone of it) is alive.
-            crate::localctl::transport::shutdown_both(socket);
-        }
-    }
-}
-
-/// A `Session`'s attach data channel (`docs/design/protocol.md` §9): a
-/// `SESSION_DATA` QUIC stream dialed straight to the peer, or a
-/// `LOCAL_STREAM` conduit relayed through this machine's resident daemon
-/// — the data-plane sibling of [`ControlLink`], split into send/recv
-/// halves the same way [`qsh_transport::control::FramedStream`] already
-/// is (`crate::client::AttachWriter`/`AttachReader` hold one each).
-pub(crate) enum DataSend {
-    /// Dialed straight to the peer (forward route).
-    Direct(FramedSend),
-    /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_STREAM` conduit (reverse route); see
-    /// [`ControlLink::Local`]'s own doc.
-    Local(DataSendHalf),
-}
+/// The send half of a `Session`'s attach data channel
+/// (`docs/design/protocol.md` §9): a `SESSION_DATA`/`EXEC_DATA`/... QUIC
+/// stream dialed straight to the peer.
+pub(crate) struct DataSend(FramedSend);
 
 impl DataSend {
-    /// Encode + send one `SessionFrame`, whichever carrier this is.
+    /// Encode + send one frame.
     pub(crate) async fn send<M: Message>(&mut self, msg: &M) -> Result<(), ClientError> {
-        match self {
-            DataSend::Direct(send) => Ok(send.send(msg).await?),
-            DataSend::Local(send) => send.send(msg).await.map_err(op_error_to_client_error),
-        }
+        Ok(self.0.send(msg).await?)
     }
 
     /// Finish our send half (`crate::client::AttachWriter::finish`'s own
-    /// doc: "only queues the FIN"). Both variants are synchronous and
-    /// swallow their own error — a second finish, or a conduit already
-    /// gone, is not this caller's problem to report (matching
-    /// [`ControlLink::finish`]'s identical choice).
+    /// doc: "only queues the FIN"). Swallows its own error: a second
+    /// finish is not this caller's problem to report.
     pub(crate) fn finish(&mut self) {
-        match self {
-            DataSend::Direct(send) => {
-                let _ = send.finish();
-            }
-            DataSend::Local(send) => send.finish(),
-        }
+        let _ = self.0.finish();
     }
 
-    /// Abandon this send half: reset the QUIC stream with `code` on the
-    /// forward route; on the reverse `LOCAL_STREAM` carrier, which has no
-    /// per-stream reset, shut the whole conduit down through `kill`
-    /// ([`DataRecv::abort`]'s rule). The peer sees a truncated stream, never
-    /// a clean end.
-    pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
-        match self {
-            DataSend::Direct(send) => send.reset(code),
-            DataSend::Local(_) => kill.kill(),
-        }
+    /// Abandon this send half: reset the QUIC stream with `code`. The peer
+    /// sees a truncated stream, never a clean end.
+    pub(crate) fn abort(&mut self, code: u32) {
+        self.0.reset(code);
+    }
+
+    /// The stream's quinn send priority, for tests of the open seam.
+    #[cfg(test)]
+    pub(crate) fn priority(&self) -> Result<i32, qsh_transport::ClosedStream> {
+        self.0.priority()
     }
 
     /// End this stream's framed phase and surrender the raw QUIC send
     /// stream, for the one caller that needs an unframed byte pipe: a
     /// tunnel stream past its handshake (`docs/design/protocol.md` §5, §7,
     /// [`crate::tunnel::splice`]).
-    ///
-    /// `Err(self)` — never a panic — for the reverse `LOCAL_STREAM`
-    /// carrier, which has no single QUIC stream to surrender: its raw
-    /// counterpart is [`Self::into_raw_local`] instead
-    /// (`crate::tunnel::splice::splice_tcp_uds`, M4 plan Step 5 (a) (2473c88)).
-    /// A caller that holds the wrong carrier gets its value back rather
-    /// than a panic, so the stream stays alive to be torn down properly.
-    pub(crate) fn into_raw_direct(self) -> Result<qsh_transport::SendStream, Self> {
-        match self {
-            DataSend::Direct(send) => Ok(send.into_raw()),
-            other @ DataSend::Local(_) => Err(other),
-        }
-    }
-
-    /// [`Self::into_raw_direct`]'s mirror for the reverse `LOCAL_STREAM`
-    /// carrier — surrenders the raw UDS byte writer
-    /// [`crate::tunnel::splice::splice_tcp_uds`] pumps a tunnel's unframed
-    /// payload onto. `Err(self)` for the forward `Direct` carrier, same
-    /// reasoning as [`Self::into_raw_direct`]'s own doc, reversed.
-    pub(crate) fn into_raw_local(self) -> Result<crate::localctl::client::RawUdsWrite, Self> {
-        match self {
-            DataSend::Local(send) => Ok(send.into_raw()),
-            other @ DataSend::Direct(_) => Err(other),
-        }
+    pub(crate) fn into_raw(self) -> qsh_transport::SendStream {
+        self.0.into_raw()
     }
 }
 
 /// See [`DataSend`]'s own doc — this is its receive-half sibling.
-pub(crate) enum DataRecv {
-    /// Dialed straight to the peer (forward route).
-    Direct(FramedRecv),
-    /// Relayed through this machine's `qsh listen` daemon over a
-    /// `LOCAL_STREAM` conduit (reverse route); see
-    /// [`ControlLink::Local`]'s own doc.
-    Local(DataRecvHalf),
-}
+pub(crate) struct DataRecv(FramedRecv);
 
 impl DataRecv {
-    /// Read the next `SessionFrame`. `Ok(None)` on a clean end of the
-    /// stream/conduit.
+    /// Read the next frame. `Ok(None)` on a clean end of the stream.
     pub(crate) async fn recv<M: Message + Default>(&mut self) -> Result<Option<M>, ClientError> {
-        match self {
-            DataRecv::Direct(recv) => Ok(recv.recv::<M>().await?),
-            DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
-        }
+        Ok(self.0.recv::<M>().await?)
     }
 
-    /// Stop receiving further data on this conduit — e.g. a client that
+    /// Stop receiving further data on this stream — e.g. a client that
     /// refuses to keep buffering output past a cap
-    /// ([`crate::client::EXEC_OUTPUT_MAX`]). The forward route resets the
-    /// QUIC receive stream with `code`, a real `STOP_SENDING` the peer
-    /// notices; the reverse `LOCAL_STREAM` carrier has no per-stream reset
-    /// of its own, so it shuts the *whole* conduit down through `kill`
-    /// instead — the daemon's own EXEC_DATA UDS-EOF rule then resets the
-    /// QUIC send side to the peer on this carrier's behalf
-    /// (`crate::localctl::daemon`'s `local_stream_relay_kind`). `kill` is a
-    /// no-op on the forward route ([`DataKillSwitch::kill`]'s own doc), so
-    /// this never double-signals there.
-    pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
-        match self {
-            DataRecv::Direct(recv) => recv.stop(code),
-            DataRecv::Local(_) => kill.kill(),
-        }
+    /// ([`crate::client::EXEC_OUTPUT_MAX`]). Resets the QUIC receive stream
+    /// with `code`, a real `STOP_SENDING` the peer notices.
+    pub(crate) fn abort(&mut self, code: u32) {
+        self.0.stop(code);
     }
 
-    /// The receive-half sibling of [`DataSend::into_raw_direct`], returning
-    /// the raw QUIC stream **and** the handshake residue behind it — bytes
-    /// the peer pipelined after its last framed message, which
+    /// The receive-half sibling of [`DataSend::into_raw`], returning the
+    /// raw QUIC stream **and** the handshake residue behind it — bytes the
+    /// peer pipelined after its last framed message, which
     /// [`qsh_transport::FramedRecv::into_raw`]'s own doc explains must be
     /// delivered ahead of everything read from the stream afterwards.
-    ///
-    /// `Err(self)` for the reverse `LOCAL_STREAM` carrier — its raw
-    /// counterpart is [`Self::into_raw_local`].
-    pub(crate) fn into_raw_direct(self) -> Result<(qsh_transport::RecvStream, Vec<u8>), Self> {
-        match self {
-            DataRecv::Direct(recv) => Ok(recv.into_raw()),
-            other @ DataRecv::Local(_) => Err(other),
-        }
-    }
-
-    /// [`Self::into_raw_direct`]'s mirror for the reverse `LOCAL_STREAM`
-    /// carrier — see [`DataSend::into_raw_local`]'s own doc.
-    pub(crate) fn into_raw_local(
-        self,
-    ) -> Result<(crate::localctl::client::RawUdsRead, Vec<u8>), Self> {
-        match self {
-            DataRecv::Local(recv) => Ok(recv.into_raw()),
-            other @ DataRecv::Direct(_) => Err(other),
-        }
+    pub(crate) fn into_raw(self) -> (qsh_transport::RecvStream, Vec<u8>) {
+        self.0.into_raw()
     }
 }
 
-/// A carrier this process can open a **fresh** data stream on — the same
-/// forward/reverse axis as [`ControlLink`] and [`DataSend`]/[`DataRecv`],
-/// but where those two represent a stream already opened, this borrows
-/// what opening *another* one needs (the live connection, or the daemon
-/// socket + host name), so more than one call site can open data streams
-/// the same way without each having to know both carriers' handshakes
-/// ([`crate::tunnel::open_stream`] is the first such second call site;
-/// [`crate::client::Session::open_data_link`] predates this type and is left as its own inline forward/reverse match rather
-/// than rebuilt on top of it, so this addition changes no observable
-/// session behavior).
-///
-/// Deliberately an enum, never a generic type parameter or an ADR-0005
-/// `Transport`/`StreamMux` trait object — see [`ControlLink`]'s own doc for
-/// why that axis split is the house style here, not a trait.
-///
-/// `crate::tunnel` opens its data streams through this seam; see
-/// `docs/design/architecture.md` for where the client-side carriers sit.
-pub(crate) enum DataLink<'a> {
-    /// A live connection dialed straight to the peer (forward route).
-    Direct(&'a Connection),
-    /// This machine's resident `qsh listen` daemon socket, plus the host
-    /// name it should relay the new `LOCAL_STREAM` conduit to (reverse
-    /// route); see [`ControlLink::Local`]'s own doc.
-    Local {
-        /// The daemon's UDS socket path.
-        socket: &'a std::path::Path,
-        /// The registered host name to relay to.
-        host: &'a str,
-    },
-}
+/// A live connection this process can open a **fresh** data stream on: it
+/// borrows what opening *another* stream needs, so more than one call site
+/// can open data streams the same way ([`crate::tunnel::open_stream`] is
+/// the first such second call site; [`crate::client::Session::open_data_link`]
+/// opens its own inline).
+pub(crate) struct DataLink<'a>(&'a Connection);
 
-impl DataLink<'_> {
+impl<'a> DataLink<'a> {
+    pub(crate) fn new(conn: &'a Connection) -> Self {
+        Self(conn)
+    }
+
     /// Open a fresh data stream and send `header` as its first frame,
     /// applying quinn's per-stream `priority` (`docs/design/protocol.md`
-    /// §12) on the forward route. The reverse `LOCAL_STREAM` conduit has
-    /// no QUIC-level notion of send priority of its own, so `priority` is
-    /// silently dropped on this route today — it is accepted here
-    /// uniformly so callers do not need to special-case which carrier
-    /// they hold, but the daemon does **not** yet apply the caller's
-    /// intended priority on its behalf: `crate::localctl::daemon`'s
-    /// `serve_stream` unconditionally opens the relayed QUIC stream at
-    /// `wire::PRIORITY_SESSION_DATA` and, as of M3, hard-rejects any
-    /// non-`SESSION_DATA` header before opening anything on QUIC. Giving
-    /// the daemon a priority/kind-aware relay path (so a tunnel header
-    /// routed over this carrier rides at `PRIORITY_TUNNEL` instead) is
-    /// M4 plan Step 5 (2473c88) PR 5a's job, not this seam's — this Step 2 seam
-    /// only fixes the call shape so callers don't need to know which
-    /// carrier they hold.
+    /// §12).
     pub(crate) async fn open_stream(
         &self,
         header: &StreamHeader,
         priority: i32,
-    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-        self.open_stream_with_wait(header, priority, 0).await
-    }
-
-    /// [`Self::open_stream`], but with the reverse route's `LocalHello.wait_ms`
-    /// threaded through rather than fixed at `0`. Every caller before
-    /// M4 plan Step 5 (a) (2473c88) had nothing to wait on (`open_stream`'s own
-    /// doc — a live registration or a fresh dial, never a queued arrival),
-    /// so `open_stream` stays the zero-wait default; `crate::tunnel::remote`'s
-    /// `-R over reverse` claim loop is the one caller that needs a real
-    /// budget, to long-poll a `TCP_ACCEPTED{forward_id}` claim instead of
-    /// busy-opening a fresh conduit per attempt
-    /// (`crate::localctl::client::open_stream_with_wait`'s own doc). On the
-    /// forward `Direct` carrier `wait_ms` is accepted uniformly but has
-    /// nothing to apply to — a fresh `open_bi()` never waits on anything.
-    pub(crate) async fn open_stream_with_wait(
-        &self,
-        header: &StreamHeader,
-        priority: i32,
-        wait_ms: u32,
-    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-        match self {
-            DataLink::Direct(conn) => {
-                let (send, recv) = conn.open_bi().await?;
-                let mut data = FramedStream::data(send, recv);
-                data.send.set_priority(priority);
-                data.send.send(header).await?;
-                let (send, recv) = data.split();
-                Ok((
-                    DataSend::Direct(send),
-                    DataRecv::Direct(recv),
-                    DataKillSwitch::default(),
-                ))
-            }
-            DataLink::Local { socket, host } => {
-                let handshake =
-                    crate::localctl::client::open_stream_with_wait(socket, host, header, wait_ms)
-                        .await
-                        .map_err(op_error_to_client_error)?;
-                let kill = DataKillSwitch::new(handshake.socket.clone());
-                Ok((
-                    DataSend::Local(handshake.send),
-                    DataRecv::Local(handshake.recv),
-                    kill,
-                ))
-            }
-        }
+    ) -> Result<(DataSend, DataRecv), ClientError> {
+        let (send, recv) = self.0.open_bi().await?;
+        let mut data = FramedStream::data(send, recv);
+        data.send.set_priority(priority);
+        data.send.send(header).await?;
+        let (send, recv) = data.split();
+        Ok((DataSend(send), DataRecv(recv)))
     }
 }
 
-// Both tests below drive the `Local` carrier against a fake daemon bound
-// to a `UnixListener`, so the whole module is unix-only, rather than
-// gating each test individually.
-#[cfg(all(test, unix))]
-mod tests {
-    use qsh_proto::ErrorCode;
-    use qsh_proto::local::{LocalHelloAck, LocalResponse, local_response};
-    use qsh_proto::wire::{Ping, control_message};
-    use tokio::net::UnixListener;
-
-    use super::*;
-
-    /// Proves the enum actually **dispatches** — a `Local`-carried
-    /// `ControlLink` sends and receives real `ControlMessage` frames
-    /// through a live `LOCAL_CONTROL` conduit, exactly the same call
-    /// shape `crate::client::Session::request` uses regardless of which
-    /// variant is underneath. The `Direct` variant's dispatch is exercised
-    /// by every pre-existing forward-path `client::Session` test in this
-    /// crate (nothing about `ControlLink::send`/`recv` changes that
-    /// behavior — see `crate::client::mod`'s `request`), so this test adds
-    /// coverage for the one variant that is actually new.
-    #[tokio::test]
-    async fn control_link_local_dispatches_send_and_recv_through_the_conduit() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("link-dispatch.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let daemon = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
-            let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
-            let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
-            conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
-                        host: "phone".to_string(),
-                        peer_fingerprint: "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
-                            .to_string(),
-                        generation: 1,
-                        capabilities: Vec::new(),
-                    })),
-                })
-                .await
-                .unwrap();
-            let echoed: ControlMessage = conduit.recv().await.unwrap().unwrap();
-            conduit.send(&echoed).await.unwrap();
-        });
-
-        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
-            .await
-            .unwrap();
-        let mut link = ControlLink::Local(handshake.conduit);
-
-        let ping = ControlMessage::new(1, control_message::Body::Ping(Ping {}));
-        link.send(&ping).await.unwrap();
-        let echoed = link.recv().await.unwrap().expect("daemon echoed a frame");
-        assert_eq!(echoed, ping);
-
-        // A no-op on the Local carrier (see `finish`'s own doc) — must not
-        // panic or hang.
-        link.finish();
-
-        daemon.await.unwrap();
+impl From<FramedSend> for DataSend {
+    fn from(send: FramedSend) -> Self {
+        Self(send)
     }
+}
 
-    /// [`DataSend`]/[`DataRecv`]'s `Local` carrier, dispatch-tested the
-    /// same way [`control_link_local_dispatches_send_and_recv_through_the_conduit`]
-    /// proves `ControlLink::Local` — a real `LOCAL_STREAM` handshake
-    /// (`crate::localctl::client::open_stream`) against a fake daemon that
-    /// then echoes raw bytes exactly the way
-    /// `crate::localctl::daemon::LocalctlDaemon::serve_stream`'s own splice
-    /// does past the header, proving a real `SessionFrame` round-trips
-    /// through both the framed handshake and the raw byte pump underneath.
-    #[tokio::test]
-    async fn data_link_local_dispatches_send_and_recv_of_real_session_frames() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("data-link-dispatch.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let daemon = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
-            let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
-            let hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
-            assert_eq!(
-                hello.kind,
-                qsh_proto::local::LocalStreamKind::LocalStream as i32
-            );
-            assert_eq!(hello.host, "phone");
-            conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
-                        host: "phone".to_string(),
-                        peer_fingerprint: "sha256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
-                            .to_string(),
-                        generation: 1,
-                        capabilities: Vec::new(),
-                    })),
-                })
-                .await
-                .unwrap();
-            let _header: qsh_proto::wire::StreamHeader = conduit.recv().await.unwrap().unwrap();
-            // Past the header this conduit is a raw byte splice, exactly
-            // like the real daemon's `serve_stream`: echo whatever
-            // arrives until the client's own write half closes.
-            let (mut raw, prefetched) = conduit.into_raw();
-            if !prefetched.is_empty() {
-                raw.write_all(&prefetched).await.unwrap();
-            }
-            let mut buf = vec![0u8; 4096];
-            loop {
-                let n = raw.read(&mut buf).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                raw.write_all(&buf[..n]).await.unwrap();
-            }
-        });
-
-        let header = qsh_proto::wire::StreamHeader::session_data(vec![9, 9, 9]);
-        let handshake = crate::localctl::client::open_stream(&sock, "phone", &header)
-            .await
-            .unwrap();
-        let mut send = DataSend::Local(handshake.send);
-        let mut recv = DataRecv::Local(handshake.recv);
-
-        let frame = qsh_proto::wire::SessionFrame::output(3, b"echo".to_vec());
-        send.send(&frame).await.unwrap();
-        let echoed: qsh_proto::wire::SessionFrame =
-            recv.recv().await.unwrap().expect("daemon echoed a frame");
-        assert_eq!(echoed, frame);
-
-        // Half-close: the daemon's echo loop reads a clean EOF, exits, and
-        // drops its own end — this end then sees a clean end of conduit
-        // too (`docs/design/protocol.md` §11-3's "UDS EOF" propagation).
-        send.finish();
-        let end: Option<qsh_proto::wire::SessionFrame> = recv.recv().await.unwrap();
-        assert!(
-            end.is_none(),
-            "expected a clean end of conduit, got {end:?}"
-        );
-
-        daemon.await.unwrap();
-    }
-
-    /// `crate::localctl::client::open_stream`'s handshake errors map
-    /// through [`DataSend`]/[`DataRecv`]'s callers exactly like
-    /// `open_control`'s do — a `LocalError` the daemon sends back is not
-    /// this layer's problem to interpret, only to relay
-    /// (`crate::localctl::client::remote_error`).
-    #[tokio::test]
-    async fn open_stream_maps_a_local_error_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("data-link-error.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let daemon = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
-            let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
-            let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
-            conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::Error(
-                        qsh_proto::local::LocalError::from_code(
-                            ErrorCode::HostNotFound,
-                            "unknown host",
-                        ),
-                    )),
-                })
-                .await
-                .unwrap();
-        });
-
-        let header = qsh_proto::wire::StreamHeader::session_data(vec![1]);
-        // Not `.unwrap_err()`: the `Ok` side (`DataHandshake`) holds a raw
-        // `UnixStream` split across three owners and has no `Debug` impl,
-        // so this matches instead.
-        let err = match crate::localctl::client::open_stream(&sock, "ghost", &header).await {
-            Ok(_) => panic!("expected the daemon's LocalError to surface"),
-            Err(err) => err,
-        };
-        assert_eq!(err.code, ErrorCode::HostNotFound);
-        assert_eq!(err.message, "unknown host");
-        daemon.await.unwrap();
-    }
-
-    #[test]
-    fn op_error_maps_to_client_error_remote_verbatim() {
-        let err = OpError::new(ErrorCode::HostNotFound, "no such host").with_retryable(false);
-        match op_error_to_client_error(err) {
-            ClientError::Remote {
-                code,
-                message,
-                retryable,
-            } => {
-                assert_eq!(code, ErrorCode::HostNotFound);
-                assert_eq!(message, "no such host");
-                assert!(!retryable);
-            }
-            other => panic!("expected ClientError::Remote, got {other:?}"),
-        }
+impl From<FramedRecv> for DataRecv {
+    fn from(recv: FramedRecv) -> Self {
+        Self(recv)
     }
 }

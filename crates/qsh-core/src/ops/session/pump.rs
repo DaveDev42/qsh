@@ -30,18 +30,6 @@ pub(super) async fn pump_attach_input(
     let finished = &ctx.finished;
     let mut commands = commands.lock().await;
     let mut acks_open = true;
-    // The reverse route has no connection of its own to probe, and the
-    // local daemon answers a control `Ping` itself, so nothing else makes a
-    // quiet attach ask the host whether it is there. An empty `Input` does:
-    // the host answers it with an `InputAck`. It rides the idle probe
-    // cadence of the forward route's watchdog.
-    // Only an attach that can draw the status line has a use for the answer.
-    let heartbeat_every = (matches!(ctx.link, RecoveryLink::Reverse(_))
-        && ctx
-            .screen
-            .as_deref()
-            .is_some_and(ScreenSink::has_status_line))
-    .then_some(ctx.recovery.watch.idle_probe_interval);
     loop {
         let command = tokio::select! {
             biased;
@@ -64,21 +52,6 @@ pub(super) async fn pump_attach_input(
                     return;
                 }
                 if writer.send_screen_ack(ack).await.is_err() {
-                    return;
-                }
-                continue;
-            }
-            // Nothing was handed to this pump for a whole beat: ask the host
-            // to answer. A busy attach restarts the wait with every command
-            // and acknowledgement, and needs no question, since what comes
-            // back proves the path. The body is not cancellable, like the
-            // command handling below.
-            () = tokio::time::sleep(heartbeat_every.unwrap_or_default()), if heartbeat_every.is_some() => {
-                // At or below what the host acknowledged, so the host reads
-                // it as a repeat of bytes it already ran and never as a gap.
-                let up_to = (*ctx.applied_input.borrow()).min(writer.input_seq());
-                ctx.link_status.sent(std::time::Instant::now());
-                if writer.send_heartbeat(up_to).await.is_err() {
                     return;
                 }
                 continue;
@@ -255,21 +228,13 @@ pub(super) async fn pump_attach_control(
                     // terminal event in the JSONL stream.
                     ControlIn::Event(event) => {
                         watch.traffic();
-                        // Defensive on a forward attach today (one
-                        // connection per session, so the peer only ever
-                        // has this session's events to send) and load-bearing
-                        // the moment this pump runs over a shared
-                        // `ControlLink::Local` control stream, where a
-                        // `session.writer_changed` is broadcast to every
-                        // conduit of the host regardless of which session
-                        // it names (`crate::localctl::mux::ControlMux::route_event`).
-                        // `docs/design/protocol.md` §11-3's own rule:
-                        // "구독자 쪽 클라이언트도 낯선 session_id의 event는
-                        // 방어적으로 무시한다" — without this, an event for
-                        // a different session would be re-stamped with
-                        // *this* session's `session_ref` and emitted as a
-                        // fabricated `qsh.event/v1` line (adversarial
-                        // review finding).
+                        // Defensive: the peer only ever has this session's
+                        // events to send on its own connection, but an event
+                        // for a different session must never be re-stamped
+                        // with *this* session's `session_ref` and emitted as
+                        // a fabricated `qsh.event/v1` line.
+                        // `docs/design/protocol.md` §11-3: "구독자 쪽 클라이언트도
+                        // 낯선 session_id의 event는 방어적으로 무시한다".
                         if event.session_id != *session_id {
                             continue;
                         }

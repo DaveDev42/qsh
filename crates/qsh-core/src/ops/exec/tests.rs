@@ -242,8 +242,7 @@ fn timeout_error_is_retryable_and_carries_the_budget() {
 /// for a name that is configured nowhere at all — proving the order is
 /// "identity, then routing" rather than "routing, then identity for
 /// whichever branch happens to need it". A device that never ran `qsh
-/// init` has no identity to build either the forward `PeerTarget` or
-/// the reverse `LocalRoute` with, and the frozen `error.CONFIG_ERROR.json`
+/// init` has no identity to build the forward `PeerTarget` with, and the frozen `error.CONFIG_ERROR.json`
 /// fixture (`qsh exec HOST_ALIAS`, `crates/qsh-cli/tests/it/fixtures.rs`)
 /// and `exit_code_matrix.rs`'s "exec: no device identity" row both pin
 /// this same order for a *configured* name; this pins it independently
@@ -286,7 +285,7 @@ fn exec_host_not_found_keeps_the_frozen_text_for_a_wholly_unconfigured_name() {
     .unwrap();
     let identity = ops.load_identity().unwrap().expect("just initialized");
 
-    // `PeerRoute` (the `Ok` side) has no `Debug` impl, so this matches
+    // `PeerTarget` (the `Ok` side) has no `Debug` impl, so this matches
     // by hand rather than `.unwrap_err()`.
     let err = match ops.resolve_exec_route("nowhere", identity) {
         Err(err) => err,

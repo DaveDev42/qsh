@@ -22,10 +22,6 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::datagram::{DatagramHub, DatagramRx, channel_from};
 use crate::exec::ExecSpec;
-// `crate::localctl` builds on every platform, so the reverse
-// (`LOCAL_CONTROL`) leg does too.
-use crate::localctl::client::ControlConduit;
-use crate::ops::OpError;
 
 pub(crate) mod file;
 pub mod link;
@@ -40,7 +36,7 @@ pub mod wake;
 
 mod echo;
 use echo::EchoFilter;
-use link::{ControlLink, DataKillSwitch, DataRecv, DataSend};
+use link::{ControlLink, DataLink, DataRecv, DataSend};
 
 /// How long to wait for the peer's `Hello`. Single definition now lives in
 /// [`crate::handshake`]; re-exported here so this path stays stable.
@@ -140,39 +136,9 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
 }
 
 /// A negotiated connection: control stream open, `Hello` exchanged.
-///
-/// `conn` is `None` exactly when `Self::link` is
-/// `ControlLink::Local` (the reverse route,
-/// M3 plan Step 6 (2473c88)): a CLI process relaying through its resident
-/// daemon is not itself a QUIC endpoint on the underlying connection, so
-/// there is no [`Connection`] to hold. Every data stream this `Session`
-/// opens — [`Self::exec`]'s `EXEC_DATA` (issue #5) and
-/// [`Self::open_attach_stream`]'s `SESSION_DATA` (`docs/design/protocol.md`
-/// §11-3) — goes through `Self::open_data_link` instead, which opens a fresh
-/// `LOCAL_STREAM` conduit to the same daemon socket and host `local`
-/// recorded on this route, rather than a QUIC `open_bi()` a reverse-linked
-/// `Session` has no connection to make.
 pub struct Session {
-    conn: Option<Connection>,
+    conn: Connection,
     link: ControlLink,
-    /// The daemon socket and host alias [`Self::link`]'s `LOCAL_CONTROL`
-    /// conduit came from — `Some` exactly when `conn` is `None`. Recorded
-    /// so a later [`Self::open_attach_stream`] can open a fresh
-    /// `LOCAL_STREAM` conduit to that *same* daemon for that *same* host
-    /// without this module having to thread a
-    /// [`crate::ops::LocalRoute`] through (which would reach backwards
-    /// from `client` into `ops`, the wrong dependency direction —
-    /// `CLAUDE.md`'s workspace map).
-    local: Option<(std::path::PathBuf, String)>,
-    /// The `LOCAL_CONTROL` leg's own `LocalHelloAck` identity —
-    /// `(peer_fingerprint, generation)` — `Some` exactly when
-    /// [`Self::local`] is `Some`. Compared against the `LOCAL_STREAM`
-    /// conduit's own ack in [`Self::open_local_data_link`] so a
-    /// registration that died and reconnected (or was superseded)
-    /// between the two handshakes is caught as a stale route rather than
-    /// silently opening a data stream against a peer the control leg
-    /// never actually bound to (see that method's own doc).
-    local_ack: Option<(String, u64)>,
     next_request_id: u64,
     /// The `RendezvousQuery` in flight and what to hand its answer to
     /// ([`Self::learn_rendezvous`]).
@@ -228,7 +194,7 @@ impl Session {
     /// never learns. Sent at most once per session, and only when `punch.v1`
     /// was negotiated on a connection of our own. Every failure is silent.
     pub async fn learn_rendezvous(&mut self, sink: RendezvousSink) {
-        if self.conn.is_none() || self.hint.is_some() || !self.has_capability(wire::CAP_PUNCH_V1) {
+        if self.hint.is_some() || !self.has_capability(wire::CAP_PUNCH_V1) {
             return;
         }
         let request_id = self.next_request_id;
@@ -296,10 +262,8 @@ impl Session {
     /// up with a `Session` through the same construction.
     pub fn from_control(conn: Connection, ctl: FramedStream, peer_hello: Hello) -> Self {
         Self {
-            conn: Some(conn),
-            link: ControlLink::Direct(ctl),
-            local: None,
-            local_ack: None,
+            conn,
+            link: ControlLink::new(ctl),
             next_request_id: 1,
             hint: None,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
@@ -307,126 +271,21 @@ impl Session {
         }
     }
 
-    /// Build a [`Session`] over a `LOCAL_CONTROL` conduit already past its
-    /// `LocalHelloAck` (`crate::localctl::client::open_control`) — the
-    /// reverse-route sibling of [`Self::from_control`]
-    /// (`docs/design/protocol.md` §11-3, M3 plan Step 6 (2473c88)). There is no
-    /// `Hello` exchange on this leg (the daemon already negotiated one
-    /// with the peer on the CLI process's behalf), so `capabilities` and
-    /// `peer_device_name` come straight from the ack instead —
-    /// `LocalHelloAck.capabilities` and `.host` respectively.
-    pub(crate) fn from_local_control(
-        conduit: ControlConduit,
-        capabilities: Vec<String>,
-        host: String,
-        socket: std::path::PathBuf,
-        peer_fingerprint: String,
-        generation: u64,
-    ) -> Self {
-        Self {
-            conn: None,
-            link: ControlLink::Local(conduit),
-            local: Some((socket, host.clone())),
-            local_ack: Some((peer_fingerprint, generation)),
-            next_request_id: 1,
-            hint: None,
-            capabilities,
-            peer_device_name: host,
-        }
-    }
-
     /// The underlying connection.
-    ///
-    /// Only ever `None` on the reverse route (see [`Self`]'s own doc);
-    /// every daemon-side session (`crate::reverse::listen`, always dialed
-    /// to a real target) and every forward CLI session is `Some`, so this
-    /// panics rather than returning `Option<&Connection>` — a signature
-    /// change every existing caller (all forward/daemon-side) would have
-    /// to thread through for a case that provably cannot reach them.
     pub fn connection(&self) -> &Connection {
-        self.conn
-            .as_ref()
-            .expect("connection() is never called on a reverse-route (LOCAL_CONTROL) Session")
+        &self.conn
     }
 
-    /// Open a fresh data link and send `header` as its first frame, at
-    /// `priority` on the forward route — a QUIC bidi stream dialed
-    /// straight to the peer (unchanged since M1 for
-    /// `SESSION_DATA`/`PRIORITY_SESSION_DATA`; issue #5 is what
-    /// makes [`Self::exec`] call this too, at `PRIORITY_EXEC_DATA`), or a
-    /// fresh `LOCAL_STREAM` conduit to the same daemon
-    /// [`Self::local`]'s `LOCAL_CONTROL` handshake came from on the
-    /// reverse route (`docs/design/protocol.md` §11-3; `priority` has no
-    /// equivalent there — [`Self::open_local_data_link`]'s own doc). The third
-    /// element is a hard-stop primitive for
-    /// [`crate::ops::session::AttachHandle::detach`] and for
-    /// [`Self::exec`]'s own output cap — live only on the reverse route
-    /// (`link::DataKillSwitch`'s own doc explains why the forward route
-    /// needs no equivalent of its own: closing [`Self::connection`], or
-    /// resetting the stream directly, already does that job there).
+    /// Open a fresh data link: a QUIC bidi stream dialed straight to the
+    /// peer, with `header` sent as its first frame at `priority`.
     async fn open_data_link(
         &self,
         header: &StreamHeader,
         priority: i32,
-    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-        if let Some(conn) = self.conn.as_ref() {
-            let (send, recv) = conn.open_bi().await?;
-            let mut data = FramedStream::data(send, recv);
-            data.send.set_priority(priority);
-            data.send.send(header).await?;
-            let (send, recv) = data.split();
-            return Ok((
-                DataSend::Direct(send),
-                DataRecv::Direct(recv),
-                DataKillSwitch::default(),
-            ));
-        }
-        self.open_local_data_link(header).await
-    }
-
-    /// [`Self::open_data_link`]'s reverse-route branch: a fresh
-    /// `LOCAL_STREAM` conduit to [`Self::local`]'s daemon socket and host
-    /// (`crate::localctl::client::open_stream` sends `header` itself —
-    /// see that function's own doc for why).
-    async fn open_local_data_link(
-        &self,
-        header: &StreamHeader,
-    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-        let Some((socket, host)) = self.local.as_ref() else {
-            return Err(ClientError::Protocol(
-                "reverse-route session has no LOCAL_CONTROL daemon socket recorded".into(),
-            ));
-        };
-        let handshake = crate::localctl::client::open_stream(socket, host, header)
+    ) -> Result<(DataSend, DataRecv), ClientError> {
+        DataLink::new(&self.conn)
+            .open_stream(header, priority)
             .await
-            .map_err(|err| map_local_stream_open_error(err, header, host))?;
-        // Fail closed on a stale route (`CLAUDE.md`'s "fail closed on any
-        // ambiguous auth/ACL state"): if the registration died and came
-        // back — or was superseded by a new one — between this session's
-        // `LOCAL_CONTROL` handshake and this `LOCAL_STREAM` one, the two
-        // acks disagree, and redeeming the ticket anyway would only reach
-        // `redeem_ticket` on a target whose per-connection ticket table
-        // never saw it, surfacing as an opaque stream reset instead of
-        // this diagnosable stale-route error.
-        if let Some((expected_fingerprint, expected_generation)) = self.local_ack.as_ref()
-            && (&handshake.peer_fingerprint != expected_fingerprint
-                || handshake.generation != *expected_generation)
-        {
-            return Err(ClientError::Remote {
-                code: ErrorCode::HostNotFound,
-                message: format!(
-                    "{host}'s registration changed between the control and data \
-                     handshakes (stale route)"
-                ),
-                retryable: true,
-            });
-        }
-        let kill = DataKillSwitch::new(handshake.socket);
-        Ok((
-            DataSend::Local(handshake.send),
-            DataRecv::Local(handshake.recv),
-            kill,
-        ))
     }
 
     fn has_capability(&self, cap: &str) -> bool {
@@ -536,26 +395,12 @@ impl Session {
 
     /// Run `spec` on the peer. `stdin`, if given, is streamed to the remote
     /// process until EOF; `None` sends an immediate EOF.
-    ///
-    /// `kill_tx`, if given, receives a clone of this exec's data-conduit
-    /// [`DataKillSwitch`] the moment the data link opens — before this
-    /// method's own receive loop starts, and regardless of which route
-    /// this `Session` rides. A caller racing this call against its own
-    /// deadline (`crate::ops::exec::exec_async_reverse`, issue #5) uses it
-    /// to shut the conduit down at the OS level the instant that deadline
-    /// hits: on the reverse route this method's stdin pump moves the send
-    /// half into a detached `tokio::spawn` (see `pump_stdin`'s own doc),
-    /// so simply dropping a cancelled call to this method does not
-    /// promptly close it the way the forward route's caller closing the
-    /// whole `Connection` does. `None` (every forward-route caller today)
-    /// costs nothing beyond the one channel send this skips.
     pub async fn exec(
         &mut self,
         spec: &ExecSpec,
         stdin: Option<Box<dyn AsyncRead + Send + Unpin>>,
-        kill_tx: Option<tokio::sync::oneshot::Sender<DataKillSwitch>>,
     ) -> Result<ExecResult, ClientError> {
-        self.exec_with_agent(spec, stdin, kill_tx, Vec::new()).await
+        self.exec_with_agent(spec, stdin, Vec::new()).await
     }
 
     /// [`Self::exec`] asking for agent forwarding with `agent_channel`
@@ -565,7 +410,6 @@ impl Session {
         &mut self,
         spec: &ExecSpec,
         stdin: Option<Box<dyn AsyncRead + Send + Unpin>>,
-        kill_tx: Option<tokio::sync::oneshot::Sender<DataKillSwitch>>,
         agent_channel: Vec<u8>,
     ) -> Result<ExecResult, ClientError> {
         let started = Instant::now();
@@ -582,19 +426,12 @@ impl Session {
         // same daemon and host this `Session`'s `LOCAL_CONTROL` handshake
         // came from on the reverse route (`Self::open_data_link` — issue #5
         // gives `exec.run` the reverse leg it did not have before).
-        let (mut send_half, mut recv_half, kill) = self
+        let (mut send_half, mut recv_half) = self
             .open_data_link(
                 &StreamHeader::exec_data(started_msg.ticket),
                 wire::PRIORITY_EXEC_DATA,
             )
             .await?;
-        if let Some(tx) = kill_tx {
-            // A dropped receiver (the caller's own deadline already fired
-            // between `exec_start` and here) is not this method's
-            // problem — the switch was offered, taking it is optional.
-            let _ = tx.send(kill.clone());
-        }
-
         // stdin pump runs concurrently with output collection.
         let stdin_task = tokio::spawn(async move {
             let result = pump_stdin(stdin, &mut send_half).await;
@@ -628,7 +465,7 @@ impl Session {
                 // Stop reading; the host notices the reset and kills the
                 // command instead of streaming into the void.
                 stdin_task.abort();
-                recv_half.abort(1, &kill);
+                recv_half.abort(1);
                 return Err(ClientError::OutputTooLarge {
                     limit: EXEC_OUTPUT_MAX,
                 });
@@ -932,7 +769,7 @@ impl Session {
         &mut self,
         attached: wire::SessionAttached,
     ) -> Result<Attached, ClientError> {
-        let (send, recv, kill) = self
+        let (send, recv) = self
             .open_data_link(
                 &StreamHeader::session_data(attached.ticket.clone()),
                 wire::PRIORITY_SESSION_DATA,
@@ -943,7 +780,7 @@ impl Session {
         // host. The channel is registered before the first byte of the
         // stream is read, so nothing the host sends is counted unknown.
         let datagram = match (&self.conn, channel_from(&attached.screen_channel)) {
-            (Some(conn), Some(channel)) if self.has_capability(wire::CAP_DATAGRAM_V1) => {
+            (conn, Some(channel)) if self.has_capability(wire::CAP_DATAGRAM_V1) => {
                 let hub = DatagramHub::of(conn);
                 let rx = hub.register(channel);
                 Some((ClientDatagram { hub, channel }, rx))
@@ -969,7 +806,6 @@ impl Session {
             input_from: attached.input_seq,
             output_end: attached.output_end,
             screen_channel: attached.screen_channel,
-            kill,
             writer: AttachWriter {
                 send,
                 // Continue the host's axis, not a private one: this is what
@@ -978,10 +814,7 @@ impl Session {
                 input_seq: attached.input_seq,
                 sent,
                 datagram: dg_tx,
-                governor: self
-                    .conn
-                    .as_ref()
-                    .map(crate::adapt::BulkGovernor::for_connection),
+                governor: Some(crate::adapt::BulkGovernor::for_connection(&self.conn)),
             },
             reader: AttachReader {
                 recv: Some(recv),
@@ -1109,9 +942,7 @@ impl Session {
     /// this session has one (see [`Self`]'s own doc on `conn`).
     pub fn close(mut self) {
         self.link.finish();
-        if let Some(conn) = self.conn.take() {
-            conn.close(0, b"done");
-        }
+        self.conn.close(0, b"done");
     }
 
     // ------------------------------------------------------------------
@@ -1241,13 +1072,6 @@ pub struct Attached {
     /// attach (`screen_channel` of the reply). Non-empty means the stream
     /// carries `ScreenUpdate` and no `Output`; empty is the byte path.
     pub screen_channel: Vec<u8>,
-    /// A synchronous, any-thread hard-stop for this attach's data link —
-    /// live only on the reverse route, a no-op otherwise
-    /// (`link::DataKillSwitch`'s own doc). `crate::ops::session`'s
-    /// `RecoveryLink` is built from this right after `open_attach_stream`
-    /// returns, before [`Self::split`] hands the writer/reader off to the
-    /// attach driver.
-    pub(crate) kill: DataKillSwitch,
     writer: AttachWriter,
     reader: AttachReader,
 }
@@ -1657,41 +1481,6 @@ fn response_kind(body: &response::Body) -> &'static str {
         response::Body::PunchAnswer(_) => "PunchAnswer",
         response::Body::RendezvousList(_) => "RendezvousList",
     }
-}
-
-/// [`crate::localctl::client::open_stream`]'s error, mapped for
-/// [`Session::open_local_data_link`] — verbatim
-/// ([`link::op_error_to_client_error`]) for every case but one: a
-/// pre-issue-#5 `qsh listen` daemon still rejects an `EXEC_DATA`
-/// `StreamHeader` with a bare `InvalidArgument` (`local_stream_relay_kind`
-/// did not exist yet on that build, so `serve_stream`'s old three-way
-/// match refused the fourth kind), and that generic "first frame must
-/// be..." text does not tell an operator what actually predates what.
-/// Since a *current* daemon never answers `InvalidArgument` to a
-/// well-formed `EXEC_DATA` header — [`local_stream_relay_kind`]
-/// (`crate::localctl::daemon`) accepts it unconditionally — seeing this
-/// pair (`ExecData` header, `InvalidArgument` reply) is diagnostic on its
-/// own: this machine's resident `qsh listen` predates reverse exec
-/// support. The code is left exactly as the daemon sent it (still a
-/// protocol-shape rejection, not reclassified as `Unsupported`); only the
-/// message names the cause and the fix (`exec_data_rejected_by_an_old_daemon_names_the_stale_qsh_listen`
-/// below, `docs/CLI.md` §6.13's reverse-relay list).
-fn map_local_stream_open_error(err: OpError, header: &StreamHeader, host: &str) -> ClientError {
-    if err.code == ErrorCode::InvalidArgument
-        && header.stream_kind() == Some(wire::StreamKind::ExecData)
-    {
-        return ClientError::Remote {
-            code: err.code,
-            message: format!(
-                "this machine's `qsh listen` daemon (relaying to {host}) rejected an EXEC_DATA \
-                 data stream: it predates reverse exec support — restart or upgrade it and \
-                 retry. (daemon said: {})",
-                err.message
-            ),
-            retryable: err.retryable,
-        };
-    }
-    link::op_error_to_client_error(err)
 }
 
 /// Pump the client's stdin onto `send` as `ExecFrame::Stdin` chunks, always

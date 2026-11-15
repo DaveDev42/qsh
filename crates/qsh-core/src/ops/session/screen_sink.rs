@@ -416,11 +416,6 @@ impl ScreenSink {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Whether this attach draws the connection status line.
-    pub(super) fn has_status_line(&self) -> bool {
-        self.link.is_some()
-    }
-
     /// The request to put in a recovery's `SessionAttach`: the window as it
     /// is now.
     pub(super) fn request(&self) -> wire::ScreenRequest {

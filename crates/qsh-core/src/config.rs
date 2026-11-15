@@ -225,7 +225,7 @@ impl Paths {
     /// computes the path, so both the daemon and a discovering CLI process
     /// agree on where to look whether or not the directory exists yet — a
     /// missing runtime directory just means no `qsh listen` has ever run
-    /// here (`localctl::client::candidate_sockets` treats it the same way).
+    /// here.
     pub fn runtime_dir(&self) -> PathBuf {
         if let Some(dir) = &self.runtime_dir_override {
             return dir.clone();

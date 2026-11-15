@@ -26,7 +26,7 @@ use crate::file::local::{self, FsKind};
 use crate::file::operand::{self, CopyPlan, Direction};
 use crate::file::stat::StatInfo;
 use crate::ops::exec::map_client_error;
-use crate::ops::{OpError, Ops, PeerRoute};
+use crate::ops::{OpError, Ops};
 
 mod tree;
 
@@ -75,7 +75,6 @@ struct Ctx {
     /// A put's destination as it goes on the wire (a trailing `/` when
     /// there are several sources: the host then insists on a directory).
     put_dst: String,
-    reverse: bool,
     /// `-r`.
     recursive: bool,
 }
@@ -133,7 +132,6 @@ fn build_ctx(
     req: &FileCopyReq,
     observer: Arc<dyn FileCopyObserver>,
     user: Option<String>,
-    reverse: bool,
 ) -> Result<Ctx, OpError> {
     let local = match plan.direction {
         Direction::Get => Some(resolve_local_dst(
@@ -159,7 +157,6 @@ fn build_ctx(
         observer,
         local,
         put_dst,
-        reverse,
         recursive: req.recursive,
     })
 }
@@ -178,7 +175,7 @@ pub(super) fn file_copy(
     // The destination and the user hint are settled before anything is
     // dialed, so a bad operand never costs a connection.
     let user = ops.resolve_user_hint(&plan.host, plan.user.clone())?;
-    let ctx = build_ctx(plan, req, observer, user, false)?;
+    let ctx = build_ctx(plan, req, observer, user)?;
 
     // The identity is loaded before the route, as `exec.run` does: an
     // uninitialized device is `CONFIG_ERROR` whatever the host name.
@@ -189,14 +186,12 @@ pub(super) fn file_copy(
         )
     })?;
     let route = ops.resolve_exec_route(&ctx.plan.host, identity)?;
-    let reverse = matches!(route, PeerRoute::Reverse(_));
     // The dial and handshake give way to Ctrl-C (decision 11).
     let mut connected = ops.connect_routed(route, cancel)?;
     let Some(mut session) = connected.take_session() else {
         return Err(OpError::new(ErrorCode::Internal, "connection already closed").into());
     };
 
-    let ctx = Ctx { reverse, ..ctx };
     let started = Instant::now();
     let report = connected
         .runtime()
@@ -221,7 +216,7 @@ pub(super) async fn file_copy_on(
     cancel: &CancelToken,
 ) -> Result<FileCopyData, FileCopyError> {
     let user = plan.user.clone();
-    let ctx = build_ctx(plan, req, observer, user, false)?;
+    let ctx = build_ctx(plan, req, observer, user)?;
     let started = Instant::now();
     let report = run(session, &ctx, cancel).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -448,17 +443,12 @@ fn canceled_error() -> OpError {
     OpError::new(ErrorCode::Canceled, "copy canceled")
 }
 
-fn capability_error(reverse: bool) -> OpError {
-    let message = if reverse {
-        "this reverse route does not have file.v1: either the target's qsh predates file copy, \
-         or this machine's `qsh listen` daemon started before this machine's own qsh was last \
-         upgraded and is still relaying its old capability set; nothing was sent. Upgrade qsh \
-         on the target, then restart `qsh listen` on this machine and retry."
-    } else {
+fn capability_error() -> OpError {
+    OpError::new(
+        ErrorCode::Unsupported,
         "the peer does not advertise the file.v1 capability; nothing was sent. Upgrade qsh on \
-         the peer."
-    };
-    OpError::new(ErrorCode::Unsupported, message)
+         the peer.",
+    )
 }
 
 /// One thing the run still has to do. The stack of them is walked
@@ -497,7 +487,7 @@ async fn run(session: &mut Session, ctx: &Ctx, cancel: &CancelToken) -> Report {
     };
     if !run.session.has_file_capability() {
         run.report.not_attempted = sources.len() as u64;
-        run.report.stop(capability_error(ctx.reverse));
+        run.report.stop(capability_error());
         return run.report;
     }
     while let Some(work) = run.stack.pop() {

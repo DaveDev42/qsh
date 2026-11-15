@@ -32,7 +32,7 @@ use qsh_proto::wire::{
 use qsh_transport::{ReadError, StreamError};
 use tokio::sync::{mpsc, watch};
 
-use super::link::{DataKillSwitch, DataRecv, DataSend};
+use super::link::{DataRecv, DataSend};
 use super::{ClientError, Session, unexpected};
 use crate::file::local::IoClass;
 use crate::file::stat::WriteGate;
@@ -152,17 +152,9 @@ impl Session {
         label: Option<&'static str>,
     ) -> Result<FileConduit, ClientError> {
         let header = StreamHeader::file_data(ticket);
-        let (send, recv, kill) = self.open_data_link(&header, wire::PRIORITY_TUNNEL).await?;
-        let watch = match (self.conn.as_ref(), label) {
-            (Some(conn), Some(label)) => Some(StallWatch::on(conn, label)),
-            _ => None,
-        };
-        Ok(FileConduit {
-            send,
-            recv,
-            kill,
-            watch,
-        })
+        let (send, recv) = self.open_data_link(&header, wire::PRIORITY_TUNNEL).await?;
+        let watch = label.map(|label| StallWatch::on(&self.conn, label));
+        Ok(FileConduit { send, recv, watch })
     }
 }
 
@@ -170,7 +162,6 @@ impl Session {
 pub(crate) struct FileConduit {
     send: DataSend,
     recv: DataRecv,
-    kill: DataKillSwitch,
     watch: Option<StallWatch>,
 }
 
@@ -420,7 +411,6 @@ pub(crate) async fn download(
     let FileConduit {
         mut send,
         mut recv,
-        kill,
         watch,
     } = conduit;
     let created = {
@@ -431,8 +421,8 @@ pub(crate) async fn download(
     let (temp_file, mut guard) = match created {
         Ok(Ok(made)) => made,
         Ok(Err(e)) => {
-            send.abort(RESET_CODE_TUNNEL_ABORT, &kill);
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            send.abort(RESET_CODE_TUNNEL_ABORT);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             return Err(local_io_failure(&e));
         }
         Err(_) => return Err(internal_local("file operation failed")),
@@ -454,7 +444,7 @@ pub(crate) async fn download(
 
     let end = match pumped {
         DownloadPumped::Stalled => {
-            recv.abort(RESET_CODE_TUNNEL_STALLED, &kill);
+            recv.abort(RESET_CODE_TUNNEL_STALLED);
             guard.clean();
             return Err(XferFailure::Local(
                 ErrorCode::ResourceExhausted,
@@ -462,13 +452,13 @@ pub(crate) async fn download(
             ));
         }
         DownloadPumped::Canceled => {
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             guard.clean();
             return Err(XferFailure::Canceled);
         }
         DownloadPumped::Done(Ok(end)) => end,
         DownloadPumped::Done(Err(DownloadStop::Violation(message))) => {
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             guard.clean();
             return Err(XferFailure::Remote(
                 ErrorCode::RemoteError,
@@ -476,12 +466,12 @@ pub(crate) async fn download(
             ));
         }
         DownloadPumped::Done(Err(DownloadStop::Failed(failure))) => {
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             guard.clean();
             return Err(failure);
         }
         DownloadPumped::Done(Err(DownloadStop::WriterClosed)) => {
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             let failure = match writer.await {
                 Ok(Written {
                     error: Some(error), ..
@@ -634,7 +624,6 @@ async fn read_result(recv: &mut DataRecv) -> Result<wire::FileWriteResult, XferF
 async fn run_upload(
     send: &mut DataSend,
     recv: &mut DataRecv,
-    kill: &DataKillSwitch,
     source: UploadSource,
     progress: &(dyn Fn(u64) + Send + Sync),
     watch: &Option<StallWatch>,
@@ -690,13 +679,13 @@ async fn run_upload(
             };
         }
         Err(other) => {
-            send.abort(RESET_CODE_TUNNEL_ABORT, kill);
+            send.abort(RESET_CODE_TUNNEL_ABORT);
             return Err(other);
         }
     }
 
     let Some(hasher) = hasher else {
-        send.abort(RESET_CODE_TUNNEL_ABORT, kill);
+        send.abort(RESET_CODE_TUNNEL_ABORT);
         return Err(XferFailure::Local(
             ErrorCode::Internal,
             "the source reader stopped unexpectedly".to_string(),
@@ -731,18 +720,17 @@ pub(crate) async fn upload(
     let FileConduit {
         mut send,
         mut recv,
-        kill,
         watch,
     } = conduit;
     let outcome = tokio::select! {
-        result = run_upload(&mut send, &mut recv, &kill, source, progress, &watch) => Some(result),
+        result = run_upload(&mut send, &mut recv, source, progress, &watch) => Some(result),
         () = canceled(&mut cancel) => None,
     };
     match outcome {
         Some(result) => result,
         None => {
-            send.abort(RESET_CODE_TUNNEL_ABORT, &kill);
-            recv.abort(RESET_CODE_TUNNEL_ABORT, &kill);
+            send.abort(RESET_CODE_TUNNEL_ABORT);
+            recv.abort(RESET_CODE_TUNNEL_ABORT);
             Err(XferFailure::Canceled)
         }
     }
@@ -826,9 +814,8 @@ mod tests {
         let watch = ledger.watch("file.data");
         let id = watch.id();
         let conduit = FileConduit {
-            send: DataSend::Direct(csend),
-            recv: DataRecv::Direct(crecv),
-            kill: DataKillSwitch::default(),
+            send: DataSend::from(csend),
+            recv: DataRecv::from(crecv),
             watch: Some(watch),
         };
         let hold = Arc::new(Hold::default());

@@ -49,11 +49,7 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
     assert_eq!(s.capabilities, expected);
 
     let r = s
-        .exec(
-            &spec(&["sh", "-c", "echo out; echo err >&2; exit 7"]),
-            None,
-            None,
-        )
+        .exec(&spec(&["sh", "-c", "echo out; echo err >&2; exit 7"]), None)
         .await
         .unwrap();
     assert_eq!(r.stdout, b"out\n");
@@ -63,7 +59,7 @@ async fn exec_dod_case_stdout_stderr_and_exit_code() {
 
     // A second exec on the same connection gets a fresh ticket.
     let r2 = s
-        .exec(&spec(&["sh", "-c", "printf %s hi"]), None, None)
+        .exec(&spec(&["sh", "-c", "printf %s hi"]), None)
         .await
         .unwrap();
     assert_eq!(r2.stdout, b"hi");
@@ -85,7 +81,7 @@ async fn exec_env_is_passed_to_the_remote_command() {
     let mut s = h.session().await;
     let mut sp = spec(&["sh", "-c", "printf %s \"$QSH_TEST_VAR\""]);
     sp.env = vec![("QSH_TEST_VAR".into(), "hello env".into())];
-    let r = s.exec(&sp, None, None).await.unwrap();
+    let r = s.exec(&sp, None).await.unwrap();
     assert_eq!(r.stdout, b"hello env");
     assert_eq!(r.exit_code, 0);
 }
@@ -124,7 +120,6 @@ async fn exec_does_not_leak_the_serve_process_environment() {
         .exec(
             &spec(&["sh", "-c", "printf '[%s]' \"$CARGO_PKG_NAME\""]),
             None,
-            None,
         )
         .await
         .unwrap();
@@ -147,7 +142,7 @@ async fn exec_env_cannot_override_the_pinned_path() {
     let mut s = h.session().await;
     let mut sp = spec(&["sh", "-c", "printf %s \"$PATH\""]);
     sp.env = vec![("PATH".into(), "/evil".into())];
-    let r = s.exec(&sp, None, None).await.unwrap();
+    let r = s.exec(&sp, None).await.unwrap();
     let path = String::from_utf8_lossy(&r.stdout).into_owned();
     assert_ne!(
         path, "/evil",
@@ -176,7 +171,7 @@ async fn exec_env_key_containing_equals_cannot_smuggle_a_path_override() {
     let mut s = h.session().await;
     let mut sp = spec(&["sh", "-c", "printf %s \"$PATH\""]);
     sp.env = vec![("PATH=/evil".into(), "".into())];
-    let r = s.exec(&sp, None, None).await.unwrap();
+    let r = s.exec(&sp, None).await.unwrap();
     let path = String::from_utf8_lossy(&r.stdout).into_owned();
     assert!(
         !path.contains("/evil"),
@@ -197,7 +192,7 @@ async fn exec_stdin_forwarding_and_large_output() {
     let input = vec![b'x'; 100_000];
     let stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin> =
         Box::new(std::io::Cursor::new(input.clone()));
-    let r = s.exec(&spec(&["cat"]), Some(stdin), None).await.unwrap();
+    let r = s.exec(&spec(&["cat"]), Some(stdin)).await.unwrap();
     assert_eq!(r.stdout, input);
     assert_eq!(r.exit_code, 0);
 
@@ -205,7 +200,6 @@ async fn exec_stdin_forwarding_and_large_output() {
     let r = s
         .exec(
             &spec(&["sh", "-c", "head -c 1048576 /dev/zero | tr '\\0' 'a'"]),
-            None,
             None,
         )
         .await
@@ -219,10 +213,7 @@ async fn exec_not_found_and_timeout() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
 
-    let r = s
-        .exec(&spec(&["/nonexistent/binary"]), None, None)
-        .await
-        .unwrap();
+    let r = s.exec(&spec(&["/nonexistent/binary"]), None).await.unwrap();
     assert_eq!(r.exit_code, 127);
     assert!(String::from_utf8_lossy(&r.stderr).contains("cannot execute"));
 
@@ -233,7 +224,7 @@ async fn exec_not_found_and_timeout() {
     let mut sp = spec(&["sleep", "30"]);
     sp.timeout = Some(Duration::from_millis(300));
     let started = std::time::Instant::now();
-    let r = s.exec(&sp, None, None).await.unwrap();
+    let r = s.exec(&sp, None).await.unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "timeout must kill"
@@ -295,7 +286,7 @@ async fn exec_run_timeout_kills_the_whole_tree_on_windows() {
     sp.timeout = Some(Duration::from_secs(10));
 
     let started = std::time::Instant::now();
-    let (result, ()) = tokio::join!(s.exec(&sp, None, None), async {
+    let (result, ()) = tokio::join!(s.exec(&sp, None), async {
         poll_until(
             "ping to write its first line",
             Duration::from_secs(60),
@@ -334,7 +325,7 @@ async fn exec_signal_exit_and_timeout_kill_report_sigkill() {
     let mut s = h.session().await;
 
     let r = s
-        .exec(&spec(&["sh", "-c", "kill -9 $$"]), None, None)
+        .exec(&spec(&["sh", "-c", "kill -9 $$"]), None)
         .await
         .unwrap();
     assert_eq!(r.exit_code, 137);
@@ -344,7 +335,7 @@ async fn exec_signal_exit_and_timeout_kill_report_sigkill() {
     let mut sp = spec(&["sh", "-c", "echo before; sleep 30; echo after"]);
     sp.timeout = Some(Duration::from_millis(300));
     let started = std::time::Instant::now();
-    let r = s.exec(&sp, None, None).await.unwrap();
+    let r = s.exec(&sp, None).await.unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "timeout must kill the whole process group"
@@ -358,7 +349,7 @@ async fn exec_signal_exit_and_timeout_kill_report_sigkill() {
 async fn denied_exec_returns_permission_denied_and_creates_nothing() {
     let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
     let mut s = h.session().await;
-    let err = s.exec(&spec(&["true"]), None, None).await.unwrap_err();
+    let err = s.exec(&spec(&["true"]), None).await.unwrap_err();
     match err {
         ClientError::Remote { code, .. } => assert_eq!(code, ErrorCode::PermissionDenied),
         other => panic!("expected remote PERMISSION_DENIED, got {other:?}"),
@@ -388,7 +379,7 @@ async fn ca_issued_device_principal_is_denied_under_allow_all_pinned() {
     let mut s = qsh_core::client::Session::negotiate(dialed.connection, "laptop")
         .await
         .expect("negotiate");
-    let err = s.exec(&spec(&["true"]), None, None).await.unwrap_err();
+    let err = s.exec(&spec(&["true"]), None).await.unwrap_err();
     match err {
         ClientError::Remote { code, .. } => assert_eq!(code, ErrorCode::PermissionDenied),
         other => panic!("expected remote PERMISSION_DENIED, got {other:?}"),
@@ -504,7 +495,6 @@ async fn peer_disappearing_mid_exec_kills_the_child() {
         s.exec(
             &spec(&argv.iter().map(String::as_str).collect::<Vec<_>>()),
             None,
-            None,
         )
         .await
     });
@@ -574,7 +564,7 @@ async fn shell_command_round_trips_quoting_variables_pipes_and_lists() {
         ("", &[], "", 0),
     ];
     for (command, env, stdout, exit) in cases {
-        let r = s.exec(&run(command, env), None, None).await.unwrap();
+        let r = s.exec(&run(command, env), None).await.unwrap();
         assert_eq!(
             String::from_utf8_lossy(&r.stdout),
             *stdout,
@@ -608,7 +598,7 @@ async fn login_shell_without_a_command_reads_its_commands_from_stdin() {
     let stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(std::io::Cursor::new(
         b"printf 'hi %s' there\nexit 5\n".to_vec(),
     ));
-    let r = s.exec(&sp, Some(stdin), None).await.unwrap();
+    let r = s.exec(&sp, Some(stdin)).await.unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout), "hi there");
     assert_eq!(r.exit_code, 5);
     h.shutdown().await;
@@ -641,7 +631,7 @@ async fn a_host_without_shell_command_v1_is_unsupported_before_anything_is_sent(
             agent_sock: None,
         },
     ] {
-        match s.exec(&sp, None, None).await.unwrap_err() {
+        match s.exec(&sp, None).await.unwrap_err() {
             ClientError::Unsupported(message) => {
                 assert_eq!(message, qsh_core::ops::SHELL_COMMAND_UNSUPPORTED_MESSAGE);
                 assert!(message.contains("too old") && message.contains("Upgrade"));
@@ -653,7 +643,7 @@ async fn a_host_without_shell_command_v1_is_unsupported_before_anything_is_sent(
     assert!(h.audit.records().is_empty(), "nothing reached the host");
     assert_eq!(h.server.pending_tickets(), 0);
 
-    let r = s.exec(&spec(&["true"]), None, None).await.unwrap();
+    let r = s.exec(&spec(&["true"]), None).await.unwrap();
     assert_eq!(r.exit_code, 0);
     h.shutdown().await;
 }
@@ -669,11 +659,7 @@ async fn denied_shell_command_never_runs() {
     let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
     let mut s = h.session().await;
     let err = s
-        .exec(
-            &shell_spec(&format!("touch '{}'", marker.display())),
-            None,
-            None,
-        )
+        .exec(&shell_spec(&format!("touch '{}'", marker.display())), None)
         .await
         .unwrap_err();
     match err {

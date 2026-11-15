@@ -678,7 +678,7 @@ async fn exec_run_against_a_missing_binary_still_releases_the_permit_end_to_end(
     let mut s = h.session().await;
 
     let missing = s
-        .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None, None)
+        .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None)
         .await
         .expect("exec.run completes over the wire even when the child never spawns");
     assert_eq!(
@@ -689,7 +689,7 @@ async fn exec_run_against_a_missing_binary_still_releases_the_permit_end_to_end(
     // The permit the first exec held must already be gone — otherwise
     // this second exec.run, same connection, same principal, cap 1, would
     // be refused RESOURCE_EXHAUSTED.
-    let admitted = s.exec(&exec_spec(&["true"]), None, None).await.unwrap();
+    let admitted = s.exec(&exec_spec(&["true"]), None).await.unwrap();
     assert_eq!(admitted.exit_code, 0);
 
     h.shutdown().await;
@@ -713,12 +713,12 @@ async fn exec_permit_is_released_before_the_result_is_observable() {
 
     for i in 0..100 {
         let missing = s
-            .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None, None)
+            .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None)
             .await
             .unwrap_or_else(|e| panic!("spawn-failure exec {i} refused: {e:?}"));
         assert_eq!(missing.exit_code, 127);
         let ok = s
-            .exec(&exec_spec(&["true"]), None, None)
+            .exec(&exec_spec(&["true"]), None)
             .await
             .unwrap_or_else(|e| panic!("normal exec {i} refused: {e:?}"));
         assert_eq!(ok.exit_code, 0);
@@ -837,7 +837,7 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
     // The child has exited: the permit is free again, and a third
     // exec.run succeeds.
     let admitted = s2
-        .exec(&exec_spec_of(qsh_testkit::shell::true_argv()), None, None)
+        .exec(&exec_spec_of(qsh_testkit::shell::true_argv()), None)
         .await
         .unwrap();
     assert_eq!(admitted.exit_code, 0);

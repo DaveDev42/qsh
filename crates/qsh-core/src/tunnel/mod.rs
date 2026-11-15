@@ -33,7 +33,7 @@
 use qsh_proto::wire::{PRIORITY_TUNNEL, StreamHeader};
 
 use crate::client::ClientError;
-use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
+use crate::client::link::{DataLink, DataRecv, DataSend};
 
 pub use dynamic::DynamicForwardHandle;
 pub use local::{LocalForwardError, LocalForwardHandle};
@@ -54,9 +54,8 @@ pub(crate) mod testutil;
 /// `StreamHeader{TCP_ACCEPTED}`) on `link`, sending `header` as its first
 /// frame and applying [`PRIORITY_TUNNEL`] (`docs/design/protocol.md` §12).
 ///
-/// Symmetric across [`DataLink::Direct`] (forward) and [`DataLink::Local`]
-/// (reverse) — both are just `link.open_stream(...)` here, same as they
-/// are for [`crate::client::Session`]'s `SESSION_DATA` stream. The
+/// This is just `link.open_stream(...)`, same as it is for
+/// [`crate::client::Session`]'s `SESSION_DATA` stream. The
 /// returned pair is framed (able to carry [`qsh_proto::wire::ConnectResult`]
 /// as `TCP_CONNECT`'s first reply) — converting it to a raw byte splice
 /// past that point is Step 3/4's job, not this seam's.
@@ -66,26 +65,8 @@ pub(crate) mod testutil;
 pub(crate) async fn open_stream(
     link: &DataLink<'_>,
     header: &StreamHeader,
-) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+) -> Result<(DataSend, DataRecv), ClientError> {
     link.open_stream(header, PRIORITY_TUNNEL).await
-}
-
-/// [`open_stream`], but long-polling the reverse route's claim wait
-/// instead of the zero-wait default — the one caller is
-/// [`remote::RemoteForwardAcceptor`]'s `-R over reverse` claim loop,
-/// waiting on a `TCP_ACCEPTED{forward_id}` arrival
-/// (`crate::client::link::DataLink::open_stream_with_wait`'s own doc,
-/// M4 plan Step 5 (a) (2473c88)).
-///
-/// That one caller lives inside `remote::RemoteForwardAcceptor`'s
-/// reverse-claim dispatch.
-pub(crate) async fn open_stream_with_wait(
-    link: &DataLink<'_>,
-    header: &StreamHeader,
-    wait_ms: u32,
-) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
-    link.open_stream_with_wait(header, PRIORITY_TUNNEL, wait_ms)
-        .await
 }
 
 #[cfg(test)]
@@ -113,15 +94,10 @@ mod tests {
             port: 3000,
             deny_host_local: false,
         };
-        let link = DataLink::Direct(&client);
-        let (mut send, _recv, _kill) = open_stream(&link, &header).await.unwrap();
+        let link = DataLink::new(&client);
+        let (mut send, _recv) = open_stream(&link, &header).await.unwrap();
 
-        match &send {
-            DataSend::Direct(quic_send) => {
-                assert_eq!(quic_send.priority().unwrap(), PRIORITY_TUNNEL);
-            }
-            DataSend::Local(_) => unreachable!("loopback_pair only opens the forward Direct route"),
-        }
+        assert_eq!(send.priority().unwrap(), PRIORITY_TUNNEL);
 
         // Discriminating guard: `PRIORITY_TUNNEL == 0` coincides with
         // quinn's default send priority, so the assertion above alone would
@@ -131,17 +107,13 @@ mod tests {
         // seam applies the priority it is handed rather than leaving the
         // stream at quinn's default.
         const SENTINEL_PRIORITY: i32 = 42;
-        let link2 = DataLink::Direct(&client);
-        let (mut sentinel_send, _r, _k) =
-            link2.open_stream(&header, SENTINEL_PRIORITY).await.unwrap();
-        match &sentinel_send {
-            DataSend::Direct(s) => assert_eq!(
-                s.priority().unwrap(),
-                SENTINEL_PRIORITY,
-                "the seam must apply the priority it is passed, not quinn's default"
-            ),
-            DataSend::Local(_) => unreachable!("forward Direct route only"),
-        }
+        let link2 = DataLink::new(&client);
+        let (mut sentinel_send, _r) = link2.open_stream(&header, SENTINEL_PRIORITY).await.unwrap();
+        assert_eq!(
+            sentinel_send.priority().unwrap(),
+            SENTINEL_PRIORITY,
+            "the seam must apply the priority it is passed, not quinn's default"
+        );
         sentinel_send.finish();
 
         let (accepted_send, accepted_recv) = server.accept_bi().await.unwrap();
@@ -156,75 +128,5 @@ mod tests {
         // Close cleanly — no tunnel business logic to exercise here.
         send.finish();
         drop(accepted_send);
-    }
-
-    /// (c) the symmetric seam compiles and runs over the reverse
-    /// `DataLink::Local` carrier too: a fake `LOCAL_STREAM` responder
-    /// (the same shape `crate::client::link`'s own
-    /// `data_link_local_dispatches_send_and_recv_of_real_session_frames`
-    /// test uses) accepts the handshake, reads the `TCP_ACCEPTED` header
-    /// back, and both ends close immediately — an empty pipe, opened and
-    /// torn down, proving this carrier is reachable through the seam with
-    /// no divergent code path (this module's own doc, "not a new code
-    /// path").
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tunnel_stream_opens_symmetrically_over_the_reverse_data_link() {
-        use qsh_proto::local::{LocalClaimGranted, LocalHelloAck, LocalResponse, local_response};
-        use tokio::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("tunnel-reverse.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let daemon = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
-            let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
-            let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
-            conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
-                        host: "phone".to_string(),
-                        peer_fingerprint: "sha256:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
-                            .to_string(),
-                        generation: 1,
-                        capabilities: Vec::new(),
-                    })),
-                })
-                .await
-                .unwrap();
-            let header: StreamHeader = conduit.recv().await.unwrap().unwrap();
-            assert_eq!(header.stream_kind(), Some(StreamKind::TcpAccepted));
-            // A real daemon always answers a `TCP_ACCEPTED` claim with
-            // exactly one framed `LocalResponse` before any raw byte
-            // (`docs/design/protocol.md` §11-3's "TCP_ACCEPTED claim
-            // leg의 요청/응답", `LocalctlDaemon::serve_tcp_accepted`'s own
-            // doc) — this fake daemon must do the same, or the client
-            // side correctly treats the connection closing with no
-            // answer as a failure rather than a granted, silent claim.
-            conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
-                })
-                .await
-                .unwrap();
-            // Nothing more to do — an empty pipe, closed immediately after
-            // the grant, is exactly what this seam-level test asks for.
-        });
-
-        let header = StreamHeader {
-            kind: StreamKind::TcpAccepted as i32,
-            ticket: b"forward-id".to_vec(),
-            host: String::new(),
-            port: 0,
-            deny_host_local: false,
-        };
-        let link = DataLink::Local {
-            socket: &sock,
-            host: "phone",
-        };
-        let (mut send, _recv, _kill) = open_stream(&link, &header).await.unwrap();
-        send.finish();
-
-        daemon.await.unwrap();
     }
 }

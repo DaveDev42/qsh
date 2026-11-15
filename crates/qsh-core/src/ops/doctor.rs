@@ -45,7 +45,6 @@ use crate::hosts::HostsFile;
 use crate::identity::{
     CERT_BACKDATE_MINUTES, FileKeyStore, Identity, KEY_FILE, KeyStore, PlatformKeyStore,
 };
-use crate::ops::PeerRoute;
 #[cfg(windows)]
 use crate::ops::service::ComTaskScheduler;
 use crate::ops::service::{TaskDefinitionReader, TaskLogonType, UnreadableTaskScheduler};
@@ -468,8 +467,7 @@ impl Ops {
     /// The first sign that this device takes inbound connections, in the
     /// order ADR-0066 decision 3 lists them: a `[serve]`, `[listen]` or
     /// `[reverse]` table with a key set, a registered service unit, a daemon
-    /// (a `serve.json` record, live or left by a crash, or a live localctl
-    /// endpoint), a pin with a role other than `none`, a live invite that
+    /// (a `serve.json` record, live or left by a crash), a pin with a role other than `none`, a live invite that
     /// pins one. `None` when there is none.
     fn doctor_server_signal(
         &self,
@@ -497,11 +495,7 @@ impl Ops {
         if unit_registered {
             return Ok(Some("service_unit"));
         }
-        let listening = crate::localctl::client::candidate_sockets(&self.paths.runtime_dir())
-            .unwrap_or_default()
-            .iter()
-            .any(|(pid, _)| crate::serve::record::process_is_alive(*pid));
-        if crate::serve::record::read(&self.paths).is_some() || listening {
+        if crate::serve::record::read(&self.paths).is_some() {
             return Ok(Some("daemon"));
         }
         let trust = self.doctor_load_trust()?;
@@ -564,7 +558,7 @@ impl Ops {
         let mut connected = self
             .connect_probe(host, TRANSPORT_PROBE_DIAL_BUDGET)
             .ok()??;
-        let connection = connected.connection()?;
+        let connection = connected.connection();
         let capabilities = connected.capabilities().to_vec();
         let has = |cap: &str| capabilities.iter().any(|c| c == cap);
         let screen_offered = has(CAP_SCREEN_V1);

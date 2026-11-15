@@ -26,16 +26,15 @@ use qsh_proto::{
 };
 use qsh_transport::{Dialer, TransportTuning};
 
-use crate::client::link::DataKillSwitch;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::reconnect::{
-    OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Reconnect, ReconnectFuture, Recovered,
-    ResumeError, recover,
+    OutputCursor, PathBinder, PendingInput, Reconnect, ReconnectFuture, Recovered, ResumeError,
+    recover,
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
 use crate::hosts::HostsFile;
 use crate::ops::exec::map_client_error;
-use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget};
+use crate::ops::{OpError, Operation, Ops, PeerTarget};
 use crate::resume::{NoToken, ResumeStore, StoredToken};
 
 mod attach;
@@ -57,21 +56,11 @@ pub(crate) use recovery::probe_alive;
 pub use screen_sink::{InteractiveOptions, Predict, ScreenAttach, ScreenSync, StatusLine};
 
 use attach::{AttachCommand, AttachStop, RenewalSchedule};
-use context::{
-    AbortOnDrop, AgentAttach, AttachContext, LegEnd, LegPumps, Pump, RecoveryLink, ReverseKill,
-    ReverseRoute,
-};
+use context::{AbortOnDrop, AgentAttach, AttachContext, LegEnd, LegPumps, Pump};
 use drive::drive_attach;
-use link::ConnectedLink;
 use pump::{InputSignals, attach_event_json, pump_attach_control, pump_attach_input};
-use reader::dial_reverse_wait;
 use reader::{dial_peer, forget_if_closed, redial_peer};
-// Wider than `session`'s own use of it needs (`pub(super)` would do for
-// every call site in this module): `crate::ops::exec::exec_async_reverse`
-// (issue #5) is the one caller outside this module, so this re-export is
-// `pub(in crate::ops)` rather than plain `use`.
-pub(in crate::ops) use reader::dial_reverse;
-use reconnect::{DialReconnect, LocalReconnect};
+use reconnect::DialReconnect;
 
 /// Dial a resolved peer once with default tuning: the bootstrap's confirming
 /// dial through a jump chain (ADR-0056 decision 21) uses the same route a
@@ -81,7 +70,6 @@ pub(in crate::ops) async fn dial_target(
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
     dial_peer(target, TransportTuning::default()).await
 }
-use recovery::abandoned;
 use recovery::{ReattachTask, Recovery, lock, map_resume_error, recover_attach, spawn_reattach};
 use screen_sink::{ScreenSink, StatusInit, screen_sync_unsupported};
 
@@ -120,7 +108,7 @@ const DETACH_FLUSH_GRACE: Duration = Duration::from_millis(2_500);
 /// Ceiling on how long a migration probe waits for *any* answer from the
 /// host before it is called a failure.
 ///
-/// Deliberately small: it is spent out of the same [`REDIAL_DEADLINE`]
+/// Deliberately small: it is spent out of the same [`REDIAL_DEADLINE`](crate::client::reconnect::REDIAL_DEADLINE)
 /// budget the re-dial needs, and migration is only ever a latency
 /// optimization (`docs/design/protocol.md` §2). A probe that has to wait
 /// longer than this has already cost more than it can save.
@@ -170,30 +158,13 @@ pub struct RecoveryConfig {
     pub migration: bool,
     /// How many times a detected death is recovered from before the attach
     /// gives up and reports the error. Each attempt is separately bounded
-    /// by its route's [`Reconnect::attempt_deadline`] — [`REDIAL_DEADLINE`]
-    /// on the forward route, `registration_wait` + [`REDIAL_DEADLINE`] on
-    /// the reverse route (`LocalReconnect::attempt_deadline`) so a single
-    /// attempt can legitimately cover the whole wait for a new
-    /// registration — and separately recorded in the recovery telemetry,
-    /// so a campaign counts attempts, not outcomes.
+    /// by [`Reconnect::attempt_deadline`] — [`REDIAL_DEADLINE`](crate::client::reconnect::REDIAL_DEADLINE) — and
+    /// separately recorded in the recovery telemetry, so a campaign counts
+    /// attempts, not outcomes.
     pub attempts: u32,
     /// Whether to recover at all. Off makes a dead path end the attach the
     /// way it did before recovery existed.
     pub enabled: bool,
-    /// Reverse-route only (`LocalReconnect`, M3 plan Step 8 (2473c88)): the
-    /// ceiling on how long a single reconnect wait asks the daemon to
-    /// block for a new-generation live registration
-    /// (`LocalHello.wait_ms`, clamped again on the daemon side to
-    /// `qsh_proto::local::LOCAL_WAIT_MAX` regardless of what is sent
-    /// here — this is this *client's* budget, not a second copy of that
-    /// clamp). Unread on the forward route: `DialReconnect` never
-    /// looks at it. Deliberately **not** [`REDIAL_DEADLINE`] — that 2 s
-    /// budget covers the resume *after* a registration is observed
-    /// (`docs/design/protocol.md` §11-4's "재등록 시점부터 resume 완료까지
-    /// 2초"), while this covers the wait *for* one, which can legitimately
-    /// run for as long as the target's own reconnect backoff
-    /// (`backoff_max_ms`, default 30 s) takes.
-    pub registration_wait: Duration,
 }
 
 impl Default for RecoveryConfig {
@@ -203,7 +174,6 @@ impl Default for RecoveryConfig {
             migration: true,
             attempts: 3,
             enabled: true,
-            registration_wait: qsh_proto::local::LOCAL_WAIT_MAX,
         }
     }
 }
@@ -513,14 +483,12 @@ impl Ops {
             conn.close();
             return Err(crate::ops::shell_command_unsupported());
         }
-        if require_dial_filter {
-            let is_reverse = conn.connection().is_none();
-            if let Err(err) =
-                crate::ops::tunnel::require_dial_filter_capability(conn.capabilities(), is_reverse)
-            {
-                conn.close();
-                return Err(err);
-            }
+        if require_dial_filter
+            && let Err(err) =
+                crate::ops::tunnel::require_dial_filter_capability(conn.capabilities())
+        {
+            conn.close();
+            return Err(err);
         }
         let peer = conn.peer_fingerprint();
         let agent_requested = !msg.agent_channel.is_empty();
@@ -854,32 +822,11 @@ impl Ops {
         // so a recovery redial dials with the same keep-alive.
         let liveness = self.liveness()?;
         let store = ResumeStore::new(&self.paths);
-        // Route-aware (M3 plan Step 7 (2473c88)): a live reverse registration
-        // relays through this machine's `qsh listen` daemon, exactly like
-        // every other `Ops::connect` caller since Step 6 — this was the
-        // one holdout still pinned to `resolve_peer`/`connect_target`
-        // (forward-only). `target` is kept only on the forward branch:
-        // resolution loads the device key, which a platform key store
-        // will not hand over from inside a runtime, and a recovery
-        // re-dials from inside one — there is no equivalent re-dial on
-        // the reverse branch (`RecoveryLink`'s own doc), so nothing there
-        // ever needs it back.
-        let (mut conn, target, reverse_route) = match self.resolve_route(&r.host)? {
-            PeerRoute::Forward(target) => {
-                let conn = self.connect_target(&target, liveness.tuning())?;
-                (conn, Some(target), None)
-            }
-            PeerRoute::Reverse(route) => {
-                let (conn, generation) = self.connect_reverse(&route)?;
-                let reverse_route = ReverseRoute {
-                    host: route.host.clone(),
-                    socket: route.socket,
-                    generation: std::sync::atomic::AtomicU64::new(generation),
-                    registration_wait_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
-                };
-                (conn, None, Some(reverse_route))
-            }
-        };
+        // `target` is kept for the recovery: resolution loads the device
+        // key, which a platform key store will not hand over from inside a
+        // runtime, and a recovery re-dials from inside one.
+        let target = self.resolve_route(&r.host)?;
+        let mut conn = self.connect_target(&target, liveness.tuning())?;
         // No verified fingerprint means nothing to bind a credential to.
         // Fail closed rather than present a token to an unidentified peer.
         let Some(peer) = conn.peer_fingerprint() else {
@@ -896,35 +843,17 @@ impl Ops {
         // Agent forwarding (ADR-0055 decisions 5 and 13). The channel is
         // registered and the dispatcher is already accepting before the
         // request leaves, because the host may open the first `AGENT`
-        // stream before the reply is read. A forward connection hosts the
+        // stream before the reply is read. The connection hosts the
         // dispatcher itself.
         let agent_requested = self.agent.is_some();
-        // The reverse route claims the host's `AGENT` streams from the
-        // `qsh listen` daemon instead (decision 14), through a claim loop
-        // that lives as long as the channel does.
-        let agent_supported = (conn.connection().is_some() || conn.reverse_route().is_some())
-            && conn.capabilities().iter().any(|c| c == wire::CAP_AGENT_V1);
+        let agent_supported = conn.capabilities().iter().any(|c| c == wire::CAP_AGENT_V1);
         let mut agent_attach: Option<AgentAttach> = None;
         let mut early_acceptor = None;
-        if let (Some(agent), Some((socket, route_host)), true) =
-            (&self.agent, conn.reverse_route(), agent_supported)
-        {
-            let channel = agent.register();
-            let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
-            conn.runtime().block_on(async {
-                channel.serve_over_daemon(socket, route_host);
-            });
-            agent_attach = Some(AgentAttach {
-                agent: Arc::clone(agent),
-                channel,
-            });
-        } else if let (Some(agent), Some(connection), true) =
-            (&self.agent, conn.connection(), agent_supported)
-        {
+        if let (Some(agent), true) = (&self.agent, agent_supported) {
             let channel = agent.register();
             early_acceptor = Some(conn.runtime().block_on(
                 crate::tunnel::remote::RemoteForwardAcceptor::spawn_with_agent(
-                    connection,
+                    conn.connection(),
                     Some(agent.dispatcher()),
                 ),
             ));
@@ -1040,17 +969,7 @@ impl Ops {
         let (remote_acceptor, remote_tunnels) = if remote_forward_specs.is_empty() {
             (early_acceptor.take(), Vec::new())
         } else {
-            // Same reverse-route refusal as `open_local_forwards`, and for
-            // the same reason: this leg needs a raw QUIC connection of its
-            // own to spawn the `TCP_ACCEPTED` acceptor on (the M4 plan (2473c88)
-            // Step 5).
-            let Some(connection) = conn.connection() else {
-                conn.close();
-                return Err(OpError::new(
-                    ErrorCode::Unsupported,
-                    "remote forwards over a reverse connection are not implemented yet",
-                ));
-            };
+            let connection = conn.connection();
             // One accept loop per connection: when `-A` already started
             // it, the `-R` table lives in that same dispatcher.
             let acceptor =
@@ -1113,26 +1032,12 @@ impl Ops {
         // since has nothing to wait for.
         let (applied_input, _) = tokio::sync::watch::channel(attached.input_from);
         // What `AttachHandle::detach`/the recovery loop actually hold onto
-        // to end or rebuild this attach's transport (`RecoveryLink`'s own
-        // doc): the forward route's swappable `Link` on the forward
-        // branch, or a hard-stop for this attach's own `LOCAL_STREAM`
-        // conduit on the reverse branch — `attached.kill`, set by
-        // `Session::open_attach_stream` moments ago, never `conn.link`
-        // (which on the reverse route carries nothing usable here; see
-        // `ConnectedLink::Reverse`'s own doc).
-        let link = match &conn.link {
-            ConnectedLink::Forward(fwd) => RecoveryLink::Forward(fwd.clone()),
-            ConnectedLink::Reverse { .. } => {
-                RecoveryLink::Reverse(ReverseKill::new(attached.kill.clone()))
-            }
-        };
+        // to end or rebuild this attach's transport: the swappable `Link`.
+        let link = conn.link.clone();
         // The drawing state of a screen-sync attach, kept across the
         // connections the attach runs on.
         // Local echo prediction needs both peers to speak `screen-echo.v1`
-        // (ADR-0053 decision 7); the reverse route has no QUIC connection to
-        // read `srtt` from and samples it from `InputAck` spacing instead
-        // (decision 8).
-        let reverse = matches!(link, RecoveryLink::Reverse(_));
+        // (ADR-0053 decision 7).
         let screen_echo = capabilities.iter().any(|c| c == wire::CAP_SCREEN_ECHO_V1);
         let predict_unavailable = match screen {
             Some(s) if s.predict == Predict::Always => {
@@ -1153,7 +1058,7 @@ impl Ops {
         ));
         let screen_sink = screen.filter(|_| screen_granted).map(|s| {
             let predict =
-                crate::client::predict_drive::PredictDriver::new(s.predict, screen_echo, reverse);
+                crate::client::predict_drive::PredictDriver::new(s.predict, screen_echo, false);
             let status = s.status_line.enabled().then(|| StatusInit {
                 link: link_status.clone(),
                 escape: s.escape,
@@ -1177,7 +1082,6 @@ impl Ops {
             tuning: liveness.tuning(),
             finished: finished.clone(),
             applied_input,
-            reverse_route,
             agent: agent_attach,
         });
         let driver = conn
@@ -1186,48 +1090,46 @@ impl Ops {
         // An interactive client (one that asked for screen sync, whether or
         // not the host granted it) watches what the transport policy would
         // decide for its connection and says so on `qsh::adapt` (ADR-0052
-        // decision 14). A reverse route has no QUIC connection of ours to
-        // watch.
-        let adapt =
-            match (&link, screen.is_some()) {
-                (RecoveryLink::Forward(live), true) => {
-                    let pinned_keep_alive = self
-                        .config()
-                        .ok()
-                        .and_then(|c| c.transport.keep_alive_ms)
-                        .map(Duration::from_millis);
-                    let user = crate::adapt::User {
-                        keep_alive: pinned_keep_alive,
-                        prediction: screen.and_then(|s| s.predict.pin()),
-                        ..crate::adapt::User::from_process()
-                    };
-                    let sampler = crate::adapt::PolicySampler::new(
-                        user,
-                        screen_granted,
-                        capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
-                    );
-                    let live = live.clone();
-                    // The prediction knob of each step goes to the attach's
-                    // predictor (ADR-0053 decision 8).
-                    let sink = screen_sink.clone();
-                    Some(crate::adapt::PolicyMonitor::spawn_observed(
-                        conn.runtime().handle(),
-                        move || live.connection(),
-                        sampler,
-                        crate::adapt::PolicyMonitor::emit_line,
-                        move |sample| {
-                            if let Some(sink) = &sink {
-                                sink.set_policy(sample.prediction);
-                                // The status line's `4 x srtt` threshold.
-                                sink.set_srtt((sample.report.rtt_ms > 0.0).then(|| {
-                                    Duration::from_secs_f64(sample.report.rtt_ms / 1000.0)
-                                }));
-                            }
-                        },
-                    ))
-                }
-                _ => None,
+        // decision 14).
+        let adapt = if screen.is_some() {
+            let pinned_keep_alive = self
+                .config()
+                .ok()
+                .and_then(|c| c.transport.keep_alive_ms)
+                .map(Duration::from_millis);
+            let user = crate::adapt::User {
+                keep_alive: pinned_keep_alive,
+                prediction: screen.and_then(|s| s.predict.pin()),
+                ..crate::adapt::User::from_process()
             };
+            let sampler = crate::adapt::PolicySampler::new(
+                user,
+                screen_granted,
+                capabilities.iter().any(|c| c == wire::CAP_DATAGRAM_V1),
+            );
+            let live = link.clone();
+            // The prediction knob of each step goes to the attach's
+            // predictor (ADR-0053 decision 8).
+            let sink = screen_sink.clone();
+            Some(crate::adapt::PolicyMonitor::spawn_observed(
+                conn.runtime().handle(),
+                move || live.connection(),
+                sampler,
+                crate::adapt::PolicyMonitor::emit_line,
+                move |sample| {
+                    if let Some(sink) = &sink {
+                        sink.set_policy(sample.prediction);
+                        // The status line's `4 x srtt` threshold.
+                        sink.set_srtt(
+                            (sample.report.rtt_ms > 0.0)
+                                .then(|| Duration::from_secs_f64(sample.report.rtt_ms / 1000.0)),
+                        );
+                    }
+                },
+            ))
+        } else {
+            None
+        };
         Ok(SessionAttachStream {
             stop: AttachStop {
                 finished,
@@ -1438,40 +1340,25 @@ impl Ops {
     /// `session.attach`) sit on — they need many round trips on one
     /// connection, where a value op needs exactly one.
     ///
-    /// Routes via [`Ops::resolve_route`] (M3 plan Step 6 (2473c88)): a live
-    /// reverse registration relays through this machine's `qsh listen`
-    /// daemon ([`Self::connect_reverse`]); otherwise this is exactly the
-    /// forward dial it always was, via [`Self::connect_target`]. Every
-    /// caller of `connect` — the six value ops and [`Ops::session_reader`]
-    /// — gets this transparently; `session.attach`'s own
-    /// [`Self::connect_target`] call stays forward-only (M3 Step 7 adds
-    /// its reverse leg).
+    /// Routes via [`Ops::resolve_route`], then dials with
+    /// [`Self::connect_target`]. Every caller of `connect` — the six value
+    /// ops and [`Ops::session_reader`] — gets this transparently.
     pub(crate) fn connect(&self, host: &str) -> Result<Connected, OpError> {
-        match self.resolve_route(host)? {
-            PeerRoute::Forward(target) => self.connect_target(&target, TransportTuning::default()),
-            // Generation is only ever needed to seed a `session.attach`'s
-            // recovery baseline (`Self::connect_reverse`'s own doc) — none
-            // of this method's six value-op callers attach anything.
-            PeerRoute::Reverse(route) => {
-                self.connect_reverse(&route).map(|(conn, _generation)| conn)
-            }
-        }
+        let target = self.resolve_route(host)?;
+        self.connect_target(&target, TransportTuning::default())
     }
 
     /// A forward connection for `qsh doctor <host>`'s measurement
     /// (ADR-0052 decision 14): the dial and handshake get `budget`, and a
-    /// host that cannot be reached that way, or one only reachable through a
-    /// reverse registration (no QUIC connection of ours to measure), is
-    /// `Ok(None)` rather than an error. The reachability findings already say
+    /// host that cannot be reached that way is `Ok(None)` rather than an
+    /// error. The reachability findings already say
     /// why a host does not answer.
     pub(crate) fn connect_probe(
         &self,
         host: &str,
         budget: Duration,
     ) -> Result<Option<Connected>, OpError> {
-        let PeerRoute::Forward(target) = self.resolve_route(host)? else {
-            return Ok(None);
-        };
+        let target = self.resolve_route(host)?;
         let runtime = self.connect_runtime()?;
         let dialed = runtime.block_on(async {
             tokio::time::timeout(budget, dial_peer(&target, TransportTuning::default())).await
@@ -1481,7 +1368,7 @@ impl Ops {
         };
         Ok(Some(Connected {
             runtime: Some(runtime),
-            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+            link: Link::new(endpoint, connection),
             session: Some(session),
         }))
     }
@@ -1497,7 +1384,7 @@ impl Ops {
     /// is untouched; only this caller stops waiting for it.
     pub(crate) fn connect_routed(
         &self,
-        route: PeerRoute,
+        target: PeerTarget,
         cancel: &crate::ops::CancelToken,
     ) -> Result<Connected, OpError> {
         let canceled = || OpError::new(qsh_proto::ErrorCode::Canceled, "copy canceled");
@@ -1505,59 +1392,34 @@ impl Ops {
             return Err(canceled());
         }
         let runtime = self.connect_runtime()?;
-        let connected = match route {
-            PeerRoute::Forward(target) => {
-                let dial = |target: &PeerTarget| {
-                    runtime.block_on(async {
-                        tokio::select! {
-                            biased;
-                            () = cancel.canceled() => Err(canceled()),
-                            dialed = dial_peer(target, TransportTuning::default()) => dialed,
-                        }
-                    })
-                };
-                let dialed = match dial(&target) {
-                    Err(err) if !cancel.is_canceled() => match self.revive_target(&target, &err) {
-                        Some(revived) => dial(&revived),
-                        None => Err(err),
-                    },
-                    other => other,
-                };
-                let (endpoint, connection, session) = dialed?;
-                Connected {
-                    runtime: Some(runtime),
-                    link: ConnectedLink::Forward(Link::new(endpoint, connection)),
-                    session: Some(session),
+        let dial = |target: &PeerTarget| {
+            runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    () = cancel.canceled() => Err(canceled()),
+                    dialed = dial_peer(target, TransportTuning::default()) => dialed,
                 }
-            }
-            PeerRoute::Reverse(route) => {
-                let dialed = runtime.block_on(async {
-                    tokio::select! {
-                        biased;
-                        () = cancel.canceled() => Err(canceled()),
-                        dialed = dial_reverse(&route) => dialed,
-                    }
-                });
-                let (session, peer_fingerprint, _generation) = dialed?;
-                Connected {
-                    runtime: Some(runtime),
-                    link: ConnectedLink::Reverse {
-                        peer_fingerprint,
-                        socket: route.socket.clone(),
-                        host: route.host.clone(),
-                    },
-                    session: Some(session),
-                }
-            }
+            })
         };
-        Ok(connected)
+        let dialed = match dial(&target) {
+            Err(err) if !cancel.is_canceled() => match self.revive_target(&target, &err) {
+                Some(revived) => dial(&revived),
+                None => Err(err),
+            },
+            other => other,
+        };
+        let (endpoint, connection, session) = dialed?;
+        Ok(Connected {
+            runtime: Some(runtime),
+            link: Link::new(endpoint, connection),
+            session: Some(session),
+        })
     }
 
     /// [`connect`](Self::connect), also handing back what a supervised
-    /// tunnel needs to mend the route later: the resolved [`PeerTarget`] on
-    /// the forward route, re-dialed as is instead of resolving the host
-    /// again (ADR-0023 decision 4), and the registration `generation` on
-    /// the reverse route (decision 7-1).
+    /// tunnel needs to mend the route later: the resolved [`PeerTarget`],
+    /// re-dialed as is instead of resolving the host again (ADR-0023
+    /// decision 4).
     ///
     /// `tuning` is the `[transport]` setting the caller read: a supervised
     /// or long-lived tunnel is the one place besides an attach that dials
@@ -1567,21 +1429,12 @@ impl Ops {
         host: &str,
         tuning: TransportTuning,
     ) -> Result<(Connected, RouteSeed), OpError> {
-        match self.resolve_route(host)? {
-            PeerRoute::Forward(target) => {
-                let conn = self.connect_target(&target, tuning)?;
-                Ok((conn, RouteSeed::Forward(Box::new(target))))
-            }
-            PeerRoute::Reverse(_) => Err(OpError::new(
-                ErrorCode::Unsupported,
-                "reverse connections were retired in v0.9.0 (ADR-0068)",
-            )
-            .with_details(serde_json::json!({ "reason": crate::retired::REASON }))),
-        }
+        let target = self.resolve_route(host)?;
+        let conn = self.connect_target(&target, tuning)?;
+        Ok((conn, RouteSeed::Forward(Box::new(target))))
     }
 
-    /// [`connect`](Self::connect) for a peer already resolved, forward
-    /// route only.
+    /// [`connect`](Self::connect) for a peer already resolved.
     ///
     /// An attach resolves its peer once and keeps the result, because the
     /// resolution loads the device key — which must not happen inside a
@@ -1601,39 +1454,9 @@ impl Ops {
         };
         Ok(Connected {
             runtime: Some(runtime),
-            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+            link: Link::new(endpoint, connection),
             session: Some(session),
         })
-    }
-
-    /// [`connect`](Self::connect)'s reverse-route branch: relay through
-    /// this machine's resident `qsh listen` daemon over a `LOCAL_CONTROL`
-    /// conduit instead of dialing the peer directly (M3 plan Step 6 (2473c88)).
-    /// No identity load here — the CLI process presents no certificate of
-    /// its own on this leg, the daemon already holds the live mTLS
-    /// connection to the peer — so, unlike [`Self::connect_target`],
-    /// there is nothing that must happen before this method's own runtime
-    /// exists.
-    /// Returns the registration `generation` observed at connect time
-    /// alongside [`Connected`] — [`Self::session_attach`]'s reverse arm
-    /// needs it to seed [`AttachContext`]'s reverse-route baseline (Step
-    /// 8's `LocalReconnect` input); every other caller of
-    /// [`Self::connect`] discards it.
-    fn connect_reverse(&self, route: &LocalRoute) -> Result<(Connected, u64), OpError> {
-        let runtime = self.connect_runtime()?;
-        let (session, peer_fingerprint, generation) = runtime.block_on(dial_reverse(route))?;
-        Ok((
-            Connected {
-                runtime: Some(runtime),
-                link: ConnectedLink::Reverse {
-                    peer_fingerprint,
-                    socket: route.socket.clone(),
-                    host: route.host.clone(),
-                },
-                session: Some(session),
-            },
-            generation,
-        ))
     }
 }
 

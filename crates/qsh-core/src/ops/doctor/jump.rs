@@ -15,9 +15,7 @@ impl Ops {
 
         const SETTLE: Duration = Duration::from_millis(1500);
         let hops = self.jump_hops_for(host).ok().flatten()?;
-        let PeerRoute::Forward(target) = self.resolve_route(host).ok()? else {
-            return None;
-        };
+        let target = self.resolve_route(host).ok()?;
         let plan = target.jump.clone()?;
         let runtime = self.connect_runtime().ok()?;
         let dialer = qsh_transport::Dialer::new(target.identity.local.clone(), target.evaluator());

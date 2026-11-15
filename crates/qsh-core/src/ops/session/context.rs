@@ -1,4 +1,4 @@
-//! Per-attach driver state: the abort-on-drop helpers, [`AttachContext`], the reverse route, and the leg pumps.
+//! Per-attach driver state: the abort-on-drop helpers, [`AttachContext`], and the leg pumps.
 
 use super::*;
 
@@ -26,21 +26,17 @@ pub(super) struct AttachContext {
     /// 9): the pumps report sends, the path watch of every leg reports
     /// replies, the recovery loop its attempt.
     pub(super) link_status: Arc<crate::client::linkstatus::LinkTracker>,
-    /// `Some` only on the forward route — `session_attach`'s own doc on
-    /// why the reverse route never resolves one of these at all.
-    /// [`reattach`] (the only reader) is reachable only when
-    /// [`Self::link`] is [`RecoveryLink::Forward`] (`drive_attach`'s "no
-    /// recovery on the reverse leg" gate), so this being `None` there is
-    /// never actually observed.
-    pub(super) target: Option<PeerTarget>,
+    /// The peer this attach dials. Resolved once, when the attach is
+    /// created ([`reattach`] is the only reader).
+    pub(super) target: PeerTarget,
     pub(super) host: String,
     pub(super) session_id: String,
     pub(super) session_ref: String,
     pub(super) paths: crate::config::Paths,
     pub(super) no_steal: bool,
-    /// The transport this attach's hard-stop and recovery ride —
-    /// [`RecoveryLink`]'s own doc.
-    pub(super) link: RecoveryLink,
+    /// The swappable endpoint/connection pair this attach's hard-stop and
+    /// recovery ride ([`Link`]'s own doc).
+    pub(super) link: Link,
     /// The last window size the frontend asked for, if it ever did.
     ///
     /// A `Resize` is written straight through and is not part of the
@@ -68,16 +64,6 @@ pub(super) struct AttachContext {
     /// been handed them (`crate::session_stream`), and a connection closed
     /// in between drops whatever the host had not read yet.
     pub(super) applied_input: tokio::sync::watch::Sender<u64>,
-    /// `Some` only on the reverse route — the mirror image of
-    /// [`Self::target`]'s "`Some` only on forward". Step 8's
-    /// [`LocalReconnect`] input: which daemon to ask, and the highest
-    /// registration generation this attach has ridden so far. Seeded at
-    /// connect time by [`Ops::session_attach`]'s reverse arm from
-    /// `LocalHelloAck.generation`, then advanced by every successful
-    /// `LocalReconnect` landing — so a *second* leg death after a
-    /// recovery waits past the generation the recovery itself landed on,
-    /// never the original one again.
-    pub(super) reverse_route: Option<ReverseRoute>,
     /// The `-A` channel of this attach and the table it lives in. It stays
     /// registered for as long as the attach does, so a recovery's new
     /// connection can carry the same channel (ADR-0055 decision 9) and its
@@ -96,112 +82,6 @@ impl AttachContext {
     pub(super) fn finished(&self) -> bool {
         self.finished.load(std::sync::atomic::Ordering::Acquire)
     }
-}
-
-/// [`AttachContext::reverse_route`]'s payload: which daemon socket and
-/// host alias to reconnect to (`LocalHello.host`, `LocalRoute`'s own
-/// fields — kept here as an owned copy rather than a borrow because this
-/// outlives the `session_attach` call that resolved them), and the
-/// generation baseline [`LocalReconnect`] must wait past. The generation
-/// is interior-mutable (not just `u64`) because it is shared, through the
-/// one `Arc<AttachContext>` every leg of this attach holds, between
-/// whichever `LocalReconnect` is currently running and the next one
-/// `drive_attach`'s gate builds after a *subsequent* leg death — see the
-/// field's own doc on `AttachContext` for why the value must survive
-/// across that boundary rather than being reset per-`LocalReconnect`.
-pub(super) struct ReverseRoute {
-    // `host`/`socket`/`generation` are read only by the `#[cfg(unix)]`
-    // `local_reattach`/`LocalReconnect` dial path; the struct is still
-    // constructed on every platform, so they are dead — not absent — on
-    // Windows. (`registration_wait_ms` below stays live everywhere: the
-    // recovery-report getter that reads it is not gated.)
-    pub(super) host: String,
-    pub(super) socket: std::path::PathBuf,
-    pub(super) generation: std::sync::atomic::AtomicU64,
-    /// Milliseconds the most recently *completed* [`LocalReconnect`] wait
-    /// spent blocked on the daemon's new-generation registration before it
-    /// could redeem the resume credential — measured across the wait
-    /// only, not the redemption that follows it. This is Step 8's
-    /// `registration_wait_ms` telemetry *input*: `docs/CLI.md` §6.4 names
-    /// the field, and wiring it into the emitted `qsh::recovery` record is
-    /// a later step's job, not this one's — this field only has to make
-    /// the number available to whatever reads it next.
-    /// `u64::MAX` means "no `LocalReconnect` wait has completed yet on
-    /// this route" (the field's zero value would be indistinguishable
-    /// from a wait that resolved instantly, which the daemon's own
-    /// immediate-hit branch can genuinely do).
-    pub(super) registration_wait_ms: std::sync::atomic::AtomicU64,
-}
-
-/// The reverse route's swappable hard-stop — the [`DataKillSwitch`]
-/// counterpart to [`Link`]'s swappable endpoint/connection pair, and for
-/// exactly the same reason ([`Link`]'s own doc: "every `AttachHandle` a
-/// frontend already took — and the teardown path — must keep reaching the
-/// live one"). Before Step 8 the reverse route never rebuilt a leg, so a
-/// bare, un-swappable `DataKillSwitch` was enough; Step 8's
-/// [`LocalReconnect`] lands a *new* `LOCAL_STREAM` conduit with its own
-/// kill switch on every successful recovery, and every clone of
-/// [`RecoveryLink::Reverse`] — [`AttachContext::link`]'s and
-/// [`AttachHandle::link`]'s alike — has to observe that swap, not go on
-/// killing the conduit that already died. One shared cell, exactly the
-/// shape [`Link`] already uses.
-#[derive(Clone, Default)]
-pub(super) struct ReverseKill(Arc<std::sync::Mutex<DataKillSwitch>>);
-
-impl ReverseKill {
-    pub(super) fn new(kill: DataKillSwitch) -> Self {
-        Self(Arc::new(std::sync::Mutex::new(kill)))
-    }
-
-    /// Shut the *current* conduit down — see [`DataKillSwitch::kill`].
-    pub(super) fn kill(&self) {
-        lock(&self.0).kill();
-    }
-
-    /// Install a new kill switch, handing back the one it replaced so the
-    /// caller can decide whether it is still worth killing explicitly
-    /// (mirrors [`Link::replace`]).
-    // Only the `#[cfg(unix)]` `LocalReconnect` recovery swap calls this;
-    // `kill`/`new` above are used cross-platform, `replace` is not.
-    pub(super) fn replace(&self, new: DataKillSwitch) -> DataKillSwitch {
-        std::mem::replace(&mut *lock(&self.0), new)
-    }
-}
-
-/// What an attach's [`AttachContext::link`]/[`AttachHandle::link`] rides —
-/// the forward route's swappable [`Link`], or, on the reverse route
-/// (M3 plan Step 7 (2473c88)), this attach's own `LOCAL_STREAM` hard-stop,
-/// swappable since Step 8 ([`ReverseKill`]'s own doc).
-///
-/// **Recovery on the reverse leg since Step 8** rides a different seam
-/// than the forward route's, because the underlying transport really is
-/// different: the forward route's migrate-or-resume machinery
-/// ([`recover_attach`], [`reattach`], [`watch_path`]) is built on a QUIC
-/// `Connection` this one attach owns exclusively — probeable for
-/// liveness, swappable for a fresh dial, and safe to hand a full
-/// `close()` to because nothing else is riding it. None of that holds on
-/// the reverse route: the `Connection` a target sees is its *one*
-/// long-lived registration to the controller, shared by every attach
-/// every daemon-relayed CLI process has open to it, so there is nothing
-/// attach-scoped to probe or migrate — only [`LocalReconnect`]'s wait-
-/// then-reattach applies (`recover_attach`'s `link: None` branch, its own
-/// doc). `drive_attach`'s gate still reads `&ctx.link` to decide *which*
-/// [`Reconnect`] to build, but both branches now reach [`recover_attach`]
-/// when `ctx.recovery.enabled` — a link death that recovery cannot use
-/// (disabled, or `LocalReconnect` exhausted, M3 plan Step 8 (2473c88)) still
-/// ends the attach with a typed error (`LegEnd::Broken`'s existing path),
-/// never a panic, an `unreachable!`, or a hang.
-#[derive(Clone)]
-pub(super) enum RecoveryLink {
-    /// The forward route: a real, swappable QUIC endpoint/connection pair
-    /// (recovery-capable — [`Link`]'s own doc).
-    Forward(Link),
-    /// The reverse route: this attach's own `LOCAL_STREAM` conduit,
-    /// killable synchronously from any thread and swappable across a
-    /// recovery ([`ReverseKill`]'s own doc) — no `Connection`, no
-    /// `Endpoint`, nothing [`recover_attach`]'s migration half could
-    /// probe (it never tries to on this route — its own doc).
-    Reverse(ReverseKill),
 }
 
 /// How one leg of an attach ended.
