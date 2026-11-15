@@ -1010,6 +1010,13 @@ replacement. A `qsh serve` whose config still holds `[serve].to` or
 `[reverse].controller` refuses to start, so a host that used to dial out never
 silently opens `[::]:4433`.
 
+The doctor code `controller_unreachable` no longer fires. Its old message,
+kept here because the vocabulary stays in the contract, read:
+
+> Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
+>
+> Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
+
 The iroh route replaces them. Run `qsh serve` on the host behind NAT and pin
 its key on the machine you sit at (`qsh trust add <name> --key ...`). The
 relay (TCP 443) always reaches it, iroh's hole punching and the daemon's port
