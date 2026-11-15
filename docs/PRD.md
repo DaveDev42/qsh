@@ -117,6 +117,12 @@ qsh serve --to controller.example.com
 
 relay(TCP 443)가 막힌 망에서는 iroh route가 서지 않고, 주소로 직접 닿지 못하는 장비에는 qsh로 닿을 길이 없다. 역방향과 qsh 자체 홀펀칭이 하던 이 fallback이 사라지는 것은 ADR-0068이 받아들인 위험이다. doctor 코드 `controller_unreachable`은 어휘에 남고 더 나오지 않는다.
 
+은퇴(ADR-0068): doctor 코드 `controller_unreachable`은 더 나오지 않는다. 어휘로 남아 있어 옛 문안을 그대로 적어 둔다.
+
+> Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay; hole punching needs a rendezvous that both ends can reach, and the controller is that rendezvous.
+>
+> Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. A controller behind NAT cannot be the rendezvous, and QSH has no answer for that.
+
 ### 세션 복구
 
 ```bash
@@ -226,7 +232,7 @@ ACL principal은 certificate fingerprint 또는 CA가 발급한 user/device iden
 
 `forward.jump`는 중간 peer가 `-J` 체인의 JUMP 스트림마다 UDP 소켓과 채널을 만들기 전에 거는 인가다(ADR-0056 결정 18). 판정 자리는 스트림마다 인라인이고 resource는 요청한 `host:port` 문자열이다. `full`과 `tunnel`이 주고 `forward.*` 행이 이 action을 함께 덮는다. `forward.agent`와 달리 실제로 넓어지는 권한이다. `forward.local`이 TCP로 닿는 곳에 QUIC로 답하는 UDP 서비스가 더해지므로, `allow = ["forward.*"]` 행을 가진 peer는 업그레이드 뒤 이 action도 얻는다. 항상 거부 gate에는 들어가지 않고, 목적지 축은 없다. host-local 거부와 QUIC 문이 모든 principal에 같이 걸린다.
 
-`host.reverse`와 `host.punch`는 ADR-0068로 역방향과 홀펀칭이 걷혀 어휘로만 남고 효과가 없다. 그 값을 쓴 `trust.toml`·`acl.toml`은 계속 파싱된다. 옛 정의: `host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
+`host.reverse`와 `host.punch`는 ADR-0068로 역방향과 홀펀칭이 걷혀 어휘로만 남고 효과가 없다. 그 값을 쓴 trust.toml·acl.toml은 계속 파싱된다. 옛 정의: `host.punch`는 홀펀칭에서 중개자와 target이 신호 상태나 서버 창을 만들기 전에 거는 인가다(ADR-0054 결정 6). `none`을 뺀 모든 role이 이 action을 주고, 주는 것은 target에 닿는 길뿐이다. target에서 무엇을 할 수 있는지는 target이 그 peer의 role과 행으로 따로 판정한다.
 
 ACL action은 인가 어휘로 operation 이름과 별개 차원이며, 하나의 action이 여러 operation을 커버할 수 있다(`session.control`은 write/resize/close를 커버). Operation과 action의 매핑은 CLI.md §2.5에서 정의한다.
 
@@ -257,7 +263,7 @@ ADR-0045(승인됨)는 trust pin에 role 하나를 두어 신뢰 등록이 곧 �
 | `exec` | `exec.run`, `session.open`, `session.list`, `session.attach`, `session.control`, `host.punch`, `forward.agent` | any |
 | `tunnel` | `forward.local`, `forward.remote`, `host.punch`, `forward.jump` | owned |
 | `read-only` | `session.list`, `session.attach`, `host.punch` | any |
-| `reverse` | `host.reverse`, `host.punch`(둘 다 효과 없음, ADR-0068) | 해당 없음 |
+| `reverse` | `host.reverse`, `host.punch` | 해당 없음 |
 | `none` | 없음 | 해당 없음 |
 
 role 하나로 장비를 들이는 예는 다음과 같다. 세밀한 제어가 필요할 때만 ACL 정책 파일을 쓴다.
