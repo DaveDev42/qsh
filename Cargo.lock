@@ -3743,6 +3743,7 @@ dependencies = [
  "bytes",
  "iroh",
  "iroh-relay",
+ "portmapper",
  "prost",
  "qsh-proto",
  "quinn",
