@@ -143,7 +143,7 @@ fn migration_probe_budget(rtt: Duration) -> Duration {
 /// plus enough slack for the task to be scheduled at all.
 const PUMP_STOP_GRACE: Duration = Duration::from_millis(50);
 
-/// How a live attach survives a dead path (M2 plan Step 7 (a) (2473c88)).
+/// How a live attach survives a dead path (M2 plan Step 7 (a) (8237375)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryConfig {
     /// How the path-death detector behaves.
@@ -517,7 +517,7 @@ impl Ops {
     /// the caller — `user@host`/a long-running external process's (e.g. an
     /// agent tool) `user` argument — always wins;
     /// otherwise `hosts.toml`'s `user` entry for `host` fills in as a
-    /// default, if it set a non-empty one (M7 plan Step 3 (69dd788), ssh_config
+    /// default, if it set a non-empty one (M7 plan Step 3 (004ebd2), ssh_config
     /// `User`-directive-like: a per-name default a caller can still
     /// override on the command line).
     ///
@@ -766,7 +766,7 @@ impl Ops {
     /// durable **before** the stream is used, because it is
     /// single-generation: losing it orphans the session.
     ///
-    /// `remote_forward_specs` (M4 plan Step 4 (2473c88)'s interactive `-R`) is
+    /// `remote_forward_specs` (M4 plan Step 4 (8237375)'s interactive `-R`) is
     /// processed **inside** this call, before the attach driver is
     /// spawned — not left to a later method on the returned
     /// [`SessionAttachStream`] the way [`SessionAttachStream::

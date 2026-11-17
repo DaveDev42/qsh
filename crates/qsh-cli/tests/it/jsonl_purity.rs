@@ -159,7 +159,7 @@ fn a_filtered_sessions_listing_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
-/// M9 plan Step 2 (b9a621b): refusing `trust accept` for lack of a code must
+/// M9 plan Step 2 (cdf4015): refusing `trust accept` for lack of a code must
 /// not leak the terminal-prompt wording onto stdout at any verbosity —
 /// the resolver never opens the prompt in machine mode, so there is
 /// nothing to leak, but this pins that as a regression test rather than
@@ -361,7 +361,7 @@ fn serve_json_setup_failure_writes_nothing_to_stdout() {
 
 /// A tunnel in progress produces `qsh::tunnel` diagnostics on stderr while
 /// it splices real traffic (`crates/qsh-core/src/tunnel/local.rs`'s
-/// accept/close `tracing::debug!`s, M4 plan Step 6 (2473c88)) — a completely
+/// accept/close `tracing::debug!`s, M4 plan Step 6 (8237375)) — a completely
 /// different code path from every value op above — and stdout must still
 /// carry nothing but the one `tunnel.open` envelope for as long as the
 /// process holds (`docs/CLI.md` §6.14: it blocks in `TunnelHold::hold`

@@ -1,4 +1,4 @@
-//! Admission control integration tests (M8 plan Step 2 (52639fc),
+//! Admission control integration tests (M8 plan Step 2 (3b23162),
 //! `docs/adr/0009-admission-defenses.md`): `qsh_core::admission::Gate`
 //! wired into a *real*, running `Server::run` accept loop
 //! over real loopback QUIC — `qsh-core::admission`'s own unit tests pin
@@ -88,7 +88,7 @@ async fn echo_round_trip(pipe: &mut PipeHandle, data: &mut FramedStream, payload
     }
 }
 
-/// Pins M8 plan Step 2 (52639fc)'s "reject before resource" invariant at the
+/// Pins M8 plan Step 2 (3b23162)'s "reject before resource" invariant at the
 /// handshake concurrency cap: once `max_concurrent_handshakes` permits
 /// are exhausted, a losing attempt is refused — fast, distinguishable,
 /// `DialError::Refused` (`qsh_transport::endpoint::DialError::Refused`'s
@@ -185,7 +185,7 @@ async fn admission_cap_refuses_and_creates_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn legitimate_client_connects_after_flood_subsides() {
     // burst_limit = rate * EPOCH.as_secs() = 1 * 2 = 2 (`crate::admission`'s
-    // `EPOCH`, M8 plan Step 2 (52639fc) verification round F2) — a handful of
+    // `EPOCH`, M8 plan Step 2 (3b23162) verification round F2) — a handful of
     // concurrent *fresh* dial attempts reliably exceeds it. Concurrency
     // cap is generous; it is not this test's subject.
     let h = LoopbackHarness::start_with_admission(64, 1, u32::MAX / 4).await;
@@ -222,7 +222,7 @@ async fn legitimate_client_connects_after_flood_subsides() {
     // epochs to elapse, since the harness wires `crate::admission::Gate`
     // to a real `SystemClock` (`LoopbackHarness::start_inner`), not a
     // steerable `TestClock`. `EPOCH` is 2 s (`crate::admission`'s own
-    // const, M8 plan Step 2 (52639fc) verification round F2) — the blended
+    // const, M8 plan Step 2 (3b23162) verification round F2) — the blended
     // sliding-window estimate at the very start of a fresh epoch still
     // weights *all* of the previous epoch's count (weight = `1 -
     // fraction_into_epoch`, and `fraction_into_epoch = 0` right at the
@@ -336,7 +336,7 @@ async fn admission_rejection_audit_is_aggregated() {
 }
 
 /// A host-stability test, **not `admission::Gate` coverage**
-/// (M8 plan Step 2 (52639fc) verification round, P3-7 — renamed from
+/// (M8 plan Step 2 (3b23162) verification round, P3-7 — renamed from
 /// `spoofed_initial_flood_creates_no_state`, which read as a `Gate`
 /// invariant it does not exercise). Pins that a flood of Initial-shaped
 /// UDP garbage never costs a session, a task, or the stability of an
@@ -344,7 +344,7 @@ async fn admission_rejection_audit_is_aggregated() {
 /// this flood ever produces a valid QUIC handshake (no real Initial keys
 /// back it), so it never even reaches `crate::admission::Gate`; what
 /// actually absorbs it is quinn's own pre-application AEAD-tag drop
-/// (M8 plan Step 2 (52639fc) design §0: a datagram whose header parses as an
+/// (M8 plan Step 2 (3b23162) design §0: a datagram whose header parses as an
 /// Initial but whose AEAD tag does not validate is dropped before any
 /// `Incoming` is ever produced, so `Gate::decide` is never called at
 /// all). Confirmed empirically during the verification round: this test
@@ -462,7 +462,7 @@ async fn poll_for_summary(
     }
 }
 
-/// M8 plan Step 2 (52639fc) verification round, P1-3/F1: pins the *bounded*
+/// M8 plan Step 2 (3b23162) verification round, P1-3/F1: pins the *bounded*
 /// half of the audit aggregation contract on the `Server` arm — a flood
 /// that stops still produces its aggregation window's summary record
 /// within one more accept-loop tick, with **no further dial** to trigger

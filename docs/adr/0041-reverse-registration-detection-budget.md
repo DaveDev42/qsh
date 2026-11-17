@@ -17,7 +17,7 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
 - 코멘트의 양 끝 합계는 laptop이 `path_dead` 316, `peer_closed` 69, `local` 19, `idle_timeout` 0이고 hub가 `path_dead` 429, `peer_closed` 1, `local` 6, `idle_timeout` 0이다.
 - `path_dead` 판정이 내려질 때까지 hub 쪽 패킷이 100~300ms마다 계속 도착했다.
 
-이 원인의 한 갈래는 감시가 control 스트림의 `Pong`만 응답으로 세어서, 순서가 있는 그 스트림이 손실 복구에 묶이면 패킷이 계속 도착해도 3-strike가 약 1초에 쌓이던 것이다. v0.4.1의 커밋 `54ce47d`가 고쳤다. 수신된 UDP datagram도 응답으로 센다(`docs/design/protocol.md` §10). 회귀는 `datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is`와 `crates/qsh-core/src/client/pathwatch/tests.rs`의 `a_moving_datagram_counter_keeps_the_path_alive_without_control_replies`, `a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_schedule`가 지킨다.
+이 원인의 한 갈래는 감시가 control 스트림의 `Pong`만 응답으로 세어서, 순서가 있는 그 스트림이 손실 복구에 묶이면 패킷이 계속 도착해도 3-strike가 약 1초에 쌓이던 것이다. v0.4.1의 커밋 `91d9154`가 고쳤다. 수신된 UDP datagram도 응답으로 센다(`docs/design/protocol.md` §10). 회귀는 `datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is`와 `crates/qsh-core/src/client/pathwatch/tests.rs`의 `a_moving_datagram_counter_keeps_the_path_alive_without_control_replies`, `a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_schedule`가 지킨다.
 
 남은 갈래는 경로가 실제로 조용한 구간이다. 이것은 오탐이 아니라 설계된 판정이다. 이 ADR의 초안은 여기서 기본값을 그대로 두고 현장 데이터를 기다리기로 했다(옛 결정 1과 5). 그 데이터가 이제 있다.
 
@@ -59,7 +59,7 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
 
 ## 근거
 
-- **현장 데이터가 생겼다.** 옛 초안이 기본값 변경을 미룬 이유는 `54ce47d` 전의 숫자로 기본값을 움직이는 것을 피하려는 것이었다. 이슈 #10의 2026-10-05 코멘트는 `54ce47d`가 겨냥한 오탐과 별개인 실제 2~4초 업링크 정전을 재고, 사용자가 약 5초 기본을 승인했다(2026-10-06).
+- **현장 데이터가 생겼다.** 옛 초안이 기본값 변경을 미룬 이유는 `91d9154` 전의 숫자로 기본값을 움직이는 것을 피하려는 것이었다. 이슈 #10의 2026-10-05 코멘트는 `91d9154`가 겨냥한 오탐과 별개인 실제 2~4초 업링크 정전을 재고, 사용자가 약 5초 기본을 승인했다(2026-10-06).
 - **attach의 2초는 attach의 근거다.** 2초 상한은 사용자가 기다리는 재접속에서 나왔고 역방향 등록에는 그 근거가 닿지 않는다. 복구 예산이 backoff에 지배되는 연결에 같은 상한을 거는 것이 이슈 #10의 불만과 맞물린 지점이다.
 - **ADR-0021을 최소로 고친다.** 결정 4의 세 값만 연다는 범위와 검증 규율은 그대로고, 역방향 등록의 기본과 상한이 연결 종류별로 갈린다. attach의 기본·상한·설정 없을 때의 바이트 동일성은 그대로다.
 - **회귀 테스트의 의미가 남는다.** 세 테스트가 지키는 성질은 "느슨한 설정이 자기 허용치를 스스로 올리지 못한다"이다. 연결 종류마다 상수를 따로 두면(결정 5) 그 성질이 유지된다.

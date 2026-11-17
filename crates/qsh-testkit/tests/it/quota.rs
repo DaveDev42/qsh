@@ -1,4 +1,4 @@
-//! Quota integration tests (M8 plan Step 3 (52639fc), `docs/adr/0010-resource-
+//! Quota integration tests (M8 plan Step 3 (3b23162), `docs/adr/0010-resource-
 //! quotas.md`): `crate::quota` wired into a *real*, running
 //! `Server::run` accept loop over real loopback QUIC —
 //! `qsh-core::quota`'s own unit tests and `server::mod`'s inline tests pin
@@ -633,7 +633,7 @@ async fn file_read_past_the_transfer_quota_answers_resource_exhausted_end_to_end
 
 /// The exec twin of I1: `max_exec_per_principal` end to end. A permit is
 /// held from ticket *issue*, not redemption (`crate::quota` module docs,
-/// M8 plan Step 3 (52639fc) verification round) — so a single unredeemed
+/// M8 plan Step 3 (3b23162) verification round) — so a single unredeemed
 /// `exec.run` ticket alone saturates a cap of 1, and the very next
 /// `exec.run` on the same connection is refused before any child is ever
 /// spawned.

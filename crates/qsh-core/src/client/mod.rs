@@ -88,7 +88,7 @@ pub const EXEC_OUTPUT_MAX: usize = 64 * 1024 * 1024;
 
 /// Map [`crate::handshake::HelloError`] onto the initiator's pre-existing
 /// [`ClientError`] surface, preserving every message exactly as it read
-/// before the handshake exchange moved into `handshake.rs` (M3 plan Step 2 (2473c88)
+/// before the handshake exchange moved into `handshake.rs` (M3 plan Step 2 (8237375)
 /// (d) — zero observable behavior change). `pub` — Step 3's `qsh reverse`
 /// (`crate::reverse::target::run_reverse`) is another `handshake::initiate`
 /// caller and reuses this exact mapping (chained into
@@ -762,7 +762,7 @@ impl Session {
     }
 
     /// The data half: redeem `attached`'s ticket on a fresh
-    /// `SESSION_DATA` link (M3 plan Step 7 (2473c88): a QUIC stream on the
+    /// `SESSION_DATA` link (M3 plan Step 7 (8237375): a QUIC stream on the
     /// forward route, a `LOCAL_STREAM` conduit on the reverse route —
     /// `Self::open_data_link`).
     pub async fn open_attach_stream(
@@ -904,7 +904,7 @@ impl Session {
     /// Answer an inbound [`ControlIn::Request`] with `UNSUPPORTED` —
     /// creates no resource, same as every other refusal at this seam
     /// (`docs/design/protocol.md` §11-3). The forward client never has one
-    /// to answer in practice; `qsh listen` (M3 plan Step 3 (2473c88)) is the
+    /// to answer in practice; `qsh listen` (M3 plan Step 3 (8237375)) is the
     /// first real caller.
     pub async fn reject_unsupported(&mut self, request_id: u64) -> Result<(), ClientError> {
         self.link
@@ -1009,7 +1009,7 @@ pub enum ControlIn {
     ///
     /// Before M3 this variant was unreachable — a plain forward `qsh
     /// <host>`/`qsh exec` peer (the host) never sends a request back to
-    /// its client. `qsh listen` (M3 plan Step 3 (2473c88)) is the first real
+    /// its client. `qsh listen` (M3 plan Step 3 (8237375)) is the first real
     /// producer: on a registered reverse connection the *controller* is
     /// the client role, and the peer (the target, now a host) can still
     /// legally attempt a request — `docs/design/protocol.md` §11-3:

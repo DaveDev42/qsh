@@ -42,7 +42,7 @@ fn all_loopback_single_address_cases() {
 }
 
 // ---- resolve_loopback_bind_addr: the table this stage owes --------
-// (M4 plan Step 4 (c) (2473c88) "loopback 강제 표")
+// (M4 plan Step 4 (c) (8237375) "loopback 강제 표")
 
 #[tokio::test]
 async fn loopback_bind_host_table() {
@@ -352,7 +352,7 @@ async fn registered_forward_id_is_dialed_at_its_destination_and_spliced() {
 /// A `TCP_ACCEPTED` naming a `forward_id` that was never registered —
 /// never opened, or already closed — is rejected without dialing
 /// anything: the peer sees the stream reset, not an echo
-/// (M4 plan Step 4 (2473c88)'s requester-leg requirement).
+/// (M4 plan Step 4 (8237375)'s requester-leg requirement).
 #[tokio::test]
 async fn unregistered_forward_id_is_rejected_without_dialing() {
     let (requester_conn, peer_conn) = loopback_pair().await;

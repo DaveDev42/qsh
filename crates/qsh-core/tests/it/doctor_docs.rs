@@ -1,5 +1,5 @@
 //! Doc-prose == code-constant anti-drift gate for
-//! [`qsh_core::doctor::CONTROLLER_UNREACHABLE`] (M3 plan Step 9 (c) (2473c88)).
+//! [`qsh_core::doctor::CONTROLLER_UNREACHABLE`] (M3 plan Step 9 (c) (8237375)).
 //!
 //! `README.md`, `docs/CLI.md`, and `docs/PRD.md` each quote this
 //! diagnostic's `message`/`remedy` verbatim rather than paraphrasing it —
@@ -13,7 +13,7 @@
 //! Deliberately has no `#[cfg(unix)]` anywhere — the diagnostic is pure
 //! data (`doctor.rs`'s own module docs) and every doc file it must appear
 //! in is plain text, so this runs on the Windows CI leg too
-//! (M3 plan Step 9 (d) (2473c88)).
+//! (M3 plan Step 9 (d) (8237375)).
 
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{
@@ -67,7 +67,7 @@ fn prd_md_quotes_the_controller_unreachable_diagnostic_verbatim() {
 }
 
 // -----------------------------------------------------------------------
-// M7 Step 6 doctor diagnostics (verify round P2-5, M7 plan §4.1 (69dd788)
+// M7 Step 6 doctor diagnostics (verify round P2-5, M7 plan §4.1 (004ebd2)
 // L98's completeness gate). Only the two new-in-M7 diagnostics
 // `docs/CLI.md` §6.17's own JSON example already quotes verbatim
 // (`TRUST_REMOVE_SCOPE` and `CERT_EXPIRING_SOON`) get a drift gate here —
@@ -75,7 +75,7 @@ fn prd_md_quotes_the_controller_unreachable_diagnostic_verbatim() {
 // paraphrase, not quoted verbatim anywhere in the docs today, so asserting
 // verbatim substring containment for them would fail against current
 // (accurate, just not verbatim) prose rather than catch real drift.
-// README.md is deliberately excluded (main-session decision, the M7 plan (69dd788)
+// README.md is deliberately excluded (main-session decision, the M7 plan (004ebd2)
 // M7 Step 6 verify-round note): its "Known limitations" section
 // paraphrases these two rather than quoting them.
 // -----------------------------------------------------------------------
@@ -142,7 +142,7 @@ fn cli_md_quotes_the_acl_ca_auth_path_missing_diagnostic_verbatim() {
     );
 }
 
-/// ADR-0045 결정 12 (M15 plan Step 7 (1a4af3b)): the role-aware wording of §6.17 is quoted
+/// ADR-0045 결정 12 (M15 plan Step 7 (1a0cbd6)): the role-aware wording of §6.17 is quoted
 /// from the constants, not retyped. `trust_pin_role_unset` is pinned word for
 /// word like the three diagnostics above; the three clauses the existing
 /// `acl_*` findings and the `trust.toml` `CONFIG_ERROR` gained are pinned the

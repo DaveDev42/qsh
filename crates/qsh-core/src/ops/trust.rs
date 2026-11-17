@@ -29,7 +29,7 @@ impl Ops {
     /// ever pinned on the strength of what the network said.
     ///
     /// Re-adding an already-pinned name is idempotent, with one deliberate
-    /// exception (M7 plan Step 2 (69dd788) decision B, `TrustStore::add_peer`'s
+    /// exception (M7 plan Step 2 (004ebd2) decision B, `TrustStore::add_peer`'s
     /// own doc): the *same* fingerprint with a *different* `--address`
     /// overwrites the stored address in place (`data.updated: true`,
     /// `data.created` stays `false`) instead of being a no-op — the M6
@@ -108,7 +108,7 @@ impl Ops {
         // Whole load→mutate→save under lock, not just the write — a
         // concurrent `qsh serve` pairing response or another CLI process
         // racing this same read-modify-write must not have its change
-        // silently discarded (`TrustStore::lock`'s own doc, the M7 plan (69dd788)
+        // silently discarded (`TrustStore::lock`'s own doc, the M7 plan (004ebd2)
         // Step 7-1).
         let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
@@ -732,7 +732,7 @@ impl Ops {
         })
     }
 
-    /// `trust.invite` — mint a one-time pairing invite (ADR-0002, the M7 plan (69dd788)
+    /// `trust.invite` — mint a one-time pairing invite (ADR-0002, the M7 plan (004ebd2)
     /// M7 Step 4).
     ///
     /// The raw secret exists only for the lifetime of this call: it is
@@ -742,7 +742,7 @@ impl Ops {
     /// serve`'s own `SharedInviteStore` picks up the freshly written invite
     /// on its very next check, without a restart (Step 2's content-based
     /// reload, invariant #6). `accept_command` is the exact command line to
-    /// hand the other party — the code alone carries no address (the M7 plan (69dd788)
+    /// hand the other party — the code alone carries no address (the M7 plan (004ebd2)
     /// M7 §4.1 #7), so this is the only place that pairing is complete.
     pub fn trust_invite(&self, req: TrustInviteReq) -> Result<TrustInviteData, OpError> {
         let assigned_name = req
@@ -765,7 +765,7 @@ impl Ops {
         // Whole load→mutate→save under lock, not just the write — closes
         // report F-9's residual lost-update window against a concurrent
         // `qsh serve` redeeming a different invite at the same time
-        // (`InviteStore::lock`'s own doc, M7 plan Step 7-1 (69dd788)).
+        // (`InviteStore::lock`'s own doc, M7 plan Step 7-1 (004ebd2)).
         let _lock = crate::trust::pairing::InviteStore::lock(&path)?;
         let mut store = crate::trust::pairing::InviteStore::load(&path)?;
         store.prune(now);
@@ -832,7 +832,7 @@ impl Ops {
     }
 
     /// `trust.accept <address> <code>` — complete a pairing exchange with
-    /// `qsh trust invite`'s counterpart (ADR-0002, M7 plan Step 4 (69dd788)).
+    /// `qsh trust invite`'s counterpart (ADR-0002, M7 plan Step 4 (004ebd2)).
     ///
     /// Dials `address` with a trust evaluator that accepts *any*
     /// certificate ([`crate::pairing::AcceptAnyForPairing`], report §B3) —

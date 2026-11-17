@@ -524,7 +524,7 @@ fn host_lost_at_is_additive_optional() {
     assert_eq!(parsed.lost_at, None);
 }
 
-/// M7 plan Step 3 (69dd788): `source`/`user` are additive-optional —
+/// M7 plan Step 3 (004ebd2): `source`/`user` are additive-optional —
 /// `None` omits the key entirely (matches the pre-M7-Step-3 shape
 /// above byte-for-byte), `Some` serializes it, matching
 /// `docs/CLI.md` §10's additive-only evolution rule.
@@ -1022,7 +1022,7 @@ fn acl_check_req_omits_empty_optionals() {
     assert_eq!(back, full);
 }
 
-/// M5 Step 7's `--owner`/`--owner-auth-path` surface (the M5 plan (2473c88)
+/// M5 Step 7's `--owner`/`--owner-auth-path` surface (the M5 plan (8237375)
 /// §4.2): additive on both `AclCheckReq` and `AclCheckData`, and
 /// `owner_auth_path` omits (never `null`) whenever `owner` itself is
 /// absent — the pairing is meaningless without an owner to pair with.

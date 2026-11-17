@@ -69,4 +69,4 @@
 
 ## 개정 이력
 
-- 2026-11-15 1단계 구현(`0b8f8a73`)에서 설정 키 이름을 바로잡았다. 결정 4의 `[transport].reverse_min_dead_after_ms`·`reverse_strikes`는 실제로 `[recovery]` 표의 키이고, `[serve].name`은 설정 키가 없고 CLI 플래그 `--name`만 있다. 결정의 뜻은 그대로다.
+- 2026-11-15 1단계 구현(`da503f95`)에서 설정 키 이름을 바로잡았다. 결정 4의 `[transport].reverse_min_dead_after_ms`·`reverse_strikes`는 실제로 `[recovery]` 표의 키이고, `[serve].name`은 설정 키가 없고 CLI 플래그 `--name`만 있다. 결정의 뜻은 그대로다.

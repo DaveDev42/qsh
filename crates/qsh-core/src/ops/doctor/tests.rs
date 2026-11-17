@@ -1532,7 +1532,7 @@ fn overall_status_is_worst_of_error_warn_ok() {
 }
 
 // -----------------------------------------------------------------
-// config_unknown_key (M8 plan Step 4b (52639fc), J10).
+// config_unknown_key (M8 plan Step 4b (3b23162), J10).
 // -----------------------------------------------------------------
 
 fn config_unknown_key_findings(ops: &Ops) -> Vec<DoctorFinding> {
@@ -2936,7 +2936,7 @@ fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
 }
 
 // -----------------------------------------------------------------
-// Trust roles (ADR-0045 결정 12, M15 plan Step 7 (1a4af3b)).
+// Trust roles (ADR-0045 결정 12, M15 plan Step 7 (1a0cbd6)).
 // -----------------------------------------------------------------
 
 fn add_pin(ops: &Ops, name: &str, role: Option<&str>) {

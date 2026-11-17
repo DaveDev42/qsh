@@ -1046,7 +1046,7 @@ fn attach_mode_unknown_or_unset_is_none_not_rw() {
 fn local_capabilities_advertise_exactly_what_is_implemented() {
     assert!(LOCAL_CAPABILITIES.contains(&CAP_EXEC));
     assert!(LOCAL_CAPABILITIES.contains(&CAP_SESSION));
-    // Resume is implemented (M2 plan Step 7 (2473c88)): credential redemption,
+    // Resume is implemented (M2 plan Step 7 (8237375)): credential redemption,
     // replay from `last_output_seq` with a `Gap` when the ring has
     // moved past it, and input dedup across the reattach. This
     // assertion is the lockstep — flipping it back means the
@@ -1251,7 +1251,7 @@ fn golden_hello_frame() {
     // additive — an old Hello re-encodes to exactly these bytes, field
     // 4 simply never appears when unset. If this assertion ever needs
     // to change, the wire format changed and that requires a
-    // deliberate `qsh/2` decision, not a test edit (M3 plan Step 1 (2473c88)).
+    // deliberate `qsh/2` decision, not a test edit (M3 plan Step 1 (8237375)).
     let msg = ControlMessage::new(
         1,
         control_message::Body::Hello(Hello {
@@ -1594,7 +1594,7 @@ fn parse_forward_spec_rejects_empty_host() {
 #[test]
 fn parse_forward_spec_accepts_non_loopback_bind_shape_only() {
     // The parser knows no policy: a non-loopback bind is shape-valid.
-    // Loopback-only enforcement is host-side (M4 plan §4.1 #5 (2473c88),
+    // Loopback-only enforcement is host-side (M4 plan §4.1 #5 (8237375),
     // implemented in a later milestone step, not here).
     let spec = parse_forward_spec("0.0.0.0:8080:localhost:3000").unwrap();
     assert_eq!(spec.bind.as_deref(), Some("0.0.0.0"));

@@ -48,7 +48,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    per-source 핸드셰이크 rate limiter에 걸려 예산 초과분 Initial이
    조용히 `Ignore`되고 클라이언트에는 "no response within 10s"만 보인다.
    제품 기본값 자체는 손대지 않는다 — 단일 소스가 제한당하는 건
-   프로덕션에서 의도된 동작이고(M8 계획 §3 Step 5(`52639fc`)), 이 상향은 신뢰된
+   프로덕션에서 의도된 동작이고(M8 계획 §3 Step 5(`3b23162`)), 이 상향은 신뢰된
    테스트 드라이버인 하네스 자신의 리스너 설정에만 적용된다.
 8. **loopback UDP가 ephemeral 범위 안에서 막혀 있지 않은지 확인한다.**
    `run.sh`가 시작 직후 `scripts/soak/preflight_udp.py`로
@@ -81,7 +81,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    세션 PTY 자식이 `getpwuid(0)`의 홈 `/root`(0700, 실제 root 소유)에
    들어가지 못해 spawn이 EACCES로 죽는다(run #6 1차 시도, 1.7초). 안쪽
    매핑이 원래 uid/gid를 되찾아 준다 — 값은 `id -u`/`id -g`에 맞춘다.
-   f331cd0 이후의 바이너리는 홈에 못 들어가도 `/`에서 세션을 열어 죽지는
+   554c69e 이후의 바이너리는 홈에 못 들어가도 `/`에서 세션을 열어 죽지는
    않지만, 회차는 실제 사용자 홈에서 여는 쪽이 프로덕션 모양에 가까우므로
    중첩 매핑을 그대로 쓴다.
 10. **회차 동안 호스트를 재부팅하지 않는다.** 사람 쪽 항목이다. Windows
@@ -246,7 +246,7 @@ heartbeat는 카운터가 움직이면 매초, 아니면 5초에 한 줄이 나�
 | 호스트 / OS / 커널 | Linux Dave-Windows-WSL 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux | 같음 |
 | `ulimit -n` | 65536 | 65536 |
 | `nproc` | 8 | 8 |
-| qsh 커밋 SHA | dd66e0fb3ba316f130f93ee7ff847a6635b74140 | 8c4f3191d3292789e2471d61f75d2ab0ec459d60 |
+| qsh 커밋 SHA | 69e8b86be1d283bb7d033558ac8df86dcf7e40f9 | 7339762c4f286746fedf77082b794363769b6329 |
 | working tree 상태 (clean/dirty) | clean | clean |
 | 바이너리 경로 / sha256 | /home/dave/Projects/github.com/qsh/target/release/qsh / 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d | /home/dave/qsh-soak6/target/release/qsh / ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef |
 | preflight_udp (§2 8번) | 없었다(회차 뒤에 생겼다) | 통과 — 네임스페이스 안 ephemeral 범위 32768-60999의 96개 표본 전부 loopback UDP 왕복 성공 |
@@ -290,8 +290,8 @@ heartbeat 이전이라 빈 칸이다(0이 아니라 자료 없음).
 
 | 회차 | idle RSS baseline/idle_end (KiB) | 세션당 buffer (KiB) | RSS 추세 (MiB/h) | listener fd baseline/idle_end | self fd 1/4 구간 델타 | echo p95 최댓값 (ms) | TTL reap (abandoned_live) | 판정 | 비고 |
 |---:|---|---|---|---|---|---|---|---|---|
-| 5 | 14236 / 30244 | 1266.3 (peak=140868) | -0.0480 | 11 / 19 | -1 | 15.847 | 0 | FAIL | 트리 dd66e0f, 바이너리 sha256 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d. 실행 시간 86636.283s(설정 86400s+drain, ≈24h04m). soak.rs 자체 verdict FAIL — DIAL_EXHAUSTED: 8건(사이클 교체 dial이 재시도 3회 모두 소진, slot 81×2·43·54·94·50·15·93). dial_retries=1138(정보성), dead_sessions=0(SESSION_STALLED 없음), listener fd quarters 델타=-1·self fd quarters 델타=-1(둘 다 allowance +2 이내, 위반 아님). summarize.py는 §3 세 축(idle RSS·세션당 buffer·RSS 추세) 기준 pass. run.sh 결합 verdict는 FAIL(test exit=100, summarize exit=0) — DIAL_EXHAUSTED>0은 `soak.rs`가 별도로 거는 축이고 §3 사전 기준 9행에는 없으며 DoD 2 세 축과도 별개다. 그 축의 원인은 이 호스트의 nftables 규칙 `inet dave_mosh`(`udp dport 60000-61000 drop`, loopback 예외 없음)로 규명됐다 — 제품 결함이 아니다. 근거와 재현은 §8 "run #5 결과" 참고. |
-| 6 | 14520 / 27308 | 1215.0 (peak=136024) | +0.1647 | 11 / 12 | -1 | 28.438 | 0 | PASS | 트리 8c4f319, 바이너리 sha256 ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef. 실행 시간 86564.262s(설정 86400s+drain, ≈24h03m). §2 9번대로 네트워크 네임스페이스 안에서 돌렸다(§5 "실행 방식"). run.sh 결합 verdict PASS(test exit=0, summarize exit=0), nextest `PASS [86564.262s] soak_session_load`. dial_exhausted=0, dead_sessions=0, dial_retries=1(정보성). listener fd quarters 델타=-5, self fd quarters 델타=-1. echo p95 스파이크 0/17276 창(0.0%). accept 루프 heartbeat 최종값 admitted=75984 retry=75987 ignore=0 refuse=0 connection_quota_refused=0 (§4.1 1번, 이 회차부터 계측). TTL reap: abandoned_live 5 → 0이 t=626s 표본과 t=631s 표본 사이(판정선 630s). 표본 17279행, SLOW 표시 25회(시간당 1회, 정상). 상세는 §8 "run #6 결과". |
+| 5 | 14236 / 30244 | 1266.3 (peak=140868) | -0.0480 | 11 / 19 | -1 | 15.847 | 0 | FAIL | 트리 69e8b86, 바이너리 sha256 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d. 실행 시간 86636.283s(설정 86400s+drain, ≈24h04m). soak.rs 자체 verdict FAIL — DIAL_EXHAUSTED: 8건(사이클 교체 dial이 재시도 3회 모두 소진, slot 81×2·43·54·94·50·15·93). dial_retries=1138(정보성), dead_sessions=0(SESSION_STALLED 없음), listener fd quarters 델타=-1·self fd quarters 델타=-1(둘 다 allowance +2 이내, 위반 아님). summarize.py는 §3 세 축(idle RSS·세션당 buffer·RSS 추세) 기준 pass. run.sh 결합 verdict는 FAIL(test exit=100, summarize exit=0) — DIAL_EXHAUSTED>0은 `soak.rs`가 별도로 거는 축이고 §3 사전 기준 9행에는 없으며 DoD 2 세 축과도 별개다. 그 축의 원인은 이 호스트의 nftables 규칙 `inet dave_mosh`(`udp dport 60000-61000 drop`, loopback 예외 없음)로 규명됐다 — 제품 결함이 아니다. 근거와 재현은 §8 "run #5 결과" 참고. |
+| 6 | 14520 / 27308 | 1215.0 (peak=136024) | +0.1647 | 11 / 12 | -1 | 28.438 | 0 | PASS | 트리 7339762, 바이너리 sha256 ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef. 실행 시간 86564.262s(설정 86400s+drain, ≈24h03m). §2 9번대로 네트워크 네임스페이스 안에서 돌렸다(§5 "실행 방식"). run.sh 결합 verdict PASS(test exit=0, summarize exit=0), nextest `PASS [86564.262s] soak_session_load`. dial_exhausted=0, dead_sessions=0, dial_retries=1(정보성). listener fd quarters 델타=-5, self fd quarters 델타=-1. echo p95 스파이크 0/17276 창(0.0%). accept 루프 heartbeat 최종값 admitted=75984 retry=75987 ignore=0 refuse=0 connection_quota_refused=0 (§4.1 1번, 이 회차부터 계측). TTL reap: abandoned_live 5 → 0이 t=626s 표본과 t=631s 표본 사이(판정선 630s). 표본 17279행, SLOW 표시 25회(시간당 1회, 정상). 상세는 §8 "run #6 결과". |
 
 `FAIL`이면 `summarize.py`가 찍는 위반 문구를 "비고"에 그대로 옮긴다 —
 특히 self fd 위반이 `FD_GROWTH_CLIENT` 태그를 달고 있으면 M7 carryover
@@ -307,7 +307,7 @@ open/cycle 자체가 실패로 집계된다). `run.log`의 `dead_sessions=N`도
 런 자체는 죽지 않고 drain까지 이어져 CSV가 끝까지 닫혔다는 뜻이기도
 하다.
 
-GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
+GHA 첫 실행(run 34203445617, af6deb7)에서는 steady 창 2개(129.5 ms,
 114.6 ms, 59개 중)가 사이클의 세션 교체(close + dial/open/attach)
 직후에 튀었다. 옛 규칙(창별 p95 최댓값 `<= bound`)은 이 스파이크 하나로
 그 회차를 위반 처리했지만, 새 비율 규칙(2/59 = 3.4%, 10% 미만)으로는
@@ -330,7 +330,7 @@ GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
 - 24h 내내 나온 새 실패 모드(있다면) — 특히 `run.log`의 SLOW 경고 빈도가
   비정상적으로 늘었는지(호스트 경합 신호).
 
-### run #5 결과 (2026-09-16 10:05 UTC 시작, dd66e0f)
+### run #5 결과 (2026-09-16 10:05 UTC 시작, 69e8b86)
 
 §3의 판정 축 중 idle listener RSS(14236/30244 KiB, bound 30720 KiB), 세션당
 buffer(1266.3 KiB, bound 8192 KiB), RSS 추세(-0.0480 MiB/h, bound <1.0),
@@ -387,7 +387,7 @@ DIAL_EXHAUSTED가 assert 위반으로 처음 관측된 회차다. `env.txt`는 �
 admission 결정 로그를 남기도록 해서 이 축을 추론이 아니라 계측으로
 가릴 수 있게 한다.
 
-태그 대상 트리 감사: `git diff dd66e0f..525a2a5`는
+태그 대상 트리 감사: `git diff 69e8b86..ba1db25`는
 `.github/workflows/release.yml`·`Cargo.lock`·`README.md`·`docs/ROADMAP.md`
 4개 파일만 건드리고, transport·admission·config·quota·server·broker·serve와
 `crates/qsh-cli/tests/it/soak.rs`에는 변경이 0줄이다. 이 회차가 관측한 동작은
@@ -458,7 +458,7 @@ loopback 예외를 두는 것 중 하나이고, `qsh` 프로세스가 자기 소
 프로세스 수준의 우회가 아니라 규칙이 존재하지 않는 별개의 네트워크 스택을
 쓰는 것이고, 권한 없이 만들 수 있으며 호스트 설정을 바꾸지 않는다.
 
-### run #6 결과 (2026-09-19 17:21 UTC 시작, 8c4f319)
+### run #6 결과 (2026-09-19 17:21 UTC 시작, 7339762)
 
 §3의 판정 축 전부 pass다. idle listener RSS 14520/27308 KiB(bound 30720
 KiB), 세션당 buffer 1215.0 KiB(peak 136024 KiB, bound 8192 KiB), RSS 추세
@@ -505,8 +505,8 @@ DIAL_EXHAUSTED는 8에서 0으로 내려왔다. run #5 §8이 원인으로 지�
 1.7초 만에 죽었다. `unshare -r`이 호출자를 네임스페이스 안 uid 0으로
 매핑하고 세션 PTY 자식이 `getpwuid(0)`의 홈 `/root`(0700, 실제 root 소유)로
 chdir하다 EACCES를 받아 spawn이 실패했기 때문이다. 회차는 중첩 userns로 uid
-1000을 되찾아 돌렸고 제품 쪽은 f331cd0(홈에 들어갈 수 없으면 sshd처럼
-경고만 남기고 `/`에서 연다)으로 따로 고쳤다. f331cd0은 트리 8c4f319 뒤에
+1000을 되찾아 돌렸고 제품 쪽은 554c69e(홈에 들어갈 수 없으면 sshd처럼
+경고만 남기고 `/`에서 연다)으로 따로 고쳤다. 554c69e은 트리 7339762 뒤에
 main에 올랐으므로 이 회차의 바이너리는 그 수정을 담고 있지 않다.
 
 24시간을 채우기까지 시도가 넷이었다. 2차(14:41Z)는 15:29:30Z에 Windows
@@ -521,10 +521,10 @@ Windows Store 자동 다운로드 정책 키(`HKLM\SOFTWARE\Policies\Microsoft\W
 넷이 됐다. §2 사전 조건에 "회차 동안 호스트를 재부팅하지 않는다"를 사람 쪽
 항목으로 넣었다.
 
-태그 대상 트리. 이 회차의 관측은 8c4f319까지만 보증한다. 그 뒤 main에
-얹힌 커밋(M9 `-D` 계열, f331cd0의 PTY 홈 폴백, 테스트 타임아웃 보고)은
+태그 대상 트리. 이 회차의 관측은 7339762까지만 보증한다. 그 뒤 main에
+얹힌 커밋(M9 `-D` 계열, 554c69e의 PTY 홈 폴백, 테스트 타임아웃 보고)은
 server·tunnel 경로를 바꾼다. 2026-09-21 사용자 결정으로 `v0.1.0-alpha.3`은
-찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(M9 계획 §7(`b9a621b`)). `-D` 포함
+찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(M9 계획 §7(`cdf4015`)). `-D` 포함
 트리의 24h soak은 run #7로 릴리스 뒤에 돌린다.
 
 ## 9. 재사용

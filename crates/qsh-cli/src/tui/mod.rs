@@ -105,7 +105,7 @@ pub enum Attach {
         forwards: Vec<String>,
         /// `-R` remote forward specs, unparsed
         /// (`qsh_core::parse_remote_forwards` turns them into specs;
-        /// M4 plan Step 4 (2473c88)). Same scope as `forwards` — only this
+        /// M4 plan Step 4 (8237375)). Same scope as `forwards` — only this
         /// form carries them.
         remote_forwards: Vec<String>,
         /// `-D` SOCKS dynamic forward specs, unparsed

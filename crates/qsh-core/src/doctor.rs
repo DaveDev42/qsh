@@ -1,5 +1,5 @@
 //! Diagnostic items: stable, human-readable facts about a QSH deployment
-//! that more than one surface needs to say. Originally (the M3 plan (2473c88) Step
+//! that more than one surface needs to say. Originally (the M3 plan (8237375) Step
 //! 9 (a)) pure data with no `doctor.run` operation behind it — M7 Step 6
 //! is the milestone that repays that debt: `crate::ops::doctor` is the
 //! `doctor.run` [`crate::ops::Operation`] that actually detects,
@@ -29,7 +29,7 @@ pub mod probe;
 /// convenience on top of it).
 ///
 /// 38 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
-/// additive-only set (M7 plan §4.1 #5 (69dd788)): [`EXPECTED_DOCTOR_CODES`] and
+/// additive-only set (M7 plan §4.1 #5 (004ebd2)): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
 /// than shipping quietly. `ROADMAP.md` M9 (h)'s batch of seven —
@@ -123,7 +123,7 @@ pub enum DiagnosticId {
 impl DiagnosticId {
     /// The stable snake_case `code` this diagnostic reports as
     /// `doctor.run`'s `DoctorFinding.code` (`docs/CLI.md` §6.17) — the
-    /// vocabulary M7 plan §4.1 #5 (69dd788) locks. Two variants
+    /// vocabulary M7 plan §4.1 #5 (004ebd2) locks. Two variants
     /// ([`DiagnosticId::AclPolicyMissing`]/[`DiagnosticId::AclPolicyInvalid`])
     /// are verbatim references to
     /// [`crate::acl::ACL_POLICY_MISSING_CODE`]/[`crate::acl::ACL_POLICY_INVALID_CODE`]
@@ -178,7 +178,7 @@ impl DiagnosticId {
 }
 
 /// The closed, additive-only set of `doctor.run` finding codes
-/// (`docs/CLI.md` §6.17, M7 plan §4.1 #5 (69dd788)), sorted — mirroring
+/// (`docs/CLI.md` §6.17, M7 plan §4.1 #5 (004ebd2)), sorted — mirroring
 /// `qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS`'s own frozen-set
 /// discipline. A code is added here only alongside a new [`DiagnosticId`]
 /// variant; nothing already shipped is ever removed or renamed (a new
@@ -345,7 +345,7 @@ pub const REVERSE_CONFIG_RETIRED: Diagnostic = Diagnostic {
     remedy: "Remove each key with `qsh config unset <section>.<key>` and the unit with `qsh service uninstall`. To be reachable, run `qsh serve` and pin this machine's key on the other side (`qsh trust add <name> --key ...`).",
 };
 
-/// M5 plan Step 3 (2473c88) (F9): the configured `[audit].path` cannot currently
+/// M5 plan Step 3 (8237375) (F9): the configured `[audit].path` cannot currently
 /// be appended to — the same failure class
 /// [`crate::audit::RotatingAuditSink`] latches degraded on
 /// (`docs/design/architecture.md` §6's audit fail-closed policy). Lets an
@@ -593,7 +593,7 @@ pub const QSH_PATH_SHADOWED: Diagnostic = Diagnostic {
     remedy: "Fix the PATH order, or remove the stale `qsh` binary the finding's detail names.",
 };
 
-/// `docs/CLI.md` §6.17, M8 plan Step 4b (52639fc) (J10): `config.toml` has a key
+/// `docs/CLI.md` §6.17, M8 plan Step 4b (3b23162) (J10): `config.toml` has a key
 /// path [`crate::config::Config`] does not know about. `#[serde(default)]`
 /// with no `deny_unknown_fields` means such a key is silently ignored
 /// rather than rejected (`docs/CLI.md` §2.3's documented contract — never
@@ -611,7 +611,7 @@ pub const CONFIG_UNKNOWN_KEY: Diagnostic = Diagnostic {
     remedy: "Check the key path the finding's detail names for a typo against docs/CLI.md's config.toml layout, or remove it if it is leftover from an older build.",
 };
 
-/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17, the M9 plan (b9a621b)/ADR-0012 결정 5
+/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17, the M9 plan (cdf4015)/ADR-0012 결정 5
 /// (ROADMAP M9 (b), `qsh serve --to` rename): `[serve].to` and the legacy
 /// `[reverse].controller` are both set and name different values
 /// (`crate::serve::config_serve_to_conflict`). `error`, not `warn` like
@@ -658,7 +658,7 @@ pub const TRUST_NARROWING_SCOPE: &str = trust_narrowing_scope!();
 /// discovering it only when a removal doesn't do what they expected. The
 /// message is [`TRUST_NARROWING_SCOPE`] behind a one-clause lead (ADR-0031
 /// 결정 9); the code, status and exposure condition are the M7 ones
-/// (M7 plan Step 2 (69dd788)).
+/// (M7 plan Step 2 (004ebd2)).
 pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
     id: DiagnosticId::TrustRemoveScope,
     code: "trust_remove_scope",
@@ -883,7 +883,7 @@ pub const SERVICE_RESTART_DROPS_SESSIONS: Diagnostic = Diagnostic {
     remedy: "Run `qsh sessions` to see what a restart would end, and close or finish those sessions before a planned restart. docs/deploy/service.md (Notes for both) and the README's Known limitations explain why.",
 };
 
-/// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `fab8563`), `docs/CLI.md` §6.17: a
+/// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `f7c26c1`), `docs/CLI.md` §6.17: a
 /// name `Ops::host_list`'s forward ∪ reverse merge already knows about
 /// (a trust-store pin or a `hosts.toml` entry) has no routable address
 /// from either book and no reverse registration — live or stale — for
@@ -941,7 +941,7 @@ pub const ACL_POLICY_INVALID_ROLE_CLAUSE: &str =
 /// failing to reload is what suspends role grants in a running process.
 pub const TRUST_FILE_ROLES_SUSPENDED_CLAUSE: &str = "a running qsh serve/listen refuses role grants until this file parses again (pin authentication keeps using the last good snapshot)";
 
-/// M5 plan Step 3 (2473c88) (F9): attempts to open `path` for append, creating
+/// M5 plan Step 3 (8237375) (F9): attempts to open `path` for append, creating
 /// the parent directory and the file itself if either is missing —
 /// exactly what [`crate::audit::RotatingAuditSink`]'s writer thread does
 /// on every fresh open. `true` means the current process could actually

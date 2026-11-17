@@ -3,13 +3,13 @@
 날짜: 2026-10-01
 상태: 승인됨 (2026-10-01 사용자 확정)
 
-개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. `CONNECTION_RECEIVE_WINDOW`(8 MiB, M8 DoD 2의 세션당 buffer 상한)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB, `docs/design/protocol.md` §12가 측정으로 확정한 값)는 그대로 두고, ADR-0010의 터널 스트림 quota 기본값도 건드리지 않는다. 느린 스트림 역압 하네스(`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`, 커밋 `209e764`)의 strict 결과가 이 ADR의 입력이다.
+개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. `CONNECTION_RECEIVE_WINDOW`(8 MiB, M8 DoD 2의 세션당 buffer 상한)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB, `docs/design/protocol.md` §12가 측정으로 확정한 값)는 그대로 두고, ADR-0010의 터널 스트림 quota 기본값도 건드리지 않는다. 느린 스트림 역압 하네스(`crates/qsh-testkit/tests/it/tunnel_stalled_streams.rs`, 커밋 `1ee908d`)의 strict 결과가 이 ADR의 입력이다.
 
 ## 맥락
 
 `docs/PRD.md` §13은 느린 파일·터널 stream이 PTY stream을 막지 않아야 한다고 적는다. 포화(고속) 축은 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 닫았다. 소비자가 읽지 않는 저속·역압 축은 `docs/design/testing.md` L9/L10의 "덮는 축은 포화(고속) 하나다" 문단이 잔여 위험으로 남겨 두었고, `docs/ROADMAP.md` M13 범위 (b)가 그것을 재라고 했다.
 
-커밋 `209e764`의 하네스는 한 QUIC 연결 위에 PTY 세션과 `-L` 포워드 N개를 올린다. 호스트 쪽 목적지가 끝없이 쓰고, 클라이언트 쪽 로컬 소비자는 작은 `SO_RCVBUF`로 연결만 열고 한 바이트도 읽지 않는다. `QSH_ACCEPTANCE_STRICT=1`로 로컬에서 돌린 결과는 이렇다.
+커밋 `1ee908d`의 하네스는 한 QUIC 연결 위에 PTY 세션과 `-L` 포워드 N개를 올린다. 호스트 쪽 목적지가 끝없이 쓰고, 클라이언트 쪽 로컬 소비자는 작은 `SO_RCVBUF`로 연결만 열고 한 바이트도 읽지 않는다. `QSH_ACCEPTANCE_STRICT=1`로 로컬에서 돌린 결과는 이렇다.
 
 - `pty_output_keeps_progressing_while_four_unread_tunnel_streams_stall`의 N=4 행은 붉다. 10초 동안 200줄 중 44줄만 왔다. N=8 행도 붉고 16줄이었다.
 - `pty_echo_p95_stays_within_measured_rtt_plus_10ms_while_four_unread_tunnel_streams_stall`은 붉다. echo 4라운드 뒤 2초 타임아웃이 났다(그때까지 p95 28.9ms).

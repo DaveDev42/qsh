@@ -12,7 +12,7 @@
 //! bytes: PTY output stops until a tunnel consumer reads. Three stalled
 //! streams hold 6 MiB and leave 2 MiB, so PTY output must keep flowing
 //! (the boundary test). Eight stalled streams are the same failure with
-//! margin. Commit `209e764` measured the progress and latency tests at N=4
+//! margin. Commit `1ee908d` measured the progress and latency tests at N=4
 //! red under `QSH_ACCEPTANCE_STRICT`, which is the input ADR-0037 decided
 //! on.
 //!
@@ -33,7 +33,7 @@
 //! convention): a numbered-lines producer for the progress test, an echo
 //! loop for the latency test.
 //!
-//! **Stall observation criterion** (M4 plan §4.1 #1 (2473c88)). Time is never the
+//! **Stall observation criterion** (M4 plan §4.1 #1 (8237375)). Time is never the
 //! criterion. The client's `Connection::stats().frame_rx` counts the
 //! frames the host sent. The stall is considered established when
 //! `data_blocked > 0` (the host ran out of connection-level credit), or

@@ -1,4 +1,4 @@
-//! L3 — M5 plan Step 4 (2473c88) DoD 4: every seam in
+//! L3 — M5 plan Step 4 (8237375) DoD 4: every seam in
 //! [`qsh_core::acl::DENY_SEAMS`] denies a remote peer uniformly, under a
 //! real `DenyAll` host (never `AllowAllPinned` — production policy is
 //! untouched by this file). "Uniformly" means two things, load-bearing
@@ -47,7 +47,7 @@
 //! every driver, equals `DENY_SEAMS`'s full name set exactly — so a new
 //! row of *any* kind that this file's blocks don't reach also fails
 //! loudly, not silently. The exemption list this file owes DoD 4 of
-//! The M5 plan (2473c88) is empty: every row in the registry is genuinely driven to a real
+//! The M5 plan (8237375) is empty: every row in the registry is genuinely driven to a real
 //! deny from testkit, including `session.attach` (see
 //! [`drive_session_attach`]'s doc for how a `DenyAll` host — which also
 //! denies `session.open` — still gets one to attach to) and
@@ -141,7 +141,7 @@ async fn drive_control_stream_op(s: &mut Session, name: &str) -> Result<(), Clie
             .await
             .map(|_| ()),
         // A well-formed but nonexistent `forward_id` — under `DenyAll` the
-        // ACL gate (`Server::authorize_owned`, M5 plan Step 5 (2473c88)) always
+        // ACL gate (`Server::authorize_owned`, M5 plan Step 5 (8237375)) always
         // runs first, so this still hits `PERMISSION_DENIED`, never
         // `INVALID_ARGUMENT`'s existence tell (`Server::handle_rfwd_close`'s
         // own doc: unknown-id resources are `owner: None`, never filtered
@@ -391,7 +391,7 @@ impl Authorizer for OpenOnlyDenyAttach {
 }
 
 /// A recording wrapper around a real deny authorizer
-/// (M15 plan Step 3 (1a4af3b)): delegates every decision unchanged and notes which
+/// (M15 plan Step 3 (1a0cbd6)): delegates every decision unchanged and notes which
 /// `(action, connection fingerprint)` pairs it was asked about, so the sweep
 /// can assert that each seam hands the authorizer the connection's own
 /// fingerprint (ADR-0045 결정 6: the role stage compares it with the
@@ -470,7 +470,7 @@ impl Authorizer for RecordingAuthorizer {
 /// whichever driver its [`SeamKind`] calls for, denied with the
 /// wire-shape-appropriate refusal and a matching audit record (module
 /// doc) — and a final coverage assertion that the set of rows actually
-/// driven equals the registry exactly (M5 plan Step 4 (2473c88) DoD 4's "add a
+/// driven equals the registry exactly (M5 plan Step 4 (8237375) DoD 4's "add a
 /// remote-facing deny seam without a registry row is a defect" made
 /// concrete for the reverse direction too: add a row nobody drives, and
 /// this test fails).
@@ -479,7 +479,7 @@ async fn every_deny_seam_in_the_registry_denies_with_the_uniform_message() {
     sweep(None).await;
 }
 
-/// M15 plan Step 3 (1a4af3b): every [`DENY_SEAMS`] row hands the authorizer the
+/// M15 plan Step 3 (1a0cbd6): every [`DENY_SEAMS`] row hands the authorizer the
 /// verified fingerprint of the connection it arrived on. Same sweep as the
 /// uniformity test above, with each host's authorizer wrapped in a
 /// [`FingerprintProbe`]; after every seam is driven the probe must have
@@ -704,7 +704,7 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
     // Coverage: the set of rows this test actually drove must equal
     // DENY_SEAMS exactly — no row left undriven, nothing driven that
     // is not (any longer) a registry row. This is the "exemption list is
-    // empty" property M5 plan Step 4 (2473c88) DoD 4 asks for: there is no
+    // empty" property M5 plan Step 4 (8237375) DoD 4 asks for: there is no
     // separate documented-exemption branch anywhere in this file because
     // every row really is driven.
     let registry_names: BTreeSet<&'static str> = DENY_SEAMS
@@ -720,7 +720,7 @@ async fn sweep(probe: Option<&Arc<FingerprintProbe>>) {
     );
 }
 
-// --- M15 plan Step 4 (1a4af3b): the role stage denies exactly like the rest ---------
+// --- M15 plan Step 4 (1a0cbd6): the role stage denies exactly like the rest ---------
 
 /// A sandbox `trust.toml` pinning `fingerprint` as `name` with an optional
 /// role, plus the production authorizer over it (`load_or_deny`; no

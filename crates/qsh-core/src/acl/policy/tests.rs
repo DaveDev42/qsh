@@ -55,7 +55,7 @@ fn family_prefix(action: Action) -> FamilyPrefix {
 
 #[test]
 fn always_deny_denies_forward_socks_under_the_most_generous_policy_with_no_rule_index() {
-    // `docs/design/architecture.md` §6 / M5 plan Step 2 (a) (2473c88): even
+    // `docs/design/architecture.md` §6 / M5 plan Step 2 (a) (8237375): even
     // the most permissive policy an operator could write cannot grant
     // `forward.socks`, undrivable by design (ADR-0019 결정 6). The file
     // actions left the gate with the host control plane (ADR-0029 결정 3).
@@ -138,7 +138,7 @@ fn principal_match_is_exact_not_prefix_or_shape() {
 #[test]
 fn omitted_auth_path_defaults_to_pin_and_never_admits_ca() {
     // A rule that never named `auth_path` in `acl.toml` — the loader
-    // defaults it to `AuthPath::Pin` (M5 plan §4.1 #2 (2473c88)); this test
+    // defaults it to `AuthPath::Pin` (M5 plan §4.1 #2 (8237375)); this test
     // pins that a `Rule` built that way can never admit a CA-asserted
     // peer, however broad `allow` is.
     let policy = Policy {
@@ -214,7 +214,7 @@ fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
     // `host.reverse`/`forward.local`) is never filtered by `scope`,
     // "owned" or "any" alike — this is the Step 2-era behavior
     // (`ResourceRef` then had no owner field to compare at all), still
-    // exactly correct now that `scope` is actually evaluated (the M5 plan (2473c88)
+    // exactly correct now that `scope` is actually evaluated (the M5 plan (8237375)
     // M5 Step 5), since an absent owner can never fail an ownership
     // comparison.
     let dave = Principal::User("dave".into());
@@ -242,7 +242,7 @@ fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
     }
 }
 
-/// The headline M5 plan Step 5 (2473c88) behavior: `scope = "owned"` (the
+/// The headline M5 plan Step 5 (8237375) behavior: `scope = "owned"` (the
 /// default) denies a request whose principal is not the resource's
 /// recorded owner, even though principal/auth_path/action all matched.
 #[test]
@@ -304,7 +304,7 @@ fn scope_owned_allows_the_resources_own_owner() {
 /// `scope = "any"` is the explicit widening: it admits a resource owned
 /// by someone else entirely, and only an operator writing that value
 /// into `acl.toml` can turn it on — the default stays `"owned"`
-/// (M5 plan §4.1 #3 (2473c88)).
+/// (M5 plan §4.1 #3 (8237375)).
 #[test]
 fn scope_any_admits_a_foreign_owner() {
     let dave = Principal::User("dave".into());
@@ -492,7 +492,7 @@ fn expand(pattern: &ActionPattern) -> Vec<Action> {
 
 /// Whether *some* rule in `policy` covers `(principal, auth_path,
 /// action, resource)`, independent of [`Policy::decide`]'s own
-/// matching logic — `resource`'s scope test (M5 plan Step 5 (2473c88))
+/// matching logic — `resource`'s scope test (M5 plan Step 5 (8237375))
 /// included, spelled out again here the same direct way `principal`/
 /// `auth_path` already were, rather than calling any of `decide`'s own
 /// helpers.
@@ -657,14 +657,14 @@ fn arb_role() -> impl Strategy<Value = Option<TrustRole>> {
 }
 
 proptest! {
-    /// DoD 3 (M5 plan Step 2 (2473c88), `docs/design/testing.md` L2/L8):
+    /// DoD 3 (M5 plan Step 2 (8237375), `docs/design/testing.md` L2/L8):
     /// for an arbitrary policy and an arbitrary request, `Policy::
     /// decide`'s allow/deny agrees with an independent naive oracle —
     /// in particular, whenever the oracle finds no covering rule, the
     /// evaluator MUST deny. The always-deny action (`forward.socks`) is asserted to
     /// override any oracle coverage, since no rule can grant it.
     ///
-    /// `owner_kind` (M5 plan Step 5 (2473c88)) draws the resource into one
+    /// `owner_kind` (M5 plan Step 5 (8237375)) draws the resource into one
     /// of the three shapes `decide`'s ④ actually distinguishes: no
     /// owner at all, this exact requester as owner, or some other
     /// principal as owner. The "other" owner is built from
@@ -698,7 +698,7 @@ proptest! {
             Some(owner) => ResourceRef { id: "r", owner: Some(owner), canonical_path: None },
             None => ResourceRef::unowned("r"),
         };
-        // The role dimension (M15 plan Step 4 (1a4af3b)): the pin of `principal`'s
+        // The role dimension (M15 plan Step 4 (1a0cbd6)): the pin of `principal`'s
         // device name carries `pin_role`; the connection's fingerprint
         // matches that pin or not; the trust store's last reload failed
         // or not. `role_of_pin` is the one resolver production uses.
@@ -878,7 +878,7 @@ proptest! {
     /// `allow` patterns of every row whose principal and `auth_path` match,
     /// expanded over `Action::ALL`, minus the literal always-denied action.
     /// The resource is unowned, so `scope` is ignored. The role dimension
-    /// (M15 plan Step 6 (1a4af3b), ADR-0045 결정 11) joins as a union: a role counts
+    /// (M15 plan Step 6 (1a0cbd6), ADR-0045 결정 11) joins as a union: a role counts
     /// only for a `device:` principal over `pin`, and grants what
     /// [`oracle_role_row`] lists.
     #[test]

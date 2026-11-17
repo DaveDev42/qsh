@@ -1694,7 +1694,7 @@ A patch release with one fix. There is no wire or contract change, and
   `udp_rx.datagrams`) as proof the path is alive. Before, a `Pong` stuck
   in QUIC's ordered loss recovery on a lossy link could leave the watch
   with no sign of life, and it reported a false `path_dead` while packets
-  were still arriving (DaveDev42/qsh#10, PR #12, commit 54ce47d).
+  were still arriving (DaveDev42/qsh#10, PR #12, commit 91d9154).
 
 What this means in use:
 

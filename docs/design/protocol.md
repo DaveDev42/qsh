@@ -417,7 +417,7 @@ message FileFrame {
 
 ## 11. 은퇴, wire는 남는다 (구 역방향 모드)
 
-> **은퇴(ADR-0068).** 역방향 연결(`qsh listen`, `qsh serve --to`, 숨김 `qsh reverse`, controller 등록과 registry, 합친 endpoint, localctl 데몬)은 v0.9.0에서 걷혔다. 이 절은 번호를 두고, 남은 wire와 그 동작만 적는다. 절차와 상태 기계를 설명하던 옛 본문은 지우고 git 이력(ADR-0068 결정 9 4·5단계 커밋 `59c4fdbd`, `0f3e4c28`)에 둔다. 연결 방향이 도달 가능성을 가르지 않는 모델은 §22의 iroh route가 맡는다(ADR-0065).
+> **은퇴(ADR-0068).** 역방향 연결(`qsh listen`, `qsh serve --to`, 숨김 `qsh reverse`, controller 등록과 registry, 합친 endpoint, localctl 데몬)은 v0.9.0에서 걷혔다. 이 절은 번호를 두고, 남은 wire와 그 동작만 적는다. 절차와 상태 기계를 설명하던 옛 본문은 지우고 git 이력(ADR-0068 결정 9 4·5단계 커밋 `25b02426`, `3f0d943b`)에 둔다. 연결 방향이 도달 가능성을 가르지 않는 모델은 §22의 iroh route가 맡는다(ADR-0065).
 
 **남은 wire와 동결.** 아래는 모두 §16의 freeze대로 `.proto`와 상수에 그대로 있다. 코드가 없어도 번호와 의미를 다시 쓰지 않는다.
 
@@ -470,7 +470,7 @@ chunk := length (4바이트, big-endian u32) || length 바이트
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **26종**이다. 처음 착륙한 파서 타깃 16종(커밋 `d87e76b`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9), `parse_ssh_bootstrap_line`(10)이 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃은 `fuzz/fuzz_targets/`에 **26종**이다. 처음 착륙한 파서 타깃 16종(커밋 `2c555d2`, 2026-09-02)이 1~4번 항목이고, 이후 `broker_ops`(6), `parse_socks5`(7), `parse_openssh_key`(8), `decode_file_frame`(9), `parse_ssh_bootstrap_line`(10)이 더해졌다. 5번은 fuzz 타깃이 아니라 proptest 모델 테스트다.
 
 1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
 2. **wire 메시지 decode 6종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로). 옛 `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`)는 ADR-0068로 걷혔다. 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.

@@ -1,7 +1,7 @@
 //! Doc-prose == code-vocabulary anti-drift gate for `Action::ALL`
-//! (M5 plan Step 1 (c) (2473c88), L6 — the same discipline `tunnel_docs.rs`/
+//! (M5 plan Step 1 (c) (8237375), L6 — the same discipline `tunnel_docs.rs`/
 //! `doctor_docs.rs` already apply to wording constants), plus the same
-//! discipline applied to `PERMISSION_DENIED_MESSAGE` (M5 plan Step 4 (2473c88)
+//! discipline applied to `PERMISSION_DENIED_MESSAGE` (M5 plan Step 4 (8237375)
 //! (c)).
 //!
 //! `docs/PRD.md` §9 is the **binding** action vocabulary (`CLAUDE.md`
@@ -25,7 +25,7 @@
 //!
 //! Deliberately has no `#[cfg(unix)]` anywhere — both sides are pure data
 //! (an enum's `as_str()`, a `&str` constant, and markdown files), so this
-//! runs on the Windows CI leg too (M3 plan Step 9 (d) (2473c88)'s precedent).
+//! runs on the Windows CI leg too (M3 plan Step 9 (d) (8237375)'s precedent).
 
 use std::collections::BTreeSet;
 
@@ -156,7 +156,7 @@ fn architecture_md_quotes_the_permission_denied_message_verbatim() {
 }
 
 // ---------------------------------------------------------------------
-// F4 (M5 plan Step 6 (2473c88) PR 6a adversarial ②): the L6 doc-consistency
+// F4 (M5 plan Step 6 (8237375) PR 6a adversarial ②): the L6 doc-consistency
 // gate the migration story (1) owed and never got — `doctor_docs.rs`'s
 // `CONTROLLER_UNREACHABLE` precedent, applied to
 // `qsh_core::acl::StartupDiagnostic::render`'s fixed wording. `render()`

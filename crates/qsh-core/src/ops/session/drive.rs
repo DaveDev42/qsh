@@ -9,7 +9,7 @@ fn spawn_watchdog(link: &Link, watch: PathWatch, probes: Arc<tokio::sync::Notify
 }
 
 /// Drive one attach for its whole life, across as many connections as it
-/// takes (`docs/design/protocol.md` §2, §10; M2 plan Step 7 (a) (2473c88)).
+/// takes (`docs/design/protocol.md` §2, §10; M2 plan Step 7 (a) (8237375)).
 ///
 /// Each *leg* is one connection's worth of attach: a data stream, a control
 /// stream, and a watchdog asking whether the path still carries packets. A

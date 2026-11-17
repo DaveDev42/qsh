@@ -147,11 +147,11 @@ impl ActionPattern {
 }
 
 /// Whether a `scope`-bearing rule applies to any instance of a resource or
-/// only ones `principal` owns. M5 plan §4.1 #3 (2473c88)'s default is
+/// only ones `principal` owns. M5 plan §4.1 #3 (8237375)'s default is
 /// [`Scope::Owned`] — the safe default that reproduces M3's
 /// opener-principal binding.
 ///
-/// **Evaluated by `Policy::decide`'s ④ since M5 plan Step 5 (2473c88)**: a
+/// **Evaluated by `Policy::decide`'s ④ since M5 plan Step 5 (8237375)**: a
 /// matched rule with `scope = "owned"` allows only when the resource's
 /// owner ([`ResourceRef::owner`]) equals the requester's own
 /// [`super::opener_key`] — `owner: None` (a resource kind with no owner
@@ -179,12 +179,12 @@ pub struct Rule {
     pub principal: String,
     /// Which trust path this rule applies to. Defaults to
     /// [`AuthPath::Pin`] when `acl.toml` omits the key
-    /// (M5 plan §4.1 #2 (2473c88)).
+    /// (M5 plan §4.1 #2 (8237375)).
     pub auth_path: AuthPath,
     /// Action patterns this rule grants (never empty — the loader rejects
     /// a rule with no `allow` entries).
     pub allow: Vec<ActionPattern>,
-    /// Ownership scope, evaluated since M5 plan Step 5 (2473c88) (see
+    /// Ownership scope, evaluated since M5 plan Step 5 (8237375) (see
     /// [`Scope`]'s doc).
     pub scope: Scope,
     /// The row's `paths` key (ADR-0029 결정 4), exactly as written: absolute
@@ -224,7 +224,7 @@ impl Rule {
 /// basis of an allow — the matching rule's array index in
 /// [`Policy::rules`] (the same value [`crate::audit::AuditRecord::rule`]
 /// and `acl check`'s `rule` field carry), or the trust role that granted it
-/// (M5 plan §4.1 #8 (2473c88): `Authorizer::check` returns this instead of a
+/// (M5 plan §4.1 #8 (8237375): `Authorizer::check` returns this instead of a
 /// bare [`Decision`] so the two never have to be computed twice).
 ///
 /// `rule` and `role` are never both `Some`: an allow is based on exactly
@@ -317,12 +317,12 @@ impl Policy {
     /// remote forward keeps denying under `scope = "owned"` exactly as
     /// M3's hardcoded `require_opener` gate did, now as an ordinary policy
     /// judgment instead of a second, separate check
-    /// (`docs/design/architecture.md` §6, M5 plan Step 5 (a) (2473c88)). A
+    /// (`docs/design/architecture.md` §6, M5 plan Step 5 (a) (8237375)). A
     /// resource with no owner concept at all (`resource.owner: None` —
     /// `exec.run`/`host.reverse`/`forward.local`) is never filtered by
     /// `scope` either way, `"owned"` or `"any"`.
     ///
-    /// `pub(crate)`, not `pub` (M5 plan Step 7 (2473c88) DoD 1): the structural
+    /// `pub(crate)`, not `pub` (M5 plan Step 7 (8237375) DoD 1): the structural
     /// half of "`acl check` runs the same code path as enforcement" is that
     /// this is the **only** evaluator, and the only way to make that a
     /// compiler-enforced fact rather than a code-review claim is to make it

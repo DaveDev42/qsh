@@ -1,4 +1,4 @@
-//! `acl.check` (`docs/CLI.md` §6.15, M5 plan Step 7 (2473c88)) — the local,
+//! `acl.check` (`docs/CLI.md` §6.15, M5 plan Step 7 (8237375)) — the local,
 //! authorization-free operation that lets an operator ask "what would
 //! enforcement decide?" without waiting for a restart (§2.5's "인가 불요"
 //! row: `acl.check` never reaches a remote peer — a remote-visible policy
@@ -16,7 +16,7 @@
 //! decide`'s matching logic.
 //!
 //! **The trust role is an input here too** (ADR-0045 결정 10·11, M15 plan
-//! Step 6 (1a4af3b)). For a `device:<name>` principal over `--auth-path pin`, the
+//! Step 6 (1a0cbd6)). For a `device:<name>` principal over `--auth-path pin`, the
 //! pin of that name in this machine's `trust.toml` supplies the role, and
 //! its own fingerprint stands in for the connection's (a local query has no
 //! connection). The role goes into the same `Policy::decide` as an explicit
@@ -57,7 +57,7 @@ impl Operation for AclShowOp {
 }
 
 /// `"pin"`/`"ca"` → [`AuthPath`], the same two-word grammar `acl.toml`'s own
-/// `auth_path` key uses (M5 plan §4.1 #2 (2473c88)). Not a `FromStr` impl on
+/// `auth_path` key uses (M5 plan §4.1 #2 (8237375)). Not a `FromStr` impl on
 /// `qsh_transport::AuthPath` itself — this two-armed match has exactly one
 /// caller family (this module's `--auth-path`/`--owner-auth-path`), the
 /// same reason `crate::audit`'s own `auth_path_str` (the render direction)
@@ -170,11 +170,11 @@ impl Ops {
     /// `principal`/`action` outside the typed vocabulary is
     /// `INVALID_ARGUMENT` — what actions exist is discoverable via
     /// `--help`/`qsh schema`, so this rejection is not an information-
-    /// disclosure oracle (M5 plan Step 7 (a) (2473c88)). `resource` omitted
+    /// disclosure oracle (M5 plan Step 7 (a) (8237375)). `resource` omitted
     /// evaluates an unowned resource; `owner` given folds it (via the
     /// production [`opener_key`], never a second folding implementation)
     /// into an owned [`ResourceRef`] so `scope = "owned"` rows are
-    /// explainable too (M5 plan §4.2 (2473c88)'s `--owner` decision) — the
+    /// explainable too (M5 plan §4.2 (8237375)'s `--owner` decision) — the
     /// folded string's internal `{auth_path:?}` encoding never leaves this
     /// function; only the unfolded `owner`/`owner_auth_path` strings are
     /// echoed back.

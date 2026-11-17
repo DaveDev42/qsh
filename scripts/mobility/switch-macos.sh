@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # switch-macos.sh — repeatable Wi-Fi <-> tethering switch driver for the M2
-# mobility campaign (M2 plan Step 9 (2473c88), docs/campaigns/m2-mobility.md).
+# mobility campaign (M2 plan Step 9 (8237375), docs/campaigns/m2-mobility.md).
 #
 # This script only moves the laptop's link. It measures nothing: the numbers for
 # the campaign come from the qsh client's `qsh::recovery` stderr diagnostics

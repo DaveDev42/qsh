@@ -4,7 +4,7 @@ fn fp(seed: &[u8]) -> Fingerprint {
     Fingerprint::of_spki_der(seed)
 }
 
-/// M9 plan §2.1 (b9a621b): every decision-table row, `(input, expected address,
+/// M9 plan §2.1 (cdf4015): every decision-table row, `(input, expected address,
 /// expected port_filled)`. Row numbers in comments match the design doc.
 #[test]
 fn normalize_peer_address_decision_table() {
@@ -224,7 +224,7 @@ fn re_adding_with_the_same_address_is_a_pure_no_op() {
 
 /// A *different* fingerprint must not silently re-pin, and must not
 /// touch the stored address either — a fingerprint mismatch is a hard
-/// no-op on the whole entry (M7 plan Step 2 (69dd788) decision B: identity
+/// no-op on the whole entry (M7 plan Step 2 (004ebd2) decision B: identity
 /// rebind is a deliberate `remove` + `add`, never a side effect).
 #[test]
 fn re_adding_with_a_different_fingerprint_never_overwrites() {
@@ -511,7 +511,7 @@ fn lookup_pin_follows_a_reordered_trust_toml_without_a_restart() {
     );
 }
 
-/// **M7 plan Step 2 (69dd788) P2-2, regression.** An mtime-only invalidator
+/// **M7 plan Step 2 (004ebd2) P2-2, regression.** An mtime-only invalidator
 /// is fail-open on a coarse-granularity filesystem (HFS+, exFAT/FAT,
 /// some SMB/NFS mounts, 1-2s resolution): two edits landing in the same
 /// tick share an mtime, so a check gated on `mtime != cached_mtime`
@@ -627,7 +627,7 @@ fn shared_store_opens_a_missing_file_as_empty() {
     assert_eq!(shared.lookup_pin(&fp(b"x")), None);
 }
 
-/// Regression for M7 plan Step 7-1 (69dd788)'s S1/general lost-update fix:
+/// Regression for M7 plan Step 7-1 (004ebd2)'s S1/general lost-update fix:
 /// 8 threads, each doing a full `TrustStore::lock` → `load` →
 /// `add_peer` → `save` cycle for a distinct peer, must not lose each
 /// other's addition. Locking only around `save` (the pre-Step-7-1
@@ -666,7 +666,7 @@ fn concurrent_full_rmw_cycles_do_not_lose_each_others_peers() {
     );
 }
 
-/// Regression for M7 plan Step 7-1 (69dd788)'s S1 scenario specifically: a
+/// Regression for M7 plan Step 7-1 (004ebd2)'s S1 scenario specifically: a
 /// pairing response's `add_peer` and an operator's concurrent `trust
 /// remove` must not race into "the removed peer comes back" — the
 /// worst outcome on this step's list, a revoked trust decision
@@ -731,7 +731,7 @@ fn a_concurrent_add_never_resurrects_a_concurrent_remove() {
     );
 }
 
-/// Regression for M7 plan Step 7-1 (69dd788)'s file-corruption fix in
+/// Regression for M7 plan Step 7-1 (004ebd2)'s file-corruption fix in
 /// `crate::config::write_private_file_io` (the writer-scoped temp
 /// ticket): many concurrent `save` calls racing the very same path,
 /// deliberately **without** `TrustStore::lock` — every real call site
@@ -745,7 +745,7 @@ fn a_concurrent_add_never_resurrects_a_concurrent_remove() {
 /// than one writer — a corrupt `trust.toml`, not just a stale one.
 ///
 /// Repeated 16 times (fresh path each round): a standalone reproduction
-/// outside this repo (M7 plan Step 7-1 (69dd788) 검증 라운드 A5) measured the
+/// outside this repo (M7 plan Step 7-1 (004ebd2) 검증 라운드 A5) measured the
 /// per-round corruption rate at 8/40 (20%) once the ticket is removed —
 /// a single round only catches a reverted ticket about 4 times out of
 /// 5. 16 independent rounds raise that to `1 - 0.8^16 ≈ 97%`, without
@@ -1066,7 +1066,7 @@ fn rewriting_a_pin_without_a_role_key_does_not_add_one() {
     assert_eq!(TrustStore::load(&path).unwrap(), store);
 
     // A brand-new pin written by `add_peer` has no role key either (M15 plan Step 5
-    // (1a4af3b) gives the writing commands a role to write).
+    // (1a0cbd6) gives the writing commands a role to write).
     let mut store = TrustStore::load(&path).unwrap();
     store.add_peer("fresh", None, fp(b"fresh"), "t".into());
     store.save(&path).unwrap();
@@ -1109,7 +1109,7 @@ fn peer_entry(name: &str, seed: &[u8], role: Option<&str>) -> String {
 
 /// ADR-0045 결정 4's inputs to ⓡ: the role comes from the pin of the
 /// requester's own name whose fingerprint equals the connection's, and from
-/// nothing else. The evaluator consumes it as stage ⓡ (M15 plan Step 4 (1a4af3b)).
+/// nothing else. The evaluator consumes it as stage ⓡ (M15 plan Step 4 (1a0cbd6)).
 #[test]
 fn resolve_role_requires_a_current_pin_with_the_connections_fingerprint() {
     let dir = tempfile::tempdir().unwrap();

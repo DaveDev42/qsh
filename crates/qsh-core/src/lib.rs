@@ -14,7 +14,7 @@
 //! - [`trust`]: `trust.toml` — pinned peers, private CA roots, and the
 //!   [`qsh_transport::TrustEvaluator`] the verifier is driven by.
 //! - [`hosts`]: `hosts.toml` — the host profile address book layered over
-//!   `trust`'s pinned peers (M7 plan Step 3 (69dd788)). Never a trust source.
+//!   `trust`'s pinned peers (M7 plan Step 3 (004ebd2)). Never a trust source.
 //! - [`mod@file`]: remote file operations; today only the shared path judgement
 //!   [`file::guard`] (`docs/adr/0029-file-copy.md`).
 //! - [`ssh_bootstrap`]: the ssh child, `ssh -G` and argument building behind

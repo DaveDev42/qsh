@@ -71,7 +71,7 @@ fn deny_all_denies_everything() {
     }
 }
 
-/// M5 plan Step 5 (2473c88)'s interim invariant: `AllowAllPinned` must keep
+/// M5 plan Step 5 (8237375)'s interim invariant: `AllowAllPinned` must keep
 /// denying a non-owner on an owned resource exactly as M3's hardcoded
 /// `require_opener` gate did — production still runs this authorizer,
 /// not a real `Policy`, until Step 6.

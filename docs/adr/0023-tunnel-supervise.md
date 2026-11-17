@@ -7,13 +7,13 @@
 
 - [ADR-0018](0018-tunnel-lifetime-bound-to-connection.md)의 결정 2는 `--supervise`를 준 standalone `qsh tunnel open`에 한해 개정한다. 결정 3이 P1 백로그로 둔 `-R` 자동 재발행은 이 ADR의 close-then-open으로 처리한다. ADR-0018 결정 1과 결정 4는 바뀌지 않는다. `--supervise`가 없는 터널과 대화형 form(`qsh [user@]host -L/-R/-D`)에는 결정 2·3도 지금 문면 그대로 적용된다. ADR-0018 제목과 결정 1의 "v1 내내"는 wire 위 터널 객체(`forward_id`, 스트림마다의 splice)의 수명을 가리키는 것으로 읽는다. 켠 터널이 하는 일은 결정 1이 처방한 "새 `tunnel.open`"을 프로세스가 스스로 하는 것이다.
 - [ADR-0022](0022-reverse-health-surface.md) 결정 7의 전제("connection이 죽으면 등록도 함께 죽으므로 살아 있지만 아픈 터널이라는 상태가 존재하지 않는다")는 `--supervise` 터널에서는 더는 참이 아니다. listener는 bind돼 있는데 그 뒤의 carrier가 없는 상태가 예산만큼 이어질 수 있다. 이 ADR은 그 상태의 관측 표면을 결정 12의 stderr 진단으로 둔다. 기본 모드 터널에는 결정 7이 그대로 참이다. ADR-0022 결정 5가 `qsh::reverse` 줄의 필드를 진단 어휘로 두었으므로 결정 20이 그 줄에 `wake` 이벤트를 더해도 그 자유 안에 든다. 결정 3의 push 표면 트리거는 건드리지 않는다(결정 23).
-- [ADR-0019](0019-socks-dynamic-forward.md) 결정 11은 `TunnelDynamicReq`의 모양을 적어 두었다. 여기에 optional 필드 둘(`supervise_ms`, `accept_hold_ms`)을 더하고 `TunnelOpenReq`에도 같은 둘을 더한다. `qsh.cli/v1` 규칙상 additive이고 `TunnelOpenReq.wait_ms`(commit `c9113cc`)가 같은 방식의 선례다.
+- [ADR-0019](0019-socks-dynamic-forward.md) 결정 11은 `TunnelDynamicReq`의 모양을 적어 두었다. 여기에 optional 필드 둘(`supervise_ms`, `accept_hold_ms`)을 더하고 `TunnelOpenReq`에도 같은 둘을 더한다. `qsh.cli/v1` 규칙상 additive이고 `TunnelOpenReq.wait_ms`(commit `dcd99f2`)가 같은 방식의 선례다.
 - [ADR-0021](0021-transport-liveness-knobs.md)은 개정하지 않는다. 결정 2의 45초 idle timeout과 결정 1의 keep-alive는 손대지 않고, 결정 17의 wake 감지기와 결정 10의 빠른 창은 설정으로 열지 않는 고정 상수다. 결정 4가 `[recovery]`로 여는 세 값과 열지 않은 `idle_probe_interval`도 바뀌지 않는다. 결정 7의 관측 게이트(ROADMAP M13 (k))도 유지한다(결정 25).
 - wire(`docs/design/protocol.md` §9, §16)와 `qsh.local.v1`은 바꾸지 않는다. `docs/CLI.md` §6.9와 §6.14에는 문단을 더하고, §6.14 첫 문단 끝에 "`--supervise` 예외는 아래 문단"이라는 참조 한 구절만 넣는다. §6.12와 §6.13에는 결정 20과 21의 진단 문단을 더한다. §6.1의 route 우선순위 문면(결정 22)을 비롯해 그 밖의 기존 문면은 고치지 않는다.
 
 ## 맥락
 
-이슈 #4의 항목 5는 "reverse 재등록을 기다렸다가 forwarding listener를 다시 만드는 supervised tunnel mode, 바깥의 exit/relaunch 루프 없이"를 요구한다. 보고된 배치에서는 controller 쪽 launchd가 `qsh tunnel open office --local 127.0.0.1:6771:localhost:6768 --json`을 쥔다. 연결이 끊기면 그 프로세스가 끝나고 launchd가 30초마다 다시 띄우며, 그 사이 로컬 포트가 사라져 downstream client가 connection refused를 받는다. 한 사례에서는 05:16:46Z에 닫힌 터널이 05:25:58Z에야 다시 열렸다. 같은 이슈의 5a는 commit `c9113cc`의 `--wait`로 처리됐고 5b가 이 ADR의 몫으로 남았다.
+이슈 #4의 항목 5는 "reverse 재등록을 기다렸다가 forwarding listener를 다시 만드는 supervised tunnel mode, 바깥의 exit/relaunch 루프 없이"를 요구한다. 보고된 배치에서는 controller 쪽 launchd가 `qsh tunnel open office --local 127.0.0.1:6771:localhost:6768 --json`을 쥔다. 연결이 끊기면 그 프로세스가 끝나고 launchd가 30초마다 다시 띄우며, 그 사이 로컬 포트가 사라져 downstream client가 connection refused를 받는다. 한 사례에서는 05:16:46Z에 닫힌 터널이 05:25:58Z에야 다시 열렸다. 같은 이슈의 5a는 commit `dcd99f2`의 `--wait`로 처리됐고 5b가 이 ADR의 몫으로 남았다.
 
 오늘의 수명 규칙은 route마다 다르다(`docs/CLI.md` §6.9, §6.14).
 

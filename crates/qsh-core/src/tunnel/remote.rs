@@ -1,11 +1,11 @@
 //! The host side of a remote forward, `-R [bind:]rport:host:hport`
-//! (M4 plan Step 4 (2473c88), `docs/design/protocol.md` §7, §9).
+//! (M4 plan Step 4 (8237375), `docs/design/protocol.md` §7, §9).
 //!
 //! **Stage A** landed the contract surface only:
 //! [`resolve_loopback_bind_addr`], the classification a
 //! `RemoteForwardOpen`'s `bind_host` is put through **after** the
 //! `forward.remote` ACL check and **before** any listener is bound
-//! (M4 plan Step 4 (2473c88), "loopback-only bind") — one resolution, whose validated
+//! (M4 plan Step 4 (8237375), "loopback-only bind") — one resolution, whose validated
 //! address is the one bound. **Stage B** (this addition) lands the rest:
 //! [`RemoteForwardBinder`] (the bind seam a unit test instruments to prove
 //! "bind 0" — the same seam shape as
@@ -53,7 +53,7 @@
 //! infrastructure gated the same way the rest of M4's host-side tunnel code
 //! is — see
 //! `crates/qsh-core/Cargo.toml`'s platform split and the Windows-leg notes in
-//! The M4 plan (2473c88) for M4 Step 3/4 (compiles, does not run the
+//! The M4 plan (8237375) for M4 Step 3/4 (compiles, does not run the
 //! integration leg on Windows). [`RemoteForwardAcceptor`] is the
 //! requester leg, not the host leg, and is **not** `cfg(unix)`-gated —
 //! same reasoning as `crate::tunnel::local`'s own requester-side listener.
@@ -116,7 +116,7 @@ impl BindHostResolver for SystemResolver {
 }
 
 /// The exact `docs/CLI.md` §6.9 / `README.md` wording for a non-loopback
-/// `-R` bind's `INVALID_ARGUMENT` refusal (M4 plan Step 8 (2473c88)'s L6
+/// `-R` bind's `INVALID_ARGUMENT` refusal (M4 plan Step 8 (8237375)'s L6
 /// doc-consistency gate, the same discipline M3 Step 9 applied to
 /// `qsh_core::doctor::CONTROLLER_UNREACHABLE`). `NotLoopback`'s
 /// `Display` is defined in terms of this constant rather than its own
@@ -187,7 +187,7 @@ const BIND_HOST_RESOLVE_TIMEOUT: Duration = crate::tunnel::dial::TUNNEL_DIAL_TIM
 ///
 /// Runs **after** the `forward.remote` ACL check and **before** any
 /// listener exists (`crate::server::Server::authorize_and_bind_remote_forward`
-/// is the one caller, and its own doc pins that order). The M4 plan (2473c88)
+/// is the one caller, and its own doc pins that order). The M4 plan (8237375)
 /// Step 4's "loopback-only bind", `docs/PRD.md` §9, M4 DoD 2.
 ///
 /// # One resolution, by construction
@@ -326,7 +326,7 @@ pub(crate) type BindFuture<'a> = Pin<Box<dyn Future<Output = io::Result<TcpListe
 /// forward's dial, mirrored for the remote forward's bind: it exists so a
 /// unit test can prove **zero binds** on a denied or non-loopback
 /// `RemoteForwardOpen` without a real socket ever touching the network
-/// (`docs/design/testing.md` L2, M4 plan Step 4 (c) (2473c88)). This trait must
+/// (`docs/design/testing.md` L2, M4 plan Step 4 (c) (8237375)). This trait must
 /// never learn about ACL or loopback policy — both decisions are made by
 /// [`crate::server::Server::authorize_and_bind_remote_forward`] strictly
 /// before the first call to [`bind`](Self::bind).
@@ -421,7 +421,7 @@ fn remote_forward_quota_key(forward_id: &[u8]) -> String {
 
 /// Accept forever on `listener`, turning each connection into a
 /// `TCP_ACCEPTED` stream on `conn` and splicing it — the host side of
-/// M4 plan Step 4 (2473c88)'s `-R`, symmetric to
+/// M4 plan Step 4 (8237375)'s `-R`, symmetric to
 /// [`crate::tunnel::local::LocalForward::run`] in every way that matters:
 /// same accept-error classification
 /// ([`crate::tunnel::local::accept_disposition`], reused rather than
@@ -436,7 +436,7 @@ fn remote_forward_quota_key(forward_id: &[u8]) -> String {
 /// `LocalForward::run`'s own contract. `conn` is a snapshot, the same
 /// `ForwardCarrier::Direct` caveat `crate::tunnel::local` documents: this
 /// forward does not survive a forward-route connection recovery
-/// (M4 plan Step 8 (2473c88)'s subject).
+/// (M4 plan Step 8 (8237375)'s subject).
 pub(crate) async fn serve_remote_forward(
     listener: TcpListener,
     conn: qsh_transport::Connection,
@@ -552,7 +552,7 @@ pub(crate) async fn serve_remote_forward(
 /// Reset code for a `TCP_ACCEPTED` stream whose `ticket` names a
 /// `forward_id` this requester never registered (already closed, never
 /// opened, or opened by a different attach) — rejected without dialing
-/// anything, per M4 plan Step 4 (2473c88)'s requester-leg requirement.
+/// anything, per M4 plan Step 4 (8237375)'s requester-leg requirement.
 const RESET_CODE_UNKNOWN_FORWARD: u32 = 0x2008;
 
 /// Reset code for a `TCP_ACCEPTED` stream whose `forward_id` *was* found,
@@ -572,7 +572,7 @@ type RemoteForwardTable = Arc<Mutex<HashMap<String, (String, u16)>>>;
 /// The requester side of `-R`: a single dispatcher, shared by every `-R`
 /// spec opened on one connection, that accepts the peer's `TCP_ACCEPTED`
 /// streams and turns each into a dial to this side's own local
-/// `forward_host:forward_port` (M4 plan Step 4 (2473c88)'s requester leg,
+/// `forward_host:forward_port` (M4 plan Step 4 (8237375)'s requester leg,
 /// `docs/design/protocol.md` §7).
 ///
 /// One dispatcher per connection, not one per spec:

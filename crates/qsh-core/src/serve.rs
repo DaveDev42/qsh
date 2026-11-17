@@ -623,7 +623,7 @@ pub async fn run_serve_with_iroh(
             runtime.server.run(listener, until).await;
         }
     }
-    // F2 (M5 plan Step 3 (2473c88)): `Server::run`'s accept loop detaches each
+    // F2 (M5 plan Step 3 (8237375)): `Server::run`'s accept loop detaches each
     // connection's task (`tokio::spawn`, no `JoinSet`) and `drain()` only
     // waits for the broker's own sessions, not those tasks themselves — so
     // a straggler can still hold its own `Arc<Server>` clone (and thus,
@@ -641,7 +641,7 @@ pub async fn run_serve_with_iroh(
 /// control stream (`docs/design/architecture.md` §3, §6).
 ///
 /// [`host_runtime`] is the one place that assembles this — shared by `qsh
-/// serve` here and, from M3 plan Step 3 (2473c88) PR 3b, `qsh reverse`: a reverse
+/// serve` here and, from M3 plan Step 3 (8237375) PR 3b, `qsh reverse`: a reverse
 /// target *is* a host, just one that dialed out instead of accepting a
 /// connection, so it reuses the exact same broker/audit/authorizer
 /// construction rather than a second copy of it (`docs/CLI.md` §6.13: the
@@ -661,7 +661,7 @@ pub struct HostRuntime {
     /// (missing or invalid) — `server`'s authorizer is [`crate::acl::DenyAll`]
     /// in that case, and the caller (`qsh-cli`'s `run_serve`/`run_reverse`
     /// wrappers) must print [`StartupDiagnostic::render`]'s output to
-    /// stderr exactly once (M5 plan Step 6 (2473c88)). `None` when a real
+    /// stderr exactly once (M5 plan Step 6 (8237375)). `None` when a real
     /// [`crate::acl::Policy`] loaded.
     pub policy_diagnostic: Option<StartupDiagnostic>,
 }
@@ -711,7 +711,7 @@ impl SharedParts {
     /// Build the shared parts for a process whose startup diagnostic
     /// example row is `role`'s. Policy loads exactly once, here, at process
     /// start, never hot-reloaded (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6
-    /// (2473c88)).
+    /// (8237375)).
     pub fn load(paths: &Paths, config: &Config, trust: Arc<SharedTrustStore>, role: Role) -> Self {
         let audit = Arc::new(RotatingAuditSink::spawn(
             config.audit.path(paths),
@@ -728,7 +728,7 @@ impl SharedParts {
         // `Server::serve_pairing_connection` simply ignores the index.
         let (authorizer, policy_diagnostic, pinned_principals) =
             load_or_deny_with_index(paths, role, Arc::clone(&trust));
-        // M8 plan Step 2 (52639fc): the same operator-configured admission
+        // M8 plan Step 2 (3b23162): the same operator-configured admission
         // bounds for every role (`qsh serve`, a reverse target's own accept
         // loop and `qsh listen`: `[listen]` has no admission keys of its
         // own and inherits `[serve]`'s) — all internet-exposed accept loops
@@ -739,7 +739,7 @@ impl SharedParts {
             config.serve.handshake_rate_per_source(),
             config.serve.validated_rate_per_source(),
         ));
-        // M8 plan Step 3 (52639fc): the same operator-configured `[serve]`
+        // M8 plan Step 3 (3b23162): the same operator-configured `[serve]`
         // quota limits the broker resolves via `BrokerConfig::from_serve`
         // (session-count axes), so the quota tracker (`exec.run`
         // concurrency, the connection axes and every axis's
@@ -808,11 +808,11 @@ pub fn host_runtime(
 /// (with its TTL reaper spawned) and the `Server` that ties it to the
 /// shared audit sink, authorizer, admission gate and quotas under
 /// `device_id`. The audit sink is the one in `parts`
-/// (`crate::audit::RotatingAuditSink`, the M5 plan (2473c88) Step 3, at
+/// (`crate::audit::RotatingAuditSink`, the M5 plan (8237375) Step 3, at
 /// `[audit]`'s configured path); the policy is the `acl.toml`-backed one
 /// `parts` resolved at startup (falls back to `DenyAll` plus a
 /// [`HostRuntime::policy_diagnostic`] on anything short of a clean load, M5
-/// plan Step 6 (2473c88); replaces the M1–M4 `AllowAllPinned` interim
+/// plan Step 6 (8237375); replaces the M1–M4 `AllowAllPinned` interim
 /// posture).
 ///
 /// The broker outlives every connection (`docs/design/architecture.md`
@@ -821,7 +821,7 @@ pub fn host_runtime(
 /// ConPTY-backed on Windows (`crate::pty::factory`).
 ///
 /// Policy loads exactly once per process, in [`SharedParts::load`] — never
-/// hot-reloaded (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a
+/// hot-reloaded (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (8237375)): a
 /// reverse target builds this once per process too
 /// (`crate::reverse::target::run_reverse_observed`), not once per
 /// reconnect, for the same reason.

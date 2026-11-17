@@ -1,4 +1,4 @@
-//! `tunnel.*` operations (`docs/CLI.md` §6.9, §6.14; M4 plan Step 3 (2473c88),
+//! `tunnel.*` operations (`docs/CLI.md` §6.9, §6.14; M4 plan Step 3 (8237375),
 //! Step 4).
 //!
 //! M4 Step 3 landed `tunnel.open` in `"local"` mode — the standalone twin
@@ -12,7 +12,7 @@
 //! `tunnel.open` (forward *and* reverse connections, via
 //! `Ops::tunnel_open_reverse`).
 //!
-//! **Holder model** (M4 plan §4.1 #1 (2473c88), `docs/CLI.md` §6.14).
+//! **Holder model** (M4 plan §4.1 #1 (8237375), `docs/CLI.md` §6.14).
 //! `tunnel.open` is a *value* operation that returns one envelope
 //! immediately — and then the process that called it has to stay alive,
 //! because it *is* the tunnel. [`TunnelHold`] is that obligation made
@@ -58,7 +58,7 @@ mod supervise;
 use supervise::{SuperviseEnd, SuperviseTask};
 
 /// One [`Ops::tunnel_open_and_hold`] registration's close signal
-/// (M6 plan Step 2 (2473c88)+3 검증 라운드 판정 ②/F2). The payload is a reply
+/// (M6 plan Step 2 (8237375)+3 검증 라운드 판정 ②/F2). The payload is a reply
 /// channel, not `()`: [`Ops::tunnel_close`]'s same-process path
 /// (`close_registered_tunnel_hold`, below) blocks on it, so a caller that
 /// gets `closed: true` back can trust the forward is already torn down —
@@ -89,7 +89,7 @@ impl Operation for TunnelOpenOp {
     const COMMAND: &'static str = "tunnel.open";
 }
 
-/// The `tunnel.list` operation (`qsh tunnels`, `docs/CLI.md` §6.9, the M4 plan (2473c88)
+/// The `tunnel.list` operation (`qsh tunnels`, `docs/CLI.md` §6.9, the M4 plan (8237375)
 /// M4 Step 5 PR 5b).
 pub struct TunnelListOp;
 impl Operation for TunnelListOp {
@@ -97,7 +97,7 @@ impl Operation for TunnelListOp {
 }
 
 /// The `tunnel.close` operation (`qsh tunnel close <id>`, `docs/CLI.md`
-/// §6.9, M4 plan Step 5 (2473c88) PR 5b).
+/// §6.9, M4 plan Step 5 (8237375) PR 5b).
 pub struct TunnelCloseOp;
 impl Operation for TunnelCloseOp {
     const COMMAND: &'static str = "tunnel.close";
@@ -212,7 +212,7 @@ pub fn parse_dynamic_forwards(specs: &[String]) -> Result<Vec<wire::DynamicSpec>
 /// This is the frontend's pre-flight: `docs/CLI.md` §6.9's grammar is
 /// checked by [`parse_forward_spec`] (sans-IO, shape only), and this then
 /// applies the one policy that is not shape — a `-L` listener binds
-/// loopback (M4 plan §4.1 #3 (2473c88)) — so `qsh host -L 0.0.0.0:8080:…`
+/// loopback (M4 plan §4.1 #3 (8237375)) — so `qsh host -L 0.0.0.0:8080:…`
 /// fails with `INVALID_ARGUMENT` before a session is opened rather than
 /// after. Both failure modes carry a `docs/CLI.md` §3.3 code; M4 adds no
 /// new one (§4.1 #9).
@@ -238,7 +238,7 @@ pub fn parse_local_forwards(specs: &[String]) -> Result<Vec<ForwardSpec>, OpErro
     Ok(parsed)
 }
 
-/// Parse `-R` spec strings into [`ForwardSpec`]s (M4 plan Step 4 (2473c88)).
+/// Parse `-R` spec strings into [`ForwardSpec`]s (M4 plan Step 4 (8237375)).
 ///
 /// Shape only, like [`parse_local_forwards`] — but unlike that function,
 /// this one applies **no** loopback pre-check: a `-R` bind is validated on
@@ -284,7 +284,7 @@ pub(crate) fn remote_forward_open_from_spec(spec: &ForwardSpec) -> wire::RemoteF
         // registers such a forward as *permanently unclaimable*
         // (`ClaimSeat`'s own doc — an absent capability is a refusal,
         // never a pass), so its `TCP_ACCEPTED` streams are reset rather
-        // than delivered to anyone. `Ops::tunnel_open_reverse` (the M4 plan (2473c88)
+        // than delivered to anyone. `Ops::tunnel_open_reverse` (the M4 plan (8237375)
         // M4 Step 5 PR 5b) does exactly that: it builds the request with
         // this function and then overwrites `claim_token` with
         // `RemoteForwardAcceptor::claim_token`'s bytes before sending.
@@ -303,7 +303,7 @@ pub(crate) fn remote_forward_open_from_spec(spec: &ForwardSpec) -> wire::RemoteF
 /// `tunnel_id` is the peer's `forward_id` verbatim, not a second ID minted
 /// here — the same "no parallel ID space" choice `Session.host`/
 /// `session_ref` makes (ADR-0007), and the one that lets a future
-/// `tunnel.close <id>` (M4 plan Step 5 (2473c88)) turn straight into
+/// `tunnel.close <id>` (M4 plan Step 5 (8237375)) turn straight into
 /// `RemoteForwardClose{forward_id: id}` with no lookup table in between.
 pub(crate) fn remote_tunnel_dto(
     spec: &ForwardSpec,
@@ -557,7 +557,7 @@ impl TunnelHold {
     /// logged structurally and accepting continues.
     ///
     /// "The connection carrying the tunnel closing" is [`Connected::
-    /// wait_dead_with_cause`] on *either* route (M4 plan Step 5 (2473c88) PR 5b) —
+    /// wait_dead_with_cause`] on *either* route (M4 plan Step 5 (8237375) PR 5b) —
     /// forward route: the QUIC connection's own close future, exactly as
     /// before; reverse route: the `LOCAL_CONTROL` conduit's own clean-end/
     /// error, which is this side's only way to learn the reverse
@@ -618,7 +618,7 @@ impl TunnelHold {
 
     /// Like [`Self::hold`], but also returns early — a deliberate close,
     /// never treated as a failure — the instant `close_rx` delivers a
-    /// reply channel (M6 plan Step 2 (2473c88)+3 검증 라운드 판정 ②/F2).
+    /// reply channel (M6 plan Step 2 (8237375)+3 검증 라운드 판정 ②/F2).
     ///
     /// [`Self::hold`]'s only close mechanism is process death (`docs/CLI.md`
     /// §6.9's "forward route에서는 tunnel이 그것을 연 CLI 프로세스에 수명이
@@ -839,7 +839,7 @@ impl Ops {
     }
 
     /// `tunnel.open` for a long-running, multi-call host process (e.g. an
-    /// agent tool, M6 plan Step 2 (2473c88)+3 검증 라운드 판정 ②/F2) rather than a one-shot
+    /// agent tool, M6 plan Step 2 (8237375)+3 검증 라운드 판정 ②/F2) rather than a one-shot
     /// CLI invocation.
     ///
     /// [`Self::tunnel_open`] hands back a [`TunnelHold`] and leaves holding
@@ -1023,7 +1023,7 @@ impl Ops {
         Ok(tunnel)
     }
 
-    /// Same-process half of `tunnel.close` (M6 plan Step 2 (2473c88)+3 검증
+    /// Same-process half of `tunnel.close` (M6 plan Step 2 (8237375)+3 검증
     /// 라운드 판정 ②/F2): `true`, with the tunnel already torn down by the
     /// time this returns, when `tunnel_id` names a hold
     /// [`Self::tunnel_open_and_hold`] registered in this same `Ops` (any

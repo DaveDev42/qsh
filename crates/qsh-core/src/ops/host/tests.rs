@@ -52,7 +52,7 @@ const FP_A: &str = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 // pre-existing in this diff, not a change in behavior).
 const FP_B: &str = "sha256:u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=";
 
-// ---- merge table (M3 plan Step 5 (c) (2473c88)) ----
+// ---- merge table (M3 plan Step 5 (c) (8237375)) ----
 
 #[test]
 fn merge_forward_only() {
@@ -111,7 +111,7 @@ fn forward_hosts_and_resolve_route_agree_on_routability() {
     assert_eq!(err.code, ErrorCode::HostNotFound);
 }
 
-// ---- hosts.toml priority/merge (M7 plan Step 3 (69dd788), §4.1 #4) ----
+// ---- hosts.toml priority/merge (M7 plan Step 3 (004ebd2), §4.1 #4) ----
 //
 // `resolve_forward` (via `forward_hosts`/`resolve_route`, its only two
 // callers) is the single place this decision is made; these tests pin
@@ -184,11 +184,11 @@ fn trust_only_name_reports_source_trust_once_hosts_toml_exists_at_all() {
 
 #[test]
 fn hosts_toml_address_wins_over_trust_toml_address_for_the_same_name() {
-    // The one decision M7 plan §4.1 #4 (69dd788) names explicitly:
+    // The one decision M7 plan §4.1 #4 (004ebd2) names explicitly:
     // hosts.toml's address wins; trust.toml's fingerprint is still the
     // one reported (hosts.toml never supplies identity). The two
     // addresses disagree here, so under the redefined `source`
-    // (M9 plan Step 3 (a)-추기 ② (b9a621b): which side's *address* won, not
+    // (M9 plan Step 3 (a)-추기 ② (cdf4015): which side's *address* won, not
     // which sides merely *name* the host) this is exactly the
     // silent-redirect-to-a-different-pinned-peer shape `source` exists
     // to surface -> `"hosts"`, not `"both"`.
@@ -294,7 +294,7 @@ fn a_port_less_hosts_toml_address_resolves_with_the_default_port() {
     assert_eq!(listed[0].source.as_deref(), Some("hosts"));
 }
 
-/// M9 plan §6 (b9a621b) 행 i: surrounding whitespace in a lookup key is
+/// M9 plan §6 (cdf4015) 행 i: surrounding whitespace in a lookup key is
 /// trimmed and still finds the pin; a `user@` hint is a different kind
 /// of prefix and must keep failing closed.
 #[test]
@@ -406,7 +406,7 @@ fn host_not_found_message_never_leaks_a_user_at_prefix() {
     // `qsh host get <name>` (`docs/CLI.md` §6.1) takes a raw
     // positional — unlike the bare `qsh [user@]host` form, it does not
     // run `parse_target`'s `user@` split first, so a `user@host` typo
-    // can reach `resolve_route` unstripped (M8 plan Step 6 (52639fc), M7
+    // can reach `resolve_route` unstripped (M8 plan Step 6 (3b23162), M7
     // carry-over v). The message must not echo the `@` back, and the
     // suggested `qsh trust add <name> --address ...` remedy must name
     // something `qsh trust add` itself would actually accept —
@@ -438,7 +438,7 @@ fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
     // would produce `qsh trust add  --address ...` (two spaces, no
     // name: un-runnable). This must land on the exact same
     // `InvalidArgument`/message the empty-name guard above uses, not a
-    // new one (M8 plan Step 6 (52639fc), lens-2 finding).
+    // new one (M8 plan Step 6 (3b23162), lens-2 finding).
     let store = TrustStore::default();
     for name in ["dave@", "@", "dave@ "] {
         let err = resolve(&store, &no_hosts(), name).unwrap_err();
@@ -457,7 +457,7 @@ fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
 
 #[test]
 fn routing_trims_a_stray_space_left_by_an_at_split_and_still_finds_host_not_found() {
-    // M8 plan Step 7 (52639fc), Q10: `"dave@ nowhere"` splits on the last
+    // M8 plan Step 7 (3b23162), Q10: `"dave@ nowhere"` splits on the last
     // `@` to `" nowhere"` — the leading space must be trimmed before
     // the `HOST_NOT_FOUND` remedy names the alias, so the suggested
     // `qsh trust add` command is runnable and the message matches the
@@ -490,7 +490,7 @@ fn routing_trims_a_bare_name_with_no_at_sign_the_same_way() {
 
 #[test]
 fn routing_an_internal_space_left_after_stripping_is_invalid_argument_not_host_not_found() {
-    // M8 plan Step 7 (52639fc), Q10: `"dave@no where"` strips to `"no
+    // M8 plan Step 7 (3b23162), Q10: `"dave@no where"` strips to `"no
     // where"` — non-empty, but not a legal `valid_host_name` alias (an
     // internal space). Falling through to `HOST_NOT_FOUND` would
     // suggest an un-runnable `qsh trust add "no where" --address ...`;

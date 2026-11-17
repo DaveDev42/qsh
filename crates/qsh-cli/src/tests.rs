@@ -93,7 +93,7 @@ fn quiet_and_an_explicit_log_level_both_silence_it() {
 /// [`report_long_running_setup_error`] (stderr only) rather than
 /// [`report_error`] (which prints a `qsh.cli/v1` envelope to stdout
 /// whenever `--json`/`--jsonl` was passed — `qsh serve` did exactly
-/// this until the M3 plan Step 3 (2473c88).5 audit follow-up caught it). This
+/// this until the M3 plan Step 3 (8237375).5 audit follow-up caught it). This
 /// pins the routing decision itself; `report_long_running_setup_error`'s
 /// own body is `human::print_error` verbatim, already proven
 /// stderr-only.

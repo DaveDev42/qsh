@@ -15,8 +15,8 @@ name: CI
 #   x86_64-apple-darwin on every tag.
 # - `clippy` runs on Linux + Windows only. Lints are overwhelmingly
 #   platform-independent; the Windows leg is kept because it has real
-#   unique surface (`cfg(not(unix))` dead_code — precedents 8897b2f,
-#   7890a5d). macOS-cfg code still compiles under `-D warnings` in the
+#   unique surface (`cfg(not(unix))` dead_code — precedents de48652,
+#   e5f0370). macOS-cfg code still compiles under `-D warnings` in the
 #   macOS `test` leg (setup-rust-toolchain v2 sets CARGO_BUILD_WARNINGS=deny), so plain
 #   rustc warnings there still fail CI; only macOS-unique *clippy* lints
 #   are forgone, and none has ever fired.
@@ -43,12 +43,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # `VersionData.build.commit` (`docs/CLI.md` §6.10, M7 plan Step 1 (69dd788)):
+  # `VersionData.build.commit` (`docs/CLI.md` §6.10, M7 plan Step 1 (004ebd2)):
   # compiled in via `option_env!`, so every job that builds or tests the
   # workspace needs it in `env`, not just the ones that ship a binary —
   # `test`'s own build is what `fixtures.rs`'s `version.json` golden
   # fixture runs against. `qsh_testkit::fixtures::normalize` drops the
-  # `build` key before comparing (M7 plan Step 1 (a)-추기 ② (69dd788)), so this
+  # `build` key before comparing (M7 plan Step 1 (a)-추기 ② (004ebd2)), so this
   # is safe to set workflow-wide rather than threaded per job.
   QSH_BUILD_COMMIT: ${{ github.sha }}
 
@@ -149,7 +149,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # The interactive acceptance set (the M2 plan (2473c88) DoD 2) as a *standing*
+  # The interactive acceptance set (the M2 plan (8237375) DoD 2) as a *standing*
   # gate. The suite skips an acceptance item whose binary is missing, which
   # is right for a developer's box and wrong for a job that is supposed to
   # keep the item from rotting — so this one installs what it needs and
@@ -239,7 +239,7 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test it -E 'test(/^predict_accept::/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
-      # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (2473c88), `docs/design/testing.md`
+      # M4 Step 7 DoD 3/4 (M4 plan Step 7 (d) (8237375), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.
       # `QSH_ACCEPTANCE_STRICT` is what asserts the literal DoD 3 ratio
@@ -267,14 +267,14 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^tunnel_stalled_streams::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
-      # ADR-0029 decision 15 (M15 plan Step 14 (1a4af3b)): a `qsh cp` file transfer on
+      # ADR-0029 decision 15 (M15 plan Step 14 (1a0cbd6)): a `qsh cp` file transfer on
       # the same connection as an attached PTY must keep the echo p95 inside
       # the same measured RTT + 10ms budget. Same standing-gate shape as the
       # tunnel harnesses above; `QSH_ACCEPTANCE_STRICT` turns the gate on.
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^file_copy_echo_under_load::/)'
         env:
           QSH_ACCEPTANCE_STRICT: 1
-      # ADR-0029 decisions 14 and 15 (M15 plan Step 15 (1a4af3b)): the same budget for
+      # ADR-0029 decisions 14 and 15 (M15 plan Step 15 (1a0cbd6)): the same budget for
       # a recursive copy of thousands of small files against the production
       # audit writer, which must not refuse a record under that load.
       - run: cargo nextest run -p qsh-testkit --test it -E 'test(/^cp_many_small_files::/)'

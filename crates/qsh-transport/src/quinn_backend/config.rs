@@ -50,7 +50,7 @@ pub(crate) fn transport_config(tuning: TransportTuning) -> quinn::TransportConfi
     ));
     tc.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
     // Tunnel/backpressure config (`docs/design/protocol.md` §12,
-    // M4 plan Step 2 (2473c88)) — priority (queue order, applied per-stream at
+    // M4 plan Step 2 (8237375)) — priority (queue order, applied per-stream at
     // the call site: `qsh_transport::control::FramedSend::set_priority`,
     // `qsh_proto::wire::PRIORITY_TUNNEL`) plus these three connection-level
     // knobs (queue depth), so a saturated tunnel cannot starve PTY chunks
@@ -129,7 +129,7 @@ pub(crate) fn server_tls_config(
 /// Build the `quinn::ServerConfig` [`Listener::bind_inner`] hands to
 /// `quinn::Endpoint::new` — TLS, the given `transport`, and the L0
 /// admission bounds ([`MAX_INCOMING`]/[`INCOMING_BUFFER_SIZE`]/
-/// [`INCOMING_BUFFER_SIZE_TOTAL`], M8 plan Step 2 (52639fc), `docs/adr/0009-
+/// [`INCOMING_BUFFER_SIZE_TOTAL`], M8 plan Step 2 (3b23162), `docs/adr/0009-
 /// admission-defenses.md`) — never set before M8, so these sat at quinn's
 /// own defaults (65536 / 10 MiB / 100 MiB, `quinn-proto` `config/mod.rs`).
 /// This is L0 of the L0-L5 admission ordering: the cheap shed quinn
@@ -137,7 +137,7 @@ pub(crate) fn server_tls_config(
 /// all — `admission::Gate` (qsh-core) is L2-L3, one layer above, and only
 /// ever sees what gets past this.
 ///
-/// **The single construction site** (M8 plan Step 2 (52639fc) verification
+/// **The single construction site** (M8 plan Step 2 (3b23162) verification
 /// round, P2-1): before this existed, the test that pinned these three
 /// bounds (`tests::server_config_sets_admission_bounds`) rebuilt its own
 /// copy of this same sequence of calls and asserted against *that* copy —

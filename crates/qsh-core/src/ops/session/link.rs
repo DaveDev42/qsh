@@ -7,11 +7,11 @@ use super::*;
 /// [`close`](Connected::close)) and the streaming ops (many calls).
 ///
 /// `pub(crate)` only so the sibling `crate::ops::tunnel` module can hold
-/// one for a foreground tunnel (M4 plan Step 3 (2473c88)); nothing outside
+/// one for a foreground tunnel (M4 plan Step 3 (8237375)); nothing outside
 /// `crate::ops` can name it.
 pub(crate) struct Connected {
     /// `None` only between [`Connected::close`] and the drop. Shared with
-    /// every other in-flight `Connected` on this `Ops` (the M7 plan (69dd788) Step
+    /// every other in-flight `Connected` on this `Ops` (the M7 plan (004ebd2) Step
     /// 7-2 ①, [`crate::ops::SharedRuntime`]'s own doc) — never the sole
     /// owner, so nothing on this type may shut it down; the wrapper (not a
     /// bare `Runtime`) is also what makes it safe for this field to be
@@ -110,7 +110,7 @@ impl Connected {
     /// Run one request closure on the live session.
     ///
     /// `pub(crate)`, not private: `crate::ops::tunnel`'s `-R` requester leg
-    /// (M4 plan Step 4 (2473c88)) needs the same one-request-closure shape
+    /// (M4 plan Step 4 (8237375)) needs the same one-request-closure shape
     /// `session_open`/`attach_request`/etc. already use here, for
     /// `Session::rfwd_open`/`rfwd_close` — a sibling `ops` module, not a
     /// descendant of this one, so plain module-private is not enough.
@@ -233,7 +233,7 @@ impl Connected {
     /// Close the control stream and the connection, then let the QUIC close
     /// frames drain.
     ///
-    /// The runtime is shared (M7 plan Step 7-2 (69dd788) ①), so this only drops
+    /// The runtime is shared (M7 plan Step 7-2 (004ebd2) ①), so this only drops
     /// this `Connected`'s own `Arc` handle to it — and only after
     /// `block_on` above has already run `connection.close()` and
     /// `endpoint.wait_idle()` to completion. If this handle happens to be

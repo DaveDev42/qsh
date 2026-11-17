@@ -1,4 +1,4 @@
-//! M5 plan Step 8 (2473c88) (SC6, DoD 2) — the three-layer enumeration owed on
+//! M5 plan Step 8 (8237375) (SC6, DoD 2) — the three-layer enumeration owed on
 //! top of `crates/qsh-core/src/acl/registry.rs`'s `OP_REGISTRY`:
 //!
 //! 1. **L6 contract cross-check** ([`section_2_5::registry_matches_cli_md_section_2_5_bidirectionally`]):
@@ -1502,7 +1502,7 @@ mod source_scan {
             .join("\n")
     }
 
-    /// ADR-0045 결정 7 / M15 plan Step 6 (1a4af3b): `Policy::decide_standing` (the evaluator, once `Policy::decide`) has exactly three
+    /// ADR-0045 결정 7 / M15 plan Step 6 (1a0cbd6): `Policy::decide_standing` (the evaluator, once `Policy::decide`) has exactly three
     /// production call sites, all inside `qsh-core` — `Policy::check_with_standing`
     /// (enforcement), `Policy::effective_actions` (`acl show`) and
     /// `Ops::acl_check` (`acl check`). The role stage ⓡ lives inside `decide`,

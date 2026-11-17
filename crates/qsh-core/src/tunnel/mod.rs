@@ -1,4 +1,4 @@
-//! Tunnel stream-open seam (M4 plan Step 2 (2473c88); `docs/design/protocol.md`
+//! Tunnel stream-open seam (M4 plan Step 2 (8237375); `docs/design/protocol.md`
 //! §7 "스트림 배치", §12 "우선순위와 backpressure"; `docs/design/architecture.md`
 //! §8's quinn selection rationale).
 //!

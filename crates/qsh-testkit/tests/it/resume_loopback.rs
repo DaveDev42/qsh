@@ -1,4 +1,4 @@
-//! L3 loopback end-to-end for **resume across connections** (the M2 plan (2473c88)
+//! L3 loopback end-to-end for **resume across connections** (the M2 plan (8237375)
 //! Step 7, `docs/design/protocol.md` §10): a session outlives the QUIC
 //! connection it was opened on, and a `session.attach` carrying the resume
 //! credential on a *brand new* connection continues the same byte stream.
@@ -592,7 +592,7 @@ async fn an_attach_without_a_credential_is_refused_by_the_host() {
 ///
 /// The contender has to be a different *principal* (a second connection
 /// from the same principal is the same writer moving devices). Before
-/// session ownership (M3 plan Step 3 (2473c88).5 PR②, PRD §6) the only way a
+/// session ownership (M3 plan Step 3 (8237375).5 PR②, PRD §6) the only way a
 /// foreign principal reached the lease at all was the `session.write` value
 /// op — an attach needs the session's credential, which never leaves the
 /// opening device. PR② closes that path too: `session.write`/`resize` now

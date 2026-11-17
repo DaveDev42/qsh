@@ -298,14 +298,14 @@ impl Operation for TrustAddCaOp {
     const COMMAND: &'static str = "trust.add_ca";
 }
 
-/// The `trust.invite` operation (ADR-0002, M7 plan Step 4 (69dd788)).
+/// The `trust.invite` operation (ADR-0002, M7 plan Step 4 (004ebd2)).
 pub struct TrustInviteOp;
 
 impl Operation for TrustInviteOp {
     const COMMAND: &'static str = "trust.invite";
 }
 
-/// The `trust.accept` operation (ADR-0002, M7 plan Step 4 (69dd788)).
+/// The `trust.accept` operation (ADR-0002, M7 plan Step 4 (004ebd2)).
 pub struct TrustAcceptOp;
 
 impl Operation for TrustAcceptOp {
@@ -598,14 +598,14 @@ pub struct Ops {
     /// replace the default ones.
     recovery_overridden: bool,
     /// Every tunnel this process is holding via [`Ops::tunnel_open_and_hold`]
-    /// (M6 plan Step 2 (2473c88)+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
+    /// (M6 plan Step 2 (8237375)+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
     /// clone of this `Ops` shares the same table (`tunnel::TunnelHoldRegistry`'s
     /// own doc).
     tunnel_holds: tunnel::TunnelHoldRegistry,
     /// The Tokio runtime [`session::Connected::connect_target`]/
     /// [`session::Connected::connect_reverse`] dial and block on, shared
     /// across every clone of this `Ops` and every pull on it instead of
-    /// built-and-torn-down per call (M7 plan Step 7-2 (69dd788) ①: a single
+    /// built-and-torn-down per call (M7 plan Step 7-2 (004ebd2) ①: a single
     /// abandoned pull used to cost 11 threads — a whole `num_cpus`-sized
     /// `Builder::new_multi_thread()` plus a `lookup_host` blocking thread —
     /// on top of its own QUIC endpoint/socket; measured 11.05
@@ -1251,7 +1251,7 @@ impl Ops {
     /// *compiled* — not read from the environment at call time. CI sets it;
     /// for a `cargo install --git` build `crates/qsh-core/build.rs` derives
     /// it from the cargo git checkout. A local build with neither reports
-    /// no `build` field at all rather than a fabricated or empty one (M7 plan §4.1 #1 (69dd788)).
+    /// no `build` field at all rather than a fabricated or empty one (M7 plan §4.1 #1 (004ebd2)).
     pub fn version(&self) -> Result<VersionData, OpError> {
         Ok(VersionData {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1289,7 +1289,7 @@ impl Ops {
 
     /// Resolve `host` to a dial target: loads the identity (`CONFIG_ERROR`
     /// before `qsh init`) and resolves an address via `hosts.toml`
-    /// layered over the trust store's pinned peers (M7 plan Step 3 (69dd788),
+    /// layered over the trust store's pinned peers (M7 plan Step 3 (004ebd2),
     /// §4.1 #4 — `hosts.toml` first, trust-store pin as fallback;
     /// `HOST_NOT_FOUND` when neither source has one). Identity/trust is
     /// still decided solely by the trust store: this only changes where
@@ -1802,7 +1802,7 @@ where
 /// The `(address, server_name)` half of [`Ops::resolve_peer`] that touches
 /// no identity — split out so a caller that already holds its own
 /// [`LoadedIdentity`] can reuse the trust-store/`hosts.toml` lookup without
-/// a second synchronous identity load of its own. `qsh reverse` (the M3 plan (2473c88)
+/// a second synchronous identity load of its own. `qsh reverse` (the M3 plan (8237375)
 /// M3 Step 3, `crate::reverse::target::run_reverse`/`dial_and_register`) is
 /// that caller: it loads identity once, outside any runtime, ahead of a
 /// reconnect loop that must not reopen the keystore per dial
@@ -1813,7 +1813,7 @@ where
 ///
 /// Address resolution: `hosts.toml` layered over `trust`'s pinned peers,
 /// via [`host::resolve_forward`] — the exact same decision
-/// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (the M7 plan (69dd788) Step
+/// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (the M7 plan (004ebd2) Step
 /// 3, §4.1 #4). Identity/trust is unaffected: `hosts.toml` supplying an
 /// address for a name with no trust peer, or a different address than
 /// trust's own pin, never changes *who* is allowed to answer. That is
@@ -1845,7 +1845,7 @@ pub(crate) fn resolve_peer_address(
     // own `user@` split), which used to echo the `user@` hint into this
     // same un-runnable `qsh trust add` shape `Ops::resolve_host_route` had
     // (`docs/design/architecture.md` §1's `Ops` façade extension pattern).
-    // M9 plan §6 (b9a621b) 행 i: the lookup key is trimmed independently of
+    // M9 plan §6 (cdf4015) 행 i: the lookup key is trimmed independently of
     // `hint_alias`'s remedy-message stripping below.
     let key = host::lookup_name(host);
     let entry = host::resolve_forward(trust.find(key), hosts.find(key), hosts_has_any).ok_or_else(

@@ -7,7 +7,7 @@
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5)에서 이 번호를 인증서 rotation·revocation(M16 (d)) 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 2026-10-11 초안은 `trust.toml`의 `[[revoked]]` 목록, `qsh trust revoke`, `qsh identity rotate`(rotation 문서와 `--keep-key` 갱신), `qsh trust rotate`, 연결 재검증, 유효기간 기한을 한 묶음으로 제안했다. 2026-10-12 사용자 결정이 P1을 다시 짜면서 앞의 넷을 뺐다. 이 문서는 남은 하나, 곧 "trust를 거두면 이미 열린 연결도 닫는다"만 정한다. 빠진 것은 대안과 기각 사유 절에 사용자 결정으로 옮겼다.
 
-- `docs/CLI.md` §6.11의 "`trust.remove`의 유효 범위" 문단과 §6.17 `trust_remove_scope`의 message·remedy를 결정 9대로 바꾼다. 이 문단과 문면은 M7 감사 개정이 고정한 것이고(M7 plan Step 2 (69dd788)), 바뀌는 것은 "이미 확립된 연결은 권한을 유지한다"는 문장과 remedy의 "(P1)"이다. `trust rename` 문단의 같은 문장도 결정 5대로 좁아진다.
+- `docs/CLI.md` §6.11의 "`trust.remove`의 유효 범위" 문단과 §6.17 `trust_remove_scope`의 message·remedy를 결정 9대로 바꾼다. 이 문단과 문면은 M7 감사 개정이 고정한 것이고(M7 plan Step 2 (004ebd2)), 바뀌는 것은 "이미 확립된 연결은 권한을 유지한다"는 문장과 remedy의 "(P1)"이다. `trust rename` 문단의 같은 문장도 결정 5대로 좁아진다.
 - ADR-0012 결정 7("rename 뒤 이미 붙어 있는 연결은 권한을 유지한다")은 role이 없는 pin에 대해서는 그대로 서고, role이 있는 pin의 rename은 결정 5의 마지막 항목으로 연결을 닫는다. `acl.toml`은 이전처럼 기동 때 한 번만 읽는다.
 - ADR-0045 결정 4의 "이미 만들어진 자원은 role이 줄어도 끝까지 간다. 그런 연결을 끊는 일은 ADR-0031(축소판)이 정한다"와 결정 12의 `trust_remove_scope` 문면은 이 ADR이 착지하면 이 ADR의 결정 5·9가 이긴다.
 - ADR-0044의 SSH 부트스트랩 잔여 위험 문단이 가리키는 "ADR-0031(축소판)"은 이 문서다. 부트스트랩이 심은 pin도 `trust remove`로 거두면 이 결정이 적용된다.

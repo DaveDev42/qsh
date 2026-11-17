@@ -2,7 +2,7 @@
 # Run a nextest filterset repeatedly while every logical CPU is saturated.
 #
 # A timing-sensitive test that is green on an idle machine can still race
-# under load (commit 8fd4602 fixed a reverse-reset observation race that
+# under load (commit 40ccdd0 fixed a reverse-reset observation race that
 # failed 16 of 80 runs under load). This harness reproduces that pressure
 # locally. It is not part of the PR gate: shared runners give poor
 # reproducibility and 50 rounds take tens of minutes.

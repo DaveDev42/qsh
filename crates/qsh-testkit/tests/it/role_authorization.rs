@@ -1,4 +1,4 @@
-//! M15 plan Step 4 (1a4af3b): the role stage of the evaluator (ADR-0045 결정 1·4·6·7·16)
+//! M15 plan Step 4 (1a0cbd6): the role stage of the evaluator (ADR-0045 결정 1·4·6·7·16)
 //! driven end to end through the production wiring.
 //!
 //! Every host here gets its authorizer from [`qsh_core::acl::load_or_deny`]
@@ -6,7 +6,7 @@
 //! written by hand, so the whole chain under test is the real one:
 //! `SharedTrustStore::resolve_role` -> `RoleResolvingAuthorizer` ->
 //! `Policy::check_with_role` -> the wire handler's refusal and audit record.
-//! The commands that write `role` keys arrive in M15 plan Step 5 (1a4af3b); this
+//! The commands that write `role` keys arrive in M15 plan Step 5 (1a0cbd6); this
 //! file builds the files itself.
 //!
 //! **Routes.** A control-stream scenario is generic over [`Route`] and runs

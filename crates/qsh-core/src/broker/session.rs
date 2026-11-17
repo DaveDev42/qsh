@@ -172,7 +172,7 @@ pub struct SessionInfo {
     /// `ctx.principal.to_string()` alone: see that function's doc for why).
     /// Never surfaced in `session.get`/`list` JSON (`session_info_to_wire`
     /// does not map it) — internal to the `session.control` ownership check
-    /// (M3 plan Step 3 (2473c88).5 PR②, PRD §6, M5 Step 5). `Broker::open`/
+    /// (M3 plan Step 3 (8237375).5 PR②, PRD §6, M5 Step 5). `Broker::open`/
     /// `open_with` (as opposed to `open_as`, which is what `SessionBackend::
     /// open` — the only production path — always calls) leave this
     /// `String::new()`: no `opener_key` output is ever empty, so a session
@@ -263,7 +263,7 @@ pub struct SessionShared {
     id: String,
     created_at: String,
     /// The owner key recorded at open ([`SessionInfo::opener`]) — set once
-    /// at creation, never mutated (M3 plan Step 3 (2473c88).5 PR②).
+    /// at creation, never mutated (M3 plan Step 3 (8237375).5 PR②).
     opener: String,
     clock: Arc<dyn Clock>,
     ring: Mutex<Box<dyn ReplayStore>>,
@@ -370,7 +370,7 @@ enum Command {
     },
     /// The `SESSION_DATA` stream's resize, unlike [`Command::Resize`],
     /// requires `conn` to hold the writer lease — the same bound `Input`
-    /// on that stream already has (M3 plan Step 3 (2473c88).5 PR② follow-up: a
+    /// on that stream already has (M3 plan Step 3 (8237375).5 PR② follow-up: a
     /// demoted attach must not still be able to mutate the live PTY).
     ResizeAt {
         conn: ConnectionId,
@@ -498,7 +498,7 @@ impl SessionHandle {
     }
 
     /// The owner key recorded when this session was opened
-    /// ([`SessionInfo::opener`] — M3 plan Step 3 (2473c88).5 PR②'s
+    /// ([`SessionInfo::opener`] — M3 plan Step 3 (8237375).5 PR②'s
     /// `session.control` ownership check).
     pub fn opener(&self) -> &str {
         &self.shared.opener
@@ -953,7 +953,7 @@ impl SessionActor {
     ///
     /// `id` is the opaque session id; `created_at` is the RFC 3339 stamp;
     /// `opener` is the opaque owner key recorded for this session
-    /// ([`SessionInfo::opener`] — M3 plan Step 3 (2473c88).5 PR②).
+    /// ([`SessionInfo::opener`] — M3 plan Step 3 (8237375).5 PR②).
     pub fn create(
         id: String,
         created_at: String,

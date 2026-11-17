@@ -40,7 +40,7 @@ scoop·winget 배포는 사용자 결정으로 철회했으므로(ADR-0035 개�
 | 이름 | 무엇인지 | 비고 |
 |---|---|---|
 | `HOMEBREW_TAP_DEPLOY_KEY` | `DaveDev42/homebrew-tap`에 쓰기 권한으로 등록한 배포 키(deploy key)의 개인키 절반. `release.yml`의 `homebrew-tap` job이 태그 push마다 tap의 `Formula/qsh.rb`를 새 버전·URL·sha256으로 bump하는 데 쓴다. | 그 저장소 하나로만 범위가 좁고 만료가 없다. 없으면 `homebrew-tap` job은 green인 채 건너뛴다. |
-| `CARGO_REGISTRY_TOKEN` | crates.io publish 토큰. | CI는 이 토큰을 쓰지 않는다 — `cargo publish`는 사람이 로컬에서 실행하는 단계다(되돌릴 수 없어서다: yank는 되지만 삭제는 안 된다). CI가 돌리는 `cargo publish --dry-run`(퍼블리시 게이트, 커밋 `faf10bd`)은 토큰이 없어도 돈다. |
+| `CARGO_REGISTRY_TOKEN` | crates.io publish 토큰. | CI는 이 토큰을 쓰지 않는다 — `cargo publish`는 사람이 로컬에서 실행하는 단계다(되돌릴 수 없어서다: yank는 되지만 삭제는 안 된다). CI가 돌리는 `cargo publish --dry-run`(퍼블리시 게이트, 커밋 `7f6c95b`)은 토큰이 없어도 돈다. |
 
 ## Provenance attestation은 시크릿이 필요 없다
 

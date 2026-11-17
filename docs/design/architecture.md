@@ -262,7 +262,7 @@ qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh servic
 - backend를 추가할 때 메서드 하나라도 빠지면 컴파일이 깨진다. `match`에 wildcard arm을 두지 않는다.
 - `dyn`도 제네릭 매개변수도 `qsh-core`까지 올라가지 않는다. splice 핫패스에 vtable이 끼지 않고, backend 선택은 variant 하나다.
 
-`Connection::quinn()` 같은 탈출구는 없다(`2cacaff0`). backend 고유 접근이 시험에 필요하면 `cfg(test)` 접근자로 같은 crate 안에서만 연다. trait은 mock 지점이 아니다(`testing.md` L4). 한 backend가 지켜야 할 행동 목록은 `crates/qsh-transport/tests/it/conformance.rs`가 고정하고, 이 시험은 backend 생성자 하나를 매개변수로 받아 quinn과 iroh에 같은 본문으로 돈다.
+`Connection::quinn()` 같은 탈출구는 없다(`5a225ca7`). backend 고유 접근이 시험에 필요하면 `cfg(test)` 접근자로 같은 crate 안에서만 연다. trait은 mock 지점이 아니다(`testing.md` L4). 한 backend가 지켜야 할 행동 목록은 `crates/qsh-transport/tests/it/conformance.rs`가 고정하고, 이 시험은 backend 생성자 하나를 매개변수로 받아 quinn과 iroh에 같은 본문으로 돈다.
 
 ### 10.2 backend 셋
 

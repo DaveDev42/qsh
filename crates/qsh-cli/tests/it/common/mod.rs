@@ -397,7 +397,7 @@ impl Default for Sandbox {
     }
 }
 
-/// M5 plan Step 6 (2473c88): production flipped from "any pinned peer, any
+/// M5 plan Step 6 (8237375): production flipped from "any pinned peer, any
 /// action" ([`qsh_core::acl::AllowAllPinned`]) to default-deny — an
 /// `acl.toml`-backed policy, or `DenyAll` when none loads. Every real-
 /// binary fixture that used to get the old interim policy for free now
@@ -520,7 +520,7 @@ impl ServeGuard {
 
     /// Like [`start_with`](Self::start_with), but never plants an
     /// `acl.toml` — for a test whose whole point is the default-deny
-    /// posture an absent policy produces (M5 plan Step 6 (2473c88)'s owed
+    /// posture an absent policy produces (M5 plan Step 6 (8237375)'s owed
     /// tests: no acl.toml at all, or a deliberately corrupt one the test
     /// writes itself before calling this).
     pub fn start_without_policy(host: &Sandbox, extra: &[&str]) -> Self {
@@ -1338,7 +1338,7 @@ pub fn wait_for_audit(
     }
 }
 
-// --- T2 adversarial load measurement helpers (M8 plan Step 4c (52639fc)).
+// --- T2 adversarial load measurement helpers (M8 plan Step 4c (3b23162)).
 // `qsh-cli`'s other integration-test binaries never call these, but this
 // module's blanket `#![allow(dead_code)]` at the top of the file already
 // covers that — no separate `#[allow(dead_code)]` is added here (4c 판정 참고).

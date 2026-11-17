@@ -164,7 +164,7 @@ pub(super) fn run(
         forward_lines.push(human::forward_started_line(&tunnel));
     }
     // `-R` remote forwards: already opened above (all-or-nothing, same as
-    // `-L`'s bind above, M4 plan Step 4 (2473c88)) — this just collects the
+    // `-L`'s bind above, M4 plan Step 4 (8237375)) — this just collects the
     // DTOs to render.
     for tunnel in stream.take_remote_forward_tunnels() {
         let _ = human::print_forward_started(&tunnel);

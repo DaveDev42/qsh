@@ -9,7 +9,7 @@
 
 GitHub 이슈 #8은 qsh가 쓰는 이름 해석을 DNS-over-HTTPS(DoH)로 강제하는 모드를 요청한다. 동기는 macOS의 기업 VPN이다. VPN이 시스템 resolver를 붙잡으면 직접 UDP 경로가 살아 있어도 controller 이름이 풀리지 않거나 VPN 쪽 주소로 풀려서 역방향 등록과 재접속이 늦어지거나 멈춘다. 이슈가 요구하는 것은 `--doh <URL>`과 `--doh-only`, 시스템 DNS 기본 유지, `system`/`doh`/`doh-only` 세 정책, 모든 해석 지점의 공용 구현, 질의 내용을 남기지 않는 구조화 진단, bootstrap·인증서 검증·프록시·captive 망에 대한 문서다. DoH는 이름 해석만 바꾸고 peer 인증은 바꾸지 않아야 한다는 조건도 붙어 있다.
 
-오늘 qsh의 이름 해석은 전부 OS resolver(`getaddrinfo`)로 간다. 경로는 `tokio::net::lookup_host`이거나 동기 `std::net::ToSocketAddrs`다. 해석 지점은 다음과 같다(2026-10-01 `0063c18` 기준).
+오늘 qsh의 이름 해석은 전부 OS resolver(`getaddrinfo`)로 간다. 경로는 `tokio::net::lookup_host`이거나 동기 `std::net::ToSocketAddrs`다. 해석 지점은 다음과 같다(2026-10-01 `957b80e` 기준).
 
 | 용도 | 위치 | 해석기 |
 |---|---|---|

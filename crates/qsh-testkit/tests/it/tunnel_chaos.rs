@@ -1,7 +1,7 @@
-//! L4: tunnel behavior under chaos (`docs/design/testing.md` L4, the M4 plan (2473c88)
+//! L4: tunnel behavior under chaos (`docs/design/testing.md` L4, the M4 plan (8237375)
 //! M4 Step 8 (a)/(c)).
 //!
-//! Two scenarios, each locking down a claim M4 plan Step 8 (a) (2473c88) makes
+//! Two scenarios, each locking down a claim M4 plan Step 8 (a) (8237375) makes
 //! about what a tunnel owes across a fault, using the same chaos
 //! primitives (`qsh_testkit::chaos::ChaosProxy`) `resume_chaos.rs` already
 //! uses for the session-only case:
@@ -133,7 +133,7 @@ const TRANSFER_BYTES: usize = 16 * 1024 * 1024;
 /// already finished when the path moves.
 const REPATH_TRIGGER_BYTES: usize = 3 * 1024 * 1024;
 
-/// M4 plan Step 8 (a) (2473c88): a `-L` transfer survives a path rebind (same
+/// M4 plan Step 8 (a) (8237375): a `-L` transfer survives a path rebind (same
 /// connection, new UDP socket/port) with zero byte loss and unmodified
 /// content, and the host never sees a second connection — i.e. quinn's
 /// migration is transparent to the splice, exactly as `resume_chaos.rs`'s
@@ -262,7 +262,7 @@ async fn a_repath_mid_transfer_survives_as_a_migration_with_zero_byte_loss() {
 const TEST2_SEED: u64 = 0x7E5_EED2;
 const IN_FLIGHT_BYTES: usize = 1024 * 1024;
 
-/// M4 plan Step 8 (a) (2473c88): on one connection carrying both an attached
+/// M4 plan Step 8 (a) (8237375): on one connection carrying both an attached
 /// PTY session and a live `-L` tunnel with an in-flight transfer, a
 /// connection the client has judged dead must resolve into exactly the
 /// split the plan promises — not "the whole connection recovers" or "the
@@ -278,7 +278,7 @@ const IN_FLIGHT_BYTES: usize = 1024 * 1024;
 ///   not gate the session's resume, checked not just by running them
 ///   concurrently but by pinning resume's own reported latency to
 ///   [`REDIAL_DEADLINE`] independent of whatever the tunnel's cleanup took;
-/// - the forward's listener (the holder, M4 plan §4.1 #1 (2473c88)) survives the
+/// - the forward's listener (the holder, M4 plan §4.1 #1 (8237375)) survives the
 ///   fault: it still accepts a new TCP connection after resume.
 ///
 /// **What "judged dead" means here.** This harness drives the raw
@@ -486,7 +486,7 @@ async fn a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes
     .await
     .unwrap_or_else(|_| panic!("the forward listener must still accept — {ctx}"));
 
-    // KNOWN GAP against M4 plan Step 8 (a) (2473c88)'s literal listener-survival
+    // KNOWN GAP against M4 plan Step 8 (a) (8237375)'s literal listener-survival
     // claim ("재연결 후 새 TCP 연결이 새 스트림을 연다" — a new TCP
     // connection after reconnect opens a new stream): it does not, today.
     //

@@ -140,7 +140,7 @@ impl Paths {
     }
 
     /// `<config_dir>/hosts.toml` — the host profile address book
-    /// (`docs/design/architecture.md` §7, M7 plan Step 3 (69dd788),
+    /// (`docs/design/architecture.md` §7, M7 plan Step 3 (004ebd2),
     /// `crate::hosts::HostsFile`). Read-only in M7: no CLI command writes
     /// this path.
     pub fn hosts_file(&self) -> PathBuf {
@@ -166,7 +166,7 @@ impl Paths {
     }
 
     /// `<config_dir>/ca` — the private CA's root cert + key
-    /// (`docs/adr/0008-private-ca-cert-issuance.md` §4, the M7 plan (69dd788) Step
+    /// (`docs/adr/0008-private-ca-cert-issuance.md` §4, the M7 plan (004ebd2) Step
     /// 5). Deliberately separate from [`Paths::identity_dir`]: this
     /// device's own identity and its issuance authority (if any) are
     /// different threats and belong in different directories.
@@ -336,7 +336,7 @@ pub(crate) fn write_private_file_with(
 /// racing the write itself or resetting shared state — `ca::init`'s and
 /// `identity::promote_to_ca_issued`'s `*_recovers_from_an_interrupted_*_write`
 /// tests block a specific temp path with a directory to force that write to
-/// fail. Forwards to [`crate::fsutil`]'s shared ticket counter (the M7 plan (69dd788)
+/// fail. Forwards to [`crate::fsutil`]'s shared ticket counter (the M7 plan (004ebd2)
 /// M7 Step 7-2 carryover (iv)) — this crate's other durable writer
 /// (`resume::write_durably`) draws from the exact same counter now, not a
 /// second one of its own, so this prediction is unaffected by which of
@@ -348,7 +348,7 @@ pub(crate) fn write_private_file_with(
 /// thread-parallel execution, any other test scheduled at the same time
 /// that also writes a private file can consume a ticket between this read
 /// and the write it's predicting for, making the caller's prediction
-/// wrong (M7 plan Step 7-1 (69dd788) 검증 라운드 A1, reproduced). Callers of
+/// wrong (M7 plan Step 7-1 (004ebd2) 검증 라운드 A1, reproduced). Callers of
 /// this function carry the same caveat in their own doc comments.
 #[cfg(test)]
 pub(crate) fn next_write_ticket_for_test() -> u64 {
@@ -383,7 +383,7 @@ pub(crate) fn lock_path_for(path: &Path) -> PathBuf {
 
 /// An exclusive advisory lock held for the duration of one
 /// read-modify-write, on **every** platform — promoted from
-/// `crate::resume` (M7 plan Step 7-1 (69dd788) brief §4) so `trust.toml`,
+/// `crate::resume` (M7 plan Step 7-1 (004ebd2) brief §4) so `trust.toml`,
 /// `invites.toml` and the CA root's key+cert pair share the same
 /// mechanism `resume.json` already relies on, instead of each config file
 /// re-deriving its own.
@@ -474,7 +474,7 @@ pub struct Config {
     /// `[reverse]` — reverse-mode target settings (`qsh reverse`).
     pub reverse: ReverseConfig,
     /// `[audit]` — audit log lifecycle settings (rotation, retention, async
-    /// writer queue depth; `docs/design/architecture.md` §7, the M5 plan (2473c88)
+    /// writer queue depth; `docs/design/architecture.md` §7, the M5 plan (8237375)
     /// Step 1). No `[acl]` section exists — policy lives in the separate
     /// `acl.toml` file, not `config.toml` (same file/`Config` split
     /// `trust.toml` already has).
@@ -618,13 +618,13 @@ pub struct ServeConfig {
     pub close_grace_ms: Option<u64>,
     /// Upper bound on connections concurrently *in handshake* — from
     /// admission through `Incoming::accept()` resolving, released before
-    /// `serve_connection` (`crate::admission::Gate`, M8 plan Step 2 (52639fc),
+    /// `serve_connection` (`crate::admission::Gate`, M8 plan Step 2 (3b23162),
     /// `docs/adr/0009-admission-defenses.md`). Unset or `0` ⇒
     /// [`ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES`] (64) — same "0
     /// degrades to default, never unlimited" discipline as
     /// [`ServeConfig::replay_bytes`]: this defense has no off switch.
     /// `[listen]` has no key of its own — `Listen::run` reads this same
-    /// value (design arbitration, M8 plan Step 2 (52639fc)).
+    /// value (design arbitration, M8 plan Step 2 (3b23162)).
     pub max_concurrent_handshakes: Option<usize>,
     /// Per-source rate limit on address-*unvalidated* Initials, in new
     /// attempts per second (key: IPv4 /32, IPv6 /64; burst 2x, not
@@ -633,7 +633,7 @@ pub struct ServeConfig {
     /// no-off-switch discipline as `max_concurrent_handshakes`.
     pub handshake_rate_per_source: Option<u32>,
     /// Global cap on live (not closed) sessions across all principals
-    /// (`crate::quota`, M8 plan Step 3 (52639fc), `docs/adr/0010-resource-
+    /// (`crate::quota`, M8 plan Step 3 (3b23162), `docs/adr/0010-resource-
     /// quotas.md`). Derived from the broker registry, not a separate
     /// counter (`docs/design/architecture.md` §1). Unset or `0` ⇒
     /// [`ServeConfig::DEFAULT_MAX_SESSIONS`] (256) — same no-off-switch
@@ -730,14 +730,14 @@ impl ServeConfig {
     pub const DEFAULT_RESUME_TTL_SECS: u64 = 24 * 60 * 60;
     /// Default close escalation grace: 5 seconds (`docs/CLI.md` §6.7).
     pub const DEFAULT_CLOSE_GRACE_MS: u64 = 5000;
-    /// Default handshake concurrency cap: 64 (M8 plan Step 2 (52639fc) — the
+    /// Default handshake concurrency cap: 64 (M8 plan Step 2 (3b23162) — the
     /// same magnitude as `localctl::daemon::MAX_CONCURRENT_LOCALCTL_HANDSHAKES`,
     /// so the codebase tells one story about this class of bound).
     pub const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 64;
-    /// Default per-source unvalidated-Initial rate: 10/s (the M8 plan (52639fc)
+    /// Default per-source unvalidated-Initial rate: 10/s (the M8 plan (3b23162)
     /// Step 2).
     pub const DEFAULT_HANDSHAKE_RATE_PER_SOURCE: u32 = 10;
-    /// Default global live-session cap: 256 (M8 plan Step 3 (52639fc),
+    /// Default global live-session cap: 256 (M8 plan Step 3 (3b23162),
     /// `docs/adr/0010-resource-quotas.md`).
     pub const DEFAULT_MAX_SESSIONS: usize = 256;
     /// Default per-principal live-session cap: 32.
@@ -763,7 +763,7 @@ impl ServeConfig {
     /// would then arrive already validated, skipping Retry, and this axis
     /// becomes the only gate on that path.
     pub const DEFAULT_VALIDATED_RATE_PER_SOURCE: u32 = 10;
-    /// Default host-wide concurrent-`exec.run` cap: 256 (the M8 plan (52639fc) Step
+    /// Default host-wide concurrent-`exec.run` cap: 256 (the M8 plan (3b23162) Step
     /// 3b, `docs/adr/0010-resource-quotas.md`).
     pub const DEFAULT_MAX_EXEC: usize = 256;
     /// Default per-principal concurrent tunnel-stream cap: 256.
@@ -1036,7 +1036,7 @@ fn non_blank<'a>(
 }
 
 /// `[audit]` section — audit log lifecycle (`docs/design/architecture.md`
-/// §6/§7, M5 plan Step 1 (2473c88)/3). `crate::serve::host_runtime` reads these
+/// §6/§7, M5 plan Step 1 (8237375)/3). `crate::serve::host_runtime` reads these
 /// values to build the rotating, bounded-queue writer
 /// (`crate::audit::RotatingAuditSink::spawn`): `max_bytes`/`retain` govern
 /// its rotation and retention, `queue_depth` its backpressure bound.
@@ -1060,7 +1060,7 @@ pub struct AuditConfig {
 
 impl AuditConfig {
     /// Default rotation trigger: 64 MiB (`docs/design/architecture.md` §7,
-    /// M5 plan §4.2 (2473c88)).
+    /// M5 plan §4.2 (8237375)).
     pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
     /// Default retained rotated files: 5.
     pub const DEFAULT_RETAIN: u32 = 5;

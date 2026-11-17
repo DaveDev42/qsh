@@ -1,4 +1,4 @@
-//! L5 — `qsh cp` end to end (ADR-0029, `docs/CLI.md` §6.21), M15 plan Step 14 (1a4af3b).
+//! L5 — `qsh cp` end to end (ADR-0029, `docs/CLI.md` §6.21), M15 plan Step 14 (1a0cbd6).
 //!
 //! Real processes, no fakes: a `qsh serve` host and the `qsh cp` client as a
 //! subprocess. (The reverse rig retired with ADR-0068.)

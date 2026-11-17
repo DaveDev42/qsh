@@ -1,4 +1,4 @@
-//! M15 plan Step 3 (1a4af3b)'s measurement row: what resolving the requester's trust
+//! M15 plan Step 3 (1a0cbd6)'s measurement row: what resolving the requester's trust
 //! role on every decision costs (ADR-0045 결정 4 "판정마다 읽기", 근거 절).
 //!
 //! The decision that happens most often is the inline `forward.local` gate
@@ -13,7 +13,7 @@
 //!   the requester's pin up and allows `forward.local` through its `full`
 //!   role. This is the production wiring (`acl::load_or_deny`).
 //!
-//! The decision is allow in both arms; only the lookup differs. (M15 plan Step 3 (1a4af3b)
+//! The decision is allow in both arms; only the lookup differs. (M15 plan Step 3 (1a0cbd6)
 //! measured the lookup alone, with the role discarded; since Step 4 the
 //! role is the grant, so arm B pays for both the lookup and the role
 //! stage.) The two
@@ -22,7 +22,7 @@
 //! each arm and their ratio.
 //!
 //! **Gating.** The numbers are always printed. The 10% budget on the median
-//! (M15 plan §7.1 #2 (1a4af3b): above it, `SharedTrustStore::refresh` switches to the
+//! (M15 plan §7.1 #2 (1a0cbd6): above it, `SharedTrustStore::refresh` switches to the
 //! stat pre-check named in ADR-0045's rationale) is asserted only under
 //! `QSH_ACCEPTANCE_STRICT`, like the other latency gates; a latency
 //! assertion is run without competing load.
@@ -38,7 +38,7 @@ use qsh_testkit::loopback::make_identity;
 use qsh_testkit::tunnel::TunnelHarness;
 use qsh_transport::{AuthPath, Fingerprint, Principal, StaticTrust};
 
-/// Pins in `trust.toml`, the client's own among them (M15 plan §7.1 #2 (1a4af3b)).
+/// Pins in `trust.toml`, the client's own among them (M15 plan §7.1 #2 (1a0cbd6)).
 const PINS: usize = 100;
 /// Connections each arm is timed over.
 const CONNECTIONS_PER_ARM: usize = 1000;
@@ -46,7 +46,7 @@ const CONNECTIONS_PER_ARM: usize = 1000;
 const BATCH: usize = 50;
 /// Untimed connections each arm opens first.
 const WARMUP: usize = 100;
-/// M15 plan §7.1 #2 (1a4af3b): a difference within 10% keeps the full read per decision.
+/// M15 plan §7.1 #2 (1a0cbd6): a difference within 10% keeps the full read per decision.
 const MAX_MEDIAN_RATIO: f64 = 1.10;
 
 fn env_flag(name: &str) -> bool {

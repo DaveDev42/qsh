@@ -229,7 +229,7 @@ const ECHO_P95_FLOOR_MS: f64 = 50.0;
 
 /// Fraction of steady-phase echo p95 windows allowed to exceed
 /// [`ECHO_P95_FLOOR_MS`]'s bound before the run is `ECHO_DEGRADED`
-/// (`docs/campaigns/m8-soak.md` §7, GHA soak run, commit b9e67b1). The rule
+/// (`docs/campaigns/m8-soak.md` §7, GHA soak run, commit af6deb7). The rule
 /// this constant replaced was "no steady window's p95
 /// may ever exceed the bound" — that first real GHA run hit exactly 2 of 59
 /// steady windows spiking to 129.5ms and 114.6ms while every other window
@@ -327,7 +327,7 @@ fn listener_connection_caps(sessions: usize) -> (usize, usize) {
 /// (no packet sent). The client then sees `ConnectionFailed` "no response
 /// within 10s" and, after [`DIAL_RETRY_ATTEMPTS`] exhausted retries, the
 /// scenario dies (the 2026-09-11 24h-abort triage). The product default is
-/// deliberately NOT changed (M7 plan Step 5 (69dd788) Q1 arbitration: a single
+/// deliberately NOT changed (M7 plan Step 5 (004ebd2) Q1 arbitration: a single
 /// high-rate source is *meant* to be limited in production) — this raises
 /// the cap only in the harness's own listener config, where the single
 /// dialing source is a trusted test driver, not a flood. `(2*N).max(64)`

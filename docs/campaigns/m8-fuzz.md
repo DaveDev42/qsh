@@ -97,7 +97,7 @@ wait
 
 ### 배치 1 — decode_* 8종
 
-커밋 `d87e76b`, 호스트 Dave-Windows-WSL, run-id `m8-fuzz-20260902-1600`,
+커밋 `2c555d2`, 호스트 Dave-Windows-WSL, run-id `m8-fuzz-20260902-1600`,
 대상 `decode_control`·`decode_hello`·`decode_exec_frame`·
 `decode_session_frame`·`decode_stream_header`·`decode_connect_result`·
 `decode_local_hello`·`decode_local_admin_request`, 시작
@@ -113,7 +113,7 @@ artifact 0건, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로
 
 ### 배치 2 — 나머지 8종
 
-커밋 `ab8a82f`, run-id `m8-fuzz-20260907-1450`, 대상 `fingerprint_principal`·
+커밋 `de968e6`, run-id `m8-fuzz-20260907-1450`, 대상 `fingerprint_principal`·
 `frame_decoder`·`json_request_types`·`parse_forward_spec`·
 `parse_invite_code`·`sanitize_peer_text`·`valid_forward_id`·
 `valid_host_name`, 시작 2026-09-07T14:47:53+09:00, 종료
@@ -149,7 +149,7 @@ valid_host_name 47.
 
 ### 배치 1 보충 — decode_* 8종 이어 돌리기
 
-커밋 `ab8a82f`(배치 2와 같은 빌드, `cargo fuzz build` 0.98초로
+커밋 `de968e6`(배치 2와 같은 빌드, `cargo fuzz build` 0.98초로
 재컴파일 없음), run-id `m8-fuzz-20260910-1505`. 런처는
 `~/fuzz/run-cont.sh`로, `run72.sh`와 같은 규율(grown corpus를 첫
 인자로, 체크인 seed는 읽기 전용 둘째 인자, `-rss_limit_mb=1536
@@ -194,7 +194,7 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 
 누적: 배치 1 실효 시간 59.1~65.6h + 13.0h = 72.1~78.6h/타깃. 부족분이
 가장 컸던 타깃(12.89h)도 72.11h로 72h를 넘는다. DoD 1의 "누적" 문면상
-회차를 나눠 이어 돌린 시간은 합산한다(M8 계획 §3 Step 1(`52639fc`) 경과 기록 09-07).
+회차를 나눠 이어 돌린 시간은 합산한다(M8 계획 §3 Step 1(`3b23162`) 경과 기록 09-07).
 
 **배치 1 보충 판정: decode_* 8 타깃 누적 ≥72h 충족, crash 0.**
 
@@ -205,7 +205,7 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 DoD 1의 16 타깃 밖이다. P1이 더한 파서 타깃 셋을 같은 형식으로 72h
 돌린다(`docs/design/protocol.md` §13의 공개 beta 전 조건, ROADMAP §5.5).
 대상 `parse_openssh_key`(M11)·`decode_file_frame`(M15)·
-`parse_ssh_bootstrap_line`(M16), 커밋 `60e54fa`, 호스트
+`parse_ssh_bootstrap_line`(M16), 커밋 `736f7a3`, 호스트
 Dave-Windows-WSL, run-id `m8-fuzz-20261020-0931`. 런처
 `~/fuzz/run72.sh`가 타깃 이름을 인자로 받아 타깃마다 프로세스 하나를
 `-max_total_time=259200 -rss_limit_mb=1536`으로 띄운다. 시작
@@ -234,7 +234,7 @@ parse_ssh_bootstrap_line 4960.
 
 - 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — 09-11 완료. `exits.txt`
   8행 `exit=0`, 로그 엄격 grep 0건, 누적 72.1~78.6h(§5).
-- DoD 1 체크 — 09-11 완료(M8 계획 §2(`52639fc`)). ROADMAP M8 마감 노트는 마감
+- DoD 1 체크 — 09-11 완료(M8 계획 §2(`3b23162`)). ROADMAP M8 마감 노트는 마감
   커밋에서 이 문서 §5를 인용한다.
 - stateful broker fuzzer(`fuzz_session_machine`/`broker_ops`)는 이 16
   타깃 집합 밖이다 — Step 7b가 착지해 §8에 기록하며, DoD 1의 "parser

@@ -1,5 +1,5 @@
 //! L5 — Ctrl-C on `qsh cp` (ADR-0029 decision 11, `docs/CLI.md` §6.21),
-//! M15 plan Step 15 (1a4af3b; the review findings of Step 14 (b1fcf3a)).
+//! M15 plan Step 15 (1a0cbd6; the review findings of Step 14 (26c12e3)).
 //!
 //! The first SIGINT cancels the copy wherever it is: mid-transfer, or still
 //! dialing. The second ends the process at once. A canceled copy exits 255

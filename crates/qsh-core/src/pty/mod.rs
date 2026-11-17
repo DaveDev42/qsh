@@ -1,6 +1,6 @@
 //! PTY backends for the session broker (`docs/design/architecture.md` §4):
 //! the POSIX one below and the Windows ConPTY one after it. M2 plan Step 4
-//! (2473c88) built the POSIX one.
+//! (8237375) built the POSIX one.
 //!
 //! `PtySource` is the production [`crate::broker::SessionSource`]: it opens a pty pair
 //! with `portable-pty` 0.9, spawns the child as a **session leader with the

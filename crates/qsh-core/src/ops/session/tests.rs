@@ -190,7 +190,7 @@ fn operation_commands_match_cli_md() {
     assert_eq!(SessionCloseOp::COMMAND, "session.close");
 }
 
-// ---- `Ops::resolve_user_hint` (M7 plan Step 3 (69dd788), `docs/CLI.md` §7)
+// ---- `Ops::resolve_user_hint` (M7 plan Step 3 (004ebd2), `docs/CLI.md` §7)
 // ----
 
 fn user_hint_ops(dir: &std::path::Path) -> Ops {

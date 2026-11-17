@@ -1,6 +1,6 @@
 # graceful re-exec(fd 보존 handoff) 비용 산정
 
-**작성일:** 2026-09-10 · **기준 트리:** `2e9c3c9`
+**작성일:** 2026-09-10 · **기준 트리:** `c72fc85`
 
 `docs/ROADMAP.md` §4 리스크 4가 요구한 산정이다. 구현 제안이 아니라 P1 결정의 입력이고, 코드는 읽기만 했다. 인용 없는 수치는 추정이다. 코드는 파일 경로와 심볼 이름으로 인용하고 줄 번호는 쓰지 않는다. 비용과 후보 비교는 기준 트리의 것이므로, 현황은 §4가 따로 적는다.
 
@@ -58,7 +58,7 @@
 |---|---|---|
 | H0 | 값싼 선행 조치. 패널 셋이 독립적으로 같은 항목에 닿았다. `docs/deploy/service.md`의 systemd 절이 `Restart=always`/`KeepAlive`를 설명하면서 그 재시작이 detached 세션을 전부 지운다는 사실을 말하지 않았고 README를 인용하지도 않았다(README "Known limitations"는 이미 정확하다). H4를 채택해도 계획된 재시작만 덮으므로 이 고지는 남는다 | 반영됨(`docs/deploy/service.md`의 재시작 고지) |
 | H1 | 관측(drain 요약·doctor 1종·배너) | 반영됨. drain 요약 줄(`qsh::lifecycle`의 `drained`), doctor 진단 `service_restart_drops_sessions`, 기동 배너다. doctor 진단은 세션을 호스팅하는 `serve`와 `reverse` mode에만 뜨고 세션이 없는 `listen` controller에는 뜨지 않는다 |
-| H1b | crash 재시작의 사용자 가시 정지를 45초에서 1 RTT로 낮추는 값이 "고지만"보다 크다 | ADR-0036에 따라 반영됨(커밋 `213001f`) |
+| H1b | crash 재시작의 사용자 가시 정지를 45초에서 1 RTT로 낮추는 값이 "고지만"보다 크다 | ADR-0036에 따라 반영됨(커밋 `37f5d4e`) |
 | H2 | 0.3ew를 문면 하나에 쓰는 거래의 값어치가 자명하지 않다(§3) | 미배치. 별도 ADR이 필요하다고 판정될 때만 한다(`docs/ROADMAP.md` P1 항목) |
 | H3 | 기각. 가치 0이어서가 아니다. H3이 내는 값(포트 hole 제거, reset key 이전으로 감지 1 RTT) 전부를 H1b가 프로세스 경계 없이 0.2~0.3ew에 내기 때문이다. 두 프로세스·fd 전달 프로토콜·반쪽 재exec 실패 모드를 1.0ew에 사서 얻을 잔여 값이 없다 | 기각 유지 |
 | H4, H5 | P1 이후. 둘 다 하는 것은 세션 상태를 두 경로로 유지하는 일이고 H5를 하면 H4는 대부분 불필요해진다 | 미착수(`docs/ROADMAP.md`가 H2·H4·H5를 P1에 둔다) |

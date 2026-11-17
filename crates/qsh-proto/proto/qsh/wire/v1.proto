@@ -318,7 +318,7 @@ enum AgentGrant {
 // requester is the dialing side on this leg, the reverse of `-L`).
 // Non-loopback `bind_host` is *shape*-valid (this message does not encode
 // policy); the host enforces loopback-only before binding
-// (`docs/PRD.md` §9, M4 plan §4.1 #5 (2473c88)).
+// (`docs/PRD.md` §9, M4 plan §4.1 #5 (8237375)).
 message RemoteForwardOpen {
   string bind_host = 1;
   uint32 bind_port = 2;

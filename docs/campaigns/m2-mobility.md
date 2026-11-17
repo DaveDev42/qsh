@@ -191,7 +191,7 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 | 조작자 | Dave |
 | 클라이언트 장비 / OS | Dave-MBP16 (Apple M1 Max) / macOS (Darwin 27.0.0) |
 | 서버 장비 / OS / `qsh serve` bind | Dave-Windows-WSL (WSL2 Ubuntu, 7950X) / `qsh serve --bind 0.0.0.0:4433` (tmux, 전용 캠페인 프로필) |
-| qsh 커밋 SHA | 바이너리 양단 `37dd5ea` (release), 문서·스크립트 `ff433dc` |
+| qsh 커밋 SHA | 바이너리 양단 `4297679` (release), 문서·스크립트 `8284aa9` |
 | Wi-Fi SSID / 대역 | 홈 Wi-Fi, en0 172.31.44.37 (SSID는 macOS가 비공개 처리 — 조작자 확인) |
 | 테더링 방식 / 캐리어 | iPhone **USB 테더**(개인용 핫스팟, en10 192.0.0.2) / 캐리어 IPv6 prefix `2001:2d8::/32` 관측 |
 | **경로 토폴로지 (중요)** | 클라이언트→서버 접속이 **Tailscale(utun) 경유** (`dave-windows-wsl.tail91e9e.ts.net`). QUIC 4-tuple이 tailnet 주소로 고정되어 물리 경로 전환이 QUIC에는 blackhole→복구로만 보인다 — §7 서술 참조 |

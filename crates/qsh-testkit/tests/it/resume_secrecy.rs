@@ -1,6 +1,6 @@
 //! One test, one property: **the resume credential never leaves the two
 //! places it is allowed to be** — the wire, and the client's 0600
-//! `resume.json` (ADR-0007, M2 plan Step 7 (d) (2473c88)).
+//! `resume.json` (ADR-0007, M2 plan Step 7 (d) (8237375)).
 //!
 //! It lives in its own test binary on purpose. Proving "it is in none of
 //! the logs" means capturing *every* tracing event the host and the client

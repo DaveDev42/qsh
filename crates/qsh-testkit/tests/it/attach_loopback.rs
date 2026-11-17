@@ -1,4 +1,4 @@
-//! L3 loopback end-to-end for the `SESSION_DATA` attach stream (the M2 plan (2473c88)
+//! L3 loopback end-to-end for the `SESSION_DATA` attach stream (the M2 plan (8237375)
 //! Step 5): `StreamHeader{SESSION_DATA, ticket}` → framed `SessionFrame`s
 //! over a real QUIC connection against a pipe-backed session
 //! (`docs/design/testing.md` §3). Zero PTY code.
@@ -292,7 +292,7 @@ async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_forwar
     .await;
 }
 
-/// The live-defect regression (M2 plan Step 5 (2473c88)): a child that stops draining
+/// The live-defect regression (M2 plan Step 5 (8237375)): a child that stops draining
 /// its PTY/pipe input parks the session's writer task for ever. That must
 /// never park the *connection*: other control traffic keeps flowing, and
 /// when the connection dies the writer lease is still released.
@@ -726,7 +726,7 @@ async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes
 
     // A demoted attach's `Resize` is dropped on the floor too, same as its
     // `Input` — it must not still be able to mutate the live PTY out from
-    // under whoever actually holds the lease (M3 plan Step 3 (2473c88).5 PR② review:
+    // under whoever actually holds the lease (M3 plan Step 3 (8237375).5 PR② review:
     // `SessionFrame::Resize` binds to the writer lease exactly like
     // `write_at`, not just `Input`).
     data.send

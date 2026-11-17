@@ -81,7 +81,7 @@ FD_GROWTH_ALLOWANCE = 2
 ECHO_P95_BOUND_MS = 50.0  # floor of the adaptive bound — see `evaluate`'s `echo_baseline_ms`
 # Fraction of steady-phase echo p95 windows allowed to exceed the bound
 # above before the run is ECHO_DEGRADED (docs/campaigns/m8-soak.md §3,
-# rule fixed after the first GHA soak run, b9e67b1). Replaces the old
+# rule fixed after the first GHA soak run, af6deb7). Replaces the old
 # "no steady window's p95 may ever exceed the bound" rule: that first real
 # GHA run hit exactly 2 of 59 steady windows spiking to 129.5ms and 114.6ms
 # while every other window stayed at 1-2ms, and both spikes landed on top of

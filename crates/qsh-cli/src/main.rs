@@ -1886,7 +1886,7 @@ fn nonzero(ms: u32) -> Option<u32> {
 /// Two-phase on purpose, and the only command shaped like this: the
 /// `Tunnel` envelope is emitted **once**, up front, exactly like any value
 /// operation — and then this process blocks, because the foreground
-/// process *is* the tunnel's holder (M4 plan §4.1 #1 (2473c88): no client
+/// process *is* the tunnel's holder (M4 plan §4.1 #1 (8237375): no client
 /// daemon). Consequences this function is careful about:
 ///
 /// - stdout is **flushed** before blocking. It is block-buffered when it
@@ -2216,7 +2216,7 @@ fn run_serve_inbound(
                     stderr_note!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER);
                 }
             },
-            // M5 plan Step 6 (2473c88): `acl.toml` policy loads once, here, at
+            // M5 plan Step 6 (8237375): `acl.toml` policy loads once, here, at
             // startup — `qsh_core::acl::StartupDiagnostic::render` is the
             // single source of truth for the wording; this closure only
             // prints it, holding no ACL logic of its own (`CLAUDE.md`'s

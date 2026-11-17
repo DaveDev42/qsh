@@ -1,5 +1,5 @@
-//! Connection admission control (M8 plan Step 2 (52639fc),
-//! `docs/adr/0009-admission-defenses.md`, extended M8 plan Step 3 (52639fc)
+//! Connection admission control (M8 plan Step 2 (3b23162),
+//! `docs/adr/0009-admission-defenses.md`, extended M8 plan Step 3 (3b23162)
 //! P2-3): the L2-L3 layer of the L0-L5 admission ordering, sitting
 //! between quinn's own cheap pre-app shed (`qsh_transport::endpoint`'s
 //! `MAX_INCOMING`/`INCOMING_BUFFER_SIZE`, L0) and the TLS handshake (L4).
@@ -35,7 +35,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::audit::AuditRecord;
 use crate::broker::Clock;
 
-/// Count-min sketch dimensions (M8 plan Step 2 (52639fc) design judgment table,
+/// Count-min sketch dimensions (M8 plan Step 2 (3b23162) design judgment table,
 /// row "source rate limit"): 4 independently-hashed rows × 1024 columns,
 /// so an attacker who can observe (or brute-force) one row's hash seed
 /// still needs to collide all 4 simultaneously to manufacture a false
@@ -49,7 +49,7 @@ const SKETCH_ROWS: usize = 4;
 /// arbitration's own number.
 const SKETCH_COLS: usize = 1024;
 
-/// Sliding-window epoch length for the per-source rate limiter (the M8 plan (52639fc)
+/// Sliding-window epoch length for the per-source rate limiter (the M8 plan (3b23162)
 /// M8 Step 2 verification round, F2/item 4). **2 s, not 1 s.** With a 1 s
 /// epoch and a `rate × 2` threshold, a *sustained* source at `rate × 2`
 /// events/s never accumulates more than `burst_limit` in either the
@@ -68,11 +68,11 @@ const EPOCH: Duration = Duration::from_secs(2);
 
 /// How long an admission-rejection audit window stays open before its
 /// suppressed count is flushed as a summary record and a new window
-/// starts (M8 plan Step 2 §5 (52639fc), ADR-0009). 10 s, matching the design's
+/// starts (M8 plan Step 2 §5 (3b23162), ADR-0009). 10 s, matching the design's
 /// own "창(10초)당 category별 1행 + 요약 1행" contract (also documented
 /// verbatim in `docs/CLI.md` §6.12).
 ///
-/// Flushed two ways (M8 plan Step 2 (52639fc) verification round, P1-3/F1):
+/// Flushed two ways (M8 plan Step 2 (3b23162) verification round, P1-3/F1):
 /// lazily, the next time a rejection in the same category arrives after
 /// the window has run past this bound (see `Gate::record_rejection`'s
 /// doc), *and* on a bounded schedule — both `crate::server::Server::run`
@@ -85,7 +85,7 @@ const EPOCH: Duration = Duration::from_secs(2);
 ///
 /// `pub`, not `pub(crate)`: `crates/qsh-cli/tests/it/adversarial_load.rs`
 /// (scenario 12a) reads this across the crate boundary instead of
-/// carrying its own hardcoded copy of the window length (the M8 plan (52639fc)
+/// carrying its own hardcoded copy of the window length (the M8 plan (3b23162)
 /// Step 5 (b-0)). Widening visibility here is not a contract change —
 /// nothing outside this crate is meant to *depend* on the value, only
 /// this one integration test computing bounds from the real number
@@ -105,7 +105,7 @@ pub enum RejectReason {
     AtCapacity,
     /// The per-source sliding-window rate limit was exceeded by an
     /// address-*validated* attempt (holder of a completed Retry round
-    /// trip) — M8 plan Step 3 (52639fc) P2-3, `docs/adr/0009-admission-
+    /// trip) — M8 plan Step 3 (3b23162) P2-3, `docs/adr/0009-admission-
     /// defenses.md`'s 한계 section. Keyed by the same validated peer
     /// address, but tracked in its own `Sketch` so a spoofed
     /// unvalidated flood can never collide with (and steal budget from)
@@ -230,7 +230,7 @@ impl SketchRow {
     }
 }
 
-/// The admission key a source's traffic is bucketed under (the M8 plan (52639fc)
+/// The admission key a source's traffic is bucketed under (the M8 plan (3b23162)
 /// Step 2 design judgment table): the full address for IPv4 (a /32 is
 /// exactly one `Ipv4Addr`), the top 64 bits for IPv6 (a /64 — privacy
 /// extensions rotate the low 64 bits for one legitimate host, so keying
@@ -390,7 +390,7 @@ impl Sketch {
 }
 
 /// Rejection-audit aggregation state for one [`RejectReason`] category
-/// (M8 plan Step 2 §5 (52639fc), ADR-0009): the first rejection in a 10 s
+/// (M8 plan Step 2 §5 (3b23162), ADR-0009): the first rejection in a 10 s
 /// window is reported immediately (with its real, observed `peer_addr` —
 /// a stray denial must not be delayed waiting for a window to close);
 /// every further rejection in that same window only increments
@@ -435,7 +435,7 @@ pub struct Gate {
     handshake_permits: Arc<Semaphore>,
     rate_per_source: u32,
     sketch: Sketch,
-    /// P2-3 (M8 plan Step 3 (52639fc), design §2.7): a **second**, independent
+    /// P2-3 (M8 plan Step 3 (3b23162), design §2.7): a **second**, independent
     /// fixed-size sketch keyed by the same validated peer address, so a
     /// spoofed unvalidated flood can never collide with (and steal
     /// budget from) a real validated source's counters.
@@ -758,7 +758,7 @@ impl Gate {
     /// Force-close every category window whose `start` is at least
     /// [`AUDIT_AGGREGATION_WINDOW`] old, emitting a
     /// [`AuditRecord::handshake_rejected_summary`] for any that suppressed
-    /// at least one rejection (M8 plan Step 2 (52639fc) verification round,
+    /// at least one rejection (M8 plan Step 2 (3b23162) verification round,
     /// P1-3/F1). The accept loop calls this once per tick of a
     /// `tokio::time::interval(AUDIT_AGGREGATION_WINDOW)` in its `select!`
     /// (plus once more on shutdown) so a category's last window closes on

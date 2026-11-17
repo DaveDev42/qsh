@@ -1,4 +1,4 @@
-//! L3 loopback end-to-end for the `session.*` value ops (M2 plan Step 3 (2473c88)):
+//! L3 loopback end-to-end for the `session.*` value ops (M2 plan Step 3 (8237375)):
 //! pinned mTLS handshake → `Hello` → `SessionOpen` → ACL + audit → broker
 //! session + `SESSION_DATA` ticket → write / read (`--after`, `--wait`) /
 //! resize / get / list / close, all over a real QUIC connection against a
@@ -83,7 +83,7 @@ async fn session_full_path_open_write_read_resize_get_list_close<P: HostedPair>(
         .pipes()
         .take_with_spec()
         .expect("pipe handle for the session");
-    // M2 plan Step 3 (d) (2473c88): what follows `--` reaches the source verbatim, with
+    // M2 plan Step 3 (d) (8237375): what follows `--` reaches the source verbatim, with
     // no shell re-interpretation anywhere on the path (CLI → SessionOpen →
     // wire → SessionSpec), and the rest of the spec survives with it.
     assert_eq!(spec.argv, vec!["sh".to_string(), "-l".to_string()]);
@@ -474,7 +474,7 @@ async fn attach_to_an_unknown_session_creates_nothing_forward() {
 }
 
 // ==========================================================================
-// Session ownership (M3 plan Step 3 (2473c88).5 PR②, PRD §6, audit A2 P0):
+// Session ownership (M3 plan Step 3 (8237375).5 PR②, PRD §6, audit A2 P0):
 // `session.write`/`session.resize` bind to the session's opener.
 // Needs a second, distinct principal, which the generic scenarios above do
 // not provide.
@@ -611,7 +611,7 @@ impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
 /// ownership: `Principal`'s `Display` alone cannot tell a pin from a CA
 /// leaf (`qsh-transport::tls::AuthPath`'s doc), so the binding has to key
 /// on `(principal, auth_path)`, not `principal.to_string()` alone
-/// (M3 plan Step 3 (2473c88).5 PR② review). Forward-only for the same reason the
+/// (M3 plan Step 3 (8237375).5 PR② review). Forward-only for the same reason the
 /// two-principal ownership tests above are: this is about the ownership
 /// gate, not role symmetry.
 #[tokio::test(flavor = "multi_thread")]
@@ -675,12 +675,12 @@ async fn ca_leaf_asserting_the_opener_principal_is_still_denied_ownership() {
     h.shutdown().await;
 }
 
-/// `scope = "any"` (M5 plan §4.1 #3 (2473c88)) is the explicit escape hatch from
+/// `scope = "any"` (M5 plan §4.1 #3 (8237375)) is the explicit escape hatch from
 /// the `scope = "owned"` default the two tests above pin: a real `Policy`
 /// (not a test double, not `AllowAllPinned`'s hardcoded posture) can grant
 /// a non-owner `session.control` over someone else's session. This is
 /// `Policy::decide`'s own ④ scope judgment (`acl/policy.rs`), evaluated
-/// live since M5 plan Step 5 (2473c88).
+/// live since M5 plan Step 5 (8237375).
 ///
 /// **`resize`, not `write`, is this test's clean witness.** `session.write`
 /// carries a *second*, ACL-independent gate — the writer lease, taken with
@@ -749,7 +749,7 @@ async fn session_control_scope_any_widens_to_a_non_owner_when_explicitly_granted
     let audit_before_resize = h.audit().records().len();
     assert_eq!(desktop.session_resize(&id, 80, 24).await.unwrap(), (80, 24));
 
-    // F8 (M5 Step 5 adversarial review, the M5 plan (2473c88) DoD): the widened op's own
+    // F8 (M5 Step 5 adversarial review, the M5 plan (8237375) DoD): the widened op's own
     // audit record names the *rule* that admitted it, not just "an allow
     // happened somewhere" — `Some(1)` is this policy's `desktop`/
     // `scope = "any"` row (index 1, above), the concrete rule a reader of
@@ -837,7 +837,7 @@ async fn session_control_binding_does_not_reach_get_read_or_close() {
     h.shutdown().await;
 }
 
-/// F1 arbitration (M5 Step 5 adversarial review, PRD §6, the M5 plan (2473c88) Step
+/// F1 arbitration (M5 Step 5 adversarial review, PRD §6, the M5 plan (8237375) Step
 /// 5 (a)): `session.close` shares `Action::SessionControl` with
 /// `write`/`resize`, but is **deliberately exempt** from `scope` —
 /// PRD §6's "조회·읽기·종료는 ACL 범위에서 가능하다" requires cross-device close so
