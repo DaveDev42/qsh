@@ -9,6 +9,35 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.9.1`
+
+A patch release that fixes router port mapping on hosts with more than one
+network interface. No contract change.
+
+### Changes
+
+- `qsh serve` now runs its own port-mapping client. iroh's built-in one only
+  tried UPnP, sending SSDP from `0.0.0.0`, and on a host with several
+  interfaces (the Windows case that showed it) the discovery left through
+  the wrong one and no mapping was made. The daemon now probes PCP and
+  NAT-PMP first and falls back to UPnP, and keeps the mapping alive.
+- The mapped address is advertised like a configured address, so peers
+  behind other NATs can dial it directly. See ADR-0064's revision history.
+- The log says what the router offered (`router port-mapping protocols
+  found`) and when the mapped address is published (`advertising the
+  address the router mapped`).
+
+### Unchanged
+
+- The `qsh.cli/v1` contract, the wire format and every file format load as
+  before. No config key is added or removed.
+
+### What is still unproven
+
+Everything `v0.9.0` lists, plus this: the mapping was measured on one
+Windows host behind one router. Other routers, and routers that offer only
+UPnP, have only the unit tests.
+
 ## `v0.9.0`
 
 A minor release that removes reverse connections and qsh's own hole
