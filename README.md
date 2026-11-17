@@ -106,7 +106,7 @@ connections](#retired-reverse-connections).
 
 ## Contents
 
-- [Install](#install): prebuilt binaries, Homebrew, or from source.
+- [Install](#install): Homebrew (macOS), prebuilt binaries, or from source.
 - [How it works](#how-it-works): server and client, and the smallest configuration.
 - [First run](#first-run): pin two machines to each other, over ssh or by hand, and open a shell.
 - [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
@@ -117,6 +117,27 @@ connections](#retired-reverse-connections).
 - [Project status](#project-status), [Documents](#documents), [Development](#development).
 
 ## Install
+
+### Homebrew (macOS)
+
+Recommended on macOS:
+
+```bash
+brew install DaveDev42/tap/qsh
+```
+
+Upgrade later with:
+
+```bash
+brew upgrade DaveDev42/tap/qsh
+```
+
+Apple silicon only for now. The formula tracks the `aarch64-apple-darwin`
+release tarball, so the signing status is whatever that asset carries. The
+Homebrew version is the release tag without its leading `v`. For tags after
+`v0.2.0` this is the install path that puts the man pages on your `MANPATH`.
+
+### Prebuilt binaries
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64
 against glibc, x86_64 and aarch64 against musl) and Windows (x86_64 and
@@ -140,9 +161,9 @@ verifies the archive's build provenance (below).
 On macOS, a binary from the curl installer is ad-hoc signed unless the
 release was cut with Apple credentials, and no published release has been.
 [Known limitations](#known-limitations) explains how to check what you have
-and what it means for the firewall prompt. The installer clears
-`com.apple.quarantine` after it installs (`scripts/install.sh`), so that path
-does not consult Gatekeeper; a manual download does.
+and what it means for the firewall prompt. `curl` does not set
+`com.apple.quarantine`, so the installer path does not consult Gatekeeper; a
+manual browser download does.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -243,17 +264,6 @@ administrator rights. Without `--tag <release tag>` it builds the default
 branch. The man pages are not installed this way. CI builds the workspace
 natively on Windows with `--locked`. See
 [From source](#from-source) for the toolchain pin and the crates.io status.
-
-### Homebrew (macOS)
-
-```bash
-brew install DaveDev42/tap/qsh
-```
-
-Apple silicon only for now. The formula tracks the `aarch64-apple-darwin`
-release tarball, so the signing status is whatever that asset carries. The
-Homebrew version is the release tag without its leading `v`. For tags after
-`v0.2.0` this is the install path that puts the man pages on your `MANPATH`.
 
 ### From source
 

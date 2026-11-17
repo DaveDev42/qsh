@@ -408,15 +408,6 @@ writable directory, or fix its permissions yourself — this installer never use
         die "failed to move the binary into place at ${QSH_INSTALL_DIR}/qsh"
     staged=""
 
-    # curl does not set com.apple.quarantine, but a proxy or a
-    # download-then-run detour can. Clearing it is best effort; whether the
-    # binary is signed and notarized depends on how the release was cut
-    # (docs/deploy/release-secrets.md), and this script does not check, so
-    # macOS may still object.
-    if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
-        xattr -d com.apple.quarantine "${QSH_INSTALL_DIR}/qsh" 2>/dev/null || true
-    fi
-
     log "installed qsh ${version} to ${QSH_INSTALL_DIR}/qsh"
 
     if [ "${QSH_NO_MAN:-}" != "1" ]; then
