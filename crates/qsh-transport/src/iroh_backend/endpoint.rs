@@ -280,10 +280,18 @@ impl EndpointHandle {
         identity: SecretKey,
         daemon: bool,
         nudge: Option<RelayNudge>,
+        mapping: bool,
     ) -> Self {
         let mut keepers = Vec::new();
+        let mapped = portmap::MappedAddr::default();
         if daemon {
-            keepers.push(tokio::spawn(keep_reflexive_address(ep.clone())));
+            keepers.push(tokio::spawn(keep_reflexive_address(
+                ep.clone(),
+                mapped.clone(),
+            )));
+            if mapping {
+                keepers.push(tokio::spawn(portmap::keep_mapping(ep.clone(), mapped)));
+            }
             if let Some(nudge) = nudge {
                 keepers.push(tokio::spawn(keep_home_relay(ep.clone(), nudge)));
             }
@@ -370,7 +378,7 @@ impl Drop for EndpointHandle {
 /// (`reflexive.rs` has the why). Runs until the task is aborted, which
 /// [`EndpointHandle`] does when the last holder lets go, or until iroh's
 /// report watcher disconnects.
-async fn keep_reflexive_address(ep: iroh::Endpoint) {
+async fn keep_reflexive_address(ep: iroh::Endpoint, mapped: portmap::MappedAddr) {
     let mut keeper = Keeper::default();
     let mut reports = ep.net_report();
     let mut pending = Some(reports.get());
@@ -390,7 +398,7 @@ async fn keep_reflexive_address(ep: iroh::Endpoint) {
                             None => std::future::pending().await,
                         }
                     } => {
-                        apply(&ep, keeper.on_tick(tokio::time::Instant::now())).await;
+                        apply(&ep, &mapped, keeper.on_tick(tokio::time::Instant::now())).await;
                         continue;
                     }
                 }
@@ -404,18 +412,21 @@ async fn keep_reflexive_address(ep: iroh::Endpoint) {
             report.global_v4.map(SocketAddr::V4),
             report.global_v6.map(SocketAddr::V6),
         );
-        apply(&ep, actions).await;
+        apply(&ep, &mapped, actions).await;
     }
 }
 
 /// Carry out the keeper's decisions on `ep`.
-async fn apply(ep: &iroh::Endpoint, actions: Vec<Action>) {
+async fn apply(ep: &iroh::Endpoint, mapped: &portmap::MappedAddr, actions: Vec<Action>) {
     for action in actions {
         match action {
             Action::Add(addr) => {
                 tracing::info!(%addr, "iroh: advertising the public address a net report found");
                 ep.add_external_addr(addr).await;
             }
+            // The router mapping advertises the same configured set; its
+            // address stays even when a report stops confirming it.
+            Action::Remove(addr) if mapped.holds(&addr) => {}
             Action::Remove(addr) => {
                 tracing::info!(%addr, "iroh: no longer advertising a public address no report has confirmed");
                 ep.remove_external_addr(&addr).await;
@@ -660,7 +671,7 @@ impl IrohEndpoint {
             .transport_config(transport_config())
             // Always set, never left to iroh's default (`Enabled` once the
             // `portmapper` feature is compiled in): a client must say no.
-            .portmapper_config(portmap::portmapper_config(mapping));
+            .portmapper_config(portmap::portmapper_config());
         if !relays.is_empty() {
             builder = builder.relay_mode(RelayMode::Custom(
                 relays
@@ -690,7 +701,13 @@ impl IrohEndpoint {
             .map_err(|e| setup_err("bind iroh endpoint", &e))?;
         let nudge = (!relays.is_empty()).then(|| RelayNudge::new(&relays, config.relay_quic_port));
         Ok(Self {
-            ep: Arc::new(EndpointHandle::new(ep, identity_key, !ephemeral, nudge)),
+            ep: Arc::new(EndpointHandle::new(
+                ep,
+                identity_key,
+                !ephemeral,
+                nudge,
+                mapping,
+            )),
             evaluator,
             relays: Arc::new(relays),
             relay_quic_port: config.relay_quic_port,
