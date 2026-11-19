@@ -75,6 +75,8 @@ pub(super) fn unix_installer_words(source: &ReleaseSource, tag: &str) -> Vec<Str
 /// Path 2 on a Unix remote: the archive arrives on standard input, is
 /// written to a scratch file, its sha256 is compared with `sha256_hex`, the
 /// `qsh` member is unpacked and renamed into `~/.local/bin` atomically.
+/// Bytes written by `cat` and `cp` carry no `com.apple.quarantine`
+/// attribute, so nothing is cleared on macOS.
 pub(super) fn unix_stream_words(sha256_hex: &str) -> Vec<String> {
     let script = [
         "set -eu".to_string(),
@@ -97,9 +99,6 @@ pub(super) fn unix_stream_words(sha256_hex: &str) -> Vec<String> {
         "staged=\"$dir/.qsh.install.$$\"".to_string(),
         "{ cp \"$work/qsh\" \"$staged\" && chmod 0755 \"$staged\" && mv -f \"$staged\" \"$dir/qsh\"; } \
          || { rm -f \"$staged\"; exit 78; }"
-            .to_string(),
-        "if [ \"$(uname -s)\" = Darwin ] && command -v xattr >/dev/null 2>&1; then \
-         xattr -d com.apple.quarantine \"$dir/qsh\" 2>/dev/null || true; fi"
             .to_string(),
         format!("printf \"{INSTALLED_MARK}%s\\n\" \"$dir/qsh\""),
     ]
