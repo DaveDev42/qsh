@@ -1,7 +1,7 @@
 # ADR-0069: client의 iroh endpoint도 공유기에 포트 매핑을 요청한다
 
 날짜: 2026-11-23
-상태: 제안됨
+상태: 승인됨 (2026-11-23 Dave 결정. 집 client에서 Office로 가는 연결이 모두 relay였다는 기록을 근거로, client endpoint도 짧은 수명 매핑을 요청하는 안을 선택)
 
 개정 관계: ADR-0064 결정 3("client endpoint는 매핑하지 않는다")과 기각한 대안 "client endpoint도 매핑하기"를 고친다. 데몬 쪽 결정 1·2·4~7은 그대로다.
 
@@ -44,3 +44,4 @@ ADR-0064는 client가 매핑해도 얻는 것이 없다고 봤다. client는 상
 ## 개정 이력
 
 - 2026-11-23 초안.
+- 2026-11-23 승인(Dave 결정, "모두 다 진행해줘"). WSL mirrored 전환과 relay 선택은 배치 쪽에서 따로 진행한다.
