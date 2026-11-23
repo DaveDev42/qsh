@@ -871,6 +871,13 @@ impl Ops {
         if !relay_named && !self.iroh_relay_urls.is_empty() {
             settings.relay_urls = self.iroh_relay_urls.clone();
         }
+        // A test that runs its own relay (private roots) must not probe the
+        // LAN gateway of the machine running it (ADR-0064 decision 7,
+        // ADR-0069 decision 5); the config-file default of `true` applies to
+        // real commands only.
+        if !self.iroh_relay_roots.is_empty() {
+            settings.portmap = false;
+        }
         let settings = settings
             .with_relay_roots(self.iroh_relay_roots.clone())
             .with_client_bind(self.iroh_client_bind.clone());

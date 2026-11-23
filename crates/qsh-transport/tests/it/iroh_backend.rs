@@ -42,8 +42,9 @@ async fn the_endpoint_fingerprint_is_the_identity_fingerprint() {
     assert_eq!(IrohPeer::new(ep.public_key()).fingerprint(), fp);
 }
 
-/// ADR-0064: an endpoint without a relay never asks the router for a
-/// mapping, whatever the config says, and a client endpoint never does either.
+/// ADR-0064, ADR-0069: an endpoint without a relay never asks the router for a
+/// mapping, whatever the config says (daemon or client), and an endpoint
+/// built from a default config never does either.
 /// The relay is off here on purpose: iroh starts a mapping at bind when its
 /// portmapper is enabled (an SSDP search on the LAN), so a hermetic test cannot
 /// bind an endpoint that maps. The positive case, a daemon with a relay that
@@ -73,7 +74,15 @@ async fn an_endpoint_without_a_relay_never_maps_a_router_port() {
         .expect("bind client");
     assert!(
         !client.portmap_enabled(),
-        "a client endpoint never maps, whatever the config says"
+        "no relay, no mapping for a client either, even when asked"
+    );
+
+    let default_client = IrohEndpoint::bind_client(&id, trust(), direct_config())
+        .await
+        .expect("bind default client");
+    assert!(
+        !default_client.portmap_enabled(),
+        "a hand-built client config never maps"
     );
 }
 

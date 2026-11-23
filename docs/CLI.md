@@ -2670,7 +2670,7 @@ qsh config unset serve.to
 | `iroh.mode` | `auto`, `off` | `auto` | 명령마다. `--no-iroh`가 이긴다 |
 | `iroh.proxy` | `env`, `off` | `env` | 데몬은 시작 때만, client 명령은 명령마다 |
 | `iroh.head_start_ms` | `0..=10000` | `1000` | 명령마다. 직결에 먼저 줄 시간(펀칭은 v0.9.0부터 없다). `0`이면 처음부터 나란히 돈다. route 기억(§6.1)이 iroh를 곧바로 고른 dial에는 쓰지 않는다 |
-| `iroh.portmap` | `true`, `false` | `true` | 시작 때만(`applies_from: next_start`). 데몬의 endpoint가 공유기에 포트 매핑(UPnP·NAT-PMP·PCP)을 요청할지(ADR-0064). client 명령은 이 키와 관계없이 요청하지 않는다 |
+| `iroh.portmap` | `true`, `false` | `true` | 시작 때만(`applies_from: next_start`). endpoint가 공유기에 포트 매핑(UPnP·NAT-PMP·PCP)을 요청할지(ADR-0064, ADR-0069). 데몬은 시작 때, client 명령은 명령마다 이 값을 읽는다(client 쪽 효과는 다음 명령부터). client는 연결을 기다리게 하지 않고 백그라운드로 요청하며, 매핑이 서면 그 주소를 후보에 더하고 endpoint를 닫을 때 지운다. JSON 계약은 바뀌지 않는다 |
 
 `qsh doctor`의 `config_unknown_key`도 이 일곱 키를 안다.
 

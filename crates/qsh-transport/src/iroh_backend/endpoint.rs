@@ -163,8 +163,9 @@ pub struct IrohConfig {
     /// Ask the router for a port mapping (UPnP, NAT-PMP, PCP) so a peer
     /// behind a symmetric NAT can send first to the mapped address
     /// (ADR-0064, `[iroh].portmap`). Honored by a daemon endpoint
-    /// ([`IrohEndpoint::bind`]) only: a client endpoint never maps. Off by
-    /// default, so an endpoint built without saying so never probes the LAN
+    /// ([`IrohEndpoint::bind`]) and by a client endpoint
+    /// ([`IrohEndpoint::bind_client`], ADR-0069): the mapping runs in the
+    /// background, so a dial never waits for it. Off by default, so an endpoint built without saying so never probes the LAN
     /// gateway. An endpoint with no relay never maps either, whatever this
     /// says (iroh would start a mapping at bind on its own).
     pub portmap: bool,
@@ -268,7 +269,7 @@ pub(crate) struct EndpointHandle {
     closing: Mutex<Vec<ie::Connection>>,
     /// The tasks that keep a daemon endpoint healthy: its public address
     /// advertised ([`keep_reflexive_address`]) and its home relay replaced
-    /// when it dies ([`keep_home_relay`]); empty for a client endpoint. They
+    /// when it dies ([`keep_home_relay`]); only the mapping keeper for a client endpoint. They
     /// hold clones of the iroh endpoint, so [`Drop`] ends them before the
     /// close.
     keepers: Vec<tokio::task::JoinHandle<()>>,
@@ -284,14 +285,18 @@ impl EndpointHandle {
     ) -> Self {
         let mut keepers = Vec::new();
         let mapped = portmap::MappedAddr::default();
+        // Dropping the handle aborts this keeper, which releases the mapping.
+        if mapping {
+            keepers.push(tokio::spawn(portmap::keep_mapping(
+                ep.clone(),
+                mapped.clone(),
+            )));
+        }
         if daemon {
             keepers.push(tokio::spawn(keep_reflexive_address(
                 ep.clone(),
                 mapped.clone(),
             )));
-            if mapping {
-                keepers.push(tokio::spawn(portmap::keep_mapping(ep.clone(), mapped)));
-            }
             if let Some(nudge) = nudge {
                 keepers.push(tokio::spawn(keep_home_relay(ep.clone(), nudge)));
             }
@@ -656,7 +661,7 @@ impl IrohEndpoint {
         // After the relay list: iroh hands its socket's port to the
         // portmapper at bind, relay or not, so a relay-less endpoint has to be
         // told `Disabled` here (ADR-0064).
-        let mapping = portmap::mapping_wanted(!ephemeral, config.portmap, !relays.is_empty());
+        let mapping = portmap::mapping_wanted(config.portmap, !relays.is_empty());
 
         // `presets::Empty`: no address lookup (no pkarr, no DNS), relays
         // disabled until set below. The crypto provider is named explicitly
@@ -670,7 +675,7 @@ impl IrohEndpoint {
             .ca_tls_config(ca_tls_config(&config.relay_trust))
             .transport_config(transport_config())
             // Always set, never left to iroh's default (`Enabled` once the
-            // `portmapper` feature is compiled in): a client must say no.
+            // `portmapper` feature is compiled in): the mapping is qsh's own.
             .portmapper_config(portmap::portmapper_config());
         if !relays.is_empty() {
             builder = builder.relay_mode(RelayMode::Custom(
@@ -751,9 +756,8 @@ impl IrohEndpoint {
         fingerprint_of_endpoint(&self.ep.identity.public())
     }
 
-    /// Whether this endpoint asks the router for a port mapping: a daemon
-    /// endpoint built with [`IrohConfig::portmap`]. A client endpoint is
-    /// always `false`.
+    /// Whether this endpoint asks the router for a port mapping: it was built
+    /// with [`IrohConfig::portmap`] and has a relay (ADR-0064, ADR-0069).
     pub fn portmap_enabled(&self) -> bool {
         self.mapping
     }

@@ -47,11 +47,11 @@ fn an_empty_section_gives_the_documented_defaults() {
     assert_eq!(settings, IrohSettings::default());
 }
 
-/// ADR-0064: `[iroh].portmap` reaches the daemon's endpoint configuration
-/// and no client's. An unset key is on, an explicit `false` is off, and a
-/// client endpoint is off whatever the key says.
+/// ADR-0064, ADR-0069: `[iroh].portmap` reaches the daemon's and the
+/// client's endpoint configuration alike. An unset key is on, an explicit
+/// `false` is off; a client asks for a mapping only when the key says on.
 #[test]
-fn portmap_reaches_the_daemon_endpoint_and_no_client() {
+fn portmap_reaches_the_daemon_endpoint_and_the_client() {
     let target = pin(&["iroh"], None, Some([7; 32]));
     for (written, expected) in [(None, true), (Some(true), true), (Some(false), false)] {
         let settings = IrohSection {
@@ -62,9 +62,10 @@ fn portmap_reaches_the_daemon_endpoint_and_no_client() {
         .unwrap();
         assert_eq!(settings.portmap, expected, "[iroh].portmap = {written:?}");
         assert_eq!(settings.server_config().portmap, expected, "{written:?}");
-        assert!(
-            !settings.client_config(&target).portmap,
-            "a client endpoint never maps ({written:?})"
+        assert_eq!(
+            settings.client_config(&target).portmap,
+            expected,
+            "client endpoint ({written:?})"
         );
     }
 }

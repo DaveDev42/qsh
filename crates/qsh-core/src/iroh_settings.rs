@@ -368,8 +368,13 @@ impl IrohSettings {
     /// The configuration of a client endpoint that dials `pin`: the relays
     /// [`Self::relays_for`] picks, on ephemeral UDP ports.
     pub fn client_config(&self, pin: &TrustPeer) -> IrohConfig {
-        // A client endpoint never asks the router for a mapping (ADR-0064).
-        self.base_config(&self.relays_for(pin), self.client_bind.clone(), false)
+        // A client endpoint asks the router for a mapping like a daemon does
+        // (ADR-0069), in the background, unless `[iroh].portmap` is off.
+        self.base_config(
+            &self.relays_for(pin),
+            self.client_bind.clone(),
+            self.portmap,
+        )
     }
 
     /// The configuration of a daemon's endpoint: homed on the best of this

@@ -18,15 +18,18 @@
 //!
 //! What is fixed here:
 //!
-//! - **Only a daemon endpoint maps.** A client endpoint is a short-lived
-//!   process with a random key; a mapping for it would be a router entry per
-//!   command. iroh's own default is *on* once its `portmapper` feature is
-//!   compiled in, so a client says `Disabled` explicitly instead of leaving
-//!   the default.
-//! - **A daemon maps only when asked** ([`crate::IrohConfig::portmap`]); the
+//! - **Daemon and client endpoints both map** (ADR-0069 revises ADR-0064
+//!   decision 3). A client's mapping gives the peer a fixed address to send
+//!   first to, which hole punching needs from both sides. It is the same
+//!   portmapper client with the same default lifetime and renewal, started in
+//!   the background so a dial never waits for it, and released when the
+//!   endpoint closes ([`ReleaseOnDrop`]). iroh's own default is *on* once its
+//!   `portmapper` feature is compiled in, so every endpoint says `Disabled`
+//!   explicitly instead of leaving the default.
+//! - **An endpoint maps only when asked** ([`crate::IrohConfig::portmap`]); the
 //!   transport's default is off, so a test that builds an `IrohConfig` by
 //!   hand never talks to the LAN gateway. `[iroh].portmap` (unset is on)
-//!   feeds it for a real daemon.
+//!   feeds it for a real daemon and for a client command.
 //! - **A relay-less endpoint never maps.** iroh's net report, which is where
 //!   it normally asks for a mapping, is skipped without a relay. But iroh also
 //!   hands its IPv4 socket's port to the portmapper when it binds, and the
@@ -61,16 +64,17 @@ const REPROBE: Duration = Duration::from_secs(5 * 60);
 /// enough for its service to send the release.
 const RELEASE_GRACE: Duration = Duration::from_secs(3);
 
-/// Whether the endpoint being built asks the router for a mapping: a daemon
-/// endpoint with at least one relay whose configuration says so.
-pub(crate) fn mapping_wanted(daemon: bool, requested: bool, has_relay: bool) -> bool {
-    daemon && requested && has_relay
+/// Whether the endpoint being built asks the router for a mapping: an
+/// endpoint (daemon or client, ADR-0069) with at least one relay whose
+/// configuration says so.
+pub(crate) fn mapping_wanted(requested: bool, has_relay: bool) -> bool {
+    requested && has_relay
 }
 
 /// The portmapper setting handed to iroh's endpoint builder: always
 /// `Disabled`. With the `portmapper` feature compiled in the default is
 /// `Enabled`, so the value is passed explicitly; the daemon's mapping is
-/// qsh's own ([`keep_mapping`]).
+/// qsh's own ([`keep_mapping`]) for daemon and client alike.
 pub(crate) fn portmapper_config() -> PortmapperConfig {
     PortmapperConfig::Disabled
 }
@@ -128,11 +132,20 @@ impl Tracker {
 
 /// Releases the mapping when the owning task is aborted: the client lives a
 /// moment longer on a detached task so its service can send the release.
-struct ReleaseOnDrop(portmapper::Client);
+struct ReleaseOnDrop {
+    client: portmapper::Client,
+    /// Test hook: set when the release has been requested.
+    #[cfg(test)]
+    released: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
-        let client = self.0.clone();
+        #[cfg(test)]
+        if let Some(flag) = &self.released {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let client = self.client.clone();
         client.deactivate();
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
@@ -143,8 +156,8 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-/// Keep a router mapping for the daemon endpoint `ep` until the task is
-/// aborted.
+/// Keep a router mapping for the endpoint `ep` (daemon or client) until the
+/// task is aborted, which releases it.
 ///
 /// Probes the router first (iroh's own portmapper never does), because the
 /// portmapper prefers PCP, then NAT-PMP, then UPnP only for protocols a probe
@@ -152,6 +165,20 @@ impl Drop for ReleaseOnDrop {
 /// `0.0.0.0` and can pick the wrong interface on a multi-NIC host; PCP and
 /// NAT-PMP go unicast to the gateway from the default route's address.
 pub(crate) async fn keep_mapping(ep: iroh::Endpoint, mapped: MappedAddr) {
+    keep_mapping_with(ep, mapped, portmapper::Config::default(), None).await;
+}
+
+/// [`keep_mapping`] with the portmapper's protocols chosen by the caller (a
+/// test turns all of them off so no packet leaves the machine). `released`
+/// is a test hook that reports the release.
+async fn keep_mapping_with(
+    ep: iroh::Endpoint,
+    mapped: MappedAddr,
+    config: portmapper::Config,
+    released: Option<Arc<std::sync::atomic::AtomicBool>>,
+) {
+    #[cfg(not(test))]
+    let _ = &released;
     let Some(port) = ep
         .bound_sockets()
         .into_iter()
@@ -161,8 +188,12 @@ pub(crate) async fn keep_mapping(ep: iroh::Endpoint, mapped: MappedAddr) {
         tracing::debug!("iroh: no IPv4 port to map, skipping the router mapping");
         return;
     };
-    let client = portmapper::Client::new(portmapper::Config::default());
-    let guard = ReleaseOnDrop(client.clone());
+    let client = portmapper::Client::new(config);
+    let guard = ReleaseOnDrop {
+        client: client.clone(),
+        #[cfg(test)]
+        released,
+    };
     probe(&client, true).await;
     client.update_local_port(port);
 
@@ -227,14 +258,47 @@ mod tests {
     }
 
     #[test]
-    fn only_a_daemon_that_asks_maps() {
-        assert!(mapping_wanted(true, true, true));
-        assert!(!mapping_wanted(true, false, true));
-        // A client endpoint never maps, whatever the config says.
-        assert!(!mapping_wanted(false, true, true));
-        assert!(!mapping_wanted(false, false, true));
+    fn an_endpoint_maps_only_when_asked_and_only_with_a_relay() {
+        // ADR-0069: daemon and client endpoints take the same decision.
+        assert!(mapping_wanted(true, true));
+        assert!(!mapping_wanted(false, true));
         // No relay, no mapping.
-        assert!(!mapping_wanted(true, true, false));
+        assert!(!mapping_wanted(true, false));
+        assert!(!mapping_wanted(false, false));
+    }
+
+    /// ADR-0069: ending the mapping task (what closing a client endpoint does
+    /// to its keeper) releases the mapping. All protocols are off, so no
+    /// packet leaves the machine.
+    #[tokio::test]
+    async fn aborting_the_mapping_task_releases_the_mapping() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ep = iroh::Endpoint::builder(iroh::endpoint::presets::Empty)
+            .crypto_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .clear_address_lookup()
+            .portmapper_config(portmapper_config())
+            .bind()
+            .await
+            .expect("bind");
+        let released = Arc::new(AtomicBool::new(false));
+        let no_protocols = portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: false,
+            enable_nat_pmp: false,
+            protocol: portmapper::Protocol::Udp,
+        };
+        let task = tokio::spawn(keep_mapping_with(
+            ep.clone(),
+            MappedAddr::default(),
+            no_protocols,
+            Some(released.clone()),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!released.load(Ordering::SeqCst), "held while it runs");
+        task.abort();
+        let _ = task.await;
+        assert!(released.load(Ordering::SeqCst), "released when it ends");
+        ep.close().await;
     }
 
     #[test]
