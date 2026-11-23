@@ -18,14 +18,14 @@ ADR-0064는 client가 매핑해도 얻는 것이 없다고 봤다. client는 상
 
 1. **client의 iroh endpoint도 매핑을 요청한다.** `bind_client`로 여는 endpoint는 `[iroh].portmap`이 `true`이면(기본) 데몬과 같은 qsh portmapper client(PCP·NAT-PMP 우선, ADR-0064 2026-11-17 개정)로 자기 IPv4 UDP 포트의 매핑을 요청하고, 받은 외부 주소를 후보에 더한다. `portmap = false`면 지금처럼 요청하지 않는다. client 명령은 명령마다 설정을 읽으므로 이 키의 client 쪽 효과는 다음 명령부터다.
 2. **매핑은 연결을 기다리게 하지 않는다.** dial은 지금처럼 relay와 알려진 후보로 바로 시작한다. 매핑이 서면 그 주소가 후보에 더해지고 iroh가 직결로 올린다. 매핑이 늦거나 안 서면 relay에 머문다. 매핑 대기 때문에 명령의 첫 바이트가 늦어지면 안 된다.
-3. **수명은 짧게 잡고 끝날 때 지운다.** client 매핑의 요청 수명은 데몬보다 짧은 10분이고, endpoint가 살아 있는 동안 갱신한다. endpoint를 닫을 때 수명 0으로 지운다. 비정상 종료에서는 공유기가 최대 10분 뒤에 지운다.
+3. **끝날 때 지운다.** client 매핑의 수명과 갱신은 데몬과 같은 portmapper 기본값(PCP 1시간, NAT-PMP·UPnP 2시간, 수명의 절반에서 갱신)이다. endpoint를 닫을 때 지운다. 비정상 종료에서는 공유기가 그 수명이 지난 뒤에 지운다.
 4. **게이트웨이가 공유기가 아니면 아무 일도 없다.** NAT 모드 VM(WSL2 기본 NAT 등)의 기본 게이트웨이는 호스트의 가상 NAT이라 PCP·NAT-PMP에 답하지 않는다. 그런 client는 지금처럼 relay다. 이 ADR은 그 경우를 고치지 않는다.
 5. **시험은 공유기에 묻지 않는다.** ADR-0064 결정 7을 client에도 적용한다. 손으로 만든 client 설정의 기본값은 `false`이고 설정 파일에서 오는 값만 기본 `true`다.
 
 ## 근거
 
 - 기록상 relay에 묶인 연결은 모두 집 client에서 Office로 가는 쪽이다. 매핑이 데몬 쪽에서 만든 효과를 client에 그대로 주는 가장 작은 변경이다.
-- 공유기 표에 항목이 명령마다 생기는 비용은 수명 10분과 종료 시 삭제로 줄인다. PCP·NAT-PMP 요청은 게이트웨이로 가는 UDP 한두 개다. SSDP(UPnP)는 v0.9.1 portmapper client가 PCP·NAT-PMP를 먼저 묻고 실패할 때만 쓴다.
+- 공유기 표에 항목이 명령마다 생기는 비용은 종료 시 삭제로 줄인다. PCP·NAT-PMP 요청은 게이트웨이로 가는 UDP 한두 개다. SSDP(UPnP)는 v0.9.1 portmapper client가 PCP·NAT-PMP를 먼저 묻고 실패할 때만 쓴다.
 - 인가는 달라지지 않는다. client endpoint는 inbound 연결을 받지 않는다. 매핑은 자기가 연 연결의 경로 후보를 하나 더할 뿐이다.
 
 ## 결과
@@ -45,3 +45,4 @@ ADR-0064는 client가 매핑해도 얻는 것이 없다고 봤다. client는 상
 
 - 2026-11-23 초안.
 - 2026-11-23 승인(Dave 결정, "모두 다 진행해줘"). WSL mirrored 전환과 relay 선택은 배치 쪽에서 따로 진행한다.
+- 2026-11-23 결정 3을 고쳤다. 초안의 수명 10분은 `portmapper` 0.19.3이 수명을 상수로 박아 두고(`pcp.rs` 1시간, `nat_pmp.rs`·`upnp.rs` 2시간) 설정으로 받지 않아 지금 의존성으로 만들 수 없다. crate를 고치거나 iroh와 묶인 버전을 올리는 대신 기본 수명과 종료 시 삭제를 받아들인다. 비정상 종료한 client의 항목은 공유기에 최대 2시간 남는다.
