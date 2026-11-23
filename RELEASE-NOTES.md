@@ -9,6 +9,45 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.9.2`
+
+A patch release that lets client connections reach a peer behind a
+symmetric NAT directly. No contract change.
+
+### Changes
+
+- Client commands (`exec`, `attach`, `cp`, `tunnel open` and the rest) now
+  ask the router for a port mapping when they open an iroh endpoint, the
+  same way `qsh serve` has since `v0.8.0`. Until now only the daemon did, so
+  a connection from a home machine to a peer behind a fully symmetric NAT
+  stayed on the relay every time: in our field logs, 2,507 of 2,507 such
+  connections from one client and 1,578 of 1,578 from another. With a
+  mapped address in its candidate list the client can be reached by the
+  peer's punch, as the daemon already could. See ADR-0069.
+- The dial does not wait for the mapping. The connection starts on the
+  relay as before and moves to the direct path once the mapping is up. A
+  command that finishes in under a second may end before that happens.
+- The mapping is deleted when the client exits. After a crash the router
+  drops it when its lifetime runs out (one hour for PCP, two for NAT-PMP
+  and UPnP).
+- `[iroh].portmap = false` turns the mapping off for clients as well as
+  for the daemon.
+- When `qsh pair ssh` streams a binary to a macOS remote, it no longer
+  clears `com.apple.quarantine` on it. A file written by `cat` and `cp` never carries
+  that attribute, so there was nothing to clear.
+- `url` is now 2.5.9 (RUSTSEC-2026-0592).
+
+### Unchanged
+
+- The `qsh.cli/v1` contract, the wire format and every file format load as
+  before. No config key is added or removed.
+
+### What is still unproven
+
+Everything `v0.9.1` lists, plus this: the client mapping has unit tests only.
+A host whose default gateway is not the router (a VM in NAT mode, such as
+WSL2 by default) gets no mapping and stays on the relay.
+
 ## `v0.9.1`
 
 A patch release that fixes router port mapping on hosts with more than one
